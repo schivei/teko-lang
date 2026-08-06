@@ -1,0 +1,229 @@
+/** teko::codegen functions (split 4/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * cg_find_decl_scan — the ORDER-DEFINING linear resolution of a type name, kept as the index's
+ * reference semantics and as the fallback for an unindexed `CgProg`.
+ *
+ * (#152) EXACT pass first — a canonical query can never be stolen by a same-bare cousin that merely
+ * appears earlier (discovery order differs per platform). Then the legacy bare last-segment fallback
+ * (unique in the no-collision case). ns-sensitive callers (emit_type_expr) use `cg_find_decl_ns` to
+ * disambiguate a same-bare-name collision.
+ *
+ * @param prog  codegen's threaded program view
+ * @param name  the type name to resolve, canonical or bare
+ * @return      the first matching declaration in item order
+ * @throws      when no declaration matches by exact name or by last segment
+ */
+fn cg_find_decl_scan(prog: CgProg, name: str) -> parser::TypeDecl | error {
+    mut e = 0
+    loop {
+        if e >= prog.items.len { break }
+        match prog.items[e] {
+            parser::TypeDecl as d => { if d.name == name { return d } }
+            _ => { }
+        }
+        e++
+    }
+    let want = checker::name_last_segment(name)
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            parser::TypeDecl as d => { if checker::name_last_segment(d.name) == want { return d } }
+            _ => { }
+        }
+        i++
+    }
+    error { message = "codegen: no such type decl" }
+}
+
+/**
+ * cg_find_decl — any TYPE_DECL (struct/variant/enum/alias) named `name`, or a `not found` error.
+ * (C: `cg_find_decl`, which returned NULL.)
+ *
+ * Resolution is `cg_find_decl_scan`'s, reached through the threaded index: the exact table answers
+ * the canonical pass and the last-segment table answers the bare fallback, each holding the FIRST
+ * item carrying that key, so the decl this returns is the one the scan returned. An unindexed
+ * `CgProg` runs the scan itself.
+ *
+ * @param prog  codegen's threaded program view
+ * @param name  the type name to resolve, canonical or bare
+ * @return      the resolved declaration
+ * @throws      when no declaration matches by exact name or by last segment
+ */
+fn cg_find_decl(prog: CgProg, name: str) -> parser::TypeDecl | error {
+    if prog.ix.exact.slots.len == 0 { return cg_find_decl_scan(prog, name) }
+    let hit = cg_table_get(prog.ix.exact, name)
+    if hit != 0 { return cg_decl_at(prog, hit) }
+    cg_decl_at(prog, cg_table_get(prog.ix.last, checker::name_last_segment(name)))
+}
+
+// (#109 W3) resolve a SYNTACTIC type path to its decl using the referencing namespace `ref_ns`,
+// against the CANONICAL decl names — so a bare `Reader` in teko::emit binds emit::Reader (not
+// teko::io::Reader). Pass 1: a qualified path matches by last-segment + a decl-ns the qualifier
+// selects; a bare path matches its OWN-ns (ref_ns) decl. Pass 2 (fallback): any last-segment match.
+fn cg_find_decl_ns(prog: CgProg, path: parser::Path, ref_ns: str) -> parser::TypeDecl | error {
+    // (#109 W3) the last segment may itself be a CANONICAL "ns::Name" stuffed into ONE segment —
+    // this is what type_to_texpr/mono_named_texpr produce for a resolved Named (e.g. a method's
+    // synthetic receiver `self: teko::checker::Sq`). Strip it to the bare last-segment for matching,
+    // and lift any embedded "::"-qualifier into `qual` so ns precision is preserved.
+    let last_raw = path.segments[path.segments.len - 1].name
+    let last = checker::name_last_segment(last_raw)
+    let embedded_qual = checker::name_qualifier(last_raw)   // "" when last_raw is already bare
+    let qualified = path.segments.len > 1 || embedded_qual.len > 0
+    mut qual = ""
+    if path.segments.len > 1 {
+        mut q: u64 = 0
+        loop {
+            if q >= path.segments.len - 1 { break }
+            if q == 0 { qual = path.segments[q].name } else { qual = qual ~ "::" ~ path.segments[q].name }
+            q++
+        }
+    } else {
+        qual = embedded_qual
+    }
+    if prog.ix.same_last_next.len == 0 { return cg_find_decl_ns_scan(prog, last, qual, ref_ns, qualified) }
+    mut cur = cg_table_get(prog.ix.last, last)
+    let head = cur
+    loop {
+        if cur == 0 { break }
+        match prog.items[cur - 1] {
+            parser::TypeDecl as d => { if cg_decl_ns_matches(d, qual, ref_ns, qualified) { return d } }
+            _ => { }
+        }
+        cur = prog.ix.same_last_next[cur - 1]
+    }
+    cg_decl_at(prog, head)
+}
+
+/**
+ * cg_decl_ns_matches — does declaration `d` satisfy the namespace side of a ns-precise resolution?
+ *
+ * A QUALIFIED reference binds a decl whose namespace is the written qualifier or ends in it (so a
+ * partially-written `emit::Reader` still reaches `teko::emit::Reader`); a BARE reference binds its
+ * own namespace's decl.
+ *
+ * @param d          the candidate declaration (already known to share the reference's last segment)
+ * @param qual       the reference's namespace qualifier (empty for a bare reference)
+ * @param ref_ns     the namespace the reference is written in
+ * @param qualified  whether the reference carried a qualifier at all
+ * @return           true iff `d` is the namespace-precise binding for the reference
+ * @since cargo/20-codegen-perf
+ */
+fn cg_decl_ns_matches(d: parser::TypeDecl, qual: str, ref_ns: str, qualified: bool) -> bool {
+    let dns = checker::name_qualifier(d.name)
+    if !qualified { return dns == ref_ns }
+    dns == qual || teko::runtime::str_ends_with(dns, "::" ~ qual)
+}
+
+/**
+ * cg_find_decl_ns_scan — the ORDER-DEFINING linear form of the namespace-precise resolution, kept as
+ * the chain walk's reference semantics and as the fallback for an unindexed `CgProg`.
+ *
+ * @param prog       codegen's threaded program view
+ * @param last       the reference's bare last segment
+ * @param qual       the reference's namespace qualifier (empty for a bare reference)
+ * @param ref_ns     the namespace the reference is written in
+ * @param qualified  whether the reference carried a qualifier at all
+ * @return           the ns-precise declaration, else the first last-segment match
+ * @throws           when no declaration carries that last segment at all
+ */
+fn cg_find_decl_ns_scan(prog: CgProg, last: str, qual: str, ref_ns: str, qualified: bool) -> parser::TypeDecl | error {
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            parser::TypeDecl as d => {
+                if checker::name_last_segment(d.name) == last && cg_decl_ns_matches(d, qual, ref_ns, qualified) { return d }
+            }
+            _ => { }
+        }
+        i++
+    }
+    mut j = 0
+    loop {
+        if j >= prog.items.len { break }
+        match prog.items[j] {
+            parser::TypeDecl as d => { if checker::name_last_segment(d.name) == last { return d } }
+            _ => { }
+        }
+        j++
+    }
+    error { message = "codegen: no such type decl" }
+}
+
+// (W10b.CLASS increment 3) is `name` a class (as opposed to a struct/enum/…)? A class is a
+// REFERENCE type — every use lowers to a pointer (emit_type_expr), so field access through one
+// needs a deref (`->`, i.e. `(*recv).field`) instead of a struct's plain `.field`.
+fn cg_is_class_named(prog: CgProg, name: str) -> bool {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body { parser::ClassBody => true; _ => false }
+        error => false
+    }
+}
+
+// (W10b.D3) is `name` an interface (a contract)? A contract-typed value lowers to the fat
+// pointer `{ data, vtable }` typedef; upcasts and dynamic method calls key off this probe.
+fn cg_is_interface_named(prog: CgProg, name: str) -> bool {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body { parser::InterfaceBody => true; _ => false }
+        error => false
+    }
+}
+
+/**
+ * (TR1) Is `name` a `trait` declared in this program? A trait VALUE lowers to the SAME
+ * `{ data, vtable }` fat pointer as an interface value (W10b.D3), so upcast + dynamic-dispatch
+ * codegen key off this probe exactly as they do off `cg_is_interface_named`.
+ *
+ * @param prog the typed program
+ * @param name the (bare or canonical) contract name
+ * @return true iff `name` names a `TraitBody` decl
+ */
+fn cg_is_trait_named(prog: CgProg, name: str) -> bool {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body { parser::TraitBody => true; _ => false }
+        error => false
+    }
+}
+
+// (#98) is `name` a POLYMORPHIC BASE — a non-sealed class (`abstract`/`virtual`)? A base-typed
+// value lowers to the SAME fat pointer `{ data, vtable }` as an interface value (a companion
+// `tk_base_<name>` typedef), so a Sub→Base upcast + base-typed dispatch reuse the D3 machinery.
+fn cg_is_polymorphic_base(prog: CgProg, name: str) -> bool {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => match cb.kind { parser::ClassKind::Sealed => false; _ => true }
+            _ => false
+        }
+        error => false
+    }
+}
+
+// (#98) does class `sub` reach ANCESTOR class `want` through the base chain (transitively)?
+// Codegen mirror of the checker's subclass_reaches — used to decide when a class value at a
+// base-typed slot is a STRICT-subclass upcast (needs the fat-pointer wrap). Hop-bounded.
+fn cg_subclass_reaches(prog: CgProg, sub: str, want: str, depth: i64) -> bool {
+    if depth <= 0 { return false }
+    match cg_find_decl(prog, sub) {
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => {
+                if !cb.has_base { return false }
+                // (#109 W3) `cb.base_name` is the BARE source `extends` name; `want` may be the
+                // CANONICAL "ns::Name" of a base-typed slot — compare by bare last-segment.
+                // (#152) EXACT when BOTH qualified (base_name arrives canonical from canon_class_bases); bare-compat otherwise.
+                if checker::name_qualifier(cb.base_name) != "" && checker::name_qualifier(want) != "" {
+                    if cb.base_name == want { return true }
+                } else {
+                    if checker::name_last_segment(cb.base_name) == checker::name_last_segment(want) { return true }
+                }
+                cg_subclass_reaches(prog, cb.base_name, want, depth - 1)
+            }
+            _ => false
+        }
+        error => false
+    }
+}

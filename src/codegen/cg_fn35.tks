@@ -1,0 +1,276 @@
+/** teko::codegen functions (split 35/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * emit_stmt_dispatch — the statement-kind dispatch of emit_stmt, factored out so a conveyance bracket
+ * (M2, Mechanism 1) can wrap ANY statement kind uniformly. `b0` already carries the coverage-line
+ * prologue. All parameters mirror emit_stmt.
+ *
+ * @param b0  the buffer with the statement's coverage prologue already appended
+ * @return    the buffer with the statement's C text appended
+ * @since 0.3.1
+ */
+fn emit_stmt_dispatch(b0: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
+    match s {
+        checker::TBinding as b => emit_binding(b0, prog, ret_type, b, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
+        checker::TAssign as a => emit_assign(b0, prog, ret_type, a, indent, frame, escaping, regions, fn_body, dctx)
+        checker::TReturn as r => emit_return(b0, prog, r, in_main, ret_type, indent, frame, escaping, regions, fn_body, dctx)
+        checker::TExprStmt as es => {
+            // W5a — an `if` in statement position runs as CONTROL FLOW (mirrors the interpreter's
+            // exec_stmt → exec_if), so break/continue/return inside a branch propagate. W5b —
+            // a `match` in statement position runs each winning arm body for effect.
+            match es.expr.kind {
+                checker::TIfExpr as f => emit_if_stmt(b0, f, es.expr.line, es.expr.col, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
+                checker::TMatchExpr as m => emit_match_stmt(b0, prog, es.expr, m, in_main, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
+                _ => emit_expr_stmt_default(b0, es.expr, prog, escaping, regions, fn_body, dctx, indent)
+            }
+        }
+        checker::TLoopStmt as l => emit_loop(b0, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
+        checker::TBreakStmt as b => {
+            // (W9.3) `break` crosses every scope from here down to & including its target loop body:
+            // fire those scopes' defers (base = the target loop's defer_base) LIFO — one sweep,
+            // innermost-block-first — BEFORE dropping their regions. S2 — then drop every block region
+            // from the top down to & including that loop's region. NOT the frame, NOT outer regions.
+            // `break NAME` -> `goto tk_lbl_<NAME>_break;`; bare `break` -> `break;` (M.5).
+            mut out = match emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, b.label), prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+            out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
+            out = cg_drop_regions_from(out, indent, regions, cg_target_region_base(dctx.loops, b.label))
+            out = cb(out, indent)
+            if b.label.len > 0 { out = cb(out, "goto tk_lbl_"); out = cb_str(out, b.label); cb(out, "_break;\n") }
+            else { cb(out, "break;\n") }
+        }
+        checker::TContinueStmt as c => {
+            // (W9.3) `continue` ends THIS iteration of its target loop: fire every crossed scope's
+            // defers (base = the target loop's defer_base) LIFO BEFORE dropping their regions, so a
+            // loop-body defer fires at each iteration end (incl. on `continue`). S2 — then drop every
+            // block region from the top down to & including that loop's region (next iter opens fresh).
+            // `continue NAME` -> `goto tk_lbl_<NAME>_cont;`; bare `continue` -> `continue;` (M.5).
+            mut out = match emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, c.label), prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+            out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
+            out = cg_drop_regions_from(out, indent, regions, cg_target_region_base(dctx.loops, c.label))
+            out = cb(out, indent)
+            if c.label.len > 0 { out = cb(out, "goto tk_lbl_"); out = cb_str(out, c.label); cb(out, "_cont;\n") }
+            else { cb(out, "continue;\n") }
+        }
+        // (W9.3) defer { stmts } — registers the cleanup block on the threaded DeferCtx (the block
+        // emitters do the actual registration via dctx_register before reaching emit_stmt for siblings);
+        // emit_stmt itself emits NOTHING inline for a defer. It fires LIFO at its scope's exit edge.
+        // (C: TK_TSTMT_DEFER — g_cg_defers[g_cg_ndefers++] = s, emits nothing.)
+        checker::TDeferStmt => b0
+        checker::TAdoptStmt as a => emit_adopt(b0, a, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
+    }
+}
+
+/**
+ * emit_expr_stmt_default — `emit_stmt`'s default expression-statement arm: a bare call run for
+ * effect, its VReg discarded. A DIVERGING call (`checker::texpr_diverges` — an unqualified
+ * `panic`/`exit`, the SAME fronteira `emit_return` leaves via) leaves EVERY enclosing scope
+ * exactly like a `return`, so its pending defers replay FIRST (`emit_return`'s own ordering,
+ * `codegen.tks` — fires before the call TEXT, so the defer body runs before the `_Noreturn`
+ * runtime call that follows it, instead of after it in UNREACHABLE text, W15/#defer-nas-saidas).
+ * Every OTHER call's own later fall-through/return/break/continue edge already fires this same
+ * scope's defers at its own exit — this site only closes the one edge those never reach.
+ *
+ * @param buf      the C output buffer
+ * @param expr     the typed statement expression (the call, run for effect)
+ * @param prog     the whole-program codegen context
+ * @param escaping []str  the enclosing function's escape-checked local names
+ * @param regions  []RegionFrame  the active block-region stack (S2)
+ * @param fn_body  []checker::TStatement  the enclosing function's full body
+ * @param dctx     DeferCtx  the pending-defer stack this statement may replay from
+ * @param indent   the C indentation for this statement
+ * @return         the buffer with this statement's C text appended
+ * @throws         propagated from replaying a pending defer or emitting `expr` itself
+ */
+fn emit_expr_stmt_default(buf: []byte, expr: checker::TExpr, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, indent: str) -> []byte | error {
+    let b1 = if checker::texpr_diverges(expr) {
+        match emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    } else { buf }
+    mut out = cb(b1, indent)
+    out = match emit_expr_ctx(out, prog, checker::Void { }, expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ";\n")
+}
+
+/**
+ * emit_adopt — lower an `adopt [name] { … }` block (the C1 closer). ALWAYS opens an adopter region
+ * `tk_region_new(<enclosing>)` (unlike an arm region, opened only when it has a block-local — an
+ * adopter is opened unconditionally, since its purpose IS to own every allocation inside), pushes a
+ * RegionFrame so cg_enclosing_region_expr returns the adopter for every allocation inside (each
+ * per-object class child region parents under it), emits the body, fires the block's defers LIFO,
+ * then SUBTREE-DROPS: `tk_region_drop_subtree(<adopter>)` frees the adopter AND every object region
+ * parented under it in one sweep (cycles irrelevant). A `return`/`break`/`continue` inside the body
+ * drops the adopter region via the region-stack helpers (a plain drop — a SAFE leak of the object
+ * subtree on that rare escape edge; the normal brace does the full subtree reclamation).
+ *
+ * ACCEPTED LIMITATIONS (by design, per the issue — do not "fix" without a follow-on spine issue):
+ *   - DYNAMIC correctness only, no static escape gate: an object built with a lexical struct-init
+ *     directly inside `adopt { }` and then STORED into an outer binding (escaping the block)
+ *     DANGLES after the brace — its child region was subtree-dropped along with everything else.
+ *     `adopt` does not prove non-escape; that is deferred to a future spine-based confinement
+ *     analysis layered on top of this dynamic primitive.
+ *   - "lexically inside" is literal: an object built by a FACTORY/METHOD CALLED FROM inside
+ *     `adopt { }` (e.g. `Node::make(1)`) opens its per-object region parented to THAT FUNCTION's
+ *     own enclosing region (typically root, if the factory has no frame region of its own) — NOT
+ *     the caller's adopter. Such an object safely LEAKS to root (within-model, not reclaimed by
+ *     the adopt brace); only allocations the adopt body performs directly are captured.
+ *
+ * @param []byte buf  the C output buffer
+ * @param checker::TAdoptStmt a  the typed adopt statement
+ * @param bool in_main  whether the enclosing function is the virtual-main
+ * @param CgProg prog  the typed program
+ * @param checker::Type ret_type  the enclosing function's return type
+ * @param str indent  the C indentation
+ * @param str frame  the enclosing frame region name (fallback parent when the region stack is empty)
+ * @param []str escaping  the enclosing function's escape set
+ * @param []RegionFrame regions  the active block-region stack
+ * @param []checker::TStatement fn_body  the enclosing function body (for block-local analysis)
+ * @param DeferCtx dctx  the threaded defer/coverage context
+ * @return []byte | error  the buffer with the adopter block emitted, or a codegen error
+ */
+fn emit_adopt(buf: []byte, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let base = dctx.defers.len
+    let fall = cg_append_direct_defers(dctx.defers, a.body)
+    let region = fresh_named("_tkad", buf.len to i64)
+    mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = teko::list::empty() })
+    out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { []byte as o => o; error as err => return err }
+    out = match emit_defers(out, fall, base, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    out = cb(out, indent); out = cb(out, "tk_region_drop_subtree("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out
+}
+
+// ---------------------------------------------------------------------------
+// A top-level function -> a C function.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether typed expression `e` (or any sub-expression) makes a DIRECT self-recursive call to the
+ * function identified by `ns`/`name`. Mirrors `cg_collect_expr_opts`'s full-body traversal; a
+ * `TCall` matches when its resolved target namespace (`call_ns`) and last callee path segment equal
+ * `ns`/`name` — each namespace holds exactly one function per name, so the pair identifies it. A
+ * closure or interface-dispatch call carries no static target name and never matches (its target is
+ * a runtime value / vtable slot). Leaf expressions hold no call and answer false.
+ *
+ * @param e     the typed expression to scan
+ * @param ns    the enclosing function's declaring namespace (matched against `TCall.call_ns`)
+ * @param name  the enclosing function's bare name (matched against the callee's last path segment)
+ * @return      true iff a direct self-recursive call appears anywhere within `e`
+ */
+fn cg_expr_calls_self(e: checker::TExpr, ns: str, name: str) -> bool {
+    match e.kind {
+        checker::TCall as c => {
+            if !c.is_closure_call && !c.is_iface_dispatch && c.call_ns == ns && cg_path_last(c.callee) == name { return true }
+            mut i = 0
+            loop { if i >= c.args.len { break }; if cg_expr_calls_self(c.args[i], ns, name) { return true }; i++ }
+            false
+        }
+        checker::TBinary as b => cg_expr_calls_self(b.left, ns, name) || cg_expr_calls_self(b.right, ns, name)
+        checker::TUnary as u => cg_expr_calls_self(u.operand, ns, name)
+        checker::TCompare as c => {
+            if cg_expr_calls_self(c.first, ns, name) { return true }
+            mut i = 0
+            loop { if i >= c.rest.len { break }; if cg_expr_calls_self(c.rest[i].operand, ns, name) { return true }; i++ }
+            false
+        }
+        checker::TIfExpr as f => cg_expr_calls_self(f.cond, ns, name) || cg_block_calls_self(f.then_blk, ns, name) || cg_block_calls_self(f.else_blk, ns, name)
+        checker::TMatchExpr as m => {
+            if cg_expr_calls_self(m.subject, ns, name) { return true }
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                if m.arms[i].has_when && cg_expr_calls_self(m.arms[i].guard, ns, name) { return true }
+                if cg_block_calls_self(m.arms[i].body, ns, name) { return true }
+                i++
+            }
+            false
+        }
+        checker::TCast as c => cg_expr_calls_self(c.expr, ns, name)
+        checker::TFieldAccess as fa => cg_expr_calls_self(fa.receiver, ns, name)
+        checker::TStructInit as si => {
+            mut i = 0
+            loop { if i >= si.field_vals.len { break }; if cg_expr_calls_self(si.field_vals[i], ns, name) { return true }; i++ }
+            false
+        }
+        checker::TIndex as ix => cg_expr_calls_self(ix.receiver, ns, name) || cg_expr_calls_self(ix.index, ns, name)
+        checker::TInterp as ip => {
+            mut i = 0
+            loop {
+                if i >= ip.holes.len { break }
+                if cg_expr_calls_self(ip.holes[i], ns, name) { return true }
+                if i < ip.specs.len {
+                    match ip.specs[i].kind {
+                        checker::TFSpecDynamic as fd => {
+                            mut k = 0
+                            loop { if k >= fd.args.len { break }; if cg_expr_calls_self(fd.args[k], ns, name) { return true }; k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            false
+        }
+        checker::TInExpr as ie => {
+            if cg_expr_calls_self(ie.lhs, ns, name) { return true }
+            mut i = 0
+            loop { if i >= ie.elems.len { break }; if cg_expr_calls_self(ie.elems[i], ns, name) { return true }; i++ }
+            false
+        }
+        checker::TArrayLit as al => {
+            mut i = 0
+            loop { if i >= al.elements.len { break }; if cg_expr_calls_self(al.elements[i].expr, ns, name) { return true }; i++ }
+            false
+        }
+        checker::TLambda as lam => cg_block_calls_self(lam.body, ns, name)
+        _ => false
+    }
+}
+
+/**
+ * Whether any statement in `stmts` (or a nested block) makes a direct self-recursive call to the
+ * function identified by `ns`/`name`. Mirrors `cg_collect_block_opts`'s statement traversal.
+ *
+ * @param stmts  the typed statement block to scan
+ * @param ns     the enclosing function's declaring namespace
+ * @param name   the enclosing function's bare name
+ * @return       true iff a direct self-recursive call appears anywhere within the block
+ */
+fn cg_block_calls_self(stmts: []checker::TStatement, ns: str, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        match stmts[i] {
+            checker::TBinding as b => if cg_expr_calls_self(b.value, ns, name) { return true }
+            checker::TAssign as a => { if cg_expr_calls_self(a.value, ns, name) { return true }; if parser::assign_has_target(a.kind) { if cg_expr_calls_self(a.target, ns, name) { return true } } }
+            checker::TReturn as r => if r.has_value && cg_expr_calls_self(r.value, ns, name) { return true }
+            checker::TLoopStmt as l => { if cg_block_calls_self(l.init, ns, name) { return true }; if cg_block_calls_self(l.body, ns, name) { return true } }
+            checker::TExprStmt as es => if cg_expr_calls_self(es.expr, ns, name) { return true }
+            checker::TDeferStmt as d => if cg_block_calls_self(d.body, ns, name) { return true }
+            checker::TAdoptStmt as a => if cg_block_calls_self(a.body, ns, name) { return true }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * Whether `f` is DIRECTLY self-recursive — its body contains a call to itself. Such a function must
+ * be emitted `__attribute__((noinline))`: LLVM (clang / zig cc, the release toolchain) miscompiles
+ * an inlined self-recursive function that takes a by-value aggregate parameter. On inlining it into
+ * a caller, LLVM elides the by-value argument copy, then Tail-Recursion-Elimination rewrites the
+ * inlined self-recursion into a loop that OVERWRITES that parameter's storage — which aliases the
+ * caller's live argument. The caller then reads the clobbered argument (issue #283: `type_join`
+ * returned its slice argument's ELEMENT type instead of the slice, so the checker rejected a valid
+ * program only under `-O2`). gcc compiles the same C correctly; the fix keeps the emitted C
+ * self-recursion out of the inliner, closing the miscompile on every toolchain.
+ *
+ * @param f  the typed function
+ * @return   true iff `f` (non-extern) calls itself directly
+ */
+fn cg_fn_is_self_recursive(f: checker::TFunction) -> bool {
+    if f.is_extern { return false }
+    cg_block_calls_self(f.body, f.namespace, f.name)
+}

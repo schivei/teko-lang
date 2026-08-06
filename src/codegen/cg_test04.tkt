@@ -1,0 +1,289 @@
+/** split 4/8 from codegen_test.tkt — mechanical, pure reorg, no logic changes. */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+fn cgt_emit_function_comprehensive() {
+    let prog = cgt_prog()
+
+    // Body 1: loop{break} + if-stmt + binding + assign + return tail
+    let break_body: []checker::TStatement = teko::list::push(cgt_empty_stmts(), checker::TBreakStmt { label = "" })
+    let loop_s: checker::TStatement = checker::TLoopStmt { label = ""; init = teko::list::empty(); body = break_body }
+
+    // if (true) { } — no else — statement position → emit_if_stmt → cb_indent_deeper
+    let empty_blk = cgt_empty_stmts()
+    let if_s: checker::TStatement = cgt_stmt(checker::TExpr {
+            kind = checker::TIfExpr { cond = cgt_e_bool_t(); then_blk = empty_blk; has_else = false; else_blk = empty_blk }
+            type = checker::Void { }
+            line = 0; col = 0
+    })
+
+    let bind_s: checker::TStatement = checker::TBinding {
+        kind = parser::BindKind::Let
+        target = parser::SimpleName { name = "x" }
+        bound = checker::Prim { kind = checker::PrimKind::I64 }
+        value = cgt_num_i64(10); di_kind = parser::DiKind::None
+    }
+    let assign_s: checker::TStatement = checker::TAssign {
+        kind = parser::AssignKind::Simple
+        name = "x"
+        op = lexer::TokenKind::PlusEq
+        bound = checker::Prim { kind = checker::PrimKind::I64 }
+        value = cgt_num_i64(1)
+        deref = false
+        target = checker::no_texpr()
+    }
+    let ret_s: checker::TStatement = cgt_ret(cgt_num_i64(42))
+
+    mut body1: []checker::TStatement = cgt_empty_stmts()
+    body1 = teko::list::push(body1, loop_s)
+    body1 = teko::list::push(body1, if_s)
+    body1 = teko::list::push(body1, bind_s)
+    body1 = teko::list::push(body1, assign_s)
+    body1 = teko::list::push(body1, ret_s)
+
+    let ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+    let f1 = cgt_fn0("cgt_fn_ret", "teko::cgt", ret_type, body1)
+    let r1 = match emit_function(cgt_empty(), prog, f1) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(r1.len > 0)
+    teko::assert::is_true(teko::str::contains(r1, "cgt_fn_ret"))
+    teko::assert::is_true(teko::str::contains(r1, "while"))   // emit_loop → while(1)
+    teko::assert::is_true(teko::str::contains(r1, "break"))
+    teko::assert::is_true(teko::str::contains(r1, "int64_t x"))
+    teko::assert::is_true(teko::str::contains(r1, "return"))
+
+    // Body 2: single TExprStmt tail → covers emit_exprstmt_tail (non-if/match path)
+    let tail_s: checker::TStatement = cgt_stmt(cgt_num_i64(99))
+    let body2: []checker::TStatement = teko::list::push(cgt_empty_stmts(), tail_s)
+    let f2 = cgt_fn0("cgt_fn_tail", "teko::cgt", ret_type, body2)
+    let r2 = match emit_function(cgt_empty(), prog, f2) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(r2.len > 0)
+    teko::assert::is_true(teko::str::contains(r2, "cgt_fn_tail"))
+    teko::assert::is_true(teko::str::contains(r2, "return"))
+
+    // Body 3: void function, empty body → needs_unreachable = false
+    let f3 = cgt_fn0("cgt_fn_void", "teko::cgt", checker::Void { }, cgt_empty_stmts())
+    let r3 = match emit_function(cgt_empty(), prog, f3) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(r3.len > 0)
+    teko::assert::is_true(teko::str::contains(r3, "void"))
+
+    // Function with a parameter → emit_type_expr is called from emit_function_sig
+    let param = parser::Param { name = "n"; has_type = true; type_ann = cgt_named_te("u64"); is_params = false; has_default = false; default_expr = parser::no_expr() }
+    let params: []parser::Param = teko::list::push(teko::list::empty(), param)
+    let body4: []checker::TStatement = teko::list::push(cgt_empty_stmts(), cgt_ret(cgt_num_i64(0)))
+    let f4 = checker::TFunction {
+        name = "cgt_fn_param"
+        type_params = teko::list::empty()
+        type_constraints = teko::list::empty()
+        namespace = "teko::cgt"
+        params = params
+        return_type = checker::Prim { kind = checker::PrimKind::I64 }
+        body = body4
+        vis = parser::Visibility::Private
+        has_doc = false
+        doc = ""
+        file = ""
+        line = 0; col = 0
+        is_test = false
+        is_extern = false; c_symbol = ""; from_lib = ""
+        has_arena_size = false; arena_size = 0 to u64
+    }
+    let r4 = match emit_function(cgt_empty(), prog, f4) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(r4.len > 0)
+    teko::assert::is_true(teko::str::contains(r4, "uint64_t"))   // emit_type_expr("u64")
+    teko::assert::is_true(teko::str::contains(r4, "n"))   // cb_ident("n")
+}
+
+// Explicit `return` drops active block regions before emitting the return value. The value must be
+// emitted against the escaping context (no active block-region parent), or a class literal would
+// parent under a dropped handle.
+#test
+
+fn cgt_emit_return_uses_escaping_region_context() {
+    let c = cgt_class_decl("RetClass", parser::ClassKind::Sealed, false, "")
+    let prog = cg_prog_of(checker::TProgram { items = teko::list::push(teko::list::empty(), c) })
+    let empty_names: []str = teko::list::empty()
+    let empty_vals: []checker::TExpr = teko::list::empty()
+    let ret_expr = checker::TExpr {
+        kind = checker::TStructInit { field_names = empty_names; field_vals = empty_vals }
+        type = checker::Named { name = "RetClass" }
+        line = 0; col = 0
+    }
+    let ret = checker::TReturn { has_value = true; value = ret_expr }
+    let regions: []RegionFrame = teko::list::push(teko::list::empty(), RegionFrame { name = "_tkbr_ret"; label = ""; is_loop = false; defer_base = 0 to u64; decls = teko::list::empty() })
+    let out = match emit_return(cgt_empty(), prog, ret, false, checker::Named { name = "RetClass" }, "    ", "", teko::list::empty(), regions, teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(out, "tk_region_drop(_tkbr_ret); _tkbr_ret = NULL;"))
+    teko::assert::is_true(teko::str::contains(out, "tk_region_new(tk_region_root())"))
+    teko::assert::is_true(!teko::str::contains(out, "tk_region_new(_tkbr_ret)"))
+}
+
+// ---------------------------------------------------------------------------
+// Group N1b: void TAIL match must CHAIN its arms with a commit jump (REGRESSION).
+//   A statement-position / tail `match` in a `-> void` fn has arm bodies that do NOT diverge
+//   (no implicit `return`). emit_match_tail must emit the FIRST winning arm's body then `goto`
+//   a unique commit label past the rest — otherwise the arms fall through as independent `if`s
+//   (`if(c){a} if(1){b}`) and MULTIPLE arms fire (the wildcard `if(1)` ALWAYS fires). The fix
+//   makes EXACTLY ONE arm run, matching the value-form match. This test asserts the
+//   emitted C carries the commit `goto …_done` chain (the structural guarantee).
+// ---------------------------------------------------------------------------
+fn cgt_lit_arm(v: u64, body_name: str) -> checker::TArm {
+    // arm: `v => { let <body_name> = <v> }` — a NON-diverging effect body (the bug trigger).
+    let lit: parser::Pattern = parser::LiteralPattern {
+        value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; line = 0; col = 0 }
+    }
+    let eff: checker::TStatement = checker::TBinding {
+        kind = parser::BindKind::Let
+        target = parser::SimpleName { name = body_name }
+        bound = checker::Prim { kind = checker::PrimKind::I64 }
+        value = cgt_num_i64(v to i64); di_kind = parser::DiKind::None
+    }
+    checker::TArm { pattern = lit; has_when = false; guard = cgt_num_i64(0); body = teko::list::push(cgt_empty_stmts(), eff) }
+}
+
+fn cgt_wild_arm(body_name: str) -> checker::TArm {
+    let eff: checker::TStatement = checker::TBinding {
+        kind = parser::BindKind::Let
+        target = parser::SimpleName { name = body_name }
+        bound = checker::Prim { kind = checker::PrimKind::I64 }
+        value = cgt_num_i64(99); di_kind = parser::DiKind::None
+    }
+    checker::TArm { pattern = parser::WildcardPattern { }; has_when = false; guard = cgt_num_i64(0); body = teko::list::push(cgt_empty_stmts(), eff) }
+}
+
+#test
+
+fn cgt_void_tail_match_chains_arms() {
+    let prog = cgt_prog()
+
+    // subject `k: i64`, two arms (1 => {effect}; _ => {effect}); the match is the void fn's tail.
+    let subj = cgt_e_var("k")
+    mut arms: []checker::TArm = teko::list::empty()
+    arms = teko::list::push(arms, cgt_lit_arm(1, "a1"))
+    arms = teko::list::push(arms, cgt_wild_arm("aw"))
+    let match_e = checker::TExpr {
+        kind = checker::TMatchExpr { subject = subj; arms = arms }
+        type = checker::Void { }
+        line = 0; col = 0
+    }
+    let tail: []checker::TStatement = teko::list::push(cgt_empty_stmts(), cgt_stmt(match_e))
+    let f = cgt_fn0("cgt_fn_void_match", "teko::cgt", checker::Void { }, tail)
+    let r = match emit_function(cgt_empty(), prog, f) { []byte as o => str(o); error => "" }
+
+    teko::assert::is_true(r.len > 0)
+    teko::assert::is_true(teko::str::contains(r, "cgt_fn_void_match"))
+    // Both arm bodies present...
+    teko::assert::is_true(teko::str::contains(r, "a1"))
+    teko::assert::is_true(teko::str::contains(r, "aw"))
+    // ...but chained with a commit jump so EXACTLY ONE arm runs (the regression guarantee).
+    // Before the fix the arms were independent `if`s with NO goto, so both fired.
+    teko::assert::is_true(teko::str::contains(r, "goto "))
+    teko::assert::is_true(teko::str::contains(r, "_done"))
+
+    // 3-arm shape (1 => ; 2 => ; _ =>) must likewise chain — assert TWO commit jumps reach the
+    // single shared label (one per non-final arm + the final wildcard = 3 gotos to one label).
+    mut arms3: []checker::TArm = teko::list::empty()
+    arms3 = teko::list::push(arms3, cgt_lit_arm(1, "b1"))
+    arms3 = teko::list::push(arms3, cgt_lit_arm(2, "b2"))
+    arms3 = teko::list::push(arms3, cgt_wild_arm("bw"))
+    let match3 = checker::TExpr {
+        kind = checker::TMatchExpr { subject = cgt_e_var("k"); arms = arms3 }
+        type = checker::Void { }
+        line = 0; col = 0
+    }
+    let tail3: []checker::TStatement = teko::list::push(cgt_empty_stmts(), cgt_stmt(match3))
+    let f3 = cgt_fn0("cgt_fn_void_match3", "teko::cgt", checker::Void { }, tail3)
+    let r3 = match emit_function(cgt_empty(), prog, f3) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(r3, "b1"))
+    teko::assert::is_true(teko::str::contains(r3, "b2"))
+    teko::assert::is_true(teko::str::contains(r3, "bw"))
+    teko::assert::is_true(teko::str::contains(r3, "goto "))
+    teko::assert::is_true(teko::str::contains(r3, "_done"))
+}
+
+// ---------------------------------------------------------------------------
+// Group N2: (C7.18/W9.3) defer lowering — the .tks twin's per-block DeferCtx + defer_base fires
+// each block's defers (LIFO) at its scope exit, matching codegen.c's g_cg_defers/emit_defers OUTPUT.
+// ---------------------------------------------------------------------------
+#test
+
+fn cgt_emit_defer() {
+    let prog = cgt_prog()
+    let ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+
+    // defer { let _c = 0 } — the with_defer() shape: [defer, return 42].
+    let defer_body: []checker::TStatement = teko::list::push(cgt_empty_stmts(), checker::TBinding {
+            kind = parser::BindKind::Let
+            target = parser::SimpleName { name = "_c" }
+            bound = checker::Prim { kind = checker::PrimKind::I64 }
+            value = cgt_num_i64(0); di_kind = parser::DiKind::None
+    })
+    let defer_s: checker::TStatement = checker::TDeferStmt { body = defer_body }
+
+    mut body: []checker::TStatement = cgt_empty_stmts()
+    body = teko::list::push(body, defer_s)
+    body = teko::list::push(body, cgt_ret(cgt_num_i64(42)))
+    let f = cgt_fn0("cgt_fn_defer", "teko::cgt", ret_type, body)
+    let r = match emit_function(cgt_empty(), prog, f) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(r.len > 0)
+    teko::assert::is_true(teko::str::contains(r, "cgt_fn_defer"))
+    teko::assert::is_true(teko::str::contains(r, "_c"))   // defer body emitted before the return
+    teko::assert::is_true(teko::str::contains(r, "return"))
+
+    // early_return_with_defer() shape: [defer, if true { return 1 }, return 2] — the defer body
+    // is drained before BOTH returns (the TIfExpr recursion + the trailing return).
+    let inner: []checker::TStatement = teko::list::push(cgt_empty_stmts(), cgt_ret(cgt_num_i64(1)))
+    let if_s: checker::TStatement = cgt_stmt(checker::TExpr {
+            kind = checker::TIfExpr { cond = cgt_e_bool_t(); then_blk = inner; has_else = false; else_blk = cgt_empty_stmts() }
+            type = checker::Void { }
+            line = 0; col = 0
+    })
+    mut body2: []checker::TStatement = cgt_empty_stmts()
+    body2 = teko::list::push(body2, defer_s)
+    body2 = teko::list::push(body2, if_s)
+    body2 = teko::list::push(body2, cgt_ret(cgt_num_i64(2)))
+    let f2 = cgt_fn0("cgt_fn_defer2", "teko::cgt", ret_type, body2)
+    let r2 = match emit_function(cgt_empty(), prog, f2) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(r2, "cgt_fn_defer2"))
+    teko::assert::is_true(teko::str::contains(r2, "_c"))   // drained inside the if AND at the tail
+}
+
+/**
+ * cgt_emit_adopt — (#337) verify the `adopt { }` lowering opens an adopter region and closes it
+ * with the SUBTREE-drop primitive, and that a NESTED adopt opens a second (inner) region. The
+ * emitted C must name tk_region_new (the adopter open) and tk_region_drop_subtree (the bulk-drop
+ * at the brace), NOT the plain tk_region_drop — that distinction is what reclaims the per-object
+ * child regions instead of leaking them to the process root.
+ */
+#test
+
+fn cgt_emit_adopt() {
+    let prog = cgt_prog()
+    let ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+
+    let inner_body: []checker::TStatement = teko::list::push(cgt_empty_stmts(), checker::TBinding {
+            kind = parser::BindKind::Let
+            target = parser::SimpleName { name = "_a" }
+            bound = checker::Prim { kind = checker::PrimKind::I64 }
+            value = cgt_num_i64(0); di_kind = parser::DiKind::None
+    })
+    let adopt_s: checker::TStatement = checker::TAdoptStmt { name = ""; body = inner_body }
+    mut body: []checker::TStatement = cgt_empty_stmts()
+    body = teko::list::push(body, adopt_s)
+    body = teko::list::push(body, cgt_ret(cgt_num_i64(3)))
+    let f = cgt_fn0("cgt_fn_adopt", "teko::cgt", ret_type, body)
+    let r = match emit_function(cgt_empty(), prog, f) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(r, "cgt_fn_adopt"))
+    teko::assert::is_true(teko::str::contains(r, "tk_region_new"))
+    teko::assert::is_true(teko::str::contains(r, "tk_region_drop_subtree"))
+
+    let named_s: checker::TStatement = checker::TAdoptStmt { name = "r"; body = inner_body }
+    let nested_body: []checker::TStatement = teko::list::push(cgt_empty_stmts(), named_s)
+    let outer_s: checker::TStatement = checker::TAdoptStmt { name = ""; body = nested_body }
+    mut body2: []checker::TStatement = cgt_empty_stmts()
+    body2 = teko::list::push(body2, outer_s)
+    body2 = teko::list::push(body2, cgt_ret(cgt_num_i64(3)))
+    let f2 = cgt_fn0("cgt_fn_adopt_nested", "teko::cgt", ret_type, body2)
+    let r2 = match emit_function(cgt_empty(), prog, f2) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(r2, "cgt_fn_adopt_nested"))
+    teko::assert::is_true(count_substr(r2, "tk_region_drop_subtree") >= 2)
+}

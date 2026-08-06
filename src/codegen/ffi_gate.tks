@@ -1,0 +1,96 @@
+/** teko::codegen — split from ffi_export.tks (mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::parser
+
+/**
+ * The reverse-FFI EXPORT GATE for an `abi="c"` artifact (FFI-D). Enforced categorically, before codegen:
+ *   * an `exp` class or interface is a COMPILE ERROR — a Teko class/interface has no stable C ABI, so it
+ *     may not cross the boundary in this slice (no shelved fallback; the owner's rejection ruling).
+ *   * an `exp` function must be FFI-safe: every parameter and the return type map to a C type, no Teko
+ *     `params []T` variadic parameter, and no unresolved generic parameter (only monomorphic export).
+ *   * two exports resolving to the SAME C symbol are a COMPILE ERROR, naming both.
+ * Non-`exp` declarations are ignored — they are internal to the artifact and never reach C.
+ *
+ * @param prog  the checked program of the `abi="c"` artifact
+ * @return      null on success
+ * @throws      on an exported class/interface, a non-FFI-safe `exp` signature, or a C-symbol collision
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+pub fn check_ffi_export(prog: checker::TProgram) -> error | null {
+    mut seen_syms: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if f.vis == parser::Visibility::Exp {
+                    match check_ffi_export_fn(f) { null => { }; error as e => return e }
+                    let sym = cg_c_export_symbol(f)
+                    if ffi_str_in(seen_syms, sym) {
+                        return error { message = teko::str::concat("reverse-FFI export collision: two exported functions resolve to the C symbol `", sym, "` — give one an explicit `exp(\"other_name\")`") }
+                    }
+                    seen_syms = teko::list::push(seen_syms, sym)
+                }
+            }
+            parser::TypeDecl as d => {
+                match check_ffi_export_type(d) { null => { }; error as e => return e }
+            }
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * Reject an exported class or interface declaration (FFI-D categorical rule). A class/interface carries a
+ * Teko vtable/reference-object layout with no stable C ABI; exporting it is a compile error rather than a
+ * silently-degraded handle. Every other `exp` type kind passes this check (they are not emitted by this
+ * slice's header, but they are not rejected here either — only class/interface are categorical errors).
+ *
+ * @param d  the type declaration
+ * @return   null when `d` is not an exported class/interface
+ * @throws   when `d` is an `exp` class or interface
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn check_ffi_export_type(d: parser::TypeDecl) -> error | null {
+    if d.vis != parser::Visibility::Exp { return null }
+    match d.body {
+        parser::ClassBody => error { message = teko::str::concat("cannot export class `", d.name, "` across the C ABI (`abi=\"c\"`): a Teko class has no stable C layout — expose a `#repr(\"c\")` struct + free functions instead") }
+        parser::InterfaceBody => error { message = teko::str::concat("cannot export interface `", d.name, "` across the C ABI (`abi=\"c\"`): a Teko interface vtable has no stable C layout — expose free functions instead") }
+        _ => null
+    }
+}
+
+/**
+ * Validate one exported function's signature for the C boundary: a resolved-return + surface-parameter
+ * FFI-safety check, plus a reject on a Teko `params []T` variadic and on an unresolved generic.
+ *
+ * @param f  the exported function
+ * @return   null when every part of the signature is FFI-safe
+ * @throws   naming the function and the offending part when it is not
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn check_ffi_export_fn(f: checker::TFunction) -> error | null {
+    if f.type_params.len != 0 {
+        return error { message = teko::str::concat("cannot export generic function `", f.name, "` across the C ABI: only a monomorphic instance has a C signature") }
+    }
+    match ffi_ctype_of_type(f.return_type) {
+        str => { }
+        error as e => return error { message = teko::str::concat("exported function `", f.name, "`: ", e.message) }
+    }
+    mut i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        let p = f.params[i]
+        if p.is_params {
+            return error { message = teko::str::concat("cannot export function `", f.name, "` with a Teko `params` variadic across the C ABI — declare a fixed C signature instead") }
+        }
+        match ffi_ctype_of_typeexpr(p.type_ann) {
+            str => { }
+            error as e => return error { message = teko::str::concat("exported function `", f.name, "`, parameter `", p.name, "`: ", e.message) }
+        }
+        i++
+    }
+    null
+}

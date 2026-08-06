@@ -1,0 +1,274 @@
+/** teko::codegen functions (split 34/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * emit_loop_while — emit a TLoopStmt's `while (1) { … }` core (the #517-UNTOUCHED loop mechanism).
+ * A LABELED loop (M.5) gets a continue-target `tk_lbl_<NAME>_cont: ;` at the TOP of its body (so
+ * `continue L` lowers to `goto tk_lbl_<NAME>_cont;`, re-running the body == the next while(1)
+ * iteration) and a break-target `tk_lbl_<NAME>_break: ;` AFTER the loop (so `break L` lowers to
+ * `goto …_break;`). A bare loop is unchanged. (C: TK_TSTMT_LOOP branch; C grew the inner indent
+ * with snprintf.)
+ *
+ * @param buf the output byte buffer
+ * @param l the typed loop node (label + body; `init` already emitted by the caller)
+ * @param in_main whether this loop is emitted inside `main`
+ * @param prog the whole typed program
+ * @param ret_type the enclosing function's return type
+ * @param indent the current indentation string
+ * @param frame the enclosing region-frame expression
+ * @param escaping the names whose values escape the current frame
+ * @param regions the active region-frame stack
+ * @param fn_body the enclosing function's body (for block-local analysis)
+ * @param dctx the defer context
+ * @return the buffer with the while-loop emitted, or a codegen error
+ */
+fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let labeled = l.label.len > 0
+    mut out = cb(buf, indent)
+    out = cb(out, "while (1) {\n")
+    let inner = cb_indent_deeper(indent)
+    // a labeled loop gets a continue-target at the TOP of its body.
+    if labeled { out = cb(out, inner); out = cb(out, "tk_lbl_"); out = cb_str(out, l.label); out = cb(out, "_cont: ;\n") }
+    // S2 — open this loop body's OWN region when it has a provably block-local binding. The region var
+    // is created AT THE TOP OF THE BODY (after the continue-target, so a labeled `continue L`'s goto
+    // re-runs tk_region_new — a fresh region every iteration) and dropped at every exit edge. The name
+    // rides out.len at the creation point (the `_bx<len>` uniquifier) so it matches the C twin exactly.
+    // A loop with NO block-local binding opens no region → byte-identical to the pre-S2 output.
+    // Cap nesting at 64 active block regions to match the C twin's fixed stack (beyond that the
+    // region is not opened — a safe leak). Not reachable in real code (64 nested recursive-struct loops).
+    // (W9.3) The loop body is ALWAYS a DEFER SCOPE (and a break/continue target) — even with no S2
+    // region — so a defer inside the loop fires at EACH iteration's end (fall-through), on break/
+    // continue, and on return. `base` = the in-scope defer count at the loop body's entry; push a
+    // LoopDeferFrame so break/continue can fire `[this loop's base, …)` for the scopes they cross.
+    let base = dctx.defers.len
+    let fall = cg_append_direct_defers(dctx.defers, l.body)   // all of this iteration's direct defers
+    let dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = base; region_base = regions.len }); cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
+    let want_block = cg_block_has_block_local(prog, escaping, fn_body, l.body, false) && regions.len < 64
+    let region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
+    mut regs2 = regions
+    if want_block {
+        out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) })
+    }
+    // emit the body with THIS block as the current block context (so a block-local binding routes to
+    // `region`) and the augmented region stack (so break/continue/return drop the right regions).
+    let cur_blk = if want_block { l.body } else { teko::list::empty() }
+    out = match emit_block(out, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false) { []byte as o => o; error as err => return err }
+    // (W9.3) Fall-through exit edge (end of an iteration): fire THIS iteration's defers (LIFO) FIRST
+    // (so a defer body can still read this iteration's block-locals), THEN drop the loop body's region.
+    out = match emit_defers(out, fall, base, prog, inner, escaping, fn_body) { []byte as o => o; error as err => return err }
+    // S2 — fall-through: drop this loop body's region (the next iteration's tk_region_new opens a fresh
+    // one). Idempotent + nulled for overlap safety.
+    if want_block { out = cb(out, inner); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
+    out = cb(out, indent)
+    out = cb(out, "}\n")
+    // …and a break-target AFTER the loop.
+    if labeled { out = cb(out, indent); out = cb(out, "tk_lbl_"); out = cb_str(out, l.label); out = cb(out, "_break: ;\n") }
+    out
+}
+
+// cb_indent_deeper — `indent` + four spaces (the C did `snprintf(inner, "%s    ", indent)`).
+fn cb_indent_deeper(indent: str) -> str {
+    mut xs: []byte = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= indent.len { break }
+        xs = teko::list::push(xs, indent[i])
+        i++
+    }
+    xs = teko::list::push(xs, b' ')
+    xs = teko::list::push(xs, b' ')
+    xs = teko::list::push(xs, b' ')
+    xs = teko::list::push(xs, b' ')
+    str(xs)
+}
+
+// emit_stmt — the statement dispatch (the C's emit_stmt switch). (C: `emit_stmt`.)
+// MEM Step 1: `frame`/`escaping` ride the LINEAR top-level path — a TBinding may frame-route its
+// allocation, a TReturn drops the region on its edge. Statements that open a SUB-SCOPE (if/match/
+// loop bodies) are emitted FRAMELESS in this first cut: any return inside them simply leaks the
+// region (SAFE, M.5), and a frame-local binding only inside a branch falls back to root.
+/**
+ * cov_push_line — add `line` to the distinct-line accumulator `acc` (skip 0 = unpositioned). Mirrors
+ * the interpreter's Teko twin's cov_addline dedup so the emitted marks match the interpreter's distinct-line set. Linear dedup: a
+ * single statement spans few lines.
+ *
+ * @param acc   the distinct lines gathered so far
+ * @param line  a candidate source line
+ * @return      `acc` with `line` appended when new (and non-zero)
+ * @since #265
+ */
+fn cov_push_line(acc: []u32, line: u32) -> []u32 {
+    if line == 0 { return acc }
+    mut i: u64 = 0
+    loop { if i >= acc.len { break }; if acc[i] == line { return acc }; i = i + 1 }
+    teko::list::push(acc, line)
+}
+
+/**
+ * cov_collect_expr — gather the distinct source lines of an expression subtree that a statement
+ * UNCONDITIONALLY evaluates when it runs (#265 Track A, A2 exactness). Descends into every
+ * child EXCEPT the conditional bodies of a nested if/match (then/else blocks and arm bodies are
+ * SEPARATE statements — emit_stmt marks their lines when THEY emit, control-sensitively). The
+ * if/match's own line + its cond/subject/guards ARE collected (they evaluate unconditionally).
+ * This mirrors the interpreter, which marks `e.line` at every eval_expr head reached by control flow, so a
+ * multi-line expression (the `cb(cb(...))` / `match emit(...) { … }` idiom pervasive in this
+ * codebase) contributes ALL its lines — the fix for the statement-head-only undercount.
+ *
+ * @param e    the typed expression
+ * @param acc  the distinct lines gathered so far
+ * @return     `acc` extended with `e`'s unconditionally-reached subtree lines
+ * @since #265
+ */
+fn cov_collect_expr(e: checker::TExpr, acc: []u32) -> []u32 {
+    let a0 = cov_push_line(acc, e.line)
+    match e.kind {
+        checker::TBinary as b => cov_collect_expr(b.right, cov_collect_expr(b.left, a0))
+        checker::TUnary as u => cov_collect_expr(u.operand, a0)
+        checker::TCompare as c => {
+            mut a = cov_collect_expr(c.first, a0)
+            mut i = 0
+            loop { if i >= c.rest.len { break }; a = cov_collect_expr(c.rest[i].operand, a); i++ }
+            a
+        }
+        checker::TCall as c => {
+            mut a = a0
+            mut i = 0
+            loop { if i >= c.args.len { break }; a = cov_collect_expr(c.args[i], a); i++ }
+            a
+        }
+        checker::TCast as c => cov_collect_expr(c.expr, a0)
+        checker::TFieldAccess as fa => cov_collect_expr(fa.receiver, a0)
+        checker::TIndex as ix => cov_collect_expr(ix.index, cov_collect_expr(ix.receiver, a0))
+        checker::TStructInit as si => {
+            mut a = a0
+            mut i = 0
+            loop { if i >= si.field_vals.len { break }; a = cov_collect_expr(si.field_vals[i], a); i++ }
+            a
+        }
+        checker::TInterp as in => {
+            mut a = a0
+            mut i = 0
+            loop {
+                if i >= in.holes.len { break }
+                a = cov_collect_expr(in.holes[i], a)
+                if i < in.specs.len {
+                    match in.specs[i].kind {
+                        checker::TFSpecDynamic as fd => {
+                            mut k = 0
+                            loop { if k >= fd.args.len { break }; a = cov_collect_expr(fd.args[k], a); k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            a
+        }
+        checker::TInExpr as ie => {
+            mut a = cov_collect_expr(ie.lhs, a0)
+            mut i = 0
+            loop { if i >= ie.elems.len { break }; a = cov_collect_expr(ie.elems[i], a); i++ }
+            a
+        }
+        checker::TArrayLit as al => {
+            mut a = a0
+            mut i = 0
+            loop { if i >= al.elements.len { break }; a = cov_collect_expr(al.elements[i].expr, a); i++ }
+            a
+        }
+        checker::TIfExpr as f => cov_collect_expr(f.cond, a0)
+        checker::TMatchExpr as m => {
+            mut a = cov_collect_expr(m.subject, a0)
+            mut i = 0
+            loop { if i >= m.arms.len { break }; if m.arms[i].has_when { a = cov_collect_expr(m.arms[i].guard, a) }; i++ }
+            a
+        }
+        _ => a0
+    }
+}
+
+/**
+ * stmt_cov_lines — the distinct source lines the interpreter would mark for a statement, unconditionally
+ * (#265 Track A, A2). Matches `cov_walk_stmt` in the interpreter's Teko twin: a binding/assign RHS, a return value, an
+ * expr-statement's expr (also covers a statement-position if/match — its own line + cond/subject,
+ * the branch bodies self-marking as separate statements). Loops (no own expr), break/continue and
+ * defer carry no lines of their own → empty.
+ *
+ * @param s  the typed statement
+ * @return   the distinct 1-based source lines to mark at statement entry (empty when none)
+ * @since #265
+ */
+fn stmt_cov_lines(s: checker::TStatement) -> []u32 {
+    let acc: []u32 = teko::list::empty()
+    match s {
+        checker::TBinding as b => cov_collect_expr(b.value, acc)
+        checker::TAssign as a => {
+            let av = cov_collect_expr(a.value, acc)
+            if parser::assign_has_target(a.kind) { cov_collect_expr(a.target, av) } else { av }
+        }
+        checker::TReturn as r => if r.has_value { cov_collect_expr(r.value, acc) } else { acc }
+        checker::TExprStmt as es => cov_collect_expr(es.expr, acc)
+        _ => acc
+    }
+}
+
+/**
+ * emit_cov_lines — under an active CovCtx, emit a `tk_cov_line_at` mark for EACH distinct line of a
+ * statement's unconditionally-reached expr subtree (byte-identical when off). One-per-line, keyed on
+ * the owning fn, matching the interpreter's per-eval line set exactly for the common multi-line-expression case.
+ *
+ * @param buf     the emission buffer
+ * @param ctx     the coverage context
+ * @param lines   the distinct lines to mark (from stmt_cov_lines)
+ * @param indent  the C indentation
+ * @return        the buffer with each mark appended, or `buf` unchanged when off
+ * @since #265
+ */
+fn emit_cov_lines(buf: []byte, ctx: CovCtx, lines: []u32, indent: str) -> []byte {
+    if !ctx.on { return buf }
+    mut out = buf
+    mut i: u64 = 0
+    loop { if i >= lines.len { break }; out = emit_cov_line(out, ctx, lines[i], indent); i = i + 1 }
+    out
+}
+
+/**
+ * emit_stmt — emit ONE statement's C text, dispatched on its checker kind. An `if`/`match` in
+ * statement position runs as direct CONTROL FLOW (`emit_if_stmt`/`emit_match_stmt`, so a nested
+ * `break`/`continue`/`return`/diverging call propagates through C's own semantics); any other
+ * expression statement (a bare call, most commonly) runs for effect via `emit_expr_stmt_default`,
+ * which is the ONE site an unqualified `panic`/`exit` STATEMENT call is recognized and replays
+ * the scope's pending defers before it (W15/#defer-nas-saidas — `lower_expr_stmt`'s own C twin).
+ * `break`/`continue` each fire their target's crossed-scope defers before their `goto`/keyword;
+ * `defer` registers onto `dctx` and emits nothing inline (fired at its scope's own exit edge).
+ *
+ * @param buf     the C output buffer
+ * @param s       the typed statement
+ * @param in_main bool  whether the enclosing function is the virtual-main entry
+ * @param prog    the whole-program codegen context (symbol/class/namespace tables)
+ * @param ret_type checker::Type  the enclosing function's own declared return type
+ * @param indent  the C indentation for this statement
+ * @param frame   the enclosing frame region's C identifier, or "" when the function opened none
+ * @param escaping []str  the enclosing function's escape-checked local names
+ * @param regions []RegionFrame  the active block-region stack (S2)
+ * @param fn_body []checker::TStatement  the enclosing function's full body (class-cleanup lookups)
+ * @param dctx    DeferCtx  the pending-defer stack + active loop targets + coverage context
+ * @param cur_block []checker::TStatement  the statement's own enclosing block (region-locality)
+ * @param cur_block_is_value bool  whether `cur_block` is a value-producing arm
+ * @return        the buffer with this statement's C text appended
+ * @throws        propagated from whichever branch lowers the statement's own sub-expressions
+ */
+fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
+    let b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
+    if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
+        mut ob = cb(b0, indent); ob = cb(ob, "tk_region_enter("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
+        let d2 = cg_dctx_bracket(dctx)
+        mut ob2 = match emit_stmt_dispatch(ob, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value) { []byte as o => o; error as err => return err }
+        ob2 = cb(ob2, indent); ob2 = cb(ob2, "tk_region_leave();\n")
+        return ob2
+    }
+    emit_stmt_dispatch(b0, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
+}

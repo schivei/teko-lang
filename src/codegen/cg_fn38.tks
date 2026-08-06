@@ -1,0 +1,284 @@
+/** teko::codegen functions (split 38/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * cg_frame_exit — emit the frame region's exit edge under M2: when `_tkfr` was ENTERED, first
+ * `tk_region_leave()` (popping `_tkfr`, exposing `_tkrr` = the caller's region for the returned value),
+ * then `tk_region_drop(_tkfr)` when the drop is active (`cg_tkfr_drop_active`). Exactly one leave per
+ * enter per control path — each exit edge is mutually exclusive — so the caller's current is never
+ * over-popped. An arena isolate (never entered) only drops its tree.
+ *
+ * @param buf      the output buffer
+ * @param indent   the current indentation
+ * @param frame    the frame region variable name (`_tkfr`)
+ * @param entered  whether `_tkfr` was entered (leave iff true; use_rr)
+ * @return         the buffer with the leave (when entered) + drop (when active) appended
+ * @since 0.3.1
+ */
+fn cg_frame_exit(buf: []byte, indent: str, frame: str, entered: bool) -> []byte {
+    mut out = buf
+    if entered { out = cb(out, indent); out = cb(out, "tk_region_leave();\n") }
+    if cg_tkfr_drop_active(entered) { out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, frame); out = cb(out, ");\n") }
+    out
+}
+
+/**
+ * cg_return_frame_exit — the frame region's exit on a RETURN edge, keyed on whether `_tkfr` was
+ * ENTERED (`dctx.rr.len > 0`) rather than on the passed `frame` (which emit_block STRIPS to "" for
+ * sub-scopes). This is load-bearing under M2: an ENTERED function's `tk_region_enter(_tkfr)` must be
+ * balanced by a `tk_region_leave()` on EVERY return edge — including a nested `error => return e`
+ * whose `frame` is stripped — else the entered `_tkfr` stays on the current-region stack, dangling
+ * after it is dropped (the parse_function imbalance). The `_tkfr` name is a per-function constant, so
+ * it is used literally here regardless of the stripped `frame`. A non-entered arena isolate drops its
+ * own `frame` tree (no leave); a frameless function does nothing.
+ *
+ * @param buf     the output buffer
+ * @param indent  the current indentation
+ * @param frame   the (possibly stripped) frame name — used only for the arena drop path
+ * @param dctx    the defer context (`rr` non-empty iff `_tkfr` was entered)
+ * @return        the buffer with the correct leave/drop for this return edge
+ * @since 0.3.1
+ */
+fn cg_return_frame_exit(buf: []byte, indent: str, frame: str, dctx: DeferCtx) -> []byte {
+    if dctx.rr.len > 0 { return cg_frame_exit(buf, indent, "_tkfr", true) }
+    if frame.len > 0 { return cg_frame_exit(buf, indent, frame, false) }
+    buf
+}
+
+/**
+ * cg_closure_env_region — the region a capturing closure's env is allocated in (0.3.1 move-on-return
+ * M2c). Inside a conveyance bracket (`bracket_depth > 0`, i.e. this closure is the RHS of an ESCAPING
+ * binding) the env routes to `_tkrr` — the caller's region — so an escaping closure's env MOVES with
+ * it and is reclaimed by the caller; its captured call-results, marked escaping by the same context,
+ * ride the same bracket. Otherwise the env keeps the process ROOT (the leak-safe fallback — never a
+ * UAF, since a non-escaping closure's env outlives its uses at root).
+ *
+ * @param dctx  the defer/bracket context
+ * @return      the C region expression the env allocates in
+ * @since 0.3.1
+ */
+fn cg_closure_env_region(dctx: DeferCtx) -> str {
+    if dctx.bracket_depth > 0 && dctx.rr.len > 0 { return dctx.rr }
+    "tk_region_root()"
+}
+
+/**
+ * cg_emit_arena_presize — the `#arena_size(N)` pre-size gesture (#453): immediately after the
+ * frame region opens, append a single DISCARDED `tk_region_alloc(_tkfr, N)` call.
+ *
+ * `tk_region_alloc`'s chunk allocator sizes a region's first chunk to `max(request, 64 KiB)`
+ * (`TK_REGION_DEFAULT_CHUNK`, `teko_rt.c`) — this call's `N`-byte request is exactly the pre-size
+ * hook the design calls for: it forces ONE up-front malloc of at least `N` bytes instead of
+ * discovering the need incrementally as the function's real allocations run.
+ *
+ * HONEST LIMIT, reported rather than hidden: `tk_region_alloc` has no reserve-WITHOUT-consume
+ * primitive today (every call bumps `used`), so this reservation's own `N` bytes count toward
+ * the chunk's tally. A function whose real work stays under `N` still gets the "one malloc, no
+ * further growth" guarantee — the default-vs-declared chunk (`max(N, 64 KiB)`) leaves headroom
+ * for it; a workload that needs a FULL `N` bytes of its OWN on top of the reservation grows an
+ * ordinary extra chunk (a correctness non-issue, just a second malloc). A byte-exact reserve-
+ * without-consume primitive would need a new `teko_rt` entry point — out of scope for this
+ * Teko-only crumb (reported, not forced). Sizing accuracy is the DEVELOPER's job by ruling
+ * (owner, 2026-07-13): this call only wires the declared number through; it never computes one.
+ *
+ * @param buf  the buffer being emitted into
+ * @param n    the declared byte count (`f.arena_size`)
+ * @return     `buf` with the reservation call appended
+ */
+fn cg_emit_arena_presize(buf: []byte, n: u64) -> []byte {
+    let out = cb(buf, "    (void)tk_region_alloc(_tkfr, ")
+    let sized = cb_u64_digits(out, n)
+    cb(sized, ");\n")
+}
+
+/** emit_function_cov — emit_function with an optional `tk_cov_mark(cov_idx)` entry prologue (#265,
+    the native-gate TestCov profile). `cov_idx < 0` emits NO prologue → byte-identical to the
+    historical emission (Program/TestPlain and every ordinary caller). A `cov_idx >= 0` marks this
+    production function's items-index on entry — the mark the interpreter does in eval_call — AND turns on the
+    interior line/branch instrumentation (Track A) via a live CovCtx threaded on `dctx.cov`, so every
+    `tk_cov_line_at`/`tk_cov_branch_at` interior mark keys on THIS function's items-index (cov_idx). */
+
+fn emit_function_cov(buf: []byte, prog: CgProg, f: checker::TFunction, cov_idx: i64) -> []byte | error {
+    mut out = match emit_function_sig(buf, prog, f) { []byte as o => o; error as err => return err }
+    out = cb(out, " {\n")
+    if cov_idx >= 0 { out = cb(cb_u64_digits(cb(out, "    tk_cov_mark("), cov_idx to u64), ");\n") }
+    // (W9.3) PER-SCOPE defer. The TAST body is emitted UNCHANGED; defers are tracked via the threaded
+    // DeferCtx (the functional twin of the C's g_cg_defers/g_cg_ndefers statics, reset per function).
+    // A TDeferStmt appends to dctx.defers (emits nothing inline); every scope-block fires `[base, len)`
+    // LIFO at its exit edge (fall-through / break / continue / return), BEFORE that block's region drop.
+    // No defers ⇒ dctx stays empty ⇒ byte-identical to the pre-W9.3 output. (C: emit_function / emit_defers.)
+    let fbody = f.body
+    let cov = if cov_idx >= 0 { CovCtx { on = true; fn_idx = cov_idx to u64 } } else { cov_off() }
+    // MEM Step 1 — THE FRAME REGION. Run the escape check (escape.tks). When a TOP-LEVEL binding is
+    // provably frame-local, open a per-function frame region `_tkfr` (a deterministic, per-fn-constant
+    // name → fixpoint-safe, NOT buf.len) at entry; its frame-local allocations are bulk-freed on the
+    // return edges (emit_return / emit_exprstmt_tail) and at the fall-through end. A function with NO
+    // frame-local binding gets NO region — zero bytes, byte-identical to the pre-Step-1 output.
+    let escaping = checker::fn_escaping_vars(f)
+    let want_frame = fn_body_has_frame_local(prog, escaping, fbody) || f.has_arena_size
+    let frame: str = if want_frame { "_tkfr" } else { "" }
+    let use_rr = want_frame && !f.has_arena_size
+    let rr: str = if use_rr { "_tkrr" } else { "" }
+    let dctx = DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov; rr = rr; bracket_depth = 0 }
+    if use_rr { out = cb(out, "    tk_region *_tkrr = "); out = cb(out, cg_rr_init_expr()); out = cb(out, ";\n") }
+    if want_frame {
+        out = cb(out, "    tk_region *_tkfr = "); out = cb(out, cg_tkfr_init_expr(f, use_rr)); out = cb(out, ";\n")
+        if use_rr { out = cb(out, "    tk_region_enter(_tkfr);\n") }
+        if f.has_arena_size { out = cg_emit_arena_presize(out, f.arena_size) }
+    }
+    // W5a — a fn body's trailing expr-statement carrying a value implicitly returns it.
+    // W5b — thread the fn's return type so a tail/return case value is wrapped into a variant
+    // return slot (emit_as).
+    out = match emit_block_tail(out, fbody, false, prog, f.return_type, "    ", frame, escaping, fbody, dctx) { []byte as o => o; error as err => return err }
+    // (W9.3) FN-BODY FALL-THROUGH defers. When control can fall off the function's end and the tail is
+    // NOT an expr-statement (a binding/assign/loop tail — an expr-stmt tail already drained via
+    // emit_exprstmt_tail; a return/break/continue tail already drained on its edge), fire the remaining
+    // fn-body-level defers (base 0) here, BEFORE the frame-region drop. (C: emit_function fn-fall-through.)
+    let tail_is_expr = if fbody.len > 0 { match fbody[fbody.len - 1] { checker::TExprStmt => true; _ => false } } else { false }
+    let tail_term = if fbody.len > 0 { cg_stmt_c_terminates(fbody[fbody.len - 1]) } else { false }
+    if !tail_is_expr && !tail_term {
+        // The fn-body fall-through fires ALL fn-body-level defers (base 0). Recompute the full list of
+        // this body's direct defers (the same NODES emit_block_tail accumulated) and fire them LIFO.
+        let fn_defers = cg_append_direct_defers(dctx.defers, fbody)
+        out = match emit_defers(out, fn_defers, 0, prog, "    ", escaping, fbody) { []byte as o => o; error as err => return err }
+    }
+    // (W10b.CLASS increment 4) DESTRUCTION HOOK — the FALL-THROUGH exit edge. Same reachability
+    // gate as the frame-region drop below (control must actually be able to reach here), but
+    // INDEPENDENT of `want_frame`: a function with a frame-local class instance and no OTHER
+    // frame-worthy struct auto-box still needs this edge (want_frame would otherwise be false).
+    if !tail_term {
+        // no tail/return expression here (the tail is a binding/assign/loop, not an expr-value) —
+        // anything that referenced a class binding already ran EARLIER, in original order.
+        let no_tail = checker::TExpr { kind = checker::TNullLit { }; type = checker::Void { }; line = 0; col = 0 }
+        let cleanup = match cg_class_cleanup_text(prog, escaping, fbody, false, no_tail) { str as c => c; error as e => return e }
+        if cleanup.len > 0 { out = cb(out, "    "); out = cb(out, cleanup); out = cb(out, "\n") }
+    }
+    // MEM Step 1 — the FALL-THROUGH exit edge. If control can reach the function's end (the tail did
+    // not C-terminate), drop the frame region there too. tk_region_drop is idempotent, so this never
+    // double-frees relative to a return-edge drop on another path.
+    if want_frame {
+        let tail_terminates = if fbody.len > 0 { cg_stmt_c_terminates(fbody[fbody.len - 1]) } else { false }
+        if !tail_terminates { out = cg_frame_exit(out, "    ", "_tkfr", use_rr) }
+    }
+    // A non-void function whose tail is a value-form `match`/`if` (or a loop) returns on every path
+    // the CHECKER proved exhaustive — but C can't see that, so without a terminator it warns
+    // -Wreturn-type and the fall-through is UB. The checker guarantees it is never reached: emit
+    // `__builtin_unreachable()`. (Skip when the tail already C-terminates, and for void functions.)
+    let needs_unreachable = match f.return_type {
+        checker::Void => false
+        _ => if fbody.len > 0 { !cg_stmt_c_terminates(fbody[fbody.len - 1]) } else { true }
+    }
+    if needs_unreachable { out = cb(out, "    __builtin_unreachable();\n") }
+    cb(out, "}\n\n")
+}
+
+// ---------------------------------------------------------------------------
+// W4c — TYPE DECLARATIONS -> C type declarations.
+//   struct { f: T; … }    -> typedef struct tk_t_<M> { <Ctype> <f>; … } tk_t_<M>;
+//   variant A | B | …     -> a tag enum tk_tag_<M> (one TK_TAG_<M>_<memberM> per member),
+//                            then typedef struct tk_t_<M> { tk_tag_<M> tag;
+//                            union { <memberCtype> <memberField>; … } as; } tk_t_<M>;
+//   enum { A; B }         -> a C enum (typedef enum tk_t_<M> { TK_E_<M>_A, … } tk_t_<M>;)
+// The `tag + union as` idiom is exactly what the bootstrap C itself uses (Type/TExpr).
+// ---------------------------------------------------------------------------
+
+// cb_upper — append the UPPERCASE form of a name's bytes (for enum/tag constants). Non
+// lowercase bytes pass through verbatim (identifiers are alnum/underscore). (C: `cb_upper`.)
+fn cb_upper(buf: []byte, s: str) -> []byte {
+    mut out = buf
+    mut i = 0
+    loop {
+        if i >= s.len { break }
+        let c = s[i]
+        if c >= b'a' && c <= b'z' {
+            out = cb_byte(out, (c to i64 - b'a' to i64 + b'A' to i64) to byte)
+        } else {
+            out = cb_byte(out, c)
+        }
+        i++
+    }
+    out
+}
+
+// variant_member_name — a variant member's bare last path segment (the union field name for a
+// NAMED member). Kept for the cg_variant_has_member scan. (C: `variant_member_name`.)
+fn variant_member_name(m: parser::TypeExpr) -> str | error {
+    match m {
+        parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
+        _ => error { message = "codegen: a variant member must be a named type" }
+    }
+}
+
+/**
+ * flags_carrier_ctype — the C unsigned integer type that carries a `flags` value, chosen by how
+ * many bits the declaration must hold: 1–8 members -> `uint8_t`, 9–16 -> `uint16_t`,
+ * 17–32 -> `uint32_t`, 33–64 -> `uint64_t`. There is no wider arm: `uint64_t` is the LAST carrier
+ * because 128-bit primitives are gone from the language (owner ruling 2026-07-30, integers AND
+ * floats), and the checker already caps a `flags` declaration at 64 members
+ * (`checker::check_flags_member_cap`), so a count above 64 never reaches codegen.
+ *
+ * @param n  the declared member count (already ≤ 64, enforced in the checker)
+ * @return   the C spelling of the carrier type
+ * @since    0.3.1 (128-bit removal)
+ */
+fn flags_carrier_ctype(n: u64) -> str {
+    if n <= 8 { return "uint8_t" }
+    if n <= 16 { return "uint16_t" }
+    if n <= 32 { return "uint32_t" }
+    "uint64_t"
+}
+
+/**
+ * emit_flags_member_const — emit ONE `flags` member's bit constant: `static const tk_t_<Name>
+ * tk_t_<Name>_<MEMBER> = (tk_t_<Name>)(((uint64_t)1) << <ordinal>);`. The shift is composed on a
+ * `uint64_t` one — the widest carrier a `flags` type can have — so the shifted bit is never
+ * truncated before the cast to the (possibly narrower) carrier.
+ *
+ * @param buf       the C output buffer to grow
+ * @param type_name the flags type's canonical name (mangled into its C typedef name)
+ * @param member    the member's declared name (upper-cased in the constant's name)
+ * @param ordinal   the member's declaration index, i.e. the bit it owns
+ * @return          `buf` followed by the member's `static const` line
+ * @since           0.3.1 (128-bit removal)
+ */
+fn emit_flags_member_const(buf: []byte, type_name: str, member: str, ordinal: u64) -> []byte {
+    mut out = cb(buf, "static const ")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, " ")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, "_")
+    out = cb_upper(out, member)
+    out = cb(out, " = (")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, ")(((uint64_t)1) << ")
+    out = cb_i64(out, ordinal to i64)
+    cb(out, ");\n")
+}
+
+/**
+ * emit_flags_typedef — (C8.4) emit a whole `flags Name { A; B; C; }` declaration: the carrier
+ * `typedef <uint_type> tk_t_<Name>;` followed by one `static const` bit constant per member, in
+ * declaration order (member `i` owns bit `i`).
+ *
+ * @param buf  the C output buffer to grow
+ * @param d    the type declaration (its `name` names the emitted typedef)
+ * @param fb   the flags body (its `members` are the declared names, in order)
+ * @return     `buf` followed by the typedef, every member constant, and a blank separator line
+ * @since      0.3.1 (128-bit removal — extracted while the `unsigned __int128` carrier arm died)
+ */
+fn emit_flags_typedef(buf: []byte, d: parser::TypeDecl, fb: parser::FlagsBody) -> []byte {
+    mut out = cb(buf, "typedef ")
+    out = cb(out, flags_carrier_ctype(fb.members.len))
+    out = cb(out, " ")
+    out = mangle_type_name(out, "", d.name)
+    out = cb(out, ";\n")
+    mut mi: u64 = 0
+    loop {
+        if mi >= fb.members.len { break }
+        out = emit_flags_member_const(out, d.name, fb.members[mi], mi)
+        mi++
+    }
+    cb(out, "\n")
+}
