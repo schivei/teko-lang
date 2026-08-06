@@ -18,6 +18,15 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode) -> str | error {
     b = cb(b, "#include <math.h>\n")   // floor/… — float ops the corpus lowers inline (link -lm)
     b = cb(b, "#include \"teko_rt.h\"\n")
     b = cb(b, "#include \"assert.h\"\n\n")   // teko::assert seed decls (driver adds its -I)
+    // GCC-14 / clang promoted these four from warning to hard error by default (owner ruling
+    // 2026-08-03). The emitted C assigns across distinct-but-layout-identical named types
+    // (e.g. teko::backend::Symbol vs teko::lsp::Symbol) that every prior toolchain accepted;
+    // emit the pragma IN the generated C so it survives regeneration (a PATH cc shim does not
+    // cover the Windows clang leg). Restores the pre-GCC-14 "warning, not error" behaviour.
+    b = cb(b, "#pragma GCC diagnostic ignored \"-Wincompatible-pointer-types\"\n")
+    b = cb(b, "#pragma GCC diagnostic ignored \"-Wint-conversion\"\n")
+    b = cb(b, "#pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"\n")
+    b = cb(b, "#pragma GCC diagnostic ignored \"-Wimplicit-int\"\n\n")
 
     // W4c — TYPE DECLS come FIRST (before any function that uses them). Two sub-passes:
     //   a) a forward `typedef struct tk_t_<M> tk_t_<M>;` for every struct/variant/class decl, so

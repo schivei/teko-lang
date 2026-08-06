@@ -5,6 +5,10 @@
 #include <math.h>
 #include "teko_rt.h"
 #include "assert.h"
+#pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
+#pragma GCC diagnostic ignored "-Wint-conversion"
+#pragma GCC diagnostic ignored "-Wimplicit-function-declaration"
+#pragma GCC diagnostic ignored "-Wimplicit-int"
 typedef struct tk_t_teko__backend__AbiDescriptor tk_t_teko__backend__AbiDescriptor;
 typedef struct tk_t_teko__backend__ArgReg tk_t_teko__backend__ArgReg;
 typedef struct tk_t_teko__backend__EncWord tk_t_teko__backend__EncWord;
@@ -154870,6 +154874,18 @@ tk_u_str_error teko_teko__codegen__tk_emit_c_mode(tk_t_teko__checker__TProgram p
     });
     b = teko_teko__codegen__cb(b, (tk_str) {
         (const tk_byte *)"#include \"assert.h\"\n\n", 21
+    });
+    b = teko_teko__codegen__cb(b, (tk_str) {
+        (const tk_byte *)"#pragma GCC diagnostic ignored \"-Wincompatible-pointer-types\"\n", 62
+    });
+    b = teko_teko__codegen__cb(b, (tk_str) {
+        (const tk_byte *)"#pragma GCC diagnostic ignored \"-Wint-conversion\"\n", 50
+    });
+    b = teko_teko__codegen__cb(b, (tk_str) {
+        (const tk_byte *)"#pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"\n", 65
+    });
+    b = teko_teko__codegen__cb(b, (tk_str) {
+        (const tk_byte *)"#pragma GCC diagnostic ignored \"-Wimplicit-int\"\n\n", 49
     });
     int64_t fw = ((int64_t)0ULL);
     while (1) {
