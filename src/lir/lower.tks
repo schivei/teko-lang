@@ -12177,13 +12177,58 @@ fn lower_var_fat(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> LoweredF
 }
 
 /**
+ * fat_value_bytes — THE single per-type width oracle for a fat VALUE's in-memory image (#112 raiz-comum
+ * R0). One function answers "how many bytes is the stored image of a `str`/`[]T` value" for every width
+ * authority that used to compute it independently — `fat_slot_bytes` (A1), `field_layout_size`'s fat
+ * case (A2), `error_field_size_of`'s `str` case (A3), the slice-element stride (`elem_byte_stride`, A4),
+ * the fat-element index stride (`lower_index_fat`, A8), and the const fat-member image
+ * (`lower_const.tks`, A10/A11). They agreed at 16 today only by arithmetic coincidence (three copies of
+ * `Ptr + I64`); routing them ALL through here makes that agreement structural.
+ *
+ * INERT AT N112.1: `str` AND `[]T` both answer the two-word `{ptr, len}` width (16). The whole point of
+ * this crumb is to introduce the seam WITHOUT moving a byte; N112.3 flips the slice arm to the three-word
+ * `{ptr, len, cap}` width (24) at the single atomic seam, leaving `str` at 16 (str-no-widen, design §0).
+ *
+ * @param t  the fat-typed value's resolved type (`str` or `[]T`, discriminated by `is_str_type`)
+ * @return   the value's stored image width in bytes: 16 for `str`, and — until N112.3 — 16 for a slice
+ * @since 0.3.1.0 (#112 N112.0/N112.1, raiz-comum R0)
+ */
+fn fat_value_bytes(t: checker::Type) -> u32 {
+    if is_str_type(t) { return str_fat_value_bytes() }
+    slice_fat_value_bytes()
+}
+
+/**
+ * str_fat_value_bytes — the stored image width of a `str` value: the two-word `{ptr, len}` fat
+ * (16 bytes), the pointer half plus the `u64` length half. `str` NEVER widens (design §0), so this is
+ * the width for every `str`-carrying authority forever.
+ *
+ * @return  the `str` image width in bytes (16)
+ * @since 0.3.1.0 (#112 N112.1, raiz-comum R0)
+ */
+fn str_fat_value_bytes() -> u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
+
+/**
+ * slice_fat_value_bytes — the stored image width of a `[]T` value. INERT AT N112.1: the same two-word
+ * `{ptr, len}` width (16) as `str`, so this crumb moves no bytes. N112.3 flips THIS function (and only
+ * this function) to the three-word `{ptr, len, cap}` width (24, `cap` at offset 16) at the single atomic
+ * rep seam.
+ *
+ * @return  the `[]T` image width in bytes (16 until N112.3, then 24)
+ * @since 0.3.1.0 (#112 N112.1, raiz-comum R0)
+ */
+fn slice_fat_value_bytes() -> u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
+
+/**
  * fat_slot_bytes — the byte size of a mutable fat local's frame slot: the pointer half followed by
  * the `u64` length half, the SAME `{ptr; len}` image `lower_fat_field` reads a fat struct field
- * with, so the two never disagree about which half lives where.
+ * with, so the two never disagree about which half lives where. Routed through the `fat_value_bytes`
+ * oracle's `str` arm (#112 A1): this is the no-type slot width, still 16 (str-no-widen); the slice
+ * `mut`-local slot gains its own type-threaded width at the N112.3 seam (design A6).
  *
  * @return  the slot's size in bytes
  */
-fn fat_slot_bytes() -> u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
+fn fat_slot_bytes() -> u32 { str_fat_value_bytes() }
 
 /**
  * alloc_fat_slot — reserve the 16-byte frame slot a mutable fat local lives in and store the
@@ -12913,16 +12958,17 @@ fn error_field_sizes(types: []LType) -> []u32 {
 }
 
 /**
- * error_field_size_of — one `error` field's byte size: 16 for the FAT `str` fields (`Ptr`'s own
- * class doubled — the pointer half plus the inline length half), else the class's plain
- * `ltype_size` (`line`/`col`, `I32`, 4 bytes each).
+ * error_field_size_of — one `error` field's byte size: the FAT `str` fields route through the
+ * `fat_value_bytes` oracle's `str` arm (16 — the pointer half plus the inline length half; #112 A3,
+ * `error` fields are ALWAYS `str`, so this stays 16 forever), else the class's plain `ltype_size`
+ * (`line`/`col`, `I32`, 4 bytes each).
  *
  * @param LType t  the field's machine class
  * @return u32  its byte size within the `error` layout
  */
 fn error_field_size_of(t: LType) -> u32 {
     match t {
-        Ptr => ltype_size(LType::Ptr) * (2 to u32)
+        Ptr => fat_value_bytes(checker::Str { })
         _ => ltype_size(t)
     }
 }
@@ -13568,7 +13614,7 @@ fn lower_index_str(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Low
  * @return       the element's byte stride inside a slice buffer
  */
 fn elem_byte_stride(t: checker::Type, enums: []LEnumInfo) -> u32 {
-    if is_fat_type(t) { return fat_slot_bytes() }
+    if is_fat_type(t) { return fat_value_bytes(t) }
     ltype_size(ltype_of(t, enums))
 }
 
@@ -13603,8 +13649,8 @@ fn elem_byte_align(t: checker::Type, enums: []LEnumInfo) -> u32 {
  */
 fn lower_index_fat(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> LoweredFat | error {
     let ro = match lower_fat_expr(ctx, ix.receiver) { LoweredFat as x => x; error as err => return err }
-    match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
-    let addr_out = match guarded_index_addr(ro.ctx, ro.ptr, ro.len, ix.index, fat_slot_bytes(), e.line, e.col) { Lowered as x => x; error as err => return err }
+    let et = match slice_element_type(ix.receiver.type) { checker::Type as t => t; error as err => return err }
+    let addr_out = match guarded_index_addr(ro.ctx, ro.ptr, ro.len, ix.index, fat_value_bytes(et), e.line, e.col) { Lowered as x => x; error as err => return err }
     load_fat_slot(addr_out.ctx, addr_out.vreg, e.line, e.col)
 }
 
@@ -15927,8 +15973,25 @@ fn typeexpr_is_fat(te: parser::TypeExpr, table: checker::TypeTable) -> bool {
  * @since #594 T-B6
  */
 fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type) -> u32 {
-    if field_is_fat_resolved(te, table, rft) { return ltype_size(LType::Ptr) * (2 to u32) }
+    if field_is_fat_resolved(te, table, rft) { return fat_value_bytes(fat_field_width_type(rft)) }
     field_size_of(ft, nested)
+}
+
+/**
+ * fat_field_width_type — the type `field_layout_size` sizes a FAT field by (#112 A2). When the resolved
+ * declared type is itself fat (`is_fat_type` — the store's own signal), it IS the width type, so `str`
+ * fields size 16 and slice fields size the slice width. When the field resolved fat only SYNTACTICALLY
+ * (`typeexpr_is_fat` — a generic bare-`T` monomorphized to `str`/`[]T` whose stamped annotation reads
+ * thin), `rft` is not a fat case; it is sized as a slice, the conservative wider arm once N112.3 flips
+ * (a slice slot always fits a `str`'s two words). INERT AT N112.1: both arms are 16.
+ *
+ * @param rft  the field's RESOLVED declared type
+ * @return     `rft` when it is a fat type, else a `[]T` sentinel selecting the slice width arm
+ * @since 0.3.1.0 (#112 N112.1, A2)
+ */
+fn fat_field_width_type(rft: checker::Type) -> checker::Type {
+    if is_fat_type(rft) { return rft }
+    checker::Slice { element = checker::Str { } }
 }
 
 /**
