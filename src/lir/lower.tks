@@ -15672,9 +15672,17 @@ fn find_known_struct_layout(layouts: []LStructLayout, name: str) -> LStructLayou
 }
 
 /**
- * field_size_of — a field's byte size: `nested`'s own resolved size when
- * present (a struct-by-value field), else `ft`'s scalar `ltype_size` (#414,
- * #382).
+ * field_size_of — a field's byte size: the BY-ADDRESS width of a nested aggregate field when
+ * `nested` is present (`nested_by_address_size`), else `ft`'s scalar `ltype_size` (#414, #382).
+ *
+ * A nested struct/class field is NOT stored inline in this backend's memory model: `store_struct_field`
+ * boxes the value into fresh runtime storage (`own_embedded_value`) and writes its ADDRESS, and
+ * `lower_field_access` reads that word back as a `Ptr`. The slot therefore holds a pointer and must be
+ * pointer-WIDE, never the pointee's inline size — which is only coincidentally >= a pointer for the
+ * self-hosted compiler's own (large) nested structs and is SMALLER for a nested generic instance like
+ * `Box<Box<i32>>`'s `Box<i32>` field (4 bytes). Sizing that field 4 truncated the stored pointer on the
+ * outer struct's whole-value copy (`named_layout_bytes`, the return/box copy) and the next read
+ * dereferenced the truncated word — the nested-generic native SIGSEGV.
  *
  * @param LType ft  the field's machine class (`ltype_of_typeexpr`'s mapping)
  * @param LStructLayout? nested  the field's nested struct layout, when known
@@ -15682,15 +15690,30 @@ fn find_known_struct_layout(layouts: []LStructLayout, name: str) -> LStructLayou
  */
 fn field_size_of(ft: LType, nested: LStructLayout | null) -> u32 {
     match nested {
-        LStructLayout as l => l.size
+        LStructLayout as l => nested_by_address_size(l)
         null => ltype_size(ft)
     }
 }
 
 /**
- * field_align_of — a field's byte alignment: `nested`'s own resolved alignment
- * when present (a struct-by-value field), else `ft`'s scalar `ltype_align`
- * (#414, #382).
+ * nested_by_address_size — the slot width a nested aggregate field occupies: at least a pointer, since
+ * the field holds the ADDRESS of a boxed copy (`store_struct_field`/`lower_field_access`). The
+ * pointee's own inline size is the floor's UPPER bound, preserved so no already-correct layout (every
+ * self-hosted nested struct is wider than a pointer) shrinks; only a sub-pointer instance is widened.
+ *
+ * @param l  the nested field type's resolved layout
+ * @return   `max(l.size, sizeof(Ptr))`
+ */
+fn nested_by_address_size(l: LStructLayout) -> u32 {
+    let ptr = ltype_size(LType::Ptr)
+    if l.size > ptr { return l.size }
+    ptr
+}
+
+/**
+ * field_align_of — a field's byte alignment: the BY-ADDRESS alignment of a nested aggregate field when
+ * `nested` is present (`nested_by_address_align`, at least pointer alignment for the same reason
+ * `field_size_of` clamps its size), else `ft`'s scalar `ltype_align` (#414, #382).
  *
  * @param LType ft  the field's machine class (`ltype_of_typeexpr`'s mapping)
  * @param LStructLayout? nested  the field's nested struct layout, when known
@@ -15698,9 +15721,23 @@ fn field_size_of(ft: LType, nested: LStructLayout | null) -> u32 {
  */
 fn field_align_of(ft: LType, nested: LStructLayout | null) -> u32 {
     match nested {
-        LStructLayout as l => l.align
+        LStructLayout as l => nested_by_address_align(l)
         null => ltype_align(ft)
     }
+}
+
+/**
+ * nested_by_address_align — the alignment a nested aggregate field's pointer slot needs: at least
+ * pointer alignment, since the slot holds an address (`field_size_of`'s size clamp, on the alignment
+ * axis). A wider pointee keeps its own stricter alignment.
+ *
+ * @param l  the nested field type's resolved layout
+ * @return   `max(l.align, alignof(Ptr))`
+ */
+fn nested_by_address_align(l: LStructLayout) -> u32 {
+    let ptr = ltype_align(LType::Ptr)
+    if l.align > ptr { return l.align }
+    ptr
 }
 
 /**
