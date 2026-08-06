@@ -319,6 +319,29 @@ fn pe_linker_targets_arch(cmd: str, arch: LinkArch) -> bool {
 }
 
 /**
+ * macho_linker_targets_arch — does the Mach-O candidate `cmd` target `arch`?
+ *
+ * Apple's `ld` and LLVM's `ld64.lld` both take `-arch <name>` (never GNU's `-m <emulation>`), and
+ * both answer `-v` with their version banner and exit 0 without touching a file — so `<cmd> -arch
+ * <name> -v` is a link-free probe that runs iff the linker exists and accepts the machine, the
+ * Mach-O sibling of `linker_targets_arch`'s `-m … --version` and `pe_linker_targets_arch`'s
+ * `/machine: /?`. The `-arch` name is the same spelling `arch_name` gives ("arm64"/"x86_64"), which
+ * is exactly the Mach-O `cpu` token, so no separate table is needed.
+ *
+ * @param cmd   the candidate Mach-O linker command
+ * @param arch  the machine the link must target
+ * @return      true iff the candidate ran and accepted the machine
+ */
+fn macho_linker_targets_arch(cmd: str, arch: LinkArch) -> bool {
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, cmd)
+    argv = teko::list::push(argv, "-arch")
+    argv = teko::list::push(argv, arch_name(arch))
+    argv = teko::list::push(argv, "-v")
+    teko::process::run_quiet(argv) == 0
+}
+
+/**
  * candidate_targets — the format-aware architecture assertion for one candidate.
  *
  * @param cmd   the candidate linker command
@@ -328,6 +351,7 @@ fn pe_linker_targets_arch(cmd: str, arch: LinkArch) -> bool {
  */
 fn candidate_targets(cmd: str, arch: LinkArch, fmt: LinkFormat) -> bool {
     if fmt == LinkFormat::Pe { return pe_linker_targets_arch(cmd, arch) }
+    if fmt == LinkFormat::Macho { return macho_linker_targets_arch(cmd, arch) }
     linker_targets_arch(cmd, arch, fmt)
 }
 
