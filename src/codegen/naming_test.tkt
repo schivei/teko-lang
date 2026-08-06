@@ -1,0 +1,115 @@
+use teko::checker
+use teko::parser
+
+/**
+ * A single-segment path.
+ *
+ * @param s  the segment name
+ * @return   a `Path` with one segment
+ */
+fn ffx_path1(s: str) -> parser::Path {
+    parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = s }) }
+}
+
+/**
+ * A bare named type annotation (`NamedType` with no generic args).
+ *
+ * @param s  the type's surface name
+ * @return   the `TypeExpr`
+ */
+fn ffx_named_te(s: str) -> parser::TypeExpr {
+    parser::NamedType { path = ffx_path1(s); args = teko::list::empty() }
+}
+
+/**
+ * A throwaway zero-literal expression (a default-slot filler for a non-defaulted parameter).
+ *
+ * @return  a positioned `Expr`
+ */
+fn ffx_no_expr() -> parser::Expr {
+    parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; line = 0; col = 0 }
+}
+
+/**
+ * A fixed (non-variadic, non-defaulted) parameter of the named type.
+ *
+ * @param name    the parameter name
+ * @param tyname  the surface type name
+ * @return        the `Param`
+ */
+fn ffx_param(name: str, tyname: str) -> parser::Param {
+    parser::Param { name = name; has_type = true; type_ann = ffx_named_te(tyname); is_params = false; has_default = false; default_expr = ffx_no_expr() }
+}
+
+/**
+ * A checked function with the given export shape.
+ *
+ * @param name     the function name
+ * @param ns       the declaring namespace
+ * @param ret      the resolved return type
+ * @param params   the parameter list
+ * @param vis      the visibility
+ * @param csym     the `exp("…")` override symbol ("" = flatten-canonical default)
+ * @param tparams  the generic type-parameter names (empty for a monomorphic function)
+ * @return         the `TFunction`
+ */
+fn ffx_tf(name: str, ns: str, ret: checker::Type, params: []parser::Param, vis: parser::Visibility, csym: str, tparams: []str) -> checker::TFunction {
+    checker::TFunction {
+        name = name
+        type_params = tparams
+        type_constraints = teko::list::empty()
+        params = params
+        return_type = ret
+        body = teko::list::empty()
+        vis = vis
+        has_doc = false
+        doc = ""
+        namespace = ns
+        file = ""
+        line = 0; col = 0
+        is_test = false
+        is_extern = false
+        c_symbol = csym
+        from_lib = ""
+        has_arena_size = false
+        arena_size = 0 to u64
+    }
+}
+
+/**
+ * A resolved `i64` type.
+ *
+ * @return  the `i64` `Prim` type
+ */
+fn ffx_i64() -> checker::Type { checker::Prim { kind = checker::PrimKind::I64 } }
+
+/**
+ * A scalar `add(a: i64, b: i64) -> i64` export in namespace `demo`.
+ *
+ * @param csym  the `exp("…")` override ("" = flatten-canonical default)
+ * @return      the `TFunction`
+ */
+fn ffx_add_fn(csym: str) -> checker::TFunction {
+    let ps = teko::list::push(teko::list::push(teko::list::empty(), ffx_param("a", "i64")), ffx_param("b", "i64"))
+    ffx_tf("add", "demo", ffx_i64(), ps, parser::Visibility::Exp, csym, teko::list::empty())
+}
+
+#test
+/**
+ * flatten_canonical joins the namespace and name with single underscores, collapsing `::` and
+ * auto-prefixing the (project-root) namespace.
+ */
+fn ffx_flatten_canonical_shapes() {
+    teko::assert::is_true(flatten_canonical("demo", "add") == "demo_add")
+    teko::assert::is_true(flatten_canonical("demo::math", "add") == "demo_math_add")
+    teko::assert::is_true(flatten_canonical("", "add") == "add")
+}
+
+#test
+/**
+ * cg_c_export_symbol takes the `exp("…")` override verbatim when present, else the flatten default.
+ */
+fn ffx_export_symbol_default_and_override() {
+    teko::assert::is_true(cg_c_export_symbol(ffx_add_fn("")) == "demo_add")
+    teko::assert::is_true(cg_c_export_symbol(ffx_add_fn("teko_add")) == "teko_add")
+}

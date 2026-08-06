@@ -1,0 +1,60 @@
+/**
+ * src/codegen/naming.tks (namespace 'teko::codegen') — reverse-FFI C symbol naming
+ * for an `[artifact] abi = "c"` project (FFI-D). Flattens canonical Teko names to
+ * C identifiers with single underscores, and manages the `exp("…")` override mechanism.
+ */
+
+/**
+ * Flatten a canonical Teko name (`namespace` + `name`) to a single C identifier for the reverse-FFI
+ * boundary: every `::` collapses to a single `_`, and the namespace joins the name with one `_`. Because
+ * the canonical root IS the project name (`teko.tkp` `name`; the source root is invisible), the flattened
+ * form auto-prefixes every export with the project name — `demo::math` + `add` -> `demo_math_add`,
+ * `demo` + `add` -> `demo_add` — the libc-collision resistance a hand-written C library gets manually.
+ *
+ * @param namespace  the declaring namespace ("" for a truly root-less symbol -> the bare name)
+ * @param name       the symbol's bare name
+ * @return           the flattened, single-underscore C identifier
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+pub fn flatten_canonical(namespace: str, name: str) -> str {
+    if namespace.len == 0 { return name }
+    teko::str::concat(ffi_flatten_seps(namespace), "_", name)
+}
+
+/**
+ * Collapse each `::` in a canonical namespace to a single `_` (the C-facing flatten; distinct from the
+ * internal `__` mangle `cb_fn_name` uses). `demo::math` -> `demo_math`.
+ *
+ * @param s  the canonical namespace
+ * @return   the same text with every `::` rewritten to one `_`
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn ffi_flatten_seps(s: str) -> str {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        if i + 1 < s.len && s[i] == b':' && s[i + 1] == b':' {
+            out = teko::list::push(out, b'_')
+            i = i + 2
+        } else {
+            out = teko::list::push(out, s[i])
+            i++
+        }
+    }
+    str(out)
+}
+
+/**
+ * The C symbol an `exp` function is emitted under in an `abi="c"` artifact: the `exp("c_name")` override
+ * verbatim when present (carried on `c_symbol`, mirroring how `extern` carries its import symbol), else the
+ * flattened canonical default.
+ *
+ * @param f  the checked function
+ * @return   the C-facing export symbol
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+pub fn cg_c_export_symbol(f: checker::TFunction) -> str {
+    if f.c_symbol != "" { return f.c_symbol }
+    flatten_canonical(f.namespace, f.name)
+}
