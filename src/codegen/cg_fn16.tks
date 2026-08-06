@@ -1,0 +1,225 @@
+/** teko::codegen functions (split 16/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+// emit_field_access — a TFieldAccess -> `(recv.field)`. (C: TK_TEXPR_FIELD_ACCESS branch.)
+// W5-idx — `.len`: a `str` lowers to the runtime tk_str's `.len` member (`(recv).len`); a
+// slice's `.len` reads its tk_slice_<elem> `.len` member (same {ptr,len} shape as tk_str -> u64).
+fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let is_slice = match fa.receiver.type { checker::Slice => true; _ => false }
+    if is_slice && fa.field == "len" {
+        mut o = cb(buf, "(")   // `.len` of a tk_slice_<elem> — same {ptr,len} shape as tk_str -> u64
+        o = match emit_expr_ctx(o, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+        return cb(o, ".len)")
+    }
+    // E2 (native): error values are now the full tk_error struct (E2-NATIVE), so
+    // field access reads the real struct fields — native parity with the interpreter. Mirrors codegen.c.
+    let is_error = match fa.receiver.type { checker::Error => true; _ => false }
+    if is_error {
+        mut oe = cb(buf, "((")
+        oe = match emit_expr_ctx(oe, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+        oe = cb(oe, ").")
+        oe = cb_str(oe, fa.field)
+        return cb(oe, ")")
+    }
+    // (MEM-1b-ii) `Ref<T>.value` deref — the reference lowers to a bare `<T> *`, so `.value` reads
+    // `(*recv)`. (The receiver `r` is itself the pointer; `.value` is its dereference.)
+    let is_ref = match fa.receiver.type { checker::Reference => true; _ => false }
+    if is_ref && fa.field == "value" {
+        mut or = cb(buf, "(*(")
+        or = match emit_expr_ctx(or, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+        return cb(or, "))")
+    }
+    // (W10b.CLASS increment 3) a class receiver is ALWAYS a pointer (reference semantics) —
+    // `recv.field` needs a deref first (`(*recv).field`, i.e. C's `recv->field`).
+    let is_class_recv = match fa.receiver.type {
+        checker::Named as nm => cg_is_class_named(prog, nm.name)
+        _ => false
+    }
+    if is_class_recv {
+        // (#98) a POLYMORPHIC-BASE-typed receiver is the fat pointer `tk_base_<B>` (data + vtable), not
+        // a raw object pointer — extract `.data`, cast to the base's raw `tk_t_<B> *`, then deref:
+        // `((*((tk_t_<B> *)(<recv>).data)).<field>)`. A plain (raw-pointer) class receiver stays
+        // `((*(<recv>)).<field>)`.
+        let recv_poly_base = match fa.receiver.type {
+            checker::Named as nm => cg_is_polymorphic_base(prog, nm.name)
+            _ => false
+        }
+        if recv_poly_base {
+            let bname = match fa.receiver.type { checker::Named as nm => nm.name; _ => "" }
+            mut ob = cb(buf, "((*((")
+            ob = mangle_type_name(ob, "", bname)
+            ob = cb(ob, " *)(")
+            ob = match emit_expr_ctx(ob, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            ob = cb(ob, ").data)).")
+            ob = cb_str(ob, fa.field)
+            return cb(ob, ")")
+        }
+        mut oc = cb(buf, "((*(")
+        oc = match emit_expr_ctx(oc, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        oc = cb(oc, ")).")
+        oc = cb_str(oc, fa.field)
+        return cb(oc, ")")
+    }
+    // auto-box: reading a recursive back-edge field derefs the heap pointer.
+    let fa_boxed = match fa.receiver.type {
+        checker::Named as nm => match cg_find_struct_field_type(prog, nm.name, fa.field) {
+            parser::TypeExpr as fte => cg_field_boxed(prog, nm.name, fte)
+            null => false
+        }
+        _ => false
+    }
+    mut out = cb(buf, "(")
+    if fa_boxed { out = cb(out, "*") }
+    out = cb(out, "(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, ".")
+    out = cb_str(out, fa.field)
+    cb(out, "))")
+}
+
+/**
+ * `cg_expr_diverges` — is a call-shaped sub-expression a diverging `panic`/`exit` call in a VALUE
+ * position (a `??` fallback's right side, or a `match` arm's tail)? Delegates the "is this
+ * actually the injected builtin, not a same-named user function/closure the resolver bound
+ * instead" test to `checker::tcall_is_diverging_builtin` — the single place that test is made —
+ * rather than re-deriving it from the bare callee name here. In a VALUE position a true positive
+ * lowers to `(<call>, (T){0})`: the call is `_Noreturn` (`tk_panic_str`/`tk_exit`), so the
+ * zero-of-T is unreachable but keeps the C `?:`/expr well-typed. Narrower than the checker's
+ * `texpr_diverges` on purpose — its two call sites only ever need to test a bare call, never a
+ * nested `match`/`if`.
+ *
+ * @param e  the typed sub-expression
+ * @return   true iff `e` is a call the resolver bound to the injected `panic`/`exit` builtin
+ */
+fn cg_expr_diverges(e: checker::TExpr) -> bool {
+    match e.kind {
+        checker::TCall as c => checker::tcall_is_diverging_builtin(c)
+        _ => false
+    }
+}
+
+// emit_index — W5-idx `recv[index]`. A `str` receiver lowers to a BOUNDS-CHECKED byte access
+// as a GNU statement-expression (single-eval of recv + idx, then the guard):
+//   ({ tk_str _sN = <recv>; uint64_t _iN = <idx>; _iN < _sN.len ? _sN.ptr[_iN]
+//                                              : (tk_panic_oob(), (tk_byte)0); })
+// tk_panic_oob is declared in teko_rt.h (the generated TU's runtime header) — an out-of-bounds
+// index PANICS with the SAME message as the interpreter's eval_index (M.1). A slice receiver uses the
+// SAME bounds-checked shape, with the element C type substituted for tk_byte and reading
+// `(recv).ptr[i]` with a `(tk_panic_oob(), (<elem>){0})` fallback. (C: the TK_TEXPR_INDEX branch.)
+fn emit_index(buf: []byte, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    // slice subscript: the SAME bounds-checked stmt-expr as str, with the element type
+    // substituted for tk_byte and a 0-of-element fallback after the panic.
+    match ix.receiver.type {
+        checker::Slice as srt => {
+            let elem = match srt.element {
+                checker::Void => return error { message = "codegen: indexing an untyped empty slice (internal: checker should reject)" }
+                _ => srt.element
+            }
+            let lstmp = $"_ls{buf.len}"
+            let litmp = $"_li{buf.len + 1}"
+            mut so = cb(buf, "({ ")
+            so = match emit_type(so, prog, elem) { []byte as o => o; error as err => return err }
+            so = cb(so, " const *")
+            so = cb(so, lstmp)
+            so = cb(so, " = (")
+            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            so = cb(so, ").ptr; uint64_t ")
+            so = cb(so, litmp)
+            so = cb(so, " = (uint64_t)(")
+            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            so = cb(so, "); ")
+            so = cb(so, litmp)
+            so = cb(so, " < (")
+            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            so = cb(so, ").len ? ")
+            so = cb(so, lstmp)
+            so = cb(so, "[")
+            so = cb(so, litmp)
+            so = cb(so, "]")
+            so = cb(so, " : (tk_panic_oob_at(")   // (C1.7) positioned OOB — node line:col
+            so = cb(so, teko::u64_to_str(e.line to u64))
+            so = cb(so, ", ")
+            so = cb(so, teko::u64_to_str(e.col to u64))
+            so = cb(so, "), (")
+            so = match emit_type(so, prog, elem) { []byte as o => o; error as err => return err }
+            return cb(so, "){0}); })")
+        }
+        checker::Str => { }
+        _ => return error { message = "codegen: indexing a non-string value not yet supported" }
+    }
+    // Unique temp names (the buffer length is the functional uniquifier — see emit_if_value).
+    let stmp = $"_s{buf.len}"
+    let itmp = $"_i{buf.len + 1}"   // +1 so it differs from stmp
+    mut out = cb(buf, "({ tk_str ")
+    out = cb(out, stmp)
+    out = cb(out, " = ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "; uint64_t ")
+    out = cb(out, itmp)
+    out = cb(out, " = (uint64_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "); ")
+    out = cb(out, itmp)
+    out = cb(out, " < ")
+    out = cb(out, stmp)
+    out = cb(out, ".len ? ")
+    out = cb(out, stmp)
+    out = cb(out, ".ptr[")
+    out = cb(out, itmp)
+    out = cb(out, "]")
+    mut z = cb(out, " : (tk_panic_oob_at(")   // (C1.7) positioned OOB — node line:col
+    z = cb(z, teko::u64_to_str(e.line to u64))
+    z = cb(z, ", ")
+    z = cb(z, teko::u64_to_str(e.col to u64))
+    cb(z, "), (tk_byte)0); })")
+}
+
+// emit_in — Phase 2: `<lhs> in [ e0, e1, … ]` -> bool. The lhs is EVALUATED ONCE (single-eval),
+// bound to a temp via a GNU statement-expression, then compared to each element with `==` OR'd
+// together (true iff the lhs equals any element). The node's `.type` is bool.
+//   ({ <CtypeOfLhs> _invN = <lhs>; (_invN == <e0>) || (_invN == <e1>) || …; })
+// A STR lhs routes each comparison through tk_str_eq instead (a tk_str is a {ptr,len} struct —
+// C `==` is invalid on it; content equality, mirroring emit_compare's str branch):
+//   ({ tk_str _invN = <lhs>; tk_str_eq(_invN, <e0>) || tk_str_eq(_invN, <e1>) || …; })
+// The temp `_inv<buf.len>` uses the buffer length as the functional uniquifier (see emit_index).
+// The EMPTY set `x in []` still EVALUATES the lhs once (single-eval), then yields false — so a
+// side-effecting lhs runs identically in the interpreter (which evaluates the lhs before its zero-iteration
+// loop). interpreter==native even for `[]`. (C: the TK_TEXPR_IN branch of emit_expr.)
+fn emit_in(buf: []byte, prog: CgProg, ie: checker::TInExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    if ie.elems.len == 0 {
+        mut z = cb(buf, "({ (void)(")
+        z = match emit_expr_ctx(z, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        return cb(z, "); 0; })")
+    }
+    let tmp = $"_inv{buf.len}"
+    let str_in = match ie.lhs.type { checker::Str => true; _ => false }
+    mut out = cb(buf, "({ ")
+    out = match emit_type(out, prog, ie.lhs.type) { []byte as o => o; error as err => return err }   // the lhs's resolved C type
+    out = cb(out, " ")
+    out = cb(out, tmp)
+    out = cb(out, " = ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "; ")
+    mut i = 0
+    loop {
+        if i >= ie.elems.len { break }
+        if i > 0 { out = cb(out, " || ") }
+        if str_in {
+            out = cb(out, "tk_str_eq(")
+            out = cb(out, tmp)
+            out = cb(out, ", ")
+            out = match emit_expr_ctx(out, prog, checker::Void { }, ie.elems[i], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            out = cb(out, ")")
+        } else {
+            out = cb(out, "(")
+            out = cb(out, tmp)
+            out = cb(out, " == ")
+            out = match emit_expr_ctx(out, prog, checker::Void { }, ie.elems[i], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            out = cb(out, ")")
+        }
+        i++
+    }
+    cb(out, "; })")
+}

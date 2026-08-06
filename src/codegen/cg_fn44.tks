@@ -1,0 +1,263 @@
+/** teko::codegen functions (split 44/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * Rebuilds one expression, recursing into every sub-expression, and STAMPS every closure literal
+ * it finds with a unique `lift_id` (issue #107 fix — a real lift_id counter bug this exposed):
+ * a `TLambda` reserves ITS OWN id BEFORE recursing into its body, so a nested lambda literal
+ * inside it stamps with HIGHER ids (outer-first numbering, stable regardless of nesting). The
+ * recursive `cg_lift_block` call may advance `acc.next` further (once per nested lambda it
+ * finds) — the counter used AFTER the recursion is read FRESH from `acc.next` (whatever the
+ * nested walk left it at), never reset to `id + 1`: that would REUSE ids already handed out to
+ * nested lambdas, producing two lifted C functions both named `__tkclo_<id>` (a
+ * duplicate-definition compile error) the moment a lambda literal contains another lambda
+ * literal. A non-capturing lambda is synthesized as a plain top-level fn; a capturing one is
+ * recorded in `acc.lams` for the env-struct + env-first lifted-fn emission path.
+ *
+ * @param e    the expression to rebuild
+ * @param acc  the lift-id counter + synthesized-fn/capturing-lambda accumulator (by-reference)
+ * @return     the expression with every lambda literal stamped
+ */
+fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc) -> checker::TExpr {
+    match e.kind {
+        checker::TLambda as lam => {
+            let id = acc.next
+            acc = StampAcc { next = id + 1; fns = acc.fns; lams = acc.lams }
+            let nbody = cg_lift_block(lam.body, acc)   // stamp nested lambdas first (ids > id)
+            // synthesize a plain top-level fn for a NON-capturing lambda; capturing → emitted by the
+            // capture path (recorded in `lams`).
+            mut newfns = acc.fns
+            mut newlams = acc.lams
+            let stamped = checker::TLambda { params = lam.params; body = nbody; captures = lam.captures; ret = lam.ret; lift_id = id }
+            if lam.captures.len == 0 {
+                mut ps: []parser::Param = teko::list::empty()
+                mut pi = 0
+                loop { if pi >= lam.params.len { break }; ps = teko::list::push(ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }); pi++ }
+                newfns = teko::list::push(newfns, checker::TFunction { name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 })
+            } else {
+                newlams = teko::list::push(newlams, stamped)
+            }
+            // preserve whatever `next` the nested recursion advanced to (never regress it).
+            acc = StampAcc { next = acc.next; fns = newfns; lams = newlams }
+            checker::TExpr { kind = stamped; type = e.type; line = e.line; col = e.col }
+        }
+        checker::TBinary as b => checker::TExpr { kind = checker::TBinary { op = b.op; left = cg_lift_expr(b.left, acc); right = cg_lift_expr(b.right, acc) }; type = e.type; line = e.line; col = e.col }
+        checker::TUnary as u => checker::TExpr { kind = checker::TUnary { op = u.op; operand = cg_lift_expr(u.operand, acc) }; type = e.type; line = e.line; col = e.col }
+        checker::TCompare as c => {
+            mut terms: []checker::TCmpTerm = teko::list::empty()
+            mut i = 0
+            loop { if i >= c.rest.len { break }; terms = teko::list::push(terms, checker::TCmpTerm { op = c.rest[i].op; operand = cg_lift_expr(c.rest[i].operand, acc) }); i++ }
+            checker::TExpr { kind = checker::TCompare { first = cg_lift_expr(c.first, acc); rest = terms }; type = e.type; line = e.line; col = e.col }
+        }
+        checker::TCall as cl => {
+            mut args: []checker::TExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= cl.args.len { break }; args = teko::list::push(args, cg_lift_expr(cl.args[i], acc)); i++ }
+            checker::TExpr { kind = checker::TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = e.type; line = e.line; col = e.col }
+        }
+        checker::TIfExpr as f => checker::TExpr { kind = checker::TIfExpr { cond = cg_lift_expr(f.cond, acc); then_blk = cg_lift_block(f.then_blk, acc); has_else = f.has_else; else_blk = cg_lift_block(f.else_blk, acc) }; type = e.type; line = e.line; col = e.col }
+        checker::TMatchExpr as m => {
+            mut arms: []checker::TArm = teko::list::empty()
+            mut i = 0
+            loop { if i >= m.arms.len { break }; let a = m.arms[i]; arms = teko::list::push(arms, checker::TArm { pattern = a.pattern; has_when = a.has_when; guard = if a.has_when { cg_lift_expr(a.guard, acc) } else { a.guard }; body = cg_lift_block(a.body, acc) }); i++ }
+            checker::TExpr { kind = checker::TMatchExpr { subject = cg_lift_expr(m.subject, acc); arms = arms }; type = e.type; line = e.line; col = e.col }
+        }
+        checker::TCast as ct => checker::TExpr { kind = checker::TCast { expr = cg_lift_expr(ct.expr, acc) }; type = e.type; line = e.line; col = e.col }
+        checker::TFieldAccess as fa => checker::TExpr { kind = checker::TFieldAccess { receiver = cg_lift_expr(fa.receiver, acc); field = fa.field }; type = e.type; line = e.line; col = e.col }
+        checker::TStructInit as si => {
+            mut vals: []checker::TExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= si.field_vals.len { break }; vals = teko::list::push(vals, cg_lift_expr(si.field_vals[i], acc)); i++ }
+            checker::TExpr { kind = checker::TStructInit { field_names = si.field_names; field_vals = vals }; type = e.type; line = e.line; col = e.col }
+        }
+        checker::TIndex as ix => checker::TExpr { kind = checker::TIndex { receiver = cg_lift_expr(ix.receiver, acc); index = cg_lift_expr(ix.index, acc) }; type = e.type; line = e.line; col = e.col }
+        checker::TInterp as in => {
+            mut holes: []checker::TExpr = teko::list::empty()
+            mut specs: []checker::TFSpec = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= in.holes.len { break }
+                holes = teko::list::push(holes, cg_lift_expr(in.holes[i], acc))
+                if i < in.specs.len {
+                    let sp = in.specs[i]
+                    let lifted_sp = match sp.kind {
+                        checker::TFSpecDynamic as fd => {
+                            mut args: []checker::TExpr = teko::list::empty()
+                            mut k = 0
+                            loop { if k >= fd.args.len { break }; args = teko::list::push(args, cg_lift_expr(fd.args[k], acc)); k++ }
+                            checker::TFSpec { kind = checker::TFSpecDynamic { args = args } }
+                        }
+                        _ => sp
+                    }
+                    specs = teko::list::push(specs, lifted_sp)
+                }
+                i++
+            }
+            checker::TExpr { kind = checker::TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = e.type; line = e.line; col = e.col }
+        }
+        checker::TInExpr as ie => {
+            mut elems: []checker::TExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= ie.elems.len { break }; elems = teko::list::push(elems, cg_lift_expr(ie.elems[i], acc)); i++ }
+            checker::TExpr { kind = checker::TInExpr { lhs = cg_lift_expr(ie.lhs, acc); elems = elems }; type = e.type; line = e.line; col = e.col }
+        }
+        checker::TArrayLit as a => {
+            mut elems: []checker::TArrayElem = teko::list::empty()
+            mut i = 0
+            loop { if i >= a.elements.len { break }; elems = teko::list::push(elems, checker::TArrayElem { is_spread = a.elements[i].is_spread; expr = cg_lift_expr(a.elements[i].expr, acc) }); i++ }
+            checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
+        }
+        _ => e   // leaves (TNumber/TVar/TStrLit/TByteLit/TBoolLit/TNullLit/TPathExpr) — no nested lambdas
+    }
+}
+
+// (W10) emit the env struct + lifted function for each CAPTURING lambda. The env struct holds one
+// field per capture (by-copy value, or the `T*` Ref for a by_ref capture). The lifted fn unpacks the
+// env into locals of the SAME names (so the body references captures with no rewrite) then runs the
+// body. ABI = env-first `R(void *envp, params)`. `protos_only` emits just the env typedefs + fn
+// forward declarations (prelude); else the full definitions.
+fn cg_emit_lambda_decls(buf: []byte, prog: CgProg, lams: []checker::TLambda, protos_only: bool) -> []byte | error {
+    mut out = buf
+    mut li = 0
+    loop {
+        if li >= lams.len { break }
+        let lam = lams[li]
+        let ids = teko::u64_to_str(lam.lift_id)
+        // env struct typedef — emitted ONCE, in the protos pass only (re-emitting it in the defs pass
+        // is a typedef redefinition error).
+        if protos_only {
+            out = cb(out, "typedef struct { ")
+            mut ci = 0
+            loop {
+                if ci >= lam.captures.len { break }
+                out = match emit_type(out, prog, lam.captures[ci].type) { []byte as o => o; error as e => return e }
+                out = cb(out, " ")
+                out = cb_ident(out, lam.captures[ci].name)
+                out = cb(out, "; ")
+                ci++
+            }
+            out = cb(out, teko::str::concat("} __tkenv_", ids, ";\n"))
+        }
+        out = match emit_type(out, prog, lam.ret) { []byte as o => o; error as e => return e }
+        out = cb(out, " ")
+        out = cb_fn_name(out, "", lam_fn_name(lam.lift_id))
+        out = cb(out, "(void *envp")
+        mut pi = 0
+        loop {
+            if pi >= lam.params.len { break }
+            out = cb(out, ", ")
+            out = match emit_type(out, prog, lam.params[pi].type) { []byte as o => o; error as e => return e }
+            out = cb(out, " ")
+            out = cb_ident(out, lam.params[pi].name)
+            pi++
+        }
+        out = cb(out, ")")
+        if protos_only {
+            out = cb(out, ";\n")
+        } else {
+            out = cb(out, " {\n")
+            out = cb(out, teko::str::concat("    __tkenv_", ids, " *_e = envp;\n"))
+            mut ui = 0
+            loop {
+                if ui >= lam.captures.len { break }
+                out = cb(out, "    ")
+                out = match emit_type(out, prog, lam.captures[ui].type) { []byte as o => o; error as e => return e }
+                out = cb(out, " ")
+                out = cb_ident(out, lam.captures[ui].name)
+                out = cb(out, " = _e->")
+                out = cb_ident(out, lam.captures[ui].name)
+                out = cb(out, ";\n")
+                ui++
+            }
+            // the body (reuse emit_block_tail; lifted fns route allocations to root — no frame region).
+            out = match emit_block_tail(out, lam.body, false, prog, lam.ret, "    ", "", teko::list::empty(), lam.body, dctx_empty()) { []byte as o => o; error as e => return e }
+            out = cb(out, "}\n")
+        }
+        li++
+    }
+    out
+}
+
+/**
+ * Emit the C symbol name of a vtable dispatch THUNK for one vtable slot, identified by the vtable-
+ * owning class, the contract/base it conforms to, and the method: `tk_vtthunk_<Class>__<Contract>__
+ * <method>` (each `::` mangled to `__`). Keying on the (class, contract) PAIR — not just the
+ * resolved method — is required: a base method inherited unchanged by a subclass reconstructs a
+ * DIFFERENT self-receiver vtable (`tk_vt_<Class>_<Base>`) per owning class, so those thunks must be
+ * distinct C functions. Both the vtable slot (which takes the thunk's address) and the thunk
+ * definition spell the name through this one function, so they always agree.
+ *
+ * @param buf       the output byte buffer to append to
+ * @param cd_name   the vtable-owning class's canonical name
+ * @param idd_name  the contract/base's canonical name (the vtable's second key)
+ * @param method    the method's bare name
+ * @return          the buffer with the thunk symbol name appended
+ * @since #291 (trait/interface vtable dispatch UB fix)
+ */
+fn cb_vtthunk_name(buf: []byte, cd_name: str, idd_name: str, method: str) -> []byte {
+    cb_ident(cb(cb_tysym(cb(cb_tysym(cb(buf, "tk_vtthunk_"), cd_name), "__"), idd_name), "__"), method)
+}
+
+/**
+ * Emit ONE vtable dispatch thunk DEFINITION: a well-typed wrapper whose genuine C signature is
+ * `R tk_vtthunk_<Class>__<Contract>__<method>(void *self, params…)`, whose body forwards to the
+ * concrete monomorphized method after RECONSTRUCTING the method's real receiver from the raw
+ * object pointer `self`. Storing this thunk's address in a vtable slot makes the dynamic dispatch's
+ * `R (*)(void *, params…)` cast CORRECT BY CONSTRUCTION — the thunk truly has that signature — so
+ * the C23 6.3.2.3p8 undefined behavior of calling the concrete method through a `void *`-first
+ * pointer type never occurs (it is `-fsanitize=function`/CFI/LTO clean).
+ *
+ * The receiver reconstruction is TYPE-DIRECTED, because a monomorphized method takes one of two
+ * receiver ABIs:
+ *   - a LEAF/own class method takes a raw pointer `tk_t_<Class> *` — the thunk casts `(tk_t_<C> *)self`;
+ *   - a POLYMORPHIC-BASE method takes the base fat pointer `tk_base_<Base>` (a `{data, vtable}`
+ *     struct by value) — the thunk rebuilds it as `(tk_base_<B>){ .data = self, .vtable =
+ *     tk_vt_<Class>_<B> }`, restoring the object's own (class, base) self-dispatch vtable (the old
+ *     direct call passed only the data word, dropping the vtable — a latent self-dispatch bug this
+ *     thunk additionally repairs).
+ *
+ * The caller DEDUPS by the `cb_vtthunk_name` symbol (a base method inherited across subclasses
+ * yields distinct thunks; identical (class, contract) slots reuse one): guard with `cg_str_in`.
+ *
+ * @param buf       the output byte buffer to append to
+ * @param prog      the whole typed program (resolves the concrete method's real signature)
+ * @param cd_name   the vtable-owning class's canonical name (rides the thunk symbol + self vtable)
+ * @param idd_name  the contract/base's canonical name (rides the thunk symbol)
+ * @param mns       the concrete method's mangled namespace (from `cg_find_method_ns`)
+ * @param method    the method's bare name
+ * @return          the buffer with the thunk definition appended
+ * @throws          when the concrete method cannot be found (an internal codegen inconsistency)
+ * @since #291 (trait/interface vtable dispatch UB fix)
+ */
+fn cg_emit_vtthunk_def(buf: []byte, prog: CgProg, cd_name: str, idd_name: str, mns: str, method: str) -> []byte | error {
+    let f = match cg_find_function(prog, mns, method) { checker::TFunction as tf => tf; error => return error { message = "codegen: vtable thunk cannot resolve its concrete method (internal)" } }
+    if f.params.len == 0 { return error { message = "codegen: vtable thunk method has no receiver parameter (internal)" } }
+    mut out = match emit_type(buf, prog, f.return_type) { []byte as o => o; error as err => return err }
+    out = cb_vtthunk_name(cb(out, " "), cd_name, idd_name, method)
+    out = cb(out, "(void *self")
+    mut pi: u64 = 1
+    loop {
+        if pi >= f.params.len { break }
+        out = cb(out, ", ")
+        out = match emit_type_expr(out, prog, f.params[pi].type_ann, f.namespace) { []byte as o => o; error as err => return err }
+        out = cb(out, " ")
+        out = cb_ident(out, f.params[pi].name)
+        pi++
+    }
+    let returns_void = match f.return_type { checker::Void => true; _ => false }
+    out = cb(out, ") { ")
+    out = cb(out, if returns_void { "" } else { "return " })
+    out = cb_fn_name(out, mns, method)
+    out = cb(out, "(")
+    out = match cg_emit_vtthunk_receiver(out, prog, cd_name, f.params[0].type_ann, f.namespace) { []byte as o => o; error as err => return err }
+    mut ai: u64 = 1
+    loop {
+        if ai >= f.params.len { break }
+        out = cb(out, ", ")
+        out = cb_ident(out, f.params[ai].name)
+        ai++
+    }
+    cb(out, "); }\n")
+}

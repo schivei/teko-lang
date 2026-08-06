@@ -1,0 +1,273 @@
+/** teko::codegen functions (split 48/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * emit_test_main — the NATIVE TEST GATE main (#265): run each `#test` in `prog.items` order under the
+ * runtime's capture, then close with the run's summary and a status derived from the tally.
+ *
+ * IT NO LONGER ENDS IN A BLIND `return 0`, and that is the point of the capture (owner ruling
+ * 2026-07-30, §14). A failing test used to end the PROCESS at the first failure, so the status was
+ * whatever `abort` left and every later test was never reported; now the harness always reaches the
+ * end and the status is a fact it counted: `tk_test_any_failed() ? 1 : 0`.
+ *
+ * Under `TestCov` the run is bracketed with the cov reset/on calls and each test wrapped in
+ * `tk_cov_enter(idx)`/`tk_cov_leave`, then the sinks are dumped to a `.tkcov` for the parent to merge
+ * — a dump that is now ALWAYS reached, where before a single panicking test lost the whole file.
+ * Under `TestPlain` NO `tk_cov_*` is emitted (zero-cost off).
+ *
+ * @param buf   the output byte buffer to append the emitted C to
+ * @param prog  the checked program whose `#test` items the harness runs
+ * @param mode  the code-generation profile selecting the coverage brackets
+ * @return      the buffer with the gate `main` appended
+ * @throws      when the analyze profile's own harness fails to emit
+ */
+fn emit_test_main(buf: []byte, prog: CgProg, mode: CgMode) -> []byte | error {
+    if mode == CgMode::TestAnalyze { return emit_test_main_analyze(buf, prog) }
+    mut b = buf
+    let cov = mode == CgMode::TestCov
+    b = cb(b, "int main(int argc, char **argv) {\n")
+    b = cb(b, "    tk_set_args(argc, argv);\n")
+    if cov {
+        b = cb(b, "    tk_cov_reset();\n")
+        b = cb(b, "    tk_cov_branch_reset(); tk_cov_branches_on(true);\n")
+        b = cb(b, "    tk_cov_line_reset(); tk_cov_lines_on(true);\n")
+    }
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if f.is_test { b = emit_test_call(b, f, i, cov) }
+            }
+            _ => { }
+        }
+        i++
+    }
+    if cov {
+        b = cb(b, "    tk_cov_branches_on(false); tk_cov_lines_on(false);\n")
+        b = cb(b, "    { const char *dp = getenv(\"TEKO_TKCOV\"); if (dp) tk_cov_dump(dp); }\n")
+    }
+    b = emit_test_main_close(b)
+    b = cb(b, "}\n")
+    b
+}
+
+/**
+ * emit_test_main_analyze — the per-test ISOLATION harness main (`teko test . --analyzer`, 0.3.0.29).
+ *
+ * Turns line/branch sinks on once, then for EACH `#test` (via `emit_test_call_analyze`) resets all
+ * three sinks, runs exactly that one test under `tk_cov_enter(idx)`/`tk_cov_leave`, and dumps THAT
+ * test's raw id-set to `$TEKO_ANALYZE_DIR/<idx>.tkcov`. One compile + one run therefore yields N
+ * disjoint per-test id-sets, which the build driver reads back to classify STALE/REDUNDANT/LIVE —
+ * without the per-test recompile the aggregate `TestCov` sink forces on `--per-test-cov`. There is
+ * NO end-of-run aggregate dump: each test already flushed its own file.
+ *
+ * @param buf   the output byte buffer to append the emitted C to
+ * @param prog  the checked program whose `#test` items form the harness body
+ * @return      the buffer with the analyze-mode `main()` appended
+ * @since 0.3.0.29
+ */
+fn emit_test_main_analyze(buf: []byte, prog: CgProg) -> []byte | error {
+    mut b = cb(buf, "extern int snprintf(char *, size_t, const char *, ...);\n")
+    b = cb(b, "int main(int argc, char **argv) {\n")
+    b = cb(b, "    tk_set_args(argc, argv);\n")
+    b = cb(b, "    tk_cov_branches_on(true);\n")
+    b = cb(b, "    tk_cov_lines_on(true);\n")
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if f.is_test { b = emit_test_call_analyze(b, f, i) }
+            }
+            _ => { }
+        }
+        i++
+    }
+    b = emit_test_main_close(b)
+    b = cb(b, "}\n")
+    b
+}
+
+/**
+ * emit_test_main_close — the last two lines of EVERY test harness: the run's summary, then the
+ * status the tally earned.
+ *
+ * IT IS ONE FUNCTION BECAUSE THE ANALYZE HARNESS ALREADY DRIFTED ONCE, and the drift was silent.
+ * The capture (§14) makes a failing `#test` return instead of aborting, so a harness that still
+ * closed on a blind `return 0` reported a suite with failures as SUCCESS — and `run_analyzer`
+ * (`project.tks`) reads exactly that status (`if arc != 0 { return arc }`). The plain gate had been
+ * taught to count; the analyze gate had not, and nothing would have said so. Sharing the close is
+ * what makes "which harness reports the tally" un-askable.
+ *
+ * ALSO CLOSES THIS SHARD'S JOURNAL SEGMENT (journal wiring, 0.3.1): `note_test_end` runs ONCE here,
+ * never per test, so `fold` sees a clean `end` for a shard that reached this line and can still
+ * synthesise `incomplete` for one that did not (died mid-suite) — the crash-survival property the
+ * journal exists for.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @return     the buffer with the summary call, the journal close, and the tally-derived `return`
+ * @since 0.3.1.0
+ */
+fn emit_test_main_close(buf: []byte) -> []byte {
+    mut b = cb(buf, "    tk_test_summary();\n    ")
+    b = cb_fn_name(b, "teko::journal", "note_test_end")
+    b = cb(b, "();\n")
+    cb(b, "    return tk_test_any_failed() ? 1 : 0;\n")
+}
+
+/**
+ * cb_journal_tkstr_lit — the `(tk_str){ (const tk_byte *)"<escaped>", <len>` compound-literal text
+ * every journal hook call below embeds as its `label` argument — everything BETWEEN the call's own
+ * opening paren and the literal's OWN closing `}` (the caller supplies both parens), factored out of
+ * `emit_test_channel_open`'s equivalent so the two never drift apart on how a label is quoted.
+ *
+ * @param buf    the output byte buffer to append the emitted C to
+ * @param label  the string to embed as a `tk_str` literal
+ * @return       the buffer with the literal appended, NOT YET closed (no trailing ` }`)
+ * @since 0.3.1
+ */
+fn cb_journal_tkstr_lit(buf: []byte, label: str) -> []byte {
+    mut b = cb(buf, "(tk_str){ (const tk_byte *)\"")
+    b = cb_cstr_escaped(b, label)
+    b = cb(b, "\", ")
+    cb_u64_digits(b, label.len)
+}
+
+/**
+ * cb_journal_call1 — emit a call to a `pub fn` in `teko::journal` taking exactly one `str` argument:
+ * `<mangled>((tk_str){ ... });\n`. `cb_fn_name` mangles the SAME way a call to any user function
+ * does (`teko::journal`'s own functions ARE ordinary user functions, compiled through this exact
+ * corpus like any other), so the symbol this builds is guaranteed to match the one the journal
+ * module itself is compiled under.
+ *
+ * @param buf    the output byte buffer to append the emitted C to
+ * @param name   the `teko::journal` function's bare name
+ * @param label  the string argument (a test/row label)
+ * @return       the buffer with the call appended
+ * @since 0.3.1
+ */
+fn cb_journal_call1(buf: []byte, name: str, label: str) -> []byte {
+    let b = cb_journal_tkstr_lit(cb(cb_fn_name(buf, "teko::journal", name), "("), label)
+    cb(b, " });\n")
+}
+
+/**
+ * cb_journal_call_exited — emit `teko::journal::note_test_exited((tk_str){ ... }, <code-expr>);\n`,
+ * where `code_expr` is a C expression this function does NOT evaluate — the local
+ * `tk_test_outcome`'s own `.code` field, read at runtime by the emitted call site, never a value
+ * this codegen pass could know at compile time.
+ *
+ * @param buf        the output byte buffer to append the emitted C to
+ * @param label      the string argument (a test's label)
+ * @param code_expr  the C expression naming the exit code (`"teko_journal_rv.code"`)
+ * @return           the buffer with the call appended
+ * @since 0.3.1
+ */
+fn cb_journal_call_exited(buf: []byte, label: str, code_expr: str) -> []byte {
+    let b = cb_journal_tkstr_lit(cb(cb_fn_name(buf, "teko::journal", "note_test_exited"), "("), label)
+    cb(b, teko::str::concat(" }, ", code_expr, ");\n"))
+}
+
+/**
+ * emit_test_call — one native-gate `#test` invocation: the shard filter, the arena checkpoint, this
+ * test's own out/err channel, the optional coverage brackets, and the captured call that reports it.
+ *
+ * The label is `namespace::name` (or bare `name`). Under `cov` the body's lines/branches are
+ * attributed to this test via `tk_cov_enter(idx)`/`tk_cov_leave`.
+ *
+ * (#469) Each invocation is wrapped in a `tk_arena_push()` / `tk_arena_pop()` checkpoint — the port
+ * of the #109 test-gate memory bound to native — so the whole per-test span (the channel, the test's
+ * transient allocations) is bulk-freed after each test instead of accumulating in the never-dropped
+ * root region across the whole run. The coverage sinks (`tk_cov_*`) are libc-heap, so the marks
+ * recorded inside the span survive the pop, and the cov brackets nest strictly inside the arena ones
+ * (arena_push … cov_enter … body … cov_leave … arena_pop).
+ *
+ * THE POP IS NOW ALWAYS REACHED (§14): before the capture, a test that panicked died between the push
+ * and the pop, so the checkpoint this function exists to take was the one case it never completed.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @param f    the `#test` function being invoked (its namespace + name form the label and symbol)
+ * @param idx  the `prog.items` coverage id passed to `tk_cov_enter` under `cov`
+ * @param cov  whether `CgMode::TestCov` is active (emit the `tk_cov_enter`/`tk_cov_leave` brackets)
+ * @return     the buffer with this test's invocation appended
+ */
+fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool) -> []byte {
+    mut b = cb(buf, "    if (tk_test_shard_take()) {\n")
+    b = cb(b, "    tk_arena_push();\n")
+    b = emit_test_channel_open(b, f)
+    if cov { b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n") }
+    b = emit_test_captured_call(b, f)
+    if cov { b = cb(b, "    tk_cov_leave();\n") }
+    b = cb(b, "    tk_arena_pop();\n")
+    b = cb(b, "    }\n")
+    b
+}
+
+/**
+ * emit_test_captured_call — the ONE invocation of a `#test` body, run under the runtime's capture and
+ * reported instead of merely called (owner ruling 2026-07-30, §14).
+ *
+ * WHAT REPLACED WHAT, and why it USED TO be one line. The harness used to call the body and then
+ * close the channel with `tk_test_end()`, so a body that panicked or called `exit` ENDED THE PROCESS:
+ * every later test went unreported, the tally had to be reconstructed from the wreckage, the
+ * `.tkcov` was never dumped and the arena checkpoint never rewound. `tk_test_run` returns instead —
+ * the setjmp lives entirely inside the runtime — and `tk_test_report` writes the verdict this test
+ * earned (`ok`, `FAILED`, or `FAILED (exit n)`) and counts it.
+ *
+ * NOW ALSO NOTES THE VERDICT TO THE JOURNAL (journal wiring, 0.3.1): the outcome is captured in a
+ * LOCAL (`tk_test_outcome` is the same struct `tk_test_report` already takes by value, so this costs
+ * nothing new to compute) and inspected ONCE to call the matching `teko::journal::note_test_*` hook
+ * before handing the SAME value to `tk_test_report`, unchanged. Wrapped in its own C block (`{ … }`)
+ * so the local's name cannot collide with a neighbouring test's block inside the same
+ * `if (tk_test_shard_take())` body.
+ *
+ * THE ONLY THING THIS ASKS OF A CODE GENERATOR IS THE ADDRESS OF A TOP-LEVEL FUNCTION. A `#test` is
+ * emitted as `void <symbol>(void)`, so `&<symbol>` is exactly the `void (*)(void)` the runtime takes:
+ * no cast, no thunk, no closure pair.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @param f    the `#test` whose namespace + name form the mangled symbol
+ * @return     the buffer with the captured invocation appended
+ */
+fn emit_test_captured_call(buf: []byte, f: checker::TFunction) -> []byte {
+    let label = test_label_of(f)
+    mut b = cb(buf, "    { tk_test_outcome teko_journal_rv = tk_test_run(&")
+    b = cb_fn_name(b, f.namespace, f.name)
+    b = cb(b, ");\n    if (teko_journal_rv.how == TK_TEST_OK) { ")
+    b = cb_journal_call1(b, "note_test_ok", label)
+    b = cb(b, "    } else if (teko_journal_rv.how == TK_TEST_EXITED) { ")
+    b = cb_journal_call_exited(b, label, "teko_journal_rv.code")
+    b = cb(b, "    } else { ")
+    b = cb_journal_call1(b, "note_test_panicked", label)
+    b = cb(b, "    }\n    tk_test_report(teko_journal_rv);\n    }\n")
+    b
+}
+
+/**
+ * emit_test_channel_open — the `tk_test_begin("<label>")` call that gives ONE test its own out/err
+ * channel, replacing the old `tk_print("test <label> ... ")` + `tk_flush_out()` pair.
+ *
+ * WHY THE VERDICT LINE MOVED TO THE END (owner ruling: a test in process gets its own channel). The
+ * old harness printed the label BEFORE the body and `ok` AFTER it, on the shared stream — so a test
+ * that printed anything of its own split its own verdict line in two and pushed `ok` onto the next
+ * line. Measured on this tree, and it made a suite count anchored on `... ok` wrong. Now the label is
+ * only REMEMBERED here; `tk_test_end` (or the panic path, for a failure) writes the whole verdict
+ * line at once and then this test's captured bytes under it. The flush the old pair needed for
+ * crash-attribution moved into `tk_chan_verdict_line`, which flushes every verdict line.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @param f    the `#test` whose namespace + name form the label
+ * @return     the buffer with the channel-open call appended
+ */
+fn emit_test_channel_open(buf: []byte, f: checker::TFunction) -> []byte {
+    let label = test_label_of(f)
+    mut b = cb(buf, "    tk_test_begin((tk_str){ (const tk_byte *)\"")
+    b = cb_cstr_escaped(b, label)
+    b = cb(b, "\", ")
+    b = cb_u64_digits(b, label.len)
+    b = cb(b, " });\n")
+    cb_journal_call1(b, "note_test_begin", label)
+}

@@ -1,0 +1,91 @@
+/** teko::codegen constants (split 1/1 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * F64_EXPONENT_SHIFT — the bit position of the IEEE-754 binary64 biased exponent field.
+ */
+const F64_EXPONENT_SHIFT: u64 = 52 to u64
+
+/**
+ * F64_EXPONENT_MASK — the IEEE-754 binary64 biased exponent field, once shifted down: all-ones
+ * denotes a non-finite value (infinity when the significand is zero, NaN otherwise).
+ */
+const F64_EXPONENT_MASK: u64 = 2047 to u64
+
+/**
+ * F64_SIGNIFICAND_MASK — the IEEE-754 binary64 significand field, the 52 low bits.
+ */
+const F64_SIGNIFICAND_MASK: u64 = 4503599627370495 to u64
+
+/**
+ * F64_SIGN_SHIFT — the bit position of the IEEE-754 binary64 sign bit.
+ */
+const F64_SIGN_SHIFT: u64 = 63 to u64
+
+/**
+ * The prefix EVERY LINKER SYMBOL that user code declares is emitted under (owner ruling
+ * 2026-07-27): user code is `teko_*`, the runtime's builtins are `tk_*`, and the two families are
+ * therefore disjoint by construction — no user function, in any namespace and under any name, can
+ * be spelled the same as a runtime symbol. `src/lir/lower.tks` carries the identical constant for
+ * the native backend, and `cgt_mangle_parity_c_and_native` proves the two agree byte for byte.
+ *
+ * Two surfaces deliberately do NOT carry it:
+ *   * an `extern fn` — it exists to name the LITERAL foreign symbol (`getpid`, `aligned_alloc`), so
+ *     both backends resolve the extern table BEFORE reaching a mangler;
+ *   * the reverse-FFI `abi = "c"` export — its C symbol is a published contract with the consuming
+ *     C program (`cg_c_export_symbol`), already project-root-prefixed by construction;
+ *   * `main`, the C entry point, which is emitted literally.
+ * Generated TYPE names (`tk_t_`, `tk_opt_`, `tk_slice_`, …) are out of scope too: a C typedef has no
+ * linkage, so a clash there is a `cc` error rather than a silent substitution.
+ */
+const TEKO_USER_PREFIX: str = "teko_"
+
+/**
+ * CG_TABLE_MIN_CAP — the smallest bucket count `cg_table_cap` ever hands back, so a program with a
+ * handful of declarations still probes a real (never zero-sized) open-addressed table and the
+ * `cap - 1` mask is always a valid all-ones word.
+ *
+ * @since cargo/20-codegen-perf
+ */
+const CG_TABLE_MIN_CAP: u64 = 16
+
+/**
+ * CG_TABLE_LOAD_NUMERATOR — the entry-count multiplier that fixes the table's maximum load factor
+ * (capacity >= NUMERATOR x entries, rounded up to a power of two). At 2 the table is at most half
+ * full, which bounds linear probing to a small constant AND guarantees a free bucket exists, so
+ * `cg_table_get`'s probe walk always terminates on an empty slot rather than wrapping forever.
+ *
+ * @since cargo/20-codegen-perf
+ */
+const CG_TABLE_LOAD_NUMERATOR: u64 = 2
+
+/**
+ * CG_MAIN_RETURN_OPEN — the C text that OPENS the virtual-main `return` carrying a process exit
+ * code (the C route's own exit-code door). It wraps the historical `(int)` cast in the runtime
+ * normalizer `tk_exit_status` (`TK_EXIT_STATUS_MASK`, `src/runtime/teko_rt.h`), so a `main` that
+ * returns 20203 leaves the process with 235 on EVERY platform instead of 235 on POSIX and 20203
+ * on Windows (owner ruling 2026-07-30). The libc `main`-to-`exit` handoff is the reason the mask
+ * cannot live in `tk_exit` alone: a `return` never calls it.
+ *
+ * @since cargo/0.3.1-saida-equalizada
+ */
+const CG_MAIN_RETURN_OPEN: str = "return tk_exit_status((int)("
+
+/**
+ * CG_MAIN_RETURN_CLOSE — the C text that CLOSES `CG_MAIN_RETURN_OPEN`: one paren for the `(int)`
+ * cast's operand group, one for the `tk_exit_status` call, then the statement terminator. Paired
+ * with the opener in a named const so the two never drift apart across the emission sites that
+ * use them (`emit_exprstmt_tail`'s W5a tail value and `emit_return`'s explicit `return n`).
+ *
+ * @since cargo/0.3.1-saida-equalizada
+ */
+const CG_MAIN_RETURN_CLOSE: str = "));\n"
+
+/**
+ * SUBCLASS_CHAIN_DEPTH_LIMIT — defensive cap on the subclass-chain hops `cg_subclass_reaches`
+ * will walk before giving up. 64 is far deeper than any real inheritance chain; the bound only
+ * exists so a cyclic/corrupt base chain terminates instead of recursing forever.
+ */
+const SUBCLASS_CHAIN_DEPTH_LIMIT: i64 = 64

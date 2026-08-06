@@ -1,0 +1,261 @@
+/** teko::codegen functions (split 33/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * emit_index_store_body — the in-bounds element write of `emit_index_assign`: `<slot> op= <value>`,
+ * where `<slot>` is `<wstmp>.ptr[<witmp>]` (both already single-eval temps, so re-emitting the slot
+ * for a shift-assign is free) and `<value>` is wrapped into the element type via `emit_as_r`.
+ *
+ * @param buf       the output buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing function's return type (threaded to `emit_as_r`)
+ * @param a         the typed index assignment (for its op + value)
+ * @param wstmp     the captured-slice temp name
+ * @param witmp     the captured-index temp name
+ * @param elem      the slice element type (the store's declared `bound`)
+ * @param escaping  the frame's escaping-name set
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function body
+ * @param dctx      the defer context
+ * @return          the buffer with the element store appended, or a codegen error
+ * @throws          when a shift-assign targets a non-integer element, or a child expression fails to emit
+ */
+fn emit_index_store_body(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, wstmp: str, witmp: str, elem: checker::Type, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {
+        let prim = match elem { checker::Prim as p => p; _ => return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
+        if !cg_prim_is_int(prim.kind) { return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
+        let tag = match prim_int_tag(prim.kind) { str as t => t; error => return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
+        let fn_prefix = if a.op == lexer::TokenKind::ShlEq { "tk_shl_" } else { "tk_shr_" }
+        mut so = emit_index_slot(buf, wstmp, witmp)
+        so = cb(so, " = ")
+        so = cb(so, fn_prefix)
+        so = cb(so, tag)
+        so = cb(so, "(")
+        so = emit_index_slot(so, wstmp, witmp)
+        so = cb(so, ", ")
+        so = match emit_expr_ctx(so, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        return cb(so, ");")
+    }
+    let op = match assignop_c(a.op) { str as s => s; error as err => return err }
+    mut out = emit_index_slot(buf, wstmp, witmp)
+    out = cb(out, " ")
+    out = cb(out, op)
+    out = cb(out, " ")
+    out = match emit_as_r(out, prog, ret_type, elem, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ";")
+}
+
+/**
+ * emit_index_slot — the C lvalue text `<wstmp>.ptr[<witmp>]` for a captured slice/index temp pair.
+ *
+ * @param buf    the output buffer
+ * @param wstmp  the captured-slice temp name
+ * @param witmp  the captured-index temp name
+ * @return       the buffer with the element lvalue appended
+ */
+fn emit_index_slot(buf: []byte, wstmp: str, witmp: str) -> []byte {
+    mut out = cb(buf, wstmp)
+    out = cb(out, ".ptr[")
+    out = cb(out, witmp)
+    cb(out, "]")
+}
+
+fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let is_index = match a.kind { parser::AssignKind::Index => true; _ => false }
+    if is_index { return emit_index_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body, dctx) }
+    let op = match assignop_c(a.op) { str as s => s; error as err => return err }
+    mut out = cb(buf, indent)
+    // (S2 Level-1) SELF-APPEND to a non-escaping slice → route the grown buffer to the frame region
+    // `_tkfr` (bulk-freed at every fn-exit edge). Emit the push directly with the frame threaded, so the
+    // whole buffer history (geometric doublings + in-place tail) dies with the frame. Guarded by
+    // frame.len (the region exists only when fn_body_has_frame_local opened it) and the SHARED predicate
+    // checker::assign_routes_to_frame, which mirrors the escape carve-out so the two never disagree.
+    // (#148 S2 Level-2) a PROVEN-LINEAR self-append (born from empty(), self-append-only writes,
+    // no capture before the fn-final statement) may FREE the old buffer on every copy-grow —
+    // realloc parity with the hand-written C twin. Takes precedence over Level-1 frame routing
+    // (the free-list is root-only; the proof admits ESCAPING chains too, which Level-1 cannot).
+    if checker::assign_frees_old(fn_body, a) {
+        match a.value.kind {
+            checker::TCall as c => {
+                out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+                out = cb(out, " = ")
+                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, "@fo") { []byte as o => o; error as err => return err }
+                return cb(out, ";\n")
+            }
+            _ => { }
+        }
+    }
+    if checker::assign_routes_to_frame(escaping, a) {
+        let accum_region = scope_region_of(regions, a.name)
+        let target = if accum_region.len > 0 { accum_region } else { frame }
+        if target.len > 0 {
+            match a.value.kind {
+                checker::TCall as c => {
+                    out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+                    out = cb(out, " = ")
+                    out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, target) { []byte as o => o; error as err => return err }
+                    return cb(out, ";\n")
+                }
+                _ => { }
+            }
+        }
+    }
+    if cg_self_append_escapes(escaping, dctx, a) {
+        match a.value.kind {
+            checker::TCall as c => {
+                out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+                out = cb(out, " = ")
+                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, dctx.rr) { []byte as o => o; error as err => return err }
+                return cb(out, ";\n")
+            }
+            _ => { }
+        }
+    }
+    // #61 — `<<=`/`>>=` must NOT emit the raw C compound operator: an out-of-range shift count
+    // is C UB natively, while the interpreter (#49, compound_apply) computes a DEFINED width-masked
+    // result. Rewrite as `lvalue = tk_shl_<w>(lvalue, rhs)` / tk_shr_<w>, routing through the
+    // SAME teko_rt.h helpers the binary `<<`/`>>` operator uses (emit_shift). SAFE to evaluate
+    // the lvalue twice: the assign-statement grammar (parse_stmt) admits only two lvalue shapes
+    // — a bare identifier (`a.name`), or (when `a.deref`) a Ref<T> handle's `(*name)` pointer
+    // dereference — never a struct field path, an array index, or a call. Both forms are pure,
+    // side-effect-free symbol lookups, so re-emitting the lvalue text a second time is cost-free.
+    if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {
+        let prim = match a.bound {
+            checker::Prim as p => p
+            _ => return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+        }
+        if !cg_prim_is_int(prim.kind) {
+            return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+        }
+        let tag = match prim_int_tag(prim.kind) {
+            str as t => t
+            error => return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+        }
+        let fn_prefix = if a.op == lexer::TokenKind::ShlEq { "tk_shl_" } else { "tk_shr_" }
+        out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+        out = cb(out, " = ")
+        out = cb(out, fn_prefix)
+        out = cb(out, tag)
+        out = cb(out, "(")
+        out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+        out = cb(out, ", ")
+        out = match emit_expr_ctx(out, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        out = cb(out, ")")
+        return cb(out, ";\n")
+    }
+    if a.op == lexer::TokenKind::SlashEq || a.op == lexer::TokenKind::PercentEq {
+        return emit_div_mod_assign(out, prog, a, escaping, regions, fn_body, dctx)
+    }
+    // (MEM-1b-ii) `r.value op= v` — write THROUGH the reference: the handle `r` IS the pointer, so the
+    // lvalue is `(*r)`. (`Ref<T>` lowers to a bare `<T> *`; deref-assign is a plain C pointer store.)
+    // (#88) a FIELD target emits the typed LHS field-access (`(*recv).f` for a class — an in-place write
+    // the aliased pointer observes; `recv.f` for a struct). emit_assign_lvalue selects the shape.
+    out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, op)
+    out = cb(out, " ")
+    // Wrap the value into the target's declared type (`bound`) — a case → its variant, a fitting
+    // literal — exactly like a binding (emit_as_r threads ret_type for a diverging value-form arm).
+    // Without this, a case value (e.g. `node = NamedType { … }`, node: TypeExpr, a variant)
+    // emitted the case's fields under the variant's C type → a field-designator error.
+    out = match emit_as_r(out, prog, ret_type, a.bound, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ";\n")
+}
+
+/**
+ * emit_return — a `TReturn` statement, lowered to C. `in_main` selects the return shape, which is
+ * the whole reason this function takes the flag: inside the virtual-main a `return n` is an EARLY
+ * PROCESS EXIT, so it emits `CG_MAIN_RETURN_OPEN`/`CG_MAIN_RETURN_CLOSE` (the `tk_exit_status`-
+ * normalized exit code — one code on every platform, owner ruling 2026-07-30) and a bare `return`
+ * emits `return 0;`; inside an ordinary function it is the plain `return [v];`, with a case value
+ * wrapped into its variant return slot (W5b). Every exit edge first fires the in-scope defers
+ * (LIFO, innermost block first), then runs the class destruction hook, then drops the block
+ * regions innermost-first and finally the frame region.
+ *
+ * @param buf        the output byte buffer to append the emitted C to
+ * @param prog       the whole typed program
+ * @param r          the typed `return` node (whether it carries a value, and the value)
+ * @param in_main    whether this `return` sits in the virtual-main (an exit code) or in a function
+ * @param ret_type   the enclosing function's declared return type (the variant return slot)
+ * @param indent     the current indentation string
+ * @param frame      the enclosing region-frame expression, or `""` when the function opened none
+ * @param escaping   the names whose values escape the current frame
+ * @param regions    the active block-region stack, innermost last
+ * @param fn_body    the enclosing function's body, for the block-local escape query
+ * @param dctx       the defer context whose pending defers this edge must fire
+ * @return           the buffer with the `return` (and its cleanup prologue) appended
+ * @throws           when a defer body, the class-cleanup text or the returned expression fails to
+ *                   emit
+ * @see              CG_MAIN_RETURN_OPEN
+ */
+fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    // (W9.3) A `return` leaves EVERY enclosing scope: fire ALL in-scope defers (base 0) LIFO — one
+    // sweep, innermost-block-first across all nesting — BEFORE dropping any region, so a defer body can
+    // still read any block-local. THEN drop all block regions (innermost-first), THEN the frame region.
+    mut out = match emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    // S2 — a `return` leaves EVERY enclosing loop, so drop all active block regions (innermost-first),
+    // THEN the frame region. The return value is escaping ⇒ in root ⇒ safe to read post-drop.
+    out = cg_drop_all_regions(out, indent, regions)
+    // (W10b.CLASS increment 4) DESTRUCTION HOOK — an explicit `return` leaves every enclosing scope,
+    // same as the frame-region drop below; independent of `frame.len > 0` for the same reason as the
+    // other two edges (emit_exprstmt_tail / emit_function's fall-through).
+    let no_tail = checker::TExpr { kind = checker::TNullLit { }; type = checker::Void { }; line = 0; col = 0 }
+    let cleanup = if r.has_value {
+        match cg_class_cleanup_text(prog, escaping, fn_body, true, r.value) { str as c => c; error as e => return e }
+    } else {
+        match cg_class_cleanup_text(prog, escaping, fn_body, false, no_tail) { str as c => c; error as e => return e }
+    }
+    if cleanup.len > 0 { out = cb(out, indent); out = cb(out, cleanup); out = cb(out, "\n") }
+    out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
+    out = cg_return_frame_exit(out, indent, frame, dctx)
+    out = cb(out, indent)
+    if !r.has_value {
+        if in_main { return cb(out, "return 0;\n") }
+        return cb(out, "return;\n")
+    }
+    let ret_regions: []RegionFrame = teko::list::empty()
+    if in_main {
+        out = cb(out, CG_MAIN_RETURN_OPEN)
+        out = match emit_expr_ctx(out, prog, checker::Void { }, r.value, escaping, ret_regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        return cb(out, CG_MAIN_RETURN_CLOSE)
+    }
+    out = cb(out, "return ")
+    // W5b — wrap a case value into a variant return slot.
+    out = match emit_as_r(out, prog, ret_type, ret_type, r.value, escaping, ret_regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ";\n")
+}
+
+/**
+ * emit_loop — a TLoopStmt. When `init` is EMPTY (infinite / while loop), this emits the bare
+ * `while (1) { … }` unchanged (byte-identical to pre-#517). When `init` is non-empty (range /
+ * 3-part / for-each), the loop is wrapped in a `{ … }` C scope so the run-once preamble bindings
+ * (`i` / `_hi` / `_first` / `_it`) live loop-locally and do NOT leak past the loop, then the
+ * `while (1)` loop is emitted one indent deeper. The loop MECHANISM itself (continue-target,
+ * break-target, region, defers) is emitted by `emit_loop_while` and is UNTOUCHED (#517).
+ *
+ * @param buf the output byte buffer
+ * @param l the typed loop node (label + init + body)
+ * @param in_main whether this loop is emitted inside `main`
+ * @param prog the whole typed program
+ * @param ret_type the enclosing function's return type
+ * @param indent the current indentation string
+ * @param frame the enclosing region-frame expression
+ * @param escaping the names whose values escape the current frame
+ * @param regions the active region-frame stack
+ * @param fn_body the enclosing function's body (for block-local analysis)
+ * @param dctx the defer context
+ * @return the buffer with the loop emitted, or a codegen error
+ */
+fn emit_loop(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    if l.init.len == 0 { return emit_loop_while(buf, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx) }
+    mut out = cb(buf, indent)
+    out = cb(out, "{\n")
+    let inner = cb_indent_deeper(indent)
+    out = match emit_block(out, l.init, in_main, prog, ret_type, inner, escaping, regions, fn_body, dctx, teko::list::empty(), false) { []byte as o => o; error as err => return err }
+    out = match emit_loop_while(out, l, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, indent)
+    out = cb(out, "}\n")
+    out
+}

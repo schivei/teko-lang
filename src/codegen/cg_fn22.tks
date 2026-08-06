@@ -1,0 +1,172 @@
+/** teko::codegen functions (split 22/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+// emit_variant_wrap_str — like emit_variant_wrap but wraps a C-EXPRESSION STRING `cexpr` of
+// resolved type `vtype` (the []U→[]T element-wise slice rebuild wraps each element, a C lvalue,
+// not an AST node). IDENTICAL pass-1-direct / pass-2-transitive structure; where emit_variant_wrap
+// emits the value AST node, this emits the literal string `cexpr`. PRECONDITION: vtype's key is
+// reachable in `expected` (caller guards with cg_var_reaches, otherwise emits the bare element —
+// `T? | error` is illegal here, so reachability is a separate predicate). (C: `emit_variant_wrap_str`.)
+fn emit_variant_wrap_str(buf: []byte, prog: CgProg, expected: checker::Type, vtype: checker::Type, cexpr: str) -> []byte | error {
+    let vkey = match cg_member_key_str(vtype) { str as s => s; error => "" }
+    let n = cg_var_nmem(prog, expected)
+    // pass 1 — DIRECT: vtype's key matches a member of `expected`.
+    mut i = 0
+    loop {
+        if i >= n { break }
+        let mk = match cg_var_mkey(prog, expected, i) { str as s => s; error => "" }
+        if mk == vkey {
+            mut out = match cg_wrap_open(buf, expected, vkey) { []byte as o => o; error as err => return err }
+            out = cb(out, cexpr)
+            return cb(out, " }")
+        }
+        i++
+    }
+    // pass 2 — TRANSITIVE: route through a member variant that reaches vkey.
+    mut j = 0
+    loop {
+        if j >= n { break }
+        let mt = cg_var_mtype(prog, expected, j)
+        if cg_is_variant_type(prog, mt) {
+            if cg_var_reaches(prog, mt, vkey, 16) {
+                let mk = match cg_var_mkey(prog, expected, j) { str as s => s; error => "" }
+                mut out = match cg_wrap_open(buf, expected, mk) { []byte as o => o; error as err => return err }
+                out = match emit_variant_wrap_str(out, prog, mt, vtype, cexpr) { []byte as o => o; error as err => return err }   // recurse into the member variant
+                return cb(out, " }")
+            }
+        }
+        j++
+    }
+    // unreachable given the caller's cg_var_reaches guard.
+    error { message = "codegen: emit_variant_wrap_str on an unreachable case (internal — caller must guard with cg_var_reaches)" }
+}
+
+/**
+ * cg_emit_union_present_str — wrap a present member C-EXPRESSION STRING `cexpr` (of static type
+ * `mem`) into the absence/sum slot `uni`, using the slot's PHYSICAL representation. A niche union
+ * stores the present member BARE (the member itself carries the representation, e.g. `error | null`
+ * ≡ `tk_error`); any other sum embeds the member behind its inline-tag through `emit_variant_wrap_str`.
+ * This is the string-position dual of `emit_as_r`'s present-value wrapping, for FFI result arms
+ * whose value is a runtime C expression rather than a typed `TExpr`.
+ *
+ * @param buf    the output byte buffer
+ * @param prog   the typed program (union representation classification)
+ * @param uni    the target absence slot (a null-union `Variant`)
+ * @param mem    the static type of the present member being wrapped
+ * @param cexpr  the C expression string producing the present member value
+ * @return       the buffer with the representation-correct wrapped value appended
+ * @throws       error when the inline-tag wrap is asked for an unreachable member (via emit_variant_wrap_str)
+ * @since 0.3.1 (null-union C6 — FFI `error | null` result arms)
+ */
+fn cg_emit_union_present_str(buf: []byte, prog: CgProg, uni: checker::Type, mem: checker::Type, cexpr: str) -> []byte | error {
+    let va = match uni { checker::Variant as v => v; _ => return cb(buf, cexpr) }
+    match cg_union_niche_member(prog, va) {
+        checker::Type => return cb(buf, cexpr)
+        null => { }
+    }
+    emit_variant_wrap_str(buf, prog, uni, mem, cexpr)
+}
+
+/**
+ * cg_emit_ffi_ures — emit a fixed-ABI unit-result (`tk_ffi_ures`) bound to `ures_tmp` as the Teko
+ * `error | null` return value, in the return type's physical representation: the `.ok` branch is the
+ * union's `null` (routed through `emit_as_r` so a niche stores its sentinel, a box stores 0, an
+ * inline-tag stores its null wrap), the failure branch wraps the `tk_str` `.err` message via
+ * `tk_error_make` into the union's present `error` member. Replaces the hardcoded `.present`/`.value`
+ * optional shape that only fit the pre-pivot `error?` former.
+ *
+ * @param buf        the output byte buffer
+ * @param prog       the typed program (representation classification + expression lowering)
+ * @param result_ty  the Teko result type (`error | null`)
+ * @param ures_tmp   the C temp name holding the bound `tk_ffi_ures`
+ * @param escaping   the escaping-locals set threaded from the enclosing emit
+ * @param regions    the active region frames
+ * @param fn_body    the enclosing function body (defer/region resolution)
+ * @param dctx       the defer context
+ * @return           the buffer with the `.ok ? <null> : <error>` ternary appended
+ * @throws           error propagated from the null/error arm emission
+ * @since 0.3.1 (null-union C6 — FFI `error | null` result arms)
+ */
+fn cg_emit_ffi_ures(buf: []byte, prog: CgProg, result_ty: checker::Type, ures_tmp: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let nulllit = checker::TExpr { kind = checker::TNullLit { }; type = result_ty; line = 0; col = 0 }
+    mut o = cb(buf, ures_tmp)
+    o = cb(o, ".ok ? ")
+    o = match emit_as_r(o, prog, result_ty, result_ty, nulllit, escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+    o = cb(o, " : ")
+    let errcexpr = teko::str::concat("tk_error_make(", ures_tmp, ".err)")
+    cg_emit_union_present_str(o, prog, result_ty, checker::Error { }, errcexpr)
+}
+
+/**
+ * cg_wrap_elem_str — wraps a C-EXPRESSION STRING `cexpr` (a `[]U` element of static type `vtype`)
+ * into the slice element target `T` (= `expected`), for the `emit_as` slice-covariance rebuild.
+ * Uniform with `emit_as`'s value-position wrapping: `T` OPTIONAL present-wraps
+ * (`(tk_opt_<inner>){ .present = true, .value = <recurse into inner> }`); `T` a CONTRACT
+ * (interface/trait) the element conforms to (W10b.D3) upcasts into the fat pointer
+ * (`.data`/`.vtable`), exactly like `emit_as`'s value-position upcast; `T` a VARIANT the
+ * element's key reaches EXACTLY variant-wraps via `emit_variant_wrap_str` (guarded with
+ * `cg_var_reaches_exact`, not the widened `cg_var_reaches`, since `emit_variant_wrap_str` has no
+ * SUB→BASE widen pass of its own); otherwise `cexpr` is emitted bare. (C: `cg_wrap_elem_str`.)
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param expected  the slice element target type `T`
+ * @param vtype     the source element's static type `U`
+ * @param cexpr     the C-expression string for the element value
+ * @return          `buf` with the wrapped element appended
+ */
+fn cg_wrap_elem_str(buf: []byte, prog: CgProg, expected: checker::Type, vtype: checker::Type, cexpr: str) -> []byte | error {
+    match expected {
+        checker::Named as en => match cg_wrap_elem_str_contract(buf, prog, en, vtype, cexpr) {
+            []byte as o => return o
+            null => { }
+            error as e => return e
+        }
+        _ => { }
+    }
+    let ukey = match cg_member_key_str(vtype) { str as s => s; error => "" }
+    let wrappable = match expected {
+        checker::Variant => ukey != "" && cg_var_reaches_exact(prog, expected, ukey, 16)
+        checker::Named => ukey != "" && cg_var_reaches_exact(prog, expected, ukey, 16)
+        _ => false
+    }
+    if wrappable {
+        return emit_variant_wrap_str(buf, prog, expected, vtype, cexpr)
+    }
+    cb(buf, cexpr)
+}
+
+/**
+ * cg_wrap_elem_str_contract — the CONTRACT branch of `cg_wrap_elem_str` (W10b.D3): when `en` is
+ * an interface/trait and `vtype` is a conforming class, upcasts `cexpr` into `en`'s fat pointer
+ * (`.data`/`.vtable`) — how a homogeneous `[]Circle` value covariant-rebuilds into a `[]Shape`
+ * slot. Returns `null` when `en`/`vtype` do not form a contract-upcast pair, so the caller falls
+ * through to the variant/bare cases.
+ *
+ * @param buf    the output byte buffer
+ * @param prog   the typed program
+ * @param en     the target named type (tested for interface/trait)
+ * @param vtype  the source element's static type
+ * @param cexpr  the C-expression string for the element value
+ * @return       `buf` with the upcast fat pointer appended, or `null` when not a contract upcast
+ */
+fn cg_wrap_elem_str_contract(buf: []byte, prog: CgProg, en: checker::Named, vtype: checker::Type, cexpr: str) -> []byte | null | error {
+    if !(cg_is_interface_named(prog, en.name) || cg_is_trait_named(prog, en.name)) { return null }
+    match vtype {
+        checker::Named as vn => {
+            if !cg_is_class_named(prog, vn.name) { return null }
+            mut o = cb(buf, "(")
+            o = mangle_type_name(o, "", en.name)
+            o = cb(o, "){ .data = (void *)(")
+            o = cb(o, cexpr)
+            o = cb(o, "), .vtable = tk_vt_")
+            o = cb_tysym(o, vn.name)
+            o = cb(o, "_")
+            o = cb_tysym(o, en.name)
+            cb(o, " }")
+        }
+        _ => null
+    }
+}

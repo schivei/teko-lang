@@ -1,0 +1,235 @@
+/** split 6/8 from codegen_test.tkt — mechanical, pure reorg, no logic changes. */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+fn cgt_emit_lit_pattern_str_vs_int() {
+    // int literal pattern: (_s == 42)
+    let int_pat: parser::Pattern = parser::LiteralPattern {
+        value = parser::Expr { kind = parser::Number { value = parser::numint_of_u64(42); is_float = false; fval = 0.0 }; line = 0; col = 0 }
+    }
+    let int_out = match emit_pat_test(cgt_empty(), cgt_prog(), int_pat, "_s", checker::Prim { kind = checker::PrimKind::I64 }) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(int_out, "(_s == "))   // bare C `==` (cb_i64 spells the constant)
+    teko::assert::is_true(teko::str::contains(int_out, "42"))
+    teko::assert::is_false(teko::str::contains(int_out, "tk_str_eq"))
+
+    // str literal pattern: tk_str_eq(_s, (tk_str){ (const tk_byte *)"build", 5 })
+    let str_pat: parser::Pattern = parser::LiteralPattern {
+        value = parser::Expr { kind = parser::StrLit { text = "build" }; line = 0; col = 0 }
+    }
+    let str_out = match emit_pat_test(cgt_empty(), cgt_prog(), str_pat, "_s", checker::Str { }) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(str_out, "tk_str_eq(_s, (tk_str){ (const tk_byte *)\"build\", 5 })"))
+    teko::assert::is_false(teko::str::contains(str_out, "=="))
+}
+
+// ---------------------------------------------------------------------------
+// Group S: cg_expr_diverges (still live — checked directly by emit_expr_stmt's
+// diverging-call value-position handling)
+// ---------------------------------------------------------------------------
+#test
+
+fn cgt_cg_expr_diverges_true_only_for_a_panic_exit_call() {
+    // direct call — non-TCall returns false, TCall to "panic" returns true
+    let non_call_e = cgt_num_i64(0)
+    teko::assert::is_false(cg_expr_diverges(non_call_e))
+    let panic_arg = checker::TExpr {
+        kind = checker::TStrLit { text = "oops" }
+        type = checker::Str { }
+        line = 0; col = 0
+    }
+    let panic_args: []checker::TExpr = teko::list::push(teko::list::empty(), panic_arg)
+    let panic_e = checker::TExpr {
+        kind = checker::TCall { callee = cgt_path1("panic"); args = panic_args; call_ns = ""; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = checker::Void { }
+        line = 0; col = 0
+    }
+    teko::assert::is_true(cg_expr_diverges(panic_e))
+}
+
+// ---------------------------------------------------------------------------
+// Group T: emit_struct_init (error literal path → emit_expr on message field)
+// ---------------------------------------------------------------------------
+#test
+
+fn cgt_emit_struct_init_error() {
+    // emit_struct_init: e.type = Error → emits the message field value directly
+    let msg_e = checker::TExpr {
+        kind = checker::TStrLit { text = "oops" }
+        type = checker::Str { }
+        line = 0; col = 0
+    }
+    let si_names: []str = teko::list::push(teko::list::empty(), "message")
+    let si_vals: []checker::TExpr = teko::list::push(teko::list::empty(), msg_e)
+    let si_e = checker::TExpr {
+        kind = checker::TStructInit { field_names = si_names; field_vals = si_vals }
+        type = checker::Error { }
+        line = 0; col = 0
+    }
+    let si_out = match emit_expr(cgt_empty(), cgt_prog(), si_e) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(si_out.len > 0)
+    teko::assert::is_true(teko::str::contains(si_out, "oops"))
+}
+
+// ---------------------------------------------------------------------------
+// Original invariant tests (kept from initial version)
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a single-`uptr`-field `#must_free` struct TypeDecl named `name` — the Arena-shaped
+ * manual region-handle (#358) the codegen region-free path recognizes structurally.
+ *
+ * @param str name  the type's name
+ * @return parser::TypeDecl  a `#must_free` struct TypeDecl with one `uptr` field named `region`
+ */
+fn cgt_region_handle_decl(name: str) -> parser::TypeDecl {
+    let field = parser::Field { name = "region"; type_ann = cgt_named_te("uptr"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fields: []parser::Field = teko::list::push(teko::list::empty(), field)
+    let body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }
+    parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = true; must_free = true }
+}
+
+/**
+ * An INDEXED emitter program whose sole item is the region-handle TypeDecl `name` — so
+ * `type_table_of` / `is_region_handle_name` resolve it when the emit path probes for the Arena
+ * structure. It hands back the emitter's own `CgProg` (via `cg_prog_of`), not the bare checked
+ * `TProgram`, because the indexed program is what every emit entry point takes since the
+ * emitter's name resolution was indexed.
+ *
+ * @param name  the region-handle type's name
+ * @return      an indexed emitter program carrying exactly that TypeDecl
+ */
+fn cgt_prog_with_region_handle(name: str) -> CgProg {
+    let items: []checker::TItem = teko::list::push(teko::list::empty(), cgt_region_handle_decl(name))
+    cg_prog_of(checker::TProgram { items = items })
+}
+
+/**
+ * Group S (#358): the manual-region codegen builtins. `emit_region_alloc` bump-allocates a `T`
+ * into a `uptr` region and copies the init in (a `ptr<T>` GNU stmt-expr routed through
+ * `tk_region_alloc`); `emit_region_free` bulk-drops a region handle via `tk_region_drop_subtree`
+ * and scrubs its `uptr` field; `region_new` lowers inline to `tk_region_new(tk_region_root())`.
+ */
+#test
+
+fn cgt_region_ops() {
+    let region_var = checker::TExpr {
+        kind = checker::TVar { name = "reg"; is_func = false; func_ns = "" }
+        type = checker::Uptr { }
+        line = 0; col = 0
+    }
+    let alloc_args: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), region_var), cgt_num(42, checker::PrimKind::U64))
+    let alloc_e = checker::TExpr {
+        kind = checker::TCall { callee = cgt_path3("teko", "mem", "region_alloc"); args = alloc_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = checker::Ptr { inner = checker::Prim { kind = checker::PrimKind::U64 } }
+        line = 0; col = 0
+    }
+    let alloc_out = match emit_expr(cgt_empty(), cgt_prog(), alloc_e) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(alloc_out, "tk_region_alloc"))
+    teko::assert::is_true(teko::str::contains(alloc_out, "sizeof(uint64_t)"))
+
+    let new_e = checker::TExpr {
+        kind = checker::TCall { callee = cgt_path3("teko", "mem", "region_new"); args = teko::list::empty(); call_ns = "teko::mem"; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = checker::Uptr { }
+        line = 0; col = 0
+    }
+    let new_out = match emit_expr(cgt_empty(), cgt_prog(), new_e) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(new_out, "tk_region_new(tk_region_root())"))
+
+    let handle_var = checker::TExpr {
+        kind = checker::TVar { name = "a"; is_func = false; func_ns = "" }
+        type = checker::Named { name = "Arena" }
+        line = 0; col = 0
+    }
+    let free_args: []checker::TExpr = teko::list::push(teko::list::empty(), handle_var)
+    let free_e = checker::TExpr {
+        kind = checker::TCall { callee = cgt_path3("teko", "mem", "free"); args = free_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = checker::Void { }
+        line = 0; col = 0
+    }
+    let free_out = match emit_expr(cgt_empty(), cgt_prog_with_region_handle("Arena"), free_e) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(free_out, "tk_region_drop_subtree"))
+    teko::assert::is_true(teko::str::contains(free_out, ".region"))
+}
+
+/**
+ * cgt_class_decl — a minimal `parser::TypeDecl` naming a class of a given `ClassKind`, optionally
+ * extending a bare base, with NO members. It carries exactly the surface the polymorphic-base vtable
+ * gate (`cg_pair_is_base_vtable`) inspects — the class kind (`cg_is_polymorphic_base` /
+ * `cg_class_is_abstract`) and the base chain (`cg_subclass_reaches`) — so a self-vtable-eligibility
+ * test needs no methods, fields, or consts.
+ *
+ * @param name       the class's bare name
+ * @param kind       the class's `ClassKind` (Sealed / Abstract / Virtual)
+ * @param has_base   whether the class extends a base
+ * @param base_name  the extended base's bare name (consulted only when `has_base`)
+ * @return           a member-less class `parser::TypeDecl`
+ */
+fn cgt_class_decl(name: str, kind: parser::ClassKind, has_base: bool, base_name: str) -> parser::TypeDecl {
+    parser::TypeDecl {
+        name = name
+        type_params = teko::list::empty()
+        type_constraints = teko::list::empty()
+        body = parser::ClassBody {
+            kind = kind
+            has_base = has_base
+            base_name = base_name
+            has_base_binding = false
+            base_binding_name = ""
+            implements = teko::list::empty()
+            fields = teko::list::empty()
+            methods = teko::list::empty()
+            consts = teko::list::empty()
+        }
+        vis = parser::Visibility::Pub
+        has_doc = false
+        doc = ""
+        line = 0; col = 0
+        di_kind = parser::DiKind::None
+        has_di_key = false
+        di_key = ""
+        is_unsafe = false
+        must_free = false
+    }
+}
+
+/**
+ * cgt_vtable_pair_gate_excludes_abstract_self — the polymorphic-base vtable gate skips an ABSTRACT
+ * base's own self-pair (its abstract methods stamp to no function, so a self-vtable is unemittable),
+ * while STILL emitting a concrete subclass's `tk_vt_<Sub>_<Base>` AND a directly-instantiable
+ * `virtual` base's own self-vtable (#594, member-const cross-ns abstract-base codegen fix). This is
+ * the regression that member_const_cross_ns_pub_inherit exposed: codegen failed with a phantom
+ * "missing a vtable method's stamped function" on the abstract base's self-pair.
+ */
+#test
+
+fn cgt_vtable_pair_gate_excludes_abstract_self() {
+    let base = cgt_class_decl("Base", parser::ClassKind::Abstract, false, "")
+    let sub = cgt_class_decl("Sub", parser::ClassKind::Sealed, true, "Base")
+    let vbase = cgt_class_decl("VBase", parser::ClassKind::Virtual, false, "")
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, base)
+    items = teko::list::push(items, sub)
+    items = teko::list::push(items, vbase)
+    let prog = cg_prog_of(checker::TProgram { items = items })
+
+    teko::assert::is_true(cg_class_is_abstract(base))
+    teko::assert::is_true(!cg_class_is_abstract(sub))
+    teko::assert::is_true(!cg_class_is_abstract(vbase))
+
+    teko::assert::is_true(!cg_pair_is_base_vtable(prog, base, base))
+    teko::assert::is_true(cg_pair_is_base_vtable(prog, sub, base))
+    teko::assert::is_true(cg_pair_is_base_vtable(prog, vbase, vbase))
+}
+
+/**
+ * cgt_mangle_eq — the byte-free `cg_mangle_eq` (AL4a-2) decides identical-C-name exactly as the
+ * retired string compare `cg_opt_key(a) == cg_opt_key(b)` did. Every case double-checks the
+ * expected boolean AND that `cg_mangle_eq` agrees with that string oracle, proving the refactor
+ * is behavior-preserving. Covers: same-shape equal/unequal; two DISTINCT `Named` that mangle
+ * EQUAL because they share a bare last segment (#109 `teko::io::Reader` vs `teko::emit::Reader`);
+ * a `Named` whose text coincides with a composite's rendered form (`Named "slice_str"` vs
+ * `[]str`, both mangle to `slice_str`) — distinct types, equal mangle; a fixed leaf vs a
+ * same-text `Named` (`str` vs `Named "str"`); erroring types (inline `Variant`, both map to the
+ * empty key `""`); and distinct types that mangle DIFFERENTLY.
+ */
+#test

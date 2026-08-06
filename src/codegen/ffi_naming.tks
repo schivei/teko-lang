@@ -1,0 +1,154 @@
+/** teko::codegen — split from ffi_export.tks (mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::parser
+
+/**
+ * src/codegen/ffi_export.tks (namespace 'teko::codegen') — the reverse-FFI (Teko -> C) EXPORT surface
+ * for an `[artifact] abi = "c"` project (FFI-D, own-native). Three concerns, all backend-independent and
+ * pure over the CHECKED program:
+ *   * NAMING     — the C symbol an `exp` function is emitted under: the `exp("c_name")` override, or the
+ *                  flattened canonical (`ns::fn` -> `ns_fn`, project-root-prefixed by construction).
+ *   * THE GATE   — `check_ffi_export`: reject a non-FFI-safe `exp` signature and a class/interface export
+ *                  categorically, and reject two exports colliding on one C symbol.
+ *   * THE HEADER — `emit_c_header`: the pure-text `.h` (real C prototypes) a C consumer includes.
+ * The C-ABI wrapper EMISSION (`cg_c_export_wrappers_text`) reuses `cg_c_export_symbol` + the FFI C-type
+ * mappers here so the prototype and the emitted object symbol always agree.
+ */
+
+/**
+ * Flatten a canonical Teko name (`namespace` + `name`) to a single C identifier for the reverse-FFI
+ * boundary: every `::` collapses to a single `_`, and the namespace joins the name with one `_`. Because
+ * the canonical root IS the project name (`teko.tkp` `name`; the source root is invisible), the flattened
+ * form auto-prefixes every export with the project name — `demo::math` + `add` -> `demo_math_add`,
+ * `demo` + `add` -> `demo_add` — the libc-collision resistance a hand-written C library gets manually.
+ *
+ * @param namespace  the declaring namespace ("" for a truly root-less symbol -> the bare name)
+ * @param name       the symbol's bare name
+ * @return           the flattened, single-underscore C identifier
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+pub fn flatten_canonical(namespace: str, name: str) -> str {
+    if namespace.len == 0 { return name }
+    teko::str::concat(ffi_flatten_seps(namespace), "_", name)
+}
+
+/**
+ * Collapse each `::` in a canonical namespace to a single `_` (the C-facing flatten; distinct from the
+ * internal `__` mangle `cb_fn_name` uses). `demo::math` -> `demo_math`.
+ *
+ * @param s  the canonical namespace
+ * @return   the same text with every `::` rewritten to one `_`
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn ffi_flatten_seps(s: str) -> str {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        if i + 1 < s.len && s[i] == b':' && s[i + 1] == b':' {
+            out = teko::list::push(out, b'_')
+            i = i + 2
+        } else {
+            out = teko::list::push(out, s[i])
+            i++
+        }
+    }
+    str(out)
+}
+
+/**
+ * The C symbol an `exp` function is emitted under in an `abi="c"` artifact: the `exp("c_name")` override
+ * verbatim when present (carried on `c_symbol`, mirroring how `extern` carries its import symbol), else the
+ * flattened canonical default.
+ *
+ * @param f  the checked function
+ * @return   the C-facing export symbol
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+pub fn cg_c_export_symbol(f: checker::TFunction) -> str {
+    if f.c_symbol != "" { return f.c_symbol }
+    flatten_canonical(f.namespace, f.name)
+}
+
+/**
+ * Map a resolved return `Type` to its FFI-safe C spelling, or fail when the type cannot cross the C ABI.
+ * The base-slice FFI-safe set is the fixed-width scalars (`iN`/`uN` for N in 8..64, `f32`/`f64`, `bool`,
+ * `byte`) plus the return-only `void`. Everything else — `str`, a slice, an aggregate, a closure, `T?`,
+ * `T | error`, AND `ptr<T>` (whose stable C spelling couples the raw-pointer export crumb —
+ * honest-stop) — is rejected here.
+ *
+ * @param t  the resolved return type
+ * @return   the C type text (e.g. `int64_t`, `void`)
+ * @throws   when `t` is not FFI-safe for export
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn ffi_ctype_of_type(t: checker::Type) -> str | error {
+    match t {
+        checker::Void => "void"
+        checker::Prim as p => ffi_c_scalar(ffi_prim_name(p.kind))
+        checker::Byte => "uint8_t"
+        _ => error { message = "return type is not FFI-safe for export (only fixed-width scalars and `void` cross the C ABI in the base slice; `ptr<T>`/aggregate export is a later crumb)" }
+    }
+}
+
+/**
+ * Map a parsed parameter `TypeExpr` to its FFI-safe C spelling, or fail. Parameters carry their surface
+ * annotation (not a resolved `Type`), so the mapper matches the written type: a `NamedType` naming a
+ * fixed-width scalar. A slice / union / optional / function type — and `ptr<T>` (honest-stop, per the
+ * return mapper) — is rejected.
+ *
+ * @param te  the parsed parameter type annotation
+ * @return    the C type text
+ * @throws    when `te` is not an FFI-safe parameter type for export
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn ffi_ctype_of_typeexpr(te: parser::TypeExpr) -> str | error {
+    match te {
+        parser::NamedType as nt => ffi_c_scalar(cg_path_last(nt.path))
+        _ => error { message = "parameter type is not FFI-safe for export (only fixed-width scalars cross the C ABI in the base slice)" }
+    }
+}
+
+/**
+ * The surface name of a scalar `PrimKind`, as written in Teko source (`i64`, `u8`, `f64`, `bool`, …). The
+ * bridge between the resolved `Prim` return type and the shared, surface-keyed `ffi_c_scalar` mapper.
+ *
+ * @param k  the primitive kind
+ * @return   the Teko surface spelling
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn ffi_prim_name(k: checker::PrimKind) -> str {
+    match k {
+        U8 => "u8"; U16 => "u16"; U32 => "u32"; U64 => "u64"
+        I8 => "i8"; I16 => "i16"; I32 => "i32"; I64 => "i64"
+        F32 => "f32"; F64 => "f64"
+        Bool => "bool"
+    }
+}
+
+/**
+ * Map an FFI-safe scalar's surface name to its stable C type, or fail. The FFI-safe set is
+ * exactly the language's native integers (`i8..i64`/`u8..u64`), `byte`, `f32`/`f64`, and `bool` —
+ * every other surface name (including the removed `i64`/`u64`/`f32` family, which the checker
+ * already rejects before a function signature reaches this FFI gate) falls through to the error.
+ *
+ * @param nm  the scalar's surface name
+ * @return    the stable C type (e.g. `int32_t`, `double`, `_Bool` via `bool`)
+ * @throws    when `nm` is not an FFI-safe scalar
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn ffi_c_scalar(nm: str) -> str | error {
+    if nm == "i8" { return "int8_t" }
+    if nm == "i16" { return "int16_t" }
+    if nm == "i32" { return "int32_t" }
+    if nm == "i64" { return "int64_t" }
+    if nm == "u8" { return "uint8_t" }
+    if nm == "u16" { return "uint16_t" }
+    if nm == "u32" { return "uint32_t" }
+    if nm == "u64" { return "uint64_t" }
+    if nm == "byte" { return "uint8_t" }
+    if nm == "f32" { return "float" }
+    if nm == "f64" { return "double" }
+    if nm == "bool" { return "bool" }
+    error { message = teko::str::concat("type `", nm, "` is not an FFI-safe scalar (i8..i64/u8..u64/byte/f32/f64/bool)") }
+}

@@ -1,0 +1,278 @@
+/** teko::codegen functions (split 6/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+// cg_te_reaches_byvalue — does this type-expr's BY-VALUE content reach the named type `to`?
+// (C: `cg_te_reaches_byvalue`.)
+fn cg_te_reaches_byvalue(prog: CgProg, te: parser::TypeExpr, to: str, seen: []str) -> bool {
+    match te {
+        parser::NamedType as nt => {
+            let base = nt.path.segments[nt.path.segments.len - 1].name
+            if cg_is_prim_name(base) { return false }
+            // (#122) a CLASS is a REFERENCE type — every use lowers to a POINTER (emit_type_expr),
+            // so a class-named edge (`C`, `C?`, `C` inside a variant) is a POINTER edge, not a
+            // by-value one; it can NEVER close a by-value size cycle. Treat it like a slice. Without
+            // this, a self-referencing class-optional field (`next: Node?` on class `Node`) is
+            // wrongly flagged boxed → the field becomes `tk_opt_Node *` while every construct/read
+            // site emits it by value (`tk_opt_Node`), and cc rejects the pointer/value mismatch.
+            if cg_is_class_named(prog, base) { return false }
+            // (S4) a generic-type USE reaches its concrete instance `Box__g__i64`, not the template.
+            let y = if nt.args.len == 0 { base } else { cg_texpr_inst_name(base, nt.args) }
+            if checker::name_last_segment(y) == checker::name_last_segment(to) { return true }   // (#109 W3) `to` (the decl name) is canonical; `y` a bare syntactic segment — compare bare
+            cg_name_reaches_byvalue(prog, y, to, seen)
+        }
+        parser::UnionType as ut => {
+            mut i = 0
+            loop {
+                if i >= ut.members.len { break }
+                if cg_te_reaches_byvalue(prog, ut.members[i], to, seen) { return true }
+                i++
+            }
+            false
+        }
+        parser::SliceType => false   // a slice is a pointer — not a by-value edge
+        parser::FunctionType => false   // (W10a) a function pointer — not a by-value aggregate edge
+    }
+}
+
+// cg_name_reaches_byvalue — does named type `from` reach named type `to` through by-value edges?
+// (visited-set guarded). (C: `cg_name_reaches_byvalue`.)
+fn cg_name_reaches_byvalue(prog: CgProg, from: str, to: str, seen: []str) -> bool {
+    if cg_nameset_seen(seen, from) { return false }   // already explored this node
+    let seen2 = teko::list::push(seen, from)
+    let d = match cg_find_decl(prog, from) { parser::TypeDecl as dd => dd; error => return false }
+    match d.body {
+        parser::StructBody as sb => {
+            mut i = 0
+            loop {
+                if i >= sb.fields.len { break }
+                if cg_te_reaches_byvalue(prog, sb.fields[i].type_ann, to, seen2) { return true }
+                i++
+            }
+            false
+        }
+        parser::VariantBody as vb => match vb.type_expr {
+            parser::UnionType as u => {
+                mut i = 0
+                loop {
+                    if i >= u.members.len { break }
+                    if cg_te_reaches_byvalue(prog, u.members[i], to, seen2) { return true }
+                    i++
+                }
+                false
+            }
+            _ => false
+        }
+        _ => false   // enum/alias — no by-value aggregate edges
+    }
+}
+
+// cg_field_boxed — is the struct `sname`'s field of declared type `fte` a recursive back-edge
+// (→ box as pointer)? A NAMED `Y` field is boxed iff its by-value content
+// reaches BACK to `sname`. A SLICE field is already a pointer (never boxed); an inline-UNION
+// field is left unboxed (none close a cycle in the corpus). (C: `cg_field_boxed`.)
+fn cg_field_boxed(prog: CgProg, sname: str, fte: parser::TypeExpr) -> bool {
+    let is_box_candidate = match fte {
+        parser::NamedType => true
+        _ => false
+    }
+    if !is_box_candidate { return false }
+    cg_te_reaches_byvalue(prog, fte, sname, teko::list::empty())
+}
+
+// cg_variant_has_member — does variant decl `d` have a member whose bare name is `member`?
+// (The member name is the union FIELD name and the UPPERCASE tag suffix.) (C: `cg_variant_has_member`.)
+fn cg_variant_has_member(d: parser::TypeDecl, member: str) -> bool {
+    let members = match d.body {
+        parser::VariantBody as vb => match vb.type_expr {
+            parser::UnionType as u => u.members
+            _ => return false
+        }
+        _ => return false
+    }
+    mut i = 0
+    loop {
+        if i >= members.len { break }
+        match variant_member_name(members[i]) {
+            str as mn => { if mn == member { return true } }
+            error => { }
+        }
+        i++
+    }
+    false
+}
+
+// emit_type — a resolved Type -> C type text. STR -> tk_str; a Named aggregate references
+// its mangled typedef (decl + ref agree via mangle_type_name). The remaining structured
+// types stay the honest "not yet supported" barrier (M.3). (C: `emit_type`.)
+fn emit_type(buf: []byte, prog: CgProg, t: checker::Type) -> []byte | error {
+    match t {
+        checker::Prim as p => emit_prim(buf, p.kind)
+        checker::Byte => cb(buf, "uint8_t")
+        // CHAR — a UTF-8 codepoint; runtime layout == the byte-slice `tk_char` (teko_rt.h),
+        // the SAME {uint8_t*,uint64_t} shape as tk_slice_byte. Distinct only by the checker tag.
+        checker::Char => cb(buf, "tk_char")
+        // VOID is the return-only marker (M.3): a `-> void` function lowers to C `void`.
+        // The checker (Z2a) forbids void as a value/binding/variant member, so reaching
+        // here is always a Func.ret position.
+        checker::Void => cb(buf, "void")
+        checker::Str => cb(buf, "tk_str")
+        // SLICE (`[]T`) — the generated tk_slice_<elem> struct. The sentinel/untyped slice
+        // (element = the Void marker, from teko::list::empty()) never reaches here on its own —
+        // emit_as wraps it to a concrete slot type, exactly like a bare `null` optional.
+        checker::Slice as sl => match sl.element {
+            checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
+            _ => cg_slice_typename(buf, sl.element)
+        }
+        // W4c — a Named aggregate -> its mangled typedef name (the bare name; resolve
+        // drops the namespace). decl + ref agree via mangle_type_name.
+        // (W10b.CLASS increment 3) a CLASS is a REFERENCE type — every use (locals, call-arg
+        // types read off .type, …) lowers to a pointer, same rule as emit_type_expr.
+        checker::Named as nm => {
+            // (#98) a POLYMORPHIC-BASE-typed slot is the fat pointer `tk_base_<name>` (data +
+            // vtable), NOT the raw object pointer — so a Sub→Base upcast + base-typed dispatch
+            // reuse the D3 fat pointer. (An interface-typed slot is likewise its fat typedef.)
+            if cg_is_polymorphic_base(prog, nm.name) { cb_tysym(cb(buf, "tk_base_"), nm.name) }
+            else if cg_is_class_named(prog, nm.name) { cb(mangle_type_name(buf, "", nm.name), " *") }
+            else { mangle_type_name(buf, "", nm.name) }
+        }
+        // VARIANT (`A | B | …`) — the generated tk_u_<keys> tagged-union struct (B-cg2). Its
+        // typedef is stamped in the prelude. A Named variant decl is reached via Named, not here.
+        checker::Variant as va => match cg_union_niche_member(prog, va) {
+            checker::Type as x => emit_type(buf, prog, x)
+            null => match cg_union_box_member(prog, va) {
+                checker::Type as bx => cb(match emit_type(buf, prog, bx) { []byte as o => o; error as e => return e }, " *")
+                null => cg_variant_typename(buf, va)
+            }
+        }
+        // (W10a) a function/closure VALUE type `(A, B) -> R` lowers to the uniform runtime
+        // `tk_closure { void *fn; void *env; }` (teko_rt.h). The per-signature C type is only
+        // needed at the CALL site (a cast on `.fn`), never as a storage type — so one struct
+        // serves every function type.
+        checker::Func => cb(buf, "tk_closure")
+        // `error` — the runtime tk_error struct (E2-NATIVE; teko_rt.h). Full diagnostic fields.
+        checker::Error => cb(buf, "tk_error")
+        // (C7.1a) opaque FFI transport types — `ptr` is a bare `void *`, `uptr` a word-size
+        // unsigned. Never dereferenced in Teko; only crosses the extern boundary.
+        // (S-mem) `ptr<T>` → `<T> *`; opaque ptr (null inner) → `void *`.
+        checker::Ptr as p => match p.inner {
+            null => cb(buf, "void *")
+            checker::Type as t => cb(match emit_type(buf, prog, t) { []byte as o => o; error as e => return e }, " *")
+        }
+        checker::Uptr => cb(buf, "uintptr_t")
+        // (MEM-1b) Ref<T> → a bare `<T> *` today ("C pointer without `*`/`&`"; struct wrapper waits for W9+ metadata).
+        checker::Reference as r => cb(match emit_type(buf, prog, r.inner) { []byte as o => o; error as e => return e }, " *")
+        checker::Null => cb(buf, "uint8_t")
+    }
+}
+
+// (W10a) the C function-pointer SIGNATURE for a closure call's cast: `R (*)(A, B)`. Built from the
+// callee's resolved Func type so `((R(*)(A,B))f.fn)(args)` invokes the code pointer with the right
+// ABI. Empty params → `(void)`. `with_env` prepends a leading `void *` (the env-first ABI used by a
+// CAPTURING closure). (C: `cg_emit_fnptr_sig`.)
+fn cg_emit_fnptr_sig_ex(buf: []byte, prog: CgProg, t: checker::Type, with_env: bool) -> []byte | error {
+    match t {
+        checker::Func as f => {
+            mut out = match emit_type(buf, prog, f.ret) { []byte as o => o; error as e => return e }
+            out = cb(out, " (*)(")
+            mut first = true
+            if with_env { out = cb(out, "void *"); first = false }
+            if f.params.len == 0 {
+                if first { out = cb(out, "void") }
+            } else {
+                mut i = 0
+                loop {
+                    if i >= f.params.len { break }
+                    if !first { out = cb(out, ", ") }
+                    first = false
+                    out = match emit_type(out, prog, f.params[i]) { []byte as o => o; error as e => return e }
+                    i++
+                }
+            }
+            cb(out, ")")
+        }
+        _ => error { message = "codegen: closure call on a non-function type (internal)" }
+    }
+}
+
+// (W10) emit a CLOSURE CALL through a `tk_closure` value as a GNU statement-expression that evaluates
+// each argument ONCE and DISPATCHES on `env`: a NON-capturing closure / named-fn value (env == NULL)
+// calls with the no-env ABI `R(params)`; a CAPTURING closure (env != NULL) calls with the env-first
+// ABI `R(void*, params)`. The callee is a local of function type (its name is the callee's last seg).
+fn emit_closure_call(buf: []byte, prog: CgProg, ret_type: checker::Type, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let nm = c.callee.segments[c.callee.segments.len - 1].name
+    mut out = cb(buf, "({ ")
+    // bind each argument to a temp (single evaluation, preserving side effects).
+    mut j = 0
+    loop {
+        if j >= c.args.len { break }
+        out = match emit_type(out, prog, c.args[j].type) { []byte as o => o; error as e => return e }
+        out = cb(out, " ")
+        out = cb(out, teko::str::concat("_tca", teko::u64_to_str(j to u64)))
+        out = cb(out, " = ")
+        out = match emit_expr_ctx(out, prog, ret_type, c.args[j], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        out = cb(out, "; ")
+        j++
+    }
+    out = cb(out, "tk_closure _tcf = ")
+    out = cb_ident(out, nm)
+    out = cb(out, "; _tcf.env ? ((")
+    out = match cg_emit_fnptr_sig_ex(out, prog, c.callee_type, true) { []byte as o => o; error as e => return e }
+    out = cb(out, ")_tcf.fn)(_tcf.env")
+    mut k = 0
+    loop { if k >= c.args.len { break }; out = cb(out, ", "); out = cb(out, teko::str::concat("_tca", teko::u64_to_str(k to u64))); k++ }
+    out = cb(out, ") : ((")
+    out = match cg_emit_fnptr_sig_ex(out, prog, c.callee_type, false) { []byte as o => o; error as e => return e }
+    out = cb(out, ")_tcf.fn)(")
+    mut m = 0
+    loop { if m >= c.args.len { break }; if m > 0 { out = cb(out, ", ") }; out = cb(out, teko::str::concat("_tca", teko::u64_to_str(m to u64))); m++ }
+    cb(out, "); })")
+}
+
+// OPTIONAL `T?` C REPRESENTATION (REBOOT_PLAN §202). Each distinct optional inner type maps to a
+// generated struct `tk_opt_<innerMangle>` = `{ bool present; <innerCtype> value; }`. The mangle
+// suffix is a deterministic function of the inner type so the typedef + every use agree. `error`
+// lowers to its message tk_str, so `error?` is `tk_opt_error`. (C: `cg_opt_typename`/`cg_opt_mangle`.)
+fn cg_opt_typename(buf: []byte, inner: checker::Type) -> []byte | error {
+    cg_opt_mangle(cb(buf, "tk_opt_"), inner)
+}
+
+// SLICE value layer (fixed+copy): a `[]T` lowers to the generated `tk_slice_<elemMangle>`
+// struct `{ <elemC> *ptr; uint64_t len; }` (same shape as tk_str). Reuses the optional element
+// mangle for the suffix, so decl + every use agree byte-for-byte. (C: `cg_slice_typename`.)
+fn cg_slice_typename(buf: []byte, elem: checker::Type) -> []byte | error {
+    cg_opt_mangle(cb(buf, "tk_slice_"), elem)
+}
+
+// The deterministic mangle SUFFIX for an optional inner type (used in tk_opt_<suffix>).
+fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
+    match inner {
+        checker::Prim as p => match p.kind {
+            checker::PrimKind::U8 => cb(buf, "u8"); checker::PrimKind::U16 => cb(buf, "u16")
+            checker::PrimKind::U32 => cb(buf, "u32"); checker::PrimKind::U64 => cb(buf, "u64")
+            checker::PrimKind::I8 => cb(buf, "i8"); checker::PrimKind::I16 => cb(buf, "i16")
+            checker::PrimKind::I32 => cb(buf, "i32"); checker::PrimKind::I64 => cb(buf, "i64")
+            checker::PrimKind::F32 => cb(buf, "f32"); checker::PrimKind::F64 => cb(buf, "f64")
+            checker::PrimKind::Bool => cb(buf, "bool")
+        }
+        checker::Byte => cb(buf, "byte")
+        checker::Char => cb(buf, "char")
+        checker::Str => cb(buf, "str")
+        checker::Error => cb(buf, "error")
+        checker::Null => cb(buf, "null")
+        checker::Named as nm => cb_str(buf, checker::name_last_segment(nm.name))   // (#149) BARE key — the (#109 W3) canonical nm.name carries `::` (invalid C); mirror cg_opt_mangle_str and the C twin (tk_name_last_segment)
+        // NESTED SLICE (#81) — a `[]T` in an element/inner position mangles to `slice_<elem>`
+        // (the SAME key cg_member_key_str already uses for a slice variant member), so `[][]T`
+        // lowers to tk_slice_slice_<elem> and every use agrees with the collected typedef.
+        checker::Slice as sl => match sl.element {
+            checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
+            _ => cg_opt_mangle(cb(buf, "slice_"), sl.element)
+        }
+        _ => error { message = "codegen: optional/slice inner type not yet supported" }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B-cg2 — VARIANT codegen (the `T | error` sum types the corpus uses pervasively).
+// ---------------------------------------------------------------------------

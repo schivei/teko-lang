@@ -1,0 +1,271 @@
+/** teko::codegen functions (split 30/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * cg_slice_grow_elem_matches — does a slice-growing binding's NATURAL push element (the concrete
+ * element `type_list_builtin` fixed the push call's own `.type` to, taken from the pushed ITEM's
+ * type when the base was the sentinel `empty()`) mangle-equal the binding's DECLARED slice element?
+ * True for the ordinary case (`let xs: []T = push(empty(), <a T>)`); false when the declared slot
+ * is a WIDER variant than the pushed case (`let xs: []Variant = push(empty(), <a case of Variant>)`,
+ * 0.3.1 covariant-slice-push) — `cg_binding_grows_escaping_slice`'s fast path must not fire there:
+ * `emit_list_push` grows a buffer typed by the NATURAL (narrow) element, which mismatches the WIDER
+ * declared slot's `tk_slice_` struct as a `let` initializer ("invalid initializer"); the caller must
+ * fall through to `emit_as_r_in`'s element-wise covariant rebuild instead, which wraps each pushed
+ * case into the wider variant.
+ *
+ * @param bound  the binding's declared type (a `Slice`, already proven by the caller)
+ * @param vtype  the push call's own resolved type (always a `Slice`, by `type_list_builtin`)
+ * @return       true iff both slices' elements mangle to the identical C element type
+ * @since 0.3.1
+ */
+fn cg_slice_grow_elem_matches(bound: checker::Type, vtype: checker::Type) -> bool {
+    match bound {
+        checker::Slice as bs => match vtype {
+            checker::Slice as vs => cg_mangle_eq(bs.element, vs.element)
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * cg_binding_grows_escaping_slice — whether binding `b` builds an escaping slice via a `list::push` /
+ * `list::with_cap` / `mem::push_fo` call whose result OUTLIVES the frame (0.3.1 move-on-return A4/M1).
+ * Such a bare slice grow follows the current region and, once M2 enters `_tkfr`, would die at the
+ * return edge; routing it to `_tkrr` names it as escaping (M1: root; M2: the caller's region — the move).
+ * Guarded by `cg_slice_grow_elem_matches`: a push whose NATURAL element is NARROWER than `b`'s declared
+ * (wider-variant) slot needs the element-wise covariant rebuild `emit_as_r_in` provides, not this
+ * bare-grow fast path — see that helper's doc for the "invalid initializer" defect it closes.
+ *
+ * @param escaping  the function's escaping-name set
+ * @param dctx      the defer context (carries `rr`)
+ * @param b         the binding
+ * @return          true iff `b`'s slice-grow value routes to `_tkrr`
+ * @since 0.3.1
+ */
+fn cg_binding_grows_escaping_slice(escaping: []str, dctx: DeferCtx, b: checker::TBinding) -> bool {
+    if dctx.rr.len == 0 { return false }
+    let name = match b.target {
+        parser::SimpleName as sn => sn.name
+        parser::DestructurePattern => return false
+    }
+    if !str_list_has(escaping, name) { return false }
+    if !cg_bound_is_slice(b.bound) { return false }
+    if !cg_slice_grow_elem_matches(b.bound, b.value.type) { return false }
+    match b.value.kind {
+        checker::TCall as c => cg_call_is_slice_grow(c)
+        _ => false
+    }
+}
+
+/**
+ * cg_call_is_slice_grow — whether call `c` is a slice-growing intrinsic: `teko::list::push`,
+ * `teko::list::with_cap`, or `teko::mem::push_fo` (the calls that bump-allocate a fresh slice buffer).
+ *
+ * @param c  the call
+ * @return   true iff `c` grows a slice
+ * @since 0.3.1
+ */
+fn cg_call_is_slice_grow(c: checker::TCall) -> bool {
+    let segs = c.callee.segments
+    if segs.len < 2 { return false }
+    let last = segs[segs.len - 1].name
+    let prev = segs[segs.len - 2].name
+    (prev == "list" && (last == "push" || last == "with_cap")) || (prev == "mem" && last == "push_fo")
+}
+
+/**
+ * str_list_has — linear membership test over a `[]str` (the A3 decls list is short, one entry per
+ * block-local accumulator).
+ *
+ * @param xs     the list to search
+ * @param name   the sought name
+ * @return       true iff `name` occurs in `xs`
+ * @since 0.3.1
+ */
+fn str_list_has(xs: []str, name: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == name { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * cg_block_slice_accums — the names of the TOP-LEVEL block-local slice accumulators declared in block
+ * `body` (A3). A binding qualifies iff it binds a `Slice`-typed SimpleName that `binding_is_block_local`
+ * proves stays inside the block: its grown buffer is then routed to this block's region (R_decl) and
+ * reclaimed at the block's exit edge. A slice that ESCAPES (return / capture) fails the proof and is
+ * excluded — it stays on the leak-safe frame/root path, never region-scoped.
+ *
+ * @param prog       the typed program (unused today; kept for signature parity with the region helpers)
+ * @param escaping   the function's escaping-name set
+ * @param fn_body    the whole enclosing function body (the block-local proof's total-reads denominator)
+ * @param body       the block whose top-level slice accumulators are collected
+ * @param is_value   does `body` yield a value (its tail escapes)?
+ * @return           the declared block-local slice accumulator names
+ * @since 0.3.1
+ */
+fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []checker::TStatement, body: []checker::TStatement, is_value: bool) -> []str {
+    mut acc: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        match body[i] {
+            checker::TBinding as b => {
+                if cg_binding_is_block_local_slice(escaping, fn_body, body, is_value, b) {
+                    match b.target {
+                        parser::SimpleName as sn => { acc = teko::list::push(acc, sn.name) }
+                        parser::DestructurePattern => { }
+                    }
+                }
+            }
+            _ => { }
+        }
+        i = i + 1
+    }
+    acc
+}
+
+/**
+ * cg_binding_is_block_local_slice — whether binding `b` is a `Slice`-typed block-local (A3): the shape
+ * that earns a per-block region for its self-append accumulator buffer. Both the region-opening
+ * decision (`cg_block_has_block_local`) and the decls map (`cg_block_slice_accums`) consult this ONE
+ * predicate, so a region is opened exactly when — and only when — an accumulator will route into it.
+ *
+ * A `#singleton` binding is EXCLUDED (A6): the residence oracle forces it to the Root tier, so the
+ * codegen routes it to `tk_region_root()` (emit_binding) and it must never earn a per-block region
+ * that would reclaim it at the block's exit — it outlives every enclosing scope.
+ *
+ * @param escaping   the function's escaping-name set
+ * @param fn_body    the whole enclosing function body
+ * @param body       the block `b` is declared at the top of
+ * @param is_value   does `body` yield a value?
+ * @param b          the typed binding
+ * @return           true iff `b` is a non-`#singleton` block-local slice binding
+ * @since 0.3.1
+ */
+fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []checker::TStatement, body: []checker::TStatement, is_value: bool, b: checker::TBinding) -> bool {
+    if b.di_kind == parser::DiKind::Singleton { return false }
+    match b.bound {
+        checker::Slice => checker::binding_is_block_local(escaping, fn_body, body, is_value, b)
+        _ => false
+    }
+}
+
+// (S2 — arena parent-ptr tree, 2026-07-01) the C EXPRESSION TEXT for the region a NEW
+// `tk_region_new(...)` call should name as its parent: the innermost open block region if any,
+// else the process root. Twin of the C `cg_enclosing_region_expr` for call sites that never see a
+// live frame (VALUE-form if/match arms — C clears g_cg_frame="" before descending into those, so
+// omitting the frame branch here is not a divergence, it is the SAME invariant expressed
+// functionally instead of via a cleared global).
+fn cg_enclosing_region_expr(regions: []RegionFrame) -> str {
+    if regions.len > 0 { regions[regions.len - 1].name } else { "tk_region_root()" }
+}
+
+// The STATEMENT-form twin (if-stmt/match-stmt arms, loop bodies): these run WITHOUT a frame-clear
+// in C (only the value-form arms clear it), so `frame` may still be live — fall back to it before
+// the process root.
+fn cg_enclosing_region_expr_framed(regions: []RegionFrame, frame: str) -> str {
+    if regions.len > 0 { regions[regions.len - 1].name } else if frame != "" { frame } else { "tk_region_root()" }
+}
+
+// dctx_empty — the no-defers context (function entry / frameless sub-expression with no enclosing defers).
+fn dctx_empty() -> DeferCtx {
+    DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov_off(); rr = ""; bracket_depth = 0 }
+}
+
+// (W9.3) emit_defers — emit the deferred blocks at index ≥ `base` in LIFO order (innermost / most-recent
+// first), each body statement via emit_stmt at the exit edge's `indent`. The functional twin of the C's
+// emit_defers (which walks g_cg_defers[base..ndefers) backwards). A defer body never contains a return/
+// break/continue/defer (checker-enforced), so each body statement emits with NO active region/defer
+// scope of its own (regions/dctx empty) — exactly matching the C twin's emit_stmt at base context.
+fn emit_defers(buf: []byte, defers: []checker::TStatement, base: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []checker::TStatement) -> []byte | error {
+    mut out = buf
+    mut i = defers.len
+    loop {
+        if i <= base { break }
+        i = i - 1
+        match defers[i] {
+            checker::TDeferStmt as d => {
+                mut j: u64 = 0
+                loop {
+                    if j >= d.body.len { break }
+                    out = match emit_stmt(out, d.body[j], false, prog, checker::Void { }, indent, "", escaping, teko::list::empty(), fn_body, dctx_empty(), teko::list::empty(), false) { []byte as o => o; error as err => return err }
+                    j++
+                }
+            }
+            _ => { }
+        }
+    }
+    out
+}
+
+// (W9.3) dctx_register — return `dctx` with statement `s` pushed onto the defer stack (used when a
+// TDeferStmt is reached). Mirrors the C `g_cg_defers[g_cg_ndefers++] = s` registration (emits nothing).
+fn dctx_register(dctx: DeferCtx, s: checker::TStatement) -> DeferCtx {
+    DeferCtx { defers = teko::list::push(dctx.defers, s); loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
+}
+
+// (W9.3) cg_append_direct_defers — append every TOP-LEVEL TDeferStmt in `body` (source order) onto
+// `defers`. A block's fall-through fires its OWN direct defers `[base, base+count)` — reached only
+// after the whole block ran, so ALL its direct defers are registered. The caller (emit_function /
+// emit_exprstmt_tail tail-if branch / emit_match_tail arm) builds the full list with this, then fires
+// `emit_defers([base, len))`. Same defer NODES as emit_block_tail's incremental accumulation, so the
+// fired bytes match the C twin's emit_defers exactly. (C: g_cg_ndefers after the block emits.)
+fn cg_append_direct_defers(defers: []checker::TStatement, body: []checker::TStatement) -> []checker::TStatement {
+    mut out = defers
+    mut i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        match body[i] {
+            checker::TDeferStmt => { out = teko::list::push(out, body[i]) }
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+// (W9.3) cg_target_defer_base — the defer base of the break/continue TARGET loop (innermost matching
+// `label`; bare label → innermost loop). Defers at index ≥ this base belong to the scopes the jump
+// crosses (the target loop body inclusive + any arms inside it). Falls back to 0 if no match (the
+// checker guarantees a break/continue is inside a loop — defensive). (C: cg_target_defer_base.)
+fn cg_target_defer_base(loops: []LoopDeferFrame, label: str) -> u64 {
+    mut k = loops.len
+    loop {
+        if k == 0 { break }
+        let lf = loops[k - 1]
+        let is_target = if label.len == 0 { true } else { lf.label == label }
+        if is_target { return lf.defer_base }
+        k = k - 1
+    }
+    0
+}
+
+/**
+ * cg_target_region_base — the RegionFrame-stack depth at the entry of the break/continue TARGET loop
+ * (the innermost loop for a bare jump, or the labeled loop for `break LABEL`). Regions at index ≥ this
+ * base were opened INSIDE the target loop body and must drop on the jump; regions below it ENCLOSE the
+ * loop and must NOT (the sibling of `cg_target_defer_base`).
+ *
+ * @param loops  the active loop-scope frame stack
+ * @param label  the jump's target label ("" = innermost loop)
+ * @return       the target loop's `region_base` (0 when no matching frame — drop nothing)
+ * @since 0.3.1
+ */
+fn cg_target_region_base(loops: []LoopDeferFrame, label: str) -> u64 {
+    mut k = loops.len
+    loop {
+        if k == 0 { break }
+        let lf = loops[k - 1]
+        let is_target = if label.len == 0 { true } else { lf.label == label }
+        if is_target { return lf.region_base }
+        k = k - 1
+    }
+    0
+}

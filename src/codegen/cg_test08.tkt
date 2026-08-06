@@ -1,0 +1,225 @@
+/** split 8/8 from codegen_test.tkt — mechanical, pure reorg, no logic changes. */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+fn cgt_mangle_native_flat_strips_prefix_only() {
+    let pairs = cgt_mangle_parity_pairs()
+    mut i: u64 = 0
+    loop {
+        if i >= pairs.len { break }
+        let prefixed = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name)
+        let flat = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name, true)
+        teko::assert::is_true(prefixed == teko::str::concat(TEKO_USER_PREFIX, flat))
+        i++
+    }
+    teko::assert::is_true(teko::lir::mangle_fn_symbol("ar_link_run", "add", true) == "ar_link_run__add")
+}
+
+/**
+ * Assert the mangle spells the whole symbol, not just its prefix: a namespaced function keeps its
+ * `::`-to-`__` namespace mangle behind the user prefix, and an un-namespaced (lifted) one is the
+ * prefix plus the bare name.
+ */
+#test
+
+fn cgt_mangle_spells_prefix_namespace_and_name() {
+    teko::assert::is_true(str(cb_fn_name(cgt_empty(), "teko::checker", "type_eq")) == "teko_teko__checker__type_eq")
+    teko::assert::is_true(str(cb_fn_name(cgt_empty(), "", "lifted")) == "teko_lifted")
+}
+
+/**
+ * A call node with a resolved namespace and a bare callee name, for the origin-namespace tests.
+ *
+ * @param ns    the resolved namespace ("" when the checker resolved no declaration)
+ * @param name  the callee's bare name
+ * @return      the call node
+ */
+fn cgt_call_ns(ns: str, name: str) -> checker::TCall {
+    checker::TCall {
+        callee = cgt_path1(name); args = teko::list::empty(); call_ns = ns
+        is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0
+    }
+}
+
+/**
+ * A program declaring `probe::mine::arena_push` (a real body) and `probe::sys::getpid` (an
+ * `extern fn`) — the two shapes `cg_call_is_user_declared` has to tell apart.
+ *
+ * @return  the indexed emitter program
+ */
+fn cgt_prog_with_colliding_names() -> CgProg {
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, cgt_fn0("arena_push", "probe::mine", checker::Void { }, cgt_empty_stmts()))
+    let ext = cgt_fn0("getpid", "probe::sys", checker::Void { }, cgt_empty_stmts())
+    items = teko::list::push(items, checker::TFunction {
+            name = ext.name; type_params = ext.type_params; type_constraints = ext.type_constraints
+            namespace = ext.namespace; params = ext.params; return_type = ext.return_type; body = ext.body
+            vis = ext.vis; has_doc = ext.has_doc; doc = ext.doc; file = ext.file; line = ext.line; col = ext.col
+            is_test = ext.is_test; is_extern = true; c_symbol = "getpid"; from_lib = "c"
+            has_arena_size = ext.has_arena_size; arena_size = ext.arena_size
+    })
+    cg_prog_of(checker::TProgram { items = items })
+}
+
+/**
+ * Assert a call the checker RESOLVED to a DECLARED body is never mistaken for a builtin, even when
+ * its bare name IS one: `cg_call_is_user_declared` answers `true` for the user's `arena_push` (user
+ * code owns the symbol) and `false` for the unresolved builtin call. This is the predicate that
+ * stopped the emitter from silently swapping a user body for the runtime's `tk_arena_push`.
+ *
+ * The two callees that carry a namespace and are still NOT declarations answer `false` as well: an
+ * `extern fn` (which must reach its foreign symbol and the host-FFI lifters) and a `teko::mem`
+ * builtin (whose `call_ns` the checker stamps synthetically, with no declaration behind it).
+ */
+#test
+
+fn cgt_user_declared_beats_a_bare_builtin_name() {
+    let prog = cgt_prog_with_colliding_names()
+    teko::assert::is_true(cg_call_is_user_declared(prog, cgt_call_ns("probe::mine", "arena_push")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "arena_push")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("probe::sys", "getpid")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("teko::mem", "free")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "println")))
+}
+
+/**
+ * cgt_test_fn — a `#test` item named `ns::name`, the one item shape the gate harness emits for.
+ *
+ * @param name  the test's own name (the mangled symbol's tail)
+ * @param ns    the test's namespace (the mangled symbol's head)
+ * @return      the `#test` function node
+ */
+fn cgt_test_fn(name: str, ns: str) -> checker::TFunction {
+    let base = cgt_fn0(name, ns, checker::Void { }, cgt_empty_stmts())
+    checker::TFunction {
+        name = base.name; type_params = base.type_params; type_constraints = base.type_constraints
+        namespace = base.namespace; params = base.params; return_type = base.return_type; body = base.body
+        vis = base.vis; has_doc = base.has_doc; doc = base.doc; file = base.file; line = base.line; col = base.col
+        is_test = true; is_extern = base.is_extern; c_symbol = base.c_symbol; from_lib = base.from_lib
+        has_arena_size = base.has_arena_size; arena_size = base.arena_size
+    }
+}
+
+/**
+ * cgt_prog_with_one_test — a program whose single item is one `#test`, so the emitted harness has
+ * exactly one invocation to inspect.
+ *
+ * @return the indexed emitter program
+ */
+fn cgt_prog_with_one_test() -> CgProg {
+    let items: []checker::TItem = teko::list::push(teko::list::empty(), cgt_test_fn("cgt_captured_body", "probe::guard"))
+    cg_prog_of(checker::TProgram { items = items })
+}
+
+/**
+ * cgt_captured_run_line — the exact C line the harness must emit to CAPTURE `cgt_captured_body`'s
+ * outcome (journal wiring, 0.3.1: the harness used to hand `tk_test_run`'s result straight to
+ * `tk_test_report` in one nested call; it now binds it to a local first so it can also branch on
+ * `.how` for the journal hooks, before still handing the SAME value to `tk_test_report`).
+ *
+ * COMPOSED FROM `TEKO_USER_PREFIX` RATHER THAN SPELLED OUT, because a literal would pin the prefix
+ * ruling into an assertion that is not about it: the claim here is the SHAPE of the invocation (the
+ * address of a top-level function handed to the runtime), and a prefix change would then break this
+ * arm for a reason it does not measure.
+ *
+ * @return  `tk_test_outcome teko_journal_rv = tk_test_run(&<mangled symbol>);`
+ */
+fn cgt_captured_run_line() -> str {
+    teko::str::concat("tk_test_outcome teko_journal_rv = tk_test_run(&", TEKO_USER_PREFIX, "probe__guard__cgt_captured_body);")
+}
+
+/**
+ * cgt_journal_symbol — the C symbol a `teko::journal` function mangles to, composed the SAME way
+ * `cb_fn_name` would (namespace-colons to underscores, `__`, bare name) so this file's assertions are
+ * not a second, independently-drifting spelling of the mangling rule.
+ *
+ * @param name  the `teko::journal` function's bare name
+ * @return      its mangled C symbol
+ */
+fn cgt_journal_symbol(name: str) -> str { teko::str::concat(TEKO_USER_PREFIX, "teko__journal__", name) }
+
+#test
+
+/**
+ * cgt_the_harness_runs_every_body_under_capture — the EMITTED half of the test-mode capture (§14).
+ *
+ * The runtime's own guard (`src/test/capture_test.tkt`) proves that a captured body's panic and exit
+ * come back instead of ending the process; this proves the harness ASKS for that — that the emitted
+ * invocation captures `tk_test_run(&<symbol>)`'s outcome and still hands it to `tk_test_report`,
+ * rather than the bare call plus a blind `tk_test_end()` it replaced long ago. Without this arm the
+ * two halves could drift and the suite would still be green, because the runtime half is exercised
+ * by an extern that the harness does not emit.
+ *
+ * The taking of the body's ADDRESS is the whole backend requirement the design names, and it is
+ * asserted literally: a `#test` is emitted as `void <symbol>(void)`, so `&<symbol>` is already the
+ * `void (*)(void)` the runtime takes — no cast, no thunk, no closure pair.
+ *
+ * @throws when the invocation is not the captured one, or the arena/channel brackets moved
+ */
+fn cgt_the_harness_runs_every_body_under_capture() {
+    let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
+    teko::assert::is_true(teko::str::contains(one, cgt_captured_run_line()))
+    teko::assert::is_true(teko::str::contains(one, "tk_test_report(teko_journal_rv);"))
+    teko::assert::is_true(!teko::str::contains(one, "tk_test_end();"))
+    teko::assert::is_true(teko::str::contains(one, "tk_arena_push();"))
+    teko::assert::is_true(teko::str::contains(one, "tk_arena_pop();"))
+    teko::assert::is_true(teko::str::contains(one, "tk_test_begin("))
+}
+
+#test
+
+/**
+ * cgt_the_harness_notes_begin_ok_exited_and_panicked_to_the_journal — journal wiring (0.3.1): every
+ * `#test` invocation the plain gate emits calls the matching `teko::journal::note_test_*` hook by its
+ * mangled symbol — `begin` unconditionally (before the body runs), then exactly one of `ok`/
+ * `exited`/`panicked` depending on `teko_journal_rv.how`, with `exited` carrying `.code` verbatim
+ * (never re-derived, never re-parsed from a formatted string).
+ *
+ * @throws when a hook is missing, misnamed, or the exited call does not forward `.code`
+ */
+fn cgt_the_harness_notes_begin_ok_exited_and_panicked_to_the_journal() {
+    let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_begin")))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_ok")))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_panicked")))
+    teko::assert::is_true(teko::str::contains(one, teko::str::concat(cgt_journal_symbol("note_test_exited"), "((tk_str){")))
+    teko::assert::is_true(teko::str::contains(one, "}, teko_journal_rv.code);"))
+    teko::assert::is_true(teko::str::contains(one, "if (teko_journal_rv.how == TK_TEST_OK)"))
+    teko::assert::is_true(teko::str::contains(one, "else if (teko_journal_rv.how == TK_TEST_EXITED)"))
+}
+
+#test
+
+/**
+ * cgt_the_harness_ends_on_the_tally_and_not_on_zero — the gate's status is now COUNTED, not assumed.
+ *
+ * Before the capture the harness closed with a blind `return 0` and relied on a panicking test
+ * killing the process to report a failure; with the capture no test can do that, so a harness that
+ * kept `return 0` would report every failing suite as green. This arm is what makes that regression
+ * impossible to land silently.
+ *
+ * BOTH HARNESSES ARE ASSERTED, and the analyze one is the reason this arm grew: it kept the blind
+ * `return 0` after the plain one was taught to count, so a failing `#test` under `teko test .
+ * --analyzer` was captured, reported as FAILED, and then handed `run_analyzer` a status of 0.
+ *
+ * ALSO ASSERTS `note_test_end` (journal wiring, 0.3.1) ON BOTH HARNESSES, for the same reason: the
+ * close is ONE shared function precisely so neither harness can drift from the other, and a journal
+ * segment the analyze harness never closes would falsely read as a shard that died mid-suite.
+ *
+ * @throws when either harness does not close on the summary, the journal end, and the tally-derived
+ *         status
+ */
+fn cgt_the_harness_ends_on_the_tally_and_not_on_zero() {
+    let main_plain = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestPlain) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(main_plain, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_plain, cgt_journal_symbol("note_test_end")))
+    teko::assert::is_true(teko::str::contains(main_plain, "return tk_test_any_failed() ? 1 : 0;"))
+    teko::assert::is_true(!teko::str::contains(main_plain, "return 0;"))
+    let main_analyze = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestAnalyze) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_captured_run_line()))
+    teko::assert::is_true(teko::str::contains(main_analyze, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_journal_symbol("note_test_end")))
+    teko::assert::is_true(teko::str::contains(main_analyze, "return tk_test_any_failed() ? 1 : 0;"))
+    teko::assert::is_true(!teko::str::contains(main_analyze, "return 0;"))
+}

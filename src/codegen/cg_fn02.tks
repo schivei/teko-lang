@@ -1,0 +1,273 @@
+/** teko::codegen functions (split 2/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * has_c_float_marker — does `text` already carry a character that makes a C numeric constant
+ * FLOATING-POINT rather than integer: a decimal point or an exponent marker?
+ *
+ * @param text  the numeric constant text
+ * @return      true iff `text` contains `.`, `e` or `E`
+ */
+fn has_c_float_marker(text: str) -> bool {
+    mut i: u64 = 0 to u64
+    loop {
+        if i >= text.len { break }
+        let ch = text[i]
+        if ch == b'.' || ch == b'e' || ch == b'E' { return true }
+        i++
+    }
+    false
+}
+
+// cb_cstr_escaped — append `s` C-escaped, INSIDE an already-open C string literal. The
+// bytes are raw (may contain NUL, quotes, newlines) — see TStrLit. We never rely on
+// length here; the caller emits the explicit byte count separately (M.1).
+// (C: `cb_cstr_escaped`.)
+fn cb_cstr_escaped(buf: []byte, s: str) -> []byte {
+    mut b = buf
+    mut i = 0
+    loop {
+        if i >= s.len { break }
+        let c = s[i]
+        if c == b'\\' { b = cb(b, "\\\\") }
+        else if c == b'"' { b = cb(b, "\\\"") }
+        else if c == b'\n' { b = cb(b, "\\n") }
+        else if c == b'\t' { b = cb(b, "\\t") }
+        else if c == b'\r' { b = cb(b, "\\r") }
+        else if c < 0x20 || c >= 0x7F {
+            // 3-digit octal — fixed width dodges the hex "run-on digit" hazard.
+            b = cb_byte(b, b'\\')
+            b = cb_byte(b, (b'0' to i64 + ((c to i64 / 64) % 8)) to byte)   // octal hundreds
+            b = cb_byte(b, (b'0' to i64 + ((c to i64 / 8) % 8)) to byte)   // octal tens
+            b = cb_byte(b, (b'0' to i64 + (c to i64 % 8)) to byte)   // octal ones
+        }
+        else { b = cb_byte(b, c) }
+        i++
+    }
+    b
+}
+
+// (C7.1k) tk_emit_meta — the build-metadata C appended to EVERY binary by the backend (after
+// tk_emit_c), so the artifact carries its identity on every OS. An `@(#)`-marked string literal,
+// readable by what(1) / `strings`: "@(#)<name> <version>[-<suffix>] | <description>". (The macOS
+// build additionally embeds an Info.plist section; Windows VERSIONINFO + a Linux ELF note follow.)
+// (C: `tk_emit_meta`.)
+pub fn tk_emit_meta(name: str, version: str, suffix: str, description: str) -> str {
+    mut b: []byte = teko::list::empty()
+    b = cb(b, "\n/* build metadata (teko C7.1k) — what(1)/strings-readable */\n")
+    b = cb(b, "__attribute__((used)) static const char tk_build_meta[] = \"@(#)")
+    b = cb_cstr_escaped(b, name)
+    b = cb(b, " ")
+    b = cb_cstr_escaped(b, version)
+    if suffix != "" { b = cb(b, "-"); b = cb_cstr_escaped(b, suffix) }
+    if description != "" { b = cb(b, " | "); b = cb_cstr_escaped(b, description) }
+    b = cb(b, "\";\n")
+    str(b)
+}
+
+// ---------------------------------------------------------------------------
+// Types -> C type text.
+// ---------------------------------------------------------------------------
+
+/**
+ * emit_prim — a `PrimKind` -> its C fixed-width type name. (C: `emit_prim`.)
+ *
+ * @param buf  the growable output buffer
+ * @param k    the prim kind to emit
+ * @return     the grown buffer
+ */
+fn emit_prim(buf: []byte, k: checker::PrimKind) -> []byte | error {
+    match k {
+        checker::PrimKind::U8 => cb(buf, "uint8_t")
+        checker::PrimKind::U16 => cb(buf, "uint16_t")
+        checker::PrimKind::U32 => cb(buf, "uint32_t")
+        checker::PrimKind::U64 => cb(buf, "uint64_t")
+        checker::PrimKind::I8 => cb(buf, "int8_t")
+        checker::PrimKind::I16 => cb(buf, "int16_t")
+        checker::PrimKind::I32 => cb(buf, "int32_t")
+        checker::PrimKind::I64 => cb(buf, "int64_t")
+        checker::PrimKind::F32 => cb(buf, "float")
+        checker::PrimKind::F64 => cb(buf, "double")
+        checker::PrimKind::Bool => cb(buf, "bool")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W4c — NAME MANGLING for named aggregate types.
+// A named aggregate `T` in namespace `N` -> the C identifier
+//   tk_t_<N with :: -> __>__<T>      (for the bare root ns, just tk_t_<T>).
+// ONE helper used by BOTH the type-decl emitter and emit_type's Named case so a
+// declaration and its references always agree. NOTE: the semantic Named carries only the
+// BARE name (resolve.tks drops the namespace) and the typed item carries no namespace
+// either, so both call sites pass an EMPTY namespace and mangle by bare name alone —
+// consistent for decl + ref (the "keep it simple and consistent" rule). The namespace
+// parameter is honored (`::` -> `__`) for the day the typed item carries provenance.
+// (C: `mangle_type_name`.)
+// ---------------------------------------------------------------------------
+// (#109 W3) append a (canonical) type NAME to a C-symbol buffer, collapsing each "::" → "__" so a
+// canonical "teko::emit::Reader" becomes the valid identifier fragment "teko__emit__Reader". The ONE
+// place the "::"→"__" rule lives — used by mangle_type_name AND every direct tk_base_/tk_vt_ concat, so
+// a decl and its every reference (fat-pointer/vtable included) agree on the same C symbol.
+fn cb_tysym(buf: []byte, name: str) -> []byte {
+    mut out = buf
+    mut i = 0
+    loop {
+        if i >= name.len { break }
+        if i + 1 < name.len && name[i] == b':' && name[i + 1] == b':' {
+            out = cb(out, "__")
+            i = i + 2
+        } else {
+            out = cb_byte(out, name[i])
+            i++
+        }
+    }
+    out
+}
+
+/**
+ * The C typedef name a user TYPE is emitted under: `tk_t_` + the mangled namespace + `__` + the
+ * mangled bare name. The canonical NAME may itself read `ns::Name`, which `cb_tysym` flattens to
+ * `ns__Name` (#109 W3).
+ *
+ * This one does NOT carry `TEKO_USER_PREFIX`, and deliberately so. The prefix ruling governs the
+ * LINKER SYMBOL space, where a user function silently became a runtime function; a C typedef has no
+ * linkage at all, lives only inside the generated translation unit, and shares that space with the
+ * rest of the generated type family (`tk_opt_`, `tk_slice_`, `tk_u_`, `tk_tag_`, `tk_base_`,
+ * `tk_vt_`). A name clash there is a `cc` redefinition error — loud, never a silent substitution.
+ *
+ * @param buf        the emit buffer
+ * @param namespace  the type's declaring namespace ("" for a root-less type)
+ * @param name       the type's canonical name
+ * @return           the buffer with the typedef name appended
+ */
+fn mangle_type_name(buf: []byte, namespace: str, name: str) -> []byte {
+    mut out = cb(buf, "tk_t_")
+    if namespace.len > 0 {
+        out = cb_tysym(out, namespace)
+        out = cb(out, "__")
+    }
+    cb_tysym(out, name)
+}
+
+/**
+ * The C symbol a top-level user FUNCTION is emitted under: `TEKO_USER_PREFIX` + the namespace with
+ * every `:` rewritten to `_` + `__` + the bare (keyword-escaped) name.
+ *
+ * The prefix is what makes user symbols and runtime builtins DISJOINT BY CONSTRUCTION (owner ruling
+ * 2026-07-27): everything user code declares is `teko_*`, everything the runtime provides is `tk_*`,
+ * so no user function — whatever it is named, in whatever namespace — can ever be spelled the same
+ * as a builtin. The namespace mangle on top of it keeps same-named functions across namespaces (and
+ * libc clashes like `div`) apart. An empty namespace (a lifted lambda) yields just the prefix + the
+ * bare name. Definition, prototype and resolved call all go through here, so they agree by
+ * construction; `main` is the one deliberate exception and is emitted literally, never through this.
+ *
+ * @param buf   the emit buffer
+ * @param ns    the function's declaring namespace ("" for a lifted lambda)
+ * @param name  the function's bare name
+ * @return      the buffer with the C symbol appended
+ */
+fn cb_fn_name(buf: []byte, ns: str, name: str) -> []byte {
+    mut out = cb(buf, TEKO_USER_PREFIX)
+    if ns.len != 0 {
+        mut i = 0
+        loop {
+            if i >= ns.len { break }
+            if ns[i] == b':' { out = cb_byte(out, b'_') } else { out = cb_byte(out, ns[i]) }
+            i++
+        }
+        out = cb(out, "__")
+    }
+    cb_ident(out, name)
+}
+
+/**
+ * Round `entries` up to the power-of-two bucket count that holds them under the table's load factor.
+ *
+ * @param entries  the number of keys the table must hold
+ * @return         the bucket count: a power of two, at least `CG_TABLE_MIN_CAP`, and at least
+ *                 `CG_TABLE_LOAD_NUMERATOR * entries`
+ * @since cargo/20-codegen-perf
+ */
+fn cg_table_cap(entries: u64) -> u64 {
+    let want = entries * CG_TABLE_LOAD_NUMERATOR
+    mut cap = CG_TABLE_MIN_CAP
+    loop {
+        if cap >= want { break }
+        cap = cap * 2
+    }
+    cap
+}
+
+/**
+ * A `[]u64` of `n` zeroes — the fresh backing array for a table's hash or slot column.
+ *
+ * @param n  the element count
+ * @return   `n` zeroes
+ * @since cargo/20-codegen-perf
+ */
+fn cg_zeros(n: u64) -> []u64 {
+    mut out: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, 0 to u64)
+        i++
+    }
+    out
+}
+
+/**
+ * A `[]str` of `n` empty strings — the fresh backing array for a table's key column.
+ *
+ * @param n  the element count
+ * @return   `n` empty strings
+ * @since cargo/20-codegen-perf
+ */
+fn cg_blanks(n: u64) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, "")
+        i++
+    }
+    out
+}
+
+/**
+ * Build a `CgNameTable` from parallel key/slot columns, keeping the FIRST slot offered for any
+ * repeated key so a probe reproduces the scan order it replaces.
+ *
+ * @param keys_in   the keys, in `prog.items` order
+ * @param slots_in  each key's item index biased by one, parallel to `keys_in`
+ * @return          the populated open-addressed table
+ * @since cargo/20-codegen-perf
+ */
+fn cg_table_build(keys_in: []str, slots_in: []u64) -> CgNameTable {
+    let cap = cg_table_cap(keys_in.len)
+    let mask = cap - 1
+    mut hashes = cg_zeros(cap)
+    mut keys = cg_blanks(cap)
+    mut slots = cg_zeros(cap)
+    mut n: u64 = 0
+    loop {
+        if n >= keys_in.len { break }
+        let key = keys_in[n]
+        let h = teko::runtime::str_hash(key)
+        mut at = h & mask
+        loop {
+            if slots[at] == 0 {
+                hashes[at] = h
+                keys[at] = key
+                slots[at] = slots_in[n]
+                break
+            }
+            if hashes[at] == h && keys[at] == key { break }
+            at = (at + 1) & mask
+        }
+        n++
+    }
+    CgNameTable { mask = mask; hashes = hashes; keys = keys; slots = slots }
+}

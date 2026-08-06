@@ -1,0 +1,268 @@
+/** teko::codegen functions (split 39/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * emit_type_decl — emit ONE type declaration. `d.name` is the bare name; the namespace is
+ * empty (the typed item carries no provenance) so decl + ref mangle identically.
+ *
+ * @param buf   the C output buffer to grow
+ * @param prog  the typed program (field/type resolution for the aggregate arms)
+ * @param d     the type declaration to emit
+ * @return      `buf` followed by `d`'s C declaration (empty for a compile-time-only body:
+ *              a transparent alias, an interface, a trait)
+ * @throws      when a body's shape is not emittable (a variant body that is not a union, a
+ *              member type codegen cannot name)
+ */
+fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl) -> []byte | error {
+    match d.body {
+        parser::StructBody as sb => {
+            mut out = cb(buf, "typedef struct ")
+            out = mangle_type_name(out, "", d.name)
+            out = cb(out, " {\n")
+            mut i = 0
+            loop {
+                if i >= sb.fields.len { break }
+                out = cb(out, "    ")
+                out = match emit_type_expr(out, prog, sb.fields[i].type_ann, checker::name_qualifier(d.name)) { []byte as o => o; error as err => return err }   // (#109 W3) ref_ns = the decl's own ns
+                out = cb(out, " ")
+                // auto-box: a recursive back-edge field is a heap pointer (finite C struct).
+                if cg_field_boxed(prog, d.name, sb.fields[i].type_ann) { out = cb(out, "*") }
+                out = cb_str(out, sb.fields[i].name)
+                out = cb(out, ";\n")
+                i++
+            }
+            out = cb(out, "} ")
+            out = mangle_type_name(out, "", d.name)
+            cb(out, ";\n\n")
+        }
+        parser::ClassBody as cb2 => {   // (W10b.CLASS) same C representation as a struct — same field
+            // layout, no arena-per-object yet. Increment 2: the EFFECTIVE (base-inherited) fields,
+            // so a derived class's C struct physically contains every ancestor's field too
+            // (field-flattening composition — no embedded C object/vtable).
+            let table = cg_type_table(prog)
+            let fields = match checker::effective_class_fields(cb2, table) { []parser::Field as fs => fs; error as err => return err }
+            mut out = cb(buf, "typedef struct ")
+            out = mangle_type_name(out, "", d.name)
+            out = cb(out, " {\n")
+            mut i = 0
+            loop {
+                if i >= fields.len { break }
+                out = cb(out, "    ")
+                out = match emit_type_expr(out, prog, fields[i].type_ann, checker::name_qualifier(d.name)) { []byte as o => o; error as err => return err }   // (#109 W3) ref_ns = the decl's own ns
+                out = cb(out, " ")
+                if cg_field_boxed(prog, d.name, fields[i].type_ann) { out = cb(out, "*") }
+                out = cb_str(out, fields[i].name)
+                out = cb(out, ";\n")
+                i++
+            }
+            // (W10b.CLASS increment 4) a HIDDEN field carrying the instance's OWN arena-per-object
+            // region handle — invisible to the Teko-level type system (the checker never sees it;
+            // no `Field` entry), set once at construction (emit_struct_init_framed) and read back
+            // at a frame-local binding's scope exit to drop the object's region (and, first, call
+            // `destruct()` if the class declares one) — the retention mechanism a per-object
+            // region needs to be reclaimed at ALL (increment 3 left this open: nothing tracked the
+            // region handle past the construction expression itself).
+            out = cb(out, "    tk_region *__region;\n")
+            out = cb(out, "} ")
+            out = mangle_type_name(out, "", d.name)
+            cb(out, ";\n\n")
+        }
+        parser::InterfaceBody => {   // (W10b.IF) an interface is a COMPILE-TIME contract only — NO
+            // runtime C type is emitted (dynamic dispatch / vtable is ROUND 3). Like a transparent
+            // alias, it lowers to nothing; the checker rejects using an interface as a value type.
+            buf
+        }
+        parser::TraitBody => {   // (TR0) a trait is COMPILE-TIME only — its members were FOLDED
+            // into every deriver before typing (fold_traits), and the checker rejects a trait in
+            // any value/instantiation position, so the decl itself lowers to nothing.
+            buf
+        }
+        parser::VariantBody as vb => {
+            // A variant body is a UnionType (A | B | …). Members may be ANY type (B-cg2):
+            // named cases, `error`, prims, slices — each mapped to a C-safe member KEY.
+            let members = match vb.type_expr {
+                parser::UnionType as u => u.members
+                _ => return error { message = "codegen: a variant body must be a union of members" }
+            }
+            // 1) the tag enum: TK_TAG_<UPPER Name>_<UPPER memberKey> per member.
+            mut out = cb(buf, "typedef enum tk_tag_")
+            out = cb_tysym(out, d.name)   // (#149) canonical d.name carries `::` → collapse (mirror C's cb_tysym)
+            out = cb(out, " {\n")
+            mut i = 0
+            loop {
+                if i >= members.len { break }
+                let mk = match cg_member_key_texpr_str(members[i]) { str as s => s; error as err => return err }
+                out = cb(out, "    TK_TAG_")
+                out = cb_upper(out, checker::name_last_segment(d.name))   // (#109 W3) BARE enum name (mirror C)
+                out = cb(out, "_")
+                out = cb_upper(out, mk)
+                if i + 1 < members.len { out = cb(out, ",") }
+                out = cb(out, "\n")
+                i++
+            }
+            out = cb(out, "} tk_tag_")
+            out = cb_tysym(out, d.name)   // (#149) collapse
+            out = cb(out, ";\n\n")
+            // 2) the value: tag + union as. Each union field is named by the member KEY and
+            //    typed via emit_type_expr (covers named/error/prim/slice/optional members).
+            out = cb(out, "typedef struct ")
+            out = mangle_type_name(out, "", d.name)
+            out = cb(out, " {\n    tk_tag_")
+            out = cb_tysym(out, d.name)   // (#149) collapse
+            out = cb(out, " tag;\n    union {\n")
+            mut j = 0
+            loop {
+                if j >= members.len { break }
+                let mem = members[j]
+                let mk = match cg_member_key_texpr_str(mem) { str as s => s; error as err => return err }
+                out = cb(out, "        ")
+                out = match emit_type_expr(out, prog, mem, checker::name_qualifier(d.name)) { []byte as o => o; error as err => return err }   // (#109 W3) ref_ns = the decl's own ns
+                out = cb(out, " ")
+                out = cb_str(out, mk)   // union field == the member key
+                out = cb(out, ";\n")
+                j++
+            }
+            out = cb(out, "    } as;\n} ")
+            out = mangle_type_name(out, "", d.name)
+            cb(out, ";\n\n")
+        }
+        parser::EnumBody as eb => {
+            mut out = cb(buf, "typedef enum ")
+            out = mangle_type_name(out, "", d.name)
+            out = cb(out, " {\n")
+            mut i = 0
+            loop {
+                if i >= eb.members.len { break }
+                out = cb(out, "    TK_E_")
+                out = cb_upper(out, checker::name_last_segment(d.name))   // (#109 W3) BARE enum name
+                out = cb(out, "_")
+                out = cb_upper(out, eb.members[i])
+                if i + 1 < eb.members.len { out = cb(out, ",") }
+                out = cb(out, "\n")
+                i++
+            }
+            out = cb(out, "} ")
+            out = mangle_type_name(out, "", d.name)
+            cb(out, ";\n\n")
+        }
+        parser::AliasBody => {
+            // A TRANSPARENT alias emits NO C type — references resolve through to the aliased
+            // type at the checker, and codegen emits that resolved type at every use site.
+            buf
+        }
+        parser::FlagsBody as fb => emit_flags_typedef(buf, d, fb)
+        parser::ExternBody => {
+            // (C7.1a) an OPAQUE foreign handle → a C `void *` typedef, so the existing
+            // Named → tk_t_<Name> mangle resolves to it (distinct in Teko, plain `void *` in C).
+            mut o = cb(buf, "typedef void *")
+            o = mangle_type_name(o, "", d.name)
+            cb(o, ";\n\n")
+        }
+    }
+}
+
+/**
+ * The mangled-name dedup key for a type; the empty string `""` for an unsupported type (skipped).
+ *
+ * Used for both optional inners and slice elements (same mangle). Renders `cg_opt_mangle` into a
+ * scratch buffer and materializes it once, so callers store the result rather than recompute it.
+ *
+ * @param t  the type to mangle
+ * @return   the mangled key, or `""` if `t` cannot be mangled
+ */
+fn cg_opt_key(t: checker::Type) -> str {
+    match cg_opt_mangle(teko::list::empty(), t) { []byte as o => str(o); error => "" }
+}
+
+/**
+ * Register a slice element type in the codegen set, deduped by its mangled key.
+ *
+ * Computes the key ONCE, pushes it to `slice_keys`, and dedup scans read the stored key. An
+ * unsupported element (empty key) is skipped so `emit_type` errors honestly.
+ *
+ * @param set   the registry to extend
+ * @param elem  the slice's element type to register
+ * @return      the set with `elem` appended, or unchanged if already present or unsupported
+ */
+fn cg_slice_add(set: CgTypeSet, elem: checker::Type) -> CgTypeSet {
+    let key = cg_opt_key(elem)
+    if key == "" { return set }
+    mut i = 0
+    loop {
+        if i >= set.slice_keys.len { break }
+        if set.slice_keys[i] == key { return set }
+        i++
+    }
+    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = teko::list::push(set.slices, elem); slice_keys = teko::list::push(set.slice_keys, key); variants = set.variants; variant_keys = set.variant_keys }
+}
+
+/**
+ * B-cg2 — the dedup key for an INLINE variant type (its `tk_u_<keys>` name); `""` for unsupported.
+ *
+ * Renders `cg_variant_typename` into a scratch buffer and materializes it once. (C:
+ * `cg_variant_typename` render-to-scratch.)
+ *
+ * @param t  the type to key; only an inline `Variant` yields a non-empty key
+ * @return   the mangled variant name, or `""` if `t` is not a mangleable inline variant
+ */
+fn cg_variant_key(t: checker::Type) -> str {
+    match t {
+        checker::Variant as v => match cg_variant_typename(teko::list::empty(), v) { []byte as o => str(o); error => "" }
+        _ => ""
+    }
+}
+
+/**
+ * B-cg2 — register an INLINE variant type in the codegen set, deduped by its `tk_u_<keys>` name.
+ *
+ * A Named variant carries its own decl typedef and is NOT registered here. Computes the key ONCE,
+ * pushes it to `variant_keys`, and dedup scans read the stored key. An unsupported member (empty
+ * key) is skipped so `emit_type` errors honestly.
+ *
+ * @param set  the registry to extend
+ * @param t    the inline variant type to register
+ * @return     the set with `t` appended, or unchanged if already present or unsupported
+ */
+fn cg_variant_add(set: CgTypeSet, t: checker::Type) -> CgTypeSet {
+    let key = cg_variant_key(t)
+    if key == "" { return set }
+    mut i = 0
+    loop {
+        if i >= set.variant_keys.len { break }
+        if set.variant_keys[i] == key { return set }
+        i++
+    }
+    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = set.slices; slice_keys = set.slice_keys; variants = teko::list::push(set.variants, t); variant_keys = teko::list::push(set.variant_keys, key) }
+}
+
+/**
+ * cg_collect_type_opts — register every slice's element in a type (nested elements first, so
+ * `[][]T` orders right), and every INLINE `A | B | …` variant (recursing into each member FIRST,
+ * so a member that is a slice gets its typedef before the enclosing `tk_u_<keys>` references it).
+ * (C: `cg_collect_type_opts`.)
+ *
+ * @param set  the registry accumulated so far
+ * @param t    the resolved type to walk
+ * @return     `set` extended with every slice/variant `t` reaches
+ */
+fn cg_collect_type_opts(set: CgTypeSet, t: checker::Type) -> CgTypeSet {
+    match t {
+        checker::Slice as sl => match sl.element {
+            checker::Void => set
+            _ => cg_slice_add(cg_collect_type_opts(set, sl.element), sl.element)
+        }
+        checker::Variant as va => {
+            mut s = set
+            mut i = 0
+            loop {
+                if i >= va.members.len { break }
+                s = cg_collect_type_opts(s, va.members[i])
+                i++
+            }
+            cg_variant_add(s, t)
+        }
+        _ => set
+    }
+}
