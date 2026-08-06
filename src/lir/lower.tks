@@ -6763,14 +6763,159 @@ fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::
         checker::Null => return lower_variant_null_construct(ctx, v, value)
         _ => { }
     }
-    match direct_variant_member_index(v.members, value.type) {
-        u32 => return lower_variant_construct(ctx, v, value)
-        null => { }
+    // SUBSUMPTION — the residual PAYLOAD-ADDRESS side of B1 (native-variant-into-variant-widen). A
+    // value whose OWN type is a MEMBER of `v` (directly, OR through an alias member's own
+    // expansion — `variant_any_member_matches`) is being WIDENED into `v` and must be RE-WRAPPED as
+    // that member, EVEN WHEN IT IS ITSELF A VARIANT: `Ty` flowing into `Ty | error` is the case
+    // `collect_sig_type_params`/`assemble_sel` reach. The former passthrough returned the NARROWER
+    // variant's own 24-byte wrapper unchanged, so a later `Ty as t` read the wider union's payload
+    // word (offset 8) — the inner wrapper's OWN payload pointer, not a boxed `Ty` — as the case
+    // address, then boxed 24 bytes from it (`tk_slice_elem_box`) → SIGSEGV. Only a value whose type
+    // is `v` ITSELF (re-flowing the SAME union) is a non-member here, and it alone passes through.
+    if variant_any_member_matches(v.members, value.type, ctx.variants) {
+        return lower_variant_construct(ctx, v, value)
     }
     match expand_named_variant(value.type, ctx.variants) {
-        checker::Variant => lower_expr(ctx, value)
+        checker::Variant as nt => {
+            // NP-widen (native-narrow-union-into-wider-variant): a value whose OWN type is a
+            // narrow union that is a STRICT SUBSET of `v` (every member of `nt` is a member of `v`,
+            // but `nt` has FEWER members, so it is not `v` itself) is the arm-join shape
+            // `type_param_reg`'s `if ifaces { InterfaceBody } else { ExternBody }` bound to a
+            // `TypeBody`-typed slot reaches. Its wrapper carries `nt`'s OWN tag numbering, which
+            // does NOT agree with `v`'s — the former passthrough handed that wrapper on unchanged, so
+            // a later `td.body as InterfaceBody` read `v`'s payload word through `nt`'s tag space and
+            // boxed a wild pointer (measured: `resolve_type_reg`'s type-param `TypeReg.decl` came out
+            // a `.text` address, then `resolve_named`'s `match td.body` dereferenced code bytes →
+            // SIGSEGV). The uniform 24-byte wrapper (`variant_wrapper_bytes`) is byte-compatible
+            // across every variant, so the widen is a payload-preserving RE-TAG into `v`'s space.
+            // Only a value whose type is `v` ITSELF (the SAME union re-flowing, `nt.len == v.len`)
+            // is a legitimate passthrough, and it alone stays on that path — byte-identical.
+            if nt.members.len < v.members.len && variant_all_members_in(nt.members, v, ctx.variants) {
+                return lower_subset_variant_widen(ctx, v, nt, value)
+            }
+            lower_expr(ctx, value)
+        }
         _ => lower_variant_construct(ctx, v, value)
     }
+}
+
+/**
+ * variant_all_members_in — is EVERY member of `nt_members` also a member of `v` (by
+ * `variant_index_of_member_type`, the SAME lookup `lower_subset_variant_widen` uses to compute each
+ * remapped tag)? The strict-subset test that guards the NP-widen re-tag: sharing the exact index
+ * lookup guarantees that whenever this answers true, the widen's per-member index computation cannot
+ * fail.
+ *
+ * @param []checker::Type nt_members  the narrow union's declared members
+ * @param checker::Variant v  the wider variant being widened into
+ * @param []LVariantDef variants  the program's declared-variant table
+ * @return bool  whether every `nt` member has a matching member (hence a tag) in `v`
+ * @since 0.3.1.0 (native-narrow-union-into-wider-variant widen)
+ */
+fn variant_all_members_in(nt_members: []checker::Type, v: checker::Variant, variants: []LVariantDef) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= nt_members.len { break }
+        match variant_index_of_member_type(v.members, nt_members[i], variants) {
+            u32 => { }
+            error => return false
+        }
+        i++
+    }
+    true
+}
+
+/**
+ * lower_subset_variant_widen — RE-TAG a narrow-union value into the WIDER variant `v`
+ * (native-narrow-union-into-wider-variant). The narrow value's wrapper and `v`'s wrapper share the
+ * uniform 24-byte `{ i32 tag@0; ptr@8; len@16 }` image (`variant_wrapper_bytes`), and the boxed
+ * payload word is identical either way — so widening is a payload-preserving copy plus a tag REMAP
+ * from `nt`'s member numbering into `v`'s. The remapped tag is computed BRANCHLESSLY as
+ * `Σ_j (narrow_tag == j) * wide_index_j` (`compute_widened_tag`) — one `ICmpEq`/`IMul`/`IAdd` triple
+ * per narrow member, no control flow, so the widen stays a straight-line lean sequence.
+ *
+ * @param LowerCtx ctx  the lowering context to append the widen's instructions into
+ * @param checker::Variant v  the wider variant being widened into
+ * @param checker::Variant nt  the narrow union the value is currently typed as
+ * @param checker::TExpr value  the narrow-union value expression
+ * @return Lowered  the widened wrapper's alloca'd base address
+ * @throws  propagated from lowering `value`, or when a narrow member names no member of `v`
+ * @since 0.3.1.0 (native-narrow-union-into-wider-variant widen)
+ */
+fn lower_subset_variant_widen(ctx: LowerCtx, v: checker::Variant, nt: checker::Variant, value: checker::TExpr) -> Lowered | error {
+    let line = value.line
+    let col = value.col
+    let nw = match lower_expr(ctx, value) { Lowered as x => x; error as err => return err }
+    // load the narrow tag (i32 @ 0)
+    let ta = ctx_alloc(nw.ctx)
+    let c_ta = ctx_append(ta.ctx, field_addr_inst(ta.vreg, nw.vreg, 0, line, col))
+    let tg = ctx_alloc(c_ta)
+    let c_tg = ctx_append(tg.ctx, load_inst(tg.vreg, ta.vreg, LType::I32, line, col))
+    // load the payload word (@8) and the length half (@16) — copied VERBATIM (the box is shared)
+    let p8a = ctx_alloc(c_tg)
+    let c_p8a = ctx_append(p8a.ctx, field_addr_inst(p8a.vreg, nw.vreg, variant_payload_offset(), line, col))
+    let p8 = ctx_alloc(c_p8a)
+    let c_p8 = ctx_append(p8.ctx, load_inst(p8.vreg, p8a.vreg, LType::Ptr, line, col))
+    let p16a = ctx_alloc(c_p8)
+    let c_p16a = ctx_append(p16a.ctx, field_addr_inst(p16a.vreg, nw.vreg, variant_payload_len_offset(), line, col))
+    let p16 = ctx_alloc(c_p16a)
+    let c_p16 = ctx_append(p16.ctx, load_inst(p16.vreg, p16a.vreg, LType::Ptr, line, col))
+    // alloca the wider wrapper and copy both payload halves
+    let base = ctx_alloc(c_p16)
+    let c_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), line, col))
+    let w8a = ctx_alloc(c_alloca)
+    let c_w8a = ctx_append(w8a.ctx, field_addr_inst(w8a.vreg, base.vreg, variant_payload_offset(), line, col))
+    let c_w8 = ctx_append(c_w8a, store_inst(w8a.vreg, p8.vreg, LType::Ptr, line, col))
+    let w16a = ctx_alloc(c_w8)
+    let c_w16a = ctx_append(w16a.ctx, field_addr_inst(w16a.vreg, base.vreg, variant_payload_len_offset(), line, col))
+    let c_w16 = ctx_append(c_w16a, store_inst(w16a.vreg, p16.vreg, LType::Ptr, line, col))
+    // compute the remapped tag in v's space and store it (i32 @ 0)
+    let wt = match compute_widened_tag(c_w16, nt, v, tg.vreg, line, col) { Lowered as x => x; error as err => return err }
+    let wta = ctx_alloc(wt.ctx)
+    let c_wta = ctx_append(wta.ctx, field_addr_inst(wta.vreg, base.vreg, 0, line, col))
+    let c_wtag = ctx_append(c_wta, store_inst(wta.vreg, wt.vreg, LType::I32, line, col))
+    Lowered { ctx = c_wtag; vreg = base.vreg }
+}
+
+/**
+ * compute_widened_tag — the RE-TAG arithmetic of `lower_subset_variant_widen`: `v`'s tag for the
+ * narrow value, computed branchlessly as `Σ_j (narrow_tag == j) * wide_index_j` over `nt`'s
+ * members. Each `ICmpEq` yields 0/1 (exactly as `lower_variant_tag_eq_test`'s tag test does), scaled
+ * by that member's index in `v` and summed — so the one true term selects `v`'s index and every
+ * other contributes 0. No branch, no merge block: a straight-line triple per narrow member.
+ *
+ * @param LowerCtx ctx  the lowering context to append the arithmetic into
+ * @param checker::Variant nt  the narrow union (its member order IS the runtime tag numbering)
+ * @param checker::Variant v  the wider variant (its member order IS the target tag numbering)
+ * @param u32 tag_vreg  the VReg holding the loaded narrow tag
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return Lowered  the VReg holding the widened tag
+ * @throws  when a narrow member names no member of `v` (guarded upstream by `variant_all_members_in`)
+ * @since 0.3.1.0 (native-narrow-union-into-wider-variant widen)
+ */
+fn compute_widened_tag(ctx: LowerCtx, nt: checker::Variant, v: checker::Variant, tag_vreg: u32, line: u32, col: u32) -> Lowered | error {
+    let z = ctx_alloc(ctx)
+    mut cur = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
+    mut acc = z.vreg
+    mut j: u64 = 0
+    loop {
+        if j >= nt.members.len { break }
+        let k = match variant_index_of_member_type(v.members, nt.members[j], cur.variants) { u32 as x => x to i64; error as err => return err }
+        let jc = ctx_alloc(cur)
+        let c_jc = ctx_append(jc.ctx, const_int_inst(jc.vreg, j to i64, line, col))
+        let eq = ctx_alloc(c_jc)
+        let c_eq = ctx_append(eq.ctx, bin_inst(eq.vreg, LBinOp::ICmpEq, tag_vreg, jc.vreg, line, col))
+        let kc = ctx_alloc(c_eq)
+        let c_kc = ctx_append(kc.ctx, const_int_inst(kc.vreg, k, line, col))
+        let term = ctx_alloc(c_kc)
+        let c_term = ctx_append(term.ctx, bin_inst(term.vreg, LBinOp::IMul, eq.vreg, kc.vreg, line, col))
+        let nacc = ctx_alloc(c_term)
+        cur = ctx_append(nacc.ctx, bin_inst(nacc.vreg, LBinOp::IAdd, acc, term.vreg, line, col))
+        acc = nacc.vreg
+        j++
+    }
+    Lowered { ctx = cur; vreg = acc }
 }
 
 /**
@@ -15357,8 +15502,8 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
         if i >= fields.len { break }
         let te = fields[i].type_ann
         let ft = ltype_of_typeexpr(te, enums)
-        let nested = struct_layout_of_field(te, known)
         let rft = resolved_field_type(te, ns, dtable)
+        let nested = struct_layout_of_resolved(rft, te, known)
         field_names = teko::list::push(field_names, fields[i].name)
         field_types = teko::list::push(field_types, ft)
         field_sizes = teko::list::push(field_sizes, field_layout_size(te, ft, nested, table, rft))
@@ -15379,10 +15524,62 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
  * @param []LStructLayout known  every struct layout resolved so far
  * @return LStructLayout?  the matching nested layout, or `null`
  */
+/**
+ * struct_layout_of_resolved — a field's nested struct-BY-VALUE layout, keyed by the field's RESOLVED
+ * CANONICAL type name (`resolved_field_type`), with the syntactic annotation only as a fallback.
+ *
+ * This is the whole `resolve_named`/self-build fix. Struct layouts are registered under the CANONICAL
+ * name a `checker::Named` carries (`qualify`'s `teko::parser::TypeDecl`), which is exactly the key
+ * `find_struct_layout` probes at field-access time (`named_type_name(arg.type)`). But the field's
+ * syntactic annotation is written RELATIVE (`decl: parser::TypeDecl`) or bare (`body: TypeBody`), so a
+ * lookup by the annotation string — single-segment OR full path (`struct_layout_of_field`) — missed
+ * every non-root nested struct field and fell to the 8-byte `Ptr` fallback (`field_size_of`). A field
+ * like `TypeReg.decl: parser::TypeDecl` was then sized 8 instead of `TypeDecl`'s full inline width, so
+ * the BOX of a `TypeReg` value (`named_layout_bytes(TypeReg)`, the variant-payload/return copy)
+ * truncated the inline `decl` — and a later `r.decl` / `td.body` read past the copied prefix,
+ * dereferencing a garbage pointer (the native `resolve_named` SIGSEGV; arch-independent shared layout
+ * math; C leg immune, `cc` lays its own structs out). Resolving through `rft` yields the SAME canonical
+ * spelling the layout table is keyed by, so the two finally agree. A resolver-unqualifiable annotation
+ * (a monomorphized bare-`T` instance) keeps the syntactic fallback.
+ *
+ * @param rft    the field's RESOLVED declared type (`resolved_field_type`)
+ * @param te     the field's syntactic annotation (the fallback when `rft` is not a canonical Named)
+ * @param known  every struct layout resolved so far
+ * @return       the field's nested struct layout, or `null` (a scalar/fat/variant/forward-ref field)
+ */
+fn struct_layout_of_resolved(rft: checker::Type, te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout | null {
+    match rft {
+        checker::Named as n => match find_known_struct_layout(known, n.name) {
+            LStructLayout as l => return l
+            null => { }
+        }
+        _ => { }
+    }
+    struct_layout_of_field(te, known)
+}
+
 fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout | null {
-    match named_type_name_of(te) {
-        str as name => find_known_struct_layout(known, name)
-        null => null
+    // Struct layouts are keyed by CANONICAL (qualified) name — `find_struct_layout` is called at
+    // field-access time with `named_type_name(arg.type)`, a `resolve_named`-qualified name. A field
+    // whose annotation is itself written QUALIFIED (`decl: parser::TypeDecl`, `sig: checker::TFuncSig`
+    // — pervasive across the self-hosted compiler's own parser/checker structs) must therefore be
+    // looked up by its FULL path name; the bare single-segment lookup alone matched only a
+    // root-namespace type (canonical == bare), so every non-root nested struct-by-value field fell
+    // through to `null` and was under-sized to the 8-byte `Ptr` fallback (`field_size_of`), placing
+    // every LATER field at the wrong offset and truncating the field's own inline extent — the
+    // wrong-OFFSET base a `tk_slice_elem_box`/by-address copy then read garbage from (the native
+    // `resolve_named`/`assemble_sel` SIGSEGV, arch-independent because this layout math is shared).
+    // The C leg is immune: it lets `cc` lay every struct out. Try the qualified path first, then the
+    // bare segment — purely additive, so no name that matched before stops matching.
+    match te {
+        parser::NamedType as nt => match find_known_struct_layout(known, path_name_of(nt.path)) {
+            LStructLayout as l => l
+            null => match single_segment_name(nt.path) {
+                str as bare => find_known_struct_layout(known, bare)
+                null => null
+            }
+        }
+        _ => null
     }
 }
 
