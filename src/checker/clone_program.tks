@@ -1,0 +1,1152 @@
+use teko::parser
+use teko::lexer
+
+/**
+ * clone_str — a fresh copy of `s`'s bytes in a newly allocated buffer, so the clone shares no
+ * string storage with the frontend region. `teko::str::concat(s, "")` always mallocs a new buffer
+ * (the runtime `tk_str_concat` never short-circuits on an empty operand), giving a malloc-backed
+ * copy that no region drop can reach — identical bytes, so codegen (structural, never by-address)
+ * emits identically.
+ *
+ * @param s  the source string
+ * @return   a fresh copy of `s` owning its own buffer
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_str(s: str) -> str {
+    teko::str::concat(s, "")
+}
+
+/**
+ * clone_str_list — rebuild a `[]str`, deep-copying every element string (see `clone_str`).
+ *
+ * @param xs  the source string slice
+ * @return    a fresh slice of fresh string copies
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_str_list(xs: []str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_str(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_u64_list — rebuild a `[]u64` into the current region. The elements are scalars (copied by
+ * value), but the backing array itself is region-allocated in the source, so it must be rebuilt.
+ *
+ * @param xs  the source u64 slice
+ * @return    a fresh slice with the same values
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_u64_list(xs: []u64) -> []u64 {
+    mut out: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, xs[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_numint — copy a `parser::NumInt` literal (sign + magnitude, both scalars) by value.
+ *
+ * @param x  the source numeric-literal value
+ * @return   an identical `parser::NumInt`
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_numint(x: parser::NumInt) -> parser::NumInt {
+    parser::NumInt { neg = x.neg; mag = x.mag }
+}
+
+/**
+ * clone_segment — copy one path segment, deep-copying its name.
+ *
+ * @param s  the source segment
+ * @return   a fresh segment
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_segment(s: parser::Segment) -> parser::Segment {
+    parser::Segment { name = clone_str(s.name) }
+}
+
+/**
+ * clone_segment_list — rebuild a `[]parser::Segment`.
+ *
+ * @param xs  the source segment slice
+ * @return    a fresh segment slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_segment_list(xs: []parser::Segment) -> []parser::Segment {
+    mut out: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_segment(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_path — copy a `parser::Path`, rebuilding its segment slice.
+ *
+ * @param p  the source path
+ * @return   a fresh path
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_path(p: parser::Path) -> parser::Path {
+    parser::Path { segments = clone_segment_list(p.segments) }
+}
+
+/**
+ * clone_typeexpr — deep-copy a syntactic `parser::TypeExpr` (recursive over its four cases).
+ *
+ * @param t  the source type expression
+ * @return   a fresh type expression holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_typeexpr(t: parser::TypeExpr) -> parser::TypeExpr {
+    match t {
+        parser::NamedType as n => parser::NamedType { path = clone_path(n.path); args = clone_typeexpr_list(n.args) }
+        parser::SliceType as s => parser::SliceType { element = clone_typeexpr(s.element) }
+        parser::UnionType as u => parser::UnionType { members = clone_typeexpr_list(u.members) }
+        parser::FunctionType as f => parser::FunctionType { params = clone_typeexpr_list(f.params); ret = clone_typeexpr(f.ret) }
+    }
+}
+
+/**
+ * clone_typeexpr_list — rebuild a `[]parser::TypeExpr`.
+ *
+ * @param xs  the source type-expression slice
+ * @return    a fresh type-expression slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_typeexpr_list(xs: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out: []parser::TypeExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_typeexpr(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_cmpterm — deep-copy one continuation term of a syntactic comparison chain.
+ *
+ * @param t  the source term
+ * @return   a fresh term
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_cmpterm(t: parser::CmpTerm) -> parser::CmpTerm {
+    parser::CmpTerm { op = t.op; operand = clone_expr(t.operand) }
+}
+
+/**
+ * clone_cmpterm_list — rebuild a `[]parser::CmpTerm`.
+ *
+ * @param xs  the source term slice
+ * @return    a fresh term slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_cmpterm_list(xs: []parser::CmpTerm) -> []parser::CmpTerm {
+    mut out: []parser::CmpTerm = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_cmpterm(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_fspeckind — deep-copy the three format-spec cases (none / static text / dynamic args).
+ *
+ * @param k  the source format-spec kind
+ * @return   a fresh format-spec kind
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_fspeckind(k: parser::FSpecKind) -> parser::FSpecKind {
+    match k {
+        parser::FSpecNone => parser::FSpecNone { }
+        parser::FSpecStatic as s => parser::FSpecStatic { s = clone_str(s.s) }
+        parser::FSpecDynamic as d => parser::FSpecDynamic { args = clone_expr_list(d.args) }
+    }
+}
+
+/**
+ * clone_fspec — deep-copy a syntactic interpolation format spec.
+ *
+ * @param f  the source format spec
+ * @return   a fresh format spec
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_fspec(f: parser::FSpec) -> parser::FSpec {
+    parser::FSpec { kind = clone_fspeckind(f.kind) }
+}
+
+/**
+ * clone_fspec_list — rebuild a `[]parser::FSpec`.
+ *
+ * @param xs  the source format-spec slice
+ * @return    a fresh format-spec slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_fspec_list(xs: []parser::FSpec) -> []parser::FSpec {
+    mut out: []parser::FSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_fspec(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_arrayelem — deep-copy one syntactic array-literal element (plain or spread).
+ *
+ * @param e  the source element
+ * @return   a fresh element
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_arrayelem(e: parser::ArrayElem) -> parser::ArrayElem {
+    parser::ArrayElem { is_spread = e.is_spread; expr = clone_expr(e.expr) }
+}
+
+/**
+ * clone_arrayelem_list — rebuild a `[]parser::ArrayElem`.
+ *
+ * @param xs  the source element slice
+ * @return    a fresh element slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_arrayelem_list(xs: []parser::ArrayElem) -> []parser::ArrayElem {
+    mut out: []parser::ArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_arrayelem(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_lambdaparam — deep-copy one syntactic closure-literal parameter.
+ *
+ * @param p  the source parameter
+ * @return   a fresh parameter
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_lambdaparam(p: parser::LambdaParam) -> parser::LambdaParam {
+    parser::LambdaParam { name = clone_str(p.name); has_type = p.has_type; type_ann = clone_typeexpr(p.type_ann) }
+}
+
+/**
+ * clone_lambdaparam_list — rebuild a `[]parser::LambdaParam`.
+ *
+ * @param xs  the source parameter slice
+ * @return    a fresh parameter slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_lambdaparam_list(xs: []parser::LambdaParam) -> []parser::LambdaParam {
+    mut out: []parser::LambdaParam = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_lambdaparam(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_expr_list — rebuild a `[]parser::Expr`.
+ *
+ * @param xs  the source expression slice
+ * @return    a fresh expression slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_expr_list(xs: []parser::Expr) -> []parser::Expr {
+    mut out: []parser::Expr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_expr(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_exprkind — deep-copy a syntactic expression node (all 24 `parser::ExprKind` cases).
+ *
+ * @param k  the source expression kind
+ * @return   a fresh expression kind holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_exprkind(k: parser::ExprKind) -> parser::ExprKind {
+    match k {
+        parser::Number as n => parser::Number { is_float = n.is_float; value = clone_numint(n.value); fval = n.fval }
+        parser::Var as v => parser::Var { name = clone_str(v.name) }
+        parser::Call as c => parser::Call { callee = clone_path(c.callee); args = clone_expr_list(c.args); arg_names = clone_str_list(c.arg_names); type_args = clone_typeexpr_list(c.type_args) }
+        parser::IfExpr as f => parser::IfExpr { cond = clone_expr(f.cond); then_blk = clone_stmt_list(f.then_blk); has_else = f.has_else; else_blk = clone_stmt_list(f.else_blk) }
+        parser::MatchExpr as m => parser::MatchExpr { subject = clone_expr(m.subject); arms = clone_arm_list(m.arms) }
+        parser::StrLit as s => parser::StrLit { text = clone_str(s.text) }
+        parser::ByteLit as b => parser::ByteLit { value = b.value }
+        parser::CharLit as c => parser::CharLit { bytes = clone_str(c.bytes) }
+        parser::BoolLit as b => parser::BoolLit { value = b.value }
+        parser::NullLit => parser::NullLit { }
+        parser::Binary as b => parser::Binary { op = b.op; left = clone_expr(b.left); right = clone_expr(b.right) }
+        parser::Unary as u => parser::Unary { op = u.op; operand = clone_expr(u.operand) }
+        parser::Compare as c => parser::Compare { first = clone_expr(c.first); rest = clone_cmpterm_list(c.rest) }
+        parser::FieldAccess as f => parser::FieldAccess { receiver = clone_expr(f.receiver); field = clone_str(f.field) }
+        parser::MethodCall as m => parser::MethodCall { receiver = clone_expr(m.receiver); method = clone_str(m.method); args = clone_expr_list(m.args) }
+        parser::Cast as c => parser::Cast { expr = clone_expr(c.expr); target = clone_typeexpr(c.target) }
+        parser::PathExpr as p => parser::PathExpr { path = clone_path(p.path) }
+        parser::StructLit as s => parser::StructLit { type_path = clone_path(s.type_path); type_args = clone_typeexpr_list(s.type_args); field_names = clone_str_list(s.field_names); field_vals = clone_expr_list(s.field_vals) }
+        parser::Index as i => parser::Index { receiver = clone_expr(i.receiver); index = clone_expr(i.index) }
+        parser::Interp as n => parser::Interp { pieces = clone_str_list(n.pieces); holes = clone_expr_list(n.holes); specs = clone_fspec_list(n.specs) }
+        parser::InExpr as n => parser::InExpr { lhs = clone_expr(n.lhs); elems = clone_expr_list(n.elems) }
+        parser::ArrayLit as a => parser::ArrayLit { elements = clone_arrayelem_list(a.elements) }
+        parser::Lambda as l => parser::Lambda { params = clone_lambdaparam_list(l.params); body = clone_stmt_list(l.body) }
+        parser::Borrow as b => parser::Borrow { operand = clone_expr(b.operand) }
+    }
+}
+
+/**
+ * clone_expr — deep-copy a syntactic `parser::Expr` (its kind plus source position).
+ *
+ * @param e  the source expression
+ * @return   a fresh expression
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_expr(e: parser::Expr) -> parser::Expr {
+    parser::Expr { kind = clone_exprkind(e.kind); line = e.line; col = e.col }
+}
+
+/**
+ * clone_bindtarget — deep-copy a binding target (a simple name or a destructure pattern).
+ *
+ * @param t  the source bind target
+ * @return   a fresh bind target
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_bindtarget(t: parser::BindTarget) -> parser::BindTarget {
+    match t {
+        parser::SimpleName as s => parser::SimpleName { name = clone_str(s.name) }
+        parser::DestructurePattern as d => parser::DestructurePattern { names = clone_str_list(d.names) }
+    }
+}
+
+/**
+ * clone_pattern — deep-copy a `match`-arm pattern (all seven `parser::Pattern` cases).
+ *
+ * @param p  the source pattern
+ * @return   a fresh pattern holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_pattern(p: parser::Pattern) -> parser::Pattern {
+    match p {
+        parser::LiteralPattern as l => parser::LiteralPattern { value = clone_expr(l.value) }
+        parser::RangePattern as r => parser::RangePattern { lo = clone_expr(r.lo); hi = clone_expr(r.hi) }
+        parser::AltPattern as a => parser::AltPattern { options = clone_pattern_list(a.options) }
+        parser::BindPattern as b => parser::BindPattern { type_name = clone_path(b.type_name); has_binding = b.has_binding; binding = clone_str(b.binding); is_slice = b.is_slice; slice_type = match b.slice_type { parser::TypeExpr as st => clone_typeexpr(st); null => null }; type_args = clone_typeexpr_list(b.type_args) }
+        parser::FieldPattern as f => parser::FieldPattern { type_name = clone_path(f.type_name); fields = clone_str_list(f.fields) }
+        parser::WildcardPattern => parser::WildcardPattern { }
+        parser::NullPattern => parser::NullPattern { }
+    }
+}
+
+/**
+ * clone_pattern_list — rebuild a `[]parser::Pattern`.
+ *
+ * @param xs  the source pattern slice
+ * @return    a fresh pattern slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_pattern_list(xs: []parser::Pattern) -> []parser::Pattern {
+    mut out: []parser::Pattern = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_pattern(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_arm — deep-copy one syntactic `match` arm (pattern, guard, body).
+ *
+ * @param a  the source arm
+ * @return   a fresh arm
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_arm(a: parser::Arm) -> parser::Arm {
+    parser::Arm { pattern = clone_pattern(a.pattern); has_when = a.has_when; guard = clone_expr(a.guard); body = clone_stmt_list(a.body) }
+}
+
+/**
+ * clone_arm_list — rebuild a `[]parser::Arm`.
+ *
+ * @param xs  the source arm slice
+ * @return    a fresh arm slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_arm_list(xs: []parser::Arm) -> []parser::Arm {
+    mut out: []parser::Arm = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_arm(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_statement — deep-copy a syntactic `parser::Statement` (all nine cases).
+ *
+ * @param s  the source statement
+ * @return   a fresh statement holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_statement(s: parser::Statement) -> parser::Statement {
+    match s {
+        parser::Binding as b => parser::Binding { kind = b.kind; target = clone_bindtarget(b.target); has_type = b.has_type; type_ann = clone_typeexpr(b.type_ann); is_ref = b.is_ref; value = clone_expr(b.value); di_kind = b.di_kind }
+        parser::Assign as a => parser::Assign { kind = a.kind; name = clone_str(a.name); op = a.op; value = clone_expr(a.value); deref = a.deref; target = clone_expr(a.target) }
+        parser::Return as r => parser::Return { has_value = r.has_value; value = clone_expr(r.value) }
+        parser::LoopStmt as l => parser::LoopStmt { label = clone_str(l.label); init = clone_stmt_list(l.init); body = clone_stmt_list(l.body) }
+        parser::BreakStmt as b => parser::BreakStmt { label = clone_str(b.label) }
+        parser::ContinueStmt as c => parser::ContinueStmt { label = clone_str(c.label) }
+        parser::ExprStmt as e => parser::ExprStmt { expr = clone_expr(e.expr) }
+        parser::DeferStmt as d => parser::DeferStmt { body = clone_stmt_list(d.body) }
+        parser::AdoptStmt as a => parser::AdoptStmt { name = clone_str(a.name); body = clone_stmt_list(a.body) }
+    }
+}
+
+/**
+ * clone_stmt_list — deep-copy a syntactic statement block.
+ *
+ * @param xs  the source statements
+ * @return    a fresh statement slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_stmt_list(xs: []parser::Statement) -> []parser::Statement {
+    mut out: []parser::Statement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_statement(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_constraintexpr — deep-copy a generic type-parameter constraint (atom / and / or / none).
+ *
+ * @param c  the source constraint
+ * @return   a fresh constraint
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_constraintexpr(c: parser::ConstraintExpr) -> parser::ConstraintExpr {
+    match c {
+        parser::ConstraintAtom as a => parser::ConstraintAtom { name = clone_str(a.name) }
+        parser::ConstraintAnd as n => parser::ConstraintAnd { left = clone_constraintexpr(n.left); right = clone_constraintexpr(n.right) }
+        parser::ConstraintOr as o => parser::ConstraintOr { left = clone_constraintexpr(o.left); right = clone_constraintexpr(o.right) }
+        parser::NoConstraint => parser::NoConstraint { }
+    }
+}
+
+/**
+ * clone_constraintexpr_list — rebuild a `[]parser::ConstraintExpr`.
+ *
+ * @param xs  the source constraint slice
+ * @return    a fresh constraint slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_constraintexpr_list(xs: []parser::ConstraintExpr) -> []parser::ConstraintExpr {
+    mut out: []parser::ConstraintExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_constraintexpr(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_param — deep-copy one immutable function parameter, including its default expression.
+ *
+ * @param p  the source parameter
+ * @return   a fresh parameter
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_param(p: parser::Param) -> parser::Param {
+    parser::Param { name = clone_str(p.name); has_type = p.has_type; type_ann = clone_typeexpr(p.type_ann); is_params = p.is_params; has_default = p.has_default; default_expr = clone_expr(p.default_expr) }
+}
+
+/**
+ * clone_param_list — rebuild a `[]parser::Param`.
+ *
+ * @param xs  the source parameter slice
+ * @return    a fresh parameter slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_param_list(xs: []parser::Param) -> []parser::Param {
+    mut out: []parser::Param = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_param(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_injectbinding — deep-copy one `#inject(name: Type)` DI binding.
+ *
+ * @param b  the source inject binding
+ * @return   a fresh inject binding
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_injectbinding(b: parser::InjectBinding) -> parser::InjectBinding {
+    parser::InjectBinding { name = clone_str(b.name); type_ann = clone_typeexpr(b.type_ann); has_key = b.has_key; key = clone_str(b.key); line = b.line; col = b.col }
+}
+
+/**
+ * clone_injectbinding_list — rebuild a `[]parser::InjectBinding`.
+ *
+ * @param xs  the source inject-binding slice
+ * @return    a fresh inject-binding slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_injectbinding_list(xs: []parser::InjectBinding) -> []parser::InjectBinding {
+    mut out: []parser::InjectBinding = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_injectbinding(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_field — deep-copy one struct/class/trait field declaration.
+ *
+ * @param f  the source field
+ * @return   a fresh field
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_field(f: parser::Field) -> parser::Field {
+    parser::Field { name = clone_str(f.name); type_ann = clone_typeexpr(f.type_ann); vis = f.vis; is_intern = f.is_intern; has_doc = f.has_doc; doc = clone_str(f.doc) }
+}
+
+/**
+ * clone_field_list — rebuild a `[]parser::Field`.
+ *
+ * @param xs  the source field slice
+ * @return    a fresh field slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_field_list(xs: []parser::Field) -> []parser::Field {
+    mut out: []parser::Field = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_field(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_parser_constdecl — deep-copy a syntactic module/type-member constant declaration.
+ *
+ * @param c  the source const declaration
+ * @return   a fresh const declaration
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_parser_constdecl(c: parser::ConstDecl) -> parser::ConstDecl {
+    parser::ConstDecl { name = clone_str(c.name); ty = clone_typeexpr(c.ty); init = clone_expr(c.init); vis = c.vis; has_doc = c.has_doc; doc = clone_str(c.doc); line = c.line; col = c.col }
+}
+
+/**
+ * clone_parser_constdecl_list — rebuild a `[]parser::ConstDecl`.
+ *
+ * @param xs  the source const-declaration slice
+ * @return    a fresh const-declaration slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_parser_constdecl_list(xs: []parser::ConstDecl) -> []parser::ConstDecl {
+    mut out: []parser::ConstDecl = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_parser_constdecl(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_function — deep-copy a syntactic `parser::Function` (carried through a passed-through
+ * `TypeDecl`'s method list). Rebuilds every slice field and every string.
+ *
+ * @param f  the source function declaration
+ * @return   a fresh function declaration holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_function(f: parser::Function) -> parser::Function {
+    parser::Function {
+        name = clone_str(f.name)
+        type_params = clone_str_list(f.type_params)
+        type_constraints = clone_constraintexpr_list(f.type_constraints)
+        params = clone_param_list(f.params)
+        has_return = f.has_return
+        return_type = clone_typeexpr(f.return_type)
+        body = clone_stmt_list(f.body)
+        vis = f.vis
+        has_doc = f.has_doc
+        doc = clone_str(f.doc)
+        line = f.line
+        col = f.col
+        is_test = f.is_test
+        is_extern = f.is_extern
+        c_symbol = clone_str(f.c_symbol)
+        from_lib = clone_str(f.from_lib)
+        os_guard = clone_str(f.os_guard)
+        is_intern = f.is_intern
+        is_abstract = f.is_abstract
+        is_virtual = f.is_virtual
+        is_override = f.is_override
+        has_inject = f.has_inject
+        injects = clone_injectbinding_list(f.injects)
+        is_unsafe = f.is_unsafe
+        has_arena_size = f.has_arena_size
+        arena_size = f.arena_size
+    }
+}
+
+/**
+ * clone_function_list — rebuild a `[]parser::Function` (a type body's method list).
+ *
+ * @param xs  the source function slice
+ * @return    a fresh function slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_function_list(xs: []parser::Function) -> []parser::Function {
+    mut out: []parser::Function = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_function(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_typebody — deep-copy a `parser::TypeBody` (struct/enum/flags/variant/alias/extern/class/
+ * interface/trait). Struct/class/trait bodies carry full method `Function`s, cloned in turn.
+ *
+ * @param b  the source type body
+ * @return   a fresh type body
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_typebody(b: parser::TypeBody) -> parser::TypeBody {
+    match b {
+        parser::StructBody as s => parser::StructBody { fields = clone_field_list(s.fields); methods = clone_function_list(s.methods); implements = clone_str_list(s.implements); consts = clone_parser_constdecl_list(s.consts) }
+        parser::EnumBody as e => parser::EnumBody { members = clone_str_list(e.members) }
+        parser::FlagsBody as f => parser::FlagsBody { members = clone_str_list(f.members); values = clone_u64_list(f.values) }
+        parser::VariantBody as v => parser::VariantBody { type_expr = clone_typeexpr(v.type_expr) }
+        parser::AliasBody as a => parser::AliasBody { alias = clone_typeexpr(a.alias) }
+        parser::ExternBody => parser::ExternBody { }
+        parser::ClassBody as c => parser::ClassBody { kind = c.kind; has_base = c.has_base; base_name = clone_str(c.base_name); has_base_binding = c.has_base_binding; base_binding_name = clone_str(c.base_binding_name); implements = clone_str_list(c.implements); fields = clone_field_list(c.fields); methods = clone_function_list(c.methods); consts = clone_parser_constdecl_list(c.consts) }
+        parser::InterfaceBody as i => parser::InterfaceBody { extends = clone_str_list(i.extends); methods = clone_function_list(i.methods) }
+        parser::TraitBody as t => parser::TraitBody { fields = clone_field_list(t.fields); methods = clone_function_list(t.methods); consts = clone_parser_constdecl_list(t.consts) }
+    }
+}
+
+/**
+ * clone_typedecl — deep-copy a `parser::TypeDecl` passed through as a `TItem`.
+ *
+ * @param d  the source type declaration
+ * @return   a fresh type declaration holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_typedecl(d: parser::TypeDecl) -> parser::TypeDecl {
+    parser::TypeDecl {
+        name = clone_str(d.name)
+        type_params = clone_str_list(d.type_params)
+        type_constraints = clone_constraintexpr_list(d.type_constraints)
+        body = clone_typebody(d.body)
+        vis = d.vis
+        has_doc = d.has_doc
+        doc = clone_str(d.doc)
+        line = d.line
+        col = d.col
+        di_kind = d.di_kind
+        has_di_key = d.has_di_key
+        di_key = clone_str(d.di_key)
+        is_unsafe = d.is_unsafe
+        must_free = d.must_free
+    }
+}
+
+/**
+ * clone_usedecl — deep-copy a `parser::UseDecl` passed through as a `TItem`.
+ *
+ * @param u  the source use declaration
+ * @return   a fresh use declaration
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_usedecl(u: parser::UseDecl) -> parser::UseDecl {
+    parser::UseDecl { path = clone_path(u.path); has_alias = u.has_alias; alias = clone_str(u.alias); names = clone_str_list(u.names) }
+}
+
+/**
+ * clone_type — deep-copy a semantic `Type` (all 14 cases). `Ptr.inner` is the one `Type | null`
+ * field and is cloned through by value (null stays null).
+ *
+ * @param t  the source type
+ * @return   a fresh type holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_type(t: Type) -> Type {
+    match t {
+        Prim as p => Prim { kind = p.kind }
+        Byte => Byte { }
+        Char => Char { }
+        Str => Str { }
+        Slice as s => Slice { element = clone_type(s.element) }
+        Named as n => Named { name = clone_str(n.name) }
+        Variant as v => Variant { members = clone_type_list(v.members) }
+        Func as f => Func { params = clone_type_list(f.params); ret = clone_type(f.ret); variadic = f.variadic; param_names = clone_str_list(f.param_names); n_required = f.n_required; defaults = clone_expr_list(f.defaults) }
+        Error => Error { }
+        Void => Void { }
+        Ptr as p => Ptr { inner = match p.inner { Type as ti => clone_type(ti); null => null } }
+        Uptr => Uptr { }
+        Reference as r => Reference { inner = clone_type(r.inner) }
+        Null => Null { }
+    }
+}
+
+/**
+ * clone_type_list — deep-copy a `[]Type`.
+ *
+ * @param xs  the source type slice
+ * @return    a fresh type slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_type_list(xs: []Type) -> []Type {
+    mut out: []Type = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_type(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tcmpterm — deep-copy one typed comparison-chain continuation term.
+ *
+ * @param t  the source term
+ * @return   a fresh term
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tcmpterm(t: TCmpTerm) -> TCmpTerm {
+    TCmpTerm { op = t.op; operand = clone_texpr(t.operand) }
+}
+
+/**
+ * clone_tcmpterm_list — rebuild a `[]TCmpTerm`.
+ *
+ * @param xs  the source term slice
+ * @return    a fresh term slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tcmpterm_list(xs: []TCmpTerm) -> []TCmpTerm {
+    mut out: []TCmpTerm = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_tcmpterm(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tfspeckind — deep-copy the three typed format-spec cases.
+ *
+ * @param k  the source format-spec kind
+ * @return   a fresh format-spec kind
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tfspeckind(k: TFSpecKind) -> TFSpecKind {
+    match k {
+        TFSpecNone => TFSpecNone { }
+        TFSpecStatic as s => TFSpecStatic { s = clone_str(s.s) }
+        TFSpecDynamic as d => TFSpecDynamic { args = clone_texpr_list(d.args) }
+    }
+}
+
+/**
+ * clone_tfspec — deep-copy a typed interpolation format spec.
+ *
+ * @param f  the source format spec
+ * @return   a fresh format spec
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tfspec(f: TFSpec) -> TFSpec {
+    TFSpec { kind = clone_tfspeckind(f.kind) }
+}
+
+/**
+ * clone_tfspec_list — rebuild a `[]TFSpec`.
+ *
+ * @param xs  the source format-spec slice
+ * @return    a fresh format-spec slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tfspec_list(xs: []TFSpec) -> []TFSpec {
+    mut out: []TFSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_tfspec(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tarrayelem — deep-copy one typed array-literal element (plain or spread).
+ *
+ * @param e  the source element
+ * @return   a fresh element
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tarrayelem(e: TArrayElem) -> TArrayElem {
+    TArrayElem { is_spread = e.is_spread; expr = clone_texpr(e.expr) }
+}
+
+/**
+ * clone_tarrayelem_list — rebuild a `[]TArrayElem`.
+ *
+ * @param xs  the source element slice
+ * @return    a fresh element slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tarrayelem_list(xs: []TArrayElem) -> []TArrayElem {
+    mut out: []TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_tarrayelem(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tlambdaparam — deep-copy one typed closure parameter.
+ *
+ * @param p  the source parameter
+ * @return   a fresh parameter
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tlambdaparam(p: TLambdaParam) -> TLambdaParam {
+    TLambdaParam { name = clone_str(p.name); type = clone_type(p.type) }
+}
+
+/**
+ * clone_tlambdaparam_list — rebuild a `[]TLambdaParam`.
+ *
+ * @param xs  the source parameter slice
+ * @return    a fresh parameter slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tlambdaparam_list(xs: []TLambdaParam) -> []TLambdaParam {
+    mut out: []TLambdaParam = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_tlambdaparam(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tcapture — deep-copy one typed closure capture.
+ *
+ * @param c  the source capture
+ * @return   a fresh capture
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tcapture(c: TCapture) -> TCapture {
+    TCapture { name = clone_str(c.name); type = clone_type(c.type); by_ref = c.by_ref }
+}
+
+/**
+ * clone_tcapture_list — rebuild a `[]TCapture`.
+ *
+ * @param xs  the source capture slice
+ * @return    a fresh capture slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tcapture_list(xs: []TCapture) -> []TCapture {
+    mut out: []TCapture = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_tcapture(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tarm — deep-copy one typed `match` arm (its pattern stays syntactic).
+ *
+ * @param a  the source arm
+ * @return   a fresh arm
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tarm(a: TArm) -> TArm {
+    TArm { pattern = clone_pattern(a.pattern); has_when = a.has_when; guard = clone_texpr(a.guard); body = clone_tstmt_list(a.body) }
+}
+
+/**
+ * clone_tarm_list — rebuild a `[]TArm`.
+ *
+ * @param xs  the source arm slice
+ * @return    a fresh arm slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tarm_list(xs: []TArm) -> []TArm {
+    mut out: []TArm = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_tarm(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_texpr_list — rebuild a `[]TExpr`.
+ *
+ * @param xs  the source typed expression slice
+ * @return    a fresh typed expression slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_texpr_list(xs: []TExpr) -> []TExpr {
+    mut out: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_texpr(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_texprkind — deep-copy a typed expression node (all 23 `TExprKind` cases). Private-name
+ * access to `TExprKind` is why this module lives in the checker namespace.
+ *
+ * @param k  the source typed expression kind
+ * @return   a fresh typed expression kind holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_texprkind(k: TExprKind) -> TExprKind {
+    match k {
+        TNumber as n => TNumber { is_float = n.is_float; value = clone_numint(n.value); fval = n.fval }
+        TVar as v => TVar { name = clone_str(v.name); is_func = v.is_func; func_ns = clone_str(v.func_ns) }
+        TStrLit as s => TStrLit { text = clone_str(s.text) }
+        TByteLit as b => TByteLit { value = b.value }
+        TCharLit as c => TCharLit { bytes = clone_str(c.bytes) }
+        TBoolLit as b => TBoolLit { value = b.value }
+        TNullLit => TNullLit { }
+        TBinary as b => TBinary { op = b.op; left = clone_texpr(b.left); right = clone_texpr(b.right) }
+        TUnary as u => TUnary { op = u.op; operand = clone_texpr(u.operand) }
+        TCompare as c => TCompare { first = clone_texpr(c.first); rest = clone_tcmpterm_list(c.rest) }
+        TCall as c => TCall { callee = clone_path(c.callee); args = clone_texpr_list(c.args); call_ns = clone_str(c.call_ns); is_closure_call = c.is_closure_call; callee_type = clone_type(c.callee_type); is_iface_dispatch = c.is_iface_dispatch; iface_slot = c.iface_slot }
+        TIfExpr as f => TIfExpr { cond = clone_texpr(f.cond); then_blk = clone_tstmt_list(f.then_blk); has_else = f.has_else; else_blk = clone_tstmt_list(f.else_blk) }
+        TMatchExpr as m => TMatchExpr { subject = clone_texpr(m.subject); arms = clone_tarm_list(m.arms) }
+        TCast as c => TCast { expr = clone_texpr(c.expr) }
+        TFieldAccess as f => TFieldAccess { receiver = clone_texpr(f.receiver); field = clone_str(f.field) }
+        TStructInit as s => TStructInit { field_names = clone_str_list(s.field_names); field_vals = clone_texpr_list(s.field_vals) }
+        TIndex as i => TIndex { receiver = clone_texpr(i.receiver); index = clone_texpr(i.index) }
+        TInterp as n => TInterp { pieces = clone_str_list(n.pieces); holes = clone_texpr_list(n.holes); specs = clone_tfspec_list(n.specs) }
+        TInExpr as n => TInExpr { lhs = clone_texpr(n.lhs); elems = clone_texpr_list(n.elems) }
+        TPathExpr as p => TPathExpr { enum_name = clone_str(p.enum_name); member = clone_str(p.member); ordinal = p.ordinal; value = p.value }
+        TArrayLit as a => TArrayLit { elements = clone_tarrayelem_list(a.elements) }
+        TLambda as l => TLambda { params = clone_tlambdaparam_list(l.params); body = clone_tstmt_list(l.body); captures = clone_tcapture_list(l.captures); ret = clone_type(l.ret); lift_id = l.lift_id }
+        TBorrow as b => TBorrow { operand = clone_texpr(b.operand) }
+    }
+}
+
+/**
+ * clone_texpr — deep-copy a typed `TExpr` (its kind, resolved type, and source position).
+ *
+ * @param e  the source typed expression
+ * @return   a fresh typed expression
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_texpr(e: TExpr) -> TExpr {
+    TExpr { kind = clone_texprkind(e.kind); type = clone_type(e.type); line = e.line; col = e.col }
+}
+
+/**
+ * clone_tstatement — deep-copy a typed `TStatement` (all nine cases).
+ *
+ * @param s  the source typed statement
+ * @return   a fresh typed statement holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tstatement(s: TStatement) -> TStatement {
+    match s {
+        TBinding as b => TBinding { kind = b.kind; target = clone_bindtarget(b.target); bound = clone_type(b.bound); value = clone_texpr(b.value); di_kind = b.di_kind }
+        TAssign as a => TAssign { kind = a.kind; name = clone_str(a.name); op = a.op; bound = clone_type(a.bound); value = clone_texpr(a.value); deref = a.deref; target = clone_texpr(a.target) }
+        TReturn as r => TReturn { has_value = r.has_value; value = clone_texpr(r.value) }
+        TLoopStmt as l => TLoopStmt { label = clone_str(l.label); init = clone_tstmt_list(l.init); body = clone_tstmt_list(l.body) }
+        TBreakStmt as b => TBreakStmt { label = clone_str(b.label) }
+        TContinueStmt as c => TContinueStmt { label = clone_str(c.label) }
+        TExprStmt as e => TExprStmt { expr = clone_texpr(e.expr) }
+        TDeferStmt as d => TDeferStmt { body = clone_tstmt_list(d.body) }
+        TAdoptStmt as a => TAdoptStmt { name = clone_str(a.name); body = clone_tstmt_list(a.body) }
+    }
+}
+
+/**
+ * clone_tstmt_list — deep-copy a typed statement block.
+ *
+ * @param xs  the source typed statements
+ * @return    a fresh typed statement slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tstmt_list(xs: []TStatement) -> []TStatement {
+    mut out: []TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_tstatement(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tfunction — deep-copy a typed `TFunction` (its typed body, params, constraints, strings).
+ *
+ * @param f  the source typed function
+ * @return   a fresh typed function holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tfunction(f: TFunction) -> TFunction {
+    TFunction {
+        name = clone_str(f.name)
+        type_params = clone_str_list(f.type_params)
+        type_constraints = clone_constraintexpr_list(f.type_constraints)
+        params = clone_param_list(f.params)
+        return_type = clone_type(f.return_type)
+        body = clone_tstmt_list(f.body)
+        vis = f.vis
+        has_doc = f.has_doc
+        doc = clone_str(f.doc)
+        namespace = clone_str(f.namespace)
+        file = clone_str(f.file)
+        line = f.line
+        col = f.col
+        is_test = f.is_test
+        is_extern = f.is_extern
+        c_symbol = clone_str(f.c_symbol)
+        from_lib = clone_str(f.from_lib)
+        has_arena_size = f.has_arena_size
+        arena_size = f.arena_size
+    }
+}
+
+/**
+ * clone_tconstdecl — deep-copy a typed module-level constant declaration.
+ *
+ * @param c  the source typed const declaration
+ * @return   a fresh typed const declaration
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_tconstdecl(c: TConstDecl) -> TConstDecl {
+    TConstDecl { name = clone_str(c.name); namespace = clone_str(c.namespace); ty = clone_type(c.ty); init = clone_texpr(c.init); vis = c.vis; has_doc = c.has_doc; doc = clone_str(c.doc); line = c.line; col = c.col }
+}
+
+/**
+ * clone_titem — deep-copy one typed top-level item (the five `TItem` cases: a typed function, a
+ * passed-through TypeDecl/UseDecl, a typed loose statement, or a typed const).
+ *
+ * @param it  the source item
+ * @return    a fresh item holding no pointer into the source region
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_titem(it: TItem) -> TItem {
+    match it {
+        TFunction as f => clone_tfunction(f)
+        parser::TypeDecl as d => clone_typedecl(d)
+        parser::UseDecl as u => clone_usedecl(u)
+        TStatement as s => clone_tstatement(s)
+        TConstDecl as c => clone_tconstdecl(c)
+    }
+}
+
+/**
+ * clone_titem_list — rebuild a `[]TItem`, the program's top-level surface.
+ *
+ * @param xs  the source item slice
+ * @return    a fresh item slice
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+fn clone_titem_list(xs: []TItem) -> []TItem {
+    mut out: []TItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, clone_titem(xs[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * clone_tprogram_into_current_region — a TOTAL deep clone of a checked `TProgram` into the CURRENT
+ * region: the arena-por-escopo M1a safety boundary. Every item, and transitively every nested
+ * aggregate, slice and string, is rebuilt (never shared by fat-pointer), so the returned program
+ * holds NO pointer into the region its argument was allocated in. That is the sufficient condition
+ * (design §2) for M1b to drop the frontend region before codegen without reopening the N112
+ * by-address use-after-free. Byte-identity of the fixpoint over the clone is the proof it is total.
+ *
+ * @param prog  the checked program to clone (typically the `inline_consts` output)
+ * @return      a structurally identical, value-exact program owning all its own storage
+ * @since 0.3.1 arena-por-escopo M1a
+ */
+pub fn clone_tprogram_into_current_region(prog: TProgram) -> TProgram {
+    TProgram { items = clone_titem_list(prog.items) }
+}
