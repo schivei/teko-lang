@@ -348,6 +348,7 @@ fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, re
         return error { message = join_diags(collected) }
     }
     phase_end_ok(checker_phase, count_unit_text(total_cell, total_cell, "items"))
+    report_phase_rss("checker")
 
     let mono_phase = phase_begin("monomorph", count_only_text(0, "instances"), mode)
     let checked = match checker::monomorphize(pre.prog, pre.table) {
@@ -359,12 +360,14 @@ fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, re
     }
     let instances = if checked.items.len > pre.prog.items.len { checked.items.len - pre.prog.items.len } else { 0 }
     phase_end_ok(mono_phase, count_unit_text(instances, instances, "instances"))
+    report_phase_rss("monomorph")
 
     let consts_total = module_const_count(checked)
     let consteval_phase = phase_begin("consteval", count_unit_text(0, consts_total, "consts"), mode)
     match checker::inline_consts(checked) {
         checker::TProgram as inlined => {
             phase_end_ok(consteval_phase, count_unit_text(consts_total, consts_total, "consts"))
+            report_phase_rss("consteval")
             inlined
         }
         error as e => {
@@ -3519,6 +3522,7 @@ fn build_dwarf_sink_for(dir: str, prog: checker::TProgram, symbols: []teko::back
  * pre-built `LModule`.
  */
 fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo) -> i32 {
+    report_phase_rss("codegen start")
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
     let target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
@@ -3645,6 +3649,19 @@ extern fn region_leave() -> void = "tk_region_leave" from "teko_rt"
  * @since 0.3.1 native-region-crash
  */
 extern fn region_current() -> u64 = "tk_region_current_u" from "teko_rt"
+
+/**
+ * cur_rss — this process's CURRENT resident set size in bytes (`tk_cur_rss`, arena-por-escopo M0):
+ * the twin of `teko::mem::peak_rss` (which reports only the monotone high-water mark). Bound as an
+ * `extern fn ... from "teko_rt"` — the seed-lowerable route the region primitives already use — so
+ * the previous released seed (which lacks a `cur_rss` builtin) still lowers this source. Used ONLY
+ * by `report_phase_rss` to ATTRIBUTE where the peak climbs across the frontend→codegen boundary; it
+ * reads `/proc/self/statm` and returns 0 where current RSS is unavailable (Windows/macOS).
+ *
+ * @return  the current resident set size in bytes, or 0 when unavailable
+ * @since 0.3.1 arena-por-escopo M0
+ */
+extern fn cur_rss() -> u64 = "tk_cur_rss" from "teko_rt"
 
 /**
  * encode_lfunc_in_region_x86 — the per-function isel → regalloc → encode pipeline for ONE `LFunc`,
@@ -5358,6 +5375,55 @@ fn report_peak() {
         let frac = mb10 % 10
         teko::io::println($"teko: memory: peak {whole}.{frac} MB")
     }
+}
+
+/**
+ * bytes_to_mb_tenths_str — render a byte count as a one-decimal megabyte string ("1234.5"), the
+ * shared formatter for the RSS reporting so `report_peak` and `report_phase_rss` print the same
+ * units. Extracted to keep the two callers from each duplicating the *10/1048576 tenths arithmetic.
+ *
+ * @param bytes  the raw byte count
+ * @return       the value in MB with one decimal place, as a string
+ * @since 0.3.1 arena-por-escopo M0
+ */
+fn bytes_to_mb_tenths_str(bytes: u64) -> str {
+    let mb10 = bytes * 10 / 1048576
+    let whole = mb10 / 10
+    let frac = mb10 % 10
+    $"{whole}.{frac}"
+}
+
+/**
+ * phase_rss_enabled — whether the per-phase RSS attribution (`TEKO_PHASE_RSS=1`) is requested. Like
+ * the other native diagnostics (`native_region_check_enabled`), it is OFF by default so an ordinary
+ * build's output — and every fixture that matches it — is unchanged; it exists to place WHERE the
+ * self-emit peak climbs across the frontend phases, the arena-por-escopo M0 measurement base.
+ *
+ * @return  true iff `TEKO_PHASE_RSS` is set to `"1"`
+ * @since 0.3.1 arena-por-escopo M0
+ */
+fn phase_rss_enabled() -> bool {
+    match teko::env::var("TEKO_PHASE_RSS") { str as v => v == "1"; error => false }
+}
+
+/**
+ * report_phase_rss — under `TEKO_PHASE_RSS=1`, print the CURRENT and PEAK resident set size at a
+ * named phase boundary, so the self-emit peak can be attributed to the phase it crosses (checker /
+ * monomorph / consteval / codegen-start). Current RSS comes from `cur_rss` (`tk_cur_rss`), peak from
+ * `teko::mem::peak_rss` — the same monotone mark `report_peak` prints at the end. A no-op (and thus
+ * output-identical to before this crumb) when the gate is off or when current RSS is unavailable.
+ *
+ * @param label  the phase boundary this reading follows (e.g. "checker", "codegen start")
+ * @return       void
+ * @since 0.3.1 arena-por-escopo M0
+ */
+fn report_phase_rss(label: str) {
+    if !phase_rss_enabled() { return }
+    let cur = cur_rss()
+    if cur == 0 { return }
+    let cur_s = bytes_to_mb_tenths_str(cur)
+    let peak_s = bytes_to_mb_tenths_str(teko::mem::peak_rss())
+    teko::io::eprintln($"teko: memory: after {label}: cur {cur_s} MB / peak {peak_s} MB")
 }
 
 // strip_tests — the production program WITHOUT `#test` functions (D4): a release binary must

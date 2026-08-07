@@ -3953,6 +3953,30 @@ uint64_t tk_peak_rss(void) {
 #endif
 }
 
+// (arena-por-escopo M0) tk_cur_rss — this process's CURRENT resident set size in BYTES, the
+// twin of tk_peak_rss: where ru_maxrss reports only the high-water mark, this reports the RSS
+// RIGHT NOW, so the build can ATTRIBUTE a peak to the phase boundary it crosses (checker / mono
+// / consteval / codegen). No runtime primitive exposes current RSS; without it the per-phase
+// retention is invisible and no later crumb is gateable by "where the peak lands". Reads
+// /proc/self/statm on Linux (field 2 = resident pages) and scales by the page size; 0 =
+// unavailable (same contract as tk_peak_rss, the caller then suppresses the print). Read-only
+// and side-effect-free, exactly like its twin.
+uint64_t tk_cur_rss(void) {
+#if defined(_WIN32) || defined(__APPLE__)
+    return 0;   /* /proc is Linux-only; the per-phase attribution is a Linux-first measurement */
+#else
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f == NULL) return 0;
+    unsigned long long total_pages = 0, resident_pages = 0;
+    int got = fscanf(f, "%llu %llu", &total_pages, &resident_pages);
+    fclose(f);
+    if (got != 2) return 0;
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) return 0;
+    return (uint64_t)resident_pages * (uint64_t)page;
+#endif
+}
+
 // (E1-C6) tk_rt_nproc — the number of processors the OS grants THIS process right now (online CPUs),
 // at least 1. The OS-granted count is what the test/regression job pools default to and clamp their
 // env override against, so the parallelism a machine may use is the machine's business and never a
