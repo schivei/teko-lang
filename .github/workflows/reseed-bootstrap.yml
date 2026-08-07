@@ -28,10 +28,16 @@
 # by the opened PR's own full matrix — it is NOT a precondition of the harvest, which exists
 # precisely to unblock that native fixpoint.
 #
-# ── IT OPENS A PR, IT DOES NOT PUSH ───────────────────────────────────────────────────────────
-# A reseed is reviewed and merged by a human. This workflow proposes it — harvested C + a complete
-# provenance record — on a fresh reseed/* branch, as a draft PR against the branch it was
-# dispatched from, so the reseed lands on the lineage whose source it was harvested from.
+# ── IT PRODUCES A VERSIONED ARTIFACT + BRANCH; THE DRAIN IS A MANUAL CHERRY-PICK ───────────────
+# This workflow does NOT open a PR and nothing here is ever merged — branch protection admits no
+# bypass, not even for the owner, so a reseed PR could only land once its own CI is 100% green,
+# which is the very state the reseed exists to reach. Instead the workflow HARVESTS the seed,
+# self-verifies it, records provenance against its own run id, and leaves the result in two places:
+#   * a fresh `reseed/teko-c-<run>` branch carrying ONE commit (bootstrap/teko.c + PROVENANCE), and
+#   * an uploaded run artifact `reseed-teko-c/` with the same two files.
+# The owner (or the integrator) then COLLECTS that versioned commit and drains it into the lane by
+# CHERRY-PICK — exactly how every other change reaches fix/retirement — so the seed swap rides in
+# with a valid, run-id-backed provenance record and the lane's own promotion is the 100%-green gate.
 #
 # ── DISPATCH ──────────────────────────────────────────────────────────────────────────────────
 # GitHub only lists workflow_dispatch workflows that exist on the DEFAULT branch, so to reseed a
@@ -56,8 +62,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write        # push the reseed/* branch
-  pull-requests: write   # open the draft PR
+  contents: write        # push the reseed/* branch (never a protected branch; drained by cherry-pick)
 
 jobs:
   reseed:
@@ -143,9 +148,7 @@ jobs:
           git fetch origin "${{ github.sha }}" --depth=1 || true
           sh scripts/provenance_gate.sh . "${{ github.sha }}"
 
-      - name: Open the reseed PR (draft, never auto-merged)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Commit the reseed on a fresh branch (for cherry-pick — NO PR, NO merge)
         run: |
           set -eu
           BRANCH="${{ steps.stage.outputs.branch }}"
@@ -160,10 +163,19 @@ jobs:
           self-lowering source fix takes effect in the built gen1.
 
           sha256: ${{ steps.stage.outputs.digest }}"
+          RESEED_SHA="$(git rev-parse HEAD)"
           git push -u origin "$BRANCH"
-          gh pr create \
-            --base "${{ github.ref_name }}" \
-            --head "$BRANCH" \
-            --draft \
-            --title "chore(bootstrap): reseed teko.c from gen1 @ ${{ github.sha }}" \
-            --body "Automated degrau reseed. Harvested gen1's emitted C from \`${{ github.sha }}\`, self-reproduce-checked down the C route, provenance recorded against run \`${{ github.run_id }}\`. Review the full CI (native fixpoint) before merging."
+          echo "reseed_sha=$RESEED_SHA" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Reseed ready::Drain into the lane by cherry-pick — this is NOT merged. Run:  git fetch origin $BRANCH && git cherry-pick $RESEED_SHA"
+        id: commit
+
+      # THE COLLECTABLE ARTIFACT: the exact two versioned files, for anyone who prefers grabbing
+      # them from the run over fetching the branch. Same bytes, same provenance record.
+      - name: Upload the reseed artifact (bootstrap/teko.c + PROVENANCE)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reseed-teko-c
+          path: |
+            bootstrap/teko.c
+            bootstrap/PROVENANCE
+          if-no-files-found: error
