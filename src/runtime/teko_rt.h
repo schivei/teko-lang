@@ -1109,6 +1109,9 @@ const tk_byte *tk_assert_scenario_prefix_len(uint64_t *out_len);
 const tk_byte *tk_test_scope_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
+// (arena-por-escopo M0) the process CURRENT RSS in bytes (0 = unavailable) — the twin of
+// tk_peak_rss, for per-phase peak attribution. Linux-only (/proc/self/statm); 0 elsewhere.
+uint64_t tk_cur_rss(void);
 // (E1-C6) the OS-granted online processor count (>= 1) — the default and cap for the test/regression
 // job pools, so a run never hard-codes how parallel a machine may be. Bound in the build source
 // through an `extern fn ... from "teko_rt"` (regression.tks `os_max`), the seed-lowerable route the
