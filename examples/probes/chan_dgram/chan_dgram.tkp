@@ -1,0 +1,43 @@
+# The `chan<T>` native-channels effort — CH0: the `AF_UNIX SOCK_DGRAM` fan-in TRANSPORT probe
+# (Linux only).
+#
+# Proves, on the OWN native backend, the exact shape `docs/medicoes/canais-nativos-3-plataformas.md`
+# §2 measured: N writer sockets, each opened independently, `sendto`-ing datagrams AT ONE reader
+# socket's bound name (fan-in BY NAME — one reader fd, no `accept`, no per-writer handler), and a
+# full receive queue REFUSING with `EAGAIN` rather than silently dropping a datagram.
+#
+#   * MAIN PROOF: 4 writers × 500 records = 2000 datagrams, each writer its OWN socket, all sent at
+#     the one reader's name. Every record verified BY CONTENT (writer id + sequence number + a
+#     pattern derived from the two) — counting proves nothing a corruption could not also produce.
+#   * FULL -> EAGAIN PROOF: a second reader, its `SO_RCVBUF` shrunk and the GRANTED size re-read
+#     with `getsockopt` (never assumed — Linux is measured to double the request), flooded with
+#     non-blocking sends until refused, then every ACCEPTED record verified DELIVERED.
+#
+# Sequential from one process (writers run one after another, not concurrently): threads/spawn-based
+# concurrency is a later crumb, and fan-in-by-name needs none of it — each writer's own socket is
+# independent by construction, the same property `docs/medicoes/canais-nativos-3-plataformas.md` §5
+# names for why N *processes* would test nothing a single process with N *sockets* does not already.
+#
+# EVERY socket/errno binding is `#os("linux")`-guarded (C7.1f): the numeric constants (address
+# family, socket type, `SOL_SOCKET` option names, `MSG_DONTWAIT`, `EAGAIN`) are Linux's own ABI
+# values. Portable POSIX/C11 (`aligned_alloc`/`free`/`memset`/`memcmp`) is unguarded.
+#
+# NO `teko::mem::buf_ptr` / `bytes_from_ptr` — neither is wired into the native backend's
+# `call_symbol` table (`docs/design/concorrencia-adiantada-s8.md`, C0(b)); that gap is CH1, not this
+# probe. Every raw buffer here is a plain `c_aligned_alloc` block, read/written through
+# `teko::mem::load_u64`/`store_u64` (proven native by `arena_bottom`) or, for the ONE genuinely
+# narrow read (glibc's `errno` cell), the single-byte `memcmp`-verified `load_byte`
+# `examples/probes/arena_teko/src/word.tks` already proved safe. A socket path is written into a raw
+# buffer one byte at a time through `path[i]`, which lowers natively (`lower_index_str`).
+#
+#   teko build examples/probes/chan_dgram    # own backend, host OS (Linux) -> links, runs
+#   ./examples/probes/chan_dgram/bin/chan_dgram     # -> 42
+#
+# NATIVE ONLY: the C backend emits its own `<stdlib.h>`/`<string.h>` prototypes for `aligned_alloc`/
+# `free`/`memset`/`memcmp`, which collide with this probe's `u64`-address bindings ("conflicting
+# types"), the same reason `arena_bottom` is native-only.
+name = "chan_dgram"
+source = "src"
+
+[artifact]
+kind = "binary"

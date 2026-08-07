@@ -1754,6 +1754,24 @@ Feature: 0.3.1 backend-memoria — o emit nativo fundido por-funcao escopa o scr
     Then stdout pattern = "scenario bmem_lambdas_many: ok"
 
 
+Feature: CK1 scoped-hash-maps — the checker resolves a global name through the sealed base hash index (design docs/design/ck1-scoped-hash-maps-0.3.1.md §8). Each case fails if the index changes a name resolution.
+  Scenario: ck1_shadow_local (a local `let` shadows a same-named global const — the tail-first local scan runs before the indexed base scan)
+    When built and run
+    Then stdout pattern = "scenario ck1_shadow_local: ok"
+  Scenario: ck1_global_via_index (a bare global reference falls through to the base hash index and resolves)
+    When built and run
+    Then stdout pattern = "scenario ck1_global_via_index: ok"
+  Scenario: ck1_many_globals_resolve (three same-prefixed globals each resolve via the hash bucket's exact-name re-test)
+    When built and run
+    Then stdout pattern = "scenario ck1_many_globals_resolve: ok"
+  Scenario: ck1_ns_call (two same-bare-name fns in different namespaces — the qualified call resolves through the base index by the call_binding_matches predicate, CK1.2)
+    When built and run
+    Then stdout pattern = "scenario ck1_ns_call: ok"
+  Scenario: ck1_type_same_bare (two types of the same last segment in different namespaces — the qualified type reference resolves through the by_last index, CK1.4)
+    When built and run
+    Then stdout pattern = "scenario ck1_type_same_bare: ok"
+
+
 Feature: promoted native known-stops and the one_byte oracle — folded from the retired native_union / one_byte projects (0.3.1 consolidation)
 
   # (native_union_scalar) THE NATIVE BACKEND'S NULL-UNION STOP, PROMOTED. Owner ruling 2026-07-28:
@@ -1779,6 +1797,31 @@ Feature: promoted native known-stops and the one_byte oracle — folded from the
   Scenario: native_union_nested (own-native — a null-union field nested inside a null-union field round-trips both levels)
     When built and run
     Then stdout pattern = "scenario native_union_nested: ok"
+
+  # (generic_fn_constructs_generic) THE fix/generic-stamping rung. A generic FREE FUNCTION
+  # (`gfc_wrap<T>`) constructs a generic TYPE (`GfcBox<T>`) from its own still-abstract type-param.
+  # Before the fix the construction node kept the phantom `GfcBox__g__T` and the checker aborted
+  # ("internal: generic instance `GfcBox__g__T` was not stamped"); the monomorph pass now re-mangles
+  # the phantom through the bound `T` (`subst_instance_name`) so `gfc_wrap<i64>`/`gfc_wrap<u8>` each
+  # build their own concrete stamp. The value 42 = 40 (i64 instance) + 2 (u8 instance) + two zero seeds.
+  Scenario: generic_fn_constructs_generic (own-native — a generic fn constructs a generic type from its own type-param)
+    When built and run
+    Then stdout pattern = "scenario generic_fn_constructs_generic: ok"
+
+  # (n112_region_lifetime_selfappend_in_virtual_main) THE N112 region-lifetime regression. A
+  # by-address aggregate (`n112::Item`) whose variant `content` holds a FAT-element `[]str` payload is
+  # self-appended into a `[]Item` inside a TOP-LEVEL `main.tks` loop, then read back (`n112::readback`).
+  # A virtual-main opens no frame region, so the accumulator's base region is the loop's OWN
+  # per-iteration body; `enter_self_append_region`'s fallback used to bracket the grow + element box
+  # (`tk_slice_elem_box`) to `region_stack[0]` — that per-iteration region — which `close_loop_body`
+  # reclaims each turn, dangling every by-address element and faulting the read-back (the self-hosted
+  # `assemble_sel` gen2==gen3 crash; probe `examples/probes/n112_assemble_sel_crash`). The fallback now
+  # routes a virtual-main top-level accumulator's growth to the ROOT (`enter_self_append_fallback`), so
+  # the fold reaches its 108 (72 trailing-str + 24 Func-case + 12 TypeDecl-case). A REAL function is
+  # unaffected: its `region_stack[0]` is a durable frame, not a loop body.
+  Scenario: n112_region_lifetime_selfappend_in_virtual_main (own-native — a fat-element-payload aggregate self-appended in a virtual-main loop survives the region drop)
+    When built and run
+    Then stdout pattern = "scenario n112_region_lifetime_selfappend_in_virtual_main: ok"
 
   # (one_byte_native) `teko::one_byte(byte) -> str` existed in the checker and the runtime mirror but
   # was NOT lowered natively: `call_symbol` found no symbol and returned `unresolved_builtin_stop`.

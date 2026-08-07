@@ -5839,3 +5839,140 @@ fn f_null_widen_native_subpositions() -> i64 {
     if unwrap_or_native_null_widen(assign_null_widen(1), -103) != 21 { return 7 }
     0
 }
+
+/**
+ * GfcBox — a single-field generic struct used to prove a generic FUNCTION may construct a generic
+ * TYPE from its OWN still-abstract type-param (`GfcBox<T>` built inside `gfc_wrap<T>`). Before
+ * fix/generic-stamping the construction inside the generic body left the phantom `GfcBox__g__T`
+ * un-concretized — the monomorph pass reported "internal: generic instance `GfcBox__g__T` was not
+ * stamped"; it now re-mangles the phantom through the bound `T` (`resolve::subst_instance_name`).
+ */
+type GfcBox<T> = struct { v: T }
+
+/**
+ * gfc_wrap — THE regression: a generic free function whose body constructs the generic type
+ * `GfcBox<T>` from the function's own type-param `T`. Monomorphizing `gfc_wrap<i64>` / `gfc_wrap<u8>`
+ * must concretize the construction node to `GfcBox__g__i64` / `GfcBox__g__u8` (each per its instance),
+ * never a shared or leftover `GfcBox__g__T`.
+ *
+ * @param x  the value to wrap
+ * @return   a `GfcBox<T>` holding `x`
+ */
+fn gfc_wrap<T>(x: T) -> GfcBox<T> { GfcBox<T>{ v = x } }
+
+/**
+ * gfc_seed_i / gfc_seed_u — explicit WRITTEN `GfcBox<i64>` / `GfcBox<u8>` uses so `instantiate_types`
+ * stamps those concrete instance decls, exactly the shape the compiler's own static-factory
+ * workaround relies on (the type argument concrete at a written site). The generic FUNCTION's
+ * construction node concretizes to these same stamps.
+ *
+ * @param n  the value to wrap
+ * @return   the concrete `GfcBox` instance holding `n`
+ */
+fn gfc_seed_i(n: i64) -> GfcBox<i64> { GfcBox<i64>{ v = n } }
+fn gfc_seed_u(n: u8) -> GfcBox<u8> { GfcBox<u8>{ v = n } }
+
+/**
+ * f_generic_fn_constructs_generic — a generic function constructing a generic type from its OWN
+ * type-param, monomorphized at two distinct instances (`i64`, `u8`) so each construction node must
+ * concretize to its own stamp; a leftover `GfcBox__g__T` would mistype or crash the native emit.
+ *
+ * @return 42 — `gfc_wrap(40).v` (i64, 40) + `gfc_wrap(2 to u8).v` (u8, 2) + the two zero-valued seeds
+ */
+fn f_generic_fn_constructs_generic() -> i64 {
+    let a = gfc_wrap(40)
+    let b = gfc_wrap(2 to u8)
+    let si = gfc_seed_i(0)
+    let su = gfc_seed_u(0 to u8)
+    a.v + (b.v to i64) + si.v + (su.v to i64)
+}
+
+/**
+ * CK1_SHADOWED — a module-level `const` whose name a local `let` re-uses in `f_ck1_shadow_local`, so
+ * the case can prove a local binding shadows a same-named global. Part of the CK1 scoped-hash-maps
+ * regression guard (design docs/design/ck1-scoped-hash-maps-0.3.1.md §8, fixture 1).
+ */
+const CK1_SHADOWED: i64 = 100
+
+/**
+ * CK1_ALPHA — one of three same-prefixed module-level consts `f_ck1_many_globals_resolve` reads by
+ * bare name, so the case proves the `lookup_binding` hash index re-tests exact bytes and returns the
+ * right global among several. Part of the CK1 regression guard (design §8).
+ */
+const CK1_ALPHA: i64 = 11
+
+/**
+ * CK1_BETA — the second of the three CK1 discrimination consts (see `CK1_ALPHA`).
+ */
+const CK1_BETA: i64 = 22
+
+/**
+ * CK1_GAMMA — the third of the three CK1 discrimination consts (see `CK1_ALPHA`).
+ */
+const CK1_GAMMA: i64 = 33
+
+/**
+ * f_ck1_shadow_local — a local `let CK1_SHADOWED = 7` shadows the module-level `const CK1_SHADOWED`
+ * (100). `lookup_binding` scans the mutable local `bindings` tail-first BEFORE the sealed globals, so
+ * the local must win — the property the CK1 hash-index rewrite of the GLOBAL scan must not disturb
+ * (design §8, fixture 1). Returns true iff the local (7), not the global (100), resolves.
+ *
+ * @return true iff the local binding shadows the same-named global const
+ */
+fn f_ck1_shadow_local() -> bool {
+    let CK1_SHADOWED: i64 = 7
+    CK1_SHADOWED == 7
+}
+
+/**
+ * f_ck1_global_via_index — a bare reference to the module-level `const CK1_BETA` with no local of that
+ * name, so `lookup_binding` falls through the local scan and resolves the global through the sealed
+ * `base_index` hash lookup — the exact CK1.1 code path. Returns true iff the index resolves the global
+ * to its value (22).
+ *
+ * @return true iff the bare global name resolves through the base index to 22
+ */
+fn f_ck1_global_via_index() -> bool {
+    CK1_BETA == 22
+}
+
+/**
+ * f_ck1_many_globals_resolve — three same-prefixed globals read by bare name, so each resolves through
+ * the `base_index` hash bucket and the exact-name re-test picks the right one. A collision or a wrong
+ * max-position pick would return the wrong value and fail the case (design §8, fixture 3's property —
+ * the max-position pick is also unit-tested in `src/checker/nidx_test.tkt`).
+ *
+ * @return true iff CK1_ALPHA, CK1_BETA and CK1_GAMMA each resolve to their own value
+ */
+fn f_ck1_many_globals_resolve() -> bool {
+    CK1_ALPHA == 11 && CK1_BETA == 22 && CK1_GAMMA == 33
+}
+
+/**
+ * f_ck1_ns_call — two functions of the SAME bare name `ck1_ns_probe` live in DIFFERENT namespaces
+ * (`aa` adds 1, `bb` adds 100). The base hash-index bucket for `ck1_ns_probe` holds both, so a
+ * qualified call must pick by namespace through `call_binding_matches` — the exact CK1.2 code path
+ * (`lookup_call`/`call_ns` routed through `call_base_pos`, design §8, fixture 2). A wrong-namespace
+ * pick would return the other arm's value and fail the case.
+ *
+ * @return true iff `aa::ck1_ns_probe(10)` resolves to 11 and `bb::ck1_ns_probe(10)` to 110
+ */
+fn f_ck1_ns_call() -> bool {
+    aa::ck1_ns_probe(10) == 11 && bb::ck1_ns_probe(10) == 110
+}
+
+/**
+ * f_ck1_type_same_bare — two types of the SAME last segment `Thing` coexist across namespaces
+ * (`aa::Thing` carries field `v`, `bb::Thing` carries field `w`). Resolving each QUALIFIED type
+ * reference goes through `resolve_qualified_type_reg`/`type_table_find`, which probe the `by_last`
+ * hash index keyed on `str_hash("Thing")` and re-check the qualifier — the CK1.4 code path (design
+ * §8, fixture 4). If the index conflated the two same-bare types, the field read would resolve
+ * against the wrong declaration.
+ *
+ * @return true iff `aa::Thing { v = 5 }.v` is 5 and `bb::Thing { w = 9 }.w` is 9
+ */
+fn f_ck1_type_same_bare() -> bool {
+    let t1 = aa::Thing { v = 5 }
+    let t2 = bb::Thing { w = 9 }
+    t1.v == 5 && t2.w == 9
+}

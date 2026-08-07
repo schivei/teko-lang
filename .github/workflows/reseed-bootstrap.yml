@@ -1,0 +1,181 @@
+# .github/workflows/reseed-bootstrap.yml
+# Reseed bootstrap/teko.c — MANUAL (workflow_dispatch). Harvests a fresh degrau seed (gen1's own
+# emitted C) from the CURRENT source, self-verifies it reproduces down the C route, records its
+# provenance against THIS run, and opens a PR that swaps bootstrap/teko.c + bootstrap/PROVENANCE.
+# It NEVER pushes to a protected branch and never merges — the owner reviews and merges the PR.
+#
+# ── WHY THIS EXISTS ───────────────────────────────────────────────────────────────────────────
+# bootstrap/teko.c is the degrau seed CI compiles gen0 (and thence gen1) from. It is HARVESTED
+# OUTPUT — gen1's C — versioned after a green run, never hand-written (scripts/provenance_gate.sh,
+# scripts/build_with_seed_fallback.sh). When a source fix changes how the compiler lowers ITSELF —
+# e.g. 74622f77, which denied free-old to escaping self-append accumulators and cured the
+# copy_relocs native use-after-free — the fix does not reach the built gen1 until the seed is
+# re-harvested: gen0 built from the STALE seed still lowers gen1 the old way, so gen1 keeps
+# corrupting during native emit even though the SOURCE is already correct. This workflow performs
+# the governed re-harvest that lets the source fix take effect in CI.
+#
+# ── THE GATE IT SATISFIES (scripts/provenance_gate.sh) ────────────────────────────────────────
+# A bootstrap/teko.c SWAP requires a complete bootstrap/PROVENANCE naming a REAL CI run id (never
+# the `unrecovered` sentinel), the commit that run measured, and a sha256 matching the file on
+# disk. This workflow IS that run: it harvests the bytes and records its OWN github.run_id, so the
+# record is honest by construction and the provenance gate PASSES on the PR it opens.
+#
+# ── WHAT "GREEN" MEANS HERE ───────────────────────────────────────────────────────────────────
+# The seed is only proposed if it SELF-REPRODUCES down the C route: the harvested C is cc-compiled
+# to a compiler, that compiler rebuilds the tip, and the tip's re-emitted teko.c is byte-identical
+# to the harvested C (a C-route fixpoint of the seed). A seed that does not reproduce itself is
+# refused, RED, never proposed. The deeper NATIVE gen2==gen3 fixpoint is a SEPARATE property proven
+# by the opened PR's own full matrix — it is NOT a precondition of the harvest, which exists
+# precisely to unblock that native fixpoint.
+#
+# ── IT PRODUCES A VERSIONED ARTIFACT + BRANCH; THE DRAIN IS A MANUAL CHERRY-PICK ───────────────
+# This workflow does NOT open a PR and nothing here is ever merged — branch protection admits no
+# bypass, not even for the owner, so a reseed PR could only land once its own CI is 100% green,
+# which is the very state the reseed exists to reach. Instead the workflow HARVESTS the seed,
+# self-verifies it, records provenance against its own run id, and leaves the result in two places:
+#   * a fresh `reseed/teko-c-<run>` branch carrying ONE commit (bootstrap/teko.c + PROVENANCE), and
+#   * an uploaded run artifact `reseed-teko-c/` with the same two files.
+# The owner (or the integrator) then COLLECTS that versioned commit and drains it into the lane by
+# CHERRY-PICK — exactly how every other change reaches fix/retirement — so the seed swap rides in
+# with a valid, run-id-backed provenance record and the lane's own promotion is the 100%-green gate.
+#
+# ── DISPATCH ──────────────────────────────────────────────────────────────────────────────────
+# GitHub only lists workflow_dispatch workflows that exist on the DEFAULT branch, so to reseed a
+# lane branch that carries a not-yet-merged source fix, dispatch by ref from the CLI/API:
+#     gh workflow run reseed-bootstrap.yml --ref <branch>
+# (Once this file is on the default branch it also appears in the Actions "Run workflow" dropdown,
+# where the branch picker selects the same <branch>.)
+name: Reseed bootstrap/teko.c
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_label:
+        description: "Released seed label whose binary RUNS on the ubuntu runner"
+        required: false
+        default: "linux-x86_64-glibc"
+
+# fork-only guard mirrors seed-linux-fork.yml: the reseed harvest is cut on the canonical repo,
+# never on the org mirror. Any branch is allowed (the fix usually lives on a lane, not main).
+concurrency:
+  group: reseed-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write        # push the reseed/* branch (never a protected branch; drained by cherry-pick)
+
+jobs:
+  reseed:
+    if: github.repository == 'schivei/teko-lang'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history — the ladder fallback needs it)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 1. HARVEST: released seed -> gen0 -> gen1, and gen1 emits out/teko.c (the candidate) ──
+      # Identical provisioning + dry-build to scripts/produce_assets.sh's own first two steps, so
+      # the harvested C is exactly the bytes every producer lane already builds from.
+      - name: Provision the released seed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sh scripts/ci_provision_teko.sh "${{ github.event.inputs.seed_label }}"
+          test -d .seed
+          echo "$PWD/.seed" >> "$GITHUB_PATH"
+
+      - name: Build gen1 (C route) and harvest its emitted C
+        run: |
+          set -eu
+          teko --version
+          sh scripts/build_with_seed_fallback.sh out
+          test -f out/teko.c
+          echo "harvested gen1 C:"
+          wc -c out/teko.c
+
+      # ── 2. THE "GREEN" CRITERION: the harvested C must reproduce ITSELF down the C route ───────
+      # cc-compile the harvested C into a compiler (that binary IS gen1), have it rebuild the tip,
+      # and require the tip's re-emitted teko.c to be byte-identical to the harvested C. A seed that
+      # does not reproduce itself is not a fixpoint and is refused here, before any PR is opened.
+      - name: Self-reproduce check (C-route fixpoint of the seed)
+        run: |
+          set -eu
+          rm -rf .reseed-check && mkdir -p .reseed-check/out
+          cc -std=c2x -w -O2 \
+            -I src/runtime -I src/assert \
+            out/teko.c src/runtime/teko_rt.c src/assert/assert.c -lm \
+            -o .reseed-check/gen1
+          .reseed-check/gen1 --version
+          ( cd . && TK_RT_DIR="$PWD/src/runtime" TEKO_BACKEND=c \
+              .reseed-check/gen1 . -o .reseed-check/out --no-verify --release )
+          test -f .reseed-check/out/teko.c
+          if ! cmp -s out/teko.c .reseed-check/out/teko.c; then
+            echo "reseed: FATAL — the harvested C does not reproduce itself down the C route." >&2
+            echo "The seed candidate is not a C-route fixpoint; refusing to propose it." >&2
+            echo "--- diff summary (byte counts) ---" >&2
+            wc -c out/teko.c .reseed-check/out/teko.c >&2
+            exit 1
+          fi
+          echo "reseed: self-reproduce PASS — the harvested C is a C-route fixpoint."
+
+      # ── 3. RECORD PROVENANCE against THIS run, then swap the seed on a fresh branch ────────────
+      - name: Stage the swap (bootstrap/teko.c + bootstrap/PROVENANCE)
+        id: stage
+        run: |
+          set -eu
+          DIGEST="$(sha256sum out/teko.c | awk '{print $1}')"
+          SINCE="$(sh scripts/derive_version.sh 2>/dev/null || echo unknown)"
+          cp out/teko.c bootstrap/teko.c
+          cat > bootstrap/PROVENANCE <<EOF
+          # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this
+          # tree. Format/parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh
+          # only on a SWAP. This record was written by .github/workflows/reseed-bootstrap.yml, which
+          # harvested gen1's own emitted C from the source at commit ${{ github.sha }} and verified it
+          # reproduces down the C route, in the CI run named below.
+          c:       bootstrap/teko.c
+          run:     ${{ github.run_id }}
+          commit:  ${{ github.sha }}
+          sha256:  $DIGEST
+          since:   $SINCE
+          EOF
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "branch=reseed/teko-c-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "--- bootstrap/PROVENANCE ---"
+          cat bootstrap/PROVENANCE
+          # PROVE THE GATE PASSES BEFORE PROPOSING (the same script the PR will run):
+          git fetch origin "${{ github.sha }}" --depth=1 || true
+          sh scripts/provenance_gate.sh . "${{ github.sha }}"
+
+      - name: Commit the reseed on a fresh branch (for cherry-pick — NO PR, NO merge)
+        run: |
+          set -eu
+          BRANCH="${{ steps.stage.outputs.branch }}"
+          git config user.name  "teko-reseed[bot]"
+          git config user.email "teko-reseed@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add bootstrap/teko.c bootstrap/PROVENANCE
+          git commit -m "chore(bootstrap): reseed teko.c from gen1 @ ${{ github.sha }}
+
+          Harvested gen1's own emitted C from the source at ${{ github.sha }}, verified it
+          reproduces down the C route, in CI run ${{ github.run_id }}. Swaps the degrau seed so a
+          self-lowering source fix takes effect in the built gen1.
+
+          sha256: ${{ steps.stage.outputs.digest }}"
+          RESEED_SHA="$(git rev-parse HEAD)"
+          git push -u origin "$BRANCH"
+          echo "reseed_sha=$RESEED_SHA" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Reseed ready::Drain into the lane by cherry-pick — this is NOT merged. Run:  git fetch origin $BRANCH && git cherry-pick $RESEED_SHA"
+        id: commit
+
+      # THE COLLECTABLE ARTIFACT: the exact two versioned files, for anyone who prefers grabbing
+      # them from the run over fetching the branch. Same bytes, same provenance record.
+      - name: Upload the reseed artifact (bootstrap/teko.c + PROVENANCE)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reseed-teko-c
+          path: |
+            bootstrap/teko.c
+            bootstrap/PROVENANCE
+          if-no-files-found: error

@@ -131,13 +131,20 @@ static void tk_rt_crash_handler(int sig) {
         raise(sig);
         return;   // unreachable once the default handler re-delivers, kept for clarity
     }
+    // (Windows visibility fix, Theory CI #62) _Exit() does NOT run the libc stream-flush atexit
+    // machinery — only exit() does. On POSIX this fflush is a no-op (stderr is already unbuffered
+    // there by convention), but it is NOT a no-op everywhere this same handler runs: see the
+    // fflush in tk_win_seh_handler below for why Windows needs it explicitly.
+    fflush(stderr);
     _Exit(128 + sig);   // async-signal-safe
 }
 #if defined(_WIN32)
 // (Windows SEH twin of tk_rt_crash_handler/tk_backtrace above.) POSIX raises a SIGSEGV/SIGBUS/
 // SIGILL/SIGFPE signal on a fault; Windows raises a Structured Exception instead — `signal(SIGSEGV,
 // ...)` (still installed below, unconditionally, on both platforms) is NOT reliably delivered for a
-// real hardware fault under MinGW, so without this the native fixpoint gate died SILENT on Windows:
+// real hardware fault under this project's Windows toolchain (clang --target=x86_64-pc-windows-msvc
+// — see src/build/project.tks's WINDOWS_CC_NAME/build_cc_argv; MinGW is explicitly banned there,
+// owner ruling 2026-08-05), so without this the native fixpoint gate died SILENT on Windows:
 // no address, nothing to feed addr2line. This is installed as a VECTORED handler
 // (AddVectoredExceptionHandler) so it runs before any language/CRT __try frame gets a look, and it
 // prints the SAME per-frame shape backtrace_symbols prints on the POSIX side —
@@ -220,11 +227,64 @@ static LONG WINAPI tk_win_seh_handler(EXCEPTION_POINTERS *ep) {
     if (!tk_win_seh_is_fatal(code)) return EXCEPTION_CONTINUE_SEARCH;
     fprintf(stderr, "\nteko: FATAL exception 0x%08lX — a generated program crashed (M.1).\n", (unsigned long)code);
     tk_win_seh_backtrace(ep);
+    // (Theory CI #62, windows-x86_64 native leg: gen2 crashed 130ms into "building gen3", with
+    // NOT EVEN the first "lexer 0/N files" progress line visible — the Linux legs print that AND a
+    // full symbolized backtrace on the same class of crash.) ROOT CAUSE: unlike POSIX (glibc/musl),
+    // the Universal CRT (UCRT — ucrtbase.dll) this binary links fully buffers stdio streams,
+    // INCLUDING stderr, once they are not attached to an interactive console. This project's
+    // Windows toolchain is `clang --target=x86_64-pc-windows-msvc` (src/build/project.tks's
+    // WINDOWS_CC_NAME/WINDOWS_MSVC_TRIPLE/build_cc_argv; MinGW is explicitly banned there, owner
+    // ruling 2026-08-05, over MinGW-gcc's own -O2 slowness and cc1/PATH/libm breakage) — targeting
+    // `-windows-msvc` links the SAME UCRT the MSVC toolchain does, via `lld-link`/`link.exe`
+    // through the clang driver, not MinGW's own runtime. The buffered-when-redirected behavior is
+    // this UCRT's, not a MinGW artifact — and it is exactly the case in CI, since the fixpoint gate
+    // pipes the child through `2>&1 | tee "$bg_log" | sed ... >&2` (fixpoint_gate.sh's build_gen).
+    // progress.tks bakes in the OPPOSITE assumption ("the C standard library never buffers stderr")
+    // — true on POSIX, false on Windows/UCRT once redirected. So every `teko::io::eprint`/`eprintln` progress line
+    // (tk_eprint/tk_eprintln, both plain fwrite/fputc to stderr with no flush) sat in the CRT's
+    // stdio buffer, AND this handler's own FATAL header + backtrace above sat in that same buffer
+    // — then `_Exit()` tore the process down without running the flush-on-exit machinery
+    // (`_Exit`/`_exit`, unlike `exit`, is specified to skip it), so a hard fault dropped everything
+    // silently no matter how much was printed. tk_rt_install_crash_handler below now forces
+    // `_IONBF` on stderr (and stdout) as the very first thing it does — before any application
+    // code can write a byte — which fixes the progress lines AND makes this fflush() usually a
+    // no-op; it stays as defense-in-depth in case some other code path re-buffers the stream later.
+    fflush(stderr);
     _Exit(128 + (int)(code & 0x7f));
     return EXCEPTION_CONTINUE_SEARCH;   // unreachable, kept for the compiler's return-path check
 }
 #endif
 __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
+#if defined(_WIN32)
+    // (Theory CI #62 root cause, part 1 of 2 — see the fflush comment in tk_win_seh_handler above
+    // for the full account of WHY: this project's Windows toolchain is
+    // `clang --target=x86_64-pc-windows-msvc`, which links the UCRT.) `setvbuf`/`fflush` are plain
+    // ISO C / UCRT stdio API, not a compiler-specific extension — they behave identically whichever
+    // front end (clang here, historically MinGW-gcc, MSVC's own cl.exe) drives the same UCRT, so
+    // this fix takes effect under this project's actual toolchain exactly as reasoned. MUST run
+    // before anything else in this constructor, and before any application code gets a chance to
+    // write a byte: `setvbuf` is only well-defined before the stream has been touched. Forcing
+    // `_IONBF` here makes stderr (and stdout, for the same buffered-when-redirected reason) behave
+    // on Windows exactly the way progress.tks already assumes stderr behaves everywhere —
+    // unbuffered, so every write lands immediately instead of sitting in the CRT's stdio buffer for
+    // a crash's `_Exit()` to discard unflushed.
+    setvbuf(stderr, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    // (Theory CI #62 root cause, part 2 of 2 — a SEPARATE gap from the buffering one above, and
+    // plausible on its own for a checker-phase crash walking 154 files' worth of recursive ASTs.)
+    // EXCEPTION_STACK_OVERFLOW is in tk_win_seh_is_fatal's list above, but WITHOUT this call the
+    // vectored handler runs on the SAME, already-exhausted stack that just faulted: the first
+    // guard page is gone, so fprintf/RtlCaptureStackBackTrace/tk_win_seh_backtrace can (and
+    // typically do) immediately re-fault on entry, delivering a SECOND, unhandled access
+    // violation with NO output — silent, exactly what Theory CI #62 observed, and independent of
+    // the stdio-buffering fix above (that fix cannot help if the handler body never gets to run).
+    // `SetThreadStackGuarantee` must be called BEFORE the overflow, on the thread that may
+    // overflow (the main thread — this compiler is single-threaded), reserving extra committed
+    // stack the OS hands back specifically for a stack-overflow handler to run in. 64 KiB matches
+    // what MSDN's own SEH sample uses and is ample for this handler's non-recursive, fixed-frame
+    // print path.
+    { ULONG tk_stk_guarantee = 64 * 1024; SetThreadStackGuarantee(&tk_stk_guarantee); }
+#endif
     signal(SIGSEGV, tk_rt_crash_handler);
 #ifndef _WIN32
     signal(SIGBUS,  tk_rt_crash_handler);   // not defined on Windows
@@ -3893,6 +3953,30 @@ uint64_t tk_peak_rss(void) {
 #endif
 }
 
+// (arena-por-escopo M0) tk_cur_rss — this process's CURRENT resident set size in BYTES, the
+// twin of tk_peak_rss: where ru_maxrss reports only the high-water mark, this reports the RSS
+// RIGHT NOW, so the build can ATTRIBUTE a peak to the phase boundary it crosses (checker / mono
+// / consteval / codegen). No runtime primitive exposes current RSS; without it the per-phase
+// retention is invisible and no later crumb is gateable by "where the peak lands". Reads
+// /proc/self/statm on Linux (field 2 = resident pages) and scales by the page size; 0 =
+// unavailable (same contract as tk_peak_rss, the caller then suppresses the print). Read-only
+// and side-effect-free, exactly like its twin.
+uint64_t tk_cur_rss(void) {
+#if defined(_WIN32) || defined(__APPLE__)
+    return 0;   /* /proc is Linux-only; the per-phase attribution is a Linux-first measurement */
+#else
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f == NULL) return 0;
+    unsigned long long total_pages = 0, resident_pages = 0;
+    int got = fscanf(f, "%llu %llu", &total_pages, &resident_pages);
+    fclose(f);
+    if (got != 2) return 0;
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) return 0;
+    return (uint64_t)resident_pages * (uint64_t)page;
+#endif
+}
+
 // (E1-C6) tk_rt_nproc — the number of processors the OS grants THIS process right now (online CPUs),
 // at least 1. The OS-granted count is what the test/regression job pools default to and clamp their
 // env override against, so the parallelism a machine may use is the machine's business and never a
@@ -4563,6 +4647,31 @@ void *tk_slice_with_cap_r(uint64_t esz, uint64_t cap, tk_region *region) {
 // tk_slice_push_r. (C1) Targets tk_region_current() — the root until a tk_region_enter.
 void *tk_slice_with_cap(uint64_t esz, uint64_t cap) {
     return tk_slice_with_cap_r(esz, cap, tk_region_current());
+}
+
+// tk_slice_grow_inplace — the F3 Model A in-place append. The slice's three-word {ptr,len,cap}
+// header lives at *hdr (the exact layout cg_slice_typename emits: a data pointer, then two u64).
+// When len<cap the spare slot at ptr[len] is written in place and len bumps — O(1), NO push cache,
+// NO copy, NO slot collision, because the capacity is READ FROM THE HEADER, not a global witness.
+// When len==cap the backing doubles (cap 0 -> 1) into a fresh region buffer, the live prefix is
+// copied once, and ptr/cap are rewritten in the header. Value-semantics safety rests on the caller
+// holding an EXCLUSIVE `ref` (F1 is_unique_at): no stale copy of the header survives the realloc.
+typedef struct { void *ptr; uint64_t len; uint64_t cap; } tk_slice_hdr;
+void tk_slice_grow_inplace(void *hdr, const void *elem, uint64_t esz, tk_region *region) {
+    tk_slice_hdr *h = (tk_slice_hdr *)hdr;
+    if (h->len < h->cap) {
+        memcpy((char *)h->ptr + h->len * esz, elem, esz);
+        h->len += 1;
+        return;
+    }
+    if (h->cap > (UINT64_MAX >> 1)) tk_panic("tk_slice_grow_inplace: capacity overflows u64");
+    uint64_t new_cap = (h->cap == 0) ? 1 : (h->cap * 2);
+    void *buf = (region == tk_g_root) ? tk_alloc(new_cap * esz) : tk_region_alloc(region, new_cap * esz);
+    if (h->len && h->ptr != NULL) memcpy(buf, h->ptr, h->len * esz);
+    memcpy((char *)buf + h->len * esz, elem, esz);
+    h->ptr = buf;
+    h->len += 1;
+    h->cap = new_cap;
 }
 
 // (mem::free ruling 2026-07-03) tk_free_block — PARK an explicitly freed root-arena block on the

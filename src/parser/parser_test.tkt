@@ -498,3 +498,55 @@ fn ffx_parses_extern_import() {
         _ => teko::assert::is_true(false)
     }
 }
+
+// --- comments-anywhere + positional doc-comment classification (ruling 2026-08-06,
+//     docs/design/comments-anywhere-doc-classification-0.3.1.md). A `/** … */` is trivia
+//     UNLESS it is adjacent (no blank line) to a const/type/fn signature ± its #attrs. ---
+
+// parse a whole module from `source`: did it parse AND consume every token?
+fn module_ok(source: str) -> bool {
+    let toks = match lexer::tokenize(source) { []lexer::Token as ts => ts; error => return false }
+    match parse_module(toks, 0) { Parsed<Module> as pm => pm.next == toks.len; error => false }
+}
+
+// does the FIRST declaration of the parsed module carry a classified doc-comment?
+fn first_decl_has_doc(source: str) -> bool {
+    let toks = match lexer::tokenize(source) { []lexer::Token as ts => ts; error => return false }
+    let pm = match parse_module(toks, 0) { Parsed<Module> as x => x; error => return false }
+    if pm.node.decls.len == 0 { return false }
+    match pm.node.decls[0] {
+        Function as f => f.has_doc
+        TypeDecl as td => td.has_doc
+        ConstDecl as cd => cd.has_doc
+    }
+}
+
+#test
+fn accepts_loose_comments_in_any_position() {
+    // a stray /** */ at the top of a file (before any decl) — accepted, ignored (was: parse error)
+    teko::assert::is_true(module_ok("/** banner */\nfn f() -> i32 { 0 }"))
+    // a loose /** */ before a `use` — accepted
+    teko::assert::is_true(module_ok("/** banner */\nuse teko::list\nfn f() -> i32 { 0 }"))
+    // a loose /** */ between two declarations — accepted
+    teko::assert::is_true(module_ok("fn a() -> i32 { 0 }\n/** between */\nfn b() -> i32 { 1 }"))
+    // a loose /** */ at end of file — accepted
+    teko::assert::is_true(module_ok("fn a() -> i32 { 0 }\n/** trailing */"))
+}
+
+#test
+fn classifies_doc_only_on_adjacency() {
+    // own line, immediately above → classified for f
+    teko::assert::is_true(first_decl_has_doc("/** doc */\nfn f() -> i32 { 0 }"))
+    // same line → classified
+    teko::assert::is_true(first_decl_has_doc("/** doc */ fn f() -> i32 { 0 }"))
+    // before #attrs → classified
+    teko::assert::is_true(first_decl_has_doc("/** doc */\n#test\nfn f() { }"))
+    // after #attrs → classified
+    teko::assert::is_true(first_decl_has_doc("#test\n/** doc */\nfn f() { }"))
+    // a BLANK LINE breaks adjacency → f has NO doc (the comment is loose)
+    teko::assert::is_false(first_decl_has_doc("/** not a doc */\n\nfn f() -> i32 { 0 }"))
+    // a loose banner separated by a blank line from a type → the type has NO doc
+    teko::assert::is_false(first_decl_has_doc("/** banner */\n\ntype T = i32"))
+    // and the blank-line cases still PARSE (the loose comment is accepted)
+    teko::assert::is_true(module_ok("/** not a doc */\n\nfn f() -> i32 { 0 }"))
+}

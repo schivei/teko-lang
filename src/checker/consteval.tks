@@ -980,6 +980,78 @@ fn build_aggregate_map(ordered: []TConstDecl) -> ScalarConstMap {
 }
 
 /**
+ * collapse_agg_const_decls — return `prog` with every module-level AGGREGATE const's OWN declaration
+ * initializer dependency-collapsed: a `TVar` reference to ANOTHER aggregate const (`const A: str = B`)
+ * is replaced by that const's already-collapsed initializer, so a downstream materializer sees a
+ * literal instead of a bare reference. A scalar const (already inlined + dropped by `inline_consts`)
+ * and every non-const item pass through unchanged.
+ *
+ * This is the resolution the C backend already gets at USE sites from `inline_aggregate_consts`, given
+ * here to the DECLARATIONS for the LIR/native shared-rodata path: `lower_program`'s
+ * `intern_aggregate_consts` serializes each aggregate const's declaration into ONE rodata entry, and
+ * without this a `const str = <other const>` reached `serialize_const`/`const_str_bytes` as a bare
+ * reference and honest-stopped (the #594 Tier-A `const str: initializer is not a string literal`
+ * follow-up). The C path is untouched, and a const-free program — or one whose aggregate consts hold
+ * no cross-const reference — is returned value-unchanged, so the C-emission fixpoint stays
+ * byte-identical.
+ *
+ * @param prog  the fully typed, monomorphized, scalar-inlined program
+ * @return      the program with aggregate const DECLARATION initializers collapsed
+ * @throws      a located error when the module-level consts form a reference cycle (`const_dep_order`)
+ * @since #594 Tier-A follow-up
+ */
+pub fn collapse_agg_const_decls(prog: TProgram) -> TProgram | error {
+    let consts = collect_module_consts(prog.items)
+    if consts.len == 0 { return prog }
+    let ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
+    let amap = build_aggregate_map(ordered)
+    mut out: []TItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = teko::list::push(out, collapse_agg_const_decl_item(prog.items[i], amap))
+        i++
+    }
+    TProgram { items = out }
+}
+
+/**
+ * collapse_agg_const_decl_item — collapse ONE item's aggregate-const-declaration initializer against
+ * the aggregate map `amap`, leaving a scalar const and every non-const item unchanged (the per-item
+ * body of `collapse_agg_const_decls`).
+ *
+ * @param it    the program item
+ * @param amap  the aggregate substitution table (dependency-collapsed initializers)
+ * @return      the item, with an aggregate const's initializer collapsed
+ * @since #594 Tier-A follow-up
+ */
+fn collapse_agg_const_decl_item(it: TItem, amap: ScalarConstMap) -> TItem {
+    match it {
+        TConstDecl as cd => collapse_agg_const_decl(cd, amap)
+        _ => it
+    }
+}
+
+/**
+ * collapse_agg_const_decl — an aggregate const `cd` rebuilt with its initializer collapsed against
+ * `amap` (references to other aggregate consts resolved); a scalar const is returned unchanged (it was
+ * already inlined + dropped, so this arm is defensive only).
+ *
+ * @param cd    the const declaration
+ * @param amap  the aggregate substitution table
+ * @return      the const, with its aggregate initializer collapsed (unchanged when scalar)
+ * @since #594 Tier-A follow-up
+ */
+fn collapse_agg_const_decl(cd: TConstDecl, amap: ScalarConstMap) -> TItem {
+    if is_scalar_const_type(cd.ty) { return cd }
+    TConstDecl {
+        name = cd.name; namespace = cd.namespace; ty = cd.ty
+        init = inline_rw_expr(cd.init, amap)
+        vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col
+    }
+}
+
+/**
  * inline_place_item_agg — fold one program item into the rewritten list, INLINING aggregate consts
  * (the C-backend leg of #594 crumb 6): a function body / loose statement has every aggregate-const
  * reference substituted by a clone of that const's collapsed initializer. The aggregate const

@@ -7,17 +7,17 @@ type Collected = struct { types: TypeTable; env: Env }
 
 // gather ALL user type declarations first (so a forward reference resolves).
 fn collect_types(items: []parser::Item) -> TypeTable {
-    mut table: []TypeReg = teko::list::empty()
+    mut table = tt_empty()
     mut i = 0
     loop {
         if i >= items.len { break }
         match items[i].content {
-            parser::TypeDecl as td => { table = teko::list::push(table, TypeReg { name = td.name; namespace = items[i].namespace; file = items[i].file; vis = td.vis; decl = td }) }
+            parser::TypeDecl as td => { table = tt_push(table, TypeReg { name = td.name; namespace = items[i].namespace; file = items[i].file; vis = td.vis; decl = td }) }
             _ => { }
         }
         i++
     }
-    table
+    tt_freeze(table)
 }
 
 // a function's signature as a FuncType (resolve its param + return types).
@@ -405,10 +405,10 @@ pub fn register_instance_methods(env: Env, table: TypeTable) -> SigOutcome {
     mut out = env
     mut diags: []str = teko::list::empty()
     let insts = table_generic_instance_regs(table)
-    mut i = 0
+    mut i: u64 = 0
     loop {
-        if i >= insts.len { break }
-        let step = register_one_instance_methods(insts[i], table, out)
+        if i >= tt_len(insts) { break }
+        let step = register_one_instance_methods(tt_at(insts, i), table, out)
         out = step.env
         diags = concat_diags(diags, step.diags)
         i++
@@ -465,19 +465,19 @@ fn instance_methods_of(decl: parser::TypeDecl) -> []parser::Function {
 // parser::Program. The namespace field is set to "" — sufficient for resolve_type (name
 // resolution ignores namespace; only W-vis-enforce uses it, and the header emitter does not).
 pub fn type_table_of(prog: TProgram) -> TypeTable {
-    mut table: []TypeReg = teko::list::empty()
+    mut table = tt_empty()
     mut i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
             parser::TypeDecl as td => {
-                table = teko::list::push(table, TypeReg { name = td.name; namespace = ""; file = ""; vis = td.vis; decl = td })
+                table = tt_push(table, TypeReg { name = td.name; namespace = ""; file = ""; vis = td.vis; decl = td })
             }
             _ => { }
         }
         i++
     }
-    table
+    tt_freeze(table)
 }
 
 // (#152) canonicalize every SOURCE-WRITTEN type reference held as a STRING — a class's
@@ -1440,8 +1440,8 @@ fn one_requirement_diag(d: TraitDerive, decl: parser::TypeDecl, req: parser::Fun
 fn program_needs_trait_fold(program: parser::Program, table: TypeTable) -> bool {
     mut t: u64 = 0
     loop {
-        if t >= table.len { break }
-        match table[t].decl.body { parser::TraitBody => { return true }; _ => { } }
+        if t >= tt_len(table) { break }
+        match tt_at(table, t).decl.body { parser::TraitBody => { return true }; _ => { } }
         t++
     }
     mut i: u64 = 0
@@ -1894,10 +1894,12 @@ fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable) -> bool {
     if pos == name.len { return false }   // no `__g__` infix at all
     if pos == 0 { return false }   // an empty base prefix can never name a generic decl
     let base = teko::str::slice_to(name, pos)
+    let cands = tt_cands(table, base)
     mut j: u64 = 0
     loop {
-        if j >= table.len { break }
-        if table[j].decl.type_params.len > 0 && table[j].name == base { return true }
+        if j >= cands.count { break }
+        let r = tt_cand_reg(table, cands, j)
+        if r.decl.type_params.len > 0 && r.name == base { return true }
         j++
     }
     false
@@ -1919,8 +1921,8 @@ fn check_no_duplicate_types(table: TypeTable) -> []str {
     mut diags: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if w0_is_stamped_generic_reg(table[i], table) { i++; continue }
+        if i >= tt_len(table) { break }
+        if w0_is_stamped_generic_reg(tt_at(table, i), table) { i++; continue }
         diags = concat_diags(diags, duplicates_of_reg(table, i))
         i++
     }
@@ -1939,12 +1941,12 @@ fn check_no_duplicate_types(table: TypeTable) -> []str {
  */
 fn duplicates_of_reg(table: TypeTable, at: u64) -> []str {
     mut diags: []str = teko::list::empty()
-    let reg = table[at]
+    let reg = tt_at(table, at)
     let ns_label = if reg.namespace == "" { "<top-level>" } else { reg.namespace }
     mut j: u64 = at + 1
     loop {
-        if j >= table.len { break }
-        let other = table[j]
+        if j >= tt_len(table) { break }
+        let other = tt_at(table, j)
         if !w0_is_stamped_generic_reg(other, table) && other.name == reg.name && other.namespace == reg.namespace {
             diags = teko::list::push(diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' in namespace '{ns_label}'"))
         }
@@ -2027,10 +2029,10 @@ fn reject_unsafe_alias(reg: TypeReg) -> []str {
  */
 fn validate_type_decls(table: TypeTable) -> []str {
     mut diags = check_no_duplicate_types(table)
-    mut i = 0
+    mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        diags = concat_diags(diags, validate_one_type_decl(table[i], table))
+        if i >= tt_len(table) { break }
+        diags = concat_diags(diags, validate_one_type_decl(tt_at(table, i), table))
         i++
     }
     diags
@@ -2388,7 +2390,7 @@ fn table_with_project_types(program: parser::Program, seeded: TypeTable) -> Type
         if i >= program.items.len { break }
         match program.items[i].content {
             parser::TypeDecl as td => {
-                table = teko::list::push(table, TypeReg { name = td.name; namespace = program.items[i].namespace; file = program.items[i].file; vis = td.vis; decl = td })
+                table = tt_push(table, TypeReg { name = td.name; namespace = program.items[i].namespace; file = program.items[i].file; vis = td.vis; decl = td })
             }
             _ => { }
         }
@@ -2409,9 +2411,10 @@ fn table_with_project_types(program: parser::Program, seeded: TypeTable) -> Type
  * @since 0.3.1
  */
 fn collect_over(program: parser::Program, table: TypeTable, env0: Env) -> CollectOutcome {
-    let decl_diags = validate_type_decls(table)
-    let sig = collect_signatures(program.items, table, env0)
-    CollectOutcome { collected = Collected { types = table; env = sig.env }; decl_diags = decl_diags; sig_diags = sig.diags }
+    let ftable = tt_freeze(table)
+    let decl_diags = validate_type_decls(ftable)
+    let sig = collect_signatures(program.items, ftable, env0)
+    CollectOutcome { collected = Collected { types = ftable; env = sig.env }; decl_diags = decl_diags; sig_diags = sig.diags }
 }
 
 
@@ -2431,12 +2434,13 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error
                 // Carry the dep item's namespace (the dep's own module path — already set when packed).
                 // find_ns_of_titem extracts it from the dep's TItem.
                 let ns = dep_item_ns(dep.items[i])
-                t = teko::list::push(t, TypeReg { name = td.name; namespace = ns; file = ""; vis = td.vis; decl = td })
+                t = tt_push(t, TypeReg { name = td.name; namespace = ns; file = ""; vis = td.vis; decl = td })
             }
             _ => { }
         }
         i++
     }
+    t = tt_freeze(t)
     // Pass 2: register function signatures using the now-complete type table.
     mut j: u64 = 0
     loop {

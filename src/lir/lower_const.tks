@@ -951,7 +951,7 @@ fn check_struct_fat_span_at(const_name: str, layout: LStructLayout, si: checker:
     let field_name = layout.field_names[j]
     let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error => return null }
     if !fat_slot_underflows(layout, j, vexpr.type) { return null }
-    error { message = $"TEKO_NATIVE_CONST_SIZE_CHECK: const '{const_name}' fat field '{field_name}' (type '{layout.name}') was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_slot_bytes()} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the following fields shift and a pointer lands misaligned" }
+    error { message = $"TEKO_NATIVE_CONST_SIZE_CHECK: const '{const_name}' fat field '{field_name}' (type '{layout.name}') was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_value_bytes(vexpr.type)} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the following fields shift and a pointer lands misaligned" }
 }
 
 /**
@@ -972,7 +972,7 @@ fn check_struct_fat_span_at(const_name: str, layout: LStructLayout, si: checker:
  */
 fn fat_slot_underflows(layout: LStructLayout, j: u64, value_type: checker::Type) -> bool {
     if !is_fat_type(value_type) { return false }
-    field_allotted_span(layout, j) < fat_slot_bytes()
+    field_allotted_span(layout, j) < fat_value_bytes(value_type)
 }
 
 /**
@@ -1020,7 +1020,7 @@ fn check_store_fat_span(ctx: LowerCtx, layout: LStructLayout, field_name: str, d
     match union_field_placement(ctx, decl) { checker::Type => return null; null => { } }
     let j = match field_index_of(layout, field_name) { u64 as k => k; null => return null }
     if !fat_slot_underflows(layout, j, value.type) { return null }
-    error { message = $"native fat-field store guard: struct '{layout.name}' fat field '{field_name}' was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_slot_bytes()} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the fat pointer/length store overruns the following field" }
+    error { message = $"native fat-field store guard: struct '{layout.name}' fat field '{field_name}' was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_value_bytes(value.type)} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the fat pointer/length store overruns the following field" }
 }
 
 /**
@@ -1197,14 +1197,14 @@ fn collect_variant_defs(prog: checker::TProgram) -> []LVariantDef {
  * @since 0.3.1.0 (the declared-variant match-arm miscompilation)
  */
 fn declared_type_table(prog: checker::TProgram) -> checker::TypeTable {
-    mut out: checker::TypeTable = teko::list::empty()
+    mut out = checker::tt_empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
         out = push_declared_type_reg(out, prog.items[i])
         i++
     }
-    out
+    checker::tt_freeze(out)
 }
 
 /**
@@ -1217,7 +1217,7 @@ fn declared_type_table(prog: checker::TProgram) -> checker::TypeTable {
  */
 fn push_declared_type_reg(acc: checker::TypeTable, it: checker::TItem) -> checker::TypeTable {
     match it {
-        parser::TypeDecl as td => teko::list::push(acc, checker::TypeReg {
+        parser::TypeDecl as td => checker::tt_push(acc, checker::TypeReg {
             name = checker::name_last_segment(td.name); namespace = checker::name_qualifier(td.name)
             file = ""; vis = td.vis; decl = td
         })
