@@ -1,0 +1,200 @@
+/**
+ * FieldAddr — the payload of the `LFieldAddr` arm `frame_sweep_inst` binds as `fa`: a base
+ * VReg whose flag decides whether the field-address VReg is itself a frame address.
+ */
+type FieldAddr = struct {
+    /** base — the VReg whose flag gates the merge in the `LFieldAddr` arm. */
+    base: u32
+    /** offset — the byte offset (unused by the sweep, present to size the payload as in `lir`). */
+    offset: u32
+}
+
+/**
+ * Jump — the payload of the `LJump` arm `frame_sweep_inst` binds as `j`: a target block and its
+ * SSA-lite block-arguments, mirroring `lir::LJump`.
+ */
+type Jump = struct {
+    /** target — the jumped-to block id. */
+    target: u32
+    /** args — the block-argument VRegs passed to the target. */
+    args: []u32
+}
+
+/**
+ * Alloca — the payload of the `LAlloca` arm: a stack reservation, mirroring `lir::LAlloca`.
+ */
+type Alloca = struct {
+    /** bytes — the slot size (unused by the sweep, present to size the payload as in `lir`). */
+    bytes: u32
+    /** align — the slot alignment. */
+    align: u32
+}
+
+/**
+ * Other — the catch-all `_` member: an operation the sweep does not interpret, mirroring the
+ * many non-address `lir::LOp` members that fall through `frame_sweep_inst`'s `_` arm.
+ */
+type Other = struct {
+    /** val — a scalar payload, present so the member is a distinct boxed shape. */
+    val: i64
+}
+
+/**
+ * Op — a minimal stand-in for `lir::LOp`: the variant `frame_sweep_inst` dispatches on with
+ * `match inst.op`, carrying the boxed multi-member payloads (`fa`/`j`) the arms bind.
+ */
+type Op = variant Alloca | FieldAddr | Jump | Other
+
+/**
+ * Inst — a minimal stand-in for `lir::LInst`: a result VReg plus the `Op` the sweep matches on.
+ */
+type Inst = struct {
+    /** result — the VReg this instruction defines (the `LAlloca`/`LFieldAddr` mark target). */
+    result: u32
+    /** op — the operation variant matched by `frame_sweep_inst`. */
+    op: Op
+}
+
+/**
+ * FrameSet — the exact shape of `lir::FrameSet`: the running mark vector plus the fixpoint's
+ * growth flag. This aggregate is what every arm of `frame_sweep_inst` returns.
+ */
+type FrameSet = struct {
+    /** marked — indexed by VReg id: true when that VReg holds a frame address. */
+    marked: []bool
+    /** grew — did the last mark flag a VReg that was not already flagged? */
+    grew: bool
+}
+
+/**
+ * flag_at — the flag of VReg `v`, or false when `v` is outside the flag vector (mirrors
+ * `lir::flag_at`).
+ *
+ * @param marks  the flag vector
+ * @param v      the VReg id
+ * @return       true iff `v` is flagged
+ */
+fn flag_at(marks: []bool, v: u32) -> bool {
+    if v >= marks.len { return false }
+    marks[v to u64]
+}
+
+/**
+ * frame_mark — flag VReg `v`, reporting growth when it was not already flagged. The exact shape
+ * of `lir::frame_mark`: an in-place `[]bool` index-assign `fs[v] = true` rewrapped into a fresh
+ * returned `FrameSet` aggregate.
+ *
+ * @param set  the flags so far
+ * @param v    the VReg to flag
+ * @return     the flags with `v` set
+ */
+fn frame_mark(set: FrameSet, v: u32) -> FrameSet {
+    if flag_at(set.marked, v) { return set }
+    if v >= set.marked.len { return set }
+    mut fs = set.marked
+    fs[v to u64] = true
+    FrameSet { marked = fs; grew = true }
+}
+
+/**
+ * frame_sweep_inst — the exact control-flow shape of `lir::frame_sweep_inst`: a `match inst.op`
+ * every arm of which RETURNS a `FrameSet` aggregate, the `FieldAddr` arm returning an `if`-value
+ * MERGE of two `FrameSet`s, the boxed payload binds (`fa`/`j`) read for the base/target.
+ *
+ * @param set   the flags so far
+ * @param inst  the instruction to interpret
+ * @return      the flags after this instruction
+ */
+fn frame_sweep_inst(set: FrameSet, inst: Inst) -> FrameSet {
+    match inst.op {
+        Alloca => return frame_mark(set, inst.result)
+        FieldAddr as fa => return if flag_at(set.marked, fa.base) { frame_mark(set, inst.result) } else { set }
+        Jump as j => return frame_mark(set, j.target)
+        _ => { }
+    }
+    set
+}
+
+/**
+ * frame_sweep_block — sweep `frame_sweep_inst` over a list of instructions, threading the
+ * `FrameSet` accumulator exactly as `lir::frame_sweep_block` does.
+ *
+ * @param set    the flags so far
+ * @param insts  the instructions to sweep
+ * @return       the flags after the block
+ */
+fn frame_sweep_block(set: FrameSet, insts: []Inst) -> FrameSet {
+    mut acc = set
+    mut i: u64 = 0
+    loop {
+        if i >= insts.len { break }
+        acc = frame_sweep_inst(acc, insts[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * count_marks — how many VRegs the swept `FrameSet` flagged, the read-back that faults when the
+ * returned aggregate's `marked` slice header was corrupted by the by-address conveyance.
+ *
+ * @param set  the swept flags
+ * @return     the number of flagged VRegs
+ */
+fn count_marks(set: FrameSet) -> i64 {
+    mut n: i64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= set.marked.len { break }
+        if set.marked[i] { n = n + 1 }
+        i++
+    }
+    return n
+}
+
+/**
+ * build_insts — a small instruction stream that exercises every arm of `frame_sweep_inst`:
+ * an `Alloca` (marks its result), a `FieldAddr` whose base is the marked alloca (takes the
+ * `then` merge), a `Jump`, and an `Other` (the `_` fall-through).
+ *
+ * @return the instruction list
+ */
+fn build_insts() -> []Inst {
+    mut insts: []Inst = teko::list::empty()
+    insts = teko::list::push(insts, Inst { result = 1; op = Alloca { bytes = 8; align = 8 } })
+    insts = teko::list::push(insts, Inst { result = 2; op = FieldAddr { base = 1; offset = 8 } })
+    insts = teko::list::push(insts, Inst { result = 3; op = Jump { target = 4; args = teko::list::empty() } })
+    insts = teko::list::push(insts, Inst { result = 5; op = Other { val = 0 } })
+    return insts
+}
+
+/**
+ * false_marks — a flag vector of `n` false entries.
+ *
+ * @param n  how many VRegs to size the vector for
+ * @return   the all-false vector
+ */
+fn false_marks(n: u64) -> []bool {
+    mut v: []bool = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        v = teko::list::push(v, false)
+        i++
+    }
+    return v
+}
+
+/**
+ * probe_code — sweep the instruction stream and read back the mark count. Exit 42 when the
+ * three marked VRegs (1 alloca, 2 field-addr, 4 jump-target) survive the by-address returns; a
+ * corrupt returned `FrameSet` reds the count or faults.
+ *
+ * @return 42 on success, else the wrong count
+ */
+fn probe_code() -> i32 {
+    let set0 = FrameSet { marked = false_marks(8); grew = false }
+    let swept = frame_sweep_block(set0, build_insts())
+    if count_marks(swept) == 3 { return 42 }
+    return count_marks(swept) to i32
+}
