@@ -471,7 +471,7 @@ operado pelo **id**, e **reside na arena raiz** (F2 — sobrevive a todas as tas
 ```teko
 pub type Record = struct { run: str, writer: str, kind: str, payload: str }
 
-static fn journal::make(writer: str, roll: Roll = Roll::none, fmt: Fmt = Fmt::line): self  // abre o segmento
+static fn journal::make(writer: str, roll: Roll = Roll::none, fmt: fn(Record): str | null = null): self  // abre
               j.id: usize                          // o id do segmento (a currency, como c.id)
 static fn journal::append(id: usize, kind: str, payload: str): null | error  // write(2) O_APPEND, sem buffer
 static fn journal::close(id: usize)              // fecha o segmento
@@ -488,25 +488,26 @@ gere). O `make` recebe, com defaults, a **política de rolling** (QUANDO rotacio
 e o **formato** (COMO cada registro é serializado):
 
 ```teko
-enum Roll {                       // QUANDO rolar
+enum Roll {                       // QUANDO rolar (política de rotação)
     none,                         // um único ficheiro (default)
     size(usize),                  // rola ao atingir N bytes  → ex.: Roll::size(100 * 1024 * 1024)
     daily,                        // rola por data (um ficheiro por dia)
     custom(fn(SegStat): bool)     // o predicado do dev decide (tamanho, idade, contagem, o que for)
 }
-enum Fmt {                        // COMO serializar cada registro
-    line,                         // "kind<TAB>payload" numa linha (default) — o formato interno
-    json,                         // um objeto JSON por linha
-    custom(fn(Record): str)       // o formatador do dev
-}
 
-// ex.: um journal que rola a cada 100 MB, em JSON
-var j = journal::make("app", Roll::size(100 * 1024 * 1024), Fmt::json)
+// fmt é uma CLOSURE, default null: se null (ou omitido), usa-se a formatação padrão (o formato interno
+// "kind<TAB>payload"); senão, a closure do dev serializa cada registro.
+
+// ex.: padrão (fmt omitido → formatação padrão), rolando a cada 100 MB:
+var j1 = journal::make("app", Roll::size(100 * 1024 * 1024))
+
+// ex.: formatação própria via closure:
+var j2 = journal::make("app", Roll::daily, fn(r: Record): str { return r.kind + "|" + r.payload })
 ```
 
-O rolling é responsabilidade do runtime de durabilidade (o `append` verifica a política e rotaciona por
-`rename` atômico antes de escrever quando ela dispara); a leitura (`fold`) relê todos os ficheiros de um
-segmento em ordem, transparente ao rolling.
+O rolling é do runtime de durabilidade (o `append` verifica a política e rotaciona por `rename` atômico
+antes de escrever quando ela dispara); o `fold` relê todos os ficheiros de um segmento em ordem,
+transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é chamada por `append`.
 
 ### 10.5 Decisões pra ti (recompostas de `concorrencia-isolate-spawn-chan` §9)
 
