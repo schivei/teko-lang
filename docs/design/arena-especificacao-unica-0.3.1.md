@@ -394,15 +394,43 @@ Fan-in: N escritores, 1 leitor. `Tx` (copiável — os N escritores são a metad
 `Rx` (um só; um segundo `pop` de outra task é erro de runtime nomeado, nunca corrida silenciosa).
 
 ```teko
-pub fn chan_bounded(cap: u64) -> u64      // canal LIMITADO com contrapressão — a lei
+pub fn chan_bounded(cap: u64) -> u64      // canal LIMITADO — teto `cap`, contrapressão
+pub fn chan_unbounded()       -> u64      // canal SEM teto — responsabilidade do dev
 pub fn chan_writer(id: u64)   -> Tx | error
 pub fn chan_reader(id: u64)   -> Rx | error
 pub fn chan_is_open(id: u64)  -> bool     // consulta ao registro, NUNCA cacheado
 ```
 
+**`bounded` — quando o produtor pode correr mais rápido que o consumidor.** O teto protege a memória: ao
+encher, o `send` recebe **contrapressão** (espera até haver espaço) em vez de crescer ou perder.
+
+```teko
+// pipeline produtor→consumidor: no máximo 256 itens em voo, nunca mais
+var c  = chan_bounded(256)
+// produtor(es) — Tx copiável, N escritores:
+var tx = chan_writer(c)
+loop over trabalho:
+    tx.send(item)             // se cheio, ESPERA (contrapressão) — memória fica ≤ 256 itens
+// consumidor — Rx, um só:
+var rx = chan_reader(c)
+loop:
+    var v = rx.pop()          // drena; devolve `closed` quando o último produtor fecha
+```
+
+**`unbounded` — quando o total é conhecido-finito e o produtor não deve bloquear.** Sem teto: o `send`
+nunca espera. O preço, e a **regra do dono**: se o consumidor não drenar, cresce sem limite — a memória é
+o único travão, e **isso é responsabilidade do dev, não da linguagem**.
+
+```teko
+// emitir um conjunto pequeno e FECHADO de eventos de uma vez, sem o produtor bloquear
+var c  = chan_unbounded()
+var tx = chan_writer(c)
+for e in eventos_conhecidos:  // o dev garante que o total é pequeno e finito
+    tx.send(e)                // nunca bloqueia por cheio (não há "cheio")
+```
+
 `join` é a **única barreira de memória** do modelo v1: nenhuma leitura do que uma raia escreveu é
-legítima antes dele. Canais são **limitados com contrapressão** por lei — um canal sem limite tem a
-memória como único travão (ver ponto aberto §11).
+legítima antes dele.
 
 ### 7.9 `async`/`await` — o mapa de arena das duas fundações
 
@@ -567,9 +595,7 @@ fn pipeline() {
 - **`spawn <call-expr>`: entra** (li tua resposta "5. Sim, entra" como isto — o açúcar de chamada, não só
   a assinatura `spawn(entry, ctx, lane)`; se eu li errado, corrige).
 
-**Resta — medição, não decisão (não bloqueia o modelo):**
-- **Taxa de elisão** — que % de escopos são folhas sem alocação (estimativa 20–45%). É medição: afeta
-  quanto se economiza, não a correção. Mede-se quando o mecanismo existir. *(Era o ponto 1 que não ficou
-  claro — reescrito aqui.)*
-- **MB que o DPS reclama** — instrumenta-se (campo `copy_bytes`); é número, não decisão.
-- Superfície ainda pendente está no Doc 2 §12 (`base` contextual, `mut` soft-dep, chave-string da DI).
+**Nada a decidir na arena — as decisões estão fechadas.** A regra de elisão é direta: **`need == 0` → não
+abre arena** (§4); `need > 0` → arena do tamanho `need + cabeçalho` (§3). O único "desconhecido" é
+*quanto* cada mecanismo economiza em MB no total — isso se **mede depois** de implementar e **não muda o
+desenho**. A superfície também está fechada (Doc 2 §12).
