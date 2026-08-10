@@ -2,8 +2,10 @@
 
 **Base:** `fix/retirement` @ `afcbc035` (or later). **Scope:** READ + DESIGN only. No product code.
 This is the MASTER spec that consolidates the already-assessed memory model (DPS / arena elision /
-arena floor, the `let`/`mut` analysis) with six decided surface changes, and gives the implementer
-team one crumb-ordered migration + reseed plan. No commit trailers (ruling 2026-07-15).
+arena floor, the `let`/`mut` analysis) with six decided surface changes, PLUS three folded-in owner
+addenda (the `unsafe`/raw-pointer retirement §6.5, the machine-word integers `size`/`usize` + position
+reballing §7b), and gives the implementer team one crumb-ordered migration + reseed plan. No commit
+trailers (ruling 2026-07-15).
 
 **Reads this spec builds on (do not re-litigate — consolidate):**
 - `docs/design/ast-computed-arena-assessment-0.3.1.md` — DPS keystone, arena elision, arena floor,
@@ -789,6 +791,98 @@ change is inert for the self-emit until adopted. Does NOT drive the reseed.
 
 ---
 
+## 7b. Type-system change — machine-word integers `size` / `usize` + the position REBALLING
+
+**Decision (owner):** add `size` (signed machine word) and `usize` (unsigned machine word),
+pointer-sized and TARGET-DEPENDENT (32-bit vs 64-bit), as the natural integer types for the
+arena/slice/pointer machinery; then REBALL every memory/collection POSITION or MEASURE — currently
+hard-coded `u64` — to `usize` (and `size` where signed). *"posições que agora possuem tamanho baseado
+no que o metal oferece e não fixo em u64."*
+
+### 7b.1 The two new types + grammar
+
+- **Lexer** (`lexer.tks:315`): `size`/`usize` are NEW primitive type names. Follow the existing prim
+  convention — they are resolved as `PrimKind` cases (§7b.2), not reserved keywords, exactly as `u64`
+  is a type-name identifier today, so no keyword collision and no grammar change beyond the type table.
+- **Checker** (`type.tks:11` `PrimKind = enum { … U8; U16; U32; U64; … }`): add `Size` and `Usize`
+  members. `prim_is_int` (`:34`) → true for both; `prim_is_signed` (`:50`) → true for `Size`, false
+  for `Usize`; `prim_width` (`:63`) returns the TARGET word width (64 on the fixpoint targets, 32 on a
+  32-bit target) — a target-parameterized width, the one place target-dependence enters the type.
+
+### 7b.2 `usize`/`size` vs `uptr` — related size, DISTINCT kinds
+
+`uptr` (`type.tks:104`, the Marshall opaque-pointer word) is an ADDRESS; `usize` is a machine-word
+INTEGER (a size/count/index). They share the machine-word WIDTH but are distinct KINDS and must stay
+separate in the type system:
+
+- **`uptr`/`ptr`** = an address (Marshall). `__unwrap<T>()` yields `ptr`/`uptr`; `__wrap` consumes one.
+- **`usize`/`size`** = an integer measure/position. `.len`/`.cap`/indices/offsets are `usize`.
+- **Legal conversions (explicit `to` only, never implicit):** `usize <-> u64`/`u32` is ordinary
+  integer transport (`to`-cast, width-checked like any int, §cast-width-hygiene). `uptr <-> usize` is
+  the ptr↔word bridge — it is a Marshall op (`to_uptr`/`from_uptr` territory), NOT a plain `to`-cast,
+  precisely because crossing the address/integer line is a boundary, not a value conversion. So a
+  `usize` index never silently becomes an address, and an `__unwrap`ped `uptr` never silently becomes a
+  length. Keep the `type.tks:177` `Uptr` same-kind-only equality; add `Size`/`Usize` as ordinary
+  int-family prims that `to`-convert with the other ints.
+
+### 7b.3 The reballing scope — resolve the position ambiguity EXPLICITLY
+
+Two kinds of "position" exist; they reball DIFFERENTLY:
+
+- **MEMORY / machine positions → REBALL to `usize`/`size`.** Slice `.len` and `.cap`, array/collection
+  indices, byte offsets, arena offsets, `tk_region_alloc` sizes, loop counters that index memory. These
+  ARE what the metal sizes; they become `usize` (or `size` where a signed delta is needed, e.g. a
+  pointer difference or a signed offset). This is the owner's target.
+- **SOURCE positions → STAY FIXED (`u32`).** Line/col (`ast.tks` `line: u32`/`col: u32`, `TExpr`,
+  every decl), byte-in-file spans, token offsets. These are NOT machine addresses or memory measures —
+  they are diagnostic coordinates whose range is a source-file property, not a metal property, and
+  making them target-dependent would be meaningless (a 32-bit build does not have shorter source
+  files). **Decision: source positions do NOT reball; they remain `u32`.** This matches the owner's
+  reading ("memory/machine positions primarily") and keeps diagnostics target-independent.
+
+The discriminator for the mechanical sweep: a `u64` that MEASURES or INDEXES memory/a collection →
+`usize`; a `u32` that LOCATES a point in source text → unchanged; a `u64` that is a domain value
+(a hash, a numeric literal's value, a timestamp) → unchanged (it is not a position).
+
+### 7b.4 Convergence with the slice / native rep (the tie the owner named)
+
+The slice fat header's `len` (and `cap`) becoming `usize` ties DIRECTLY to the native slice
+representation — the paused #112 rep work (`native-slice-str-rep-separation-0.3.1.md`). The whole
+arena/DPS/slice machinery now speaks ONE machine-word type: `alloc_call_dest`'s sizes, the DPS
+destination offsets, `tk_region_alloc`'s length, `scope_touches_arena`'s counts, `tk_slice_grow_inplace`
+(AL3), and the slice header `{ptr, len, cap}` all become `usize`. This is a UNIFYING move: the memory
+model's measures were already all word-sized on 64-bit; reballing makes the TYPE say what the metal
+already does, which is exactly what lets the #112 rep work resume against a single position type rather
+than a hard-coded `u64`.
+
+### 7b.5 Byte-preservation on the fixpoint targets — the load-bearing argument
+
+**On the 64-bit fixpoint targets (x86_64, arm64), `usize == u64` and `size == i64`, bit-for-bit.**
+`prim_width(Usize) == 64` there, and the lowering emits the SAME machine type (`i64`/`u64`) it emits
+for `u64` today. So `u64 → usize` on a position CHANGES the checker's type but lowers to the IDENTICAL
+emitted bytes → **`gen2==gen3` holds**, and the reballing is byte-preserving on every fixpoint target.
+Confirm precisely at the lowering: `Usize`/`Size` map to the same LIR/C integer type as `U64`/`I64`
+(`lower.tks`/`codegen.tks` prim→machine-type table gains `Usize => i64`, `Size => i64` on a 64-bit
+target). 32-bit (where `usize == u32`) is NOT a fixpoint target, so it never enters the `gen2==gen3`
+comparison; its correctness is a separate cross-compile property, not a fixpoint gate.
+
+Because it is byte-preserving on 64-bit, the reballing rides the SOURCE SWEEP (Phase S) and needs NO
+separate reseed — it is a mechanical mass rewrite (every `.len: u64`, every index, every `to u64` on a
+position → `usize`), validated by the fixpoint byte-identity like every other Phase-S sweep.
+
+### 7b.6 Migration crumbs (Phase G additive + Phase S sweep)
+
+- **G-crumb (additive):** add `Size`/`Usize` to `PrimKind` + the prim predicates + the lowering
+  prim→machine-type table (`Usize => i64`, `Size => i64` on 64-bit), and make `usize`/`size` resolvable
+  type names. Inert until used — `src/` still says `u64`, so byte-identical. Lands in Phase G (see §10,
+  crumb G9).
+- **S-crumb (sweep):** mechanically rewrite memory/collection positions in `src/` + `.tkt` from `u64`
+  to `usize` (and `size` for signed deltas): slice `.len`/`.cap`, indices, offsets, arena sizes, the
+  slice header, the DPS/AL3 machinery. Source positions (`line`/`col` `u32`) untouched. Byte-preserving
+  on 64-bit → fixpoint-gated. Lands in Phase S (see §10, crumb S6).
+
+---
+
 ## 8. The `self` ↔ DPS convergence (owner point 4, made precise)
 
 `self` is a mutable receiver passed as a caller-arena pointer; a method mutating `self.field` writes
@@ -822,7 +916,9 @@ the DPS crumbs (§1.1) plus the front-end rename (§5).
 | `->` → `:` (§4) | **YES** (post-sweep) | distinct tokens, identical AST/bytes |
 | `self`/`base`/`static` (§5) | **YES** | front-end rename; codegen byte-neutral |
 | Marshall opaque `ptr` (§6) | **YES until adopted** | tag path inert; `src/` FFI migration mechanical |
+| `unsafe`/raw-ptr retirement (§6.5) | **YES** | deletes unused surface; obsoleted by arena; post-sweep |
 | DI `service`/`svc` (§7) | **YES until used** | `program_uses_di`-gated; `src/` uses no DI |
+| `size`/`usize` + reballing (§7b) | **YES on 64-bit targets** | `usize == u64` bit-for-bit; same lowered bytes |
 | **DPS / caller-arena return (§1.1)** | **MOVES BYTES** (deterministic) | native return ABI change; `gen1≠gen2`, `gen2==gen3` HOLDS |
 | arena elision (§1.2) | MOVES BYTES (deterministic) | removes region new/enter/leave/drop; `gen2==gen3` holds |
 
@@ -897,6 +993,9 @@ marked. Sizes: S/M/L. The sequence is dependency-correct; the reseed is the hing
 - **G8 — retire manual memory (`mem::free`/`#must_free`/`Arena`) + `RawBuf`/`Owned<T>`** (§6.5.4 steps
   2-3); migrate the few call sites to lexical/DI-scoped regions. Size M. Ritual: fixpoint (mechanical,
   contained to `src/mem/unsafe`).
+- **G9 — add `size`/`usize` to `PrimKind` + prim predicates + the lowering prim→machine-type table**
+  (`Usize`/`Size` => `i64` on 64-bit, §7b.6). Inert until used (`src/` still says `u64` = byte-
+  identical). Size M. Ritual: full gate (byte-identical).
 
 **Phase R — THE RESEED (the hinge):**
 - **R1 — one reseed** via `reseed-bootstrap.yml` (dispatch by ref on the lane), cherry-pick drain, no
@@ -915,11 +1014,18 @@ marked. Sizes: S/M/L. The sequence is dependency-correct; the reseed is the hing
   removes every `unsafe`/`#must_free`/raw-type occurrence from `src/`. Last crumb — nothing remains to
   contain. `extern fn` (G) untouched, gains the "wrap a foreign `ptr` with `__wrap<T>()`" honest-stop.
   Size M. Ritual: fixpoint + `unsafe_keyword_removed` (EXPECT_COMPILE_FAIL).
+- **S6 — REBALL memory/collection positions `u64` → `usize`/`size`** (§7b.3/§7b.6): slice `.len`/`.cap`,
+  indices, offsets, arena sizes, the slice header, DPS/AL3 machinery. Source positions (`line`/`col`
+  `u32`) untouched. Byte-preserving on 64-bit (`usize == u64`). Size L (mechanical mass rewrite).
+  Ritual: fixpoint byte-identity (the proof that `usize` lowers identically to `u64` on the targets).
 
-**Independence map:** G1–G6 are mutually independent grammar crumbs (each additive, each gate-able
-alone) and independent of Phase A EXCEPT that A must land before R (DPS in the seed). S1–S4 each depend
-only on R and on their matching G crumb. A4 (elision) and A5 (push_inst_block) are independent of the
-DPS core and of each other.
+**Independence map:** G1–G9 are mutually independent additive crumbs (each gate-able alone) and
+independent of Phase A EXCEPT that A must land before R (DPS in the seed); G7/G8 (safe-intrinsic
+reclassify + manual-memory retire) and G9 (`size`/`usize` add) ride the same additive window. S1–S6
+each depend only on R and on their matching G crumb; S5 (delete `unsafe`) must follow the sweeps that
+remove every `unsafe`/raw occurrence, and S6 (reball) is independent of the other sweeps but shares
+their fixpoint-byte-identity gate. A4 (elision) and A5 (push_inst_block) are independent of the DPS core
+and of each other.
 
 ---
 
@@ -993,6 +1099,10 @@ Surface fixtures (new):
 | `must_free_removed` | `#must_free` / `mem::free` no longer parse; region drops at scope | 0 |
 | `opaque_ptr_no_arithmetic` | `p + 1` / `p[0]` on an opaque `ptr` rejected ("no arithmetic") | EXPECT_COMPILE_FAIL |
 | `foreign_ptr_needs_wrap` | a C-returned `ptr` used without `__wrap<T>()` is rejected | EXPECT_COMPILE_FAIL |
+| `usize_len_index` | `xs.len: usize`, `xs[i: usize]` type-check; `usize` lowers = `u64` on 64-bit | 0 |
+| `usize_uptr_not_implicit` | a `usize` used where a `uptr` is expected (and vice-versa) is rejected | EXPECT_COMPILE_FAIL |
+| `source_pos_stays_u32` | `line`/`col` remain `u32` (source positions do not reball) | 0 |
+| `reball_bytes_identical` | a position rewritten `u64`→`usize` emits byte-identical native (64-bit) | 0 |
 
 Each fixture is a standalone project under `examples/regressions/<name>/`; REJECT fixtures carry
 `EXPECT_COMPILE_FAIL`; `svc`/service/marshall accept-fixtures are native exit-code oracles.
@@ -1136,6 +1246,22 @@ composing directly with the de-C endgame. The removal rides the wave reseed + so
 G7/G8 while `unsafe` still parses as a no-op, then S5 deletes the keyword after the sweep); it needs no
 reseed of its own. A false "fully removable" would have been worse than an honest residual — the residual
 is named (FFI trust) and already has its non-`unsafe` home.
+
+**Machine-word integers + position reballing (items 7-8):** add `size` (signed) / `usize` (unsigned)
+pointer-sized, target-dependent machine-word types (new `PrimKind` cases, `type.tks:11`; `prim_width`
+returns the target word), then REBALL every memory/collection position — slice `.len`/`.cap`, indices,
+byte/arena offsets, the slice header, the DPS/AL3 machinery — from hard-coded `u64` to `usize`/`size`.
+**Source positions (`line`/`col` `u32`) do NOT reball** — they locate points in source text, not the
+metal, so they stay target-independent (explicit decision, matches the owner's "memory/machine
+positions primarily"). **`usize` (an integer measure) stays a DISTINCT KIND from `uptr` (an address):**
+`__unwrap` yields `ptr`/`uptr`, lengths/indices are `usize`; `usize↔u64` is a plain `to`-cast, but
+`uptr↔usize` is a Marshall boundary op, never implicit. **Byte-preserving on the fixpoint targets:** on
+x86_64/arm64 `usize == u64` and `size == i64` bit-for-bit (both lower to the same `i64`), so the
+`u64→usize` rewrite changes the checker type but emits IDENTICAL bytes → `gen2==gen3` holds; the
+reballing therefore rides the source sweep (Phase S, crumb S6) with no separate reseed (32-bit, where
+`usize==u32`, is not a fixpoint target). This ties the whole arena/DPS/slice machinery to ONE
+machine-word position type, unblocking the paused #112 native slice-rep work against `usize` rather than
+a hard-coded `u64`. Add-the-type is crumb G9 (additive, inert until used); the mass rewrite is S6.
 
 **Single biggest risk:** the reseed is an unbypassable one-shot hinge coupled to a DPS bet that is
 unproven until the P1 pin — if the native `gen2==gen3` is not truly reached before R1 (P1 mis-pins, or
