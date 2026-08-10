@@ -6607,11 +6607,30 @@ fn slice_element_of(t: checker::Type) -> checker::Type | null {
  * @throws       propagated from lowering the value or from `slice_widen_plan`
  * @since 0.3.1 (native []U -> []T slice-widen coercion — interface-conformance fixpoint blocker)
  */
+/**
+ * slice_widen_member_tag — the wide variant's declared tag for a source element type `u` being
+ * widened in, matching how `lower_value_into_variant` selects a member: a `Null` element takes the
+ * variant's own `Null` slot (`variant_null_member_index`, the arm `direct_variant_member_index`
+ * deliberately omits since a scalar null construction is recognized by NODE, not by looking `Null`
+ * up by type), every other element by direct membership (`direct_variant_member_index`). `null` when
+ * `u` is not a direct member — the caller then passes the value through un-widened.
+ *
+ * @param vwide  the wider variant being widened into
+ * @param u      the source slice's element type
+ * @return       `u`'s declared tag in `vwide`, or `null` when `u` is not a direct member
+ */
+fn slice_widen_member_tag(vwide: checker::Variant, u: checker::Type) -> u32 | null {
+    match u {
+        checker::Null => variant_null_member_index(vwide)
+        _ => direct_variant_member_index(vwide.members, u)
+    }
+}
+
 fn lower_fat_expr_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> LoweredFat | error {
     let bel = match slice_element_of(bound) { checker::Type as t => t; null => return lower_fat_expr(ctx, value) }
     let uel = match slice_element_of(value.type) { checker::Type as t => t; null => return lower_fat_expr(ctx, value) }
     let vwide = match expand_named_variant(bel, ctx.variants) { checker::Variant as v => v; _ => return lower_fat_expr(ctx, value) }
-    let tag = match direct_variant_member_index(vwide.members, uel) { u32 as ix => ix; null => return lower_fat_expr(ctx, value) }
+    let tag = match slice_widen_member_tag(vwide, uel) { u32 as ix => ix; null => return lower_fat_expr(ctx, value) }
     let plan = match slice_widen_plan(uel, ctx) { SliceWidenPlan as p => p; error as err => return err }
     let fat = match lower_fat_expr(ctx, value) { LoweredFat as x => x; error as err => return err }
     let sc = ctx_alloc(fat.ctx)
