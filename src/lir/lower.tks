@@ -12014,12 +12014,35 @@ fn lower_fn_tail_fat(ctx: LowerCtx, s: checker::TStatement, line: u32, col: u32)
  * @since 0.3.1
  */
 fn lower_conveyed_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt, line: u32, col: u32) -> LowerBlockValueFat | error {
-    if ctx.bracket_depth > 0 { return lower_tail_expr_stmt_fat(ctx, es) }
+    if ctx.bracket_depth > 0 { return lower_body_tail_expr_stmt_fat(ctx, es) }
     let left = emit_region_leaves(ctx, line, col)
     let marked = ctx_with_bracket_depth(left, 1)
-    let out = match lower_tail_expr_stmt_fat(marked, es) { LowerBlockValueFat as x => x; error as err => return err }
+    let out = match lower_body_tail_expr_stmt_fat(marked, es) { LowerBlockValueFat as x => x; error as err => return err }
     let entered = emit_region_enters(out.ctx, line, col)
     LowerBlockValueFat { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated; ptr = out.ptr; len = out.len }
+}
+
+/**
+ * lower_body_tail_expr_stmt_fat — the FUNCTION-BODY fat tail (an implicit return), widened into the
+ * enclosing function's declared return type (`ctx.ret_type`) exactly as the explicit `return`
+ * placement is. This is the body-tail analog of `lower_return_fat`'s coercion: a builder that ends
+ * in a bare `push(empty(), Member{})` returns a `[]Member` value where the function declares
+ * `[]Variant`, so it must be rebuilt element-wise (`lower_fat_expr_into_type`) rather than returned
+ * at the narrow element width. A diverging (`Void`-typed) tail keeps `lower_tail_expr_stmt_fat`'s own
+ * closed-set handling. UNLIKE the shared `lower_tail_expr_stmt_fat`, this is reached ONLY on the
+ * function-body path (`lower_conveyed_tail_expr_stmt_fat`), where the tail's target genuinely IS the
+ * return type — an if/match ARM tail keeps the plain `lower_tail_expr_stmt_fat`, whose target is the
+ * arm's own result type, not the function's.
+ *
+ * @param ctx  the lowering context (its `ret_type` is the tail's target)
+ * @param es   the tail expression-statement
+ * @return     the widened fat tail value
+ * @throws     propagated from lowering/widening the tail
+ */
+fn lower_body_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt) -> LowerBlockValueFat | error {
+    if type_is_void(es.expr.type) { return lower_tail_expr_stmt_fat(ctx, es) }
+    let fo = match lower_fat_expr_into_type(ctx, ctx.ret_type, es.expr) { LoweredFat as x => x; error as err => return err }
+    LowerBlockValueFat { ctx = fo.ctx; terminated = false; ptr = fo.ptr; len = fo.len }
 }
 
 /**
