@@ -1,15 +1,19 @@
-# The `lir::frame_sweep_inst` by-address aggregate-through-merge/return probe (native fixpoint
-# blocker C2). Mirrors src/lir/frame_escape.tks: `frame_sweep_inst` matches `inst.op` and EVERY
-# arm RETURNS a `FrameSet` aggregate, the `FieldAddr` arm returning an `if`-value MERGE of two
-# `FrameSet`s; `frame_mark` does an in-place `[]bool` index-assign `fs[v] = true` then rewraps it
-# into the returned aggregate. This isolates whether the native SIGSEGV is on the RETURN /
-# TAIL-MERGE facet (the returned `FrameSet` box reclaimed with its frame) or the PAYLOAD-BIND /
-# index-store facet (the `fs[v] = true` write in a reclaimed region).
+# The `lir::frame_sweep_inst` by-address conveyance probe (native fixpoint blocker C2 — the P1
+# pin). A FAITHFUL mirror of src/lir/frame_escape.tks: the `frame_marks_of` fixpoint over a
+# multi-block function, `frame_sweep_inst` whose every `match inst.op` arm RETURNS a `FrameSet`,
+# the `FieldAddr` arm returning an `if`-value MERGE, and `frame_mark`'s in-place `[]bool`
+# index-assign `fs[v] = true` rewrapped into the returned aggregate.
 #
-# EXIT CODES: 42 all three marked VRegs survive; any other code is the wrong mark count.
+# THE FINDING IT RECORDS: built natively this probe PASSES (exit 42). The native backend BOXES
+# every `FrameSet` return (`tk_slice_elem_box`, the degrau-4/return-side copy) so the RETURN /
+# TAIL-MERGE facet is already handled, and the `[]bool` buffer is root-allocated so the in-place
+# store survives. That is why a properly-built native compiler (gen2) does NOT fault in its own
+# `frame_sweep_inst` on this commit: the residual by-address hazard is the PAYLOAD-BIND
+# (in-place `[]bool` element-write) facet, not the return facet, and here it happens to be benign.
+# The live native by-address crash surfaces instead in the element-BOX path — see
+# examples/probes/native_isel_elem_box.
 #
-#   TEKO_BACKEND=native teko build examples/probes/frame_sweep_merge
-#   ./examples/probes/frame_sweep_merge/bin/frame_sweep_merge    # -> 42
+# EXIT CODES: 42 the swept mark count is correct; any other code is the wrong count.
 name = "frame_sweep_merge"
 source = "src"
 
