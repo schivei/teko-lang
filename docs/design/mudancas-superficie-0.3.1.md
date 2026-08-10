@@ -349,6 +349,25 @@ enum Dir { N, S, E, W } {
 }
 ```
 
+### 9.1 Valores default de parâmetro
+
+**O que muda.** Um parâmetro pode ter valor default (`bounds: usize = 1`) — pedido antigo do projeto,
+formalizado agora (é o que o `chan<T>::make(bounds: usize = 1)` usa). Uma chamada que omite o argumento
+recebe o default.
+
+**O que entra.** Sintaxe `nome: T = <const-expr>` na assinatura; o default é uma **expressão de
+comp-time** (const), preenchida no call-site pelo checker. Só na **cauda** da lista de parâmetros (um
+parâmetro com default não pode preceder um sem default). Interação com sobrecarga (§9): se uma chamada
+fica **ambígua** entre uma sobrecarga e uma aridade preenchida por default, é **erro de compilação** —
+mesma disciplina "conflito colide em comp-time" da DI.
+
+**Exemplo.**
+```teko
+static fn chan<T>::make(bounds: usize = 1): self
+var a = chan<i32>::make()      // bounds = 1 (default)
+var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
+```
+
 ---
 
 ## 10. Concorrência — a superfície (`isolate`/`spawn`/`chan`, `async`/`await`, journaling)
@@ -420,18 +439,22 @@ não cruza a fronteira**: nem `spawn`/`chan`/`async fn` aceitam `ref`, nem um ge
 
 O journal é um **registro append-only, carimbado por corrida, segmentado por escritor**; a sumarização
 **relê** (`fold`), não funde. Para quem escreve testes hoje, **nada muda** de grafia (`teko::test::scoped`
-segue igual). O módulo:
+segue igual). Segue a **mesma lógica dos canais** (ruling do dono): tipo OOP, fábrica estática `make`,
+operado pelo **id**, e **reside na arena raiz** (F2 — sobrevive a todas as tasks, Doc 1 §7.10):
 
 ```teko
-pub type Journal = struct { run: str, writer: str, seg: u64 }   // seg opaco: fd hoje, laje-por-raia amanhã
-pub type Record  = struct { run: str, writer: str, kind: str, payload: str }
-fn run_id(): str                       // <ns monotônico>-<pid> — nomear a corrida mata o lixo calado
-fn run_root(): str                     // bin/.tkrun/<run_id()>
-fn open(writer: str): Journal | error
-fn append(j: Journal, kind: str, payload: str): null | error   // durabilidade: write(2) O_APPEND, sem buffer
-fn fold(root: str, run: str): []Record // descarta lixo de outra corrida / linha rasgada / sintetiza `end`
-fn scratch(base: str): str             // o compositor único de caminhos isolados
-fn sweep(keep: str): u64               // a limpeza é da corrida SEGUINTE, nunca da própria
+pub type Record = struct { run: str, writer: str, kind: str, payload: str }
+
+static fn journal::make(writer: str): self       // abre o segmento de `writer` na corrida corrente
+              j.id: usize                          // o id do segmento (a currency, como c.id)
+static fn journal::append(id: usize, kind: str, payload: str): null | error  // write(2) O_APPEND, sem buffer
+static fn journal::close(id: usize)              // fecha o segmento
+// nível de corrida (sem id de segmento):
+static fn journal::run_id(): str                 // <ns monotônico>-<pid> — nomear a corrida mata o lixo calado
+static fn journal::run_root(): str               // bin/.tkrun/<run_id()>
+static fn journal::fold(root: str, run: str): []Record   // relê; descarta lixo/linha rasgada; sintetiza `end`
+static fn journal::scratch(base: str): str       // o compositor único de caminhos isolados
+static fn journal::sweep(keep: str): usize       // limpeza é da corrida SEGUINTE, nunca da própria
 ```
 
 ### 10.5 Decisões pra ti (recompostas de `concorrencia-isolate-spawn-chan` §9)

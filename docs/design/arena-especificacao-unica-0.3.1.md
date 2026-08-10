@@ -405,6 +405,9 @@ static fn chan<T>::close(id: usize)                // fecho do lado do produtor
 ```
 
 - `chan<T>::make()` → **bounded-1** (default) · `make(64)` → bounded-64 · `make(0)` → **unbounded**.
+- **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
+  cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB e o desenho dele
+  suportar, é por conta dele.
 - Fan-in MPSC: N escritores (`Tx`), 1 leitor (`Rx`).
 
 `spawn` é uma **keyword de corotina** (não uma função) — estilo Go: `spawn f(args)` lança `f` numa corotina
@@ -412,7 +415,8 @@ static fn chan<T>::close(id: usize)                // fecho do lado do produtor
 **não há `join`** — a sincronização é pelo `chan` (resultados) e por `WaitGroup` (esperar N terminarem).
 
 **bounded — indexar um log de 10 GB sem carregá-lo na memória.** Leitor rápido, indexador lento, correndo
-ao mesmo tempo. O teto de 64 faz o leitor **esperar** ao encher: a memória fica ≤ 64 linhas em voo.
+ao mesmo tempo. O teto de 64 **mensagens** faz o leitor **esperar** ao encher: ≤ 64 linhas em voo (o
+ficheiro tem 10 GB no total; cada linha é uma mensagem).
 
 ```teko
 fn ler(cid: usize, caminho: str) {                 // corotina produtora — recebe o ID por cópia
@@ -491,7 +495,10 @@ ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan`
 
 ### 7.10 Journaling — a faceta de arena da durabilidade
 
-O journaling (`journaling-de-corrida`) tem faceta de arena por dois pontos:
+O journal segue a **mesma lógica dos canais** (ruling do dono): é um tipo OOP com fábrica estática
+`make`, operado pelo **id** (`journal::make(...) -> self`, `j.id`, estáticas que recebem o id — Doc 2
+§10.4), e o seu registro/handle **reside na arena raiz** (a região imortal do programa, F2, §7.6) — como
+o `chan`, porque um journal precisa sobreviver a todas as tasks. Tem faceta de arena por dois pontos:
 
 - **Segmento por escritor = a mesma disciplina de região-por-raia.** Cada escritor possui seu segmento e
   mais ninguém (sem lock, sem destino partilhado) — é o `encoded[i]` disjunto do §7.3 aplicado à
