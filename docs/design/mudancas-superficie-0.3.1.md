@@ -295,7 +295,7 @@ fn index(xs: []i64, i: usize): i64 { return xs[i] }
 
 ---
 
-## 9. Sobrecarga de método e de operador
+## 9. Sobrecarga (método, operador, tipo) e tipos com métodos sobre primitivo/enum/flag
 
 **O que muda.** Funções de mesmo nome com assinaturas diferentes (sobrecarga de método). Operadores com
 comportamento definido pelo usuário (sobrecarga de operador — **comportamento**, não casting; nada de
@@ -311,10 +311,16 @@ a tipos, não só a métodos/operadores.
 - **Operador:** um branch de lookup de dunder por operador + o mapa operador→dunder + derivação
   automática de `__eq`/`__lt` para comparação. Inerte até um tipo definir um dunder; o caminho de prim
   fica byte-idêntico.
+- **Tipo com métodos sobre primitivo/enum/flag** (o que dá aos operadores um lar): um `type` respaldado
+  por um primitivo (ou `enum`/`flags`) pode carregar **métodos** — **estáticos**, **de instância
+  (readonly)** e **operadores** — mas **NÃO tem campos** (o valor É o primitivo). Métodos são aceitos
+  também em **`enum`** e **`flags`**. Sem corpo `{}`, o tipo **comporta-se como o próprio primitivo**
+  (transparente — um alias/newtype sem superfície nova).
 
-**O que resolve.** Ergonomia: mesma operação, nomes/tipos diferentes, sem inventar nomes distintos; e
-operadores que fazem sentido para tipos do usuário (um `Vec2 + Vec2`), com o comportamento definido pelo
-autor do tipo — sem coerção implícita escondida.
+**O que resolve.** Ergonomia: mesma operação, nomes/tipos diferentes, sem inventar nomes distintos;
+operadores que fazem sentido para tipos do usuário (um `Vec2 + Vec2`) com o comportamento definido pelo
+autor — sem coerção implícita escondida; e **dar comportamento (métodos/operadores) a um primitivo, enum
+ou flag** sem embrulhá-lo numa struct (nem pagar um campo).
 
 **Exemplo.**
 ```teko
@@ -322,10 +328,25 @@ autor do tipo — sem coerção implícita escondida.
 fn draw(p: Point) { }
 fn draw(p: Point, cor: i64) { }        // mesmo nome, assinatura distinta
 
-// sobrecarga de operador (comportamento)
+// sobrecarga de operador numa struct
 type Vec2 = struct { x: i64, y: i64 }
 fn Vec2::__add(o: Vec2): Vec2 { return Vec2 { x: self.x + o.x, y: self.y + o.y } }
 var v = Vec2 { x:1, y:2 } + Vec2 { x:3, y:4 }   // usa __add
+
+// tipo sobre primitivo, com métodos — SEM campos
+type Celsius = i32 {
+    static fn from_f(f: i32): Celsius { return (f - 32) * 5 / 9 }   // estático
+    fn to_f(): i32 { return self * 9 / 5 + 32 }                     // instância (readonly)
+    fn Celsius::__add(o: Celsius): Celsius { return self + o }      // operador
+}
+var t = Celsius::from_f(212) + 10        // usa __add; `t` É um i32 por baixo
+
+type Meters = i32                        // sem corpo → comporta-se como i32 puro
+
+// métodos em enum / flags
+enum Dir { N, S, E, W } {
+    fn oposto(): Dir { return match self { N => Dir::S, S => Dir::N, E => Dir::W, W => Dir::E } }
+}
 ```
 
 ---
