@@ -3247,6 +3247,31 @@ fn lower_arg_into_param(ctx: LowerCtx, decl: checker::Type | null, arg: checker:
             let lo = match lower_value_into_type(ctx, bound, arg) { Lowered as x => x; error as err => return err }
             LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
         }
+        null => lower_fat_arg_into_param(ctx, decl, arg)
+    }
+}
+
+/**
+ * lower_fat_arg_into_param — the non-union arm of `lower_arg_into_param`: a FAT (`str`/`[]T`)
+ * argument is widened into the callee's DECLARED parameter element type when one is known
+ * (`lower_fat_expr_into_type`), so a narrow-member list passed where a wider-variant slice is
+ * expected is rebuilt element-wise before it crosses the call — the argument analog of the binding,
+ * return and field coercions. A non-fat argument, or one with no declared parameter type, lowers
+ * exactly as `lower_arg_vregs` already does.
+ *
+ * @param ctx   the lowering context
+ * @param decl  the callee's declared parameter type, or `null`
+ * @param arg   the argument expression
+ * @return      the advanced context + the argument's ABI-flattened VReg(s)
+ * @throws      propagated from lowering/widening the argument
+ */
+fn lower_fat_arg_into_param(ctx: LowerCtx, decl: checker::Type | null, arg: checker::TExpr) -> LoweredArgs | error {
+    if !is_fat_type(arg.type) { return lower_arg_vregs(ctx, arg) }
+    match decl {
+        checker::Type as d => {
+            let fo = match lower_fat_expr_into_type(ctx, d, arg) { LoweredFat as x => x; error as err => return err }
+            LoweredArgs { ctx = fo.ctx; vregs = two_args(fo.ptr, fo.len) }
+        }
         null => lower_arg_vregs(ctx, arg)
     }
 }
@@ -13580,6 +13605,26 @@ fn union_field_placement(ctx: LowerCtx, decl: checker::Type | null) -> checker::
  * @return LowerCtx  the advanced context
  * @throws  propagated from lowering (or coercing) `value`
  */
+/**
+ * store_field_fat_value — a struct/class FIELD's fat (`str`/`[]T`) value, widened into the field's
+ * DECLARED element type when the field declares one: the fat-field analog of the binding/return
+ * coercion, so a narrow-member list stored into a wider-variant slice field is rebuilt element-wise
+ * (`lower_fat_expr_into_type`) rather than stored at the source element width. A field with no
+ * declared type (`null` — a synthesized wrapper slot) has nothing to widen against and lowers plain.
+ *
+ * @param ctx    the lowering context
+ * @param decl   the field's declared type, or `null`
+ * @param value  the typed fat value
+ * @return       the placed (and, when needed, widened) (ptr, len) pair
+ * @throws       propagated from lowering/widening the value
+ */
+fn store_field_fat_value(ctx: LowerCtx, decl: checker::Type | null, value: checker::TExpr) -> LoweredFat | error {
+    match decl {
+        checker::Type as d => lower_fat_expr_into_type(ctx, d, value)
+        null => lower_fat_expr(ctx, value)
+    }
+}
+
 fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type | null, value: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
     match union_field_placement(ctx, decl) {
         checker::Type as bound => {
@@ -13592,7 +13637,7 @@ fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type
         null => { }
     }
     if is_fat_type(value.type) {
-        let fo = match lower_fat_expr(ctx, value) { LoweredFat as x => x; error as err => return err }
+        let fo = match store_field_fat_value(ctx, decl, value) { LoweredFat as x => x; error as err => return err }
         let addr = ctx_alloc(fo.ctx)
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
         return store_fat_slot(with_addr, addr.vreg, fo, line, col)
