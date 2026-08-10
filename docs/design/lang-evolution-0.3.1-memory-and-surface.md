@@ -41,7 +41,15 @@ callee writes into it; exclusivity is control-flow* — appears five times:
 
 The remaining two surface changes (`->` → `:` §5; `self`/`base`/`static` §7) are pure legibility
 that ride the same migration. This is why the wave is **one grammar migration + one source sweep +
-one reseed**, not six independent efforts.
+one reseed**, not many independent efforts.
+
+**The ONLY wave items NOT derived from the §0 arena thesis are the two OVERLOADING features (§7c —
+method overloading + operator overloading).** They are pure ergonomics; they do not flow from the
+memory discipline, they COMPOSE with it (an overloaded op returning an aggregate uses DPS; distinct
+overloads mangle like existing signature-distinguished symbols). Every OTHER item is a corollary of the
+arena principle above. The machine-word integers + reballing (§7b) and the `unsafe`/raw-pointer
+retirement (§6.5) ARE arena corollaries (they make the type say what the metal does, and they retire a
+containment the arena makes unnecessary).
 
 ---
 
@@ -905,6 +913,186 @@ the DPS crumbs (§1.1) plus the front-end rename (§5).
 
 ---
 
+## 7c. Overloading — methods + operators (ERGONOMICS, NOT arena corollaries)
+
+**These two are the ONLY wave items NOT derived from the §0 arena thesis** (noted there): they are pure
+ergonomics that COMPOSE with the discipline rather than flow from it. The composition points, stated up
+front: an overloaded function/operator that returns an AGGREGATE is an ordinary aggregate-returning
+function, so DPS (§1.1) applies — its result is born in the caller's arena; and distinct overloads mangle
+to distinct symbols via the EXISTING signature-mangling, exactly like today's monomorph instances. Both
+are feature-gated-inert (a program with no same-name defs and no dunder methods is byte-identical), so
+they ride the one wave: Phase G adds the capability, Phase S sweeps only if `src/` chooses to adopt.
+
+### 7c.1 Method (function) overloading — same name, different signatures
+
+**Grounding.** Today the checker REJECTS same-name definitions: functions via `revalidate.tks:6`
+("no duplicate definition"), and interface conformance already distinguishes the two cases at
+`resolve.tks:878` ("Same name + SAME signature is fine (equivalent, kept once); same name + DIFFERENT
+signature is [an error]"). Overloading RELAXES the function reject: same name is allowed IFF the
+parameter signatures differ. A single-def name resolves exactly as today (fully additive for
+non-overloaded code).
+
+**Grammar.** None. Overloading is purely a checker relaxation — no new tokens, no new syntax. Two
+`fn f(...)` decls with the same name and different param signatures both parse today; only the checker
+currently rejects the second.
+
+**Checker — the relaxation + resolution.**
+- **Definition rule:** an environment may bind N functions to one name provided their PARAMETER
+  signatures are pairwise distinct (by the same signature identity AL4a already computes for mangling,
+  §mangling below). Two defs with identical parameter signatures remain a redeclaration error
+  (`revalidate.tks:6` fires as today) — **the return type is NOT part of signature identity for the
+  distinctness check** (below).
+- **Resolution axis = PARAMETER signatures ONLY, never the return type.** A call site provides argument
+  types, not an expected return; disambiguating on return type would make resolution depend on the
+  call's context, which teko does not do (M.3 honesty — the reader resolves the overload from the
+  arguments alone). Enforce: the return type is ignored in overload selection, and two overloads that
+  differ ONLY in return type are a compile error (they are indistinguishable at every call site).
+- **Resolution rule (candidate selection):** at a call `f(args)`, collect the overload set for `f`;
+  filter to candidates whose arity + parameter types ACCEPT `args`; then:
+  1. **Exact match first** — a candidate whose parameter types EQUAL the argument types wins outright.
+  2. **Else the existing coercion/widening** — the same implicit widenings the checker already applies
+     to a single call (numeric-literal context typing, `literal-context-typing.md`; `null`→union). A
+     candidate reachable only by widening ranks below an exact match.
+  3. **Tie-break / AMBIGUITY** — if ≥2 candidates are equally good (both exact, or both reachable only
+     by the same-rank widening), it is a COMPILE ERROR ("ambiguous call to `f`: N overloads match
+     `(argtypes)` equally"), never a silent pick. This is the "no magic values" spirit: the compiler
+     refuses to guess. Reuse the existing `ambiguous` diagnostic idiom (`resolve.tks:697/893`).
+- **This EXTENDS the call path, it does not invent a resolver from scratch.** Today a callee name
+  resolves to ONE `Func` type; overloading makes that lookup return a candidate SET and adds the
+  selection above. The candidate-cursor machinery `TtCands`/`tt_cands` (`resolve.tks:147-218`) already
+  iterates same-key candidates for type lookups and interface dispatch — the overload set reuses that
+  shape (a linear candidate scan keeping the best match, ambiguity on a tie). The achatamento plan's
+  CK3 "overload resolution" step is where this lands; this is its content.
+
+```teko
+/**
+ * select_overload — choose the one function an overloaded call resolves to, by PARAMETER signatures
+ * only (never the return type). Filters the candidate set to those accepting `args`, prefers an exact
+ * parameter-type match over one reached by the checker's existing implicit widenings, and REJECTS a
+ * tie (>=2 equally-good candidates) as an ambiguous-call compile error rather than picking silently.
+ *
+ * @param cands  the functions bound to the called name (>=1; a single-def name trivially returns it)
+ * @param args   the argument types at the call site
+ * @return       the selected function, or an ambiguity/no-match error
+ * @throws       when no candidate accepts `args`, or >=2 accept it equally well
+ * @since 0.3.1
+ */
+fn select_overload(cands: []checker::TFunction, args: []Type): checker::TFunction | error
+```
+
+**Mangling — distinct overloads get distinct symbols FOR FREE.** Emitted function symbols already
+encode the signature: the AL4a signature-interning/mangling that distinguishes monomorph instances
+(`al4a-interning-design.md`; `mangle_type_name` and the function-symbol mangler, `codegen.tks:517-532`)
+produces a signature-distinguished symbol, so two overloads of `f` mangle to two different symbols with
+no new mangling work. Confirm: the function symbol must include the parameter-signature component (it
+does for generics; overloads reuse the same component). Byte-preservation depends on this — a
+non-overloaded `f`'s symbol must be UNCHANGED (do not add a signature suffix to single-def names, or
+every existing symbol moves; only overloaded names need the disambiguating suffix, exactly as today).
+
+**Interactions.**
+- **Generics / monomorphization:** an overload set MAY contain a generic member. Resolution runs on the
+  DECLARED signatures; a generic candidate matches by unifying its type params against `args` and ranks
+  as a match (below exact, at widening rank — a concrete exact overload beats a generic one, the C++/
+  Rust intuition). After selection, the chosen generic member monomorphizes as today. No new monomorph
+  surface — selection just happens before instantiation.
+- **Methods vs free functions:** overloading applies to BOTH. For struct/class METHODS, the synthetic
+  `self` receiver (§5) is `params[0]`; two methods `f(self, a: i64)` and `f(self, a: str)` overload on
+  the NON-receiver params (the receiver type is fixed by the method's owning type, so it never
+  participates in disambiguation within one type). Method resolution already dispatches by receiver
+  type then name; overloading adds the param-signature selection after the name match.
+- **DI conflict rule (orthogonal — NON-interaction):** the §7.2 DI conflict is about INTERFACE
+  PROVIDERS (two services claiming one interface), resolved by `(interface, key)` in the static table.
+  Function overloading is about SAME-NAME FUNCTIONS resolved by parameter signatures. Different
+  namespaces (the DI table vs the fn environment), different keys (interface vs param-sig), no shared
+  mechanism. State explicitly: they do not interact.
+
+**Byte-preservation.** Additive — a program with no same-name defs resolves and mangles identically.
+**Confirm before the sweep:** grep `src/` for accidental same-name defs that overloading would now
+ADMIT and thereby change meaning (today they are a redeclaration error, so none can exist in compiling
+source — the reject guarantees `src/` has zero same-name collisions, so enabling overloading cannot
+change how existing `src/` resolves; the check is a belt-and-braces confirmation, not a risk).
+
+### 7c.2 Operator overloading — behavior for user types (NOT casting)
+
+**Owner:** customize operator BEHAVIOR for user types; explicitly NO C#-style `implicit`/`explicit`
+CONVERSION operators — conversion stays `to` (explicit), a SEPARATE axis from operator behavior. So
+this adds no coercion path; `a + b` on user types calls a user method, it never converts `a` to `b`'s
+type.
+
+**The desugar target = a DUNDER METHOD convention, consistent with `__wrap`/`__unwrap` (§6) and the DI
+`__di_materialize`/`ctor` convention (§7).** When an operand's type defines the dunder, the operator
+desugars to the method call; primitives keep the builtin path untouched.
+
+**The operator → dunder map + signature shape** (each dunder is an INSTANCE method with a `self`
+receiver, fitting §5; an aggregate return uses DPS, §1.1):
+
+| operator | dunder | signature shape |
+|---|---|---|
+| `a + b` | `__add` | `fn __add(self, rhs: T): R` |
+| `a - b` | `__sub` | `fn __sub(self, rhs: T): R` |
+| `a * b` | `__mul` | `fn __mul(self, rhs: T): R` |
+| `a / b` | `__div` | `fn __div(self, rhs: T): R` |
+| `a % b` | `__mod` | `fn __mod(self, rhs: T): R` |
+| `a == b` | `__eq` | `fn __eq(self, rhs: T): bool` |
+| `a < b` | `__lt` | `fn __lt(self, rhs: T): bool` |
+| `-a` | `__neg` | `fn __neg(self): R` (unary) |
+| `~a` | `__not` | `fn __not(self): R` (unary bitwise NOT; distinct from binary `~` concat, typer.tks:280) |
+| `a[i]` | `__index` | `fn __index(self, i: I): R` |
+| `a & b` / `a \| b` / `a ^ b` | `__band`/`__bor`/`__bxor` | bitwise (opt-in; see below) |
+
+**Comparison derivation (RECOMMENDED — automatic).** A user type defines `__eq` + `__lt` ONLY; the
+compiler DERIVES `!=` (¬`__eq`), `>` (rhs `__lt` self), `<=` (¬(rhs `__lt` self)), `>=` (¬`__lt`). One
+source of truth, fewer methods — the owner's no-redeclaration ethos. Derivation is AUTOMATIC from
+`__eq`/`__lt`; a type defining neither has no comparison operators (the builtin path stays for
+primitives). A type MAY define `__eq` without `__lt` (equality only, no ordering); `<`/`>`/`<=`/`>=`
+then remain undefined for it (a clear "type T defines no ordering" error), while `==`/`!=` work.
+
+**Which operators are overloadable, and which are NOT (decided + justified):**
+- **Overloadable:** arithmetic (`+ - * / %`), comparison (`== <` → derived `!= > <= >=`), unary
+  `-`/`~`, index `[]`, and bitwise (`& | ^`) as an OPT-IN (they are genuine numeric-like behavior on a
+  user bignum/bitset; low risk).
+- **NOT overloadable, and why:** assignment `=` (rebinding is the language's storage model, not a
+  behavior — overloading it invites the C++ copy-assignment morass); member/path `.`/`::` (resolution,
+  not computation); logical short-circuit `&&`/`||` (overloading them would force EAGER evaluation of
+  both operands, DESTROYING short-circuit semantics — a correctness trap, M.3); the concat `~` binary
+  form stays the builtin string concat (`typer.tks:280`) — a user type wanting concatenation defines a
+  named method, not an overload of the string operator. Range/`in`/`to` are cast/membership operators,
+  a separate axis (owner: conversion stays `to`).
+
+**Checker.** Operators are builtin-only in the typer today (`check_binary`/`check_unary`/`check_compare`
+regimes, `typer.tks:278-479`). The desugar adds ONE branch at the front of each operator's typing: if a
+user-typed operand's type defines the matching dunder (a method lookup on the type), REWRITE the
+operator node to a method call (`a.__add(b)`) and type THAT; else fall through to the existing builtin
+path (byte-identical for primitives). Because it is a rewrite to an ordinary method call, overload
+resolution (§7c.1), generics, DPS, and mangling all apply with zero extra machinery. Guard: both
+operands primitive → never look up a dunder (the builtin path is unconditional for prim/prim), so the
+hot arithmetic path is untouched.
+
+**Lowering / arena.** None new. `a.__add(b)` is an ordinary method call; if `R` is an aggregate it
+returns via DPS (§1.1) into the caller's arena — the composition the owner named. Comparison dunders
+return `bool` (scalar, no DPS).
+
+**Byte-preservation.** Builtin ops on primitives are unchanged (the prim/prim guard). The user-op
+desugar is INERT until a user type defines a dunder — `src/` is byte-identical until it adopts one. The
+comparison-derivation is compile-time desugar (no runtime cost, no new symbols beyond the `__eq`/`__lt`
+methods the type already defines).
+
+### 7c.3 Migration crumbs
+
+- **G10 — method overloading:** relax the same-name reject to param-signature distinctness
+  (`revalidate.tks:6`); add `select_overload` candidate selection at the call path (extending the CK3
+  step); confirm the function-symbol mangler emits the signature component for overloaded names only.
+  Inert until `src/` defines an overload set. Size L. Ritual: full gate (byte-identical).
+- **G11 — operator overloading:** add the dunder-lookup branch to each operator's typing
+  (`typer.tks:278-479`), the operator→dunder map, and automatic `__eq`/`__lt` comparison derivation.
+  Inert until a user type defines a dunder. Size L. Ritual: full gate (prim path byte-identical).
+- **S7 (optional) — adopt in `src/`:** IF the compiler's own source chooses to use an overload set or
+  an operator dunder (e.g. a `bigint`/`dec` `__add`), that adoption is a Phase-S sweep, byte-moving
+  only where adopted, fixpoint-gated. If `src/` adopts nothing, S7 is empty and the feature ships
+  purely as a user-facing capability.
+
+---
+
 ## 9. Byte-preservation, the fixpoint, and the ONE reseed
 
 ### 9.1 Classification
@@ -919,6 +1107,8 @@ the DPS crumbs (§1.1) plus the front-end rename (§5).
 | `unsafe`/raw-ptr retirement (§6.5) | **YES** | deletes unused surface; obsoleted by arena; post-sweep |
 | DI `service`/`svc` (§7) | **YES until used** | `program_uses_di`-gated; `src/` uses no DI |
 | `size`/`usize` + reballing (§7b) | **YES on 64-bit targets** | `usize == u64` bit-for-bit; same lowered bytes |
+| method overloading (§7c.1) | **YES until used** | additive; single-def names resolve+mangle identically |
+| operator overloading (§7c.2) | **YES until used** | prim/prim path guarded; dunder desugar inert until a type defines one |
 | **DPS / caller-arena return (§1.1)** | **MOVES BYTES** (deterministic) | native return ABI change; `gen1≠gen2`, `gen2==gen3` HOLDS |
 | arena elision (§1.2) | MOVES BYTES (deterministic) | removes region new/enter/leave/drop; `gen2==gen3` holds |
 
@@ -996,6 +1186,12 @@ marked. Sizes: S/M/L. The sequence is dependency-correct; the reseed is the hing
 - **G9 — add `size`/`usize` to `PrimKind` + prim predicates + the lowering prim→machine-type table**
   (`Usize`/`Size` => `i64` on 64-bit, §7b.6). Inert until used (`src/` still says `u64` = byte-
   identical). Size M. Ritual: full gate (byte-identical).
+- **G10 — method overloading** (§7c.3): relax the same-name reject to param-signature distinctness;
+  add `select_overload` at the call path; overloaded-only symbol suffix. Inert until an overload set
+  exists. Size L. Ritual: full gate (byte-identical).
+- **G11 — operator overloading** (§7c.3): dunder-lookup branch per operator + the op→dunder map +
+  automatic `__eq`/`__lt` comparison derivation. Inert until a type defines a dunder. Size L. Ritual:
+  full gate (prim path byte-identical).
 
 **Phase R — THE RESEED (the hinge):**
 - **R1 — one reseed** via `reseed-bootstrap.yml` (dispatch by ref on the lane), cherry-pick drain, no
@@ -1018,14 +1214,18 @@ marked. Sizes: S/M/L. The sequence is dependency-correct; the reseed is the hing
   indices, offsets, arena sizes, the slice header, DPS/AL3 machinery. Source positions (`line`/`col`
   `u32`) untouched. Byte-preserving on 64-bit (`usize == u64`). Size L (mechanical mass rewrite).
   Ritual: fixpoint byte-identity (the proof that `usize` lowers identically to `u64` on the targets).
+- **S7 (optional) — adopt overloading in `src/`** (§7c.3): only if the compiler's own source chooses an
+  overload set or an operator dunder; byte-moving only where adopted, fixpoint-gated. Empty if `src/`
+  adopts nothing (the features ship as user-facing capability regardless). Size S-M. Ritual: fixpoint.
 
-**Independence map:** G1–G9 are mutually independent additive crumbs (each gate-able alone) and
+**Independence map:** G1–G11 are mutually independent additive crumbs (each gate-able alone) and
 independent of Phase A EXCEPT that A must land before R (DPS in the seed); G7/G8 (safe-intrinsic
-reclassify + manual-memory retire) and G9 (`size`/`usize` add) ride the same additive window. S1–S6
-each depend only on R and on their matching G crumb; S5 (delete `unsafe`) must follow the sweeps that
-remove every `unsafe`/raw occurrence, and S6 (reball) is independent of the other sweeps but shares
-their fixpoint-byte-identity gate. A4 (elision) and A5 (push_inst_block) are independent of the DPS core
-and of each other.
+reclassify + manual-memory retire), G9 (`size`/`usize` add), and G10/G11 (method + operator
+overloading) all ride the same additive window, inert until adopted. S1–S7 each depend only on R and on
+their matching G crumb; S5 (delete `unsafe`) must follow the sweeps that remove every `unsafe`/raw
+occurrence, S6 (reball) is independent of the other sweeps but shares their fixpoint-byte-identity gate,
+and S7 (adopt overloading) is optional and empty unless `src/` uses the feature. A4 (elision) and A5
+(push_inst_block) are independent of the DPS core and of each other.
 
 ---
 
@@ -1103,6 +1303,14 @@ Surface fixtures (new):
 | `usize_uptr_not_implicit` | a `usize` used where a `uptr` is expected (and vice-versa) is rejected | EXPECT_COMPILE_FAIL |
 | `source_pos_stays_u32` | `line`/`col` remain `u32` (source positions do not reball) | 0 |
 | `reball_bytes_identical` | a position rewritten `u64`→`usize` emits byte-identical native (64-bit) | 0 |
+| `overload_resolves_by_params` | `f(i64)` and `f(str)` both defined; each call picks the right one | 0 |
+| `overload_ambiguous_rejected` | two equally-good candidates for a call → compile error | EXPECT_COMPILE_FAIL |
+| `overload_return_type_only_rejected` | two `f()` differing only in return type → compile error | EXPECT_COMPILE_FAIL |
+| `single_def_symbol_unchanged` | a non-overloaded `f`'s emitted symbol is unchanged (byte-identity) | 0 |
+| `op_overload_add_aggregate` | `a + b` on a user type calls `__add`; aggregate result via DPS | 0 |
+| `op_overload_cmp_derived` | defining `__eq`+`__lt` makes `!=`/`>`/`<=`/`>=` work (derived) | 0 |
+| `op_no_overload_shortcircuit` | `&&`/`||` cannot be overloaded (short-circuit preserved) | EXPECT_COMPILE_FAIL |
+| `op_prim_path_unchanged` | `i64 + i64` never looks up a dunder (builtin path byte-identical) | 0 |
 
 Each fixture is a standalone project under `examples/regressions/<name>/`; REJECT fixtures carry
 `EXPECT_COMPILE_FAIL`; `svc`/service/marshall accept-fixtures are native exit-code oracles.
@@ -1262,6 +1470,25 @@ reballing therefore rides the source sweep (Phase S, crumb S6) with no separate 
 `usize==u32`, is not a fixpoint target). This ties the whole arena/DPS/slice machinery to ONE
 machine-word position type, unblocking the paused #112 native slice-rep work against `usize` rather than
 a hard-coded `u64`. Add-the-type is crumb G9 (additive, inert until used); the mass rewrite is S6.
+
+**Overloading — method + operator (items 9-10, the ONLY non-arena items — ergonomics that COMPOSE with
+the discipline, they do not derive from it).** METHOD overloading relaxes the same-name reject
+(`revalidate.tks:6`) to allow same name iff PARAMETER signatures differ; resolution is by parameters
+ONLY, never the return type (two overloads differing only in return type is a compile error); exact
+match beats the existing implicit widenings, and a tie (≥2 equally-good) is an ambiguity compile error
+(no silent pick). It EXTENDS the call path's candidate selection (the achatamento CK3 step, reusing the
+`TtCands` candidate-cursor shape) and gets distinct symbols for free from the AL4a signature mangling —
+with single-def names' symbols UNCHANGED (byte-identity). OPERATOR overloading desugars `a OP b` to a
+dunder method (`__add`/`__sub`/…/`__eq`/`__lt`/`__neg`/`__index`), consistent with `__wrap`/`__unwrap`,
+an instance method `fn __add(self, rhs): R`; `__eq`+`__lt` are the only comparison methods a type
+defines and `!=`/`>`/`<=`/`>=` are DERIVED automatically. Overloadable: arithmetic, comparison, unary
+`-`/`~`, `[]`, opt-in bitwise; NOT `=`/`.`/`::` or short-circuit `&&`/`||` (overloading them would kill
+short-circuit — a correctness trap). Both are feature-gated-inert (byte-identical until `src/` adopts a
+dunder or an overload set; the prim/prim operator path is guarded and untouched), so they ride the wave:
+G10/G11 add the capability, S7 (optional) sweeps only if `src/` chooses to use it. NO C#-style
+conversion operators — conversion stays `to`, a separate axis. An overloaded op returning an aggregate
+uses DPS (result born in the caller's arena) — the one composition point with §0. The DI conflict rule
+is orthogonal (interface providers vs fn signatures — no interaction).
 
 **Single biggest risk:** the reseed is an unbypassable one-shot hinge coupled to a DPS bet that is
 unproven until the P1 pin — if the native `gen2==gen3` is not truly reached before R1 (P1 mis-pins, or
