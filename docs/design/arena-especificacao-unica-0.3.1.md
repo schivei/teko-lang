@@ -390,58 +390,62 @@ pub type ChanId  = u64                       // o canal que a main abre e distri
 
 ### 7.8 `chan<T>` — MPSC (fan-in), a primitiva de dados
 
-Fan-in: N escritores, 1 leitor. `Tx` (copiável — os N escritores são a metade que pode ser múltipla),
-`Rx` (um só; um segundo `pop` de outra task é erro de runtime nomeado, nunca corrida silenciosa).
+`chan<T>` é um **tipo genérico**, aberto pela fábrica estática `make`, cujo parâmetro `bounds` tem
+**valor default = 1** (usa a superfície nova: `static fn`, genérico, `usize`, e **parâmetro com default**):
 
 ```teko
-pub fn chan_bounded(cap: u64) -> u64      // canal LIMITADO — teto `cap`, contrapressão
-pub fn chan_unbounded()       -> u64      // canal SEM teto — responsabilidade do dev
-pub fn chan_writer(id: u64)   -> Tx | error
-pub fn chan_reader(id: u64)   -> Rx | error
-pub fn chan_is_open(id: u64)  -> bool     // consulta ao registro, NUNCA cacheado
+static fn chan<T>::make(bounds: usize = 1): self   // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
+fn    chan<T>::writer(): Tx    // extremo de escrita — copiável (N escritores)   [forma OOP de chan_writer]
+fn    chan<T>::reader(): Rx    // extremo de leitura — um só; 2º pop de outra task = erro nomeado
+fn    chan<T>::close()         // fecho do lado do produtor
 ```
 
-**`bounded` — indexar um log de 10 GB sem carregá-lo na memória.** O leitor é rápido, o indexador é
-lento. O teto de 64 faz o leitor **esperar** o indexador ao encher (contrapressão) — a memória fica ≤ 64
-linhas em voo, não os 10 GB. É o caso onde produtor e consumidor correm ao mesmo tempo e um pode afogar o
-outro.
+- `chan<T>::make()` → **bounded, capacidade 1** (o default).
+- `chan<T>::make(64)` → bounded, capacidade 64.
+- `chan<T>::make(0)` → **unbounded** (sem teto — responsabilidade do dev).
+
+Fan-in MPSC: N escritores (`Tx`, copiável), 1 leitor (`Rx`, um só; 2º `pop` de outra task = erro nomeado,
+nunca corrida silenciosa).
+
+**bounded — indexar um log de 10 GB sem carregá-lo na memória.** Leitor rápido, indexador lento, correndo
+ao mesmo tempo. O teto de 64 faz o leitor **esperar** ao encher (contrapressão): a memória fica ≤ 64
+linhas em voo, não os 10 GB.
 
 ```teko
-fn ler(c: ChanId, caminho: str) {                  // produtor, numa raia
-    var tx = chan_writer(c)
+fn ler(c: chan<str>, caminho: str) {               // produtor, numa raia (recebe o handle por cópia)
+    var tx = c.writer()
     for linha in ler_linhas(caminho) {
         tx.send(linha)          // 64 casas cheias? ESPERA o indexador — nunca engole o ficheiro
     }
-    chan_close(c)               // fim → o pop do consumidor passará a devolver `closed`
+    c.close()                   // fim → o pop do consumidor passará a devolver `closed`
 }
 
 fn main() {
-    var c = chan_bounded(64)
-    spawn ler(c, "app.log")     // o leitor roda concorrente; a main indexa no seu ritmo
-    var rx = chan_reader(c)
+    var c = chan<str>::make(64)     // bounded, 64
+    spawn ler(c, "app.log")         // o leitor roda concorrente; a main indexa no seu ritmo
+    var rx = c.reader()
     loop {
         var m = rx.pop()
         match m {
-            str    => guardar_no_indice(m),   // lento; o leitor não corre à frente dele
+            str    => guardar_no_indice(m),
             closed => break
         }
     }
 }
 ```
 
-**`unbounded` — enfileirar um lote fixo ANTES de existir consumidor.** Aqui o `bounded` daria
-**deadlock**: a `main` enfileira o lote inteiro *antes* de lançar os workers, então ninguém está drenando
-— um teto cheio travaria a `main` para sempre. O `unbounded` não bloqueia, e é seguro porque o total é
-**conhecido e pequeno** (o dev garante isso — a memória é a responsabilidade dele).
+**unbounded — enfileirar um lote fixo ANTES de existir consumidor.** Aqui o bounded daria **deadlock**: a
+`main` enfileira tudo *antes* de lançar os workers, então ninguém está drenando — um teto cheio travaria a
+`main` para sempre. O `make(0)` não bloqueia, e é seguro porque o total é **conhecido e pequeno**.
 
 ```teko
 fn main() {
-    var c  = chan_unbounded()
-    var tx = chan_writer(c)
-    for tarefa in lote_fixo() {   // ex.: 12 tarefas conhecidas — total pequeno e finito
-        tx.send(tarefa)           // nunca bloqueia; não há "cheio" para travar a main
+    var c  = chan<Tarefa>::make(0)   // unbounded
+    var tx = c.writer()
+    for tarefa in lote_fixo() {      // ex.: 12 tarefas conhecidas — total pequeno e finito
+        tx.send(tarefa)              // nunca bloqueia; não há "cheio" para travar a main
     }
-    chan_close(c)
+    c.close()
     fork_join(4, 4, worker, ctx_de(c))   // SÓ AGORA os workers drenam — não havia consumidor antes
 }
 ```

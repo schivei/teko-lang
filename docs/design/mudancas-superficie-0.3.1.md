@@ -375,11 +375,10 @@ fn fork_join(count: u64, lanes: u64, entry: cabi fn(ptr) -> ptr, ctx: ptr): u64 
 fn hardware_parallelism(): u64
 
 // chan<T> MPSC (fan-in: N escritores, 1 leitor). Transporte: SOCK_DGRAM (Linux/macOS), mailslot (Windows)
-fn chan_bounded(cap: u64): u64                    // LIMITADO — teto cap, contrapressão
-fn chan_unbounded(): u64                          // SEM teto — responsabilidade do dev (Doc 1 §7.8)
-fn chan_writer(id: u64): Tx | error              // Tx copiável (os N escritores)
-fn chan_reader(id: u64): Rx | error              // Rx um só; 2º leitor = erro nomeado
-fn chan_is_open(id: u64): bool                    // consulta ao registro, nunca cacheado
+static fn chan<T>::make(bounds: usize = 1): self  // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
+fn chan<T>::writer(): Tx                           // Tx copiável (os N escritores)
+fn chan<T>::reader(): Rx                           // Rx um só; 2º leitor = erro nomeado
+fn chan<T>::close()                                // fecho do produtor
 
 // WaitGroup (integrator-pinned) — para contagem que CRESCE após o lançamento;
 // onde a contagem é estática, fork_join/join basta e é preferível
