@@ -6836,12 +6836,105 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmt
 fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
     match bound { checker::Reference => return lower_value_into_reference(ctx, value); _ => { } }
     match expand_named_variant(bound, ctx.variants) {
-        checker::Variant as v => match null_union_shape(v) {
-            NullUnionShape as shape => lower_value_into_null_union(ctx, shape, value)
-            null => lower_value_into_variant(ctx, v, value)
+        checker::Variant as v => {
+            match arm_join_retag_into(bound, v, value, ctx) {
+                checker::TExpr as retagged => return lower_expr(ctx, retagged)
+                null => { }
+            }
+            match null_union_shape(v) {
+                NullUnionShape as shape => lower_value_into_null_union(ctx, shape, value)
+                null => lower_value_into_variant(ctx, v, value)
+            }
         }
         _ => lower_expr(ctx, value)
     }
+}
+
+/**
+ * arm_join_retag_into — the ARM-JOIN WIDEN, the native twin of the C route's `emit_as` re-tag
+ * (`codegen.tks:6771`). The checker infers an `if`/`match` USED AS A VALUE at the union of its arm
+ * types IN ARM ORDER, so a body `match a { 0 => B{}; _ => A{} }` whose declared slot is
+ * `variant A | B` is typed `B | A` — the SAME member SET as the slot, but a DIFFERENT tag numbering
+ * (and, when an arm is a bare sub-member like `Reference` flowing into `Type | error`, a member that
+ * must be re-wrapped nested, not merely re-tagged). Lowered plainly, each arm builds its wrapper with
+ * ITS OWN inferred-union tag, which the CONSUMER — reading through the DECLARED slot's tag numbering —
+ * then misreads: the self-hosted `ref_target_type`'s `_ => Reference{…}` arm (Reference→Type, tag 0)
+ * sits after four `error` arms (tag 1), so its value came out tagged `error` and `func_type` reported
+ * a spurious signature error with a garbage message (the native `resolve_type` self-host blocker).
+ *
+ * The cure mirrors the C route exactly: when `value` is an `if`/`match` whose inferred variant type
+ * is NOT already the target's own tag layout but every member of which reaches the target `v`, return
+ * `value` with its NODE TYPE retagged to `bound`, so `lower_expr` re-lowers the `if`/`match` with each
+ * arm's tail coerced into `bound` (`lower_block_value`'s `target_ty` is the node type) — the arm then
+ * constructs directly into the DECLARED tag space, re-wrapping a nested sub-member correctly on the way.
+ * `null` (no retag) when `value` is not an `if`/`match`, its type is not a variant, or its tag layout
+ * already matches `v` (the common case — byte-identical, no re-lower).
+ *
+ * @param bound  the DECLARED target type the value is placed into (retag target — a `Named` variant
+ *               or an inline `Variant`, whichever `lower_value_into_type` was handed)
+ * @param v      `bound` already expanded to its `Variant` (the target tag numbering)
+ * @param value  the value expression being placed
+ * @param ctx    the lowering context (its declared-variant table drives the reach/layout tests)
+ * @return       `value` retagged to `bound` when the arm-join widen applies, else `null`
+ * @since 0.3.1 (native arm-join variant-tag widen — the `ref_target_type` self-host blocker)
+ */
+fn arm_join_retag_into(bound: checker::Type, v: checker::Variant, value: checker::TExpr, ctx: LowerCtx) -> checker::TExpr | null {
+    let is_join = match value.kind { checker::TMatchExpr => true; checker::TIfExpr => true; _ => false }
+    if !is_join { return null }
+    match expand_named_variant(value.type, ctx.variants) {
+        checker::Variant as nt => {
+            if variant_tag_layout_matches(nt, v, ctx.variants) { return null }
+            if !variant_all_members_reach(nt.members, v, ctx.variants) { return null }
+            checker::TExpr { kind = value.kind; type = bound; line = value.line; col = value.col }
+        }
+        _ => null
+    }
+}
+
+/**
+ * variant_tag_layout_matches — do `nt` and `v` carry the SAME member tag numbering: the same member
+ * count AND, at every index, the same case (`variant_member_type_matches`)? When true, a value typed
+ * `nt` already reads correctly through `v`'s tags, so `arm_join_retag_into` leaves it alone (no
+ * re-lower). A DIFFERENT order, or `nt` a strict subset, answers false — those need the re-tag.
+ *
+ * @param nt        the value's own inferred variant type
+ * @param v         the declared target variant
+ * @param variants  the program's declared-variant table (nested-alias resolution)
+ * @return          whether the two share an identical positional tag layout
+ * @since 0.3.1 (native arm-join variant-tag widen)
+ */
+fn variant_tag_layout_matches(nt: checker::Variant, v: checker::Variant, variants: []LVariantDef) -> bool {
+    if nt.members.len != v.members.len { return false }
+    mut j: u64 = 0
+    loop {
+        if j >= nt.members.len { break }
+        if !variant_member_type_matches(v.members[j], nt.members[j], variants) { return false }
+        j++
+    }
+    true
+}
+
+/**
+ * variant_all_members_reach — does EVERY member of `members` reach some member of the target variant
+ * `v` (`variant_any_member_matches`, so a bare sub-member like `Reference` counts as reaching `v`'s
+ * `Type` member)? The native mirror of the C route's `cg_narrow_variant_widens_into` guard: it gates
+ * `arm_join_retag_into`'s re-tag on the value being a true WIDEN into `v`, never a re-tag of members
+ * `v` cannot hold.
+ *
+ * @param members   the value's own inferred variant members
+ * @param v         the declared target variant
+ * @param variants  the program's declared-variant table (nested-alias resolution)
+ * @return          whether every member reaches a case of `v`
+ * @since 0.3.1 (native arm-join variant-tag widen)
+ */
+fn variant_all_members_reach(members: []checker::Type, v: checker::Variant, variants: []LVariantDef) -> bool {
+    mut j: u64 = 0
+    loop {
+        if j >= members.len { break }
+        if !variant_any_member_matches(v.members, members[j], variants) { return false }
+        j++
+    }
+    true
 }
 
 /**
