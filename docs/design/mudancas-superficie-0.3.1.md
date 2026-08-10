@@ -368,6 +368,29 @@ var a = chan<i32>::make()      // bounds = 1 (default)
 var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
 ```
 
+### 9.2 Tipos de closure — `func<…>` / `action<…>`
+
+**O que muda.** O **tipo** de uma closure passa a ser um subtipo de comp-time, ao modo do C# — em vez da
+forma antiga baseada em `fn`. A closure **literal** continua `(params) => expr` (ou `(params) => { … }`) —
+**sem `fn`, sem `-> R`**, retorno inferido (já era assim, `parse_expr.tks:308`).
+
+**O que sai.** A anotação de tipo `fn(T): R` / `() -> T?` — que **colide** com uniões de retorno:
+`fn(T): R | null` é ambíguo entre `(fn(T): R) | null` e `fn(T): (R | null)`.
+
+**O que entra.** Dois construtores de tipo genéricos, **subtipos de comp-time** (monomorfizados, sem a
+sobrecarga de um objeto delegate em runtime):
+- **`func<T1, …, Tn, R>`** — recebe `T1…Tn`, **retorna `R`** (o último parâmetro de tipo é o retorno).
+- **`action<T1, …, Tn>`** — recebe `T1…Tn`, **sem retorno**.
+
+**O que resolve.** Declaração mais simples e **sem colisão**: `func<Record, str> | null` é inequívoco.
+
+**Exemplo.**
+```teko
+var dobro: func<i32, i32>            = (x) => x * 2
+var log:   action<str>              = (m) => print(m)
+var fmt:   func<Record, str> | null = null           // sem colisão (era `fn(Record): str | null`, ambíguo)
+```
+
 ---
 
 ## 10. Concorrência — a superfície (`isolate`/`spawn`/`chan`, `async`/`await`, journaling)
@@ -474,7 +497,7 @@ operado pelo **id**, e **reside na arena raiz** (F2 — sobrevive a todas as tas
 ```teko
 pub type Record = struct { run: str, writer: str, kind: str, payload: str }
 
-static fn journal::make(writer: str, roll: Roll = Roll::none, fmt: fn(Record): str | null = null): self  // abre
+static fn journal::make(writer: str, roll: Roll = Roll::none, fmt: func<Record, str> | null = null): self  // abre
               j.id: usize                          // o id do segmento (a currency, como c.id)
 static fn journal::append(id: usize, kind: str, payload: str): null | error  // write(2) O_APPEND, sem buffer
 static fn journal::close(id: usize)              // fecha o segmento
@@ -495,17 +518,17 @@ enum Roll {                       // QUANDO rolar (política de rotação)
     none,                         // um único ficheiro (default)
     size(usize),                  // rola ao atingir N bytes  → ex.: Roll::size(100 * 1024 * 1024)
     daily,                        // rola por data (um ficheiro por dia)
-    custom(fn(SegStat): bool)     // o predicado do dev decide (tamanho, idade, contagem, o que for)
+    custom(func<SegStat, bool>)   // o predicado do dev decide (tamanho, idade, contagem, o que for)
 }
 
-// fmt é uma CLOSURE, default null: se null (ou omitido), usa-se a formatação padrão (o formato interno
-// "kind<TAB>payload"); senão, a closure do dev serializa cada registro.
+// fmt é uma CLOSURE (func<Record, str>), default null: se null (ou omitido), usa-se a formatação padrão
+// (o formato interno "kind<TAB>payload"); senão, a closure do dev serializa cada registro.
 
 // ex.: padrão (fmt omitido → formatação padrão), rolando a cada 100 MB:
 var j1 = journal::make("app", Roll::size(100 * 1024 * 1024))
 
-// ex.: formatação própria via closure:
-var j2 = journal::make("app", Roll::daily, fn(r: Record): str { return r.kind + "|" + r.payload })
+// ex.: formatação própria via closure — literal `(params) => expr`, sem `fn`:
+var j2 = journal::make("app", Roll::daily, (r) => r.kind + "|" + r.payload)
 ```
 
 O rolling é do runtime de durabilidade (o `append` verifica a política e rotaciona por `rename` atômico
