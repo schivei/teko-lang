@@ -31,10 +31,12 @@ história de comp-time). `let` e `mut` deixam de ser kinds distintos.
 (`&x`/`ref x`/`mem::free` exigirem `is_mut`) viram sempre-passa. A rejeição de "reatribuir um `let`"
 some.
 
-**O que entra.** `var` como a keyword de local. `is_mut` vira sempre-verdadeiro para locais. `mut`
-sobrevive na janela aditiva como grafia **aceita-mas-no-op** (soft-deprecation), não erro de parse, para
-o corpus não quebrar de uma vez. CF3 (const-propagation) re-baseia em **fluxo-de-atribuição-única** (um
-local escrito exatamente uma vez É imutável de fato — derivável, byte-preservante).
+**O que entra.** `var` como a keyword de local. `is_mut` vira sempre-verdadeiro para locais. **`let`/`mut`
+NÃO ficam como no-op** (ruling do dono): são varridos para `var` e depois **erram** — superfície que não
+existe mais, não uma grafia tolerada. (Durante a janela aditiva o parser aceita ambos só para o seed
+construir o `src/` ainda-não-varrido; pós-sweep+reseed, `let`/`mut` são erro de parse.) CF3
+(const-propagation) re-baseia em **fluxo-de-atribuição-única** (um local escrito exatamente uma vez É
+imutável de fato — derivável, byte-preservante).
 
 **O que resolve.** Remove um eixo de binding redundante. A segurança nunca vinha da keyword
 (`ast-computed-arena-assessment` §4.8): UAF/overflow são da arena, aliasing é da exclusividade F1. Sob
@@ -122,10 +124,11 @@ solto). `base` referencia o método da super numa sobrescrita. `static` marca um
 **O que sai.** O receptor solto (o primeiro parâmetro untyped que hoje faz de `self`) e o
 `allow_untyped_first` — no sweep.
 
-**O que entra.** `self` sintético; `static` como keyword. `base` é **contextual** — só significa
-super-receptor dentro de uma sobrescrita; **continua um nome de local válido** em código de produção que
-já o usa (`driver.tks`, `resolve.tks`, `zlib.tks`), para não quebrar. Um parâmetro de usuário chamado
-`self` é rejeitado.
+**O que entra.** `self` sintético; `static` e `base` como **keywords reservadas** (ruling do dono: se
+`base` vira keyword, não fica também como nome de local — "mesma coisa" de `mut`). Os poucos sítios de
+produção que usam `base` como local (`driver.tks`, `resolve.tks`, `zlib.tks`) são **varridos** para outro
+nome no sweep. `base` = o super-receptor numa sobrescrita. Um parâmetro de usuário chamado `self` é
+rejeitado.
 
 **O que resolve.** OOP explícito e consistente: o receptor é uma keyword, não uma convenção posicional; a
 super é nomeável; membros de tipo (fábricas) têm marca própria. Ctor de `service` (DI) usa `static`.
@@ -232,7 +235,9 @@ fn use_it(path: ptr): i64 | error {
 **O que entra.** Keywords `service` (+ `sealed`), os lifetimes `singleton`/`scoped`/`transient`, o ctor
 `static`, e `svc<T>()` como **intrínseco de comp-time** (o compilador substitui o call-site inline por
 código por-lifetime; sem ABI de runtime). Chaves de string desambiguam múltiplos provedores de uma
-interface. **Regra de escape:** valor de serviço nunca armazenado em campo, passado como argumento, ou
+interface — e a política de conflito é dura (ruling do dono): **se já há um registro do mesmo tipo sob a
+mesma chave, é ERRO DE COMPILAÇÃO** (chaves distintas coexistem; mesmo-tipo-mesma-chave colide em
+comp-time, nunca "último vence" silencioso). **Regra de escape:** valor de serviço nunca armazenado em campo, passado como argumento, ou
 retornado em código de usuário — forçando o `claim` explícito via `svc<T>()`; o backend é isento mas o
 que segura fica arena-bounded.
 
@@ -443,13 +448,16 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
 
 ---
 
-## 12. Pontos em aberto — para tua validação
+## 12. Decisões — todas resolvidas pelo dono (2026-08-10)
 
-1. **`mut` na janela aditiva** — aceito-no-op (soft-dep) vs. erro de parse imediato. Proposto: no-op,
-   para o corpus não quebrar de uma vez. Confirmar.
-2. **`base` contextual** — mantê-lo como nome de local válido (produção usa) exige que "super" só valha
-   dentro de sobrescrita. Confirmar que essa contextualidade te serve, ou preferes `base` reservado
-   (quebra os call-sites de produção).
-3. **Chaves de string na DI** — a forma exata da chave (`svc<I>(key "x")`) e a política de conflito
-   (A/B/C/D/E que levantaste) — validar a superfície final.
-4. ~~`chan_unbounded`~~ — **resolvido:** entra, é responsabilidade do dev (ruling 08-10).
+1. ~~`mut` na janela aditiva~~ — **superfície removida ERRA, sem no-op.** "Vale pra tudo": `let`/`mut`,
+   `->`, receptor solto, `unsafe`, `ptr<T>` genérico são varridos para a grafia nova e depois erram — não
+   ficam como grafia tolerada. (Na janela aditiva o parser aceita ambos só para o seed construir o `src/`
+   ainda-não-varrido; pós-sweep+reseed, a grafia velha é erro de parse.)
+2. ~~`base` contextual~~ — **`base` é keyword reservada** (§4); os sítios de produção que o usam como local
+   são varridos para outro nome. Não fica como nome válido.
+3. ~~chave-string da DI~~ — **mesmo tipo sob a mesma chave = ERRO DE COMPILAÇÃO** (§7); chaves distintas
+   coexistem, nunca "último vence" silencioso.
+4. ~~`chan_unbounded`~~ — entra, responsabilidade do dev.
+
+**Nada em aberto na superfície.**
