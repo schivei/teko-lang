@@ -369,21 +369,26 @@ O isolamento de memória tem **duas camadas**:
    a keyword `spawn` cria** (§7.8): cada `spawn f(args)` nasce uma corotina isolada com sua sub-raiz, os
    argumentos entram **por cópia** nessa raiz, e nada de fora é referenciado por `ref` (§9).
 
-**`isolate { … }` — a fronteira de heap SEM thread (síncrona).** Um bloco `isolate` corre na sua **própria
-raiz de arena** (`tk_region_new(NULL)`, "como se fosse outro programa"): tudo que ele aloca vive nessa raiz
-e é **dropado de uma vez ao sair** — sem thread, sem escalonamento. É o `#arena_size` de hoje promovido a
-keyword. Relação com `spawn`: `spawn f(args)` é este isolamento **+** uma corotina; `isolate { }` é só o
-isolamento (síncrono, no mesmo fluxo).
+**`isolate fn` — a keyword de função da corotina.** `isolate` é um **modificador de função** (não um
+bloco): uma `isolate fn` **não tem retorno** e **só pode ser chamada por `spawn`** (chamá-la diretamente é
+erro de compilação). É o par declarativo do `spawn`: a função marca "isto é um ponto de entrada de corotina
+isolada", e o checker garante que ela nunca corre síncrona nem devolve valor — resultados saem por `chan`.
+Quando `spawn` a lança, ela nasce na sua **própria sub-raiz de arena** (F1), com os argumentos entrando por
+cópia.
 
 ```teko
-isolate {
-    var big = carregar_tudo()      // aloca à vontade na raiz PRÓPRIA do isolate
-    processar(big)
-}                                   // toda a arena do isolate dropa aqui, de uma vez — nada vaza para fora
-```
+isolate fn worker(cid: usize) {        // sem retorno; SÓ chamável por spawn
+    var tx = chan<i32>::writer(cid)
+    tx.send(processar())
+    chan<i32>::close(cid)
+}
 
-Uso típico: uma operação pesada de memória cujo rastro inteiro se quer reclamar de uma vez (um pedido, um
-lote, a compilação de uma função) — o mesmo motivo do `#arena_size`.
+fn main() {
+    var c = chan<i32>::make(64)
+    spawn worker(c.id)                 // a ÚNICA forma de invocar uma isolate fn
+    // worker(c.id)                     // ERRO de compilação: isolate fn não pode ser chamada direto
+}
+```
 
 **A região do programa (F2):** depois que F1 parte a raiz única em N raízes de task, **não sobra raiz de
 processo** para um singleton morar — cada task morre e sua raiz esvazia. Um `chan`, criado UMA vez pela
@@ -439,7 +444,7 @@ quando há 64 pendentes (contrapressão): a fila em voo nunca passa de 64, não 
 consumidor atrasa.
 
 ```teko
-fn gerar(cid: usize) {                             // produtor rápido, numa corotina — recebe o ID por cópia
+isolate fn gerar(cid: usize) {                     // corotina (isolate fn): sem retorno, só via spawn
     var tx = chan<Pedido>::writer(cid)
     for p in pedidos() {
         tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula

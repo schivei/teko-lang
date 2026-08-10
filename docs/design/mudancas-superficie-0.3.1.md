@@ -401,7 +401,7 @@ A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o u
 
 ### 10.1 Estratégia de token — tudo contextual
 
-`spawn`, `async`, `await` (corotina) e `isolate` (bloco de heap isolado) são **keywords contextuais**
+`spawn`, `async`, `await` (corotina) e `isolate` (modificador de função — a corotina só chamável por `spawn`) são **keywords contextuais**
 (reconhecidas pelo parser por posição, sem reserva no lexer — a mesma norma que
 `class`/`abstract`/`virtual`/`override` seguem); `chan` é um **tipo genérico** (`chan<T>`). Medido: **zero
 identificadores Teko hoje** se chamam `spawn`/`chan`/`async`/`isolate`, então reconhecê-los por posição não
@@ -410,9 +410,9 @@ quebra corpus.
 ### 10.2 `spawn` (corotina) + `chan<T>` — paralelismo real, memória isolada
 
 `spawn` é uma **keyword de corotina** (estilo Go), **não uma função** — `spawn f(args)` lança `f` numa
-corotina **isolada** (sub-raiz própria), argumentos **por cópia**, **sem retorno** e **sem `join`**. A
-versão **síncrona** do isolamento (sem corotina) é o bloco `isolate { … }` — heap próprio, dropado ao sair
-(Doc 1 §7.6). Ou seja: `spawn` = `isolate` + corotina.
+corotina **isolada** (sub-raiz própria), argumentos **por cópia**, **sem retorno** e **sem `join`**. O par
+declarativo é `isolate fn`: **`isolate` é um modificador de função** — uma `isolate fn` **não tem retorno**
+e **só pode ser chamada por `spawn`** (chamá-la direto é erro de compilação). Doc 1 §7.6.
 
 ```teko
 spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia
@@ -438,7 +438,7 @@ fn hardware_parallelism(): usize                   // paralelismo concedido pelo
 Um fluxo mínimo — a `main` cria o canal, uma corotina escreve, a `main` lê até o `closed`:
 
 ```teko
-fn produz(cid: usize) {                  // corotina: recebe o id por cópia, reconstrói o Tx
+isolate fn produz(cid: usize) {          // corotina (isolate fn): sem retorno, só via spawn
     var tx = chan<i32>::writer(cid)
     var i = 0
     loop while i < 100 { tx.send(i); i = i + 1 }
