@@ -230,7 +230,10 @@ que segura fica arena-bounded.
 
 **O que resolve.** Resolução determinística em comp-time (tabela estática por análise), sem custo de
 runtime, e um modelo de lifetime que casa com a arena em vez de brigar com ela. A regra de escape impede
-que um serviço vaze para além da sua arena.
+que um serviço vaze para além da sua arena. **Sob threads** (ruling do dono 08-10), a resolução é **por
+thread**: `singleton` vive na raiz da THREAD (não do programa), `scoped` na sub-raiz da thread — a faceta
+de arena está no Doc 1 §8. É o "considerar DI no front e no back": a superfície é a mesma, o tempo de vida
+é o da thread.
 
 **Exemplo.**
 ```teko
@@ -283,7 +286,9 @@ fn index(xs: []i64, i: usize): i64 { return xs[i] }
 
 **O que muda.** Funções de mesmo nome com assinaturas diferentes (sobrecarga de método). Operadores com
 comportamento definido pelo usuário (sobrecarga de operador — **comportamento**, não casting; nada de
-"explicit/implicit operator").
+"explicit/implicit operator"). E **tipos** de mesmo nome com aridade genérica distinta — `Intent` (opaco,
+sem dado) e `Intent<T>` (carrega a cópia do dado) coexistem: é a razão do dono para overload servir também
+a tipos, não só a métodos/operadores.
 
 **O que sai.** A rejeição de "mesmo nome" hoje — relaxada para **distinção por assinatura de parâmetro**.
 
@@ -355,15 +360,23 @@ transporte do SO.
 
 ### 10.3 `async`/`await` + `Intent<T>` — açúcar de duas fundações
 
-Keywords **contextuais**. `async`/`await` é açúcar sobre DUAS fundações, e o desenho diz qual é qual (a
-arena de cada uma está no Doc 1 §7.9):
+Keywords **contextuais**. `async`/`await` retorna um `Intent`/`Intent<T>`:
 
-- **I/O cooperativo** — `Intent<T>` vive na arena de quem criou; sem thread de SO nova; reator
+- **`Intent<T>`** carrega o **estado da intenção + a CÓPIA do dado retornado**; no `await`, a cópia de
+  `T` aterrissa na arena de quem espera (nunca uma referência à arena que produziu o valor).
+- **`Intent`** (não-genérico) é **opaco e sem dado** — fire-and-forget; `await` só sincroniza.
+- `Intent` vs `Intent<T>` são overload de **tipo** (§9).
+
+É açúcar sobre DUAS fundações, e o desenho diz qual é qual (a arena de cada uma no Doc 1 §7.9):
+
+- **I/O cooperativo** — o `Intent` vive na arena de quem criou; sem thread de SO nova; reator
   `epoll`/`kqueue`/`IOCP`. Barato.
 - **CPU** — `async fn pesado()` desaçucara para `isolate`/`spawn`/`join` sobre um pool; `await` = `join`.
   Herda F1 de graça.
 
-**Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve").
+**Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve"). E **`ref`
+não cruza a fronteira**: nem `spawn`/`chan`/`async fn` aceitam `ref`, nem um genérico pode ser `<ref T>`
+(§10.6) — preserva UAF; o que cruza é cópia ou id.
 
 ### 10.4 `teko::journal` — o módulo de journaling
 
@@ -389,10 +402,21 @@ fn sweep(keep: str): u64               // a limpeza é da corrida SEGUINTE, nunc
 |---|---|---|
 | D1 | `isolate`/`spawn`/`chan` — tokens reservados ou biblioteca? | **biblioteca, zero tokens** (contextual) |
 | D2 | `spawn <call-expr>` (açúcar de chamada) — agora ou depois? | **depois** (registrar; journal não precisa) |
-| D3 | `chan_unbounded` — entra ou sai? | **sai / sinalizado não-recomendado** (reabre OOM) |
+| D3 | `chan_unbounded` — entra ou sai? | **ENTRA — responsabilidade do dev, não da linguagem** (ruling do dono 08-10) |
 | D4 | `WaitGroup` — a forma acima ou só `Isolate[]`+`join`? | a forma acima (menos apoiada em medição) |
-| D5 | `async`/`await` — separar as duas fundações ou `Intent<T>` único? | **separar** (dizer qual fundação no tipo/doc) |
+| D5 | `async`/`await` — separar as duas fundações ou `Intent<T>` único? | **separar** (ruling do dono 08-10): `Intent<T>` carrega cópia, `Intent` opaco |
 | D6 | namespace — `teko::isolate`+`teko::threads` ou um só? | **um só, `teko::threads`** |
+
+### 10.6 `ref` e genéricos sob concorrência — a regra de UAF (ruling do dono 08-10)
+
+`ref` (borrow) **não pode cruzar fronteira de MT/async**, e um genérico **não pode ser parametrizado por
+referência** — `<ref T>` é rejeitado pelo checker. Um borrow que atravessasse uma task/continuação
+penduraria quando a arena do outro lado dropasse (UAF). Consequências de superfície:
+
+- `spawn`/`chan_writer`/`chan_reader`/`async fn` **rejeitam** parâmetro/valor `ref`.
+- `Foo<ref T>` não parseia/typa. `ref` sobrevive só como borrow **local** caller→callee que **não** cruza
+  fronteira de concorrência (§3: `ref` já é só parâmetro).
+- O que cruza a fronteira é **cópia** (valor) ou **id** (`u64`), nunca borrow.
 
 ---
 
@@ -420,4 +444,4 @@ fn sweep(keep: str): u64               // a limpeza é da corrida SEGUINTE, nunc
    (quebra os call-sites de produção).
 3. **Chaves de string na DI** — a forma exata da chave (`svc<I>(key "x")`) e a política de conflito
    (A/B/C/D/E que levantaste) — validar a superfície final.
-4. **`chan_unbounded`** — mesmo ponto do Doc 1 §11: manter com aviso ou remover.
+4. ~~`chan_unbounded`~~ — **resolvido:** entra, é responsabilidade do dev (ruling 08-10).

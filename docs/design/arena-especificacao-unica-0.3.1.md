@@ -139,12 +139,14 @@ A AST prova um **limite inferior** da demanda do primeiro chunk de uma região: 
 largura fixa que os statements de um escopo provadamente fazem (literais de struct de layout conhecido,
 literais de array de contagem conhecida, sítios de box). Esse piso semeia o presize:
 
-- Ponto de encaixe: `open_frame_region`/`open_native_region` passam um piso calculado a
-  `tk_region_new_sized_u(parent, piso)` em vez de deixar a primeira alocação puxar 64 KiB default.
-- **Não é análise standalone.** É o **seed do caso `Confidence::Thin`** do presize do profiler
-  (`#arena_size`, `codegen.tks:9832`), onde a amostra dinâmica está ausente. O caminho dinâmico
-  (profiler p99.9) continua sizeando melhor as coleções dinâmicas; o piso estático é o complemento para
-  quando não há amostra.
+- **A regra do dono (2026-08-10):** o piso de um escopo é o **cálculo estático de quanto ele precisa +
+  o cabeçalho da arena** — **NÃO os 64 KiB default de sempre.** `open_frame_region`/`open_native_region`
+  passam esse piso a `tk_region_new_sized_u(parent, need + header)`. A região nasce do tamanho da
+  necessidade provada, não de um bloco fixo. (Elisão, §4, é o caso limite `need == 0`: sem necessidade,
+  sem região.)
+- **Para necessidade dinâmica** (a folha aloca, mas o tamanho é fato de runtime): o piso estático semeia
+  o caso `Confidence::Thin` do presize do profiler (`#arena_size`, `codegen.tks:9832`), e a região cresce
+  além por chunk-list (§1.1); o caminho dinâmico (profiler p99.9) refina quando há amostra.
 
 ### 3.2 O que ele garante e o que não
 
@@ -176,11 +178,13 @@ provado na mesma função. A pilha de regiões continua balanceada pela mesma si
 
 ### 4.2 O que ganha
 
-Cada região USADA custa **64 KiB mínimo** (o piso default). O profiler mediu o caso brutal: um bloco que
-guarda 200 bytes custa 64 KiB — perda de 300×. Elisão remove esse piso para cada escopo-folha sem
-alocação (`if x { return a }`, um braço de comparação, um bloco-guarda). Economia = 64 KiB × regiões
-elididas simultaneamente vivas (o custo é por região **simultaneamente viva**, limitado pela
-profundidade, não pela contagem total).
+Com o piso já dimensionado por necessidade (§3), a elisão é o caso **`need == 0`**: um escopo-folha que
+não aloca nada (`if x { return a }`, um braço de comparação, um bloco-guarda) não abre região nenhuma —
+economiza o **cabeçalho da arena + a maquinaria** `new`/`enter`/`leave`/`drop` no caminho quente. (Antes
+do piso por necessidade, cada região pagava 64 KiB mínimo — o profiler mediu o caso brutal: um bloco de
+200 bytes custava 64 KiB, perda de 300×; com piso = need+header isso desaparece, e a elisão remove até o
+header.) O custo é por região **simultaneamente viva**, limitado pela profundidade, não pela contagem
+total.
 
 ### 4.3 A regra de ouro: conservador
 
@@ -405,6 +409,17 @@ memória como único travão (ver ponto aberto §11).
 `async`/`await` (com `Intent<T>`) é **açúcar**, e a arena difere conforme a fundação — a distinção tem de
 ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan` §8):
 
+**O que o `Intent` carrega, e por que o dado cruza por cópia (regra do dono):**
+- **`Intent<T>`** (genérico) carrega o **estado da intenção + a CÓPIA do dado retornado**. Quando o
+  `await` resolve, a cópia de `T` aterrissa na arena de quem espera — **nunca uma referência** à arena da
+  raia/continuação que produziu o valor (essa arena pode ter rebobinado). É o mesmo "dados cruzam só por
+  cópia" do `isolate`, aplicado ao retorno de `async`.
+- **`Intent`** (não-genérico) é **opaco e não possui dado** — fire-and-forget; `await` só sincroniza.
+  (`Intent` vs `Intent<T>` = o mesmo nome com aridade genérica distinta — é overload de TIPO, Doc 2 §9.)
+- **`ref` NÃO cruza a fronteira de MT/async** (regra do dono, preservação de UAF): nem como argumento de
+  `spawn`/`chan`/`async fn`, nem embutido num genérico (`<ref T>` é rejeitado, §9). Um borrow que cruzasse
+  penduraria quando a arena do outro lado dropasse. O que cruza é cópia (valor) ou id (`u64`), nunca borrow.
+
 - **I/O cooperativo (uma só raia mutando a arena por vez):** o `Intent` de I/O **vive dentro do
   bloco/arena de quem o criou** — não tem arena própria, não cria thread de SO. `await` suspende a
   tarefa lógica sem bloquear a thread; um reator (`epoll`/`kqueue`/`IOCP`) por thread executora retoma.
@@ -453,6 +468,19 @@ de superfície):
   backend é isento dessa proibição, mas os valores que ele segura permanecem **arena-bounded** (vivem na
   arena, dropam com ela) — é o caso especial das funções de background do backend sobre a arena.
 
+**DI sob threads — a regra do dono (2026-08-10).** Cada thread tem uma **sub-raiz** própria (§7.6, F1), e
+a resolução de DI é **da thread, não do programa** — justamente para não ressincronizar entre threads:
+
+| lifetime | sob thread |
+|---|---|
+| **singleton** | vive na **raiz da THREAD**, não na raiz do programa — cada thread tem seu singleton, sem partilha nem lock cross-thread |
+| **scoped** | resolve contra a arena-escopo **dentro da sub-raiz da thread** (fecha o ponto que estava aberto) |
+| **transient** | região corrente da thread |
+
+Isso mantém a disciplina "dados só cruzam por cópia/id entre threads": um serviço resolvido numa thread
+não é visível a outra por referência — se precisar atravessar, atravessa como valor por `chan`, nunca o
+`Ref` do serviço.
+
 ---
 
 ## 9. Invariantes de segurança e casos de borda (checklist)
@@ -469,6 +497,10 @@ de superfície):
    falha do arena-por-escopo (bulk-drop com alias vivo) não recorre.
 6. **Threads:** cada worker na sua região; resultado copiado para a lane-region antes do drop; nomes em
    `prog` imutável; fold em ordem de índice. IDs entre tasks, nunca ponteiros.
+7. **`ref` não cruza fronteira de concorrência** (regra do dono): `spawn`/`chan`/`async fn` **rejeitam**
+   `ref` como parâmetro/valor, e **`<ref T>` é proibido em genérico** — um borrow que atravessasse uma
+   task/continuação penduraria quando a arena do outro lado dropasse. O que cruza é cópia (valor) ou id
+   (`u64`). É a mesma raiz do "IDs, não ponteiros" (§7.7), estendida a todo borrow.
 
 ---
 
@@ -521,21 +553,23 @@ fn pipeline() {
 
 ---
 
-## 11. Pontos em aberto (marcados para tua validação)
+## 11. Decisões — resolvidas pelo dono (2026-08-10) e o que resta
 
-1. **% de escopos-folha elidíveis** — estimativa 20–45%, **não medido**. A caminhada estática dá o
-   denominador; o profiler dá quais eram quentes. (Não bloqueia; afeta só a magnitude do ganho.)
-2. **MB exato que o DPS reclama** — bounded pelo volume de box do `own_returned_value`, **não medido** até
-   instrumentar (o campo `copy_bytes` do profiler carrega isso).
-3. **`chan_unbounded`** — pedido na superfície, mas reabre o risco de OOM que a lei "limitado, com
-   contrapressão" existe para fechar. **Decisão do dono:** mantém como superfície com aviso, ou remove?
-4. **DI `scoped` sob threads** — a caminhada de ancestralidade de arena para `scoped` interage com as
-   lane-regions (§7.2): uma dependência `scoped` resolvida dentro de um worker resolve contra a
-   lane-region ou contra a arena-escopo lógica do trabalho? **Novo — precisa da tua ruling** (não estava
-   nos docs de origem; nomeio para não passar por decidido).
-5. **`spawn <call-expr>`** (açúcar `spawn orquestrar(c)` vs. a assinatura `spawn(entry, ctx, lane)`) —
-   registrado como açúcar FUTURO, não fechado aqui. Confirmar que fica fora do escopo desta onda.
-6. **`async`/`await` — as duas fundações** (§7.9) — separar I/O cooperativo (arena de quem cria, custo
-   zero) de CPU (açúcar sobre `isolate`, herda F1), dizendo no tipo/doc-comment qual fundação cada
-   `async fn` usa; **ou** manter um `Intent<T>` único indiferenciado (aí `await` pode custar tanto quanto
-   um `spawn` isolado sem aviso no call-site). Recomendação: separar. **Tua ruling.**
+**Resolvidas (incorporadas acima):**
+- **Piso = necessidade estática + cabeçalho da arena**, não 64 KiB default (§3). Elisão = o caso limite
+  `need == 0` (§4).
+- **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
+- **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
+  scoped na sub-raiz da thread — sem ressincronizar (§8).
+- **`async`/`await`: duas fundações separadas**; `Intent<T>` carrega a **cópia** do dado, `Intent` é
+  opaco sem dado; overload serve para tipos (§7.9).
+- **`ref` não cruza fronteira de MT/async; `<ref T>` proibido em genérico** — preserva UAF (§9).
+- **`spawn <call-expr>`: entra** (li tua resposta "5. Sim, entra" como isto — o açúcar de chamada, não só
+  a assinatura `spawn(entry, ctx, lane)`; se eu li errado, corrige).
+
+**Resta — medição, não decisão (não bloqueia o modelo):**
+- **Taxa de elisão** — que % de escopos são folhas sem alocação (estimativa 20–45%). É medição: afeta
+  quanto se economiza, não a correção. Mede-se quando o mecanismo existir. *(Era o ponto 1 que não ficou
+  claro — reescrito aqui.)*
+- **MB que o DPS reclama** — instrumenta-se (campo `copy_bytes`); é número, não decisão.
+- Superfície ainda pendente está no Doc 2 §12 (`base` contextual, `mut` soft-dep, chave-string da DI).
