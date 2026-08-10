@@ -6961,6 +6961,22 @@ fn lower_value_into_reference(ctx: LowerCtx, value: checker::TExpr) -> Lowered |
  * passes through unwrapped; any other value (the bare `null` literal or a bare `T`) is wrapped via
  * `lower_null_union_construct`.
  *
+ * THE DIRECT-PAYLOAD-MEMBER CHECK RUNS FIRST, ahead of the "value.type expands to some `Variant`"
+ * passthrough — the two-member twin of the defect `lower_value_into_variant`'s degrau-33 note names.
+ * When the union's own PAYLOAD member is ITSELF a declared variant (`Type | null`, `Type` = the
+ * checker's `variant Prim | … | Null`), a present payload value has type `Type`, which ALSO expands
+ * to a bare `Variant`, so the passthrough test alone took the SAME arm for it: the raw `Type`'s own
+ * 24-byte wrapper flowed out UNREWRAPPED, its offset-0 word still the inner case tag (`Slice` = 4,
+ * `Str` = 3, …) rather than the null-union's payload tag (`shape.payload_index`, 1). The reader's tag
+ * discriminant (`payload_index` => present, `null_index` => absent, else => the dead defensive edge)
+ * then misread every anchor whose inner tag is >= 2 into the `match`'s `(ptr = 0, len = 0x80000000)`
+ * fall-through — `checker::array_join_anchor`'s `Type | null` return crashed `type_array_lit`'s
+ * element fold, the FIRST native self-build wall. Wrapping such a value via `lower_null_union_construct`
+ * (whose `payload_needs_inner_wrapper` correctly sees the value is already a whole-`Type`, not a bare
+ * case) stamps `payload_index` at offset 0 and boxes the payload at offset 8, the shape the reader
+ * expects. A value whose type is the null-union ITSELF (the SAME `T | null` re-flowing) does NOT
+ * match `shape.payload` and alone stays on the byte-identical passthrough.
+ *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param NullUnionShape shape  the union's payload member plus both declared indices
  * @param checker::TExpr value  the typed value expression being placed into the union slot
@@ -6969,7 +6985,12 @@ fn lower_value_into_reference(ctx: LowerCtx, value: checker::TExpr) -> Lowered |
  */
 fn lower_value_into_null_union(ctx: LowerCtx, shape: NullUnionShape, value: checker::TExpr) -> Lowered | error {
     match expand_named_variant(value.type, ctx.variants) {
-        checker::Variant => lower_expr(ctx, value)
+        checker::Variant => {
+            if variant_member_type_matches(shape.payload, value.type, ctx.variants) {
+                return lower_null_union_construct(ctx, shape, value)
+            }
+            lower_expr(ctx, value)
+        }
         _ => lower_null_union_construct(ctx, shape, value)
     }
 }
