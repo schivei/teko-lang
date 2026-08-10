@@ -124,6 +124,21 @@ TK_RT_LIST(int64_t,   tk_i64_list)     // []i64   — integer accumulator lists
 // TU — that would route those allocations to the arena while their tk_free0 stays libc (corruption).
 void *tk_alloc(size_t n);
 
+// tk_slice_variant_widen — build a `[]T` (T a variant; the own backend holds a variant slice
+// BY-ADDRESS, i.e. `len` 8-byte pointers each to a boxed 24-byte tag+payload wrapper) from a `[]U`
+// whose element U is a DIRECT member of T, wrapping every element as member `tag`. This is the own
+// backend's analog of the C route's `emit_as` covariant-slice rebuild (codegen.tks, the
+// malloc + per-element `cg_wrap_elem_str` loop): the own backend's `lower_value_into_type` widened a
+// scalar member into a variant but left a `[]U` -> `[]T` binding un-widened, so the slice's elements
+// were read at the wrong width. `mode` selects how the wrapper's payload (offset 8) is filled from
+// the `[]U` element at `src_stride` bytes: 0 = REGISTER (copy `pcopy` payload bytes inline), 1 = FAT
+// (copy the 16-byte {ptr,len} pair), 2 = AGGREGATE (the element holds an address; box `pcopy` bytes
+// read through it and store the box pointer), 3 = NULL (tag only). Every allocation follows
+// tk_region_current(), exactly like tk_slice_push, so the widened slice lives where its `[]U` source
+// did. Returns the `[]T` data pointer (len is unchanged, kept by the caller).
+void *tk_slice_variant_widen(const void *src, uint64_t len, uint64_t src_stride,
+                             int64_t tag, int32_t mode, uint64_t pcopy);
+
 // ── Arena allocation (S1 — TEKO_EVOLUTION_DESIGN §5.2: arena primitive + root region) ──
 // A bump-allocator REGION: a chunk-list of aligned-malloc'd blocks, sub-allocated by a bump
 // offset. No per-object metadata, no free-list (M.0 metal/no-GC). region_alloc results are

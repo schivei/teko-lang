@@ -4572,6 +4572,33 @@ void *tk_slice_elem_box(const void *elem, uint64_t esz) {
     return p;
 }
 
+// tk_slice_variant_widen — see teko_rt.h. The 24 and 8 below are the own backend's own
+// variant_wrapper_bytes()/variant_payload_offset(): a boxed variant is a 24-byte block whose i64 tag
+// sits at offset 0 and whose payload region begins at offset 8. `[]T` for a variant T is itself
+// by-address, so the result is a `len`-long array of 8-byte pointers into freshly boxed wrappers.
+void *tk_slice_variant_widen(const void *src, uint64_t len, uint64_t src_stride,
+                             int64_t tag, int32_t mode, uint64_t pcopy) {
+    void **dst = (void **)tk_alloc((size_t)(len * 8));
+    for (uint64_t i = 0; i < len; i++) {
+        unsigned char *w = (unsigned char *)tk_alloc(24);
+        memset(w, 0, 24);
+        *(int64_t *)w = tag;
+        const unsigned char *s = (const unsigned char *)src + i * src_stride;
+        if (mode == 0) {
+            if (pcopy != 0) memcpy(w + 8, s, (size_t)pcopy);
+        } else if (mode == 1) {
+            memcpy(w + 8, s, 16);
+        } else if (mode == 2) {
+            const void *inner = *(const void *const *)s;
+            void *box = tk_alloc((size_t)pcopy);
+            if (pcopy != 0) memcpy(box, inner, (size_t)pcopy);
+            *(void **)(w + 8) = box;
+        }
+        dst[i] = (void *)w;
+    }
+    return (void *)dst;
+}
+
 // (0.3.1.0 degrau 18) tk_mem_copy — see teko_rt.h for why the native lowering needs this at all
 // (a reference deref-assignment's aggregate arm, `store_assign_aggregate_ref`).
 void tk_mem_copy(void *dst, const void *src, uint64_t n) {

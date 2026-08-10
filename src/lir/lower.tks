@@ -6526,6 +6526,115 @@ fn lower_binding_conveyed(ctx: LowerCtx, b: checker::TBinding, name: str) -> Low
 }
 
 /**
+ * SliceWidenPlan — how `tk_slice_variant_widen` fills each wrapper's payload for one source element
+ * type `U`, matching `store_variant_payload`'s three shapes: `mode` (0 register / 1 fat / 2 boxed
+ * aggregate / 3 null-tag-only), `stride` (the `[]U` element's byte width, how far to advance the
+ * source pointer), and `pcopy` (register: payload bytes copied inline; aggregate: the box's byte
+ * width). The C route's `emit_as` inlines the equivalent per-element wrap; this is the own backend's
+ * parameterization of it into one runtime loop.
+ */
+type SliceWidenPlan = struct {
+    /** mode — 0 register-inline, 1 fat {ptr,len}, 2 boxed aggregate, 3 null (tag only). */
+    mode: i32
+    /** stride — the source `[]U` element's byte width (`ltype_size` of U's `ltype`, or 8/16 for the by-address/fat shapes). */
+    stride: u64
+    /** pcopy — register: bytes copied inline into the payload; aggregate: the box's byte width; else unused. */
+    pcopy: u64
+}
+
+/**
+ * slice_widen_plan — classify the source element type `u` into a `SliceWidenPlan`, mirroring the
+ * shape decisions `store_variant_payload`/`push_box_bytes` make for a single value: a `Null` needs
+ * only the tag; a fat `str`/`[]T` stores its two-word pair; a register value copies its `ltype`
+ * width inline; every other aggregate is held BY ADDRESS in the source slice and re-boxed into the
+ * wrapper at its whole-type width (`aggregate_box_bytes`).
+ *
+ * @param u    the source slice's element type (a direct member of the wider variant)
+ * @param ctx  the lowering context (its enums pin `u`'s register/ltype classification, its layouts
+ *             and variant table pin an aggregate's box width)
+ * @return     the fill plan for `tk_slice_variant_widen`
+ * @throws     when `u` is an aggregate whose whole-type byte width this backend does not pin
+ *             (`unsized_aggregate_push_stop`, the same stop a push of `u` would raise)
+ */
+fn slice_widen_plan(u: checker::Type, ctx: LowerCtx) -> SliceWidenPlan | error {
+    match u {
+        checker::Null => return SliceWidenPlan { mode = 3 to i32; stride = ltype_size(ltype_of(u, ctx.enums)) to u64; pcopy = 0 to u64 }
+        _ => { }
+    }
+    if is_fat_type(u) {
+        return SliceWidenPlan { mode = 1 to i32; stride = 16 to u64; pcopy = 16 to u64 }
+    }
+    if is_register_value_type(u, ctx.enums) {
+        let w = ltype_size(ltype_of(u, ctx.enums)) to u64
+        return SliceWidenPlan { mode = 0 to i32; stride = w; pcopy = w }
+    }
+    match aggregate_box_bytes(u, ctx) {
+        u32 as n => SliceWidenPlan { mode = 2 to i32; stride = 8 to u64; pcopy = n to u64 }
+        null => unsized_aggregate_push_stop(aggregate_form_name(u))
+    }
+}
+
+/**
+ * slice_element_of — the element type of a slice-typed `t`, or `null` when `t` is not a `Slice` or is
+ * the untyped sentinel slice (element `Void`). The two `null` cases (not a slice / the sentinel) are
+ * both "no widen applies", which is exactly what the single caller needs.
+ *
+ * @param t  a resolved type
+ * @return   `t`'s concrete element type, or `null` when there is none to widen against
+ */
+fn slice_element_of(t: checker::Type) -> checker::Type | null {
+    match t {
+        checker::Slice as s => match s.element { checker::Void => null; _ => s.element }
+        _ => null
+    }
+}
+
+/**
+ * lower_fat_expr_into_type — lower a fat (`str`/`[]T`) value COERCED into the fat slot type `bound`,
+ * the fat-path analog of `lower_value_into_type`. The ONE coercion a fat placement needs and the
+ * plain `lower_fat_expr` omitted: a `[]U` value flowing into a `[]T` slot whose element `T` is a
+ * VARIANT of which `U` is a direct member is an element-WIDENING slice coercion — the C route's
+ * `emit_as` rebuilds it (malloc + per-element variant wrap), and without the same rebuild the own
+ * backend bound a `[]U` buffer into a `[]T` slot, so every element read back at the wrong width
+ * (the `error | null` return-type mismatch that wrongly failed interface conformance). Every other
+ * shape — a `str`, a same-element `[]T`, the sentinel empty, a non-member element — passes straight
+ * through `lower_fat_expr` unchanged, so no working placement moves.
+ *
+ * @param ctx    the lowering context to append into
+ * @param bound  the DECLARED fat type of the slot the value is placed into
+ * @param value  the typed fat value expression
+ * @return       the placed (and, when a variant-member widen is needed, rebuilt) (ptr, len) pair
+ * @throws       propagated from lowering the value or from `slice_widen_plan`
+ * @since 0.3.1 (native []U -> []T slice-widen coercion — interface-conformance fixpoint blocker)
+ */
+fn lower_fat_expr_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> LoweredFat | error {
+    let bel = match slice_element_of(bound) { checker::Type as t => t; null => return lower_fat_expr(ctx, value) }
+    let uel = match slice_element_of(value.type) { checker::Type as t => t; null => return lower_fat_expr(ctx, value) }
+    let vwide = match expand_named_variant(bel, ctx.variants) { checker::Variant as v => v; _ => return lower_fat_expr(ctx, value) }
+    let tag = match direct_variant_member_index(vwide.members, uel) { u32 as ix => ix; null => return lower_fat_expr(ctx, value) }
+    let plan = match slice_widen_plan(uel, ctx) { SliceWidenPlan as p => p; error as err => return err }
+    let fat = match lower_fat_expr(ctx, value) { LoweredFat as x => x; error as err => return err }
+    let sc = ctx_alloc(fat.ctx)
+    let with_stride = ctx_append(sc.ctx, const_int_inst(sc.vreg, plan.stride to i64, value.line, value.col))
+    let tc = ctx_alloc(with_stride)
+    let with_tag = ctx_append(tc.ctx, const_int_inst(tc.vreg, tag to i64, value.line, value.col))
+    let mc = ctx_alloc(with_tag)
+    let with_mode = ctx_append(mc.ctx, const_int_inst(mc.vreg, plan.mode to i64, value.line, value.col))
+    let pc = ctx_alloc(with_mode)
+    let with_pcopy = ctx_append(pc.ctx, const_int_inst(pc.vreg, plan.pcopy to i64, value.line, value.col))
+    let rc = ctx_alloc(with_pcopy)
+    mut args: []u32 = teko::list::empty()
+    args = teko::list::push(args, fat.ptr)
+    args = teko::list::push(args, fat.len)
+    args = teko::list::push(args, sc.vreg)
+    args = teko::list::push(args, tc.vreg)
+    args = teko::list::push(args, mc.vreg)
+    args = teko::list::push(args, pc.vreg)
+    let with_call = ctx_append(rc.ctx, call_inst(rc.vreg, "tk_slice_variant_widen", args, false, value.line, value.col))
+    LoweredFat { ctx = with_call; ptr = rc.vreg; len = fat.len }
+}
+
+/**
  * lower_binding_direct — `lower_binding`'s own body, minus the `Reference`/conveyance dispatch
  * (extracted so the bracket in `lower_binding_conveyed` can run it unchanged, NP3b): a str/slice-
  * typed binding (A1-4, #382) lowers `e` through the FAT path and binds (ptr, len); every other
@@ -6547,7 +6656,7 @@ fn lower_binding_conveyed(ctx: LowerCtx, b: checker::TBinding, name: str) -> Low
  */
 fn lower_binding_direct(ctx: LowerCtx, b: checker::TBinding, name: str) -> LowerStmtOut | error {
     if is_fat_type(b.bound) {
-        let fo = match lower_fat_expr(ctx, b.value) { LoweredFat as x => x; error as err => return err }
+        let fo = match lower_fat_expr_into_type(ctx, b.bound, b.value) { LoweredFat as x => x; error as err => return err }
         if b.kind == parser::BindKind::Mut { return bind_mutable_fat(fo, name, b.value.line, b.value.col) }
         return LowerStmtOut { ctx = ctx_bind_fat(fo.ctx, name, fo.ptr, fo.len); terminated = false }
     }
