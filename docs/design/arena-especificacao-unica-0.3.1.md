@@ -418,28 +418,28 @@ fn Rx<T>::pop(): T | closed                        // recebe; devolve `closed` q
 **isolada** (sub-raiz própria, §7.6). Os argumentos vão **por cópia**, **nenhum retorno é esperado**, e
 **não há `join`** — a sincronização é pelo `chan` (resultados) e por `WaitGroup` (esperar N terminarem).
 
-**bounded — indexar um log de 10 GB sem carregá-lo na memória.** Leitor rápido, indexador lento, correndo
-ao mesmo tempo. O teto de 64 **mensagens** faz o leitor **esperar** ao encher: ≤ 64 linhas em voo (o
-ficheiro tem 10 GB no total; cada linha é uma mensagem).
+**bounded — produtor rápido, consumidor lento.** O teto de 64 **mensagens** faz o produtor **esperar**
+quando há 64 pendentes (contrapressão): a fila em voo nunca passa de 64, não cresce sem limite se o
+consumidor atrasa.
 
 ```teko
-fn ler(cid: usize, caminho: str) {                 // corotina produtora — recebe o ID por cópia
-    var tx = chan<str>::writer(cid)
-    for linha in ler_linhas(caminho) {
-        tx.send(linha)          // 64 casas cheias? ESPERA o indexador — nunca engole o ficheiro
+fn gerar(cid: usize) {                             // produtor rápido, numa corotina — recebe o ID por cópia
+    var tx = chan<Pedido>::writer(cid)
+    for p in pedidos() {
+        tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula
     }
-    chan<str>::close(cid)       // fim → o pop do leitor passará a devolver `closed`
+    chan<Pedido>::close(cid)    // fim → o pop do consumidor passará a devolver `closed`
 }
 
 fn main() {
-    var c = chan<str>::make(64)
-    spawn ler(c.id, "app.log")      // Go-style: dispara e segue (sem join); passa o ID por cópia
-    var rx = chan<str>::reader(c.id)
+    var c = chan<Pedido>::make(64)   // no máx. 64 pedidos em voo
+    spawn gerar(c.id)               // Go-style: dispara e segue (sem join); passa o ID
+    var rx = chan<Pedido>::reader(c.id)
     loop {
         var m = rx.pop()
         match m {
-            str    => guardar_no_indice(m),
-            closed => break             // o fecho do canal É a sincronização — não há join
+            Pedido => processar_lento(m),   // lento; o produtor não corre à frente dele
+            closed => break                 // o fecho do canal É a sincronização — não há join
         }
     }
 }
@@ -514,6 +514,11 @@ o `chan`, porque um journal precisa sobreviver a todas as tasks. Tem faceta de a
   o perde (só uma queda de máquina perderia). Um buffer de userspace (um `FILE*` com stdio) morreria com
   o processo — exatamente o momento em que o ficheiro tinha valor. A sumarização **relê** (`fold`), não
   funde: nada por fundir que se perca, já estava escrito.
+- **Rolling — um journal cresce, então rotaciona.** É aqui que os 10 GB moram (não no canal): o dev
+  configura a **política de rolling** (por tamanho, por data, ou custom) e a **formatação** no
+  `journal::make` (Doc 2 §10.4). O `append` verifica a política e rotaciona por `rename` atômico antes de
+  escrever quando ela dispara; o `fold` relê todos os ficheiros do segmento em ordem, transparente ao
+  rolling. O handle/registro vive na arena raiz; os ficheiros vivem em disco.
 
 ---
 

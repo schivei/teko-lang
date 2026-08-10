@@ -471,7 +471,7 @@ operado pelo **id**, e **reside na arena raiz** (F2 — sobrevive a todas as tas
 ```teko
 pub type Record = struct { run: str, writer: str, kind: str, payload: str }
 
-static fn journal::make(writer: str): self       // abre o segmento de `writer` na corrida corrente
+static fn journal::make(writer: str, roll: Roll = Roll::none, fmt: Fmt = Fmt::line): self  // abre o segmento
               j.id: usize                          // o id do segmento (a currency, como c.id)
 static fn journal::append(id: usize, kind: str, payload: str): null | error  // write(2) O_APPEND, sem buffer
 static fn journal::close(id: usize)              // fecha o segmento
@@ -482,6 +482,31 @@ static fn journal::fold(root: str, run: str): []Record   // relê; descarta lixo
 static fn journal::scratch(base: str): str       // o compositor único de caminhos isolados
 static fn journal::sweep(keep: str): usize       // limpeza é da corrida SEGUINTE, nunca da própria
 ```
+
+**Rolling e formatação — configuráveis pelo dev** (ruling do dono; é aqui que um journal de 10 GB se
+gere). O `make` recebe, com defaults, a **política de rolling** (QUANDO rotacionar para um novo ficheiro)
+e o **formato** (COMO cada registro é serializado):
+
+```teko
+enum Roll {                       // QUANDO rolar
+    none,                         // um único ficheiro (default)
+    size(usize),                  // rola ao atingir N bytes  → ex.: Roll::size(100 * 1024 * 1024)
+    daily,                        // rola por data (um ficheiro por dia)
+    custom(fn(SegStat): bool)     // o predicado do dev decide (tamanho, idade, contagem, o que for)
+}
+enum Fmt {                        // COMO serializar cada registro
+    line,                         // "kind<TAB>payload" numa linha (default) — o formato interno
+    json,                         // um objeto JSON por linha
+    custom(fn(Record): str)       // o formatador do dev
+}
+
+// ex.: um journal que rola a cada 100 MB, em JSON
+var j = journal::make("app", Roll::size(100 * 1024 * 1024), Fmt::json)
+```
+
+O rolling é responsabilidade do runtime de durabilidade (o `append` verifica a política e rotaciona por
+`rename` atômico antes de escrever quando ela dispara); a leitura (`fold`) relê todos os ficheiros de um
+segmento em ordem, transparente ao rolling.
 
 ### 10.5 Decisões pra ti (recompostas de `concorrencia-isolate-spawn-chan` §9)
 
