@@ -397,8 +397,9 @@ transporte do SO.
 
 Keywords **contextuais**. `async`/`await` retorna um `Intent`/`Intent<T>`:
 
-- **`Intent<T>`** carrega o **estado da intenção + a CÓPIA do dado retornado**; no `await`, a cópia de
-  `T` aterrissa na arena de quem espera (nunca uma referência à arena que produziu o valor).
+- **`Intent<T>`** é **criado na arena do caller** e carrega o **estado da intenção + a CÓPIA do dado**; o
+  **processo de sincronização o alimenta** (escreve a cópia de `T` dentro dele ao completar) — nunca uma
+  referência à arena que produziu o valor. Destino-na-arena-do-caller, como o DPS.
 - **`Intent`** (não-genérico) é **opaco e sem dado** — fire-and-forget; `await` só sincroniza.
 - `Intent` vs `Intent<T>` são overload de **tipo** (§9).
 

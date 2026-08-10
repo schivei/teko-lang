@@ -438,10 +438,12 @@ legítima antes dele.
 ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan` §8):
 
 **O que o `Intent` carrega, e por que o dado cruza por cópia (regra do dono):**
-- **`Intent<T>`** (genérico) carrega o **estado da intenção + a CÓPIA do dado retornado**. Quando o
-  `await` resolve, a cópia de `T` aterrissa na arena de quem espera — **nunca uma referência** à arena da
-  raia/continuação que produziu o valor (essa arena pode ter rebobinado). É o mesmo "dados cruzam só por
-  cópia" do `isolate`, aplicado ao retorno de `async`.
+- **`Intent<T>`** (genérico) é **criado na arena do caller** (quem faz a chamada `async`) e carrega o
+  **estado da intenção + a CÓPIA do dado**. Ele é **alimentado pelo processo de sincronização**: quando o
+  trabalho completa, o sync (o reator no I/O, o `join` no CPU) **escreve a cópia de `T` dentro do Intent**
+  que já vive na arena do caller — **nunca uma referência** à arena da raia/continuação que produziu o
+  valor (essa pode ter rebobinado). É o "dados cruzam só por cópia" do `isolate`, e é destino-na-arena-do-
+  caller, como o DPS (§5).
 - **`Intent`** (não-genérico) é **opaco e não possui dado** — fire-and-forget; `await` só sincroniza.
   (`Intent` vs `Intent<T>` = o mesmo nome com aridade genérica distinta — é overload de TIPO, Doc 2 §9.)
 - **`ref` NÃO cruza a fronteira de MT/async** (regra do dono, preservação de UAF): nem como argumento de
