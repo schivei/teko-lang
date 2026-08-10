@@ -399,9 +399,13 @@ default**). Tudo é operado pelo **id** do canal (a regra "IDs, não ponteiros",
 ```teko
 static fn chan<T>::make(bounds: usize = 1): self   // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
                     c.id: usize                     // o id do canal — o que se passa a uma corotina
-static fn chan<T>::writer(id: usize): Tx           // extremo de escrita (copiável, N escritores)
-static fn chan<T>::reader(id: usize): Rx           // extremo de leitura (um só; 2º de outra task = erro)
+static fn chan<T>::writer(id: usize): Tx<T>        // extremo de ESCRITA (copiável, N escritores)
+static fn chan<T>::reader(id: usize): Rx<T>        // extremo de LEITURA (um só; 2º de outra task = erro)
 static fn chan<T>::close(id: usize)                // fecho do lado do produtor
+
+// Tx<T> e Rx<T> são handles pequenos que carregam o id, tipados por T — obtidos por writer(id)/reader(id):
+fn Tx<T>::send(v: T): null | error                 // envia; ESPERA se bounded-cheio; error se já fechado
+fn Rx<T>::pop(): T | closed                        // recebe; devolve `closed` quando o último produtor fecha e esvazia
 ```
 
 - `chan<T>::make()` → **bounded-1** (default) · `make(64)` → bounded-64 · `make(0)` → **unbounded**.

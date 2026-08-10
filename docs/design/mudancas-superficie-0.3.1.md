@@ -394,9 +394,11 @@ spawn f(c.id)                                      // KEYWORD (não função): d
 // chan<T> MPSC (fan-in: N escritores, 1 leitor). Transporte: SOCK_DGRAM (Linux/macOS), mailslot (Windows)
 static fn chan<T>::make(bounds: usize = 1): self  // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
               c.id: usize                          // o id — o que se passa à corotina (spawn f(c.id))
-static fn chan<T>::writer(id: usize): Tx           // Tx copiável (os N escritores)
-static fn chan<T>::reader(id: usize): Rx           // Rx um só; 2º leitor = erro nomeado
+static fn chan<T>::writer(id: usize): Tx<T>       // extremo de escrita (copiável, N escritores)
+static fn chan<T>::reader(id: usize): Rx<T>       // extremo de leitura (um só; 2º leitor = erro nomeado)
 static fn chan<T>::close(id: usize)                // fecho do produtor
+fn        Tx<T>::send(v: T): null | error          // envia; espera se bounded-cheio; error se fechado
+fn        Rx<T>::pop(): T | closed                 // recebe; `closed` quando o último produtor fecha e esvazia
 
 // WaitGroup — esperar N corotinas terminarem (NÃO há join no modelo de corotina)
 fn wg_open(): usize
@@ -405,6 +407,30 @@ fn wg_done(wg: usize): null | error
 fn wg_wait(wg: usize): null | error
 
 fn hardware_parallelism(): usize                   // paralelismo concedido pelo SO
+```
+
+Um fluxo mínimo — a `main` cria o canal, uma corotina escreve, a `main` lê até o `closed`:
+
+```teko
+fn produz(cid: usize) {                  // corotina: recebe o id por cópia, reconstrói o Tx
+    var tx = chan<i32>::writer(cid)
+    var i = 0
+    loop while i < 100 { tx.send(i); i = i + 1 }
+    chan<i32>::close(cid)                 // fecha → o pop do leitor passará a devolver `closed`
+}
+
+fn main() {
+    var c  = chan<i32>::make(64)         // bounded-64 (64 mensagens em voo, no máx.)
+    spawn produz(c.id)                    // dispara e segue (sem join); passa o id
+    var rx = chan<i32>::reader(c.id)
+    loop {
+        var v = rx.pop()                  // v: i32 | closed
+        match v {
+            i32    => usar(v),
+            closed => break               // o fecho do canal É a sincronização
+        }
+    }
+}
 ```
 
 **Sem `join`:** dados só cruzam a fronteira por **cópia** (via `chan`); espera-se pelo **fecho do canal**
