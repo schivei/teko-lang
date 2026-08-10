@@ -1,15 +1,20 @@
 # The native `checker::type_array_lit` probe (native fixpoint blocker — the FIRST wall of the
-# native self-build). `type_array_lit` folds an array literal's element types and cross-adopts a
-# bare numeric-literal sibling into a concrete element's type via
-# `match array_join_anchor(typed) { Type as anchor => adopt_array_elem_literals(typed, anchor); null => typed }`
-# — a `[]TArrayElem` conveyed OUT of a `match` merge. A NATIVE-built compiler (gen2) miscompiled
-# that fat-slice-through-`match`-merge, so gen2 checking any array literal whose join takes the
-# `adopt` arm crashed at `type_array_lit+4519` (checker item 3/7080 of the compiler's own source).
+# native self-build). `type_array_lit` folds an array literal's element types, taking the anchor
+# from `array_join_anchor`, whose return is a `Type | null`. The native backend wrapped a present
+# `Type` (a value of the variant that is the union's own payload member) with the raw `Type`'s inner
+# case tag (`Slice`=4, `Str`=3, …) instead of the null-union payload tag 1, so the reader's `match`
+# discriminant fell through to its dead defensive `(ptr=0, len=0x80000000)` edge and the element
+# fold dereferenced the null pointer at `type_array_lit+4519` (checker item 3/7080 of the compiler's
+# own source). Fixed in `lower_value_into_null_union` (a bare payload value whose type is itself a
+# variant is now wrapped, not passed through).
 #
-# FACET: fat-slice conveyed through a `match` merge (the return/tail-merge shape degrau 5 pinned
-# for a `match`-VALUE). The C route builds and runs this correctly; only a native-built compiler
-# faulted. This is the pass/fail gate: the native-built compiler must build it and the built binary
-# run to exit 42.
+# FACET: variant-tag widen at a `T | null` construction (the arm-tag / variant-widen family). The C
+# route builds and runs this to exit 42; a PRE-FIX native-built compiler (gen2) crashes at
+# `type_array_lit+4519`, a FIXED one (gen2f) advances past it (the self-build reaches checker item
+# 1827/7080). DIAGNOSTIC input, not a green native fixture: a native-built compiler cannot yet LINK
+# a user binary at all (the pre-existing `push_mem_operand_x86` narrow-relocation blocker, C2 note
+# blocker #2, emits `R_X86_64_16/8` against local symbols) — so the built binary's exit 42 is
+# currently only reachable via the C route.
 name = "native_type_array_lit"
 source = "src"
 
