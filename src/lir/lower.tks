@@ -14248,15 +14248,59 @@ fn plain_op_of_compound(op: lexer::TokenKind) -> lexer::TokenKind | error {
 }
 
 /**
+ * assign_escape_target_name — the name whose escape decides whether `a` must be conveyance-bracketed
+ * (`lower_assign`). A `Simple`/`RefDeref` assign names its target DIRECTLY in `a.name`. A `Field` or
+ * `Index` assign leaves `a.name` EMPTY (the checker's `type_index_assign`/field-assign build it so)
+ * and carries its place in `a.target`, so the escaping thing is the CONTAINER at the base of that
+ * place — `blocks` in `blocks[i] = …`, `f` in `f.blocks[i] = …`. Its root variable is what must be
+ * tested against the frame's escaping set: when the container is returned/aliased outward, the fresh
+ * str/slice/aggregate VALUE the write stores (an aggregate element is a per-EXECUTION box) has to
+ * land at `rr` and not in the frame/block region a later `tk_region_drop_u` reclaims underneath the
+ * escaped container (`tk_slice_elem_box` follows `tk_region_current()`).
+ *
+ * @param a  the typed assignment
+ * @return   the name to escape-test — `a.name` for a direct target, else the place's root variable
+ */
+fn assign_escape_target_name(a: checker::TAssign) -> str {
+    match a.kind {
+        parser::AssignKind::Index => texpr_root_var_name(a.target)
+        parser::AssignKind::Field => texpr_root_var_name(a.target)
+        _ => a.name
+    }
+}
+
+/**
+ * texpr_root_var_name — the base variable name of a place expression: descend the receiver chain of a
+ * `Field`/`Index` access to the `TVar` at its root and return its name, or `""` when the base is not
+ * a bare variable (a call result, a literal — nothing the frame's escaping set can name).
+ *
+ * @param e  the place expression to walk
+ * @return   the root variable's name, or `""` when there is none
+ */
+fn texpr_root_var_name(e: checker::TExpr) -> str {
+    match e.kind {
+        checker::TVar as v => v.name
+        checker::TFieldAccess as fa => texpr_root_var_name(fa.receiver)
+        checker::TIndex as ix => texpr_root_var_name(ix.receiver)
+        _ => ""
+    }
+}
+
+/**
  * lower_assign — a TAssign, by target shape: Simple (a local rebind), Field (a struct-field write
  * via memory), RefDeref (write THROUGH a `Ref<T>` handle) or Index (a slice ELEMENT write,
- * `lower_assign_index`). An assignment whose `a.name` ESCAPES this function (`binding_conveys_escape`,
+ * `lower_assign_index`). An assignment whose target ESCAPES this function (`binding_conveys_escape`,
  * NP3b — the C route's `cg_conveys_escape_deep` twin) runs the whole dispatch inside a conveyance
  * bracket (`lower_assign_conveyed`): a Field/Index/RefDeref write's OWN receiver address needs no
  * bracket (it is a plain STORE through an already-computed address), but the VALUE it writes may be a
  * freshly built str/slice/struct whose backing bytes must land at `rr`, not the frame/block region a
  * later `tk_region_drop_u` reclaims — exactly the same hazard a `Simple` rebind has. Bracketing the
- * WHOLE dispatch (uniformly, like the C route) covers every kind with one rule.
+ * WHOLE dispatch (uniformly) covers every kind with one rule. The escape test uses
+ * `assign_escape_target_name`: a `Field`/`Index` write leaves `a.name` empty and escapes through the
+ * CONTAINER at the base of `a.target` (the root variable), NOT through the always-empty `a.name` —
+ * without which the bracket never fired for an element/field write and an escaping aggregate element's
+ * per-EXECUTION box was reclaimed from under the returned container (native fixpoint blocker #5, the
+ * `lir::push_inst_block`/`append_inst` self-append corruption).
  *
  * @param ctx  the lowering context
  * @param a    the typed assignment
@@ -14264,7 +14308,7 @@ fn plain_op_of_compound(op: lexer::TokenKind) -> lexer::TokenKind | error {
  * @throws     propagated from the arm the target shape selects
  */
 fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
-    if binding_conveys_escape(ctx.escaping, a.name) { return lower_assign_conveyed(ctx, a) }
+    if binding_conveys_escape(ctx.escaping, assign_escape_target_name(a)) { return lower_assign_conveyed(ctx, a) }
     lower_assign_dispatch(ctx, a)
 }
 
