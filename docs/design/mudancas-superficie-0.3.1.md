@@ -378,15 +378,18 @@ A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o u
 
 ### 10.1 Estratégia de token — tudo contextual
 
-`spawn`, `async` e `await` são **keywords de corotina contextuais** (reconhecidas pelo parser por posição,
-sem reserva no lexer — a mesma norma que `class`/`abstract`/`virtual`/`override` seguem); `chan` é um
-**tipo genérico** (`chan<T>`). Medido: **zero identificadores Teko hoje** se chamam `spawn`/`chan`/`async`,
-então reconhecê-los por posição não quebra corpus.
+`spawn`, `async`, `await` (corotina) e `isolate` (bloco de heap isolado) são **keywords contextuais**
+(reconhecidas pelo parser por posição, sem reserva no lexer — a mesma norma que
+`class`/`abstract`/`virtual`/`override` seguem); `chan` é um **tipo genérico** (`chan<T>`). Medido: **zero
+identificadores Teko hoje** se chamam `spawn`/`chan`/`async`/`isolate`, então reconhecê-los por posição não
+quebra corpus.
 
 ### 10.2 `spawn` (corotina) + `chan<T>` — paralelismo real, memória isolada
 
 `spawn` é uma **keyword de corotina** (estilo Go), **não uma função** — `spawn f(args)` lança `f` numa
-corotina **isolada** (sub-raiz própria), argumentos **por cópia**, **sem retorno** e **sem `join`**:
+corotina **isolada** (sub-raiz própria), argumentos **por cópia**, **sem retorno** e **sem `join`**. A
+versão **síncrona** do isolamento (sem corotina) é o bloco `isolate { … }` — heap próprio, dropado ao sair
+(Doc 1 §7.6). Ou seja: `spawn` = `isolate` + corotina.
 
 ```teko
 spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia

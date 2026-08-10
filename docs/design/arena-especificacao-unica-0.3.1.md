@@ -369,6 +369,22 @@ O isolamento de memória tem **duas camadas**:
    a keyword `spawn` cria** (§7.8): cada `spawn f(args)` nasce uma corotina isolada com sua sub-raiz, os
    argumentos entram **por cópia** nessa raiz, e nada de fora é referenciado por `ref` (§9).
 
+**`isolate { … }` — a fronteira de heap SEM thread (síncrona).** Um bloco `isolate` corre na sua **própria
+raiz de arena** (`tk_region_new(NULL)`, "como se fosse outro programa"): tudo que ele aloca vive nessa raiz
+e é **dropado de uma vez ao sair** — sem thread, sem escalonamento. É o `#arena_size` de hoje promovido a
+keyword. Relação com `spawn`: `spawn f(args)` é este isolamento **+** uma corotina; `isolate { }` é só o
+isolamento (síncrono, no mesmo fluxo).
+
+```teko
+isolate {
+    var big = carregar_tudo()      // aloca à vontade na raiz PRÓPRIA do isolate
+    processar(big)
+}                                   // toda a arena do isolate dropa aqui, de uma vez — nada vaza para fora
+```
+
+Uso típico: uma operação pesada de memória cujo rastro inteiro se quer reclamar de uma vez (um pedido, um
+lote, a compilação de uma função) — o mesmo motivo do `#arena_size`.
+
 **A região do programa (F2):** depois que F1 parte a raiz única em N raízes de task, **não sobra raiz de
 processo** para um singleton morar — cada task morre e sua raiz esvazia. Um `chan`, criado UMA vez pela
 `main` e que sobrevive a todas as tasks, precisa de uma região **imortal, separada de qualquer raiz de
