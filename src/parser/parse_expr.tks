@@ -280,9 +280,39 @@ fn lambda_ahead(tokens: []lexer::Token, pos: u64) -> bool {
     }
 }
 
-// (W10) a closure literal `(params) => expr` / `(params) => { … }` — `pos` is at `(`. Each param is
-// `name` or `name: type` (type OPTIONAL — inferred from the target when absent). The body is a block
-// `{ … }` or a single expression (stored as one trailing ExprStmt). NO `fn`, NO `-> R` (ret inferred).
+/**
+ * lambda_expr_body — the one-statement body of a bare-expression closure `(params) => expr`: the
+ * single expression `e` wrapped as a trailing `ExprStmt`, returned as a `[]Statement` so
+ * `parse_lambda` assigns it exactly as it assigns a `{ … }` block body's `parse_block` result.
+ *
+ * Building the list THROUGH a function return (rather than inline in `parse_lambda`'s `else` arm) is
+ * load-bearing on the native backend: the pushed `ExprStmt` element is held BY ADDRESS, and only a
+ * return-value conveyance parks that per-execution box in an outliving (root) region. An inline
+ * `push` inside the arm left the wrapper in a region reclaimed when `parse_lambda` returned, so the
+ * escaped `Lambda.body` element dangled — the native self-build's `checker::type_statement` item
+ * 1827 use-after-free (the `{ … }`-block path was immune precisely because `parse_block` RETURNS its
+ * `[]Statement`).
+ *
+ * @param e  the closure's single body expression
+ * @return   a one-element `[]Statement` holding `e` as an `ExprStmt`
+ * @since    0.3.1
+ */
+fn lambda_expr_body(e: Expr) -> []Statement {
+    teko::list::push(teko::list::empty(), ExprStmt { expr = e })
+}
+
+/**
+ * parse_lambda — a closure literal `(params) => expr` / `(params) => { … }`; `pos` is at `(`. Each
+ * parameter is `name` or `name: type` (the type is OPTIONAL — inferred from the target when absent).
+ * The body is a `{ … }` block or a single expression (stored as one trailing `ExprStmt` built by
+ * `lambda_expr_body`). A closure declares NO `fn` and NO `-> R` (the return type is inferred).
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the opening `(`
+ * @return        the parsed closure expression + the index past its body, or an honest stop
+ * @throws        on a malformed parameter list, a missing `=>`, or propagated from the body
+ * @since         0.3.1 (W10)
+ */
 fn parse_lambda(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | error {
     mut params: []LambdaParam = teko::list::empty()
     mut p = pos + 1
@@ -317,7 +347,7 @@ fn parse_lambda(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | error {
         p = blk.next
     } else {
         let e = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
-        body = teko::list::push(teko::list::empty(), ExprStmt { expr = e.node })
+        body = lambda_expr_body(e.node)
         p = e.next
     }
     Parsed<Expr> { node = Expr { kind = Lambda { params = params; body = body }; line = tokens[pos].line; col = tokens[pos].col }; next = p }
