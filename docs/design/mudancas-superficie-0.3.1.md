@@ -154,10 +154,14 @@ aritmética. O acesso ao valor por trás é por marshalling explícito.
 **O que sai.** `ptr<T>`/`Uptr {}` genéricos e seu handling. Aritmética de ponteiro
 (`p + 1`, `p[0]`) é rejeitada.
 
-**O que entra.** Dois tipos atômicos opacos `ptr`/`uptr`. Métodos:
-- `p.__wrap<T>(): T | error | null` — **falível**: checa liveness da arena + tag do tipo; devolve o
-  valor, ou `error` (arena morta / tag divergente), ou `null` (endereço 0).
-- `p.__unwrap<T>(): T` — **infalível**: expõe o valor sem checagem (o chamador garante).
+**O que entra.** Dois tipos atômicos opacos `ptr`/`uptr` e **quatro funções — duas estáticas
+(construtoras, infalíveis) e duas de instância (acessoras, falíveis):**
+- `ptr::__unwrap<T>(ref T): ptr` e `uptr::__unwrap<T>(ref T): uptr` — **estáticas, infalíveis.** Pegam uma
+  **referência a um valor** `T` e devolvem o **ponteiro opaco**. Infalível porque só tomam o endereço —
+  **`__unwrap` devolve o PONTEIRO, não o valor**; não há nada a checar.
+- `ptr.__wrap<T>(): T | error | null` e `uptr.__wrap<T>(): T | error | null` — **de instância, falíveis.**
+  Do ponteiro opaco recuperam o **VALOR** `T`, checando liveness da arena + tag do tipo: `error` (arena
+  morta / tag divergente), `null` (endereço 0).
 
 **O que resolve.** Ponteiro cru seguro por construção: nada de aritmética, e o acesso passa por uma
 checagem dinâmica (tag + liveness) no `__wrap`. É o que torna possível **aposentar `unsafe`** (§6) — o
@@ -169,9 +173,13 @@ um `ptr` estrangeiro).
 // antes
 fn read(p: ptr<Node>): i64 { return p.value }   // deref genérico, confiança implícita
 
-// depois
+// depois — construir o ponteiro opaco a partir de um valor (estática, infalível → devolve o PONTEIRO)
+var node = Node { value: 42 }
+var p = ptr::__unwrap<Node>(ref node)            // : ptr
+
+// recuperar o VALOR do ponteiro opaco (instância, falível → checa tag + liveness)
 fn read(p: ptr): i64 | error {
-    var n = p.__wrap<Node>()      // checa tag + liveness; error se arena morta / tag errada
+    var n = p.__wrap<Node>()                     // : Node | error | null
     return match n { Node => n.value, error => n, null => 0 }
 }
 ```
