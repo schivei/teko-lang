@@ -401,32 +401,49 @@ pub fn chan_reader(id: u64)   -> Rx | error
 pub fn chan_is_open(id: u64)  -> bool     // consulta ao registro, NUNCA cacheado
 ```
 
-**`bounded` — quando o produtor pode correr mais rápido que o consumidor.** O teto protege a memória: ao
-encher, o `send` recebe **contrapressão** (espera até haver espaço) em vez de crescer ou perder.
+**`bounded` — indexar um log de 10 GB sem carregá-lo na memória.** O leitor é rápido, o indexador é
+lento. O teto de 64 faz o leitor **esperar** o indexador ao encher (contrapressão) — a memória fica ≤ 64
+linhas em voo, não os 10 GB. É o caso onde produtor e consumidor correm ao mesmo tempo e um pode afogar o
+outro.
 
 ```teko
-// pipeline produtor→consumidor: no máximo 256 itens em voo, nunca mais
-var c  = chan_bounded(256)
-// produtor(es) — Tx copiável, N escritores:
-var tx = chan_writer(c)
-loop over trabalho:
-    tx.send(item)             // se cheio, ESPERA (contrapressão) — memória fica ≤ 256 itens
-// consumidor — Rx, um só:
-var rx = chan_reader(c)
-loop:
-    var v = rx.pop()          // drena; devolve `closed` quando o último produtor fecha
+fn ler(c: ChanId, caminho: str) {                  // produtor, numa raia
+    var tx = chan_writer(c)
+    for linha in ler_linhas(caminho) {
+        tx.send(linha)          // 64 casas cheias? ESPERA o indexador — nunca engole o ficheiro
+    }
+    chan_close(c)               // fim → o pop do consumidor passará a devolver `closed`
+}
+
+fn main() {
+    var c = chan_bounded(64)
+    spawn ler(c, "app.log")     // o leitor roda concorrente; a main indexa no seu ritmo
+    var rx = chan_reader(c)
+    loop {
+        var m = rx.pop()
+        match m {
+            str    => guardar_no_indice(m),   // lento; o leitor não corre à frente dele
+            closed => break
+        }
+    }
+}
 ```
 
-**`unbounded` — quando o total é conhecido-finito e o produtor não deve bloquear.** Sem teto: o `send`
-nunca espera. O preço, e a **regra do dono**: se o consumidor não drenar, cresce sem limite — a memória é
-o único travão, e **isso é responsabilidade do dev, não da linguagem**.
+**`unbounded` — enfileirar um lote fixo ANTES de existir consumidor.** Aqui o `bounded` daria
+**deadlock**: a `main` enfileira o lote inteiro *antes* de lançar os workers, então ninguém está drenando
+— um teto cheio travaria a `main` para sempre. O `unbounded` não bloqueia, e é seguro porque o total é
+**conhecido e pequeno** (o dev garante isso — a memória é a responsabilidade dele).
 
 ```teko
-// emitir um conjunto pequeno e FECHADO de eventos de uma vez, sem o produtor bloquear
-var c  = chan_unbounded()
-var tx = chan_writer(c)
-for e in eventos_conhecidos:  // o dev garante que o total é pequeno e finito
-    tx.send(e)                // nunca bloqueia por cheio (não há "cheio")
+fn main() {
+    var c  = chan_unbounded()
+    var tx = chan_writer(c)
+    for tarefa in lote_fixo() {   // ex.: 12 tarefas conhecidas — total pequeno e finito
+        tx.send(tarefa)           // nunca bloqueia; não há "cheio" para travar a main
+    }
+    chan_close(c)
+    fork_join(4, 4, worker, ctx_de(c))   // SÓ AGORA os workers drenam — não havia consumidor antes
+}
 ```
 
 `join` é a **única barreira de memória** do modelo v1: nenhuma leitura do que uma raia escreveu é
