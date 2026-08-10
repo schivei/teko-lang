@@ -1,0 +1,24 @@
+# The `lir::push_inst_block` / `lir::append_inst` self-append by-address conveyance probe
+# (native fixpoint blocker #5).
+#
+# WHAT IT PROVES, end to end on BOTH routes: an aggregate whose fat `[]T` member is grown by a
+# self-append `teko::list::push` inside a helper, then stored back IN PLACE via an index-assign
+# onto a slice that aliases the enclosing struct's buffer (the exact shape of `lir::append_inst`
+# → `lir::push_inst_block`, lir.tks:530/552), reads back with a SOUND slice header. Before the
+# fix the own backend corrupts the inner `insts` slice header (garbage `len`) — a later read
+# faults (SIGSEGV) or a huge phantom allocation aborts M.1 "out of memory". The C route always
+# reads back the correct sum.
+#
+# The driver mirrors `append_inst`: three blocks, and a loop that repeatedly grows each block's
+# instruction stream via the in-place `blocks[i] = push_inst_block(blocks[i], inst)` index-assign.
+# The read-back sums every instruction; a corrupt header reds the sum check.
+#
+# EXIT CODES: 1 the read-back sum is wrong (corruption); 42 all good.
+#
+#   TEKO_BACKEND=native teko build examples/probes/push_inst_block_selfappend
+#   ./examples/probes/push_inst_block_selfappend/bin/push_inst_block_selfappend    # -> 42
+name = "push_inst_block_selfappend"
+source = "src"
+
+[artifact]
+kind = "binary"
