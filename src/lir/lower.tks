@@ -7241,6 +7241,18 @@ fn bind_target_name(t: parser::BindTarget) -> str | error {
  *           for a plain return, the store for a fat one) and BEFORE the `LRet` itself — reclaiming the
  *           frame region's non-escaping scratch on the way out, never the value the `LRet` carries
  *           (already conveyed to `rr` by the NP3b brackets, or self-contained if a register value).
+ * @implNote NP3b: the return value is lowered under `bracket_depth = 1` (`ctx_with_bracket_depth`),
+ *           exactly like `lower_binding_conveyed`/`lower_assign_conveyed`/`lower_conveyed_tail_expr_stmt`
+ *           pair their own `emit_region_leaves`. `emit_region_leaves` has already detoured the runtime
+ *           current region down to the conveyance anchor `rr`, so a return VALUE that itself opens
+ *           lexical regions (`return match … { … }`/`return if … { … }`, whose arms call
+ *           `open_native_region`) MUST NOT open them — the bracket makes `open_native_region`/
+ *           `close_native_region` no-ops (their own `bracket_depth > 0` skip), keeping the value at `rr`.
+ *           Without it, a `return match` from inside nested loops emitted `tk_region_enter_u`s with no
+ *           matching `tk_region_leave`, LEAKING the current-region stack (`cur_rsp`) — a later emit
+ *           helper then dropped a leaked entry and `tk_region_current()` returned a freed region, faulting
+ *           in `tk_region_alloc` (native fixpoint blocker C2, the `select_fused_branch_x86` element-box
+ *           wild-write; `backend::find_cmp_def`'s `return match inst.op` was the leaking shape).
  */
 fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
     let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
@@ -7251,9 +7263,11 @@ fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
         return LowerStmtOut { ctx = ctx_append(dropped, vinst); terminated = true }
     }
     if is_fat_type(left.ret_type) { return lower_return_fat(left, r) }
-    let lo = match lower_return_value(left, r.value) { Lowered as x => x; error as err => return err }
+    let marked = ctx_with_bracket_depth(left, 1)
+    let lo = match lower_return_value(marked, r.value) { Lowered as x => x; error as err => return err }
     let owned = own_returned_value(lo, r.value.line, r.value.col)
-    let dropped = emit_region_drops(owned.ctx, r.value.line, r.value.col)
+    let restored = ctx_with_bracket_depth(owned.ctx, ctx.bracket_depth)
+    let dropped = emit_region_drops(restored, r.value.line, r.value.col)
     let inst = ret_inst(owned.vreg, r.value.line, r.value.col)
     LowerStmtOut { ctx = ctx_append(dropped, inst); terminated = true }
 }
@@ -7274,11 +7288,19 @@ fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
  * @param r    the return node (`r.has_value` already true)
  * @return     the terminated context
  * @throws     when the enclosing body has no reserved out-slot, or propagated from lowering `e`
+ * @implNote NP3b: the fat value is lowered under `bracket_depth = 1` (`ctx_with_bracket_depth`), the
+ *           fat-axis twin of `lower_return`'s own bracket — `ctx` is already past `emit_region_leaves`
+ *           (`current == rr`), so a fat return VALUE that opens lexical regions (`return if … { s } else
+ *           { t }` over `str`/`[]T`) must not open them, or it leaks the current-region stack exactly as
+ *           the scalar path did (C2). The bracket makes the arms' `open_native_region` a no-op, landing
+ *           the fat builder's own buffer at `rr` directly.
  */
 fn lower_return_fat(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
     if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
-    let fo = match lower_fat_expr_into_type(ctx, ctx.ret_type, r.value) { LoweredFat as x => x; error as err => return err }
-    let stored = ctx_append(fo.ctx, store_inst(fo.ctx.ret_len_slot, fo.len, LType::I64, r.value.line, r.value.col))
+    let marked = ctx_with_bracket_depth(ctx, 1)
+    let fo = match lower_fat_expr_into_type(marked, marked.ret_type, r.value) { LoweredFat as x => x; error as err => return err }
+    let restored = ctx_with_bracket_depth(fo.ctx, ctx.bracket_depth)
+    let stored = ctx_append(restored, store_inst(restored.ret_len_slot, fo.len, LType::I64, r.value.line, r.value.col))
     let dropped = emit_region_drops(stored, r.value.line, r.value.col)
     LowerStmtOut { ctx = ctx_append(dropped, ret_inst(fo.ptr, r.value.line, r.value.col)); terminated = true }
 }
