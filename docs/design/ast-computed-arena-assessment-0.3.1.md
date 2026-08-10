@@ -41,6 +41,22 @@ entirely, and the corpus proves this is nearly free — **zero production `-> re
 (one probe, two rejection-regressions). It STRENGTHENS Idea 3: the migration removes a feature rather
 than adding one. Detail in §4.5.
 
+**Owner decision folded in (remove `let`/`mut` — every local mutable): SAFE and net-simpler, BUILD
+it.** The code proves the owner's governing principle *"a segurança está na capacidade das arenas,
+não no tipo da variável"* holds in spirit across all three hazards: **UAF and overflow are covered at
+the arena level (lifetime ⊇ use, floor + chunk-list growth); aliasing is covered by control-flow / F1
+exclusivity — and NONE of the three is the `let`/`mut` keyword.** In this compiler `let`/`mut` is an
+INTENT gate (`is_mut` only gates user `&`/`ref`/`free` ergonomics), never a safety invariant; borrow
+safety is F1 exclusivity in `borrow.tks`, which never reads `BindKind`. The DPS destination's
+write-once is **single-writer-by-construction from the call/return control flow** — a synthetic slot
+(`alloc_call_dest`) that was NEVER a `let` binding — so **the earlier "write-once from `let`" caveat is
+withdrawn.** One honest correction for the owner: DPS does not FORCE the removal (DPS init is
+lowering-internal, below the user borrow gate, so `let a = f()` stays a plain single initialization) —
+removal is a clean *language-simplicity* choice, not a DPS necessity. Real costs, none of them safety:
+the user immutability contract (a language call), a mechanical re-base of CF3 const-prop onto
+flow-single-assignment (byte-preserving), and the F2 shared-immutable fast path (already
+INSTRUMENT-gated in the spine). Full verification in §4.8.
+
 ---
 
 ## 1. The current model, measured (what the three ideas plug into)
@@ -418,11 +434,13 @@ IS the new rejection). It removes the single return-form whose semantics compete
   while move-on-return still aliased it. **DPS does NOT drop anything under the callee** — it redirects
   *where the callee writes*, into a destination the caller allocated in the caller's OWN current
   region (`alloc_call_dest`, §4.2). There is no premature drop, so the arena-por-escopo failure mode
-  does not recur. Against F1 exclusivity: the destination is write-once, callee-exclusive until the
-  return, then caller-exclusive after — this is F1's borrow discipline applied to the return channel,
-  and it is SOUND where region-per-frontend was not. The destination MUST be the caller's current
-  region, never a fresh child (a child dropped at scope exit could strand the returned value — the
-  guard is in `alloc_call_dest`'s doc).
+  does not recur. The destination's exclusivity is **single-writer-by-construction from the call/return
+  control flow** (§4.8): the caller synthesizes one destination, passes it to one callee, does not
+  touch it until the call returns; the callee has exclusive access and writes it once per return path.
+  This is NOT a `let`/`mut` fact and never was — it is a property of the lowering (see §4.8 for the
+  full `let`/`mut`-removal safety verification). The destination MUST be the caller's current region,
+  never a fresh child (a child dropped at scope exit could strand the returned value — the guard is in
+  `alloc_call_dest`'s doc).
 - **Composition with move-on-return:** DPS SUBSUMES the move-on-return conveyance for the return case
   — `binding_conveys_escape`'s bracket detour to `rr` becomes unnecessary for returns (the value is
   already in caller storage). Escaping BINDINGS/ASSIGNS via non-return channels still need their
@@ -437,6 +455,134 @@ retrofitted patch, it is the strongest post-AL3 retention lever, it eliminates a
 (`-> ref T`), and it plausibly closes two of the three pinned corruption blockers. The gate is
 root-map C2/C3 (pin `type_match`/`frame_sweep_inst` to confirm the return facet) — do that BEFORE the
 ABI change so the change is aimed, not speculative.
+
+### 4.8 The `let`/`mut` removal under DPS — safety verification (owner decision)
+
+**Owner decision:** under caller-arena DPS, remove `let`/`mut` entirely — every local becomes
+mutable. **Owner's governing principle:** *"A segurança não está no tipo da variável, está na
+capacidade das arenas."* This section TESTS that principle against the code, rigorously, across all
+three memory hazards, and answers the coordinator's residual concern (does DPS's write-once survive
+without `let`?).
+
+**Finding that reframes everything: in this compiler `let`/`mut` is an INTENT gate, not a safety
+gate.** Grepped the enforcement (`BindKind = enum { Let; Mut; Const }`, `ast.tks:259`). Every place
+`is_mut` is consulted is an *ergonomic/intent* check, never a memory-safety invariant:
+- `&x` borrow requires `is_mut` (`typer.tks:1769`, `:3276`): *"cannot take a reference to immutable
+  `x` — declare it `mut` (a borrow needs a mutable target)"*.
+- `ref r: T = x` requires a mutable source (`typer.tks:4212`).
+- `mem::free(x)` requires `is_mut` (`typer.tks:949`).
+
+These say "you declared it immutable, so you probably did not mean to mutate through this" — a
+did-you-mean-it filter. **The memory safety of borrows is F1 exclusivity in `borrow.tks`** (a
+flow/aliasing analysis over borrowed-parameter indices and alias chains), which never reads
+`BindKind`. So the keyword is orthogonal to safety.
+
+**Governing-principle test across the three hazards:**
+
+1. **Lifetime (no UAF) — ARENA-LEVEL, principle HOLDS.** A DPS return writes into the caller's arena,
+   whose lifetime ⊇ the caller scope ⊇ every use of the value. This is a REGION property computed
+   from the AST (the enclosing region of the call site), proven today by the escape analysis + region
+   model WITHOUT reading `BindKind`. `let` never contributed to lifetime. **Confirmed arena-level.**
+
+2. **Capacity (no overflow) — ARENA-LEVEL, principle HOLDS.** The pre-computed floor (Idea 1) plus the
+   chunk-list growth (`tk_region_alloc` never overflows a chunk — it links another, §1.1) bound every
+   write. This is purely allocator-level; `let` never touched it. **Confirmed arena-level.**
+
+3. **ALIASING (F1 exclusivity) — NOT arena-level, but NOT `let`-level either; the principle holds in
+   SPIRIT with a one-clause amendment.** Stress-test: with everything mutable, can two live references
+   point into the SAME arena slot with ordered/inconsistent writes? The arena capacity+lifetime model
+   is silent on this — two borrows of one cell both live in the same arena, both lifetime-valid, both
+   within capacity; the arena is content. **So aliasing is a SEPARATE axis the arena does not cover.**
+   *But `let`/`mut` never covered it either.* Aliasing safety is provided by:
+   - **General borrows:** F1 exclusivity in `borrow.tks` (flow analysis, keyword-independent). Removing
+     `let`/`mut` does NOT remove it; it only means every variable is now borrowable, so MORE borrows
+     flow into the SAME exclusivity checker — which still enforces one-live-mutable-borrow on all of
+     them. Safety preserved; what is lost is the `let`-based pre-filter and the F2 "immutable ⇒
+     shareable without exclusivity" fast path (a precision/perf axis, not a safety axis).
+   - **The DPS destination specifically:** **single-writer-by-construction from the call/return control
+     flow.** The caller synthesizes ONE destination, hands it to ONE callee, and does not read it until
+     the call returns; the callee holds it exclusively and writes it once per return path. There is no
+     second live reference to the destination during the callee's run. This exclusivity is a property
+     of the lowering structure — it is what the doc previously (imprecisely) attributed to "write-once
+     from `let`." **The write-once DPS needs comes from control flow, not from `let`, and not from the
+     arena capacity model. The `let` caveat is withdrawn.**
+
+**Verdict on the principle:** *"safety is arena capacity, not variable type"* holds **fully in spirit
+across all three hazards** — no hazard's safety is provided by `let`/`mut`. The precise statement is:
+**safety = arena lifetime+capacity (UAF, overflow) + control-flow / F1 exclusivity (aliasing), and
+none of those three is the `let`/`mut` keyword.** So removing `let`/`mut` does NOT weaken DPS safety.
+The coordinator's residual concern resolves: DPS's write-once was never proven by `let` (the
+destination is a synthetic slot, `alloc_call_dest`, with no user binding at all) — it is proven by the
+call/return single-writer structure.
+
+**A category correction the owner should have (it makes the case cleaner, not weaker):** the owner's
+premises (a)/(b) — that keeping `let` would force admitting `let a = fun()` is "mutable by reference"
+or special-casing a DPS-init borrow — rest on the DPS init going through the *user* borrow gate. **It
+does not.** DPS is a LOWERING transform: "the callee writes `a`'s slot" happens in LIR, below the
+checker's `is_mut` borrow gate, which only fires on *user-written* `&`/`ref`/`free`. The checker sees
+`let a = fun()` as an ordinary single INITIALIZATION; DPS merely chooses WHERE that one init writes.
+Initialization is not reassignment, so `let`'s contract is not violated, and no user-visible special
+case is needed. **DPS does not FORCE `let`/`mut` removal** — it is fully compatible with keeping it.
+Removal is therefore a *language-simplicity* decision the owner is free to make on its own merits, and
+it is SAFE — but it should not be sold as "DPS requires it," because DPS does not.
+
+**What is genuinely LOST by removal (honest costs, none of them safety):**
+1. **The user-facing immutability contract** — a binding/signature promising "not reassigned." A real
+   language-design loss (owner's call to accept).
+2. **CF3 const-propagation** keyed on `lp_is_const_binding` (`comptime_fold.tks:2918`: propagates only
+   `let`/`const`). With `let` gone, only `const` propagates and former-`let` folds vanish — UNLESS the
+   key is re-based on **flow-single-assignment** (a local written exactly once IS effectively
+   immutable, and that is derivable). Recommended: re-base CF3 on written-once flow, which PRESERVES
+   the folds and the emitted bytes. Real refactor, but the property is flow-derivable — which is
+   itself further proof the keyword was a redundant annotation.
+3. **F2 (deep-immutable `let`) fast path** — the `&(let)` rejection (`typer.tks:3260`) and the
+   "immutable ⇒ shareable without exclusivity" reasoning. Lost as a keyword fact; every borrow now
+   routes through exclusivity. This aligns with the spine's R3 (`safety-spine.md`), which already
+   treats the shared-immutable `&T` view as not-yet-built (INSTRUMENT-gated), so nothing regresses.
+4. **The three ergonomic intent gates** (`&`/`ref`/`free` on an immutable) become always-pass — a loss
+   of "did you mean it" friction, not of safety.
+
+**Byte-preservation / fixpoint — SAFE.** Both `let` and `mut` already lower to the SAME writable slot
+(codegen distinguishes only `Const`, `codegen.tks:8583` rodata prefix and `:1447` frame-route
+exclusion, and the `Mut` fat-rebind branch `lower.tks:6704` — none is a storage difference for
+`let` vs `mut`). So a given program's emitted bytes are unchanged by the merge. The checker stops
+REJECTING reassignment of former-`let` locals — but the compiler's own source never reassigns a `let`
+(it compiles today), so removing the rejection cannot change how `src/` lowers. `gen2==gen3` is
+unaffected: the only byte-mover is CF3, and re-basing it on flow-single-assignment holds the folds
+(bytes identical); even a naive const-only restriction shifts bytes only deterministically, so the
+self-emit fixpoint still holds.
+
+**Migration surface (grepped):**
+- `BindKind = enum { Let; Mut; Const }` → collapse `Let`+`Mut` into one local kind, **retain `Const`**
+  (it carries the comptime story and is a separate axis).
+- Parser: `parse_stmt.tks:55/194/227/256-258` (keyword→kind), `loop_head.tks:84/98/407` (BindKind),
+  `parse_stmt.tks:311` (`ref`→Mut desugar).
+- Checker: `is_mut` becomes always-true for locals; the `&`/`ref`/`free` gates
+  (`typer.tks:949/1769/3276/4212`) become always-pass (delete the now-dead messages).
+- comptime_fold: re-base `lp_is_const_binding` on flow-single-assignment (or restrict to `const`).
+- codegen: update the `Mut` fat-rebind condition (`lower.tks:6704`) to the merged kind; the `Const`
+  checks are unaffected.
+- **Keep as-is (SEPARATE axis, NOT the `let`/`mut` keyword):** parameter immutability and match-binding
+  immutability are **B.21**, not `let` (`scope.tks:186/249`, `match.tks:216/253`). "Every variable
+  becomes mutable" should mean **local bindings**, not params — making params mutable is a distinct,
+  larger semantic change, unrelated to DPS, and should NOT ride this crumb.
+- **`mut` keyword:** recommend KEEP it as an accepted-but-no-op spelling (a soft-deprecation lint)
+  rather than a hard parse error, so the existing corpus and docs do not all break in one load — the
+  bootstrap additive-load rule wants the seed to keep building.
+
+**The middle path (named, per the coordinator's ask):** if the owner values the immutability contract
+after all, keep `let` as a **checker-only single-assignment property** — no storage difference, no
+user borrow-gate change — which DPS init satisfies BY DEFINITION (init is the single assignment) with
+**zero user-visible special case** (DPS init is lowering-internal, §4.8 category correction). This
+retains the contract, the CF3 key, and F2, at no DPS cost. It is the option to reach for only if the
+immutability contract is judged worth a keyword; the safety case does not require it.
+
+**Net verdict on removal:** **SAFE and net-simpler — build it.** It removes zero safety (all three
+hazards are covered without the keyword), it collapses one binding axis, and it makes the DPS
+user-story trivial. The only real prices are the immutability contract (a language call) and the CF3
+re-base (mechanical, flow-derivable, byte-preserving). Fold it in as DPS crumb **D6** (§6), after the
+return ABI lands, so the exclusivity story is demonstrably control-flow-based before the keyword is
+retired.
 
 ---
 
@@ -475,6 +621,13 @@ ABI change so the change is aimed, not speculative.
 5. **D4 — remove `-> ref T`** (owner addendum): drop the `Reference` return arm + gate cluster
    (§4.5), retarget the one probe, retire the two rejection tests. Gate: FIXPOINT + `teko test .`;
    the form ceasing to parse is the new rejection fixture. Ritual: YES.
+6. **D5 — re-base CF3 const-prop on flow-single-assignment** (`lp_is_const_binding`, §4.8), so the
+   fold survives the loss of the `let` key. Gate: FIXPOINT byte-identical (the folds must hold) +
+   `teko test .`. Ritual: YES. This LANDS BEFORE D6 so the byte-preservation net exists first.
+7. **D6 — merge `let`/`mut` into one local kind** (owner decision, §4.8): collapse `BindKind::Let`+
+   `Mut`, retain `Const`, `is_mut`→always-true for locals, the `&`/`ref`/`free` intent gates
+   always-pass, keep `mut` as an accepted-no-op spelling, params stay B.21-immutable. Gate: FIXPOINT
+   gen2==gen3 + `teko test .`; inversion `reassign_former_let_now_compiles`. Ritual: YES.
 
 **Regression fixtures to add (inputs → native exit codes):**
 
@@ -486,6 +639,9 @@ ABI change so the change is aimed, not speculative.
 | `dps_no_frame_escape` | `frame_escape_guard` reports 0 offenders on the DPS corpus | 0 |
 | `dps_caller_dest_not_dropped` | a returned value survives the callee's scope exit (inversion: with the dest in a fresh child region it must FAIL) | 0 / (inversion fails) |
 | `ref_return_form_rejected` | `fn f() -> ref T` no longer parses/typechecks | EXPECT_COMPILE_FAIL |
+| `reassign_former_let_now_compiles` | a binding written twice compiles (was a `let` reassignment error) | 0 |
+| `dps_dest_single_writer` | inversion: a synthetic second live writer of the DPS dest must FAIL the borrow/exclusivity check — proves aliasing safety is control-flow, not `let` | (inversion fails) |
+| `cf3_fold_survives_let_merge` | a formerly-`let` const-initialized local still folds after the merge (flow-single-assignment key) — byte-identical fixpoint | 0 |
 | `arena_elided_leaf_scope` (Idea 2) | an alloc-free `if` arm emits no `tk_region_new_u` | 0 |
 | `arena_floor_presized` (Idea 1) | a literal-count collection is born at final cap, no doubling | 0 |
 
@@ -517,3 +673,6 @@ decision gate is go/no-go on D1's pin result, which is engineering, not a law co
    root-map did not disassemble them; D1 is the disambiguator and the go/no-go for the two-birds claim.
 4. Idea 1's slice-cap subset size — al1 says ~8 % of push-sites are statically-final; the MB that
    converts to is not separately measured.
+5. The CF3 fold-count delta from re-basing `lp_is_const_binding` on flow-single-assignment vs the
+   current `let`/`const` key (§4.8, D5) — expected byte-identical if the flow key is a superset of the
+   keyword key, but the exact fold set is not enumerated here; D5's fixpoint gate is the proof.
