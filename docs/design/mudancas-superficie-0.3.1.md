@@ -359,38 +359,40 @@ A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o u
 
 ### 10.1 Estratégia de token — tudo contextual
 
-`isolate`/`spawn`/`chan` e `async`/`await` são **contextuais** (reconhecidos pelo parser por posição, sem
-reserva no lexer) — a mesma norma que `class`/`abstract`/`virtual`/`override` já seguem. Medido: **zero
-identificadores Teko hoje** se chamam `isolate`/`spawn`/`chan`, então reservá-los não quebraria corpus; a
-razão de ficarem contextuais não é medo de colisão, é não fechar uma porta de sintaxe antes de um segundo
-uso a justificar.
+`spawn`, `async` e `await` são **keywords de corotina contextuais** (reconhecidas pelo parser por posição,
+sem reserva no lexer — a mesma norma que `class`/`abstract`/`virtual`/`override` seguem); `chan` é um
+**tipo genérico** (`chan<T>`). Medido: **zero identificadores Teko hoje** se chamam `spawn`/`chan`/`async`,
+então reconhecê-los por posição não quebra corpus.
 
-### 10.2 `isolate`/`spawn`/`chan` — biblioteca (paralelismo real, memória isolada)
+### 10.2 `spawn` (corotina) + `chan<T>` — paralelismo real, memória isolada
+
+`spawn` é uma **keyword de corotina** (estilo Go), **não uma função** — `spawn f(args)` lança `f` numa
+corotina **isolada** (sub-raiz própria), argumentos **por cópia**, **sem retorno** e **sem `join`**:
 
 ```teko
-pub type Isolate = struct { handle: u64 }        // só o id (IDs, não ponteiros — Doc 1 §7.7)
-fn spawn(entry: cabi fn(ptr) -> ptr, ctx: ptr, lane: u64): Isolate | error
-fn join(t: Isolate): null | error                // a ÚNICA barreira de memória do modelo v1
-fn fork_join(count: u64, lanes: u64, entry: cabi fn(ptr) -> ptr, ctx: ptr): u64 | error
-fn hardware_parallelism(): u64
+spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia
 
 // chan<T> MPSC (fan-in: N escritores, 1 leitor). Transporte: SOCK_DGRAM (Linux/macOS), mailslot (Windows)
 static fn chan<T>::make(bounds: usize = 1): self  // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
-fn chan<T>::writer(): Tx                           // Tx copiável (os N escritores)
-fn chan<T>::reader(): Rx                           // Rx um só; 2º leitor = erro nomeado
-fn chan<T>::close()                                // fecho do produtor
+              c.id: usize                          // o id — o que se passa à corotina (spawn f(c.id))
+static fn chan<T>::writer(id: usize): Tx           // Tx copiável (os N escritores)
+static fn chan<T>::reader(id: usize): Rx           // Rx um só; 2º leitor = erro nomeado
+static fn chan<T>::close(id: usize)                // fecho do produtor
 
-// WaitGroup (integrator-pinned) — para contagem que CRESCE após o lançamento;
-// onde a contagem é estática, fork_join/join basta e é preferível
-fn wg_open(): u64
-fn wg_add(wg: u64, n: u64): null | error
-fn wg_done(wg: u64): null | error
-fn wg_wait(wg: u64): null | error
+// WaitGroup — esperar N corotinas terminarem (NÃO há join no modelo de corotina)
+fn wg_open(): usize
+fn wg_add(wg: usize, n: usize): null | error
+fn wg_done(wg: usize): null | error
+fn wg_wait(wg: usize): null | error
+
+fn hardware_parallelism(): usize                   // paralelismo concedido pelo SO
 ```
 
-Dados só cruzam a fronteira de isolate **por cópia** (via `chan` ou o valor de retorno de `join`). A
-camada de linguagem **não reimplementa** limite/contrapressão/fecho — pede uma vez na abertura e confia no
-transporte do SO.
+**Sem `join`:** dados só cruzam a fronteira por **cópia** (via `chan`); espera-se pelo **fecho do canal**
+(o `pop` devolver `closed`) ou pelo `WaitGroup`. A camada de linguagem **não reimplementa**
+limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte do SO. *(A primitiva
+`fork_join` de baixo nível sobrevive como mecanismo INTERNO do backend, para paralelizar o codegen — não
+é superfície de usuário; o usuário escreve `spawn`.)*
 
 ### 10.3 `async`/`await` + `Intent<T>` — açúcar de duas fundações
 
@@ -406,8 +408,9 @@ Keywords **contextuais**. `async`/`await` retorna um `Intent`/`Intent<T>`:
 
 - **I/O cooperativo** — o `Intent` vive na arena de quem criou; sem thread de SO nova; reator
   `epoll`/`kqueue`/`IOCP`. Barato.
-- **CPU** — `async fn pesado()` desaçucara para `isolate`/`spawn`/`join` sobre um pool; `await` = `join`.
-  Herda F1 de graça.
+- **CPU** — `async fn pesado(): T` desaçucara para uma corotina isolada de um pool; o `await` **recolhe o
+  `Intent<T>`** que o sync alimentou. Herda F1. (`async`/`await` tem resultado; `spawn` é fire-and-forget,
+  sem retorno.)
 
 **Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve"). E **`ref`
 não cruza a fronteira**: nem `spawn`/`chan`/`async fn` aceitam `ref`, nem um genérico pode ser `<ref T>`
@@ -435,8 +438,8 @@ fn sweep(keep: str): u64               // a limpeza é da corrida SEGUINTE, nunc
 
 | # | pergunta | recomendação |
 |---|---|---|
-| D1 | `isolate`/`spawn`/`chan` — tokens reservados ou biblioteca? | **biblioteca, zero tokens** (contextual) |
-| D2 | `spawn <call-expr>` (açúcar de chamada) — agora ou depois? | **depois** (registrar; journal não precisa) |
+| D1 | `spawn` — função ou keyword? | **keyword de corotina** (estilo Go, contextual, sem `join`); `chan` é tipo genérico |
+| D2 | `spawn <call-expr>` — agora ou depois? | **agora** — é a forma canônica da keyword: `spawn f(args)` (Go-style, args por cópia, sem retorno) |
 | D3 | `chan_unbounded` — entra ou sai? | **ENTRA — responsabilidade do dev, não da linguagem** (ruling do dono 08-10) |
 | D4 | `WaitGroup` — a forma acima ou só `Isolate[]`+`join`? | a forma acima (menos apoiada em medição) |
 | D5 | `async`/`await` — separar as duas fundações ou `Intent<T>` único? | **separar** (ruling do dono 08-10): `Intent<T>` carrega cópia, `Intent` opaco |

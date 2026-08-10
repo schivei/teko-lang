@@ -365,7 +365,9 @@ O isolamento de memória tem **duas camadas**:
    raiz, sem paralelismo real.
 2. **Fronteira de task (raiz própria + thread de SO concorrente) — o pré-requisito bloqueante:**
    `tk_task`/`tk_task_current()`, as globais colapsadas por-task, `tk_arena_push`/`pop` sobre a raiz da
-   task chamadora. Necessária para qualquer `spawn` que rode código Teko concorrente.
+   task chamadora. Necessária para qualquer `spawn` que rode código Teko concorrente. **É esta camada que
+   a keyword `spawn` cria** (§7.8): cada `spawn f(args)` nasce uma corotina isolada com sua sub-raiz, os
+   argumentos entram **por cópia** nessa raiz, e nada de fora é referenciado por `ref` (§9).
 
 **A região do programa (F2):** depois que F1 parte a raiz única em N raízes de task, **não sobra raiz de
 processo** para um singleton morar — cada task morre e sua raiz esvazia. Um `chan`, criado UMA vez pela
@@ -391,67 +393,69 @@ pub type ChanId  = u64                       // o canal que a main abre e distri
 ### 7.8 `chan<T>` — MPSC (fan-in), a primitiva de dados
 
 `chan<T>` é um **tipo genérico**, aberto pela fábrica estática `make`, cujo parâmetro `bounds` tem
-**valor default = 1** (usa a superfície nova: `static fn`, genérico, `usize`, e **parâmetro com default**):
+**valor default = 1** (usa a superfície nova de uma vez: genérico, `static fn`, `usize`, e **parâmetro com
+default**). Tudo é operado pelo **id** do canal (a regra "IDs, não ponteiros", §7.7):
 
 ```teko
 static fn chan<T>::make(bounds: usize = 1): self   // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
-fn    chan<T>::writer(): Tx    // extremo de escrita — copiável (N escritores)   [forma OOP de chan_writer]
-fn    chan<T>::reader(): Rx    // extremo de leitura — um só; 2º pop de outra task = erro nomeado
-fn    chan<T>::close()         // fecho do lado do produtor
+                    c.id: usize                     // o id do canal — o que se passa a uma corotina
+static fn chan<T>::writer(id: usize): Tx           // extremo de escrita (copiável, N escritores)
+static fn chan<T>::reader(id: usize): Rx           // extremo de leitura (um só; 2º de outra task = erro)
+static fn chan<T>::close(id: usize)                // fecho do lado do produtor
 ```
 
-- `chan<T>::make()` → **bounded, capacidade 1** (o default).
-- `chan<T>::make(64)` → bounded, capacidade 64.
-- `chan<T>::make(0)` → **unbounded** (sem teto — responsabilidade do dev).
+- `chan<T>::make()` → **bounded-1** (default) · `make(64)` → bounded-64 · `make(0)` → **unbounded**.
+- Fan-in MPSC: N escritores (`Tx`), 1 leitor (`Rx`).
 
-Fan-in MPSC: N escritores (`Tx`, copiável), 1 leitor (`Rx`, um só; 2º `pop` de outra task = erro nomeado,
-nunca corrida silenciosa).
+`spawn` é uma **keyword de corotina** (não uma função) — estilo Go: `spawn f(args)` lança `f` numa corotina
+**isolada** (sub-raiz própria, §7.6). Os argumentos vão **por cópia**, **nenhum retorno é esperado**, e
+**não há `join`** — a sincronização é pelo `chan` (resultados) e por `WaitGroup` (esperar N terminarem).
 
 **bounded — indexar um log de 10 GB sem carregá-lo na memória.** Leitor rápido, indexador lento, correndo
-ao mesmo tempo. O teto de 64 faz o leitor **esperar** ao encher (contrapressão): a memória fica ≤ 64
-linhas em voo, não os 10 GB.
+ao mesmo tempo. O teto de 64 faz o leitor **esperar** ao encher: a memória fica ≤ 64 linhas em voo.
 
 ```teko
-fn ler(c: chan<str>, caminho: str) {               // produtor, numa raia (recebe o handle por cópia)
-    var tx = c.writer()
+fn ler(cid: usize, caminho: str) {                 // corotina produtora — recebe o ID por cópia
+    var tx = chan<str>::writer(cid)
     for linha in ler_linhas(caminho) {
         tx.send(linha)          // 64 casas cheias? ESPERA o indexador — nunca engole o ficheiro
     }
-    c.close()                   // fim → o pop do consumidor passará a devolver `closed`
+    chan<str>::close(cid)       // fim → o pop do leitor passará a devolver `closed`
 }
 
 fn main() {
-    var c = chan<str>::make(64)     // bounded, 64
-    spawn ler(c, "app.log")         // o leitor roda concorrente; a main indexa no seu ritmo
-    var rx = c.reader()
+    var c = chan<str>::make(64)
+    spawn ler(c.id, "app.log")      // Go-style: dispara e segue (sem join); passa o ID por cópia
+    var rx = chan<str>::reader(c.id)
     loop {
         var m = rx.pop()
         match m {
             str    => guardar_no_indice(m),
-            closed => break
+            closed => break             // o fecho do canal É a sincronização — não há join
         }
     }
 }
 ```
 
-**unbounded — enfileirar um lote fixo ANTES de existir consumidor.** Aqui o bounded daria **deadlock**: a
-`main` enfileira tudo *antes* de lançar os workers, então ninguém está drenando — um teto cheio travaria a
-`main` para sempre. O `make(0)` não bloqueia, e é seguro porque o total é **conhecido e pequeno**.
+**unbounded — enfileirar um lote fixo ANTES de existir consumidor.** Bounded daria **deadlock** (ninguém
+drena enquanto a `main` enfileira). O `make(0)` não bloqueia, e é seguro porque o total é **conhecido e
+pequeno**.
 
 ```teko
 fn main() {
     var c  = chan<Tarefa>::make(0)   // unbounded
-    var tx = c.writer()
+    var tx = chan<Tarefa>::writer(c.id)
     for tarefa in lote_fixo() {      // ex.: 12 tarefas conhecidas — total pequeno e finito
         tx.send(tarefa)              // nunca bloqueia; não há "cheio" para travar a main
     }
-    c.close()
-    fork_join(4, 4, worker, ctx_de(c))   // SÓ AGORA os workers drenam — não havia consumidor antes
+    chan<Tarefa>::close(c.id)
+    var i = 0
+    loop while i < 4 { spawn worker(c.id); i = i + 1 }   // 4 corotinas drenam; sync via chan/WaitGroup
 }
 ```
 
-`join` é a **única barreira de memória** do modelo v1: nenhuma leitura do que uma raia escreveu é
-legítima antes dele.
+Não há `join` no modelo de corotina: a barreira de memória é o **fecho do canal** (o `pop` devolver
+`closed`) e/ou o `WaitGroup`.
 
 ### 7.9 `async`/`await` — o mapa de arena das duas fundações
 
@@ -477,9 +481,10 @@ ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan`
   **Custo de arena: zero** — não precisa de F1, porque com uma só raia a garantia de F1 (ninguém
   rebobina a arena de outro) já vale de graça. Compõe com `isolate`: cada isolate roda seu laço
   cooperativo na SUA arena.
-- **CPU (`teko::threading::run(...) -> Intent<T>`):** desaçucara para **`isolate`/`spawn`/`join` sobre
-  um pool de isolates pré-aquecido** — herda a arena-por-task (F1) inteira. `await` = `join`. **Não é um
-  terceiro modelo de arena "leve".**
+- **CPU (`async fn f(): T`):** desaçucara para lançar o corpo numa **corotina isolada de um pool**
+  pré-aquecido (F1) e o `await` **recolhe o `Intent<T>`** que o processo de sincronização alimentou ao
+  completar. Herda a arena-por-task inteira. **Não é um terceiro modelo de arena "leve".** (Diferente de
+  `spawn`, que é fire-and-forget sem retorno; `async`/`await` tem resultado, via `Intent<T>`.)
 - **O que NÃO existe:** thread de verdade rodando Teko que **compartilha arena sem F1**. Custaria o mesmo
   (precisa de F1 para ser seguro) e entregaria menos — é o bug que F1 existe para fechar
   (`arena_push`/`pop` de duas raias sobre a mesma pilha se corrompem, sintoma nenhum).
