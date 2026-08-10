@@ -429,18 +429,23 @@ fn lwt_lowers_cast_u64_to_u8_guards_only_the_ceiling() {
 }
 
 /**
- * lwt_lowers_cast_i32_to_i64_costs_nothing — a WIDENING `to` needs no guard (it cannot overflow) and
- * no conversion instruction either: the operand's 64-bit register already holds the widened value, so
- * the cast lowers to nothing at all. `checker::cast_is_lossless_widen` is the single width table this
- * decision and the C route's `cast_may_lose` both ask.
+ * lwt_lowers_cast_i32_to_i64_retracks_width — a WIDENING `to i64` needs no fit guard (it cannot
+ * overflow) and no extend/truncate opcode, but it MUST re-track the value at 64-bit width for the
+ * native isels, whose per-VReg `wide` bit would otherwise stay 32-bit and select 32-bit forms for
+ * every later use (the `push_mem_operand_x86` cast-guard trap, `lower_widen_to_64`). The re-track is
+ * one `ior` into a fresh 64-bit zero (`0 | value`), the identity over the LIR i64 carrier — so no
+ * `tk_panic_cast`, `sext`, or `trunc` is emitted, only the width-advancing `ior`.
+ * `checker::cast_is_lossless_widen` is the single width table this decision and the C route's
+ * `cast_may_lose` both ask.
  */
 #test
-fn lwt_lowers_cast_i32_to_i64_costs_nothing() {
+fn lwt_lowers_cast_i32_to_i64_retracks_width() {
     let inner = lwt_num(5, checker::PrimKind::I32)
     let text = lwt_lower_expr_text(lwt_cast(inner, checker::PrimKind::I64))
     teko::assert::is_true(!teko::str::contains(text, "tk_panic_cast"))
     teko::assert::is_true(!teko::str::contains(text, "sext"))
     teko::assert::is_true(!teko::str::contains(text, "trunc"))
+    teko::assert::str_contains(text, "ior")
 }
 
 #test

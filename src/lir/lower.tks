@@ -820,19 +820,67 @@ fn lower_cast_fit_guard(ctx: LowerCtx, value: u32, src: checker::PrimKind, dst: 
 }
 
 /**
- * lower_int_cast — the whole int->int (and `byte`/enum-ordinal) `to` cast: guard the fit, then
- * reuse the operand's own VReg as the result. See `lower_cast_fit_guard` for why the guard is
- * the entire conversion and no extend/truncate instruction survives it.
+ * cast_widens_to_64 — true when a `to` cast crosses from a machine-narrow (<64-bit) source into a
+ * 64-bit destination (`i64`/`u64`). This is the ONE cast shape whose result the native isels must
+ * re-track at 64-bit width: they carry a per-VReg `wide` bit, and a value handed straight through
+ * from a narrow producer keeps that producer's 32-bit tracking (`select_bin_x86` reads the first
+ * operand's recorded `wide`), which then selects 32-bit forms for every later use. That is unsound
+ * the moment a use compares the value against a bound outside the signed-32 range — precisely the
+ * `to u32` fit guard's `CAST_CEIL_U32` (`4294967295`), which reads as `-1` in a 32-bit signed
+ * compare, so a valid small displacement `8` fails `8 <= -1` and traps (the native self-build's
+ * `push_mem_operand_x86` "impossible conversion" wall: `(mem.offset to i64) & X86_BYTE_MASK to u32`).
+ *
+ * @param src  the cast operand's PrimKind
+ * @param dst  the cast target's PrimKind
+ * @return     true iff `src` is narrower than 64 bits and `dst` is 64 bits wide
+ */
+fn cast_widens_to_64(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
+    prim_width_of(dst) == (64 to u32) && prim_width_of(src) < (64 to u32)
+}
+
+/**
+ * lower_widen_to_64 — re-materialize a machine-narrow value as a 64-bit-tracked one by ORing it
+ * into a fresh 64-bit zero (`0 | value`). A `LConstInt` is always selected at 64-bit width, so the
+ * `IOr` it feeds is a 64-bit op whose result the isel records `wide=true`, and its `or r64, r/m`
+ * reads the source operand's whole register — which a narrow value already holds ZERO-EXTENDED
+ * (every 32-bit x86 op clears the upper half), so the ORed value is the operand's exact
+ * non-negative widening with no bit changed. The value's identity is preserved (`0 | v == v`, the
+ * LIR interpreter oracle's own reading), and only the width TRACKING advances — which is what a
+ * widening `to i64`/`to u64` cast owes the isel so its later uses select the 64-bit form.
+ *
+ * @param operand  the already-lowered narrow operand
+ * @param line     the source line of the cast expression
+ * @param col      the source column of the cast expression
+ * @return         the operand widened into a fresh 64-bit-tracked VReg
+ */
+fn lower_widen_to_64(operand: Lowered, line: u32, col: u32) -> Lowered {
+    let z = ctx_alloc(operand.ctx)
+    let with_zero = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
+    let r = ctx_alloc(with_zero)
+    let widened = ctx_append(r.ctx, bin_inst(r.vreg, LBinOp::IOr, z.vreg, operand.vreg, line, col))
+    Lowered { ctx = widened; vreg = r.vreg }
+}
+
+/**
+ * lower_int_cast — the whole int->int (and `byte`/enum-ordinal) `to` cast: guard the fit, then keep
+ * the operand's value. A NARROWING cast hands back the operand's own VReg unchanged (see
+ * `lower_cast_fit_guard` for why the guard is the entire conversion and no extend/truncate survives
+ * it); a WIDENING cast into a 64-bit destination re-tracks the value at 64-bit width via
+ * `lower_widen_to_64`, the width bit the native isels lose when a narrow value flows straight into a
+ * wider use (`cast_widens_to_64`).
  *
  * @param operand  the already-lowered operand
  * @param src      the cast operand's PrimKind
  * @param dst      the cast target's PrimKind
  * @param line     the source line of the cast expression
  * @param col      the source column of the cast expression
- * @return         the operand's VReg, reachable only on the path where it fits `dst`
+ * @return         the value that fits `dst` (widened to a 64-bit-tracked VReg when `dst` is 64 bits),
+ *                 reachable only on the path where it fits
  */
 fn lower_int_cast(operand: Lowered, src: checker::PrimKind, dst: checker::PrimKind, line: u32, col: u32) -> Lowered {
-    Lowered { ctx = lower_cast_fit_guard(operand.ctx, operand.vreg, src, dst, line, col); vreg = operand.vreg }
+    let guarded = lower_cast_fit_guard(operand.ctx, operand.vreg, src, dst, line, col)
+    if cast_widens_to_64(src, dst) { return lower_widen_to_64(Lowered { ctx = guarded; vreg = operand.vreg }, line, col) }
+    Lowered { ctx = guarded; vreg = operand.vreg }
 }
 
 /** prim_width_of — the bit width of an integer/float PrimKind (bool = 1). Local copy of
