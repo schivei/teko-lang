@@ -312,7 +312,91 @@ var v = Vec2 { x:1, y:2 } + Vec2 { x:3, y:4 }   // usa __add
 
 ---
 
-## 10. Sequência (ordem do dono: superfície → reseed → backend)
+## 10. Concorrência — a superfície (`isolate`/`spawn`/`chan`, `async`/`await`, journaling)
+
+A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o usuário vê. Recomposto de
+`concorrencia-isolate-spawn-chan` (08-03), `journaling-de-corrida` (07-30) e `paralelizacao-eixo1/eixo2`
+(08-02).
+
+### 10.1 Estratégia de token — tudo contextual
+
+`isolate`/`spawn`/`chan` e `async`/`await` são **contextuais** (reconhecidos pelo parser por posição, sem
+reserva no lexer) — a mesma norma que `class`/`abstract`/`virtual`/`override` já seguem. Medido: **zero
+identificadores Teko hoje** se chamam `isolate`/`spawn`/`chan`, então reservá-los não quebraria corpus; a
+razão de ficarem contextuais não é medo de colisão, é não fechar uma porta de sintaxe antes de um segundo
+uso a justificar.
+
+### 10.2 `isolate`/`spawn`/`chan` — biblioteca (paralelismo real, memória isolada)
+
+```teko
+pub type Isolate = struct { handle: u64 }        // só o id (IDs, não ponteiros — Doc 1 §7.7)
+fn spawn(entry: cabi fn(ptr) -> ptr, ctx: ptr, lane: u64): Isolate | error
+fn join(t: Isolate): null | error                // a ÚNICA barreira de memória do modelo v1
+fn fork_join(count: u64, lanes: u64, entry: cabi fn(ptr) -> ptr, ctx: ptr): u64 | error
+fn hardware_parallelism(): u64
+
+// chan<T> MPSC (fan-in: N escritores, 1 leitor). Transporte: SOCK_DGRAM (Linux/macOS), mailslot (Windows)
+fn chan_bounded(cap: u64): u64                    // LIMITADO com contrapressão — a lei
+fn chan_writer(id: u64): Tx | error              // Tx copiável (os N escritores)
+fn chan_reader(id: u64): Rx | error              // Rx um só; 2º leitor = erro nomeado
+fn chan_is_open(id: u64): bool                    // consulta ao registro, nunca cacheado
+
+// WaitGroup (integrator-pinned) — para contagem que CRESCE após o lançamento;
+// onde a contagem é estática, fork_join/join basta e é preferível
+fn wg_open(): u64
+fn wg_add(wg: u64, n: u64): null | error
+fn wg_done(wg: u64): null | error
+fn wg_wait(wg: u64): null | error
+```
+
+Dados só cruzam a fronteira de isolate **por cópia** (via `chan` ou o valor de retorno de `join`). A
+camada de linguagem **não reimplementa** limite/contrapressão/fecho — pede uma vez na abertura e confia no
+transporte do SO.
+
+### 10.3 `async`/`await` + `Intent<T>` — açúcar de duas fundações
+
+Keywords **contextuais**. `async`/`await` é açúcar sobre DUAS fundações, e o desenho diz qual é qual (a
+arena de cada uma está no Doc 1 §7.9):
+
+- **I/O cooperativo** — `Intent<T>` vive na arena de quem criou; sem thread de SO nova; reator
+  `epoll`/`kqueue`/`IOCP`. Barato.
+- **CPU** — `async fn pesado()` desaçucara para `isolate`/`spawn`/`join` sobre um pool; `await` = `join`.
+  Herda F1 de graça.
+
+**Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve").
+
+### 10.4 `teko::journal` — o módulo de journaling
+
+O journal é um **registro append-only, carimbado por corrida, segmentado por escritor**; a sumarização
+**relê** (`fold`), não funde. Para quem escreve testes hoje, **nada muda** de grafia (`teko::test::scoped`
+segue igual). O módulo:
+
+```teko
+pub type Journal = struct { run: str, writer: str, seg: u64 }   // seg opaco: fd hoje, laje-por-raia amanhã
+pub type Record  = struct { run: str, writer: str, kind: str, payload: str }
+fn run_id(): str                       // <ns monotônico>-<pid> — nomear a corrida mata o lixo calado
+fn run_root(): str                     // bin/.tkrun/<run_id()>
+fn open(writer: str): Journal | error
+fn append(j: Journal, kind: str, payload: str): null | error   // durabilidade: write(2) O_APPEND, sem buffer
+fn fold(root: str, run: str): []Record // descarta lixo de outra corrida / linha rasgada / sintetiza `end`
+fn scratch(base: str): str             // o compositor único de caminhos isolados
+fn sweep(keep: str): u64               // a limpeza é da corrida SEGUINTE, nunca da própria
+```
+
+### 10.5 Decisões pra ti (recompostas de `concorrencia-isolate-spawn-chan` §9)
+
+| # | pergunta | recomendação |
+|---|---|---|
+| D1 | `isolate`/`spawn`/`chan` — tokens reservados ou biblioteca? | **biblioteca, zero tokens** (contextual) |
+| D2 | `spawn <call-expr>` (açúcar de chamada) — agora ou depois? | **depois** (registrar; journal não precisa) |
+| D3 | `chan_unbounded` — entra ou sai? | **sai / sinalizado não-recomendado** (reabre OOM) |
+| D4 | `WaitGroup` — a forma acima ou só `Isolate[]`+`join`? | a forma acima (menos apoiada em medição) |
+| D5 | `async`/`await` — separar as duas fundações ou `Intent<T>` único? | **separar** (dizer qual fundação no tipo/doc) |
+| D6 | namespace — `teko::isolate`+`teko::threads` ou um só? | **um só, `teko::threads`** |
+
+---
+
+## 11. Sequência (ordem do dono: superfície → reseed → backend)
 
 1. **Aditivo (front/FFI):** cada mudança entra aceitando a grafia velha ao lado da nova, escrita na
    grafia velha (o seed atual parseia). Ordem entre elas é livre (são mutuamente independentes).
@@ -327,7 +411,7 @@ var v = Vec2 { x:1, y:2 } + Vec2 { x:3, y:4 }   // usa __add
 
 ---
 
-## 11. Pontos em aberto — para tua validação
+## 12. Pontos em aberto — para tua validação
 
 1. **`mut` na janela aditiva** — aceito-no-op (soft-dep) vs. erro de parse imediato. Proposto: no-op,
    para o corpus não quebrar de uma vez. Confirmar.

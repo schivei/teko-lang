@@ -269,10 +269,19 @@ mais cedo** — a falha do arena-por-escopo foi exatamente dropar cedo com alias
 
 ---
 
-## 7. Multi-threading — a arena sob paralelismo
+## 7. Concorrência — a arena sob isolamento e paralelismo
 
-O paralelismo do teko é do **BACKEND pós-lowering**, e o modelo de arena sob threads é uma extensão
-direta e provada da disciplina de região por-função.
+O teko tem **dois modelos de concorrência**, e a distinção entre eles é de ARENA (recomposto dos docs
+`concorrencia-isolate-spawn-chan` 08-03, `paralelizacao-eixo1/eixo2` 08-02, `journaling-de-corrida`
+07-30, `concorrencia-adiantada-s8`):
+
+| modelo | superfície | arena |
+|---|---|---|
+| **`isolate`/`spawn`/`chan`** — paralelismo real | biblioteca (Doc 2 §10) | **heap ISOLADO** — cada isolate nasce com raiz própria (`tk_region_new(NULL)`, "como se fosse outro programa"); dados só cruzam por cópia (via `chan` ou retorno de `join`) |
+| **`async`/`await` + `Intent<T>`** — açúcar | keywords contextuais (Doc 2 §10) | **duas fundações** (§7.9): I/O cooperativo vive na arena de quem criou; CPU desaçucara para `isolate`/pool |
+
+O paralelismo de compilação (abaixo) é do **BACKEND pós-lowering**, e o modelo de arena sob threads é
+uma extensão direta e provada da disciplina de região por-função.
 
 ### 7.1 Escopo: paralelizar o backend, NUNCA o lowering
 
@@ -391,6 +400,39 @@ pub fn chan_is_open(id: u64)  -> bool     // consulta ao registro, NUNCA cachead
 legítima antes dele. Canais são **limitados com contrapressão** por lei — um canal sem limite tem a
 memória como único travão (ver ponto aberto §11).
 
+### 7.9 `async`/`await` — o mapa de arena das duas fundações
+
+`async`/`await` (com `Intent<T>`) é **açúcar**, e a arena difere conforme a fundação — a distinção tem de
+ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan` §8):
+
+- **I/O cooperativo (uma só raia mutando a arena por vez):** o `Intent` de I/O **vive dentro do
+  bloco/arena de quem o criou** — não tem arena própria, não cria thread de SO. `await` suspende a
+  tarefa lógica sem bloquear a thread; um reator (`epoll`/`kqueue`/`IOCP`) por thread executora retoma.
+  **Custo de arena: zero** — não precisa de F1, porque com uma só raia a garantia de F1 (ninguém
+  rebobina a arena de outro) já vale de graça. Compõe com `isolate`: cada isolate roda seu laço
+  cooperativo na SUA arena.
+- **CPU (`teko::threading::run(...) -> Intent<T>`):** desaçucara para **`isolate`/`spawn`/`join` sobre
+  um pool de isolates pré-aquecido** — herda a arena-por-task (F1) inteira. `await` = `join`. **Não é um
+  terceiro modelo de arena "leve".**
+- **O que NÃO existe:** thread de verdade rodando Teko que **compartilha arena sem F1**. Custaria o mesmo
+  (precisa de F1 para ser seguro) e entregaria menos — é o bug que F1 existe para fechar
+  (`arena_push`/`pop` de duas raias sobre a mesma pilha se corrompem, sintoma nenhum).
+
+### 7.10 Journaling — a faceta de arena da durabilidade
+
+O journaling (`journaling-de-corrida`) tem faceta de arena por dois pontos:
+
+- **Segmento por escritor = a mesma disciplina de região-por-raia.** Cada escritor possui seu segmento e
+  mais ninguém (sem lock, sem destino partilhado) — é o `encoded[i]` disjunto do §7.3 aplicado à
+  durabilidade. O campo `Journal.seg` é opaco: um descritor de ficheiro hoje, um **índice de laje por
+  raia** quando as threads chegarem — a troca é uma função (`journal_open_rt`), e **nada mais muda**.
+- **A durabilidade mora FORA do buffer que morre com o processo** — o mesmo princípio da arena: estado
+  que precisa sobreviver não pode viver onde vai ser reclamado. `append` é um `write(2)` em `O_APPEND`
+  **sem buffer de userspace**: o registro está no kernel quando `append` retorna, então um `SIGKILL` não
+  o perde (só uma queda de máquina perderia). Um buffer de userspace (um `FILE*` com stdio) morreria com
+  o processo — exatamente o momento em que o ficheiro tinha valor. A sumarização **relê** (`fold`), não
+  funde: nada por fundir que se perca, já estava escrito.
+
 ---
 
 ## 8. DI — tempos de vida SÃO tempos de vida de arena
@@ -493,3 +535,7 @@ fn pipeline() {
    nos docs de origem; nomeio para não passar por decidido).
 5. **`spawn <call-expr>`** (açúcar `spawn orquestrar(c)` vs. a assinatura `spawn(entry, ctx, lane)`) —
    registrado como açúcar FUTURO, não fechado aqui. Confirmar que fica fora do escopo desta onda.
+6. **`async`/`await` — as duas fundações** (§7.9) — separar I/O cooperativo (arena de quem cria, custo
+   zero) de CPU (açúcar sobre `isolate`, herda F1), dizendo no tipo/doc-comment qual fundação cada
+   `async fn` usa; **ou** manter um `Intent<T>` único indiferenciado (aí `await` pode custar tanto quanto
+   um `spawn` isolado sem aviso no call-site). Recomendação: separar. **Tua ruling.**
