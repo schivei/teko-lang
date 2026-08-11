@@ -369,29 +369,35 @@ O isolamento de memória tem **duas camadas**:
    a keyword `spawn` cria** (§7.8): cada `spawn f(args)` nasce uma corotina isolada com sua sub-raiz, os
    argumentos entram **por cópia** nessa raiz, e nada de fora é referenciado por `ref` (§9).
 
-**`spawn` e o modificador `isolate`.** A regra dura do `spawn` é **uma só: o alvo NÃO pode ter retorno** —
-um valor retornado não teria para quem ir (`spawn` é fire-and-forget). O alvo pode ser uma **função comum
-sem retorno** OU uma **`isolate fn`**. O **`isolate` é um modificador OPCIONAL** que restringe uma função
-sem-retorno a ser **spawn-only** — só chamável por `spawn`, nunca direto (o checker rejeita a chamada
-direta). Uma função sem-retorno comum pode ser chamada direto ou por `spawn`; marcá-la `isolate` fecha a
-porta da chamada direta. Isso é tudo que o checker garante — nada sobre execução. O **`spawn` é
-fire-and-forget**: dispara e segue; **não se espera por ela**, a conclusão vem por outros meios (o fecho do
-canal, o `WaitGroup`). Quando lançada, a corotina nasce na sua **própria sub-raiz de arena** (F1), com os
-argumentos entrando por cópia; resultados saem por `chan`.
+**`spawn` e o modificador `isolate` — dois níveis de isolamento.** A regra dura do `spawn` é **uma só: o
+alvo NÃO pode ter retorno** (um valor retornado não teria para quem ir — `spawn` é fire-and-forget). O
+alvo pode ser:
+
+- **uma função comum sem retorno** → roda como uma **thread**: sua própria sub-raiz de arena (F1), mas
+  **dentro do processo** — compartilha a região de programa (F2: registro de `chan`, singletons por thread);
+- **uma `isolate fn`** → roda em **isolamento total, como se fosse outro processo** — raiz própria, **sem
+  compartilhar memória de programa nenhuma**, **mais restrita que uma thread**. Comunica **só por `chan`**
+  (o transporte do SO — `SOCK_DGRAM`/mailslot — que cruza a fronteira de processo naturalmente), por id,
+  por cópia. É a `#arena_size` / "como se fosse outro programa" (ruling 2026-07-27) levada ao extremo.
+
+`isolate fn` é ainda **spawn-only** (só chamável por `spawn`, nunca direto — chamá-la síncrona não faz
+sentido) e **sem retorno**. Em ambos os casos o **`spawn` é fire-and-forget**: dispara e segue; **não se
+espera**, a conclusão vem por outros meios (o fecho do canal, o `WaitGroup`); os argumentos entram por
+cópia.
 
 ```teko
-isolate fn worker(cid: usize) {        // sem retorno + spawn-only (o `isolate` fecha a chamada direta)
+isolate fn worker(cid: usize) {        // isolamento tipo-processo; spawn-only, sem retorno
     var tx = chan<i32>::writer(cid)
     tx.send(processar())
     chan<i32>::close(cid)
 }
 
-fn tarefa(cid: usize) { … }            // função comum SEM retorno — também spawnável (e chamável direto)
+fn tarefa(cid: usize) { … }            // função comum SEM retorno → roda como thread (compartilha F2)
 
 fn main() {
     var c = chan<i32>::make(64)
-    spawn worker(c.id)                 // ok
-    spawn tarefa(c.id)                 // ok — spawn só exige "sem retorno"
+    spawn worker(c.id)                 // isolamento total (como outro processo)
+    spawn tarefa(c.id)                 // thread (mesmo processo)
     // worker(c.id)                     // ERRO: isolate fn não pode ser chamada direto
     // spawn soma(a, b)                 // ERRO: soma tem retorno — spawn não aceita
 }

@@ -422,9 +422,10 @@ hoje** se chamam `spawn`/`chan`/`await`/`isolate`, então reconhecê-los por pos
 ### 10.2 `spawn` (corotina) + `chan<T>` — paralelismo real, memória isolada
 
 `spawn` é uma **keyword de corotina** (estilo Go), **não uma função** — `spawn f(args)` lança `f` numa
-corotina **isolada** (sub-raiz própria), argumentos **por cópia**, **sem retorno** e **sem `join`**. O par
-declarativo é `isolate fn`: **`isolate` é um modificador de função** — uma `isolate fn` **não tem retorno**
-e **só pode ser chamada por `spawn`** (chamá-la direto é erro de compilação). Doc 1 §7.6.
+corotina, argumentos **por cópia**, **sem retorno** e **sem `join`**. **Dois níveis de isolamento:** uma
+**função comum sem retorno** roda como **thread** (compartilha a região de programa); uma **`isolate fn`**
+roda em **isolamento total, como outro processo** (raiz própria, sem memória compartilhada, mais restrita
+que thread; comunica só por `chan`) e é **spawn-only** (chamá-la direto = erro). Doc 1 §7.6.
 
 ```teko
 spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia
