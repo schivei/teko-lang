@@ -403,28 +403,29 @@ var log:   action<str>              = (m) => print(m)
 var fmt:   func<Record, str> | null = null           // sem colisão (era `fn(Record): str | null`, ambíguo)
 ```
 
-### 9.3 Tuplas e desestruturação — `( )` e `[ ]`
+### 9.3 Decomposição — `( )` e `[ ]` (SEM tipo tupla)
 
-**O que muda.** Entram **tuplas** (produto posicional, heterogêneo) — a linguagem não as tinha — e a
-**desestruturação posicional** em `var`, por tupla `( )` e por array `[ ]`. (Já existe a desestruturação
-por NOME `{ x; y }` de campos de struct, B.13; estas são as **posicionais**.)
+**O que muda.** Entra **decomposição posicional** em `var` — ligar vários valores de uma vez — **sem
+introduzir um tipo tupla** (ruling do dono). Não há um valor "tupla" que se armazene ou passe: `( … )` é
+**só o ponto de decomposição / de produção múltipla** (estilo Go multi-return), nunca um tipo de 1ª classe.
+(Já existe a decomposição por NOME `{ x; y }` de campos de struct, B.13; estas são as **posicionais**.)
 
 **O que entra.**
-- **Tupla:** tipo `(A, B, C)` e literal `(a, b, c)` — um struct anônimo de campos posicionais, heterogêneo.
-  `(x)` é só `x` entre parênteses; uma tupla precisa de ≥2 elementos (ou `(x,)` para a 1-tupla).
-- **Desestruturação por tupla:** `var (a, b, c) = expr` — posicional, tipos podem diferir.
-- **Desestruturação por array:** `var [a, b, c] = expr` — posicional, **homogêneo** (todos do tipo do
-  elemento). "Muito mais útil" no caso comum.
+- **Decomposição por `( )`** — de um **produtor de múltiplos valores**: uma função de **retorno múltiplo**
+  (`fn div(): (i32, i32)`, estilo Go — o chamador **tem de** decompor) ou um **grupo de `await`**. O grupo
+  **não** é capturável num só valor (`var t = div(…)` não existe — só `var (q, r) = div(…)`).
+- **Decomposição por `[ ]`** — de um **array** (`[]T`, um tipo REAL): `var [a, b, c] = arr`. Homogêneo.
 
-**O que resolve.** Retornar/ligar vários valores de uma vez sem inventar um struct nomeado, e é a base do
-`await` de várias tasks (§10.3) — que **substitui `when_all`/`when_any`**.
+**O que resolve.** Retorno/ligação múltiplos sem inventar um struct nomeado **nem** carregar um tipo tupla
+pelo sistema de tipos — mantém o sistema enxuto (arrays são tipo; grupos `( )` são só decomposição). É a
+base do `await` de várias tasks (§10.3), que **substitui `when_all`/`when_any`**.
 
 **Exemplo.**
 ```teko
-fn div(a: i32, b: i32): (i32, i32) { (a / b, a % b) }   // retorna uma tupla
-var (q, r) = div(17, 5)                                  // desestrutura: q = 3, r = 2
+fn div(a: i32, b: i32): (i32, i32) { return (a / b, a % b) }   // retorno MÚLTIPLO (não um tipo tupla)
+var (q, r) = div(17, 5)                                          // decompõe: q = 3, r = 2
 
-var [x, y, z] = [1, 2, 3]                                // desestrutura array (homogêneo)
+var [x, y, z] = [1, 2, 3]                                        // decompõe um array []i32 (tipo real)
 ```
 
 ---
@@ -533,8 +534,8 @@ chamadas espera todas e devolve uma tupla de `Intent`s (heterogêneo); `await` d
 `[]Intent<T>` (homogêneo):
 
 ```teko
-var (a, b, c) = await (fa(), fb(), fc())   // → (Intent<A>, Intent<B>, Intent<C>)
-var [r0, r1]  = await [g(0), g(1)]          // → []Intent<T>
+var (a, b, c) = await (fa(), fb(), fc())   // decompõe em a,b,c (cada um Intent<…>) — grupo, não tipo tupla
+var [r0, r1]  = await [g(0), g(1)]          // decompõe um []Intent<T> (array é tipo real)
 ```
 
 Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é

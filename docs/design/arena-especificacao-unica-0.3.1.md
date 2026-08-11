@@ -528,8 +528,8 @@ chamadas espera todas e devolve uma tupla de `Intent`s (heterogêneo); `await` d
 `[]Intent<T>` (homogêneo):
 
 ```teko
-var (a, b, c) = await (fa(), fb(), fc())   // → (Intent<A>, Intent<B>, Intent<C>)
-var [r0, r1]  = await [g(0), g(1)]          // → []Intent<T>
+var (a, b, c) = await (fa(), fb(), fc())   // decompõe em a,b,c (cada um Intent<…>) — grupo, não tipo tupla
+var [r0, r1]  = await [g(0), g(1)]          // decompõe um []Intent<T> (array é tipo real)
 ```
 
 Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é seguro;
