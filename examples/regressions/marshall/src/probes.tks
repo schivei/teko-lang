@@ -1,0 +1,74 @@
+/**
+ * marshall_unwrap_wrap_roundtrip — the §5 Part A `ptr` round-trip: `ptr::__unwrap<i64>(x)` takes the
+ * address of a `mut i64`, then `p.__wrap<i64>()` recovers the value behind that opaque word. The
+ * guard seam is constant-true in Part A, so the `T`-arm is taken and the recovered value equals `x`.
+ *
+ * @return  the round-tripped value (77)
+ * @since 0.3.1 (§5 Part A)
+ */
+pub fn marshall_unwrap_wrap_roundtrip(): i64 {
+    var x: i64 = 77
+    var p = ptr::__unwrap<i64>(x)
+    match p.__wrap<i64>() {
+        i64 as v => v
+        error => 1
+        null => 2
+    }
+}
+
+/**
+ * marshall_uptr_unwrap_wrap_roundtrip — the `uptr` twin of the round-trip: the opaque word carries
+ * `usize` width, `__unwrap`/`__wrap` behave identically to the `ptr` form.
+ *
+ * @return  the round-tripped value (40)
+ * @since 0.3.1 (§5 Part A)
+ */
+pub fn marshall_uptr_unwrap_wrap_roundtrip(): i64 {
+    var y: i64 = 40
+    var q = uptr::__unwrap<i64>(y)
+    match q.__wrap<i64>() {
+        i64 as v => v
+        error => 1
+        null => 2
+    }
+}
+
+/**
+ * marshall_wrap_null_returns_null — the LIVE `null` arm: `__wrap<T>()` on an opaque `ptr` whose
+ * address is 0 short-circuits to `null` before the (constant-true) guard, proving the null-arm is
+ * reachable in Part A.
+ *
+ * @return  5 (the null-arm marker), never 9 (T-arm) or 8 (error-arm)
+ * @since 0.3.1 (§5 Part A)
+ */
+pub fn marshall_wrap_null_returns_null(): i64 {
+    var z: u64 = 0 to u64
+    var p = z to ptr
+    match p.__wrap<i64>() {
+        i64 as v => 9
+        error => 8
+        null => 5
+    }
+}
+
+/**
+ * marshall_region_alloc_opaque — `teko::mem::region_alloc` now yields the opaque atomic `ptr`, which
+ * flows unchanged into `teko::mem::bytes_from_ptr` (also opaque-`ptr`-signed): the four little-endian
+ * octets of `0x44434241` read back and sum to 266 (0x41 + 0x42 + 0x43 + 0x44).
+ *
+ * @return  the byte sum (266)
+ * @since 0.3.1 (§5 Part A)
+ */
+pub fn marshall_region_alloc_opaque(): i64 {
+    var r = teko::mem::region_new()
+    var p = teko::mem::region_alloc(r, 0x44434241 to u32)
+    var bytes = teko::mem::bytes_from_ptr(p, 4 to u64)
+    var sum: i64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= bytes.len { break }
+        sum = sum + (bytes[i] to i64)
+        i++
+    }
+    sum
+}

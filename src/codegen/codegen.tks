@@ -3867,7 +3867,8 @@ fn emit_buf_ptr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, r
  * @return []byte | error  the buffer with the region-alloc stmt-expr appended, or a codegen error
  */
 fn emit_region_alloc(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
-    var elem = match e.type { checker::Ptr as p => match p.inner { checker::Type as t => t; null => return error { message = "codegen: region_alloc result is an opaque ptr (internal — checker must set ptr<T>)" } }; _ => return error { message = "codegen: region_alloc result is not a ptr type (internal)" } }
+    if c.args.len != 2 { return error { message = "codegen: region_alloc expects two arguments (internal)" } }
+    var elem = c.args[1].type
     var ra = fresh_named("_ra", buf.len to i64)
     var out = cb(buf, "({ ")
     out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
@@ -3886,6 +3887,122 @@ fn emit_region_alloc(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::T
     out = cb(out, "); ")
     out = cb(out, ra)
     cb(out, "; })")
+}
+
+/**
+ * emit_ptr_unwrap_seam — the §5 Part A backend seam for `__unwrap`'s tag/gen registration. Part A
+ * emits NOTHING (returns `buf` unchanged): the reinterpret trusts the address by vacuity. Doc 1
+ * (Part B) replaces this body with `tk_ptr_track(<addr_c>, <tag_c>);` — the ONLY edit `__unwrap`'s
+ * backend needs to light up the side-table. The seam signature is FINAL so Doc 1 changes one body,
+ * not a signature; `tag_c` is passed already (empty placeholder in Part A) so it cannot shift later.
+ *
+ * @param buf     the output byte buffer
+ * @param addr_c  the C expression naming the unwrapped address (the `void *` temp)
+ * @param tag_c   the comp-time tag materialization of `T` (empty in Part A, ignored)
+ * @return        `buf` unchanged (Part A: empty seam)
+ * @since 0.3.1 (§5 Part A)
+ */
+fn emit_ptr_unwrap_seam(buf: []byte, addr_c: str, tag_c: str): []byte {
+    buf
+}
+
+/**
+ * emit_ptr_wrap_guard — the §5 Part A backend seam for `__wrap`'s liveness/tag guard. Part A emits
+ * the literal `1` (constant-true), so the `T`-arm is always taken and the `error`-arm — emitted and
+ * compiled — is DEAD. Doc 1 (Part B) replaces this body with `tk_ptr_check(<addr_c>, <tag_c>)`, at
+ * which point the `error`-arm becomes reachable (a dead arena or a divergent tag yields `error`).
+ * The seam signature is FINAL; `tag_c` rides already (empty placeholder in Part A) so Doc 1 changes
+ * one body, not a signature.
+ *
+ * @param buf     the output byte buffer
+ * @param addr_c  the C expression naming the wrapped address (the `void *` temp)
+ * @param tag_c   the comp-time tag materialization of `T` (empty in Part A, ignored)
+ * @return        `buf` with the constant-true guard `1` appended (Part A)
+ * @since 0.3.1 (§5 Part A)
+ */
+fn emit_ptr_wrap_guard(buf: []byte, addr_c: str, tag_c: str): []byte {
+    cb(buf, "1")
+}
+
+/**
+ * emit_ptr_unwrap — lower `ptr::__unwrap<T>(x)` / `uptr::__unwrap<T>(x)` (§5 Part A): the infallible
+ * reinterpret that takes the ADDRESS of the addressable argument and yields the opaque word. Emits a
+ * GNU statement-expression `({ void *__a = (void *)(&(<x>)); <seam> (<opaque-C-type>)__a; })` — the
+ * seam (`emit_ptr_unwrap_seam`) is empty in Part A. The yield casts the `void *` to the result's C
+ * representation (`void *` for `ptr`, `uintptr_t` for `uptr`).
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param e         the `__unwrap` call TExpr (its `.type` is `ptr`/`uptr`)
+ * @param c         the typed call (args[0] = the addressable value; type_args[0] = `T`)
+ * @param escaping  the escaping-binding set
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function body (defer context)
+ * @param dctx      the defer context
+ * @return          `buf` with the reinterpret stmt-expr appended, or a codegen error
+ * @throws          when the call's arity is not 1 (internal — the checker guarantees it)
+ * @since 0.3.1 (§5 Part A)
+ */
+fn emit_ptr_unwrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+    if c.args.len != 1 { return error { message = "codegen: ptr::__unwrap expects one argument (internal)" } }
+    var a = fresh_named("_pu", buf.len to i64)
+    var out = cb(buf, "({ void *")
+    out = cb(out, a)
+    out = cb(out, " = (void *)(&(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, ")); ")
+    out = emit_ptr_unwrap_seam(out, a, "")
+    out = cb(out, "(")
+    out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
+    out = cb(out, ")")
+    out = cb(out, a)
+    cb(out, "; })")
+}
+
+/**
+ * emit_ptr_wrap — lower `p.__wrap<T>()` (§5 Part A): the fallible recovery of the value behind the
+ * opaque word into the union `T | error | null`. Emits a GNU statement-expression whose three arms
+ * are built in the union's C representation via `emit_variant_wrap_str`:
+ *   `({ void *__a = (void *)(<p>);
+ *       __a == 0 ? <null-arm> : ( <guard> ? <*(T*)__a> : <error-arm> ); })`
+ * The `null`-arm (address 0) is LIVE. The guard seam (`emit_ptr_wrap_guard`) is the literal `1` in
+ * Part A, so the `error`-arm — emitted and compiled — is DEAD until Doc 1 lights the seam.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param e         the `__wrap` call TExpr (its `.type` is the `T | error | null` union)
+ * @param c         the typed call (args[0] = the receiver; type_args[0] = `T`)
+ * @param escaping  the escaping-binding set
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function body (defer context)
+ * @param dctx      the defer context
+ * @return          `buf` with the wrap stmt-expr appended, or a codegen error
+ * @throws          when the call's arity/type-arg count is not 1 (internal — the checker guarantees it)
+ * @since 0.3.1 (§5 Part A)
+ */
+fn emit_ptr_wrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+    if c.args.len != 1 { return error { message = "codegen: __wrap expects one (receiver) argument (internal)" } }
+    if c.type_args.len != 1 { return error { message = "codegen: __wrap expects one type argument (internal)" } }
+    var ttype = c.type_args[0]
+    var addr = fresh_named("_pw", buf.len to i64)
+    var out = cb(buf, "({ void *")
+    out = cb(out, addr)
+    out = cb(out, " = (void *)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "); ")
+    out = cb(out, addr)
+    out = cb(out, " == 0 ? ")
+    out = match emit_variant_wrap_str(out, prog, e.type, checker::Null { }, "0") { []byte as o => o; error as err => return err }
+    out = cb(out, " : (")
+    out = emit_ptr_wrap_guard(out, addr, "")
+    out = cb(out, " ? ")
+    var tcbuf = match emit_type(teko::list::empty(), prog, ttype) { []byte as o => o; error as err => return err }
+    var tc = str(tcbuf)
+    var tarm = $"*({tc} *){addr}"
+    out = match emit_variant_wrap_str(out, prog, e.type, ttype, tarm) { []byte as o => o; error as err => return err }
+    out = cb(out, " : ")
+    out = match emit_variant_wrap_str(out, prog, e.type, checker::Error { }, "(tk_error){0}") { []byte as o => o; error as err => return err }
+    cb(out, "); })")
 }
 
 /**
@@ -4243,6 +4360,8 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
     // the checker already proved `is_closure_call` (scope.tks::lookup_call scans innermost-first,
     // so the local always wins over the namespace fn); codegen just has to respect that verdict.
     if c.is_closure_call { return emit_closure_call(buf, prog, ret_type, c, escaping, regions, fn_body, dctx) }
+    if c.call_ns == "teko::__ptr_unwrap" { return emit_ptr_unwrap(buf, prog, e, c, escaping, regions, fn_body, dctx) }
+    if c.call_ns == "teko::__ptr_wrap" { return emit_ptr_wrap(buf, prog, e, c, escaping, regions, fn_body, dctx) }
     var p = c.callee
     var user_declared = cg_call_is_user_declared(prog, c)
     if p.segments.len == 1 && checker::is_di_materializer_call(p.segments[0].name) {
@@ -10752,7 +10871,7 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: parser::TypeExpr): checker::T
             else if last == "null" { checker::Null { } }
             else if last == "uptr" { checker::Uptr { } }
             else if last == "Ref" { if nt.args.len > 0 { checker::Reference { inner = cg_te_to_type_ns(prog, ref_ns, nt.args[0]) } } else { checker::Reference { inner = checker::Void { } } } }
-            else if last == "ptr" { if nt.args.len > 0 { checker::Ptr { inner = cg_te_to_type_ns(prog, ref_ns, nt.args[0]) } } else { checker::Ptr { inner = null } } }
+            else if last == "ptr" { checker::Ptr { inner = null } }
             else { checker::Named { name = cg_te_canonical_name(prog, ref_ns, nt.path, last) } }
         }
         parser::SliceType as st => checker::Slice { element = cg_te_to_type_ns(prog, ref_ns, st.element) }

@@ -734,6 +734,7 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
     var l0 = deref_ref_value(match type_expr(b.left, env, table) { TExpr as te => te; error as e => return e })
     var r0 = deref_ref_value(match type_expr(b.right, env, table) { TExpr as te => te; error as e => return e })
     if type_is_void(l0.type) || type_is_void(r0.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    if is_ptr_or_uptr(l0.type) || is_ptr_or_uptr(r0.type) { return ptr_opaque_error() }
     var lk = bignum_kind(l0.type)
     var rk = bignum_kind(r0.type)
     if lk != "" || rk != "" { return type_bignum_binop(b.op, l0, r0, lk, rk) }
@@ -753,6 +754,7 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
 fn type_unary(u: parser::Unary, env: Env, table: TypeTable): TExpr | error {
     var o = deref_ref_value(match type_expr(u.operand, env, table) { TExpr as te => te; error as e => return e })
     if type_is_void(o.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    if is_ptr_or_uptr(o.type) { return ptr_opaque_error() }
     var uk = bignum_kind(o.type)
     if uk != "" {
         if u.op == lexer::TokenKind::Minus { return bignum_call(uk, "neg", teko::list::push(teko::list::empty(), o), bignum_named(uk)) }
@@ -1022,7 +1024,118 @@ fn type_region_alloc(c: parser::Call, env: Env, table: TypeTable): TExpr | NotRe
     if type_is_void(init.type) { return error { message = "teko::mem::region_alloc cannot allocate a `void` value" } }
     var ra_args = teko::list::push(teko::list::empty(), region)
     ra_args = teko::list::push(ra_args, init)
-    TExpr { kind = TCall { callee = c.callee; args = ra_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Ptr { inner = init.type }; line = 0; col = 0 }
+    TExpr { kind = TCall { callee = c.callee; args = ra_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Ptr { inner = null }; line = 0; col = 0 }
+}
+
+/**
+ * The negative sentinel for `type_ptr_unwrap`/`type_ptr_wrap` — the call/method is not one of the
+ * opaque-pointer intrinsics, so the caller falls through to ordinary resolution.
+ */
+type NotPtrOp = struct { }
+
+/**
+ * ptr_opaque_error — the shared diagnostic for every operation the opaque atomic `ptr`/`uptr`
+ * forbids (arithmetic `p + n`/`p - n`, subscript `p[n]`, deref/borrow `*p`/`&p`). A `ptr` is a
+ * single machine word carrying only an address, never a base for pointer walking; the only way to
+ * recover a value behind it is `p.__wrap<T>()`.
+ *
+ * @return  the fixed opaque-pointer rejection error
+ * @since 0.3.1
+ */
+fn ptr_opaque_error(): error {
+    error { message = "`ptr` é opaco atômico: sem aritmética nem deref — use `__wrap<T>()`" }
+}
+
+/**
+ * is_ptr_or_uptr — is `t` one of the two opaque atomic pointer words (`ptr` or `uptr`)? The single
+ * classifier the arithmetic/deref/borrow rejection guards consult so every site agrees on what a
+ * bare opaque pointer is.
+ *
+ * @param t  the resolved operand type
+ * @return   true iff `t` is a `Ptr` or a `Uptr`
+ * @since 0.3.1
+ */
+fn is_ptr_or_uptr(t: Type): bool {
+    match t { Ptr => true; Uptr => true; _ => false }
+}
+
+/**
+ * type_ptr_unwrap — recognize and type the STATIC intrinsic `ptr::__unwrap<T>(x)` /
+ * `uptr::__unwrap<T>(x)` (§5 Part A): the infallible reinterpret that takes the ADDRESS of an
+ * addressable `mut` variable (R7 ordinary auto-ref of a `var`) and hands it back as the opaque word
+ * `ptr` (or `uptr`). Devolve o PONTEIRO, não o valor — nada a checar. The argument's static type
+ * must equal the explicit `T`; the value flowing to codegen carries `T` as the sole type-arg so the
+ * seam can materialize its tag (Part B). Returns `NotPtrOp` when the callee is not an `__unwrap`
+ * intrinsic path, so `type_call` falls through to ordinary resolution.
+ *
+ * @param c      the raw static-call node (`ptr::__unwrap<T>(x)`)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       a `ptr`/`uptr`-typed `TCall`, `NotPtrOp` when the path is not `__unwrap`, or an error
+ * @throws       on wrong type-arg/argument arity, a non-addressable argument, or an argument whose
+ *               type is not `T`
+ * @since 0.3.1
+ */
+fn type_ptr_unwrap(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrOp | error {
+    if c.callee.segments.len != 2 { return NotPtrOp { } }
+    var owner = c.callee.segments[0].name
+    var last = c.callee.segments[1].name
+    if last != "__unwrap" { return NotPtrOp { } }
+    if owner != "ptr" && owner != "uptr" { return NotPtrOp { } }
+    if c.callee_type_args.len != 1 { return error { message = $"`{owner}::__unwrap<T>` takes exactly one type argument" } }
+    if c.args.len != 1 { return error { message = $"`{owner}::__unwrap<T>` expects one argument (an addressable `mut` variable)" } }
+    var rt = match resolve_type(c.callee_type_args[0], table, env.cur_ns) { Type as t => t; error as e => return e }
+    var a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    var is_mut_lvalue = match a.kind {
+        TVar as v => match lookup_binding(env, v.name) { ValBinding as vb => vb.is_mut; error => false }
+        _ => false
+    }
+    if !is_mut_lvalue { return error { message = $"`{owner}::__unwrap<T>` requires an addressable `mut` variable (a `ref T`) — its address is what the opaque word wraps" } }
+    if !type_eq(a.type, rt) { return error { message = $"`{owner}::__unwrap<{type_render(rt)}>` argument must be a `{type_render(rt)}` (got `{type_render(a.type)}`)" } }
+    var uargs = teko::list::push(teko::list::empty(), a)
+    var xtypes = teko::list::push(teko::list::empty(), rt)
+    var restype: Type = Ptr { inner = null }
+    if owner == "uptr" { restype = Uptr { } }
+    TExpr { kind = TCall { callee = c.callee; args = uargs; call_ns = "teko::__ptr_unwrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = restype; line = 0; col = 0 }
+}
+
+/**
+ * type_ptr_wrap — type the INSTANCE intrinsic `p.__wrap<T>()` on a `ptr`/`uptr` receiver (§5 Part
+ * A): the fallible recovery of the value behind the opaque word. The result type is the FINAL union
+ * `T | error | null` (null-first normalized, exactly as a written `T | error | null` resolves): the
+ * `null` arm (address 0) is LIVE now; the `error` arm (dead arena / divergent tag) is emitted but
+ * DEAD in Part A (the codegen guard is a constant `1`) until the Part B backend seam lights it up.
+ * The receiver rides `args[0]`; `T` rides the sole type-arg for the seam. Returns `NotPtrOp` when the
+ * method is not `__wrap` so the caller can surface an ordinary no-such-method diagnostic.
+ *
+ * @param mc      the method-call node (`p.__wrap<T>()`)
+ * @param recv_t  the already-typed receiver type (a `Ptr` or `Uptr`)
+ * @param env     the typing environment
+ * @param table   the folded type table
+ * @return        a `T | error | null`-typed `TCall`, `NotPtrOp` when the method is not `__wrap`, or an error
+ * @throws        on wrong type-arg/argument arity, or a `void`/reference/absence-union `T`
+ * @since 0.3.1
+ */
+fn type_ptr_wrap(mc: parser::MethodCall, recv_t: Type, env: Env, table: TypeTable): TExpr | NotPtrOp | error {
+    if mc.method != "__wrap" { return NotPtrOp { } }
+    if !is_ptr_or_uptr(recv_t) { return NotPtrOp { } }
+    if mc.type_args.len != 1 { return error { message = "`__wrap<T>` takes exactly one type argument" } }
+    if mc.args.len != 0 { return error { message = "`__wrap<T>` takes no value arguments (its receiver is the opaque word)" } }
+    var rt = match resolve_type(mc.type_args[0], table, env.cur_ns) { Type as t => t; error as e => return e }
+    match rt {
+        Void => return error { message = "`__wrap<void>` is invalid — void is not a value (M.3)" }
+        Reference => return error { message = "`__wrap<T>` cannot recover a reference (a raw address is not a safe ref target, R4)" }
+        Variant as v => if variant_has_null_member(Variant { members = v.members }) { return error { message = "`__wrap<T>` cannot recover an absence union `T | null` — the null arm would collide with `__wrap`'s own `null` (address 0)" } }
+        _ => { }
+    }
+    var recv = match type_expr(mc.receiver, env, table) { TExpr as te => te; error as e => return e }
+    var members = teko::list::push(teko::list::empty(), rt)
+    members = teko::list::push(members, Error { })
+    members = teko::list::push(members, Null { })
+    var wargs = teko::list::push(teko::list::empty(), recv)
+    var xtypes = teko::list::push(teko::list::empty(), rt)
+    var wseg = teko::list::push(teko::list::empty(), parser::Segment { name = "__wrap" })
+    TExpr { kind = TCall { callee = parser::Path { segments = wseg }; args = wargs; call_ns = "teko::__ptr_wrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = Variant { members = union_normalize_null(members) }; line = 0; col = 0 }
 }
 
 // (2026-07-01) call-site desugar for a `params`-variadic function `f`. Two shapes:
@@ -1663,6 +1776,11 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
         error as e => return e
         NotRegionOp => { }
     }
+    match type_ptr_unwrap(c, env, table) {
+        TExpr as te => return te
+        error as e => return e
+        NotPtrOp => { }
+    }
     var name = c.callee.segments[c.callee.segments.len - 1].name
     // panic / exit — injected GLOBAL diverging builtins (legislator's ruling — NO `never` type).
     // panic(error | str) = the message; exit(<integer>) = the status code. Both terminate the
@@ -1921,26 +2039,18 @@ fn cast_kind(t: Type): PrimKind | error {
 
 /**
  * cast_kind_of_ptr — `cast_kind`'s `Ptr` arm: the arena address-carrier decision
- * (`docs/design/arena-em-teko.md` §2 P1 — "não existe cast `u64 -> ptr<byte>`, então nem o
- * caminho alocante é alcançável a partir de um endereço calculado"). `u64` is ABI-identical to
- * `void *` on every 64-bit target, so a `ptr<byte> <-> u64` pair carries `PrimKind::U64` into
- * `cast_check`'s generic "any numeric to any numeric is defined" rule, making the cast a
- * reinterpret rather than a conversion. Scoped NARROWLY to `ptr<byte>` (not every `ptr<T>`, and
- * not the opaque `ptr`): the arena's whole address surface is `u64`-carried bytes, and widening
- * this admission to arbitrary pointee types or the opaque pointer is outside what that decision
- * asked for.
+ * (`docs/design/arena-em-teko.md` §2 P1 — "não existe cast `u64 -> ptr`, então nem o caminho
+ * alocante é alcançável a partir de um endereço calculado"). `u64` is ABI-identical to `void *` on
+ * every 64-bit target, so a `ptr <-> u64` pair carries `PrimKind::U64` into `cast_check`'s generic
+ * "any numeric to any numeric is defined" rule, making the cast a reinterpret rather than a
+ * conversion. Since §5 collapsed `ptr` to the opaque atomic word (no `ptr<T>` remains), that word
+ * IS the arena's whole address surface — the single admitted pointer partner of `u64`.
  *
- * @param p  the resolved `Ptr` type (`p.inner` is the pointee, or `null` for the opaque `ptr`)
- * @return   `PrimKind::U64` when `p` is `ptr<byte>`; a NAMED error for every other pointer shape
+ * @param p  the resolved opaque `Ptr` type (`p.inner` is always `null` in §5)
+ * @return   `PrimKind::U64` — the opaque `ptr` reinterprets to/from `u64` as the address carrier
  */
 fn cast_kind_of_ptr(p: Ptr): PrimKind | error {
-    match p.inner {
-        Type as inner => match inner {
-            Byte => PrimKind::U64
-            _ => error { message = "cast not defined for this pointer's element type in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
-        }
-        null => error { message = "cast not defined for the opaque `ptr` in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
-    }
+    PrimKind::U64
 }
 
 /**
@@ -2731,6 +2841,8 @@ fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
     match recv.type {
         Str => TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { }; line = 0; col = 0 }
         Slice as s => TExpr { kind = TIndex { receiver = recv; index = idx }; type = s.element; line = 0; col = 0 }
+        Ptr => ptr_opaque_error()
+        Uptr => ptr_opaque_error()
         _ => error { message = "cannot index a value of this type" }
     }
 }
@@ -3325,6 +3437,7 @@ fn type_path_expr(pe: parser::PathExpr, table: TypeTable, env: Env): TExpr | err
  */
 fn type_borrow_expr(b: parser::Borrow, env: Env, table: TypeTable): TExpr | error {
     var to = match type_expr(b.operand, env, table) { TExpr as x => x; error as e => return e }
+    if is_ptr_or_uptr(to.type) { return ptr_opaque_error() }
     match to.kind {
         TVar as v => match lookup_binding(env, v.name) {
             ValBinding as vb => {
@@ -3364,7 +3477,15 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
             // TK_EXPR_METHOD_CALL case (the receiver is probed once for the flags check, then
             // re-typed inside whichever branch actually handles the call).
             match type_expr(mc.receiver, env, table) {
-                TExpr as te => if is_flags_named(te.type, table) { type_flags_method(mc, env, table) } else { type_method_call(mc, env, table) }
+                TExpr as te => {
+                    if is_ptr_or_uptr(te.type) {
+                        match type_ptr_wrap(mc, te.type, env, table) {
+                            TExpr as we => we
+                            error as e => e
+                            NotPtrOp => error { message = $"the opaque `{type_render(te.type)}` has only `__wrap<T>()` — got `.{mc.method}(…)`" }
+                        }
+                    } else if is_flags_named(te.type, table) { type_flags_method(mc, env, table) } else { type_method_call(mc, env, table) }
+                }
                 error => type_method_call(mc, env, table)   // let it re-type and surface the real error
             }
         }

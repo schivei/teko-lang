@@ -1,58 +1,39 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): re-harvested after closing the LAST hole in generics —
-# a GENERIC method inside a GENERIC type now lowers. This is a checker/monomorph change, so the compiler
-# shifts and the previous bootstrap no longer reproduces it; the new harvest be1153c5 self-reproduces
-# byte-identical (gen1==gen2 fixpoint). The owner did NOT edit bootstrap/teko.c itself; this reseed only
-# realigns the seed with the current source.
+# RESEED (hand-harvest, by-hand per owner order): re-harvested after landing §5 Part A of the 0.3.1
+# surface migration — opaque atomic `ptr`/`uptr` + `__wrap`/`__unwrap`. This is a checker/codegen
+# change, so the compiler shifts and the previous bootstrap no longer reproduces it; the new harvest
+# e936eba0 self-reproduces byte-identical (gen1==gen2 fixpoint). The owner did NOT edit
+# bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# monomorph: generic method in generic type — per-method-instantiation stamping
+# §5 part A: opaque ptr/uptr + __wrap/__unwrap surface (seams open for doc1)
 # ---------------------------------------------------------------------------------------------
-# The 4th call shape — a GENERIC method on a GENERIC type (`Gen<T>::g2<T2>()` and the inferred
-# `Gen<T>::g2(x)`) — did not lower: codegen emitted a dangling `tk_t_T2`. The parser + checker already
-# resolve BOTH positions (`owner_type_args` binds the type `T`, `callee_type_args` binds the method
-# `T2`); the hole was purely in the MONOMORPH. `stamp_one_instance_method` carimba a single concrete copy
-# of each instance method with `type_params = []`, which ERASES the method-level `T2`, so the stamped body
-# kept `T2` unresolved. (The same wall hit the INFERRED form on the pre-feature compiler — the feature
-# only EXPOSED the hole, it did not create it.)
-# The cure composes the TWO substitutions and stamps the generic method PER METHOD-INSTANTIATION, into the
-# concrete instance's namespace — the method-level twin of how free generic fns are stamped:
-#   - `stamp_instance_methods` now SKIPS a method that carries method-level type-params (the erasing
-#     single-copy stamp is exactly what emitted `tk_t_T2`); a NON-generic method of a generic type stamps
-#     unchanged (byte-identical — the whole existing corpus).
-#   - `mono_texpr` (the call-site walk) detects a generic method of a generic-type INSTANCE
-#     (`is_generic_instance_method_call`: `gf` is generic AND `call_ns` is a `__g__` instance whose base
-#     owns `gf`) and composes the INSTANCE Subst (owner `T → concrete` + the `Base → Gen__g__i64` receiver
-#     remap, from `instance_method_subst_l5`) with the METHOD Subst (`T2 → concrete`, from
-#     `mono_call_subst`) into one `compose_method_subst`. It records a `MonoInst` carrying the new
-#     `owner_ns` field = the instance namespace.
-#   - PHASE-2 stamping lands the method in `owner_ns` (`Gen__g__i64::g2__g__i64`), not the abstract
-#     template's namespace, so the symbol matches the call site's `call_ns`. The dedup ledger
-#     (`mono_inst_seen`) keys on (owner_ns × mangle), so `Gen<i64>::g2<i64>` and `Gen<str>::g2<i64>` stamp
-#     as two distinct symbols instead of colliding on the bare method mangle `g2__g__i64`.
-#   - `mono_call_subst` gained an `owner_tps` parameter: for the INFERRED generic-instance call the
-#     desugared receiver param is typed as the owner generic (`Gen<T>`/`Self`), which the method's own
-#     type-param scope cannot resolve; with the owner params in scope the receiver pattern resolves and a
-#     param that binds no method type-param is skipped. Empty `owner_tps` = the pre-existing free-fn path,
-#     byte-identical.
-# The arity cap (`max_generic_arity()` = 16) is untouched and still gates both positions.
-# NON-REGRESSION (gated additive): `Tipo<T>::func()` (gen type, non-gen method — `Lst<i64>::make`),
-# `Tipo::func<T>()` (non-gen type, gen method — `Plain::f1<i64>`), instance `x.m<T>()` on a non-gen type
-# (`Box::wrap<i64>`), and every NON-generic method of a generic type all stay on their existing paths —
-# `is_generic_instance_method_call` returns false and every added branch collapses to the old behavior. A
-# generic type with only non-generic methods emits byte-identical C old-vs-new (proven on a `Cell<T>` with
-# a plain `get()`).
-# Proven by examples/probes/explicit_type_args, extended with the 4th shape: `Gen<i64>::g2<i64>(7)`, the
-# inferred `Gen<i64>::g2(8)`, the `T != T2` `Gen<str>::g2<i64>(9)`, and an instance `gi.pick<str>(...)` /
-# inferred `gi.pick(...)` that read the owner `T` — build + run exit 0 on the re-built compiler, and fail
-# identically (`unknown type: …::Gen`) on the pre-fix compiler. Additive over the corpus.
+# `ptr`/`uptr` become OPAQUE ATOMIC words (a single machine word carrying only an address; C-repr
+# stays pointer-width `void*`/`uintptr_t` today, alignable to the future `size`/`usize`). `ptr<T>` is
+# retired: `Ptr.inner` is now always `null`, and the generic annotation `ptr<T>`/`uptr<T>` is rejected
+# in `resolve_generic_inst`. Four intrinsics are recognized in the TYPER as meta-type operations (like
+# `type_region_alloc`), with NO new grammar:
+#   - `ptr::__unwrap<T>(x)` / `uptr::__unwrap<T>(x)` — STATIC, infallible: takes the address of an
+#     addressable `mut` variable (R7 ordinary auto-ref) and yields the opaque word.
+#   - `p.__wrap<T>()` — INSTANCE, fallible: returns the FINAL union `T | error | null`. The `null` arm
+#     (address 0) is LIVE; the `error` arm is emitted+compiled but DEAD in Part A (the codegen guard is
+#     the literal `1`).
+# Codegen adds `emit_ptr_unwrap`/`emit_ptr_wrap` plus the two BACKEND SEAMS `emit_ptr_unwrap_seam`
+# (Part A: empty) and `emit_ptr_wrap_guard` (Part A: emits `1`) in src/codegen/codegen.tks — the ONLY
+# two function bodies Doc 1 (Part B) swaps for `tk_ptr_track`/`tk_ptr_check` + the runtime; no
+# signature, typer, type, or fixture changes between A and B. Arithmetic/deref/borrow/subscript on
+# `ptr`/`uptr` are rejected (`type_binary`/`type_unary`/`type_index`/`type_borrow_expr`). The seven
+# internal `ptr<T>` sites were swept to the opaque `ptr` (region_alloc return; RawBuf.ptr; the FFI
+# prims buf_ptr/bytes_from_ptr/as_ptr/as_cstr/str_from_c/region_buf; the `ptr <-> u64` address-carrier
+# cast; the extern absence union; the export honest-stop text), and tkb type-tag 12 (`ptr<T>`) was
+# removed (10 = opaque `ptr`, 11 = `uptr` remain). ZERO runtime C touched — no new `tk_*` symbol.
 #
 # FIXPOINT. The reseed converged in one step: gen0 (cc of the previous bootstrap) C-built the reworked
-# source into bin-d; compiling bin-d into the new compiler and rebuilding produced a byte-identical bin-e
-# (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# source into bin-a; compiling bin-a into the new compiler and rebuilding produced a byte-identical
+# bin-b (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0';  TEKO_BACKEND=c gen0' build . -> OUT;  OUT/teko.c == bootstrap/teko.c.
 #
 # `run: hand-harvest` — no CI run produced this file; it was harvested by hand on the branch, in the
@@ -61,8 +42,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  be1153c502811012b511264c059cf9f7c4a162948766df98129a6fda4c96bd72
+sha256:  2a70007f39c06d245d4788527e093ae5fe8adbaf452616a186bf9e5597e58897
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (generic method in generic type —
-         per-method-instantiation stamping); sha256 is read directly off the committed file and was
-         proven a fixpoint (bin-d == bin-e, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§5 part A: opaque atomic ptr/uptr +
+         __wrap/__unwrap surface, seams open for doc1); sha256 is read directly off the committed file
+         and was proven a fixpoint (bin-a == bin-b, byte-identical).

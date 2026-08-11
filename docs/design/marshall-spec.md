@@ -1,5 +1,9 @@
 # Marshall — the maximal safe↔unsafe pointer boundary (design 0.3.1)
 
+> **Status: RETIRED (superseded by §5 of docs/design/mudancas-superficie-0.3.1.md)** — the
+> opaque atomic `ptr`/`uptr` + `__wrap`/`__unwrap` surface replaces this design. See §5 for the
+> ratified shape.
+
 > **Status:** DESIGN-AHEAD, doc-only. **NOT implemented.** Companion + downstream of
 > `docs/design/ref-transparent-model.md` (the ratified `Ref<T>`/`ref` model, §5 "Marshall & a
 > fronteira `Ref`/`Ptr`") and `docs/design/memory-unsafe-backend-remodel.md` (unsafe-by-TYPE, §2).

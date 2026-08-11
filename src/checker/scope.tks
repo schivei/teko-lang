@@ -530,15 +530,64 @@ fn builtin_type(name: str): Type | NotBuiltinType | error {
 }
 
 /**
- * C7.19 (#169 D0) — the ratified `Buf` transport's signature: `buf_ptr(len: u64): ptr<byte>`.
- * Bump-allocates `len` bytes from the currently open arena region (S1) and hands back the raw
- * address; a raw `extern` (libc/OS) writes through that pointer, and Teko re-reads the written
- * bytes by length via `bytes_from_ptr`. The region stays opaque to Teko until that read-back, so
- * no index-assignment is ever needed — the `[]byte`-param sugar is a future, separate addition.
+ * C7.19 (#169 D0) — the ratified `Buf` transport's signature: `buf_ptr(len: u64): ptr`. Bump-
+ * allocates `len` bytes from the currently open arena region (S1) and hands back the raw address as
+ * the opaque atomic `ptr` (§5); a raw `extern` (libc/OS) writes through that pointer, and Teko
+ * re-reads the written bytes by length via `bytes_from_ptr`. The region stays opaque to Teko until
+ * that read-back, so no index-assignment is ever needed — the `[]byte`-param sugar is a future,
+ * separate addition.
  */
 fn buf_ptr_signature(): Type {
     var len_param: []Type = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 })
-    Func { params = len_param; ret = Ptr { inner = Byte { } }; variadic = false; param_names = []; n_required = len_param.len; defaults = [] }
+    Func { params = len_param; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = len_param.len; defaults = [] }
+}
+
+/**
+ * as_cstr_signature — `teko::mem::as_cstr(s: str): ptr` (c-types-and-marshalling-0.3.1.md §7.3/§9.5,
+ * crumb C3+C7): a fresh NUL-terminated copy of `s`'s bytes, bump-allocated into the ENCLOSING region
+ * and returned as the opaque atomic `ptr` (§5 — no `ptr<byte>` remains). Its storage is bulk-freed
+ * with the enclosing region rather than leaked on the process heap.
+ *
+ * @param str_t  the resolved `str` type (the sole parameter)
+ * @return       the fixed `(str): ptr` signature
+ */
+fn as_cstr_signature(str_t: Type): Type {
+    var p: []Type = teko::list::push(teko::list::empty(), str_t)
+    Func { params = p; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = p.len; defaults = [] }
+}
+
+/**
+ * str_from_c_signature — `teko::mem::str_from_c(p: ptr, max: u64): str`
+ * (c-types-and-marshalling-0.3.1.md §6, crumb C2): the BOUNDED inbound C-string scan replacing the
+ * unbounded `str_from_cstr`. TOTAL — `p` null or `max == 0` yield the empty `str`; a NUL at octet
+ * `i < max` yields the first `i` octets; no NUL in `[0, max)` yields exactly `max` octets (truncation,
+ * not a panic). The pointer parameter is the opaque atomic `ptr` (§5).
+ *
+ * @param str_t  the resolved `str` type (the return type)
+ * @return       the fixed `(ptr, u64): str` signature
+ */
+fn str_from_c_signature(str_t: Type): Type {
+    var sfc: []Type = teko::list::push(teko::list::empty(), Ptr { inner = null })
+    sfc = teko::list::push(sfc, Prim { kind = PrimKind::U64 })
+    Func { params = sfc; ret = str_t; variadic = false; param_names = []; n_required = sfc.len; defaults = [] }
+}
+
+/**
+ * region_buf_signature — `teko::mem::region_buf(region: uptr, len: u64, init: str): ptr`
+ * (c-types-and-marshalling-0.3.1.md §7.3, crumb C5): the NAMED-region twin of `buf_ptr`. Bump-
+ * allocates `len` contiguous octets INTO the caller-chosen region, copies at most `len` octets of
+ * `init` to the front, and writes a NUL terminator at the first octet `init` did not fill (or at the
+ * final octet when `init` fills the whole span) — the tier-2 `c_string_in_arena` allocation `buf_ptr`'s
+ * enclosing-region form cannot provide. Returns the opaque atomic `ptr` (§5).
+ *
+ * @param str_t  the resolved `str` type (the `init` parameter)
+ * @return       the fixed `(uptr, u64, str): ptr` signature
+ */
+fn region_buf_signature(str_t: Type): Type {
+    var rb: []Type = teko::list::push(teko::list::empty(), Uptr { })
+    rb = teko::list::push(rb, Prim { kind = PrimKind::U64 })
+    rb = teko::list::push(rb, str_t)
+    Func { params = rb; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = rb.len; defaults = [] }
 }
 
 /**
@@ -1012,23 +1061,8 @@ fn builtin_fn(name: str): Type | error {
     // (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
     // `as_ptr` is the raw byte pointer of a `str` (borrows; pairs with `.len`; NOT NUL-terminated).
     if name == "as_ptr" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] } }
-    // `as_cstr(str): ptr<byte>` — a fresh NUL-terminated copy of `str`'s bytes, bump-allocated
-    // into the ENCLOSING region (c-types-and-marshalling-0.3.1.md §7.3/§9.5, crumb C3+C7): the
-    // result is a TYPED byte pointer, never the opaque `ptr` (a `void *` reading/writing octets is
-    // `ptr<byte>` by the design's own §5.3 rule), and its storage is bulk-freed with the enclosing
-    // region rather than leaked on the process heap.
-    if name == "as_cstr" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Ptr { inner = Byte { } }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] } }
-    // `str_from_c(p: ptr<byte>, max: u64): str` — the BOUNDED inbound C-string scan
-    // (c-types-and-marshalling-0.3.1.md §6, crumb C2), replacing the unbounded `str_from_cstr`
-    // (`strlen` on a foreign pointer). TOTAL: `p` null or `max == 0` yield the empty `str`; a NUL at
-    // octet `i < max` yields the first `i` octets; no NUL in `[0, max)` yields exactly `max` octets
-    // (truncation, not a panic — a fixed-width unterminated C field is a legitimate input).
-    if name == "str_from_c" {
-        var sfc: []Type = teko::list::push(teko::list::empty(), Ptr { inner = Byte { } })
-        sfc = teko::list::push(sfc, Prim { kind = PrimKind::U64 })
-        return Func { params = sfc; ret = str_t; variadic = false; param_names = []; n_required = sfc.len; defaults = [] }
-    }
-    // `bytes_from_ptr(ptr, u64): []byte` — copy `n` octets from a foreign pointer back.
+    if name == "as_cstr" { return as_cstr_signature(str_t) }
+    if name == "str_from_c" { return str_from_c_signature(str_t) }
     if name == "bytes_from_ptr" {
         var bp: []Type = teko::list::push(teko::list::empty(), Ptr { inner = null })
         bp = teko::list::push(bp, Prim { kind = PrimKind::U64 })
@@ -1037,18 +1071,7 @@ fn builtin_fn(name: str): Type | error {
     if name == "load_u64" { return load_u64_signature() }
     if name == "store_u64" { return store_u64_signature() }
     if name == "buf_ptr" { return buf_ptr_signature() }
-    // `region_buf(region: uptr, len: u64, init: str): ptr<byte>` — the NAMED-region twin of
-    // `buf_ptr` (c-types-and-marshalling-0.3.1.md §7.3, crumb C5): bump-allocates `len` contiguous
-    // octets INTO the caller-chosen region, copies at most `len` octets of `init` into the front of
-    // that buffer, and writes a NUL terminator at the first octet `init` did not fill (or at the
-    // final octet, when `init` fills the whole span) — the tier-2 allocation `c_string_in_arena`
-    // needs and `buf_ptr`'s enclosing-region form cannot provide (a NAMED region, not the lexical one).
-    if name == "region_buf" {
-        var rb: []Type = teko::list::push(teko::list::empty(), Uptr { })
-        rb = teko::list::push(rb, Prim { kind = PrimKind::U64 })
-        rb = teko::list::push(rb, str_t)
-        return Func { params = rb; ret = Ptr { inner = Byte { } }; variadic = false; param_names = []; n_required = rb.len; defaults = [] }
-    }
+    if name == "region_buf" { return region_buf_signature(str_t) }
     // ROUND 0 format helpers — interpreter-intercepted (try_builtin_call) + native (tk_fmt_*).
     if name == "fmt_f" || name == "fmt_e" || name == "fmt_g" || name == "fmt_n_f" || name == "fmt_p" {
         var p: []Type = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 })

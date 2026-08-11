@@ -2288,7 +2288,7 @@ pub fn type_mangle(t: Type): str {
         Slice as sl => teko::str::concat("slice_", type_mangle(sl.element))
         Error => "error"
         Void => "void"
-        Ptr as p => match p.inner { null => "ptr"; Type as t => teko::str::concat("ptr_", type_mangle(t)) }
+        Ptr => "ptr"
         Uptr => "uptr"
         Reference as r => teko::str::concat("ref_", type_mangle(r.inner))   // (MEM-1b)
         Variant => "variant"
@@ -2447,12 +2447,8 @@ fn ref_target_type(argt: Type): Type | error {
 fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str): Type | error {
     // (#109 W1) reserved for the R0-R5 rules (W2); threaded to every resolve_type arg + the table lookup.
     var name = nt.path.segments[nt.path.segments.len - 1].name
-    // (S-mem) the builtin generic `ptr<T>` → a typed pointer `Ptr{inner}`. `ptr<void>` ≡ the opaque
-    // `ptr` (void isn't a value type) → null inner. Not a user decl, handled before the table lookup.
-    if name == "ptr" {
-        if nt.args.len != 1 { return error { message = "`ptr<T>` takes exactly one type argument" } }
-        var argt = match resolve_type(nt.args[0], table, ref_ns) { Type as t => t; error as e => return e }
-        match argt { Void => return Ptr { inner = null }; _ => return Ptr { inner = argt } }
+    if name == "ptr" || name == "uptr" {
+        return error { message = $"`{name}` is an opaque atomic pointer — it takes no type argument; recover a value with `p.__wrap<T>()` (§5)" }
     }
     // (MEM-1b) the compiler-known generic struct `Ref<T>` → the SAFE reference `Ref{inner}` (the safe
     // surface OVER the raw `ptr<T>`). Capitalized (a struct-like named type, reusing generics — no
@@ -2518,7 +2514,7 @@ pub fn type_render(t: Type): str {
         Slice as s => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
         Variant as v => render_members(v.members)
         Func as f => render_func(f)   // (C1.8) "(p0, …): ret" — full mirror of resolve.c (M.3, show what we know)
-        Ptr as p => match p.inner { null => "ptr"; Type as t => $"ptr<{type_render(t)}>" }   // ptr<T> human render
+        Ptr => "ptr"
         Uptr => "uptr"   // (C7.1a) opaque word-size unsigned
         Reference as r => $"Ref<{type_render(r.inner)}>"   // (MEM-1b) Ref<T> human render
         Null => "null"
