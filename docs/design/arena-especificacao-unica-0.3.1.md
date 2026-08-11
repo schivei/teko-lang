@@ -281,8 +281,8 @@ O teko tem **dois modelos de concorrência**, e a distinção entre eles é de A
 
 | modelo | superfície | arena |
 |---|---|---|
-| **`isolate`/`spawn`/`chan`** — paralelismo real | biblioteca (Doc 2 §10) | **heap ISOLADO** — cada isolate nasce com raiz própria (`tk_region_new(NULL)`, "como se fosse outro programa"); dados só cruzam por cópia (via `chan` ou retorno de `join`) |
-| **`async`/`await` + `Intent<T>`** — açúcar | keywords contextuais (Doc 2 §10) | **duas fundações** (§7.9): I/O cooperativo vive na arena de quem criou; CPU desaçucara para `isolate`/pool |
+| **`spawn` + `chan`** — paralelismo real | keyword + tipo (Doc 2 §10) | **heap isolado por task** — cada task tem sub-raiz própria (F1); dados só cruzam por **cópia** (via `chan`); `spawn` é fire-and-forget (sem retorno) |
+| **`await` + `Intent<T>`** — suspensão | keyword contextual (Doc 2 §10) | **duas fundações** (§7.9): I/O cooperativo vive na arena de quem criou; CPU roda numa corotina de um pool |
 
 O paralelismo de compilação (abaixo) é do **BACKEND pós-lowering**, e o modelo de arena sob threads é
 uma extensão direta e provada da disciplina de região por-função.
@@ -356,7 +356,7 @@ sempre `≥ 1`. Override explícito (`TEKO_BUILD_LANES`) clampado a `[1, os_max]
 Todo o fork-join fica dentro de UMA fase `phase_begin`/`phase_end` (codegen) → `dark` continua 0; o
 overlap encolhe o `wall` da fase.
 
-### 7.6 Isolate, task e a região imortal do programa (F2)
+### 7.6 `spawn`, task e a região imortal do programa (F2)
 
 O isolamento de memória tem **duas camadas**:
 
@@ -411,7 +411,7 @@ uma CHAMADA que consulta o registro pelo id, nunca um campo lido do handle (uma 
 inofensiva por construção só se copiar um nome não envelhecer o nome).
 
 ```teko
-pub type Isolate = struct { handle: u64 }   // só o id, zero estado observável em cache
+pub type TaskHandle = struct { handle: u64 }  // só o id, zero estado observável em cache
 pub type ChanId  = u64                       // o canal que a main abre e distribui por nome
 ```
 
@@ -448,7 +448,7 @@ quando há 64 pendentes (contrapressão): a fila em voo nunca passa de 64, não 
 consumidor atrasa.
 
 ```teko
-isolate fn gerar(cid: usize) {                     // corotina (isolate fn): sem retorno, só via spawn
+fn gerar(cid: usize) {                             // função sem retorno — spawnável como thread
     var tx = chan<Pedido>::writer(cid)
     for p in pedidos() {
         tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula
@@ -544,7 +544,7 @@ A arena difere conforme a fundação (I/O vs CPU), dita e não escondida (`conco
   `.canceled` + `.failure`, no nível da task. Ele é **alimentado pela retomada**:
   quando o trabalho completa, a suspensão **escreve a cópia de `T` em `.value`** — **nunca uma referência**
   à arena da raia/continuação que produziu o valor (essa pode ter rebobinado). É o "dados cruzam só por
-  cópia" do `isolate`, e é destino-na-arena-do-caller, como o DPS (§5).
+  cópia" entre tasks, e é destino-na-arena-do-caller, como o DPS (§5).
 - **`Intent`** (não-genérico) é o desfecho de esperar uma **função SEM retorno**: só `.canceled`, sem
   `.value`. (`Intent` vs `Intent<T>` = o mesmo nome com aridade genérica distinta — é overload de TIPO,
   Doc 2 §9.)
@@ -556,7 +556,7 @@ A arena difere conforme a fundação (I/O vs CPU), dita e não escondida (`conco
   bloco/arena de quem o criou** — não tem arena própria, não cria thread de SO. `await` suspende a
   tarefa lógica sem bloquear a thread; um reator (`epoll`/`kqueue`/`IOCP`) por thread executora retoma.
   **Custo de arena: zero** — não precisa de F1, porque com uma só raia a garantia de F1 (ninguém
-  rebobina a arena de outro) já vale de graça. Compõe com `isolate`: cada isolate roda seu laço
+  rebobina a arena de outro) já vale de graça. Compõe com o `spawn`: uma task que faça I/O roda seu laço
   cooperativo na SUA arena.
 - **CPU (`await f()` de trabalho pesado):** o corpo roda numa **corotina isolada de um pool** pré-aquecido
   (F1); o `await` **suspende** a tarefa que espera (sem bloquear a thread) até o `Intent<T>` ser alimentado
@@ -638,7 +638,7 @@ não é visível a outra por referência — se precisar atravessar, atravessa c
    falha do arena-por-escopo (bulk-drop com alias vivo) não recorre.
 6. **Threads:** cada worker na sua região; resultado copiado para a lane-region antes do drop; nomes em
    `prog` imutável; fold em ordem de índice. IDs entre tasks, nunca ponteiros.
-7. **`ref` não cruza fronteira de concorrência** (regra do dono): `spawn`/`chan`/`async fn` **rejeitam**
+7. **`ref` não cruza fronteira de concorrência** (regra do dono): `spawn`/`chan`/uma função esperada por `await` **rejeitam**
    `ref` como parâmetro/valor, e **`<ref T>` é proibido em genérico** — um borrow que atravessasse uma
    task/continuação penduraria quando a arena do outro lado dropasse. O que cruza é cópia (valor) ou id
    (`u64`). É a mesma raiz do "IDs, não ponteiros" (§7.7), estendida a todo borrow.
@@ -702,11 +702,13 @@ fn pipeline() {
 - **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
 - **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
   scoped na sub-raiz da thread — sem ressincronizar (§8).
-- **`async`/`await`: duas fundações separadas**; `Intent<T>` carrega a **cópia** do dado, `Intent` é
-  opaco sem dado; overload serve para tipos (§7.9).
-- **`ref` não cruza fronteira de MT/async; `<ref T>` proibido em genérico** — preserva UAF (§9).
-- **`spawn <call-expr>`: entra** (li tua resposta "5. Sim, entra" como isto — o açúcar de chamada, não só
-  a assinatura `spawn(entry, ctx, lane)`; se eu li errado, corrige).
+- **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Sem
+  `async` (o `await` prefixo alarga o retorno para `Intent<T>` por suspensão) e **sem `isolate`** (não há
+  isolamento tipo-processo — quem precisa usa outro binário) (§7.6/§7.9).
+- **`Intent<T>`**: `.value`/`.canceled`/`.failure`; várias tasks por **atribuição múltipla**
+  (`await var a, b = fa(), fb()`), sem `when_all`/`when_any`; **`cancel()`** global cancela o Intent ou dá
+  panic (§7.9).
+- **`ref` não cruza fronteira de concorrência; `<ref T>` proibido em genérico** — preserva UAF (§9).
 
 **Nada a decidir na arena — as decisões estão fechadas.** A regra de elisão é direta: **`need == 0` → não
 abre arena** (§4); `need > 0` → arena do tamanho `need + cabeçalho` (§3). O único "desconhecido" é

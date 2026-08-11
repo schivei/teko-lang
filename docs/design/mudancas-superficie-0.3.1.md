@@ -437,7 +437,7 @@ var q, r = div(17, 5)                                           // q = 3, r = 2
 
 ---
 
-## 10. Concorrência — a superfície (`isolate`/`spawn`/`chan`, `async`/`await`, journaling)
+## 10. Concorrência — a superfície (`spawn`/`chan`, `await`, journaling)
 
 A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o usuário vê. Recomposto de
 `concorrencia-isolate-spawn-chan` (08-03), `journaling-de-corrida` (07-30) e `paralelizacao-eixo1/eixo2`
@@ -482,7 +482,7 @@ fn hardware_parallelism(): usize                   // paralelismo concedido pelo
 Um fluxo mínimo — a `main` cria o canal, uma corotina escreve, a `main` lê até o `closed`:
 
 ```teko
-isolate fn produz(cid: usize) {          // corotina (isolate fn): sem retorno, só via spawn
+fn produz(cid: usize) {                  // função sem retorno — spawnável como thread
     var tx = chan<i32>::writer(cid)
     var i = 0
     loop while i < 100 { tx.send(i); i = i + 1 }
@@ -603,16 +603,18 @@ O rolling é do runtime de durabilidade (o `append` verifica a política e rotac
 antes de escrever quando ela dispara); o `fold` relê todos os ficheiros de um segmento em ordem,
 transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é chamada por `append`.
 
-### 10.5 Decisões pra ti (recompostas de `concorrencia-isolate-spawn-chan` §9)
+### 10.5 Modelo de concorrência — resumo (decisões fechadas)
 
-| # | pergunta | recomendação |
-|---|---|---|
-| D1 | `spawn` — função ou keyword? | **keyword de corotina** (estilo Go, contextual, sem `join`); `chan` é tipo genérico |
-| D2 | `spawn <call-expr>` — agora ou depois? | **agora** — é a forma canônica da keyword: `spawn f(args)` (Go-style, args por cópia, sem retorno) |
-| D3 | `chan_unbounded` — entra ou sai? | **ENTRA — responsabilidade do dev, não da linguagem** (ruling do dono 08-10) |
-| D4 | `WaitGroup` — a forma acima ou só `Isolate[]`+`join`? | a forma acima (menos apoiada em medição) |
-| D5 | `async`/`await` — separar as duas fundações ou `Intent<T>` único? | **separar** (ruling do dono 08-10): `Intent<T>` carrega cópia, `Intent` opaco |
-| D6 | namespace — `teko::isolate`+`teko::threads` ou um só? | **um só, `teko::threads`** |
+| tema | fechado (08-10) |
+|---|---|
+| **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
+| **`isolate`** | **removido** — sem isolamento tipo-processo na linguagem (quem precisa usa outro binário) |
+| **`chan<T>`** | tipo genérico MPSC; `make(bounds: usize = 1)`; `bounds` = nº de **mensagens**; unbounded = `make(0)` (resp. do dev) |
+| **`await`** | **sem `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline |
+| **`Intent<T>`** | `.value` / `.canceled` / `.failure`; **`cancel()`** global (cancela o Intent, ou `panic` fora de suspensão) |
+| **várias tasks** | por **atribuição múltipla** (`await var a, b = fa(), fb()`), sem `when_all`/`when_any` |
+| **`ref`** | não cruza fronteira; `<ref T>` proibido (§10.6) |
+| **namespace / afinidade** | `teko::threads`; afinidade **válida, registrada como capacidade futura** |
 
 ### 10.6 `ref` e genéricos sob concorrência — a regra de UAF (ruling do dono 08-10)
 
@@ -620,7 +622,7 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 referência** — `<ref T>` é rejeitado pelo checker. Um borrow que atravessasse uma task/continuação
 penduraria quando a arena do outro lado dropasse (UAF). Consequências de superfície:
 
-- `spawn`/`chan_writer`/`chan_reader`/`async fn` **rejeitam** parâmetro/valor `ref`.
+- `spawn`/`chan<T>::writer`/`chan<T>::reader`/uma função esperada por `await` **rejeitam** parâmetro/valor `ref`.
 - `Foo<ref T>` não parseia/typa. `ref` sobrevive só como borrow **local** caller→callee que **não** cruza
   fronteira de concorrência (§3: `ref` já é só parâmetro).
 - O que cruza a fronteira é **cópia** (valor) ou **id** (`u64`), nunca borrow.
