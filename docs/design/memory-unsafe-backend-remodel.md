@@ -1,5 +1,13 @@
 # Remodel: Memory Model + `unsafe` + Own Backend — Design Base
 
+> **SUPERSEDED-by-§6 (0.3.1 surface migration, 2026-08-11).** The `unsafe`-by-TYPE seal this
+> document ratified LOST ITS FUNCTION and was RETIRED by §6 of `mudancas-superficie-0.3.1.md`
+> (see `plano-secao6-aposentar-unsafe.md`): with an opaque `ptr` + `__wrap<T>()` (§5) there is no
+> raw operation left to guard, so the `unsafe` keyword, its contagion, and the manual-memory
+> surface (`mem::free`/`#must_free`/`Arena`/`RawBuf`/`Owned<T>`) were removed from the language.
+> This document is KEPT as ratified base (memory safety = arena capability + lifetime + F1), not
+> deleted; only the `unsafe` seal it describes is historical.
+
 **Status:** RATIFIED by the owner 2026-07-06. This document is the base for a **parallel
 remodel branch**. It records the decisions from the memory-model and backend discussion so
 the branch starts from a settled design and does not re-litigate.

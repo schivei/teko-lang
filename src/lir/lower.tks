@@ -1123,11 +1123,7 @@ pub type LowerCtx = struct {
     addr_taken: []str
     /**
      * table — the program's type table (`checker::type_table_of(prog)`), threaded read-only
-     * exactly like `variants`/`field_decls`: the ONE place `lower_mem_free_call` asks the checker's
-     * structural probes `checker::is_region_handle_name`/`region_handle_field_name` whether a
-     * `teko::mem::free` argument is a manual region handle and, if so, which field carries its
-     * `uptr`, so the native `free` routes to `tk_region_drop_subtree` on exactly the same shape the
-     * C route does.
+     * exactly like `variants`/`field_decls` for the checker structural probes the lowerer consults.
      */
     table: checker::TypeTable
     /**
@@ -3084,9 +3080,6 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_load_u64_call(c.callee) { return lower_load_u64_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_store_u64_call(c.callee) { return lower_store_u64_call(ctx, e, c) }
-    if is_region_new_call(c) { return lower_region_new_call(ctx, e, c) }
-    if is_region_alloc_call(c) { return lower_region_alloc_call(ctx, e, c) }
-    if is_mem_free_call(c) { return lower_mem_free_call(ctx, e, c) }
     var sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
@@ -4377,293 +4370,6 @@ fn lower_store_u64_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lo
     Lowered { ctx = with_store; vreg = 0 to u32 }
 }
 
-/**
- * is_mem_ns_builtin — whether `c` is the `teko::mem` builtin whose last path segment is `name`. The
- * checker stamps every `teko::mem::*` region builtin with `call_ns == "teko::mem"` (`typer.tks`),
- * so the recognition key is the (namespace, last-segment) pair rather than the bare path — unlike
- * `buf_ptr`, whose `call_ns` is empty. Interception in `lower_call` runs BEFORE `call_symbol`, or
- * the call falls into the mangler and emits an undefined `teko_teko__mem__<name>` symbol.
- *
- * @param c     the typed call (its `callee` path + `call_ns`)
- * @param name  the builtin's last-segment name (`region_new`/`region_alloc`/`free`)
- * @return      true iff `c` names `teko::mem::<name>`
- */
-fn is_mem_ns_builtin(c: checker::TCall, name: str): bool {
-    var segs = c.callee.segments
-    c.call_ns == "teko::mem" && segs.len > 0 && segs[segs.len - 1].name == name
-}
-
-/**
- * is_region_new_call — recognizes `teko::mem::region_new`: the manual region opener with no
- * arguments that the C route emits as `(uintptr_t)tk_region_new(tk_region_root())`
- * (`codegen.tks:4166`). Stamped by the checker with `call_ns == "teko::mem"` (`typer.tks:964`), so
- * it is recognized by the (namespace, last-segment) pair and intercepted in `lower_call` BEFORE
- * `call_symbol`, else it falls into the mangler and emits the undefined symbol
- * `teko_teko__mem__region_new`.
- *
- * @param c  the typed call (its `callee` + `call_ns`)
- * @return   true iff `c` names `teko::mem::region_new`
- * @since 0.3.1
- */
-fn is_region_new_call(c: checker::TCall): bool {
-    is_mem_ns_builtin(c, "region_new")
-}
-
-/**
- * lower_region_new_call — `teko::mem::region_new(): uptr`: open a fresh child region of the
- * process root and return its opaque handle. Mirrors the C route's inline
- * `(uintptr_t)tk_region_new(tk_region_root())` (`codegen.tks:4166`) with two chained `LCall`s, in
- * the mould of `lower_buf_ptr_call`: `tk_region_root()` then `tk_region_new(root)`. The result is a
- * `uptr` in an integer register — no special result class. Reuses the existing runtime primitives
- * (`teko_rt.h:149,153`); adds no runtime.
- *
- * @param ctx  the lowering context
- * @param e    the call expression (its position stamps the instructions; its type is `uptr`)
- * @param c    the typed call (zero arguments)
- * @return     the advanced context + the handle's VReg, or a propagated error
- * @since 0.3.1
- */
-fn lower_region_new_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
-    if c.args.len != 0 { return error { message = "native backend N1: `region_new` takes no arguments (internal)" } }
-    var root = ctx_alloc(ctx)
-    var with_root = ctx_append(root.ctx, call_inst(root.vreg, "tk_region_root", teko::list::empty(), false, e.line, e.col))
-    var result = ctx_alloc(with_root)
-    var new_args = teko::list::push(teko::list::empty(), root.vreg)
-    var with_new = ctx_append(result.ctx, call_inst(result.vreg, "tk_region_new", new_args, false, e.line, e.col))
-    Lowered { ctx = with_new; vreg = result.vreg }
-}
-
-/**
- * is_region_alloc_call — recognizes `teko::mem::region_alloc`: bump-allocate ONE `T` into the
- * caller-chosen region (`call_ns == "teko::mem"`, `typer.tks:1001`). Intercepted in `lower_call`
- * before `call_symbol` for the same reason as `is_region_new_call`.
- *
- * @param c  the typed call
- * @return   true iff `c` names `teko::mem::region_alloc`
- * @since 0.3.1
- */
-fn is_region_alloc_call(c: checker::TCall): bool {
-    is_mem_ns_builtin(c, "region_alloc")
-}
-
-/**
- * region_alloc_elem — the element type `T` of a `teko::mem::region_alloc`'s `ptr<T>` result type,
- * read off the call expression exactly as `emit_region_alloc` reads `p.inner` (`codegen.tks:3822`).
- *
- * @param ety  the call expression's resolved type (`ptr<T>`)
- * @return     `T`, or a NAMED internal error when the checker's `ptr<T>` invariant is broken
- */
-fn region_alloc_elem(ety: checker::Type): checker::Type | error {
-    match ety {
-        checker::Ptr as p => match p.inner { checker::Type as t => t; null => error { message = "native backend N1: `region_alloc` result is an opaque ptr (internal — checker must set ptr<T>)" } }
-        _ => error { message = "native backend N1: `region_alloc` result is not a ptr type (internal)" }
-    }
-}
-
-/**
- * region_alloc_elem_size — the byte width `tk_region_alloc` must bump for one `elem`: a fat
- * (`str`/`[]T`) element is the 16-byte `{ptr, len}` slot, an aggregate element is its registered
- * layout size, and any register-class element is its machine width. Mirrors the C route's
- * `sizeof(T)`.
- *
- * @param elem  the element type `T`
- * @param ctx   the lowering context (for the aggregate layout lookup + enum set)
- * @return      the element's byte width
- */
-fn region_alloc_elem_size(elem: checker::Type, ctx: LowerCtx): u32 {
-    if is_fat_type(elem) { return fat_slot_bytes() }
-    match aggregate_box_bytes(elem, ctx) {
-        u32 as b => b
-        null => ltype_size(ltype_of(elem, ctx.enums))
-    }
-}
-
-/**
- * region_alloc_store_init — copy the `init` value into the freshly bump-allocated slot at `dst`,
- * the native twin of the C route's `*p = init`: a fat element stores its `{ptr, len}` pair, an
- * aggregate element is bit-copied with `tk_mem_copy` (the same runtime touch every aggregate place
- * copy uses — no LIR memcpy op exists), and a register-class element is a single `store`.
- *
- * @param ctx       the lowering context (positioned after the alloc)
- * @param elem      the element type `T`
- * @param init      the `init` argument expression
- * @param dst       the allocated slot's address VReg
- * @param size_vreg the element-size VReg (reused as `tk_mem_copy`'s width)
- * @param e         the call expression (source position)
- * @return          the advanced context, or a propagated error
- */
-fn region_alloc_store_init(ctx: LowerCtx, elem: checker::Type, init: checker::TExpr, dst: u32, size_vreg: u32, e: checker::TExpr): LowerCtx | error {
-    if is_fat_type(elem) {
-        var fo = match lower_fat_expr(ctx, init) { LoweredFat as x => x; error as err => return err }
-        return store_fat_slot(fo.ctx, dst, fo, e.line, e.col)
-    }
-    match aggregate_box_bytes(elem, ctx) {
-        u32 => {
-            var src = match lower_expr(ctx, init) { Lowered as x => x; error as err => return err }
-            ctx_append(src.ctx, void_call_inst("tk_mem_copy", teko::list::push(two_args(dst, src.vreg), size_vreg), false, e.line, e.col))
-        }
-        null => {
-            var v = match lower_expr(ctx, init) { Lowered as x => x; error as err => return err }
-            ctx_append(v.ctx, store_inst(dst, v.vreg, ltype_of(elem, ctx.enums), e.line, e.col))
-        }
-    }
-}
-
-/**
- * lower_region_alloc_call — `teko::mem::region_alloc(region: uptr, init: T): ptr<T>`: bump-alloc
- * `sizeof(T)` bytes in `region`, copy `init` there, and return the `ptr<T>`. Mirrors
- * `emit_region_alloc` (`codegen.tks:3821`): `p = tk_region_alloc((tk_region*)region, sizeof(T)); *p
- * = init; p`. `sizeof(T)` is `region_alloc_elem_size` of the element read off `e.type` (as the C
- * route reads `p.inner`). Reuses `tk_region_alloc` (`teko_rt.h:150`); adds no runtime.
- *
- * @param ctx  the lowering context
- * @param e    the call expression (its type is `ptr<T>`, whence `T`)
- * @param c    the typed call (args[0] = region uptr, args[1] = init)
- * @return     the advanced context + the pointer's VReg, or a propagated error
- * @throws     when `e.type` is not `ptr<T>` (a checker invariant break) or the arity is not 2
- * @since 0.3.1
- */
-fn lower_region_alloc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
-    if c.args.len != 2 { return error { message = "native backend N1: `region_alloc` expects exactly two arguments (internal)" } }
-    var elem = match region_alloc_elem(e.type) { checker::Type as t => t; error as err => return err }
-    var region = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
-    var size = region_alloc_elem_size(elem, region.ctx)
-    var szc = ctx_alloc(region.ctx)
-    var with_sz = ctx_append(szc.ctx, const_int_inst(szc.vreg, size to i64, e.line, e.col))
-    var ptr = ctx_alloc(with_sz)
-    var alloc_args = two_args(region.vreg, szc.vreg)
-    var with_alloc = ctx_append(ptr.ctx, call_inst(ptr.vreg, "tk_region_alloc", alloc_args, false, e.line, e.col))
-    var stored = match region_alloc_store_init(with_alloc, elem, c.args[1], ptr.vreg, szc.vreg, e) { LowerCtx as cc => cc; error as err => return err }
-    Lowered { ctx = stored; vreg = ptr.vreg }
-}
-
-/**
- * is_mem_free_call — recognizes `teko::mem::free`: the type-directed manual deallocation
- * (`call_ns == "teko::mem"`, `typer.tks:933`). Intercepted in `lower_call` before `call_symbol`,
- * else it emits the undefined symbol `teko_teko__mem__free` — the measured cause of the link gap.
- *
- * @param c  the typed call
- * @return   true iff `c` names `teko::mem::free`
- * @since 0.3.1
- */
-fn is_mem_free_call(c: checker::TCall): bool {
-    is_mem_ns_builtin(c, "free")
-}
-
-/**
- * lower_mem_free_call — `teko::mem::free(x): void`: reclaim `x`'s heap block and SCRUB the
- * binding, branching on the type of `x` (the checker proved it a mutable variable of a heap type).
- * Mirrors `emit_mem_free`/`emit_region_free` (`codegen.tks:3932-3993`):
- *
- *   * `[]E`           → `tk_free_block(x.ptr, x.len*sizeof(E))`, then scrub `x` to the empty slice;
- *   * region-handle   → `tk_region_drop_subtree(x.<field>)`, then scrub `x.<field>` to 0, where
- *                       `<field>` is `checker::region_handle_field_name` (the same structural probe
- *                       the C route uses, gated by `checker::is_region_handle_name`).
- *
- * The class arm (`tk_region_drop(x->__region)`) has NO native equivalent: the native backend keeps
- * NO per-object `tk_region *` on a class instance (`class_instance_fields` deliberately omits it —
- * native class storage is region-scoped, not per-object freed), so a class `free` cannot mirror the
- * C route without pulling in per-object region retention (residency work, out of this lane). It is a
- * NAMED honest-stop until that arrives; the self-host frees no class instance, so the link is
- * unaffected.
- *
- * The scrub is a write-back to `x`'s place (`lower_addr_of_place` + store), NOT an extra: without it
- * a post-free read (which `#must_free` permits on paths the consume-dataflow does not cover) would
- * return the parked buffer, diverging from C and corrupting `tk_free_block`'s free-list. Reuses
- * `tk_free_block`/`tk_region_drop_subtree` (`teko_rt.h`); adds no runtime.
- *
- * @param ctx  the lowering context
- * @param e    the call expression (its type is `void`)
- * @param c    the typed call (args[0] = the mutable place to free)
- * @return     the advanced context (no result VReg — void), or a propagated error
- * @throws     when `arg.type` is neither a slice nor a region handle (a class arm honest-stop, or a
- *             checker-gated shape reaching here as an internal break)
- * @since 0.3.1
- */
-fn lower_mem_free_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
-    if c.args.len != 1 { return error { message = "native backend N1: `free` expects exactly one argument (internal)" } }
-    var arg = c.args[0]
-    match arg.type {
-        checker::Slice as sl => lower_free_slice(ctx, arg, sl, e)
-        checker::Named as nm => lower_free_named(ctx, arg, nm, e)
-        _ => error { message = "native backend N1: `mem::free` on a non-heap type (internal — checker must gate)" }
-    }
-}
-
-/**
- * lower_free_slice — `mem::free`'s `[]E` arm: park the backing buffer for same-size reuse with
- * `tk_free_block(x.ptr, x.len*sizeof(E))`, then scrub `x` to the empty slice `{0, 0}` written back
- * to its frame slot. Mirrors `emit_mem_free`'s slice arm (`codegen.tks:3935-3947`).
- *
- * @param ctx  the lowering context
- * @param arg  the slice place being freed (a mutable fat local)
- * @param sl   the slice type (its `element` gives the `sizeof(E)` stride)
- * @param e    the call expression (source position)
- * @return     the advanced context (void), or a propagated error
- */
-fn lower_free_slice(ctx: LowerCtx, arg: checker::TExpr, sl: checker::Slice, e: checker::TExpr): Lowered | error {
-    var fo = match lower_fat_expr(ctx, arg) { LoweredFat as x => x; error as err => return err }
-    var esz = ltype_size(ltype_of(sl.element, ctx.enums))
-    var szc = ctx_alloc(fo.ctx)
-    var with_sz = ctx_append(szc.ctx, const_int_inst(szc.vreg, esz to i64, e.line, e.col))
-    var bytes = ctx_alloc(with_sz)
-    var with_bytes = ctx_append(bytes.ctx, bin_inst(bytes.vreg, LBinOp::IMul, fo.len, szc.vreg, e.line, e.col))
-    var with_free = ctx_append(with_bytes, void_call_inst("tk_free_block", two_args(fo.ptr, bytes.vreg), false, e.line, e.col))
-    var slot = match lower_addr_of_place(with_free, arg) { Lowered as x => x; error as err => return err }
-    var zp = ctx_alloc(slot.ctx)
-    var with_zp = ctx_append(zp.ctx, const_int_inst(zp.vreg, 0, e.line, e.col))
-    var zl = ctx_alloc(with_zp)
-    var with_zl = ctx_append(zl.ctx, const_int_inst(zl.vreg, 0, e.line, e.col))
-    var scrubbed = store_fat_slot(with_zl, slot.vreg, LoweredFat { ctx = with_zl; ptr = zp.vreg; len = zl.vreg }, e.line, e.col)
-    Lowered { ctx = scrubbed; vreg = 0 to u32 }
-}
-
-/**
- * lower_free_named — `mem::free`'s `Named` dispatch: a region handle
- * (`checker::is_region_handle_name`) takes the bulk-drop arm; a class instance is the NAMED
- * honest-stop the native backend owes (no per-object region — see `lower_mem_free_call`).
- *
- * @param ctx  the lowering context
- * @param arg  the place being freed
- * @param nm   the named type of `arg`
- * @param e    the call expression (source position)
- * @return     the advanced context (void), or a propagated error / honest-stop
- */
-fn lower_free_named(ctx: LowerCtx, arg: checker::TExpr, nm: checker::Named, e: checker::TExpr): Lowered | error {
-    if checker::is_region_handle_name(nm.name, ctx.table) { return lower_free_region_handle(ctx, arg, nm, e) }
-    error { message = teko::str::concat("native backend N1: `mem::free` of the class instance `", teko::str::concat(nm.name, "` is not lowered in the native backend — a native class carries no per-object region to drop (N2)")) }
-}
-
-/**
- * lower_free_region_handle — `mem::free`'s region-handle arm: bulk-drop the handle's whole child
- * subtree with `tk_region_drop_subtree(x.<field>)`, then scrub `x.<field>` to 0 so a later read
- * never re-uses the freed `tk_region *`. Mirrors `emit_region_free` (`codegen.tks:3983-3993`); the
- * handle's sole `uptr` field is `checker::region_handle_field_name` (the same probe that routed
- * here) and its byte offset comes from the registered struct layout.
- *
- * @param ctx  the lowering context
- * @param arg  the handle place being freed (a mutable local of `nm`)
- * @param nm   the handle's named type
- * @param e    the call expression (source position)
- * @return     the advanced context (void), or a propagated error
- */
-fn lower_free_region_handle(ctx: LowerCtx, arg: checker::TExpr, nm: checker::Named, e: checker::TExpr): Lowered | error {
-    var field = checker::region_handle_field_name(nm.name, ctx.table)
-    var name = match named_type_name(arg.type) { str as s => s; error as err => return err }
-    var layout = match find_struct_layout(ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
-    var off = match field_offset_of(layout, field) { u32 as o => o; error as err => return err }
-    var slot = match lower_addr_of_place(ctx, arg) { Lowered as x => x; error as err => return err }
-    var faddr = ctx_alloc(slot.ctx)
-    var with_faddr = ctx_append(faddr.ctx, field_addr_inst(faddr.vreg, slot.vreg, off, e.line, e.col))
-    var handle = ctx_alloc(with_faddr)
-    var with_load = ctx_append(handle.ctx, load_inst(handle.vreg, faddr.vreg, LType::Ptr, e.line, e.col))
-    var drop_args = teko::list::push(teko::list::empty(), handle.vreg)
-    var with_drop = ctx_append(with_load, void_call_inst("tk_region_drop_subtree", drop_args, false, e.line, e.col))
-    var zero = ctx_alloc(with_drop)
-    var with_zero = ctx_append(zero.ctx, const_int_inst(zero.vreg, 0, e.line, e.col))
-    var scrubbed = ctx_append(with_zero, store_inst(faddr.vreg, zero.vreg, LType::Ptr, e.line, e.col))
-    Lowered { ctx = scrubbed; vreg = 0 to u32 }
-}
 
 /**
  * is_str_arg_builtin — is `sym` one of the seven io sinks `lower_str_arg_call` was written for
@@ -7084,7 +6790,7 @@ fn lower_value_into_null_union(ctx: LowerCtx, shape: NullUnionShape, value: chec
  * collapsed to bare `Null` by nested `type_join` folding needs the SAME ancestor-level widen a bare
  * `TNullLit` gets — otherwise its leaf `null` literals reach `lower_null_lit` with no enclosing
  * union coercion in sight and the own backend honest-stops (measured on the self-hosted native gate,
- * `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail).
+ * in a deeply-nested checker `match` tail).
  *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param checker::Variant v  the declared variant the value is placed into
@@ -9645,8 +9351,8 @@ fn lower_variant_absent(ctx: LowerCtx, index: i64, e: checker::TExpr): Lowered {
  *                          collapsed `match`/`if` sub-expression
  * @return Lowered  the wrapper's alloca'd base address
  * @throws  propagated from lowering a non-literal `e`
- * @since native-N1-null-widen (O1 retirement — the native-lowering gap O1 exposed at
- *        `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail)
+ * @since native-N1-null-widen (O1 retirement — the native-lowering gap O1 exposed in a
+ *        deeply-nested checker `match` tail)
  */
 fn lower_null_absent_widened(ctx: LowerCtx, index: u32, e: checker::TExpr): Lowered | error {
     match e.kind {
@@ -11405,8 +11111,7 @@ fn is_append_fo_call(callee: parser::Path): bool {
  * buffer is dead (parked for reuse; `TEKO_MEM_PARANOID` poisons it instead, so a violated decree
  * fails the gate loudly). Zig's answer — an explicit allocator argument, the CALLER freeing the old
  * buffer — was checked against our surface and does NOT fit it: no allocator value reaches a Teko
- * builtin call, and `teko::mem::free` is a SEPARATE builtin this backend does not lower at all yet
- * (measured, `docs/memory/0.3.1.0-linux-native-first-stop.md`'s degrau-26 family table). Go's
+ * builtin call, and manual free was retired in 0.3.1 (§6 — values die at their lexical scope). Go's
  * one-value-in, one-value-out spelling is what `b = teko::mem::append_fo(b, s)` already is.
  *
  * @param ctx  the lowering context
@@ -16138,7 +15843,7 @@ fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeT
  *               like a field annotated `str` directly (0.3.1.0 raiz A, crumb R0)
  * @param dtable the resolver-keyed table (`declared_type_table`) each field's RESOLVED declared type
  *               (`resolved_field_type`) is read from, so a monomorphized bare-`T` fat field
- *               (`Owned<str>`) sizes off `is_fat_type` exactly as its store does — layout == store by
+ *               (`Parsed<str>`) sizes off `is_fat_type` exactly as its store does — layout == store by
  *               construction (0.3.1.0 raiz A — fat-field layout unification)
  * @return LStructLayout  the resolved size/align/per-field offsets
  */
@@ -16581,7 +16286,7 @@ fn fat_field_width_type(rft: checker::Type): checker::Type {
  * (`typeexpr_is_fat`, over any alias chain) OR its RESOLVED declared type is fat (`is_fat_type`, the
  * SAME semantic predicate `store_struct_field` writes the value through). The disjunction is what
  * closes the raiz-A bare-type-parameter gap: a generic field annotated `T` and monomorphized fat
- * (`Owned<str>`, `Parsed<str>`) whose stamped annotation the syntactic predicate reads as thin still
+ * (`Parsed<str>`, `Box<str>`) whose stamped annotation the syntactic predicate reads as thin still
  * sizes 16 the moment the resolver sees its concrete `Str`/`Slice`, so `field_layout_size` reserves
  * exactly the 16-byte `{ptr, len}` slot `store_fat_slot` writes — the two can no longer disagree.
  *

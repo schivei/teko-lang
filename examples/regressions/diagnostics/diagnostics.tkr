@@ -146,30 +146,10 @@ Feature: F1 diagnostics — folded EXPECT_COMPILE_FAIL single-file fixtures (dob
     When compilation fails
     Then diagnostic = "return value does not match the function's declared return type"
 
-  # src/c20_arena_manual_leak/case.tks
-  Scenario: arena_manual_leak
-    When compilation fails
-    Then diagnostic = "`#must_free` value `a` is dropped without being freed on this path — c"
-
   # src/c27_extern_reachability/case.tks
   Scenario: extern_reachability
     When compilation fails
     Then diagnostic = "arithmetic needs a numeric operand (int or float)"
-
-  # src/c28_free_aliased_rejected/case.tks
-  Scenario: free_aliased_rejected
-    When compilation fails
-    Then diagnostic = "cannot free `xs` — it is aliased (another binding still holds it); `me"
-
-  # src/c29_free_captured_by_container_rejected/case.tks
-  Scenario: free_captured_by_container_rejected
-    When compilation fails
-    Then diagnostic = "cannot free `xs` — it is aliased (another binding still holds it); `me"
-
-  # src/c30_free_field_extract_rejected/case.tks
-  Scenario: free_field_extract_rejected
-    When compilation fails
-    Then diagnostic = "cannot free `obj` — it is aliased (another binding still holds it); `m"
 
   # src/c31_iface_value_struct_rejected/case.tks
   Scenario: iface_value_struct_rejected
@@ -200,11 +180,6 @@ Feature: F1 diagnostics — folded EXPECT_COMPILE_FAIL single-file fixtures (dob
   Scenario: masked_compound_assign_shift
     When compilation fails
     Then diagnostic = "mixed-sign integer arithmetic has no lossless common type here (W-RULE"
-
-  # src/c39_must_free_leak/case.tks
-  Scenario: must_free_leak
-    When compilation fails
-    Then diagnostic = "`#must_free` value `h` is dropped without being freed on this path — c"
 
   # (c40_redundant_cast_same_type removed 2026-07-27 — see the D1 note in this file's header)
 
@@ -252,11 +227,6 @@ Feature: F9 romaneio .31 — the audit's compile-fail regressions — folded int
     When compilation fails
     Then diagnostic = "a lambda cannot assign to the captured variable `n`"
 
-  # src/c62_arena_size_on_unsafe_rejected/case.tks
-  Scenario: arena_size_on_unsafe_rejected
-    When compilation fails
-    Then diagnostic = "may not precede an `unsafe fn`"
-
   # src/c68_ref_inferred_immutable_source/case.tks — the silent copy this replaced
   Scenario: ref_inferred_immutable_source_rejected
     When compilation fails
@@ -274,23 +244,10 @@ Feature: F9 romaneio .31 — the audit's compile-fail regressions — folded int
 
 Feature: checker SOFT pre-walk rejections — folded into this project's single failing build
 
-  # src/c55_unsafe_field_in_safe_struct/case.tks — `validate_type_decls`, a SOFT boundary
-  Scenario: unsafe_field_in_safe_struct
-    When compilation fails
-    Then diagnostic = "struct/class 'Wrapper' has an unsafe-typed field 'bu"
-
   # src/c53_reject_flags_65/case.tks — `check_modules`, a SOFT boundary
   Scenario: reject_flags_65
     When compilation fails
     Then diagnostic = "a flags type may declare at most 64 members (bit 63 is the last) — wri"
-
-  # src/c61_unsafe_alias_rejected/case.tks — `reject_unsafe_alias` (`validate_type_decls`), a SOFT
-  # boundary. `unsafe type Danger = ptr<byte>` used to compile and do nothing (cargo/20-unsafe-
-  # alias-rejeitado, docs/design/c-types-and-marshalling-0.3.1.md §9.2) — the `unsafe` on a
-  # structural alias is now a hard compile error instead of a silent no-op.
-  Scenario: unsafe_alias_rejected
-    When compilation fails
-    Then diagnostic = "type alias 'Danger' cannot be declared `unsafe`"
 
 Feature: F10 c-types-and-marshalling — the reject half (docs/design/c-types-and-marshalling-0.3.1.md, folded into this project's single failing build)
 
@@ -298,11 +255,6 @@ Feature: F10 c-types-and-marshalling — the reject half (docs/design/c-types-an
   Scenario: c_types_alias_no_implicit_widen
     When compilation fails
     Then diagnostic = "value type does not match annotation"
-
-  # src/c63_c_string_field_in_safe_struct_re/case.tks — `validate_type_decls`, `c55`'s sibling
-  Scenario: c_string_field_in_safe_struct_rejected
-    When compilation fails
-    Then diagnostic = "struct/class 'Wrapper' has an unsafe-typed field 'ha"
 
   # src/c65_c_string_as_extern_param_rejec/case.tks — C7.1a's extern_type_ok, the `Named` arm
   Scenario: c_string_as_extern_param_rejected
@@ -319,23 +271,12 @@ Feature: F10 c-types-and-marshalling — the reject half (docs/design/c-types-an
     When compilation fails
     Then diagnostic = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)"
 
-Feature: checker SIGNATURE walk — a HARD boundary, so all three constructs share ONE build
+Feature: checker SIGNATURE walk — a HARD boundary, so both constructs share ONE build
 
   Scenario: discard_param_plain_fn
     Given source = "cases/prewalk_signature_stops.tks"
     When compilation fails
     Then diagnostic = "a `_` discard parameter is only allowed when impleme"
-
-  # `reject_unsafe_signature_contagion` (U2) is this SAME HARD boundary — `func_type` fails to
-  # collect the signature, exactly like the other two rows here — so `c64` (cargo/20-c-types-impl)
-  # moved off the shared item-walk build it used to sit in: a HARD signature-walk failure inside
-  # THAT build was cutting the whole item walk at the pre-loop boundary before it ever reached the
-  # other forty-plus item-walk diagnostics (found while chasing #613's `is private to` going
-  # missing — the const-visibility scenario two Features up never got a chance to run).
-  Scenario: c_string_in_safe_signature_rejected
-    Given source = "cases/prewalk_signature_stops.tks"
-    When compilation fails
-    Then diagnostic = "safe fn 'takes_handle' names unsafe type in its signature"
 
   Scenario: ref_depth_rejected
     Given source = "cases/prewalk_signature_stops.tks"
@@ -482,3 +423,53 @@ Feature: parser rejections, folded as standalone Given source compile-fail cases
     Given source = "parse_cases/pin_slice_opt_param.tks"
     When compilation fails
     Then diagnostic = "a function type '(A, B): R' needs '->' before the return type"
+
+Feature: §6 — retire `unsafe` + manual-memory surface (each rejected construct its own compile-fail build)
+
+  # parse_cases/unsafe_fn.tks — the `unsafe fn` modifier is retired
+  Scenario: unsafe_fn_rejected
+    Given source = "parse_cases/unsafe_fn.tks"
+    When compilation fails
+    Then diagnostic = "unsafe was retired in 0.3.1: memory safety is the arena's job (capability + lifetime) + F1; there is no unsafe surface to mark"
+
+  # parse_cases/unsafe_type.tks — the `unsafe type` modifier is retired
+  Scenario: unsafe_type_rejected
+    Given source = "parse_cases/unsafe_type.tks"
+    When compilation fails
+    Then diagnostic = "unsafe was retired in 0.3.1: memory safety is the arena's job (capability + lifetime) + F1; there is no unsafe surface to mark"
+
+  # parse_cases/must_free_decorator.tks — the `#must_free` decorator is retired
+  Scenario: must_free_decorator_rejected
+    Given source = "parse_cases/must_free_decorator.tks"
+    When compilation fails
+    Then diagnostic = "manual memory was retired in 0.3.1: values die at their lexical scope (region drop); the FFI boundary is crossed with __wrap<T>()"
+
+  # cases/mem_free_retired.tks — `teko::mem::free` is retired
+  Scenario: mem_free_rejected
+    Given source = "cases/mem_free_retired.tks"
+    When compilation fails
+    Then diagnostic = "manual memory was retired in 0.3.1: values die at their lexical scope (region drop); the FFI boundary is crossed with __wrap<T>()"
+
+  # cases/region_alloc_surface_retired.tks — `teko::mem::region_alloc`/`region_new` surface is retired
+  Scenario: region_alloc_surface_rejected
+    Given source = "cases/region_alloc_surface_retired.tks"
+    When compilation fails
+    Then diagnostic = "manual memory was retired in 0.3.1: values die at their lexical scope (region drop); the FFI boundary is crossed with __wrap<T>()"
+
+  # cases/rawbuf_retired.tks — the `RawBuf` manual-memory type no longer exists
+  Scenario: rawbuf_rejected
+    Given source = "cases/rawbuf_retired.tks"
+    When compilation fails
+    Then diagnostic = "unknown type: RawBuf"
+
+  # cases/owned_retired.tks — the `Owned<T>` manual-memory wrapper no longer exists
+  Scenario: owned_rejected
+    Given source = "cases/owned_retired.tks"
+    When compilation fails
+    Then diagnostic = "unknown generic type: Owned"
+
+  # cases/arena_manual_retired.tks — the non-lexical `Arena` type no longer exists
+  Scenario: arena_manual_rejected
+    Given source = "cases/arena_manual_retired.tks"
+    When compilation fails
+    Then diagnostic = "unknown function: new"

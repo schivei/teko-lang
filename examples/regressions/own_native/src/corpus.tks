@@ -2317,22 +2317,20 @@ fn f_arena_size_directive_ok(): i64 {
 }
 
 /**
- * pub extern unsafe fn c_abs — the frontier's spelling PARSES, CHECKS, LINKS, and RUNS (0.3.1.0
- * C0, c-types-and-marshalling-0.3.1.md §4), pinning the doc-comment correction at
- * `src/parser/parse_decl.tks::consume_unsafe_modifier`: `extern` is consumed FIRST, `unsafe` is
- * consumed second and threads `is_unsafe` through to the `Function` node unchanged. Migrated from
- * `bulk`'s `q191_c_extern_unsafe_accepted` (cargo/0.3.1-dissolver-bulk, 2026-07-29) — the first
- * fixture in this tree to mark a raw-libc extern `unsafe` and prove the marker survives to a
- * linked, running binary.
+ * pub extern fn c_abs — a raw-libc extern binding PARSES, CHECKS, LINKS, and RUNS (0.3.1.0 C0,
+ * c-types-and-marshalling-0.3.1.md §4). The `unsafe` marker this fixture once carried was retired
+ * by §6 of the 0.3.1 surface migration (there is no unsafe surface to mark); `extern fn … = "sym"`
+ * remains the FFI boundary, and the linked symbol survives to a running binary unchanged.
  *
  * @param x  the value to negate before taking its absolute value
  * @return   `abs(x)`, computed by the linked libc symbol
  */
-pub extern unsafe fn c_abs(x: i32): i32 = "abs"
+pub extern fn c_abs(x: i32): i32 = "abs"
 
 /**
- * f_c_extern_unsafe_accepted — `pub extern unsafe fn … = "sym"` parses, checks, links and runs
- * (migrated from `bulk`'s `q191_c_extern_unsafe_accepted`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ * f_c_extern_unsafe_accepted — `pub extern fn … = "sym"` parses, checks, links and runs. (The
+ * `unsafe` spelling it was migrated from — `bulk`'s `q191_c_extern_unsafe_accepted` — was retired
+ * by §6; the scenario name is kept so the harness/gate references stay stable.)
  *
  * @return 0 on success, 1 if the linked `abs` call disagrees with the expected magnitude
  */
@@ -5975,4 +5973,60 @@ fn f_ck1_type_same_bare(): bool {
     var t1 = aa::Thing { v = 5 }
     var t2 = bb::Thing { w = 9 }
     t1.v == 5 && t2.w == 9
+}
+
+/**
+ * f_mem_intrinsics_safe_callable — §6: the surviving FFI marshalling intrinsics (`teko::mem::as_ptr`,
+ * `teko::mem::bytes_from_ptr`) are SAFE-CALLABLE from a plain `pub fn` — no `unsafe` gate — and
+ * round-trip a `str`'s octets through the opaque atomic `ptr` (§5). "xy" reads back as 120 + 121.
+ *
+ * @return 241 (the byte sum of "xy"), or 1 on a length mismatch
+ */
+pub fn f_mem_intrinsics_safe_callable(): i64 {
+    var p = teko::mem::as_ptr("xy")
+    var bytes = teko::mem::bytes_from_ptr(p, 2 to u64)
+    if bytes.len != 2 to u64 { return 1 }
+    (bytes[0] to i64) + (bytes[1] to i64)
+}
+
+/**
+ * mem_scope_drop_build_and_read — a helper whose FRAME is the lexical scope: the `xs` list is
+ * allocated into this frame's region and reclaimed on the return edge (the region drop), with NO
+ * `mem::free` spelled anywhere — the region-as-scope replacement for the retired manual free. Only
+ * the scalar it reads out escapes.
+ *
+ * @return 7 (the value read out of the frame-scoped list before its region drops on return)
+ */
+fn mem_scope_drop_build_and_read(): i64 {
+    var xs: []i64 = teko::list::empty()
+    xs = teko::list::push(xs, 7)
+    xs[0]
+}
+
+/**
+ * f_mem_scope_drop_replaces_free — §6: proves a value dies at its lexical scope (the callee's frame
+ * region drops on return) instead of at a `mem::free` call — the retired manual free's replacement.
+ *
+ * @return 7 (the scalar read out of the frame-scoped list)
+ */
+fn f_mem_scope_drop_replaces_free(): i64 {
+    mem_scope_drop_build_and_read()
+}
+
+/**
+ * f_ffi_wrap_boundary — §6: the foreign boundary is crossed by WRAPPING an opaque `ptr` with
+ * `.__wrap<T>()` (§5), never an `unsafe` decree. The address of a `mut i64` is taken with
+ * `ptr::__unwrap<i64>` and recovered through the fallible `__wrap<i64>()` union — the `T` arm
+ * yields the value back (the guard seam is constant-true in §5 Part A).
+ *
+ * @return 33 (the round-tripped value), or 1/2 on the error/null arms
+ */
+fn f_ffi_wrap_boundary(): i64 {
+    var x: i64 = 33
+    var p = ptr::__unwrap<i64>(x)
+    match p.__wrap<i64>() {
+        i64 as v => v
+        error => 1
+        null => 2
+    }
 }

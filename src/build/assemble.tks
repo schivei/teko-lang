@@ -85,11 +85,11 @@ fn asm_parse(path: str, tokens: []lexer::Token): []parser::Item | error {
 }
 
 /**
- * asm_lex_and_parse — lex `src` and parse it into ONE file's item list, freeing the token buffer on
- * the success path. Extracted so `assemble_sel`'s per-file loop matches on a single result instead
- * of holding a `tokens` binding across two fallible steps: the collector needs the failure arms to
- * fall through to the next file, and a `tokens` alive across them is a second live handle that
- * `mem::free` (rightly) refuses.
+ * asm_lex_and_parse — lex `src` and parse it into ONE file's item list. Extracted so
+ * `assemble_sel`'s per-file loop matches on a single result instead of holding a `tokens` binding
+ * across two fallible steps: the collector needs the failure arms to fall through to the next file.
+ * The `tokens` buffer dies at this function's lexical scope (its region drop reclaims it on every
+ * exit edge) — the §6 replacement for the retired manual free.
  *
  * @param path  the source file's path (selects the entry-file vs module grammar)
  * @param src   the file's contents
@@ -98,9 +98,7 @@ fn asm_parse(path: str, tokens: []lexer::Token): []parser::Item | error {
  */
 fn asm_lex_and_parse(path: str, src: str): []parser::Item | error {
     var tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return e }
-    var one = match asm_parse(path, tokens) { []parser::Item as items => items; error as e => return e }
-    teko::mem::free(tokens)
-    one
+    match asm_parse(path, tokens) { []parser::Item as items => items; error as e => return e }
 }
 
 /**

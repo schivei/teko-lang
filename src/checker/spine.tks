@@ -991,22 +991,6 @@ fn is_nonscalar_bare_local(e: TExpr): bool {
 }
 
 /**
- * Is `c` a `teko::mem::free(_)` call? Mirrors `typer.tks`'s `type_mem_free` shape probe (last two
- * segments `mem::free`, rooted at `teko` or bare). The capture sweep must SKIP such a call: its
- * argument is CONSUMED (the affine gate's subject), never captured — else `free(x)` would mark its
- * own `x` shared and the gate would reject every free.
- *
- * @param TCall c  the typed call
- * @return bool  true iff `c` is a canonical `teko::mem::free` call
- */
-fn is_mem_free_call(c: TCall): bool {
-    if c.callee.segments.len < 2 { return false }
-    if c.callee.segments[c.callee.segments.len - 1].name != "free" { return false }
-    if c.callee.segments[c.callee.segments.len - 2].name != "mem" { return false }
-    c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
-}
-
-/**
  * The self-thread exclusion name for a bind target: the `SimpleName` being bound (`x` in `let x =
  * …`), "" for a destructure. A non-scalar local re-bound to a call over ITSELF (`x = push(x, item)`)
  * is threaded, not captured — the capture sweep excludes it so the builder-then-`free` idiom
@@ -1155,9 +1139,8 @@ fn capture_expr(e: TExpr, cells: []Cell, us: []Unique, exclude: str): []Unique {
 }
 
 /**
- * The capture sweep for a call: SKIP a `teko::mem::free` (its argument is consumed, not captured);
- * otherwise every non-scalar bare-local argument (!= `exclude`) joins `UsShared`, and each argument
- * recurses for a nested call / init.
+ * The capture sweep for a call: every non-scalar bare-local argument (!= `exclude`) joins
+ * `UsShared`, and each argument recurses for a nested call / init.
  *
  * @param TCall c  the typed call
  * @param []Cell cells  the cell universe
@@ -1166,7 +1149,6 @@ fn capture_expr(e: TExpr, cells: []Cell, us: []Unique, exclude: str): []Unique {
  * @return []Unique  the axis with this call's captured arguments joined
  */
 fn capture_call(c: TCall, cells: []Cell, us: []Unique, exclude: str): []Unique {
-    if is_mem_free_call(c) { return us }
     capture_operands(c.args, cells, us, exclude)
 }
 
@@ -1541,20 +1523,20 @@ fn referent_not_escaping_adopter(s: Spine, referent: u32): bool {
 }
 
 /**
- * Is `binding` the SOLE live handle — `us(binding) = UsUnique`? The affine `mem::free` /
- * channel-send-move gate (PR-3, and the L2c consume contract below) consults this: a `UsShared` /
- * `UsTop` cell may NOT be consumed (the aliased-free UAF, remodel §5 / #336 gap 1). Conservative:
- * `⊤` ⇒ shared ⇒ FALSE. Any-alias-anywhere ⇒ shared at the fixpoint (a later increment may add
- * flow-sensitivity; out of scope here). EXPOSED for PR-3; consumed by no gate in PR-1.
+ * Is `binding` the SOLE live handle — `us(binding) = UsUnique`? The channel-send-move gate (PR-3,
+ * and the L2c consume contract below) consults this: a `UsShared` / `UsTop` cell may NOT be
+ * consumed. Conservative: `⊤` ⇒ shared ⇒ FALSE. Any-alias-anywhere ⇒ shared at the fixpoint (a
+ * later increment may add flow-sensitivity; out of scope here). EXPOSED for PR-3; consumed by no
+ * gate in PR-1.
  *
  * L2c CONSUME CONTRACT (semantics only — spine-build-plan §4): a future `chan.send(x)` consume site
- * MUST call `is_unique_at(s, cell_of(s, x))` and REJECT a shared / `⊤` target, identically to the
- * L2b `mem::free` affine guard — one analysis, four guarantees. No channel surface exists yet, so
- * L2c ships this documented primitive with no gate site and no fixture.
+ * MUST call `is_unique_at(s, cell_of(s, x))` and REJECT a shared / `⊤` target — one analysis, the
+ * consume guarantee. No channel surface exists yet, so L2c ships this documented primitive with no
+ * gate site and no fixture.
  *
  * @param Spine s  the function's spine
  * @param u32 binding  the cell index of the consumed binding
- * @return bool  true iff `binding` is provably unique (safe to free / move)
+ * @return bool  true iff `binding` is provably unique (safe to move)
  */
 pub fn is_unique_at(s: Spine, binding: u32): bool {
     if binding >= s.us.len { return false }

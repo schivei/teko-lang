@@ -1,39 +1,50 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): re-harvested after landing §5 Part A of the 0.3.1
-# surface migration — opaque atomic `ptr`/`uptr` + `__wrap`/`__unwrap`. This is a checker/codegen
-# change, so the compiler shifts and the previous bootstrap no longer reproduces it; the new harvest
-# e936eba0 self-reproduces byte-identical (gen1==gen2 fixpoint). The owner did NOT edit
+# RESEED (hand-harvest, by-hand per owner order): re-harvested after landing §6 of the 0.3.1 surface
+# migration — retire `unsafe` + the manual-memory surface. This is a lexer/parser/checker/codegen +
+# `.tkb`-wire change, so the compiler shifts and the previous bootstrap no longer reproduces it; the
+# new harvest bc8072ba self-reproduces byte-identical (gen2==gen3 fixpoint). The owner did NOT edit
 # bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# §5 part A: opaque ptr/uptr + __wrap/__unwrap surface (seams open for doc1)
+# §6: retire unsafe + manual-memory surface
 # ---------------------------------------------------------------------------------------------
-# `ptr`/`uptr` become OPAQUE ATOMIC words (a single machine word carrying only an address; C-repr
-# stays pointer-width `void*`/`uintptr_t` today, alignable to the future `size`/`usize`). `ptr<T>` is
-# retired: `Ptr.inner` is now always `null`, and the generic annotation `ptr<T>`/`uptr<T>` is rejected
-# in `resolve_generic_inst`. Four intrinsics are recognized in the TYPER as meta-type operations (like
-# `type_region_alloc`), with NO new grammar:
-#   - `ptr::__unwrap<T>(x)` / `uptr::__unwrap<T>(x)` — STATIC, infallible: takes the address of an
-#     addressable `mut` variable (R7 ordinary auto-ref) and yields the opaque word.
-#   - `p.__wrap<T>()` — INSTANCE, fallible: returns the FINAL union `T | error | null`. The `null` arm
-#     (address 0) is LIVE; the `error` arm is emitted+compiled but DEAD in Part A (the codegen guard is
-#     the literal `1`).
-# Codegen adds `emit_ptr_unwrap`/`emit_ptr_wrap` plus the two BACKEND SEAMS `emit_ptr_unwrap_seam`
-# (Part A: empty) and `emit_ptr_wrap_guard` (Part A: emits `1`) in src/codegen/codegen.tks — the ONLY
-# two function bodies Doc 1 (Part B) swaps for `tk_ptr_track`/`tk_ptr_check` + the runtime; no
-# signature, typer, type, or fixture changes between A and B. Arithmetic/deref/borrow/subscript on
-# `ptr`/`uptr` are rejected (`type_binary`/`type_unary`/`type_index`/`type_borrow_expr`). The seven
-# internal `ptr<T>` sites were swept to the opaque `ptr` (region_alloc return; RawBuf.ptr; the FFI
-# prims buf_ptr/bytes_from_ptr/as_ptr/as_cstr/str_from_c/region_buf; the `ptr <-> u64` address-carrier
-# cast; the extern absence union; the export honest-stop text), and tkb type-tag 12 (`ptr<T>`) was
-# removed (10 = opaque `ptr`, 11 = `uptr` remain). ZERO runtime C touched — no new `tk_*` symbol.
+# The developer SURFACE for `unsafe` and manual memory is REMOVED from the language; the compiler-
+# INTERNAL region primitives the backend needs are KEPT, de-surfaced. What SAILED:
+#   - the `unsafe` keyword (contextual modifier on `type`/`fn`): the parser now REJECTS it in the
+#     modifier slot ("unsafe was retired in 0.3.1: memory safety is the arena's job …"); the whole
+#     contagion machinery is deleted — `reject_unsafe_signature_contagion`/`reject_unsafe_field_
+#     contagion`/`reject_unsafe_alias`/`method_is_effective_unsafe` (collect), `is_unsafe_type`/
+#     `unsafe_carrying*`/`func_type_unsafe_carrying`/`generic_args_unsafe_carrying` (resolve), the
+#     local-binding gate + `#arena_size`×`unsafe` check (typer), and the `Env.fn_unsafe` field +
+#     `with_fn_unsafe` (scope). The AST `is_unsafe` fields on `parser::Function`/`parser::TypeDecl`
+#     are removed.
+#   - manual memory: the surface `teko::mem::free`/`region_new`/`region_alloc` intrinsics
+#     (`reject_retired_mem_surface` now emits "manual memory was retired in 0.3.1 …"), the
+#     `#must_free` decorator (parser reject) + its whole consume-or-fail dataflow and affine
+#     `mem::free` guard (typer, `is_unique_at`/the reticulado PRESERVED), the region-handle probes
+#     `is_must_free_name`/`is_region_handle_name`/`region_handle_field_name` (resolve), the surface
+#     lowering in `lir/lower.tks` + `codegen/codegen.tks`, the spine `is_mem_free_call` probe, the AST
+#     `must_free` field + `ParsedAttributes.must_free`, and the whole `src/mem/unsafe/` directory
+#     (`RawBuf`/`Owned<T>`/`Arena`). The one live self-host caller (`build/assemble.tks`) was severed:
+#     the token buffer now dies at its lexical scope (region drop), not a `mem::free`.
+# KEPT (internal, de-surfaced): the region lifecycle prims `region_new`/`enter`/`leave`/`drop`/`root`
+# + `tk_region_*` and the FFI marshalling intrinsics `buf_ptr`/`bytes_from_ptr`/`as_ptr`/`as_cstr`/
+# `str_from_c`/`region_buf`/`load_u64`/`store_u64` (all §5, safe-callable, no grammar change).
 #
-# FIXPOINT. The reseed converged in one step: gen0 (cc of the previous bootstrap) C-built the reworked
-# source into bin-a; compiling bin-a into the new compiler and rebuilding produced a byte-identical
-# bin-b (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# `.tkb` WIRE. The trailing `is_unsafe` byte was removed from the `TypeDecl`/`Function` records (the
+# benign trailing case — nothing shifts); `must_free` was never on the wire. `TKB_EXPR_VERSION`
+# bumped 2→3 and `TKB_PROGRAM_VERSION` bumped 4→5 (standard R2 procedure); the reader already
+# rejects stale artifacts loudly. The reseed builds from SOURCE, so the fixpoint is indifferent.
+#
+# ZERO runtime C touched — no new `tk_*` symbol, no `teko_rt.{c,h}` edit; `teko_rt.tks` stays
+# self-sufficient (0 hits for `mem::free`/`RawBuf`/`Owned`/`must_free`, was 0, stays 0).
+#
+# FIXPOINT. gen0 (cc of the previous bootstrap) C-built the reworked source into bin-a; compiling
+# bin-a into the new compiler and rebuilding produced a byte-identical bin-b (sha256 below). The
+# committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0';  TEKO_BACKEND=c gen0' build . -> OUT;  OUT/teko.c == bootstrap/teko.c.
 #
 # `run: hand-harvest` — no CI run produced this file; it was harvested by hand on the branch, in the
@@ -42,8 +53,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  2a70007f39c06d245d4788527e093ae5fe8adbaf452616a186bf9e5597e58897
+sha256:  bc8072bac0df3e76bfdc16513c3190d206e4a31aa58bcf8e3a0984533fae19da
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§5 part A: opaque atomic ptr/uptr +
-         __wrap/__unwrap surface, seams open for doc1); sha256 is read directly off the committed file
-         and was proven a fixpoint (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§6: retire unsafe + manual-memory
+         surface); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
+         bin-b, byte-identical).

@@ -888,18 +888,6 @@ fn sp_nonfree_call(args: []TExpr): TExpr {
 }
 
 /**
- * A CANONICAL `teko::mem::free(name)` call with a full three-segment path — the shape
- * `is_mem_free_call` recognizes (so the capture sweep SKIPS its argument as a consume).
- *
- * @param str name  the freed variable's name
- * @return TExpr  a `teko::mem::free` `TCall` typed expression
- */
-fn sp_mem_free_call(name: str): TExpr {
-    var segs = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), parser::Segment { name = "teko" }), parser::Segment { name = "mem" }), parser::Segment { name = "free" })
-    TExpr { kind = TCall { callee = parser::Path { segments = segs }; args = teko::list::push(teko::list::empty(), sp_nonscalar_var(name)); call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
-}
-
-/**
  * A single-field struct-init `{ f = value }` — the field-STORE shape whose non-scalar bare-local
  * field value the capture sweep marks shared.
  *
@@ -911,25 +899,6 @@ fn sp_struct_init(value: TExpr): TExpr {
 }
 
 /**
- * A `TCall` value with the given path segment names and `call_ns` — for probing `is_mem_free_call`'s
- * shape arms directly.
- *
- * @param []str names  the callee path's segment names
- * @param str ns  the resolved call namespace
- * @return TCall  a `TCall` value
- */
-fn sp_tcall_segs(names: []str, ns: str): TCall {
-    var segs: []parser::Segment = teko::list::empty()
-    var i = 0
-    loop {
-        if i >= names.len { break }
-        segs = teko::list::push(segs, parser::Segment { name = names[i] })
-        i++
-    }
-    TCall { callee = parser::Path { segments = segs }; args = teko::list::empty(); call_ns = ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }
-}
-
-/**
  * (#331 L2b, option b) A non-scalar bare local stored into a struct FIELD (`{ f = xs }`) escapes —
  * the capture sweep marks it shared.
  */
@@ -938,31 +907,6 @@ fn sp_tcall_segs(names: []str, ns: str): TCall {
     var store = sp_let("box", sp_struct_init(sp_nonscalar_var("xs")))
     var s = fn_spine(sp_fn(teko::list::empty(), teko::list::push(teko::list::push(teko::list::empty(), mk), store)))
     teko::assert::is_false(is_unique_at(s, cell_of(s, "xs") to u32))
-}
-
-/**
- * (#331 L2b, option b) The self-defeat guard: a canonical `teko::mem::free(xs)` is a CONSUME, not a
- * capture — the sweep skips it, so `xs` stays unique and a UNIQUE free is admitted (never rejects
- * itself).
- */
-#test fn spine_capture_mem_free_call_does_not_capture_its_arg() {
-    var mk = sp_let("xs", sp_nonfree_call(teko::list::empty()))
-    var freeit = sp_exprstmt(sp_mem_free_call("xs"))
-    var s = fn_spine(sp_fn(teko::list::empty(), teko::list::push(teko::list::push(teko::list::empty(), mk), freeit)))
-    teko::assert::is_true(is_unique_at(s, cell_of(s, "xs") to u32))
-}
-
-/**
- * (#331 L2b, option b) `is_mem_free_call` shape probe — coverage of every reject arm: a short path
- * (`< 2` segments), a wrong last segment, a wrong second-to-last segment, and an unrooted
- * `foo::mem::free`; plus the canonical accept.
- */
-#test fn spine_is_mem_free_call_covers_shapes() {
-    teko::assert::is_false(is_mem_free_call(sp_tcall_segs(teko::list::push(teko::list::empty(), "free"), "teko::mem")))
-    teko::assert::is_false(is_mem_free_call(sp_tcall_segs(teko::list::push(teko::list::push(teko::list::empty(), "mem"), "alloc"), "teko::mem")))
-    teko::assert::is_false(is_mem_free_call(sp_tcall_segs(teko::list::push(teko::list::push(teko::list::empty(), "list"), "free"), "teko::list")))
-    teko::assert::is_false(is_mem_free_call(sp_tcall_segs(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "foo"), "mem"), "free"), "foo::mem")))
-    teko::assert::is_true(is_mem_free_call(sp_tcall_segs(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "teko"), "mem"), "free"), "teko::mem")))
 }
 
 /**

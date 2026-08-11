@@ -47,16 +47,8 @@ type ValBinding = struct {
 // on a self-build). Sealing the globals once (seal(), called by the typer between collect and the
 // typing loop) makes a fork copy only its OWN locals — a few dozen entries. Lookups scan bindings
 // innermost-first, THEN base innermost-first (locals shadow globals; global order preserved).
-/** (U2, the 0.1.0.0-beta memory+unsafe remodel #333) `fn_unsafe` — is the fn body CURRENTLY
- *  being typed effectively `unsafe` (its own `is_unsafe`, OR the enclosing type's for a
- *  method — the same `method_is_effective_unsafe` OR-rule `collect.tks::method_func_type`
- *  applies)? Set ONCE by `type_function` (and the method-body typer) before typing the
- *  body, so the local-binding containment gate (`type_binding`) can read it without any
- *  extra parameter threaded through every statement/expression typer — same shape as
- *  `owner_type`. `false` for every non-`unsafe` fn (the overwhelming default), so a
- *  corpus with zero `unsafe` types types byte-identically. */
 /** `file` — the source file of the item CURRENTLY being typed, set once per item by
- *  `type_item` (`with_file`), exactly like `cur_ns`/`owner_type`/`fn_unsafe` above and for
+ *  `type_item` (`with_file`), exactly like `cur_ns`/`owner_type` above and for
  *  the same reason: a per-item fact the deep expression typers need without threading a
  *  parameter through every one of them.
  *
@@ -77,7 +69,7 @@ type ValBinding = struct {
  *  only turns `lookup_binding`'s global scan from a reverse O(n) linear scan into an O(log n + c)
  *  binary search that returns the SAME binding (design section 5). `nidx_empty()` before `seal`, where
  *  a lookup finds nothing and falls through as before. */
-pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; fn_unsafe: bool; file: str; base_index: NameIndex }
+pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; file: str; base_index: NameIndex }
 
 /**
  * env_empty — an empty environment: no bindings, no current namespace, not inside any class method,
@@ -85,30 +77,19 @@ pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns
  *
  * @return a fresh empty Env
  */
-pub fn env_empty(): Env { Env { base_slots = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); fn_unsafe = false; file = ""; base_index = nidx_empty() } }
+pub fn env_empty(): Env { Env { base_slots = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); file = ""; base_index = nidx_empty() } }
 
 /** (W10c/MEM-3) set the program DI registry once — the typer seeds it onto the base env after the
  *  DI pass so `type_function` can resolve each `#inject` binding to its provider. */
 pub fn with_di(env: Env, di: DiRegistry): Env {
-    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; file = env.file; base_index = env.base_index }
 }
 
 /** (W10c/MEM-3) set the DI-injected locals in scope for the fn body about to be typed. */
 pub fn with_injects(env: Env, injects: []DiInjectBind): Env {
-    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; file = env.file; base_index = env.base_index }
 }
 
-/**
- * (U2) set whether the fn body about to be typed is effectively `unsafe` — read by the
- * local-binding containment gate in `type_binding`.
- *
- * @param Env env  the environment about to type a fn body
- * @param bool fn_unsafe  is the fn (own flag OR, for a method, its enclosing type's) unsafe?
- * @return Env  `env` with `fn_unsafe` set
- */
-pub fn with_fn_unsafe(env: Env, fn_unsafe: bool): Env {
-    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = fn_unsafe; file = env.file; base_index = env.base_index }
-}
 
 /** (W10c/MEM-3) the DI-injected binding named `name` in scope, or an error if none — the signal a
  *  `type_var` uses to decide whether to lower the read into a materializer call. */
@@ -138,7 +119,7 @@ pub fn seal(env: Env): Env {
     var b = env.base_slots
     var i: u64 = 0
     loop { if i >= env.bindings.len { break }; b = teko::list::push(b, env.bindings[i]); i++ }
-    Env { base_slots = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = nidx_build(nidx_names_of(b)) }
+    Env { base_slots = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; file = env.file; base_index = nidx_build(nidx_names_of(b)) }
 }
 
 /**
@@ -150,7 +131,7 @@ pub fn seal(env: Env): Env {
  * @return     `env` with `cur_ns` set to `ns`
  * @since #41
  */
-pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
+pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; file = env.file; base_index = env.base_index } }
 
 /**
  * with_file — set the source file of the item about to be typed. The twin of `with_ns`, set
@@ -163,7 +144,7 @@ pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bind
  * @return      `env` with `file` set
  * @since       0.3.1
  */
-pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = file; base_index = env.base_index } }
+pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; file = file; base_index = env.base_index } }
 
 /**
  * with_owner — set the DECLARING class of the method body about to be typed; "" clears it (used when
@@ -174,7 +155,7 @@ pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; 
  * @return       `env` with `owner_type` set to `owner`
  * @since W10b.CLASS
  */
-pub fn with_owner(env: Env, owner: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
+pub fn with_owner(env: Env, owner: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; file = env.file; base_index = env.base_index } }
 
 /**
  * binding_is_writable — the SINGLE decision point for "may this binding be written through?"
@@ -208,7 +189,7 @@ fn binding_is_writable(t: Type, is_mut: bool): bool {
  * @return        `env` extended with the new local binding
  */
 pub fn define(env: Env, name: str, t: Type, is_mut: bool): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; file = env.file; base_index = env.base_index }
 }
 
 /**
@@ -224,7 +205,7 @@ pub fn define(env: Env, name: str, t: Type, is_mut: bool): Env {
  * @since #41
  */
 pub fn define_fn(env: Env, name: str, t: Type, ns: str): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; file = env.file; base_index = env.base_index }
 }
 
 /**
@@ -243,7 +224,7 @@ pub fn define_fn(env: Env, name: str, t: Type, ns: str): Env {
  * @since #594
  */
 pub fn define_const(env: Env, name: str, t: Type, ns: str, vis: parser::Visibility): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; file = env.file; base_index = env.base_index }
 }
 
 // a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
