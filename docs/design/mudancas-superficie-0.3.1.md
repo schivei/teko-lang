@@ -495,26 +495,30 @@ spawn f()                                          // KEYWORD (não função): d
 type IChannelKind<T> = interface { fn init(key: str); fn send(v: T); fn recv(): T; fn end() }
 
 // make: cria, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a chave,
-// e devolve o CONTEXTO (ctx) — o WaitGroup do canal + um fecho de reserva:
+// e devolve o CONTEXTO (ctx) — o WaitGroup MANUAL do canal + um fecho de reserva:
 static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): ctx
               // key:    CONSTANTE (literal/const, comp-time) — o "nome" do canal
               // bounds: 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
 
-// AMBOS os extremos são clamados por svc, pela MESMA chave constante (svc = comp-time, inline):
+// AMBOS os extremos (e o ctx) são clamados por svc, pela MESMA chave constante (svc = comp-time, inline):
 var rx = svc<Rx<T>>("chave")                       // LEITOR único
 var tx = svc<Tx<T>>("chave")                       // ESCRITOR (N)
+var c  = svc<Ctx>("chave")                         // o ctx — p/ um worker fazer done()
 fn  Tx<T>::send(v: T): null                        // devolve null; a propriedade tx.closed diz se fechou (drenado)
 fn  Tx<T>::close()                                 // o PRODUTOR fecha: invoca o end() (fecha + drena)
 fn  Rx<T>::pop(): T | Closed                       // recebe; o erro ESPECÍFICO `Closed` quando encerrado e drenado
 
-fn  ctx::wait()                                    // WaitGroup: espera as tasks do canal terminarem
-fn  ctx::close()                                   // o CONTEXTO também pode fechar (fecho de reserva)
+// WaitGroup MANUAL — a contagem é do USUÁRIO, nunca automática (nem no spawn, nem na saída da task):
+fn  ctx::add(n: usize)                             // registra N tasks a esperar
+fn  ctx::done()                                    // uma task sinaliza que terminou
+fn  ctx::wait()                                    // bloqueia até o contador zerar
+fn  ctx::close()                                   // fecho de reserva do canal
 
 fn hardware_parallelism(): usize                   // paralelismo concedido pelo SO
 ```
 
-Um fluxo mínimo — a `main` cria o canal (recebe o **ctx**), uma corotina resolve o escritor por chave e
-escreve, a `main` resolve o leitor por chave e lê até encerrar. **Nenhum id trafega — nem no `spawn`:**
+Um fluxo mínimo — a `main` cria o canal (recebe o **ctx**), faz o **`add` manual**, uma corotina resolve o
+escritor por chave, escreve e faz **`done` manual**; a `main` lê até encerrar e `wait`. **Nenhum id trafega:**
 
 ```teko
 fn produz() {                            // função sem retorno — SEM id (resolve por chave)
@@ -522,10 +526,12 @@ fn produz() {                            // função sem retorno — SEM id (res
     var i = 0
     loop while i < 100 { tx.send(i); i = i + 1 }
     tx.close()                           // o PRODUTOR fecha → o pop do leitor passará a devolver `Closed`
+    svc<Ctx>("nums").done()              // done() MANUAL — resolve o ctx por chave
 }
 
 fn main() {
-    var ctx = chan<i32>::make<OsChan<i32>>("nums", 64)   // cria, registra em F2 sob "nums", devolve o ctx (WaitGroup)
+    var ctx = chan<i32>::make<OsChan<i32>>("nums", 64)   // cria em F2 sob "nums"; devolve o ctx
+    ctx.add(1)                            // add() MANUAL — 1 task a esperar
     spawn produz()                        // dispara e segue (sem join) — SEM id
     var rx = svc<Rx<i32>>("nums")         // o LEITOR também por svc, pela chave
     loop {
@@ -535,7 +541,7 @@ fn main() {
             Closed => break               // erro específico: encerrado e drenado — a sincronização
         }
     }
-    ctx.wait()                            // WaitGroup: espera a task
+    ctx.wait()                            // bloqueia até o done()
 }
 ```
 
@@ -546,9 +552,13 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte.
 é superfície de usuário; o usuário escreve `spawn`.)*
 
 **`make` devolve o `ctx`; ambos os extremos por `svc` (ruling do dono).** A criação é por `make`, que devolve
-o **contexto** (`ctx`) — o **WaitGroup** do canal (`ctx.wait()`) e um fecho de reserva. **Ambos** os extremos
-são clamados por chave: `svc<Rx<T>>(key)` (leitor) e `svc<Tx<T>>(key)` (escritores). O `ctx` do `make` faz
-sentido como handle de coordenação (WaitGroup) sem trafegar id.
+o **contexto** (`ctx`) — o **WaitGroup** do canal e um fecho de reserva. **Ambos** os extremos e o próprio
+`ctx` são clamados por chave: `svc<Rx<T>>(key)`, `svc<Tx<T>>(key)`, `svc<Ctx>(key)` (este p/ um worker fazer
+`done()`) — coordenação sem trafegar id.
+
+**O WaitGroup do `ctx` é MANUAL (ruling do dono).** A contagem é **do usuário**, **nunca automática** — o
+`spawn` não registra nada, a saída da task não faz `done` sozinha. O usuário coordena `ctx.add(n)` /
+`ctx.done()` / `ctx.wait()` como quiser.
 
 **O `ctx` É O DONO do lifetime — transient (ruling proposto).** O serviço singleton do canal vive em F2, mas
 **quem o possui é o `ctx`** (transient, na região do criador). Quando o `ctx` cai, ele **cascateia o
@@ -730,7 +740,7 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 |---|---|
 | **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
 | **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
-| **`chan<T>`** | tipo genérico MPSC; `make<K: service singleton & IChannelKind<T>>(key, bounds = 1): ctx` (devolve o **ctx**/WaitGroup); **ambos** os extremos por `svc<Rx<T>>`/`svc<Tx<T>>`; `bounds` = nº de **mensagens**; unbounded = `make(key, 0)` |
+| **`chan<T>`** | tipo genérico MPSC; `make<K: service singleton & IChannelKind<T>>(key, bounds = 1): ctx`; o **ctx** = WaitGroup **manual** (`add`/`done`/`wait`, coordenação do usuário) + fecho; extremos e ctx por `svc<Rx>`/`svc<Tx>`/`svc<Ctx>`; unbounded = `make(key, 0)` |
 | **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por CHAVE CONSTANTE** — todo transporte é `service singleton` (não-singleton = erro de compilação), vive em **F2**; **elimina id no `spawn`**; não dispatch dinâmico |
 | **fecho** | **responsabilidade do PRODUTOR** — `tx.close()` invoca `end()` (fecha + drena), idempotente; reserva em `ctx.close()`; consumidor faz `pop()` até o erro específico `Closed`. `Rx::pop(): T \| Closed`; `Tx::send(): null` + `tx.closed` (ambos observam) |
 | **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |

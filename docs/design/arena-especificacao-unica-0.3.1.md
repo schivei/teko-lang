@@ -385,11 +385,14 @@ fn tarefa() {                          // função comum SEM retorno — SEM id 
     var tx = svc<Tx<i32>>("res")       // extremo de escrita, pela chave constante
     tx.send(processar())
     tx.close()                         // o produtor fecha
+    svc<Ctx>("res").done()             // done() manual
 }
 
 fn main() {
-    var ctx = chan<i32>::make<OsChan<i32>>("res", 64)   // devolve o ctx (WaitGroup)
-    spawn tarefa()                     // thread fire-and-forget SEM id; sincroniza pelo canal / ctx.wait()
+    var ctx = chan<i32>::make<OsChan<i32>>("res", 64)   // devolve o ctx (WaitGroup manual)
+    ctx.add(1)                         // add() manual
+    spawn tarefa()                     // thread fire-and-forget SEM id
+    ctx.wait()                         // espera o done()
     // spawn soma(a, b)                 // ERRO: soma tem retorno — spawn não aceita
 }
 ```
@@ -434,20 +437,24 @@ type IChannelKind<T> = interface {
 }
 
 // make: cria o canal, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a CHAVE constante,
-// e devolve o CONTEXTO (ctx) — o WaitGroup do canal (esperar as tasks) + um fecho de reserva.
+// e devolve o CONTEXTO (ctx) — o WaitGroup MANUAL do canal (add/done/wait, coordenados pelo usuário) + fecho.
 // K é um `service singleton` que satisfaz a interface (senão: erro de compilação):
 static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): ctx
 
-// AMBOS os extremos são clamados por svc, pela MESMA chave constante (svc = intrínseco de comp-time, §8):
-var rx = svc<Rx<T>>("chave")                       // LEITOR único — resolvido por chave
-var tx = svc<Tx<T>>("chave")                       // ESCRITOR (N) — resolvido por chave (nada de id no spawn)
+// AMBOS os extremos (e o próprio ctx) são clamados por svc, pela MESMA chave constante (svc = comp-time, §8):
+var rx  = svc<Rx<T>>("chave")                      // LEITOR único — resolvido por chave
+var tx  = svc<Tx<T>>("chave")                      // ESCRITOR (N) — resolvido por chave (nada de id no spawn)
+var c   = svc<Ctx>("chave")                        // o ctx também por chave — p/ um worker fazer done()
 
 fn Tx<T>::send(v: T): null                         // devolve null; a propriedade tx.closed diz se fechou (drenado)
 fn Tx<T>::close()                                  // o PRODUTOR fecha: invoca o end() do transporte (fecha + drena)
 fn Rx<T>::pop(): T | Closed                        // recebe; o erro ESPECÍFICO `Closed` quando encerrado e drenado
 
-fn ctx::wait()                                     // WaitGroup: espera as tasks do canal terminarem
-fn ctx::close()                                    // o CONTEXTO também pode fechar (fecho de reserva, caso precise)
+// WaitGroup MANUAL — a contagem é do USUÁRIO, nunca automática (nem no spawn, nem na saída da task):
+fn ctx::add(n: usize)                              // registra N tasks a esperar
+fn ctx::done()                                     // uma task sinaliza que terminou (decrementa)
+fn ctx::wait()                                     // bloqueia até o contador zerar
+fn ctx::close()                                    // fecho de reserva do canal (invoca end())
 ```
 
 - **TOTALMENTE ESTÁTICO — a chave é uma CONSTANTE (ruling do dono).** `make` e `svc` usam a MESMA chave, um
@@ -457,13 +464,16 @@ fn ctx::close()                                    // o CONTEXTO também pode fe
   id, resolve o `Tx` pela chave. É por isso que `make<K: service singleton & IChannelKind<T>>` — o transporte é um
   **`service`** que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
 - **`make` devolve o `ctx`; AMBOS os extremos por `svc` (ruling do dono).** `make(key, bounds = 1): ctx`
-  cria o canal e devolve o **contexto** — o **WaitGroup** do canal (`ctx.wait()` espera as tasks) e um fecho
-  de reserva (`ctx.close()`). Os dois extremos são clamados por chave: `svc<Rx<T>>(key)` (leitor único) e
-  `svc<Tx<T>>(key)` (N escritores). Fan-in MPSC: **1 leitor**, **N escritores**, todos resolvidos por `svc`.
+  cria o canal e devolve o **contexto** — o **WaitGroup** do canal e um fecho de reserva (`ctx.close()`).
+  Os dois extremos (e o `ctx`) são clamados por chave: `svc<Rx<T>>(key)` (leitor), `svc<Tx<T>>(key)` (N
+  escritores), `svc<Ctx>(key)` (para um worker fazer `done()`). Fan-in MPSC: **1 leitor**, **N escritores**.
+- **O WaitGroup do `ctx` é MANUAL (ruling do dono).** A contagem é **do usuário**, nunca automática — nem no
+  `spawn`, nem na saída da task. O usuário coordena `ctx.add(n)` (registra N a esperar), `ctx.done()` (uma
+  task sinaliza fim) e `ctx.wait()` (bloqueia até zerar) como quiser. O `spawn` **não** registra nada sozinho.
 - **Fechar é responsabilidade do PRODUTOR (ruling do dono).** O **`Tx` tem o `close()`** — quem sabe que não
   há mais mensagens é o produtor, então é ele que fecha (`tx.close()` → `end()`; convenção Go). Com N
-  produtores, coordena-se por `ctx.wait()` e fecha-se **uma vez** (idempotente). O fecho também fica **no
-  `ctx`** (`ctx.close()`) como reserva, **caso precise**. O **consumidor (`Rx`) não fecha** — faz `pop()` até
+  produtores, o usuário coordena por `ctx.add/done/wait` e fecha-se **uma vez** (idempotente). O fecho também
+  fica **no `ctx`** (`ctx.close()`) como reserva, **caso precise**. O **consumidor (`Rx`) não fecha** — faz `pop()` até
   receber o erro **específico `Closed`** (encerrado + drenado; distinto de um `error` de transporte). Ambos
   observam: `Rx` pelo `Closed`, `Tx` pela propriedade `tx.closed`.
 - **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
@@ -523,10 +533,12 @@ fn gerar() {                                       // função sem retorno — S
         tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula
     }
     tx.close()                 // o PRODUTOR fecha → o pop do consumidor passará a devolver `Closed`
+    svc<Ctx>("pedidos").done() // done() MANUAL — o worker resolve o ctx por chave e sinaliza
 }
 
 fn main() {
-    var ctx = chan<Pedido>::make<OsChan<Pedido>>("pedidos", 64)   // cria, registra em F2 sob "pedidos", devolve o ctx (WaitGroup)
+    var ctx = chan<Pedido>::make<OsChan<Pedido>>("pedidos", 64)   // cria em F2 sob "pedidos"; devolve o ctx
+    ctx.add(1)                       // add() MANUAL — 1 task a esperar (coordenação do usuário)
     spawn gerar()                    // Go-style: dispara e segue (sem join) — SEM id
     var rx = svc<Rx<Pedido>>("pedidos")   // o LEITOR também por svc, pela chave
     loop {
@@ -536,7 +548,7 @@ fn main() {
             Closed => break                 // erro específico: encerrado e drenado — a sincronização, não há join
         }
     }
-    ctx.wait()                       // WaitGroup: espera a task terminar
+    ctx.wait()                       // bloqueia até o done() da task
 }
 ```
 
@@ -546,15 +558,16 @@ pequeno**.
 
 ```teko
 fn main() {
-    var ctx = chan<Tarefa>::make<OsChan<Tarefa>>("tarefas", 0)   // unbounded; devolve o ctx (WaitGroup)
+    var ctx = chan<Tarefa>::make<OsChan<Tarefa>>("tarefas", 0)   // unbounded; devolve o ctx
     var tx  = svc<Tx<Tarefa>>("tarefas")                          // escritor pela chave
     for tarefa in lote_fixo() {      // ex.: 12 tarefas conhecidas — total pequeno e finito
         tx.send(tarefa)              // nunca bloqueia; não há "cheio" para travar a main
     }
     tx.close()                       // o produtor fecha
+    ctx.add(4)                       // MANUAL: 4 workers a esperar
     var i = 0
-    loop while i < 4 { spawn worker(); i = i + 1 }   // 4 corotinas drenam — SEM id; leem por svc<Rx<Tarefa>>("tarefas")
-    ctx.wait()                       // WaitGroup: espera as 4 terminarem
+    loop while i < 4 { spawn worker(); i = i + 1 }   // cada worker: lê por svc<Rx<Tarefa>>, e faz svc<Ctx>("tarefas").done()
+    ctx.wait()                       // bloqueia até os 4 done()
 }
 ```
 
@@ -783,11 +796,12 @@ fn collect(xs: []i64): []i64 {
 **(d) Threads — canal por chave constante, nunca ponteiro nem id:**
 ```teko
 fn pipeline() {
-    var ctx = chan<Msg>::make<OsChan<Msg>>("pipe", 1024)  // main cria o canal (vive em F2, imortal), recebe o ctx (WaitGroup)
+    var ctx = chan<Msg>::make<OsChan<Msg>>("pipe", 1024)  // main cria o canal (serviço em F2), recebe o ctx
     var rx  = svc<Rx<Msg>>("pipe")    // leitor por chave
-    spawn handler()                   // SEM id — o handler resolve o escritor por chave
-    // dentro do handler: var w = svc<Tx<Msg>>("pipe")   // resolve em comp-time; nunca um &canal (penduraria)
-    ctx.wait()                        // WaitGroup
+    ctx.add(1)                        // MANUAL
+    spawn handler()                   // SEM id — o handler resolve tx/ctx por chave
+    // dentro do handler: var w = svc<Tx<Msg>>("pipe"); … ; svc<Ctx>("pipe").done()   // nunca um &canal (penduraria)
+    ctx.wait()                        // bloqueia até o done()
 }
 ```
 
