@@ -436,16 +436,24 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
             var ca = match parse_call_args(tokens, pp.next) { ParsedCallArgs as x => x; error as e => return e }
             return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = ca.args; arg_names = ca.arg_names; type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
         }
-        // (W9.4) explicit type-args at construction `Name<i64> { … }` — SPECULATIVE: parse `<…>`,
-        // and commit to a typed struct literal ONLY when a `{` follows the closed list (so `a < b`
-        // and a pending `>>` mid-close still backtrack to comparison). Requires allow_struct like the bare form.
-        if allow_struct && is_kind_at(tokens, pp.next, lexer::TokenKind::Lt) {
+        // (W9.4) explicit type-args after a path — SPECULATIVE: parse the `<…>` list, then commit by
+        // what follows the CLOSED list. A `(` → an explicit-generic FUNCTION call `foo<T>(args)` /
+        // `ns::foo<T>(args)`; this is UNAMBIGUOUS once the `(` is seen, so it is NOT struct-gated (it
+        // must work in an if/match scrutinee too). A `{` → a typed struct literal `Name<i64>{ … }`, and
+        // a `::` → a generic static call `Type<Args>::m(…)`; those two ARE struct-gated (a bare `{`
+        // opens a block in a scrutinee). Anything else (or a non-closing / pending `>>` list) backtracks
+        // to comparison, so `a < b` and `a < b > c` stay comparisons.
+        if is_kind_at(tokens, pp.next, lexer::TokenKind::Lt) {
             match parse_type_args(tokens, pp.next) {
                 ParsedTypeArgs as ta => {
-                    if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LBrace) {
+                    if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LParen) {
+                        var gca = match parse_call_args(tokens, ta.next) { ParsedCallArgs as x => x; error as e => return e }
+                        return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = gca.args; arg_names = gca.arg_names; type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }; next = gca.next }
+                    }
+                    if allow_struct && ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LBrace) {
                         return parse_struct_lit(tokens, ta.next, pp.node, ta.args)
                     }
-                    if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::ColonColon) {
+                    if allow_struct && ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::ColonColon) {
                         return parse_generic_static_call(tokens, ta.next, pp.node, ta.args, pos)
                     }
                 }
@@ -503,12 +511,29 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
             return err_at(tokens, p + 1, "expected a field or method name after '.'")
         }
         var name = tokens[p + 1].text
+        // explicit call-site type-args on a method: `recv.m<T>(args)` — SPECULATIVE. Parse the
+        // `<…>` list and commit to a generic method call ONLY when it closes (`pending_gt == 0`)
+        // AND a `(` follows; otherwise backtrack so `recv.m < b` stays a comparison. Mirrors the
+        // static-generic / typed-struct-literal disambiguation (parse_atom).
+        if is_kind_at(tokens, p + 2, lexer::TokenKind::Lt) {
+            match parse_type_args(tokens, p + 2) {
+                ParsedTypeArgs as ta => {
+                    if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LParen) {
+                        var mca = match parse_call_args(tokens, ta.next) { ParsedCallArgs as x => x; error as e => return e }
+                        node = Expr { kind = MethodCall { receiver = node; method = name; args = mca.args; type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }
+                        p = mca.next
+                        continue
+                    }
+                }
+                error => { }   // backtrack: `recv.m < b` comparison, or a pending mid-close
+            }
+        }
         if is_kind_at(tokens, p + 2, lexer::TokenKind::LParen) {
             // (2026-07-01) named-call (DEFARGS) is NOT yet supported through MethodCall's `.method()`
             // postfix form (today only builtin/flags-helper dispatch, not real OOP methods) —
             // ca.arg_names is intentionally discarded here; revisit once OOP methods land.
             var ca = match parse_call_args(tokens, p + 2) { ParsedCallArgs as x => x; error as e => return e }
-            node = Expr { kind = MethodCall { receiver = node; method = name; args = ca.args }; line = tokens[pos].line; col = tokens[pos].col }
+            node = Expr { kind = MethodCall { receiver = node; method = name; args = ca.args; type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }
             p = ca.next
         } else {
             node = Expr { kind = FieldAccess { receiver = node; field = name }; line = tokens[pos].line; col = tokens[pos].col }

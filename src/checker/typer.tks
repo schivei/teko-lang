@@ -445,7 +445,7 @@ fn bignum_call(kind: str, fn_name: str, args: []TExpr, ret: Type): TExpr {
     segs = teko::list::push(segs, parser::Segment { name = kind })
     segs = teko::list::push(segs, parser::Segment { name = fn_name })
     var callee = parser::Path { segments = segs }
-    TExpr { kind = TCall { callee = callee; args = args; call_ns = bignum_ns(kind); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = ret; line = 0; col = 0 }
+    TExpr { kind = TCall { callee = callee; args = args; call_ns = bignum_ns(kind); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = ret; line = 0; col = 0 }
 }
 
 /**
@@ -859,7 +859,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
     if last == "empty" {
         if c.args.len != 0 { return error { message = "teko::list::empty expects no arguments" } }
         // SENTINEL slice: element is the Void marker (unifies with any concrete slice — type_eq).
-        TExpr { kind = TCall { callee = c.callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Slice { element = Void { } }; line = 0; col = 0 }
+        TExpr { kind = TCall { callee = c.callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
     } else if last == "push" || is_pushfo {
         if c.args.len != 2 { return error { message = "teko::list::push expects two arguments (slice, item)" } }
         var s = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -880,7 +880,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
         // ignores a slice's element type but codegen's emit_list_empty REQUIRES it. (Mirror expr.c.)
         var arr_expr = match elem { Void => TExpr { kind = s.kind; type = Slice { element = result_elem }; line = s.line; col = s.col }; _ => s }
         var args = teko::list::push(teko::list::push(teko::list::empty(), arr_expr), x)
-        TExpr { kind = TCall { callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Slice { element = result_elem }; line = 0; col = 0 }
+        TExpr { kind = TCall { callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = result_elem }; line = 0; col = 0 }
     } else if last == "with_cap" {
         if c.args.len != 1 { return error { message = "teko::list::with_cap expects one argument (the initial capacity, a `u64`)" } }
         var n = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -891,7 +891,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
             n_typed = TExpr { kind = n.kind; type = cap_t; line = n.line; col = n.col }
         }
         var wargs = teko::list::push(teko::list::empty(), n_typed)
-        TExpr { kind = TCall { callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Slice { element = Void { } }; line = 0; col = 0 }
+        TExpr { kind = TCall { callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
     } else if last == "grow_inplace" {
         if c.args.len != 2 { return error { message = "teko::list::grow_inplace expects two arguments (a `ref []T`, item)" } }
         var r = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -914,7 +914,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
             }
         }
         var gargs = teko::list::push(teko::list::push(teko::list::empty(), r), item)
-        TExpr { kind = TCall { callee = c.callee; args = gargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
+        TExpr { kind = TCall { callee = c.callee; args = gargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
     } else {
         NotListBuiltin { }
     }
@@ -954,7 +954,7 @@ fn type_mem_free(c: parser::Call, env: Env, table: TypeTable): TExpr | NotMemFre
     }
     if !is_heap { return error { message = $"teko::mem::free target must be a `[]T` slice, a class instance, or a manual region handle (`unsafe #must_free type` with a single `uptr` field) — `{type_render(arg.type)}` owns no freeable heap block" } }
     var av = teko::list::push(teko::list::empty(), arg)
-    TExpr { kind = TCall { callee = c.callee; args = av; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
+    TExpr { kind = TCall { callee = c.callee; args = av; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
 }
 
 /**
@@ -985,7 +985,7 @@ fn type_region_new(c: parser::Call, env: Env, table: TypeTable): TExpr | NotRegi
     var rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
     if !rooted { return NotRegionOp { } }
     if c.args.len != 0 { return error { message = "teko::mem::region_new takes no arguments (it opens a fresh region)" } }
-    TExpr { kind = TCall { callee = c.callee; args = teko::list::empty(); call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Uptr { }; line = 0; col = 0 }
+    TExpr { kind = TCall { callee = c.callee; args = teko::list::empty(); call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Uptr { }; line = 0; col = 0 }
 }
 
 /**
@@ -1022,7 +1022,7 @@ fn type_region_alloc(c: parser::Call, env: Env, table: TypeTable): TExpr | NotRe
     if type_is_void(init.type) { return error { message = "teko::mem::region_alloc cannot allocate a `void` value" } }
     var ra_args = teko::list::push(teko::list::empty(), region)
     ra_args = teko::list::push(ra_args, init)
-    TExpr { kind = TCall { callee = c.callee; args = ra_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Ptr { inner = init.type }; line = 0; col = 0 }
+    TExpr { kind = TCall { callee = c.callee; args = ra_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Ptr { inner = init.type }; line = 0; col = 0 }
 }
 
 // (2026-07-01) call-site desugar for a `params`-variadic function `f`. Two shapes:
@@ -1417,7 +1417,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                         var bseg_m = parser::Segment { name = mc.method }
                         var bsegs: []parser::Segment = teko::list::push(teko::list::empty(), bseg_base)
                         bsegs = teko::list::push(bsegs, bseg_m)
-                        return TExpr { kind = TCall { callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot }; type = bf.ret; line = 0; col = 0 }
+                        return TExpr { kind = TCall { callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot; type_args = teko::list::empty() }; type = bf.ret; line = 0; col = 0 }
                     }
                     error => { }   // method not in the base vtable → fall through to the direct desugar (a NEW own method reachable only when receiver is statically the base)
                 }
@@ -1432,7 +1432,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     var cnames: []str = teko::list::empty()
     var ni: u64 = 0
     loop { if ni >= cargs.len { break }; cnames = teko::list::push(cnames, ""); ni++ }
-    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; type_args = teko::list::empty() }, env, table)
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; type_args = mc.type_args }, env, table)
 }
 
 /**
@@ -1502,7 +1502,7 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
     var seg_m = parser::Segment { name = mc.method }
     var isegs: []parser::Segment = teko::list::push(teko::list::empty(), seg_iface)
     isegs = teko::list::push(isegs, seg_m)
-    TExpr { kind = TCall { callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot }; type = f.ret; line = 0; col = 0 }
+    TExpr { kind = TCall { callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot; type_args = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
 }
 
 /**
@@ -1620,9 +1620,24 @@ fn unresolved_builtin_qualifier_error(callee: parser::Path, name: str): error {
  * @throws       an unknown callee, an arity/type mismatch, or an uninferable generic type-param
  */
 fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
-    var c = if c0.type_args.len == 0 { c0 } else {
-        var rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
-        parser::Call { callee = rc; args = c0.args; arg_names = c0.arg_names; type_args = c0.type_args }
+    // Explicit call-site type-args, when present, are one of TWO shapes that share this Call node:
+    //   • a generic STATIC/factory call `Type<Args>::m(…)` — the args bind the OWNER TYPE's params
+    //     (retargeted to the mangled instance owner, unchanged pre-existing behavior); or
+    //   • an explicit generic FUNCTION/METHOD call `foo<Args>(…)` / `recv.m<Args>(…)` — the args
+    //     bind the FUNCTION's own type-params (the new call-site form). We disambiguate by resolving
+    //     the callee: a callee that names a function takes the explicit-fn path; otherwise it is the
+    //     static-type retarget. `explicit_fn_args` is empty for every ordinary (bare/inferred) call.
+    var explicit_fn_args: []parser::TypeExpr = teko::list::empty()
+    var c = c0
+    if c0.type_args.len > 0 {
+        var callee_is_fn = match lookup_call(env, c0.callee) { Type as t => match t { Func => true; _ => false }; error => false }
+        if callee_is_fn {
+            explicit_fn_args = c0.type_args
+            c = parser::Call { callee = c0.callee; args = c0.args; arg_names = c0.arg_names; type_args = teko::list::empty() }
+        } else {
+            var rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
+            c = parser::Call { callee = rc; args = c0.args; arg_names = c0.arg_names; type_args = c0.type_args }
+        }
     }
     match type_list_builtin(c, env, table) {   // teko::list::empty / push (generic)
         TExpr as te => return te
@@ -1659,7 +1674,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             var ok = match a.type { Str => true; Error => true; _ => false }
             if !ok { return error { message = "panic's argument must be an `error` or a `str`" } }
             var pargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
+            return TExpr { kind = TCall { callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
         }
         if name == "exit" {
             if c.args.len != 1 { return error { message = "exit expects one argument (an integer status code)" } }
@@ -1667,7 +1682,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             var ok = match a.type { Prim as p => prim_is_int(p.kind); _ => false }
             if !ok { return error { message = "exit's argument must be an integer status code" } }
             var eargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
+            return TExpr { kind = TCall { callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
         }
     }
     var resolved_ns = match lookup_call(env, c.callee) { Type => call_ns(env, c.callee); error => "" }
@@ -1728,10 +1743,46 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             // (post-typer) stamps the concrete instance and rewrites the callee. Type-params that appear
             // only in the return type cannot be inferred from args (M.2 no-guessing) → honest error.
             var all_tps = collect_sig_type_params(ft, table, teko::list::empty())
+            // Explicit type-args on a NON-generic callee are a plain error (nothing to instantiate).
+            if explicit_fn_args.len > 0 && all_tps.len == 0 {
+                return error { message = $"'{name}' is not generic — it takes no explicit type arguments" }
+            }
             if all_tps.len > 0 {
                 var param_tps: []str = teko::list::empty()
                 var pp = 0
                 loop { if pp >= f.params.len { break }; param_tps = collect_sig_type_params(f.params[pp], table, param_tps); pp++ }
+                if explicit_fn_args.len > 0 {
+                    // EXPLICIT call-site type-args WIN over inference (owner ruling): bind each of the
+                    // signature's type-params (in appearance order) to the corresponding resolved arg,
+                    // dispensing with inference — this also enables a type-param that appears ONLY in the
+                    // return type (uninferable from args). The typed args must still FIT the substituted
+                    // parameters. The resolved concrete types ride the TCall so the monomorph pass stamps
+                    // exactly this instance (instead of re-inferring from the args).
+                    if explicit_fn_args.len != all_tps.len {
+                        return error { message = $"'{name}' takes {all_tps.len} type argument(s), but {explicit_fn_args.len} were given" }
+                    }
+                    var s = Subst { params = all_tps; names = teko::list::empty(); types = teko::list::empty() }
+                    var xtypes: []Type = teko::list::empty()
+                    var xi = 0
+                    loop {
+                        if xi >= all_tps.len { break }
+                        var rt = match resolve_type(explicit_fn_args[xi], table, env.cur_ns) { Type as tt => tt; error as e => return e }
+                        match rt { Reference => return error { message = "a reference cannot be an explicit generic type argument (it would be stored / escape)" }; _ => { } }
+                        s = Subst { params = all_tps; names = teko::list::push(s.names, all_tps[xi]); types = teko::list::push(s.types, rt) }
+                        xtypes = teko::list::push(xtypes, rt)
+                        xi++
+                    }
+                    var vi = 0
+                    loop {
+                        if vi >= targs.len { break }   // targs.len == f.params.len (arity checked above)
+                        var want = subst_type(f.params[vi], s)
+                        if !assignable_to(targs[vi].type, want, table) {
+                            return error { message = $"argument {vi + 1} of '{name}' does not fit the explicit instantiation (expected {type_render(want)}, got {type_render(targs[vi].type)})" }
+                        }
+                        vi++
+                    }
+                    return TExpr { kind = TCall { callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                }
                 var rk = 0
                 loop {
                     if rk >= all_tps.len { break }
@@ -1745,7 +1796,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                     s = match unify(f.params[gi], targs[gi].type, s, table) { Subst as x => x; error as e => return e }
                     gi++
                 }
-                return TExpr { kind = TCall { callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                return TExpr { kind = TCall { callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = subst_type(f.ret, s); line = 0; col = 0 }
             }
             // NON-generic: each argument must WIDEN into the parameter's type (B.14 case→variant, T→T?)
             // OR be a fitting literal that adopts it (C6) — same rule as binding/return/assign.
@@ -1787,7 +1838,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             // LOCAL (resolved_ns == "" — only define_fn sets a namespace). It is a `tk_closure` VALUE,
             // so codegen calls through `((R(*)(A,B))f.fn)(args)` using the Func type for the cast.
             var is_closure = in_scope && resolved_ns.len == 0
-            TExpr { kind = TCall { callee = c.callee; args = args; call_ns = resolved_ns; is_closure_call = is_closure; callee_type = ft; is_iface_dispatch = false; iface_slot = 0 }; type = f.ret; line = 0; col = 0 }
+            TExpr { kind = TCall { callee = c.callee; args = args; call_ns = resolved_ns; is_closure_call = is_closure; callee_type = ft; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
         }
         _ => error { message = $"not a function: {name}" }
     }

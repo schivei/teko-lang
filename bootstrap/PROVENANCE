@@ -1,56 +1,62 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): re-harvested after the owner's `->`→`:` return
-# refac (commit 408171af) shifted an emitted diagnostic string, so the committed source no longer
-# compiled to the previous bootstrap (b02cf8e4). New harvest b84f482d self-reproduces byte-identical
-# (gen1==gen2 fixpoint), verified independently from a clean archive. The owner did NOT edit
+# RESEED (hand-harvest, by-hand per owner order): re-harvested after teaching the compiler EXPLICIT
+# CALL-SITE TYPE-ARGS for generics (functions AND methods). The added parser branches, checker
+# threading and the new `TCall.type_args` field shift the emitted compiler, so the committed source no
+# longer compiled to the previous bootstrap (b84f482d). New harvest 4fc1f137 self-reproduces
+# byte-identical (gen1==gen2 fixpoint), verified from the same source tree. The owner did NOT edit
 # bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# §4 R3 — strip self explícito + des-ensino receptor solto/super-binding; grafia nova pura
-# (2026-08-11). FINAL sub-cycle of §4: the compiler now rebuilds itself 100% in the new spelling.
+# explicit call-site type-args (fn/method) — aditivo, colheita à mão (2026-08-11)
 # ---------------------------------------------------------------------------------------------
-# Hand-harvested for the THIRD and LAST sub-cycle of the §4 self/base/static work
-# (docs/design/plano-secao4-self-base-static.md, Crumb 6 + 6b + Crumb 7). This bootstrap carries,
-# on top of R2 (statics marked + synthetic-`self` injection is the parser default):
-#   - Crumb 6 (SWEEP-B): the explicit `self` receiver (param[0], untyped, named `self`) STRIPPED
-#     from every instance-method DECLARATION in the corpus (54 sites: 43 in `.tks` — rawbuf, iter,
-#     io/stream+file_stream+compress_stream, collections/map+list — and 11 in `.tkt` fixtures). Only
-#     the receiver slot was removed; the `self` in method BODIES stays (it now refers to the
-#     synthetic receiver the parser injects). String/comment occurrences were left untouched.
-#   - Crumb 6b (G, super call-sites → `base`): ZERO sites in the corpus (no `class Base(name)`, no
-#     `name.super()`); a no-op sweep confirmed by grep.
-#   - Crumb 7 (DES-TEACH): the OLD spelling now ERRORS (§12.1). (a) `parse_params` lost
-#     `allow_untyped_first` and the loose-receiver branch — an untyped first param, or a written
-#     `self`, is a parse error; `parse_function`'s `allow_receiver` became `is_type_method` (its sole
-#     remaining duty is injecting the synthetic receiver for a non-`static` member). (b) the NAMED
-#     super-binding was retired: `parse_class_body` no longer parses `class Base(name)` (a `(` there
-#     is now an error — super is reached via `base`), and the checker's
-#     `has_base_binding`/`base_binding_name`/`inject_base_binding` branch is gone; `base` injection is
-#     regated on the class HAVING a base (`base_name != ""`) and is the SOLE super path. The AST
-#     fields `has_base_binding`/`base_binding_name` (ClassBody) are kept VESTIGIAL (always false/"")
-#     so the `.tkb` serialization format is untouched; their physical removal is a W15 pass post-§4.
-# R3 is a strict NO-OP over the corpus behavior: the source was already stripped of every explicit
-# receiver (Crumb 6) and carries 0 base-bindings, so removing the acceptance of both breaks nothing.
-# Verified by a green C-backend dry build under R2.
+# Generics could be DECLARED (`fn id<T>`, `Box<T>`) and CALLED only with `T` INFERRED from the
+# arguments. The owner ruled that if generics exist, they must be instantiable EXPLICITLY at the call
+# site — for both a free FUNCTION and an instance METHOD. This reseed carries that feature, purely
+# ADDITIVE over the corpus (nothing in the tree writes the new spelling, so every existing call is
+# byte-identical). What landed:
+#   - PARSER. `MethodCall` gained a `type_args: []TypeExpr` field. `parse_postfix` grows a speculative
+#     `recv.m<T>(args)` branch, and `parse_atom` a speculative `foo<T>(args)` / `ns::foo<T>(args)`
+#     branch. Both reuse `parse_type_args` + backtrack: a `<…>` list only commits when it CLOSES
+#     (`pending_gt == 0`) AND a `(` follows — otherwise it backtracks to a comparison, so `a < b` and
+#     the chain `a < b < c` are untouched. The `(`-commit is NOT struct-gated (unambiguous once the
+#     `(` is seen), so an explicit call works inside an if/match scrutinee too; the `{` (typed struct
+#     literal) and `::` (generic static call) commits stay struct-gated exactly as before.
+#   - CHECKER. `type_call` disambiguates the two shapes that share the `Call` node — a generic STATIC
+#     call `Type<Args>::m(…)` (args bind the OWNER TYPE, retargeted as before) vs an explicit
+#     FUNCTION/METHOD call (args bind the FUNCTION's own type-params) — by resolving the callee. When
+#     explicit args are present they WIN over inference: the signature's type-params bind to the given
+#     types (in appearance order), the typed args must fit the substituted parameters, and a type-param
+#     that appears ONLY in the return type (uninferable from args) becomes callable. `type_method_call`
+#     threads `mc.type_args` through its desugar into `type_call`.
+#   - MONOMORPH. `TCall` gained `type_args: []Type` (the RESOLVED explicit args). The mono pass, at a
+#     generic-fn call carrying them, binds the instance Subst from the explicit args (substituted
+#     through the enclosing instantiation) INSTEAD of re-inferring from the argument types — so the
+#     stamped instance matches what the typer chose (explicit wins end-to-end). A bare/inferred call
+#     keeps the pre-existing inference path, byte-identical.
+#   - .tkb. The typed-tree codec appends `TCall.type_args` (a type list, empty for every bare call) on
+#     the plain-call tag, defaulting to empty on read — format stays append/compatible, no ordinal
+#     broke.
+# Proven by a probe (examples/probes/explicit_type_args): `id<i64>(3)`, `first<A,B>`, the return-only
+# `empty_list<i64>()`, and the method `b.wrap<i64>(9)` all PARSE + CHECK + LOWER + run (exit 0); the
+# bare `empty_list()` still errors "cannot infer … only in the return type". Comparisons and the whole
+# generic corpus (examples/regressions/own_native) are byte-identical in behavior.
 #
-# FIXPOINT. The reseed converged in one step on this base: gen0 (cc of the R2 bootstrap) C-built the
-# des-taught source into bin-a; compiling bin-a into the R3 compiler and rebuilding the source
-# produced a byte-identical bin-b (sha256 below). The committed file is that fixpoint — it
-# self-reproduces:
+# FIXPOINT. The reseed converged in one step: gen0 (cc of the previous bootstrap) C-built the taught
+# source into bin-a; compiling bin-a into the new compiler and rebuilding the source produced a
+# byte-identical bin-b (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0';  TEKO_BACKEND=c gen0' build . -> OUT;  OUT/teko.c == bootstrap/teko.c.
-# With R3, §4 is COMPLETE: the compiler rebuilds itself entirely in the new spelling — synthetic
-# `self`, `static` members, `base` super, and `self` as a return type.
 #
 # `run: hand-harvest` — no CI run produced this file; it was harvested by hand on the branch, in the
-# owner's ordered §4 sequence. `commit: pending drain` — the landing commit is not yet known at
-# harvest time (this record is written in the same change that commits the file).
+# owner's ordered sequence. `commit: pending drain` — the landing commit is not yet known at harvest
+# time (this record is written in the same change that commits the file).
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  b84f482dbe81877c07bb0f2f04dccb7d2ac956393797b2a76cbc8323cea6d626
+sha256:  4fc1f137e86fe4c86faca7bfe9f593bec067e2336e0c868871fdfabd26286616
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§4 R3); sha256 is read directly off
-         the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (explicit call-site type-args);
+         sha256 is read directly off the committed file and was proven a fixpoint (bin-a == bin-b,
+         byte-identical).

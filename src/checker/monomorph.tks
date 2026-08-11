@@ -479,7 +479,7 @@ fn rekey_struct_constraint_dispatch(cl: TCall, args: []TExpr, table: TypeTable):
     if !is_struct_named(table, recv) { return cl }
     var method = cl.callee.segments[cl.callee.segments.len - 1].name
     var direct = struct_dispatch_callee(recv, method)
-    TCall { callee = direct; args = cl.args; call_ns = recv; is_closure_call = false; callee_type = cl.callee_type; is_iface_dispatch = false; iface_slot = 0 }
+    TCall { callee = direct; args = cl.args; call_ns = recv; is_closure_call = false; callee_type = cl.callee_type; is_iface_dispatch = false; iface_slot = 0; type_args = cl.type_args }
 }
 
 /**
@@ -515,7 +515,78 @@ fn rekey_iface_dispatch(cl: TCall, args: []TExpr, table: TypeTable): TCall {
     var owner = match conformed_owner_iface(recv_class, method, table) { str as o => o; null => return cl }
     var slot = match iface_method_slot(owner, method, table) { u32 as sv => sv; null => return cl }
     var newcallee = rewrite_iface_segment(cl.callee, owner)
-    TCall { callee = newcallee; args = cl.args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = slot }
+    TCall { callee = newcallee; args = cl.args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = slot; type_args = cl.type_args }
+}
+
+/**
+ * The generic function/method signature's type-param universe, in APPEARANCE order (params then
+ * return) — the SAME order the typer's `collect_sig_type_params` yields, so an explicit-call-site
+ * type-arg list (stored positionally on the TCall) binds to the right names here. Each param's
+ * annotation resolves through `ptable` (the fn's type-params in scope); a param with no annotation
+ * (the injected `self` receiver of an instance method) is skipped. A resolution failure on a param
+ * is skipped rather than fatal — the param simply contributes no type-param name (any genuinely bad
+ * signature was already reported by the checker).
+ *
+ * @param gf      the generic fn/method template
+ * @param ptable  the type-param-in-scope table (resolves the fn's own `T…`)
+ * @param table   the folded type table
+ * @return        the fn's signature type-param names, deduped, in appearance order
+ */
+fn fn_sig_type_params(gf: TFunction, ptable: TypeTable, table: TypeTable): []str {
+    var acc: []str = teko::list::empty()
+    var i = 0
+    loop {
+        if i >= gf.params.len { break }
+        if gf.params[i].has_type {
+            match resolve_type(gf.params[i].type_ann, ptable, gf.namespace) {
+                Type as pt => acc = collect_sig_type_params(pt, table, acc)
+                error => { }
+            }
+        }
+        i++
+    }
+    collect_sig_type_params(gf.return_type, table, acc)
+}
+
+/**
+ * The instantiation Subst for a generic-fn call at monomorphization. When the call carries EXPLICIT
+ * call-site type-args (`foo<T>(…)` / `recv.m<T>(…)`), they WIN over inference (owner ruling): each
+ * signature type-param (appearance order) binds to the corresponding concrete arg, substituted through
+ * the enclosing instantiation `s` so a nested `make<U>()` inside `outer<U>` concretizes. Otherwise the
+ * Subst is INFERRED from the rewritten argument types against the fn's parameter patterns (the pre-
+ * existing path — byte-identical for every bare/inferred call, the whole existing corpus).
+ *
+ * @param gf     the generic fn/method template found for this callee
+ * @param cl     the (typed) call — cl.type_args carries the resolved explicit args, empty if inferred
+ * @param args   the rewritten (concrete) argument TExprs
+ * @param s      the enclosing instantiation's Subst (for nested-generic concretization)
+ * @param table  the folded type table
+ * @return       the `{type-param → concrete}` Subst that stamps this instance
+ * @throws       an inference conflict (inferred path) or a param resolution error
+ */
+fn mono_call_subst(gf: TFunction, cl: TCall, args: []TExpr, s: Subst, table: TypeTable): Subst | error {
+    var ptable = type_param_table(gf.type_params, gf.type_constraints, "", table)
+    if cl.type_args.len > 0 {
+        var inst_tps = fn_sig_type_params(gf, ptable, table)
+        var xs = Subst { params = gf.type_params; names = teko::list::empty(); types = teko::list::empty() }
+        var xi = 0
+        loop {
+            if xi >= inst_tps.len { break }
+            if xi >= cl.type_args.len { break }
+            xs = Subst { params = gf.type_params; names = teko::list::push(xs.names, inst_tps[xi]); types = teko::list::push(xs.types, subst_type(cl.type_args[xi], s)) }
+            xi++
+        }
+        return xs
+    }
+    var infs = Subst { params = gf.type_params; names = teko::list::empty(); types = teko::list::empty() }
+    var gi = 0
+    loop {
+        if gi >= args.len { break }   // args.len == gf.params.len (arity checked at typing); bound by the rewritten-arg list
+        var pat = match resolve_type(gf.params[gi].type_ann, ptable, gf.namespace) { Type as t => t; error as er => return er }   // (#109 W1) ref_ns = the generic fn's declaring namespace
+        infs = match unify(pat, args[gi].type, infs, table) { Subst as x => x; error as er => return er }
+        gi++
+    }
+    infs
 }
 
 // ── the total rewrite walk ───────────────────────────────────────────────────────────────
@@ -575,24 +646,17 @@ fn mono_texpr(e: TExpr, s: Subst, items: []TItem, table: TypeTable): WExpr | err
             var bare = if cl.callee.segments.len == 0 { "" } else { cl.callee.segments[cl.callee.segments.len - 1].name }
             match find_generic_fn(items, bare) {
                 TFunction as gf => {
-                    // INFER the Subst from the rewritten arg types against the generic's param patterns.
-                    var ptable = type_param_table(gf.type_params, gf.type_constraints, "", table)
-                    var sub = Subst { params = gf.type_params; names = teko::list::empty(); types = teko::list::empty() }
-                    var gi = 0
-                    loop {
-                        if gi >= args.len { break }   // args.len == gf.params.len (arity checked at typing); bound by the rewritten-arg list
-                        var pat = match resolve_type(gf.params[gi].type_ann, ptable, gf.namespace) { Type as t => t; error as er => return er }   // (#109 W1) ref_ns = the generic fn's declaring namespace
-                        sub = match unify(pat, args[gi].type, sub, table) { Subst as x => x; error as er => return er }
-                        gi++
-                    }
+                    // The instantiation Subst: EXPLICIT call-site type-args (cl.type_args) WIN over
+                    // inference when present; otherwise infer from the rewritten arg types (mono_call_subst).
+                    var sub = match mono_call_subst(gf, cl, args, s, table) { Subst as x => x; error as er => return er }
                     var mangled = mono_mangle_name(bare, gf.type_params, sub)
                     // rewrite the callee's LAST segment to the mangled name (keep the leading segments + call_ns).
                     var newcallee = rewrite_last_segment(cl.callee, mangled)
                     var rec = MonoInst { fn_name = bare; mangled = mangled; s = sub }
-                    WExpr { expr = TExpr { kind = TCall { callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
+                    WExpr { expr = TExpr { kind = TCall { callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
                 }
                 null => {
-                    var passthrough = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }
+                    var passthrough = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }
                     var rekeyed = rekey_iface_dispatch(passthrough, args, table)
                     WExpr { expr = TExpr { kind = rekeyed; type = nt; line = e.line; col = e.col }; insts = acc }
                 }
