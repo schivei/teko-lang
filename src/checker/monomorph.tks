@@ -21,7 +21,15 @@ use teko::parser
 // A discovered instantiation: the generic fn's bare name, the mangled instance name, and
 // the Subst (type-param → concrete) that stamps it. The Subst's `names`/`types` are the
 // inferred bindings; `params` is the generic's type-param universe.
-type MonoInst = struct { fn_name: str; mangled: str; s: Subst }
+//
+// `owner_ns` — the STAMP TARGET NAMESPACE. Empty for an ordinary free-fn / non-generic-type
+// instance-method stamp (the stamp lands in the template's own `gf.namespace`, unchanged). Set to a
+// generic-type INSTANCE name (`Gen__g__i64`) for a GENERIC method of a GENERIC type: the stamped
+// method must live in the instance's namespace (not the abstract template's), and `s` is the COMPOSED
+// Subst (owner `T` + instance remap + method `T2`) so both levels of type-param resolve. It also
+// disambiguates the dedup ledger (`mono_inst_seen`) so `Gen<i64>::g2<i64>` and `Gen<str>::g2<i64>`
+// stamp as two distinct symbols instead of colliding on the bare method mangle `g2__g__i64`.
+type MonoInst = struct { fn_name: str; mangled: str; s: Subst; owner_ns: str }
 
 /**
  * (W11/S6) CONSTRAINT CHECKING — does `concrete` satisfy the single atom `atom_name`? Runs HERE,
@@ -187,6 +195,21 @@ fn mono_seen(insts: []MonoInst, mangled: str): bool {
     loop {
         if i >= insts.len { break }
         if teko::runtime::str_eq(insts[i].mangled, mangled) { return true }
+        i++
+    }
+    false
+}
+
+// has this exact instantiation (owner-namespace × mangled name) already been stamped / queued? The
+// dedup key for the PHASE-2 ledger — the FULL identity, so a generic-type instance-method stamp
+// (`Gen__g__i64` × `g2__g__i64`) is distinct from the same bare method mangle under another instance
+// (`Gen__g__str` × `g2__g__i64`). A free-fn stamp carries owner_ns "" and its mangle is globally
+// unique, so both fields matching reduces to the old bare-mangle check for it (byte-identical).
+fn mono_inst_seen(insts: []MonoInst, inst: MonoInst): bool {
+    var i = 0
+    loop {
+        if i >= insts.len { break }
+        if teko::runtime::str_eq(insts[i].mangled, inst.mangled) && teko::runtime::str_eq(insts[i].owner_ns, inst.owner_ns) { return true }
         i++
     }
     false
@@ -556,18 +579,27 @@ fn fn_sig_type_params(gf: TFunction, ptable: TypeTable, table: TypeTable): []str
  * Subst is INFERRED from the rewritten argument types against the fn's parameter patterns (the pre-
  * existing path — byte-identical for every bare/inferred call, the whole existing corpus).
  *
- * @param gf     the generic fn/method template found for this callee
- * @param cl     the (typed) call — cl.type_args carries the resolved explicit args, empty if inferred
- * @param args   the rewritten (concrete) argument TExprs
- * @param s      the enclosing instantiation's Subst (for nested-generic concretization)
- * @param table  the folded type table
- * @return       the `{type-param → concrete}` Subst that stamps this instance
- * @throws       an inference conflict (inferred path) or a param resolution error
+ * `owner_tps` extends the pattern-resolution scope with the ENCLOSING generic type's params, for a
+ * generic method of a generic-type instance (`Gen<i64>::g2(x)` inferred): the desugared receiver
+ * param is typed as the owner generic (`Cell<T>`/`Self`), which the method's own type-param scope
+ * cannot resolve. With owner params in scope the receiver pattern resolves; a param whose pattern
+ * cannot resolve or cannot unify (the receiver against the concrete instance) is SKIPPED — it binds no
+ * METHOD type-param, which is all this Subst recovers. Empty owner_tps = the pre-existing free-fn /
+ * non-generic-type path (byte-identical: same method-only ptable, every error surfaces, no skip).
+ *
+ * @param gf         the generic fn/method template found for this callee
+ * @param cl         the (typed) call — cl.type_args carries the resolved explicit args, empty if inferred
+ * @param args       the rewritten (concrete) argument TExprs
+ * @param s          the enclosing instantiation's Subst (for nested-generic concretization)
+ * @param owner_tps  the enclosing generic type's params (empty for a free fn / non-generic owner)
+ * @param table      the folded type table
+ * @return           the `{type-param → concrete}` Subst that stamps this instance
+ * @throws           an inference conflict (inferred path) or a param resolution error
  */
-fn mono_call_subst(gf: TFunction, cl: TCall, args: []TExpr, s: Subst, table: TypeTable): Subst | error {
-    var ptable = type_param_table(gf.type_params, gf.type_constraints, "", table)
+fn mono_call_subst(gf: TFunction, cl: TCall, args: []TExpr, s: Subst, owner_tps: []str, table: TypeTable): Subst | error {
     if cl.type_args.len > 0 {
-        var inst_tps = fn_sig_type_params(gf, ptable, table)
+        var ptable0 = type_param_table(gf.type_params, gf.type_constraints, "", table)
+        var inst_tps = fn_sig_type_params(gf, ptable0, table)
         var xs = Subst { params = gf.type_params; names = teko::list::empty(); types = teko::list::empty() }
         var xi = 0
         loop {
@@ -578,15 +610,89 @@ fn mono_call_subst(gf: TFunction, cl: TCall, args: []TExpr, s: Subst, table: Typ
         }
         return xs
     }
+    // INFERRED: resolve param patterns with the method's type-params (plus, for a generic-instance
+    // method, the enclosing type's params) in scope, unifying each against its concrete arg type.
+    var lenient = owner_tps.len > 0
+    var all_tps = gf.type_params
+    var all_tcs = gf.type_constraints
+    var oi = 0
+    loop { if oi >= owner_tps.len { break }; all_tps = teko::list::push(all_tps, owner_tps[oi]); all_tcs = teko::list::push(all_tcs, parser::NoConstraint { }); oi++ }
+    var ptable = type_param_table(all_tps, all_tcs, "", table)
     var infs = Subst { params = gf.type_params; names = teko::list::empty(); types = teko::list::empty() }
     var gi = 0
     loop {
         if gi >= args.len { break }   // args.len == gf.params.len (arity checked at typing); bound by the rewritten-arg list
-        var pat = match resolve_type(gf.params[gi].type_ann, ptable, gf.namespace) { Type as t => t; error as er => return er }   // (#109 W1) ref_ns = the generic fn's declaring namespace
-        infs = match unify(pat, args[gi].type, infs, table) { Subst as x => x; error as er => return er }
+        match resolve_type(gf.params[gi].type_ann, ptable, gf.namespace) {   // (#109 W1) ref_ns = the generic fn's declaring namespace
+            Type as pat => match unify(pat, args[gi].type, infs, table) {
+                Subst as x => infs = x
+                error as er => { if !lenient { return er } }   // a receiver/owner-typed param binds no method type-param — skip when lenient
+            }
+            error as er => { if !lenient { return er } }   // a param the method scope cannot resolve (the owner-typed receiver) — skip when lenient
+        }
         gi++
     }
     infs
+}
+
+/**
+ * The stamped generic-INSTANCE decl named `name` (`Gen__g__i64`) in the folded table — the source of
+ * the concrete field types a method stamp recovers the owner's `{T → concrete}` Subst from. Null when
+ * `name` names no such registration (never a generic instance). (generic method in generic type.)
+ *
+ * @param table  the folded type table
+ * @param name   the (bare, stamped) instance name
+ * @return       the instance decl, or null
+ */
+fn find_instance_decl(table: TypeTable, name: str): parser::TypeDecl | null {
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => td
+        error => null
+    }
+}
+
+/**
+ * Is this call a GENERIC METHOD of a GENERIC-TYPE INSTANCE — the 4th call shape (`Gen<i64>::g2<i64>()`
+ * and the inferred `Gen<i64>::g2(x)`)? True iff the callee resolves to a generic method (`gf` carries
+ * method-level type-params) AND the call's target namespace is a stamped generic INSTANCE (`call_ns`
+ * carries the `__g__` infix) whose base owns `gf` (the method's declaring namespace's last segment is
+ * that base). Such a call cannot ride the free-fn stamp path: the stamp must land in the INSTANCE
+ * namespace (not the abstract template's) and its body needs the owner `T` bound too, not only the
+ * method `T2`. An instance method of a NON-generic type (`b.wrap<i64>()`, call_ns `Box`, no `__g__`)
+ * is NOT this case — it keeps riding the free-fn path unchanged, since there `gf.namespace == call_ns`.
+ *
+ * @param gf       the generic TFunction the callee resolved to
+ * @param call_ns  the typed call's resolved target namespace
+ * @param table    the folded type table
+ * @return         true iff the call is a generic method of a generic-type instance
+ */
+fn is_generic_instance_method_call(gf: TFunction, call_ns: str, table: TypeTable): bool {
+    if gf.type_params.len == 0 { return false }
+    var stem = g_instance_base(call_ns)
+    if teko::runtime::str_eq(stem, call_ns) { return false }   // call_ns carries no `__g__` → not an instance
+    if !method_ns_owns_base(gf.namespace, stem) { return false }   // gf is not a method of this instance's type
+    match find_generic_template(table, stem) { TemplateReg => true; null => false }
+}
+
+/**
+ * Compose the instance-level Subst (owner `T → concrete` + the `Base → Gen__g__i64` receiver remaps,
+ * from `instance_method_subst_l5`) with the method-level Subst (`T2 → concrete`, from `mono_call_subst`)
+ * into ONE Subst that stamps a generic method of a generic-type instance. The method bindings are
+ * appended (name, type, and the param NAME into the substitutable universe) on top of the instance
+ * Subst, so a stamped body's owner `T`, receiver/`Self`, AND method `T2` all resolve in a single pass.
+ *
+ * @param inst_subst  the instance-level Subst (owner params + receiver remaps)
+ * @param msub        the method-level Subst (the method's own type-params → concrete)
+ * @return            the composed Subst
+ */
+fn compose_method_subst(inst_subst: Subst, msub: Subst): Subst {
+    var out = inst_subst
+    var i = 0
+    loop {
+        if i >= msub.names.len { break }
+        out = Subst { params = teko::list::push(out.params, msub.names[i]); names = teko::list::push(out.names, msub.names[i]); types = teko::list::push(out.types, msub.types[i]) }
+        i++
+    }
+    out
 }
 
 // ── the total rewrite walk ───────────────────────────────────────────────────────────────
@@ -646,13 +752,32 @@ fn mono_texpr(e: TExpr, s: Subst, items: []TItem, table: TypeTable): WExpr | err
             var bare = if cl.callee.segments.len == 0 { "" } else { cl.callee.segments[cl.callee.segments.len - 1].name }
             match find_generic_fn(items, bare) {
                 TFunction as gf => {
+                    // A GENERIC method of a GENERIC-TYPE instance (`Gen<i64>::g2<i64>()`, inferred
+                    // `Gen<i64>::g2(x)`) cannot ride the plain free-fn stamp: its body carries the owner
+                    // `T` too (not only the method `T2`), and the stamp must land in the INSTANCE
+                    // namespace (`Gen__g__i64`), not the abstract template's. Compose the instance Subst
+                    // (owner T + receiver remap) with the method Subst (T2) and target the instance ns.
+                    if is_generic_instance_method_call(gf, cl.call_ns, table) {
+                        var stem = g_instance_base(cl.call_ns)
+                        var tpl = match find_generic_template(table, stem) { TemplateReg as tr => tr; null => return error { message = teko::str::concat("internal: monomorph lost the generic template for ", stem) } }
+                        var idecl = match find_instance_decl(table, cl.call_ns) { parser::TypeDecl as d => d; null => return error { message = teko::str::concat("internal: monomorph lost the generic instance ", cl.call_ns) } }
+                        // The method Subst (`T2 → concrete`), resolving the owner-typed receiver param with
+                        // the owner's params also in scope (mono_call_subst's lenient inferred path).
+                        var msub = match mono_call_subst(gf, cl, args, s, tpl.decl.type_params, table) { Subst as x => x; error as er => return er }
+                        var mmangled = mono_mangle_name(bare, gf.type_params, msub)
+                        var isub = instance_method_subst_l5(tpl.decl, tpl.namespace, idecl, table)
+                        var composed = compose_method_subst(isub, msub)
+                        var newcalleeM = rewrite_last_segment(cl.callee, mmangled)
+                        var recM = MonoInst { fn_name = bare; mangled = mmangled; s = composed; owner_ns = cl.call_ns }
+                        return WExpr { expr = TExpr { kind = TCall { callee = newcalleeM; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, recM) }
+                    }
                     // The instantiation Subst: EXPLICIT call-site type-args (cl.type_args) WIN over
                     // inference when present; otherwise infer from the rewritten arg types (mono_call_subst).
-                    var sub = match mono_call_subst(gf, cl, args, s, table) { Subst as x => x; error as er => return er }
+                    var sub = match mono_call_subst(gf, cl, args, s, teko::list::empty(), table) { Subst as x => x; error as er => return er }
                     var mangled = mono_mangle_name(bare, gf.type_params, sub)
                     // rewrite the callee's LAST segment to the mangled name (keep the leading segments + call_ns).
                     var newcallee = rewrite_last_segment(cl.callee, mangled)
-                    var rec = MonoInst { fn_name = bare; mangled = mangled; s = sub }
+                    var rec = MonoInst { fn_name = bare; mangled = mangled; s = sub; owner_ns = "" }
                     WExpr { expr = TExpr { kind = TCall { callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
                 }
                 null => {
@@ -1160,9 +1285,15 @@ fn stamp_instance_methods(inst: parser::TypeDecl, items: []TItem, table: TypeTab
         if mi >= methods.len { break }
         match find_template_method(items, stem, methods[mi].name) {
             TFunction as tmpl => {
-                var wf = match stamp_one_instance_method(inst.name, tmpl, s, items, table) { WFn as w => w; error as e => return e }
-                fns = teko::list::push(fns, wf.func)
-                insts = mono_inst_concat(insts, wf.insts)
+                // A GENERIC method (method-level type-params) is NOT stamped here — a single per-instance
+                // stamp would erase `T2` and emit `tk_t_T2`. It is stamped PER METHOD-INSTANTIATION at each
+                // call site instead (the composed-Subst path in `mono_texpr`, keyed to the instance ns),
+                // so `Gen<i64>::g2<i64>` and `Gen<i64>::g2(x)` lower with both `T` and `T2` resolved.
+                if tmpl.type_params.len == 0 {
+                    var wf = match stamp_one_instance_method(inst.name, tmpl, s, items, table) { WFn as w => w; error as e => return e }
+                    fns = teko::list::push(fns, wf.func)
+                    insts = mono_inst_concat(insts, wf.insts)
+                }
             }
             null => { }
         }
@@ -1285,7 +1416,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         if qi >= queue.len { break }
         var inst = queue[qi]
         qi++
-        if mono_seen(stamped, inst.mangled) { continue }   // already stamped → skip
+        if mono_inst_seen(stamped, inst) { continue }   // already stamped (owner-ns × mangle) → skip
         if stamped.len >= ceiling {
             return error { message = "monomorphization exceeded the instantiation ceiling (5000) — likely unbounded polymorphic recursion" }
         }
@@ -1308,7 +1439,11 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         queue = mono_inst_concat(queue, wb.insts)
         var no_tps: []str = teko::list::empty()
         var no_tcs: []parser::ConstraintExpr = teko::list::empty()
-        var sf = TFunction { name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = gf.namespace; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size }
+        // The stamp's NAMESPACE: a generic method of a generic-type instance lands in the INSTANCE
+        // namespace (`owner_ns`, `Gen__g__i64`) so its symbol matches the call site's `call_ns`; every
+        // other stamp keeps the template's own namespace (owner_ns "" → gf.namespace, unchanged).
+        var stamp_ns = if inst.owner_ns.len > 0 { inst.owner_ns } else { gf.namespace }
+        var sf = TFunction { name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = stamp_ns; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size }
         kept = teko::list::push(kept, sf)
     }
 
