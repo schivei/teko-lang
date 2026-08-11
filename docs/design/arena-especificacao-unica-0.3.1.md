@@ -523,10 +523,18 @@ que o Intent nasce na arena do caller). O `Intent<T>` carrega o desfecho: **`.va
 **`.canceled: bool`** (a task foi cancelada). É o oposto do `spawn` (fire-and-forget, sem retorno): no
 `await` se GARANTE a execução, por suspensão.
 
-**Várias tasks — sem `Intent` na assinatura.** Para disparar/esperar muitas, usa-se a biblioteca, não a
-assinatura: `await teko::tasks::when_all(calc(1,2), calc(3,4), …)` e `await teko::tasks::when_any(…)`, que
-devolvem uma **lista de `Intent`s**. O dev nunca escreve `Intent` num retorno — só o `await` (direto ou via
-`when_all`/`when_any`) o produz.
+**Várias tasks — por tupla ou array (Doc 2 §9.3), sem `when_all`/`when_any`.** `await` de uma **tupla** de
+chamadas espera todas e devolve uma tupla de `Intent`s (heterogêneo); `await` de um **array** devolve
+`[]Intent<T>` (homogêneo):
+
+```teko
+var (a, b, c) = await (fa(), fb(), fc())   // → (Intent<A>, Intent<B>, Intent<C>)
+var [r0, r1]  = await [g(0), g(1)]          // → []Intent<T>
+```
+
+Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é seguro;
+inspeciona-se cada `Intent`. Isso torna `when_all`/`when_any` desnecessários. O dev nunca escreve `Intent`
+num retorno — só o `await` o produz.
 
 **`cancel()` — uma função global, como `panic`, mas ciente de suspensão.** Há uma **marcação de execução
 suspensa** (o runtime sabe se a tarefa corrente está sob um `await`). `cancel()`:

@@ -403,6 +403,30 @@ var log:   action<str>              = (m) => print(m)
 var fmt:   func<Record, str> | null = null           // sem colisão (era `fn(Record): str | null`, ambíguo)
 ```
 
+### 9.3 Tuplas e desestruturação — `( )` e `[ ]`
+
+**O que muda.** Entram **tuplas** (produto posicional, heterogêneo) — a linguagem não as tinha — e a
+**desestruturação posicional** em `var`, por tupla `( )` e por array `[ ]`. (Já existe a desestruturação
+por NOME `{ x; y }` de campos de struct, B.13; estas são as **posicionais**.)
+
+**O que entra.**
+- **Tupla:** tipo `(A, B, C)` e literal `(a, b, c)` — um struct anônimo de campos posicionais, heterogêneo.
+  `(x)` é só `x` entre parênteses; uma tupla precisa de ≥2 elementos (ou `(x,)` para a 1-tupla).
+- **Desestruturação por tupla:** `var (a, b, c) = expr` — posicional, tipos podem diferir.
+- **Desestruturação por array:** `var [a, b, c] = expr` — posicional, **homogêneo** (todos do tipo do
+  elemento). "Muito mais útil" no caso comum.
+
+**O que resolve.** Retornar/ligar vários valores de uma vez sem inventar um struct nomeado, e é a base do
+`await` de várias tasks (§10.3) — que **substitui `when_all`/`when_any`**.
+
+**Exemplo.**
+```teko
+fn div(a: i32, b: i32): (i32, i32) { (a / b, a % b) }   // retorna uma tupla
+var (q, r) = div(17, 5)                                  // desestrutura: q = 3, r = 2
+
+var [x, y, z] = [1, 2, 3]                                // desestrutura array (homogêneo)
+```
+
 ---
 
 ## 10. Concorrência — a superfície (`isolate`/`spawn`/`chan`, `async`/`await`, journaling)
@@ -504,9 +528,19 @@ um `Intent<T>` criado no caller. Campos: **`.value: T`**, **`.canceled: bool`**,
 razão); **fora de suspensão** → dispara um `panic`. Um verbo só que degrada de cancelamento cooperativo
 para panic.
 
-**Várias tasks — sem `Intent` na assinatura:** `await teko::tasks::when_all(f(a), g(b), …)` e
-`await teko::tasks::when_any(…)` devolvem uma **lista de `Intent`s**. O dev nunca escreve `Intent` num
-retorno; só o `await` (direto ou via `when_all`/`when_any`) o produz.
+**Várias tasks — por tupla ou array (§9.3), sem `when_all`/`when_any`.** `await` de uma **tupla** de
+chamadas espera todas e devolve uma tupla de `Intent`s (heterogêneo); `await` de um **array** devolve
+`[]Intent<T>` (homogêneo):
+
+```teko
+var (a, b, c) = await (fa(), fb(), fc())   // → (Intent<A>, Intent<B>, Intent<C>)
+var [r0, r1]  = await [g(0), g(1)]          // → []Intent<T>
+```
+
+Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é
+seguro; inspeciona-se cada `Intent` (`.value`/`.canceled`/`.failure`). Isso torna `when_all`/`when_any`
+desnecessários — o `await` de tupla/array + a inspeção cobrem os dois casos. O dev nunca escreve `Intent`
+num retorno; só o `await` o produz.
 
 - **Arena/fundações** (Doc 1 §7.9): **I/O** — reator (`epoll`/`kqueue`/`IOCP`), sem thread nova; **CPU** —
   corotina isolada de um pool (F1). Em ambos o `await` cede e retoma, nunca bloqueia.
