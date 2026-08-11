@@ -369,36 +369,27 @@ O isolamento de memória tem **duas camadas**:
    a keyword `spawn` cria** (§7.8): cada `spawn f(args)` nasce uma corotina isolada com sua sub-raiz, os
    argumentos entram **por cópia** nessa raiz, e nada de fora é referenciado por `ref` (§9).
 
-**`spawn` e o modificador `isolate` — dois níveis de isolamento.** A regra dura do `spawn` é **uma só: o
-alvo NÃO pode ter retorno** (um valor retornado não teria para quem ir — `spawn` é fire-and-forget). O
-alvo pode ser:
+**`spawn` — lança uma função sem retorno como thread.** A regra dura do `spawn` é **uma só: o alvo NÃO
+pode ter retorno** (um valor retornado não teria para quem ir — `spawn` é fire-and-forget). Uma função
+sem-retorno lançada por `spawn` roda como uma **thread**: sua **própria sub-raiz de arena** (F1), dentro do
+processo (compartilha a região de programa F2: registro de `chan`, singletons por thread). Os argumentos
+entram **por cópia**, nada de fora é referenciado por `ref` (§9), e a conclusão vem por outros meios (o
+fecho do canal, o `WaitGroup`) — nunca pelo próprio `spawn`.
 
-- **uma função comum sem retorno** → roda como uma **thread**: sua própria sub-raiz de arena (F1), mas
-  **dentro do processo** — compartilha a região de programa (F2: registro de `chan`, singletons por thread);
-- **uma `isolate fn`** → roda em **isolamento total, como se fosse outro processo** — raiz própria, **sem
-  compartilhar memória de programa nenhuma**, **mais restrita que uma thread**. Comunica **só por `chan`**
-  (o transporte do SO — `SOCK_DGRAM`/mailslot — que cruza a fronteira de processo naturalmente), por id,
-  por cópia. É a `#arena_size` / "como se fosse outro programa" (ruling 2026-07-27) levada ao extremo.
-
-`isolate fn` é ainda **spawn-only** (só chamável por `spawn`, nunca direto — chamá-la síncrona não faz
-sentido) e **sem retorno**. Em ambos os casos o **`spawn` é fire-and-forget**: dispara e segue; **não se
-espera**, a conclusão vem por outros meios (o fecho do canal, o `WaitGroup`); os argumentos entram por
-cópia.
+*(Não há um construto de isolamento tipo-processo na linguagem, e é de propósito: uma thread no mesmo
+processo ainda pode corromper e já só fala por canais do SO — teria os custos de um processo sem o ganho.
+Quem precisa de isolação de processo real usa **outro binário**, fora do escopo da linguagem.)*
 
 ```teko
-isolate fn worker(cid: usize) {        // isolamento tipo-processo; spawn-only, sem retorno
+fn tarefa(cid: usize) {                // função comum SEM retorno
     var tx = chan<i32>::writer(cid)
     tx.send(processar())
     chan<i32>::close(cid)
 }
 
-fn tarefa(cid: usize) { … }            // função comum SEM retorno → roda como thread (compartilha F2)
-
 fn main() {
     var c = chan<i32>::make(64)
-    spawn worker(c.id)                 // isolamento total (como outro processo)
-    spawn tarefa(c.id)                 // thread (mesmo processo)
-    // worker(c.id)                     // ERRO: isolate fn não pode ser chamada direto
+    spawn tarefa(c.id)                 // thread fire-and-forget; sincroniza pelo canal / WaitGroup
     // spawn soma(a, b)                 // ERRO: soma tem retorno — spawn não aceita
 }
 ```

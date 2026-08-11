@@ -445,19 +445,18 @@ A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o u
 
 ### 10.1 Estratégia de token — tudo contextual
 
-`spawn` (dispara), `await` (suspende) e `isolate` (modificador opcional de função — restringe a spawn-only)
-são **keywords contextuais** (reconhecidas pelo parser por posição, sem reserva no lexer — a mesma norma
-que `class`/`abstract`/`virtual`/`override` seguem); `chan` é um **tipo genérico** (`chan<T>`). **Não há
-keyword `async`** — `await` sozinho suspende qualquer função (§10.3). Medido: **zero identificadores Teko
-hoje** se chamam `spawn`/`chan`/`await`/`isolate`, então reconhecê-los por posição não quebra corpus.
+`spawn` (dispara) e `await` (suspende/prefixo de ligação) são **keywords contextuais** (reconhecidas pelo
+parser por posição, sem reserva no lexer — a mesma norma que `class`/`abstract`/`virtual`/`override`
+seguem); `chan` é um **tipo genérico** (`chan<T>`). **Não há keyword `async`** (só `await`, §10.3) nem
+**`isolate`** (não há isolamento tipo-processo na linguagem — quem precisa usa outro binário). Medido:
+**zero identificadores Teko hoje** se chamam `spawn`/`chan`/`await`, então reconhecê-los por posição não
+quebra corpus.
 
 ### 10.2 `spawn` (corotina) + `chan<T>` — paralelismo real, memória isolada
 
-`spawn` é uma **keyword de corotina** (estilo Go), **não uma função** — `spawn f(args)` lança `f` numa
-corotina, argumentos **por cópia**, **sem retorno** e **sem `join`**. **Dois níveis de isolamento:** uma
-**função comum sem retorno** roda como **thread** (compartilha a região de programa); uma **`isolate fn`**
-roda em **isolamento total, como outro processo** (raiz própria, sem memória compartilhada, mais restrita
-que thread; comunica só por `chan`) e é **spawn-only** (chamá-la direto = erro). Doc 1 §7.6.
+`spawn` é uma **keyword de corotina** (estilo Go), **não uma função** — `spawn f(args)` lança `f` como
+uma **thread** fire-and-forget — sub-raiz de arena própria (F1), argumentos **por cópia**, **sem retorno**
+e **sem `join`**. Não há isolamento tipo-processo na linguagem (quem precisa usa outro binário). Doc 1 §7.6.
 
 ```teko
 spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia
