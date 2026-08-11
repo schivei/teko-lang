@@ -379,7 +379,9 @@ var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
 
 2. **União de CONSTRAINT — de FORMAS, no bound de um genérico.** Um constraint é uma **disjunção de
    conjunções**: `<T: Alt1 | Alt2 | …>`, onde cada `Alt` é `Termo & Termo & …`. Os **termos** são:
-   - **palavras de forma:** `class`, `service`, `struct` — forçam a *forma* do tipo;
+   - **palavras de forma:** `class`, `service`, `struct` — forçam a *forma* do tipo. `service` **aceita um
+     lifetime** (`service singleton` / `service scoped` / `service transient`), forçando também **como** o
+     serviço vive;
    - **interfaces** (`Ifce`) e **tipos concretos** (`str`, …) — forçam conformidade/identidade;
    - **`notnull`** — o único termo que **só entra por `&`, nunca por `|`** (não é uma forma-alternativa, é
      um modificador): proíbe o genérico de ser nulo, **nem na definição**.
@@ -388,15 +390,21 @@ var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
    <T: class & Ifce | struct & OutraIfce | str>   // T = (class que faz Ifce) | (struct que faz OutraIfce) | str
    <T: notnull>                                     // T não pode ser nulo (único uso de notnull sozinho)
    <T: class & notnull>                             // classe não-nula
-   <K: service & IChannelKind<T>>                   // o constraint do transporte de canal (§10.2) já é desta forma
+   <K: service singleton & IChannelKind<T>>         // o constraint do transporte de canal (§10.2): service SINGLETON
    ```
 
+   **Por que forçar o lifetime é honesto (ruling do dono).** O canal força `service singleton` no `make`
+   (§10.2). Sem isso, o usuário poderia declarar um transporte `service transient` (uma instância nova a cada
+   resolução — quebra o "um canal por chave em F2") e o compilador teria de **redirecionar deliberadamente**
+   essa implementação errônea para singleton, escondendo o erro. Com o lifetime no constraint, um transporte
+   que não seja `singleton` **falha na compilação** no ponto do `make` — falha honesta, não coerção silenciosa.
+
 **O que resolve.** Separa o `|` estrutural (o valor é um dos ramos) do `|` de forma (o *tipo* tem uma das
-formas), e dá ao genérico poder de exigir forma (`class`/`service`/`struct`), conformidade (interface/tipo) e
-não-nulidade (`notnull`) — sem nunca virar um `type` nomeado. Para um tipo-soma **nomeado**, continua
-**`variant`** (nominal, com tag — `type Pattern = variant A | B | C`), o mecanismo de todos os ADTs do
-compilador. `type X = A | B` **estrutural** segue **rejeitado**; custo zero (os 34 tipos-soma nomeados do
-corpus já são `variant`).
+formas), e dá ao genérico poder de exigir forma (`class`/`service [lifetime]`/`struct`), conformidade
+(interface/tipo) e não-nulidade (`notnull`) — sem nunca virar um `type` nomeado. Para um tipo-soma
+**nomeado**, continua **`variant`** (nominal, com tag — `type Pattern = variant A | B | C`), o mecanismo de
+todos os ADTs do compilador. `type X = A | B` **estrutural** segue **rejeitado**; custo zero (os 34
+tipos-soma nomeados do corpus já são `variant`).
 
 ### 9.2 Tipos de closure — `func<…>` / `action<…>`
 
@@ -480,12 +488,12 @@ e **sem `join`**. Não há isolamento tipo-processo na linguagem (quem precisa u
 ```teko
 spawn f()                                          // KEYWORD (não função): dispara e segue, SEM id, args por cópia
 
-// chan<T> MPSC (fan-in: N escritores, 1 leitor). TODO transporte é um `service`; a chave é CONSTANTE.
+// chan<T> MPSC (fan-in: N escritores, 1 leitor). TODO transporte é um `service singleton`; a chave é CONSTANTE.
 // TRANSPORTE = contrato extensível (SO, memória, Kafka, RabbitMQ, RPC, WS, HTTP, …):
 type IChannelKind<T> = interface { fn init(key: str); fn send(v: T); fn recv(): T; fn end() }
 
 // make: cria, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a chave, devolve o LEITOR:
-static fn chan<T>::make<K: service & IChannelKind<T>>(key: str, bounds: usize = 1): Rx<T>
+static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): Rx<T>
               // key:    CONSTANTE (literal/const, comp-time) — o "nome" do canal
               // bounds: 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
 static fn chan<T>::close(key: str)                 // invoca o end() do transporte: fecha + drena
@@ -540,16 +548,18 @@ fecha no caminho normal** — lê até `pop() → error`. Ambos **observam**: o 
 pela propriedade `tx.closed`. Um consumidor que **abandona** cedo *pode* chamar `close(key)` (idempotente) —
 os produtores param ao ver `tx.closed` — mas é a exceção, não o caminho feliz.
 
-**Transporte extensível — `service & IChannelKind<T>` (ruling do dono).** O transporte **não é um enum
+**Transporte extensível — `service singleton & IChannelKind<T>` (ruling do dono).** O transporte **não é um enum
 fechado**: é uma **interface** genérica com `init(key)`/`send(T)`/`recv(): T`/`end()` (o `init` é o método
 prévio que liga o transporte à chave; o `end()` sinaliza fecho + dreno). A linguagem entrega os built-ins
 `OsChan<T>` (default — `SOCK_DGRAM`/mailslot) e `MemChan<T>` (fila em-processo, sem syscall), e o dev
 **pluga o seu** — Kafka, RabbitMQ, RPC, UDP, WebSocket, HTTP, o que for. É **native-only**: código Teko
 falando o protocolo, ou link dinâmico FFI a uma lib de sistema, nunca um `.c` local.
 
-**Totalmente estático — DI por CHAVE CONSTANTE (ruling do dono).** Todo transporte é um **`service`**, e o
+**Totalmente estático — DI por CHAVE CONSTANTE (ruling do dono).** Todo transporte é um **`service singleton`**
+(o constraint `K: service singleton` faz um transporte não-singleton **falhar na compilação** no `make`, em
+vez de o compilador redirecionar silenciosamente uma implementação errada — §9.2b), e o
 canal é resolvido pela **chave constante** (um literal/`const`, comp-time), como `svc<T>("chave")`. `make<K:
-service & IChannelKind<T>>(key, bounds): Rx<T>` cria o canal, chama `K.init(key)`, registra o serviço na
+service singleton & IChannelKind<T>>(key, bounds): Rx<T>` cria o canal, chama `K.init(key)`, registra o serviço na
 **raiz do programa (F2)** sob a chave e devolve o **leitor único** (`Rx<T>`); os escritores fazem
 `svc<Tx<T>>("chave")` — resolvido **inline em comp-time**. Assim **nada trafega id** (nem no `spawn`), e
 **nada reconstrói o tipo**: a chave constante + o tipo dizem tudo em compilação. O serviço do canal vive em
@@ -560,8 +570,8 @@ interface (já existe) + o `service` DI por chave. **Conflito de chave = erro de
 ```teko
 type IChannelKind<T> = interface { fn init(key: str); fn send(v: T); fn recv(): T; fn end() }
 
-// o dev escreve o seu transporte — um `service` que satisfaz a interface (conformidade estática):
-service sealed KafkaChan<T> & IChannelKind<T> {
+// o dev escreve o seu transporte — um `service singleton` que satisfaz a interface (conformidade estática):
+service sealed KafkaChan<T> singleton & IChannelKind<T> {   // singleton: forçado pelo constraint do make
     brokers: str
     topic: str
     fn init(key: str) { /* liga o transporte ao tópico derivado da chave `key` */ }
@@ -685,8 +695,8 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 |---|---|
 | **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
 | **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
-| **`chan<T>`** | tipo genérico MPSC; `make<K: service & IChannelKind<T>>(key, bounds = 1): Rx<T>`; `bounds` = nº de **mensagens**; unbounded = `make(key, 0)` (resp. do dev) |
-| **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por CHAVE CONSTANTE** — todo transporte é `service`, vive em **F2** (raiz do programa), resolve por `svc<Tx<T>>("chave")` em comp-time; **elimina id no `spawn`**; não dispatch dinâmico |
+| **`chan<T>`** | tipo genérico MPSC; `make<K: service singleton & IChannelKind<T>>(key, bounds = 1): Rx<T>`; `bounds` = nº de **mensagens**; unbounded = `make(key, 0)` (resp. do dev) |
+| **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por CHAVE CONSTANTE** — todo transporte é `service singleton` (não-singleton = erro de compilação), vive em **F2** (raiz do programa), resolve por `svc<Tx<T>>("chave")` em comp-time; **elimina id no `spawn`**; não dispatch dinâmico |
 | **fecho** | **responsabilidade do PRODUTOR** — `close(key)` invoca `end()` (fecha + drena), idempotente; consumidor lê até `error`. `Rx::pop(): T \| error`; `Tx::send(): null` + `tx.closed` (ambos observam) |
 | **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |
 | **`Intent<T>`** | `.value` / `.canceled` / `.failure`; **`cancel()`** global (cancela o Intent, ou `panic` fora de suspensão) |
@@ -733,10 +743,10 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
 3. ~~chave-string da DI~~ — **mesmo tipo sob a mesma chave = ERRO DE COMPILAÇÃO** (§7); chaves distintas
    coexistem, nunca "último vence" silencioso.
 4. ~~`chan_unbounded`~~ — entra, responsabilidade do dev.
-5. ~~tipo do canal (enum `os`/`mem`)~~ — **transporte é um `service & IChannelKind<T>` extensível**
+5. ~~tipo do canal (enum `os`/`mem`)~~ — **transporte é um `service singleton & IChannelKind<T>` extensível**
    (`interface { fn init(key); fn send(T); fn recv(): T; fn end() }`): built-ins `OsChan` (default) /
    `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/WS/HTTP. **Totalmente estático — DI por CHAVE CONSTANTE:**
-   `make<K: service & IChannelKind<T>>(key, bounds): Rx<T>` devolve o leitor; os escritores fazem
+   `make<K: service singleton & IChannelKind<T>>(key, bounds): Rx<T>` devolve o leitor; os escritores fazem
    `svc<Tx<T>>("chave")` (comp-time, inline). O serviço vive na **raiz do programa (F2)** — exceção de
    lifetime, por ser comunicação entre tasks — do `make` ao `close`/`end()`. **Elimina passar id no
    `spawn`.** Não dispatch dinâmico do Round 3.

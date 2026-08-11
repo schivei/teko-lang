@@ -424,7 +424,7 @@ var tx = svc<Tx<i32>>("res")                        // o worker resolve por chav
 default**). Tudo é operado pela **chave constante** do canal (a regra "NOMES, não ponteiros", §7.7):
 
 ```teko
-// O TRANSPORTE é um contrato — a interface que qualquer canal satisfaz; TODO transporte é também um `service`:
+// O TRANSPORTE é um contrato — a interface que qualquer canal satisfaz; TODO transporte é um `service singleton`:
 type IChannelKind<T> = interface {
     fn init(key: str)   // método PRÉVIO: inicializa o transporte ligado à CHAVE constante do canal
     fn send(v: T)       // entrega uma mensagem
@@ -433,8 +433,8 @@ type IChannelKind<T> = interface {
 }
 
 // make: cria o canal, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a CHAVE constante,
-// e devolve o LEITOR único (Rx<T>). K é um `service` que satisfaz a interface:
-static fn chan<T>::make<K: service & IChannelKind<T>>(key: str, bounds: usize = 1): Rx<T>
+// e devolve o LEITOR único (Rx<T>). K é um `service singleton` que satisfaz a interface (senão: erro de compilação):
+static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): Rx<T>
 
 // os ESCRITORES resolvem o extremo de escrita pela MESMA chave constante (svc = intrínseco de comp-time, §8):
 var tx = svc<Tx<T>>("chave")                       // Tx<T> — N escritores, todos por chave (nada de id no spawn)
@@ -449,7 +449,7 @@ fn Rx<T>::pop(): T | error                         // recebe; error quando o can
   literal de string / `const` conhecido em **comp-time** (o compilador exige que seja constante). Isso torna
   `svc<Tx<T>>("chave")` um **intrínseco de comp-time** (§8), substituído inline — **sem id em runtime, sem
   vtable, sem dispatch dinâmico, sem service-locator**. **Elimina passar id no `spawn`**: o worker não recebe
-  id, resolve o `Tx` pela chave. É por isso que `make<K: service & IChannelKind<T>>` — o transporte é um
+  id, resolve o `Tx` pela chave. É por isso que `make<K: service singleton & IChannelKind<T>>` — o transporte é um
   **`service`** que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
 - **`chan<T>::make(key, bounds = 1): Rx<T>`** devolve o **leitor único** a quem cria o canal; os escritores
   fazem `svc<Tx<T>>(key)`. Fan-in MPSC: **1 leitor** (o `Rx` de `make`), **N escritores** (`svc<Tx>` por chave).
@@ -462,17 +462,19 @@ fn Rx<T>::pop(): T | error                         // recebe; error quando o can
   ao ver `tx.closed` — mas isso é a exceção; a responsabilidade convencional do fim-de-stream é do produtor.
 - **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
   cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB, é por conta dele.
-- **O transporte `K` é um `service & IChannelKind<T>` extensível (ruling do dono).** O `make` chama
+- **O transporte `K` é um `service singleton & IChannelKind<T>` extensível (ruling do dono).** O `make` chama
   `K.init(key)` (o método prévio), registra o canal sob a chave, devolve `Rx<T>`. Built-ins e plugues:
   - **`OsChan<T>`** (default): transporte do **SO** — `SOCK_DGRAM` no Linux/macOS, **mailslot** no Windows.
   - **`MemChan<T>`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais rápida.
   - **do dev**: `KafkaChan<T>`, `RabbitChan<T>`, `WsChan<T>`, `HttpChan<T>`, `UdpChan<T>`, `RpcChan<T>` —
-    qualquer `service` que implemente `init`/`send`/`recv`/`end`. Native-only: código Teko falando o
+    qualquer `service singleton` que implemente `init`/`send`/`recv`/`end`. Native-only: código Teko falando o
     protocolo, ou **link dinâmico FFI** a uma lib de sistema — nunca um `.c` local.
-- **Lifetime: raiz de PROGRAMA (F2), não de thread — a exceção do canal.** Singletons comuns vivem na raiz
-  da THREAD (§8); o canal é a primitiva de comunicação ENTRE tasks, então o serviço do canal vive na **raiz
-  do programa (F2)**, do `make` ao `close`/`end()` — por isso `svc<Tx<T>>("chave")` de **qualquer thread**
-  resolve o MESMO canal. Config **por valor**, nunca um `ref` cruzando task (regra de UAF, §9).
+- **`singleton` garante UMA instância; o `make` a coloca em F2 — a exceção do canal.** O `singleton` do
+  constraint garante **instância única** (é o que proíbe um transporte `transient`, que abriria um socket
+  novo por resolução). Um singleton comum resolvido por `svc<T>()` (sem chave) vive na raiz da THREAD (§8);
+  mas o canal é registrado pelo `make` sob uma **chave**, para comunicação ENTRE tasks, então essa instância
+  única vive na **raiz do PROGRAMA (F2)**, do `make` ao `close`/`end()` — por isso `svc<Tx<T>>("chave")` de
+  **qualquer thread** resolve o MESMO canal. Config **por valor**, nunca um `ref` cruzando task (UAF, §9).
 - **Conflito de chave = erro de compilação** (§7 Doc 2, política de DI): o mesmo `chan<T>` sob a mesma chave
   duas vezes é **erro em comp-time**; chaves distintas coexistem, nunca "último vence".
 - **Conformidade de interface ESTÁTICA, não dispatch dinâmico do Round 3.** Tudo resolve por `(tipo, chave
@@ -679,7 +681,7 @@ não é visível a outra por referência — se precisar atravessar, atravessa c
 `Ref` do serviço.
 
 **O transporte de canal (§7.8) é DI por CHAVE CONSTANTE.** O DI resolve por `svc<T>("chave")` — tipo +
-chave, ambos em **comp-time**. O transporte do `chan` é exatamente isso: `make<K: service & IChannelKind<T>>`
+chave, ambos em **comp-time**. O transporte do `chan` é exatamente isso: `make<K: service singleton & IChannelKind<T>>`
 exige que K seja um **`service`**, e a instância vive na **raiz do programa (F2)** sob a **chave constante**
 do canal. **`Tx`/`Rx` clamam o serviço por `svc<Tx<T>>("chave")`**, resolvido inline em comp-time — não há
 id de runtime nem service-locator. É por isso que o worker não recebe id no `spawn` e **nada reconstrói o
@@ -764,9 +766,9 @@ fn pipeline() {
 - **Piso = necessidade estática + cabeçalho da arena**, não 64 KiB default (§3). Elisão = o caso limite
   `need == 0` (§4).
 - **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
-- **Transporte do canal = `service & IChannelKind<T>` extensível** (`interface { fn init(key); fn send(T);
+- **Transporte do canal = `service singleton & IChannelKind<T>` extensível** (`interface { fn init(key); fn send(T);
   fn recv(): T; fn end() }`); built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/
-  WS/HTTP. **Totalmente estático — DI por CHAVE CONSTANTE:** `make<K: service & IChannelKind<T>>(key, bounds)
+  WS/HTTP. **Totalmente estático — DI por CHAVE CONSTANTE:** `make<K: service singleton & IChannelKind<T>>(key, bounds)
   : Rx<T>` cria e devolve o leitor único; os escritores fazem `svc<Tx<T>>("chave")` (comp-time, inline). O
   serviço vive na **raiz do programa (F2)** (exceção de lifetime — não raiz-de-thread — por ser comunicação
   entre tasks), da abertura ao `close`/`end()`. **Elimina passar id no `spawn`.** `Rx::pop(): T | error`
