@@ -371,10 +371,11 @@ O isolamento de memória tem **duas camadas**:
 
 **`isolate fn` — a keyword de função da corotina.** `isolate` é um **modificador de função** (não um
 bloco): uma `isolate fn` **não tem retorno** e **só pode ser chamada por `spawn`** (chamá-la diretamente é
-erro de compilação). É o par declarativo do `spawn`: a função marca "isto é um ponto de entrada de corotina
-isolada", e o checker garante que ela nunca corre síncrona nem devolve valor — resultados saem por `chan`.
-Quando `spawn` a lança, ela nasce na sua **própria sub-raiz de arena** (F1), com os argumentos entrando por
-cópia.
+erro de compilação). Essas duas coisas são o que o checker garante — nada sobre execução. O **`spawn` é
+fire-and-forget**: dispara a corotina e segue; **não se espera por ela**, e a conclusão é garantida por
+outros meios (o fecho do canal, o `WaitGroup`), nunca pelo próprio `spawn`. Resultados saem por `chan`.
+Quando `spawn` a lança, a `isolate fn` nasce na sua **própria sub-raiz de arena** (F1), com os argumentos
+entrando por cópia.
 
 ```teko
 isolate fn worker(cid: usize) {        // sem retorno; SÓ chamável por spawn
