@@ -379,3 +379,30 @@ Feature: nested block/loop class transfer — class values survive branch-to-out
     Given env = ["TEKO_BACKEND=c"]
     When built and run
     Then stdout pattern = "100-49."
+
+Feature: bare block statement — `{ … }` at statement position opens a lexical scope (0.3.1 §6)
+
+  # The owner's canonical §6 repro: a bare `{ … }` block opens a child scope whose binding (`y`)
+  # dies at the closing brace, while the outer `var x` written from inside survives — so `compute`
+  # returns `1 + 2`. The bare block IS the region (the retired manual `Arena`'s replacement). C route
+  # only: the own-native backend does not yet lower a bare block (the same N2 gap `adopt` carries),
+  # so this pins the C route, where codegen emits the block's region enter/drop.
+  Scenario: a bare block opens a scope; an outer var written inside survives
+    Given source = "cases/bare_block_scope.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then exit = 3
+
+  # Form B (a value-producing block-expression) stays UNSUPPORTED: a bare `{ … }` in expression
+  # position (`var r = { 1 }`) must still fail to parse, exactly as before the statement form landed.
+  Scenario: a bare block is rejected in expression position
+    Given source = "cases/bare_block_expr_position_rejected.tks"
+    When compilation fails
+    Then diagnostic = "expected an expression"
+
+  # A binding declared inside a bare block is scoped to it and dies at the closing brace: reading it
+  # after the block is an undefined name, proving the scope boundary the block introduces.
+  Scenario: a binding declared inside a bare block is not visible after it
+    Given source = "cases/bare_block_binding_dies_rejected.tks"
+    When compilation fails
+    Then diagnostic = "undefined name: y"

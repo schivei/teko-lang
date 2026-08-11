@@ -121,6 +121,7 @@ fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str, ref
         parser::ExprStmt as es => lam_collect_expr(es.expr, refs, bound, writes)
         parser::DeferStmt as d => lam_collect_block(d.body, refs, bound, writes)
         parser::AdoptStmt as a => lam_collect_block(a.body, refs, bound, writes)
+        parser::BlockStmt as b => lam_collect_block(b.body, refs, bound, writes)
         parser::BreakStmt => { }
         parser::ContinueStmt => { }
     }
@@ -4325,7 +4326,24 @@ fn type_statement(s: parser::Statement, env: Env, table: TypeTable): TypedStmt |
             TypedStmt { node = TDeferStmt { body = tb.stmts }; env = env }
         }
         parser::AdoptStmt as a => type_adopt(a, env, table)
+        parser::BlockStmt as bs => type_block_stmt(bs, env, table)
     }
+}
+
+/**
+ * type_block_stmt — type-check a bare `{ … }` block statement in void context (0.3.1 §6). The body
+ * is an ordinary control-flow block (return/break/continue and nested blocks are all allowed), typed
+ * via type_block so its bindings are scoped INSIDE and do not leak `env` — a binding declared in the
+ * block is invisible after its closing brace. The enclosing `env` is returned unchanged.
+ *
+ * @param parser::BlockStmt bs  the parsed bare block statement
+ * @param Env env  the enclosing type environment (unchanged on return — the body is scoped)
+ * @param TypeTable table  the program type table
+ * @return TypedStmt | error  the typed block statement, or a type error propagated from the body
+ */
+fn type_block_stmt(bs: parser::BlockStmt, env: Env, table: TypeTable): TypedStmt | error {
+    var tb = match type_block(bs.body, env, table) { TypedBlock as x => x; error as e => return e }
+    TypedStmt { node = TBlockStmt { body = tb.stmts }; env = env }
 }
 
 /**
@@ -4917,6 +4935,7 @@ fn retype_return_stmt(s: TStatement, ret: Type, table: TypeTable, is_trailing: b
         }
         TLoopStmt as l => TLoopStmt { label = l.label; init = l.init; body = retype_return_positions(l.body, ret, table, false) }
         TAdoptStmt as a => TAdoptStmt { name = a.name; body = retype_return_positions(a.body, ret, table, false) }
+        TBlockStmt as b => TBlockStmt { body = retype_return_positions(b.body, ret, table, false) }
         TExprStmt as es => {
             var inner = retype_returns_in_expr(es.expr, ret, table)
             if is_trailing && !texpr_diverges(inner) && literal_adopts(inner, ret) {
@@ -5002,6 +5021,7 @@ fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable): error | null {
         TLoopStmt as l => check_returns(l.body, ret, table)
         TExprStmt as es => check_returns_inexpr(es.expr, ret, table)
         TAdoptStmt as a => check_returns(a.body, ret, table)
+        TBlockStmt as b => check_returns(b.body, ret, table)
         _ => null
     }
 }
@@ -5183,6 +5203,11 @@ fn check_labels(stmts: []TStatement, scope: []str, in_loop: bool, seen: []str): 
             }
             TAdoptStmt as a => {
                 var t = check_labels(a.body, scope, in_loop, acc)
+                if t.failed { return t }
+                acc = t.seen
+            }
+            TBlockStmt as b => {
+                var t = check_labels(b.body, scope, in_loop, acc)
                 if t.failed { return t }
                 acc = t.seen
             }
@@ -5672,6 +5697,7 @@ fn check_ref_storability_stmt(s: TStatement, spine: Spine): error | null {
         TLoopStmt as l => match check_ref_storability_block(l.init, spine) { error as e => return e; null => check_ref_storability_block(l.body, spine) }
         TDeferStmt as d => check_ref_storability_block(d.body, spine)
         TAdoptStmt as a => check_ref_storability_block(a.body, spine)
+        TBlockStmt as b => check_ref_storability_block(b.body, spine)
         TReturn as r => if r.has_value { check_ref_storability_expr(r.value, spine) } else { null }
         TExprStmt as es => check_ref_storability_expr(es.expr, spine)
         TBreakStmt => null

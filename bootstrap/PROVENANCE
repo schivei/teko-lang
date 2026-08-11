@@ -1,51 +1,51 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): re-harvested after landing §6 of the 0.3.1 surface
-# migration — retire `unsafe` + the manual-memory surface. This is a lexer/parser/checker/codegen +
+# RESEED (hand-harvest, by-hand per owner order): re-harvested after landing the BARE BLOCK STATEMENT
+# (0.3.1 §6). A `{ stmts }` at STATEMENT position now opens a lexical scope — the intended replacement
+# for the retired manual `Arena`, "a bare `{ }` is the region". This is a parser + checker + codegen +
 # `.tkb`-wire change, so the compiler shifts and the previous bootstrap no longer reproduces it; the
-# new harvest bc8072ba self-reproduces byte-identical (gen2==gen3 fixpoint). The owner did NOT edit
+# new harvest self-reproduces byte-identical (bin-a == bin-b fixpoint). The owner did NOT edit
 # bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# §6: retire unsafe + manual-memory surface
+# feat: bare block statement (lexical scope)
 # ---------------------------------------------------------------------------------------------
-# The developer SURFACE for `unsafe` and manual memory is REMOVED from the language; the compiler-
-# INTERNAL region primitives the backend needs are KEPT, de-surfaced. What SAILED:
-#   - the `unsafe` keyword (contextual modifier on `type`/`fn`): the parser now REJECTS it in the
-#     modifier slot ("unsafe was retired in 0.3.1: memory safety is the arena's job …"); the whole
-#     contagion machinery is deleted — `reject_unsafe_signature_contagion`/`reject_unsafe_field_
-#     contagion`/`reject_unsafe_alias`/`method_is_effective_unsafe` (collect), `is_unsafe_type`/
-#     `unsafe_carrying*`/`func_type_unsafe_carrying`/`generic_args_unsafe_carrying` (resolve), the
-#     local-binding gate + `#arena_size`×`unsafe` check (typer), and the `Env.fn_unsafe` field +
-#     `with_fn_unsafe` (scope). The AST `is_unsafe` fields on `parser::Function`/`parser::TypeDecl`
-#     are removed.
-#   - manual memory: the surface `teko::mem::free`/`region_new`/`region_alloc` intrinsics
-#     (`reject_retired_mem_surface` now emits "manual memory was retired in 0.3.1 …"), the
-#     `#must_free` decorator (parser reject) + its whole consume-or-fail dataflow and affine
-#     `mem::free` guard (typer, `is_unique_at`/the reticulado PRESERVED), the region-handle probes
-#     `is_must_free_name`/`is_region_handle_name`/`region_handle_field_name` (resolve), the surface
-#     lowering in `lir/lower.tks` + `codegen/codegen.tks`, the spine `is_mem_free_call` probe, the AST
-#     `must_free` field + `ParsedAttributes.must_free`, and the whole `src/mem/unsafe/` directory
-#     (`RawBuf`/`Owned<T>`/`Arena`). The one live self-host caller (`build/assemble.tks`) was severed:
-#     the token buffer now dies at its lexical scope (region drop), not a `mem::free`.
-# KEPT (internal, de-surfaced): the region lifecycle prims `region_new`/`enter`/`leave`/`drop`/`root`
-# + `tk_region_*` and the FFI marshalling intrinsics `buf_ptr`/`bytes_from_ptr`/`as_ptr`/`as_cstr`/
-# `str_from_c`/`region_buf`/`load_u64`/`store_u64` (all §5, safe-callable, no grammar change).
+# STATEMENT-ONLY, form (A), per owner ruling. A bare `{ stmts }` at statement position opens a child
+# lexical scope: bindings declared inside die at the closing brace, and the block's region drops on
+# exit exactly as an `if`/`loop` arm body's scope does. It does NOT produce a value and is NOT usable
+# in expression position (`var r = { … }` stays a parse error — form B, block-as-expression, was
+# explicitly rejected). What SAILED:
+#   - PARSER: a new `parser::BlockStmt = struct { body: []Statement }` AST node, wired into the
+#     `Statement` union. The statement dispatcher (`parse_stmt.tks`) gains an `is_block_stmt_head`
+#     branch — a leading `{` at statement position, tested BEFORE the expression-statement fallback
+#     (which previously rejected it with `expected an expression`). Unambiguous: a struct literal is
+#     led by a type NAME, and a destructure `{ … }` only follows a binding keyword.
+#   - CHECKER: a new `checker::TBlockStmt = struct { body: []TStatement }` typed node, typed by
+#     `type_block_stmt` via `type_block` in a CHILD env, so inner bindings do not leak the enclosing
+#     `env`. Threaded through every exhaustive TStatement walk (typer/spine/escape/residence/borrow/
+#     monomorph/consteval/comptime_fold/initanalysis/metrics/warnings/coverage/reachability), mirroring
+#     the `TAdoptStmt` arm — EXCEPT the points-to transfer, where a block recurses under the SAME
+#     enclosing region (like an `if`/`loop` body), never opening a fresh adopter region.
+#   - CODEGEN (C route): `emit_block_region` — the SAME arm/loop-body region emitter (`tk_region_new`
+#     … `tk_region_drop`, a plain drop, NOT the adopter's `tk_region_drop_subtree`), so block-local
+#     bindings are freed at the closing brace via the ordinary region-drop path (no manual `mem::free`).
+#   - The native (LIR) backend honest-stops on a bare block ("block not yet lowered (N2)"), the SAME
+#     N2 gap `adopt` carries — the C route is the one this teach lands.
 #
-# `.tkb` WIRE. The trailing `is_unsafe` byte was removed from the `TypeDecl`/`Function` records (the
-# benign trailing case — nothing shifts); `must_free` was never on the wire. `TKB_EXPR_VERSION`
-# bumped 2→3 and `TKB_PROGRAM_VERSION` bumped 4→5 (standard R2 procedure); the reader already
-# rejects stale artifacts loudly. The reseed builds from SOURCE, so the fixpoint is indifferent.
+# `.tkb` WIRE. A new trailing statement TAG `9` (`TBlockStmt`: body `[]TStatement`) was APPENDED to the
+# `write_tstatement`/`read_tstatement` codec and the string-interning collector — nothing shifts, so
+# `TKB_EXPR_VERSION`/`TKB_PROGRAM_VERSION` are UNCHANGED (the benign trailing-add case).
 #
-# ZERO runtime C touched — no new `tk_*` symbol, no `teko_rt.{c,h}` edit; `teko_rt.tks` stays
-# self-sufficient (0 hits for `mem::free`/`RawBuf`/`Owned`/`must_free`, was 0, stays 0).
+# ZERO runtime C touched — no new `tk_*` symbol, no `teko_rt.{c,h}` edit; the region prims the block
+# reuses (`tk_region_new`/`tk_region_drop`) already existed.
 #
 # FIXPOINT. gen0 (cc of the previous bootstrap) C-built the reworked source into bin-a; compiling
-# bin-a into the new compiler and rebuilding produced a byte-identical bin-b (sha256 below). The
-# committed file is that fixpoint — it self-reproduces:
-#   cc(bootstrap/teko.c) -> gen0';  TEKO_BACKEND=c gen0' build . -> OUT;  OUT/teko.c == bootstrap/teko.c.
+# bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical bin-b/teko.c
+# (sha256 below). The committed file is that fixpoint — it self-reproduces:
+#   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
+#   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
 #
 # `run: hand-harvest` — no CI run produced this file; it was harvested by hand on the branch, in the
 # owner's ordered sequence. `commit: pending drain` — the landing commit is not yet known at harvest
@@ -53,8 +53,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  bc8072bac0df3e76bfdc16513c3190d206e4a31aa58bcf8e3a0984533fae19da
+sha256:  508514354ae692a7c3fa2380b84127152d452e6b14fa6fdfe8c60d68c326df72
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§6: retire unsafe + manual-memory
-         surface); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
+legacy:  none — this is an exact, self-reproducing hand harvest (feat: bare block statement / lexical
+         scope); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
          bin-b, byte-identical).
