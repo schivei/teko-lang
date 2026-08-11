@@ -563,14 +563,20 @@ A divisão respeita o lifetime: o **`add` fica no `ctx`** — o **criador** faz 
 o seu `tx`/`rx`** (estável, F2). `ctx.wait()` (no criador) bloqueia até zerar. Pôr o `add` no handle
 reintroduziria a corrida "add-depois-do-spawn"; por isso só o `done` desce.
 
-**Registro ESTÁTICO (compilador) vs materialização (runtime, `make`) — ruling do dono.** `Ctx`/`Rx<T>`/`Tx<T>`
-são **registrados estaticamente pelo compilador** no sítio do `make`: como a chave é **constante conhecida em
-comp-time**, o compilador reserva o slot `(chan<T>, "chave") → (Ctx, Rx, Tx)` e liga cada `svc<…>("chave")` a
-ele **inline**. O `make` só **materializa** em runtime (`K.init(key)`, abre o transporte, põe a instância em F2
-no slot pré-reservado). Por isso a chave **precisa** ser constante — sem ela não há registro estático (e
-`svc(key)` viraria lookup de runtime). **Chave não-constante no `make`, ou `svc` cuja chave não casa com um
-`make` conhecido, = erro de compilação** (e o conflito de chave é pego aqui). `Ctx`/`Rx`/`Tx` **não** são
-serviços do usuário — são handles que o compilador registra e o `make` materializa.
+**Registro (compilador) vs materialização (`make`) — dois modos de chave (ruling do dono).** `Ctx`/`Rx<T>`/
+`Tx<T>` **não** são serviços do usuário — são handles que o compilador registra e o `make` materializa. O
+registro tem duas fases, e o modo é escolhido pela **forma da chave**:
+- **Chave CONSTANTE (literal/`const`) — registro ESTÁTICO, inline (o default, custo zero).** O compilador
+  pareia cada `svc<…>("literal")` ao `make` da mesma constante, **conhece o `K`**, monomorfiza `Ctx`/`Rx`/`Tx`
+  + as ops do transporte, reserva o slot **inline**; o `make` só **materializa**. **Sem lookup em runtime.**
+  Conflito (mesmo `chan<T>`+chave em dois `make`) = **erro de compilação**.
+- **Chave VARIÁVEL (`str` de runtime) — PRÉ-REGISTRO + FINALIZAÇÃO em runtime.** Para o caso em que a chave
+  não é conhecida na compilação (um canal por conexão/request/usuário), o compilador **pré-registra a FORMA**
+  (monomorfiza `(chan<T>, K)`: handles por `T` + um **registro de ops** do transporte), e o `make` **finaliza**
+  a ligação chave→instância num **registro processo-inteiro chaveado pela string** (F2). Aí `svc<Rx<T>>(var_key)`
+  é um **lookup em runtime**, e as ops de `Rx`/`Tx` viram **chamada indireta** (ponteiro de função) — **não**
+  vtable de interface, **não** o Round 3. **Custo:** um lookup + uma indireção por op. Conflito = **erro em
+  runtime** no 2º `make`. (O `T` continua estático nos dois modos; só o `K` é apagado no sítio do `svc` variável.)
 
 **O `ctx` É O DONO do lifetime — transient (ruling do dono, ratificado).** O serviço singleton do canal vive em F2, mas
 **quem o possui é o `ctx`** (transient, na região do criador). Quando o `ctx` cai, ele **cascateia o
@@ -753,7 +759,7 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 | **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
 | **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
 | **`chan<T>`** | tipo genérico MPSC; `make<K: service singleton & IChannelKind<T>>(key, bounds = 1): ctx`; WaitGroup **manual** — `ctx.add(n)` no criador (antes do spawn), `tx.done()`/`rx.done()` no handle (ctx transient), `ctx.wait()` no criador; extremos por `svc<Rx>`/`svc<Tx>`; unbounded = `make(key, 0)` |
-| **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por CHAVE CONSTANTE** — todo transporte é `service singleton` (não-singleton = erro de compilação), vive em **F2**; **elimina id no `spawn`**; não dispatch dinâmico |
+| **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por chave** — todo transporte é `service singleton` (não-singleton = erro), vive em **F2**; chave **constante** = registro estático/inline, chave **variável** = pré-registro + lookup runtime; **elimina id no `spawn`**; não dispatch dinâmico |
 | **fecho** | **responsabilidade do PRODUTOR** — `tx.close()` invoca `end()` (fecha + drena), idempotente; reserva em `ctx.close()`; consumidor faz `pop()` até o erro específico `Closed`. `Rx::pop(): T \| Closed`; `Tx::send(): null` + `tx.closed` (ambos observam) |
 | **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |
 | **`Intent<T>`** | `.value` / `.canceled` / `.failure`; **`cancel()`** global (cancela o Intent, ou `panic` fora de suspensão) |

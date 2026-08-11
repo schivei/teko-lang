@@ -457,22 +457,32 @@ fn ctx::wait()                                     // o criador bloqueia até o 
 fn ctx::close()                                    // fecho de reserva do canal (invoca end())
 ```
 
-- **TOTALMENTE ESTÁTICO — a chave é uma CONSTANTE (ruling do dono).** `make` e `svc` usam a MESMA chave, um
-  literal de string / `const` conhecido em **comp-time** (o compilador exige que seja constante). Isso torna
-  `svc<Tx<T>>("chave")` um **intrínseco de comp-time** (§8), substituído inline — **sem id em runtime, sem
-  vtable, sem dispatch dinâmico, sem service-locator**. **Elimina passar id no `spawn`**: o worker não recebe
-  id, resolve o `Tx` pela chave. É por isso que `make<K: service singleton & IChannelKind<T>>` — o transporte é um
-  **`service`** que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
-- **REGISTRO estático (compilador) vs MATERIALIZAÇÃO (runtime, `make`) — ruling do dono.** `Ctx`/`Rx<T>`/`Tx<T>`
-  são **registrados ESTATICAMENTE pelo compilador** no sítio do `make`: como a chave é **constante conhecida
-  em comp-time**, o compilador reserva o slot `(chan<T>, "chave") → (Ctx, Rx<T>, Tx<T>)` e liga cada
-  `svc<Rx<T>>("chave")` / `svc<Tx<T>>("chave")` a esse slot **inline**. O `make` só **MATERIALIZA** em runtime
-  (chama `K.init(key)`, abre o transporte, coloca a instância em F2 no slot pré-reservado). Por isso a chave
-  **PRECISA** ser constante — sem ela o compilador não faz o registro estático (e `svc(key)` viraria lookup de
-  runtime, justamente o que se evita). **Chave não-constante no `make`, ou um `svc` cuja chave não casa com um
-  `make` conhecido, = erro de compilação.** O conflito (mesmo `chan<T>` sob a mesma chave em dois `make`) é
-  pego **neste passo de registro estático**. `Ctx`/`Rx`/`Tx` **não** são serviços do usuário — são handles que
-  o compilador registra sob a chave e o `make` materializa.
+- **Resolução por CHAVE (não id nem ponteiro) — ruling do dono.** `make` e `svc` usam a MESMA chave; o
+  **caso comum é a chave CONSTANTE** (literal/`const`), que torna `svc<Tx<T>>("chave")` um **intrínseco de
+  comp-time** (§8), substituído inline — **sem id em runtime, sem vtable, sem dispatch dinâmico**. (Uma chave
+  **variável** de runtime também é possível, com um custo — ver o próximo bullet.) **Elimina passar id no
+  `spawn`**: o worker resolve o `Tx` pela chave. `make<K: service singleton & IChannelKind<T>>` — o transporte
+  é um `service` que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
+- **REGISTRO (compilador) vs MATERIALIZAÇÃO (`make`) — dois modos de chave, ruling do dono.** `Ctx`/`Rx<T>`/
+  `Tx<T>` **não** são serviços do usuário — são handles que o compilador registra e o `make` materializa. O
+  registro tem **duas fases**, e o modo é escolhido pela **forma da chave**:
+  - **Chave CONSTANTE (literal/`const`) — registro ESTÁTICO, resolução INLINE (o default, custo zero).** O
+    compilador pareia cada `svc<…>("literal")` ao `make` da mesma constante, **conhece o `K`**, monomorfiza
+    `Ctx`/`Rx`/`Tx` + as ops do transporte, e reserva o slot `(chan<T>, "literal") → (Ctx, Rx, Tx)` **inline**.
+    O `make` só **MATERIALIZA** (chama `K.init`, abre o transporte, põe a instância no slot). **Sem lookup em
+    runtime.** O conflito (mesmo `chan<T>` sob a mesma chave em dois `make`) é **erro de compilação**.
+  - **Chave VARIÁVEL (`str` de runtime) — PRÉ-REGISTRO (comp-time) + FINALIZAÇÃO (runtime).** Para o caso em
+    que a chave **não** é conhecida na compilação (um canal por conexão, por request, por usuário), o
+    compilador **pré-registra a FORMA** — monomorfiza `(chan<T>, K)`: os handles por `T` e um **registro de
+    ops** do transporte (`send`/`recv`/`end`). Mas a ligação **chave→instância** é **finalizada em runtime**
+    pelo `make`, que insere a instância + o registro de ops num **registro processo-inteiro chaveado pela
+    string** (em F2). O `svc<Rx<T>>(var_key)` vira então um **lookup em runtime** pela string, e as ops de
+    `Rx`/`Tx` são uma **chamada indireta** (o ponteiro de função do registro de ops) — **não** vtable de
+    interface, **não** o Round 3. **Custo:** um lookup por resolução + uma indireção por op. Conflito
+    (mesma chave viva em dois `make`) = **erro em runtime** no 2º `make`.
+  - **A diferença é se o `K` é conhecido no sítio do `svc`:** chave constante → `K` conhecido → inline; chave
+    variável → `K` **apagado** no sítio (o key é variável, não pareável a um `make` específico) → indireção
+    pelo registro de ops. Nos dois casos o **tipo `T` é estático** e **não há dispatch dinâmico de interface**.
 - **`make` devolve o `ctx`; AMBOS os extremos por `svc` (ruling do dono).** `make(key, bounds = 1): ctx`
   cria o canal e devolve o **contexto** — o **WaitGroup** do canal e um fecho de reserva (`ctx.close()`).
   Os dois extremos são clamados por chave: `svc<Rx<T>>(key)` (leitor), `svc<Tx<T>>(key)` (N escritores); o
