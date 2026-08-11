@@ -449,10 +449,12 @@ fn Tx<T>::send(v: T): null                         // devolve null; a propriedad
 fn Tx<T>::close()                                  // o PRODUTOR fecha: invoca o end() do transporte (fecha + drena)
 fn Rx<T>::pop(): T | Closed                        // recebe; o erro ESPECÍFICO `Closed` quando encerrado e drenado
 
-// WaitGroup MANUAL — o `done()` desce para os HANDLES (o `ctx` é transient, o worker não o alcança):
+// WaitGroup MANUAL — add/done disponíveis TAMBÉM nos handles (o `ctx` é transient, o worker não o alcança):
+fn Tx<T>::add()                                    // um PRODUTOR se registra pelo SEU handle (incrementa o ctx)
 fn Tx<T>::done()                                   // um PRODUTOR sinaliza fim pelo SEU handle (decrementa o ctx)
+fn Rx<T>::add()                                    // um CONSUMIDOR se registra pelo SEU handle
 fn Rx<T>::done()                                   // um CONSUMIDOR sinaliza fim pelo SEU handle
-fn ctx::add(n: usize)                              // o CRIADOR registra N tasks ANTES do spawn (race-free)
+fn ctx::add(n: usize)                              // o CRIADOR registra N tasks (antes do spawn = race-free)
 fn ctx::wait()                                     // o criador bloqueia até o contador zerar
 fn ctx::close()                                    // fecho de reserva do canal (invoca end())
 ```
@@ -487,14 +489,14 @@ fn ctx::close()                                    // fecho de reserva do canal 
   cria o canal e devolve o **contexto** — o **WaitGroup** do canal e um fecho de reserva (`ctx.close()`).
   Os dois extremos são clamados por chave: `svc<Rx<T>>(key)` (leitor), `svc<Tx<T>>(key)` (N escritores); o
   `ctx` é o retorno do `make` (fica com o criador). O worker sinaliza fim pelo **seu handle** (`tx.done()`/`rx.done()`), não pelo ctx transient. Fan-in MPSC: **1 leitor**, **N escritores**.
-- **O WaitGroup é MANUAL, e o `done()` desce para os handles porque o `ctx` é transient (ruling do dono).** A
-  contagem é **do usuário**, nunca automática (nem no `spawn`, nem na saída da task). A divisão respeita o
-  lifetime: o **`add` fica no `ctx`** — o **criador** chama `ctx.add(n)` **antes** do `spawn` (o criador é
-  quem segura o ctx transient, e adicionar antes de disparar é **race-free**); o **`done` desce para os
-  HANDLES** — `tx.done()` (produtor) e `rx.done()` (consumidor), *respectivamente*, porque um worker **não
-  alcança o `ctx` transient** (ele está na região do criador), mas **sempre segura o seu `tx`/`rx`** (estável,
-  backed em F2). O `ctx.wait()` (no criador) bloqueia até o contador zerar. Pôr o `add` no handle
-  reintroduziria a corrida "add-depois-do-spawn"; por isso só o `done` desce.
+- **O WaitGroup é MANUAL, e `add`/`done` estão disponíveis também nos handles (ruling do dono — não bloquear o
+  dev).** A contagem é **do usuário**, nunca automática (nem no `spawn`, nem na saída da task). Como o `ctx` é
+  **transient** (na região do criador) e um worker **não o alcança**, mas **sempre segura o seu `tx`/`rx`**
+  (estável, F2), tanto o **`add`** quanto o **`done`** ficam **também nos handles**: `tx.add()`/`tx.done()`
+  (produtor) e `rx.add()`/`rx.done()` (consumidor). O criador ainda tem `ctx.add(n)` e `ctx.wait()`. **Caveat
+  (não trava):** se o dev adiciona **depois** do `spawn` (via handle) em vez de **antes** (via `ctx.add`), a
+  corrida "add-depois-do-spawn" é **responsabilidade dele** — o `ctx.add(n)` antes do `spawn` é o caminho
+  race-free, mas o dev **pode** coordenar como quiser.
 - **Fechar é responsabilidade do PRODUTOR (ruling do dono).** O **`Tx` tem o `close()`** — quem sabe que não
   há mais mensagens é o produtor, então é ele que fecha (`tx.close()` → `end()`; convenção Go). Com N
   produtores, o usuário coordena por `ctx.add` + `tx.done()`/`rx.done()` + `ctx.wait()` e fecha-se **uma vez** (idempotente). O fecho também

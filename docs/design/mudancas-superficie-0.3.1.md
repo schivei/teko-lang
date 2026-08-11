@@ -507,10 +507,12 @@ fn  Tx<T>::send(v: T): null                        // devolve null; a propriedad
 fn  Tx<T>::close()                                 // o PRODUTOR fecha: invoca o end() (fecha + drena)
 fn  Rx<T>::pop(): T | Closed                       // recebe; o erro ESPECÍFICO `Closed` quando encerrado e drenado
 
-// WaitGroup MANUAL — o `done()` desce para os HANDLES (o ctx é transient; o worker não o alcança):
-fn  Tx<T>::done()                                  // um PRODUTOR sinaliza fim pelo SEU handle (decrementa o ctx)
+// WaitGroup MANUAL — add/done disponíveis TAMBÉM nos handles (o ctx é transient; o worker não o alcança):
+fn  Tx<T>::add()                                   // um PRODUTOR se registra pelo SEU handle
+fn  Tx<T>::done()                                  // um PRODUTOR sinaliza fim pelo SEU handle
+fn  Rx<T>::add()                                   // um CONSUMIDOR se registra pelo SEU handle
 fn  Rx<T>::done()                                  // um CONSUMIDOR sinaliza fim pelo SEU handle
-fn  ctx::add(n: usize)                             // o CRIADOR registra N tasks ANTES do spawn (race-free)
+fn  ctx::add(n: usize)                             // o CRIADOR registra N (antes do spawn = race-free)
 fn  ctx::wait()                                    // o criador bloqueia até o contador zerar
 fn  ctx::close()                                   // fecho de reserva do canal
 
@@ -555,13 +557,13 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte.
 o **contexto** (`ctx`) — o **WaitGroup** do canal e um fecho de reserva. Os extremos são clamados por chave:
 `svc<Rx<T>>(key)`, `svc<Tx<T>>(key)` — coordenação sem trafegar id.
 
-**WaitGroup MANUAL; `done()` desce para os handles porque o `ctx` é transient (ruling do dono).** A contagem
-é **do usuário**, **nunca automática** (o `spawn` não registra nada, a saída da task não faz `done` sozinha).
-A divisão respeita o lifetime: o **`add` fica no `ctx`** — o **criador** faz `ctx.add(n)` **antes** do
-`spawn` (race-free, e é ele quem segura o ctx transient); o **`done` desce para os HANDLES** — `tx.done()`
-(produtor) / `rx.done()` (consumidor), porque um worker **não alcança o `ctx` transient** mas **sempre segura
-o seu `tx`/`rx`** (estável, F2). `ctx.wait()` (no criador) bloqueia até zerar. Pôr o `add` no handle
-reintroduziria a corrida "add-depois-do-spawn"; por isso só o `done` desce.
+**WaitGroup MANUAL; `add`/`done` também nos handles — não bloquear o dev (ruling do dono).** A contagem é **do
+usuário**, **nunca automática** (o `spawn` não registra nada, a saída da task não faz `done` sozinha). Como o
+`ctx` é **transient** e um worker não o alcança, mas sempre segura o seu `tx`/`rx` (estável, F2), tanto
+**`add`** quanto **`done`** ficam **também nos handles**: `tx.add()`/`tx.done()` (produtor) e `rx.add()`/
+`rx.done()` (consumidor). O criador ainda tem `ctx.add(n)` e `ctx.wait()`. **Caveat (não trava):** adicionar
+**depois** do `spawn` (via handle) em vez de **antes** (via `ctx.add`) é a corrida "add-depois-do-spawn", e é
+**responsabilidade do dev** — o `ctx.add(n)` antes do `spawn` é o caminho race-free, mas ele coordena como quiser.
 
 **Registro (compilador) vs materialização (`make`) — dois modos de chave (ruling do dono).** `Ctx`/`Rx<T>`/
 `Tx<T>` **não** são serviços do usuário — são handles que o compilador registra e o `make` materializa. O
@@ -758,7 +760,7 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 |---|---|
 | **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
 | **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
-| **`chan<T>`** | tipo genérico MPSC; `make<K: service singleton & IChannelKind<T>>(key, bounds = 1): ctx`; WaitGroup **manual** — `ctx.add(n)` no criador (antes do spawn), `tx.done()`/`rx.done()` no handle (ctx transient), `ctx.wait()` no criador; extremos por `svc<Rx>`/`svc<Tx>`; unbounded = `make(key, 0)` |
+| **`chan<T>`** | tipo genérico MPSC; `make<K: service singleton & IChannelKind<T>>(key, bounds = 1): ctx`; WaitGroup **manual** — `add`/`done` no `ctx` **e** nos handles (`tx`/`rx`, pois o ctx é transient), `ctx.wait()` no criador; extremos por `svc<Rx>`/`svc<Tx>`; unbounded = `make(key, 0)` |
 | **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por chave** — todo transporte é `service singleton` (não-singleton = erro), vive em **F2**; chave **constante** = registro estático/inline, chave **variável** = pré-registro + lookup runtime; **elimina id no `spawn`**; não dispatch dinâmico |
 | **fecho** | **responsabilidade do PRODUTOR** — `tx.close()` invoca `end()` (fecha + drena), idempotente; reserva em `ctx.close()`; consumidor faz `pop()` até o erro específico `Closed`. `Rx::pop(): T \| Closed`; `Tx::send(): null` + `tx.closed` (ambos observam) |
 | **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |
