@@ -423,17 +423,21 @@ default**). Tudo é operado pelo **id** do canal (a regra "IDs, não ponteiros",
 
 ```teko
 // O TRANSPORTE é um contrato — a interface que qualquer canal (SO, memória, Kafka, RabbitMQ, RPC, …) satisfaz:
-type IChannelKind<T> = interface { fn send(v: T); fn recv(): T }
+type IChannelKind<T> = interface {
+    fn send(v: T)   // entrega uma mensagem no transporte
+    fn recv(): T    // retira uma mensagem do transporte
+    fn end()        // sinaliza o FECHO e o DRENO do canal
+}
 
 static fn chan<T>::make<K: IChannelKind<T>>(bounds: usize = 1, kind: K = OsChan<T>{}): self
                     c.id: usize                     // o id do canal — o que se passa a uma corotina
 static fn chan<T>::writer(id: usize): Tx<T>        // extremo de ESCRITA (copiável, N escritores)
 static fn chan<T>::reader(id: usize): Rx<T>        // extremo de LEITURA (um só; 2º de outra task = erro)
-static fn chan<T>::close(id: usize)                // fecho do lado do produtor
+static fn chan<T>::close(id: usize)                // invoca o `end()` do transporte: fecha + drena
 
-// Tx<T> e Rx<T> são handles pequenos que carregam o id, tipados por T — obtidos por writer(id)/reader(id):
-fn Tx<T>::send(v: T): null | error                 // envia; ESPERA se bounded-cheio; error se já fechado
-fn Rx<T>::pop(): T | closed                        // recebe; devolve `closed` quando o último produtor fecha e esvazia
+// Tx<T> e Rx<T> são handles pequenos que carregam SÓ o id, tipados por T — obtidos por writer(id)/reader(id):
+fn Tx<T>::send(v: T): null                         // devolve `null` no envio; a propriedade `tx.closed: bool` diz se o canal fechou (drenado, sem mais mensagens)
+fn Rx<T>::pop(): T | error                         // recebe; devolve `error` quando o canal foi encerrado (`end()`) e drenado
 ```
 
 - `chan<T>::make()` → **bounded-1**, transporte do SO (defaults) · `make(64)` → bounded-64 · `make(0)` → **unbounded**.
@@ -448,16 +452,23 @@ fn Rx<T>::pop(): T | closed                        // recebe; devolve `closed` q
   - **`MemChan<T>`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais rápida,
     só dentro do MESMO processo.
   - **do dev**: `KafkaChan<T>{ brokers, topic }`, `RabbitChan<T>{…}`, `WsChan<T>{…}`, `HttpChan<T>{…}`,
-    `UdpChan<T>{…}`, `RpcChan<T>{…}` — qualquer coisa que implemente `send`/`recv`. Native-only: o transporte
-    é **código Teko** falando o protocolo, ou **link dinâmico FFI** a uma lib de sistema — nunca um `.c` local.
-- **Não é dispatch dinâmico (ruling do dono), é conformidade ESTÁTICA.** O tipo concreto do `kind` é
-  conhecido no `make` (por isso `make<K: IChannelKind<T>>` — a interface é usada como **bound de comp-time**,
-  como o subtipo de closure §Doc 2 §9.2). O `send`/`recv` do transporte é **monomorfizado** dentro do canal:
-  chamada estática, **sem vtable, sem representação de runtime da interface** (o Round-3 de dispatch dinâmico
-  NÃO é pré-requisito — só a conformidade estática de interface, que já existe). O `closed`/bounds/contrapressão
-  ficam na camada `chan` (Tx/Rx); a interface é só o `send`/`recv` cru do transporte.
-- **Arena:** a instância do `kind` é **config copiada para F2** no `make` (região imortal, §7.6) — vive tanto
-  quanto o canal, carrega o config por valor, **nunca um `ref` cruzando fronteira de task** (regra de UAF, §9).
+    `UdpChan<T>{…}`, `RpcChan<T>{…}` — qualquer coisa que implemente `send`/`recv`/`end`. Native-only: o
+    transporte é **código Teko** falando o protocolo, ou **link dinâmico FFI** a uma lib de sistema — nunca um `.c` local.
+- **A instância do transporte é um SERVIÇO na raiz, chaveado pelo id — DI com chave de RUNTIME (ruling do dono).**
+  Esta é a peça que resolve "reconstruir o tipo quando só o id cruza a fronteira": a instância de quem
+  implementa a interface **reside num ponteiro na arena raiz (F2, §7.6) sob um id de contexto** — o id do
+  canal. **Quem clama pelo serviço é o `Tx`/`Rx`, usando o id como chave** (é o mesmo mecanismo do DI, §8, só
+  que a chave é resolvida em runtime, não por tipo em comp-time). O handle carrega só o id; a cada `send`/
+  `pop` resolve o transporte pelo id e o invoca. É **seguro** porque a instância vive na raiz **até o `close`**
+  (`end()`), então o ponteiro nunca pendura, e **nada precisa reconstruir o tipo concreto** do lado receptor.
+- **Conformidade de interface ESTÁTICA, não dispatch dinâmico do Round 3.** O tipo concreto do `kind` é
+  fixado no `make` (`make<K: IChannelKind<T>>` — a interface como **bound de comp-time**, como o subtipo de
+  closure Doc 2 §9.2): o `send`/`recv`/`end` do transporte é **monomorfizado** e **registrado como o serviço
+  sob o id**. O roteamento é a **resolução DI por id** (service locator), com o transporte concreto por trás —
+  **sem vtable de interface, sem representação de runtime da interface** (o Round-3 NÃO é pré-requisito).
+- **Ciclo de vida:** a instância carrega o config **por valor** (nunca um `ref` cruzando task, regra de UAF
+  §9), vive na raiz sob o id **do `make` até o `close`**, e o `close(id)` invoca `end()` (fecho + dreno) e
+  então a solta da raiz. O `bounds`/contrapressão ficam na camada `chan` (Tx/Rx); a interface é só `send`/`recv`/`end`.
 - Fan-in MPSC: N escritores (`Tx`), 1 leitor (`Rx`).
 
 `spawn` é uma **keyword de corotina** (não uma função) — estilo Go: `spawn f(args)` lança `f` numa corotina
@@ -474,7 +485,7 @@ fn gerar(cid: usize) {                             // função sem retorno — s
     for p in pedidos() {
         tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula
     }
-    chan<Pedido>::close(cid)    // fim → o pop do consumidor passará a devolver `closed`
+    chan<Pedido>::close(cid)    // end(): fecha + drena → o pop do consumidor passará a devolver `error`
 }
 
 fn main() {
@@ -485,7 +496,7 @@ fn main() {
         var m = rx.pop()
         match m {
             Pedido => processar_lento(m),   // lento; o produtor não corre à frente dele
-            closed => break                 // o fecho do canal É a sincronização — não há join
+            error  => break                 // canal encerrado e drenado — é a sincronização, não há join
         }
     }
 }
@@ -509,7 +520,7 @@ fn main() {
 ```
 
 Não há `join` no modelo de corotina: a barreira de memória é o **fecho do canal** (o `pop` devolver
-`closed`) e/ou o `WaitGroup`.
+`error` após `end()`) e/ou o `WaitGroup`.
 
 ### 7.9 `await` — alarga o retorno para `Intent<T>` (sem necessidade de `async`)
 
@@ -658,6 +669,13 @@ Isso mantém a disciplina "dados só cruzam por cópia/id entre threads": um ser
 não é visível a outra por referência — se precisar atravessar, atravessa como valor por `chan`, nunca o
 `Ref` do serviço.
 
+**O transporte de canal (§7.8) é DI com chave de RUNTIME.** O DI acima resolve por **tipo em comp-time**
+(`svc<T>()`). O transporte do `chan` é o mesmo padrão de service-locator, só que a **chave é o id do canal
+resolvido em runtime**: a instância do `IChannelKind<T>` fica num ponteiro na **raiz do programa (F2)** sob
+o id de contexto, e **`Tx`/`Rx` clamam o serviço pelo id** a cada `send`/`pop`/`end`. É por isso que o
+handle carrega só o id e nada precisa reconstruir o tipo concreto quando o id cruza para uma corotina
+`spawn` — a resolução por id devolve o transporte concreto (monomorfizado no `make`), vivo até o `close`.
+
 ---
 
 ## 9. Invariantes de segurança e casos de borda (checklist)
@@ -736,9 +754,11 @@ fn pipeline() {
 - **Piso = necessidade estática + cabeçalho da arena**, não 64 KiB default (§3). Elisão = o caso limite
   `need == 0` (§4).
 - **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
-- **Transporte do canal = `IChannelKind<T>` extensível** (`interface { fn send(T); fn recv(): T }`);
-  built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/WS/HTTP. Conformidade
-  **estática** (monomorfização, `make<K: IChannelKind<T>>`), não dispatch dinâmico (§7.8).
+- **Transporte do canal = `IChannelKind<T>` extensível** (`interface { fn send(T); fn recv(): T; fn end() }`);
+  built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/WS/HTTP. A instância é um
+  **serviço na raiz chaveado pelo id** — DI com chave de **runtime**: `Tx`/`Rx` resolvem o transporte pelo id
+  (§8), vive da abertura ao `close`/`end()`. Conformidade **estática** (monomorfização), não dispatch dinâmico
+  do Round 3 (§7.8). `Rx::pop(): T | error` (error = encerrado); `Tx::send(): null` + `tx.closed`.
 - **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
   scoped na sub-raiz da thread — sem ressincronizar (§8).
 - **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Não há
