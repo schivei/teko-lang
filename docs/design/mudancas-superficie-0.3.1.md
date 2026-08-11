@@ -477,26 +477,35 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte 
 `fork_join` de baixo nível sobrevive como mecanismo INTERNO do backend, para paralelizar o codegen — não
 é superfície de usuário; o usuário escreve `spawn`.)*
 
-### 10.3 `await` — suspender qualquer função (sem `async`)
+### 10.3 `await` — alarga o retorno para `Intent<T>` (sem `async`)
 
-**Não há keyword `async`: basta `await`.** `await f(args)` **suspende** a tarefa corrente (cede o controle,
-cooperativa, **sem bloquear a thread**), executa `f`, e é retomada com o resultado quando ele resolve —
-gerando um `Intent<T>` (o carregador do resultado pendente). É onde se **garante a execução** — ao
-contrário do `spawn` (fire-and-forget, sem retorno). A arena de cada fundação está no Doc 1 §7.9.
-
-- **`Intent<T>`** é **criado na arena do caller** e carrega o **estado + a CÓPIA do resultado**; a retomada
-  da suspensão escreve a cópia de `T` dentro dele (nunca uma referência à arena que a produziu) —
-  destino-na-arena, como o DPS. **`Intent`** (não-genérico) é opaco, sem dado. São overload de tipo (§9).
-- **I/O** — a suspensão é servida por um reator (`epoll`/`kqueue`/`IOCP`), sem thread nova. **CPU** — o
-  corpo roda numa corotina isolada de um pool (F1). Em ambos o `await` cede e retoma; nunca bloqueia.
-
-**Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve"). E **`ref` não
-cruza a fronteira** de concorrência: nem `spawn`/`chan` aceitam `ref`, nem um genérico pode ser `<ref T>`
-(§10.6) — preserva UAF; o que cruza é cópia ou id.
+**Não há `async`, e a função NÃO declara `Intent`.** A função retorna o seu tipo normal; o **`await`
+ALARGA** o retorno para `Intent<T>` no ponto de chamada. Ao contrário de outras linguagens (que
+**estreitam** a assinatura para `Task<T>`/`Promise<T>`), aqui a assinatura fica limpa e o alargamento é só
+onde se espera.
 
 ```teko
-var r = await calcular(x)     // suspende, roda calcular, retoma com r — qualquer função, sem `async`
+fn calc(x: i32, y: i32): i32 { x + y }
+
+var a = await calc(1, 2)       // a : Intent<i32>
+if a.canceled { println("canceled") }
+else          { println($"r = {a.value}") }
 ```
+
+`await f(args)` **suspende** (cede, sem bloquear a thread), executa `f`, e o retorno cai em **`.value`** de
+um `Intent<T>` criado no caller. Campos: **`.value: T`** + **`.canceled: bool`**. `Intent` (sem `T`) = o
+desfecho de esperar uma função **sem retorno** (só `.canceled`). É onde se **garante a execução** — o
+`spawn` é fire-and-forget, sem retorno.
+
+**Várias tasks — sem `Intent` na assinatura:** `await teko::tasks::when_all(f(a), g(b), …)` e
+`await teko::tasks::when_any(…)` devolvem uma **lista de `Intent`s**. O dev nunca escreve `Intent` num
+retorno; só o `await` (direto ou via `when_all`/`when_any`) o produz.
+
+- **Arena/fundações** (Doc 1 §7.9): **I/O** — reator (`epoll`/`kqueue`/`IOCP`), sem thread nova; **CPU** —
+  corotina isolada de um pool (F1). Em ambos o `await` cede e retoma, nunca bloqueia.
+
+**Não** existe thread compartilhando arena sem F1. E **`ref` não cruza** a fronteira: nem `spawn`/`chan`
+aceitam `ref`, nem `<ref T>` genérico (§10.6) — preserva UAF; cruza cópia ou id.
 
 ### 10.4 `teko::journal` — o módulo de journaling
 

@@ -493,26 +493,48 @@ fn main() {
 Não há `join` no modelo de corotina: a barreira de memória é o **fecho do canal** (o `pop` devolver
 `closed`) e/ou o `WaitGroup`.
 
-### 7.9 `await` — suspender qualquer função e gerar um `Intent` (sem `async`)
+### 7.9 `await` — alarga o retorno para `Intent<T>` (sem `async`)
 
-**Não há keyword `async`: basta `await`.** Qualquer função pode ser suspensa de execução — `await f(args)`
-**suspende** a tarefa corrente (cooperativa, **cede o controle sem bloquear a thread do SO**), executa `f`,
-e é retomada com o resultado quando ele resolve. A suspensão gera um `Intent<T>` (o carregador do resultado
-pendente). É o oposto do `spawn`: **`spawn` dispara e esquece (sem retorno); `await` suspende e recolhe (com
-retorno)** — é no `await` que se GARANTE a execução, por suspensão. A arena difere conforme a fundação (I/O
-vs CPU), dita e não escondida (`concorrencia-isolate-spawn-chan` §8):
+**Não há keyword `async`, e a função NÃO declara `Intent`.** Uma função retorna o seu tipo normal
+(`fn calc(x, y): i32`); é o **`await` que ALARGA** o retorno para `Intent<T>` no ponto de chamada. Ao
+contrário de outras linguagens (que **estreitam** a assinatura para `Task<T>`/`Promise<T>`), aqui a
+assinatura fica limpa e o **alargamento** acontece só onde se espera:
+
+```teko
+fn calc(x: i32, y: i32): i32 { x + y }
+
+var a = await calc(1, 2)       // a : Intent<i32> — o await criou o Intent; o retorno foi para .value
+if a.canceled {
+    println("canceled")
+} else {
+    println($"r = {a.value}")
+}
+```
+
+`await f(args)` **suspende** a tarefa corrente (cooperativa, **cede o controle sem bloquear a thread**),
+executa `f`, e o retorno de `f` **cai no campo `.value` de um `Intent<T>` criado no caller** (é por isso
+que o Intent nasce na arena do caller). O `Intent<T>` carrega o desfecho: **`.value: T`** (o retorno) e
+**`.canceled: bool`** (a task foi cancelada). É o oposto do `spawn` (fire-and-forget, sem retorno): no
+`await` se GARANTE a execução, por suspensão.
+
+**Várias tasks — sem `Intent` na assinatura.** Para disparar/esperar muitas, usa-se a biblioteca, não a
+assinatura: `await teko::tasks::when_all(calc(1,2), calc(3,4), …)` e `await teko::tasks::when_any(…)`, que
+devolvem uma **lista de `Intent`s**. O dev nunca escreve `Intent` num retorno — só o `await` (direto ou via
+`when_all`/`when_any`) o produz.
+
+A arena difere conforme a fundação (I/O vs CPU), dita e não escondida (`concorrencia-isolate-spawn-chan` §8):
 
 **O que o `Intent` carrega, e por que o dado cruza por cópia (regra do dono):**
-- **`Intent<T>`** (genérico) é **criado na arena do caller** (quem faz a chamada `async`) e carrega o
-  **estado da intenção + a CÓPIA do dado**. Ele é **alimentado pelo processo de sincronização**: quando o
-  trabalho completa, o sync (o reator no I/O, o `join` no CPU) **escreve a cópia de `T` dentro do Intent**
-  que já vive na arena do caller — **nunca uma referência** à arena da raia/continuação que produziu o
-  valor (essa pode ter rebobinado). É o "dados cruzam só por cópia" do `isolate`, e é destino-na-arena-do-
-  caller, como o DPS (§5).
-- **`Intent`** (não-genérico) é **opaco e não possui dado** — fire-and-forget; `await` só sincroniza.
-  (`Intent` vs `Intent<T>` = o mesmo nome com aridade genérica distinta — é overload de TIPO, Doc 2 §9.)
+- **`Intent<T>`** (genérico) é **criado na arena do caller** (quem faz o `await`) e carrega o desfecho:
+  **`.value: T`** (a CÓPIA do retorno de `f`) + **`.canceled: bool`**. Ele é **alimentado pela retomada**:
+  quando o trabalho completa, a suspensão **escreve a cópia de `T` em `.value`** — **nunca uma referência**
+  à arena da raia/continuação que produziu o valor (essa pode ter rebobinado). É o "dados cruzam só por
+  cópia" do `isolate`, e é destino-na-arena-do-caller, como o DPS (§5).
+- **`Intent`** (não-genérico) é o desfecho de esperar uma **função SEM retorno**: só `.canceled`, sem
+  `.value`. (`Intent` vs `Intent<T>` = o mesmo nome com aridade genérica distinta — é overload de TIPO,
+  Doc 2 §9.)
 - **`ref` NÃO cruza a fronteira de MT/async** (regra do dono, preservação de UAF): nem como argumento de
-  `spawn`/`chan`/`async fn`, nem embutido num genérico (`<ref T>` é rejeitado, §9). Um borrow que cruzasse
+  `spawn`/`chan`/uma função esperada por `await`, nem embutido num genérico (`<ref T>` é rejeitado, §9). Um borrow que cruzasse
   penduraria quando a arena do outro lado dropasse. O que cruza é cópia (valor) ou id (`u64`), nunca borrow.
 
 - **I/O cooperativo (uma só raia mutando a arena por vez):** o `Intent` de I/O **vive dentro do
