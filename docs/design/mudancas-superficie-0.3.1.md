@@ -403,28 +403,33 @@ var log:   action<str>              = (m) => print(m)
 var fmt:   func<Record, str> | null = null           // sem colisão (era `fn(Record): str | null`, ambíguo)
 ```
 
-### 9.3 Atribuição múltipla — `var a, b, c = …` (sem tipo tupla)
+### 9.3 Atribuição múltipla e decomposição de array — `var a, b = …` e `var [a, b] = arr` (sem tipo tupla)
 
-**O que muda.** Entra a **atribuição múltipla**: vários alvos ligados posicionalmente a vários valores,
-**sem parênteses e sem tipo tupla**. É a base do `await` (§10.3) e dá **retorno múltiplo** de graça. (A
-decomposição por NOME `{ x; y }` de campos de struct, B.13, continua; esta é a posicional.)
+**O que muda.** Entram a **atribuição múltipla** (vários alvos = vários valores, posicional) e a
+**decomposição de array** (desempacotar um `[]T` em alvos posicionais), **sem tipo tupla**. Atribuição
+múltipla é a base do `await` (§10.3) e dá **retorno múltiplo** de graça. (A decomposição por NOME
+`{ x; y }` de campos de struct, B.13, continua.)
 
 **O que entra.**
 - `var a, b, c = e1, e2, e3` — liga posicional; **tipos inferidos por posição** (cada alvo pega o tipo do
   seu valor).
 - `var a, b: T = e1, e2` — **um tipo só** anotado, compartilhado por todos os alvos.
+- **Decomposição de array:** `var [a, b, c] = arr` — desempacota um **array `[]T`** (um tipo REAL) em
+  ligações posicionais. **Fica** — é importante para trabalhar com arrays.
 - **Retorno múltiplo:** `fn div(): (i32, i32)` (a assinatura lista os retornos); o chamador liga com
   `var q, r = div(17, 5)`. **Não há tipo tupla** — o `( )` só aparece na assinatura e no ponto de ligação,
   nunca como valor de 1ª classe (`var t = div(…)` não existe).
 
-**O que resolve.** Ligar/retornar vários valores sem struct nomeado nem tipo tupla — sistema de tipos
-enxuto — e é a notação natural para várias tasks (§10.3), matando `when_all`/`when_any` **e** o `await` de
-array.
+**O que resolve.** Ligar/retornar vários valores e desempacotar arrays sem struct nomeado nem tipo tupla —
+sistema de tipos enxuto. A atribuição múltipla é a notação natural para várias tasks (§10.3), matando
+`when_all`/`when_any` **e** o `await` de array (mas a decomposição de array em si fica).
 
 **Exemplo.**
 ```teko
-var e, f = 1, "abc"           // e : i32, f : str — tipos por posição
+var e, f = 1, "abc"           // e : i32, f : str — tipos por posição (atribuição múltipla)
 var g, h: i32 = 1, 2          // g, h : i32 — tipo compartilhado
+
+var [x, y, z] = [1, 2, 3]     // decomposição de array []i32 (tipo real)
 
 fn div(a: i32, b: i32): (i32, i32) { return (a / b, a % b) }   // retorno múltiplo (NÃO um tipo)
 var q, r = div(17, 5)                                           // q = 3, r = 2
