@@ -5318,168 +5318,21 @@ fn name_in_set(set: []str, name: str): bool {
 }
 
 /**
- * ref_value_is_passdown — is the returned reference expression `e` a sound R6/R7 pass-down: a BARE
- * read of one of the function's own `ref`/`Reference` parameters (whose target is the caller's,
- * outliving the call), or an if/match whose every branch trailing value is itself a pass-down? Any
- * other reference source (an `&x` borrow of a local, a ref local, a field/element) is NOT a pass-down.
+ * reject_ref_return — the retirement gate for ref-return (mudancas-superficie §3, 0.3.1). A function
+ * may no longer declare a `Reference` return type: `ref` survives ONLY as a PARAMETER (a
+ * write-through borrow whose target is the caller's) and as a LOCAL BINDING (`ref r: T = x`), never
+ * as a returned value. A `Reference`-typed return is REJECTED here; every other return passes.
  *
- * @param e           the returned typed expression (already known to be `Reference`-typed)
- * @param ref_params  the names of the function's reference parameters
- * @return            true iff `e` is a sound reference pass-down
+ * @param ret  the function's resolved return type
+ * @return     null when `ret` is not a reference, else the retirement error
+ * @throws     when `ret` is a `Reference`
  */
-fn ref_value_is_passdown(e: TExpr, ref_params: []str): bool {
-    match e.kind {
-        TVar as v => name_in_set(ref_params, v.name)
-        TIfExpr as f => ref_trailing_is_passdown(f.then_blk, ref_params) && ref_trailing_is_passdown(f.else_blk, ref_params)
-        TMatchExpr as m => ref_arms_are_passdown(m.arms, ref_params)
-        _ => false
-    }
-}
-
-/**
- * ref_arms_are_passdown — do ALL match arms' trailing values qualify as reference pass-downs?
- *
- * @param arms        the typed match arms
- * @param ref_params  the function's reference-parameter names
- * @return            true iff every arm's trailing value is a pass-down
- */
-fn ref_arms_are_passdown(arms: []TArm, ref_params: []str): bool {
-    var i = 0
-    loop {
-        if i >= arms.len { break }
-        if !ref_trailing_is_passdown(arms[i].body, ref_params) { return false }
-        i++
-    }
-    true
-}
-
-/**
- * ref_trailing_is_passdown — does a block's trailing value qualify as a reference pass-down (a bare
- * ref-parameter read, transitively through nested if/match)? A block with no expression trailing
- * value cannot yield the reference and is treated as non-pass-down (conservative reject).
- *
- * @param stmts       the block's typed statements
- * @param ref_params  the function's reference-parameter names
- * @return            true iff the block's trailing value is a pass-down
- */
-fn ref_trailing_is_passdown(stmts: []TStatement, ref_params: []str): bool {
-    match tblock_trailing(stmts) {
-        TExpr as t => ref_value_is_passdown(t, ref_params)
-        null => false
-    }
-}
-
-/**
- * check_ref_return_passdown — the soundness gate for a `-> ref T` function (0.3.0.30 Part A). A
- * function that returns a reference may return ONLY a bare read of one of its own `ref` PARAMETERS
- * (the identity pass-down, R6/R7 — the aliased storage belongs to the caller and outlives the call).
- * Every explicit `return`, and the body's trailing value, is checked; a reference sourced any other
- * way (a local `&x` borrow, a ref local, a struct field) is conservatively REJECTED pending the
- * transitive-escape spine (ref-transparent-model §9 honest-stop). Non-reference returns are ignored.
- *
- * @param stmts       the function body's typed statements
- * @param ref_params  the function's reference-parameter names
- * @return            null when every returned reference is a sound pass-down, else the reject error
- * @throws            when a returned reference is not an own-`ref`-parameter pass-down
- */
-fn check_ref_return_passdown(stmts: []TStatement, ref_params: []str): error | null {
-    var i = 0
-    loop {
-        if i >= stmts.len { break }
-        match check_ref_return_passdown_stmt(stmts[i], ref_params) { null => { }; error as e => return e }
-        i++
-    }
-    match tblock_trailing(stmts) {
-        TExpr as t => match t.type {
-            Reference => if !ref_value_is_passdown(t, ref_params) { return ref_passdown_error() }
-            _ => { }
-        }
-        null => { }
+fn reject_ref_return(ret: Type): error | null {
+    match ret {
+        Reference => return error { message = "a function cannot return a reference — ref-return was retired in 0.3.1; `ref` survives only as a parameter (write-through borrow) (mudancas-superficie §3)" }
+        _ => { }
     }
     null
-}
-
-/**
- * ref_passdown_error — the shared diagnostic for a `-> ref T` return that is not a sound pass-down.
- *
- * @return the reject error naming the pass-down-only rule and the spine dependency
- */
-fn ref_passdown_error(): error {
-    error { message = "a `-> ref T` function may return only one of its own `ref` parameters (identity pass-down) — a reference to a local, a `ref` local, or a stored field cannot escape until the transitive-escape spine lands (reference-model §9 conservative honest-stop)" }
-}
-
-/**
- * collect_ref_param_names — the names of a function's parameters whose resolved type is a
- * `Reference` (a `ref`/`Ref<T>` parameter). Drives the `-> ref T` return pass-down gate.
- *
- * @param params  the function's syntactic parameters
- * @param tbl     the type-parameter table in scope
- * @param ns      the function's enclosing namespace (the type-resolution referencing ns)
- * @return        the reference parameters' names, in declaration order
- */
-fn collect_ref_param_names(params: []parser::Param, tbl: TypeTable, ns: str): []str {
-    var out: []str = teko::list::empty()
-    var i = 0
-    loop {
-        if i >= params.len { break }
-        if params[i].has_type {
-            var rt = match resolve_type(params[i].type_ann, tbl, ns) { Type as t => t; error => Void { } }
-            match rt { Reference => out = teko::list::push(out, params[i].name); _ => { } }
-        }
-        i++
-    }
-    out
-}
-
-/**
- * check_ref_return_passdown_stmt — walk one typed statement for reference `return`s, descending into
- * loop/adopt bodies and if/match blocks, gating every reference-typed `return` value.
- *
- * @param s           the typed statement
- * @param ref_params  the function's reference-parameter names
- * @return            null when sound, else the reject error
- * @throws            when a reference `return` is not a pass-down
- */
-fn check_ref_return_passdown_stmt(s: TStatement, ref_params: []str): error | null {
-    match s {
-        TReturn as r => {
-            if !r.has_value { return null }
-            match r.value.type { Reference => if !ref_value_is_passdown(r.value, ref_params) { return ref_passdown_error() }; _ => { } }
-            null
-        }
-        TLoopStmt as l => check_ref_return_passdown(l.body, ref_params)
-        TAdoptStmt as a => check_ref_return_passdown(a.body, ref_params)
-        TExprStmt as es => check_ref_return_passdown_inexpr(es.expr, ref_params)
-        _ => null
-    }
-}
-
-/**
- * check_ref_return_passdown_inexpr — descend into an if/match expression-statement's blocks, gating
- * every reference-typed `return` nested inside a branch.
- *
- * @param e           the typed expression
- * @param ref_params  the function's reference-parameter names
- * @return            null when sound, else the reject error
- * @throws            when a nested reference `return` is not a pass-down
- */
-fn check_ref_return_passdown_inexpr(e: TExpr, ref_params: []str): error | null {
-    match e.kind {
-        TIfExpr as f => {
-            match check_ref_return_passdown(f.then_blk, ref_params) { null => { }; error as e => return e }
-            check_ref_return_passdown(f.else_blk, ref_params)
-        }
-        TMatchExpr as m => {
-            var i = 0
-            loop {
-                if i >= m.arms.len { break }
-                match check_ref_return_passdown(m.arms[i].body, ref_params) { null => { }; error as e => return e }
-                i++
-            }
-            null
-        }
-        _ => null
-    }
 }
 
 // the trailing-value check — ONLY when the last statement is an expression (else: NO claim, the
@@ -5989,7 +5842,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }
-    match ret { Reference => match check_ref_return_passdown(tb.stmts, collect_ref_param_names(f.params, tbl, env.cur_ns)) { null => { }; error as e => return e }; _ => { } }
+    match reject_ref_return(ret) { null => { }; error as e => return e }   // §3: ref-return retired
     var lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())
     if lc.failed { return error { message = lc.message } }
     var ret_stmts = retype_union_returns(tb.stmts, ret, table)
@@ -6375,7 +6228,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
     var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: each `return e` matches `ret`
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: trailing value (when present) matches
-    match ret { Reference => match check_ref_return_passdown(tb.stmts, collect_ref_param_names(f.params, tbl, env.cur_ns)) { null => { }; error as e => return e }; _ => { } }
+    match reject_ref_return(ret) { null => { }; error as e => return e }   // §3: ref-return retired
     var lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())   // W5-cf-2: loop labels resolve + are unique
     if lc.failed { return error { message = lc.message } }
     match check_must_free(f, tbl, env.cur_ns, tb.stmts, table) { null => { }; error as e => return e }
