@@ -492,6 +492,11 @@ Não há `join` no modelo de corotina: a barreira de memória é o **fecho do ca
 `async`/`await` (com `Intent<T>`) é **açúcar**, e a arena difere conforme a fundação — a distinção tem de
 ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan` §8):
 
+**A diferença para `spawn`: aqui se GARANTE a execução — por suspensão.** O `spawn` é fire-and-forget (não
+se espera por ele). O `async`/`await` é o oposto: o **`await` é o ponto onde se aguarda o resultado**, e o
+faz **por suspensão** — a tarefa que espera **cede o controle** (cooperativamente, sem bloquear a thread do
+SO) e é retomada quando o `Intent` resolve. `spawn` dispara e esquece; `await` suspende e recolhe.
+
 **O que o `Intent` carrega, e por que o dado cruza por cópia (regra do dono):**
 - **`Intent<T>`** (genérico) é **criado na arena do caller** (quem faz a chamada `async`) e carrega o
   **estado da intenção + a CÓPIA do dado**. Ele é **alimentado pelo processo de sincronização**: quando o
@@ -512,9 +517,9 @@ ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan`
   rebobina a arena de outro) já vale de graça. Compõe com `isolate`: cada isolate roda seu laço
   cooperativo na SUA arena.
 - **CPU (`async fn f(): T`):** desaçucara para lançar o corpo numa **corotina isolada de um pool**
-  pré-aquecido (F1) e o `await` **recolhe o `Intent<T>`** que o processo de sincronização alimentou ao
-  completar. Herda a arena-por-task inteira. **Não é um terceiro modelo de arena "leve".** (Diferente de
-  `spawn`, que é fire-and-forget sem retorno; `async`/`await` tem resultado, via `Intent<T>`.)
+  pré-aquecido (F1); o `await` **suspende** a tarefa que espera (sem bloquear a thread) até o `Intent<T>`
+  ser alimentado ao completar, e então recolhe o resultado. Herda a arena-por-task inteira. **Não é um
+  terceiro modelo de arena "leve".** (Diferente de `spawn`, que é fire-and-forget sem retorno.)
 - **O que NÃO existe:** thread de verdade rodando Teko que **compartilha arena sem F1**. Custaria o mesmo
   (precisa de F1 para ser seguro) e entregaria menos — é o bug que F1 existe para fechar
   (`arena_push`/`pop` de duas raias sobre a mesma pilha se corrompem, sintoma nenhum).

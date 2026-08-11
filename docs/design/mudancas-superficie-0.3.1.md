@@ -467,7 +467,9 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte 
 
 ### 10.3 `async`/`await` + `Intent<T>` — açúcar de duas fundações
 
-Keywords **contextuais**. `async`/`await` retorna um `Intent`/`Intent<T>`:
+Keywords **contextuais**. É aqui que se **garante a execução** (ao contrário do `spawn`, fire-and-forget):
+o **`await` aguarda o resultado por SUSPENSÃO** — a tarefa cede o controle, cooperativa, sem bloquear a
+thread, e é retomada quando o `Intent` resolve. `async`/`await` retorna um `Intent`/`Intent<T>`:
 
 - **`Intent<T>`** é **criado na arena do caller** e carrega o **estado da intenção + a CÓPIA do dado**; o
   **processo de sincronização o alimenta** (escreve a cópia de `T` dentro dele ao completar) — nunca uma
@@ -479,9 +481,9 @@ Keywords **contextuais**. `async`/`await` retorna um `Intent`/`Intent<T>`:
 
 - **I/O cooperativo** — o `Intent` vive na arena de quem criou; sem thread de SO nova; reator
   `epoll`/`kqueue`/`IOCP`. Barato.
-- **CPU** — `async fn pesado(): T` desaçucara para uma corotina isolada de um pool; o `await` **recolhe o
-  `Intent<T>`** que o sync alimentou. Herda F1. (`async`/`await` tem resultado; `spawn` é fire-and-forget,
-  sem retorno.)
+- **CPU** — `async fn pesado(): T` desaçucara para uma corotina isolada de um pool; o `await` **suspende**
+  (sem bloquear a thread) até o `Intent<T>` resolver, e então recolhe o resultado. Herda F1.
+  (`async`/`await` garante o resultado por suspensão; `spawn` é fire-and-forget, sem retorno.)
 
 **Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve"). E **`ref`
 não cruza a fronteira**: nem `spawn`/`chan`/`async fn` aceitam `ref`, nem um genérico pode ser `<ref T>`
