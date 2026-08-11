@@ -479,8 +479,29 @@ fn ctx::close()                                    // o CONTEXTO também pode fe
   constraint garante **instância única** (é o que proíbe um transporte `transient`, que abriria um socket
   novo por resolução). Um singleton comum resolvido por `svc<T>()` (sem chave) vive na raiz da THREAD (§8);
   mas o canal é registrado pelo `make` sob uma **chave**, para comunicação ENTRE tasks, então essa instância
-  única vive na **raiz do PROGRAMA (F2)**, do `make` ao `close`/`end()` — por isso `svc<Tx<T>>("chave")` de
-  **qualquer thread** resolve o MESMO canal. Config **por valor**, nunca um `ref` cruzando task (UAF, §9).
+  única vive na **raiz do PROGRAMA (F2)** — por isso `svc<Rx<T>>("chave")`/`svc<Tx<T>>("chave")` de
+  **qualquer thread** resolvem o MESMO canal. Config **por valor**, nunca um `ref` cruzando task (UAF, §9).
+- **O `ctx` É O DONO do lifetime do canal — transient (ruling proposto).** A instância vive em F2, mas
+  **quem a possui é o `ctx`**: o `ctx` é **transient** (vive na região de quem chamou `make`). Quando o
+  `ctx` cai (a região do criador sai de escopo), ele **cascateia o teardown**: `end()` do transporte →
+  **desregistra a chave** de F2 → **libera** a entrada (o `service` singleton + `Rx` + `Tx`) de F2. Uma
+  cascata só: o canal, o serviço e os dois extremos morrem **juntos com o `ctx`**.
+- **O UAF é fechado por CONSTRUÇÃO — sem `mem::free` manual.** Duas coisas o garantem:
+  1. **`ctx.wait()` é a barreira.** Ele bloqueia até TODAS as tasks (produtores/consumidores) terminarem;
+     o criador chama `ctx.wait()` **antes** de deixar a região cair. Logo, no instante do teardown, **não há
+     nenhum `Rx`/`Tx` vivo em uso** — é a mesma pré-condição do drop total (§2.2): nada vivo aponta para o
+     que vai cair. (Há serviços que dependem de `Rx`/`Tx` finalizarem — o `ctx.wait()` é exatamente esse
+     ponto de espera.)
+  2. **Resolução por CHAVE, não ponteiro cacheado (§7.7).** Um worker nunca segura um ponteiro para o canal;
+     resolve `svc<…>("chave")`. Depois do teardown a chave está desregistrada, então uma resolução tardia
+     **falha** (não há serviço) em vez de pendurar. Não há borrow cruzando fronteira que envelheça.
+- **O "free" é a reclamação POR-ENTRADA de F2, disciplinada pela arena (nova capacidade).** Como o serviço
+  vive em **F2 (imortal)** e F2 não faz bulk-drop, o teardown do `ctx` precisa **remover só a entrada daquele
+  canal** de F2 — um `free` direcionado, **disparado pelo drop do `ctx` transient**, não um `mem::free` do
+  usuário. É a **única capacidade nova de arena** que isto exige: F2 ganha um **free-list/slab** para
+  entradas de canal/journal, reclamáveis **individualmente** (o resto de F2 continua imortal). É a resposta
+  ao trio "UAF + lifetime + free": o *lifetime* é do `ctx`, o *free* é a reclamação da entrada de F2 no drop
+  do `ctx`, e o *UAF* é fechado pelo `ctx.wait()` + resolução-por-chave.
 - **Conflito de chave = erro de compilação** (§7 Doc 2, política de DI): o mesmo `chan<T>` sob a mesma chave
   duas vezes é **erro em comp-time**; chaves distintas coexistem, nunca "último vence".
 - **Conformidade de interface ESTÁTICA, não dispatch dinâmico do Round 3.** Tudo resolve por `(tipo, chave
@@ -786,6 +807,10 @@ fn pipeline() {
   (F2)** (exceção de lifetime — não raiz-de-thread — por ser comunicação entre tasks), da abertura ao fecho.
   **Elimina passar id no `spawn`.** Fechar = do **produtor** (`tx.close()`; reserva em `ctx.close()`);
   `Rx::pop(): T | Closed` (erro específico `Closed` = encerrado); `Tx::send(): null` + `tx.closed`. Sem dispatch dinâmico do Round 3 (§7.8).
+- **Lifetime do canal = o `ctx` (transient); o drop do `ctx` cascateia o teardown** (`end()` + desregistra a
+  chave + libera a entrada de F2). **UAF fechado por construção** (`ctx.wait()` barreira + resolução por
+  chave). **Nova capacidade de arena exigida:** F2 ganha **reclamação por-entrada** (free-list/slab) para
+  canais/journals — um `free` direcionado disparado pelo drop do `ctx`, **não** `mem::free` manual (§7.8).
 - **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
   scoped na sub-raiz da thread — sem ressincronizar (§8).
 - **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Não há

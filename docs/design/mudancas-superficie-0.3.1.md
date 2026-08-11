@@ -234,7 +234,9 @@ lifetimes SÃO tempos de vida de arena (detalhe em `arena-especificacao-unica-0.
 **O que sai.** A DI por anotação da era anterior (`#singleton`/`#inject`, `src/checker/di.tks`
 `choose_factory`) é substituída pela tabela estática nomeada.
 
-**O que entra.** Keywords `service` (+ `sealed`), os lifetimes `singleton`/`scoped`/`transient`, o ctor
+**O que entra.** A keyword `service` (**sempre selado** — um serviço **não pode** ser `virtual` nem
+`abstract`, então `sealed` é redundante e não se escreve; é o mesmo default do `class`, que só se abre com
+`virtual`/`abstract`), os lifetimes `singleton`/`scoped`/`transient`, o ctor
 `static`, e `svc<T: service>(key: str | null = null): T` como **intrínseco de comp-time** (o compilador
 substitui o call-site inline por código por-lifetime; sem ABI de runtime). Chaves de string desambiguam múltiplos provedores de uma
 interface — e a política de conflito é dura (ruling do dono): **se já há um registro do mesmo tipo sob a
@@ -252,7 +254,7 @@ de arena está no Doc 1 §8. É o "considerar DI no front e no back": a superfí
 
 **Exemplo.**
 ```teko
-service sealed Clock singleton {
+service Clock singleton {
     static fn ctor(): self { return Clock { } }
     fn now(): i64 { return 0 }
 }
@@ -548,6 +550,15 @@ o **contexto** (`ctx`) — o **WaitGroup** do canal (`ctx.wait()`) e um fecho de
 são clamados por chave: `svc<Rx<T>>(key)` (leitor) e `svc<Tx<T>>(key)` (escritores). O `ctx` do `make` faz
 sentido como handle de coordenação (WaitGroup) sem trafegar id.
 
+**O `ctx` É O DONO do lifetime — transient (ruling proposto).** O serviço singleton do canal vive em F2, mas
+**quem o possui é o `ctx`** (transient, na região do criador). Quando o `ctx` cai, ele **cascateia o
+teardown**: `end()` → desregistra a chave → **libera** o serviço + `Rx` + `Tx` de F2. O canal, os dois
+extremos e o serviço morrem **junto com o `ctx`**. O **UAF é fechado por construção**: (a) `ctx.wait()`
+barreira — o criador espera todas as tasks antes de a região cair, então nada vivo aponta para o que morre;
+(b) resolução por **chave** (não ponteiro) — depois do teardown, `svc<…>("chave")` **falha** em vez de
+pendurar. O **"free"** é a **reclamação por-entrada de F2** disparada pelo drop do `ctx` (disciplinada pela
+arena, não um `mem::free` manual) — a única capacidade nova de arena que isto exige (Doc 1 §7.8).
+
 **Quem fecha o canal — o PRODUTOR (ruling do dono).** O **`Tx` tem o `close()`** — quem sabe que não há mais
 mensagens é o produtor, então é ele que fecha (`tx.close()` → `end()`; convenção Go); com N produtores,
 coordena por `ctx.wait()` e fecha **uma vez** (idempotente). O fecho também fica **no `ctx`** (`ctx.close()`),
@@ -578,7 +589,7 @@ interface (já existe) + o `service` DI por chave. **Conflito de chave = erro de
 type IChannelKind<T> = interface { fn init(key: str); fn send(v: T); fn recv(): T; fn end() }
 
 // o dev escreve o seu transporte — um `service singleton` que satisfaz a interface (conformidade estática):
-service sealed KafkaChan<T> singleton & IChannelKind<T> {   // singleton: forçado pelo constraint do make
+service KafkaChan<T> singleton & IChannelKind<T> {   // singleton: forçado pelo constraint do make
     brokers: str
     topic: str
     fn init(key: str) { /* liga o transporte ao tópico derivado da chave `key` */ }
