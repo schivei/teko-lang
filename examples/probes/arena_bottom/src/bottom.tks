@@ -15,7 +15,7 @@
  * @param size       the block size in bytes; C11 requires it to be a multiple of `alignment`
  * @return           the block's base address, or 0 on failure
  */
-pub extern fn c_aligned_alloc(alignment: u64, size: u64) -> u64 = "aligned_alloc"
+pub extern fn c_aligned_alloc(alignment: u64, size: u64): u64 = "aligned_alloc"
 
 /**
  * The C deallocator, reached DIRECTLY as a C symbol — the counterpart of `c_aligned_alloc`. A
@@ -25,7 +25,7 @@ pub extern fn c_aligned_alloc(alignment: u64, size: u64) -> u64 = "aligned_alloc
  * @param block  the base address returned by `c_aligned_alloc`; 0 is a documented no-op
  * @return       nothing
  */
-pub extern fn c_free(block: u64) -> void = "free"
+pub extern fn c_free(block: u64): void = "free"
 
 /**
  * The C byte-fill primitive, reached DIRECTLY as a C symbol. It is the arena's WRITE bottom: the
@@ -39,7 +39,7 @@ pub extern fn c_free(block: u64) -> void = "free"
  * @param count  how many bytes to fill
  * @return       `block`, as C's `memset` returns its destination
  */
-pub extern fn c_memset(block: u64, value: i32, count: u64) -> u64 = "memset"
+pub extern fn c_memset(block: u64, value: i32, count: u64): u64 = "memset"
 
 /**
  * The C block-compare primitive, reached DIRECTLY as a C symbol. It is the arena's READ bottom for
@@ -64,7 +64,7 @@ pub extern fn c_memset(block: u64, value: i32, count: u64) -> u64 = "memset"
  * @param count  how many bytes to compare
  * @return       the return register in full; only its low 32 bits are the C result
  */
-pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64) -> u64 = "memcmp"
+pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64): u64 = "memcmp"
 
 /**
  * The number of distinct values a 32-bit C `int` holds — the modulus that recovers the C result
@@ -72,7 +72,7 @@ pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64) -> u64 = "memcmp"
  *
  * @return  2^32
  */
-pub fn int32_radix() -> u64 {
+pub fn int32_radix(): u64 {
     4294967296
 }
 
@@ -85,7 +85,7 @@ pub fn int32_radix() -> u64 {
  * @param count  how many bytes to compare
  * @return       true when the two blocks differ within `count` bytes
  */
-pub fn blocks_differ(left: u64, right: u64, count: u64) -> bool {
+pub fn blocks_differ(left: u64, right: u64, count: u64): bool {
     c_memcmp_raw(left, right, count) % int32_radix() != 0
 }
 
@@ -95,7 +95,7 @@ pub fn blocks_differ(left: u64, right: u64, count: u64) -> bool {
  *
  * @return  16, the arena's payload alignment in bytes
  */
-pub fn arena_align() -> u64 {
+pub fn arena_align(): u64 {
     16
 }
 
@@ -105,7 +105,7 @@ pub fn arena_align() -> u64 {
  *
  * @return  65536, the default chunk payload in bytes
  */
-pub fn default_chunk_bytes() -> u64 {
+pub fn default_chunk_bytes(): u64 {
     65536
 }
 
@@ -116,7 +116,7 @@ pub fn default_chunk_bytes() -> u64 {
  *
  * @return  0xDD, the poison byte
  */
-pub fn poison_byte() -> i32 {
+pub fn poison_byte(): i32 {
     221
 }
 
@@ -144,7 +144,7 @@ pub fn demand(held: bool, code: i32) {
  * @param address  the address to test
  * @return         true when `address` is a multiple of `arena_align()`
  */
-pub fn is_arena_aligned(address: u64) -> bool {
+pub fn is_arena_aligned(address: u64): bool {
     address % arena_align() == 0
 }
 
@@ -155,8 +155,8 @@ pub fn is_arena_aligned(address: u64) -> bool {
  *
  * @return  the chunk's base address
  */
-pub fn acquire_chunk() -> u64 {
-    let block = c_aligned_alloc(arena_align(), default_chunk_bytes())
+pub fn acquire_chunk(): u64 {
+    var block = c_aligned_alloc(arena_align(), default_chunk_bytes())
     demand(block != 0, 10)
     demand(is_arena_aligned(block), 11)
     block
@@ -182,8 +182,8 @@ pub fn release_chunk(block: u64) {
  * @return       nothing
  */
 pub fn prove_chunk_is_writable(value: i32) {
-    let left = acquire_chunk()
-    let right = acquire_chunk()
+    var left = acquire_chunk()
+    var right = acquire_chunk()
     demand(left != right, 12)
     c_memset(left, value, default_chunk_bytes())
     c_memset(right, value, default_chunk_bytes())
@@ -203,8 +203,8 @@ pub fn prove_chunk_is_writable(value: i32) {
  * @return        nothing
  */
 pub fn prove_bump_offset_addresses_memory(offset: u64, count: u64) {
-    let chunk = acquire_chunk()
-    let reference = acquire_chunk()
+    var chunk = acquire_chunk()
+    var reference = acquire_chunk()
     c_memset(chunk, 0, default_chunk_bytes())
     c_memset(chunk + offset, poison_byte(), count)
     c_memset(reference, poison_byte(), count)
@@ -226,7 +226,7 @@ pub fn prove_bump_offset_addresses_memory(offset: u64, count: u64) {
  */
 pub fn demand_untouched_prefix(chunk: u64, offset: u64) {
     if offset == 0 { return }
-    let zeroes = acquire_chunk()
+    var zeroes = acquire_chunk()
     c_memset(zeroes, 0, default_chunk_bytes())
     demand(!blocks_differ(chunk, zeroes, offset), 15)
     release_chunk(zeroes)
@@ -241,9 +241,9 @@ pub fn demand_untouched_prefix(chunk: u64, offset: u64) {
  * @return  nothing
  */
 pub fn prove_reacquire_after_release() {
-    let first = acquire_chunk()
+    var first = acquire_chunk()
     release_chunk(first)
-    let second = acquire_chunk()
+    var second = acquire_chunk()
     demand(second != 0, 16)
     demand(is_arena_aligned(second), 17)
     release_chunk(second)
@@ -256,7 +256,7 @@ pub fn prove_reacquire_after_release() {
  *
  * @return  0xDEADBEEFCAFEBABE
  */
-pub fn control_word() -> u64 {
+pub fn control_word(): u64 {
     0xDEADBEEFCAFEBABE
 }
 
@@ -271,9 +271,9 @@ pub fn control_word() -> u64 {
  * @return        nothing
  */
 pub fn prove_word_round_trip(offset: u64) {
-    let chunk = acquire_chunk()
+    var chunk = acquire_chunk()
     c_memset(chunk, 0, default_chunk_bytes())
-    let address = chunk + offset
+    var address = chunk + offset
     teko::mem::store_u64(address, control_word())
     demand(teko::mem::load_u64(address) == control_word(), 18)
     release_chunk(chunk)
@@ -288,9 +288,9 @@ pub fn prove_word_round_trip(offset: u64) {
  * @return  nothing
  */
 pub fn prove_u64_ptr_byte_cast_round_trip() {
-    let chunk = acquire_chunk()
-    let as_ptr_byte = chunk to ptr<byte>
-    let back_to_u64 = as_ptr_byte to u64
+    var chunk = acquire_chunk()
+    var as_ptr_byte = chunk to ptr<byte>
+    var back_to_u64 = as_ptr_byte to u64
     demand(back_to_u64 == chunk, 19)
     release_chunk(chunk)
 }
@@ -306,7 +306,7 @@ pub fn prove_u64_ptr_byte_cast_round_trip() {
  *
  * @return  42 when the arena's floor holds
  */
-pub fn probe_bottom() -> i32 {
+pub fn probe_bottom(): i32 {
     prove_reacquire_after_release()
     prove_chunk_is_writable(65)
     prove_bump_offset_addresses_memory(0, 4096)

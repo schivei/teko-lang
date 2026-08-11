@@ -7,13 +7,13 @@ use teko::lexer
 
 // the stored type must equal the type derived independently here.
 // `error?`: null ⇒ ok; an `error` ⇒ the mismatch.
-fn check_node_type(stored: Type, expected: Type) -> error | null {
+fn check_node_type(stored: Type, expected: Type): error | null {
     if type_eq(stored, expected) { return null }
     error { message = "corrupt typed tree: a node's type does not match its derivation" }
 }
 
 // re-derive a binary's result type from its operands (B.22), independently.
-fn rederive_binary(lt: Type, rt: Type, op: lexer::TokenKind) -> Type | error {
+fn rederive_binary(lt: Type, rt: Type, op: lexer::TokenKind): Type | error {
     if op_is_shift(op) {
         if !is_integer(lt) || !is_integer(rt) { return error { message = "corrupt: shift operands not integer" } }
         return lt
@@ -31,8 +31,8 @@ fn rederive_binary(lt: Type, rt: Type, op: lexer::TokenKind) -> Type | error {
     error { message = "corrupt: unknown binary operator" }
 }
 
-fn validate_each(xs: []TExpr) -> error | null {
-    mut i = 0
+fn validate_each(xs: []TExpr): error | null {
+    var i = 0
     loop {
         if i >= xs.len { break }
         match validate_texpr(xs[i]) { null => { }; error as e => return e }
@@ -44,7 +44,7 @@ fn validate_each(xs: []TExpr) -> error | null {
 // COUNTER-VALIDATE a typed expression: re-derive its type and confirm it matches
 // the stored one (operators/literals), or check it structurally (env-dependent).
 // `error?`: null ⇒ the subtree is sound; an `error` ⇒ the corruption.
-fn validate_texpr(te: TExpr) -> error | null {
+fn validate_texpr(te: TExpr): error | null {
     match te.kind {
         TNumber as n => check_node_type(te.type, Prim { kind = if n.is_float { PrimKind::F64 } else { PrimKind::I64 } })   // default leaf type (B.38)
         TStrLit => check_node_type(te.type, Str { })
@@ -58,7 +58,7 @@ fn validate_texpr(te: TExpr) -> error | null {
         TBinary as b => {
             match validate_texpr(b.left) { null => { }; error as e => return e }
             match validate_texpr(b.right) { null => { }; error as e => return e }
-            let d = match rederive_binary(b.left.type, b.right.type, b.op) { Type as t => t; error as e => return e }
+            var d = match rederive_binary(b.left.type, b.right.type, b.op) { Type as t => t; error as e => return e }
             check_node_type(te.type, d)
         }
         TUnary as u => {
@@ -76,7 +76,7 @@ fn validate_texpr(te: TExpr) -> error | null {
         }
         TCompare as cmp => {
             match validate_texpr(cmp.first) { null => { }; error as e => return e }
-            mut i = 0
+            var i = 0
             loop {
                 if i >= cmp.rest.len { break }
                 match validate_texpr(cmp.rest[i].operand) { null => { }; error as e => return e }
@@ -109,18 +109,18 @@ fn validate_texpr(te: TExpr) -> error | null {
         TIndex as ix => {   // recv[index] (W5-idx): str/slice receiver, integer index (element type re-derived in the typer)
             match validate_texpr(ix.receiver) { null => { }; error as e => return e }
             match validate_texpr(ix.index) { null => { }; error as e => return e }
-            let ok_recv = match ix.receiver.type { Str => true; Slice => true; _ => false }
+            var ok_recv = match ix.receiver.type { Str => true; Slice => true; _ => false }
             if !ok_recv { return error { message = "corrupt: subscript on a non-indexable receiver" } }
             if !is_integer(ix.index.type) { return error { message = "corrupt: subscript index is not an integer" } }
             null
         }
         TInterp as in => {   // $"…{expr}…": str result; each hole valid + str/integer-typed
             match te.type { Str => { }; _ => return error { message = "corrupt: interpolation not typed as a str" } }
-            mut i = 0
+            var i = 0
             loop {
                 if i >= in.holes.len { break }
                 match validate_texpr(in.holes[i]) { null => { }; error as e => return e }
-                let ok = match in.holes[i].type { Str => true; _ => is_integer(in.holes[i].type) }
+                var ok = match in.holes[i].type { Str => true; _ => is_integer(in.holes[i].type) }
                 if !ok { return error { message = "corrupt: interpolation hole is not a str or an integer" } }
                 i++
             }
@@ -128,7 +128,7 @@ fn validate_texpr(te: TExpr) -> error | null {
         }
         TInExpr as ie => {   // <lhs> in [ … ] (Phase 2): bool result; lhs + each element valid
             match validate_texpr(ie.lhs) { null => { }; error as e => return e }
-            mut i = 0
+            var i = 0
             loop {
                 if i >= ie.elems.len { break }
                 match validate_texpr(ie.elems[i]) { null => { }; error as e => return e }
@@ -137,7 +137,7 @@ fn validate_texpr(te: TExpr) -> error | null {
             check_node_type(te.type, Prim { kind = PrimKind::Bool })
         }
         TArrayLit as a => {   // [ e0, e1, … ] (Increment B+): []T result; each element valid (spread or plain)
-            mut i = 0
+            var i = 0
             loop {
                 if i >= a.elements.len { break }
                 match validate_texpr(a.elements[i].expr) { null => { }; error as e => return e }

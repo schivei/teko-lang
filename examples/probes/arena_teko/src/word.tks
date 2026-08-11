@@ -8,7 +8,7 @@
  * @param size       the block size in bytes; C11 requires it to be a multiple of `alignment`
  * @return           the block's base address, or 0 on failure
  */
-pub extern fn c_aligned_alloc(alignment: u64, size: u64) -> u64 = "aligned_alloc"
+pub extern fn c_aligned_alloc(alignment: u64, size: u64): u64 = "aligned_alloc"
 
 /**
  * The C deallocator — the counterpart of `c_aligned_alloc`, and what `tk_chunk_free` does today.
@@ -18,7 +18,7 @@ pub extern fn c_aligned_alloc(alignment: u64, size: u64) -> u64 = "aligned_alloc
  * @param block  the base address to release; 0 is a documented no-op
  * @return       nothing
  */
-pub extern fn c_free(block: u64) -> void = "free"
+pub extern fn c_free(block: u64): void = "free"
 
 /**
  * The C byte-fill primitive — the arena's raw WRITE bottom. Every store this unit performs is a
@@ -30,7 +30,7 @@ pub extern fn c_free(block: u64) -> void = "free"
  * @param count  how many bytes to fill
  * @return       `block`, as C's `memset` returns its destination
  */
-pub extern fn c_memset(block: u64, value: i32, count: u64) -> u64 = "memset"
+pub extern fn c_memset(block: u64, value: i32, count: u64): u64 = "memset"
 
 /**
  * The C block-compare primitive — the arena's raw READ bottom. C specifies the return as the sign
@@ -51,7 +51,7 @@ pub extern fn c_memset(block: u64, value: i32, count: u64) -> u64 = "memset"
  * @param count  how many bytes to compare
  * @return       the return register in full; only its low 32 bits are the C result
  */
-pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64) -> u64 = "memcmp"
+pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64): u64 = "memcmp"
 
 /**
  * The C block-copy primitive, used where a grown array must carry its old contents over — the
@@ -62,7 +62,7 @@ pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64) -> u64 = "memcmp"
  * @param count  how many bytes to copy
  * @return       `dst`, as C's `memcpy` returns its destination
  */
-pub extern fn c_memcpy(dst: u64, src: u64, count: u64) -> u64 = "memcpy"
+pub extern fn c_memcpy(dst: u64, src: u64, count: u64): u64 = "memcpy"
 
 /** The arena's payload alignment: the C twin's `TK_ARENA_ALIGN`, 16 on every supported target. */
 pub const ARENA_ALIGN: u64 = 16
@@ -103,8 +103,8 @@ pub const ORDER_GREATER: u64 = 2
  * @param n  the size or offset to round
  * @return   the smallest multiple of `ARENA_ALIGN` that is at least `n`
  */
-pub fn round_up_align(n: u64) -> u64 {
-    let slack = n % ARENA_ALIGN
+pub fn round_up_align(n: u64): u64 {
+    var slack = n % ARENA_ALIGN
     if slack == 0 { return n }
     n + ARENA_ALIGN - slack
 }
@@ -118,7 +118,7 @@ pub fn round_up_align(n: u64) -> u64 {
  * @param n  the size to round
  * @return   the largest multiple of `ARENA_ALIGN` that is at most `n`
  */
-pub fn round_down_align(n: u64) -> u64 {
+pub fn round_down_align(n: u64): u64 {
     n - n % ARENA_ALIGN
 }
 
@@ -133,8 +133,8 @@ pub fn round_down_align(n: u64) -> u64 {
  * @param count  how many bytes to compare
  * @return       `ORDER_EQUAL`, `ORDER_LESS`, or `ORDER_GREATER`
  */
-pub fn compare_bytes(left: u64, right: u64, count: u64) -> u64 {
-    let result = c_memcmp_raw(left, right, count) % INT32_RADIX
+pub fn compare_bytes(left: u64, right: u64, count: u64): u64 {
+    var result = c_memcmp_raw(left, right, count) % INT32_RADIX
     if result == 0 { return ORDER_EQUAL }
     if result >= INT32_SIGN { return ORDER_LESS }
     ORDER_GREATER
@@ -162,8 +162,8 @@ pub fn demand(held: bool, code: i32) {
  * @param bytes  the block size; rounded up to `ARENA_ALIGN` as C11's `aligned_alloc` requires
  * @return       the block's base address, never 0
  */
-pub fn raw_alloc(bytes: u64) -> u64 {
-    let block = c_aligned_alloc(ARENA_ALIGN, round_up_align(bytes))
+pub fn raw_alloc(bytes: u64): u64 {
+    var block = c_aligned_alloc(ARENA_ALIGN, round_up_align(bytes))
     demand(block != 0, 20)
     block
 }
@@ -176,7 +176,7 @@ pub fn raw_alloc(bytes: u64) -> u64 {
  * @param bytes  the block size; rounded up to `ARENA_ALIGN`
  * @return       the block's base address, or 0 when the allocator refuses
  */
-pub fn raw_alloc_try(bytes: u64) -> u64 {
+pub fn raw_alloc_try(bytes: u64): u64 {
     c_aligned_alloc(ARENA_ALIGN, round_up_align(bytes))
 }
 
@@ -208,14 +208,14 @@ pub fn store_byte(address: u64, value: u64) {
  * @param scratch  a caller-owned raw byte the search may overwrite
  * @return         the byte value at `address`, 0..255
  */
-pub fn load_byte(address: u64, scratch: u64) -> u64 {
-    mut low: u64 = 0
-    mut high: u64 = BYTE_MAX
+pub fn load_byte(address: u64, scratch: u64): u64 {
+    var low: u64 = 0
+    var high: u64 = BYTE_MAX
     loop {
         if low >= high { break }
-        let mid = low + (high - low) / 2
+        var mid = low + (high - low) / 2
         store_byte(scratch, mid)
-        let order = compare_bytes(address, scratch, 1)
+        var order = compare_bytes(address, scratch, 1)
         if order == ORDER_EQUAL { return mid }
         if order == ORDER_LESS { high = mid - 1 } else { low = mid + 1 }
     }
@@ -232,8 +232,8 @@ pub fn load_byte(address: u64, scratch: u64) -> u64 {
  * @return         nothing
  */
 pub fn store_word(address: u64, value: u64) {
-    mut rest = value
-    mut i: u64 = 0
+    var rest = value
+    var i: u64 = 0
     loop {
         if i >= WORD { break }
         store_byte(address + i, rest % BYTE_RADIX)
@@ -251,10 +251,10 @@ pub fn store_word(address: u64, value: u64) {
  * @param scratch  a caller-owned raw byte the read may overwrite
  * @return         the word at `address`
  */
-pub fn load_word(address: u64, scratch: u64) -> u64 {
-    mut value: u64 = 0
-    mut place: u64 = 1
-    mut i: u64 = 0
+pub fn load_word(address: u64, scratch: u64): u64 {
+    var value: u64 = 0
+    var place: u64 = 1
+    var i: u64 = 0
     loop {
         if i >= WORD { break }
         value = value + load_byte(address + i, scratch) * place

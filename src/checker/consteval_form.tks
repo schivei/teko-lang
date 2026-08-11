@@ -17,7 +17,7 @@ use teko::lexer
  * @return     the message positioned at `e`'s line/col
  * @since #594
  */
-fn const_form_error(msg: str, e: TExpr) -> error {
+fn const_form_error(msg: str, e: TExpr): error {
     teko::error::err_loc(error { message = msg }, e.line, e.col)
 }
 
@@ -30,7 +30,7 @@ fn const_form_error(msg: str, e: TExpr) -> error {
  * @return   a short phrase naming the kind (e.g. "a string interpolation")
  * @since #594
  */
-fn form_name(k: TExprKind) -> str {
+fn form_name(k: TExprKind): str {
     match k {
         TNullLit => "a `null` literal"
         TCompare => "a comparison"
@@ -54,7 +54,7 @@ fn form_name(k: TExprKind) -> str {
  * @return   a located error naming the offending form
  * @since #594
  */
-fn reject_form(e: TExpr) -> error {
+fn reject_form(e: TExpr): error {
     const_form_error($"{form_name(e.kind)} is not allowed in a const initializer (#594)", e)
 }
 
@@ -67,7 +67,7 @@ fn reject_form(e: TExpr) -> error {
  * @return    whether the operator may appear over const-expr operands
  * @since #594
  */
-fn is_const_binary_op(op: lexer::TokenKind) -> bool {
+fn is_const_binary_op(op: lexer::TokenKind): bool {
     match op {
         lexer::TokenKind::Plus => true
         lexer::TokenKind::Minus => true
@@ -92,7 +92,7 @@ fn is_const_binary_op(op: lexer::TokenKind) -> bool {
  * @return    whether the operator may appear over a const-expr operand
  * @since #594
  */
-fn is_const_unary_op(op: lexer::TokenKind) -> bool {
+fn is_const_unary_op(op: lexer::TokenKind): bool {
     match op {
         lexer::TokenKind::Tilde => true
         lexer::TokenKind::Minus => true
@@ -107,9 +107,9 @@ fn is_const_unary_op(op: lexer::TokenKind) -> bool {
  * @return      the `::`-joined path text (empty for an empty path)
  * @since #594
  */
-fn path_str(path: parser::Path) -> str {
-    mut out = ""
-    mut i: u64 = 0
+fn path_str(path: parser::Path): str {
+    var out = ""
+    var i: u64 = 0
     loop {
         if i >= path.segments.len { break }
         if i > 0 { out = $"{out}::" }
@@ -130,12 +130,12 @@ fn path_str(path: parser::Path) -> str {
  * @return      whether the callee may appear in a const initializer
  * @since #594
  */
-fn is_const_allowlisted_callee(path: parser::Path) -> bool {
-    let n = path.segments.len
+fn is_const_allowlisted_callee(path: parser::Path): bool {
+    var n = path.segments.len
     if n == 1 { return path.segments[0].name == "preg" }
     if n == 2 {
         if path.segments[0].name != "teko" { return false }
-        let last = path.segments[1].name
+        var last = path.segments[1].name
         return last == "f64_from_bits" || last == "f32_from_bits"
     }
     false
@@ -153,7 +153,7 @@ fn is_const_allowlisted_callee(path: parser::Path) -> bool {
  * @return     null when `v` names a const, else a located error
  * @since #594
  */
-fn const_var_ok(v: TVar, e: TExpr, env: Env) -> error | null {
+fn const_var_ok(v: TVar, e: TExpr, env: Env): error | null {
     match lookup_binding(env, v.name) {
         ValBinding as b => if b.is_const { null } else { const_form_error($"reference to '{v.name}', which is not a module-level const, in a const initializer (#594)", e) }
         error => const_form_error($"reference to undefined name '{v.name}' in a const initializer (#594)", e)
@@ -171,7 +171,7 @@ fn const_var_ok(v: TVar, e: TExpr, env: Env) -> error | null {
  * @return       null when both the operator and operand are const, else a located error
  * @since #594
  */
-fn const_unary_ok(u: TUnary, e: TExpr, table: TypeTable, env: Env) -> error | null {
+fn const_unary_ok(u: TUnary, e: TExpr, table: TypeTable, env: Env): error | null {
     if !is_const_unary_op(u.op) { return const_form_error("a non-const unary operator in a const initializer (only `~` and unary `-` are allowed) (#594)", e) }
     is_const_expr(u.operand, table, env)
 }
@@ -188,7 +188,7 @@ fn const_unary_ok(u: TUnary, e: TExpr, table: TypeTable, env: Env) -> error | nu
  * @return       null when the operator and both operands are const, else a located error
  * @since #594
  */
-fn const_binary_ok(b: TBinary, e: TExpr, table: TypeTable, env: Env) -> error | null {
+fn const_binary_ok(b: TBinary, e: TExpr, table: TypeTable, env: Env): error | null {
     if !is_const_binary_op(b.op) { return const_form_error("a non-const binary operator in a const initializer (only `+ - * / % & | ^ << >>` are allowed) (#594)", e) }
     match is_const_expr(b.left, table, env) { error as x => return x; null => { } }
     is_const_expr(b.right, table, env)
@@ -205,8 +205,8 @@ fn const_binary_ok(b: TBinary, e: TExpr, table: TypeTable, env: Env) -> error | 
  * @return       null when every element is const, else the first located error
  * @since #594
  */
-fn const_exprs_ok(xs: []TExpr, table: TypeTable, env: Env) -> error | null {
-    mut i: u64 = 0
+fn const_exprs_ok(xs: []TExpr, table: TypeTable, env: Env): error | null {
+    var i: u64 = 0
     loop {
         if i >= xs.len { break }
         match is_const_expr(xs[i], table, env) { error as x => return x; null => { } }
@@ -225,9 +225,9 @@ fn const_exprs_ok(xs: []TExpr, table: TypeTable, env: Env) -> error | null {
  * @return       null when every element is const, else the first located error
  * @since #594
  */
-fn const_array_ok(a: TArrayLit, table: TypeTable, env: Env) -> error | null {
-    mut vals: []TExpr = teko::list::empty()
-    mut i: u64 = 0
+fn const_array_ok(a: TArrayLit, table: TypeTable, env: Env): error | null {
+    var vals: []TExpr = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         vals = teko::list::push(vals, a.elements[i].expr)
@@ -249,7 +249,7 @@ fn const_array_ok(a: TArrayLit, table: TypeTable, env: Env) -> error | null {
  * @return       null when the callee is allowlisted and every argument is const, else a located error
  * @since #594
  */
-fn const_call_ok(c: TCall, e: TExpr, table: TypeTable, env: Env) -> error | null {
+fn const_call_ok(c: TCall, e: TExpr, table: TypeTable, env: Env): error | null {
     if !is_const_allowlisted_callee(c.callee) { return const_form_error($"call to '{path_str(c.callee)}' is not an allowlisted const constructor (#594)", e) }
     const_exprs_ok(c.args, table, env)
 }
@@ -279,7 +279,7 @@ fn const_call_ok(c: TCall, e: TExpr, table: TypeTable, env: Env) -> error | null
  * @return       null when `e` is a legal const initializer, else a located error
  * @since #594
  */
-fn is_const_expr(e: TExpr, table: TypeTable, env: Env) -> error | null {
+fn is_const_expr(e: TExpr, table: TypeTable, env: Env): error | null {
     match e.kind {
         TNumber => null
         TStrLit => null

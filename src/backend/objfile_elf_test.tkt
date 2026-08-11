@@ -7,7 +7,7 @@ use teko::lir
  * @param u32 id  the x86 ISA register number
  * @return MReg  the physical GPR operand
  */
-fn el_p(id: u32) -> MReg {
+fn el_p(id: u32): MReg {
     preg(id, MRegClass::GPR)
 }
 
@@ -18,7 +18,7 @@ fn el_p(id: u32) -> MReg {
  * @param []MInstX86 insts  the block's instructions
  * @return MBlockX86  the built block
  */
-fn el_block(id: u32, insts: []MInstX86) -> MBlockX86 {
+fn el_block(id: u32, insts: []MInstX86): MBlockX86 {
     MBlockX86 { id = id; params = teko::list::empty(); insts = insts }
 }
 
@@ -31,7 +31,7 @@ fn el_block(id: u32, insts: []MInstX86) -> MBlockX86 {
  * @param []lir::LAlloca frame  the function's frame slots
  * @return MFuncX86  the built function
  */
-fn el_1block_func(sym: str, insts: []MInstX86, frame: []lir::LAlloca) -> MFuncX86 {
+fn el_1block_func(sym: str, insts: []MInstX86, frame: []lir::LAlloca): MFuncX86 {
     MFuncX86 { symbol = sym; blocks = [el_block(0 to u32, insts)]; frame = frame }
 }
 
@@ -40,7 +40,7 @@ fn el_1block_func(sym: str, insts: []MInstX86, frame: []lir::LAlloca) -> MFuncX8
  *
  * @return []lir::LAlloca  an empty frame slot list
  */
-fn el_no_frame() -> []lir::LAlloca {
+fn el_no_frame(): []lir::LAlloca {
     teko::list::empty()
 }
 
@@ -52,7 +52,7 @@ fn el_no_frame() -> []lir::LAlloca {
  * @param MModuleX86 m  the module to encode + emit
  * @return []byte  the ELF object bytes, or empty on error
  */
-fn el_object_of(m: MModuleX86) -> []byte {
+fn el_object_of(m: MModuleX86): []byte {
     match encode_module_x86(SYSV64, m) {
         EncodedModuleX86 as x => emit_elf(x, no_dwarf_sink())
         error as e => teko::list::empty()
@@ -67,7 +67,7 @@ fn el_object_of(m: MModuleX86) -> []byte {
  * @param u64 i  the field's byte offset
  * @return u32  the little-endian u32 at `i`
  */
-fn el_u32_at(bytes: []byte, i: u64) -> u32 {
+fn el_u32_at(bytes: []byte, i: u64): u32 {
     (bytes[i] to u32) | ((bytes[i + (1 to u64)] to u32) << (8 to u32)) | ((bytes[i + (2 to u64)] to u32) << (16 to u32)) | ((bytes[i + (3 to u64)] to u32) << (24 to u32))
 }
 
@@ -79,7 +79,7 @@ fn el_u32_at(bytes: []byte, i: u64) -> u32 {
  * @param u64 i  the field's byte offset
  * @return u32  the little-endian u16 at `i`
  */
-fn el_u16_at(bytes: []byte, i: u64) -> u32 {
+fn el_u16_at(bytes: []byte, i: u64): u32 {
     (bytes[i] to u32) | ((bytes[i + (1 to u64)] to u32) << (8 to u32))
 }
 
@@ -91,11 +91,11 @@ fn el_u16_at(bytes: []byte, i: u64) -> u32 {
  *
  * @return MModuleX86  the one-function, one-rodata module
  */
-fn el_rodata_module() -> MModuleX86 {
-    let insts = [lea_rip_x86(el_p(0), "s0", RelocKindX86::Pc32), ret_x86()]
-    let f = el_1block_func("main", insts, el_no_frame())
-    let rbytes = [0x41 to byte, 0 to byte]
-    let rodata = [lir::LRodata { symbol = "s0"; bytes = rbytes; relocs = teko::list::empty() }]
+fn el_rodata_module(): MModuleX86 {
+    var insts = [lea_rip_x86(el_p(0), "s0", RelocKindX86::Pc32), ret_x86()]
+    var f = el_1block_func("main", insts, el_no_frame())
+    var rbytes = [0x41 to byte, 0 to byte]
+    var rodata = [lir::LRodata { symbol = "s0"; bytes = rbytes; relocs = teko::list::empty() }]
     MModuleX86 { funcs = [f]; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
 }
 
@@ -111,7 +111,7 @@ fn el_rodata_module() -> MModuleX86 {
  * @return void
  */
 fn elf_rodata_uses_section_symbol_and_pc32() {
-    let obj = el_object_of(el_rodata_module())
+    var obj = el_object_of(el_rodata_module())
     teko::assert::is_true(obj[108] == (0x03 to byte))
     teko::assert::is_true(el_u16_at(obj, 110 to u64) == (2 to u32))
     teko::assert::is_true(obj[132] == (0x12 to byte))
@@ -132,12 +132,12 @@ fn elf_rodata_uses_section_symbol_and_pc32() {
  *
  * @return EncodedModuleX86  the hand-built module
  */
-fn el_rodata_off_module() -> EncodedModuleX86 {
-    let text = [0x48 to byte, 0x8D to byte, 0x05 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
-    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte]
-    let s1 = Symbol { name = "s1"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
-    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
-    let reloc = RelocX86 { offset = 3 to u32; sym = "s1"; kind = RelocKindX86::Pc32; addend = (0) - (4); sect = RelocSect::Text }
+fn el_rodata_off_module(): EncodedModuleX86 {
+    var text = [0x48 to byte, 0x8D to byte, 0x05 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
+    var rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte]
+    var s1 = Symbol { name = "s1"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    var main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    var reloc = RelocX86 { offset = 3 to u32; sym = "s1"; kind = RelocKindX86::Pc32; addend = (0) - (4); sect = RelocSect::Text }
     EncodedModuleX86 { text = text; rodata = rodata; symbols = [s1, main]; relocs = [reloc] }
 }
 
@@ -153,7 +153,7 @@ fn el_rodata_off_module() -> EncodedModuleX86 {
  * @return void
  */
 fn elf_folds_rodata_offset_into_addend() {
-    let obj = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    var obj = emit_elf(el_rodata_off_module(), no_dwarf_sink())
     teko::assert::is_true(el_u32_at(obj, 224 to u64) == (3 to u32))
     teko::assert::is_true(el_u32_at(obj, 232 to u64) == (2 to u32))
     teko::assert::is_true(el_u32_at(obj, 236 to u64) == (1 to u32))
@@ -171,13 +171,13 @@ fn elf_folds_rodata_offset_into_addend() {
  * @param u64 code_size  the function's (and so the unit's) code size
  * @return DwarfSink  the assembled, `present = true` sink
  */
-fn el_dwarf_sink_of(sym: str, code_size: u64) -> DwarfSink {
-    let sub = DwSubprogram { name = "main"; decl_file = 1; decl_line = 10 to u32; symbol = sym; code_size = code_size }
-    let cu = DwCompileUnit {
+fn el_dwarf_sink_of(sym: str, code_size: u64): DwarfSink {
+    var sub = DwSubprogram { name = "main"; decl_file = 1; decl_line = 10 to u32; symbol = sym; code_size = code_size }
+    var cu = DwCompileUnit {
         producer = "teko test"; language = 0x0c to u32; name = "t.tks"; comp_dir = "."
         text_symbol = sym; text_size = code_size; subprograms = [sub]
     }
-    let rows = [DwLineRow { pc_advance = 0 to u64; line = 10 to u32; file = 1 }]
+    var rows = [DwLineRow { pc_advance = 0 to u64; line = 10 to u32; file = 1 }]
     build_dwarf_sink(cu, ["t.tks"], rows, code_size)
 }
 
@@ -190,8 +190,8 @@ fn el_dwarf_sink_of(sym: str, code_size: u64) -> DwarfSink {
  * @return void
  */
 fn elf_dwarf_absent_is_byte_identical() {
-    let a = emit_elf(el_rodata_off_module(), no_dwarf_sink())
-    let b = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    var a = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    var b = emit_elf(el_rodata_off_module(), no_dwarf_sink())
     teko::assert::eq_u64(a.len, b.len)
     teko::assert::is_true(el_bytes_eq(a, b))
     teko::assert::eq_u64(el_u16_at(a, EL_EHDR_SHNUM_FIELD) to u64, 7 to u64)
@@ -210,8 +210,8 @@ fn elf_dwarf_absent_is_byte_identical() {
  * @return void
  */
 fn elf_dwarf_present_appends_five_progbits_and_rela_headers() {
-    let sink = el_dwarf_sink_of("main", 8 to u64)
-    let obj = emit_elf(el_rodata_off_module(), sink)
+    var sink = el_dwarf_sink_of("main", 8 to u64)
+    var obj = emit_elf(el_rodata_off_module(), sink)
     teko::assert::eq_u64(el_u16_at(obj, EL_EHDR_SHNUM_FIELD) to u64, 12 to u64)
     teko::assert::eq_u64(el_shdr_u32(obj, 7 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
     teko::assert::eq_u64(el_shdr_u32(obj, 8 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
@@ -236,7 +236,7 @@ fn elf_dwarf_present_appends_five_progbits_and_rela_headers() {
  * @return void
  */
 fn elf_dwarf_relas_resolve_against_defined_function_symbol() {
-    let obj = emit_elf(el_rodata_off_module(), el_dwarf_sink_of("main", 8 to u64))
+    var obj = emit_elf(el_rodata_off_module(), el_dwarf_sink_of("main", 8 to u64))
     teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_TYPE_FIELD) to u64, 1 to u64)
     teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_SYM_FIELD) to u64, 2 to u64)
     teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_ADDEND_FIELD) to u64, 0 to u64)
@@ -251,11 +251,11 @@ fn elf_dwarf_relas_resolve_against_defined_function_symbol() {
  *
  * @return EncodedModuleX86  the hand-built Abs64 module
  */
-fn el_abs64_module() -> EncodedModuleX86 {
-    let text = [0x48 to byte, 0xB8 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
-    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
-    let gv = Symbol { name = "gv"; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }
-    let reloc = RelocX86 { offset = 2 to u32; sym = "gv"; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Text }
+fn el_abs64_module(): EncodedModuleX86 {
+    var text = [0x48 to byte, 0xB8 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
+    var main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    var gv = Symbol { name = "gv"; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }
+    var reloc = RelocX86 { offset = 2 to u32; sym = "gv"; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Text }
     EncodedModuleX86 { text = text; rodata = teko::list::empty(); symbols = [main, gv]; relocs = [reloc] }
 }
 
@@ -269,7 +269,7 @@ fn el_abs64_module() -> EncodedModuleX86 {
  * @return void
  */
 fn elf_abs64_emits_r_x86_64_64() {
-    let obj = emit_elf(el_abs64_module(), no_dwarf_sink())
+    var obj = emit_elf(el_abs64_module(), no_dwarf_sink())
     teko::assert::is_true(el_u32_at(obj, 224 to u64) == (1 to u32))
     teko::assert::is_true(el_u32_at(obj, 228 to u64) == (2 to u32))
     teko::assert::is_true(el_u32_at(obj, 232 to u64) == (0 to u32))
@@ -287,14 +287,14 @@ fn elf_abs64_emits_r_x86_64_64() {
  *
  * @return EncodedModuleX86  the hand-built pointer-bearing-const module
  */
-fn el_drr_module() -> EncodedModuleX86 {
-    let text = [0x48 to byte, 0x8D to byte, 0x05 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
-    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
-    let slot = Symbol { name = "slot"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
-    let leaf = Symbol { name = "leaf"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
-    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
-    let text_ref = RelocX86 { offset = 3 to u32; sym = "slot"; kind = RelocKindX86::Pc32; addend = (0) - (4); sect = RelocSect::Text }
-    let data_ptr = RelocX86 { offset = 0 to u32; sym = "leaf"; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata }
+fn el_drr_module(): EncodedModuleX86 {
+    var text = [0x48 to byte, 0x8D to byte, 0x05 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
+    var rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
+    var slot = Symbol { name = "slot"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
+    var leaf = Symbol { name = "leaf"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    var main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    var text_ref = RelocX86 { offset = 3 to u32; sym = "slot"; kind = RelocKindX86::Pc32; addend = (0) - (4); sect = RelocSect::Text }
+    var data_ptr = RelocX86 { offset = 0 to u32; sym = "leaf"; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata }
     EncodedModuleX86 { text = text; rodata = rodata; symbols = [slot, leaf, main]; relocs = [text_ref, data_ptr] }
 }
 
@@ -312,7 +312,7 @@ fn el_drr_module() -> EncodedModuleX86 {
  * @return void
  */
 fn elf_partition_moves_pointer_const_to_data_rel_ro() {
-    let obj = emit_elf(el_drr_module(), no_dwarf_sink())
+    var obj = emit_elf(el_drr_module(), no_dwarf_sink())
     teko::assert::is_true(el_section_offset(obj, EL_SHNDX_DATA_REL_RO) > (0 to u64))
     teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_TYPE_FIELD) == (1 to u32))
     teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_SYM_FIELD) == (1 to u32))
@@ -332,7 +332,7 @@ fn elf_partition_moves_pointer_const_to_data_rel_ro() {
  * @return void
  */
 fn elf_symbol_index_finds_and_sentinels() {
-    let syms = [ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 }, ElfSym { name = "main"; info = 0x12 to u32; shndx = 1 to u32; value = 0 to u32 }]
+    var syms = [ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 }, ElfSym { name = "main"; info = 0x12 to u32; shndx = 1 to u32; value = 0 to u32 }]
     teko::assert::is_true(elf_symbol_index(syms, "main") == (1 to u32))
     teko::assert::is_true(elf_symbol_index(syms, "absent") == (2 to u32))
 }
@@ -447,8 +447,8 @@ const EL_RELA_ADDEND_FIELD: u64 = 16 to u64
  * @param u64 shndx  the section-header index
  * @return u64  that section's `sh_offset`
  */
-fn el_section_offset(obj: []byte, shndx: u64) -> u64 {
-    let shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
+fn el_section_offset(obj: []byte, shndx: u64): u64 {
+    var shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
     el_u32_at(obj, shoff + (shndx * EL_SHDR_SIZE) + EL_SHDR_OFFSET_FIELD) to u64
 }
 
@@ -463,7 +463,7 @@ fn el_section_offset(obj: []byte, shndx: u64) -> u64 {
  * @param u64 field  the field's byte offset within the `Elf64_Rela`
  * @return u32  the little-endian u32 at that field
  */
-fn el_rela_field(obj: []byte, shndx: u64, n: u64, field: u64) -> u32 {
+fn el_rela_field(obj: []byte, shndx: u64, n: u64, field: u64): u32 {
     el_u32_at(obj, el_section_offset(obj, shndx) + (n * EL_RELA_SIZE) + field)
 }
 
@@ -478,8 +478,8 @@ fn el_rela_field(obj: []byte, shndx: u64, n: u64, field: u64) -> u32 {
  * @return u32  the little-endian u32 at that field
  * @since 0.3.1.0
  */
-fn el_shdr_u32(obj: []byte, shndx: u64, field: u64) -> u32 {
-    let shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
+fn el_shdr_u32(obj: []byte, shndx: u64, field: u64): u32 {
+    var shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
     el_u32_at(obj, shoff + (shndx * EL_SHDR_SIZE) + field)
 }
 
@@ -493,9 +493,9 @@ fn el_shdr_u32(obj: []byte, shndx: u64, field: u64) -> u32 {
  * @return bool  true iff `a` and `b` are byte-for-byte identical
  * @since 0.3.1.0
  */
-fn el_bytes_eq(a: []byte, b: []byte) -> bool {
+fn el_bytes_eq(a: []byte, b: []byte): bool {
     if a.len != b.len { return false }
-    mut i: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= a.len { break }
         if a[i] != b[i] { return false }
@@ -511,7 +511,7 @@ fn el_bytes_eq(a: []byte, b: []byte) -> bool {
  * @param u32 id  the arm64 ISA register number
  * @return MReg  the physical GPR operand
  */
-fn el_arm64_gpr(id: u32) -> MReg {
+fn el_arm64_gpr(id: u32): MReg {
     preg(id, MRegClass::GPR)
 }
 
@@ -523,7 +523,7 @@ fn el_arm64_gpr(id: u32) -> MReg {
  * @param []MInst insts  the block's instructions
  * @return MFunc  the assembled arm64 function
  */
-fn el_arm64_func(sym: str, insts: []MInst) -> MFunc {
+fn el_arm64_func(sym: str, insts: []MInst): MFunc {
     MFunc { symbol = sym; blocks = [MBlock { id = 0 to u32; params = teko::list::empty(); insts = insts }]; frame = teko::list::empty() }
 }
 
@@ -536,9 +536,9 @@ fn el_arm64_func(sym: str, insts: []MInst) -> MFunc {
  *
  * @return MModule  the one-function, one-rodata, three-reloc arm64 module
  */
-fn el_arm64_reloc_module() -> MModule {
-    let insts = [adrp_inst(el_arm64_gpr(0), "s0", MRelocKind::PageHi), add_lo_inst(el_arm64_gpr(0), el_arm64_gpr(0), "s0", MRelocKind::PageLo), call_inst("tk_exit", teko::list::empty(), el_arm64_gpr(0), false, false)]
-    let rodata = [lir::LRodata { symbol = "s0"; bytes = [0x41 to byte, 0 to byte]; relocs = teko::list::empty() }]
+fn el_arm64_reloc_module(): MModule {
+    var insts = [adrp_inst(el_arm64_gpr(0), "s0", MRelocKind::PageHi), add_lo_inst(el_arm64_gpr(0), el_arm64_gpr(0), "s0", MRelocKind::PageLo), call_inst("tk_exit", teko::list::empty(), el_arm64_gpr(0), false, false)]
+    var rodata = [lir::LRodata { symbol = "s0"; bytes = [0x41 to byte, 0 to byte]; relocs = teko::list::empty() }]
     MModule { funcs = [el_arm64_func("main", insts)]; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
 }
 
@@ -550,7 +550,7 @@ fn el_arm64_reloc_module() -> MModule {
  * @param MModule m  the arm64 module to encode + emit
  * @return []byte  the AArch64 ELF object bytes, or empty on error
  */
-fn el_arm64_object_of(m: MModule) -> []byte {
+fn el_arm64_object_of(m: MModule): []byte {
     match encode_module(AAPCS64, m) {
         EncodedModule as x => emit_elf_arm64(x, no_dwarf_sink())
         error as e => teko::list::empty()
@@ -572,7 +572,7 @@ fn el_arm64_object_of(m: MModule) -> []byte {
  * @return void
  */
 fn elf_arm64_object_header_and_relas_are_golden() {
-    let obj = el_arm64_object_of(el_arm64_reloc_module())
+    var obj = el_arm64_object_of(el_arm64_reloc_module())
     teko::assert::is_true(el_u16_at(obj, EL_EHDR_MACHINE_FIELD) == (183 to u32))
     teko::assert::is_true(el_u32_at(obj, EL_EHDR_FLAGS_FIELD) == (0 to u32))
     teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_TYPE_FIELD) == (275 to u32))
@@ -596,11 +596,11 @@ fn elf_arm64_object_header_and_relas_are_golden() {
  *
  * @return EncodedModule  the hand-built rodata-internal-pointer arm64 module
  */
-fn el_arm64_abs64_enc() -> EncodedModule {
-    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
-    let ptr = Symbol { name = "ptr"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
-    let target = Symbol { name = "target"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
-    let rr = Reloc { offset = 0 to u32; sym = "target"; kind = MRelocKind::Abs64; sect = RelocSect::Rodata }
+fn el_arm64_abs64_enc(): EncodedModule {
+    var rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
+    var ptr = Symbol { name = "ptr"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
+    var target = Symbol { name = "target"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    var rr = Reloc { offset = 0 to u32; sym = "target"; kind = MRelocKind::Abs64; sect = RelocSect::Rodata }
     EncodedModule { text = teko::list::empty(); rodata = rodata; symbols = [ptr, target]; relocs = [rr] }
 }
 
@@ -618,7 +618,7 @@ fn el_arm64_abs64_enc() -> EncodedModule {
  * @return void
  */
 fn elf_arm64_abs64_lands_in_rela_data_rel_ro() {
-    let obj = emit_elf_arm64(el_arm64_abs64_enc(), no_dwarf_sink())
+    var obj = emit_elf_arm64(el_arm64_abs64_enc(), no_dwarf_sink())
     teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_TYPE_FIELD) == (257 to u32))
     teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_ADDEND_FIELD) == (0 to u32))
     teko::assert::is_true(el_section_offset(obj, EL_SHNDX_DATA_REL_RO) > (0 to u64))
@@ -641,8 +641,8 @@ const EL_LDST_LO12_TYPES: []u32 = [278 to u32, 284 to u32, 285 to u32, 286 to u3
  * @return void
  */
 fn el_kind_is_not_an_ldst_form(kind: MRelocKind) {
-    let rtype = elf_reloc_type_arm64(kind)
-    mut i: u64 = 0
+    var rtype = elf_reloc_type_arm64(kind)
+    var i: u64 = 0
     loop {
         if i >= EL_LDST_LO12_TYPES.len { break }
         teko::assert::is_true(rtype != EL_LDST_LO12_TYPES[i])
@@ -680,7 +680,7 @@ fn elf_arm64_reloc_kinds_are_add_form_only() {
  * @return void
  */
 fn elf_x86_bytes_are_unchanged_by_the_arm64_adapter() {
-    let obj = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    var obj = emit_elf(el_rodata_off_module(), no_dwarf_sink())
     teko::assert::is_true(el_u16_at(obj, EL_EHDR_MACHINE_FIELD) == (62 to u32))
     teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_TYPE_FIELD) == (2 to u32))
     teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_SYM_FIELD) == (1 to u32))

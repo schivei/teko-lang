@@ -42,7 +42,7 @@ pub const E_POISON_REUSED: i32 = 70
  * @param overwrite  non-zero to replace an existing binding
  * @return           0 on success
  */
-pub extern fn c_setenv(name: u64, value: u64, overwrite: i32) -> i32 = "setenv"
+pub extern fn c_setenv(name: u64, value: u64, overwrite: i32): i32 = "setenv"
 
 /**
  * The C environment remover, the counterpart of `c_setenv`.
@@ -50,7 +50,7 @@ pub extern fn c_setenv(name: u64, value: u64, overwrite: i32) -> i32 = "setenv"
  * @param name  the address of a NUL-terminated variable name
  * @return      0 on success
  */
-pub extern fn c_unsetenv(name: u64) -> i32 = "unsetenv"
+pub extern fn c_unsetenv(name: u64): i32 = "unsetenv"
 
 /**
  * Counts the regions the subtree of `root` still holds on the live registry — the observable a
@@ -61,9 +61,9 @@ pub extern fn c_unsetenv(name: u64) -> i32 = "unsetenv"
  * @param root     the subtree's root
  * @return         how many live regions reach `root`
  */
-pub fn subtree_live_count(control: u64, root: u64) -> u64 {
-    mut region = ctrl_get(control, CTRL_REGS)
-    mut count: u64 = 0
+pub fn subtree_live_count(control: u64, root: u64): u64 {
+    var region = ctrl_get(control, CTRL_REGS)
+    var count: u64 = 0
     loop {
         if region == 0 { break }
         if region_reaches(control, region, root) { count++ }
@@ -82,13 +82,13 @@ pub fn subtree_live_count(control: u64, root: u64) -> u64 {
  * @return         nothing
  */
 pub fn demand_subtree_drop_is_exact(control: u64) {
-    let root = region_root(control)
-    let branch = region_new(control, root)
-    let child = region_new(control, branch)
-    let grandchild = region_new(control, child)
-    let sibling = region_new(control, root)
-    let cousin = region_new(control, sibling)
-    let orphan = region_new(control, 0)
+    var root = region_root(control)
+    var branch = region_new(control, root)
+    var child = region_new(control, branch)
+    var grandchild = region_new(control, child)
+    var sibling = region_new(control, root)
+    var cousin = region_new(control, sibling)
+    var orphan = region_new(control, 0)
     _ = region_alloc(control, grandchild, 1000)
     _ = region_alloc(control, cousin, 1000)
     demand(subtree_live_count(control, branch) == 3, E_SUBTREE_KEEPS)
@@ -115,7 +115,7 @@ pub fn demand_subtree_drop_is_exact(control: u64) {
  * @return         nothing
  */
 pub fn demand_registry_stores_and_overwrites(control: u64) {
-    let region = region_new(control, 0)
+    var region = region_new(control, 0)
     region_register(control, region, 7, 1000)
     region_register(control, region, 9, 2000)
     demand(region_lookup(control, region, 7) == 1000, E_REGISTER_MISS)
@@ -137,15 +137,15 @@ pub fn demand_registry_stores_and_overwrites(control: u64) {
  * @return         nothing
  */
 pub fn demand_registry_survives_growth(control: u64) {
-    let region = region_new(control, 0)
-    mut i: u64 = 1
+    var region = region_new(control, 0)
+    var i: u64 = 1
     loop {
         if i > 20 { break }
         region_register(control, region, i, i * 100)
         i++
     }
     demand(region_get(control, region, REGION_NENTRIES) == 20, E_REGISTER_MISS)
-    mut k: u64 = 1
+    var k: u64 = 1
     loop {
         if k > 20 { break }
         demand(region_lookup(control, region, k) == k * 100, E_REGISTER_MISS)
@@ -162,9 +162,9 @@ pub fn demand_registry_survives_growth(control: u64) {
  * @return         nothing
  */
 pub fn demand_lookup_climbs_and_shadows(control: u64) {
-    let root = region_root(control)
-    let middle = region_new(control, root)
-    let leaf = region_new(control, middle)
+    var root = region_root(control)
+    var middle = region_new(control, root)
+    var leaf = region_new(control, middle)
     region_register(control, root, 5, 500)
     region_register(control, root, 6, 600)
     region_register(control, middle, 6, 660)
@@ -185,12 +185,12 @@ pub fn demand_lookup_climbs_and_shadows(control: u64) {
  * @return         nothing
  */
 pub fn demand_rewind_extent(control: u64) {
-    let root = region_root(control)
-    let kept = region_alloc(control, root, 64)
-    let chunks_before = chunk_count(control, root)
-    let used_before = chunk_get(control, region_get(control, root, REGION_HEAD), CHUNK_USED)
+    var root = region_root(control)
+    var kept = region_alloc(control, root, 64)
+    var chunks_before = chunk_count(control, root)
+    var used_before = chunk_get(control, region_get(control, root, REGION_HEAD), CHUNK_USED)
     checkpoint_push(control)
-    mut i: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= 12 { break }
         _ = region_alloc(control, root, DEFAULT_CHUNK / 2)
@@ -200,7 +200,7 @@ pub fn demand_rewind_extent(control: u64) {
     checkpoint_pop(control)
     demand(chunk_count(control, root) == chunks_before, E_REWIND_EXTENT)
     demand(chunk_get(control, region_get(control, root, REGION_HEAD), CHUNK_USED) == used_before, E_REWIND_EXTENT)
-    let after = region_alloc(control, root, 64)
+    var after = region_alloc(control, root, 64)
     demand(after == kept + 64, E_REWIND_EXTENT)
     demand_writable(control, kept, 64)
 }
@@ -214,23 +214,23 @@ pub fn demand_rewind_extent(control: u64) {
  * @return         nothing
  */
 pub fn demand_commit_and_depth(control: u64) {
-    let root = region_root(control)
+    var root = region_root(control)
     checkpoint_push(control)
-    let live = region_alloc(control, root, 128)
-    let chunks = chunk_count(control, root)
+    var live = region_alloc(control, root, 128)
+    var chunks = chunk_count(control, root)
     checkpoint_commit(control)
     demand(chunk_count(control, root) == chunks, E_COMMIT_KEEPS)
     demand(ctrl_get(control, CTRL_MSP) == 0, E_COMMIT_KEEPS)
     demand_writable(control, live, 128)
-    let deep_target = chunk_count(control, root)
-    mut pushed: u64 = 0
+    var deep_target = chunk_count(control, root)
+    var pushed: u64 = 0
     loop {
         if pushed >= MARK_SLOTS + 4 { break }
         checkpoint_push(control)
         pushed++
     }
     demand(ctrl_get(control, CTRL_MSP) == MARK_SLOTS + 4, E_MARK_DEPTH)
-    mut popped: u64 = 0
+    var popped: u64 = 0
     loop {
         if popped >= MARK_SLOTS + 4 { break }
         checkpoint_pop(control)
@@ -252,7 +252,7 @@ pub fn demand_commit_and_depth(control: u64) {
  * @return         nothing
  */
 pub fn set_paranoid_env(control: u64, wanted: bool) {
-    let block = raw_alloc(PARANOID_PROBE_BYTES)
+    var block = raw_alloc(PARANOID_PROBE_BYTES)
     spell_paranoid_var(block)
     if wanted {
         store_byte(block + PARANOID_VAR_BYTES, ASCII_T)
@@ -275,11 +275,11 @@ pub fn set_paranoid_env(control: u64, wanted: bool) {
 pub fn demand_reuse_when_oracle_off(control: u64) {
     set_paranoid_env(control, false)
     demand(!paranoid_enabled(control), E_REUSE_OFF)
-    let root = region_root(control)
-    let block = region_alloc(control, root, 96)
+    var root = region_root(control)
+    var block = region_alloc(control, root, 96)
     free_block(control, block, 96)
     demand(region_alloc(control, root, 96) == block, E_REUSE_OFF)
-    let large = region_alloc(control, root, FREE_BIN_MAX_BYTES * 2)
+    var large = region_alloc(control, root, FREE_BIN_MAX_BYTES * 2)
     free_block(control, large, FREE_BIN_MAX_BYTES * 2)
     demand(region_alloc(control, root, FREE_BIN_MAX_BYTES * 2) == large, E_REUSE_OFF)
 }
@@ -295,14 +295,14 @@ pub fn demand_reuse_when_oracle_off(control: u64) {
 pub fn demand_poison_when_oracle_on(control: u64) {
     set_paranoid_env(control, true)
     demand(paranoid_enabled(control), E_POISON_MISSING)
-    let root = region_root(control)
-    let block = region_alloc(control, root, 96)
+    var root = region_root(control)
+    var block = region_alloc(control, root, 96)
     _ = c_memset(block, 0, 96)
     free_block(control, block, 96)
     demand(load_byte(block, ctrl_scratch(control)) == 221, E_POISON_MISSING)
     demand(load_byte(block + 95, ctrl_scratch(control)) == 221, E_POISON_MISSING)
     demand(region_alloc(control, root, 96) != block, E_POISON_REUSED)
-    let short = region_alloc(control, root, 8)
+    var short = region_alloc(control, root, 8)
     _ = c_memset(short, 0, 8)
     free_block(control, short, 8)
     demand(load_byte(short, ctrl_scratch(control)) == 0, E_POISON_MISSING)
@@ -317,10 +317,10 @@ pub fn demand_poison_when_oracle_on(control: u64) {
  *
  * @return  `GATE_OK` when the whole arena holds; any other exit names the invariant that broke
  */
-pub fn run_full_gate() -> i32 {
-    let core = run_arena_gate()
+pub fn run_full_gate(): i32 {
+    var core = run_arena_gate()
     if core != GATE_OK { return core }
-    let control = control_new()
+    var control = control_new()
     demand_subtree_drop_is_exact(control)
     demand_registry_stores_and_overwrites(control)
     demand_registry_survives_growth(control)

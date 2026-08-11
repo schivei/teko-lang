@@ -8,7 +8,7 @@ use teko::lexer
  * @param u64 pos  the index to test
  * @return bool  true iff a `fn`/`type`/`extern` keyword starts there
  */
-fn is_decl_start(tokens: []lexer::Token, pos: u64) -> bool {
+fn is_decl_start(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Fn) || is_kind_at(tokens, pos, lexer::TokenKind::Type) || is_kind_at(tokens, pos, lexer::TokenKind::Extern)
 }
 
@@ -24,11 +24,11 @@ fn is_decl_start(tokens: []lexer::Token, pos: u64) -> bool {
  * @return Parsed<Path> | error  the parsed path plus the resume index (at the trailing `::[`, or past the
  *               last plain segment), or a parse error if no leading name is present
  */
-fn parse_use_path(tokens: []lexer::Token, pos: u64) -> Parsed<Path> | error {
+fn parse_use_path(tokens: []lexer::Token, pos: u64): Parsed<Path> | error {
     if !is_name_at(tokens, pos) { return err_at(tokens, pos, "expected a name") }
-    mut segs: []Segment = teko::list::empty()
+    var segs: []Segment = teko::list::empty()
     segs = teko::list::push(segs, Segment { name = tokens[pos].text })
-    mut p = pos + 1
+    var p = pos + 1
     loop {
         if !is_kind_at(tokens, p, lexer::TokenKind::ColonColon) { break }
         if is_kind_at(tokens, p + 1, lexer::TokenKind::LBracket) { break }
@@ -51,12 +51,12 @@ fn parse_use_path(tokens: []lexer::Token, pos: u64) -> Parsed<Path> | error {
  * @return ParsedList<str> | error  the collected names in order plus the resume index (past the closing `]`),
  *               or a parse error for any malformed list
  */
-fn parse_use_name_list(tokens: []lexer::Token, pos: u64) -> ParsedList<str> | error {
+fn parse_use_name_list(tokens: []lexer::Token, pos: u64): ParsedList<str> | error {
     if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) {
         return err_at(tokens, pos, "expected a name in a grouped `use` import")
     }
-    mut names: []str = teko::list::empty()
-    mut p = pos
+    var names: []str = teko::list::empty()
+    var p = pos
     loop {
         names = teko::list::push(names, tokens[p].text)
         p = p + 1
@@ -81,18 +81,18 @@ fn parse_use_name_list(tokens: []lexer::Token, pos: u64) -> ParsedList<str> | er
  * @param u64 pos  the index of the `use` keyword
  * @return Parsed<UseDecl> | error  the parsed `UseDecl` plus the resume index, or a parse error
  */
-fn parse_use(tokens: []lexer::Token, pos: u64) -> Parsed<UseDecl> | error {
-    let pp = match parse_use_path(tokens, pos + 1) { Parsed<Path> as x => x; error as e => return e }
+fn parse_use(tokens: []lexer::Token, pos: u64): Parsed<UseDecl> | error {
+    var pp = match parse_use_path(tokens, pos + 1) { Parsed<Path> as x => x; error as e => return e }
     if is_kind_at(tokens, pp.next, lexer::TokenKind::ColonColon) && is_kind_at(tokens, pp.next + 1, lexer::TokenKind::LBracket) {
-        let nl = match parse_use_name_list(tokens, pp.next + 2) { ParsedList<str> as x => x; error as e => return e }
+        var nl = match parse_use_name_list(tokens, pp.next + 2) { ParsedList<str> as x => x; error as e => return e }
         if is_kind_at(tokens, nl.next, lexer::TokenKind::As) {
             return err_at(tokens, nl.next, "a grouped `use` import takes no alias")
         }
         return Parsed<UseDecl> { node = UseDecl { path = pp.node; has_alias = false; alias = ""; names = nl.items }; next = nl.next }
     }
-    mut has_alias = false
-    mut alias = ""
-    mut p = pp.next
+    var has_alias = false
+    var alias = ""
+    var p = pp.next
     if is_kind_at(tokens, p, lexer::TokenKind::As) {
         if !is_kind_at(tokens, p + 1, lexer::TokenKind::Ident) {
             return err_at(tokens, p + 1, "expected a name after `as` in a `use`")
@@ -114,12 +114,12 @@ fn parse_use(tokens: []lexer::Token, pos: u64) -> Parsed<UseDecl> | error {
  * @return ParsedList<UseDecl> | error  the parsed `use` decls plus the resume index where the body/decls begin, or
  *               a parse error
  */
-fn parse_use_header(tokens: []lexer::Token, pos: u64) -> ParsedList<UseDecl> | error {
-    mut p = skip_trivia(tokens, pos)
-    mut uses: []UseDecl = teko::list::empty()
+fn parse_use_header(tokens: []lexer::Token, pos: u64): ParsedList<UseDecl> | error {
+    var p = skip_trivia(tokens, pos)
+    var uses: []UseDecl = teko::list::empty()
     loop {
         if !is_kind_at(tokens, p, lexer::TokenKind::Use) { break }
-        let u = match parse_use(tokens, p) { Parsed<UseDecl> as x => x; error as e => return e }
+        var u = match parse_use(tokens, p) { Parsed<UseDecl> as x => x; error as e => return e }
         uses = teko::list::push(uses, u.node)
         p = u.next
         if !has_token(tokens, p) { break }
@@ -139,16 +139,16 @@ fn parse_use_header(tokens: []lexer::Token, pos: u64) -> ParsedList<UseDecl> | e
  * @param u64 pos  the file start (0)
  * @return Parsed<MainFile> | error  the parsed `MainFile` plus the resume index, or a parse error
  */
-pub fn parse_main_file(tokens: []lexer::Token, pos: u64) -> Parsed<MainFile> | error {
-    let hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
-    mut p = skip_trivia(tokens, hdr.next)
-    mut body: []Statement = teko::list::empty()
+pub fn parse_main_file(tokens: []lexer::Token, pos: u64): Parsed<MainFile> | error {
+    var hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
+    var p = skip_trivia(tokens, hdr.next)
+    var body: []Statement = teko::list::empty()
     loop {
         if !has_token(tokens, p) { break }
         if is_decl_start(tokens, p) {
             return err_at(tokens, p, "main.tks is a virtual main: it may not declare types or functions (only `use` + statements)")
         }
-        let s = match parse_statement(tokens, p) { Parsed<Statement> as x => x; error as e => return e }
+        var s = match parse_statement(tokens, p) { Parsed<Statement> as x => x; error as e => return e }
         body = teko::list::push(body, s.node)
         p = s.next
         if !has_token(tokens, p) { break }

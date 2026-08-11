@@ -15,7 +15,7 @@ use teko::parser
  * @return   the located warning line
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn unused_fn_warning(f: TFunction) -> str {
+fn unused_fn_warning(f: TFunction): str {
     diag_at(f.file, f.line, f.col, $"warning: unused private function `{f.name}`")
 }
 
@@ -30,9 +30,9 @@ fn unused_fn_warning(f: TFunction) -> str {
  * @return      one warning line per unused private function, in item order
  * @since 0.3.1.0 (LSP crumb C)
  */
-pub fn collect_unused_fn_warnings(prog: TProgram) -> []str {
-    mut out: []str = teko::list::empty()
-    mut i: u64 = 0
+pub fn collect_unused_fn_warnings(prog: TProgram): []str {
+    var out: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
@@ -67,7 +67,7 @@ pub fn collect_unused_fn_warnings(prog: TProgram) -> []str {
  * @return   the innermost cast layer's own `.type`, or `e.type` unchanged when `e` is not a cast
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn innermost_cast_type(e: TExpr) -> Type {
+fn innermost_cast_type(e: TExpr): Type {
     match e.kind {
         TCast as tc => match tc.expr.kind { TCast => innermost_cast_type(tc.expr); _ => e.type }
         _ => e.type
@@ -87,7 +87,7 @@ fn innermost_cast_type(e: TExpr) -> Type {
  * @return      the located warning line
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn redundant_cast_warning(file: str, line: u32, col: u32, ty: Type) -> str {
+fn redundant_cast_warning(file: str, line: u32, col: u32, ty: Type): str {
     diag_at(file, line, col, $"warning: redundant cast: this `to {type_render(ty)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
 }
 
@@ -103,7 +103,7 @@ fn redundant_cast_warning(file: str, line: u32, col: u32, ty: Type) -> str {
  * @return      `out`, with `e`'s own redundant same-type cast appended when present
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn note_class1_cast(file: str, e: TExpr, out: []str) -> []str {
+fn note_class1_cast(file: str, e: TExpr, out: []str): []str {
     match e.kind {
         TCast as tc => if type_eq(tc.expr.type, e.type) { teko::list::push(out, redundant_cast_warning(file, e.line, e.col, e.type)) } else { out }
         _ => out
@@ -122,7 +122,7 @@ fn note_class1_cast(file: str, e: TExpr, out: []str) -> []str {
  * @return      `out`, with the flagged operand's warning appended when `b` carries one
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn note_class3_binary(file: str, b: TBinary, out: []str) -> []str {
+fn note_class3_binary(file: str, b: TBinary, out: []str): []str {
     if !op_is_arith(b.op) && !op_is_arith_bitwise(b.op) { return out }
     match redundant_widen_cast_of(b.left, b.right) {
         TExpr as bad => teko::list::push(out, redundant_cast_warning(file, bad.line, bad.col, innermost_cast_type(bad)))
@@ -143,13 +143,13 @@ fn note_class3_binary(file: str, b: TBinary, out: []str) -> []str {
  * @return      `out`, with one warning appended per flagged consecutive pair
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn note_class3_compare(file: str, c: TCompare, out: []str) -> []str {
-    mut acc = out
-    mut prev = c.first
-    mut i: u64 = 0
+fn note_class3_compare(file: str, c: TCompare, out: []str): []str {
+    var acc = out
+    var prev = c.first
+    var i: u64 = 0
     loop {
         if i >= c.rest.len { break }
-        let cur = c.rest[i].operand
+        var cur = c.rest[i].operand
         acc = match redundant_widen_cast_of(prev, cur) {
             TExpr as bad => teko::list::push(acc, redundant_cast_warning(file, bad.line, bad.col, innermost_cast_type(bad)))
             null => acc
@@ -174,8 +174,8 @@ fn note_class3_compare(file: str, c: TCompare, out: []str) -> []str {
  * @return      `out`, with every redundant cast reachable from `e` appended
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn note_redundant_casts_expr(file: str, e: TExpr, out: []str) -> []str {
-    mut acc = note_class1_cast(file, e, out)
+fn note_redundant_casts_expr(file: str, e: TExpr, out: []str): []str {
+    var acc = note_class1_cast(file, e, out)
     match e.kind {
         TBinary as b => {
             acc = note_class3_binary(file, b, acc)
@@ -186,10 +186,10 @@ fn note_redundant_casts_expr(file: str, e: TExpr, out: []str) -> []str {
         TCompare as cm => {
             acc = note_class3_compare(file, cm, acc)
             acc = note_redundant_casts_expr(file, cm.first, acc)
-            mut i: u64 = 0
+            var i: u64 = 0
             loop { if i >= cm.rest.len { break }; acc = note_redundant_casts_expr(file, cm.rest[i].operand, acc); i = i + 1 }
         }
-        TCall as c => { mut i: u64 = 0; loop { if i >= c.args.len { break }; acc = note_redundant_casts_expr(file, c.args[i], acc); i = i + 1 } }
+        TCall as c => { var i: u64 = 0; loop { if i >= c.args.len { break }; acc = note_redundant_casts_expr(file, c.args[i], acc); i = i + 1 } }
         TCast as ct => acc = note_redundant_casts_expr(file, ct.expr, acc)
         TIfExpr as f => {
             acc = note_redundant_casts_expr(file, f.cond, acc)
@@ -198,7 +198,7 @@ fn note_redundant_casts_expr(file: str, e: TExpr, out: []str) -> []str {
         }
         TMatchExpr as m => {
             acc = note_redundant_casts_expr(file, m.subject, acc)
-            mut i: u64 = 0
+            var i: u64 = 0
             loop {
                 if i >= m.arms.len { break }
                 if m.arms[i].has_when { acc = note_redundant_casts_expr(file, m.arms[i].guard, acc) }
@@ -208,15 +208,15 @@ fn note_redundant_casts_expr(file: str, e: TExpr, out: []str) -> []str {
         }
         TFieldAccess as fa => acc = note_redundant_casts_expr(file, fa.receiver, acc)
         TIndex as ix => { acc = note_redundant_casts_expr(file, ix.receiver, acc); acc = note_redundant_casts_expr(file, ix.index, acc) }
-        TStructInit as si => { mut i: u64 = 0; loop { if i >= si.field_vals.len { break }; acc = note_redundant_casts_expr(file, si.field_vals[i], acc); i = i + 1 } }
+        TStructInit as si => { var i: u64 = 0; loop { if i >= si.field_vals.len { break }; acc = note_redundant_casts_expr(file, si.field_vals[i], acc); i = i + 1 } }
         TInterp as ip => {
-            mut i: u64 = 0
+            var i: u64 = 0
             loop {
                 if i >= ip.holes.len { break }
                 acc = note_redundant_casts_expr(file, ip.holes[i], acc)
                 if i < ip.specs.len {
                     match ip.specs[i].kind {
-                        TFSpecDynamic as fd => { mut k: u64 = 0; loop { if k >= fd.args.len { break }; acc = note_redundant_casts_expr(file, fd.args[k], acc); k = k + 1 } }
+                        TFSpecDynamic as fd => { var k: u64 = 0; loop { if k >= fd.args.len { break }; acc = note_redundant_casts_expr(file, fd.args[k], acc); k = k + 1 } }
                         _ => { }
                     }
                 }
@@ -225,10 +225,10 @@ fn note_redundant_casts_expr(file: str, e: TExpr, out: []str) -> []str {
         }
         TInExpr as ie => {
             acc = note_redundant_casts_expr(file, ie.lhs, acc)
-            mut i: u64 = 0
+            var i: u64 = 0
             loop { if i >= ie.elems.len { break }; acc = note_redundant_casts_expr(file, ie.elems[i], acc); i = i + 1 }
         }
-        TArrayLit as al => { mut i: u64 = 0; loop { if i >= al.elements.len { break }; acc = note_redundant_casts_expr(file, al.elements[i].expr, acc); i = i + 1 } }
+        TArrayLit as al => { var i: u64 = 0; loop { if i >= al.elements.len { break }; acc = note_redundant_casts_expr(file, al.elements[i].expr, acc); i = i + 1 } }
         TBorrow as bo => acc = note_redundant_casts_expr(file, bo.operand, acc)
         TLambda as lam => acc = note_redundant_casts_block(file, lam.body, acc)
         _ => { }
@@ -245,9 +245,9 @@ fn note_redundant_casts_expr(file: str, e: TExpr, out: []str) -> []str {
  * @return       `out`, with the whole block's findings appended
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn note_redundant_casts_block(file: str, stmts: []TStatement, out: []str) -> []str {
-    mut acc = out
-    mut i: u64 = 0
+fn note_redundant_casts_block(file: str, stmts: []TStatement, out: []str): []str {
+    var acc = out
+    var i: u64 = 0
     loop { if i >= stmts.len { break }; acc = note_redundant_casts_stmt(file, stmts[i], acc); i = i + 1 }
     acc
 }
@@ -262,11 +262,11 @@ fn note_redundant_casts_block(file: str, stmts: []TStatement, out: []str) -> []s
  * @return      `out`, with every redundant cast reachable from `s` appended
  * @since 0.3.1.0 (LSP crumb C)
  */
-fn note_redundant_casts_stmt(file: str, s: TStatement, out: []str) -> []str {
+fn note_redundant_casts_stmt(file: str, s: TStatement, out: []str): []str {
     match s {
         TBinding as b => note_redundant_casts_expr(file, b.value, out)
         TAssign as a => {
-            let acc1 = note_redundant_casts_expr(file, a.value, out)
+            var acc1 = note_redundant_casts_expr(file, a.value, out)
             if parser::assign_has_target(a.kind) { note_redundant_casts_expr(file, a.target, acc1) } else { acc1 }
         }
         TReturn as r => if r.has_value { note_redundant_casts_expr(file, r.value, out) } else { out }
@@ -295,9 +295,9 @@ fn note_redundant_casts_stmt(file: str, s: TStatement, out: []str) -> []str {
  * @return      one warning line per redundant cast found, in item/declaration order
  * @since 0.3.1.0 (LSP crumb C)
  */
-pub fn collect_redundant_cast_warnings(prog: TProgram) -> []str {
-    mut out: []str = teko::list::empty()
-    mut i: u64 = 0
+pub fn collect_redundant_cast_warnings(prog: TProgram): []str {
+    var out: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
@@ -325,6 +325,6 @@ pub fn collect_redundant_cast_warnings(prog: TProgram) -> []str {
  * @return      every warning, unused-fn findings before redundant-cast findings
  * @since 0.3.1.0 (LSP crumb C)
  */
-pub fn collect_warnings(prog: TProgram) -> []str {
+pub fn collect_warnings(prog: TProgram): []str {
     concat_diags(collect_unused_fn_warnings(prog), collect_redundant_cast_warnings(prog))
 }

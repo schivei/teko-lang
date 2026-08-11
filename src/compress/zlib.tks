@@ -25,9 +25,9 @@ const ZLIB_CMF: u32 = 0x78
  * @param cmf  the header's `CMF` byte (see `ZLIB_CMF`)
  * @return     the `FLG` byte pairing with `cmf` to satisfy the header checksum
  */
-fn zlib_flg(cmf: u32) -> u32 {
-    let base = cmf * 256
-    let remainder = base % 31
+fn zlib_flg(cmf: u32): u32 {
+    var base = cmf * 256
+    var remainder = base % 31
     if remainder == 0 { return 0 }
     31 - remainder
 }
@@ -40,22 +40,22 @@ fn zlib_flg(cmf: u32) -> u32 {
  * @param data  the bytes to compress
  * @return      the framed zlib stream
  */
-pub fn zlib_compress(data: []byte) -> []byte {
-    let cmf = ZLIB_CMF
-    let flg = zlib_flg(cmf)
-    mut out: []byte = teko::list::empty()
+pub fn zlib_compress(data: []byte): []byte {
+    var cmf = ZLIB_CMF
+    var flg = zlib_flg(cmf)
+    var out: []byte = teko::list::empty()
     out = teko::list::push(out, cmf to byte)
     out = teko::list::push(out, flg to byte)
 
-    let payload = teko::compress::deflate(data)
-    mut i: u64 = 0
+    var payload = teko::compress::deflate(data)
+    var i: u64 = 0
     loop {
         if i >= payload.len { break }
         out = teko::list::push(out, payload[i])
         i++
     }
 
-    let checksum = teko::compress::adler32_of(data)
+    var checksum = teko::compress::adler32_of(data)
     out = teko::list::push(out, ((checksum >> 24) & 0xFF) to byte)
     out = teko::list::push(out, ((checksum >> 16) & 0xFF) to byte)
     out = teko::list::push(out, ((checksum >> 8) & 0xFF) to byte)
@@ -76,21 +76,21 @@ pub fn zlib_compress(data: []byte) -> []byte {
  *              set (a preset dictionary — unsupported), or the trailing checksum
  *              mismatches
  */
-pub fn zlib_decompress(data: []byte) -> []byte | error {
+pub fn zlib_decompress(data: []byte): []byte | error {
     if data.len < 6 { return error { message = "zlib: stream too short for header + trailer" } }
 
-    let cmf = data[0] to u32
-    let flg = data[1] to u32
+    var cmf = data[0] to u32
+    var flg = data[1] to u32
     if (cmf & 0x0F) != 8 { return error { message = "zlib: unsupported compression method (CM != 8)" } }
     if ((cmf * 256) + flg) % 31 != 0 { return error { message = "zlib: header check (FCHECK) failed" } }
     if (flg & 0x20) != 0 { return error { message = "zlib: preset dictionary (FDICT) is not supported" } }
 
-    let payload = slice_bytes(data, 2, data.len - 4)
-    let decompressed = match teko::compress::inflate(payload) { []byte as b => b; error as e => return e }
+    var payload = slice_bytes(data, 2, data.len - 4)
+    var decompressed = match teko::compress::inflate(payload) { []byte as b => b; error as e => return e }
 
-    let trailer_pos = data.len - 4
-    let expected = (data[trailer_pos] to u32 << 24) | (data[trailer_pos + 1] to u32 << 16) | (data[trailer_pos + 2] to u32 << 8) | (data[trailer_pos + 3] to u32)
-    let actual = teko::compress::adler32_of(decompressed)
+    var trailer_pos = data.len - 4
+    var expected = (data[trailer_pos] to u32 << 24) | (data[trailer_pos + 1] to u32 << 16) | (data[trailer_pos + 2] to u32 << 8) | (data[trailer_pos + 3] to u32)
+    var actual = teko::compress::adler32_of(decompressed)
     if expected != actual { return error { message = "zlib: Adler-32 checksum mismatch" } }
 
     decompressed

@@ -6,9 +6,9 @@ use teko::parser
 type Collected = struct { types: TypeTable; env: Env }
 
 // gather ALL user type declarations first (so a forward reference resolves).
-fn collect_types(items: []parser::Item) -> TypeTable {
-    mut table = tt_empty()
-    mut i = 0
+fn collect_types(items: []parser::Item): TypeTable {
+    var table = tt_empty()
+    var i = 0
     loop {
         if i >= items.len { break }
         match items[i].content {
@@ -36,7 +36,7 @@ fn collect_types(items: []parser::Item) -> TypeTable {
  * @param TypeTable table  the program's type table (for the `unsafe_carrying` leaf probe)
  * @return error?  an error iff `t` carries unsafe data into a non-`unsafe` fn's signature
  */
-fn reject_unsafe_signature_contagion(fn_name: str, fn_unsafe: bool, t: Type, table: TypeTable) -> error | null {
+fn reject_unsafe_signature_contagion(fn_name: str, fn_unsafe: bool, t: Type, table: TypeTable): error | null {
     if fn_unsafe { return null }
     if !unsafe_carrying(t, table) { return null }
     error { message = $"safe fn '{fn_name}' names unsafe type in its signature — mark it `unsafe fn` or take/return only safe types (§2: only safe types cross the boundary)" }
@@ -52,7 +52,7 @@ fn reject_unsafe_signature_contagion(fn_name: str, fn_unsafe: bool, t: Type, tab
  * @return    `e` positioned at the const's own line/col when it carried none
  * @since #594
  */
-fn const_type_located(e: error, cd: parser::ConstDecl) -> error {
+fn const_type_located(e: error, cd: parser::ConstDecl): error {
     if e.line != 0 { return e }
     teko::error::err_loc(e, cd.line, cd.col)
 }
@@ -70,26 +70,26 @@ fn const_type_located(e: error, cd: parser::ConstDecl) -> error {
  * @return        the const's resolved value type, or a located error on an unknown type
  * @since #594
  */
-fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str) -> Type | error {
+fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str): Type | error {
     match resolve_type(cd.ty, table, ref_ns) {
         Type as t => t
         error as e => const_type_located(e, cd)
     }
 }
 
-fn func_type(f: parser::Function, table: TypeTable, ref_ns: str) -> Type | error {
-    let tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
-    mut params: []Type = teko::list::empty()
-    mut param_names: []str = teko::list::empty()
-    mut defaults: []parser::Expr = teko::list::empty()
-    mut n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — the first has_default param's index; TRAILING-ONLY (rule A) means every param after it also defaults
-    mut i = 0
+fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): Type | error {
+    var tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
+    var params: []Type = teko::list::empty()
+    var param_names: []str = teko::list::empty()
+    var defaults: []parser::Expr = teko::list::empty()
+    var n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — the first has_default param's index; TRAILING-ONLY (rule A) means every param after it also defaults
+    var i = 0
     loop {
         if i >= f.params.len { break }
         if !f.params[i].has_type && f.params[i].name == "_" {
             return error { message = "a `_` discard parameter is only allowed when implementing an interface method or overriding a base method — a plain function must name its parameters" }
         }
-        let pt = match resolve_type(f.params[i].type_ann, tbl, ref_ns) {
+        var pt = match resolve_type(f.params[i].type_ann, tbl, ref_ns) {
             Type as t => t
             error as e => return e
         }
@@ -104,13 +104,13 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str) -> Type | error
     }
     // No `-> ret` ⇒ a void return (M.3) — f.return_type is the empty no_type() placeholder, NOT a
     // value type, so it must not be resolved. Mirrors typer.tks's function typer.
-    let ret = if f.has_return {
+    var ret = if f.has_return {
         match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
     } else {
         Void { }
     }
     match reject_unsafe_signature_contagion(f.name, f.is_unsafe, ret, table) { error as e => return e; null => { } }
-    let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+    var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
     Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
 }
 
@@ -130,9 +130,9 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str) -> Type | error
  * @return             the receiver's canonical `ns::…::Type` name (bare for the root ns or a type-param)
  * @since onda-3 (#290)
  */
-pub fn receiver_canonical_name(struct_name: str, ref_ns: str, table: TypeTable) -> str {
+pub fn receiver_canonical_name(struct_name: str, ref_ns: str, table: TypeTable): str {
     if name_qualifier(struct_name) != "" { return struct_name }
-    let qualified = qualify(ref_ns, struct_name)
+    var qualified = qualify(ref_ns, struct_name)
     match type_table_find(table, qualified, "") {
         parser::TypeDecl => qualified
         error => struct_name
@@ -167,7 +167,7 @@ pub fn receiver_canonical_name(struct_name: str, ref_ns: str, table: TypeTable) 
  * @param TypeTable table  the folded type table (owner lookup)
  * @return bool  true iff `f` or its enclosing type is `unsafe`
  */
-fn method_is_effective_unsafe(f: parser::Function, struct_name: str, ref_ns: str, table: TypeTable) -> bool {
+fn method_is_effective_unsafe(f: parser::Function, struct_name: str, ref_ns: str, table: TypeTable): bool {
     if f.is_unsafe { return true }
     match type_table_find(table, receiver_canonical_name(struct_name, ref_ns, table), "") {
         parser::TypeDecl as owner => owner.is_unsafe
@@ -175,18 +175,18 @@ fn method_is_effective_unsafe(f: parser::Function, struct_name: str, ref_ns: str
     }
 }
 
-fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref_ns: str) -> Type | error {
-    let tbl = method_type_param_table(receiver_canonical_name(struct_name, ref_ns, table), f.type_params, f.type_constraints, "", table)
-    let fn_unsafe = method_is_effective_unsafe(f, struct_name, ref_ns, table)
-    mut params: []Type = teko::list::empty()
-    mut param_names: []str = teko::list::empty()
-    mut defaults: []parser::Expr = teko::list::empty()
-    mut n_required: u64 = f.params.len
-    let disc_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, ref_ns, table) } else { null }
-    mut i = 0
+fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref_ns: str): Type | error {
+    var tbl = method_type_param_table(receiver_canonical_name(struct_name, ref_ns, table), f.type_params, f.type_constraints, "", table)
+    var fn_unsafe = method_is_effective_unsafe(f, struct_name, ref_ns, table)
+    var params: []Type = teko::list::empty()
+    var param_names: []str = teko::list::empty()
+    var defaults: []parser::Expr = teko::list::empty()
+    var n_required: u64 = f.params.len
+    var disc_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, ref_ns, table) } else { null }
+    var i = 0
     loop {
         if i >= f.params.len { break }
-        let pt = if !f.params[i].has_type && f.params[i].name == "_" {
+        var pt = if !f.params[i].has_type && f.params[i].name == "_" {
             match discard_param_type(disc_gov, i to u64, tbl, ref_ns) { Type as t => t; error as e => return e }
         } else if !f.params[i].has_type {
             Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
@@ -204,13 +204,13 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
         }
         i++
     }
-    let ret = if f.has_return {
+    var ret = if f.has_return {
         match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
     } else {
         Void { }
     }
     match reject_unsafe_signature_contagion(f.name, fn_unsafe, ret, table) { error as e => return e; null => { } }
-    let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+    var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
     Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
 }
 
@@ -239,7 +239,7 @@ type SigOutcome = struct {
  * @return     that environment with no diagnostics
  * @since 0.3.1
  */
-fn sig_unchanged(env: Env) -> SigOutcome {
+fn sig_unchanged(env: Env): SigOutcome {
     SigOutcome { env = env; diags = teko::list::empty() }
 }
 
@@ -257,13 +257,13 @@ fn sig_unchanged(env: Env) -> SigOutcome {
  * @param env0   the environment to grow (empty for a depless project, the dep's for a seeded one)
  * @return       the grown environment plus every signature diagnostic, in declaration order
  */
-fn collect_signatures(items: []parser::Item, table: TypeTable, env0: Env) -> SigOutcome {
-    mut env = env0
-    mut diags: []str = teko::list::empty()
-    mut i = 0
+fn collect_signatures(items: []parser::Item, table: TypeTable, env0: Env): SigOutcome {
+    var env = env0
+    var diags: []str = teko::list::empty()
+    var i = 0
     loop {
         if i >= items.len { break }
-        let step = collect_item_signature(items[i], table, env)
+        var step = collect_item_signature(items[i], table, env)
         env = step.env
         diags = concat_diags(diags, step.diags)
         i++
@@ -280,7 +280,7 @@ fn collect_signatures(items: []parser::Item, table: TypeTable, env0: Env) -> Sig
  * @param env    the environment so far
  * @return       the environment after this item, plus its signature diagnostics
  */
-fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env) -> SigOutcome {
+fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env): SigOutcome {
     match item.content {
         parser::Function as f => collect_fn_signature(item, f, table, env)
         parser::ConstDecl as cd => collect_const_signature(item, cd, table, env)
@@ -300,7 +300,7 @@ fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env) -> Sig
  * @param env    the environment so far
  * @return       the environment with the function bound, or unchanged plus its diagnostic
  */
-fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTable, env: Env) -> SigOutcome {
+fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTable, env: Env): SigOutcome {
     match func_type(f, table, item.namespace) {
         Type as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace); diags = teko::list::empty() }
         error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, f.line, f.col, e)) }
@@ -317,7 +317,7 @@ fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTabl
  * @param env    the environment so far
  * @return       the environment with the const bound, or unchanged plus its diagnostic
  */
-fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: TypeTable, env: Env) -> SigOutcome {
+fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: TypeTable, env: Env): SigOutcome {
     match collect_const_sig(cd, table, item.namespace) {
         Type as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis); diags = teko::list::empty() }
         error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, cd.line, cd.col, e)) }
@@ -335,12 +335,12 @@ fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: Typ
  * @param env    the environment so far
  * @return       the environment with the body's methods bound, plus their diagnostics
  */
-fn collect_type_member_signatures(item: parser::Item, td: parser::TypeDecl, table: TypeTable, env: Env) -> SigOutcome {
-    let method_ns = if item.namespace == "" { td.name } else { item.namespace ~ "::" ~ td.name }
+fn collect_type_member_signatures(item: parser::Item, td: parser::TypeDecl, table: TypeTable, env: Env): SigOutcome {
+    var method_ns = if item.namespace == "" { td.name } else { item.namespace ~ "::" ~ td.name }
     match td.body {
         parser::StructBody as sb => collect_method_signatures(item, td, sb.methods, method_ns, table, env)
         parser::ClassBody as cb => {
-            let eff = match effective_class_methods(cb, table) {
+            var eff = match effective_class_methods(cb, table) {
                 []parser::Function as m => m
                 error as e => return SigOutcome { env = env; diags = one_diag(located_diag(item.file, td.line, td.col, e)) }
             }
@@ -366,10 +366,10 @@ fn collect_type_member_signatures(item: parser::Item, td: parser::TypeDecl, tabl
  * @param env        the environment so far
  * @return           the environment with the resolvable methods bound, plus the rest's diagnostics
  */
-fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: []parser::Function, method_ns: str, table: TypeTable, env: Env) -> SigOutcome {
-    mut out = env
-    mut diags: []str = teko::list::empty()
-    mut i = 0
+fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: []parser::Function, method_ns: str, table: TypeTable, env: Env): SigOutcome {
+    var out = env
+    var diags: []str = teko::list::empty()
+    var i = 0
     loop {
         if i >= methods.len { break }
         match method_func_type(methods[i], td.name, table, item.namespace) {
@@ -401,14 +401,14 @@ fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: 
  *               diagnostics of the ones that did not resolve
  * @since onda-3 (#254)
  */
-pub fn register_instance_methods(env: Env, table: TypeTable) -> SigOutcome {
-    mut out = env
-    mut diags: []str = teko::list::empty()
-    let insts = table_generic_instance_regs(table)
-    mut i: u64 = 0
+pub fn register_instance_methods(env: Env, table: TypeTable): SigOutcome {
+    var out = env
+    var diags: []str = teko::list::empty()
+    var insts = table_generic_instance_regs(table)
+    var i: u64 = 0
     loop {
         if i >= tt_len(insts) { break }
-        let step = register_one_instance_methods(tt_at(insts, i), table, out)
+        var step = register_one_instance_methods(tt_at(insts, i), table, out)
         out = step.env
         diags = concat_diags(diags, step.diags)
         i++
@@ -427,11 +427,11 @@ pub fn register_instance_methods(env: Env, table: TypeTable) -> SigOutcome {
  *               diagnostics
  * @since 0.3.1
  */
-fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env) -> SigOutcome {
-    mut out = env
-    mut diags: []str = teko::list::empty()
-    let methods = instance_methods_of(inst.decl)
-    mut mi = 0
+fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env): SigOutcome {
+    var out = env
+    var diags: []str = teko::list::empty()
+    var methods = instance_methods_of(inst.decl)
+    var mi = 0
     loop {
         if mi >= methods.len { break }
         match method_func_type(methods[mi], inst.name, table, "") {
@@ -452,7 +452,7 @@ fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env) -> S
  * @return      the instance's methods, or an empty list for a non-struct/class body
  * @since onda-3 (#254)
  */
-fn instance_methods_of(decl: parser::TypeDecl) -> []parser::Function {
+fn instance_methods_of(decl: parser::TypeDecl): []parser::Function {
     match decl.body {
         parser::StructBody as sb => sb.methods
         parser::ClassBody as cb => cb.methods
@@ -464,9 +464,9 @@ fn instance_methods_of(decl: parser::TypeDecl) -> []parser::Function {
 // Used by the package backend (project.tks::backend) which has a TProgram, not a
 // parser::Program. The namespace field is set to "" — sufficient for resolve_type (name
 // resolution ignores namespace; only W-vis-enforce uses it, and the header emitter does not).
-pub fn type_table_of(prog: TProgram) -> TypeTable {
-    mut table = tt_empty()
-    mut i = 0
+pub fn type_table_of(prog: TProgram): TypeTable {
+    var table = tt_empty()
+    var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
@@ -488,22 +488,22 @@ pub fn type_table_of(prog: TProgram) -> TypeTable {
 // platform; a type of the same bare name in ANOTHER namespace would win by scan order). An
 // unresolvable name is left AS WRITTEN — validation surfaces that specific error with the source
 // wording. NO-OP (program returned unchanged) when nothing to canonicalize. (Mirror collect.c.)
-fn canon_ref_name(name: str, table: TypeTable, ref_ns: str) -> str {
+fn canon_ref_name(name: str, table: TypeTable, ref_ns: str): str {
     match resolve_name_ref(name, table, ref_ns) {
         parser::TypeDecl as td => qualify(resolved_name_ns(name, table, ref_ns), name_last_segment(td.name))
         error => name   // unresolvable — leave as written
     }
 }
-fn canon_ref_list(names: []str, table: TypeTable, ref_ns: str) -> []str {
-    mut out: []str = teko::list::empty()
-    mut i: u64 = 0
+fn canon_ref_list(names: []str, table: TypeTable, ref_ns: str): []str {
+    var out: []str = teko::list::empty()
+    var i: u64 = 0
     loop { if i >= names.len { break }; out = teko::list::push(out, canon_ref_name(names[i], table, ref_ns)); i++ }
     out
 }
-pub fn canon_class_bases(program: parser::Program) -> parser::Program {
-    let table = collect_types(program.items)
-    mut any = false
-    mut t = 0
+pub fn canon_class_bases(program: parser::Program): parser::Program {
+    var table = collect_types(program.items)
+    var any = false
+    var t = 0
     loop {
         if t >= program.items.len { break }
         match program.items[t].content {
@@ -518,18 +518,18 @@ pub fn canon_class_bases(program: parser::Program) -> parser::Program {
         t++
     }
     if !any { return program }
-    mut items: []parser::Item = teko::list::empty()
-    mut i = 0
+    var items: []parser::Item = teko::list::empty()
+    var i = 0
     loop {
         if i >= program.items.len { break }
-        let it = program.items[i]
-        mut content = it.content
+        var it = program.items[i]
+        var content = it.content
         match it.content {
             parser::TypeDecl as td => {
                 match td.body {
                     parser::ClassBody as cb => {
                         if cb.has_base || cb.implements.len > 0 {
-                            let cbase = if cb.has_base { canon_ref_name(cb.base_name, table, it.namespace) } else { cb.base_name }
+                            var cbase = if cb.has_base { canon_ref_name(cb.base_name, table, it.namespace) } else { cb.base_name }
                             content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cbase; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = canon_ref_list(cb.implements, table, it.namespace); fields = cb.fields; methods = cb.methods; consts = cb.consts }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
                         }
                     }
@@ -555,8 +555,8 @@ pub fn canon_class_bases(program: parser::Program) -> parser::Program {
 }
 
 // (W10b.CLASS increment 2) look up a class's own parser::ClassBody by name (error if unknown or not a class).
-pub fn find_class_body(name: str, table: TypeTable) -> parser::ClassBody | error {
-    let decl = match type_table_find(table, name, "") {   // (#109 W1) class-body lookup on a resolved name — no referencing ns
+pub fn find_class_body(name: str, table: TypeTable): parser::ClassBody | error {
+    var decl = match type_table_find(table, name, "") {   // (#109 W1) class-body lookup on a resolved name — no referencing ns
         parser::TypeDecl as td => td
         error => return error { message = $"unknown base class: {name}" }
     }
@@ -573,17 +573,17 @@ pub fn find_class_body(name: str, table: TypeTable) -> parser::ClassBody | error
 // an honest error. Uses only the NON-recursive find_class_body lookup, so it terminates even on a
 // cycle. A base that is unknown / not-a-class STOPS the walk (validate_class_decl surfaces that
 // specific error). Mirrors the interface-cycle guard in effective_interface_methods.
-fn class_inheritance_acyclic(name: str, table: TypeTable) -> error | null {
-    mut seen: []str = teko::list::push(teko::list::empty(), name)
-    mut cur = name
+fn class_inheritance_acyclic(name: str, table: TypeTable): error | null {
+    var seen: []str = teko::list::push(teko::list::empty(), name)
+    var cur = name
     loop {
         // a base that is unknown / not-a-class ends the walk cleanly (return null) — validate_class_decl
         // surfaces that specific error. (`return null` here, not `break`: the self-hosted codegen does
         // not support `break` inside a `match` used as a sub-expression.)
-        let cb = match find_class_body(cur, table) { parser::ClassBody as c => c; error => return null }
+        var cb = match find_class_body(cur, table) { parser::ClassBody as c => c; error => return null }
         if !cb.has_base { break }
-        let b = cb.base_name
-        mut i = 0
+        var b = cb.base_name
+        var i = 0
         loop {
             if i >= seen.len { break }
             if seen[i] == b { return error { message = $"cyclic class inheritance: '{b}' inherits from itself (directly or transitively)" } }
@@ -599,14 +599,14 @@ fn class_inheritance_acyclic(name: str, table: TypeTable) -> error | null {
 // followed by its own — structural inheritance by field-flattening (composition, no embedded C
 // object/vtable yet). Used everywhere a class's data shape matters (construction, field access,
 // codegen struct layout) so a derived instance carries every ancestor's field too.
-pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable) -> []parser::Field | error {
-    mut base: []parser::Field = teko::list::empty()
+pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable): []parser::Field | error {
+    var base: []parser::Field = teko::list::empty()
     if cb.has_base {
-        let base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
+        var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
         base = match effective_class_fields(base_cb, table) { []parser::Field as f => f; error as e => return e }
     }
-    mut out: []parser::Field = base
-    mut i = 0
+    var out: []parser::Field = base
+    var i = 0
     loop { if i >= cb.fields.len { break }; out = teko::list::push(out, cb.fields[i]); i++ }
     out
 }
@@ -626,18 +626,18 @@ pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable) -> []pars
  * @return       the effective methods, base-first then this class's own
  * @throws       when a base name in the chain does not resolve to a class body
  */
-pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable) -> []parser::Function | error {
-    mut base: []parser::Function = teko::list::empty()
+pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parser::Function | error {
+    var base: []parser::Function = teko::list::empty()
     if cb.has_base {
-        let base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
+        var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
         base = match effective_class_methods(base_cb, table) { []parser::Function as f => f; error as e => return e }
     }
-    mut out: []parser::Function = teko::list::empty()
-    mut i = 0
+    var out: []parser::Function = teko::list::empty()
+    var i = 0
     loop {
         if i >= base.len { break }
-        mut m = base[i]
-        mut j = 0
+        var m = base[i]
+        var j = 0
         loop {
             if j >= cb.methods.len { break }
             if cb.methods[j].name == m.name { m = cb.methods[j] }
@@ -646,11 +646,11 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable) -> []par
         out = teko::list::push(out, m)
         i++
     }
-    mut k = 0
+    var k = 0
     loop {
         if k >= cb.methods.len { break }
-        mut is_new = true
-        mut bi = 0
+        var is_new = true
+        var bi = 0
         loop { if bi >= base.len { break }; if base[bi].name == cb.methods[k].name { is_new = false; break }; bi++ }
         if is_new { out = teko::list::push(out, cb.methods[k]) }
         k++
@@ -670,12 +670,12 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable) -> []par
  * @throws       when a base class cannot be resolved
  * @since #594
  */
-pub fn effective_class_consts(cb: parser::ClassBody, table: TypeTable) -> []parser::ConstDecl | error {
-    mut out = cb.consts
+pub fn effective_class_consts(cb: parser::ClassBody, table: TypeTable): []parser::ConstDecl | error {
+    var out = cb.consts
     if cb.has_base {
-        let base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
-        let base_consts = match effective_class_consts(base_cb, table) { []parser::ConstDecl as c => c; error as e => return e }
-        mut i: u64 = 0
+        var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
+        var base_consts = match effective_class_consts(base_cb, table) { []parser::ConstDecl as c => c; error as e => return e }
+        var i: u64 = 0
         loop {
             if i >= base_consts.len { break }
             if !consts_have_name(out, base_consts[i].name) { out = teko::list::push(out, base_consts[i]) }
@@ -693,7 +693,7 @@ pub fn effective_class_consts(cb: parser::ClassBody, table: TypeTable) -> []pars
  * @return      its member consts, or an empty list for a body kind that cannot declare them
  * @since #594
  */
-pub fn body_consts(body: parser::TypeBody) -> []parser::ConstDecl {
+pub fn body_consts(body: parser::TypeBody): []parser::ConstDecl {
     match body {
         parser::StructBody as sb => sb.consts
         parser::ClassBody as cb => cb.consts
@@ -705,7 +705,7 @@ pub fn body_consts(body: parser::TypeBody) -> []parser::ConstDecl {
 // (W10b.CLASS residual — intern visibility) is `class_name` the same as, or a (transitive)
 // SUBCLASS of, `ancestor_name`? Used to decide whether an `intern` (subclass-visible) member is
 // reachable from `class_name`'s own code.
-pub fn is_subclass_of(class_name: str, ancestor_name: str, table: TypeTable) -> bool {
+pub fn is_subclass_of(class_name: str, ancestor_name: str, table: TypeTable): bool {
     if class_name == ancestor_name { return true }
     match find_class_body(class_name, table) {
         parser::ClassBody as cb => if cb.has_base { is_subclass_of(cb.base_name, ancestor_name, table) } else { false }
@@ -720,9 +720,9 @@ pub type MemberOwner = struct { declaring_class: str; vis: parser::Visibility; i
 
 // (W10b.CLASS residual — intern visibility) find field `field_name`'s declaring class + reach,
 // walking `class_name`'s own fields first, then its base chain.
-pub fn find_field_owner(class_name: str, table: TypeTable, field_name: str) -> MemberOwner | error {
-    let cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
-    mut i = 0
+pub fn find_field_owner(class_name: str, table: TypeTable, field_name: str): MemberOwner | error {
+    var cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
+    var i = 0
     loop {
         if i >= cb.fields.len { break }
         if cb.fields[i].name == field_name { return MemberOwner { declaring_class = class_name; vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern } }
@@ -734,9 +734,9 @@ pub fn find_field_owner(class_name: str, table: TypeTable, field_name: str) -> M
 
 // (W10b.CLASS residual — intern visibility) find method `method_name`'s declaring class + reach
 // (mirrors find_field_owner — an override's OWN vis/is_intern governs at that point in the chain).
-pub fn find_method_owner(class_name: str, table: TypeTable, method_name: str) -> MemberOwner | error {
-    let cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
-    mut i = 0
+pub fn find_method_owner(class_name: str, table: TypeTable, method_name: str): MemberOwner | error {
+    var cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
+    var i = 0
     loop {
         if i >= cb.methods.len { break }
         if cb.methods[i].name == method_name { return MemberOwner { declaring_class = class_name; vis = cb.methods[i].vis; is_intern = cb.methods[i].is_intern } }
@@ -751,7 +751,7 @@ pub fn find_method_owner(class_name: str, table: TypeTable, method_name: str) ->
 // top-level code)? `pub`/`exp` are reachable from anywhere; a private (default) member is
 // reachable only from its OWN declaring class's code, or — if `is_intern` — from a (transitive)
 // subclass's code too.
-pub fn member_accessible(owner: MemberOwner, accessor_type: str, table: TypeTable) -> bool {
+pub fn member_accessible(owner: MemberOwner, accessor_type: str, table: TypeTable): bool {
     match owner.vis {
         parser::Visibility::Pub => true
         parser::Visibility::Exp => true
@@ -780,9 +780,9 @@ pub fn member_accessible(owner: MemberOwner, accessor_type: str, table: TypeTabl
  * @param ns  the method's registered pseudo-namespace
  * @return    the bare class name (the whole string when it carries no "::")
  */
-pub fn class_name_from_method_ns(ns: str) -> str {
-    mut last_sep: i64 = -1
-    mut i: u64 = 0
+pub fn class_name_from_method_ns(ns: str): str {
+    var last_sep: i64 = -1
+    var i: u64 = 0
     loop {
         if i + 1 >= ns.len { break }
         if ns[i] == b':' && ns[i + 1] == b':' { last_sep = i to i64 }
@@ -800,9 +800,9 @@ pub fn class_name_from_method_ns(ns: str) -> str {
 // are assumed already length-matched by the caller (method_sig_matches / the override arity check).
 // Returns the OFFENDING param's name, or "" if no restatement is found. Mirror of
 // collect.c::default_restated_param.
-fn default_restated_param(contract_params: []parser::Param, impl_params: []parser::Param) -> str {
-    mut k: u64 = 0
-    let n = if contract_params.len < impl_params.len { contract_params.len } else { impl_params.len }
+fn default_restated_param(contract_params: []parser::Param, impl_params: []parser::Param): str {
+    var k: u64 = 0
+    var n = if contract_params.len < impl_params.len { contract_params.len } else { impl_params.len }
     loop {
         if k >= n { break }
         if contract_params[k].has_default && impl_params[k].has_default { return impl_params[k].name }
@@ -817,13 +817,13 @@ fn default_restated_param(contract_params: []parser::Param, impl_params: []parse
 //  - an `override` method must match an existing method in the base's EFFECTIVE methods, and
 //    that base method must itself be overridable (`abstract`/`virtual`/already `override`).
 //  - (DEFARGS rule E) an `override` method must NOT restate a default the base method owns.
-fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error | null {
+fn validate_class_decl(cb: parser::ClassBody, table: TypeTable): error | null {
     if cb.has_base {
-        let base_decl = match type_table_find(table, cb.base_name, "") {   // (#109 W1) base-class lookup on a resolved name — no referencing ns
+        var base_decl = match type_table_find(table, cb.base_name, "") {   // (#109 W1) base-class lookup on a resolved name — no referencing ns
             parser::TypeDecl as td => td
             error => return error { message = $"unknown base class: {cb.base_name}" }
         }
-        let base_cb = match base_decl.body {
+        var base_cb = match base_decl.body {
             parser::ClassBody as b => b
             _ => return error { message = $"{cb.base_name} is not a class" }
         }
@@ -832,7 +832,7 @@ fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error | null 
             _ => { }
         }
     }
-    let base_methods = if cb.has_base {
+    var base_methods = if cb.has_base {
         match find_class_body(cb.base_name, table) {
             parser::ClassBody as b => match effective_class_methods(b, table) { []parser::Function as f => f; error as e => return e }
             error as e => return e
@@ -840,13 +840,13 @@ fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error | null 
     } else {
         teko::list::empty()
     }
-    mut i = 0
+    var i = 0
     loop {
         if i >= cb.methods.len { break }
-        let m = cb.methods[i]
+        var m = cb.methods[i]
         if m.is_override {
-            mut found: parser::Function | null = null
-            mut j = 0
+            var found: parser::Function | null = null
+            var j = 0
             loop {
                 if j >= base_methods.len { break }
                 if base_methods[j].name == m.name { found = base_methods[j]; break }
@@ -855,10 +855,10 @@ fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error | null 
             match found {
                 null => return error { message = $"'{m.name}' has no matching base method to override" }
                 parser::Function as bm => {
-                    let overridable = bm.is_abstract || bm.is_virtual || bm.is_override
+                    var overridable = bm.is_abstract || bm.is_virtual || bm.is_override
                     if !overridable { return error { message = $"'{m.name}' overrides a base method that is not `abstract`/`virtual`" } }
                     if bm.params.len != m.params.len { return error { message = $"'{m.name}' override must have the same parameter count as the base method" } }
-                    let restated = default_restated_param(bm.params, m.params)
+                    var restated = default_restated_param(bm.params, m.params)
                     if restated != "" { return error { message = $"'{m.name}' override must not restate the default for '{restated}' — the base method '{cb.base_name}::{m.name}' owns its default" } }
                 }
             }
@@ -880,7 +880,7 @@ fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error | null 
 // (CI: linux-arm64 found teko::emit::Reader the struct before teko::io::Reader). The hit carries
 // the WINNING namespace so extends recursion and cycle identity stay namespace-exact.
 type IfaceHit = struct { decl: parser::TypeDecl; ns: str }
-fn find_interface_decl(name: str, table: TypeTable, ref_ns: str) -> IfaceHit | error {
+fn find_interface_decl(name: str, table: TypeTable, ref_ns: str): IfaceHit | error {
     match resolve_name_ref(name, table, ref_ns) {
         parser::TypeDecl as td => {
             match td.body {
@@ -895,8 +895,8 @@ fn find_interface_decl(name: str, table: TypeTable, ref_ns: str) -> IfaceHit | e
     // (an exact/qualified match is unique post-W0, never an order-dependent bare scan). A name
     // that is ALREADY qualified (#152 canon_class_bases) probes AS-IS — re-qualifying it would
     // build "ns::ns::Name" and miss.
-    let qprobe = if name_qualifier(name) != "" { name } else { qualify(ref_ns, name) }
-    let decl = match type_table_find(table, qprobe, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown interface: {name}" } }
+    var qprobe = if name_qualifier(name) != "" { name } else { qualify(ref_ns, name) }
+    var decl = match type_table_find(table, qprobe, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown interface: {name}" } }
     match decl.body {
         parser::InterfaceBody => IfaceHit { decl = decl; ns = name_qualifier(decl.name) }
         _ => return error { message = $"{name} is not an interface" }
@@ -911,30 +911,30 @@ fn find_interface_decl(name: str, table: TypeTable, ref_ns: str) -> IfaceHit | e
 // instead of recursing forever (a diamond — the same interface reached via two DIFFERENT branches —
 // is fine, since `seen` tracks only the current path, not all-visited). Callers seed `seen` with
 // the interface's OWN canonical name.
-pub fn effective_interface_methods(ib: parser::InterfaceBody, iface_ns: str, table: TypeTable, seen: []str) -> []parser::Function | error {
-    mut out: []parser::Function = teko::list::empty()
-    mut ei = 0
+pub fn effective_interface_methods(ib: parser::InterfaceBody, iface_ns: str, table: TypeTable, seen: []str): []parser::Function | error {
+    var out: []parser::Function = teko::list::empty()
+    var ei = 0
     loop {
         if ei >= ib.extends.len { break }
-        let ename = ib.extends[ei]
+        var ename = ib.extends[ei]
         // (#109) resolve the extended name FIRST (from the declaring interface's namespace); the
         // cycle identity is the QUALIFIED form of the winning (ns, bare-name) pair, and the
         // recursion resolves the base's own extends from ITS namespace.
-        let hit = match find_interface_decl(ename, table, iface_ns) { IfaceHit as h => h; error as e => return e }
-        let key = qualify(hit.ns, name_last_segment(hit.decl.name))
-        mut si = 0
+        var hit = match find_interface_decl(ename, table, iface_ns) { IfaceHit as h => h; error as e => return e }
+        var key = qualify(hit.ns, name_last_segment(hit.decl.name))
+        var si = 0
         loop {
             if si >= seen.len { break }
             if seen[si] == key { return error { message = $"cyclic interface `extends`: '{ename}' extends itself (directly or transitively)" } }
             si++
         }
-        let base_ib = match hit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{ename} is not an interface" } }   // unreachable — find_interface_decl verified
-        let bm = match effective_interface_methods(base_ib, hit.ns, table, teko::list::push(seen, key)) { []parser::Function as f => f; error as e => return e }
-        mut bi = 0
+        var base_ib = match hit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{ename} is not an interface" } }   // unreachable — find_interface_decl verified
+        var bm = match effective_interface_methods(base_ib, hit.ns, table, teko::list::push(seen, key)) { []parser::Function as f => f; error as e => return e }
+        var bi = 0
         loop { if bi >= bm.len { break }; out = teko::list::push(out, bm[bi]); bi++ }
         ei++
     }
-    mut mi = 0
+    var mi = 0
     loop { if mi >= ib.methods.len { break }; out = teko::list::push(out, ib.methods[mi]); mi++ }
     out
 }
@@ -954,14 +954,14 @@ pub fn effective_interface_methods(ib: parser::InterfaceBody, iface_ns: str, tab
  * @return the contract's effective methods, in slot order
  * @throws when `iface` names neither an interface nor a trait
  */
-pub fn iface_methods_by_name(iface: str, table: TypeTable) -> []parser::Function | error {
-    let decl = match type_table_find(table, iface, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown interface: {iface}" } }
-    let ib = match decl.body {
+pub fn iface_methods_by_name(iface: str, table: TypeTable): []parser::Function | error {
+    var decl = match type_table_find(table, iface, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown interface: {iface}" } }
+    var ib = match decl.body {
         parser::InterfaceBody as b => b
         parser::TraitBody => return trait_methods_by_name(iface, table)
         _ => return error { message = $"{iface} is not an interface" }
     }
-    mut ns = type_ns_of(table, iface)
+    var ns = type_ns_of(table, iface)
     if ns == "" { ns = name_qualifier(decl.name) }
     effective_interface_methods(ib, ns, table, teko::list::push(teko::list::empty(), qualify(ns, name_last_segment(decl.name))))
 }
@@ -970,17 +970,17 @@ pub fn iface_methods_by_name(iface: str, table: TypeTable) -> []parser::Function
 // appended — effective_class_methods order), which is EXACTLY the slot scheme codegen's
 // `tk_vt_<Sub>_<Base>` build reads. Used by the checker (base-typed dispatch) so its `iface_slot`
 // agrees with the emitted table. Mirror of collect.c::tk_base_vtable_methods.
-pub fn base_vtable_methods(base: str, table: TypeTable) -> []parser::Function | error {
-    let cb = match find_class_body(base, table) { parser::ClassBody as b => b; error as e => return e }
+pub fn base_vtable_methods(base: str, table: TypeTable): []parser::Function | error {
+    var cb = match find_class_body(base, table) { parser::ClassBody as b => b; error as e => return e }
     effective_class_methods(cb, table)
 }
 
 // (#98) the vtable SLOT of `method` in `base`'s virtual method table, or an error if `method` is
 // not an effective method of the base (a subclass-only method — reachable only when the receiver
 // is statically the subclass, so it stays a DIRECT call). Mirror of collect.c::tk_base_vtable_slot.
-pub fn base_vtable_slot(base: str, method: str, table: TypeTable) -> u32 | error {
-    let ms = match base_vtable_methods(base, table) { []parser::Function as f => f; error as e => return e }
-    mut i: u64 = 0
+pub fn base_vtable_slot(base: str, method: str, table: TypeTable): u32 | error {
+    var ms = match base_vtable_methods(base, table) { []parser::Function as f => f; error as e => return e }
+    var i: u64 = 0
     loop {
         if i >= ms.len { break }
         if ms[i].name == method { return i to u32 }
@@ -993,32 +993,32 @@ pub fn base_vtable_slot(base: str, method: str, table: TypeTable) -> u32 | error
 // receiver param types (both skip their 1st untyped receiver param) + same return type. Any type
 // that fails to resolve makes it a non-match (the conformance error surfaces the missing/mismatched
 // method; the unresolved type surfaces separately via check_modules/normal resolution).
-fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: TypeTable, ref_ns: str) -> bool {
-    mut rstart: u64 = 0
+fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: TypeTable, ref_ns: str): bool {
+    var rstart: u64 = 0
     if req.params.len > 0 && !req.params[0].has_type { rstart = 1 }
-    mut istart: u64 = 0
+    var istart: u64 = 0
     if impl_m.params.len > 0 && !impl_m.params[0].has_type { istart = 1 }
     // instance/static parity: an INSTANCE interface method (has a receiver) must be satisfied by an
     // INSTANCE method, not a same-named STATIC one (rstart/istart are 1 iff a receiver is present).
     if rstart != istart { return false }
     if req.params.len - rstart != impl_m.params.len - istart { return false }
-    mut k: u64 = 0
+    var k: u64 = 0
     loop {
         if rstart + k >= req.params.len { break }
-        let ip = impl_m.params[istart + k]
+        var ip = impl_m.params[istart + k]
         if !ip.has_type && ip.name == "_" {
             k++
             continue
         }
-        let rt = match resolve_type(req.params[rstart + k].type_ann, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
-        let it = match resolve_type(ip.type_ann, table, ref_ns) { Type as t => t; error => return false }
+        var rt = match resolve_type(req.params[rstart + k].type_ann, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
+        var it = match resolve_type(ip.type_ann, table, ref_ns) { Type as t => t; error => return false }
         if !type_eq(rt, it) { return false }
         k++
     }
     if req.has_return != impl_m.has_return { return false }
     if req.has_return {
-        let rr = match resolve_type(req.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
-        let ir = match resolve_type(impl_m.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
+        var rr = match resolve_type(req.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
+        var ir = match resolve_type(impl_m.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
         if !type_eq(rr, ir) { return false }
     }
     true
@@ -1045,11 +1045,11 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
  * @return null on full conformance
  * @throws when an interface method is missing, mismatched, or not `pub` on a class
  */
-fn check_conformance(type_name: str, type_ns: str, own_methods: []parser::Function, implements: []str, table: TypeTable, members_all_public: bool) -> error | null {
-    mut ii = 0
+fn check_conformance(type_name: str, type_ns: str, own_methods: []parser::Function, implements: []str, table: TypeTable, members_all_public: bool): error | null {
+    var ii = 0
     loop {
         if ii >= implements.len { break }
-        let iname = implements[ii]
+        var iname = implements[ii]
         if !is_trait_name(iname, table) && !is_structural_trait(iname) {
             match check_one_interface(type_name, type_ns, own_methods, iname, table, members_all_public) { error as e => return e; null => { } }
         }
@@ -1073,11 +1073,11 @@ fn check_conformance(type_name: str, type_ns: str, own_methods: []parser::Functi
  * @return null when the type conforms to `iname`
  * @throws when a required method is missing, mismatched, restates a default, or is not `pub`
  */
-fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, table: TypeTable, members_all_public: bool) -> error | null {
-    let ihit = match find_interface_decl(iname, table, type_ns) { IfaceHit as h => h; error as e => return e }
-    let ib = match ihit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{iname} is not an interface" } }
-    let req_methods = match effective_interface_methods(ib, ihit.ns, table, teko::list::push(teko::list::empty(), qualify(ihit.ns, name_last_segment(ihit.decl.name)))) { []parser::Function as f => f; error as e => return e }
-    mut ri = 0
+fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, table: TypeTable, members_all_public: bool): error | null {
+    var ihit = match find_interface_decl(iname, table, type_ns) { IfaceHit as h => h; error as e => return e }
+    var ib = match ihit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{iname} is not an interface" } }
+    var req_methods = match effective_interface_methods(ib, ihit.ns, table, teko::list::push(teko::list::empty(), qualify(ihit.ns, name_last_segment(ihit.decl.name)))) { []parser::Function as f => f; error as e => return e }
+    var ri = 0
     loop {
         if ri >= req_methods.len { break }
         match check_one_requirement(type_name, type_ns, own_methods, iname, req_methods[ri], table, members_all_public) { error as e => return e; null => { } }
@@ -1100,15 +1100,15 @@ fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Func
  * @return null when `req` is satisfied
  * @throws when `req` is missing, its signature mismatches, it restates a default, or is not `pub`
  */
-fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, req: parser::Function, table: TypeTable, members_all_public: bool) -> error | null {
-    mut mi = 0
+fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, req: parser::Function, table: TypeTable, members_all_public: bool): error | null {
+    var mi = 0
     loop {
         if mi >= own_methods.len { break }
         if own_methods[mi].name == req.name {
             if !method_sig_matches(req, own_methods[mi], table, type_ns) {
                 return error { message = $"'{type_name}' method '{req.name}' does not match interface '{iname}'s signature" }
             }
-            let restated = default_restated_param(req.params, own_methods[mi].params)
+            var restated = default_restated_param(req.params, own_methods[mi].params)
             if restated != "" { return error { message = $"'{type_name}' method '{req.name}' must not restate the default for '{restated}' — interface '{iname}' owns its default" } }
             if !members_all_public {
                 match own_methods[mi].vis {
@@ -1138,7 +1138,7 @@ pub type FieldView = struct { name: str; type: Type }
  * namespace — its type annotation was written there, mirroring `field_type`/`type_ns_of` call
  * sites elsewhere in the checker).
  */
-fn resolve_field_view(f: parser::Field, table: TypeTable, owner_ns: str) -> FieldView | error {
+fn resolve_field_view(f: parser::Field, table: TypeTable, owner_ns: str): FieldView | error {
     match resolve_type(f.type_ann, table, owner_ns) {
         Type as t => FieldView { name = f.name; type = t }
         error as e => e
@@ -1149,12 +1149,12 @@ fn resolve_field_view(f: parser::Field, table: TypeTable, owner_ns: str) -> Fiel
  * Resolve a list of `parser::Field` into `FieldView`s, in order, stopping at the first resolution
  * error.
  */
-fn resolve_field_views(fields: []parser::Field, table: TypeTable, owner_ns: str) -> []FieldView | error {
-    mut out: []FieldView = teko::list::empty()
-    mut i: u64 = 0
+fn resolve_field_views(fields: []parser::Field, table: TypeTable, owner_ns: str): []FieldView | error {
+    var out: []FieldView = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= fields.len { break }
-        let fv = match resolve_field_view(fields[i], table, owner_ns) { FieldView as v => v; error as e => return e }
+        var fv = match resolve_field_view(fields[i], table, owner_ns) { FieldView as v => v; error as e => return e }
         out = teko::list::push(out, fv)
         i++
     }
@@ -1171,16 +1171,16 @@ fn resolve_field_views(fields: []parser::Field, table: TypeTable, owner_ns: str)
  * `type_name`, a type_name that is neither a struct nor a class, or a field whose annotation fails
  * to resolve.
  */
-pub fn deriver_field_view(type_name: str, table: TypeTable) -> []FieldView | error {
-    let decl = match type_table_find(table, type_name, "") {
+pub fn deriver_field_view(type_name: str, table: TypeTable): []FieldView | error {
+    var decl = match type_table_find(table, type_name, "") {
         parser::TypeDecl as td => td
         error => return error { message = $"unknown deriver: {type_name}" }
     }
-    let owner_ns = type_ns_of(table, type_name)
+    var owner_ns = type_ns_of(table, type_name)
     match decl.body {
         parser::StructBody as sb => resolve_field_views(sb.fields, table, owner_ns)
         parser::ClassBody as cb => {
-            let fields = match effective_class_fields(cb, table) { []parser::Field as f => f; error as e => return e }
+            var fields = match effective_class_fields(cb, table) { []parser::Field as f => f; error as e => return e }
             resolve_field_views(fields, table, owner_ns)
         }
         _ => error { message = $"'{type_name}' is not a struct or a class — a structural trait can only derive from a field-shaped deriver" }
@@ -1195,8 +1195,8 @@ pub fn deriver_field_view(type_name: str, table: TypeTable) -> []FieldView | err
 // value position (resolve_named rejects it; TR1 brings trait-typed dynamic values).
 
 // look up a trait body by name — error if the name is unknown or not a trait.
-pub fn find_trait_body(name: str, table: TypeTable) -> parser::TraitBody | error {
-    let decl = match type_table_find(table, name, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown trait: {name}" } }   // (#109 W1) trait-body lookup on a resolved name — no referencing ns
+pub fn find_trait_body(name: str, table: TypeTable): parser::TraitBody | error {
+    var decl = match type_table_find(table, name, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown trait: {name}" } }   // (#109 W1) trait-body lookup on a resolved name — no referencing ns
     match decl.body {
         parser::TraitBody as tb => tb
         _ => return error { message = $"{name} is not a trait" }
@@ -1215,8 +1215,8 @@ pub fn find_trait_body(name: str, table: TypeTable) -> parser::TraitBody | error
  * @return the trait's methods, or an error if `name` is not a declared trait
  * @throws when `name` names no trait
  */
-pub fn trait_methods_by_name(name: str, table: TypeTable) -> []parser::Function | error {
-    let tb = match find_trait_body(name, table) { parser::TraitBody as t => t; error as e => return e }
+pub fn trait_methods_by_name(name: str, table: TypeTable): []parser::Function | error {
+    var tb = match find_trait_body(name, table) { parser::TraitBody as t => t; error as e => return e }
     tb.methods
 }
 
@@ -1235,11 +1235,11 @@ type TraitDerive = struct { type_name: str; trait_name: str }
 type SplitImpls = struct { traits: []str; ifaces: []str; structural: []str }
 type FoldedMembers = struct { fields: []parser::Field; methods: []parser::Function; consts: []parser::ConstDecl }
 
-fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str) -> SplitImpls {
-    mut traits: []str = teko::list::empty()
-    mut ifaces: []str = teko::list::empty()
-    mut structural: []str = teko::list::empty()
-    mut i: u64 = 0
+fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str): SplitImpls {
+    var traits: []str = teko::list::empty()
+    var ifaces: []str = teko::list::empty()
+    var structural: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= implements.len { break }
         if is_structural_trait(implements[i]) {
@@ -1247,7 +1247,7 @@ fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str) -> Spli
             i++
             continue
         }
-        let is_trait = match resolve_name_ref(implements[i], table, ref_ns) {   // (#109 order fix) SOURCE name — R0-R5 from the declaring item's namespace, never by scan order
+        var is_trait = match resolve_name_ref(implements[i], table, ref_ns) {   // (#109 order fix) SOURCE name — R0-R5 from the declaring item's namespace, never by scan order
             parser::TypeDecl as td => match td.body { parser::TraitBody => true; _ => false }
             error => false
         }
@@ -1258,13 +1258,13 @@ fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str) -> Spli
     SplitImpls { traits = traits; ifaces = ifaces; structural = structural }
 }
 
-fn fields_have_name(fields: []parser::Field, name: str) -> bool {
-    mut i: u64 = 0
+fn fields_have_name(fields: []parser::Field, name: str): bool {
+    var i: u64 = 0
     loop { if i >= fields.len { break }; if fields[i].name == name { return true }; i++ }
     false
 }
-fn methods_have_name(methods: []parser::Function, name: str) -> bool {
-    mut i: u64 = 0
+fn methods_have_name(methods: []parser::Function, name: str): bool {
+    var i: u64 = 0
     loop { if i >= methods.len { break }; if methods[i].name == name { return true }; i++ }
     false
 }
@@ -1277,8 +1277,8 @@ fn methods_have_name(methods: []parser::Function, name: str) -> bool {
  * @param name    the candidate member const name
  * @return        true iff a member const of that name already exists
  */
-fn consts_have_name(consts: []parser::ConstDecl, name: str) -> bool {
-    mut i: u64 = 0
+fn consts_have_name(consts: []parser::ConstDecl, name: str): bool {
+    var i: u64 = 0
     loop { if i >= consts.len { break }; if consts[i].name == name { return true }; i++ }
     false
 }
@@ -1293,46 +1293,46 @@ fn consts_have_name(consts: []parser::ConstDecl, name: str) -> bool {
 // field's visibility obeys the DERIVER's kind (`into_class`: struct = public value data, class =
 // encapsulated/private); a folded method is `pub` (the bundle's methods are its public surface,
 // and a class needs `pub` methods to satisfy interfaces through them).
-fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: []parser::Function, own_consts: []parser::ConstDecl, trait_names: []str, table: TypeTable, into_class: bool) -> FoldedMembers | error {
-    mut fields = own_fields
-    mut methods = own_methods
-    mut consts = own_consts
-    mut i: u64 = 0
+fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: []parser::Function, own_consts: []parser::ConstDecl, trait_names: []str, table: TypeTable, into_class: bool): FoldedMembers | error {
+    var fields = own_fields
+    var methods = own_methods
+    var consts = own_consts
+    var i: u64 = 0
     loop {
         if i >= trait_names.len { break }
-        let tname = trait_names[i]
-        mut di: u64 = 0
+        var tname = trait_names[i]
+        var di: u64 = 0
         loop {
             if di >= i { break }
             if trait_names[di] == tname { return error { message = $"'{type_name}' derives trait '{tname}' more than once" } }
             di++
         }
-        let tb = match find_trait_body(tname, table) { parser::TraitBody as t => t; error as e => return e }
-        mut fi: u64 = 0
+        var tb = match find_trait_body(tname, table) { parser::TraitBody as t => t; error as e => return e }
+        var fi: u64 = 0
         loop {
             if fi >= tb.fields.len { break }
-            let tf = tb.fields[fi]
+            var tf = tb.fields[fi]
             if fields_have_name(fields, tf.name) {
                 return error { message = $"trait '{tname}' field '{tf.name}' collides with an existing field on '{type_name}' — fields cannot be overridden; rename it or do not co-derive" }
             }
-            let fvis = if into_class { parser::Visibility::Private } else { parser::Visibility::Pub }
+            var fvis = if into_class { parser::Visibility::Private } else { parser::Visibility::Pub }
             fields = teko::list::push(fields, parser::Field { name = tf.name; type_ann = tf.type_ann; vis = fvis; is_intern = false; has_doc = tf.has_doc; doc = tf.doc })
             fi++
         }
-        mut ci: u64 = 0
+        var ci: u64 = 0
         loop {
             if ci >= tb.consts.len { break }
-            let tc = tb.consts[ci]
+            var tc = tb.consts[ci]
             if consts_have_name(consts, tc.name) {
                 return error { message = $"trait '{tname}' const '{tc.name}' collides with an existing member const on '{type_name}' — rename it or do not co-derive" }
             }
             consts = teko::list::push(consts, tc)
             ci++
         }
-        mut mi: u64 = 0
+        var mi: u64 = 0
         loop {
             if mi >= tb.methods.len { break }
-            let tm = tb.methods[mi]
+            var tm = tb.methods[mi]
             if tm.body.len > 0 {
                 if methods_have_name(own_methods, tm.name) {
                     // the deriver defines this name itself — its method IS the override; the
@@ -1355,9 +1355,9 @@ fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: 
 // bodied method from a sibling trait counts: it IS a deriver method now) or, for a class, an
 // inherited one. A requirement SHARED by several derived traits is naturally satisfied once
 // (each pair checks independently against the same method).
-fn check_trait_requirements(derives: []TraitDerive, table: TypeTable) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut i: u64 = 0
+fn check_trait_requirements(derives: []TraitDerive, table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= derives.len { break }
         diags = concat_diags(diags, one_derive_requirement_diags(derives[i], table))
@@ -1377,22 +1377,22 @@ fn check_trait_requirements(derives: []TraitDerive, table: TypeTable) -> []str {
  * @return       one diagnostic per unsatisfied or mismatched requirement
  * @since 0.3.1
  */
-fn one_derive_requirement_diags(d: TraitDerive, table: TypeTable) -> []str {
-    let tb = match find_trait_body(d.trait_name, table) { parser::TraitBody as t => t; error as e => return one_diag(e.message) }
-    let decl = match type_table_find(table, d.type_name, "") {
+fn one_derive_requirement_diags(d: TraitDerive, table: TypeTable): []str {
+    var tb = match find_trait_body(d.trait_name, table) { parser::TraitBody as t => t; error as e => return one_diag(e.message) }
+    var decl = match type_table_find(table, d.type_name, "") {
         parser::TypeDecl as td => td
         error => return one_diag($"internal: trait deriver '{d.type_name}' vanished from the type table")
     }
-    let own = match decl.body {
+    var own = match decl.body {
         parser::StructBody as sb => sb.methods
         parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return one_diag(diag_at("", decl.line, decl.col, e.message)) }
         _ => teko::list::empty()
     }
-    mut diags: []str = teko::list::empty()
-    mut ri: u64 = 0
+    var diags: []str = teko::list::empty()
+    var ri: u64 = 0
     loop {
         if ri >= tb.methods.len { break }
-        let req = tb.methods[ri]
+        var req = tb.methods[ri]
         if req.body.len == 0 {
             diags = concat_diags(diags, one_requirement_diag(d, decl, req, own, table))
         }
@@ -1414,8 +1414,8 @@ fn one_derive_requirement_diags(d: TraitDerive, table: TypeTable) -> []str {
  * @return       the requirement's diagnostic, or an empty list when it is satisfied
  * @since 0.3.1
  */
-fn one_requirement_diag(d: TraitDerive, decl: parser::TypeDecl, req: parser::Function, own: []parser::Function, table: TypeTable) -> []str {
-    mut mi: u64 = 0
+fn one_requirement_diag(d: TraitDerive, decl: parser::TypeDecl, req: parser::Function, own: []parser::Function, table: TypeTable): []str {
+    var mi: u64 = 0
     loop {
         if mi >= own.len { break }
         if own[mi].name == req.name {
@@ -1437,14 +1437,14 @@ fn one_requirement_diag(d: TraitDerive, decl: parser::TypeDecl, req: parser::Fun
  * @param table   the pre-fold type table
  * @return true iff the program needs the derivation fold
  */
-fn program_needs_trait_fold(program: parser::Program, table: TypeTable) -> bool {
-    mut t: u64 = 0
+fn program_needs_trait_fold(program: parser::Program, table: TypeTable): bool {
+    var t: u64 = 0
     loop {
         if t >= tt_len(table) { break }
         match tt_at(table, t).decl.body { parser::TraitBody => { return true }; _ => { } }
         t++
     }
-    mut i: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= program.items.len { break }
         match program.items[i].content {
@@ -1466,8 +1466,8 @@ fn program_needs_trait_fold(program: parser::Program, table: TypeTable) -> bool 
  * @param implements the `&`-list of contract names
  * @return true iff at least one is a structural trait
  */
-fn any_structural(implements: []str) -> bool {
-    mut i: u64 = 0
+fn any_structural(implements: []str): bool {
+    var i: u64 = 0
     loop { if i >= implements.len { break }; if is_structural_trait(implements[i]) { return true }; i++ }
     false
 }
@@ -1479,9 +1479,9 @@ fn any_structural(implements: []str) -> bool {
  * @param methods the deriver's own methods
  * @return the parallel list of method names
  */
-fn method_name_set(methods: []parser::Function) -> []str {
-    mut out: []str = teko::list::empty()
-    mut i: u64 = 0
+fn method_name_set(methods: []parser::Function): []str {
+    var out: []str = teko::list::empty()
+    var i: u64 = 0
     loop { if i >= methods.len { break }; out = teko::list::push(out, methods[i].name); i++ }
     out
 }
@@ -1495,9 +1495,9 @@ fn method_name_set(methods: []parser::Function) -> []str {
  * @param extra   the synthesized methods to append
  * @return the combined method list
  */
-fn append_methods(methods: []parser::Function, extra: []parser::Function) -> []parser::Function {
-    mut out = methods
-    mut i: u64 = 0
+fn append_methods(methods: []parser::Function, extra: []parser::Function): []parser::Function {
+    var out = methods
+    var i: u64 = 0
     loop { if i >= extra.len { break }; out = teko::list::push(out, extra[i]); i++ }
     out
 }
@@ -1546,14 +1546,14 @@ type FoldedItem = struct {
  * @param table    the pre-fold type table
  * @return         the rewritten items, the recorded user-trait derives, and every fold diagnostic
  */
-fn fold_user_traits(program: parser::Program, table: TypeTable) -> UserFoldResult {
-    mut items: []parser::Item = teko::list::empty()
-    mut derives: []TraitDerive = teko::list::empty()
-    mut diags: []str = teko::list::empty()
-    mut i: u64 = 0
+fn fold_user_traits(program: parser::Program, table: TypeTable): UserFoldResult {
+    var items: []parser::Item = teko::list::empty()
+    var derives: []TraitDerive = teko::list::empty()
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= program.items.len { break }
-        let folded = fold_one_item(program.items[i], table, derives)
+        var folded = fold_one_item(program.items[i], table, derives)
         items = teko::list::push(items, folded.item)
         derives = folded.derives
         diags = concat_diags(diags, folded.diags)
@@ -1570,7 +1570,7 @@ fn fold_user_traits(program: parser::Program, table: TypeTable) -> UserFoldResul
  * @return         that item and derive list, with no diagnostics
  * @since 0.3.1
  */
-fn unfolded_item(it: parser::Item, derives: []TraitDerive) -> FoldedItem {
+fn unfolded_item(it: parser::Item, derives: []TraitDerive): FoldedItem {
     FoldedItem { item = it; derives = derives; diags = teko::list::empty() }
 }
 
@@ -1584,8 +1584,8 @@ fn unfolded_item(it: parser::Item, derives: []TraitDerive) -> FoldedItem {
  * @return         the (possibly rewritten) item, the extended derive list, and any fold diagnostic
  * @since 0.3.1
  */
-fn fold_one_item(it: parser::Item, table: TypeTable, derives: []TraitDerive) -> FoldedItem {
-    let td = match it.content { parser::TypeDecl as t => t; _ => return unfolded_item(it, derives) }
+fn fold_one_item(it: parser::Item, table: TypeTable, derives: []TraitDerive): FoldedItem {
+    var td = match it.content { parser::TypeDecl as t => t; _ => return unfolded_item(it, derives) }
     match td.body {
         parser::StructBody as sb => fold_struct_item(it, td, sb, table, derives)
         parser::ClassBody as cb => fold_class_item(it, td, cb, table, derives)
@@ -1604,14 +1604,14 @@ fn fold_one_item(it: parser::Item, table: TypeTable, derives: []TraitDerive) -> 
  * @return         the rewritten item, the extended derive list, and any fold diagnostic
  * @since 0.3.1
  */
-fn fold_struct_item(it: parser::Item, td: parser::TypeDecl, sb: parser::StructBody, table: TypeTable, derives: []TraitDerive) -> FoldedItem {
-    let split = split_trait_derives(sb.implements, table, it.namespace)
+fn fold_struct_item(it: parser::Item, td: parser::TypeDecl, sb: parser::StructBody, table: TypeTable, derives: []TraitDerive): FoldedItem {
+    var split = split_trait_derives(sb.implements, table, it.namespace)
     if split.traits.len == 0 { return unfolded_item(it, derives) }
-    let fm = match fold_trait_members(td.name, sb.fields, sb.methods, sb.consts, split.traits, table, false) {
+    var fm = match fold_trait_members(td.name, sb.fields, sb.methods, sb.consts, split.traits, table, false) {
         FoldedMembers as f => f
         error as e => return FoldedItem { item = it; derives = derives; diags = one_diag(located_diag(it.file, td.line, td.col, e)) }
     }
-    let body = parser::StructBody { fields = fm.fields; methods = fm.methods; implements = sb.implements; consts = fm.consts }
+    var body = parser::StructBody { fields = fm.fields; methods = fm.methods; implements = sb.implements; consts = fm.consts }
     FoldedItem { item = item_with_body(it, td, body); derives = record_user_trait_derives(derives, td.name, split.traits); diags = teko::list::empty() }
 }
 
@@ -1626,14 +1626,14 @@ fn fold_struct_item(it: parser::Item, td: parser::TypeDecl, sb: parser::StructBo
  * @return         the rewritten item, the extended derive list, and any fold diagnostic
  * @since 0.3.1
  */
-fn fold_class_item(it: parser::Item, td: parser::TypeDecl, cb: parser::ClassBody, table: TypeTable, derives: []TraitDerive) -> FoldedItem {
-    let split = split_trait_derives(cb.implements, table, it.namespace)
+fn fold_class_item(it: parser::Item, td: parser::TypeDecl, cb: parser::ClassBody, table: TypeTable, derives: []TraitDerive): FoldedItem {
+    var split = split_trait_derives(cb.implements, table, it.namespace)
     if split.traits.len == 0 { return unfolded_item(it, derives) }
-    let fm = match fold_trait_members(td.name, cb.fields, cb.methods, cb.consts, split.traits, table, true) {
+    var fm = match fold_trait_members(td.name, cb.fields, cb.methods, cb.consts, split.traits, table, true) {
         FoldedMembers as f => f
         error as e => return FoldedItem { item = it; derives = derives; diags = one_diag(located_diag(it.file, td.line, td.col, e)) }
     }
-    let body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fm.fields; methods = fm.methods; consts = fm.consts }
+    var body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fm.fields; methods = fm.methods; consts = fm.consts }
     FoldedItem { item = item_with_body(it, td, body); derives = record_user_trait_derives(derives, td.name, split.traits); diags = teko::list::empty() }
 }
 
@@ -1647,8 +1647,8 @@ fn fold_class_item(it: parser::Item, td: parser::TypeDecl, cb: parser::ClassBody
  * @return      the rewritten item
  * @since 0.3.1
  */
-fn item_with_body(it: parser::Item, td: parser::TypeDecl, body: parser::TypeBody) -> parser::Item {
-    let decl = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = body; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
+fn item_with_body(it: parser::Item, td: parser::TypeDecl, body: parser::TypeBody): parser::Item {
+    var decl = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = body; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
     parser::Item { content = decl; namespace = it.namespace; file = it.file }
 }
 
@@ -1661,9 +1661,9 @@ fn item_with_body(it: parser::Item, td: parser::TypeDecl, body: parser::TypeBody
  * @param traits  the USER-trait names this deriver derives
  * @return the extended derive list
  */
-fn record_user_trait_derives(derives: []TraitDerive, td_name: str, traits: []str) -> []TraitDerive {
-    mut out = derives
-    mut si: u64 = 0
+fn record_user_trait_derives(derives: []TraitDerive, td_name: str, traits: []str): []TraitDerive {
+    var out = derives
+    var si: u64 = 0
     loop { if si >= traits.len { break }; out = teko::list::push(out, TraitDerive { type_name = td_name; trait_name = traits[si] }); si++ }
     out
 }
@@ -1677,7 +1677,7 @@ fn record_user_trait_derives(derives: []TraitDerive, td_name: str, traits: []str
  * @param extra the synthesized methods to append
  * @return the rewritten `TypeDecl`
  */
-fn struct_with_methods(td: parser::TypeDecl, sb: parser::StructBody, extra: []parser::Function) -> parser::TypeDecl {
+fn struct_with_methods(td: parser::TypeDecl, sb: parser::StructBody, extra: []parser::Function): parser::TypeDecl {
     parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::StructBody { fields = sb.fields; methods = append_methods(sb.methods, extra); implements = sb.implements; consts = sb.consts }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
 }
 
@@ -1690,7 +1690,7 @@ fn struct_with_methods(td: parser::TypeDecl, sb: parser::StructBody, extra: []pa
  * @param extra the synthesized methods to append
  * @return the rewritten `TypeDecl`
  */
-fn class_with_methods(td: parser::TypeDecl, cb: parser::ClassBody, extra: []parser::Function) -> parser::TypeDecl {
+fn class_with_methods(td: parser::TypeDecl, cb: parser::ClassBody, extra: []parser::Function): parser::TypeDecl {
     parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = cb.fields; methods = append_methods(cb.methods, extra); consts = cb.consts }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
 }
 
@@ -1704,21 +1704,21 @@ fn class_with_methods(td: parser::TypeDecl, cb: parser::ClassBody, extra: []pars
  * @return the item, possibly with synthesized methods folded in, or a located error
  * @throws when a synthesized field shape is unsupported or a nested field does not derive the trait
  */
-fn synthesize_one_decl(it: parser::Item, folded_table: TypeTable) -> parser::Item | error {
+fn synthesize_one_decl(it: parser::Item, folded_table: TypeTable): parser::Item | error {
     match it.content {
         parser::TypeDecl as td => match td.body {
             parser::StructBody as sb => {
-                let split = split_trait_derives(sb.implements, folded_table, it.namespace)
+                var split = split_trait_derives(sb.implements, folded_table, it.namespace)
                 if split.structural.len == 0 { return it }
-                let fv = match deriver_field_view(td.name, folded_table) { []FieldView as v => v; error as e => return e }
-                let synth = match synthesize_structural_methods(td.name, fv, split.structural, method_name_set(sb.methods), folded_table) { []parser::Function as m => m; error as e => return e }
+                var fv = match deriver_field_view(td.name, folded_table) { []FieldView as v => v; error as e => return e }
+                var synth = match synthesize_structural_methods(td.name, fv, split.structural, method_name_set(sb.methods), folded_table) { []parser::Function as m => m; error as e => return e }
                 parser::Item { content = struct_with_methods(td, sb, synth); namespace = it.namespace; file = it.file }
             }
             parser::ClassBody as cb => {
-                let split = split_trait_derives(cb.implements, folded_table, it.namespace)
+                var split = split_trait_derives(cb.implements, folded_table, it.namespace)
                 if split.structural.len == 0 { return it }
-                let fv = match deriver_field_view(td.name, folded_table) { []FieldView as v => v; error as e => return e }
-                let synth = match synthesize_structural_methods(td.name, fv, split.structural, method_name_set(cb.methods), folded_table) { []parser::Function as m => m; error as e => return e }
+                var fv = match deriver_field_view(td.name, folded_table) { []FieldView as v => v; error as e => return e }
+                var synth = match synthesize_structural_methods(td.name, fv, split.structural, method_name_set(cb.methods), folded_table) { []parser::Function as m => m; error as e => return e }
                 parser::Item { content = class_with_methods(td, cb, synth); namespace = it.namespace; file = it.file }
             }
             _ => it
@@ -1740,13 +1740,13 @@ fn synthesize_one_decl(it: parser::Item, folded_table: TypeTable) -> parser::Ite
  * @param folded_table the user-trait-folded type table
  * @return             the items with structural methods synthesized in, plus every synthesis diagnostic
  */
-fn synthesize_structural(items: []parser::Item, folded_table: TypeTable) -> ItemsOutcome {
-    mut out: []parser::Item = teko::list::empty()
-    mut diags: []str = teko::list::empty()
-    mut i: u64 = 0
+fn synthesize_structural(items: []parser::Item, folded_table: TypeTable): ItemsOutcome {
+    var out: []parser::Item = teko::list::empty()
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= items.len { break }
-        let it = items[i]
+        var it = items[i]
         match synthesize_one_decl(it, folded_table) {
             parser::Item as synth => { out = teko::list::push(out, synth) }
             error as e => {
@@ -1784,7 +1784,7 @@ const NO_DECL_POSITION: u32 = 0
  * @return    the declaration's 1-based line, or `NO_DECL_POSITION` when the item declares nothing
  * @since 0.3.1
  */
-fn item_decl_line(it: parser::Item) -> u32 {
+fn item_decl_line(it: parser::Item): u32 {
     match it.content {
         parser::Function as f => f.line
         parser::TypeDecl as td => td.line
@@ -1800,7 +1800,7 @@ fn item_decl_line(it: parser::Item) -> u32 {
  * @return    the declaration's 1-based column, or `NO_DECL_POSITION` when the item declares nothing
  * @since 0.3.1
  */
-fn item_decl_col(it: parser::Item) -> u32 {
+fn item_decl_col(it: parser::Item): u32 {
     match it.content {
         parser::Function as f => f.col
         parser::TypeDecl as td => td.col
@@ -1829,8 +1829,8 @@ fn item_decl_col(it: parser::Item) -> u32 {
  * @throws when a folded field/method collides unresolvably, a synthesized field shape is
  *         unsupported, or a deriver misses a required method
  */
-pub fn fold_traits(program: parser::Program) -> parser::Program | error {
-    let folded = fold_traits_collected(program)
+pub fn fold_traits(program: parser::Program): parser::Program | error {
+    var folded = fold_traits_collected(program)
     if folded.diags.len > 0 { return diags_error(folded.diags) }
     folded.program
 }
@@ -1846,12 +1846,12 @@ pub fn fold_traits(program: parser::Program) -> parser::Program | error {
  * @return         the folded program (the input, unchanged, when a stage cut) and every diagnostic
  * @since 0.3.1
  */
-fn fold_traits_collected(program: parser::Program) -> FoldOutcome {
-    let table = collect_types(program.items)
+fn fold_traits_collected(program: parser::Program): FoldOutcome {
+    var table = collect_types(program.items)
     if !program_needs_trait_fold(program, table) { return FoldOutcome { program = program; diags = teko::list::empty() } }
-    let user = fold_user_traits(program, table)
+    var user = fold_user_traits(program, table)
     if user.diags.len > 0 { return FoldOutcome { program = program; diags = user.diags } }
-    let synth = synthesize_structural(user.items, collect_types(user.items))
+    var synth = synthesize_structural(user.items, collect_types(user.items))
     if synth.diags.len > 0 { return FoldOutcome { program = program; diags = synth.diags } }
     FoldOutcome { program = parser::Program { items = synth.items }; diags = check_trait_requirements(user.derives, collect_types(synth.items)) }
 }
@@ -1881,11 +1881,11 @@ type FoldOutcome = struct {
 //       in the table (a real generic base — `Foo__g__Bar` with no generic `Foo` fails this).
 // LOCAL predicate on purpose: name_is_g_instance keeps its broad substring semantics for the
 // mono pass (which only ever sees names IT stamped); only the W0 ban needs the strict form.
-fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable) -> bool {
+fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable): bool {
     if reg.namespace != "" { return false }
-    let name = reg.name
-    mut pos: u64 = name.len   // index of the FIRST `__g__`, or name.len when absent
-    mut i: u64 = 0
+    var name = reg.name
+    var pos: u64 = name.len   // index of the FIRST `__g__`, or name.len when absent
+    var i: u64 = 0
     loop {
         if i + 5 > name.len { break }
         if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' { pos = i; break }
@@ -1893,12 +1893,12 @@ fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable) -> bool {
     }
     if pos == name.len { return false }   // no `__g__` infix at all
     if pos == 0 { return false }   // an empty base prefix can never name a generic decl
-    let base = teko::str::slice_to(name, pos)
-    let cands = tt_cands(table, base)
-    mut j: u64 = 0
+    var base = teko::str::slice_to(name, pos)
+    var cands = tt_cands(table, base)
+    var j: u64 = 0
     loop {
         if j >= cands.count { break }
-        let r = tt_cand_reg(table, cands, j)
+        var r = tt_cand_reg(table, cands, j)
         if r.decl.type_params.len > 0 && r.name == base { return true }
         j++
     }
@@ -1917,9 +1917,9 @@ fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable) -> bool {
 // `Base__g__<mangle>` instances that share the "" namespace bucket with every other stamped
 // instance; that's not a user-facing collision, and stamping already dedups by exact mangled
 // name (resolve.tks::instantiate_types's "already stamped" check).
-fn check_no_duplicate_types(table: TypeTable) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut i: u64 = 0
+fn check_no_duplicate_types(table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= tt_len(table) { break }
         if w0_is_stamped_generic_reg(tt_at(table, i), table) { i++; continue }
@@ -1939,14 +1939,14 @@ fn check_no_duplicate_types(table: TypeTable) -> []str {
  * @return       one diagnostic per duplicate found after `at` (empty when there is none)
  * @since 0.3.1
  */
-fn duplicates_of_reg(table: TypeTable, at: u64) -> []str {
-    mut diags: []str = teko::list::empty()
-    let reg = tt_at(table, at)
-    let ns_label = if reg.namespace == "" { "<top-level>" } else { reg.namespace }
-    mut j: u64 = at + 1
+fn duplicates_of_reg(table: TypeTable, at: u64): []str {
+    var diags: []str = teko::list::empty()
+    var reg = tt_at(table, at)
+    var ns_label = if reg.namespace == "" { "<top-level>" } else { reg.namespace }
+    var j: u64 = at + 1
     loop {
         if j >= tt_len(table) { break }
-        let other = tt_at(table, j)
+        var other = tt_at(table, j)
         if !w0_is_stamped_generic_reg(other, table) && other.name == reg.name && other.namespace == reg.namespace {
             diags = teko::list::push(diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' in namespace '{ns_label}'"))
         }
@@ -1972,7 +1972,7 @@ fn duplicates_of_reg(table: TypeTable, at: u64) -> []str {
  * @param TypeTable table  the program's type table (for the `unsafe_carrying` leaf probe)
  * @return error?  an error iff `ft` carries unsafe data into a non-`unsafe` decl
  */
-fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: str, ft: Type, table: TypeTable) -> error | null {
+fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: str, ft: Type, table: TypeTable): error | null {
     if decl_unsafe { return null }
     if !unsafe_carrying(ft, table) { return null }
     error { message = $"struct/class '{decl_name}' has an unsafe-typed field '{field_name}' — it must be declared `unsafe` (unsafe data cannot be held by a safe type; §2 contagion-by-composition)" }
@@ -2012,7 +2012,7 @@ fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: 
  * @return     one diagnostic iff the alias carries `unsafe` (empty otherwise)
  * @since 0.3.1
  */
-fn reject_unsafe_alias(reg: TypeReg) -> []str {
+fn reject_unsafe_alias(reg: TypeReg): []str {
     if !reg.decl.is_unsafe { return teko::list::empty() }
     one_diag(decl_diag(reg, $"type alias '{reg.name}' cannot be declared `unsafe` — `unsafe` marks a type's OWN methods as unsafe and unlocks raw pointers inside its OWN body, but a transparent alias (`type {reg.name} = …`) has neither: it has no methods, no body, and resolves straight through to its target, so the modifier has no referent and would otherwise compile as a silent no-op (§9.2, docs/design/c-types-and-marshalling-0.3.1.md). Declare a nominal `unsafe type {reg.name} = struct {{ … }}` (or `class`) instead if you need a real unsafe-typed wrapper — this is why `c_string` is a nominal struct, not an alias."))
 }
@@ -2027,9 +2027,9 @@ fn reject_unsafe_alias(reg: TypeReg) -> []str {
  * @param table  the collected, already generic-stamped type table
  * @return       every declaration diagnostic, in table order (empty when the declarations are clean)
  */
-fn validate_type_decls(table: TypeTable) -> []str {
-    mut diags = check_no_duplicate_types(table)
-    mut i: u64 = 0
+fn validate_type_decls(table: TypeTable): []str {
+    var diags = check_no_duplicate_types(table)
+    var i: u64 = 0
     loop {
         if i >= tt_len(table) { break }
         diags = concat_diags(diags, validate_one_type_decl(tt_at(table, i), table))
@@ -2048,7 +2048,7 @@ fn validate_type_decls(table: TypeTable) -> []str {
  * @return     the `file:line:col: msg` line
  * @since 0.3.1
  */
-fn decl_diag(reg: TypeReg, msg: str) -> str {
+fn decl_diag(reg: TypeReg, msg: str): str {
     diag_at(reg.file, reg.decl.line, reg.decl.col, msg)
 }
 
@@ -2061,7 +2061,7 @@ fn decl_diag(reg: TypeReg, msg: str) -> str {
  * @return       the `file:line:col: text` line
  * @since 0.3.1
  */
-fn decl_error_diag(reg: TypeReg, inner: error) -> str {
+fn decl_error_diag(reg: TypeReg, inner: error): str {
     located_diag(reg.file, reg.decl.line, reg.decl.col, inner)
 }
 
@@ -2081,9 +2081,9 @@ fn decl_error_diag(reg: TypeReg, inner: error) -> str {
  * @param table  the whole collected type table (for leaf probes and base/interface walks)
  * @return       the declaration's diagnostics, in declaration order
  */
-fn validate_one_type_decl(reg: TypeReg, table: TypeTable) -> []str {
-    let decl = reg.decl
-    let tbl = type_param_table(decl.type_params, decl.type_constraints, "", table)
+fn validate_one_type_decl(reg: TypeReg, table: TypeTable): []str {
+    var decl = reg.decl
+    var tbl = type_param_table(decl.type_params, decl.type_constraints, "", table)
     match decl.body {
         parser::StructBody as sb => validate_struct_body(reg, sb, tbl, table)
         parser::AliasBody as ab => concat_diags(reject_unsafe_alias(reg), validate_field_slot(reg, "alias", ab.alias, tbl, table))
@@ -2106,9 +2106,9 @@ fn validate_one_type_decl(reg: TypeReg, table: TypeTable) -> []str {
  * @param table       the whole collected type table (for the unsafe-carrying leaf probe)
  * @return            the slot's diagnostics (at most one — the first gate it trips)
  */
-fn validate_field_slot(reg: TypeReg, field_name: str, ann: parser::TypeExpr, tbl: TypeTable, table: TypeTable) -> []str {
-    let decl = reg.decl
-    let ft = match resolve_type(ann, tbl, reg.namespace) {
+fn validate_field_slot(reg: TypeReg, field_name: str, ann: parser::TypeExpr, tbl: TypeTable, table: TypeTable): []str {
+    var decl = reg.decl
+    var ft = match resolve_type(ann, tbl, reg.namespace) {
         Type as t => t
         error as e => return one_diag(decl_error_diag(reg, e))
     }
@@ -2131,9 +2131,9 @@ fn validate_field_slot(reg: TypeReg, field_name: str, ann: parser::TypeExpr, tbl
  * @param table   the whole collected type table
  * @return        the fields' diagnostics, in declaration order
  */
-fn validate_body_fields(reg: TypeReg, fields: []parser::Field, tbl: TypeTable, table: TypeTable) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut f: u64 = 0
+fn validate_body_fields(reg: TypeReg, fields: []parser::Field, tbl: TypeTable, table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var f: u64 = 0
     loop {
         if f >= fields.len { break }
         diags = concat_diags(diags, validate_field_slot(reg, fields[f].name, fields[f].type_ann, tbl, table))
@@ -2152,7 +2152,7 @@ fn validate_body_fields(reg: TypeReg, fields: []parser::Field, tbl: TypeTable, t
  * @param members_public  are the declaration's members implicitly public (a struct's are)?
  * @return                the conformance diagnostic, or an empty list
  */
-fn conformance_diags(reg: TypeReg, methods: []parser::Function, implements: []str, table: TypeTable, members_public: bool) -> []str {
+fn conformance_diags(reg: TypeReg, methods: []parser::Function, implements: []str, table: TypeTable, members_public: bool): []str {
     match check_conformance(reg.decl.name, reg.namespace, methods, implements, table, members_public) {
         error as e => one_diag(decl_error_diag(reg, e))
         null => teko::list::empty()
@@ -2169,7 +2169,7 @@ fn conformance_diags(reg: TypeReg, methods: []parser::Function, implements: []st
  * @param table  the whole collected type table
  * @return       the body's diagnostics, in declaration order
  */
-fn validate_struct_body(reg: TypeReg, sb: parser::StructBody, tbl: TypeTable, table: TypeTable) -> []str {
+fn validate_struct_body(reg: TypeReg, sb: parser::StructBody, tbl: TypeTable, table: TypeTable): []str {
     concat_diags(validate_body_fields(reg, sb.fields, tbl, table), conformance_diags(reg, sb.methods, sb.implements, table, true))
 }
 
@@ -2185,17 +2185,17 @@ fn validate_struct_body(reg: TypeReg, sb: parser::StructBody, tbl: TypeTable, ta
  * @param table  the whole collected type table
  * @return       the body's diagnostics, in declaration order
  */
-fn validate_class_body(reg: TypeReg, cb: parser::ClassBody, tbl: TypeTable, table: TypeTable) -> []str {
+fn validate_class_body(reg: TypeReg, cb: parser::ClassBody, tbl: TypeTable, table: TypeTable): []str {
     match class_inheritance_acyclic(reg.decl.name, table) {
         error as e => return one_diag(decl_error_diag(reg, e))
         null => { }
     }
-    mut diags = validate_body_fields(reg, cb.fields, tbl, table)
+    var diags = validate_body_fields(reg, cb.fields, tbl, table)
     match validate_class_decl(cb, table) {
         error as e => diags = concat_diags(diags, one_diag(decl_error_diag(reg, e)))
         null => { }
     }
-    let eff = match effective_class_methods(cb, table) {
+    var eff = match effective_class_methods(cb, table) {
         []parser::Function as m => m
         error as e => return concat_diags(diags, one_diag(decl_error_diag(reg, e)))
     }
@@ -2213,8 +2213,8 @@ fn validate_class_body(reg: TypeReg, cb: parser::ClassBody, tbl: TypeTable, tabl
  * @param table  the whole collected type table
  * @return       the body's diagnostics, in declaration order
  */
-fn validate_trait_body(reg: TypeReg, trb: parser::TraitBody, tbl: TypeTable, table: TypeTable) -> []str {
-    let decl = reg.decl
+fn validate_trait_body(reg: TypeReg, trb: parser::TraitBody, tbl: TypeTable, table: TypeTable): []str {
+    var decl = reg.decl
     if decl.type_params.len > 0 {
         return one_diag(decl_diag(reg, $"a generic trait ('{decl.name}<…>') is not supported (TR0 — a trait is a concrete bundle)"))
     }
@@ -2230,12 +2230,12 @@ fn validate_trait_body(reg: TypeReg, trb: parser::TraitBody, tbl: TypeTable, tab
  * @param methods  the trait's methods, in declaration order
  * @return         one diagnostic per offending method
  */
-fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut i: u64 = 0
+fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= methods.len { break }
-        let m = methods[i]
+        var m = methods[i]
         if m.is_abstract || m.is_virtual || m.is_override || m.is_intern {
             diags = teko::list::push(diags, decl_diag(reg, $"trait method '{m.name}' may not be `abstract`/`virtual`/`override`/`intern` — a bodyless trait method is the requirement, and a deriver-defined method is the override (TR0)"))
         }
@@ -2255,10 +2255,10 @@ fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function) -> []s
  * @param table  the whole collected type table
  * @return       the body's diagnostics, in declaration order
  */
-fn validate_interface_body(reg: TypeReg, ib: parser::InterfaceBody, table: TypeTable) -> []str {
-    let diags = interface_bodyless_diags(reg, ib.methods)
-    let seen = teko::list::push(teko::list::empty(), qualify(reg.namespace, name_last_segment(reg.decl.name)))
-    let eff = match effective_interface_methods(ib, reg.namespace, table, seen) {
+fn validate_interface_body(reg: TypeReg, ib: parser::InterfaceBody, table: TypeTable): []str {
+    var diags = interface_bodyless_diags(reg, ib.methods)
+    var seen = teko::list::push(teko::list::empty(), qualify(reg.namespace, name_last_segment(reg.decl.name)))
+    var eff = match effective_interface_methods(ib, reg.namespace, table, seen) {
         []parser::Function as m => m
         error as e => return concat_diags(diags, one_diag(decl_error_diag(reg, e)))
     }
@@ -2273,9 +2273,9 @@ fn validate_interface_body(reg: TypeReg, ib: parser::InterfaceBody, table: TypeT
  * @param methods  the interface's own methods, in declaration order
  * @return         one diagnostic per method that carries a body
  */
-fn interface_bodyless_diags(reg: TypeReg, methods: []parser::Function) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut i: u64 = 0
+fn interface_bodyless_diags(reg: TypeReg, methods: []parser::Function): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= methods.len { break }
         if methods[i].body.len > 0 {
@@ -2296,13 +2296,13 @@ fn interface_bodyless_diags(reg: TypeReg, methods: []parser::Function) -> []str 
  * @param table  the whole collected type table (for signature comparison)
  * @return       one diagnostic per conflicting pair
  */
-fn interface_conflict_diags(reg: TypeReg, eff: []parser::Function, table: TypeTable) -> []str {
-    mut diags: []str = teko::list::empty()
-    let owner_ns = type_ns_of(table, reg.decl.name)
-    mut a: u64 = 0
+fn interface_conflict_diags(reg: TypeReg, eff: []parser::Function, table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var owner_ns = type_ns_of(table, reg.decl.name)
+    var a: u64 = 0
     loop {
         if a >= eff.len { break }
-        mut b: u64 = a + 1
+        var b: u64 = a + 1
         loop {
             if b >= eff.len { break }
             if eff[a].name == eff[b].name && !method_sig_matches(eff[a], eff[b], table, owner_ns) {
@@ -2348,7 +2348,7 @@ type CollectOutcome = struct {
  * @param program  the parsed (trait-folded, base-canonicalized) program
  * @return         the collected type table + top-level environment, and both diagnostic classes
  */
-fn collect(program: parser::Program) -> CollectOutcome {
+fn collect(program: parser::Program): CollectOutcome {
     collect_over(program, instantiate_types(program, collect_types(program.items)), env_empty())
 }
 
@@ -2370,7 +2370,7 @@ fn collect(program: parser::Program) -> CollectOutcome {
  * @return         the collected table + environment layered on the seed, and both diagnostic classes
  * @since #594
  */
-fn collect_with_seed(program: parser::Program, seed: Collected) -> CollectOutcome {
+fn collect_with_seed(program: parser::Program, seed: Collected): CollectOutcome {
     collect_over(program, instantiate_types(program, table_with_project_types(program, seed.types)), seed.env)
 }
 
@@ -2383,9 +2383,9 @@ fn collect_with_seed(program: parser::Program, seed: Collected) -> CollectOutcom
  * @return         the table with one registration per project type declaration appended
  * @since 0.3.1
  */
-fn table_with_project_types(program: parser::Program, seeded: TypeTable) -> TypeTable {
-    mut table = seeded
-    mut i = 0
+fn table_with_project_types(program: parser::Program, seeded: TypeTable): TypeTable {
+    var table = seeded
+    var i = 0
     loop {
         if i >= program.items.len { break }
         match program.items[i].content {
@@ -2410,10 +2410,10 @@ fn table_with_project_types(program: parser::Program, seeded: TypeTable) -> Type
  * @return         the collected (table, env) and both diagnostic classes
  * @since 0.3.1
  */
-fn collect_over(program: parser::Program, table: TypeTable, env0: Env) -> CollectOutcome {
-    let ftable = tt_freeze(table)
-    let decl_diags = validate_type_decls(ftable)
-    let sig = collect_signatures(program.items, ftable, env0)
+fn collect_over(program: parser::Program, table: TypeTable, env0: Env): CollectOutcome {
+    var ftable = tt_freeze(table)
+    var decl_diags = validate_type_decls(ftable)
+    var sig = collect_signatures(program.items, ftable, env0)
     CollectOutcome { collected = Collected { types = ftable; env = sig.env }; decl_diags = decl_diags; sig_diags = sig.diags }
 }
 
@@ -2422,18 +2422,18 @@ fn collect_over(program: parser::Program, table: TypeTable, env0: Env) -> Collec
 // Adds the dep's type declarations to `table` and the dep's function signatures to `env`.
 // This gives the project's type_program access to dep types and functions without re-typing
 // the dep's bodies (which are already verified). The dep's namespace is preserved on each entry.
-fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error {
-    mut t = table
-    mut e = env
+fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
+    var t = table
+    var e = env
     // Pass 1: register type declarations (so function param types can resolve against them).
-    mut i: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= dep.items.len { break }
         match dep.items[i] {
             parser::TypeDecl as td => {
                 // Carry the dep item's namespace (the dep's own module path — already set when packed).
                 // find_ns_of_titem extracts it from the dep's TItem.
-                let ns = dep_item_ns(dep.items[i])
+                var ns = dep_item_ns(dep.items[i])
                 t = tt_push(t, TypeReg { name = td.name; namespace = ns; file = ""; vis = td.vis; decl = td })
             }
             _ => { }
@@ -2442,20 +2442,20 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error
     }
     t = tt_freeze(t)
     // Pass 2: register function signatures using the now-complete type table.
-    mut j: u64 = 0
+    var j: u64 = 0
     loop {
         if j >= dep.items.len { break }
         match dep.items[j] {
             TFunction as f => {
-                let dtbl = type_param_table(f.type_params, f.type_constraints, "", t)
-                mut params: []Type = teko::list::empty()
-                mut param_names: []str = teko::list::empty()
-                mut defaults: []parser::Expr = teko::list::empty()
-                mut n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — see func_type
-                mut pi: u64 = 0
+                var dtbl = type_param_table(f.type_params, f.type_constraints, "", t)
+                var params: []Type = teko::list::empty()
+                var param_names: []str = teko::list::empty()
+                var defaults: []parser::Expr = teko::list::empty()
+                var n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — see func_type
+                var pi: u64 = 0
                 loop {
                     if pi >= f.params.len { break }
-                    let pt = match resolve_type(f.params[pi].type_ann, dtbl, f.namespace) { Type as ty => ty; error as err => return err }   // (#109 W1) ref_ns = the dep fn's declaring namespace
+                    var pt = match resolve_type(f.params[pi].type_ann, dtbl, f.namespace) { Type as ty => ty; error as err => return err }   // (#109 W1) ref_ns = the dep fn's declaring namespace
                     params = teko::list::push(params, pt)
                     param_names = teko::list::push(param_names, f.params[pi].name)
                     if f.params[pi].has_default {
@@ -2464,8 +2464,8 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error
                     }
                     pi++
                 }
-                let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
-                let ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
+                var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+                var ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
                 e = define_fn(e, f.name, ft, f.namespace)
             }
             _ => { }
@@ -2488,9 +2488,9 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error
  * @return     `env` extended with the dep's exported module consts bound by name
  * @since #594
  */
-fn seed_dep_consts(env: Env, dep: TProgram) -> Env {
-    mut e = env
-    mut k: u64 = 0
+fn seed_dep_consts(env: Env, dep: TProgram): Env {
+    var e = env
+    var k: u64 = 0
     loop {
         if k >= dep.items.len { break }
         match dep.items[k] {
@@ -2512,7 +2512,7 @@ fn seed_dep_consts(env: Env, dep: TProgram) -> Env {
  * @return   whether the const is part of the dep's public (cross-module) surface
  * @since #594
  */
-fn dep_const_is_exported(c: TConstDecl) -> bool {
+fn dep_const_is_exported(c: TConstDecl): bool {
     match c.vis {
         parser::Visibility::Private => false
         parser::Visibility::Pub => true
@@ -2524,7 +2524,7 @@ fn dep_const_is_exported(c: TConstDecl) -> bool {
 // TypeDecl and UseDecl items use "" (the dep's top-level namespace) since we do not have
 // a wrapping Item here. For C7.10, type decls are the dep's public types — namespace "" is
 // fine for resolve_type (which ignores namespace; W-vis-enforce is not re-run for deps).
-fn dep_item_ns(item: TItem) -> str {
+fn dep_item_ns(item: TItem): str {
     match item {
         TFunction as f => f.namespace
         parser::TypeDecl => ""

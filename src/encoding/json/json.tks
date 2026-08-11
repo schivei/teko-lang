@@ -77,15 +77,15 @@ pub type JsonValue = variant JsonNull | JsonBool | JsonNumber | JsonString | Jso
 // predicate, so these are written locally, over `byte` — the parser scans UTF-8 bytes
 // directly, decoding codepoints only inside string literals where `\uXXXX` needs it). ---
 
-fn is_json_ws(b: byte) -> bool {
+fn is_json_ws(b: byte): bool {
     b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
 }
 
-fn is_digit_byte(b: byte) -> bool {
+fn is_digit_byte(b: byte): bool {
     b >= b'0' && b <= b'9'
 }
 
-fn hex_digit_value(b: byte) -> i64 {
+fn hex_digit_value(b: byte): i64 {
     if b >= b'0' && b <= b'9' { return (b to i64) - (b'0' to i64) }
     if b >= b'a' && b <= b'f' { return (b to i64) - (b'a' to i64) + 10 }
     if b >= b'A' && b <= b'F' { return (b to i64) - (b'A' to i64) + 10 }
@@ -104,8 +104,8 @@ fn hex_digit_value(b: byte) -> i64 {
 // uses for its own `PState`).
 pub type PResult = struct { pos: u64; value: JsonValue }
 
-fn skip_ws(p: []byte, pos: u64) -> u64 {
-    mut at = pos
+fn skip_ws(p: []byte, pos: u64): u64 {
+    var at = pos
     loop {
         if at >= p.len || !is_json_ws(p[at]) { break }
         at++
@@ -113,10 +113,10 @@ fn skip_ws(p: []byte, pos: u64) -> u64 {
     at
 }
 
-fn parse_value(p: []byte, pos: u64) -> PResult | error {
-    let at = skip_ws(p, pos)
+fn parse_value(p: []byte, pos: u64): PResult | error {
+    var at = skip_ws(p, pos)
     if at >= p.len { return error { message = "json: unexpected end of input" } }
-    let b = p[at]
+    var b = p[at]
     if b == b'{' { return parse_object(p, at) }
     if b == b'[' { return parse_array(p, at) }
     if b == b'"' { return parse_string_value(p, at) }
@@ -128,8 +128,8 @@ fn parse_value(p: []byte, pos: u64) -> PResult | error {
 }
 
 // matches a fixed ASCII keyword (`true`/`false`/`null`) starting at `pos`.
-fn parse_literal(p: []byte, pos: u64, word: str, value: JsonValue) -> PResult | error {
-    mut i: u64 = 0
+fn parse_literal(p: []byte, pos: u64, word: str, value: JsonValue): PResult | error {
+    var i: u64 = 0
     loop {
         if i >= word.len { break }
         if pos + i >= p.len || p[pos + i] != word[i] {
@@ -142,23 +142,23 @@ fn parse_literal(p: []byte, pos: u64, word: str, value: JsonValue) -> PResult | 
 
 // --- object: `{ "key" : value , "key" : value ... }` ---
 
-fn parse_object(p: []byte, pos: u64) -> PResult | error {
+fn parse_object(p: []byte, pos: u64): PResult | error {
     // pos is at '{'
-    mut at = skip_ws(p, pos + 1)
-    mut keys: []str = teko::list::empty()
-    mut values: []JsonValue = teko::list::empty()
+    var at = skip_ws(p, pos + 1)
+    var keys: []str = teko::list::empty()
+    var values: []JsonValue = teko::list::empty()
     if at < p.len && p[at] == b'}' { return PResult { pos = at + 1; value = JsonObject { keys = keys; values = values } } }
     loop {
         at = skip_ws(p, at)
         if at >= p.len || p[at] != b'"' {
             return error { message = concat("json: expected string key at offset ", i64_to_str(at to i64)) }
         }
-        let key_res = match parse_string(p, at) { PStringResult as s => s; error as e => return e }
+        var key_res = match parse_string(p, at) { PStringResult as s => s; error as e => return e }
         at = skip_ws(p, key_res.pos)
         if at >= p.len || p[at] != b':' {
             return error { message = concat("json: expected ':' after object key at offset ", i64_to_str(at to i64)) }
         }
-        let val_res = match parse_value(p, at + 1) { PResult as v => v; error as e => return e }
+        var val_res = match parse_value(p, at + 1) { PResult as v => v; error as e => return e }
         keys = teko::list::push(keys, key_res.text)
         values = teko::list::push(values, val_res.value)
         at = skip_ws(p, val_res.pos)
@@ -172,13 +172,13 @@ fn parse_object(p: []byte, pos: u64) -> PResult | error {
 
 // --- array: `[ value , value ... ]` ---
 
-fn parse_array(p: []byte, pos: u64) -> PResult | error {
+fn parse_array(p: []byte, pos: u64): PResult | error {
     // pos is at '['
-    mut at = skip_ws(p, pos + 1)
-    mut items: []JsonValue = teko::list::empty()
+    var at = skip_ws(p, pos + 1)
+    var items: []JsonValue = teko::list::empty()
     if at < p.len && p[at] == b']' { return PResult { pos = at + 1; value = JsonArray { items = items } } }
     loop {
-        let val_res = match parse_value(p, at) { PResult as v => v; error as e => return e }
+        var val_res = match parse_value(p, at) { PResult as v => v; error as e => return e }
         items = teko::list::push(items, val_res.value)
         at = skip_ws(p, val_res.pos)
         if at >= p.len { return error { message = "json: unterminated array — expected ',' or ']'" } }
@@ -195,8 +195,8 @@ fn parse_array(p: []byte, pos: u64) -> PResult | error {
 // case needs the decoded text, not a wrapped `JsonValue` — avoids an unwrap-then-rewrap).
 pub type PStringResult = struct { pos: u64; text: str }
 
-fn parse_string_value(p: []byte, pos: u64) -> PResult | error {
-    let s = match parse_string(p, pos) { PStringResult as r => r; error as e => return e }
+fn parse_string_value(p: []byte, pos: u64): PResult | error {
+    var s = match parse_string(p, pos) { PStringResult as r => r; error as e => return e }
     PResult { pos = s.pos; value = JsonString { value = s.text } }
 }
 
@@ -205,16 +205,16 @@ fn parse_string_value(p: []byte, pos: u64) -> PResult | error {
 // a lone/unpaired surrogate is preserved as the Unicode replacement handling documented
 // below (M.3 — no silent corruption: an unpaired high surrogate with no valid low
 // surrogate following is a decode error rather than emitting an invalid codepoint).
-fn parse_string(p: []byte, pos: u64) -> PStringResult | error {
-    mut at = pos + 1   // past the opening quote
-    mut out: str = ""
+fn parse_string(p: []byte, pos: u64): PStringResult | error {
+    var at = pos + 1   // past the opening quote
+    var out: str = ""
     loop {
         if at >= p.len { return error { message = "json: unterminated string" } }
-        let b = p[at]
+        var b = p[at]
         if b == b'"' { return PStringResult { pos = at + 1; text = out } }
         if b == b'\\' {
             if at + 1 >= p.len { return error { message = "json: unterminated escape sequence" } }
-            let esc = p[at + 1]
+            var esc = p[at + 1]
             if esc == b'"' { out = out ~ one_byte(b'"'); at = at + 2; continue }
             if esc == b'\\' { out = out ~ one_byte(b'\\'); at = at + 2; continue }
             if esc == b'/' { out = out ~ one_byte(b'/'); at = at + 2; continue }
@@ -224,7 +224,7 @@ fn parse_string(p: []byte, pos: u64) -> PStringResult | error {
             if esc == b'r' { out = out ~ one_byte(b'\r'); at = at + 2; continue }
             if esc == b't' { out = out ~ one_byte(b'\t'); at = at + 2; continue }
             if esc == b'u' {
-                let step = match parse_unicode_escape(p, at) { UEscResult as u => u; error as e => return e }
+                var step = match parse_unicode_escape(p, at) { UEscResult as u => u; error as e => return e }
                 out = out ~ step.text
                 at = step.pos
                 continue
@@ -250,14 +250,14 @@ pub type UEscResult = struct { pos: u64; text: str }
 // pos is at the 'u' escape's leading backslash (p[pos] == '\\', p[pos+1] == 'u').
 // Decodes one \uXXXX, resolving a UTF-16 surrogate pair into its astral codepoint when a
 // high surrogate is immediately followed by \uDCxx-\uDFxx low surrogate.
-fn parse_unicode_escape(p: []byte, pos: u64) -> UEscResult | error {
-    let cp1 = match read_hex4(p, pos + 2) { i64 as v => v; error as e => return e }
+fn parse_unicode_escape(p: []byte, pos: u64): UEscResult | error {
+    var cp1 = match read_hex4(p, pos + 2) { i64 as v => v; error as e => return e }
     // high surrogate range D800-DBFF: only valid alone as an error; try to pair it.
     if cp1 >= 0xD800 && cp1 <= 0xDBFF {
         if pos + 6 + 1 < p.len && p[pos + 6] == b'\\' && p[pos + 7] == b'u' {
-            let cp2 = match read_hex4(p, pos + 8) { i64 as v => v; error as e => return e }
+            var cp2 = match read_hex4(p, pos + 8) { i64 as v => v; error as e => return e }
             if cp2 >= 0xDC00 && cp2 <= 0xDFFF {
-                let astral = 0x10000 + ((cp1 - 0xD800) * 0x400) + (cp2 - 0xDC00)
+                var astral = 0x10000 + ((cp1 - 0xD800) * 0x400) + (cp2 - 0xDC00)
                 return UEscResult { pos = pos + 12; text = codepoint_to_str(astral) }
             }
         }
@@ -270,13 +270,13 @@ fn parse_unicode_escape(p: []byte, pos: u64) -> UEscResult | error {
 }
 
 // reads exactly 4 hex digits starting at `pos`, returning their value (0..0xFFFF).
-fn read_hex4(p: []byte, pos: u64) -> i64 | error {
+fn read_hex4(p: []byte, pos: u64): i64 | error {
     if pos + 4 > p.len { return error { message = "json: truncated \\u escape" } }
-    mut v: i64 = 0
-    mut i: u64 = 0
+    var v: i64 = 0
+    var i: u64 = 0
     loop {
         if i >= 4 { break }
-        let d = hex_digit_value(p[pos + i])
+        var d = hex_digit_value(p[pos + i])
         if d < 0 { return error { message = "json: invalid hex digit in \\u escape" } }
         v = (v * 16) + d
         i++
@@ -287,32 +287,32 @@ fn read_hex4(p: []byte, pos: u64) -> i64 | error {
 // builds a one-codepoint `str` by hand-encoding UTF-8 (no builtin "codepoint -> str"
 // exists yet, so this is written locally; it mirrors the well-known UTF-8 encoding
 // table and is only ever fed values in 0..0x10FFFF by the caller above).
-fn codepoint_to_str(cp: i64) -> str {
+fn codepoint_to_str(cp: i64): str {
     if cp <= 0x7F {
         one_byte(cp to byte)
     } else if cp <= 0x7FF {
-        let b0 = (0xC0 | (cp >> 6)) to byte
-        let b1 = (0x80 | (cp & 0x3F)) to byte
+        var b0 = (0xC0 | (cp >> 6)) to byte
+        var b1 = (0x80 | (cp & 0x3F)) to byte
         one_byte(b0) ~ one_byte(b1)
     } else if cp <= 0xFFFF {
-        let b0 = (0xE0 | (cp >> 12)) to byte
-        let b1 = (0x80 | ((cp >> 6) & 0x3F)) to byte
-        let b2 = (0x80 | (cp & 0x3F)) to byte
+        var b0 = (0xE0 | (cp >> 12)) to byte
+        var b1 = (0x80 | ((cp >> 6) & 0x3F)) to byte
+        var b2 = (0x80 | (cp & 0x3F)) to byte
         one_byte(b0) ~ one_byte(b1) ~ one_byte(b2)
     } else {
-        let b0 = (0xF0 | (cp >> 18)) to byte
-        let b1 = (0x80 | ((cp >> 12) & 0x3F)) to byte
-        let b2 = (0x80 | ((cp >> 6) & 0x3F)) to byte
-        let b3 = (0x80 | (cp & 0x3F)) to byte
+        var b0 = (0xF0 | (cp >> 18)) to byte
+        var b1 = (0x80 | ((cp >> 12) & 0x3F)) to byte
+        var b2 = (0x80 | ((cp >> 6) & 0x3F)) to byte
+        var b3 = (0x80 | (cp & 0x3F)) to byte
         one_byte(b0) ~ one_byte(b1) ~ one_byte(b2) ~ one_byte(b3)
     }
 }
 
 // --- number: RFC 8259 §6 — `-? int frac? exp?` ---
 
-fn parse_number(p: []byte, pos: u64) -> PResult | error {
-    mut at = pos
-    mut negative = false
+fn parse_number(p: []byte, pos: u64): PResult | error {
+    var at = pos
+    var negative = false
     if at < p.len && p[at] == b'-' { negative = true; at = at + 1 }
     if at >= p.len || !is_digit_byte(p[at]) {
         return error { message = concat("json: invalid number at offset ", i64_to_str(pos to i64)) }
@@ -327,9 +327,9 @@ fn parse_number(p: []byte, pos: u64) -> PResult | error {
             at++
         }
     }
-    mut has_frac = false
-    mut frac_start: u64 = 0
-    mut frac_end: u64 = 0
+    var has_frac = false
+    var frac_start: u64 = 0
+    var frac_end: u64 = 0
     if at < p.len && p[at] == b'.' {
         has_frac = true
         at = at + 1
@@ -343,10 +343,10 @@ fn parse_number(p: []byte, pos: u64) -> PResult | error {
         }
         frac_end = at
     }
-    mut has_exp = false
-    mut exp_negative = false
-    mut exp_start: u64 = 0
-    mut exp_end: u64 = 0
+    var has_exp = false
+    var exp_negative = false
+    var exp_start: u64 = 0
+    var exp_end: u64 = 0
     if at < p.len && (p[at] == b'e' || p[at] == b'E') {
         has_exp = true
         at = at + 1
@@ -374,17 +374,17 @@ fn parse_number(p: []byte, pos: u64) -> PResult | error {
             return error { message = "json: number exponent has too many digits" }
         }
     }
-    let sign_width = if negative { 1 to u64 } else { 0 to u64 }
-    let int_text = str_slice_bytes(p, pos + sign_width, int_end_of(p, pos, negative))
-    mut mantissa = digits_to_f64(int_text)
+    var sign_width = if negative { 1 to u64 } else { 0 to u64 }
+    var int_text = str_slice_bytes(p, pos + sign_width, int_end_of(p, pos, negative))
+    var mantissa = digits_to_f64(int_text)
     if has_frac {
-        let frac_text = str_slice_bytes(p, frac_start, frac_end)
+        var frac_text = str_slice_bytes(p, frac_start, frac_end)
         mantissa = mantissa + (digits_to_f64(frac_text) / pow10(frac_end - frac_start))
     }
     if negative { mantissa = -mantissa }
     if has_exp {
-        let exp_text = str_slice_bytes(p, exp_start, exp_end)
-        mut exp_val = digits_to_i64(exp_text)
+        var exp_text = str_slice_bytes(p, exp_start, exp_end)
+        var exp_val = digits_to_i64(exp_text)
         if exp_negative { exp_val = -exp_val }
         mantissa = mantissa * pow10_signed(exp_val)
     }
@@ -393,9 +393,9 @@ fn parse_number(p: []byte, pos: u64) -> PResult | error {
 
 // the integer part ends where the fractional/exponent part (or the number) ends; this
 // helper just re-derives that boundary cheaply by rescanning (numbers are short).
-fn int_end_of(p: []byte, pos: u64, negative: bool) -> u64 {
-    let sign_width = if negative { 1 to u64 } else { 0 to u64 }
-    mut at = pos + sign_width
+fn int_end_of(p: []byte, pos: u64, negative: bool): u64 {
+    var sign_width = if negative { 1 to u64 } else { 0 to u64 }
+    var at = pos + sign_width
     if at < p.len && p[at] == b'0' { return at + 1 }
     loop {
         if at >= p.len || !is_digit_byte(p[at]) { break }
@@ -404,9 +404,9 @@ fn int_end_of(p: []byte, pos: u64, negative: bool) -> u64 {
     at
 }
 
-fn str_slice_bytes(p: []byte, from: u64, to_pos: u64) -> str {
-    mut out: str = ""
-    mut i = from
+fn str_slice_bytes(p: []byte, from: u64, to_pos: u64): str {
+    var out: str = ""
+    var i = from
     loop {
         if i >= to_pos { break }
         out = out ~ one_byte(p[i])
@@ -416,33 +416,33 @@ fn str_slice_bytes(p: []byte, from: u64, to_pos: u64) -> str {
 }
 
 // decimal-digit text (ASCII '0'-'9' only, as produced by the scans above) -> f64.
-fn digits_to_f64(digits: str) -> f64 {
-    mut v: f64 = 0.0
-    mut i: u64 = 0
+fn digits_to_f64(digits: str): f64 {
+    var v: f64 = 0.0
+    var i: u64 = 0
     loop {
         if i >= digits.len { break }
-        let d = ((digits[i] to i64) - (b'0' to i64)) to f64
+        var d = ((digits[i] to i64) - (b'0' to i64)) to f64
         v = (v * 10.0) + d
         i++
     }
     v
 }
 
-fn digits_to_i64(digits: str) -> i64 {
-    mut v: i64 = 0
-    mut i: u64 = 0
+fn digits_to_i64(digits: str): i64 {
+    var v: i64 = 0
+    var i: u64 = 0
     loop {
         if i >= digits.len { break }
-        let d = (digits[i] to i64) - (b'0' to i64)
+        var d = (digits[i] to i64) - (b'0' to i64)
         v = (v * 10) + d
         i++
     }
     v
 }
 
-fn pow10(n: u64) -> f64 {
-    mut v: f64 = 1.0
-    mut i: u64 = 0
+fn pow10(n: u64): f64 {
+    var v: f64 = 1.0
+    var i: u64 = 0
     loop {
         if i >= n { break }
         v = v * 10.0
@@ -451,7 +451,7 @@ fn pow10(n: u64) -> f64 {
     v
 }
 
-fn pow10_signed(n: i64) -> f64 {
+fn pow10_signed(n: i64): f64 {
     if n >= 0 { return pow10(n to u64) }
     1.0 / pow10((-n) to u64)
 }
@@ -460,10 +460,10 @@ fn pow10_signed(n: i64) -> f64 {
 
 // decode(text) — parse a complete JSON document. Trailing (non-whitespace) input after
 // the top-level value is an error (RFC 8259 §2 — a JSON text is EXACTLY one value).
-pub fn decode(text: str) -> JsonValue | error {
-    let bytes = bytes_of_str(text)
-    let result = match parse_value(bytes, 0) { PResult as r => r; error as e => return e }
-    let after = skip_ws(bytes, result.pos)
+pub fn decode(text: str): JsonValue | error {
+    var bytes = bytes_of_str(text)
+    var result = match parse_value(bytes, 0) { PResult as r => r; error as e => return e }
+    var after = skip_ws(bytes, result.pos)
     if after != bytes.len {
         return error { message = concat("json: unexpected trailing input at offset ", i64_to_str(after to i64)) }
     }
@@ -473,7 +473,7 @@ pub fn decode(text: str) -> JsonValue | error {
 // --- the encoder: JsonValue -> str, always total (a well-formed tree is always
 // representable, so no `| error` — mirrors teko::compress::write_zip's totality). ---
 
-pub fn encode(value: JsonValue) -> str {
+pub fn encode(value: JsonValue): str {
     match value {
         JsonNull => "null"
         JsonBool as b => if b.value { "true" } else { "false" }
@@ -484,9 +484,9 @@ pub fn encode(value: JsonValue) -> str {
     }
 }
 
-fn encode_array(items: []JsonValue) -> str {
-    mut out = "["
-    mut i: u64 = 0
+fn encode_array(items: []JsonValue): str {
+    var out = "["
+    var i: u64 = 0
     loop {
         if i >= items.len { break }
         if i > 0 { out = out ~ "," }
@@ -496,9 +496,9 @@ fn encode_array(items: []JsonValue) -> str {
     out ~ "]"
 }
 
-fn encode_object(keys: []str, values: []JsonValue) -> str {
-    mut out = "{"
-    mut i: u64 = 0
+fn encode_object(keys: []str, values: []JsonValue): str {
+    var out = "{"
+    var i: u64 = 0
     loop {
         if i >= keys.len { break }
         if i > 0 { out = out ~ "," }
@@ -515,12 +515,12 @@ fn encode_object(keys: []str, values: []JsonValue) -> str {
 // spec (§8.1) and Teko `str` already carries that invariant (B.36), so no re-encoding
 // is needed for the non-ASCII case, only for control characters and the two
 // structural characters.
-fn encode_string(s: str) -> str {
-    mut out = "\""
-    mut i: u64 = 0
+fn encode_string(s: str): str {
+    var out = "\""
+    var i: u64 = 0
     loop {
         if i >= s.len { break }
-        let b = s[i]
+        var b = s[i]
         if b == b'"' { out = out ~ "\\\""; i++; continue }
         if b == b'\\' { out = out ~ "\\\\"; i++; continue }
         if b == b'\n' { out = out ~ "\\n"; i++; continue }
@@ -539,11 +539,11 @@ fn encode_string(s: str) -> str {
     out ~ "\""
 }
 
-fn hex4_of(v: i64) -> str {
+fn hex4_of(v: i64): str {
     one_byte(hex_nibble(((v >> 12) & 0xF))) ~ one_byte(hex_nibble(((v >> 8) & 0xF))) ~ one_byte(hex_nibble(((v >> 4) & 0xF))) ~ one_byte(hex_nibble(v & 0xF))
 }
 
-fn hex_nibble(v: i64) -> byte {
+fn hex_nibble(v: i64): byte {
     if v < 10 { return ((b'0' to i64) + v) to byte }
     ((b'a' to i64) + (v - 10)) to byte
 }
@@ -556,7 +556,7 @@ fn hex_nibble(v: i64) -> byte {
 // spirit as regex's documented ROUND 0 exclusions: values needing exponent form to be
 // exact at extreme magnitudes are rare in the JSON-as-config/API use case this unit
 // targets first, and a shortest-round-trip float formatter is its own sub-problem.)
-fn encode_number(v: f64) -> str {
+fn encode_number(v: f64): str {
     if v == (v to i64 to f64) && v >= -9223372036854775808.0 && v <= 9223372036854775807.0 {
         return i64_to_str(v to i64)
     }
@@ -565,29 +565,29 @@ fn encode_number(v: f64) -> str {
 
 // fixed-point fallback for non-integral numbers: sign, integer part, '.', up to 9
 // fractional digits with trailing zeros trimmed (never emitting a bare trailing '.').
-fn encode_float_fixed(v: f64) -> str {
-    mut x = v
-    mut sign = ""
+fn encode_float_fixed(v: f64): str {
+    var x = v
+    var sign = ""
     if x < 0.0 { sign = "-"; x = -x }
-    let int_part = x to i64
-    mut frac = x - (int_part to f64)
-    mut digits = ""
-    mut i: u64 = 0
+    var int_part = x to i64
+    var frac = x - (int_part to f64)
+    var digits = ""
+    var i: u64 = 0
     loop {
         if i >= 9 { break }
         frac = frac * 10.0
-        let d = frac to i64
+        var d = frac to i64
         digits = digits ~ one_byte(((b'0' to i64) + d) to byte)
         frac = frac - (d to f64)
         i++
     }
-    let trimmed = trim_trailing_zeros(digits)
+    var trimmed = trim_trailing_zeros(digits)
     if trimmed.len == 0 { return sign ~ i64_to_str(int_part) }
     sign ~ i64_to_str(int_part) ~ "." ~ trimmed
 }
 
-fn trim_trailing_zeros(digits: str) -> str {
-    mut end = digits.len
+fn trim_trailing_zeros(digits: str): str {
+    var end = digits.len
     loop {
         if end == 0 || digits[end - 1] != b'0' { break }
         end--
@@ -602,8 +602,8 @@ fn trim_trailing_zeros(digits: str) -> str {
 // object sizes make this the right complexity/simplicity trade for now (matches the
 // parallel-slices shape; a hashed lookup is exactly what `teko::collections::Map`
 // integration — noted above — will later provide for large/hot-path objects).
-pub fn object_get(obj: JsonObject, key: str) -> JsonValue | null {
-    mut i: u64 = 0
+pub fn object_get(obj: JsonObject, key: str): JsonValue | null {
+    var i: u64 = 0
     loop {
         if i >= obj.keys.len { break }
         if str_eq(obj.keys[i], key) { return obj.values[i] }
@@ -612,9 +612,9 @@ pub fn object_get(obj: JsonObject, key: str) -> JsonValue | null {
     null
 }
 
-fn str_eq(a: str, b: str) -> bool {
+fn str_eq(a: str, b: str): bool {
     if a.len != b.len { return false }
-    mut i: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= a.len { break }
         if a[i] != b[i] { return false }
@@ -625,7 +625,7 @@ fn str_eq(a: str, b: str) -> bool {
 
 // array_get(arr, index) — bounds-checked element access, or `null` when out of range
 // (mirrors object_get's absent-key shape so callers handle "missing" uniformly).
-pub fn array_get(arr: JsonArray, index: u64) -> JsonValue | null {
+pub fn array_get(arr: JsonArray, index: u64): JsonValue | null {
     if index >= arr.items.len { return null }
     arr.items[index]
 }

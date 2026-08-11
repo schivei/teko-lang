@@ -25,7 +25,7 @@ fn verdict_channel_path_reads_the_env_var() {
  *
  * @return this test's own channel name, relative to the working directory
  */
-fn verdict_path_test_channel() -> str { teko::test::scoped(".teko-verdict-path-test.chan") }
+fn verdict_path_test_channel(): str { teko::test::scoped(".teko-verdict-path-test.chan") }
 
 /**
  * verdict_emit_test_channel — the channel file `verdict_emit_appends_to_the_named_channel` writes,
@@ -45,7 +45,7 @@ fn verdict_path_test_channel() -> str { teko::test::scoped(".teko-verdict-path-t
  *
  * @return this test's own channel file, relative to the working directory
  */
-fn verdict_emit_test_channel() -> str { teko::test::scoped(".teko-verdict-emit-test.chan") }
+fn verdict_emit_test_channel(): str { teko::test::scoped(".teko-verdict-emit-test.chan") }
 
 /**
  * verdict_emit_ok — did `verdict_emit(line)` report success?
@@ -57,7 +57,7 @@ fn verdict_emit_test_channel() -> str { teko::test::scoped(".teko-verdict-emit-t
  * @param line  the record to append, WITHOUT a trailing newline
  * @return      true iff `verdict_emit` returned `null` (the append landed)
  */
-fn verdict_emit_ok(line: str) -> bool {
+fn verdict_emit_ok(line: str): bool {
     match verdict_emit(line) { null => true; error => false }
 }
 
@@ -75,12 +75,12 @@ fn verdict_emit_ok(line: str) -> bool {
  * @return void
  */
 fn verdict_emit_appends_to_the_named_channel() {
-    let path = verdict_emit_test_channel()
+    var path = verdict_emit_test_channel()
     match teko::fs::remove_file(path) { error => { }; null => { } }
     match teko::env::set_var(VERDICT_CHANNEL_ENV, path) { error => { }; null => { } }
     teko::assert::is_true(verdict_emit_ok("first"))
     teko::assert::is_true(verdict_emit_ok("second"))
-    let content = match teko::io::read_file(path) { str as s => s; error => "" }
+    var content = match teko::io::read_file(path) { str as s => s; error => "" }
     teko::assert::is_true(content == "first\nsecond\n")
     match teko::fs::remove_file(path) { error => { }; null => { } }
 }
@@ -116,8 +116,8 @@ const PIPE_NO_EOF_DEADLINE_MS: i64 = 400
  * @param script  the shell script the child runs
  * @return        the child's argument vector
  */
-fn shell_argv(script: str) -> []str {
-    mut v: []str = teko::list::push(teko::list::empty(), "sh")
+fn shell_argv(script: str): []str {
+    var v: []str = teko::list::push(teko::list::empty(), "sh")
     v = teko::list::push(v, "-c")
     teko::list::push(v, script)
 }
@@ -136,9 +136,9 @@ fn shell_argv(script: str) -> []str {
  * @return             what the writer sent, or the drain's failure
  * @throws             when the deadline expired before end-of-file, or a read failed
  */
-fn drained(p: Pipe, deadline_ms: i64) -> str | error {
+fn drained(p: Pipe, deadline_ms: i64): str | error {
     match close_fd(p.write_fd) { error as e => return e; null => { } }
-    let got = read_to_eof(p.read_fd, deadline_ms)
+    var got = read_to_eof(p.read_fd, deadline_ms)
     match close_fd(p.read_fd) { error => { }; null => { } }
     got
 }
@@ -150,7 +150,7 @@ fn drained(p: Pipe, deadline_ms: i64) -> str | error {
  * @param deadline_ms  the total budget for the drain
  * @return             what the writer sent, or "" when the drain failed
  */
-fn drain_text(p: Pipe, deadline_ms: i64) -> str {
+fn drain_text(p: Pipe, deadline_ms: i64): str {
     match drained(p, deadline_ms) { str as s => s; error => "" }
 }
 
@@ -159,7 +159,7 @@ fn drain_text(p: Pipe, deadline_ms: i64) -> str {
  *
  * @return the pipe, with both ends open
  */
-fn opened_pipe() -> Pipe {
+fn opened_pipe(): Pipe {
     match pipe() {
         Pipe as p => p
         error => { teko::assert::is_true(false); Pipe { read_fd = NO_FD; write_fd = NO_FD } }
@@ -177,7 +177,7 @@ fn opened_pipe() -> Pipe {
  * @return void
  */
 fn pipe_returns_two_open_distinct_descriptors() {
-    let p = opened_pipe()
+    var p = opened_pipe()
     teko::assert::ge_i64(p.read_fd, 0)
     teko::assert::ge_i64(p.write_fd, 0)
     teko::assert::ne_i64(p.read_fd, p.write_fd)
@@ -196,7 +196,7 @@ fn pipe_returns_two_open_distinct_descriptors() {
  * @return void
  */
 fn closing_the_same_descriptor_twice_is_reported() {
-    let p = opened_pipe()
+    var p = opened_pipe()
     match close_fd(p.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
     match close_fd(p.write_fd) { error => { }; null => { teko::assert::is_true(false) } }
     match close_fd(p.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
@@ -213,8 +213,8 @@ fn closing_the_same_descriptor_twice_is_reported() {
  * @return void
  */
 fn a_child_stdout_arrives_through_the_pipe() {
-    let p = opened_pipe()
-    let h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    var p = opened_pipe()
+    var h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "pipe-mark")
     teko::assert::is_true(wait_one(h) == 0)
@@ -238,9 +238,9 @@ fn a_child_stdout_arrives_through_the_pipe() {
  * @return void
  */
 fn an_unconnected_pipe_delivers_nothing() {
-    let elsewhere = teko::test::scoped(".teko-pipe-elsewhere.out")
-    let p = opened_pipe()
-    let h = spawn_redirected(shell_argv("printf pipe-mark"), "", teko::list::empty(), "", elsewhere, "")
+    var elsewhere = teko::test::scoped(".teko-pipe-elsewhere.out")
+    var p = opened_pipe()
+    var h = spawn_redirected(shell_argv("printf pipe-mark"), "", teko::list::empty(), "", elsewhere, "")
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::is_true(wait_one(h) == 0)
     teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "")
@@ -259,8 +259,8 @@ fn an_unconnected_pipe_delivers_nothing() {
  * @return void
  */
 fn the_read_end_sees_eof_once_the_child_is_gone() {
-    let p = opened_pipe()
-    let h = spawn_redirected_fds(shell_argv("printf a; printf b"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    var p = opened_pipe()
+    var h = spawn_redirected_fds(shell_argv("printf a; printf b"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     match drained(p, PIPE_DEADLINE_MS) {
         str as s => teko::assert::eq_str(s, "ab")
@@ -283,8 +283,8 @@ fn the_read_end_sees_eof_once_the_child_is_gone() {
  * @return void
  */
 fn a_write_end_left_open_in_the_parent_withholds_eof() {
-    let p = opened_pipe()
-    let h = spawn_redirected_fds(shell_argv("printf half"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    var p = opened_pipe()
+    var h = spawn_redirected_fds(shell_argv("printf half"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::is_true(wait_one(h) == 0)
     match read_to_eof(p.read_fd, PIPE_NO_EOF_DEADLINE_MS) {
@@ -312,8 +312,8 @@ fn a_write_end_left_open_in_the_parent_withholds_eof() {
  * @return void
  */
 fn one_write_end_can_back_both_child_streams() {
-    let p = opened_pipe()
-    let h = spawn_redirected_fds(shell_argv("printf O; printf E 1>&2"), "", teko::list::empty(), NO_FD, p.write_fd, p.write_fd)
+    var p = opened_pipe()
+    var h = spawn_redirected_fds(shell_argv("printf O; printf E 1>&2"), "", teko::list::empty(), NO_FD, p.write_fd, p.write_fd)
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "OE")
     teko::assert::is_true(wait_one(h) == 0)
@@ -330,10 +330,10 @@ fn one_write_end_can_back_both_child_streams() {
  * @return void
  */
 fn a_pipe_can_feed_the_child_stdin() {
-    let feed = opened_pipe()
-    let cap = opened_pipe()
+    var feed = opened_pipe()
+    var cap = opened_pipe()
     match close_fd(feed.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
-    let h = spawn_redirected_fds(shell_argv("cat; printf .done"), "", teko::list::empty(), feed.read_fd, cap.write_fd, NO_FD)
+    var h = spawn_redirected_fds(shell_argv("cat; printf .done"), "", teko::list::empty(), feed.read_fd, cap.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     match close_fd(feed.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
     teko::assert::eq_str(drain_text(cap, PIPE_DEADLINE_MS), ".done")
@@ -353,12 +353,12 @@ fn a_pipe_can_feed_the_child_stdin() {
  * @return void
  */
 fn the_path_route_is_unchanged() {
-    let outp = teko::test::scoped(".teko-pipe-path-route.out")
+    var outp = teko::test::scoped(".teko-pipe-path-route.out")
     match teko::fs::remove_file(outp) { error => { }; null => { } }
-    let h = spawn_redirected(shell_argv("printf path-mark"), "", teko::list::empty(), "", outp, "")
+    var h = spawn_redirected(shell_argv("printf path-mark"), "", teko::list::empty(), "", outp, "")
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::is_true(wait_one(h) == 0)
-    let got = match teko::io::read_file(outp) { str as s => s; error => "" }
+    var got = match teko::io::read_file(outp) { str as s => s; error => "" }
     teko::assert::eq_str(got, "path-mark")
     match teko::fs::remove_file(outp) { error => { }; null => { } }
 }
@@ -375,7 +375,7 @@ fn the_path_route_is_unchanged() {
  * @return void
  */
 fn a_fill_on_a_broken_descriptor_is_an_error_not_an_end_of_file() {
-    let p = opened_pipe()
+    var p = opened_pipe()
     match close_fd(p.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
     match close_fd(p.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
     match fd_fill(p.read_fd, PIPE_NO_EOF_DEADLINE_MS) {
@@ -409,7 +409,7 @@ const APPEND_RECORDS: u64 = 800
  * @param k  the record's index
  * @return   the record, WITHOUT a trailing newline
  */
-fn append_record_text(k: u64) -> str {
+fn append_record_text(k: u64): str {
     "record-" ~ teko::str::u64_to_str(k) ~ "-0123456789012345678901234567890123456789"
 }
 
@@ -420,9 +420,9 @@ fn append_record_text(k: u64) -> str {
  * @param n     how many records
  * @return      true iff every append reported success
  */
-fn append_all(path: str, n: u64) -> bool {
-    mut ok = true
-    mut k: u64 = 0
+fn append_all(path: str, n: u64): bool {
+    var ok = true
+    var k: u64 = 0
     loop {
         if k >= n { break }
         match teko::io::append_file(path, append_record_text(k) ~ "\n") { error => { ok = false }; null => { } }
@@ -450,12 +450,12 @@ fn append_all(path: str, n: u64) -> bool {
  * @param n     how many records
  * @return      true iff every rewrite reported success
  */
-fn rewrite_all(path: str, n: u64) -> bool {
-    mut ok = true
-    mut k: u64 = 0
+fn rewrite_all(path: str, n: u64): bool {
+    var ok = true
+    var k: u64 = 0
     loop {
         if k >= n { break }
-        let prior = match teko::io::read_file(path) { str as s => s; error => "" }
+        var prior = match teko::io::read_file(path) { str as s => s; error => "" }
         match teko::io::write_file(path, prior ~ append_record_text(k) ~ "\n") { error => { ok = false }; null => { } }
         k = k + 1
     }
@@ -469,8 +469,8 @@ fn rewrite_all(path: str, n: u64) -> bool {
  * @param k     the line index
  * @return      that line, or "" when there are fewer
  */
-fn nth_line(text: str, k: u64) -> str {
-    let lines = teko::iter::split_lines(text)
+fn nth_line(text: str, k: u64): str {
+    var lines = teko::iter::split_lines(text)
     if k >= lines.len { return "" }
     lines[k]
 }
@@ -482,7 +482,7 @@ fn nth_line(text: str, k: u64) -> str {
  * @param text  the whole file
  * @return      the count of lines
  */
-fn lines_in(text: str) -> u64 { teko::iter::split_lines(text).len }
+fn lines_in(text: str): u64 { teko::iter::split_lines(text).len }
 
 #test
 /**
@@ -497,10 +497,10 @@ fn lines_in(text: str) -> u64 { teko::iter::split_lines(text).len }
  * @return void
  */
 fn append_file_keeps_every_record_in_order() {
-    let path = teko::test::scoped(".teko-append-order.log")
+    var path = teko::test::scoped(".teko-append-order.log")
     match teko::fs::remove_file(path) { error => { }; null => { } }
     teko::assert::is_true(append_all(path, APPEND_RECORDS))
-    let text = match teko::io::read_file(path) { str as s => s; error => "" }
+    var text = match teko::io::read_file(path) { str as s => s; error => "" }
     teko::assert::eq_u64(lines_in(text), APPEND_RECORDS)
     teko::assert::eq_str(nth_line(text, 0), append_record_text(0))
     teko::assert::eq_str(nth_line(text, APPEND_RECORDS / 2), append_record_text(APPEND_RECORDS / 2))
@@ -519,14 +519,14 @@ fn append_file_keeps_every_record_in_order() {
  * @return void
  */
 fn append_file_and_the_old_rewrite_agree_byte_for_byte() {
-    let by_append = teko::test::scoped(".teko-append-agree-a.log")
-    let by_rewrite = teko::test::scoped(".teko-append-agree-b.log")
+    var by_append = teko::test::scoped(".teko-append-agree-a.log")
+    var by_rewrite = teko::test::scoped(".teko-append-agree-b.log")
     match teko::fs::remove_file(by_append) { error => { }; null => { } }
     match teko::fs::remove_file(by_rewrite) { error => { }; null => { } }
     teko::assert::is_true(append_all(by_append, 64))
     teko::assert::is_true(rewrite_all(by_rewrite, 64))
-    let a = match teko::io::read_file(by_append) { str as s => s; error => "" }
-    let b = match teko::io::read_file(by_rewrite) { str as s => s; error => "" }
+    var a = match teko::io::read_file(by_append) { str as s => s; error => "" }
+    var b = match teko::io::read_file(by_rewrite) { str as s => s; error => "" }
     teko::assert::eq_str(a, b)
     match teko::fs::remove_file(by_append) { error => { }; null => { } }
     match teko::fs::remove_file(by_rewrite) { error => { }; null => { } }

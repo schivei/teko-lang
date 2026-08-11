@@ -20,7 +20,7 @@ pub const GZIP_MAGIC: []byte = [0x1F to byte, 0x8B to byte]
  *
  * @return  `8` (DEFLATE — the only method RFC 1952 defines)
  */
-fn gzip_cm_deflate() -> byte { 8 to byte }
+fn gzip_cm_deflate(): byte { 8 to byte }
 
 /**
  * The 10-byte gzip member header this module emits: magic, `CM = 8`, `FLG = 0` (no
@@ -30,9 +30,9 @@ fn gzip_cm_deflate() -> byte { 8 to byte }
  *
  * @return  the fixed 10-byte header
  */
-fn gzip_header() -> []byte {
-    mut out: []byte = teko::list::empty()
-    let magic = GZIP_MAGIC
+fn gzip_header(): []byte {
+    var out: []byte = teko::list::empty()
+    var magic = GZIP_MAGIC
     out = teko::list::push(out, magic[0])
     out = teko::list::push(out, magic[1])
     out = teko::list::push(out, gzip_cm_deflate())
@@ -54,24 +54,24 @@ fn gzip_header() -> []byte {
  * @param data  the bytes to compress
  * @return      the framed gzip stream
  */
-pub fn gzip_compress(data: []byte) -> []byte {
-    mut out = gzip_header()
+pub fn gzip_compress(data: []byte): []byte {
+    var out = gzip_header()
 
-    let payload = teko::compress::deflate(data)
-    mut i: u64 = 0
+    var payload = teko::compress::deflate(data)
+    var i: u64 = 0
     loop {
         if i >= payload.len { break }
         out = teko::list::push(out, payload[i])
         i++
     }
 
-    let crc = teko::compress::crc32_of(data)
+    var crc = teko::compress::crc32_of(data)
     out = teko::list::push(out, (crc & 0xFF) to byte)
     out = teko::list::push(out, ((crc >> 8) & 0xFF) to byte)
     out = teko::list::push(out, ((crc >> 16) & 0xFF) to byte)
     out = teko::list::push(out, ((crc >> 24) & 0xFF) to byte)
 
-    let isize = (data.len % 4294967296) to u32
+    var isize = (data.len % 4294967296) to u32
     out = teko::list::push(out, (isize & 0xFF) to byte)
     out = teko::list::push(out, ((isize >> 8) & 0xFF) to byte)
     out = teko::list::push(out, ((isize >> 16) & 0xFF) to byte)
@@ -95,25 +95,25 @@ pub fn gzip_compress(data: []byte) -> []byte {
  * @throws      when `data.len < 18`, the magic bytes mismatch, `CM != 8`, `FLG != 0`, or
  *              the trailing CRC-32/ISIZE mismatches
  */
-pub fn gzip_decompress(data: []byte) -> []byte | error {
+pub fn gzip_decompress(data: []byte): []byte | error {
     if data.len < 18 { return error { message = "gzip: stream too short for header + trailer" } }
 
-    let magic = GZIP_MAGIC
+    var magic = GZIP_MAGIC
     if data[0] != magic[0] || data[1] != magic[1] { return error { message = "gzip: bad magic bytes" } }
     if data[2] != gzip_cm_deflate() { return error { message = "gzip: unsupported compression method" } }
     if data[3] != (0 to byte) { return error { message = "gzip: optional header fields are not supported" } }
 
-    let payload = slice_bytes(data, 10, data.len - 8)
-    let decompressed = match teko::compress::inflate(payload) { []byte as b => b; error as e => return e }
+    var payload = slice_bytes(data, 10, data.len - 8)
+    var decompressed = match teko::compress::inflate(payload) { []byte as b => b; error as e => return e }
 
-    let trailer_pos = data.len - 8
-    let expected_crc = (data[trailer_pos] to u32) | ((data[trailer_pos + 1] to u32) << 8) | ((data[trailer_pos + 2] to u32) << 16) | ((data[trailer_pos + 3] to u32) << 24)
-    let actual_crc = teko::compress::crc32_of(decompressed)
+    var trailer_pos = data.len - 8
+    var expected_crc = (data[trailer_pos] to u32) | ((data[trailer_pos + 1] to u32) << 8) | ((data[trailer_pos + 2] to u32) << 16) | ((data[trailer_pos + 3] to u32) << 24)
+    var actual_crc = teko::compress::crc32_of(decompressed)
     if expected_crc != actual_crc { return error { message = "gzip: CRC-32 checksum mismatch" } }
 
-    let isize_pos = trailer_pos + 4
-    let expected_isize = (data[isize_pos] to u32) | ((data[isize_pos + 1] to u32) << 8) | ((data[isize_pos + 2] to u32) << 16) | ((data[isize_pos + 3] to u32) << 24)
-    let actual_isize = (decompressed.len % 4294967296) to u32
+    var isize_pos = trailer_pos + 4
+    var expected_isize = (data[isize_pos] to u32) | ((data[isize_pos + 1] to u32) << 8) | ((data[isize_pos + 2] to u32) << 16) | ((data[isize_pos + 3] to u32) << 24)
+    var actual_isize = (decompressed.len % 4294967296) to u32
     if expected_isize != actual_isize { return error { message = "gzip: ISIZE mismatch" } }
 
     decompressed

@@ -8,8 +8,8 @@
  * @param root     the subtree's root
  * @return         true when walking `region`'s parents arrives at `root`
  */
-pub fn region_reaches(control: u64, region: u64, root: u64) -> bool {
-    mut current = region
+pub fn region_reaches(control: u64, region: u64, root: u64): bool {
+    var current = region
     loop {
         if current == 0 { break }
         if current == root { return true }
@@ -31,12 +31,12 @@ pub fn region_reaches(control: u64, region: u64, root: u64) -> bool {
  * @param root     the subtree's root
  * @return         the head of the detached list of doomed regions, or 0 when none
  */
-pub fn subtree_collect(control: u64, root: u64) -> u64 {
-    mut doomed: u64 = 0
-    mut current = ctrl_get(control, CTRL_REGS)
+pub fn subtree_collect(control: u64, root: u64): u64 {
+    var doomed: u64 = 0
+    var current = ctrl_get(control, CTRL_REGS)
     loop {
         if current == 0 { break }
-        let next = region_get(control, current, REGION_REG_NEXT)
+        var next = region_get(control, current, REGION_REG_NEXT)
         if region_reaches(control, current, root) {
             registry_unlink(control, current)
             region_set(current, REGION_REG_NEXT, doomed)
@@ -59,10 +59,10 @@ pub fn subtree_collect(control: u64, root: u64) -> u64 {
  */
 pub fn region_drop_subtree(control: u64, root: u64) {
     if root == 0 { return }
-    mut doomed = subtree_collect(control, root)
+    var doomed = subtree_collect(control, root)
     loop {
         if doomed == 0 { break }
-        let next = region_get(control, doomed, REGION_REG_NEXT)
+        var next = region_get(control, doomed, REGION_REG_NEXT)
         region_release(control, doomed)
         doomed = next
     }
@@ -76,7 +76,7 @@ pub fn region_drop_subtree(control: u64, root: u64) {
  * @param index    the entry's position in the table
  * @return         the entry's base address
  */
-pub fn entry_slot(control: u64, region: u64, index: u64) -> u64 {
+pub fn entry_slot(control: u64, region: u64, index: u64): u64 {
     region_get(control, region, REGION_ENTRIES) + index * ENTRY_BYTES
 }
 
@@ -90,9 +90,9 @@ pub fn entry_slot(control: u64, region: u64, index: u64) -> u64 {
  * @param type_id  the type identifier to find
  * @return         the entry's index, or the table's length when absent
  */
-pub fn entry_index_of(control: u64, region: u64, type_id: u64) -> u64 {
-    let count = region_get(control, region, REGION_NENTRIES)
-    mut i: u64 = 0
+pub fn entry_index_of(control: u64, region: u64, type_id: u64): u64 {
+    var count = region_get(control, region, REGION_NENTRIES)
+    var i: u64 = 0
     loop {
         if i >= count { break }
         if ctrl_load(control, entry_slot(control, region, i) + ENTRY_TYPE_ID) == type_id { return i }
@@ -112,11 +112,11 @@ pub fn entry_index_of(control: u64, region: u64, type_id: u64) -> u64 {
  * @return         nothing
  */
 pub fn entries_grow(control: u64, region: u64) {
-    let old_cap = region_get(control, region, REGION_ENTRIES_CAP)
-    let new_cap = if old_cap == 0 { ENTRIES_FIRST_CAP } else { old_cap * 2 }
-    let old_table = region_get(control, region, REGION_ENTRIES)
-    let new_table = raw_alloc(new_cap * ENTRY_BYTES)
-    let used = region_get(control, region, REGION_NENTRIES) * ENTRY_BYTES
+    var old_cap = region_get(control, region, REGION_ENTRIES_CAP)
+    var new_cap = if old_cap == 0 { ENTRIES_FIRST_CAP } else { old_cap * 2 }
+    var old_table = region_get(control, region, REGION_ENTRIES)
+    var new_table = raw_alloc(new_cap * ENTRY_BYTES)
+    var used = region_get(control, region, REGION_NENTRIES) * ENTRY_BYTES
     if used > 0 { _ = c_memcpy(new_table, old_table, used) }
     c_free(old_table)
     region_set(region, REGION_ENTRIES, new_table)
@@ -136,14 +136,14 @@ pub fn entries_grow(control: u64, region: u64) {
  */
 pub fn region_register(control: u64, region: u64, type_id: u64, instance: u64) {
     if region == 0 { return }
-    let count = region_get(control, region, REGION_NENTRIES)
-    let found = entry_index_of(control, region, type_id)
+    var count = region_get(control, region, REGION_NENTRIES)
+    var found = entry_index_of(control, region, type_id)
     if found < count {
         store_word(entry_slot(control, region, found) + ENTRY_INSTANCE, instance)
         return
     }
     if count == region_get(control, region, REGION_ENTRIES_CAP) { entries_grow(control, region) }
-    let slot = entry_slot(control, region, count)
+    var slot = entry_slot(control, region, count)
     store_word(slot + ENTRY_TYPE_ID, type_id)
     store_word(slot + ENTRY_INSTANCE, instance)
     region_set(region, REGION_NENTRIES, count + 1)
@@ -159,12 +159,12 @@ pub fn region_register(control: u64, region: u64, type_id: u64, instance: u64) {
  * @param type_id  the type identifier to resolve
  * @return         the bound instance address, or 0
  */
-pub fn region_lookup(control: u64, region: u64, type_id: u64) -> u64 {
-    mut current = region
+pub fn region_lookup(control: u64, region: u64, type_id: u64): u64 {
+    var current = region
     loop {
         if current == 0 { break }
-        let count = region_get(control, current, REGION_NENTRIES)
-        let found = entry_index_of(control, current, type_id)
+        var count = region_get(control, current, REGION_NENTRIES)
+        var found = entry_index_of(control, current, type_id)
         if found < count { return ctrl_load(control, entry_slot(control, current, found) + ENTRY_INSTANCE) }
         current = region_get(control, current, REGION_PARENT)
     }

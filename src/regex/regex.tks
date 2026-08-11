@@ -92,8 +92,8 @@ pub type Regex = struct { pattern: str; ast: RegexNode }
 
 // --- the []RegexNode-of-one helper pair (the interpreter workaround plumbing) ---
 
-fn one(node: RegexNode) -> []RegexNode { teko::list::push(teko::list::empty(), node) }
-fn one_of(wrapped: []RegexNode) -> RegexNode { wrapped[0] }
+fn one(node: RegexNode): []RegexNode { teko::list::push(teko::list::empty(), node) }
+fn one_of(wrapped: []RegexNode): RegexNode { wrapped[0] }
 
 // --- pattern scanning helpers (over the pattern's raw UTF-8 bytes) ---
 
@@ -117,7 +117,7 @@ pub type CPScan = struct {
  * @param b0  the lead byte of a codepoint
  * @return    1 for ASCII, 2/3/4 for a two/three/four-byte lead
  */
-fn utf8_width(b0: byte) -> u64 {
+fn utf8_width(b0: byte): u64 {
     if b0 <= 0x7F { return 1 }
     if b0 <= 0xDF { return 2 }
     if b0 <= 0xEF { return 3 }
@@ -141,34 +141,34 @@ fn utf8_width(b0: byte) -> u64 {
  * @param pos  the byte offset of the codepoint's lead byte
  * @return     the decoded codepoint and its width in bytes
  */
-fn decode_codepoint(p: []byte, pos: u64) -> CPScan {
-    let width = utf8_width(p[pos])
+fn decode_codepoint(p: []byte, pos: u64): CPScan {
+    var width = utf8_width(p[pos])
     if width == 1 { return CPScan { cp = p[pos] to u32; width = width } }
     if width == 2 {
-        let b0 = p[pos] to u32
-        let b1 = p[pos + 1] to u32
+        var b0 = p[pos] to u32
+        var b1 = p[pos + 1] to u32
         return CPScan { cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F); width = width }
     }
     if width == 3 {
-        let b0 = p[pos] to u32
-        let b1 = p[pos + 1] to u32
-        let b2 = p[pos + 2] to u32
+        var b0 = p[pos] to u32
+        var b1 = p[pos + 1] to u32
+        var b2 = p[pos + 2] to u32
         return CPScan { cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F); width = width }
     }
-    let b0 = p[pos] to u32
-    let b1 = p[pos + 1] to u32
-    let b2 = p[pos + 2] to u32
-    let b3 = p[pos + 3] to u32
+    var b0 = p[pos] to u32
+    var b1 = p[pos + 1] to u32
+    var b2 = p[pos + 2] to u32
+    var b3 = p[pos + 3] to u32
     CPScan { cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F); width = width }
 }
 
-fn codepoints_of(input: str) -> []u32 {
-    let bytes = bytes_of_str(input)
-    mut out: []u32 = teko::list::empty()
-    mut pos: u64 = 0
+fn codepoints_of(input: str): []u32 {
+    var bytes = bytes_of_str(input)
+    var out: []u32 = teko::list::empty()
+    var pos: u64 = 0
     loop {
         if pos >= bytes.len { break }
-        let scan = decode_codepoint(bytes, pos)
+        var scan = decode_codepoint(bytes, pos)
         out = teko::list::push(out, scan.cp)
         pos = pos + scan.width
     }
@@ -187,13 +187,13 @@ fn codepoints_of(input: str) -> []u32 {
 // the same idiom the lexer itself uses).
 pub type PState = struct { pos: u64; node: RegexNode }
 
-fn parse_alt(p: []byte, pos: u64) -> PState | error {
-    let first = match parse_concat(p, pos) { PState as s => s; error as e => return e }
-    mut branches: []RegexNode = teko::list::push(teko::list::empty(), first.node)
-    mut at = first.pos
+fn parse_alt(p: []byte, pos: u64): PState | error {
+    var first = match parse_concat(p, pos) { PState as s => s; error as e => return e }
+    var branches: []RegexNode = teko::list::push(teko::list::empty(), first.node)
+    var at = first.pos
     loop {
         if at >= p.len || p[at] != b'|' { break }
-        let next = match parse_concat(p, at + 1) { PState as s => s; error as e => return e }
+        var next = match parse_concat(p, at + 1) { PState as s => s; error as e => return e }
         branches = teko::list::push(branches, next.node)
         at = next.pos
     }
@@ -201,12 +201,12 @@ fn parse_alt(p: []byte, pos: u64) -> PState | error {
     PState { pos = at; node = RAlt { branches = branches } }
 }
 
-fn parse_concat(p: []byte, pos: u64) -> PState | error {
-    mut parts: []RegexNode = teko::list::empty()
-    mut at = pos
+fn parse_concat(p: []byte, pos: u64): PState | error {
+    var parts: []RegexNode = teko::list::empty()
+    var at = pos
     loop {
         if at >= p.len || p[at] == b'|' || p[at] == b')' { break }
-        let step = match parse_repeat(p, at) { PState as s => s; error as e => return e }
+        var step = match parse_repeat(p, at) { PState as s => s; error as e => return e }
         parts = teko::list::push(parts, step.node)
         at = step.pos
     }
@@ -215,8 +215,8 @@ fn parse_concat(p: []byte, pos: u64) -> PState | error {
     PState { pos = at; node = RConcat { parts = parts } }
 }
 
-fn parse_repeat(p: []byte, pos: u64) -> PState | error {
-    let base = match parse_atom(p, pos) { PState as s => s; error as e => return e }
+fn parse_repeat(p: []byte, pos: u64): PState | error {
+    var base = match parse_atom(p, pos) { PState as s => s; error as e => return e }
     if base.pos < p.len && p[base.pos] == b'*' {
         return PState { pos = base.pos + 1; node = RStar { inner = one(base.node) } }
     }
@@ -239,14 +239,14 @@ fn parse_repeat(p: []byte, pos: u64) -> PState | error {
  * @return     the parsed node and the position just past it
  * @throws     an unterminated group, a bare `\`, a stray `)`, or a quantifier with nothing to repeat
  */
-fn parse_atom(p: []byte, pos: u64) -> PState | error {
+fn parse_atom(p: []byte, pos: u64): PState | error {
     if pos >= p.len { return error { message = "regex: unexpected end of pattern" } }
-    let b = p[pos]
+    var b = p[pos]
     if b == b'.' { return PState { pos = pos + 1; node = RAny { } } }
     if b == b'^' { return PState { pos = pos + 1; node = RStart { } } }
     if b == b'$' { return PState { pos = pos + 1; node = REnd { } } }
     if b == b'(' {
-        let inner = match parse_alt(p, pos + 1) { PState as s => s; error as e => return e }
+        var inner = match parse_alt(p, pos + 1) { PState as s => s; error as e => return e }
         if inner.pos >= p.len || p[inner.pos] != b')' {
             return error { message = "regex: unterminated group — expected ')'" }
         }
@@ -260,7 +260,7 @@ fn parse_atom(p: []byte, pos: u64) -> PState | error {
     if b == b'*' || b == b'+' || b == b'?' {
         return error { message = "regex: quantifier with nothing to repeat" }
     }
-    let scan = decode_codepoint(p, pos)
+    var scan = decode_codepoint(p, pos)
     PState { pos = pos + scan.width; node = RChar { cp = scan.cp } }
 }
 
@@ -275,20 +275,20 @@ fn parse_atom(p: []byte, pos: u64) -> PState | error {
  * @return     the parsed `RClass` node and the position just past its closing `]`
  * @throws     an unterminated or empty class, or a range whose endpoints are out of order
  */
-fn parse_class(p: []byte, pos: u64) -> PState | error {
-    mut at = pos
-    mut negate = false
+fn parse_class(p: []byte, pos: u64): PState | error {
+    var at = pos
+    var negate = false
     if at < p.len && p[at] == b'^' { negate = true; at = at + 1 }
-    mut ranges: []RRange = teko::list::empty()
-    mut first = true
+    var ranges: []RRange = teko::list::empty()
+    var first = true
     loop {
         if at >= p.len { return error { message = "regex: unterminated character class — expected ']'" } }
         if p[at] == b']' && !first { break }
         first = false
-        let lo = decode_codepoint(p, at)
-        let after_lo = at + lo.width
+        var lo = decode_codepoint(p, at)
+        var after_lo = at + lo.width
         if after_lo + 1 < p.len && p[after_lo] == b'-' && p[after_lo + 1] != b']' {
-            let hi = decode_codepoint(p, after_lo + 1)
+            var hi = decode_codepoint(p, after_lo + 1)
             if hi.cp < lo.cp { return error { message = "regex: character class range out of order" } }
             ranges = teko::list::push(ranges, RRange { lo = lo.cp; hi = hi.cp })
             at = after_lo + 1 + hi.width
@@ -304,9 +304,9 @@ fn parse_class(p: []byte, pos: u64) -> PState | error {
 // compile(pattern) — parse a pattern string into a Regex, or a compile error (M.3 —
 // a malformed pattern is a checked failure, following the fallible-builtin convention
 // used by str_from_utf8 / DateTime parses elsewhere in ROUND 0).
-pub fn compile(pattern: str) -> Regex | error {
-    let bytes = bytes_of_str(pattern)
-    let parsed = match parse_alt(bytes, 0) { PState as s => s; error as e => return e }
+pub fn compile(pattern: str): Regex | error {
+    var bytes = bytes_of_str(pattern)
+    var parsed = match parse_alt(bytes, 0) { PState as s => s; error as e => return e }
     if parsed.pos != bytes.len {
         return error { message = "regex: unexpected trailing input in pattern" }
     }
@@ -347,7 +347,7 @@ type MCont = struct {
  *
  * @return the end-of-chain continuation
  */
-fn mc_end() -> []MCont { teko::list::empty() }
+fn mc_end(): []MCont { teko::list::empty() }
 
 /**
  * mc_push — `cont` with `node` to be matched FIRST. O(1): the tail is shared, never copied.
@@ -356,7 +356,7 @@ fn mc_end() -> []MCont { teko::list::empty() }
  * @param cont  the continuation to match after it
  * @return      the extended continuation
  */
-fn mc_push(node: RegexNode, cont: []MCont) -> []MCont {
+fn mc_push(node: RegexNode, cont: []MCont): []MCont {
     teko::list::push(teko::list::empty(), MCont { head = node; tail = cont })
 }
 
@@ -368,9 +368,9 @@ fn mc_push(node: RegexNode, cont: []MCont) -> []MCont {
  * @param cont   the continuation to match after them
  * @return       the extended continuation
  */
-fn mc_push_all(parts: []RegexNode, cont: []MCont) -> []MCont {
-    mut out = cont
-    mut j = parts.len
+fn mc_push_all(parts: []RegexNode, cont: []MCont): []MCont {
+    var out = cont
+    var j = parts.len
     loop {
         if j == 0 { break }
         j = j - 1
@@ -388,7 +388,7 @@ fn mc_push_all(parts: []RegexNode, cont: []MCont) -> []MCont {
  * @param cont  what to match after it
  * @return      the continuation
  */
-fn mc_of_node(node: RegexNode, cont: []MCont) -> []MCont {
+fn mc_of_node(node: RegexNode, cont: []MCont): []MCont {
     match node {
         RConcat as c => mc_push_all(c.parts, cont)
         _ => mc_push(node, cont)
@@ -403,12 +403,12 @@ fn mc_of_node(node: RegexNode, cont: []MCont) -> []MCont {
  * @param cp   the candidate codepoint
  * @return     true iff the class accepts `cp`
  */
-fn class_matches(cls: RClass, cp: u32) -> bool {
-    mut i: u64 = 0
-    mut hit = false
+fn class_matches(cls: RClass, cp: u32): bool {
+    var i: u64 = 0
+    var hit = false
     loop {
         if i >= cls.ranges.len { break }
-        let r = cls.ranges[i]
+        var r = cls.ranges[i]
         if cp >= r.lo && cp <= r.hi { hit = true; break }
         i++
     }
@@ -424,7 +424,7 @@ fn class_matches(cls: RClass, cp: u32) -> bool {
  * @param i      the codepoint index to match from
  * @return       true iff the whole chain matches from `i`
  */
-fn m_cont(cont: []MCont, input: []u32, i: u64) -> bool {
+fn m_cont(cont: []MCont, input: []u32, i: u64): bool {
     if cont.len == 0 { return true }
     m_node(cont[0].head, input, i, cont[0].tail)
 }
@@ -438,7 +438,7 @@ fn m_cont(cont: []MCont, input: []u32, i: u64) -> bool {
  * @param cont   what must match after `node`
  * @return       true iff `node` and then `cont` match
  */
-fn m_node(node: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
+fn m_node(node: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
     match node {
         REmpty => m_cont(cont, input, i)
         RChar as c => m_one(i < input.len && input[i] == c.cp, input, i, cont)
@@ -467,7 +467,7 @@ fn m_node(node: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
  * @param cont      what must match after it
  * @return          true iff the node accepted and the continuation matches from `i + 1`
  */
-fn m_one(accepted: bool, input: []u32, i: u64, cont: []MCont) -> bool {
+fn m_one(accepted: bool, input: []u32, i: u64, cont: []MCont): bool {
     accepted && m_cont(cont, input, i + 1)
 }
 
@@ -481,7 +481,7 @@ fn m_one(accepted: bool, input: []u32, i: u64, cont: []MCont) -> bool {
  * @param cont      what must match after the branch
  * @return          true iff some branch from `idx` on matches, followed by `cont`
  */
-fn m_alt(branches: []RegexNode, idx: u64, input: []u32, i: u64, cont: []MCont) -> bool {
+fn m_alt(branches: []RegexNode, idx: u64, input: []u32, i: u64, cont: []MCont): bool {
     if idx >= branches.len { return false }
     if m_node(branches[idx], input, i, cont) { return true }
     m_alt(branches, idx + 1, input, i, cont)
@@ -497,7 +497,7 @@ fn m_alt(branches: []RegexNode, idx: u64, input: []u32, i: u64, cont: []MCont) -
  * @param cont   what must match after the repetition
  * @return       true iff some number of copies of `inner` followed by `cont` matches
  */
-fn m_star(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
+fn m_star(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
     if m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont)) { return true }
     m_cont(cont, input, i)
 }
@@ -512,7 +512,7 @@ fn m_star(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
  * @param cont   what must match after the repetition
  * @return       true iff one or more copies of `inner` followed by `cont` matches
  */
-fn m_plus(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
+fn m_plus(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
     m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont))
 }
 
@@ -526,7 +526,7 @@ fn m_plus(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
  * @param cont   what must match after it
  * @return       true iff `inner` then `cont`, or `cont` alone, matches from `i`
  */
-fn m_opt(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
+fn m_opt(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
     if m_node(inner, input, i, cont) { return true }
     m_cont(cont, input, i)
 }
@@ -546,10 +546,10 @@ fn m_opt(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
  * @param input  the string to search
  * @return       true iff the pattern matches at some offset
  */
-pub fn is_match(re: Regex, input: str) -> bool {
-    let cps = codepoints_of(input)
-    let cont = mc_of_node(re.ast, mc_end())
-    mut start: u64 = 0
+pub fn is_match(re: Regex, input: str): bool {
+    var cps = codepoints_of(input)
+    var cont = mc_of_node(re.ast, mc_end())
+    var start: u64 = 0
     loop {
         if m_cont(cont, cps, start) { return true }
         if start >= cps.len { break }
@@ -566,8 +566,8 @@ pub fn is_match(re: Regex, input: str) -> bool {
  * @return         true iff the pattern matches at some offset
  * @throws         the compile error of a malformed pattern (the fallible-builtin convention)
  */
-pub fn is_match_pattern(pattern: str, input: str) -> bool | error {
-    let re = match compile(pattern) { Regex as r => r; error as e => return e }
+pub fn is_match_pattern(pattern: str, input: str): bool | error {
+    var re = match compile(pattern) { Regex as r => r; error as e => return e }
     is_match(re, input)
 }
 
@@ -579,7 +579,7 @@ pub fn is_match_pattern(pattern: str, input: str) -> bool | error {
  * @param input  the string to match
  * @return       true iff the whole of `input` is matched by the pattern
  */
-pub fn full_match(re: Regex, input: str) -> bool {
-    let cps = codepoints_of(input)
+pub fn full_match(re: Regex, input: str): bool {
+    var cps = codepoints_of(input)
     m_cont(mc_of_node(re.ast, mc_push(REnd { }, mc_end())), cps, 0)
 }

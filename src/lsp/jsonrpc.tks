@@ -14,7 +14,7 @@ use teko::encoding::json
  * @return   the bytes read; `.len == n` on a full body, `.len < n` on EOF mid-body
  * @since 0.3.1.0
  */
-extern fn read_stdin_n(n: u64) -> []byte = "tk_rt_read_stdin_n" from "teko_rt"
+extern fn read_stdin_n(n: u64): []byte = "tk_rt_read_stdin_n" from "teko_rt"
 
 /**
  * RpcMessage — one decoded JSON-RPC / LSP / DAP message: the raw `Content-Length`-framed body
@@ -47,8 +47,8 @@ const CRLF: str = "\r\n"
  * @return      the complete `Content-Length`-framed wire message
  * @since 0.3.1.0
  */
-pub fn encode_frame(body: json::JsonValue) -> str {
-    let payload = json::encode(body)
+pub fn encode_frame(body: json::JsonValue): str {
+    var payload = json::encode(body)
     teko::str::concat("Content-Length: ", teko::u64_to_str(payload.len), CRLF, CRLF, payload)
 }
 
@@ -61,7 +61,7 @@ pub fn encode_frame(body: json::JsonValue) -> str {
  * @param body  the payload to frame and emit on stdout
  * @since 0.3.1.0
  */
-pub fn write_message(body: json::JsonValue) -> void {
+pub fn write_message(body: json::JsonValue): void {
     teko::io::write(encode_frame(body))
 }
 
@@ -73,7 +73,7 @@ pub fn write_message(body: json::JsonValue) -> void {
  * @param msg  the diagnostic text
  * @since 0.3.1.0
  */
-pub fn log(msg: str) -> void {
+pub fn log(msg: str): void {
     teko::io::eprintln(teko::str::concat("teko-lsp: ", msg))
 }
 
@@ -86,7 +86,7 @@ pub fn log(msg: str) -> void {
  * @return   the lowercased byte
  * @since 0.3.1.0
  */
-fn ascii_lower(b: byte) -> byte {
+fn ascii_lower(b: byte): byte {
     if b >= b'A' && b <= b'Z' { return ((b to i64) + 32) to byte }
     b
 }
@@ -100,10 +100,10 @@ fn ascii_lower(b: byte) -> byte {
  * @return      true when the field name is `content-length`
  * @since 0.3.1.0
  */
-fn header_is_content_length(line: str) -> bool {
-    let name = "content-length"
+fn header_is_content_length(line: str): bool {
+    var name = "content-length"
     if line.len < name.len { return false }
-    mut i: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= name.len { break }
         if ascii_lower(line[i]) != name[i] { return false }
@@ -121,8 +121,8 @@ fn header_is_content_length(line: str) -> bool {
  * @return      the parsed value, or `null` when no digits follow the colon
  * @since 0.3.1.0
  */
-fn parse_header_value_u64(line: str) -> u64 | null {
-    mut i: u64 = 0
+fn parse_header_value_u64(line: str): u64 | null {
+    var i: u64 = 0
     loop {
         if i >= line.len { return null }
         if line[i] == b':' { i = i + 1; break }
@@ -133,7 +133,7 @@ fn parse_header_value_u64(line: str) -> u64 | null {
         i = i + 1
     }
     if i >= line.len || line[i] < b'0' || line[i] > b'9' { return null }
-    mut n: u64 = 0
+    var n: u64 = 0
     loop {
         if i >= line.len || line[i] < b'0' || line[i] > b'9' { break }
         n = n * 10 + ((line[i] to u64) - (b'0' to u64))
@@ -152,12 +152,12 @@ fn parse_header_value_u64(line: str) -> u64 | null {
  * @throws            when the body is not valid UTF-8 or not valid JSON
  * @since 0.3.1.0
  */
-fn body_to_message(body_bytes: []byte) -> RpcMessage | error {
-    let text = match teko::text::str_from_utf8(body_bytes) {
+fn body_to_message(body_bytes: []byte): RpcMessage | error {
+    var text = match teko::text::str_from_utf8(body_bytes) {
         str as s => s
         error as e => return error { message = teko::str::concat("malformed frame: body is not UTF-8: ", e.message) }
     }
-    let value = match json::decode(text) {
+    var value = match json::decode(text) {
         json::JsonValue as v => v
         error as e => return error { message = teko::str::concat("malformed frame: body is not JSON: ", e.message) }
     }
@@ -176,12 +176,12 @@ fn body_to_message(body_bytes: []byte) -> RpcMessage | error {
  *          when the header is absent / the length is unparseable / the body is truncated
  * @since 0.3.1.0
  */
-pub fn read_message() -> RpcMessage | error {
-    mut have_len = false
-    mut content_length: u64 = 0
-    mut saw_header = false
+pub fn read_message(): RpcMessage | error {
+    var have_len = false
+    var content_length: u64 = 0
+    var saw_header = false
     loop {
-        let line = teko::io::read_line()
+        var line = teko::io::read_line()
         if line.len == 0 {
             if !saw_header && teko::io::stdin_eof() { return error { message = "eof" } }
             break
@@ -195,7 +195,7 @@ pub fn read_message() -> RpcMessage | error {
         }
     }
     if !have_len { return error { message = "malformed frame: missing Content-Length" } }
-    let body_bytes = read_stdin_n(content_length)
+    var body_bytes = read_stdin_n(content_length)
     if body_bytes.len < content_length { return error { message = "malformed frame: truncated body" } }
     body_to_message(body_bytes)
 }
@@ -209,9 +209,9 @@ pub fn read_message() -> RpcMessage | error {
  * @return       the index of the first `\r` of the separator, or `null`
  * @since 0.3.1.0
  */
-fn find_crlf_crlf(bytes: []byte) -> u64 | null {
+fn find_crlf_crlf(bytes: []byte): u64 | null {
     if bytes.len < 4 { return null }
-    mut i: u64 = 0
+    var i: u64 = 0
     loop {
         if i + 4 > bytes.len { return null }
         if bytes[i] == b'\r' && bytes[i + 1] == b'\n' && bytes[i + 2] == b'\r' && bytes[i + 3] == b'\n' { return i }
@@ -231,9 +231,9 @@ fn find_crlf_crlf(bytes: []byte) -> u64 | null {
  * @return       the copied sub-range
  * @since 0.3.1.0
  */
-fn slice_bytes(bytes: []byte, from: u64, to: u64) -> []byte {
-    mut out: []byte = teko::list::empty()
-    mut i = from
+fn slice_bytes(bytes: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
     loop {
         if i >= to || i >= bytes.len { break }
         out = teko::list::push(out, bytes[i])
@@ -251,18 +251,18 @@ fn slice_bytes(bytes: []byte, from: u64, to: u64) -> []byte {
  * @return        the declared body length, or `null` when no valid `Content-Length` is present
  * @since 0.3.1.0
  */
-fn content_length_of_header_bytes(header: []byte) -> u64 | null {
-    let text = match teko::text::str_from_utf8(header) { str as s => s; error => return null }
-    mut start: u64 = 0
-    mut i: u64 = 0
+fn content_length_of_header_bytes(header: []byte): u64 | null {
+    var text = match teko::text::str_from_utf8(header) { str as s => s; error => return null }
+    var start: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= text.len {
-            let last = teko::str::slice(text, start, text.len)
+            var last = teko::str::slice(text, start, text.len)
             if header_is_content_length(last) { return parse_header_value_u64(last) }
             break
         }
         if text[i] == b'\r' && i + 1 < text.len && text[i + 1] == b'\n' {
-            let line = teko::str::slice(text, start, i)
+            var line = teko::str::slice(text, start, i)
             if header_is_content_length(line) { return parse_header_value_u64(line) }
             i = i + 2
             start = i
@@ -285,17 +285,17 @@ fn content_length_of_header_bytes(header: []byte) -> u64 | null {
  * @throws       `malformed frame: ...` when the separator / length is absent or the body is short
  * @since 0.3.1.0
  */
-pub fn decode_frame_bytes(bytes: []byte) -> RpcMessage | error {
-    let sep = match find_crlf_crlf(bytes) {
+pub fn decode_frame_bytes(bytes: []byte): RpcMessage | error {
+    var sep = match find_crlf_crlf(bytes) {
         u64 as s => s
         null => return error { message = "malformed frame: no header/body separator" }
     }
-    let header = slice_bytes(bytes, 0, sep)
-    let content_length = match content_length_of_header_bytes(header) {
+    var header = slice_bytes(bytes, 0, sep)
+    var content_length = match content_length_of_header_bytes(header) {
         u64 as n => n
         null => return error { message = "malformed frame: missing Content-Length" }
     }
-    let body_start = sep + 4
+    var body_start = sep + 4
     if body_start + content_length > bytes.len { return error { message = "malformed frame: truncated body" } }
     body_to_message(slice_bytes(bytes, body_start, body_start + content_length))
 }

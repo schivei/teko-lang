@@ -53,8 +53,8 @@ type FrameSet = struct {
  * @return   `null` when no function returns a frame address, else a NAMED error listing them
  * @since 0.3.1.0 degrau agregado-copia (the arm64 aggregate-copy family, closed as a family)
  */
-pub fn frame_escape_guard(m: LModule) -> null | error {
-    let offenders = frame_escaping_funcs(m)
+pub fn frame_escape_guard(m: LModule): null | error {
+    var offenders = frame_escaping_funcs(m)
     if offenders.len == 0 { return null }
     error { message = teko::str::concat("native backend N1: ", teko::str::concat(teko::u64_to_str(offenders.len), teko::str::concat(" function(s) return an address inside their OWN frame, which the `ret` pops (internal) — ", frame_escape_lines(offenders)))) }
 }
@@ -66,9 +66,9 @@ pub fn frame_escape_guard(m: LModule) -> null | error {
  * @param m  the fully lowered module
  * @return   the offending symbols (empty when the invariant holds)
  */
-fn frame_escaping_funcs(m: LModule) -> []str {
-    mut found: []str = teko::list::empty()
-    mut i: u64 = 0
+fn frame_escaping_funcs(m: LModule): []str {
+    var found: []str = teko::list::empty()
+    var i: u64 = 0
     loop {
         if i >= m.funcs.len { break }
         if func_returns_frame_address(m.funcs[i]) { found = teko::list::push(found, m.funcs[i].symbol) }
@@ -84,9 +84,9 @@ fn frame_escaping_funcs(m: LModule) -> []str {
  * @param offenders  the offending symbols
  * @return           the diagnostic tail
  */
-fn frame_escape_lines(offenders: []str) -> str {
-    mut out: str = ""
-    mut i: u64 = 0
+fn frame_escape_lines(offenders: []str): str {
+    var out: str = ""
+    var i: u64 = 0
     loop {
         if i >= offenders.len || i >= FRAME_ESCAPE_LIMIT { break }
         if i > 0 { out = teko::str::concat(out, ", ") }
@@ -104,9 +104,9 @@ fn frame_escape_lines(offenders: []str) -> str {
  * @param f  the lowered function
  * @return   true when at least one `ret` carries a frame address
  */
-fn func_returns_frame_address(f: LFunc) -> bool {
-    let marks = frame_marks_of(f)
-    mut bi: u64 = 0
+fn func_returns_frame_address(f: LFunc): bool {
+    var marks = frame_marks_of(f)
+    var bi: u64 = 0
     loop {
         if bi >= f.blocks.len { break }
         if block_returns_frame_address(f.blocks[bi], marks) { return true }
@@ -122,8 +122,8 @@ fn func_returns_frame_address(f: LFunc) -> bool {
  * @param marks  the already-computed frame-address flags of the enclosing function
  * @return       true when at least one `ret` in `b` carries a frame address
  */
-fn block_returns_frame_address(b: LBlock, marks: []bool) -> bool {
-    mut i: u64 = 0
+fn block_returns_frame_address(b: LBlock, marks: []bool): bool {
+    var i: u64 = 0
     loop {
         if i >= b.insts.len { break }
         match b.insts[i].op {
@@ -145,8 +145,8 @@ fn block_returns_frame_address(b: LBlock, marks: []bool) -> bool {
  * @param f  the lowered function
  * @return   the frame-address flags, indexed by VReg id
  */
-fn frame_marks_of(f: LFunc) -> []bool {
-    mut set = FrameSet { marked = false_marks(f.next_vreg); grew = true }
+fn frame_marks_of(f: LFunc): []bool {
+    var set = FrameSet { marked = false_marks(f.next_vreg); grew = true }
     loop {
         if !set.grew { break }
         set = frame_sweep(f, FrameSet { marked = set.marked; grew = false })
@@ -168,9 +168,9 @@ fn frame_marks_of(f: LFunc) -> []bool {
  * @param set  the flags so far, with `grew` reset by the caller
  * @return     the flags after this pass, `grew` true iff it marked something new
  */
-fn frame_sweep(f: LFunc, set: FrameSet) -> FrameSet {
-    mut acc = set
-    mut bi: u64 = 0
+fn frame_sweep(f: LFunc, set: FrameSet): FrameSet {
+    var acc = set
+    var bi: u64 = 0
     loop {
         if bi >= f.blocks.len { break }
         acc = frame_sweep_block(f, acc, f.blocks[bi])
@@ -187,9 +187,9 @@ fn frame_sweep(f: LFunc, set: FrameSet) -> FrameSet {
  * @param b    the block to sweep
  * @return     the flags after this block
  */
-fn frame_sweep_block(f: LFunc, set: FrameSet, b: LBlock) -> FrameSet {
-    mut acc = set
-    mut i: u64 = 0
+fn frame_sweep_block(f: LFunc, set: FrameSet, b: LBlock): FrameSet {
+    var acc = set
+    var i: u64 = 0
     loop {
         if i >= b.insts.len { break }
         acc = frame_sweep_inst(f, acc, b.insts[i])
@@ -206,7 +206,7 @@ fn frame_sweep_block(f: LFunc, set: FrameSet, b: LBlock) -> FrameSet {
  * @param inst  the instruction to interpret
  * @return      the flags after this instruction
  */
-fn frame_sweep_inst(f: LFunc, set: FrameSet, inst: LInst) -> FrameSet {
+fn frame_sweep_inst(f: LFunc, set: FrameSet, inst: LInst): FrameSet {
     match inst.op {
         LAlloca => return frame_mark(set, inst.result)
         LFieldAddr as fa => return if flag_at(set.marked, fa.base) { frame_mark(set, inst.result) } else { set }
@@ -231,10 +231,10 @@ fn frame_sweep_inst(f: LFunc, set: FrameSet, inst: LInst) -> FrameSet {
  * @param args    the jump's arguments, positionally matching the target's parameters
  * @return        the flags after the transfer
  */
-fn frame_pass_args(f: LFunc, set: FrameSet, target: u32, args: []u32) -> FrameSet {
-    let params = match block_params_of(f, target) { []u32 as p => p; null => return set }
-    mut acc = set
-    mut i: u64 = 0
+fn frame_pass_args(f: LFunc, set: FrameSet, target: u32, args: []u32): FrameSet {
+    var params = match block_params_of(f, target) { []u32 as p => p; null => return set }
+    var acc = set
+    var i: u64 = 0
     loop {
         if i >= args.len || i >= params.len { break }
         if flag_at(acc.marked, args[i]) { acc = frame_mark(acc, params[i]) }
@@ -251,8 +251,8 @@ fn frame_pass_args(f: LFunc, set: FrameSet, target: u32, args: []u32) -> FrameSe
  * @param id  the block id to find
  * @return    the block's parameter VRegs, or `null`
  */
-fn block_params_of(f: LFunc, id: u32) -> []u32 | null {
-    mut i: u64 = 0
+fn block_params_of(f: LFunc, id: u32): []u32 | null {
+    var i: u64 = 0
     loop {
         if i >= f.blocks.len { break }
         if f.blocks[i].id == id { return f.blocks[i].params }
@@ -269,10 +269,10 @@ fn block_params_of(f: LFunc, id: u32) -> []u32 | null {
  * @param v    the VReg to flag
  * @return     the flags with `v` set
  */
-fn frame_mark(set: FrameSet, v: u32) -> FrameSet {
+fn frame_mark(set: FrameSet, v: u32): FrameSet {
     if flag_at(set.marked, v) { return set }
     if v >= set.marked.len { return set }
-    mut fs = set.marked
+    var fs = set.marked
     fs[v to u64] = true
     FrameSet { marked = fs; grew = true }
 }
@@ -286,7 +286,7 @@ fn frame_mark(set: FrameSet, v: u32) -> FrameSet {
  * @param v      the VReg id
  * @return       true iff `v` is flagged
  */
-fn flag_at(marks: []bool, v: u32) -> bool {
+fn flag_at(marks: []bool, v: u32): bool {
     if v >= marks.len { return false }
     marks[v to u64]
 }
@@ -297,9 +297,9 @@ fn flag_at(marks: []bool, v: u32) -> bool {
  * @param n  how many VRegs the function allocated (`LFunc.next_vreg`)
  * @return   the all-false vector
  */
-fn false_marks(n: u32) -> []bool {
-    mut fs: []bool = teko::list::empty()
-    mut i: u32 = 0
+fn false_marks(n: u32): []bool {
+    var fs: []bool = teko::list::empty()
+    var i: u32 = 0
     loop {
         if i >= n { break }
         fs = teko::list::push(fs, false)

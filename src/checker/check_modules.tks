@@ -17,10 +17,10 @@ type AliasBind = struct { ns: str; alias: str; target: str }
 
 // join the first `n` segments of a path with "::" (n = segments.len → the full namespace;
 // n = segments.len - 1 → the prefix before the final symbol).
-fn join_n(p: parser::Path, n: u64) -> str {
+fn join_n(p: parser::Path, n: u64): str {
     if n == 0 { return "" }
-    mut s = ""
-    mut i = 0
+    var s = ""
+    var i = 0
     loop {
         if i >= n { break }
         s = teko::str::concat(s, p.segments[i].name)
@@ -31,15 +31,15 @@ fn join_n(p: parser::Path, n: u64) -> str {
 }
 
 // build the alias map from every use-item (file-local `use`, B.32).
-fn build_aliases(prog: parser::Program) -> []AliasBind {
-    mut a: []AliasBind = teko::list::empty()
-    mut i = 0
+fn build_aliases(prog: parser::Program): []AliasBind {
+    var a: []AliasBind = teko::list::empty()
+    var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i].content {
             parser::UseDecl as u => {
                 if u.names.len == 0 && u.path.segments.len > 0 {
-                    let alias = if u.has_alias { u.alias } else { u.path.segments[u.path.segments.len - 1].name }
+                    var alias = if u.has_alias { u.alias } else { u.path.segments[u.path.segments.len - 1].name }
                     a = teko::list::push(a, AliasBind { ns = prog.items[i].namespace; alias = alias; target = join_n(u.path, u.path.segments.len) })
                 }
             }
@@ -51,8 +51,8 @@ fn build_aliases(prog: parser::Program) -> []AliasBind {
 }
 
 // resolve an alias used in `ref_ns` → its target namespace ("" if unbound).
-fn alias_target(a: []AliasBind, ref_ns: str, alias: str) -> str {
-    mut i = 0
+fn alias_target(a: []AliasBind, ref_ns: str, alias: str): str {
+    var i = 0
     loop {
         if i >= a.len { break }
         if a[i].ns == ref_ns && a[i].alias == alias { return a[i].target }
@@ -71,12 +71,12 @@ fn alias_target(a: []AliasBind, ref_ns: str, alias: str) -> str {
  * @param ns     the namespace the registration must be declared in
  * @return       the matching registration, or null when none matches
  */
-fn find_in_ns(table: TypeTable, name: str, ns: str) -> TypeReg | null {
-    let cands = tt_cands(table, name)
-    mut i: u64 = 0
+fn find_in_ns(table: TypeTable, name: str, ns: str): TypeReg | null {
+    var cands = tt_cands(table, name)
+    var i: u64 = 0
     loop {
         if i >= cands.count { break }
-        let r = tt_cand_reg(table, cands, i)
+        var r = tt_cand_reg(table, cands, i)
         if r.name == name && r.namespace == ns { return r }
         i++
     }
@@ -91,9 +91,9 @@ fn find_in_ns(table: TypeTable, name: str, ns: str) -> TypeReg | null {
  * @param name   the sought bare type name
  * @return       true iff at least one registration is named `name`
  */
-fn name_exists_anywhere(table: TypeTable, name: str) -> bool {
-    let cands = tt_cands(table, name)
-    mut i: u64 = 0
+fn name_exists_anywhere(table: TypeTable, name: str): bool {
+    var cands = tt_cands(table, name)
+    var i: u64 = 0
     loop {
         if i >= cands.count { break }
         if tt_cand_reg(table, cands, i).name == name { return true }
@@ -114,9 +114,9 @@ fn name_exists_anywhere(table: TypeTable, name: str) -> bool {
  * @param al      the file's alias bindings
  * @return        an error when the reference violates the namespace rules, else null
  */
-fn check_named(path: parser::Path, ref_ns: str, table: TypeTable, al: []AliasBind) -> error | null {
+fn check_named(path: parser::Path, ref_ns: str, table: TypeTable, al: []AliasBind): error | null {
     if path.segments.len == 0 { return null }
-    let last = path.segments[path.segments.len - 1].name
+    var last = path.segments[path.segments.len - 1].name
     match builtin_type(last) { Type => return null; NotBuiltinType => { }; error => { } }
 
     if path.segments.len == 1 {   // BARE
@@ -128,7 +128,7 @@ fn check_named(path: parser::Path, ref_ns: str, table: TypeTable, al: []AliasBin
     }
 
     // QUALIFIED / ABSOLUTE: resolve the target namespace.
-    mut target_ns = ""
+    var target_ns = ""
     if path.segments.len == 2 {   // single-segment prefix = a `use` alias
         target_ns = alias_target(al, ref_ns, path.segments[0].name)
         if target_ns == "" {
@@ -154,12 +154,12 @@ fn check_named(path: parser::Path, ref_ns: str, table: TypeTable, al: []AliasBin
 }
 
 // walk a type expression, checking every Named leaf.
-fn check_texpr(te: parser::TypeExpr, ref_ns: str, table: TypeTable, al: []AliasBind) -> error | null {
+fn check_texpr(te: parser::TypeExpr, ref_ns: str, table: TypeTable, al: []AliasBind): error | null {
     match te {
         parser::NamedType as n => check_named(n.path, ref_ns, table, al)
         parser::SliceType as s => check_texpr(s.element, ref_ns, table, al)
         parser::UnionType as u => {
-            mut i = 0
+            var i = 0
             loop {
                 if i >= u.members.len { break }
                 match check_texpr(u.members[i], ref_ns, table, al) { null => { }; error as e => return e }
@@ -168,7 +168,7 @@ fn check_texpr(te: parser::TypeExpr, ref_ns: str, table: TypeTable, al: []AliasB
             null
         }
         parser::FunctionType as fnt => {   // (W10a) check every param + the return
-            mut i = 0
+            var i = 0
             loop {
                 if i >= fnt.params.len { break }
                 match check_texpr(fnt.params[i], ref_ns, table, al) { null => { }; error as e => return e }
@@ -191,7 +191,7 @@ fn check_texpr(te: parser::TypeExpr, ref_ns: str, table: TypeTable, al: []AliasB
  * @return    an error when the cap is exceeded, else `null`
  * @throws    when `fb.members.len` exceeds 64
  */
-fn check_flags_member_cap(fb: parser::FlagsBody) -> error | null {
+fn check_flags_member_cap(fb: parser::FlagsBody): error | null {
     if fb.members.len > 64 {
         return error { message = "a flags type may declare at most 64 members (bit 63 is the last) — write this as two flags types instead" }
     }
@@ -211,10 +211,10 @@ fn check_flags_member_cap(fb: parser::FlagsBody) -> error | null {
  * @param table  the collected type table
  * @return       every module-system diagnostic, in program order (empty when the program is clean)
  */
-fn check_modules(prog: parser::Program, table: TypeTable) -> []str {
-    let al = build_aliases(prog)
-    mut diags: []str = teko::list::empty()
-    mut i = 0
+fn check_modules(prog: parser::Program, table: TypeTable): []str {
+    var al = build_aliases(prog)
+    var diags: []str = teko::list::empty()
+    var i = 0
     loop {
         if i >= prog.items.len { break }
         diags = concat_diags(diags, item_module_diags(prog.items[i], table, al))
@@ -233,7 +233,7 @@ fn check_modules(prog: parser::Program, table: TypeTable) -> []str {
  * @return       the item's diagnostics, in declaration order
  * @since 0.3.1
  */
-fn item_module_diags(it: parser::Item, table: TypeTable, al: []AliasBind) -> []str {
+fn item_module_diags(it: parser::Item, table: TypeTable, al: []AliasBind): []str {
     match it.content {
         parser::Function as f => fn_module_diags(it, f, table, al)
         parser::TypeDecl as d => type_module_diags(it, d, table, al)
@@ -257,7 +257,7 @@ fn item_module_diags(it: parser::Item, table: TypeTable, al: []AliasBind) -> []s
  * @return       the diagnostic, or an empty list
  * @since 0.3.1
  */
-fn texpr_module_diags(it: parser::Item, line: u32, col: u32, te: parser::TypeExpr, table: TypeTable, al: []AliasBind) -> []str {
+fn texpr_module_diags(it: parser::Item, line: u32, col: u32, te: parser::TypeExpr, table: TypeTable, al: []AliasBind): []str {
     match check_texpr(te, it.namespace, table, al) {
         error as e => one_diag(located_diag(it.file, line, col, e))
         null => teko::list::empty()
@@ -276,10 +276,10 @@ fn texpr_module_diags(it: parser::Item, line: u32, col: u32, te: parser::TypeExp
  * @return       the function's diagnostics, in signature order
  * @since 0.3.1
  */
-fn fn_module_diags(it: parser::Item, f: parser::Function, table: TypeTable, al: []AliasBind) -> []str {
-    let ftbl = type_param_table(f.type_params, f.type_constraints, it.namespace, table)
-    mut diags: []str = teko::list::empty()
-    mut p = 0
+fn fn_module_diags(it: parser::Item, f: parser::Function, table: TypeTable, al: []AliasBind): []str {
+    var ftbl = type_param_table(f.type_params, f.type_constraints, it.namespace, table)
+    var diags: []str = teko::list::empty()
+    var p = 0
     loop {
         if p >= f.params.len { break }
         diags = concat_diags(diags, texpr_module_diags(it, f.line, f.col, f.params[p].type_ann, ftbl, al))
@@ -304,7 +304,7 @@ fn fn_module_diags(it: parser::Item, f: parser::Function, table: TypeTable, al: 
  * @return       the declaration's diagnostics, in declaration order
  * @since 0.3.1
  */
-fn type_module_diags(it: parser::Item, d: parser::TypeDecl, table: TypeTable, al: []AliasBind) -> []str {
+fn type_module_diags(it: parser::Item, d: parser::TypeDecl, table: TypeTable, al: []AliasBind): []str {
     match d.body {
         parser::StructBody as sb => fields_module_diags(it, d, sb.fields, table, al)
         parser::VariantBody as vb => texpr_module_diags(it, d.line, d.col, vb.type_expr, table, al)
@@ -326,7 +326,7 @@ fn type_module_diags(it: parser::Item, d: parser::TypeDecl, table: TypeTable, al
  * @return    the cap diagnostic, or an empty list
  * @since 0.3.1
  */
-fn flags_cap_diags(it: parser::Item, d: parser::TypeDecl, fb: parser::FlagsBody) -> []str {
+fn flags_cap_diags(it: parser::Item, d: parser::TypeDecl, fb: parser::FlagsBody): []str {
     match check_flags_member_cap(fb) {
         error as e => one_diag(located_diag(it.file, d.line, d.col, e))
         null => teko::list::empty()
@@ -344,9 +344,9 @@ fn flags_cap_diags(it: parser::Item, d: parser::TypeDecl, fb: parser::FlagsBody)
  * @return        the fields' diagnostics, in declaration order
  * @since 0.3.1
  */
-fn fields_module_diags(it: parser::Item, d: parser::TypeDecl, fields: []parser::Field, table: TypeTable, al: []AliasBind) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut k = 0
+fn fields_module_diags(it: parser::Item, d: parser::TypeDecl, fields: []parser::Field, table: TypeTable, al: []AliasBind): []str {
+    var diags: []str = teko::list::empty()
+    var k = 0
     loop {
         if k >= fields.len { break }
         diags = concat_diags(diags, texpr_module_diags(it, d.line, d.col, fields[k].type_ann, table, al))
@@ -367,9 +367,9 @@ fn fields_module_diags(it: parser::Item, d: parser::TypeDecl, fields: []parser::
  * @return         the signatures' diagnostics, in declaration order
  * @since 0.3.1
  */
-fn method_sigs_module_diags(it: parser::Item, d: parser::TypeDecl, methods: []parser::Function, table: TypeTable, al: []AliasBind) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut mi = 0
+fn method_sigs_module_diags(it: parser::Item, d: parser::TypeDecl, methods: []parser::Function, table: TypeTable, al: []AliasBind): []str {
+    var diags: []str = teko::list::empty()
+    var mi = 0
     loop {
         if mi >= methods.len { break }
         diags = concat_diags(diags, one_method_sig_module_diags(it, d, methods[mi], table, al))
@@ -389,9 +389,9 @@ fn method_sigs_module_diags(it: parser::Item, d: parser::TypeDecl, methods: []pa
  * @return       the signature's diagnostics, in signature order
  * @since 0.3.1
  */
-fn one_method_sig_module_diags(it: parser::Item, d: parser::TypeDecl, m: parser::Function, table: TypeTable, al: []AliasBind) -> []str {
-    mut diags: []str = teko::list::empty()
-    mut pi = 0
+fn one_method_sig_module_diags(it: parser::Item, d: parser::TypeDecl, m: parser::Function, table: TypeTable, al: []AliasBind): []str {
+    var diags: []str = teko::list::empty()
+    var pi = 0
     loop {
         if pi >= m.params.len { break }
         if m.params[pi].has_type {
