@@ -563,6 +563,15 @@ A divisão respeita o lifetime: o **`add` fica no `ctx`** — o **criador** faz 
 o seu `tx`/`rx`** (estável, F2). `ctx.wait()` (no criador) bloqueia até zerar. Pôr o `add` no handle
 reintroduziria a corrida "add-depois-do-spawn"; por isso só o `done` desce.
 
+**Registro ESTÁTICO (compilador) vs materialização (runtime, `make`) — ruling do dono.** `Ctx`/`Rx<T>`/`Tx<T>`
+são **registrados estaticamente pelo compilador** no sítio do `make`: como a chave é **constante conhecida em
+comp-time**, o compilador reserva o slot `(chan<T>, "chave") → (Ctx, Rx, Tx)` e liga cada `svc<…>("chave")` a
+ele **inline**. O `make` só **materializa** em runtime (`K.init(key)`, abre o transporte, põe a instância em F2
+no slot pré-reservado). Por isso a chave **precisa** ser constante — sem ela não há registro estático (e
+`svc(key)` viraria lookup de runtime). **Chave não-constante no `make`, ou `svc` cuja chave não casa com um
+`make` conhecido, = erro de compilação** (e o conflito de chave é pego aqui). `Ctx`/`Rx`/`Tx` **não** são
+serviços do usuário — são handles que o compilador registra e o `make` materializa.
+
 **O `ctx` É O DONO do lifetime — transient (ruling do dono, ratificado).** O serviço singleton do canal vive em F2, mas
 **quem o possui é o `ctx`** (transient, na região do criador). Quando o `ctx` cai, ele **cascateia o
 teardown**: `end()` → desregistra a chave → **libera** o serviço + `Rx` + `Tx` de F2. O canal, os dois

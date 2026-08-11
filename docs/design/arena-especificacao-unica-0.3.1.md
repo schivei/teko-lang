@@ -463,10 +463,20 @@ fn ctx::close()                                    // fecho de reserva do canal 
   vtable, sem dispatch dinâmico, sem service-locator**. **Elimina passar id no `spawn`**: o worker não recebe
   id, resolve o `Tx` pela chave. É por isso que `make<K: service singleton & IChannelKind<T>>` — o transporte é um
   **`service`** que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
+- **REGISTRO estático (compilador) vs MATERIALIZAÇÃO (runtime, `make`) — ruling do dono.** `Ctx`/`Rx<T>`/`Tx<T>`
+  são **registrados ESTATICAMENTE pelo compilador** no sítio do `make`: como a chave é **constante conhecida
+  em comp-time**, o compilador reserva o slot `(chan<T>, "chave") → (Ctx, Rx<T>, Tx<T>)` e liga cada
+  `svc<Rx<T>>("chave")` / `svc<Tx<T>>("chave")` a esse slot **inline**. O `make` só **MATERIALIZA** em runtime
+  (chama `K.init(key)`, abre o transporte, coloca a instância em F2 no slot pré-reservado). Por isso a chave
+  **PRECISA** ser constante — sem ela o compilador não faz o registro estático (e `svc(key)` viraria lookup de
+  runtime, justamente o que se evita). **Chave não-constante no `make`, ou um `svc` cuja chave não casa com um
+  `make` conhecido, = erro de compilação.** O conflito (mesmo `chan<T>` sob a mesma chave em dois `make`) é
+  pego **neste passo de registro estático**. `Ctx`/`Rx`/`Tx` **não** são serviços do usuário — são handles que
+  o compilador registra sob a chave e o `make` materializa.
 - **`make` devolve o `ctx`; AMBOS os extremos por `svc` (ruling do dono).** `make(key, bounds = 1): ctx`
   cria o canal e devolve o **contexto** — o **WaitGroup** do canal e um fecho de reserva (`ctx.close()`).
-  Os dois extremos (e o `ctx`) são clamados por chave: `svc<Rx<T>>(key)` (leitor), `svc<Tx<T>>(key)` (N
-  escritores). O worker sinaliza fim pelo **seu handle** (`tx.done()`/`rx.done()`), não pelo ctx transient. Fan-in MPSC: **1 leitor**, **N escritores**.
+  Os dois extremos são clamados por chave: `svc<Rx<T>>(key)` (leitor), `svc<Tx<T>>(key)` (N escritores); o
+  `ctx` é o retorno do `make` (fica com o criador). O worker sinaliza fim pelo **seu handle** (`tx.done()`/`rx.done()`), não pelo ctx transient. Fan-in MPSC: **1 leitor**, **N escritores**.
 - **O WaitGroup é MANUAL, e o `done()` desce para os handles porque o `ctx` é transient (ruling do dono).** A
   contagem é **do usuário**, nunca automática (nem no `spawn`, nem na saída da task). A divisão respeita o
   lifetime: o **`add` fica no `ctx`** — o **criador** chama `ctx.add(n)` **antes** do `spawn` (o criador é
