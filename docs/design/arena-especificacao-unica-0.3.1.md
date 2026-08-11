@@ -528,11 +528,22 @@ assinatura: `await teko::tasks::when_all(calc(1,2), calc(3,4), …)` e `await te
 devolvem uma **lista de `Intent`s**. O dev nunca escreve `Intent` num retorno — só o `await` (direto ou via
 `when_all`/`when_any`) o produz.
 
+**`cancel()` — uma função global, como `panic`, mas ciente de suspensão.** Há uma **marcação de execução
+suspensa** (o runtime sabe se a tarefa corrente está sob um `await`). `cancel()`:
+- **em suspensão** → **cancela o `Intent`** corrente: marca `.canceled = true` e escreve a razão em
+  `.failure` (`error | null`). O `await` retoma com esse desfecho — o chamador vê `.canceled` e reage.
+- **fora de suspensão** (nada a cancelar) → **dispara um `panic`**, igualzinho ao `panic()` de hoje.
+
+É um só verbo — "aborta isto" — que degrada de cancelamento cooperativo (quando há um `Intent`) para panic
+(quando não há), sem o dev precisar saber em qual contexto está.
+
 A arena difere conforme a fundação (I/O vs CPU), dita e não escondida (`concorrencia-isolate-spawn-chan` §8):
 
 **O que o `Intent` carrega, e por que o dado cruza por cópia (regra do dono):**
 - **`Intent<T>`** (genérico) é **criado na arena do caller** (quem faz o `await`) e carrega o desfecho:
-  **`.value: T`** (a CÓPIA do retorno de `f`) + **`.canceled: bool`**. Ele é **alimentado pela retomada**:
+  **`.value: T`** (a CÓPIA do retorno de `f`), **`.canceled: bool`**, e **`.failure: error | null`** (a
+  razão do cancelamento). Erro-de-negócio fica no `.value` (se `f` retorna `T | error`); cancelamento é
+  `.canceled` + `.failure`, no nível da task. Ele é **alimentado pela retomada**:
   quando o trabalho completa, a suspensão **escreve a cópia de `T` em `.value`** — **nunca uma referência**
   à arena da raia/continuação que produziu o valor (essa pode ter rebobinado). É o "dados cruzam só por
   cópia" do `isolate`, e é destino-na-arena-do-caller, como o DPS (§5).

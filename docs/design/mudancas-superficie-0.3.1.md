@@ -494,9 +494,15 @@ else          { println($"r = {a.value}") }
 ```
 
 `await f(args)` **suspende** (cede, sem bloquear a thread), executa `f`, e o retorno cai em **`.value`** de
-um `Intent<T>` criado no caller. Campos: **`.value: T`** + **`.canceled: bool`**. `Intent` (sem `T`) = o
-desfecho de esperar uma função **sem retorno** (só `.canceled`). É onde se **garante a execução** — o
-`spawn` é fire-and-forget, sem retorno.
+um `Intent<T>` criado no caller. Campos: **`.value: T`**, **`.canceled: bool`**, **`.failure: error | null`**
+(razão do cancelamento). Erro-de-negócio fica no `.value`; cancelamento é `.canceled`+`.failure`. `Intent`
+(sem `T`) = o desfecho de esperar uma função **sem retorno** (só `.canceled`/`.failure`). É onde se
+**garante a execução** — o `spawn` é fire-and-forget, sem retorno.
+
+**`cancel()` — global, como `panic`, ciente de suspensão.** O runtime marca se a tarefa corrente está sob
+`await`. `cancel()` **em suspensão** → cancela o `Intent` corrente (`.canceled = true`, `.failure` = a
+razão); **fora de suspensão** → dispara um `panic`. Um verbo só que degrada de cancelamento cooperativo
+para panic.
 
 **Várias tasks — sem `Intent` na assinatura:** `await teko::tasks::when_all(f(a), g(b), …)` e
 `await teko::tasks::when_any(…)` devolvem uma **lista de `Intent`s**. O dev nunca escreve `Intent` num
