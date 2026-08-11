@@ -240,6 +240,29 @@ fn consume_static_modifier(tokens: []lexer::Token, pos: u64): Parsed<bool> {
     Parsed<bool> { node = true; next = pos + 1 }
 }
 
+/**
+ * inject_synthetic_receiver — prepend the synthetic receiver `self` (param[0], has_type=false; the
+ * type is injected by the checker as the enclosing type) to a method's user-written params. This is
+ * the single point where the §4 synthetic receiver is born; every downstream consumer
+ * (receiver_canonical_name / method_func_type / the `is_instance = !params[0].has_type` detector) reads
+ * it unchanged. Called only for an INSTANCE method (non-`static`) that did NOT write an explicit
+ * receiver — during the §4 teach window every instance method still writes `self` explicitly, so the
+ * caller's guard never fires and this stays a behavioral no-op.
+ * @param params  the params WRITTEN by the user (no receiver)
+ * @return        params with the synthetic `self` at index 0
+ */
+fn inject_synthetic_receiver(params: []Param): []Param {
+    var out: []Param = teko::list::empty()
+    out = teko::list::push(out, Param { name = "self"; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() })
+    var i = 0 to u64
+    loop {
+        if i >= params.len { break }
+        out = teko::list::push(out, params[i])
+        i = i + 1
+    }
+    out
+}
+
 // `allow_receiver` (OOP A1, 2026-07-01) — true ONLY when called for a struct-body method: lets
 // the 1st param be a bare untyped name (the receiver). A top-level `fn` always passes false.
 // `allow_bodyless` (W10b.IF) — true ONLY for an INTERFACE method: a pure signature `fn sig(self) -> T`
@@ -398,6 +421,17 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
     }
     var params = match parse_params(tokens, p, allow_receiver) { ParsedList<Param> as x => x; error as e => return e }
     p = params.next
+    // (§4 Crumb 4 FLIP) An INSTANCE method (a type-body member, `allow_receiver`, NOT `static`) whose
+    // slot has no explicit untyped receiver gets the synthetic `self` at param[0]. The static-vs-instance
+    // inversion lives ONLY here: a `static fn` gets no injection; every other type-body method does. The
+    // checker's detector (`is_instance = params.len>0 && !params[0].has_type`) is unchanged — the
+    // injection is what keeps it correct. During the teach window every instance method still writes
+    // `self` (an untyped param[0]), so the guard below is false and this is a no-op.
+    if allow_receiver && !is_static {
+        if params.items.len == 0 || params.items[0].has_type {
+            params = ParsedList<Param> { items = inject_synthetic_receiver(params.items); next = params.next }
+        }
+    }
     var has_return = false
     var return_type = no_type()
     if is_return_type_intro_at(tokens, p) {

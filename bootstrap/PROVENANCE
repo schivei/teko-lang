@@ -3,22 +3,28 @@
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# §4 R1 — teach self/base/static, colheita à mão, ordem do dono (2026-08-11).
+# §4 R2 — mark statics + flip da detecção, colheita à mão, ordem do dono (2026-08-11).
 # ---------------------------------------------------------------------------------------------
-# Hand-harvested for the FIRST sub-cycle of the §4 self/base/static work
-# (docs/design/plano-secao4-self-base-static.md, Crumb 0 + Crumb 1). This bootstrap carries:
-#   - Crumb 0: every plain-identifier use of `base` across the corpus renamed to a meaningful
-#     per-site name (so `base` can be reserved without breaking the tree).
-#   - Crumb 1: `self`/`base`/`static` reserved as keywords; `self`/`base` as primary expressions;
-#     the `static` method modifier + `Function.is_static`; `self` as a type atom resolving to the
-#     enclosing type (incl. a `self` return); the explicit-`self` receiver kept for back-compat;
-#     the `base` super-receiver taught additively via the existing named-binding reinterpret.
-# The §4 teach is a strict NO-OP over the corpus (the source does not yet USE the new keywords),
-# verified by a green C-backend dry build under the previous bootstrap.
+# Hand-harvested for the SECOND sub-cycle of the §4 self/base/static work
+# (docs/design/plano-secao4-self-base-static.md, Crumb 3 + Crumb 4). This bootstrap carries,
+# on top of R1 (self/base/static reserved + taught additively):
+#   - Crumb 3 (SWEEP-A): the `static` keyword prepended to the 17 type-body members that ARE
+#     static by the receiver's param shape (6 empty-param + 11 typed-first-param): List::make,
+#     Map::make, ZipReader::of, FileReader::of, Buf::{empty,from_bytes,from_str}, NullStream::make,
+#     MemReader::{over,of_str}, MemWriter::empty, LimitReader::of, BufReader::of, BufWriter::of,
+#     TeeWriter::of, Arena::new, Owned::make. Byte-inert under R1 (the detector still keys off the
+#     param shape, so marking `static` changes nothing yet).
+#   - Crumb 4 (FLIP): the parser now INJECTS a synthetic `self` (param[0], has_type=false) into any
+#     NON-`static` type-body method that has no explicit untyped receiver. The static-vs-instance
+#     inversion lives ONLY in the parser (`static` ⇒ no injection; else ⇒ injection); the checker's
+#     `is_instance = params.len>0 && !params[0].has_type` detector (typer.tks) is unchanged. During
+#     the window every instance method still writes `self` explicitly, so the injection never fires.
+# R2 is a strict NO-OP over the corpus behavior (statics already marked in Crumb 3; instances still
+# carry the explicit `self`), verified by a green C-backend dry build under R1.
 #
-# FIXPOINT. The reseed converged in one step on this base: gen0 (cc of the previous bootstrap)
-# C-built the current source into bin-a; compiling bin-a and rebuilding the source produced a
-# byte-identical bin-b (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# FIXPOINT. The reseed converged in one step on this base: gen0 (cc of the R1 bootstrap) C-built the
+# current source into bin-a; compiling bin-a and rebuilding the source produced a byte-identical
+# bin-b (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0';  TEKO_BACKEND=c gen0' build . -> OUT;  OUT/teko.c == bootstrap/teko.c.
 #
 # `run: hand-harvest` — no CI run produced this file; it was harvested by hand on the branch, in the
@@ -27,7 +33,7 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  744bf541602bcef802a340d892718da33a92915f554d51e84b18a7e00b2082a0
+sha256:  ccfa5e075c150c3769b147fee4adf0df6b26763bf7b48fedfae3c44fd9c37ee7
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§4 R1); sha256 is read directly off
+legacy:  none — this is an exact, self-reproducing hand harvest (§4 R2); sha256 is read directly off
          the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
