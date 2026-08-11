@@ -385,7 +385,7 @@ fn tarefa() {                          // função comum SEM retorno — SEM id 
     var tx = svc<Tx<i32>>("res")       // extremo de escrita, pela chave constante
     tx.send(processar())
     tx.close()                         // o produtor fecha
-    svc<Ctx>("res").done()             // done() manual
+    tx.done()                          // done() pelo próprio handle (o ctx é transient, inalcançável aqui)
 }
 
 fn main() {
@@ -441,19 +441,19 @@ type IChannelKind<T> = interface {
 // K é um `service singleton` que satisfaz a interface (senão: erro de compilação):
 static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): ctx
 
-// AMBOS os extremos (e o próprio ctx) são clamados por svc, pela MESMA chave constante (svc = comp-time, §8):
+// Os extremos são clamados por svc, pela MESMA chave constante (svc = comp-time, §8):
 var rx  = svc<Rx<T>>("chave")                      // LEITOR único — resolvido por chave
 var tx  = svc<Tx<T>>("chave")                      // ESCRITOR (N) — resolvido por chave (nada de id no spawn)
-var c   = svc<Ctx>("chave")                        // o ctx também por chave — p/ um worker fazer done()
 
 fn Tx<T>::send(v: T): null                         // devolve null; a propriedade tx.closed diz se fechou (drenado)
 fn Tx<T>::close()                                  // o PRODUTOR fecha: invoca o end() do transporte (fecha + drena)
 fn Rx<T>::pop(): T | Closed                        // recebe; o erro ESPECÍFICO `Closed` quando encerrado e drenado
 
-// WaitGroup MANUAL — a contagem é do USUÁRIO, nunca automática (nem no spawn, nem na saída da task):
-fn ctx::add(n: usize)                              // registra N tasks a esperar
-fn ctx::done()                                     // uma task sinaliza que terminou (decrementa)
-fn ctx::wait()                                     // bloqueia até o contador zerar
+// WaitGroup MANUAL — o `done()` desce para os HANDLES (o `ctx` é transient, o worker não o alcança):
+fn Tx<T>::done()                                   // um PRODUTOR sinaliza fim pelo SEU handle (decrementa o ctx)
+fn Rx<T>::done()                                   // um CONSUMIDOR sinaliza fim pelo SEU handle
+fn ctx::add(n: usize)                              // o CRIADOR registra N tasks ANTES do spawn (race-free)
+fn ctx::wait()                                     // o criador bloqueia até o contador zerar
 fn ctx::close()                                    // fecho de reserva do canal (invoca end())
 ```
 
@@ -466,13 +466,18 @@ fn ctx::close()                                    // fecho de reserva do canal 
 - **`make` devolve o `ctx`; AMBOS os extremos por `svc` (ruling do dono).** `make(key, bounds = 1): ctx`
   cria o canal e devolve o **contexto** — o **WaitGroup** do canal e um fecho de reserva (`ctx.close()`).
   Os dois extremos (e o `ctx`) são clamados por chave: `svc<Rx<T>>(key)` (leitor), `svc<Tx<T>>(key)` (N
-  escritores), `svc<Ctx>(key)` (para um worker fazer `done()`). Fan-in MPSC: **1 leitor**, **N escritores**.
-- **O WaitGroup do `ctx` é MANUAL (ruling do dono).** A contagem é **do usuário**, nunca automática — nem no
-  `spawn`, nem na saída da task. O usuário coordena `ctx.add(n)` (registra N a esperar), `ctx.done()` (uma
-  task sinaliza fim) e `ctx.wait()` (bloqueia até zerar) como quiser. O `spawn` **não** registra nada sozinho.
+  escritores). O worker sinaliza fim pelo **seu handle** (`tx.done()`/`rx.done()`), não pelo ctx transient. Fan-in MPSC: **1 leitor**, **N escritores**.
+- **O WaitGroup é MANUAL, e o `done()` desce para os handles porque o `ctx` é transient (ruling do dono).** A
+  contagem é **do usuário**, nunca automática (nem no `spawn`, nem na saída da task). A divisão respeita o
+  lifetime: o **`add` fica no `ctx`** — o **criador** chama `ctx.add(n)` **antes** do `spawn` (o criador é
+  quem segura o ctx transient, e adicionar antes de disparar é **race-free**); o **`done` desce para os
+  HANDLES** — `tx.done()` (produtor) e `rx.done()` (consumidor), *respectivamente*, porque um worker **não
+  alcança o `ctx` transient** (ele está na região do criador), mas **sempre segura o seu `tx`/`rx`** (estável,
+  backed em F2). O `ctx.wait()` (no criador) bloqueia até o contador zerar. Pôr o `add` no handle
+  reintroduziria a corrida "add-depois-do-spawn"; por isso só o `done` desce.
 - **Fechar é responsabilidade do PRODUTOR (ruling do dono).** O **`Tx` tem o `close()`** — quem sabe que não
   há mais mensagens é o produtor, então é ele que fecha (`tx.close()` → `end()`; convenção Go). Com N
-  produtores, o usuário coordena por `ctx.add/done/wait` e fecha-se **uma vez** (idempotente). O fecho também
+  produtores, o usuário coordena por `ctx.add` + `tx.done()`/`rx.done()` + `ctx.wait()` e fecha-se **uma vez** (idempotente). O fecho também
   fica **no `ctx`** (`ctx.close()`) como reserva, **caso precise**. O **consumidor (`Rx`) não fecha** — faz `pop()` até
   receber o erro **específico `Closed`** (encerrado + drenado; distinto de um `error` de transporte). Ambos
   observam: `Rx` pelo `Closed`, `Tx` pela propriedade `tx.closed`.
@@ -533,7 +538,7 @@ fn gerar() {                                       // função sem retorno — S
         tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula
     }
     tx.close()                 // o PRODUTOR fecha → o pop do consumidor passará a devolver `Closed`
-    svc<Ctx>("pedidos").done() // done() MANUAL — o worker resolve o ctx por chave e sinaliza
+    tx.done()                  // done() pelo próprio handle (o ctx é transient, inalcançável no worker)
 }
 
 fn main() {
@@ -566,7 +571,7 @@ fn main() {
     tx.close()                       // o produtor fecha
     ctx.add(4)                       // MANUAL: 4 workers a esperar
     var i = 0
-    loop while i < 4 { spawn worker(); i = i + 1 }   // cada worker: lê por svc<Rx<Tarefa>>, e faz svc<Ctx>("tarefas").done()
+    loop while i < 4 { spawn worker(); i = i + 1 }   // cada worker: lê por svc<Rx<Tarefa>>, e faz rx.done() ao terminar
     ctx.wait()                       // bloqueia até os 4 done()
 }
 ```
@@ -800,7 +805,7 @@ fn pipeline() {
     var rx  = svc<Rx<Msg>>("pipe")    // leitor por chave
     ctx.add(1)                        // MANUAL
     spawn handler()                   // SEM id — o handler resolve tx/ctx por chave
-    // dentro do handler: var w = svc<Tx<Msg>>("pipe"); … ; svc<Ctx>("pipe").done()   // nunca um &canal (penduraria)
+    // dentro do handler: var w = svc<Tx<Msg>>("pipe"); … ; w.done()   // done() pelo handle; nunca um &canal (penduraria)
     ctx.wait()                        // bloqueia até o done()
 }
 ```
