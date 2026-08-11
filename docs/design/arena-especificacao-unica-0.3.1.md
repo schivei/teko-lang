@@ -439,7 +439,10 @@ type IChannelKind<T> = interface {
 // make: cria o canal, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a CHAVE constante,
 // e devolve o CONTEXTO (ctx) — o WaitGroup MANUAL do canal (add/done/wait, coordenados pelo usuário) + fecho.
 // K é um `service singleton` que satisfaz a interface (senão: erro de compilação):
-static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): ctx
+static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): Ctx | error
+                                                   // error: conflito de chave (runtime) ou falha do K.init (abrir o transporte)
+// checar existência antes de resolver (evita o panic do svc de chave ausente):
+fn has_svc<T: service>(key: str | null = null): bool
 
 // Os extremos são clamados por svc, pela MESMA chave constante (svc = comp-time, §8):
 var rx  = svc<Rx<T>>("chave")                      // LEITOR único — resolvido por chave
@@ -481,9 +484,11 @@ fn ctx::close()                                    // fecho de reserva do canal 
     string** (em F2). O `svc<Rx<T>>(var_key)` vira então um **lookup em runtime** pela string, e as ops de
     `Rx`/`Tx` são uma **chamada indireta** (o ponteiro de função do registro de ops) — **não** vtable de
     interface, **não** o Round 3. **Custo:** um lookup por resolução + uma indireção por op. Conflito
-    (mesma chave viva em dois `make`) = **erro em runtime** no 2º `make`. **`svc` de chave não encontrada
-    (nenhum `make` a finalizou) = PANIC (ruling do dono)** — o `svc` continua infalível no tipo (devolve `T`),
-    e a chave ausente é um `panic` (como um acesso fora de faixa), não um retorno `| error`.
+    (mesma chave viva em dois `make`) sai como **`error`** — por isso `make` devolve **`Ctx | error`** (o
+    `error` também cobre a falha do `K.init`, p.ex. abrir o socket). **`svc` de chave não encontrada = PANIC
+    (ruling do dono)** — o `svc` continua infalível no tipo (devolve `T`), a chave ausente é `panic` (como um
+    acesso fora de faixa). Para checar **antes** de resolver há **`has_svc<T: service>(key): bool`** — o dev
+    faz o check e evita o panic.
   - **A diferença é se o `K` é conhecido no sítio do `svc`:** chave constante → `K` conhecido → inline; chave
     variável → `K` **apagado** no sítio (o key é variável, não pareável a um `make` específico) → indireção
     pelo registro de ops. Nos dois casos o **tipo `T` é estático** e **não há dispatch dinâmico de interface**.

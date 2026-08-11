@@ -237,8 +237,9 @@ lifetimes SÃO tempos de vida de arena (detalhe em `arena-especificacao-unica-0.
 **O que entra.** A keyword `service` (**sempre selado** — um serviço **não pode** ser `virtual` nem
 `abstract`, então `sealed` é redundante e não se escreve; é o mesmo default do `class`, que só se abre com
 `virtual`/`abstract`), os lifetimes `singleton`/`scoped`/`transient`, o ctor
-`static`, e `svc<T: service>(key: str | null = null): T` como **intrínseco de comp-time** (o compilador
-substitui o call-site inline por código por-lifetime; sem ABI de runtime). Chaves de string desambiguam múltiplos provedores de uma
+`static`, `svc<T: service>(key: str | null = null): T` como **intrínseco de comp-time** (o compilador
+substitui o call-site inline por código por-lifetime; sem ABI de runtime) — **chave ausente = `panic`**, e há
+**`has_svc<T: service>(key): bool`** para checar antes. Chaves de string desambiguam múltiplos provedores de uma
 interface — e a política de conflito é dura (ruling do dono): **se já há um registro do mesmo tipo sob a
 mesma chave, é ERRO DE COMPILAÇÃO** (chaves distintas coexistem; mesmo-tipo-mesma-chave colide em
 comp-time, nunca "último vence" silencioso). **Regra de escape:** valor de serviço nunca armazenado em campo, passado como argumento, ou
@@ -496,7 +497,9 @@ type IChannelKind<T> = interface { fn init(key: str); fn send(v: T); fn recv(): 
 
 // make: cria, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a chave,
 // e devolve o CONTEXTO (ctx) — o WaitGroup MANUAL do canal + um fecho de reserva:
-static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): ctx
+static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): Ctx | error
+                                                   // error: conflito de chave (runtime) ou falha do K.init (abrir o transporte)
+fn has_svc<T: service>(key: str | null = null): bool   // checar existência antes de resolver (evita o panic do svc)
               // key:    CONSTANTE (literal/const, comp-time) — o "nome" do canal
               // bounds: 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
 
@@ -578,9 +581,10 @@ registro tem duas fases, e o modo é escolhido pela **forma da chave**:
   a ligação chave→instância num **registro processo-inteiro chaveado pela string** (F2). Aí `svc<Rx<T>>(var_key)`
   é um **lookup em runtime**, e as ops de `Rx`/`Tx` viram **chamada indireta** (ponteiro de função) — **não**
   vtable de interface, **não** o Round 3. **Custo:** um lookup + uma indireção por op. Conflito = **erro em
-  runtime** no 2º `make`. **`svc` de chave não encontrada = PANIC (ruling do dono)** — o `svc` continua
-  infalível no tipo (devolve `T`); chave ausente é `panic`, não retorno `| error`. (O `T` continua estático
-  nos dois modos; só o `K` é apagado no sítio do `svc` variável.)
+  runtime** e sai como **`error`** — por isso `make` devolve **`Ctx | error`** (o `error` cobre o conflito de
+  chave e a falha do `K.init`, p.ex. abrir o socket). **`svc` de chave não encontrada = PANIC (ruling do
+  dono)** — o `svc` é infalível no tipo (devolve `T`); chave ausente é `panic`. Para checar **antes** há
+  **`has_svc<T: service>(key): bool`**. (O `T` continua estático nos dois modos; só o `K` é apagado no `svc` variável.)
 
 **O `ctx` É O DONO do lifetime — transient (ruling do dono, ratificado).** O serviço singleton do canal vive em F2, mas
 **quem o possui é o `ctx`** (transient, na região do criador). Quando o `ctx` cai, ele **cascateia o
