@@ -491,7 +491,7 @@ fn ctx::close()                                    // fecho de reserva do canal 
   mas o canal é registrado pelo `make` sob uma **chave**, para comunicação ENTRE tasks, então essa instância
   única vive na **raiz do PROGRAMA (F2)** — por isso `svc<Rx<T>>("chave")`/`svc<Tx<T>>("chave")` de
   **qualquer thread** resolvem o MESMO canal. Config **por valor**, nunca um `ref` cruzando task (UAF, §9).
-- **O `ctx` É O DONO do lifetime do canal — transient (ruling proposto).** A instância vive em F2, mas
+- **O `ctx` É O DONO do lifetime do canal — transient (ruling do dono, ratificado).** A instância vive em F2, mas
   **quem a possui é o `ctx`**: o `ctx` é **transient** (vive na região de quem chamou `make`). Quando o
   `ctx` cai (a região do criador sai de escopo), ele **cascateia o teardown**: `end()` do transporte →
   **desregistra a chave** de F2 → **libera** a entrada (o `service` singleton + `Rx` + `Tx`) de F2. Uma

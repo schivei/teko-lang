@@ -560,7 +560,7 @@ o **contexto** (`ctx`) — o **WaitGroup** do canal e um fecho de reserva. **Amb
 `spawn` não registra nada, a saída da task não faz `done` sozinha. O usuário coordena `ctx.add(n)` /
 `ctx.done()` / `ctx.wait()` como quiser.
 
-**O `ctx` É O DONO do lifetime — transient (ruling proposto).** O serviço singleton do canal vive em F2, mas
+**O `ctx` É O DONO do lifetime — transient (ruling do dono, ratificado).** O serviço singleton do canal vive em F2, mas
 **quem o possui é o `ctx`** (transient, na região do criador). Quando o `ctx` cai, ele **cascateia o
 teardown**: `end()` → desregistra a chave → **libera** o serviço + `Rx` + `Tx` de F2. O canal, os dois
 extremos e o serviço morrem **junto com o `ctx`**. O **UAF é fechado por construção**: (a) `ctx.wait()`
