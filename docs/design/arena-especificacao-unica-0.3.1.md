@@ -369,25 +369,31 @@ O isolamento de memória tem **duas camadas**:
    a keyword `spawn` cria** (§7.8): cada `spawn f(args)` nasce uma corotina isolada com sua sub-raiz, os
    argumentos entram **por cópia** nessa raiz, e nada de fora é referenciado por `ref` (§9).
 
-**`isolate fn` — a keyword de função da corotina.** `isolate` é um **modificador de função** (não um
-bloco): uma `isolate fn` **não tem retorno** e **só pode ser chamada por `spawn`** (chamá-la diretamente é
-erro de compilação). Essas duas coisas são o que o checker garante — nada sobre execução. O **`spawn` é
-fire-and-forget**: dispara a corotina e segue; **não se espera por ela**, e a conclusão é garantida por
-outros meios (o fecho do canal, o `WaitGroup`), nunca pelo próprio `spawn`. Resultados saem por `chan`.
-Quando `spawn` a lança, a `isolate fn` nasce na sua **própria sub-raiz de arena** (F1), com os argumentos
-entrando por cópia.
+**`spawn` e o modificador `isolate`.** A regra dura do `spawn` é **uma só: o alvo NÃO pode ter retorno** —
+um valor retornado não teria para quem ir (`spawn` é fire-and-forget). O alvo pode ser uma **função comum
+sem retorno** OU uma **`isolate fn`**. O **`isolate` é um modificador OPCIONAL** que restringe uma função
+sem-retorno a ser **spawn-only** — só chamável por `spawn`, nunca direto (o checker rejeita a chamada
+direta). Uma função sem-retorno comum pode ser chamada direto ou por `spawn`; marcá-la `isolate` fecha a
+porta da chamada direta. Isso é tudo que o checker garante — nada sobre execução. O **`spawn` é
+fire-and-forget**: dispara e segue; **não se espera por ela**, a conclusão vem por outros meios (o fecho do
+canal, o `WaitGroup`). Quando lançada, a corotina nasce na sua **própria sub-raiz de arena** (F1), com os
+argumentos entrando por cópia; resultados saem por `chan`.
 
 ```teko
-isolate fn worker(cid: usize) {        // sem retorno; SÓ chamável por spawn
+isolate fn worker(cid: usize) {        // sem retorno + spawn-only (o `isolate` fecha a chamada direta)
     var tx = chan<i32>::writer(cid)
     tx.send(processar())
     chan<i32>::close(cid)
 }
 
+fn tarefa(cid: usize) { … }            // função comum SEM retorno — também spawnável (e chamável direto)
+
 fn main() {
     var c = chan<i32>::make(64)
-    spawn worker(c.id)                 // a ÚNICA forma de invocar uma isolate fn
-    // worker(c.id)                     // ERRO de compilação: isolate fn não pode ser chamada direto
+    spawn worker(c.id)                 // ok
+    spawn tarefa(c.id)                 // ok — spawn só exige "sem retorno"
+    // worker(c.id)                     // ERRO: isolate fn não pode ser chamada direto
+    // spawn soma(a, b)                 // ERRO: soma tem retorno — spawn não aceita
 }
 ```
 
@@ -487,15 +493,14 @@ fn main() {
 Não há `join` no modelo de corotina: a barreira de memória é o **fecho do canal** (o `pop` devolver
 `closed`) e/ou o `WaitGroup`.
 
-### 7.9 `async`/`await` — o mapa de arena das duas fundações
+### 7.9 `await` — suspender qualquer função e gerar um `Intent` (sem `async`)
 
-`async`/`await` (com `Intent<T>`) é **açúcar**, e a arena difere conforme a fundação — a distinção tem de
-ser dita, não escondida atrás do mesmo tipo (`concorrencia-isolate-spawn-chan` §8):
-
-**A diferença para `spawn`: aqui se GARANTE a execução — por suspensão.** O `spawn` é fire-and-forget (não
-se espera por ele). O `async`/`await` é o oposto: o **`await` é o ponto onde se aguarda o resultado**, e o
-faz **por suspensão** — a tarefa que espera **cede o controle** (cooperativamente, sem bloquear a thread do
-SO) e é retomada quando o `Intent` resolve. `spawn` dispara e esquece; `await` suspende e recolhe.
+**Não há keyword `async`: basta `await`.** Qualquer função pode ser suspensa de execução — `await f(args)`
+**suspende** a tarefa corrente (cooperativa, **cede o controle sem bloquear a thread do SO**), executa `f`,
+e é retomada com o resultado quando ele resolve. A suspensão gera um `Intent<T>` (o carregador do resultado
+pendente). É o oposto do `spawn`: **`spawn` dispara e esquece (sem retorno); `await` suspende e recolhe (com
+retorno)** — é no `await` que se GARANTE a execução, por suspensão. A arena difere conforme a fundação (I/O
+vs CPU), dita e não escondida (`concorrencia-isolate-spawn-chan` §8):
 
 **O que o `Intent` carrega, e por que o dado cruza por cópia (regra do dono):**
 - **`Intent<T>`** (genérico) é **criado na arena do caller** (quem faz a chamada `async`) e carrega o
@@ -516,10 +521,10 @@ SO) e é retomada quando o `Intent` resolve. `spawn` dispara e esquece; `await` 
   **Custo de arena: zero** — não precisa de F1, porque com uma só raia a garantia de F1 (ninguém
   rebobina a arena de outro) já vale de graça. Compõe com `isolate`: cada isolate roda seu laço
   cooperativo na SUA arena.
-- **CPU (`async fn f(): T`):** desaçucara para lançar o corpo numa **corotina isolada de um pool**
-  pré-aquecido (F1); o `await` **suspende** a tarefa que espera (sem bloquear a thread) até o `Intent<T>`
-  ser alimentado ao completar, e então recolhe o resultado. Herda a arena-por-task inteira. **Não é um
-  terceiro modelo de arena "leve".** (Diferente de `spawn`, que é fire-and-forget sem retorno.)
+- **CPU (`await f()` de trabalho pesado):** o corpo roda numa **corotina isolada de um pool** pré-aquecido
+  (F1); o `await` **suspende** a tarefa que espera (sem bloquear a thread) até o `Intent<T>` ser alimentado
+  ao completar, e então recolhe o resultado. Herda a arena-por-task inteira. **Não é um terceiro modelo de
+  arena "leve".** (Diferente de `spawn`, que é fire-and-forget sem retorno.)
 - **O que NÃO existe:** thread de verdade rodando Teko que **compartilha arena sem F1**. Custaria o mesmo
   (precisa de F1 para ser seguro) e entregaria menos — é o bug que F1 existe para fechar
   (`arena_push`/`pop` de duas raias sobre a mesma pilha se corrompem, sintoma nenhum).

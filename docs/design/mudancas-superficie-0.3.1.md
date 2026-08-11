@@ -401,11 +401,11 @@ A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o u
 
 ### 10.1 Estratégia de token — tudo contextual
 
-`spawn`, `async`, `await` (corotina) e `isolate` (modificador de função — a corotina só chamável por `spawn`) são **keywords contextuais**
-(reconhecidas pelo parser por posição, sem reserva no lexer — a mesma norma que
-`class`/`abstract`/`virtual`/`override` seguem); `chan` é um **tipo genérico** (`chan<T>`). Medido: **zero
-identificadores Teko hoje** se chamam `spawn`/`chan`/`async`/`isolate`, então reconhecê-los por posição não
-quebra corpus.
+`spawn` (dispara), `await` (suspende) e `isolate` (modificador opcional de função — restringe a spawn-only)
+são **keywords contextuais** (reconhecidas pelo parser por posição, sem reserva no lexer — a mesma norma
+que `class`/`abstract`/`virtual`/`override` seguem); `chan` é um **tipo genérico** (`chan<T>`). **Não há
+keyword `async`** — `await` sozinho suspende qualquer função (§10.3). Medido: **zero identificadores Teko
+hoje** se chamam `spawn`/`chan`/`await`/`isolate`, então reconhecê-los por posição não quebra corpus.
 
 ### 10.2 `spawn` (corotina) + `chan<T>` — paralelismo real, memória isolada
 
@@ -465,29 +465,26 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte 
 `fork_join` de baixo nível sobrevive como mecanismo INTERNO do backend, para paralelizar o codegen — não
 é superfície de usuário; o usuário escreve `spawn`.)*
 
-### 10.3 `async`/`await` + `Intent<T>` — açúcar de duas fundações
+### 10.3 `await` — suspender qualquer função (sem `async`)
 
-Keywords **contextuais**. É aqui que se **garante a execução** (ao contrário do `spawn`, fire-and-forget):
-o **`await` aguarda o resultado por SUSPENSÃO** — a tarefa cede o controle, cooperativa, sem bloquear a
-thread, e é retomada quando o `Intent` resolve. `async`/`await` retorna um `Intent`/`Intent<T>`:
+**Não há keyword `async`: basta `await`.** `await f(args)` **suspende** a tarefa corrente (cede o controle,
+cooperativa, **sem bloquear a thread**), executa `f`, e é retomada com o resultado quando ele resolve —
+gerando um `Intent<T>` (o carregador do resultado pendente). É onde se **garante a execução** — ao
+contrário do `spawn` (fire-and-forget, sem retorno). A arena de cada fundação está no Doc 1 §7.9.
 
-- **`Intent<T>`** é **criado na arena do caller** e carrega o **estado da intenção + a CÓPIA do dado**; o
-  **processo de sincronização o alimenta** (escreve a cópia de `T` dentro dele ao completar) — nunca uma
-  referência à arena que produziu o valor. Destino-na-arena-do-caller, como o DPS.
-- **`Intent`** (não-genérico) é **opaco e sem dado** — fire-and-forget; `await` só sincroniza.
-- `Intent` vs `Intent<T>` são overload de **tipo** (§9).
+- **`Intent<T>`** é **criado na arena do caller** e carrega o **estado + a CÓPIA do resultado**; a retomada
+  da suspensão escreve a cópia de `T` dentro dele (nunca uma referência à arena que a produziu) —
+  destino-na-arena, como o DPS. **`Intent`** (não-genérico) é opaco, sem dado. São overload de tipo (§9).
+- **I/O** — a suspensão é servida por um reator (`epoll`/`kqueue`/`IOCP`), sem thread nova. **CPU** — o
+  corpo roda numa corotina isolada de um pool (F1). Em ambos o `await` cede e retoma; nunca bloqueia.
 
-É açúcar sobre DUAS fundações, e o desenho diz qual é qual (a arena de cada uma no Doc 1 §7.9):
-
-- **I/O cooperativo** — o `Intent` vive na arena de quem criou; sem thread de SO nova; reator
-  `epoll`/`kqueue`/`IOCP`. Barato.
-- **CPU** — `async fn pesado(): T` desaçucara para uma corotina isolada de um pool; o `await` **suspende**
-  (sem bloquear a thread) até o `Intent<T>` resolver, e então recolhe o resultado. Herda F1.
-  (`async`/`await` garante o resultado por suspensão; `spawn` é fire-and-forget, sem retorno.)
-
-**Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve"). E **`ref`
-não cruza a fronteira**: nem `spawn`/`chan`/`async fn` aceitam `ref`, nem um genérico pode ser `<ref T>`
+**Não** existe um terceiro modelo (thread compartilhando arena sem F1 disfarçada de "leve"). E **`ref` não
+cruza a fronteira** de concorrência: nem `spawn`/`chan` aceitam `ref`, nem um genérico pode ser `<ref T>`
 (§10.6) — preserva UAF; o que cruza é cópia ou id.
+
+```teko
+var r = await calcular(x)     // suspende, roda calcular, retoma com r — qualquer função, sem `async`
+```
 
 ### 10.4 `teko::journal` — o módulo de journaling
 
