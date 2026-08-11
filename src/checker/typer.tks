@@ -946,7 +946,7 @@ fn type_mem_free(c: parser::Call, env: Env, table: TypeTable) -> TExpr | NotMemF
     // the target must be a plain VARIABLE (so the lowering can scrub it) that is `mut` (owned to free).
     let vname = match arg.kind { TVar as v => v.name; _ => return error { message = "teko::mem::free requires a mutable variable — the value must have a binding to invalidate" } }
     let vb = match lookup_binding(env, vname) { ValBinding as b => b; error as e => return e }
-    if !vb.is_mut { return error { message = $"cannot free immutable `{vname}` — declare it `mut` (free invalidates the binding)" } }
+    if !vb.is_mut { return error { message = $"cannot free immutable `{vname}` — declare it `mut`/`var` (free invalidates the binding)" } }
     let is_heap = match arg.type {
         Slice => true
         Named as nm => is_class_name(nm.name, table) || is_region_handle_name(nm.name, table)
@@ -1766,7 +1766,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                             match a.kind {
                                 TVar as v => match lookup_binding(env, v.name) {
                                     ValBinding as vb => {
-                                        if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut` (a reference needs a mutable target)" } }
+                                        if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut`/`var` (a reference needs a mutable target)" } }
                                         auto_reffed = true   // keep a.type = T; emit_call emits `&` (param is ref<T>)
                                     }
                                     error => return error { message = "auto-ref requires a mutable variable (a `mut` binding)" }
@@ -3273,7 +3273,7 @@ fn type_borrow_expr(b: parser::Borrow, env: Env, table: TypeTable) -> TExpr | er
     match to.kind {
         TVar as v => match lookup_binding(env, v.name) {
             ValBinding as vb => {
-                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut` (a borrow needs a mutable target)" } }
+                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut`/`var` (a borrow needs a mutable target)" } }
                 TExpr { kind = TBorrow { operand = to }; type = Reference { inner = to.type }; line = 0; col = 0 }
             }
             error as e => e
@@ -4400,7 +4400,7 @@ fn field_write_root_writable(receiver: parser::Expr, env: Env) -> error | null {
     if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
     let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
     if rb.is_mut { return null }
-    error { message = $"cannot assign to a field of immutable `{root.name}` — declare it `mut`, or let the declaring type's own method write it (`let` protects fields at every level; there is no `ref mut`) (B.21)" }
+    error { message = $"cannot assign to a field of immutable `{root.name}` — declare it `mut`/`var`, or let the declaring type's own method write it (`let` protects fields at every level; there is no `ref mut`) (B.21)" }
 }
 
 /**
@@ -4475,7 +4475,7 @@ fn type_index_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
     let root = lvalue_root(ix.receiver)
     if !root.reachable { return error { message = "cannot assign into an element of a temporary value — the receiver is not a mutable variable" } }
     let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
-    if !rb.is_mut { return error { message = $"cannot assign into an element of immutable `{root.name}` — declare it `mut` (B.21)" } }
+    if !rb.is_mut { return error { message = $"cannot assign into an element of immutable `{root.name}` — declare it `mut`/`var` (B.21)" } }
     let lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(elem) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a slice element (parameter-only in this version)" } }
@@ -4520,7 +4520,7 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
         }
         return TypedStmt { node = TAssign { kind = parser::AssignKind::RefDeref; name = a.name; op = a.op; bound = inner; value = dv; deref = true; target = no_texpr() }; env = env }
     }
-    if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut` (B.21)" } }
+    if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut`/`var` (B.21)" } }
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     let both_bare_ref = (match tb.type { Reference => true; _ => false }) && (match v.type { Reference => true; _ => false })
     if !both_bare_ref {
