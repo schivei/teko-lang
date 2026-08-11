@@ -5722,9 +5722,8 @@ fn discard_param_type(gov: parser::Function | null, idx: u64, table: TypeTable, 
  * @param struct_name        the enclosing type name (bare from the caller; canonicalized here)
  * @param env                the typing environment
  * @param table              the folded type table
- * @param has_base_binding   does the class expose a named base-object binding to this method?
- * @param base_binding_name  the base-binding local name (valid iff has_base_binding)
- * @param base_name          the (canonical) base class name (valid iff has_base_binding)
+ * @param has_base           does this method's class extend a base class (super reachable via `base`)?
+ * @param base_name          the (canonical) base class name (valid iff has_base)
  * @param declaring_class    the class that ORIGINALLY declared this body (intern/private access ctx)
  * @return                   the typed method as a TFunction (namespace stamped by the caller)
  *                           or (U2, §2 line 72) a local/param/return of unsafe type when neither
@@ -5768,22 +5767,21 @@ fn is_method_receiver(f: parser::Function, i: u64): bool {
     !f.params[0].has_type
 }
 
-fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable, has_base_binding: bool, base_binding_name: str, base_name: str, declaring_class: str): TFunction | error {
+fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable, has_base: bool, base_name: str, declaring_class: str): TFunction | error {
     // (W10b.CLASS residual — intern visibility) this body's OWN field/method accesses are
     // checked against `declaring_class` (see type_struct_methods's own comment on why this can
     // differ from `struct_name`), NOT `struct_name` — set before typing the body below.
     var local = with_fn_unsafe(with_owner(env, declaring_class), method_is_effective_unsafe(f, struct_name, env.cur_ns, table))
     var tbl = method_type_param_table(receiver_canonical_name(struct_name, env.cur_ns, table), f.type_params, f.type_constraints, "", table)
     var is_teko_rt = f.is_extern && f.from_lib == "teko_rt"
-    // (W10b.CLASS) `class Base(parent) { … }` — the NAMED BINDING an instance method uses to
-    // reach the base object. Only meaningful for an INSTANCE method (has a receiver); a class's
-    // static methods never chain/inherit, so there is no base object to bind there. The binding
-    // is a REINTERPRET of the SAME receiver pointer as the base type — sound because
-    // effective_class_fields lays out the base's fields as a PREFIX of the derived struct
-    // (field-flattening composition, increment 2), so a `tk_t_Derived *` and a `tk_t_Base *`
-    // pointing at the SAME address read identical bytes for every base field.
+    // (§4 G) `base` — the super receiver an INSTANCE method of a subclass uses to reach the base
+    // object. Only meaningful for an INSTANCE method (has a receiver); a class's static methods never
+    // chain/inherit, so there is no base object to bind there. The binding is a REINTERPRET of the
+    // SAME receiver pointer as the base type — sound because effective_class_fields lays out the
+    // base's fields as a PREFIX of the derived struct (field-flattening composition, increment 2), so
+    // a `tk_t_Derived *` and a `tk_t_Base *` pointing at the SAME address read identical base fields.
     var is_instance_method = f.params.len > 0 && !f.params[0].has_type
-    var inject_base_binding = has_base_binding && is_instance_method
+    var inject_base = has_base && is_instance_method
     // codegen reads TFunction.params[i].type_ann DIRECTLY (the syntactic node, not the checked
     // Type) to emit a C signature — so the receiver's placeholder type_ann (no_type(), from
     // parsing) must be REWRITTEN to a real Named(struct_name) TypeExpr before it ever reaches
@@ -5824,12 +5822,9 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         local = define(local, f.params[i].name, pt, is_method_receiver(f, i))
         i++
     }
-    if inject_base_binding { local = define(local, base_binding_name, canonical_base_type(base_name, env.cur_ns), true) }
-    // (§4 D1) `base` — the super receiver — reuses EXACTLY the named-binding reinterpret above, with
-    // the fixed name "base" instead of the author's binding name. During the teach window the two
-    // COEXIST; inert on the current corpus (0 classes declare a base binding). The eventual removal
-    // of the named binding (so `base` is the sole super path) is a later §4 crumb.
-    if inject_base_binding { local = define(local, "base", canonical_base_type(base_name, env.cur_ns), true) }
+    // (§4 G) `base` — the super receiver — is defined as a reinterpret of `self` to the base type,
+    // under the fixed name `base`. It is now the SOLE path to super (the named binding was retired).
+    if inject_base { local = define(local, "base", canonical_base_type(base_name, env.cur_ns), true) }
     var ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
     if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {
@@ -5851,14 +5846,14 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     var lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())
     if lc.failed { return error { message = lc.message } }
     var ret_stmts = retype_union_returns(tb.stmts, ret, table)
-    // (W10b.CLASS / #98 Option A) PREPEND the base-binding as the method body's FIRST statement: a
-    // synthetic `let <binding>: <Base> = <self>` — self UPCAST to the base, NOT a reinterpret-cast.
+    // (§4 G / #98 Option A) PREPEND the `base` super-binding as the method body's FIRST statement: a
+    // synthetic `let base: <Base> = <self>` — self UPCAST to the base, NOT a reinterpret-cast.
     // Binding self (the concrete subclass) with the base-typed `bound` lets emit_as build the D3 fat
-    // pointer (data + tk_vt_<Sub>_<Base>), so dispatch through the base-binding works uniformly under
-    // the one-representation model (widens_into now permits the Sub→Base widen). Checked ABOVE the
+    // pointer (data + tk_vt_<Sub>_<Base>), so dispatch through `base` works uniformly under the
+    // one-representation model (widens_into now permits the Sub→Base widen). Checked ABOVE the
     // injection (check_returns/check_trailing_value/check_labels all read the ORIGINAL body) since it
     // changes nothing about return/trailing-value/label semantics.
-    var body = if inject_base_binding {
+    var body = if inject_base {
         var receiver_name = f.params[0].name
         var cast_val = TExpr {
             kind = TVar { name = receiver_name; is_func = false; func_ns = "" }
@@ -5866,11 +5861,10 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             line = 0; col = 0
         }
         var base_bound = Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }
-        var bind_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = base_binding_name }; bound = base_bound; value = cast_val; di_kind = parser::DiKind::None }
-        // (§4 D1) the coexisting `base` super-binding: the same self→base upcast, bound to the fixed
-        // name `base` (inert on the current corpus — no class declares a base binding).
+        // (§4 G) the `base` super-binding: a self→base upcast bound to the fixed name `base`, the sole
+        // super path. Prepended as the method body's FIRST statement.
         var base_kw_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "base" }; bound = base_bound; value = cast_val; di_kind = parser::DiKind::None }
-        var prefixed: []TStatement = teko::list::push(teko::list::push(teko::list::empty(), bind_stmt), base_kw_stmt)
+        var prefixed: []TStatement = teko::list::push(teko::list::empty(), base_kw_stmt)
         var si = 0
         loop { if si >= ret_stmts.len { break }; prefixed = teko::list::push(prefixed, ret_stmts[si]); si++ }
         prefixed
@@ -6271,17 +6265,13 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
     // (no vtable/dispatch yet). An `abstract fn` signature (no body, never overridden by THIS
     // class) has nothing to emit — skipped.
     var methods: []parser::Function = teko::list::empty()
-    var has_base_binding = false
-    var base_binding_name = ""
     var base_name = ""
     var is_class = false
-    var own_names: []str = teko::list::empty()   // (W10b.CLASS) methods declared DIRECTLY on td — the base-binding is only ever injected for these (see below)
+    var own_names: []str = teko::list::empty()   // (W10b.CLASS) methods declared DIRECTLY on td — `base` is only ever injected for these (see below)
     match td.body {
         parser::StructBody as sb => { methods = sb.methods }
         parser::ClassBody as cb => {
             methods = match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
-            has_base_binding = cb.has_base_binding
-            base_binding_name = cb.base_binding_name
             base_name = cb.base_name
             is_class = true
             var oi = 0
@@ -6295,13 +6285,12 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
     loop {
         if mi >= methods.len { break }
         if methods[mi].is_abstract { mi++; continue }
-        // (W10b.CLASS) the base-binding is injected ONLY for a method DECLARED DIRECTLY on THIS
-        // class (own or an override) — a PURELY inherited method (never touched by this class)
-        // keeps its ORIGINAL declaring class's own context; re-typing it under a DIFFERENT
-        // derived class must NOT inject a binding that method's body never asked for (it would
-        // either be spuriously unused, or — worse — silently shadow an ancestor's OWN binding of
-        // the same name in a 3+-level chain).
-        var use_base_binding = has_base_binding && str_set_has(own_names, methods[mi].name)
+        // (§4 G) `base` is injected ONLY for a method DECLARED DIRECTLY on THIS class (own or an
+        // override) — a PURELY inherited method (never touched by this class) keeps its ORIGINAL
+        // declaring class's own context; re-typing it under a DIFFERENT derived class must NOT inject
+        // a `base` its body never asked for. Gated on the class HAVING a base (base_name != "") — the
+        // super path, decoupled from the retired named binding.
+        var use_base = base_name != "" && str_set_has(own_names, methods[mi].name)
         // (W10b.CLASS residual — intern visibility) the ACCESSOR context for THIS method body's
         // OWN field/method accesses: the class that ORIGINALLY DECLARED it (itself, if own/an
         // override; the ancestor that declared it, if purely inherited) — NEVER td.name when the
@@ -6311,7 +6300,7 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
         } else {
             td.name
         }
-        var mf = match type_method(methods[mi], td.name, with_file(env, file), table, use_base_binding, base_binding_name, base_name, declaring_class) {
+        var mf = match type_method(methods[mi], td.name, with_file(env, file), table, use_base, base_name, declaring_class) {
             TFunction as x => x
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
