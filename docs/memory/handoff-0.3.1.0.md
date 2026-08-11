@@ -614,7 +614,7 @@ Sete vezes, o corpo de uma função corria directamente para dentro do doc-comme
 o `0`, o `}`, a linha vazia e o `/**` **todos ausentes**:
 
 ```teko
-fn f_slice_elem_store_boundaries() -> i64 {
+fn f_slice_elem_store_boundaries(): i64 {
     …
     if ys.len != 5 { return 11 }
  * D27_TENTH_F32 — `0.1` held as an `f32`, whose EXACT binary64 value …
@@ -857,7 +857,7 @@ em `(ptr, len)`, o que É a ABI da SysV e NÃO é a de Win64 — e a correcção
 `args.len == 2`:
 
 ```teko
-fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32) -> bool {
+fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32): bool {
     abi.max_reg_arg_bytes < X86_STR_ARG_BYTES && lir::is_str_arg_builtin(symbol) && args.len == (2 to u64)
 }
 ```
@@ -1690,7 +1690,7 @@ codifica uma **DICOTOMIA** — `Binary` contra tudo o resto — e escreve-a por 
 
 ```teko
 // (C7.1m) The three non-Binary kinds are LIBRARY kinds — they forbid a main.tks.
-fn check_main_file_rule(artifact: Artifact, has_main: bool) -> Artifact | error {
+fn check_main_file_rule(artifact: Artifact, has_main: bool): Artifact | error {
     if artifact == Artifact::Binary && !has_main { return error { … "requires a main.tks" } }
     if artifact != Artifact::Binary && has_main  { return error { … "may not have a main.tks" } }
 ```
@@ -1795,7 +1795,7 @@ nomeiam-nos igual.
 **E O DESENHO CERTO JÁ EXISTE, 800 linhas abaixo, no mesmo ficheiro** — não se inventa nada:
 
 ```teko
-fn archive_output_path(od: str, stem: str, format: ArchiveFormat) -> str {
+fn archive_output_path(od: str, stem: str, format: ArchiveFormat): str {
     match format {
         Coff => teko::str::concat(od, "/", teko::str::concat(stem, ".lib"))
         _    => teko::str::concat(od, "/", teko::str::concat("lib", teko::str::concat(stem, ".a")))
@@ -2596,8 +2596,8 @@ Veio como achado adjacente do ramo `cargo/0.3.1.0-ftoa-nonfinite`, não pedido. 
 instrumento que lê os bits.** Repro mínima, medida com `teko 0.3.0.31-beta`:
 
 ```teko
-fn p_inf() -> f64 { mut huge: f64 = 1.0e308; mut ten: f64 = 10.0; huge * ten }
-fn p_from_arith() -> u64 { let nan = p_inf() - p_inf(); teko::f64_bits(nan) }
+fn p_inf(): f64 { mut huge: f64 = 1.0e308; mut ten: f64 = 10.0; huge * ten }
+fn p_from_arith(): u64 { let nan = p_inf() - p_inf(); teko::f64_bits(nan) }
 ```
 
 | rota | resultado |
@@ -2992,7 +2992,7 @@ teko-ci:   | teko: .: src/build/project.tks:5873:4: the function's final express
 ```
 
 ```teko
-fn stage_rc_of_env(key: str) -> i32 {
+fn stage_rc_of_env(key: str): i32 {
     match teko::env::var(key) { str as v => bp_parse_uint(v) to i32; error => 0 }
 }
 ```

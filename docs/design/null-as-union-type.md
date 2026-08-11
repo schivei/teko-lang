@@ -148,7 +148,7 @@ whole value. That is the single factual correction; everything else survives.
 ```
 mut valor: i32 | null = null        // Null widens into i32 | null
 let x: i32 | null | null = null     // idempotent — dedup to i32 | null
-fn find(k: str) -> Node | null      // absence as an ordinary member
+fn find(k: str): Node | null      // absence as an ordinary member
 let r: str | null | error = fetch() // triple union, no special-casing
 ```
 
@@ -759,7 +759,7 @@ resolve to one type + one mangle (§3c). Nothing produces such a union yet.
  * @param members the deduped union members (source order)
  * @return the members with any `Null` moved to index 0
  */
-fn union_normalize_null(members: []checker::Type) -> []checker::Type
+fn union_normalize_null(members: []checker::Type): []checker::Type
 ```
 
 Fixture: `t/union_null_member.tks` — `let x: i32 | null = 0` / `= null` both
@@ -786,7 +786,7 @@ use). RITUAL: size probe + fixpoint.** Emit `tk_null` (1-byte). Teach the unifie
  * @return the niche-carrying member, or `null` if the union must be tagged
  * @throws error on an internally malformed member type
  */
-fn cg_union_niche_member(v: checker::Variant) -> checker::Type | null | error
+fn cg_union_niche_member(v: checker::Variant): checker::Type | null | error
 ```
 
 Size probe `t/repr_niche.tks`: `ClassRef|null`==8, `Ref<T>|null`==8, `ptr<T>|null`
@@ -812,7 +812,7 @@ that binding/field's codegen from box to inline-tag.
  * @param table the type table (recursion + size resolution)
  * @return null when `#inline` is legal; an error naming the ineligible class
  */
-fn inline_attr_eligible(t: checker::Type, table: TypeTable) -> error?
+fn inline_attr_eligible(t: checker::Type, table: TypeTable): error?
 ```
 
 Size probe `t/repr_box.tks`: `u128|null` slot ==8 (boxed) with zero heap for the
@@ -841,7 +841,7 @@ source and unchanged behavior.
  * @param table  the type table (to expand a named-variant target)
  * @return true iff a `Null` value is assignable into `target`
  */
-fn null_widens_into(target: checker::Type, table: TypeTable) -> bool
+fn null_widens_into(target: checker::Type, table: TypeTable): bool
 
 /**
  * narrow_on_eq_guard — the one genuinely new checker piece (§3f): if `cond` is
@@ -852,7 +852,7 @@ fn null_widens_into(target: checker::Type, table: TypeTable) -> bool
  * @param env  the current flow type-environment
  * @return the (then-env, else-env) overrides, or the unchanged env
  */
-fn narrow_on_eq_guard(cond: checker::TExpr, env: FlowEnv) -> BranchEnvs
+fn narrow_on_eq_guard(cond: checker::TExpr, env: FlowEnv): BranchEnvs
 ```
 
 Fixtures: `t/null_narrow_match.tks` + `t/null_narrow_ifguard.tks` (bare payload

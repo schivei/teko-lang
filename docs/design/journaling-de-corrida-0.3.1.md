@@ -148,7 +148,7 @@ pub type Record = struct {
  * @return o identificador da corrida (`<ns monotonico>-<pid>`), estavel dentro do processo
  * @since 0.3.1
  */
-pub fn run_id() -> str
+pub fn run_id(): str
 
 /**
  * run_root — o directorio que esta corrida possui, e o UNICO que ela pode criar.
@@ -156,7 +156,7 @@ pub fn run_id() -> str
  * @return `bin/.tkrun/<run_id()>`
  * @since 0.3.1
  */
-pub fn run_root() -> str
+pub fn run_root(): str
 
 /**
  * open — abrir o segmento de `writer` nesta corrida.
@@ -166,7 +166,7 @@ pub fn run_root() -> str
  * @throws        quando o segmento nao pode ser criado (permissao, disco cheio)
  * @since 0.3.1
  */
-pub fn open(writer: str) -> Journal | error
+pub fn open(writer: str): Journal | error
 
 /**
  * append — acrescentar UM registo ao segmento de `j`.
@@ -182,7 +182,7 @@ pub fn open(writer: str) -> Journal | error
  * @throws         quando a escrita falha (ENOSPC, EIO) — e a falha e PEGAJOSA (§4, modo 5)
  * @since 0.3.1
  */
-pub fn append(j: Journal, kind: str, payload: str) -> null | error
+pub fn append(j: Journal, kind: str, payload: str): null | error
 
 /**
  * fold — reler TODOS os segmentos de `run` sob `root` e devolver os registos em ordem de segmento.
@@ -199,7 +199,7 @@ pub fn append(j: Journal, kind: str, payload: str) -> null | error
  * @return      os registos, ordenados por nome de segmento e depois por ordem de escrita
  * @since 0.3.1
  */
-pub fn fold(root: str, run: str) -> []Record
+pub fn fold(root: str, run: str): []Record
 
 /**
  * scratch — o caminho que `base` tem NESTA corrida e para ESTE escritor.
@@ -211,7 +211,7 @@ pub fn fold(root: str, run: str) -> []Record
  * @return      `<run_root()>/<writer>/<escopo>/<base>`, com os directorios ja criados
  * @since 0.3.1
  */
-pub fn scratch(base: str) -> str
+pub fn scratch(base: str): str
 
 /**
  * sweep — remover as raizes de corrida sob `bin/.tkrun/` que nao sejam `keep`.
@@ -225,7 +225,7 @@ pub fn scratch(base: str) -> str
  * @return      quantas raizes foram removidas
  * @since 0.3.1
  */
-pub fn sweep(keep: str) -> u64
+pub fn sweep(keep: str): u64
 ```
 
 ### 2.3 Os fundos de runtime (C mantido — `src/runtime/teko_rt.{c,h}`)
@@ -287,7 +287,7 @@ Do lado do orquestrador, `run_gate_sharded` deixa de "fundir no fim" e passa a *
  * @param jobs  quantas shards deviam ter escrito um segmento
  * @return      o veredicto agregado, com as shards incompletas nomeadas
  */
-fn gate_summary(root: str, run: str, jobs: u64) -> GateVerdict {
+fn gate_summary(root: str, run: str, jobs: u64): GateVerdict {
     let recs = teko::journal::fold(root, run)
     let v = gate_fold_records(recs)
     if v.segments < jobs { return gate_verdict_missing(v, jobs) }
@@ -310,7 +310,7 @@ E a fusao de cobertura passa a ser **falivel**, que hoje nao e:
  * @param jobs  quantas shards correram
  * @throws      quando alguma shard nao deixou despejo — a corrida para, com a shard nomeada
  */
-fn merge_shard_coverage(base: str, jobs: u64) -> null | error {
+fn merge_shard_coverage(base: str, jobs: u64): null | error {
     mut i: u64 = 0
     loop {
         if i >= jobs { break }
@@ -925,7 +925,7 @@ pub type RunSummary = struct {
  * @return      o veredicto agregado
  * @since 0.3.1
  */
-pub fn summarize(recs: []Record) -> RunSummary
+pub fn summarize(recs: []Record): RunSummary
 
 /**
  * render_summary — o bloco que o humano le, em texto estavel.
@@ -939,7 +939,7 @@ pub fn summarize(recs: []Record) -> RunSummary
  * @return   o bloco, com quebras de linha, terminado pela linha de fecho
  * @since 0.3.1
  */
-pub fn render_summary(s: RunSummary) -> str
+pub fn render_summary(s: RunSummary): str
 ```
 
 ### 13.4 O bloco, como o dono o vai ler
@@ -1232,7 +1232,7 @@ pub type TestEnd = struct {
  * @return      como o corpo terminou
  * @since 0.3.1
  */
-pub extern fn run_capturing(body: cabi fn()) -> TestEnd = "tk_test_run" from "teko_rt"
+pub extern fn run_capturing(body: cabi fn()): TestEnd = "tk_test_run" from "teko_rt"
 ```
 
 ### 14.4 O arnes, e o que ele deixa de precisar
@@ -1485,7 +1485,7 @@ filho por uma **disciplina de drenagem obrigatoria**. A disciplina e uma linha d
  * @param deadline_ms  quanto tempo o laco pode ficar sem progresso antes de desistir; 0 = sem limite
  * @return       o estado de saida de cada filho, em ordem de indice (nunca de chegada)
  */
-pub fn pump(hs: []ProcHandle, sinks: []Journal, deadline_ms: i32) -> []i32
+pub fn pump(hs: []ProcHandle, sinks: []Journal, deadline_ms: i32): []i32
 ```
 
 ### 15.4 O `ProcHandle` ganha os descritores e o evento de fecho
@@ -1584,7 +1584,7 @@ pub type Sink = enum { Stderr; Segment }
  * @param line  o registo, sem quebra de linha
  * @throws      quando a escrita falha (§4, modo 5 — a falha e pegajosa)
  */
-pub fn emit_to(sink: Sink, seg: Journal, line: str) -> null | error
+pub fn emit_to(sink: Sink, seg: Journal, line: str): null | error
 ```
 
 ### 15.7 `chan<T>`: o primeiro consumidor real, registado e NAO construido
@@ -1764,7 +1764,7 @@ pub type ChanMsg = struct {
  * @throws        quando o handler nao pode ser criado (limite de threads)
  * @since 0.3.1
  */
-pub fn drain_into(h: ProcHandle, c: Chan, writer: str) -> null | error
+pub fn drain_into(h: ProcHandle, c: Chan, writer: str): null | error
 
 /**
  * recv — tirar o proximo registo do canal, bloqueando ate haver um.
@@ -1777,7 +1777,7 @@ pub fn drain_into(h: ProcHandle, c: Chan, writer: str) -> null | error
  * @return   o proximo registo, ou `closed` quando TODOS os produtores fecharam
  * @since 0.3.1
  */
-pub fn recv(c: Chan) -> ChanMsg | closed
+pub fn recv(c: Chan): ChanMsg | closed
 ```
 
 E o orquestrador inteiro, que e o ponto do *"algo burro mas extremamente eficiente"*:
@@ -1801,7 +1801,7 @@ E o orquestrador inteiro, que e o ponto do *"algo burro mas extremamente eficien
  * @param sinks  o segmento de journal de cada escritor
  * @return       quantos registos foram apendados
  */
-fn orchestrate(c: Chan, sinks: []Journal) -> u64 {
+fn orchestrate(c: Chan, sinks: []Journal): u64 {
     mut n: u64 = 0
     loop {
         match recv(c) {
@@ -2140,13 +2140,13 @@ pub type Rx = struct { raw: i64 }
  * @throws           quando o canal nao pode ser criado
  * @since 0.3.1
  */
-pub fn open(cap_bytes: u64, producers: u32) -> ChanEnds | error
+pub fn open(cap_bytes: u64, producers: u32): ChanEnds | error
 
 /** send — empurrar um registo rotulado. N escritores, sem coordenacao entre eles. */
-pub fn send(t: Tx, writer: str, bytes: str) -> null | error
+pub fn send(t: Tx, writer: str, bytes: str): null | error
 
 /** recv — tirar o proximo registo. UM leitor; um segundo PANICA (§18.2). */
-pub fn recv(r: Rx) -> ChanMsg | closed
+pub fn recv(r: Rx): ChanMsg | closed
 ```
 
 ### 18.2 Erro de verificador, erro de runtime, ou corrida silenciosa? — **runtime, hoje; e nunca silenciosa**
@@ -2318,7 +2318,7 @@ E a forma que eu proponho para o laco vai um passo mais longe, e elimina o handl
  * @param c  o id do canal que a `main` abriu e de que e dona
  * @return   quantos registos foram apendados
  */
-fn orchestrate(c: u64) -> u64 {
+fn orchestrate(c: u64): u64 {
     mut n: u64 = 0
     loop teko::threads::chan_is_open(c) {
         match teko::threads::chan_recv(c) {
@@ -2587,7 +2587,7 @@ por onde entra o item que existe em duas plataformas e nao foi provado em nenhum
 **O `match` cresce? Digo o que medi.** `prune_os` (`project.tks:124`) trata **so**
 `parser::Function`; `parse_decl.tks:1292` recusa `#os` em qualquer outra posicao. **Recomendo manter
 `#arch` tambem so em funcao**, e a razao nao e preguica: um `const` ou um `type` que difere por
-arquitectura e exprimivel por **uma funcao** guardada (`fn word_size() -> u64`), e essa forma tem
+arquitectura e exprimivel por **uma funcao** guardada (`fn word_size(): u64`), e essa forma tem
 ainda a vantagem de o valor divergente ter um NOME. Se o dono quiser `#arch` em `type`/`const`, o
 `match` de `prune_os` cresce com um braco por especie de item, mais o espelho na recusa de posicao —
 **e a serializacao do `.tkb` ja nao chega, porque um `type` podado muda a tabela de tipos**. Digo-o
@@ -2896,7 +2896,7 @@ handler **repete**. E a reformulacao e esta, e ela **e mais forte do que a que s
  * @param w   a identidade com que os blocos deste handler sao rotulados
  * @return    quantos blocos entregou
  */
-fn drain_one(fd: i64, c: u64, w: str) -> u64 {
+fn drain_one(fd: i64, c: u64, w: str): u64 {
     mut n: u64 = 0
     loop {
         let blk = teko::threads::read_block(fd)
@@ -3151,7 +3151,7 @@ Fui reler-me antes de responder. `docs/.../journaling` §16.4 e §18.1:
 
 ```teko
 /** recv — tirar o proximo registo do canal, BLOQUEANDO ate haver um. */
-pub fn recv(c: Chan) -> ChanMsg | closed
+pub fn recv(c: Chan): ChanMsg | closed
 ```
 
 **Duas saidas, e bloqueante.** Portanto: **nao tinha o defeito TOCTOU** — nunca houve um `is_empty()`
@@ -3187,7 +3187,7 @@ nao-bloqueante, **o orquestrador nao bloqueia em nada, ponto**, e a invariante d
  * @throws   quando o id nao nomeia um canal, ou quem chama nao e o leitor registado (§25.3)
  * @since 0.3.1
  */
-pub fn pop(c: u64) -> Rec | error | null
+pub fn pop(c: u64): Rec | error | null
 ```
 
 E o orquestrador, na forma final — **as duas pecas que ja existiam, agora usadas em conjunto**:
@@ -3204,7 +3204,7 @@ E o orquestrador, na forma final — **as duas pecas que ja existiam, agora usad
  * @param sinks  o segmento de journal de cada escritor
  * @return       quantos registos foram apendados
  */
-fn orchestrate(c: u64, sinks: []Journal) -> u64 {
+fn orchestrate(c: u64, sinks: []Journal): u64 {
     mut n: u64 = 0
     loop teko::threads::chan_is_open(c) {
         match teko::threads::chan_pop(c) {
@@ -4131,7 +4131,7 @@ e a medicao de §29.5 diz exactamente como a afirmar sem mentir:
  * @throws         quando o concedido nao acomoda `rec_max`, com o pedido e o concedido na mensagem
  * @since 0.3.1
  */
-pub fn ensure_capacity(t: Transport, rec_max: u64) -> null | error
+pub fn ensure_capacity(t: Transport, rec_max: u64): null | error
 ```
 
 ### 29.11 O `SCM_RIGHTS` nao faz falta a este desenho — e sai do caminho

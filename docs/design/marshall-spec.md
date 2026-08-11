@@ -174,7 +174,7 @@ safe `ref T` that legally crosses back to safe code (§2 boundary rule: a safe t
  * @example ref node: Node = teko::marshall::wrap<Node>(raw_node_ptr)  // result is ref Node
  * @since 0.3.1
  */
-pub unsafe fn wrap<T>(p: ptr<T>) -> ref T {
+pub unsafe fn wrap<T>(p: ptr<T>): ref T {
     // BLOCKED on the transparent ref redesign (§4 ref model). Body: null-panic guard, then
     // reinterpret p as the bare `T *` a Reference{T} already is (zero-cost, §3).
 }
@@ -205,7 +205,7 @@ Honesty demands we state: `unwrap` is *infallible at the crossing and dangerous 
  * @example let raw: ptr<Node> = teko::marshall::unwrap(node_ref)  // result is ptr<Node>
  * @since 0.3.1
  */
-pub unsafe fn unwrap<T>(r: Ref<T>) -> ptr<T> {
+pub unsafe fn unwrap<T>(r: Ref<T>): ptr<T> {
     // BLOCKED on the transparent ref redesign. Body: reinterpret the Reference{T}'s bare
     // `T *` as ptr<T> (zero-cost, §3). No guard.
 }
@@ -232,7 +232,7 @@ pub unsafe fn unwrap<T>(r: Ref<T>) -> ptr<T> {
  * @return ptr<T>  a null `ptr<T>` (address 0)
  * @since 0.3.1
  */
-pub unsafe fn null<T>() -> ptr<T> { /* codegen: (T *)0 */ }
+pub unsafe fn null<T>(): ptr<T> { /* codegen: (T *)0 */ }
 
 /**
  * Tests whether a raw `ptr<T>` is null (address 0) — the explicit null check that replaces the
@@ -242,7 +242,7 @@ pub unsafe fn null<T>() -> ptr<T> { /* codegen: (T *)0 */ }
  * @return bool  true iff `p` is the null pointer
  * @since 0.3.1
  */
-pub unsafe fn is_null<T>(p: ptr<T>) -> bool { /* codegen: p == (T *)0 */ }
+pub unsafe fn is_null<T>(p: ptr<T>): bool { /* codegen: p == (T *)0 */ }
 ```
 
 ### 5.4 ptr ↔ integer bridge — `to_uptr` / `from_uptr` (D35 precedent)
@@ -265,7 +265,7 @@ fns only cross the *pointer/word* line.
  * @return uptr  `p`'s address as an opaque word
  * @since 0.3.1
  */
-pub unsafe fn to_uptr<T>(p: ptr<T>) -> uptr { /* codegen: (uintptr_t)p */ }
+pub unsafe fn to_uptr<T>(p: ptr<T>): uptr { /* codegen: (uintptr_t)p */ }
 
 /**
  * Reinterprets an opaque `uptr` address as a raw `ptr<T>` — the integer->ptr half. The element
@@ -277,7 +277,7 @@ pub unsafe fn to_uptr<T>(p: ptr<T>) -> uptr { /* codegen: (uintptr_t)p */ }
  * @example let p: ptr<Node> = teko::marshall::from_uptr<Node>(word)
  * @since 0.3.1
  */
-pub unsafe fn from_uptr<T>(u: uptr) -> ptr<T> { /* codegen: (T *)u */ }
+pub unsafe fn from_uptr<T>(u: uptr): ptr<T> { /* codegen: (T *)u */ }
 ```
 
 ### 5.5 Raw-pointer OPERATORS and the sigils `*` / `&` / `->`
@@ -396,7 +396,7 @@ element on the way in — no cheaper than the loop). Documented so the implement
  * @throws panic  on the first null element
  * @since 0.3.1
  */
-pub unsafe fn wrap_slice<T>(ps: []ptr<T>) -> []ref T { /* deferred; loop of wrap */ }
+pub unsafe fn wrap_slice<T>(ps: []ptr<T>): []ref T { /* deferred; loop of wrap */ }
 ```
 
 ---
@@ -475,12 +475,12 @@ boundary zone.
  * @param ptr<byte> c_name  a NUL-terminated C string the caller prepared
  * @return ptr<byte>  the C API's own result pointer (ownership per the C API's contract)
  */
-pub unsafe fn greet_raw(c_name: ptr<byte>) -> ptr<byte> {
+pub unsafe fn greet_raw(c_name: ptr<byte>): ptr<byte> {
     c_api_greet(c_name)
 }
 
 // the CALLER makes every copy visibly, at the call site:
-unsafe fn caller(name: str) -> str {
+unsafe fn caller(name: str): str {
     let c_in: ptr<byte> = teko::mem::as_cstr(name)     // VISIBLE copy #1 (NUL-terminated)
     let c_out: ptr<byte> = greet_raw(c_in)
     teko::mem::str_from_cstr(c_out)                    // VISIBLE copy #2 (back to safe str)
@@ -507,7 +507,7 @@ pub unsafe fn fill(ref buf: []byte) {
  * @param ptr<Node> raw  a raw, non-null node pointer from C
  * @return i64  a value computed by the safe helper
  */
-pub unsafe fn summarize(raw: ptr<Node>) -> i64 {
+pub unsafe fn summarize(raw: ptr<Node>): i64 {
     ref n: Node = teko::marshall::wrap<Node>(raw)      // null-panics if raw is null; result is ref Node
     node_weight(n)                                     // a plain SAFE fn taking ref Node
 }

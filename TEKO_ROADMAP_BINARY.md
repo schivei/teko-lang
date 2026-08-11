@@ -116,7 +116,7 @@ ast.h/result.h como headers reais + `tk_expr`/helpers/corpos → B0d `tk_str_eq`
 |---|---|---|---|
 | B3a ◑ | **Runtime de valor** — **str feito**: `tk_str` (view `[]byte` UTF-8, B.36) em `runtime/teko_rt.h`, literais baixados com **comprimento explícito** (NUL-safe, não `strlen` — M.1); inteiros/bool já nativos (stdint). `list` (`TK_LIST`) **diferido** (não bloqueia o 1º programa com saída) | M.0 | P |
 | B3b ◑ | **Os pânicos** — **superfície criada** em `runtime/teko_rt.{h,c}`: `tk_panic` (→ stderr + abort não-zero) + `tk_panic_div0`/`oob`/`cast`/`overflow` (`_Noreturn`). **Cablagem no codegen pendente** (guards de ÷0 / conversão-impossível / overflow-debug que o C gerado chama) — próximo incremento | M.1 | M |
-| B3c ✓ | **IO** — **feito**: `print`/`println : (str) -> Unit` injetados (stdlib não-importada, não-sombreável — `tk_builtin_fn` espelha `tk_builtin_type`); codegen mapeia `print`/`println` → `tk_print`/`tk_println` (`fwrite` byte-exato, sem assumir NUL); driver passa `-I$TK_RT_DIR` + compila `teko_rt.c` no mesmo `cc` (M.5) | M.1 | P |
+| B3c ✓ | **IO** — **feito**: `print`/`println : (str): Unit` injetados (stdlib não-importada, não-sombreável — `tk_builtin_fn` espelha `tk_builtin_type`); codegen mapeia `print`/`println` → `tk_print`/`tk_println` (`fwrite` byte-exato, sem assumir NUL); driver passa `-I$TK_RT_DIR` + compila `teko_rt.c` no mesmo `cc` (M.5) | M.1 | P |
 | B3d ✓ | **Entry + saída** — virtual-main → `main` C; exit codes (early-exit) **+ saída real via `print`**; pânico → `abort`/stderr com mensagem (`tk_panic`) | M.1 | P |
 
 > **MARCO ZERO (M0) ✅ ALCANÇADO no F2** — via **exit-code** (não precisou de runtime): `main.tks` de aritmética
@@ -129,7 +129,7 @@ ast.h/result.h como headers reais + `tk_expr`/helpers/corpos → B0d `tk_str_eq`
 >
 > **F3 — incremento 1 ✅ (saída observável de verdade):** `print("hello, teko\n")` → `teko` → C+`teko_rt.c` → `cc` →
 > binário que **imprime** e sai 0. Entregue: `runtime/teko_rt.{h,c}` (str/IO + superfície de pânicos), typer injeta
-> `print`/`println:(str)->Unit`, codegen baixa literais `str` (escaping + len explícito) / `byte` e mapeia as chamadas
+> `print`/`println:(str):Unit`, codegen baixa literais `str` (escaping + len explícito) / `byte` e mapeia as chamadas
 > built-in, driver+CMake fiam o runtime no `cc`. Verificado: hello-world imprime; `let s: str` + `println(s)`; em-dash
 > UTF-8 → octal byte-exato; `print(42)` → erro honesto de tipo (M.3); aritmética-exit-code sem regressão.
 > **Incremento 2 (próximo):** cablar **B3b** no codegen — guard de **conversão-impossível** (`x to T` runtime → `tk_panic_cast`),

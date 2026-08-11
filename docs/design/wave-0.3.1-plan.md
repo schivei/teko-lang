@@ -189,7 +189,7 @@ builds gen1).
  * @see docs/design/ref-transparent-model.md §4, §4.2 (null transparency), §3 (depth cap 2)
  * @since 0.3.1.3-beta
  */
-fn autoderef_to(expr: Expr, expected: Type) -> Expr | error
+fn autoderef_to(expr: Expr, expected: Type): Expr | error
 ```
 
 **Fixtures owed:**
@@ -296,7 +296,7 @@ refinement), NOT a blanket reject.
  * @see docs/design/ref-transparent-model.md §8 A1, §7 (the single root hole)
  * @since 0.3.1.6-beta
  */
-fn a1_escape_ok(place: AccessPath, roots: BorrowRoots) -> Ok | error
+fn a1_escape_ok(place: AccessPath, roots: BorrowRoots): Ok | error
 ```
 
 **Fixtures owed (the soundness proof set):**

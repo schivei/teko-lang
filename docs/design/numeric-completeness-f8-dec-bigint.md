@@ -169,7 +169,7 @@ pub type PrimKind = enum {
  * @return true iff k is a floating-point prim
  * @since NUMERIC-COMPLETENESS
  */
-fn prim_is_float(k: PrimKind) -> bool {
+fn prim_is_float(k: PrimKind): bool {
     match k { F16 => true; F32 => true; F64 => true; F8E4M3 => true; F8E5M2 => true; _ => false }
 }
 
@@ -182,7 +182,7 @@ fn prim_is_float(k: PrimKind) -> bool {
  * @return true iff k is F8E4M3 or F8E5M2
  * @since NUMERIC-COMPLETENESS
  */
-fn prim_is_f8(k: PrimKind) -> bool {
+fn prim_is_f8(k: PrimKind): bool {
     match k { F8E4M3 => true; F8E5M2 => true; _ => false }
 }
 ```
@@ -209,7 +209,7 @@ compares by `kind`, so `f8e4m3 != f8e5m2 != f16` falls out for free.
  * @return the decoded PrimKind (falls back to Bool on an unknown byte — forward-compat guard)
  * @since NUMERIC-COMPLETENESS
  */
-fn prim_of(b: byte) -> checker::PrimKind {
+fn prim_of(b: byte): checker::PrimKind {
     // … existing 0..12 …
     if b == 13 { return checker::PrimKind::Bool }
     if b == 14 { return checker::PrimKind::F8E4M3 }
@@ -253,7 +253,7 @@ fn prim_of(b: byte) -> checker::PrimKind {
   `:1160`, `:1857`.
 - **Runtime helpers — maintained-C seed (`teko_rt.c`, the allowed exception).** A small
   branch-free family, round-to-nearest-even, format-correct saturation/NaN:
-  `tk_f32_to_f8e4m3(float) -> tk_f8e4m3`, `tk_f8e4m3_to_f32(tk_f8e4m3) -> float`, the e5m2 pair,
+  `tk_f32_to_f8e4m3(float): tk_f8e4m3`, `tk_f8e4m3_to_f32(tk_f8e4m3): float`, the e5m2 pair,
   and `tk_f8e4m3_to_f8e5m2` / reverse. f8 arithmetic in emitted C is `to_f32 → C float op →
   from_f32` (no `tk_f8_add` needed; `%` stays rejected per `:2144`, `/` panics on ÷0 via the f32
   substrate). **Owner note:** these C helpers are the *reference* semantics; §3.7 mirrors them

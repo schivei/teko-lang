@@ -236,11 +236,11 @@ Discovery scans a regressor directory for EVERY `.tkr` file (not the first) and 
 project's verdict is the aggregate over all of them. The signature shift from the single-spec
 model:
 
-- `dir_tkr_files(dir) -> []str` — the basenames of ALL `*.tkr` in `dir` (replaces the
+- `dir_tkr_files(dir): []str` — the basenames of ALL `*.tkr` in `dir` (replaces the
   first-only `dir_first_tkr`/`dir_first_spec`; a dir IS a regressor iff this is non-empty).
-- `discover_source(source) -> []str` — unchanged in shape (regressor directories), but a dir
+- `discover_source(source): []str` — unchanged in shape (regressor directories), but a dir
   qualifies when `dir_tkr_files(dir).len > 0`.
-- `run_one_regressor(exe, dir, prefix) -> RegrOutcome` — iterates `dir_tkr_files(dir)`, parses
+- `run_one_regressor(exe, dir, prefix): RegrOutcome` — iterates `dir_tkr_files(dir)`, parses
   each with `parse_tkr` (→ `[]TkrFeature`), runs every feature's every scenario, and folds the
   verdicts (FIRST failure wins, else pass). The per-file scratch prefix includes the `.tkr`
   basename so captures never collide across files.

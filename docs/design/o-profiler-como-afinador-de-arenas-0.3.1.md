@@ -271,7 +271,7 @@ ratificada e divergir dela seria inventar uma segunda gramática para o mesmo ti
  * @return        o valor lido e o índice de retoma
  * @throws        quando falta o `(`, o literal não é um inteiro positivo, ou falta o `)`
  */
-fn parse_arena_depth_arg(tokens: []lexer::Token, pos: u64) -> ParsedU64 | error {
+fn parse_arena_depth_arg(tokens: []lexer::Token, pos: u64): ParsedU64 | error {
     if !is_kind_at(tokens, pos + 2, lexer::TokenKind::LParen) { return err_at(tokens, pos + 2, "expected '(' after `#arena_depth`") }
     if !is_kind_at(tokens, pos + 3, lexer::TokenKind::Number) { return err_at(tokens, pos + 3, "expected a positive nesting depth in `#arena_depth(N)`") }
     let lit = tokens[pos + 3].text
@@ -456,7 +456,7 @@ que morre no dia em que a onda fecha.
 execução**. A mesma forma, aplicada às aberturas de região:
 
 ```
-tk_region_new(parent)   ->   tk_region_new_at(parent, <site_id>)
+tk_region_new(parent):   tk_region_new_at(parent, <site_id>)
 ```
 
 **Cinco sítios de emissão no `codegen.tks`, todos já localizados:** `:5441` (moldura de função),
@@ -704,7 +704,7 @@ pub type Profile = struct {
  * @return      a tabela de sítios, ordenada por arquivo e linha
  * @since 0.3.1
  */
-pub fn walk(prog: checker::TProgram) -> []Site
+pub fn walk(prog: checker::TProgram): []Site
 
 /**
  * read — ler um `.tkprof` produzido por uma corrida instrumentada.
@@ -714,7 +714,7 @@ pub fn walk(prog: checker::TProgram) -> []Site
  * @throws      magic errado, `format` divergente (com o remédio na mensagem), ou quadro rasgado no fim
  * @since 0.3.1
  */
-pub fn read(path: str) -> Profile | error
+pub fn read(path: str): Profile | error
 
 /**
  * suggest — derivar `#arena_size`/`#arena_depth` por declaração a partir de um perfil.
@@ -730,7 +730,7 @@ pub fn read(path: str) -> Profile | error
  * @return   uma sugestão (ou uma recusa nomeada) por declaração com sítios observados
  * @since 0.3.1
  */
-pub fn suggest(p: Profile) -> []Suggestion
+pub fn suggest(p: Profile): []Suggestion
 
 /**
  * render — o relatório humano: a distribuição, os dois custos, a diretiva pronta a colar.
@@ -743,7 +743,7 @@ pub fn suggest(p: Profile) -> []Suggestion
  * @return     o relatório
  * @since 0.3.1
  */
-pub fn render(p: Profile, sug: []Suggestion) -> str
+pub fn render(p: Profile, sug: []Suggestion): str
 
 /**
  * run_cli — o subcomando `teko profile`.
@@ -756,7 +756,7 @@ pub fn render(p: Profile, sug: []Suggestion) -> str
  * @return      o código de saída do processo
  * @since 0.3.1
  */
-pub fn run_cli(args: []str) -> i32
+pub fn run_cli(args: []str): i32
 ```
 
 E o fundo de runtime — **C mantido, e cabe nas duas permissões da lei** (o backend nativo precisa de

@@ -93,7 +93,7 @@ acima são minhas. Isto é o que o corpus diz.
 ### 1. O `adopt { }` NÃO TEM UM ÚNICO UTILIZADOR em código de produção
 
 ```
-grep -rn 'adopt {' src/ --include=*.tks | (excluindo linhas de comentário)   ->  VAZIO
+grep -rn 'adopt {' src/ --include=*.tks | (excluindo linhas de comentário):  VAZIO
 ```
 
 As 19 ocorrências de `adopt` em `src/` são **todas doc-comments** (15 só em `spine.tks`, a descrever

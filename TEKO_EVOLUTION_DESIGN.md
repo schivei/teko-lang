@@ -157,7 +157,7 @@ deferred ceiling** (the generics-constraint-system tax, B.11), approached only i
 *proven* insufficient by real self-hosted code (M.4). All three memos agree on this; it is stated once.
 
 **3.2 Out-region parameter vs. region-polymorphism.** The arena memo adopts the single "out-region
-parameter" pattern (`fn build(into: region) -> []T`) from Cyclone-style regions but rejects full
+parameter" pattern (`fn build(into: region): []T`) from Cyclone-style regions but rejects full
 region-polymorphism (it *is* generics-over-regions → reintroduces the constraint tax). The ref memo's
 "return a `ref` into an equal-or-outer arena" is the same pattern viewed from the callee. **Resolution:**
 adopt **only** the out-region parameter as the sanctioned no-copy-return mechanism; reject region

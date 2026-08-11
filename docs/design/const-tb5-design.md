@@ -179,7 +179,7 @@ Colocadas em o twin Teko do interpretador logo após `store_bytes` (`:197`) e an
  * @return MemStore | error  a memória com os slots de ponteiro escritos, ou o erro
  *                           nomeado de alvo desconhecido / escrita interna
  */
-fn resolve_entry_relocs(mem: MemStore, rodata: []LRodata, entry: LRodata, base: i128) -> MemStore | error {
+fn resolve_entry_relocs(mem: MemStore, rodata: []LRodata, entry: LRodata, base: i128): MemStore | error {
     mut cur = mem
     mut j: u64 = 0
     loop {
@@ -210,7 +210,7 @@ fn resolve_entry_relocs(mem: MemStore, rodata: []LRodata, entry: LRodata, base: 
  * @return MemStore | error  a memória com todos os slots de ponteiro resolvidos, ou o
  *                           erro nomeado propagado
  */
-fn resolve_rodata_relocs(mem: MemStore, rodata: []LRodata) -> MemStore | error {
+fn resolve_rodata_relocs(mem: MemStore, rodata: []LRodata): MemStore | error {
     mut cur = mem
     mut base: i128 = 0 to i128
     mut i: u64 = 0
@@ -234,7 +234,7 @@ fim (o corpo de semeadura atual fica intocado — o passo 2 é anexado):
     offsets from `m.rodata` (a STATIC table), so no separate address-table threads
     through the interpreter. Every entry's `relocs` is empty until T-B6, so the resolve
     pass rewrites nothing and the seeded memory is byte-identical (A1-4, #382; T-B5). */
-fn seed_rodata(m: LModule) -> MemStore | error {
+fn seed_rodata(m: LModule): MemStore | error {
     mut mem = empty_memstore()
     mut i: u64 = 0
     loop {
@@ -338,7 +338,7 @@ corrente do blob dentro do `.rodata`/`__const` concatenado:
  * @param u32 blob_off  o offset corrente do blob dentro do `__const` concatenado
  * @return Reloc  a relocation data→data, `Rodata`-tagueada
  */
-fn rodata_reloc_of(r: lir::LDataReloc, blob_off: u32) -> Reloc {
+fn rodata_reloc_of(r: lir::LDataReloc, blob_off: u32): Reloc {
     Reloc { offset = blob_off + r.offset; sym = r.target; kind = MRelocKind::Abs64; sect = RelocSect::Rodata }
 }
 ```
@@ -349,7 +349,7 @@ fn rodata_reloc_of(r: lir::LDataReloc, blob_off: u32) -> Reloc {
 honest-stop; os três callers `encode_module` largam o `match`):
 
 ```teko
-fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata {
+fn encode_rodata(rodata: []lir::LRodata): ModuleRodata {
     mut bytes: []byte = teko::list::empty()
     mut syms: []Symbol = teko::list::empty()
     mut relocs: []Reloc = teko::list::empty()
@@ -418,7 +418,7 @@ o twin de testes do interpretador, construindo `LModule` à mão. Helper novo `i
  * @param []LDataReloc relocs  as relocations internas
  * @return LRodata  a entrada
  */
-fn iwt_rodata_rel(symbol: str, bytes: []byte, relocs: []LDataReloc) -> LRodata {
+fn iwt_rodata_rel(symbol: str, bytes: []byte, relocs: []LDataReloc): LRodata {
     LRodata { symbol = symbol; bytes = bytes; relocs = relocs }
 }
 ```

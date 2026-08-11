@@ -126,7 +126,7 @@ externs. `-lm` already linked; the extern `from "m"` names the libm soname.
  * @return the non-negative square root, or NaN for x < 0 / NaN input
  * @since 0.0.1.4
  */
-pub extern fn sqrt(x: f64) -> f64 = "sqrt" from "m"
+pub extern fn sqrt(x: f64): f64 = "sqrt" from "m"
 
 /**
  * Natural logarithm (libm `log`).
@@ -135,7 +135,7 @@ pub extern fn sqrt(x: f64) -> f64 = "sqrt" from "m"
  * @return ln(x), or NaN/-inf at the domain edges
  * @since 0.0.1.4
  */
-pub extern fn log(x: f64) -> f64 = "log" from "m"
+pub extern fn log(x: f64): f64 = "log" from "m"
 
 /**
  * Two-argument arctangent (libm `atan2`) — the angle of the vector (x, y).
@@ -145,7 +145,7 @@ pub extern fn log(x: f64) -> f64 = "log" from "m"
  * @return the angle in radians in (-pi, pi]
  * @since 0.0.1.4
  */
-pub extern fn atan2(y: f64, x: f64) -> f64 = "atan2" from "m"
+pub extern fn atan2(y: f64, x: f64): f64 = "atan2" from "m"
 ```
    Full set: `sqrt cbrt exp exp2 expm1 log log2 log10 log1p pow(2) sin cos tan asin acos
    atan atan2(2) sinh cosh tanh asinh acosh atanh hypot(2) fmod(2) floor ceil round trunc`.
@@ -154,7 +154,7 @@ pub extern fn atan2(y: f64, x: f64) -> f64 = "atan2" from "m"
 3. **precision-vector fixtures** `real_test.tkt` — `#test` cases asserting each fn against
    known values within an ULP tolerance helper. Because the interpreter can't call externs, these
    fixtures are `teko build`-gated (native): input `f64` → expected `f64` within epsilon.
-   Add a `fn approx_eq(a: f64, b: f64, eps: f64) -> bool` guard in the `.tkt`.
+   Add a `fn approx_eq(a: f64, b: f64, eps: f64): bool` guard in the `.tkt`.
    Expected exit codes: native run exit 0 (all assert pass); interpreter run of an extern caller =
    honest-stop nonzero (assert the stop, per `time_test` precedent).
 
@@ -184,7 +184,7 @@ get flattened/Javadoc'd as they are edited.
  * @return the 32-bit Adler-32 value (high 16 bits = sum-of-sums mod 65521, low = sum)
  * @since 0.0.1.4
  */
-fn adler32_of(data: []byte) -> u32 { /* running s1=1,s2=0 mod 65521 */ }
+fn adler32_of(data: []byte): u32 { /* running s1=1,s2=0 mod 65521 */ }
 ```
    Gate: full ritual (new corpus decl).
 
@@ -198,7 +198,7 @@ fn adler32_of(data: []byte) -> u32 { /* running s1=1,s2=0 mod 65521 */ }
  * @return the decompressed bytes, or an error on malformed input / bad back-reference
  * @since 0.0.1.4
  */
-pub fn inflate(deflated: []byte) -> []byte | error { ... }
+pub fn inflate(deflated: []byte): []byte | error { ... }
 ```
    Sub-helpers (all Javadoc'd, flattened via early-return): `BitReader` value-struct
    (`data: []byte; byte_pos: u64; bit_pos: u8`) with value-threading `read_bits_step` (the
@@ -206,7 +206,7 @@ pub fn inflate(deflated: []byte) -> []byte | error { ... }
    from code-length counts. Gate: full ritual.
 
 3. **DEFLATE encoder (deflate)** — start with STORED blocks (type 00) + a fixed-Huffman
-   path; dynamic-Huffman is a follow-up sub-PR. `pub fn deflate(raw: []byte) -> []byte`.
+   path; dynamic-Huffman is a follow-up sub-PR. `pub fn deflate(raw: []byte): []byte`.
    Gate: full ritual + a **round-trip fixture** `inflate(deflate(x)) == x`.
 
 4. **gzip / zlib wrappers** — header + checksum framing over `deflate`/`inflate`:
@@ -219,13 +219,13 @@ pub fn inflate(deflated: []byte) -> []byte | error { ... }
  * @return a complete gzip member
  * @since 0.0.1.4
  */
-pub fn gzip(raw: []byte) -> []byte { ... }
+pub fn gzip(raw: []byte): []byte { ... }
 
 /**
  * Wrap DEFLATE output in a zlib stream (RFC 1950): 2-byte header, deflate body,
  * Adler-32 trailer.
  */
-pub fn zlib(raw: []byte) -> []byte { ... }
+pub fn zlib(raw: []byte): []byte { ... }
 ```
    Plus `gunzip`/`zlib_inflate` inverses. Gate: full ritual.
 
@@ -260,7 +260,7 @@ base64 → url → csv → toml (toml is the biggest; base64 is reused by url/MI
  * @return the Base64 ASCII string
  * @since 0.0.1.4
  */
-pub fn encode(data: []byte) -> str { ... }
+pub fn encode(data: []byte): str { ... }
 
 /**
  * Decode a standard Base64 string (RFC 4648 §4).
@@ -269,29 +269,29 @@ pub fn encode(data: []byte) -> str { ... }
  * @return the decoded bytes, or an error on an invalid alphabet char / bad length
  * @since 0.0.1.4
  */
-pub fn decode(text: str) -> []byte | error { ... }
+pub fn decode(text: str): []byte | error { ... }
 ```
    Gate: full ritual. Fixtures: RFC 4648 test vectors (`""`→`""`, `"f"`→`"Zg=="`,
    `"foobar"`→`"Zm9vYmFy"`), invalid-char → error. Exit 0 both engines.
 
 2. **url** (`url.tks`) — percent-encode/decode + `application/x-www-form-urlencoded`
    (form pairs → `[](str,str)` or a small struct list). `pub fn percent_encode(s: str,
-   reserved: str) -> str`; `pub fn form_decode(body: str) -> []FormPair | error`.
+   reserved: str): str`; `pub fn form_decode(body: str): []FormPair | error`.
    Gate: full ritual. Fixtures: space→`%20`/`+` per mode, round-trip.
 
 3. **csv** (`csv.tks`) — RFC 4180 reader/writer (quotes, embedded commas/newlines, CRLF).
-   `pub fn parse(text: str) -> [][]str | error`; `pub fn write(rows: [][]str) -> str`.
+   `pub fn parse(text: str): [][]str | error`; `pub fn write(rows: [][]str): str`.
    Gate: full ritual. Fixtures: quoted field with comma, embedded `""` escape, trailing
    newline. Exit 0 both engines.
 
 4. **toml** (`toml.tks`) — RFC-compliant subset parser → a value DOM (mirror the S-JSON DOM
    shape in `json.tks`: a `TomlValue` enum). Feeds #215 config + `.tkp` manifest.
-   `pub fn parse(text: str) -> TomlValue | error`. Gate: full ritual.
+   `pub fn parse(text: str): TomlValue | error`. Gate: full ritual.
    Fixtures: tables `[a.b]`, arrays, basic/multiline strings, ints/floats/bools/datetime,
    error on duplicate key. Exit 0 both engines.
 
 5. **multipart/MIME** — `multipart/form-data` boundary split + base64 MIME (reuses base64).
-   `pub fn parse_multipart(body: []byte, boundary: str) -> []Part | error`. Gate: full ritual.
+   `pub fn parse_multipart(body: []byte, boundary: str): []Part | error`. Gate: full ritual.
 
 **Type shapes:** new DOM enum `TomlValue = enum { Str; Int; Float; Bool; ... }` (named-type
 pattern, no inline variant bodies — the no-variant-fork ruling), `FormPair`/`Part` structs.
@@ -310,7 +310,7 @@ hashes require.
 **Crumb sequence (hash first — fully monomorphic, no FFI):**
 
 1. **SHA-256** (`hash.tks`) — the reference hash; pure `[]byte`, wrapping u32 add/rotate
-   (use `teko::math::checked` wrapping mode). `pub fn sha256(data: []byte) -> []byte` (32-byte
+   (use `teko::math::checked` wrapping mode). `pub fn sha256(data: []byte): []byte` (32-byte
    digest). Gate: full ritual. Fixtures: NIST vectors (`""`, `"abc"`, the 448-bit message).
    Exit 0 BOTH engines (pure Teko — interpreter==native REQUIRED).
 2. **SHA-512 / SHA-224 / SHA-384** — 64-bit variant + truncations. Gate: full ritual.
@@ -328,7 +328,7 @@ hashes require.
  * @throws error when the OS entropy syscall fails (rare: EFAULT/EINTR exhaustion)
  * @since 0.0.1.4
  */
-pub extern fn secure_bytes(n: u64) -> []byte = "tk_rt_secure_bytes" from "teko_rt"
+pub extern fn secure_bytes(n: u64): []byte = "tk_rt_secure_bytes" from "teko_rt"
 ```
    This requires a `tk_rt_secure_bytes` in `src/runtime/teko_rt.c` (maintained C, per the
    no-mirroring ruling — this is the runtime seam, NOT a frozen twin; the implementer edits
@@ -361,7 +361,7 @@ its "Crumb-plan de architect entra como comentário aqui"). Summary of the 5-cru
    BOTH codegen and the interpreter. Gate: full ritual + fixpoint (gen1==gen2) — this is the highest-risk
    crumb (touches codegen AND the interpreter).
 4. **typer return-type-as-expected** — thread declared return type as expected-context so
-   `fn box_make<T>(v: T) -> Box<T> { Box { value = v } }` infers. Gate: full ritual.
+   `fn box_make<T>(v: T): Box<T> { Box { value = v } }` infers. Gate: full ritual.
 5. **fixtures** — `generics_test.tkt` gains: generic struct WITH method; generic class with
    factory+methods; method that constructs its own type; trait-fold chain. interpreter==native parity.
 

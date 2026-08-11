@@ -24,10 +24,10 @@ backend nativo enquanto `error_struct_layout` não carregar `line`/`col`/`file`,
 |---|---|
 | `error {` (total) | **2152** |
 | `error {` no FIM da linha (abertura de corpo de `fn … -> T \| error {`) | **1214** |
-| corpo de uma linha (`fn f() -> T \| error { expr }`) | **8** |
+| corpo de uma linha (`fn f(): T \| error { expr }`) | **8** |
 | **construções reais** (`error { message = `) | **928** |
 
-O número 2148 conta `fn f() -> T | error {` como construção. Não é. **A contagem honesta de
+O número 2148 conta `fn f(): T | error {` como construção. Não é. **A contagem honesta de
 construções em `src/` é 928**; no resto da árvore (`examples/`, `tooling/`) são mais **60**, e
 **16** ficheiros em `docs/`. Nenhuma delas tem de mudar para o degrau 22.
 
@@ -209,7 +209,7 @@ A sonda `probe_errlayout` (projecto descartável, fora da árvore) declara um `E
 2. a **leitura de 4 bytes ao offset 32 e 36 dentro de um agregado de 72 bytes**
    (exactamente o caso `error.line`/`error.col`), comparada contra `0` e contra `7`;
 3. a **passagem por valor** através de uma fronteira de chamada (o caso `const_type_located(e:
-   error) -> error`) e a **semântica de cópia** que `tk_error_loc` define (a origem não é mutada);
+   error): error`) e a **semântica de cópia** que `tk_error_loc` define (a origem não é mutada);
 4. o **embrulho de variante de 24 bytes** dos degraus 15 e 21 (`str | ErrShape`), construído e
    destruído por `match`.
 
@@ -284,7 +284,7 @@ O dono fechou em **concatenação achatada**. A medição **confirma-o e reforç
 |---|---|
 | sítios em `src/` que precisam de desembrulhar um erro composto | **0** |
 | sítios em `src/` que fazem junção de PARES de erros à mão | **0** |
-| o produto já resolve "muitos erros"? | **sim** — `join_checker_diags([]str) -> str` e `diags_error([]str) -> error` (`src/checker/diagnostics.tks:88` e `:110`) juntam N diagnósticos por `\n` numa única `message`. **A leitura (a) já é o idioma da casa, já embarcado.** |
+| o produto já resolve "muitos erros"? | **sim** — `join_checker_diags([]str): str` e `diags_error([]str): error` (`src/checker/diagnostics.tks:88` e `:110`) juntam N diagnósticos por `\n` numa única `message`. **A leitura (a) já é o idioma da casa, já embarcado.** |
 | sítios que compõem a mensagem de OUTRO erro | **10** directos + **79** via envolventes (`err_at`/`one_diag`/`fail`) |
 
 **Achado adjacente, REPORTADO e não transformado em issue:** esses 89 sítios não são junção de
@@ -357,7 +357,7 @@ Não são separáveis: crescer o layout sem zerar é o defeito silencioso do §4
  * @return LStructLayout  o layout registado do `error`
  * @since 0.3.1 (degrau N2 — o campo `message`); 0.3.1.0 degrau 22 (os cinco de diagnóstico)
  */
-fn error_struct_layout() -> LStructLayout {
+fn error_struct_layout(): LStructLayout {
     let names = error_field_names()
     let types = error_field_types()
     layout_of_sized(error_struct_name(), names, types, error_field_sizes(types), error_field_aligns(types))
@@ -386,7 +386,7 @@ fn error_struct_layout() -> LStructLayout {
  * @param u32 col  a coluna de origem a atribuir às instruções emitidas
  * @return LowerCtx  o contexto avançado
  */
-fn zero_error_diagnostics(ctx: LowerCtx, base: u32, layout: LStructLayout, from_index: u64, line: u32, col: u32) -> LowerCtx { … }
+fn zero_error_diagnostics(ctx: LowerCtx, base: u32, layout: LStructLayout, from_index: u64, line: u32, col: u32): LowerCtx { … }
 ```
 
 Toca em: `lower_struct_init` (só no braço `error`), `lower_last_index_of_error_arm`,
@@ -410,7 +410,7 @@ código **57** em `main.tks`:
  *
  * @return i64  0 em sucesso, um código distinto por verificação falhada
  */
-fn f_error_diagnostic_fields() -> i64 {
+fn f_error_diagnostic_fields(): i64 {
     let e = error { message = "x" }
     if e.line != 0 { return 1 }
     if e.col != 0 { return 2 }
@@ -435,7 +435,7 @@ fn f_error_diagnostic_fields() -> i64 {
  * @return str|error  sempre o membro `error`
  * @throws  sempre
  */
-fn mk_error_union() -> str | error { error { message = "y" } }
+fn mk_error_union(): str | error { error { message = "y" } }
 ```
 
 **Portão:** `f_error_diagnostic_fields` passa de vermelho a verde na rota nativa; a rota C mantém
@@ -459,7 +459,7 @@ o mesmo valor. Auto-hospedagem completa na rota C verde.
  * @param checker::TExpr e  a expressão da chamada (só a posição de origem)
  * @return Lowered  o endereço-base do slot novo
  */
-fn copy_error_value(ctx: LowerCtx, src: u32, layout: LStructLayout, e: checker::TExpr) -> Lowered { … }
+fn copy_error_value(ctx: LowerCtx, src: u32, layout: LStructLayout, e: checker::TExpr): Lowered { … }
 
 /**
  * lower_err_loc_call — `teko::error::err_loc(e, line, col)` (E2): uma cópia de `e` com `line` e
@@ -478,7 +478,7 @@ fn copy_error_value(ctx: LowerCtx, src: u32, layout: LStructLayout, e: checker::
  * @throws  propagado do baixamento dos argumentos, ou quando a aridade não é 3 (quebra de
  *          invariante — o checker já a validou em `scope.tks`)
  */
-fn lower_err_loc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error { … }
+fn lower_err_loc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error { … }
 ```
 
 Intercepção, ao lado das duas que já lá estão (`lower.tks:1806-1807`):
@@ -563,7 +563,7 @@ mensagem exacta, e a confirmação de que o stop do degrau 22 desapareceu.
 
 **P1 — Uma interface pode ser membro de união (`T | error`) hoje? NÃO.**
 
-Sonda `probe_iface_union` (interface declarada, classe implementadora, `fn mk() -> str | ErrIface`).
+Sonda `probe_iface_union` (interface declarada, classe implementadora, `fn mk(): str | ErrIface`).
 As duas rotas rejeitam **na mesma linha**:
 
 ```
@@ -602,7 +602,7 @@ downcast da P4, que não existe.
 
 **P3 — `err_loc` sobrevive?** `err_loc(e, line, col)` devolve **uma cópia com dois campos
 sobrescritos**. Um valor de interface é imutável do lado de fora (só métodos), portanto `err_loc`
-deixa de poder existir na sua forma actual: teria de virar `with_pos(line, col) -> ErrIface` **no
+deixa de poder existir na sua forma actual: teria de virar `with_pos(line, col): ErrIface` **no
 contrato**, obrigando **todo** o implementador a saber reconstruir-se. Os 10 sítios de `err_loc` e
 os 22 de `err_typed` — **32 no total** — são redesenho, não migração.
 

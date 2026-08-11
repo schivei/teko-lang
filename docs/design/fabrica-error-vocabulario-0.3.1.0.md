@@ -23,11 +23,11 @@ não. O `join` **já existe no produto**, partido em dois nomes e um nível de i
 
 | o que faz | como se chama hoje | sítios |
 |---|---|---|
-| junta N diagnósticos numa `str` | `join_checker_diags([]str) -> str` | **3** |
-| junta N diagnósticos num `error` | `diags_error([]str) -> error` | **4** |
-| concatena duas listas de diagnósticos | `concat_diags([]str, []str) -> []str` | **31** |
+| junta N diagnósticos numa `str` | `join_checker_diags([]str): str` | **3** |
+| junta N diagnósticos num `error` | `diags_error([]str): error` | **4** |
+| concatena duas listas de diagnósticos | `concat_diags([]str, []str): []str` | **31** |
 | idem, outro nome | `append_diags(…)` | **3** |
-| embrulha UM diagnóstico numa lista | `one_diag(str) -> []str` | **23** |
+| embrulha UM diagnóstico numa lista | `one_diag(str): []str` | **23** |
 
 **64 sítios**, cinco nomes, para uma operação — compor diagnósticos. `diags_error` é literalmente
 `error { message = join_checker_diags(diags) }`: a fábrica `join` **é** esta função, com o nome
@@ -42,7 +42,7 @@ Zero leituras porque está **por implementar**, não porque seja inútil. A prov
 função que o dono apontou (`src/checker/diagnostics.tks:37-41`):
 
 ```teko
-fn located_diag(file: str, decl_line: u32, decl_col: u32, inner: error) -> str {
+fn located_diag(file: str, decl_line: u32, decl_col: u32, inner: error): str {
     let line = if inner.line != 0 { inner.line } else { decl_line }
     let col  = if inner.line != 0 { inner.col }  else { decl_col }
     diag_at(file, line, col, inner.message)
@@ -67,7 +67,7 @@ Com o `file` escrito na origem, a assinatura colapsa de quatro parâmetros para 
  * @param inner  o erro do checker a renderizar
  * @return       a linha `file:line:col: texto`
  */
-fn located_diag(inner: error) -> str { … }
+fn located_diag(inner: error): str { … }
 ```
 
 ---
@@ -78,11 +78,11 @@ fn located_diag(inner: error) -> str { … }
 
 | forma | assinatura de hoje | sítios |
 |---|---|---|
-| posição derivada e **assada no texto**, nada anexado | `err_at(tokens, pos, msg) -> error` | **187** |
-| posição passada a três, ao lado do erro | `located_diag(file, line, col, inner) -> str` | **18** |
-| idem, reencaminhando `reg.file`/`decl.line`/`decl.col` | `decl_error_diag(reg, inner) -> str` | **8** |
-| idem, e devolvendo `error` em vez de `str` | `surface_at(file, line, col, inner) -> error` | **8** |
-| formatador de quatro parâmetros | `diag_at(file, line, col, msg) -> str` | **10** |
+| posição derivada e **assada no texto**, nada anexado | `err_at(tokens, pos, msg): error` | **187** |
+| posição passada a três, ao lado do erro | `located_diag(file, line, col, inner): str` | **18** |
+| idem, reencaminhando `reg.file`/`decl.line`/`decl.col` | `decl_error_diag(reg, inner): str` | **8** |
+| idem, e devolvendo `error` em vez de `str` | `surface_at(file, line, col, inner): error` | **8** |
+| formatador de quatro parâmetros | `diag_at(file, line, col, msg): str` | **10** |
 | construir e posicionar em dois passos | `err_loc(error { message = … }, n.line, n.col)` | **7** |
 | **TOTAL** | | **238** |
 

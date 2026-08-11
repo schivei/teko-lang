@@ -127,7 +127,7 @@ Teko poder ser semeado.
 Este é o mecanismo que torna a camada-2 possível, e ele **já foi provado** (`afdb1fd8`, citado em
 `expurgo…` §3): um `extern fn` Teko mira o SÍMBOLO C declarado, não o mangling Teko. `call_symbol →
 find_extern_symbol`, `collect_undefined_x86` deriva `GLOBAL|NOTYPE / SHN_UNDEF`, `objfile_elf.tks`
-emite `R_X86_64_PLT32`. Prova: `pub extern fn c_getpid() -> i32 = "getpid"` liga a `U getpid`, roda.
+emite `R_X86_64_PLT32`. Prova: `pub extern fn c_getpid(): i32 = "getpid"` liga a `U getpid`, roda.
 
 Consequência para o runtime:
 
@@ -364,7 +364,7 @@ pub type TargetSymbol = struct {
  * @return      void
  * @since 0.3.1
  */
-pub fn store_u64(addr: u64, v: u64) -> void
+pub fn store_u64(addr: u64, v: u64): void
 
 /**
  * load_u64 — lê a palavra de 64 bits no endereço cru `addr` (P1). NÃO ALOCA. Lowera para uma única
@@ -375,7 +375,7 @@ pub fn store_u64(addr: u64, v: u64) -> void
  * @return      a palavra de 64 bits em `addr`
  * @since 0.3.1
  */
-pub fn load_u64(addr: u64) -> u64
+pub fn load_u64(addr: u64): u64
 ```
 
 Formas de runtime REUSADAS (não redeclarar): `tk_str_concat_r(tk_region*, tk_str, tk_str)`

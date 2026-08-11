@@ -337,7 +337,7 @@ acontece quando o `null` é tipado num contexto COM tipo esperado conhecido (`sr
 `type_expr(c.rest[i].operand, env, table)` **sem** passar um tipo esperado — para um `null` nu isso
 cai no caminho genérico `type_nulllit` (`src/checker/typer.tks:46-47`):
 ```
-fn type_nulllit(n: parser::NullLit) -> TExpr | error {
+fn type_nulllit(n: parser::NullLit): TExpr | error {
     TExpr { kind = TNullLit { }; type = Optional { inner = Void { } }; line = 0; col = 0 }
 }
 ```
@@ -357,7 +357,7 @@ compila a comparação.
 `type_if`/`type_if_stmt` (`src/checker/typer.tks:3732-3763`) tipam o `then_blk` e o `else_blk` com o
 MESMO `env` recebido, sem qualquer inspecção da FORMA de `f.cond`:
 ```teko
-fn type_if(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error {
+fn type_if(f: parser::IfExpr, env: Env, table: TypeTable): TExpr | error {
     let c = match type_expr(f.cond, env, table) { ... }
     ...
     let tb = match type_block(f.then_blk, env, table) { ... }   // MESMO env
@@ -450,7 +450,7 @@ testes sobre isto para não desviar do pedido central.
 
 **Isto é FUNCIONALIDADE nova, não correcção de bug.** Estreitamento por fluxo dentro de `if`
 exigiria, no mínimo:
-1. Uma função `narrow_type_for_cond(cond: TExpr, env: Env) -> (then_env: Env, else_env: Env)` chamada
+1. Uma função `narrow_type_for_cond(cond: TExpr, env: Env): (then_env: Env, else_env: Env)` chamada
    a partir de `type_if`/`type_if_stmt` (`src/checker/typer.tks:3732`, `3755`) ANTES de tipar cada
    ramo com o env correspondente em vez do env comum de hoje.
 2. Reconhecer, no mínimo, a FORMA `<var> != null` / `<var> == null` (e o inverso no ramo oposto) —

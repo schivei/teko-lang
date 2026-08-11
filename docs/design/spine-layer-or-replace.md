@@ -124,7 +124,7 @@ The product lattice is `pt × bf × us`, height ≤ 3 per axis ⇒ **finite, fix
 
 ### Where the fixpoint runs, the join, and termination
 
-- **Where:** a new `pub fn fn_spine(f: TFunction) -> Spine` beside `fn_escaping_vars` (`escape.tks:323`),
+- **Where:** a new `pub fn fn_spine(f: TFunction): Spine` beside `fn_escaping_vars` (`escape.tks:323`),
   reading the same `f.body`. It runs a **per-function** worklist fixpoint over the finite cell universe
   of `f` (its bindings + one-hop field paths + `Reference` params). It does **not** touch `mark_*`.
 - **The join** is the componentwise product-lattice join above (union for `pt`, `none < param(i)/local < ⊤`

@@ -378,7 +378,7 @@ brackets adiciona um predicado e um contexto de profundidade de bracket ao codeg
  * @return          true sse a RHS de `name` deve ser bracketada para conveyance a `_tkrr`
  * @since 0.3.1
  */
-fn binding_conveys_escape(escaping: []str, name: str) -> bool
+fn binding_conveys_escape(escaping: []str, name: str): bool
 ```
 
 ```teko
@@ -396,7 +396,7 @@ fn binding_conveys_escape(escaping: []str, name: str) -> bool
  * @return       (buffer, dctx') com a profundidade de bracket +1
  * @since 0.3.1
  */
-fn cg_open_conveyance_bracket(out: []byte, rr: str, dctx: DeferCtx) -> (out: []byte, dctx: DeferCtx)
+fn cg_open_conveyance_bracket(out: []byte, rr: str, dctx: DeferCtx): (out: []byte, dctx: DeferCtx)
 ```
 
 **Funções existentes que a transição TOCA (rota C):** `codegen.tks` `emit_function_cov`

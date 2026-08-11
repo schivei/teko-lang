@@ -171,7 +171,7 @@ Verificação adversarial (45 agentes, 8 frentes) **derrubou** a afirmação "n�
 
 ```teko
 struct Holder { r: ref int }
-fn leak() -> Holder {
+fn leak(): Holder {
     mut local: int = 42
     return Holder { r = local }   // R5 copia `local` na arena de leak; r aponta pra lá
 }                                  // retorno-por-valor copia os BYTES = o ponteiro r, não o pointee
@@ -201,8 +201,8 @@ As emendas **não são remendos**: são a especificação da *spine* (L1 do remo
 **Ir em direção ao valor (descascar) é sempre seguro; afastar-se dele (embrulhar +1 nível) exige um lastro mais-longevo que um local não tem.**
 
 ```teko
-fn a<T>(ref b: ref T) -> ref T        // SEGURA: descasca 1 (T** → T*); o alvo sobrevive ao caller ⟹ a `a`
-fn a<T>(ref b: T)     -> ref ref T    // REJEITADA (genérico): produzir ref ref T exige aliasar um slot
+fn a<T>(ref b: ref T): ref T        // SEGURA: descasca 1 (T** → T*); o alvo sobrevive ao caller ⟹ a `a`
+fn a<T>(ref b: T): ref ref T    // REJEITADA (genérico): produzir ref ref T exige aliasar um slot
                                       // ref T ≥ caller; o único é o param b, cujo slot morre com `a` → escape (A2)
 ```
 

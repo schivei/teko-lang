@@ -7,7 +7,7 @@ A project has exactly one of two forms of entry point, never both:
 - **Virtual main** — top-level statements (plus local `let`/`const`) directly in `main.tks`,
   no function wrapper. Natural end of the file → exit 0; `teko::exit(n)` → exit `n`; a panic →
   stderr + a nonzero exit.
-- **Explicit `fn main`** — a single `fn main() -> i32` inside `main.tks`, and only there.
+- **Explicit `fn main`** — a single `fn main(): i32` inside `main.tks`, and only there.
   Teko has no `void` and no function overloading (both are explained below), so there is
   exactly one legal signature — a `fn main` without an arrow is rejected as an honest error
   rather than silently treated as exit 0. Command-line arguments come from `teko::env::args()`
@@ -43,7 +43,7 @@ no exception, no `raise`/`throw`, no stack unwinding: a failure is handled with 
 like any other variant.
 
 ```teko
-fn parse_port(s: str) -> u16 | error {
+fn parse_port(s: str): u16 | error {
     match teko::numeric::parse_u16(s) {
         u16 as n => n
         error as e => e
@@ -106,13 +106,13 @@ itself follows and that `teko lint` flags.
 
 ```teko
 type Shape = interface {
-    fn area(self) -> f64
+    fn area(self): f64
 }
 
 type Circle = class {
     pub r: f64
-    pub fn make(r: f64) -> Circle { Circle { r = r } }
-    pub fn area(self) -> f64 { 3.14159 * self.r * self.r }
+    pub fn make(r: f64): Circle { Circle { r = r } }
+    pub fn area(self): f64 { 3.14159 * self.r * self.r }
 }
 ```
 
@@ -129,7 +129,7 @@ per distinct set of concrete type arguments actually used in the program, so the
 runtime dispatch cost and no boxing for the generic path itself.
 
 ```teko
-fn first<T>(xs: []T) -> T? {
+fn first<T>(xs: []T): T? {
     if xs.len == 0 { return null }
     xs[0]
 }

@@ -141,7 +141,7 @@ A premissa de que o censo sairia de graça porque "o eixo já é calculado em to
 antes da chamada:
 
 ```
-fn check_ref_storability(tf: TFunction) -> error | null {
+fn check_ref_storability(tf: TFunction): error | null {
     if !fn_has_ref_param(tf) {
         if !stmts_have_free(tf.body) { return null }
     }

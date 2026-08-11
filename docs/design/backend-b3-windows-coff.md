@@ -240,7 +240,7 @@ instruction-encoding order B1 fixed (`RAX=0,RCX=1,RDX=2,RBX=3,RSP=4,RBP=5,RSI=6,
  *
  * @return AbiDescriptor  the Win64 register file
  */
-pub fn win64() -> AbiDescriptor {
+pub fn win64(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = win64_gpr_arg_seq()
         fpr_arg = push_range(teko::list::empty(), 0, 3)
@@ -330,7 +330,7 @@ The frame is the ONLY part of `encode_x86_64.tks` B3 touches, and only its side-
  * @param MFuncX86 f  the fully-physical function
  * @return bool  true iff the function issues at least one call
  */
-fn func_makes_call_x86(f: MFuncX86) -> bool { … }
+fn func_makes_call_x86(f: MFuncX86): bool { … }
 ```
 
 ### 4.2 `compute_frame_layout_x86` — the shadow-space reservation (the one guarded change)
@@ -486,7 +486,7 @@ type CoffStrtab = struct {
  * @param []Symbol symbols  the symbol table, in emission order
  * @return CoffStrtab  the string-table bytes + per-symbol inline/offset resolution
  */
-fn build_coff_strtab(symbols: []Symbol) -> CoffStrtab { … }
+fn build_coff_strtab(symbols: []Symbol): CoffStrtab { … }
 ```
 
 ### 5.3 The symbol table — local(static)-then-external, aux-free MVP
@@ -534,7 +534,7 @@ numerically (the ONLY COFF knowledge the writer injects), exactly as the ELF ada
  * @param RelocKindX86 kind  the relocation kind the encoder tagged
  * @return u32  the `IMAGE_RELOCATION` `Type` field value
  */
-fn coff_reloc_type(kind: RelocKindX86) -> u32 {
+fn coff_reloc_type(kind: RelocKindX86): u32 {
     match kind {
         Plt32 => 0x0004 to u32
         Pc32  => 0x0004 to u32
@@ -572,7 +572,7 @@ fn coff_reloc_type(kind: RelocKindX86) -> u32 {
  * @param EncodedModuleX86 enc  the section images + symbols + relocations
  * @return []byte  the PE/COFF object file bytes
  */
-pub fn emit_coff(enc: EncodedModuleX86) -> []byte { … }
+pub fn emit_coff(enc: EncodedModuleX86): []byte { … }
 ```
 
 Baked A4-4/B1-7-class findings (as COFF requirements):
@@ -623,7 +623,7 @@ Baked A4-4/B1-7-class findings (as COFF requirements):
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest): i32 {
     let sel = match teko::backend::select_module_x86(lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     let col = match teko::backend::regalloc_module_x86(teko::backend::win64(), sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     let enc = match teko::backend::encode_module_x86(teko::backend::win64(), col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }

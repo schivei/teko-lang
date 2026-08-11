@@ -17,24 +17,24 @@ Alinha com a régua `teko lsp` já registrada (`TEKO_ROADMAP_DEVTOOLS.md:94`).
 - diags do checker já `file:line:col: msg` via `checker/diagnostics.tks:37` `located_diag`;
   seam estruturado `pub` `type_program_with_deps_pre_mono` → `PreMono.diags: []str`
   (`typer.tks:6657`), coletados em `pre_walk` (`typer.tks:6797`).
-- `fmt::format_source(src) -> str|error` puro (`fmt.tks:649`) — formatação in-process.
+- `fmt::format_source(src): str|error` puro (`fmt.tks:649`) — formatação in-process.
 - json `decode`/`encode` `pub` (`encoding/json/json.tks:463`/`:476`).
 - `Token` posiciona tudo: `line`/`col`/`text` (`lexer/token.tks:184-189`).
 
 ## Alarme PROVADO (§4 do design)
 Transporte stdin: `read_line` (`io.tks:26`) para no `\n` e sobre-lê o corpo JSON-RPC (que não
 tem newline terminal); `read_stdin` (`io.tks:37`) bloqueia até EOF (impossível p/ servidor de
-vida longa). Não há leitura byte-exata. **Exige** primitiva nova `read_stdin_n(n)->str` em
+vida longa). Não há leitura byte-exata. **Exige** primitiva nova `read_stdin_n(n):str` em
 `teko_rt.{c,h}` (exceção C mantida) + extern em io.tks + lift no codegen Teko — mesmo padrão de
 `read_line`/`read_stdin`. Crumb 0, sequenciado primeiro (seed precisa carregá-la antes de
 `src/lsp/` usá-la).
 
 ## Lacunas nomeadas = crumbs
-1. **collect_diagnostics(program)->[]str** `pub` no checker (invólucro do pre_walk). §5.1.
+1. **collect_diagnostics(program):[]str** `pub` no checker (invólucro do pre_walk). §5.1.
 2. **Warnings escapam pelo stderr** (`typer.tks:2008`, `initanalysis.tks:251`) — coletar em
    vez de imprimir (crumb C).
 3. **Diagnostic estruturado** (`{file;line;col;end_line;end_col;severity;message}`) — crumb D.
-4. **Índice de símbolos** `build_symbol_index(parser::Program)->[]Symbol` (nome/pos/doc/kind)
+4. **Índice de símbolos** `build_symbol_index(parser::Program):[]Symbol` (nome/pos/doc/kind)
    — motor de hover/def/completion; deriva só do parse. `src/lsp/symbols.tks` (crumb E).
 5. **assemble_with_overrides** (buffer não-salvo; `assemble` só lê disco em `assemble.tks:228`)
    — aditivo (crumb E).

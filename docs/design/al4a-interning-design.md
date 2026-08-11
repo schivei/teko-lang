@@ -108,7 +108,7 @@ remain, used only where a genuine `str` is still needed (the dedup keys, crumb 3
 
 ### Crumb AL4a-2 — structural mangle-equality without strings (kills cg_opt_key's emit share). Size S.
 Replace `cg_type_mangle_eq(a,c) = cg_opt_key(a) == cg_opt_key(c)` (:4030) with a byte-free
-predicate `cg_mangle_eq(a, c) -> bool` that decides "do these two types mangle to the same C
+predicate `cg_mangle_eq(a, c): bool` that decides "do these two types mangle to the same C
 name" by folding their structure directly (the twin of `qualify_eq`). NOTE — this is NOT
 `type_eq`: two DISTINCT types can mangle to the SAME C name (the `name_last_segment` bare-key
 case, #109, is why `cg_type_mangle_eq` exists), so the predicate must mirror the MANGLE, not

@@ -20,10 +20,10 @@ what lands here, not for the runtime to become an unaudited dumping ground.
 ## `extern` — calling out to foreign (C) code
 
 ```teko
-extern fn host_write(fd: i32, buf: ptr, len: u64) -> i64 = "write" from "libc"
+extern fn host_write(fd: i32, buf: ptr, len: u64): i64 = "write" from "libc"
 ```
 
-- **Form:** `extern fn name(params) -> ret = "symbol" from "lib"` — a bodyless `fn`, reusing
+- **Form:** `extern fn name(params): ret = "symbol" from "lib"` — a bodyless `fn`, reusing
   the ordinary function grammar rather than a dedicated block construct. The Teko-facing name
   is decoupled from the C symbol, so the surface stays idiomatic.
 - **`from` is optional.** Omitted, the symbol is expected in the implicit host libc — the
@@ -32,7 +32,7 @@ extern fn host_write(fd: i32, buf: ptr, len: u64) -> i64 = "write" from "libc"
 - **Marshalling is restricted and explicit.** Parameters/returns are limited to the native
   primitives plus `ptr`/`uptr`/`void`. Aggregates (strings, byte slices, structs) never
   auto-convert across the boundary — crossing requires an explicit call
-  (`teko::mem::as_ptr(str|[]byte) -> ptr`, `.len`) so the unsafe seam is always visible at the
+  (`teko::mem::as_ptr(str|[]byte): ptr`, `.len`) so the unsafe seam is always visible at the
   call site, never hidden behind a convenience wrapper.
 - **`extern type Name`** is a named, fully opaque foreign handle (`FILE*`, `sqlite3*`, a socket)
   — one pointer-sized word, non-null by default (a maybe-null handle is the ordinary `Name?`),

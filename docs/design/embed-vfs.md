@@ -223,7 +223,7 @@ pub type FileSystem = struct {
      *              impossibility (the compiler produced it), so decode cannot fail here;
      *              see §8 Q1 on whether the return widens to `[]byte | error` defensively
      */
-    fn read(self, path: str) -> []byte? { /* design-ahead: reads self.table/blobs, inflates */ }
+    fn read(self, path: str): []byte? { /* design-ahead: reads self.table/blobs, inflates */ }
 
     /**
      * exists — whether a file at `path` was embedded. O(count) over the packed table.
@@ -231,18 +231,18 @@ pub type FileSystem = struct {
      * @param path  the project-relative logical path
      * @return      true iff an entry with that name is present
      */
-    fn exists(self, path: str) -> bool { /* design-ahead */ }
+    fn exists(self, path: str): bool { /* design-ahead */ }
 
     /**
      * list — every embedded path, in directive/emit order.
      *
      * @return  the logical paths of all embedded files (empty when nothing is embedded)
      */
-    fn list(self) -> []str { /* design-ahead */ }
+    fn list(self): []str { /* design-ahead */ }
 }
 ```
 
-Convenience accessor (integrator-pinned, veto-open — §8 Q1): `read_str(self, path: str) -> str?`
+Convenience accessor (integrator-pinned, veto-open — §8 Q1): `read_str(self, path: str): str?`
 returning the decompressed bytes decoded as UTF-8, for text assets like the mascot, so the
 common case skips a manual bytes→str decode.
 
@@ -263,7 +263,7 @@ reuses `teko::build::output_is_tty(no_tty)` (`progress.tks:33`) and the `--no-tt
  * @return        nothing; best-effort cosmetic output
  * @since #embed (design-ahead)
  */
-fn print_mascot(no_tty: bool) -> void {
+fn print_mascot(no_tty: bool): void {
     if !teko::build::output_is_tty(no_tty) { return }
     match teko::embed::FILES.read("docs/brand/mascot.ansi") {
         []byte as bytes => teko::io::write(teko::text::from_utf8_lossy(bytes))
@@ -349,7 +349,7 @@ pub type EmbedDecl = struct {
  *                `, TYPE, LEVEL` tail, or an unknown compression type
  * @since #embed (design-ahead)
  */
-fn parse_embed(tokens: []lexer::Token, pos: u64) -> Parsed<Decl> | error { /* design-ahead */ }
+fn parse_embed(tokens: []lexer::Token, pos: u64): Parsed<Decl> | error { /* design-ahead */ }
 ```
 
 Wiring: `parse_decl_attributes` (or `parse_decl`) recognizes `Hash` + `Ident("embed")` and
@@ -373,14 +373,14 @@ delegates to `parse_embed` instead of the attribute loop; `parse_module`'s loop
  * @throws         on absolute path, a `..` segment, an out-of-root resolution, or no match
  * @since #embed (design-ahead)
  */
-fn resolve_embed_path(root: str, pattern: str) -> []str | error { /* design-ahead */ }
+fn resolve_embed_path(root: str, pattern: str): []str | error { /* design-ahead */ }
 ```
 
 - **Compile-time file read (genuinely new).** `teko::io::read_file` exists but returns `str`
   (`io.tks:18`); binary assets need bytes. There is `write_file_bytes` (`io.tks:46`) but **no**
   `read_file_bytes`. Add one maintained-C seam — this is inside the frozen-C **exception**
   (`teko_rt.{c,h}`), so it is allowed:
-  `pub extern fn read_file_bytes(path: str) -> []byte | error = "tk_rt_read_file_bytes" from "teko_rt"`.
+  `pub extern fn read_file_bytes(path: str): []byte | error = "tk_rt_read_file_bytes" from "teko_rt"`.
   It is called only by the compiler's embed pass, never by the emitted program (M.0, §1.1).
 - **Glob matching (genuinely new).** Recommend (integrator-pinned, veto-open): ship **exact
   path** first; add glob (`*` within one path segment, then `**`) as a fast-follow. Grounds in
@@ -404,8 +404,8 @@ Verified in `src/compress/`:
 
 | Codec | compress (build) | decompress (runtime accessor) |
 |---|---|---|
-| Deflate | `deflate(data: []byte) -> []byte` (`deflate.tks:100`) | `inflate(data: []byte) -> []byte \| error` (`inflate.tks:711`) |
-| Gzip | `gzip_compress(data: []byte) -> []byte` (`gzip.tks:57`) | `gzip_decompress(data: []byte) -> []byte \| error` (`gzip.tks:98`) |
+| Deflate | `deflate(data: []byte): []byte` (`deflate.tks:100`) | `inflate(data: []byte): []byte \| error` (`inflate.tks:711`) |
+| Gzip | `gzip_compress(data: []byte): []byte` (`gzip.tks:57`) | `gzip_decompress(data: []byte): []byte \| error` (`gzip.tks:98`) |
 | None | — (verbatim) | — (verbatim) |
 
 Build-side compression runs in the compiler; the emitted `read` calls the matching
@@ -539,8 +539,8 @@ existing driver I/O discipline; the mascot reuses `output_is_tty` already in the
 
 ## 8. Open questions (owner only — each with a recommendation)
 
-1. **The exact accessor API.** Recommend `read(path) -> []byte?`, `exists(path) -> bool`,
-   `list() -> []str`, **plus** `read_str(path) -> str?` for text assets (the mascot). Should
+1. **The exact accessor API.** Recommend `read(path): []byte?`, `exists(path): bool`,
+   `list(): []str`, **plus** `read_str(path): str?` for text assets (the mascot). Should
    `read` widen to `[]byte | error` defensively (a corrupt embedded stream) even though the
    compiler produced the bytes? Recommend **no** — keep `[]byte?`; a build-produced stream
    cannot be corrupt, and `?` keeps the common path clean (M.5). *(integrator-pinned,

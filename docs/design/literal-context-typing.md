@@ -66,7 +66,7 @@ Confirmed by build probes against the 0.3.0.27 seed:
 - simple / ref-deref / field assignment (typer.tks:3430+3435, 3364, 3385)
 
 All of these route through `literal_adopts`, which is why `takesbyte(0x41)`, `S { b = 255 }`,
-`fn f() -> byte { 0x41 }`, `x == 0` (x: u32), and `takes128(9223372036854775808)` all compile
+`fn f(): byte { 0x41 }`, `x == 0` (x: u32), and `takes128(9223372036854775808)` all compile
 **with no cast today**.
 
 ### 2.4 THE GAP — the sites that force a `to T` (enumerated, file:line)
@@ -86,7 +86,7 @@ cast:
 | G3 | `let xs: []byte = [0x1, 0x2]` / `[]byte = [ if c {1} else {2} ]` | array recursion in `annotated_literal_ok` inherits G1 (element `byte`) and G2 (element `if`/`match`) | forces `[…] to []byte` or per-element casts |
 
 Note the asymmetry that makes these *pure gaps* and not design choices: `takesbyte(0x41)` (arg),
-`S { b = 0x41 }` (field), and `fn f() -> byte { 0x41 }` (return) **all compile**, because they use
+`S { b = 0x41 }` (field), and `fn f(): byte { 0x41 }` (return) **all compile**, because they use
 `literal_adopts`; only the *annotated binding/const of the same literal* fails.
 
 ### 2.5 A latent MISCOMPILE surfaced by the audit (report-up + fixed by A)

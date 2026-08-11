@@ -240,7 +240,7 @@ pub type VersionReq = struct { bounds: []VersionBound }
  * @return the parsed Version, or an error when `s` is malformed (non-numeric field, empty)
  * @since 0.3.x
  */
-pub fn parse_version(s: str) -> Version | error
+pub fn parse_version(s: str): Version | error
 
 /**
  * Total order over versions: field-by-field (major, minor, patch, build), then a final release
@@ -251,7 +251,7 @@ pub fn parse_version(s: str) -> Version | error
  * @return -1 when a < b, 0 when equal, 1 when a > b
  * @since 0.3.x
  */
-pub fn compare_versions(a: Version, b: Version) -> i64
+pub fn compare_versions(a: Version, b: Version): i64
 
 /**
  * Parse a requirement string, desugaring `^`/`~` and splitting a space-separated range into
@@ -261,7 +261,7 @@ pub fn compare_versions(a: Version, b: Version) -> i64
  * @return the VersionReq, or an error when a comparator or version is malformed
  * @since 0.3.x
  */
-pub fn parse_version_req(s: str) -> VersionReq | error
+pub fn parse_version_req(s: str): VersionReq | error
 
 /**
  * Does a version satisfy EVERY bound of a requirement?
@@ -271,7 +271,7 @@ pub fn parse_version_req(s: str) -> VersionReq | error
  * @return true iff `v` satisfies all bounds of `req`
  * @since 0.3.x
  */
-pub fn version_satisfies(v: Version, req: VersionReq) -> bool
+pub fn version_satisfies(v: Version, req: VersionReq): bool
 ```
 
 ### 3.2 Dependency declarations (PK0): the `[dependencies]` grammar
@@ -379,7 +379,7 @@ pub type Resolution = struct {
  * @return the package's manifest block (name, version, declared deps)
  * @since 0.3.x
  */
-pub fn header_manifest(h: Header) -> PkgManifest
+pub fn header_manifest(h: Header): PkgManifest
 
 /**
  * Resolve the whole dependency graph FLAT and single-aligned.
@@ -395,7 +395,7 @@ pub fn header_manifest(h: Header) -> PkgManifest
  * @return the flat single-aligned Resolution, or a build error (conflict, cycle, or missing package)
  * @since 0.3.x
  */
-pub fn resolve_deps(root: Manifest, store: PackageStore) -> Resolution | error
+pub fn resolve_deps(root: Manifest, store: PackageStore): Resolution | error
 
 /**
  * The alignment check for ONE package name: find the single version satisfying ALL requirements
@@ -408,7 +408,7 @@ pub fn resolve_deps(root: Manifest, store: PackageStore) -> Resolution | error
  *         unsatisfiable requirements
  * @since 0.3.x
  */
-pub fn align_versions(name: str, reqs: []VersionReq, available: []Version) -> Version | error
+pub fn align_versions(name: str, reqs: []VersionReq, available: []Version): Version | error
 ```
 
 **Algorithm (deterministic, M.2):**
@@ -469,7 +469,7 @@ pub type Lockfile = struct { entries: []LockEntry }
  * @return the `teko.lock` file contents
  * @since 0.3.x
  */
-pub fn write_lockfile(res: Resolution) -> str
+pub fn write_lockfile(res: Resolution): str
 
 /**
  * Parse `teko.lock` text back into a Lockfile.
@@ -478,7 +478,7 @@ pub fn write_lockfile(res: Resolution) -> str
  * @return the parsed Lockfile, or an error on a malformed entry
  * @since 0.3.x
  */
-pub fn parse_lockfile(src: str) -> Lockfile | error
+pub fn parse_lockfile(src: str): Lockfile | error
 
 /**
  * Does a fresh Resolution still match the pinned Lockfile (same names, versions, integrity)?
@@ -489,7 +489,7 @@ pub fn parse_lockfile(src: str) -> Lockfile | error
  * @return true iff every resolved dep matches its pinned entry exactly
  * @since 0.3.x
  */
-pub fn lockfile_matches(lock: Lockfile, res: Resolution) -> bool
+pub fn lockfile_matches(lock: Lockfile, res: Resolution): bool
 ```
 
 ### 3.5 Cache + monomorphization-by-use (PK5 — wires into the ratified #180 build)

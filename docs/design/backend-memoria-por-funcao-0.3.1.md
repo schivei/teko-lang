@@ -10,7 +10,7 @@ com arquivo:linha.**
 
 ## 0. A correção de enquadramento — o pipeline é MÓDULO-a-módulo, não função-a-função
 
-A tese do issue enuncia o pipeline como *"`lower_function` -> `select` (MInst) -> `regalloc` ->
+A tese do issue enuncia o pipeline como *"`lower_function` -> `select` (MInst): `regalloc` ->
 `encode` -> anexa bytes ao objeto"*, função a função. **Medi a estrutura real e ela não é essa** — e
 essa diferença é o eixo de todo o desenho, por isso vem primeiro e com arquivo:linha.
 
@@ -243,7 +243,7 @@ mapeamento de nome, ao lado das de `arena_push`). **Gate:** builda; `teko test .
 chama enter/leave ainda ⇒ FIXPOINT byte-idêntico trivial. Ritual: NÃO (aditivo, sem uso).
 
 **C2 — Backend: wrappers `pub` de encode por-função.** Adicionar `pub fn encode_func_x86(abi, f:
-MFuncX86) -> EncodedFuncX86 | error` envolvendo `fold_func_into_text_x86` (`encode_x86_64.tks:2357`)
+MFuncX86): EncodedFuncX86 | error` envolvendo `fold_func_into_text_x86` (`encode_x86_64.tks:2357`)
 para UMA função, devolvendo `{ text: []byte; syms: []Symbol; relocs: []RelocX86 }`; idem `encode_func`
 arm64 (`encode_arm64.tks:2676`). `select_lfunc_x86`/`regalloc_func_x86` já são `pub`
 (`isel_x86_64.tks:1874`, `regalloc_x86.tks:873`); os pares arm64 também (`isel_arm64.tks:1936`,
@@ -353,7 +353,7 @@ pub type EncodedFuncX86 = struct {
  * @return     o delta por-função, ou o honest-stop propagado
  * @since 0.3.1
  */
-pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86) -> EncodedFuncX86 | error
+pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86): EncodedFuncX86 | error
 
 /**
  * region_enter — empilha `child` como região-corrente da task: toda alocação
@@ -367,7 +367,7 @@ pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86) -> EncodedFuncX86 | erro
  * @return       void
  * @since 0.3.1
  */
-pub fn region_enter(child: /* handle de região */ ) -> void
+pub fn region_enter(child: /* handle de região */ ): void
 
 /**
  * region_leave — desempilha a região-corrente: a alocação default volta ao seu
@@ -377,7 +377,7 @@ pub fn region_enter(child: /* handle de região */ ) -> void
  * @return  void
  * @since 0.3.1
  */
-pub fn region_leave() -> void
+pub fn region_leave(): void
 ```
 
 Funções existentes que o driver fundido TOCA (chama, não edita): `select_lfunc_x86`

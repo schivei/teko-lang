@@ -37,7 +37,7 @@ bodies); **`class`** = the OOP unit (single base + field-flattening inheritance,
 type Timestamped = trait {
     created_at: i64                       // a field the deriver gains
     updated_at: i64
-    fn touch(self: Ref<Timestamped>) -> void { self.updated_at = now() }   // a method with a body
+    fn touch(self: Ref<Timestamped>): void { self.updated_at = now() }   // a method with a body
 }
 
 // any struct or class DERIVES it → gains created_at, updated_at, and touch():

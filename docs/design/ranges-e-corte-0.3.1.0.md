@@ -100,13 +100,13 @@ Não há builtin de corte de `[]T`. Não há função de runtime. `builtin_fn` n
 
 | nome | definido em | defs | chamadas |
 |---|---|---|---|
-| `bytes_slice([]byte,u64,u64) -> []byte` | `src/crypto/hash.tks:281` | 2 | 12 |
-| `slice_bytes([]byte,u64,u64) -> []byte` | `src/compress/deflate.tks:80` | 2 | 16 |
-| `slice_u32([]u32,u64,u64) -> []u32` | `src/compress/inflate.tks:541` | 1 | 2 |
-| `bytes_slice_view([]byte,u64,u64) -> []byte` | `src/encoding/base64/base64.tks:260` | 2 | 2 |
-| `str_slice_bytes([]byte,u64,u64) -> str` | `src/encoding/json/json.tks:407` | 2 | 6 |
-| `str_slice_bytes_view([]byte,u64,u64) -> str` | `src/encoding/csv/csv.tks:242` | 2 | 2 |
-| `io::Buf::slice(self,u64,u64) -> Buf \| error` | `src/io/stream.tks:182` | 1 | — |
+| `bytes_slice([]byte,u64,u64): []byte` | `src/crypto/hash.tks:281` | 2 | 12 |
+| `slice_bytes([]byte,u64,u64): []byte` | `src/compress/deflate.tks:80` | 2 | 16 |
+| `slice_u32([]u32,u64,u64): []u32` | `src/compress/inflate.tks:541` | 1 | 2 |
+| `bytes_slice_view([]byte,u64,u64): []byte` | `src/encoding/base64/base64.tks:260` | 2 | 2 |
+| `str_slice_bytes([]byte,u64,u64): str` | `src/encoding/json/json.tks:407` | 2 | 6 |
+| `str_slice_bytes_view([]byte,u64,u64): str` | `src/encoding/csv/csv.tks:242` | 2 | 2 |
+| `io::Buf::slice(self,u64,u64): Buf \| error` | `src/io/stream.tks:182` | 1 | — |
 | | | **12** | **40** |
 
 `bytes_slice` e `slice_bytes` são o **mesmo corpo com o nome invertido**:
@@ -344,7 +344,7 @@ acrescentar capacidade."*
 ### 5.1 O que já compila hoje (medido, para não desenhar o que existe)
 
 ```teko
-fn f(x: u64) -> u64 { x + 1 }
+fn f(x: u64): u64 { x + 1 }
 let a: []u64 = [10, 20, 30]
 a[f(0)]        // → 20      ✓ compila e corre
 let s: str = "café🐝"
@@ -374,7 +374,7 @@ ao dono.
 
 **(B) "indexar um MAPA pela CHAVE"** — `m["nome"]`, `m[expr]`. **NÃO EXISTE.**
 `teko::collections::Map<V>` (`src/collections/map.tks:30`) é uma `class` com chaves `str` e acesso por
-método: `get(k) -> V | null`, `insert`, `contains`, `remove`, `keys`. Não há `m[k]`.
+método: `get(k): V | null`, `insert`, `contains`, `remove`, `keys`. Não há `m[k]`.
 
 **A palavra "chave" pesa para (B)** — em (A) chamar-se-ia índice, não chave. E as três linguagens que
 o dono citou (Python, C#, TS) fazem todas `d[key]` em dicionários. Mas **(A) também encaixa** na
@@ -569,7 +569,7 @@ pub type Index = struct { receiver: Expr; index: Expr; cut: IndexCut | null }
  *                     não traz limite superior (`a[i..=]` não quer dizer nada)
  * @since 0.3.1.0
  */
-fn parse_subscript(tokens: []lexer::Token, recv: Expr, pos: u64) -> Parsed<Expr> | error
+fn parse_subscript(tokens: []lexer::Token, recv: Expr, pos: u64): Parsed<Expr> | error
 ```
 
 Auxiliares, todas privadas a este ficheiro:
@@ -584,7 +584,7 @@ Auxiliares, todas privadas a este ficheiro:
  * @return      a expressão `0`
  * @since 0.3.1.0
  */
-fn subscript_zero(line: u32, col: u32) -> Expr
+fn subscript_zero(line: u32, col: u32): Expr
 
 /**
  * parse_subscript_hi — o limite superior de um corte, depois de o `..`/`..=` ter sido consumido.
@@ -599,7 +599,7 @@ fn subscript_zero(line: u32, col: u32) -> Expr
  * @throws           `a[i..=]` — um limite superior inclusivo sem limite superior
  * @since 0.3.1.0
  */
-fn parse_subscript_hi(tokens: []lexer::Token, pos: u64, inclusive: bool) -> ParsedCutHi | error
+fn parse_subscript_hi(tokens: []lexer::Token, pos: u64, inclusive: bool): ParsedCutHi | error
 
 /**
  * ParsedCutHi — o resultado de `parse_subscript_hi`: o limite superior (ou a sua ausência) e a
@@ -652,8 +652,8 @@ const uint8_t *tk_str_cut_from_len(const uint8_t *p, uint64_t n, uint64_t from, 
 
 ```teko
 // scope.tks — junto de `slice`/`slice_to`/`slice_from`, e com a diferença dita no sítio:
-//   str_cut(str, u64, u64) -> str        CARACTERES
-//   str_cut_from(str, u64) -> str        CARACTERES
+//   str_cut(str, u64, u64): str        CARACTERES
+//   str_cut_from(str, u64): str        CARACTERES
 ```
 
 ```teko
@@ -669,7 +669,7 @@ const uint8_t *tk_str_cut_from_len(const uint8_t *p, uint64_t n, uint64_t from, 
  * @return       a expressão tipada
  * @throws       num índice/limite não inteiro, ou num receptor que a forma não admite
  */
-fn type_index(ix: parser::Index, env: Env, table: TypeTable) -> TExpr | error
+fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error
 
 /**
  * type_index_cut — o braço de CORTE de `type_index`: `recv[lo..hi]` e as suas variantes.
@@ -710,7 +710,7 @@ fn type_index(ix: parser::Index, env: Env, table: TypeTable) -> TExpr | error
  *               `cut_receiver_error` para a frase de cada recusa
  * @since 0.3.1.0
  */
-fn type_index_cut(ix: parser::Index, cut: parser::IndexCut, env: Env, table: TypeTable) -> TExpr | error
+fn type_index_cut(ix: parser::Index, cut: parser::IndexCut, env: Env, table: TypeTable): TExpr | error
 
 /**
  * cut_receiver_error — a recusa NOMEADA de um receptor não cortável. Teko não admite corte por
@@ -723,7 +723,7 @@ fn type_index_cut(ix: parser::Index, cut: parser::IndexCut, env: Env, table: Typ
  * @return   o erro a devolver, com o par esperado/actual quando faz sentido
  * @since 0.3.1.0
  */
-fn cut_receiver_error(t: Type) -> error
+fn cut_receiver_error(t: Type): error
 
 /**
  * cut_builtin_call — constrói a `TCall` a um builtin de corte: `call_ns` vazio (a convenção que
@@ -738,7 +738,7 @@ fn cut_receiver_error(t: Type) -> error
  * @return      a chamada tipada
  * @since 0.3.1.0
  */
-fn cut_builtin_call(name: str, args: []TExpr, ret: Type, line: u32, col: u32) -> TExpr
+fn cut_builtin_call(name: str, args: []TExpr, ret: Type, line: u32, col: u32): TExpr
 
 /**
  * cut_hi_inclusive — o limite superior de um `..=`, elevado em 1 para o converter no limite
@@ -749,7 +749,7 @@ fn cut_builtin_call(name: str, args: []TExpr, ret: Type, line: u32, col: u32) ->
  * @return    `hi + 1`
  * @since 0.3.1.0
  */
-fn cut_hi_inclusive(hi: TExpr) -> TExpr
+fn cut_hi_inclusive(hi: TExpr): TExpr
 ```
 
 **Gate:** `s[a..b]` compila e corre na ROTA C (o codegen alcança `tk_str_cut` pela mesma via de
@@ -778,7 +778,7 @@ Crumb verde com uma paragem nomeada, nunca com uma miscompilação.
  * @return      o twin `tk_str_cut*_len`, ou `null` quando `last` não nomeia nenhum dos dois
  * @since 0.3.1.0
  */
-fn builtin_str_cut_symbol(last: str) -> str | null
+fn builtin_str_cut_symbol(last: str): str | null
 ```
 
 **Gate — RITUAL COMPLETO.** As duas rotas produzem o mesmo valor; o canal `own_native` fecha com
@@ -803,7 +803,7 @@ Fora de limites: `tk_panic`, com as mesmas três frases que `tk_str_slice_chars`
 
 `teko::list::*` já é uma família de builtins genéricos intercetada no lowering, e o checker já lhe
 resolve o tipo de elemento a partir do argumento (`typer.tks:861-893`, os braços de `empty`/`push`).
-`cut`/`cut_from` entram por lá: `cut([]T, u64, u64) -> []T`.
+`cut`/`cut_from` entram por lá: `cut([]T, u64, u64): []T`.
 
 #### Crumb 2.3 — Lowering: um braço em `lower_list_builtin`
 
@@ -824,7 +824,7 @@ resolve o tipo de elemento a partir do argumento (`typer.tks:861-893`, os braço
  * @throws     num elemento de largura não fixável, ou propagado do lowering dos limites
  * @since 0.3.1.0
  */
-fn lower_list_cut(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str) -> LoweredFat | error
+fn lower_list_cut(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str): LoweredFat | error
 ```
 
 **Gate — RITUAL COMPLETO**, e adicionalmente: `[]T` de elemento GORDO (`[]str`, `[]char`) cortado nas
@@ -944,7 +944,7 @@ completo e entregável sem essa resposta, e nenhum crumb dele muda conforme ela.
 | `a[i]` — índice inteiro | **já existe** |
 | `a[expr]` — expressão na posição do índice | **já existe** (medido, §5.1) |
 | `d[chave]` — indexador por chave, **lança** se ausente | **lane 3** — `m[k]` → `Map::at`, **panic** |
-| `d.TryGetValue(k, out v)` — a forma segura | **já existe** — `Map::get(k) -> V \| null` |
+| `d.TryGetValue(k, out v)` — a forma segura | **já existe** — `Map::get(k): V \| null` |
 | `a[1..3]`, `a[..n]`, `a[n..]`, `a[..]`, `a[1..=3]` | **lanes 1 e 2** |
 | `System.Range` de 1.ª classe | **RECUSADO** (§3 — medido) |
 | `System.Index` / `^n` | **RECUSADO** (§4.3 + A.4) |
@@ -1006,7 +1006,7 @@ quer dizer nada. Frase: `"cannot cut a \`Map<V>\`: a map has no order — subscr
      * @see get
      * @since 0.3.1.0
      */
-    pub fn at(self, k: str) -> V
+    pub fn at(self, k: str): V
 ```
 
 **Um subscrito por chave INTEIRA não existe** e não é criado por arrasto: `Map<V>` tem chaves `str`

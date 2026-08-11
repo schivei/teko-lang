@@ -166,7 +166,7 @@ type PhaseSample = struct { name: str; elapsed_ns: u64; out_bytes: u64 }
  * @return              a razão; 0.0 quando output_bytes == 0 (guard)
  * @since 0.x (#AL1)
  */
-pub fn copy_amplification(grow_bytes: u64, output_bytes: u64) -> f64
+pub fn copy_amplification(grow_bytes: u64, output_bytes: u64): f64
 ```
 
 ---
@@ -222,7 +222,7 @@ sites (esperado ~0 no padrão mutável).
  * @throws   pânico se cap estourar u64 (M.1 fail-loud)
  * @since 0.x (#AL3/F1)
  */
-pub fn push[T](x: &[]T, v: T) -> void
+pub fn push[T](x: &[]T, v: T): void
 ```
 
 Ritual: fixpoint verde (o C do compilador muda, mas o C emitido para o CORPUS-ALVO não). Blast:
@@ -284,7 +284,7 @@ a recomputação). Ritual: fixpoint + probe: allocs de `cg_variant_typename_str`
  * @return      o nome manglado interned (computado 1×, servido N×)
  * @since 0.x (#AL4a)
  */
-pub fn variant_typename_interned(cache: &ManglingIntern, t: Type) -> str
+pub fn variant_typename_interned(cache: &ManglingIntern, t: Type): str
 ```
 
 ---
@@ -330,7 +330,7 @@ bom — **não mexer**. Ritual: probe dark-matter str MB ↓ + pico RSS ↓.
  * @return  void, ou error num write curto/falho (M.1)
  * @since 0.x (#AL4b)
  */
-pub fn ew_write(w: &EmitWriter, s: str) -> void | error
+pub fn ew_write(w: &EmitWriter, s: str): void | error
 ```
 
 ### 5.3 AL5 — region-per-phase (M/L) — ELEVADO pela prova
@@ -346,7 +346,7 @@ reclaim-ratio ↑ (de 0%), RSS ↓, zero regressão (native validation + fixpoin
 ## 6. PONTE DE COEXISTÊNCIA — o que torna o blast radius gerenciável
 
 **Viável: SIM.** As duas assinaturas coexistem durante a migração:
-- `teko::list::push(xs: []T, v: T) -> []T` — value-thread, ATUAL, intocada (byte-idêntica).
+- `teko::list::push(xs: []T, v: T): []T` — value-thread, ATUAL, intocada (byte-idêntica).
 - ref-push, NOVA (F1/AL3) — a forma borrow.
 
 Ponte por **nome novo durante a migração** (`push_into`/`grow` para a forma borrow),

@@ -87,7 +87,7 @@ Grounded against the current tree:
    `monomorph.tks:814`) emits the concrete type-decls whose bodies were method-stripped by layer 2.
 4. **no return-type-as-expected threading (layer: TExpr.types / typer).**
    `type_return`/`type_block` do not propagate the declared return type as an expected context, so
-   `fn box_make<T>(v: T) -> Box<T> { Box { value = v } }` fails (`cannot infer` / `Box__g__T` not stamped).
+   `fn box_make<T>(v: T): Box<T> { Box { value = v } }` fails (`cannot infer` / `Box__g__T` not stamped).
    The annotation-driven struct-init retarget exists ONLY for `let`-bindings (`type_binding` →
    `type_struct_lit(expected)`, see S4 memory), not for a return position.
 5. **classes need a static factory (layer: all of 1–4 + auto-construction).**
@@ -229,7 +229,7 @@ two masked 64-bit halves (no 128-bit-wide checked cast exists, so we go through 
  * @see wrap_hole_to_u64 the 64-bit sibling reinterpret ((historically))
  * @since onda-3 (#296)
  */
-fn reinterpret_i128_to_u128(raw: i128) -> u128 {
+fn reinterpret_i128_to_u128(raw: i128): u128 {
     let lo = wrap_hole_to_u64(raw) to u128
     let hi = wrap_hole_to_u64(raw >> 64) to u128
     (hi << 64) | lo
@@ -270,7 +270,7 @@ Rewrite the `v < 0` arm so the magnitude never goes through a checked `to u128`:
  * @return     `buf` with the C constant expression appended
  * @since onda-3 (#299)
  */
-fn cb_i128(buf: []byte, v: i128) -> []byte {
+fn cb_i128(buf: []byte, v: i128): []byte {
     if v < 0 {
         let mag = (~ reinterpret_i128_bits_u128(v)) + (1 to u128)   // two's-complement magnitude, non-trapping
         mut b = cb(buf, "-(")
@@ -328,7 +328,7 @@ alongside the path so `type_call` resolves against the exact namespace rather th
  * @return             the fully-qualified `[..ns.., Class, method]` callee path
  * @since onda-3 (#290)
  */
-fn method_dispatch_callee(struct_name: str, method: str) -> parser::Path {
+fn method_dispatch_callee(struct_name: str, method: str): parser::Path {
     mut segs: []parser::Segment = teko::list::empty()
     let qual = name_qualifier(struct_name)   // "" for a root type, else the owning ns
     if qual.len > 0 {
@@ -366,7 +366,7 @@ the CLASS and there is a leading qualifier, require the binding's ns to END WITH
  * @return          true iff `b_ns` ends with the callee's `<owner-segments>::<Class>` tail
  * @since onda-3 (#290)
  */
-fn ns_matches_qualified_class(b_ns: str, callee: parser::Path) -> bool {
+fn ns_matches_qualified_class(b_ns: str, callee: parser::Path): bool {
     // reconstruct the `owner::…::Class` tail from every segment EXCEPT the trailing method
     let want = join_ns(path_prefix_segments(callee))   // all but the last segment, `::`-joined
     b_ns == want || ends_with_ns(b_ns, want)
@@ -380,8 +380,8 @@ proven for optionals/tags (`qualified_optional` fixture).
 
 - **Fixtures:** `examples/regressions/same_bare_method_dispatch/` (consistent), modeled on
   `di_same_name_cross_ns` (which reads a FIELD precisely because method dispatch was broken — #290's own
-  report). Two namespaces `left`/`right`, each `type Svc = class { pub tag: i64; pub fn make(x) -> Svc; pub
-  fn tag_of(self) -> i64 { self.tag } }`; `left::Svc::make(3).tag_of()` == 3 and `right::Svc::make(7).tag_of()`
+  report). Two namespaces `left`/`right`, each `type Svc = class { pub tag: i64; pub fn make(x): Svc; pub
+  fn tag_of(self): i64 { self.tag } }`; `left::Svc::make(3).tag_of()` == 3 and `right::Svc::make(7).tag_of()`
   == 7; `exit(l + r)` = **exit 10**. Fails to type-check today (`argument type mismatch`), passes on both
   after. Also **flip** `di_same_name_cross_ns` to CALL the method (not read the field) once #290 lands —
   that fixture's field-read workaround becomes obsolete (report it, do not silently rewrite unrelated
@@ -451,7 +451,7 @@ free generic fn's. The discovery seed: a constructor / method call on a generic-
 
 **Crumb 4: return-type-as-expected threading (#254 layer 4).**
 `type_return` — thread the enclosing fn's declared `return_type` as the expected context into the returned
-expression's typing, so `fn box_make<T>(v: T) -> Box<T> { Box { value = v } }` retargets the struct-init to
+expression's typing, so `fn box_make<T>(v: T): Box<T> { Box { value = v } }` retargets the struct-init to
 the concrete instance exactly as `type_binding` already does for `let`. Reuse `type_struct_lit(expected)`
 (the annotation-driven retarget) — pass the fn's return type as the expected type at the return position.
 ```teko
@@ -465,13 +465,13 @@ covered by the ClassBody arm) and verify the arena-per-object ref semantics surv
 method set reuses the same class-lowering; no new codegen).
 
 - **Fixtures (consistent unless noted):**
-  - `examples/regressions/generic_struct_method/` — `type Box<T> = struct { value: T; pub fn get(self) -> T
+  - `examples/regressions/generic_struct_method/` — `type Box<T> = struct { value: T; pub fn get(self): T
     { self.value } }`; `Box<i64>{value=42}.get()` → **exit 42**; a second instantiation `Box<u8>` proves
     per-instance stamping.
-  - `examples/regressions/generic_class_factory/` — `type Cell<T> = class { pub v: T; pub fn make(x: T) ->
-    Cell<T> { Cell { v = x } }; pub fn read(self) -> T { self.v } }`; `Cell<i64>::make(7).read()` → exit 7.
+  - `examples/regressions/generic_class_factory/` — `type Cell<T> = class { pub v: T; pub fn make(x: T):
+    Cell<T> { Cell { v = x } }; pub fn read(self): T { self.v } }`; `Cell<i64>::make(7).read()` → exit 7.
   - `examples/regressions/generic_method_self_construct/` — a method that CONSTRUCTS its own type
-    (`fn dup(self) -> Box<T> { Box { value = self.value } }`) — proves the return-type-as-expected thread.
+    (`fn dup(self): Box<T> { Box { value = self.value } }`) — proves the return-type-as-expected thread.
   - `examples/regressions/generic_method_trait_fold/` — a `<K: Hashable & Eq>` chain method (the #163 Map
     key path) — proves the constraint gate + trait fold survive method stamping.
   - Plus corpus `#test`s in `generics_test.tkt` (to cover the mono method path across implementations).

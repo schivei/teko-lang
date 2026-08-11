@@ -77,7 +77,7 @@ path.
 
 ### 1.2 Idea 2 — arena elision
 
-A `scope_touches_arena(body) -> bool` predicate elides the region for alloc-free leaf scopes, guarding
+A `scope_touches_arena(body): bool` predicate elides the region for alloc-free leaf scopes, guarding
 `open_native_region`/`open_frame_region` (`lower.tks:1619`/`:1392`) exactly as the existing
 `bracket_depth > 0` skip does (`lower.tks:1637`). Saves the 64 KiB region floor per elided leaf.
 Independent, cheap, composes with DPS. Conservative: doubt → do not elide (route to enclosing region,
@@ -570,7 +570,7 @@ under its specialized interface AND every interface that one transitively extend
  * @return       the canonical names of `iface` and all its transitive interface ancestors
  * @since 0.3.1
  */
-fn interface_ancestry(iface: str, table: TypeTable) -> []str
+fn interface_ancestry(iface: str, table: TypeTable): []str
 ```
 
 **Conflict detection — the exact rule.** `T` (+ key) resolves **iff EXACTLY ONE** table row matches
@@ -613,10 +613,10 @@ per lifetime, and (2) the runtime SUPPORT that inline code reads/writes. Both ar
 **The runtime support (two data structures; reuse existing `teko_rt`, justify any addition):**
 
 1. **Per-arena scoped registry** — REUSE the existing native `tk_region_register(region, id, ptr)` /
-   `tk_region_lookup(region, id) -> ptr` already on the region (`di.tks:368` names them as the DI
+   `tk_region_lookup(region, id): ptr` already on the region (`di.tks:368` names them as the DI
    lifetime cache; `di_cache` is the interpreter twin). It is a small per-region map `service_id ->
    instance ptr` on the `tk_region` header. No NEW structure is required for the storage; the only
-   possible addition is a `tk_region_parent(region) -> region` accessor for the ancestry walk — add it
+   possible addition is a `tk_region_parent(region): region` accessor for the ancestry walk — add it
    ONLY if not already exposed (a one-line read accessor, within the runtime exception, behavior-
    identical). The walk itself is EMITTED INLINE (consistent with intrinsic expansion), so no
    `tk_region_lookup_up` runtime helper is needed.
@@ -707,7 +707,7 @@ producer and the value is forbidden from outliving its claim.
  * @return       true iff `e` carries service taint
  * @since 0.3.1
  */
-fn is_service_tainted(e: TExpr, env: Env) -> bool
+fn is_service_tainted(e: TExpr, env: Env): bool
 
 /**
  * check_no_service_escape — reject every escape of a service-tainted value: a field store
@@ -1273,7 +1273,7 @@ Surface fixtures (new):
 | `mut_accepted_as_var_softdep` | `mut a = 0` still parses during the additive window | 0 |
 | `ref_return_form_rejected` | `fn f(): ref T` no longer parses | EXPECT_COMPILE_FAIL |
 | `colon_return_operator` | `fn f(): T { }` parses; `->` also parses (additive window) | 0 |
-| `arrow_token_removed` | `fn f() -> T` no longer parses (post-S4) | EXPECT_COMPILE_FAIL |
+| `arrow_token_removed` | `fn f(): T` no longer parses (post-S4) | EXPECT_COMPILE_FAIL |
 | `self_keyword_receiver` | `fn f(): i64 { self.x }` types; no loose receiver param | 0 |
 | `base_call_in_override` | `base.g()` in a subclass method resolves | 0 |
 | `base_still_a_local_name` | production `base` local (non-method) still compiles (contextual) | 0 |

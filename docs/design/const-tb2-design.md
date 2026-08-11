@@ -215,7 +215,7 @@ os bytes de `.shstrtab` — e todos os offsets subsequentes — ficam idênticos
  * @param has_rodata_relocs  se há ao menos uma relocation cujo patch site é `.rodata`
  * @return  os nomes das seções, em ordem de header (7 ou 8)
  */
-fn elf_section_names(has_rodata_relocs: bool) -> []str {
+fn elf_section_names(has_rodata_relocs: bool): []str {
     let base = ["", ".text", ".rodata", ".symtab", ".strtab", ".shstrtab", ".rela.text"]
     if has_rodata_relocs { return teko::list::push(base, ".rela.rodata") }
     base
@@ -228,7 +228,7 @@ fn elf_section_names(has_rodata_relocs: bool) -> []str {
 segue `5` (`.shstrtab` não muda de índice). Assinatura:
 
 ```teko
-fn emit_elf_header(buf: []byte, lay: ElfLayout, e_machine: u32, e_flags: u32, nsects: u32) -> []byte
+fn emit_elf_header(buf: []byte, lay: ElfLayout, e_machine: u32, e_flags: u32, nsects: u32): []byte
 ```
 
 Corpo: trocar `b = emit_u16_le_elf(b, 7 to u32)` por `b = emit_u16_le_elf(b, nsects)`.
@@ -238,7 +238,7 @@ Callsite `emit_elf_object` (`:964`) passa `lay.nsects`. Byte-inerte quando
 ### 2.5 `compute_elf_layout` computa `.rela.rodata` (`objfile_elf.tks:624`)
 
 ```teko
-fn compute_elf_layout(obj: ElfObject, nsyms: u32, nrela: u32, nrela_rodata: u32, strtab_len: u32, shstrtab_len: u32, first_global: u32, nsects: u32) -> ElfLayout
+fn compute_elf_layout(obj: ElfObject, nsyms: u32, nrela: u32, nrela_rodata: u32, strtab_len: u32, shstrtab_len: u32, first_global: u32, nsects: u32): ElfLayout
 ```
 
 Corpo (após `rela_size`, antes de `shoff`):
@@ -277,7 +277,7 @@ preservação de comportamento):
  * @param secidx   o índice do símbolo de seção `.rodata`
  * @return         a linha `Elf64_Rela` resolvida
  */
-fn elf_resolve_rela(r: ElfRelocReq, symbols: []Symbol, syms: []ElfSym, secidx: u32) -> ElfRela {
+fn elf_resolve_rela(r: ElfRelocReq, symbols: []Symbol, syms: []ElfSym, secidx: u32): ElfRela {
     let hit = elf_rodata_hit(symbols, r.sym)
     let symidx = if hit.found { secidx } else { elf_symbol_index(syms, r.sym) }
     let addend = if hit.found { r.addend + (hit.offset to i64) } else { r.addend }
@@ -296,7 +296,7 @@ fn elf_resolve_rela(r: ElfRelocReq, symbols: []Symbol, syms: []ElfSym, secidx: u
  * @param syms  a tabela de símbolos resolvida (para os índices)
  * @return      as linhas de relocation de `.rela.rodata`, em ordem de emissão
  */
-fn elf_build_rodata_relas(obj: ElfObject, syms: []ElfSym) -> []ElfRela {
+fn elf_build_rodata_relas(obj: ElfObject, syms: []ElfSym): []ElfRela {
     let secidx = elf_rodata_secsym_index(syms)
     mut out: []ElfRela = teko::list::empty()
     mut i: u64 = 0
@@ -338,7 +338,7 @@ passa a `b = emit_elf_shdr(...)` seguida do bloco condicional e de `b` como valo
 ### 2.8 `emit_elf_object` costura tudo (`objfile_elf.tks:956`)
 
 ```teko
-pub fn emit_elf_object(obj: ElfObject) -> []byte {
+pub fn emit_elf_object(obj: ElfObject): []byte {
     let has_rr = obj.rodata_relocs.len > (0 to u64)
     let syms = elf_build_symbols(obj.symbols)
     let strtab = build_elf_strtab(elf_sym_names(syms))
@@ -413,7 +413,7 @@ zero, offset 0) + datum-alvo (`0x41` + 7 zeros, offset 8); um `rodata_reloc` no 
 apontando para o alvo em offset 8.
 
 ```teko
-fn eo_rodata_ptr_object() -> ElfObject {
+fn eo_rodata_ptr_object(): ElfObject {
     let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
     let ptr = Symbol { name = "ptr"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
     let target = Symbol { name = "target"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }

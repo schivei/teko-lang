@@ -36,7 +36,7 @@ Anything that would move emitted bytes, a test outcome, or the fixpoint is out o
 
 Every domain-meaningful literal is named. A **magic value** is a bare literal carrying domain meaning at its use site — a mask, offset, size, index bound, tag, file magic, opcode, or section flag. Under W15 it becomes named:
 
-- a single semantic scalar → **`const NAME: T = <const-expr>`** (comp-time, **no arena** — never a nullary `fn X() -> T { <const> }`, which opens a lexical region per call);
+- a single semantic scalar → **`const NAME: T = <const-expr>`** (comp-time, **no arena** — never a nullary `fn X(): T { <const> }`, which opens a lexical region per call);
 - a **closed integer tag family** → **`enum`** (e.g. block-type/scope-kind/value-type tags);
 - a **bitmask** ORed from independent bits → **`flags`** (e.g. ELF `SHF_ALLOC | SHF_EXECINSTR`);
 - a **large immutable aggregate** read repeatedly → an **aggregate `const`** (rodata).

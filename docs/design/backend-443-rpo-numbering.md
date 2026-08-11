@@ -159,7 +159,7 @@ W15 law; no inline `//`. The repo convention folds the error case into `@return 
  * @param u32 x  the value to find
  * @return bool  true iff `x` is present
  */
-fn u32_in(list: []u32, x: u32) -> bool {
+fn u32_in(list: []u32, x: u32): bool {
     mut i: u64 = 0
     loop {
         if i >= list.len { break }
@@ -175,7 +175,7 @@ fn u32_in(list: []u32, x: u32) -> bool {
  * @param []u32 list  the list to reverse
  * @return []u32  the reversed list
  */
-fn reverse_u32(list: []u32) -> []u32 {
+fn reverse_u32(list: []u32): []u32 {
     mut out: []u32 = teko::list::empty()
     mut i: u64 = list.len
     loop {
@@ -195,7 +195,7 @@ fn reverse_u32(list: []u32) -> []u32 {
  * @param u32 id  the block id
  * @return []MInst  the block's instructions, or empty
  */
-fn block_insts_of(f: MFunc, id: u32) -> []MInst {
+fn block_insts_of(f: MFunc, id: u32): []MInst {
     mut i: u64 = 0
     loop {
         if i >= f.blocks.len { break }
@@ -215,7 +215,7 @@ fn block_insts_of(f: MFunc, id: u32) -> []MInst {
  * @param u32 id  the block whose successors to enumerate
  * @return []u32  the distinct successor block ids, in terminator order
  */
-fn block_successors(f: MFunc, id: u32) -> []u32 {
+fn block_successors(f: MFunc, id: u32): []u32 {
     let insts = block_insts_of(f, id)
     mut out: []u32 = teko::list::empty()
     mut i: u64 = 0
@@ -256,7 +256,7 @@ type RpoState = struct {
  * @param RpoState st  the visited set + post-order so far
  * @return RpoState  the updated visited set + post-order
  */
-fn rpo_visit(f: MFunc, id: u32, st: RpoState) -> RpoState {
+fn rpo_visit(f: MFunc, id: u32, st: RpoState): RpoState {
     if u32_in(st.visited, id) { return st }
     let succs = block_successors(f, id)
     mut cur = RpoState { visited = teko::list::push(st.visited, id); post = st.post }
@@ -279,7 +279,7 @@ fn rpo_visit(f: MFunc, id: u32, st: RpoState) -> RpoState {
  * @param []u32 order  the reachable-block order so far
  * @return []u32  the order extended with any unreachable block ids
  */
-fn append_unvisited(f: MFunc, order: []u32) -> []u32 {
+fn append_unvisited(f: MFunc, order: []u32): []u32 {
     mut out = order
     mut i: u64 = 0
     loop {
@@ -302,7 +302,7 @@ fn append_unvisited(f: MFunc, order: []u32) -> []u32 {
  * @param MFunc f  the selected function
  * @return []u32  the RPO block-id order (entry first)
  */
-fn rpo_block_order(f: MFunc) -> []u32 {
+fn rpo_block_order(f: MFunc): []u32 {
     if f.blocks.len == 0 { return teko::list::empty() }
     let entry = f.blocks[0].id
     let st = rpo_visit(f, entry, RpoState { visited = teko::list::empty(); post = teko::list::empty() })
@@ -318,7 +318,7 @@ fn rpo_block_order(f: MFunc) -> []u32 {
  * @param u32 id  the block id to rank
  * @return u32  the 0-based RPO position, or `order.len`
  */
-fn block_pos(order: []u32, id: u32) -> u32 {
+fn block_pos(order: []u32, id: u32): u32 {
     mut i: u64 = 0
     loop {
         if i >= order.len { break }
@@ -344,7 +344,7 @@ fn block_pos(order: []u32, id: u32) -> u32 {
  * @param []u32 order  the RPO block-id order (from `rpo_block_order`)
  * @return []NumberedInst  the flattened, RPO-numbered stream
  */
-fn number_insts(f: MFunc, order: []u32) -> []NumberedInst {
+fn number_insts(f: MFunc, order: []u32): []NumberedInst {
     mut out: []NumberedInst = teko::list::empty()
     mut p: u32 = 0
     mut bi: u64 = 0
@@ -380,7 +380,7 @@ fn number_insts(f: MFunc, order: []u32) -> []NumberedInst {
  * @param []u32 order  the RPO block-id order
  * @return bool  true iff a retreating (back-)edge is present
  */
-fn has_back_edge(stream: []NumberedInst, order: []u32) -> bool {
+fn has_back_edge(stream: []NumberedInst, order: []u32): bool {
     mut i: u64 = 0
     loop {
         if i >= stream.len { break }
@@ -408,7 +408,7 @@ fn has_back_edge(stream: []NumberedInst, order: []u32) -> bool {
  * @param []u32 order  the RPO block-id order (for the back-edge test)
  * @return IntervalSet | error  the computed intervals, or the back-edge stop
  */
-fn compute_intervals(stream: []NumberedInst, order: []u32) -> IntervalSet | error {
+fn compute_intervals(stream: []NumberedInst, order: []u32): IntervalSet | error {
     if has_back_edge(stream, order) {
         return error { message = "regalloc: a loop back-edge needs live-range holes over the strict linear numbering — deferred to the A3-loop follow-up (§6.2)" }
     }
@@ -430,7 +430,7 @@ fn compute_intervals(stream: []NumberedInst, order: []u32) -> IntervalSet | erro
  * @param MFunc f  the selected function (virtual MRegs + ABI pins)
  * @return MFunc | error  the fully-colored function, or a named honest-stop
  */
-pub fn regalloc_func(abi: AbiDescriptor, f: MFunc) -> MFunc | error {
+pub fn regalloc_func(abi: AbiDescriptor, f: MFunc): MFunc | error {
     let order = rpo_block_order(f)
     let numbered = number_insts(f, order)
     let ivals = match compute_intervals(numbered, order) {
@@ -482,7 +482,7 @@ over-stops (never miscompiles). Never the reverse.
 - **Update** the 5 existing `number_insts(...)` call sites in `regalloc_test.tkt`
   (lines 221, 237, 252, 261, 918). For the single-block fixtures RPO order == `[0]` == id order, so
   **expected values are unchanged** — only the call adds `rpo_block_order(f)`. Recommended helper to
-  cut churn: `fn rgt_number(f: MFunc) -> []NumberedInst { number_insts(f, rpo_block_order(f)) }`.
+  cut churn: `fn rgt_number(f: MFunc): []NumberedInst { number_insts(f, rpo_block_order(f)) }`.
 - **New white-box test** (the inverted-liveness case, at the numbering layer): build the diamond
   fixture where a vreg is **defined in a high-id arm block and used in the low-id merge block**
   (§10.3); assert its def-point < its use-point in `number_insts(f, rpo_block_order(f))` (monotonic
@@ -496,7 +496,7 @@ over-stops (never miscompiles). Never the reverse.
   `order` to `compute_intervals` (§5.5). Now a nested `if`/`match` **allocates**; a real `loop`
   **still honest-stops**.
 - **Update** the 4 existing `compute_intervals(...)` call sites in `regalloc_test.tkt`
-  (lines 237, 252, 261, 918) to thread `order` (helper: `fn rgt_intervals(f: MFunc) ->
+  (lines 237, 252, 261, 918) to thread `order` (helper: `fn rgt_intervals(f: MFunc):
   IntervalSet | error { let o = rpo_block_order(f); compute_intervals(number_insts(f, o), o) }`).
   Single-block expected values unchanged.
 - **New fixtures** (§10): the nested-`if` interp-equivalence + allocate-success (§10.1); the loop

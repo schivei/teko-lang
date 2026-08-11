@@ -145,7 +145,7 @@ New core loop (copy-paste — replaces the discover-and-walk body of `run_regres
  * @return     0 when the tier passes (or is advisory), 1 when a failure/missing-path gates it
  * @since 0.3.1
  */
-fn run_regression_sources(exe: str, m: Manifest) -> i32 {
+fn run_regression_sources(exe: str, m: Manifest): i32 {
     let work = "bin/.regr-work"
     match mkdir_p(teko::str::concat(work, "/")) { error => { }; null => { } }
     mut fails: u64 = 0
@@ -210,7 +210,7 @@ STRUCTURAL property plus the sentinel backstop:
  * @throws          when `regr_dir` is the project root and the scenario has no inline/explicit source
  * @since 0.3.1
  */
-fn guard_no_project_build_at_root(regr_dir: str, t: Tkr) -> null | error {
+fn guard_no_project_build_at_root(regr_dir: str, t: Tkr): null | error {
     let at_root = regr_dir == "." || regr_dir.len == 0
     let has_src = t.source_inline.len > 0 || t.source_file.len > 0
     if at_root && t.kind != TkrKind::CompileFail && !has_src {
@@ -261,7 +261,7 @@ inputs the lowering fills):
  * @return          the captured build outcome (+ the produced binary path in `stdout`-adjacent scratch)
  * @since 0.3.1
  */
-fn compile_inline_source(exe: str, src_text: str, env: []str, prefix: str) -> CapResult {
+fn compile_inline_source(exe: str, src_text: str, env: []str, prefix: str): CapResult {
     let srcp = prefix ~ ".src.tks"
     match mkdir_p(teko::str::concat(dirname_of(srcp), "/")) { error => { }; null => { } }
     match teko::io::write_file(srcp, src_text) { error => { }; null => { } }
@@ -314,7 +314,7 @@ runtime symbol, no parent-process `set_var` leak:
  * @return            the captured exit/stdout/stderr
  * @since 0.3.1
  */
-fn run_captured_env(argv: []str, stdin_data: str, env: []str, prefix: str) -> CapResult {
+fn run_captured_env(argv: []str, stdin_data: str, env: []str, prefix: str): CapResult {
     mut cmd = ""
     mut k: u64 = 0
     if env.len > 0 { cmd = "env" }
@@ -351,7 +351,7 @@ matrix lives alongside it.
  * @return    true when the scenario declares no `When` verb
  * @since 0.3.1
  */
-fn tkb_scenario_is_declarative(sc: TkbScenario) -> bool { sc_when_verb(sc).len == 0 }
+fn tkb_scenario_is_declarative(sc: TkbScenario): bool { sc_when_verb(sc).len == 0 }
 ```
 
 ### 2d. What the six scripts do, mapped one-by-one (runner capability OR death by duplication)
@@ -386,7 +386,7 @@ drop it into a scratch `packages/`, then compile the consumer against it. Exactl
  * @throws                  on a missing/malformed dep manifest, a dep build failure, or no `.tkl`
  * @since 0.3.1
  */
-fn provision_dependency(exe: str, dep_dir: str, scratch_packages: str, prefix: str) -> str | error { /* crumb C4 */ }
+fn provision_dependency(exe: str, dep_dir: str, scratch_packages: str, prefix: str): str | error { /* crumb C4 */ }
 ```
 
 ### 2f. `Then object well-formed` — the surviving leaf tools
@@ -411,7 +411,7 @@ absent host tool is an honest per-scenario skip (never a fabricated pass).
  * @return        the verdict (ok / FAIL / skip-when-tool-absent)
  * @since 0.3.1
  */
-fn check_object_wellformed(objp: str, target: str) -> RegrOutcome { /* crumb C3 */ }
+fn check_object_wellformed(objp: str, target: str): RegrOutcome { /* crumb C3 */ }
 ```
 
 ### 2g. Target selection — `Given target`, honest os-arch skip

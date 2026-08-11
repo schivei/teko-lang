@@ -252,7 +252,7 @@ Javadoc):**
  * @see    is_comparable — the comparison sibling this mirrors (expr.tks:19)
  * @since  0.3.1
  */
-fn int_arith_join(a: PrimKind, b: PrimKind) -> PrimKind | error { /* … */ }
+fn int_arith_join(a: PrimKind, b: PrimKind): PrimKind | error { /* … */ }
 ```
 
 ```teko
@@ -267,7 +267,7 @@ fn int_arith_join(a: PrimKind, b: PrimKind) -> PrimKind | error { /* … */ }
  * @return TExpr    operand, or operand wrapped in a synthetic TCast{target} (never lossy)
  * @since  0.3.1
  */
-fn widen_operand(operand: TExpr, target: PrimKind) -> TExpr { /* … */ }
+fn widen_operand(operand: TExpr, target: PrimKind): TExpr { /* … */ }
 ```
 
 `type_binary` then becomes: type both sides → literal-adopt (unchanged) → if `type_eq` keep the
@@ -624,7 +624,7 @@ param type**, so the name carries source AND destination).
  * @see    teko::math::checked_add_u32 — the checked-arithmetic sibling this mirrors
  * @since  0.3.1
  */
-pub fn u64_to_u32(v: u64) -> u32 | error { /* if v > U32_MAX { return error {…} }  v to u32 */ }
+pub fn u64_to_u32(v: u64): u32 | error { /* if v > U32_MAX { return error {…} }  v to u32 */ }
 ```
 
 **Family derived from the SURVIVING-narrow inventory (NOT the cartesian product — owner mandate).**

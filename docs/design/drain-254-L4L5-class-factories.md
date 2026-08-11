@@ -131,7 +131,7 @@ Concretely, three touches inside `type_struct_lit`, all gated so the corpus is b
  * @return             true iff this is a self-construct of the enclosing generic template
  * @since onda-3 (#254 L4/L5)
  */
-fn is_self_generic_construct(base_name: str, owner_type: str, decl_tparams: []str) -> bool {
+fn is_self_generic_construct(base_name: str, owner_type: str, decl_tparams: []str): bool {
     if decl_tparams.len == 0 { return false }
     if owner_type == "" { return false }
     teko::runtime::str_eq(name_last_segment(owner_type), base_name)
@@ -155,7 +155,7 @@ so it matches the `-> Box<T>` return spelling byte-for-byte:
  * @return             the phantom instance name (`Box__g__T`)
  * @since onda-3 (#254 L4/L5)
  */
-fn phantom_self_inst_name(base_name: str, owner_tparams: []str) -> str {
+fn phantom_self_inst_name(base_name: str, owner_tparams: []str): str {
     mut args: []Type = teko::list::empty()
     mut i = 0
     loop { if i >= owner_tparams.len { break }; args = teko::list::push(args, Named { name = owner_tparams[i] }); i++ }
@@ -207,7 +207,7 @@ automatically — codegen/interpreter emit the concrete instance.
  * @return            the L3 Subst extended with the phantom → instance remap
  * @since onda-3 (#254 L4/L5)
  */
-fn instance_method_subst_l5(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable) -> Subst {
+fn instance_method_subst_l5(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable): Subst {
     let s = instance_method_subst(template, template_ns, inst, table)
     if template.type_params.len == 0 { return s }
     let base = g_instance_base(inst.name)
@@ -300,7 +300,7 @@ maps it to the stamped `Cell__g__i64::make`:
  * @throws       when a type-arg fails to resolve
  * @since onda-3 (#254 L5)
  */
-fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str) -> parser::Path | error {
+fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str): parser::Path | error {
     if c.type_args.len == 0 || c.callee.segments.len < 2 { return c.callee }
     let owner_idx = c.callee.segments.len - 2
     let base = c.callee.segments[owner_idx].name
@@ -358,15 +358,15 @@ mono method path both engines). Gate: full interpreter gate.
 ### Fixtures (interpreter==native unless noted)
 
 - **`examples/regressions/generic_method_self_construct/`** (proves L4). Struct:
-  `type Box<T> = struct { value: T; pub fn dup(self) -> Box<T> { Box { value = self.value } };
-  pub fn get(self) -> T { self.value } }`. Program:
+  `type Box<T> = struct { value: T; pub fn dup(self): Box<T> { Box { value = self.value } };
+  pub fn get(self): T { self.value } }`. Program:
   `Box<i64>{value=21}.dup().get()` + a SECOND instance `Box<u8>{value=1}.dup().get() to i64`
   → `exit(21 + 21 + …)`; pick constants summing to a distinct exit (e.g. 21+21 → **exit 42**,
   with the `u8` instance proving per-instance retarget, not a shared phantom). Fails to type-check
   today; passes both engines after L4.
 - **`examples/regressions/generic_class_factory/`** (proves L5 + L4). Class:
-  `type Cell<T> = class { pub v: T; pub fn make(x: T) -> Cell<T> { Cell { v = x } };
-  pub fn read(self) -> T { self.v } }`. Program:
+  `type Cell<T> = class { pub v: T; pub fn make(x: T): Cell<T> { Cell { v = x } };
+  pub fn read(self): T { self.v } }`. Program:
   `Cell<i64>::make(7).read()` + `Cell<str>::make("ab").read().len` → **exit (7+2)=9** (two distinct
   instantiations prove the factory stamps per instance; the `str` case proves the parser type-arg
   path + arena-per-object ref semantics on a non-scalar). cc-rejects / interpreter-panics today; both pass

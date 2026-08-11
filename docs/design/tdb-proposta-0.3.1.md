@@ -107,7 +107,7 @@ loaded bin/hello.tsym (v2): 412 functions, 5108 line rows, 412 frame descriptors
 Breakpoint 1 at 0x1133: src/main.tks:41 (in teko::demo::add)
 (tdb) run
 Breakpoint 1, teko::demo::add at src/main.tks:41
-   39 fn add(a: i32, b: i32) -> i32 {
+   39 fn add(a: i32, b: i32): i32 {
    40     let doubled = a * 2
 -> 41     let s = doubled + b
    42     s
@@ -302,7 +302,7 @@ provado, e um programa que sai com sinal deixa de ser um número opaco.
 
 | crumb | conteúdo | prova |
 | --- | --- | --- |
-| **M2.0 — MEDIR PRIMEIRO, e é o crumb mais importante desta proposta** | **um `extern` de libc implícito, com parâmetros de largura de ponteiro, liga e chama pela rota nativa?** Medido hoje: o checker tem `ptr` e `uptr` (`src/checker/scope.tks:387-388`, *"opaque FFI pointer (transport-only)"*), e o `TExternDecl` tem `from_lib: str` com o comentário **`"" = implicit libc`** (`src/checker/tast.tks:172`). Medido também: **os 24 `pub extern fn` da árvore levam TODOS `from "teko_rt"`** — nenhum exercita o caminho de libc implícito. O mecanismo está declarado; o caminho está **por andar**. Este crumb declara `extern fn getpid() -> i32 = "getpid"`, constrói pela rota nativa, e corre | o binário nativo imprime o pid correcto. Se falhar, o crumb reporta **onde** falha (checker, símbolo indefinido, ou linha de linker), e o conserto é um crumb nomeado em vez de uma descoberta a meio da fase 3 |
+| **M2.0 — MEDIR PRIMEIRO, e é o crumb mais importante desta proposta** | **um `extern` de libc implícito, com parâmetros de largura de ponteiro, liga e chama pela rota nativa?** Medido hoje: o checker tem `ptr` e `uptr` (`src/checker/scope.tks:387-388`, *"opaque FFI pointer (transport-only)"*), e o `TExternDecl` tem `from_lib: str` com o comentário **`"" = implicit libc`** (`src/checker/tast.tks:172`). Medido também: **os 24 `pub extern fn` da árvore levam TODOS `from "teko_rt"`** — nenhum exercita o caminho de libc implícito. O mecanismo está declarado; o caminho está **por andar**. Este crumb declara `extern fn getpid(): i32 = "getpid"`, constrói pela rota nativa, e corre | o binário nativo imprime o pid correcto. Se falhar, o crumb reporta **onde** falha (checker, símbolo indefinido, ou linha de linker), e o conserto é um crumb nomeado em vez de uma descoberta a meio da fase 3 |
 | **T2.1** | `ptrace` declarado como `extern` de libc implícito, com os pedidos que interessam como constantes nomeadas | um teste que anexa e desanexa de um processo filho trivial |
 | **T2.2** | `fork` + `execvp` + `PTRACE_TRACEME`: nasce um filho **parado no `execvp`** | o filho existe, está parado, e o pai sabe o pid |
 | **T2.3** | `waitpid` + a **decodificação do estado**, com a regra 128+N que `tk_rt_run` já pratica na árvore | a matriz: saída normal, saída por sinal, e paragem — três resultados distinguíveis, nenhum colapsado |
@@ -467,7 +467,7 @@ Medido:
 
 | facto | onde |
 | --- | --- |
-| o produtor de `.tsym` vive **dentro do emissor de C** | `fn tk_emit_tsym(prog: checker::TProgram) -> str` em `src/codegen/codegen.tks:12187`, e o comentário admite-o: *"mirror of codegen.c tk_emit_tsym"* |
+| o produtor de `.tsym` vive **dentro do emissor de C** | `fn tk_emit_tsym(prog: checker::TProgram): str` em `src/codegen/codegen.tks:12187`, e o comentário admite-o: *"mirror of codegen.c tk_emit_tsym"* |
 | e é chamado de **QUATRO** sítios, entre eles a rota **NATIVA** | em `src/build/project.tks`, hoje `:1781` e `:1845` (em `backend`), **`:2749` (em `finish_native_object` — a rota nativa)** e `:3912` (em `build_debug_binary`). **Quatro, e não dois:** medi dois na primeira leitura e a base avançou entretanto, o que **agrava** o achado em vez de o aliviar |
 | e o expurgo vai apagar a casa | `docs/design/expurgo-do-c-e-a-busca-por-linker-0.3.1.md`, fatia **6**: *"REMOVER DO FONTE … a emissão de C"* — **pendente** |
 
@@ -600,7 +600,7 @@ pub type DebugInfo = enum { None; Lines; Vars }
  * @return   the level for "none", "lines" or "vars"
  * @throws   when `v` is none of the three, naming all accepted values
  */
-fn debug_info_of_value(v: str) -> DebugInfo | error {
+fn debug_info_of_value(v: str): DebugInfo | error {
     if v == "none" { return DebugInfo::None }
     if v == "lines" { return DebugInfo::Lines }
     if v == "vars" { return DebugInfo::Vars }
@@ -626,7 +626,7 @@ fn debug_info_of_value(v: str) -> DebugInfo | error {
  * @return       the whole `.tsym` text, ready to write beside the binary and into the `.tkl`
  */
 pub fn emit_tsym_v2(prog: checker::TProgram, lines: []LineRow, frames: []FrameRow,
-                    locals: []LocalRow, level: DebugInfo) -> str
+                    locals: []LocalRow, level: DebugInfo): str
 ```
 
 **Onde isto toca o que já existe:**
@@ -709,7 +709,7 @@ nossa e sem a rota C**, e diz o que está medido e o que é o crumb `M2.0`.
 | medição | resultado |
 | --- | --- |
 | `grep syscall src/ --include=*.tks` | **2 ocorrências, e ambas são COMENTÁRIOS** — `src/runtime/teko_rt.tks:635` e `:643`, os dois a descrever *"the SAME deferred `extern`/syscall bottom"*. **Não existe primitiva de chamada de sistema crua na nossa superfície**, e nem a palavra existe em código |
-| a única forma de alcançar o SO | o **FFI, que liga a símbolos POR NOME**: `pub extern fn run(args: []str) -> i32 = "tk_rt_run" from "teko_rt"` |
+| a única forma de alcançar o SO | o **FFI, que liga a símbolos POR NOME**: `pub extern fn run(args: []str): i32 = "tk_rt_run" from "teko_rt"` |
 | quantos `pub extern fn` existem, e para onde apontam | **24, e TODOS levam `from "teko_rt"`.** Nenhum aponta para uma biblioteca da plataforma |
 | existe forma declarada de apontar para a libc? | **sim, e está no tipo.** `TExternDecl.from_lib: str` tem o comentário literal **`("" = implicit libc; valid iff is_extern)`** (`src/checker/tast.tks:172`). Uma declaração **sem** cláusula `from` significa **libc implícita** |
 | existe forma declarada de apontar para uma biblioteca de plataforma nomeada? | **sim, e já é usada.** `teko.tkp:72-73` tem `[extern.libs.windows]` com `kernel32 = []`, e `applicable_extern_libs(m, target)` (`src/build/project.tks:1244`) já resolve as declarações aplicáveis por alvo |
@@ -718,7 +718,7 @@ nossa e sem a rota C**, e diz o que está medido e o que é o crumb `M2.0`.
 **A leitura honesta destas seis linhas:** o mecanismo está **declarado e tipado**; o que está **por andar**
 é o caminho de libc implícita pela rota nativa, porque **nenhum dos 24 externs da árvore o exercita**.
 
-**Isso é exactamente um crumb de medição, e é o `M2.0`** (§3.2): declarar `extern fn getpid() -> i32 =
+**Isso é exactamente um crumb de medição, e é o `M2.0`** (§3.2): declarar `extern fn getpid(): i32 =
 "getpid"`, construir pela rota nativa, correr, e ver o pid. Se funcionar, as fases 2 e 3 assentam num
 caminho provado. Se falhar, o crumb reporta **onde** falha — checker, símbolo indefinido, ou linha de
 linker — e o conserto é um crumb nomeado, em vez de uma descoberta a meio da fase 3. **É o crumb mais
@@ -748,7 +748,7 @@ Nenhuma linha de C. Nenhum ficheiro novo em `src/runtime/`. Nenhuma compilação
  * @since 0.3.1 tdb proposal, fase 2
  * @see dbg_spawn_traced  the only caller that passes PTRACE_TRACEME
  */
-pub extern fn ptrace(request: i32, pid: i32, addr: uptr, data: uptr) -> i64 = "ptrace"
+pub extern fn ptrace(request: i32, pid: i32, addr: uptr, data: uptr): i64 = "ptrace"
 
 /**
  * dbg_spawn_traced — fork, mark the child traceable, and exec the target, leaving it STOPPED at
@@ -762,7 +762,7 @@ pub extern fn ptrace(request: i32, pid: i32, addr: uptr, data: uptr) -> i64 = "p
  * @throws      when the fork or the exec fails, naming which and why
  * @since 0.3.1 tdb proposal, fase 2
  */
-pub fn dbg_spawn_traced(argv: []str) -> i32 | error
+pub fn dbg_spawn_traced(argv: []str): i32 | error
 ```
 
 ## 5.3 Como "SEM C LANG" se lê, e é um facto de plataforma

@@ -377,12 +377,12 @@ bare-metal/SO-em-Teko); nada no metal resolve (algoritmo: divisão-resto p/ int,
 int=semente, float=alpha, specifiers ricos=alpha/evolução. **`to_string` (instância `.`) / `parse`
 (estático `::`) auto-imbuídos pelo compilador** — só primitivos (escritos à mão, format C#) e enums
 (gerados dos membros). **Structs NÃO** ("Inês é morta" — exigiria static [banido] ou generics
-[evolução]); MAS o dev escreve **função livre monomorfizada** (`fn parse_ponto(s) -> Ponto | Error`) —
+[evolução]); MAS o dev escreve **função livre monomorfizada** (`fn parse_ponto(s): Ponto | Error`) —
 sem static, sem método-em-struct, sem generics. **Distinção que reconcilia:** auto-imbuído pelo
 compilador (permitido — método gerado por tipo) vs `static` declarado pelo usuário (banido — estado
 global). **Interpolação de struct/variant = ERRO** (sem `to_string` auto-imbuído; o compilador não
 infere a função livre; variant precisa "explodir" via match). **`Error` é exceção** — tipo especial
-**global** (sem namespace), built-in, com `to_string() -> str` auto-imbuído (erros existem pra ser
+**global** (sem namespace), built-in, com `to_string(): str` auto-imbuído (erros existem pra ser
 comunicados); **sem `parse`** (erros são produzidos, não parseados), **sem parâmetro de formato**
 (é mensagem); estrutura `{ message: str; line: u32; file: str; trace: str? }`. **Padrão recorrente (3×:
 `.len`, `to_string`, `parse`):** feature universal sem generics = código concreto por tipo (escrito à
@@ -607,7 +607,7 @@ labels e âncoras — **não** de imitar inglês natural (uncanny valley — App
 - **Parênteses:** **fora** de control-flow (`if cond`, `while cond`, `for x in xs` — sem `()`);
   **dentro** de chamada/assinatura (`foo(a, b)`, `fn foo(x: i32)`) e de **agrupamento de expressão**
   (`(a + b) * c`). Regra: o parêntese carrega significado → fica; só delimita redundante → sai.
-- **Tipo de retorno atrás, com `->`** (`fn f(x: i32) -> i32`). Nome primeiro, tipo depois — legível
+- **Tipo de retorno atrás, com `->`** (`fn f(x: i32): i32`). Nome primeiro, tipo depois — legível
   com tipos compostos.
 - **Inferência no corpo, anotação obrigatória na assinatura.** `let x = 42` infere; `let b: u8 = 42`
   força. Parâmetros e retorno **sempre** anotados (contrato).
@@ -620,7 +620,7 @@ labels e âncoras — **não** de imitar inglês natural (uncanny valley — App
 
 ```teko
 // a cara, em uma função: sem ;, sem return redundante, parênteses só onde importam
-fn clamp(value v: i32, max limit: i32) -> i32 {
+fn clamp(value v: i32, max limit: i32): i32 {
     if v > limit { limit } else { v }
 }
 ```
@@ -712,7 +712,7 @@ type Binary = struct { op: []u8; left: Node; right: Node }
 // o variant UNE os tipos declarados
 type Node = variant Number | Ident | Binary
 
-fn valor_de(node: Node) -> f64 {
+fn valor_de(node: Node): f64 {
     match node {
         // binding: 'as' liga o todo; '{ }' seleciona campos por nome (B.15)
         Number as n   => n.value
@@ -782,7 +782,7 @@ usuário*. A linha: compilador-injeta-método (ok) vs usuário-declara-static (b
 
 **Padrão recorrente (3× — `.len`, `to_string`, `parse`):** uma feature universal **sem generics** =
 **código concreto por tipo** — escrito à mão para os primitivos finitos, gerado para enums, e uma
-**função livre monomorfizada** para structs (`fn parse_ponto(s: str?) -> Ponto | Error`). Teko
+**função livre monomorfizada** para structs (`fn parse_ponto(s: str?): Ponto | Error`). Teko
 **substitui generics/métodos/static por funções livres monomorfizadas por tipo** — simplicidade do
 mecanismo > concisão da abstração. (Structs com métodos de instância é decisão maior, adiada.)
 
@@ -931,7 +931,7 @@ Três ausências, três mecanismos distintos (nunca se misturam):
 (aparece em `T | Error` em toda operação checada — global evita importá-lo em todo arquivo).
 **Estrutura:** `Error { message: str; line: u32; file: str; trace: str? }` (`file`/`line` injetados
 em compile-time, estilo `__FILE__`/`__LINE__`, sem reflection; `line` é **u32** — não-negativo,
-cobre qualquer arquivo; `trace` nullable). **Tem `to_string() -> str` auto-imbuído** (exceção à regra
+cobre qualquer arquivo; `trace` nullable). **Tem `to_string(): str` auto-imbuído** (exceção à regra
 "structs não têm to_string auto-imbuído" — erros existem pra ser comunicados); **NÃO tem `parse`**
 (erros são produzidos, não parseados) **nem parâmetro de formato** (é mensagem, não valor com
 apresentações). **Sem stack trace** na alpha — por custo (unwinding + símbolos), não por falta de
@@ -1001,9 +1001,9 @@ type Token = struct { kind: TokenKind; text: []u8 }
 // src/lexer/lexer.tks   (mesmo namespace 'lexer' — sem use, referências nuas)
 type Scan = struct { token: Token; next: i32 }   // struct empacota resultado+estado (não há tupla)
 
-fn is_digit(c: u8) -> bool { c >= '0' && c <= '9' }
+fn is_digit(c: u8): bool { c >= '0' && c <= '9' }
 
-fn skip_spaces(source: []u8, pos: i32) -> i32 {
+fn skip_spaces(source: []u8, pos: i32): i32 {
     mut p = pos
     loop {
         if p >= source.len { break }
@@ -1013,7 +1013,7 @@ fn skip_spaces(source: []u8, pos: i32) -> i32 {
     p
 }
 
-fn read_number(source: []u8, pos: i32) -> Scan {
+fn read_number(source: []u8, pos: i32): Scan {
     mut p = pos
     loop {
         if p >= source.len { break }
@@ -1026,7 +1026,7 @@ fn read_number(source: []u8, pos: i32) -> Scan {
     }
 }
 
-fn tokenize(source: []u8) -> []Token | Error {
+fn tokenize(source: []u8): []Token | Error {
     mut pos = 0
     mut tokens = teko::list::empty()
     loop {
@@ -1219,25 +1219,25 @@ type Ponto = struct {
 
     // MÉTODO DE INSTÂNCIA: 1º arg 'ponto' é solto (sem tipo) → é o self.
     // Receptor é CÓPIA (value-semantics). Chamado com '.'.
-    fn distancia(ponto, outro: Ponto) -> f64 {
+    fn distancia(ponto, outro: Ponto): f64 {
         let dx = ponto.x - outro.x
         let dy = ponto.y - outro.y
         math::sqrt(dx*dx + dy*dy)
     }
 
     // MÉTODO de instância (nome do receptor é livre — aqui 'p')
-    fn to_string(p) -> str {
+    fn to_string(p): str {
         $"({p.x}, {p.y})"
     }
 
     // FUNÇÃO ESTÁTICA: 1º arg é TIPADO (x: f64) → não há self →
     // estática do tipo. Construtor. Chamada com '::'.
-    fn init(x: f64, y: f64) -> Ponto {
+    fn init(x: f64, y: f64): Ponto {
         Ponto { x = x; y = y }
     }
 
     // ESTÁTICA: parse (sem self) — devolve Ponto | Error
-    fn parse(s: str?) -> Ponto | Error {
+    fn parse(s: str?): Ponto | Error {
         // ... (na semente, if-antes; sem generics)
     }
 }
@@ -1273,7 +1273,7 @@ log(Ponto::distancia(a, b))          // forma estática-explícita (idêntica)
 //
 //   type Contador = struct {
 //       valor: i32
-//       fn incrementa(ref self) -> void { self.valor += 1 }   // muta a instância
+//       fn incrementa(ref self): void { self.valor += 1 }   // muta a instância
 //   }
 //   c.incrementa()   // hoje retornaria nova cópia; com ref, muta c
 //
@@ -1283,7 +1283,7 @@ log(Ponto::distancia(a, b))          // forma estática-explícita (idêntica)
 //
 // — quando DEFAULT ARGS vierem (evolução, junto com format specifiers) —
 //   to_string ganha o param opcional de formato:
-//   fn to_string(self, format: str? = null) -> str { ... }
+//   fn to_string(self, format: str? = null): str { ... }
 //   p.to_string()        // usa o default
 //   p.to_string("F2")    // formato explícito
 //   (na SEMENTE: to_string() é aridade-zero; format é evolução)

@@ -24,7 +24,7 @@ match greet(args[1]) {
     }
 }
 
-fn greet(name: str) -> str | error {
+fn greet(name: str): str | error {
     if name.len == 0 {
         return error::new("name must not be empty")
     }
@@ -40,12 +40,12 @@ exception that could unwind past `greet`'s caller unannounced.
 ```teko
 type User = struct { name: str; email: str? }
 
-fn find_user(id: u64) -> User? {
+fn find_user(id: u64): User? {
     if id == 1 { return User { name = "Ana", email = "ana@example.com" } }
     null
 }
 
-fn contact_line(id: u64) -> str {
+fn contact_line(id: u64): str {
     let u = find_user(id)
     $"{u?.name ?? "unknown"} <{u?.email ?? "no email"}>"
 }
@@ -59,22 +59,22 @@ type level, that absence is a real, handled case.
 
 ```teko
 type Shape = interface {
-    fn area(self) -> f64
+    fn area(self): f64
 }
 
 type Circle = class {
     pub r: f64
-    pub fn make(r: f64) -> Circle { Circle { r = r } }
-    pub fn area(self) -> f64 { 3.14159 * self.r * self.r }
+    pub fn make(r: f64): Circle { Circle { r = r } }
+    pub fn area(self): f64 { 3.14159 * self.r * self.r }
 }
 
 type Square = class {
     pub side: f64
-    pub fn make(side: f64) -> Square { Square { side = side } }
-    pub fn area(self) -> f64 { self.side * self.side }
+    pub fn make(side: f64): Square { Square { side = side } }
+    pub fn area(self): f64 { self.side * self.side }
 }
 
-fn total_area<T>(ref shapes: []T) -> f64 {
+fn total_area<T>(ref shapes: []T): f64 {
     let sum = 0.0
     loop shapes as s {
         sum += s.area()
@@ -95,7 +95,7 @@ type Node = class {
     pub next: Node?
 }
 
-fn build_chain(n: i64) -> Node? {
+fn build_chain(n: i64): Node? {
     let head: Node? = null
     let i = n
     loop {
@@ -121,7 +121,7 @@ fn build_ring(n: i64) {
 
 ```teko
 // math.tks
-pub fn add(a: i64, b: i64) -> i64 { a + b }
+pub fn add(a: i64, b: i64): i64 { a + b }
 ```
 
 ```teko
@@ -147,7 +147,7 @@ teko build .          # runs them again, as a gate, before producing a release b
 ## 6. Isolate concurrency — fork-join
 
 ```teko
-fn parallel_sum(xs: []i64) -> i64 {
+fn parallel_sum(xs: []i64): i64 {
     let mid = xs.len / 2
     let (left, right) = (xs[0..mid], xs[mid..xs.len])
     let results = teko::isolate::fork_join([
@@ -157,7 +157,7 @@ fn parallel_sum(xs: []i64) -> i64 {
     results[0] + results[1]
 }
 
-fn sum(xs: []i64) -> i64 {
+fn sum(xs: []i64): i64 {
     let total = 0
     loop xs as x { total += x }
     total

@@ -15,7 +15,7 @@ Ground truth this doc was written against (read before implementing):
 - `src/codegen/codegen.tks:5808-5856` (`emit_loop`), `:6046-6068` (break/continue emit).
 - `src/parser/parse_expr.tks:393-397` — `parse_expr_no_struct` (the if/match scrutinee form; **reused** for the while-head so a trailing `{` opens the body, not a struct literal).
 - `src/parser/parse_pattern.tks:7-75` — pattern grammar (`_` = `WildcardPattern`, no `as`; `Foo as x`/`i64 as v` needs a **type name**).
-- `src/iter/int_iter.tks`, `src/iter/int_terminals.tks` — ITER0: an iterator is a **closure `() -> T?`** (`null` = exhausted); consumers match `i64 as v`/`null`.
+- `src/iter/int_iter.tks`, `src/iter/int_terminals.tks` — ITER0: an iterator is a **closure `(): T?`** (`null` = exhausted); consumers match `i64 as v`/`null`.
 
 ---
 
@@ -202,7 +202,7 @@ already folded them), so most checker work comes for free:
   condition. (Diagnostic wording is if-flavored; the loop-specific message is a
   micro-decision, §8.)
 - **iterator/closure wiring** — free: `_it()` is an ordinary call; the checker's
-  call typing requires `_it : () -> T?` and yields `T?` for the `match`. A raw
+  call typing requires `_it : (): T?` and yields `T?` for the `match`. A raw
   collection fails here (not callable) — the deferred case.
 - **element type inference** — free: `mut x = _v` (simple) / `mut a = _elem.a`
   (destructure) infer from the subject's non-null / field type. No `: T` needed.
@@ -222,7 +222,7 @@ already folded them), so most checker work comes for free:
    * @param table the type table
    * @return the typed loop statement paired with the UNCHANGED outer env, or a type error
    */
-  fn type_loop(l: parser::LoopStmt, env: Env, table: TypeTable) -> TypedStmt | error {
+  fn type_loop(l: parser::LoopStmt, env: Env, table: TypeTable): TypedStmt | error {
       let ib = match type_block(l.init, env, table) { TypedBlock as bk => bk; error as e => return e }
       let bb = match type_block(l.body, ib.env, table) { TypedBlock as bk => bk; error as e => return e }
       TypedStmt { node = TLoopStmt { label = l.label; init = ib.stmts; body = bb.stmts }; env = env }
@@ -245,7 +245,7 @@ already folded them), so most checker work comes for free:
    * @param label the loop's declared label ("" = unlabeled, always ok)
    * @return true when the label is empty or a valid UPPER_SNAKE identifier
    */
-  fn label_format_ok(label: str) -> bool { label.len == 0 || lexer::is_upper_snake(label) }
+  fn label_format_ok(label: str): bool { label.len == 0 || lexer::is_upper_snake(label) }
   ```
 
 ---
@@ -303,7 +303,7 @@ body = [
 `<step>` is any statement (`i++`, `i += 2`, `p = p.next`, …). `<cond>` is
 re-evaluated each iteration (C-`for`), unlike the range bound (captured once).
 
-### 5.4 for-each closure-iterator — `loop mut x in <it>` (`<it> : () -> T?`)
+### 5.4 for-each closure-iterator — `loop mut x in <it>` (`<it> : (): T?`)
 
 Requires the **new `_ as x` wildcard-binding pattern** (§5.4.1). `mut` = a local
 **COPY** (owner 2026-07-12) — NO write-back logic; class elements share their
@@ -413,7 +413,7 @@ proving fixture. New/changed code owes **100% coverage** (measured natively,
 `teko . -o bin --coverage`).
 
 **Crumb 1 — lexer: `is_upper_snake`.**
-Add `pub fn is_upper_snake(text: str) -> bool` (`[A-Z][A-Z0-9_]*`; empty → false).
+Add `pub fn is_upper_snake(text: str): bool` (`[A-Z][A-Z0-9_]*`; empty → false).
 Ritual: unit (`lexer_test`). Fixture: truth table — `OUTER`✓, `A`✓, `A0_B9`✓,
 `outer`✗, `_X`✗, `0A`✗, `A-B`✗, ``✗.
 
@@ -501,7 +501,7 @@ desugars proven by their fixtures).
    loop-conditions for a loop-specific message as a polish follow-on.
 7. **Raw-collection for-each diagnostic** — currently "not callable" at `_it()`.
    **Default: accept**; a targeted "raw collections are not yet iterable — pass a
-   closure iterator `() -> T?`" message is a polish follow-on.
+   closure iterator `(): T?`" message is a polish follow-on.
 8. **UPPER_SNAKE enforcement site** — **Default: checker `check_labels`** (single
    source of truth) with the lexer predicate; a parser-side early diagnostic is
    the alternative (better position, but splits label rules).

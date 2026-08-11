@@ -359,7 +359,7 @@ the carrier (const-fold `+`/`-`/`~`/unary-`-`, `value_fits`) becomes sign-magnit
  * @param k  the target integer prim kind (U8..U64 / I8..I64)
  * @return   true iff `v` is representable in `k`
  */
-fn numint_fits(v: NumInt, k: PrimKind) -> bool
+fn numint_fits(v: NumInt, k: PrimKind): bool
 ```
 
 ### 2.2 Raw 64-bit wrapping carrier — for the *interpreter register files*
@@ -422,7 +422,7 @@ in the runtime C and the `teko::time` module:
   signatures may be narrowed to `int64_t` under this issue.
 - `src/time/time.tks:15-19` — `DateTime.ticks: i128`, `TimeSpan.ticks: i128`, `DateTimeOffset.ticks:
   i128`; extern decls `datetime_now`/`datetime_to_unix_ns` (`:24,45`) mirror the C `__int128`.
-- `src/build/progress.tks:85` `Phase.start: i128`, `:98` `now_ns() -> i128` (chains
+- `src/build/progress.tks:85` `Phase.start: i128`, `:98` `now_ns(): i128` (chains
   `datetime_to_unix_ns(datetime_now())`), `:145` `elapsed_str`.
 - `src/build/project.tks` — 11 functions thread `start: i128` (`:1568,1611,1626,1813,1841,1872,1879`).
 

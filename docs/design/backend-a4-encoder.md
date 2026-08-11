@@ -35,7 +35,7 @@ owns), grounded in the merged code (`src/backend/minst.tks`, `regalloc.tks`, `ab
   arm64 is fixed-width, so no relaxation/iteration), plus a `[]Reloc` for symbol references
   (`MRelocKind` maps 1:1 to the three ARM64 external reloc types). Module assembly flattens the words
   to `[]byte` little-endian (`(w & 0xFF) to byte` idiom) and rebases per-function reloc offsets.
-- **Frame:** a pure `compute_frame_layout(abi, f) -> FrameLayout` side-table (frame size, the
+- **Frame:** a pure `compute_frame_layout(abi, f): FrameLayout` side-table (frame size, the
   callee-saved save list **re-derived by scanning the physical `MFunc`** — `MFunc` does not carry
   `used_callee_saved`, §3.1 — and a `slot → SP-offset` map). The encoder consumes it to prepend the
   prologue and to expand `MFrameAddr → ADD dst, sp, #off` and `MRet → epilogue + ret`, **without
@@ -107,7 +107,7 @@ verbatim. Instruction words are `u32`; the object's `__text` is their little-end
  * @param u32 w  the 32-bit word to append
  * @return []byte  `buf` followed by w's four little-endian bytes
  */
-pub fn emit_u32_le(buf: []byte, w: u32) -> []byte {
+pub fn emit_u32_le(buf: []byte, w: u32): []byte {
     mut b = teko::list::push(buf, (w & 0xFF) to byte)
     b = teko::list::push(b, ((w >> 8) & 0xFF) to byte)
     b = teko::list::push(b, ((w >> 16) & 0xFF) to byte)
@@ -254,7 +254,7 @@ pub type Symbol = struct {
  * @param MReg r  a physical register (is_phys must hold; A4 runs post-regalloc)
  * @return u32  its 5-bit ISA field value
  */
-fn enc_reg(r: MReg) -> u32 { r.id }
+fn enc_reg(r: MReg): u32 { r.id }
 
 /**
  * sf_bit — the size flag for a `wide` operand: 1 (the 64-bit X form) shifted to
@@ -263,7 +263,7 @@ fn enc_reg(r: MReg) -> u32 { r.id }
  * @param bool wide  true for the 64-bit form
  * @return u32  `1 << 31` when wide, else 0
  */
-fn sf_bit(wide: bool) -> u32 { if wide { 0x80000000 } else { 0 } }
+fn sf_bit(wide: bool): u32 { if wide { 0x80000000 } else { 0 } }
 ```
 
 The i64 immediate on `MAluImm`/`MCmpImm` is masked to the 12-bit unsigned field; a **negative** imm
@@ -378,7 +378,7 @@ pub type EncWord = struct {
  * @param MInst inst  the instruction to encode (all operands physical)
  * @return EncWord | error  the encoding, or a named honest-stop
  */
-fn encode_inst_word(layout: FrameLayout, inst: MInst) -> EncWord | error { … }
+fn encode_inst_word(layout: FrameLayout, inst: MInst): EncWord | error { … }
 
 /**
  * encode_func — lower one fully-colored `MFunc` to an `EncodedFunc`: compute
@@ -392,7 +392,7 @@ fn encode_inst_word(layout: FrameLayout, inst: MInst) -> EncWord | error { … }
  * @param MFunc f  the fully-physical function
  * @return EncodedFunc | error  the encoded function, or a named honest-stop
  */
-pub fn encode_func(abi: AbiDescriptor, f: MFunc) -> EncodedFunc | error { … }
+pub fn encode_func(abi: AbiDescriptor, f: MFunc): EncodedFunc | error { … }
 
 /**
  * encode_module — encode every `MFunc` of `m`, concatenate their `__text`
@@ -406,7 +406,7 @@ pub fn encode_func(abi: AbiDescriptor, f: MFunc) -> EncodedFunc | error { … }
  * @param MModule m  the fully-colored module
  * @return EncodedModule | error  the section images + symbols + relocs
  */
-pub fn encode_module(abi: AbiDescriptor, m: MModule) -> EncodedModule | error { … }
+pub fn encode_module(abi: AbiDescriptor, m: MModule): EncodedModule | error { … }
 ```
 
 ---
@@ -484,7 +484,7 @@ pub type FrameLayout = struct {
  * @param MFunc f  the fully-physical function
  * @return FrameLayout  the resolved frame
  */
-pub fn compute_frame_layout(abi: AbiDescriptor, f: MFunc) -> FrameLayout { … }
+pub fn compute_frame_layout(abi: AbiDescriptor, f: MFunc): FrameLayout { … }
 
 /**
  * slot_offset — the SP-relative byte offset of frame slot `slot` under
@@ -495,7 +495,7 @@ pub fn compute_frame_layout(abi: AbiDescriptor, f: MFunc) -> FrameLayout { … }
  * @param u32 slot  the frame-slot index
  * @return u32  the SP-relative byte offset
  */
-pub fn slot_offset(layout: FrameLayout, slot: u32) -> u32 { … }
+pub fn slot_offset(layout: FrameLayout, slot: u32): u32 { … }
 ```
 
 **Frame decision.** A function is FRAMELESS (`size=0`, no prologue/epilogue) iff it has no frame
@@ -586,7 +586,7 @@ A minimal `MH_OBJECT` (relocatable) Mach-O for arm64, enough for `ld`/`cc` to li
  * @param EncodedModule enc  the section images + symbols + relocations
  * @return []byte  the Mach-O object file bytes
  */
-pub fn emit_macho(enc: EncodedModule) -> []byte { … }
+pub fn emit_macho(enc: EncodedModule): []byte { … }
 ```
 
 Testability: golden byte assertions on the fixed header prefix (magic/cputype/filetype) and a tiny
@@ -619,7 +619,7 @@ cross-checks the bytes; the encoder slices (A4-1..A4-3) need no tool at all.
  * @param m the resolved manifest
  * @return the process exit status (0 on success)
  */
-fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest): i32 {
     let lmod = match lir::lower_program(prog) { lir::LModule as x => x; error as e => return fail(dir, e.message) }
     let sel  = match isel::select_module(lmod) { minst::MModule as x => x; error as e => return fail(dir, e.message) }
     let col  = match regalloc::regalloc_module(abi::aapcs64(), sel) { minst::MModule as x => x; error as e => return fail(dir, e.message) }
@@ -632,7 +632,7 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
 ### 5.2 The link step (reuse `run_cc`'s machinery)
 
 `run_cc` (`project.tks:397`) already assembles the exact link line A4 needs — it just passes a `.c`
-where A4 passes a `.o`. Extract a `link_object(objfile, binary, m, prog) -> i32` that reuses `run_cc`'s
+where A4 passes a `.o`. Extract a `link_object(objfile, binary, m, prog): i32` that reuses `run_cc`'s
 compiler resolution, the `teko_rt.c` + `assert.c` sources, `-lm`, the reachable `[extern.libs]` flags,
 and the `__info_plist` `-Wl,-sectcreate` (so `__info_plist` parity is preserved for free in the
 `cc`-linker era, `own-backend-architecture.md` §2.1). The only change is `cfile → objfile`; `cc` links

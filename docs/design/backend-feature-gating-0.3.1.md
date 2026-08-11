@@ -187,7 +187,7 @@ perfis** — esta é a propriedade central do desenho, e é o que evita ter de e
 maior do que este problema pede):
 
 ```
-fn emit_native(...) -> i32 {
+fn emit_native(...): i32 {
     match native_target(...) {
         NativeTarget::X8664Linux   => emit_native_x86(...)
         NativeTarget::X8664Windows => emit_native_win(...)
@@ -216,7 +216,7 @@ uma vez, não algo que precise de prova geral).
 O corpo do stub é honesto, não um `panic` nem um valor inventado:
 
 ```
-fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo) -> i32 {
+fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo): i32 {
     teko::io::eprintln("teko: this binary was built with the `host-only` backend profile and does not include the x86_64-linux backend")
     teko::io::eprintln("teko: rebuild with --backend-profile=cross (or install the `cross` distribution) to target x86_64-linux")
     2

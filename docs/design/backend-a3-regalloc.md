@@ -246,7 +246,7 @@ pub type AbiDescriptor = struct {
  *
  * @return AbiDescriptor  the AAPCS64 register file
  */
-pub fn aapcs64() -> AbiDescriptor { … }
+pub fn aapcs64(): AbiDescriptor { … }
 
 /**
  * arg_reg — the physical argument/result register for per-class position
@@ -258,7 +258,7 @@ pub fn aapcs64() -> AbiDescriptor { … }
  * @param u32 index  the per-class argument position
  * @return ArgReg  the resolved physical register, or `ok=false`
  */
-pub fn arg_reg(abi: AbiDescriptor, reg_class: MRegClass, index: u32) -> ArgReg { … }
+pub fn arg_reg(abi: AbiDescriptor, reg_class: MRegClass, index: u32): ArgReg { … }
 
 /**
  * allocatable_pool — the ordered allocatable register ids for `reg_class`
@@ -269,7 +269,7 @@ pub fn arg_reg(abi: AbiDescriptor, reg_class: MRegClass, index: u32) -> ArgReg {
  * @param MRegClass reg_class  which register file to enumerate
  * @return []u32  the ordered allocatable ISA register ids
  */
-pub fn allocatable_pool(abi: AbiDescriptor, reg_class: MRegClass) -> []u32 { … }
+pub fn allocatable_pool(abi: AbiDescriptor, reg_class: MRegClass): []u32 { … }
 
 /**
  * is_caller_saved — whether physical register `r` is clobbered by a call, so
@@ -279,7 +279,7 @@ pub fn allocatable_pool(abi: AbiDescriptor, reg_class: MRegClass) -> []u32 { …
  * @param MReg r  a physical register (is_phys must be true)
  * @return bool  true iff `r` is caller-saved in `r`'s class
  */
-pub fn is_caller_saved(abi: AbiDescriptor, r: MReg) -> bool { … }
+pub fn is_caller_saved(abi: AbiDescriptor, r: MReg): bool { … }
 
 /**
  * is_callee_saved — whether physical register `r` is preserved across a call,
@@ -291,7 +291,7 @@ pub fn is_caller_saved(abi: AbiDescriptor, r: MReg) -> bool { … }
  * @param MReg r  a physical register (is_phys must be true)
  * @return bool  true iff `r` is callee-saved in `r`'s class
  */
-pub fn is_callee_saved(abi: AbiDescriptor, r: MReg) -> bool { … }
+pub fn is_callee_saved(abi: AbiDescriptor, r: MReg): bool { … }
 
 /**
  * spill_scratch — the `nth` reserved spill-scratch register of `reg_class`
@@ -303,7 +303,7 @@ pub fn is_callee_saved(abi: AbiDescriptor, r: MReg) -> bool { … }
  * @param u32 nth  the scratch index (0-based, < the class's reserved count)
  * @return MReg  the physical scratch register
  */
-pub fn spill_scratch(abi: AbiDescriptor, reg_class: MRegClass, nth: u32) -> MReg { … }
+pub fn spill_scratch(abi: AbiDescriptor, reg_class: MRegClass, nth: u32): MReg { … }
 ```
 
 `ArgReg` is the `param_slot`-shaped `struct { ok: bool; reg: MReg }` (`isel_arm64.tks:983-990`).
@@ -312,7 +312,7 @@ pub fn spill_scratch(abi: AbiDescriptor, reg_class: MRegClass, nth: u32) -> MReg
 
 ## 3. The allocator (`src/backend/regalloc.tks`, target-independent core)
 
-`regalloc_module(abi, m: MModule) -> MModule | error` walks each `MFunc` and rewrites it in place.
+`regalloc_module(abi, m: MModule): MModule | error` walks each `MFunc` and rewrites it in place.
 Per function the pipeline is four passes: **number → intervals → scan → rewrite** — mirroring how
 `select_module` walks (`isel_arm64.tks:1866`) and threading functional state (no mutable module).
 
@@ -341,7 +341,7 @@ pub type NumberedInst = struct { point: u32; block_id: u32; inst: MInst }
  * @param MFunc f  the selected function
  * @return []NumberedInst  the flattened, numbered stream
  */
-fn number_insts(f: MFunc) -> []NumberedInst { … }
+fn number_insts(f: MFunc): []NumberedInst { … }
 ```
 
 > **Loop back-edges are out of A3's first cut and are a NAMED honest-stop (§6.2).** A2's control
@@ -404,7 +404,7 @@ pub type InstRegs = struct { has_def: bool; def_reg: MReg; uses: []MReg; is_call
  * @param MInst inst  the instruction to decompose
  * @return InstRegs  its def/use decomposition
  */
-pub fn inst_regs(inst: MInst) -> InstRegs { … }
+pub fn inst_regs(inst: MInst): InstRegs { … }
 
 /**
  * LiveInterval — one value's live range over the linear numbering: the vreg
@@ -463,7 +463,7 @@ pub type IntervalSet = struct { virt: []LiveInterval; fixed: []LiveInterval; cal
  * @param []NumberedInst stream  the linearly-numbered instruction stream
  * @return IntervalSet  the virtual + fixed intervals and call points
  */
-fn compute_intervals(stream: []NumberedInst) -> IntervalSet { … }
+fn compute_intervals(stream: []NumberedInst): IntervalSet { … }
 ```
 
 ### 3.3 Pass 3 — the linear-scan core (`linear_scan`)
@@ -526,7 +526,7 @@ pub type ScanResult = struct { assignments: []RegAssignment; used_callee_saved: 
  * @param IntervalSet ivals  the virtual + fixed intervals and call points
  * @return ScanResult  the per-vreg assignment + the callee-saved save-set
  */
-fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet) -> ScanResult { … }
+fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet): ScanResult { … }
 ```
 
 ### 3.4 Pass 4 — the rewrite (`rewrite_func`)
@@ -554,10 +554,10 @@ Rewrite every `MInst`, mapping each `MReg` operand through the assignment and ex
  * all-physical invariant test).
  *
  * @param MInst inst  the instruction to rewrite
- * @param fn(MReg)->MReg f  the per-register substitution
+ * @param fn(MReg):MReg f  the per-register substitution
  * @return MInst  the rewritten instruction
  */
-fn map_minst_regs(inst: MInst, f: fn(MReg) -> MReg) -> MInst { … }
+fn map_minst_regs(inst: MInst, f: fn(MReg): MReg): MInst { … }
 
 /**
  * rewrite_inst — expand one numbered instruction into its final physical
@@ -571,7 +571,7 @@ fn map_minst_regs(inst: MInst, f: fn(MReg) -> MReg) -> MInst { … }
  * @param MInst inst  the instruction to rewrite
  * @return []MInst  the reloads ++ the rewritten instruction ++ the store
  */
-fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst) -> []MInst { … }
+fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst): []MInst { … }
 
 /**
  * rewrite_func — the §3.4 pass: rebuild every block from its rewritten
@@ -583,7 +583,7 @@ fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst) -> []MInst { �
  * @param ScanResult sr  the allocation
  * @return MFunc  the fully-colored function
  */
-fn rewrite_func(abi: AbiDescriptor, f: MFunc, sr: ScanResult) -> MFunc { … }
+fn rewrite_func(abi: AbiDescriptor, f: MFunc, sr: ScanResult): MFunc { … }
 ```
 
 ### 3.5 Frame finalization + the module driver
@@ -606,7 +606,7 @@ stack-pointer arithmetic.
  * @return MFunc | error  the fully-colored function, or a NAMED honest-stop
  *                         (a loop back-edge §6.2, or an internal invariant)
  */
-pub fn regalloc_func(abi: AbiDescriptor, f: MFunc) -> MFunc | error { … }
+pub fn regalloc_func(abi: AbiDescriptor, f: MFunc): MFunc | error { … }
 
 /**
  * regalloc_module — allocate every function of `m`, carrying the rodata/
@@ -617,7 +617,7 @@ pub fn regalloc_func(abi: AbiDescriptor, f: MFunc) -> MFunc | error { … }
  * @param MModule m  the selected module
  * @return MModule | error  the colored module, or the first function's error
  */
-pub fn regalloc_module(abi: AbiDescriptor, m: MModule) -> MModule | error { … }
+pub fn regalloc_module(abi: AbiDescriptor, m: MModule): MModule | error { … }
 ```
 
 ---

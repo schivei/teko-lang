@@ -206,7 +206,7 @@ Estas cobrem casos diferentes; **uno as duas** (perde-se zero):
  * @return    true sse o escritor morreu por qualquer das duas vias
  * @since 0.3.1
  */
-fn is_dead(st: WriterStat) -> bool { st.has_incomplete || (st.has_plan && !st.has_end) }
+fn is_dead(st: WriterStat): bool { st.has_incomplete || (st.has_plan && !st.has_end) }
 ```
 
 E `fold_writer_record` ganha o braço que faltava na impl, para o `incomplete` do `fold` nomear o
@@ -226,7 +226,7 @@ teste morto e disparar `has_incomplete`:
  * @return       o agregado atualizado
  * @since 0.3.1
  */
-fn with_incomplete(st: WriterStat, label: str) -> WriterStat {
+fn with_incomplete(st: WriterStat, label: str): WriterStat {
     WriterStat {
         writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
         ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; has_incomplete = true
@@ -257,7 +257,7 @@ veredicto), `dead.len=1`. E confere com a impl no `js_records_of_a_dead_shard` (
  * @return      o veredicto agregado
  * @since 0.3.1
  */
-pub fn summarize(recs: []Record) -> RunSummary {
+pub fn summarize(recs: []Record): RunSummary {
     let writers = distinct_writers(recs)
     mut passed = zero_tally()
     mut failed = zero_tally()
@@ -487,8 +487,8 @@ valioso na summary está agora absorvido pela §3; o resto é duplicata inferior
 **Superfície pública final de `teko::journal` (inalterada para os chamadores):** `open`, `append`,
 `append_raw`, `note`, `rename`, `scratch`, `fold`, `sweep`, `run_id`, `run_root`, os `note_test_*`/
 `note_row_*`, tipos `Journal`/`Record`, consts `KIND_*` (+`KIND_COV` novo); e de `summary`:
-`summarize(recs: []Record) -> RunSummary`, `with_coverage(s, cov, cov_missing) -> RunSummary`,
-`render_summary(s) -> str`, tipos `RunSummary`/`PhaseTally`/`CovTriple`/`Finding`. Nenhuma assinatura
+`summarize(recs: []Record): RunSummary`, `with_coverage(s, cov, cov_missing): RunSummary`,
+`render_summary(s): str`, tipos `RunSummary`/`PhaseTally`/`CovTriple`/`Finding`. Nenhuma assinatura
 pública muda — a fiação da captura C0 e o `project.tks` continuam a compilar e a produzir a mesma
 saída.
 

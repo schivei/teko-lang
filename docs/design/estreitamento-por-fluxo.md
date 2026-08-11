@@ -84,7 +84,7 @@ Ferramenta: `sh scripts/build_gen1_from_c.sh bootstrap/teko.c src .gen1` seguido
 MESMO `env` da entrada**:
 
 ```teko
-fn type_if(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error {
+fn type_if(f: parser::IfExpr, env: Env, table: TypeTable): TExpr | error {
     let c = match type_expr(f.cond, env, table) { TExpr as te => te; error as e => return e }
     if !is_bool(c.type) { return error { message = "an `if` condition must be a bool" } }
     if !f.has_else { return error { message = "an `if` used as a value needs an `else`" } }
@@ -203,7 +203,7 @@ declarados, mas resolve outro problema).
 
 `src/checker/typer.tks:3299`:
 ```teko
-fn tblock_diverges(stmts: []TStatement) -> bool {
+fn tblock_diverges(stmts: []TStatement): bool {
     if stmts.len == 0 { return false }
     match stmts[stmts.len - 1] {   // ← SÓ o último
 ```
@@ -220,9 +220,9 @@ Consequência medida — dois programas **semanticamente idênticos**, um compil
 ```
 Os programas:
 ```teko
-pub fn f(c: i32) -> i32 { match c { 1 => { exit(1) };                _ => { 2 } } }  // ok
-pub fn f(c: i32) -> i32 { match c { 1 => { exit(1); let z: i32 = 0 }; _ => { 2 } } }  // REJEITADO
-pub fn f(c: i32) -> i32 { match c { 1 => { return 1; let z: i32 = 0 }; _ => { 2 } } } // REJEITADO
+pub fn f(c: i32): i32 { match c { 1 => { exit(1) };                _ => { 2 } } }  // ok
+pub fn f(c: i32): i32 { match c { 1 => { exit(1); let z: i32 = 0 }; _ => { 2 } } }  // REJEITADO
+pub fn f(c: i32): i32 { match c { 1 => { return 1; let z: i32 = 0 }; _ => { 2 } } } // REJEITADO
 ```
 
 **Isto é falsa-rejeição pura** (o compilador recusa programa correcto), e é o defeito de que o dono
@@ -244,8 +244,8 @@ builtin e **ganha** a resolução. Medido:
 
 ```teko
 // src/bottom.tks
-pub fn exit(code: i32) -> i32 { code + 40 }
-pub fn f(c: i32) -> i32 { if c == 1 { exit(1) } else { 2 } }
+pub fn exit(code: i32): i32 { code + 40 }
+pub fn f(c: i32): i32 { if c == 1 { exit(1) } else { 2 } }
 // src/main.tks
 exit(f(1))
 ```
@@ -258,8 +258,8 @@ continua a tratar ambas as chamadas como divergentes.
 
 Escalado até partir o tipo:
 ```teko
-pub fn exit(code: i32) -> str { "shadowed" }
-pub fn f(c: i32) -> i32 { match c { 1 => { exit(1) }; _ => { 2 } } }
+pub fn exit(code: i32): str { "shadowed" }
+pub fn f(c: i32): i32 { match c { 1 => { exit(1) }; _ => { 2 } } }
 ```
 ```
 checker    2/2 items   0.0s  ✓                      ← o CHECKER ACEITA
@@ -358,7 +358,7 @@ de `null` **remove um membro**, dando `Variant { members = [Prim{I32}, Str{}] }`
 
 Consequências que o desenho tem de honrar desde o crumb 1:
 
-1. A operação primitiva é **`variant_without_null(t) -> Type`**, não "desembrulhar o par".
+1. A operação primitiva é **`variant_without_null(t): Type`**, não "desembrulhar o par".
 2. Quando restar **um único** membro, o resultado **colapsa** ao membro nu (`i32 | null` sem `null`
    dá `i32`, não `Variant{i32}`) — senão `exit(a)` continua a falhar, e o ruling do dono não fecha.
 3. O ramo negativo (`if a == null { … }` no `then`) estreita para **`Null{}`** puro,
@@ -478,7 +478,7 @@ pub type CondFacts = struct {
  * @return  a `NarrowSet` holding no refinements
  * @since 0.3.2 (flow narrowing)
  */
-pub fn narrowset_empty() -> NarrowSet
+pub fn narrowset_empty(): NarrowSet
 
 /**
  * narrowset_lookup — the proven type of `name` under `ns`, or `null` when no fact refines it.
@@ -490,7 +490,7 @@ pub fn narrowset_empty() -> NarrowSet
  * @return      the refined type, or `null` when the declared type stands
  * @since 0.3.2 (flow narrowing)
  */
-pub fn narrowset_lookup(ns: NarrowSet, name: str) -> Type | null
+pub fn narrowset_lookup(ns: NarrowSet, name: str): Type | null
 
 /**
  * narrowset_add — `ns` extended with one refinement. A later fact for the same name shadows the
@@ -503,7 +503,7 @@ pub fn narrowset_lookup(ns: NarrowSet, name: str) -> Type | null
  * @return      `ns` with the new fact appended
  * @since 0.3.2 (flow narrowing)
  */
-pub fn narrowset_add(ns: NarrowSet, name: str, t: Type) -> NarrowSet
+pub fn narrowset_add(ns: NarrowSet, name: str, t: Type): NarrowSet
 
 /**
  * narrowset_union — every fact of `a` plus every fact of `b`, `b` winning on a name both refine.
@@ -515,7 +515,7 @@ pub fn narrowset_add(ns: NarrowSet, name: str, t: Type) -> NarrowSet
  * @return   the combined facts
  * @since 0.3.2 (flow narrowing)
  */
-pub fn narrowset_union(a: NarrowSet, b: NarrowSet) -> NarrowSet
+pub fn narrowset_union(a: NarrowSet, b: NarrowSet): NarrowSet
 
 /**
  * narrowset_drop — `ns` with every fact about `name` removed. The invalidation primitive: called
@@ -527,7 +527,7 @@ pub fn narrowset_union(a: NarrowSet, b: NarrowSet) -> NarrowSet
  * @return      `ns` without any fact about `name`
  * @since 0.3.2 (flow narrowing)
  */
-pub fn narrowset_drop(ns: NarrowSet, name: str) -> NarrowSet
+pub fn narrowset_drop(ns: NarrowSet, name: str): NarrowSet
 
 /**
  * narrowset_drop_mut — `ns` with every fact about a `mut` binding removed, `let` facts kept. The
@@ -540,7 +540,7 @@ pub fn narrowset_drop(ns: NarrowSet, name: str) -> NarrowSet
  * @return     `ns` restricted to facts about immutable bindings
  * @since 0.3.2 (flow narrowing)
  */
-pub fn narrowset_drop_mut(ns: NarrowSet, env: Env) -> NarrowSet
+pub fn narrowset_drop_mut(ns: NarrowSet, env: Env): NarrowSet
 
 /**
  * cond_facts — what the typed condition `c` proves on each outcome, given `env` (which names the
@@ -564,7 +564,7 @@ pub fn narrowset_drop_mut(ns: NarrowSet, env: Env) -> NarrowSet
  * @return       the facts proven on each outcome; both empty when nothing is proven
  * @since 0.3.2 (flow narrowing)
  */
-pub fn cond_facts(c: TExpr, env: Env, table: TypeTable) -> CondFacts
+pub fn cond_facts(c: TExpr, env: Env, table: TypeTable): CondFacts
 
 /**
  * type_without_null — `t` with its `null` member removed, COLLAPSING to the bare member when one
@@ -580,7 +580,7 @@ pub fn cond_facts(c: TExpr, env: Env, table: TypeTable) -> CondFacts
  * @return       the null-free type, or `null` when `t` carries no null member to remove
  * @since 0.3.2 (flow narrowing)
  */
-pub fn type_without_null(t: Type, table: TypeTable) -> Type | null
+pub fn type_without_null(t: Type, table: TypeTable): Type | null
 
 /**
  * fn_takes_address_of — does the function body `stmts` anywhere take the address of `name` (a
@@ -593,7 +593,7 @@ pub fn type_without_null(t: Type, table: TypeTable) -> Type | null
  * @return       true iff a fact about `name` must not survive a call
  * @since 0.3.2 (flow narrowing)
  */
-pub fn fn_takes_address_of(stmts: []TStatement, name: str) -> bool
+pub fn fn_takes_address_of(stmts: []TStatement, name: str): bool
 ```
 
 ### 4.3 Como se compõe com o `Env` que já existe
@@ -619,7 +619,7 @@ mais o setter no molde de `with_fn_unsafe`/`with_file`:
  * @return        `env` with `narrow` set
  * @since         0.3.2 (flow narrowing)
  */
-pub fn with_narrow(env: Env, narrow: NarrowSet) -> Env
+pub fn with_narrow(env: Env, narrow: NarrowSet): Env
 ```
 
 **Um único ponto de consumo**, e é o que faz o custo ser pequeno: `lookup_binding` (`scope.tks`).
@@ -643,7 +643,7 @@ muda; `type_call` não muda. O que muda é o que `lookup_binding` devolve.
  * @throws      error naming the unbound identifier
  * @since       0.3.2 (flow narrowing — the narrow-aware return)
  */
-pub fn lookup_binding(env: Env, name: str) -> ValBinding | error
+pub fn lookup_binding(env: Env, name: str): ValBinding | error
 ```
 
 ### 4.4 Os três pontos de produção
@@ -801,7 +801,7 @@ nativo. Exit code é o contrato.
 | `nf-p01` | ruling do dono (E1) | `let a: i32\|null = 7`<br>`if a != null { exit(a) }`<br>`exit(1)` | exit **7** |
 | `nf-p02` | `else` de `== null` (E2) | `if a == null { exit(1) } else { exit(a) }` | exit **7** |
 | `nf-p03` | `else` de `!= null` (E3) | `if a != null { exit(a) } else { exit(0) }` com `a = null` | exit **0** |
-| `nf-p04` | **guarda precoce por `return`** (E4) | `fn f(a: i32\|null) -> i32 { if a == null { return 0 }; a }` | exit **7** |
+| `nf-p04` | **guarda precoce por `return`** (E4) | `fn f(a: i32\|null): i32 { if a == null { return 0 }; a }` | exit **7** |
 | `nf-p05` | guarda precoce por `exit` (E4) | `if a == null { exit(1) }`<br>`exit(a)` | exit **7** |
 | `nf-p06` | guarda precoce por `break` (E4) | `loop { if a == null { break }; exit(a) }` | exit **7** |
 | `nf-p07` | `&&` (E5) | `if a != null && a > 0 { exit(a) }` | exit **7** |
@@ -839,7 +839,7 @@ Esta é a metade que impede o estreitamento de aceitar a mais. **Todas devem fal
 | `nf-n13` | **F2 — campo não estreita** | `if p.x != null { exit(p.x) }` | sem points-to; fora do alcance |
 | `nf-n14` | **F3 — índice não estreita** | `if v[i] != null { exit(v[i]) }` | idem |
 | `nf-n15` | **F6 — predicado de função não estreita** | `if is_some(a) { exit(a) }` | sem contratos de predicado |
-| `nf-n16` | **D2 — `exit` sombreado deixa de divergir** | `pub fn exit(c: i32) -> str { "x" }`<br>`match c { 1 => { exit(1) }; _ => { 2 } }` | **hoje o checker ACEITA e o `cc` apanha**; depois de D2 o CHECKER tem de rejeitar |
+| `nf-n16` | **D2 — `exit` sombreado deixa de divergir** | `pub fn exit(c: i32): str { "x" }`<br>`match c { 1 => { exit(1) }; _ => { 2 } }` | **hoje o checker ACEITA e o `cc` apanha**; depois de D2 o CHECKER tem de rejeitar |
 | `nf-n17` | `mut` reatribuído a não-null não reinstala | `mut a: i32\|null = null`<br>`if a == null { a = 7 }`<br>`exit(a)` | conservador por desenho; deve REJEITAR e o autor escreve `match` |
 
 `nf-n16` é a fixture mais importante do conjunto: é a única que prova que a correcção da análise de

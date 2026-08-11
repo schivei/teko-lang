@@ -217,7 +217,7 @@ through the `Manifest`/argv parse (`project.tks:901-977` already skips `-o`/`--n
  * @param m the resolved manifest, carrying the backend selection
  * @return the process exit status (0 on success)
  */
-fn emit_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest): i32 {
     if m.backend == Backend::Native { return emit_native(dir, stem, out_dir, prog, m) }
     emit_c_native(dir, stem, out_dir, prog, m)
 }

@@ -170,7 +170,7 @@ Mais baixa das três ideias. **Dobrar no presize do profiler**, não construir c
 
 ### 4.1 O que é
 
-Um predicado `scope_touches_arena(body) -> bool` — verdadeiro sse e só se o escopo contém ao menos um
+Um predicado `scope_touches_arena(body): bool` — verdadeiro sse e só se o escopo contém ao menos um
 sítio de alocação routável (`push`/`box`/init-de-struct/lit-de-array/concat-de-str/`tk_alloc`). Quando
 falso, `open_native_region`/`open_frame_region` **pulam** `tk_region_new_u`/`enter_u` (e o `drop_u`
 pareado) — exatamente como o skip de `bracket_depth > 0` já faz hoje (`lower.tks:1637`), um padrão
@@ -231,10 +231,10 @@ retornos de agregado.
 ### 5.3 As assinaturas (copiar verbatim de `ast-computed-arena-assessment-0.3.1.md` §4.2)
 
 ```teko
-fn fn_returns_aggregate(f: checker::TFunction, ctx: LowerCtx) -> bool
-fn with_ret_dest(ctx: LowerCtx, dest: u32 | null) -> LowerCtx
-fn lower_return_into_dest(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error
-fn alloc_call_dest(ctx: LowerCtx, callee: checker::TFunction) -> Lowered
+fn fn_returns_aggregate(f: checker::TFunction, ctx: LowerCtx): bool
+fn with_ret_dest(ctx: LowerCtx, dest: u32 | null): LowerCtx
+fn lower_return_into_dest(ctx: LowerCtx, r: checker::TReturn): LowerStmtOut | error
+fn alloc_call_dest(ctx: LowerCtx, callee: checker::TFunction): Lowered
 ```
 
 Funções existentes tocadas: `lower_return`/`lower_return_fat` (`lower.tks:7245`/`:7278`), `lower_call`

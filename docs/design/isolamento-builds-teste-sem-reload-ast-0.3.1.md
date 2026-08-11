@@ -172,7 +172,7 @@ const TEST_STAGE_REGR: str = "regr"
  * @throws     a mensagem do manifesto quando o diretório não tem um `.tkp` legível único
  * @since 0.3.1
  */
-fn test_stage_regr(dir: str) -> i32 {
+fn test_stage_regr(dir: str): i32 {
     ensure_rt_dir_abs()
     let exe = self_exe_path()
     let m = match enter_project_manifest(dir) { Manifest as x => x; error as e => return fail(dir, e.message) }
@@ -224,7 +224,7 @@ const REGR_CHUNK_ENV: str = "TEKO_REGR_CHUNK"
  * @return o tamanho do lote, >= 1
  * @since 0.3.1
  */
-fn regr_chunk_size() -> u64
+fn regr_chunk_size(): u64
 ```
 
 ### 2.3 C3 — a fold "1 build por `.tkp`" já existe; o residual e o alvo
@@ -289,7 +289,7 @@ Assinatura declarada contra a qual o implementer já pode escrever o scaffolding
  * @return      o blob serializado do site-map, ou o erro de escrita
  * @since 0.3.1  (DESIGN-AHEAD — bloqueado na ratificação da forma serializada)
  */
-fn cov_emit_sitemap(prog: checker::TProgram) -> str | error
+fn cov_emit_sitemap(prog: checker::TProgram): str | error
 
 /**
  * cov_cobertura_from_sitemap — renderiza o relatório Cobertura a partir do site-map serializado e das
@@ -299,7 +299,7 @@ fn cov_emit_sitemap(prog: checker::TProgram) -> str | error
  * @return         o XML Cobertura
  * @since 0.3.1  (DESIGN-AHEAD)
  */
-fn cov_cobertura_from_sitemap(sitemap: str) -> str | error
+fn cov_cobertura_from_sitemap(sitemap: str): str | error
 ```
 
 ### 2.5 C5 — a captura não sobrevive ao veredicto (poda do agregado)

@@ -161,8 +161,8 @@ Ritual: fixpoint + probe: allocs de `cg_variant_typename_str` no dark-matter →
   (`src/parser/optokens.tks:25`, `parse_multiplicative` `src/parser/parse_expr.tks:511`); o unário é
   só `- ~ !` (`optokens.tks:9-13`). Um `&` em posição de PREFIXO é inambíguo (binário só ocorre
   após operando esquerdo). `*`/deref NÃO muda em F1 (prospecção, §12 do doc-mãe).
-- Spine (#331): queries PURAS já existem — `is_unique_at(s, binding) -> bool`
-  (`src/checker/spine.tks:1484`), `ref_target_outlives(s, borrow, referent) -> bool` (`:1438`),
+- Spine (#331): queries PURAS já existem — `is_unique_at(s, binding): bool`
+  (`src/checker/spine.tks:1484`), `ref_target_outlives(s, borrow, referent): bool` (`:1438`),
   `BorrowedFrom = BfNone|BfParam|BfLocal|BfTop` (`:146`). A relaxação **L2a** (`bf := BfLocal` no
   ÚNICO sítio sintático de borrow de um ref-bind local) está descrita `:21-23,:139-143,:1268,:1352`
   — é EXATAMENTE a máquina do `mut y = &x`. F1 é o CONSUMO (PR-2/PR-3), não a query.
@@ -232,7 +232,7 @@ ESTE primeiro. O sink local `mut y = &x` fica gated por F1.3.
  * @throws      error when the operand is not a `mut` lvalue in a mutable position, or not an lvalue
  * @since 0.x (#AL/F1.2)
  */
-fn type_borrow_expr(b: parser::Borrow, env: Env, mut_pos: bool) -> TExpr | error
+fn type_borrow_expr(b: parser::Borrow, env: Env, mut_pos: bool): TExpr | error
 ```
 
 **F1.3 — Spine.** No sítio de borrow (o nó `Borrow` OU o ref-bind local `mut y = &x`), CONSUMIR as
@@ -262,7 +262,7 @@ semântica de valor (o `cap`-no-objeto vem em F3/AL3; aqui a ponte só troca a a
 /**
  * Grow `x` by appending `v`, mutating `x` IN-PLACE through the exclusive mutable borrow `&x` (F1
  * bridge). This is the coexistence signature for the ref-push migration (AL3): it lives ALONGSIDE
- * the untouched value-thread `push(xs, v) -> []T` so no unmigrated site changes. F1's body writes
+ * the untouched value-thread `push(xs, v): []T` so no unmigrated site changes. F1's body writes
  * through the reference (`x.value = push(x.value, v)`) — behavior-identical to the value form; the
  * cap-in-object win that removes the global tk_push_cache lands with F3+AL3, not here. Migration is
  * gradual, fixpoint-green per sub-lote (§6); a final rename to `push` is optional once all sites move.
@@ -273,7 +273,7 @@ semântica de valor (o `cap`-no-objeto vem em F3/AL3; aqui a ponte só troca a a
  * @throws   panic if cap overflows u64 (M.1 fail-loud) — reached only once F3's cap-doubling lands
  * @since 0.x (#AL/F1.5 bridge; in-place cap = AL3)
  */
-pub fn grow[T](x: &[]T, v: T) -> void
+pub fn grow[T](x: &[]T, v: T): void
 ```
 
 **F1.6 — Fixtures + ritual.** `.tkt` colocados (o padrão do repo: `src/<mod>/<mod>_test.tkt`, testes

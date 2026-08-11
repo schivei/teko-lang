@@ -316,7 +316,7 @@ that call `widens_into` — `typer.tks:963`, `1196`, and the annotated-binding p
  * @see          widens_into_at — the value-widen gate this diagnoses the gap of
  * @since 0.3.0.29 interface-value keystone
  */
-pub fn struct_conforms_but_not_class(from: Type, to: Type, table: TypeTable) -> bool {
+pub fn struct_conforms_but_not_class(from: Type, to: Type, table: TypeTable): bool {
     match from {
         Named as fn_ => match to {
             Named as tn => is_struct_name(fn_.name, table)
@@ -357,7 +357,7 @@ true, return (via `teko::error::err_typed`):
  * @see          is_class_name, is_interface_name
  * @since 0.3.0.29 interface-value keystone
  */
-pub fn is_struct_name(name: str, table: TypeTable) -> bool {
+pub fn is_struct_name(name: str, table: TypeTable): bool {
     match type_table_find(table, name, "") {
         parser::TypeDecl as td => match td.body { parser::StructBody => true; _ => false }
         error => false
@@ -393,7 +393,7 @@ the `ReadFn`/`WriteFn` closure seam (`stream.tks:236-257`, `277-460`):
  * @see      copy, read_exact
  * @since IO1 (interface-value keystone)
  */
-pub fn read_all(r: Reader) -> Buf | error {
+pub fn read_all(r: Reader): Buf | error {
     mut collected = Buf::empty()
     loop {
         let chunk = match read_chunk(r, DEFAULT_CHUNK_SIZE) { Buf as b => b; error as e => return e }
@@ -518,7 +518,7 @@ skip convention (`class_slices.tkp`).
 | `iface_value_param_dispatch` | `class & Reader` passed to `fn pull(r: Reader, n)`, body `r.read(n)`; sum of two reads | **exit 7** |
 | `iface_value_stateful_class` | `class & Counter` with mutating `tick(self)`, driven 3× through a `Counter` param | **exit 3** |
 | `iface_value_hetero_slice` | `[]Shape` = `[Circle, Square]`, iterate + dispatch `area()` (already the `class_slices` #5 case, extracted as its own pinned fixture) | **exit 0** |
-| `iface_value_return` | `fn pick(b: bool) -> Reader` returning one of two conforming classes; caller dispatches | **exit 0** |
+| `iface_value_return` | `fn pick(b: bool): Reader` returning one of two conforming classes; caller dispatches | **exit 0** |
 | `iface_value_field` | a struct field `r: Reader` holding a class-derived interface value (class object outlives the struct — §4.1 sound), dispatched | **exit 0** |
 
 **Crumb S1 — the struct honest-stop (compile-fail):**
@@ -533,7 +533,7 @@ pin):**
 
 | fixture | shape | expected |
 |---|---|---|
-| `iface_union_member_rejected` | `fn f() -> Reader \| error` (interface as a union member) | **compile error** containing "an interface cannot be a variant member yet" (pins `resolve.tks:1397` so null-union Crumb 2 must consciously handle the interface arm) |
+| `iface_union_member_rejected` | `fn f(): Reader \| error` (interface as a union member) | **compile error** containing "an interface cannot be a variant member yet" (pins `resolve.tks:1397` so null-union Crumb 2 must consciously handle the interface arm) |
 
 **Crumb S3 — IO1 (the stream module's own `.tkt`):** the re-typed combinators
 keep the existing `src/io/*` test coverage; add a `class & Reader`/`class & Writer`

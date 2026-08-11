@@ -60,8 +60,8 @@ Três factos compostos, cada um com arquivo:linha:
 
 2. **A orquestração do frontend corre nessa camada de topo.** `checked_program_of`
    (`project.tks:328`) encadeia as três fases e cada saída ALIMENTA a próxima:
-   `type_program_with_deps_pre_mono(selected) -> pre` (checker) → `monomorphize(pre.prog, pre.table)
-   -> checked` (mono) → `inline_consts(checked) -> inlined` (consteval). Os intermédios —
+   `type_program_with_deps_pre_mono(selected): pre` (checker) → `monomorphize(pre.prog, pre.table)
+   -> checked` (mono) → `inline_consts(checked): inlined` (consteval). Os intermédios —
    `selected` (parsed), `pre.prog`, `pre.table`, `checked` — ficam TODOS vivos em root até o processo
    sair, porque nada os larga: são valores da moldura de topo que não tem frame que caia.
 
@@ -166,7 +166,7 @@ codegen START. É contra esta base que M1–M3 provam o ganho.
 ### Crumb M1a — o clone TOTAL da `TProgram` (a prova de segurança, drop AINDA DESLIGADO)
 
 **Classe:** orquestração pura (`project.tks`) + travessia nova.
-**O quê:** `clone_tprogram_into_current_region(prog) -> checker::TProgram` — uma cópia estrutural
+**O quê:** `clone_tprogram_into_current_region(prog): checker::TProgram` — uma cópia estrutural
 TOTAL, por-VALOR, de `TProgram` (recursiva sobre `TItem`/`TStatement`/`TExpr`/`Type` e todos os
 slices/str), alocando na região CORRENTE. Rotear o codegen através dela SEM ainda envolver o frontend
 em região nem largar nada:

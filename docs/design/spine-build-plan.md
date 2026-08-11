@@ -157,7 +157,7 @@ pub type Spine = struct {
  * @see      docs/design/spine-layer-or-replace.md §2c.2
  * @since    0.1.0.0-beta (#331 L1)
  */
-pub fn fn_spine(f: TFunction) -> Spine { /* build universe → seed → worklist-join to fixpoint */ }
+pub fn fn_spine(f: TFunction): Spine { /* build universe → seed → worklist-join to fixpoint */ }
 ```
 
 **Seeding** (the initial climb-floor): every bare cell starts `pt = PtFrame`, `bf = BfNone`,
@@ -195,7 +195,7 @@ lattice × monotone transfers on the two climbing axes ⇒ fixpoint in ≤ `|cel
  * @param referent the cell index of the referent (or a sentinel when un-nameable)
  * @return         true iff the borrow provably does not outlive its referent
  */
-pub fn ref_target_outlives(s: Spine, borrow: u32, referent: u32) -> bool { /* read bf, pt of referent */ }
+pub fn ref_target_outlives(s: Spine, borrow: u32, referent: u32): bool { /* read bf, pt of referent */ }
 
 /**
  * Is `binding` the SOLE live handle at `site` — `us(binding) = UsUnique`? The affine `mem::free`
@@ -206,7 +206,7 @@ pub fn ref_target_outlives(s: Spine, borrow: u32, referent: u32) -> bool { /* re
  * @param binding  the cell index of the consumed binding
  * @return         true iff `binding` is provably unique (safe to free/move)
  */
-pub fn is_unique_at(s: Spine, binding: u32) -> bool { /* us(binding) == UsUnique */ }
+pub fn is_unique_at(s: Spine, binding: u32): bool { /* us(binding) == UsUnique */ }
 ```
 
 `is_unique_at` does not need a distinct per-`site` value in the first build: the fixpoint joins
@@ -261,7 +261,7 @@ body becomes an early-return guard (W15 flatten):
  * @param ref_ce the cell index of the referent
  * @return       true iff the ref-bind is sound and the gate should ADMIT it
  */
-fn ref_bind_is_sound(bound: Type, s: Spine, borrow: u32, ref_ce: u32) -> bool {
+fn ref_bind_is_sound(bound: Type, s: Spine, borrow: u32, ref_ce: u32): bool {
     if !type_contains_ref(bound) { return true }
     ref_target_outlives(s, borrow, ref_ce)
 }
@@ -286,7 +286,7 @@ new-code coverage debt; cover the unreachable arms via a fabricated-`Spine` unit
 
 **PHASE ORDERING (why §2.3's "thread fn_spine into the gates" is INFEASIBLE):** `fn_spine` needs a typed
 `TFunction`; `type_binding`/`type_assign` run mid-typing on `parser::` nodes before any `TFunction`
-exists. So the consumer is a **post-typing pass** `check_ref_storability(tf) -> null | error`, run ONCE
+exists. So the consumer is a **post-typing pass** `check_ref_storability(tf): null | error`, run ONCE
 per function after the body is assembled (`type_function` after `check_must_free`, ~typer.tks:3700, over
 the `TFunction` built at :3701; `type_method` over the assembled body ~:3635). Build `fn_spine(tf)` ONCE
 from the ACTUAL `fixed_params` (so `is_ref_param`/`seed_bf` yield `BfParam` — a stripped shell seeds
@@ -327,7 +327,7 @@ existing string `"a reference cannot be bound to a local (parameter-only in this
 - `b.slot = <ref>` (store a ref into a field) → **REJECT / KEEP the inline gate byte-identical**. This is **VACUOUS**: no struct/class field can be DECLARED `Ref`-typed (collect.tks:1496+/resolve.tks:1373+), so `field_t` is never a `Reference` — wiring a spine narrow-relax here would be dead, uncoverable code. **DEFER §2.1(ii) entirely.**
 
 **★ SKEPTIC AMENDMENT 1 (UNSOUND — MUST ship in PR-2): closure-capture is an escape route the rationale
-missed.** `fn leak(p: Ref<i64>) -> (fn()->i64) { let r = p; () => { r.value } }` — admitting `let r = p`
+missed.** `fn leak(p: Ref<i64>): (fn():i64) { let r = p; () => { r.value } }` — admitting `let r = p`
 lets a closure capture `r` into its heap env and RETURN it, carrying a ref to the caller's (now-dead)
 object past the frame → UAF. The "R3/R4/R2/field-store = complete escape set" claim is FALSE. **Fix:** in
 `type_lambda` (typer.tks:~158-163 capture loop) REJECT any capture whose captured type satisfies

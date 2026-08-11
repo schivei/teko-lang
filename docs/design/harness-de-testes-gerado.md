@@ -265,7 +265,7 @@ pub type GatePlan = struct {
  * @throws      quando o programa não declara nenhum `#test`, ou já traz um `main` de gate
  * @since 0.3.1.1
  */
-pub fn gate_program(prog: checker::TProgram, plan: GatePlan) -> checker::TProgram | error
+pub fn gate_program(prog: checker::TProgram, plan: GatePlan): checker::TProgram | error
 
 /**
  * gate_test_indices — os índices, em `prog.items`, de cada função `#test`, por ordem crescente.
@@ -277,7 +277,7 @@ pub fn gate_program(prog: checker::TProgram, plan: GatePlan) -> checker::TProgra
  * @return      os índices dos `#test`, crescentes; vazio quando não há nenhum
  * @since 0.3.1.1
  */
-pub fn gate_test_indices(prog: checker::TProgram) -> []u64
+pub fn gate_test_indices(prog: checker::TProgram): []u64
 ```
 
 Dois ajustes de lowering acompanham, ambos já nomeados por `gate-sem-c-0.3.0.31.md` §F2:
@@ -415,7 +415,7 @@ pub type ProcHandle = struct {
  * @return          a alça do filho, ou uma alça com `raw` negativo quando nenhum filho arrancou
  * @since 0.3.1.2
  */
-pub fn spawn_redirected(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str) -> ProcHandle
+pub fn spawn_redirected(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str): ProcHandle
 
 /**
  * wait_one — bloqueia até `h` terminar e devolve o estado com que terminou.
@@ -429,7 +429,7 @@ pub fn spawn_redirected(argv: []str, dir: str, env: []str, in_path: str, out_pat
  * @return   o estado do filho, ou `TK_RT_SPAWN_FAILED` quando a alça nunca correspondeu a um filho
  * @since 0.3.1.2
  */
-pub fn wait_one(h: ProcHandle) -> i32
+pub fn wait_one(h: ProcHandle): i32
 ```
 
 O chão em C fica em `src/runtime/teko_rt.c` — o **C mantido**, a excepção explícita da lei Teko-only,
@@ -510,7 +510,7 @@ pub type ProcPool = struct {
  * @return       uma captura por linha, na ordem de `specs`
  * @since 0.3.1.2
  */
-pub fn run_pool(specs: []ProcSpec, jobs: u64) -> []CapResult
+pub fn run_pool(specs: []ProcSpec, jobs: u64): []CapResult
 ```
 
 `CapResult` fica com a forma que tem hoje (`exit`/`stdout`/`stderr`/`harness_ns`/`child_ns`/`cmd`), e
@@ -558,7 +558,7 @@ pub type chan<T>
  * @throws     quando `cap` é zero
  * @since 0.3.2
  */
-pub fn chan_new<T>(cap: u64) -> chan<T> | error
+pub fn chan_new<T>(cap: u64): chan<T> | error
 
 /**
  * send — copia `value` para a próxima casa livre do canal e publica-a.
@@ -574,7 +574,7 @@ pub fn chan_new<T>(cap: u64) -> chan<T> | error
  * @throws       quando o canal já foi fechado
  * @since 0.3.2
  */
-pub fn send<T>(c: chan<T>, value: T) -> null | error
+pub fn send<T>(c: chan<T>, value: T): null | error
 
 /**
  * recv — retira o valor publicado mais antigo, bloqueando enquanto não houver nenhum.
@@ -586,7 +586,7 @@ pub fn send<T>(c: chan<T>, value: T) -> null | error
  * @return   o valor mais antigo, ou `null` quando o canal está fechado e vazio
  * @since 0.3.2
  */
-pub fn recv<T>(c: chan<T>) -> T | null
+pub fn recv<T>(c: chan<T>): T | null
 
 /**
  * chan_close — declara que nenhum `send` mais acontecerá neste canal.
@@ -597,7 +597,7 @@ pub fn recv<T>(c: chan<T>) -> T | null
  * @return   nada
  * @since 0.3.2
  */
-pub fn chan_close<T>(c: chan<T>) -> void
+pub fn chan_close<T>(c: chan<T>): void
 ```
 
 ### 6.2 O tipo transportado — o veredicto de um teste é um VALOR, não texto
@@ -787,7 +787,7 @@ guarda uma raia longa: guarda UM teste, porque R1 manda uma thread por `#test`):
  * @return       nada
  * @since 0.3.2
  */
-fn gate_guard_begin(index: u64) -> void
+fn gate_guard_begin(index: u64): void
 
 /**
  * gate_guard_end — desarma a guarda da thread chamadora: o caminho normal de saída de um teste que
@@ -800,7 +800,7 @@ fn gate_guard_begin(index: u64) -> void
  * @return  nada
  * @since 0.3.2
  */
-fn gate_guard_end() -> void
+fn gate_guard_end(): void
 ```
 
 **O que a guarda deposita, e onde.** A linha da tabela é `{thread_id, index, state, code, message,
@@ -897,7 +897,7 @@ A correcção é de UMA linha por asserção: `teko::assert::*` passa a chamar u
  * @return         nada; a chamada não retorna nem para o teste nem para o processo
  * @since 0.3.2
  */
-pub fn assert_fail(message: str, site: str) -> void
+pub fn assert_fail(message: str, site: str): void
 ```
 
 #### 6.5.6 `exit` dentro de um teste — o RECORD distingue, a POLÍTICA decide
@@ -1098,7 +1098,7 @@ O instrumento certo já estava à mão na própria sonda: a linha de panic APARE
 `ewrite` → **stderr, não-bufferizado**. Sonda reescrita com `eprintln` nos dois pontos:
 
 ```teko
-pub fn body(fail: bool) -> i32 {
+pub fn body(fail: bool): i32 {
     defer { eprintln("DEFER RAN") }
     eprintln("BEFORE")
     if fail { panic("probe") }
@@ -1328,7 +1328,7 @@ sem uma linha de trabalho extra, porque a bifurcação está no `panic` que toda
 
 | # | sítio | o que é | porque NUNCA bifurca |
 |---|---|---|---|
-| 1 | `rt_abort()` — `exp extern fn rt_abort() -> void = "abort" from "c"` (`src/runtime/teko_rt.tks`) | o `abort` da libc, declarado verbatim | é o FUNDO. Se bifurcasse, a bifurcação não teria fundo nenhum e o panic não-guardado deixaria de abortar |
+| 1 | `rt_abort()` — `exp extern fn rt_abort(): void = "abort" from "c"` (`src/runtime/teko_rt.tks`) | o `abort` da libc, declarado verbatim | é o FUNDO. Se bifurcasse, a bifurcação não teria fundo nenhum e o panic não-guardado deixaria de abortar |
 | 2 | o builtin injectado `abort` (`src/checker/scope.tks`, *"teko::abort — host abort FFI bottom"*) | a mesma coisa, pela via do builtin | quem escreve `abort()` pediu o abort do host, não o panic do Teko. Bifurcá-lo seria mudar o significado de uma chamada directa |
 | 3 | `exit(code)` da libc, dentro de `tk_exit` (`src/runtime/teko_rt.c`) | a saída real do processo | é o FUNDO de P-B, pela mesma razão de (1) |
 | 4 | `_exit(127)` no filho do `fork` após `execvp` falhar (`teko_rt.c`, dois sítios) | a saída do filho que não conseguiu executar | corre **noutro processo**, entre `fork` e `exec`, onde só é legal chamar funções async-signal-safe. Uma bifurcação aqui escreveria numa tabela de guardas que pertence ao PAI |
@@ -1386,7 +1386,7 @@ um modo até ao lowering, porque `lower_item_function` tem de parar de descartar
 O precedente exacto já existe no ficheiro e deve ser copiado em vez de inventado — `flat_symbols`:
 
 ```teko
-pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error
+pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false): LModule | error
 ```
 
 um parâmetro de topo com omissão, carregado em `LowerCtx` (`flat_symbols: bool`) e reproduzido em
@@ -1584,7 +1584,7 @@ const PARALLELISM_ENV_LANES: str = "TEKO_TEST_LANES"
  * @return          o grau efectivo, nunca zero
  * @since 0.3.1.2
  */
-fn parallelism_of(raw: str, fallback: u64) -> u64
+fn parallelism_of(raw: str, fallback: u64): u64
 
 /**
  * hardware_parallelism — quantas threads o host consegue executar de facto em paralelo.
@@ -1592,7 +1592,7 @@ fn parallelism_of(raw: str, fallback: u64) -> u64
  * @return  o número de processadores em linha, nunca menor que 1
  * @since 0.3.2
  */
-pub fn hardware_parallelism() -> u64
+pub fn hardware_parallelism(): u64
 ```
 
 ---
@@ -1645,7 +1645,7 @@ byte-idêntico + `sh scripts/no_emitted_c.sh`. Migalhas de sonda e de fixture sa
 | **8** | **`run_pool` — a metade de regressões** | janela deslizante, colheita por índice, `child_ns` real. `run_captured_batch` reescrita por dentro, mesma assinatura de intenção | **sim** |
 | **9** | **a morte do andaime de shell** | os treze símbolos de §5.4 apagados, `.rc` incluído. É o passo que o `parallel-test-harness-0.3.2.md` prometeu | **sim** |
 | **10** | **o terceiro canal, com fallback** | `TEKO_VERDICT_CHANNEL`; sem ele, o veredicto vai para stderr (R0). Um registo por linha, com etiqueta de tipo (veredicto · início-de-índice · imagem de cobertura) | **sim** |
-| **11** | **`cabi fn(T…) -> R` em parâmetro de `extern fn`** | coerção do nome nu de uma função de topo não-capturante para `LFuncAddr`; recusa de capturante, genérica, método e tipo não representável em ABI C. Já desenhado em `concorrencia-adiantada-s8.md` C1 — **não redesenhar** | **sim** |
+| **11** | **`cabi fn(T…): R` em parâmetro de `extern fn`** | coerção do nome nu de uma função de topo não-capturante para `LFuncAddr`; recusa de capturante, genérica, método e tipo não representável em ABI C. Já desenhado em `concorrencia-adiantada-s8.md` C1 — **não redesenhar** | **sim** |
 | **12** | **o chão de thread** | `pthread_create`/`join`/`exit`/`self` e os gémeos Win32 como `extern fn` sob `#os` | **sim** |
 | **13** | **raiz de arena e sinks de cobertura POR THREAD** | o que a migalha 0(d) tiver medido. **BLOQUEANTE:** nenhuma migalha posterior pousa antes desta | **sim** |
 | **13b** | **`panic`/`exit` reimplementados em TEKO** | `call_symbol` deixa de apontar a `tk_panic_str`/`tk_exit` e passa a apontar a funções Teko em `src/runtime/teko_rt.tks`, cujo fundo NÃO-guardado é `extern fn` para `write`/`abort`. **Zero C novo.** Saída byte-idêntica, exit 134 preservado — é a pré-condição das duas primitivas e é `concorrencia-adiantada-s8.md` C3 verbatim | **sim** |
@@ -1716,7 +1716,7 @@ nativo, e a rota C só aparece nas fixtures de EQUIVALÊNCIA, que a nomeiam expl
 
 | # | primitiva | estado medido | quem bloqueia |
 |---|---|---|---|
-| 1 | **`cabi fn(T…) -> R`** em parâmetro de `extern fn`, com coerção do nome de função | **NÃO EXISTE.** Um nome de função como valor vira closure `{fn, env}` (`lower_fn_value`), não um endereço. `LFuncAddr` já existe e o isel já o baixa nas duas arquitecturas | migalhas 11-17, ou seja **toda a metade de threads** |
+| 1 | **`cabi fn(T…): R`** em parâmetro de `extern fn`, com coerção do nome de função | **NÃO EXISTE.** Um nome de função como valor vira closure `{fn, env}` (`lower_fn_value`), não um endereço. `LFuncAddr` já existe e o isel já o baixa nas duas arquitecturas | migalhas 11-17, ou seja **toda a metade de threads** |
 | 2 | **chão de thread** (`pthread_create`/`join`/`exit`/`self`, gémeos Win32) | não existe; `src/` não tem `thread` nem `isolate` | 12-17 |
 | 3 | **raiz de região e pilha de marcas POR THREAD** | `tk_g_root`/`tk_g_regs`/`tk_arena_marks` são estáticos de processo. **Hipótese de custo baixo (classe de armazenamento) por MEDIR** | 13-17 |
 | 4 | **sinks de cobertura por thread + fusão** | `tk_cov_ids`/`tk_cov_n`/`tk_cov_cap` são de processo | 13, 16 |
@@ -1835,7 +1835,7 @@ degrau da lane, não um rodapé.**
 (`exit(probe())`), compilado nas DUAS rotas, corrido com três argumentos.
 
 ```teko
-pub fn probe() -> i32 {
+pub fn probe(): i32 {
     let a = teko::env::args()
     if a.len == 0 { return 0 }
     if a.len == 1 { return 1 }
@@ -1896,7 +1896,7 @@ if segs.len == 1 {
 
 **A guarda só cobre a grafia NUA.** Um builtin de host escrito qualificado atravessa-a, não é achado
 por `find_extern_symbol` (num projecto de utilizador `args` é builtin INJECTADO, não `extern fn`
-declarado — a declaração `pub extern fn args() -> []str = "tk_rt_args"` vive em `src/env/env.tks`, que
+declarado — a declaração `pub extern fn args(): []str = "tk_rt_args"` vive em `src/env/env.tks`, que
 é fonte do COMPILADOR e não do projecto), e cai em `mangle_fn_symbol("", "args")` → `teko_args`, que
 símbolo nenhum define.
 
@@ -1985,7 +1985,7 @@ primitiva escondida não passa numa palavra que toda a gente vai escrever.
  * @return        nada; a chamada não retorna
  * @since (a decidir — ver §17.10)
  */
-pub fn cancel(reason: error | null) -> void
+pub fn cancel(reason: error | null): void
 ```
 
 ### 18.2 Como é que `cancel` sabe onde está? **É a MESMA tabela. Verificado, não presumido.**
@@ -2330,7 +2330,7 @@ O compilador **já sabe** que aquelas duas chamadas são saídas. `src/checker/t
 
 ```teko
 // global builtins panic/exit, unqualified.
-fn texpr_diverges(e: TExpr) -> bool {
+fn texpr_diverges(e: TExpr): bool {
     match e.kind {
         TCall as c => c.callee.segments.len == 1 && (c.callee.segments[0].name == "panic" || c.callee.segments[0].name == "exit")
 ```

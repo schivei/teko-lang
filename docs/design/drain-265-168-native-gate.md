@@ -122,7 +122,7 @@ type CovCtx = struct {
  * @return a CovCtx with `on = false` → emit_cov_line/emit_cov_branch emit ZERO bytes.
  * @since #265
  */
-fn cov_off() -> CovCtx { CovCtx { on = false; fn_idx = 0 } }
+fn cov_off(): CovCtx { CovCtx { on = false; fn_idx = 0 } }
 ```
 
 Thread `CovCtx` as the LAST parameter of the body-emission spine only:
@@ -152,7 +152,7 @@ walk enumerates, because `cov_walk_stmt`/`cov_walk_expr` add the statement's own
  * @return the buffer with the mark appended, or `buf` unchanged when off
  * @since #265
  */
-fn emit_cov_line(buf: []byte, ctx: CovCtx, line: u32, indent: str) -> []byte {
+fn emit_cov_line(buf: []byte, ctx: CovCtx, line: u32, indent: str): []byte {
     if !ctx.on { return buf }
     if line == 0 { return buf }
     cb(cb_u128_digits(cb(cb(buf, indent), "tk_cov_line("), line to u128), ");\n")
@@ -196,7 +196,7 @@ Three emission sites, each mirroring one interpreter `cov_branch` call:
  * @return the buffer with the mark appended, or `buf` unchanged when off
  * @since #265
  */
-fn emit_cov_branch(buf: []byte, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str) -> []byte {
+fn emit_cov_branch(buf: []byte, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str): []byte {
     if !ctx.on { return buf }
     mut b = cb(cb(buf, indent), "tk_cov_branch(")
     b = cb(cb_u128_digits(b, line to u128), ", ")
@@ -300,9 +300,9 @@ proves the three native floors match the interpreter floors on the fixtures (§4
 
 ## 3. Type signatures / function shapes (what the implementer adds)
 
-New (codegen.tks): `type CovCtx = struct { on: bool; fn_idx: u64 }`; `fn cov_off() -> CovCtx`;
-`fn emit_cov_line(buf: []byte, ctx: CovCtx, line: u32, indent: str) -> []byte`;
-`fn emit_cov_branch(buf: []byte, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str) -> []byte`.
+New (codegen.tks): `type CovCtx = struct { on: bool; fn_idx: u64 }`; `fn cov_off(): CovCtx`;
+`fn emit_cov_line(buf: []byte, ctx: CovCtx, line: u32, indent: str): []byte`;
+`fn emit_cov_branch(buf: []byte, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str): []byte`.
 New (teko_rt.h/.c — MAINTAINED runtime seam, permitted C): `void tk_cov_line_at(uint64_t fn, uint32_t line);`
 `void tk_cov_branch_at(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome);` (delegate to the
 existing `tk_line_id`/`tk_branch_id` packing, bypassing the fn-stack).

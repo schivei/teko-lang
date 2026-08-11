@@ -49,12 +49,12 @@ próprio já resolveu** nesta tarefa, e que eu confirmo, não invento.
 **Ruling A — 2026-06-30, `S8/ASYNC` (`TEKO_MASTER_PLAN.md:659`):** unifica async(I/O) e
 concorrência(threads) sob `Intent<T>`/`Intent`. *"**ONLY 2 NEW KEYWORDS: `async` + `await`**
 (everything else = namespace TYPES)... **NO `scope`**... **NO `spawn`** (calling an async fn
-returns the Intent). CPU parallelism = lib fn `teko::threading::run(()=>…) -> Intent<T>`."* A linha
+returns the Intent). CPU parallelism = lib fn `teko::threading::run(()=>…): Intent<T>`."* A linha
 seguinte (`:661`) crava a supressão: *"~~W13~~ SUPERSEDED... Old concurrency design (`scope{}`/
 `spawn`/`WaitGroup`/M:N scheduler) is REPLACED: NO `scope`/`spawn`."*
 
 **Ruling B — 2026-07-27, `concorrencia-adiantada-s8.md`:** o gate de teste precisa de threads de SO
-**agora**, e desenha `teko::isolate` (L1) com `Isolate`, `spawn(entry, ctx, lane) -> Isolate |
+**agora**, e desenha `teko::isolate` (L1) com `Isolate`, `spawn(entry, ctx, lane): Isolate |
 error`, `join`, `fork_join`, `hardware_parallelism` — como **biblioteca**, deixando as **cinco
 palavras-chave** `scope{}`/`spawn`/`channel<T>`/`send`/`recv` **reservadas e não congeladas**
 (`TEKO_MASTER_PLAN.md:262`, citado por aquele documento).
@@ -63,7 +63,7 @@ palavras-chave** `scope{}`/`spawn`/`channel<T>`/`send`/`recv` **reservadas e nã
 leitura correta, que é a do dono nesta tarefa, é que não há contradição nenhuma — porque as duas
 frases falam de coisas diferentes.** O "NO spawn" de A é sobre uma **palavra-chave de sintaxe**: A
 não introduz um token `spawn` no lexer, nem uma forma de statement `spawn <expr>`. O `spawn` de B
-é, e sempre foi, **uma função de biblioteca** — `pub unsafe fn spawn(entry, ctx, lane) -> Isolate |
+é, e sempre foi, **uma função de biblioteca** — `pub unsafe fn spawn(entry, ctx, lane): Isolate |
 error` é uma assinatura comum, chamável como qualquer outra, sem nenhuma palavra reservada nova. A
 própria B nunca propôs um token: ela cita `TEKO_MASTER_PLAN.md:262` exatamente para dizer que as
 **palavras-chave** continuam congeladas, e entrega a **capacidade** por biblioteca enquanto isso.
@@ -142,7 +142,7 @@ loop teko::threads::chan_is_open(c) { ... }          // `loop <cond> { }` JÁ EX
 
 Nenhuma linha acima usa uma palavra reservada nova. `chan<Rec>` é um tipo genérico como qualquer
 outro (`Tx<Rec>`, `Rx<Rec>` ou um único `Chan<Rec>` com dois acessores — a forma exata é §5). `spawn`
-é uma função (`teko::isolate::spawn(entry, ctx, lane) -> Isolate | error`, já assinada em B). `join`,
+é uma função (`teko::isolate::spawn(entry, ctx, lane): Isolate | error`, já assinada em B). `join`,
 `fork_join`, `hardware_parallelism` idem. **Portanto: zero tokens novos no lexer, zero entradas novas
 no parser, para toda a superfície que este documento existe para suportar.**
 
@@ -268,22 +268,22 @@ segure por `Ref`, a pergunta continua aberta e é do dono (B §8.9, journaling-d
 ### 4.1 A assinatura fechada, herdada de B sem alteração
 
 ```teko
-pub unsafe fn spawn(entry: cabi fn(ptr<byte>) -> ptr<byte>, ctx: ptr<byte>, lane: u64) -> Isolate | error
-pub unsafe fn join(t: Isolate) -> null | error
-pub unsafe fn fork_join(count: u64, lanes: u64, entry: cabi fn(ptr<byte>) -> ptr<byte>, ctx: ptr<byte>) -> u64 | error
-pub fn hardware_parallelism() -> u64
+pub unsafe fn spawn(entry: cabi fn(ptr<byte>): ptr<byte>, ctx: ptr<byte>, lane: u64): Isolate | error
+pub unsafe fn join(t: Isolate): null | error
+pub unsafe fn fork_join(count: u64, lanes: u64, entry: cabi fn(ptr<byte>): ptr<byte>, ctx: ptr<byte>): u64 | error
+pub fn hardware_parallelism(): u64
 ```
 
 `join` é a **única barreira de memória** do modelo v1 (B §3.2): nenhuma leitura do que uma raia
 escreveu é legítima antes dele, e por isso não há necessidade de ordenação de memória explícita —
 decisão que este documento herda sem reabrir.
 
-### 4.2 O bloqueio real, medido nesta pesquisa e em B: `cabi fn(T…) -> R` não é token deste lexer
+### 4.2 O bloqueio real, medido nesta pesquisa e em B: `cabi fn(T…): R` não é token deste lexer
 
 Medido (§20 de B, reconfirmado independentemente em journaling-de-corrida §20 sobre a MESMA busca):
 `cabi` tem **zero** acertos em `src/lexer/` e `src/parser/`. **A assinatura acima não compila hoje.**
 Não é um detalhe — é o único vão de superfície que falta para `spawn` sair de "assinatura desenhada"
-para "função chamável": um tipo de parâmetro `cabi fn(T…) -> R`, válido só em posição de parâmetro
+para "função chamável": um tipo de parâmetro `cabi fn(T…): R`, válido só em posição de parâmetro
 de função `unsafe`/`extern`, que aceita como argumento apenas o nome nu de uma função de topo
 não-capturante (B §2.4, forma já reservada em `docs/design/star-ref-and-ffi-0.3.1.md` §4.4 G3). O
 backend já emite o que falta (`LFuncAddr`, `src/lir/lir.tks:118-126`, medido); o vão é só de
@@ -334,12 +334,12 @@ pub type Tx = struct { raw: u64 }
  *  nomeado, nunca corrida silenciosa (journaling-de-corrida §18.2). */
 pub type Rx = struct { raw: u64 }
 
-pub fn chan_bounded(cap: u64)   -> u64          // abre um canal LIMITADO; devolve o id (§3.4)
-pub fn chan_unbounded()         -> u64          // idem, sem limite — ver ressalva §5.2
-pub fn chan_writer(id: u64)     -> Tx | error   // NotAProducer/Closed se o id não serve
-pub fn chan_reader(id: u64)     -> Rx | error   // NotAReader se já há um leitor tomado
-pub fn chan_close(id: u64)      -> null         // fecho do lado da main (o backstop, §8.2)
-pub fn chan_is_open(id: u64)    -> bool         // consulta ao registro, NUNCA cacheado (§3.4)
+pub fn chan_bounded(cap: u64): u64          // abre um canal LIMITADO; devolve o id (§3.4)
+pub fn chan_unbounded(): u64          // idem, sem limite — ver ressalva §5.2
+pub fn chan_writer(id: u64): Tx | error   // NotAProducer/Closed se o id não serve
+pub fn chan_reader(id: u64): Rx | error   // NotAReader se já há um leitor tomado
+pub fn chan_close(id: u64): null         // fecho do lado da main (o backstop, §8.2)
+pub fn chan_is_open(id: u64): bool         // consulta ao registro, NUNCA cacheado (§3.4)
 ```
 
 ### 5.2 `chan_unbounded` — uma ressalva que preciso registrar, não decidir
@@ -354,7 +354,7 @@ pergunta ao dono na §10 em vez de decidir por ele.
 
 ### 5.3 A atomicidade de `push`/`pop` — por que é о transporte do SO que a entrega de graça
 
-> *"`tx.push(rec) -> error | null` ATÓMICO (nada de 'posso escrever?' + push = TOCTOU)"*
+> *"`tx.push(rec): error | null` ATÓMICO (nada de 'posso escrever?' + push = TOCTOU)"*
 
 A prova de que isto **não é uma promessa**, é uma propriedade medida do transporte escolhido na §6:
 `sendto`/`WriteFile` sobre um datagrama são uma ÚNICA chamada de sistema — não há janela entre "há
@@ -365,8 +365,8 @@ não-bloqueante decide, sem consulta prévia, entre devolver um registo, `null` 
 como `EAGAIN`/erro equivalente), ou fechado (leitura devolveu 0, medido).
 
 ```teko
-pub fn push(tx: Tx, rec: Rec) -> error | null   // ATÓMICO — 1 chamada de sistema, §6
-pub fn pop(rx: Rx)             -> Rec | error | null // idem — `null` é "nada AGORA", não é fecho
+pub fn push(tx: Tx, rec: Rec): error | null   // ATÓMICO — 1 chamada de sistema, §6
+pub fn pop(rx: Rx): Rec | error | null // idem — `null` é "nada AGORA", não é fecho
 ```
 
 ### 5.4 O que fica reservado, e o consult site que já existe e não é usado ainda
@@ -450,7 +450,7 @@ Não finjo cobertura que não existe.
 
 ### 7.1 O que já está fechado (herdado sem alteração)
 
-`join(t: Isolate) -> null | error` e `fork_join(count, lanes, entry, ctx) -> u64 | error` (§4.1)
+`join(t: Isolate): null | error` e `fork_join(count, lanes, entry, ctx): u64 | error` (§4.1)
 cobrem o caso de **contagem estática conhecida no lançamento** — o caso do gate de teste em B. O
 `defer` já existe como palavra reservada (`lexer.tks:348`) e o padrão *main é dona, `defer
 chan_close(c)`* não pede nada novo: é uma chamada comum dentro de um `defer` comum.
@@ -476,10 +476,10 @@ como INTEGRATOR-PINNED, veto aberto:**
  *
  * @since 0.3.1 (integrator-pinned — não fechado por nenhuma ruling do dono; ver §10)
  */
-pub fn wg_open()               -> u64            // abre um contador, devolve o id
-pub fn wg_add(wg: u64, n: u64) -> null | error    // soma n tarefas esperadas
-pub fn wg_done(wg: u64)        -> null | error    // uma tarefa terminou
-pub fn wg_wait(wg: u64)        -> null | error    // bloqueia até a contagem chegar a zero
+pub fn wg_open(): u64            // abre um contador, devolve o id
+pub fn wg_add(wg: u64, n: u64): null | error    // soma n tarefas esperadas
+pub fn wg_done(wg: u64): null | error    // uma tarefa terminou
+pub fn wg_wait(wg: u64): null | error    // bloqueia até a contagem chegar a zero
 ```
 
 Construído sobre o MESMO registro F3 que já sustenta `chan` — nenhuma máquina de segurança de
@@ -524,7 +524,7 @@ memória.**
 exatamente esta distinção sem a nomear**: *"NO `scope`` (blocks already are arenas → arena drop
 joins/cancels pending Intents)"* — ou seja, um `Intent` de I/O vive DENTRO do bloco/arena de quem o
 criou, não tem arena própria — **isto é a Leitura 1**. E *"CPU parallelism = lib fn
-`teko::threading::run(()=>…) -> Intent<T>`"* — uma função de biblioteca que devolve `Intent<T>` para
+`teko::threading::run(()=>…): Intent<T>`"* — uma função de biblioteca que devolve `Intent<T>` para
 trabalho de CPU é, estruturalmente, **a mesma forma de `spawn`+`join`** que B desenhou meses depois,
 só que com um nome e um tipo de retorno diferentes. **A árvore já continha a resposta: `Intent<T>`
 nunca foi UM modelo — sempre foram dois, disfarçados do mesmo nome de tipo.**
@@ -553,7 +553,7 @@ como diferentes, não como um único "não-isolado" indiferenciado:**
    transformação de corpo `async fn` em máquina de estados, no lexer ou no codegen hoje) — não é
    sugar barato de escrever, só é seguro por barato de manter.
 
-2. **`async`/`await` para CPU (a forma `teko::threading::run(...) -> Intent<T>` do `S8/ASYNC`) —
+2. **`async`/`await` para CPU (a forma `teko::threading::run(...): Intent<T>` do `S8/ASYNC`) —
    SIM, mas SÓ como açúcar LITERAL sobre `isolate`/`spawn`/`join` (§4), nunca sobre um terceiro
    modelo de arena "leve". `async fn trabalho_pesado()` desaçucararia para: lançar o corpo num
    worker de um pool de isolates pré-aquecido (evitando o custo de `pthread_create` por chamada,

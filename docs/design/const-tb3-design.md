@@ -222,7 +222,7 @@ pub type MRelocKind = enum { PageHi; PageLo; Call; Abs64 }
  * @param MRelocKind k  the relocation kind
  * @return u32  the `r_type` field value
  */
-fn reloc_type_value(k: MRelocKind) -> u32 {
+fn reloc_type_value(k: MRelocKind): u32 {
     match k {
         PageHi => 3 to u32
         PageLo => 4 to u32
@@ -236,7 +236,7 @@ fn reloc_type_value(k: MRelocKind) -> u32 {
 PC-relativo):
 
 ```teko
-fn reloc_pcrel(k: MRelocKind) -> u32 {
+fn reloc_pcrel(k: MRelocKind): u32 {
     match k {
         PageHi => 1 to u32
         PageLo => 0 to u32
@@ -262,7 +262,7 @@ kind (2 = 4 bytes para os fixups de instrução; 3 = 8 bytes para o ponteiro abs
  * @param MRelocKind k  the relocation kind
  * @return u32  the `r_length` field value (2 or 3)
  */
-fn reloc_length(k: MRelocKind) -> u32 {
+fn reloc_length(k: MRelocKind): u32 {
     match k {
         Abs64 => 3 to u32
         PageHi => 2 to u32
@@ -305,7 +305,7 @@ type MachoRelocParts = struct {
  * @param []Reloc relocs  the module's relocations, `.sect`-tagged, in emission order
  * @return MachoRelocParts  the `text` and `rodata` partitions
  */
-fn macho_partition_relocs(relocs: []Reloc) -> MachoRelocParts {
+fn macho_partition_relocs(relocs: []Reloc): MachoRelocParts {
     mut text: []Reloc = teko::list::empty()
     mut rodata: []Reloc = teko::list::empty()
     mut i: u64 = 0
@@ -345,7 +345,7 @@ fn macho_partition_relocs(relocs: []Reloc) -> MachoRelocParts {
 tira da partição) e a computar a segunda tabela:
 
 ```teko
-fn compute_macho_layout(enc: EncodedModule, strtab_size: u32, nreloc_text: u32, nreloc_const: u32) -> MachoLayout
+fn compute_macho_layout(enc: EncodedModule, strtab_size: u32, nreloc_text: u32, nreloc_const: u32): MachoLayout
 ```
 
 Corpo — trocar `let nreloc = enc.relocs.len to u32` por `nreloc_text`, e após
@@ -397,7 +397,7 @@ partição) e usar `reloc_length(r.kind)`:
  * @param []Symbol symbols  the module's symbol table (for the target indices)
  * @return []byte  `buf` followed by the relocation entries
  */
-fn emit_reloc_table(buf: []byte, relocs: []Reloc, symbols: []Symbol) -> []byte {
+fn emit_reloc_table(buf: []byte, relocs: []Reloc, symbols: []Symbol): []byte {
     mut b = buf
     mut i: u64 = 0
     loop {
@@ -416,7 +416,7 @@ fn emit_reloc_table(buf: []byte, relocs: []Reloc, symbols: []Symbol) -> []byte {
 **`emit_macho`** (`:735`) costura a partição + a segunda tabela:
 
 ```teko
-pub fn emit_macho(enc: EncodedModule) -> []byte {
+pub fn emit_macho(enc: EncodedModule): []byte {
     let parts = macho_partition_relocs(enc.relocs)
     let strtab = build_strtab(enc.symbols)
     let lay = compute_macho_layout(enc, strtab.bytes.len to u32, parts.text.len to u32, parts.rodata.len to u32)
@@ -474,7 +474,7 @@ type CoffRelocParts = struct {
  * @param []RelocX86 relocs  the module's relocations, `.sect`-tagged, in order
  * @return CoffRelocParts  the `text` and `rdata` partitions
  */
-fn coff_partition_relocs(relocs: []RelocX86) -> CoffRelocParts {
+fn coff_partition_relocs(relocs: []RelocX86): CoffRelocParts {
     mut text: []RelocX86 = teko::list::empty()
     mut rdata: []RelocX86 = teko::list::empty()
     mut i: u64 = 0
@@ -518,7 +518,7 @@ bytes baixos e os 4 altos ficam 0 (o slot é zero-init pelo serializer). Novo he
  * @param []RelocX86 relocs  the `.rdata` partition, in emission order
  * @return []byte  `rodata` with each data reloc's target offset folded in-place
  */
-fn coff_apply_data_reloc_addends(rodata: []byte, symbols: []Symbol, relocs: []RelocX86) -> []byte {
+fn coff_apply_data_reloc_addends(rodata: []byte, symbols: []Symbol, relocs: []RelocX86): []byte {
     mut buf = rodata
     mut i: u64 = 0
     loop {
@@ -550,7 +550,7 @@ fn coff_apply_data_reloc_addends(rodata: []byte, symbols: []Symbol, relocs: []Re
 **`compute_coff_layout`** (`:512`) recebe as duas contagens:
 
 ```teko
-fn compute_coff_layout(enc: EncodedModuleX86, num_symbols: u32, num_text_relocs: u32, num_rdata_relocs: u32) -> CoffLayout
+fn compute_coff_layout(enc: EncodedModuleX86, num_symbols: u32, num_text_relocs: u32, num_rdata_relocs: u32): CoffLayout
 ```
 
 Corpo — trocar `num_relocs` por `num_text_relocs` e após `reloc_offset`:
@@ -583,7 +583,7 @@ Quando `num_rdata_relocs=0`: `rdata_reloc_ptr=0`, `nreloc=0` — byte-idêntico 
 **`emit_coff`** (`:708`) costura a partição + a segunda tabela + o fold de dados:
 
 ```teko
-pub fn emit_coff(enc: EncodedModuleX86) -> []byte {
+pub fn emit_coff(enc: EncodedModuleX86): []byte {
     let parts = coff_partition_relocs(enc.relocs)
     let coffsyms = coff_build_symbols(enc.symbols)
     let strtab = build_coff_strtab(coffsyms)
@@ -666,7 +666,7 @@ datum-alvo (`0x41` + 7 zero, offset 8); dois símbolos locais section-2 (`ptr`@0
  *
  * @return EncodedModule  the hand-built rodata-internal-pointer module
  */
-fn mo_rodata_ptr_enc() -> EncodedModule {
+fn mo_rodata_ptr_enc(): EncodedModule {
     let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
     let ptr = Symbol { name = "ptr"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
     let target = Symbol { name = "target"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
@@ -731,7 +731,7 @@ sect=Rodata }`.
  *
  * @return EncodedModuleX86  the hand-built rodata-internal-pointer module
  */
-fn co_rodata_ptr_module() -> EncodedModuleX86 {
+fn co_rodata_ptr_module(): EncodedModuleX86 {
     let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
     let ptr = co_sym("ptr", true, true, 2 to u8, 0 to u32)
     let target = co_sym("target", true, true, 2 to u8, 8 to u32)

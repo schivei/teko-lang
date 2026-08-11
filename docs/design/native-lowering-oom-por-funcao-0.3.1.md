@@ -273,7 +273,7 @@ usadas pelo Tier 1). Colisão minimizada: as edições concentram-se em `project
 **C6.0 — [proteção de restart] commit vazio + push.** Sem código. (Feito na abertura do ramo.)
 
 **C6.1 — `lower.tks`: prelúdio + entrada por-item `pub` (ADITIVO).** Extrair de `lower_program`
-(`13732-13757`) o setup Grupo B num `pub fn lower_prelude(prog, flat_symbols) -> LowerPrelude | error`
+(`13732-13757`) o setup Grupo B num `pub fn lower_prelude(prog, flat_symbols): LowerPrelude | error`
 (guardas + `collect_*` + módulo inicial com layouts registados + rodata de const-agregado interná). Expor
 `lower_item` como `pub` (ou um wrapper `pub fn lower_item_pub(...)` com a mesma assinatura). `lower_program`
 PERMANECE, reimplementado sobre `lower_prelude` + o laço existente, **byte-idêntico** (a rota C e o
@@ -282,10 +282,10 @@ mudar semântica. **Gate:** builda; `teko test .` verde; ninguém usa o novo `pu
 byte-idêntico trivial (`lower_program` inalterado no comportamento). **Ritual: NÃO.**
 
 **C6.2 — `backend`/`project.tks`: helpers de encode-lista + commit (ADITIVO).** `pub fn
-encode_lfuncs_in_region_x86(fs: []lir::LFunc) -> []backend::EncodedFuncX86 | error` (envolve o
+encode_lfuncs_in_region_x86(fs: []lir::LFunc): []backend::EncodedFuncX86 | error` (envolve o
 `encode_lfunc_in_region_x86` existente, `project.tks:2687`, para uma LISTA — o LFunc do item + os seus
 lifted); `fn fold_encoded_funcs_x86(mt, efs)` (envolve `fold_encoded_func_x86` num laço, já existe
-`2716`); `fn commit_rodata_delta(robase, grown) -> []lir::LRodata` (copia o sufixo novo com `bytes` e
+`2716`); `fn commit_rodata_delta(robase, grown): []lir::LRodata` (copia o sufixo novo com `bytes` e
 `symbol` copiados — E4); `fn commit_loose(acc, delta)` (E6). **Colisão:** `project.tks` (concentrado).
 **Gate:** helpers não-usados ⇒ FIXPOINT byte-idêntico. **Ritual: NÃO.**
 
@@ -386,7 +386,7 @@ pub type LowerPrelude = struct {
  * @return              o contexto whole-program residente na raiz, ou o honest-stop das guardas
  * @since 0.3.1
  */
-pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool) -> LowerPrelude | error
+pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool): LowerPrelude | error
 
 /**
  * encode_lfuncs_in_region_x86 — encoda uma LISTA de `LFunc` (o LFunc de topo do item
@@ -399,7 +399,7 @@ pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool) -> LowerPrelud
  * @return    um `EncodedFuncX86` por função, ou o honest-stop propagado
  * @since 0.3.1
  */
-pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc) -> []teko::backend::EncodedFuncX86 | error
+pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc): []teko::backend::EncodedFuncX86 | error
 
 /**
  * commit_rodata_delta — copia para o acumulador de rodata RAIZ as entradas NOVAS que o
@@ -413,7 +413,7 @@ pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc) -> []teko::backend::E
  * @return        `robase` estendido com o delta copiado para a raiz
  * @since 0.3.1
  */
-fn commit_rodata_delta(robase: []teko::lir::LRodata, grown: []teko::lir::LRodata) -> []teko::lir::LRodata
+fn commit_rodata_delta(robase: []teko::lir::LRodata, grown: []teko::lir::LRodata): []teko::lir::LRodata
 
 /**
  * commit_loose — anexa ao acumulador de `loose` RAIZ as statements soltas novas de um
@@ -426,7 +426,7 @@ fn commit_rodata_delta(robase: []teko::lir::LRodata, grown: []teko::lir::LRodata
  * @return       `acc` estendido, residente na raiz
  * @since 0.3.1
  */
-fn commit_loose(acc: []checker::TStatement, delta: []checker::TStatement) -> []checker::TStatement
+fn commit_loose(acc: []checker::TStatement, delta: []checker::TStatement): []checker::TStatement
 ```
 
 Funções existentes que o driver fundido TOCA (chama, não edita): `lower_item`/`lower_item_function`

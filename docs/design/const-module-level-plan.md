@@ -28,7 +28,7 @@ Author: architect. Implementer executes the crumb sequence in order.
 1. `const NAME: Type = <const-expr>` at **module** level must exist as a real
    language feature (parse → check → usable-as-value → cross-module `pub const`).
    "Defined since the start, neglected by agents; do it now."
-2. Migrate **ALL** ~50 `fn X() -> T { <const> }` nullary constant-returning
+2. Migrate **ALL** ~50 `fn X(): T { <const> }` nullary constant-returning
    functions to named constants. Scope is "Tudo, não apenas o máximo": the
    const-eval frontier must reach every site; the architect classifies each.
 3. **No magic values** (new W15 convention, owner 2026-07-15): the retrofit is not
@@ -73,7 +73,7 @@ position.
 
 ## 1. The real rationale: arenas, not just CALL/RET (owner 2026-07-15)
 
-The dominant cost of a zero-arg `fn X() -> T { <const> }` is **not** the CALL/RET
+The dominant cost of a zero-arg `fn X(): T { <const> }` is **not** the CALL/RET
 pair. It is that **every call opens an arena (a lexical region)** — Teko's memory
 model is arena-per-scope (ref-transparent model, R11: "sem GC; arenas lexicais").
 A nullary function that returns a constant still enters, allocates/owns a region
@@ -167,7 +167,7 @@ silently inlining an arbitrary call (least-surprise, law-first).
   much larger, higher-risk feature out of scope for #594. Documented in
   DECISION_LOG as reversible. A future `const fn` marker can supersede it.
 
-Everything above is validated by a single predicate `is_const_expr(TExpr) -> error?`
+Everything above is validated by a single predicate `is_const_expr(TExpr): error?`
 in the new `consteval` module (§3.5). Anything else in a const initializer is a
 type error with a located message.
 
@@ -377,7 +377,7 @@ pub type ConstDecl = struct { name: str; ty: TypeExpr; init: Expr; vis: Visibili
  *                `=`, or an ill-formed initializer expression
  * @since #594
  */
-fn parse_const_decl(tokens: []lexer::Token, start: u64, vis: Visibility) -> Parsed<Decl> | error
+fn parse_const_decl(tokens: []lexer::Token, start: u64, vis: Visibility): Parsed<Decl> | error
 ```
 
 Wire into `parse_decl` (`:895`-style arm, after the `fn`/`type`/`flags` checks):
@@ -399,7 +399,7 @@ Wire into `parse_decl` (`:895`-style arm, after the `fn`/`type`/`flags` checks):
  * @return        the const's resolved value type, or a located error
  * @since #594
  */
-fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str) -> Type | error
+fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str): Type | error
 ```
 
 Bind `cd.name` → resolved type into `Env` (a new `EnvBinding` kind, or reuse the
@@ -420,7 +420,7 @@ existing value-binding path with an `is_const` marker — reuse is cheaper).
  * @return       null when const, else a located error
  * @since #594
  */
-fn is_const_expr(e: TExpr, table: TypeTable, env: Env) -> error?
+fn is_const_expr(e: TExpr, table: TypeTable, env: Env): error?
 
 /**
  * const_dep_order — topologically order the program's module-level consts by their
@@ -432,7 +432,7 @@ fn is_const_expr(e: TExpr, table: TypeTable, env: Env) -> error?
  * @return        the consts in dependency order (deps first), or a cycle error
  * @since #594
  */
-fn const_dep_order(consts: []TConstDecl) -> []TConstDecl | error
+fn const_dep_order(consts: []TConstDecl): []TConstDecl | error
 
 /**
  * is_const_allowlisted_callee — true iff a call to `path` is permitted in a const
@@ -444,7 +444,7 @@ fn const_dep_order(consts: []TConstDecl) -> []TConstDecl | error
  * @return      whether the callee may appear in a const initializer
  * @since #594
  */
-fn is_const_allowlisted_callee(path: parser::Path) -> bool
+fn is_const_allowlisted_callee(path: parser::Path): bool
 ```
 
 ### 4.5 Typed AST (`src/checker/tast.tks`)
@@ -497,7 +497,7 @@ pub type TConstDecl = struct { name: str; namespace: str; ty: Type; init: TExpr;
  * @return       the typed constant, or a located error (type mismatch or non-const)
  * @since #594
  */
-fn type_const_decl(cd: parser::ConstDecl, env: Env, table: TypeTable) -> TConstDecl | error
+fn type_const_decl(cd: parser::ConstDecl, env: Env, table: TypeTable): TConstDecl | error
 ```
 
 ### 4.7 Inliner (const-use substitution)
@@ -522,7 +522,7 @@ and — at baseline — every `TVar` resolving to an **aggregate** const likewis
  * @throws      a located error if a const reference cannot be resolved
  * @since #594
  */
-pub fn inline_consts(prog: TProgram) -> TProgram | error
+pub fn inline_consts(prog: TProgram): TProgram | error
 ```
 
 > Placement: runs in the checker pipeline after `monomorphize`
@@ -565,7 +565,7 @@ same. `parse_fields` / `parse_class_fields` gain the third member branch.
  * @throws        a located error on a missing name / `: Type` / `=` / bad initializer
  * @since #594
  */
-fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility) -> Parsed<ConstDecl> | error
+fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility): Parsed<ConstDecl> | error
 
 /**
  * find_member_const — resolve `TypeName::NAME` to its member const's checked
@@ -580,7 +580,7 @@ fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility) ->
  * @return       the member const's typed initializer, or null when not found
  * @since #594
  */
-fn find_member_const(owner: parser::TypeDecl, seg: str, table: TypeTable) -> TExpr?
+fn find_member_const(owner: parser::TypeDecl, seg: str, table: TypeTable): TExpr?
 ```
 
 Wire `find_member_const` into `type_path_expr` (`typer.tks:2283`) as the FIRST arm
@@ -678,7 +678,7 @@ consts" becomes **N consts + M enums + K flags**.
 > Migration note for enums: the tag's **numeric wire value** must be preserved
 > where it is serialized to bytes (the ZIP method u16).
 > Where Teko enums do not (yet) pin discriminant values, keep a small
-> `fn <enum>_wire(v) -> u8/u32` at the **single** emit site and drive it by `match`.
+> `fn <enum>_wire(v): u8/u32` at the **single** emit site and drive it by `match`.
 > This keeps the wire bytes byte-identical (fixpoint-safe) while the *logic* uses
 > the enum. Do NOT change the emitted bytes.
 

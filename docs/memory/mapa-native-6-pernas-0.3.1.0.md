@@ -186,7 +186,7 @@ The command `teko test .` runs the built-in test suite with:
 (lines 2818–2868):**
 
 ```teko
-fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, tty: bool) -> i32 {
+fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, tty: bool): i32 {
     ...
     let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
     let emit_phase = phase_begin("emit test", cfile, mode)

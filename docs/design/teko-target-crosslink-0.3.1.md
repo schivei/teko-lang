@@ -102,7 +102,7 @@ the predefines; this doc states the contract only.)
 Front-end wiring mirrors `os` EXACTLY at the two sites that make it usable by the compiler
 (the compiler is compiled by the frozen C backend, so C emission is what matters):
 
-- `src/checker/scope.tks` — beside line 450, add the `arch` signature (`() -> str`).
+- `src/checker/scope.tks` — beside line 450, add the `arch` signature (`(): str`).
 - `src/codegen/codegen.tks` — beside line 3036, add `else if last == "arch" { builtin =
   "tk_rt_arch"; has_builtin = true }`.
 - Native N1 lowering is OPTIONAL: a corpus program calling `teko::arch()` under `--backend=native`
@@ -134,7 +134,7 @@ the honest-error message.
  * @throws when "<arch>-<os>" is absent from supported_targets
  * @since 0.3.1
  */
-fn host_target() -> NativeTarget | error { /* crumb C3 */ }
+fn host_target(): NativeTarget | error { /* crumb C3 */ }
 
 /**
  * supported_targets — the SINGLE source of truth (D39) for own-backend targets: the ordered list
@@ -145,7 +145,7 @@ fn host_target() -> NativeTarget | error { /* crumb C3 */ }
  * @return the canonical (name, variant) pairs, in display order for the honest-error message
  * @since 0.3.1
  */
-fn supported_targets() -> []TargetRow { /* crumb C3 */ }
+fn supported_targets(): []TargetRow { /* crumb C3 */ }
 
 /**
  * TargetRow — one row of the supported-targets table: the canonical os-arch name, its NativeTarget
@@ -175,7 +175,7 @@ arm64 fallback) on miss:
  * @throws when name is neither a canonical supported name nor a known alias (R2)
  * @since 0.3.1
  */
-fn target_from_name(name: str) -> NativeTarget | error { /* touches src/build/project.tks:1077 */ }
+fn target_from_name(name: str): NativeTarget | error { /* touches src/build/project.tks:1077 */ }
 
 /**
  * native_target — the effective own-backend target: host_target() when TEKO_TARGET is unset (R1),
@@ -188,7 +188,7 @@ fn target_from_name(name: str) -> NativeTarget | error { /* touches src/build/pr
  * @throws when the host os-arch (unset) or the requested value (set) is unsupported
  * @since 0.3.1
  */
-fn native_target() -> NativeTarget | error { /* touches src/build/project.tks:1108 */ }
+fn native_target(): NativeTarget | error { /* touches src/build/project.tks:1108 */ }
 ```
 
 Note the return-type change `NativeTarget → NativeTarget | error` ripples to `emit_native()`
@@ -221,7 +221,7 @@ fabricated pass. Design:
  * @return a record { is_cross: bool; note: str } for the build report
  * @since 0.3.1
  */
-fn cross_note(target: NativeTarget) -> CrossNote { /* crumb C5 */ }
+fn cross_note(target: NativeTarget): CrossNote { /* crumb C5 */ }
 ```
 
 Reporting surface: a field on the build report, printed as an explicit line, e.g.
@@ -327,7 +327,7 @@ flagged as a spec-fill for owner ratification, separate from the ratified §4.1 
  * @throws when a static: lib for target is not pointed-at or not present locally (R4/M.3)
  * @since 0.3.1
  */
-fn validate_static_libs_for_target(m: Manifest, target: NativeTarget) -> error? { /* crumb C4 */ }
+fn validate_static_libs_for_target(m: Manifest, target: NativeTarget): error? { /* crumb C4 */ }
 ```
 
 Manifest struct delta (`src/build/manifest.tks:31` type `Manifest`, and the builder `:311+`): the

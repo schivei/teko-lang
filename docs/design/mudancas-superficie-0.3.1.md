@@ -77,8 +77,8 @@ ainda parseia). No sweep, `src/` migra para `:` e o `->` deixa de parsear.
 **Exemplo.**
 ```teko
 // antes
-fn soma(a: i64, b: i64) -> i64 { return a + b }
-var f = fn(x: i64) -> i64 { return x * 2 }
+fn soma(a: i64, b: i64): i64 { return a + b }
+var f = fn(x: i64): i64 { return x * 2 }
 
 // depois
 fn soma(a: i64, b: i64): i64 { return a + b }
@@ -105,7 +105,7 @@ mecanismos ortogonais em vez de `ref` cavalgando os dois.
 **Exemplo.**
 ```teko
 // antes (vestigial — identity pass-down)
-fn hand_back(ref ch: Ch) -> ref Ch { return ch }
+fn hand_back(ref ch: Ch): ref Ch { return ch }
 
 // depois — o form não parseia; o valor já vem na arena do caller por DPS
 fn hand_back(ch: Ch): Ch { return ch }
@@ -415,7 +415,7 @@ tipos-soma nomeados do corpus já são `variant`).
 forma antiga baseada em `fn`. A closure **literal** continua `(params) => expr` (ou `(params) => { … }`) —
 **sem `fn`, sem `-> R`**, retorno inferido (já era assim, `parse_expr.tks:308`).
 
-**O que sai.** A anotação de tipo `fn(T): R` / `() -> T?` — que **colide** com uniões de retorno:
+**O que sai.** A anotação de tipo `fn(T): R` / `(): T?` — que **colide** com uniões de retorno:
 `fn(T): R | null` é ambíguo entre `(fn(T): R) | null` e `fn(T): (R | null)`.
 
 **O que entra.** Dois construtores de tipo genéricos, **subtipos de comp-time** (monomorfizados, sem a

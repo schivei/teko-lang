@@ -35,10 +35,10 @@ Teko is a compiled, statically-typed programming language with a **fully self-ho
 // Errors are values: a function that can fail returns `T | error`.
 pub type Box = struct { v: i64 }
 
-fn ok()   -> Box | error { Box { v = 7 } }
-fn fail() -> Box | error { error { message = "boom" } }
+fn ok(): Box | error { Box { v = 7 } }
+fn fail(): Box | error { error { message = "boom" } }
 
-pub fn classify() -> i64 {
+pub fn classify(): i64 {
     match ok() {
         Box as b  => b.v      // bind the success member
         error     => 0        // handle the failure member
@@ -48,7 +48,7 @@ pub fn classify() -> i64 {
 
 ```teko
 // Optionals: `T?`, safe navigation `?.` and coalescing `??`.
-pub fn safe() -> i64 {
+pub fn safe(): i64 {
     let b: Box? = null
     b?.v ?? 8                 // → 8 (absent → fallback)
 }
@@ -60,11 +60,11 @@ type Dog = class {
     pub name: str
     pub age: i64
 
-    pub fn make(n: str, a: i64) -> Dog {
+    pub fn make(n: str, a: i64): Dog {
         Dog { name = n; age = a }
     }
 
-    pub fn is_puppy(self) -> bool {
+    pub fn is_puppy(self): bool {
         self.age < 1
     }
 }

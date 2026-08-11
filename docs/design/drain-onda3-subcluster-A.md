@@ -44,7 +44,7 @@ Change `typer.tks:786`: build the callee from the canonical qualifier's segments
  * @return             the `[..ns.., Class, method]` callee path (all leading qualifier segments + Class + method)
  * @since onda-3 (#290)
  */
-fn method_dispatch_callee(struct_name: str, method: str) -> parser::Path {
+fn method_dispatch_callee(struct_name: str, method: str): parser::Path {
     mut segs: []parser::Segment = teko::list::empty()
     let qual = name_qualifier(struct_name)
     if qual.len > 0 {
@@ -77,14 +77,14 @@ When the callee path has ≥3 segments AND the second-to-last names a class in t
  * @return        true iff `b_ns` == or ends-with the callee's `<owner-segments>::<Class>` tail
  * @since onda-3 (#290)
  */
-fn ns_matches_qualified_class(b_ns: str, callee: parser::Path) -> bool {
+fn ns_matches_qualified_class(b_ns: str, callee: parser::Path): bool {
     let want = join_ns(path_prefix_segments(callee))
     b_ns == want || ends_with_ns(b_ns, want)
 }
 ```
 Apply at ALL **4** compare sites (`scope.tks:143` + `:156` in `lookup_call`, `:179` + `:192` in `call_ns`). Guard: only substitute the predicate when `callee.segments.len >= 3 && second_to_last names a class`; else keep `ns_last_seg(b.ns) == qual`. Helpers `join_ns`/`path_prefix_segments`/`ends_with_ns` — grep first; `ends_with_ns` likely already exists (`find_class_method` at `the interpreter` uses an `ends_with(tf.namespace, "::" ~ class_name)` idiom — reuse that exact tail-compare).
 
-**Fixtures:** `examples/regressions/same_bare_method_dispatch/` (interpreter==native), modeled on `di_same_name_cross_ns`. Two ns `left`/`right`, each `type Svc = class { pub tag: i64; pub fn make(x: i64) -> Svc; pub fn tag_of(self) -> i64 { self.tag } }`; `left::Svc::make(3).tag_of() == 3`, `right::Svc::make(7).tag_of() == 7`; `exit(l + r)` = **exit 10**. Fails to type-check today, passes both after. **Fold in:** flip `di_same_name_cross_ns` to CALL the method (its field-read is the #290 workaround) IN THIS PR — it IS the regression closure (report the flip in the PR body; do not silently rewrite).
+**Fixtures:** `examples/regressions/same_bare_method_dispatch/` (interpreter==native), modeled on `di_same_name_cross_ns`. Two ns `left`/`right`, each `type Svc = class { pub tag: i64; pub fn make(x: i64): Svc; pub fn tag_of(self): i64 { self.tag } }`; `left::Svc::make(3).tag_of() == 3`, `right::Svc::make(7).tag_of() == 7`; `exit(l + r)` = **exit 10**. Fails to type-check today, passes both after. **Fold in:** flip `di_same_name_cross_ns` to CALL the method (its field-read is the #290 workaround) IN THIS PR — it IS the regression closure (report the flip in the PR body; do not silently rewrite).
 **Ritual:** full gate; the compiler's own #109 type surface has same-bare classes, so gen1==gen2 is a loud guard. The qualified-class predicate MUST be a no-op for every non-class-dispatch call.
 
 ---
@@ -154,7 +154,7 @@ Free-fn sites `func_type` (`collect.tks:27`) and `type_function` (`typer.tks:302
  * @return            a type-param table over `owner_tps ++ mtps` / `owner_tcs ++ mtcs`
  * @since onda-3 (#254)
  */
-fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []parser::ConstraintExpr, table: TypeTable) -> TypeTable {
+fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []parser::ConstraintExpr, table: TypeTable): TypeTable {
     match type_table_find(table, owner_name, "") {
         parser::TypeDecl as td => type_param_table(concat_tps(td.type_params, mtps), concat_tcs(td.type_constraints, mtcs), "", table)
         error => type_param_table(mtps, mtcs, "", table)
@@ -211,7 +211,7 @@ Method walk per method: `subst_texpr_names` each `params[i].type_ann` + `return_
 
 ```teko
 // type_return (typer.tks:2482) — thread the enclosing return type as the struct-init expected context:
-fn type_return(r: parser::Return, env: Env, table: TypeTable) -> TypedStmt | error {
+fn type_return(r: parser::Return, env: Env, table: TypeTable): TypedStmt | error {
     if !r.has_value {
         return TypedStmt { node = TReturn { has_value = false; value = void_texpr() }; env = env }
     }
@@ -225,9 +225,9 @@ fn type_return(r: parser::Return, env: Env, table: TypeTable) -> TypedStmt | err
 With L1-L4, a generic class's static factory (body constructs `Self<T>{…}`, return type is the generic instance) type-checks and stamps. The ClassBody method carrier (L2/L3) covers it. Verify arena-per-object ref semantics survive stamping (the stamped method set reuses the same class-lowering; no new codegen).
 
 **Fixtures (interpreter==native unless noted):**
-- `examples/regressions/generic_struct_method/` — `type Box<T> = struct { value: T; pub fn get(self) -> T { self.value } }`; `Box<i64>{value=42}.get()` → **exit 42**; a second `Box<u8>` inst proves per-instance stamping.
-- `examples/regressions/generic_class_factory/` — `type Cell<T> = class { pub v: T; pub fn make(x: T) -> Cell<T> { Cell { v = x } }; pub fn read(self) -> T { self.v } }`; `Cell<i64>::make(7).read()` → exit 7 (proves L5 + L4).
-- `examples/regressions/generic_method_self_construct/` — `fn dup(self) -> Box<T> { Box { value = self.value } }` (proves the L4 return-type thread).
+- `examples/regressions/generic_struct_method/` — `type Box<T> = struct { value: T; pub fn get(self): T { self.value } }`; `Box<i64>{value=42}.get()` → **exit 42**; a second `Box<u8>` inst proves per-instance stamping.
+- `examples/regressions/generic_class_factory/` — `type Cell<T> = class { pub v: T; pub fn make(x: T): Cell<T> { Cell { v = x } }; pub fn read(self): T { self.v } }`; `Cell<i64>::make(7).read()` → exit 7 (proves L5 + L4).
+- `examples/regressions/generic_method_self_construct/` — `fn dup(self): Box<T> { Box { value = self.value } }` (proves the L4 return-type thread).
 - `examples/regressions/generic_method_trait_fold/` — a `<K: Hashable & Eq>` chain method (the #163 Map-key path — proves the constraint gate + trait fold survive stamping).
 - Corpus `#test`s in `generics_test.tkt` (interpreter → cover the mono method path both engines).
 **Ritual:** full gate at EACH layer (independently gate-able). The `any_generic` no-op guard (`monomorph.tks:739`) MUST hold — the compiler has ZERO generic methods → gen1==gen2 byte-identical is the single most important fixpoint guard in the cluster. Verify at each layer, not only at the end.
@@ -261,7 +261,7 @@ In `rekey_iface_dispatch` (`monomorph.tks:404`), BEFORE the `type_conforms_to` e
  * @return      a DIRECT TCall keyed on the stamped struct method when the receiver is a struct; else `cl`
  * @since onda-3 (#294)
  */
-fn rekey_struct_constraint_dispatch(cl: TCall, args: []TExpr, table: TypeTable) -> TCall {
+fn rekey_struct_constraint_dispatch(cl: TCall, args: []TExpr, table: TypeTable): TCall {
     if !cl.is_iface_dispatch || args.len == 0 { return cl }
     let recv = match args[0].type { Named as n => n.name; _ => return cl }
     if !is_struct_named(table, recv) { return cl }   // class/interface → leave for the vtable path
@@ -273,7 +273,7 @@ fn rekey_struct_constraint_dispatch(cl: TCall, args: []TExpr, table: TypeTable) 
 Call it at the head of `rekey_iface_dispatch` (return early on a struct rewrite) so `emit_iface_call` never receives a struct. Provide `is_struct_named(table, name)` (a struct-decl-body probe; the checker twin of `cg_is_class_named`). The interpreter side needs no new dispatch — a direct call resolves through `find_function_ns` like any stamped method.
 
 **Fixtures (interpreter==native):**
-- `examples/regressions/struct_through_constraint/` — `type P = struct { pub w: i64; pub fn measure(self) -> i64 { self.w } }` + `fn total<T: Measurable>(x: T) -> i64 { x.measure() }`; `total(P{w=5})` → **exit 5**. Panics on interpreter / cc-rejects natively today; both pass after.
+- `examples/regressions/struct_through_constraint/` — `type P = struct { pub w: i64; pub fn measure(self): i64 { self.w } }` + `fn total<T: Measurable>(x: T): i64 { x.measure() }`; `total(P{w=5})` → **exit 5**. Panics on interpreter / cc-rejects natively today; both pass after.
 - `examples/regressions/struct_vs_class_constraint/` — same constraint satisfied by a STRUCT and by a CLASS in the same program; the struct dispatches direct, the class through the vtable — both correct (proves the no-op-for-class guard).
 **Ritual:** full gate; gated on #254 green (the stamped concrete method is the direct target). gen1==gen2: the compiler uses no constraint-bound struct dispatch → the new arm is a no-op there.
 

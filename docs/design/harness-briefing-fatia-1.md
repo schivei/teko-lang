@@ -150,7 +150,7 @@ pub type GatePlan = struct {
  * @return      os índices dos `#test`, crescentes; vazio quando não há nenhum
  * @since 0.3.1.1
  */
-pub fn gate_test_indices(prog: checker::TProgram) -> []u64
+pub fn gate_test_indices(prog: checker::TProgram): []u64
 
 /**
  * gate_program — devolve `prog` com um `main` SINTETIZADO que corre cada `#test`.
@@ -167,7 +167,7 @@ pub fn gate_test_indices(prog: checker::TProgram) -> []u64
  * @throws      quando o programa não declara nenhum `#test`, ou já traz um `main` de gate
  * @since 0.3.1.1
  */
-pub fn gate_program(prog: checker::TProgram, plan: GatePlan) -> checker::TProgram | error
+pub fn gate_program(prog: checker::TProgram, plan: GatePlan): checker::TProgram | error
 ```
 
 **O corpo que o `main` sintetizado tem de produzir** — é o contrato de hoje, na ordem exacta, e P2
@@ -209,7 +209,7 @@ para a captura. **É UM sinalizador, não dois.**
 O precedente exacto já está no ficheiro e deve ser copiado em vez de inventado — `flat_symbols`:
 
 ```teko
-pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error
+pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false): LModule | error
 ```
 
 parâmetro de topo com omissão, carregado em `LowerCtx` (`flat_symbols: bool`) e reproduzido em cada

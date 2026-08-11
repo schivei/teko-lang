@@ -79,7 +79,7 @@ Essa condição **acabou de ser satisfeita**. O commit `afdb1fd8` (já no vagão
 - `collect_undefined_x86` já derivava `GLOBAL|NOTYPE / SHN_UNDEF` de qualquer alvo de relocation
   não definido, e `objfile_elf.tks` já emitia `R_X86_64_PLT32`. **Só o NOME estava errado.**
 
-A prova do commit: `pub extern fn c_getpid() -> i32 = "getpid"` passou de
+A prova do commit: `pub extern fn c_getpid(): i32 = "getpid"` passou de
 `ld: undefined reference to 'externprobe__p__c_getpid'` para `nm -u → U getpid`, binário roda.
 
 **Consequência:** `teko_rt.tks` pode declarar `extern fn write(fd, buf, n)`, `extern fn _exit(c)`,

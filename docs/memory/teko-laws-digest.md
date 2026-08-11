@@ -480,7 +480,7 @@ Respondidas em bloco, na sequência das duas auditorias (`cargo/0.3.1-superficie
 
 `texpr_diverges` (`typer.tks:3281`) e a sua cópia `cg_expr_diverges` (`codegen.tks:3986`) reconhecem
 divergência por **comparação de string com o nome nu** — `segments.len == 1 && (name == "panic" ||
-name == "exit")` — sem nunca consultar o resolvedor. Um `pub fn exit(code: i32) -> str` do
+name == "exit")` — sem nunca consultar o resolvedor. Um `pub fn exit(code: i32): str` do
 utilizador ganha a resolução mas continua a ser tratado como divergente, e o checker salta a
 verificação de tipo de retorno nesse ramo. **Na rota C o `cc` apanha por acidente. O backend nativo
 não tem `cc`** — e esta lane é precisamente a que remove essa rede do Linux. Verificado por leitura
@@ -639,7 +639,7 @@ wasm nesta árvore encontrou um defeito da remoção, não uma migalha deixada d
 
 ### Duas leis em que EU escorreguei, registadas para não se repetir
 
-Propus ao dono `fn main() -> void` e `fn main() -> i32`, *"exatamente como o `Main` do C#"*. Ele
+Propus ao dono `fn main(): void` e `fn main(): i32`, *"exatamente como o `Main` do C#"*. Ele
 cortou:
 
 > Não temos `void` eu os bani, do mesmo modo, não temos sobrecarga de função/metodo, também os bani
@@ -665,7 +665,7 @@ REGRA DE ENTRADA HÍBRIDA, não para o conjunto de assinaturas.
 > livre, se não, o arquivo é como é hoje. Mas, a funcao main teria que residir dentro do main.tks
 > somente e haver somente um de cada (somente uma funcao e somente um arquivo main).
 
-1. **Assinatura: `fn main() -> i32`, e só.** Dono: *"Sai com i32 (sem saída não será aceito)"* — um
+1. **Assinatura: `fn main(): i32`, e só.** Dono: *"Sai com i32 (sem saída não será aceito)"* — um
    `fn main()` sem seta é **erro honesto**, nunca exit 0 implícito. Sem `void` para oferecer e sem
    sobrecarga para permitir duas formas, há exatamente uma.
 2. **Misturar `fn main` com instruções no topo: REJEITAR.** Ambiguidade de ponto de entrada, e o C#
@@ -745,7 +745,7 @@ trabalha ao nível do FONTE, `regr_group_main_text` **gera um `main.tks`** por g
 2. A entrada do programa é **sempre também** emitida sob `<project>__main`, em todo modo, logo é
    chamável e assertável.
 
-O híbrido cai de graça nessa invariante: um `fn main() -> i32` escrito pelo utilizador **já** é
+O híbrido cai de graça nessa invariante: um `fn main(): i32` escrito pelo utilizador **já** é
 manglado para `<project>__main` pelo mangler ordinário, logo em modo de teste já é emitido e chamável.
 O único que precisa de tratamento novo é o main **virtual** (instruções soltas).
 
@@ -758,7 +758,7 @@ O `main.tks` do próprio compilador é o único espécime grande, e vive na **ra
 > (no fn/type declarations — those live in modules). Output contract: natural end → exit 0;
 > `teko::exit(n)` → exit n; panic → stderr + exit ≠0. **NO value return.**
 
-1. **`fn main() -> i32` é contrato NOVO, não renomeação.** Hoje o código de saída sai por
+1. **`fn main(): i32` é contrato NOVO, não renomeação.** Hoje o código de saída sai por
    `teko::exit(n)` DENTRO do corpo, e o main virtual explicitamente não devolve valor. As duas formas
    vão coexistir — o que torna "um `fn main` sem seta é erro honesto" ainda mais necessário: senão
    haveria um main que nem devolve nem tem contrato de saída.
@@ -1121,7 +1121,7 @@ sistema crua na superfície. A única forma de alcançar o SO é o FFI, e ele li
 nome**:
 
 ```teko
-pub extern fn c_aligned_alloc(alignment: u64, size: u64) -> u64 = "aligned_alloc"
+pub extern fn c_aligned_alloc(alignment: u64, size: u64): u64 = "aligned_alloc"
 ```
 
 `tdb` precisa de `ptrace` (Linux), `mach_vm`/`ptrace` (macOS), `DebugActiveProcess` (Windows). **Duas
@@ -1227,7 +1227,7 @@ mas não é pré-requisito de nada nesta versão.
 `call_indirect_inst` um parâmetro com valor por omissão:
 
 ```teko
-pub fn call_inst(…, ret_type: LType = LType::I64) -> LInst      // em src/lir/lir.tks, namespace teko::lir
+pub fn call_inst(…, ret_type: LType = LType::I64): LInst      // em src/lir/lir.tks, namespace teko::lir
 ```
 
 Dentro de `teko::lir`, `LType::I64` escreve-se nu e compila. Mas **o valor por omissão é materializado em
@@ -1286,7 +1286,7 @@ fronteira de hunk que fez desaparecer o `0`, o `}`, a linha vazia e o `/**` entr
 seguinte — deixando o corpo de uma a correr para dentro do doc-comment da outra:
 
 ```teko
-fn f_slice_elem_store_boundaries() -> i64 {
+fn f_slice_elem_store_boundaries(): i64 {
     …
     if ys.len != 5 { return 11 }
  * D27_TENTH_F32 — `0.1` held as an `f32` …
@@ -2356,9 +2356,9 @@ não um mecanismo. Não é um contra-argumento à decisão: é o teste que ela e
 ```teko
 type WaitGroup = class {
     pub id: u64                                       // carrega o id e MAIS NADA (§19.3)
-    pub fn add(self, n: u64) -> error | null { … }
-    pub fn done(self)        -> error | null { … }
-    pub fn wait(self)        -> error | null { … }
+    pub fn add(self, n: u64): error | null { … }
+    pub fn done(self): error | null { … }
+    pub fn wait(self): error | null { … }
 }
 
 fn main() {
@@ -2596,7 +2596,7 @@ Eu disse ao dono, e escrevi-o para justificar que a medição era barata:
 **Li a linha 6030 e nunca li as 6027–6029, que são a guarda:**
 
 ```teko
-fn check_ref_storability(tf: TFunction) -> error | null {
+fn check_ref_storability(tf: TFunction): error | null {
     if !fn_has_ref_param(tf) {
         if !stmts_have_free(tf.body) { return null }
     }

@@ -51,14 +51,14 @@ Three small factual corrections to the requesting brief are in §8.
 
 - `pub type ElfObject = struct { e_machine: u32; e_flags: u32; text; rodata; symbols: []Symbol;
   relocs: []ElfRelocReq; rodata_relocs: []ElfRelocReq }` (`:990`)
-- `pub fn emit_elf_object(obj: ElfObject) -> []byte` (`:1052`) — its own doc-comment: *"No ISA
+- `pub fn emit_elf_object(obj: ElfObject): []byte` (`:1052`) — its own doc-comment: *"No ISA
   knowledge remains past this boundary — the per-ISA `emit_elf` adapter supplies the machine, flags,
   and numeric reloc types, so E1 (the ELF static linker) reuses this verbatim."*
 - `pub type ElfRelocReq = struct { offset; sym; rtype: u32; addend: i64 }` — **`rtype` is already a
   NUMBER**, not an x86 enum.
 - `fn emit_elf_header(buf, lay, e_machine: u32, e_flags: u32, nsects)` (`:758`) — the machine is a
   **parameter**.
-- `pub fn emit_elf(enc: EncodedModuleX86) -> []byte` (`:1136`) is a **13-line adapter**: it fills
+- `pub fn emit_elf(enc: EncodedModuleX86): []byte` (`:1136`) is a **13-line adapter**: it fills
   `e_machine = EM_X86_64`, `e_flags = 0`, and maps kinds to numbers.
 
 So the AArch64 ELF object writer is a **sibling adapter**, and `emit_elf_object` /
@@ -128,7 +128,7 @@ Three things this proves, that presumption would have got wrong:
 `src/backend/isel_arm64.tks:1502`:
 
 ```
-fn select_func_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFuncAddr) -> SelCtx {
+fn select_func_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFuncAddr): SelCtx {
     select_addr_pair(ctx0, inst, fa.symbol, MRelocKind::Call, MRelocKind::Call)
 }
 ```
@@ -181,7 +181,7 @@ formats:
  * @param fa    the function-address op
  * @return      the advanced context
  */
-fn select_func_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFuncAddr) -> SelCtx {
+fn select_func_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFuncAddr): SelCtx {
     select_addr_pair(ctx0, inst, fa.symbol, MRelocKind::PageHi, MRelocKind::PageLo)
 }
 ```
@@ -275,7 +275,7 @@ const EM_AARCH64: u32 = 183 to u32
  * @return u32  the `Elf64_Rela` `r_info` type field
  * @since 0.3.1
  */
-fn elf_reloc_type_arm64(kind: MRelocKind) -> u32 {
+fn elf_reloc_type_arm64(kind: MRelocKind): u32 {
     match kind {
         PageHi => 275 to u32
         PageLo => 277 to u32
@@ -285,8 +285,8 @@ fn elf_reloc_type_arm64(kind: MRelocKind) -> u32 {
 }
 ```
 
-plus `arm64_reloc_reqs(enc: EncodedModule) -> []ElfRelocReq`,
-`arm64_rodata_reloc_reqs(enc: EncodedModule) -> []ElfRelocReq` (the `RelocSect::Text` /
+plus `arm64_reloc_reqs(enc: EncodedModule): []ElfRelocReq`,
+`arm64_rodata_reloc_reqs(enc: EncodedModule): []ElfRelocReq` (the `RelocSect::Text` /
 `RelocSect::Rodata` partition, structurally identical to `x86_reloc_reqs` /
 `x86_rodata_reloc_reqs` at `:1094`/`:1115`), and:
 
@@ -304,7 +304,7 @@ plus `arm64_reloc_reqs(enc: EncodedModule) -> []ElfRelocReq`,
  * @return []byte  the ELF64 `ET_REL` object file bytes
  * @since 0.3.1
  */
-pub fn emit_elf_arm64(enc: EncodedModule) -> []byte {
+pub fn emit_elf_arm64(enc: EncodedModule): []byte {
     emit_elf_object(ElfObject {
         e_machine = EM_AARCH64
         e_flags = 0 to u32
@@ -365,7 +365,7 @@ exactly one call:
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest): i32 {
     let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
     let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }

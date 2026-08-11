@@ -24,8 +24,8 @@ fail() { echo "fmt_cli_test: FAIL: $*" >&2; exit 1; }
 work="$(mktemp -d "${TMPDIR:-/tmp}/teko-fmt-cli.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-UNFORMATTED=$'fn a() -> i64 {\nreturn 1\n}\n'
-CANONICAL=$'fn a() -> i64 {\n    return 1\n}\n'
+UNFORMATTED=$'fn a(): i64 {\nreturn 1\n}\n'
+CANONICAL=$'fn a(): i64 {\n    return 1\n}\n'
 INVALID=$'fn (\n'
 
 assert_check_mode() {

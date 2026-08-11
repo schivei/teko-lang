@@ -66,7 +66,7 @@ que este desenho explicitamente NÃO toma; fica para depois de os pontos abertos
 **Verificação de que o per-função não lê estado global mutável que afeta bytes** (a prova §3 depende
 disto):
 - `tk_alloc` → per-task (a filha entrada, `cur_regions` topo). ✔
-- `region_new`/`region_drop` → `tk_task_current()->regs` (per-task) + `tk_g_region_gen` ATÔMICO
+- `region_new`/`region_drop` → `tk_task_current():regs` (per-task) + `tk_g_region_gen` ATÔMICO
   (`teko_rt.c:1281`); o `gen` só afeta a validade do `push_cache`, NUNCA os bytes. ✔
 - interning → **medido: o backend NÃO interna.** `grep intern src/backend` = só palavras de
   doc-comment ("internal", "rodata-internal"); os builtins `intern_get`/`put` só têm binding em
@@ -273,7 +273,7 @@ a MESMA função de worker `cabi`, sobre o MESMO `encoded[]` disjunto.
  * @return       o vetor de `EncodedFuncX86` em ordem de índice de função, ou o honest-stop propagado
  * @since 0.3.1
  */
-fn encode_module_mapped_x86(entry: teko::lir::LModule, lanes: u64) -> []teko::backend::EncodedFuncX86 | error
+fn encode_module_mapped_x86(entry: teko::lir::LModule, lanes: u64): []teko::backend::EncodedFuncX86 | error
 
 /**
  * encode_module_reduced_x86 — a FASE REDUCE serial e ORDENADA: folda `encoded[0..n]` no acumulador
@@ -288,7 +288,7 @@ fn encode_module_mapped_x86(entry: teko::lir::LModule, lanes: u64) -> []teko::ba
  * @return         o módulo codificado (imagens de secção + símbolos ordenados + relocs), ou honest-stop
  * @since 0.3.1
  */
-fn encode_module_reduced_x86(encoded: []teko::backend::EncodedFuncX86, rodata: teko::lir::Rodata, globals: teko::lir::Globals) -> teko::backend::EncodedModuleX86 | error
+fn encode_module_reduced_x86(encoded: []teko::backend::EncodedFuncX86, rodata: teko::lir::Rodata, globals: teko::lir::Globals): teko::backend::EncodedModuleX86 | error
 
 /**
  * clone_encoded_into — copia um `EncodedFuncX86` da região de scratch da função para `dst` (a
@@ -302,7 +302,7 @@ fn encode_module_reduced_x86(encoded: []teko::backend::EncodedFuncX86, rodata: t
  * @return     o `EncodedFuncX86` residente em `dst`
  * @since 0.3.1
  */
-fn clone_encoded_into(dst: u64, ef: teko::backend::EncodedFuncX86) -> teko::backend::EncodedFuncX86
+fn clone_encoded_into(dst: u64, ef: teko::backend::EncodedFuncX86): teko::backend::EncodedFuncX86
 ```
 
 Funções existentes TOCADAS (chamadas, não editadas): `encode_lfunc_in_region_x86`

@@ -45,10 +45,10 @@ opt-out for the code that genuinely needs raw control.
 // Errors are values: a function that can fail returns `T | error`.
 pub type Box = struct { v: i64 }
 
-fn ok()   -> Box | error { Box { v = 7 } }
-fn fail() -> Box | error { error::new("boom") }
+fn ok(): Box | error { Box { v = 7 } }
+fn fail(): Box | error { error::new("boom") }
 
-pub fn classify() -> i64 {
+pub fn classify(): i64 {
     match ok() {
         Box as b  => b.v      // bind the success member
         error     => 0        // handle the failure member
@@ -58,7 +58,7 @@ pub fn classify() -> i64 {
 
 ```teko
 // Optionals: `T?`, safe navigation `?.`, and coalescing `??`.
-pub fn safe() -> i64 {
+pub fn safe(): i64 {
     let b: Box? = null
     b?.v ?? 8                 // absence falls back to 8
 }
@@ -70,11 +70,11 @@ type Dog = class {
     pub name: str
     pub age: i64
 
-    pub fn make(n: str, a: i64) -> Dog {
+    pub fn make(n: str, a: i64): Dog {
         Dog { name = n; age = a }
     }
 
-    pub fn is_puppy(self) -> bool {
+    pub fn is_puppy(self): bool {
         self.age < 1
     }
 }
@@ -84,7 +84,7 @@ let rex = Dog::make("Rex", 3)
 
 Programs have a **virtual main**: top-level statements in `main.tks` are the entry point — no
 boilerplate `fn main` required for a simple program. A program that wants an explicit exit code
-contract can instead write `fn main() -> i32` (see `language-guide.md`); the two forms are
+contract can instead write `fn main(): i32` (see `language-guide.md`); the two forms are
 mutually exclusive within one project.
 
 ## Project status

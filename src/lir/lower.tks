@@ -1016,7 +1016,7 @@ pub type LFieldDecls = struct { name: str; field_names: []str; field_types: []ch
 
 /**
  * LExternFn — one declared `extern fn`'s resolved namespace + Teko name + the
- * FOREIGN symbol it binds to (C7.1a: `extern fn f(…) -> T = "sym"`). A call to
+ * FOREIGN symbol it binds to (C7.1a: `extern fn f(…): T = "sym"`). A call to
  * an `extern` must target that raw symbol, NOT the Teko namespace mangling —
  * the mangled name is defined by nobody, so the link fails on an undefined
  * reference. The C backend already dispatches this way through
@@ -2976,7 +2976,7 @@ fn lower_variant_member_compare_dispatch(ctx: LowerCtx, e: checker::TExpr, cmp: 
 }
 
 /**
- * lower_compare — a `TCompare` (`first` + `rest` chain) -> the chain of ICmp/FCmp opcodes, ANDed
+ * lower_compare — a `TCompare` (`first` + `rest` chain): the chain of ICmp/FCmp opcodes, ANDed
  * together. Four subject shapes detour before the generic chain: a `str` subject goes to
  * `lower_str_compare` (two words, no single machine comparison); a `char` subject goes to
  * `lower_char_compare` (a scalar, but with no `PrimKind` — see its own doc); a `[]T` subject goes
@@ -3527,7 +3527,7 @@ fn lower_last_index_of_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, e: che
 }
 
 /**
- * lower_last_index_of_call — `teko::str::last_index_of(hay, needle) -> u64 | error` (0.3.1.0
+ * lower_last_index_of_call — `teko::str::last_index_of(hay, needle): u64 | error` (0.3.1.0
  * degrau 15): the runtime's real ABI (`tk_rt_last_index_of`) returns a 2-eightbyte
  * `{bool ok; uint64_t value}` struct this backend's `LCall` cannot capture (it reads ONE result
  * register, `select_call_result_x86`/`select_call_result_arm64`) — so a dedicated runtime twin
@@ -3703,7 +3703,7 @@ fn lower_ffi_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, msg_ptr: u32, ms
 }
 
 /**
- * lower_str_from_utf8_call — `teko::text::str_from_utf8(bytes) -> str | error` (0.3.1.0 degrau
+ * lower_str_from_utf8_call — `teko::text::str_from_utf8(bytes): str | error` (0.3.1.0 degrau
  * 21): the runtime's real ABI (`tk_ffi_sres`, `{bool ok; tk_str value; tk_str err}` — 40 bytes,
  * SysV MEMORY class → SRET) is wider than this backend's `LCall` can capture (it reads ONE result
  * register, `select_call_result_x86`/`select_call_result_arm64`), so a dedicated runtime twin
@@ -4159,7 +4159,7 @@ fn lower_f64_bitcast_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): 
  * is_float_parse_call — recognizes `teko::float::parse`'s bare last segment:
  * the IEEE-754 string-to-double parser builtin.
  *
- * `teko::float::parse(str) -> f64` is intercepted in `lower_call` BEFORE
+ * `teko::float::parse(str): f64` is intercepted in `lower_call` BEFORE
  * `call_symbol` because the result comes back in XMM0/D0 and LCall records no
  * result class, so the native backend's result-register selector would
  * silently corrupt the float value by reading from the integer register. The
@@ -4175,7 +4175,7 @@ fn is_float_parse_call(callee: parser::Path): bool {
 }
 
 /**
- * lower_float_parse_call — `teko::float::parse(str) -> f64`: intercept the
+ * lower_float_parse_call — `teko::float::parse(str): f64`: intercept the
  * call and route through `tk_rt_float_parse_bits`, which wraps the standard
  * float parser and returns IEEE-754 bits as a u64. The u64 result is then
  * bitcasted back to f64 on the assignment side.
@@ -4200,7 +4200,7 @@ fn lower_float_parse_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): 
  * is_bytes_from_ptr_call — recognizes `teko::mem::bytes_from_ptr`'s bare last segment: the
  * slice-lift builtin that constructs a `[]byte` fat value from a raw pointer and a byte count.
  *
- * `bytes_from_ptr(ptr<byte>, u64) -> []byte` is intercepted in `lower_call_fat` BEFORE
+ * `bytes_from_ptr(ptr<byte>, u64): []byte` is intercepted in `lower_call_fat` BEFORE
  * `call_symbol` because no runtime call is needed — the fat result is simply the two already-
  * lowered arguments bound together as a `(ptr, len)` pair.
  *
@@ -4213,7 +4213,7 @@ fn is_bytes_from_ptr_call(callee: parser::Path): bool {
 }
 
 /**
- * lower_bytes_from_ptr_call — `teko::mem::bytes_from_ptr(ptr, len) -> []byte`: identity fat-
+ * lower_bytes_from_ptr_call — `teko::mem::bytes_from_ptr(ptr, len): []byte`: identity fat-
  * lift. Constructs the fat slice directly from the two already-lowered scalar arguments, with no
  * runtime call at all — the SAME no-ABI-call shortcut `lower_f64_bitcast_call` takes, though that
  * one still needs a real machine instruction to cross the GPR/FPR register-file boundary, where
@@ -4237,7 +4237,7 @@ fn lower_bytes_from_ptr_call(ctx: LowerCtx, c: checker::TCall): LoweredFat | err
  * is_buf_ptr_call — recognizes `teko::mem::buf_ptr`'s bare last segment: the arena bump-allocate
  * builtin that allocates `len` bytes in ROOT (0.3.1.0 degrau 26).
  *
- * `teko::mem::buf_ptr(len: u64) -> ptr<byte>` is intercepted BEFORE the plain `call_symbol`
+ * `teko::mem::buf_ptr(len: u64): ptr<byte>` is intercepted BEFORE the plain `call_symbol`
  * resolver table because `buf_ptr` returns a RAW `ptr<byte>` with NO lifetime tracking of its
  * own — the checker/backend cannot see whether the caller retains it past the innermost open
  * scope (the exact shape a `{}`/if-arm/loop-iteration region NP5 opens would free out from under,
@@ -4257,7 +4257,7 @@ fn is_buf_ptr_call(callee: parser::Path): bool {
 }
 
 /**
- * lower_buf_ptr_call — `teko::mem::buf_ptr(len: u64) -> ptr<byte>`: allocate `len` bytes into
+ * lower_buf_ptr_call — `teko::mem::buf_ptr(len: u64): ptr<byte>`: allocate `len` bytes into
  * ROOT (via `tk_region_root_u()`) and return the pointer. This is the enclosing-region twin of C
  * codegen's `emit_buf_ptr` MINUS the enclosing-region routing (`is_buf_ptr_call`'s own doc):
  * `buf_ptr`'s raw, untracked-lifetime pointer routinely outlives the innermost lexical scope, so
@@ -4318,7 +4318,7 @@ fn is_load_u64_call(callee: parser::Path): bool {
 }
 
 /**
- * lower_load_u64_call — `teko::mem::load_u64(addr: u64) -> u64`: read ONE 64-bit word at the
+ * lower_load_u64_call — `teko::mem::load_u64(addr: u64): u64`: read ONE 64-bit word at the
  * caller-computed address. Lowers directly to `LLoad{addr, ty=I64}` (`lir.tks:151`) — the SAME
  * instruction every struct field read already emits — with NO runtime call: the argument's own
  * VReg IS the address, because a raw `u64` address carries no field offset to add on top (P1's
@@ -4356,7 +4356,7 @@ fn is_store_u64_call(callee: parser::Path): bool {
 }
 
 /**
- * lower_store_u64_call — `teko::mem::store_u64(addr: u64, v: u64) -> void`: write ONE 64-bit
+ * lower_store_u64_call — `teko::mem::store_u64(addr: u64, v: u64): void`: write ONE 64-bit
  * word to the caller-computed address. Lowers directly to `LStore{addr, value, ty=I64}`
  * (`lir.tks:155`) with no runtime call — the twin of `lower_load_u64_call`.
  *
@@ -4412,7 +4412,7 @@ fn is_region_new_call(c: checker::TCall): bool {
 }
 
 /**
- * lower_region_new_call — `teko::mem::region_new() -> uptr`: open a fresh child region of the
+ * lower_region_new_call — `teko::mem::region_new(): uptr`: open a fresh child region of the
  * process root and return its opaque handle. Mirrors the C route's inline
  * `(uintptr_t)tk_region_new(tk_region_root())` (`codegen.tks:4166`) with two chained `LCall`s, in
  * the mould of `lower_buf_ptr_call`: `tk_region_root()` then `tk_region_new(root)`. The result is a
@@ -4512,7 +4512,7 @@ fn region_alloc_store_init(ctx: LowerCtx, elem: checker::Type, init: checker::TE
 }
 
 /**
- * lower_region_alloc_call — `teko::mem::region_alloc(region: uptr, init: T) -> ptr<T>`: bump-alloc
+ * lower_region_alloc_call — `teko::mem::region_alloc(region: uptr, init: T): ptr<T>`: bump-alloc
  * `sizeof(T)` bytes in `region`, copy `init` there, and return the `ptr<T>`. Mirrors
  * `emit_region_alloc` (`codegen.tks:3821`): `p = tk_region_alloc((tk_region*)region, sizeof(T)); *p
  * = init; p`. `sizeof(T)` is `region_alloc_elem_size` of the element read off `e.type` (as the C
@@ -4553,7 +4553,7 @@ fn is_mem_free_call(c: checker::TCall): bool {
 }
 
 /**
- * lower_mem_free_call — `teko::mem::free(x) -> void`: reclaim `x`'s heap block and SCRUB the
+ * lower_mem_free_call — `teko::mem::free(x): void`: reclaim `x`'s heap block and SCRUB the
  * binding, branching on the type of `x` (the checker proved it a mutable variable of a heap type).
  * Mirrors `emit_mem_free`/`emit_region_free` (`codegen.tks:3932-3993`):
  *
@@ -4669,7 +4669,7 @@ fn lower_free_region_handle(ctx: LowerCtx, arg: checker::TExpr, nm: checker::Nam
 
 /**
  * is_str_arg_builtin — is `sym` one of the seven io sinks `lower_str_arg_call` was written for
- * (`IO_STR_SINK_ENTRIES`: the six `(tk_str) -> void` writers plus `_Noreturn tk_panic_str`)?
+ * (`IO_STR_SINK_ENTRIES`: the six `(tk_str): void` writers plus `_Noreturn tk_panic_str`)?
  *
  * A ROUTING QUESTION, NOT AN ABI ONE, and that distinction is the whole reason it is no longer
  * spelled `fat_arg_builtin_arity(sym) == 1`. Its truth sends a call into `lower_str_arg_call`,
@@ -5247,7 +5247,7 @@ fn assert_seed_symbol(callee: parser::Path): str | null {
 
 /**
  * builtin_str_query_symbol — the runtime twin of the two `str` PREDICATE builtins this N1 subset
- * lowers directly: `ends_with`/`contains` (`checker/scope.tks`), both `(str, str) -> bool`. A
+ * lowers directly: `ends_with`/`contains` (`checker/scope.tks`), both `(str, str): bool`. A
  * `bool` result fits the SAME single result register `select_call_result_x86`/
  * `select_call_result_arm64` already capture for every ordinary scalar call — unlike the SLICE
  * family below (`builtin_str_slice_symbol`), no out-parameter-length twin is needed here, because
@@ -5288,7 +5288,7 @@ fn builtin_str_slice_symbol(last: str): str | null {
 
 /**
  * builtin_int_to_str_symbol — the runtime twin of the two INTEGER-TO-DECIMAL-STRING builtins this
- * N1 subset lowers directly: `i64_to_str`/`u64_to_str` (`checker/scope.tks`), each `(iNN) -> str`
+ * N1 subset lowers directly: `i64_to_str`/`u64_to_str` (`checker/scope.tks`), each `(iNN): str`
  * (fat), resolving to the out-parameter-length twins built at 0.3.1.0 degrau 9
  * (`tk_i64_to_str_len`/`tk_u64_to_str_len`, `teko_rt.h`) — the SAME `lower_len_out_call` shape
  * `builtin_str_slice_symbol` already uses. Before this resolved, the ONLY native path to either
@@ -5309,7 +5309,7 @@ fn builtin_int_to_str_symbol(last: str): str | null {
 
 /**
  * builtin_float_to_str_symbol — the runtime twin of the two FLOAT-TO-TEXT builtins this N1 subset
- * lowers directly: `ftoa` and `f64_g17` (`checker/scope.tks`), each `(f64) -> str` (fat) and each
+ * lowers directly: `ftoa` and `f64_g17` (`checker/scope.tks`), each `(f64): str` (fat) and each
  * the SAME `%.17g` host renderer (`teko_rt.c` — one exact-binary64-round-trip spelling under two
  * names, which the C route already treats as interchangeable). Both resolve to the out-parameter-
  * length twins added at 0.3.1.0 degrau 27 (`tk_ftoa_len`/`tk_f64_g17_len`, `teko_rt.h`) — the SAME
@@ -5339,7 +5339,7 @@ fn builtin_float_to_str_symbol(last: str): str | null {
 /**
  * builtin_str_of_bytes_symbol — the runtime twin of the `str`/`str_of_bytes` builtin ALIAS pair
  * this N1 subset lowers directly (`checker/scope.tks`'s own `if name == "str" || name ==
- * "str_of_bytes"` — ONE registration, two spellings): `([]byte) -> str` (fat), resolving to the
+ * "str_of_bytes"` — ONE registration, two spellings): `([]byte): str` (fat), resolving to the
  * out-parameter-length twin (`tk_str_of_bytes_len`, `teko_rt.h`) — the SAME `lower_len_out_call`
  * shape `builtin_str_slice_symbol`/`builtin_int_to_str_symbol` already use. No new lowering ARM is
  * needed: a `[]byte` argument is ALREADY fat (`is_fat_type`), so `lower_args`' existing
@@ -5358,7 +5358,7 @@ fn builtin_str_of_bytes_symbol(last: str): str | null {
 /**
  * builtin_bytes_of_str_symbol — the runtime twin of the ONE STRING-TO-BYTES VIEW builtin this N1
  * subset lowers directly: `bytes_of_str` (`teko::text::bytes_of_str`, `checker/scope.tks`), a
- * `(str) -> []byte` (fat) ZERO-COPY view of a `str`'s own bytes — resolves to the out-parameter-
+ * `(str): []byte` (fat) ZERO-COPY view of a `str`'s own bytes — resolves to the out-parameter-
  * length twin (`tk_bytes_of_str_len`, `teko_rt.h`), the SAME `lower_len_out_call` shape
  * `builtin_str_of_bytes_symbol` already uses for its own reverse direction (`[]byte -> str`). No
  * new lowering ARM is needed: `s`'s fat (ptr, len) pair already flattens through `lower_args`
@@ -5377,7 +5377,7 @@ fn builtin_bytes_of_str_symbol(last: str): str | null {
 
 /**
  * builtin_one_byte_symbol — the runtime twin of the ONE BYTE-TO-STRING builtin this N1 subset
- * lowers directly: `one_byte` (`checker/scope.tks`'s `(byte) -> str`), a fresh 1-byte `str` holding
+ * lowers directly: `one_byte` (`checker/scope.tks`'s `(byte): str`), a fresh 1-byte `str` holding
  * its argument — resolves to the out-parameter-length twin (`tk_one_byte_len`, `teko_rt.h`), the
  * SAME `lower_len_out_call` shape `builtin_str_of_bytes_symbol`/`builtin_bytes_of_str_symbol`
  * already use for their own `[]byte`/`str` directions. No new lowering ARM is needed: the lone
@@ -5401,7 +5401,7 @@ fn builtin_one_byte_symbol(last: str): str | null {
 /**
  * builtin_host_info_symbol — the runtime twin of the three ZERO-ARGUMENT, COMPILE-TIME-CONSTANT
  * host-info strings this N1 subset lowers directly: `os`/`arch`/`version` (`checker/scope.tks`),
- * each `() -> str` (fat), resolving to the out-parameter-length twin (`tk_rt_os_len`/
+ * each `(): str` (fat), resolving to the out-parameter-length twin (`tk_rt_os_len`/
  * `tk_rt_arch_len`/`tk_rt_version_len`, `teko_rt.h`) — the SAME `lower_len_out_call` shape
  * `builtin_str_slice_symbol`/`builtin_str_of_bytes_symbol` already use. Found while closing
  * degrau 15/16's own sibling search: the compiler's own `teko::build::target_os` calls `os`/
@@ -5419,7 +5419,7 @@ fn builtin_host_info_symbol(last: str): str | null {
 
 /**
  * builtin_peak_rss_symbol — the runtime twin of the ONE plain-scalar host-info builtin this N1
- * subset lowers directly: `peak_rss() -> u64` (`checker/scope.tks`) — a whole 64-bit register,
+ * subset lowers directly: `peak_rss(): u64` (`checker/scope.tks`) — a whole 64-bit register,
  * so it needs no out-parameter convention at all, unlike its `str`-returning `os`/`arch`/
  * `version` siblings above (0.3.1.0 degrau 17).
  *
@@ -5441,7 +5441,7 @@ fn builtin_peak_rss_symbol(last: str): str | null {
  * `teko::env` host-surface primitive with a native lowering (`builtin_env_symbol`). Split into one
  * predicate per family so a family grows without lengthening the others.
  *
- * The INVERSE direction of the float pair — `teko::float::parse(str) -> f64`, the language's own
+ * The INVERSE direction of the float pair — `teko::float::parse(str): f64`, the language's own
  * `atof` — is deliberately NOT here, and its absence is a MEASURED refusal rather than an
  * oversight: its result is a `double` in XMM0/D0, and `select_call_result_x86`/
  * `select_call_result_arm64` capture every call result out of the INTEGER result register (`LInst`
@@ -5572,7 +5572,7 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false): str
 }
 
 /**
- * float_parse_result_stop — the NAMED honest stop for `teko::float::parse(str) -> f64`, the
+ * float_parse_result_stop — the NAMED honest stop for `teko::float::parse(str): f64`, the
  * language's own `atof` and the INVERSE direction of the float-to-text pair degrau 27 lowered
  * (`builtin_float_to_str_symbol`). Its runtime twin already exists (`tk_float_parse`, `teko_rt.h`)
  * and its `str` argument already flattens through `lower_args`, so the ONLY thing missing is the
@@ -5590,7 +5590,7 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false): str
  * @return  the honest stop, always
  */
 fn float_parse_result_stop(): error {
-    error { message = "native backend N1: builtin `parse` (`teko::float::parse(str) -> f64`) not yet lowered (N2) — its `double` result comes back in XMM0/D0 and `LCall` records no result class, so `select_call_result_*` would capture the integer register instead and hand back a silently wrong float" }
+    error { message = "native backend N1: builtin `parse` (`teko::float::parse(str): f64`) not yet lowered (N2) — its `double` result comes back in XMM0/D0 and `LCall` records no result class, so `select_call_result_*` would capture the integer register instead and hand back a silently wrong float" }
 }
 
 /**
@@ -6277,7 +6277,7 @@ fn store_lambda_captures(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, c
  * body's `bind_lambda_captures` reads back from (A1-7, #382).
  *
  * The filled aggregate is built in a frame `alloca` and then COPIED into runtime storage
- * (`emit_elem_box`), because a closure outlives the statement that made it: `fn f() -> (u64) ->
+ * (`emit_elem_box`), because a closure outlives the statement that made it: `fn f(): (u64):
  * void { (n: u64) => { … } }` returns a value whose env word would otherwise aim at the frame the
  * `ret` popped. `frame_escape_guard` reports exactly that shape, and reported it on the corpus's
  * own `rd_tick_fn` (0.3.1.0 degrau agregado-copia).
@@ -11372,7 +11372,7 @@ fn lower_concat_elements(ctx: LowerCtx, e: checker::TExpr, elements: []checker::
 
 /**
  * is_append_fo_call — recognizes the checker's OWN `teko::mem::append_fo` builtin (the `#148 R2`
- * BULK byte-append, `([]byte, str) -> []byte`, free-old on grow BY DECREE). Resolved by BARE LAST
+ * BULK byte-append, `([]byte, str): []byte`, free-old on grow BY DECREE). Resolved by BARE LAST
  * SEGMENT, because that is how the checker itself resolves it: `append_fo` lives in `scope.tks`'s
  * `builtin_fn` table, which keys on the last path segment ALONE, so any prefix ending in the name
  * reaches the same builtin — the SAME shape `is_concat_builtin_call` recognizes its own family by,
@@ -11389,7 +11389,7 @@ fn is_append_fo_call(callee: parser::Path): bool {
 }
 
 /**
- * lower_append_fo_call — `teko::mem::append_fo(dst: []byte, src: str) -> []byte`: the runtime's own
+ * lower_append_fo_call — `teko::mem::append_fo(dst: []byte, src: str): []byte`: the runtime's own
  * bulk byte-append (`tk_append_bytes_fo`, `teko_rt.h`), reached through the ESTABLISHED
  * out-parameter-length convention (`lower_len_out_call`) with both arguments ABI-flattened to their
  * (ptr, len) pairs — `four_args`, byte for byte the shape `lower_concat_elements` already passes to

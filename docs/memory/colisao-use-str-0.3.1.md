@@ -50,15 +50,15 @@ Cada sonda foi compilada pelas duas rotas: `TEKO_BACKEND=c teko . -o binc` e `te
 
 ## 1. O caso do dono, directo — `str` como TIPO
 
-`use teko::str` seguido de `fn f(s: str) -> str`.
+`use teko::str` seguido de `fn f(s: str): str`.
 
 ```
 // src/probe.tks
 use teko::str
 
-pub fn f(s: str) -> str { s }
+pub fn f(s: str): str { s }
 
-pub fn check() -> u64 {
+pub fn check(): u64 {
     let r = f("x")
     println(r)
     0
@@ -108,7 +108,7 @@ outra regra.
 ```
 use teko::str
 
-pub fn check() -> u64 {
+pub fn check(): u64 {
     let r = str::concat("a", "b")
     println(r)
     0
@@ -135,8 +135,8 @@ tk_str r = concat(( {
 
 ```
 use teko::str
-pub fn f(s: str) -> str { s }
-pub fn check() -> u64 {
+pub fn f(s: str): str { s }
+pub fn check(): u64 {
     let a = f("a")
     let r = str::concat(a, "b")
     println(r)
@@ -160,7 +160,7 @@ segmentos que não seja `teko::`, ver secção 7.**
 ```
 use teko::str
 
-pub fn check() -> u64 {
+pub fn check(): u64 {
     let b: []byte = [b'h', b'i']
     let r = str(b)
     println(r)
@@ -187,7 +187,7 @@ gap nativo é um degrau conhecido e não-relacionado (§6).**
 
 | sonda | com `use teko::str` | sem `use` | idêntico? |
 |---|---|---|---|
-| `fn f(s: str) -> str` (tipo) | ✓/✓ (C/nativo) | ✓/✓ | **sim** |
+| `fn f(s: str): str` (tipo) | ✓/✓ (C/nativo) | ✓/✓ | **sim** |
 | `str::concat(a,b)` (namespace curto) | `cc` falha / link falha | `cc` falha idêntico / link falha idêntico | **sim, byte a byte na mensagem** |
 | `str(bytes)` (builtin) | ✓C / nativo "not yet lowered" | ✓C idêntico / nativo idêntico | **sim** |
 
@@ -227,7 +227,7 @@ $ grep -ron "teko::str::concat" . --include="*.tks" --include="*.tkt" --include=
 Sonda directa da forma canónica, SEM `use`:
 
 ```
-pub fn check() -> u64 {
+pub fn check(): u64 {
     let r = teko::str::concat("a", "b")
     println(r)
     0
@@ -263,7 +263,7 @@ de `str`, que aparece nas DUAS tabelas (`scope.tks:382` tipo, `scope.tks:577` fu
 único dos cinco nomes candidatos a `use teko::X` que é ao mesmo tempo um tipo builtin E uma função
 builtin — é estruturalmente diferente dos irmãos, não apenas por acaso.**
 
-Sonda em execução, `fn f(v: X) -> X { v }`, com e sem `use teko::X`:
+Sonda em execução, `fn f(v: X): X { v }`, com e sem `use teko::X`:
 
 | X | com `use` | sem `use` | mensagem (idêntica nas duas colunas) |
 |---|---|---|---|
@@ -323,7 +323,7 @@ Prova directa: uma chamada com um prefixo de namespace **inventado**, que não e
 do programa:
 
 ```
-pub fn check() -> u64 {
+pub fn check(): u64 {
     let b: []byte = [b'h', b'i']
     let r = bogus_namespace::str(b)      // "bogus_namespace" não existe
     println(r)
@@ -354,7 +354,7 @@ devolve `[]str`):
 
 ```
 use teko::str
-pub fn check() -> u64 {
+pub fn check(): u64 {
     let r = str::args()
     println("str::args() type-checked and ran")
     0
@@ -378,7 +378,7 @@ Terceira prova — um alias EXPLÍCITO, sem a palavra `str` em lado nenhum, sofr
 
 ```
 use teko::str as tstr
-pub fn check() -> u64 {
+pub fn check(): u64 {
     let r = tstr::concat("a", "b")
     ...
 ```

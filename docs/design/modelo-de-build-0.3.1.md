@@ -258,7 +258,7 @@ pub type BuildClock = struct {
  * @return o relogio aberto
  * @since 0.3.1
  */
-pub fn build_clock_start() -> BuildClock {
+pub fn build_clock_start(): BuildClock {
     BuildClock { start = teko::build::now_ns_pub() }
 }
 ```
@@ -299,7 +299,7 @@ pub type PhaseLedger = struct {
  * @return       o razao com a fase anexada
  * @since 0.3.1
  */
-pub fn ledger_record(l: PhaseLedger, label: str, ns: i64) -> PhaseLedger {
+pub fn ledger_record(l: PhaseLedger, label: str, ns: i64): PhaseLedger {
     PhaseLedger {
         labels = teko::list::push(l.labels, label)
         ns = teko::list::push(l.ns, ns)
@@ -313,7 +313,7 @@ pub fn ledger_record(l: PhaseLedger, label: str, ns: i64) -> PhaseLedger {
  * @return   a soma das duracoes, em ns
  * @since 0.3.1
  */
-pub fn ledger_total_ns(l: PhaseLedger) -> i64 {
+pub fn ledger_total_ns(l: PhaseLedger): i64 {
     mut acc: i64 = 0
     mut i: u64 = 0
     loop {
@@ -350,7 +350,7 @@ pub type Reconciliation = struct {
  * @return      a decomposicao com `dark == 0`, ou um error quando ha tempo escuro (`dark > 0`)
  * @since 0.3.1
  */
-pub fn ledger_reconcile(l: PhaseLedger, wall: i64) -> Reconciliation | error {
+pub fn ledger_reconcile(l: PhaseLedger, wall: i64): Reconciliation | error {
     let total = ledger_total_ns(l)
     let dark = if wall > total { wall - total } else { 0 }
     if dark > 0 { return error { message = $"teko: {dark}ns of wall belongs to no phase (dark time)" } }
@@ -435,7 +435,7 @@ Proposta (DESIGN-AHEAD, seed C MANTIDO — `teko_rt.{c,h}` e excecao explicita a
  * @return o numero efetivo de raias (>= 1)
  * @since 0.3.1
  */
-fn build_jobs() -> u64 {
+fn build_jobs(): u64 {
     let dflt = teko::env::nproc()
     match teko::env::var("TEKO_JOBS") { str as v => regr_jobs_of_default(v, dflt); error => dflt }
 }
@@ -455,7 +455,7 @@ O primitivo que falta, contra a forma DECLARADA (nao ha impl hoje; e o unico fun
  * @return o numero de CPUs logicas concedidas (>= 1)
  * @since 0.3.1
  */
-pub fn nproc() -> u64
+pub fn nproc(): u64
 ```
 ```c
 // tk_nproc — o numero de CPUs logicas concedidas ao processo. POSIX: sysconf(_SC_NPROCESSORS_ONLN).

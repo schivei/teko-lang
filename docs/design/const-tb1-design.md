@@ -181,7 +181,7 @@ pub type LDataReloc = struct { offset: u32; target: str }
  * @return        the data-relocation entry
  * @since #594 T-B1
  */
-pub fn data_reloc(offset: u32, target: str) -> LDataReloc {
+pub fn data_reloc(offset: u32, target: str): LDataReloc {
     LDataReloc { offset = offset; target = target }
 }
 ```
@@ -233,7 +233,7 @@ byte-identical.
  * @return  the located Tier-B honest-stop error
  * @since #594 T-B1
  */
-fn honest_data_reloc() -> error {
+fn honest_data_reloc(): error {
     error { message = "rodata-internal pointer relocation: emission lands in T-B2..T-B5 (#594 T-B)" }
 }
 
@@ -246,7 +246,7 @@ fn honest_data_reloc() -> error {
  * @return        true iff some entry has an `LDataReloc`
  * @since #594 T-B1
  */
-fn rodata_has_internal_relocs(rodata: []lir::LRodata) -> bool {
+fn rodata_has_internal_relocs(rodata: []lir::LRodata): bool {
     mut i: u64 = 0
     loop {
         if i >= rodata.len { break }
@@ -266,7 +266,7 @@ fn rodata_has_internal_relocs(rodata: []lir::LRodata) -> bool {
 and its signature/callsite:
 
 ```teko
-fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error
+fn encode_rodata(rodata: []lir::LRodata): ModuleRodata | error
 ```
 
 ```teko

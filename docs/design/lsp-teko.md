@@ -40,8 +40,8 @@ UMA primitiva nova de runtime (leitura de N bytes / de 1 byte), que cai dentro d
 | Achado do dono | Confirmado? | Evidência |
 |---|---|---|
 | Extensão é só realce (TextMate gerado por `main.tks`→`generate`) | **Sim** | `tooling/vscode/package.json` v0.3.2, publisher `schivei`: só `contributes.grammars`/`languages`, SEM `main`, SEM `activationEvents`, SEM `vscode-languageclient`. |
-| `teko fmt` existe e pode ser reusado | **Sim, e in-process** | `src/fmt/fmt.tks:649` `pub fn format_source(source: str) -> str \| error` — função pura, str→str. O LSP a chama direto (não precisa de subprocesso). |
-| JSON existe (JSON-RPC sobre stdio) | **Sim** | `src/encoding/json/json.tks:463` `pub fn decode(text: str) -> JsonValue \| error`, `:476` `pub fn encode(value: JsonValue) -> str`. |
+| `teko fmt` existe e pode ser reusado | **Sim, e in-process** | `src/fmt/fmt.tks:649` `pub fn format_source(source: str): str \| error` — função pura, str→str. O LSP a chama direto (não precisa de subprocesso). |
+| JSON existe (JSON-RPC sobre stdio) | **Sim** | `src/encoding/json/json.tks:463` `pub fn decode(text: str): JsonValue \| error`, `:476` `pub fn encode(value: JsonValue): str`. |
 | Diagnósticos já posicionados (`file:line:col`) | **Sim, mas STRING** | `src/checker/diagnostics.tks:14` `diag_at` monta `"{file}:{line}:{col}: {msg}"`; `:37` `located_diag`. O `error` builtin carrega `.line`/`.col`/`.message` (lido em `diagnostics.tks:38-40`). |
 | doc-comments preservados no AST (fonte do hover) | **Sim — CONFIRMADO no ponto exato** | `src/parser/ast.tks:407-408` `Function.has_doc`/`doc`; `:481` `Field.has_doc`/`doc`; `:556-557` `TypeDecl.has_doc`/`doc`; `:631` `ConstDecl.has_doc`/`doc`. **O parser JÁ preserva os doc-comments** — o hover não precisa de mudança no parser para tê-los. |
 
@@ -130,11 +130,11 @@ aditivo (§5.5).
 
 | Chamada | Assinatura atual | `pub`? | Chamável in-process? |
 |---|---|---|---|
-| Lexer | `teko::lexer::tokenize(src) -> []Token \| error` | sim | **sim** |
-| Parser (módulo) | `teko::parser::parse_module(toks, 0) -> Parsed<Module> \| error` | sim | **sim** |
-| Parser (main) | `teko::parser::parse_main_file(toks, 0) -> Parsed<MainFile> \| error` | sim | **sim** |
-| Checker (diag) | `teko::checker::type_program_with_deps_pre_mono(prog, empty, on_item) -> PreMono \| error` | sim | **sim, mas** ver §5.1 (invólucro `pub` mais limpo recomendado) |
-| Formatador | `teko::fmt::format_source(src) -> str \| error` | sim | **sim** |
+| Lexer | `teko::lexer::tokenize(src): []Token \| error` | sim | **sim** |
+| Parser (módulo) | `teko::parser::parse_module(toks, 0): Parsed<Module> \| error` | sim | **sim** |
+| Parser (main) | `teko::parser::parse_main_file(toks, 0): Parsed<MainFile> \| error` | sim | **sim** |
+| Checker (diag) | `teko::checker::type_program_with_deps_pre_mono(prog, empty, on_item): PreMono \| error` | sim | **sim, mas** ver §5.1 (invólucro `pub` mais limpo recomendado) |
+| Formatador | `teko::fmt::format_source(src): str \| error` | sim | **sim** |
 
 Conclusão: o front-end **já é uma biblioteca**. Nenhuma reescrita CLI→lib é necessária. As
 lacunas são aditivas (invólucros `pub`, um tipo `Diagnostic` estruturado, o override de
@@ -159,7 +159,7 @@ buffer, e a primitiva de stdin) — não refatorações.
   por um append num acumulador de diagnósticos.
 - **Lacuna 3 (endurecimento, crumb D):** tipo `Diagnostic` estruturado no checker
   (`{ file; line; col; end_line; end_col; severity; message }`) e um invólucro `pub`
-  `collect_diagnostics(program) -> []Diagnostic`, eliminando o re-parse de string. Fica para
+  `collect_diagnostics(program): []Diagnostic`, eliminando o re-parse de string. Fica para
   depois porque o crumb A já entrega o valor.
 
 ### 3.2 Hover — **crumb F**
@@ -195,7 +195,7 @@ buffer, e a primitiva de stdin) — não refatorações.
 
 ### 3.5 Formatação — **crumb B — in-process**
 
-- **Fonte:** `teko::fmt::format_source(src) -> str \| error` (`fmt.tks:649`). Função pura.
+- **Fonte:** `teko::fmt::format_source(src): str \| error` (`fmt.tks:649`). Função pura.
 - **Decisão (responde à pergunta do dono):** **in-process**, não subprocesso. O servidor
   chama `format_source` diretamente e devolve um único `TextEdit` que substitui o documento
   inteiro (o `fmt` é whole-file por design — `fmt.tks` re-emite o stream inteiro). Nenhum
@@ -222,9 +222,9 @@ O corpo tem exatamente `N` bytes e **não** tem terminador de linha (spec LSP). 
 preciso ler **exatamente N bytes** de stdin.
 
 **O que o runtime oferece hoje (`src/io/io.tks`):**
-- `read_line() -> str` (`:26`) — lê até `\n`, **strip do newline**. Bloqueante.
-- `read_stdin() -> str` (`:37`) — slurpa TODO o stdin até EOF. Bloqueante até EOF.
-- `stdin_eof() -> bool` (`:30`).
+- `read_line(): str` (`:26`) — lê até `\n`, **strip do newline**. Bloqueante.
+- `read_stdin(): str` (`:37`) — slurpa TODO o stdin até EOF. Bloqueante até EOF.
+- `stdin_eof(): bool` (`:30`).
 
 **Prova de que nenhuma serve:**
 1. `read_stdin()` bloqueia até EOF. O stdin de um servidor de linguagem só vê EOF quando o
@@ -262,7 +262,7 @@ compila):
  * @return   os bytes lidos como str (até `n`; menos que `n` só em EOF)
  * @since 0.3.1.0 (transporte LSP)
  */
-pub extern fn read_stdin_n(n: u64) -> str = "tk_rt_read_stdin_n" from "teko_rt"
+pub extern fn read_stdin_n(n: u64): str = "tk_rt_read_stdin_n" from "teko_rt"
 ```
 
 **Sequenciamento (regra do bootstrap):** o seed que compila `src/lsp/` precisa saber lower
@@ -295,7 +295,7 @@ resto (encode/decode de mensagens, roteamento, índice de símbolos, diagnóstic
  * @return         cada diagnóstico do projeto, em ordem de report (vazio = programa limpo)
  * @since 0.3.1.0 (LSP)
  */
-pub fn collect_diagnostics(program: parser::Program) -> []str { ... }
+pub fn collect_diagnostics(program: parser::Program): []str { ... }
 ```
 Arquivo: `src/checker/` (novo `lsp_api.tks` ou dentro de `check.tks`). Aditivo, `pub`.
 
@@ -359,7 +359,7 @@ pub type SymKind = enum { Function; Type; Const; Field; Method }
  * @field col        a coluna 1-based do nome
  * @field kind       Function / Type / Const / Field / Method
  * @field doc        o doc-comment (`""` quando ausente)
- * @field signature  a assinatura renderizada para o hover (ex.: `fn f(x: i64) -> str`)
+ * @field signature  a assinatura renderizada para o hover (ex.: `fn f(x: i64): str`)
  * @since 0.3.1.0 (LSP)
  */
 pub type Symbol = struct {
@@ -376,7 +376,7 @@ pub type Symbol = struct {
  * @return         a lista de símbolos, em ordem de arquivo/declaração
  * @since 0.3.1.0 (LSP)
  */
-pub fn build_symbol_index(program: parser::Program) -> []Symbol { ... }
+pub fn build_symbol_index(program: parser::Program): []Symbol { ... }
 ```
 Arquivo: `src/lsp/symbols.tks`. Pode viver em `teko::lsp` (não precisa ser do checker).
 
@@ -402,7 +402,7 @@ pub type FileOverride = struct { path: str; content: str }
  * @return           o programa mesclado + os diagnósticos de lex/parse por-arquivo
  * @since 0.3.1.0 (LSP)
  */
-pub fn assemble_with_overrides(files: []SourceFile, overrides: []FileOverride) -> Assembled | error { ... }
+pub fn assemble_with_overrides(files: []SourceFile, overrides: []FileOverride): Assembled | error { ... }
 ```
 Arquivo: `src/build/assemble.tks` (aditivo). O `assemble` atual vira um caso de zero overrides.
 

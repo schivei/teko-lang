@@ -324,7 +324,7 @@ pub type CVAgg = struct { elems: []ConstValue }
  *               out-of-range / a non-const form reaching this evaluator)
  * @since #comptime-fold
  */
-fn eval_const(e: TExpr, table: TypeTable, env: Env) -> ConstValue | error
+fn eval_const(e: TExpr, table: TypeTable, env: Env): ConstValue | error
 
 /**
  * literal_of — reconstruct a literal TExpr from a computed ConstValue, typed as `ty`
@@ -342,7 +342,7 @@ fn eval_const(e: TExpr, table: TypeTable, env: Env) -> ConstValue | error
  * @return      a literal TExpr carrying `v`, typed `ty`
  * @since #comptime-fold
  */
-fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32) -> TExpr
+fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32): TExpr
 ```
 
 ### 4.2 The fold driver (Layer 1) + the comptime formatter (Layer 2)
@@ -365,7 +365,7 @@ fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32) -> TExpr
  *               error propagated from `eval_const` (overflow / ÷0 / out-of-range)
  * @since #comptime-fold
  */
-fn fold_expr(e: TExpr, table: TypeTable, env: Env) -> TExpr | error
+fn fold_expr(e: TExpr, table: TypeTable, env: Env): TExpr | error
 
 /**
  * comptime_format — the Layer-2 comptime formatter: render `v` under `sp` exactly as
@@ -384,7 +384,7 @@ fn fold_expr(e: TExpr, table: TypeTable, env: Env) -> TExpr | error
  *                 error for an unrecognized spec (mirrors emit_interp's error arm)
  * @since #comptime-fold
  */
-fn comptime_format(v: ConstValue, sp: TFSpec, hole_ty: Type) -> []byte | error
+fn comptime_format(v: ConstValue, sp: TFSpec, hole_ty: Type): []byte | error
 
 /**
  * fold_interp — the Layer-2 interpolation fold: when EVERY hole of `in` is a const
@@ -403,7 +403,7 @@ fn comptime_format(v: ConstValue, sp: TFSpec, hole_ty: Type) -> []byte | error
  *               located error propagated from `comptime_format`
  * @since #comptime-fold
  */
-fn fold_interp(in: TInterp, e: TExpr, table: TypeTable, env: Env) -> TExpr | error
+fn fold_interp(in: TInterp, e: TExpr, table: TypeTable, env: Env): TExpr | error
 ```
 
 ### 4.3 Existing fns this touches (extend, do not rewrite)
@@ -487,7 +487,7 @@ const line = read_line(stdin)               // runtime; `is_const_expr` fails �
 let msg = $"{line:X}"                        // stays runtime tk_str_concat + tk_fmt_x_upper
 
 // F — any runtime leaf poisons the subtree.
-fn f(x: u64) -> u64 { x & MASK_ALL_U64 }    // MASK folds to a literal; `x & lit` stays runtime (x is runtime)
+fn f(x: u64): u64 { x & MASK_ALL_U64 }    // MASK folds to a literal; `x & lit` stays runtime (x is runtime)
 
 // G — dynamic spec with runtime args stays runtime (Layer-2 boundary; see §11 Q3).
 let w = user_width()
@@ -548,7 +548,7 @@ the arena probe shows the runtime ops gone.
 | fold-interp-hex | end-to-end `.tkp` | `let a: u64 = 0xFF; print($"{a:X}")` | prints `FF`; emitted `TStrLit`, **no** `tk_str_concat`/`tk_fmt_x_upper` in output; exit 0 |
 | fold-tindex-const | end-to-end `.tkp` | `const G: []byte = [0x1F to byte, 0x8B to byte]; print(G[0] to u64)` | prints `31`; folded literal; exit 0 |
 | noflod-runtime-bind | end-to-end `.tkp` | `const line = read_line(stdin); print($"{line:X}")` (E) | stays runtime; output identical to today; exit 0 |
-| noflod-runtime-hole | end-to-end `.tkp` | `fn f(x: u64) -> u64 { x & M }` (F) | `x & <literal>` remains; exit 0; behavior identical |
+| noflod-runtime-hole | end-to-end `.tkp` | `fn f(x: u64): u64 { x & M }` (F) | `x & <literal>` remains; exit 0; behavior identical |
 | noflod-dynamic-spec | end-to-end `.tkp` | `let w = user_width(); $"{a:[w]}"` (G) | runtime `tk_fmt_dyn_*`; exit 0 |
 | **format-oracle** | `src/checker/comptime_fold_test.tkt` (differential) | for every (value ∈ matrix, spec ∈ {none,`X`,`x`,`b`,`d`,`f2`,`e`,`g`,`p`,`n`}) : assert `comptime_format(v,spec) == <runtime tk_fmt_*(v,spec)>` | **byte-identical** for every pair; ANY divergence fails the crumb — the M.1 discharge for §10 |
 
@@ -802,7 +802,7 @@ pub type AggConstMap = ScalarConstMap
  * @return       the aggregate ConstValue
  * @since #comptime-fold
  */
-fn cv_agg(elems: []ConstValue) -> ConstValue { ConstValue { kind = CVAgg { elems = elems } } }
+fn cv_agg(elems: []ConstValue): ConstValue { ConstValue { kind = CVAgg { elems = elems } } }
 
 /**
  * agg_const_init — resolve the collapsed initializer of the module aggregate const named
@@ -817,7 +817,7 @@ fn cv_agg(elems: []ConstValue) -> ConstValue { ConstValue { kind = CVAgg { elems
  * @return      the const's collapsed initializer, or null
  * @since #comptime-fold
  */
-fn agg_const_init(agg: AggConstMap, name: str, ns: str) -> TExpr?
+fn agg_const_init(agg: AggConstMap, name: str, ns: str): TExpr?
 
 /**
  * eval_array_agg — evaluate an array/slice literal's elements to a `CVAgg`, recursing
@@ -832,7 +832,7 @@ fn agg_const_init(agg: AggConstMap, name: str, ns: str) -> TExpr?
  * @return       the aggregate comptime value, or the first located element error
  * @since #comptime-fold
  */
-fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error
+fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap): ConstValue | error
 
 /**
  * eval_index_expr — evaluate a `TIndex` of a const aggregate at a const index (Layer 1c):
@@ -850,7 +850,7 @@ fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap) ->
  * @return       the element comptime value, or a located error (out-of-range / shape)
  * @since #comptime-fold
  */
-fn eval_index_expr(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error
+fn eval_index_expr(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): ConstValue | error
 
 /**
  * cf_agg_value — true iff `e` is a const AGGREGATE the index fold may evaluate: an
@@ -865,7 +865,7 @@ fn eval_index_expr(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggCon
  * @return     whether `e` is a foldable const aggregate
  * @since #comptime-fold
  */
-fn cf_agg_value(e: TExpr, agg: AggConstMap) -> bool
+fn cf_agg_value(e: TExpr, agg: AggConstMap): bool
 
 /**
  * cf_can_index — true iff the whole `TIndex` folds: a foldable const-aggregate receiver
@@ -878,7 +878,7 @@ fn cf_agg_value(e: TExpr, agg: AggConstMap) -> bool
  * @return     whether the index expression is fully const-foldable
  * @since #comptime-fold
  */
-fn cf_can_index(ix: TIndex, agg: AggConstMap) -> bool
+fn cf_can_index(ix: TIndex, agg: AggConstMap): bool
 ```
 
 **Modifications to existing fns (extend, do not rewrite):**
@@ -910,7 +910,7 @@ fn cf_can_index(ix: TIndex, agg: AggConstMap) -> bool
 - `inline_consts` (`consteval.tks:531`) — build the map ONCE from the substituted
   program and pass it in:
   `let agg = build_module_agg_map(substituted); fold_program(propagate_locals(substituted), agg)`.
-  Add a small `pub fn build_module_agg_map(prog) -> AggConstMap | error` in `consteval.tks`
+  Add a small `pub fn build_module_agg_map(prog): AggConstMap | error` in `consteval.tks`
   that reuses `collect_module_consts` + `const_dep_order` + `build_aggregate_map` (all
   present; `build_aggregate_map` becomes `pub` or is wrapped). `propagate_locals` is
   **NOT** given the map (see §13.4).
@@ -966,8 +966,8 @@ CF4b RITUAL.**
 | index-arraylit-inline | `comptime_fold_test.tkt` | `fold_expr` of `[10 to byte, 20 to byte][1]` (in-tree `TArrayLit` receiver, empty map) | folds to `TNumber 20` (proves the no-map literal-receiver path) |
 | **fixture D (e2e)** | `examples/regressions/cf4_index_fold/` (`.tkp` + `src`) | `const G: []byte = [0x1F to byte, 0x8B to byte]` … `exit((G[0] to u64) to i32)` | exit **31** in rota C e backend nativo (C rota and native backend); the emitted body carries the folded literal, no index op at the `G[0]` site |
 | index-in-const-init (e2e/tkt) | `comptime_fold_test.tkt` or the e2e dir | `const H: []byte = [G[0], G[1]]` (AL0's rewrite shape) | `H`'s init folds each `G[i]` to a byte literal; proves the module-const-index-inside-a-const-initializer path AL0 depends on |
-| **noflod-runtime-index (e2e/tkt)** | `comptime_fold_test.tkt` (negative) | `fn f(i: u64) -> byte { G[i] }` | `cf_can_index` false → `G[i]` stays a runtime `TIndex`; behavior identical to today; exit parity |
-| noflod-runtime-recv (negative) | `comptime_fold_test.tkt` | `fn f(a: []byte) -> byte { a[0] }` | runtime receiver → stays runtime |
+| **noflod-runtime-index (e2e/tkt)** | `comptime_fold_test.tkt` (negative) | `fn f(i: u64): byte { G[i] }` | `cf_can_index` false → `G[i]` stays a runtime `TIndex`; behavior identical to today; exit parity |
+| noflod-runtime-recv (negative) | `comptime_fold_test.tkt` | `fn f(a: []byte): byte { a[0] }` | runtime receiver → stays runtime |
 | regression-guard (existing) | `checker_const_test.tkt:283` | `seed_from_dep_qualified_value_const_and_fn` | UNCHANGED and green (§13.4) |
 
 The `.tkt` unit fixtures need a test helper `empty_agg()` (an `AggConstMap` with empty

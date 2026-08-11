@@ -210,7 +210,7 @@ O **mesmo objeto**, sem uma alteração, no lldb 18.1.3:
 $ lldb -b -o "breakpoint set --file hello.tks --line 30" -o run -o bt ./mini
 Breakpoint 1: where = mini`add + 10 at hello.tks:30:1, address = 0x0000000000001133
     frame #0: 0x0000555555555133 mini`add at hello.tks:30:1
-   29  	fn add(a: i32, b: i32) -> i32 {
+   29  	fn add(a: i32, b: i32): i32 {
 -> 30  	    let s = a + b
    31  	    s
   * frame #0: 0x0000555555555133 mini`add at hello.tks:30:1
@@ -243,7 +243,7 @@ pseudo-instrução marcadora de zero bytes (`MLineMark`) em vez de envolver cada
 razão e ela **não depende do consumidor**:
 
 ```teko
-pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64) -> []MInst
+pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64): []MInst
 ```
 
 **Uma instrução vira N.** O alocador expande derramamentos e recargas, logo um array paralelo a
@@ -354,7 +354,7 @@ Isto importa porque o DWARF é interop (§6) e o interop tem de ser honesto sem 
 **Primeiro, o argumento estrutural.** `encode_x86_64.tks:1532`:
 
 ```teko
-fn frame_is_framed_x86(layout: FrameLayoutX86) -> bool {
+fn frame_is_framed_x86(layout: FrameLayoutX86): bool {
     let n_saved = (layout.saved_gpr.len + layout.saved_fpr.len) to u32
     (layout.size > (0 to u32)) || (n_saved > (0 to u32)) || layout.call_align
 }
@@ -412,7 +412,7 @@ A red-flag dizia que a cadeia `LEnv(nome→vreg)` → `regalloc(vreg→registo|s
 **irrelevante**, porque medi a chave:
 
 ```teko
-pub fn assign_lookup(sr: ScanResult, vreg_id: u32) -> AssignLookup   // regalloc.tks:1475
+pub fn assign_lookup(sr: ScanResult, vreg_id: u32): AssignLookup   // regalloc.tks:1475
 pub type InReg   = struct { vreg_id: u32; phys: u32 }
 pub type Spilled = struct { vreg_id: u32; slot: u64 }
 ```
@@ -431,7 +431,7 @@ e é exactamente o defeito que o dono rejeitou.
 **A resolução honesta já está no código.** `src/lir/lower.tks:113`:
 
 ```teko
-pub fn lenv_bind_scalar_slot(env: LEnv, name: str, slot: u32, ty: LType) -> LEnv
+pub fn lenv_bind_scalar_slot(env: LEnv, name: str, slot: u32, ty: LType): LEnv
 ```
 
 Um local nomeado **pode já ser ligado a um slot de frame** com o seu `LType`. Sob o perfil de
@@ -649,7 +649,7 @@ pub type DebugInfo = enum { None; Lines }
  * @param a  a single CLI argument token
  * @return   true iff `a` is a `--debug=<value>` form
  */
-fn debug_arg_has_prefix(a: str) -> bool {
+fn debug_arg_has_prefix(a: str): bool {
     a.len > 8 && teko::str::slice_to(a, 8) == "--debug="
 }
 
@@ -665,7 +665,7 @@ fn debug_arg_has_prefix(a: str) -> bool {
  * @return   the level for "none"/"lines"
  * @throws   when `v` is neither "none" nor "lines", naming both accepted values
  */
-fn debug_info_of_value(v: str) -> DebugInfo | error {
+fn debug_info_of_value(v: str): DebugInfo | error {
     if v == "none" { return DebugInfo::None }
     if v == "lines" { return DebugInfo::Lines }
     error { message = teko::str::concat("teko: --debug=", teko::str::concat(v, ": unknown level — accepted: none, lines")) }
@@ -686,7 +686,7 @@ fn debug_info_of_value(v: str) -> DebugInfo | error {
  * @return      the resolved level (`None` by default)
  * @throws      when a `--debug=` value is not a recognised level
  */
-fn debug_info_of(args: []str) -> DebugInfo | error {
+fn debug_info_of(args: []str): DebugInfo | error {
     mut i: u64 = 0
     mut level = DebugInfo::None
     loop {
@@ -718,7 +718,7 @@ fn debug_info_of(args: []str) -> DebugInfo | error {
  * @param start  the index to begin scanning from (2 for a subcommand, 1 for a bare project)
  * @return       true iff a bare `-g` token appears anywhere from `start` onward
  */
-fn has_bare_g_flag(args: []str, start: u64) -> bool {
+fn has_bare_g_flag(args: []str, start: u64): bool {
     mut i = start
     loop {
         if i >= args.len { break }

@@ -189,7 +189,7 @@ priority of the three.**
   `close_native_region` mirrors it (`lower.tks:1667`). **The elision machinery is a proven pattern in
   the same function.**
 
-What has to be added: a predicate `scope_touches_arena(body) -> bool` — true iff the scope's
+What has to be added: a predicate `scope_touches_arena(body): bool` — true iff the scope's
 statements contain at least one routable allocation site (a `push`/`box`/struct-init/array-lit/str-
 concat/`tk_alloc`). When false, `open_native_region`/`open_frame_region` skip the
 `tk_region_new_u`/`enter_u` (and the paired `drop_u`), exactly as the bracket-skip already does. This
@@ -272,7 +272,7 @@ handle, the box-size query) is all present.** What changes:
  * @return     true iff `f` must receive a caller-provided destination for its return value
  * @since 0.3.1
  */
-fn fn_returns_aggregate(f: checker::TFunction, ctx: LowerCtx) -> bool
+fn fn_returns_aggregate(f: checker::TFunction, ctx: LowerCtx): bool
 
 /**
  * with_ret_dest — a copy of `ctx` whose return destination is `dest` (the caller-provided slot in the
@@ -286,7 +286,7 @@ fn fn_returns_aggregate(f: checker::TFunction, ctx: LowerCtx) -> bool
  * @return      the context whose `ret_dest` is `dest`
  * @since 0.3.1
  */
-fn with_ret_dest(ctx: LowerCtx, dest: u32 | null) -> LowerCtx
+fn with_ret_dest(ctx: LowerCtx, dest: u32 | null): LowerCtx
 
 /**
  * lower_return_into_dest — the VIRTUAL return: construct the return value directly in `ctx.ret_dest`
@@ -303,7 +303,7 @@ fn with_ret_dest(ctx: LowerCtx, dest: u32 | null) -> LowerCtx
  * @throws     when the return value cannot be placed into the destination (out-of-subset shape)
  * @since 0.3.1
  */
-fn lower_return_into_dest(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error
+fn lower_return_into_dest(ctx: LowerCtx, r: checker::TReturn): LowerStmtOut | error
 
 /**
  * alloc_call_dest — the caller half: reserve a destination for an aggregate-returning call in the
@@ -319,7 +319,7 @@ fn lower_return_into_dest(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | 
  * @return        the context (with the destination alloca emitted) and the destination VReg
  * @since 0.3.1
  */
-fn alloc_call_dest(ctx: LowerCtx, callee: checker::TFunction) -> Lowered
+fn alloc_call_dest(ctx: LowerCtx, callee: checker::TFunction): Lowered
 ```
 
 Existing functions touched: `lower_return`/`lower_return_fat` (`:7245`/`:7278`), `lower_call`
@@ -388,7 +388,7 @@ Every other reference return (a `&x` of a local, a `ref` local, a stored field) 
 **honest-stop**, rejected pending the transitive-escape spine (`ref_passdown_error`, `typer.tks:5408`).
 
 **Production users: ZERO.** The only `-> ref` occurrences in the whole tree (excluding worktrees):
-- `examples/regressions/own_native/src/ref_bind/probe.tks:89` — `hand_back(ref ch: Ch) -> ref Ch`,
+- `examples/regressions/own_native/src/ref_bind/probe.tks:89` — `hand_back(ref ch: Ch): ref Ch`,
   a probe of the pass-down itself.
 - `examples/regressions/diagnostics/src/c52_ref_return_local_rejected/case.tks:4` — a REJECTION test.
 - `examples/regressions/diagnostics/src/c49_ref_null_local_escape_rejected/case.tks:4` — a REJECTION
@@ -638,7 +638,7 @@ retired.
 | `dps_frameset_if_return` | the `frame_sweep_inst` shape (`return if …` of an aggregate) no longer SIGSEGVs | 0 |
 | `dps_no_frame_escape` | `frame_escape_guard` reports 0 offenders on the DPS corpus | 0 |
 | `dps_caller_dest_not_dropped` | a returned value survives the callee's scope exit (inversion: with the dest in a fresh child region it must FAIL) | 0 / (inversion fails) |
-| `ref_return_form_rejected` | `fn f() -> ref T` no longer parses/typechecks | EXPECT_COMPILE_FAIL |
+| `ref_return_form_rejected` | `fn f(): ref T` no longer parses/typechecks | EXPECT_COMPILE_FAIL |
 | `reassign_former_let_now_compiles` | a binding written twice compiles (was a `let` reassignment error) | 0 |
 | `dps_dest_single_writer` | inversion: a synthetic second live writer of the DPS dest must FAIL the borrow/exclusivity check — proves aliasing safety is control-flow, not `let` | (inversion fails) |
 | `cf3_fold_survives_let_merge` | a formerly-`let` const-initialized local still folds after the merge (flow-single-assignment key) — byte-identical fixpoint | 0 |

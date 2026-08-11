@@ -88,7 +88,7 @@ alcançam o BUILTIN, não a função real, porque uma chamada bare só casa com 
 `src/text/text.tks:61-63` documenta `bytes_of_str` **num comentário apenas**:
 
 ```
-// bytes_of_str(s: str) -> []byte — expose the raw UTF-8 bytes of a str as a []byte
+// bytes_of_str(s: str): []byte — expose the raw UTF-8 bytes of a str as a []byte
 // slice. Zero-copy; the returned slice views the same memory. Registered as a builtin
 // (like str_of_bytes) in scope.c/tks; this comment is the canonical documentation.
 ```

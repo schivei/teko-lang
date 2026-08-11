@@ -152,17 +152,17 @@ ANTES do resolver, por `mem_op = segs[-2]=="mem"` (`codegen/codegen.tks:4161-417
 
 | builtin | assinatura (checker) | rota C (codegen.tks) | rota nativa (lower.tks) | alcançável no self-host? |
 |---|---|---|---|---|
-| `free` | `(T) -> void` (T = `[]E` \| class \| region-handle) | `emit_mem_free` type-directed (`:3932`) | **AUSENTE → undefined** | **SIM** (typer, resolve, spine, assemble, arena) |
-| `region_new` | `() -> uptr` | inline `tk_region_new(tk_region_root())` (`:4166`) | **AUSENTE → undefined** | **SIM** (arena.tks, via checker) |
-| `region_alloc` | `(uptr, init:T) -> ptr<T>` | `emit_region_alloc` (`:3821`) | **AUSENTE → undefined** | **SIM** (arena.tks) |
-| `buf_ptr` | `(u64) -> ptr<byte>` | `emit_buf_ptr` (`:3794`) | `lower_buf_ptr_call` (`:3423`) ✔ | sim (rawbuf) |
-| `bytes_from_ptr` | `(ptr<byte>,u64) -> []byte` | `emit_host_ffi tk_bytes_from_ptr` | `lower_bytes_from_ptr_call` (`:3376`) ✔ | sim |
-| `append_fo` | `([]byte,str) -> []byte` | inline (`:4203`) | `lower_append_fo` via `lower_call_fat` ✔ | sim (coverage, codegen) |
+| `free` | `(T): void` (T = `[]E` \| class \| region-handle) | `emit_mem_free` type-directed (`:3932`) | **AUSENTE → undefined** | **SIM** (typer, resolve, spine, assemble, arena) |
+| `region_new` | `(): uptr` | inline `tk_region_new(tk_region_root())` (`:4166`) | **AUSENTE → undefined** | **SIM** (arena.tks, via checker) |
+| `region_alloc` | `(uptr, init:T): ptr<T>` | `emit_region_alloc` (`:3821`) | **AUSENTE → undefined** | **SIM** (arena.tks) |
+| `buf_ptr` | `(u64): ptr<byte>` | `emit_buf_ptr` (`:3794`) | `lower_buf_ptr_call` (`:3423`) ✔ | sim (rawbuf) |
+| `bytes_from_ptr` | `(ptr<byte>,u64): []byte` | `emit_host_ffi tk_bytes_from_ptr` | `lower_bytes_from_ptr_call` (`:3376`) ✔ | sim |
+| `append_fo` | `([]byte,str): []byte` | inline (`:4203`) | `lower_append_fo` via `lower_call_fat` ✔ | sim (coverage, codegen) |
 | `push_fo` | genérico `list::push` | `emit_list_push @fo` (`:4155`) | `is_list_builtin_call` → honest-stop N2 (`:4311`) | sim — **honest-stop hoje** (ver R2) |
-| `str`/`str_of_bytes` | `([]byte) -> str` | `tk_str_of_bytes` (`:4221`) | `builtin_str_of_bytes_symbol` ✔ | sim |
-| `as_cstr` | `(str) -> ptr<byte>` | `emit_as_cstr` (`:3861`) | **AUSENTE → unresolved_builtin_stop** | NÃO (só codegen def) |
-| `str_from_c` | `(ptr<byte>,u64) -> str` | `emit_str_from_c` (`:3886`) | **AUSENTE → unresolved_builtin_stop** | NÃO |
-| `region_buf` | `(uptr,u64,str) -> ptr<byte>` | `emit_region_buf` (`:3906`) | **AUSENTE → unresolved_builtin_stop** | NÃO |
+| `str`/`str_of_bytes` | `([]byte): str` | `tk_str_of_bytes` (`:4221`) | `builtin_str_of_bytes_symbol` ✔ | sim |
+| `as_cstr` | `(str): ptr<byte>` | `emit_as_cstr` (`:3861`) | **AUSENTE → unresolved_builtin_stop** | NÃO (só codegen def) |
+| `str_from_c` | `(ptr<byte>,u64): str` | `emit_str_from_c` (`:3886`) | **AUSENTE → unresolved_builtin_stop** | NÃO |
+| `region_buf` | `(uptr,u64,str): ptr<byte>` | `emit_region_buf` (`:3906`) | **AUSENTE → unresolved_builtin_stop** | NÃO |
 | `region_drop` | (não é builtin exposto; `tk_region_drop` é primitiva interna) | — | — | N/A |
 | `copy`/`alloc` | (não existem como builtin `teko::mem::*` — o issue lista-os como possíveis; não há assinatura em `scope.tks`) | — | — | N/A |
 
@@ -190,7 +190,7 @@ estes têm `call_ns` carimbado), o mesmo que a rota C usa (`mem_op = segs[-2]=="
 
 #### 2.3a `region_new` — o mais simples (mero forwarder)
 
-`teko::mem::region_new() -> uptr` ⇒ `tk_region_new(tk_region_root())` como um `uptr`. A rota C emite
+`teko::mem::region_new(): uptr` ⇒ `tk_region_new(tk_region_root())` como um `uptr`. A rota C emite
 `(uintptr_t)tk_region_new(tk_region_root())`. No nativo, duas `LCall` encadeadas (exatamente o molde
 de `lower_buf_ptr_call`, `:3423-3439`): chamar `tk_region_root()` → passar o resultado a
 `tk_region_new(root)`. O resultado é um ponteiro/uptr num registo inteiro — nenhuma classe de
@@ -199,7 +199,7 @@ existentes (`teko_rt.h:149,153`); NÃO adiciona runtime.
 
 #### 2.3b `region_alloc` — bump-aloca UM T e copia `init`
 
-`teko::mem::region_alloc(region: uptr, init: T) -> ptr<T>`. A rota C
+`teko::mem::region_alloc(region: uptr, init: T): ptr<T>`. A rota C
 (`emit_region_alloc`, `:3821-3841`): `p = (T*)tk_region_alloc((tk_region*)region, sizeof(T)); *p =
 init; p`. No nativo: lower do `region` (uptr) e do `init` (valor de T); `LCall tk_region_alloc(region,
 size)` com `size = ltype_size(elem)` (o tamanho vem do `ptr<T>` no `e.type`, como o C lê `p.inner`);
@@ -415,10 +415,10 @@ interceção de `lower_call` (ao lado de `is_buf_ptr_call`/`lower_buf_ptr_call`,
  * @return   true sse `c` nomeia `teko::mem::region_new`
  * @since 0.3.1
  */
-fn is_region_new_call(c: checker::TCall) -> bool
+fn is_region_new_call(c: checker::TCall): bool
 
 /**
- * lower_region_new_call — `teko::mem::region_new() -> uptr`: abre uma nova região-filha da raiz do
+ * lower_region_new_call — `teko::mem::region_new(): uptr`: abre uma nova região-filha da raiz do
  * processo e devolve o seu handle opaco. Espelha o `emit`-inline da rota C
  * (`(uintptr_t)tk_region_new(tk_region_root())`, `codegen.tks:4166`) com duas `LCall` encadeadas,
  * no molde de `lower_buf_ptr_call` (`:3423`): `tk_region_root()` → `tk_region_new(root)`. O
@@ -431,7 +431,7 @@ fn is_region_new_call(c: checker::TCall) -> bool
  * @return     o contexto avançado + o VReg do handle, ou um erro propagado
  * @since 0.3.1
  */
-fn lower_region_new_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error
+fn lower_region_new_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error
 
 /**
  * is_region_alloc_call — reconhece `teko::mem::region_alloc`: bump-aloca UM `T` na região escolhida
@@ -442,10 +442,10 @@ fn lower_region_new_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) ->
  * @return   true sse `c` nomeia `teko::mem::region_alloc`
  * @since 0.3.1
  */
-fn is_region_alloc_call(c: checker::TCall) -> bool
+fn is_region_alloc_call(c: checker::TCall): bool
 
 /**
- * lower_region_alloc_call — `teko::mem::region_alloc(region: uptr, init: T) -> ptr<T>`: bump-aloca
+ * lower_region_alloc_call — `teko::mem::region_alloc(region: uptr, init: T): ptr<T>`: bump-aloca
  * `sizeof(T)` bytes na `region` dada, copia `init` para lá e devolve o `ptr<T>`. Espelha
  * `emit_region_alloc` (`codegen.tks:3821`): `p = tk_region_alloc((tk_region*)region, sizeof(T)); *p
  * = init; p`. O `sizeof(T)` é `ltype_size` do elemento, lido do `ptr<T>` em `e.type` (como o C lê
@@ -459,7 +459,7 @@ fn is_region_alloc_call(c: checker::TCall) -> bool
  * @throws     quando o `e.type` não é `ptr<T>` (invariante do checker) ou a aridade não é 2
  * @since 0.3.1
  */
-fn lower_region_alloc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error
+fn lower_region_alloc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error
 
 /**
  * is_mem_free_call — reconhece `teko::mem::free`: a desalocação manual type-directed (`call_ns ==
@@ -470,10 +470,10 @@ fn lower_region_alloc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) 
  * @return   true sse `c` nomeia `teko::mem::free`
  * @since 0.3.1
  */
-fn is_mem_free_call(c: checker::TCall) -> bool
+fn is_mem_free_call(c: checker::TCall): bool
 
 /**
- * lower_mem_free_call — `teko::mem::free(x) -> void`: recupera o bloco heap de `x` e SCRUBA o
+ * lower_mem_free_call — `teko::mem::free(x): void`: recupera o bloco heap de `x` e SCRUBA o
  * binding, ramificando no tipo de `x` (o checker provou ser variável mutável de tipo heap). Espelho
  * exato de `emit_mem_free`/`emit_region_free` (`codegen.tks:3932-3993`), os três braços:
  *
@@ -496,7 +496,7 @@ fn is_mem_free_call(c: checker::TCall) -> bool
  * @throws     quando `arg.type` não é slice/class/region-handle (o checker deve ter barrado)
  * @since 0.3.1
  */
-fn lower_mem_free_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error
+fn lower_mem_free_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error
 ```
 
 Interceção em `lower_call` (`lower.tks:2490-2502`), ao lado das existentes:

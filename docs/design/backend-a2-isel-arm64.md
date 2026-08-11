@@ -191,7 +191,7 @@ from `LModule` (A4 emits them; isel does not touch their bytes).
 
 ## 3. The instruction selector (new `src/backend/isel_arm64.tks`)
 
-`select_module(m: LModule) -> MModule` walks each `LFunc`, threading a `SelCtx` that carries
+`select_module(m: LModule): MModule` walks each `LFunc`, threading a `SelCtx` that carries
 the in-progress `MFunc`, the current block, the **`class_of` side-table** (VReg -> `MRegClass`,
 populated at each op's result so argument/return classification is exact), and a scratch-VReg
 allocator (fresh virtual ids past `LFunc.next_vreg`). Selection is a flat per-`LOp` match; the
@@ -208,7 +208,7 @@ mapping:
   `IShrU`->LSR). **`IRemS`/`IRemU`** -> `MAlu` SDIV/UDIV into a scratch quotient, then
   `MMSub` (`rem = a - q*b`).
 - **`LBin` float** -> one `MFAlu` (`FAdd`->FADD …).
-- **`LBin` compare** (`ICmp*`/`FCmp*`) -> when the value is consumed by a `LBranch` and by
+- **`LBin` compare** (`ICmp*`/`FCmp*`): when the value is consumed by a `LBranch` and by
   nothing else, it is **fused** (§3.2) and emits nothing here; otherwise `MCmp`/`MFCmp` then
   `MCSet dst, cond` materializing the 0/1 result. `cond` from the opcode's `MCond`.
 - **`LUn`** -> `INeg`->`MNeg`; `INot`->`MMvn`; `FNeg`->`MFNeg`; `Trunc`->`MMov` (W-view write

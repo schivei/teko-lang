@@ -92,7 +92,7 @@ tem, com braços que nomeiam classes concretas — a mesma forma de
  * @param e  o valor de interface a interrogar
  * @return   a descrição da classe concreta encontrada
  */
-fn describe(e: ErrIface) -> str {
+fn describe(e: ErrIface): str {
     match e {
         SimpleErr as s => s.msg
         PathErr as p => p.path

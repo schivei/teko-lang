@@ -30,7 +30,7 @@
 | `Error` / `Valor \| Error` / `Error as e` | LEGISLATION §49, §66–90 | `error` (nativo) / `valor \| error` |
 | `str \| Error`, `[]byte \| Error` | LEGISLATION §121, §135 | `str \| error`, `[]byte \| error` |
 | `teko::Error` | LEGISLATION §176 | `teko::error` |
-| `write_file(...) -> () \| Error` (void-em-variant) | LEGISLATION §270–271 | `write_file(...) -> error?`; `read_file -> []byte \| error`; `write_err([]byte) -> void` |
+| `write_file(...): () \| Error` (void-em-variant) | LEGISLATION §270–271 | `write_file(...): error?`; `read_file -> []byte \| error`; `write_err([]byte): void` |
 | `type Unit = struct {}` ; `Type = … \| Unit` ; `Unit {}` ; `-> Unit` | **TEKO_CHECKER.md:78,81,90,1095,1245–1278** (deriva congelada) | excisar; `void` como marcador de retorno; checks → `error?` |
 
 **Corretivos (a lei que supera, já no cânone):** `void` (HISTORY §5829–5833/§5971) · `?`-nulabilidade

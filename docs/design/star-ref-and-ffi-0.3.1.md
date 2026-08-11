@@ -146,7 +146,7 @@ linker dependency. Ships .30, own-native.
 
 ### 4.2 C MACROS without a C preprocessor — the teko-native macro RESOLVER (the hard problem)
 
-`extern macro fn N(params) -> R = "MACRO" from header "h.h"` is resolved at build-time by a
+`extern macro fn N(params): R = "MACRO" from header "h.h"` is resolved at build-time by a
 **teko-native resolver** the compiler owns — it reads the named header, finds the `#define`, and
 resolves it in **tiers**, never invoking `cc`:
 
@@ -161,7 +161,7 @@ resolves it in **tiers**, never invoking `cc`:
  * @return u32   the asserted result
  * @since 0.3.1
  */
-extern macro fn htonl(x: u32) -> u32 = "htonl" from header "arpa/inet.h"
+extern macro fn htonl(x: u32): u32 = "htonl" from header "arpa/inet.h"
 ```
 
 - **Tier 0 — object-like / CONSTANT macro** (`O_RDONLY`, `INT_MAX`, `SOCK_STREAM`, flag bits — the
@@ -195,7 +195,7 @@ always-present honest error.
 
 ### 4.3 VARARGS — a per-target own-backend ABI (not delegated to any C compiler)
 
-`extern fn printf(fmt: *byte, ...) -> i32 = "printf"` (`...` = C-ABI variadic tail, extern-only,
+`extern fn printf(fmt: *byte, ...): i32 = "printf"` (`...` = C-ABI variadic tail, extern-only,
 trailing; default argument promotions `f32→f64`, sub-`int`→`int`). The **own backend implements the
 platform varargs calling convention itself**:
 
@@ -269,7 +269,7 @@ everything else (codegen) is earlier and own-native.
  * @since 0.3.0.30
  */
 #[export("teko_add")]
-pub fn add(a: i64, b: i64) -> i64 { a + b }
+pub fn add(a: i64, b: i64): i64 { a + b }
 ```
 
 ---

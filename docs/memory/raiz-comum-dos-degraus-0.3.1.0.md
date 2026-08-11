@@ -224,7 +224,7 @@ pub type LInst = struct { result: u32; has_result: bool; op: LOp; line: u32; col
 `src/lir/lower.tks:270,276` — e o mapa do tipo semântico para a máquina colapsa `str`/`[]T` em `Ptr`:
 
 ```
-pub fn ltype_of(t: checker::Type, enums: []LEnumInfo) -> LType {
+pub fn ltype_of(t: checker::Type, enums: []LEnumInfo): LType {
     match t {
         checker::Prim as p => ltype_of_prim(p.kind)
         checker::Byte => LType::I8
@@ -343,7 +343,7 @@ inventário de §3 aponta como o único com LEITOR e sem ESCRITOR: o campo gordo
 ```teko
 pub type Holder = struct { name: str; n: i32 }
 
-pub fn probe() -> i32 {
+pub fn probe(): i32 {
     let h = Holder { name = "abcde"; n = 7 }
     if h.n != 7 { return 1 }
     if h.name.len != 5 { return 2 }
@@ -392,7 +392,7 @@ um escritor que só existia para consts, e o escritor de RUNTIME nunca foi alarg
 ```teko
 pub type Holder = struct { name: str; n: i32 }
 
-pub fn probe() -> i32 {
+pub fn probe(): i32 {
     mut h = Holder { name = "abcde"; n = 7 }
     h.name = "xy"
     if h.name.len != 2 { return 3 }
@@ -407,9 +407,9 @@ C: **0**. Nativo: **3**. Sítio: `lower_assign_field` (`lower.tks:7276`) passa
 
 ```teko
 pub type Holder = struct { n: i32; name: str }
-fn take(s: str) -> i32 { s.len to i32 }
+fn take(s: str): i32 { s.len to i32 }
 
-pub fn probe() -> i32 {
+pub fn probe(): i32 {
     let h = Holder { n = 7; name = "abcde" }
     if take(h.name) != 5 { return 1 }
     0
@@ -430,7 +430,7 @@ C: **0**. Nativo: **1**. `is_fat_type` cobre `Str` E `Slice`; o defeito também.
 ### 5.5 E o literal `[]str` constrói-se em SILÊNCIO com o stride errado
 
 ```teko
-pub fn probe() -> i32 {
+pub fn probe(): i32 {
     let xs: []str = ["aa", "bbb", "cccc"]
     if xs.len != 3 { return 1 }
     0
@@ -504,7 +504,7 @@ byte-idênticos ao de hoje.
  * @see fat_len_offset
  * @since 0.3.1.0 raiz A
  */
-fn fat_value_bytes() -> u32 {
+fn fat_value_bytes(): u32 {
     ltype_size(LType::Ptr) * (2 to u32)
 }
 
@@ -520,7 +520,7 @@ fn fat_value_bytes() -> u32 {
  * @see fat_value_bytes
  * @since 0.3.1.0 raiz A
  */
-fn fat_len_offset() -> u32 {
+fn fat_len_offset(): u32 {
     ltype_size(LType::Ptr)
 }
 
@@ -540,7 +540,7 @@ fn fat_len_offset() -> u32 {
  * @see fat_value_bytes
  * @since 0.3.1.0 raiz A
  */
-fn value_image_bytes(t: checker::Type, enums: []LEnumInfo) -> u32 {
+fn value_image_bytes(t: checker::Type, enums: []LEnumInfo): u32 {
     if is_fat_type(t) { return fat_value_bytes() }
     ltype_size(ltype_of(t, enums))
 }
@@ -577,7 +577,7 @@ são os mesmos. Portão: corpus `own_native` byte-idêntico.
  * @see load_fat_image
  * @since 0.3.1.0 raiz A
  */
-fn store_fat_image(ctx: LowerCtx, addr: u32, fo: LoweredFat, line: u32, col: u32) -> LowerCtx {
+fn store_fat_image(ctx: LowerCtx, addr: u32, fo: LoweredFat, line: u32, col: u32): LowerCtx {
     let with_ptr = ctx_append(ctx, store_inst(addr, fo.ptr, LType::Ptr, line, col))
     let la = ctx_alloc(with_ptr)
     let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, addr, fat_len_offset(), line, col))
@@ -598,7 +598,7 @@ fn store_fat_image(ctx: LowerCtx, addr: u32, fo: LoweredFat, line: u32, col: u32
  * @see store_fat_image
  * @since 0.3.1.0 raiz A
  */
-fn load_fat_image(ctx: LowerCtx, addr: u32, line: u32, col: u32) -> LoweredFat {
+fn load_fat_image(ctx: LowerCtx, addr: u32, line: u32, col: u32): LoweredFat {
     let pr = ctx_alloc(ctx)
     let with_pr = ctx_append(pr.ctx, load_inst(pr.vreg, addr, LType::Ptr, line, col))
     let la = ctx_alloc(with_pr)
@@ -636,7 +636,7 @@ que `store_variant_payload` (`lower.tks:4536`) já tem, e que é o modelo a copi
  * @throws propagado de `lower_fat_expr`/`lower_value_into_type`
  * @since 0.3.1.0 raiz A
  */
-fn store_field_value(ctx: LowerCtx, addr: u32, declared: checker::Type, value: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
+fn store_field_value(ctx: LowerCtx, addr: u32, declared: checker::Type, value: checker::TExpr, line: u32, col: u32): LowerCtx | error {
     if is_fat_type(declared) {
         let fo = match lower_fat_expr(ctx, value) { LoweredFat as x => x; error as err => return err }
         return store_fat_image(fo.ctx, addr, fo, line, col)
@@ -917,7 +917,7 @@ dois (`is_fat_type`, `typeexpr_is_fat`).
 `lower_char_lit`, `src/lir/lower.tks:7174`:
 
 ```
-fn lower_char_lit(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit) -> Lowered {
+fn lower_char_lit(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit): Lowered {
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, utf8_codepoint(c.bytes), e.line, e.col)); vreg = r.vreg }
 }
@@ -1048,7 +1048,7 @@ A sequência passa portanto a ter **oito** crumbs, com um novo ANTES de tudo e u
  * @see typeexpr_is_fat  o gémeo SINTÁCTICO, que responde à mesma pergunta sobre uma anotação
  * @since 0.3.1.0 raiz A, crumb R0
  */
-fn is_fat_type(t: checker::Type) -> bool {
+fn is_fat_type(t: checker::Type): bool {
     match t {
         checker::Str => true
         checker::Slice => true
@@ -1071,7 +1071,7 @@ fn is_fat_type(t: checker::Type) -> bool {
  * @see is_fat_type  o gémeo SEMÂNTICO
  * @since 0.3.1.0 raiz A, crumb R0
  */
-fn typeexpr_is_fat(te: parser::TypeExpr) -> bool {
+fn typeexpr_is_fat(te: parser::TypeExpr): bool {
     match te {
         parser::SliceType => true
         parser::NamedType as nt => named_single_segment_is(nt.path, "str") || named_single_segment_is(nt.path, "char")
@@ -1213,8 +1213,8 @@ A pergunta de §7-bis.4 deixou de ser pergunta. Ruling do dono, literal:
 > validação de um campo, o tamanho máximo de um texto. O usuário do sistema não sabe bytes e nem
 > imagina que um caractere acentuado ocupa 2 bytes e um emoji ocupa 4.*
 >
-> *Se o dev precisa dos bytes, então teria que usar uma stdlib `teko::strings::get_bytes(str) ->
-> []byte` ou o inverso `teko::strings::from_bytes([]byte) -> str` e depois isso pode se expandir
+> *Se o dev precisa dos bytes, então teria que usar uma stdlib `teko::strings::get_bytes(str):
+> []byte` ou o inverso `teko::strings::from_bytes([]byte): str` e depois isso pode se expandir
 > para outros encondings."*
 
 O dono decide o QUÊ; esta secção dá o QUANTO. **Não implemento nada aqui e não escolho nada aqui.**
@@ -1224,13 +1224,13 @@ O dono decide o QUÊ; esta secção dá o QUANTO. **Não implemento nada aqui e 
 `src/checker/scope.tks:614-615`:
 
 ```
-if name == "bytes_of_str" { … ret = bytes_t … }   // bytes_of_str(str) -> []byte
-if name == "str_from_utf8" {   // str_from_utf8([]byte) -> str | error (ROUND 0 / B.36)
+if name == "bytes_of_str" { … ret = bytes_t … }   // bytes_of_str(str): []byte
+if name == "str_from_utf8" {   // str_from_utf8([]byte): str | error (ROUND 0 / B.36)
 ```
 
-- `teko::str::bytes_of_str(str) -> []byte` **é** o `get_bytes` do ruling. Já usado em **20 sítios de
+- `teko::str::bytes_of_str(str): []byte` **é** o `get_bytes` do ruling. Já usado em **20 sítios de
   11 módulos** (§7-bis.6).
-- `teko::str::str_from_utf8([]byte) -> str | error` **é** o `from_bytes` do ruling — e já devolve
+- `teko::str::str_from_utf8([]byte): str | error` **é** o `from_bytes` do ruling — e já devolve
   `| error`, isto é, já VALIDA em vez de confiar.
 
 **Nada há a construir do lado do acesso a bytes.** O que falta é (a) o NOME, (b) a extensibilidade a
@@ -1255,7 +1255,7 @@ Contagem de usos em `src/**` (varrimento literal):
 
 **Para a extensibilidade a outros encodings que o ruling pede,** o ponto de desenho é o mesmo nas
 três: `get_bytes(s)` é `get_bytes(s, Encoding::Utf8)` com o encoding por omissão, e
-`from_bytes(b)` é `from_bytes(b, Encoding::Utf8) -> str | error`. O `| error` já existe em
+`from_bytes(b)` é `from_bytes(b, Encoding::Utf8): str | error`. O `| error` já existe em
 `str_from_utf8` e é o que torna a extensão segura — um decode que falha PARA em vez de inventar.
 **Decisão do dono; a medição está feita.**
 
@@ -1514,7 +1514,7 @@ vêm atrás) e **R7**, agora repartido (§7-quater.3).
 Medido no vagão, são duas, mas **não é uma**:
 
 ```
-src/lir/lower.tks:6496   fn fat_slot_bytes() -> u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
+src/lir/lower.tks:6496   fn fat_slot_bytes(): u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
 src/lir/lower.tks:8334       if typeexpr_is_fat(te) { return ltype_size(LType::Ptr) * (2 to u32) }
 ```
 

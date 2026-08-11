@@ -24,7 +24,7 @@ O builtin já existia nos dois sítios que não são o baixamento nativo:
 
 | papel | endereço |
 |---|---|
-| assinatura no checker, `(byte) -> str` | `src/checker/scope.tks:787` |
+| assinatura no checker, `(byte): str` | `src/checker/scope.tks:787` |
 | espelho de runtime em Teko | `src/runtime/teko_rt.tks:169` |
 | resolução da rota C, `tk_one_byte` | `src/codegen/codegen.tks:4334` |
 | **baixamento nativo** | **ausente** |
@@ -111,7 +111,7 @@ teko: .: native backend N1: builtin `str_slice_chars` not yet lowered (N2)
 | papel | endereço |
 |---|---|
 | disparo | `src/encoding/json/json.tks:595`, em `trim_trailing_zeros` (declarada em `:589`) |
-| assinatura no checker, `(str, i64, i64) -> str` | `src/checker/scope.tks:837` |
+| assinatura no checker, `(str, i64, i64): str` | `src/checker/scope.tks:837` |
 | resolução da rota C, `tk_str_slice_chars` | `src/codegen/codegen.tks:4352` |
 | símbolo de runtime já na lista de permissão nativa | `src/lir/lower.tks:3480` |
 | paragem | `src/lir/lower.tks:4262`, via `:4216` |

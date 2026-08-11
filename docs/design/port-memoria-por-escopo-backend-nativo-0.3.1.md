@@ -230,7 +230,7 @@ O `NativeRegionFrame` e os campos de `LowerCtx` estão no §4. As funções de e
  *             da corrente
  * @since 0.3.1
  */
-fn region_current_vreg(ctx: LowerCtx) -> (ctx: LowerCtx, vreg: u32)
+fn region_current_vreg(ctx: LowerCtx): (ctx: LowerCtx, vreg: u32)
 ```
 
 ```teko
@@ -250,7 +250,7 @@ fn region_current_vreg(ctx: LowerCtx) -> (ctx: LowerCtx, vreg: u32)
  * @throws  propagado da emissão das chamadas de runtime
  * @since 0.3.1
  */
-fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, col: u32) -> LowerCtx | error
+fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, col: u32): LowerCtx | error
 ```
 
 ```teko
@@ -270,7 +270,7 @@ fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, c
  * @throws  propagado da emissão, ou um erro nomeado se a pilha estiver vazia (invariante partido)
  * @since 0.3.1
  */
-fn close_native_region(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx | error
+fn close_native_region(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error
 ```
 
 ```teko
@@ -290,7 +290,7 @@ fn close_native_region(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx | error
  * @return          true sse a RHS de `name` deve ser bracketada para conveyance a `rr_vreg`
  * @since 0.3.1
  */
-fn binding_conveys_escape(escaping: []str, name: str) -> bool
+fn binding_conveys_escape(escaping: []str, name: str): bool
 ```
 
 ```teko
@@ -308,7 +308,7 @@ fn binding_conveys_escape(escaping: []str, name: str) -> bool
  * @return       o VReg da região declarante, ou `null` se não resolvida
  * @since 0.3.1
  */
-fn native_scope_region_of(stack: []NativeRegionFrame, name: str) -> u32 | null
+fn native_scope_region_of(stack: []NativeRegionFrame, name: str): u32 | null
 ```
 
 **Funções existentes que o port TOCA (`lower.tks`):**

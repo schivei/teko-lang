@@ -81,7 +81,7 @@ codegen incapazes de divergir (o contrato `escape.tks:406-409`). A mudança de `
  * @return          a contagem de leituras-inside seguras
  * @since 0.3.1
  */
-fn count_block_local_reads(body: []TStatement, name: str, is_value: bool) -> i64
+fn count_block_local_reads(body: []TStatement, name: str, is_value: bool): i64
 ```
 
 Corpo (a única linha que muda é o braço `TAssign`): onde hoje está `TAssign => { }`, passa a
@@ -369,7 +369,7 @@ O `ResidencePlan`/`ResidenceTier`/`residence_plan`/`region_enter`/`region_leave`
  *                (fallback leak-seguro: frame ⊒ bloco ⊒ usos)
  * @since 0.3.1
  */
-fn scope_region_of(frames: []RegionFrame, name: str) -> str
+fn scope_region_of(frames: []RegionFrame, name: str): str
 ```
 
 E a adição de runtime (C MANTIDA, `teko_rt.{c,h}`): `tk_region *tk_region_current(void)` (des-static +

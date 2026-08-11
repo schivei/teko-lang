@@ -222,9 +222,9 @@ explicit `= "SYM"` (import-symmetric) **or** flattened canonical default, §5.2.
 ### 5.2.1 The C export SYMBOL-NAME rule (`exp` + `abi="c"`) — RATIFIABLE, symmetric with the IMPORT convention
 
 **The owner's steer:** for IMPORT (FFI-in) the convention is already ratified — the dev names the C
-symbol EXPLICITLY in the `extern` clause: **`[pub|exp] extern fn name(...) -> R = "c_symbol" from "lib"`**
-(verified: `drain-fase3-stdlib-order.md:127/136/146` — `pub extern fn sqrt(x: f64) -> f64 = "sqrt" from
-"m"`; the interpreter-retirement decision — `exp extern fn cov_merge(path: str) -> bool = "tk_cov_merge" from
+symbol EXPLICITLY in the `extern` clause: **`[pub|exp] extern fn name(...): R = "c_symbol" from "lib"`**
+(verified: `drain-fase3-stdlib-order.md:127/136/146` — `pub extern fn sqrt(x: f64): f64 = "sqrt" from
+"m"`; the interpreter-retirement decision — `exp extern fn cov_merge(path: str): bool = "tk_cov_merge" from
 "teko_rt"`; also `embed-vfs.md`). The C symbol lives in the **`= "SYM"`** clause, the library in
 **`from "lib"`**. **EXPORT is the mirror of this** — the same `= "SYM"` clause names the C symbol; **no
 new `#[export]` attribute.**
@@ -248,9 +248,9 @@ foundation.
 1. **EXPLICIT symbol (symmetric with import — the primary form).** An `exp fn` in an `abi="c"` artifact
    names its C symbol with the SAME **`= "c_name"`** clause `extern` uses on import:
    ```
-   exp fn add(a: i64, b: i64) -> i64 = "teko_add" { a + b }     // exports the C symbol `teko_add`
+   exp fn add(a: i64, b: i64): i64 = "teko_add" { a + b }     // exports the C symbol `teko_add`
    ```
-   Exact mirror of `extern fn add(...) -> i64 = "teko_add" from "lib"` (import): the same `= "SYM"`
+   Exact mirror of `extern fn add(...): i64 = "teko_add" from "lib"` (import): the same `= "SYM"`
    clause names the C symbol on the SAME `fn` grammar; on import the body is ABSENT (foreign), on export
    the body is PRESENT (Teko) — the only difference. **No `#[export]`; no new token — `= "STR"` and `exp`
    already exist.** *(Grammar note: the parser already reads `= "STR"` after an `extern fn` signature;
@@ -323,7 +323,7 @@ type tag, and (compositionally) to each exported member/method/variant symbol. `
 | **struct** (`#repr("c")`) | `typedef struct <tag> { <fields> } <tag>;` — `<tag>` = flattened canonical `ns_Name` or `= "SYM"` | field names carried verbatim (C identifiers) | every field must be **FFI-safe** (scalar / `ptr<T>` / nested `#repr("c")`); a Teko **slice/fat-pointer**, closure, or bare `ref` field ⇒ **compile error** (export it as an explicit `ptr<T>+len` pair or don't export) |
 | **enum** | `typedef enum <tag> { ns_Name_A, ns_Name_B, … } <tag>;` | variants → **`<tag>_<Variant>`** constants | ordinals are the **ABI contract** — source order fixes `0..n`; **reordering variants is an ABI break** (documented). C `enum` is int-width — fine for a plain enum |
 | **flags** | `typedef <uintN> <tag>;` + **`#define <tag>_<MEMBER> <1u<<k>`** per bit (mirrors the internal `tk_t_<Name>_<MEMBER>` power-of-2 scheme, `codegen.tks:471`) | bits → **`<tag>_<MEMBER>`** | `#define`/`static const`, **not** a C `enum` (flags are `u128`-capable, wider than int); underlying `typedef` picks `uint32/64_t`/`unsigned __int128` by width |
-| **class** | **opaque handle** `typedef struct <tag>* <tag>;` (C never sees the layout — matches the Teko class `{data,vtable}` reference-object) | methods → **`<tag>_<method>(<tag> self, …)`**; ctor → `<tag>_new(…) -> <tag>`; dtor → `<tag>_free(<tag> self)` | **polymorphism DOES cross via the exported method wrappers**: each `<tag>_<method>` wrapper does the Teko-side vtable dispatch internally; the C side stays vtable-agnostic. **Honest-stop: C cannot SUBCLASS / override virtuals** (that needs C to supply a vtable — the abstraction can't cross); export is for C to *use*, not *extend* |
+| **class** | **opaque handle** `typedef struct <tag>* <tag>;` (C never sees the layout — matches the Teko class `{data,vtable}` reference-object) | methods → **`<tag>_<method>(<tag> self, …)`**; ctor → `<tag>_new(…): <tag>`; dtor → `<tag>_free(<tag> self)` | **polymorphism DOES cross via the exported method wrappers**: each `<tag>_<method>` wrapper does the Teko-side vtable dispatch internally; the C side stays vtable-agnostic. **Honest-stop: C cannot SUBCLASS / override virtuals** (that needs C to supply a vtable — the abstraction can't cross); export is for C to *use*, not *extend* |
 | **interface** | **vtable struct-of-function-pointers** `typedef struct <tag> { R (*method)(void* self, …); … } <tag>;` + the boundary value is a `{ void* self; const <tag>* vtable; }` fat pointer | methods → the fn-pointer field names | this is the honest C form of an interface (a vtable). **Dynamic dispatch crosses** (C calls through the fn-pointer table). C MAY implement it (supply its own fn pointers) — the one decl kind that crosses both ways cleanly. Default/generic interface methods ⇒ honest-stop |
 | **variant** (tagged union) | `typedef struct <tag> { <int> tag; union { <members> } u; } <tag>;` (`#repr("c")`) | members → `<tag>_<Member>` tag constants | doable as a C tagged struct; a member that is itself non-FFI-safe ⇒ honest-stop |
 | **alias / trait** | alias → the aliased C type inline; trait → **nothing** (compile-time only, like today) | — | trait never reaches the boundary |

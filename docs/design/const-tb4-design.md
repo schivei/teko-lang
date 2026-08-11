@@ -163,7 +163,7 @@ já o chama unqualified em `:487`/`:530`, provando o acesso cross-file same-name
  * @param str target  o símbolo da entrada referenciada
  * @return u32 | error  o endereço absoluto do alvo, ou um erro nomeado
  */
-fn wasm_data_addr_of(symbols: []str, offsets: []u32, target: str) -> u32 | error {
+fn wasm_data_addr_of(symbols: []str, offsets: []u32, target: str): u32 | error {
     mut i: u64 = 0
     loop {
         if i >= symbols.len { break }
@@ -197,7 +197,7 @@ fn wasm_data_addr_of(symbols: []str, offsets: []u32, target: str) -> u32 | error
  * @return WasmRodataLayout | error  o layout com os slots de ponteiro escritos, ou o
  *                                   erro nomeado de alvo desconhecido propagado
  */
-pub fn wasm_relocate_rodata(layout: WasmRodataLayout, rodata: []lir::LRodata) -> WasmRodataLayout | error {
+pub fn wasm_relocate_rodata(layout: WasmRodataLayout, rodata: []lir::LRodata): WasmRodataLayout | error {
     let base = layout.segment.offset
     mut buf = layout.segment.bytes
     mut i: u64 = 0
@@ -327,7 +327,7 @@ construindo `WasmRodataLayout`/`LModule` à mão — o precedente de
  * @param []lir::LDataReloc relocs  as relocations internas
  * @return lir::LRodata  a entrada
  */
-fn srt_rodata_rel(symbol: str, bytes: []byte, relocs: []lir::LDataReloc) -> lir::LRodata {
+fn srt_rodata_rel(symbol: str, bytes: []byte, relocs: []lir::LDataReloc): lir::LRodata {
     lir::LRodata { symbol = symbol; bytes = bytes; relocs = relocs }
 }
 ```

@@ -130,7 +130,7 @@ type NameIndex = struct {
  * @return an empty NameIndex
  * @since 0.3.1
  */
-fn nidx_empty() -> NameIndex { NameIndex { slots = teko::list::empty() } }
+fn nidx_empty(): NameIndex { NameIndex { slots = teko::list::empty() } }
 
 /**
  * nidx_build — build a NameIndex over `names` (the ordered name-of each entry in the array being
@@ -142,7 +142,7 @@ fn nidx_empty() -> NameIndex { NameIndex { slots = teko::list::empty() } }
  * @return       the sorted hash index over `names`
  * @since 0.3.1
  */
-fn nidx_build(names: []str) -> NameIndex {
+fn nidx_build(names: []str): NameIndex {
     mut slots: []NameSlot = teko::list::empty()
     mut i: u64 = 0
     loop {
@@ -163,7 +163,7 @@ fn nidx_build(names: []str) -> NameIndex {
  * @return     the first slot index with `slots[k].hash >= h` (idx.slots.len when none)
  * @since 0.3.1
  */
-fn nidx_lower_bound(idx: NameIndex, h: u64) -> u64 {
+fn nidx_lower_bound(idx: NameIndex, h: u64): u64 {
     mut lo: u64 = 0
     mut hi: u64 = idx.slots.len
     loop {
@@ -217,7 +217,7 @@ pub type Env = struct { base: []ValBinding; bindings: []ValBinding; cur_ns: str;
 
 - `env_empty` → `base_index = nidx_empty()`.
 - `seal` → após mover `bindings` para `b`, `base_index = nidx_build(nidx_names_of(b))`, onde
-  `nidx_names_of(b: []ValBinding) -> []str` extrai `b[i].name` em ordem.
+  `nidx_names_of(b: []ValBinding): []str` extrai `b[i].name` em ordem.
 - `with_di`/`with_injects`/`with_fn_unsafe`/`with_ns`/`with_file`/`with_owner`/`define`/`define_fn`/
   `define_const` → carregam `base_index = env.base_index` inalterado.
 
@@ -237,7 +237,7 @@ troca só o scan de `base`:
  * @return      the matching binding, or an "undefined name" error
  * @throws      when no local or global binding is named `name`
  */
-fn lookup_binding(env: Env, name: str) -> ValBinding | error {
+fn lookup_binding(env: Env, name: str): ValBinding | error {
     mut i = env.bindings.len
     loop {
         if i == 0 { break }

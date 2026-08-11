@@ -105,7 +105,7 @@ to the (lexical, safe) `adopt { }`.
 
 ```teko
 unsafe #must_free type Arena = ...        // both markers coexist on the TypeDecl (U1 is_unsafe + S2 must_free)
-unsafe fn build() -> i64 {
+unsafe fn build(): i64 {
     mut a = Arena::new()                  // tk_region_new (fresh child region)
     let p = a.alloc<Node>(...)            // ptr<Node> attached to a's lifetime
     mem::free(a)                          // bulk-free the whole region (the #must_free consume)

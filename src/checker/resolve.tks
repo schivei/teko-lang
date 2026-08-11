@@ -1498,13 +1498,13 @@ pub fn is_unsafe_type(name: str, table: TypeTable): bool {
 /**
  * Does the resolved `t` CARRY an unsafe-typed component — either `t` itself names an
  * `unsafe type` (the leaf case) or `t` is a compositional carrier (`[]M`, `M?`, `Ref<M>`,
- * `ptr<M>`, a variant with an unsafe member, or a `fn(…)->…` signature naming an unsafe
+ * `ptr<M>`, a variant with an unsafe member, or a `fn(…):…` signature naming an unsafe
  * param/return) wrapping one? Mirrors the recursion shape of `widens_into_at`/
  * `carries_sentinel`: depth-bounded so a self-referential variant cannot loop. Fails
  * CLOSED at the depth bound (a containment gate exhausting its budget must REJECT, never
  * silently pass unsafe data through as "not carrying"). A `Func` is recursed into because
  * this walk is about DATA the value's TYPE names, not call sites — calls stay uncolored,
- * but a safe field/param typed `fn(Raw)->Raw` still stores/exposes `Raw` in its shape. This
+ * but a safe field/param typed `fn(Raw):Raw` still stores/exposes `Raw` in its shape. This
  * is the sole engine behind the U2 containment gates (field composition, fn signatures,
  * locals, and generic-instance stamping) — every carrier the checker lets a value travel
  * through must be walked here, or unsafe data could leak through it unchecked.
@@ -1980,7 +1980,7 @@ pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable): Subst | erro
 // A generic-INSTANCE name (`Box__g__T` — the PHANTOM a generic fn's `-> Box<T>` return resolves to
 // while `T` is abstract) is NOT a type-param: its embedded params are recovered from the BARE param
 // positions that also mention them (a param `x: T`), so treating the whole mangled name as one opaque
-// "type-param" would wrongly make `wrap<T>(x: T) -> Box<T>` look uninferable. Skip it — the corpus
+// "type-param" would wrongly make `wrap<T>(x: T): Box<T>` look uninferable. Skip it — the corpus
 // carries no phantom in any typed signature, so this is byte-identical there. (C: tk_collect_sig_type_params.)
 pub fn collect_sig_type_params(t: Type, table: TypeTable, acc: []str): []str {
     match t {
@@ -2153,7 +2153,7 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str): Type |
             }
             Variant { members = union_normalize_null(members) }
         }
-        // (W10a) FunctionType `(A, B) -> R` → Func { params; ret ; variadic = false }. The return MAY be `void`
+        // (W10a) FunctionType `(A, B): R` → Func { params; ret ; variadic = false }. The return MAY be `void`
         // (a function value can return nothing); params must be COMPLETE value types (void/ref
         // rejected — a ref cannot be stored, R4; void is not a value, M.3).
         parser::FunctionType as fnt => {
@@ -2426,7 +2426,7 @@ fn ref_target_type(argt: Type): Type | error {
         Reference => error { message = "a reference cannot target another reference (`Ref<Ref<T>>` is invalid)" }
         Ptr => error { message = "a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)" }
         Uptr => error { message = "a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)" }
-        Func => error { message = "a reference cannot target a function (`Ref<(…)->…>` is invalid)" }
+        Func => error { message = "a reference cannot target a function (`Ref<(…):…>` is invalid)" }
         _ => Reference { inner = argt }
     }
 }
@@ -2507,7 +2507,7 @@ pub fn type_render(t: Type): str {
         Named as n => name_last_segment(n.name)   // (#109 W3) canonical "ns::Name" → bare "Name" for readable diagnostics
         Slice as s => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
         Variant as v => render_members(v.members)
-        Func as f => render_func(f)   // (C1.8) "(p0, …) -> ret" — full mirror of resolve.c (M.3, show what we know)
+        Func as f => render_func(f)   // (C1.8) "(p0, …): ret" — full mirror of resolve.c (M.3, show what we know)
         Ptr as p => match p.inner { null => "ptr"; Type as t => $"ptr<{type_render(t)}>" }   // ptr<T> human render
         Uptr => "uptr"   // (C7.1a) opaque word-size unsigned
         Reference as r => $"Ref<{type_render(r.inner)}>"   // (MEM-1b) Ref<T> human render
@@ -2515,7 +2515,7 @@ pub fn type_render(t: Type): str {
     }
 }
 
-// (C1.8) render a function type "(p0, p1, …) -> ret" — mirror of the FUNC branch of
+// (C1.8) render a function type "(p0, p1, …): ret" — mirror of the FUNC branch of
 // resolve.c::tk_type_render (M.3, show what we know). `ret` may be void.
 fn render_func(f: Func): str {
     var params = ""
@@ -2526,7 +2526,7 @@ fn render_func(f: Func): str {
         params = $"{params}{type_render(f.params[i])}"
         i++
     }
-    $"({params}) -> {type_render(f.ret)}"
+    $"({params}): {type_render(f.ret)}"
 }
 
 // (C1.8) join variant members with " | " (e.g. "Circle | Square | Triangle"). Mirror of the

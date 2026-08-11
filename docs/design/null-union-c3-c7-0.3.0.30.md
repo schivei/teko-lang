@@ -173,7 +173,7 @@ tagged path (with the `uint8` tag, once C3 lands, for any null-bearing union).
  * @see      cg_union_tag_ctype (the inline `uint8`-tag path this gates)
  * @since 0.3.0.30 (null-union C3)
  */
-fn cg_union_niche_member(v: checker::Variant) -> checker::Type | null | error
+fn cg_union_niche_member(v: checker::Variant): checker::Type | null | error
 
 /**
  * variant_member_admissible — the C3 replacement for the flat `Reference`
@@ -189,7 +189,7 @@ fn cg_union_niche_member(v: checker::Variant) -> checker::Type | null | error
  * @return          null when `member` is admissible; an error naming why not
  * @since 0.3.0.30 (null-union C3)
  */
-fn variant_member_admissible(member: checker::Type, siblings: []checker::Type, table: TypeTable) -> null | error
+fn variant_member_admissible(member: checker::Type, siblings: []checker::Type, table: TypeTable): null | error
 
 /**
  * cg_union_tag_ctype — the C type of a null-bearing tagged union's discriminant:
@@ -202,7 +202,7 @@ fn variant_member_admissible(member: checker::Type, siblings: []checker::Type, t
  * @return     `buf` with `uint8_t` appended, or an error
  * @since 0.3.0.30 (null-union C3)
  */
-fn cg_union_tag_ctype(buf: []byte, v: checker::Variant) -> []byte | error
+fn cg_union_tag_ctype(buf: []byte, v: checker::Variant): []byte | error
 ```
 
 ### Fixtures this crumb adds
@@ -296,7 +296,7 @@ parser does not cover. This crumb adds a binding/field attribute channel:
  * @return       null when `#inline` is legal; an error naming the ineligible class
  * @since 0.3.0.30 (null-union C4)
  */
-fn inline_attr_eligible(t: checker::Type, table: TypeTable) -> null | error
+fn inline_attr_eligible(t: checker::Type, table: TypeTable): null | error
 
 /**
  * union_repr_class — classify how a resolved union is stored: `Niche` (bare, C3),
@@ -310,7 +310,7 @@ fn inline_attr_eligible(t: checker::Type, table: TypeTable) -> null | error
  * @return          the representation class, or an error on a malformed member
  * @since 0.3.0.30 (null-union C4)
  */
-fn union_repr_class(v: checker::Variant, forced_inline: bool, table: TypeTable) -> UnionRepr | error
+fn union_repr_class(v: checker::Variant, forced_inline: bool, table: TypeTable): UnionRepr | error
 
 /**
  * The physical storage class chosen for a resolved union type. Orthogonal to the
@@ -412,7 +412,7 @@ bytes, which is the precondition for C6's byte-identical corpus rewrite.
  * @see         match narrowing (checker/match.tks arm binding)
  * @since 0.3.0.30 (null-union C5)
  */
-fn narrow_on_eq_guard(cond: checker::TExpr, env: FlowEnv) -> BranchEnvs
+fn narrow_on_eq_guard(cond: checker::TExpr, env: FlowEnv): BranchEnvs
 
 /**
  * desugar_optional_type — the transitional BRIDGE lowering (retired in C7): map a
@@ -425,7 +425,7 @@ fn narrow_on_eq_guard(cond: checker::TExpr, env: FlowEnv) -> BranchEnvs
  * @deprecated   transitional; deleted in C7 once no source uses `T?`
  * @since 0.3.0.30 (null-union C5)
  */
-fn desugar_optional_type(inner: checker::Type) -> checker::Type
+fn desugar_optional_type(inner: checker::Type): checker::Type
 
 /**
  * require_narrowed — reject a use of a `T | null` (any union) payload AS a bare
@@ -440,7 +440,7 @@ fn desugar_optional_type(inner: checker::Type) -> checker::Type
  * @return          null when the use is legal; an error demanding narrowing
  * @since 0.3.0.30 (null-union C5)
  */
-fn require_narrowed(use_site: checker::TExpr, val_type: checker::Type, narrowed: bool) -> null | error
+fn require_narrowed(use_site: checker::TExpr, val_type: checker::Type, narrowed: bool): null | error
 ```
 
 ### Fixtures this crumb adds

@@ -491,7 +491,7 @@ Builtins Teko em `scope.tks` (espelhar `:740-742`) + mapeamento em `lower.tks` (
 ⇒ FIXPOINT trivial. Ritual: NÃO.
 
 **C2 — Checker: o oráculo de residência `ResidencePlan`.** Novo `src/checker/residence.tks` (ou
-extensão de `spine.tks`): `pub fn residence_plan(f: TFunction) -> ResidencePlan` que, por binding,
+extensão de `spine.tks`): `pub fn residence_plan(f: TFunction): ResidencePlan` que, por binding,
 devolve o tier (escopo léxico / frame / caller / root) associando cada binding ao seu escopo-dono
 qualquer que seja o sabor (bloco/loop/if/when/fn, §4), usando `pt_join` (`spine.tks:495`) como oráculo
 transitivo e `escape.tks` como fast-path; por `return`, se é move. Fixar o default de materialização
@@ -683,7 +683,7 @@ pub type ResidencePlan = struct {
  *           defeito medido, ou é honest-stopped a montante conforme a política ratificada)
  * @since 0.3.1
  */
-pub fn residence_plan(f: checker::TFunction) -> ResidencePlan
+pub fn residence_plan(f: checker::TFunction): ResidencePlan
 
 /**
  * region_enter — empilha `child` como região-corrente da task: toda alocação default subsequente
@@ -696,7 +696,7 @@ pub fn residence_plan(f: checker::TFunction) -> ResidencePlan
  * @return       void
  * @since 0.3.1
  */
-pub fn region_enter(child: RegionHandle) -> void
+pub fn region_enter(child: RegionHandle): void
 
 /**
  * region_leave — desempilha a região-corrente: a alocação default volta ao destino anterior (a
@@ -707,7 +707,7 @@ pub fn region_enter(child: RegionHandle) -> void
  * @return  void
  * @since 0.3.1
  */
-pub fn region_leave() -> void
+pub fn region_leave(): void
 ```
 
 E a assinatura de runtime (C MANTIDA), §9: `tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b)`.

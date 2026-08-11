@@ -169,7 +169,7 @@ consistency between isel pins, the descriptor, and the encoder's ModRM field is)
  *
  * @return AbiDescriptor  the SysV AMD64 register file
  */
-pub fn sysv64() -> AbiDescriptor {
+pub fn sysv64(): AbiDescriptor {
     /*
      * gpr_arg      = [7(RDI),6(RSI),2(RDX),1(RCX),8(R8),9(R9)]  (index 0 = RAX(0) as result)
      * NOTE the result register is RAX(0), distinct from arg[0]=RDI(7): SysV's
@@ -260,7 +260,7 @@ holding the left operand:
  * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
  * @return SelCtxX86  the advanced context
  */
-fn select_alu_x86(ctx0: SelCtxX86, inst: lir::LInst, op: MAluOpX86, a: u32, b: u32, wide: bool) -> SelCtxX86 {
+fn select_alu_x86(ctx0: SelCtxX86, inst: lir::LInst, op: MAluOpX86, a: u32, b: u32, wide: bool): SelCtxX86 {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
     let ctx2 = selctx_x86_emit(ctx1, mov_x86(wide, dst, vreg(a, MRegClass::GPR)))
@@ -324,7 +324,7 @@ This is the DRY-critical, subtle-eviction code — it stays single-sourced (M.5)
 
 ### 5.2 What is MIRRORED (per-ISA adapter, small + mechanical)
 
-`inst_regs_x86(inst: MInstX86) -> InstRegs` — a total match over `MInstX86` producing the neutral
+`inst_regs_x86(inst: MInstX86): InstRegs` — a total match over `MInstX86` producing the neutral
 `InstRegs` (`regalloc.tks:260`, reused). The two-address RMW op reports `ir_def_use(dst, [dst, src])`
 (the def is also the first use — the `MMovK` precedent at `regalloc.tks:421`); `MDivSeqX86` reports
 the RAX/RDX defs+uses; `MCallX86` reports `ir_call`. `map_minst_x86`/`compute_intervals_x86`/
@@ -412,7 +412,7 @@ pub type EncInstX86 = struct {
  * @param MInstX86 inst  the instruction to encode (all operands physical)
  * @return EncInstX86 | error  the encoding, or a named honest-stop
  */
-fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86) -> EncInstX86 | error { … }
+fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86): EncInstX86 | error { … }
 ```
 
 ### 6.2 Branch layout — rel32-ALWAYS (single emit pass + patch pass, no relaxation)
@@ -481,7 +481,7 @@ via an x86 movzx/movsx choice.
 
 ### 6.5 Frame — SysV prologue/epilogue (mirrors A4-2's re-derived save-set)
 
-`compute_frame_layout_x86(abi, f) -> FrameLayoutX86` mirrors `compute_frame_layout`
+`compute_frame_layout_x86(abi, f): FrameLayoutX86` mirrors `compute_frame_layout`
 (`encode_arm64.tks:1079`): re-derive the callee-saved save-set by scanning the physical `MFuncX86`
 (`inst_regs_x86` + `is_callee_saved`, the D-A/A4 §3.1 precedent — `MFuncX86` carries no
 `used_callee_saved`), lay out slots honoring each `LAlloca` alignment, size the frame to 16 (SysV
@@ -597,7 +597,7 @@ for both the `cc`-bootstrap and the future E1 static linker. A rodata `lea` uses
  * @param EncodedModuleX86 enc  the section images + symbols + relocations
  * @return []byte  the ELF64 object file bytes
  */
-pub fn emit_elf(enc: EncodedModuleX86) -> []byte { … }
+pub fn emit_elf(enc: EncodedModuleX86): []byte { … }
 ```
 
 ### 7.4 Baked A4-4 review findings (as ELF requirements)
@@ -633,7 +633,7 @@ pub fn emit_elf(enc: EncodedModuleX86) -> []byte { … }
  *
  * @return NativeTarget  the selected own-backend target
  */
-fn native_target() -> NativeTarget {
+fn native_target(): NativeTarget {
     match teko::env::var("TEKO_TARGET") { str as v => if v == "x86_64-linux" { NativeTarget::X8664Elf } else { NativeTarget::Arm64Macho }; error => NativeTarget::Arm64Macho }
 }
 ```

@@ -55,10 +55,10 @@ CURRENT:
 ```
 type Animal = virtual class {
     name: str
-    pub fn greet(self) -> str { self.name }
+    pub fn greet(self): str { self.name }
 }
 type Dog = class Animal(parent) {
-    pub override fn greet(self) -> str { parent.greet() ~ "!" }
+    pub override fn greet(self): str { parent.greet() ~ "!" }
 }
 ```
 
@@ -66,10 +66,10 @@ PROPOSED:
 ```
 type Animal = virtual class {
     name: str
-    pub fn greet() -> str { this.name }
+    pub fn greet(): str { this.name }
 }
 type Dog = class Animal {
-    pub override fn greet() -> str { base.greet() ~ "!" }
+    pub override fn greet(): str { base.greet() ~ "!" }
 }
 ```
 
@@ -82,8 +82,8 @@ CURRENT (static = a TYPED or zero first param; `make` below is static because it
 ```
 type Point = class {
     x: i64; y: i64
-    pub fn make(x: i64, y: i64) -> Point { Point { x = x; y = y } }   // static (no untyped 1st param)
-    pub fn dist(self) -> i64 { self.x + self.y }                       // instance (untyped `self`)
+    pub fn make(x: i64, y: i64): Point { Point { x = x; y = y } }   // static (no untyped 1st param)
+    pub fn dist(self): i64 { self.x + self.y }                       // instance (untyped `self`)
 }
 ```
 
@@ -91,15 +91,15 @@ PROPOSED (static = the `static` keyword; instance = its absence):
 ```
 type Point = class {
     x: i64; y: i64
-    pub static fn make(x: i64, y: i64) -> Point { Point { x = x; y = y } }
-    pub fn dist() -> i64 { this.x + this.y }
+    pub static fn make(x: i64, y: i64): Point { Point { x = x; y = y } }
+    pub fn dist(): i64 { this.x + this.y }
 }
 ```
 
 ### Interface signature
 
-CURRENT: `pub type Reader = interface { fn read(self, into: Buf) -> u64 | error }`
-PROPOSED: `pub type Reader = interface { fn read(into: Buf) -> u64 | error }`
+CURRENT: `pub type Reader = interface { fn read(self, into: Buf): u64 | error }`
+PROPOSED: `pub type Reader = interface { fn read(into: Buf): u64 | error }`
 
 An interface method is instance-by-default (a contract on `this`); a static signature would be
 `static fn …` (interfaces do not carry statics today — remains rejected, unchanged).
@@ -267,15 +267,15 @@ Each crumb is independently gate-able (`./build/teko . -o bin` + `.tkt` gate, th
 
 ### Regression fixtures (inputs → expected, rota C e backend nativo identical)
 - `parser_test.tkt`:
-  - `type C = class { pub fn f() -> i64 { 0 } }` → parses; `methods[0].params[0].name=="this"`,
+  - `type C = class { pub fn f(): i64 { 0 } }` → parses; `methods[0].params[0].name=="this"`,
     `has_type==false`, `is_static==false`.
-  - `type C = class { pub static fn make() -> C { … } }` → `is_static==true`, 0 params.
-  - `type D = class B { override fn g() -> i64 { base.h() } }` → `has_base`, base local == `base`.
+  - `type C = class { pub static fn make(): C { … } }` → `is_static==true`, 0 params.
+  - `type D = class B { override fn g(): i64 { base.h() } }` → `has_base`, base local == `base`.
   - `static fn topLevel() {}` at module scope → **error** (statics are type-members only).
   - `type C = class { fn f(this: i64) {} }` → **error** (`this` reserved in a method).
 - `checker_test.tkt`:
   - instance method body uses `this.field` → type-checks; a sealed class + `base` → error.
-  - interface `type R = interface { fn read(into: Buf) -> u64 | error }` conformance still holds.
+  - interface `type R = interface { fn read(into: Buf): u64 | error }` conformance still holds.
   - a static factory called `C::make()` and an instance `x.f()` both resolve (parity unchanged).
 - `vm_test.tkt` + `codegen_test.tkt`: port the existing VmCounter/VmShape/VmDogD3 fixtures to the
   new syntax; assert IDENTICAL exit codes/outputs on rota C e backend nativo (the whole point: behavior frozen).

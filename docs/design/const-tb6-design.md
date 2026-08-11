@@ -270,7 +270,7 @@ o comportamento crumb-6 é o caso vazio). Assinatura nova:
  * @throws         um honest-stop para uma forma agregada ainda não materializável
  * @since #594 crumb 6 (bytes) + T-B6 (relocs + leaves)
  */
-fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo) -> ConstImage | error
+fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo): ConstImage | error
 ```
 
 ### 3.2 O campo slice: `const_struct_field_bytes` deixa de rejeitar `Ptr`
@@ -299,7 +299,7 @@ reloc + uma leaf. O helper novo produz, para o campo `j` no offset `layout.field
  * @throws            quando o inicializador não é materializável (não-literal, spread, elemento ptr)
  * @since #594 T-B6
  */
-fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: checker::Type, vexpr: checker::TExpr) -> FatFieldImage | error
+fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: checker::Type, vexpr: checker::TExpr): FatFieldImage | error
 ```
 
 onde `FatFieldImage = struct { slot_bytes: []byte; reloc: lir::LDataReloc; leaf: LRodata }`.
@@ -332,7 +332,7 @@ como "Tier-A follow-up" até terem o seu próprio design).
  * @return            o símbolo rodata da leaf
  * @since #594 T-B6
  */
-fn const_leaf_symbol(const_name: str, field_name: str) -> str {
+fn const_leaf_symbol(const_name: str, field_name: str): str {
     teko::str::concat(const_rodata_symbol(const_name), teko::str::concat(".", field_name))
 }
 ```
@@ -360,7 +360,7 @@ leaf (em ordem de campo declarada) e DEPOIS o blob principal com as suas relocs.
  * @throws         um honest-stop para um agregado não materializável
  * @since #594 crumb 6 + T-B6
  */
-fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo) -> LModule | error {
+fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo): LModule | error {
     if const_decl_is_scalar(cd.ty) { return m }
     let img = match serialize_const(cd, layouts, variants) { ConstImage as x => x; error as e => return e }
     mut cur = m
@@ -400,7 +400,7 @@ espelho dual-engine (§5.8 do T-B5) T-B6 adiciona:
  * @return    se o campo é um fat-pointer (16 bytes {ptr,len})
  * @since #594 T-B6
  */
-fn typeexpr_is_fat(te: parser::TypeExpr) -> bool {
+fn typeexpr_is_fat(te: parser::TypeExpr): bool {
     match te {
         parser::SliceType => true
         parser::NamedType as nt => single_segment_name_is(nt.path, "str")
@@ -431,7 +431,7 @@ por um segundo load no offset+8 — o mesmo idioma que um struct-by-value aninha
  * @throws     quando o receptor não é um struct com layout registrado, ou o campo não existe
  * @since #594 T-B6
  */
-fn lower_fat_field(ctx: LowerCtx, fa: checker::TFieldAccess) -> LoweredFat | error {
+fn lower_fat_field(ctx: LowerCtx, fa: checker::TFieldAccess): LoweredFat | error {
     let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as e => return e }
     let name = match named_type_name(fa.receiver.type) { str as s => s; error as e => return e }
     let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as e => return e }
@@ -619,7 +619,7 @@ Asserir que `layout_of_fields` de `type S = struct { xs: []u32; n: u32 }` dá `x
 
 ### 7.5 (dual-engine SOURCE-level, o espelho §5.8 do T-B5) — o AAPCS64 real
 
-Um `.tkt` both-engine: `fn main() -> i64 { let r = arg_reg(AAPCS64, MRegClass::GPR, 0); exit(r.reg.id to i64) }` → **exit 0** (x0) no interpretador E no nativo; `arg_reg(AAPCS64, GPR, 7).reg.id` → 7;
+Um `.tkt` both-engine: `fn main(): i64 { let r = arg_reg(AAPCS64, MRegClass::GPR, 0); exit(r.reg.id to i64) }` → **exit 0** (x0) no interpretador E no nativo; `arg_reg(AAPCS64, GPR, 7).reg.id` → 7;
 `allocatable_pool(SYSV64, GPR).len` → 12; `is_caller_saved(WIN64, preg(6, GPR))` → false (RSI
 callee-saved no Win64). Este é o teste que T-B5 §5.8 nomeou como bloqueado atrás do BUMP #3 —
 T-B6 o destrava e o entrega.

@@ -404,10 +404,10 @@ report that gap up to the integrator rather than inventing a lane. Each fixture:
 
 | new fixture | source (one-liner) | expected | asserts |
 |---|---|---|---|
-| `sugar_qmark_type_rejected`   | `fn f() -> i64? { 1 }`                | compile FAILS (lex error on `?`) | `T?` eradicated (C6) |
+| `sugar_qmark_type_rejected`   | `fn f(): i64? { 1 }`                | compile FAILS (lex error on `?`) | `T?` eradicated (C6) |
 | `sugar_qmark_field_rejected`  | `let y = x?.n`                        | compile FAILS (lex/parse on `?`) | `?.` eradicated (C5) |
 | `sugar_coalesce_rejected`     | `let y = a ?? 0`                      | compile FAILS (lex/parse on `?`) | `??` eradicated (C5) |
-| `sugar_slice_opt_rejected`    | `fn f(xs: []i64?) -> i64 { 0 }`      | compile FAILS               | element `?` eradicated (C6) |
+| `sugar_slice_opt_rejected`    | `fn f(xs: []i64?): i64 { 0 }`      | compile FAILS               | element `?` eradicated (C6) |
 
 Each carries an `EXPECT_EXIT` (non-zero compile failure) and, where the fail-lane supports it, an
 expected-message substring (`unexpected` / the lexer's stray-`?` message). These run under the same

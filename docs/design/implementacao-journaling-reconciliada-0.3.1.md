@@ -214,11 +214,11 @@ não o trabalho.** Três razões, law-first:
 ```
 isolamento-C4 (lane própria)            journal J4 (este plano)
 ────────────────────────────           ─────────────────────────
-cov_emit_sitemap(prog) -> .tksites      merge_shard_coverage(base,jobs) -> null|error   [falível]
-cov_cobertura_from_sitemap(sitemap)     summarize(fold(root,run)) -> RunSummary
+cov_emit_sitemap(prog): .tksites      merge_shard_coverage(base,jobs): null|error   [falível]
+cov_cobertura_from_sitemap(sitemap)     summarize(fold(root,run)): RunSummary
   (report renderiza sem recheck)          .cov      = CovTriple lido dos .tkcov já fundidos
                                           .cov_missing = quantos dumps esperados faltaram
-                                        render_summary(RunSummary) -> o bloco §13.4
+                                        render_summary(RunSummary): o bloco §13.4
                                           (a linha COVERAGE cita .tksites p/ nomear ficheiro:linha
                                            das falhas, DEPOIS da morte, via --replay)
 ```
@@ -278,7 +278,7 @@ Assinaturas que o implementer adiciona (copiar verbatim; full-Javadoc):
  * @return      o descritor (>= 0), ou o `-errno` numa falha de abertura
  * @since 0.3.1
  */
-extern fn open_seg_rt(path: str) -> i64 = "tk_journal_open" from "teko_rt"
+extern fn open_seg_rt(path: str): i64 = "tk_journal_open" from "teko_rt"
 
 /**
  * append_seg_rt — escreve `rec` inteiro no descritor `seg`, repetindo numa escrita curta.
@@ -293,7 +293,7 @@ extern fn open_seg_rt(path: str) -> i64 = "tk_journal_open" from "teko_rt"
  * @return     0, ou o `errno` da escrita (ENOSPC/EIO) — e a falha é PEGAJOSA no chamador (§4)
  * @since 0.3.1
  */
-extern fn append_seg_rt(seg: i64, rec: str) -> i32 = "tk_journal_append" from "teko_rt"
+extern fn append_seg_rt(seg: i64, rec: str): i32 = "tk_journal_append" from "teko_rt"
 
 /**
  * rename_rt — renomeia atomicamente dentro do mesmo diretório (rename(2)/MoveFileExW REPLACE_EXISTING).
@@ -307,7 +307,7 @@ extern fn append_seg_rt(seg: i64, rec: str) -> i32 = "tk_journal_append" from "t
  * @return      0, ou o `errno`
  * @since 0.3.1
  */
-extern fn rename_rt(from: str, to: str) -> i32 = "tk_rt_rename" from "teko_rt"
+extern fn rename_rt(from: str, to: str): i32 = "tk_rt_rename" from "teko_rt"
 
 /**
  * open — abrir o segmento de `writer` nesta corrida (§2.2).
@@ -317,7 +317,7 @@ extern fn rename_rt(from: str, to: str) -> i32 = "tk_rt_rename" from "teko_rt"
  * @throws        quando o segmento não pode ser criado (permissão, disco cheio)
  * @since 0.3.1
  */
-pub fn open(writer: str) -> Journal | error
+pub fn open(writer: str): Journal | error
 
 /**
  * append — acrescentar UM registo ao segmento de `j`, com a falha PEGAJOSA de §4 (modo 5): o primeiro
@@ -331,7 +331,7 @@ pub fn open(writer: str) -> Journal | error
  * @throws         quando a escrita falha
  * @since 0.3.1
  */
-pub fn append(j: Journal, kind: str, payload: str) -> null | error
+pub fn append(j: Journal, kind: str, payload: str): null | error
 ```
 
 Os `type Journal`/`type Record` e as bodies de `run_id`/`run_root`/`fold`/`scratch`/`sweep` copiam de
@@ -379,8 +379,8 @@ carimbado. As 22 comparações de §3.1 **não mudam** (não escrevem). Ler os c
 
 ### 5.4 J4 — o sumário, e a costura com isolamento-C4
 
-`RunSummary`/`Finding`/`PhaseTally`/`CovTriple` (§13.3), `summarize(recs: []Record) -> RunSummary`
-(fold puro), `render_summary(s: RunSummary) -> str` (o bloco §13.4). `merge_shard_coverage`
+`RunSummary`/`Finding`/`PhaseTally`/`CovTriple` (§13.3), `summarize(recs: []Record): RunSummary`
+(fold puro), `render_summary(s: RunSummary): str` (o bloco §13.4). `merge_shard_coverage`
 (`project.tks:3887`) passa de `-> null` (descarta) para `-> null | error` que PARA e NOMEIA a shard
 sem dump (§2.4), alimentando `cov_missing`.
 

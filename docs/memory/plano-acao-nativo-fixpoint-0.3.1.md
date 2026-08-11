@@ -73,7 +73,7 @@ reprodução de build permitida **dentro de agente** (nunca no loop principal).
 
 ## Frente E — superfície de linguagem (DIFERIDO, pós-fixpoint)
 
-- **E1.** `sizeof<T>() -> u64` (comptime) + `teko::mem::size<T>(ref value: T) -> u64 | error`
+- **E1.** `sizeof<T>(): u64` (comptime) + `teko::mem::size<T>(ref value: T): u64 | error`
   (runtime; null→0; error p/ incalculável/corrupção) — salvaguardas de memória manual/unsafe.
 - **E2.** Parâmetros default em funções (vagão futuro).
 

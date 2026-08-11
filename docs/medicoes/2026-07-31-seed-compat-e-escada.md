@@ -40,7 +40,7 @@ teko: .: src/build/project.tks:5873:4: the function's final expression does not 
 **Byte a byte o diagnóstico do CI.** O sítio:
 
 ```teko
-fn stage_rc_of_env(key: str) -> i32 {
+fn stage_rc_of_env(key: str): i32 {
     match teko::env::var(key) { str as v => bp_parse_uint(v) to i32; error => 0 }
 }
 ```

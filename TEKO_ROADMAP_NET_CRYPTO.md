@@ -62,7 +62,7 @@ this tractable:
 **Deps:** none. **Files:** `src/checker/typer.{tks,c}`, `src/codegen/codegen.{tks,c}`, a smoke example.
 **Decision to ratify (law-first, in the design PR):** choose ONE of
 - **(A) `ptr<byte>` + explicit length**, with `teko::net` owning a small **arena-backed mutable byte
-  region** whose address is taken via a new `buf_ptr(region) -> ptr<byte>` builtin (reuses the S1 arena;
+  region** whose address is taken via a new `buf_ptr(region): ptr<byte>` builtin (reuses the S1 arena;
   the region is written by C through the pointer, then read back by length). Keeps the extern ABI at the
   already-legal `ptr`/`uptr` — **smallest compiler change**, and the no-index-assign ruling is respected
   because the buffer is opaque to Teko until read back.

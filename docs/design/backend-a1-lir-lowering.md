@@ -243,7 +243,7 @@ after it. When A1-7 merges, the branch's honest-stops are all closed and the min
 
 ### A1-1 · control-flow core
 
-- **Touches:** `lir.tks` (add `alloc_block(f) -> {func, block_id}`, and make `LowerCtx`/`ctx_append`
+- **Touches:** `lir.tks` (add `alloc_block(f): {func, block_id}`, and make `LowerCtx`/`ctx_append`
   block-aware — already parametric on `block_id`, so mainly a block-allocator + a helper to *start*
   emitting into a new block); `lower.tks` (add `lower_compare`, `lower_if_expr`, dispatch `TIfExpr`
   in `lower_expr`; teach `lower_block` that a branch/jump also terminates); `lir_interp.tks`
@@ -479,7 +479,7 @@ mirroring `promote_env`/`jump_args_for_names` (the SAME machinery loop headers a
  * @param LEnv env  the pre-branch scalar environment (the promotable names)
  * @return []str  the distinct enclosing scalar names re-assigned in any arm
  */
-fn reassigned_scalars(arms: []checker::TStatement, env: LEnv) -> []str { … }
+fn reassigned_scalars(arms: []checker::TStatement, env: LEnv): []str { … }
 ```
 
 Each merge then adds one block-param per reassigned name (after any existing value param), every
@@ -659,7 +659,7 @@ leaving `j` at VReg(3); the merge reads `j` → `3`. This is precisely the C beh
  * @param u32 vreg  the reassignment's fresh result VReg
  * @return LEnv  `env` with the newest `name` slot's VReg replaced in place
  */
-pub fn lenv_reassign(env: LEnv, name: str, vreg: u32) -> LEnv { … }
+pub fn lenv_reassign(env: LEnv, name: str, vreg: u32): LEnv { … }
 ```
 
 `lower_assign_simple` (`lower.tks:4322`) swaps its two `ctx_bind` calls for a `ctx_reassign` wrapper
@@ -677,7 +677,7 @@ pattern binds are UNTOUCHED (they must keep appending — that IS the shadow).
  * @param []str names  the threaded scalar names, in merge-param order
  * @return []u64  each name's pre-branch index, in the SAME order as `names`
  */
-fn merge_scalar_indices(env: LEnv, names: []str) -> []u64 { … }
+fn merge_scalar_indices(env: LEnv, names: []str): []u64 { … }
 
 /**
  * arm_scalar_args — one jump-arg per threaded scalar, read from `arm_env` at the
@@ -691,7 +691,7 @@ fn merge_scalar_indices(env: LEnv, names: []str) -> []u64 { … }
  * @param []u64 indices  the threaded scalars' pre-branch indices, in param order
  * @return []u32  each index's current VReg, in the SAME order as `indices`
  */
-fn arm_scalar_args(arm_env: LEnv, indices: []u64) -> []u32 { … }
+fn arm_scalar_args(arm_env: LEnv, indices: []u64): []u32 { … }
 ```
 
 `close_arm_replaying_defers` (`:2697`) swaps its `names: []str` param for `indices: []u64` and computes

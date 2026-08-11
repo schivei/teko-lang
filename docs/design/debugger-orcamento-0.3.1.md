@@ -76,8 +76,8 @@ consumir essa posição."* Corrijo em duas frentes, e a correção é o que dá 
 **Mas a reparação é barata, e é por uma razão que só se vê olhando o código.** Ambos os
 selecionadores canalizam **toda** emissão de instrução por **uma única função**:
 
-- arm64: `selctx_emit(ctx: SelCtx, inst: MInst) -> SelCtx` (`src/backend/isel_arm64.tks`)
-- x86-64: `selctx_x86_emit(ctx: SelCtxX86, inst: MInstX86) -> SelCtxX86` (`src/backend/isel_x86_64.tks`)
+- arm64: `selctx_emit(ctx: SelCtx, inst: MInst): SelCtx` (`src/backend/isel_arm64.tks`)
+- x86-64: `selctx_x86_emit(ctx: SelCtxX86, inst: MInstX86): SelCtxX86` (`src/backend/isel_x86_64.tks`)
 
 e ambos despacham por `LOp` numa única função que **já recebe o `lir::LInst` inteiro**
 (`select_inst`, `select_inst_x86`), chamada de um único laço (`select_insts`,
@@ -234,7 +234,7 @@ ninguém reescrever o fluxo.
 `src/backend/regalloc.tks` expõe:
 
 ```
-pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64) -> []MInst
+pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64): []MInst
 ```
 
 **Uma instrução vira N.** O alocador de registos expande derramamentos e recargas. Um array
@@ -356,7 +356,7 @@ sem valor de retorno **não leva seta** — `-> void` é banido):
  * @since debugger camada 0
  * @see emit_cov_line  the coverage-mark sibling this mirrors, same call site
  */
-fn emit_line_directive(buf: []byte, file: str, line: u32, indent: str) -> []byte {
+fn emit_line_directive(buf: []byte, file: str, line: u32, indent: str): []byte {
     if line == 0 { return buf }
     if file.len == 0 { return buf }
     mut b = cb(cb(buf, indent), "#line ")
@@ -576,7 +576,7 @@ pub type DwarfSections = struct {
  * @example
  *   let secs = dwarf::emit_dwarf(DwarfUnit { comp_dir = "/src"; name = "main.tks"; funcs = fs })
  */
-pub fn emit_dwarf(unit: DwarfUnit) -> DwarfSections
+pub fn emit_dwarf(unit: DwarfUnit): DwarfSections
 ```
 
 > O corpo do `emit_dwarf` é o trabalho do D1.3 e **não** está esboçado aqui de propósito: um
@@ -601,7 +601,7 @@ As três primitivas internas que o D1.3 precisa, com as suas formas fixadas:
  *                 single zero byte)
  * @since debugger camada 1
  */
-pub fn emit_uleb128(buf: []byte, value: u64) -> []byte
+pub fn emit_uleb128(buf: []byte, value: u64): []byte
 
 /**
  * emit_sleb128 — append `value` in DWARF's SIGNED little-endian base-128 encoding, whose sign
@@ -617,7 +617,7 @@ pub fn emit_uleb128(buf: []byte, value: u64) -> []byte
  * @return []byte  `buf` followed by the encoded bytes
  * @since debugger camada 1
  */
-pub fn emit_sleb128(buf: []byte, value: i64) -> []byte
+pub fn emit_sleb128(buf: []byte, value: i64): []byte
 
 /**
  * emit_line_program — one function's `LineRow`s rendered as a DWARF line-number program: a
@@ -636,7 +636,7 @@ pub fn emit_sleb128(buf: []byte, value: i64) -> []byte
  *                         `DW_LNE_set_address` operand the object writer must relocate
  * @since debugger camada 1
  */
-pub fn emit_line_program(buf: []byte, f: DwarfFunc) -> LineProgramOut
+pub fn emit_line_program(buf: []byte, f: DwarfFunc): LineProgramOut
 ```
 
 **Crumb D1.4 — o escoadouro ELF**
