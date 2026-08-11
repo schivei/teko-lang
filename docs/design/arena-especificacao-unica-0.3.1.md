@@ -422,9 +422,10 @@ pub type ChanId  = u64                       // o canal que a main abre e distri
 default**). Tudo é operado pelo **id** do canal (a regra "IDs, não ponteiros", §7.7):
 
 ```teko
-type ChanKind = enum { os, mem }   // os = transporte do SO (DEFAULT) · mem = fila em-processo (sem syscall)
+// O TRANSPORTE é um contrato — a interface que qualquer canal (SO, memória, Kafka, RabbitMQ, RPC, …) satisfaz:
+type IChannelKind<T> = interface { fn send(v: T); fn recv(): T }
 
-static fn chan<T>::make(bounds: usize = 1, kind: ChanKind = ChanKind::os): self
+static fn chan<T>::make<K: IChannelKind<T>>(bounds: usize = 1, kind: K = OsChan<T>{}): self
                     c.id: usize                     // o id do canal — o que se passa a uma corotina
 static fn chan<T>::writer(id: usize): Tx<T>        // extremo de ESCRITA (copiável, N escritores)
 static fn chan<T>::reader(id: usize): Rx<T>        // extremo de LEITURA (um só; 2º de outra task = erro)
@@ -439,14 +440,24 @@ fn Rx<T>::pop(): T | closed                        // recebe; devolve `closed` q
 - **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
   cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB e o desenho dele
   suportar, é por conta dele.
-- **`kind` — o TIPO (transporte) do canal, default `os`.** Segundo parâmetro com default (superfície nova):
-  - **`ChanKind::os`** (default): transporte do **SO** — `SOCK_DGRAM` no Linux/macOS, **mailslot** no
-    Windows. É o padrão porque é o mais robusto (bufferizado pelo kernel, atravessa qualquer raia/task com
-    a mesma disciplina de id), e é o que fecha a garantia de "dados cruzam por cópia" via o próprio kernel.
-  - **`ChanKind::mem`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais
-    rápida, mas só dentro do MESMO processo. Escolha do dev quando produtor e consumidor são tasks do mesmo
-    binário e ele quer o caminho curto. A superfície (`make`/`writer`/`reader`/`close`/`Tx`/`Rx`) é idêntica;
-    só o transporte por baixo muda.
+- **`kind` — o TRANSPORTE do canal, um `IChannelKind<T>` extensível (ruling do dono).** O transporte não é
+  um enum fechado: é uma **interface** genérica com só `send(T)`/`recv(): T`. O dev passa uma **instância
+  configurada** (que carrega o config do transporte por valor) e a linguagem só fornece a **costura**:
+  - **`OsChan<T>`** (default): transporte do **SO** — `SOCK_DGRAM` no Linux/macOS, **mailslot** no Windows.
+    Robusto (bufferizado pelo kernel, atravessa qualquer raia/task), fecha a garantia de "cruza por cópia".
+  - **`MemChan<T>`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais rápida,
+    só dentro do MESMO processo.
+  - **do dev**: `KafkaChan<T>{ brokers, topic }`, `RabbitChan<T>{…}`, `WsChan<T>{…}`, `HttpChan<T>{…}`,
+    `UdpChan<T>{…}`, `RpcChan<T>{…}` — qualquer coisa que implemente `send`/`recv`. Native-only: o transporte
+    é **código Teko** falando o protocolo, ou **link dinâmico FFI** a uma lib de sistema — nunca um `.c` local.
+- **Não é dispatch dinâmico (ruling do dono), é conformidade ESTÁTICA.** O tipo concreto do `kind` é
+  conhecido no `make` (por isso `make<K: IChannelKind<T>>` — a interface é usada como **bound de comp-time**,
+  como o subtipo de closure §Doc 2 §9.2). O `send`/`recv` do transporte é **monomorfizado** dentro do canal:
+  chamada estática, **sem vtable, sem representação de runtime da interface** (o Round-3 de dispatch dinâmico
+  NÃO é pré-requisito — só a conformidade estática de interface, que já existe). O `closed`/bounds/contrapressão
+  ficam na camada `chan` (Tx/Rx); a interface é só o `send`/`recv` cru do transporte.
+- **Arena:** a instância do `kind` é **config copiada para F2** no `make` (região imortal, §7.6) — vive tanto
+  quanto o canal, carrega o config por valor, **nunca um `ref` cruzando fronteira de task** (regra de UAF, §9).
 - Fan-in MPSC: N escritores (`Tx`), 1 leitor (`Rx`).
 
 `spawn` é uma **keyword de corotina** (não uma função) — estilo Go: `spawn f(args)` lança `f` numa corotina
@@ -725,6 +736,9 @@ fn pipeline() {
 - **Piso = necessidade estática + cabeçalho da arena**, não 64 KiB default (§3). Elisão = o caso limite
   `need == 0` (§4).
 - **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
+- **Transporte do canal = `IChannelKind<T>` extensível** (`interface { fn send(T); fn recv(): T }`);
+  built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/WS/HTTP. Conformidade
+  **estática** (monomorfização, `make<K: IChannelKind<T>>`), não dispatch dinâmico (§7.8).
 - **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
   scoped na sub-raiz da thread — sem ressincronizar (§8).
 - **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Não há

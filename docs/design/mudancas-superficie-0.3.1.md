@@ -463,10 +463,11 @@ e **sem `join`**. Não há isolamento tipo-processo na linguagem (quem precisa u
 spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia
 
 // chan<T> MPSC (fan-in: N escritores, 1 leitor).
-type ChanKind = enum { os, mem }                  // os=transporte do SO (DEFAULT) · mem=fila em-processo
-static fn chan<T>::make(bounds: usize = 1, kind: ChanKind = ChanKind::os): self
+// TRANSPORTE = contrato extensível (SO, memória, Kafka, RabbitMQ, RPC, WS, HTTP, …):
+type IChannelKind<T> = interface { fn send(v: T); fn recv(): T }
+static fn chan<T>::make<K: IChannelKind<T>>(bounds: usize = 1, kind: K = OsChan<T>{}): self
               // bounds: 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
-              // kind:   os (default)=SOCK_DGRAM (Linux/macOS)/mailslot (Windows) · mem=anel em-processo, sem syscall
+              // kind:   IChannelKind<T> — OsChan<T> (default, SOCK_DGRAM/mailslot) · MemChan<T> · impl do dev
               c.id: usize                          // o id — o que se passa à corotina (spawn f(c.id))
 static fn chan<T>::writer(id: usize): Tx<T>       // extremo de escrita (copiável, N escritores)
 static fn chan<T>::reader(id: usize): Rx<T>       // extremo de leitura (um só; 2º leitor = erro nomeado)
@@ -509,9 +510,35 @@ fn main() {
 
 **Sem `join`:** dados só cruzam a fronteira por **cópia** (via `chan`); espera-se pelo **fecho do canal**
 (o `pop` devolver `closed`) ou pelo `WaitGroup`. A camada de linguagem **não reimplementa**
-limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte do SO. *(A primitiva
+limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte. *(A primitiva
 `fork_join` de baixo nível sobrevive como mecanismo INTERNO do backend, para paralelizar o codegen — não
 é superfície de usuário; o usuário escreve `spawn`.)*
+
+**Transporte extensível — `kind: IChannelKind<T>` (ruling do dono).** O transporte **não é um enum fechado**:
+é uma **interface** genérica com só `send(T)`/`recv(): T`. A linguagem entrega os built-ins `OsChan<T>`
+(default — `SOCK_DGRAM`/mailslot) e `MemChan<T>` (fila em-processo, sem syscall), e o dev **pluga o seu**
+implementando `send`/`recv` — Kafka, RabbitMQ, RPC, UDP, WebSocket, HTTP, o que for. É **native-only**: o
+transporte do dev é código Teko falando o protocolo, ou link dinâmico FFI a uma lib de sistema, nunca um
+`.c` local. **Não é dispatch dinâmico** — o tipo concreto do `kind` é conhecido no `make`
+(`make<K: IChannelKind<T>>`, a interface como **bound de comp-time**, como o subtipo de closure §9.2), então
+`send`/`recv` são **monomorfizados** (chamada estática, sem vtable). **Pré-requisito:** exige apenas a
+**conformidade estática de interface** — que já existe (`type X = interface {…}`) — e NÃO o dispatch
+dinâmico do Round 3.
+
+```teko
+type IChannelKind<T> = interface { fn send(v: T); fn recv(): T }
+
+// o dev escreve o seu transporte — implementa a interface (conformidade estática):
+struct KafkaChan<T> & IChannelKind<T> {
+    brokers: str
+    topic: str
+    fn send(v: T) { /* serializa v e publica no tópico (Teko puro ou FFI dinâmico) */ }
+    fn recv(): T  { /* consome do tópico e desserializa em T */ }
+}
+
+var c = chan<Order>::make(64, KafkaChan<Order>{ brokers: "…", topic: "orders" })   // transporte plugado
+var c2 = chan<i32>::make()                    // default: OsChan<i32> (transporte do SO)
+```
 
 ### 10.3 `await` — alarga o retorno para `Intent<T>` (sem necessidade de `async`)
 
@@ -623,7 +650,8 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 |---|---|
 | **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
 | **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
-| **`chan<T>`** | tipo genérico MPSC; `make(bounds: usize = 1, kind: ChanKind = os)`; `bounds` = nº de **mensagens**; `kind` = transporte (`os` default / `mem`); unbounded = `make(0)` (resp. do dev) |
+| **`chan<T>`** | tipo genérico MPSC; `make<K: IChannelKind<T>>(bounds = 1, kind = OsChan<T>{})`; `bounds` = nº de **mensagens**; unbounded = `make(0)` (resp. do dev) |
+| **transporte** | `kind: IChannelKind<T>` = `interface { fn send(T); fn recv(): T }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); conformidade **estática** (monomorfização), não dispatch dinâmico |
 | **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |
 | **`Intent<T>`** | `.value` / `.canceled` / `.failure`; **`cancel()`** global (cancela o Intent, ou `panic` fora de suspensão) |
 | **várias tasks** | por **atribuição múltipla** (`await var a, b = fa(), fb()`), sem `when_all`/`when_any` |
@@ -669,5 +697,14 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
 3. ~~chave-string da DI~~ — **mesmo tipo sob a mesma chave = ERRO DE COMPILAÇÃO** (§7); chaves distintas
    coexistem, nunca "último vence" silencioso.
 4. ~~`chan_unbounded`~~ — entra, responsabilidade do dev.
+5. ~~tipo do canal (enum `os`/`mem`)~~ — **transporte é um `IChannelKind<T>` extensível** (`interface { fn
+   send(T); fn recv(): T }`): built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/
+   WS/HTTP. **Conformidade estática** (monomorfização via `make<K: IChannelKind<T>>`), **não** dispatch
+   dinâmico — pré-requisito é só a interface estática (que já existe), não o Round 3.
+6. ~~`isolate` / `async`~~ — **sem necessidade de existirem** (o `await` prefixo basta; thread no mesmo
+   processo não justifica `isolate` — isolação real = outro binário).
 
-**Nada em aberto na superfície.**
+**Nada em aberto na superfície.** *(Pré-requisito registrado: a **conformidade estática de interface** —
+`type X = interface {…}` com `send`/`recv` monomorfizados — precisa estar funcional para o transporte de
+canal; é o único novo ponto de apoio de linguagem que a onda de concorrência exige, e NÃO é o dispatch
+dinâmico do Round 3.)*
