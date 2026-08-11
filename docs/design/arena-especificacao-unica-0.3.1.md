@@ -453,6 +453,13 @@ fn Rx<T>::pop(): T | error                         // recebe; error quando o can
   **`service`** que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
 - **`chan<T>::make(key, bounds = 1): Rx<T>`** devolve o **leitor único** a quem cria o canal; os escritores
   fazem `svc<Tx<T>>(key)`. Fan-in MPSC: **1 leitor** (o `Rx` de `make`), **N escritores** (`svc<Tx>` por chave).
+- **Fechar é responsabilidade do PRODUTOR (ruling proposto).** `close(key)` (= `end()`) é o sinal de
+  **fim-de-stream** — quem sabe que não há mais mensagens é o lado que produz, então é o produtor que fecha
+  (convenção Go). Com N produtores, coordena-se por `WaitGroup` e **fecha-se UMA vez** (o `close` é
+  **idempotente** por chave). O **consumidor (`Rx`) não fecha no caminho normal** — lê até `pop() → error`.
+  Os dois lados **observam** o fecho: o `Rx` por `pop() → error`, o `Tx` pela propriedade `tx.closed`. Se o
+  consumidor precisa **abandonar** cedo, ele *pode* chamar `close(key)` (idempotente) e os produtores param
+  ao ver `tx.closed` — mas isso é a exceção; a responsabilidade convencional do fim-de-stream é do produtor.
 - **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
   cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB, é por conta dele.
 - **O transporte `K` é um `service & IChannelKind<T>` extensível (ruling do dono).** O `make` chama
@@ -649,8 +656,10 @@ de superfície):
 | **scoped** | caminhada de ancestralidade de arena — a instância da arena-escopo do call-site | walk até a arena-escopo |
 | **transient** | região corrente — instância nova a cada resolução | alloc na região atual |
 
-- `svc<T>()` é um **intrínseco de comp-time** (sem ABI; o compilador substitui o call-site inline por
-  código por-lifetime). Não é uma chamada de runtime.
+- `svc<T: service>(key: str | null = null): T` é um **intrínseco de comp-time** (sem ABI; o compilador
+  substitui o call-site inline por código por-lifetime). Não é uma chamada de runtime. O constraint
+  `T: service` (Doc 2 §9.2b) garante que só serviços se resolvem; a `key` é opcional (sem chave = por tipo;
+  com chave constante = por nome, ex.: `svc<Tx<T>>("chave")` do canal, §7.8).
 - **Regra de escape:** um valor de serviço **nunca** é armazenado em campo, passado como argumento, ou
   retornado em código de usuário (`a.b = svc<S>()`, `fun(svc<S>())`, `return svc<S>()` são rejeitados). O
   backend é isento dessa proibição, mas os valores que ele segura permanecem **arena-bounded** (vivem na

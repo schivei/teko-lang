@@ -226,19 +226,21 @@ fn use_it(path: ptr): i64 | error {
 ## 7. Injeção de dependência — `service`/`svc` com lifetimes de arena
 
 **O que muda.** DI de primeira classe: classes de serviço com lifetime (`singleton`/`scoped`/
-`transient`), resolvidas por `svc<T>()` em comp-time. Os lifetimes SÃO tempos de vida de arena
-(detalhe em `arena-especificacao-unica-0.3.1.md` §8).
+`transient`), resolvidas por **`svc<T: service>(key: str | null = null): T`** em comp-time (o constraint
+`T: service` — §9.2b — garante que só serviços se resolvem; a `key` é opcional: sem chave resolve por tipo,
+com chave constante desambigua/resolve por nome — inclusive `svc<Tx<T>>("chave")` do canal, §10.2). Os
+lifetimes SÃO tempos de vida de arena (detalhe em `arena-especificacao-unica-0.3.1.md` §8).
 
 **O que sai.** A DI por anotação da era anterior (`#singleton`/`#inject`, `src/checker/di.tks`
 `choose_factory`) é substituída pela tabela estática nomeada.
 
 **O que entra.** Keywords `service` (+ `sealed`), os lifetimes `singleton`/`scoped`/`transient`, o ctor
-`static`, e `svc<T>()` como **intrínseco de comp-time** (o compilador substitui o call-site inline por
-código por-lifetime; sem ABI de runtime). Chaves de string desambiguam múltiplos provedores de uma
+`static`, e `svc<T: service>(key: str | null = null): T` como **intrínseco de comp-time** (o compilador
+substitui o call-site inline por código por-lifetime; sem ABI de runtime). Chaves de string desambiguam múltiplos provedores de uma
 interface — e a política de conflito é dura (ruling do dono): **se já há um registro do mesmo tipo sob a
 mesma chave, é ERRO DE COMPILAÇÃO** (chaves distintas coexistem; mesmo-tipo-mesma-chave colide em
 comp-time, nunca "último vence" silencioso). **Regra de escape:** valor de serviço nunca armazenado em campo, passado como argumento, ou
-retornado em código de usuário — forçando o `claim` explícito via `svc<T>()`; o backend é isento mas o
+retornado em código de usuário — forçando o `claim` explícito via `svc<T: service>(...)`; o backend é isento mas o
 que segura fica arena-bounded.
 
 **O que resolve.** Resolução determinística em comp-time (tabela estática por análise), sem custo de
@@ -368,17 +370,33 @@ var a = chan<i32>::make()      // bounds = 1 (default)
 var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
 ```
 
-### 9.2b Uniões `|` — só estruturais e inline; `variant` para tipo-soma nomeado
+### 9.2b Uniões `|` — DECLARAÇÃO vs CONSTRAINT (dois `|` distintos); `variant` para tipo-soma nomeado
 
-**O que muda.** A união `|` é **estrutural e só inline** — vale em declaração de variável, parâmetro,
-constraint de genérico e retorno (`fn f(): T | error | null`), mas **NÃO pode ser nomeada como um `type`**
-(`type X = A | B` é rejeitado). Para um tipo-soma **nomeado**, usa-se **`variant`** (nominal, com tag), que
-já é o mecanismo de todos os ADTs do compilador (`type Pattern = variant A | B | C`).
+**O que muda.** A união `|` tem **duas posições de uso distintas**, e nunca é um `type` nomeado (ruling do dono):
 
-**O que resolve.** Separa claramente: `|` é composição estrutural no ponto de uso; dar **nome** a um sum
-type é `variant`; e `type` fica reservado ao concreto (`struct`, newtype-sobre-primitivo, ou alias de um
-tipo só). Custo zero — o corpus não tem nenhum `type X = A | B` estrutural (todos os 34 tipos-soma
-nomeados já são `variant`).
+1. **União de DECLARAÇÃO / retorno — estrutural, inline.** Vale em declaração de variável, parâmetro e
+   retorno: `fn f(): T | error | null`. É composição estrutural no ponto de uso (o valor É um dos ramos).
+
+2. **União de CONSTRAINT — de FORMAS, no bound de um genérico.** Um constraint é uma **disjunção de
+   conjunções**: `<T: Alt1 | Alt2 | …>`, onde cada `Alt` é `Termo & Termo & …`. Os **termos** são:
+   - **palavras de forma:** `class`, `service`, `struct` — forçam a *forma* do tipo;
+   - **interfaces** (`Ifce`) e **tipos concretos** (`str`, …) — forçam conformidade/identidade;
+   - **`notnull`** — o único termo que **só entra por `&`, nunca por `|`** (não é uma forma-alternativa, é
+     um modificador): proíbe o genérico de ser nulo, **nem na definição**.
+
+   ```teko
+   <T: class & Ifce | struct & OutraIfce | str>   // T = (class que faz Ifce) | (struct que faz OutraIfce) | str
+   <T: notnull>                                     // T não pode ser nulo (único uso de notnull sozinho)
+   <T: class & notnull>                             // classe não-nula
+   <K: service & IChannelKind<T>>                   // o constraint do transporte de canal (§10.2) já é desta forma
+   ```
+
+**O que resolve.** Separa o `|` estrutural (o valor é um dos ramos) do `|` de forma (o *tipo* tem uma das
+formas), e dá ao genérico poder de exigir forma (`class`/`service`/`struct`), conformidade (interface/tipo) e
+não-nulidade (`notnull`) — sem nunca virar um `type` nomeado. Para um tipo-soma **nomeado**, continua
+**`variant`** (nominal, com tag — `type Pattern = variant A | B | C`), o mecanismo de todos os ADTs do
+compilador. `type X = A | B` **estrutural** segue **rejeitado**; custo zero (os 34 tipos-soma nomeados do
+corpus já são `variant`).
 
 ### 9.2 Tipos de closure — `func<…>` / `action<…>`
 
@@ -514,6 +532,13 @@ fn main() {
 limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte. *(A primitiva
 `fork_join` de baixo nível sobrevive como mecanismo INTERNO do backend, para paralelizar o codegen — não
 é superfície de usuário; o usuário escreve `spawn`.)*
+
+**Quem fecha o canal — o PRODUTOR (ruling proposto).** `close(key)` (= `end()`) é o sinal de fim-de-stream:
+quem sabe que não há mais mensagens é o produtor, então é o **produtor** que fecha (convenção Go); com N
+produtores, coordena por `WaitGroup` e fecha **uma vez** (idempotente por chave). O **consumidor (`Rx`) não
+fecha no caminho normal** — lê até `pop() → error`. Ambos **observam**: o `Rx` por `pop() → error`, o `Tx`
+pela propriedade `tx.closed`. Um consumidor que **abandona** cedo *pode* chamar `close(key)` (idempotente) —
+os produtores param ao ver `tx.closed` — mas é a exceção, não o caminho feliz.
 
 **Transporte extensível — `service & IChannelKind<T>` (ruling do dono).** O transporte **não é um enum
 fechado**: é uma **interface** genérica com `init(key)`/`send(T)`/`recv(): T`/`end()` (o `init` é o método
@@ -662,7 +687,7 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 | **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
 | **`chan<T>`** | tipo genérico MPSC; `make<K: service & IChannelKind<T>>(key, bounds = 1): Rx<T>`; `bounds` = nº de **mensagens**; unbounded = `make(key, 0)` (resp. do dev) |
 | **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por CHAVE CONSTANTE** — todo transporte é `service`, vive em **F2** (raiz do programa), resolve por `svc<Tx<T>>("chave")` em comp-time; **elimina id no `spawn`**; não dispatch dinâmico |
-| **fecho** | `close(key)` invoca `end()` (fecha + drena); `Rx::pop(): T \| error` (error = encerrado); `Tx::send(): null` + `tx.closed` |
+| **fecho** | **responsabilidade do PRODUTOR** — `close(key)` invoca `end()` (fecha + drena), idempotente; consumidor lê até `error`. `Rx::pop(): T \| error`; `Tx::send(): null` + `tx.closed` (ambos observam) |
 | **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |
 | **`Intent<T>`** | `.value` / `.canceled` / `.failure`; **`cancel()`** global (cancela o Intent, ou `panic` fora de suspensão) |
 | **várias tasks** | por **atribuição múltipla** (`await var a, b = fa(), fb()`), sem `when_all`/`when_any` |
