@@ -647,3 +647,50 @@ fn hash_inline_and_singleton_reject_non_binding() {
     teko::assert::is_true(stmt_errors("#inline var = 1"))
     teko::assert::is_true(stmt_errors("#singleton return"))
 }
+
+/**
+ * return_type_name_of — the first path segment of `source`'s parsed function's return type, or ""
+ * when `source` fails to parse, has no return type, or the return type is not a plain named type.
+ * A tight probe that both graphs feed the SAME parsed type, not merely that parsing succeeds.
+ */
+fn return_type_name_of(source: str) -> str {
+    let f = match func_of(source) { Function as x => x; error => return "" }
+    if !f.has_return { return "" }
+    match f.return_type { NamedType as nt => nt.path.segments[0].name; _ => "" }
+}
+
+/**
+ * A top-level `fn`'s return type parses under `:` exactly as it already does under `->` — same
+ * `has_return`/resolved type — and the two graphs may sit on sibling declarations in one module.
+ */
+#test
+fn return_type_colon_accepted_on_functions() {
+    teko::assert::is_true(match func_of("fn f(): i64 { return 0 }") { Function as f => f.has_return; error => false })
+    teko::assert::is_true(return_type_name_of("fn f(): i64 { return 0 }") == "i64")
+    teko::assert::is_true(return_type_name_of("fn f() -> i64 { return 0 }") == "i64")
+    teko::assert::is_false(func_errors("fn soma(a: i64, b: i64): i64 { return a + b }"))
+    teko::assert::is_true(module_ok("fn a(): i64 { 0 }\nfn b() -> i64 { 1 }"))
+}
+
+/**
+ * `:` with no return type, or `:` with no body, are malformed exactly as the `->` equivalents
+ * already are — the additive window changes which TOKEN introduces the return type, not the
+ * grammar around it.
+ */
+#test
+fn return_type_colon_rejects_malformed_forms() {
+    teko::assert::is_true(func_errors("fn f(): { }"))
+    teko::assert::is_true(func_errors("fn f(): u8"))
+}
+
+/**
+ * The `:` grafia also parses at the two OTHER call sites of `parse_function`'s return-type arm: a
+ * class method (`allow_receiver`) and a bodyless interface method signature (`allow_bodyless`) —
+ * both graphs may even coexist on sibling members of the same interface.
+ */
+#test
+fn return_type_colon_accepted_in_class_and_interface_methods() {
+    teko::assert::is_true(module_ok("type Sq = class {\n    pub fn area(self): i64 { self.s }\n}"))
+    teko::assert::is_true(module_ok("type Geo = interface {\n    fn area(self): i64\n}"))
+    teko::assert::is_true(module_ok("type Geo = interface {\n    fn area(self) -> i64\n    fn scaled(self, k: i64): i64\n}"))
+}

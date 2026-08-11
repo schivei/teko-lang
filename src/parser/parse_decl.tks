@@ -270,6 +270,22 @@ fn skip_export_override_peek(tokens: []lexer::Token, pos: u64) -> u64 {
 }
 
 /**
+ * Is the token at `pos` the start of a function/closure return-type annotation — the ADDITIVE
+ * window of the `->` → `:` migration (docs/design/mudancas-superficie-0.3.1.md §2)? Both `Arrow`
+ * (`->`, the pre-existing grafia, kept building `src/` until the sweep) and `Colon` (`:`, the SAME
+ * operator `x: T` already uses to annotate a variable's type) are accepted side by side; removing
+ * `Arrow` is the later sweep, not this window.
+ *
+ * @param tokens  the full token stream
+ * @param pos     the index just past the parameter list's closing `)`
+ * @return        true when `pos` opens a return-type annotation, in either grafia
+ * @since 0.3.1 (`->` → `:` return-type window, additive)
+ */
+fn is_return_type_intro_at(tokens: []lexer::Token, pos: u64) -> bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Arrow) || is_kind_at(tokens, pos, lexer::TokenKind::Colon)
+}
+
+/**
  * Parse a `fn` declaration's signature + body, from an optional leading doc-comment through the
  * closing `}` (or the bodyless/`extern` forms). Shared by the top-level `fn` position (real
  * `is_test`/`os_guard`/`has_arena_size`/`arena_size` attributes threaded in from
@@ -356,7 +372,7 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
     p = params.next
     mut has_return = false
     mut return_type = no_type()
-    if is_kind_at(tokens, p, lexer::TokenKind::Arrow) {
+    if is_return_type_intro_at(tokens, p) {
         let ret = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
         has_return = true
         return_type = ret.node
