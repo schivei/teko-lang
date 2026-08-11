@@ -2052,3 +2052,28 @@ fn collect_diagnostics_structured_stamps_real_severity_and_range() {
     teko::assert::str_contains(diags[1].message, "unused private function")
     teko::assert::str_contains(diags[1].message, "dead_leaf")
 }
+
+/**
+ * typechecks_src — lex + parse `src` as a module (via `prog_from_module_src`) and run the REAL
+ * checker `type_program` on it. 0.3.1 mudancas-superficie-0.3.1.md §1's `var` end-to-end
+ * regressions reuse `prog_from_module_src`'s real lex → parse seam rather than hand-built AST, so
+ * the CONTEXTUAL `var`-head parse (`parse_stmt.tks`'s `is_var_binding_head`) is genuinely exercised.
+ *
+ * @param src  the module source text
+ * @return     true iff the program type-checks with no diagnostics
+ */
+fn typechecks_src(src: str) -> bool {
+    match type_program(prog_from_module_src(src, "var_test.tks")) { TProgram => true; error => false }
+}
+
+/**
+ * var_binding_type_checks_end_to_end — 0.3.1 mudancas-superficie-0.3.1.md §1: `var` parses onto the
+ * always-mutable local (`BindKind::Mut`). A `var` local may be REASSIGNED (no "cannot assign to
+ * immutable"), and may be the source of a `ref` binding (no "cannot take a reference to immutable")
+ * — the two checker gates that used to require `mut`, now equally open to `var`.
+ */
+#test
+fn var_binding_type_checks_end_to_end() {
+    teko::assert::is_true(typechecks_src("pub fn f() -> i32 { var x = 1; x = 2; return x }"))
+    teko::assert::is_true(typechecks_src("pub fn f() -> i32 { var x = 1; ref r = x; return r }"))
+}

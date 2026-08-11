@@ -550,3 +550,100 @@ fn classifies_doc_only_on_adjacency() {
     // and the blank-line cases still PARSE (the loose comment is accepted)
     teko::assert::is_true(module_ok("/** not a doc */\n\nfn f() -> i32 { 0 }"))
 }
+
+/** toks_of — `source` lexed, or an empty token list on a lex fault (a `var`-head test helper: every
+    caller here feeds well-formed lexemes, so an empty list only ever surfaces as a loud parse
+    failure downstream, never a silent pass). */
+fn toks_of(source: str) -> []lexer::Token {
+    match lexer::tokenize(source) { []lexer::Token as ts => ts; error => teko::list::empty() }
+}
+
+/**
+ * is_var_binding_head_recognizes_the_head_shape — 0.3.1 mudancas-superficie-0.3.1.md §1: `var` is
+ * CONTEXTUAL (like `ref`), so `is_var_binding_head` must accept exactly the binding-head shapes
+ * (a name then `:`/`=`, or a destructure `{ … }`) and reject every other adjacency — in particular
+ * `var` used as a plain identifier (a bare reassignment, or a name with neither `:` nor `=` after
+ * it) stays legal, which is the whole point of going contextual instead of reserving the word.
+ */
+#test
+fn is_var_binding_head_recognizes_the_head_shape() {
+    teko::assert::is_true(is_var_binding_head(toks_of("var x = 1"), 0))
+    teko::assert::is_true(is_var_binding_head(toks_of("var x: i64 = 1"), 0))
+    teko::assert::is_true(is_var_binding_head(toks_of("var { a; b } = p"), 0))
+    teko::assert::is_false(is_var_binding_head(toks_of("mut x = 1"), 0))
+    teko::assert::is_false(is_var_binding_head(toks_of("var = 1"), 0))
+    teko::assert::is_false(is_var_binding_head(toks_of("var x 1"), 0))
+}
+
+/**
+ * bind_kind_at_maps_var_to_mut — `var` and `mut` both stamp `BindKind::Mut` (0.3.1
+ * mudancas-superficie-0.3.1.md §1: the single always-mutable local); `let` and `const` keep their
+ * own kinds — the additive window changes no existing mapping.
+ */
+#test
+fn bind_kind_at_maps_var_to_mut() {
+    teko::assert::is_true(bind_kind_at(toks_of("var x = 1"), 0) == BindKind::Mut)
+    teko::assert::is_true(bind_kind_at(toks_of("mut x = 1"), 0) == BindKind::Mut)
+    teko::assert::is_true(bind_kind_at(toks_of("let x = 1"), 0) == BindKind::Let)
+    teko::assert::is_true(bind_kind_at(toks_of("const x = 1"), 0) == BindKind::Const)
+}
+
+/** is_binding_head_recognizes_var — the shared dispatcher predicate opens on `var` exactly when
+    `is_var_binding_head` would, and stays closed on a plain `var` reassignment. */
+#test
+fn is_binding_head_recognizes_var() {
+    teko::assert::is_true(is_binding_head(toks_of("var x = 1"), 0))
+    teko::assert::is_false(is_binding_head(toks_of("var = 1"), 0))
+}
+
+/** stmt_of — `source` parsed as ONE statement, or its error. */
+fn stmt_of(source: str) -> Statement | error {
+    let toks = match lexer::tokenize(source) { []lexer::Token as ts => ts; error => return error { message = "lex failed" } }
+    match parse_statement(toks, 0) { Parsed<Statement> as p => p.node; error as e => return e }
+}
+
+/**
+ * var_statement_parses_as_mutable_binding — the statement dispatcher (`parse_statement`) routes a
+ * `var`-headed statement to `parse_binding`, producing a `Binding` stamped `BindKind::Mut`, with and
+ * without a type annotation.
+ */
+#test
+fn var_statement_parses_as_mutable_binding() {
+    teko::assert::is_true(match stmt_of("var x = 1") { Statement as s => match s { Binding as b => b.kind == BindKind::Mut; _ => false }; error => false })
+    teko::assert::is_true(match stmt_of("var x: i64 = 1") { Statement as s => match s { Binding as b => b.kind == BindKind::Mut && b.has_type; _ => false }; error => false })
+}
+
+/**
+ * var_reassignment_and_malformed_var_statements — `var` reassignment stays a PLAIN assignment (no
+ * binding keyword involved, since `var` is contextual); a `var`-headed destructure parses, and
+ * propagates the same barriers `let`/`mut` already carry (an unclosed destructure, and a bare
+ * `ref T` annotation — the tripartite-law rejection, now spelled with `var` too).
+ */
+#test
+fn var_reassignment_and_malformed_var_statements() {
+    teko::assert::is_false(stmt_errors("var = 1"))
+    teko::assert::is_true(block_errors("{ var x 1 }"))
+    teko::assert::is_false(stmt_errors("var { a; b } = p"))
+    teko::assert::is_true(stmt_errors("var { x = p"))
+    teko::assert::is_true(stmt_errors("var x: ref i64 = 1"))
+    teko::assert::is_true(stmt_errors("let ref x = 1"))
+}
+
+/**
+ * hash_inline_and_singleton_accept_var — `#inline`/`#singleton` attach to a `var` binding exactly as
+ * they already do to `let`/`mut`/`const` (`is_binding_head` is the single predicate both attribute
+ * parsers now share).
+ */
+#test
+fn hash_inline_and_singleton_accept_var() {
+    teko::assert::is_false(stmt_errors("#inline var x = 1"))
+    teko::assert::is_false(stmt_errors("#singleton var x = 1"))
+}
+
+/** hash_inline_and_singleton_reject_non_binding — the attribute still refuses a non-binding
+    statement, `var` included when it is not itself a binding head. */
+#test
+fn hash_inline_and_singleton_reject_non_binding() {
+    teko::assert::is_true(stmt_errors("#inline var = 1"))
+    teko::assert::is_true(stmt_errors("#singleton return"))
+}
