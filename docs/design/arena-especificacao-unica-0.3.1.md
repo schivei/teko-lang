@@ -481,7 +481,9 @@ fn ctx::close()                                    // fecho de reserva do canal 
     string** (em F2). O `svc<Rx<T>>(var_key)` vira então um **lookup em runtime** pela string, e as ops de
     `Rx`/`Tx` são uma **chamada indireta** (o ponteiro de função do registro de ops) — **não** vtable de
     interface, **não** o Round 3. **Custo:** um lookup por resolução + uma indireção por op. Conflito
-    (mesma chave viva em dois `make`) = **erro em runtime** no 2º `make`.
+    (mesma chave viva em dois `make`) = **erro em runtime** no 2º `make`. **`svc` de chave não encontrada
+    (nenhum `make` a finalizou) = PANIC (ruling do dono)** — o `svc` continua infalível no tipo (devolve `T`),
+    e a chave ausente é um `panic` (como um acesso fora de faixa), não um retorno `| error`.
   - **A diferença é se o `K` é conhecido no sítio do `svc`:** chave constante → `K` conhecido → inline; chave
     variável → `K` **apagado** no sítio (o key é variável, não pareável a um `make` específico) → indireção
     pelo registro de ops. Nos dois casos o **tipo `T` é estático** e **não há dispatch dinâmico de interface**.

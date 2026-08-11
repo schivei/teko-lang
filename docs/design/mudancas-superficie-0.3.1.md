@@ -578,7 +578,9 @@ registro tem duas fases, e o modo é escolhido pela **forma da chave**:
   a ligação chave→instância num **registro processo-inteiro chaveado pela string** (F2). Aí `svc<Rx<T>>(var_key)`
   é um **lookup em runtime**, e as ops de `Rx`/`Tx` viram **chamada indireta** (ponteiro de função) — **não**
   vtable de interface, **não** o Round 3. **Custo:** um lookup + uma indireção por op. Conflito = **erro em
-  runtime** no 2º `make`. (O `T` continua estático nos dois modos; só o `K` é apagado no sítio do `svc` variável.)
+  runtime** no 2º `make`. **`svc` de chave não encontrada = PANIC (ruling do dono)** — o `svc` continua
+  infalível no tipo (devolve `T`); chave ausente é `panic`, não retorno `| error`. (O `T` continua estático
+  nos dois modos; só o `K` é apagado no sítio do `svc` variável.)
 
 **O `ctx` É O DONO do lifetime — transient (ruling do dono, ratificado).** O serviço singleton do canal vive em F2, mas
 **quem o possui é o `ctx`** (transient, na região do criador). Quando o `ctx` cai, ele **cascateia o
