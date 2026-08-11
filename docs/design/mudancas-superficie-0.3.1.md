@@ -447,8 +447,9 @@ A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o u
 
 `spawn` (dispara) e `await` (suspende/prefixo de ligação) são **keywords contextuais** (reconhecidas pelo
 parser por posição, sem reserva no lexer — a mesma norma que `class`/`abstract`/`virtual`/`override`
-seguem); `chan` é um **tipo genérico** (`chan<T>`). **Não há keyword `async`** (só `await`, §10.3) nem
-**`isolate`** (não há isolamento tipo-processo na linguagem — quem precisa usa outro binário). Medido:
+seguem); `chan` é um **tipo genérico** (`chan<T>`). **Não há necessidade de uma keyword `async`** (o
+`await` prefixo já basta, §10.3) **nem de um `isolate`** (uma thread no mesmo processo ainda pode corromper
+e só fala por canais do SO — quem precisa de isolação real usa outro binário). Medido:
 **zero identificadores Teko hoje** se chamam `spawn`/`chan`/`await`, então reconhecê-los por posição não
 quebra corpus.
 
@@ -461,8 +462,11 @@ e **sem `join`**. Não há isolamento tipo-processo na linguagem (quem precisa u
 ```teko
 spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia
 
-// chan<T> MPSC (fan-in: N escritores, 1 leitor). Transporte: SOCK_DGRAM (Linux/macOS), mailslot (Windows)
-static fn chan<T>::make(bounds: usize = 1): self  // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
+// chan<T> MPSC (fan-in: N escritores, 1 leitor).
+type ChanKind = enum { os, mem }                  // os=transporte do SO (DEFAULT) · mem=fila em-processo
+static fn chan<T>::make(bounds: usize = 1, kind: ChanKind = ChanKind::os): self
+              // bounds: 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
+              // kind:   os (default)=SOCK_DGRAM (Linux/macOS)/mailslot (Windows) · mem=anel em-processo, sem syscall
               c.id: usize                          // o id — o que se passa à corotina (spawn f(c.id))
 static fn chan<T>::writer(id: usize): Tx<T>       // extremo de escrita (copiável, N escritores)
 static fn chan<T>::reader(id: usize): Rx<T>       // extremo de leitura (um só; 2º leitor = erro nomeado)
@@ -509,9 +513,9 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte 
 `fork_join` de baixo nível sobrevive como mecanismo INTERNO do backend, para paralelizar o codegen — não
 é superfície de usuário; o usuário escreve `spawn`.)*
 
-### 10.3 `await` — alarga o retorno para `Intent<T>` (sem `async`)
+### 10.3 `await` — alarga o retorno para `Intent<T>` (sem necessidade de `async`)
 
-**Não há `async`, a função NÃO declara `Intent`, e o `await` é um PREFIXO de ligação/atribuição** (não um
+**Não há necessidade de `async`, a função NÃO declara `Intent`, e o `await` é um PREFIXO de ligação/atribuição** (não um
 operador de expressão). A função retorna o seu tipo normal; `await var a = f()` faz `a` receber um
 `Intent<T>` em vez do valor cru — **alarga**, ao contrário das linguagens que **estreitam** a assinatura
 para `Task<T>`/`Promise<T>`. (Consequência: não há `await` inline numa expressão — liga-se primeiro.)
@@ -548,6 +552,16 @@ await var a, b, c = fa(), fb(), fc()   // a, b, c : Intent<…> — todas espera
 Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é seguro;
 inspeciona-se cada `Intent` (`.value`/`.canceled`/`.failure`). Isso torna `when_all`/`when_any` e o `await`
 de array desnecessários. O dev nunca escreve `Intent` num retorno; só o `await` o produz.
+
+**Descartar o retorno — `await _ = f()`.** Espera `f` completar (garantia de execução, por suspensão) **sem
+capturar** o desfecho — como esperar uma `Task` em C# sem guardar o resultado. Usa o `_` (o mesmo descarte
+do resto da linguagem), que não abre variável nem materializa o `Intent`. Difere do `spawn`, que **não**
+espera:
+
+```teko
+await _ = liberar_cache()      // espera; nenhum Intent capturado
+await _, x = fa(), fb()        // descarta o 1º, captura o 2º em x : Intent<…>
+```
 
 - **Arena/fundações** (Doc 1 §7.9): **I/O** — reator (`epoll`/`kqueue`/`IOCP`), sem thread nova; **CPU** —
   corotina isolada de um pool (F1). Em ambos o `await` cede e retoma, nunca bloqueia.
@@ -608,9 +622,9 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 | tema | fechado (08-10) |
 |---|---|
 | **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
-| **`isolate`** | **removido** — sem isolamento tipo-processo na linguagem (quem precisa usa outro binário) |
-| **`chan<T>`** | tipo genérico MPSC; `make(bounds: usize = 1)`; `bounds` = nº de **mensagens**; unbounded = `make(0)` (resp. do dev) |
-| **`await`** | **sem `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline |
+| **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
+| **`chan<T>`** | tipo genérico MPSC; `make(bounds: usize = 1, kind: ChanKind = os)`; `bounds` = nº de **mensagens**; `kind` = transporte (`os` default / `mem`); unbounded = `make(0)` (resp. do dev) |
+| **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |
 | **`Intent<T>`** | `.value` / `.canceled` / `.failure`; **`cancel()`** global (cancela o Intent, ou `panic` fora de suspensão) |
 | **várias tasks** | por **atribuição múltipla** (`await var a, b = fa(), fb()`), sem `when_all`/`when_any` |
 | **`ref`** | não cruza fronteira; `<ref T>` proibido (§10.6) |

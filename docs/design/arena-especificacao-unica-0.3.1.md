@@ -422,7 +422,9 @@ pub type ChanId  = u64                       // o canal que a main abre e distri
 default**). Tudo é operado pelo **id** do canal (a regra "IDs, não ponteiros", §7.7):
 
 ```teko
-static fn chan<T>::make(bounds: usize = 1): self   // 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
+type ChanKind = enum { os, mem }   // os = transporte do SO (DEFAULT) · mem = fila em-processo (sem syscall)
+
+static fn chan<T>::make(bounds: usize = 1, kind: ChanKind = ChanKind::os): self
                     c.id: usize                     // o id do canal — o que se passa a uma corotina
 static fn chan<T>::writer(id: usize): Tx<T>        // extremo de ESCRITA (copiável, N escritores)
 static fn chan<T>::reader(id: usize): Rx<T>        // extremo de LEITURA (um só; 2º de outra task = erro)
@@ -433,10 +435,18 @@ fn Tx<T>::send(v: T): null | error                 // envia; ESPERA se bounded-c
 fn Rx<T>::pop(): T | closed                        // recebe; devolve `closed` quando o último produtor fecha e esvazia
 ```
 
-- `chan<T>::make()` → **bounded-1** (default) · `make(64)` → bounded-64 · `make(0)` → **unbounded**.
+- `chan<T>::make()` → **bounded-1**, transporte do SO (defaults) · `make(64)` → bounded-64 · `make(0)` → **unbounded**.
 - **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
   cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB e o desenho dele
   suportar, é por conta dele.
+- **`kind` — o TIPO (transporte) do canal, default `os`.** Segundo parâmetro com default (superfície nova):
+  - **`ChanKind::os`** (default): transporte do **SO** — `SOCK_DGRAM` no Linux/macOS, **mailslot** no
+    Windows. É o padrão porque é o mais robusto (bufferizado pelo kernel, atravessa qualquer raia/task com
+    a mesma disciplina de id), e é o que fecha a garantia de "dados cruzam por cópia" via o próprio kernel.
+  - **`ChanKind::mem`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais
+    rápida, mas só dentro do MESMO processo. Escolha do dev quando produtor e consumidor são tasks do mesmo
+    binário e ele quer o caminho curto. A superfície (`make`/`writer`/`reader`/`close`/`Tx`/`Rx`) é idêntica;
+    só o transporte por baixo muda.
 - Fan-in MPSC: N escritores (`Tx`), 1 leitor (`Rx`).
 
 `spawn` é uma **keyword de corotina** (não uma função) — estilo Go: `spawn f(args)` lança `f` numa corotina
@@ -490,9 +500,9 @@ fn main() {
 Não há `join` no modelo de corotina: a barreira de memória é o **fecho do canal** (o `pop` devolver
 `closed`) e/ou o `WaitGroup`.
 
-### 7.9 `await` — alarga o retorno para `Intent<T>` (sem `async`)
+### 7.9 `await` — alarga o retorno para `Intent<T>` (sem necessidade de `async`)
 
-**Não há keyword `async`, e a função NÃO declara `Intent`.** Uma função retorna o seu tipo normal
+**Não há necessidade de uma keyword `async`, e a função NÃO declara `Intent`.** Uma função retorna o seu tipo normal
 (`fn calc(x, y): i32`); é o **`await` — um PREFIXO de ligação/atribuição** — que ALARGA o retorno para
 `Intent<T>`. Ao contrário de outras linguagens (que **estreitam** a assinatura para `Task<T>`/`Promise<T>`),
 aqui a assinatura fica limpa e o **alargamento** acontece só onde se espera (não há `await` inline numa
@@ -525,6 +535,21 @@ await var a, b, c = fa(), fb(), fc()   // a, b, c : Intent<…> — todas espera
 Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é seguro;
 inspeciona-se cada `Intent`. Isso torna `when_all`/`when_any` e o `await` de array desnecessários. O dev
 nunca escreve `Intent` num retorno — só o `await` o produz.
+
+**Descartar o retorno — `await _ = f()`.** Às vezes se quer a **garantia de execução** do `await` (esperar
+`f` completar, por suspensão) sem **capturar** o desfecho — o equivalente a esperar uma `Task` em C# sem
+guardar o resultado. Como o `await` é prefixo de uma ligação, o descarte usa o alvo `_` (o mesmo `_` do
+resto da linguagem): liga, espera, e **não materializa** o `Intent`.
+
+```teko
+await _ = liberar_cache()      // espera completar; nenhum Intent capturado (nem .value nem .canceled)
+await _, _ = fa(), fb()        // espera as duas; descarta ambos os desfechos
+await _, x = fa(), fb()        // descarta o 1º, captura o 2º em x : Intent<…>
+```
+
+O `_` não abre variável nem arena: o compilador esperando o desfecho e o descartando na hora, sem alocar o
+`Intent` no caller. Difere do `spawn` (fire-and-forget, **não** espera): `await _ = f()` **espera**, só não
+guarda.
 
 **`cancel()` — uma função global, como `panic`, mas ciente de suspensão.** Há uma **marcação de execução
 suspensa** (o runtime sabe se a tarefa corrente está sob um `await`). `cancel()`:
@@ -702,9 +727,10 @@ fn pipeline() {
 - **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
 - **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
   scoped na sub-raiz da thread — sem ressincronizar (§8).
-- **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Sem
-  `async` (o `await` prefixo alarga o retorno para `Intent<T>` por suspensão) e **sem `isolate`** (não há
-  isolamento tipo-processo — quem precisa usa outro binário) (§7.6/§7.9).
+- **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Não há
+  **necessidade de `async`** — o `await` prefixo já alarga o retorno para `Intent<T>` por suspensão, então
+  marcar a função seria redundante. Não há **necessidade de um `isolate`** — uma thread no mesmo processo
+  ainda pode corromper e só fala por canais do SO; quem precisa de isolação real usa outro binário (§7.6/§7.9).
 - **`Intent<T>`**: `.value`/`.canceled`/`.failure`; várias tasks por **atribuição múltipla**
   (`await var a, b = fa(), fb()`), sem `when_all`/`when_any`; **`cancel()`** global cancela o Intent ou dá
   panic (§7.9).
