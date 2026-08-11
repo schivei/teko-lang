@@ -403,29 +403,31 @@ var log:   action<str>              = (m) => print(m)
 var fmt:   func<Record, str> | null = null           // sem colisão (era `fn(Record): str | null`, ambíguo)
 ```
 
-### 9.3 Decomposição — `( )` e `[ ]` (SEM tipo tupla)
+### 9.3 Atribuição múltipla — `var a, b, c = …` (sem tipo tupla)
 
-**O que muda.** Entra **decomposição posicional** em `var` — ligar vários valores de uma vez — **sem
-introduzir um tipo tupla** (ruling do dono). Não há um valor "tupla" que se armazene ou passe: `( … )` é
-**só o ponto de decomposição / de produção múltipla** (estilo Go multi-return), nunca um tipo de 1ª classe.
-(Já existe a decomposição por NOME `{ x; y }` de campos de struct, B.13; estas são as **posicionais**.)
+**O que muda.** Entra a **atribuição múltipla**: vários alvos ligados posicionalmente a vários valores,
+**sem parênteses e sem tipo tupla**. É a base do `await` (§10.3) e dá **retorno múltiplo** de graça. (A
+decomposição por NOME `{ x; y }` de campos de struct, B.13, continua; esta é a posicional.)
 
 **O que entra.**
-- **Decomposição por `( )`** — de um **produtor de múltiplos valores**: uma função de **retorno múltiplo**
-  (`fn div(): (i32, i32)`, estilo Go — o chamador **tem de** decompor) ou um **grupo de `await`**. O grupo
-  **não** é capturável num só valor (`var t = div(…)` não existe — só `var (q, r) = div(…)`).
-- **Decomposição por `[ ]`** — de um **array** (`[]T`, um tipo REAL): `var [a, b, c] = arr`. Homogêneo.
+- `var a, b, c = e1, e2, e3` — liga posicional; **tipos inferidos por posição** (cada alvo pega o tipo do
+  seu valor).
+- `var a, b: T = e1, e2` — **um tipo só** anotado, compartilhado por todos os alvos.
+- **Retorno múltiplo:** `fn div(): (i32, i32)` (a assinatura lista os retornos); o chamador liga com
+  `var q, r = div(17, 5)`. **Não há tipo tupla** — o `( )` só aparece na assinatura e no ponto de ligação,
+  nunca como valor de 1ª classe (`var t = div(…)` não existe).
 
-**O que resolve.** Retorno/ligação múltiplos sem inventar um struct nomeado **nem** carregar um tipo tupla
-pelo sistema de tipos — mantém o sistema enxuto (arrays são tipo; grupos `( )` são só decomposição). É a
-base do `await` de várias tasks (§10.3), que **substitui `when_all`/`when_any`**.
+**O que resolve.** Ligar/retornar vários valores sem struct nomeado nem tipo tupla — sistema de tipos
+enxuto — e é a notação natural para várias tasks (§10.3), matando `when_all`/`when_any` **e** o `await` de
+array.
 
 **Exemplo.**
 ```teko
-fn div(a: i32, b: i32): (i32, i32) { return (a / b, a % b) }   // retorno MÚLTIPLO (não um tipo tupla)
-var (q, r) = div(17, 5)                                          // decompõe: q = 3, r = 2
+var e, f = 1, "abc"           // e : i32, f : str — tipos por posição
+var g, h: i32 = 1, 2          // g, h : i32 — tipo compartilhado
 
-var [x, y, z] = [1, 2, 3]                                        // decompõe um array []i32 (tipo real)
+fn div(a: i32, b: i32): (i32, i32) { return (a / b, a % b) }   // retorno múltiplo (NÃO um tipo)
+var q, r = div(17, 5)                                           // q = 3, r = 2
 ```
 
 ---
@@ -505,17 +507,20 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte 
 
 ### 10.3 `await` — alarga o retorno para `Intent<T>` (sem `async`)
 
-**Não há `async`, e a função NÃO declara `Intent`.** A função retorna o seu tipo normal; o **`await`
-ALARGA** o retorno para `Intent<T>` no ponto de chamada. Ao contrário de outras linguagens (que
-**estreitam** a assinatura para `Task<T>`/`Promise<T>`), aqui a assinatura fica limpa e o alargamento é só
-onde se espera.
+**Não há `async`, a função NÃO declara `Intent`, e o `await` é um PREFIXO de ligação/atribuição** (não um
+operador de expressão). A função retorna o seu tipo normal; `await var a = f()` faz `a` receber um
+`Intent<T>` em vez do valor cru — **alarga**, ao contrário das linguagens que **estreitam** a assinatura
+para `Task<T>`/`Promise<T>`. (Consequência: não há `await` inline numa expressão — liga-se primeiro.)
 
 ```teko
 fn calc(x: i32, y: i32): i32 { x + y }
 
-var a = await calc(1, 2)       // a : Intent<i32>
+await var a = calc(1, 2)       // a : Intent<i32> — o `await` prefixa a ligação
 if a.canceled { println("canceled") }
 else          { println($"r = {a.value}") }
+
+await var b, c = fb(), fc()    // atribuição múltipla (§9.3): b, c : Intent<…>
+await a = fa()                 // reatribui um `a` existente (remanescente de outro intent)
 ```
 
 `await f(args)` **suspende** (cede, sem bloquear a thread), executa `f`, e o retorno cai em **`.value`** de
@@ -529,19 +534,16 @@ um `Intent<T>` criado no caller. Campos: **`.value: T`**, **`.canceled: bool`**,
 razão); **fora de suspensão** → dispara um `panic`. Um verbo só que degrada de cancelamento cooperativo
 para panic.
 
-**Várias tasks — por tupla ou array (§9.3), sem `when_all`/`when_any`.** `await` de uma **tupla** de
-chamadas espera todas e devolve uma tupla de `Intent`s (heterogêneo); `await` de um **array** devolve
-`[]Intent<T>` (homogêneo):
+**Várias tasks — atribuição múltipla (§9.3), sem `when_all`/`when_any` nem `await` de array.** O `await`
+prefixa uma ligação múltipla e **cada alvo vira um `Intent`**, todas esperadas:
 
 ```teko
-var (a, b, c) = await (fa(), fb(), fc())   // decompõe em a,b,c (cada um Intent<…>) — grupo, não tipo tupla
-var [r0, r1]  = await [g(0), g(1)]          // decompõe um []Intent<T> (array é tipo real)
+await var a, b, c = fa(), fb(), fc()   // a, b, c : Intent<…> — todas esperadas em paralelo
 ```
 
-Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é
-seguro; inspeciona-se cada `Intent` (`.value`/`.canceled`/`.failure`). Isso torna `when_all`/`when_any`
-desnecessários — o `await` de tupla/array + a inspeção cobrem os dois casos. O dev nunca escreve `Intent`
-num retorno; só o `await` o produz.
+Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é seguro;
+inspeciona-se cada `Intent` (`.value`/`.canceled`/`.failure`). Isso torna `when_all`/`when_any` e o `await`
+de array desnecessários. O dev nunca escreve `Intent` num retorno; só o `await` o produz.
 
 - **Arena/fundações** (Doc 1 §7.9): **I/O** — reator (`epoll`/`kqueue`/`IOCP`), sem thread nova; **CPU** —
   corotina isolada de um pool (F1). Em ambos o `await` cede e retoma, nunca bloqueia.

@@ -502,14 +502,15 @@ Não há `join` no modelo de corotina: a barreira de memória é o **fecho do ca
 ### 7.9 `await` — alarga o retorno para `Intent<T>` (sem `async`)
 
 **Não há keyword `async`, e a função NÃO declara `Intent`.** Uma função retorna o seu tipo normal
-(`fn calc(x, y): i32`); é o **`await` que ALARGA** o retorno para `Intent<T>` no ponto de chamada. Ao
-contrário de outras linguagens (que **estreitam** a assinatura para `Task<T>`/`Promise<T>`), aqui a
-assinatura fica limpa e o **alargamento** acontece só onde se espera:
+(`fn calc(x, y): i32`); é o **`await` — um PREFIXO de ligação/atribuição** — que ALARGA o retorno para
+`Intent<T>`. Ao contrário de outras linguagens (que **estreitam** a assinatura para `Task<T>`/`Promise<T>`),
+aqui a assinatura fica limpa e o **alargamento** acontece só onde se espera (não há `await` inline numa
+expressão — liga-se primeiro):
 
 ```teko
 fn calc(x: i32, y: i32): i32 { x + y }
 
-var a = await calc(1, 2)       // a : Intent<i32> — o await criou o Intent; o retorno foi para .value
+await var a = calc(1, 2)       // a : Intent<i32> — o `await` PREFIXA a ligação; o retorno vai para .value
 if a.canceled {
     println("canceled")
 } else {
@@ -523,18 +524,16 @@ que o Intent nasce na arena do caller). O `Intent<T>` carrega o desfecho: **`.va
 **`.canceled: bool`** (a task foi cancelada). É o oposto do `spawn` (fire-and-forget, sem retorno): no
 `await` se GARANTE a execução, por suspensão.
 
-**Várias tasks — por tupla ou array (Doc 2 §9.3), sem `when_all`/`when_any`.** `await` de uma **tupla** de
-chamadas espera todas e devolve uma tupla de `Intent`s (heterogêneo); `await` de um **array** devolve
-`[]Intent<T>` (homogêneo):
+**Várias tasks — atribuição múltipla (Doc 2 §9.3), sem `when_all`/`when_any` nem `await` de array.** O
+`await` prefixa uma ligação múltipla e cada alvo vira um `Intent`, todas esperadas:
 
 ```teko
-var (a, b, c) = await (fa(), fb(), fc())   // decompõe em a,b,c (cada um Intent<…>) — grupo, não tipo tupla
-var [r0, r1]  = await [g(0), g(1)]          // decompõe um []Intent<T> (array é tipo real)
+await var a, b, c = fa(), fb(), fc()   // a, b, c : Intent<…> — todas esperadas em paralelo
 ```
 
 Como **não há throwing** (cancelada ou não, a task sempre executa até um desfecho), esperar todas é seguro;
-inspeciona-se cada `Intent`. Isso torna `when_all`/`when_any` desnecessários. O dev nunca escreve `Intent`
-num retorno — só o `await` o produz.
+inspeciona-se cada `Intent`. Isso torna `when_all`/`when_any` e o `await` de array desnecessários. O dev
+nunca escreve `Intent` num retorno — só o `await` o produz.
 
 **`cancel()` — uma função global, como `panic`, mas ciente de suspensão.** Há uma **marcação de execução
 suspensa** (o runtime sabe se a tarefa corrente está sob um `await`). `cancel()`:
