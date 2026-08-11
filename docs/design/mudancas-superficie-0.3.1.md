@@ -368,6 +368,18 @@ var a = chan<i32>::make()      // bounds = 1 (default)
 var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
 ```
 
+### 9.2b Uniões `|` — só estruturais e inline; `variant` para tipo-soma nomeado
+
+**O que muda.** A união `|` é **estrutural e só inline** — vale em declaração de variável, parâmetro,
+constraint de genérico e retorno (`fn f(): T | error | null`), mas **NÃO pode ser nomeada como um `type`**
+(`type X = A | B` é rejeitado). Para um tipo-soma **nomeado**, usa-se **`variant`** (nominal, com tag), que
+já é o mecanismo de todos os ADTs do compilador (`type Pattern = variant A | B | C`).
+
+**O que resolve.** Separa claramente: `|` é composição estrutural no ponto de uso; dar **nome** a um sum
+type é `variant`; e `type` fica reservado ao concreto (`struct`, newtype-sobre-primitivo, ou alias de um
+tipo só). Custo zero — o corpus não tem nenhum `type X = A | B` estrutural (todos os 34 tipos-soma
+nomeados já são `variant`).
+
 ### 9.2 Tipos de closure — `func<…>` / `action<…>`
 
 **O que muda.** O **tipo** de uma closure passa a ser um subtipo de comp-time, ao modo do C# — em vez da
