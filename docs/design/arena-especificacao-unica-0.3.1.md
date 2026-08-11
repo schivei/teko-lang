@@ -384,12 +384,12 @@ Quem precisa de isolação de processo real usa **outro binário**, fora do esco
 fn tarefa() {                          // função comum SEM retorno — SEM id (resolve por chave)
     var tx = svc<Tx<i32>>("res")       // extremo de escrita, pela chave constante
     tx.send(processar())
-    chan<i32>::close("res")
+    tx.close()                         // o produtor fecha
 }
 
 fn main() {
-    var rx = chan<i32>::make<OsChan<i32>>("res", 64)
-    spawn tarefa()                     // thread fire-and-forget SEM id; sincroniza pelo canal / WaitGroup
+    var ctx = chan<i32>::make<OsChan<i32>>("res", 64)   // devolve o ctx (WaitGroup)
+    spawn tarefa()                     // thread fire-and-forget SEM id; sincroniza pelo canal / ctx.wait()
     // spawn soma(a, b)                 // ERRO: soma tem retorno — spawn não aceita
 }
 ```
@@ -413,8 +413,9 @@ regra: o "nome" é uma constante conhecida na compilação, e a instância do ca
 
 ```teko
 // O "nome" do canal é a CHAVE constante — não um id de runtime:
-var rx = chan<i32>::make<OsChan<i32>>("res", 64)   // a main cria e nomeia o canal
-var tx = svc<Tx<i32>>("res")                        // o worker resolve por chave, em comp-time (sem id)
+var ctx = chan<i32>::make<OsChan<i32>>("res", 64)   // a main cria e nomeia o canal; recebe o ctx (WaitGroup)
+var rx  = svc<Rx<i32>>("res")                        // AMBOS os extremos por chave, em comp-time (sem id):
+var tx  = svc<Tx<i32>>("res")                        // leitor e escritor resolvidos por svc
 ```
 
 ### 7.8 `chan<T>` — MPSC (fan-in), a primitiva de dados
@@ -433,16 +434,20 @@ type IChannelKind<T> = interface {
 }
 
 // make: cria o canal, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a CHAVE constante,
-// e devolve o LEITOR único (Rx<T>). K é um `service singleton` que satisfaz a interface (senão: erro de compilação):
-static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): Rx<T>
+// e devolve o CONTEXTO (ctx) — o WaitGroup do canal (esperar as tasks) + um fecho de reserva.
+// K é um `service singleton` que satisfaz a interface (senão: erro de compilação):
+static fn chan<T>::make<K: service singleton & IChannelKind<T>>(key: str, bounds: usize = 1): ctx
 
-// os ESCRITORES resolvem o extremo de escrita pela MESMA chave constante (svc = intrínseco de comp-time, §8):
-var tx = svc<Tx<T>>("chave")                       // Tx<T> — N escritores, todos por chave (nada de id no spawn)
-
-static fn chan<T>::close(key: str)                 // invoca o end() do transporte: fecha + drena
+// AMBOS os extremos são clamados por svc, pela MESMA chave constante (svc = intrínseco de comp-time, §8):
+var rx = svc<Rx<T>>("chave")                       // LEITOR único — resolvido por chave
+var tx = svc<Tx<T>>("chave")                       // ESCRITOR (N) — resolvido por chave (nada de id no spawn)
 
 fn Tx<T>::send(v: T): null                         // devolve null; a propriedade tx.closed diz se fechou (drenado)
-fn Rx<T>::pop(): T | error                         // recebe; error quando o canal foi encerrado (end()) e drenado
+fn Tx<T>::close()                                  // o PRODUTOR fecha: invoca o end() do transporte (fecha + drena)
+fn Rx<T>::pop(): T | Closed                        // recebe; o erro ESPECÍFICO `Closed` quando encerrado e drenado
+
+fn ctx::wait()                                     // WaitGroup: espera as tasks do canal terminarem
+fn ctx::close()                                    // o CONTEXTO também pode fechar (fecho de reserva, caso precise)
 ```
 
 - **TOTALMENTE ESTÁTICO — a chave é uma CONSTANTE (ruling do dono).** `make` e `svc` usam a MESMA chave, um
@@ -451,19 +456,20 @@ fn Rx<T>::pop(): T | error                         // recebe; error quando o can
   vtable, sem dispatch dinâmico, sem service-locator**. **Elimina passar id no `spawn`**: o worker não recebe
   id, resolve o `Tx` pela chave. É por isso que `make<K: service singleton & IChannelKind<T>>` — o transporte é um
   **`service`** que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
-- **`chan<T>::make(key, bounds = 1): Rx<T>`** devolve o **leitor único** a quem cria o canal; os escritores
-  fazem `svc<Tx<T>>(key)`. Fan-in MPSC: **1 leitor** (o `Rx` de `make`), **N escritores** (`svc<Tx>` por chave).
-- **Fechar é responsabilidade do PRODUTOR (ruling proposto).** `close(key)` (= `end()`) é o sinal de
-  **fim-de-stream** — quem sabe que não há mais mensagens é o lado que produz, então é o produtor que fecha
-  (convenção Go). Com N produtores, coordena-se por `WaitGroup` e **fecha-se UMA vez** (o `close` é
-  **idempotente** por chave). O **consumidor (`Rx`) não fecha no caminho normal** — lê até `pop() → error`.
-  Os dois lados **observam** o fecho: o `Rx` por `pop() → error`, o `Tx` pela propriedade `tx.closed`. Se o
-  consumidor precisa **abandonar** cedo, ele *pode* chamar `close(key)` (idempotente) e os produtores param
-  ao ver `tx.closed` — mas isso é a exceção; a responsabilidade convencional do fim-de-stream é do produtor.
+- **`make` devolve o `ctx`; AMBOS os extremos por `svc` (ruling do dono).** `make(key, bounds = 1): ctx`
+  cria o canal e devolve o **contexto** — o **WaitGroup** do canal (`ctx.wait()` espera as tasks) e um fecho
+  de reserva (`ctx.close()`). Os dois extremos são clamados por chave: `svc<Rx<T>>(key)` (leitor único) e
+  `svc<Tx<T>>(key)` (N escritores). Fan-in MPSC: **1 leitor**, **N escritores**, todos resolvidos por `svc`.
+- **Fechar é responsabilidade do PRODUTOR (ruling do dono).** O **`Tx` tem o `close()`** — quem sabe que não
+  há mais mensagens é o produtor, então é ele que fecha (`tx.close()` → `end()`; convenção Go). Com N
+  produtores, coordena-se por `ctx.wait()` e fecha-se **uma vez** (idempotente). O fecho também fica **no
+  `ctx`** (`ctx.close()`) como reserva, **caso precise**. O **consumidor (`Rx`) não fecha** — faz `pop()` até
+  receber o erro **específico `Closed`** (encerrado + drenado; distinto de um `error` de transporte). Ambos
+  observam: `Rx` pelo `Closed`, `Tx` pela propriedade `tx.closed`.
 - **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
   cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB, é por conta dele.
 - **O transporte `K` é um `service singleton & IChannelKind<T>` extensível (ruling do dono).** O `make` chama
-  `K.init(key)` (o método prévio), registra o canal sob a chave, devolve `Rx<T>`. Built-ins e plugues:
+  `K.init(key)` (o método prévio), registra o canal sob a chave, devolve o `ctx`. Built-ins e plugues:
   - **`OsChan<T>`** (default): transporte do **SO** — `SOCK_DGRAM` no Linux/macOS, **mailslot** no Windows.
   - **`MemChan<T>`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais rápida.
   - **do dev**: `KafkaChan<T>`, `RabbitChan<T>`, `WsChan<T>`, `HttpChan<T>`, `UdpChan<T>`, `RpcChan<T>` —
@@ -495,19 +501,21 @@ fn gerar() {                                       // função sem retorno — S
     for p in pedidos() {
         tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula
     }
-    chan<Pedido>::close("pedidos")   // end(): fecha + drena → o pop do consumidor passará a devolver `error`
+    tx.close()                 // o PRODUTOR fecha → o pop do consumidor passará a devolver `Closed`
 }
 
 fn main() {
-    var rx = chan<Pedido>::make<OsChan<Pedido>>("pedidos", 64)   // cria, registra em F2 sob "pedidos", devolve o leitor
+    var ctx = chan<Pedido>::make<OsChan<Pedido>>("pedidos", 64)   // cria, registra em F2 sob "pedidos", devolve o ctx (WaitGroup)
     spawn gerar()                    // Go-style: dispara e segue (sem join) — SEM id
+    var rx = svc<Rx<Pedido>>("pedidos")   // o LEITOR também por svc, pela chave
     loop {
         var m = rx.pop()
         match m {
             Pedido => processar_lento(m),   // lento; o produtor não corre à frente dele
-            error  => break                 // canal encerrado e drenado — é a sincronização, não há join
+            Closed => break                 // erro específico: encerrado e drenado — a sincronização, não há join
         }
     }
+    ctx.wait()                       // WaitGroup: espera a task terminar
 }
 ```
 
@@ -517,19 +525,20 @@ pequeno**.
 
 ```teko
 fn main() {
-    var rx = chan<Tarefa>::make<OsChan<Tarefa>>("tarefas", 0)   // unbounded; devolve o leitor
-    var tx = svc<Tx<Tarefa>>("tarefas")                          // escritor pela chave
+    var ctx = chan<Tarefa>::make<OsChan<Tarefa>>("tarefas", 0)   // unbounded; devolve o ctx (WaitGroup)
+    var tx  = svc<Tx<Tarefa>>("tarefas")                          // escritor pela chave
     for tarefa in lote_fixo() {      // ex.: 12 tarefas conhecidas — total pequeno e finito
         tx.send(tarefa)              // nunca bloqueia; não há "cheio" para travar a main
     }
-    chan<Tarefa>::close("tarefas")
+    tx.close()                       // o produtor fecha
     var i = 0
-    loop while i < 4 { spawn worker(); i = i + 1 }   // 4 corotinas drenam — SEM id; sync via chan/WaitGroup
+    loop while i < 4 { spawn worker(); i = i + 1 }   // 4 corotinas drenam — SEM id; leem por svc<Rx<Tarefa>>("tarefas")
+    ctx.wait()                       // WaitGroup: espera as 4 terminarem
 }
 ```
 
-Não há `join` no modelo de corotina: a barreira de memória é o **fecho do canal** (o `pop` devolver
-`error` após `end()`) e/ou o `WaitGroup`.
+Não há `join` no modelo de corotina: a barreira de memória é o **fecho do canal** (o `pop` devolver o erro
+específico `Closed` após `end()`) e/ou o `ctx.wait()` (WaitGroup).
 
 ### 7.9 `await` — alarga o retorno para `Intent<T>` (sem necessidade de `async`)
 
@@ -624,10 +633,11 @@ A arena difere conforme a fundação (I/O vs CPU), dita e não escondida (`conco
 
 ### 7.10 Journaling — a faceta de arena da durabilidade
 
-O journal segue a **mesma lógica dos canais** (ruling do dono): é um tipo OOP com fábrica estática
-`make`, operado pelo **id** (`journal::make(...) -> self`, `j.id`, estáticas que recebem o id — Doc 2
-§10.4), e o seu registro/handle **reside na arena raiz** (a região imortal do programa, F2, §7.6) — como
-o `chan`, porque um journal precisa sobreviver a todas as tasks. Tem faceta de arena por dois pontos:
+O journal segue **exatamente o mesmo modelo dos canais** (ruling do dono): o **sink** é um
+`service singleton & IJournalKind` (default `FileJournal`), o `make<K: service singleton & IJournalKind>(key,
+roll, fmt): ctx` recebe a **chave constante** e devolve o **ctx**, e o escritor é clamado por `svc<Jw>(key)`
+(Doc 2 §10.4). O serviço **reside na raiz do programa** (F2, §7.6) — como o `chan`, porque um journal precisa
+sobreviver a todas as tasks. Tem faceta de arena por dois pontos:
 
 - **Segmento por escritor = a mesma disciplina de região-por-raia.** Cada escritor possui seu segmento e
   mais ninguém (sem lock, sem destino partilhado) — é o `encoded[i]` disjunto do §7.3 aplicado à
@@ -643,7 +653,7 @@ o `chan`, porque um journal precisa sobreviver a todas as tasks. Tem faceta de a
   configura a **política de rolling** (por tamanho, por data, ou custom) e a **formatação** no
   `journal::make` (Doc 2 §10.4). O `append` verifica a política e rotaciona por `rename` atômico antes de
   escrever quando ela dispara; o `fold` relê todos os ficheiros do segmento em ordem, transparente ao
-  rolling. O handle/registro vive na arena raiz; os ficheiros vivem em disco.
+  rolling. O serviço do sink vive na raiz do programa (F2); os ficheiros vivem em disco.
 
 ---
 
@@ -752,9 +762,11 @@ fn collect(xs: []i64): []i64 {
 **(d) Threads — canal por chave constante, nunca ponteiro nem id:**
 ```teko
 fn pipeline() {
-    var r = chan<Msg>::make<OsChan<Msg>>("pipe", 1024)   // main cria o canal (vive na região F2, imortal), recebe o leitor
+    var ctx = chan<Msg>::make<OsChan<Msg>>("pipe", 1024)  // main cria o canal (vive em F2, imortal), recebe o ctx (WaitGroup)
+    var rx  = svc<Rx<Msg>>("pipe")    // leitor por chave
     spawn handler()                   // SEM id — o handler resolve o escritor por chave
     // dentro do handler: var w = svc<Tx<Msg>>("pipe")   // resolve em comp-time; nunca um &canal (penduraria)
+    ctx.wait()                        // WaitGroup
 }
 ```
 
@@ -768,11 +780,12 @@ fn pipeline() {
 - **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
 - **Transporte do canal = `service singleton & IChannelKind<T>` extensível** (`interface { fn init(key); fn send(T);
   fn recv(): T; fn end() }`); built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/
-  WS/HTTP. **Totalmente estático — DI por CHAVE CONSTANTE:** `make<K: service singleton & IChannelKind<T>>(key, bounds)
-  : Rx<T>` cria e devolve o leitor único; os escritores fazem `svc<Tx<T>>("chave")` (comp-time, inline). O
-  serviço vive na **raiz do programa (F2)** (exceção de lifetime — não raiz-de-thread — por ser comunicação
-  entre tasks), da abertura ao `close`/`end()`. **Elimina passar id no `spawn`.** `Rx::pop(): T | error`
-  (error = encerrado); `Tx::send(): null` + `tx.closed`. Sem dispatch dinâmico do Round 3 (§7.8).
+  WS/HTTP. **Totalmente estático — DI por CHAVE CONSTANTE:** `make<K: service singleton & IChannelKind<T>>(key,
+  bounds): ctx` cria e devolve o **ctx** (WaitGroup + fecho de reserva); **ambos** os extremos por chave —
+  `svc<Rx<T>>("chave")` e `svc<Tx<T>>("chave")` (comp-time, inline). O serviço vive na **raiz do programa
+  (F2)** (exceção de lifetime — não raiz-de-thread — por ser comunicação entre tasks), da abertura ao fecho.
+  **Elimina passar id no `spawn`.** Fechar = do **produtor** (`tx.close()`; reserva em `ctx.close()`);
+  `Rx::pop(): T | Closed` (erro específico `Closed` = encerrado); `Tx::send(): null` + `tx.closed`. Sem dispatch dinâmico do Round 3 (§7.8).
 - **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
   scoped na sub-raiz da thread — sem ressincronizar (§8).
 - **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Não há
