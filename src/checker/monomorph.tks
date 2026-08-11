@@ -849,8 +849,8 @@ fn g_instance_base(name: str): str {
  * @return           true iff `method_ns`'s last segment equals `base`
  * @since onda-3 (#254)
  */
-fn method_ns_owns_base(method_ns: str, base: str): bool {
-    teko::runtime::str_eq(name_last_segment(method_ns), base)
+fn method_ns_owns_base(method_ns: str, stem: str): bool {
+    teko::runtime::str_eq(name_last_segment(method_ns), stem)
 }
 
 /**
@@ -867,13 +867,13 @@ fn method_ns_owns_base(method_ns: str, base: str): bool {
  * @return        the abstract template method TFunction, or null when none matches
  * @since onda-3 (#254)
  */
-fn find_template_method(items: []TItem, base: str, method: str): TFunction | null {
+fn find_template_method(items: []TItem, stem: str, method: str): TFunction | null {
     var i = 0
     loop {
         if i >= items.len { break }
         match items[i] {
             TFunction as f => {
-                if teko::runtime::str_eq(f.name, method) && method_ns_owns_base(f.namespace, base) && !f.is_extern {
+                if teko::runtime::str_eq(f.name, method) && method_ns_owns_base(f.namespace, stem) && !f.is_extern {
                     return f
                 }
             }
@@ -1019,13 +1019,13 @@ fn stamp_one_instance_method(inst_name: str, tmpl: TFunction, s: Subst, items: [
  * @since onda-3 (#254)
  */
 fn instance_method_subst(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable): Subst {
-    var base = g_instance_base(inst.name)
+    var stem = g_instance_base(inst.name)
     var s = instance_type_subst(template, inst, table)
-    var canon = if template_ns == "" { base } else { teko::str::concat(teko::str::concat(template_ns, "::"), base) }
+    var canon = if template_ns == "" { stem } else { teko::str::concat(teko::str::concat(template_ns, "::"), stem) }
     var inst_named = Named { name = inst.name }
     var s1 = subst_add_type_remap(s, canon, inst_named)
-    if teko::runtime::str_eq(base, canon) { return s1 }
-    subst_add_type_remap(s1, base, inst_named)
+    if teko::runtime::str_eq(stem, canon) { return s1 }
+    subst_add_type_remap(s1, stem, inst_named)
 }
 
 /**
@@ -1064,8 +1064,8 @@ fn subst_add_type_remap(s: Subst, from_name: str, to_type: Type): Subst {
 fn instance_method_subst_l5(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable): Subst {
     var s = instance_method_subst(template, template_ns, inst, table)
     if template.type_params.len == 0 { return s }
-    var base = g_instance_base(inst.name)
-    var phantom = phantom_self_inst_name(base, template.type_params)
+    var stem = g_instance_base(inst.name)
+    var phantom = phantom_self_inst_name(stem, template.type_params)
     if teko::runtime::str_eq(phantom, inst.name) { return s }
     subst_add_type_remap(s, phantom, Named { name = inst.name })
 }
@@ -1085,8 +1085,8 @@ fn instance_method_subst_l5(template: parser::TypeDecl, template_ns: str, inst: 
  * @since onda-3 (#254)
  */
 fn stamp_instance_methods(inst: parser::TypeDecl, items: []TItem, table: TypeTable): WFnList | error {
-    var base = g_instance_base(inst.name)
-    var template = match find_generic_template(table, base) { TemplateReg as tr => tr; null => return WFnList { fns = teko::list::empty(); insts = teko::list::empty() } }
+    var stem = g_instance_base(inst.name)
+    var template = match find_generic_template(table, stem) { TemplateReg as tr => tr; null => return WFnList { fns = teko::list::empty(); insts = teko::list::empty() } }
     var s = instance_method_subst_l5(template.decl, template.namespace, inst, table)
     var methods = mono_decl_methods(inst)
     var fns: []TFunction = teko::list::empty()
@@ -1094,7 +1094,7 @@ fn stamp_instance_methods(inst: parser::TypeDecl, items: []TItem, table: TypeTab
     var mi = 0
     loop {
         if mi >= methods.len { break }
-        match find_template_method(items, base, methods[mi].name) {
+        match find_template_method(items, stem, methods[mi].name) {
             TFunction as tmpl => {
                 var wf = match stamp_one_instance_method(inst.name, tmpl, s, items, table) { WFn as w => w; error as e => return e }
                 fns = teko::list::push(fns, wf.func)

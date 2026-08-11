@@ -1739,10 +1739,10 @@ fn close_native_region(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error {
  *              a depth this scope actually passed through on the way in)
  * @since 0.3.1
  */
-fn close_native_regions_to(ctx: LowerCtx, base: u64, line: u32, col: u32): LowerCtx | error {
+fn close_native_regions_to(ctx: LowerCtx, floor: u64, line: u32, col: u32): LowerCtx | error {
     var cur = ctx
     loop {
-        if cur.region_stack.len <= base { break }
+        if cur.region_stack.len <= floor { break }
         cur = match close_native_region(cur, line, col) { LowerCtx as c => c; error as err => return err }
     }
     cur
@@ -2883,13 +2883,13 @@ fn variant_cmp_payload_comparable(t: checker::Type): bool {
  *          payload comparison (`variant_cmp_payload_comparable`)
  * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
  */
-fn lower_variant_payload_eq(ctx: LowerCtx, base: u32, member_expr: checker::TExpr, tag_eq: u32, line: u32, col: u32): Lowered | error {
+fn lower_variant_payload_eq(ctx: LowerCtx, base_vreg: u32, member_expr: checker::TExpr, tag_eq: u32, line: u32, col: u32): Lowered | error {
     if !variant_cmp_payload_comparable(member_expr.type) {
         return error { message = "native backend N1: comparing a tagged union to a non-null, non-numeric member is not yet lowered (N2)" }
     }
     var lty = ltype_of(member_expr.type, ctx.enums)
     var addr = ctx_alloc(ctx)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, variant_payload_offset(), line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, variant_payload_offset(), line, col))
     var pr = ctx_alloc(with_addr)
     var with_load = ctx_append(pr.ctx, load_inst(pr.vreg, addr.vreg, lty, line, col))
     var mo = match lower_expr(with_load, member_expr) { Lowered as x => x; error as err => return err }
@@ -3510,17 +3510,17 @@ fn lower_last_index_of_ok_arm(ctx: LowerCtx, wrapper: u32, index: i64, value: u3
 fn lower_last_index_of_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, e: checker::TExpr): LowerCtx | error {
     var tagged = store_variant_tag(ctx, wrapper, index, e.line, e.col)
     var layout = error_struct_layout()
-    var base = ctx_alloc(tagged.ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, e.line, e.col))
+    var slot = ctx_alloc(tagged.ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, layout.size, layout.align, e.line, e.col))
     var zero_ptr = ctx_alloc(with_alloca)
     var with_zero_ptr = ctx_append(zero_ptr.ctx, const_int_inst(zero_ptr.vreg, 0, e.line, e.col))
     var zero_len = ctx_alloc(with_zero_ptr)
     var with_zero_len = ctx_append(zero_len.ctx, const_int_inst(zero_len.vreg, 0, e.line, e.col))
     var empty_msg = LoweredFat { ctx = with_zero_len; ptr = zero_ptr.vreg; len = zero_len.vreg }
-    var with_msg = store_fat_slot(empty_msg.ctx, base.vreg, empty_msg, e.line, e.col)
-    var with_zeroed = zero_error_diagnostics(with_msg, base.vreg, layout, 1, e.line, e.col)
+    var with_msg = store_fat_slot(empty_msg.ctx, slot.vreg, empty_msg, e.line, e.col)
+    var with_zeroed = zero_error_diagnostics(with_msg, slot.vreg, layout, 1, e.line, e.col)
     var box_bytes = match variant_payload_box_bytes(checker::Error { }, with_zeroed) { u32 as n => n; error as err => return err }
-    var owned = box_aggregate_value(Lowered { ctx = with_zeroed; vreg = base.vreg }, box_bytes, e)
+    var owned = box_aggregate_value(Lowered { ctx = with_zeroed; vreg = slot.vreg }, box_bytes, e)
     var paddr = ctx_alloc(owned.ctx)
     var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, wrapper, variant_payload_offset(), e.line, e.col))
     ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, LType::Ptr, e.line, e.col))
@@ -3690,13 +3690,13 @@ fn lower_ffi_fat_ok_arm(ctx: LowerCtx, wrapper: u32, index: i64, ptr: u32, len: 
 fn lower_ffi_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, msg_ptr: u32, msg_len: u32, e: checker::TExpr): LowerCtx | error {
     var tagged = store_variant_tag(ctx, wrapper, index, e.line, e.col)
     var layout = error_struct_layout()
-    var base = ctx_alloc(tagged.ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, e.line, e.col))
+    var slot = ctx_alloc(tagged.ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, layout.size, layout.align, e.line, e.col))
     var msg = LoweredFat { ctx = with_alloca; ptr = msg_ptr; len = msg_len }
-    var with_msg = store_fat_slot(with_alloca, base.vreg, msg, e.line, e.col)
-    var with_zeroed = zero_error_diagnostics(with_msg, base.vreg, layout, 1, e.line, e.col)
+    var with_msg = store_fat_slot(with_alloca, slot.vreg, msg, e.line, e.col)
+    var with_zeroed = zero_error_diagnostics(with_msg, slot.vreg, layout, 1, e.line, e.col)
     var box_bytes = match variant_payload_box_bytes(checker::Error { }, with_zeroed) { u32 as n => n; error as err => return err }
-    var owned = box_aggregate_value(Lowered { ctx = with_zeroed; vreg = base.vreg }, box_bytes, e)
+    var owned = box_aggregate_value(Lowered { ctx = with_zeroed; vreg = slot.vreg }, box_bytes, e)
     var paddr = ctx_alloc(owned.ctx)
     var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, wrapper, variant_payload_offset(), e.line, e.col))
     ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, LType::Ptr, e.line, e.col))
@@ -3912,10 +3912,10 @@ fn lower_ffi_open_branch(ok: Lowered, line: u32, col: u32): FfiBranch {
 fn lower_ffi_error_else_arm(br: FfiBranch, out_ptr: u32, out_len: u32, err_index: u32, e: checker::TExpr): LFunc | error {
     var else_ctx = ctx_with(br.ctx1, br.ctx1.func, br.elseb, br.ctx1.env)
     var loaded = load_ptr_len_out_slots(else_ctx, out_ptr, out_len, e.line, e.col)
-    var base = ctx_alloc(loaded.ctx)
-    var alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
-    var built = match lower_ffi_error_arm(alloca, base.vreg, err_index to i64, loaded.ptr, loaded.len, e) { LowerCtx as x => x; error as err => return err }
-    close_arm_to(built, br.mergeb, teko::list::push(teko::list::empty(), base.vreg), e.line, e.col)
+    var slot = ctx_alloc(loaded.ctx)
+    var alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    var built = match lower_ffi_error_arm(alloca, slot.vreg, err_index to i64, loaded.ptr, loaded.len, e) { LowerCtx as x => x; error as err => return err }
+    close_arm_to(built, br.mergeb, teko::list::push(teko::list::empty(), slot.vreg), e.line, e.col)
 }
 
 /**
@@ -4021,11 +4021,11 @@ fn is_err_typed_call(callee: parser::Path): bool {
  * @return LowerCtx  the advanced context
  * @throws  when `field` is not registered on `layout` (an internal invariant break)
  */
-fn store_error_scalar_field(base: u32, layout: LStructLayout, field: str, value: Lowered, line: u32, col: u32): LowerCtx | error {
+fn store_error_scalar_field(base_vreg: u32, layout: LStructLayout, field: str, value: Lowered, line: u32, col: u32): LowerCtx | error {
     var off = match field_offset_of(layout, field) { u32 as o => o; error as err => return err }
     var ty = match field_type_of(layout, field) { LType as t => t; error as err => return err }
     var addr = ctx_alloc(value.ctx)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, off, line, col))
     ctx_append(with_addr, store_inst(addr.vreg, value.vreg, ty, line, col))
 }
 
@@ -4044,10 +4044,10 @@ fn store_error_scalar_field(base: u32, layout: LStructLayout, field: str, value:
  * @return LowerCtx  the advanced context
  * @throws  when `field` is not registered on `layout` (an internal invariant break)
  */
-fn store_error_fat_field(base: u32, layout: LStructLayout, field: str, fo: LoweredFat, line: u32, col: u32): LowerCtx | error {
+fn store_error_fat_field(base_vreg: u32, layout: LStructLayout, field: str, fo: LoweredFat, line: u32, col: u32): LowerCtx | error {
     var off = match field_offset_of(layout, field) { u32 as o => o; error as err => return err }
     var addr = ctx_alloc(fo.ctx)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, off, line, col))
     store_fat_slot(with_addr, addr.vreg, fo, line, col)
 }
 
@@ -4654,9 +4654,9 @@ fn lower_free_region_handle(ctx: LowerCtx, arg: checker::TExpr, nm: checker::Nam
     var name = match named_type_name(arg.type) { str as s => s; error as err => return err }
     var layout = match find_struct_layout(ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
     var off = match field_offset_of(layout, field) { u32 as o => o; error as err => return err }
-    var base = match lower_addr_of_place(ctx, arg) { Lowered as x => x; error as err => return err }
-    var faddr = ctx_alloc(base.ctx)
-    var with_faddr = ctx_append(faddr.ctx, field_addr_inst(faddr.vreg, base.vreg, off, e.line, e.col))
+    var slot = match lower_addr_of_place(ctx, arg) { Lowered as x => x; error as err => return err }
+    var faddr = ctx_alloc(slot.ctx)
+    var with_faddr = ctx_append(faddr.ctx, field_addr_inst(faddr.vreg, slot.vreg, off, e.line, e.col))
     var handle = ctx_alloc(with_faddr)
     var with_load = ctx_append(handle.ctx, load_inst(handle.vreg, faddr.vreg, LType::Ptr, e.line, e.col))
     var drop_args = teko::list::push(teko::list::empty(), handle.vreg)
@@ -5682,14 +5682,14 @@ pub type IfaceFatPtr = struct { ctx: LowerCtx; data: u32; vtable: u32 }
  * @param u32 col  the source column (propagated onto the emitted insts)
  * @return IfaceFatPtr  the advanced context + the loaded data/vtable VRegs
  */
-fn lower_iface_fatptr(ctx: LowerCtx, base: u32, line: u32, col: u32): IfaceFatPtr {
+fn lower_iface_fatptr(ctx: LowerCtx, base_vreg: u32, line: u32, col: u32): IfaceFatPtr {
     var ptr_size = ltype_size(LType::Ptr)
     var data_addr = ctx_alloc(ctx)
-    var with_data_addr = ctx_append(data_addr.ctx, field_addr_inst(data_addr.vreg, base, 0, line, col))
+    var with_data_addr = ctx_append(data_addr.ctx, field_addr_inst(data_addr.vreg, base_vreg, 0, line, col))
     var data = ctx_alloc(with_data_addr)
     var with_data = ctx_append(data.ctx, load_inst(data.vreg, data_addr.vreg, LType::Ptr, line, col))
     var vt_addr = ctx_alloc(with_data)
-    var with_vt_addr = ctx_append(vt_addr.ctx, field_addr_inst(vt_addr.vreg, base, ptr_size, line, col))
+    var with_vt_addr = ctx_append(vt_addr.ctx, field_addr_inst(vt_addr.vreg, base_vreg, ptr_size, line, col))
     var vt = ctx_alloc(with_vt_addr)
     var with_vt = ctx_append(vt.ctx, load_inst(vt.vreg, vt_addr.vreg, LType::Ptr, line, col))
     IfaceFatPtr { ctx = with_vt; data = data.vreg; vtable = vt.vreg }
@@ -6027,15 +6027,15 @@ fn build_closure_literal(ctx: LowerCtx, fn_symbol: str, env_vreg: u32, line: u32
     var ptr_size = ltype_size(LType::Ptr)
     var fnaddr = ctx_alloc(ctx)
     var with_fnaddr = ctx_append(fnaddr.ctx, func_addr_inst(fnaddr.vreg, fn_symbol, line, col))
-    var base = ctx_alloc(with_fnaddr)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, ptr_size * 2, ptr_size, line, col))
+    var slot = ctx_alloc(with_fnaddr)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, ptr_size * 2, ptr_size, line, col))
     var fslot = ctx_alloc(with_alloca)
-    var with_fslot_addr = ctx_append(fslot.ctx, field_addr_inst(fslot.vreg, base.vreg, 0, line, col))
+    var with_fslot_addr = ctx_append(fslot.ctx, field_addr_inst(fslot.vreg, slot.vreg, 0, line, col))
     var with_fn_store = ctx_append(with_fslot_addr, store_inst(fslot.vreg, fnaddr.vreg, LType::Ptr, line, col))
     var eslot = ctx_alloc(with_fn_store)
-    var with_eslot_addr = ctx_append(eslot.ctx, field_addr_inst(eslot.vreg, base.vreg, ptr_size, line, col))
+    var with_eslot_addr = ctx_append(eslot.ctx, field_addr_inst(eslot.vreg, slot.vreg, ptr_size, line, col))
     var with_env_store = ctx_append(with_eslot_addr, store_inst(eslot.vreg, env_vreg, LType::Ptr, line, col))
-    emit_elem_box(Lowered { ctx = with_env_store; vreg = base.vreg }, ptr_size * 2, line, col)
+    emit_elem_box(Lowered { ctx = with_env_store; vreg = slot.vreg }, ptr_size * 2, line, col)
 }
 
 /**
@@ -6092,8 +6092,8 @@ pub type ClosureFatPtr = struct { ctx: LowerCtx; target: u32; env: u32 }
  * @param u32 col  the source column to propagate onto every emitted inst
  * @return ClosureFatPtr  the advanced context + the loaded target/env VRegs
  */
-fn lower_closure_fatptr(ctx: LowerCtx, base: u32, line: u32, col: u32): ClosureFatPtr {
-    var fp = lower_iface_fatptr(ctx, base, line, col)
+fn lower_closure_fatptr(ctx: LowerCtx, base_vreg: u32, line: u32, col: u32): ClosureFatPtr {
+    var fp = lower_iface_fatptr(ctx, base_vreg, line, col)
     ClosureFatPtr { ctx = fp.ctx; target = fp.data; env = fp.vtable }
 }
 
@@ -6237,7 +6237,7 @@ fn lambda_env_layout(captures: []checker::TCapture, enums: []LEnumInfo): LStruct
  *                          stores), or a NAMED internal error when a capture
  *                          is unbound
  */
-fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captures: []checker::TCapture, line: u32, col: u32): Lowered | error {
+fn store_lambda_captures(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, captures: []checker::TCapture, line: u32, col: u32): Lowered | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -6252,22 +6252,22 @@ fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captur
         if ty == LType::Ptr && is_fat_type(captures[i].type) {
             // fat type capture (str/slice): store ptr half and len half separately
             var ptr_addr = ctx_alloc(cur)
-            var ptr_addr_inst = ctx_append(ptr_addr.ctx, field_addr_inst(ptr_addr.vreg, base, off, line, col))
+            var ptr_addr_inst = ctx_append(ptr_addr.ctx, field_addr_inst(ptr_addr.vreg, base_vreg, off, line, col))
             var len_hit = lenv_lookup_fat(cur.env, captures[i].name)
             if !len_hit.found { return error { message = teko::str::concat("native backend N1: fat capture `", captures[i].name, "` not a fat binding (internal)") } }
             var ptr_store = ctx_append(ptr_addr_inst, store_inst(ptr_addr.vreg, len_hit.ptr, LType::Ptr, line, col))
             var len_addr = ctx_alloc(ptr_store)
-            var len_addr_inst = ctx_append(len_addr.ctx, field_addr_inst(len_addr.vreg, base, off + ltype_size(LType::Ptr), line, col))
+            var len_addr_inst = ctx_append(len_addr.ctx, field_addr_inst(len_addr.vreg, base_vreg, off + ltype_size(LType::Ptr), line, col))
             cur = ctx_append(len_addr_inst, store_inst(len_addr.vreg, len_hit.len, LType::I64, line, col))
         } else {
             // scalar type capture
             var addr = ctx_alloc(cur)
-            var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
+            var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, off, line, col))
             cur = ctx_append(with_addr, store_inst(addr.vreg, hit.vreg, ltype_of(captures[i].type, cur.enums), line, col))
         }
         i++
     }
-    Lowered { ctx = cur; vreg = base }
+    Lowered { ctx = cur; vreg = base_vreg }
 }
 
 /**
@@ -6295,9 +6295,9 @@ fn build_lambda_env(ctx: LowerCtx, layout: LStructLayout, captures: []checker::T
         var r = ctx_alloc(ctx)
         return Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, line, col)); vreg = r.vreg }
     }
-    var base = ctx_alloc(ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, line, col))
-    var filled = match store_lambda_captures(with_alloca, base.vreg, layout, captures, line, col) { Lowered as x => x; error as err => return err }
+    var slot = ctx_alloc(ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, layout.size, layout.align, line, col))
+    var filled = match store_lambda_captures(with_alloca, slot.vreg, layout, captures, line, col) { Lowered as x => x; error as err => return err }
     emit_elem_box(filled, layout.size, line, col)
 }
 
@@ -7200,20 +7200,20 @@ fn lower_subset_variant_widen(ctx: LowerCtx, v: checker::Variant, nt: checker::V
     var p16 = ctx_alloc(c_p16a)
     var c_p16 = ctx_append(p16.ctx, load_inst(p16.vreg, p16a.vreg, LType::Ptr, line, col))
     // alloca the wider wrapper and copy both payload halves
-    var base = ctx_alloc(c_p16)
-    var c_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), line, col))
+    var slot = ctx_alloc(c_p16)
+    var c_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), line, col))
     var w8a = ctx_alloc(c_alloca)
-    var c_w8a = ctx_append(w8a.ctx, field_addr_inst(w8a.vreg, base.vreg, variant_payload_offset(), line, col))
+    var c_w8a = ctx_append(w8a.ctx, field_addr_inst(w8a.vreg, slot.vreg, variant_payload_offset(), line, col))
     var c_w8 = ctx_append(c_w8a, store_inst(w8a.vreg, p8.vreg, LType::Ptr, line, col))
     var w16a = ctx_alloc(c_w8)
-    var c_w16a = ctx_append(w16a.ctx, field_addr_inst(w16a.vreg, base.vreg, variant_payload_len_offset(), line, col))
+    var c_w16a = ctx_append(w16a.ctx, field_addr_inst(w16a.vreg, slot.vreg, variant_payload_len_offset(), line, col))
     var c_w16 = ctx_append(c_w16a, store_inst(w16a.vreg, p16.vreg, LType::Ptr, line, col))
     // compute the remapped tag in v's space and store it (i32 @ 0)
     var wt = match compute_widened_tag(c_w16, nt, v, tg.vreg, line, col) { Lowered as x => x; error as err => return err }
     var wta = ctx_alloc(wt.ctx)
-    var c_wta = ctx_append(wta.ctx, field_addr_inst(wta.vreg, base.vreg, 0, line, col))
+    var c_wta = ctx_append(wta.ctx, field_addr_inst(wta.vreg, slot.vreg, 0, line, col))
     var c_wtag = ctx_append(c_wta, store_inst(wta.vreg, wt.vreg, LType::I32, line, col))
-    Lowered { ctx = c_wtag; vreg = base.vreg }
+    Lowered { ctx = c_wtag; vreg = slot.vreg }
 }
 
 /**
@@ -7483,11 +7483,11 @@ fn lower_defer(ctx: LowerCtx, d: checker::TDeferStmt): LowerStmtOut {
  *                           with the replayed instructions), or a NAMED
  *                           internal error when a defer body fails to lower
  */
-fn replay_defers(ctx: LowerCtx, base: u64): LowerCtx | error {
+fn replay_defers(ctx: LowerCtx, floor: u64): LowerCtx | error {
     var cur = ctx
     var i: u64 = ctx.defers.len
     loop {
-        if i <= base { break }
+        if i <= floor { break }
         i = i - 1
         cur = match lower_block(cur, ctx.defers[i].body) { LowerCtx as c => c; error as err => return err }
     }
@@ -9459,9 +9459,9 @@ fn lower_variant_tag_eq_test(ctx: LowerCtx, subj: MatchSubj, index: i64, line: u
  * @return LowerCtx  the context with `binding` bound to the loaded payload
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
  */
-fn bind_case_payload(ctx: LowerCtx, base: u32, ty: checker::Type, binding: str): LowerCtx {
-    if is_fat_type(ty) { return bind_fat_case_payload(ctx, base, binding) }
-    bind_scalar_case_payload(ctx, base, ltype_of(ty, ctx.enums), binding)
+fn bind_case_payload(ctx: LowerCtx, base_vreg: u32, ty: checker::Type, binding: str): LowerCtx {
+    if is_fat_type(ty) { return bind_fat_case_payload(ctx, base_vreg, binding) }
+    bind_scalar_case_payload(ctx, base_vreg, ltype_of(ty, ctx.enums), binding)
 }
 
 /**
@@ -9476,9 +9476,9 @@ fn bind_case_payload(ctx: LowerCtx, base: u32, ty: checker::Type, binding: str):
  * @return LowerCtx  the context with `binding` bound to the loaded payload word
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
  */
-fn bind_scalar_case_payload(ctx: LowerCtx, base: u32, ty: LType, binding: str): LowerCtx {
+fn bind_scalar_case_payload(ctx: LowerCtx, base_vreg: u32, ty: LType, binding: str): LowerCtx {
     var addr = ctx_alloc(ctx)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, variant_payload_offset(), 0, 0))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, variant_payload_offset(), 0, 0))
     var r = ctx_alloc(with_addr)
     var with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ty, 0, 0))
     ctx_bind(with_load, binding, r.vreg)
@@ -9496,13 +9496,13 @@ fn bind_scalar_case_payload(ctx: LowerCtx, base: u32, ty: LType, binding: str): 
  * @return LowerCtx  the context with `binding` bound as a fat local
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
  */
-fn bind_fat_case_payload(ctx: LowerCtx, base: u32, binding: str): LowerCtx {
+fn bind_fat_case_payload(ctx: LowerCtx, base_vreg: u32, binding: str): LowerCtx {
     var pa = ctx_alloc(ctx)
-    var with_pa = ctx_append(pa.ctx, field_addr_inst(pa.vreg, base, variant_payload_offset(), 0, 0))
+    var with_pa = ctx_append(pa.ctx, field_addr_inst(pa.vreg, base_vreg, variant_payload_offset(), 0, 0))
     var pr = ctx_alloc(with_pa)
     var with_pr = ctx_append(pr.ctx, load_inst(pr.vreg, pa.vreg, LType::Ptr, 0, 0))
     var la = ctx_alloc(with_pr)
-    var with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, base, variant_payload_len_offset(), 0, 0))
+    var with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, base_vreg, variant_payload_len_offset(), 0, 0))
     var lr = ctx_alloc(with_la)
     var with_lr = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, 0, 0))
     ctx_bind_fat(with_lr, binding, pr.vreg, lr.vreg)
@@ -9599,9 +9599,9 @@ fn lower_null_union_construct(ctx: LowerCtx, shape: NullUnionShape, e: checker::
         _ => { }
     }
     if payload_needs_inner_wrapper(ctx, shape.payload, e) { return lower_null_union_nested_present(ctx, shape, e) }
-    var base = ctx_alloc(ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
-    store_variant_payload(with_alloca, base.vreg, shape.payload_index to i64, shape.payload, e)
+    var slot = ctx_alloc(ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    store_variant_payload(with_alloca, slot.vreg, shape.payload_index to i64, shape.payload, e)
 }
 
 /**
@@ -9620,9 +9620,9 @@ fn lower_null_union_construct(ctx: LowerCtx, shape: NullUnionShape, e: checker::
  *        30 — the index became a parameter so any arity shares it)
  */
 fn lower_variant_absent(ctx: LowerCtx, index: i64, e: checker::TExpr): Lowered {
-    var base = ctx_alloc(ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
-    store_variant_tag(with_alloca, base.vreg, index, e.line, e.col)
+    var slot = ctx_alloc(ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    store_variant_tag(with_alloca, slot.vreg, index, e.line, e.col)
 }
 
 /**
@@ -9695,10 +9695,10 @@ fn payload_needs_inner_wrapper(ctx: LowerCtx, payload: checker::Type, e: checker
  */
 fn lower_null_union_nested_present(ctx: LowerCtx, shape: NullUnionShape, e: checker::TExpr): Lowered | error {
     var inner = match lower_value_into_type(ctx, shape.payload, e) { Lowered as x => x; error as err => return err }
-    var base = ctx_alloc(inner.ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
-    var tagged = store_variant_tag(with_alloca, base.vreg, shape.payload_index to i64, e.line, e.col)
-    store_scalar_variant_payload_value(base.vreg, shape.payload, Lowered { ctx = tagged.ctx; vreg = inner.vreg }, e)
+    var slot = ctx_alloc(inner.ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    var tagged = store_variant_tag(with_alloca, slot.vreg, shape.payload_index to i64, e.line, e.col)
+    store_scalar_variant_payload_value(slot.vreg, shape.payload, Lowered { ctx = tagged.ctx; vreg = inner.vreg }, e)
 }
 
 /**
@@ -9744,9 +9744,9 @@ fn lower_variant_construct(ctx: LowerCtx, v: checker::Variant, value: checker::T
  * @since 0.3.1.0 (degrau 23 — factored out of `lower_variant_construct`, #382)
  */
 fn build_variant_wrapper(ctx: LowerCtx, index: i64, pty: checker::Type, value: checker::TExpr): Lowered | error {
-    var base = ctx_alloc(ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), value.line, value.col))
-    store_variant_payload(with_alloca, base.vreg, index, pty, value)
+    var slot = ctx_alloc(ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), value.line, value.col))
+    store_variant_payload(with_alloca, slot.vreg, index, pty, value)
 }
 
 /**
@@ -9834,10 +9834,10 @@ fn lower_nested_variant_construct(ctx: LowerCtx, v: checker::Variant, value: che
     match find_nested_alias_member(v.members, value.type, ctx.variants) {
         NestedAliasMember as nm => {
             var inner = match lower_variant_construct(ctx, nm.expansion, value) { Lowered as x => x; error as e => return e }
-            var base = ctx_alloc(inner.ctx)
-            var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), value.line, value.col))
-            var tagged = store_variant_tag(with_alloca, base.vreg, nm.index to i64, value.line, value.col)
-            store_scalar_variant_payload_value(base.vreg, checker::Named { name = nm.name }, Lowered { ctx = tagged.ctx; vreg = inner.vreg }, value)
+            var slot = ctx_alloc(inner.ctx)
+            var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), value.line, value.col))
+            var tagged = store_variant_tag(with_alloca, slot.vreg, nm.index to i64, value.line, value.col)
+            store_scalar_variant_payload_value(slot.vreg, checker::Named { name = nm.name }, Lowered { ctx = tagged.ctx; vreg = inner.vreg }, value)
         }
         null => error { message = "native backend N1: value's type is not a member of its declared variant (internal)" }
     }
@@ -9926,13 +9926,13 @@ fn nested_alias_member_if_covers(index: u32, name: str, inner: checker::Variant,
  *          whose whole-type width this backend does not pin
  * @since 0.3.1.0 (degrau 23 — nested named-variant construction, #382)
  */
-fn store_scalar_variant_payload_value(base: u32, pty: checker::Type, vo: Lowered, pos: checker::TExpr): Lowered | error {
+fn store_scalar_variant_payload_value(base_vreg: u32, pty: checker::Type, vo: Lowered, pos: checker::TExpr): Lowered | error {
     var box_bytes = match variant_payload_box_bytes(pty, vo.ctx) { u32 as n => n; error as err => return err }
     var owned = box_aggregate_value(vo, box_bytes, pos)
     var paddr = ctx_alloc(owned.ctx)
-    var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), pos.line, pos.col))
+    var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base_vreg, variant_payload_offset(), pos.line, pos.col))
     var with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, ltype_of(pty, vo.ctx.enums), pos.line, pos.col))
-    Lowered { ctx = with_pstore; vreg = base }
+    Lowered { ctx = with_pstore; vreg = base_vreg }
 }
 
 /**
@@ -10000,13 +10000,13 @@ fn variant_wrapper_align(): u32 { ltype_align(LType::Ptr) }
  * @param u32 col  the source column to stamp the emitted instructions with
  * @return Lowered  the wrapper's base address, unchanged
  */
-fn store_variant_tag(ctx: LowerCtx, base: u32, index: i64, line: u32, col: u32): Lowered {
+fn store_variant_tag(ctx: LowerCtx, base_vreg: u32, index: i64, line: u32, col: u32): Lowered {
     var tagr = ctx_alloc(ctx)
     var with_tag = ctx_append(tagr.ctx, const_int_inst(tagr.vreg, index, line, col))
     var addr = ctx_alloc(with_tag)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, 0, line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, 0, line, col))
     var with_store = ctx_append(with_addr, store_inst(addr.vreg, tagr.vreg, LType::I32, line, col))
-    Lowered { ctx = with_store; vreg = base }
+    Lowered { ctx = with_store; vreg = base_vreg }
 }
 
 /**
@@ -10026,10 +10026,10 @@ fn store_variant_tag(ctx: LowerCtx, base: u32, index: i64, line: u32, col: u32):
  * @return Lowered  the wrapper's base address
  * @throws  propagated from lowering `e`
  */
-fn store_variant_payload(ctx: LowerCtx, base: u32, index: i64, pty: checker::Type, e: checker::TExpr): Lowered | error {
-    var tagged = store_variant_tag(ctx, base, index, e.line, e.col)
-    if is_fat_type(pty) { return store_fat_variant_payload(tagged.ctx, base, e) }
-    store_scalar_variant_payload(tagged.ctx, base, pty, e)
+fn store_variant_payload(ctx: LowerCtx, base_vreg: u32, index: i64, pty: checker::Type, e: checker::TExpr): Lowered | error {
+    var tagged = store_variant_tag(ctx, base_vreg, index, e.line, e.col)
+    if is_fat_type(pty) { return store_fat_variant_payload(tagged.ctx, base_vreg, e) }
+    store_scalar_variant_payload(tagged.ctx, base_vreg, pty, e)
 }
 
 /**
@@ -10080,14 +10080,14 @@ fn variant_payload_box_bytes(pty: checker::Type, ctx: LowerCtx): u32 | error {
  *          non-register aggregate whose whole-type width this backend does not pin
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 8 — the owned payload)
  */
-fn store_scalar_variant_payload(ctx: LowerCtx, base: u32, pty: checker::Type, e: checker::TExpr): Lowered | error {
+fn store_scalar_variant_payload(ctx: LowerCtx, base_vreg: u32, pty: checker::Type, e: checker::TExpr): Lowered | error {
     var vo = match lower_expr(ctx, e) { Lowered as x => x; error as err => return err }
     var box_bytes = match variant_payload_box_bytes(pty, ctx) { u32 as n => n; error as err => return err }
     var owned = box_aggregate_value(vo, box_bytes, e)
     var paddr = ctx_alloc(owned.ctx)
-    var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), e.line, e.col))
+    var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base_vreg, variant_payload_offset(), e.line, e.col))
     var with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, ltype_of(pty, ctx.enums), e.line, e.col))
-    Lowered { ctx = with_pstore; vreg = base }
+    Lowered { ctx = with_pstore; vreg = base_vreg }
 }
 
 /**
@@ -10108,9 +10108,9 @@ fn store_scalar_variant_payload(ctx: LowerCtx, base: u32, pty: checker::Type, e:
  * @throws  propagated from lowering `e` as a fat-pointer producer
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
  */
-fn store_fat_variant_payload(ctx: LowerCtx, base: u32, e: checker::TExpr): Lowered | error {
+fn store_fat_variant_payload(ctx: LowerCtx, base_vreg: u32, e: checker::TExpr): Lowered | error {
     var fo = match lower_fat_expr(ctx, e) { LoweredFat as x => x; error as err => return err }
-    Lowered { ctx = store_fat_variant_payload_pair(fo.ctx, base, fo.ptr, fo.len, e.line, e.col); vreg = base }
+    Lowered { ctx = store_fat_variant_payload_pair(fo.ctx, base_vreg, fo.ptr, fo.len, e.line, e.col); vreg = base_vreg }
 }
 
 /**
@@ -10130,12 +10130,12 @@ fn store_fat_variant_payload(ctx: LowerCtx, base: u32, e: checker::TExpr): Lower
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 21 — factored out of
  *        `store_fat_variant_payload`)
  */
-fn store_fat_variant_payload_pair(ctx: LowerCtx, base: u32, ptr: u32, len: u32, line: u32, col: u32): LowerCtx {
+fn store_fat_variant_payload_pair(ctx: LowerCtx, base_vreg: u32, ptr: u32, len: u32, line: u32, col: u32): LowerCtx {
     var paddr = ctx_alloc(ctx)
-    var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), line, col))
+    var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base_vreg, variant_payload_offset(), line, col))
     var with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, ptr, LType::Ptr, line, col))
     var laddr = ctx_alloc(with_pstore)
-    var with_laddr = ctx_append(laddr.ctx, field_addr_inst(laddr.vreg, base, variant_payload_len_offset(), line, col))
+    var with_laddr = ctx_append(laddr.ctx, field_addr_inst(laddr.vreg, base_vreg, variant_payload_len_offset(), line, col))
     ctx_append(with_laddr, store_inst(laddr.vreg, len, LType::I64, line, col))
 }
 
@@ -10746,9 +10746,9 @@ fn lower_variant_field_binds(ctx: LowerCtx, subj: MatchSubj, members: []checker:
     var layout = match find_struct_layout(ctx.layouts, sname) { LStructLayout as l => l; error as err => return err }
     var paddr = ctx_alloc(ctx)
     var with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, subj.vreg, 8, 0, 0))
-    var base = ctx_alloc(with_paddr)
-    var with_base = ctx_append(base.ctx, load_inst(base.vreg, paddr.vreg, LType::Ptr, 0, 0))
-    bind_variant_fields(with_base, base.vreg, layout, fp.fields)
+    var slot = ctx_alloc(with_paddr)
+    var with_base = ctx_append(slot.ctx, load_inst(slot.vreg, paddr.vreg, LType::Ptr, 0, 0))
+    bind_variant_fields(with_base, slot.vreg, layout, fp.fields)
 }
 
 /**
@@ -10762,7 +10762,7 @@ fn lower_variant_field_binds(ctx: LowerCtx, subj: MatchSubj, members: []checker:
  * @return LowerCtx  the context with every field bound
  * @throws  when a requested field is not registered on `layout`
  */
-fn bind_variant_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, fields: []str): LowerCtx | error {
+fn bind_variant_fields(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, fields: []str): LowerCtx | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -10770,7 +10770,7 @@ fn bind_variant_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, fields: 
         var off = match field_offset_of(layout, fields[i]) { u32 as o => o; error as err => return err }
         var fty = match field_type_of(layout, fields[i]) { LType as t => t; error as err => return err }
         var addr = ctx_alloc(cur)
-        var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, 0, 0))
+        var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, off, 0, 0))
         var r = ctx_alloc(with_addr)
         var with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, fty, 0, 0))
         cur = ctx_bind(with_load, fields[i], r.vreg)
@@ -11511,9 +11511,9 @@ fn lower_list_empty(ctx: LowerCtx, e: checker::TExpr): LoweredFat {
 fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str): LoweredFat | error {
     if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` expects (slice, item) (internal)" } }
     var elem = match push_elem_type(e, cl) { checker::Type as t => t; error as err => return err }
-    var base = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
-    if is_fat_type(elem) { return lower_fat_element_push(base, cl.args[1], sym, e) }
-    lower_scalar_element_push(base, elem, cl.args[1], sym, e)
+    var dst_fat = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
+    if is_fat_type(elem) { return lower_fat_element_push(dst_fat, cl.args[1], sym, e) }
+    lower_scalar_element_push(dst_fat, elem, cl.args[1], sym, e)
 }
 
 /**
@@ -11540,17 +11540,17 @@ fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: st
  * @throws      on an aggregate element whose byte width this backend cannot pin
  *              (`push_box_bytes`), or propagated from lowering the item
  */
-fn lower_scalar_element_push(base: LoweredFat, elem: checker::Type, item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
-    var box_bytes = match push_box_bytes(elem, base.ctx) { u32 as n => n; error as err => return err }
-    var elem_lt = ltype_of(elem, base.ctx.enums)
+fn lower_scalar_element_push(dst_fat: LoweredFat, elem: checker::Type, item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
+    var box_bytes = match push_box_bytes(elem, dst_fat.ctx) { u32 as n => n; error as err => return err }
+    var elem_lt = ltype_of(elem, dst_fat.ctx.enums)
     if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
-    var lowered = match lower_value_into_type(base.ctx, elem, item) { Lowered as x => x; error as err => return err }
+    var lowered = match lower_value_into_type(dst_fat.ctx, elem, item) { Lowered as x => x; error as err => return err }
     var boxed = box_aggregate_value(lowered, box_bytes, e)
     var slot = reserve_item_slot(boxed.ctx, ltype_size(elem_lt), ltype_align(elem_lt), e)
     var with_store = ctx_append(slot.ctx, store_inst(slot.vreg, boxed.vreg, elem_lt, e.line, e.col))
     var esz = ctx_alloc(with_store)
     var with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, ltype_size(elem_lt) to i64, e.line, e.col))
-    lower_len_out_call(with_esz, sym, push_head_args(base, slot.vreg, esz.vreg), e)
+    lower_len_out_call(with_esz, sym, push_head_args(dst_fat, slot.vreg, esz.vreg), e)
 }
 
 /**
@@ -11569,13 +11569,13 @@ fn lower_scalar_element_push(base: LoweredFat, elem: checker::Type, item: checke
  * @return      the grown slice's (ptr, len) pair
  * @throws      propagated from lowering the item as a fat-pointer producer
  */
-fn lower_fat_element_push(base: LoweredFat, item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
-    var fo = match lower_fat_expr(base.ctx, item) { LoweredFat as x => x; error as err => return err }
+fn lower_fat_element_push(dst_fat: LoweredFat, item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
+    var fo = match lower_fat_expr(dst_fat.ctx, item) { LoweredFat as x => x; error as err => return err }
     var slot = reserve_item_slot(fo.ctx, fat_slot_bytes(), ltype_align(LType::Ptr), e)
     var with_store = store_fat_slot(slot.ctx, slot.vreg, fo, e.line, e.col)
     var esz = ctx_alloc(with_store)
     var with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, fat_slot_bytes() to i64, e.line, e.col))
-    lower_len_out_call(with_esz, sym, push_head_args(base, slot.vreg, esz.vreg), e)
+    lower_len_out_call(with_esz, sym, push_head_args(dst_fat, slot.vreg, esz.vreg), e)
 }
 
 /**
@@ -12072,8 +12072,8 @@ fn reserve_item_slot(ctx: LowerCtx, bytes: u32, align: u32, e: checker::TExpr): 
  * @param esz        the element's byte size VReg
  * @return           the four argument VRegs, in ABI order
  */
-fn push_head_args(base: LoweredFat, item_slot: u32, esz: u32): []u32 {
-    teko::list::push(teko::list::push(two_args(base.ptr, base.len), item_slot), esz)
+fn push_head_args(dst_fat: LoweredFat, item_slot: u32, esz: u32): []u32 {
+    teko::list::push(teko::list::push(two_args(dst_fat.ptr, dst_fat.len), item_slot), esz)
 }
 
 /**
@@ -13494,12 +13494,12 @@ fn error_struct_layout(): LStructLayout {
  * @param col         the source column to stamp the emitted instructions with
  * @return LowerCtx  the advanced context
  */
-fn zero_error_diagnostics(ctx: LowerCtx, base: u32, layout: LStructLayout, from_index: u64, line: u32, col: u32): LowerCtx {
+fn zero_error_diagnostics(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, from_index: u64, line: u32, col: u32): LowerCtx {
     var cur = ctx
     var i = from_index
     loop {
         if i >= layout.field_types.len { break }
-        cur = zero_error_field(cur, base, layout, i, line, col)
+        cur = zero_error_field(cur, base_vreg, layout, i, line, col)
         i++
     }
     cur
@@ -13518,11 +13518,11 @@ fn zero_error_diagnostics(ctx: LowerCtx, base: u32, layout: LStructLayout, from_
  * @param col     the source column to stamp the emitted instructions with
  * @return LowerCtx  the advanced context
  */
-fn zero_error_field(ctx: LowerCtx, base: u32, layout: LStructLayout, i: u64, line: u32, col: u32): LowerCtx {
+fn zero_error_field(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, i: u64, line: u32, col: u32): LowerCtx {
     var off = layout.field_offsets[i]
     match layout.field_types[i] {
-        Ptr => zero_fat_field_at(ctx, base, off, line, col)
-        _ => zero_scalar_field_at(ctx, base, off, layout.field_types[i], line, col)
+        Ptr => zero_fat_field_at(ctx, base_vreg, off, line, col)
+        _ => zero_scalar_field_at(ctx, base_vreg, off, layout.field_types[i], line, col)
     }
 }
 
@@ -13539,13 +13539,13 @@ fn zero_error_field(ctx: LowerCtx, base: u32, layout: LStructLayout, i: u64, lin
  * @param col     the source column to stamp the emitted instructions with
  * @return LowerCtx  the advanced context
  */
-fn zero_fat_field_at(ctx: LowerCtx, base: u32, offset: u32, line: u32, col: u32): LowerCtx {
+fn zero_fat_field_at(ctx: LowerCtx, base_vreg: u32, offset: u32, line: u32, col: u32): LowerCtx {
     var zp = ctx_alloc(ctx)
     var with_zp = ctx_append(zp.ctx, const_int_inst(zp.vreg, 0, line, col))
     var zl = ctx_alloc(with_zp)
     var with_zl = ctx_append(zl.ctx, const_int_inst(zl.vreg, 0, line, col))
     var addr = ctx_alloc(with_zl)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, offset, line, col))
     store_fat_slot(with_addr, addr.vreg, LoweredFat { ctx = with_addr; ptr = zp.vreg; len = zl.vreg }, line, col)
 }
 
@@ -13562,11 +13562,11 @@ fn zero_fat_field_at(ctx: LowerCtx, base: u32, offset: u32, line: u32, col: u32)
  * @param col     the source column to stamp the emitted instructions with
  * @return LowerCtx  the advanced context
  */
-fn zero_scalar_field_at(ctx: LowerCtx, base: u32, offset: u32, ty: LType, line: u32, col: u32): LowerCtx {
+fn zero_scalar_field_at(ctx: LowerCtx, base_vreg: u32, offset: u32, ty: LType, line: u32, col: u32): LowerCtx {
     var z = ctx_alloc(ctx)
     var with_z = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
     var addr = ctx_alloc(with_z)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, offset, line, col))
     ctx_append(with_addr, store_inst(addr.vreg, z.vreg, ty, line, col))
 }
 
@@ -13667,11 +13667,11 @@ fn field_type_of(layout: LStructLayout, field: str): LType | error {
 fn lower_struct_init(ctx: LowerCtx, e: checker::TExpr, si: checker::TStructInit): Lowered | error {
     var name = match named_type_name(e.type) { str as s => s; error as err => return err }
     var layout = match find_struct_layout(ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
-    var base = ctx_alloc(ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, e.line, e.col))
-    var stored = match store_struct_fields(with_alloca, base.vreg, layout, si.field_names, si.field_vals, e.line, e.col) { Lowered as l => l; error as err => return err }
+    var slot = ctx_alloc(ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, layout.size, layout.align, e.line, e.col))
+    var stored = match store_struct_fields(with_alloca, slot.vreg, layout, si.field_names, si.field_vals, e.line, e.col) { Lowered as l => l; error as err => return err }
     match e.type {
-        checker::Error => Lowered { ctx = zero_error_diagnostics(stored.ctx, base.vreg, layout, si.field_names.len, e.line, e.col); vreg = base.vreg }
+        checker::Error => Lowered { ctx = zero_error_diagnostics(stored.ctx, slot.vreg, layout, si.field_names.len, e.line, e.col); vreg = slot.vreg }
         _ => stored
     }
 }
@@ -13692,7 +13692,7 @@ fn lower_struct_init(ctx: LowerCtx, e: checker::TExpr, si: checker::TStructInit)
  * @return Lowered  the advanced context plus `base`
  * @throws  when a written field is not registered on `layout`, or propagated from storing a value
  */
-fn store_struct_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, field_names: []str, field_vals: []checker::TExpr, line: u32, col: u32): Lowered | error {
+fn store_struct_fields(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, field_names: []str, field_vals: []checker::TExpr, line: u32, col: u32): Lowered | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -13700,10 +13700,10 @@ fn store_struct_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, field_na
         var off = match field_offset_of(layout, field_names[i]) { u32 as o => o; error as err => return err }
         var decl = find_field_decl_type(ctx.field_decls, layout.name, field_names[i])
         match check_store_fat_span(cur, layout, field_names[i], decl, field_vals[i]) { error as err => return err; null => { } }
-        cur = match store_struct_field(cur, base, off, decl, field_vals[i], line, col) { LowerCtx as c => c; error as err => return err }
+        cur = match store_struct_field(cur, base_vreg, off, decl, field_vals[i], line, col) { LowerCtx as c => c; error as err => return err }
         i++
     }
-    Lowered { ctx = cur; vreg = base }
+    Lowered { ctx = cur; vreg = base_vreg }
 }
 
 /**
@@ -13832,13 +13832,13 @@ fn store_field_fat_value(ctx: LowerCtx, decl: checker::Type | null, value: check
     }
 }
 
-fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type | null, value: checker::TExpr, line: u32, col: u32): LowerCtx | error {
+fn store_struct_field(ctx: LowerCtx, base_vreg: u32, offset: u32, decl: checker::Type | null, value: checker::TExpr, line: u32, col: u32): LowerCtx | error {
     match union_field_placement(ctx, decl) {
         checker::Type as bound => {
             var uo = match lower_value_into_type(ctx, bound, value) { Lowered as x => x; error as err => return err }
             var owned = box_aggregate_value_at(uo, variant_wrapper_bytes(), line, col)
             var uaddr = ctx_alloc(owned.ctx)
-            var with_uaddr = ctx_append(uaddr.ctx, field_addr_inst(uaddr.vreg, base, offset, line, col))
+            var with_uaddr = ctx_append(uaddr.ctx, field_addr_inst(uaddr.vreg, base_vreg, offset, line, col))
             return ctx_append(with_uaddr, store_inst(uaddr.vreg, owned.vreg, LType::Ptr, line, col))
         }
         null => { }
@@ -13846,13 +13846,13 @@ fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type
     if is_fat_type(value.type) {
         var fo = match store_field_fat_value(ctx, decl, value) { LoweredFat as x => x; error as err => return err }
         var addr = ctx_alloc(fo.ctx)
-        var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+        var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, offset, line, col))
         return store_fat_slot(with_addr, addr.vreg, fo, line, col)
     }
     var raw = match lower_expr(ctx, value) { Lowered as x => x; error as err => return err }
     var vo = own_embedded_value(raw, value)
     var addr = ctx_alloc(vo.ctx)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, offset, line, col))
     ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(value.type, vo.ctx.enums), line, col))
 }
 
@@ -13942,10 +13942,10 @@ fn slice_element_type(t: checker::Type): checker::Type | error {
  * @param col        the source column of the subscript
  * @return           the element's address
  */
-fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i64, stride: u32, line: u32, col: u32): Lowered {
+fn const_index_addr(ctx: LowerCtx, base_vreg: u32, idx_value: i64, stride: u32, line: u32, col: u32): Lowered {
     var offset = (idx_value * stride) to u32
     var r = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(r.ctx, field_addr_inst(r.vreg, base, offset, line, col)); vreg = r.vreg }
+    Lowered { ctx = ctx_append(r.ctx, field_addr_inst(r.vreg, base_vreg, offset, line, col)); vreg = r.vreg }
 }
 
 /**
@@ -13967,13 +13967,13 @@ fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i64, stride: u32, line:
  * @param col     the source column of the subscript
  * @return        the element's address
  */
-fn element_addr_at(ctx: LowerCtx, base: u32, index: u32, stride: u32, line: u32, col: u32): Lowered {
+fn element_addr_at(ctx: LowerCtx, base_vreg: u32, index: u32, stride: u32, line: u32, col: u32): Lowered {
     var sc = ctx_alloc(ctx)
     var with_stride = ctx_append(sc.ctx, const_int_inst(sc.vreg, stride to i64, line, col))
     var mr = ctx_alloc(with_stride)
     var with_mul = ctx_append(mr.ctx, bin_inst(mr.vreg, LBinOp::IMul, index, sc.vreg, line, col))
     var ar = ctx_alloc(with_mul)
-    Lowered { ctx = ctx_append(ar.ctx, bin_inst(ar.vreg, LBinOp::IAdd, base, mr.vreg, line, col)); vreg = ar.vreg }
+    Lowered { ctx = ctx_append(ar.ctx, bin_inst(ar.vreg, LBinOp::IAdd, base_vreg, mr.vreg, line, col)); vreg = ar.vreg }
 }
 
 /**
@@ -13995,10 +13995,10 @@ fn element_addr_at(ctx: LowerCtx, base: u32, index: u32, stride: u32, line: u32,
  * @param col         the source column of the subscript
  * @return            the element's address
  */
-fn index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, index_vreg: u32, stride: u32, line: u32, col: u32): Lowered {
+fn index_addr(ctx: LowerCtx, base_vreg: u32, index: checker::TExpr, index_vreg: u32, stride: u32, line: u32, col: u32): Lowered {
     match index.kind {
-        checker::TNumber as n => if n.is_float { element_addr_at(ctx, base, index_vreg, stride, line, col) } else { const_index_addr(ctx, base, parser::numint_to_i64(n.value), stride, line, col) }
-        _ => element_addr_at(ctx, base, index_vreg, stride, line, col)
+        checker::TNumber as n => if n.is_float { element_addr_at(ctx, base_vreg, index_vreg, stride, line, col) } else { const_index_addr(ctx, base_vreg, parser::numint_to_i64(n.value), stride, line, col) }
+        _ => element_addr_at(ctx, base_vreg, index_vreg, stride, line, col)
     }
 }
 
@@ -14026,10 +14026,10 @@ fn index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, index_vreg: u32, 
  * @return        the element's address, reached only when the index is inside `len`
  * @throws        propagated from lowering the index expression
  */
-fn guarded_index_addr(ctx: LowerCtx, base: u32, len: u32, index: checker::TExpr, stride: u32, line: u32, col: u32): Lowered | error {
+fn guarded_index_addr(ctx: LowerCtx, base_vreg: u32, len: u32, index: checker::TExpr, stride: u32, line: u32, col: u32): Lowered | error {
     var io = match lower_expr(ctx, index) { Lowered as x => x; error as err => return err }
     var checked = lower_index_bounds_guard(io.ctx, io.vreg, len, line, col)
-    index_addr(checked, base, index, io.vreg, stride, line, col)
+    index_addr(checked, base_vreg, index, io.vreg, stride, line, col)
 }
 
 /**
@@ -14182,16 +14182,16 @@ fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit): Lo
     var elem_t = match slice_element_type(e.type) { checker::Type as t => t; error as err => return err }
     var stride = elem_byte_stride(elem_t, ctx.enums)
     var total = (al.elements.len to u32) * stride
-    var base = ctx_alloc(ctx)
-    var with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, total, elem_byte_align(elem_t, ctx.enums), e.line, e.col))
-    var filled = match store_array_elements(with_alloca, base.vreg, elem_t, al.elements, stride, e.line, e.col) { Lowered as x => x; error as err => return err }
+    var slot = ctx_alloc(ctx)
+    var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, total, elem_byte_align(elem_t, ctx.enums), e.line, e.col))
+    var filled = match store_array_elements(with_alloca, slot.vreg, elem_t, al.elements, stride, e.line, e.col) { Lowered as x => x; error as err => return err }
     emit_elem_box(filled, total, e.line, e.col)
 }
 
 /** store_array_elements — lower each non-spread element in turn, storing it at its
     constant `index * stride` offset from `base` (`store_array_elem`); the result VReg is
     `base` itself. */
-fn store_array_elements(ctx: LowerCtx, base: u32, elem_t: checker::Type, elements: []checker::TArrayElem, stride: u32, line: u32, col: u32): Lowered | error {
+fn store_array_elements(ctx: LowerCtx, base_vreg: u32, elem_t: checker::Type, elements: []checker::TArrayElem, stride: u32, line: u32, col: u32): Lowered | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -14199,26 +14199,26 @@ fn store_array_elements(ctx: LowerCtx, base: u32, elem_t: checker::Type, element
         var elem = elements[i]
         if elem.is_spread { return error { message = "native backend N1: spread array element not yet lowered (N2)" } }
         var offset = (i to u32) * stride
-        cur = match store_array_elem(cur, base, offset, elem_t, elem.expr, line, col) { LowerCtx as c => c; error as err => return err }
+        cur = match store_array_elem(cur, base_vreg, offset, elem_t, elem.expr, line, col) { LowerCtx as c => c; error as err => return err }
         i++
     }
-    Lowered { ctx = cur; vreg = base }
+    Lowered { ctx = cur; vreg = base_vreg }
 }
 
 /** store_array_elem — store ONE array-literal element at `base + offset`: a FAT element
     (`elem_t`, 0.3.1.0 degrau 10) lowers through the fat-pointer producer path and writes BOTH
     halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape a mutable fat local's frame
     slot uses); every other element lowers plainly and writes its single machine word. */
-fn store_array_elem(ctx: LowerCtx, base: u32, offset: u32, elem_t: checker::Type, expr: checker::TExpr, line: u32, col: u32): LowerCtx | error {
+fn store_array_elem(ctx: LowerCtx, base_vreg: u32, offset: u32, elem_t: checker::Type, expr: checker::TExpr, line: u32, col: u32): LowerCtx | error {
     if is_fat_type(elem_t) {
         var fo = match lower_fat_expr(ctx, expr) { LoweredFat as x => x; error as err => return err }
         var addr = ctx_alloc(fo.ctx)
-        var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+        var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, offset, line, col))
         return store_fat_slot(with_addr, addr.vreg, fo, line, col)
     }
     var vo = match lower_expr(ctx, expr) { Lowered as x => x; error as err => return err }
     var addr = ctx_alloc(vo.ctx)
-    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    var with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base_vreg, offset, line, col))
     ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(expr.type, vo.ctx.enums), line, col))
 }
 
@@ -14227,10 +14227,10 @@ fn store_array_elem(ctx: LowerCtx, base: u32, offset: u32, elem_t: checker::Type
     never needs the length), plus one more constant for its compile-time-known element count
     (A1-4, #382). */
 fn lower_array_lit_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit): LoweredFat | error {
-    var base = match lower_array_lit(ctx, e, al) { Lowered as x => x; error as err => return err }
-    var lenr = ctx_alloc(base.ctx)
+    var slot = match lower_array_lit(ctx, e, al) { Lowered as x => x; error as err => return err }
+    var lenr = ctx_alloc(slot.ctx)
     var with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, al.elements.len to i64, e.line, e.col))
-    LoweredFat { ctx = with_len; ptr = base.vreg; len = lenr.vreg }
+    LoweredFat { ctx = with_len; ptr = slot.vreg; len = lenr.vreg }
 }
 
 /** bool_lit_value — a bool literal's i64 register carrier (1 = true, 0 = false — the released

@@ -1703,12 +1703,12 @@ pub fn type_conforms_to(name: str, iface: str, table: TypeTable): bool {
         var td = match type_table_find(table, cur, "") { parser::TypeDecl as d => d; error => return false }   // (#109 W1) conformance walk on resolved names — no referencing ns
         var impls: []str = teko::list::empty()
         var has_base = false
-        var base = ""
+        var base_class = ""
         match td.body {
             parser::ClassBody as cb => {
                 impls = cb.implements
                 has_base = cb.has_base
-                base = cb.base_name
+                base_class = cb.base_name
             }
             parser::StructBody as sb => { impls = sb.implements }
             _ => return false
@@ -1726,7 +1726,7 @@ pub fn type_conforms_to(name: str, iface: str, table: TypeTable): bool {
             i++
         }
         if !has_base { return false }
-        cur = base
+        cur = base_class
         hops++
     }
     false
@@ -2289,8 +2289,8 @@ pub fn type_mangle(t: Type): str {
 
 // (S4) the mangled name of a generic INSTANCE: `<base>__g__<arg0>[__<arg1>…]` over the args IN
 // ORDER. The `__g__` infix marks a stamped symbol (no user name may contain it). (C: tk_generic_inst_name.)
-pub fn generic_inst_name(base: str, args: []Type): str {
-    var out = teko::str::concat(base, "__g__")
+pub fn generic_inst_name(stem: str, args: []Type): str {
+    var out = teko::str::concat(stem, "__g__")
     var i = 0
     loop {
         if i >= args.len { break }
@@ -2312,7 +2312,7 @@ type GenericInstanceSplit = struct {
     /** true when `name` carries the `__g__` stamp (it is a generic instance's canonical name). */
     is_generic: bool
     /** the base before the stamp (valid iff `is_generic`; `""` otherwise). */
-    base: str
+    stem: str
 }
 
 /**
@@ -2331,11 +2331,11 @@ pub fn split_generic_instance_name(name: str): GenericInstanceSplit {
     loop {
         if i + 5 > name.len { break }
         if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' {
-            return GenericInstanceSplit { is_generic = true; base = teko::str::slice_to(name, i) }
+            return GenericInstanceSplit { is_generic = true; stem = teko::str::slice_to(name, i) }
         }
         i++
     }
-    GenericInstanceSplit { is_generic = false; base = "" }
+    GenericInstanceSplit { is_generic = false; stem = "" }
 }
 
 /**
@@ -2358,7 +2358,7 @@ pub fn split_generic_instance_name(name: str): GenericInstanceSplit {
  */
 pub fn named_case_name(name: str): str {
     var split = split_generic_instance_name(name)
-    if split.is_generic { return split.base }
+    if split.is_generic { return split.stem }
     name_last_segment(name)
 }
 
@@ -2655,7 +2655,7 @@ fn subst_method_sig_names(f: parser::Function, params: []str, args: []parser::Ty
         i++
     }
     var nret = if f.has_return { subst_texpr_names(f.return_type, params, args) } else { f.return_type }
-    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; has_inject = f.has_inject; injects = f.injects; is_unsafe = f.is_unsafe; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; has_inject = f.has_inject; injects = f.injects; is_unsafe = f.is_unsafe; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
 }
 
 /**
@@ -2810,8 +2810,8 @@ fn collect_site_args(path: parser::Path, args: []parser::TypeExpr, acc: []parser
 fn collect_call_site_args(call: parser::Call, acc: []parser::TypeExpr): []parser::TypeExpr {
     if call.type_args.len == 0 { return acc }
     if call.callee.segments.len < 2 { return acc }
-    var base = call.callee.segments[call.callee.segments.len - 2].name
-    collect_site_args(parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = base }) }, call.type_args, acc)
+    var owner_name = call.callee.segments[call.callee.segments.len - 2].name
+    collect_site_args(parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = owner_name }) }, call.type_args, acc)
 }
 
 // (W9.4) walk an expression for construction-site type-args (`Foo<i64>{…}`) and nested patterns.
@@ -3152,14 +3152,14 @@ pub type TemplateReg = struct { decl: parser::TypeDecl; namespace: str }
  * @return      the template decl + its namespace, or null when no generic `base` exists
  * @since onda-3 (#254)
  */
-pub fn find_generic_template(table: TypeTable, base: str): TemplateReg | null {
-    var cands = tt_cands(table, base)
+pub fn find_generic_template(table: TypeTable, stem: str): TemplateReg | null {
+    var cands = tt_cands(table, stem)
     var i: u64 = 0
     loop {
         if i >= cands.count { break }
         var reg = tt_cand_reg(table, cands, i)
         if reg.decl.type_params.len > 0 {
-            if teko::runtime::str_eq(reg.name, base) || teko::runtime::str_eq(name_last_segment(reg.name), base) {
+            if teko::runtime::str_eq(reg.name, stem) || teko::runtime::str_eq(name_last_segment(reg.name), stem) {
                 return TemplateReg { decl = reg.decl; namespace = reg.namespace }
             }
         }
@@ -3285,7 +3285,7 @@ fn normalize_inst_method(f: parser::Function, table: TypeTable): parser::Functio
         i++
     }
     var nret = if f.has_return { normalize_inst_texpr(f.return_type, table) } else { f.return_type }
-    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; has_inject = f.has_inject; injects = f.injects; is_unsafe = f.is_unsafe; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; has_inject = f.has_inject; injects = f.injects; is_unsafe = f.is_unsafe; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
 }
 
 /**

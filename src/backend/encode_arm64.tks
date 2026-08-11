@@ -120,7 +120,7 @@ type MemForm = struct {
      * base — the size-and-direction template word (the LDR/STR family entry),
      * with the immediate/register fields left zero.
      */
-    base: u32
+    base_bits: u32
     /**
      * scale — the access width in bytes (1/2/4/8); the scaled unsigned
      * immediate is `offset / scale`.
@@ -450,12 +450,12 @@ fn ext_base(op: MExtOp): u32 {
  */
 fn load_form(size: MMemSize, sign: bool): MemForm {
     match size {
-        B => MemForm { base = if sign { ARM64_LDRSB } else { ARM64_LDRB }; scale = ARM64_SCALE_B }
-        H => MemForm { base = if sign { ARM64_LDRSH } else { ARM64_LDRH }; scale = ARM64_SCALE_H }
-        W => MemForm { base = if sign { ARM64_LDRSW } else { ARM64_LDR_W }; scale = ARM64_SCALE_W }
-        X => MemForm { base = ARM64_LDR_X; scale = ARM64_SCALE_X }
-        S => MemForm { base = ARM64_LDR_FPR32; scale = ARM64_SCALE_S }
-        D => MemForm { base = ARM64_LDR_FPR64; scale = ARM64_SCALE_D }
+        B => MemForm { base_bits = if sign { ARM64_LDRSB } else { ARM64_LDRB }; scale = ARM64_SCALE_B }
+        H => MemForm { base_bits = if sign { ARM64_LDRSH } else { ARM64_LDRH }; scale = ARM64_SCALE_H }
+        W => MemForm { base_bits = if sign { ARM64_LDRSW } else { ARM64_LDR_W }; scale = ARM64_SCALE_W }
+        X => MemForm { base_bits = ARM64_LDR_X; scale = ARM64_SCALE_X }
+        S => MemForm { base_bits = ARM64_LDR_FPR32; scale = ARM64_SCALE_S }
+        D => MemForm { base_bits = ARM64_LDR_FPR64; scale = ARM64_SCALE_D }
     }
 }
 
@@ -469,12 +469,12 @@ fn load_form(size: MMemSize, sign: bool): MemForm {
  */
 fn store_form(size: MMemSize): MemForm {
     match size {
-        B => MemForm { base = ARM64_STRB; scale = ARM64_SCALE_B }
-        H => MemForm { base = ARM64_STRH; scale = ARM64_SCALE_H }
-        W => MemForm { base = ARM64_STR_W; scale = ARM64_SCALE_W }
-        X => MemForm { base = ARM64_STR_X; scale = ARM64_SCALE_X }
-        S => MemForm { base = ARM64_STR_FPR32; scale = ARM64_SCALE_S }
-        D => MemForm { base = ARM64_STR_FPR64; scale = ARM64_SCALE_D }
+        B => MemForm { base_bits = ARM64_STRB; scale = ARM64_SCALE_B }
+        H => MemForm { base_bits = ARM64_STRH; scale = ARM64_SCALE_H }
+        W => MemForm { base_bits = ARM64_STR_W; scale = ARM64_SCALE_W }
+        X => MemForm { base_bits = ARM64_STR_X; scale = ARM64_SCALE_X }
+        S => MemForm { base_bits = ARM64_STR_FPR32; scale = ARM64_SCALE_S }
+        D => MemForm { base_bits = ARM64_STR_FPR64; scale = ARM64_SCALE_D }
     }
 }
 
@@ -521,10 +521,10 @@ fn encode_alu_imm(i: MAluImm): EncWord | error {
     if i.imm > hi { return honest_bigimm() }
     if i.imm < lo { return honest_bigimm() }
     var neg = i.imm < (0)
-    var base = match add_sub_imm_base(i.op, neg) { u32 as b => b; error as e => return e }
+    var base_word = match add_sub_imm_base(i.op, neg) { u32 as b => b; error as e => return e }
     var mag = if neg { (0) - i.imm } else { i.imm }
     var field = ((mag to u32) & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT
-    plain_word(base | sf_bit(i.wide) | field | enc_rn(i.a) | enc_rd(i.dst))
+    plain_word(base_word | sf_bit(i.wide) | field | enc_rn(i.a) | enc_rd(i.dst))
 }
 
 /**
@@ -611,10 +611,10 @@ fn encode_cset(i: MCSet): EncWord {
  * @param u32 shift  the lane's bit position (0/16/32/48)
  * @return EncWord  the encoded word
  */
-fn encode_movi(base: u32, wide: bool, dst: MReg, imm16: u32, shift: u32): EncWord {
+fn encode_movi(base_word: u32, wide: bool, dst: MReg, imm16: u32, shift: u32): EncWord {
     var hw = (shift / ARM64_MOVI_LANE_BITS) << ARM64_MOVI_HW_SHIFT
     var imm = (imm16 & ARM64_IMM16_MASK) << ARM64_MOVI_IMM16_SHIFT
-    plain_word(base | sf_bit(wide) | hw | imm | enc_rd(dst))
+    plain_word(base_word | sf_bit(wide) | hw | imm | enc_rd(dst))
 }
 
 /**
@@ -753,8 +753,8 @@ fn fmov_base_bits(i: MFMov): u32 | error {
  * @return EncWord | error  the encoded word, or the internal error
  */
 fn encode_fmov(i: MFMov): EncWord | error {
-    var base = match fmov_base_bits(i) { u32 as b => b; error as e => return e }
-    plain_word(base | enc_rn(i.src) | enc_rd(i.dst))
+    var base_word = match fmov_base_bits(i) { u32 as b => b; error as e => return e }
+    plain_word(base_word | enc_rn(i.src) | enc_rd(i.dst))
 }
 
 /**
@@ -821,8 +821,8 @@ fn cvt_base(i: MCvt): u32 | error {
  * @return EncWord | error  the encoded word, or a named internal error
  */
 fn encode_cvt(i: MCvt): EncWord | error {
-    var base = match cvt_base(i) { u32 as b => b; error as e => return e }
-    plain_word(base | enc_rn(i.a) | enc_rd(i.dst))
+    var base_word = match cvt_base(i) { u32 as b => b; error as e => return e }
+    plain_word(base_word | enc_rn(i.a) | enc_rd(i.dst))
 }
 
 /**
@@ -837,7 +837,7 @@ fn encode_load(i: MLoad): EncWord | error {
     var form = load_form(i.size, i.sign)
     var imm = match scaled_offset(i.mem.offset, form.scale) { u32 as v => v; error as e => return e }
     var field = (imm & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT
-    plain_word(form.base | field | enc_rn(i.mem.base) | enc_rd(i.dst))
+    plain_word(form.base_bits | field | enc_rn(i.mem.base_reg) | enc_rd(i.dst))
 }
 
 /**
@@ -852,7 +852,7 @@ fn encode_store(i: MStore): EncWord | error {
     var form = store_form(i.size)
     var imm = match scaled_offset(i.mem.offset, form.scale) { u32 as v => v; error as e => return e }
     var field = (imm & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT
-    plain_word(form.base | field | enc_rn(i.mem.base) | enc_rd(i.src))
+    plain_word(form.base_bits | field | enc_rn(i.mem.base_reg) | enc_rd(i.src))
 }
 
 /**
@@ -888,8 +888,8 @@ fn encode_branch_cond(i: MBranchCond): EncWord {
  * @return EncWord  the branch-flagged placeholder word
  */
 fn encode_cbz(i: MCbz): EncWord {
-    var base = if i.zero { ARM64_CBZ } else { ARM64_CBNZ }
-    var w = base | sf_bit(i.wide) | enc_rd(i.a)
+    var base_word = if i.zero { ARM64_CBZ } else { ARM64_CBNZ }
+    var w = base_word | sf_bit(i.wide) | enc_rd(i.a)
     branch_word(w, i.target, 1 to u32)
 }
 
@@ -1670,12 +1670,12 @@ fn single_frame_word(ra: u32, imm12: u32, is_fpr: bool, is_store: bool): u32 {
  * @param bool is_store  true for saves (prologue), false for restores (epilogue)
  * @return []u32  `words0` followed by the class's save/restore words
  */
-fn emit_frame_mem(words0: []u32, ids: []u32, base: u32, is_fpr: bool, is_store: bool): []u32 {
+fn emit_frame_mem(words0: []u32, ids: []u32, frame_off: u32, is_fpr: bool, is_store: bool): []u32 {
     var words = words0
     var i: u64 = 0
     loop {
         if i >= ids.len { break }
-        var off = base + ((i to u32) * ARM64_REG_BYTES)
+        var off = frame_off + ((i to u32) * ARM64_REG_BYTES)
         var has_pair = (i + 1) < ids.len
         if has_pair {
             words = teko::list::push(words, pair_frame_word(ids[i], ids[i + 1], off / ARM64_REG_BYTES, is_fpr, is_store))
@@ -1711,9 +1711,9 @@ fn callee_base_offset(layout: FrameLayout): u32 {
  * @return []u32  `words0` followed by the callee-saved words
  */
 fn emit_callee_area(words0: []u32, layout: FrameLayout, is_store: bool): []u32 {
-    var base = callee_base_offset(layout)
-    var after_gpr = emit_frame_mem(words0, layout.saved_gpr, base, false, is_store)
-    var fpr_base = base + ((layout.saved_gpr.len to u32) * ARM64_REG_BYTES)
+    var frame_off = callee_base_offset(layout)
+    var after_gpr = emit_frame_mem(words0, layout.saved_gpr, frame_off, false, is_store)
+    var fpr_base = frame_off + ((layout.saved_gpr.len to u32) * ARM64_REG_BYTES)
     emit_frame_mem(after_gpr, layout.saved_fpr, fpr_base, true, is_store)
 }
 
@@ -1731,12 +1731,12 @@ fn emit_callee_area(words0: []u32, layout: FrameLayout, is_store: bool): []u32 {
  * @param bool is_store  true for saves (prologue), false for restores (epilogue)
  * @return []u32  `words0` followed by the class's individual save/restore words
  */
-fn emit_frame_mem_single(words0: []u32, ids: []u32, base: u32, is_fpr: bool, is_store: bool): []u32 {
+fn emit_frame_mem_single(words0: []u32, ids: []u32, frame_off: u32, is_fpr: bool, is_store: bool): []u32 {
     var words = words0
     var i: u64 = 0
     loop {
         if i >= ids.len { break }
-        var off = base + ((i to u32) * ARM64_REG_BYTES)
+        var off = frame_off + ((i to u32) * ARM64_REG_BYTES)
         words = teko::list::push(words, single_frame_word(ids[i], off / ARM64_REG_BYTES, is_fpr, is_store))
         i++
     }
@@ -1755,9 +1755,9 @@ fn emit_frame_mem_single(words0: []u32, ids: []u32, base: u32, is_fpr: bool, is_
  * @return []u32  `words0` followed by the callee-saved words
  */
 fn emit_callee_area_single(words0: []u32, layout: FrameLayout, is_store: bool): []u32 {
-    var base = callee_base_offset(layout)
-    var after_gpr = emit_frame_mem_single(words0, layout.saved_gpr, base, false, is_store)
-    var fpr_base = base + ((layout.saved_gpr.len to u32) * ARM64_REG_BYTES)
+    var frame_off = callee_base_offset(layout)
+    var after_gpr = emit_frame_mem_single(words0, layout.saved_gpr, frame_off, false, is_store)
+    var fpr_base = frame_off + ((layout.saved_gpr.len to u32) * ARM64_REG_BYTES)
     emit_frame_mem_single(after_gpr, layout.saved_fpr, fpr_base, true, is_store)
 }
 
@@ -1951,7 +1951,7 @@ pub fn emit_epilogue(layout: FrameLayout): []u32 | error {
  * @return EncWord | error  the encoded word, or a named honest-stop
  */
 fn encode_fspill(layout: FrameLayout, i: MFSpill): EncWord | error {
-    var mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = slot_offset(layout, i.slot) to i32 }
+    var mem = MMem { base_reg = preg(ARM64_SP_ID, MRegClass::GPR); offset = slot_offset(layout, i.slot) to i32 }
     if i.is_load { return encode_load(MLoad { size = MMemSize::D; sign = false; dst = i.reg; mem = mem }) }
     encode_store(MStore { size = MMemSize::D; src = i.reg; mem = mem })
 }
@@ -1987,7 +1987,7 @@ fn encode_frame_addr(layout: FrameLayout, i: MFrameAddr): EncWord | error {
  * @return EncWord | error  the encoded STR, or a named honest-stop
  */
 fn encode_out_arg(i: MOutArg): EncWord | error {
-    var mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = (i.index * ARM64_REG_BYTES) to i32 }
+    var mem = MMem { base_reg = preg(ARM64_SP_ID, MRegClass::GPR); offset = (i.index * ARM64_REG_BYTES) to i32 }
     encode_store(MStore { size = i.size; src = i.src; mem = mem })
 }
 
@@ -2002,7 +2002,7 @@ fn encode_out_arg(i: MOutArg): EncWord | error {
  * @return EncWord | error  the encoded LDR, or a named honest-stop
  */
 fn encode_in_arg(layout: FrameLayout, i: MInArg): EncWord | error {
-    var mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = (layout.size + i.index * ARM64_REG_BYTES) to i32 }
+    var mem = MMem { base_reg = preg(ARM64_SP_ID, MRegClass::GPR); offset = (layout.size + i.index * ARM64_REG_BYTES) to i32 }
     encode_load(MLoad { size = i.size; sign = false; dst = i.dst; mem = mem })
 }
 
@@ -2610,13 +2610,13 @@ fn append_words_le(buf: []byte, ws: []u32): []byte {
  * @param u32 base  the function's `__text` base byte offset
  * @return []Reloc  `acc` followed by the rebased relocations
  */
-fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base: u32): []Reloc {
+fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base_off: u32): []Reloc {
     var out = acc
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
         var r = relocs[i]
-        out = teko::list::push(out, Reloc { offset = r.offset + base; sym = r.sym; kind = r.kind; sect = r.sect })
+        out = teko::list::push(out, Reloc { offset = r.offset + base_off; sym = r.sym; kind = r.kind; sect = r.sect })
         i++
     }
     out
@@ -2650,7 +2650,7 @@ pub type ModuleText = struct {
      * base — the next function's `__text` base byte offset (the current image
      * length).
      */
-    base: u32
+    text_off: u32
 }
 
 /**
@@ -2661,7 +2661,7 @@ pub type ModuleText = struct {
  * @return ModuleText  the seed accumulator
  */
 pub fn empty_module_text(): ModuleText {
-    ModuleText { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); base = 0 to u32 }
+    ModuleText { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); text_off = 0 to u32 }
 }
 
 /**
@@ -2700,12 +2700,12 @@ fn fold_func_into_text(abi: AbiDescriptor, acc: ModuleText, f: MFunc): ModuleTex
  * @since 0.3.1 C6.4
  */
 pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc): ModuleText {
-    var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.base; local = false }
+    var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.text_off; local = false }
     var text = append_words_le(acc.text, ef.words)
-    var relocs = rebase_relocs(acc.relocs, ef.relocs, acc.base)
+    var relocs = rebase_relocs(acc.relocs, ef.relocs, acc.text_off)
     var syms = teko::list::push(acc.syms, sym)
-    var base = acc.base + ((ef.words.len to u32) * ARM64_WORD_BYTES)
-    ModuleText { text = text; relocs = relocs; syms = syms; base = base }
+    var text_off = acc.text_off + ((ef.words.len to u32) * ARM64_WORD_BYTES)
+    ModuleText { text = text; relocs = relocs; syms = syms; text_off = text_off }
 }
 
 /**

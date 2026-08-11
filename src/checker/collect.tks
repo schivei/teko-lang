@@ -175,6 +175,22 @@ fn method_is_effective_unsafe(f: parser::Function, struct_name: str, ref_ns: str
     }
 }
 
+/**
+ * return_type_is_self — is the type-expression the §4 `self` type atom (the parser's single-segment
+ * `NamedType` named "self")? True only for a bare, un-parameterized `self`; a `self` with type-args
+ * or a deeper path is not it. Used by `method_func_type` to resolve a `self` return to the enclosing
+ * type. (§4 teach, 2026-08-11.)
+ *
+ * @param te  the return type-expression
+ * @return    true iff `te` is the bare `self` type atom
+ */
+fn return_type_is_self(te: parser::TypeExpr): bool {
+    match te {
+        parser::NamedType as nt => nt.args.len == 0 && nt.path.segments.len == 1 && nt.path.segments[0].name == "self"
+        _ => false
+    }
+}
+
 fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref_ns: str): Type | error {
     var tbl = method_type_param_table(receiver_canonical_name(struct_name, ref_ns, table), f.type_params, f.type_constraints, "", table)
     var fn_unsafe = method_is_effective_unsafe(f, struct_name, ref_ns, table)
@@ -205,7 +221,16 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
         i++
     }
     var ret = if f.has_return {
-        match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
+        // (§4) a `self` return type = the ENCLOSING type (the receiver's type in an instance method,
+        // the type itself in a `static fn` factory). Resolved here, where `struct_name` is known —
+        // exactly like the synthetic receiver at param index 0 above — rather than in the generic
+        // `resolve_type`, which has no enclosing-type context. Inert on the current corpus (no
+        // method declares a `self` return yet).
+        if return_type_is_self(f.return_type) {
+            Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
+        } else {
+            match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
+        }
     } else {
         Void { }
     }
@@ -600,12 +625,12 @@ fn class_inheritance_acyclic(name: str, table: TypeTable): error | null {
 // object/vtable yet). Used everywhere a class's data shape matters (construction, field access,
 // codegen struct layout) so a derived instance carries every ancestor's field too.
 pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable): []parser::Field | error {
-    var base: []parser::Field = teko::list::empty()
+    var inherited: []parser::Field = teko::list::empty()
     if cb.has_base {
         var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
-        base = match effective_class_fields(base_cb, table) { []parser::Field as f => f; error as e => return e }
+        inherited = match effective_class_fields(base_cb, table) { []parser::Field as f => f; error as e => return e }
     }
-    var out: []parser::Field = base
+    var out: []parser::Field = inherited
     var i = 0
     loop { if i >= cb.fields.len { break }; out = teko::list::push(out, cb.fields[i]); i++ }
     out
@@ -627,16 +652,16 @@ pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable): []parser
  * @throws       when a base name in the chain does not resolve to a class body
  */
 pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parser::Function | error {
-    var base: []parser::Function = teko::list::empty()
+    var inherited: []parser::Function = teko::list::empty()
     if cb.has_base {
         var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
-        base = match effective_class_methods(base_cb, table) { []parser::Function as f => f; error as e => return e }
+        inherited = match effective_class_methods(base_cb, table) { []parser::Function as f => f; error as e => return e }
     }
     var out: []parser::Function = teko::list::empty()
     var i = 0
     loop {
-        if i >= base.len { break }
-        var m = base[i]
+        if i >= inherited.len { break }
+        var m = inherited[i]
         var j = 0
         loop {
             if j >= cb.methods.len { break }
@@ -651,7 +676,7 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parse
         if k >= cb.methods.len { break }
         var is_new = true
         var bi = 0
-        loop { if bi >= base.len { break }; if base[bi].name == cb.methods[k].name { is_new = false; break }; bi++ }
+        loop { if bi >= inherited.len { break }; if inherited[bi].name == cb.methods[k].name { is_new = false; break }; bi++ }
         if is_new { out = teko::list::push(out, cb.methods[k]) }
         k++
     }
@@ -970,23 +995,23 @@ pub fn iface_methods_by_name(iface: str, table: TypeTable): []parser::Function |
 // appended — effective_class_methods order), which is EXACTLY the slot scheme codegen's
 // `tk_vt_<Sub>_<Base>` build reads. Used by the checker (base-typed dispatch) so its `iface_slot`
 // agrees with the emitted table. Mirror of collect.c::tk_base_vtable_methods.
-pub fn base_vtable_methods(base: str, table: TypeTable): []parser::Function | error {
-    var cb = match find_class_body(base, table) { parser::ClassBody as b => b; error as e => return e }
+pub fn base_vtable_methods(base_class: str, table: TypeTable): []parser::Function | error {
+    var cb = match find_class_body(base_class, table) { parser::ClassBody as b => b; error as e => return e }
     effective_class_methods(cb, table)
 }
 
 // (#98) the vtable SLOT of `method` in `base`'s virtual method table, or an error if `method` is
 // not an effective method of the base (a subclass-only method — reachable only when the receiver
 // is statically the subclass, so it stays a DIRECT call). Mirror of collect.c::tk_base_vtable_slot.
-pub fn base_vtable_slot(base: str, method: str, table: TypeTable): u32 | error {
-    var ms = match base_vtable_methods(base, table) { []parser::Function as f => f; error as e => return e }
+pub fn base_vtable_slot(base_class: str, method: str, table: TypeTable): u32 | error {
+    var ms = match base_vtable_methods(base_class, table) { []parser::Function as f => f; error as e => return e }
     var i: u64 = 0
     loop {
         if i >= ms.len { break }
         if ms[i].name == method { return i to u32 }
         i++
     }
-    error { message = $"'{method}' is not a virtual method of base class '{base}'" }
+    error { message = $"'{method}' is not a virtual method of base class '{base_class}'" }
 }
 
 // (W10b.IF) does implementing method `impl_m` satisfy interface-required method `req`? Same NON-
@@ -1340,7 +1365,7 @@ fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: 
                 } else if methods_have_name(methods, tm.name) {
                     return error { message = $"method '{tm.name}' is provided by more than one derived trait — '{type_name}' must define its own '{tm.name}' to resolve the conflict" }
                 } else {
-                    methods = teko::list::push(methods, parser::Function { name = tm.name; type_params = tm.type_params; type_constraints = tm.type_constraints; params = tm.params; has_return = tm.has_return; return_type = tm.return_type; body = tm.body; vis = parser::Visibility::Pub; has_doc = tm.has_doc; doc = tm.doc; line = tm.line; col = tm.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = tm.os_guard; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 })
+                    methods = teko::list::push(methods, parser::Function { name = tm.name; type_params = tm.type_params; type_constraints = tm.type_constraints; params = tm.params; has_return = tm.has_return; return_type = tm.return_type; body = tm.body; vis = parser::Visibility::Pub; has_doc = tm.has_doc; doc = tm.doc; line = tm.line; col = tm.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = tm.os_guard; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 })
                 }
             }
             mi++
@@ -1893,13 +1918,13 @@ fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable): bool {
     }
     if pos == name.len { return false }   // no `__g__` infix at all
     if pos == 0 { return false }   // an empty base prefix can never name a generic decl
-    var base = teko::str::slice_to(name, pos)
-    var cands = tt_cands(table, base)
+    var stem = teko::str::slice_to(name, pos)
+    var cands = tt_cands(table, stem)
     var j: u64 = 0
     loop {
         if j >= cands.count { break }
         var r = tt_cand_reg(table, cands, j)
-        if r.decl.type_params.len > 0 && r.name == base { return true }
+        if r.decl.type_params.len > 0 && r.name == stem { return true }
         j++
     }
     false

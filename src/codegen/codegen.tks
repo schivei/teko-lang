@@ -1540,17 +1540,17 @@ fn cg_nameset_seen(seen: []str, n: str): bool { cg_str_in(seen, n) }
 fn cg_te_reaches_byvalue(prog: CgProg, te: parser::TypeExpr, to: str, seen: []str): bool {
     match te {
         parser::NamedType as nt => {
-            var base = nt.path.segments[nt.path.segments.len - 1].name
-            if cg_is_prim_name(base) { return false }
+            var stem = nt.path.segments[nt.path.segments.len - 1].name
+            if cg_is_prim_name(stem) { return false }
             // (#122) a CLASS is a REFERENCE type — every use lowers to a POINTER (emit_type_expr),
             // so a class-named edge (`C`, `C?`, `C` inside a variant) is a POINTER edge, not a
             // by-value one; it can NEVER close a by-value size cycle. Treat it like a slice. Without
             // this, a self-referencing class-optional field (`next: Node?` on class `Node`) is
             // wrongly flagged boxed → the field becomes `tk_opt_Node *` while every construct/read
             // site emits it by value (`tk_opt_Node`), and cc rejects the pointer/value mismatch.
-            if cg_is_class_named(prog, base) { return false }
+            if cg_is_class_named(prog, stem) { return false }
             // (S4) a generic-type USE reaches its concrete instance `Box__g__i64`, not the template.
-            var y = if nt.args.len == 0 { base } else { cg_texpr_inst_name(base, nt.args) }
+            var y = if nt.args.len == 0 { stem } else { cg_texpr_inst_name(stem, nt.args) }
             if checker::name_last_segment(y) == checker::name_last_segment(to) { return true }   // (#109 W3) `to` (the decl name) is canonical; `y` a bare syntactic segment — compare bare
             cg_name_reaches_byvalue(prog, y, to, seen)
         }
@@ -2566,8 +2566,8 @@ fn cg_texpr_mangle(te: parser::TypeExpr): str {
     }
 }
 // `<base>__g__<arg0>[__<arg1>…]` over type-arg exprs (matches checker::generic_inst_name).
-fn cg_texpr_inst_name(base: str, args: []parser::TypeExpr): str {
-    var out = teko::str::concat(base, "__g__")
+fn cg_texpr_inst_name(stem: str, args: []parser::TypeExpr): str {
+    var out = teko::str::concat(stem, "__g__")
     var i = 0
     loop {
         if i >= args.len { break }
@@ -5474,7 +5474,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: [
         // No block-local binding: emit exactly as the pre-W9 path (no region), but with live context.
         // (W9.3) If the branch has its OWN top-level `defer`, register it and fire it AFTER the tail is
         // captured into `sink`, then drop the base so nothing leaks into later branches/functions.
-        var base = dctx.defers.len
+        var defer_floor = dctx.defers.len
         var cur = dctx
         var out = buf
         var i = 0
@@ -5489,17 +5489,17 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: [
         if body.len > 0 {
             out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regions, fn_body, cur, teko::list::empty()) { []byte as o => o; error as err => return err }
         }
-        if cur.defers.len > base {
-            out = match emit_defers(out, cur.defers, base, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+        if cur.defers.len > defer_floor {
+            out = match emit_defers(out, cur.defers, defer_floor, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
         }
         return out
     }
     // Open the value-arm region (named `_tkbr<len>` — the deterministic out.len uniquifier).
-    var base = dctx.defers.len   // (W9.3) defer scope base for this value-arm
+    var defer_floor = dctx.defers.len   // (W9.3) defer scope base for this value-arm
     var fall = cg_append_direct_defers(dctx.defers, body)
     var region = fresh_named("_tkbr", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
-    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) })
+    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) })
     var cur = dctx
     var i = 0
     loop {
@@ -5518,7 +5518,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: [
     }
     // (W9.3) Tail is in the enclosing `sink`; fire THIS value-arm's defers (LIFO) BEFORE dropping its
     // region (idempotent + nulled for overlap safety).
-    out = match emit_defers(out, fall, base, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
@@ -7302,10 +7302,10 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: c
     // region for those NON-tail block-locals. ORDERING (W9 trap): the tail value is materialized into
     // `sink` (enclosing) FIRST, then the region drops BEFORE the `break`. No block-local ⇒ no region ⇒
     // byte-identical to the pre-W9 value-arm output. (C: emit_arm_value.)
-    var base = dctx.defers.len   // (W9.3) defer scope base for this value-arm
+    var defer_floor = dctx.defers.len   // (W9.3) defer scope base for this value-arm
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     var region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
-    var regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }) } else { regions }
+    var regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }) } else { regions }
     var cur_blk = if want_block { body } else { teko::list::empty() }
     var out = buf
     if want_block {
@@ -7348,21 +7348,21 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: c
                 // (W9.3) Tail is materialized into `sink`. Fire THIS value-arm's defers (LIFO) if any —
                 // on their own lines (only when present, so the no-defer output stays byte-identical to
                 // the pre-W9.3 inline form) — BEFORE dropping the arm region on `break`.
-                if fall.len > base {
+                if fall.len > defer_floor {
                     out = cb(out, "\n")
-                    out = match emit_defers(out, fall, base, prog, ci, escaping, fn_body) { []byte as o => o; error as err => return err }
+                    out = match emit_defers(out, fall, defer_floor, prog, ci, escaping, fn_body) { []byte as o => o; error as err => return err }
                     out = cb(out, ci); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
                 } else {
                     // No defers: keep the original inline ` tk_region_drop(…)` form (byte-identical to pre-W9.3).
                     out = cb(out, " tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
                 }
                 cb(out, " break;\n")
-            } else if fall.len > base {
+            } else if fall.len > defer_floor {
                 // (W9.3) No region, but this value-arm registered defers: the tail is now in `sink`, so fire
                 // the arm's defers (LIFO) INSIDE the arm's `{ … }` scope (where the arm-locals are still
                 // declared), BEFORE the `break`, then the base resets when this arm's frame unwinds.
                 out = cb(out, "\n")
-                out = match emit_defers(out, fall, base, prog, ci, escaping, fn_body) { []byte as o => o; error as err => return err }
+                out = match emit_defers(out, fall, defer_floor, prog, ci, escaping, fn_body) { []byte as o => o; error as err => return err }
                 out = cb(out, ci); out = cb(out, "break;\n")
                 out
             } else {
@@ -8136,11 +8136,11 @@ fn dctx_empty(): DeferCtx {
 // emit_defers (which walks g_cg_defers[base..ndefers) backwards). A defer body never contains a return/
 // break/continue/defer (checker-enforced), so each body statement emits with NO active region/defer
 // scope of its own (regions/dctx empty) — exactly matching the C twin's emit_stmt at base context.
-fn emit_defers(buf: []byte, defers: []checker::TStatement, base: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []checker::TStatement): []byte | error {
+fn emit_defers(buf: []byte, defers: []checker::TStatement, defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []checker::TStatement): []byte | error {
     var out = buf
     var i = defers.len
     loop {
-        if i <= base { break }
+        if i <= defer_floor { break }
         i = i - 1
         match defers[i] {
             checker::TDeferStmt as d => {
@@ -8237,11 +8237,11 @@ fn cg_target_region_base(loops: []LoopDeferFrame, label: str): u64 {
  * @return         the buffer with the drops appended
  * @since 0.3.1
  */
-fn cg_drop_regions_from(buf: []byte, indent: str, regions: []RegionFrame, base: u64): []byte {
+fn cg_drop_regions_from(buf: []byte, indent: str, regions: []RegionFrame, defer_floor: u64): []byte {
     var out = buf
     var k = regions.len
     loop {
-        if k <= base { break }
+        if k <= defer_floor { break }
         var r = regions[k - 1]
         out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
         k = k - 1
@@ -8363,25 +8363,25 @@ fn emit_block_region(buf: []byte, body: []checker::TStatement, in_main: bool, pr
     // (W9.3) EVERY statement-arm is a DEFER SCOPE — even with no S2 region — so a defer inside the arm
     // fires at the arm's fall-through (before the arm's region, if any, drops). `base` = the in-scope
     // defer count at arm entry; the fall-through fires `[base, base+direct)` LIFO.
-    var base = dctx.defers.len
+    var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, body)   // all of THIS arm's direct defers, in scope at fall-through
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, false) && regions.len < 64
     if !want_block {
         // No S2 region — region-less defer-only scope: emit the body, then fire the arm's defers at fall-through.
         var out = match emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, dctx, teko::list::empty(), false) { []byte as o => o; error as err => return err }
-        return emit_defers(out, fall, base, prog, indent, escaping, fn_body)
+        return emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body)
     }
     // Open the arm region. Name by the buffer length at the creation point (the deterministic
     // `_tkbr<len>` uniquifier — matches the C twin's b->len read without a counter).
     var region = fresh_named("_tkbr", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) })
+    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) })
     // Emit the body with THIS block as the current block context (so block-local bindings route to
     // `region`) and the augmented region stack.
     out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false) { []byte as o => o; error as err => return err }
     // (W9.3) Normal fall-through exit edge: fire THIS arm's defers (LIFO) FIRST (so a defer body can
     // still read the arm's block-locals), THEN drop the arm region (idempotent + nulled for overlap).
-    out = match emit_defers(out, fall, base, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
@@ -9030,15 +9030,15 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     // region — so a defer inside the loop fires at EACH iteration's end (fall-through), on break/
     // continue, and on return. `base` = the in-scope defer count at the loop body's entry; push a
     // LoopDeferFrame so break/continue can fire `[this loop's base, …)` for the scopes they cross.
-    var base = dctx.defers.len
+    var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, l.body)   // all of this iteration's direct defers
-    var dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = base; region_base = regions.len }); cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
+    var dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }); cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, l.body, false) && regions.len < 64
     var region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     var regs2 = regions
     if want_block {
         out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) })
+        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) })
     }
     // emit the body with THIS block as the current block context (so a block-local binding routes to
     // `region`) and the augmented region stack (so break/continue/return drop the right regions).
@@ -9046,7 +9046,7 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     out = match emit_block(out, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false) { []byte as o => o; error as err => return err }
     // (W9.3) Fall-through exit edge (end of an iteration): fire THIS iteration's defers (LIFO) FIRST
     // (so a defer body can still read this iteration's block-locals), THEN drop the loop body's region.
-    out = match emit_defers(out, fall, base, prog, inner, escaping, fn_body) { []byte as o => o; error as err => return err }
+    out = match emit_defers(out, fall, defer_floor, prog, inner, escaping, fn_body) { []byte as o => o; error as err => return err }
     // S2 — fall-through: drop this loop body's region (the next iteration's tk_region_new opens a fresh
     // one). Idempotent + nulled for overlap safety.
     if want_block { out = cb(out, inner); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
@@ -9388,13 +9388,13 @@ fn emit_expr_stmt_default(buf: []byte, expr: checker::TExpr, prog: CgProg, escap
  * @return []byte | error  the buffer with the adopter block emitted, or a codegen error
  */
 fn emit_adopt(buf: []byte, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
-    var base = dctx.defers.len
+    var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, a.body)
     var region = fresh_named("_tkad", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = teko::list::empty() })
+    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = teko::list::empty() })
     out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { []byte as o => o; error as err => return err }
-    out = match emit_defers(out, fall, base, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, indent); out = cb(out, "tk_region_drop_subtree("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
@@ -11051,19 +11051,19 @@ fn cg_texpr_union_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, ut: parser:
 fn cg_texpr_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, te: parser::TypeExpr, owner_ns: str): bool {
     match te {
         parser::NamedType as nt => {
-            var base = nt.path.segments[nt.path.segments.len - 1].name
-            if cg_is_builtin_scalar(base) { return true }   // builtin scalar → ready
+            var stem = nt.path.segments[nt.path.segments.len - 1].name
+            if cg_is_builtin_scalar(stem) { return true }   // builtin scalar → ready
             // (#122) a CLASS field is a POINTER (`tk_t_C *`) — it only needs the forward typedef
             // (always present by this pass), never the full body. So it is READY like a slice; a
             // recursive class-optional (`Node?` inside class `Node`) would otherwise be an
             // unbreakable by-value cycle here even though the C layout is finite.
-            if cg_is_class_named(prog, base) { return true }
+            if cg_is_class_named(prog, stem) { return true }
             // (S4) a generic-type USE `Box<i64>` depends on the concrete instance `Box__g__i64`, not
             // the (dropped) template `Box` — gate on the instance name.
-            if nt.args.len > 0 { return cg_named_emitted(em, cg_texpr_inst_name(base, nt.args)) }
+            if nt.args.len > 0 { return cg_named_emitted(em, cg_texpr_inst_name(stem, nt.args)) }
             // (#109 order fix) resolve the SYNTACTIC path in the OWNER decl's namespace, so the
             // edge points at THAT decl (namespace-precise), not a same-bare cousin.
-            var want = match cg_find_decl_ns(prog, nt.path, owner_ns) { parser::TypeDecl as dd => dd.name; error => base }
+            var want = match cg_find_decl_ns(prog, nt.path, owner_ns) { parser::TypeDecl as dd => dd.name; error => stem }
             cg_named_emitted_precise(prog, em, want)
         }
         parser::SliceType => true   // pointer (slice typedef pre-emitted)
@@ -11797,11 +11797,11 @@ fn cg_emit_vtthunk_def(buf: []byte, prog: CgProg, cd_name: str, idd_name: str, m
  * @since #291 (trait/interface vtable dispatch UB fix)
  */
 fn cg_emit_vtthunk_receiver(buf: []byte, prog: CgProg, cd_name: str, recv_ann: parser::TypeExpr, recv_ns: str): []byte | error {
-    var base = cg_vtthunk_base_name(recv_ann)
-    if base.len > 0 && cg_is_polymorphic_base(prog, base) {
-        var out = cb_tysym(cb(buf, "(tk_base_"), base)
+    var thunk_base = cg_vtthunk_base_name(recv_ann)
+    if thunk_base.len > 0 && cg_is_polymorphic_base(prog, thunk_base) {
+        var out = cb_tysym(cb(buf, "(tk_base_"), thunk_base)
         out = cb(out, "){ .data = self, .vtable = ")
-        out = cb_tysym(cb(cb_tysym(cb(out, "tk_vt_"), cd_name), "_"), base)
+        out = cb_tysym(cb(cb_tysym(cb(out, "tk_vt_"), cd_name), "_"), thunk_base)
         return cb(out, " }")
     }
     var out = cb(buf, "(")
@@ -12159,9 +12159,9 @@ fn tk_emit_c(prog0: checker::TProgram): str | error {
     translation unit PLUS the C-ABI export wrappers (`cg_c_export_wrappers_text`) that expose each
     `exp` function under its C symbol. The export GATE (`check_ffi_export`) must have passed first. */
 pub fn tk_emit_c_export(prog0: checker::TProgram): str | error {
-    var base = match tk_emit_c_mode(prog0, CgMode::Program) { str as s => s; error as e => return e }
+    var body_c = match tk_emit_c_mode(prog0, CgMode::Program) { str as s => s; error as e => return e }
     var wrappers = match cg_c_export_wrappers_text(prog0) { str as s => s; error as e => return e }
-    teko::str::concat(base, wrappers)
+    teko::str::concat(body_c, wrappers)
 }
 
 /** tk_emit_c_test — the NATIVE TEST-GATE emission entry (#265): a translation unit whose `main()`

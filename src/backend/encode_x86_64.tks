@@ -509,7 +509,7 @@ fn emit_rm_ext_x86(buf: []byte, rexw: bool, opcode: u32, ext_field: u32, rm: MRe
  * @return []byte  `buf` followed by the ModRM/SIB/disp bytes
  */
 fn push_mem_operand_x86(buf: []byte, reg3: u32, mem: MMem): []byte {
-    var base3 = reg_low3_x86(mem.base)
+    var base3 = reg_low3_x86(mem.base_reg)
     var disp = mem.offset to i64
     var need_sib = base3 == X86_REG_RSP_ID
     var is_rbp = base3 == X86_REG_RBP_ID
@@ -542,7 +542,7 @@ fn emit_mem_op_x86(form: X86MemOp, regop: MReg, mem: MMem): EncInstX86 {
     if form.op66 { b = push_byte_x86(b, X86_OPERAND_SIZE_PREFIX) }
     var force = form.byte_reg && (regop.id >= X86_BYTE_REG_MIN_ID)
     var rr = reg_ext_x86(regop)
-    var rb = reg_ext_x86(mem.base)
+    var rb = reg_ext_x86(mem.base_reg)
     b = if force { push_rex_forced_x86(b, form.rexw, rr, false, rb) } else { push_rex_x86(b, form.rexw, rr, false, rb) }
     if form.two_byte { b = push_byte_x86(b, X86_OP_TWO_BYTE_ESCAPE) }
     b = push_byte_x86(b, form.opcode)
@@ -982,7 +982,7 @@ fn in_arg_base_x86(layout: FrameLayoutX86): u32 {
  * @return EncInstX86  the encoded instruction
  */
 fn encode_fspill_x86(layout: FrameLayoutX86, i: MFSpillX86): EncInstX86 {
-    var mem = MMem { base = RSP_BASE_X86; offset = layout.slot_offsets[i.slot] to i32 }
+    var mem = MMem { base_reg = RSP_BASE_X86; offset = layout.slot_offsets[i.slot] to i32 }
     var form = if i.is_load { load_memop_x86(MMemSizeX86::F64, false) } else { store_memop_x86(MMemSizeX86::F64) }
     emit_mem_op_x86(form, i.reg, mem)
 }
@@ -1000,7 +1000,7 @@ fn encode_fspill_x86(layout: FrameLayoutX86, i: MFSpillX86): EncInstX86 {
  */
 fn encode_out_arg_x86(layout: FrameLayoutX86, i: MOutArgX86): EncInstX86 {
     var off = layout.out_arg_base + (i.index * X86_GPR_BYTES)
-    emit_mem_op_x86(store_memop_x86(i.size), i.src, MMem { base = RSP_BASE_X86; offset = off to i32 })
+    emit_mem_op_x86(store_memop_x86(i.size), i.src, MMem { base_reg = RSP_BASE_X86; offset = off to i32 })
 }
 
 /**
@@ -1015,7 +1015,7 @@ fn encode_out_arg_x86(layout: FrameLayoutX86, i: MOutArgX86): EncInstX86 {
  */
 fn encode_in_arg_x86(layout: FrameLayoutX86, i: MInArgX86): EncInstX86 {
     var off = in_arg_base_x86(layout) + (i.index * X86_GPR_BYTES)
-    emit_mem_op_x86(load_memop_x86(i.size, false), i.dst, MMem { base = RSP_BASE_X86; offset = off to i32 })
+    emit_mem_op_x86(load_memop_x86(i.size, false), i.dst, MMem { base_reg = RSP_BASE_X86; offset = off to i32 })
 }
 
 /**
@@ -1030,8 +1030,8 @@ fn encode_in_arg_x86(layout: FrameLayoutX86, i: MInArgX86): EncInstX86 {
  */
 fn encode_frame_addr_x86(layout: FrameLayoutX86, i: MFrameAddrX86): EncInstX86 {
     var off = layout.slot_offsets[i.slot]
-    var mem = MMem { base = RSP_BASE_X86; offset = off to i32 }
-    var b = push_rex_x86(teko::list::empty(), true, reg_ext_x86(i.dst), false, reg_ext_x86(mem.base))
+    var mem = MMem { base_reg = RSP_BASE_X86; offset = off to i32 }
+    var b = push_rex_x86(teko::list::empty(), true, reg_ext_x86(i.dst), false, reg_ext_x86(mem.base_reg))
     b = push_byte_x86(b, X86_OP_LEA)
     plain_inst_x86(push_mem_operand_x86(b, reg_low3_x86(i.dst), mem))
 }
@@ -1719,7 +1719,7 @@ fn emit_saved_fpr_stores_x86(buf: []byte, layout: FrameLayoutX86, reload: bool):
 fn emit_movaps_frame_x86(id: u32, off: u32, reload: bool): EncInstX86 {
     var opcode = if reload { X86_OP_MOVAPS_LOAD } else { X86_OP_MOVAPS_STORE }
     var form = X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = true; opcode = opcode; byte_reg = false }
-    emit_mem_op_x86(form, preg(id, MRegClass::FPR), MMem { base = RSP_BASE_X86; offset = off to i32 })
+    emit_mem_op_x86(form, preg(id, MRegClass::FPR), MMem { base_reg = RSP_BASE_X86; offset = off to i32 })
 }
 
 /**
@@ -2318,7 +2318,7 @@ pub type ModuleTextX86 = struct {
     /**
      * base — the next function's `.text` base byte offset (the current image length).
      */
-    base: u32
+    text_off: u32
 }
 
 /**
@@ -2329,7 +2329,7 @@ pub type ModuleTextX86 = struct {
  * @return ModuleTextX86  the seed accumulator
  */
 pub fn empty_module_text_x86(): ModuleTextX86 {
-    ModuleTextX86 { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); base = 0 to u32 }
+    ModuleTextX86 { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); text_off = 0 to u32 }
 }
 
 /**
@@ -2343,13 +2343,13 @@ pub fn empty_module_text_x86(): ModuleTextX86 {
  * @param u32 base  the function's `.text` base byte offset
  * @return []RelocX86  `acc` followed by the rebased relocations
  */
-fn rebase_relocs_x86(acc: []RelocX86, relocs: []RelocX86, base: u32): []RelocX86 {
+fn rebase_relocs_x86(acc: []RelocX86, relocs: []RelocX86, base_off: u32): []RelocX86 {
     var out = acc
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
         var r = relocs[i]
-        out = teko::list::push(out, RelocX86 { offset = r.offset + base; sym = r.sym; kind = r.kind; addend = r.addend; sect = r.sect })
+        out = teko::list::push(out, RelocX86 { offset = r.offset + base_off; sym = r.sym; kind = r.kind; addend = r.addend; sect = r.sect })
         i++
     }
     out
@@ -2391,12 +2391,12 @@ fn fold_func_into_text_x86(abi: AbiDescriptor, acc: ModuleTextX86, f: MFuncX86):
  * @since 0.3.1
  */
 pub fn fold_encoded_func_x86(acc: ModuleTextX86, ef: EncodedFuncX86): ModuleTextX86 {
-    var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.base; local = false }
+    var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.text_off; local = false }
     var text = append_bytes(acc.text, ef.bytes)
-    var relocs = rebase_relocs_x86(acc.relocs, ef.relocs, acc.base)
+    var relocs = rebase_relocs_x86(acc.relocs, ef.relocs, acc.text_off)
     var syms = teko::list::push(acc.syms, sym)
-    var base = acc.base + (ef.bytes.len to u32)
-    ModuleTextX86 { text = text; relocs = relocs; syms = syms; base = base }
+    var text_off = acc.text_off + (ef.bytes.len to u32)
+    ModuleTextX86 { text = text; relocs = relocs; syms = syms; text_off = text_off }
 }
 
 /**

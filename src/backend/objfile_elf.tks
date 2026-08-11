@@ -690,8 +690,8 @@ fn elf_rela_info(symidx: u32, rtype: u32): u64 {
  * @return []str  the section names, in header order
  */
 fn elf_section_names(has_drr: bool, has_dwarf: bool): []str {
-    var base = ["", ".text", ".rodata", ".symtab", ".strtab", ".shstrtab", ".rela.text"]
-    var with_drr = if has_drr { teko::list::push(teko::list::push(base, ".data.rel.ro"), ".rela.data.rel.ro") } else { base }
+    var sect_names = ["", ".text", ".rodata", ".symtab", ".strtab", ".shstrtab", ".rela.text"]
+    var with_drr = if has_drr { teko::list::push(teko::list::push(sect_names, ".data.rel.ro"), ".rela.data.rel.ro") } else { sect_names }
     if !has_dwarf { return with_drr }
     var with_dwarf_secs = teko::list::push(teko::list::push(teko::list::push(with_drr, ".debug_abbrev"), ".debug_info"), ".debug_line")
     teko::list::push(teko::list::push(with_dwarf_secs, ".rela.debug_info"), ".rela.debug_line")
@@ -1154,14 +1154,14 @@ fn emit_elf_shdrs(buf: []byte, lay: ElfLayout, shname: []u32, has_drr: bool, has
  * @return []byte  `buf` followed by the five DWARF section headers
  * @since 0.3.1.0
  */
-fn emit_elf_dwarf_shdrs(buf: []byte, lay: ElfLayout, shname: []u32, base: u64): []byte {
-    var info_idx = base + 1
-    var line_idx = base + 2
-    var b = emit_elf_shdr(buf, shname[base], SHT_PROGBITS, 0 to u32, lay.debug_abbrev_offset, lay.debug_abbrev_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
+fn emit_elf_dwarf_shdrs(buf: []byte, lay: ElfLayout, shname: []u32, base_idx: u64): []byte {
+    var info_idx = base_idx + 1
+    var line_idx = base_idx + 2
+    var b = emit_elf_shdr(buf, shname[base_idx], SHT_PROGBITS, 0 to u32, lay.debug_abbrev_offset, lay.debug_abbrev_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
     b = emit_elf_shdr(b, shname[info_idx], SHT_PROGBITS, 0 to u32, lay.debug_info_offset, lay.debug_info_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
     b = emit_elf_shdr(b, shname[line_idx], SHT_PROGBITS, 0 to u32, lay.debug_line_offset, lay.debug_line_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
-    b = emit_elf_shdr(b, shname[base + 3], SHT_RELA, SHF_INFO_LINK, lay.rela_debug_info_offset, lay.rela_debug_info_size, ELF_SHNDX_SYMTAB, info_idx to u32, 8 to u32, ELF64_RELA_SIZE)
-    emit_elf_shdr(b, shname[base + 4], SHT_RELA, SHF_INFO_LINK, lay.rela_debug_line_offset, lay.rela_debug_line_size, ELF_SHNDX_SYMTAB, line_idx to u32, 8 to u32, ELF64_RELA_SIZE)
+    b = emit_elf_shdr(b, shname[base_idx + 3], SHT_RELA, SHF_INFO_LINK, lay.rela_debug_info_offset, lay.rela_debug_info_size, ELF_SHNDX_SYMTAB, info_idx to u32, 8 to u32, ELF64_RELA_SIZE)
+    emit_elf_shdr(b, shname[base_idx + 4], SHT_RELA, SHF_INFO_LINK, lay.rela_debug_line_offset, lay.rela_debug_line_size, ELF_SHNDX_SYMTAB, line_idx to u32, 8 to u32, ELF64_RELA_SIZE)
 }
 
 /**
@@ -1550,9 +1550,9 @@ fn elf_assign_partition_offsets(entries: []ElfConstEntry, rodata_relocs: []ElfRe
         var e = entries[i]
         var moves = elf_reloc_in_span(rodata_relocs, e.start, e.end)
         var span = e.end - e.start
-        var base = if moves { align_up(drr_run, 8 to u32) } else { align_up(rodata_run, 8 to u32) }
-        if moves { drr_run = base + span } else { rodata_run = base + span }
-        out = teko::list::push(out, ElfConstEntry { name = e.name; start = e.start; end = e.end; to_drr = moves; new_offset = base })
+        var new_off = if moves { align_up(drr_run, 8 to u32) } else { align_up(rodata_run, 8 to u32) }
+        if moves { drr_run = new_off + span } else { rodata_run = new_off + span }
+        out = teko::list::push(out, ElfConstEntry { name = e.name; start = e.start; end = e.end; to_drr = moves; new_offset = new_off })
         i++
     }
     out

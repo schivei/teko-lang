@@ -90,9 +90,9 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
  * @throws          when a name after `::` is missing, or a `(` does not follow the factory tail
  * @since onda-3 (#254 L5)
  */
-fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, base: Path, type_args: []TypeExpr, origin: u64): Parsed<Expr> | error {
+fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, type_args: []TypeExpr, origin: u64): Parsed<Expr> | error {
     var tail = match parse_path(tokens, at_colons + 1) { Parsed<Path> as x => x; error as e => return e }
-    var full = path_concat(base, tail.node)
+    var full = path_concat(head_path, tail.node)
     if !is_kind_at(tokens, tail.next, lexer::TokenKind::LParen) {
         return err_at(tokens, tail.next, "expected '(' — a generic static call is `Type<Args>::fn(...)`")
     }
@@ -420,6 +420,15 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
     }
     if k == lexer::TokenKind::Match {
         return parse_match(tokens, pos)
+    }
+    // §4 (D2/D1): `self` and `base` are reserved keywords, so they no longer pass `is_name_at`
+    // (which powers path parsing). They are simple Var primaries — `self`/`base` resolve to the
+    // synthetic receiver / super receiver; postfix (`.field`, `.method(...)`) chains on top.
+    if k == lexer::TokenKind::SelfKw {
+        return Parsed<Expr> { node = Expr { kind = Var { name = "self" }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
+    }
+    if k == lexer::TokenKind::Base {
+        return Parsed<Expr> { node = Expr { kind = Var { name = "base" }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if is_name_at(tokens, pos) {   // IDENT or a contextual keyword (`type`/`to`) used as a value/path
         var pp = match parse_path(tokens, pos) { Parsed<Path> as x => x; error as e => return e }

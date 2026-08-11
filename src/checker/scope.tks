@@ -77,7 +77,7 @@ type ValBinding = struct {
  *  only turns `lookup_binding`'s global scan from a reverse O(n) linear scan into an O(log n + c)
  *  binary search that returns the SAME binding (design section 5). `nidx_empty()` before `seal`, where
  *  a lookup finds nothing and falls through as before. */
-pub type Env = struct { base: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; fn_unsafe: bool; file: str; base_index: NameIndex }
+pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; fn_unsafe: bool; file: str; base_index: NameIndex }
 
 /**
  * env_empty — an empty environment: no bindings, no current namespace, not inside any class method,
@@ -85,17 +85,17 @@ pub type Env = struct { base: []ValBinding; bindings: []ValBinding; cur_ns: str;
  *
  * @return a fresh empty Env
  */
-pub fn env_empty(): Env { Env { base = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); fn_unsafe = false; file = ""; base_index = nidx_empty() } }
+pub fn env_empty(): Env { Env { base_slots = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); fn_unsafe = false; file = ""; base_index = nidx_empty() } }
 
 /** (W10c/MEM-3) set the program DI registry once — the typer seeds it onto the base env after the
  *  DI pass so `type_function` can resolve each `#inject` binding to its provider. */
 pub fn with_di(env: Env, di: DiRegistry): Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /** (W10c/MEM-3) set the DI-injected locals in scope for the fn body about to be typed. */
 pub fn with_injects(env: Env, injects: []DiInjectBind): Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /**
@@ -107,7 +107,7 @@ pub fn with_injects(env: Env, injects: []DiInjectBind): Env {
  * @return Env  `env` with `fn_unsafe` set
  */
 pub fn with_fn_unsafe(env: Env, fn_unsafe: bool): Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /** (W10c/MEM-3) the DI-injected binding named `name` in scope, or an error if none — the signal a
@@ -135,10 +135,10 @@ pub fn lookup_inject(env: Env, name: str): DiInjectBind | error {
  * @since #148
  */
 pub fn seal(env: Env): Env {
-    var b = env.base
+    var b = env.base_slots
     var i: u64 = 0
     loop { if i >= env.bindings.len { break }; b = teko::list::push(b, env.bindings[i]); i++ }
-    Env { base = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = nidx_build(nidx_names_of(b)) }
+    Env { base_slots = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = nidx_build(nidx_names_of(b)) }
 }
 
 /**
@@ -150,7 +150,7 @@ pub fn seal(env: Env): Env {
  * @return     `env` with `cur_ns` set to `ns`
  * @since #41
  */
-pub fn with_ns(env: Env, ns: str): Env { Env { base = env.base; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
+pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
 
 /**
  * with_file — set the source file of the item about to be typed. The twin of `with_ns`, set
@@ -163,7 +163,7 @@ pub fn with_ns(env: Env, ns: str): Env { Env { base = env.base; bindings = env.b
  * @return      `env` with `file` set
  * @since       0.3.1
  */
-pub fn with_file(env: Env, file: str): Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = file; base_index = env.base_index } }
+pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = file; base_index = env.base_index } }
 
 /**
  * with_owner — set the DECLARING class of the method body about to be typed; "" clears it (used when
@@ -174,7 +174,7 @@ pub fn with_file(env: Env, file: str): Env { Env { base = env.base; bindings = e
  * @return       `env` with `owner_type` set to `owner`
  * @since W10b.CLASS
  */
-pub fn with_owner(env: Env, owner: str): Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
+pub fn with_owner(env: Env, owner: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
 
 /**
  * binding_is_writable — the SINGLE decision point for "may this binding be written through?"
@@ -208,7 +208,7 @@ fn binding_is_writable(t: Type, is_mut: bool): bool {
  * @return        `env` extended with the new local binding
  */
 pub fn define(env: Env, name: str, t: Type, is_mut: bool): Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /**
@@ -224,7 +224,7 @@ pub fn define(env: Env, name: str, t: Type, is_mut: bool): Env {
  * @since #41
  */
 pub fn define_fn(env: Env, name: str, t: Type, ns: str): Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /**
@@ -243,7 +243,7 @@ pub fn define_fn(env: Env, name: str, t: Type, ns: str): Env {
  * @since #594
  */
 pub fn define_const(env: Env, name: str, t: Type, ns: str, vis: parser::Visibility): Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 // a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
@@ -298,10 +298,10 @@ fn lookup_binding(env: Env, name: str): ValBinding | error {
         if k >= env.base_index.slots.len { break }
         if env.base_index.slots[k].hash != h { break }
         var p = env.base_index.slots[k].pos
-        if env.base[p].name == name && (p to i64) > best { best = p to i64 }
+        if env.base_slots[p].name == name && (p to i64) > best { best = p to i64 }
         k++
     }
-    if best >= 0 { return env.base[best to u64] }
+    if best >= 0 { return env.base_slots[best to u64] }
     error { message = $"undefined name: {name}" }
 }
 
@@ -330,11 +330,11 @@ fn lookup_value_in_ns(env: Env, name: str, ns: str): ValBinding | error {
         i = i - 1
         if env.bindings[i].name == name && qualifier_selects_ns(env.bindings[i].ns, ns) { return env.bindings[i] }
     }
-    var j = env.base.len
+    var j = env.base_slots.len
     loop {
         if j == 0 { break }
         j = j - 1
-        if env.base[j].name == name && qualifier_selects_ns(env.base[j].ns, ns) { return env.base[j] }
+        if env.base_slots[j].name == name && qualifier_selects_ns(env.base_slots[j].ns, ns) { return env.base_slots[j] }
     }
     error { message = $"unknown value: {ns}::{name}" }
 }
@@ -418,7 +418,7 @@ fn call_base_pos(env: Env, callee: parser::Path, name: str, qualified: bool): i6
         if k >= env.base_index.slots.len { break }
         if env.base_index.slots[k].hash != h { break }
         var p = env.base_index.slots[k].pos
-        var b = env.base[p]
+        var b = env.base_slots[p]
         if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) && (p to i64) > best { best = p to i64 }
         k++
     }
@@ -448,7 +448,7 @@ fn lookup_call(env: Env, callee: parser::Path): Type | error {
         if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { return b.type }
     }
     var p = call_base_pos(env, callee, name, qualified)
-    if p >= 0 { return env.base[p to u64].type }
+    if p >= 0 { return env.base_slots[p to u64].type }
     error { message = $"undefined name: {name}" }
 }
 
@@ -473,7 +473,7 @@ fn call_ns(env: Env, callee: parser::Path): str {
         if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { return b.ns }
     }
     var p = call_base_pos(env, callee, name, qualified)
-    if p >= 0 { return env.base[p to u64].ns }
+    if p >= 0 { return env.base_slots[p to u64].ns }
     ""
 }
 

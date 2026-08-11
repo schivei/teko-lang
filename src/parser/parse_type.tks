@@ -87,7 +87,14 @@ fn parse_type_primary(tokens: []lexer::Token, pos: u64): ParsedType | error {
         var inner = match parse_type_primary(tokens, pos + 1) { ParsedType as x => x; error as e => return e }
         return ParsedType { node = wrap_ref_type(inner.node); next = inner.next; pending_gt = inner.pending_gt }
     }
-    var base = if is_kind_at(tokens, pos, lexer::TokenKind::LBracket) {
+    // (§4) `self` as a type ATOM — the ENCLOSING type (the receiver's type in an instance method,
+    // the type itself in a `static fn`). Modeled as a single-segment `NamedType` named "self"; the
+    // checker's `resolve_type` special-cases that segment and resolves it to the enclosing type
+    // (only meaningful inside a method body — e.g. a `: self` return on a factory). No new AST node,
+    // so `.tkb` serialization is unchanged.
+    var head = if is_kind_at(tokens, pos, lexer::TokenKind::SelfKw) {
+        ParsedType { node = NamedType { path = Path { segments = teko::list::push(teko::list::empty(), Segment { name = "self" }) }; args = teko::list::empty() }; next = pos + 1; pending_gt = 0 }
+    } else if is_kind_at(tokens, pos, lexer::TokenKind::LBracket) {
         match parse_slice(tokens, pos) { ParsedType as x => x; error as e => return e }
     } else if is_kind_at(tokens, pos, lexer::TokenKind::LParen) {
         match parse_function_type(tokens, pos) { ParsedType as x => x; error as e => return e }
@@ -96,12 +103,12 @@ fn parse_type_primary(tokens: []lexer::Token, pos: u64): ParsedType | error {
     } else {
         match parse_named(tokens, pos) { ParsedType as x => x; error as e => return e }
     }
-    var node = base.node
-    var p = base.next
+    var node = head.node
+    var p = head.next
     // A pending compound-`>` close (`>>` from a nested generic) means we are mid-close: no postfix
     // `?` can apply here — propagate the leftover up to the enclosing generic's close (S4).
-    if base.pending_gt > 0 {
-        return ParsedType { node = node; next = p; pending_gt = base.pending_gt }
+    if head.pending_gt > 0 {
+        return ParsedType { node = node; next = p; pending_gt = head.pending_gt }
     }
     ParsedType { node = node; next = p; pending_gt = 0 }
 }
