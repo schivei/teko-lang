@@ -460,20 +460,21 @@ uma **thread** fire-and-forget — sub-raiz de arena própria (F1), argumentos *
 e **sem `join`**. Não há isolamento tipo-processo na linguagem (quem precisa usa outro binário). Doc 1 §7.6.
 
 ```teko
-spawn f(c.id)                                      // KEYWORD (não função): dispara e segue, args por cópia
+spawn f()                                          // KEYWORD (não função): dispara e segue, SEM id, args por cópia
 
-// chan<T> MPSC (fan-in: N escritores, 1 leitor).
+// chan<T> MPSC (fan-in: N escritores, 1 leitor). TODO transporte é um `service`; a chave é CONSTANTE.
 // TRANSPORTE = contrato extensível (SO, memória, Kafka, RabbitMQ, RPC, WS, HTTP, …):
-type IChannelKind<T> = interface { fn send(v: T); fn recv(): T; fn end() }   // end() = fecho + dreno
-static fn chan<T>::make<K: IChannelKind<T>>(bounds: usize = 1, kind: K = OsChan<T>{}): self
+type IChannelKind<T> = interface { fn init(key: str); fn send(v: T); fn recv(): T; fn end() }
+
+// make: cria, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a chave, devolve o LEITOR:
+static fn chan<T>::make<K: service & IChannelKind<T>>(key: str, bounds: usize = 1): Rx<T>
+              // key:    CONSTANTE (literal/const, comp-time) — o "nome" do canal
               // bounds: 1 (default)=bounded-1 · N=bounded-N · 0=UNBOUNDED
-              // kind:   IChannelKind<T> — OsChan<T> (default, SOCK_DGRAM/mailslot) · MemChan<T> · impl do dev
-              c.id: usize                          // o id — o que se passa à corotina (spawn f(c.id))
-static fn chan<T>::writer(id: usize): Tx<T>       // extremo de escrita (copiável, N escritores)
-static fn chan<T>::reader(id: usize): Rx<T>       // extremo de leitura (um só; 2º leitor = erro nomeado)
-static fn chan<T>::close(id: usize)                // invoca o end() do transporte: fecha + drena
-fn        Tx<T>::send(v: T): null                  // devolve null; a propriedade tx.closed diz se fechou (drenado)
-fn        Rx<T>::pop(): T | error                  // recebe; error quando o canal foi encerrado (end()) e drenado
+static fn chan<T>::close(key: str)                 // invoca o end() do transporte: fecha + drena
+
+var tx = svc<Tx<T>>("chave")                       // ESCRITOR: resolvido por chave (svc = comp-time, inline)
+fn  Tx<T>::send(v: T): null                        // devolve null; a propriedade tx.closed diz se fechou (drenado)
+fn  Rx<T>::pop(): T | error                        // recebe; error quando o canal foi encerrado (end()) e drenado
 
 // WaitGroup — esperar N corotinas terminarem (NÃO há join no modelo de corotina)
 fn wg_open(): usize
@@ -484,20 +485,20 @@ fn wg_wait(wg: usize): null | error
 fn hardware_parallelism(): usize                   // paralelismo concedido pelo SO
 ```
 
-Um fluxo mínimo — a `main` cria o canal, uma corotina escreve, a `main` lê até encerrar:
+Um fluxo mínimo — a `main` cria o canal (recebe o leitor), uma corotina resolve o escritor por chave e
+escreve, a `main` lê até encerrar. **Nenhum id trafega — nem no `spawn`:**
 
 ```teko
-fn produz(cid: usize) {                  // função sem retorno — spawnável como thread
-    var tx = chan<i32>::writer(cid)
+fn produz() {                            // função sem retorno — SEM id (resolve por chave)
+    var tx = svc<Tx<i32>>("nums")        // extremo de escrita, pela chave constante
     var i = 0
     loop while i < 100 { tx.send(i); i = i + 1 }
-    chan<i32>::close(cid)                 // end(): fecha + drena → o pop do leitor passará a devolver `error`
+    chan<i32>::close("nums")             // end(): fecha + drena → o pop do leitor passará a devolver `error`
 }
 
 fn main() {
-    var c  = chan<i32>::make(64)         // bounded-64 (64 mensagens em voo, no máx.)
-    spawn produz(c.id)                    // dispara e segue (sem join); passa o id
-    var rx = chan<i32>::reader(c.id)
+    var rx = chan<i32>::make<OsChan<i32>>("nums", 64)   // cria, registra em F2 sob "nums", devolve o leitor
+    spawn produz()                        // dispara e segue (sem join) — SEM id
     loop {
         var v = rx.pop()                  // v: i32 | error
         match v {
@@ -514,37 +515,39 @@ limite/contrapressão/fecho — pede uma vez na abertura e confia no transporte.
 `fork_join` de baixo nível sobrevive como mecanismo INTERNO do backend, para paralelizar o codegen — não
 é superfície de usuário; o usuário escreve `spawn`.)*
 
-**Transporte extensível — `kind: IChannelKind<T>` (ruling do dono).** O transporte **não é um enum fechado**:
-é uma **interface** genérica com `send(T)`/`recv(): T`/`end()` (o `end()` sinaliza fecho + dreno). A
-linguagem entrega os built-ins `OsChan<T>` (default — `SOCK_DGRAM`/mailslot) e `MemChan<T>` (fila
-em-processo, sem syscall), e o dev **pluga o seu** implementando `send`/`recv`/`end` — Kafka, RabbitMQ, RPC,
-UDP, WebSocket, HTTP, o que for. É **native-only**: o transporte do dev é código Teko falando o protocolo,
-ou link dinâmico FFI a uma lib de sistema, nunca um `.c` local.
+**Transporte extensível — `service & IChannelKind<T>` (ruling do dono).** O transporte **não é um enum
+fechado**: é uma **interface** genérica com `init(key)`/`send(T)`/`recv(): T`/`end()` (o `init` é o método
+prévio que liga o transporte à chave; o `end()` sinaliza fecho + dreno). A linguagem entrega os built-ins
+`OsChan<T>` (default — `SOCK_DGRAM`/mailslot) e `MemChan<T>` (fila em-processo, sem syscall), e o dev
+**pluga o seu** — Kafka, RabbitMQ, RPC, UDP, WebSocket, HTTP, o que for. É **native-only**: código Teko
+falando o protocolo, ou link dinâmico FFI a uma lib de sistema, nunca um `.c` local.
 
-**A instância do transporte é um serviço na raiz, chaveado pelo id — DI com chave de RUNTIME (ruling do
-dono).** A instância de quem implementa a interface **reside num ponteiro na arena raiz sob o id de contexto**
-(o id do canal), e **`Tx`/`Rx` clamam o serviço pelo id** a cada `send`/`pop`/`end` — é o **DI** (§7 Doc 2,
-DI), só que a chave é o id resolvido em **runtime**, não o tipo em comp-time. É por isso que o handle carrega
-só o id e **nada precisa reconstruir o tipo** quando o id cruza para um `spawn`: a resolução por id devolve o
-transporte concreto, vivo na raiz **até o `close`** (`end()`). Continua **conformidade estática de interface**
-(o tipo concreto é fixado no `make`, `make<K: IChannelKind<T>>`, monomorfizado e registrado como o serviço sob
-o id) — **não** o dispatch dinâmico do Round 3. **Pré-requisito:** exige só a conformidade estática de
-interface, que já existe (`type X = interface {…}`).
+**Totalmente estático — DI por CHAVE CONSTANTE (ruling do dono).** Todo transporte é um **`service`**, e o
+canal é resolvido pela **chave constante** (um literal/`const`, comp-time), como `svc<T>("chave")`. `make<K:
+service & IChannelKind<T>>(key, bounds): Rx<T>` cria o canal, chama `K.init(key)`, registra o serviço na
+**raiz do programa (F2)** sob a chave e devolve o **leitor único** (`Rx<T>`); os escritores fazem
+`svc<Tx<T>>("chave")` — resolvido **inline em comp-time**. Assim **nada trafega id** (nem no `spawn`), e
+**nada reconstrói o tipo**: a chave constante + o tipo dizem tudo em compilação. O serviço do canal vive em
+**F2** (exceção de lifetime — não raiz-de-thread — por ser comunicação entre tasks), do `make` ao
+`close`/`end()`. **Não** é dispatch dinâmico do Round 3 — pré-requisito é só a conformidade estática de
+interface (já existe) + o `service` DI por chave. **Conflito de chave = erro de compilação** (§7).
 
 ```teko
-type IChannelKind<T> = interface { fn send(v: T); fn recv(): T; fn end() }
+type IChannelKind<T> = interface { fn init(key: str); fn send(v: T); fn recv(): T; fn end() }
 
-// o dev escreve o seu transporte — implementa a interface (conformidade estática):
-struct KafkaChan<T> & IChannelKind<T> {
+// o dev escreve o seu transporte — um `service` que satisfaz a interface (conformidade estática):
+service sealed KafkaChan<T> & IChannelKind<T> {
     brokers: str
     topic: str
-    fn send(v: T) { /* serializa v e publica no tópico (Teko puro ou FFI dinâmico) */ }
-    fn recv(): T  { /* consome do tópico e desserializa em T */ }
-    fn end()      { /* fecha o produtor e drena o tópico */ }
+    fn init(key: str) { /* liga o transporte ao tópico derivado da chave `key` */ }
+    fn send(v: T)     { /* serializa v e publica (Teko puro ou FFI dinâmico) */ }
+    fn recv(): T      { /* consome e desserializa em T */ }
+    fn end()          { /* fecha o produtor e drena */ }
 }
 
-var c = chan<Order>::make(64, KafkaChan<Order>{ brokers: "…", topic: "orders" })   // instância → raiz, sob c.id
-var c2 = chan<i32>::make()                    // default: OsChan<i32> (transporte do SO)
+var rx = chan<Order>::make<KafkaChan<Order>>("orders", 64)   // cria, init("orders"), serviço → F2 sob "orders"
+var tx = svc<Tx<Order>>("orders")                            // escritor resolvido por chave (comp-time)
+var rx2 = chan<i32>::make<OsChan<i32>>("nums")               // default do SO, bounded-1
 ```
 
 ### 10.3 `await` — alarga o retorno para `Intent<T>` (sem necessidade de `async`)
@@ -614,7 +617,7 @@ operado pelo **id**, e **reside na arena raiz** (F2 — sobrevive a todas as tas
 pub type Record = struct { run: str, writer: str, kind: str, payload: str }
 
 static fn journal::make(writer: str, roll: Roll = Roll::none, fmt: func<Record, str> | null = null): self  // abre
-              j.id: usize                          // o id do segmento (a currency, como c.id)
+              j.id: usize                          // o id do segmento do journal
 static fn journal::append(id: usize, kind: str, payload: str): null | error  // write(2) O_APPEND, sem buffer
 static fn journal::close(id: usize)              // fecha o segmento
 // nível de corrida (sem id de segmento):
@@ -657,9 +660,9 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 |---|---|
 | **`spawn`** | keyword (Go-style); dispara uma **função sem retorno** como **thread** fire-and-forget; args por cópia; sem `join` |
 | **`isolate`** | **sem necessidade** — thread no mesmo processo ainda pode corromper e só fala por canais do SO; isolação real = outro binário |
-| **`chan<T>`** | tipo genérico MPSC; `make<K: IChannelKind<T>>(bounds = 1, kind = OsChan<T>{})`; `bounds` = nº de **mensagens**; unbounded = `make(0)` (resp. do dev) |
-| **transporte** | `kind: IChannelKind<T>` = `interface { send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); instância = **serviço na raiz chaveado pelo id** (DI c/ chave runtime); estática (monomorfização), não dispatch dinâmico |
-| **fecho** | `close(id)` invoca `end()` (fecha + drena); `Rx::pop(): T \| error` (error = encerrado); `Tx::send(): null` + `tx.closed` |
+| **`chan<T>`** | tipo genérico MPSC; `make<K: service & IChannelKind<T>>(key, bounds = 1): Rx<T>`; `bounds` = nº de **mensagens**; unbounded = `make(key, 0)` (resp. do dev) |
+| **transporte** | `IChannelKind<T>` = `interface { init(key); send(T); recv(): T; end() }` **extensível**; built-ins `OsChan`/`MemChan` + plug do dev (Kafka/Rabbit/RPC/UDP/WS/HTTP); **DI por CHAVE CONSTANTE** — todo transporte é `service`, vive em **F2** (raiz do programa), resolve por `svc<Tx<T>>("chave")` em comp-time; **elimina id no `spawn`**; não dispatch dinâmico |
+| **fecho** | `close(key)` invoca `end()` (fecha + drena); `Rx::pop(): T \| error` (error = encerrado); `Tx::send(): null` + `tx.closed` |
 | **`await`** | **sem necessidade de `async`**; prefixo de ligação que **alarga** o retorno para `Intent<T>` por suspensão; sem inline; `await _ = f()` descarta o retorno |
 | **`Intent<T>`** | `.value` / `.canceled` / `.failure`; **`cancel()`** global (cancela o Intent, ou `panic` fora de suspensão) |
 | **várias tasks** | por **atribuição múltipla** (`await var a, b = fa(), fb()`), sem `when_all`/`when_any` |
@@ -672,10 +675,10 @@ transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é ch
 referência** — `<ref T>` é rejeitado pelo checker. Um borrow que atravessasse uma task/continuação
 penduraria quando a arena do outro lado dropasse (UAF). Consequências de superfície:
 
-- `spawn`/`chan<T>::writer`/`chan<T>::reader`/uma função esperada por `await` **rejeitam** parâmetro/valor `ref`.
+- `spawn`/`svc<Tx<T>>`/`svc<Rx<T>>`/uma função esperada por `await` **rejeitam** parâmetro/valor `ref`.
 - `Foo<ref T>` não parseia/typa. `ref` sobrevive só como borrow **local** caller→callee que **não** cruza
   fronteira de concorrência (§3: `ref` já é só parâmetro).
-- O que cruza a fronteira é **cópia** (valor) ou **id** (`u64`), nunca borrow.
+- O que cruza a fronteira é **cópia** (valor) ou **nome** (a chave constante do canal), nunca borrow.
 
 ---
 
@@ -705,16 +708,17 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
 3. ~~chave-string da DI~~ — **mesmo tipo sob a mesma chave = ERRO DE COMPILAÇÃO** (§7); chaves distintas
    coexistem, nunca "último vence" silencioso.
 4. ~~`chan_unbounded`~~ — entra, responsabilidade do dev.
-5. ~~tipo do canal (enum `os`/`mem`)~~ — **transporte é um `IChannelKind<T>` extensível** (`interface { fn
-   send(T); fn recv(): T; fn end() }`): built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/
-   RPC/UDP/WS/HTTP. A instância é um **serviço na raiz chaveado pelo id** (DI com chave de **runtime**: `Tx`/
-   `Rx` clamam pelo id), viva até o `close`/`end()` — por isso nada reconstrói o tipo quando o id cruza um
-   `spawn`. **Conformidade estática** (monomorfização), **não** dispatch dinâmico do Round 3. `Rx::pop(): T |
-   error` (error = encerrado); `Tx::send(): null` + `tx.closed`.
+5. ~~tipo do canal (enum `os`/`mem`)~~ — **transporte é um `service & IChannelKind<T>` extensível**
+   (`interface { fn init(key); fn send(T); fn recv(): T; fn end() }`): built-ins `OsChan` (default) /
+   `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/WS/HTTP. **Totalmente estático — DI por CHAVE CONSTANTE:**
+   `make<K: service & IChannelKind<T>>(key, bounds): Rx<T>` devolve o leitor; os escritores fazem
+   `svc<Tx<T>>("chave")` (comp-time, inline). O serviço vive na **raiz do programa (F2)** — exceção de
+   lifetime, por ser comunicação entre tasks — do `make` ao `close`/`end()`. **Elimina passar id no
+   `spawn`.** Não dispatch dinâmico do Round 3.
 6. ~~`isolate` / `async`~~ — **sem necessidade de existirem** (o `await` prefixo basta; thread no mesmo
    processo não justifica `isolate` — isolação real = outro binário).
 
-**Nada em aberto na superfície.** *(Pré-requisito registrado: a **conformidade estática de interface** —
-`type X = interface {…}` com `send`/`recv` monomorfizados — precisa estar funcional para o transporte de
-canal; é o único novo ponto de apoio de linguagem que a onda de concorrência exige, e NÃO é o dispatch
-dinâmico do Round 3.)*
+**Nada em aberto na superfície.** *(Pré-requisito registrado: a **conformidade estática de interface**
+(`type X = interface {…}`) **+ o `service` DI resolvido por chave constante** (`svc<T>("chave")`) precisam
+estar funcionais para o transporte de canal; é o único novo ponto de apoio de linguagem que a onda de
+concorrência exige, e NÃO é o dispatch dinâmico do Round 3.)*

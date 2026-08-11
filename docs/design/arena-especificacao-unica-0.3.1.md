@@ -381,15 +381,15 @@ processo ainda pode corromper e já só fala por canais do SO — teria os custo
 Quem precisa de isolação de processo real usa **outro binário**, fora do escopo da linguagem.)*
 
 ```teko
-fn tarefa(cid: usize) {                // função comum SEM retorno
-    var tx = chan<i32>::writer(cid)
+fn tarefa() {                          // função comum SEM retorno — SEM id (resolve por chave)
+    var tx = svc<Tx<i32>>("res")       // extremo de escrita, pela chave constante
     tx.send(processar())
-    chan<i32>::close(cid)
+    chan<i32>::close("res")
 }
 
 fn main() {
-    var c = chan<i32>::make(64)
-    spawn tarefa(c.id)                 // thread fire-and-forget; sincroniza pelo canal / WaitGroup
+    var rx = chan<i32>::make<OsChan<i32>>("res", 64)
+    spawn tarefa()                     // thread fire-and-forget SEM id; sincroniza pelo canal / WaitGroup
     // spawn soma(a, b)                 // ERRO: soma tem retorno — spawn não aceita
 }
 ```
@@ -399,77 +399,78 @@ processo** para um singleton morar — cada task morre e sua raiz esvazia. Um `c
 `main` e que sobrevive a todas as tasks, precisa de uma região **imortal, separada de qualquer raiz de
 task**. F2 é essa região, e é **pré-requisito de F1**, não adicional.
 
-### 7.7 IDs, não ponteiros — a regra do dono para tudo que cruza fronteira de task
+### 7.7 NOMES, não ponteiros — a regra do dono para tudo que cruza fronteira de task
 
-> *"a main abre o canal e passa para a thread do orquestrador um id pra ele buscar a ref do canal
-> somente leitura e para os handlers passa o id pra eles buscarem a ref de escrita."* — dono
+> *"a main abre o canal e o consumidor o resolve; toda implementação é um `service`, e a chave é uma
+> constante — o worker resolve o `Tx` por `svc<Tx<T>>(\"chave\")`, sem receber id nenhum."* — dono
 
 A razão é memória: **um ponteiro para a arena de OUTRA task pendura no instante em que essa task rebobina
-seu `arena_pop`.** Um `u64` não é um ponteiro — é um **NOME**, resolvido por consulta a um registro
-processo-inteiro a cada uso, **nunca cacheado**. Um handle carrega o id e **nada mais**; todo predicado é
-uma CHAMADA que consulta o registro pelo id, nunca um campo lido do handle (uma cópia do handle é
-inofensiva por construção só se copiar um nome não envelhecer o nome).
+seu `arena_pop`.** O que cruza a fronteira nunca é um ponteiro — é um **NOME**. E o nome do canal é a sua
+**chave constante** (§7.8): resolvida **em comp-time** por `svc<Tx<T>>("chave")`, um intrínseco DI (§8) —
+não há nem sequer um `u64` de runtime a passar, nem registro consultado por handle. É a forma mais forte da
+regra: o "nome" é uma constante conhecida na compilação, e a instância do canal vive na raiz do programa
+(F2) sob essa chave, então nada envelhece e **nada precisa reconstruir tipo** ao cruzar um `spawn`.
 
 ```teko
-pub type TaskHandle = struct { handle: u64 }  // só o id, zero estado observável em cache
-pub type ChanId  = u64                       // o canal que a main abre e distribui por nome
+// O "nome" do canal é a CHAVE constante — não um id de runtime:
+var rx = chan<i32>::make<OsChan<i32>>("res", 64)   // a main cria e nomeia o canal
+var tx = svc<Tx<i32>>("res")                        // o worker resolve por chave, em comp-time (sem id)
 ```
 
 ### 7.8 `chan<T>` — MPSC (fan-in), a primitiva de dados
 
 `chan<T>` é um **tipo genérico**, aberto pela fábrica estática `make`, cujo parâmetro `bounds` tem
 **valor default = 1** (usa a superfície nova de uma vez: genérico, `static fn`, `usize`, e **parâmetro com
-default**). Tudo é operado pelo **id** do canal (a regra "IDs, não ponteiros", §7.7):
+default**). Tudo é operado pela **chave constante** do canal (a regra "NOMES, não ponteiros", §7.7):
 
 ```teko
-// O TRANSPORTE é um contrato — a interface que qualquer canal (SO, memória, Kafka, RabbitMQ, RPC, …) satisfaz:
+// O TRANSPORTE é um contrato — a interface que qualquer canal satisfaz; TODO transporte é também um `service`:
 type IChannelKind<T> = interface {
-    fn send(v: T)   // entrega uma mensagem no transporte
-    fn recv(): T    // retira uma mensagem do transporte
-    fn end()        // sinaliza o FECHO e o DRENO do canal
+    fn init(key: str)   // método PRÉVIO: inicializa o transporte ligado à CHAVE constante do canal
+    fn send(v: T)       // entrega uma mensagem
+    fn recv(): T        // retira uma mensagem
+    fn end()            // fecho + dreno
 }
 
-static fn chan<T>::make<K: IChannelKind<T>>(bounds: usize = 1, kind: K = OsChan<T>{}): self
-                    c.id: usize                     // o id do canal — o que se passa a uma corotina
-static fn chan<T>::writer(id: usize): Tx<T>        // extremo de ESCRITA (copiável, N escritores)
-static fn chan<T>::reader(id: usize): Rx<T>        // extremo de LEITURA (um só; 2º de outra task = erro)
-static fn chan<T>::close(id: usize)                // invoca o `end()` do transporte: fecha + drena
+// make: cria o canal, chama K.init(key), registra o serviço na RAIZ DO PROGRAMA (F2) sob a CHAVE constante,
+// e devolve o LEITOR único (Rx<T>). K é um `service` que satisfaz a interface:
+static fn chan<T>::make<K: service & IChannelKind<T>>(key: str, bounds: usize = 1): Rx<T>
 
-// Tx<T> e Rx<T> são handles pequenos que carregam SÓ o id, tipados por T — obtidos por writer(id)/reader(id):
-fn Tx<T>::send(v: T): null                         // devolve `null` no envio; a propriedade `tx.closed: bool` diz se o canal fechou (drenado, sem mais mensagens)
-fn Rx<T>::pop(): T | error                         // recebe; devolve `error` quando o canal foi encerrado (`end()`) e drenado
+// os ESCRITORES resolvem o extremo de escrita pela MESMA chave constante (svc = intrínseco de comp-time, §8):
+var tx = svc<Tx<T>>("chave")                       // Tx<T> — N escritores, todos por chave (nada de id no spawn)
+
+static fn chan<T>::close(key: str)                 // invoca o end() do transporte: fecha + drena
+
+fn Tx<T>::send(v: T): null                         // devolve null; a propriedade tx.closed diz se fechou (drenado)
+fn Rx<T>::pop(): T | error                         // recebe; error quando o canal foi encerrado (end()) e drenado
 ```
 
-- `chan<T>::make()` → **bounded-1**, transporte do SO (defaults) · `make(64)` → bounded-64 · `make(0)` → **unbounded**.
+- **TOTALMENTE ESTÁTICO — a chave é uma CONSTANTE (ruling do dono).** `make` e `svc` usam a MESMA chave, um
+  literal de string / `const` conhecido em **comp-time** (o compilador exige que seja constante). Isso torna
+  `svc<Tx<T>>("chave")` um **intrínseco de comp-time** (§8), substituído inline — **sem id em runtime, sem
+  vtable, sem dispatch dinâmico, sem service-locator**. **Elimina passar id no `spawn`**: o worker não recebe
+  id, resolve o `Tx` pela chave. É por isso que `make<K: service & IChannelKind<T>>` — o transporte é um
+  **`service`** que satisfaz a interface, e o `make` só precisa do tipo `K` + a chave.
+- **`chan<T>::make(key, bounds = 1): Rx<T>`** devolve o **leitor único** a quem cria o canal; os escritores
+  fazem `svc<Tx<T>>(key)`. Fan-in MPSC: **1 leitor** (o `Rx` de `make`), **N escritores** (`svc<Tx>` por chave).
 - **`bounds` conta MENSAGENS, não bytes.** O teto limita quantas mensagens ficam em voo; o **tamanho de
-  cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB e o desenho dele
-  suportar, é por conta dele.
-- **`kind` — o TRANSPORTE do canal, um `IChannelKind<T>` extensível (ruling do dono).** O transporte não é
-  um enum fechado: é uma **interface** genérica com só `send(T)`/`recv(): T`. O dev passa uma **instância
-  configurada** (que carrega o config do transporte por valor) e a linguagem só fornece a **costura**:
+  cada mensagem é responsabilidade do dev** — se ele enviar uma única mensagem de 10 GB, é por conta dele.
+- **O transporte `K` é um `service & IChannelKind<T>` extensível (ruling do dono).** O `make` chama
+  `K.init(key)` (o método prévio), registra o canal sob a chave, devolve `Rx<T>`. Built-ins e plugues:
   - **`OsChan<T>`** (default): transporte do **SO** — `SOCK_DGRAM` no Linux/macOS, **mailslot** no Windows.
-    Robusto (bufferizado pelo kernel, atravessa qualquer raia/task), fecha a garantia de "cruza por cópia".
-  - **`MemChan<T>`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais rápida,
-    só dentro do MESMO processo.
-  - **do dev**: `KafkaChan<T>{ brokers, topic }`, `RabbitChan<T>{…}`, `WsChan<T>{…}`, `HttpChan<T>{…}`,
-    `UdpChan<T>{…}`, `RpcChan<T>{…}` — qualquer coisa que implemente `send`/`recv`/`end`. Native-only: o
-    transporte é **código Teko** falando o protocolo, ou **link dinâmico FFI** a uma lib de sistema — nunca um `.c` local.
-- **A instância do transporte é um SERVIÇO na raiz, chaveado pelo id — DI com chave de RUNTIME (ruling do dono).**
-  Esta é a peça que resolve "reconstruir o tipo quando só o id cruza a fronteira": a instância de quem
-  implementa a interface **reside num ponteiro na arena raiz (F2, §7.6) sob um id de contexto** — o id do
-  canal. **Quem clama pelo serviço é o `Tx`/`Rx`, usando o id como chave** (é o mesmo mecanismo do DI, §8, só
-  que a chave é resolvida em runtime, não por tipo em comp-time). O handle carrega só o id; a cada `send`/
-  `pop` resolve o transporte pelo id e o invoca. É **seguro** porque a instância vive na raiz **até o `close`**
-  (`end()`), então o ponteiro nunca pendura, e **nada precisa reconstruir o tipo concreto** do lado receptor.
-- **Conformidade de interface ESTÁTICA, não dispatch dinâmico do Round 3.** O tipo concreto do `kind` é
-  fixado no `make` (`make<K: IChannelKind<T>>` — a interface como **bound de comp-time**, como o subtipo de
-  closure Doc 2 §9.2): o `send`/`recv`/`end` do transporte é **monomorfizado** e **registrado como o serviço
-  sob o id**. O roteamento é a **resolução DI por id** (service locator), com o transporte concreto por trás —
-  **sem vtable de interface, sem representação de runtime da interface** (o Round-3 NÃO é pré-requisito).
-- **Ciclo de vida:** a instância carrega o config **por valor** (nunca um `ref` cruzando task, regra de UAF
-  §9), vive na raiz sob o id **do `make` até o `close`**, e o `close(id)` invoca `end()` (fecho + dreno) e
-  então a solta da raiz. O `bounds`/contrapressão ficam na camada `chan` (Tx/Rx); a interface é só `send`/`recv`/`end`.
-- Fan-in MPSC: N escritores (`Tx`), 1 leitor (`Rx`).
+  - **`MemChan<T>`**: fila **em-processo** (anel na região imortal F2, §7.6), **sem syscall** — mais rápida.
+  - **do dev**: `KafkaChan<T>`, `RabbitChan<T>`, `WsChan<T>`, `HttpChan<T>`, `UdpChan<T>`, `RpcChan<T>` —
+    qualquer `service` que implemente `init`/`send`/`recv`/`end`. Native-only: código Teko falando o
+    protocolo, ou **link dinâmico FFI** a uma lib de sistema — nunca um `.c` local.
+- **Lifetime: raiz de PROGRAMA (F2), não de thread — a exceção do canal.** Singletons comuns vivem na raiz
+  da THREAD (§8); o canal é a primitiva de comunicação ENTRE tasks, então o serviço do canal vive na **raiz
+  do programa (F2)**, do `make` ao `close`/`end()` — por isso `svc<Tx<T>>("chave")` de **qualquer thread**
+  resolve o MESMO canal. Config **por valor**, nunca um `ref` cruzando task (regra de UAF, §9).
+- **Conflito de chave = erro de compilação** (§7 Doc 2, política de DI): o mesmo `chan<T>` sob a mesma chave
+  duas vezes é **erro em comp-time**; chaves distintas coexistem, nunca "último vence".
+- **Conformidade de interface ESTÁTICA, não dispatch dinâmico do Round 3.** Tudo resolve por `(tipo, chave
+  constante)` em comp-time; o `send`/`recv`/`end` do transporte é **monomorfizado**. Pré-requisito é só a
+  conformidade estática de interface (que já existe) + o `service` DI por chave — **não** o Round 3.
 
 `spawn` é uma **keyword de corotina** (não uma função) — estilo Go: `spawn f(args)` lança `f` numa corotina
 **isolada** (sub-raiz própria, §7.6). Os argumentos vão **por cópia**, **nenhum retorno é esperado**, e
@@ -480,18 +481,17 @@ quando há 64 pendentes (contrapressão): a fila em voo nunca passa de 64, não 
 consumidor atrasa.
 
 ```teko
-fn gerar(cid: usize) {                             // função sem retorno — spawnável como thread
-    var tx = chan<Pedido>::writer(cid)
+fn gerar() {                                       // função sem retorno — SEM id: resolve por chave
+    var tx = svc<Tx<Pedido>>("pedidos")            // extremo de escrita, pela chave constante
     for p in pedidos() {
         tx.send(p)              // 64 pendentes? ESPERA o consumidor — a fila não acumula
     }
-    chan<Pedido>::close(cid)    // end(): fecha + drena → o pop do consumidor passará a devolver `error`
+    chan<Pedido>::close("pedidos")   // end(): fecha + drena → o pop do consumidor passará a devolver `error`
 }
 
 fn main() {
-    var c = chan<Pedido>::make(64)   // no máx. 64 pedidos em voo
-    spawn gerar(c.id)               // Go-style: dispara e segue (sem join); passa o ID
-    var rx = chan<Pedido>::reader(c.id)
+    var rx = chan<Pedido>::make<OsChan<Pedido>>("pedidos", 64)   // cria, registra em F2 sob "pedidos", devolve o leitor
+    spawn gerar()                    // Go-style: dispara e segue (sem join) — SEM id
     loop {
         var m = rx.pop()
         match m {
@@ -503,19 +503,19 @@ fn main() {
 ```
 
 **unbounded — enfileirar um lote fixo ANTES de existir consumidor.** Bounded daria **deadlock** (ninguém
-drena enquanto a `main` enfileira). O `make(0)` não bloqueia, e é seguro porque o total é **conhecido e
+drena enquanto a `main` enfileira). O `bounds = 0` não bloqueia, e é seguro porque o total é **conhecido e
 pequeno**.
 
 ```teko
 fn main() {
-    var c  = chan<Tarefa>::make(0)   // unbounded
-    var tx = chan<Tarefa>::writer(c.id)
+    var rx = chan<Tarefa>::make<OsChan<Tarefa>>("tarefas", 0)   // unbounded; devolve o leitor
+    var tx = svc<Tx<Tarefa>>("tarefas")                          // escritor pela chave
     for tarefa in lote_fixo() {      // ex.: 12 tarefas conhecidas — total pequeno e finito
         tx.send(tarefa)              // nunca bloqueia; não há "cheio" para travar a main
     }
-    chan<Tarefa>::close(c.id)
+    chan<Tarefa>::close("tarefas")
     var i = 0
-    loop while i < 4 { spawn worker(c.id); i = i + 1 }   // 4 corotinas drenam; sync via chan/WaitGroup
+    loop while i < 4 { spawn worker(); i = i + 1 }   // 4 corotinas drenam — SEM id; sync via chan/WaitGroup
 }
 ```
 
@@ -665,16 +665,18 @@ a resolução de DI é **da thread, não do programa** — justamente para não 
 | **scoped** | resolve contra a arena-escopo **dentro da sub-raiz da thread** (fecha o ponto que estava aberto) |
 | **transient** | região corrente da thread |
 
-Isso mantém a disciplina "dados só cruzam por cópia/id entre threads": um serviço resolvido numa thread
+Isso mantém a disciplina "dados só cruzam por cópia/nome entre threads": um serviço resolvido numa thread
 não é visível a outra por referência — se precisar atravessar, atravessa como valor por `chan`, nunca o
 `Ref` do serviço.
 
-**O transporte de canal (§7.8) é DI com chave de RUNTIME.** O DI acima resolve por **tipo em comp-time**
-(`svc<T>()`). O transporte do `chan` é o mesmo padrão de service-locator, só que a **chave é o id do canal
-resolvido em runtime**: a instância do `IChannelKind<T>` fica num ponteiro na **raiz do programa (F2)** sob
-o id de contexto, e **`Tx`/`Rx` clamam o serviço pelo id** a cada `send`/`pop`/`end`. É por isso que o
-handle carrega só o id e nada precisa reconstruir o tipo concreto quando o id cruza para uma corotina
-`spawn` — a resolução por id devolve o transporte concreto (monomorfizado no `make`), vivo até o `close`.
+**O transporte de canal (§7.8) é DI por CHAVE CONSTANTE.** O DI resolve por `svc<T>("chave")` — tipo +
+chave, ambos em **comp-time**. O transporte do `chan` é exatamente isso: `make<K: service & IChannelKind<T>>`
+exige que K seja um **`service`**, e a instância vive na **raiz do programa (F2)** sob a **chave constante**
+do canal. **`Tx`/`Rx` clamam o serviço por `svc<Tx<T>>("chave")`**, resolvido inline em comp-time — não há
+id de runtime nem service-locator. É por isso que o worker não recebe id no `spawn` e **nada reconstrói o
+tipo**: a chave constante + o tipo já dizem tudo em compilação; a instância (monomorfizada no `make`) vive
+em F2 até o `close`. É a **exceção de lifetime**: o serviço do canal é raiz-de-PROGRAMA (F2), não raiz-de-
+thread, porque é a primitiva de comunicação ENTRE tasks.
 
 ---
 
@@ -691,11 +693,11 @@ handle carrega só o id e nada precisa reconstruir o tipo concreto quando o id c
 5. **Sem drop prematuro:** o DPS não dropa nada sob o callee; ele redireciona ONDE o callee escreve. A
    falha do arena-por-escopo (bulk-drop com alias vivo) não recorre.
 6. **Threads:** cada worker na sua região; resultado copiado para a lane-region antes do drop; nomes em
-   `prog` imutável; fold em ordem de índice. IDs entre tasks, nunca ponteiros.
+   `prog` imutável; fold em ordem de índice. **Nomes** entre tasks (chave constante do canal), nunca ponteiros.
 7. **`ref` não cruza fronteira de concorrência** (regra do dono): `spawn`/`chan`/uma função esperada por `await` **rejeitam**
    `ref` como parâmetro/valor, e **`<ref T>` é proibido em genérico** — um borrow que atravessasse uma
-   task/continuação penduraria quando a arena do outro lado dropasse. O que cruza é cópia (valor) ou id
-   (`u64`). É a mesma raiz do "IDs, não ponteiros" (§7.7), estendida a todo borrow.
+   task/continuação penduraria quando a arena do outro lado dropasse. O que cruza é cópia (valor) ou **nome**
+   (a chave constante do canal). É a mesma raiz do "NOMES, não ponteiros" (§7.7), estendida a todo borrow.
 
 ---
 
@@ -736,13 +738,12 @@ fn collect(xs: []i64): []i64 {
 }
 ```
 
-**(d) Threads — canal por id, nunca ponteiro:**
+**(d) Threads — canal por chave constante, nunca ponteiro nem id:**
 ```teko
 fn pipeline() {
-    var c = chan_bounded(1024)        // main abre o canal (vive na região F2, imortal)
-    var w = chan_writer(c)            // handlers recebem o ID `c`, buscam a ref de escrita por nome
-    var r = chan_reader(c)            // o orquestrador recebe o ID `c`, busca a ref de leitura
-    // ... spawn passa `c` (um u64), nunca &c: um ponteiro penduraria quando a task rebobinasse a arena
+    var r = chan<Msg>::make<OsChan<Msg>>("pipe", 1024)   // main cria o canal (vive na região F2, imortal), recebe o leitor
+    spawn handler()                   // SEM id — o handler resolve o escritor por chave
+    // dentro do handler: var w = svc<Tx<Msg>>("pipe")   // resolve em comp-time; nunca um &canal (penduraria)
 }
 ```
 
@@ -754,11 +755,13 @@ fn pipeline() {
 - **Piso = necessidade estática + cabeçalho da arena**, não 64 KiB default (§3). Elisão = o caso limite
   `need == 0` (§4).
 - **`chan_unbounded`: PERMITIDO** — responsabilidade do dev, não da linguagem (§7.8).
-- **Transporte do canal = `IChannelKind<T>` extensível** (`interface { fn send(T); fn recv(): T; fn end() }`);
-  built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/WS/HTTP. A instância é um
-  **serviço na raiz chaveado pelo id** — DI com chave de **runtime**: `Tx`/`Rx` resolvem o transporte pelo id
-  (§8), vive da abertura ao `close`/`end()`. Conformidade **estática** (monomorfização), não dispatch dinâmico
-  do Round 3 (§7.8). `Rx::pop(): T | error` (error = encerrado); `Tx::send(): null` + `tx.closed`.
+- **Transporte do canal = `service & IChannelKind<T>` extensível** (`interface { fn init(key); fn send(T);
+  fn recv(): T; fn end() }`); built-ins `OsChan` (default) / `MemChan`, e o dev pluga Kafka/Rabbit/RPC/UDP/
+  WS/HTTP. **Totalmente estático — DI por CHAVE CONSTANTE:** `make<K: service & IChannelKind<T>>(key, bounds)
+  : Rx<T>` cria e devolve o leitor único; os escritores fazem `svc<Tx<T>>("chave")` (comp-time, inline). O
+  serviço vive na **raiz do programa (F2)** (exceção de lifetime — não raiz-de-thread — por ser comunicação
+  entre tasks), da abertura ao `close`/`end()`. **Elimina passar id no `spawn`.** `Rx::pop(): T | error`
+  (error = encerrado); `Tx::send(): null` + `tx.closed`. Sem dispatch dinâmico do Round 3 (§7.8).
 - **DI sob threads:** cada thread tem sub-raiz; **singleton vive na raiz da THREAD** (não do programa),
   scoped na sub-raiz da thread — sem ressincronizar (§8).
 - **Concorrência: `spawn` (keyword, dispara função sem retorno como thread), `chan<T>`, `await`.** Não há
