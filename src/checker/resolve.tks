@@ -1063,6 +1063,16 @@ fn type_param_reg(name: str, own_constraint: parser::ConstraintExpr, ns: str, ta
     `type_params` (same length; NoConstraint where the caller has none) — see type_param_reg for how
     index i's constraint becomes its synthetic TypeReg (a single-interface atom `<T: I>` is the N=1
     degenerate case, unchanged since #99). */
+/**
+ * The maximum arity of ANY generic — the number of type-parameters a type/function/method may DECLARE,
+ * and the number of explicit type-arguments a call-site may pass (owner OR callee position). Owner
+ * ruling: C#'s Func/Action-16 cap generalized to every generic, keeping monomorphization tractable and
+ * ruling out pathological arities. The SINGLE source of truth the whole checker validates against.
+ *
+ * @return the inclusive maximum type-parameter / type-argument count (16)
+ */
+pub fn max_generic_arity(): u64 { 16 }
+
 pub fn type_param_table(type_params: []str, type_constraints: []parser::ConstraintExpr, ns: str, table: TypeTable): TypeTable {
     if type_params.len == 0 { return table }
     var tbl = tt_empty()
@@ -2808,10 +2818,10 @@ fn collect_site_args(path: parser::Path, args: []parser::TypeExpr, acc: []parser
  * @since onda-3 (#254 L5)
  */
 fn collect_call_site_args(call: parser::Call, acc: []parser::TypeExpr): []parser::TypeExpr {
-    if call.type_args.len == 0 { return acc }
+    if call.owner_type_args.len == 0 { return acc }   // the OWNER `<…>` (`Cell<i64>::make`) stamps the type instance; method `<…>` bind elsewhere
     if call.callee.segments.len < 2 { return acc }
     var owner_name = call.callee.segments[call.callee.segments.len - 2].name
-    collect_site_args(parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = owner_name }) }, call.type_args, acc)
+    collect_site_args(parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = owner_name }) }, call.owner_type_args, acc)
 }
 
 // (W9.4) walk an expression for construction-site type-args (`Foo<i64>{…}`) and nested patterns.

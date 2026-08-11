@@ -29,7 +29,7 @@ fn parse_num_suffix_lit(tokens: []lexer::Token, pos: u64, txt: str): Parsed<Expr
     var arg = Expr { kind = StrLit { text = numeric }; line = tokens[pos].line; col = tokens[pos].col }
     var args = teko::list::push(teko::list::empty(), arg)
     var arg_names = teko::list::push(teko::list::empty(), "")
-    var call = Call { callee = Path { segments = segs }; args = args; arg_names = arg_names; type_args = teko::list::empty() }
+    var call = Call { callee = Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }
     Parsed<Expr> { node = Expr { kind = call; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
 }
 
@@ -76,28 +76,46 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
 /**
  * Parse a generic STATIC/factory call `Cell<i64>::make(args)` (#254 L5). `at_colons` is at the `::`
  * that follows the already-closed construction-site `<…>`; `base` is the constructed base path
- * (`Cell`); `type_args` are the parsed generic args (`[i64]`). Parses the factory tail after the `::`,
- * appends it to `base` (`Cell::make`), then the argument list, and carries the type-args on the Call so
- * the checker retargets the callee owner to the mangled instance (`Cell__g__i64::make`). A missing `(`
- * after the tail is a hard error — a generic static call is `Type<Args>::fn(...)`.
+ * (`Cell`); `owner_type_args` are the parsed TYPE generic args (`[i64]`). Parses the factory tail after
+ * the `::`, appends it to `base` (`Cell::make`), OPTIONALLY a second explicit `<…>` on the METHOD
+ * (`Map<K,V>::fold<Acc>()` → callee_type_args), then the argument list. The owner args ride on the Call
+ * so the checker retargets the callee owner to the mangled instance (`Cell__g__i64::make`); the method
+ * args bind the factory method's own type-params. A missing `(` after the tail (and optional method
+ * `<…>`) is a hard error — a generic static call is `Type<Args>::fn(...)`.
  *
- * @param tokens    the token stream
- * @param at_colons the index of the `::` after the closed `<…>`
- * @param base      the constructed base path (`Cell`)
- * @param type_args the construction-site generic args (`[i64]`)
- * @param origin    the leading token index (for the Call node's line/col)
- * @return          the parsed factory `Call` expression, or a parse error
- * @throws          when a name after `::` is missing, or a `(` does not follow the factory tail
+ * @param tokens          the token stream
+ * @param at_colons       the index of the `::` after the closed `<…>`
+ * @param base            the constructed base path (`Cell`)
+ * @param owner_type_args the TYPE generic args (`[i64]`)
+ * @param origin          the leading token index (for the Call node's line/col)
+ * @return                the parsed factory `Call` expression, or a parse error
+ * @throws                when a name after `::` is missing, or a `(` does not follow the factory tail
  * @since onda-3 (#254 L5)
  */
-fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, type_args: []TypeExpr, origin: u64): Parsed<Expr> | error {
+fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, owner_type_args: []TypeExpr, origin: u64): Parsed<Expr> | error {
     var tail = match parse_path(tokens, at_colons + 1) { Parsed<Path> as x => x; error as e => return e }
     var full = path_concat(head_path, tail.node)
-    if !is_kind_at(tokens, tail.next, lexer::TokenKind::LParen) {
-        return err_at(tokens, tail.next, "expected '(' — a generic static call is `Type<Args>::fn(...)`")
+    // OPTIONAL explicit METHOD type-args on the factory: `Type<A>::func<B>(…)` — SPECULATIVE, commit
+    // only when the `<…>` closes AND a `(` follows (mirrors the other call-site sites). Otherwise the
+    // resume point stays at the tail and the `(` check below reports the missing paren.
+    var callee_type_args: []TypeExpr = teko::list::empty()
+    var after = tail.next
+    if is_kind_at(tokens, tail.next, lexer::TokenKind::Lt) {
+        match parse_type_args(tokens, tail.next) {
+            ParsedTypeArgs as ta => {
+                if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LParen) {
+                    callee_type_args = ta.args
+                    after = ta.next
+                }
+            }
+            error => { }
+        }
     }
-    var ca = match parse_call_args(tokens, tail.next) { ParsedCallArgs as x => x; error as e => return e }
-    Parsed<Expr> { node = Expr { kind = Call { callee = full; args = ca.args; arg_names = ca.arg_names; type_args = type_args }; line = tokens[origin].line; col = tokens[origin].col }; next = ca.next }
+    if !is_kind_at(tokens, after, lexer::TokenKind::LParen) {
+        return err_at(tokens, after, "expected '(' — a generic static call is `Type<Args>::fn(...)`")
+    }
+    var ca = match parse_call_args(tokens, after) { ParsedCallArgs as x => x; error as e => return e }
+    Parsed<Expr> { node = Expr { kind = Call { callee = full; args = ca.args; arg_names = ca.arg_names; owner_type_args = owner_type_args; callee_type_args = callee_type_args }; line = tokens[origin].line; col = tokens[origin].col }; next = ca.next }
 }
 
 // `Name { field = value (; | newline)* }` — a struct VALUE literal (W4a). `pos` is at `{`.
@@ -434,7 +452,7 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         var pp = match parse_path(tokens, pos) { Parsed<Path> as x => x; error as e => return e }
         if is_kind_at(tokens, pp.next, lexer::TokenKind::LParen) {
             var ca = match parse_call_args(tokens, pp.next) { ParsedCallArgs as x => x; error as e => return e }
-            return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = ca.args; arg_names = ca.arg_names; type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
+            return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = ca.args; arg_names = ca.arg_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
         }
         // (W9.4) explicit type-args after a path — SPECULATIVE: parse the `<…>` list, then commit by
         // what follows the CLOSED list. A `(` → an explicit-generic FUNCTION call `foo<T>(args)` /
@@ -448,7 +466,7 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
                 ParsedTypeArgs as ta => {
                     if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LParen) {
                         var gca = match parse_call_args(tokens, ta.next) { ParsedCallArgs as x => x; error as e => return e }
-                        return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = gca.args; arg_names = gca.arg_names; type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }; next = gca.next }
+                        return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = gca.args; arg_names = gca.arg_names; owner_type_args = teko::list::empty(); callee_type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }; next = gca.next }
                     }
                     if allow_struct && ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LBrace) {
                         return parse_struct_lit(tokens, ta.next, pp.node, ta.args)

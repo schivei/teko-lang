@@ -352,7 +352,7 @@ fn type_tilde_chain(b: parser::Binary, env: Env, table: TypeTable): TExpr | erro
     var pos_names: []str = teko::list::empty()   // DEFARGS (2026-07-01) — this synthetic call is always all-positional
     var ni: u64 = 0
     loop { if ni >= folded.len { break }; pos_names = teko::list::push(pos_names, ""); ni++ }
-    var call = parser::Call { callee = parser::Path { segments = segs }; args = folded; arg_names = pos_names; type_args = teko::list::empty() }
+    var call = parser::Call { callee = parser::Path { segments = segs }; args = folded; arg_names = pos_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }
     // `concat`'s own arg-widening (type_call, below) already requires every piece to be `str` —
     // a non-str `~` operand fails there with a clear message, no separate check needed here.
     type_call(call, env, table)
@@ -1432,7 +1432,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     var cnames: []str = teko::list::empty()
     var ni: u64 = 0
     loop { if ni >= cargs.len { break }; cnames = teko::list::push(cnames, ""); ni++ }
-    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; type_args = mc.type_args }, env, table)
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = teko::list::empty(); callee_type_args = mc.type_args }, env, table)
 }
 
 /**
@@ -1541,25 +1541,27 @@ fn rewrite_segment_at(p: parser::Path, idx: u64, name: str): parser::Path {
 }
 
 /**
- * Retarget a static-call callee that carries construction-site type-args (`Cell<i64>::make(…)`) to the
+ * Retarget a static-call callee that carries OWNER-TYPE type-args (`Cell<i64>::make(…)`) to the
  * mangled generic-instance owner (`Cell__g__i64::make`), so `lookup_call` resolves the stamped factory
- * `register_instance_methods` registered (#254 L5). Resolves the type-args to concrete types, mangles
- * the base (the callee's SECOND-TO-LAST segment) via `generic_inst_name`, and rewrites that segment.
- * A call with no type-args (or a single-segment callee) passes through unchanged → byte-identical for
- * every existing call.
+ * `register_instance_methods` registered (#254 L5). Resolves the `owner_type_args` (the `<…>` on the
+ * TYPE before `::`) to concrete types, mangles the base (the callee's SECOND-TO-LAST segment) via
+ * `generic_inst_name`, and rewrites that segment. A call with no owner type-args (or a single-segment
+ * callee) passes through unchanged → byte-identical for every existing call. Any explicit METHOD
+ * type-args (`callee_type_args`) are NOT consumed here — they bind the factory method's own params
+ * downstream (`Map<str,i64>::fold<Acc>()`).
  *
- * @param c      the parsed static call (carrying type_args)
+ * @param c      the parsed static call (carrying owner_type_args)
  * @param table  the folded type table (arg resolution)
  * @param ref_ns the call's enclosing namespace
  * @return       the callee path with the owner segment mangled to the instance, or `c.callee` verbatim
- * @throws       when a type-arg fails to resolve
+ * @throws       when an owner type-arg fails to resolve
  * @since onda-3 (#254 L5)
  */
 fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str): parser::Path | error {
-    if c.type_args.len == 0 || c.callee.segments.len < 2 { return c.callee }
+    if c.owner_type_args.len == 0 || c.callee.segments.len < 2 { return c.callee }
     var owner_idx = c.callee.segments.len - 2
     var owner_name = c.callee.segments[owner_idx].name
-    var nt = parser::NamedType { path = single_seg_path(owner_name); args = c.type_args }
+    var nt = parser::NamedType { path = single_seg_path(owner_name); args = c.owner_type_args }
     var rt = match resolve_type(nt, table, ref_ns) { Type as t => t; error as e => return e }
     var inst = match rt { Named as n => n.name; _ => return c.callee }
     rewrite_segment_at(c.callee, owner_idx, inst)
@@ -1620,24 +1622,26 @@ fn unresolved_builtin_qualifier_error(callee: parser::Path, name: str): error {
  * @throws       an unknown callee, an arity/type mismatch, or an uninferable generic type-param
  */
 fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
-    // Explicit call-site type-args, when present, are one of TWO shapes that share this Call node:
-    //   • a generic STATIC/factory call `Type<Args>::m(…)` — the args bind the OWNER TYPE's params
-    //     (retargeted to the mangled instance owner, unchanged pre-existing behavior); or
-    //   • an explicit generic FUNCTION/METHOD call `foo<Args>(…)` / `recv.m<Args>(…)` — the args
-    //     bind the FUNCTION's own type-params (the new call-site form). We disambiguate by resolving
-    //     the callee: a callee that names a function takes the explicit-fn path; otherwise it is the
-    //     static-type retarget. `explicit_fn_args` is empty for every ordinary (bare/inferred) call.
-    var explicit_fn_args: []parser::TypeExpr = teko::list::empty()
+    // Explicit call-site type-args live in TWO INDEPENDENT positions the parser recorded separately, so
+    // there is no guessing:
+    //   • `owner_type_args` — the `<…>` on the TYPE before `::` (`List<i64>::make`, `Map<str,i64>::fold`):
+    //     they bind the OWNER TYPE's params, and the factory callee is retargeted to the mangled instance
+    //     owner (`List<i64>::make` → `List__g__i64::make`) — unchanged pre-existing behavior.
+    //   • `callee_type_args` — the `<…>` on the FUNCTION/METHOD (`foo<T>()`, `ns::foo<T>()`, `Type::m<T>()`,
+    //     `Type<A>::m<B>()`, and — via the method desugar — `recv.m<T>()`): they bind the CALLEE's own
+    //     type-params (the explicit-fn path).
+    // The two are wholly separate and may coexist (`Map<str,i64>::fold<Acc>()`): the type args retarget the
+    // owner, the method args bind `fold`. Both are empty for an ordinary (bare/inferred) call.
+    // Shared generic-arity guard (owner ruling): at most `max_generic_arity()` explicit type-args in
+    // EITHER position — the owner `<…>` (`Type<…>::m`) or the callee `<…>` (`m<…>()`).
+    if c0.owner_type_args.len > max_generic_arity() || c0.callee_type_args.len > max_generic_arity() {
+        return error { message = "at most 16 explicit type arguments" }
+    }
+    var explicit_fn_args: []parser::TypeExpr = c0.callee_type_args
     var c = c0
-    if c0.type_args.len > 0 {
-        var callee_is_fn = match lookup_call(env, c0.callee) { Type as t => match t { Func => true; _ => false }; error => false }
-        if callee_is_fn {
-            explicit_fn_args = c0.type_args
-            c = parser::Call { callee = c0.callee; args = c0.args; arg_names = c0.arg_names; type_args = teko::list::empty() }
-        } else {
-            var rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
-            c = parser::Call { callee = rc; args = c0.args; arg_names = c0.arg_names; type_args = c0.type_args }
-        }
+    if c0.owner_type_args.len > 0 {
+        var rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
+        c = parser::Call { callee = rc; args = c0.args; arg_names = c0.arg_names; owner_type_args = c0.owner_type_args; callee_type_args = c0.callee_type_args }
     }
     match type_list_builtin(c, env, table) {   // teko::list::empty / push (generic)
         TExpr as te => return te
@@ -2816,7 +2820,7 @@ fn desugar_datetime_hole(raw_hole: parser::Expr, hole_ns: str, fn_name: str, pat
     args = teko::list::push(args, pat_expr)
     var arg_names: []str = teko::list::push(teko::list::empty(), "")
     arg_names = teko::list::push(arg_names, "")
-    var call = parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = arg_names; type_args = teko::list::empty() }
+    var call = parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }
     type_call(call, env, table)
 }
 

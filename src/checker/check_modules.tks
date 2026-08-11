@@ -235,10 +235,51 @@ fn check_modules(prog: parser::Program, table: TypeTable): []str {
  */
 fn item_module_diags(it: parser::Item, table: TypeTable, al: []AliasBind): []str {
     match it.content {
-        parser::Function as f => fn_module_diags(it, f, table, al)
-        parser::TypeDecl as d => type_module_diags(it, d, table, al)
+        parser::Function as f => concat_diags(arity_decl_diags(it, f.line, f.col, f.type_params.len), fn_module_diags(it, f, table, al))
+        parser::TypeDecl as d => {
+            var ds = arity_decl_diags(it, d.line, d.col, d.type_params.len)   // the TYPE's own type-params
+            ds = concat_diags(ds, type_method_arity_diags(it, d))             // each of its methods' type-params
+            concat_diags(ds, type_module_diags(it, d, table, al))
+        }
         _ => teko::list::empty()
     }
+}
+
+/**
+ * The arity-cap diagnostic for ONE generic DECLARATION: a type/function/method that declares MORE than
+ * `max_generic_arity()` type-parameters is an honest error (the shared generic-arity guard — owner
+ * ruling). A declaration within the cap contributes nothing, so every existing declaration is unchanged.
+ *
+ * @param it    the declaring item (source file for the located diagnostic)
+ * @param line  the declaration's line
+ * @param col   the declaration's column
+ * @param n     the number of declared type-parameters
+ * @return      the located diagnostic when `n` exceeds the cap, else an empty list
+ */
+fn arity_decl_diags(it: parser::Item, line: u32, col: u32, n: u64): []str {
+    if n <= max_generic_arity() { return teko::list::empty() }
+    one_diag(located_diag(it.file, line, col, error { message = "a generic may declare at most 16 type parameters" }))
+}
+
+/**
+ * The arity-cap diagnostics for every METHOD of a type declaration — a struct/class method that declares
+ * more than `max_generic_arity()` type-parameters is an honest error, exactly like a free function or the
+ * enclosing type. Non-struct/class bodies carry no methods here and contribute nothing.
+ *
+ * @param it  the declaring item
+ * @param d   the type declaration
+ * @return    each over-arity method's located diagnostic, in declaration order
+ */
+fn type_method_arity_diags(it: parser::Item, d: parser::TypeDecl): []str {
+    var ms = instance_methods_of(d)
+    var diags: []str = teko::list::empty()
+    var i = 0
+    loop {
+        if i >= ms.len { break }
+        diags = concat_diags(diags, arity_decl_diags(it, ms[i].line, ms[i].col, ms[i].type_params.len))
+        i++
+    }
+    diags
 }
 
 /**

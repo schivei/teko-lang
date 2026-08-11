@@ -1,52 +1,50 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): re-harvested after teaching the compiler EXPLICIT
-# CALL-SITE TYPE-ARGS for generics (functions AND methods). The added parser branches, checker
-# threading and the new `TCall.type_args` field shift the emitted compiler, so the committed source no
-# longer compiled to the previous bootstrap (b84f482d). New harvest 4fc1f137 self-reproduces
-# byte-identical (gen1==gen2 fixpoint), verified from the same source tree. The owner did NOT edit
+# RESEED (hand-harvest, by-hand per owner order): re-harvested after reworking the explicit call-site
+# type-args feature into its correct TWO-POSITION model and adding the generic-arity guard. This is a
+# checker/parser change, so the compiler shifts and the previous bootstrap no longer reproduces it; the
+# new harvest 6728bb0a self-reproduces byte-identical (gen1==gen2 fixpoint). The owner did NOT edit
 # bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# explicit call-site type-args (fn/method) — aditivo, colheita à mão (2026-08-11)
+# fix: List<T>::make disambiguation regression from explicit type-args (owner vs callee) + arity guard
 # ---------------------------------------------------------------------------------------------
-# Generics could be DECLARED (`fn id<T>`, `Box<T>`) and CALLED only with `T` INFERRED from the
-# arguments. The owner ruled that if generics exist, they must be instantiable EXPLICITLY at the call
-# site — for both a free FUNCTION and an instance METHOD. This reseed carries that feature, purely
-# ADDITIVE over the corpus (nothing in the tree writes the new spelling, so every existing call is
-# byte-identical). What landed:
-#   - PARSER. `MethodCall` gained a `type_args: []TypeExpr` field. `parse_postfix` grows a speculative
-#     `recv.m<T>(args)` branch, and `parse_atom` a speculative `foo<T>(args)` / `ns::foo<T>(args)`
-#     branch. Both reuse `parse_type_args` + backtrack: a `<…>` list only commits when it CLOSES
-#     (`pending_gt == 0`) AND a `(` follows — otherwise it backtracks to a comparison, so `a < b` and
-#     the chain `a < b < c` are untouched. The `(`-commit is NOT struct-gated (unambiguous once the
-#     `(` is seen), so an explicit call works inside an if/match scrutinee too; the `{` (typed struct
-#     literal) and `::` (generic static call) commits stay struct-gated exactly as before.
-#   - CHECKER. `type_call` disambiguates the two shapes that share the `Call` node — a generic STATIC
-#     call `Type<Args>::m(…)` (args bind the OWNER TYPE, retargeted as before) vs an explicit
-#     FUNCTION/METHOD call (args bind the FUNCTION's own type-params) — by resolving the callee. When
-#     explicit args are present they WIN over inference: the signature's type-params bind to the given
-#     types (in appearance order), the typed args must fit the substituted parameters, and a type-param
-#     that appears ONLY in the return type (uninferable from args) becomes callable. `type_method_call`
-#     threads `mc.type_args` through its desugar into `type_call`.
-#   - MONOMORPH. `TCall` gained `type_args: []Type` (the RESOLVED explicit args). The mono pass, at a
-#     generic-fn call carrying them, binds the instance Subst from the explicit args (substituted
-#     through the enclosing instantiation) INSTEAD of re-inferring from the argument types — so the
-#     stamped instance matches what the typer chose (explicit wins end-to-end). A bare/inferred call
-#     keeps the pre-existing inference path, byte-identical.
-#   - .tkb. The typed-tree codec appends `TCall.type_args` (a type list, empty for every bare call) on
-#     the plain-call tag, defaulting to empty on read — format stays append/compatible, no ordinal
-#     broke.
-# Proven by a probe (examples/probes/explicit_type_args): `id<i64>(3)`, `first<A,B>`, the return-only
-# `empty_list<i64>()`, and the method `b.wrap<i64>(9)` all PARSE + CHECK + LOWER + run (exit 0); the
-# bare `empty_list()` still errors "cannot infer … only in the return type". Comparisons and the whole
-# generic corpus (examples/regressions/own_native) are byte-identical in behavior.
+# The first cut of explicit call-site type-args stored a SINGLE `type_args` list on the call and guessed
+# whether it bound the owner type or the callee function (`callee_is_fn`). That guess REGRESSED the
+# generic static factory `List<i64>::make()` / `Map<K,V>::make()`: `List::make` resolves as a function,
+# so the guess routed the `<i64>` (which binds the TYPE `List`) down the explicit-function path and
+# raised `'make' is not generic` (10 sites: list_test + map_test). The cure is STRUCTURAL — the two
+# positions are recorded separately, no guessing:
+#   - AST (`parser::Call`): the single `type_args` is split into `owner_type_args` (the `<…>` on the TYPE
+#     before `::`, `Type<T>::m`) and `callee_type_args` (the `<…>` on the FUNCTION/METHOD, `foo<T>()`,
+#     `Type::m<T>()`). Either/both/neither may be present.
+#   - PARSER: `parse_generic_static_call` records the owner `<…>` and now ALSO accepts a second explicit
+#     `<…>` on the method (`Map<str,i64>::fold<Acc>()` → callee_type_args); the bare/function form fills
+#     `callee_type_args`; the method desugar carries `mc.type_args` into `callee_type_args`.
+#   - CHECKER (`type_call`): `owner_type_args` retargets the factory owner (unchanged #254 path);
+#     `callee_type_args` bind the callee's own type-params (explicit-fn path). The `callee_is_fn` guess is
+#     gone — the decision is now purely which position the parser filled. `retarget_generic_static_callee`
+#     and `collect_call_site_args` read `owner_type_args`.
+# GENERIC-ARITY GUARD (owner ruling — C# Func/Action-16 generalized to every generic): a shared
+# `max_generic_arity()` (16) gates BOTH a DECLARATION (a type/function/method declaring >16 type-params →
+# "a generic may declare at most 16 type parameters", checked in the module-diags pass over items + their
+# methods) and a CALL-SITE (>16 explicit type-args in either position → "at most 16 explicit type
+# arguments", in `type_call`).
+# Acceptance matrix (all build+run exit 0 except the one PRE-EXISTING wall): a non-generic type's static
+# methods `Plain::f0()`, `Plain::f1<T>()` (explicit-only), `Plain::f2(x)` (inferred), `Plain::f2<T>(x)`
+# (explicit); the generic-type factory `Lst<i64>::make()`; plus the free-fn / instance-method / return-only
+# forms. The generic-TYPE + generic-METHOD combination (`Gen<T>::m<U>()`) is a PRE-EXISTING monomorph
+# limitation — the #254 instance-method stamp erases method-level type-params (emits `tk_t_U`); it fails
+# identically on the pre-feature compiler and is out of scope here.
+# Proven by examples/probes/explicit_type_args. Additive over the corpus; the only checker error `teko
+# test` still surfaces (checker_test.tkt:1275, an unrelated `list::push`/Variant test) is PRE-EXISTING
+# (identical on the pre-feature compiler) and does not affect `build .` or the fixpoint.
 #
-# FIXPOINT. The reseed converged in one step: gen0 (cc of the previous bootstrap) C-built the taught
-# source into bin-a; compiling bin-a into the new compiler and rebuilding the source produced a
-# byte-identical bin-b (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# FIXPOINT. The reseed converged in one step: gen0 (cc of the previous bootstrap) C-built the reworked
+# source into bin-a; compiling bin-a into the new compiler and rebuilding produced a byte-identical bin-b
+# (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0';  TEKO_BACKEND=c gen0' build . -> OUT;  OUT/teko.c == bootstrap/teko.c.
 #
 # `run: hand-harvest` — no CI run produced this file; it was harvested by hand on the branch, in the
@@ -55,8 +53,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  4fc1f137e86fe4c86faca7bfe9f593bec067e2336e0c868871fdfabd26286616
+sha256:  6728bb0a1df02d7e45a7f43264d403351ae9a15c26f6f6950a7fcbf25640f1b1
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (explicit call-site type-args);
-         sha256 is read directly off the committed file and was proven a fixpoint (bin-a == bin-b,
-         byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (owner/callee type-args split + arity
+         guard); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
+         bin-b, byte-identical).
