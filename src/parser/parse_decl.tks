@@ -604,6 +604,9 @@ fn parse_class_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error 
     var kind = ClassKind::Sealed
     if is_kind_at(tokens, p, lexer::TokenKind::Abstract) { kind = ClassKind::Abstract; p = p + 1 }
     else if is_kind_at(tokens, p, lexer::TokenKind::Virtual) { kind = ClassKind::Virtual; p = p + 1 }
+    if is_kind_at(tokens, p, lexer::TokenKind::Service) {
+        return err_at(tokens, p, "a service is always sealed; write 'type N = service <lifetime> { … }' (no 'virtual'/'abstract')")
+    }
     if !is_kind_at(tokens, p, lexer::TokenKind::Class) {
         return err_at(tokens, p, "expected `class`")
     }
@@ -641,6 +644,66 @@ fn parse_class_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error 
             kind = kind; has_base = has_base; base_name = base_name
             has_base_binding = has_base_binding; base_binding_name = base_binding_name
             implements = implements; fields = fs.fields; methods = fs.methods; consts = fs.consts
+            is_service = false; service_lifetime = ServiceLifetime::Singleton
+        }; next = fs.next }
+}
+
+/**
+ * Parse the lifetime modifier that follows `service` (§7 DI). Contextual, like `params`/`trait`:
+ * `singleton`/`scoped`/`transient` are ordinary identifiers everywhere else and only mean a lifetime
+ * in the slot immediately after `service`. A missing/unknown lifetime is a clean parse error.
+ *
+ * @param tokens  the token stream
+ * @param pos     the position of the lifetime word (one past `service`)
+ * @return        the parsed ServiceLifetime and the resume position
+ * @throws        when the token is not one of `singleton`/`scoped`/`transient`
+ */
+fn parse_service_lifetime(tokens: []lexer::Token, pos: u64): Parsed<ServiceLifetime> | error {
+    if is_name_at(tokens, pos) && tokens[pos].text == "singleton" {
+        return Parsed<ServiceLifetime> { node = ServiceLifetime::Singleton; next = pos + 1 }
+    }
+    if is_name_at(tokens, pos) && tokens[pos].text == "scoped" {
+        return Parsed<ServiceLifetime> { node = ServiceLifetime::Scoped; next = pos + 1 }
+    }
+    if is_name_at(tokens, pos) && tokens[pos].text == "transient" {
+        return Parsed<ServiceLifetime> { node = ServiceLifetime::Transient; next = pos + 1 }
+    }
+    err_at(tokens, pos, "expected a service lifetime `singleton`/`scoped`/`transient` after `service`")
+}
+
+/**
+ * Parse a `service <lifetime> [& I1 & I2 …] { members }` body (§7 DI). `pos` is at `service`. A
+ * service is a SEALED class (never `virtual`/`abstract`) carrying an arena lifetime; it reuses the
+ * ClassBody node marked `is_service`. The `& I` list (each an interface it implements) and the member
+ * body follow the class shape; the factory `static ctor(): self` (the IService contract) lives among
+ * the members.
+ *
+ * @param tokens  the token stream
+ * @param pos     the position of the `service` keyword
+ * @return        the parsed ClassBody (is_service = true) and the resume position
+ * @throws        when the lifetime, interface list, or `{ … }` body is malformed
+ */
+fn parse_service_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
+    var lt = match parse_service_lifetime(tokens, pos + 1) { Parsed<ServiceLifetime> as x => x; error as e => return e }
+    var p = lt.next
+    var implements: []str = teko::list::empty()
+    loop {
+        if !is_kind_at(tokens, p, lexer::TokenKind::Amp) { break }
+        if !is_name_at(tokens, p + 1) {
+            return err_at(tokens, p + 1, "expected an interface name after '&'")
+        }
+        implements = teko::list::push(implements, tokens[p + 1].text)
+        p = p + 2
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+        return err_at(tokens, p, "expected '{' for the service body")
+    }
+    var fs = match parse_class_fields(tokens, p) { ParsedStructBody as x => x; error as e => return e }
+    Parsed<TypeBody> { node = ClassBody {
+            kind = ClassKind::Sealed; has_base = false; base_name = ""
+            has_base_binding = false; base_binding_name = ""
+            implements = implements; fields = fs.fields; methods = fs.methods; consts = fs.consts
+            is_service = true; service_lifetime = lt.node
         }; next = fs.next }
 }
 
@@ -666,7 +729,9 @@ fn parse_amp_name_list(tokens: []lexer::Token, pos: u64): ParsedList<str> | erro
 // extends list (multiple inheritance) sits between `interface` and `{`; each member is a BODYLESS
 // method signature (parse_function is_type_method=true, allow_bodyless=true) — no fields, no bodies.
 fn parse_interface_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
-    var ext = match parse_amp_name_list(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
+    var ext_start = pos + 1
+    if is_kind_at(tokens, ext_start, lexer::TokenKind::Amp) { ext_start = ext_start + 1 }
+    var ext = match parse_amp_name_list(tokens, ext_start) { ParsedList<str> as x => x; error as e => return e }
     var p = ext.next
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the interface body")
@@ -748,6 +813,9 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Interface) {
         return parse_interface_body(tokens, pos)
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Service) {
+        return parse_service_body(tokens, pos)
     }
     // (TR0) `trait` is CONTEXTUAL, like `from`/`params` — NOT a reserved word (an identifier named
     // `trait` stays an ordinary Ident everywhere else). It only means "trait declaration" when the

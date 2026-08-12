@@ -1035,6 +1035,382 @@ fn type_ptr_wrap(mc: parser::MethodCall, recv_t: Type, env: Env, table: TypeTabl
     TExpr { kind = TCall { callee = parser::Path { segments = wseg }; args = wargs; call_ns = "teko::__ptr_wrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = Variant { members = union_normalize_null(members) }; line = 0; col = 0 }
 }
 
+/**
+ * The negative sentinel for `type_svc`/`type_has_svc` — the call is not a `svc`/`has_svc` intrinsic,
+ * so `type_call` falls through to ordinary resolution.
+ */
+type NotSvcOp = struct { }
+
+/**
+ * (§7 DI, escape rule) Is `e` a DIRECT `svc<T>(…)` claim expression? The escape rule keys on
+ * PROVENANCE, not type: a value that came straight from `svc<T>()` is arena-bounded and may not be
+ * stored, passed as an argument, or returned — it must be re-claimed. A freshly-CONSTRUCTED value
+ * (a `ctor` factory's `EnHi { }`, any function result, a local bound with `var c = svc<…>()`) is
+ * NOT a claim and flows freely; only the direct call node carries the restriction (shallow
+ * propagation, per the design).
+ *
+ * @param e  the surface expression at a store/arg/return sink
+ * @return   true iff `e` is a direct `svc<T>(…)` intrinsic call
+ */
+fn expr_is_svc_claim(e: parser::Expr): bool {
+    match e.kind {
+        parser::Call as c => c.callee.segments.len == 1 && c.callee.segments[0].name == "svc" && c.callee_type_args.len == 1
+        _ => false
+    }
+}
+
+/**
+ * (§7 DI, escape rule) The shared diagnostic when a claimed service value escapes its arena binding.
+ *
+ * @return the located escape error
+ */
+fn svc_escape_error(): error {
+    error { message = "a claimed service value is arena-bounded: it may not be stored, passed as an argument, or returned — re-claim it with svc<T>() where needed" }
+}
+
+/**
+ * A registered service provider under a `(T, key)` resolution (§7 DI): the provider's canonical type
+ * name and the string key it answers to (its bare type name).
+ *
+ * @field canon  the provider service's canonical (namespace-qualified) name
+ * @field key    the string key the provider answers to (its bare last-segment name)
+ */
+type SvcProvider = struct { canon: str; key: str }
+
+/**
+ * (§7 DI) The canonical name of the sole type-argument of a `svc<T>` / `has_svc<T>` intrinsic, or an
+ * error when it is not a nominal type.
+ *
+ * @param c      the intrinsic call node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the resolved nominal type name of `T`
+ * @throws       when `T` is not a nominal (named) type
+ */
+fn svc_target_name(c: parser::Call, env: Env, table: TypeTable): str | error {
+    var t = match resolve_type(c.callee_type_args[0], table, env.cur_ns) { Type as ty => ty; error as e => return e }
+    match t {
+        Named as nm => nm.name
+        _ => error { message = "svc<T> requires T to be a nominal `service` or `interface & IService` type" }
+    }
+}
+
+/**
+ * (§7 DI) Is `tname` a CONCRETE service (a `service` kind), as opposed to an `interface & IService`?
+ *
+ * @param tname  the target type name
+ * @param table  the folded type table
+ * @return       true iff `tname` names a concrete service
+ */
+fn svc_target_is_concrete(tname: str, table: TypeTable): bool {
+    match type_table_find(table, tname, "") {
+        parser::TypeDecl as td => match td.body { parser::ClassBody as cb => cb.is_service; _ => false }
+        error => false
+    }
+}
+
+/**
+ * (§7 DI) Enumerate the service providers that resolve `svc<T>()`. When `T` is a concrete service it
+ * provides itself (its bare name is the key); when `T` is an `interface & IService`, every service
+ * implementing `T` is a provider (each keyed by its own bare name). The table IS the registry — this
+ * reads it directly, so codegen and the checker can never diverge into the historic dual-registry
+ * crash (there are no separately-built locator tables).
+ *
+ * @param tname  the target type's name
+ * @param table  the folded type table
+ * @return       the providers, in table order
+ */
+fn svc_providers(tname: str, table: TypeTable): []SvcProvider {
+    var out: []SvcProvider = teko::list::empty()
+    var want = name_last_segment(tname)
+    var concrete = svc_target_is_concrete(tname, table)
+    var i: u64 = 0
+    loop {
+        if i >= tt_len(table) { break }
+        var reg = tt_at(table, i)
+        i++
+        match reg.decl.body {
+            parser::ClassBody as cb => {
+                if cb.is_service {
+                    var scanon = qualify(reg.namespace, name_last_segment(reg.name))
+                    var sbare = name_last_segment(reg.name)
+                    var matches = if concrete { sbare == want } else { svc_service_implements(cb, want) }
+                    if matches { out = teko::list::push(out, SvcProvider { canon = scanon; key = sbare }) }
+                }
+            }
+            _ => { }
+        }
+    }
+    out
+}
+
+/**
+ * (§7 DI) Does service body `cb` implement the interface whose bare name is `want`?
+ *
+ * @param cb    the service's class body
+ * @param want  the interface's bare last-segment name
+ * @return      true iff `cb`'s implements list names `want`
+ */
+fn svc_service_implements(cb: parser::ClassBody, want: str): bool {
+    var j: u64 = 0
+    loop {
+        if j >= cb.implements.len { break }
+        if name_last_segment(cb.implements[j]) == want { return true }
+        j++
+    }
+    false
+}
+
+/**
+ * (§7 DI) The typed `Provider::ctor()` factory call — the simplest-correct materialization of a
+ * service (a fresh instance via its IService `ctor`; the arena-lifetime slot placement is the Doc 1
+ * §8 seam, layered later without touching this surface). Recurses through `type_call` so the static
+ * factory resolves with full namespace/visibility/type machinery.
+ *
+ * @param canon  the provider's canonical name
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed factory call (typed as the concrete service), or an error
+ */
+fn svc_ctor_texpr(canon: str, env: Env, table: TypeTable): TExpr | error {
+    var bpath = name_to_path(canon)
+    var segs = teko::list::push(bpath.segments, parser::Segment { name = "ctor" })
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = teko::list::empty(); arg_names = teko::list::empty(); owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }, env, table)
+}
+
+/**
+ * (§7 DI) A `str`-typed literal TExpr for a comptime key.
+ *
+ * @param s  the key text
+ * @return   the typed string-literal expression
+ */
+fn svc_str_lit(s: str): TExpr {
+    TExpr { kind = TStrLit { text = s }; type = Str { }; line = 0; col = 0 }
+}
+
+/**
+ * (§7 DI) A `bool`-typed literal TExpr.
+ *
+ * @param b  the value
+ * @return   the typed boolean-literal expression
+ */
+fn svc_bool_lit(b: bool): TExpr {
+    TExpr { kind = TBoolLit { value = b }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/**
+ * (§7 DI) The `key == "<literal>"` comparison TExpr for the runtime service locator.
+ *
+ * @param key  the runtime key expression
+ * @param lit  the provider's key literal
+ * @return     a bool-typed comparison expression
+ */
+fn svc_key_eq(key: TExpr, lit: str): TExpr {
+    var term = TCmpTerm { op = lexer::TokenKind::EqEq; operand = svc_str_lit(lit) }
+    TExpr { kind = TCompare { first = key; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/**
+ * (§7 DI) A single-statement block wrapping one expression tail — the value of an `if`/`else` branch.
+ *
+ * @param e  the branch's value expression
+ * @return   a one-element statement block
+ */
+fn svc_tail_block(e: TExpr): []TStatement {
+    teko::list::push(teko::list::empty(), TExprStmt { expr = e })
+}
+
+/**
+ * (§7 DI) The runtime service-locator's miss branch — a `panic` that terminates when no provider
+ * answers the runtime key (guarded at the call site by `has_svc<T>(key)`, D6).
+ *
+ * @param tname  the target type's name (for the diagnostic)
+ * @return       a diverging panic statement block
+ */
+fn svc_panic_block(tname: str): []TStatement {
+    var msg = svc_str_lit($"svc<{name_last_segment(tname)}>: no provider registered for the runtime key")
+    var pseg = teko::list::push(teko::list::empty(), parser::Segment { name = "panic" })
+    var pcall = TExpr { kind = TCall { callee = parser::Path { segments = pseg }; args = teko::list::push(teko::list::empty(), msg); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+    svc_tail_block(pcall)
+}
+
+/**
+ * (§7 DI, Path 2) Synthesize the runtime service-locator as an INLINE if/else chain over the
+ * providers of `T` — `if key == "A" { A::ctor() } else if key == "B" { B::ctor() } else { panic }` —
+ * typed as `T`. Each branch's concrete `Provider::ctor()` is upcast to `T` by the ordinary
+ * branch-tail coercion (`emit_as`), so NO separate locator function, vtable-enumeration, or provider
+ * registry is emitted: the historic dual-registry OOB cannot recur.
+ *
+ * @param key        the runtime key expression
+ * @param providers  the providers of `T`
+ * @param rtype      the result type `T` (a service or interface Named)
+ * @param env        the typing environment
+ * @param table      the folded type table
+ * @return           the typed if-chain expression, or an error
+ */
+fn svc_runtime_chain(key: TExpr, providers: []SvcProvider, rtype: Type, tname: str, env: Env, table: TypeTable): TExpr | error {
+    var elseblk = svc_panic_block(tname)
+    var out: TExpr = svc_bool_lit(false)
+    var built = false
+    var n = providers.len
+    loop {
+        if n == 0 { break }
+        n--
+        var ctor = match svc_ctor_texpr(providers[n].canon, env, table) { TExpr as te => te; error as e => return e }
+        var cond = svc_key_eq(key, providers[n].key)
+        var ifx = TExpr { kind = TIfExpr { cond = cond; then_blk = svc_tail_block(ctor); has_else = true; else_blk = elseblk }; type = rtype; line = 0; col = 0 }
+        elseblk = svc_tail_block(ifx)
+        out = ifx
+        built = true
+    }
+    if !built { return error { message = "svc: no provider" } }
+    out
+}
+
+/**
+ * (§7 DI, Path 2) The runtime `has_svc<T>(key)` — a nested `if key == "A" { true } … else { false }`
+ * over the providers of `T`, typed `bool`. The comptime guard for a runtime `svc<T>(key)`.
+ *
+ * @param key        the runtime key expression
+ * @param providers  the providers of `T`
+ * @return           a bool-typed if-chain expression
+ */
+fn svc_has_runtime_chain(key: TExpr, providers: []SvcProvider): TExpr {
+    var out = svc_bool_lit(false)
+    var elseblk = svc_tail_block(svc_bool_lit(false))
+    var n = providers.len
+    loop {
+        if n == 0 { break }
+        n--
+        var cond = svc_key_eq(key, providers[n].key)
+        var ifx = TExpr { kind = TIfExpr { cond = cond; then_blk = svc_tail_block(svc_bool_lit(true)); has_else = true; else_blk = elseblk }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+        elseblk = svc_tail_block(ifx)
+        out = ifx
+    }
+    out
+}
+
+/**
+ * (§7 DI) The comptime constant key of an intrinsic's key argument, or NotSvcOp when the argument is
+ * a RUNTIME expression (not a string literal). A `null`/absent key is reported by the caller.
+ *
+ * @param key  the already-typed key expression
+ * @return     the literal text, or NotSvcOp for a runtime key
+ */
+fn svc_const_key(key: TExpr): str | NotSvcOp {
+    match key.kind {
+        TStrLit as sl => sl.text
+        _ => NotSvcOp { }
+    }
+}
+
+/**
+ * (§7 DI) The clean type error a non-IService `svc<T>`/`has_svc<T>` yields — the diagnostic that
+ * turns the historic pre-codegen crash on a plain interface into an honest compile-time rejection.
+ *
+ * @param tname  the offending target type name
+ * @return       the located type error
+ */
+fn svc_not_iservice_error(tname: str): error {
+    error { message = $"svc<T> requires T to satisfy IService — a 'service' type, or an 'interface & IService'; '{name_last_segment(tname)}' does not" }
+}
+
+/**
+ * (§7 DI) Type the `svc<T: IService>(key: str | null = null): T` intrinsic (§7 Part A). `T` must
+ * satisfy IService (else a clean type error, never the historic crash). Resolution: a `null`/absent
+ * key resolves BY TYPE (a concrete service → its `ctor`); a CONSTANT string key resolves the provider
+ * at comptime (a miss is a comptime error, D6); a RUNTIME key lowers to the inline locator chain
+ * (Path 2), guarded by `has_svc`. Returns NotSvcOp when the callee is not `svc`, so `type_call` falls
+ * through.
+ *
+ * @param c      the raw static-call node (`svc<T>(key?)`)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the resolved/typed expression, NotSvcOp, or a type error
+ * @throws       on a non-IService `T`, a missing const-key provider, or a keyless interface resolve
+ * @since 0.3.1
+ */
+fn type_svc(c: parser::Call, env: Env, table: TypeTable): TExpr | NotSvcOp | error {
+    if c.callee.segments.len != 1 { return NotSvcOp { } }
+    if c.callee.segments[0].name != "svc" { return NotSvcOp { } }
+    if c.callee_type_args.len != 1 { return NotSvcOp { } }
+    if c.args.len > 1 { return error { message = "svc<T>(key) takes at most one argument (an optional string key)" } }
+    var tname = match svc_target_name(c, env, table) { str as s => s; error as e => return e }
+    if !type_satisfies_iservice(tname, table) { return svc_not_iservice_error(tname) }
+    var providers = svc_providers(tname, table)
+    var concrete = svc_target_is_concrete(tname, table)
+    if c.args.len == 0 {
+        if !concrete { return error { message = $"svc<{name_last_segment(tname)}>() over an interface needs a key — write svc<{name_last_segment(tname)}>(\"Impl\")" } }
+        if providers.len == 0 { return error { message = $"svc<{name_last_segment(tname)}>(): no service provider" } }
+        match svc_ctor_texpr(providers[0].canon, env, table) { TExpr as te => return te; error as e => return e }
+    }
+    var key = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    match key.type { Str => { }; _ => return error { message = "svc<T>(key)'s key must be a `str`" } }
+    match svc_const_key(key) {
+        str as k => {
+            var hit = svc_provider_for_key(providers, k)
+            match hit {
+                SvcProvider as p => match svc_ctor_texpr(p.canon, env, table) { TExpr as te => return te; error as e => return e }
+                NotSvcOp => return error { message = $"svc<{name_last_segment(tname)}>(\"{k}\"): no service provider registered under that key" }
+            }
+        }
+        NotSvcOp => { }
+    }
+    var rtype: Type = Named { name = tname }
+    match svc_runtime_chain(key, providers, rtype, tname, env, table) { TExpr as te => return te; error as e => return e }
+}
+
+/**
+ * (§7 DI) The provider answering a constant key, or NotSvcOp on a miss.
+ *
+ * @param providers  the providers of `T`
+ * @param k          the constant key
+ * @return           the matching provider, or NotSvcOp
+ */
+fn svc_provider_for_key(providers: []SvcProvider, k: str): SvcProvider | NotSvcOp {
+    var i: u64 = 0
+    loop {
+        if i >= providers.len { break }
+        if providers[i].key == k { return providers[i] }
+        i++
+    }
+    NotSvcOp { }
+}
+
+/**
+ * (§7 DI) Type the `has_svc<T: IService>(key: str): bool` intrinsic — true iff a provider is
+ * registered under `(T, key)`. A CONSTANT key is a comptime bool; a RUNTIME key lowers to the inline
+ * boolean locator chain. Returns NotSvcOp when the callee is not `has_svc`.
+ *
+ * @param c      the raw static-call node (`has_svc<T>(key)`)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the bool-typed expression, NotSvcOp, or a type error
+ * @throws       on a non-IService `T` or a missing/non-str key
+ * @since 0.3.1
+ */
+fn type_has_svc(c: parser::Call, env: Env, table: TypeTable): TExpr | NotSvcOp | error {
+    if c.callee.segments.len != 1 { return NotSvcOp { } }
+    if c.callee.segments[0].name != "has_svc" { return NotSvcOp { } }
+    if c.callee_type_args.len != 1 { return NotSvcOp { } }
+    if c.args.len != 1 { return error { message = "has_svc<T>(key) requires exactly one argument (the string key)" } }
+    var tname = match svc_target_name(c, env, table) { str as s => s; error as e => return e }
+    if !type_satisfies_iservice(tname, table) { return svc_not_iservice_error(tname) }
+    var providers = svc_providers(tname, table)
+    var key = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    match key.type { Str => { }; _ => return error { message = "has_svc<T>(key)'s key must be a `str`" } }
+    match svc_const_key(key) {
+        str as k => {
+            match svc_provider_for_key(providers, k) {
+                SvcProvider => return svc_bool_lit(true)
+                NotSvcOp => return svc_bool_lit(false)
+            }
+        }
+        NotSvcOp => { }
+    }
+    svc_has_runtime_chain(key, providers)
+}
+
 // (2026-07-01) call-site desugar for a `params`-variadic function `f`. Two shapes:
 //   passthrough — exactly `f.params.len` raw args AND the last one is already typed `[]T`
 //     (T = the params element type) → pass through unchanged, no re-wrapping.
@@ -1663,6 +2039,16 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
         error as e => return e
         NotPtrOp => { }
     }
+    match type_svc(c, env, table) {
+        TExpr as te => return te
+        error as e => return e
+        NotSvcOp => { }
+    }
+    match type_has_svc(c, env, table) {
+        TExpr as te => return te
+        error as e => return e
+        NotSvcOp => { }
+    }
     var name = c.callee.segments[c.callee.segments.len - 1].name
     // panic / exit — injected GLOBAL diverging builtins (legislator's ruling — NO `never` type).
     // panic(error | str) = the message; exit(<integer>) = the status code. Both terminate the
@@ -1725,6 +2111,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             var ti = 0
             loop {
                 if ti >= dargs.len { break }
+                if expr_is_svc_claim(dargs[ti]) { return svc_escape_error() }
                 // (W10) a closure-literal ARG whose parameter is a concrete function type infers its
                 // un-annotated params from that target (ruling 3); other args type normally.
                 var is_lam = match dargs[ti].kind { parser::Lambda => true; _ => false }
@@ -4178,6 +4565,7 @@ fn type_index_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt |
 }
 
 fn type_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt | error {
+    if expr_is_svc_claim(a.value) { return svc_escape_error() }
     var is_field = match a.kind { parser::AssignKind::Field => true; _ => false }
     if is_field { return type_field_assign(a, env, table) }
     var is_index = match a.kind { parser::AssignKind::Index => true; _ => false }
@@ -4225,6 +4613,7 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt | error
 }
 
 fn type_return(r: parser::Return, env: Env, table: TypeTable): TypedStmt | error {
+    if r.has_value && expr_is_svc_claim(r.value) { return svc_escape_error() }
     var v = match type_expr(r.value, env, table) { TExpr as te => te; error as e => return e }
     TypedStmt { node = TReturn { has_value = r.has_value; value = v }; env = env }   // value gated by has_value (B.20); the return-type match is enforced by type_function's check_returns (C5)
 }

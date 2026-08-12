@@ -420,7 +420,15 @@ fn write_struct_body(buf: []byte, t: StrTable, s: parser::StructBody): []byte {
     write_constdecls(write_strs(write_functions(write_fields(write_u8(buf, 0), t, s.fields), t, s.methods), t, s.implements), t, s.consts)
 }
 
-/** (#165 C5) a ClassBody: kind + base + binding + implements + fields + methods + member consts (all ride). */
+/**
+ * Encode a ServiceLifetime as its ordinal byte for the `.tkb` wire (§7 DI).
+ *
+ * @param lt  the lifetime to encode
+ * @return    the ordinal byte (Singleton = 0, Scoped = 1, Transient = 2)
+ */
+fn service_lifetime_byte(lt: parser::ServiceLifetime): byte { lt to byte }
+
+/** (#165 C5) a ClassBody: kind + base + binding + implements + fields + methods + member consts + service marks (all ride). */
 fn write_class_body(buf: []byte, t: StrTable, c: parser::ClassBody): []byte {
     var b = write_u8(write_u8(buf, 6), class_kind_byte(c.kind))
     b = write_u8(b, (if c.has_base { 1 } else { 0 }) to byte)
@@ -430,7 +438,9 @@ fn write_class_body(buf: []byte, t: StrTable, c: parser::ClassBody): []byte {
     b = write_strs(b, t, c.implements)
     b = write_fields(b, t, c.fields)
     b = write_functions(b, t, c.methods)
-    write_constdecls(b, t, c.consts)
+    b = write_constdecls(b, t, c.consts)
+    b = write_u8(b, (if c.is_service { 1 } else { 0 }) to byte)
+    write_u8(b, service_lifetime_byte(c.service_lifetime))
 }
 
 /** a TypeBody: u8 tag + payload. StructBody(0)/EnumBody(1)/VariantBody(2)/AliasBody(3)/ExternBody(4)/

@@ -5,9 +5,55 @@ use teko::parser
 // the top-level environment after collecting: user types + function signatures.
 type Collected = struct { types: TypeTable; env: Env }
 
+/**
+ * The `self` type-atom as a TypeExpr — a single-segment `NamedType` named "self" (§4). Used to
+ * build the synthesized IService contract's `static ctor(): self` return (§7 DI).
+ *
+ * @return the `self` type-expression
+ */
+fn self_type_expr(): parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "self" }) }; args = teko::list::empty() }
+}
+
+/**
+ * The synthesized `IService` contract's sole member — `exp static ctor(): self` (§7 DI): a static,
+ * zero-parameter factory returning the conforming type. This is the requirement a `service`
+ * auto-satisfies and a user `interface & IService` inherits through its extends list.
+ *
+ * @return the `ctor` requirement Function
+ */
+fn iservice_ctor_sig(): parser::Function {
+    parser::Function {
+        name = "ctor"; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        params = teko::list::empty(); has_return = true; return_type = self_type_expr()
+        body = teko::list::empty(); vis = parser::Visibility::Exp; has_doc = false; doc = ""
+        line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""
+        os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false
+        is_static = true; has_inject = false; injects = teko::list::empty()
+        has_arena_size = false; arena_size = 0 to u64
+    }
+}
+
+/**
+ * The synthesized `IService` interface declaration — `exp type IService = interface { exp static
+ * ctor(): self }` (§7 DI). Seeded into the type table before conformance so `interface & IService`
+ * resolves and every `service` auto-conforms to it. Not written in source; the compiler injects it.
+ *
+ * @return the IService TypeDecl
+ */
+fn iservice_decl(): parser::TypeDecl {
+    parser::TypeDecl {
+        name = "IService"; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        body = parser::InterfaceBody { extends = teko::list::empty(); methods = teko::list::push(teko::list::empty(), iservice_ctor_sig()) }
+        vis = parser::Visibility::Exp; has_doc = false; doc = ""; line = 0; col = 0
+        di_kind = parser::DiKind::None; has_di_key = false; di_key = ""
+    }
+}
+
 // gather ALL user type declarations first (so a forward reference resolves).
 fn collect_types(items: []parser::Item): TypeTable {
     var table = tt_empty()
+    table = tt_push(table, TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() })
     var i = 0
     loop {
         if i >= items.len { break }
@@ -446,6 +492,7 @@ fn instance_methods_of(decl: parser::TypeDecl): []parser::Function {
 // resolution ignores namespace; only W-vis-enforce uses it, and the header emitter does not).
 pub fn type_table_of(prog: TProgram): TypeTable {
     var table = tt_empty()
+    table = tt_push(table, TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() })
     var i = 0
     loop {
         if i >= prog.items.len { break }
@@ -510,7 +557,7 @@ pub fn canon_class_bases(program: parser::Program): parser::Program {
                     parser::ClassBody as cb => {
                         if cb.has_base || cb.implements.len > 0 {
                             var cbase = if cb.has_base { canon_ref_name(cb.base_name, table, it.namespace) } else { cb.base_name }
-                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cbase; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = canon_ref_list(cb.implements, table, it.namespace); fields = cb.fields; methods = cb.methods; consts = cb.consts }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key}
+                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cbase; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = canon_ref_list(cb.implements, table, it.namespace); fields = cb.fields; methods = cb.methods; consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key}
                         }
                     }
                     parser::StructBody as sb => {
@@ -859,6 +906,52 @@ fn validate_class_decl(cb: parser::ClassBody, table: TypeTable): error | null {
 // name colliding with a same-named type in ANOTHER namespace picked whichever the scan met first
 // (CI: linux-arm64 found teko::emit::Reader the struct before teko::io::Reader). The hit carries
 // the WINNING namespace so extends recursion and cycle identity stay namespace-exact.
+/**
+ * (§7 DI) Does `name` (an interface) transitively extend the synthesized `IService`? True when
+ * `name` IS `IService`, or when any interface on its extends chain is. A cycle-safe walk over
+ * `InterfaceBody.extends`; a non-interface or unknown name stops that branch.
+ *
+ * @param name   the interface name to test (source or canonical)
+ * @param table  the folded type table
+ * @return       true iff `name` is or extends `IService`
+ */
+fn interface_extends_iservice(name: str, table: TypeTable): bool {
+    if name_last_segment(name) == "IService" { return true }
+    var decl = match type_table_find(table, name, "") { parser::TypeDecl as td => td; error => return false }
+    var ib = match decl.body { parser::InterfaceBody as b => b; _ => return false }
+    var i: u64 = 0
+    loop {
+        if i >= ib.extends.len { break }
+        if interface_extends_iservice(ib.extends[i], table) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * (§7 DI) THE `IService` GATE: does `name` satisfy the `T: IService` constraint that `svc<T>` /
+ * `has_svc<T>` require? True for (1) a concrete `service` type (it auto-conforms — its `static
+ * ctor(): self` factory IS the contract), or (2) an `interface & IService` (an interface whose
+ * extends chain reaches IService). A plain interface, struct, class, or primitive does NOT satisfy
+ * it — that is the clean type error the crash-repro (`svc<PlainInterface>`) now yields.
+ *
+ * @param name   the candidate type name (source or canonical)
+ * @param table  the folded type table
+ * @return       true iff `name` is a service or an `interface & IService`
+ */
+pub fn type_satisfies_iservice(name: str, table: TypeTable): bool {
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => {
+            match td.body {
+                parser::ClassBody as cb => cb.is_service
+                parser::InterfaceBody => interface_extends_iservice(name, table)
+                _ => false
+            }
+        }
+        error => false
+    }
+}
+
 type IfaceHit = struct { decl: parser::TypeDecl; ns: str }
 fn find_interface_decl(name: str, table: TypeTable, ref_ns: str): IfaceHit | error {
     match resolve_name_ref(name, table, ref_ns) {
@@ -973,7 +1066,7 @@ pub fn base_vtable_slot(base_class: str, method: str, table: TypeTable): u32 | e
 // receiver param types (both skip their 1st untyped receiver param) + same return type. Any type
 // that fails to resolve makes it a non-match (the conformance error surfaces the missing/mismatched
 // method; the unresolved type surfaces separately via check_modules/normal resolution).
-fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: TypeTable, ref_ns: str): bool {
+fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: TypeTable, ref_ns: str, self_type: str): bool {
     var rstart: u64 = 0
     if req.params.len > 0 && !req.params[0].has_type { rstart = 1 }
     var istart: u64 = 0
@@ -997,11 +1090,32 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
     }
     if req.has_return != impl_m.has_return { return false }
     if req.has_return {
-        var rr = match resolve_type(req.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
-        var ir = match resolve_type(impl_m.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
+        var rr = match sig_return_type(req.return_type, table, ref_ns, self_type) { Type as t => t; error => return false }
+        var ir = match sig_return_type(impl_m.return_type, table, ref_ns, self_type) { Type as t => t; error => return false }
         if !type_eq(rr, ir) { return false }
     }
     true
+}
+
+/**
+ * Resolve a contract/method RETURN type-expression, binding a bare `self` (§4) return to the
+ * conforming type (§7 IService's `static ctor(): self`). When the return is the `self` atom the
+ * result is the conforming type named by `self_type` (its canonical name); otherwise it resolves
+ * ordinarily in `ref_ns`. With no self context (`self_type == ""`) a `self` return is unresolvable.
+ *
+ * @param te         the return type-expression
+ * @param table      the folded type table
+ * @param ref_ns     the namespace the type-expression was written in
+ * @param self_type  the conforming type's name to bind `self` to (empty = no self context)
+ * @return           the resolved return Type
+ * @throws           when `self` has no binding context, or the type-expression fails to resolve
+ */
+fn sig_return_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str, self_type: str): Type | error {
+    if return_type_is_self(te) {
+        if self_type == "" { return error { message = "a `self` return has no enclosing type in this context" } }
+        return Named { name = receiver_canonical_name(self_type, ref_ns, table) }
+    }
+    resolve_type(te, table, ref_ns)
 }
 
 /**
@@ -1085,7 +1199,7 @@ fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Fu
     loop {
         if mi >= own_methods.len { break }
         if own_methods[mi].name == req.name {
-            if !method_sig_matches(req, own_methods[mi], table, type_ns) {
+            if !method_sig_matches(req, own_methods[mi], table, type_ns, type_name) {
                 return error { message = $"'{type_name}' method '{req.name}' does not match interface '{iname}'s signature" }
             }
             var restated = default_restated_param(req.params, own_methods[mi].params)
@@ -1399,7 +1513,7 @@ fn one_requirement_diag(d: TraitDerive, decl: parser::TypeDecl, req: parser::Fun
     loop {
         if mi >= own.len { break }
         if own[mi].name == req.name {
-            if method_sig_matches(req, own[mi], table, type_ns_of(table, d.type_name)) { return teko::list::empty() }
+            if method_sig_matches(req, own[mi], table, type_ns_of(table, d.type_name), d.type_name) { return teko::list::empty() }
             return one_diag(diag_at("", own[mi].line, own[mi].col, $"'{d.type_name}' method '{req.name}' does not match trait '{d.trait_name}'s required signature"))
         }
         mi++
@@ -1613,7 +1727,7 @@ fn fold_class_item(it: parser::Item, td: parser::TypeDecl, cb: parser::ClassBody
         FoldedMembers as f => f
         error as e => return FoldedItem { item = it; derives = derives; diags = one_diag(located_diag(it.file, td.line, td.col, e)) }
     }
-    var body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fm.fields; methods = fm.methods; consts = fm.consts }
+    var body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fm.fields; methods = fm.methods; consts = fm.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }
     FoldedItem { item = item_with_body(it, td, body); derives = record_user_trait_derives(derives, td.name, split.traits); diags = teko::list::empty() }
 }
 
@@ -1671,7 +1785,7 @@ fn struct_with_methods(td: parser::TypeDecl, sb: parser::StructBody, extra: []pa
  * @return the rewritten `TypeDecl`
  */
 fn class_with_methods(td: parser::TypeDecl, cb: parser::ClassBody, extra: []parser::Function): parser::TypeDecl {
-    parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = cb.fields; methods = append_methods(cb.methods, extra); consts = cb.consts }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key}
+    parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = cb.fields; methods = append_methods(cb.methods, extra); consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key}
 }
 
 /**
@@ -2216,7 +2330,7 @@ fn interface_conflict_diags(reg: TypeReg, eff: []parser::Function, table: TypeTa
         var b: u64 = a + 1
         loop {
             if b >= eff.len { break }
-            if eff[a].name == eff[b].name && !method_sig_matches(eff[a], eff[b], table, owner_ns) {
+            if eff[a].name == eff[b].name && !method_sig_matches(eff[a], eff[b], table, owner_ns, reg.decl.name) {
                 diags = teko::list::push(diags, decl_diag(reg, $"interface '{reg.decl.name}' has conflicting signatures for method '{eff[a].name}' (an extended interface declares it differently)"))
             }
             b++
@@ -2294,7 +2408,7 @@ fn collect_with_seed(program: parser::Program, seed: Collected): CollectOutcome 
  * @since 0.3.1
  */
 fn table_with_project_types(program: parser::Program, seeded: TypeTable): TypeTable {
-    var table = seeded
+    var table = tt_push(seeded, TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() })
     var i = 0
     loop {
         if i >= program.items.len { break }

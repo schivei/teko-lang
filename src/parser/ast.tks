@@ -510,9 +510,20 @@ pub type ExternBody = struct { }   // `extern type Name` — an OPAQUE foreign h
 // NOT instantiable; `virtual class` = instantiable AND inheritable.
 pub type ClassKind = enum { Sealed; Abstract; Virtual }
 /**
+ * ServiceLifetime — the arena lifetime of a `service` kind (§7 DI). Governs which arena slot a
+ * `svc<T>()`-resolved value resides in (Doc 1 §8, per-thread): `Singleton` = one instance per
+ * thread-root; `Scoped` = one per enclosing frame/sub-root; `Transient` = a fresh instance each
+ * resolution (no slot). A `service` always carries exactly one of these.
+ *
+ * @since 0.3.1
+ */
+pub type ServiceLifetime = enum { Singleton; Scoped; Transient }
+/**
  * ClassBody — a `type C = <kind> [Base[(binding)]] [& I1 & I2 …] { fields; methods; consts }` body
  * (W10b.CLASS). AT MOST one base class (itself Abstract or Virtual, enforced by the checker). Members
- * (fields + methods) are PRIVATE BY DEFAULT (`pub`/`intern` widen) — the inverse of a struct.
+ * (fields + methods) are PRIVATE BY DEFAULT (`pub`/`intern` widen) — the inverse of a struct. A
+ * `service` (§7 DI) REUSES this node: it is a SEALED class marked `is_service`, carrying a
+ * `service_lifetime`; `svc<T>()` resolves it in comp-time.
  *
  * @param kind              SEALED (default), Abstract, or Virtual (see ClassKind)
  * @param has_base          does this class extend a base class?
@@ -525,6 +536,9 @@ pub type ClassKind = enum { Sealed; Abstract; Virtual }
  * @param consts            the static type-member `const NAME: T = …` declarations (#594 crumb 7);
  *                          each occupies NO layout slot and is resolved by `ClassName::NAME` (a
  *                          subclass reaches a base's `pub`/`exp` member const by name)
+ * @param is_service        true iff this class was written `type N = service <lifetime> …` (§7 DI);
+ *                          a service is always Sealed and auto-conforms to the synthesized IService
+ * @param service_lifetime  the arena lifetime (valid iff is_service; Singleton for a non-service)
  */
 pub type ClassBody = struct {
     kind: ClassKind
@@ -536,6 +550,8 @@ pub type ClassBody = struct {
     fields: []Field
     methods: []Function
     consts: []ConstDecl
+    is_service: bool
+    service_lifetime: ServiceLifetime
 }
 // (W10b.IF) an INTERFACE — a PURE SIGNATURE CONTRACT: `type X = interface [I1 & I2 …] { fn sig; … }`.
 // `extends: []str` — the interfaces this one extends (multiple inheritance; the `I1 & I2` list between
