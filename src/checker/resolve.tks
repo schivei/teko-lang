@@ -348,6 +348,43 @@ fn type_table_find_scan(table: TypeTable, name: str): parser::TypeDecl | error {
 }
 
 /**
+ * type_table_find_arity — the §9 B arity-SELECTIVE sibling of `type_table_find`: among the
+ * registrations whose name (exact, qualified, or last-segment) matches `name`, return the one whose
+ * declared generic ARITY equals `arity` (`decl.type_params.len`). This is what lets `Foo`, `Foo<T>`
+ * and `Foo<T,U>` coexist under one bare name and still resolve unambiguously — a bare reference asks
+ * for arity 0, a `Foo<X>` reference for arity 1, and each gets its OWN declaration instead of the
+ * first-by-name match `type_table_find` returns.
+ *
+ * For a name with a SINGLE registration the answer is identical to `type_table_find` when the arity
+ * matches, and a located "no type named …" error when it does not — so the single-declaration corpus
+ * (every name has exactly one arity) is byte-identical. A stamped generic-instance name
+ * (`Box__g__i64`, arity 0 by construction) matches at arity 0 and is unaffected.
+ *
+ * @param table  the folded type table to search
+ * @param name   the type name to find (bare or canonical)
+ * @param arity  the reference's syntactic arity (0 for a bare `Foo`, N for `Foo<A1..An>`)
+ * @return       the registration declared at exactly `arity`, or a located error when none matches
+ * @since §9 B
+ */
+pub fn type_table_find_arity(table: TypeTable, name: str, arity: u64): parser::TypeDecl | error {
+    var i: u64 = 0
+    loop {
+        if i >= tt_len(table) { break }
+        var r = tt_at(table, i)
+        if (r.name == name || qualify_eq(r.namespace, r.name, name)) && r.decl.type_params.len == arity { return r.decl }
+        i++
+    }
+    var j: u64 = 0
+    loop {
+        if j >= tt_len(table) { break }
+        var r = tt_at(table, j)
+        if name_last_segment(r.name) == name && r.decl.type_params.len == arity { return r.decl }
+        j++
+    }
+    error { message = $"no type named '{name}' with {arity} type-parameter(s)" }
+}
+
+/**
  * type_table_find_path — find a user type's declaration from a WRITTEN reference path already split
  * into its QUALIFIER (the segments before the last, joined with `::`; `""` for a bare reference) and
  * its LAST segment. The qualifier-aware sibling of `type_table_find`, and the lookup a backend that
@@ -576,36 +613,40 @@ type NotUserType = struct { }
  * @param path    the WRITTEN reference path
  * @param table   the folded type table
  * @param ref_ns  the namespace of the code that wrote the reference
+ * @param arity   the reference's syntactic generic arity (0 for a bare `Foo`, N for `Foo<A1..An>`)
  * @return        the matched registration, `NotUserType` when nothing matches, or a fail-loud error
  */
-fn resolve_type_reg(path: parser::Path, table: TypeTable, ref_ns: str): TypeReg | NotUserType | error {
+fn resolve_type_reg(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64): TypeReg | NotUserType | error {
     if path.segments.len == 0 { return NotUserType { } }
     var last = path.segments[path.segments.len - 1].name
-    if path.segments.len == 1 { return resolve_bare_type_reg(last, table, ref_ns) }
-    resolve_qualified_type_reg(path, last, table)
+    if path.segments.len == 1 { return resolve_bare_type_reg(last, table, ref_ns, arity) }
+    resolve_qualified_type_reg(path, last, table, arity)
 }
 
 /**
- * R3 — resolve a BARE (single-segment) type reference to its registration: strict own-namespace
- * resolution first, then the root ("") scope that type-params and top-level types share, then the
- * collision-proof stamped-instance names. A name that exists ONLY in other namespaces is rejected
- * fail-loud; a name that exists nowhere is `NotUserType`.
+ * R3 — resolve a BARE (single-segment) type reference to its registration, ARITY-SELECTIVE (§9 B):
+ * strict own-namespace resolution first, then the root ("") scope that type-params and top-level
+ * types share, then the collision-proof stamped-instance names. Among same-name registrations the
+ * one declared at exactly `arity` wins, so a bare `Foo` (arity 0) never picks a `Foo<T>` sharing the
+ * namespace (ruling 3). A name that exists ONLY in other namespaces is rejected fail-loud; a name
+ * that exists nowhere at this arity is `NotUserType` (the caller crafts the arity/unknown message).
  *
  * @param last    the referenced bare type name
  * @param table   the folded type table
  * @param ref_ns  the namespace of the code that wrote the reference
+ * @param arity   the reference's syntactic generic arity
  * @return        the matched registration, `NotUserType`, or the not-visible-bare error
  */
-fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str): TypeReg | NotUserType | error {
+fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str, arity: u64): TypeReg | NotUserType | error {
     var cands = tt_cands(table, last)
     var i: u64 = 0
     loop {
         if i >= cands.count { break }
         var r = tt_cand_reg(table, cands, i)
-        if r.name == last && r.namespace == ref_ns { return r }
+        if r.name == last && r.namespace == ref_ns && r.decl.type_params.len == arity { return r }
         i++
     }
-    match resolve_root_scope_reg(last, table, ref_ns) { TypeReg as r => return r; null => { } }
+    match resolve_root_scope_reg(last, table, ref_ns, arity) { TypeReg as r => return r; null => { } }
     match resolve_bare_g_instance(last, table) { TypeReg as r => return r; null => { } }
     match reject_or_unknown_bare_type(last, table, ref_ns) {
         NotUserType => NotUserType { }
@@ -622,43 +663,56 @@ fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str): TypeReg | No
  * @param last    the referenced bare type name
  * @param table   the folded type table
  * @param ref_ns  the namespace of the code that wrote the reference
+ * @param arity   the reference's syntactic generic arity (§9 B — only the matching-arity root decl wins)
  * @return        the root-scope registration, or null
  */
-fn resolve_root_scope_reg(last: str, table: TypeTable, ref_ns: str): TypeReg | null {
+fn resolve_root_scope_reg(last: str, table: TypeTable, ref_ns: str, arity: u64): TypeReg | null {
     if ref_ns == "" { return null }
     var cands = tt_cands(table, last)
     var k: u64 = 0
     loop {
         if k >= cands.count { break }
         var r = tt_cand_reg(table, cands, k)
-        if r.name == last && r.namespace == "" { return r }
+        if r.name == last && r.namespace == "" && r.decl.type_params.len == arity { return r }
         k++
     }
     null
 }
 
 /**
- * The verdict for a bare reference that matched nothing visible: if the name lives in other
- * namespace(s), that is the cross-namespace collision — the reference is not visible bare and MUST
- * be qualified (fail-loud, naming those namespaces). Otherwise it is simply unknown and the caller's
- * own "unknown type" message stands.
+ * The verdict for a bare reference that matched no VISIBLE registration at the requested arity (§9 B).
+ * The classification is by namespace, not arity: if the name is declared in the referencing namespace
+ * or the root scope (but only at a DIFFERENT arity — else the caller would have matched it), the miss
+ * is an arity mismatch and `NotUserType` is returned so the caller crafts the precise arity/generic
+ * message. If the name lives ONLY in other namespace(s), that is the cross-namespace collision — the
+ * reference is not visible bare and MUST be qualified (fail-loud, naming those namespaces). If it
+ * lives nowhere, `NotUserType` and the caller's own "unknown type" message stands.
  *
  * @param last    the referenced bare type name
  * @param table   the folded type table
  * @param ref_ns  the namespace of the code that wrote the reference
- * @return        `NotUserType` when the name is nowhere, else the not-visible-bare error
+ * @return        `NotUserType` when the name is absent or visible-but-wrong-arity, else the
+ *                not-visible-bare error for a name declared only in other namespaces
  */
 fn reject_or_unknown_bare_type(last: str, table: TypeTable, ref_ns: str): NotUserType | error {
     var cands = tt_cands(table, last)
+    var visible_wrong_arity = false
+    var other_ns = false
     var j: u64 = 0
     loop {
         if j >= cands.count { break }
-        if tt_cand_reg(table, cands, j).name == last {
-            var nss = namespaces_declaring(table, last)
-            var here = if ref_ns == "" { "<top-level>" } else { ref_ns }
-            return error { message = $"type '{last}' is not visible bare from namespace '{here}' — it is declared in: {nss}. Qualify it (`ns::{last}`) or reference it from its own namespace." }
+        var r = tt_cand_reg(table, cands, j)
+        if r.name == last {
+            if r.namespace == ref_ns || r.namespace == "" { visible_wrong_arity = true }
+            else { other_ns = true }
         }
         j++
+    }
+    if visible_wrong_arity { return NotUserType { } }
+    if other_ns {
+        var nss = namespaces_declaring(table, last)
+        var here = if ref_ns == "" { "<top-level>" } else { ref_ns }
+        return error { message = $"type '{last}' is not visible bare from namespace '{here}' — it is declared in: {nss}. Qualify it (`ns::{last}`) or reference it from its own namespace." }
     }
     NotUserType { }
 }
@@ -671,9 +725,10 @@ fn reject_or_unknown_bare_type(last: str, table: TypeTable, ref_ns: str): NotUse
  * @param path   the WRITTEN reference path (more than one segment)
  * @param last   the path's last segment
  * @param table  the folded type table
+ * @param arity  the reference's syntactic generic arity (§9 B — only the matching-arity decl wins)
  * @return       the unique matching registration, `NotUserType`, or the ambiguity error
  */
-fn resolve_qualified_type_reg(path: parser::Path, last: str, table: TypeTable): TypeReg | NotUserType | error {
+fn resolve_qualified_type_reg(path: parser::Path, last: str, table: TypeTable, arity: u64): TypeReg | NotUserType | error {
     var qual = path_qualifier(path, path.segments.len - 1)
     var cands = tt_cands(table, last)
     var winner_idx: i64 = -1
@@ -684,7 +739,7 @@ fn resolve_qualified_type_reg(path: parser::Path, last: str, table: TypeTable): 
         if c >= cands.count { break }
         var i2 = tt_cand_pos(table, cands, c)
         var r = tt_cand_reg(table, cands, c)
-        if r.name == last && qualifier_selects_ns(r.namespace, qual) {
+        if r.name == last && qualifier_selects_ns(r.namespace, qual) && r.decl.type_params.len == arity {
             if winner_idx >= 0 && r.namespace != matched_ns {
                 ambiguous = true
             } else {
@@ -709,10 +764,11 @@ fn resolve_qualified_type_reg(path: parser::Path, last: str, table: TypeTable): 
  * @param path    the WRITTEN reference path
  * @param table   the folded type table
  * @param ref_ns  the namespace of the code that wrote the reference
+ * @param arity   the reference's syntactic generic arity (0 for a bare `Foo`, N for `Foo<A1..An>`)
  * @return        the matched decl, `NotUserType` when nothing matches, or a fail-loud error
  */
-fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str): parser::TypeDecl | NotUserType | error {
-    match resolve_type_reg(path, table, ref_ns) {
+fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64): parser::TypeDecl | NotUserType | error {
+    match resolve_type_reg(path, table, ref_ns, arity) {
         TypeReg as r => r.decl
         NotUserType => NotUserType { }
         error as e => e
@@ -746,7 +802,7 @@ fn name_to_path(name: str): parser::Path {
 // (companion, like type_ref_ns). Used by collect's `implements`/`extends`/trait-derive walks, so
 // a bare name never resolves by table-scan order. (Mirrors resolve.c.)
 pub fn resolve_name_ref(name: str, table: TypeTable, ref_ns: str): parser::TypeDecl | error {
-    match resolve_type_ref(name_to_path(name), table, ref_ns) {
+    match resolve_type_ref(name_to_path(name), table, ref_ns, 0) {
         parser::TypeDecl as td => td
         NotUserType => error { message = "not a user type" }
         error as e => e
@@ -1152,16 +1208,25 @@ pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []parser::Con
     }
 }
 
-// resolve a NAMED type (a path) to a semantic Type: built-in or user type.
-// (#109 W2) `ref_ns` = the referencing namespace; drives the R0-R5 resolution rules (via
-// resolve_type_ref). R2 builtins are matched FIRST (bare only — a builtin is never namespaced); the
-// user-type lookup then applies R3 (bare = strict own-ns) / R4/R0 (qualified = last+qualifier).
-fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str): Type | error {
-    // M.1: an empty path is an internal invariant break — an honest error, never an out-of-bounds.
+/**
+ * resolve_named — resolve a NAMED type reference (a path at a given syntactic ARITY) to a semantic
+ * Type: a built-in or a user type. `ref_ns` (the referencing namespace) drives the R0-R5 rules via
+ * `resolve_type_ref`; R2 builtins are matched FIRST (bare only — a builtin is never namespaced), then
+ * the user-type lookup applies R3 (bare = strict own-ns) / R4/R0 (qualified = last + qualifier). Under
+ * §9 B the lookup is ARITY-SELECTIVE: `resolve_named` is the arity-0 entry (`Foo`), so a bare name
+ * NEVER borrows the arity of a coexisting `Foo<T>` — a bare reference to a name that exists only as a
+ * generic is a diagnosed error naming the fix (`write Foo<…>` / `self { … }`), not a silent match.
+ *
+ * @param path    the WRITTEN reference path
+ * @param table   the folded type table
+ * @param ref_ns  the referencing namespace (drives R0-R5)
+ * @param arity   the reference's syntactic generic arity (0 for a bare `Foo`)
+ * @return        the resolved semantic type, or a located error (unknown / bare-of-generic)
+ * @since §9 B (arity threaded)
+ */
+fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64): Type | error {
     if path.segments.len == 0 { return error { message = "internal: empty type path (a void/missing type used where a value type is required)" } }
-    var name = path.segments[path.segments.len - 1].name   // seed: last segment
-    // R2 — a BUILTIN resolves only for a BARE reference (`u8`…`u64`, `byte`, `str`, `error`, …). A
-    // qualified path can never name a builtin, so a `ns::str` falls through to the user-type rules.
+    var name = path.segments[path.segments.len - 1].name
     if path.segments.len == 1 {
         match builtin_type(name) {
             Type as t => return t
@@ -1169,18 +1234,40 @@ fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str): Type | erro
             error as e => return e
         }
     }
-    match resolve_type_ref(path, table, ref_ns) {   // R0/R3/R4 — a user struct/enum/variant/alias
-        // A TRANSPARENT alias `type Name = <type-expr>` resolves THROUGH to the aliased type
-        // (self-host parity): `TypeTable = []TypeReg` → a Slice, `Foo = Circle` → its Named
-        // struct, etc. struct/enum/variant decls stay NOMINAL (a bare Named of `name`).
+    match resolve_type_ref(path, table, ref_ns, arity) {
         parser::TypeDecl as td => {
             match td.body {
-                parser::AliasBody as ab => return resolve_type(ab.alias, table, type_ref_ns(path, table, ref_ns))   // (#109 W2) alias body resolves in the alias's OWN ns, not the referencing ns
+                parser::AliasBody as ab => return resolve_type(ab.alias, table, type_ref_ns(path, table, ref_ns))
                 _ => return if name_is_g_instance(name) { Named { name = name } } else { Named { name = qualify(type_ref_ns(path, table, ref_ns), name) } }
             }
         }
-        NotUserType => return error { message = $"unknown type: {name}" }
+        NotUserType => return unknown_named_error(name, table, arity)
         error as e => return e
+    }
+    unknown_named_error(name, table, arity)
+}
+
+/**
+ * unknown_named_error — the located verdict for a NAMED reference that resolved nothing at its arity.
+ * When a declaration of `name` exists at a DIFFERENT (generic) arity, the reference is a bare use of a
+ * generic type (ruling 7) and the message names the fix; otherwise the name is genuinely unknown.
+ *
+ * @param name   the referenced type name
+ * @param table  the folded type table
+ * @param arity  the reference's syntactic arity (0 for a bare use)
+ * @return       the "names a generic type" hint when a generic decl exists, else "unknown type"
+ * @since §9 B
+ */
+fn unknown_named_error(name: str, table: TypeTable, arity: u64): error {
+    if arity == 0 {
+        match type_table_find(table, name, "") {
+            parser::TypeDecl as td => {
+                if td.type_params.len > 0 {
+                    return error { message = $"`{name}` names a generic type — write `{name}<…>` (or `self {{ … }}` to construct the enclosing type)" }
+                }
+            }
+            error => { }
+        }
     }
     error { message = $"unknown type: {name}" }
 }
@@ -1924,7 +2011,7 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str): Type |
         // instantiation pass / mono (blocker #1: reuse the Named case, no new Type variant).
         parser::NamedType as nt => {
             if named_type_is_null(nt) { Null { } }
-            else if nt.args.len == 0 { resolve_named(nt.path, table, ref_ns) }
+            else if nt.args.len == 0 { resolve_named(nt.path, table, ref_ns, 0) }
             else { resolve_generic_inst(nt, table, ref_ns) }
         }
         parser::SliceType as st => {
@@ -2170,40 +2257,22 @@ pub fn named_case_name(name: str): str {
 }
 
 /**
- * Is this struct/class literal a SELF-CONSTRUCT inside its own generic template — i.e. the base
- * being constructed equals the enclosing method's owner type, AND that owner is generic (so no
- * concrete instance is stamped while typing the abstract template)? Only then do we type against the
- * abstract template body and tag the node with the phantom `Base__g__<param>` instance name that the
- * mono pass will later remap to the concrete stamp (#254 L4/L5). A non-generic owner, or a
- * construction of a DIFFERENT generic type, is NOT a self-construct → the ordinary
- * expected-instance path (unchanged) applies.
- *
- * @param base_name    the bare base of the constructed type (`Box`)
- * @param owner_type   the enclosing method's owner (`env.owner_type`, canonical or "")
- * @param decl_tparams the constructed base's type-params (generic iff non-empty)
- * @return             true iff this is a self-construct of the enclosing generic template
- * @since onda-3 (#254 L4/L5)
- */
-pub fn is_self_generic_construct(base_name: str, owner_type: str, decl_tparams: []str): bool {
-    if decl_tparams.len == 0 { return false }
-    if owner_type == "" { return false }
-    name_last_segment(owner_type) == base_name
-}
-
-/**
- * The PHANTOM generic-instance name for a self-construct inside a generic template: the enclosing
- * type's OWN type-params, in order, mangled exactly as `resolve_generic_inst` mangles `-> Box<T>`
- * (`Box__g__T`). The template body's self-init, its `-> Box<T>` return, and any `Box<T>` local all
- * carry this SAME spelling, so the mono pass's single `phantom → concrete` remap retargets them
- * together (#254 L4/L5). Reuses `generic_inst_name` over the owner's params-as-Named so the spelling
- * cannot drift from the resolver's.
+ * self_inst_spelling — the PHANTOM generic-instance name for a `self { … }` construction inside a
+ * generic template (§9 B, ruling 6's explicit replacement for the deleted self-construct inference):
+ * the enclosing type's OWN type-params, in order, mangled exactly as `resolve_generic_inst` mangles
+ * `-> Box<T>` (`Box__g__T`). The template body's `self`-init, its `-> Box<T>` return, and any `Box<T>`
+ * local all carry this SAME spelling, so the mono pass's single `phantom → concrete` remap
+ * (`instance_method_subst_l5`) retargets them together (#254 L4/L5). It is the SINGLE source of that
+ * spelling — shared by the `self` branch of `type_struct_lit` and the mono remap — so the two can
+ * never drift (a drift would silently break the remap). Reuses `generic_inst_name` over the owner's
+ * params-as-Named so the spelling cannot drift from the resolver's either.
  *
  * @param base_name     the bare base (`Box`)
  * @param owner_tparams the enclosing type's type-param names (`["T"]`)
  * @return              the phantom instance name (`Box__g__T`)
- * @since onda-3 (#254 L4/L5)
+ * @since onda-3 (#254 L4/L5), single-sourced §9 B
  */
-pub fn phantom_self_inst_name(base_name: str, owner_tparams: []str): str {
+pub fn self_inst_spelling(base_name: str, owner_tparams: []str): str {
     var args: []Type = teko::list::empty()
     var i = 0
     loop {
@@ -2272,19 +2341,34 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str): T
         argtypes = teko::list::push(argtypes, a)
         i++
     }
-    match resolve_type_ref(nt.path, table, ref_ns) {   // (#109 W2) R0/R3/R4 over the WRITTEN path
-        parser::TypeDecl as td => {
-            if td.type_params.len == 0 {
-                return error { message = $"type `{name}` is not generic but was given type arguments" }
-            }
-            if td.type_params.len != nt.args.len {
-                return error { message = $"generic type `{name}` expects a different number of type arguments" }
-            }
-            Named { name = generic_inst_name(name, argtypes) }
-        }
-        NotUserType => return error { message = $"unknown generic type: {name}" }
+    match resolve_type_ref(nt.path, table, ref_ns, nt.args.len) {
+        parser::TypeDecl as td => Named { name = generic_inst_name(name, argtypes) }
+        NotUserType => return generic_inst_arity_error(name, table, nt.args.len)
         error as e => return e
     }
+}
+
+/**
+ * generic_inst_arity_error — the located verdict for a `Foo<A..>` reference that matched no decl at
+ * arity `args` (§9 B, no partial application — ruling 3). If a `Foo` decl exists at another arity, the
+ * message distinguishes a non-generic given arguments from a wrong argument count (R2); otherwise the
+ * generic type is genuinely unknown.
+ *
+ * @param name   the generic base name
+ * @param table  the folded type table
+ * @param args   the reference's supplied type-argument count
+ * @return       the "not generic" / "different number of type arguments" / "unknown generic" error
+ * @since §9 B
+ */
+fn generic_inst_arity_error(name: str, table: TypeTable, args: u64): error {
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => {
+            if td.type_params.len == 0 { return error { message = $"type `{name}` is not generic but was given type arguments" } }
+            return error { message = $"generic type `{name}` expects a different number of type arguments" }
+        }
+        error => { }
+    }
+    error { message = $"unknown generic type: {name}" }
 }
 
 /**
@@ -2918,7 +3002,7 @@ fn seed_inst_sites(program: parser::Program): []InstSite {
  */
 fn generic_template_reg(nt: parser::NamedType, table: TypeTable, ref_ns: str): TypeReg | null {
     var arity = nt.args.len
-    match resolve_type_reg(nt.path, table, ref_ns) {
+    match resolve_type_reg(nt.path, table, ref_ns, arity) {
         TypeReg as r => { if r.decl.type_params.len == arity { return r } }
         NotUserType => { }
         error => { }

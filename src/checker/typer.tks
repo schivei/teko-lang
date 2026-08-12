@@ -3238,90 +3238,198 @@ fn type_match_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable): TA
     type_arm(a, subject, env, table)
 }
 
-// ---- struct literal `Name { f = v, … }` (W4a) ----
-// Resolve the named struct, require EXACTLY the declared fields (once each — M.1), check
-// per-field value types, and emit the typed children in the struct's DECLARED order (so the
-// interpreter and codegen lower identically). A numeric literal adopts a fitting field prim type
-// (parity with annotated bindings).
-// `expected` is the binding/return/param type the literal flows into (a `Void` sentinel = none). It
-// retargets a GENERIC struct constructor `Box { … }` to the concrete instance named by the annotation
-// (`Box__g__i64`), so the fields type against i64 — annotation-driven (S4 type-generics, legislated).
-fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeTable): TExpr | error {
-    var nt = match resolve_named(sl.type_path, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the literal's enclosing namespace
-    // The builtin `error` is the one non-Named constructible type — `error { message = <str> }` (B.1).
-    match nt {
-        Error => {
-            if sl.field_names.len != 1 || sl.field_names[0] != "message" {
-                return error { message = "`error` is constructed as `error { message = <str> }` (one `message` field)" }
-            }
-            var v = match type_expr(sl.field_vals[0], env, table) { TExpr as te => te; error as e => return e }
-            match v.type { Str => { }; _ => return error { message = "`error`'s `message` must be a `str`" } }
-            var enames = teko::list::push(teko::list::empty(), "message")
-            var evals = teko::list::push(teko::list::empty(), v)
-            return TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { }; line = 0; col = 0 }
-        }
+/**
+ * ConstructTarget — the resolved prefix of a construction literal (§9 B): the CANONICAL type `name`
+ * the node is tagged with, its `decl` (whose fields the values type against), and whether this is a
+ * `self { … }` construction (which bypasses the class-literal owner gate). The three prefix forms —
+ * `self { … }`, `Foo<A..> { … }` and bare `Foo { … }` — all reduce to one of these.
+ */
+type ConstructTarget = struct {
+    /** the canonical result-type name the `TStructInit` node carries (a phantom `Base__g__…` for a generic self/instance construct). */
+    name: str
+    /** the declaration whose fields the literal's values are typed against (the abstract template for a phantom instance). */
+    decl: parser::TypeDecl
+    /** true iff this is a `self { … }` construction — it is legal inside the owner's own methods, so the class-literal owner gate is bypassed. */
+    is_self: bool
+}
+
+/**
+ * is_self_sentinel — is `path` the `self` type-INITIALIZATION sentinel (§9 B, ruling 5)? The parser
+ * emits a single-segment path naming the reserved word `self` for `self { … }`; no user type can
+ * spell it, so this test is unambiguous.
+ *
+ * @param path  the construction literal's `type_path`
+ * @return      true iff `path` is the `self` sentinel
+ * @since §9 B
+ */
+fn is_self_sentinel(path: parser::Path): bool {
+    path.segments.len == 1 && path.segments[0].name == "self"
+}
+
+/**
+ * is_error_literal_prefix — does `sl` construct the one builtin constructible type, `error { message
+ * = <str> }` (B.1)? A bare single-segment `error` with no explicit type-arguments; `error` is a
+ * reserved builtin name no user type can shadow, so the syntactic test matches `builtin_type`.
+ *
+ * @param sl  the construction literal
+ * @return    true iff `sl` is an `error { … }` literal
+ * @since §9 B
+ */
+fn is_error_literal_prefix(sl: parser::StructLit): bool {
+    sl.type_args.len == 0 && sl.type_path.segments.len == 1 && sl.type_path.segments[0].name == "error"
+}
+
+/**
+ * type_error_literal — type the builtin `error { message = <str> }` construction (B.1), the one
+ * non-Named constructible type: exactly one `message` field, whose value must be a `str`.
+ *
+ * @param sl     the `error { … }` literal
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed `error` init node, or a located error
+ * @since §9 B (extracted from type_struct_lit)
+ */
+fn type_error_literal(sl: parser::StructLit, env: Env, table: TypeTable): TExpr | error {
+    if sl.field_names.len != 1 || sl.field_names[0] != "message" {
+        return error { message = "`error` is constructed as `error { message = <str> }` (one `message` field)" }
+    }
+    var v = match type_expr(sl.field_vals[0], env, table) { TExpr as te => te; error as e => return e }
+    match v.type { Str => { }; _ => return error { message = "`error`'s `message` must be a `str`" } }
+    var enames = teko::list::push(teko::list::empty(), "message")
+    var evals = teko::list::push(teko::list::empty(), v)
+    TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { }; line = 0; col = 0 }
+}
+
+/**
+ * self_construct_target — resolve a `self { … }` construction to its ConstructTarget (§9 B, ruling
+ * 6's explicit replacement for the deleted self-construct inference). The enclosing type is
+ * `env.owner_type` (set in a static OR instance method, so `self { … }` is legal in both); a generic
+ * owner keeps its abstract TEMPLATE decl (fields type against `T`) and is tagged with the phantom
+ * `Base__g__<owner-params>` spelling (`self_inst_spelling`) that the mono pass remaps to the concrete
+ * instance. Errors when there is no enclosing type.
+ *
+ * @param env    the typing environment (its `owner_type` names the enclosing type)
+ * @param table  the folded type table
+ * @return       the self construction target, or a located error
+ * @since §9 B
+ */
+fn self_construct_target(env: Env, table: TypeTable): ConstructTarget | error {
+    if env.owner_type == "" {
+        return error { message = "`self { … }` is only valid inside a method (there is no enclosing type here)" }
+    }
+    var owner = env.owner_type
+    var decl = match type_table_find(table, owner, "") {
+        parser::TypeDecl as td => td
+        error => return error { message = $"internal: enclosing type `{owner}` not found for `self {{ … }}`" }
+    }
+    if decl.type_params.len == 0 {
+        return ConstructTarget { name = owner; decl = decl; is_self = true }
+    }
+    var phantom = self_inst_spelling(name_last_segment(owner), decl.type_params)
+    ConstructTarget { name = phantom; decl = decl; is_self = true }
+}
+
+/**
+ * explicit_inst_target — resolve a `Foo<A..> { … }` construction (§9 B, ruling 4): the explicit
+ * type-arguments name the concrete instance `Foo__g__…` (arity-selectively — no partial application),
+ * which the node is tagged with. When the annotation names ANOTHER instance of the same generic base
+ * the two must agree. The concrete stamped decl types the fields; a not-yet-stamped PHANTOM instance
+ * (a generic constructing a different generic from its own `T`) keeps the abstract template decl.
+ *
+ * @param sl        the construction literal (`type_args` non-empty)
+ * @param expected  the flow-target type — checked for agreement with the explicit instance only
+ * @param env       the typing environment
+ * @param table     the folded type table
+ * @return          the explicit-instance construction target, or a located error
+ * @since §9 B
+ */
+fn explicit_inst_target(sl: parser::StructLit, expected: Type, env: Env, table: TypeTable): ConstructTarget | error {
+    var stem = sl.type_path.segments[sl.type_path.segments.len - 1].name
+    var gte = parser::NamedType { path = sl.type_path; args = sl.type_args }
+    var git = match resolve_type(gte, table, env.cur_ns) { Type as t => t; error as e => return e }
+    var ginst = match git { Named as gn => gn.name; _ => return error { message = "explicit type-arguments did not resolve to a struct instance" } }
+    match expected {
+        Named as en => { if name_has_generic_base(en.name, stem) && en.name != ginst { return error { message = "the explicit type-arguments at construction disagree with the annotated type" } } }
         _ => { }
     }
-    var canon_name = match nt {
-        Named as n => n.name   // (#109 W3) CANONICAL result-type name (mirrors expr.c `name = nt.name`); type_eq compares canonical both sides
-        _ => return error { message = "a struct literal requires a named struct type" }
+    match type_table_find(table, ginst, "") {
+        parser::TypeDecl as td => ConstructTarget { name = ginst; decl = td; is_self = false }
+        error => {
+            if !name_is_phantom_instance(ginst, table) {
+                return error { message = $"internal: generic instance `{ginst}` was not stamped" }
+            }
+            var tmpl = match type_table_find_arity(table, stem, sl.type_args.len) { parser::TypeDecl as t => t; error as e => return e }
+            ConstructTarget { name = ginst; decl = tmpl; is_self = false }
+        }
     }
-    var base_name = name_last_segment(canon_name)   // (#109 W3) BARE base — a generic instance name (Gen__g__i64) is bare, so name_has_generic_base matches the bare "Gen" prefix
-    var name = canon_name
-    var decl = match type_table_find(table, name, "") {   // (#109 W1) struct-literal decl lookup on a resolved name — no referencing ns
+}
+
+/**
+ * bare_construct_target — resolve a bare `Foo { … }` construction (§9 B, ruling 4/7): a bare prefix
+ * is ARITY-0 ALWAYS, so it names the arity-0 declaration and NEVER borrows type-args from `expected`
+ * (a bare use of a name that exists only as a generic is a diagnosed error inside `resolve_named`).
+ *
+ * @param sl     the construction literal (no explicit type-args, not `self`, not `error`)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the arity-0 construction target, or a located error
+ * @since §9 B
+ */
+fn bare_construct_target(sl: parser::StructLit, env: Env, table: TypeTable): ConstructTarget | error {
+    var nt = match resolve_named(sl.type_path, table, env.cur_ns, 0) { Type as t => t; error as e => return e }
+    var canon = match nt { Named as n => n.name; _ => return error { message = "a struct literal requires a named struct type" } }
+    var decl = match type_table_find_arity(table, canon, 0) {
         parser::TypeDecl as td => td
-        error => return error { message = $"unknown type in a struct literal: {name}" }
+        error => return error { message = $"unknown type in a struct literal: {canon}" }
     }
-    var tgt = expected
-    // (W9.4) explicit construction-site type-args `Foo<i64>{ … }` resolve to the concrete instance
-    // `Foo__g__i64` directly — NO annotation required. This OVERRIDES `expected`: resolve the synthetic
-    // generic type (the same path as an annotation), which validates arity and rejects non-generic-with-args.
-    // The instance decl is stamped by instantiate_types (fed from the construction site). If the annotation
-    // is ANOTHER instance of the SAME generic base, the two must name the same instance; if it is a wider
-    // type (a variant the instance widens into), the binding-level widening check below handles it (so
-    // `let w: Wrap = Gen<i64>{…}` is fine).
-    if sl.type_args.len > 0 {
-        var gte = parser::NamedType { path = sl.type_path; args = sl.type_args }
-        var git = match resolve_type(gte, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the literal's enclosing namespace
-        var ginst = match git { Named as gn => gn.name; _ => return error { message = "explicit type-arguments did not resolve to a struct instance" } }
-        match tgt {
-            Named as en => { if name_has_generic_base(en.name, base_name) && en.name != ginst { return error { message = "the explicit type-arguments at construction disagree with the annotated type" } } }
-            _ => { }
-        }
-        tgt = git   // retarget below as if annotated
-    }
-    // (S4) constructing a GENERIC struct → retarget to the concrete instance named by `tgt` (the
-    // annotation OR the W9.4 construction-site type-args), so `Box { … }` under `: Box<i64>`
-    // (or `Box<i64> { … }`) builds `Box__g__i64` (its fields are T→i64).
-    var is_self_construct = false
-    if decl.type_params.len > 0 {
-        if is_self_generic_construct(base_name, env.owner_type, decl.type_params) {
-            is_self_construct = true
-            name = phantom_self_inst_name(base_name, decl.type_params)
-        } else {
-            var mname = match tgt {
-                Named as en => en.name
-                _ => return error { message = $"cannot infer the type arguments of `{base_name}` here — annotate it (e.g. `var x: {base_name}<…> = …`)" }
-            }
-            if !name_has_generic_base(mname, base_name) {
-                return error { message = $"struct literal `{base_name}` does not match the annotated type" }
-            }
-            match type_table_find(table, mname, "") {
-                parser::TypeDecl as td => { decl = td; name = mname }
-                error => {
-                    // A PHANTOM instance (`Box__g__T`) — its type-args still carry an in-scope
-                    // abstract type-param, so no concrete decl is stamped while typing the ENCLOSING
-                    // generic (a generic fn/method constructing a DIFFERENT generic type from its own
-                    // `T`). Tolerate it exactly like a self-construct: keep the abstract template
-                    // `decl` (its fields type against `T`) and tag the node with the phantom name; the
-                    // monomorph pass substitutes `T` (subst_instance_name) and stamps the concrete
-                    // instance. A name whose tokens are all concrete is a GENUINE missing stamp → error.
-                    if name_is_phantom_instance(mname, table) { name = mname }
-                    else { return error { message = $"internal: generic instance `{mname}` was not stamped" } }
-                }
-            }
-        }
-    }
+    ConstructTarget { name = canon; decl = decl; is_self = false }
+}
+
+/**
+ * construct_target — dispatch a construction literal's PREFIX (§9 B, ruling 4) to its resolved
+ * ConstructTarget: `self { … }`, `Foo<A..> { … }`, or bare `Foo { … }`. The prefix ALWAYS decides the
+ * arity — there is no nameless `{ … }` construction and a bare prefix never borrows arity from the
+ * flow target.
+ *
+ * @param sl        the construction literal
+ * @param expected  the flow-target type (used only to check agreement with an explicit instance)
+ * @param env       the typing environment
+ * @param table     the folded type table
+ * @return          the resolved construction target, or a located error
+ * @since §9 B
+ */
+fn construct_target(sl: parser::StructLit, expected: Type, env: Env, table: TypeTable): ConstructTarget | error {
+    if is_self_sentinel(sl.type_path) { return self_construct_target(env, table) }
+    if sl.type_args.len > 0 { return explicit_inst_target(sl, expected, env, table) }
+    bare_construct_target(sl, env, table)
+}
+
+/**
+ * type_struct_lit — type a construction literal, whose prefix is ALWAYS an explicit type (§9 B,
+ * ruling 4): `Foo { … }` (arity 0), `Foo<i64> { … }` (name + explicit type-args) or `self { … }` (the
+ * enclosing type / Self, inside a static OR instance method). There is NO nameless `{ … }`
+ * construction — a bare `{` in expression position is always a block. The prefix decides the arity: a
+ * bare `Foo` resolves the ARITY-0 declaration always (never borrowing type-args from `expected`,
+ * ruling 7); `Foo<A..>` resolves the instance at that arity; `self` resolves `env.owner_type` (phantom
+ * -stamped when the owner is generic). The builtin `error { message = <str> }` is the one non-Named
+ * constructible type. Once the prefix is resolved the shared tail requires EXACTLY the declared
+ * fields (once each — M.1), checks per-field value types, and emits the typed children in the
+ * struct's DECLARED order so interpreter and codegen lower identically.
+ *
+ * @param sl        the parsed construction literal (`type_path` = the `self` sentinel for `self {…}`)
+ * @param expected  the flow-target type — used ONLY for an explicit instance's agreement check and a
+ *                  field value's nested expectation, NEVER to retarget a bare generic prefix (ruling 7)
+ * @param env       the typing environment (its `owner_type` resolves `self`)
+ * @param table     the collected type table
+ * @return          the typed `TStructInit`, or a located error
+ * @since §9 B (rewrites the W4a/S4/W9.4 construction path)
+ */
+fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeTable): TExpr | error {
+    if is_error_literal_prefix(sl) { return type_error_literal(sl, env, table) }
+    var ct = match construct_target(sl, expected, env, table) { ConstructTarget as c => c; error as e => return e }
+    var name = ct.name
+    var decl = ct.decl
+    var is_self_construct = ct.is_self
     // (W10b.CLASS) `Name { … }` also constructs a class instance — a class's fields are typed
     // identically to a struct's (increment 2: the EFFECTIVE, base-inherited fields too). An
     // `abstract` class cannot be instantiated directly (only a concrete subclass may be — it is
@@ -3977,7 +4085,7 @@ fn type_path_expr(pe: parser::PathExpr, table: TypeTable, env: Env): TExpr | err
         segs = teko::list::push(segs, p.segments[i])
         i++
     }
-    var et = match resolve_named(parser::Path { segments = segs }, table, env.cur_ns) {
+    var et = match resolve_named(parser::Path { segments = segs }, table, env.cur_ns, 0) {
         Type as t => t
         error as e => return type_ns_qualified_value(pe, member, e, env)
     }

@@ -155,6 +155,21 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
     Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = names; field_vals = vals }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
 }
 
+/**
+ * self_sentinel_path — the SENTINEL `type_path` for a `self { … }` type-INITIALIZATION (§9 B,
+ * ruling 5): a single-segment `Path` whose name is the reserved word `self`. Because `self` is
+ * reserved it never passes `is_name_at` and no user type can spell it, so a `StructLit` whose
+ * `type_path` is this sentinel is an unambiguous marker the checker (`type_struct_lit`) recognises
+ * and resolves against the enclosing type (`env.owner_type`). Reusing the ordinary `StructLit` shape
+ * this way adds no AST field, so the `.tkb` layout is unchanged.
+ *
+ * @return  a one-segment path naming the reserved word `self`
+ * @since §9 B
+ */
+fn self_sentinel_path(): Path {
+    Path { segments = teko::list::push(teko::list::empty(), Segment { name = "self" }) }
+}
+
 // ---- string interpolation `$"…{expr}…"` (self-host parity) ----
 // decode `\` + one byte (the same escape set lexer::read_str decodes), appending the decoded
 // byte to `bytes`; returns the bytes + the index AFTER the escape. A malformed escape errors.
@@ -443,6 +458,9 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
     // (which powers path parsing). They are simple Var primaries — `self`/`base` resolve to the
     // synthetic receiver / super receiver; postfix (`.field`, `.method(...)`) chains on top.
     if k == lexer::TokenKind::SelfKw {
+        if allow_struct && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
+            return parse_struct_lit(tokens, pos + 1, self_sentinel_path(), teko::list::empty())
+        }
         return Parsed<Expr> { node = Expr { kind = Var { name = "self" }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::Base {

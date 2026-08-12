@@ -1,0 +1,111 @@
+/**
+ * Pair — the ARITY-0 declaration of the name `Pair` (§9 B, ruling 1): a plain non-generic struct. It
+ * coexists with `Pair<T>` and `Pair<T,U>` in this same namespace because the type-decl key carries the
+ * arity; a bare `Pair` reference names THIS declaration always (ruling 3).
+ */
+pub type Pair = struct {
+    /** a — the arity-0 pair's single datum, absent from the generic arities. */
+    a: i64
+}
+
+/**
+ * Pair<T> — the ARITY-1 declaration of the name `Pair` (§9 B): one type-parameter. A `Pair<i64>`
+ * reference selects this declaration by its syntactic arity, never the arity-0 or arity-2 `Pair`.
+ */
+pub type Pair<T> = struct {
+    /** x — the single generic field. */
+    x: T
+}
+
+/**
+ * Pair<T,U> — the ARITY-2 declaration of the name `Pair` (§9 B): two type-parameters. A `Pair<i64,i64>`
+ * reference selects this declaration by its arity.
+ */
+pub type Pair<T, U> = struct {
+    /** x — the first generic field. */
+    x: T
+    /** y — the second generic field. */
+    y: U
+}
+
+/**
+ * Box<T> — a generic CLASS whose static factory and instance method both construct via `self { … }`
+ * (§9 B, ruling 4/5), the same pattern `teko::collections::List<T>::make` now takes. It witnesses that
+ * `self { … }` phantom-stamps per width and is legal in a static AND an instance method.
+ */
+pub type Box<T> = class {
+    /** v — the owned value. */
+    intern v: T
+
+    /**
+     * of — the generic static factory, constructing the enclosing `Box<T>` via `self { … }`.
+     *
+     * @param x  the value to box
+     * @return   a fresh `Box<T>` holding `x`
+     */
+    pub static fn of(x: T): Box<T> { self { v = x } }
+
+    /**
+     * get — read the boxed value.
+     *
+     * @return the owned `v`
+     */
+    pub fn get(): T { self.v }
+
+    /**
+     * remap — return a NEW `Box<T>` holding `nx`, constructed via `self { … }` inside an INSTANCE
+     * method (proving `self { … }` is legal outside a static factory too).
+     *
+     * @param nx  the value for the new box
+     * @return    a fresh `Box<T>` holding `nx`
+     */
+    pub fn remap(nx: T): Box<T> { self { v = nx } }
+}
+
+/**
+ * arity_coexist_probe — construct all three `Pair` arities in one namespace and read each declaration's
+ * own fields back, proving arity coexistence (ruling 1) and syntactic arity selection (ruling 3).
+ *
+ * @return true iff each arity constructed and read back its own fields
+ */
+pub fn arity_coexist_probe(): bool {
+    var p0 = Pair { a = 7 }
+    var p1 = Pair<i64> { x = 3 }
+    var p2 = Pair<i64, i64> { x = 4; y = 5 }
+    p0.a == 7 && p1.x == 3 && p2.x == 4 && p2.y == 5
+}
+
+/**
+ * self_static_probe — build a `Box<T>` at two widths through the `self { … }` static factory, proving
+ * the phantom self-construct stamps per concrete width (ruling 4/5).
+ *
+ * @return true iff both widths round-trip their boxed value
+ */
+pub fn self_static_probe(): bool {
+    var bi = Box<i64>::of(42)
+    var bs = Box<str>::of("hi")
+    bi.get() == 42 && bs.get().len == 2
+}
+
+/**
+ * self_instance_probe — call an INSTANCE method that constructs `self { … }`, proving `self { … }` is
+ * legal outside a static factory (ruling 5).
+ *
+ * @return true iff the remapped box holds the new value
+ */
+pub fn self_instance_probe(): bool {
+    var b = Box<i64>::of(1)
+    var b2 = b.remap(9)
+    b2.get() == 9
+}
+
+/**
+ * bare_arity0_probe — a bare `Pair { … }` names the ARITY-0 declaration ALWAYS, never borrowing the
+ * arity of the coexisting `Pair<T>` (ruling 7): it has the field `a`, which the generic arities do not.
+ *
+ * @return true iff the bare construction selected the arity-0 `Pair`
+ */
+pub fn bare_arity0_probe(): bool {
+    var p = Pair { a = 11 }
+    p.a == 11
+}

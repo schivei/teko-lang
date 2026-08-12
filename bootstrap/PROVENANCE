@@ -1,80 +1,84 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): §9 PROPERTIES (get/set accessors) — the ADDITIVE,
-# INERT phase. An interface may declare a property via accessors (`get name(): T` / `set name(value:
-# T)`); an implementer (class or struct) provides the accessor bodies backed by a private field; the
-# use-site reads/writes the property FIELD-LIKE (`a.prop` / `a.prop = v`, no parentheses). An accessor
-# IS a method: the parser registers it under a synthetic reserved name (`__get_<prop>` / `__set_<prop>`)
-# with three new inert `Function` flags, so registration, conformance-by-name, the vtable slot, fat-ptr
-# and direct dispatch, mangling and codegen are ALL reused with ZERO backend change. The previous seed
-# (match-universal phase 1) C-builds THIS source with only pre-existing language features, so it
-# produced this new seed; the compiler's own sources hold ZERO accessors, so the seed was re-harvested
-# only because the new parser/checker logic (new functions + shifted source lines) changes the
-# compiler's own emitted C — behavior on the existing corpus is unchanged. The owner did NOT edit
-# bootstrap/teko.c by hand; the file is the harvested self-host output, proven a fixpoint. Format and
-# parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only ever judges
-# this record on a SWAP.
+# RESEED (hand-harvest, by-hand per owner order): §9 B TYPE OVERLOAD BY GENERIC ARITY + `self { … }`
+# CONSTRUCTION. The type-declaration key becomes `(namespace, name, ARITY)`, so `Foo`, `Foo<T>` and
+# `Foo<T,U>` are THREE distinct declarations that coexist in one namespace; a reference resolves by its
+# SYNTACTIC arity (bare `Foo` = arity 0, `Foo<X>` = arity 1, no partial application); and construction
+# is ALWAYS an explicit type prefix — `Foo { … }` (arity 0), `Foo<i64> { … }` (name + args) or
+# `self { … }` (the enclosing type / Self, inside a static OR instance method). The nameless
+# `{ … }`-is-Self inference is DELETED and replaced by explicit `self { … }`. Unlike §9 properties this
+# phase touches PRODUCT source (`src/collections/list.tks`, `src/collections/map.tks` sweep their
+# self-constructing factories to `self { … }`), but those classes are used only by their `.tkt` tests,
+# not the compiler build, so the compiler's own emitted C changes only because the checker/parser
+# LOGIC changed (new functions + shifted lines) — behavior on the existing corpus is byte-identical
+# (the re-key and arity selection are additive: every current type name has exactly one arity, so the
+# `(ns,name,arity)` key gives the same verdict as `(ns,name)` and the arity-selective resolvers return
+# the same single registration). The owner did NOT edit bootstrap/teko.c by hand; the file is the
+# harvested self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's kv_field;
+# enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
 #
-# §9 properties — get/set accessors on interfaces and implementers (additive)
+# §9 B type overload by arity + self { … } construction
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (additive; every existing member/field access parses and lowers byte-identically —
-# docs/design/plano-secao9-properties.md §0-§7):
-#   - THREE INERT `Function` FIELDS, in `src/parser/ast.tks`: `is_getter`/`is_setter`/`accessor_prop`,
-#     false/false/"" in every constructor and passed through in every reconstruction. The `.tkb` codec
-#     is UNCHANGED and reads them back false/"" (the `is_static` inert-field precedent).
-#   - CONTEXTUAL `get`/`set` PARSING, in `src/parser/parse_decl.tks`. `get`/`set` stay ordinary
-#     identifiers (never reserved — the corpus names hundreds of them); `accessor_kind_at` recognises
-#     an accessor only when `get`/`set` in MEMBER position is followed by a NAME and `(`.
-#     `parse_accessor`/`accessor_function` build a `Function` under the synthetic name with the flags
-#     set; `parse_member_fn_or_accessor` routes the struct/class/trait/interface member loops.
-#   - USE-SITE DESUGAR, in `src/checker/typer.tks`. `find_property`/`PropInfo` scan the receiver's
-#     EFFECTIVE method surface for accessors (the flags, never the bare name, are the authority). A
-#     READ (`type_field_access`) probes a property ONLY after field-absence (never on a visibility
-#     failure): a getter desugars `a.prop` to `__get_prop()` via `type_method_call`; a get-less
-#     property is a write-only error. A WRITE (`type_field_assign`) probes property-first: a setter
-#     desugars `a.prop = v` to `__set_prop(v)` wrapped in a `TExprStmt`; a set-less property is a
-#     read-only error; a compound `op=` on a property is a clean deferred error (plain `=` only).
-#   - CONFORMANCE, in `src/checker/collect.tks`. An accessor requirement is an ordinary method
-#     requirement (matched by the synthetic name); `requirement_desc` hides the synthetic name behind
-#     property wording in the diagnostic (byte-identical text for every non-accessor requirement).
-# WHAT DOES NOT ENTER: no auto-property (the backing field is explicit); struct implementers are
-# get-only in this cut (a struct setter needs `mut self` machinery reported below); compound `op=` on
-# a property is deferred to a follow-up; cross-library accessors (`.tkb` serialization) are a future
-# additive extension. ZERO codegen/lowering `.tks` edited — an accessor is a method end to end.
+# WHAT ENTERS (docs/design/plano-secao9B-type-overload.md — the 8-crumb plan):
+#   - RE-KEY THE TYPE-DECL REGISTRY, in `src/checker/collect.tks`. `duplicates_of_reg` adds the arity
+#     (`decl.type_params.len`) to the collision key; the diagnostic names it (`duplicate type 'Foo'
+#     (arity N) in namespace '…'`). Same-arity is a duplicate regardless of constraint OR type-param
+#     name; cross-kind (struct/enum/class) collides through the same key.
+#   - ARITY-SELECTIVE RESOLUTION, in `src/checker/resolve.tks`. A new `type_table_find_arity` and an
+#     `arity` parameter threaded through `resolve_named` / `resolve_type_ref` / `resolve_type_reg` /
+#     `resolve_bare_type_reg` / `resolve_qualified_type_reg` / `resolve_root_scope_reg`, from the
+#     `resolve_type` entry points (bare = arity 0, `Foo<A..>` = `nt.args.len`). A bare reference to a
+#     name that exists only as a generic is a diagnosed error (`names a generic type — write Foo<…>`);
+#     the arity-count refinement for `Foo<A..>` migrates to `generic_inst_arity_error`.
+#   - `self { … }` PARSING, in `src/parser/parse_expr.tks`. A `{` after `self` (when struct literals
+#     are allowed) parses a construction via `parse_struct_lit` with a single-segment `self` sentinel
+#     path (`self_sentinel_path`) — no new AST field, `.tkb` shape unchanged.
+#   - CONSTRUCTION REWRITE, in `src/checker/typer.tks`. `type_struct_lit` dispatches its prefix
+#     (`construct_target`): `self { … }` (`self_construct_target`, resolving `env.owner_type`,
+#     phantom-stamped for a generic owner), `Foo<A..> { … }` (`explicit_inst_target`) and bare
+#     `Foo { … }` (`bare_construct_target`, arity 0, never borrowing arity from `expected`). The
+#     annotation-retarget of a bare generic and the `is_self_generic_construct` inference are DELETED.
+#   - PHANTOM SELF SPELLING KEPT, single-sourced. `phantom_self_inst_name` is RENAMED to the neutral
+#     `self_inst_spelling` (NOT deleted): its second consumer `instance_method_subst_l5`
+#     (`src/checker/monomorph.tks`) needs the phantom→instance remap spelling, so the string stays
+#     single-sourced and shared by the `self` construction branch and the mono remap.
+#   - PRODUCT SWEEP. `List<T>::make` and `Map<V>::make` construct via `self { … }` instead of the
+#     deleted bare-`List{}`/`Map{}`-is-Self inference — behavior-preserving (same phantom name, same
+#     template decl, same TStructInit).
+# WHAT DOES NOT ENTER: no method/function overload (that is §9 A) and no defaults/named args (§9 C);
+# `self { … }` takes no explicit type-args (Self's arity comes from the enclosing type); no `.tkb`
+# format change (arity is `type_params.len`, derived, never persisted).
 #
-# INERTNESS. Zero accessors exist in the corpus, so `find_property` returns null for every existing
-# field access and both desugar sites run the historic path in the historic order (read probes only
-# after field-absence; write probes first but null on every real field, the backing being `_prop`).
-# `accessor_kind_at`/`parse_accessor` never fire (no `get`/`set` in member position followed by
-# name+`(`), and `get`/`set` stay `Ident`, so every real `get`/`set` name parses unchanged. No existing
-# field access newly routes through an accessor. The whole 153-file compiler re-checks and self-builds
-# green.
+# INERTNESS OF THE RE-KEY/ARITY PARTS. Every current type name has exactly ONE arity, so a `Foo`/
+# `Foo<T>` pair (which would collide under today's keyless `(ns,name)`) does not exist; the arity key
+# gives the same 0-duplicate verdict and the arity-selective resolvers return the same single
+# registration `type_table_find` returned. The ONLY source whose spelling changed is the two-site
+# self-construct sweep, and its typed output is identical (proven by the ACCEPT fixture round-tripping
+# the same generic-class + `self { … }` static/instance pattern on both backends).
 #
-# ACCEPT fixtures (examples/regressions/properties): two NATIVE members — a STRUCT get-only property
-# read field-like via DIRECT dispatch (the IR-migration shape) and a proof that `get`/`set` stay
-# ordinary identifiers — plus three C-route (TEKO_BACKEND=c) members: a class read-write property
-# round-tripping set-then-get through interface fat-ptr dispatch, a read-only COMPUTED getter (a body,
-# not a field), and a write-only sink accepting field-like writes. The interface members pin the C
-# route for the SAME reason match_universal does — interface fat-ptr dispatch is an N2 honest-stop on
-# the native backend (a plain interface method call crashes there too; the accessor merely rides the
-# pre-existing gap). REJECT fixtures (examples/regressions/properties_reject): writing a read-only
-# property, reading a write-only property, an implementer missing a required accessor, and a getter
-# with no return type — the single failing build reports all four diagnostics (parse AND checker).
+# ACCEPT fixtures (examples/regressions/type_overload): three `Pair` arities coexist and resolve by
+# syntactic arity; `self { … }` in a generic type's STATIC factory phantom-stamps per width; `self { …
+# }` in an INSTANCE method; and a bare prefix constructs the arity-0 declaration (never the coexisting
+# `Pair<T>`). All four scenarios print `ok` and run byte-identically on the native and C backends.
+# REJECT fixtures (examples/regressions/type_overload_reject): two same-arity decls differing only by
+# constraint, a cross-kind same-arity pair, a partially-applied generic, a bare use of a generic, and
+# `self { … }` outside a method — the single failing build reports all five diagnostics.
 #
-# FIXPOINT. gen0 (cc of the previous match-universal seed, which C-builds this §9 properties source)
-# built bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a
-# byte-identical bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
-#   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
-#   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
-# A TEKO_MEM_PARANOID=1 build of the same source exits 0.
+# FIXPOINT. The previous seed (§9 properties) does NOT parse `self { … }`, so bin-a was built in two
+# stages (seed builds the checker/parser support with the libs un-swept, then that compiler builds the
+# swept source); the COMMITTED artifact self-reproduces directly: compiling bootstrap/teko.c with cc
+# into a compiler and rebuilding the swept source produced a byte-identical teko.c (sha256 below).
+#   cc(bootstrap/teko.c) -> gen;  TEKO_BACKEND=c gen build . -> bin-b;  sha256(bin-b/teko.c) == below.
+# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 2875 MB).
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  7285029e0d4e23316d4b840533fd480deda0bbdf306f0f833e7333ca3afeaf1f
+sha256:  c1448cdf604c9550f02536af0011e6717382dccbb195367b4a3d881761788cd4
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§9 properties, additive in src/);
-         sha256 is read directly off the committed file and was proven a fixpoint (bin-a == bin-b,
-         byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§9 B type overload + self { … }
+         construction; re-key/arity additive in src/, plus the two-site collections self-construct
+         sweep); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
+         bin-b, byte-identical).

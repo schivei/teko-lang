@@ -2042,25 +2042,31 @@ fn check_no_duplicate_types(table: TypeTable): []str {
 }
 
 /**
- * Every LATER registration in `table` that duplicates the entry at `at` — the inner half of the
- * W0 ban, extracted so the outer walk stays flat. Reported against the DUPLICATE's own position,
- * not the first declaration's, so the diagnostic points at the redeclaration a reader must delete.
+ * Every LATER registration in `table` that duplicates the entry at `at` under the §9 B key
+ * `(namespace, name, ARITY)` — the inner half of the W0 ban, extracted so the outer walk stays flat.
+ * The ARITY (`decl.type_params.len`) is the §9 B discriminant: `Foo`, `Foo<T>` and `Foo<T,U>` are
+ * THREE distinct declarations that coexist, so only a SAME-arity redeclaration is a duplicate. The
+ * constraint and the type-param NAMES never enter the key — two `Foo<T>` collide even when one is
+ * `Foo<T: Ord>` and the other `Foo<U>`. Cross-kind is already keyed by name, so `struct Foo<T>` and
+ * `enum Foo<T>` collide through this same arity comparison. Reported against the DUPLICATE's own
+ * position, not the first declaration's, so the diagnostic points at the redeclaration to delete.
  *
  * @param table  the collected type table
  * @param at     the index of the registration being compared against
- * @return       one diagnostic per duplicate found after `at` (empty when there is none)
- * @since 0.3.1
+ * @return       one diagnostic per same-arity duplicate found after `at` (empty when there is none)
+ * @since §9 B
  */
 fn duplicates_of_reg(table: TypeTable, at: u64): []str {
     var diags: []str = teko::list::empty()
     var reg = tt_at(table, at)
     var ns_label = if reg.namespace == "" { "<top-level>" } else { reg.namespace }
+    var arity = reg.decl.type_params.len
     var j: u64 = at + 1
     loop {
         if j >= tt_len(table) { break }
         var other = tt_at(table, j)
-        if !w0_is_stamped_generic_reg(other, table) && other.name == reg.name && other.namespace == reg.namespace {
-            diags = teko::list::push(diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' in namespace '{ns_label}'"))
+        if !w0_is_stamped_generic_reg(other, table) && other.name == reg.name && other.namespace == reg.namespace && other.decl.type_params.len == arity {
+            diags = teko::list::push(diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' (arity {arity}) in namespace '{ns_label}'"))
         }
         j++
     }

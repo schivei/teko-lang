@@ -1,0 +1,39 @@
+# type_overload_reject.tkr — the §9 B type-overload REJECT host. Five illegal forms live one per
+# namespace under src/, and the single failing build reports every diagnostic it finds (the compiler
+# reports all diagnostics rather than stopping at the first), one per scenario below. It has no
+# successful build to sanitize/run. The type-decl key is `(namespace, name, ARITY)` and the constraint
+# / type-param name NEVER disambiguates (ruling 2); a reference's arity is SYNTACTIC with no partial
+# application (ruling 3); a bare prefix is arity-0 always (ruling 7); and `self { … }` is a
+# type-initialization valid only inside a method (ruling 5).
+
+Feature: §9 B type overload reject — the compiler rejects the illegal overload/construction forms
+
+  # (dup_constraint) two arity-1 `Foo` declarations differing ONLY by a constraint collide — the
+  # constraint never disambiguates (ruling 2).
+  Scenario: dup_constraint — same-arity decls differing only by constraint are a duplicate
+    When compilation fails
+    Then diagnostic = "duplicate type 'Foo'"
+
+  # (dup_crosskind) a struct `Bar<T>` and an enum `Bar<T>` collide through the same
+  # `(namespace, name, arity)` key — cross-kind does not disambiguate (ruling 2).
+  Scenario: dup_crosskind — a cross-kind same-arity pair is a duplicate
+    When compilation fails
+    Then diagnostic = "duplicate type 'Bar'"
+
+  # (partial_app) `Baz<i64>` applies the arity-2 `Baz` with one type-argument — no partial application
+  # (ruling 3).
+  Scenario: partial_app — a partially-applied generic is an arity error
+    When compilation fails
+    Then diagnostic = "type arguments"
+
+  # (bare_generic) a bare `Qux { … }` names arity-0 always and there is no arity-0 `Qux` — a bare use
+  # of a generic (ruling 7).
+  Scenario: bare_generic — a bare use of a generic type is rejected
+    When compilation fails
+    Then diagnostic = "names a generic type"
+
+  # (self_free) `self { … }` in a free function has no enclosing type — a type-initialization valid
+  # only inside a method (ruling 5).
+  Scenario: self_free — self { … } outside a method is rejected
+    When compilation fails
+    Then diagnostic = "only valid inside a method"
