@@ -1,74 +1,80 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): MATCH-UNIVERSAL PHASE 1 — the ADDITIVE, INERT phase.
-# `match` becomes a UNIVERSAL discriminator: on top of the existing variant-arm and enum-member axes it
-# now discriminates a sealed CLASS hierarchy (which subclass a base-typed value is) and an INTERFACE
-# value (which concrete impl), additively. `variant` stays fully alive; NO type is migrated (that is a
-# later phase). The previous seed (`6bc32b38…`, §9 A: method/function overloading) C-builds THIS source
-# with only pre-existing language features, so it produced this new seed; the compiler's own sources
-# hold ZERO match-over-class/interface sites, so the seed was re-harvested only because the new
-# checker/backend logic (new functions + shifted source lines) changes the compiler's own emitted C —
-# behavior on the existing corpus is unchanged. The owner did NOT edit bootstrap/teko.c by hand; the
-# file is the harvested self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's
-# kv_field; enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
+# RESEED (hand-harvest, by-hand per owner order): §9 PROPERTIES (get/set accessors) — the ADDITIVE,
+# INERT phase. An interface may declare a property via accessors (`get name(): T` / `set name(value:
+# T)`); an implementer (class or struct) provides the accessor bodies backed by a private field; the
+# use-site reads/writes the property FIELD-LIKE (`a.prop` / `a.prop = v`, no parentheses). An accessor
+# IS a method: the parser registers it under a synthetic reserved name (`__get_<prop>` / `__set_<prop>`)
+# with three new inert `Function` flags, so registration, conformance-by-name, the vtable slot, fat-ptr
+# and direct dispatch, mangling and codegen are ALL reused with ZERO backend change. The previous seed
+# (match-universal phase 1) C-builds THIS source with only pre-existing language features, so it
+# produced this new seed; the compiler's own sources hold ZERO accessors, so the seed was re-harvested
+# only because the new parser/checker logic (new functions + shifted source lines) changes the
+# compiler's own emitted C — behavior on the existing corpus is unchanged. The owner did NOT edit
+# bootstrap/teko.c by hand; the file is the harvested self-host output, proven a fixpoint. Format and
+# parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only ever judges
+# this record on a SWAP.
 #
-# match-universal phase 1 — `match` as a universal discriminator (additive)
+# §9 properties — get/set accessors on interfaces and implementers (additive)
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (additive; every existing match site lowers byte-identically —
-# docs/design/plano-match-universal-e-migracao-variant.md §0-§2, §7):
-#   - LEFT-OF-ARM RELATION CHECK, in `src/checker/match.tks`. `is_direct_case_of` now takes the type
-#     table and, for a NON-variant subject, defers to `is_type_discriminant_of`: a polymorphic
-#     BASE-CLASS subject admits a concrete SUBCLASS reaching it (`subclass_reaches`); an INTERFACE
-#     subject admits a concrete type conforming to it (`type_conforms_to`); every other subject
-#     (struct/primitive/sealed-class/service) admits only itself, the bind-all `type_eq` already
-#     accepts — so the change is inert for them. A rejected arm is diagnosed by
-#     `discriminant_mismatch_error` ("not a subclass of" / "does not implement", else the historic
-#     variant skip-level message).
-#   - CLOSED-SET EXHAUSTIVENESS, in `src/checker/match.tks`. `exhaustive`'s non-variant/non-enum tail
-#     now routes to `exhaustive_type_subject`: a polymorphic base-class subject is exhaustive iff an
-#     unguarded bind-all names the base OR every concrete subclass is covered (`subclasses_of` +
-#     `class_covered`); an INTERFACE subject is an OPEN set, exhaustive only via an unguarded
-#     catch-all/bind-all; every other subject stays open (false — the pre-existing behavior). A guarded
-#     arm (`when`) does NOT count toward covering its case (the existing B.15 rule, reused).
-#   - C-BACKEND LOWERING, in `src/codegen/codegen.tks`. A base-class/interface/trait subject is a fat
-#     pointer `{ data, vtable }` (W10b.D3 / #98): `cg_fatptr_subject_name` detects it, and
-#     `cg_emit_fatptr_pat_test`/`cg_emit_fatptr_pat_binds` discriminate an arm by comparing the
-#     subject's `.vtable` word against that concrete's `tk_vt_<Concrete>_<Subject>` array and bind the
-#     concrete off `.data`. A bind-all naming the subject matches unconditionally and binds the whole
-#     value. The native backend carries no per-object vtable, so its fat-pointer dispatch stays the
-#     existing N2 honest-stop (unchanged this phase).
-# WHAT DOES NOT ENTER: no `variant` type is migrated; literal/range patterns on the left still parse
-# and work (Phase 2); no `properties`/interface get-set.
+# WHAT ENTERS (additive; every existing member/field access parses and lowers byte-identically —
+# docs/design/plano-secao9-properties.md §0-§7):
+#   - THREE INERT `Function` FIELDS, in `src/parser/ast.tks`: `is_getter`/`is_setter`/`accessor_prop`,
+#     false/false/"" in every constructor and passed through in every reconstruction. The `.tkb` codec
+#     is UNCHANGED and reads them back false/"" (the `is_static` inert-field precedent).
+#   - CONTEXTUAL `get`/`set` PARSING, in `src/parser/parse_decl.tks`. `get`/`set` stay ordinary
+#     identifiers (never reserved — the corpus names hundreds of them); `accessor_kind_at` recognises
+#     an accessor only when `get`/`set` in MEMBER position is followed by a NAME and `(`.
+#     `parse_accessor`/`accessor_function` build a `Function` under the synthetic name with the flags
+#     set; `parse_member_fn_or_accessor` routes the struct/class/trait/interface member loops.
+#   - USE-SITE DESUGAR, in `src/checker/typer.tks`. `find_property`/`PropInfo` scan the receiver's
+#     EFFECTIVE method surface for accessors (the flags, never the bare name, are the authority). A
+#     READ (`type_field_access`) probes a property ONLY after field-absence (never on a visibility
+#     failure): a getter desugars `a.prop` to `__get_prop()` via `type_method_call`; a get-less
+#     property is a write-only error. A WRITE (`type_field_assign`) probes property-first: a setter
+#     desugars `a.prop = v` to `__set_prop(v)` wrapped in a `TExprStmt`; a set-less property is a
+#     read-only error; a compound `op=` on a property is a clean deferred error (plain `=` only).
+#   - CONFORMANCE, in `src/checker/collect.tks`. An accessor requirement is an ordinary method
+#     requirement (matched by the synthetic name); `requirement_desc` hides the synthetic name behind
+#     property wording in the diagnostic (byte-identical text for every non-accessor requirement).
+# WHAT DOES NOT ENTER: no auto-property (the backing field is explicit); struct implementers are
+# get-only in this cut (a struct setter needs `mut self` machinery reported below); compound `op=` on
+# a property is deferred to a follow-up; cross-library accessors (`.tkb` serialization) are a future
+# additive extension. ZERO codegen/lowering `.tks` edited — an accessor is a method end to end.
 #
-# INERTNESS. A real-build scan of the compiler's own emitted C shows the ONLY new `teko_teko__`
-# symbols are the phase-1 additions (`checker::{is_type_discriminant_of, discriminant_mismatch_error,
-# subclasses_of, class_covered, exhaustive_type_subject}`, `codegen::{cg_fatptr_subject_name,
-# cg_emit_fatptr_pat_test, cg_emit_fatptr_pat_binds}`) plus `checker::subclass_reaches` (an existing
-# function now reachable as a standalone symbol) — ZERO removed symbols, so no existing match site is
-# lowered differently. The whole 153-file compiler re-checks and self-builds green.
+# INERTNESS. Zero accessors exist in the corpus, so `find_property` returns null for every existing
+# field access and both desugar sites run the historic path in the historic order (read probes only
+# after field-absence; write probes first but null on every real field, the backing being `_prop`).
+# `accessor_kind_at`/`parse_accessor` never fire (no `get`/`set` in member position followed by
+# name+`(`), and `get`/`set` stay `Ident`, so every real `get`/`set` name parses unchanged. No existing
+# field access newly routes through an accessor. The whole 153-file compiler re-checks and self-builds
+# green.
 #
-# ACCEPT fixtures (examples/regressions/match_universal): a NATIVE variant match (the inertness anchor,
-# `mu_variant_match_inert`) plus three C-route (TEKO_BACKEND=c) cases — a sealed class hierarchy match
-# exhaustive with NO catch-all, a bind-all catch over the base, and an interface match with a `when`
-# guard and the required catch-all. REJECT fixtures (examples/regressions/match_universal_reject): a
-# non-exhaustive sealed match with no catch-all, a guarded-only cover with no unguarded fallback, an
-# open interface match with no catch-all, and an arm naming a non-subclass of the base — the single
-# failing build reports all four diagnostics.
+# ACCEPT fixtures (examples/regressions/properties): two NATIVE members — a STRUCT get-only property
+# read field-like via DIRECT dispatch (the IR-migration shape) and a proof that `get`/`set` stay
+# ordinary identifiers — plus three C-route (TEKO_BACKEND=c) members: a class read-write property
+# round-tripping set-then-get through interface fat-ptr dispatch, a read-only COMPUTED getter (a body,
+# not a field), and a write-only sink accepting field-like writes. The interface members pin the C
+# route for the SAME reason match_universal does — interface fat-ptr dispatch is an N2 honest-stop on
+# the native backend (a plain interface method call crashes there too; the accessor merely rides the
+# pre-existing gap). REJECT fixtures (examples/regressions/properties_reject): writing a read-only
+# property, reading a write-only property, an implementer missing a required accessor, and a getter
+# with no return type — the single failing build reports all four diagnostics (parse AND checker).
 #
-# FIXPOINT. gen0 (cc of the previous `6bc32b38…` §9 A seed, which C-builds this phase-1 source) built
-# bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical
-# bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# FIXPOINT. gen0 (cc of the previous match-universal seed, which C-builds this §9 properties source)
+# built bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a
+# byte-identical bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
 #   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
-# A TEKO_MEM_PARANOID=1 build of the same source exits 0 and emits a byte-identical teko.c.
+# A TEKO_MEM_PARANOID=1 build of the same source exits 0.
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  0cc2219daa96adc9cff5da049e09a6537a229bc52108f6c76ee09ff8293b712d
+sha256:  7285029e0d4e23316d4b840533fd480deda0bbdf306f0f833e7333ca3afeaf1f
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (match-universal phase 1, additive in
-         src/); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
-         bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§9 properties, additive in src/);
+         sha256 is read directly off the committed file and was proven a fixpoint (bin-a == bin-b,
+         byte-identical).
