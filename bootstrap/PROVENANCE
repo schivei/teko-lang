@@ -1,61 +1,54 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): the FINAL reseed of the func/action + void-retirement
-# work. The previous commit was the BRIDGE reseed (`6857530c…`) — a seed that TAUGHT `func<…>` /
-# `action<…>` + function-without-return while the compiler's own source still used the old
-# `(A, B): R` / `: void` forms. This commit CONVERTED every usage to the new spelling, honored the
-# owner's `remove void` sweep (cherry-picked), and RETIRED the surface `void` type name and the old
-# `(A, B): R` closure form. The bridge (which understood `func`/`action`) built this converted tree;
-# the harvest below self-reproduces byte-identical (bin-a == bin-b fixpoint). The owner did NOT edit
-# bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
+# RESEED (hand-harvest, by-hand per owner order): the §7 DI service/svc surface. This reseed LOCKS IN
+# the new `service` kind and the `svc`/`has_svc` intrinsics; the retirement of the OLD annotation DI
+# (`#singleton`/`#inject`/`choose_factory`/`DiKind`) is a SEPARATE follow-up reseed (it coexists
+# harmlessly with the new surface, so this seed is a valid, self-reproducing intermediate). The owner
+# did NOT edit bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# teach func/action + function-without-return; retire surface void and the old (params):R closure form
+# §7 — DI service/svc with IService synthesis; Path-2 runtime-key resolved inline (no locator, no crash)
 # ---------------------------------------------------------------------------------------------
-# SURFACE RESPELLING of the closure/function TYPE, plus retirement of the old spellings. What SAILED:
-#   - PARSER (`parse_type.tks`): `func<T1, …, Tn, R>` / `action<T1, …, Tn>` — the C# `Func`/`Action`
-#     delegate TYPE spellings. `func`'s LAST type arg is the return, the rest are params (`func<R>` =
-#     0 params returning R); `action` has NO return (unit), all args are params, and BARE `action` is
-#     the zero-parameter no-return function type. BARE `func` and empty `func<>`/`action<>` are
-#     rejected; arity capped at 16. Both DESUGAR into the existing `parser::FunctionType` node, so
-#     checker / codegen / `.tkb` are UNCHANGED — codegen already lowers every `FunctionType` to the
-#     opaque `tk_closure` fat pointer. The old `(A, B): R` form is RETIRED: a `(` in a type position
-#     now falls through to the ordinary parse error (no bespoke diagnostic).
-#   - CHECKER: the surface `void` type name is RETIRED — `builtin_type` (`scope.tks`) no longer maps
-#     `void` to a type, so `void` falls through to the ordinary unknown-type error. The INTERNAL
-#     `Void{}` variant and `mono_type_mangle(Void{})` -> "void" are UNTOUCHED. The no-return delegate
-#     carries an UNSPELLABLE internal sentinel `()` in `FunctionType.ret`, which `builtin_type` maps
-#     to `Void`; `type_to_texpr(Void)` (`monomorph.tks`) and the codegen demangle now use `()` so the
-#     internal Void round-trip never depends on the retired `void` name.
-#   - function-without-return already worked (a `fn` with no `: R` sets `has_return = false` -> Void).
-#   - USAGES CONVERTED: `ProgressFn` -> `action<u64, u64>`; the `iter` iterator aliases and every
-#     higher-order combinator param (`map`/`filter`/`fold`/…) -> `func<…, R>`; `NativeObjectWriterArm64`
-#     -> `func<…, []byte>`; the closure-value regression probes and unit tests migrated.
-#   - RETIREMENT DIAGNOSTICS de-narrated (owner ruling): `let`/`mut` un-taught from the lexer (now
-#     ordinary identifiers), and the `unsafe` / `#must_free` / ref-return / manual-memory (`mem::free`/
-#     `region_new`/`region_alloc`) / opaque-`ptr` rejections reduced to ordinary failures with no
-#     "retired in 0.3.1 because …" reason. Stale `let`/`mut` wording in surviving diagnostics swept to
-#     `var` (the §1 retirement's leftover message text).
+# WHAT SAILED (surface only; old annotation DI still present, retired in the next reseed):
+#   - GRAMMAR: `service` is a KIND in `type Name = <kind>` (like class/struct/interface), with a
+#     lifetime modifier `singleton`/`scoped`/`transient` (`type Clock = service singleton { … }`);
+#     `TokenKind::Service`; `parse_service_body`/`parse_service_lifetime`; `ClassBody.is_service` +
+#     `ServiceLifetime`. A `virtual`/`abstract service` is rejected (a service is always sealed).
+#   - IService: the compiler SYNTHESIZES `exp type IService = interface { exp static ctor(): self }`
+#     (root-visible); every `service` auto-conforms (its `static ctor(): self` factory satisfies it).
+#     Two interface-contract capabilities were taught: a STATIC method contract, and `self` as a
+#     contract's return type (bound to the conforming type in `method_sig_matches`). `type_satisfies_
+#     iservice` gates the intrinsics: satisfied by a concrete `service` OR an `interface & IService`.
+#   - `svc<T: IService>(key: str | null = null): T` and `has_svc<T: IService>(key: str): bool`,
+#     recognized in `type_call` by callee shape. The CHECKER's type table IS the service registry —
+#     there is NO second codegen-side registry, so the dual-registry OOB that crashed the lost
+#     implementation cannot recur. A const/by-type key resolves to the concrete `Provider::ctor()`
+#     inline; a RUNTIME key lowers to an INLINE if-chain (`if key=="A" { A::ctor() } else … else
+#     panic`) typed as T, each arm upcast by the ordinary `emit_as` — no locator function, no vtable
+#     enumeration. A PLAIN interface (not `& IService`) is a clean type error, never a crash.
+#   - Escape rule keys on PROVENANCE (a value obtained from `svc<T>()`), not on service TYPE — a
+#     freshly-constructed value returned from the `ctor` factory (an ordinary static method) is fine.
+#   - const-key miss = compile-time error; runtime-key miss = `tk_panic` (guarded by `has_svc`);
+#     same-type-same-key registration = compile-time error.
+#   - `.tkb`: `ClassBody` carries `is_service`/`service_lifetime`; `TKB_EXPR_VERSION` 3→4,
+#     `TKB_PROGRAM_VERSION` 5→6. NO runtime C touched. The per-thread arena-slot placement stays the
+#     Doc 1 §8 SEAM (`svc_scope_expr`); today the lowering is simplest-correct (fresh build via `ctor`).
 #
-# NO new AST node, NO `.tkb` wire change (`FunctionType.ret` stays a mandatory TypeExpr — the `()`
-# sentinel is an ordinary named type all existing walks recurse over), NO runtime C touched.
-#
-# FIXPOINT. gen0 (cc of the bridge `6857530c…` seed) C-built the converted source into bin-a;
-# compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical
-# bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# FIXPOINT. gen0 (cc of the previous `69184f49…` void-retirement seed) C-built the service/svc source
+# into bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a
+# byte-identical bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
 #   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
 #
-# `run: hand-harvest` — no CI run produced this file; it was harvested by hand on the branch, in the
-# owner's ordered sequence. `commit: pending drain` — the landing commit is not yet known at harvest
-# time (this record is written in the same change that commits the file).
+# `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
+# ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  69184f4987bfc0ae90241bff2ad1d3ab9e4f595584c91823e3016881a53050e7
+sha256:  9bd24246ba53d66df94d3111d52fd3039e0d7ffc57beb519285ccbc785f36190
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (teach func/action + function-without-
-         return; retire surface void and the old (params):R closure form); sha256 is read directly off
-         the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§7 DI service/svc surface + IService
+         synthesis; old annotation DI retired in the next reseed); sha256 is read directly off the
+         committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
