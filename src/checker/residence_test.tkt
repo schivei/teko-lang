@@ -32,25 +32,15 @@ fn rt_var(name: str): TExpr {
 }
 
 /**
- * A `let name = value` binding stamped with the given residence lifetime.
+ * A `let name = value` binding (the ordinary case).
  *
  * @param name   the bound name
  * @param value  the binding's typed RHS
- * @param di     the residence lifetime to stamp
  * @return       a `TBinding` statement
  */
-fn rt_let_di(name: str, value: TExpr, di: parser::DiKind): TStatement {
-    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value; di_kind = di }
+fn rt_let(name: str, value: TExpr): TStatement {
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value }
 }
-
-/**
- * A `let name = value` binding with no residence lifetime (the ordinary case).
- *
- * @param name   the bound name
- * @param value  the binding's typed RHS
- * @return       a `TBinding` statement
- */
-fn rt_let(name: str, value: TExpr): TStatement { rt_let_di(name, value, parser::DiKind::None) }
 
 /**
  * A `let { a; b } = value` destructure binding (a nameless target the oracle leaves Unresolved).
@@ -61,7 +51,7 @@ fn rt_let(name: str, value: TExpr): TStatement { rt_let_di(name, value, parser::
  * @return       a `TBinding` statement with a destructure target
  */
 fn rt_destructure(a: str, b: str, value: TExpr): TStatement {
-    TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), a), b) }; bound = value.type; value = value; di_kind = parser::DiKind::None }
+    TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), a), b) }; bound = value.type; value = value }
 }
 
 /**
@@ -146,8 +136,8 @@ fn rt_pt_param(): PointsTo { PtParam { id = PtParamId { index = 0 to u32 } } }
 fn rt_pt_adopter(): PointsTo { PtAdopter { id = PtAdopterId { region = 0 to u32; top = false } } }
 
 /**
- * residence_tier forces a `#singleton` binding to `Root`, short-circuiting the points-to (even a
- * frame-born value is root when singleton-declared).
+ * residence_tier forces a binding with the service `singleton` lifetime to `Root`,
+ * short-circuiting the points-to (even a frame-born value is root when singleton-residing).
  */
 #test fn residence_tier_singleton_is_root() {
     teko::assert::is_true(rt_is_root(residence_tier(true, PtFrame { }, false, false)))
@@ -197,17 +187,6 @@ fn rt_pt_adopter(): PointsTo { PtAdopter { id = PtAdopterId { region = 0 to u32;
 #test fn residence_tier_frame_local_is_frame() {
     teko::assert::is_true(rt_is_frame(residence_tier(false, PtFrame { }, false, false)))
     teko::assert::is_true(rt_is_frame(residence_tier(false, rt_pt_adopter(), false, false)))
-}
-
-/**
- * residence_plan resides a `#singleton` binding in `Root`.
- */
-#test fn residence_plan_singleton_binding_is_root() {
-    var body = teko::list::push(teko::list::empty(), rt_let_di("cfg", rt_i64_lit(7), parser::DiKind::Singleton))
-    var plan = residence_plan(rt_fn(body))
-    teko::assert::is_true(plan.bindings.len == 1)
-    teko::assert::is_true(plan.bindings[0].name == "cfg")
-    teko::assert::is_true(rt_is_root(plan.bindings[0].tier))
 }
 
 /**
