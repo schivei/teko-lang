@@ -923,36 +923,6 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
     }
 }
 
-/**
- * The negative sentinel for `reject_retired_mem_surface` — the call is not one of the retired
- * manual-memory surface builtins, so `type_call` falls through to ordinary resolution.
- */
-type NotRetiredMem = struct { }
-
-/**
- * reject_retired_mem_surface — reject the manual-memory surface retired by §6 of the 0.3.1 surface
- * migration: `teko::mem::free`, `teko::mem::region_new`, and `teko::mem::region_alloc`. Values now
- * die at their lexical scope (the region drop), and the FFI boundary is crossed with `__wrap<T>()`
- * (§5), so there is no manual free or region constructor left to call. Recognized by the same rooted
- * `teko::mem::<name>` shape the deleted intrinsics used, and dispatched BEFORE ordinary resolution so
- * the diagnostic names the retirement rather than reporting an "unknown function".
- *
- * @param c  the raw call node
- * @return   always the retirement error when `c` names a retired builtin, `NotRetiredMem` otherwise
- * @throws   the §6 retirement diagnostic when `c` names `mem::free`/`region_new`/`region_alloc`
- */
-fn reject_retired_mem_surface(c: parser::Call): TExpr | NotRetiredMem | error {
-    if c.callee.segments.len < 2 { return NotRetiredMem { } }
-    var last = c.callee.segments[c.callee.segments.len - 1].name
-    var prev = c.callee.segments[c.callee.segments.len - 2].name
-    if prev != "mem" { return NotRetiredMem { } }
-    var rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
-    if !rooted { return NotRetiredMem { } }
-    if last == "free" || last == "region_new" || last == "region_alloc" {
-        return error { message = "manual memory was retired in 0.3.1: values die at their lexical scope (region drop); the FFI boundary is crossed with __wrap<T>()" }
-    }
-    NotRetiredMem { }
-}
 
 /**
  * The negative sentinel for `type_ptr_unwrap`/`type_ptr_wrap` — the call/method is not one of the
@@ -970,7 +940,7 @@ type NotPtrOp = struct { }
  * @since 0.3.1
  */
 fn ptr_opaque_error(): error {
-    error { message = "`ptr` é opaco atômico: sem aritmética nem deref — use `__wrap<T>()`" }
+    error { message = "an opaque `ptr`/`uptr` cannot be an operand" }
 }
 
 /**
@@ -989,7 +959,7 @@ fn is_ptr_or_uptr(t: Type): bool {
 /**
  * type_ptr_unwrap — recognize and type the STATIC intrinsic `ptr::__unwrap<T>(x)` /
  * `uptr::__unwrap<T>(x)` (§5 Part A): the infallible reinterpret that takes the ADDRESS of an
- * addressable `mut` variable (R7 ordinary auto-ref of a `var`) and hands it back as the opaque word
+ * addressable `var` variable (R7 ordinary auto-ref of a `var`) and hands it back as the opaque word
  * `ptr` (or `uptr`). Devolve o PONTEIRO, não o valor — nada a checar. The argument's static type
  * must equal the explicit `T`; the value flowing to codegen carries `T` as the sole type-arg so the
  * seam can materialize its tag (Part B). Returns `NotPtrOp` when the callee is not an `__unwrap`
@@ -1010,14 +980,14 @@ fn type_ptr_unwrap(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrO
     if last != "__unwrap" { return NotPtrOp { } }
     if owner != "ptr" && owner != "uptr" { return NotPtrOp { } }
     if c.callee_type_args.len != 1 { return error { message = $"`{owner}::__unwrap<T>` takes exactly one type argument" } }
-    if c.args.len != 1 { return error { message = $"`{owner}::__unwrap<T>` expects one argument (an addressable `mut` variable)" } }
+    if c.args.len != 1 { return error { message = $"`{owner}::__unwrap<T>` expects one argument (an addressable `var` variable)" } }
     var rt = match resolve_type(c.callee_type_args[0], table, env.cur_ns) { Type as t => t; error as e => return e }
     var a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
     var is_mut_lvalue = match a.kind {
         TVar as v => match lookup_binding(env, v.name) { ValBinding as vb => vb.is_mut; error => false }
         _ => false
     }
-    if !is_mut_lvalue { return error { message = $"`{owner}::__unwrap<T>` requires an addressable `mut` variable (a `ref T`) — its address is what the opaque word wraps" } }
+    if !is_mut_lvalue { return error { message = $"`{owner}::__unwrap<T>` requires an addressable `var` variable (a `ref T`) — its address is what the opaque word wraps" } }
     if !type_eq(a.type, rt) { return error { message = $"`{owner}::__unwrap<{type_render(rt)}>` argument must be a `{type_render(rt)}` (got `{type_render(a.type)}`)" } }
     var uargs = teko::list::push(teko::list::empty(), a)
     var xtypes = teko::list::push(teko::list::empty(), rt)
@@ -1688,11 +1658,6 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
         error as e => return e
         NotListBuiltin => { }   // not a list builtin → fall through to the ordinary call
     }
-    match reject_retired_mem_surface(c) {
-        TExpr as te => return te
-        error as e => return e
-        NotRetiredMem => { }
-    }
     match type_ptr_unwrap(c, env, table) {
         TExpr as te => return te
         error as e => return e
@@ -1846,7 +1811,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                 var a = targs[i]
                 if !assignable_to(a.type, f.params[i], table) { a = deref_ref_value(a) }
                 // (MEM-1b-ii) AUTO-REF: a `ref<T>` param accepts a `mut` lvalue of the pointed type T —
-                // the compiler takes the reference (codegen emits `&`). Requires a `mut` variable (you
+                // the compiler takes the reference (codegen emits `&`). Requires a `var` variable (you
                 // can't reference an immutable binding — there'd be nothing to mutate). A value ALREADY
                 // of type `ref<T>` (e.g. forwarding a ref param) takes the normal assignable path below.
                 var auto_reffed = false
@@ -1859,9 +1824,9 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                                         if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut`/`var` (a reference needs a mutable target)" } }
                                         auto_reffed = true   // keep a.type = T; emit_call emits `&` (param is ref<T>)
                                     }
-                                    error => return error { message = "auto-ref requires a mutable variable (a `mut` binding)" }
+                                    error => return error { message = "auto-ref requires a mutable variable (a `var` binding)" }
                                 }
-                                _ => return error { message = "a `ref<T>` argument must be a mutable variable (a `mut` binding) — only an lvalue can be referenced" }
+                                _ => return error { message = "a `ref<T>` argument must be a mutable variable (a `var` binding) — only an lvalue can be referenced" }
                             }
                         }
                     }
@@ -2624,7 +2589,7 @@ fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeT
         } else {
             var mname = match tgt {
                 Named as en => en.name
-                _ => return error { message = $"cannot infer the type arguments of `{base_name}` here — annotate it (e.g. `let x: {base_name}<…> = …`)" }
+                _ => return error { message = $"cannot infer the type arguments of `{base_name}` here — annotate it (e.g. `var x: {base_name}<…> = …`)" }
             }
             if !name_has_generic_base(mname, base_name) {
                 return error { message = $"struct literal `{base_name}` does not match the annotated type" }
@@ -4077,7 +4042,7 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable): TypedStmt | err
     // error: no silent element-less slice, no codegen back-inference (collections ruling #4).
     var bound_is_sentinel_slice = match bound { Slice as bs2 => match bs2.element { Void => true; _ => false }; _ => false }
     if bound_is_sentinel_slice {
-        return error { message = "an empty list needs a known element type; annotate the binding (e.g. `mut xs: []i32 = teko::list::empty()`)" }
+        return error { message = "an empty list needs a known element type; annotate the binding (e.g. `var xs: []i32 = …`)" }
     }
     match bound {
         Reference => if b.kind != parser::BindKind::Mut { return error { message = "`let`/`const` cannot bind a reference — a reference binding is spelled `ref r: T = x` (write-through, requires a mutable source)" } }
@@ -5077,7 +5042,7 @@ fn name_in_set(set: []str, name: str): bool {
  */
 fn reject_ref_return(ret: Type): error | null {
     match ret {
-        Reference => return error { message = "a function cannot return a reference — ref-return was retired in 0.3.1; `ref` survives only as a parameter (write-through borrow) (mudancas-superficie §3)" }
+        Reference => return error { message = "a function cannot return a reference" }
         _ => { }
     }
     null
@@ -6091,7 +6056,7 @@ fn surface_at(file: str, item_line: u32, item_col: u32, inner: error): error {
  * @param done   how many top-level items have been typed so far
  * @param total  the total top-level item count for this program
  */
-pub type ProgressFn = (u64, u64)
+pub type ProgressFn = action<u64, u64>
 
 /**
  * `type_program_with_deps`'s result BEFORE monomorphization: the checked program

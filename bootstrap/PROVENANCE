@@ -1,49 +1,50 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): re-harvested after landing the BARE BLOCK STATEMENT
-# (0.3.1 §6). A `{ stmts }` at STATEMENT position now opens a lexical scope — the intended replacement
-# for the retired manual `Arena`, "a bare `{ }` is the region". This is a parser + checker + codegen +
-# `.tkb`-wire change, so the compiler shifts and the previous bootstrap no longer reproduces it; the
-# new harvest self-reproduces byte-identical (bin-a == bin-b fixpoint). The owner did NOT edit
+# RESEED (hand-harvest, by-hand per owner order): the FINAL reseed of the func/action + void-retirement
+# work. The previous commit was the BRIDGE reseed (`6857530c…`) — a seed that TAUGHT `func<…>` /
+# `action<…>` + function-without-return while the compiler's own source still used the old
+# `(A, B): R` / `: void` forms. This commit CONVERTED every usage to the new spelling, honored the
+# owner's `remove void` sweep (cherry-picked), and RETIRED the surface `void` type name and the old
+# `(A, B): R` closure form. The bridge (which understood `func`/`action`) built this converted tree;
+# the harvest below self-reproduces byte-identical (bin-a == bin-b fixpoint). The owner did NOT edit
 # bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# feat: bare block statement (lexical scope)
+# teach func/action + function-without-return; retire surface void and the old (params):R closure form
 # ---------------------------------------------------------------------------------------------
-# STATEMENT-ONLY, form (A), per owner ruling. A bare `{ stmts }` at statement position opens a child
-# lexical scope: bindings declared inside die at the closing brace, and the block's region drops on
-# exit exactly as an `if`/`loop` arm body's scope does. It does NOT produce a value and is NOT usable
-# in expression position (`var r = { … }` stays a parse error — form B, block-as-expression, was
-# explicitly rejected). What SAILED:
-#   - PARSER: a new `parser::BlockStmt = struct { body: []Statement }` AST node, wired into the
-#     `Statement` union. The statement dispatcher (`parse_stmt.tks`) gains an `is_block_stmt_head`
-#     branch — a leading `{` at statement position, tested BEFORE the expression-statement fallback
-#     (which previously rejected it with `expected an expression`). Unambiguous: a struct literal is
-#     led by a type NAME, and a destructure `{ … }` only follows a binding keyword.
-#   - CHECKER: a new `checker::TBlockStmt = struct { body: []TStatement }` typed node, typed by
-#     `type_block_stmt` via `type_block` in a CHILD env, so inner bindings do not leak the enclosing
-#     `env`. Threaded through every exhaustive TStatement walk (typer/spine/escape/residence/borrow/
-#     monomorph/consteval/comptime_fold/initanalysis/metrics/warnings/coverage/reachability), mirroring
-#     the `TAdoptStmt` arm — EXCEPT the points-to transfer, where a block recurses under the SAME
-#     enclosing region (like an `if`/`loop` body), never opening a fresh adopter region.
-#   - CODEGEN (C route): `emit_block_region` — the SAME arm/loop-body region emitter (`tk_region_new`
-#     … `tk_region_drop`, a plain drop, NOT the adopter's `tk_region_drop_subtree`), so block-local
-#     bindings are freed at the closing brace via the ordinary region-drop path (no manual `mem::free`).
-#   - The native (LIR) backend honest-stops on a bare block ("block not yet lowered (N2)"), the SAME
-#     N2 gap `adopt` carries — the C route is the one this teach lands.
+# SURFACE RESPELLING of the closure/function TYPE, plus retirement of the old spellings. What SAILED:
+#   - PARSER (`parse_type.tks`): `func<T1, …, Tn, R>` / `action<T1, …, Tn>` — the C# `Func`/`Action`
+#     delegate TYPE spellings. `func`'s LAST type arg is the return, the rest are params (`func<R>` =
+#     0 params returning R); `action` has NO return (unit), all args are params, and BARE `action` is
+#     the zero-parameter no-return function type. BARE `func` and empty `func<>`/`action<>` are
+#     rejected; arity capped at 16. Both DESUGAR into the existing `parser::FunctionType` node, so
+#     checker / codegen / `.tkb` are UNCHANGED — codegen already lowers every `FunctionType` to the
+#     opaque `tk_closure` fat pointer. The old `(A, B): R` form is RETIRED: a `(` in a type position
+#     now falls through to the ordinary parse error (no bespoke diagnostic).
+#   - CHECKER: the surface `void` type name is RETIRED — `builtin_type` (`scope.tks`) no longer maps
+#     `void` to a type, so `void` falls through to the ordinary unknown-type error. The INTERNAL
+#     `Void{}` variant and `mono_type_mangle(Void{})` -> "void" are UNTOUCHED. The no-return delegate
+#     carries an UNSPELLABLE internal sentinel `()` in `FunctionType.ret`, which `builtin_type` maps
+#     to `Void`; `type_to_texpr(Void)` (`monomorph.tks`) and the codegen demangle now use `()` so the
+#     internal Void round-trip never depends on the retired `void` name.
+#   - function-without-return already worked (a `fn` with no `: R` sets `has_return = false` -> Void).
+#   - USAGES CONVERTED: `ProgressFn` -> `action<u64, u64>`; the `iter` iterator aliases and every
+#     higher-order combinator param (`map`/`filter`/`fold`/…) -> `func<…, R>`; `NativeObjectWriterArm64`
+#     -> `func<…, []byte>`; the closure-value regression probes and unit tests migrated.
+#   - RETIREMENT DIAGNOSTICS de-narrated (owner ruling): `let`/`mut` un-taught from the lexer (now
+#     ordinary identifiers), and the `unsafe` / `#must_free` / ref-return / manual-memory (`mem::free`/
+#     `region_new`/`region_alloc`) / opaque-`ptr` rejections reduced to ordinary failures with no
+#     "retired in 0.3.1 because …" reason. Stale `let`/`mut` wording in surviving diagnostics swept to
+#     `var` (the §1 retirement's leftover message text).
 #
-# `.tkb` WIRE. A new trailing statement TAG `9` (`TBlockStmt`: body `[]TStatement`) was APPENDED to the
-# `write_tstatement`/`read_tstatement` codec and the string-interning collector — nothing shifts, so
-# `TKB_EXPR_VERSION`/`TKB_PROGRAM_VERSION` are UNCHANGED (the benign trailing-add case).
+# NO new AST node, NO `.tkb` wire change (`FunctionType.ret` stays a mandatory TypeExpr — the `()`
+# sentinel is an ordinary named type all existing walks recurse over), NO runtime C touched.
 #
-# ZERO runtime C touched — no new `tk_*` symbol, no `teko_rt.{c,h}` edit; the region prims the block
-# reuses (`tk_region_new`/`tk_region_drop`) already existed.
-#
-# FIXPOINT. gen0 (cc of the previous bootstrap) C-built the reworked source into bin-a; compiling
-# bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical bin-b/teko.c
-# (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# FIXPOINT. gen0 (cc of the bridge `6857530c…` seed) C-built the converted source into bin-a;
+# compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical
+# bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
 #   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
 #
@@ -53,8 +54,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  508514354ae692a7c3fa2380b84127152d452e6b14fa6fdfe8c60d68c326df72
+sha256:  69184f4987bfc0ae90241bff2ad1d3ab9e4f595584c91823e3016881a53050e7
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (feat: bare block statement / lexical
-         scope); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
-         bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (teach func/action + function-without-
+         return; retire surface void and the old (params):R closure form); sha256 is read directly off
+         the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).

@@ -212,7 +212,7 @@ fn parse_inline_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | e
     }
     var after = skip_seps(tokens, pos + 2)
     if !is_binding_head(tokens, after) {
-        return err_at(tokens, after, "`#inline` attaches only to a `let`/`mut`/`var`/`const` binding")
+        return err_at(tokens, after, "`#inline` attaches only to a `var`/`const` binding")
     }
     parse_binding_di(tokens, after, DiKind::None)
 }
@@ -292,9 +292,6 @@ fn bind_kind_at(tokens: []lexer::Token, pos: u64): BindKind {
  * @since 0.3.1
  */
 fn parse_binding_di(tokens: []lexer::Token, pos: u64, di_kind: DiKind): Parsed<Statement> | error {
-    if is_kind_at(tokens, pos, lexer::TokenKind::Let) || is_kind_at(tokens, pos, lexer::TokenKind::Mut) {
-        return err_at(tokens, pos, "`let`/`mut` were retired in 0.3.1 — every local is an always-mutable `var` (mudancas-superficie §1). Write `var x = …` instead of `let x = …` / `mut x = …` (`const` remains for comp-time constants).")
-    }
     if is_ref_binding_head(tokens, pos + 1) {
         return err_at(tokens, pos + 1, "a reference binding is written `ref x: T` — the `ref` is itself the binding modifier; there is no `let ref`/`mut ref`/`var ref`/`const ref` (tripartite law: `let` protects a value, `mut`/`var` unlock a value, `ref` aliases — a reference is inherently mutable, so no immutable reference exists)")
     }
@@ -302,7 +299,7 @@ fn parse_binding_di(tokens: []lexer::Token, pos: u64, di_kind: DiKind): Parsed<S
     var tgt = match parse_bind_target(tokens, pos + 1) { Parsed<BindTarget> as x => x; error as e => return e }
     var ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
     if ann.has_type && is_ref_grafia_annotation(ann.type_ann) {
-        return err_at(tokens, tgt.next, "a reference binding is written `ref x: T = e` — a `let`/`mut`/`var`/`const` annotation may not be a bare `ref T` (the `ref` is the binding modifier, not part of the bound value's type; a `ref T | null` union member is still fine)")
+        return err_at(tokens, tgt.next, "a reference binding is written `ref x: T = e` — a `var`/`const` annotation may not be a bare `ref T` (the `ref` is the binding modifier, not part of the bound value's type; a `ref T | null` union member is still fine)")
     }
     if !is_kind_at(tokens, ann.next, lexer::TokenKind::Assign) {
         return err_at(tokens, ann.next, "expected '=' in a binding")
@@ -359,7 +356,7 @@ fn is_var_binding_head(tokens: []lexer::Token, pos: u64): bool {
  * @return        true iff `pos` opens a `let`/`mut`/`var`/`const` binding
  */
 fn is_binding_head(tokens: []lexer::Token, pos: u64): bool {
-    is_kind_at(tokens, pos, lexer::TokenKind::Let) || is_kind_at(tokens, pos, lexer::TokenKind::Mut) || is_kind_at(tokens, pos, lexer::TokenKind::Const) || is_var_binding_head(tokens, pos)
+    is_kind_at(tokens, pos, lexer::TokenKind::Const) || is_var_binding_head(tokens, pos)
 }
 
 /**
@@ -397,10 +394,10 @@ fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<BindTarget> | err
         return Parsed<BindTarget> { node = DestructurePattern { names = names.items }; next = names.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Underscore) {
-        return err_at(tokens, pos, "`_` is the write-only discard and cannot be a `let`/`mut`/`const` target — drop the keyword and write `_ = expr` to evaluate an expression and discard its result")
+        return err_at(tokens, pos, "`_` is the write-only discard and cannot be a `var`/`const` target — drop the keyword and write `_ = expr` to evaluate an expression and discard its result")
     }
     if !is_name_at(tokens, pos) {
-        return err_at(tokens, pos, "expected a name or `{ … }` after `let`/`mut`/`const`")
+        return err_at(tokens, pos, "expected a name or `{ … }` after `var`/`const`")
     }
     Parsed<BindTarget> { node = SimpleName { name = tokens[pos].text }; next = pos + 1 }
 }
