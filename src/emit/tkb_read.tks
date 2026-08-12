@@ -506,7 +506,7 @@ fn read_tstatement(r: Reader, table: []str): RTStmt | error {
         var bt = match read_bindtarget(bk.r, table) { RBindTarget as x => x; error as e => return e }
         var bd = match read_type(bt.r, table) { RType as x => x; error as e => return e }
         var v = match read_texpr(bd.r, table) { RTExpr as x => x; error as e => return e }
-        return RTStmt { r = v.r; value = checker::TBinding { kind = bk.value to parser::BindKind; target = bt.value; bound = bd.value; value = v.value; di_kind = parser::DiKind::None } }
+        return RTStmt { r = v.r; value = checker::TBinding { kind = bk.value to parser::BindKind; target = bt.value; bound = bd.value; value = v.value } }
     }
     if tag.value == 1 {
         // TAssign: kind (u8) + name (u32) + op (u8) + bound (Type) + value (TExpr) + deref (u8)
@@ -689,8 +689,7 @@ fn read_constraints(r: Reader, table: []str): RConstraints | error {
     does not exist, so reject it loudly rather than mis-read.
     `has_arena_size`/`arena_size` (#453) are NOT round-tripped — a method never carries the
     directive in this crumb (`parse_decl_attributes` only runs at the top-level `fn` position), so
-    a `.tkb`-read method always reads back `has_arena_size = false`, the same precedent as
-    `TypeDecl.di_kind` above. */
+    a `.tkb`-read method always reads back `has_arena_size = false` (an inert-field precedent). */
 fn read_function(r: Reader, table: []str): RFunction | error {
     var nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     var tp = match read_strs(nm.r, table) { RStrs as x => x; error as e => return e }
@@ -722,7 +721,6 @@ fn read_function(r: Reader, table: []str): RFunction | error {
             c_symbol = cs.value; from_lib = fr.value; os_guard = og.value
             is_intern = ii.value != 0; is_abstract = ia.value != 0; is_virtual = iv.value != 0; is_override = io.value != 0
             is_static = false   // (§4 teach) not serialized in .tkb — the format is unchanged; the corpus has no `static fn` yet
-            has_inject = false; injects = teko::list::empty()
             has_arena_size = false; arena_size = 0 to u64
     } }
 }
@@ -804,10 +802,6 @@ fn read_typebody(r: Reader, table: []str): RTypeBody | error {
 /**
  * Read a parser TypeDecl: inverse of write_typedecl.
  *
- * `di_kind`/`has_di_key`/`di_key` are NOT round-tripped (write_typedecl never serializes them) —
- * a `.tkb`-read TypeDecl always carries `di_kind = None`, a pre-existing gap this pass does not
- * close.
- *
  * @param Reader r  the reader cursor, positioned at the TypeDecl's first field
  * @param []str table  the program's deduplicated string table (referenced by index)
  * @return RTypeDecl | error  the decoded TypeDecl plus the reader's advanced position
@@ -822,7 +816,7 @@ fn read_typedecl(r: Reader, table: []str): RTypeDecl | error {
     var doc = match tkb_read_str(hd.r, table) { RStr as x => x; error as e => return e }
     var ln = match read_u32(doc.r) { RU32 as x => x; error as e => return e }
     var cl = match read_u32(ln.r) { RU32 as x => x; error as e => return e }
-    RTypeDecl { r = cl.r; value = parser::TypeDecl { name = nm.value; type_params = tp.value; type_constraints = tc.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; line = ln.value; col = cl.value; di_kind = parser::DiKind::None; has_di_key = false; di_key = "" } }
+    RTypeDecl { r = cl.r; value = parser::TypeDecl { name = nm.value; type_params = tp.value; type_constraints = tc.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; line = ln.value; col = cl.value } }
 }
 /**
  * The inverse of `write_usedecl` — reads `path` + `has_alias` + `alias` + `names` (S1, the
@@ -842,10 +836,9 @@ fn read_usedecl(r: Reader, table: []str): RUseDecl | error {
 /**
  * Read a typed `TFunction` item: inverse of `write_tfunction`.
  *
- * `has_arena_size`/`arena_size` (#453) are NOT round-tripped — following the same precedent as
- * `TypeDecl.di_kind` (`read_typedecl` above) and `parser::Function`'s own method codec
- * (`read_function` above): a `.tkb`-read `TFunction` always carries `has_arena_size = false`, a
- * pre-existing gap this pass does not close.
+ * `has_arena_size`/`arena_size` (#453) are NOT round-tripped — following the same inert-field
+ * precedent as `parser::Function`'s own method codec (`read_function` above): a `.tkb`-read
+ * `TFunction` always carries `has_arena_size = false`, a pre-existing gap this pass does not close.
  *
  * @param Reader r  the reader cursor, positioned at the TFunction's first field
  * @param []str table  the program's deduplicated string table

@@ -1,44 +1,51 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): the §7 DI service/svc surface. This reseed LOCKS IN
-# the new `service` kind and the `svc`/`has_svc` intrinsics; the retirement of the OLD annotation DI
-# (`#singleton`/`#inject`/`choose_factory`/`DiKind`) is a SEPARATE follow-up reseed (it coexists
-# harmlessly with the new surface, so this seed is a valid, self-reproducing intermediate). The owner
-# did NOT edit bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
-# Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
-# only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
-# bootstrap/teko.c) — never for the unchanged incumbent this record describes.
+# RESEED (hand-harvest, by-hand per owner order): §7 part 2 — RETIRE the OLD annotation DI. The
+# previous seed (`9bd24246…`) locked in the new `service`/`svc` surface WHILE the old annotation DI
+# (`#singleton`/`#inject`/`DiKind`/`src/checker/di.tks`) still coexisted; that seed still understands
+# the old DI, so it C-builds THIS tree — the one with the old DI removed — cleanly. This reseed
+# realigns the committed seed with the retired-DI source. The owner did NOT edit bootstrap/teko.c by
+# hand; the file is the harvested self-host output, proven a fixpoint. Format and parser:
+# scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only ever judges this
+# record on a SWAP (an add, replace, or remove-then-reintroduce of bootstrap/teko.c) — never for the
+# unchanged incumbent this record describes.
 #
-# §7 — DI service/svc with IService synthesis; Path-2 runtime-key resolved inline (no locator, no crash)
+# §7 part 2 — retire old annotation DI (#singleton/#inject/DiKind/di.tks); service/svc is the sole DI
 # ---------------------------------------------------------------------------------------------
-# WHAT SAILED (surface only; old annotation DI still present, retired in the next reseed):
-#   - GRAMMAR: `service` is a KIND in `type Name = <kind>` (like class/struct/interface), with a
-#     lifetime modifier `singleton`/`scoped`/`transient` (`type Clock = service singleton { … }`);
-#     `TokenKind::Service`; `parse_service_body`/`parse_service_lifetime`; `ClassBody.is_service` +
-#     `ServiceLifetime`. A `virtual`/`abstract service` is rejected (a service is always sealed).
-#   - IService: the compiler SYNTHESIZES `exp type IService = interface { exp static ctor(): self }`
-#     (root-visible); every `service` auto-conforms (its `static ctor(): self` factory satisfies it).
-#     Two interface-contract capabilities were taught: a STATIC method contract, and `self` as a
-#     contract's return type (bound to the conforming type in `method_sig_matches`). `type_satisfies_
-#     iservice` gates the intrinsics: satisfied by a concrete `service` OR an `interface & IService`.
-#   - `svc<T: IService>(key: str | null = null): T` and `has_svc<T: IService>(key: str): bool`,
-#     recognized in `type_call` by callee shape. The CHECKER's type table IS the service registry —
-#     there is NO second codegen-side registry, so the dual-registry OOB that crashed the lost
-#     implementation cannot recur. A const/by-type key resolves to the concrete `Provider::ctor()`
-#     inline; a RUNTIME key lowers to an INLINE if-chain (`if key=="A" { A::ctor() } else … else
-#     panic`) typed as T, each arm upcast by the ordinary `emit_as` — no locator function, no vtable
-#     enumeration. A PLAIN interface (not `& IService`) is a clean type error, never a crash.
-#   - Escape rule keys on PROVENANCE (a value obtained from `svc<T>()`), not on service TYPE — a
-#     freshly-constructed value returned from the `ctor` factory (an ordinary static method) is fine.
-#   - const-key miss = compile-time error; runtime-key miss = `tk_panic` (guarded by `has_svc`);
-#     same-type-same-key registration = compile-time error.
-#   - `.tkb`: `ClassBody` carries `is_service`/`service_lifetime`; `TKB_EXPR_VERSION` 3→4,
-#     `TKB_PROGRAM_VERSION` 5→6. NO runtime C touched. The per-thread arena-slot placement stays the
-#     Doc 1 §8 SEAM (`svc_scope_expr`); today the lowering is simplest-correct (fresh build via `ctor`).
+# WHAT SAILED (removal only; the `service`/`svc`/`IService` surface from the prior seed is untouched):
+#   - ANNOTATION SURFACE removed: `#singleton`/`#scoped`/`#transient`/`#inject` (and the inert `@key`)
+#     no longer parse — `parse_decl_attributes` (`parse_decl.tks`) and the binding attribute parser
+#     (`parse_stmt.tks`) reject them as unknown attributes; `lifetime_kind_of`, `parse_inject_overlay`,
+#     `parse_inject_binding`, `with_fn_inject`, `with_type_di` deleted. The `#singleton` root-residence
+#     BINDING is retired: `residence_tier` KEEPS its `is_singleton` param (mechanism preserved for the
+#     Doc 1 §8 `service singleton`→thread-root seam), but no source sets it (the source is now `false`).
+#   - AST/CHECKER carriers removed: the `DiKind` enum, `Binding.di_kind`, `TypeDecl.di_kind`/
+#     `has_di_key`/`di_key`, `Function.has_inject`/`injects`, `InjectBinding`, the typed `TBinding.di_kind`,
+#     and every `di_kind = …` initializer across `src/**/*.tks`. `Env.di`/`Env.injects` and their
+#     helpers (`with_di`/`with_injects`/`lookup_inject`/`di_registry_empty`) dropped from `scope.tks`;
+#     the DI pass wiring (`build_di_registry`/`di_overlay_diags`/`seed_di_injects`/`di_lower_use`)
+#     removed from `pre_walk`/`type_var`/`type_function` in `typer.tks`.
+#   - `src/checker/di.tks` reduced to the SINGLE preserved helper `svc_type_id` (FNV-1a type-id, the
+#     tag the Doc 1 §8 arena-slot seam binds; renamed from `di_type_id`). The whole annotation-DI
+#     module (`DiProvider`/`DiRegistry`/`choose_factory`/`build_di_registry`/`check_inject_overlays`/
+#     `di_lower_use`/materializers) is gone. The checker's type table IS the service registry.
+#   - CODEGEN old-DI materializers removed from `codegen.tks`: `cg_build_di_registry`/
+#     `cg_add_di_providers`/`cg_di_factory`/`emit_di_materializers`/`emit_di_materializer_protos`/
+#     `emit_di_materializer`/`cg_find_di_factory_ns`/`di_emit_materializer_body`/`di_emit_transient_body`/
+#     `di_emit_cached_body`/`di_scope_expr`, the `is_di_materializer_call` call-site branch, the three
+#     `di_kind == Singleton` residence guards, and the materializer proto/def emission from the pipeline.
+#     The new `svc`/`has_svc` lowering (the checker's inline `Provider::ctor()` if-chain) shares NONE of
+#     this — verified: the service_svc regression builds and runs green (svc<G>("EnHi") == 5).
+#   - `.tkb`: the wire is UNCHANGED. The prior seed already removed the annotation-DI bytes
+#     (`di_kind`/`has_di_key`/`di_key`/`has_inject`/`injects`) from the write side and bumped
+#     `TKB_EXPR_VERSION` 3→4 / `TKB_PROGRAM_VERSION` 5→6 when it added `is_service`/`service_lifetime`.
+#     Removing the in-memory struct FIELDS here serializes nothing that was ever on the wire, so there
+#     is NO wire change and NO further version bump (4/6 stand). NO runtime C touched.
 #
-# FIXPOINT. gen0 (cc of the previous `69184f49…` void-retirement seed) C-built the service/svc source
-# into bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a
-# byte-identical bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# FIXPOINT. gen0 (cc of the previous `9bd24246…` service/svc seed, which still understands the old DI
+# and so C-builds this retired-DI source) built bin-a; compiling bin-a/teko.c with cc into the new
+# compiler and rebuilding produced a byte-identical bin-b/teko.c (sha256 below). The committed file is
+# that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
 #   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
 #
@@ -47,8 +54,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  9bd24246ba53d66df94d3111d52fd3039e0d7ffc57beb519285ccbc785f36190
+sha256:  51c6c9845dfd00f58c3ab9a38a81c4f73b641e6eb711224002a420e321295fec
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§7 DI service/svc surface + IService
-         synthesis; old annotation DI retired in the next reseed); sha256 is read directly off the
-         committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§7 part 2: retire old annotation DI —
+         #singleton/#inject/DiKind/di.tks removed; service/svc is the sole DI); sha256 is read directly
+         off the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).

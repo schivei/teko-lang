@@ -75,10 +75,9 @@ pub type Frame = struct { }
 pub type Caller = struct { }
 
 /**
- * Root — the WIDE tier (`tk_region_root()` / program). It has EXACTLY two legitimate origins: a
- * declared `#singleton` binding (short-circuiting the oracle, reusing `DiKind::Singleton →
- * tk_region_root()`, codegen.tks:9564) OR a structural cross-thread value (chan/wait_group). Never
- * a fallback-for-uncertainty (that is `Unresolved`).
+ * Root — the WIDE tier (`tk_region_root()` / program). Its legitimate origin is a structural
+ * cross-thread value (chan/wait_group); a `service singleton`→thread-root binding will land via the
+ * Doc 1 §8 seam. Never a fallback-for-uncertainty (that is `Unresolved`).
  *
  * @since 0.3.1
  */
@@ -149,14 +148,15 @@ pub type ResidencePlan = struct {
 }
 
 /**
- * residence_tier — the PURE decision core of the oracle. Maps a binding's inputs to its tier: a
- * `#singleton` binding is forced to `Root` (short-circuit); otherwise the transitive points-to
+ * residence_tier — the PURE decision core of the oracle. Maps a binding's inputs to its tier: an
+ * `is_singleton` binding is forced to `Root` (short-circuit — the mechanism the Doc 1 §8 `service
+ * singleton`→thread-root seam drives; no source sets it today); otherwise the transitive points-to
  * value decides — `PtTop` is the measured defect `Unresolved`, `PtRoot` is `Root`, `PtParam` points
  * at caller storage so it moves to `Caller`, and a frame-born (`PtFrame`/`PtAdopter`) value refines
  * via the escape fast-path: it moves to `Caller` if it escapes the frame, resides in `Scope` if it
  * is block-local, else in the `Frame`.
  *
- * @param is_singleton   the binding carried `#singleton` (declared root residence)
+ * @param is_singleton   the binding is forced to root residence (Doc 1 §8 seam; no source sets it today)
  * @param pt             the binding's transitive points-to value (from `fn_spine`)
  * @param escapes_frame  the binding's name is in the function's frame-escape set
  * @param is_block_local the binding is provably freeable at its block's exit edges
@@ -265,7 +265,10 @@ fn binding_points_to(sp: Spine, name: str): PointsTo {
  */
 fn plan_binding(b: TBinding, fn_body: []TStatement, block_body: []TStatement, is_value: bool, sp: Spine, escaping: []str): BindingResidence {
     var name = binding_name(b)
-    var is_singleton = b.di_kind == parser::DiKind::Singleton
+    // (§7 part 2) The annotation-DI `#singleton` binding was retired; no binding forces Root
+    // residence today. `residence_tier` keeps its `is_singleton` param (mechanism preserved) and the
+    // source is `false` — the `service singleton`→thread-root binding lands via the Doc 1 §8 seam.
+    var is_singleton = false
     var pt = binding_points_to(sp, name)
     var escapes = residence_name_in_set(escaping, name)
     var blk_local = binding_is_block_local(escaping, fn_body, block_body, is_value, b)

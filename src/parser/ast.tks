@@ -281,10 +281,6 @@ pub type BindTarget = variant SimpleName | DestructurePattern
  *                  `Ref<>`-wrapped annotation to carry its reference-ness — without the flag the
  *                  checker saw a plain `mut` binding and silently COPIED (owner ruling 2026-07-30)
  * @field value     the initializer expression
- * @field di_kind   the residence lifetime the binding declared (0.3.1 modelo-de-memoria §2a). `None`
- *                  = an ordinary scope-ephemeral local; `Singleton` = a `#singleton` binding forced to
- *                  root residence. `Scoped`/`Transient` are rejected on a binding at parse time (the
- *                  default local IS the scope-ephemeral case), so only `None`/`Singleton` reach here.
  */
 pub type Binding = struct {
     kind: BindKind
@@ -293,7 +289,6 @@ pub type Binding = struct {
     type_ann: TypeExpr
     is_ref: bool
     value: Expr
-    di_kind: DiKind
 }
 /**
  * AssignKind — the target shape of an assignment (#88). One of four, tagged on `Assign`/`TAssign`:
@@ -398,18 +393,6 @@ pub type ConstraintExpr = variant ConstraintAtom | ConstraintAnd | ConstraintOr 
 // --- top-level items ---
 pub type Param = struct { name: str; has_type: bool; type_ann: TypeExpr; is_params: bool; has_default: bool; default_expr: Expr }   // immutable (B.21); is_params = C#-style variadic modifier (2026-07-01), trailing-only, type_ann must be a Slice; has_default/default_expr = DEFARGS (2026-07-01) — TRAILING-ONLY (once one param defaults, every later param must too), default_expr valid iff has_default; has_type = OOP A1 (2026-07-01) — false ONLY for a struct method's 1st param (the RECEIVER, name free, type injected by the checker as the enclosing struct); every other param is always typed (type_ann valid iff has_type)
 
-/** A dependency-injection lifetime (W10c/MEM-3). `None` = the type carries no
- *  `#singleton`/`#scoped`/`#transient` annotation; the three others are the design's three
- *  DI lifetimes — a singleton lives in the root region, a scoped instance in its owning
- *  region (walking up the arena tree), a transient one is freshly built per use. */
-pub type DiKind = enum { None; Singleton; Scoped; Transient }
-
-/** One `#inject(name: Type)` binding on a fn overlay (W10c/MEM-3). `has_key`/`key` carry
- *  an optional `@Key` selector — parsed so issue #173 (keys + `#wire`) needs no AST churn,
- *  but rejected by the core-DI checker (keys are out of core scope). `line`/`col` point at
- *  the binding name for diagnostics. */
-pub type InjectBinding = struct { name: str; type_ann: TypeExpr; has_key: bool; key: str; line: u32; col: u32 }
-
 // Visibility — a declaration's REACH (LEGISLATION "Visibility — pub vs exp"; B.9).
 // Private (default, no keyword) = own namespace only; Pub = across the project's
 // namespaces (not in the binary header); Exp = exported in the `.tkh` (the public ABI),
@@ -439,8 +422,6 @@ pub type Function = struct {
     is_virtual: bool   // `virtual fn` — overridable by a derived class
     is_override: bool   // `override fn` — overrides a base virtual/abstract method
     is_static: bool   // (§4 D3, 2026-08-11) `static fn` — an in-body member of the TYPE, no receiver. Parsed universally (inert at top level, like a modifier); the checker's static-vs-instance detector still keys off the receiver's param shape during the §4 teach window, so this flag is ACCEPTED but not yet authoritative. Non-method `Function`s carry false.
-    has_inject: bool
-    injects: []InjectBinding
     /**
      * A `#arena_size(N)` directive precedes it (#453, the 0.3.1 SW1 resource/arena foundation) —
      * a DEVELOPER-DECLARED per-function arena budget in bytes, covering the function's own frame
@@ -585,9 +566,6 @@ pub type TypeDecl = struct {   // nominal (B.13)
     doc: str   // the doc span (valid iff has_doc)
     line: u32   // the name's 1-based source line (W-loc-2 diagnostics)
     col: u32   // the name's 1-based source column (W-loc-2 diagnostics)
-    di_kind: DiKind
-    has_di_key: bool
-    di_key: str
 }
 /**
  * A `use` declaration, in one of three forms (S1, the 0.1.0.0-beta remodel §3.1):
