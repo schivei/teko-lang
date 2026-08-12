@@ -71,7 +71,7 @@ Every row is a read measurement.
 | a user struct crossing an extern boundary is a **C compile error** even where allowed | measured, recorded | `src/time/time.tks:21-34` |
 | `extern type Name` exists — an opaque foreign handle, lowers to `typedef void *tk_t_Name;` | yes | `src/parser/ast.tks:463`, `parse_decl.tks:822-824`, `src/codegen/codegen.tks:9029-9035` |
 | `ptr<byte>` as an extern param **links and runs** | proven twice in the regressor | `examples/regressions/bulk/src/q026_buf_ptr_memset_roundtrip/body.tks:1`, `q170_unsafe_rawbuf_roundtrip/body.tks:14` |
-| `-> void` on a **raw libc** extern is proven | yes | `feat/issue-runtime-em-teko` `src/runtime/teko_rt.tks:676` (`rt_abort(): void = "abort" from "c"`) |
+| `-> void` on a **raw libc** extern is proven | yes | `feat/issue-runtime-em-teko` `src/runtime/teko_rt.tks:676` (`rt_abort() = "abort" from "c"`) |
 | `Ptr{inner=null}` (the opaque `ptr`) lowers to literally `void *` | yes | `codegen.tks:1549-1551` |
 | `Uptr` lowers to literally `uintptr_t` | yes | `codegen.tks:1553` |
 | `Void` lowers to literally `void` | yes | `codegen.tks:1502` |
@@ -266,7 +266,7 @@ both** — nothing else in this document depends on them. Flagged rather than sm
 
 | C shape | Teko | entry? |
 |---|---|---|
-| `void f(…)` (return position) | `void` | **NO ENTRY.** It is literally the same thing, already spelled in one word, already proven on a raw libc extern (`rt_abort(): void = "abort" from "c"`) and admitted by an explicit checker arm (`typer.tks:5761-5763`). A `type c_void = void` alias would be a **synonym** — a second name for a thing that has a name and is the same thing. §5.2 records it as excluded |
+| `void f(…)` (return position) | `void` | **NO ENTRY.** It is literally the same thing, already spelled in one word, already proven on a raw libc extern (`rt_abort() = "abort" from "c"`) and admitted by an explicit checker arm (`typer.tks:5761-5763`). A `type c_void = void` alias would be a **synonym** — a second name for a thing that has a name and is the same thing. §5.2 records it as excluded |
 | `void *` (an address of the unknown) | `ptr<byte>` **or** the opaque `ptr` — never `uptr`. Rule in §5.3 | **NO ENTRY.** The opaque `ptr` lowers to literally `void *` (`codegen.tks:1550`); an alias would again be a synonym |
 
 *Measured, for the record, because the earlier proposal must be answerable rather than merely

@@ -2182,7 +2182,7 @@ tk_typed_stmt_result tk_type_statement(tk_statement s, tk_env env, tk_type_table
 static tk_type function_return(tk_function f, tk_type_table table) {
     if (!f.has_return) return void_t();    // returns no value → the `-> void` marker
     tk_type_result r = tk_resolve_type(f.return_type, table);
-    return r.ok ? r.as.value : void_t();   // collect validated signatures; a bad annotation surfaces there
+    return r.ok ? r.as.value _t();   // collect validated signatures; a bad annotation surfaces there
 }
 
 // ---- C5: return / final-expr vs the declared return type (see the Teko twin; NULL = ok) ----

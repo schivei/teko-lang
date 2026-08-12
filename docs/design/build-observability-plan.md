@@ -255,7 +255,7 @@ de EXTENSÃO, não de formato. Scaffolding:
  * @param prog  the checked, monomorphized program to cache
  * @return      null on success, else the write error
  */
-fn write_tkc(path: str, prog: checker::TProgram): void | error {
+fn write_tkc(path: str, prog: checker::TProgram) | error {
     teko::io::write_file_bytes(path, emit::serialize_program(prog))
 }
 

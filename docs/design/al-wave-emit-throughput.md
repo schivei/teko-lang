@@ -222,7 +222,7 @@ sites (esperado ~0 no padrão mutável).
  * @throws   pânico se cap estourar u64 (M.1 fail-loud)
  * @since 0.x (#AL3/F1)
  */
-pub fn push[T](x: &[]T, v: T): void
+pub fn push[T](x: &[]T, v: T)
 ```
 
 Ritual: fixpoint verde (o C do compilador muda, mas o C emitido para o CORPUS-ALVO não). Blast:
@@ -330,7 +330,7 @@ bom — **não mexer**. Ritual: probe dark-matter str MB ↓ + pico RSS ↓.
  * @return  void, ou error num write curto/falho (M.1)
  * @since 0.x (#AL4b)
  */
-pub fn ew_write(w: &EmitWriter, s: str): void | error
+pub fn ew_write(w: &EmitWriter, s: str) | error
 ```
 
 ### 5.3 AL5 — region-per-phase (M/L) — ELEVADO pela prova

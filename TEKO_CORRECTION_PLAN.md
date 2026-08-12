@@ -30,7 +30,7 @@
 | `Error` / `Valor \| Error` / `Error as e` | LEGISLATION §49, §66–90 | `error` (nativo) / `valor \| error` |
 | `str \| Error`, `[]byte \| Error` | LEGISLATION §121, §135 | `str \| error`, `[]byte \| error` |
 | `teko::Error` | LEGISLATION §176 | `teko::error` |
-| `write_file(...): () \| Error` (void-em-variant) | LEGISLATION §270–271 | `write_file(...): error?`; `read_file -> []byte \| error`; `write_err([]byte): void` |
+| `write_file(...): () \| Error` (void-em-variant) | LEGISLATION §270–271 | `write_file(...): error?`; `read_file -> []byte \| error`; `write_err([]byte)` |
 | `type Unit = struct {}` ; `Type = … \| Unit` ; `Unit {}` ; `-> Unit` | **TEKO_CHECKER.md:78,81,90,1095,1245–1278** (deriva congelada) | excisar; `void` como marcador de retorno; checks → `error?` |
 
 **Corretivos (a lei que supera, já no cânone):** `void` (HISTORY §5829–5833/§5971) · `?`-nulabilidade
@@ -41,7 +41,7 @@
 ## §2 — Contenção (imediata, serial — PARA de sangrar)
 
 - **[Z0] Emenda legislativa** *(serial, primeiro — vira o guard que as correções citam)*. par: `TEKO_LEGISLATION.md` + `TEKO_HISTORY.md`
-  > Gravar as 4 regras como decisão (B.x): void (marcador de retorno, nunca tipo/valor/membro), variant
+  > Gravar as 4 regras como decisão (B.x) (marcador de retorno, nunca tipo/valor/membro), variant
   > (tipos completos, sem construtores/void/anuláveis), nullable (`T?`, nunca membro de variant), `error`
   > nativo supera `Error`. Marcar os pontos defasados de §1 como ↺ corrigidos. Anotar a deriva da
   > `TEKO_CHECKER.md` (a fonte do `Unit`). **HALT/guard:** nenhum código novo pode introduzir `Unit`,

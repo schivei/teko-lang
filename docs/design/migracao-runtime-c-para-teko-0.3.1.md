@@ -364,7 +364,7 @@ pub type TargetSymbol = struct {
  * @return      void
  * @since 0.3.1
  */
-pub fn store_u64(addr: u64, v: u64): void
+pub fn store_u64(addr: u64, v: u64)
 
 /**
  * load_u64 — lê a palavra de 64 bits no endereço cru `addr` (P1). NÃO ALOCA. Lowera para uma única

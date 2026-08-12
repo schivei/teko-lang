@@ -152,7 +152,7 @@ ANTES do resolver, por `mem_op = segs[-2]=="mem"` (`codegen/codegen.tks:4161-417
 
 | builtin | assinatura (checker) | rota C (codegen.tks) | rota nativa (lower.tks) | alcançável no self-host? |
 |---|---|---|---|---|
-| `free` | `(T): void` (T = `[]E` \| class \| region-handle) | `emit_mem_free` type-directed (`:3932`) | **AUSENTE → undefined** | **SIM** (typer, resolve, spine, assemble, arena) |
+| `free` | `(T)` (T = `[]E` \| class \| region-handle) | `emit_mem_free` type-directed (`:3932`) | **AUSENTE → undefined** | **SIM** (typer, resolve, spine, assemble, arena) |
 | `region_new` | `(): uptr` | inline `tk_region_new(tk_region_root())` (`:4166`) | **AUSENTE → undefined** | **SIM** (arena.tks, via checker) |
 | `region_alloc` | `(uptr, init:T): ptr<T>` | `emit_region_alloc` (`:3821`) | **AUSENTE → undefined** | **SIM** (arena.tks) |
 | `buf_ptr` | `(u64): ptr<byte>` | `emit_buf_ptr` (`:3794`) | `lower_buf_ptr_call` (`:3423`) ✔ | sim (rawbuf) |
@@ -473,7 +473,7 @@ fn lower_region_alloc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall):
 fn is_mem_free_call(c: checker::TCall): bool
 
 /**
- * lower_mem_free_call — `teko::mem::free(x): void`: recupera o bloco heap de `x` e SCRUBA o
+ * lower_mem_free_call — `teko::mem::free(x)`: recupera o bloco heap de `x` e SCRUBA o
  * binding, ramificando no tipo de `x` (o checker provou ser variável mutável de tipo heap). Espelho
  * exato de `emit_mem_free`/`emit_region_free` (`codegen.tks:3932-3993`), os três braços:
  *

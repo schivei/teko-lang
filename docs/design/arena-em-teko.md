@@ -19,7 +19,7 @@ backend nativo, sem hop pela stdlib:
 
 ```
 pub extern fn c_aligned_alloc(alignment: u64, size: u64): u64  = "aligned_alloc"
-pub extern fn c_free(block: u64): void = "free"
+pub extern fn c_free(block: u64) = "free"
 pub extern fn c_memset(block: u64, value: i32, count: u64): u64 = "memset"
 pub extern fn c_memcmp(left: u64, right: u64, count: u64): i32 = "memcmp"
 ```
