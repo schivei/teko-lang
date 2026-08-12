@@ -269,10 +269,39 @@ fn cast_widen_is_redundant(term: TExpr, other: Type): bool {
  * @since        0.3.1
  */
 pub fn cast_is_lossless_widen(inner: PrimKind, outer: PrimKind): bool {
+    if same_word_lateral(inner, outer) { return true }
     match int_arith_join(inner, outer) {
         PrimKind as k => k == outer
         error => false
     }
+}
+
+/**
+ * same_word_lateral — is `{a, b}` one of the two equal-width, same-sign, DISTINCT-kind
+ * integer pairs teko's 64-bit-only target makes semantically interchangeable: `{U64, Usize}`
+ * or `{I64, Size}`, in EITHER order? On a 64-bit target `usize` ≡ `u64` and `size` ≡ `i64` in
+ * both width and sign — they differ only in spelling (a semantic label), so a value of one kind
+ * holds every value of its partner losslessly in both directions. `int_arith_join` returns the
+ * LEFT kind on an equal-width tie, so it can never report the RIGHT kind as the join of such a
+ * pair; this predicate is the standing exception that makes `cast_is_lossless_widen` (and thus
+ * the implicit-coercion gate `numeric_widens_implicitly` plus the fit-guard consumers) treat the
+ * relabel as the width no-op it is.
+ *
+ * Deliberately limited to those two pairs: floats, `bool`, and the opaque pointer words
+ * `uptr`/`ptr` are NOT lateral — the pointer words are §5 transport-only and must stay explicit.
+ *
+ * @param a  one integer `PrimKind`
+ * @param b  the other integer `PrimKind`
+ * @return   true iff `{a, b}` is `{U64, Usize}` or `{I64, Size}` in either order
+ * @see      cast_is_lossless_widen — the sole caller; this is its first check
+ * @since    0.3.1
+ */
+fn same_word_lateral(a: PrimKind, b: PrimKind): bool {
+    if a == PrimKind::U64 && b == PrimKind::Usize { return true }
+    if a == PrimKind::Usize && b == PrimKind::U64 { return true }
+    if a == PrimKind::I64 && b == PrimKind::Size { return true }
+    if a == PrimKind::Size && b == PrimKind::I64 { return true }
+    false
 }
 
 /**
