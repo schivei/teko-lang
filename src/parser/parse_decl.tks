@@ -444,6 +444,183 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
     Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size }; next = blk.next }
 }
 
+/**
+ * accessor_kind_at — is the member at `pos` a property accessor, and which? Returns 1 for a getter
+ * (`get <name>(`), 2 for a setter (`set <name>(`), 0 for neither. CONTEXTUAL, exactly like
+ * `operator`/`trait`: `get`/`set` are ordinary identifiers everywhere and only start an accessor
+ * when `Ident("get")`/`Ident("set")` is immediately followed by a NAME and a `(` (past an optional
+ * leading doc and a `pub`/`exp`/`intern` visibility run — the same prefix `class_item_is_method`
+ * skips). Never reserve `get`/`set`: they name real members across the corpus, so a `get: T` field
+ * or an `fn get(…)` method still routes to its historic branch and this returns 0.
+ *
+ * @param tokens  the token stream
+ * @param pos     the member's first token (leading doc/visibility allowed)
+ * @return        1 = getter, 2 = setter, 0 = not an accessor
+ * @since §9 properties
+ */
+fn accessor_kind_at(tokens: []lexer::Token, pos: u64): u64 {
+    var k = pos
+    if is_kind_at(tokens, k, lexer::TokenKind::Doc) { k = skip_seps(tokens, k + 1) }
+    if is_kind_at(tokens, k, lexer::TokenKind::Pub) { k = k + 1 }
+    else if is_kind_at(tokens, k, lexer::TokenKind::Exp) { k = k + 1 }
+    if is_kind_at(tokens, k, lexer::TokenKind::Intern) { k = k + 1 }
+    if !is_kind_at(tokens, k, lexer::TokenKind::Ident) { return 0 to u64 }
+    var word = tokens[k].text
+    if word != "get" && word != "set" { return 0 to u64 }
+    if !is_name_at(tokens, k + 1) { return 0 to u64 }
+    if !is_kind_at(tokens, k + 2, lexer::TokenKind::LParen) { return 0 to u64 }
+    if word == "get" { return 1 to u64 }
+    2 to u64
+}
+
+/**
+ * parse_accessor — parse a property accessor member `[pub|exp|intern] (get|set) <prop> ( … ) [: T]
+ * [{ … }]` into a `Function` flagged `is_getter`/`is_setter` with `accessor_prop = <prop>` and a
+ * SYNTHETIC dispatch name (`__get_<prop>` / `__set_<prop>`). `allow_bodyless` is true in an
+ * interface body (a bodyless contract accessor) and false in a struct/class body (a real accessor
+ * body is required). The receiver `self` is ALWAYS injected (accessors are instance members); an
+ * explicit `self` never appears — the property name follows the `get`/`set` word directly.
+ *
+ * Shape rules (post-parse, precise diagnostics):
+ *   - getter: ZERO user parameters (only the injected `self`) and a return type `: T` REQUIRED.
+ *   - setter: exactly ONE typed user parameter (the value) and NO return type.
+ *
+ * @param tokens          the token stream
+ * @param pos             the accessor's first token (leading doc/visibility allowed)
+ * @param allow_bodyless  true in an interface body, false in a struct/class body
+ * @return                the parsed accessor `Function` + the resume index
+ * @throws                on a malformed accessor shape or a missing/forbidden body
+ * @since §9 properties
+ */
+fn parse_accessor(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parsed<Decl> | error {
+    var p = pos
+    var has_doc = false
+    var doc = ""
+    if is_kind_at(tokens, p, lexer::TokenKind::Doc) {
+        has_doc = true
+        doc = tokens[p].text
+        p = skip_seps(tokens, p + 1)
+    }
+    var vis = Visibility::Private
+    if is_kind_at(tokens, p, lexer::TokenKind::Pub) { vis = Visibility::Pub; p = p + 1 }
+    else if is_kind_at(tokens, p, lexer::TokenKind::Exp) { vis = Visibility::Exp; p = p + 1 }
+    var is_intern = false
+    if is_kind_at(tokens, p, lexer::TokenKind::Intern) { is_intern = true; p = p + 1 }
+    if !is_kind_at(tokens, p, lexer::TokenKind::Ident) {
+        return err_at(tokens, p, "expected `get` or `set` to open a property accessor")
+    }
+    var word = tokens[p].text
+    var is_getter = word == "get"
+    var is_setter = word == "set"
+    if !is_getter && !is_setter {
+        return err_at(tokens, p, "expected `get` or `set` to open a property accessor")
+    }
+    p = p + 1
+    if !is_name_at(tokens, p) {
+        return err_at(tokens, p, "expected a property name after `get`/`set`")
+    }
+    var prop = tokens[p].text
+    var name_line: u32 = tokens[p].line
+    var name_col: u32 = tokens[p].col
+    p = p + 1
+    if !is_kind_at(tokens, p, lexer::TokenKind::LParen) {
+        return err_at(tokens, p, "expected '(' for the accessor parameter list")
+    }
+    var params = match parse_params(tokens, p) { ParsedList<Param> as x => x; error as e => return e }
+    p = params.next
+    if is_getter && params.items.len != 0 {
+        return err_at(tokens, p, "a getter takes no parameters — write `get " ~ prop ~ "(): T`")
+    }
+    if is_setter && params.items.len != 1 {
+        return err_at(tokens, p, "a setter takes exactly one value parameter — write `set " ~ prop ~ "(value: T)`")
+    }
+    if is_setter && !params.items[0].has_type {
+        return err_at(tokens, p, "a setter's value parameter must declare a type — write `set " ~ prop ~ "(value: T)`")
+    }
+    var injected = inject_synthetic_receiver(params.items)
+    var has_return = false
+    var return_type = no_type()
+    if is_return_type_intro_at(tokens, p) {
+        var ret = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+        has_return = true
+        return_type = ret.node
+        p = ret.next
+    }
+    if is_getter && !has_return {
+        return err_at(tokens, p, "a getter must declare a return type — write `get " ~ prop ~ "(): T`")
+    }
+    if is_setter && has_return {
+        return err_at(tokens, p, "a setter returns nothing — drop the `: T` after `set " ~ prop ~ "(value: T)`")
+    }
+    var sym = (if is_getter { "__get_" } else { "__set_" }) ~ prop
+    var body: []Statement = teko::list::empty()
+    if allow_bodyless && !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+        return Parsed<Decl> { node = accessor_function(sym, injected, has_return, return_type, body, vis, has_doc, doc, name_line, name_col, is_intern, is_getter, is_setter, prop); next = p }
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+        return err_at(tokens, p, "expected '{' for the accessor body")
+    }
+    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    Parsed<Decl> { node = accessor_function(sym, injected, has_return, return_type, blk.items, vis, has_doc, doc, name_line, name_col, is_intern, is_getter, is_setter, prop); next = blk.next }
+}
+
+/**
+ * accessor_function — assemble the `Function` node for a parsed property accessor (§9 properties).
+ * The `name` is the SYNTHETIC dispatch symbol (`__get_<prop>`/`__set_<prop>`) so the accessor reuses
+ * every method mechanism (registration, conformance-by-name, vtable slot, dispatch, mangling); the
+ * human property name rides on `accessor_prop` for diagnostics and the use-site registry.
+ *
+ * @param sym          the synthetic method name (`__get_<prop>` / `__set_<prop>`)
+ * @param params       the parameter list WITH the injected `self` receiver
+ * @param has_return   the getter's return-type presence (always false for a setter)
+ * @param return_type  the getter's return type (Unit for a setter)
+ * @param body         the accessor body statements (empty for a bodyless interface accessor)
+ * @param vis          the accessor's visibility
+ * @param has_doc      a leading doc-comment was peeled?
+ * @param doc          the doc span (valid iff has_doc)
+ * @param line         the property name's 1-based source line
+ * @param col          the property name's 1-based source column
+ * @param is_intern    the `intern` reach widener was present?
+ * @param is_getter    this accessor is a getter?
+ * @param is_setter    this accessor is a setter?
+ * @param prop         the human-facing property name
+ * @return             the assembled accessor Function
+ * @since §9 properties
+ */
+fn accessor_function(sym: str, params: []Param, has_return: bool, return_type: TypeExpr, body: []Statement, vis: Visibility, has_doc: bool, doc: str, line: u32, col: u32, is_intern: bool, is_getter: bool, is_setter: bool, prop: str): Function {
+    Function {
+        name = sym; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        params = params; has_return = has_return; return_type = return_type; body = body
+        vis = vis; has_doc = has_doc; doc = doc; line = line; col = col
+        is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""
+        is_intern = is_intern; is_abstract = false; is_virtual = false; is_override = false; is_static = false
+        is_getter = is_getter; is_setter = is_setter; accessor_prop = prop
+        has_arena_size = false; arena_size = 0 to u64
+    }
+}
+
+/**
+ * parse_member_fn_or_accessor — parse ONE type-body member that `*_item_is_method` has already
+ * classified as a method-shaped member: either a property accessor (`get`/`set`, contextual — §9
+ * properties) or an ordinary `fn` method. Routing is the sole new behaviour; a non-accessor member
+ * takes the historic `parse_function` path unchanged, so the corpus (which holds no accessor)
+ * reproduces byte-for-byte.
+ *
+ * @param tokens          the token stream
+ * @param pos             the member's first token (leading doc/visibility allowed)
+ * @param allow_bodyless  true in an interface/trait body (a bodyless contract member is legal),
+ *                        false in a struct/class body (a real body is required)
+ * @return                the parsed member `Function` (as a `Decl`) + the resume index
+ * @throws                on a malformed accessor or `fn` member
+ * @since §9 properties
+ */
+fn parse_member_fn_or_accessor(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parsed<Decl> | error {
+    if accessor_kind_at(tokens, pos) != 0 to u64 {
+        return parse_accessor(tokens, pos, allow_bodyless)
+    }
+    parse_function(tokens, pos, false, "", true, allow_bodyless, false, 0 to u64)
+}
+
 // `{ name: T; name: T; … }` — field list; `;`/newline separates; empty `{ }` allowed;
 // trailing separator allowed. `pos` is at `{`. (Inside `{}` → `;`/newline, B.17.)
 // (OOP A1, 2026-07-01) A struct body's items are INTERLEAVED fields and methods (unified
@@ -459,7 +636,8 @@ fn struct_item_is_method(tokens: []lexer::Token, pos: u64): bool {
     if is_kind_at(tokens, k, lexer::TokenKind::Pub) { k = k + 1 }
     else if is_kind_at(tokens, k, lexer::TokenKind::Exp) { k = k + 1 }
     if is_kind_at(tokens, k, lexer::TokenKind::Static) { k = k + 1 }   // (§4 D3) `static fn` factory in a struct body
-    is_kind_at(tokens, k, lexer::TokenKind::Fn)
+    if is_kind_at(tokens, k, lexer::TokenKind::Fn) { return true }
+    accessor_kind_at(tokens, pos) != 0 to u64
 }
 /**
  * skip_field_inline_attr — consume an optional leading `#inline` layout attribute at a struct/class
@@ -494,7 +672,7 @@ fn parse_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
     }
     loop {
         if struct_item_is_method(tokens, p) {
-            var m = match parse_function(tokens, p, false, "", true, false, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
+            var m = match parse_member_fn_or_accessor(tokens, p, false) { Parsed<Decl> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a struct method must parse to a Function") }
             methods = teko::list::push(methods, mf)
             p = m.next
@@ -541,7 +719,8 @@ fn class_item_is_method(tokens: []lexer::Token, pos: u64): bool {
     else if is_kind_at(tokens, k, lexer::TokenKind::Virtual) { k = k + 1 }
     else if is_kind_at(tokens, k, lexer::TokenKind::Override) { k = k + 1 }
     if is_kind_at(tokens, k, lexer::TokenKind::Static) { k = k + 1 }   // (§4 D3) `static fn` member of the type
-    is_kind_at(tokens, k, lexer::TokenKind::Fn)
+    if is_kind_at(tokens, k, lexer::TokenKind::Fn) { return true }
+    accessor_kind_at(tokens, pos) != 0 to u64
 }
 
 // `{ [pub|exp]? [intern]? name: T; … }` interleaved with methods (`parse_function`,
@@ -557,7 +736,7 @@ fn parse_class_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
     }
     loop {
         if class_item_is_method(tokens, p) {
-            var m = match parse_function(tokens, p, false, "", true, false, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
+            var m = match parse_member_fn_or_accessor(tokens, p, false) { Parsed<Decl> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a class method must parse to a Function") }
             methods = teko::list::push(methods, mf)
             p = m.next
@@ -745,7 +924,7 @@ fn parse_interface_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | er
         var idoc = peel_leading_doc(tokens, p)
         var imc = peek_member_const(tokens, idoc.next)
         if imc.is_const || imc.bad_override { return reject_const_member(tokens, imc.kw_pos) }
-        var m = match parse_function(tokens, p, false, "", true, true, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
+        var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<Decl> as x => x; error as e => return e }
         var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "an interface member must be a method signature (`fn …`)") }
         methods = teko::list::push(methods, mf)
         p = m.next
@@ -771,7 +950,7 @@ fn parse_trait_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
     }
     loop {
         if struct_item_is_method(tokens, p) {
-            var m = match parse_function(tokens, p, false, "", true, true, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
+            var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<Decl> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a trait method must parse to a Function") }
             methods = teko::list::push(methods, mf)
             p = m.next
