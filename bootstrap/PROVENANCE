@@ -1,67 +1,74 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): §9 A — method/function OVERLOADING. Teko now allows
-# two or more functions (or methods) to share a name in one namespace; a call selects exactly one of
-# them at compile time from the argument types (and, under defaults/named-call, the parameter names),
-# and each overload emits a distinct linker symbol. The previous seed (`7c1732cd…`, §8 part 2: lateral
-# usize↔u64 / size↔i64 coercion) C-builds THIS source with only pre-existing language features, so it
-# produced this new seed; the source adds an overload SET nowhere in the compiler itself, so the seed
-# had to be re-harvested only because the new checker/backend logic changes the compiler's own emitted
-# C. The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host output, proven
-# a fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh,
-# which only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
-# bootstrap/teko.c) — never for the unchanged incumbent this record describes.
+# RESEED (hand-harvest, by-hand per owner order): MATCH-UNIVERSAL PHASE 1 — the ADDITIVE, INERT phase.
+# `match` becomes a UNIVERSAL discriminator: on top of the existing variant-arm and enum-member axes it
+# now discriminates a sealed CLASS hierarchy (which subclass a base-typed value is) and an INTERFACE
+# value (which concrete impl), additively. `variant` stays fully alive; NO type is migrated (that is a
+# later phase). The previous seed (`6bc32b38…`, §9 A: method/function overloading) C-builds THIS source
+# with only pre-existing language features, so it produced this new seed; the compiler's own sources
+# hold ZERO match-over-class/interface sites, so the seed was re-harvested only because the new
+# checker/backend logic (new functions + shifted source lines) changes the compiler's own emitted C —
+# behavior on the existing corpus is unchanged. The owner did NOT edit bootstrap/teko.c by hand; the
+# file is the harvested self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's
+# kv_field; enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
 #
-# §9 A — method/function overloading
+# match-universal phase 1 — `match` as a universal discriminator (additive)
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (additive; the non-overloaded path is byte-identical — docs/design/plano-secao9A-method-overload.md):
-#   - THE GATE, keyed on `(namespace, name)`: `env_is_overloaded` / `overload_func_bindings`
-#     (`src/checker/scope.tks`) count the SEALED-GLOBAL `Func` bindings sharing EXACTLY a declaring
-#     namespace AND bare name. Keyed on the pair — never the bare name — so cross-namespace same-name
-#     twins (`div`×3, `to_str`×3, `read`×7, …, ~40 in all) are NOT overload sets, keep their historic
-#     unsuffixed symbol, and the fixpoint closes. `lookup_call_candidates` returns the whole resolving
-#     set for the call site.
-#   - CALL-SITE SELECTION: `select_overload` (`src/checker/typer.tks`) runs ONLY when the resolved
-#     `(ns, name)` is a real overload set. Each candidate must bind by shape (`resolve_defargs` /
-#     `pack_variadic_args` — parameter NAME discriminates under defaults, ruling 5) and every argument
-#     must FIT its parameter (`type_value_expected` + `assignable_to`). Survivors split into an EXACT
-#     tier (`type_eq`) and a WIDENED tier: an exact singleton wins outright; otherwise the highest
-#     non-empty tier decides, and >1 there is a call-site ambiguity (ruling 3). A cast disambiguates
-#     (ruling 4). A one-candidate set is never scored — the whole existing corpus takes that path.
-#   - THE SUFFIX, one source of truth in the checker: `overload_suffix_of` (`src/checker/resolve.tks`)
-#     mangles the effective signature — `"__ov"` + `_`-joined parameter-type mangle, plus a
-#     `"_nm"` + parameter-name mangle ONLY when two members share identical parameter TYPES. Stamped
-#     onto `TFunction.overload_suffix` (definition) and `TCall.overload_suffix` (call) in the checker,
-#     "" for a sole declaration. Both backends append it verbatim after the `(ns, name)` mangle
-#     (`cb_fn_name`, `src/codegen/codegen.tks`; `mangle_fn_symbol`, `src/lir/lower.tks`), so definition,
-#     prototype, call and `.tsym` agree by construction and the C↔native parity holds.
-#   - TAST: `overload_suffix: str` added to `TFunction` and `TCall` (`src/checker/tast.tks`), "" in
-#     every existing constructor and PRESERVED across every rewrite pass (monomorph, consteval,
-#     comptime-fold, the codegen lambda-lift, test-unmark) so a stamped suffix survives to codegen.
-#   - NO runtime C touched. NO `.tkb` wire change (the emitted corpus spells no overload set, so
-#     `overload_suffix` is "" everywhere in the compiler's own output).
+# WHAT ENTERS (additive; every existing match site lowers byte-identically —
+# docs/design/plano-match-universal-e-migracao-variant.md §0-§2, §7):
+#   - LEFT-OF-ARM RELATION CHECK, in `src/checker/match.tks`. `is_direct_case_of` now takes the type
+#     table and, for a NON-variant subject, defers to `is_type_discriminant_of`: a polymorphic
+#     BASE-CLASS subject admits a concrete SUBCLASS reaching it (`subclass_reaches`); an INTERFACE
+#     subject admits a concrete type conforming to it (`type_conforms_to`); every other subject
+#     (struct/primitive/sealed-class/service) admits only itself, the bind-all `type_eq` already
+#     accepts — so the change is inert for them. A rejected arm is diagnosed by
+#     `discriminant_mismatch_error` ("not a subclass of" / "does not implement", else the historic
+#     variant skip-level message).
+#   - CLOSED-SET EXHAUSTIVENESS, in `src/checker/match.tks`. `exhaustive`'s non-variant/non-enum tail
+#     now routes to `exhaustive_type_subject`: a polymorphic base-class subject is exhaustive iff an
+#     unguarded bind-all names the base OR every concrete subclass is covered (`subclasses_of` +
+#     `class_covered`); an INTERFACE subject is an OPEN set, exhaustive only via an unguarded
+#     catch-all/bind-all; every other subject stays open (false — the pre-existing behavior). A guarded
+#     arm (`when`) does NOT count toward covering its case (the existing B.15 rule, reused).
+#   - C-BACKEND LOWERING, in `src/codegen/codegen.tks`. A base-class/interface/trait subject is a fat
+#     pointer `{ data, vtable }` (W10b.D3 / #98): `cg_fatptr_subject_name` detects it, and
+#     `cg_emit_fatptr_pat_test`/`cg_emit_fatptr_pat_binds` discriminate an arm by comparing the
+#     subject's `.vtable` word against that concrete's `tk_vt_<Concrete>_<Subject>` array and bind the
+#     concrete off `.data`. A bind-all naming the subject matches unconditionally and binds the whole
+#     value. The native backend carries no per-object vtable, so its fat-pointer dispatch stays the
+#     existing N2 honest-stop (unchanged this phase).
+# WHAT DOES NOT ENTER: no `variant` type is migrated; literal/range patterns on the left still parse
+# and work (Phase 2); no `properties`/interface get-set.
 #
-# FIXPOINT. gen0 (cc of the previous `7c1732cd…` §8-part-2 seed, which C-builds this §9 A source) built
+# INERTNESS. A real-build scan of the compiler's own emitted C shows the ONLY new `teko_teko__`
+# symbols are the phase-1 additions (`checker::{is_type_discriminant_of, discriminant_mismatch_error,
+# subclasses_of, class_covered, exhaustive_type_subject}`, `codegen::{cg_fatptr_subject_name,
+# cg_emit_fatptr_pat_test, cg_emit_fatptr_pat_binds}`) plus `checker::subclass_reaches` (an existing
+# function now reachable as a standalone symbol) — ZERO removed symbols, so no existing match site is
+# lowered differently. The whole 153-file compiler re-checks and self-builds green.
+#
+# ACCEPT fixtures (examples/regressions/match_universal): a NATIVE variant match (the inertness anchor,
+# `mu_variant_match_inert`) plus three C-route (TEKO_BACKEND=c) cases — a sealed class hierarchy match
+# exhaustive with NO catch-all, a bind-all catch over the base, and an interface match with a `when`
+# guard and the required catch-all. REJECT fixtures (examples/regressions/match_universal_reject): a
+# non-exhaustive sealed match with no catch-all, a guarded-only cover with no unguarded fallback, an
+# open interface match with no catch-all, and an arm naming a non-subclass of the base — the single
+# failing build reports all four diagnostics.
+#
+# FIXPOINT. gen0 (cc of the previous `6bc32b38…` §9 A seed, which C-builds this phase-1 source) built
 # bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical
 # bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
 #   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
-# The gate `env_is_overloaded("teko::numeric::dec","div") == false` holds, and a real-build scan of the
-# compiler's own emitted C found ZERO overload-suffixed symbols — no corpus function is newly suffixed.
-# ACCEPT fixture (examples/regressions/overload_resolve): resolution by argument TYPE, by parameter
-# NAME under defaults, EXACT-over-WIDENING, and an explicit-cast disambiguation, summed into one witness
-# number (151) that only the correct resolution of all four paths produces — runs on BOTH backends.
-# REJECT fixtures (examples/regressions/diagnostics/src/rov_r1_ambiguous, rov_r3_no_match): an ambiguous
-# call ("ambiguous call to overloaded 'g'") and a no-match call ("no matching overload for 'h'") each
-# fail at the CALL site, never at the definition (ruling 1).
+# A TEKO_MEM_PARANOID=1 build of the same source exits 0 and emits a byte-identical teko.c.
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  6bc32b388bb5c0e012e4ccf6311a93b517323a13c741213f75eb092b8f6a0677
+sha256:  0cc2219daa96adc9cff5da049e09a6537a229bc52108f6c76ee09ff8293b712d
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§9 A: method/function overloading,
-         additive in src/); sha256 is read directly off the committed file and was proven a fixpoint
-         (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (match-universal phase 1, additive in
+         src/); sha256 is read directly off the committed file and was proven a fixpoint (bin-a ==
+         bin-b, byte-identical).

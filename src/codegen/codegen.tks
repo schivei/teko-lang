@@ -7043,6 +7043,102 @@ fn cg_kind_derived_subj(subj: str, boxed: bool): str {
     str(o)
 }
 
+/**
+ * cg_fatptr_subject_name — the canonical name a fat-pointer match SUBJECT discriminates against, or
+ * null when `subjT` is not a fat pointer. A `match` over a polymorphic BASE class or an INTERFACE/
+ * TRAIT value lowers on the subject's `.vtable` word: each concrete subclass/impl owns a distinct
+ * `tk_vt_<Concrete>_<Subject>` array (W10b.D3 / #98), so an arm's test compares `.vtable` against
+ * that symbol and its bind extracts the object pointer from `.data` (match-universal phase 1, C
+ * backend). Every other subject kind carries no `.vtable` and answers null.
+ *
+ * @param prog   the typed program (kind oracles)
+ * @param subjT  the subject's resolved type
+ * @return       the subject's canonical fat-pointer name, or null
+ */
+fn cg_fatptr_subject_name(prog: CgProg, subjT: checker::Type): str | null {
+    match subjT {
+        checker::Named as nm => {
+            if cg_is_polymorphic_base(prog, nm.name) || cg_is_interface_named(prog, nm.name) || cg_is_trait_named(prog, nm.name) { return nm.name }
+            null
+        }
+        _ => null
+    }
+}
+
+/**
+ * cg_emit_fatptr_pat_test — the arm TEST for a fat-pointer (base-class/interface/trait) match
+ * subject (match-universal phase 1, C backend). A bind-all naming the subject itself matches
+ * unconditionally; every other bind names a concrete subclass/impl, discriminated by comparing the
+ * subject's `.vtable` word against that concrete's `tk_vt_<Concrete>_<Subject>` array. A wildcard
+ * `_` passes through to the unconditional `1`.
+ *
+ * @param buf       the output buffer
+ * @param prog      the typed program
+ * @param pat       the arm pattern
+ * @param subj      the subject temp name
+ * @param subjname  the subject's canonical fat-pointer name
+ * @return          the buffer with the boolean test appended
+ * @throws          on a slice/field/alt pattern, which cannot discriminate a fat pointer
+ */
+fn cg_emit_fatptr_pat_test(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, subjname: str): []byte | error {
+    match pat {
+        parser::WildcardPattern => cb(buf, "1")
+        parser::BindPattern as bp => {
+            if bp.is_slice { return error { message = "codegen: a slice pattern cannot discriminate a class/interface subject (internal)" } }
+            var sub_last = cg_path_last(bp.type_name)
+            if sub_last == checker::name_last_segment(subjname) { return cb(buf, "1") }
+            var canon = cg_canon_name(prog, sub_last)
+            var o = cb(buf, "((")
+            o = cb(o, subj)
+            o = cb(o, ").vtable == tk_vt_")
+            o = cb_tysym(o, canon)
+            o = cb(o, "_")
+            o = cb_tysym(o, subjname)
+            cb(o, ")")
+        }
+        _ => error { message = "codegen: unsupported pattern over a class/interface subject (internal)" }
+    }
+}
+
+/**
+ * cg_emit_fatptr_pat_binds — the arm BINDS for a fat-pointer match subject (match-universal phase 1,
+ * C backend). A bind-all naming the subject binds the whole fat pointer (still the subject type); a
+ * concrete arm `Sub as x` binds the raw object pointer extracted from `.data`, cast to the concrete
+ * class's `tk_t_<Sub> *` so field/method access reads the subclass instance. A bindless pattern
+ * introduces nothing.
+ *
+ * @param buf       the output buffer
+ * @param prog      the typed program
+ * @param pat       the arm pattern
+ * @param subj      the subject temp name
+ * @param subjname  the subject's canonical fat-pointer name
+ * @param indent    the arm-body indentation
+ * @return          the buffer with the binding declarations appended
+ */
+fn cg_emit_fatptr_pat_binds(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, subjname: str, indent: str): []byte | error {
+    match pat {
+        parser::BindPattern as bp => {
+            if !bp.has_binding { return buf }
+            var o = cb(buf, indent)
+            o = cb(o, "auto ")
+            o = cb_str(o, bp.binding)
+            o = cb(o, " = ")
+            var sub_last = cg_path_last(bp.type_name)
+            if sub_last == checker::name_last_segment(subjname) {
+                o = cb(o, subj)
+                return cb(o, ";\n")
+            }
+            var canon = cg_canon_name(prog, sub_last)
+            o = cb(o, "(")
+            o = mangle_type_name(o, "", canon)
+            o = cb(o, " *)((")
+            o = cb(o, subj)
+            cb(o, ").data);\n")
+        }
+        _ => buf
+    }
+}
+
 // cg_emit_pat_test — TOP-LEVEL pattern test (handles an OPTIONAL subject — REBOOT_PLAN §202).
 // `subjT` is the subject's resolved type; `subj` is the subject temp name (a tk_opt_<inner>
 // struct when optional). For an optional subject: `null` ⇒ `(!_s.present)`; a bare bind/wildcard
@@ -7086,6 +7182,10 @@ fn cg_emit_pat_test(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, 
             null => { }
         }
         _ => { }
+    }
+    match cg_fatptr_subject_name(prog, subjT) {
+        str as sname => return cg_emit_fatptr_pat_test(buf, prog, pat, subj, sname)
+        null => { }
     }
     emit_pat_test(buf, prog, pat, subj, subjT)
 }
@@ -7193,6 +7293,10 @@ fn cg_emit_pat_binds(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str,
             null => { }
         }
         _ => { }
+    }
+    match cg_fatptr_subject_name(prog, subjT) {
+        str as sname => return cg_emit_fatptr_pat_binds(buf, prog, pat, subj, sname, indent)
+        null => { }
     }
     match pat {
         parser::BindPattern as bp => {
