@@ -1,67 +1,67 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): 0.3.1 surface migration §8 PART 2 — teach the
-# checker the LATERAL machine-word coercions `usize↔u64` and `size↔i64`. The previous seed
-# (`9141506f…`, §8 part 1: ADD the `size`/`usize` kinds, inert) already knows the two kinds and their
-# widths/signs, so it C-builds THIS tree — the one that adds the `same_word_lateral` predicate — with
-# only pre-existing language features. This reseed realigns the committed seed with the §8-part-2
-# source (the new predicate changes the compiler's own emitted C, so the seed must be re-harvested to
-# the new fixpoint). The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested
-# self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by
-# scripts/provenance_gate.sh, which only ever judges this record on a SWAP (an add, replace, or
-# remove-then-reintroduce of bootstrap/teko.c) — never for the unchanged incumbent this record
-# describes.
+# RESEED (hand-harvest, by-hand per owner order): §9 A — method/function OVERLOADING. Teko now allows
+# two or more functions (or methods) to share a name in one namespace; a call selects exactly one of
+# them at compile time from the argument types (and, under defaults/named-call, the parameter names),
+# and each overload emits a distinct linker symbol. The previous seed (`7c1732cd…`, §8 part 2: lateral
+# usize↔u64 / size↔i64 coercion) C-builds THIS source with only pre-existing language features, so it
+# produced this new seed; the source adds an overload SET nowhere in the compiler itself, so the seed
+# had to be re-harvested only because the new checker/backend logic changes the compiler's own emitted
+# C. The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host output, proven
+# a fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh,
+# which only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
+# bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# §8 part 2 — lateral usize↔u64 / size↔i64 implicit coercion
+# §9 A — method/function overloading
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (additive only; nothing removed — docs/design/mudancas-superficie-0.3.1.md §8):
-#   - `same_word_lateral(a: PrimKind, b: PrimKind): bool` (`src/checker/expr.tks`, immediately after
-#     `cast_is_lossless_widen`): true iff `{a,b}` is `{U64, Usize}` or `{I64, Size}` in EITHER order.
-#     On teko's 64-bit-only target `usize` ≡ `u64` and `size` ≡ `i64` in BOTH width and sign — they
-#     differ only in spelling — so each of those two pairs holds every value of its partner losslessly
-#     in both directions. Deliberately limited to those two pairs: floats, `bool`, and the opaque §5
-#     pointer words `uptr`/`ptr` are NOT lateral and stay explicit.
-#   - WIRING: `same_word_lateral` becomes the FIRST check inside `cast_is_lossless_widen`
-#     (`if same_word_lateral(inner, outer) { return true }`), the single source of truth. That reaches
-#     BOTH the implicit-coercion gate (`numeric_widens_implicitly` → `widen_value_into` →
-#     `coerce_value_into`, covering assignment/field/index/return) AND the fit-guard consumers (native
-#     `lower_cast_fit_guard`, C `cast_may_lose`), so an implicit `u64`→`usize` relabel type-checks and
-#     an explicit `u64 to usize` relabel correctly skips the runtime fit guard (same width = lossless,
-#     lowered to a same-width no-op).
-#   - ROOT CAUSE this closes: `int_arith_join` returns the LEFT kind on an equal-width tie, so it can
-#     never report the RIGHT kind of such a pair as the join — `cast_is_lossless_widen` answered false
-#     in BOTH directions for these two equal-width, same-sign, distinct-kind pairs, the sole gap left
-#     by the pre-existing C#-style widening (a narrower same-sign int already widens implicitly, so
-#     `u8`→`usize` and `i32`→`size` already worked). No other function changed: `int_arith_join`,
-#     `prim_width`, `prim_is_signed` were already correct (Usize/Size → width 64; Usize unsigned, Size
-#     signed).
-#   - REDUNDANT-CAST PASS: UNCHANGED. Because `int_arith_join` returns the left operand on an
-#     equal-width tie and `U64`≠`Usize` (and `I64`≠`Size`) at the enum level, `join_unchanged_without_cast`
-#     never reports a lateral relabel as a no-op, so the D1 class-3 `redundant cast` diagnostic does
-#     not fire on a deliberate `u64 to usize`/`i64 to size` relabel. Verified: a probe with
-#     `(a to usize) + b` and `(a to u64) < b` builds with NO redundant-cast warning.
-#   - NO runtime C touched. NO `.tkb` wire change (the emitted corpus spells no new construct).
+# WHAT ENTERS (additive; the non-overloaded path is byte-identical — docs/design/plano-secao9A-method-overload.md):
+#   - THE GATE, keyed on `(namespace, name)`: `env_is_overloaded` / `overload_func_bindings`
+#     (`src/checker/scope.tks`) count the SEALED-GLOBAL `Func` bindings sharing EXACTLY a declaring
+#     namespace AND bare name. Keyed on the pair — never the bare name — so cross-namespace same-name
+#     twins (`div`×3, `to_str`×3, `read`×7, …, ~40 in all) are NOT overload sets, keep their historic
+#     unsuffixed symbol, and the fixpoint closes. `lookup_call_candidates` returns the whole resolving
+#     set for the call site.
+#   - CALL-SITE SELECTION: `select_overload` (`src/checker/typer.tks`) runs ONLY when the resolved
+#     `(ns, name)` is a real overload set. Each candidate must bind by shape (`resolve_defargs` /
+#     `pack_variadic_args` — parameter NAME discriminates under defaults, ruling 5) and every argument
+#     must FIT its parameter (`type_value_expected` + `assignable_to`). Survivors split into an EXACT
+#     tier (`type_eq`) and a WIDENED tier: an exact singleton wins outright; otherwise the highest
+#     non-empty tier decides, and >1 there is a call-site ambiguity (ruling 3). A cast disambiguates
+#     (ruling 4). A one-candidate set is never scored — the whole existing corpus takes that path.
+#   - THE SUFFIX, one source of truth in the checker: `overload_suffix_of` (`src/checker/resolve.tks`)
+#     mangles the effective signature — `"__ov"` + `_`-joined parameter-type mangle, plus a
+#     `"_nm"` + parameter-name mangle ONLY when two members share identical parameter TYPES. Stamped
+#     onto `TFunction.overload_suffix` (definition) and `TCall.overload_suffix` (call) in the checker,
+#     "" for a sole declaration. Both backends append it verbatim after the `(ns, name)` mangle
+#     (`cb_fn_name`, `src/codegen/codegen.tks`; `mangle_fn_symbol`, `src/lir/lower.tks`), so definition,
+#     prototype, call and `.tsym` agree by construction and the C↔native parity holds.
+#   - TAST: `overload_suffix: str` added to `TFunction` and `TCall` (`src/checker/tast.tks`), "" in
+#     every existing constructor and PRESERVED across every rewrite pass (monomorph, consteval,
+#     comptime-fold, the codegen lambda-lift, test-unmark) so a stamped suffix survives to codegen.
+#   - NO runtime C touched. NO `.tkb` wire change (the emitted corpus spells no overload set, so
+#     `overload_suffix` is "" everywhere in the compiler's own output).
 #
-# FIXPOINT. gen0 (cc of the previous `9141506f…` §8-part-1 seed, which C-builds this §8-part-2 source)
-# built bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a
-# byte-identical bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
+# FIXPOINT. gen0 (cc of the previous `7c1732cd…` §8-part-2 seed, which C-builds this §9 A source) built
+# bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical
+# bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
 #   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
-# ACCEPT fixture (examples/probes/s8_lateral_word): the four lateral relabels driven through typed
-# VARIABLES with no `to`, across BOTH the assignment rung (`var b: usize = a`) and the return rung
-# (the `relabel_*` helpers), plus a pre-existing `u8`→`usize` widen — builds under this seed and runs
-# (exit 42); the `u64`→`usize` relabel lowers to a same-width no-op, the §8-part-2 byte-preservation
-# proof. REJECT fixtures (examples/regressions/diagnostics/src/c71..c73): `usize`→`u32` (narrowing)
-# and `usize`→`i64` / `size`→`u64` (cross-sign) each still demand an explicit `to`
-# ("value type does not match annotation").
+# The gate `env_is_overloaded("teko::numeric::dec","div") == false` holds, and a real-build scan of the
+# compiler's own emitted C found ZERO overload-suffixed symbols — no corpus function is newly suffixed.
+# ACCEPT fixture (examples/regressions/overload_resolve): resolution by argument TYPE, by parameter
+# NAME under defaults, EXACT-over-WIDENING, and an explicit-cast disambiguation, summed into one witness
+# number (151) that only the correct resolution of all four paths produces — runs on BOTH backends.
+# REJECT fixtures (examples/regressions/diagnostics/src/rov_r1_ambiguous, rov_r3_no_match): an ambiguous
+# call ("ambiguous call to overloaded 'g'") and a no-match call ("no matching overload for 'h'") each
+# fail at the CALL site, never at the definition (ruling 1).
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  7c1732cdd2f70ba469965c1018c72e91a65aad270b2fc8dfc5bfec47b186c9cd
+sha256:  6bc32b388bb5c0e012e4ccf6311a93b517323a13c741213f75eb092b8f6a0677
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§8 part 2: lateral usize↔u64 /
-         size↔i64 implicit coercion via `same_word_lateral`, additive in src/); sha256 is read
-         directly off the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§9 A: method/function overloading,
+         additive in src/); sha256 is read directly off the committed file and was proven a fixpoint
+         (bin-a == bin-b, byte-identical).

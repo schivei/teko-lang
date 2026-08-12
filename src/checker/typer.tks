@@ -445,7 +445,7 @@ fn bignum_call(kind: str, fn_name: str, args: []TExpr, ret: Type): TExpr {
     segs = teko::list::push(segs, parser::Segment { name = kind })
     segs = teko::list::push(segs, parser::Segment { name = fn_name })
     var callee = parser::Path { segments = segs }
-    TExpr { kind = TCall { callee = callee; args = args; call_ns = bignum_ns(kind); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = bignum_ns(kind); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = ret; line = 0; col = 0 }
 }
 
 /**
@@ -861,7 +861,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
     if last == "empty" {
         if c.args.len != 0 { return error { message = "teko::list::empty expects no arguments" } }
         // SENTINEL slice: element is the Void marker (unifies with any concrete slice — type_eq).
-        TExpr { kind = TCall { callee = c.callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
     } else if last == "push" || is_pushfo {
         if c.args.len != 2 { return error { message = "teko::list::push expects two arguments (slice, item)" } }
         var s = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -882,7 +882,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
         // ignores a slice's element type but codegen's emit_list_empty REQUIRES it. (Mirror expr.c.)
         var arr_expr = match elem { Void => TExpr { kind = s.kind; type = Slice { element = result_elem }; line = s.line; col = s.col }; _ => s }
         var args = teko::list::push(teko::list::push(teko::list::empty(), arr_expr), x)
-        TExpr { kind = TCall { callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = result_elem }; line = 0; col = 0 }
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = result_elem }; line = 0; col = 0 }
     } else if last == "with_cap" {
         if c.args.len != 1 { return error { message = "teko::list::with_cap expects one argument (the initial capacity, a `u64`)" } }
         var n = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -893,7 +893,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
             n_typed = TExpr { kind = n.kind; type = cap_t; line = n.line; col = n.col }
         }
         var wargs = teko::list::push(teko::list::empty(), n_typed)
-        TExpr { kind = TCall { callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
     } else if last == "grow_inplace" {
         if c.args.len != 2 { return error { message = "teko::list::grow_inplace expects two arguments (a `ref []T`, item)" } }
         var r = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -916,7 +916,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
             }
         }
         var gargs = teko::list::push(teko::list::push(teko::list::empty(), r), item)
-        TExpr { kind = TCall { callee = c.callee; args = gargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = gargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
     } else {
         NotListBuiltin { }
     }
@@ -992,7 +992,7 @@ fn type_ptr_unwrap(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrO
     var xtypes = teko::list::push(teko::list::empty(), rt)
     var restype: Type = Ptr { inner = null }
     if owner == "uptr" { restype = Uptr { } }
-    TExpr { kind = TCall { callee = c.callee; args = uargs; call_ns = "teko::__ptr_unwrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = restype; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = uargs; call_ns = "teko::__ptr_unwrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = restype; line = 0; col = 0 }
 }
 
 /**
@@ -1031,7 +1031,7 @@ fn type_ptr_wrap(mc: parser::MethodCall, recv_t: Type, env: Env, table: TypeTabl
     var wargs = teko::list::push(teko::list::empty(), recv)
     var xtypes = teko::list::push(teko::list::empty(), rt)
     var wseg = teko::list::push(teko::list::empty(), parser::Segment { name = "__wrap" })
-    TExpr { kind = TCall { callee = parser::Path { segments = wseg }; args = wargs; call_ns = "teko::__ptr_wrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = Variant { members = union_normalize_null(members) }; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = wseg }; args = wargs; call_ns = "teko::__ptr_wrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = Variant { members = union_normalize_null(members) }; line = 0; col = 0 }
 }
 
 /**
@@ -1247,7 +1247,7 @@ fn svc_tail_block(e: TExpr): []TStatement {
 fn svc_panic_block(tname: str): []TStatement {
     var msg = svc_str_lit($"svc<{name_last_segment(tname)}>: no provider registered for the runtime key")
     var pseg = teko::list::push(teko::list::empty(), parser::Segment { name = "panic" })
-    var pcall = TExpr { kind = TCall { callee = parser::Path { segments = pseg }; args = teko::list::push(teko::list::empty(), msg); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+    var pcall = TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = pseg }; args = teko::list::push(teko::list::empty(), msg); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
     svc_tail_block(pcall)
 }
 
@@ -1820,7 +1820,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                         var bseg_m = parser::Segment { name = mc.method }
                         var bsegs: []parser::Segment = teko::list::push(teko::list::empty(), bseg_base)
                         bsegs = teko::list::push(bsegs, bseg_m)
-                        return TExpr { kind = TCall { callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot; type_args = teko::list::empty() }; type = bf.ret; line = 0; col = 0 }
+                        return TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot; type_args = teko::list::empty() }; type = bf.ret; line = 0; col = 0 }
                     }
                     error => { }   // method not in the base vtable → fall through to the direct desugar (a NEW own method reachable only when receiver is statically the base)
                 }
@@ -1905,7 +1905,7 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
     var seg_m = parser::Segment { name = mc.method }
     var isegs: []parser::Segment = teko::list::push(teko::list::empty(), seg_iface)
     isegs = teko::list::push(isegs, seg_m)
-    TExpr { kind = TCall { callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot; type_args = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot; type_args = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
 }
 
 /**
@@ -2024,6 +2024,174 @@ fn unresolved_builtin_qualifier_error(callee: parser::Path, name: str): error {
  * @return       the typed call expression, its type the callee's resolved return type
  * @throws       an unknown callee, an arity/type mismatch, or an uninferable generic type-param
  */
+/**
+ * overload_members_funcs — the `Func` signatures of every global function sharing exactly `(ns, name)`
+ * (the members of an overload set), extracted from `overload_func_bindings`. The `members` input to
+ * `overload_suffix_of`, used identically on the definition side and the call side.
+ *
+ * @param env   the SEALED typing environment
+ * @param ns    the exact declaring namespace
+ * @param name  the exact bare name
+ * @return      the members' function signatures, in ascending base position
+ * @since §9 A
+ */
+fn overload_members_funcs(env: Env, ns: str, name: str): []Func {
+    var bs = overload_func_bindings(env, ns, name)
+    var out: []Func = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= bs.len { break }
+        match bs[i].type { Func as f => out = teko::list::push(out, f); _ => { } }
+        i++
+    }
+    out
+}
+
+/**
+ * overload_suffix_for_binding — the §9 A symbol suffix for the CHOSEN call-site candidate `b`,
+ * computed over the members of `b`'s exact `(ns, name)` set. "" when `b` is a value/non-function or
+ * the sole declaration — keeping the historic unsuffixed symbol (ruling 6 / fixpoint).
+ *
+ * @param env  the SEALED typing environment
+ * @param b    the winning candidate binding (`select_overload`)
+ * @return     the suffix to stamp on the `TCall`, "" when `b` is not part of an overload set
+ * @since §9 A
+ */
+fn overload_suffix_for_binding(env: Env, b: ValBinding): str {
+    match b.type {
+        Func as f => overload_suffix_of(f, overload_members_funcs(env, b.ns, b.name))
+        _ => ""
+    }
+}
+
+/**
+ * build_overload_sig — reconstruct the resolved `Func` signature of a typed function DECLARATION from
+ * its parameter annotations, for the definition-side overload suffix. Resolves each parameter's
+ * syntactic type against `ns` with the SAME `resolve_type` the collector used, so the rebuilt
+ * parameter types are byte-equal to the collected binding's — which is what makes the definition
+ * symbol match the call symbol. `ret`/`n_required`/`defaults` are placeholders (the suffix ignores
+ * them). Only ever reached for a real overload set (`overload_suffix_for_decl` gates on
+ * `env_is_overloaded` first).
+ *
+ * @param tf     the typed function whose signature is rebuilt
+ * @param ns     the declaring namespace to resolve parameter types against
+ * @param table  the resolved type table
+ * @return       the reconstructed signature, or an error if a parameter type does not resolve
+ * @throws       when a parameter's type annotation fails to resolve under `ns`
+ * @since §9 A
+ */
+fn build_overload_sig(tf: TFunction, ns: str, table: TypeTable): Func | error {
+    var ptypes: []Type = teko::list::empty()
+    var pnames: []str = teko::list::empty()
+    var variadic = false
+    var i: u64 = 0
+    loop {
+        if i >= tf.params.len { break }
+        var pt = match resolve_type(tf.params[i].type_ann, table, ns) { Type as t => t; error as e => return e }
+        ptypes = teko::list::push(ptypes, pt)
+        pnames = teko::list::push(pnames, tf.params[i].name)
+        if tf.params[i].is_params { variadic = true }
+        i++
+    }
+    Func { params = ptypes; ret = tf.return_type; variadic = variadic; param_names = pnames; n_required = 0; defaults = teko::list::empty() }
+}
+
+/**
+ * overload_suffix_for_decl — the §9 A symbol suffix for a function DEFINITION `tf` declared as
+ * `(ns, name)`. "" unless `(ns, name)` is a real overload set (`env_is_overloaded`) — so every
+ * function in a program with no overload set keeps its historic unsuffixed symbol byte-for-byte
+ * (ruling 6 / fixpoint). Otherwise reconstructs `tf`'s signature and mangles it over the set's members,
+ * exactly as the call side mangles the chosen candidate, so definition and call agree.
+ *
+ * @param env    the SEALED typing environment
+ * @param ns     the function's declaring namespace
+ * @param name   the function's bare name
+ * @param tf     the typed function
+ * @param table  the resolved type table
+ * @return       the suffix to stamp on the `TFunction`, "" when not part of an overload set
+ * @since §9 A
+ */
+fn overload_suffix_for_decl(env: Env, ns: str, name: str, tf: TFunction, table: TypeTable): str {
+    if !env_is_overloaded(env, ns, name) { return "" }
+    match build_overload_sig(tf, ns, table) {
+        Func as f => overload_suffix_of(f, overload_members_funcs(env, ns, name))
+        error => ""
+    }
+}
+
+/**
+ * select_overload — choose exactly ONE overload of the call `c` from the candidate bindings `cands`,
+ * at the call site, in compile time (rulings 2/3). Each candidate that is a function is scored: its
+ * call SHAPE must bind (`resolve_defargs`/`pack_variadic_args` — this is where a named/default argument
+ * discriminates by PARAMETER NAME, ruling 5), and every argument must FIT its parameter
+ * (`type_value_expected`, the same rule an ordinary call applies, so a bare literal may adopt a narrow
+ * parameter). Survivors split into two TIERS: EXACT (every argument's plain type is `type_eq` to its
+ * parameter) and WIDENED (fits only by implicit widening / literal adoption). An exact-tier singleton
+ * wins outright; otherwise the highest non-empty tier decides, and more than one there is a call-site
+ * ambiguity (ruling 3). A one-candidate set is never scored — the caller only reaches here for a real
+ * overload set.
+ *
+ * @param cands  the candidate bindings (`lookup_call_candidates`)
+ * @param c      the untyped call node (its args + arg-names drive the shape/type scoring)
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the chosen binding, or a located ambiguity / no-match error
+ * @throws       when 0 candidates fit, or >1 fit with no unique best
+ * @since §9 A
+ */
+fn select_overload(cands: []ValBinding, c: parser::Call, env: Env, table: TypeTable): ValBinding | error {
+    var name = c.callee.segments[c.callee.segments.len - 1].name
+    var exacts: []ValBinding = teko::list::empty()
+    var widens: []ValBinding = teko::list::empty()
+    var ci: u64 = 0
+    loop {
+        if ci >= cands.len { break }
+        var cb = cands[ci]
+        ci++
+        match cb.type {
+            Func as f => {
+                var shaped = if f.variadic { pack_variadic_args(f, c.args, env, table) } else { resolve_defargs(f, c.args, c.arg_names) }
+                match shaped {
+                    []parser::Expr as dargs => {
+                        if dargs.len == f.params.len {
+                            var fits = true
+                            var exact = true
+                            var j: u64 = 0
+                            loop {
+                                if j >= dargs.len { break }
+                                match type_expr(dargs[j], env, table) {
+                                    TExpr as plain => {
+                                        if type_is_void(plain.type) { fits = false; break }
+                                        match type_value_expected(dargs[j], f.params[j], env, table) {
+                                            TExpr as fa => {
+                                                if !assignable_to(fa.type, f.params[j], table) { fits = false; break }
+                                                if !type_eq(plain.type, f.params[j]) { exact = false }
+                                            }
+                                            error => { fits = false; break }
+                                        }
+                                    }
+                                    error => { fits = false; break }
+                                }
+                                j++
+                            }
+                            if fits {
+                                if exact { exacts = teko::list::push(exacts, cb) } else { widens = teko::list::push(widens, cb) }
+                            }
+                        }
+                    }
+                    error => { }
+                }
+            }
+            _ => { }
+        }
+    }
+    if exacts.len == 1 { return exacts[0] }
+    if exacts.len >= 2 { return error { message = $"ambiguous call to overloaded '{name}': {exacts.len} candidates match with an exact signature — disambiguate with an explicit cast (e.g. `x to T`)" } }
+    if widens.len == 1 { return widens[0] }
+    if widens.len >= 2 { return error { message = $"ambiguous call to overloaded '{name}': {widens.len} candidates match by implicit widening — disambiguate with an explicit cast (e.g. `x to T`)" } }
+    error { message = $"no matching overload for '{name}' with the given argument types" }
+}
+
 fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
     // Explicit call-site type-args live in TWO INDEPENDENT positions the parser recorded separately, so
     // there is no guessing:
@@ -2081,7 +2249,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             var ok = match a.type { Str => true; Error => true; _ => false }
             if !ok { return error { message = "panic's argument must be an `error` or a `str`" } }
             var pargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
         }
         if name == "exit" {
             if c.args.len != 1 { return error { message = "exit expects one argument (an integer status code)" } }
@@ -2089,7 +2257,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             var ok = match a.type { Prim as p => prim_is_int(p.kind); _ => false }
             if !ok { return error { message = "exit's argument must be an integer status code" } }
             var eargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
         }
     }
     var resolved_ns = match lookup_call(env, c.callee) { Type => call_ns(env, c.callee); error => "" }
@@ -2102,6 +2270,13 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             }
             error => return error { message = $"unknown function: {name}" }
         }
+    }
+    var ov_suffix = ""
+    if in_scope && env_is_overloaded(env, resolved_ns, name) {
+        var wb = match select_overload(lookup_call_candidates(env, c.callee), c, env, table) { ValBinding as b => b; error as e => return e }
+        ft = wb.type
+        resolved_ns = wb.ns
+        ov_suffix = overload_suffix_for_binding(env, wb)
     }
     // (W10b.CLASS residual — intern visibility) a STATIC call (`ClassName::method(…)`) is
     // reachable under the SAME rule as an instance dot-call — check it here too, routed through
@@ -2188,7 +2363,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                         }
                         vi++
                     }
-                    return TExpr { kind = TCall { callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                    return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes }; type = subst_type(f.ret, s); line = 0; col = 0 }
                 }
                 var rk = 0
                 loop {
@@ -2203,7 +2378,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                     s = match unify(f.params[gi], targs[gi].type, s, table) { Subst as x => x; error as e => return e }
                     gi++
                 }
-                return TExpr { kind = TCall { callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = subst_type(f.ret, s); line = 0; col = 0 }
             }
             // NON-generic: each argument must WIDEN into the parameter's type (B.14 case→variant, T→T?)
             // OR be a fitting literal that adopts it (C6) — same rule as binding/return/assign.
@@ -2245,7 +2420,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             // LOCAL (resolved_ns == "" — only define_fn sets a namespace). It is a `tk_closure` VALUE,
             // so codegen calls through `((R(*)(A,B))f.fn)(args)` using the Func type for the cast.
             var is_closure = in_scope && resolved_ns.len == 0
-            TExpr { kind = TCall { callee = c.callee; args = args; call_ns = resolved_ns; is_closure_call = is_closure; callee_type = ft; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
+            TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = args; call_ns = resolved_ns; is_closure_call = is_closure; callee_type = ft; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
         }
         _ => error { message = $"not a function: {name}" }
     }
@@ -5965,7 +6140,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         var no_body: []TStatement = teko::list::empty()
-        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
     var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
@@ -5999,7 +6174,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     } else {
         ret_stmts
     }
-    var tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -6248,7 +6423,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         var no_body: []TStatement = teko::list::empty()
-        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
     var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: each `return e` matches `ret`
@@ -6257,7 +6432,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
     var lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())   // W5-cf-2: loop labels resolve + are unique
     if lc.failed { return error { message = lc.message } }
     var ret_stmts = retype_union_returns(tb.stmts, ret, table)
-    var tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -6325,7 +6500,8 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
             TFunction as x => x
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
-        var stamped = TFunction { name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size }
+        var mov = overload_suffix_for_decl(env, method_ns, mf.name, mf, table)
+        var stamped = TFunction { overload_suffix = mov; name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size }
         out = teko::list::push(out, stamped)
         mi++
     }
@@ -6419,7 +6595,8 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable): TItem | error {
         parser::Function as f => {
             var tf = match type_function(f, fenv, table) { TFunction as x => x; error as e => return e }
             // (#49) stamp the declaring namespace from the parsed item so codegen mangles the C name.
-            TFunction { name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib; has_arena_size = tf.has_arena_size; arena_size = tf.arena_size }
+            var ov = overload_suffix_for_decl(env, item.namespace, tf.name, tf, table)
+            TFunction { overload_suffix = ov; name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib; has_arena_size = tf.has_arena_size; arena_size = tf.arena_size }
         }
         parser::TypeDecl as td => {
             // (#109 W3) CANONICALIZE the decl name to "ns::Name" so codegen emits a namespace-distinct

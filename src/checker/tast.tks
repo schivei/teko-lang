@@ -36,7 +36,25 @@ pub type TBinary = struct { op: lexer::TokenKind; left: TExpr; right: TExpr }
 pub type TUnary = struct { op: lexer::TokenKind; operand: TExpr }
 pub type TCmpTerm = struct { op: lexer::TokenKind; operand: TExpr }
 pub type TCompare = struct { first: TExpr; rest: []TCmpTerm }
-pub type TCall = struct { callee: parser::Path; args: []TExpr; call_ns: str; is_closure_call: bool; callee_type: Type; is_iface_dispatch: bool; iface_slot: u32; type_args: []Type }   // type_args: explicit call-site generic args (RESOLVED concrete types, in signature-appearance order), empty for a bare/inferred call — the monomorph pass binds them instead of inferring (explicit wins). call_ns: resolved target's namespace ("" = builtin/local → no mangle) (#41/#49). (W10a) is_closure_call = the callee is a LOCAL of function type (a `tk_closure` VALUE) → codegen calls through `((R(*)(A,B))f.fn)(args)` using callee_type (the Func) for the cast; false (callee_type unused) for a direct/builtin call. (W10b.D3) is_iface_dispatch = a DYNAMIC contract-method call: callee = [<Iface>, <method>], args[0] = the receiver, callee_type = the resolved interface-method Func (receiver param typed Named{Iface}), iface_slot = the method's index in the interface's effective-method list (== its vtable slot).
+/**
+ * TCall — a typed call node. `type_args` are explicit call-site generic args (RESOLVED concrete
+ * types, in signature-appearance order), empty for a bare/inferred call — the monomorph pass binds
+ * them instead of inferring (explicit wins). `call_ns` is the resolved target's namespace ("" =
+ * builtin/local → no mangle) (#41/#49). (W10a) `is_closure_call` = the callee is a LOCAL of function
+ * type (a `tk_closure` VALUE) → codegen calls through `((R(*)(A,B))f.fn)(args)` using `callee_type`
+ * (the Func) for the cast; false (callee_type unused) for a direct/builtin call. (W10b.D3)
+ * `is_iface_dispatch` = a DYNAMIC contract-method call: callee = [<Iface>, <method>], args[0] = the
+ * receiver, callee_type = the resolved interface-method Func (receiver param typed Named{Iface}),
+ * iface_slot = the method's index in the interface's effective-method list (== its vtable slot).
+ * `overload_suffix` (§9 A) is the signature mangle that distinguishes this member of a FUNCTION
+ * OVERLOAD SET from its siblings in the linker-symbol space: the suffix of the candidate CHOSEN by
+ * `select_overload` for this call. Empty for the sole declaration of a `(namespace, name)` — which
+ * keeps its historic unsuffixed symbol byte-for-byte, so a program with no overload set reproduces the
+ * pre-§9-A output exactly (ruling 6 / fixpoint). Both backends append it verbatim after the
+ * `(ns, name)` mangle at the call (`cb_fn_name` / `mangle_fn_symbol`), so the call agrees with the
+ * chosen definition by construction.
+ */
+pub type TCall = struct { callee: parser::Path; args: []TExpr; call_ns: str; is_closure_call: bool; callee_type: Type; is_iface_dispatch: bool; iface_slot: u32; type_args: []Type; overload_suffix: str }
 
 // control-flow expressions carry TYPED blocks/arms (B.20/B.15). The `pattern` stays
 // syntactic (it binds; pattern typing itself is C7a); `guard` is valid iff has_when.
@@ -196,6 +214,15 @@ pub type TFunction = struct {
     has_arena_size: bool
     /** The `#arena_size(N)` byte count itself (valid iff `has_arena_size`; `0` otherwise). */
     arena_size: u64
+    /**
+     * overload_suffix — the signature mangle that distinguishes this member of a FUNCTION OVERLOAD
+     * SET from its siblings in the linker-symbol space (§9 A). Empty for the sole declaration of a
+     * `(namespace, name)` — which keeps its historic unsuffixed symbol byte-for-byte, so a program
+     * with no overload set reproduces the pre-§9-A output exactly (ruling 6 / fixpoint). Both
+     * backends append it verbatim after the `(ns, name)` mangle (`cb_fn_name` / `mangle_fn_symbol`),
+     * so definition, prototype, call, closure literal and `.tsym` all agree by construction.
+     */
+    overload_suffix: str
 }
 /**
  * TConstDecl — a typed module-level constant (#594): the resolved value type and the typed,

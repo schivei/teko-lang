@@ -512,17 +512,17 @@ fn gfn(name: str, param_ann: parser::TypeExpr, ret: Type, body: []TStatement): T
     var tcs: []parser::ConstraintExpr = teko::list::push(teko::list::empty(), parser::NoConstraint { })
     var p = parser::Param { name = "x"; has_type = true; type_ann = param_ann; is_params = false; has_default = false; default_expr = e_num(0) }
     var params = teko::list::push(teko::list::empty(), p)
-    TFunction { name = name; type_params = tps; type_constraints = tcs; params = params; return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+    TFunction { overload_suffix = ""; name = name; type_params = tps; type_constraints = tcs; params = params; return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
 }
 // a non-generic TFunction with a hand-built body.
 fn plainfn(name: str, ret: Type, body: []TStatement): TFunction {
-    TFunction { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+    TFunction { overload_suffix = ""; name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
 }
 // a typed call `NAME(arg)` with result type `rt`.
 fn tcall1(name: str, arg: TExpr, rt: Type): TExpr {
     var callee = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
     var args = teko::list::push(teko::list::empty(), arg)
-    TExpr { kind = TCall { callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = rt; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty() }; type = rt; line = 0; col = 0 }
 }
 fn texpr_stmt(e: TExpr): TStatement { TExprStmt { expr = e } }
 fn treturn(e: TExpr): TStatement { TReturn { has_value = true; value = e } }
@@ -1910,4 +1910,38 @@ fn typechecks_src(src: str): bool {
 fn var_binding_type_checks_end_to_end() {
     teko::assert::is_true(typechecks_src("pub fn f(): i32 { var x = 1; x = 2; return x }"))
     teko::assert::is_true(typechecks_src("pub fn f(): i32 { var x = 1; ref r = x; return r }"))
+}
+
+/**
+ * one_param_func — a single-parameter `Func` type over `pt`, a synthetic overload-set member for the
+ * `env_is_overloaded` gate test (the gate reads only that the binding IS a function, its namespace,
+ * and its name — the parameter type is immaterial to it).
+ *
+ * @param pt  the sole parameter type
+ * @return    `Func { (pt): i64 }`
+ */
+fn one_param_func(pt: Type): Type {
+    var ps: []Type = teko::list::push(teko::list::empty(), pt)
+    Func { params = ps; ret = i64t(); variadic = false; param_names = []; n_required = 1 to u64; defaults = [] }
+}
+
+/**
+ * overload_gate_keys_on_ns_and_name — the §9 A fixpoint-safety invariant: `env_is_overloaded` keys on
+ * the EXACT `(namespace, name)` pair, so two same-named functions in DIFFERENT namespaces (the
+ * cross-namespace `div` twins) are NOT an overload set, while two in the SAME namespace are. A bare-name
+ * gate would falsely suffix ~40 corpus functions and break the fixpoint (design §5).
+ */
+#test
+fn overload_gate_keys_on_ns_and_name() {
+    var e0 = env_empty()
+    var e1 = define_fn(e0, "area", one_param_func(i64t()), "ov")
+    var e2 = define_fn(e1, "area", one_param_func(i32t()), "ov")
+    var e3 = define_fn(e2, "div", one_param_func(i64t()), "teko::numeric::dec")
+    var e4 = define_fn(e3, "div", one_param_func(i64t()), "teko::numeric::bigint")
+    var sealed = seal(e4)
+    teko::assert::is_true(env_is_overloaded(sealed, "ov", "area"))
+    teko::assert::is_false(env_is_overloaded(sealed, "teko::numeric::dec", "div"))
+    teko::assert::is_false(env_is_overloaded(sealed, "ov", "missing"))
+    teko::assert::is_true(overload_func_bindings(sealed, "ov", "area").len == 2 to u64)
+    teko::assert::is_true(overload_func_bindings(sealed, "teko::numeric::dec", "div").len == 1 to u64)
 }

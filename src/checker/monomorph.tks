@@ -499,7 +499,7 @@ fn rekey_struct_constraint_dispatch(cl: TCall, args: []TExpr, table: TypeTable):
     if !is_struct_named(table, recv) { return cl }
     var method = cl.callee.segments[cl.callee.segments.len - 1].name
     var direct = struct_dispatch_callee(recv, method)
-    TCall { callee = direct; args = cl.args; call_ns = recv; is_closure_call = false; callee_type = cl.callee_type; is_iface_dispatch = false; iface_slot = 0; type_args = cl.type_args }
+    TCall { overload_suffix = cl.overload_suffix; callee = direct; args = cl.args; call_ns = recv; is_closure_call = false; callee_type = cl.callee_type; is_iface_dispatch = false; iface_slot = 0; type_args = cl.type_args }
 }
 
 /**
@@ -535,7 +535,7 @@ fn rekey_iface_dispatch(cl: TCall, args: []TExpr, table: TypeTable): TCall {
     var owner = match conformed_owner_iface(recv_class, method, table) { str as o => o; null => return cl }
     var slot = match iface_method_slot(owner, method, table) { u32 as sv => sv; null => return cl }
     var newcallee = rewrite_iface_segment(cl.callee, owner)
-    TCall { callee = newcallee; args = cl.args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = slot; type_args = cl.type_args }
+    TCall { overload_suffix = cl.overload_suffix; callee = newcallee; args = cl.args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = slot; type_args = cl.type_args }
 }
 
 /**
@@ -766,7 +766,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []TItem, table: TypeTable): WExpr | err
                         var composed = compose_method_subst(isub, msub)
                         var newcalleeM = rewrite_last_segment(cl.callee, mmangled)
                         var recM = MonoInst { fn_name = bare; mangled = mmangled; s = composed; owner_ns = cl.call_ns }
-                        return WExpr { expr = TExpr { kind = TCall { callee = newcalleeM; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, recM) }
+                        return WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcalleeM; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, recM) }
                     }
                     // The instantiation Subst: EXPLICIT call-site type-args (cl.type_args) WIN over
                     // inference when present; otherwise infer from the rewritten arg types (mono_call_subst).
@@ -775,10 +775,10 @@ fn mono_texpr(e: TExpr, s: Subst, items: []TItem, table: TypeTable): WExpr | err
                     // rewrite the callee's LAST segment to the mangled name (keep the leading segments + call_ns).
                     var newcallee = rewrite_last_segment(cl.callee, mangled)
                     var rec = MonoInst { fn_name = bare; mangled = mangled; s = sub; owner_ns = "" }
-                    WExpr { expr = TExpr { kind = TCall { callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
+                    WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
                 }
                 null => {
-                    var passthrough = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }
+                    var passthrough = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }
                     var rekeyed = rekey_iface_dispatch(passthrough, args, table)
                     WExpr { expr = TExpr { kind = rekeyed; type = nt; line = e.line; col = e.col }; insts = acc }
                 }
@@ -1191,7 +1191,7 @@ fn stamp_one_instance_method(inst_name: str, tmpl: TFunction, s: Subst, items: [
     var wb = match mono_block(tmpl.body, s, items, table) { WBlock as w => w; error as e => return e }
     var no_tps: []str = teko::list::empty()
     var no_tcs: []parser::ConstraintExpr = teko::list::empty()
-    var sf = TFunction { name = tmpl.name; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(tmpl.return_type, s); body = wb.stmts; vis = tmpl.vis; has_doc = tmpl.has_doc; doc = tmpl.doc; namespace = inst_name; file = tmpl.file; line = tmpl.line; col = tmpl.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = tmpl.has_arena_size; arena_size = tmpl.arena_size }
+    var sf = TFunction { overload_suffix = ""; name = tmpl.name; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(tmpl.return_type, s); body = wb.stmts; vis = tmpl.vis; has_doc = tmpl.has_doc; doc = tmpl.doc; namespace = inst_name; file = tmpl.file; line = tmpl.line; col = tmpl.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = tmpl.has_arena_size; arena_size = tmpl.arena_size }
     WFn { func = sf; insts = wb.insts }
 }
 
@@ -1384,7 +1384,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
                 var is_droppable = f.type_params.len > 0 || is_generic_template_method(f, table)
                 if !is_droppable {
                     var wb = match mono_block(f.body, empty_s, prog.items, table) { WBlock as w => w; error as e => return e }
-                    var nf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+                    var nf = TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
                     kept = teko::list::push(kept, nf)
                     queue = mono_inst_concat(queue, wb.insts)
                 }
@@ -1444,7 +1444,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         // namespace (`owner_ns`, `Gen__g__i64`) so its symbol matches the call site's `call_ns`; every
         // other stamp keeps the template's own namespace (owner_ns "" → gf.namespace, unchanged).
         var stamp_ns = if inst.owner_ns.len > 0 { inst.owner_ns } else { gf.namespace }
-        var sf = TFunction { name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = stamp_ns; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size }
+        var sf = TFunction { overload_suffix = ""; name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = stamp_ns; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size }
         kept = teko::list::push(kept, sf)
     }
 

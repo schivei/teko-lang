@@ -928,15 +928,20 @@ const TEKO_USER_PREFIX: str = "teko_"
  * `main` is the one symbol deliberately kept un-prefixed regardless of `flat`, and it never
  * comes through here: `lower_virtual_main` builds it with `new_func("main", …)` directly.
  *
- * @param ns    the declaring namespace ("" for a lifted lambda)
- * @param name  the bare function name
- * @param flat  strip `TEKO_USER_PREFIX` (the static/shared-archive carve-out); default `false`
- * @return      the emitted symbol
+ * @param ns      the declaring namespace ("" for a lifted lambda)
+ * @param name    the bare function name
+ * @param flat    strip `TEKO_USER_PREFIX` (the static/shared-archive carve-out); default `false`
+ * @param suffix  the §9 A overload suffix appended verbatim after the bare name ("" for the sole
+ *                declaration of a `(ns, name)` — the whole non-overloaded corpus — so the historic
+ *                symbol is reproduced byte-for-byte, keeping C↔native mangle parity)
+ * @return        the emitted symbol
  */
-pub fn mangle_fn_symbol(ns: str, name: str, flat: bool = false): str {
+pub fn mangle_fn_symbol(ns: str, name: str, flat: bool = false, suffix: str = ""): str {
     var sym = if flat { "" } else { TEKO_USER_PREFIX }
     if ns.len != 0 { sym = teko::str::concat(sym, mangle_ns(ns), "__") }
-    teko::str::concat(sym, escape_c_keyword(name))
+    sym = teko::str::concat(sym, escape_c_keyword(name))
+    if suffix.len != 0 { sym = teko::str::concat(sym, suffix) }
+    sym
 }
 
 /** mangle_ns — a namespace with every `:` byte rewritten to `_`. */
@@ -5274,7 +5279,7 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false): str
     }
     match find_extern_symbol(externs, c.call_ns, last) {
         str as foreign => foreign
-        null => mangle_fn_symbol(c.call_ns, last, flat)
+        null => mangle_fn_symbol(c.call_ns, last, flat, c.overload_suffix)
     }
 }
 
@@ -15155,7 +15160,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
     var fat_ret = is_fat_type(f.return_type)
     var ptypes = param_ltypes(f.params, enums, table)
     var all_ptypes = if fat_ret { teko::list::push(ptypes, LType::Ptr) } else { ptypes }
-    var fn0 = new_func(mangle_fn_symbol(f.namespace, f.name, flat_symbols), all_ptypes.len to u32, all_ptypes, ltype_of(f.return_type, enums))
+    var fn0 = new_func(mangle_fn_symbol(f.namespace, f.name, flat_symbols, f.overload_suffix), all_ptypes.len to u32, all_ptypes, ltype_of(f.return_type, enums))
     var bound = bind_fn_params(fn0, f.params, f.line, f.col, table)
     var slot_reg = bound.next_reg
     var with_slot = if fat_ret { bind_ret_len_slot(bound, f.line, f.col) } else { bound }

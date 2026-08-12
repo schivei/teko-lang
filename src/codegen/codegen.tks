@@ -552,12 +552,15 @@ fn mangle_type_name(buf: []byte, namespace: str, name: str): []byte {
  * bare name. Definition, prototype and resolved call all go through here, so they agree by
  * construction; `main` is the one deliberate exception and is emitted literally, never through this.
  *
- * @param buf   the emit buffer
- * @param ns    the function's declaring namespace ("" for a lifted lambda)
- * @param name  the function's bare name
- * @return      the buffer with the C symbol appended
+ * @param buf     the emit buffer
+ * @param ns      the function's declaring namespace ("" for a lifted lambda)
+ * @param name    the function's bare name
+ * @param suffix  the §9 A overload suffix appended verbatim after the bare name ("" for the sole
+ *                declaration of a `(ns, name)`, which is the whole non-overloaded corpus — so the
+ *                historic symbol is reproduced byte-for-byte; the checker guarantees it is C-legal)
+ * @return        the buffer with the C symbol appended
  */
-fn cb_fn_name(buf: []byte, ns: str, name: str): []byte {
+fn cb_fn_name(buf: []byte, ns: str, name: str, suffix: str = ""): []byte {
     var out = cb(buf, TEKO_USER_PREFIX)
     if ns.len != 0 {
         var i = 0
@@ -568,7 +571,9 @@ fn cb_fn_name(buf: []byte, ns: str, name: str): []byte {
         }
         out = cb(out, "__")
     }
-    cb_ident(out, name)
+    out = cb_ident(out, name)
+    if suffix.len != 0 { out = cb(out, suffix) }
+    out
 }
 
 /**
@@ -4528,7 +4533,7 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
             // (#49) a resolved USER call -> the SAME namespace-mangled C name emit_function_sig gives
             // the definition (teko::checker::type_eq -> teko__checker__type_eq), so def + call agree
             // and same-named functions across namespaces never collide.
-            out = cb_fn_name(out, c.call_ns, p.segments[p.segments.len - 1].name)
+            out = cb_fn_name(out, c.call_ns, p.segments[p.segments.len - 1].name, c.overload_suffix)
         }
     } else {
         // No resolved namespace (a builtin, or a name not carried) -> the bare
@@ -9580,7 +9585,7 @@ fn emit_function_sig(buf: []byte, prog: CgProg, f: checker::TFunction): []byte |
     if f.is_extern {
         out = cb(out, f.c_symbol)   // C7.1a: the raw foreign C symbol (NO namespace mangling)
     } else {
-        out = cb_fn_name(out, f.namespace, f.name)   // (#49) namespace-mangled C name (def + prototype agree)
+        out = cb_fn_name(out, f.namespace, f.name, f.overload_suffix)
     }
     out = cb(out, "(")
     if f.params.len == 0 {
@@ -11302,7 +11307,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         match prog.items[i] {
             checker::TFunction as f => {
                 var nb = cg_lift_block(f.body, acc)
-                items = teko::list::push(items, checker::TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size })
+                items = teko::list::push(items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size })
             }
             checker::TStatement as ts => {
                 var ns = cg_lift_stmt(ts, acc)
@@ -11389,7 +11394,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
                 var ps: []parser::Param = teko::list::empty()
                 var pi = 0
                 loop { if pi >= lam.params.len { break }; ps = teko::list::push(ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }); pi++ }
-                newfns = teko::list::push(newfns, checker::TFunction { name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 })
+                newfns = teko::list::push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 })
             } else {
                 newlams = teko::list::push(newlams, stamped)
             }
@@ -11409,7 +11414,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
             var args: []checker::TExpr = teko::list::empty()
             var i = 0
             loop { if i >= cl.args.len { break }; args = teko::list::push(args, cg_lift_expr(cl.args[i], acc)); i++ }
-            checker::TExpr { kind = checker::TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = e.type; line = e.line; col = e.col }
+            checker::TExpr { kind = checker::TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = e.type; line = e.line; col = e.col }
         }
         checker::TIfExpr as f => checker::TExpr { kind = checker::TIfExpr { cond = cg_lift_expr(f.cond, acc); then_blk = cg_lift_block(f.then_blk, acc); has_else = f.has_else; else_blk = cg_lift_block(f.else_blk, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TMatchExpr as m => {
@@ -12529,7 +12534,7 @@ fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool): []by
 fn emit_test_captured_call(buf: []byte, f: checker::TFunction): []byte {
     var label = test_label_of(f)
     var b = cb(buf, "    { tk_test_outcome teko_journal_rv = tk_test_run(&")
-    b = cb_fn_name(b, f.namespace, f.name)
+    b = cb_fn_name(b, f.namespace, f.name, f.overload_suffix)
     b = cb(b, ");\n    if (teko_journal_rv.how == TK_TEST_OK) { ")
     b = cb_journal_call1(b, "note_test_ok", label)
     b = cb(b, "    } else if (teko_journal_rv.how == TK_TEST_EXITED) { ")
@@ -12671,7 +12676,7 @@ fn tk_emit_tsym(prog: checker::TProgram): str {
         if i >= prog.items.len { break }
         match prog.items[i] {
             checker::TFunction as f => {
-                b = cb_fn_name(b, f.namespace, f.name)   // the mangled C symbol (matches the definition)
+                b = cb_fn_name(b, f.namespace, f.name, f.overload_suffix)
                 b = cb(b, "\t")
                 if f.namespace.len != 0 {
                     b = cb(b, f.namespace)

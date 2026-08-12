@@ -2318,6 +2318,135 @@ pub fn type_render(t: Type): str {
     }
 }
 
+/**
+ * mangle_type_for_overload — a DETERMINISTIC, C-legal (`[A-Za-z0-9_]`) token for one parameter type,
+ * the atom of a §9 A overload symbol suffix. A prim renders as its spelling (`i64`, `usize`), a
+ * composite as an unambiguous tag prefix + its element mangle (`S` slice, `R` reference, `N` named,
+ * `V` variant, `F` func). Independent of declaration order and injective over the type shapes an
+ * overload set actually distinguishes, so two members of a set never collide and the pre-§9-A
+ * single-declaration symbol never appears (see `overload_suffix_of`).
+ *
+ * @param t  the parameter type to mangle
+ * @return   a C-legal token identifying `t` for the overload suffix
+ * @since §9 A
+ */
+fn mangle_type_for_overload(t: Type): str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Byte => "byte"
+        Char => "char"
+        Str => "str"
+        Error => "error"
+        Void => "void"
+        Named as n => "N" ~ name_last_segment(n.name)
+        Slice as s => "S" ~ mangle_type_for_overload(s.element)
+        Variant as v => "V" ~ overload_variant_mangle(v.members)
+        Func as f => "F" ~ overload_types_mangle(f)
+        Ptr => "ptr"
+        Uptr => "uptr"
+        Reference as r => "R" ~ mangle_type_for_overload(r.inner)
+        Null => "null"
+    }
+}
+
+/**
+ * overload_variant_mangle — the ordered `_`-joined mangle of a variant's member types, the body of a
+ * `V`-tagged parameter mangle. Order follows the variant's canonical member order (the same order the
+ * backends read), so the token is stable across builds.
+ *
+ * @param members  the variant's member types, canonical order
+ * @return         the `_`-joined per-member mangle
+ * @since §9 A
+ */
+fn overload_variant_mangle(members: []Type): str {
+    var s = ""
+    var i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        s = s ~ "_" ~ mangle_type_for_overload(members[i])
+        i++
+    }
+    s
+}
+
+/**
+ * overload_types_mangle — the `_`-joined mangle of a function's parameter types, in signature order,
+ * with a trailing `_variadic` when the last parameter is a `params` tail. This is the part of the
+ * overload suffix that distinguishes members whose parameter TYPES differ (the common case).
+ *
+ * @param f  the function signature
+ * @return   the `_`-prefixed per-parameter type mangle (empty for a zero-parameter signature)
+ * @since §9 A
+ */
+fn overload_types_mangle(f: Func): str {
+    var s = ""
+    var i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        s = s ~ "_" ~ mangle_type_for_overload(f.params[i])
+        i++
+    }
+    if f.variadic { s = s ~ "_variadic" }
+    s
+}
+
+/**
+ * overload_names_mangle — the `_`-joined mangle of a function's parameter NAMES, in signature order.
+ * Appended to the suffix ONLY when two members of a set share identical parameter TYPES and can be
+ * told apart solely by a parameter name under defaults/named-call (ruling 5 / §9 C) — see
+ * `overload_suffix_of`. Teko parameter names are already `[A-Za-z0-9_]`, so no sanitizing is needed.
+ *
+ * @param f  the function signature
+ * @return   the `_`-prefixed per-parameter name mangle
+ * @since §9 A
+ */
+fn overload_names_mangle(f: Func): str {
+    var s = ""
+    var i: u64 = 0
+    loop {
+        if i >= f.param_names.len { break }
+        s = s ~ "_" ~ f.param_names[i]
+        i++
+    }
+    s
+}
+
+/**
+ * overload_suffix_of — the linker-symbol suffix that distinguishes signature `this` from its siblings
+ * in the overload set `members` (§9 A). THE SUFFIX GRAMMAR, fixed here and covered by fixture:
+ *
+ *     ""                                            when `members` is not an overload set (< 2)
+ *     "__ov" ~ overload_types_mangle(this)          when `this`'s parameter TYPES are unique in the set
+ *     "__ov" ~ types ~ "_nm" ~ overload_names_mangle(this)
+ *                                                   when another member shares `this`'s type mangle,
+ *                                                   so parameter NAMES must break the tie (ruling 5)
+ *
+ * Deterministic and independent of declaration order (a pure function of the signature and the set's
+ * type-mangle multiset), and injective over distinguishable members — the two invariants the fixpoint
+ * needs. Returns "" for a one-member set, which keeps the sole declaration's historic unsuffixed
+ * symbol byte-for-byte (ruling 6). Both call side (the chosen candidate) and definition side (the
+ * function itself) call this over the SAME `members`, so the two symbols agree by construction.
+ *
+ * @param this     the signature being mangled (a member of `members`, or the sole declaration)
+ * @param members  every function sharing this member's exact `(ns, name)` (`overload_func_bindings`)
+ * @return         the suffix to append after the `(ns, name)` symbol mangle, "" when not overloaded
+ * @since §9 A
+ */
+pub fn overload_suffix_of(this: Func, members: []Func): str {
+    if members.len < 2 { return "" }
+    var tm = overload_types_mangle(this)
+    var same: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if overload_types_mangle(members[i]) == tm { same = same + 1 }
+        i++
+    }
+    var s = "__ov" ~ tm
+    if same >= 2 { s = s ~ "_nm" ~ overload_names_mangle(this) }
+    s
+}
+
 // (C1.8) render a function type "(p0, p1, …): ret" — mirror of the FUNC branch of
 // resolve.c::tk_type_render (M.3, show what we know). `ret` may be void.
 fn render_func(f: Func): str {

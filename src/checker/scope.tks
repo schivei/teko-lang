@@ -435,6 +435,107 @@ fn call_ns(env: Env, callee: parser::Path): str {
 }
 
 /**
+ * binding_is_func — is `b` bound to a FUNCTION type? The overload machinery counts only function
+ * bindings, never a value/const of some unrelated type that happens to share a name.
+ *
+ * @param b  the value binding to classify
+ * @return   true iff `b.type` is the `Func` variant
+ * @since §9 A
+ */
+fn binding_is_func(b: ValBinding): bool {
+    match b.type { Func => true; _ => false }
+}
+
+/**
+ * lookup_call_candidates — EVERY value binding that resolves the callee `callee` under the same
+ * namespace rules as `lookup_call` (`call_binding_matches`): the sealed globals first (ascending base
+ * position, resolved through the hash index), then the per-scope locals (ascending declaration index).
+ * `lookup_call` returns only the highest-position match — correct for a single declaration but hiding
+ * an overload SET; this returns the whole set so `select_overload` can pick by argument types.
+ *
+ * A single-declaration name yields a one-element list, on which the caller never runs scoring — the
+ * non-overloaded path stays byte-identical (ruling 6 / fixpoint).
+ *
+ * @param env     the typing environment (local bindings + sealed globals + current namespace)
+ * @param callee  the call callee path
+ * @return        every resolving binding, base-then-local order; empty when the callee is unbound
+ * @since §9 A
+ */
+pub fn lookup_call_candidates(env: Env, callee: parser::Path): []ValBinding {
+    var name = callee.segments[callee.segments.len - 1].name
+    var qualified = callee.segments.len > 1
+    var out: []ValBinding = teko::list::empty()
+    var h = teko::runtime::str_hash(name)
+    var k = nidx_lower_bound(env.base_index, h)
+    loop {
+        if k >= env.base_index.slots.len { break }
+        if env.base_index.slots[k].hash != h { break }
+        var p = env.base_index.slots[k].pos
+        var b = env.base_slots[p]
+        if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { out = teko::list::push(out, b) }
+        k++
+    }
+    var i: u64 = 0
+    loop {
+        if i >= env.bindings.len { break }
+        var lb = env.bindings[i]
+        if lb.name == name && call_binding_matches(lb, callee, env.cur_ns, qualified) { out = teko::list::push(out, lb) }
+        i++
+    }
+    out
+}
+
+/**
+ * overload_func_bindings — every SEALED-GLOBAL function binding sharing EXACTLY `(ns, name)`: the
+ * declared members of a candidate overload set (§9 A). Resolved through the hash index like
+ * `call_base_pos`, keeping only non-const `Func` bindings whose declaring namespace equals `ns`
+ * EXACTLY — never a same-name function in a DIFFERENT namespace (`teko::numeric::dec::div` vs
+ * `teko::numeric::bigint::div`), which already mangles to a distinct symbol and must stay untouched
+ * (§5 fixpoint safety).
+ *
+ * @param env   the SEALED typing environment
+ * @param ns    the exact declaring namespace to match
+ * @param name  the exact bare name to match
+ * @return      the matching global function bindings, in ascending base position
+ * @since §9 A
+ */
+pub fn overload_func_bindings(env: Env, ns: str, name: str): []ValBinding {
+    var h = teko::runtime::str_hash(name)
+    var out: []ValBinding = teko::list::empty()
+    var k = nidx_lower_bound(env.base_index, h)
+    loop {
+        if k >= env.base_index.slots.len { break }
+        if env.base_index.slots[k].hash != h { break }
+        var p = env.base_index.slots[k].pos
+        var b = env.base_slots[p]
+        if b.name == name && b.ns == ns && !b.is_const && binding_is_func(b) { out = teko::list::push(out, b) }
+        k++
+    }
+    out
+}
+
+/**
+ * env_is_overloaded — is `(ns, name)` a declared FUNCTION OVERLOAD SET: two or more non-const `Func`
+ * bindings sharing exactly this declaring namespace AND bare name in the sealed globals? The GATE for
+ * symbol suffixing (§4): false ⇒ the sole declaration keeps its historic unsuffixed symbol (ruling 6,
+ * fixpoint-safe); true ⇒ every member of the set carries a signature suffix.
+ *
+ * Keyed on `(ns, name)` — never the bare name alone: two same-named functions in DIFFERENT namespaces
+ * are NOT an overload set, mangle to distinct symbols already, and must stay untouched (§5). For
+ * methods the `ns` is `collect`'s method pseudo-namespace `<owner-ns>::<Class>`, so two overloads of
+ * one class method form a set uniformly with free functions.
+ *
+ * @param env   the SEALED typing environment
+ * @param ns    the function's declaring namespace
+ * @param name  the function's bare name
+ * @return      true iff two or more function declarations share this exact `(ns, name)`
+ * @since §9 A
+ */
+pub fn env_is_overloaded(env: Env, ns: str, name: str): bool {
+    overload_func_bindings(env, ns, name).len >= 2
+}
+
+/**
  * NotBuiltinType — the marker `builtin_type` returns for a name that is simply not a built-in: a
  * STRUCTURED "keep looking" answer, distinct from the `error` arm, which is reserved for a name
  * that IS reserved and rejected (the removed `i64`/`u64`/`f32`).
