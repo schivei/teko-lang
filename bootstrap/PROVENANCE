@@ -1,65 +1,67 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): 0.3.1 surface migration §8 — ADD the `size`/`usize`
-# machine-word types. The previous seed (`51c6c984…`, §7 part 2 retire-DI) does NOT yet know the
-# `size`/`usize` surface, but §8 is purely ADDITIVE and INERT in `src/` (no source file spells `size`
-# or `usize` — the reball is deferred), so that seed C-builds THIS tree — the one that teaches the
-# compiler the new kinds — cleanly. This reseed realigns the committed seed with the §8 source. The
-# owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host output, proven a
-# fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh,
-# which only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
-# bootstrap/teko.c) — never for the unchanged incumbent this record describes.
+# RESEED (hand-harvest, by-hand per owner order): 0.3.1 surface migration §8 PART 2 — teach the
+# checker the LATERAL machine-word coercions `usize↔u64` and `size↔i64`. The previous seed
+# (`9141506f…`, §8 part 1: ADD the `size`/`usize` kinds, inert) already knows the two kinds and their
+# widths/signs, so it C-builds THIS tree — the one that adds the `same_word_lateral` predicate — with
+# only pre-existing language features. This reseed realigns the committed seed with the §8-part-2
+# source (the new predicate changes the compiler's own emitted C, so the seed must be re-harvested to
+# the new fixpoint). The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested
+# self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by
+# scripts/provenance_gate.sh, which only ever judges this record on a SWAP (an add, replace, or
+# remove-then-reintroduce of bootstrap/teko.c) — never for the unchanged incumbent this record
+# describes.
 #
-# §8 — size/usize machine-word types; memory positions reballed (byte-preserving)
+# §8 part 2 — lateral usize↔u64 / size↔i64 implicit coercion
 # ---------------------------------------------------------------------------------------------
 # WHAT ENTERS (additive only; nothing removed — docs/design/mudancas-superficie-0.3.1.md §8):
-#   - `PrimKind` (`src/checker/type.tks`) gains `Size` (signed) and `Usize` (unsigned), APPENDED
-#     after `Bool` so every existing ordinal is stable (ordinal-safe for the `.tkb` prim tag, which
-#     is the enum ordinal). `Size`/`Usize` are DISTINCT kinds from `uptr` (`Uptr`, the opaque FFI
-#     address): a `usize` is a NUMBER that casts/does-arithmetic like `u64`; a `uptr` is a
-#     transport-only opaque word. They are NOT unified.
-#   - PREDICATES: `prim_is_int` (both true), `prim_is_signed` (`Size` true, `Usize` false),
-#     `prim_width` (both 64), `numint_fits` (usize≡u64 range, size≡i64 range), `bignum_ctor_of`
-#     (usize routes to `of_u64` like u64) — checker; `prim_is_signed_int`/`prim_width_of`/
-#     `ltype_of_prim_name` — lir/lower; `prim_name` (surface spelling) — resolve.
-#   - LEXER/RESOLUTION: `builtin_type` (`scope.tks`) resolves `size`→Prim{Size}, `usize`→Prim{Usize}
-#     (type names are plain identifiers, so no lexer keyword table changes). The syntactic mirrors
-#     `cg_te_to_type_ns`/`emit_type_expr`/`cg_is_builtin_scalar` (`codegen.tks`) recognize them too.
-#   - LOWERING (prim → machine type, 64-bit): `Usize`→`uint64_t`, `Size`→`int64_t` in `emit_prim`;
-#     the C-type/mangle/div-cast tables (`emit_type_expr`, `cg_opt_mangle`(_str), `prim_div_tag`,
-#     `cg_int_width`) map both to their 64-bit twin so a `usize` typedef/helper is byte-identical to
-#     `u64` (and `size` to `i64`). `ffi_export` (ffi_prim_name/ffi_c_scalar) and the native DWARF
-#     base-type table (`dwarf.tks`) also learn them.
-#   - `.tkb`: the reader `prim_of` (`tkb_read.tks`) now round-trips ordinals 11=`Size`/12=`Usize`;
-#     the writer `prim_byte` (`k to byte`) emits them automatically. NO version bump — `src/` spells
-#     no `size`/`usize`, so the EMITTED CORPUS carries no 11/12 byte and the wire does not actually
-#     gain the ordinals here (`TKB_EXPR_VERSION`/`TKB_PROGRAM_VERSION` 4/6 stand). The reader accepts
-#     them ahead of first use so a future reball round-trips without a compat break.
-#   - SWEEP: NONE performed in `src/` (conservative). Every memory/collection `u64` the doc names
-#     (slice `.len`/`.cap`, indices, offsets, the slice header) is part of a large connected
-#     component that crosses `type_eq` STRICT boundaries (assignment to a `u64` slot, a `u64`
-#     argument, a `u64` return) as the other type; because `Usize`≠`U64` at the type level, reballing
-#     any single such position in isolation is REJECTED by the checker (not byte-different — it fails
-#     to compile), and reballing an entire component atomically is exactly the broad, ambiguous class
-#     §8's own conservatism directive says to leave alone. The infrastructure lands INERT; the reball
-#     is deferred. NO runtime C touched.
+#   - `same_word_lateral(a: PrimKind, b: PrimKind): bool` (`src/checker/expr.tks`, immediately after
+#     `cast_is_lossless_widen`): true iff `{a,b}` is `{U64, Usize}` or `{I64, Size}` in EITHER order.
+#     On teko's 64-bit-only target `usize` ≡ `u64` and `size` ≡ `i64` in BOTH width and sign — they
+#     differ only in spelling — so each of those two pairs holds every value of its partner losslessly
+#     in both directions. Deliberately limited to those two pairs: floats, `bool`, and the opaque §5
+#     pointer words `uptr`/`ptr` are NOT lateral and stay explicit.
+#   - WIRING: `same_word_lateral` becomes the FIRST check inside `cast_is_lossless_widen`
+#     (`if same_word_lateral(inner, outer) { return true }`), the single source of truth. That reaches
+#     BOTH the implicit-coercion gate (`numeric_widens_implicitly` → `widen_value_into` →
+#     `coerce_value_into`, covering assignment/field/index/return) AND the fit-guard consumers (native
+#     `lower_cast_fit_guard`, C `cast_may_lose`), so an implicit `u64`→`usize` relabel type-checks and
+#     an explicit `u64 to usize` relabel correctly skips the runtime fit guard (same width = lossless,
+#     lowered to a same-width no-op).
+#   - ROOT CAUSE this closes: `int_arith_join` returns the LEFT kind on an equal-width tie, so it can
+#     never report the RIGHT kind of such a pair as the join — `cast_is_lossless_widen` answered false
+#     in BOTH directions for these two equal-width, same-sign, distinct-kind pairs, the sole gap left
+#     by the pre-existing C#-style widening (a narrower same-sign int already widens implicitly, so
+#     `u8`→`usize` and `i32`→`size` already worked). No other function changed: `int_arith_join`,
+#     `prim_width`, `prim_is_signed` were already correct (Usize/Size → width 64; Usize unsigned, Size
+#     signed).
+#   - REDUNDANT-CAST PASS: UNCHANGED. Because `int_arith_join` returns the left operand on an
+#     equal-width tie and `U64`≠`Usize` (and `I64`≠`Size`) at the enum level, `join_unchanged_without_cast`
+#     never reports a lateral relabel as a no-op, so the D1 class-3 `redundant cast` diagnostic does
+#     not fire on a deliberate `u64 to usize`/`i64 to size` relabel. Verified: a probe with
+#     `(a to usize) + b` and `(a to u64) < b` builds with NO redundant-cast warning.
+#   - NO runtime C touched. NO `.tkb` wire change (the emitted corpus spells no new construct).
 #
-# FIXPOINT. gen0 (cc of the previous `51c6c984…` retire-DI seed, which C-builds this additive-§8
-# source) built bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a
+# FIXPOINT. gen0 (cc of the previous `9141506f…` §8-part-1 seed, which C-builds this §8-part-2 source)
+# built bin-a; compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a
 # byte-identical bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
 #   TEKO_BACKEND=c bin build . -> bin-b;  sha256(bin-a/teko.c) == sha256(bin-b/teko.c).
-# ACCEPT fixture (examples/probes/s8_usize_index): `fn index(xs: []i64, i: usize): i64 { return xs[i] }`
-# plus a `usize` loop counter — builds under this seed and runs (exit 42); the `usize` param lowers to
-# `uint64_t` in the emitted C, the §8 byte-preservation proof.
+# ACCEPT fixture (examples/probes/s8_lateral_word): the four lateral relabels driven through typed
+# VARIABLES with no `to`, across BOTH the assignment rung (`var b: usize = a`) and the return rung
+# (the `relabel_*` helpers), plus a pre-existing `u8`→`usize` widen — builds under this seed and runs
+# (exit 42); the `u64`→`usize` relabel lowers to a same-width no-op, the §8-part-2 byte-preservation
+# proof. REJECT fixtures (examples/regressions/diagnostics/src/c71..c73): `usize`→`u32` (narrowing)
+# and `usize`→`i64` / `size`→`u64` (cross-sign) each still demand an explicit `to`
+# ("value type does not match annotation").
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  9141506f638e5a09d5e70fc984a7da009a129523e6ba4766b964235beb93fc1d
+sha256:  7c1732cdd2f70ba469965c1018c72e91a65aad270b2fc8dfc5bfec47b186c9cd
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§8: add size/usize machine-word
-         types; PrimKind + predicates + lowering, inert in src/ — no reball); sha256 is read directly
-         off the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§8 part 2: lateral usize↔u64 /
+         size↔i64 implicit coercion via `same_word_lateral`, additive in src/); sha256 is read
+         directly off the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
