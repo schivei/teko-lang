@@ -460,6 +460,8 @@ fn emit_prim(buf: []byte, k: checker::PrimKind): []byte | error {
         checker::PrimKind::F32 => cb(buf, "float")
         checker::PrimKind::F64 => cb(buf, "double")
         checker::PrimKind::Bool => cb(buf, "bool")
+        checker::PrimKind::Usize => cb(buf, "uint64_t")   // (§8) unsigned machine word ≡ u64 on 64-bit (byte-identical C)
+        checker::PrimKind::Size => cb(buf, "int64_t")   // (§8) signed machine word ≡ i64 on 64-bit (byte-identical C)
     }
 }
 
@@ -1808,6 +1810,9 @@ fn cg_opt_mangle(buf: []byte, inner: checker::Type): []byte | error {
             checker::PrimKind::I32 => cb(buf, "i32"); checker::PrimKind::I64 => cb(buf, "i64")
             checker::PrimKind::F32 => cb(buf, "f32"); checker::PrimKind::F64 => cb(buf, "f64")
             checker::PrimKind::Bool => cb(buf, "bool")
+            // (§8) machine words mangle to their 64-bit twin's key so a `[]usize` shares the u64
+            // typedef and emits byte-identical C (usize ≡ u64 / size ≡ i64 on 64-bit).
+            checker::PrimKind::Usize => cb(buf, "u64"); checker::PrimKind::Size => cb(buf, "i64")
         }
         checker::Byte => cb(buf, "byte")
         checker::Char => cb(buf, "char")
@@ -1841,6 +1846,8 @@ fn cg_opt_mangle_str(inner: checker::Type): str | error {
             checker::PrimKind::I32 => "i32"; checker::PrimKind::I64 => "i64"
             checker::PrimKind::F32 => "f32"; checker::PrimKind::F64 => "f64"
             checker::PrimKind::Bool => "bool"
+            // (§8) machine words share their 64-bit twin's key (usize ≡ u64 / size ≡ i64).
+            checker::PrimKind::Usize => "u64"; checker::PrimKind::Size => "i64"
         }
         checker::Byte => "byte"
         checker::Char => "char"
@@ -2593,6 +2600,8 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str):
             else if last == "f32" { return cb(buf, "float") }
             else if last == "f64" { return cb(buf, "double") }
             else if last == "bool" { return cb(buf, "bool") }
+            else if last == "usize" { return cb(buf, "uint64_t") }   // (§8) unsigned machine word ≡ u64 on 64-bit (a NUMBER — distinct from `uptr`, the opaque address → uintptr_t)
+            else if last == "size" { return cb(buf, "int64_t") }   // (§8) signed machine word ≡ i64 on 64-bit
             else if last == "byte" { return cb(buf, "uint8_t") }
             else if last == "char" { return cb(buf, "tk_char") }   // UTF-8 codepoint (byte-slice layout)
             else if last == "str" { return cb(buf, "tk_str") }
@@ -2810,6 +2819,8 @@ fn cg_int_width(k: checker::PrimKind): i64 {
         checker::PrimKind::I32 => 32
         checker::PrimKind::U64 => 64
         checker::PrimKind::I64 => 64
+        checker::PrimKind::Usize => 64   // (§8) machine word — 64-bit
+        checker::PrimKind::Size => 64   // (§8) machine word — 64-bit
         _ => 0
     }
 }
@@ -2836,6 +2847,9 @@ fn prim_div_tag(k: checker::PrimKind): str | error {
         checker::PrimKind::F32 => "f32"
         checker::PrimKind::F64 => "f64"
         checker::PrimKind::Bool => error { message = "codegen: bool has no div/cast helper tag" }
+        // (§8) machine words reuse their 64-bit twin's div/cast helpers (usize ≡ u64 / size ≡ i64).
+        checker::PrimKind::Usize => "u64"
+        checker::PrimKind::Size => "i64"
     }
 }
 
@@ -10563,6 +10577,8 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: parser::TypeExpr): checker::T
             else if last == "f32" { checker::Prim { kind = checker::PrimKind::F32 } }
             else if last == "f64" { checker::Prim { kind = checker::PrimKind::F64 } }
             else if last == "bool" { checker::Prim { kind = checker::PrimKind::Bool } }
+            else if last == "usize" { checker::Prim { kind = checker::PrimKind::Usize } }   // (§8) unsigned machine word
+            else if last == "size" { checker::Prim { kind = checker::PrimKind::Size } }   // (§8) signed machine word
             else if last == "byte" { checker::Byte { } }
             else if last == "str" { checker::Str { } }
             else if last == "error" { checker::Error { } }
@@ -10834,6 +10850,7 @@ fn cg_is_builtin_scalar(last: str): bool {
     last == "u8" || last == "u16" || last == "u32" || last == "u64" ||
     last == "i8" || last == "i16" || last == "i32" || last == "i64" ||
     last == "f32" || last == "f64" || last == "bool" || last == "byte" ||
+    last == "usize" || last == "size" ||   // (§8) machine words — scalars (uint64_t/int64_t), no aggregate edge
     last == "str" || last == "error" || last == "ptr" || last == "uptr" ||   // (C7.1a) opaque FFI transport types
     last == "Ref"   // (MEM-1b) Ref<T> lowers to a pointer → no by-value aggregate edge
 }
