@@ -1069,6 +1069,24 @@ fn svc_escape_error(): error {
 }
 
 /**
+ * (§7 DI, escape rule) Reject if any EXPLICIT argument is a direct `svc<T>()` claim — the "passed as
+ * an argument" sink. Method-call RECEIVERS are excluded (calling a method ON a claim consumes it in
+ * place); only genuine argument positions are guarded.
+ *
+ * @param args  the explicit source arguments
+ * @return      the escape error when a claim is passed, else null
+ */
+fn svc_guard_arg_list(args: []parser::Expr): error | null {
+    var i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if expr_is_svc_claim(args[i]) { return svc_escape_error() }
+        i++
+    }
+    null
+}
+
+/**
  * A registered service provider under a `(T, key)` resolution (§7 DI): the provider's canonical type
  * name and the string key it answers to (its bare type name).
  *
@@ -2111,7 +2129,6 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             var ti = 0
             loop {
                 if ti >= dargs.len { break }
-                if expr_is_svc_claim(dargs[ti]) { return svc_escape_error() }
                 // (W10) a closure-literal ARG whose parameter is a concrete function type infers its
                 // un-annotated params from that target (ruling 3); other args type normally.
                 var is_lam = match dargs[ti].kind { parser::Lambda => true; _ => false }
@@ -3735,7 +3752,10 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
         parser::Binary as b => type_binary(b, env, table)
         parser::Unary as u => type_unary(u, env, table)
         parser::Compare as c => type_compare(c, env, table)
-        parser::Call as cl => type_call(cl, env, table)
+        parser::Call as cl => {
+            match svc_guard_arg_list(cl.args) { error as e => return e; null => { } }
+            type_call(cl, env, table)
+        }
         parser::IfExpr as f => type_if(f, env, table)
         parser::MatchExpr as m => type_match(m, env, table)
         parser::FieldAccess as fa => type_field_access(fa, env, table)
@@ -3745,6 +3765,7 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
             // dispatch to type_method_call; anything else remains deferred. Mirror of expr.c's
             // TK_EXPR_METHOD_CALL case (the receiver is probed once for the flags check, then
             // re-typed inside whichever branch actually handles the call).
+            match svc_guard_arg_list(mc.args) { error as e => return e; null => { } }
             match type_expr(mc.receiver, env, table) {
                 TExpr as te => {
                     if is_ptr_or_uptr(te.type) {

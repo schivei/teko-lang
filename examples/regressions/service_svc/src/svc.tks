@@ -1,0 +1,152 @@
+/**
+ * A keyless singleton service resolved by concrete type (`svc<Clock>()`). Its `ctor` factory is the
+ * IService contract `svc<Clock>()` inlines.
+ *
+ * @since 0.3.1
+ */
+type Clock = service singleton {
+    /**
+     * Construct the instance — the IService `static ctor(): self` factory.
+     *
+     * @return self  a fresh `Clock`
+     */
+    pub static fn ctor(): Clock { return Clock { } }
+
+    /**
+     * @return i64  the deterministic instant used by this fixture
+     */
+    pub fn now(): i64 { return 7 }
+}
+
+/**
+ * A transient service — each `svc<Rng>()` yields a fresh instance (arena slot: none).
+ *
+ * @since 0.3.1
+ */
+type Rng = service transient {
+    /** @return self  a fresh `Rng`. */
+    pub static fn ctor(): Rng { return Rng { } }
+    /** @return i64  a deterministic roll. */
+    pub fn roll(): i64 { return 3 }
+}
+
+/**
+ * A scoped service resolved inside a block.
+ *
+ * @since 0.3.1
+ */
+type Buf = service scoped {
+    /** @return self  a fresh `Buf`. */
+    pub static fn ctor(): Buf { return Buf { } }
+    /** @return i64  the buffer capacity. */
+    pub fn cap(): i64 { return 8 }
+}
+
+/**
+ * A user interface that PARTICIPATES in DI by extending the synthesized IService — every conformer of
+ * `G` is a conformer of IService, so `svc<G>(key)` resolves `G`'s providers.
+ *
+ * @since 0.3.1
+ */
+type G = interface & IService {
+    /** @return i64  the greeting value. */
+    fn greet(): i64
+}
+
+/**
+ * An English `G` provider (singleton). Keyed by its bare name `EnHi`.
+ *
+ * @since 0.3.1
+ */
+type EnHi = service singleton & G {
+    /** @return self  a fresh `EnHi`. */
+    pub static fn ctor(): EnHi { return EnHi { } }
+    /** @return i64  five. */
+    pub fn greet(): i64 { return 5 }
+}
+
+/**
+ * A French `G` provider (singleton). Keyed by its bare name `FrHi`.
+ *
+ * @since 0.3.1
+ */
+type FrHi = service singleton & G {
+    /** @return self  a fresh `FrHi`. */
+    pub static fn ctor(): FrHi { return FrHi { } }
+    /** @return i64  nine. */
+    pub fn greet(): i64 { return 9 }
+}
+
+/**
+ * `svc<Clock>().now()` — a keyless by-type singleton resolve.
+ *
+ * @return i64  the clock's instant
+ */
+pub fn singleton_now(): i64 { return svc<Clock>().now() }
+
+/**
+ * A fresh transient resolve bound to a local (an allowed `var c = svc<…>()` claim).
+ *
+ * @return i64  the transient's roll
+ */
+pub fn transient_roll(): i64 {
+    var r = svc<Rng>()
+    return r.roll()
+}
+
+/**
+ * A scoped service resolved and consumed inside a block.
+ *
+ * @return i64  the scoped buffer capacity
+ */
+pub fn scoped_cap(): i64 {
+    var v = 0
+    {
+        v = svc<Buf>().cap()
+    }
+    return v
+}
+
+/**
+ * Two CONSTANT-key resolves over `G` (`"EnHi"` + `"FrHi"`), disambiguated at compile time.
+ *
+ * @return i64  the sum of both providers' greetings (14)
+ */
+pub fn const_key_sum(): i64 {
+    return svc<G>("EnHi").greet() + svc<G>("FrHi").greet()
+}
+
+/**
+ * A RUNTIME-key resolve over `G` (Path 2 — the inline locator): the key is a parameter, not a
+ * constant, so the provider is chosen at run time. Proves the locator BUILDS and RUNS.
+ *
+ * @param key  the runtime provider key
+ * @return i64  the chosen provider's greeting
+ */
+pub fn runtime_pick(key: str): i64 { return svc<G>(key).greet() }
+
+/**
+ * `has_svc<G>(key)` over a RUNTIME key — 1 when a provider answers, else 0.
+ *
+ * @param key  the runtime provider key
+ * @return i64  1 if present, 0 otherwise
+ */
+pub fn runtime_has(key: str): i64 {
+    if has_svc<G>(key) { return 1 }
+    return 0
+}
+
+/**
+ * A factory returning a freshly-CONSTRUCTED value (the `ctor`'s result, not a svc-claim) — allowed to
+ * escape by the provenance rule, unlike a value obtained from `svc<T>()`.
+ *
+ * @return EnHi  a fresh instance
+ */
+pub fn make_enhi(): EnHi { return EnHi::ctor() }
+
+/**
+ * Consume the freshly-constructed value the factory returned — proves construction escapes freely.
+ *
+ * @return i64  the constructed provider's greeting
+ */
+pub fn factory_greet(): i64 { return make_enhi().greet() }

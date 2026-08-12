@@ -2220,11 +2220,33 @@ fn validate_class_body(reg: TypeReg, cb: parser::ClassBody, tbl: TypeTable, tabl
         error as e => diags = concat_diags(diags, one_diag(decl_error_diag(reg, e)))
         null => { }
     }
+    if cb.is_service && !service_has_ctor(cb) {
+        diags = concat_diags(diags, one_diag(decl_diag(reg, "a service must conform to IService: declare 'static fn ctor(): self'")))
+    }
     var eff = match effective_class_methods(cb, table) {
         []parser::Function as m => m
         error as e => return concat_diags(diags, one_diag(decl_error_diag(reg, e)))
     }
     concat_diags(diags, conformance_diags(reg, eff, cb.implements, table, false))
+}
+
+/**
+ * (§7 DI) Does service body `cb` declare the `static ctor` factory the synthesized IService contract
+ * requires? A zero-parameter static method named `ctor` (its return type is checked structurally by
+ * ordinary conformance when the service names an interface).
+ *
+ * @param cb  the service's class body
+ * @return    true iff a static zero-arg `ctor` method is present
+ */
+fn service_has_ctor(cb: parser::ClassBody): bool {
+    var i: u64 = 0
+    loop {
+        if i >= cb.methods.len { break }
+        var m = cb.methods[i]
+        if m.name == "ctor" && m.params.len == 0 { return true }
+        i++
+    }
+    false
 }
 
 /**
