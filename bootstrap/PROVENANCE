@@ -1,37 +1,48 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): re-harvested after TEACHING the C#-style delegate
-# TYPE spellings `func<…>` / `action<…>` and function-without-return (0.3.1 §2 surface). This is the
-# BRIDGE reseed: the compiler's OWN source still uses the old `(A, B): R` / `: void` forms, so the
-# previous `508514…` bootstrap can still build the tree; this new seed additionally UNDERSTANDS
-# `func`/`action` + optional return, so the NEXT commit can convert every usage to the new spelling
-# and retire the old forms. The owner did NOT edit bootstrap/teko.c itself; this reseed only realigns
-# the seed with the current source.
+# RESEED (hand-harvest, by-hand per owner order): the FINAL reseed of the func/action + void-retirement
+# work. The previous commit was the BRIDGE reseed (`6857530c…`) — a seed that TAUGHT `func<…>` /
+# `action<…>` + function-without-return while the compiler's own source still used the old
+# `(A, B): R` / `: void` forms. This commit CONVERTED every usage to the new spelling, honored the
+# owner's `remove void` sweep (cherry-picked), and RETIRED the surface `void` type name and the old
+# `(A, B): R` closure form. The bridge (which understood `func`/`action`) built this converted tree;
+# the harvest below self-reproduces byte-identical (bin-a == bin-b fixpoint). The owner did NOT edit
+# bootstrap/teko.c itself; this reseed only realigns the seed with the current source.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which
 # only ever judges this record on a SWAP (an add, replace, or remove-then-reintroduce of
 # bootstrap/teko.c) — never for the unchanged incumbent this record describes.
 #
-# teach func/action delegate types + function-without-return (bridge)
+# teach func/action + function-without-return; retire surface void and the old (params):R closure form
 # ---------------------------------------------------------------------------------------------
-# SURFACE RESPELLING, purely additive on this bridge commit. What SAILED:
+# SURFACE RESPELLING of the closure/function TYPE, plus retirement of the old spellings. What SAILED:
 #   - PARSER (`parse_type.tks`): `func<T1, …, Tn, R>` / `action<T1, …, Tn>` — the C# `Func`/`Action`
 #     delegate TYPE spellings. `func`'s LAST type arg is the return, the rest are params (`func<R>` =
-#     0 params returning R); `action` has NO return (unit), all args are params, and BARE `action`
-#     (no `<…>`) is the zero-parameter no-return function type. BARE `func` and empty `func<>`/`action<>`
-#     are rejected. Arity capped at 16 type args (the general generic cap). Both DESUGAR into the
-#     existing `parser::FunctionType` AST node, so checker / codegen / `.tkb` are UNCHANGED — codegen
-#     already lowers every `FunctionType` to the opaque `tk_closure` fat pointer. The no-return case
-#     carries an UNSPELLABLE internal sentinel `()` in the shared `ret` slot.
-#   - CHECKER (`scope.tks` builtin_type): the `()` sentinel resolves to the internal `Void{}` (the
-#     SAME unit the old `(A, B): void` produced) — added alongside the still-live `void` recognition.
-#   - function-without-return already worked (a `fn` with no `: R` sets `has_return = false` → `Void`).
+#     0 params returning R); `action` has NO return (unit), all args are params, and BARE `action` is
+#     the zero-parameter no-return function type. BARE `func` and empty `func<>`/`action<>` are
+#     rejected; arity capped at 16. Both DESUGAR into the existing `parser::FunctionType` node, so
+#     checker / codegen / `.tkb` are UNCHANGED — codegen already lowers every `FunctionType` to the
+#     opaque `tk_closure` fat pointer. The old `(A, B): R` form is RETIRED: a `(` in a type position
+#     now falls through to the ordinary parse error (no bespoke diagnostic).
+#   - CHECKER: the surface `void` type name is RETIRED — `builtin_type` (`scope.tks`) no longer maps
+#     `void` to a type, so `void` falls through to the ordinary unknown-type error. The INTERNAL
+#     `Void{}` variant and `mono_type_mangle(Void{})` -> "void" are UNTOUCHED. The no-return delegate
+#     carries an UNSPELLABLE internal sentinel `()` in `FunctionType.ret`, which `builtin_type` maps
+#     to `Void`; `type_to_texpr(Void)` (`monomorph.tks`) and the codegen demangle now use `()` so the
+#     internal Void round-trip never depends on the retired `void` name.
+#   - function-without-return already worked (a `fn` with no `: R` sets `has_return = false` -> Void).
+#   - USAGES CONVERTED: `ProgressFn` -> `action<u64, u64>`; the `iter` iterator aliases and every
+#     higher-order combinator param (`map`/`filter`/`fold`/…) -> `func<…, R>`; `NativeObjectWriterArm64`
+#     -> `func<…, []byte>`; the closure-value regression probes and unit tests migrated.
+#   - RETIREMENT DIAGNOSTICS de-narrated (owner ruling): `let`/`mut` un-taught from the lexer (now
+#     ordinary identifiers), and the `unsafe` / `#must_free` / ref-return / manual-memory (`mem::free`/
+#     `region_new`/`region_alloc`) / opaque-`ptr` rejections reduced to ordinary failures with no
+#     "retired in 0.3.1 because …" reason. Stale `let`/`mut` wording in surviving diagnostics swept to
+#     `var` (the §1 retirement's leftover message text).
 #
 # NO new AST node, NO `.tkb` wire change (`FunctionType.ret` stays a mandatory TypeExpr — the `()`
-# sentinel is an ordinary named type that all existing walks recurse over and `builtin_type` maps to
-# `Void`), NO runtime C touched. The old `(A, B): R` / surface `void` forms are STILL accepted on this
-# bridge — they are retired in the NEXT commit, which the bridge builds.
+# sentinel is an ordinary named type all existing walks recurse over), NO runtime C touched.
 #
-# FIXPOINT. gen0 (cc of the previous `508514…` bootstrap) C-built the taught source into bin-a;
+# FIXPOINT. gen0 (cc of the bridge `6857530c…` seed) C-built the converted source into bin-a;
 # compiling bin-a/teko.c with cc into the new compiler and rebuilding produced a byte-identical
 # bin-b/teko.c (sha256 below). The committed file is that fixpoint — it self-reproduces:
 #   cc(bootstrap/teko.c) -> gen0;  TEKO_BACKEND=c gen0 build . -> bin-a;  cc(bin-a/teko.c) -> bin;
@@ -43,8 +54,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  6857530c475dcef582f27cf8bb1acdf7fce77c18de0eb26e9ae22ad9b306214d
+sha256:  69184f4987bfc0ae90241bff2ad1d3ab9e4f595584c91823e3016881a53050e7
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (teach func/action delegate types +
-         function-without-return, bridge); sha256 is read directly off the committed file and was
-         proven a fixpoint (bin-a == bin-b, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (teach func/action + function-without-
+         return; retire surface void and the old (params):R closure form); sha256 is read directly off
+         the committed file and was proven a fixpoint (bin-a == bin-b, byte-identical).
