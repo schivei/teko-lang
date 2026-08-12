@@ -207,7 +207,28 @@ pub type MatchExpr = struct { subject: Expr; arms: []Arm }   // match is an EXPR
 
 // --- postfix access & cast (F2) — recursive over Expr (compiler-managed indirection) ---
 pub type FieldAccess = struct { receiver: Expr; field: str }   // x.field — read a struct field (the checker's own `s.token`/`b.left` shape; B.29)
-pub type MethodCall = struct { receiver: Expr; method: str; args: []Expr; type_args: []TypeExpr }   // recv.method(a, …) — B.29 instance call via `.`; method *checking* is deferred (M.4). type_args = explicit call-site generic args `recv.m<T>(…)` (empty for the bare `recv.m(…)` inferred form)
+/**
+ * MethodCall — an instance dot-call `recv.method(a, …)` (B.29), typed via the struct/class method
+ * dispatch (method checking is deferred, M.4). Carries the call-site argument names so a dot-call
+ * `recv.m(w := 5)` binds §9 C defaults/named args exactly as a free call `m(w := 5)` does.
+ */
+pub type MethodCall = struct {
+    /** receiver — the value the method is invoked on (the implicit index-0 argument). */
+    receiver: Expr
+    /** method — the invoked method's bare name. */
+    method: str
+    /** args — the call-site arguments, in source order (the receiver is NOT among them). */
+    args: []Expr
+    /**
+     * arg_names — the call-site argument NAMES, parallel to `args`: `""` for a positional argument,
+     * else the parameter named by a `:=` named argument (§9 C ruling 2). Threaded verbatim from
+     * `parse_call_args` (`ParsedCallArgs.arg_names`); the typer prepends a `""` for the receiver at
+     * index 0 before forwarding to `resolve_defargs`.
+     */
+    arg_names: []str
+    /** type_args — explicit call-site generic args `recv.m<T>(…)` (empty for the inferred `recv.m(…)`). */
+    type_args: []TypeExpr
+}
 pub type Cast = struct { expr: Expr; target: TypeExpr }   // x to T — explicit conversion; preserves→ok / loses→compile-error (E7; M.0+M.1)
 /**
  * Borrow — the prefix `&x` safe mutable-borrow expression (AL wave F1). Takes a live

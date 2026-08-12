@@ -1428,35 +1428,151 @@ fn type_has_svc(c: parser::Call, env: Env, table: TypeTable): TExpr | NotSvcOp |
     svc_has_runtime_chain(key, providers)
 }
 
-// (2026-07-01) call-site desugar for a `params`-variadic function `f`. Two shapes:
-//   passthrough — exactly `f.params.len` raw args AND the last one is already typed `[]T`
-//     (T = the params element type) → pass through unchanged, no re-wrapping.
-//   pack — otherwise, the trailing args (0 or more) beyond the fixed prefix are collapsed into
-//     ONE synthetic array-literal `parser::Expr` (reusing array-literal codegen — Increment B+),
-//     so the rest of `type_call` sees an ordinary `f.params.len`-arity call.
-fn pack_variadic_args(f: Func, args: []parser::Expr, env: Env, table: TypeTable): []parser::Expr | error {
+/**
+ * resolve_call_args — the single call-site argument resolver: dispatch to `pack_variadic_args` for a
+ * `params`-variadic callee, else to `resolve_defargs`. Both produce a positional `[]parser::Expr` of
+ * exactly `f.params.len` entries in declaration order, so §9 C defaults and `:=` named arguments bind
+ * uniformly whether or not the callee is variadic (owner ruling C-T1: `params` is an inherent
+ * trailing-optional and composes with defaults/named args).
+ *
+ * @param f          the callee's function type
+ * @param args       the raw call-site argument expressions, in source order
+ * @param arg_names  the parallel names (`""` positional, else a `:=` target), one per `args` entry
+ * @param env        the typing environment (for a variadic passthrough type probe)
+ * @param table      the resolved type table
+ * @return           the resolved declaration-order positional arguments, or a located error
+ * @throws           on arity/name/default violations reported by the delegate resolver
+ * @since §9 C
+ */
+fn resolve_call_args(f: Func, args: []parser::Expr, arg_names: []str, env: Env, table: TypeTable): []parser::Expr | error {
+    if f.variadic { return pack_variadic_args(f, args, arg_names, env, table) }
+    resolve_defargs(f, args, arg_names)
+}
+
+/**
+ * positional_prefix_len — the number of leading positional arguments before the first `:=` named
+ * argument (§9 C ruling 2: named args are trailing, enforced at parse time). Equals `arg_names.len`
+ * when the call is all-positional.
+ *
+ * @param arg_names  the parallel argument names (`""` = positional)
+ * @return           the index of the first named argument, or `arg_names.len` if none
+ * @since §9 C
+ */
+fn positional_prefix_len(arg_names: []str): u64 {
+    var n: u64 = 0
+    loop { if n >= arg_names.len { break }; if arg_names[n] != "" { break }; n++ }
+    n
+}
+
+/**
+ * named_arg_expr — the argument expression a named `:=` argument supplies for the fixed-prefix
+ * parameter `pname`, searched over the named suffix `[npos, args.len)`. Returns null when no named
+ * argument targets `pname` (so the parameter falls back to a default or is missing).
+ *
+ * @param pname      the fixed-prefix parameter's name being filled
+ * @param args       the raw call-site argument expressions
+ * @param arg_names  the parallel argument names
+ * @param npos       the positional-prefix length (first named index)
+ * @return           the matching argument expression, or null
+ * @since §9 C
+ */
+fn named_arg_expr(pname: str, args: []parser::Expr, arg_names: []str, npos: u64): parser::Expr | null {
+    var k: u64 = npos
+    loop {
+        if k >= args.len { break }
+        if arg_names[k] == pname { return args[k] }
+        k++
+    }
+    null
+}
+
+/**
+ * validate_variadic_named — reject a `:=` named argument on a variadic call that does not target a
+ * FIXED-prefix parameter (§9 C + owner ruling C-T1): an unknown name, a name already filled
+ * positionally, or a name that targets the trailing `params` slot itself (the variadic slot is
+ * positional-only — it collects the tail, it is not passed by name).
+ *
+ * @param f          the variadic callee's function type
+ * @param args       the raw call-site argument expressions
+ * @param arg_names  the parallel argument names
+ * @param npos       the positional-prefix length (also the count of positionally-filled params)
+ * @param nfixed     the number of fixed (non-variadic) parameters
+ * @return           null when every named argument is a legal fixed-prefix target, else an error
+ * @throws           on an unknown name, a positionally-filled name, or a `params`-slot name
+ * @since §9 C
+ */
+fn validate_variadic_named(f: Func, args: []parser::Expr, arg_names: []str, npos: u64, nfixed: u64): error | null {
+    var vk: u64 = npos
+    loop {
+        if vk >= args.len { break }
+        var nm = arg_names[vk]
+        var fidx: u64 = 0
+        var matched = false
+        loop { if fidx >= f.param_names.len { break }; if f.param_names[fidx] == nm { matched = true; break }; fidx++ }
+        if !matched { return error { message = $"unknown named argument '{nm}'" } }
+        if fidx >= nfixed { return error { message = $"the variadic 'params' parameter '{nm}' cannot be passed by name" } }
+        if fidx < npos { return error { message = $"named argument '{nm}' was already provided positionally" } }
+        vk++
+    }
+    null
+}
+
+/**
+ * (2026-07-01, extended §9 C) call-site desugar for a `params`-variadic function `f`. Resolves the
+ * FIXED prefix `[0, nfixed)` with the same defaults/named-argument binding as `resolve_defargs`
+ * (owner ruling C-T1), then collapses the remaining positional tail into ONE synthetic array-literal
+ * for the trailing `params` slot. Two fast shapes preserved: passthrough — exactly `f.params.len`
+ * all-positional args whose last is already typed `[]T` (T = the params element type) → returned
+ * verbatim; pack — otherwise the tail (0 or more) beyond `nfixed` becomes the array literal, so the
+ * rest of `type_call` sees an ordinary `f.params.len`-arity call.
+ *
+ * @param f          the variadic callee's function type
+ * @param args       the raw call-site argument expressions, in source order
+ * @param arg_names  the parallel names (`""` positional, else a `:=` fixed-prefix target)
+ * @param env        the typing environment (for the passthrough type probe)
+ * @param table      the resolved type table
+ * @return           the `f.params.len`-entry positional arguments (fixed prefix + packed tail)
+ * @throws           on too few fixed arguments, a missing required parameter, or an illegal named arg
+ * @since §9 C
+ */
+fn pack_variadic_args(f: Func, args: []parser::Expr, arg_names: []str, env: Env, table: TypeTable): []parser::Expr | error {
     var nfixed = f.params.len - 1
     var elem_ty = match f.params[nfixed] { Slice as s => s.element; _ => Void { } }   // parser already enforced the last param is a Slice
-    if args.len == f.params.len {
+    var npos = positional_prefix_len(arg_names)
+    var any_named = npos < args.len
+    if !any_named && args.len == f.params.len {
         var last = match type_expr(args[nfixed], env, table) { TExpr as te => te; error as e => return e }
         if type_eq(last.type, Slice { element = elem_ty }) { return args }   // passthrough
     }
-    if args.len < nfixed { return error { message = "wrong number of arguments" } }
+    if any_named && npos > nfixed { return error { message = "wrong number of arguments" } }
+    match validate_variadic_named(f, args, arg_names, npos, nfixed) { error as e => return e; null => { } }
+    var fixed_pos = if npos < nfixed { npos } else { nfixed }
+    var out: []parser::Expr = teko::list::empty()
+    var idx: u64 = 0
+    loop {
+        if idx >= nfixed { break }
+        if idx < fixed_pos {
+            out = teko::list::push(out, args[idx])
+        } else {
+            match named_arg_expr(f.param_names[idx], args, arg_names, npos) {
+                parser::Expr as e => out = teko::list::push(out, e)
+                null => {
+                    if idx < f.n_required { return error { message = $"missing required argument '{f.param_names[idx]}'" } }
+                    out = teko::list::push(out, f.defaults[idx - f.n_required])
+                }
+            }
+        }
+        idx++
+    }
     var elems: []parser::ArrayElem = teko::list::empty()
-    var i = nfixed
+    var i = fixed_pos
     loop {
         if i >= args.len { break }
+        if arg_names[i] != "" { break }
         elems = teko::list::push(elems, parser::ArrayElem { is_spread = false; expr = args[i] })
         i++
     }
     var synth = parser::Expr { kind = parser::ArrayLit { elements = elems }; line = 0; col = 0 }
-    var out: []parser::Expr = teko::list::empty()
-    var j = 0
-    loop {
-        if j >= nfixed { break }
-        out = teko::list::push(out, args[j])
-        j++
-    }
     teko::list::push(out, synth)
 }
 
@@ -1736,6 +1852,24 @@ fn method_dispatch_callee(struct_name: str, method: str): parser::Path {
     there is the vtable slot both backends dispatch through. The receiver rides as args[0] (an
     interface value, or a class instance the emitters upcast on the fly). Mirror:
     expr.c::type_method_call. */
+/**
+ * method_call_arg_names — the effective call-site argument names for a method dot-call, with the
+ * receiver prepended as an unnamed (`""`) index-0 argument. `resolve_defargs`/`pack_variadic_args`
+ * treat a method exactly like a free call whose first parameter is the receiver, so the receiver is
+ * always positional and every entry of `mc.arg_names` (a `""` positional or a `:=` named target,
+ * §9 C ruling 2) follows it in order.
+ *
+ * @param mc  the parsed method call
+ * @return    `["", mc.arg_names[0], mc.arg_names[1], …]`, parallel to the receiver-prepended args
+ * @since §9 C
+ */
+fn method_call_arg_names(mc: parser::MethodCall): []str {
+    var names: []str = teko::list::push(teko::list::empty(), "")
+    var i: u64 = 0
+    loop { if i >= mc.arg_names.len { break }; names = teko::list::push(names, mc.arg_names[i]); i++ }
+    names
+}
+
 fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr | error {
     var recv_t = match type_expr(mc.receiver, env, table) { TExpr as te => te.type; error as e => return e }
     if is_flags_named(recv_t, table) { return error { message = "method typing is deferred (B.29 / M.4)" } }
@@ -1800,10 +1934,8 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                         var bcargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
                         var bai: u64 = 0
                         loop { if bai >= mc.args.len { break }; bcargs = teko::list::push(bcargs, mc.args[bai]); bai++ }
-                        var bcnames: []str = teko::list::empty()
-                        var bni: u64 = 0
-                        loop { if bni >= bcargs.len { break }; bcnames = teko::list::push(bcnames, ""); bni++ }
-                        var bdargs = match resolve_defargs(bf, bcargs, bcnames) { []parser::Expr as x => x; error as e => return e }
+                        var bcnames: []str = method_call_arg_names(mc)
+                        var bdargs = match resolve_call_args(bf, bcargs, bcnames, env, table) { []parser::Expr as x => x; error as e => return e }
                         if bdargs.len != bf.params.len { return error { message = "wrong number of arguments" } }
                         var biargs: []TExpr = teko::list::empty()
                         var bii: u64 = 0
@@ -1832,9 +1964,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     var cargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
     var ai: u64 = 0
     loop { if ai >= mc.args.len { break }; cargs = teko::list::push(cargs, mc.args[ai]); ai++ }
-    var cnames: []str = teko::list::empty()
-    var ni: u64 = 0
-    loop { if ni >= cargs.len { break }; cnames = teko::list::push(cnames, ""); ni++ }
+    var cnames: []str = method_call_arg_names(mc)
     type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = teko::list::empty(); callee_type_args = mc.type_args }, env, table)
 }
 
@@ -1885,10 +2015,8 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
     var icargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
     var ica: u64 = 0
     loop { if ica >= mc.args.len { break }; icargs = teko::list::push(icargs, mc.args[ica]); ica++ }
-    var icnames: []str = teko::list::empty()
-    var icn: u64 = 0
-    loop { if icn >= icargs.len { break }; icnames = teko::list::push(icnames, ""); icn++ }
-    var dargs = match resolve_defargs(f, icargs, icnames) { []parser::Expr as x => x; error as e => return e }
+    var icnames: []str = method_call_arg_names(mc)
+    var dargs = match resolve_call_args(f, icargs, icnames, env, table) { []parser::Expr as x => x; error as e => return e }
     if dargs.len != f.params.len { return error { message = "wrong number of arguments" } }
     var iargs: []TExpr = teko::list::empty()
     var ii: u64 = 0
@@ -2150,7 +2278,7 @@ fn select_overload(cands: []ValBinding, c: parser::Call, env: Env, table: TypeTa
         ci++
         match cb.type {
             Func as f => {
-                var shaped = if f.variadic { pack_variadic_args(f, c.args, env, table) } else { resolve_defargs(f, c.args, c.arg_names) }
+                var shaped = resolve_call_args(f, c.args, c.arg_names, env, table)
                 match shaped {
                     []parser::Expr as dargs => {
                         if dargs.len == f.params.len {
@@ -2296,7 +2424,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
     }
     match ft {
         Func as f => {
-            var dargs = if f.variadic { match pack_variadic_args(f, c.args, env, table) { []parser::Expr as x => x; error as e => return e } } else { match resolve_defargs(f, c.args, c.arg_names) { []parser::Expr as x => x; error as e => return e } }
+            var dargs = match resolve_call_args(f, c.args, c.arg_names, env, table) { []parser::Expr as x => x; error as e => return e }
             if dargs.len != f.params.len { return error { message = "wrong number of arguments" } }
             // Type every argument first (void rejected); strict-check / generic-infer below.
             var targs: []TExpr = teko::list::empty()
@@ -2940,7 +3068,7 @@ fn class_field_visible_to(owner: MemberOwner, env: Env, table: TypeTable): bool 
  * @return       the typed accessor-call TExpr (a `TCall`), or a type error
  */
 fn desugar_getter(recv: parser::Expr, prop: str, env: Env, table: TypeTable): TExpr | error {
-    var mc = parser::MethodCall { receiver = recv; method = "__get_" ~ prop; args = teko::list::empty(); type_args = teko::list::empty() }
+    var mc = parser::MethodCall { receiver = recv; method = "__get_" ~ prop; args = teko::list::empty(); arg_names = teko::list::empty(); type_args = teko::list::empty() }
     type_method_call(mc, env, table)
 }
 
@@ -4944,7 +5072,7 @@ fn property_write_dispatch(fa: parser::FieldAccess, a: parser::Assign, pinfo: Pr
     if a.op != lexer::TokenKind::Assign {
         return error { message = $"a compound assignment on property '{fa.field}' is not supported yet — write `x.{fa.field} = x.{fa.field} <op> v` explicitly (§9 op= is a follow-up)" }
     }
-    var mc = parser::MethodCall { receiver = fa.receiver; method = "__set_" ~ fa.field; args = teko::list::push(teko::list::empty(), a.value); type_args = teko::list::empty() }
+    var mc = parser::MethodCall { receiver = fa.receiver; method = "__set_" ~ fa.field; args = teko::list::push(teko::list::empty(), a.value); arg_names = teko::list::push(teko::list::empty(), ""); type_args = teko::list::empty() }
     var call = match type_method_call(mc, env, table) { TExpr as te => te; error as e => return e }
     TypedStmt { node = TExprStmt { expr = call }; env = env }
 }
@@ -6443,6 +6571,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         var no_body: []TStatement = teko::list::empty()
         return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
+    match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
     var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }
@@ -6685,6 +6814,37 @@ fn ref_borrow_or_error(spine: Spine, target: str, value: TExpr): error | null {
  * @return TFunction | error  the typed function
  * @throws bad return/trailing value, or a label failure
  */
+/**
+ * check_param_defaults — enforce §9 C ruling 1 (owner sealed T2): every defaulted parameter's
+ * default value MUST be a compile-time constant expression. `resolve_defargs` inlines each default
+ * at the omitting call site, so a non-const default (a function call, a `var`/`let` read, an
+ * allocation) would smuggle a per-call side effect into an omitted argument. Each `default_expr` is
+ * typed in the function's parameter environment and forwarded to `is_const_expr` — the same D1
+ * const-grammar gate a `const` initializer passes — so the two share one definition of "const".
+ *
+ * @param f      the function/method whose parameter defaults are validated
+ * @param env    the environment with the function's parameters and generics in scope
+ * @param table  the resolved type table (with the fn's type-params folded in)
+ * @return       null when every default is a compile-time constant, else a located error
+ * @throws       when a defaulted parameter's `default_expr` is not a compile-time constant expression
+ * @since §9 C
+ */
+fn check_param_defaults(f: parser::Function, env: Env, table: TypeTable): error | null {
+    var i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        if f.params[i].has_default {
+            var te = match type_expr(f.params[i].default_expr, env, table) { TExpr as x => x; error as e => return e }
+            match is_const_expr(te, table, env) {
+                null => { }
+                error => return error { message = $"the default for parameter '{f.params[i].name}' must be a compile-time constant expression" }
+            }
+        }
+        i++
+    }
+    null
+}
+
 fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | error {
     var local = env
     var tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
@@ -6726,6 +6886,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
         var no_body: []TStatement = teko::list::empty()
         return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
+    match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
     var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: each `return e` matches `ret`
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: trailing value (when present) matches

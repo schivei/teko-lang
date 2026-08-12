@@ -46,10 +46,7 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
         return ParsedCallArgs { args = args; arg_names = arg_names; next = p + 1 }
     }
     loop {
-        // `name = expr` — a NAMED argument (DEFARGS rule D). Unambiguous: Teko assignment is
-        // statement-only (never an expression), so `Ident '=' …` at an arg position can only be
-        // a named arg, never a real assignment expression being passed as a value.
-        var is_named = is_kind_at(tokens, p, lexer::TokenKind::Ident) && is_kind_at(tokens, p + 1, lexer::TokenKind::Assign)
+        var is_named = is_kind_at(tokens, p, lexer::TokenKind::Ident) && is_kind_at(tokens, p + 1, lexer::TokenKind::Walrus)
         var aname = ""
         var ap = p
         if is_named {
@@ -556,7 +553,7 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
                 ParsedTypeArgs as ta => {
                     if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LParen) {
                         var mca = match parse_call_args(tokens, ta.next) { ParsedCallArgs as x => x; error as e => return e }
-                        node = Expr { kind = MethodCall { receiver = node; method = name; args = mca.args; type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }
+                        node = Expr { kind = MethodCall { receiver = node; method = name; args = mca.args; arg_names = mca.arg_names; type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }
                         p = mca.next
                         continue
                     }
@@ -565,11 +562,8 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
             }
         }
         if is_kind_at(tokens, p + 2, lexer::TokenKind::LParen) {
-            // (2026-07-01) named-call (DEFARGS) is NOT yet supported through MethodCall's `.method()`
-            // postfix form (today only builtin/flags-helper dispatch, not real OOP methods) —
-            // ca.arg_names is intentionally discarded here; revisit once OOP methods land.
             var ca = match parse_call_args(tokens, p + 2) { ParsedCallArgs as x => x; error as e => return e }
-            node = Expr { kind = MethodCall { receiver = node; method = name; args = ca.args; type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }
+            node = Expr { kind = MethodCall { receiver = node; method = name; args = ca.args; arg_names = ca.arg_names; type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }
             p = ca.next
         } else {
             node = Expr { kind = FieldAccess { receiver = node; field = name }; line = tokens[pos].line; col = tokens[pos].col }
