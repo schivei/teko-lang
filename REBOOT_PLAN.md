@@ -1273,7 +1273,7 @@ log(Ponto::distancia(a, b))          // forma estática-explícita (idêntica)
 //
 //   type Contador = struct {
 //       valor: i32
-//       fn incrementa(ref self): void { self.valor += 1 }   // muta a instância
+//       fn incrementa(ref self) { self.valor += 1 }   // muta a instância
 //   }
 //   c.incrementa()   // hoje retornaria nova cópia; com ref, muta c
 //

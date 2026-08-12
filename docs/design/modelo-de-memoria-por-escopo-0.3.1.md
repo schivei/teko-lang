@@ -696,7 +696,7 @@ pub fn residence_plan(f: checker::TFunction): ResidencePlan
  * @return       void
  * @since 0.3.1
  */
-pub fn region_enter(child: RegionHandle): void
+pub fn region_enter(child: RegionHandle)
 
 /**
  * region_leave — desempilha a região-corrente: a alocação default volta ao destino anterior (a
@@ -707,7 +707,7 @@ pub fn region_enter(child: RegionHandle): void
  * @return  void
  * @since 0.3.1
  */
-pub fn region_leave(): void
+pub fn region_leave()
 ```
 
 E a assinatura de runtime (C MANTIDA), §9: `tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b)`.

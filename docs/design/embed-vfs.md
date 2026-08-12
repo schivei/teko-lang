@@ -263,7 +263,7 @@ reuses `teko::build::output_is_tty(no_tty)` (`progress.tks:33`) and the `--no-tt
  * @return        nothing; best-effort cosmetic output
  * @since #embed (design-ahead)
  */
-fn print_mascot(no_tty: bool): void {
+fn print_mascot(no_tty: bool) {
     if !teko::build::output_is_tty(no_tty) { return }
     match teko::embed::FILES.read("docs/brand/mascot.ansi") {
         []byte as bytes => teko::io::write(teko::text::from_utf8_lossy(bytes))

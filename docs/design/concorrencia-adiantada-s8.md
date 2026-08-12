@@ -249,7 +249,7 @@ pub unsafe extern fn sys_thread_join(tid: u64, retval_out: u64): i32 = "pthread_
  * @since S8
  */
 #os("linux")
-pub unsafe extern fn sys_thread_exit(retval: u64): void = "pthread_exit"
+pub unsafe extern fn sys_thread_exit(retval: u64) = "pthread_exit"
 
 /**
  * O identificador da thread chamadora — a chave com que uma raia se reconhece na tabela de raias.
@@ -414,7 +414,7 @@ avança em vez de ser contornado.**
  * @return     nada; a chamada não retorna nem para a raia nem para o processo
  * @since S8
  */
-pub fn panic(msg: str): void
+pub fn panic(msg: str)
 
 /**
  * Registra a raia chamadora como guardada, ligando o seu identificador de thread à casa de
@@ -430,7 +430,7 @@ pub fn panic(msg: str): void
  * @return      nada
  * @since S8
  */
-pub unsafe fn guard_lane(slot: ptr<byte>): void
+pub unsafe fn guard_lane(slot: ptr<byte>)
 
 /**
  * Desfaz `guard_lane` para a thread chamadora — o caminho normal de saída de uma raia que terminou
@@ -441,7 +441,7 @@ pub unsafe fn guard_lane(slot: ptr<byte>): void
  * @return  nada
  * @since S8
  */
-pub unsafe fn unguard_lane(): void
+pub unsafe fn unguard_lane()
 ```
 
 ### 4.3 Como a saída é atribuída ao teste certo

@@ -20,7 +20,7 @@ cross-front keystone, §2/§8) and `al-wave-crumbs.md` (F1/F2/F3 foundation).
   `src/checker/borrow.tks:1-40` (SP-1a) e `src/checker/typer.tks` (auto-ref).
 - Codegen + native: `git log` `e075aefb` "lower TBorrow (&x) as lower_addr_of_place in native
   backend".
-- **A PONTE de coexistência (AL-Wave F1.5) JÁ EXISTE**: `pub fn grow<T>(ref x: []T, v: T): void`
+- **A PONTE de coexistência (AL-Wave F1.5) JÁ EXISTE**: `pub fn grow<T>(ref x: []T, v: T)`
   em `src/list/list.tks:17`, corpo write-through `x.value = teko::list::push(x.value, v)` —
   behavior-idêntico ao value-form, **cap-in-object explicitamente adiado para "F3+AL3"**
   (`src/list/list.tks:9,14`). O bridge está pronto e ESPERA a primitiva que F3 entrega.
@@ -298,7 +298,7 @@ pub type SliceType = struct { element: TypeExpr; initial_cap: TypeExpr | null }
  * @throws   pânico se a capacidade de backing estourar u64 (M.1 fail-loud)
  * @since 0.3.1 (#F3.3 — cap-in-object; corpo de list.tks:17 rewired para a primitiva in-place)
  */
-pub fn grow<T>(ref x: []T, v: T): void
+pub fn grow<T>(ref x: []T, v: T)
 ```
 
 O seam C que F3.3 adiciona ao `teko_rt.h` (C mantido — a assinatura que o codegen chama):

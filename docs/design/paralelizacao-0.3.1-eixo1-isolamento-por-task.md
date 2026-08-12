@@ -164,7 +164,7 @@ stdout do pai. É o que torna a atribuição imune ao paralelismo: pela casa, nu
  * @return void
  * @since 0.3.1
  */
-extern fn task_reset(): void = "tk_task_reset" from "teko_rt"
+extern fn task_reset() = "tk_task_reset" from "teko_rt"
 ```
 
 O binding `tk_task_reset(tk_task*)` recebe a task; o wrapper Teko (`task_reset`) passa

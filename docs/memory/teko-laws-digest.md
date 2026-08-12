@@ -639,7 +639,7 @@ wasm nesta árvore encontrou um defeito da remoção, não uma migalha deixada d
 
 ### Duas leis em que EU escorreguei, registadas para não se repetir
 
-Propus ao dono `fn main(): void` e `fn main(): i32`, *"exatamente como o `Main` do C#"*. Ele
+Propus ao dono `fn main()` e `fn main(): i32`, *"exatamente como o `Main` do C#"*. Ele
 cortou:
 
 > Não temos `void` eu os bani, do mesmo modo, não temos sobrecarga de função/metodo, também os bani

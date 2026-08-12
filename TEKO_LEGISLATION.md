@@ -410,7 +410,7 @@ because redefinition is a legislative act.)*
 - **IO is slurp (whole-file `[]byte`), not streams — for the seed.** `read_file(path): []byte | error`,
   (open, read all, close), `write_file(path, []byte): error?` (↺ superseded the **illegal**
   `-> () | Error` void-in-variant — a fallible-no-value fn is `error?`, null = ok / `error` = failure,
-  B.37), `write_err([]byte): void` (stderr; ↺ `-> void` return marker, B.37). **Streams are deferred**
+  B.37), `write_err([]byte)` (stderr; ↺ `-> void` return marker, B.37). **Streams are deferred**
   (they enter when large inputs justify the weight). `read_file` returns **raw `[]byte`** (octets), not
   `[]u8` — a file *is* bytes; interpreting them as text (UTF-8 → `char` → `str`) is a separate step
   (`byte` is distinct from `u8` — B.12). **Governing Law: M.5** (small files don't justify stream weight)

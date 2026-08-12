@@ -367,7 +367,7 @@ pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86): EncodedFuncX86 | error
  * @return       void
  * @since 0.3.1
  */
-pub fn region_enter(child: /* handle de região */ ): void
+pub fn region_enter(child: /* handle de região */ )
 
 /**
  * region_leave — desempilha a região-corrente: a alocação default volta ao seu
@@ -377,7 +377,7 @@ pub fn region_enter(child: /* handle de região */ ): void
  * @return  void
  * @since 0.3.1
  */
-pub fn region_leave(): void
+pub fn region_leave()
 ```
 
 Funções existentes que o driver fundido TOCA (chama, não edita): `select_lfunc_x86`

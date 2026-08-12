@@ -273,7 +273,7 @@ semântica de valor (o `cap`-no-objeto vem em F3/AL3; aqui a ponte só troca a a
  * @throws   panic if cap overflows u64 (M.1 fail-loud) — reached only once F3's cap-doubling lands
  * @since 0.x (#AL/F1.5 bridge; in-place cap = AL3)
  */
-pub fn grow[T](x: &[]T, v: T): void
+pub fn grow[T](x: &[]T, v: T)
 ```
 
 **F1.6 — Fixtures + ritual.** `.tkt` colocados (o padrão do repo: `src/<mod>/<mod>_test.tkt`, testes

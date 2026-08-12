@@ -597,7 +597,7 @@ pub fn recv<T>(c: chan<T>): T | null
  * @return   nada
  * @since 0.3.2
  */
-pub fn chan_close<T>(c: chan<T>): void
+pub fn chan_close<T>(c: chan<T>)
 ```
 
 ### 6.2 O tipo transportado — o veredicto de um teste é um VALOR, não texto
@@ -787,7 +787,7 @@ guarda uma raia longa: guarda UM teste, porque R1 manda uma thread por `#test`):
  * @return       nada
  * @since 0.3.2
  */
-fn gate_guard_begin(index: u64): void
+fn gate_guard_begin(index: u64)
 
 /**
  * gate_guard_end — desarma a guarda da thread chamadora: o caminho normal de saída de um teste que
@@ -800,7 +800,7 @@ fn gate_guard_begin(index: u64): void
  * @return  nada
  * @since 0.3.2
  */
-fn gate_guard_end(): void
+fn gate_guard_end()
 ```
 
 **O que a guarda deposita, e onde.** A linha da tabela é `{thread_id, index, state, code, message,
@@ -897,7 +897,7 @@ A correcção é de UMA linha por asserção: `teko::assert::*` passa a chamar u
  * @return         nada; a chamada não retorna nem para o teste nem para o processo
  * @since 0.3.2
  */
-pub fn assert_fail(message: str, site: str): void
+pub fn assert_fail(message: str, site: str)
 ```
 
 #### 6.5.6 `exit` dentro de um teste — o RECORD distingue, a POLÍTICA decide
@@ -1328,7 +1328,7 @@ sem uma linha de trabalho extra, porque a bifurcação está no `panic` que toda
 
 | # | sítio | o que é | porque NUNCA bifurca |
 |---|---|---|---|
-| 1 | `rt_abort()` — `exp extern fn rt_abort(): void = "abort" from "c"` (`src/runtime/teko_rt.tks`) | o `abort` da libc, declarado verbatim | é o FUNDO. Se bifurcasse, a bifurcação não teria fundo nenhum e o panic não-guardado deixaria de abortar |
+| 1 | `rt_abort()` — `exp extern fn rt_abort() = "abort" from "c"` (`src/runtime/teko_rt.tks`) | o `abort` da libc, declarado verbatim | é o FUNDO. Se bifurcasse, a bifurcação não teria fundo nenhum e o panic não-guardado deixaria de abortar |
 | 2 | o builtin injectado `abort` (`src/checker/scope.tks`, *"teko::abort — host abort FFI bottom"*) | a mesma coisa, pela via do builtin | quem escreve `abort()` pediu o abort do host, não o panic do Teko. Bifurcá-lo seria mudar o significado de uma chamada directa |
 | 3 | `exit(code)` da libc, dentro de `tk_exit` (`src/runtime/teko_rt.c`) | a saída real do processo | é o FUNDO de P-B, pela mesma razão de (1) |
 | 4 | `_exit(127)` no filho do `fork` após `execvp` falhar (`teko_rt.c`, dois sítios) | a saída do filho que não conseguiu executar | corre **noutro processo**, entre `fork` e `exec`, onde só é legal chamar funções async-signal-safe. Uma bifurcação aqui escreveria numa tabela de guardas que pertence ao PAI |
@@ -1985,7 +1985,7 @@ primitiva escondida não passa numa palavra que toda a gente vai escrever.
  * @return        nada; a chamada não retorna
  * @since (a decidir — ver §17.10)
  */
-pub fn cancel(reason: error | null): void
+pub fn cancel(reason: error | null)
 ```
 
 ### 18.2 Como é que `cancel` sabe onde está? **É a MESMA tabela. Verificado, não presumido.**
