@@ -68,6 +68,10 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error 
         var op = if is_kind_at(tokens, pos + 1, lexer::TokenKind::PlusPlus) { lexer::TokenKind::PlusEq } else { lexer::TokenKind::MinusEq }
         return Parsed<Statement> { node = Assign { kind = AssignKind::Simple; name = tokens[pos].text; op = op; value = Expr { kind = Number { is_float = false; value = numint_of_u64(1); fval = 0.0 }; line = 0; col = 0 }; deref = false; target = no_expr() }; next = pos + 2 }
     }
+    if is_block_stmt_head(tokens, pos) {
+        var blk = match parse_block(tokens, pos) { ParsedList<Statement> as x => x; error as e => return e }
+        return Parsed<Statement> { node = BlockStmt { body = blk.items }; next = blk.next }
+    }
     // (#88) a general FIELD/deref-assign target: parse a full postfix EXPRESSION, then — if it is a
     // field-access path (`recv.field`, possibly nested / indexed) AND an assign-op follows — treat it as
     // an assignment target. Subsumes the old hardcoded `name.value op= …` (MEM-1b-ii) shape: the TYPER
@@ -88,6 +92,22 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error 
         return Parsed<Statement> { node = Assign { kind = AssignKind::Index; name = ""; op = iop; value = iv.node; deref = false; target = e.node }; next = iv.next }
     }
     Parsed<Statement> { node = ExprStmt { expr = e.node }; next = e.next }
+}
+
+/**
+ * is_block_stmt_head — does `pos` open a bare `{ … }` BLOCK STATEMENT (0.3.1 §6)? True iff the token
+ * at `pos` is a `{`. A leading `{` is unambiguous at statement position: a struct literal is led by a
+ * type NAME (an Ident), never a bare `{`, and a destructure `{ … }` only ever follows a binding
+ * keyword (`let`/`mut`/`var`/`const`/`ref`), all dispatched before this — so a `{` here can only be a
+ * block. The dispatcher tests this BEFORE the expression-statement fallback, which is what otherwise
+ * rejects a leading `{` with `expected an expression`.
+ *
+ * @param tokens  the token stream
+ * @param pos     the candidate statement-head index
+ * @return        true iff `pos` opens a bare block statement
+ */
+fn is_block_stmt_head(tokens: []lexer::Token, pos: u64): bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::LBrace)
 }
 
 /**
