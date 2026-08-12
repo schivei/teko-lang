@@ -1,0 +1,175 @@
+/**
+ * A singleton service — its instance lives in the arena root slot (`svc_scope_expr` seam) and every
+ * `svc<Clock>()` resolves to the same cached instance at comptime (§7 Path 1).
+ *
+ * @since 0.3.1 (§7)
+ */
+service Clock singleton {
+    /**
+     * Construct the service — the single `static` ctor `svc<Clock>()` inlines at the call site.
+     * @return self  the new `Clock`
+     */
+    pub static fn ctor(): Clock { return Clock { } }
+
+    /**
+     * @return i64  the current instant (a deterministic stub)
+     */
+    pub fn now(): i64 { return 42 }
+}
+
+/**
+ * A transient service — a fresh instance is built per `svc<Counter>()` (no arena slot).
+ *
+ * @since 0.3.1 (§7)
+ */
+service Counter transient {
+    /**
+     * @return self  a fresh `Counter`
+     */
+    pub static fn ctor(): Counter { return Counter { } }
+
+    /**
+     * @return i64  the counter's fixed reading
+     */
+    pub fn value(): i64 { return 7 }
+}
+
+/**
+ * A scoped service — its instance lives in the enclosing block/frame region (`svc_scope_expr` seam).
+ *
+ * @since 0.3.1 (§7)
+ */
+service Buf scoped {
+    /**
+     * @return self  a fresh `Buf`
+     */
+    pub static fn ctor(): Buf { return Buf { } }
+
+    /**
+     * @return i64  the buffer's fixed capacity
+     */
+    pub fn cap(): i64 { return 13 }
+}
+
+/**
+ * A greeting contract — resolved by `svc<Greeter>(key)`, the key naming the implementing service.
+ *
+ * @since 0.3.1 (§7)
+ */
+type Greeter = interface {
+    /**
+     * @return i64  the greeting's code
+     */
+    fn greet(): i64
+}
+
+/**
+ * An English greeter service, registered for `Greeter` under key "EnHi" (its bare name).
+ *
+ * @since 0.3.1 (§7)
+ */
+service EnHi singleton & Greeter {
+    /**
+     * @return self  a fresh `EnHi`
+     */
+    pub static fn ctor(): EnHi { return EnHi { } }
+
+    /**
+     * @return i64  the English greeting code
+     */
+    pub fn greet(): i64 { return 5 }
+}
+
+/**
+ * A French greeter service, registered for `Greeter` under key "FrHi".
+ *
+ * @since 0.3.1 (§7)
+ */
+service FrHi singleton & Greeter {
+    /**
+     * @return self  a fresh `FrHi`
+     */
+    pub static fn ctor(): FrHi { return FrHi { } }
+
+    /**
+     * @return i64  the French greeting code
+     */
+    pub fn greet(): i64 { return 9 }
+}
+
+/**
+ * svc_singleton_resolves — `svc<Clock>()` (comptime Path 1) resolves the singleton and reads it.
+ *
+ * @return i64  42
+ * @since 0.3.1 (§7)
+ */
+pub fn svc_singleton_resolves(): i64 {
+    var c = svc<Clock>()
+    return c.now()
+}
+
+/**
+ * svc_transient_fresh — two `svc<Counter>()` build two fresh transient instances.
+ *
+ * @return i64  14
+ * @since 0.3.1 (§7)
+ */
+pub fn svc_transient_fresh(): i64 {
+    var a = svc<Counter>()
+    var b = svc<Counter>()
+    return a.value() + b.value()
+}
+
+/**
+ * svc_scoped_in_block — a `scoped` service resolved inside a bare block.
+ *
+ * @return i64  13
+ * @since 0.3.1 (§7)
+ */
+pub fn svc_scoped_in_block(): i64 {
+    var out: i64 = 0
+    {
+        var b = svc<Buf>()
+        out = b.cap()
+    }
+    return out
+}
+
+/**
+ * has_svc_true_then_svc — `has_svc<Clock>()` guards a `svc<Clock>()` resolution.
+ *
+ * @return i64  42
+ * @since 0.3.1 (§7)
+ */
+pub fn has_svc_true_then_svc(): i64 {
+    if has_svc<Clock>() {
+        return svc<Clock>().now()
+    }
+    return 0
+}
+
+/**
+ * has_svc_false_unregistered — a comptime `has_svc` for an unregistered key folds to false.
+ *
+ * @return i64  0
+ * @since 0.3.1 (§7)
+ */
+pub fn has_svc_false_unregistered(): i64 {
+    if has_svc<Counter>("nope") {
+        return 1
+    }
+    return 0
+}
+
+/**
+ * svc_keyed_disambiguates — two `Greeter` providers under distinct const keys resolve independently.
+ *
+ * @return i64  14 (5 + 9)
+ * @since 0.3.1 (§7)
+ */
+pub fn svc_keyed_disambiguates(): i64 {
+    var en = svc<Greeter>("EnHi")
+    var fr = svc<Greeter>("FrHi")
+    return en.greet() + fr.greet()
+}
+
