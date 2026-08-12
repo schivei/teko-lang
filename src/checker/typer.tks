@@ -2845,11 +2845,136 @@ fn require_narrowed(t: Type): error {
 }
 
 /**
+ * PropInfo — the accessor surface of a property `prop` on a resolved type: whether a getter and/or
+ * a setter exist, and the accessors themselves (for the return/value type and the dispatch name).
+ * Presence decides the mode (§9 ruling 1): get-only = read-only, set-only = write-only, both = rw.
+ *
+ * @field has_get  a `get prop` accessor exists on the type's effective method surface
+ * @field has_set  a `set prop` accessor exists on the type's effective method surface
+ * @field getter   the getter Function (valid iff has_get)
+ * @field setter   the setter Function (valid iff has_set)
+ */
+pub type PropInfo = struct { has_get: bool; has_set: bool; getter: parser::Function; setter: parser::Function }
+
+/**
+ * property_surface_of — the effective method surface a property probe scans for a resolved type:
+ * the contract methods for an interface/trait receiver, the effective class methods for a class,
+ * or the struct's own methods. Returns null when the type has no method surface (so `find_property`
+ * cleanly falls through to null for a non-property member).
+ *
+ * @param decl   the receiver's resolved type declaration
+ * @param name   the receiver's resolved type name
+ * @param table  the folded type table
+ * @return       the method surface to scan, or null when the type has none
+ */
+fn property_surface_of(decl: parser::TypeDecl, name: str, table: TypeTable): []parser::Function | null {
+    match decl.body {
+        parser::InterfaceBody => match iface_methods_by_name(name, table) { []parser::Function as f => f; error => null }
+        parser::TraitBody => match iface_methods_by_name(name, table) { []parser::Function as f => f; error => null }
+        parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error => null }
+        parser::StructBody as sb => sb.methods
+        _ => null
+    }
+}
+
+/**
+ * find_property — the property `prop` declared on the resolved type `type_name` (or `null` when
+ * `prop` is not a property of it). Scans the type's EFFECTIVE method surface for accessors flagged
+ * `is_getter`/`is_setter` whose `accessor_prop == prop`. The flags (never the bare name) are the
+ * authority, so an ordinary method that merely happens to be named `__get_x` is NOT a property.
+ * Zero accessors exist in the corpus, so this returns `null` for every existing field access —
+ * the use-site desugars run their historic path (additive-inert).
+ *
+ * @param type_name  the receiver's resolved type name
+ * @param prop       the accessed member name
+ * @param table      the folded type table
+ * @return           the property's accessor surface, or null when `prop` is not a property
+ */
+fn find_property(type_name: str, prop: str, table: TypeTable): PropInfo | null {
+    var decl = match type_table_find(table, type_name, "") { parser::TypeDecl as td => td; error => return null }
+    var methods = match property_surface_of(decl, type_name, table) { []parser::Function as f => f; null => return null }
+    if methods.len == 0 to u64 { return null }
+    var has_get = false
+    var has_set = false
+    var getter = methods[0]
+    var setter = methods[0]
+    var i = 0 to u64
+    loop {
+        if i >= methods.len { break }
+        var m = methods[i]
+        if m.accessor_prop == prop {
+            if m.is_getter { has_get = true; getter = m }
+            else if m.is_setter { has_set = true; setter = m }
+        }
+        i = i + 1
+    }
+    if !has_get && !has_set { return null }
+    PropInfo { has_get = has_get; has_set = has_set; getter = getter; setter = setter }
+}
+
+/**
+ * class_field_visible_to — is a class field owned by `owner` reachable from the code currently being
+ * typed? A private (default) field is reachable only from its OWN declaring class's code, or — if
+ * `intern` — a subclass's too (W10b.CLASS residual). Wraps `member_accessible` against the enclosing
+ * `env.owner_type`, naming the intent the field-read visibility gate enforces.
+ *
+ * @param owner  the field's declaring-class ownership record
+ * @param env    the enclosing type environment (its `owner_type` is the accessing code's class)
+ * @param table  the folded type table
+ * @return       true iff the field is accessible from the current code
+ */
+fn class_field_visible_to(owner: MemberOwner, env: Env, table: TypeTable): bool {
+    member_accessible(owner, env.owner_type, table)
+}
+
+/**
+ * desugar_getter — type `recv.prop` as the accessor CALL `recv.__get_prop()` (§9 ruling 3,
+ * field-like read). Synthesizes a `parser::MethodCall` and routes it through `type_method_call`, so
+ * an interface receiver dispatches through the fat-ptr vtable and a struct/class receiver takes the
+ * direct/virtual method path — no new codegen. The result type is the getter's return type.
+ *
+ * @param recv   the RAW receiver expression (`recv.prop`'s `recv`)
+ * @param prop   the property name
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed accessor-call TExpr (a `TCall`), or a type error
+ */
+fn desugar_getter(recv: parser::Expr, prop: str, env: Env, table: TypeTable): TExpr | error {
+    var mc = parser::MethodCall { receiver = recv; method = "__get_" ~ prop; args = teko::list::empty(); type_args = teko::list::empty() }
+    type_method_call(mc, env, table)
+}
+
+/**
+ * property_read_or — resolve a field-absence into a property READ or re-raise the field error. Only
+ * called AFTER the field path failed by ABSENCE (never on a visibility failure), so a private field
+ * still errors as a field. A getter yields the desugared call; a set-only (write-only) property is a
+ * precise write-only error; a non-property re-raises the original field error unchanged (inertness).
+ *
+ * @param orig_err   the original field-absence error to re-raise for a non-property member
+ * @param type_name  the receiver's resolved type name
+ * @param recv       the RAW receiver expression
+ * @param prop       the accessed member name
+ * @param env        the typing environment
+ * @param table      the folded type table
+ * @return           the typed getter call, or an error (write-only, or the re-raised field error)
+ * @throws           when the member is a write-only property or is neither field nor property
+ */
+fn property_read_or(orig_err: error, type_name: str, recv: parser::Expr, prop: str, env: Env, table: TypeTable): TExpr | error {
+    match find_property(type_name, prop, table) {
+        PropInfo as pinfo => {
+            if pinfo.has_get { return desugar_getter(recv, prop, env, table) }
+            return error { message = $"property '{prop}' is write-only — it has a setter but no getter" }
+        }
+        null => orig_err
+    }
+}
+
+/**
  * type_field_access — type `recv.field`. Handles the non-struct receivers FIRST (`str`/slice
  * `.len`, `error`'s carrier fields, `Ref<T>.value`), then requires a `T | null` receiver be
  * narrowed before `.` is used on it (NP-OOP, issue #116 — `require_narrowed` names WHY and
  * points at the narrowing match instead of the generic struct message), and finally resolves an
- * ordinary struct/class field.
+ * ordinary struct/class field — or, when the member is absent as a field, a property GETTER (§9).
  *
  * @param fa     the syntactic field access
  * @param env    the enclosing type environment
@@ -2900,23 +3025,29 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable): TExpr
         parser::TypeDecl as td => td
         error => return error { message = $"unknown type for field access: {name}" }
     }
-    var ft = match decl.body {
-        parser::StructBody as sb => match field_type(sb.fields, fa.field, table, type_ns_of(table, name)) { Type as t => t; error as e => return e }
-        parser::ClassBody as cb => {
-            var t = match effective_class_fields(cb, table) { []parser::Field as fs => match field_type(fs, fa.field, table, type_ns_of(table, name)) { Type as t => t; error as e => return e }; error as e => return e }   // (W10b.CLASS increment 2)
-            // (W10b.CLASS residual — intern visibility) a private (default) field is reachable
-            // only from its OWN declaring class's code, or — if `intern` — a subclass's too.
-            var owner = match find_field_owner(name, table, fa.field) { MemberOwner as mo => mo; error as e => return e }
-            if !member_accessible(owner, env.owner_type, table) {
-                return error { message = $"field '{fa.field}' is private to {owner.declaring_class}" }
+    match decl.body {
+        parser::StructBody as sb => {
+            match field_type(sb.fields, fa.field, table, type_ns_of(table, name)) {
+                Type as t => return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = t; line = 0; col = 0 }
+                error as e => return property_read_or(e, name, fa.receiver, fa.field, env, table)
             }
-            t
         }
-        // (W10b.D3) an interface value is data + vtable — the contract exposes METHODS only.
-        parser::InterfaceBody => return error { message = "an interface value exposes no fields — only its contract methods" }
+        parser::ClassBody as cb => {
+            var fs = match effective_class_fields(cb, table) { []parser::Field as x => x; error as e => return e }
+            match field_type(fs, fa.field, table, type_ns_of(table, name)) {
+                Type as t => {
+                    var owner = match find_field_owner(name, table, fa.field) { MemberOwner as mo => mo; error as e => return e }
+                    if !class_field_visible_to(owner, env, table) {
+                        return error { message = $"field '{fa.field}' is private to {owner.declaring_class}" }
+                    }
+                    return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = t; line = 0; col = 0 }
+                }
+                error as e => return property_read_or(e, name, fa.receiver, fa.field, env, table)
+            }
+        }
+        parser::InterfaceBody => return property_read_or(error { message = "an interface value exposes no fields — only its contract methods" }, name, fa.receiver, fa.field, env, table)
         _ => return error { message = $"type {name} is not a struct (no fields)" }
     }
-    TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = ft; line = 0; col = 0 }
 }
 
 // ---- `?.` safe navigation (NP-OOP, issue #116) — the shared checker DESUGAR ----
@@ -4683,6 +4814,62 @@ fn field_write_root_writable(receiver: parser::Expr, env: Env): error | null {
 }
 
 /**
+ * property_write_dispatch — emit the setter CALL for a property WRITE `recv.prop = value` (§9 ruling
+ * 3, field-like write). Requires a setter (a get-only property is read-only); a compound `op=` is a
+ * follow-up (owner decision — only plain `=` in this cut). Synthesizes `recv.__set_prop(value)` and
+ * routes it through `type_method_call` (which coerces the value into the setter's parameter type and
+ * dispatches interface/struct/class), then wraps the void call in a `TExprStmt`.
+ *
+ * @param fa     the field-access LHS (`recv.prop`)
+ * @param a      the raw assignment (carries `a.op` and the RHS `a.value`)
+ * @param pinfo  the resolved property surface (has_get/has_set + accessors)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed setter call wrapped in a `TypedStmt`, or a type error
+ * @throws       when the property is read-only, the assignment is a compound `op=`, or the setter
+ *               call fails to type
+ */
+fn property_write_dispatch(fa: parser::FieldAccess, a: parser::Assign, pinfo: PropInfo, env: Env, table: TypeTable): TypedStmt | error {
+    if !pinfo.has_set {
+        return error { message = $"property '{fa.field}' is read-only — it has a getter but no setter" }
+    }
+    if a.op != lexer::TokenKind::Assign {
+        return error { message = $"a compound assignment on property '{fa.field}' is not supported yet — write `x.{fa.field} = x.{fa.field} <op> v` explicitly (§9 op= is a follow-up)" }
+    }
+    var mc = parser::MethodCall { receiver = fa.receiver; method = "__set_" ~ fa.field; args = teko::list::push(teko::list::empty(), a.value); type_args = teko::list::empty() }
+    var call = match type_method_call(mc, env, table) { TExpr as te => te; error as e => return e }
+    TypedStmt { node = TExprStmt { expr = call }; env = env }
+}
+
+/**
+ * property_write — probe whether the assignment target `recv.prop` is a PROPERTY (§9) and, if so,
+ * dispatch it through its setter; otherwise return null so the historic field-write path runs
+ * byte-for-byte. Probed FIRST (before the LHS is typed as a field read), because a property LHS is
+ * NOT a real field access — typing it as a field would desugar the getter and break the write. Safe
+ * to probe first: a property `prop` and a homonymous field never coexist (the backing is `_prop`),
+ * and `find_property` returns null for every real field, so this is inert on the corpus. A receiver
+ * that does not resolve to a Named type falls through to the historic path unchanged.
+ *
+ * @param fa     the field-access LHS (`recv.prop`)
+ * @param a      the raw assignment
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed setter statement, null (not a property — historic path), or a type error
+ * @throws       when the target is a read-only property or the setter call fails to type
+ */
+fn property_write(fa: parser::FieldAccess, a: parser::Assign, env: Env, table: TypeTable): TypedStmt | null | error {
+    var recv = match type_expr(fa.receiver, env, table) { TExpr as te => te; error => return null }
+    var name = match recv.type { Named as n => n.name; _ => return null }
+    match find_property(name, fa.field, table) {
+        PropInfo as pinfo => match property_write_dispatch(fa, a, pinfo, env, table) {
+            TypedStmt as ts => ts
+            error as e => e
+        }
+        null => null
+    }
+}
+
+/**
  * type_field_assign — type a FIELD-target assignment `recv.field op= value` (#88). The parser routes
  * EVERY `recv.field = …` here; this branch decides Ref-deref versus a struct/class field WRITE.
  *
@@ -4706,6 +4893,12 @@ fn field_write_root_writable(receiver: parser::Expr, env: Env): error | null {
  *               value does not match the field type
  */
 fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt | error {
+    var probe_fa = match a.target.kind { parser::FieldAccess as fa => fa; _ => return error { message = "assignment target is not a field access (internal: parser guarantees a field LHS)" } }
+    match property_write(probe_fa, a, env, table) {
+        TypedStmt as ts => return ts
+        error as e => return e
+        null => { }
+    }
     var lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
     var lhs_fa = match a.target.kind { parser::FieldAccess as fa => fa; _ => return error { message = "assignment target is not a field access (internal: parser guarantees a field LHS)" } }
     var recv = match type_expr(lhs_fa.receiver, env, table) { TExpr as te => te; error as e => return e }

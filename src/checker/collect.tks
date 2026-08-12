@@ -1194,28 +1194,46 @@ fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Func
  * @return null when `req` is satisfied
  * @throws when `req` is missing, its signature mismatches, it restates a default, or is not `pub`
  */
+/**
+ * requirement_desc — the human description of an interface requirement for a conformance diagnostic:
+ * `getter for property '<prop>'` / `setter for property '<prop>'` for a §9 accessor requirement, and
+ * the historic `method '<name>'` for an ordinary method. The non-accessor spelling reproduces the
+ * old message text byte-for-byte (the corpus has no accessor requirement — additive-inert), so the
+ * accessor case merely hides the synthetic `__get_`/`__set_` name behind the property wording.
+ *
+ * @param req  the interface's required method (an accessor carries is_getter/is_setter/accessor_prop)
+ * @return     the requirement's human description
+ * @since §9 properties
+ */
+fn requirement_desc(req: parser::Function): str {
+    if req.is_getter { return $"getter for property '{req.accessor_prop}'" }
+    if req.is_setter { return $"setter for property '{req.accessor_prop}'" }
+    $"method '{req.name}'"
+}
+
 fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, req: parser::Function, table: TypeTable, members_all_public: bool): error | null {
+    var desc = requirement_desc(req)
     var mi = 0
     loop {
         if mi >= own_methods.len { break }
         if own_methods[mi].name == req.name {
             if !method_sig_matches(req, own_methods[mi], table, type_ns, type_name) {
-                return error { message = $"'{type_name}' method '{req.name}' does not match interface '{iname}'s signature" }
+                return error { message = $"'{type_name}' {desc} does not match interface '{iname}'s signature" }
             }
             var restated = default_restated_param(req.params, own_methods[mi].params)
-            if restated != "" { return error { message = $"'{type_name}' method '{req.name}' must not restate the default for '{restated}' — interface '{iname}' owns its default" } }
+            if restated != "" { return error { message = $"'{type_name}' {desc} must not restate the default for '{restated}' — interface '{iname}' owns its default" } }
             if !members_all_public {
                 match own_methods[mi].vis {
                     parser::Visibility::Pub => { }
                     parser::Visibility::Exp => { }
-                    _ => return error { message = $"'{type_name}' method '{req.name}' must be `pub` to satisfy interface '{iname}'" }
+                    _ => return error { message = $"'{type_name}' {desc} must be `pub` to satisfy interface '{iname}'" }
                 }
             }
             return null
         }
         mi++
     }
-    error { message = $"'{type_name}' does not implement interface '{iname}' — missing method '{req.name}'" }
+    error { message = $"'{type_name}' does not implement interface '{iname}' — missing {desc}" }
 }
 
 /**
