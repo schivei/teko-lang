@@ -502,7 +502,29 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         }
         return Parsed<Expr> { node = Expr { kind = PathExpr { path = pp.node }; line = tokens[pos].line; col = tokens[pos].col }; next = pp.next }
     }
+    if allow_struct && k == lexer::TokenKind::LBrace {
+        return parse_block_expr(tokens, pos)
+    }
     err_at(tokens, pos, "expected an expression")
+}
+
+/**
+ * parse_block_expr — a LEADING `{` opens a Block-B in expression position (§9 E, ruling 7); `pos` is
+ * at the `{`. Reuses `parse_block` — the very same body a closure `{ … }` parses — so no new parsing
+ * logic: the block's statements are collected and its trailing statement's value becomes its result.
+ * Gated by `allow_struct` at the call site so it does not steal the `{` that opens an `if`/`match`
+ * scrutinee block; §9 B construction (which always carries a type prefix) has already been dispatched
+ * above, so a `{` with no path before it is unambiguously a block.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the opening `{`
+ * @return        the parsed Block-B expression + the index past its closing `}`, or an honest stop
+ * @throws        propagated from `parse_block` on a malformed block body
+ * @since         §9 E
+ */
+fn parse_block_expr(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
+    var blk = match parse_block(tokens, pos) { ParsedList<Statement> as x => x; error as e => return e }
+    Parsed<Expr> { node = Expr { kind = Block { body = blk.items }; line = tokens[pos].line; col = tokens[pos].col }; next = blk.next }
 }
 
 // THE EXPRESSION ENTRY — descends the whole ladder (P2 complete: or → and →

@@ -41,6 +41,36 @@ pub fn empty_lenv(): LEnv {
     }
 }
 
+/**
+ * lenv_prefix — a copy of `env` keeping only its first `n` entries across all seven parallel arrays
+ * (§9 E). A Block-B lowers INLINE and threads the enclosing `LEnv`: its own block-local bindings are
+ * APPENDED (`lenv_bind`, indices >= the enclosing length) while a write to an enclosing scalar updates
+ * that scalar's entry IN PLACE (`lenv_reassign`, `list_set_u32` on the shared prefix). Truncating the
+ * post-block env to the enclosing length therefore drops the block-local names (they do not leak past
+ * the closing brace) while preserving every enclosing scalar's post-block VReg — so `var s = { acc =
+ * acc + 1; acc }` leaves `acc`'s reassignment visible to the code that follows.
+ *
+ * @param env  the post-block environment (enclosing prefix + appended block-locals)
+ * @param n    the enclosing environment's length (the truncation point)
+ * @return     `env` restricted to its first `n` entries
+ * @since      §9 E
+ */
+fn lenv_prefix(env: LEnv, n: u64): LEnv {
+    var out = empty_lenv()
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = LEnv {
+            names = teko::list::push(out.names, env.names[i]); vregs = teko::list::push(out.vregs, env.vregs[i])
+            len_vregs = teko::list::push(out.len_vregs, env.len_vregs[i]); has_len = teko::list::push(out.has_len, env.has_len[i])
+            is_slot = teko::list::push(out.is_slot, env.is_slot[i])
+            is_scalar_slot = teko::list::push(out.is_scalar_slot, env.is_scalar_slot[i]); slot_ltype = teko::list::push(out.slot_ltype, env.slot_ltype[i])
+        }
+        i++
+    }
+    out
+}
+
 /** lenv_bind — extend `env` with (name -> vreg), a SCALAR (non-fat) binding. A later binding
     of the same name shadows the earlier one (lookup scans newest-first). */
 pub fn lenv_bind(env: LEnv, name: str, vreg: u32): LEnv {
@@ -1807,8 +1837,39 @@ pub fn lower_expr(ctx: LowerCtx, e: checker::TExpr): Lowered | error {
         checker::TMatchExpr as mx => lower_match(ctx, e, mx)
         checker::TLambda as lam => lower_lambda(ctx, e, lam)
         checker::TBorrow as bw => lower_addr_of_place(ctx, bw.operand)
+        checker::TBlockExpr as blk => lower_block_expr(ctx, e, blk)
         _ => error { message = teko::str::concat("native backend N1: ", texpr_kind_name(e), " not yet lowered (N2)") }
     }
+}
+
+/**
+ * lower_block_expr — lower a Block-B in value position (§9 E, ruling 7). The block runs INLINE in
+ * the enclosing frame: every statement but the last lowers as an ordinary effect-only statement
+ * (`lower_block_prefix`), then the trailing statement is the block's tail VALUE
+ * (`lower_tail_stmt`) whose vreg becomes this expression's result. No control-flow branch, no merge
+ * block, and no separate lexical region are opened — the block-local bindings live in the enclosing
+ * frame region (a sound over-approximation of their lifetime, never a use-after-free), which is why
+ * the tail value needs no conveyance bracket (it stays in the SAME region the caller reads it from).
+ * The checker (`type_block_expr`) has already rejected an empty, `void`-tailed, or diverging block in
+ * value position, so a terminated prefix/tail here is an internal invariant break.
+ *
+ * @param ctx  the lowering context positioned at the block's first statement
+ * @param e    the block expression (its `.type` is the trailing value's type)
+ * @param blk  the typed Block-B node
+ * @return     the context after the block plus the vreg holding its trailing value
+ * @throws     when the block is empty or a statement terminates before the tail (internal), or
+ *             propagated from lowering any statement
+ * @since      §9 E
+ */
+fn lower_block_expr(ctx: LowerCtx, e: checker::TExpr, blk: checker::TBlockExpr): Lowered | error {
+    if blk.body.len == 0 { return error { message = "native backend: a block used as a value must not be empty (internal)" } }
+    var pre = match lower_block_prefix(ctx, blk.body) { LowerStmtOut as x => x; error as err => return err }
+    if pre.terminated { return error { message = "native backend: a block used as a value must not diverge before its tail (internal)" } }
+    var result_ty = ltype_of(e.type, ctx.enums)
+    var tail = match lower_tail_stmt(pre.ctx, blk.body[blk.body.len - 1], result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
+    if tail.terminated { return error { message = "native backend: a block used as a value must end in a value (internal)" } }
+    var scoped = ctx_with(tail.ctx, tail.ctx.func, tail.ctx.block_id, lenv_prefix(tail.ctx.env, ctx.env.names.len))
+    Lowered { ctx = scoped; vreg = tail.vreg }
 }
 
 /**
@@ -7642,6 +7703,7 @@ fn addr_taken_expr(e: checker::TExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo,
         checker::TInExpr as ine => addr_taken_expr_list(ine.elems, ref_fns, enums, addr_taken_expr(ine.lhs, ref_fns, enums, acc))
         checker::TArrayLit as al => addr_taken_array_elems(al.elements, ref_fns, enums, acc)
         checker::TLambda as lam => addr_taken_stmts(lam.body, ref_fns, enums, acc)
+        checker::TBlockExpr as blk => addr_taken_stmts(blk.body, ref_fns, enums, acc)
         _ => acc
     }
 }
@@ -14846,6 +14908,7 @@ fn texpr_kind_name(e: checker::TExpr): str {
         checker::TArrayLit => "array literal"
         checker::TLambda => "lambda"
         checker::TBorrow => "borrow"
+        checker::TBlockExpr => "block expression"
     }
 }
 

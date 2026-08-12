@@ -7864,7 +7864,43 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker:
         // allocates its env struct and uses the env-first ABI (handled below).
         checker::TLambda as lam => emit_lambda(buf, prog, e, lam, escaping, regions, fn_body, dctx)
         checker::TBorrow as b => emit_borrow(buf, prog, ret_type, b, escaping, regions, fn_body, dctx)
+        checker::TBlockExpr as blk => emit_block_expr(buf, prog, ret_type, e, blk, escaping, regions, fn_body, dctx)
     }
+}
+
+/**
+ * emit_block_expr — lower a Block-B in value position (§9 E, ruling 7) to a GNU statement-expression
+ * `({ <Ctype> _tkN; <stmts…>; _tkN = <tail>; _tkN; })`, the same idiom `emit_if_value` uses. The
+ * block runs INLINE in the enclosing frame; its trailing statement's value is materialized into the
+ * temp `_tkN` (of the block's own resolved type) via `emit_branch_value`, which threads the
+ * block-region / defer context so a block-local aggregate binding opens its own arm region and the
+ * tail is captured into the temp BEFORE that region drops (S2/W9 ordering, shared with if/match
+ * value arms). The temp is then the stmt-expr's value.
+ *
+ * @param buf       the code buffer being appended to
+ * @param prog      the typed program (namespaces + resolved function table)
+ * @param ret_type  the enclosing function's return type, threaded to the tail emitter
+ * @param e         the block expression (its `.type` is the trailing value's C type)
+ * @param blk       the typed Block-B node
+ * @param escaping  the enclosing function's frame-escape set (block-region context)
+ * @param regions   the open block-region stack
+ * @param fn_body   the enclosing function body (block-locality denominator)
+ * @param dctx      the defer context threaded through the block
+ * @return          `buf` with the GNU statement-expression appended, or a propagated error
+ * @throws          propagated from emitting the block's type or any of its statements
+ * @since           §9 E
+ */
+fn emit_block_expr(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, blk: checker::TBlockExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+    var tmp = fresh_tmp_name(buf.len to i64)
+    var out = cb(buf, "({ ")
+    out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, tmp)
+    out = cb(out, ";\n")
+    out = match emit_branch_value(out, prog, ret_type, blk.body, e.type, tmp, "    ", escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, tmp)
+    cb(out, "; })")
 }
 
 /**
@@ -9587,6 +9623,7 @@ fn cg_expr_calls_self(e: checker::TExpr, ns: str, name: str): bool {
             false
         }
         checker::TLambda as lam => cg_block_calls_self(lam.body, ns, name)
+        checker::TBlockExpr as blk => cg_block_calls_self(blk.body, ns, name)
         _ => false
     }
 }
@@ -10632,6 +10669,7 @@ fn cg_collect_expr_opts(set: CgTypeSet, e: checker::TExpr): CgTypeSet {
             s = cg_collect_type_opts(s, lam.ret)
             s = cg_collect_block_opts(s, lam.body)
         }
+        checker::TBlockExpr as blk => { s = cg_collect_block_opts(s, blk.body) }
         _ => { }   // leaves: type already registered above
     }
     s
@@ -11572,6 +11610,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
             loop { if i >= a.elements.len { break }; elems = teko::list::push(elems, checker::TArrayElem { is_spread = a.elements[i].is_spread; expr = cg_lift_expr(a.elements[i].expr, acc) }); i++ }
             checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
         }
+        checker::TBlockExpr as blk => checker::TExpr { kind = checker::TBlockExpr { body = cg_lift_block(blk.body, acc) }; type = e.type; line = e.line; col = e.col }
         _ => e   // leaves (TNumber/TVar/TStrLit/TByteLit/TBoolLit/TNullLit/TPathExpr) — no nested lambdas
     }
 }

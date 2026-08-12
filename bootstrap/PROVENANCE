@@ -1,75 +1,79 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): §9 C PARAMETER DEFAULTS + `:=` NAMED ARGUMENTS.
-# §9 C was ~85% already shipped (the DEFARGS 2026-07-01 work + the `params` variadic); this reseed
-# lands only the sealed GAPS: (G1) the named-argument surface moves from `=` to the sealed `:=`
-# marker; (G2) `:=` named arguments now flow through METHOD dot-calls; (G3, owner ruling C-T1) a
-# `params` variadic composes with defaults / named arguments as an inherent trailing-optional; and
-# (G4, owner ruling T2) a parameter default is ENFORCED to be a compile-time constant expression. The
-# owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host output, proven a
-# fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh,
-# which only ever judges this record on a SWAP.
+# RESEED (hand-harvest, by-hand per owner order): §9 E BLOCK-B IN EXPRESSION POSITION.
+# The §9 E closure spine (`func<…>`/`action<…>` delegate types, closure literals, capture-by-copy +
+# `ref`) ALREADY landed on this branch (commits bd2f5108 / 2f14ad49 / b2d73949) and the old `fn(T): R`
+# annotation was already removed; the plan (docs/design/plano-secao9E-closures.md, ruling 7) leaves ONE
+# product piece: a brace group in EXPRESSION position — a value-producing block whose TRAILING
+# expression is its value, running INLINE in the enclosing frame (not a closure — no capture, no
+# allocation). The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host
+# output, proven a fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by
+# scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
 #
-# §9 C parameter defaults + `:=` named arguments
+# §9 E Block-B in expression position (ruling 7)
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (docs/design/plano-secao9C-defaults.md — the gap-closing crumbs):
-#   - THE `:=` TOKEN, in `src/lexer/token.tks` + `src/lexer/lexer.tks`. A new `Walrus` variant is
-#     APPENDED LAST to `TokenKind` (never a stored operator, so no `.tkb` ordinal shifts) with a
-#     2-byte maximal-munch rule beside `::`.
-#   - THE NAMED-ARG TRIGGER, in `src/parser/parse_expr.tks`. `parse_call_args` triggers a named
-#     argument on `Ident Walrus` (`name := expr`) instead of `Ident Assign`; `=` no longer names.
-#   - NAMED ARGS ON METHOD CALLS (G2), in `src/parser/ast.tks` + `src/checker/typer.tks`. `MethodCall`
-#     gains an `arg_names` field (threaded from `parse_call_args`); `type_method_call`, the virtual
-#     dispatch branch and `type_contract_dispatch` prepend a `""` for the receiver and forward the
-#     names to `resolve_defargs`, so `recv.m(w := 5)` binds like a free call.
-#   - `params` + DEFAULTS/NAMED COMBINED (G3, ruling C-T1), in `src/parser/parse_decl.tks` +
-#     `src/checker/typer.tks`. The parser's trailing-only rejection EXEMPTS a `params` parameter; a
-#     new `resolve_call_args` unifies the dispatch, and `pack_variadic_args` now resolves the fixed
-#     prefix's defaults/named arguments before packing the variadic tail.
-#   - DEFAULT-IS-CONST (G4, ruling T2), in `src/checker/typer.tks`. `check_param_defaults` types each
-#     `default_expr` and forwards it to `is_const_expr` (the D1 const gate), run from both function
-#     typers; a runtime default is a located `must be a compile-time constant expression` error.
-#   - CORPUS ADAPTATION FOR G4, in `src/lir/lower.tks`. The only two non-const parameter defaults in
-#     the corpus (`lower_function` / `lower_virtual_main`, whose `[]T`/`checker::TypeTable` defaults
-#     were `teko::list::empty()`/`checker::tt_empty()`) are made const: the `[]T` defaults become the
-#     empty array literal `[]`, `lower_virtual_main`'s three trailing defaults (every caller already
-#     passes them) are dropped, and `lower_function`'s `table` becomes a required 2nd parameter (its
-#     lone default-omitting caller is a unit test, updated to pass `checker::tt_empty()`).
-# WHAT DOES NOT ENTER: no `.tkb` format change (a `MethodCall` is an expression body, never
-# serialized; the pre-existing cross-`.tkb` default/variadic-metadata loss is unchanged and reported
-# adjacent). No corpus named-CALL uses `=` today, so the `=`->`:=` surface migration is a one-step,
-# fixpoint-neutral change of the parser trigger.
+# WHAT ENTERS (docs/design/plano-secao9E-closures.md §3 — the one missing product piece):
+#   - THE `Block` AST NODE, in `src/parser/ast.tks`. A new `Block { body: []Statement }` variant is
+#     APPENDED LAST to `ExprKind`; `parse_atom` (`src/parser/parse_expr.tks`) gains a leading-`{`
+#     value-block branch (`parse_block_expr`, reusing `parse_block`) GATED by `allow_struct`, so it
+#     never steals the `{` that opens an `if`/`match` scrutinee block. §9 B construction always carries
+#     a type prefix (`Name { … }`), so a `{` with no path before it is unambiguously a block.
+#   - THE `TBlockExpr` TAST NODE, in `src/checker/tast.tks`. Appended LAST to `TExprKind`;
+#     `type_block_expr` (`src/checker/typer.tks`) types the body in a child scope (`type_block`), takes
+#     the trailing value's type (`tblock_type`), and rejects a `void`-tailed or DIVERGING block in value
+#     position — the same contract `type_if` imposes on an `if`-as-value without an `else`.
+#   - THE FULL `TExprKind` WALK ARMS (the "TLambda was added everywhere" pattern), treating a Block-B as
+#     an INLINE statement block (NOT a lifted function): `revalidate`, `initanalysis`, `consteval`,
+#     `consteval_form`, `comptime_fold` (fold + loop-propagate), `warnings`, `metrics`, `monomorph`,
+#     `escape` (mark/count-reads/chain-stats — inline, so its body IS this frame's), `spine`
+#     (cells/points-to/unique/borrowed-from), `reachability`, and `codegen` (lift/self-call/opt-collect).
+#   - CODEGEN, in `src/codegen/codegen.tks` (`emit_block_expr`): a GNU statement-expression
+#     `({ <Ctype> _tk; <stmts…>; _tk = <tail>; _tk; })`, reusing `emit_branch_value` (the if/match
+#     value-arm path) so block-local aggregates and defers are handled identically.
+#   - NATIVE/LIR, in `src/lir/lower.tks` (`lower_block_expr`): lowers the prefix inline then yields the
+#     trailing value's vreg. Block-local bindings are DROPPED at the closing brace (`lenv_prefix`) while
+#     an enclosing-scalar reassignment made inside the block — which updates the shared env prefix in
+#     place (`lenv_reassign`) — is PRESERVED, so `{ acc = acc + 1; acc }` leaves `acc`'s write visible.
+#   - tkb SER/DE, in `src/emit/tkb_write.tks` / `tkb_read.tks` / `tkb_frame.tks`: a new expr tag 26 that
+#     round-trips the body as `[]TStatement` (mirroring the IF/MATCH block encoding), with the frame
+#     collector interning the body's strings so it round-trips.
+# WHAT DOES NOT ENTER: no memory-model change. The §9 E capture semantics are RATIFIED as-is (owner
+# E-capture ruling): closures capture by COPY (snapshot); `by_ref` only for `Reference` bindings;
+# writing a copy-captured var stays an error. "estilo C#" is read as the SURFACE (a closure closes over
+# names of the scope), not C#'s implicit shared-cell (which would need boxing / a closure-lifetime
+# borrow-checker, colliding with move-on-return and R4).
 #
-# INERTNESS ON THE COMPILER CORPUS. The compiler source contains ZERO named-argument CALLS, so the
-# `=`->`:=` trigger change leaves every parse tree identical; the `Walrus` token is appended, shifting
-# no serialized ordinal; the `MethodCall.arg_names` field is `""`-filled for every all-positional
-# method call in the corpus; and the const-default enforcement only rejects genuinely non-const
-# defaults (the two migrated above). gen0 (built from THIS bootstrap's predecessor) and bin-a emit a
-# byte-identical teko.c — the fixpoint closes on the reseed.
+# INERTNESS ON THE COMPILER CORPUS. The compiler source uses NO bare value-block in expression position
+# (its blocks are `if`/`match`/`fn`/loop bodies and §6 bare block STATEMENTS, none of which reach the
+# new `parse_atom` branch); the `Block`/`TBlockExpr` variants are appended, shifting no serialized
+# ordinal; tag 26 fires only on a Block-B, which the corpus never produces. gen0 (built from THIS
+# bootstrap's predecessor) and bin-a emit a byte-identical teko.c — Block-B is inert until USED, and no
+# existing `{`-in-expression site changed meaning (the byte-identical fixpoint proves it).
 #
-# ACCEPT fixture (examples/regressions/defaults_named): default-fill by omission, `:=` naming any
-# parameter (including the first), positional-before-named, started-named -> all-named with free
-# reordering, `:=` through a METHOD dot-call, and `params` combined with a default — one witness
-# number (33178) that only the correct binding of all paths produces, printed identically on the
-# native and C backends. REJECT fixture (examples/regressions/defaults_named_reject): a non-trailing
-# default, a positional after a named argument, an unknown named argument, a named argument colliding
-# with a positional, a missing required argument, the retired `=` naming surface, and a non-const
-# default — the single failing build reports all seven diagnostics.
+# ACCEPT fixture (examples/regressions/block_expr): a Block-B's trailing expression is its value, a
+# Block-B nested inside another, a Block-B reading AND writing an enclosing var inline, a Block-B in
+# argument position, a Block-B coexisting with a §9 B construction unambiguously, a closure body that is
+# itself a Block-B, and a capture-by-copy snapshot — each case names itself and asserts its own value
+# (`scenario`), passing identically on the native inline-block lowering and the C GNU statement-expression
+# lowering. REJECT fixture (examples/regressions/block_expr_reject): a Block-B ending in an assignment
+# (no trailing value) and a Block-B that DIVERGES via a trailing `return` — the single failing build
+# reports both diagnostics.
 #
 # FIXPOINT. The COMMITTED artifact self-reproduces DIRECTLY (the predecessor seed builds this source
-# with no staged bootstrap, since the corpus uses no `:=`): compiling bootstrap/teko.c with cc into a
+# with no staged bootstrap, since the corpus uses no Block-B): compiling bootstrap/teko.c with cc into a
 # compiler and rebuilding the source produced a byte-identical teko.c (sha256 below).
 #   cc(bootstrap/teko.c) -> gen;  TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == below.
-# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 2873 MB).
+# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 2930 MB).
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  e547e5cfd4ac4df1b6079dbb48247453dae692234a0828fb070300ac53ad0079
+sha256:  ae1c740df70992d013cfa2fbdc2d62fa32d680c5f94ebd0cd800cb5d39624cbc
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§9 C parameter defaults + `:=` named
-         arguments; token + parser trigger + method named-args + params/defaults combined + const
-         default enforcement, with the two non-const corpus defaults migrated); sha256 is read
-         directly off the committed file and was proven a fixpoint (bin == committed, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§9 E Block-B in expression position;
+         parser Block node + allow_struct-gated parse_atom branch, TBlockExpr TAST + type_block_expr,
+         the full TExprKind walk arms treating a Block-B as an inline block, C GNU stmt-expr codegen,
+         native inline-block lowering, and tkb tag 26); sha256 is read directly off the committed file
+         and was proven a fixpoint (bin == committed, byte-identical).

@@ -157,6 +157,7 @@ fn lam_collect_expr(e: parser::Expr, ref refs: []str, ref bound: []str, ref writ
         parser::InExpr as n => { lam_collect_expr(n.lhs, refs, bound, writes); var i = 0; loop { if i >= n.elems.len { break }; lam_collect_expr(n.elems[i], refs, bound, writes); i++ } }
         parser::ArrayLit as a => { var i = 0; loop { if i >= a.elements.len { break }; lam_collect_expr(a.elements[i].expr, refs, bound, writes); i++ } }
         parser::Lambda as lam => { var i = 0; loop { if i >= lam.params.len { break }; bound = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound, writes) }
+        parser::Block as blk => lam_collect_block(blk.body, refs, bound, writes)
         parser::Number => { }
         parser::StrLit => { }
         parser::ByteLit => { }
@@ -4331,7 +4332,31 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
         parser::ArrayLit as a => type_array_lit(a, env, table)   // [ e0, e1, … ] (Increment B+)
         parser::Lambda as lam => type_lambda(lam, Void { }, env, table)   // (W10) no target here → un-annotated params error (ruling 3); a binding/call-arg threads the target
         parser::Borrow as b => type_borrow_expr(b, env, table)   // &x safe borrow (AL wave F1)
+        parser::Block as blk => type_block_expr(blk, env, table)
     }
+}
+
+/**
+ * type_block_expr — type a Block-B in value position (§9 E, ruling 7). The body is typed in a CHILD
+ * scope (`type_block`) so its bindings do not leak into the enclosing environment; the block's VALUE
+ * is the type of its trailing value (`tblock_type`). A block that diverges or whose trailing value is
+ * `void` cannot occupy value position — an honest error, the same contract `type_if` imposes on an
+ * `if`-as-value without an `else`. The body runs INLINE in the enclosing frame (no capture, no lift),
+ * so later passes walk it as an ordinary statement block, not as a lifted closure.
+ *
+ * @param blk    the parsed Block-B
+ * @param env    the enclosing type environment (the block reads it directly — no capture)
+ * @param table  the folded type table
+ * @return       the block's `TExpr` (kind `TBlockExpr`, type = trailing value), or a located error
+ * @throws       when the block diverges or its trailing value is `void` in value position
+ * @since        §9 E
+ */
+fn type_block_expr(blk: parser::Block, env: Env, table: TypeTable): TExpr | error {
+    var tb = match type_block(blk.body, env, table) { TypedBlock as bk => bk; error as e => return e }
+    if tblock_diverges(tb.stmts) { return error { message = "a block used as a value cannot diverge — it must end in a value expression" } }
+    var vt = tblock_type(tb.stmts)
+    if type_is_void(vt) { return error { message = "a block used as a value must end in a value expression, not a statement" } }
+    TExpr { kind = TBlockExpr { body = tb.stmts }; type = vt; line = 0; col = 0 }
 }
 
 // (C1-POS/E1/E2) public entry — wrap the dispatch to thread the source position. On success, copy

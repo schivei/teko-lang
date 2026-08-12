@@ -2133,7 +2133,27 @@ fn fold_children(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr 
         TArrayLit as a => fold_array(a, e, table, env, agg)
         TLambda as lam => fold_lambda(lam, e, table, env, agg)
         TBorrow as b => fold_borrow(b, e, table, env, agg)
+        TBlockExpr as b => fold_block_expr(b, e, table, env, agg)
     }
+}
+
+/**
+ * fold_block_expr — comptime-fold a Block-B (§9 E): fold every statement of its inline body, keeping
+ * the block node (its trailing value is not itself const-collapsed here — the block runs inline, so
+ * folding descends into it exactly as `fold_lambda` folds a closure body).
+ *
+ * @param blk    the typed Block-B node
+ * @param e      the enclosing block expression (its type/position are preserved)
+ * @param table  the folded type table
+ * @param env    the fold environment
+ * @param agg    the aggregate-const map
+ * @return       the block expression with its body folded, or a propagated error
+ * @throws       propagated from folding any statement of the body
+ * @since         §9 E
+ */
+fn fold_block_expr(blk: TBlockExpr, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
+    var body = match fold_block(blk.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+    TExpr { kind = TBlockExpr { body = body }; type = e.type; line = e.line; col = e.col }
 }
 
 /**
@@ -3078,6 +3098,7 @@ fn lp_expr(e: TExpr, m: LocalConstMap): TExpr {
         TArrayLit as a => lp_array(a, e, m)
         TLambda => e
         TBorrow as b => TExpr { kind = TBorrow { operand = lp_expr(b.operand, m) }; type = e.type; line = e.line; col = e.col }
+        TBlockExpr as b => TExpr { kind = TBlockExpr { body = lp_scope_block(b.body, m) }; type = e.type; line = e.line; col = e.col }
     }
 }
 
