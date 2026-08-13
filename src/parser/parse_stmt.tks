@@ -15,6 +15,10 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error 
         if !has_token(tokens, after) || is_sep(tokens, after) || is_kind_at(tokens, after, lexer::TokenKind::RBrace) {
             return Parsed<Statement> { node = Return { has_value = false; value = Expr { kind = Number { is_float = false; value = numint_of_u64(0); fval = 0.0 }; line = 0; col = 0 }; values = teko::list::empty() }; next = after }
         }
+        if is_kind_at(tokens, after, lexer::TokenKind::LParen) && paren_has_top_comma(tokens, after) {
+            var vals = match parse_return_value_list(tokens, after) { ParsedList<Expr> as x => x; error as e => return e }
+            return Parsed<Statement> { node = Return { has_value = true; value = vals.items[0]; values = vals.items }; next = vals.next }
+        }
         var v = match parse_expr(tokens, after) { Parsed<Expr> as x => x; error as e => return e }
         return Parsed<Statement> { node = Return { has_value = true; value = v.node; values = teko::list::empty() }; next = v.next }
     }
@@ -375,6 +379,64 @@ fn parse_array_bind_targets(tokens: []lexer::Token, pos: u64): ParsedList<BindEl
         return err_at(tokens, p, "expected ']' to close an array decomposition")
     }
     ParsedList<BindElem> { items = elems; next = p + 1 }
+}
+
+/**
+ * paren_has_top_comma — does the parenthesized group that OPENS at `lpos` contain a comma at its top
+ * nesting level (§9 F)? Scans from the `(` to its matching `)`, tracking (), [], {} depth; a comma at
+ * depth 1 marks a multiple-return value list `return (a, b)`, distinguishing it from a grouped single
+ * expression `return (a + b)` (no top comma) — which stays the ordinary single-return path.
+ *
+ * @param tokens  the token stream
+ * @param lpos    the `(` token position
+ * @return        true iff a top-level comma separates values inside the group
+ * @since §9 F
+ */
+fn paren_has_top_comma(tokens: []lexer::Token, lpos: u64): bool {
+    var depth: i64 = 0
+    var p = lpos
+    loop {
+        if !has_token(tokens, p) { break }
+        var k = kind_at(tokens, p)
+        if k == lexer::TokenKind::LParen || k == lexer::TokenKind::LBracket || k == lexer::TokenKind::LBrace {
+            depth = depth + 1
+        } else if k == lexer::TokenKind::RParen || k == lexer::TokenKind::RBracket || k == lexer::TokenKind::RBrace {
+            depth = depth - 1
+            if depth == 0 { break }
+        } else if k == lexer::TokenKind::Comma && depth == 1 {
+            return true
+        }
+        p = p + 1
+    }
+    false
+}
+
+/**
+ * parse_return_value_list — parse the comma-separated values of a multiple return `return (e1, e2, …)`
+ * (§9 F, ruling 3). `pos` is at the `(`. The `( )` are recognized ONLY here (never a standalone
+ * `(a, b)` expression, which stays a parse error), so there is no first-class tuple value.
+ *
+ * @param tokens  the token stream
+ * @param pos     the `(` token position
+ * @return        the parsed value list (length ≥ 2, guaranteed by the caller's top-comma test) and the
+ *                index past `)`, or a parse error
+ * @throws        on a malformed value expression or a missing `)`
+ * @since §9 F
+ */
+fn parse_return_value_list(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
+    var p = skip_seps(tokens, pos + 1)
+    var vals: []Expr = teko::list::empty()
+    loop {
+        var v = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
+        vals = teko::list::push(vals, v.node)
+        p = skip_seps(tokens, v.next)
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = skip_seps(tokens, p + 1)
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return err_at(tokens, p, "expected ')' to close a multiple return `return ( … )`")
+    }
+    ParsedList<Expr> { items = vals; next = p + 1 }
 }
 
 /**

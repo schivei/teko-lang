@@ -5071,6 +5071,9 @@ fn bind_value_into_annotation(v: TExpr, raw: parser::Expr, ann: Type, table: Typ
 
 fn type_binding(b: parser::Binding, env: Env, table: TypeTable): TypedStmt | error {
     var v = match type_binding_value(b, env, table) { TExpr as te => te; error as e => return e }
+    if type_is_mret_aggregate(v.type) {
+        return error { message = "a multiple-return value cannot be bound to a single name — destructure it, e.g. `var a, b = f(…)` (a multiple-return call yields no first-class tuple value to capture)" }
+    }
     var bound = if b.is_ref && !b.has_type { ref_bound_of(v.type) } else { v.type }
     if type_is_void(bound) { return error { message = "cannot bind a `void` expression — it yields no value (M.1)" } }
     if b.has_type {
@@ -5573,10 +5576,77 @@ fn mb_array_shape(targets: []parser::BindElem): MbArrayShape {
  * @param env    the type environment
  * @param table  the program's type table
  * @return       the desugared statement sequence plus the extended env, or an error
+ * @throws       when the single value is not a multiple-return call, or its arity differs from the
+ *               number of targets
  * @since §9 F
  */
 fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq | error {
-    return error { message = "multiple-return destructuring is not yet supported" }
+    var call = match type_expr(mb.values[0], env, table) { TExpr as x => x; error as e => return e }
+    if !type_is_mret_aggregate(call.type) {
+        return error { message = "a multiple binding `var a, b = …` with one right-hand value needs a multiple-return call there (a `fn f(): (A, B)`); this value is not one" }
+    }
+    var aggname = match call.type { Named as nm => nm.name; _ => "" }
+    var decl = match type_table_find(table, aggname, env.cur_ns) { parser::TypeDecl as d => d; error as e => return e }
+    var nfields = match decl.body { parser::StructBody as sb => sb.fields.len; _ => 0 }
+    if mb.targets.len != nfields {
+        return error { message = "multiple-return destructuring: the call returns " ~ teko::u64_to_str(nfields) ~ " values but " ~ teko::u64_to_str(mb.targets.len) ~ " targets were given" }
+    }
+    var tname = mb_temp_name(mb, 0)
+    var cur = define(env, tname, call.type, true)
+    var body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = tname }; bound = call.type; value = call })
+    var i: u64 = 0
+    loop {
+        if i >= mb.targets.len { break }
+        match mb.targets[i] {
+            parser::BindName as bn => {
+                var vstmt = mb_binding_stmt(mb.kind, bn.name, false, mb.type_ann, mb_field(mb_var(tname), mret_field_name(i)))
+                var ts = match type_statement(vstmt, cur, table) { TypedStmt as t => t; error as e => return e }
+                body = teko::list::push(body, ts.node)
+                cur = ts.env
+            }
+            parser::BindSkip => { }
+            parser::BindRest => return error { message = "`..` skip-range is not valid in a multiple-return destructuring" }
+        }
+        i = i + 1
+    }
+    TStmtSeq { stmts = body; env = cur }
+}
+
+/**
+ * str_has_prefix — does `s` begin with `p`? A byte-wise prefix test (§9 F needs only ASCII), used to
+ * recognize a synthesized multiple-return aggregate by its reserved name stem.
+ *
+ * @param s  the string to test
+ * @param p  the candidate prefix
+ * @return   true iff `s` starts with `p`
+ * @since §9 F
+ */
+fn str_has_prefix(s: str, p: str): bool {
+    if s.len < p.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= p.len { break }
+        if s[i] != p[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * type_is_mret_aggregate — is `t` a synthesized §9 F multiple-return aggregate struct? True for a
+ * `Named` whose last segment carries the reserved `MRET_PREFIX` stem. The value-position guard and the
+ * destructuring desugar both key off this, so an aggregate is only ever produced by a multiple-return
+ * call and only ever consumed by a `return (…)` or a destructuring `var a, b = …`.
+ *
+ * @param t  the type to classify
+ * @return   true iff `t` is a multiple-return aggregate
+ * @since §9 F
+ */
+fn type_is_mret_aggregate(t: Type): bool {
+    match t {
+        Named as nm => str_has_prefix(name_last_segment(nm.name), MRET_PREFIX)
+        _ => false
+    }
 }
 
 /**
@@ -7637,7 +7707,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     // check's honest "not an interface" error rather than a silent half-fold).
     var folded = fold_traits_collected(raw_program)
     if folded.diags.len > 0 { return PreMono { prog = TProgram { items = teko::list::empty() }; table = tt_empty(); diags = folded.diags } }
-    var program = canon_class_bases(folded.program)
+    var program = synthesize_mret_structs(canon_class_bases(folded.program))
     var seed_empty = Collected { types = tt_empty(); env = env_empty() }
     var seed = match seed_from_dep(dep_prog, seed_empty.types, seed_empty.env) {
         Collected as s => s
@@ -7788,7 +7858,7 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
     // registered (for honest value-position/instantiation errors) but is never emitted.
     var folded = fold_traits_collected(raw_program)
     if folded.diags.len > 0 { return diags_error(folded.diags) }
-    var program = canon_class_bases(folded.program)
+    var program = synthesize_mret_structs(canon_class_bases(folded.program))
     var pre = pre_walk(program, collect(program))
     if pre.diags.len > 0 { return diags_error(pre.diags) }
     var types = pre.types

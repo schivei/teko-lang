@@ -297,6 +297,40 @@ fn is_return_type_intro_at(tokens: []lexer::Token, pos: u64): bool {
 }
 
 /**
+ * parse_multi_return_types — parse a MULTIPLE-return signature `( A, B, … )` (§9 F, ruling 3). `pos`
+ * is at the `(` immediately after the return-type `:`. At least TWO types are required — a single
+ * `( A )` is rejected (write `A`). The `( )` are recognized ONLY in this return-type position, so the
+ * multi-valuation never enters the general type grammar: there is no first-class tuple type.
+ *
+ * @param tokens  the token stream
+ * @param pos     the `(` token position
+ * @return        the parsed return-type list (length ≥ 2) and the index past `)`, or a parse error
+ * @throws        on a single-type `( A )`, an empty `( )`, a missing `,`/`)`, or a malformed type
+ * @since §9 F
+ */
+fn parse_multi_return_types(tokens: []lexer::Token, pos: u64): ParsedList<TypeExpr> | error {
+    var p = skip_seps(tokens, pos + 1)
+    if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return err_at(tokens, p, "a multiple-return signature `( A, B )` needs at least two types")
+    }
+    var types: []TypeExpr = teko::list::empty()
+    loop {
+        var t = match parse_type(tokens, p) { ParsedType as x => x; error as e => return e }
+        types = teko::list::push(types, t.node)
+        p = skip_seps(tokens, t.next)
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = skip_seps(tokens, p + 1)
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return err_at(tokens, p, "expected ')' to close a multiple-return signature")
+    }
+    if types.len < 2 {
+        return err_at(tokens, pos, "a multiple-return signature `( A, B )` needs at least two types — for a single return type write `A`, not `( A )`")
+    }
+    ParsedList<TypeExpr> { items = types; next = p + 1 }
+}
+
+/**
  * Parse a `fn` declaration's signature + body, from an optional leading doc-comment through the
  * closing `}` (or the bodyless/`extern` forms). Shared by the top-level `fn` position (real
  * `is_test`/`os_guard`/`has_arena_size`/`arena_size` attributes threaded in from
@@ -397,13 +431,23 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
     }
     var has_return = false
     var return_type = no_type()
+    var ret_types: []TypeExpr = teko::list::empty()
     if is_return_type_intro_at(tokens, p) {
-        var ret = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
-        has_return = true
-        return_type = ret.node
-        p = ret.next
+        if is_kind_at(tokens, p + 1, lexer::TokenKind::LParen) {
+            var mr = match parse_multi_return_types(tokens, p + 1) { ParsedList<TypeExpr> as x => x; error as e => return e }
+            ret_types = mr.items
+            has_return = true
+            return_type = ret_types[0]
+            p = mr.next
+        } else {
+            var ret = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+            has_return = true
+            return_type = ret.node
+            p = ret.next
+        }
     }
     if is_extern {
+        if ret_types.len > 0 { return err_at(tokens, p, "an `extern` function may not declare a multiple-return `( A, B )` signature") }
         if is_test { return err_at(tokens, p, "`#test` may not precede `extern`") }
         if has_arena_size { return err_at(tokens, p, "`#arena_size(…)` may not precede `extern` (there is no Teko body to size)") }
         if export_c_symbol != "" { return err_at(tokens, p, "an `extern` (imported) function may not carry an `exp(\"…\")` export override") }
@@ -434,6 +478,7 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
     // enforced by the checker, not the parser). A bare `;`/newline/`}` follows instead of `{`.
     if (is_abstract || allow_bodyless) && !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         if has_arena_size { return err_at(tokens, p, "`#arena_size(…)` may not precede an `abstract fn` (there is no Teko body to size)") }
+        if ret_types.len > 0 { return err_at(tokens, p, "a bodyless (`abstract`/interface) function may not declare a multiple-return `( A, B )` signature yet") }
         var no_body: []Statement = teko::list::empty()
         return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty() }; next = p }
     }
@@ -441,7 +486,7 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
         return err_at(tokens, p, "expected '{' for the function body")
     }
     var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
-    Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size; ret_types = teko::list::empty() }; next = blk.next }
+    Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size; ret_types = ret_types }; next = blk.next }
 }
 
 /**

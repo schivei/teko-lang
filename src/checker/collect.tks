@@ -527,6 +527,347 @@ fn canon_ref_list(names: []str, table: TypeTable, ref_ns: str): []str {
     loop { if i >= names.len { break }; out = teko::list::push(out, canon_ref_name(names[i], table, ref_ns)); i++ }
     out
 }
+/**
+ * MRET_PREFIX — the reserved name stem of a §9 F multiple-return aggregate struct. A synthesized
+ * aggregate is named `<MRET_PREFIX>_<type-mangle>` and is NOT a user-spellable identifier (a leading
+ * double underscore is reserved), so the aggregate — while a genuine registered struct both backends
+ * lower with their ordinary machinery — is never a first-class tuple TYPE the surface can name.
+ *
+ * @since §9 F
+ */
+const MRET_PREFIX: str = "__mret"
+
+/**
+ * mret_path_sym — the underscore-joined identifier of a type-path (§9 F name mangle). Reuses each
+ * segment name verbatim, joined by `_`, so a qualified `a::B` mangles to `a_B`.
+ *
+ * @param p  the type-expression path
+ * @return   the mangled path fragment
+ * @since §9 F
+ */
+fn mret_path_sym(p: parser::Path): str {
+    var s = ""
+    var i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        if i > 0 { s = s ~ "_" }
+        s = s ~ p.segments[i].name
+        i = i + 1
+    }
+    s
+}
+
+/**
+ * mret_type_sym — a deterministic, injective, C-legal identifier fragment for a return type (§9 F name
+ * mangle). Two functions whose return-type lists spell the SAME types produce the SAME fragment, so
+ * their aggregate struct dedups to one declaration; differently-spelled lists never collide.
+ *
+ * @param te  the return-type expression
+ * @return    the mangled identifier fragment
+ * @since §9 F
+ */
+fn mret_type_sym(te: parser::TypeExpr): str {
+    match te {
+        parser::NamedType as nt => {
+            if nt.args.len == 0 { return mret_path_sym(nt.path) }
+            var s = mret_path_sym(nt.path) ~ "_of"
+            var i: u64 = 0
+            loop {
+                if i >= nt.args.len { break }
+                s = s ~ "_" ~ mret_type_sym(nt.args[i])
+                i = i + 1
+            }
+            s
+        }
+        parser::SliceType as st => "sl_" ~ mret_type_sym(st.element)
+        parser::UnionType as ut => {
+            var s = "un"
+            var i: u64 = 0
+            loop {
+                if i >= ut.members.len { break }
+                s = s ~ "_" ~ mret_type_sym(ut.members[i])
+                i = i + 1
+            }
+            s
+        }
+        parser::FunctionType as ft => {
+            var s = "fnq"
+            var i: u64 = 0
+            loop {
+                if i >= ft.params.len { break }
+                s = s ~ "_" ~ mret_type_sym(ft.params[i])
+                i = i + 1
+            }
+            s ~ "_r_" ~ mret_type_sym(ft.ret)
+        }
+    }
+}
+
+/**
+ * mret_mangle — the full aggregate struct name for a multiple-return type list (§9 F): `MRET_PREFIX`
+ * followed by each type's mangle, joined by `_`.
+ *
+ * @param types  the return-type list (length ≥ 2)
+ * @return       the aggregate struct's bare name
+ * @since §9 F
+ */
+fn mret_mangle(types: []parser::TypeExpr): str {
+    var s = MRET_PREFIX
+    var i: u64 = 0
+    loop {
+        if i >= types.len { break }
+        s = s ~ "_" ~ mret_type_sym(types[i])
+        i = i + 1
+    }
+    s
+}
+
+/**
+ * mret_field_name — the aggregate's `_N` field for return slot `slot` (§9 F). Positional, so the
+ * binding-site desugar reads `_mb._0`, `_mb._1`, … and the `return (…)` rewrite writes them.
+ *
+ * @param slot  the 0-based return slot
+ * @return      the field name `_<slot>`
+ * @since §9 F
+ */
+fn mret_field_name(slot: u64): str {
+    "_" ~ teko::u64_to_str(slot)
+}
+
+/**
+ * mret_struct_item — the synthesized aggregate struct `type <mangle> = struct { _0: T0; _1: T1; … }`
+ * for a multiple-return list (§9 F, ruling 3). Injected into the function's OWN namespace so the
+ * rewritten bare `return_type` resolves same-namespace; both backends emit its typedef/layout with
+ * their ordinary struct machinery, and the value-position guard keeps it out of first-class use.
+ *
+ * @param ns      the owning namespace (the multiple-return function's)
+ * @param file    the source file to attribute the synthesized item to
+ * @param mangle  the aggregate's bare name (`mret_mangle`)
+ * @param types   the field types, positional (`_0` = `types[0]`, …)
+ * @return        the synthesized top-level struct item
+ * @since §9 F
+ */
+fn mret_struct_item(ns: str, file: str, mangle: str, types: []parser::TypeExpr): parser::Item {
+    var fields: []parser::Field = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= types.len { break }
+        fields = teko::list::push(fields, parser::Field { name = mret_field_name(i); type_ann = types[i]; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" })
+        i = i + 1
+    }
+    var body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }
+    var decl = parser::TypeDecl { name = mangle; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0 }
+    parser::Item { content = decl; namespace = ns; file = file }
+}
+
+/**
+ * mret_named_type — the aggregate's bare `NamedType` (`mangle`), the rewritten single return type of a
+ * multiple-return function (§9 F).
+ *
+ * @param mangle  the aggregate struct's bare name
+ * @return        the `NamedType` return-type expression
+ * @since §9 F
+ */
+fn mret_named_type(mangle: str): parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = mangle }) }; args = teko::list::empty() }
+}
+
+/**
+ * mret_return_struct_lit — rewrite a multiple `return (e1, e2, …)` into `return <mangle> { _0 = e1; … }`
+ * (§9 F): a single-value return of the synthesized aggregate struct, so the checker's ordinary return
+ * and struct-literal typing lower it with zero multiple-return-specific typing.
+ *
+ * @param mangle  the aggregate struct's bare name
+ * @param values  the return values, positional
+ * @param line    the original return's source line
+ * @param col     the original return's source column
+ * @return        the rewritten single-value `Return`
+ * @since §9 F
+ */
+fn mret_return_struct_lit(mangle: str, values: []parser::Expr, line: u32, col: u32): parser::Statement {
+    var names: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= values.len { break }
+        names = teko::list::push(names, mret_field_name(i))
+        i = i + 1
+    }
+    var lit = parser::StructLit { type_path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = mangle }) }; type_args = teko::list::empty(); field_names = names; field_vals = values }
+    parser::Return { has_value = true; value = parser::Expr { kind = lit; line = line; col = col }; values = teko::list::empty() }
+}
+
+/**
+ * mret_rewrite_returns — rewrite every multiple `return (…)` in a statement block to a single-value
+ * aggregate return (§9 F), recursing into every nested statement block (loop/defer/adopt/block and the
+ * `if`/`match` blocks that surface as expression statements). A single/bare return passes through.
+ *
+ * @param stmts   the statement block to rewrite
+ * @param mangle  the enclosing function's aggregate struct name
+ * @return        the rewritten block
+ * @since §9 F
+ */
+fn mret_rewrite_returns(stmts: []parser::Statement, mangle: str): []parser::Statement {
+    var out: []parser::Statement = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        out = teko::list::push(out, mret_rewrite_stmt(stmts[i], mangle))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * mret_rewrite_stmt — rewrite one statement for §9 F multiple-return lowering: a multiple `return (…)`
+ * becomes an aggregate return; a control-flow statement has its nested blocks rewritten; every other
+ * statement passes through unchanged.
+ *
+ * @param s       the statement to rewrite
+ * @param mangle  the enclosing function's aggregate struct name
+ * @return        the rewritten statement
+ * @since §9 F
+ */
+fn mret_rewrite_stmt(s: parser::Statement, mangle: str): parser::Statement {
+    match s {
+        parser::Return as r => if r.values.len >= 2 { mret_return_struct_lit(mangle, r.values, 0, 0) } else { s }
+        parser::LoopStmt as l => parser::LoopStmt { label = l.label; init = mret_rewrite_returns(l.init, mangle); body = mret_rewrite_returns(l.body, mangle) }
+        parser::DeferStmt as d => parser::DeferStmt { body = mret_rewrite_returns(d.body, mangle) }
+        parser::AdoptStmt as a => parser::AdoptStmt { name = a.name; body = mret_rewrite_returns(a.body, mangle) }
+        parser::BlockStmt as b => parser::BlockStmt { body = mret_rewrite_returns(b.body, mangle) }
+        parser::ExprStmt as es => parser::ExprStmt { expr = mret_rewrite_expr_stmt(es.expr, mangle) }
+        _ => s
+    }
+}
+
+/**
+ * mret_rewrite_expr_stmt — rewrite the `if`/`match` blocks that surface as a bare expression statement,
+ * so a multiple `return (…)` inside a branch is lowered (§9 F). Any other expression statement (a plain
+ * call run for effect) never contains a return statement and passes through.
+ *
+ * @param e       the expression-statement's expression
+ * @param mangle  the enclosing function's aggregate struct name
+ * @return        the rewritten expression
+ * @since §9 F
+ */
+fn mret_rewrite_expr_stmt(e: parser::Expr, mangle: str): parser::Expr {
+    match e.kind {
+        parser::IfExpr as f => parser::Expr { kind = parser::IfExpr { cond = f.cond; then_blk = mret_rewrite_returns(f.then_blk, mangle); has_else = f.has_else; else_blk = mret_rewrite_returns(f.else_blk, mangle) }; line = e.line; col = e.col }
+        parser::MatchExpr as m => parser::Expr { kind = parser::MatchExpr { subject = m.subject; arms = mret_rewrite_arms(m.arms, mangle) }; line = e.line; col = e.col }
+        _ => e
+    }
+}
+
+/**
+ * mret_rewrite_arms — rewrite the bodies of every `match` arm for §9 F multiple-return lowering.
+ *
+ * @param arms    the match arms
+ * @param mangle  the enclosing function's aggregate struct name
+ * @return        the arms with rewritten bodies
+ * @since §9 F
+ */
+fn mret_rewrite_arms(arms: []parser::Arm, mangle: str): []parser::Arm {
+    var out: []parser::Arm = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        var a = arms[i]
+        out = teko::list::push(out, parser::Arm { pattern = a.pattern; has_when = a.has_when; guard = a.guard; body = mret_rewrite_returns(a.body, mangle) })
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * mret_rewrite_fn — rewrite a multiple-return `Function` (§9 F): its `return_type` becomes the aggregate
+ * struct, and every multiple `return (…)` in its body becomes an aggregate return. `ret_types` is kept
+ * so the checker still recognizes the function as multiple-return for its value-position guard.
+ *
+ * @param f       the multiple-return function
+ * @param mangle  the aggregate struct's bare name
+ * @return        the rewritten function
+ * @since §9 F
+ */
+fn mret_rewrite_fn(f: parser::Function, mangle: str): parser::Function {
+    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = true; return_type = mret_named_type(mangle); body = mret_rewrite_returns(f.body, mangle); vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types }
+}
+
+/**
+ * synthesize_mret_structs — the §9 F pre-collect pass that lowers multiple-return functions to ordinary
+ * struct-returning functions. For every top-level `fn f(): (A, B, …)` it synthesizes one aggregate
+ * struct per distinct (namespace, return-type-list), rewrites the function's signature and `return (…)`
+ * statements to use it, and appends the struct declarations. When no function declares a multiple
+ * return the program is returned unchanged (fixpoint-inert — the compiler's own corpus).
+ *
+ * @param program  the parsed program, post `canon_class_bases`
+ * @return         the program with multiple-return functions lowered and aggregate structs appended
+ * @since §9 F
+ */
+pub fn synthesize_mret_structs(program: parser::Program): parser::Program {
+    var has_any = false
+    var t: u64 = 0
+    loop {
+        if t >= program.items.len { break }
+        match program.items[t].content {
+            parser::Function as f => if f.ret_types.len >= 2 { has_any = true }
+            _ => { }
+        }
+        t = t + 1
+    }
+    if !has_any { return program }
+    var out: []parser::Item = teko::list::empty()
+    var made_keys: []str = teko::list::empty()
+    var new_structs: []parser::Item = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        var it = program.items[i]
+        match it.content {
+            parser::Function as f => {
+                if f.ret_types.len >= 2 {
+                    var mangle = mret_mangle(f.ret_types)
+                    var key = it.namespace ~ "#" ~ mangle
+                    if !mret_key_seen(made_keys, key) {
+                        made_keys = teko::list::push(made_keys, key)
+                        new_structs = teko::list::push(new_structs, mret_struct_item(it.namespace, it.file, mangle, f.ret_types))
+                    }
+                    out = teko::list::push(out, parser::Item { content = mret_rewrite_fn(f, mangle); namespace = it.namespace; file = it.file })
+                } else {
+                    out = teko::list::push(out, it)
+                }
+            }
+            _ => { out = teko::list::push(out, it) }
+        }
+        i = i + 1
+    }
+    var k: u64 = 0
+    loop {
+        if k >= new_structs.len { break }
+        out = teko::list::push(out, new_structs[k])
+        k = k + 1
+    }
+    parser::Program { items = out }
+}
+
+/**
+ * mret_key_seen — has an aggregate `(namespace, mangle)` key already been synthesized (§9 F dedup)? A
+ * linear scan; the key count equals the number of DISTINCT multiple-return shapes in a program, which
+ * is tiny.
+ *
+ * @param keys  the keys already emitted
+ * @param key   the candidate key
+ * @return      true iff `key` is already present
+ * @since §9 F
+ */
+fn mret_key_seen(keys: []str, key: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= keys.len { break }
+        if keys[i] == key { return true }
+        i = i + 1
+    }
+    false
+}
+
 pub fn canon_class_bases(program: parser::Program): parser::Program {
     var table = collect_types(program.items)
     var any = false
