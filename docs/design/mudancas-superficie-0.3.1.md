@@ -973,11 +973,15 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
 - **item 14 — value-struct mutável** (C#-style via property, tirando o bloqueio "struct é readonly"):
   **ANTECIPADO.** Está no caminho crítico da Intent (o `pub set` que escreve `self._x`, §10.3) e do `Ctx`
   performático; entra cedo.
-- **expansão da stdlib — ANTES da §11.** Define os **novos itens** da stdlib e decide a **separação** que
-  permite o **self-link com o programa final** (o que a stdlib expõe vs mantém interno). É quem **povoa** o
-  `exp`/`pub` que a §11 depois formaliza. Bônus: **já reduz parte dos problemas de memória** (o RSS
-  super-linear do item 13 — uma stdlib bem separada corta parte do que a monomorfização arrasta pra dentro
-  de cada programa).
+- **expansão da stdlib — ANTES da §11.** O cerne é **aumentar os recursos do dev** (um **catálogo** de novos
+  itens — passo focado próprio, separado de "como separa"); e decidir a **separação** que permite o
+  **self-link com o programa final**. É quem **povoa** o `exp`/`pub` que a §11 depois formaliza. Bônus: **já
+  reduz parte dos problemas de memória** (o RSS super-linear do item 13 — o programa linka contra o monólito
+  pré-compilado em vez de re-arrastá-lo como fonte).
+  - **Mecanismo (ruling do dono): self-`.tkh` do monólito.** Teko é monolítico; **nada de extrair pacote**. O
+    compilador, ao compilar, **exporta o `.tkh` dele próprio**, e o programa final **linka contra o monólito**
+    via esse header. Só o que é **`exp`** entra no self-`.tkh` → reforça a necessidade de `exp` no visível ao
+    dev. **Substitui** a ideia de pacote-separado (o fork P2 da prep).
 - **§11 — visibilidade `exp`/`pub`: PENÚLTIMA** (não mais a última). O enforcement vira muita coisa
   hoje-visível em **ilegal** (muitas falhas a corrigir), e a grafia já é **forward-compatible** (hoje tudo
   lê como `exp`; a proteção da Intent auto-corrige quando ela entrar), então atrasá-la minimiza retrabalho.
