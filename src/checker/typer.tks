@@ -2348,6 +2348,342 @@ fn method_call_arg_names(mc: parser::MethodCall): []str {
     names
 }
 
+/**
+ * expr_roots_at_name — does the lvalue chain of `e` bottom out at the bare variable `nm`? Walks a
+ * `FieldAccess`/`Index` receiver chain to its root (like `lvalue_root`, but also descends an `Index`
+ * receiver, which a self-write `self[i] = v` needs). Used to spot a write or a mutating call whose
+ * target/receiver roots at `self`.
+ *
+ * @param e   the expression to walk
+ * @param nm  the root name sought (`self` for the mutation analysis)
+ * @return    true iff the chain roots at `Var(nm)`
+ * @since item-14
+ */
+fn expr_roots_at_name(e: parser::Expr, nm: str): bool {
+    match e.kind {
+        parser::Var as v => v.name == nm
+        parser::FieldAccess as fa => expr_roots_at_name(fa.receiver, nm)
+        parser::Index as ix => expr_roots_at_name(ix.receiver, nm)
+        _ => false
+    }
+}
+
+/**
+ * assign_target_is_self — does assignment `a` write THROUGH `self`? True for `self = …` /
+ * `self.value = …` (a bare/deref target named `self`) and for `self.field = …` / `self[i] = …` (a
+ * Field/Index target whose lvalue chain roots at `self`). This is the direct-write leaf of the
+ * mutating-method inference (§13.2).
+ *
+ * @param a  the raw assignment
+ * @return   true iff the assignment mutates the receiver
+ * @since item-14
+ */
+fn assign_target_is_self(a: parser::Assign): bool {
+    match a.kind {
+        parser::AssignKind::Simple => a.name == "self"
+        parser::AssignKind::RefDeref => a.name == "self"
+        parser::AssignKind::Field => expr_roots_at_name(a.target, "self")
+        parser::AssignKind::Index => expr_roots_at_name(a.target, "self")
+    }
+}
+
+/**
+ * find_instance_method_named — the instance method (or operator) named `mname` on the struct/class/
+ * value-type `sname`, or null when there is none. Feeds the transitive step of the mutating-method
+ * inference: a `self.other(…)` call resolves `other` here to recurse into its body.
+ *
+ * @param sname  the declaring type's name
+ * @param mname  the method name sought
+ * @param table  the folded type table
+ * @return       the matching Function, or null
+ * @since item-14
+ */
+fn find_instance_method_named(sname: str, mname: str, table: TypeTable): parser::Function | null {
+    var decl = match type_table_find(table, sname, "") { parser::TypeDecl as td => td; error => return null }
+    var methods = match decl.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error => return null }
+        parser::NewtypeBody as nb => nb.methods
+        parser::EnumBody as eb => eb.methods
+        parser::FlagsBody as fb => fb.methods
+        _ => return null
+    }
+    var i = 0 to u64
+    loop {
+        if i >= methods.len { break }
+        if methods[i].name == mname { return methods[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * method_name_visited — has method name `nm` already been entered on the current transitive-call walk?
+ * Guards the least-fixpoint recursion of `method_mutates_self` against a cycle (a method calling
+ * itself, directly or through a ring); a cycle is treated as non-mutating until a write is proven.
+ *
+ * @param visited  the names entered so far
+ * @param nm       the method name under test
+ * @return         true iff `nm` is already on the walk
+ * @since item-14
+ */
+fn method_name_visited(visited: []str, nm: str): bool {
+    var i = 0 to u64
+    loop {
+        if i >= visited.len { break }
+        if visited[i] == nm { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * method_mutates_self — does instance method `m` of `sname` mutate its receiver (§13.2)? True when the
+ * body WRITES self (`self.field = …` / `self[i] = …` / `self = …`, or a property `set` on self, which
+ * desugars to such a write), OR calls another instance method on self that itself mutates self. There
+ * is NO `mut fn` marker — the inference is entirely from the body (ruling 7). The walk is bounded by a
+ * visited-name set (least fixpoint: a recursion cycle is non-mutating until a write is proven). Inert
+ * on today's corpus: no value-struct method writes self (structs are by-value), so this returns false
+ * for every struct method and the §13.2 receiver check never fires.
+ *
+ * @param sname  the declaring type's name
+ * @param m      the method
+ * @param table  the folded type table (to resolve callee methods for the transitive step)
+ * @return       true iff calling `m` may mutate the receiver
+ * @since item-14
+ */
+fn method_mutates_self(sname: str, m: parser::Function, table: TypeTable): bool {
+    method_mutates_self_guarded(sname, m, table, teko::list::empty())
+}
+
+/**
+ * method_mutates_self_guarded — `method_mutates_self` carrying the visited-name set for cycle
+ * safety. Enters `m.name`, then scans the body for a self-write or a mutating self-call.
+ *
+ * @param sname    the declaring type's name
+ * @param m        the method under analysis
+ * @param table    the folded type table
+ * @param visited  the method names already on this walk
+ * @return         true iff `m` mutates self
+ * @since item-14
+ */
+fn method_mutates_self_guarded(sname: str, m: parser::Function, table: TypeTable, visited: []str): bool {
+    if method_name_visited(visited, m.name) { return false }
+    stmts_mutate_self(sname, m.body, table, teko::list::push(visited, m.name))
+}
+
+/**
+ * stmts_mutate_self — does any statement in `stmts` write self or issue a mutating self-call (§13.2)?
+ *
+ * @param sname    the declaring type's name
+ * @param stmts    the statement list
+ * @param table    the folded type table
+ * @param visited  the transitive-call visited set
+ * @return         true iff some statement mutates self
+ * @since item-14
+ */
+fn stmts_mutate_self(sname: str, stmts: []parser::Statement, table: TypeTable, visited: []str): bool {
+    var i = 0 to u64
+    loop {
+        if i >= stmts.len { break }
+        if stmt_mutates_self(sname, stmts[i], table, visited) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * stmt_mutates_self — does a single statement write self or contain a mutating self-call (§13.2)? A
+ * direct `Assign` whose target roots at self is a write; every statement's sub-expressions and nested
+ * blocks are scanned for a mutating self-method call.
+ *
+ * @param sname    the declaring type's name
+ * @param s        the statement
+ * @param table    the folded type table
+ * @param visited  the transitive-call visited set
+ * @return         true iff the statement mutates self
+ * @since item-14
+ */
+fn stmt_mutates_self(sname: str, s: parser::Statement, table: TypeTable, visited: []str): bool {
+    match s {
+        parser::Assign as a => {
+            if assign_target_is_self(a) { return true }
+            if expr_mutates_self(sname, a.value, table, visited) { return true }
+            parser::assign_has_target(a.kind) && expr_mutates_self(sname, a.target, table, visited)
+        }
+        parser::Binding as b => expr_mutates_self(sname, b.value, table, visited)
+        parser::MultiBind as mb => exprs_mutate_self(sname, mb.values, table, visited)
+        parser::Return as r => (r.has_value && expr_mutates_self(sname, r.value, table, visited)) || exprs_mutate_self(sname, r.values, table, visited)
+        parser::ExprStmt as es => expr_mutates_self(sname, es.expr, table, visited)
+        parser::LoopStmt as l => stmts_mutate_self(sname, l.init, table, visited) || stmts_mutate_self(sname, l.body, table, visited)
+        parser::DeferStmt as d => stmts_mutate_self(sname, d.body, table, visited)
+        parser::AdoptStmt as ad => stmts_mutate_self(sname, ad.body, table, visited)
+        parser::BlockStmt as bl => stmts_mutate_self(sname, bl.body, table, visited)
+        _ => false
+    }
+}
+
+/**
+ * exprs_mutate_self — does any expression in `es` contain a mutating self-call (§13.2)?
+ *
+ * @param sname    the declaring type's name
+ * @param es       the expression list
+ * @param table    the folded type table
+ * @param visited  the transitive-call visited set
+ * @return         true iff some expression carries a mutating self-call
+ * @since item-14
+ */
+fn exprs_mutate_self(sname: str, es: []parser::Expr, table: TypeTable, visited: []str): bool {
+    var i = 0 to u64
+    loop {
+        if i >= es.len { break }
+        if expr_mutates_self(sname, es[i], table, visited) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * arms_mutate_self — does any match arm's guard or body carry a mutating self-call (§13.2)?
+ *
+ * @param sname    the declaring type's name
+ * @param arms     the match arms
+ * @param table    the folded type table
+ * @param visited  the transitive-call visited set
+ * @return         true iff some arm mutates self
+ * @since item-14
+ */
+fn arms_mutate_self(sname: str, arms: []parser::Arm, table: TypeTable, visited: []str): bool {
+    var i = 0 to u64
+    loop {
+        if i >= arms.len { break }
+        if arms[i].has_when && expr_mutates_self(sname, arms[i].guard, table, visited) { return true }
+        if stmts_mutate_self(sname, arms[i].body, table, visited) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * expr_mutates_self — does expression `e` issue a mutating self-call (§13.2)? A `MethodCall` whose
+ * receiver roots at self is resolved to its callee method and recursed into (transitive mutation);
+ * every other node is walked structurally into its sub-expressions and nested statement blocks. Leaf
+ * nodes (literals, `Var`, `PathExpr`) carry no self-mutation.
+ *
+ * @param sname    the declaring type's name
+ * @param e        the expression
+ * @param table    the folded type table
+ * @param visited  the transitive-call visited set
+ * @return         true iff the expression carries a mutating self-call
+ * @since item-14
+ */
+fn expr_mutates_self(sname: str, e: parser::Expr, table: TypeTable, visited: []str): bool {
+    match e.kind {
+        parser::MethodCall as mc => {
+            if expr_roots_at_name(mc.receiver, "self") {
+                match find_instance_method_named(sname, mc.method, table) {
+                    parser::Function as cm => if method_mutates_self_guarded(sname, cm, table, visited) { return true }
+                    null => { }
+                }
+            }
+            expr_mutates_self(sname, mc.receiver, table, visited) || exprs_mutate_self(sname, mc.args, table, visited)
+        }
+        parser::Call as c => exprs_mutate_self(sname, c.args, table, visited)
+        parser::Binary as b => expr_mutates_self(sname, b.left, table, visited) || expr_mutates_self(sname, b.right, table, visited)
+        parser::Unary as u => expr_mutates_self(sname, u.operand, table, visited)
+        parser::Compare as cmp => expr_mutates_self(sname, cmp.first, table, visited) || cmpterms_mutate_self(sname, cmp.rest, table, visited)
+        parser::FieldAccess as fa => expr_mutates_self(sname, fa.receiver, table, visited)
+        parser::Index as ix => expr_mutates_self(sname, ix.receiver, table, visited) || expr_mutates_self(sname, ix.index, table, visited)
+        parser::Cast as ct => expr_mutates_self(sname, ct.expr, table, visited)
+        parser::IfExpr as iff => expr_mutates_self(sname, iff.cond, table, visited) || stmts_mutate_self(sname, iff.then_blk, table, visited) || stmts_mutate_self(sname, iff.else_blk, table, visited)
+        parser::MatchExpr as mx => expr_mutates_self(sname, mx.subject, table, visited) || arms_mutate_self(sname, mx.arms, table, visited)
+        parser::StructLit as sl => exprs_mutate_self(sname, sl.field_vals, table, visited)
+        parser::ArrayLit as al => arrayelems_mutate_self(sname, al.elements, table, visited)
+        parser::Interp as ip => exprs_mutate_self(sname, ip.holes, table, visited)
+        parser::InExpr as ie => expr_mutates_self(sname, ie.lhs, table, visited) || exprs_mutate_self(sname, ie.elems, table, visited)
+        parser::Borrow as bo => expr_mutates_self(sname, bo.operand, table, visited)
+        parser::Block as blk => stmts_mutate_self(sname, blk.body, table, visited)
+        parser::Lambda as lm => stmts_mutate_self(sname, lm.body, table, visited)
+        _ => false
+    }
+}
+
+/**
+ * cmpterms_mutate_self — does any continuation term of a `Compare` chain carry a mutating self-call?
+ *
+ * @param sname    the declaring type's name
+ * @param ts       the comparison continuation terms
+ * @param table    the folded type table
+ * @param visited  the transitive-call visited set
+ * @return         true iff some term mutates self
+ * @since item-14
+ */
+fn cmpterms_mutate_self(sname: str, ts: []parser::CmpTerm, table: TypeTable, visited: []str): bool {
+    var i = 0 to u64
+    loop {
+        if i >= ts.len { break }
+        if expr_mutates_self(sname, ts[i].operand, table, visited) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * arrayelems_mutate_self — does any array-literal element expression carry a mutating self-call?
+ *
+ * @param sname    the declaring type's name
+ * @param els      the array elements
+ * @param table    the folded type table
+ * @param visited  the transitive-call visited set
+ * @return         true iff some element mutates self
+ * @since item-14
+ */
+fn arrayelems_mutate_self(sname: str, els: []parser::ArrayElem, table: TypeTable, visited: []str): bool {
+    var i = 0 to u64
+    loop {
+        if i >= els.len { break }
+        if expr_mutates_self(sname, els[i].expr, table, visited) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * struct_is_readonly_named — is `sname` a `readonly struct` (§13.3)? True only for a StructBody whose
+ * whole-struct readonly flag is set; false for any other type or an unknown name.
+ *
+ * @param sname  the type name
+ * @param table  the folded type table
+ * @return       true iff `sname` names a readonly struct
+ * @since item-14
+ */
+fn struct_is_readonly_named(sname: str, table: TypeTable): bool {
+    var decl = match type_table_find(table, sname, "") { parser::TypeDecl as td => td; error => return false }
+    match decl.body { parser::StructBody as sb => sb.is_readonly; _ => false }
+}
+
+/**
+ * receiver_is_immutable_target — is the receiver EXPRESSION of a method call an immutable target
+ * (§13.2)? True for a value on which a mutating method must be rejected: a literal / temporary (its
+ * lvalue chain roots at no binding), or a value whose STATIC type is a `readonly struct` (ruling 11).
+ * Under §13.1 a plain `var` local is mutable, so an ordinary struct receiver returns false and the
+ * call is admitted.
+ *
+ * @param recv   the untyped receiver expression
+ * @param rt     the receiver's resolved type
+ * @param env    the typing environment
+ * @param table  the folded type table (for the readonly-struct test)
+ * @return       true iff a mutating method call on this receiver must be rejected
+ * @since item-14
+ */
+fn receiver_is_immutable_target(recv: parser::Expr, rt: Type, env: Env, table: TypeTable): bool {
+    if !lvalue_root(recv).reachable { return true }
+    match rt {
+        Named as n => struct_is_readonly_named(n.name, table)
+        _ => false
+    }
+}
+
 fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr | error {
     var recv_t = match type_expr(mc.receiver, env, table) { TExpr as te => te.type; error as e => return e }
     if is_flags_named(recv_t, table) && !flags_named_has_user_method(recv_t, mc.method, table) {
@@ -2387,6 +2723,14 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     if !found { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
     var is_instance = mfn.params.len > 0 && !mfn.params[0].has_type
     if !is_instance { return error { message = $"'{mc.method}' is a static method — call it as {struct_name}::{mc.method}(…)" } }
+    match decl.body {
+        parser::StructBody => {
+            if method_mutates_self(struct_name, mfn, table) && receiver_is_immutable_target(mc.receiver, recv_t, env, table) {
+                return error { message = $"cannot call mutating method `{mc.method}` on an immutable `{struct_name}` — the receiver is a literal or a `readonly struct` (§13.2)" }
+            }
+        }
+        _ => { }
+    }
     // (W10b.CLASS residual — intern visibility) a private (default) method is reachable only
     // from its OWN declaring class's code, or — if `intern` — a subclass's too. Struct methods
     // stay all-public (W10b.0.A) — this check only fires for a ClassBody receiver.
