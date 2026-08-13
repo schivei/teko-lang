@@ -252,6 +252,9 @@ fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
         return err_at(tokens, pos + 1, "a reference binding is written `ref x: T` — the `ref` is itself the binding modifier; there is no `let ref`/`mut ref`/`var ref`/`const ref` (tripartite law: `let` protects a value, `mut`/`var` unlock a value, `ref` aliases — a reference is inherently mutable, so no immutable reference exists)")
     }
     var kind = bind_kind_at(tokens, pos)
+    if is_multibind_shape(tokens, pos + 1) {
+        return parse_multibind(tokens, pos + 1, kind)
+    }
     var tgt = match parse_bind_target(tokens, pos + 1) { Parsed<BindTarget> as x => x; error as e => return e }
     var ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
     if ann.has_type && is_ref_grafia_annotation(ann.type_ann) {
@@ -262,6 +265,142 @@ fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
     }
     var v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
     Parsed<Statement> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; is_ref = false; value = v.node }; next = v.next }
+}
+
+/**
+ * parse_multibind — parse a MULTIPLE binding `var|const TARGETS [: T] = VALUES` (§9 F). `tpos` is the
+ * first target token (right after the binding keyword). The target shape is an array decomposition
+ * `[ a, _, .., b ]` (leading `[`) or a parallel name-list `a, _, c`; then an optional shared `: T`
+ * annotation (ruling 1), `=`, and a comma-separated value list. The result is the single new
+ * `MultiBind` statement (the checker desugars it to existing typed nodes).
+ *
+ * @param tokens  the token stream
+ * @param tpos    the first target token (after `var`/`const`)
+ * @param kind    the mutability the keyword declared (`Const`/`Mut`)
+ * @return        the parsed `MultiBind` statement and the resume index, or a parse error
+ * @throws        on a malformed target list, a missing `=`, or a malformed value list
+ * @since §9 F
+ */
+fn parse_multibind(tokens: []lexer::Token, tpos: u64, kind: BindKind): Parsed<Statement> | error {
+    var line = tokens[tpos].line
+    var col = tokens[tpos].col
+    var is_array = is_kind_at(tokens, tpos, lexer::TokenKind::LBracket)
+    var shape = if is_array { MultiTargetKind::ArrayDecomp } else { MultiTargetKind::Parallel }
+    var tl = if is_array {
+        match parse_array_bind_targets(tokens, tpos) { ParsedList<BindElem> as x => x; error as e => return e }
+    } else {
+        match parse_parallel_bind_targets(tokens, tpos) { ParsedList<BindElem> as x => x; error as e => return e }
+    }
+    var ann = match parse_annotation(tokens, tl.next) { Annotation as x => x; error as e => return e }
+    if !is_kind_at(tokens, ann.next, lexer::TokenKind::Assign) {
+        return err_at(tokens, ann.next, "expected '=' in a multiple binding")
+    }
+    var vals = match parse_multibind_values(tokens, ann.next + 1) { ParsedList<Expr> as x => x; error as e => return e }
+    Parsed<Statement> { node = MultiBind { kind = kind; shape = shape; targets = tl.items; has_type = ann.has_type; type_ann = ann.type_ann; values = vals.items; line = line; col = col }; next = vals.next }
+}
+
+/**
+ * parse_parallel_bind_targets — parse the comma-separated targets of a parallel multiple binding
+ * `a, _, c` (§9 F). Each target is a NAME (`BindName`) or the `_` discard (`BindSkip`); the `..`
+ * skip-range is rejected here (it is legal only inside an array decomposition, ruling 2).
+ *
+ * @param tokens  the token stream
+ * @param pos     the first target token
+ * @return        the parsed `BindElem` list and the resume index, or a parse error
+ * @throws        when a target is neither a name nor `_`
+ * @since §9 F
+ */
+fn parse_parallel_bind_targets(tokens: []lexer::Token, pos: u64): ParsedList<BindElem> | error {
+    var p = pos
+    var elems: []BindElem = teko::list::empty()
+    loop {
+        if is_kind_at(tokens, p, lexer::TokenKind::Underscore) {
+            elems = teko::list::push(elems, BindSkip { })
+            p = p + 1
+        } else if is_name_at(tokens, p) {
+            elems = teko::list::push(elems, BindName { name = tokens[p].text })
+            p = p + 1
+        } else if is_kind_at(tokens, p, lexer::TokenKind::DotDot) {
+            return err_at(tokens, p, "`..` skip-range is legal only inside an array decomposition `var [a, .., b] = …`, not in a parallel binding")
+        } else {
+            return err_at(tokens, p, "expected a name or `_` in a multiple binding target list")
+        }
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = p + 1
+    }
+    ParsedList<BindElem> { items = elems; next = p }
+}
+
+/**
+ * parse_array_bind_targets — parse the bracketed targets of an array decomposition `[ a, _, .., b ]`
+ * (§9 F, ruling 2). Each element is a NAME, the `_` discard, or exactly one `..` skip-range marker
+ * (`BindRest`) that skips 0+ middle elements. `pos` is at the `[`.
+ *
+ * @param tokens  the token stream
+ * @param pos     the `[` token position
+ * @return        the parsed `BindElem` list and the index past `]`, or a parse error
+ * @throws        on an empty `[]`, a second `..`, a missing `]`, or an unexpected token
+ * @since §9 F
+ */
+fn parse_array_bind_targets(tokens: []lexer::Token, pos: u64): ParsedList<BindElem> | error {
+    var p = skip_seps(tokens, pos + 1)
+    if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
+        return err_at(tokens, p, "an array decomposition `var [ … ] = …` needs at least one target")
+    }
+    var elems: []BindElem = teko::list::empty()
+    var seen_rest = false
+    loop {
+        if is_kind_at(tokens, p, lexer::TokenKind::DotDot) {
+            if seen_rest {
+                return err_at(tokens, p, "at most one `..` skip-range in an array decomposition")
+            }
+            seen_rest = true
+            elems = teko::list::push(elems, BindRest { })
+            p = p + 1
+        } else if is_kind_at(tokens, p, lexer::TokenKind::Underscore) {
+            elems = teko::list::push(elems, BindSkip { })
+            p = p + 1
+        } else if is_name_at(tokens, p) {
+            elems = teko::list::push(elems, BindName { name = tokens[p].text })
+            p = p + 1
+        } else {
+            return err_at(tokens, p, "expected a name, `_`, or `..` in an array decomposition `[ … ]`")
+        }
+        p = skip_seps(tokens, p)
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = skip_seps(tokens, p + 1)
+        if is_kind_at(tokens, p, lexer::TokenKind::RBracket) { break }
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
+        return err_at(tokens, p, "expected ']' to close an array decomposition")
+    }
+    ParsedList<BindElem> { items = elems; next = p + 1 }
+}
+
+/**
+ * parse_multibind_values — parse the comma-separated right-hand side of a multiple binding (§9 F):
+ * one or more `parse_expr` values. A single value is either the sole array source (`ArrayDecomp`) or
+ * a multiple-return call (`Parallel`); several values are the parallel list. Commas INSIDE an
+ * expression (a call's arguments) are consumed by `parse_expr`, so only top-level commas separate
+ * values.
+ *
+ * @param tokens  the token stream
+ * @param pos     the first value token (after `=`)
+ * @return        the parsed value `Expr` list and the resume index, or a parse error
+ * @throws        when a value expression fails to parse
+ * @since §9 F
+ */
+fn parse_multibind_values(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
+    var p = pos
+    var vals: []Expr = teko::list::empty()
+    loop {
+        var v = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
+        vals = teko::list::push(vals, v.node)
+        p = v.next
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = skip_seps(tokens, p + 1)
+    }
+    ParsedList<Expr> { items = vals; next = p }
 }
 
 /**
@@ -312,8 +451,25 @@ fn is_ref_binding_head(tokens: []lexer::Token, pos: u64): bool {
 fn is_var_binding_head(tokens: []lexer::Token, pos: u64): bool {
     if !(is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "var") { return false }
     if is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) { return true }
+    if is_multibind_shape(tokens, pos + 1) { return true }
     if !is_name_at(tokens, pos + 1) { return false }
     is_kind_at(tokens, pos + 2, lexer::TokenKind::Colon) || is_kind_at(tokens, pos + 2, lexer::TokenKind::Assign)
+}
+
+/**
+ * is_multibind_shape — does the target position `tpos` (right after `var`/`const`) open a MULTIPLE
+ * binding (§9 F)? True for an array decomposition `[ … ]` (a leading `[`) or a parallel name-list
+ * `a, …` (a name immediately followed by a comma). A single `var a =`/`var a :` and a field
+ * destructure `var { … }` are NOT multiple and stay on the ordinary `Binding` path.
+ *
+ * @param tokens  the token stream
+ * @param tpos    the target position (right after the binding keyword)
+ * @return        true iff `tpos` opens an array-decomposition or parallel multiple binding
+ * @since §9 F
+ */
+fn is_multibind_shape(tokens: []lexer::Token, tpos: u64): bool {
+    if is_kind_at(tokens, tpos, lexer::TokenKind::LBracket) { return true }
+    is_name_at(tokens, tpos) && is_kind_at(tokens, tpos + 1, lexer::TokenKind::Comma)
 }
 
 /**
