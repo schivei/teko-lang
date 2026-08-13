@@ -80,6 +80,12 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   = ref implícito (mutação gruda, método mutante inferido); fat header (struct) vs thin transiente (subtipo
   primitivo/enum/flags, readonly `val-ref`); **`readonly` opt-in** (struct inteira estilo C# e campo; só
   definível na construção/default).
+- **§9.D — `type X = variant` aposentado** (ruling do dono). NÃO vira wrapper (`struct { case: … }`) nem
+  alias (`type X = A | B`): a única forma-soma é a **união `|` estrutural inline, escrita POR EXTENSO** em
+  cada campo/param/retorno/var. O agregado nomeado some; **os membros seguem nomeados** (`match … as` e
+  coerção membro→união inalterados, byte-idênticos). Recursão fecha pelo **box que a própria união já emite**
+  (`{tag;ptr;len}`). **Array-de-união exige parênteses** — `[](A | B)` (`[]` liga mais forte que `|`).
+  **Verbosidade é o preço, aceito** (verbatim: *"Vai ser verboso mesmo, e isso não é problema, é o preço."*).
 
 ## Aprendizados sobre sair de tensões
 - Tratar o **fechado como vinculante**; não re-litigar decisão tomada.
@@ -89,3 +95,20 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   essas são do dono; trazer fork + recomendação.
 - Reverter local sem drama; a verdade é `origin`.
 - O dono confia no agente para **sair de tensões** sobre o que já foi conversado — este perfil é a rede.
+
+## Aprendizados desta sessão (§9.D + arquitetos)
+- **A solução do dono costuma ser mais enxuta que a do arquiteto.** No §9.D o arquiteto trouxe wrapper /
+  newtype / classe selada (Soluções A/B/C); o dono cortou tudo com uma **união inline por extenso**
+  (*"Tão simples e o arquiteto gastou tokens pra… nada"*). Lição: **não sobre-engenheirar**; quando houver
+  uma via que evita nominalidade/abreviação/wrapper, ela costuma ser a preferida — mesmo que verbosa.
+- **O valor do arquiteto é a RECON, não a forma.** O aproveitável do §9.D foi o **fato descoberto no
+  código** (a `variant` já é descritor fat `{tag;ptr;len}` com payload boxed → a recursão fecha sem virar
+  referência), não a recomendação de representação. Despachar arquiteto para **levantar fatos + 3+ opções
+  com exemplos**; esperar que o dono escolha uma quarta via mais simples.
+- **Verbosidade > nominalidade oculta.** O dono aceita repetir a união em centenas de sites para não ter
+  um alias/tipo-soma nominal escondendo mágica. Explícito ganha de conciso quando conciso = ocultação.
+- **Artefato de avaliação = código real do codebase.** Quando o dono pede material para avaliar, ele quer
+  **onde e como** algo é usado hoje, com snippets reais (não abstrações) e a solução confrontada com cada
+  padrão de uso. Levantar do `origin`, por posição de declaração (campo/param/retorno/var).
+- **Apontar o furo com honestidade.** O dono valoriza quando o agente **nomeia o furo comum** de todas as
+  opções (ex.: auto-recursão exige indireção — é teorema) em vez de vender uma recomendação.
