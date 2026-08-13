@@ -1032,9 +1032,14 @@ primitivo/enum/flags, que são **`val-ref` readonly** (self é ref só-leitura; 
 - **construção:** `self { … }` (Block-B).
 - **acesso:** `self.x` / `self::y` — **aqui `self` é `ref`**.
 
-**Materialização e o ponteiro do ref:**
+**Materialização e o ponteiro do ref (representação em runtime):**
 - **objeto (class/service):** cada instância tem **arena própria** → ponteiro/identidade intrínseco; o `ref`
   é natural.
-- **struct (value):** ao materializar, **carrega o próprio ponteiro** para permitir o `ref`. Uma **cópia é
-  nova materialização — novo ponteiro** (é o que preserva value semantics: mutar a cópia não toca o
-  original).
+- **struct (value):** é **fat** — carrega um **cabeçalho** (mais simples que o de objeto: só `uptr`/`ptr`, o
+  ponteiro para si) que habilita o `ref`/`self`. Uma **cópia é nova materialização — novo cabeçalho, novo
+  ponteiro** (é o que preserva value semantics: mutar a cópia não toca o original).
+- **subtipo de primitivo/enum/flags (readonly):** é **thin** — fica do tamanho do primitivo, **sem
+  cabeçalho**; o runtime **define `self` na hora da chamada** do método que o usa (self **transiente**). Por
+  serem **readonly**, esse self-ref transiente basta — não há mutação a propagar. (Dava pra usar o mesmo
+  transiente em struct, mas a escolha é **cabeçalho** para struct — mais direto que remontar `self` a cada
+  chamada.)
