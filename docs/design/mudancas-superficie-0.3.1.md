@@ -985,3 +985,26 @@ e nenhum é o dispatch dinâmico do Round 3: (a) **conformidade estática de int
 {…}`); (b) o **solver de constraint de forma** — `<T: forma & ifce | … | tipo>`, com `service [lifetime]` e
 `notnull` (§9.2b); (c) o **`service` DI resolvido por chave constante** (`svc<T: service>("chave")`). O
 transporte de canal depende dos três.)*
+
+---
+
+## 13. Value-struct mutável (roadmap item 14) — remover o bloqueio "struct é readonly"
+
+**Antecipado** (§11): está no caminho crítico da Intent (o `pub set`, §10.3) e do `Ctx` performático. Remove
+o bloqueio que torna struct imutável, para mutação **in-place** (comportamento de classe) **sem** virar
+objeto — continua **value type** (cópia na atribuição/passagem, sem identidade nem heap), pela performance.
+
+### 13.1 Modelo de mutabilidade — tudo é `var`
+
+Sem `let`/`mut` (§1): **toda variável é `var`, mutável por default.** Não há marca de tipo "mutable struct"
+— qualquer struct é mutável. Consequências (rulings do dono):
+
+- **`val` NÃO é binding de usuário** — é **marca interna**, o que restou: o **alias de match** (`as`,
+  readonly raso — não re-vincula, transparente a props/métodos internos, ver plano-match-universal) e
+  **literais**. Fora disso, não se escreve `val`.
+- **Parâmetros de função e método comportam-se como `var`** (garantido) — mutáveis no corpo. `val` fica só
+  para aliases e literais.
+- **Mutação = escrita direta:** `s.x = v` para campo acessível; **property `set`** para o
+  controlado/computado/encapsulado (como a Intent: `_value` privado, só `pub set` escreve).
+- **Value semantics preservada:** mutar um parâmetro-valor ou um local é **local** (é cópia); só `ref`
+  (borrow local, §3/§10.6) propaga a mutação ao original.
