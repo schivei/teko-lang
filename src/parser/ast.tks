@@ -741,18 +741,25 @@ pub type ClassBody = struct {
 // compile-time contract only, so codegen emits nothing for it and rejects it as a value type.
 pub type InterfaceBody = struct { extends: []str; methods: []Function }
 /**
- * TraitBody — a `trait { fields; methods; consts }` body (TR0): a struct-shaped, NON-instantiable
- * bundle a struct/class DERIVES (`type Post = struct Timestamped { … }`, the `&`-list position).
- * The checker FOLDS derived traits into each deriver before typing (fold_traits), so codegen
- * never sees a trait in a value position; the decl itself emits nothing (like InterfaceBody).
+ * TraitBody — the `trait [<& composition>] { <concrete members> }` MIXIN body (§9.4 revised): a
+ * self-contained, flattenable bundle of CONCRETE members ONLY, composed into a struct/class/service
+ * (or into another trait) through the `&`-list. A trait is NOT a type — it never reaches a value,
+ * param, return, field, constraint or dispatch position; it resides only in its own declaration and
+ * in a composer's `&`-list. It carries FIELDS (the mixin's own state — the `_name` backing a `get
+ * name` lives HERE, read as `self._name`, never the property, or it recurses), BODIED methods
+ * (instance methods, `get`/`set` accessors, `static fn` factories) and member consts. It carries NO
+ * bodyless members (that is the interface's role — the parser rejects a bodyless trait method).
+ * Self-containment: every `self.X` a body references MUST be declared by this trait or by a trait it
+ * composes (`implements`). The `implements` list names traits it composes (flattened in) and/or
+ * interfaces it fully implements (trait-carries-interface).
  *
- * @param fields   the provided members, folded into the deriver (class field-flattening)
- * @param methods  a method WITH a body is PROVIDED (overridable); a bodyless one is a REQUIREMENT
- *                 the deriver must satisfy (like interface conformance)
- * @param consts   the static type-member `const NAME: T = …` declarations (#594 crumb 7); each
- *                 folds into every deriver like a field, resolved by `DeriverName::NAME`
+ * @field fields      the mixin's own fields, flattened into the composer
+ * @field methods     the interleaved bodied instance/accessor/static methods, in source order
+ * @field consts      the static member consts (D-consts), resolved by `ComposerName::NAME`
+ * @field implements  the `&`-composed trait names (flattened in) and/or interface names (carried)
+ * @since 0.3.1 (§9.4 revised)
  */
-pub type TraitBody = struct { fields: []Field; methods: []Function; consts: []ConstDecl }
+pub type TraitBody = struct { fields: []Field; methods: []Function; consts: []ConstDecl; implements: []str }
 /**
  * TypeBody — the body variant of a `TypeDecl`: a struct/enum/flags/variant/alias/§9 newtype/extern/
  * class/interface/trait shape. Public because it is both the `TypeDecl.body` surface and the `.tkb`

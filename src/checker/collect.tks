@@ -2352,32 +2352,35 @@ fn service_has_ctor(cb: parser::ClassBody): bool {
 }
 
 /**
- * A trait body's diagnostics. (TR0) A trait is a struct-shaped bundle: its field types resolve
- * like a struct's (same R4 escape-gate). A GENERIC trait is outside TR0's unit and is rejected on
- * its own, before the fields — the type-params it would need in scope do not exist.
+ * validate_trait_body — a trait body's diagnostics (§9.4). A trait is a concrete mixin whose field
+ * types resolve like a struct's (same R4 escape-gate). A GENERIC trait is outside the mixin's unit
+ * and is rejected on its own, before the fields — the type-params it would need in scope do not exist.
  *
  * @param reg    the trait's registration
  * @param trb    the trait body
  * @param tbl    the table WITH the declaration's generic type-params in scope
  * @param table  the whole collected type table
  * @return       the body's diagnostics, in declaration order
+ * @since 0.3.1 (§9.4 revised)
  */
 fn validate_trait_body(reg: TypeReg, trb: parser::TraitBody, tbl: TypeTable, table: TypeTable): []str {
     var decl = reg.decl
     if decl.type_params.len > 0 {
-        return one_diag(decl_diag(reg, $"a generic trait ('{decl.name}<…>') is not supported (TR0 — a trait is a concrete bundle)"))
+        return one_diag(decl_diag(reg, $"a generic trait ('{decl.name}<…>') is not supported — a trait is a concrete mixin (§9.4)"))
     }
     concat_diags(validate_body_fields(reg, trb.fields, tbl, table), trait_method_modifier_diags(reg, trb.methods))
 }
 
 /**
- * (TR0) The class dispatch markers are outside a trait's unit — an honest error, not silent
- * acceptance: a bodyless trait method already IS the requirement, and a deriver-defined method IS
- * the override, so `abstract`/`virtual`/`override`/`intern` have nothing to mean here.
+ * trait_method_modifier_diags — the class dispatch markers are outside a trait's unit (§9.4): a
+ * trait is a concrete self-contained mixin whose members flatten into the composer, so
+ * `abstract`/`virtual`/`override`/`intern` have nothing to mean on a trait method and are a named
+ * error rather than silent acceptance.
  *
  * @param reg      the trait's registration
  * @param methods  the trait's methods, in declaration order
  * @return         one diagnostic per offending method
+ * @since 0.3.1 (§9.4 revised)
  */
 fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function): []str {
     var diags: []str = teko::list::empty()
@@ -2386,7 +2389,7 @@ fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function): []str
         if i >= methods.len { break }
         var m = methods[i]
         if m.is_abstract || m.is_virtual || m.is_override || m.is_intern {
-            diags = teko::list::push(diags, decl_diag(reg, $"trait method '{m.name}' may not be `abstract`/`virtual`/`override`/`intern` — a bodyless trait method is the requirement, and a deriver-defined method is the override (TR0)"))
+            diags = teko::list::push(diags, decl_diag(reg, $"trait method '{m.name}' may not be `abstract`/`virtual`/`override`/`intern` — a trait is a concrete mixin, not a dispatch contract (§9.4)"))
         }
         i++
     }

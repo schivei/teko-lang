@@ -1146,11 +1146,45 @@ fn parse_interface_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | er
     Parsed<TypeBody> { node = InterfaceBody { extends = ext.items; methods = methods }; next = p + 1 }
 }
 
-// (TR0) `trait { <fields>; <methods, with or without bodies> }`. `pos` is at the `{` (the caller
-// consumed the contextual `trait`). The body is STRUCT-SHAPED: interleaved `name: T` fields and
-// `fn` methods; unlike a struct's, a method here MAY be bodyless (a requirement the deriver must
-// satisfy — parse_function allow_bodyless=true, the interface-member path). Mirrors parse_fields.
-fn parse_trait_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
+/**
+ * parse_trait_composition — parse a trait's optional leading-`&` composition list (§9.4). `pos` is
+ * one past the contextual `trait`, at the first `&` (or at `{` for a trait with no composition). Each
+ * `& Name` names a trait it composes (flattened in) or an interface it carries. A bare `{` yields the
+ * empty list. Mirrors the class-body `implements` loop (a leading-`&` list, unlike a struct's
+ * first-name-then-`&` list).
+ *
+ * @param tokens  the token stream
+ * @param pos     one past `trait` (at `&` or `{`)
+ * @return        the composed names and the resume index (at `{`), or a located parse error
+ * @throws        when a `&` is not followed by a name
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn parse_trait_composition(tokens: []lexer::Token, pos: u64): ParsedList<str> | error {
+    var p = pos
+    var names: []str = teko::list::empty()
+    loop {
+        if !is_kind_at(tokens, p, lexer::TokenKind::Amp) { break }
+        if !is_name_at(tokens, p + 1) { return err_at(tokens, p + 1, "expected a trait or interface name after '&'") }
+        names = teko::list::push(names, tokens[p + 1].text)
+        p = p + 2
+    }
+    ParsedList<str> { items = names; next = p }
+}
+
+/**
+ * parse_trait_members — parse a trait's `{ <concrete members> }` body (§9.4). `pos` is at the `{`
+ * (the caller consumed `trait` and any `&`-composition list). The body is STRUCT-SHAPED: interleaved
+ * `name: T` fields (the mixin's own state), bodied `fn` methods (instance/`get`/`set`/`static`), and
+ * `const` members. A trait is a concrete mixin, so a method MUST have a body — a bodyless member
+ * (including an `abstract` one) belongs on an interface, not a trait.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the trait body's `{`
+ * @return        the parsed members + the resume index, or a located parse error
+ * @throws        when a member is malformed or a method is bodyless
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn parse_trait_members(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
     var p = skip_seps(tokens, pos + 1)   // consume `{`, skip leading separators
     var fields: []Field = teko::list::empty()
     var methods: []Function = teko::list::empty()
@@ -1162,6 +1196,9 @@ fn parse_trait_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
         if struct_item_is_method(tokens, p) {
             var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<Decl> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a trait method must parse to a Function") }
+            if mf.body.len == 0 {
+                return err_at(tokens, p, "a trait method must have a body — a trait is a concrete mixin, not a contract of signatures; a bodyless member belongs on an interface (§9.4)")
+            }
             methods = teko::list::push(methods, mf)
             p = m.next
         } else {
@@ -1254,9 +1291,34 @@ fn parse_struct_body(tokens: []lexer::Token, pos: u64, is_readonly: bool): Parse
     Parsed<TypeBody> { node = StructBody { fields = flds; methods = fs.methods; implements = impls.items; consts = fs.consts; is_readonly = is_readonly }; next = fs.next }
 }
 
-// the body of a type declaration. `struct [I & …] { fields }`, `interface [I & …] { sigs }`,
-// `trait { … }`, `enum { … }`, `variant A | B`, `[abstract|virtual] class …`, or ELSE a
-// TRANSPARENT alias `= <type-expr>` (self-host parity). `pos` is at the body's first token.
+/**
+ * is_trait_decl_head — does the body position at `pos` open a `trait` declaration (§9.4)? `trait` is
+ * CONTEXTUAL, like `from`/`params` — NOT a reserved word, so an identifier named `trait` stays an
+ * ordinary Ident everywhere else. It means "trait declaration" only when `Ident("trait")` is
+ * IMMEDIATELY followed by `{` OR by `&` (the start of a `& …` composition list). A transparent alias
+ * to a type named `trait` (`type X = trait`) has neither and parses as an alias instead.
+ *
+ * @param tokens  the token stream
+ * @param pos     the body position under test
+ * @return        true iff `pos` opens a trait declaration
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn is_trait_decl_head(tokens: []lexer::Token, pos: u64): bool {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) { return false }
+    if tokens[pos].text != "trait" { return false }
+    is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) || is_kind_at(tokens, pos + 1, lexer::TokenKind::Amp)
+}
+
+/**
+ * parse_type_body — the body of a type declaration: `struct [I & …] { fields }`, `interface [I & …]
+ * { sigs }`, `trait [& …] { … }`, `enum { … }`, `variant A | B`, `[abstract|virtual] class …`, or
+ * ELSE a TRANSPARENT alias `= <type-expr>` (self-host parity). `pos` is at the body's first token.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the body's first token
+ * @return        the parsed TypeBody + resume index, or a located parse error
+ * @since 0.3.1
+ */
 fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::Class) || is_kind_at(tokens, pos, lexer::TokenKind::Abstract) || is_kind_at(tokens, pos, lexer::TokenKind::Virtual) {
         return parse_class_body(tokens, pos)
@@ -1267,14 +1329,13 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::Service) {
         return parse_service_body(tokens, pos)
     }
-    // (TR0) `trait` is CONTEXTUAL, like `from`/`params` — NOT a reserved word (an identifier named
-    // `trait` stays an ordinary Ident everywhere else). It only means "trait declaration" when the
-    // body position holds Ident("trait") IMMEDIATELY followed by `{` — a transparent alias to a
-    // type named `trait` (`type X = trait`) has no `{` and still parses as an alias below. A trait
-    // declares NO derive-list of its own (no `trait A & B { }` — compose at the deriver instead).
-    if is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "trait" && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
-        var fs = match parse_trait_fields(tokens, pos + 1) { ParsedStructBody as x => x; error as e => return e }
-        return Parsed<TypeBody> { node = TraitBody { fields = fs.fields; methods = fs.methods; consts = fs.consts }; next = fs.next }
+    if is_trait_decl_head(tokens, pos) {
+        var impls = match parse_trait_composition(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
+        if !is_kind_at(tokens, impls.next, lexer::TokenKind::LBrace) {
+            return err_at(tokens, impls.next, "expected '{' after `trait` (or its `& …` composition list)")
+        }
+        var fs = match parse_trait_members(tokens, impls.next) { ParsedStructBody as x => x; error as e => return e }
+        return Parsed<TypeBody> { node = TraitBody { fields = fs.fields; methods = fs.methods; consts = fs.consts; implements = impls.items }; next = fs.next }
     }
     if is_readonly_struct_head(tokens, pos) {
         return parse_struct_body(tokens, pos + 1, true)

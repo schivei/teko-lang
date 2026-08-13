@@ -123,3 +123,35 @@ fn tkh_version_1_is_rejected() {
     teko::assert::str_contains(msg, "unsupported .tkh version")
     teko::assert::str_contains(msg, "must be rebuilt with the current compiler")
 }
+
+/**
+ * trait_body_roundtrips_implements — the `.tkb` codec round-trips a TraitBody's new `implements`
+ * list (§9.4): a trait carrying a field plus a `& A & B` composition list survives write then read
+ * with its fields and its composed names intact, proving the codec's added field is in parity.
+ *
+ * @return true iff the decoded TraitBody equals the encoded one on fields and implements
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn trait_body_roundtrips_implements(): bool {
+    var f = parser::Field { name = "x"; type_ann = nt("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false }
+    var impls = teko::list::push(teko::list::push(teko::list::empty(), "A"), "B")
+    var tb: parser::TypeBody = parser::TraitBody { fields = teko::list::push(teko::list::empty(), f); methods = teko::list::empty(); consts = teko::list::empty(); implements = impls }
+    var st = collect_typebody(st_empty(), tb)
+    var bytes = write_typebody(teko::list::empty(), st, tb)
+    var decoded = match read_typebody(Reader { data = bytes; pos = 0 }, st.strings) { RTypeBody as x => x.value; error => return false }
+    match decoded {
+        parser::TraitBody as d => d.fields.len == 1 && d.fields[0].name == "x" && d.implements.len == 2 && d.implements[0] == "A" && d.implements[1] == "B"
+        _ => false
+    }
+}
+
+/**
+ * tkb_traitbody_implements_roundtrip — the #test wrapper asserting the TraitBody `implements`
+ * round-trip holds (§9.4).
+ *
+ * @since 0.3.1 (§9.4 revised)
+ */
+#test
+fn tkb_traitbody_implements_roundtrip() {
+    teko::assert::is_true(trait_body_roundtrips_implements())
+}
