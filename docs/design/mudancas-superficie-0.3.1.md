@@ -1179,8 +1179,9 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
 ### 14.3 Consequências
 - **Fork "o que args é" resolvido pelo estágio:** A = **AST-only**, B = **valores typed**. Sem construto
   híbrido (supera o 1C single-construct do `plano-macro`, a revisar).
-- **FFI:** `extern` + a família — `extern macro` (macro C função-like) / `extern comptime` (constante C,
-  `O_RDONLY`).
+- **FFI:** só `extern fn` → libc (§16). **NÃO há `extern macro`/`extern comptime`** — resolver macro/constante
+  de header C exigiria toolchain C (gcc/cc/clang), **indeferido** (§16). Constantes de libc são consts Teko à
+  mão, por-plataforma.
 - **Chamada:** `@nome(...)` nas duas — o **`@` marca "executado pelo COMPILADOR"** (macro OU comptime);
   **bare (sem `@`) é função de RUNTIME** (ruling do dono, pela clareza). É essa a distinção do par `sizeof`:
   `@sizeof<T>()` (comptime, compilador) vs `sizeof(t)` (fn runtime). **Keywords fechadas: `macro` (Família A)
@@ -1235,8 +1236,12 @@ por-plataforma dos bindings vive atrás deles.
 - **O compilador CONVERTE tipos na fronteira FFI** (ruling do dono) — marshalling teko↔C **automático**
   (`str`↔`char*`+len, `i32`↔`int`, `size`↔palavra…) pra **reduzir a opacidade**: o dev **não embrulha tudo à
   mão**. Sub-decisão que resta: **quais conversões o compilador conhece** (a tabela) vs o que fica opaco.
-- **Aberto (acopla a §17):** quem escreve os bindings — usuário vs `teko::sys` curada — e ambos vivem atrás
-  de `#os`/`#arch`.
+- **Fork D (extern macro / extern comptime de C) — INDEFERIDO** (ruling do dono): trazer macro/constante de
+  **header C** exigiria um preprocessador/toolchain C (gcc/cc/clang) — **a dependência que estamos
+  removendo**. Não cruzamos essa fronteira. Consequência: **constantes/flags de libc (`O_RDONLY`, `SEEK_SET`,
+  `EAGAIN`) são consts Teko À MÃO**, por-plataforma (`#os`/`#arch`), numa **`teko::sys` curada** (escrito uma
+  vez, certo, por plataforma). Isso também responde **quem escreve os bindings: `teko::sys` curada**, não
+  resolução automática de header.
 
 ---
 
