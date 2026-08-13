@@ -1,12 +1,16 @@
 # Plano — self-construction (o gap do §9) via `.{ … }` target-typed
 
-Status: DESIGN (arquiteto). Ruling do dono (2026-08-13): a via primária é a **construção
-target-typed `.{ campo = valor }`** — um `.` unário PREFIXADO + bloco de inicialização que
-**lowera para o TIPO ESPERADO do contexto**. Este doc desenha o plano em torno de `.{}`
-(pressure-teste, não survey), com o RECON que localiza a falha atual e o blast-radius/ordem de
-fixpoint source-only. Lei de referência: `mudancas-superficie-0.3.1.md` (§9 B construção,
-§10.3 Intent, §13/item14 `self` ref implícito). Selados NÃO reabertos: §9.4, item 14, Intent
-§10.3, §9.D (união `|` inline por extenso, abreviável por macro Família A `@Type()`).
+Status: DESIGN (arquiteto). Ruling do dono (2026-08-13, DUAS ratificações): (1) a via
+target-typed **`.{ campo = valor }`** — um `.` unário PREFIXADO + bloco de inicialização que
+**lowera para o TIPO ESPERADO do contexto**, exige tipo-alvo conhecido (sem-alvo = erro);
+(2) as DUAS formas de construção são **`Tipo { … }` (nominal)** e **`.{ … }` (target-typed)** —
+o **`self { }` como CONSTRUTOR é RETIRADO** (não consertado): `self` fica só como **receptor** e
+como **tipo**. Este doc desenha o plano de IMPLEMENTAÇÃO em torno dessa lei (agora selada em Doc 2
+§4.1, commit `4b4781d4`), com o RECON que localiza a falha atual, o **sweep de remoção** do
+`self { }` e o blast-radius/ordem de fixpoint source-only. Lei de referência:
+`mudancas-superficie-0.3.1.md` §4.1 (as duas formas), §10.3 (Intent em `.{}`), §13.2/§13.3
+(item 14, `self` ref implícito; construção via `.{}`). Selados NÃO reabertos: §9.4, item 14,
+Intent §10.3, §9.D (união `|` inline por extenso, abreviável por macro Família A `@Type()`).
 
 ---
 
@@ -18,16 +22,22 @@ fixpoint source-only. Lei de referência: `mudancas-superficie-0.3.1.md` (§9 B 
   valor construído por `self { … }` recebe o nome do owner **cru/bare** (`env.owner_type`),
   enquanto o retorno `self` resolve para o nome **canônico qualificado** — e `widens_into`
   compara nomes de `Named` por igualdade EXATA de string. Bare `Counter` ≠ `ns::Counter` ⇒ falha.
-- **Via primária (dono):** `.{ campo = valor }` constrói o **tipo-alvo do contexto** (retorno
-  de `static fn` cujo tipo é `self`; slot `var x: Foo = .{…}`; argumento; campo). Reescreve o
-  factory como `static fn zero(): self { .{ _n = 0 } }`. Sem nomear `self` nem o tipo.
+- **Resolução (dono): retirar `self { }`, não consertar.** Como a lei agora tem `.{ }` (que nasce
+  no nome CANÔNICO do alvo) e `Tipo { }`, o `self { }` construtor é **removido** — e com ele
+  **desaparece o bug bare→canônico** (não há mais `self { }` a canonizar). `self` sobra só como
+  receptor (`self.x`, `self::y`) e como tipo (`(): self`).
+- **Via target-typed:** `.{ campo = valor }` constrói o **tipo-alvo do contexto** (retorno de
+  `static fn` cujo tipo é `self`; slot `var x: Foo = .{…}`; argumento; campo). Factory:
+  `static fn zero(): self { .{ _n = 0 } }`. Sem nomear `self` nem o tipo.
 - **Regra ratificada:** `.{}` é legal **somente num slot tipado** (um contexto que forneça um
   tipo-alvo). **Sem tipo-alvo ⇒ erro de compilação** (mensagem em §2.4).
-- **Coexistência:** `Name { … }` (nominal) e `self { … }` continuam válidos; `.{}` é a forma
-  target-typed. Nenhuma é removida.
-- **Custo real:** o único plumbing NOVO é **propagar o tipo de retorno como `expected`** para
-  as posições de cauda/`return` (hoje typadas sem `expected`). Binding-anotado e campo já
-  propagam; argumento é um predicado a mais. **Zero mudança no codegen** (§3.3).
+- **Três formas, estado SELADO (§2.5):** `Tipo { … }` nominal = **válida sempre** ("à gosto do
+  cliente"); `.{ … }` target-typed = válida onde há tipo-alvo (sem alvo = erro); `self { … }`
+  construtor = **REMOVIDO** (self só receptor/tipo). `Tipo { }` e `.{ }` coexistem.
+- **Custo real:** (a) o único plumbing NOVO é **propagar o tipo de retorno como `expected`** para
+  as posições de cauda/`return` (hoje typadas sem `expected`) — binding-anotado e campo já
+  propagam, argumento é um predicado a mais; (b) a **remoção** do `self { }` do parser/checker + o
+  **sweep** de 4 sítios `.tks`/`.tkr` do corpus (§3.4). **Zero mudança no codegen** (§3.3).
 
 ---
 
@@ -141,13 +151,12 @@ uma segunda divergência do mesmo tipo: `self { }` produz o phantom `Base__g__�
 retorno-`self` produz o base bare-qualificado (`typer.tks:7998` não gera phantom) — duas grafias
 distintas do mesmo tipo.
 
-> **REPORT (achado adjacente, não é um novo issue):** o bug do `self { }` é um defeito real e
-> ORTOGONAL ao `.{}` — a forma nominal `self { }` (posição de construção selada em §13.2)
-> continua a errar em tipos namespaced mesmo depois de `.{}` entrar. O conserto é de 1 linha:
-> `self_construct_target` deve canonizar o owner via `receiver_canonical_name(env.owner_type,
-> env.cur_ns, table)` em vez de usar `env.owner_type` cru (e o retorno-`self` genérico deve
-> produzir o mesmo phantom). Incluído como crumb OPCIONAL (§4, C7) para o integrador decidir
-> foldar; não bloqueia `.{}`.
+> **Consequência do ruling (2026-08-13): o bug DISSOLVE.** Como o dono RETIRA o `self { }`
+> construtor (em vez de consertá-lo), não sobra nenhum `self { }` a canonizar — a divergência
+> bare↔canônico deixa de existir por CONSTRUÇÃO. A remoção do `self { }` (parser + checker) vira
+> um crumb **OBRIGATÓRIO** (§4, C7), com **sweep** dos sítios do corpus (§3.4). `self` permanece
+> só como receptor e como tipo. A maquinaria phantom (`self_inst_spelling`, `resolve.tks:2226`)
+> **NÃO** é deletada — é **reaproveitada** por `.{}` para estampar o alvo genérico (§2.2).
 
 ### 1.5 Sítios do corpus que esperam o padrão
 
@@ -215,35 +224,47 @@ distinguível do `self` sentinel (`segments.len == 1`, nome `self`) e do nominal
 ### 2.2 Inferência do tipo-alvo (checker)
 
 Um novo predicado `is_dot_sentinel(path): bool` = `path.segments.len == 0`, e um novo ramo em
-`construct_target` (`typer.tks:4434`), ANTES do teste de `self`:
+`construct_target` (`typer.tks:4434`). **Estado FINAL (pós-R2, `self { }` removido):**
 
 ```
 fn construct_target(sl, expected, env, table): ConstructTarget | error {
     if is_dot_sentinel(sl.type_path) { return dot_construct_target(expected, env, table) }
-    if is_self_sentinel(sl.type_path) { return self_construct_target(env, table) }
     if sl.type_args.len > 0 { return explicit_inst_target(sl, expected, env, table) }
     bare_construct_target(sl, env, table)
 }
 ```
 
+Na **janela aditiva (R1)** o ramo `if is_self_sentinel(sl.type_path) { return
+self_construct_target(env, table) }` (`typer.tks:4435`) **permanece** — o parser ainda aceita
+`self { }` até o sweep, então o checker precisa resolvê-lo. Ele (mais `is_self_sentinel`,
+`self_construct_target`, `self_sentinel_path`) só é **deletado no crumb C7/R2**, junto com o
+ramo `SelfKw`+`LBrace` do parser (`parse_expr.tks:457-459`). `self_inst_spelling` NÃO é deletado
+(§2.2, reaproveitado).
+
 `dot_construct_target(expected, env, table): ConstructTarget | error` resolve o alvo a partir
 de `expected`, reusando a maquinaria já existente:
 
 1. `expected` é `Named { name }`:
-   - Se `name` é o próprio owner corrente sob forma-phantom de um método genérico, delega para
-     `self_construct_target` (mesma grafia phantom `Base__g__…`) — resolve o caso
-     `static fn make(): self` num `Cell<T>`.
-   - Senão, `type_table_find(table, name, "")` dá a `TypeDecl` concreta ⇒
+   - `type_table_find(table, name, "")` dá a `TypeDecl` concreta ⇒
      `ConstructTarget { name = name; decl = td; is_self = false }`. Instância genérica já
      estampada (`Foo__g__i64`) e phantom-instance seguem o MESMO tratamento de
      `explicit_inst_target` (`typer.tks:4388-4396`).
+   - **Caso genérico-owner (o que `self { }` fazia):** num método genérico `static fn make():
+     self` de `Cell<T>`, o `expected` é o base bare-qualificado (o retorno-`self`, hoje
+     `typer.tks:7998`, ainda não estampa phantom). `dot_construct_target` REAPROVEITA
+     `self_inst_spelling(name_last_segment(env.owner_type), decl.type_params)`
+     (`resolve.tks:2226`, a MESMA função que o `self { }` usava) para produzir o phantom
+     `Cell__g__T` + o template decl do owner, remapeado no mono pass. Este é o único ponto onde
+     a lógica phantom do `self { }` sobrevive — sob `.{}`.
 2. `expected` é qualquer OUTRA coisa (Void, Prim, Slice, união sem alvo único, etc.) ⇒
    **erro sem-alvo** (§2.4).
 
 Como `dot_construct_target` produz um `ConstructTarget` com um `name` **canônico** (o de
 `expected`, que JÁ é o nome canônico do retorno/slot), o `TExpr` final (`typer.tks:4551`)
 sai com `type = Named { name = <canônico> }`, IDÊNTICO ao alvo — `widens_into` passa por
-`type_eq`. **É exatamente isto que fecha o gap sem tocar `self { }`.**
+`type_eq`. **É exatamente isto que fecha o gap** — `.{ }` nasce no nome canônico do alvo, ao
+contrário do `self { }` (que nascia bare); por isso a via target-typed nunca dispara a
+divergência de §1.4, e o `self { }` pode ser removido em vez de canonizado.
 
 ### 2.3 Onde `expected` chega (as 5 posições de slot tipado)
 
@@ -269,16 +290,22 @@ struct/classe construível. Ratifica-se: `.{}` **nunca** infere por back-flow de
 o tipo-alvo vem SÓ do slot imediato. Isto mantém a checagem uni-direcional (a mesma disciplina
 de `type_value_expected`), sem inferência global.
 
-### 2.5 Coexistência com `Name { … }` e `self { … }`
+### 2.5 Estado SELADO das formas de construção (ruling final do dono, 2026-08-13)
 
-- `Name { … }` (nominal, com/sem type-args): **inalterado**, continua a via explícita — a única
-  que funciona SEM tipo-alvo no contexto (ex. dentro de um `println`, num scrutinee via bloco,
-  numa expressão solta).
-- `self { … }`: **permanece** como posição de construção selada (§13.2). Recomenda-se, junto,
-  o conserto de 1 linha de §1.4 (crumb C7) para que também funcione namespaced — mas isso é
-  ORTOGONAL a `.{}` e separável.
-- `.{ … }`: a via **target-typed**, primária nos 5 slots tipados. Nos factories de `self` e na
-  Intent, `.{}` **substitui** `self { }` na grafia recomendada (reescrita em §3.4).
+**SELADO — não é presunção deste plano.** O dono ratificou o estado definitivo das TRÊS grafias
+(Doc 2 §4.1, commit `4b4781d4`; ratificação final que sela o ponto que estava "a ratificar"):
+
+| Forma | Status | Onde vale |
+|---|---|---|
+| `Tipo { … }` (nominal) | **VÁLIDA SEMPRE — "à gosto do cliente"** | Qualquer posição, com ou sem tipo-alvo no contexto (ex. dentro de `println`, num scrutinee, expressão solta). Com/sem type-args. |
+| `.{ … }` (target-typed) | **VÁLIDA onde há tipo-alvo; sem alvo = ERRO** | Os 5 slots tipados (§2.3): retorno `(): self`, `var x: T = .{…}`, argumento, campo. |
+| `self { … }` (construtor) | **REMOVIDO** | Em lugar nenhum. `self` fica só **receptor** (`self.x`/`self::y`, item 14 ref implícito) e **tipo** (`(): self`, `p: self`). |
+
+Consequências firmadas: (a) `Tipo { }` e `.{ }` **coexistem** — o dev escolhe a nominal quando
+quiser ser explícito ou quando não há tipo-alvo, e a target-typed quando o alvo já está no slot;
+(b) todo `self { … }` do corpus é reescrito para `.{ … }` (§3.4) e o parser passa a **rejeitá-lo**
+(crumb C7, OBRIGATÓRIO — não mais opcional); (c) a remoção DISSOLVE o bug bare↔canônico (§1.4) —
+sem `self { }`, não há nome cru a divergir do canônico.
 
 ### 2.6 Interação com item 14 (value-struct, `self` ref implícito)
 
@@ -366,50 +393,101 @@ concreto, o codegen não distingue `.{}` de `Name{}`/`self{}`. Nenhuma edição 
 `src/codegen/`. Idem interpretador (aposentado). **O gate byte-identidade gen2==gen3 é
 preservado por construção** — a AST typada é a mesma que a via nominal produziria.
 
-### 3.4 Reescritas de corpus (source-only)
+### 3.4 Sweep do `self { }` no corpus (source-only) — inventário EXATO
 
-- Intent §10.3 (doc + eventual `.tks` da Intent quando ela entrar): `self { … }` → `.{ … }`
-  nos dois `new` (`mudancas-superficie-0.3.1.md:847-849, 864-866`). Doc-only agora; o `.tks`
-  ainda não existe (a Intent depende de §10.3/§11, DESIGN-AHEAD).
-- Factories de value-struct do corpus (`static fn … : self { self { … } }`) → `.{ … }`.
-  Levantar por `rg 'static fn .*: self' src` no momento da implementação (o parser aceita ambas
-  as grafias na janela, então a varredura é incremental, sem big-bang).
-- `service … ctor(): self` — idem.
+Levantamento por `rg 'self\s*\{' <repo>` (executado). **CUIDADO — distinguir dois usos de
+`self`:** `operator … (): self { <expr> }` é `self` como **tipo de retorno** com um CORPO de
+expressão (ex. `(left to i32 …) to Cel`) — NÃO é construção `self { }`, **NÃO se toca**. Só se
+reescreve onde o corpo é literalmente `self { campo = … }`.
 
-### 3.5 Ordem de fixpoint (bootstrap-seed safe)
+**Sítios de CONSTRUÇÃO `self { }` a reescrever para `.{ }`:**
 
-O seed é o `teko` binário anterior; o corpus não pode USAR `.{}` antes do seed o entender. Logo:
+| Arquivo | Linha | Hoje | Vira |
+|---|---|---|---|
+| `src/collections/list.tks` | 26 | `static fn make(): List<T> { self { items = … } }` | `.{ items = … }` |
+| `src/collections/map.tks` | 44 | `static fn make(): Map<V> { self { keys=…; hashes=…; vals=… } }` | `.{ keys=…; … }` |
+| `examples/regressions/type_overload/src/probe.tks` | 46 | `pub static fn of(x: T): Box<T> { self { v = x } }` | `.{ v = x }` |
+| `examples/regressions/type_overload/src/probe.tks` | 62 | `pub fn remap(nx: T): Box<T> { self { v = nx } }` | `.{ v = nx }` |
+| `examples/regressions/type_overload_reject/src/self_free/case.tks` | 16 | `var c = self { a = 1 }` (teste de REJEIÇÃO) | ver abaixo |
 
-1. **C1 (parser)** e **C2/C3 (checker)** entram como CAPACIDADE, sem NENHUM uso de `.{}` no
-   `src/` ainda. Build com o seed atual (que ignora a capacidade nova pois nada a usa).
-2. **Reseed** — o novo `teko` passa a ENTENDER `.{}`.
-3. **C4/C5/C6 + reescritas** (§3.4) — só DEPOIS do reseed o corpus pode escrever `.{}`.
-   Ritual: gate cheio (compila + regressões + gen2==gen3) neste ponto.
+**`.tkr` a atualizar:**
+- `examples/regressions/type_overload/type_overload.tkr` — cenários `self_static`/`self_instance`
+  (descrevem `self { }` numa fábrica/método): renomear para `dot_static`/`dot_instance`, prosa e
+  probes para `.{ }`.
+- `examples/regressions/type_overload_reject/type_overload_reject.tkr` — cenário `self_free`
+  (hoje: "`self { }` fora de método é rejeitado"). **Reenquadrar:** com `self { }` removido, ele
+  vira **erro de parse em QUALQUER lugar**; o teste de rejeição correspondente passa a ser
+  `dot_no_target` — `.{ }` sem tipo-alvo (`var c = .{ a = 1 }`) é rejeitado (§2.4). O
+  `self_free/case.tks` é reescrito para esse `.{ }` sem-alvo.
 
-Isto respeita "o corpus não usa feature ausente no seed": a capacidade precede o uso por um
-reseed.
+**Comentários stale (limpeza, não semântica):** `defaults_named/src/dn/dn.tks:9` (código já usa
+`B { … }` nominal; só a prosa cita `self { }`); `ast.tks:612,637`; `parse_expr.tks:156`;
+`typer.tks:4277-4291,4337-4356,4442-4452`; `resolve.tks:1216` e o DIAGNÓSTICO
+`resolve.tks:1265` (mensagem "write `Name<…>` (or `self { … }` to construct …)" → trocar para
+`.{ … }`). `trait_mixin/src/tm/tm.tks:35` (comentário "self-construction não suportada ainda" →
+agora suportada por `.{ }`).
+
+**Intent §10.3** já reescrita em Doc 2 (commit `4b4781d4`, linhas 883/900 usam `.{ … }`); o
+`.tks` da Intent ainda não existe (DESIGN-AHEAD; entra com §10.3/§11).
+
+### 3.5 Ordem de fixpoint (bootstrap-seed safe) — DOIS reseeds
+
+O seed é o `teko` binário anterior: ele **entende `self { }`** mas **NÃO `.{}`**. O corpus (`src/`)
+HOJE usa `self { }` (list/map). Duas invariantes: (a) o corpus não pode USAR `.{}` antes do seed o
+entender; (b) o corpus **nunca pode ficar sem construtor** entre os dois passos. Logo, com o
+parser em **janela aditiva** (aceita AMBOS, §12.1):
+
+1. **R1 — CAPACIDADE aditiva.** Parser aceita `.{ }` **além** de `self { }`; checker resolve `.{}`
+   (C1-C4) e **mantém** `self { }`. `src/` **inalterado** (ainda `self { }`). Build com o seed
+   ATUAL (entende `self { }`; ignora `.{}` pois nada em `src/` o usa). **Reseed R1** → o novo seed
+   entende `.{}` E `self { }`.
+2. **R2 — SWEEP + REMOÇÃO.** Com o seed R1 (que entende `.{}`), reescrever `src/` `self { }`→`.{ }`
+   (§3.4) E **remover** `self { }` do parser (`SelfKw`+`LBrace` → erro) e do checker
+   (`is_self_sentinel`/`self_construct_target`/`self_sentinel_path`). Build com o seed R1 (entende
+   `.{}`; o `src/` já não usa `self { }`). **Reseed R2** → o seed passa a REJEITAR `self { }`.
+
+**Por que dois reseeds (confirmação):** não dá para sweepar `src/`→`.{}` antes do seed entender
+`.{}` (invariante a) — logo a capacidade PRECEDE o sweep por um reseed. E a remoção do `self { }`
+só é segura DEPOIS que `src/` deixou de usá-lo — logo remoção viaja COM o sweep (R2), nunca antes.
+Entre R1 e R2 o corpus sempre tem construtor: `self { }` (pré-R2) ou `.{ }` (R2). A invariante (b)
+do dono ("mesmo reseed" = capacidade `.{}` e a remoção do `self { }` na MESMA passada de
+sweep-R2, sem um reseed intermediário que deixasse o corpus órfão) é satisfeita: R2 é atômico
+(sweep+remoção+reseed). Ritual (gate cheio: compila + regressões + gen2==gen3) em R1 e em R2.
 
 ---
 
 ## 4. Sequência de crumbs (cada um gate-ável)
 
-- **C1 — parse de `.{`** (`src/parser/parse_expr.tks`, `+ dot_sentinel_path`):
-  novo ramo `Dot`+`LBrace` em `parse_atom` → `StructLit` com `type_path` vazio. Gate: parse-only
-  (a AST typada de um `.{}` sem suporte no checker ainda erra — então C1 sem uso no corpus).
-- **C2 — `is_dot_sentinel` + `dot_construct_target`** (`typer.tks`, junto a `4298`/`4349`):
-  resolve alvo de `expected`; erro sem-alvo (§2.4). Reusa `explicit_inst_target`/
-  `self_construct_target` para os casos genéricos/phantom.
+**Bloco R1 — capacidade aditiva `.{}` (parser+checker; `src/` intocado, `self { }` mantido):**
+
+- **C1 — parse de `.{`** (`src/parser/parse_expr.tks`, `+ dot_sentinel_path`): novo ramo
+  `Dot`+`LBrace` em `parse_atom` → `StructLit` com `type_path` vazio. `self { }` continua
+  parseando (janela aditiva). Gate: parse-only.
+- **C2 — `is_dot_sentinel` + `dot_construct_target`** (`typer.tks`, junto a `4298`/`4434`):
+  resolve alvo de `expected`; erro sem-alvo (§2.4); reusa `explicit_inst_target` e a lógica
+  phantom `self_inst_spelling` (§2.2). O ramo `is_self_sentinel` **permanece** aqui em R1.
 - **C3 — threading de retorno** (`scope.tks` Env + `with_ret_expected`; `type_method`/
   `type_function`; `type_return`; cauda de `type_block`; `type_loop` limpa). O maior crumb.
   Introduzir um `type_expr_expected(e, expected, env, table)` fino que roteia struct/dot-lit por
   `type_value_expected` e o resto por `type_expr`, para a cauda de `if`/`match`.
 - **C4 — argumento `.{}`** (`typer.tks:3287`): `+ arg_is_dot_init` na disjunção.
-- **C5 — RESEED** (ritual). Depois: o corpus pode escrever `.{}`.
-- **C6 — reescritas de corpus** (§3.4) + fixtures (§5). Ritual: gate cheio + gen2==gen3.
-- **C7 (OPCIONAL, ortogonal — REPORT §1.4)** — conserto do `self { }` bare→canônico:
-  `self_construct_target` usa `receiver_canonical_name(env.owner_type, env.cur_ns, table)`; e o
-  retorno-`self` genérico produz o phantom. Fecha a forma nominal selada §13.2 em tipos
-  namespaced. Separável; o integrador decide foldar em C2/C3 ou adiar.
+- **C5 — RESEED R1** (ritual: gate cheio + gen2==gen3). Depois: o seed entende `.{}`.
+
+**Bloco R2 — sweep + remoção do `self { }` (com o seed R1):**
+
+- **C6 — sweep do corpus** (§3.4): reescrever os 4 sítios de construção `.tks` `self { }`→`.{ }`
+  (`list.tks:26`, `map.tks:44`, `type_overload/src/probe.tks:46,62`), atualizar os 2 `.tkr`
+  (type_overload, type_overload_reject reenquadrado) + `self_free/case.tks`, o diagnóstico
+  `resolve.tks:1265`, e os comentários stale. **NÃO tocar** os `operator … : self { <expr> }`
+  (self é tipo de retorno, não construção). + fixtures novas (§5).
+- **C7 — REMOÇÃO do `self { }` construtor** (OBRIGATÓRIO — o ex-crumb opcional, agora o ruling
+  do dono): deletar do parser o ramo `SelfKw`+`LBrace` (`parse_expr.tks:457-459`) e
+  `self_sentinel_path` (`:156`); do checker `is_self_sentinel` (`typer.tks:4298`),
+  `self_construct_target` (`4349-4363`) e o ramo `is_self_sentinel` de `construct_target`
+  (`4435`). `self { }` passa a ser **erro de parse**. **PRESERVAR** `self_inst_spelling`
+  (`resolve.tks:2226`, reaproveitado por `.{}`). `self` receptor/tipo intocados. C6+C7 são uma
+  passada atômica (não reseedar entre eles).
+- **C8 — RESEED R2** (ritual: gate cheio + gen2==gen3). Depois: `self { }` rejeitado.
 
 ---
 
@@ -435,17 +513,23 @@ exit-code. Programas mínimos (namespaced, para exercitar o gap real do §1.4). 
 6. **`dot_generic_self`** — `Cell<T>` com `static fn of(v: T): self { .{ _v = v } }`;
    `Cell<i64>::of(9)` → **exit 0** (exercita o phantom via `expected`).
 7. **`dot_no_target_err`** (compile-fail) — `var x = .{ _n = 0 }` sem anotação →
-   **compile error** com a mensagem de §2.4. `Then compile fails`.
+   **compile error** com a mensagem de §2.4. `Then compile fails`. (Substitui o antigo
+   `self_free` reject de `type_overload_reject`.)
 8. **`dot_scrutinee_err`** (compile-fail) — `.{…}` como subject de `if` → **compile error**
    (não-`bool`), garantindo que o parse incondicional não abre buraco semântico.
-9. **`intent_shape_ok`** (quando a Intent entrar) — os dois `new` da Intent em grafia `.{}` →
-   **exit 0** (construção protegida via `.{}` com backing privados).
-10. **`nominal_still_ok`** (não-regressão) — `Name { … }` nominal e `self { … }` continuam a
-    compilar/rodar como antes → **exit 0** (coexistência; guarda contra regressão da via nominal).
+9. **`self_ctor_removed_err`** (compile-fail, entra em R2) — `static fn zero(): self { self {
+   _n = 0 } }` → **compile error de PARSE** (`self { }` não é mais construtor). Trava a remoção
+   C7; garante que `self` receptor/tipo seguem válidos (o mesmo arquivo usa `self._n` e `(): self`
+   sem erro).
+10. **`intent_shape_ok`** (quando a Intent entrar) — os dois `new` da Intent em grafia `.{}` →
+    **exit 0** (construção protegida via `.{}` com backing privados).
+11. **`nominal_still_ok`** (não-regressão) — `Tipo { … }` nominal (com/sem type-args) continua a
+    compilar/rodar como antes → **exit 0** (a forma que COEXISTE com `.{}`). **Não** inclui
+    `self { }` (removido).
 
 Adicionar, ainda, um teste de unidade `.tkt` em `src/parser/parser_test.tkt` para `.{` →
-`StructLit` com `type_path` vazio, e em `src/checker` para `dot_construct_target` (alvo
-resolvido de `expected`; erro sem-alvo).
+`StructLit` com `type_path` vazio (e, pós-C7, `self { }` → erro de parse), e em `src/checker`
+para `dot_construct_target` (alvo resolvido de `expected`; erro sem-alvo).
 
 ---
 
@@ -461,14 +545,17 @@ resolvido de `expected`; erro sem-alvo).
   construível PODE resolver a `T` — opcional; recomendo tratar como sem-alvo por simplicidade e
   reavaliar se o corpus pedir.)
 - **R3 — owner genérico / phantom.** O retorno-`self` genérico hoje NÃO produz phantom
-  (`typer.tks:7998`), enquanto `self_construct_target` produz. `dot_construct_target` deve
-  espelhar o phantom quando `expected` é o owner corrente (§2.2). Fixture 6 trava isto. Se o
-  crumb C7 (ortogonal) for foldado, alinha as duas grafias de vez.
-- **T1 — tensão de lei §13.2 (self { } selado) × ruling `.{}`.** §13.2 nomeia `self { }` como
-  posição de construção; o dono introduz `.{}` como via target-typed e reescreve a Intent para
-  `.{}`. **Não é tensão real:** coexistem (§2.5) — `.{}` é target-typed, `self { }`/`Name { }`
-  são nominais; nenhuma é removida. O ruling do dono é o mais recente e vence law-first. **Sem
-  HALT.**
+  (`typer.tks:7998`); `dot_construct_target` deve produzi-lo via `self_inst_spelling` quando
+  `expected` é o owner corrente (§2.2). Fixture 6 (`Cell<T>::of`) trava isto. `self_inst_spelling`
+  é PRESERVADO em C7 exatamente por isto — a única peça da máquina `self { }` que sobrevive.
+- **R4 — sweep incompleto do `self { }`.** Um `self { }` de construção não reescrito viraria erro
+  de parse pós-C7. Mitigação: o inventário EXATO (§3.4, `rg 'self\s*\{'` executado — 4 sítios de
+  construção `.tks` + os `.tkr`) e a distinção explícita de `operator … : self { <expr> }` (self
+  como TIPO, não construção — NÃO tocar). Fixture 9 + o gate cheio de R2 pegam qualquer resto.
+- **T1 — tensão §13.2 × `self { }` retirado — RESOLVIDA na lei.** O ruling do dono (2026-08-13)
+  já foi absorvido em Doc 2 §4.1 e §13.2 (commit `4b4781d4`): a construção passa a ser `.{ }`
+  target-typed / `Tipo { }` nominal, e `self { }` construtor está formalmente RETIRADO. Não há
+  mais tensão — a lei e este plano concordam. **Sem HALT.**
 - **T2 — W15/Javadoc.** Todo `.tks` novo/tocado (parser ramo, checker fns, Env campo) leva
   Javadoc completo em CADA declaração. Os snippets deste doc já vêm nesse estilo para cópia
   verbatim.
