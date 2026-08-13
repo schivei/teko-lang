@@ -377,8 +377,11 @@ var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
 
 **O que muda.** A união `|` tem **duas posições de uso distintas**, e nunca é um `type` nomeado (ruling do dono):
 
-1. **União de DECLARAÇÃO / retorno — estrutural, inline.** Vale em declaração de variável, parâmetro e
-   retorno: `fn f(): T | error | null`. É composição estrutural no ponto de uso (o valor É um dos ramos).
+1. **União de DECLARAÇÃO / retorno / CAMPO — estrutural, inline.** Vale em declaração de variável,
+   parâmetro, retorno **e campo de struct**: `fn f(): T | error | null`, `struct { x: A | B | C }`. É
+   composição estrutural no ponto de uso (o valor É um dos ramos). A extensão a **campo** (§9.D) é o que
+   substitui os antigos `variant` nomeados: um campo que antes tinha tipo `Type` agora carrega a **união
+   dos membros, escrita por extenso**.
 
 2. **União de CONSTRAINT — de FORMAS, no bound de um genérico.** Um constraint é uma **disjunção de
    conjunções**: `<T: Alt1 | Alt2 | …>`, onde cada `Alt` é `Termo & Termo & …`. Os **termos** são:
@@ -404,10 +407,12 @@ var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
 
 **O que resolve.** Separa o `|` estrutural (o valor é um dos ramos) do `|` de forma (o *tipo* tem uma das
 formas), e dá ao genérico poder de exigir forma (`class`/`service [lifetime]`/`struct`), conformidade
-(interface/tipo) e não-nulidade (`notnull`) — sem nunca virar um `type` nomeado. Para um tipo-soma
-**nomeado**, continua **`variant`** (nominal, com tag — `type Pattern = variant A | B | C`), o mecanismo de
-todos os ADTs do compilador. `type X = A | B` **estrutural** segue **rejeitado**; custo zero (os 34
-tipos-soma nomeados do corpus já são `variant`).
+(interface/tipo) e não-nulidade (`notnull`) — sem nunca virar um `type` nomeado. **Não há tipo-soma
+nomeado** (ruling do dono, §9.D): `type X = variant …` sai e `type X = A | B` (alias estrutural) **continua
+rejeitado** — a única forma-soma é a **união `|` estrutural inline**, escrita por extenso onde usada.
+**Sem alias, sem abreviação: a verbosidade é o preço, não um defeito** (ruling do dono — repetir os N
+membros num campo é aceito; a alternativa, um alias/wrapper, reintroduziria a nominalidade que o §9.D
+elimina). Ver **§9.D** para a migração dos ~28 ADTs do compilador.
 
 ### 9.2 Tipos de closure — `func<…>` / `action<…>`
 
@@ -569,6 +574,51 @@ interface-only, sem exceção.**
 |---|---|---|---|
 | **interface** | sim (dispatch) | **sim** | assinaturas (o dev implementa) |
 | **trait-decorador** | não (achata) | não | métodos-com-corpo (o dev escreve) |
+
+### 9.D Aposentar `type X = variant` — a união `|` estrutural inline, por extenso (ruling do dono)
+
+**A decisão.** O tipo-soma **nomeado** (`type X = variant A | B | …`) **sai**. Não é substituído por
+wrapper (`struct { case: … }`) nem por alias (`type X = A | B`) — **a única forma-soma é a união `|`
+estrutural inline**, escrita **por extenso** onde é usada (var/param/retorno/**campo**, §9.2b). Os
+**membros** continuam tipos nomeados (`type Prim = struct { … }`); só o **agregado** perde o nome.
+
+```teko
+// ANTES (variant nominal):
+pub type Slice = struct { element: Type }
+pub type Type  = variant Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null
+
+// DEPOIS (§9.D — o agregado 'Type' some; a união vai por extenso em cada campo):
+pub type Slice   = struct { element: Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null }
+pub type Variant = struct { members: [](Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null) }
+pub type Func    = struct { params: [](Prim | … | Null); ret: Prim | … | Null; variadic: bool; … }
+```
+
+**A verbosidade é o preço, não um defeito** (ruling do dono, verbatim: *"Vai ser verboso mesmo, e isso não é
+problema, é o preço."*). Sem alias, sem `newtype`, sem wrapper — qualquer abreviação reintroduziria a
+nominalidade que esta decisão elimina. Escala real: `: Type` completa aparece em **~630 sites** de valor
+direto (+ 70 `[]Type`, + 29 `| null`); `MInst` tem 32 membros, `LOp` 16 — todos escritos por extenso.
+
+**Por que fecha o crux (o "risco de 1ª ordem", `plano-match-universal §4.2`).** Nada vira referência:
+
+- **Recursão — box implícito da própria união.** `Slice.element` carrega a união que **inclui `Slice`**; o
+  descritor fat `{tag@0; ptr@8; len@16}` que a união `|` já emite (o *compiler-managed indirection* que o
+  `variant` sempre teve) é quem boxa a fronteira recursiva. Sem `ref` explícito. Um campo `[]…` (lista) já é
+  indireto pela slice, então nem entra na conta; o núcleo que depende do box são os **~10–20 campos de
+  valor-direto auto-referente** (`Slice.element`, `Func.ret`, `Ptr.inner`, `Reference.inner`,
+  `TCall.callee_type`, `TLambda.ret`, …).
+- **`match` e construção — inalterados.** Os membros seguem nomeados, então `match x { Prim as pa => … }`
+  e a coerção membro→união (`Named { name = … }` flui para um slot-união) ficam **byte-a-byte iguais**. Os
+  112 arquivos de `match` não mudam de grafia.
+- **Membro compartilhado — trivial.** `Function`/`TypeDecl` aparecem em várias uniões ao mesmo tempo
+  (`Decl`, `ItemKind`, `TItem`); sem nome nem herança, cada união apenas **os lista**. O problema que
+  forçaria split (herança) não existe.
+
+**Escopo e ordem.** ~28 ADTs (a contagem correta é 28 — `BindElem` incluído). A **espinha do
+`plano-9d-migracao-variant.md`** — a classificação por-ADT, a lista de campos recursivos, a ordem de
+fixpoint folhas→raízes (`Type` por último por causa do carrier `Variant`), as 8 fixtures e o wire `.tkb` —
+**segue válida**; o que muda é a FORMA-alvo: **não** a "Solução A / newtype-tagged-value-union" que aquele
+doc recomendava (wrapper), e **sim** a união inline por extenso deste ruling. A migração é **source-only** —
+a união emite o mesmo descritor que o `variant` emitia, então o gate é **byte-identidade** no fixpoint.
 
 ---
 

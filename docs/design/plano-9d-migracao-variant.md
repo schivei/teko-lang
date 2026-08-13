@@ -1,5 +1,16 @@
 # Plano — §9.D: banir `type X = variant` e migrar os ~28 ADTs nomeados SEM a virada valor→referência
 
+> **⚑ RULING DO DONO (supera a recomendação abaixo).** A forma-alvo **NÃO** é a "Solução A /
+> newtype-tagged-value-union" (wrapper `struct { case: … }`) que este doc recomenda. É a **união `|`
+> estrutural inline, escrita POR EXTENSO** em cada campo — sem wrapper, sem alias, sem `newtype`. O
+> agregado nomeado (`Type`, `MInst`, …) simplesmente **some**; cada campo carrega a união dos membros por
+> extenso (`Slice = struct { element: Prim | Byte | … | Null }`). **Verbosidade é o preço, aceito**
+> (verbatim: *"Vai ser verboso mesmo, e isso não é problema, é o preço."*). A recursão fecha pelo box que a
+> própria união `|` já emite (o descritor `{tag;ptr;len}`). **A espinha deste plano** — classificação
+> por-ADT, campos recursivos de valor-direto, ordem de fixpoint folhas→raízes, fixtures, wire `.tkb` —
+> **segue válida**; só a representação-alvo muda (união inline, não wrapper). Ver Doc 2 **§9.D**
+> (`mudancas-superficie-0.3.1.md`). O corpo abaixo fica como registro da deliberação.
+
 > **Status:** DESIGN. Read-only no código de produto — NENHUM `.tks` editado, NENHUM build, NENHUM
 > reseed, NENHUM `teko test .` em forma alguma (a fuga do `monomorph` derruba o container). Este
 > documento É o artefacto; o único commit desta crumb é ele próprio. Worktree isolado off
