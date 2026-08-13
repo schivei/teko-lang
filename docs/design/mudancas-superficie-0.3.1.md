@@ -1200,6 +1200,9 @@ mesmo princípio que aposentou a structural.
   diferentes coexistem, como overload).
 - **Compõe com visibilidade:** `exp global comptime sizeof<T>(): usize` — `exp` (entra no `.tkh`) + `global`
   (sem namespace) + `comptime`.
-- **Tipos global** *(a confirmar):* um `global type Intent` fica alcançável como `Intent`, não
-  `teko::threads::Intent` — é como `str`/`error` (core) já funcionam, agora **explícito** via `global` em vez
-  de injetado.
+- **Tipos global** (confirmado): um `global type Intent` fica alcançável como `Intent`, não
+  `teko::threads::Intent` — como `str`/`error` (core) já são, agora **explícito** via `global`.
+- **Toda a superfície ambiente vira `global`** (ruling do dono). Tudo que hoje se usa sem qualificação —
+  `println`, `sizeof`, ops de `list`/`str`, … — passa a ser **declaração `global` explícita** na stdlib
+  (ex.: `global fn println(...)` em `src/io`), no lugar da injeção de parse. **Elimina o shadow por
+  completo** — e amarra na triagem `exp` da stdlib (o que é `global` é a superfície ambiente exportada).
