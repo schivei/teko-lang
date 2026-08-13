@@ -1043,3 +1043,17 @@ primitivo/enum/flags, que são **`val-ref` readonly** (self é ref só-leitura; 
   serem **readonly**, esse self-ref transiente basta — não há mutação a propagar. (Dava pra usar o mesmo
   transiente em struct, mas a escolha é **cabeçalho** para struct — mais direto que remontar `self` a cada
   chamada.)
+
+### 13.3 `readonly` — imutabilidade opt-in (default é mutável)
+
+Tudo é `var` por default; **`readonly` é o opt-in** de imutabilidade (modelo C#), em dois níveis:
+
+- **struct inteira:** `readonly struct Foo { … }` marca a **struct toda** como somente-leitura (igual ao
+  `readonly struct` do C#) — todos os campos são readonly.
+- **campo:** `readonly id: u64` marca um **campo** individual como somente-leitura.
+
+**Regra:** um campo readonly — solo ou vindo de uma struct readonly — só pode ser definido na **construção**
+(`self { … }`) ou por **valor default** na declaração; **nunca mutado depois**, nem por fora nem por dentro
+(um método que tentasse `self.id = …` sobre campo readonly = **erro**). É a garantia à prova de mutação
+**interna** que a property só-`get` (§13.2) não dá — as duas coexistem: `get`-only encapsula, `readonly`
+congela.
