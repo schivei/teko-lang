@@ -1181,8 +1181,10 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   híbrido (supera o 1C single-construct do `plano-macro`, a revisar).
 - **FFI:** `extern` + a família — `extern macro` (macro C função-like) / `extern comptime` (constante C,
   `O_RDONLY`).
-- **Chamada:** `@nome(...)` nas duas. **Keywords fechadas: `macro` (Família A) / `comptime` (Família B)**
-  (ruling do dono).
+- **Chamada:** `@nome(...)` nas duas — o **`@` marca "executado pelo COMPILADOR"** (macro OU comptime);
+  **bare (sem `@`) é função de RUNTIME** (ruling do dono, pela clareza). É essa a distinção do par `sizeof`:
+  `@sizeof<T>()` (comptime, compilador) vs `sizeof(t)` (fn runtime). **Keywords fechadas: `macro` (Família A)
+  / `comptime` (Família B)** (ruling do dono).
 
 ---
 
