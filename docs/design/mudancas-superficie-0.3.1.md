@@ -1006,5 +1006,35 @@ Sem `let`/`mut` (§1): **toda variável é `var`, mutável por default.** Não h
   para aliases e literais.
 - **Mutação = escrita direta:** `s.x = v` para campo acessível; **property `set`** para o
   controlado/computado/encapsulado (como a Intent: `_value` privado, só `pub set` escreve).
-- **Value semantics preservada:** mutar um parâmetro-valor ou um local é **local** (é cópia); só `ref`
-  (borrow local, §3/§10.6) propaga a mutação ao original.
+- **Value semantics (struct) vs identidade (objeto):**
+  - **struct (value):** atribuir/passar **copia o valor**; mutar um parâmetro/local é **local**.
+  - **classe/serviço (objeto, reference):** atribuir/passar copia a **referência**; `a.b = v` muta o objeto
+    **compartilhado** — propaga por **identidade**, sem `ref`. (Sítio gated por visibilidade: `b` acessível
+    ou `set` acessível.)
+  - **`ref`** é a ponte do value type: `ref a: T` é **alias do slot** da variável do chamador, para
+    **qualquer** `T`; permite **reatribuir tudo** (`func(ref a: T) { a = T { … } }`), não só um campo —
+    preserva-se só o **ponteiro** do ref. (Borrow local, §3/§10.6.)
+
+### 13.2 `self` — ref implícito, e onde aparece
+
+**No acesso, `self` é `ref`** (Parte 2): num método, `self` é ref implícito do receptor, então a mutação
+**gruda** na instância — e **não copia** o struct a cada chamada (a performance que motiva o item 14). Um
+método que escreve `self` é **mutante**; um que só lê é **não-mutante**, e o compilador **infere** isso do
+corpo — **(i) sem marca `mut fn`**. Chamar um método mutante sobre receptor **imutável** (literal, alias
+`val`) = **erro**.
+
+**Serve em qualquer tipo** — `struct` / `class` / `trait` / `service` — **exceto** subtipos de
+primitivo/enum/flags, que são **`val-ref` readonly** (self é ref só-leitura; não se mutam).
+
+**As posições de `self`:**
+- **como TIPO** (o próprio tipo): em declaração de variável, campo, propriedade, retorno ou parâmetro —
+  ex.: `static fn new(): self`, `p: self`.
+- **construção:** `self { … }` (Block-B).
+- **acesso:** `self.x` / `self::y` — **aqui `self` é `ref`**.
+
+**Materialização e o ponteiro do ref:**
+- **objeto (class/service):** cada instância tem **arena própria** → ponteiro/identidade intrínseco; o `ref`
+  é natural.
+- **struct (value):** ao materializar, **carrega o próprio ponteiro** para permitir o `ref`. Uma **cópia é
+  nova materialização — novo ponteiro** (é o que preserva value semantics: mutar a cópia não toca o
+  original).
