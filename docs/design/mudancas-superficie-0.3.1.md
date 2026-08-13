@@ -1128,9 +1128,16 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   ```
 - **O tipo de retorno discrimina:** macro **sem** retorno **emite código** (via `lowering`); macro **com**
   retorno (`: usize`) **computa um valor** inlined (`macro count(...args): usize { args.len }`).
+- **Hygiene = mangle, sem erro** (ruling do dono). Colisão de variável **nunca erra**: um binding que a macro
+  introduz no verbatim de `lowering` (o `var t` do `swap`) é **manglado** para um nome único (`t$…`), então
+  jamais colide com o `t` do usuário. Dois detalhes forçados:
+  - **mangle estável/determinístico** (chave = macro+sítio+nome+índice de expansão), **nunca aleatório** —
+    senão duas compilações do mesmo fonte divergem e **quebram o fixpoint byte-idêntico**;
+  - **só o verbatim dentro de `lowering` é manglado** (é da macro); o que entra por **`${}`** é **nó do
+    usuário e fica INTACTO** (referencia o escopo do usuário — manglá-lo capturaria errado). É essa
+    assimetria que É a hygiene.
 - Modelo **Rust/Lisp** (expand-então-tipa). Funciona com args de runtime (`@count(a, b)` conta nós, não
-  avalia nada). Precisa de **hygiene** (um binding introduzido pela macro pode capturar o do usuário) — o
-  esquema (gensym/colorido) fica pra onda.
+  avalia nada).
 
 ### 14.2 Família B — avaliação comptime *(keyword: `comptime`)*
 - **Os tipos JÁ são conhecidos** — roda **DEPOIS do type-check**: `parse → AST → TYPE-CHECK → [comptime eval]
