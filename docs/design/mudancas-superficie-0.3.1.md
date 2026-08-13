@@ -505,6 +505,12 @@ assinaturas" e passa a ser **decorador**: achata-se no tipo que a compõe (nem s
 - **Modelo mental:** mixin (estado + comportamento concretos que achatam), estilo trait-de-Scala/`partial` —
   mas **não é tipo** (não instancia, não referencia, não despacha por si; o **host** é que vira o tipo).
 
+**A regra de desambiguação por AST é GERAL, não específica de trait.** Onde quer que a composição por `&`
+**funda membros de mesmo nome**, aplica-se a mesma regra — **AST igual → funde num só; qualquer diferença →
+erro**: **interface ∘ interface** (`IFoo & IBar`, ou um tipo que implementa várias — duas assinaturas
+homônimas idênticas viram um contrato; conflitantes erram), **tipo ∘ (trait/interface)**, e a
+composição de **operador-interfaces** (`IEq & IOrd`…). Uma regra uniforme e decidível, não uma por construto.
+
 **Structural traits (`Eq`/`Ord`/`Hash`/`Clone`/`Default` + sinônimos `Hashable`/`Comparable`) —
 APOSENTADAS.** Eram *compiler-shadow*: nomes **hardcoded** (`is_structural_trait`, `resolve.tks`) cujos
 corpos o compilador **sintetizava dos campos** (`synthesize_structural_methods`, `synth.tks` — gera
