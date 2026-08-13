@@ -415,9 +415,12 @@ formas), e dá ao genérico poder de exigir forma (`class`/`service [lifetime]`/
 (interface/tipo) e não-nulidade (`notnull`) — sem nunca virar um `type` nomeado. **Não há tipo-soma
 nomeado** (ruling do dono, §9.D): `type X = variant …` sai e `type X = A | B` (alias estrutural) **continua
 rejeitado** — a única forma-soma é a **união `|` estrutural inline**, escrita por extenso onde usada.
-**Sem alias, sem abreviação: a verbosidade é o preço, não um defeito** (ruling do dono — repetir os N
-membros num campo é aceito; a alternativa, um alias/wrapper, reintroduziria a nominalidade que o §9.D
-elimina). Ver **§9.D** para a migração dos ~28 ADTs do compilador.
+A **verbosidade da fonte é abreviável por MACRO** (Família A, §14.1: uma `macro Type()` cujo `lowering`
+alarga para a união entre parênteses; usa-se `[]@Type()`) — açúcar **puramente sintático**, resolvido
+*antes* do typecheck, então **não** reintroduz a nominalidade (depois da expansão só há a união literal
+inline, nenhum `type` nomeado). O que continua **proibido** é o **alias/wrapper/newtype nominal**
+(`type X = A | B`, `struct { case: … }`, `newtype`), que criaria um *tipo* com identidade. Ver **§9.D**
+para a migração dos ~28 ADTs do compilador.
 
 ### 9.2 Tipos de closure — `func<…>` / `action<…>`
 
@@ -601,10 +604,17 @@ pub type Func    = struct { params: [](Prim | … | Null); ret: Prim | … | Nul
 Note os **parênteses obrigatórios no array-de-união** (`members: [](Prim | … | Null)`): `[]` liga mais
 forte que `|`, então sem eles `[]Prim | … | Null` seria "array-de-Prim, ou Byte, ou …" (§9.2b, precedência).
 
-**A verbosidade é o preço, não um defeito** (ruling do dono, verbatim: *"Vai ser verboso mesmo, e isso não é
-problema, é o preço."*). Sem alias, sem `newtype`, sem wrapper — qualquer abreviação reintroduziria a
-nominalidade que esta decisão elimina. Escala real: `: Type` completa aparece em **~630 sites** de valor
-direto (+ 70 `[]Type`, + 29 `| null`); `MInst` tem 32 membros, `LOp` 16 — todos escritos por extenso.
+**A verbosidade é o preço aceito** (ruling do dono, verbatim: *"Vai ser verboso mesmo, e isso não é
+problema, é o preço."*) — mas **abreviável por MACRO**, não por alias. Uma `macro` da Família A (§14.1)
+nomeia a expansão sem criar um tipo:
+```teko
+pub macro Type() { lowering { (Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null) } }
+pub type Variant = struct { members: []@Type() }   // @Type() alarga para a união entre parênteses, pré-typecheck
+```
+O `@Type()` **copia-se in loco e alarga a AST antes do typecheck** — o checker vê a união literal inline,
+**sem** `type` nomeado nenhum, então o §9.D segue honrado (o proibido é o alias/wrapper/newtype *nominal*,
+não a macro sintática). Escala real: `: Type` completa aparece em **~630 sites** de valor direto (+ 70
+`[]Type`, + 29 `| null`); `MInst` tem 32 membros, `LOp` 16 — a macro é o que torna isso sustentável.
 
 **Por que fecha o crux (o "risco de 1ª ordem", `plano-match-universal §4.2`).** Nada vira referência:
 
