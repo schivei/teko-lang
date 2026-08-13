@@ -327,7 +327,7 @@ cost nothing.
 | DB-CASS | `teko::db::cassandra` (native) | CQL binary v4/v5: STARTUP/AUTH/QUERY/PREPARE/EXECUTE, paging | DB0, N1(+N3), C1 | **pure** | **P3** |
 | DB-REDIS | `teko::db::redis` (native) | key-value/cache surface over RESP2/RESP3 — **SHARES** the `net::redis` codec (N13) | DB0, N13 | **pure** | **P3** |
 | DB-ORA | `teko::db::oracle` (FFI) | `extern` OCI (`libclntsh`: `OCIEnvCreate`/`OCIStmtPrepare`/`OCIStmtExecute`/`OCIDefine…`) — TNS/Net is proprietary, so FFI é o caminho pragmático | DB0, **KEYSTONE-LINK**; **FFI** | **needs FFI** (proprietary wire) | **P3** |
-| DB-ODBC | `teko::db::odbc` (FFI, universal) | uma superfície `extern` para `unixODBC` (`SQLDriverConnect`/`SQLPrepare`/`SQLExecute`/`SQLFetch`/`SQLGetData`) — **catch-all** para qualquer engine com driver ODBC (Oracle, MSSQL, DB2, Informix, Sybase…) | DB0, **KEYSTONE-LINK**; **FFI** | **needs FFI** (vendor driver) | **P3** |
+| DB-ODBC | `teko::db::odbc` (FFI, universal) | uma superfície `extern` para `unixODBC` (`SQLDriverConnect`/`SQLPrepare`/`SQLExecute`/`SQLFetch`/`SQLGetData`) — **catch-all** para qualquer engine com driver ODBC (Oracle, MSSQL, DB2, Informix, Sybase…). **DEVE suportar x86 (32-bit) E x64** (`#arch`): há drivers ODBC que **só existem em 32-bit**, então o binding do Driver Manager e os tipos C-ABI (`SQLLEN`/`SQLULEN`/handles) variam por arquitetura e ambas as larguras precisam ser geráveis | DB0, **KEYSTONE-LINK**; **FFI**; **§17 `#arch`** | **needs FFI** (vendor driver, per-arch) | **P3** |
 | Pool / Tx | `teko::db` shared | `exp type Pool { fn get(self): Connection\|error }` | DB0, §10 (concurrent pool) | **pure** | **P3** |
 
 **Os dois caminhos** (ruling do dono: o set de DB estava fraco — mysql/mariadb/mongodb/mssql/oracle/redis +
