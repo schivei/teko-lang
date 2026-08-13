@@ -1,65 +1,63 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): §9 F MULTIPLE ASSIGNMENT, ARRAY DECOMPOSITION,
-# MULTIPLE RETURN. The sealed model has NO first-class tuple type: `( )` appear only in a multiple-return
-# signature and at a binding site, never as a value. The owner did NOT edit bootstrap/teko.c by hand;
+# RESEED (hand-harvest, by-hand per owner order): §9 OPERATOR OVERLOADING + READONLY METHODS ON
+# VALUE-TYPES (prim-backed newtypes, enums, flags). The owner did NOT edit bootstrap/teko.c by hand;
 # the file is the harvested self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's
 # kv_field; enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
 #
-# §9 F multiple assignment / array decomposition / multiple return
+# §9 operators + value-type methods
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (docs/design/plano-secao9F-multi-assign.md):
-#   - THE MULTIPLE-BINDING AST, in `src/parser/ast.tks`: `BindElem = BindName | BindSkip | BindRest`,
-#     `MultiTargetKind = Parallel | ArrayDecomp`, and a new `MultiBind` `Statement` case; plus
-#     `Return.values` and `Function.ret_types` (both empty on every existing node — fixpoint-inert).
-#   - PARSER, in `src/parser/parse_stmt.tks` / `src/parser/parse_decl.tks`: `parse_multibind` (the two
-#     lookaheads `var [` and `var NAME ,`, parallel / bracketed target lists with `_` and the ASCII `..`
-#     skip-range, F-D1); `parse_multi_return_types` (a `( A, B, … )` signature, arity >= 2, `(A)` and
-#     extern/bodyless rejected); and `return (e1, e2, …)` recognized only by a top-level comma inside a
-#     parenthesized `return` value (`paren_has_top_comma`), so a grouped single `return (a + b)` is
-#     unchanged and a bare `(a, b)` expression stays a parse error.
-#   - CHECKER, in `src/checker/typer.tks` / `src/checker/collect.tks`:
-#       * `type_multibind` DESUGARS multiple assignment and array decomposition to a FLAT sequence of
-#         existing typed nodes (`TBinding` + a synthesized `if`/`panic` length guard), spliced into the
-#         enclosing block and the two top-level statement sequencers via `TStmtSeq` — NO `TBlockStmt`
-#         (the native backend does not lower it) and no new typed node, so codegen/LIR are untouched.
-#         Parallel binds each value to a fresh position-unique temp first (parallel semantics); array
-#         decomposition binds the source to a temp, emits the runtime length guard (exact without `..`,
-#         minimum head+tail with `..`, ruling 5), then reads head elements at constant indices and tail
-#         elements at `len - k`.
-#       * `synthesize_mret_structs` is a pre-collect pass that lowers every multiple-return function to
-#         an ORDINARY struct-returning one: it synthesizes one aggregate struct (`__mret…`, an
-#         unspellable reserved stem) per distinct (namespace, return-type-list), rewrites the signature's
-#         return type and every `return (…)` to that struct, and appends the declarations. Both backends
-#         then emit the aggregate with their ordinary struct machinery — there is no tuple type in the
-#         type system. A value-position guard (`type_is_mret_aggregate`) rejects binding a multiple-return
-#         value to a single name (ruling 3), and `type_multibind_mret` destructures `var q, r = f(…)`
-#         into aggregate field reads (`_mb._0`, `_mb._1`, …), `_` discarding its slot.
+# WHAT ENTERS (docs/design/plano-secao9-operadores-e-value-type-methods.md):
+#   - THE VALUE-TYPE BODY AST, in `src/parser/ast.tks`: a new `NewtypeBody` (a prim-backed value-type
+#     WITH a body — nominal, non-transparent), `methods` fields on `EnumBody`/`FlagsBody`, and an
+#     `is_operator` flag on `Function` (all empty/false on every existing node — fixpoint-inert). The
+#     `.tkb` codec (`src/emit/tkb_*.tks`) serializes the new node/fields in parity.
+#   - PARSER, in `src/parser/parse_decl.tks`: `parse_value_type_members` parses the trailing
+#     `{ method-or-operator* }` block of `type X = <prim> { … }` / `enum … { … }` / `flags … { … }`;
+#     `operator` is CONTEXTUAL (precedent `trait` — an `Ident("operator")` followed by a dunder name),
+#     so no reserved token is added. A field/const/static member is a precise located parse error
+#     (ruling 10).
+#   - CHECKER, in `src/checker/collect.tks` / `src/checker/typer.tks`:
+#       * value-type instance methods collect + dispatch through the existing method machinery; the
+#         flags method honest-stop is lifted; a `self` operand/return type resolves to the owner.
+#       * `check_operator_invariants` validates each operator at DEFINITION (rulings 1/3/4/5): dunder
+#         name, arity, at least one `self` operand, the class-mandated return (arith/bitwise → self,
+#         comparison → bool, index → element), `__index` only on an indexed carrier, and the mandatory
+#         comparator counterparts (__eq⟂__ne, __lt⟂__ge, __gt⟂__le).
+#       * the operator dunder lookup (`dunder_of_binop`/`value_op_owner`/`dispatch_binop_operator`),
+#         gated so it fires only when at least one operand is a NAMED value-type (ruling 7), lowers a
+#         matched operator to a static `Owner::__dunder(l, r)` call and otherwise reduces each operand
+#         to its base (rulings 8), across `type_binary`/`type_unary`/`type_compare`/`type_index`.
+#       * E9 (ruling 9): `value_type_base`/`value_type_reduce` reduce a nominal newtype to its backing
+#         so `type_cast` treats newtype<->base as a representation no-op, exactly like the enum<->int
+#         (E7) and flags<->int (E8) paths.
+#   - BACKENDS: `src/codegen/codegen.tks` lowers a `NewtypeBody` to a C typedef of its backing machine
+#     type; `src/lir/lower.tks` records a value-type carrier in the LEnumInfo table (`find_value_carrier`)
+#     so the native backend lowers a value-type to its backing machine class. Both are corpus-inert (no
+#     `NewtypeBody` exists in the compiler's own sources).
 #
-# ACCEPT fixture (examples/regressions/multi_assign): parallel assignment, read-before-bind, a shared
-# `: T` annotation, array decomposition with `_` and a `..` skip-range (including a zero-middle skip),
-# and a top-level multiple-return destructure with and without a discard — each case names itself and
-# asserts its own value on the own-native backend; standalone assignment/decomposition cases run on both
-# the own-native and C routes and the length-guard panic is pinned on both. REJECT fixture
-# (examples/regressions/multi_assign_reject): a parallel target/value arity mismatch, a multiple-return
-# value bound to a single name, a second `..` in a decomposition, and an arity-1 `( A )` signature — the
-# single failing build reports all four diagnostics.
+# ACCEPT fixture (examples/regressions/value_type_operators): arithmetic with both dispatch legs,
+# comparison + counterpart, a readonly method on an enum and on a flags value-type, and operator
+# __index over a []i32-backed newtype — each extracting/reconstructing through the E9 cast. REJECT
+# fixtures (examples/regressions/diagnostics, folded as standalone Given-source builds): a field and a
+# static in a value-type body, an operator with no `self`, a non-bool comparison return, `__index` on
+# a scalar newtype, a missing comparator counterpart, and a nominal newtype used as its base without a
+# cast.
 #
 # FIXPOINT. The COMMITTED artifact self-reproduces DIRECTLY (the predecessor seed builds this source
-# with no staged bootstrap, since the corpus uses no §9 F form): compiling bootstrap/teko.c with cc into
-# a compiler and rebuilding the source produced a byte-identical teko.c (sha256 below).
+# with no staged bootstrap, since the corpus uses no §9 value-type form): compiling bootstrap/teko.c
+# with cc into a compiler and rebuilding the source produced a byte-identical teko.c (sha256 below).
 #   cc(bootstrap/teko.c) -> gen;  TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == below.
-# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 3487.6 MB).
+# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 3564.9 MB).
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  4b477e541da211f07642a185fd4fde9046e453887743ef4b1502e683046e50ac
+sha256:  f94a30667e3eb618e98417e302f287da742dcc3dbe83ee1cc9b9689025cd2e38
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§9 F multiple assignment, array
-         decomposition and multiple return; parser MultiBind + multi-return signature/return, checker
-         desugar to a flat TBinding sequence, the synthesize_mret_structs pre-collect aggregate pass,
-         the value-position guard and the destructuring desugar); sha256 is read directly off the
-         committed file and was proven a fixpoint (bin == committed, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§9 operator overloading and readonly
+         methods on prim/enum/flags value-types; parser NewtypeBody + contextual operator, checker
+         operator dunder dispatch + E9 newtype<->base cast + definition validations, C typedef and
+         native carrier lowering), byte-identical on rebuild; no unrecovered legacy artifact underlies it.
