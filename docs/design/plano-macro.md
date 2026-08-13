@@ -5,8 +5,9 @@ this document writes no `.tks`, triggers no reseed, runs no build, and — per t
 constraint — **`teko test` was NOT run in any form** (the `monomorph` leak crashes the
 container). Author: architect. Branch base: `origin/fix/retirement`.
 
-> **What is SEALED (do not reopen).** `docs/design/mudancas-superficie-0.3.1.md` §14 (HEAD
-> `8962edca`) seals the shape: Teko gains macros in **two keyword-identified families,
+> **What is SEALED (do not reopen).** `docs/design/mudancas-superficie-0.3.1.md` §14/§14.1
+> (HEAD `ee5acced` — `2659199a` splice + `2459cde2`/`ee5acced` hygiene) seals the shape: Teko gains macros
+> in **two keyword-identified families,
 > both `@`-called, split by pipeline STAGE**, and the stage FIXES the arg model — there is
 > **no single-construct hybrid** (the prior `plano-macro` 1A/1B/1C hybrid is SUPERSEDED and
 > is gone from this rewrite):
@@ -14,8 +15,14 @@ container). Author: architect. Branch base: `origin/fix/retirement`.
 > - **Family A — syntactic** *(provisional keyword `macro`)* — expands on the **AST BEFORE
 >   type-check** (`parse → AST → [expand] → TYPE-CHECK of the result → lower`). Args = **raw
 >   AST only** (`.node`/`.source`/`.len`); types do NOT exist yet, so **no `.type`/`.value()`
->   in the body**. Produces **code** (AST), type-checked afterward. Rust/Lisp model. Needs
->   hygiene + a `quote`/`${}` splice+unquote mechanism.
+>   in the body**. The body is **comptime logic that runs BEFORE enlarging** and decides which
+>   **`lowering { … }`** blocks to emit (or none); inside `lowering { }` everything is
+>   **verbatim** EXCEPT **`${expr}`**, which injects a macro-computed node. **Return type
+>   discriminates:** NO return type ⇒ **emits code** (via `lowering`); a return type (`: usize`)
+>   ⇒ computes an **inlined value** (`macro count(...args): usize { args.len }`). Rust/Lisp
+>   model. The splice is **`lowering`/`${}`** (NOT `quote`); hygiene is **stable-mangle, never an
+>   error** (only the `lowering` verbatim is mangled; a `${}`-injected node is the USER's, kept
+>   INTACT).
 > - **Family B — comptime evaluation** *(provisional keyword `comptime`)* — runs **AFTER
 >   type-check** (`parse → AST → TYPE-CHECK → [comptime eval] → lower`). Args = **typed
 >   evaluable values**; computes an inlined **value**. Zig comptime model.
@@ -51,7 +58,7 @@ container). Author: architect. Branch base: `origin/fix/retirement`.
 **Parser / AST (Family A operates on THIS tree — pre-type-check).**
 - `Expr = struct { kind: ExprKind; line: u32; col: u32 }` — `src/parser/ast.tks:293`;
   `ExprKind = variant Number | Var | Call | … | Block` — `:292`. Every node already
-  carries `line`/`col` (C1-POS) — the stable key for hygiene gensym (§A.3, §5.4) and for
+  carries `line`/`col` (C1-POS) — the stable key for hygiene stable-mangle (§A.3, §5.4) and for
   `.source` reconstruction (§A.1).
 - `Call = struct { callee: Path; args: []Expr; arg_names: []str; owner_type_args;
   callee_type_args }` — `:199`. The template for a new `MacroCall` node.
@@ -119,10 +126,10 @@ that split:
 | stage | **before** type-check (on `parser::Program`) | **after** type-check (on `checker::TProgram`) |
 | args are | **raw, ANONYMOUS AST** — `.node`/`.source`/`.len`, un-typed until materialized | **typed evaluable values** — a `ConstValue` |
 | variadics | **free** — anonymous args have no type, so arity is unconstrained (§A.0) | trailing typed pack (`is_params` precedent) |
-| body may use | node reflection + `quote`/`${}` | `eval_const` arithmetic over typed values |
+| body may use | comptime logic + node reflection + `lowering`/`${}` | `eval_const` arithmetic over typed values |
 | body may NOT use | `.type`, `.value()` (no types yet) | `.node`/`.source` (AST is gone; it's a value) |
-| produces | **code** (an AST fragment), type-checked after | a **value**, inlined as a literal |
-| needs | hygiene, quote/unquote (§A.2, §A.3) | nothing new — reuses `eval_const`/`literal_of` |
+| produces | **code** via `lowering` when the macro has **no return type**; an **inlined value** when it declares one (`count`, §A.0 consequence 4) | a **value**, inlined as a literal |
+| needs | **stable-mangle** hygiene + `lowering`/`${}` splice (§A.2, §A.3) | nothing new — reuses `eval_const`/`literal_of` |
 | engine | new `expand_macros_syntactic` pre-pass (§5.1) | `expand_comptime` at `project.tks:367` (§B.1) |
 | FFI form | `extern macro` (Tiers 1-3) | `extern comptime` (Tier 0 constants) |
 | owner example | `@count(a, b)` counts nodes = `2` | `@sum(2,3,5)` folds to `10` |
@@ -141,7 +148,7 @@ The sub-designs below split into **Family A detail** (§A), **Family B detail** 
 
 ## A.0 — the DEFINING mechanism: copy-in-place, enlarge the AST (the spine)
 
-Per the sharpened seal (`mudancas-superficie-0.3.1.md` §14.1, HEAD `3976a8be`), a Family-A
+Per the sharpened seal (`mudancas-superficie-0.3.1.md` §14.1, HEAD `ee5acced`), a Family-A
 macro is defined by ONE mechanism, and every sub-design below serves it:
 
 > **A Family-A macro COPIES ITSELF into the use site and ENLARGES the AST.** It is **inline
@@ -150,28 +157,35 @@ macro is defined by ONE mechanism, and every sub-design below serves it:
 > vtable, no runtime selection). This copy-in-place is exactly what distinguishes a macro from
 > a function or a trait.
 
-Three consequences fix the whole section:
+Four consequences fix the whole section:
 
-1. **Enlarge-the-AST, not invoke.** The expander does not *evaluate* the body — it *pastes*
-   it. So the surfaces the body needs are (a) how it *reads* the pasted-in args (§A.1 — the
-   `Node` reflection), (b) how it *writes* the fragment being pasted (§A.2 — `quote`/`${}`
-   splice), and (c) how the paste avoids clobbering the site it grows into (§A.3 — hygiene).
-   The pipeline slot (§5.1-A) runs the paste **before type-check**, so the enlarged AST is
-   type-checked as if the dev had written it by hand — a badly-typed expansion fails the
-   normal type-check, pointing back at the site.
+1. **The body is comptime logic that runs BEFORE enlarging.** The expander does not *evaluate*
+   the body as a runtime call — it runs the body's **comptime logic**, which decides which
+   **`lowering { … }`** blocks to emit (or none — conditional/assembled expansion), then
+   *pastes* the emitted fragment at the call position. So the surfaces the body needs are (a)
+   how it *reads* the pasted-in args (§A.1 — the `Node` reflection), (b) how it *writes* the
+   fragment being pasted (§A.2 — the sealed **`lowering`/`${}`** splice), and (c) how the paste
+   avoids clobbering the site it grows into (§A.3 — stable-mangle hygiene). The pipeline slot
+   (§5.1-A) runs the paste **before type-check**, so the enlarged AST is type-checked as if the
+   dev had written it by hand — a badly-typed expansion fails the normal type-check, pointing
+   back at the site.
 
 ```teko
 /**
- * twice — Family A, the mechanism in one macro: `@twice(work())` does not CALL twice — it
- * COPIES `work()` twice into the use site, enlarging the AST to two statements. No frame,
- * no dispatch; the caller's AST literally grows.
+ * log_if — Family A, the mechanism in one macro: the body is COMPTIME LOGIC that runs before
+ * enlarging and decides whether to emit a `lowering` block at all. `@log_if(msg)` COPIES a
+ * `println` into the use site; `@log_if()` emits NOTHING. No frame, no dispatch; the caller's
+ * AST grows only when the comptime `if` fires. NO return type ⇒ this macro EMITS CODE.
  *
- * @param x  the expression node, copied verbatim into each slot
- * @return   a statement fragment holding two copies of `x`
+ * @param args  the pack of anonymous call-site nodes the comptime logic inspects
  * @since 0.4-macros
  */
-macro twice(x): stmt { quote { ${x}; ${x} } }
-// call site:  @twice(step())  →  the AST at the site BECOMES:  step(); step()
+macro log_if(...args) {
+    if args.len > 0 {                          // comptime logic — runs BEFORE enlarging
+        lowering { teko::io::println(${args[0]}) }   // verbatim, ${} injects the arg node
+    }                                          // if false → nothing is pasted
+}
+// call site:  @log_if(msg)  →  teko::io::println(msg)   ;   @log_if()  →  (nothing)
 ```
 
 2. **No explicit types ⇒ free arity (variadics are a consequence, not a bolt-on).** A
@@ -213,20 +227,28 @@ macro count(...args): usize { args.len }
  * @param a       the left value node
  * @param b       the right value node
  * @param fields  the field-name nodes to compare
- * @return        a boolean expression fragment ANDing the per-field comparisons
  * @since 0.4-macros
  */
-macro eq_by_fields(a, b, ...fields): bool {
-    var acc = quote { true }
-    for f in fields { acc = quote { ${acc} && ${a}.$(f.source) == ${b}.$(f.source) } }
-    acc
+macro eq_by_fields(a, b, ...fields) {              // NO return type ⇒ emits code
+    var acc = lowering { true }
+    for f in fields { acc = lowering { ${acc} && ${a}.${f.source} == ${b}.${f.source} } }
+    acc                                            // the assembled `lowering` fragment
 }
 // call site:  @eq_by_fields(p, q, x, y)  →  true && p.x == q.x && p.y == q.y   (visible, copied in)
 ```
 
+4. **Return type discriminates emit-code vs compute-value (sealed §14.1).** A Family-A macro
+   with **NO return type EMITS CODE** — its comptime logic assembles `lowering { … }` fragments
+   (`log_if` above, `eq_by_fields` above, `swap` in §A.3). A Family-A macro **WITH a return type
+   computes an inlined VALUE** — no `lowering`, just the value the body returns, pasted as a
+   literal (`macro count(...args): usize { args.len }` above; `macro stringify(x): str { x.source }`
+   in §A.1). The two canonical value macros need no splice at all. This is the sealed rule:
+   the presence or absence of `: T` on the macro decl *is* the emit-code / compute-value switch.
+
 The three open sub-designs — the **AST reflection surface** the body reads (§A.1), the
-**splice/quote mechanism** the body writes with (§A.2), and **hygiene** for the paste (§A.3)
-— are exactly the three faces of this one copy-in-place mechanism.
+**splice mechanism** the body writes with (§A.2, sealed to `lowering`/`${}`), and **hygiene**
+for the paste (§A.3, sealed to stable-mangle) — are the three faces of this one copy-in-place
+mechanism.
 
 ## A.1 — AST reflection surface (`Node`): how much of the AST to expose
 
@@ -255,20 +277,20 @@ macro count(...args): usize { args.len }
 // call site:  @count(f(), g())  →  expands to the literal  2   (f/g NEVER run)
 
 /**
- * stringify — Family A: expands to a string literal holding the VERBATIM SOURCE TEXT of its
- * single argument node. `.source` is the exact bytes the caller wrote — no evaluation, no
- * type. The classic "print the expression you were given" macro.
+ * stringify — Family A, the value form: WITH a `: str` return type it COMPUTES a value (the
+ * verbatim source text of its single argument) and inlines it as a string literal — no
+ * `lowering` needed. `.source` is the exact bytes the caller wrote — no evaluation, no type.
  *
  * @param x  the argument node whose source text is captured
- * @return   a string-literal AST fragment holding `x`'s source
+ * @return   the source text of `x`, inlined as a string literal
  * @since 0.4-macros
  */
-macro stringify(x): str { quote { $string(x.source) } }
+macro stringify(x): str { x.source }
 // call site:  @stringify(a + b * 2)  →  expands to the literal  "a + b * 2"
 ```
 
-- **Unlocks:** `@count`, `@stringify`, and (with §A.2's splice) any macro that only needs
-  to re-emit a node verbatim — e.g. a `@dbg(x)` that prints `"x = " ++ @stringify(x)` then
+- **Unlocks:** `@count`, `@stringify`, and (with §A.2's `lowering` splice) any macro that only
+  needs to re-emit a node verbatim — e.g. a `@dbg(x)` that prints `"x = " ++ @stringify(x)` then
   the value. **Cost:** minimal, honours M.0. **Limit:** a macro cannot branch on node shape
   (can't ask "is this a call?").
 
@@ -289,11 +311,11 @@ shape-specific accessors that return `Node | null` (e.g. `.callee`, `.arg(i)`, `
  * @throws      a compile-time `@error` if `cond` is not an `==` comparison
  * @since 0.4-macros
  */
-macro assert_eq(cond): stmt {
+macro assert_eq(cond) {                             // NO return type ⇒ emits code
     if cond.kind != NodeKind::Binary { @error("assert_eq expects `a == b`") }
-    quote {
-        if !($(cond.lhs) == $(cond.rhs)) {
-            panic($string(cond.lhs.source) ++ " != " ++ $string(cond.rhs.source))
+    lowering {
+        if !(${cond.lhs} == ${cond.rhs}) {
+            panic(${cond.lhs.source} ++ " != " ++ ${cond.rhs.source})
         }
     }
 }
@@ -308,7 +330,7 @@ macro assert_eq(cond): stmt {
 ### A.1-Tier-3 — full builder: `.kind` + mutation + a `Node`-construction API
 
 Add constructors (`Node::call(callee, args)`, `Node::binary(op, l, r)`, …) so a macro can
-BUILD arbitrary AST programmatically instead of only via `quote`. This is the Lisp
+BUILD arbitrary AST programmatically instead of only via `lowering`. This is the Lisp
 "AST-as-data" maximum.
 
 ```teko
@@ -320,8 +342,8 @@ BUILD arbitrary AST programmatically instead of only via `quote`. This is the Li
  * @return      a statement fragment performing the swap
  * @since 0.4-macros
  */
-macro tuple_swap(...args): stmt {
-    var tmp = Node::fresh_local()                    // hygienic gensym (§A.3)
+macro tuple_swap(...args) {                          // NO return type ⇒ emits code
+    var tmp = Node::fresh_local()                    // stable-mangled temp (§A.3)
     Node::block([
         Node::bind(tmp, args[0]),                    // var <tmp> = a
         Node::assign(args[0], args[1]),              // a = b
@@ -338,208 +360,111 @@ macro tuple_swap(...args): stmt {
 Tier-1 satisfies the sealed `@count` example and `@stringify` with near-zero surface. Tier-2
 (`kind` + read accessors) is the first thing real macros want (`assert_eq`), and read-only
 accessors are honest surface; land it as its own crumb once demand is shown. Tier-3's
-builder is redundant with `quote` (§A.2) for almost all cases and pays the M.0 cost twice —
-defer until a concrete macro cannot be written with `quote` + Tier-2.
+builder is redundant with `lowering` (§A.2) for almost all cases and pays the M.0 cost twice —
+defer until a concrete macro cannot be written with `lowering` + Tier-2.
 
-## A.2 — splice / quote mechanism: how a Family-A body PRODUCES code
+## A.2 — the splice mechanism: `lowering { … }` + `${expr}` — **SEALED**
 
-The body returns an AST fragment. Three surfaces for constructing it.
-
-### A.2-Var-1 — `quote { … }` + `${expr}` unquote — *RECOMMENDED*
-
-`quote { … }` is a literal AST fragment; inside it `${expr}` (or the shorthand `$(expr)` for a
-single node) **splices** the `Node` that `expr` evaluates to. `$string(x)` splices a string
-literal built from a `str`. This is the Rust `quote!`/Lisp quasiquote surface — the fragment
-reads like the code it produces.
+**SEALED (§14.1, HEAD `ee5acced`): the splice is `lowering { … }` + `${expr}`, NOT `quote`.**
+`lowering { … }` **lowers code into the AST** (the name = "lowers code into the AST", chosen
+over `quote`). Inside `lowering { }` **everything is verbatim** — copied whole into the AST —
+**EXCEPT `${expr}`**, the one escape, which **injects the node/value the macro computed**. A
+code-emitting macro (no return type, §A.0 consequence 4) assembles one or more `lowering { … }` blocks; the
+comptime logic around them decides which to emit (or none). This is the Rust `quote!`/Lisp
+quasiquote role, renamed and pinned: the fragment reads like the code it produces.
 
 ```teko
 /**
- * unless — Family A: expands to an `if` whose condition is the NEGATION of the spliced
- * call-site argument, producing statements at the call site. `${cond}` splices the caller's
- * verbatim condition node so it resolves in the CALLER's scope; the `if`/`!` scaffolding is
- * quoted structure.
+ * unless — Family A: emits an `if` whose condition is the NEGATION of the injected call-site
+ * argument. `${cond}` injects the caller's verbatim condition node so it resolves in the
+ * CALLER's scope; the `if`/`!` scaffolding is verbatim `lowering` structure. NO return type
+ * ⇒ this macro EMITS CODE via `lowering`.
  *
- * @param cond  the condition node, spliced verbatim into the negation
- * @param body  the block node, spliced as the `if` body
- * @return      a statement fragment inlined at the call site
+ * @param cond  the condition node, injected verbatim into the negation
+ * @param body  the block node, injected as the `if` body
  * @since 0.4-macros
  */
-macro unless(cond, body): stmt {
-    quote { if !(${cond}) { ${body} } }
+macro unless(cond, body) {
+    lowering { if !(${cond}) { ${body} } }
 }
 // call site:  @unless(done, { retry() })  →  if !(done) { retry() }
 
 /**
- * log_expr — Family A: a LAZY-ARG macro — the argument `x` is spliced into a branch that
- * only runs when logging is on, so a costly `x` is never evaluated when disabled. This is
- * the reason args are raw nodes, not values: laziness is free.
+ * log_expr — Family A: a LAZY-ARG macro — the argument `x` is injected into a branch that only
+ * runs when logging is on, so a costly `x` is never evaluated when disabled. This is the reason
+ * args are raw nodes, not values: laziness is free. `${x.source}` injects the arg's source text
+ * as a string literal; `${x}` injects the arg node itself.
  *
- * @param x  the expression node, spliced UNEVALUATED into the guarded branch
- * @return   a statement fragment guarding the evaluation behind `log_on()`
+ * @param x  the expression node, injected UNEVALUATED into the guarded branch
  * @since 0.4-macros
  */
-macro log_expr(x): stmt {
-    quote { if log_on() { print($string(x.source) ++ " = " ++ str(${x})) } }
+macro log_expr(x) {
+    lowering { if log_on() { print(${x.source} ++ " = " ++ str(${x})) } }
 }
 // call site:  @log_expr(expensive())  →  expensive() runs ONLY when log_on() is true
 ```
 
-- **Cost:** a `quote` sub-parser + the `${}`/`$string` splice grammar (a distinguished
-  region the parser captures as a fragment template with holes). Moderate, but it is the
-  surface every macro author already expects, and it keeps the produced code READABLE (M.3 —
-  you can read what the macro emits). **Splice is verbatim-node**, so hygiene (§A.3) is owed.
+- **Cost:** a `lowering` sub-parser + the `${}` injection grammar (a distinguished region the
+  parser captures as a verbatim fragment template with `${}` holes). It keeps produced code
+  READABLE (M.3 — you can read what the macro emits). **The `lowering` verbatim is mangled for
+  hygiene (§A.3); a `${}`-injected node is the USER's and stays INTACT.**
 
-### A.2-Var-2 — builder API over `Node` (no quote grammar)
+**Fallback still available (NOT the primary): the `Node` builder API.** For a shape `lowering`
+cannot express, the body may build the fragment with the A.1-Tier-3 builder calls
+(`Node::if_(...)`, `Node::call(...)`) — same power, but the produced code is opaque at the
+definition site (a tree of constructor calls, no readable `if`), so it is the escape hatch, not
+the surface. A string-mixin path (return a `str` of source the compiler re-parses, Zig/D style)
+is **rejected** — stringly-typed, unhygienic (names are strings, no stable mangle) — recorded
+only as the emergency-cheap bootstrap if `lowering` slips.
 
-No new grammar; the body constructs the fragment with the Tier-3 builder calls
-(`Node::if_(...)`, `Node::call(...)`). Same power, but the fragment is written as nested
-constructor calls.
+## A.3 — hygiene: **SEALED — stable mangle, never an error**
 
-```teko
-/**
- * unless_built — Family A: the `@unless` of A.2-Var-1, expressed WITHOUT a quote grammar —
- * every node is a builder call. Functionally identical; syntactically opaque.
- *
- * @param cond  the condition node
- * @param body  the block node
- * @return      the same `if !(cond) { body }` fragment, built explicitly
- * @since 0.4-macros
- */
-macro unless_built(cond, body): stmt {
-    Node::if_(Node::unary(TokenKind::Bang, cond), body)
-}
-// call site:  @unless_built(done, { retry() })  →  if !(done) { retry() }
-```
+**SEALED (§14.1, HEAD `ee5acced`): hygiene is a STABLE MANGLE, and a collision is NEVER an
+error.** Family A pastes code into the caller's scope; a `var t` the macro introduces in a
+`lowering` verbatim block would otherwise collide with the caller's `t`. The sealed answer is
+one rule, no fork:
 
-- **Cost:** zero new grammar, but the produced code is UNREADABLE at the definition site
-  (you cannot see the `if` — it's a tree of calls), which cuts against M.3. Reuses A.1-Tier-3
-  surface. Good as a fallback when `quote` cannot express a shape; poor as the primary.
-
-### A.2-Var-3 — string-mixin (compile-and-splice a string)
-
-The body returns a `str` of Teko source; the compiler re-parses it and splices the resulting
-AST (Zig `@import`/D `mixin` style).
-
-```teko
-/**
- * getters — Family A: emits a getter method per named field by BUILDING SOURCE TEXT and
- * handing it back as a string the compiler re-parses. Maximum flexibility, minimum safety.
- *
- * @param names  the field-name nodes to generate getters for
- * @return       a source string that is re-parsed and spliced as methods
- * @since 0.4-macros
- */
-macro getters(...names): stmt {
-    var src = ""
-    for n in names { src = src ++ "fn get_" ++ n.source ++ "(): auto { self." ++ n.source ++ " }\n" }
-    mixin(src)                                        // compiler re-parses `src`
-}
-// call site:  @getters(x, y)  →  fn get_x() { self.x }  fn get_y() { self.y }
-```
-
-- **Cost:** trivial to implement (concatenate + re-parse), but it is **stringly-typed**: no
-  structural checking of the fragment until re-parse, easy quoting bugs, and hygiene is
-  almost impossible (names are strings). Contradicts M.3's "readable, checkable logic".
-  Rejected as primary; noted because it is the cheapest bootstrap if `quote` slips.
-
-**Recommendation: A.2-Var-1 (`quote` + `${}`), with Var-2's builder available underneath as
-the fallback for shapes `quote` can't express.** `quote` keeps produced code readable
-(M.3), matches author expectation, and composes with §A.3 hygiene cleanly. Var-3 string-mixin
-is rejected (stringly-typed, unhygienic) but recorded as the emergency-cheap path.
-
-## A.3 — hygiene: preventing accidental capture in spliced code
-
-Family A splices code into the caller's scope; a `var tmp` the macro introduces can collide
-with a caller `tmp`. Three schemes, each shown on a macro that WOULD capture without it.
-
-### A.3-Scheme-1 — unhygienic (splice identifiers as written)
-
-Macro-body bindings bind literally at the call site. Simple, C-like.
+1. **A binding introduced by the macro's `lowering` verbatim is MANGLED to a unique name**
+   (`t` → `t$…`), so it can never collide with the user's `t`. Collision does not diagnose — it
+   is silently, deterministically disambiguated.
+2. **The mangle is STABLE / deterministic** — key = **macro + call-site + name + expansion
+   index** (`t$__<macro>_<line>_<col>_<idx>`), **never random**. A random mangle would make two
+   compilations of the same source diverge and **break the byte-identical fixpoint**; the stable
+   key mirrors `lower_const`'s symbol determinism (§5.4).
+3. **ONLY the `lowering` verbatim is mangled** — it is the macro's own text. **A `${}`-injected
+   node is the USER's and stays INTACT** — it references the caller's scope, so mangling it
+   would capture the wrong binding. This asymmetry (verbatim mangled, `${}` intact) **is** the
+   hygiene, and it is **airtight**: **`${}` is the SOLE bridge** from the macro's comptime scope
+   (outside `lowering`) into the verbatim — nothing from outside appears inside except via the
+   escape. So the mangle scope is **exactly** the verbatim: what is there is the macro's, what
+   entered via `${}` is the user's, and the outside comptime logic **never becomes AST**.
 
 ```teko
 /**
- * swap_bad — Family A, UNHYGIENIC: introduces a literal `tmp`. If the caller also has a
- * `tmp`, the expansion SILENTLY captures it — the classic macro bug.
+ * swap — Family A, HYGIENIC by stable mangle: the introduced temp `t` is a `lowering` verbatim
+ * binding, so it is mangled to a stable unique name — a caller `t` is NEVER captured and NEVER
+ * an error. The `${a}`/`${b}` injected args are the USER's nodes and stay INTACT. NO return
+ * type ⇒ this macro EMITS CODE.
  *
- * @param a  first lvalue node
- * @param b  second lvalue node
- * @return   a swap fragment using a literal `tmp` binding
+ * @param a  first lvalue node, injected verbatim (caller scope, intact)
+ * @param b  second lvalue node, injected verbatim (caller scope, intact)
  * @since 0.4-macros
  */
-macro swap_bad(a, b): stmt {
-    quote { var tmp = ${a}; ${a} = ${b}; ${b} = tmp }
+macro swap(a, b) {
+    lowering { var t = ${a}; ${a} = ${b}; ${b} = t }   // `t` (verbatim) → t$__swap_<line>_<col>_0
 }
-// call site with a caller `tmp`:
-//   var tmp = 99
-//   @swap_bad(x, tmp)   →  var tmp = x; x = tmp; tmp = tmp   ← CAPTURE: wrong result
+// call site with a caller `t`:
+//   var t = 99
+//   @swap(x, t)  →  var t$__swap_12_4_0 = x; x = t; t = t$__swap_12_4_0   ← correct, no error
 ```
 
-- **Rejected.** Silent capture is exactly the unreadable logic **M.3 forbids** — the same
-  principle that bans preprocessor magic in the bootstrap (`TEKO_LEGISLATION.md:606-609`).
-
-### A.3-Scheme-2 — gensym / auto-rename of macro-introduced bindings (stable-key) — *RECOMMENDED*
-
-Every binding **introduced by the expansion** (a `var` in the quoted body, or
-`Node::fresh_local()`) is renamed to a fresh deterministic symbol; SPLICED call-site nodes
-(`${a}`) are inserted verbatim, so they still resolve in the caller's scope. The fresh name
-is a **pure function of stable keys** — `__m_<macroname>_<callsite_line>_<callsite_col>_<idx>`
-— never a global mutable counter, mirroring `lower_const`'s symbol determinism (fixpoint-safe,
-§5.4).
-
-```teko
-/**
- * swap — Family A, HYGIENIC via gensym: the introduced temp is renamed to a stable fresh
- * symbol, so a caller `tmp` is never captured. Spliced args stay verbatim.
- *
- * @param a  first lvalue node
- * @param b  second lvalue node
- * @return   a capture-free swap fragment
- * @since 0.4-macros
- */
-macro swap(a, b): stmt {
-    quote { var tmp = ${a}; ${a} = ${b}; ${b} = tmp }   // `tmp` → __m_swap_<line>_<col>_0
-}
-// call site with a caller `tmp`:
-//   var tmp = 99
-//   @swap(x, tmp)  →  var __m_swap_12_4_0 = x; x = tmp; tmp = __m_swap_12_4_0   ← correct
-```
-
-- **Medium cost**, reuses the existing name-mangling infra. Upholds M.3 (no silent capture)
-  with a bounded change, and the stable-key rule keeps expansion byte-identical across
-  self-host generations.
-
-### A.3-Scheme-3 — fully hygienic scoping (colored identifiers)
-
-Every identifier carries its introduction context; macro-body names resolve in the macro's
-DEFINITION scope, call-site names in the caller's. The resolver (`src/checker/resolve.tks`)
-threads hygiene contexts through name resolution.
-
-```teko
-/**
- * with_lock — Family A, FULLY HYGIENIC: references a helper `unlock` from the MACRO's own
- * module. Colored hygiene resolves `unlock` in the macro's definition scope even though the
- * expansion lands in a caller that has its own unrelated `unlock`.
- *
- * @param lk    the lock node, spliced verbatim (caller scope)
- * @param body  the guarded block, spliced verbatim (caller scope)
- * @return      a lock/run/unlock fragment; `unlock` binds in the MACRO's scope
- * @since 0.4-macros
- */
-macro with_lock(lk, body): stmt {
-    quote { lock(${lk}); ${body}; unlock(${lk}) }   // `unlock` = the macro-module's unlock
-}
-// call site in a module with a DIFFERENT `unlock`:
-//   @with_lock(m, { work() })  →  still calls the macro-module's unlock, not the caller's
-```
-
-- **Most correct, largest change** (resolver surgery). Deferred: gensym (Scheme-2) covers
-  the capture-of-introduced-binding case, which is >90% of real hygiene needs; definition-scope
-  reference resolution is the residual Scheme-3 buys.
-
-**Recommendation: A.3-Scheme-2 (stable-key gensym); Scheme-1 rejected (M.3); Scheme-3
-deferred.** Gensym is the bounded change that kills silent capture and stays fixpoint-safe.
-Note: because **Family B produces a VALUE, it owes NO hygiene** — hygiene is a Family-A-only
-obligation, which is another reason the stage split is clean.
+- **Medium cost**, reuses the existing name-mangling infra; upholds M.3 (no silent capture)
+  and stays fixpoint-safe via the stable key. **Colored (fully-scoped) hygiene was considered
+  and rejected** — it needs resolver surgery to resolve macro-definition-scope references, and
+  stable-mangle already covers the capture-of-introduced-binding case that is >90% of real need;
+  the owner sealed stable-mangle.
+- Because **Family B produces a VALUE, it owes NO hygiene** — hygiene is a Family-A-only
+  obligation, another reason the stage split is clean.
 
 ---
 
@@ -749,7 +674,7 @@ The sealed model puts the two families at two stages, so there are **two passes*
 /**
  * expand_macros_syntactic — Family A pre-pass: rewrite every `@macro`-call in the UNTYPED
  * program into its produced AST fragment, to a bounded fixpoint, before type-check runs.
- * Deterministic (stable-key gensym) so self-host generations are byte-identical.
+ * Deterministic (stable-key mangle) so self-host generations are byte-identical.
  *
  * @param prog  the parsed, os-pruned program (types do NOT exist yet)
  * @return      the program with all Family-A calls expanded, or the first expansion error
@@ -782,10 +707,9 @@ typed, so its variadic pack reuses the ordinary trailing-`is_params` discipline.
  *
  * @param fmt   the leading format-string node
  * @param args  the trailing pack of argument nodes
- * @return      a print fragment
  * @since 0.4-macros
  */
-macro printf_like(fmt, ...args): stmt { quote { do_print(${fmt}, $count(args.len)) } }
+macro printf_like(fmt, ...args) { lowering { do_print(${fmt}, ${args.len}) } }
 // call site:  @printf_like("x={}", a, b)  →  fmt fixed, args.len == 2
 ```
 
@@ -817,13 +741,12 @@ macro printf_like(fmt, ...args): stmt { quote { do_print(${fmt}, $count(args.len
  * that is not a bare identifier. Demonstrates `@error` (5.3-C) at the call site (5.3-A).
  *
  * @param x  the argument node; must be a `Var`
- * @return   a fragment binding a shadow of `x`
  * @throws   a compile-time `@error` naming the offending node's source
  * @since 0.4-macros
  */
-macro require_ident(x): stmt {
+macro require_ident(x) {                             // NO return type ⇒ emits code
     if x.kind != NodeKind::Var { @error("expected an identifier, got `" ++ x.source ++ "`") }
-    quote { var shadow = ${x} }
+    lowering { var shadow = ${x} }                  // `shadow` (verbatim) is stable-mangled
 }
 // call site:  @require_ident(a + 1)  →  compile error: expected an identifier, got `a + 1`
 ```
@@ -837,9 +760,10 @@ the honest error the FFI doc already specifies.
 byte-identical output across generations, exactly as `lower_const` guarantees symbol
 byte-identity:
 - Family B folds to literals via `literal_of` — inherently deterministic.
-- Family A gensym (§A.3-Scheme-2) names are a **pure function of stable keys** (macro name +
+- Family A stable-mangle (§A.3) names are a **pure function of stable keys** (macro name +
   call-site line/col + local index — all available on `Expr.line`/`col`, `ast.tks:293`),
   **never** a global mutable counter — mirroring `const_leaf_symbol`/`const_rodata_symbol`.
+  Only the `lowering` verbatim is mangled; a `${}`-injected node stays intact.
 - **Expansion depth is bounded**: a macro that expands (directly or mutually) past a fixed
   depth is a **compile error** (a REJECT fixture, §8) — no unbounded/nondeterministic
   expansion reaches type-check (Family A) or lowering (Family B).
@@ -850,10 +774,9 @@ byte-identity:
  * must hit the bounded-depth guard and become a compile error rather than expand forever.
  *
  * @param x  any node
- * @return   a fragment that (illegally) re-invokes the same macro
  * @since 0.4-macros
  */
-macro loop_macro(x): stmt { quote { @loop_macro(${x}) } }
+macro loop_macro(x) { lowering { @loop_macro(${x}) } }   // NO return type ⇒ emits code
 // call site:  @loop_macro(a)  →  compile error: macro expansion depth exceeded
 ```
 
@@ -922,7 +845,7 @@ engine (never `teko test` here — design only):
 | `macro_a_count_empty/` | A | `@count()` | ACCEPT; native **exit 0** |
 | `macro_a_stringify/` | A | `@stringify(a + b)` compared to `"a + b"`, exit = match | ACCEPT; **exit 0** on match |
 | `macro_a_unless/` | A | `@unless(cond, { … })` expands to `if !(cond) {…}` | ACCEPT; exit proves the negated branch ran |
-| `macro_a_hygiene_no_capture/` | A | `@swap(x, tmp)` with a caller `tmp` (§A.3-Scheme-2) | ACCEPT; gensym prevents capture; exit proves caller `tmp` intact |
+| `macro_a_hygiene_no_capture/` | A | `@swap(x, t)` with a caller `t` (§A.3 stable-mangle) | ACCEPT; stable-mangle prevents capture (never an error); exit proves caller `t` intact |
 | `macro_a_error_intrinsic_rejected/` | A | `@require_ident(a + 1)` (5.3-C) | REJECT — author `@error` "expected an identifier" (`EXPECT_COMPILE_FAIL`) |
 | `macro_a_depth_rejected/` | A | `@loop_macro(a)` self-expanding (§5.4) | REJECT — "macro expansion depth exceeded" |
 | `macro_b_sum/` | B | `comptime sum(...args): usize { … }` + `@sum(2,3,5)` | ACCEPT; native **exit 10** |
@@ -956,7 +879,8 @@ FIXPOINT) are marked ★.
    that compile. Gate: parser tests.
 3. ★ **Family A pre-pass (syntactic, §5.1-A).** `expand_macros_syntactic` after `#os` prune,
    before type-check (`project.tks:464`/`:116-126`); A.1-Tier-1 surface (`.len`/`.source`),
-   A.2-Var-1 `quote`/`${}`, A.3-Scheme-2 gensym, 5.3-A/5.3-C errors, 5.4 bounded depth. Gate:
+   the sealed `lowering`/`${}` splice (§A.2), stable-mangle hygiene (§A.3), return-type
+   discrimination (§A.0 consequence 4), 5.3-A/5.3-C errors, 5.4 bounded depth. Gate:
    FULL gate + `macro_a_count` (exit 2), `macro_a_stringify`, `macro_a_hygiene_no_capture`,
    `macro_a_depth_rejected`, `macro_a_error_intrinsic_rejected`.
 4. ★ **Family B pass (comptime, §B.1-Opt-1).** `expand_comptime` before `inline_consts`
@@ -969,7 +893,7 @@ FIXPOINT) are marked ★.
 6. ★ **SEED BUMP #1.** Release a seed understanding both families; only after may `src/**.tks`
    use `@`/`macro`/`comptime` (D40/D41 discipline). **Ritual.**
 7. **Family A Tier-2 surface (post-seed).** `.kind` + read accessors (A.1-Tier-2) →
-   `@assert_eq`; A.3-Scheme-3 colored hygiene only if demanded. Gate: FULL gate +
+   `@assert_eq`; colored hygiene (the §A.3 rejected note) only if ever demanded. Gate: FULL gate +
    `macro_a_unless`, structure-directed fixtures.
 8. **FFI Tiers 1-2 (`extern macro`)** (symbol-alias, C-expr→own-IR); Tier 3 stays the honest
    error; B.1-Opt-3 two-phase if comptime-calls-comptime lands. Gate: FULL gate, coupled to
@@ -987,8 +911,8 @@ resolver), **6** (seed bump).
 |---|---|---|
 | **D33 / `TEKO_LEGISLATION.md:607` "no macros" seal** | The facility exists at all | Owner override (§14 seal) — noted, not relitigated. On landing, amend D33's reference + the legislation line to "superseded for the macro facility by owner ruling" (doc-sync, not a code change here). |
 | **M.0 small-language surface** | Family A `Node` reflection; Family B `Type` reflection | Stage the surface: A.1-Tier-1 (`.len`/`.source`) in the seed, Tier-2 (`.kind`/accessors) as a gated crumb, Tier-3 builder deferred; B.2-Opt-a builtins over B.2-Opt-b `Type` reflection. Each tier its own crumb. |
-| **M.3 honesty vs. silent capture** | Family A splice hygiene | A.3-Scheme-1 rejected; **A.3-Scheme-2 gensym** adopted; Family B owes NO hygiene (produces a value). |
-| **Fixpoint (self-host byte-identity)** | Family A gensym; expansion determinism | **Stable-key gensym** (pure fn of macro name + call-site loc, `Expr.line`/`col`), bounded depth, `literal_of` determinism — mirrors `lower_const`. |
+| **M.3 honesty vs. silent capture** | Family A splice hygiene | **SEALED: stable-mangle, never an error** (§A.3) — only the `lowering` verbatim is mangled, a `${}`-injected node stays intact; colored hygiene considered and rejected; Family B owes NO hygiene (produces a value). |
+| **Fixpoint (self-host byte-identity)** | Family A stable-mangle; expansion determinism | **Stable-key mangle** (pure fn of macro name + call-site loc + name + expansion index, `Expr.line`/`col`), never random, bounded depth, `literal_of` determinism — mirrors `lower_const`. |
 | **Seed ordering** | Corpus using macros before the seed knows them | **Land-then-seed-bump** (crumb 6); corpus abstains until then; FFI Tier-0 (`extern comptime`) first. |
 | **Two passes at two stages** | Family A on `parser::Program`, B on `TProgram` | Do NOT merge — two named passes at the two sealed slots (§5.1). Merging would force a family to the wrong stage, breaking the seal. |
 | **Provisional keyword names** | `macro`/`comptime` are owner-pending | Write them throughout, isolated to `keyword_kind` (`lexer.tks:331-372`) so a final rename is a one-site change; note the pending confirmation (does NOT block any other crumb). |
