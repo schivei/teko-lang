@@ -50,6 +50,14 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
 - **Build seco:** `TEKO_BACKEND=c <compilador> <dir> -o <FRESCO> --no-verify --release` (o `--no-verify`
   descarta o parser de `.tkt` de propósito). O default do compilador é **native** e não emite `teko.c` —
   fixar `TEKO_BACKEND=c` para o fixpoint.
+- **⚠️ TETO DE MEMÓRIA NO BUILD (aprendido em 2 crashes seguidos).** O `--no-verify` **NÃO** pula o estágio
+  `monomorph` (só pula o *verify*), então **o build seco pode vazar e derrubar o container** (16 GB) sem um
+  teto. Todo build de agente vai num subshell com cap: `( ulimit -v <KB>; export TK_RT_DIR=...; TEKO_BACKEND=c
+  … --no-verify --release )` — um leak estoura o teto e mata **só o processo**, não o container. Se um build
+  bate no teto → o agente **PARA e reporta**, não re-tenta (leak não se resolve no braço).
+- **Commit a cada crumb (protege contra restart).** O container reinicia; trabalho **não-commitado se perde**
+  (o reseed do `.{}` perdeu o R1 duas vezes por não commitar). Commitar cada crumb assim que fica **verde**
+  (build+fixpoint OK), nunca estado meio-crumb.
 - **Reseed:** cc seed `cc -std=c2x -w -O2 -I src/runtime -I src/assert bootstrap/teko.c src/runtime/teko_rt.c
   src/assert/assert.c -lm -o gen0`; `TK_RT_DIR` setado; `-o` fresco (cache velho segfaulta self-build);
   fixpoint **byte-idêntico**; **gate independente** após cada reseed.
@@ -85,7 +93,17 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   cada campo/param/retorno/var. O agregado nomeado some; **os membros seguem nomeados** (`match … as` e
   coerção membro→união inalterados, byte-idênticos). Recursão fecha pelo **box que a própria união já emite**
   (`{tag;ptr;len}`). **Array-de-união exige parênteses** — `[](A | B)` (`[]` liga mais forte que `|`).
-  **Verbosidade é o preço, aceito** (verbatim: *"Vai ser verboso mesmo, e isso não é problema, é o preço."*).
+  **Verbosidade é o preço, aceito** (verbatim: *"Vai ser verboso mesmo, e isso não é problema, é o preço."*),
+  **mas abreviável por MACRO** (Família A: `macro Type() { lowering { (A | B | …) } }` + `[]@Type()`) — a
+  macro **alarga a AST pré-typecheck**, então não é alias nominal (o proibido continua sendo alias/wrapper/
+  newtype *nominal*, não a macro sintática).
+- **§4.1 — construção: três formas (ruling do dono).** `Tipo { … }` nominal = **sempre válida** ("à gosto do
+  cliente"); `.{ … }` **target-typed** = válida onde há **tipo-alvo conhecido** na declaração (retorno
+  anotado incl. `(): self`, var anotada, param, campo), **sem alvo = ERRO**; `self { … }` **construtor
+  REMOVIDO** — `self` fica só **receptor** (`self.x`) e **tipo** (`(): self`). Retirar o `self{}` **dissolve**
+  o bug bare→canônico (o `self{}` gerava `Named` bare, o tipo `self` resolve para o qualificado, `type_eq`
+  compara string exata) — em vez de consertar, remove-se. `.{}` é a construção que materializa o cabeçalho fat
+  do item 14.
 
 ## Aprendizados sobre sair de tensões
 - Tratar o **fechado como vinculante**; não re-litigar decisão tomada.
@@ -112,3 +130,24 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   padrão de uso. Levantar do `origin`, por posição de declaração (campo/param/retorno/var).
 - **Apontar o furo com honestidade.** O dono valoriza quando o agente **nomeia o furo comum** de todas as
   opções (ex.: auto-recursão exige indireção — é teorema) em vez de vender uma recomendação.
+
+## Aprendizados desta sessão (construção `.{}` + memória + precisão)
+- **Ler as palavras do dono ao pé da letra.** *"Stdlib é 9-ops"* era *"Stdlib **e** 9-ops"* (dois itens
+  distintos, não identidade). Não inflar uma conjunção em tese. Quando o dono corrige a grafia de uma
+  palavra, a diferença é semântica e importa.
+- **A memória é a restrição dura, não só o `teko test`.** O build seco **também** vaza (via `monomorph`) e
+  derruba o container sem `ulimit`. Toda invocação de build de agente vai com teto de memória, um build de
+  cada vez. Dois crashes seguidos ensinaram isto.
+- **Após 2 falhas iguais, checar antes de repetir.** Não re-despachar cegamente um reseed que travou duas
+  vezes; blindar (teto de memória, commit-por-crumb) e **confirmar com o dono** antes da terceira tentativa.
+- **Ordem de reseed por segurança quando delegada:** aditivo/**byte-idêntico primeiro** (o gate byte-idêntico
+  é a rede mais forte — se o `teko.c` sai igual, não há regressão), **mudança de layout invasiva por último**
+  (item 14 fat header muda `teko_rt.c`+codegen+layout, byte-identidade não se mantém). §9.D migração é
+  source-only byte-idêntica → das mais seguras; ortogonal à construção.
+- **O dono pede artefato para avaliar e argumentar.** Status, catálogos, confronto de opções — montar como
+  **artefato** (não só texto), com dados reais do `origin`. O **report grande é só quando ele pedir** (ele
+  avisou: "amanhã de manhã") — não construir proativamente.
+- **Higiene de worktrees por regra, não caso-a-caso.** Limpar as **drenadas+limpas** direto; as **DIRTY /
+  NOT-drained** só **sem agentes** (build seco concorrente com reseed compete por memória) e com **build seco
+  de confirmação** antes de drenar. Nunca mexer nas worktrees de trabalho paralelo do dono (`cargo/*`,
+  `theory/*`, `native/*`).
