@@ -1,79 +1,65 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): §9 E BLOCK-B IN EXPRESSION POSITION.
-# The §9 E closure spine (`func<…>`/`action<…>` delegate types, closure literals, capture-by-copy +
-# `ref`) ALREADY landed on this branch (commits bd2f5108 / 2f14ad49 / b2d73949) and the old `fn(T): R`
-# annotation was already removed; the plan (docs/design/plano-secao9E-closures.md, ruling 7) leaves ONE
-# product piece: a brace group in EXPRESSION position — a value-producing block whose TRAILING
-# expression is its value, running INLINE in the enclosing frame (not a closure — no capture, no
-# allocation). The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host
-# output, proven a fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by
-# scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
+# RESEED (hand-harvest, by-hand per owner order): §9 F MULTIPLE ASSIGNMENT, ARRAY DECOMPOSITION,
+# MULTIPLE RETURN. The sealed model has NO first-class tuple type: `( )` appear only in a multiple-return
+# signature and at a binding site, never as a value. The owner did NOT edit bootstrap/teko.c by hand;
+# the file is the harvested self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's
+# kv_field; enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
 #
-# §9 E Block-B in expression position (ruling 7)
+# §9 F multiple assignment / array decomposition / multiple return
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (docs/design/plano-secao9E-closures.md §3 — the one missing product piece):
-#   - THE `Block` AST NODE, in `src/parser/ast.tks`. A new `Block { body: []Statement }` variant is
-#     APPENDED LAST to `ExprKind`; `parse_atom` (`src/parser/parse_expr.tks`) gains a leading-`{`
-#     value-block branch (`parse_block_expr`, reusing `parse_block`) GATED by `allow_struct`, so it
-#     never steals the `{` that opens an `if`/`match` scrutinee block. §9 B construction always carries
-#     a type prefix (`Name { … }`), so a `{` with no path before it is unambiguously a block.
-#   - THE `TBlockExpr` TAST NODE, in `src/checker/tast.tks`. Appended LAST to `TExprKind`;
-#     `type_block_expr` (`src/checker/typer.tks`) types the body in a child scope (`type_block`), takes
-#     the trailing value's type (`tblock_type`), and rejects a `void`-tailed or DIVERGING block in value
-#     position — the same contract `type_if` imposes on an `if`-as-value without an `else`.
-#   - THE FULL `TExprKind` WALK ARMS (the "TLambda was added everywhere" pattern), treating a Block-B as
-#     an INLINE statement block (NOT a lifted function): `revalidate`, `initanalysis`, `consteval`,
-#     `consteval_form`, `comptime_fold` (fold + loop-propagate), `warnings`, `metrics`, `monomorph`,
-#     `escape` (mark/count-reads/chain-stats — inline, so its body IS this frame's), `spine`
-#     (cells/points-to/unique/borrowed-from), `reachability`, and `codegen` (lift/self-call/opt-collect).
-#   - CODEGEN, in `src/codegen/codegen.tks` (`emit_block_expr`): a GNU statement-expression
-#     `({ <Ctype> _tk; <stmts…>; _tk = <tail>; _tk; })`, reusing `emit_branch_value` (the if/match
-#     value-arm path) so block-local aggregates and defers are handled identically.
-#   - NATIVE/LIR, in `src/lir/lower.tks` (`lower_block_expr`): lowers the prefix inline then yields the
-#     trailing value's vreg. Block-local bindings are DROPPED at the closing brace (`lenv_prefix`) while
-#     an enclosing-scalar reassignment made inside the block — which updates the shared env prefix in
-#     place (`lenv_reassign`) — is PRESERVED, so `{ acc = acc + 1; acc }` leaves `acc`'s write visible.
-#   - tkb SER/DE, in `src/emit/tkb_write.tks` / `tkb_read.tks` / `tkb_frame.tks`: a new expr tag 26 that
-#     round-trips the body as `[]TStatement` (mirroring the IF/MATCH block encoding), with the frame
-#     collector interning the body's strings so it round-trips.
-# WHAT DOES NOT ENTER: no memory-model change. The §9 E capture semantics are RATIFIED as-is (owner
-# E-capture ruling): closures capture by COPY (snapshot); `by_ref` only for `Reference` bindings;
-# writing a copy-captured var stays an error. "estilo C#" is read as the SURFACE (a closure closes over
-# names of the scope), not C#'s implicit shared-cell (which would need boxing / a closure-lifetime
-# borrow-checker, colliding with move-on-return and R4).
+# WHAT ENTERS (docs/design/plano-secao9F-multi-assign.md):
+#   - THE MULTIPLE-BINDING AST, in `src/parser/ast.tks`: `BindElem = BindName | BindSkip | BindRest`,
+#     `MultiTargetKind = Parallel | ArrayDecomp`, and a new `MultiBind` `Statement` case; plus
+#     `Return.values` and `Function.ret_types` (both empty on every existing node — fixpoint-inert).
+#   - PARSER, in `src/parser/parse_stmt.tks` / `src/parser/parse_decl.tks`: `parse_multibind` (the two
+#     lookaheads `var [` and `var NAME ,`, parallel / bracketed target lists with `_` and the ASCII `..`
+#     skip-range, F-D1); `parse_multi_return_types` (a `( A, B, … )` signature, arity >= 2, `(A)` and
+#     extern/bodyless rejected); and `return (e1, e2, …)` recognized only by a top-level comma inside a
+#     parenthesized `return` value (`paren_has_top_comma`), so a grouped single `return (a + b)` is
+#     unchanged and a bare `(a, b)` expression stays a parse error.
+#   - CHECKER, in `src/checker/typer.tks` / `src/checker/collect.tks`:
+#       * `type_multibind` DESUGARS multiple assignment and array decomposition to a FLAT sequence of
+#         existing typed nodes (`TBinding` + a synthesized `if`/`panic` length guard), spliced into the
+#         enclosing block and the two top-level statement sequencers via `TStmtSeq` — NO `TBlockStmt`
+#         (the native backend does not lower it) and no new typed node, so codegen/LIR are untouched.
+#         Parallel binds each value to a fresh position-unique temp first (parallel semantics); array
+#         decomposition binds the source to a temp, emits the runtime length guard (exact without `..`,
+#         minimum head+tail with `..`, ruling 5), then reads head elements at constant indices and tail
+#         elements at `len - k`.
+#       * `synthesize_mret_structs` is a pre-collect pass that lowers every multiple-return function to
+#         an ORDINARY struct-returning one: it synthesizes one aggregate struct (`__mret…`, an
+#         unspellable reserved stem) per distinct (namespace, return-type-list), rewrites the signature's
+#         return type and every `return (…)` to that struct, and appends the declarations. Both backends
+#         then emit the aggregate with their ordinary struct machinery — there is no tuple type in the
+#         type system. A value-position guard (`type_is_mret_aggregate`) rejects binding a multiple-return
+#         value to a single name (ruling 3), and `type_multibind_mret` destructures `var q, r = f(…)`
+#         into aggregate field reads (`_mb._0`, `_mb._1`, …), `_` discarding its slot.
 #
-# INERTNESS ON THE COMPILER CORPUS. The compiler source uses NO bare value-block in expression position
-# (its blocks are `if`/`match`/`fn`/loop bodies and §6 bare block STATEMENTS, none of which reach the
-# new `parse_atom` branch); the `Block`/`TBlockExpr` variants are appended, shifting no serialized
-# ordinal; tag 26 fires only on a Block-B, which the corpus never produces. gen0 (built from THIS
-# bootstrap's predecessor) and bin-a emit a byte-identical teko.c — Block-B is inert until USED, and no
-# existing `{`-in-expression site changed meaning (the byte-identical fixpoint proves it).
-#
-# ACCEPT fixture (examples/regressions/block_expr): a Block-B's trailing expression is its value, a
-# Block-B nested inside another, a Block-B reading AND writing an enclosing var inline, a Block-B in
-# argument position, a Block-B coexisting with a §9 B construction unambiguously, a closure body that is
-# itself a Block-B, and a capture-by-copy snapshot — each case names itself and asserts its own value
-# (`scenario`), passing identically on the native inline-block lowering and the C GNU statement-expression
-# lowering. REJECT fixture (examples/regressions/block_expr_reject): a Block-B ending in an assignment
-# (no trailing value) and a Block-B that DIVERGES via a trailing `return` — the single failing build
-# reports both diagnostics.
+# ACCEPT fixture (examples/regressions/multi_assign): parallel assignment, read-before-bind, a shared
+# `: T` annotation, array decomposition with `_` and a `..` skip-range (including a zero-middle skip),
+# and a top-level multiple-return destructure with and without a discard — each case names itself and
+# asserts its own value on the own-native backend; standalone assignment/decomposition cases run on both
+# the own-native and C routes and the length-guard panic is pinned on both. REJECT fixture
+# (examples/regressions/multi_assign_reject): a parallel target/value arity mismatch, a multiple-return
+# value bound to a single name, a second `..` in a decomposition, and an arity-1 `( A )` signature — the
+# single failing build reports all four diagnostics.
 #
 # FIXPOINT. The COMMITTED artifact self-reproduces DIRECTLY (the predecessor seed builds this source
-# with no staged bootstrap, since the corpus uses no Block-B): compiling bootstrap/teko.c with cc into a
-# compiler and rebuilding the source produced a byte-identical teko.c (sha256 below).
+# with no staged bootstrap, since the corpus uses no §9 F form): compiling bootstrap/teko.c with cc into
+# a compiler and rebuilding the source produced a byte-identical teko.c (sha256 below).
 #   cc(bootstrap/teko.c) -> gen;  TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == below.
-# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 2930 MB).
+# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 3487.6 MB).
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  ae1c740df70992d013cfa2fbdc2d62fa32d680c5f94ebd0cd800cb5d39624cbc
+sha256:  4b477e541da211f07642a185fd4fde9046e453887743ef4b1502e683046e50ac
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§9 E Block-B in expression position;
-         parser Block node + allow_struct-gated parse_atom branch, TBlockExpr TAST + type_block_expr,
-         the full TExprKind walk arms treating a Block-B as an inline block, C GNU stmt-expr codegen,
-         native inline-block lowering, and tkb tag 26); sha256 is read directly off the committed file
-         and was proven a fixpoint (bin == committed, byte-identical).
+legacy:  none — this is an exact, self-reproducing hand harvest (§9 F multiple assignment, array
+         decomposition and multiple return; parser MultiBind + multi-return signature/return, checker
+         desugar to a flat TBinding sequence, the synthesize_mret_structs pre-collect aggregate pass,
+         the value-position guard and the destructuring desugar); sha256 is read directly off the
+         committed file and was proven a fixpoint (bin == committed, byte-identical).
