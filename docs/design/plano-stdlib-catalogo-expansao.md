@@ -323,13 +323,29 @@ cost nothing.
 | DB-MY | `teko::db::mysql` (native) | handshake, caching_sha2 auth, prepared statements | DB0, N1(+N3) | **pure** | **P3** |
 | DB-SQLITE | `teko::db::sqlite` (FFI) | `extern` bindings to `libsqlite3` (`sqlite3_open/prepare/step/column_*/finalize`) | DB0, **KEYSTONE-LINK**; **FFI** | **needs FFI** (embedded, no wire) | **P2** |
 | DB-MONGO | `teko::db::mongodb` (native) | OP_MSG + SCRAM | DB0, N1, S-BSON | **pure** | **P3** |
+| DB-MSSQL | `teko::db::mssql` (native) | TDS 7.x: pre-login, SQL-auth (SSPI later), RPC/prepared, row tokens | DB0, N1 (+TLS-in-TDS) | **pure** wire codec (TDS documented) | **P3** |
+| DB-CASS | `teko::db::cassandra` (native) | CQL binary v4/v5: STARTUP/AUTH/QUERY/PREPARE/EXECUTE, paging | DB0, N1(+N3), C1 | **pure** | **P3** |
+| DB-REDIS | `teko::db::redis` (native) | key-value/cache surface over RESP2/RESP3 — **SHARES** the `net::redis` codec (N13) | DB0, N13 | **pure** | **P3** |
+| DB-ORA | `teko::db::oracle` (FFI) | `extern` OCI (`libclntsh`: `OCIEnvCreate`/`OCIStmtPrepare`/`OCIStmtExecute`/`OCIDefine…`) — TNS/Net is proprietary, so FFI é o caminho pragmático | DB0, **KEYSTONE-LINK**; **FFI** | **needs FFI** (proprietary wire) | **P3** |
+| DB-ODBC | `teko::db::odbc` (FFI, universal) | uma superfície `extern` para `unixODBC` (`SQLDriverConnect`/`SQLPrepare`/`SQLExecute`/`SQLFetch`/`SQLGetData`) — **catch-all** para qualquer engine com driver ODBC (Oracle, MSSQL, DB2, Informix, Sybase…) | DB0, **KEYSTONE-LINK**; **FFI** | **needs FFI** (vendor driver) | **P3** |
 | Pool / Tx | `teko::db` shared | `exp type Pool { fn get(self): Connection\|error }` | DB0, §10 (concurrent pool) | **pure** | **P3** |
 
-**Native-feasibility note.** The blessed path is a **pure-Teko wire driver** — one binary, cross-platform
-for free, `.tkt`-testable on the message codec. Only **SQLite** (an embedded C library with no wire
-protocol) needs FFI, and KEYSTONE-LINK guarantees a program that imports `teko::db` but never calls
-SQLite requires no `libsqlite3`. Portable placeholder (`?`) in the common layer, driver rewrites to
-`$1`/`?`/`:name`. **ORM/query builder is a SEPARATE later roadmap — not in the connector layer.**
+**Os dois caminhos** (ruling do dono: o set de DB estava fraco — mysql/mariadb/mongodb/mssql/oracle/redis +
+outros; FFI liberado onde não há wire aberto):
+- **Native wire (puro Teko, preferido):** Postgres · **MySQL/MariaDB** (mesmo protocolo cliente — **DB-MY
+  cobre os dois**; `ed25519`/`mysql_native`/`caching_sha2` são variantes do mesmo handshake) · **MSSQL**
+  (TDS) · **MongoDB** (OP_MSG + BSON) · **Cassandra** (CQL) · **Redis** (RESP, compartilhado com
+  `net::redis`) · ClickHouse (TCP nativo ou HTTP). Um binário, cross-platform de graça, codec `.tkt`-testável.
+- **FFI (lib do fornecedor, onde o wire é proprietário ou inexistente):** **SQLite** (embedded, `libsqlite3`)
+  · **Oracle** (OCI `libclntsh` — TNS proprietário) · um **bridge universal `db::odbc`** (unixODBC) que
+  alcança Oracle/MSSQL/DB2/Sybase/Informix pelos drivers ODBC — o catch-all que o dono sancionou (*"pode até
+  ser por FFI"*). KEYSTONE-LINK garante que um programa que não chama um driver não linka a lib dele.
+- **De graça por um driver existente (sem módulo novo):** CockroachDB / YugabyteDB / Redshift falam o **wire
+  do Postgres** → DB-PG dirige-os como estão; Elasticsearch / OpenSearch / CouchDB / DynamoDB são
+  **HTTP+JSON** → `net::http` + `encoding::json` os dirigem sem código de camada-db.
+
+Placeholder portável (`?`) na camada comum, o driver reescreve para `$1`/`?`/`:name`/`@p1`. **ORM/query
+builder é roadmap SEPARADO — não entra na camada de conector.**
 
 ---
 
@@ -393,7 +409,7 @@ when #254 lands, GUI last.**
 | **P0** | Foundations / keystones | `teko::mem`+KEYSTONE-BUF · `teko::sys` · KEYSTONE-LINK · io/iter `exp` posture | compiler-side |
 | **P1** | Pure wins (no keystone) | **sort** (A1/A2) · **crypto** C0/C1/C2 · **encoding** S-JSON · **compress** Z-DEFLATE/GZIP/ZLIB · crypto **C6 rand** (needs P0 BUF) | none / P0-BUF |
 | **P2** | Transport + web baseline | net N0/N1/N2/N3(provider TLS)/N4/N5/N6 · crypto C3/C4/C5 · encoding S-PB/S-ASN1/S-XML/S-MIME · **db** DB0/DB-PG/DB-SQLITE · protocols P-SOCKS/P-RPC · sort A3/A4 (**when #254 lands**) | P0-BUF, P0-LINK, #254 (A3/A4) |
-| **P3** | Cloud-native + breadth | net N8(H2)/N9|P-GRPC/N-QUIC/N10(H3)/N11(MQTT)/N13(Redis)/N14(mail)/N16(ssh) · P-AMQP · crypto C3b/C7/C8/C9/C-PGP + `math::bigint` · db DB-MY/DB-MONGO/Pool · encoding S-YAML/S-CBOR/S-MSGPACK/S-BSON · compress brotli/lzma/zstd | as noted per unit |
+| **P3** | Cloud-native + breadth | net N8(H2)/N9|P-GRPC/N-QUIC/N10(H3)/N11(MQTT)/N13(Redis)/N14(mail)/N16(ssh) · P-AMQP · crypto C3b/C7/C8/C9/C-PGP + `math::bigint` · db DB-MY(+MariaDB)/DB-MSSQL/DB-MONGO/DB-CASS/DB-REDIS/DB-ORA(FFI)/DB-ODBC(FFI)/Pool · encoding S-YAML/S-CBOR/S-MSGPACK/S-BSON · compress brotli/lzma/zstd | as noted per unit |
 | **P4** | GUI (research) | `teko::ui` U0/U1/U2 (SDL2-backed spike first) | own research spike; gates nothing |
 
 **Parallelizable immediately (no keystone, no #254):** `{sort A1, crypto C0/C1, encoding S-JSON,
