@@ -878,6 +878,22 @@ O rolling é do runtime de durabilidade (o `append` verifica a política e rotac
 antes de escrever quando ela dispara); o `fold` relê todos os ficheiros de um segmento em ordem,
 transparente ao rolling. A closure `fmt` vive com o journal (arena raiz) e é chamada por `append`.
 
+**Papel duplo + ciclo de vida (rulings do dono, Parte 4).**
+- **Ambos os papéis, um módulo só.** O journal é **ao mesmo tempo** durabilidade dev-facing **e** o veículo
+  do **journaling de concorrência** — incluindo o produto que o motivou: escrever as saídas de teste em
+  **paralelo** para pós-análise. Tudo passa pelo **sink** (destino IO) e pelo **out** (formato); a mesma
+  abstração cobre **texto e binário**.
+- **Escrita concorrente binária.** O caso motivador: N escritores → `chan<Rec>` (bounded MPSC) →
+  orquestrador agrega/sumariza → **`.tkj`** (binário, append-only, quadro **prefixado por comprimento**,
+  precedente `.tkb`); relê-se com `teko journal corrida.tkj -o corrida.log`. Binário **por enquadramento**
+  (o `expected`/`got` de uma asserção tem quebras de linha; um quadro prefixado torna a carga opaca e
+  incorruptível ao enquadramento), **portátil** (little-endian fixo — `tkb_buf.tks` desloca bytes, um
+  journal de CI arm64 lê num x86_64). O registro carrega `writer`+`seq` (atribuição + perda **detectável**);
+  a captura de `panic`/`exit` mantém o **processo vivo**. Desenho completo do produto: artifact das leis
+  §17–§27 (dono, 2026-07-30).
+- **Lazy.** O journaling **liga no primeiro uso** (custo zero antes) e **fica ligado até o fim** (residência
+  **F2**). Nem sempre-ligado, nem compilado-fora, nem nível-em-runtime.
+
 ### 10.5 Modelo de concorrência — resumo (decisões fechadas)
 
 | tema | fechado (08-10) |
