@@ -1146,20 +1146,24 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
 - **Os tipos JÁ são conhecidos** — roda **DEPOIS do type-check**: `parse → AST → TYPE-CHECK → [comptime eval]
   → lower`. Args = **valores comptime-conhecidos**; computa um **valor** inlined. Modelo **Zig comptime**
   (tipa-então-avalia).
-- **Args têm de ser comptime-CONHECIDOS; variável de runtime = ERRO de compilação** (ruling do dono). Como
-  roda pós-typecheck, o `comptime` **tem de conhecer o que é passado** — um valor de runtime não é avaliável
-  ali. Então os args são **constantes, tipos, ou expressões comptime-computáveis**; passar um local de
-  runtime **erra no sítio da chamada**. Consequência: a exigência de const é **por-macro** (todo arg
-  comptime-conhecido), **não por-acesso** — `.value()`/`.type` sempre resolvem.
+- **Avaliar VALOR de runtime = erro; inferir TIPO de runtime = OK** (ruling do dono — a regra fina). Como
+  roda pós-typecheck, o `comptime` **avalia valores** — e um valor só é avaliável se for **comptime-const**;
+  **avaliar um local de runtime = erro**. Mas o **TIPO** de qualquer arg é comptime-conhecido (mesmo de um
+  runtime), então uma `comptime` **genérica** pode **inferir o tipo** de um arg de runtime **sem avaliá-lo**.
+- **Comptime genérica é como o `sizeof` funciona** (em vez de passar o tipo como valor, `@sizeof(i32)`, que
+  seria esquisito): `sizeof` é **genérico** com um param de valor **opcional e nunca avaliado** — só veículo
+  de inferência de `T`:
   ```teko
-  comptime sizeof(...args): usize { args[0].type.size }
-  @sizeof(i64)      // → 8  (passa o TIPO, comptime-conhecido)
+  comptime sizeof<T>(t: T | null = null): usize { T.size }
   var saldo: i64 = ler()
-  @sizeof(saldo)    // ✗ erro: `saldo` é runtime — comptime não pode conhecê-lo
+  @sizeof(saldo)    // → 8  — infere T=i64 do arg; `saldo` NÃO é avaliado (só o tipo)
+  @sizeof<i32>()    // → 4  — tipo explícito, sem valor
   ```
-- **`@sizeof`/`@typename` = macro comptime** (visível, no-shadow) sobre a reflexão de tipo
-  (`.type.size`/`.type.name`), **não builtin oculto**. A sub-decisão que resta: **quanto de reflexão de tipo
-  expor** (`.size`/`.name`/`.fields`…).
+- **`@sizeof`/`@typename` = macro comptime** (visível, no-shadow) sobre a reflexão de tipo (`T.size`/
+  `T.name`), **não builtin oculto**. Sub-decisão que resta: **quanto de reflexão de tipo expor**
+  (`.size`/`.name`/`.fields`…); e a tensão do `.fields` (geração dirigida-por-campo precisa de campos
+  pós-typecheck **e** emissão pré-typecheck — famílias distintas) tem **recomendação (a), a confirmar**:
+  reflexão computa sobre campos, geração-por-campo fica com trait/interface à mão.
 
 ### 14.3 Consequências
 - **Fork "o que args é" resolvido pelo estágio:** A = **AST-only**, B = **valores typed**. Sem construto
