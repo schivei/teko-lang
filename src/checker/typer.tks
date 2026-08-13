@@ -736,15 +736,289 @@ fn type_logical_binop(op: lexer::TokenKind, l: TExpr, r: TExpr): TExpr | error {
 }
 
 /**
+ * NoOperator — the tri-state marker `dispatch_binop_operator` returns when NEITHER operand's owner
+ * declares a matching `operator` for the token (§9 ruling 8): the caller then falls back to the
+ * primitive operator over the reduced base. Modeled on `NotListBuiltin`.
+ *
+ * @since §9
+ */
+type NoOperator = struct { }
+
+/**
+ * dunder_of_binop — the dunder method name a binary operator token dispatches to (§9 ruling 2), or
+ * "" when the token is not an overloadable binary operator (`&&`/`||` are NOT — they stay bool-only).
+ * Arithmetic: + __add, - __sub, * __mul, / __div, % __mod. Comparison: == __eq, != __ne, < __lt,
+ * > __gt, <= __le, >= __ge. Bitwise: & __band, | __bor, ^ __bxor, << __shl, >> __shr. (Index `[]`
+ * and unary `~` __bnot have their own sites — `type_index` / `type_unary`.)
+ *
+ * @param op  the binary operator token
+ * @return    the dunder name, or "" if `op` is not an overloadable binary operator
+ * @since §9
+ */
+fn dunder_of_binop(op: lexer::TokenKind): str {
+    if op == lexer::TokenKind::Plus { return "__add" }
+    if op == lexer::TokenKind::Minus { return "__sub" }
+    if op == lexer::TokenKind::Star { return "__mul" }
+    if op == lexer::TokenKind::Slash { return "__div" }
+    if op == lexer::TokenKind::Percent { return "__mod" }
+    if op == lexer::TokenKind::EqEq { return "__eq" }
+    if op == lexer::TokenKind::Ne { return "__ne" }
+    if op == lexer::TokenKind::Lt { return "__lt" }
+    if op == lexer::TokenKind::Gt { return "__gt" }
+    if op == lexer::TokenKind::Le { return "__le" }
+    if op == lexer::TokenKind::Ge { return "__ge" }
+    if op == lexer::TokenKind::Amp { return "__band" }
+    if op == lexer::TokenKind::Pipe { return "__bor" }
+    if op == lexer::TokenKind::Caret { return "__bxor" }
+    if op == lexer::TokenKind::Shl { return "__shl" }
+    if op == lexer::TokenKind::Shr { return "__shr" }
+    ""
+}
+
+/**
+ * value_type_body_methods — the readonly instance methods + operators declared in a value-type body
+ * (§9), or the empty list for any other body kind. The single accessor the operator lookup and the
+ * definition validator share.
+ *
+ * @param body  the type declaration's body
+ * @return      the body's method/operator list, or empty for a non-value-type body
+ * @since §9
+ */
+fn value_type_body_methods(body: parser::TypeBody): []parser::Function {
+    match body {
+        parser::NewtypeBody as nb => nb.methods
+        parser::EnumBody as eb => eb.methods
+        parser::FlagsBody as fb => fb.methods
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * value_op_owner — the value-type NAME that owns operator/method lookup for `t`, or "" when `t` is a
+ * RAW primitive (ruling 7's trigger: the dunder lookup runs iff at least one operand is NOT a raw
+ * primitive). A `Named` type whose decl is a `NewtypeBody`, `EnumBody`, or `FlagsBody` (a NAMED
+ * value-type counts as non-primitive) returns its canonical name; every `Prim`/`Byte`/`Str`/`Slice`/
+ * a plain struct/class/… returns "". Because the compiler's own corpus declares ZERO value-types,
+ * and two raw primitives both yield "", the operator branch is never entered for any primitive pair —
+ * the historic primitive path is byte-identical (plan §8 fixpoint argument).
+ *
+ * @param t      the operand's resolved type
+ * @param table  the folded type table
+ * @return       the owning value-type's canonical name, or ""
+ * @since §9
+ */
+fn value_op_owner(t: Type, table: TypeTable): str {
+    match t {
+        Named as n => match type_table_find(table, n.name, "") {
+            parser::TypeDecl as td => match td.body {
+                parser::NewtypeBody => n.name
+                parser::EnumBody => n.name
+                parser::FlagsBody => n.name
+                _ => ""
+            }
+            error => ""
+        }
+        _ => ""
+    }
+}
+
+/**
+ * operand_reduced_to_base — the ruling-8 FALLBACK reduction: when no operator matched, a nominal
+ * prim-backed value-type operand is lowered to its backing type (a representation-identity `TCast`)
+ * so the primitive operator applies over the base. Enum/flags and every non-value-type operand pass
+ * through unchanged. Inert on the corpus (never a value-type there).
+ *
+ * @param e      the typed operand
+ * @param table  the folded type table
+ * @return       the operand cast to its backing type, or `e` unchanged
+ * @since §9
+ */
+fn operand_reduced_to_base(e: TExpr, table: TypeTable): TExpr {
+    match value_type_base(e.type, table) {
+        Type as bty => TExpr { kind = TCast { expr = e }; type = bty; line = e.line; col = e.col }
+        NotValueType => e
+    }
+}
+
+/**
+ * operator_operand_type — resolve one declared operator-operand type-expression to a `Type`,
+ * mapping the `self` atom to the owning value-type (§9 ruling 1). Used to match a call's (l, r)
+ * operand pair against a candidate operator's declared positions.
+ *
+ * @param te               the declared operand type-expression
+ * @param owner_canonical  the canonical name of the owning value-type
+ * @param table            the folded type table
+ * @return                 the resolved operand type, or a resolution error
+ * @since §9
+ */
+fn operator_operand_type(te: parser::TypeExpr, owner_canonical: str, table: TypeTable): Type | error {
+    if return_type_is_self(te) { return Named { name = owner_canonical } }
+    resolve_type(te, table, name_qualifier(owner_canonical))
+}
+
+/**
+ * owner_has_matching_operator — does the value-type `owner_canonical` declare an `operator <dn>`
+ * whose two declared operands ACCEPT the (l, r) pair BY POSITION (§9 rulings 1/6/8)? Position 0 must
+ * accept `l`, position 1 `r`, under the ordinary assignability rule. This is the comp-time match that
+ * decides ruling 8's ordered dispatch without committing to a call.
+ *
+ * @param owner_canonical  the candidate owner's canonical name
+ * @param dn               the dunder name sought
+ * @param l                the typed left operand
+ * @param r                the typed right operand
+ * @param table            the folded type table
+ * @return                 true iff a declared operator accepts (l, r) by position
+ * @since §9
+ */
+fn owner_has_matching_operator(owner_canonical: str, dn: str, l: TExpr, r: TExpr, table: TypeTable): bool {
+    var methods = match type_table_find(table, owner_canonical, "") {
+        parser::TypeDecl as td => value_type_body_methods(td.body)
+        error => teko::list::empty()
+    }
+    var i = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].is_operator && methods[i].name == dn && methods[i].params.len == 2 {
+            var p0 = match operator_operand_type(methods[i].params[0].type_ann, owner_canonical, table) { Type as t => t; error => Void { } }
+            var p1 = match operator_operand_type(methods[i].params[1].type_ann, owner_canonical, table) { Type as t => t; error => Void { } }
+            if operator_operand_accepts(l, p0, table) && operator_operand_accepts(r, p1, table) { return true }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * operator_operand_accepts — does an operator operand `arg` fit the declared position type `param`
+ * (§9 rulings 1/6)? Beyond ordinary assignability, a bare NUMERIC LITERAL adopts any numeric position
+ * exactly as it would at a normal call site (`f(3)` into an `i32`), so `celsius + 3` matches an
+ * `operator __add(self, i32)`. The final fit/overload choice is `type_call`'s at `build_operator_call`;
+ * this only gates which side owns the dispatch (ruling 8).
+ *
+ * @param arg    the typed operand
+ * @param param  the operator's declared position type
+ * @param table  the folded type table
+ * @return       true iff `arg` fits `param` at this position
+ * @since §9
+ */
+fn operator_operand_accepts(arg: TExpr, param: Type, table: TypeTable): bool {
+    if assignable_to(arg.type, param, table) { return true }
+    match arg.kind {
+        TNumber => is_numeric(param)
+        _ => false
+    }
+}
+
+/**
+ * build_operator_call — lower a matched binary operator to the STATIC call `<owner>::<dn>(left,
+ * right)` (§9 ruling 8), routing the ORIGINAL operand expressions through `type_call` so the operator
+ * reuses the ordinary method mangling, namespace resolution, and argument coercion (no new symbol
+ * scheme). The result type is the operator's declared return.
+ *
+ * @param owner_canonical  the owning value-type's canonical name
+ * @param dn               the dunder name
+ * @param left             the RAW left operand expression
+ * @param right            the RAW right operand expression
+ * @param env              the typing environment
+ * @param table            the folded type table
+ * @return                 the typed static-call expression, or a type error
+ * @since §9
+ */
+fn build_operator_call(owner_canonical: str, dn: str, left: parser::Expr, right: parser::Expr, env: Env, table: TypeTable): TExpr | error {
+    var callee = method_dispatch_callee(owner_canonical, dn)
+    var args: []parser::Expr = teko::list::push(teko::list::push(teko::list::empty(), left), right)
+    var names: []str = teko::list::push(teko::list::push(teko::list::empty(), ""), "")
+    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }, env, table)
+}
+
+/**
+ * dispatch_binop_operator — resolve a binary operator to a user `operator` on one of its operands and
+ * lower it to a static method call, per ruling 8's ordered dispatch: (1) the LEFT operand's owner
+ * declares an `operator <dn>` accepting this (l, r) pair by position → call `Lowner::<dn>(l, r)`;
+ * else (2) the RIGHT operand's owner declares a matching one → call it; else (3) `NoOperator` (the
+ * caller reduces to the base and emits the primitive op). The explicit left/right order resolves
+ * non-commutative and mixed-operand cases (rulings 1/6).
+ *
+ * @param dn     the dunder name (`dunder_of_binop`)
+ * @param left   the RAW left operand expression
+ * @param right  the RAW right operand expression
+ * @param l      the typed left operand
+ * @param r      the typed right operand
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the lowered static-call TExpr, `NoOperator` when neither side matches, or a type error
+ * @since §9
+ */
+fn dispatch_binop_operator(dn: str, left: parser::Expr, right: parser::Expr, l: TExpr, r: TExpr, env: Env, table: TypeTable): TExpr | NoOperator | error {
+    var lo = value_op_owner(l.type, table)
+    if lo != "" && owner_has_matching_operator(lo, dn, l, r, table) {
+        match build_operator_call(lo, dn, left, right, env, table) { TExpr as te => return te; error as e => return e }
+    }
+    var ro = value_op_owner(r.type, table)
+    if ro != "" && owner_has_matching_operator(ro, dn, l, r, table) {
+        match build_operator_call(ro, dn, left, right, env, table) { TExpr as te => return te; error as e => return e }
+    }
+    NoOperator { }
+}
+
+/**
+ * owner_has_unary_operator — does the value-type `owner_canonical` declare a UNARY `operator <dn>`
+ * (one operand) accepting `o` (§9 ruling 2 — `~` → `__bnot`)? The single-operand analogue of
+ * `owner_has_matching_operator`.
+ *
+ * @param owner_canonical  the candidate owner's canonical name
+ * @param dn               the unary dunder name sought
+ * @param o                the typed operand
+ * @param table            the folded type table
+ * @return                 true iff a declared one-operand operator accepts `o`
+ * @since §9
+ */
+fn owner_has_unary_operator(owner_canonical: str, dn: str, o: TExpr, table: TypeTable): bool {
+    var methods = match type_table_find(table, owner_canonical, "") {
+        parser::TypeDecl as td => value_type_body_methods(td.body)
+        error => teko::list::empty()
+    }
+    var i = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].is_operator && methods[i].name == dn && methods[i].params.len == 1 {
+            var p0 = match operator_operand_type(methods[i].params[0].type_ann, owner_canonical, table) { Type as t => t; error => Void { } }
+            if assignable_to(o.type, p0, table) { return true }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * build_unary_operator_call — lower a matched unary operator to the static call `<owner>::<dn>(x)`
+ * (§9 ruling 2), routing the ORIGINAL operand through `type_call` for the ordinary method mangling.
+ *
+ * @param owner_canonical  the owning value-type's canonical name
+ * @param dn               the unary dunder name
+ * @param operand          the RAW operand expression
+ * @param env              the typing environment
+ * @param table            the folded type table
+ * @return                 the typed static-call expression, or a type error
+ * @since §9
+ */
+fn build_unary_operator_call(owner_canonical: str, dn: str, operand: parser::Expr, env: Env, table: TypeTable): TExpr | error {
+    var callee = method_dispatch_callee(owner_canonical, dn)
+    var args: []parser::Expr = teko::list::push(teko::list::empty(), operand)
+    var names: []str = teko::list::push(teko::list::empty(), "")
+    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }, env, table)
+}
+
+/**
  * type_binary — type a binary expression. Dispatches, in order: the `~` concat chain; the `bigint`/
- * `dec` operator sugar (lowered to library calls); then the native operator classes — shift, arith
- * (`+ - * /`), bitwise/remainder (`% & | ^`), and logical (`&& ||`). Operands are normalized so a
- * fitting untyped numeric literal adopts its partner's type first (C6).
+ * `dec` operator sugar (lowered to library calls); the §9 value-type operator lookup; then the native
+ * operator classes — shift, arith (`+ - * /`), bitwise/remainder (`% & | ^`), and logical (`&& ||`).
+ * Operands are normalized so a fitting untyped numeric literal adopts its partner's type first (C6).
  *
  * @param b      the binary expression node
  * @param env    the typing environment
  * @param table  the folded type table
- * @return       the typed binary (or lowered bignum call) expression, or a type error
+ * @return       the typed binary (or lowered bignum/operator call) expression, or a type error
  * @throws       on a void operand, an incompatible operand type, or a non-binary operator
  * @see          warn_redundant_cast — the D1 class-3 WARNING this emits in passing (never a failure)
  */
@@ -757,6 +1031,23 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
     var lk = bignum_kind(l0.type)
     var rk = bignum_kind(r0.type)
     if lk != "" || rk != "" { return type_bignum_binop(b.op, l0, r0, lk, rk) }
+    // (§9 rulings 7/8) value-type operator dispatch: fires iff at least one operand is a NAMED
+    // value-type. Two raw primitives skip this entirely (both owners "") → the primitive path is
+    // byte-identical. A matching operator lowers to a static call; no match reduces each value-type
+    // operand to its backing type and continues to the primitive op over the base.
+    if value_op_owner(l0.type, table) != "" || value_op_owner(r0.type, table) != "" {
+        var dn = dunder_of_binop(b.op)
+        if dn != "" {
+            match dispatch_binop_operator(dn, b.left, b.right, l0, r0, env, table) {
+                TExpr as te => return te
+                NoOperator => {
+                    l0 = operand_reduced_to_base(l0, table)
+                    r0 = operand_reduced_to_base(r0, table)
+                }
+                error as e => return e
+            }
+        }
+    }
     var ops = adopt_binop_operands(l0, r0)
     var l = ops.l
     var r = ops.r
@@ -784,6 +1075,12 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable): TExpr | error {
         return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
     }
     if u.op == lexer::TokenKind::Tilde {   // bitwise complement: integer-only (no float bit-flip — B.38)
+        // (§9 ruling 2) a value-type may overload `~` as `operator __bnot(self): self` — dispatch to
+        // it before the integer-only primitive rule. Inert on the corpus (no value-type operand).
+        var owner = value_op_owner(o.type, table)
+        if owner != "" && owner_has_unary_operator(owner, "__bnot", o, table) {
+            return build_unary_operator_call(owner, "__bnot", u.operand, env, table)
+        }
         if !is_integer(o.type) { return error { message = "unary `~` needs an integer (not a float — B.38)" } }
         return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
     }
@@ -809,11 +1106,134 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable): TExpr | error {
  * @throws       on a `void` operand or an incomparable operand pair — NOT on a redundant widen
  *               cast, which only warns (owner ruling 2026-07-27, `warn_redundant_cast`)
  */
+/**
+ * compare_has_value_type — does any operand of the comparison chain resolve to a NAMED value-type
+ * (§9)? A cheap pre-scan (each `type_expr` is pure); an operand whose typing errors is treated as
+ * NOT a value-type, so the main path still reports the real error. Returns false for every
+ * primitive-only chain — the historic `TCompare` path stays byte-identical (plan §8).
+ *
+ * @param c      the comparison chain
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       true iff at least one operand is a value-type
+ * @since §9
+ */
+fn compare_has_value_type(c: parser::Compare, env: Env, table: TypeTable): bool {
+    if operand_is_value_type(c.first, env, table) { return true }
+    var i = 0
+    loop {
+        if i >= c.rest.len { break }
+        if operand_is_value_type(c.rest[i].operand, env, table) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * operand_is_value_type — does the expression `e` type to a NAMED value-type (§9)? A typing error is
+ * reported as NOT a value-type (the caller's main path re-types and surfaces the real error).
+ *
+ * @param e      the operand expression
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       true iff `e` types to a value-type
+ * @since §9
+ */
+fn operand_is_value_type(e: parser::Expr, env: Env, table: TypeTable): bool {
+    match type_expr(e, env, table) {
+        TExpr as te => value_op_owner(te.type, table) != ""
+        error => false
+    }
+}
+
+/**
+ * single_primitive_compare — the boolean of ONE primitive comparison term (`l op r`): adopt a bare
+ * literal operand, check comparability, and build a two-term `TCompare` typed `bool`. The §9
+ * value-type comparison fold uses it for a term whose operands are (reduced to) primitives.
+ *
+ * @param op  the comparison operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the boolean `TCompare`, or an incomparable-operands error
+ * @since §9
+ */
+fn single_primitive_compare(op: lexer::TokenKind, l: TExpr, r: TExpr): TExpr | error {
+    var adopted = adopt_binop_operands(l, r)
+    if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
+    var term = TCmpTerm { op = op; operand = adopted.r }
+    TExpr { kind = TCompare { first = adopted.l; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/**
+ * compare_value_term — the boolean of ONE comparison term when at least one operand is a value-type
+ * (§9 rulings 3/8): dispatch the comparison dunder to a user `operator` (which must return `bool`),
+ * or — no match — reduce each value-type operand to its base and compare primitively. Returns a
+ * `bool`-typed expression either way, so the chain composes with `&&`.
+ *
+ * @param op    the comparison operator token
+ * @param le    the RAW left operand expression
+ * @param l     the typed left operand
+ * @param re    the RAW right operand expression
+ * @param r     the typed right operand
+ * @param env   the typing environment
+ * @param table the folded type table
+ * @return      the boolean term expression, or a type error
+ * @throws      when a matched comparison operator does not return `bool` (ruling 3), or the fallback
+ *              primitive compare is incomparable
+ * @since §9
+ */
+fn compare_value_term(op: lexer::TokenKind, le: parser::Expr, l: TExpr, re: parser::Expr, r: TExpr, env: Env, table: TypeTable): TExpr | error {
+    var dn = dunder_of_binop(op)
+    match dispatch_binop_operator(dn, le, re, l, r, env, table) {
+        TExpr as te => {
+            if !is_bool(te.type) { return error { message = $"a comparison `operator {dn}` must return `bool` (§9 ruling 3)" } }
+            te
+        }
+        NoOperator => single_primitive_compare(op, operand_reduced_to_base(l, table), operand_reduced_to_base(r, table))
+        error as e => e
+    }
+}
+
+/**
+ * type_compare_value_chain — type a comparison chain in which at least one operand is a value-type
+ * (§9 ruling 3/§3.4), as an `&&`-fold of per-term booleans (`a < b < c` → `(a<b) && (b<c)`),
+ * reusing `type_logical_binop`'s semantics. Each term is a user comparison operator (returning
+ * `bool`) or a reduced-to-base primitive comparison.
+ *
+ * @param c      the comparison chain (rest length ≥ 1)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the folded boolean expression, or a type error
+ * @since §9
+ */
+fn type_compare_value_chain(c: parser::Compare, env: Env, table: TypeTable): TExpr | error {
+    var prev_expr = c.first
+    var prev = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
+    if type_is_void(prev.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    var acc = prev   // placeholder; overwritten on the first term (rest.len ≥ 1)
+    var has_acc = false
+    var i = 0
+    loop {
+        if i >= c.rest.len { break }
+        var cur_expr = c.rest[i].operand
+        var cur = deref_ref_value(match type_expr(cur_expr, env, table) { TExpr as te => te; error as e => return e })
+        if type_is_void(cur.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        var term = match compare_value_term(c.rest[i].op, prev_expr, prev, cur_expr, cur, env, table) { TExpr as t => t; error as e => return e }
+        acc = if !has_acc { term } else { TExpr { kind = TBinary { op = lexer::TokenKind::AndAnd; left = acc; right = term }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 } }
+        has_acc = true
+        prev_expr = cur_expr
+        prev = cur
+        i++
+    }
+    acc
+}
+
 fn type_compare(c: parser::Compare, env: Env, table: TypeTable): TExpr | error {
     var first = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
     if type_is_void(first.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
     var fk = bignum_kind(first.type)
     if fk != "" { return type_bignum_compare(first, c.rest, env, table, fk) }
+    if compare_has_value_type(c, env, table) { return type_compare_value_chain(c, env, table) }
     var prev = first
     var terms: []TCmpTerm = teko::list::empty()
     var i = 0
@@ -2949,6 +3369,64 @@ fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable): bool {
 }
 
 /**
+ * NotValueType — the sentinel `value_type_base` returns when `t` is NOT a body-carrying prim-backed
+ * newtype (§9 E9). Modeled on the `NotListBuiltin`/`NotPtrOp` tri-state markers.
+ *
+ * @since §9
+ */
+type NotValueType = struct { }
+
+/**
+ * value_type_base — the resolved BACKING type of a nominal prim-backed value-type `Named`
+ * (a `NewtypeBody`), or `NotValueType` when `t` is anything else (§9 ruling 9). For
+ * `type Celsius = f32 { … }` it returns the resolved `f32`; an enum/flags value-type reports its
+ * ordinal/wire integer through the existing E7/E8 paths instead, so this covers ONLY the NewtypeBody
+ * case (E9's new work). A TRANSPARENT `AliasBody` never reaches here — it resolves-through
+ * (`resolve.tks`) and needs no cast. Returns `NotValueType` for every type in the compiler's own
+ * corpus (no `NewtypeBody` exists), so the E9 gate is inert on the self-build (plan §8 fixpoint).
+ *
+ * @param t      the type to inspect
+ * @param table  the folded type table
+ * @return       the resolved backing type, or `NotValueType`
+ * @since §9
+ */
+fn value_type_base(t: Type, table: TypeTable): Type | NotValueType {
+    match t {
+        Named as n => match type_table_find(table, n.name, "") {
+            parser::TypeDecl as td => match td.body {
+                parser::NewtypeBody as nb => match resolve_type(nb.backing, table, "") {
+                    Type as bt => bt
+                    error => NotValueType { }
+                }
+                _ => NotValueType { }
+            }
+            error => NotValueType { }
+        }
+        _ => NotValueType { }
+    }
+}
+
+/**
+ * value_type_reduce — reduce a nominal prim-backed value-type to its backing type (§9 E9), leaving
+ * every other type unchanged. Lets `type_cast` apply the ordinary numeric-cast rules across the
+ * newtype↔base boundary: representation is identity (the value IS the primitive), so a `Celsius`
+ * (backed by `f32`) casts to/from any numeric endpoint exactly as its `f32` base would, the loss
+ * runtime-guarded like any other numeric conversion. Inert on the corpus (every type reduces to
+ * itself).
+ *
+ * @param t      the type to reduce
+ * @param table  the folded type table
+ * @return       the backing type for a NewtypeBody `Named`, else `t` unchanged
+ * @since §9
+ */
+fn value_type_reduce(t: Type, table: TypeTable): Type {
+    match value_type_base(t, table) {
+        Type as bty => bty
+        NotValueType => t
+    }
+}
+
+/**
  * warn_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9):
  * a WARNING printed to stderr, never a build failure. Fires on a provable no-op
  * `to` (class 1 — same-type; class 3 — a lossless widen the W-RULE/B.22
@@ -3016,13 +3494,21 @@ fn type_cast(c: parser::Cast, env: Env, table: TypeTable): TExpr | error {
     // member (the `(byte)k` / `(TokenKind)b` the .tkb serializer relies on). cast_check is prim-only,
     // so handle this pair here (it has the type table to detect an enum); the result type is the
     // target. Any OTHER enum cast stays rejected by cast_check. (Mirrors expr.c type_cast's e7.)
-    var e7 = (is_enum_named(inner.type, table) && is_int_cast_end(target)) ||
-    (is_int_cast_end(inner.type) && is_enum_named(target, table))
-    var e8 = is_flags_wire_cast(inner.type, target, table)
+    // (§9 E9 — ruling 9) the nominal newtype↔base conversion. A prim-backed value-type is REDUCED to
+    // its backing type before the numeric-cast rules run: `Celsius to f32` (EXTRACT) and
+    // `f32 to Celsius` (CONSTRUCT) are representation-identity, exactly like the enum↔int (E7) and
+    // flags↔int (E8) paths. Both endpoints reduce, so a `Celsius(i32) to Fahrenheit(i32)` also lowers
+    // to the underlying `i32 to i32`. Reduction is the identity on every non-newtype, so E7/E8 and the
+    // prim-only `cast_check` see exactly what they saw before on the compiler's own corpus.
+    var inner_r = value_type_reduce(inner.type, table)
+    var target_r = value_type_reduce(target, table)
+    var e7 = (is_enum_named(inner_r, table) && is_int_cast_end(target_r)) ||
+    (is_int_cast_end(inner_r) && is_enum_named(target_r, table))
+    var e8 = is_flags_wire_cast(inner_r, target_r, table)
     if !e7 && !e8 {
-        match cast_check(inner.type, target) { null => { }; error as e => return e }
+        match cast_check(inner_r, target_r) { null => { }; error as e => return e }
     }
-    match const_range_check(c.expr, target) { null => { }; error as e => return e }
+    match const_range_check(c.expr, target_r) { null => { }; error as e => return e }
     TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }   // the cast's type IS the resolved target
 }
 
@@ -3757,6 +4243,13 @@ fn name_has_generic_base(mname: str, stem: str): bool {
 fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
     var recv = match type_expr(ix.receiver, env, table) { TExpr as te => te; error as e => return e }
     var idx = match type_expr(ix.index, env, table) { TExpr as te => te; error as e => return e }
+    // (§9 ruling 4) a value-type may define `operator __index(self, i): E` over an indexed base —
+    // dispatch to it before the primitive subscript rules (so its index/element types are the
+    // operator's, not the integer-only primitive contract). Inert on the corpus (no value-type).
+    var iowner = value_op_owner(recv.type, table)
+    if iowner != "" && owner_has_matching_operator(iowner, "__index", recv, idx, table) {
+        return build_operator_call(iowner, "__index", ix.receiver, ix.index, env, table)
+    }
     if !is_integer(idx.type) { return error { message = "a subscript index must be an integer" } }
     match recv.type {
         Str => TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { }; line = 0; col = 0 }
