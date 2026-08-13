@@ -1888,11 +1888,12 @@ fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: 
         var tname = trait_names[i]
         if trait_name_seen_before(trait_names, i, tname) { i++; continue }
         var tb = match find_trait_body(tname, table) { parser::TraitBody as t => t; error as e => return e }
-        var fmf = match fold_trait_fields(type_name, tname, fields, tb.fields, into_class) { []parser::Field as f => f; error as e => return e }
+        var eff = match flatten_trait_composition(tname, tb, table, teko::list::empty()) { FoldedMembers as f => f; error as e => return e }
+        var fmf = match fold_trait_fields(type_name, tname, fields, eff.fields, into_class) { []parser::Field as f => f; error as e => return e }
         fields = fmf
-        var fmc = match fold_trait_consts(type_name, tname, consts, tb.consts) { []parser::ConstDecl as c => c; error as e => return e }
+        var fmc = match fold_trait_consts(type_name, tname, consts, eff.consts) { []parser::ConstDecl as c => c; error as e => return e }
         consts = fmc
-        var fmm = match fold_trait_methods(type_name, tname, own_methods, methods, tb.methods, table) { []parser::Function as m => m; error as e => return e }
+        var fmm = match fold_trait_methods(type_name, tname, own_methods, methods, eff.methods, table) { []parser::Function as m => m; error as e => return e }
         methods = fmm
         i++
     }
@@ -2557,7 +2558,7 @@ fn validate_trait_body(reg: TypeReg, trb: parser::TraitBody, tbl: TypeTable, tab
     if decl.type_params.len > 0 {
         return one_diag(decl_diag(reg, $"a generic trait ('{decl.name}<…>') is not supported — a trait is a concrete mixin (§9.4)"))
     }
-    concat_diags(validate_body_fields(reg, trb.fields, tbl, table), trait_method_modifier_diags(reg, trb.methods))
+    concat_diags(concat_diags(validate_body_fields(reg, trb.fields, tbl, table), trait_method_modifier_diags(reg, trb.methods)), trait_composition_diags(reg, trb, table))
 }
 
 /**
