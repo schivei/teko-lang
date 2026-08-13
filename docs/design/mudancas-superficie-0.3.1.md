@@ -951,10 +951,17 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
 - **item 14 — value-struct mutável** (C#-style via property, tirando o bloqueio "struct é readonly"):
   **ANTECIPADO.** Está no caminho crítico da Intent (o `pub set` que escreve `self._x`, §10.3) e do `Ctx`
   performático; entra cedo.
-- **visibilidade `exp`/`pub` — POR ÚLTIMO de tudo.** O enforcement vira muita coisa hoje-visível em
-  **ilegal** (muitas falhas a corrigir), e a grafia `exp`/`pub` já é **forward-compatible** (hoje tudo lê
-  como `exp`; a proteção da Intent auto-corrige quando ela entrar), então **nada bloqueia** por ela chegar
-  tarde — pelo contrário, atrasá-la minimiza retrabalho.
+- **expansão da stdlib — ANTES da §11.** Define os **novos itens** da stdlib e decide a **separação** que
+  permite o **self-link com o programa final** (o que a stdlib expõe vs mantém interno). É quem **povoa** o
+  `exp`/`pub` que a §11 depois formaliza. Bônus: **já reduz parte dos problemas de memória** (o RSS
+  super-linear do item 13 — uma stdlib bem separada corta parte do que a monomorfização arrasta pra dentro
+  de cada programa).
+- **§11 — visibilidade `exp`/`pub`: PENÚLTIMA** (não mais a última). O enforcement vira muita coisa
+  hoje-visível em **ilegal** (muitas falhas a corrigir), e a grafia já é **forward-compatible** (hoje tudo
+  lê como `exp`; a proteção da Intent auto-corrige quando ela entrar), então atrasá-la minimiza retrabalho.
+  **Forma a superfície de visibilidade** sobre a qual a §12 opera.
+- **§12 — libc-direct / `#if` / `#os` / macro: ÚLTIMA.** Invertida com a §11: precisa **operar sobre a §11
+  já formada** (a visibilidade `exp`/`pub` decidida), então só entra depois dela.
 
 ---
 
