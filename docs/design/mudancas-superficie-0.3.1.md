@@ -507,12 +507,24 @@ NÃO conseguia (era opaca-em-T, `resolve.tks:863` devolvia superfície vazia; fo
 desistiu e virou `str`-keyed). A interface despacha por vtable, então `<K: IEq & IHash>` **destrava** o
 `Map<K, V>` genérico que nunca funcionou.
 
+**A interface OBRIGA a counter-part do operador** — completude, sem meia-comparação. Igualdade por
+**negação** (`==` obriga `!=`, com `!=` = `!(==)`); ordem por **reflexão** (`<` obriga `>` = operandos
+trocados, e `<=` obriga `>=`). O contrato lista **as duas** assinaturas; um **trait-decorador opcional**
+entrega o corpo óbvio da counter-part (zero shadow — quem quiser um `!=` não-trivial, tipo NaN, escreve o
+próprio em vez de compor o decorador).
+
 ```teko
 type IEq = interface {
-    operator __eq(left: self, right: self): bool     // contrato: implementar ==
+    operator __eq(left: self, right: self): bool     // contrato: ==
+    operator __ne(left: self, right: self): bool     // counter-part OBRIGATÓRIA: !=
 }
 
-type Point = struct IEq {
+// decorador opcional: entrega o corpo óbvio de !=, sem mágica de compilador
+type NeByEq = trait {
+    operator __ne(left: self, right: self): bool { !(left == right) }
+}
+
+type Point = struct IEq & NeByEq {                   // == à mão, != herdado do decorador
     x: i32
     y: i32
     operator __eq(left: self, right: self): bool { left.x == right.x && left.y == right.y }
