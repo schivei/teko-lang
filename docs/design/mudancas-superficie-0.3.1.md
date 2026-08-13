@@ -1126,8 +1126,10 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   }
   @log_if(msg)   // → teko::io::println(msg)   ;   @log_if()  → nada
   ```
-- **O tipo de retorno discrimina:** macro **sem** retorno **emite código** (via `lowering`); macro **com**
-  retorno (`: usize`) **computa um valor** inlined (`macro count(...args): usize { args.len }`).
+- **`macro` NÃO tem retorno** (ruling do dono) — ela **se substitui e alarga a AST** (emite via `lowering`),
+  **sempre**. Inspeciona args (`.len`/`.node`) na sua lógica comptime, mas **não retorna** — emite. O caso
+  "computa um valor" **nunca é `macro`; é `comptime`** (que retorna literal, §14.2). Ex.: contar args é
+  `comptime count(...args): usize { args.len }`, não `macro`.
 - **Hygiene = mangle, sem erro** (ruling do dono). Colisão de variável **nunca erra**: um binding que a macro
   introduz no verbatim de `lowering` (o `var t` do `swap`) é **manglado** para um nome único (`t$…`), então
   jamais colide com o `t` do usuário. Dois detalhes forçados:
@@ -1150,15 +1152,19 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   roda pós-typecheck, o `comptime` **avalia valores** — e um valor só é avaliável se for **comptime-const**;
   **avaliar um local de runtime = erro**. Mas o **TIPO** de qualquer arg é comptime-conhecido (mesmo de um
   runtime), então uma `comptime` **genérica** pode **inferir o tipo** de um arg de runtime **sem avaliá-lo**.
-- **Comptime genérica é como o `sizeof` funciona** (em vez de passar o tipo como valor, `@sizeof(i32)`, que
-  seria esquisito): `sizeof` é **genérico** com um param de valor **opcional e nunca avaliado** — só veículo
-  de inferência de `T`:
+- **O retorno da `comptime` (quando houver) é inlined como LITERAL** (ruling do dono): `var x = @sizeof<i32>()`
+  fica como se fosse `var x = 4`.
+- **`sizeof` são DOIS construtos** (correção): o **comptime** dá o **slot** de `T` (`T` explícito, sem param
+  de valor); a versão que recebe um **valor** é uma **função runtime** (bytes ocupados). O `@` distingue:
   ```teko
-  comptime sizeof<T>(t: T | null = null): usize { T.size }
-  var saldo: i64 = ler()
-  @sizeof(saldo)    // → 8  — infere T=i64 do arg; `saldo` NÃO é avaliado (só o tipo)
-  @sizeof<i32>()    // → 4  — tipo explícito, sem valor
+  // src/mem
+  exp global comptime sizeof<T>(): usize { /* tamanho do SLOT de T, comp-time */ }
+  @sizeof<i32>()        // → 4  (comptime, slot)
+
+  exp fn sizeof<T>(t: T | null = null): u64 { if t == null { return 0 } /* bytes OCUPADOS por t */ }
+  sizeof(x)             // runtime — tamanho ocupado pelo valor x
   ```
+  (o modificador `global` — acesso sem namespace, fim do shadow de parse — fica no §15.)
 - **`@sizeof`/`@typename` = macro comptime** (visível, no-shadow) sobre a reflexão de tipo (`T.size`/
   `T.name`), **não builtin oculto**. Sub-decisão que resta: **quanto de reflexão de tipo expor**
   (`.size`/`.name`/`.fields`…) — e a reflexão só computa **valores comptime** (contar campos, somar
