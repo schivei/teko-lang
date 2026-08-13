@@ -857,7 +857,7 @@ fn type_ref_ns(path: parser::Path, table: TypeTable, ref_ns: str): str {
  * @throws when `name` names no declared type
  */
 fn atom_surface(name: str, table: TypeTable): []parser::Function | error {
-    if is_trait_name(name, table) { return trait_methods_by_name(name, table) }
+    if is_trait_name(name, table) { return error { message = $"trait '{name}' is not a type and cannot appear in a constraint — use an interface (§9.4)" } }
     if is_interface_name(name, table) { return iface_methods_by_name(name, table) }
     match type_table_find(table, name, "") {
         parser::TypeDecl => { var empty_surface: []parser::Function = teko::list::empty(); empty_surface }
@@ -1019,7 +1019,7 @@ fn constraint_interfaces(c: parser::ConstraintExpr, table: TypeTable): []str | e
             interfaces_surviving(surface_union_names(l, r), surface, table)
         }
         parser::ConstraintAtom as a => {
-            if is_trait_name(a.name, table) { return teko::list::push(teko::list::empty(), a.name) }
+            if is_trait_name(a.name, table) { return error { message = $"trait '{a.name}' is not a type and cannot appear in a constraint — use an interface (§9.4)" } }
             if is_interface_name(a.name, table) { return teko::list::push(teko::list::empty(), a.name) }
             var no_interfaces: []str = teko::list::empty()
             no_interfaces
@@ -1236,6 +1236,7 @@ fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str, arity: u64):
         parser::TypeDecl as td => {
             match td.body {
                 parser::AliasBody as ab => return resolve_type(ab.alias, table, type_ref_ns(path, table, ref_ns))
+                parser::TraitBody => return error { message = $"trait '{name}' is not a type — a trait is a concrete mixin composed with `&`, never a value, param, return or field type (§9.4)" }
                 _ => return if name_is_g_instance(name) { Named { name = name } } else { Named { name = qualify(type_ref_ns(path, table, ref_ns), name) } }
             }
         }
@@ -1361,7 +1362,7 @@ fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64): bool {
     match from {
         Named as fname => match to {
             Named as tname => {
-                if is_class_name(fname.name, table) && (is_interface_name(tname.name, table) || is_trait_name(tname.name, table)) && type_conforms_to(fname.name, tname.name, table) { return true }
+                if is_class_name(fname.name, table) && is_interface_name(tname.name, table) && type_conforms_to(fname.name, tname.name, table) { return true }
                 if fname.name != tname.name && is_class_name(fname.name, table) && is_polymorphic_base(tname.name, table) && subclass_reaches(fname.name, tname.name, table, 64) { return true }
             }
             _ => { }
@@ -1477,7 +1478,7 @@ pub fn is_struct_name(name: str, table: TypeTable): bool {
 pub fn struct_conforms_but_not_class(from: Type, to: Type, table: TypeTable): bool {
     match from {
         Named as fn_ => match to {
-            Named as tn => is_struct_name(fn_.name, table) && (is_interface_name(tn.name, table) || is_trait_name(tn.name, table)) && type_conforms_to(fn_.name, tn.name, table)
+            Named as tn => is_struct_name(fn_.name, table) && is_interface_name(tn.name, table) && type_conforms_to(fn_.name, tn.name, table)
             _ => false
         }
         _ => false

@@ -217,6 +217,48 @@ fn variant_has_null_member(t: Type): bool {
 }
 
 /**
+ * reject_trait_in_match — a trait has no discriminant (§9.4): a trait name in a match SUBJECT is a
+ * NAMED error, never a silent no-match. A composed trait is flattened away and never reaches here as
+ * a Named trait, so this fires only on a direct trait subject a user wrote.
+ *
+ * @param t      the resolved subject type
+ * @param table  the type table
+ * @param where  the position word placed into the diagnostic (e.g. "subject")
+ * @return       null when `t` is not a trait, else the named error
+ * @throws       when `t` names a trait
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn reject_trait_in_match(t: Type, table: TypeTable, where: str): null | error {
+    match t {
+        Named as n => if is_trait_name(n.name, table) { error { message = $"cannot match on trait `{n.name}` in {where} position — a trait has no discriminant (§9.4)" } } else { null }
+        _ => null
+    }
+}
+
+/**
+ * reject_trait_case — a trait name in a match CASE (left-of-arm) is a NAMED error (§9.4): a trait has
+ * no discriminant to test. Checks the case pattern's nominal name before it would resolve (a trait is
+ * not a type, so resolution would otherwise report the generic "not a type").
+ *
+ * @param p      the arm's pattern
+ * @param table  the type table
+ * @return       null when the case names no trait, else the named error
+ * @throws       when the case names a trait
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn reject_trait_case(p: parser::Pattern, table: TypeTable): null | error {
+    var name = match p {
+        parser::BindPattern as bp => if bp.is_slice { "" } else { bp.type_name.segments[bp.type_name.segments.len - 1].name }
+        parser::FieldPattern as fp => fp.type_name.segments[fp.type_name.segments.len - 1].name
+        _ => ""
+    }
+    if name != "" && is_trait_name(name, table) {
+        return error { message = $"cannot match on trait `{name}` in case position — a trait has no discriminant (§9.4)" }
+    }
+    null
+}
+
+/**
  * check_pattern — validate a pattern against the subject; return the env extended with bindings.
  * A `T | null` union subject is handled by the generic `NullPattern` arm
  * (`variant_has_null_member`) below plus the present case's ordinary variant-member matching.
@@ -228,6 +270,8 @@ fn variant_has_null_member(t: Type): bool {
  * @return         the env extended with the pattern's bindings, or an error
  */
 fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable): Env | error {
+    match reject_trait_in_match(subject, table, "subject") { error as e => return e; null => { } }
+    match reject_trait_case(p, table) { error as e => return e; null => { } }
     // ENUM subject (C7b): member patterns, not type binds — detected before the generic match so a
     // bare `U8` is not mis-resolved as a type name (resolve_named → "unknown type: U8").
     match subject {

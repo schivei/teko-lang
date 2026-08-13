@@ -1384,25 +1384,24 @@ fn merge_iface_method(out: []parser::Function, m: parser::Function): []parser::F
 }
 
 /**
- * (W10b.D3 / TR1) A CONTRACT's effective methods BY NAME — the PUBLIC dispatch surface. The checker
- * (contract-receiver method typing), codegen (vtable emission), and the plan's slot scheme all read
- * THIS list in THIS order (extends-transitive methods first, then own) — the method's index here IS
- * its vtable slot. `iface` may name an INTERFACE or (TR1) a TRAIT: a trait has no `extends`, so its
- * own method list IS its effective surface (`trait_methods_by_name`). This one kind-agnostic query
- * is what makes the whole D2/D3 surface trait-aware for free. Callers pass a RESOLVED name (a
- * canonical `Named.name` or a validated contract); the declaring ns (for the extends walk) is
- * recovered via `type_ns_of`.
+ * iface_methods_by_name — a CONTRACT's effective methods BY NAME, the PUBLIC dispatch surface
+ * (W10b.D3). The checker (contract-receiver method typing), codegen (vtable emission) and the slot
+ * scheme all read THIS list in THIS order (extends-transitive methods first, then own) — the method's
+ * index here IS its vtable slot. `iface` names an INTERFACE only: a trait is not a dispatch contract
+ * (§9.4), so a trait name is a named error here. Callers pass a RESOLVED name; the declaring ns (for
+ * the extends walk) is recovered via `type_ns_of`.
  *
- * @param iface a resolved interface OR trait name
+ * @param iface a resolved interface name
  * @param table the folded type table
- * @return the contract's effective methods, in slot order
- * @throws when `iface` names neither an interface nor a trait
+ * @return the interface's effective methods, in slot order
+ * @throws when `iface` names no interface (a trait is not a dispatch contract)
+ * @since 0.3.1 (§9.4 revised)
  */
 pub fn iface_methods_by_name(iface: str, table: TypeTable): []parser::Function | error {
     var decl = match type_table_find(table, iface, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown interface: {iface}" } }
     var ib = match decl.body {
         parser::InterfaceBody as b => b
-        parser::TraitBody => return trait_methods_by_name(iface, table)
+        parser::TraitBody => return error { message = $"trait '{iface}' is not an interface — a trait is not a dispatch contract (§9.4)" }
         _ => return error { message = $"{iface} is not an interface" }
     }
     var ns = type_ns_of(table, iface)
@@ -1706,22 +1705,6 @@ pub fn find_trait_body(name: str, table: TypeTable): parser::TraitBody | error {
     }
 }
 
-/**
- * trait_methods_by_name — the bodied method list a `trait` declares, by declaration order (§9.4). A
- * trait is a self-contained concrete mixin: every method carries a body (no bodyless requirements),
- * so its own method list IS its member surface. Used by the composition fold to flatten the trait's
- * methods into a composer.
- *
- * @param name  the resolved trait name
- * @param table the (folded) type table
- * @return the trait's methods, or an error if `name` is not a declared trait
- * @throws when `name` names no trait
- * @since 0.3.1 (§9.4 revised)
- */
-pub fn trait_methods_by_name(name: str, table: TypeTable): []parser::Function | error {
-    var tb = match find_trait_body(name, table) { parser::TraitBody as t => t; error as e => return e }
-    tb.methods
-}
 
 /**
  * SplitImpls — two disjoint buckets from one `&`-list: names declared as user `trait`s FOLD their
