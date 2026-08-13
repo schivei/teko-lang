@@ -1135,7 +1135,10 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
     senão duas compilações do mesmo fonte divergem e **quebram o fixpoint byte-idêntico**;
   - **só o verbatim dentro de `lowering` é manglado** (é da macro); o que entra por **`${}`** é **nó do
     usuário e fica INTACTO** (referencia o escopo do usuário — manglá-lo capturaria errado). É essa
-    assimetria que É a hygiene.
+    assimetria que É a hygiene. E ela é **estanque:** o `${}` é a **ÚNICA ponte** do escopo comptime da macro
+    (fora do `lowering`) pra dentro do verbatim — nada de fora aparece dentro senão por escape. Por isso o
+    mangle é **exatamente** o verbatim: o que está lá é da macro; o que entrou por `${}` é do usuário; a
+    lógica comptime de fora nem vira AST.
 - Modelo **Rust/Lisp** (expand-então-tipa). Funciona com args de runtime (`@count(a, b)` conta nós, não
   avalia nada).
 
