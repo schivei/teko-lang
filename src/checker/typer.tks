@@ -5755,6 +5755,35 @@ fn property_write(fa: parser::FieldAccess, a: parser::Assign, env: Env, table: T
  * @throws       when the LHS is not a field access, the receiver's root is not writable, or the
  *               value does not match the field type
  */
+/**
+ * field_is_readonly — is field `fname` of the Named struct `sname` frozen (§13.3)? True when the
+ * field itself is `readonly`, OR its declaring struct is a `readonly struct` (which freezes every
+ * field — the parser already propagated the freeze to each Field, so the per-field flag alone
+ * suffices, and the struct-level flag is checked too for robustness). A frozen field is writable ONLY
+ * through a `self { … }` construction or a declaration default; every `recv.field = v` /
+ * `self.field = v` targeting it is rejected (the construction path is a StructInit, NOT a
+ * field-assign, so it never reaches this guard). Returns false for a non-struct, an unknown type, or
+ * an ordinary field — inert on today's corpus (no struct is marked readonly).
+ *
+ * @param sname  the receiver's resolved struct name
+ * @param fname  the field being written
+ * @param table  the folded type table
+ * @return       true iff the write must be rejected as a readonly violation
+ * @since item-14
+ */
+fn field_is_readonly(sname: str, fname: str, table: TypeTable): bool {
+    var decl = match type_table_find(table, sname, "") { parser::TypeDecl as td => td; error => return false }
+    var sb = match decl.body { parser::StructBody as s => s; _ => return false }
+    if sb.is_readonly { return true }
+    var i = 0 to u64
+    loop {
+        if i >= sb.fields.len { break }
+        if sb.fields[i].name == fname { return sb.fields[i].is_readonly }
+        i++
+    }
+    false
+}
+
 fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt | error {
     var probe_fa = match a.target.kind { parser::FieldAccess as fa => fa; _ => return error { message = "assignment target is not a field access (internal: parser guarantees a field LHS)" } }
     match property_write(probe_fa, a, env, table) {
@@ -5776,6 +5805,13 @@ fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt |
             dv = TExpr { kind = dv.kind; type = ref_inner; line = dv.line; col = dv.col }
         }
         return TypedStmt { node = TAssign { kind = parser::AssignKind::RefDeref; name = ref_name; op = a.op; bound = ref_inner; value = dv; deref = true; target = no_texpr() }; env = env }
+    }
+
+    match recv.type {
+        Named as n => if field_is_readonly(n.name, lhs_fa.field, table) {
+            return error { message = $"cannot assign to readonly field `{lhs_fa.field}` of `{n.name}` — a readonly field is set only at construction (`{n.name} {{ … }}`) or by a declaration default (§13.3)" }
+        }
+        _ => { }
     }
 
     match field_write_root_writable(lhs_fa.receiver, env) { error as e => return e; null => { } }
