@@ -1031,10 +1031,6 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
     var lk = bignum_kind(l0.type)
     var rk = bignum_kind(r0.type)
     if lk != "" || rk != "" { return type_bignum_binop(b.op, l0, r0, lk, rk) }
-    // (§9 rulings 7/8) value-type operator dispatch: fires iff at least one operand is a NAMED
-    // value-type. Two raw primitives skip this entirely (both owners "") → the primitive path is
-    // byte-identical. A matching operator lowers to a static call; no match reduces each value-type
-    // operand to its backing type and continues to the primitive op over the base.
     if value_op_owner(l0.type, table) != "" || value_op_owner(r0.type, table) != "" {
         var dn = dunder_of_binop(b.op)
         if dn != "" {
@@ -1075,8 +1071,6 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable): TExpr | error {
         return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
     }
     if u.op == lexer::TokenKind::Tilde {   // bitwise complement: integer-only (no float bit-flip — B.38)
-        // (§9 ruling 2) a value-type may overload `~` as `operator __bnot(self): self` — dispatch to
-        // it before the integer-only primitive rule. Inert on the corpus (no value-type operand).
         var owner = value_op_owner(o.type, table)
         if owner != "" && owner_has_unary_operator(owner, "__bnot", o, table) {
             return build_unary_operator_call(owner, "__bnot", u.operand, env, table)
@@ -1210,7 +1204,7 @@ fn type_compare_value_chain(c: parser::Compare, env: Env, table: TypeTable): TEx
     var prev_expr = c.first
     var prev = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
     if type_is_void(prev.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
-    var acc = prev   // placeholder; overwritten on the first term (rest.len ≥ 1)
+    var acc = prev
     var has_acc = false
     var i = 0
     loop {
@@ -2356,9 +2350,6 @@ fn method_call_arg_names(mc: parser::MethodCall): []str {
 
 fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr | error {
     var recv_t = match type_expr(mc.receiver, env, table) { TExpr as te => te.type; error as e => return e }
-    // (§9 ruling 12) a flags VALUE-TYPE may carry a user method. A flags receiver whose called name
-    // is NOT one of its declared methods keeps the built-in flags path (has/all/any/none/add/remove);
-    // a matching user method falls through to the ordinary method dispatch below.
     if is_flags_named(recv_t, table) && !flags_named_has_user_method(recv_t, mc.method, table) {
         return type_flags_method(mc, env, table)
     }
@@ -2379,9 +2370,9 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     var methods = match decl.body {
         parser::StructBody as sb => sb.methods
         parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }   // (W10b.CLASS increment 2) inherited methods are callable too
-        parser::NewtypeBody as nb => nb.methods   // (§9 ruling 10/12) value-type instance methods
-        parser::EnumBody as eb => eb.methods   // (§9 ruling 12) enum value-type instance methods
-        parser::FlagsBody as fb => fb.methods   // (§9 ruling 12) flags value-type instance methods
+        parser::NewtypeBody as nb => nb.methods
+        parser::EnumBody as eb => eb.methods
+        parser::FlagsBody as fb => fb.methods
         _ => return error { message = "method typing is deferred (B.29 / M.4)" }
     }
     if methods.len == 0 { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
@@ -3494,12 +3485,6 @@ fn type_cast(c: parser::Cast, env: Env, table: TypeTable): TExpr | error {
     // member (the `(byte)k` / `(TokenKind)b` the .tkb serializer relies on). cast_check is prim-only,
     // so handle this pair here (it has the type table to detect an enum); the result type is the
     // target. Any OTHER enum cast stays rejected by cast_check. (Mirrors expr.c type_cast's e7.)
-    // (§9 E9 — ruling 9) the nominal newtype↔base conversion. A prim-backed value-type is REDUCED to
-    // its backing type before the numeric-cast rules run: `Celsius to f32` (EXTRACT) and
-    // `f32 to Celsius` (CONSTRUCT) are representation-identity, exactly like the enum↔int (E7) and
-    // flags↔int (E8) paths. Both endpoints reduce, so a `Celsius(i32) to Fahrenheit(i32)` also lowers
-    // to the underlying `i32 to i32`. Reduction is the identity on every non-newtype, so E7/E8 and the
-    // prim-only `cast_check` see exactly what they saw before on the compiler's own corpus.
     var inner_r = value_type_reduce(inner.type, table)
     var target_r = value_type_reduce(target, table)
     var e7 = (is_enum_named(inner_r, table) && is_int_cast_end(target_r)) ||
@@ -4243,9 +4228,6 @@ fn name_has_generic_base(mname: str, stem: str): bool {
 fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
     var recv = match type_expr(ix.receiver, env, table) { TExpr as te => te; error as e => return e }
     var idx = match type_expr(ix.index, env, table) { TExpr as te => te; error as e => return e }
-    // (§9 ruling 4) a value-type may define `operator __index(self, i): E` over an indexed base —
-    // dispatch to it before the primitive subscript rules (so its index/element types are the
-    // operator's, not the integer-only primitive contract). Inert on the corpus (no value-type).
     var iowner = value_op_owner(recv.type, table)
     if iowner != "" && owner_has_matching_operator(iowner, "__index", recv, idx, table) {
         return build_operator_call(iowner, "__index", ix.receiver, ix.index, env, table)
@@ -7604,8 +7586,6 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             i++
             continue
         }
-        // (§9 ruling 1) an operator operand written `left: self` names the enclosing value-type,
-        // exactly like the untyped receiver below — resolved here, where `struct_name` is known.
         var is_self_typed = f.params[i].has_type && return_type_is_self(f.params[i].type_ann)
         var pt = if !f.params[i].has_type || is_self_typed {
             Named { name = qualify(env.cur_ns, struct_name) }   // (#109 W3) canonical: the method's own ns qualifies its receiver type
@@ -7634,13 +7614,10 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     // (§4 G) `base` — the super receiver — is defined as a reinterpret of `self` to the base type,
     // under the fixed name `base`. It is now the SOLE path to super (the named binding was retired).
     if inject_base { local = define(local, "base", canonical_base_type(base_name, env.cur_ns), true) }
-    // (§9 ruling 1/3) a `self` return type (an arith/bitwise operator, or a value-type method) names
-    // the enclosing value-type — resolved here where `struct_name` is known (function_return has no
-    // enclosing-type context). Inert for every ordinary method, whose return resolves normally.
     var ret = if f.has_return && return_type_is_self(f.return_type) {
         Named { name = qualify(env.cur_ns, struct_name) }
     } else {
-        match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
+        match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }
     }
     if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {
@@ -8236,8 +8213,6 @@ fn check_operator_invariants(td: parser::TypeDecl, ref_ns: str, table: TypeTable
  * @throws         when a method body fails to type
  */
 fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []TItem | error {
-    // (§9 rulings 1–5) validate a value-type's operator members at DEFINITION before typing any body.
-    // Inert for every non value-type (value_type_body_methods is empty) — the compiler's own corpus.
     match check_operator_invariants(td, item_ns, table) { error as e => return e; null => { } }
     // (W10b.CLASS) a class's methods are typed/stamped by this SAME pass — only the methods
     // list's source differs; a class method is otherwise identical to a struct method. Increment
@@ -8258,9 +8233,9 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
             var oi = 0
             loop { if oi >= cb.methods.len { break }; own_names = teko::list::push(own_names, cb.methods[oi].name); oi++ }
         }
-        parser::NewtypeBody as nb => { methods = nb.methods }   // (§9 ruling 10) value-type methods + operators
-        parser::EnumBody as eb => { methods = eb.methods }   // (§9 ruling 12) enum value-type methods + operators
-        parser::FlagsBody as fb => { methods = fb.methods }   // (§9 ruling 12) flags value-type methods + operators
+        parser::NewtypeBody as nb => { methods = nb.methods }
+        parser::EnumBody as eb => { methods = eb.methods }
+        parser::FlagsBody as fb => { methods = fb.methods }
         _ => { }
     }
     var out: []TItem = teko::list::empty()

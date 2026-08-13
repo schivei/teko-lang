@@ -10293,9 +10293,30 @@ fn emit_flags_member_const(buf: []byte, type_name: str, member: str, ordinal: u6
 }
 
 /**
- * emit_flags_typedef — (C8.4) emit a whole `flags Name { A; B; C; }` declaration: the carrier
- * `typedef <uint_type> tk_t_<Name>;` followed by one `static const` bit constant per member, in
- * declaration order (member `i` owns bit `i`).
+ * emit_newtype_typedef — lower a §9 NOMINAL prim-backed value-type to a C typedef of its BACKING
+ * machine type (`typedef <backing-C> tk_t_<Name>;`, ruling 9). The value IS the primitive, so the
+ * typedef makes `tk_t_<Name>` and the backing C type assignment-compatible — the E9 newtype<->base
+ * cast is a representation no-op, exactly like the enum<->int (E7) path.
+ *
+ * @param buf   the C output buffer to grow
+ * @param prog  the codegen program (for backing type-expression emission)
+ * @param d     the value-type declaration (its `name` names the emitted typedef)
+ * @param nb    the newtype body (its `backing` is the primitive the typedef aliases)
+ * @return      `buf` followed by the typedef and a blank separator line, or an emission error
+ * @throws      when the backing type-expression fails to emit
+ * @since §9
+ */
+fn emit_newtype_typedef(buf: []byte, prog: CgProg, d: parser::TypeDecl, nb: parser::NewtypeBody): []byte | error {
+    var o = cb(buf, "typedef ")
+    o = match emit_type_expr(o, prog, nb.backing, checker::name_qualifier(d.name)) { []byte as x => x; error as err => return err }
+    o = cb(o, " ")
+    o = mangle_type_name(o, "", d.name)
+    cb(o, ";\n\n")
+}
+
+/**
+ * emit_flags_typedef — the C typedef + member constants of a `flags` type: `typedef <carrier>
+ * tk_t_<Name>;` then each member's `1 << i` constant, in declaration order (member `i` owns bit `i`).
  *
  * @param buf  the C output buffer to grow
  * @param d    the type declaration (its `name` names the emitted typedef)
@@ -10467,17 +10488,7 @@ fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl): []byte | erro
             // type at the checker, and codegen emits that resolved type at every use site.
             buf
         }
-        parser::NewtypeBody as nb => {
-            // (§9 ruling 9/§4.2) a NOMINAL prim-backed value-type lowers to its BACKING machine
-            // type: `typedef <backing-C> tk_t_<Name>;`. The value IS the primitive, so a C typedef
-            // makes `tk_t_<Name>` and the backing C type assignment-compatible — the E9 cast
-            // (newtype↔base) is a representation no-op, exactly like the enum↔int (E7) path.
-            var o = cb(buf, "typedef ")
-            o = match emit_type_expr(o, prog, nb.backing, checker::name_qualifier(d.name)) { []byte as x => x; error as err => return err }
-            o = cb(o, " ")
-            o = mangle_type_name(o, "", d.name)
-            cb(o, ";\n\n")
-        }
+        parser::NewtypeBody as nb => match emit_newtype_typedef(buf, prog, d, nb) { []byte as x => x; error as err => return err }
         parser::FlagsBody as fb => emit_flags_typedef(buf, d, fb)
         parser::ExternBody => {
             // (C7.1a) an OPAQUE foreign handle → a C `void *` typedef, so the existing
