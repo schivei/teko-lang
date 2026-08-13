@@ -1090,3 +1090,33 @@ Tudo é `var` por default; **`readonly` é o opt-in** de imutabilidade (modelo C
 (um método que tentasse `self.id = …` sobre campo readonly = **erro**). É a garantia à prova de mutação
 **interna** que a property só-`get` (§13.2) não dá — as duas coexistem: `get`-only encapsula, `readonly`
 congela.
+
+---
+
+## 14. Macros — duas famílias, identificadas por keyword (roadmap, cluster §12)
+
+Teko ganha **macros** (trazidas do "pós-1.0 / no macros" por ruling do dono — reversão deliberada do
+`DECISION_LOG:320`/`TEKO_LEGISLATION:607`), em **duas famílias distintas**, cada uma **identificada por
+keyword** (o dev **diz** o que quer, o compilador **sabe** o que é) e chamada com **`@`**. As duas se
+distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os args são** (sem híbrido).
+
+### 14.1 Família A — sintática *(keyword provisória: `macro`)*
+- **Aplica na AST, ANTES do type-check** (pré-passo): `parse → AST → [expand] → TYPE-CHECK do resultado →
+  lower`. Args = **AST crua** (`.node`/`.source`/`.len`); os tipos **ainda não existem**, logo **sem
+  `.type`/`.value()`** dentro do corpo. Produz **código** (AST), que é **type-checado depois** — código
+  mal-tipado gerado falha no type-check normal, apontando a expansão.
+- Modelo **Rust/Lisp** (expand-então-tipa). Funciona com args de runtime (`@count(a, b)` conta nós, não
+  avalia nada). Precisa de **hygiene** (splice de código) e de um mecanismo `quote`/`${}` (splice + unquote).
+
+### 14.2 Família B — avaliação comptime *(keyword provisória: `comptime`)*
+- **Os tipos JÁ são conhecidos** — roda **DEPOIS do type-check**: `parse → AST → TYPE-CHECK → [comptime eval]
+  → lower`. Args = **valores typed avaliáveis**; computa um **valor** inlined. Modelo **Zig comptime**
+  (tipa-então-avalia). A keyword declara que os args têm de ser **comptime-conhecidos**.
+
+### 14.3 Consequências
+- **Fork "o que args é" resolvido pelo estágio:** A = **AST-only**, B = **valores typed**. Sem construto
+  híbrido (supera o 1C single-construct do `plano-macro`, a revisar).
+- **FFI:** `extern` + a família — `extern macro` (macro C função-like) / `extern comptime` (constante C,
+  `O_RDONLY`).
+- **Chamada:** `@nome(...)` nas duas. **Nomes das keywords `macro`/`comptime` são PROVISÓRIOS** — a confirmar
+  pelo dono; só a **semântica** (duas famílias + estágios) está fechada aqui.
