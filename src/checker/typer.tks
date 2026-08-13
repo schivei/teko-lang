@@ -4540,6 +4540,17 @@ fn type_block(stmts: []parser::Statement, env: Env, table: TypeTable): TypedBloc
             }
         }
         if !handled {
+            match stmts[i] {
+                MultiBind as mb => {
+                    var seq = match type_multibind(mb, cur, table) { TStmtSeq as sq => sq; error as e => return e }
+                    out = splice_stmts(out, seq.stmts)
+                    cur = seq.env
+                    handled = true
+                }
+                _ => { }
+            }
+        }
+        if !handled {
             var ts = match type_statement(stmts[i], cur, table) { TypedStmt as t => t; error as e => return e }
             out = teko::mem::push_fo(out, ts.node)
             cur = ts.env
@@ -4547,6 +4558,28 @@ fn type_block(stmts: []parser::Statement, env: Env, table: TypeTable): TypedBloc
         i++
     }
     TypedBlock { stmts = out; env = cur }
+}
+
+/**
+ * splice_stmts — append every statement of `seq` onto `out`, in order (§9 F). The §9 F multiple-binding
+ * desugar produces a flat statement sequence that must land at the SAME scope level as a hand-written
+ * binding; this is the one place that flattening happens, shared by the block and top-level statement
+ * sequencers.
+ *
+ * @param out  the accumulating typed-statement list
+ * @param seq  the desugared statements to append
+ * @return     `out` with every element of `seq` appended in order
+ * @since §9 F
+ */
+fn splice_stmts(out: []TStatement, seq: []TStatement): []TStatement {
+    var acc = out
+    var i: u64 = 0
+    loop {
+        if i >= seq.len { break }
+        acc = teko::mem::push_fo(acc, seq[i])
+        i = i + 1
+    }
+    acc
 }
 
 // ---- if as a VALUE (B.20): cond bool; `else` required; both branches one type ----
@@ -5342,21 +5375,364 @@ fn type_exprstmt(es: parser::ExprStmt, env: Env, table: TypeTable): TypedStmt | 
 }
 
 /**
- * type_multibind — types and DESUGARS a `MultiBind` (§9 F) to a `TBlockStmt` of already-existing
- * `TBinding`s (plus a synthesized length guard for array decomposition), introducing NO new typed
- * node so codegen/LIR stay untouched. Fully implemented in the desugar crumb; this signature is the
- * dispatch target of `type_statement`.
+ * TStmtSeq — the flat statement sequence a `MultiBind` desugars to (§9 F), together with the env
+ * extended by the bound names. The sequence is SPLICED into the enclosing statement block (never
+ * wrapped in a `TBlockStmt`, which the native backend does not lower), so every desugared
+ * `TBinding`/guard sits at the SAME scope level as a hand-written binding and both backends lower it
+ * with zero new statement-node support.
+ *
+ * @field stmts  the desugared typed statements, in source order
+ * @field env    the environment extended with the multiple binding's bound targets
+ * @since §9 F
+ */
+type TStmtSeq = struct { stmts: []TStatement; env: Env }
+
+/**
+ * mb_expr — wrap a synthesized expression `kind` at an unpositioned (0,0) source location for the
+ * §9 F multiple-binding desugar. The desugared nodes carry no user source position of their own; any
+ * diagnostic they raise is blamed on the values/targets that were typed through them.
+ *
+ * @param kind  the expression kind to wrap
+ * @return      the synthesized `parser::Expr`
+ * @since §9 F
+ */
+fn mb_expr(kind: parser::ExprKind): parser::Expr {
+    parser::Expr { kind = kind; line = 0; col = 0 }
+}
+
+/**
+ * mb_var — a synthesized variable-read of the temp/target named `name` (§9 F desugar).
+ *
+ * @param name  the variable name to read
+ * @return      a `parser::Var` expression
+ * @since §9 F
+ */
+fn mb_var(name: str): parser::Expr {
+    mb_expr(parser::Var { name = name })
+}
+
+/**
+ * mb_u64_lit — a synthesized non-negative integer literal carrying the magnitude `v` (§9 F desugar):
+ * an array index, a fixed element count, or a length-guard bound.
+ *
+ * @param v  the literal's magnitude
+ * @return   a `parser::Number` expression
+ * @since §9 F
+ */
+fn mb_u64_lit(v: u64): parser::Expr {
+    mb_expr(parser::Number { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 })
+}
+
+/**
+ * mb_field — a synthesized field read `recv.field` (§9 F desugar), used for the source temp's `.len`.
+ *
+ * @param recv   the receiver expression
+ * @param field  the field name to read
+ * @return       a `parser::FieldAccess` expression
+ * @since §9 F
+ */
+fn mb_field(recv: parser::Expr, field: str): parser::Expr {
+    mb_expr(parser::FieldAccess { receiver = recv; field = field })
+}
+
+/**
+ * mb_index — a synthesized element read `recv[idx]` (§9 F array-decomposition desugar).
+ *
+ * @param recv  the slice temp being indexed
+ * @param idx   the index expression (a constant for the head, `len - k` for the tail)
+ * @return      a `parser::Index` expression
+ * @since §9 F
+ */
+fn mb_index(recv: parser::Expr, idx: parser::Expr): parser::Expr {
+    mb_expr(parser::Index { receiver = recv; index = idx })
+}
+
+/**
+ * mb_binary — a synthesized binary arithmetic expression `left op right` (§9 F desugar), used for the
+ * tail index `len - k`.
+ *
+ * @param op     the binary operator token
+ * @param left   the left operand
+ * @param right  the right operand
+ * @return       a `parser::Binary` expression
+ * @since §9 F
+ */
+fn mb_binary(op: lexer::TokenKind, left: parser::Expr, right: parser::Expr): parser::Expr {
+    mb_expr(parser::Binary { op = op; left = left; right = right })
+}
+
+/**
+ * mb_len — the source temp's `.len` (§9 F array-decomposition guard/tail-index base).
+ *
+ * @param recv  the slice temp
+ * @return      the `recv.len` field read
+ * @since §9 F
+ */
+fn mb_len(recv: parser::Expr): parser::Expr {
+    mb_field(recv, "len")
+}
+
+/**
+ * mb_binding_stmt — a synthesized single `parser::Binding` statement the §9 F desugar feeds back
+ * through `type_statement`, so all existing binding checks (numeric widening, literal adoption, `_`
+ * discard, env extension) apply unchanged.
+ *
+ * @param kind      the mutability of the resulting binding (`Mut` for a temp, `mb.kind` for a target)
+ * @param name      the bound name
+ * @param has_type  true iff the shared `: T` annotation applies to this binding
+ * @param ann       the shared annotation (meaningful only when `has_type`)
+ * @param value     the initializer expression
+ * @return          the synthesized `parser::Binding` statement
+ * @since §9 F
+ */
+fn mb_binding_stmt(kind: parser::BindKind, name: str, has_type: bool, ann: parser::TypeExpr, value: parser::Expr): parser::Statement {
+    parser::Binding { kind = kind; target = parser::SimpleName { name = name }; has_type = has_type; type_ann = ann; is_ref = false; value = value }
+}
+
+/**
+ * mb_guard_stmt — the synthesized runtime length guard `if temp.len OP bound { panic(msg) }` (§9 F,
+ * ruling 5). `OP` is `!=` for an exact-length decomposition and `<` for a `..` minimum-length one; the
+ * guard reuses the existing `if`-statement and `panic` builtin lowering, so no codegen changes.
+ *
+ * @param temp   the source slice temp's name
+ * @param op     the comparison token (`Ne` exact, `Lt` minimum)
+ * @param bound  the fixed element count to compare `.len` against
+ * @param msg    the panic message
+ * @return       the synthesized guard statement
+ * @since §9 F
+ */
+fn mb_guard_stmt(temp: str, op: lexer::TokenKind, bound: u64, msg: str): parser::Statement {
+    var term = parser::CmpTerm { op = op; operand = mb_u64_lit(bound) }
+    var cond = mb_expr(parser::Compare { first = mb_len(mb_var(temp)); rest = teko::list::push(teko::list::empty(), term) })
+    var pseg = teko::list::push(teko::list::empty(), parser::Segment { name = "panic" })
+    var pargs = teko::list::push(teko::list::empty(), mb_expr(parser::StrLit { text = msg }))
+    var pnames = teko::list::push(teko::list::empty(), "")
+    var pcall = mb_expr(parser::Call { callee = parser::Path { segments = pseg }; args = pargs; arg_names = pnames; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() })
+    var then_blk = teko::list::push(teko::list::empty(), parser::ExprStmt { expr = pcall })
+    parser::ExprStmt { expr = mb_expr(parser::IfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = teko::list::empty() }) }
+}
+
+/**
+ * mb_temp_name — the fresh, function-unique name of the §9 F desugar temp for slot `slot`. Uniqueness
+ * comes from the multiple binding's own source position (`line:col`, unique within a function) plus the
+ * slot index, so two multiple bindings never share a temp and the name-based escape/codegen analyses
+ * never conflate them. A user cannot spell the name (it is not a legal identifier surface), so the temp
+ * is invisible.
+ *
+ * @param mb    the multiple-binding statement (source of the unique `line:col`)
+ * @param slot  the per-binding slot index
+ * @return      the synthesized temp name
+ * @since §9 F
+ */
+fn mb_temp_name(mb: parser::MultiBind, slot: u64): str {
+    "_mb_" ~ teko::u64_to_str(mb.line to u64) ~ "_" ~ teko::u64_to_str(mb.col to u64) ~ "_" ~ teko::u64_to_str(slot)
+}
+
+/**
+ * MbArrayShape — the counts an array-decomposition target list splits into (§9 F, ruling 2): the fixed
+ * targets before a `..` (`head_n`), those after it (`tail_n`), and whether a `..` skip-range is present.
+ *
+ * @field head_n    the number of positional targets (names + `_`) before the `..` (or all of them when
+ *                  there is no `..`).
+ * @field tail_n    the number of positional targets after the `..` (0 without a `..`).
+ * @field has_rest  true iff the list contains a `..` skip-range.
+ * @since §9 F
+ */
+type MbArrayShape = struct { head_n: u64; tail_n: u64; has_rest: bool }
+
+/**
+ * mb_array_shape — split an array-decomposition target list into head/tail counts around its optional
+ * `..` (§9 F). The parser guarantees at most one `..`, so a single scan classifies every element.
+ *
+ * @param targets  the `BindElem` list of an `ArrayDecomp`
+ * @return         the head/tail counts and rest presence
+ * @since §9 F
+ */
+fn mb_array_shape(targets: []parser::BindElem): MbArrayShape {
+    var head_n: u64 = 0
+    var tail_n: u64 = 0
+    var has_rest = false
+    var i: u64 = 0
+    loop {
+        if i >= targets.len { break }
+        match targets[i] {
+            parser::BindRest => has_rest = true
+            _ => if has_rest { tail_n = tail_n + 1 } else { head_n = head_n + 1 }
+        }
+        i = i + 1
+    }
+    MbArrayShape { head_n = head_n; tail_n = tail_n; has_rest = has_rest }
+}
+
+/**
+ * type_multibind_mret — desugar a single-value parallel binding `var q, r = div(…)` into a
+ * multiple-return destructure (§9 F, ruling 3). Filled in by the multiple-return crumb; until then a
+ * single right-hand value in a parallel binding is not yet supported.
+ *
+ * @param mb     the parallel multiple binding whose right-hand side is a single value
+ * @param env    the type environment
+ * @param table  the program's type table
+ * @return       the desugared statement sequence plus the extended env, or an error
+ * @since §9 F
+ */
+fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq | error {
+    return error { message = "multiple-return destructuring is not yet supported" }
+}
+
+/**
+ * type_multibind_parallel — desugar the parallel form `var a, b, … = e1, e2, …` (§9 F, ruling 1). With
+ * a SINGLE right-hand value the form is a multiple-return destructure (`var q, r = div(…)`), delegated
+ * to `type_multibind_mret`. Otherwise the target and value counts must match: each value is bound to a
+ * fresh temp FIRST (so `var a, b = b, a` swaps — every right-hand side is evaluated before any target
+ * is written), then each target is bound from its temp. A `_` target still evaluates its value (side
+ * effects preserved) but binds nothing.
+ *
+ * @param mb     the parallel multiple binding
+ * @param env    the type environment
+ * @param table  the program's type table
+ * @return       the desugared statement sequence plus the env extended with the bound targets, or an error
+ * @throws       when target and value counts differ, or a `..` appears in a parallel target list
+ * @since §9 F
+ */
+fn type_multibind_parallel(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq | error {
+    if mb.values.len == 1 {
+        return type_multibind_mret(mb, env, table)
+    }
+    if mb.targets.len != mb.values.len {
+        return error { message = "multiple assignment: the number of targets and values must match (got " ~ teko::u64_to_str(mb.targets.len) ~ " targets, " ~ teko::u64_to_str(mb.values.len) ~ " values)" }
+    }
+    var cur = env
+    var body: []TStatement = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= mb.values.len { break }
+        var tstmt = mb_binding_stmt(parser::BindKind::Mut, mb_temp_name(mb, i), mb.has_type, mb.type_ann, mb.values[i])
+        var ts = match type_statement(tstmt, cur, table) { TypedStmt as t => t; error as e => return e }
+        body = teko::list::push(body, ts.node)
+        cur = ts.env
+        i = i + 1
+    }
+    i = 0
+    loop {
+        if i >= mb.targets.len { break }
+        match mb.targets[i] {
+            parser::BindName as bn => {
+                var vstmt = mb_binding_stmt(mb.kind, bn.name, false, mb.type_ann, mb_var(mb_temp_name(mb, i)))
+                var ts = match type_statement(vstmt, cur, table) { TypedStmt as t => t; error as e => return e }
+                body = teko::list::push(body, ts.node)
+                cur = ts.env
+            }
+            parser::BindSkip => { }
+            parser::BindRest => return error { message = "`..` skip-range is not valid in a parallel multiple assignment" }
+        }
+        i = i + 1
+    }
+    TStmtSeq { stmts = body; env = cur }
+}
+
+/**
+ * type_multibind_array — desugar the array-decomposition form `var [a, _, .., b] = arr` (§9 F, ruling
+ * 2). The source array is bound to a fresh temp, a runtime length guard is emitted (ruling 5: exact
+ * length without `..`, minimum head+tail length with `..`), then each named target is bound to an
+ * element read — the head at a constant index, the tail at `len - k` computed at runtime. `_` skips its
+ * index without binding; `..` separates head from tail.
+ *
+ * @param mb     the array-decomposition multiple binding
+ * @param env    the type environment
+ * @param table  the program's type table
+ * @return       the desugared statement sequence plus the env extended with the bound targets, or an error
+ * @throws       when the right-hand side is not exactly one value, or an element read fails to type
+ * @since §9 F
+ */
+fn type_multibind_array(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq | error {
+    if mb.values.len != 1 {
+        return error { message = "array decomposition binds exactly one array value" }
+    }
+    var shape = mb_array_shape(mb.targets)
+    var cur = env
+    var body: []TStatement = teko::list::empty()
+    var aname = mb_temp_name(mb, 0)
+    var astmt = mb_binding_stmt(parser::BindKind::Mut, aname, false, mb.type_ann, mb.values[0])
+    var ats = match type_statement(astmt, cur, table) { TypedStmt as t => t; error as e => return e }
+    body = teko::list::push(body, ats.node)
+    cur = ats.env
+    var guard = if shape.has_rest {
+        mb_guard_stmt(aname, lexer::TokenKind::Lt, shape.head_n + shape.tail_n, "array decomposition: expected at least " ~ teko::u64_to_str(shape.head_n + shape.tail_n) ~ " elements")
+    } else {
+        mb_guard_stmt(aname, lexer::TokenKind::Ne, shape.head_n, "array decomposition: expected exactly " ~ teko::u64_to_str(shape.head_n) ~ " elements")
+    }
+    var gts = match type_statement(guard, cur, table) { TypedStmt as t => t; error as e => return e }
+    body = teko::list::push(body, gts.node)
+    cur = gts.env
+    var slot: u64 = 0
+    var j: u64 = 0
+    var in_tail = false
+    var i: u64 = 0
+    loop {
+        if i >= mb.targets.len { break }
+        match mb.targets[i] {
+            parser::BindRest => { in_tail = true }
+            parser::BindSkip => if in_tail { j = j + 1 } else { slot = slot + 1 }
+            parser::BindName as bn => {
+                var idx_expr = if in_tail {
+                    mb_index(mb_var(aname), mb_binary(lexer::TokenKind::Minus, mb_len(mb_var(aname)), mb_u64_lit(shape.tail_n - j)))
+                } else {
+                    mb_index(mb_var(aname), mb_u64_lit(slot))
+                }
+                var vstmt = mb_binding_stmt(mb.kind, bn.name, mb.has_type, mb.type_ann, idx_expr)
+                var ts = match type_statement(vstmt, cur, table) { TypedStmt as t => t; error as e => return e }
+                body = teko::list::push(body, ts.node)
+                cur = ts.env
+                if in_tail { j = j + 1 } else { slot = slot + 1 }
+            }
+        }
+        i = i + 1
+    }
+    TStmtSeq { stmts = body; env = cur }
+}
+
+/**
+ * type_multibind — types and DESUGARS a `MultiBind` (§9 F) into a FLAT sequence of already-existing
+ * typed statements (`TBinding`s plus a synthesized length guard for array decomposition), introducing
+ * NO new typed node so codegen/LIR stay untouched. The caller SPLICES the sequence into the enclosing
+ * block. Dispatches on the target shape; the parallel form additionally routes a single
+ * multiple-return call to `type_multibind_mret`.
  *
  * @param mb     the multiple-binding statement
  * @param env    the type environment
  * @param table  the program's type table
- * @return       the desugared `TBlockStmt` plus the env extended with the bound names, or an error
+ * @return       the desugared statement sequence plus the env extended with the bound names, or an error
  * @throws       RHS/LHS arity mismatch; a wrong-arity multiple-return call; a non-`[]T` decomposition
  *               source; a misplaced or repeated `..`; an incompatible shared `: T` annotation
  * @since §9 F
  */
-fn type_multibind(mb: parser::MultiBind, env: Env, table: TypeTable): TypedStmt | error {
-    return error { message = "multiple binding not yet supported" }
+fn type_multibind(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq | error {
+    match mb.shape {
+        parser::MultiTargetKind::Parallel => type_multibind_parallel(mb, env, table)
+        parser::MultiTargetKind::ArrayDecomp => type_multibind_array(mb, env, table)
+    }
+}
+
+/**
+ * top_level_stmt_nodes — type a single top-level (virtual-main) statement into the FLAT typed-statement
+ * sequence it contributes (§9 F). An ordinary statement yields one node; a multiple binding desugars to
+ * several, spliced at the top level exactly as inside a block. Returns the sequence plus the threaded
+ * env so the collect-all and fail-fast top-level loops share one code path.
+ *
+ * @param s      the parsed top-level statement (the file already stamped onto `env` by the caller)
+ * @param env    the threaded type environment
+ * @param table  the program's type table
+ * @return       the contributed statements plus the advanced env, or an error
+ * @since §9 F
+ */
+fn top_level_stmt_nodes(s: parser::Statement, env: Env, table: TypeTable): TStmtSeq | error {
+    match s {
+        parser::MultiBind as mb => type_multibind(mb, env, table)
+        _ => {
+            var ts = match type_statement(s, env, table) { TypedStmt as x => x; error as e => return e }
+            TStmtSeq { stmts = teko::list::push(teko::list::empty(), ts.node); env = ts.env }
+        }
+    }
 }
 
 fn type_statement(s: parser::Statement, env: Env, table: TypeTable): TypedStmt | error {
@@ -5387,7 +5763,7 @@ fn type_statement(s: parser::Statement, env: Env, table: TypeTable): TypedStmt |
         }
         parser::AdoptStmt as a => type_adopt(a, env, table)
         parser::BlockStmt as bs => type_block_stmt(bs, env, table)
-        parser::MultiBind as mb => type_multibind(mb, env, table)
+        parser::MultiBind => error { message = "internal: a multiple binding must be spliced by the statement sequencer, not typed as a single statement" }
     }
 }
 
@@ -7293,19 +7669,18 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
             _ => { }
         }
         match it.content {
-            parser::Statement as s => {
-                // `with_file` — the COLLECT-ALL twin of the fail-fast loop's own stamp. This is the
-                // loop that actually runs, so missing it here made every warning from a virtual-main
-                // statement file-less even after the other one was fixed (measured, not reviewed).
-                match type_statement(s, with_file(cur, it.file), types) {
-                    TypedStmt as ts => {
-                        items = teko::list::push(items, ts.node)
-                        mainbody = teko::list::push(mainbody, ts.node)
-                        cur = ts.env
+            parser::Statement as s => match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
+                TStmtSeq as seq => {
+                    var si: u64 = 0
+                    loop {
+                        if si >= seq.stmts.len { break }
+                        items = teko::list::push(items, seq.stmts[si])
+                        mainbody = teko::list::push(mainbody, seq.stmts[si])
+                        si = si + 1
                     }
-                    // DECLARATION-boundary isolation: record and move to the next item.
-                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
+                    cur = seq.env
                 }
+                error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
             }
             _ => {
                 match type_item(it, ienv, types) {
@@ -7452,18 +7827,18 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
         // surface_at. The error value now carries those adornments per the E2 contract.
         match it.content {
             parser::Statement as s => {
-                // type with the THREADED scope `cur` (not the base env) so a loose `let args = …`
-                // is visible to the following statements; advance `cur` to the binding's env.
-                // `with_file` here and not only in `type_item`: a loose statement is typed on THIS
-                // path, which bypasses `type_item` entirely, so without it every warning raised
-                // from a virtual-main statement would name a line in no file (measured).
-                var ts = match type_statement(s, with_file(cur, it.file), types) {
-                    TypedStmt as x => x
+                var seq = match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
+                    TStmtSeq as x => x
                     error as e => return surface_at(it.file, line, col, e)
                 }
-                items = teko::list::push(items, ts.node)
-                mainbody = teko::list::push(mainbody, ts.node)
-                cur = ts.env
+                var si: u64 = 0
+                loop {
+                    if si >= seq.stmts.len { break }
+                    items = teko::list::push(items, seq.stmts[si])
+                    mainbody = teko::list::push(mainbody, seq.stmts[si])
+                    si = si + 1
+                }
+                cur = seq.env
             }
             _ => {
                 var ti = match type_item(it, ienv, types) {
