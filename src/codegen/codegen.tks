@@ -10467,6 +10467,17 @@ fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl): []byte | erro
             // type at the checker, and codegen emits that resolved type at every use site.
             buf
         }
+        parser::NewtypeBody as nb => {
+            // (§9 ruling 9/§4.2) a NOMINAL prim-backed value-type lowers to its BACKING machine
+            // type: `typedef <backing-C> tk_t_<Name>;`. The value IS the primitive, so a C typedef
+            // makes `tk_t_<Name>` and the backing C type assignment-compatible — the E9 cast
+            // (newtype↔base) is a representation no-op, exactly like the enum↔int (E7) path.
+            var o = cb(buf, "typedef ")
+            o = match emit_type_expr(o, prog, nb.backing, checker::name_qualifier(d.name)) { []byte as x => x; error as err => return err }
+            o = cb(o, " ")
+            o = mangle_type_name(o, "", d.name)
+            cb(o, ";\n\n")
+        }
         parser::FlagsBody as fb => emit_flags_typedef(buf, d, fb)
         parser::ExternBody => {
             // (C7.1a) an OPAQUE foreign handle → a C `void *` typedef, so the existing

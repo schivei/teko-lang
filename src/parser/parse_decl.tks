@@ -472,7 +472,7 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
             p = p + 1
         }
         var no_body: []Statement = teko::list::empty()
-        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = true; c_symbol = c_symbol; from_lib = from_lib; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty() }; next = p }
+        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = true; c_symbol = c_symbol; from_lib = from_lib; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false }; next = p }
     }
     // (W10b.CLASS increment 2) `abstract fn …` — a SIGNATURE ONLY, no body (abstract classes only;
     // enforced by the checker, not the parser). A bare `;`/newline/`}` follows instead of `{`.
@@ -480,13 +480,13 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
         if has_arena_size { return err_at(tokens, p, "`#arena_size(…)` may not precede an `abstract fn` (there is no Teko body to size)") }
         if ret_types.len > 0 { return err_at(tokens, p, "a bodyless (`abstract`/interface) function may not declare a multiple-return `( A, B )` signature yet") }
         var no_body: []Statement = teko::list::empty()
-        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty() }; next = p }
+        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false }; next = p }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the function body")
     }
     var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
-    Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size; ret_types = ret_types }; next = blk.next }
+    Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size; ret_types = ret_types; is_operator = false }; next = blk.next }
 }
 
 /**
@@ -641,6 +641,7 @@ fn accessor_function(sym: str, params: []Param, has_return: bool, return_type: T
         is_intern = is_intern; is_abstract = false; is_virtual = false; is_override = false; is_static = false
         is_getter = is_getter; is_setter = is_setter; accessor_prop = prop
         has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty()
+        is_operator = false
     }
 }
 
@@ -1065,7 +1066,7 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
         }
         match reject_const_body_member(tokens, pos + 1) { error as e => return e; null => { } }
         var ms = match parse_field_names(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
-        return Parsed<TypeBody> { node = EnumBody { members = ms.items }; next = ms.next }
+        return Parsed<TypeBody> { node = EnumBody { members = ms.items; methods = teko::list::empty() }; next = ms.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Flags) {
         if !is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
@@ -1073,7 +1074,7 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
         }
         match reject_const_body_member(tokens, pos + 1) { error as e => return e; null => { } }
         var ms = match parse_field_names(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
-        return Parsed<TypeBody> { node = FlagsBody { members = ms.items; values = teko::list::empty() }; next = ms.next }
+        return Parsed<TypeBody> { node = FlagsBody { members = ms.items; values = teko::list::empty(); methods = teko::list::empty() }; next = ms.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Variant) {
         var ty = match parse_type(tokens, pos + 1) { ParsedType as x => x; error as e => return e }
@@ -1121,7 +1122,7 @@ fn parse_flags_decl(tokens: []lexer::Token, pos: u64): Parsed<Decl> | error {
         return err_at(tokens, p, "expected '{' after the flags type name")
     }
     var ms = match parse_field_names(tokens, p) { ParsedList<str> as x => x; error as e => return e }
-    Parsed<Decl> { node = TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = FlagsBody { members = ms.items; values = teko::list::empty() }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col }; next = ms.next }
+    Parsed<Decl> { node = TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = FlagsBody { members = ms.items; values = teko::list::empty(); methods = teko::list::empty() }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col }; next = ms.next }
 }
 
 // `[doc] [pub|exp] type Name = <body>` (B.13, nominal). Doc + visibility precede `type`.
@@ -1269,7 +1270,7 @@ fn peel_leading_doc(tokens: []lexer::Token, pos: u64): ParsedLeadingDoc {
 fn with_outer_doc(node: Decl, has_doc: bool, doc: str): Decl {
     if !has_doc { return node }
     match node {
-        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = true; doc = doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types }
+        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = true; doc = doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
         TypeDecl as td => TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = td.body; vis = td.vis; has_doc = true; doc = doc; line = td.line; col = td.col }
         ConstDecl as cd => ConstDecl { name = cd.name; ty = cd.ty; init = cd.init; vis = cd.vis; has_doc = true; doc = doc; line = cd.line; col = cd.col }
         _ => node

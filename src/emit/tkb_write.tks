@@ -445,15 +445,18 @@ fn write_class_body(buf: []byte, t: StrTable, c: parser::ClassBody): []byte {
 }
 
 /** a TypeBody: u8 tag + payload. StructBody(0)/EnumBody(1)/VariantBody(2)/AliasBody(3)/ExternBody(4)/
-    FlagsBody(5)/ClassBody(6)/InterfaceBody(7)/TraitBody(8). (#165 C5) Interface/Trait ride their
-    method SIGS after extends/fields, in declaration = vtable order; FlagsBody carries name+u64 value
-    (drop-128, 2026-07-24), still wire-shaped as a hi:lo pair (`hi` always 0) for byte compat. */
+    FlagsBody(5)/ClassBody(6)/InterfaceBody(7)/TraitBody(8)/NewtypeBody(9). (#165 C5) Interface/Trait
+    ride their method SIGS after extends/fields, in declaration = vtable order; FlagsBody carries
+    name+u64 value (drop-128, 2026-07-24), still wire-shaped as a hi:lo pair (`hi` always 0) for byte
+    compat. (§9) EnumBody/FlagsBody append their value-type method SIGS after the members, and
+    NewtypeBody(9) writes its backing type-expr then its method SIGS — the value-type body carrier. */
 fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody): []byte {
     match tb {
         parser::StructBody as s => write_struct_body(buf, t, s)
-        parser::EnumBody as e => write_strs(write_u8(buf, 1), t, e.members)
+        parser::EnumBody as e => write_functions(write_strs(write_u8(buf, 1), t, e.members), t, e.methods)
         parser::VariantBody as v => write_typeexpr(write_u8(buf, 2), t, v.type_expr)
         parser::AliasBody as a => write_typeexpr(write_u8(buf, 3), t, a.alias)
+        parser::NewtypeBody as nb => write_functions(write_typeexpr(write_u8(buf, 9), t, nb.backing), t, nb.methods)
         parser::ExternBody => write_u8(buf, 4)
         parser::FlagsBody as f => write_flags_body(buf, t, f)
         parser::ClassBody as c => write_class_body(buf, t, c)
@@ -477,7 +480,7 @@ fn write_flags_body(buf: []byte, t: StrTable, f: parser::FlagsBody): []byte {
         sb = write_u64(sb, f.values[i])
         i++
     }
-    sb
+    write_functions(sb, t, f.methods)
 }
 
 /** a parser TypeDecl: name + type_params + type_constraints + body + vis + has_doc + doc + line + col. */

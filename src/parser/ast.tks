@@ -586,6 +586,16 @@ pub type Function = struct {
      * @since §9 F
      */
     ret_types: []TypeExpr
+    /**
+     * is_operator — this member is an `operator __dunder(left: …, right: …)` declaration (§9
+     * ruling 1), NOT an ordinary method. Operators are STATIC (no injected receiver — every operand
+     * is explicitly typed) and READONLY; the checker validates the dunder name, the operand
+     * arity/positions (at least one operand is `self`), and the mandated return type per class
+     * (arith/bitwise → self, comparison → bool, index → element). Every ordinary `fn`/method carries
+     * false, so each existing `Function { … }` literal only appends `is_operator = false` and nothing
+     * changes (additive-inert, fixpoint).
+     */
+    is_operator: bool
 }
 /**
  * StructBody — a `struct [I & …] { fields; methods; consts }` body (OOP A1). A struct's members
@@ -619,7 +629,18 @@ pub type StructBody = struct { fields: []Field; methods: []Function; implements:
  * @param doc        the doc-comment's text (valid iff has_doc)
  */
 pub type Field = struct { name: str; type_ann: TypeExpr; vis: Visibility; is_intern: bool; has_doc: bool; doc: str }
-pub type EnumBody = struct { members: []str }   // member names, in order
+/**
+ * EnumBody — an `enum Name { A; B; … }` body: the member names, in declaration order. §9 adds an
+ * optional trailing method block `enum Dir { N; S } { fn oposto(): Dir { … } }` (ruling 12): a
+ * value-type enum may carry readonly instance methods + operators. An enum written WITHOUT the
+ * second brace-block has `methods == []` and reproduces the pre-§9 node byte-for-byte
+ * (additive-inert, the fixpoint argument in the plan §8).
+ *
+ * @field members  the member names, in declaration order
+ * @field methods  the trailing `{ … }` block's readonly instance methods + operators (§9); empty
+ *                 for an enum with no method block
+ */
+pub type EnumBody = struct { members: []str; methods: []Function }
 /**
  * A `flags` type body: member names + their power-of-2 bit-values (C8.3 assigns member `i`
  * → `1 << i`; C8.6 serializes). The bit-value carrier is `u64` (drop-128, 2026-07-24), so a
@@ -628,10 +649,28 @@ pub type EnumBody = struct { members: []str }   // member names, in order
  *
  * @field members  the member names, in declaration order
  * @field values    the resolved bit-value of each member, PARALLEL to `members` (≤ 64 entries)
+ * @field methods   the trailing `{ … }` block's readonly instance methods + operators (§9 ruling
+ *                  12); empty for a flags type with no method block (additive-inert)
  */
-pub type FlagsBody = struct { members: []str; values: []u64 }
+pub type FlagsBody = struct { members: []str; values: []u64; methods: []Function }
 pub type VariantBody = struct { type_expr: TypeExpr }   // a union (A.8)
 pub type AliasBody = struct { alias: TypeExpr }   // `type Name = <type-expr>` — a TRANSPARENT alias (self-host parity)
+/**
+ * NewtypeBody — a PRIMITIVE-backed value-type WITH a body: `type Celsius = f32 { <members> }`
+ * (§9 rulings 10/11). NOMINAL and NON-transparent — unlike `AliasBody` it does NOT resolve-through to
+ * its base (`resolve.tks` keeps it a `Named`), so the base↔newtype conversion needs the explicit E9
+ * cast (§9 ruling 9). The value IS the primitive: `base` is the backing type-expr (a scalar prim, or
+ * — ONLY for an `[]`-operator carrier — an indexed type map/array/list/dict, ruling 4); `methods`
+ * holds ONLY readonly instance methods and `operator` declarations (NO fields, NO statics — ruling
+ * 10, enforced by the checker).
+ *
+ * A `type X = <prim>` with NO trailing `{ … }` block parses as `AliasBody` (transparent) exactly as
+ * today — this node is produced ONLY when a body block follows.
+ *
+ * @field backing  the backing type-expr (the primitive the value IS, or an indexed type for `[]`)
+ * @field methods  the interleaved readonly instance methods + operators, in source order
+ */
+pub type NewtypeBody = struct { backing: TypeExpr; methods: []Function }
 pub type ExternBody = struct { }   // `extern type Name` — an OPAQUE foreign handle (C7.1a; lowers to `void *`)
 // (W10b.CLASS, 2026-07-01) a class's KIND — Teko INVERTS the usual default: SEALED (final,
 // instantiable, NOT inheritable) is the DEFAULT (bare `class`); `abstract class` = inheritable,
@@ -702,7 +741,7 @@ pub type InterfaceBody = struct { extends: []str; methods: []Function }
  *                 folds into every deriver like a field, resolved by `DeriverName::NAME`
  */
 pub type TraitBody = struct { fields: []Field; methods: []Function; consts: []ConstDecl }
-pub type TypeBody = variant StructBody | EnumBody | FlagsBody | VariantBody | AliasBody | ExternBody | ClassBody | InterfaceBody | TraitBody   // pub: TypeDecl.body surface + the .tkb codec (C7.16)
+pub type TypeBody = variant StructBody | EnumBody | FlagsBody | VariantBody | AliasBody | NewtypeBody | ExternBody | ClassBody | InterfaceBody | TraitBody   // pub: TypeDecl.body surface + the .tkb codec (C7.16)
 pub type TypeDecl = struct {   // nominal (B.13)
     name: str
     type_params: []str   // generic type-parameter names (S4 — empty for a non-generic type; e.g. `type Box<T>` → ["T"])
