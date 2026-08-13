@@ -1161,9 +1161,14 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   ```
 - **`@sizeof`/`@typename` = macro comptime** (visível, no-shadow) sobre a reflexão de tipo (`T.size`/
   `T.name`), **não builtin oculto**. Sub-decisão que resta: **quanto de reflexão de tipo expor**
-  (`.size`/`.name`/`.fields`…); e a tensão do `.fields` (geração dirigida-por-campo precisa de campos
-  pós-typecheck **e** emissão pré-typecheck — famílias distintas) tem **recomendação (a), a confirmar**:
-  reflexão computa sobre campos, geração-por-campo fica com trait/interface à mão.
+  (`.size`/`.name`/`.fields`…) — e a reflexão só computa **valores comptime** (contar campos, somar
+  tamanhos), **nunca** toca valor de campo em runtime.
+- **NÃO há terceira classe de macro** (ruling do dono). "Runtime macro" é contradição — o código que a macro
+  expande **já roda em runtime**; a macro em si é sempre **comp-time**. O limite é claro: **macro = comp-time**
+  (A: expande AST; B: computa valor comptime) e **não lê valor de runtime**; **tudo que precisa de valor de
+  runtime é FUNÇÃO/MÉTODO real** (stdlib). Um `eq_by_fields` que compara campos em runtime é **função/método**
+  (ou a impl de interface+operador, §9.4), **não macro** — a "tensão do `.fields`" **dissolve-se**: nunca foi
+  território de macro.
 
 ### 14.3 Consequências
 - **Fork "o que args é" resolvido pelo estágio:** A = **AST-only**, B = **valores typed**. Sem construto
