@@ -279,15 +279,66 @@ fn check_trait_self_contained(trait_name: str, trait_body: parser::TraitBody, su
 }
 
 /**
- * trait_composition_diags — the self-containment (and, transitively, the composition-merge)
- * diagnostics of ONE trait declaration (§9.4). Flattens the trait's composition to build its
- * self-contained surface; a flatten error (cyclic composition or an un-absorbable composed member)
- * is reported, and otherwise the trait's method bodies are scanned for undeclared `self.X`.
+ * check_trait_carries_interface — a trait declaring `& IFoo` in its `implements` must FULLY implement
+ * IFoo from its own flattened surface (§9.4 traits-carry-interface): every method IFoo requires
+ * (transitively via extends) is provided, by name + matching signature, among the trait's flattened
+ * members. This is the TRAIT-LEVEL full-impl check — it runs on the trait decl, so a `trait T & IFoo`
+ * missing a method fails AT THE TRAIT. Reuses the interface-conformance machinery with the trait's
+ * flattened methods as `own_methods` and `members_all_public = true` (a mixin's methods flatten as the
+ * host's public surface).
+ *
+ * @param trait_name  the carrying trait
+ * @param type_ns     the trait's declaring namespace
+ * @param flattened   the trait's flattened member surface
+ * @param iface_name  the carried interface (from the trait's `implements`)
+ * @param table       the type table
+ * @return            null when the trait fully implements the interface, else the conformance error
+ * @throws            when a required interface method is missing or mismatched on the trait's surface
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn check_trait_carries_interface(trait_name: str, type_ns: str, flattened: FoldedMembers, iface_name: str, table: TypeTable): error | null {
+    check_one_interface(trait_name, type_ns, flattened.methods, iface_name, table, true)
+}
+
+/**
+ * trait_carried_interface_diags — the carried-interface conformance diagnostics of ONE trait: for
+ * every interface named in the trait's `implements`, the trait's flattened surface must fully
+ * implement it (§9.4 traits-carry-interface). Trait names in `implements` are composed (flattened),
+ * not carried, so they are excluded here.
+ *
+ * @param reg        the trait's registration (for the diagnostic position)
+ * @param trb        the trait body
+ * @param surface    the trait's flattened member surface
+ * @param table      the whole collected type table
+ * @return           one diagnostic per carried interface the trait does not fully implement
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn trait_carried_interface_diags(reg: TypeReg, trb: parser::TraitBody, surface: FoldedMembers, table: TypeTable): []str {
+    var type_ns = type_ns_of(table, reg.decl.name)
+    var split = split_trait_derives(trb.implements, table, type_ns)
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= split.ifaces.len { break }
+        match check_trait_carries_interface(reg.decl.name, type_ns, surface, split.ifaces[i], table) {
+            error as e => { diags = teko::list::push(diags, decl_diag(reg, e.message)) }
+            null => { }
+        }
+        i++
+    }
+    diags
+}
+
+/**
+ * trait_composition_diags — the composition diagnostics of ONE trait declaration (§9.4): flattens the
+ * trait's composition to build its self-contained surface (a flatten error — cyclic composition or an
+ * un-absorbable composed member — is reported), scans its method bodies for undeclared `self.X`, and
+ * checks that every carried interface is fully implemented by the flattened surface.
  *
  * @param reg    the trait's registration (for the diagnostic position)
  * @param trb    the trait body
  * @param table  the whole collected type table
- * @return       the trait's composition/self-containment diagnostics, in declaration order
+ * @return       the trait's composition diagnostics, in declaration order
  * @since 0.3.1 (§9.4 revised)
  */
 fn trait_composition_diags(reg: TypeReg, trb: parser::TraitBody, table: TypeTable): []str {
@@ -295,8 +346,9 @@ fn trait_composition_diags(reg: TypeReg, trb: parser::TraitBody, table: TypeTabl
         FoldedMembers as f => f
         error as e => return one_diag(decl_diag(reg, e.message))
     }
-    match check_trait_self_contained(reg.decl.name, trb, surface) {
+    var self_diags = match check_trait_self_contained(reg.decl.name, trb, surface) {
         error as e => one_diag(decl_diag(reg, e.message))
         null => teko::list::empty()
     }
+    concat_diags(self_diags, trait_carried_interface_diags(reg, trb, surface, table))
 }
