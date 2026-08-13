@@ -147,6 +147,32 @@ fn Sub::render(): i64 { return base.render() + 1 }               // `base` = sup
 var base = 7                                                      // ainda um local válido
 ```
 
+### 4.1 Construção — nominal `Tipo { … }` e target-typed `.{ … }`; `self { }` sai (ruling do dono)
+
+Há **duas** formas de construir um valor de struct:
+
+- **Nominal** — `Tipo { campo = valor }`: sempre válida, o tipo é escrito.
+- **Target-typed** — `.{ campo = valor }`: um `.` **unário prefixado** (sem receptor à esquerda) que
+  constrói **o tipo esperado do contexto**. Exige **tipo-alvo conhecido na declaração** — retorno anotado
+  (incl. `static fn (): self`), variável anotada (`var x: Tipo = .{ … }`), parâmetro, campo. **Sem
+  tipo-alvo → erro** (`var x = .{ … }` é ilegal). Parse inequívoco (`.{` não colide com `..`/`.5`).
+
+**`self { }` como construtor é RETIRADO.** `self` fica **só como receptor** (métodos de instância) e como
+**tipo** (`(): self`), nunca como construtor. Quem construía o próprio tipo numa fábrica usa `.{ }` (o alvo
+é o `self`):
+
+```teko
+static fn Counter::zero(): self { .{ _n = 0 } }   // era `self { _n = 0 }` — agora target-typed
+var c: Counter = .{ _n = 5 }                        // ok — alvo anotado
+var d = .{ _n = 5 }                                 // ERRO — sem tipo-alvo
+```
+
+**Por que retirar `self { }`.** Ele produzia `Named` com o nome **bare** (`Counter`), enquanto o tipo `self`
+resolve para o **canônico qualificado** (`ns::Counter`); `type_eq` compara `Named` por string exata e não há
+upcast de struct, então `self { }` falhava em todo tipo sob namespace (todo o corpus + a Intent). `.{ }`
+constrói com o nome canônico do alvo **por construção**, dissolvendo o conflito — sem o conserto de
+canonização que a via `self { }` exigiria.
+
 ---
 
 ## 5. Marshall — ponteiros opacos com `__wrap`/`__unwrap`
@@ -855,7 +881,7 @@ exp type Intent = struct {           // esperar uma função SEM retorno — só
     pub set failure(v: error | null)  { self._failure = v }
 
     pub static fn new(c: bool, f: error | null): self {
-        self { _canceled = c; _failure = f }
+        .{ _canceled = c; _failure = f }              // target-typed (§4.1); o alvo é `self`
     }
 }
 
@@ -872,13 +898,14 @@ exp type Intent<T> = struct {         // esperar uma função COM retorno T — 
     pub set failure(v: error | null)  { self._failure = v }
 
     pub static fn new(v: T | null, c: bool, f: error | null): self {
-        self { _value = v; _canceled = c; _failure = f }
+        .{ _value = v; _canceled = c; _failure = f }   // target-typed (§4.1)
     }
 }
 ```
 
 **Dependências da forma** (todas forward-compatible): **§9** (properties `get`/`set`, factory estática,
-`self {}`), **item 14** (value-struct mutável — o `set` escreve `self._x`, o que a regra "struct é
+construção target-typed `.{}` — §4.1, o `self { }` construtor foi retirado), **item 14** (value-struct
+mutável — o `set` escreve `self._x`, o que a regra "struct é
 readonly" proíbe hoje), **§11** (enforcement `exp`/`pub`). E uma **consequência de arena**: value-struct +
 preenchimento pelo runtime exige que o `set` acerte **a mesma instância** que o awaiter segura — nada de
 cópia entre o fill e a leitura (residência F1/F2, §10.2).
@@ -1153,7 +1180,8 @@ primitivo/enum/flags, que são **`val-ref` readonly** (self é ref só-leitura; 
 **As posições de `self`:**
 - **como TIPO** (o próprio tipo): em declaração de variável, campo, propriedade, retorno ou parâmetro —
   ex.: `static fn new(): self`, `p: self`.
-- **construção:** `self { … }` (Block-B).
+- **construção:** `.{ … }` (target-typed, §4.1) — o `self { … }` construtor **foi retirado**; numa fábrica
+  `(): self`, o alvo do `.{ }` é `self`.
 - **acesso:** `self.x` / `self::y` — **aqui `self` é `ref`**.
 
 **Materialização e o ponteiro do ref (representação em runtime):**
@@ -1177,7 +1205,8 @@ Tudo é `var` por default; **`readonly` é o opt-in** de imutabilidade (modelo C
 - **campo:** `readonly id: u64` marca um **campo** individual como somente-leitura.
 
 **Regra:** um campo readonly — solo ou vindo de uma struct readonly — só pode ser definido na **construção**
-(`self { … }`) ou por **valor default** na declaração; **nunca mutado depois**, nem por fora nem por dentro
+(`.{ … }` target-typed ou `Tipo { … }` nominal, §4.1) ou por **valor default** na declaração; **nunca mutado
+depois**, nem por fora nem por dentro
 (um método que tentasse `self.id = …` sobre campo readonly = **erro**). É a garantia à prova de mutação
 **interna** que a property só-`get` (§13.2) não dá — as duas coexistem: `get`-only encapsula, `readonly`
 congela.
