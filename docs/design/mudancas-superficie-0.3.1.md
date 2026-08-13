@@ -466,6 +466,52 @@ var q, r = div(17, 5)                                           // q = 3, r = 2
 
 ---
 
+### 9.4 Traits (decorador achatável) — e a aposentadoria das *structural traits*
+
+**Onda própria** (não embutida na implementação de §9/§10/§11). Uma `trait` deixa de ser "contrato de
+assinaturas" e passa a ser **decorador**: achata-se no tipo que a compõe (nem sub, nem super objeto) e
+**não é tipo**. Redefine o comportamento das traits.
+
+**O que uma trait É:**
+- **Só métodos com corpo** — properties `get`/`set` (que são métodos), factories `static fn`, métodos de
+  instância. **Zero campos. Zero membro abstrato/sem-corpo.**
+- **Não é tipo:** sem `var`/parâmetro/retorno/campo tipado por trait, sem dispatch, sem trait-object.
+  **Reside apenas** (1) no próprio código (a definição da trait) e (2) na escrita da definição de tipos
+  (o `&`-compose). **Nunca** em retorno, parâmetro, variável ou constraint.
+- **Contrato sobre o host = estrutural, implícito:** os backing fields e métodos que os corpos referenciam
+  têm de existir no host composto → **erro-de-composição nomeado** se faltar. Convenção `_nome` ↔ property
+  `nome` (o getter lê o backing `self._nome`, nunca a property — senão recursão).
+- **`self` = o implementador**, como valor (`self._x`) e como tipo (`static fn new(): self`).
+- **`&` compõe**; achata em **classe (selada/virtual/abstrata), struct e service**.
+- **Colisão** entre traits compostas = **erro de compilação, salvo sobrecarga válida** (aridade+tipo, §9).
+  Sem override silencioso. (Micro-fork — struct redefinir método de trait — deferido ao arquiteto na onda.)
+- **Sem `match` sobre trait:** trait não tem discriminante; nome de trait em *subject*/*case* de match =
+  **erro nomeado** (guard entra com a onda ou na fase 2 do match-universal). Traits compostas idem.
+- **Modelo mental:** `partial` do C#, porém mais restritivo (sem campos, sem redeclaração de artefato).
+
+**Structural traits (`Eq`/`Ord`/`Hash`/`Clone`/`Default` + sinônimos `Hashable`/`Comparable`) —
+APOSENTADAS.** Eram *compiler-shadow*: nomes **hardcoded** (`is_structural_trait`, `resolve.tks`) cujos
+corpos o compilador **sintetizava dos campos** (`synthesize_structural_methods`, `synth.tks` — gera
+`eq`/`compare`/`hash`/`clone`/`default` campo-a-campo, sem metadata de runtime, Law M.0). A máquina
+**funciona**, mas **uso real em `/src/**/*.tks` = zero** (nenhum derive `& Eq…`, nenhuma chamada
+`.eq()`/`.compare()`/…), e **contradiz o princípio no-shadow** — o dev nunca vê nem escreve o corpo.
+Decisão do dono: **remover** — síntese + reconhecedores (`resolve.tks`, `collect.tks`, `monomorph.tks`).
+Quem precisar de igualdade/ordem/hash **implementa interface explícita**, visível. (Deleção de código do
+compilador — tarefa de implementer numa onda.)
+
+**Constraint = interface-only (sem exceção).** Com as structural fora, **só a interface** é constraint de
+genérico. O `<K: Hashable & Eq>` reservado (nunca entregue — opaco-em-T, `resolve.tks:863`) vira, quando a
+coleção genérica chegar, bound de **interface**.
+
+**Sobra UM construto de capacidade:**
+
+| construto | é tipo? | pode constraint? | corpo |
+|---|---|---|---|
+| **interface** | sim (dispatch) | **sim** | assinaturas (o dev implementa) |
+| **trait-decorador** | não (achata) | não | métodos-com-corpo (o dev escreve) |
+
+---
+
 ## 10. Concorrência — a superfície (`spawn`/`chan`, `await`, journaling)
 
 A faceta de **arena** dela está no Doc 1 §7; aqui é a **superfície** que o usuário vê. Recomposto de
