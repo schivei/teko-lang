@@ -472,22 +472,37 @@ var q, r = div(17, 5)                                           // q = 3, r = 2
 assinaturas" e passa a ser **decorador**: achata-se no tipo que a compõe (nem sub, nem super objeto) e
 **não é tipo**. Redefine o comportamento das traits.
 
-**O que uma trait É:**
-- **Só métodos com corpo** — properties `get`/`set` (que são métodos), factories `static fn`, métodos de
-  instância. **Zero campos. Zero membro abstrato/sem-corpo.**
-- **Não é tipo:** sem `var`/parâmetro/retorno/campo tipado por trait, sem dispatch, sem trait-object.
-  **Reside apenas** (1) no próprio código (a definição da trait) e (2) na escrita da definição de tipos
-  (o `&`-compose). **Nunca** em retorno, parâmetro, variável ou constraint.
-- **Contrato sobre o host = estrutural, implícito:** os backing fields e métodos que os corpos referenciam
-  têm de existir no host composto → **erro-de-composição nomeado** se faltar. Convenção `_nome` ↔ property
-  `nome` (o getter lê o backing `self._nome`, nunca a property — senão recursão).
-- **`self` = o implementador**, como valor (`self._x`) e como tipo (`static fn new(): self`).
-- **`&` compõe**; achata em **classe (selada/virtual/abstrata), struct e service**.
-- **Colisão** entre traits compostas = **erro de compilação, salvo sobrecarga válida** (aridade+tipo, §9).
-  Sem override silencioso. (Micro-fork — struct redefinir método de trait — deferido ao arquiteto na onda.)
+**O que uma trait É — mixin concreto auto-contido:**
+- **Só membros CONCRETOS** — **campos** (com tipo, default opcional), **métodos-com-corpo** (properties
+  `get`/`set`, `static fn`, métodos de instância) e **`const`s**. **Zero membro abstrato/sem-corpo** — isso é
+  papel da *interface*. (Campos **VOLTAM**: como tudo achata, um campo de trait é só um campo que achata no
+  host — bani-los era preciosismo. Um `const` não é campo, é comp-time; sempre coube.)
+- **Auto-contida:** todo `self.X` que um corpo referencia é **declarado na própria trait** (ou numa trait que
+  ela **compôs**, abaixo). Uma trait apontando pra algo que **não declara/desconhece** está **visivelmente
+  errada** → erro na própria trait, não na composição. Cai o antigo "contrato-sobre-host": o backing `_nome`
+  do getter `nome` mora **na trait** (o getter lê `self._nome`, nunca a property — senão recursão).
+- **Não é tipo:** sem `var`/parâmetro/retorno/campo/constraint tipado por trait, sem dispatch, sem
+  trait-object. Reside só (1) na definição da trait e (2) no `&`-compose de um tipo.
+- **`self` = o host que a compõe**, valor (`self._x`) e tipo (`static fn new(): self`).
+- **`&` compõe, e traits compõem traits:** `trait C & A & B { … }` achata A e B em C — e C **conhece** A/B,
+  logo pode referenciá-los (a auto-contenção estende-se ao que a trait compôs). Achata em **classe
+  (selada/virtual/abstrata), struct e service**.
+- **Traits carregam interface:** `trait T & IFoo { … }` = T implementa **IFoo inteira** (auto-contida); todo
+  host que compõe T passa a **satisfazer** IFoo — é o **host** (tipo) que despacha, a trait não. Padrão
+  parcial: uma trait pode só **contribuir** métodos sem declarar `& IFoo`; aí o **host** declara `& IFoo` e a
+  composição inteira fecha o contrato (ex.: `NeByEq`). É o substituto **explícito** da structural aposentada
+  (um `trait Equatable & IEq` / `Comparable & IOrd` escrito à mão, composto pra dar a capacidade).
+- **Colisão = identidade estrutural.** Dois membros de mesmo nome ao achatar: se a **declaração inteira** for
+  **idêntica** (campo: nome+tipo+default · método: assinatura+corpo · const: nome+tipo+valor) → **absorve num
+  só**; **qualquer diferença** → **erro de compilação**. Subsume o **diamante** (mesma trait 2× = idêntica =
+  absorvida, **idempotente**) e integra **sobrecarga** (assinaturas diferentes = overload, coexistem; só
+  entram na regra os de mesma assinatura). Resolve o micro-fork struct-vs-trait: redefinir um membro de trait
+  com corpo diferente = **erro**, sem override silencioso. *Nota:* dois privados idênticos porém
+  semanticamente distintos viram **um campo compartilhado** (absorção é estrutural, não sabe de intenção).
 - **Sem `match` sobre trait:** trait não tem discriminante; nome de trait em *subject*/*case* de match =
-  **erro nomeado** (guard entra com a onda ou na fase 2 do match-universal). Traits compostas idem.
-- **Modelo mental:** `partial` do C#, porém mais restritivo (sem campos, sem redeclaração de artefato).
+  **erro nomeado**. Traits compostas idem.
+- **Modelo mental:** mixin (estado + comportamento concretos que achatam), estilo trait-de-Scala/`partial` —
+  mas **não é tipo** (não instancia, não referencia, não despacha por si; o **host** é que vira o tipo).
 
 **Structural traits (`Eq`/`Ord`/`Hash`/`Clone`/`Default` + sinônimos `Hashable`/`Comparable`) —
 APOSENTADAS.** Eram *compiler-shadow*: nomes **hardcoded** (`is_structural_trait`, `resolve.tks`) cujos
