@@ -7984,6 +7984,242 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
 }
 
 /**
+ * operator_return_class — the return-type class a value-type operator must satisfy (§9 ruling 3):
+ * "self" for arithmetic and bitwise operators (`__add`…`__mod`, `__band`…`__shr`, and the unary
+ * `__bnot`), "bool" for the comparison operators (`__eq`…`__ge`), "element" for the index operator
+ * (`__index`, whose return is the element type and is otherwise unconstrained), or "" when `name` is
+ * not a recognized overloadable dunder.
+ *
+ * @param name  the operator member's dunder name
+ * @return      "self", "bool", "element", or "" for an unrecognized name
+ * @since §9
+ */
+fn operator_return_class(name: str): str {
+    if name == "__add" || name == "__sub" || name == "__mul" || name == "__div" || name == "__mod" { return "self" }
+    if name == "__band" || name == "__bor" || name == "__bxor" || name == "__shl" || name == "__shr" || name == "__bnot" { return "self" }
+    if name == "__eq" || name == "__ne" || name == "__lt" || name == "__gt" || name == "__le" || name == "__ge" { return "bool" }
+    if name == "__index" { return "element" }
+    ""
+}
+
+/**
+ * operator_expected_arity — the operand count a value-type operator must declare (§9 ruling 1): 1 for
+ * the sole unary operator `__bnot`, 2 for every binary operator (arithmetic, comparison, bitwise, and
+ * `__index`, whose operands are the receiver and the subscript).
+ *
+ * @param name  the operator member's dunder name
+ * @return      the required operand count
+ * @since §9
+ */
+fn operator_expected_arity(name: str): u64 {
+    if name == "__bnot" { return 1 to u64 }
+    2 to u64
+}
+
+/**
+ * type_is_indexed — is `t` a primitively subscriptable type (a `str` or a slice `[]T`)? Mirrors the
+ * receiver classes `type_index` accepts, so `operator __index` is admitted (§9 ruling 4) only on a
+ * newtype whose backing the primitive fallback could itself index.
+ *
+ * @param t  the resolved backing type
+ * @return   true iff `t` is `str` or a slice
+ * @since §9
+ */
+fn type_is_indexed(t: Type): bool {
+    match t {
+        Str => true
+        Slice => true
+        _ => false
+    }
+}
+
+/**
+ * newtype_base_is_indexed — does the value-type `td` back an `operator __index` legally (§9 ruling
+ * 4)? True only for a `NewtypeBody` whose resolved backing is an indexed type (`str`/slice); an
+ * enum/flags value-type or a scalar newtype (`type Celsius = i32`) is never indexed.
+ *
+ * @param td      the value-type declaration
+ * @param ref_ns  the declaration's namespace (for backing-type resolution)
+ * @param table   the folded type table
+ * @return        true iff an `__index` operator is permitted on `td`
+ * @since §9
+ */
+fn newtype_base_is_indexed(td: parser::TypeDecl, ref_ns: str, table: TypeTable): bool {
+    match td.body {
+        parser::NewtypeBody as nb => match resolve_type(nb.backing, table, ref_ns) {
+            Type as bt => type_is_indexed(bt)
+            error => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * comparator_counterpart — the mandatory counterpart of a comparison operator (§9 ruling 5):
+ * `__eq`⟂`__ne`, `__lt`⟂`__ge`, `__gt`⟂`__le`. Returns "" for a non-comparison dunder (arithmetic,
+ * bitwise, and index operators are individual — no counterpart).
+ *
+ * @param name  the operator member's dunder name
+ * @return      the counterpart dunder, or "" when none is required
+ * @since §9
+ */
+fn comparator_counterpart(name: str): str {
+    if name == "__eq" { return "__ne" }
+    if name == "__ne" { return "__eq" }
+    if name == "__lt" { return "__ge" }
+    if name == "__ge" { return "__lt" }
+    if name == "__gt" { return "__le" }
+    if name == "__le" { return "__gt" }
+    ""
+}
+
+/**
+ * op_diag — a located §9 operator-definition diagnostic, positioned on the operator member itself so
+ * the error names the exact `operator` line rather than the whole type declaration.
+ *
+ * @param op   the offending operator member
+ * @param msg  the diagnostic text
+ * @return     the located error
+ * @since §9
+ */
+fn op_diag(op: parser::Function, msg: str): error {
+    teko::error::err_loc(error { message = msg }, op.line, op.col)
+}
+
+/**
+ * check_one_operator — validate a single value-type `operator` member at DEFINITION (§9 rulings
+ * 1/3/4): the dunder name is a recognized overloadable operator; the operand count matches the
+ * operator's arity; every operand is explicitly typed and at least one is `self`; a return type is
+ * declared and matches the operator's class (arithmetic/bitwise → `self`, comparison → `bool`, index
+ * → the element type); and `__index` appears only on an indexed value-type.
+ *
+ * @param td      the owning value-type declaration
+ * @param op      the operator member to validate
+ * @param ref_ns  the declaration's namespace (for return/backing resolution)
+ * @param table   the folded type table
+ * @return        null when the operator is well-formed, else the first located diagnostic
+ * @throws        a diagnostic naming the violated ruling (unknown dunder, arity, missing `self`,
+ *                wrong return type, or an `__index` on a non-indexed carrier)
+ * @since §9
+ */
+fn check_one_operator(td: parser::TypeDecl, op: parser::Function, ref_ns: str, table: TypeTable): null | error {
+    var cls = operator_return_class(op.name)
+    if cls == "" {
+        return op_diag(op, $"`operator {op.name}` is not a recognized overloadable operator (§9 ruling 2)")
+    }
+    var arity = operator_expected_arity(op.name)
+    if op.params.len != arity {
+        return op_diag(op, $"`operator {op.name}` must take exactly {arity} operand(s) (§9 ruling 1)")
+    }
+    var saw_self = false
+    var j = 0
+    loop {
+        if j >= op.params.len { break }
+        if !op.params[j].has_type {
+            return op_diag(op, $"every operand of `operator {op.name}` must be explicitly typed (§9 ruling 1)")
+        }
+        if return_type_is_self(op.params[j].type_ann) { saw_self = true }
+        j++
+    }
+    if !saw_self {
+        return op_diag(op, $"at least one operand of `operator {op.name}` must be `self` (§9 ruling 1)")
+    }
+    if !op.has_return {
+        return op_diag(op, $"`operator {op.name}` must declare a return type (§9 ruling 3)")
+    }
+    if cls == "self" && !return_type_is_self(op.return_type) {
+        return op_diag(op, $"an arithmetic/bitwise `operator {op.name}` must return `self` (§9 ruling 3)")
+    }
+    if cls == "bool" {
+        if return_type_is_self(op.return_type) {
+            return op_diag(op, $"a comparison `operator {op.name}` must return `bool` (§9 ruling 3)")
+        }
+        match resolve_type(op.return_type, table, ref_ns) {
+            Type as rt => if !is_bool(rt) { return op_diag(op, $"a comparison `operator {op.name}` must return `bool` (§9 ruling 3)") }
+            error as e => return e
+        }
+    }
+    if op.name == "__index" && !newtype_base_is_indexed(td, ref_ns, table) {
+        return op_diag(op, $"`operator __index` is allowed only on an indexed value-type (over `str` or `[]T`), never a scalar newtype (§9 ruling 4)")
+    }
+    null
+}
+
+/**
+ * check_comparator_counterparts — enforce ruling 5: a value-type that declares one side of a
+ * comparison pair must declare the other. Scans the value-type's operator members; the first
+ * comparison operator whose mandated counterpart is absent yields a located diagnostic naming the
+ * missing dunder.
+ *
+ * @param methods  the value-type body's members (operators + methods)
+ * @return         null when every comparison operator has its counterpart, else the diagnostic
+ * @throws         a diagnostic naming the missing counterpart dunder
+ * @since §9
+ */
+fn check_comparator_counterparts(methods: []parser::Function): null | error {
+    var i = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].is_operator {
+            var want = comparator_counterpart(methods[i].name)
+            if want != "" && !func_list_has_name(operator_members(methods), want) {
+                return op_diag(methods[i], $"defining `operator {methods[i].name}` requires its counterpart `operator {want}` (§9 ruling 5)")
+            }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * operator_members — the sublist of `methods` that are `operator` declarations (§9), so the
+ * counterpart scan matches dunder names only against actual operators (never an ordinary method that
+ * happens to share a dunder-like name).
+ *
+ * @param methods  the value-type body's members
+ * @return         only the members carrying `is_operator`
+ * @since §9
+ */
+fn operator_members(methods: []parser::Function): []parser::Function {
+    var out: []parser::Function = teko::list::empty()
+    var i = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].is_operator { out = teko::list::push(out, methods[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * check_operator_invariants — validate a value-type declaration's `operator` members at DEFINITION
+ * (§9 rulings 1–5). Per operator: `check_one_operator` (name, arity, `self`, return type, index
+ * carrier); across operators: `check_comparator_counterparts` (ruling 5). Inert for every non
+ * value-type body and for a value-type with no operators (`operator_members` is empty), so the
+ * compiler's own corpus never triggers it (plan §8 fixpoint argument). Ruling 10 (no fields, no
+ * statics, no consts) is enforced earlier by the parser.
+ *
+ * @param td      the value-type declaration
+ * @param ref_ns  the declaration's namespace (for return/backing resolution)
+ * @param table   the folded type table
+ * @return        null when every operator is well-formed, else the first located diagnostic
+ * @throws        the first ruling violation among the value-type's operators
+ * @since §9
+ */
+fn check_operator_invariants(td: parser::TypeDecl, ref_ns: str, table: TypeTable): null | error {
+    var methods = value_type_body_methods(td.body)
+    var i = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].is_operator {
+            match check_one_operator(td, methods[i], ref_ns, table) { error as e => return e; null => { } }
+        }
+        i++
+    }
+    check_comparator_counterparts(methods)
+}
+
+/**
  * (OOP A1, 2026-07-01) Type-check EVERY method body on a struct TypeDecl and stamp each into a full
  * `TFunction` item (namespace = "<owning-ns>::<StructName>", mirroring `collect_signatures`'
  * registration exactly, so codegen and the interpreter mangle and resolve method calls to these SAME items).
@@ -8000,6 +8236,9 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
  * @throws         when a method body fails to type
  */
 fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []TItem | error {
+    // (§9 rulings 1–5) validate a value-type's operator members at DEFINITION before typing any body.
+    // Inert for every non value-type (value_type_body_methods is empty) — the compiler's own corpus.
+    match check_operator_invariants(td, item_ns, table) { error as e => return e; null => { } }
     // (W10b.CLASS) a class's methods are typed/stamped by this SAME pass — only the methods
     // list's source differs; a class method is otherwise identical to a struct method. Increment
     // 2: stamps the EFFECTIVE (base-inherited + overridden) methods against THIS class's own
