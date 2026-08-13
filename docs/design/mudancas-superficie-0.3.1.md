@@ -1233,5 +1233,25 @@ por-plataforma dos bindings vive atrás deles.
 - **O compilador CONVERTE tipos na fronteira FFI** (ruling do dono) — marshalling teko↔C **automático**
   (`str`↔`char*`+len, `i32`↔`int`, `size`↔palavra…) pra **reduzir a opacidade**: o dev **não embrulha tudo à
   mão**. Sub-decisão que resta: **quais conversões o compilador conhece** (a tabela) vs o que fica opaco.
-- **Aberto (acopla a Fork B/C):** quem escreve os bindings — usuário vs `teko::sys` curada — e ambos vivem
-  atrás de `#os`/`#arch`.
+- **Aberto (acopla a §17):** quem escreve os bindings — usuário vs `teko::sys` curada — e ambos vivem atrás
+  de `#os`/`#arch`.
+
+---
+
+## 17. Compilação condicional (roadmap §12) — `#if/#elseif/#else/#endif`, com `#os`/`#arch` como atalhos
+
+**Ruling do dono: as marcas condicionais ENTRAM** (o Fork B3 do prep, "adiar `#if`", cai). `#os`/`#arch` **não
+são um eixo à parte** — são **atalhos** (açúcar) de um processo `#if/#elseif/#else/#endif`. É **quase uma
+macro, mas um atalho**: um **prune de build-time** (quais itens/regiões sobrevivem ao type-check), **distinto
+da família `comptime`** (§14, que computa valor).
+
+- **Geral:** `#if(<pred>) … #elseif(<pred>) … #else … #endif` — região condicional, podada por um **predicado
+  de build-time** (sobre `os`, `arch`, e flags de build). Aceita predicado **composto** (`&&`/`||`/`!`).
+- **Atalhos:** `#os("linux")` ≡ `#if(os == "linux")`; `#arch("arm64")` ≡ `#if(arch == "arm64")` — a
+  forma-atributo pra **um item só**, o caso comum.
+- **Alarga a TODOS os itens de topo** (o antigo Fork B1): `#os`/`#arch`/`#if` guardam `fn`, `type` (incl.
+  `extern type`, §16), `const`, extern-block — não só função.
+- **É prune, NÃO `comptime`:** o predicado é avaliado **no prune** (build-time) e decide o que sobrevive ao
+  type-check — não computa valor, não gera código. Exige um **avaliador booleano-sobre-constantes** no prune
+  (que o dono aceita como o mecanismo desta família — não reabre o `comptime`).
+- **Subsume os Forks B e C do prep:** o `#if` geral é a forma; os atributos são os atalhos.
