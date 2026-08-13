@@ -1206,3 +1206,26 @@ mesmo princípio que aposentou a structural.
   `println`, `sizeof`, ops de `list`/`str`, … — passa a ser **declaração `global` explícita** na stdlib
   (ex.: `global fn println(...)` em `src/io`), no lugar da injeção de parse. **Elimina o shadow por
   completo** — e amarra na triagem `exp` da stdlib (o que é `global` é a superfície ambiente exportada).
+
+---
+
+## 16. FFI libc-direct (roadmap §12) — `extern` aponta pra libc, `teko_rt` desaparece
+
+**A meta (ruling do dono): o `extern … from "teko_rt"` de hoje DESAPARECE** e vira **apontamento FFI pra a
+libc de cada OS e arquitetura**. É por isso que **macros e pragmas** (`#os`/`#arch`) importam — a variação
+por-plataforma dos bindings vive atrás deles.
+
+- **Forma (Fork A = A3):** a **lógica pura** (os twins `str_eq`…) vira **função Teko** comum (sai do seam,
+  **sem `extern`**); o **piso de syscall** (`write`/`read`/`malloc`) vira **`extern fn` apontando pra libc**
+  (per OS/arch), resolvido pelo **own-linker** (.33–.34) **sem `cc`**. O `teko_rt` **some por inteiro** —
+  parte vira Teko, parte vira extern-libc.
+  ```teko
+  extern fn write(fd: i32, buf: *u8, n: usize): size = "write" from lib "c"   // size, NÃO isize
+  ```
+- **Tipos na fronteira (correção do dono):** **`isize` NÃO existe** — é **`size`** (palavra de máquina
+  assinada) ou **`usize`** (§8). **Ponteiros opacos** só pros **outros casos** (o que não mapeia direto).
+- **O compilador CONVERTE tipos na fronteira FFI** (ruling do dono) — marshalling teko↔C **automático**
+  (`str`↔`char*`+len, `i32`↔`int`, `size`↔palavra…) pra **reduzir a opacidade**: o dev **não embrulha tudo à
+  mão**. Sub-decisão que resta: **quais conversões o compilador conhece** (a tabela) vs o que fica opaco.
+- **Aberto (acopla a Fork B/C):** quem escreve os bindings — usuário vs `teko::sys` curada — e ambos vivem
+  atrás de `#os`/`#arch`.
