@@ -327,7 +327,7 @@ cost nothing.
 | DB-CASS | `teko::db::cassandra` (native) | CQL binary v4/v5: STARTUP/AUTH/QUERY/PREPARE/EXECUTE, paging | DB0, N1(+N3), C1 | **pure** | **P3** |
 | DB-REDIS | `teko::db::redis` (native) | key-value/cache surface over RESP2/RESP3 — **SHARES** the `net::redis` codec (N13) | DB0, N13 | **pure** | **P3** |
 | DB-ORA | `teko::db::oracle` (FFI) | `extern` OCI (`libclntsh`: `OCIEnvCreate`/`OCIStmtPrepare`/`OCIStmtExecute`/`OCIDefine…`) — TNS/Net is proprietary, so FFI é o caminho pragmático | DB0, **KEYSTONE-LINK**; **FFI** | **needs FFI** (proprietary wire) | **P3** |
-| DB-ODBC | `teko::db::odbc` (FFI, universal) | uma superfície `extern` para `unixODBC` (`SQLDriverConnect`/`SQLPrepare`/`SQLExecute`/`SQLFetch`/`SQLGetData`) — **catch-all** para qualquer engine com driver ODBC (Oracle, MSSQL, DB2, Informix, Sybase…). **DEVE suportar x86 (32-bit) E x64** (`#arch`): há drivers ODBC que **só existem em 32-bit**, então o binding do Driver Manager e os tipos C-ABI (`SQLLEN`/`SQLULEN`/handles) variam por arquitetura e ambas as larguras precisam ser geráveis | DB0, **KEYSTONE-LINK**; **FFI**; **§17 `#arch`** | **needs FFI** (vendor driver, per-arch) | **P3** |
+| DB-ODBC | `teko::odbc` (FFI, universal) | superfície `extern` para o Driver Manager ODBC (`SQLDriverConnect`/`SQLPrepare`/`SQLExecute`/`SQLFetch`/`SQLGetData`) — **catch-all** para qualquer engine com driver ODBC (Oracle, MSSQL, DB2, Informix, Sybase…). **Expõe pares de funções por sufixo `_32`/`_64`** (`connect_32`/`connect_64`, …). **NÃO é `#arch`:** o processo roda em x64, mas o **driver instalado** pode ser só-32-bit — a escolha da variante depende do **driver**, não do CPU. Um driver 32-bit sob processo 64-bit fala via **bridge out-of-process**; **ambas as variantes sempre compilam** (não são condicionais de compilação) | DB0, **KEYSTONE-LINK**; **FFI** | **needs FFI** (runtime, por bitness do driver) | **P3** |
 | Pool / Tx | `teko::db` shared | `exp type Pool { fn get(self): Connection\|error }` | DB0, §10 (concurrent pool) | **pure** | **P3** |
 
 **Os dois caminhos** (ruling do dono: o set de DB estava fraco — mysql/mariadb/mongodb/mssql/oracle/redis +
@@ -337,9 +337,10 @@ outros; FFI liberado onde não há wire aberto):
   (TDS) · **MongoDB** (OP_MSG + BSON) · **Cassandra** (CQL) · **Redis** (RESP, compartilhado com
   `net::redis`) · ClickHouse (TCP nativo ou HTTP). Um binário, cross-platform de graça, codec `.tkt`-testável.
 - **FFI (lib do fornecedor, onde o wire é proprietário ou inexistente):** **SQLite** (embedded, `libsqlite3`)
-  · **Oracle** (OCI `libclntsh` — TNS proprietário) · um **bridge universal `db::odbc`** (unixODBC) que
-  alcança Oracle/MSSQL/DB2/Sybase/Informix pelos drivers ODBC — o catch-all que o dono sancionou (*"pode até
-  ser por FFI"*). KEYSTONE-LINK garante que um programa que não chama um driver não linka a lib dele.
+  · **Oracle** (OCI `libclntsh` — TNS proprietário) · um **bridge universal `teko::odbc`** que alcança
+  Oracle/MSSQL/DB2/Sybase/Informix pelos drivers ODBC — o catch-all que o dono sancionou (*"pode até ser por
+  FFI"*), com **variantes `_32`/`_64`** escolhidas pela **bitness do driver instalado** (não pela arquitetura
+  do CPU). KEYSTONE-LINK garante que um programa que não chama um driver não linka a lib dele.
 - **De graça por um driver existente (sem módulo novo):** CockroachDB / YugabyteDB / Redshift falam o **wire
   do Postgres** → DB-PG dirige-os como estão; Elasticsearch / OpenSearch / CouchDB / DynamoDB são
   **HTTP+JSON** → `net::http` + `encoding::json` os dirigem sem código de camada-db.
