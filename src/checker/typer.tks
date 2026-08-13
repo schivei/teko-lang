@@ -8573,7 +8573,37 @@ fn check_operator_invariants(td: parser::TypeDecl, ref_ns: str, table: TypeTable
         }
         i++
     }
+    match check_value_type_self_readonly(td, methods, table) { error as e => return e; null => { } }
     check_comparator_counterparts(methods)
+}
+
+/**
+ * check_value_type_self_readonly — a subtype of a primitive/enum/flags carries a READONLY,
+ * transient `self` (§13.2 ruling 8/10): its instance method may READ self but never WRITE it (the
+ * value IS the primitive, materialized fresh on each call — a write cannot stick). Any value-type
+ * instance method whose body mutates self is a DEFINITION error, the thin-side mirror of the
+ * fat-struct rule (§13.2). Operators are excluded (they are static, every operand explicit). Inert on
+ * today's corpus: it declares no value-type whose method writes self.
+ *
+ * @param td       the value-type declaration
+ * @param methods  the value-type body's methods (already extracted by the caller)
+ * @param table    the folded type table (for the transitive-call resolution)
+ * @return         null when every instance method leaves self read-only, else the located diagnostic
+ * @throws         the first value-type method that writes self
+ * @since item-14
+ */
+fn check_value_type_self_readonly(td: parser::TypeDecl, methods: []parser::Function, table: TypeTable): null | error {
+    var i = 0 to u64
+    loop {
+        if i >= methods.len { break }
+        var m = methods[i]
+        var is_instance = !m.is_operator && !m.is_static && m.params.len > 0 && !m.params[0].has_type
+        if is_instance && method_mutates_self(td.name, m, table) {
+            return error { message = $"cannot mutate `self` in method `{m.name}` of value-type `{td.name}` — a subtype of a primitive/enum/flags carries a readonly `self` (the value IS the primitive; §13.2)" }
+        }
+        i++
+    }
+    null
 }
 
 /**
