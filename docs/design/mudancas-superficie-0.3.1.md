@@ -499,9 +499,35 @@ Decisão do dono: **remover** — síntese + reconhecedores (`resolve.tks`, `col
 Quem precisar de igualdade/ordem/hash **implementa interface explícita**, visível. (Deleção de código do
 compilador — tarefa de implementer numa onda.)
 
-**Constraint = interface-only (sem exceção).** Com as structural fora, **só a interface** é constraint de
-genérico. O `<K: Hashable & Eq>` reservado (nunca entregue — opaco-em-T, `resolve.tks:863`) vira, quando a
-coleção genérica chegar, bound de **interface**.
+**A capacidade renasce como interface que OBRIGA um operador por contrato** (ruling do dono — habilitado
+pelo overload de operador, §9). Em vez da síntese-shadow, `Eq`/`Ord`/… viram **interfaces cujo contrato é
+um operador** (`operator __eq`/`__lt`/…, §9). O tipo cumpre **escrevendo o operador** (explícito, visível);
+o genérico constrange na interface e **despacha o operador através de T** — exatamente o que a structural
+NÃO conseguia (era opaca-em-T, `resolve.tks:863` devolvia superfície vazia; foi por isso que o `Map`
+desistiu e virou `str`-keyed). A interface despacha por vtable, então `<K: IEq & IHash>` **destrava** o
+`Map<K, V>` genérico que nunca funcionou.
+
+```teko
+type IEq = interface {
+    operator __eq(left: self, right: self): bool     // contrato: implementar ==
+}
+
+type Point = struct IEq {
+    x: i32
+    y: i32
+    operator __eq(left: self, right: self): bool { left.x == right.x && left.y == right.y }
+}
+
+fn index_of<T: IEq>(xs: []T, needle: T): i32 {       // == despacha pelo contrato IEq — REAL
+    var i = 0
+    loop { if i >= xs.len { return -1 }; if xs[i] == needle { return i }; i++ }
+}
+```
+
+Compartilhar o *corpo* de um operador entre tipos de mesma forma é papel do **trait-decorador** (achata
+`operator __eq(...) { … }`); comparação campo-a-campo genérica (o que a síntese fazia por mágica) **não**
+volta — cada tipo escreve o seu, ou compartilha via decorador quando faz sentido. **Constraint =
+interface-only, sem exceção.**
 
 **Sobra UM construto de capacidade:**
 
@@ -708,6 +734,52 @@ um `Intent<T>` criado no caller. Campos: **`.value: T`**, **`.canceled: bool`**,
 (razão do cancelamento). Erro-de-negócio fica no `.value`; cancelamento é `.canceled`+`.failure`. `Intent`
 (sem `T`) = o desfecho de esperar uma função **sem retorno** (só `.canceled`/`.failure`). É onde se
 **garante a execução** — o `spawn` é fire-and-forget, sem retorno.
+
+**A `Intent` é PROTEGIDA — o dev LÊ, o runtime GRAVA, ninguém inicializa à mão.** Struct puro (sem trait):
+backing fields **privados** (`_value`/`_canceled`/`_failure`, visíveis só a runtime/compilador), face de
+leitura por **`exp get`**, escrita do desfecho por **`pub set`** (o runtime grava dado no sucesso, ou
+`canceled`+`failure` no cancelamento), e a única construção é **`pub static fn new`** — interna. A grafia
+`exp`/`pub` é **forward-compatible**: hoje tudo lê como `exp` (sem enforcement); quando o **§11** entrar,
+`pub` passa a valer e a proteção **auto-corrige**, sem refactor.
+
+```teko
+exp type Intent = struct {           // esperar uma função SEM retorno — só o desfecho
+    _canceled: bool
+    _failure: error | null
+
+    exp get canceled(): bool          { self._canceled }
+    exp get failure(): error | null   { self._failure }
+    pub set canceled(v: bool)         { self._canceled = v }
+    pub set failure(v: error | null)  { self._failure = v }
+
+    pub static fn new(c: bool, f: error | null): self {
+        self { _canceled = c; _failure = f }
+    }
+}
+
+exp type Intent<T> = struct {         // esperar uma função COM retorno T — o valor cai em `.value`
+    _value: T | null
+    _canceled: bool
+    _failure: error | null
+
+    exp get value(): T | null         { self._value }
+    exp get canceled(): bool          { self._canceled }
+    exp get failure(): error | null   { self._failure }
+    pub set value(v: T | null)        { self._value = v }
+    pub set canceled(v: bool)         { self._canceled = v }
+    pub set failure(v: error | null)  { self._failure = v }
+
+    pub static fn new(v: T | null, c: bool, f: error | null): self {
+        self { _value = v; _canceled = c; _failure = f }
+    }
+}
+```
+
+**Dependências da forma** (todas forward-compatible): **§9** (properties `get`/`set`, factory estática,
+`self {}`), **item 14** (value-struct mutável — o `set` escreve `self._x`, o que a regra "struct é
+readonly" proíbe hoje), **§11** (enforcement `exp`/`pub`). E uma **consequência de arena**: value-struct +
+preenchimento pelo runtime exige que o `set` acerte **a mesma instância** que o awaiter segura — nada de
+cópia entre o fill e a leitura (residência F1/F2, §10.2).
 
 **`cancel()` — global, como `panic`, ciente de suspensão.** O runtime marca se a tarefa corrente está sob
 `await`. `cancel()` **em suspensão** → cancela o `Intent` corrente (`.canceled = true`, `.failure` = a
