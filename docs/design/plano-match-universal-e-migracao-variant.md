@@ -46,6 +46,18 @@ Todo arm de match: `<discriminant> [as <bind>] [when <cond>] => <body>`.
   pode ser falsa), então qualquer match que use `when` exige um fallback catch-all/bind-all SEM
   guarda. Sobre um conjunto ABERTO (interface com impls desconhecidas, espaço de valor primitivo) um
   catch-all/bind-all sem guarda é obrigatório.
+- **O bind `as` é por REFERÊNCIA — alias transparente do subject, não cópia** (ruling do dono). `Tipo as t`
+  liga `t` como um **alias-ref** do subject (nunca copia — o `as` copiando era o desperdício a matar). O
+  readonly é **raso**: a variável `t` é imutável (não re-vincula; `t = outro` é erro), mas **props e métodos
+  internos são transparentes** — através de `t` faz-se exatamente o que se faria mexendo no subject direto,
+  nem mais nem menos. A mutabilidade **herda do subject**:
+  - **classe** (qualquer binding) → `t.prop = v` OK (reference type, objeto mutável por identidade);
+  - **value-struct `var s`** → `t.prop = v` OK, muta `s` **in-place** (item 14);
+  - **value-struct `val s`** / **temporário / expressão** (`match foo()`) → escrita barrada, pela
+    imutabilidade do próprio valor, não pelo alias.
+
+  Sem sintaxe nova (nada de `ref T as t`). `t` é o único alias vivo do subject durante o braço; o
+  borrow-checker garante que o subject não seja tocado por outro caminho ali dentro.
 
 ---
 
