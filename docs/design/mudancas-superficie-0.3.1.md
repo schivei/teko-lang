@@ -1220,10 +1220,16 @@ por-plataforma dos bindings vive atrás deles.
   (per OS/arch), resolvido pelo **own-linker** (.33–.34) **sem `cc`**. O `teko_rt` **some por inteiro** —
   parte vira Teko, parte vira extern-libc.
   ```teko
-  extern fn write(fd: i32, buf: *u8, n: usize): size = "write" from lib "c"   // size, NÃO isize
+  #os("linux") extern type Stat = struct { dev: u64; ino: u64; mode: u32; size: i64 }  // extern type = layout-C
+  extern fn fstat(fd: i32, out: ref Stat): i32 = "fstat" from lib "c"                   // ref → ponteiro opaco
   ```
+- **Sem sigilos** (`*`/`&` foram removidos, §5/§6): FFI por-referência é **`ref`** — o compilador troca
+  `ref os: Stat` pelo **ponteiro opaco** na fronteira. Nada de `*Stat`/`*u8`.
+- **Struct C-ABI = `extern type`, NÃO `#repr`** (ruling do dono): `extern type Stat = struct { … }` declara o
+  **layout externo** (ordem/padding do C). Reusa o `extern` (como `extern fn`), explícito (no-shadow), **sem
+  pragma nova** — resolve o fork "explícito vs inferência" sem nenhum dos dois.
 - **Tipos na fronteira (correção do dono):** **`isize` NÃO existe** — é **`size`** (palavra de máquina
-  assinada) ou **`usize`** (§8). **Ponteiros opacos** só pros **outros casos** (o que não mapeia direto).
+  assinada) ou **`usize`** (§8). O ponteiro é **sempre opaco e vem do `ref`**, nunca de sigilo.
 - **O compilador CONVERTE tipos na fronteira FFI** (ruling do dono) — marshalling teko↔C **automático**
   (`str`↔`char*`+len, `i32`↔`int`, `size`↔palavra…) pra **reduzir a opacidade**: o dev **não embrulha tudo à
   mão**. Sub-decisão que resta: **quais conversões o compilador conhece** (a tabela) vs o que fica opaco.
