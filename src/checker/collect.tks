@@ -1352,12 +1352,35 @@ pub fn effective_interface_methods(ib: parser::InterfaceBody, iface_ns: str, tab
         var base_ib = match hit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{ename} is not an interface" } }   // unreachable — find_interface_decl verified
         var bm = match effective_interface_methods(base_ib, hit.ns, table, teko::list::push(seen, key)) { []parser::Function as f => f; error as e => return e }
         var bi = 0
-        loop { if bi >= bm.len { break }; out = teko::list::push(out, bm[bi]); bi++ }
+        loop { if bi >= bm.len { break }; out = merge_iface_method(out, bm[bi]); bi++ }
         ei++
     }
     var mi = 0
-    loop { if mi >= ib.methods.len { break }; out = teko::list::push(out, ib.methods[mi]); mi++ }
+    loop { if mi >= ib.methods.len { break }; out = merge_iface_method(out, ib.methods[mi]); mi++ }
     out
+}
+
+/**
+ * merge_iface_method — append one interface method to an effective-method surface through the §9.4
+ * AST-equality merge (interface∘interface). An interface method is bodyless, so a same-name pair is
+ * either structurally IDENTICAL (`functions_ast_equal` — absorb the idempotent diamond, keep one) or
+ * a DISTINCT signature (coexist as an overload set); a same-signature different-body Conflict cannot
+ * arise without bodies. The routine therefore drops a method only when an identical one is already
+ * present, and otherwise appends it.
+ *
+ * @param out  the accumulated effective method surface
+ * @param m    the method to merge in
+ * @return     the surface with `m` merged (absorbed when identical, else appended)
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn merge_iface_method(out: []parser::Function, m: parser::Function): []parser::Function {
+    var i: u64 = 0
+    loop {
+        if i >= out.len { break }
+        if out[i].name == m.name && functions_ast_equal(out[i], m) { return out }
+        i++
+    }
+    teko::list::push(out, m)
 }
 
 /**
@@ -1762,6 +1785,65 @@ fn methods_have_name(methods: []parser::Function, name: str): bool {
 }
 
 /**
+ * field_index_by_name — the index of the first field named `name`, or -1 when absent. Used by the
+ * composition fold to fetch the accumulated field a same-name incoming field must AST-match (§9.4).
+ *
+ * @param fields  the accumulated fields
+ * @param name    the field name to locate
+ * @return        the 0-based index, or -1 when no such field exists
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn field_index_by_name(fields: []parser::Field, name: str): i64 {
+    var i: u64 = 0
+    loop { if i >= fields.len { break }; if fields[i].name == name { return i to i64 }; i++ }
+    -1
+}
+
+/**
+ * method_index_by_name — the index of the first method named `name`, or -1 when absent. Used by the
+ * composition fold to fetch the accumulated method a same-name incoming method must be merged against.
+ *
+ * @param methods  the accumulated methods
+ * @param name     the method name to locate
+ * @return         the 0-based index, or -1 when no such method exists
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn method_index_by_name(methods: []parser::Function, name: str): i64 {
+    var i: u64 = 0
+    loop { if i >= methods.len { break }; if methods[i].name == name { return i to i64 }; i++ }
+    -1
+}
+
+/**
+ * const_index_by_name — the index of the first member const named `name`, or -1 when absent. Used by
+ * the composition fold to fetch the accumulated const a same-name incoming const must AST-match.
+ *
+ * @param consts  the accumulated member consts
+ * @param name    the const name to locate
+ * @return        the 0-based index, or -1 when no such const exists
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn const_index_by_name(consts: []parser::ConstDecl, name: str): i64 {
+    var i: u64 = 0
+    loop { if i >= consts.len { break }; if consts[i].name == name { return i to i64 }; i++ }
+    -1
+}
+
+/**
+ * trait_method_as_member — one trait method restamped as a composer member: `pub` visibility (a
+ * mixin's methods are the composer's public surface, and a class needs `pub` methods to satisfy
+ * interfaces through them), every other field preserved verbatim so `functions_ast_equal` reconciles
+ * a re-flattened diamond copy with its source (§9.4 §3.3 — preserves is_static/get/set/operator).
+ *
+ * @param tm  the trait's method
+ * @return    the method restamped for the composer's method list
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn trait_method_as_member(tm: parser::Function): parser::Function {
+    parser::Function { name = tm.name; type_params = tm.type_params; type_constraints = tm.type_constraints; params = tm.params; has_return = tm.has_return; return_type = tm.return_type; body = tm.body; vis = parser::Visibility::Pub; has_doc = tm.has_doc; doc = tm.doc; line = tm.line; col = tm.col; is_test = tm.is_test; is_extern = tm.is_extern; c_symbol = tm.c_symbol; from_lib = tm.from_lib; os_guard = tm.os_guard; is_intern = tm.is_intern; is_abstract = tm.is_abstract; is_virtual = tm.is_virtual; is_override = tm.is_override; is_static = tm.is_static; is_getter = tm.is_getter; is_setter = tm.is_setter; accessor_prop = tm.accessor_prop; has_arena_size = tm.has_arena_size; arena_size = tm.arena_size; ret_types = tm.ret_types; is_operator = tm.is_operator }
+}
+
+/**
  * (TR3, #594 crumb 7) does `consts` already declare a member const named `name`? Used to reject a
  * trait member const that would collide with the deriver's own (or an earlier co-derived trait's).
  *
@@ -1775,16 +1857,27 @@ fn consts_have_name(consts: []parser::ConstDecl, name: str): bool {
     false
 }
 
-// fold `trait_names`' members into ONE deriver. Fields APPEND after the deriver's own — a name
-// collision (with the deriver's own fields or an earlier trait's) is a COMPILE ERROR (fields
-// cannot be overridden — rename or don't co-derive). A trait method WITH a body folds in UNLESS
-// the deriver defines that name itself (the deriver's own method IS the override); TWO traits
-// providing the same bodied name with no deriver override = a compile error (never an implicit
-// resolution order — W10b's no-overloading/override-only ruling). Bodyless methods are
-// REQUIREMENTS — not folded here; checked after all folds (check_trait_requirements). A folded
-// field's visibility obeys the DERIVER's kind (`into_class`: struct = public value data, class =
-// encapsulated/private); a folded method is `pub` (the bundle's methods are its public surface,
-// and a class needs `pub` methods to satisfy interfaces through them).
+/**
+ * fold_trait_members — flatten `trait_names`' concrete members into ONE composer (§9.4). Each
+ * composed trait's fields, member consts and bodied methods APPEND after the composer's own. A
+ * same-name collision is reconciled by the SHARED AST-equality merge: identical → absorbed once
+ * (subsumes the idempotent diamond), any difference → a named error (no silent override). A composed
+ * trait named twice on one composer is idempotent (skipped). A flattened field's visibility obeys the
+ * composer's kind (`into_class`: struct = public value data, class = encapsulated/private); a
+ * flattened method is `pub` (the mixin's methods are the composer's public surface, and a class needs
+ * `pub` methods to satisfy interfaces through them).
+ *
+ * @param type_name    the composer's type name
+ * @param own_fields   the composer's own fields
+ * @param own_methods  the composer's own methods
+ * @param own_consts   the composer's own member consts
+ * @param trait_names  the composed trait names, in `&`-list order
+ * @param table        the type table
+ * @param into_class   true when the composer is a class/service (fields flatten private)
+ * @return             the flattened member surface, or a merge error
+ * @throws             when a same-name member cannot absorb (differing AST / unresolved overload)
+ * @since 0.3.1 (§9.4 revised)
+ */
 fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: []parser::Function, own_consts: []parser::ConstDecl, trait_names: []str, table: TypeTable, into_class: bool): FoldedMembers | error {
     var fields = own_fields
     var methods = own_methods
@@ -1793,53 +1886,149 @@ fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: 
     loop {
         if i >= trait_names.len { break }
         var tname = trait_names[i]
-        var di: u64 = 0
-        loop {
-            if di >= i { break }
-            if trait_names[di] == tname { return error { message = $"'{type_name}' derives trait '{tname}' more than once" } }
-            di++
-        }
+        if trait_name_seen_before(trait_names, i, tname) { i++; continue }
         var tb = match find_trait_body(tname, table) { parser::TraitBody as t => t; error as e => return e }
-        var fi: u64 = 0
-        loop {
-            if fi >= tb.fields.len { break }
-            var tf = tb.fields[fi]
-            if fields_have_name(fields, tf.name) {
-                return error { message = $"trait '{tname}' field '{tf.name}' collides with an existing field on '{type_name}' — fields cannot be overridden; rename it or do not co-derive" }
-            }
-            var fvis = if into_class { parser::Visibility::Private } else { parser::Visibility::Pub }
-            fields = teko::list::push(fields, parser::Field { name = tf.name; type_ann = tf.type_ann; vis = fvis; is_intern = false; has_doc = tf.has_doc; doc = tf.doc; is_readonly = tf.is_readonly })
-            fi++
-        }
-        var ci: u64 = 0
-        loop {
-            if ci >= tb.consts.len { break }
-            var tc = tb.consts[ci]
-            if consts_have_name(consts, tc.name) {
-                return error { message = $"trait '{tname}' const '{tc.name}' collides with an existing member const on '{type_name}' — rename it or do not co-derive" }
-            }
-            consts = teko::list::push(consts, tc)
-            ci++
-        }
-        var mi: u64 = 0
-        loop {
-            if mi >= tb.methods.len { break }
-            var tm = tb.methods[mi]
-            if tm.body.len > 0 {
-                if methods_have_name(own_methods, tm.name) {
-                    // the deriver defines this name itself — its method IS the override; the
-                    // trait's provided body steps aside.
-                } else if methods_have_name(methods, tm.name) {
-                    return error { message = $"method '{tm.name}' is provided by more than one derived trait — '{type_name}' must define its own '{tm.name}' to resolve the conflict" }
-                } else {
-                    methods = teko::list::push(methods, parser::Function { name = tm.name; type_params = tm.type_params; type_constraints = tm.type_constraints; params = tm.params; has_return = tm.has_return; return_type = tm.return_type; body = tm.body; vis = parser::Visibility::Pub; has_doc = tm.has_doc; doc = tm.doc; line = tm.line; col = tm.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = tm.os_guard; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = false; is_getter = tm.is_getter; is_setter = tm.is_setter; accessor_prop = tm.accessor_prop; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = tm.is_operator })
-                }
-            }
-            mi++
-        }
+        var fmf = match fold_trait_fields(type_name, tname, fields, tb.fields, into_class) { []parser::Field as f => f; error as e => return e }
+        fields = fmf
+        var fmc = match fold_trait_consts(type_name, tname, consts, tb.consts) { []parser::ConstDecl as c => c; error as e => return e }
+        consts = fmc
+        var fmm = match fold_trait_methods(type_name, tname, own_methods, methods, tb.methods, table) { []parser::Function as m => m; error as e => return e }
+        methods = fmm
         i++
     }
     FoldedMembers { fields = fields; methods = methods; consts = consts }
+}
+
+/**
+ * trait_name_seen_before — was `tname` already listed in `trait_names[0..idx]`? A trait composed
+ * twice on one composer is idempotent (§9.4 diamond), so the second listing is skipped rather than
+ * re-flattened.
+ *
+ * @param trait_names  the composed trait names
+ * @param idx          the current index
+ * @param tname        the current trait name
+ * @return             true iff an earlier entry already named `tname`
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn trait_name_seen_before(trait_names: []str, idx: u64, tname: str): bool {
+    var di: u64 = 0
+    loop { if di >= idx { break }; if trait_names[di] == tname { return true }; di++ }
+    false
+}
+
+/**
+ * fold_trait_fields — flatten one trait's fields into the accumulated composer field list (§9.4). A
+ * same-name field absorbs when its AST is identical (`fields_ast_equal`), else it is a named error.
+ *
+ * @param type_name    the composer's name (for diagnostics)
+ * @param tname        the composed trait's name (for diagnostics)
+ * @param fields       the accumulated fields
+ * @param trait_fields the composed trait's own fields
+ * @param into_class   true when the composer flattens fields private
+ * @return             the accumulated fields with the trait's fields merged in, or an error
+ * @throws             when a same-name field differs in type or readonly-ness
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn fold_trait_fields(type_name: str, tname: str, fields: []parser::Field, trait_fields: []parser::Field, into_class: bool): []parser::Field | error {
+    var out = fields
+    var fi: u64 = 0
+    loop {
+        if fi >= trait_fields.len { break }
+        var tf = trait_fields[fi]
+        var fvis = if into_class { parser::Visibility::Private } else { parser::Visibility::Pub }
+        var member = parser::Field { name = tf.name; type_ann = tf.type_ann; vis = fvis; is_intern = false; has_doc = tf.has_doc; doc = tf.doc; is_readonly = tf.is_readonly }
+        var idx = field_index_by_name(out, tf.name)
+        if idx < 0 { out = teko::list::push(out, member); fi++; continue }
+        if !fields_ast_equal(out[idx to u64], member) {
+            return error { message = $"trait '{tname}' field '{tf.name}' collides with a different field on '{type_name}' — a field absorbs only when identical (§9.4); rename it or reconcile its type" }
+        }
+        fi++
+    }
+    out
+}
+
+/**
+ * fold_trait_consts — flatten one trait's member consts into the accumulated composer const list
+ * (§9.4). A same-name const absorbs when its AST is identical (`consts_ast_equal`), else it is a
+ * named error.
+ *
+ * @param type_name    the composer's name (for diagnostics)
+ * @param tname        the composed trait's name (for diagnostics)
+ * @param consts       the accumulated member consts
+ * @param trait_consts the composed trait's own member consts
+ * @return             the accumulated consts with the trait's consts merged in, or an error
+ * @throws             when a same-name const differs in type or initializer
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn fold_trait_consts(type_name: str, tname: str, consts: []parser::ConstDecl, trait_consts: []parser::ConstDecl): []parser::ConstDecl | error {
+    var out = consts
+    var ci: u64 = 0
+    loop {
+        if ci >= trait_consts.len { break }
+        var tc = trait_consts[ci]
+        var idx = const_index_by_name(out, tc.name)
+        if idx < 0 { out = teko::list::push(out, tc); ci++; continue }
+        if !consts_ast_equal(out[idx to u64], tc) {
+            return error { message = $"trait '{tname}' const '{tc.name}' collides with a different member const on '{type_name}' — a const absorbs only when identical (§9.4); rename it or reconcile its value" }
+        }
+        ci++
+    }
+    out
+}
+
+/**
+ * fold_trait_methods — flatten one trait's bodied methods into the accumulated composer method list
+ * (§9.4) through the shared AST-equality merge (`merge_named_members`). A same-name method absorbs
+ * when identical; a same-signature different-body pair is a named error (no silent override — whether
+ * the existing member is the composer's own, R8, or an earlier composed trait's, R7); a
+ * distinct-signature pair would overload, which is not yet resolved across composition (§9A).
+ *
+ * @param type_name     the composer's name (for diagnostics)
+ * @param tname         the composed trait's name (for diagnostics)
+ * @param own_methods   the composer's OWN methods (to distinguish R8 from R7 diagnostics)
+ * @param methods       the accumulated methods (own + earlier-composed)
+ * @param trait_methods the composed trait's own methods
+ * @param table         the type table (for signature resolution)
+ * @return              the accumulated methods with the trait's methods merged in, or an error
+ * @throws              when a same-name method cannot absorb (differing body / unresolved overload)
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn fold_trait_methods(type_name: str, tname: str, own_methods: []parser::Function, methods: []parser::Function, trait_methods: []parser::Function, table: TypeTable): []parser::Function | error {
+    var out = methods
+    var mi: u64 = 0
+    loop {
+        if mi >= trait_methods.len { break }
+        var tm = trait_methods[mi]
+        if tm.body.len == 0 { mi++; continue }
+        var idx = method_index_by_name(out, tm.name)
+        if idx < 0 { out = teko::list::push(out, trait_method_as_member(tm)); mi++; continue }
+        match merge_named_members(out[idx to u64], tm, table, "", type_name) {
+            Absorb => { }
+            Conflict => return method_merge_error(type_name, tname, tm.name, own_methods)
+            Overload => return error { message = $"method '{tm.name}' on '{type_name}' would overload trait '{tname}'s '{tm.name}' (a different signature) — method overloading across composition is not yet resolved (§9A)" }
+        }
+        mi++
+    }
+    out
+}
+
+/**
+ * method_merge_error — the named error for a same-signature, different-body method collision during
+ * the composition fold (§9.4 no silent override). Distinguishes the composer redefining a composed
+ * trait's member (R8) from two composed traits providing differing bodies (R7).
+ *
+ * @param type_name    the composer's name
+ * @param tname        the composed trait whose method could not absorb
+ * @param method_name  the colliding method name
+ * @param own_methods  the composer's own methods (to select the R8 vs R7 wording)
+ * @return             the located merge error
+ * @since 0.3.1 (§9.4 revised)
+ */
+fn method_merge_error(type_name: str, tname: str, method_name: str, own_methods: []parser::Function): error {
+    if methods_have_name(own_methods, method_name) {
+        return error { message = $"'{type_name}' redefines '{method_name}' with a body different from trait '{tname}'s — a trait member absorbs only when identical (§9.4); make them identical or drop the composition" }
+    }
+    error { message = $"method '{method_name}' is provided by composed traits with differing bodies — '{type_name}' cannot absorb them (§9.4); reconcile the traits" }
 }
 
 /**
