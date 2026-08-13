@@ -1,0 +1,180 @@
+/**
+ * Cel — an `i32`-backed value-type (§9 rulings 10/11) carrying arithmetic and comparison operators.
+ * It is NOMINAL: a `Cel` and a raw `i32` convert only through the explicit E9 cast (`to i32` /
+ * `to Cel`), which is a representation no-op (the value IS the `i32`). The `+` on two `Cel` operands
+ * dispatches to `__add` with the LEFT operand owning (ruling 8), proving E9 in both directions
+ * (EXTRACT `left to i32`, CONSTRUCT `… to Cel`).
+ */
+type Cel = i32 {
+    /**
+     * __add — add two temperatures. Extracts each operand to its `i32` base (E9 EXTRACT), adds
+     * primitively, and reconstructs a `Cel` (E9 CONSTRUCT); the return type `self` is the owner (§9
+     * ruling 3, arithmetic → self).
+     *
+     * @param left   the left temperature
+     * @param right  the right temperature
+     * @return       their sum as a `Cel`
+     */
+    operator __add(left: self, right: self): self { (left to i32 + right to i32) to Cel }
+    /**
+     * __eq — equality over the `i32` base (§9 ruling 3, comparison → bool). Its counterpart `__ne` is
+     * mandatory (ruling 5).
+     *
+     * @param left   the left temperature
+     * @param right  the right temperature
+     * @return       true iff the two bases are equal
+     */
+    operator __eq(left: self, right: self): bool { left to i32 == right to i32 }
+    /**
+     * __ne — inequality over the `i32` base, the mandated counterpart of `__eq` (§9 ruling 5).
+     *
+     * @param left   the left temperature
+     * @param right  the right temperature
+     * @return       true iff the two bases differ
+     */
+    operator __ne(left: self, right: self): bool { left to i32 != right to i32 }
+}
+
+/**
+ * Off — an `i32`-backed value-type whose `+` places `self` on the RIGHT (`operator __add(i32,
+ * self)`). It witnesses ruling 8's SECOND dispatch leg: in `raw + off` the left operand is a raw
+ * primitive (no owner) so the dispatch falls through to the RIGHT operand's owner.
+ */
+type Off = i32 {
+    /**
+     * __add — add a raw `i32` offset on the left to an `Off` on the right (mixed operands, ruling 6),
+     * returning a new `Off`.
+     *
+     * @param left   the raw offset
+     * @param right  the base value
+     * @return       the offset base as an `Off`
+     */
+    operator __add(left: i32, right: self): self { (left + right to i32) to Off }
+}
+
+/**
+ * Dir — an `enum` value-type (§9 ruling 12) carrying a readonly instance method. The second brace
+ * block holds the method; without it the enum would behave exactly as a pre-§9 enum.
+ */
+type Dir = enum { N; S; E; W } {
+    /**
+     * oposto — the opposite compass direction, comparing the receiver `self` against each member.
+     *
+     * @return  the direction opposite to `self`
+     */
+    fn oposto(): Dir {
+        if self == Dir::N { return Dir::S }
+        if self == Dir::S { return Dir::N }
+        if self == Dir::E { return Dir::W }
+        Dir::E
+    }
+}
+
+/**
+ * Grid — a slice-backed (`[]i32`) INDEXED value-type (§9 ruling 4) whose `[]` reads an element. The
+ * backing is an indexed type, the only carrier on which `operator __index` is admitted; inside the
+ * operator the receiver is extracted to its `[]i32` base (E9) before the primitive subscript, so the
+ * dispatch does not recurse.
+ */
+type Grid = []i32 {
+    /**
+     * __index — read the element at `i` from the backing slice (§9 ruling 3, index → element type).
+     *
+     * @param left  the grid receiver
+     * @param i     the element index
+     * @return      the `i32` element at `i`
+     */
+    operator __index(left: self, i: i32): i32 { (left to []i32)[i] }
+}
+
+/**
+ * Perm — a `flags` value-type (§9 ruling 12) carrying a readonly instance method alongside the
+ * built-in flag operations (`has`/`add`/…), proving the flags method honest-stop is lifted.
+ */
+flags Perm { R; W; X } {
+    /**
+     * writable — is the write bit set on the receiver?
+     *
+     * @return  true iff `self` includes `Perm::W`
+     */
+    fn writable(): bool { self.has(Perm::W) }
+}
+
+/**
+ * arith_same_type — `Cel + Cel` via the left-owning `__add` (ruling 8, first leg): 20 + 5 = 25,
+ * extracted to `i32` for the announced value.
+ *
+ * @return  25
+ */
+pub fn arith_same_type(): i64 {
+    var a = 20 to Cel
+    var b = 5 to Cel
+    ((a + b) to i32) to i64
+}
+
+/**
+ * right_side_dispatch — `raw + Off` via the right-owning `__add` (ruling 8, second leg): 5 + 10 = 15.
+ *
+ * @return  15
+ */
+pub fn right_side_dispatch(): i64 {
+    var o = 10 to Off
+    ((5 + o) to i32) to i64
+}
+
+/**
+ * comparison_and_counterpart — `__eq` on two equal `Cel` and `__ne` on two different `Cel` both hold,
+ * proving the `bool` return (ruling 3) and the mandated counterpart (ruling 5): 1 + 1 = 2.
+ *
+ * @return  2
+ */
+pub fn comparison_and_counterpart(): i64 {
+    var x = 7 to Cel
+    var y = 7 to Cel
+    var z = 9 to Cel
+    var eq = if x == y { 1 } else { 0 }
+    var ne = if x != z { 1 } else { 0 }
+    eq + ne
+}
+
+/**
+ * enum_method — `Dir::N.oposto()` is `Dir::S`, whose ordinal is 1 (§9 ruling 12, enum body method).
+ *
+ * @return  1
+ */
+pub fn enum_method(): i64 {
+    (Dir::N.oposto() to i32) to i64
+}
+
+/**
+ * indexed_newtype — `Grid[2]` over `[10, 20, 30]` reads 30 through `operator __index` (ruling 4).
+ *
+ * @return  30
+ */
+pub fn indexed_newtype(): i64 {
+    var g = mk_grid() to Grid
+    (g[2]) to i64
+}
+
+/**
+ * mk_grid — the backing slice `[10, 20, 30]` the `Grid` index scenario reads.
+ *
+ * @return  a three-element `[]i32`
+ */
+fn mk_grid(): []i32 {
+    var s: []i32 = teko::list::empty()
+    s = teko::list::push(s, 10 to i32)
+    s = teko::list::push(s, 20 to i32)
+    s = teko::list::push(s, 30 to i32)
+    s
+}
+
+/**
+ * flags_method — `(Perm::W).writable()` is true (§9 ruling 12, flags body method), reported as 1.
+ *
+ * @return  1
+ */
+pub fn flags_method(): i64 {
+    var p = Perm::W
+    if p.writable() { 1 } else { 0 }
+}
