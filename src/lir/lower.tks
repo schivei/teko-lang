@@ -378,8 +378,8 @@ pub fn ltype_of(t: checker::Type, enums: []LEnumInfo): LType {
  * @since #594 T-B (the enum carrier)
  */
 fn ltype_of_named(n: checker::Named, enums: []LEnumInfo): LType {
-    match find_enum_info(enums, n.name) {
-        LEnumInfo => enum_carrier_ltype()
+    match find_value_carrier(enums, n.name) {
+        LEnumInfo as info => info.carrier
         null => LType::Ptr
     }
 }
@@ -425,8 +425,8 @@ pub fn ltype_of_typeexpr(te: parser::TypeExpr, enums: []LEnumInfo): LType {
     bare one, because a field annotation is written however the source spells it while the enum
     table holds declared names — `find_enum_info` owns that reconciliation. */
 fn ltype_of_named_path(p: parser::Path, enums: []LEnumInfo): LType {
-    match find_enum_info(enums, path_name_of(p)) {
-        LEnumInfo => return enum_carrier_ltype()
+    match find_value_carrier(enums, path_name_of(p)) {
+        LEnumInfo as info => return info.carrier
         null => { }
     }
     if p.segments.len != 1 { return LType::Ptr }
@@ -1008,12 +1008,24 @@ fn is_c_keyword(s: str): bool {
 }
 
 /**
- * LEnumInfo — one declared `enum` type's name + its member spellings, in
- * declared order (the ORDINAL a bare/qualified enum-member match pattern tests
- * against is that member's INDEX in this list — mirrors the checker's own
- * `check_enum_pattern`/`enum_covered` convention, A1-5, #382).
+ * LEnumInfo — one declared `enum` type's name + its member spellings, in declared order (the ORDINAL
+ * a bare/qualified enum-member match pattern tests against is that member's INDEX in this list —
+ * mirrors the checker's own `check_enum_pattern`/`enum_covered` convention, A1-5, #382). §9 reuses the
+ * same table to carry a prim-backed value-type's machine class: a `NewtypeBody` registers an entry
+ * with `is_newtype = true`, an empty `members`, and its BACKING `carrier`/`is_register` — the
+ * representation-identity lowering (ruling 9). `find_enum_info` (the enum-semantic probe) skips those
+ * newtype entries; only `find_value_carrier` (`ltype_of`/`is_register_value_type`) reads them, so the
+ * enum ordinal/member paths are untouched. Inert on the compiler's own corpus (no `NewtypeBody`).
+ *
+ * @field name         the type's declared name (bare or qualified)
+ * @field members      the enum's member spellings, in declared order (empty for a newtype entry)
+ * @field carrier      the machine class a value of this type occupies (an enum's integer carrier, or
+ *                     a newtype's backing machine class)
+ * @field is_register  true iff a value of this type is a self-contained register datum (every enum;
+ *                     a scalar-backed newtype) rather than an address (a slice/aggregate-backed one)
+ * @field is_newtype   true iff this entry is a §9 prim-backed value-type, not a declared `enum`
  */
-pub type LEnumInfo = struct { name: str; members: []str }
+pub type LEnumInfo = struct { name: str; members: []str; carrier: LType; is_register: bool; is_newtype: bool }
 
 /**
  * LVariantDef — one declared `type X = variant A | B | …` declaration's name + the EXPANDED union
@@ -9938,6 +9950,28 @@ fn find_enum_info(enums: []LEnumInfo, name: str): LEnumInfo | null {
     var i: u64 = 0
     loop {
         if i >= enums.len { break }
+        if !enums[i].is_newtype && checker::name_last_segment(enums[i].name) == bare { return enums[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * find_value_carrier — the machine-carrier entry for a type name, matching a declared `enum` OR a §9
+ * prim-backed value-type (unlike `find_enum_info`, which skips newtypes so the enum ordinal/member
+ * paths never mistake a newtype for an enum). `ltype_of`/`is_register_value_type` read the carrier and
+ * register-ness through here, so a value-type lowers to its backing machine class (ruling 9).
+ *
+ * @param enums  the program's value-carrier table (enums + newtypes)
+ * @param name   the type name to look up (bare or qualified)
+ * @return       the matching carrier entry, or `null` when `name` is neither an enum nor a newtype
+ * @since §9
+ */
+fn find_value_carrier(enums: []LEnumInfo, name: str): LEnumInfo | null {
+    var bare = checker::name_last_segment(name)
+    var i: u64 = 0
+    loop {
+        if i >= enums.len { break }
         if checker::name_last_segment(enums[i].name) == bare { return enums[i] }
         i++
     }
@@ -11776,7 +11810,7 @@ fn is_register_value_type(t: checker::Type, enums: []LEnumInfo): bool {
     match t {
         checker::Prim => true
         checker::Byte => true
-        checker::Named as n => match find_enum_info(enums, n.name) { LEnumInfo => true; null => false }
+        checker::Named as n => match find_value_carrier(enums, n.name) { LEnumInfo as info => info.is_register; null => false }
         _ => false
     }
 }
@@ -16430,19 +16464,54 @@ fn collect_enum_item(acc: []LEnumInfo, it: checker::TItem): []LEnumInfo {
 }
 
 /**
- * collect_enum_decl — accumulate `td`'s member list onto `acc` when its body is
- * an `EnumBody`; unchanged for any other type-declaration shape
- * (struct/class/variant/…).
+ * collect_enum_decl — accumulate `td`'s carrier entry onto `acc`: an `EnumBody` registers the enum
+ * (its integer carrier, a register value); a §9 `NewtypeBody` registers a value-type carrier
+ * (`is_newtype`) whose machine class IS its backing's (ruling 9's representation-identity lowering) —
+ * a register value when the backing is scalar, an address when it is a slice/aggregate. Every other
+ * type-declaration shape (struct/class/variant/alias/flags) is unchanged. Inert on the compiler's own
+ * corpus, which declares no `NewtypeBody`.
  *
- * @param []LEnumInfo acc  the enum table accumulated so far
- * @param parser::TypeDecl td  the type declaration to fold
- * @return []LEnumInfo  `acc`, with `td`'s enum info appended when applicable
+ * @param acc  the carrier table accumulated so far
+ * @param td   the type declaration to fold
+ * @return     `acc`, with `td`'s carrier entry appended when applicable
  */
 fn collect_enum_decl(acc: []LEnumInfo, td: parser::TypeDecl): []LEnumInfo {
     match td.body {
-        parser::EnumBody as eb => teko::list::push(acc, LEnumInfo { name = td.name; members = eb.members })
+        parser::EnumBody as eb => teko::list::push(acc, LEnumInfo { name = td.name; members = eb.members; carrier = enum_carrier_ltype(); is_register = true; is_newtype = false })
+        parser::NewtypeBody as nb => teko::list::push(acc, newtype_carrier_entry(td.name, nb, acc))
         _ => acc
     }
+}
+
+/**
+ * newtype_carrier_entry — the §9 value-type carrier entry for a `NewtypeBody`: its backing machine
+ * class (`ltype_of_typeexpr` over the syntactic backing) and whether that class is a self-contained
+ * register value (a scalar) or an address (a slice/aggregate backing). Modeled on the enum entry, but
+ * flagged `is_newtype` so only `find_value_carrier` reads it.
+ *
+ * @param name  the value-type's declared name
+ * @param nb    the newtype body (its backing type-expression)
+ * @param acc   the carrier table so far (for a backing that itself names an enum/newtype)
+ * @return      the newtype's carrier entry
+ * @since §9
+ */
+fn newtype_carrier_entry(name: str, nb: parser::NewtypeBody, acc: []LEnumInfo): LEnumInfo {
+    var carrier = ltype_of_typeexpr(nb.backing, acc)
+    LEnumInfo { name = name; members = teko::list::empty(); carrier = carrier; is_register = ltype_is_scalar(carrier); is_newtype = true }
+}
+
+/**
+ * ltype_is_scalar — is `t` a self-contained register scalar (an integer/float carrier), as opposed to
+ * an address (`Ptr`) or the return-only `Void`? Decides a prim-backed value-type's `is_register`.
+ *
+ * @param t  the machine class
+ * @return   true iff `t` is a scalar register value
+ * @since §9
+ */
+fn ltype_is_scalar(t: LType): bool {
+    if t == LType::Ptr { return false }
+    if t == LType::Void { return false }
+    true
 }
 
 /**
