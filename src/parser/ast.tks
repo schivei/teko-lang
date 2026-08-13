@@ -358,7 +358,19 @@ pub fn assign_has_target(kind: AssignKind): bool {
         _ => false
     }
 }
-pub type Return = struct { has_value: bool; value: Expr }   // `return [expr]` — bare `return` (no value) has has_value=false, value a placeholder (B.20; P4a)
+/**
+ * Return — a `return [expr]` / `return (e1, e2, …)` statement. A bare `return` (no value) carries
+ * `has_value=false` and a placeholder `value`. A single-value return uses `value`; a MULTIPLE return
+ * (§9 F, ruling 3) fills `values` with ≥ 2 exprs matched positionally against `Function.ret_types`.
+ *
+ * @field has_value true iff a value (single or multiple) follows the `return`.
+ * @field value     the single returned expression (a placeholder when `!has_value` or when multiple).
+ * @field values    the `return (e1, e2, …)` list; length ≤ 1 ⇒ single return (uses `value`,
+ *                  byte-identical); ≥ 2 ⇒ multiple return. The `( )` are recognized ONLY in `return`
+ *                  position — a bare `(a, b)` expression stays a parse error (ruling 3).
+ * @since §9 F (the `values` field)
+ */
+pub type Return = struct { has_value: bool; value: Expr; values: []Expr }
 /**
  * `[LABEL:] loop [<head>] { … }` (M.5, #517). The head is fully desugared by the parser: `init`
  * holds the run-once, LOOP-SCOPED preamble (counter/bound/`_first` for range & 3-part, `_it` for
@@ -404,7 +416,78 @@ pub type AdoptStmt = struct { name: str; body: []Statement }
  */
 pub type BlockStmt = struct { body: []Statement }
 
-pub type Statement = variant Binding | Assign | Return | LoopStmt | BreakStmt | ContinueStmt | ExprStmt | DeferStmt | AdoptStmt | BlockStmt
+/**
+ * BindName — a positional target in a multiple-binding form (§9 F) that binds its slot's value to a
+ * source name.
+ *
+ * @field name  the identifier the slot's value is bound to
+ * @since §9 F
+ */
+pub type BindName = struct { name: str }
+/**
+ * BindSkip — the `_` discard target in a multiple-binding form (§9 F): the slot is consumed but no
+ * variable is emitted for it.
+ *
+ * @since §9 F
+ */
+pub type BindSkip = struct { }
+/**
+ * BindRest — the `..` skip-range marker of an array decomposition `[a, .., b, c]` (§9 F, ruling 2
+ * addendum). It skips 0+ MIDDLE elements and separates the bound head from the bound tail. Legal only
+ * inside an `ArrayDecomp` shape, at most once, never in a parallel name-list.
+ *
+ * @since §9 F
+ */
+pub type BindRest = struct { }
+/**
+ * BindElem — one positional leaf of a multiple-binding target list (§9 F): a name, the `_` discard, or
+ * the `..` skip-range marker. It is never a value — always a leaf of a target LIST.
+ *
+ * @since §9 F
+ */
+pub type BindElem = variant BindName | BindSkip | BindRest
+
+/**
+ * MultiTargetKind — which multiple-binding shape a `MultiBind` declares, fixing how its right-hand
+ * side is interpreted.
+ *
+ * @field Parallel    `var a, b, c = …` — comma-separated targets; the RHS is either N parallel exprs
+ *                    (ruling 1) or a single multiple-return call destructured (ruling 3).
+ * @field ArrayDecomp `var [a, b, c] = arr` — bracketed targets; the RHS is one `[]T` unpacked by
+ *                    position (ruling 2). Admits one `BindRest` (`..`).
+ * @since §9 F
+ */
+pub type MultiTargetKind = enum { Parallel; ArrayDecomp }
+
+/**
+ * MultiBind — the MULTIPLE binding statement `var|const TARGETS [: T] = VALUES` (§9 F). Deliberately
+ * separate from `Binding` (which stays byte-identical, the sole path the compiler's own fixpoint
+ * exercises): the whole new surface is one new `Statement` case, and the checker desugars it to
+ * already-existing typed nodes, leaving codegen/LIR untouched.
+ *
+ * @field kind      the mutability the binder declared (`Const`/`Mut`).
+ * @field shape     `Parallel` (`a, b`) or `ArrayDecomp` (`[a, b]`).
+ * @field targets   the positional targets in source order (`BindName`/`BindSkip`/`BindRest`).
+ * @field has_type  true iff a single shared `: T` annotation was present (ruling 1).
+ * @field type_ann  the shared annotation, meaningful only when `has_type`.
+ * @field values    `Parallel`: N exprs (parallel) or 1 expr (a multiple-return call); `ArrayDecomp`:
+ *                  exactly 1 expr (the `[]T`).
+ * @field line      1-based source line of the first target (diagnostics).
+ * @field col       1-based source column of the first target.
+ * @since §9 F
+ */
+pub type MultiBind = struct {
+    kind: BindKind
+    shape: MultiTargetKind
+    targets: []BindElem
+    has_type: bool
+    type_ann: TypeExpr
+    values: []Expr
+    line: u32
+    col: u32
+}
+
+pub type Statement = variant Binding | Assign | Return | LoopStmt | BreakStmt | ContinueStmt | ExprStmt | DeferStmt | AdoptStmt | BlockStmt | MultiBind
 
 /**
  * Generic type-parameter CONSTRAINTS (W11/S6, 2026-07-01). `<T: ConstraintExpr>` is a DEDICATED
@@ -494,6 +577,15 @@ pub type Function = struct {
      * time (a zero-byte arena is not a budget).
      */
     arena_size: u64
+    /**
+     * ret_types — the return-type list of an `fn f(): (A, B, …)` MULTIPLE-return signature (§9 F,
+     * ruling 3). EMPTY for a single-return fn (which keeps using `return_type`), so every existing
+     * `Function { … }` literal only appends `ret_types = teko::list::empty()` and nothing changes
+     * (fixpoint). The `( )` are parsed ONLY in this signature position, so multi-valuedness never
+     * enters `TypeExpr` — there is no first-class tuple type.
+     * @since §9 F
+     */
+    ret_types: []TypeExpr
 }
 /**
  * StructBody — a `struct [I & …] { fields; methods; consts }` body (OOP A1). A struct's members

@@ -123,6 +123,24 @@ fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str, ref
         parser::BlockStmt as b => lam_collect_block(b.body, refs, bound, writes)
         parser::BreakStmt => { }
         parser::ContinueStmt => { }
+        parser::MultiBind as mb => {
+            var vi = 0
+            loop {
+                if vi >= mb.values.len { break }
+                lam_collect_expr(mb.values[vi], refs, bound, writes)
+                vi++
+            }
+            var ti = 0
+            loop {
+                if ti >= mb.targets.len { break }
+                match mb.targets[ti] {
+                    parser::BindName as bn => bound = str_set_add(bound.value, bn.name)
+                    parser::BindSkip => { }
+                    parser::BindRest => { }
+                }
+                ti++
+            }
+        }
     }
 }
 /**
@@ -5305,6 +5323,24 @@ fn type_exprstmt(es: parser::ExprStmt, env: Env, table: TypeTable): TypedStmt | 
     }
 }
 
+/**
+ * type_multibind — types and DESUGARS a `MultiBind` (§9 F) to a `TBlockStmt` of already-existing
+ * `TBinding`s (plus a synthesized length guard for array decomposition), introducing NO new typed
+ * node so codegen/LIR stay untouched. Fully implemented in the desugar crumb; this signature is the
+ * dispatch target of `type_statement`.
+ *
+ * @param mb     the multiple-binding statement
+ * @param env    the type environment
+ * @param table  the program's type table
+ * @return       the desugared `TBlockStmt` plus the env extended with the bound names, or an error
+ * @throws       RHS/LHS arity mismatch; a wrong-arity multiple-return call; a non-`[]T` decomposition
+ *               source; a misplaced or repeated `..`; an incompatible shared `: T` annotation
+ * @since §9 F
+ */
+fn type_multibind(mb: parser::MultiBind, env: Env, table: TypeTable): TypedStmt | error {
+    return error { message = "multiple binding not yet supported" }
+}
+
 fn type_statement(s: parser::Statement, env: Env, table: TypeTable): TypedStmt | error {
     match s {
         parser::Binding as b => type_binding(b, env, table)
@@ -5333,6 +5369,7 @@ fn type_statement(s: parser::Statement, env: Env, table: TypeTable): TypedStmt |
         }
         parser::AdoptStmt as a => type_adopt(a, env, table)
         parser::BlockStmt as bs => type_block_stmt(bs, env, table)
+        parser::MultiBind as mb => type_multibind(mb, env, table)
     }
 }
 
