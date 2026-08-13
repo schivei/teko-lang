@@ -1183,3 +1183,23 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   `O_RDONLY`).
 - **Chamada:** `@nome(...)` nas duas. **Keywords fechadas: `macro` (Família A) / `comptime` (Família B)**
   (ruling do dono).
+
+---
+
+## 15. `global` — acesso sem namespace, e o fim do shadow de parse
+
+**O que resolve (ruling do dono): parar o shadow do parse.** Hoje builtins (`sizeof`, `list`, `str`…) são
+**injetados no parse** — shadow, invisível ao dev. Com `global`, viram **declarações reais e visíveis** (em
+`src/mem`, `src/list`…) alcançáveis **sem qualificar o namespace**. É o **no-shadow aplicado aos builtins** — o
+mesmo princípio que aposentou a structural.
+
+- **`global`** modifica uma declaração de **nível de namespace** — **função, tipo ou constante**.
+- **Variável NUNCA é global** — sem estado mutável global.
+- **Acesso direto:** um símbolo `global` é alcançável **sem o namespace** — `@sizeof<T>()`, não `mem::sizeof`.
+- **Colisão:** se já houver a **mesma assinatura exportada** como global → **erro de compilação** (assinaturas
+  diferentes coexistem, como overload).
+- **Compõe com visibilidade:** `exp global comptime sizeof<T>(): usize` — `exp` (entra no `.tkh`) + `global`
+  (sem namespace) + `comptime`.
+- **Tipos global** *(a confirmar):* um `global type Intent` fica alcançável como `Intent`, não
+  `teko::threads::Intent` — é como `str`/`error` (core) já funcionam, agora **explícito** via `global` em vez
+  de injetado.
