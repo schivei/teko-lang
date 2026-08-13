@@ -1105,6 +1105,14 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   lower`. Args = **AST crua** (`.node`/`.source`/`.len`); os tipos **ainda não existem**, logo **sem
   `.type`/`.value()`** dentro do corpo. Produz **código** (AST), que é **type-checado depois** — código
   mal-tipado gerado falha no type-check normal, apontando a expansão.
+- **O mecanismo DEFINIDOR: a macro COPIA-SE no local de uso — ALARGA a AST.** Não é chamada (como função)
+  nem despacho — é **expansão inline**: o corpo é **copiado** na posição da chamada, com os args
+  substituídos, e a AST **cresce** ali. É essa cópia-in-place que distingue uma macro de uma função/trait.
+- **Não explicita tipos** — os args são **anônimos até serem materializados na AST** (e só então
+  type-checados). É isso que **sustenta os variadics**: sem tipo explícito, a aridade é livre.
+- **Uma macro nomeada ≈ `structural trait`, mas como HELPER que encapsula** — é o herdeiro **explícito e
+  visível** do que a *structural trait* tentava ser (encapsular um padrão estrutural), só que **escrito à
+  mão, sem shadow**, e copiado in-place no uso.
 - Modelo **Rust/Lisp** (expand-então-tipa). Funciona com args de runtime (`@count(a, b)` conta nós, não
   avalia nada). Precisa de **hygiene** (splice de código) e de um mecanismo `quote`/`${}` (splice + unquote).
 
