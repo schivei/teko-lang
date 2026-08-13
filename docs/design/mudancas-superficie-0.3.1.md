@@ -1144,8 +1144,22 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
 
 ### 14.2 Família B — avaliação comptime *(keyword: `comptime`)*
 - **Os tipos JÁ são conhecidos** — roda **DEPOIS do type-check**: `parse → AST → TYPE-CHECK → [comptime eval]
-  → lower`. Args = **valores typed avaliáveis**; computa um **valor** inlined. Modelo **Zig comptime**
-  (tipa-então-avalia). A keyword declara que os args têm de ser **comptime-conhecidos**.
+  → lower`. Args = **valores comptime-conhecidos**; computa um **valor** inlined. Modelo **Zig comptime**
+  (tipa-então-avalia).
+- **Args têm de ser comptime-CONHECIDOS; variável de runtime = ERRO de compilação** (ruling do dono). Como
+  roda pós-typecheck, o `comptime` **tem de conhecer o que é passado** — um valor de runtime não é avaliável
+  ali. Então os args são **constantes, tipos, ou expressões comptime-computáveis**; passar um local de
+  runtime **erra no sítio da chamada**. Consequência: a exigência de const é **por-macro** (todo arg
+  comptime-conhecido), **não por-acesso** — `.value()`/`.type` sempre resolvem.
+  ```teko
+  comptime sizeof(...args): usize { args[0].type.size }
+  @sizeof(i64)      // → 8  (passa o TIPO, comptime-conhecido)
+  var saldo: i64 = ler()
+  @sizeof(saldo)    // ✗ erro: `saldo` é runtime — comptime não pode conhecê-lo
+  ```
+- **`@sizeof`/`@typename` = macro comptime** (visível, no-shadow) sobre a reflexão de tipo
+  (`.type.size`/`.type.name`), **não builtin oculto**. A sub-decisão que resta: **quanto de reflexão de tipo
+  expor** (`.size`/`.name`/`.fields`…).
 
 ### 14.3 Consequências
 - **Fork "o que args é" resolvido pelo estágio:** A = **AST-only**, B = **valores typed**. Sem construto
