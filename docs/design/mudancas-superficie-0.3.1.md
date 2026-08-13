@@ -989,6 +989,29 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
 - **§12 — libc-direct / `#if` / `#os` / macro: ÚLTIMA.** Invertida com a §11: precisa **operar sobre a §11
   já formada** (a visibilidade `exp`/`pub` decidida), então só entra depois dela.
 
+### 11.1 Regra de ouro `exp`/`pub`/privado — a triagem de visibilidade
+
+Três camadas, uma regra por camada (ruling do dono):
+
+- **`exp` = tudo visível ao desenvolvedor** (o consumidor da linguagem). É o que entra no **self-`.tkh`**
+  do monólito e, portanto, o que o programa final enxerga ao linkar. Toda a superfície de API que o dev
+  usa — tipos, funções, operadores, consts, `global`s — é `exp`. Regra prática: **se o dev pode escrever o
+  nome, é `exp`**.
+- **`pub` = interno ao compilador/monólito** — visível entre namespaces do próprio Teko, **mas fora do
+  self-`.tkh`**. É o encapsulamento de implementação: o dev nunca vê, o programa final não linka contra.
+- **privado (sem modificador) = file-local** — nem outros namespaces do monólito enxergam.
+
+**Consequência de triagem:** popular `exp` corretamente **é** o trabalho da expansão-da-stdlib (§11-antes);
+a §11 depois só **formaliza/enforça**. O que hoje lê como `exp` por default (forward-compatible, tudo lê como
+`exp` sem enforcement) precisa ser reclassificado item a item quando a §11 entrar: o que for detalhe de
+implementação **desce para `pub`**; o resto **fica `exp` explícito**. Atrasar a §11 para depois da stdlib
+minimiza esse retrabalho (a superfície já nasce triada).
+
+**Amarra com o resto do Doc:** a Intent (`exp get` / `pub set`, §10.3), o `sizeof` (`exp global comptime`,
+§14.2/§15), os operadores de interface (`operator __eq` exportado, §9.4) — todos já grafados sob esta regra.
+`global` compõe direto: **`exp global …`** = superfície ambiente exportada (`println`, `sizeof`, `list`,
+`str`); **`pub global …`** = global visível ao monólito mas fora do self-`.tkh`.
+
 ---
 
 ## 12. Decisões — todas resolvidas pelo dono (2026-08-10)
