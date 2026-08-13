@@ -183,10 +183,11 @@ pub fn receiver_canonical_name(struct_name: str, ref_ns: str, table: TypeTable):
  */
 /**
 /**
- * return_type_is_self — is the type-expression the §4 `self` type atom (the parser's single-segment
+ * return_type_is_self — is the type-expression the `self` type atom (the parser's single-segment
  * `NamedType` named "self")? True only for a bare, un-parameterized `self`; a `self` with type-args
- * or a deeper path is not it. Used by `method_func_type` to resolve a `self` return to the enclosing
- * type. (§4 teach, 2026-08-11.)
+ * or a deeper path is not it. Used by `method_func_type` to resolve a `self` RETURN, and a `self`
+ * operand type in an `operator __dunder(left: self, …)` declaration (§9 ruling 1), to the enclosing
+ * value-type. (§4 teach, 2026-08-11; §9.)
  *
  * @param te  the return type-expression
  * @return    true iff `te` is the bare `self` type atom
@@ -211,6 +212,8 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
         var pt = if !f.params[i].has_type && f.params[i].name == "_" {
             match discard_param_type(disc_gov, i to u64, tbl, ref_ns) { Type as t => t; error as e => return e }
         } else if !f.params[i].has_type {
+            Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
+        } else if return_type_is_self(f.params[i].type_ann) {
             Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
         } else {
             match resolve_type(f.params[i].type_ann, tbl, ref_ns) { Type as t => t; error as e => return e }
@@ -373,6 +376,9 @@ fn collect_type_member_signatures(item: parser::Item, td: parser::TypeDecl, tabl
             }
             collect_method_signatures(item, td, eff, method_ns, table, env)
         }
+        parser::NewtypeBody as nb => collect_method_signatures(item, td, nb.methods, method_ns, table, env)
+        parser::EnumBody as eb => collect_method_signatures(item, td, eb.methods, method_ns, table, env)
+        parser::FlagsBody as fb => collect_method_signatures(item, td, fb.methods, method_ns, table, env)
         _ => sig_unchanged(env)
     }
 }
