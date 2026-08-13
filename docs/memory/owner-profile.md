@@ -138,6 +138,18 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
 - **A memória é a restrição dura, não só o `teko test`.** O build seco **também** vaza (via `monomorph`) e
   derruba o container sem `ulimit`. Toda invocação de build de agente vai com teto de memória, um build de
   cada vez. Dois crashes seguidos ensinaram isto.
+- **Investigação de memória (baseline blindado, `ulimit -v` + monitor de RSS).** A árvore atual builda
+  **limpa a ~3.5 GB RSS** (exit 0, limitado) — o baseline **NÃO vaza**. Cresceu de ~2.8 → ~3.5 GB com a
+  onda-das-traits (mais código de compilador = mais RSS; **crescimento limitado, não leak**). Logo o teto
+  certo é **tight (~5 GB, o normal ≈3.5)**, **não** alto: **10 GB era acomodar o leak, não investigá-lo**
+  (ruling do dono — *"algo aumentou o vazamento e precisa de investigação e correção"*). O crash foi
+  **ausência de `ulimit`** + provável caminho novo (`.{}`) tocando o leak do `monomorph`. Com teto tight, um
+  leak vira **OOM diagnosticável** (localiza o construct) em vez de derrubar o container — o teto é
+  **instrumento de investigação, não muleta**.
+- **Distinguir propriedade de RUNTIME de propriedade de COMPILE-TIME (correção ODBC).** A bitness ODBC
+  `_32`/`_64` depende do **driver instalado**, não do CPU (o processo é x64, o driver pode ser só-32-bit) →
+  é **par de funções por sufixo** (`connect_32`/`connect_64`), **não `#arch`**. Quando o dono corrige uma
+  proposta, a nuance costuma ser exatamente essa: runtime/instalado ≠ compile-time/arquitetura.
 - **Após 2 falhas iguais, checar antes de repetir.** Não re-despachar cegamente um reseed que travou duas
   vezes; blindar (teto de memória, commit-por-crumb) e **confirmar com o dono** antes da terceira tentativa.
 - **Ordem de reseed por segurança quando delegada:** aditivo/**byte-idêntico primeiro** (o gate byte-idêntico
