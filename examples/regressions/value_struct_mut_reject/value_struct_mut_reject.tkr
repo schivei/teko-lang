@@ -1,0 +1,38 @@
+# value_struct_mut_reject.tkr — the item-14 REJECT host (value-struct mutability + readonly,
+# §13.1-§13.3). Five illegal forms live one per namespace under src/, and the single failing build
+# reports every diagnostic it finds (parse-stage and checker-stage alike), one per scenario below. It
+# has no successful build to sanitize/run. A readonly field freezes after construction, inside and
+# outside the type (§13.3); a mutating method (inferred from the body — no `mut fn`) may not run on
+# an immutable receiver (§13.2); a value-type's `self` is readonly (§13.2 ruling 8/10).
+
+Feature: value_struct_mut_reject — the compiler rejects the illegal value-struct mutations (§13.1-§13.3)
+
+  # (ext_write_readonly) a write to a readonly field from OUTSIDE the type — the field freezes after
+  # construction (§13.3).
+  Scenario: ext_write_readonly — an external write to a readonly field is rejected
+    When compilation fails
+    Then diagnostic = "readonly field"
+
+  # (self_write_readonly) an internal `self.id = …` to a readonly field — a readonly field is frozen
+  # inside the declaring method too (§13.3).
+  Scenario: self_write_readonly — an internal `self` write to a readonly field is rejected
+    When compilation fails
+    Then diagnostic = "readonly field"
+
+  # (readonly_struct_whole) a `readonly struct` whose method writes a field — the whole-struct marker
+  # froze every field (§13.3).
+  Scenario: readonly_struct_whole — a write inside a `readonly struct` method is rejected
+    When compilation fails
+    Then diagnostic = "readonly field"
+
+  # (mutating_on_literal) a mutating method called on a LITERAL receiver — a literal is an immutable
+  # target (§13.2).
+  Scenario: mutating_on_literal — a mutating method on a literal receiver is rejected
+    When compilation fails
+    Then diagnostic = "immutable"
+
+  # (valuetype_self_write) a value-type method that writes its `self` — a subtype of a
+  # primitive/enum/flags carries a readonly `self` (§13.2 ruling 8/10).
+  Scenario: valuetype_self_write — a value-type method writing self is rejected
+    When compilation fails
+    Then diagnostic = "readonly `self`"
