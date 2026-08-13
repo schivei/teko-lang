@@ -947,6 +947,15 @@ penduraria quando a arena do outro lado dropasse (UAF). Consequências de superf
    o `gen2==gen3` nativo por edição de fonte, **sem segundo reseed** (o seed é da rota C, que já funciona;
    os bugs nativos são de fonte).
 
+**Ordem dos itens de roadmap dentro desta janela** (rulings do dono):
+- **item 14 — value-struct mutável** (C#-style via property, tirando o bloqueio "struct é readonly"):
+  **ANTECIPADO.** Está no caminho crítico da Intent (o `pub set` que escreve `self._x`, §10.3) e do `Ctx`
+  performático; entra cedo.
+- **visibilidade `exp`/`pub` — POR ÚLTIMO de tudo.** O enforcement vira muita coisa hoje-visível em
+  **ilegal** (muitas falhas a corrigir), e a grafia `exp`/`pub` já é **forward-compatible** (hoje tudo lê
+  como `exp`; a proteção da Intent auto-corrige quando ela entrar), então **nada bloqueia** por ela chegar
+  tarde — pelo contrário, atrasá-la minimiza retrabalho.
+
 ---
 
 ## 12. Decisões — todas resolvidas pelo dono (2026-08-10)
