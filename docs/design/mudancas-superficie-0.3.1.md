@@ -492,9 +492,10 @@ assinaturas" e passa a ser **decorador**: achata-se no tipo que a compõe (nem s
   parcial: uma trait pode só **contribuir** métodos sem declarar `& IFoo`; aí o **host** declara `& IFoo` e a
   composição inteira fecha o contrato (ex.: `NeByEq`). É o substituto **explícito** da structural aposentada
   (um `trait Equatable & IEq` / `Comparable & IOrd` escrito à mão, composto pra dar a capacidade).
-- **Colisão = identidade estrutural.** Dois membros de mesmo nome ao achatar: se a **declaração inteira** for
-  **idêntica** (campo: nome+tipo+default · método: assinatura+corpo · const: nome+tipo+valor) → **absorve num
-  só**; **qualquer diferença** → **erro de compilação**. Subsume o **diamante** (mesma trait 2× = idêntica =
+- **Colisão = identidade estrutural, comparada pela AST.** Dois membros de mesmo nome ao achatar:
+  **compara-se a AST dos membros conflitantes** (pós-parse — normaliza espaços/comentários, mas é
+  estrutural: identificadores e ordem contam, `a+b` ≠ `b+a`, nome de parâmetro conta). **AST igual** →
+  **absorve num só**; **qualquer diferença** → **erro de compilação**. Subsume o **diamante** (mesma trait 2× = idêntica =
   absorvida, **idempotente**) e integra **sobrecarga** (assinaturas diferentes = overload, coexistem; só
   entram na regra os de mesma assinatura). Resolve o micro-fork struct-vs-trait: redefinir um membro de trait
   com corpo diferente = **erro**, sem override silencioso. *Nota:* dois privados idênticos porém
