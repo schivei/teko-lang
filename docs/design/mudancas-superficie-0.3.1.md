@@ -383,6 +383,11 @@ var b = chan<i32>::make(0)     // bounds = 0 (unbounded)
    substitui os antigos `variant` nomeados: um campo que antes tinha tipo `Type` agora carrega a **união
    dos membros, escrita por extenso**.
 
+   **Precedência `[]` > `|` — array de tipo-soma exige parênteses (ruling do dono).** O former de slice
+   `[]` liga mais forte que a união `|`, então `[]A | B` parseia como `([]A) | B` (um array-de-A, OU um
+   B). Um array **cujo elemento é a união** deve ser circundado: **`[](A | B | …)`**. Ex.:
+   `members: [](Prim | Byte | … | Null)` (array da união) vs `[]Prim | Byte` (array de Prim, ou Byte).
+
 2. **União de CONSTRAINT — de FORMAS, no bound de um genérico.** Um constraint é uma **disjunção de
    conjunções**: `<T: Alt1 | Alt2 | …>`, onde cada `Alt` é `Termo & Termo & …`. Os **termos** são:
    - **palavras de forma:** `class`, `service`, `struct` — forçam a *forma* do tipo. `service` **aceita um
@@ -592,6 +597,9 @@ pub type Slice   = struct { element: Prim | Byte | Char | Str | Slice | Named | 
 pub type Variant = struct { members: [](Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null) }
 pub type Func    = struct { params: [](Prim | … | Null); ret: Prim | … | Null; variadic: bool; … }
 ```
+
+Note os **parênteses obrigatórios no array-de-união** (`members: [](Prim | … | Null)`): `[]` liga mais
+forte que `|`, então sem eles `[]Prim | … | Null` seria "array-de-Prim, ou Byte, ou …" (§9.2b, precedência).
 
 **A verbosidade é o preço, não um defeito** (ruling do dono, verbatim: *"Vai ser verboso mesmo, e isso não é
 problema, é o preço."*). Sem alias, sem `newtype`, sem wrapper — qualquer abreviação reintroduziria a
