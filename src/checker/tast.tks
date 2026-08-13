@@ -54,7 +54,17 @@ pub type TCompare = struct { first: TExpr; rest: []TCmpTerm }
  * `(ns, name)` mangle at the call (`cb_fn_name` / `mangle_fn_symbol`), so the call agrees with the
  * chosen definition by construction.
  */
-pub type TCall = struct { callee: parser::Path; args: []TExpr; call_ns: str; is_closure_call: bool; callee_type: Type; is_iface_dispatch: bool; iface_slot: u32; type_args: []Type; overload_suffix: str }
+/**
+ * TCall — a typed call. `.type` (on the enclosing `TExpr`) is the call's result type — for a
+ * MULTIPLE-return callee (§9 F, ruling 3) that is the FIRST return type and `ret_extra` carries the
+ * rest; such a call is legal ONLY as the sole RHS of a `MultiBind` or a matched-arity `return`
+ * (`reject_multivalue_in_value_position` bars every other position — there is no tuple type).
+ *
+ * @field ret_extra  the additional return types (positions 2..N) when the callee returns multiple
+ *                   values; EMPTY otherwise (every existing `TCall { … }` only appends
+ *                   `ret_extra = teko::list::empty()`, fixpoint-inert).
+ */
+pub type TCall = struct { callee: parser::Path; args: []TExpr; call_ns: str; is_closure_call: bool; callee_type: Type; is_iface_dispatch: bool; iface_slot: u32; type_args: []Type; overload_suffix: str; ret_extra: []Type }
 
 // control-flow expressions carry TYPED blocks/arms (B.20/B.15). The `pattern` stays
 // syntactic (it binds; pattern typing itself is C7a); `guard` is valid iff has_when.
@@ -155,7 +165,17 @@ pub type TBinding = struct { kind: parser::BindKind; target: parser::BindTarget;
 // `bound` = the target's declared type (codegen wraps the RHS into it — emit_as). `deref` stays a plain
 // bool == (kind==RefDeref) so the legacy TKB layout / readers are unchanged for the two old shapes.
 pub type TAssign = struct { kind: parser::AssignKind; name: str; op: lexer::TokenKind; bound: Type; value: TExpr; deref: bool; target: TExpr }
-pub type TReturn = struct { has_value: bool; value: TExpr }   // `value` gated by has_value (B.20) — a bare `return`'s placeholder (Number 0) types harmlessly
+/**
+ * TReturn — a typed `return`. `value` is gated by `has_value` (a bare `return`'s placeholder Number 0
+ * types harmlessly). For a MULTIPLE return (§9 F) `values` holds the ≥ 2 typed return expressions,
+ * lowered by codegen into the synthesized by-value aggregate; `values` is EMPTY for a single/bare
+ * return (every existing `TReturn { … }` only appends `values = teko::list::empty()`, fixpoint-inert).
+ *
+ * @field has_value true iff a value (single or multiple) follows the `return`.
+ * @field value     the single returned expression (a placeholder when bare or multiple).
+ * @field values    the ≥ 2 typed return expressions of a multiple return; empty otherwise.
+ */
+pub type TReturn = struct { has_value: bool; value: TExpr; values: []TExpr }
 /**
  * `[LABEL:] loop [<head>] { … }` typed (M.5, #517) — the head already desugared: `init` is the
  * run-once LOOP-SCOPED preamble (counter/bound/`_first`/`_it`; empty for infinite & while) and
@@ -235,6 +255,14 @@ pub type TFunction = struct {
      * so definition, prototype, call, closure literal and `.tsym` all agree by construction.
      */
     overload_suffix: str
+    /**
+     * ret_extra — the RESOLVED additional return types (positions 2..N) of a MULTIPLE-return function
+     * (§9 F, ruling 3). EMPTY for a single-return fn (`return_type` is the sole return), so every
+     * existing `TFunction { … }` only appends `ret_extra = teko::list::empty()` (fixpoint). Codegen
+     * reads it to synthesize the by-value return aggregate `tk_mret_…` and to emit the multi-value
+     * `return`; both backends key the aggregate off this same list. Never a tuple `Type`.
+     */
+    ret_extra: []Type
 }
 /**
  * TConstDecl — a typed module-level constant (#594): the resolved value type and the typed,

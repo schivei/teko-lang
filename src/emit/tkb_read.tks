@@ -170,7 +170,7 @@ fn read_type(r: Reader, table: []str): RType | error {
     if tag.value == 8 {
         var ps = match read_types(tag.r, table) { RTypes as x => x; error as e => return e }
         var rt = match read_type(ps.r, table) { RType as x => x; error as e => return e }
-        return RType { r = rt.r; value = checker::Func { params = ps.value; ret = rt.value; variadic = false; param_names = []; n_required = (ps.value).len; defaults = [] } }
+        return RType { r = rt.r; value = checker::Func { params = ps.value; ret = rt.value; variadic = false; param_names = []; n_required = (ps.value).len; defaults = []; ret_extra = teko::list::empty() } }
     }
     if tag.value == 10 { return RType { r = tag.r; value = checker::Ptr { inner = null } } }
     if tag.value == 11 { return RType { r = tag.r; value = checker::Uptr { } } }   // (C7.1a) tag 11 = uptr
@@ -323,7 +323,7 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         var callns = match tkb_read_str(ar.r, table) { RStr as x => x; error as e => return e }
         var closure = match read_u8(callns.r) { RByte as x => x; error as e => return e }
         var tas = match read_types(closure.r, table) { RTypes as x => x; error as e => return e }   // explicit call-site type-args (empty for a bare/inferred call)
-        return RTExpr { r = tas.r; value = checker::TExpr { kind = checker::TCall { overload_suffix = ""; callee = cal.value; args = ar.value; call_ns = callns.value; is_closure_call = closure.value != 0; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = tas.value }; type = ty.value; line = 0; col = 0 } }
+        return RTExpr { r = tas.r; value = checker::TExpr { kind = checker::TCall { overload_suffix = ""; callee = cal.value; args = ar.value; call_ns = callns.value; is_closure_call = closure.value != 0; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = tas.value; ret_extra = teko::list::empty() }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 8 {
         // (C7.16) IF: inverse of write tag 8 — cond (texpr) + then_blk + has_else (u8) + else_blk.
@@ -463,7 +463,7 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         var ar = match read_texprs(slot.r, table) { RTExprs as x => x; error as e => return e }
         var callns = match tkb_read_str(ar.r, table) { RStr as x => x; error as e => return e }
         var closure = match read_u8(callns.r) { RByte as x => x; error as e => return e }
-        return RTExpr { r = closure.r; value = checker::TExpr { kind = checker::TCall { overload_suffix = ""; callee = cal.value; args = ar.value; call_ns = callns.value; is_closure_call = closure.value != 0; callee_type = ct.value; is_iface_dispatch = true; iface_slot = slot.value; type_args = teko::list::empty() }; type = ty.value; line = 0; col = 0 } }
+        return RTExpr { r = closure.r; value = checker::TExpr { kind = checker::TCall { overload_suffix = ""; callee = cal.value; args = ar.value; call_ns = callns.value; is_closure_call = closure.value != 0; callee_type = ct.value; is_iface_dispatch = true; iface_slot = slot.value; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 26 {
         var bd = match read_tstatements(tag.r, table) { RTStmts as x => x; error as e => return e }
@@ -539,7 +539,7 @@ fn read_tstatement(r: Reader, table: []str): RTStmt | error {
     if tag.value == 2 {
         var hv = match read_u8(tag.r) { RByte as x => x; error as e => return e }
         var v = match read_texpr(hv.r, table) { RTExpr as x => x; error as e => return e }
-        return RTStmt { r = v.r; value = checker::TReturn { has_value = hv.value != 0; value = v.value } }
+        return RTStmt { r = v.r; value = checker::TReturn { has_value = hv.value != 0; value = v.value; values = teko::list::empty() } }
     }
     if tag.value == 3 {
         var lb = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
@@ -879,7 +879,7 @@ fn read_tfunction(r: Reader, table: []str): RTFunction | error {
     var ie = match read_u8(it.r) { RByte as x => x; error as e => return e }
     var cs = match tkb_read_str(ie.r, table) { RStr as x => x; error as e => return e }
     var fr = match tkb_read_str(cs.r, table) { RStr as x => x; error as e => return e }
-    RTFunction { r = fr.r; value = checker::TFunction { overload_suffix = ""; name = nm.value; type_params = tp.value; type_constraints = tc.value; params = ps.value; return_type = rt.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; namespace = ns.value; file = fl.value; line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0; c_symbol = cs.value; from_lib = fr.value; has_arena_size = false; arena_size = 0 to u64 } }
+    RTFunction { r = fr.r; value = checker::TFunction { overload_suffix = ""; name = nm.value; type_params = tp.value; type_constraints = tc.value; params = ps.value; return_type = rt.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; namespace = ns.value; file = fl.value; line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0; c_symbol = cs.value; from_lib = fr.value; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty() } }
 }
 /**
  * Read a module-level `TConstDecl` TItem: inverse of `write_tconstdecl` (#594 crumb 8) — name +

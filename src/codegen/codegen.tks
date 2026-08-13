@@ -10748,7 +10748,7 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: parser::TypeExpr): checker::T
             }
             checker::Variant { members = cg_union_normalize_null(mem) }
         }
-        parser::FunctionType => checker::Func { params = teko::list::empty(); ret = checker::Void { }; variadic = false; param_names = []; n_required = 0; defaults = [] }
+        parser::FunctionType => checker::Func { params = teko::list::empty(); ret = checker::Void { }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() }
     }
 }
 
@@ -11449,7 +11449,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         match prog.items[i] {
             checker::TFunction as f => {
                 var nb = cg_lift_block(f.body, acc)
-                items = teko::list::push(items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size })
+                items = teko::list::push(items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra })
             }
             checker::TStatement as ts => {
                 var ns = cg_lift_stmt(ts, acc)
@@ -11494,7 +11494,7 @@ fn cg_lift_stmt(s: checker::TStatement, ref acc: StampAcc): checker::TStatement 
     match s {
         checker::TBinding as b => checker::TBinding { kind = b.kind; target = b.target; bound = b.bound; value = cg_lift_expr(b.value, acc) }
         checker::TAssign as a => checker::TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = cg_lift_expr(a.value, acc); deref = a.deref; target = if parser::assign_has_target(a.kind) { cg_lift_expr(a.target, acc) } else { a.target } }
-        checker::TReturn as r => checker::TReturn { has_value = r.has_value; value = if r.has_value { cg_lift_expr(r.value, acc) } else { r.value } }
+        checker::TReturn as r => checker::TReturn { has_value = r.has_value; value = if r.has_value { cg_lift_expr(r.value, acc) } else { r.value }; values = teko::list::empty() }
         checker::TLoopStmt as l => checker::TLoopStmt { label = l.label; init = cg_lift_block(l.init, acc); body = cg_lift_block(l.body, acc) }
         checker::TExprStmt as es => checker::TExprStmt { expr = cg_lift_expr(es.expr, acc) }
         checker::TDeferStmt as d => checker::TDeferStmt { body = cg_lift_block(d.body, acc) }
@@ -11536,7 +11536,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
                 var ps: []parser::Param = teko::list::empty()
                 var pi = 0
                 loop { if pi >= lam.params.len { break }; ps = teko::list::push(ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }); pi++ }
-                newfns = teko::list::push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 })
+                newfns = teko::list::push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty() })
             } else {
                 newlams = teko::list::push(newlams, stamped)
             }
@@ -11556,7 +11556,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
             var args: []checker::TExpr = teko::list::empty()
             var i = 0
             loop { if i >= cl.args.len { break }; args = teko::list::push(args, cg_lift_expr(cl.args[i], acc)); i++ }
-            checker::TExpr { kind = checker::TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = e.type; line = e.line; col = e.col }
+            checker::TExpr { kind = checker::TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = e.type; line = e.line; col = e.col }
         }
         checker::TIfExpr as f => checker::TExpr { kind = checker::TIfExpr { cond = cg_lift_expr(f.cond, acc); then_blk = cg_lift_block(f.then_blk, acc); has_else = f.has_else; else_blk = cg_lift_block(f.else_blk, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TMatchExpr as m => {

@@ -2367,7 +2367,7 @@ fn fold_borrow(b: TBorrow, e: TExpr, table: TypeTable, env: Env, agg: AggConstMa
  */
 fn fold_call(cl: TCall, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
     var args = match fold_exprs(cl.args, table, env, agg) { error as x => return x; []TExpr as a => a }
-    TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = e.type; line = e.line; col = e.col }
+    TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = e.type; line = e.line; col = e.col }
 }
 
 /**
@@ -2665,7 +2665,7 @@ fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap): TSta
 fn fold_return(r: TReturn, st: TStatement, table: TypeTable, env: Env, agg: AggConstMap): TStatement | error {
     if !r.has_value { return st }
     var v = match fold_expr(r.value, table, env, agg) { error as x => return x; TExpr as f => f }
-    TReturn { has_value = true; value = v }
+    TReturn { has_value = true; value = v; values = teko::list::empty() }
 }
 
 /**
@@ -2767,7 +2767,7 @@ fn fold_item(it: TItem, table: TypeTable, env: Env, agg: AggConstMap, ctors: []T
  */
 fn fold_function(f: TFunction, table: TypeTable, env: Env, agg: AggConstMap): TItem | error {
     var body = match fold_block(f.body, table, env, agg) { error as x => return x; []TStatement as v => v }
-    TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra }
 }
 
 /**
@@ -3086,7 +3086,7 @@ fn lp_expr(e: TExpr, m: LocalConstMap): TExpr {
         TBinary as b => TExpr { kind = TBinary { op = b.op; left = lp_expr(b.left, m); right = lp_expr(b.right, m) }; type = e.type; line = e.line; col = e.col }
         TUnary as u => TExpr { kind = TUnary { op = u.op; operand = lp_expr(u.operand, m) }; type = e.type; line = e.line; col = e.col }
         TCompare as c => lp_compare(c, e, m)
-        TCall as cl => TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = lp_exprs(cl.args, m); call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args }; type = e.type; line = e.line; col = e.col }
+        TCall as cl => TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = lp_exprs(cl.args, m); call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = e.type; line = e.line; col = e.col }
         TIfExpr as f => lp_if(f, e, m)
         TMatchExpr as mm => lp_match(mm, e, m)
         TCast as c => TExpr { kind = TCast { expr = lp_expr(c.expr, m) }; type = e.type; line = e.line; col = e.col }
@@ -3353,7 +3353,7 @@ fn lp_adopt(a: TAdoptStmt, m: LocalConstMap): TStatement {
  */
 fn lp_return(r: TReturn, st: TStatement, m: LocalConstMap): TStatement {
     if !r.has_value { return st }
-    TReturn { has_value = true; value = lp_expr(r.value, m) }
+    TReturn { has_value = true; value = lp_expr(r.value, m); values = teko::list::empty() }
 }
 
 /**
@@ -3384,7 +3384,7 @@ fn lp_assign(a: TAssign, m: LocalConstMap): TStatement {
  */
 fn lp_function(f: TFunction): TItem {
     var body = lp_block(f.body, lp_empty()).stmts
-    TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra }
 }
 
 /**
