@@ -1100,7 +1100,7 @@ Teko ganha **macros** (trazidas do "pós-1.0 / no macros" por ruling do dono —
 keyword** (o dev **diz** o que quer, o compilador **sabe** o que é) e chamada com **`@`**. As duas se
 distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os args são** (sem híbrido).
 
-### 14.1 Família A — sintática *(keyword provisória: `macro`)*
+### 14.1 Família A — sintática *(keyword: `macro`)*
 - **Aplica na AST, ANTES do type-check** (pré-passo): `parse → AST → [expand] → TYPE-CHECK do resultado →
   lower`. Args = **AST crua** (`.node`/`.source`/`.len`); os tipos **ainda não existem**, logo **sem
   `.type`/`.value()`** dentro do corpo. Produz **código** (AST), que é **type-checado depois** — código
@@ -1116,7 +1116,7 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
 - Modelo **Rust/Lisp** (expand-então-tipa). Funciona com args de runtime (`@count(a, b)` conta nós, não
   avalia nada). Precisa de **hygiene** (splice de código) e de um mecanismo `quote`/`${}` (splice + unquote).
 
-### 14.2 Família B — avaliação comptime *(keyword provisória: `comptime`)*
+### 14.2 Família B — avaliação comptime *(keyword: `comptime`)*
 - **Os tipos JÁ são conhecidos** — roda **DEPOIS do type-check**: `parse → AST → TYPE-CHECK → [comptime eval]
   → lower`. Args = **valores typed avaliáveis**; computa um **valor** inlined. Modelo **Zig comptime**
   (tipa-então-avalia). A keyword declara que os args têm de ser **comptime-conhecidos**.
@@ -1126,5 +1126,5 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
   híbrido (supera o 1C single-construct do `plano-macro`, a revisar).
 - **FFI:** `extern` + a família — `extern macro` (macro C função-like) / `extern comptime` (constante C,
   `O_RDONLY`).
-- **Chamada:** `@nome(...)` nas duas. **Nomes das keywords `macro`/`comptime` são PROVISÓRIOS** — a confirmar
-  pelo dono; só a **semântica** (duas famílias + estágios) está fechada aqui.
+- **Chamada:** `@nome(...)` nas duas. **Keywords fechadas: `macro` (Família A) / `comptime` (Família B)**
+  (ruling do dono).
