@@ -1113,8 +1113,24 @@ distinguem pelo **estágio de pipeline** — e é o estágio que **fixa o que os
 - **Uma macro nomeada ≈ `structural trait`, mas como HELPER que encapsula** — é o herdeiro **explícito e
   visível** do que a *structural trait* tentava ser (encapsular um padrão estrutural), só que **escrito à
   mão, sem shadow**, e copiado in-place no uso.
+- **O splice: `lowering { … }` + `${expr}`.** O corpo da macro é **lógica comptime que roda ANTES de
+  alargar** e decide **quais blocos `lowering` emitir** (ou nenhum) — expansão condicional/montada. Dentro de
+  `lowering { }` tudo é **verbatim** (copiado na íntegra na AST); **exceto `${expr}`**, que **injeta o
+  nó/valor computado** pela macro. (Nome `lowering` = "baixa código na AST", no lugar de `quote`; escape
+  `${}`.)
+  ```teko
+  macro log_if(...args) {                       // sem retorno → EMITE código
+      if args.len > 0 {                          // lógica comptime — roda antes de alargar
+          lowering { teko::io::println(${args[0]}) }   // verbatim, com ${} injetando o nó do arg
+      }                                          // if falso → não alarga nada
+  }
+  @log_if(msg)   // → teko::io::println(msg)   ;   @log_if()  → nada
+  ```
+- **O tipo de retorno discrimina:** macro **sem** retorno **emite código** (via `lowering`); macro **com**
+  retorno (`: usize`) **computa um valor** inlined (`macro count(...args): usize { args.len }`).
 - Modelo **Rust/Lisp** (expand-então-tipa). Funciona com args de runtime (`@count(a, b)` conta nós, não
-  avalia nada). Precisa de **hygiene** (splice de código) e de um mecanismo `quote`/`${}` (splice + unquote).
+  avalia nada). Precisa de **hygiene** (um binding introduzido pela macro pode capturar o do usuário) — o
+  esquema (gensym/colorido) fica pra onda.
 
 ### 14.2 Família B — avaliação comptime *(keyword: `comptime`)*
 - **Os tipos JÁ são conhecidos** — roda **DEPOIS do type-check**: `parse → AST → TYPE-CHECK → [comptime eval]
