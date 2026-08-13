@@ -851,6 +851,25 @@ fn skip_field_inline_attr(tokens: []lexer::Token, pos: u64): u64 | error {
     skip_seps(tokens, pos + 2)
 }
 
+/**
+ * parse_readonly_marker — consume a CONTEXTUAL `readonly` marker at `pos` and report whether it was
+ * present (§13.3). `readonly` is NOT a reserved word: the caller has already established that this
+ * position is a marker slot (immediately before `struct`, or before a `name :` field head), so an
+ * `Ident("readonly")` here is the freeze marker; anywhere else it stays an ordinary identifier
+ * (precedent `trait`). Returns the (possibly advanced) index plus a present-flag.
+ *
+ * @param tokens  the token stream
+ * @param pos     the candidate marker index
+ * @return        `{ present, next }` — `next` is past the marker when present, else `pos` unchanged
+ * @since item-14
+ */
+fn parse_readonly_marker(tokens: []lexer::Token, pos: u64): ReadonlyMarker {
+    if is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "readonly" {
+        return ReadonlyMarker { present = true; next = pos + 1 }
+    }
+    ReadonlyMarker { present = false; next = pos }
+}
+
 fn parse_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
     var p = skip_seps(tokens, pos + 1)   // consume `{`, skip leading separators
     var fields: []Field = teko::list::empty()
@@ -872,7 +891,9 @@ fn parse_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
                 consts = mcs.consts
                 p = mcs.next
             } else {
-                var fstart = match skip_field_inline_attr(tokens, fdoc.next) { u64 as x => x; error as e => return e }
+                var iattr = match skip_field_inline_attr(tokens, fdoc.next) { u64 as x => x; error as e => return e }
+                var ro = parse_readonly_marker(tokens, iattr)
+                var fstart = ro.next
                 if !is_name_at(tokens, fstart) {
                     return err_at(tokens, fstart, "expected a field name, a method (`fn …`), or a `const` member")
                 }
@@ -881,7 +902,7 @@ fn parse_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
                     return err_at(tokens, fstart + 1, "expected ':' after a field name")
                 }
                 var ty = match parse_type(tokens, fstart + 2) { ParsedType as x => x; error as e => return e }
-                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc })
+                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = ro.present })
                 p = ty.next
             }
         }
@@ -950,7 +971,7 @@ fn parse_class_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
                     return err_at(tokens, fp + 1, "expected ':' after a field name")
                 }
                 var ty = match parse_type(tokens, fp + 2) { ParsedType as x => x; error as e => return e }
-                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = fvis; is_intern = fintern; has_doc = fdoc.has_doc; doc = fdoc.doc })
+                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = fvis; is_intern = fintern; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = false })
                 p = ty.next
             }
         }
@@ -1158,7 +1179,7 @@ fn parse_trait_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
                     return err_at(tokens, fdoc.next + 1, "expected ':' after a field name")
                 }
                 var ty = match parse_type(tokens, fdoc.next + 2) { ParsedType as x => x; error as e => return e }
-                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc })
+                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = false })
                 p = ty.next
             }
         }
@@ -1170,6 +1191,67 @@ fn parse_trait_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }   // trailing separator
     }
     ParsedStructBody { fields = fields; methods = methods; consts = consts; next = p + 1 }
+}
+
+/**
+ * freeze_all_fields — mark every field of a `readonly struct` as readonly (§13.3): the whole-struct
+ * marker propagates the freeze to each field, so a per-field write check needs no separate
+ * struct-level lookup. Returns a fresh field list with `is_readonly = true` on each; the input list
+ * is unchanged.
+ *
+ * @param fields  the parsed fields of a readonly struct
+ * @return        the same fields, each carrying `is_readonly = true`
+ * @since item-14
+ */
+fn freeze_all_fields(fields: []Field): []Field {
+    var out: []Field = teko::list::empty()
+    var i = 0 to u64
+    loop {
+        if i >= fields.len { break }
+        var f = fields[i]
+        out = teko::list::push(out, Field { name = f.name; type_ann = f.type_ann; vis = f.vis; is_intern = f.is_intern; has_doc = f.has_doc; doc = f.doc; is_readonly = true })
+        i++
+    }
+    out
+}
+
+/**
+ * is_readonly_struct_head — does the body position at `pos` open a `readonly struct` (§13.3)? True
+ * when a CONTEXTUAL `Ident("readonly")` sits immediately before `struct`; anywhere else `readonly`
+ * stays an ordinary identifier (precedent `trait`), so a transparent alias `type X = readonly` (no
+ * following `struct`) is NOT a readonly-struct head and falls through to the alias branch.
+ *
+ * @param tokens  the token stream
+ * @param pos     the body position under test
+ * @return        true iff `pos` opens a `readonly struct` declaration
+ * @since item-14
+ */
+fn is_readonly_struct_head(tokens: []lexer::Token, pos: u64): bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "readonly" && is_kind_at(tokens, pos + 1, lexer::TokenKind::Struct)
+}
+
+/**
+ * parse_struct_body — parse a `struct [I & …] { fields }` body (OOP A1), optionally frozen as a
+ * `readonly struct` (§13.3). `pos` is at the `struct` keyword (the caller consumed any leading
+ * `readonly` marker and passes its presence as `is_readonly`). When frozen, the marker propagates to
+ * every field (`freeze_all_fields`), so each Field also reads back readonly.
+ *
+ * @param tokens       the token stream
+ * @param pos          the index of the `struct` keyword
+ * @param is_readonly  true iff a `readonly` marker preceded `struct`
+ * @return             the parsed StructBody + the resume index, or a located parse error
+ * @throws             a malformed interface list or `{ … }` field body
+ * @since item-14
+ */
+fn parse_struct_body(tokens: []lexer::Token, pos: u64, is_readonly: bool): Parsed<TypeBody> | error {
+    var impls = match parse_amp_name_list(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
+    if !is_kind_at(tokens, impls.next, lexer::TokenKind::LBrace) {
+        return err_at(tokens, impls.next, "expected '{' after `struct` (or its interface list)")
+    }
+    var fs = match parse_fields(tokens, impls.next) { ParsedStructBody as x => x; error as e => return e }
+    var flds = fs.fields
+    if is_readonly { flds = freeze_all_fields(fs.fields) }
+    Parsed<TypeBody> { node = StructBody { fields = flds; methods = fs.methods; implements = impls.items; consts = fs.consts; is_readonly = is_readonly }; next = fs.next }
 }
 
 // the body of a type declaration. `struct [I & …] { fields }`, `interface [I & …] { sigs }`,
@@ -1194,14 +1276,11 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | error {
         var fs = match parse_trait_fields(tokens, pos + 1) { ParsedStructBody as x => x; error as e => return e }
         return Parsed<TypeBody> { node = TraitBody { fields = fs.fields; methods = fs.methods; consts = fs.consts }; next = fs.next }
     }
+    if is_readonly_struct_head(tokens, pos) {
+        return parse_struct_body(tokens, pos + 1, true)
+    }
     if is_kind_at(tokens, pos, lexer::TokenKind::Struct) {
-        // (W10b.IF) optional implements list `struct I1 & I2 { … }` between `struct` and `{`.
-        var impls = match parse_amp_name_list(tokens, pos + 1) { ParsedList<str> as x => x; error as e => return e }
-        if !is_kind_at(tokens, impls.next, lexer::TokenKind::LBrace) {
-            return err_at(tokens, impls.next, "expected '{' after `struct` (or its interface list)")
-        }
-        var fs = match parse_fields(tokens, impls.next) { ParsedStructBody as x => x; error as e => return e }
-        return Parsed<TypeBody> { node = StructBody { fields = fs.fields; methods = fs.methods; implements = impls.items; consts = fs.consts }; next = fs.next }
+        return parse_struct_body(tokens, pos, false)
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Enum) {
         if !is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {

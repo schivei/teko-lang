@@ -608,8 +608,14 @@ pub type Function = struct {
  * @param implements  the interface names the struct conforms to (`& I1 & I2`), empty when none
  * @param consts      the static type-member `const NAME: T = …` declarations (#594 crumb 7); each
  *                    occupies NO layout slot and is resolved by `StructName::NAME`
+ * @param is_readonly this struct is a `readonly struct` (§13.3): EVERY field freezes after
+ *                    construction. A readonly struct's fields may be set ONLY inside a `self { … }`
+ *                    construction or via a declaration default; any later write (external
+ *                    `s.f = v` or internal `self.f = v`) is a checker error. A bare `struct` (the
+ *                    default, all `var`) carries false and is byte-identical to today's tree
+ *                    (additive-inert, fixpoint).
  */
-pub type StructBody = struct { fields: []Field; methods: []Function; implements: []str; consts: []ConstDecl }
+pub type StructBody = struct { fields: []Field; methods: []Function; implements: []str; consts: []ConstDecl; is_readonly: bool }
 /**
  * One field of a struct/class/trait body.
  *
@@ -627,8 +633,14 @@ pub type StructBody = struct { fields: []Field; methods: []Function; implements:
  * @param is_intern  visible to inheritors? (class bodies only; always false for a struct field)
  * @param has_doc    a Javadoc directly precedes this field?
  * @param doc        the doc-comment's text (valid iff has_doc)
+ * @param is_readonly this individual field is `readonly` (§13.3), even inside an otherwise-mutable
+ *                    struct: it may be set ONLY at construction (`self { … }`) or by a declaration
+ *                    default, never mutated afterwards. A struct marked `readonly` propagates the
+ *                    freeze to every field, so each Field also reads back true there. An ordinary
+ *                    field carries false. Orthogonal to `vis`/`is_intern` (reach) and to a get-only
+ *                    property (encapsulation): `readonly` freezes, `get`-only encapsulates.
  */
-pub type Field = struct { name: str; type_ann: TypeExpr; vis: Visibility; is_intern: bool; has_doc: bool; doc: str }
+pub type Field = struct { name: str; type_ann: TypeExpr; vis: Visibility; is_intern: bool; has_doc: bool; doc: str; is_readonly: bool }
 /**
  * EnumBody — an `enum Name { A; B; … }` body: the member names, in declaration order. §9 adds an
  * optional trailing method block `enum Dir { N; S } { fn oposto(): Dir { … } }` (ruling 12): a
