@@ -36,16 +36,14 @@ type MonoInst = struct { fn_name: str; mangled: str; s: Subst; owner_ns: str }
  * at monomorphization (never at definition): an unconstrained `T` stays opaque at the generic's
  * own definition; a constraint gates the CONCRETE type bound to `T` once a real instantiation
  * exists. Membership is NOMINAL. A `variant` atom is satisfied when `concrete` equals (by `type_eq`
- * — no structural check) one of the variant's declared MEMBER types. An INTERFACE or (TR1) TRAIT
- * atom is satisfied when `concrete` nominally conforms (its own name, or `type_conforms_to` through
+ * — no structural check) one of the variant's declared MEMBER types. An INTERFACE atom is
+ * satisfied when `concrete` nominally conforms (its own name, or `type_conforms_to` through
  * the class base chain + contract `extends` closure — the same gate as the D3 upcast); classes AND
  * structs conform here (a struct cannot become a contract VALUE, but it may instantiate a
- * constrained generic). (TR3) A compiler-known STRUCTURAL trait atom (incl. the `Hashable`/
- * `Comparable` synonyms, collapsed by `structural_trait_canonical`) is satisfied when `concrete`
- * DERIVES the canonical structural trait — its folded `implements` list carries the canonical name
- * (fold_traits keeps derives in `implements`), so `type_conforms_to` sees it; this is what lets
- * `<K: Hashable & Eq>` bind. Any other TypeDecl kind (struct/enum/flags/alias/extern) is an exact
+ * constrained generic). Any other TypeDecl kind (struct/enum/flags/alias/extern) is an exact
  * nominal name. An atom naming no TypeDecl at all is unsatisfiable (never silently ignored — M.1).
+ * A trait never reaches this routine as a constraint atom: a trait is not a type and `atom_surface`
+ * already rejects it before monomorphization (§9.4 constraint = interface-only).
  *
  * @param atom_name the constraint atom's name
  * @param concrete  the concrete type bound to the type parameter at this instantiation
@@ -53,10 +51,6 @@ type MonoInst = struct { fn_name: str; mangled: str; s: Subst; owner_ns: str }
  * @return true iff `concrete` satisfies the atom
  */
 fn constraint_atom_satisfied(atom_name: str, concrete: Type, table: TypeTable): bool {
-    if is_structural_trait(atom_name) {
-        var canon = structural_trait_canonical(atom_name)
-        return match concrete { Named as n => type_conforms_to(n.name, canon, table); _ => false }
-    }
     match type_table_find(table, atom_name, "") {   // (#109 W1) constraint-atom probe on a resolved name — no referencing ns
         parser::TypeDecl as td => {
             match td.body {
