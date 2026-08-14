@@ -533,3 +533,10 @@ feito."* — verificado: já sabe chamar (`ItemKind`), nada a ensinar.
    `@Type() | null` (o `union_collect` colapsa o null — sem tratamento especial).
 5. Gate: reseed + `teko test .` no CI. Fixtures novas: round-trip de união-de-uniões (`@TItem()`
    contendo `@TStatement()`) + `@Type()`-anulável.
+
+**Ciclo direto união→união (`A=B|C; B=A|C`) — NÃO existe (verificado 2026-08-14, ruling do dono: YAGNI).**
+Grafo de arestas união→união mapeado: só `ItemKind→Statement` e `TItem→TStatement`, ambos SEM volta
+(DAG). A recursão real é SEMPRE mediada por struct (ex. `Type`→`Variant` struct→`[]Type` slice), que
+fecha pelo box + nome nominal do struct — não é expansão infinita. Como não há caso de ciclo direto,
+**nenhum mecanismo de ciclo é necessário** (nem invariante "interpõe struct", nem box-no-ciclo). Se um
+ciclo direto for introduzido no futuro, decide-se ali; hoje, não há o que resolver.
