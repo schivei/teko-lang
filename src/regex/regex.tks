@@ -71,29 +71,74 @@ pub type RChar = struct { cp: u32 }   // a literal codepoint
 pub type RAny = struct { }   // `.`
 pub type RRange = struct { lo: u32; hi: u32 }   // one class member: a single cp (lo==hi) or a-b range
 pub type RClass = struct { negate: bool; ranges: []RRange }   // `[...]` / `[^...]`
-pub type RConcat = struct { parts: []RegexNode }   // sequential composition
-pub type RAlt = struct { branches: []RegexNode }   // `a|b|c`
-// `inner` is a ONE-element `[]RegexNode` (never a bare `RegexNode` field) — see the interpreter
-// workaround note above. Built via `one(node)`, read via `one_of(x.inner)`.
-pub type RStar = struct { inner: []RegexNode }   // `x*`  (0 or more, greedy)
-pub type RPlus = struct { inner: []RegexNode }   // `x+`  (1 or more, greedy)
-pub type ROpt = struct { inner: []RegexNode }   // `x?`  (0 or 1)
-pub type RGroup = struct { inner: []RegexNode }   // `(...)` — grouping only (no captures yet)
+/**
+ * RConcat — a sequential composition `ab…`: match every part in order.
+ *
+ * @field parts  the sub-nodes to match in sequence
+ */
+pub type RConcat = struct { parts: []@RegexNode() }
+
+/**
+ * RAlt — an alternation `a|b|c`: match any one branch.
+ *
+ * @field branches  the alternative sub-nodes
+ */
+pub type RAlt = struct { branches: []@RegexNode() }
+
+/**
+ * RStar — a Kleene star `x*` (0 or more, greedy). Its `inner` is a ONE-element `[]@RegexNode()` (never a
+ * bare `@RegexNode()` field) — the interpreter workaround noted above; built via `one(node)`, read via
+ * `one_of(x.inner)`.
+ *
+ * @field inner  the one-element operand slice
+ */
+pub type RStar = struct { inner: []@RegexNode() }
+
+/**
+ * RPlus — `x+` (1 or more, greedy). `inner` is a one-element operand slice (see `RStar`).
+ *
+ * @field inner  the one-element operand slice
+ */
+pub type RPlus = struct { inner: []@RegexNode() }
+
+/**
+ * ROpt — `x?` (0 or 1). `inner` is a one-element operand slice (see `RStar`).
+ *
+ * @field inner  the one-element operand slice
+ */
+pub type ROpt = struct { inner: []@RegexNode() }
+
+/**
+ * RGroup — a grouping `(...)` (no captures yet). `inner` is a one-element operand slice (see `RStar`).
+ *
+ * @field inner  the one-element operand slice
+ */
+pub type RGroup = struct { inner: []@RegexNode() }
 pub type RStart = struct { }   // `^` — anchors the match to input start
 pub type REnd = struct { }   // `$` — anchors the match to input end
 pub type REmpty = struct { }   // the empty pattern / empty alternative branch
 
-pub type RegexNode = variant RChar | RAny | RClass | RConcat | RAlt | RStar | RPlus | ROpt | RGroup | RStart | REnd | REmpty
+/**
+ * RegexNode — the regex AST node: the inline union of the twelve named arm structs, abbreviated by this
+ * Family-A type macro (§9.D sweep) so its many `@RegexNode()` / `[]@RegexNode()` uses stay legible. The
+ * recursion is finite: `@RegexNode()` expands one level to the union of NAMED arm structs, and an arm's
+ * own back-edge field (`RStar.inner: []@RegexNode()`, …) is a separate annotation that expands
+ * independently — no arm body is inlined, so there is no unbounded expansion.
+ *
+ * @return  the inline union of the twelve arm structs (RChar … REmpty)
+ * @since   §9.D sweep (retired from `type … = variant` to `@Type()`)
+ */
+macro RegexNode() { lowering { RChar | RAny | RClass | RConcat | RAlt | RStar | RPlus | ROpt | RGroup | RStart | REnd | REmpty } }
 
 // a COMPILED pattern — the parsed AST plus the source text (kept for diagnostics /
 // re-display; matching only ever reads `ast`). No struct methods yet (project ruling —
 // structs stay pure data), so every operation is a free function taking `Regex` by value.
-pub type Regex = struct { pattern: str; ast: RegexNode }
+pub type Regex = struct { pattern: str; ast: @RegexNode() }
 
 // --- the []RegexNode-of-one helper pair (the interpreter workaround plumbing) ---
 
-fn one(node: RegexNode): []RegexNode { teko::list::push(teko::list::empty(), node) }
-fn one_of(wrapped: []RegexNode): RegexNode { wrapped[0] }
+fn one(node: @RegexNode()): []@RegexNode() { teko::list::push(teko::list::empty(), node) }
+fn one_of(wrapped: []@RegexNode()): @RegexNode() { wrapped[0] }
 
 // --- pattern scanning helpers (over the pattern's raw UTF-8 bytes) ---
 
@@ -185,11 +230,11 @@ fn codepoints_of(input: str): []u32 {
 // a parse result: the position just past what was consumed, plus the node built.
 // Threaded through by return value (no mutable out-param — REBIND on each step,
 // the same idiom the lexer itself uses).
-pub type PState = struct { pos: u64; node: RegexNode }
+pub type PState = struct { pos: u64; node: @RegexNode() }
 
 fn parse_alt(p: []byte, pos: u64): PState | error {
     var first = match parse_concat(p, pos) { PState as s => s; error as e => return e }
-    var branches: []RegexNode = teko::list::push(teko::list::empty(), first.node)
+    var branches: []@RegexNode() = teko::list::push(teko::list::empty(), first.node)
     var at = first.pos
     loop {
         if at >= p.len || p[at] != b'|' { break }
@@ -202,7 +247,7 @@ fn parse_alt(p: []byte, pos: u64): PState | error {
 }
 
 fn parse_concat(p: []byte, pos: u64): PState | error {
-    var parts: []RegexNode = teko::list::empty()
+    var parts: []@RegexNode() = teko::list::empty()
     var at = pos
     loop {
         if at >= p.len || p[at] == b'|' || p[at] == b')' { break }
@@ -337,7 +382,7 @@ pub fn compile(pattern: str): Regex | error {
  */
 type MCont = struct {
     /** the node to match next. */
-    head: RegexNode
+    head: @RegexNode()
     /** the rest of the continuation: a ONE-element slice, or empty at the end of the chain. */
     tail: []MCont
 }
@@ -356,7 +401,7 @@ fn mc_end(): []MCont { teko::list::empty() }
  * @param cont  the continuation to match after it
  * @return      the extended continuation
  */
-fn mc_push(node: RegexNode, cont: []MCont): []MCont {
+fn mc_push(node: @RegexNode(), cont: []MCont): []MCont {
     teko::list::push(teko::list::empty(), MCont { head = node; tail = cont })
 }
 
@@ -368,7 +413,7 @@ fn mc_push(node: RegexNode, cont: []MCont): []MCont {
  * @param cont   the continuation to match after them
  * @return       the extended continuation
  */
-fn mc_push_all(parts: []RegexNode, cont: []MCont): []MCont {
+fn mc_push_all(parts: []@RegexNode(), cont: []MCont): []MCont {
     var out = cont
     var j = parts.len
     loop {
@@ -388,7 +433,7 @@ fn mc_push_all(parts: []RegexNode, cont: []MCont): []MCont {
  * @param cont  what to match after it
  * @return      the continuation
  */
-fn mc_of_node(node: RegexNode, cont: []MCont): []MCont {
+fn mc_of_node(node: @RegexNode(), cont: []MCont): []MCont {
     match node {
         RConcat as c => mc_push_all(c.parts, cont)
         _ => mc_push(node, cont)
@@ -438,7 +483,7 @@ fn m_cont(cont: []MCont, input: []u32, i: u64): bool {
  * @param cont   what must match after `node`
  * @return       true iff `node` and then `cont` match
  */
-fn m_node(node: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
+fn m_node(node: @RegexNode(), input: []u32, i: u64, cont: []MCont): bool {
     match node {
         REmpty => m_cont(cont, input, i)
         RChar as c => m_one(i < input.len && input[i] == c.cp, input, i, cont)
@@ -481,7 +526,7 @@ fn m_one(accepted: bool, input: []u32, i: u64, cont: []MCont): bool {
  * @param cont      what must match after the branch
  * @return          true iff some branch from `idx` on matches, followed by `cont`
  */
-fn m_alt(branches: []RegexNode, idx: u64, input: []u32, i: u64, cont: []MCont): bool {
+fn m_alt(branches: []@RegexNode(), idx: u64, input: []u32, i: u64, cont: []MCont): bool {
     if idx >= branches.len { return false }
     if m_node(branches[idx], input, i, cont) { return true }
     m_alt(branches, idx + 1, input, i, cont)
@@ -497,7 +542,7 @@ fn m_alt(branches: []RegexNode, idx: u64, input: []u32, i: u64, cont: []MCont): 
  * @param cont   what must match after the repetition
  * @return       true iff some number of copies of `inner` followed by `cont` matches
  */
-fn m_star(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
+fn m_star(inner: @RegexNode(), input: []u32, i: u64, cont: []MCont): bool {
     if m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont)) { return true }
     m_cont(cont, input, i)
 }
@@ -512,7 +557,7 @@ fn m_star(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
  * @param cont   what must match after the repetition
  * @return       true iff one or more copies of `inner` followed by `cont` matches
  */
-fn m_plus(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
+fn m_plus(inner: @RegexNode(), input: []u32, i: u64, cont: []MCont): bool {
     m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont))
 }
 
@@ -526,7 +571,7 @@ fn m_plus(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
  * @param cont   what must match after it
  * @return       true iff `inner` then `cont`, or `cont` alone, matches from `i`
  */
-fn m_opt(inner: RegexNode, input: []u32, i: u64, cont: []MCont): bool {
+fn m_opt(inner: @RegexNode(), input: []u32, i: u64, cont: []MCont): bool {
     if m_node(inner, input, i, cont) { return true }
     m_cont(cont, input, i)
 }
