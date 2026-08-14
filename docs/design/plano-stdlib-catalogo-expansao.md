@@ -101,6 +101,66 @@ GUI (research)  ui::*                   part.   —            add-on    YES (wi
 
 ---
 
+## 1.5 Árvore de namespaces — a hierarquia AUTORITATIVA (agentes DEVEM seguir)
+
+Cada **categoria é um sub-namespace** (ou sub-sub-…). Esta árvore fixa os **nomes de namespace**; um agente
+que implementa um módulo **segue esta hierarquia** — não inventa nome novo, não achata categorias. `puro` =
+Teko puro; `[FFI]` = binding opt-in (§0: opcional, link dinâmico, erro runtime só no uso).
+
+```
+teko::
+├─ sort
+│  ├─ <mono>       sort_i64/u64/f64/str/bytes · is_sorted · bsearch · nth(quickselect) · partition_point
+│  └─ <genérico>   sort<T:Ord> · sort_by · sort_by_key · dedup                       [9-ops/#254]
+├─ crypto
+│  ├─ hash         SHA-256/512 · SHA-3-256 · SHAKE128 · BLAKE2b · streaming · legacy SHA-1/MD5
+│  ├─ mac          HMAC-SHA256 · Poly1305 · CMAC · GMAC
+│  ├─ kdf          HKDF · PBKDF2
+│  ├─ password     Argon2id · scrypt · legacy bcrypt
+│  ├─ cipher       AES-128/192/256 {CBC,CTR,CFB,OFB} · ChaCha20 · legacy 3DES
+│  ├─ aead         AES-256-GCM · AES-CCM · ChaCha20-Poly1305
+│  ├─ rand         CSPRNG                                                              [FFI getrandom]
+│  ├─ pk           X25519 · Ed25519 · RSA-OAEP/PSS · ECDSA P-256 · ECDH               (sym="sync" / asym="async")
+│  ├─ x509         parse_cert · verify_chain · SAN
+│  ├─ pgp          OpenPGP (RFC 9580)
+│  ├─ openssl      provider libcrypto/libssl (simétrica+assimétrica, pilha inteira)   [FFI]
+│  └─ gpg          GnuPG/gpgme (PGP/GPG)                                               [FFI]
+├─ net  (OSI 4–7; codec puro, transporte de socket [FFI])
+│  ├─ tcp · udp · unix                                                                 [L4]
+│  ├─ tls · dtls                                                                       [L5/6]
+│  ├─ dns                                                                              [FFI getaddrinfo]
+│  ├─ http · http2 · http3                                                            [L7 web]
+│  ├─ ws · sse · <polling> · <long-polling>                                           [realtime]
+│  ├─ mqtt · redis                                                                     [mensageria/cache]
+│  ├─ smtp · imap · pop3                                                               [mail]
+│  ├─ ssh · sftp · ftp/ftps · telnet                                                   [acesso/legacy]
+│  └─ quic
+├─ encoding  (formatos ABERTOS; fechados o dev implementa)
+│  ├─ json · xml · csv · toml · ini · yaml                                             [texto]
+│  ├─ cbor · msgpack · bson · protobuf · asn1                                          [binário]
+│  └─ base64 · url · mime (form-urlencoded · multipart)                               [web]
+├─ compress
+│  ├─ deflate/inflate ✅ · gzip ✅ · zlib ✅ · zip
+│  └─ brotli · lzma · zstd (puro OU [FFI])            ;  #embed → VFS readonly in-memory (design)
+├─ db
+│  ├─ postgres · mysql(+MariaDB) · mssql · mongodb · cassandra · redis                 [native wire, puro]
+│  └─ sqlite · oracle                                                                  [FFI]
+├─ odbc            universal — connect_32/connect_64 (pela bitness do driver)          [FFI]
+├─ rpc             jsonrpc · grpc · amqp · socks5
+├─ math            bigint · checked
+├─ mem             Buf · as_ptr · buf_slice/buf_ptr                                    [KEYSTONE-BUF]
+├─ sys             constantes libc per-OS/arch
+├─ io · iter       seams de composição (Reader/Writer/Iterator)
+└─ ui              window · widget                                                     [P4 pesquisa]
+```
+
+**Regras de nomeação (ruling do dono).** (1) categoria = sub-namespace, sempre; (2) `teko::odbc` é
+**top-level** (não `db::odbc`) e usa sufixo `_32`/`_64` pela bitness do driver; (3) o par simétrico/
+assimétrico do dono é **"sync"/"async" de CHAVE** (chave-única / par public-private), **não** modelo de
+execução; (4) formatos abertos entram, fechados o dev implementa; (5) todo `[FFI]` é opt-in (§0).
+
+---
+
 ## 2. Foundations & gating keystones (design AROUND these — they are the enablers)
 
 These are not new "areas" but the seams every area rides. They already exist as design in sibling docs;
