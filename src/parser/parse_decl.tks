@@ -1619,16 +1619,19 @@ fn with_outer_doc(node: Decl, has_doc: bool, doc: str): Decl {
  * @since 0.4-macros (§14 A1)
  */
 /**
- * parse_macro_params — parse a Family-A macro's `(a, b, params tail)` parameter list (§14.1). Unlike a
- * function's, a macro parameter is an ANONYMOUS NODE — untyped until materialized — so each is a bare
- * identifier (`has_type = false`, no `: T`). A trailing `params name` binds the variadic node pack
- * (`is_params`, the same modifier a variadic function uses), and must be last. `pos` is at the `(`.
+ * parse_macro_params — parse a Family-A macro's `(a, b, params tail)` parameter list (§14.1). A macro
+ * parameter is a bare identifier, an ANONYMOUS untyped NODE by default (`has_type = false`, no `: T`) for
+ * the value-macro `${param}` holes. A parametric TYPE-macro parameter (§14 Form 2) may additionally carry
+ * an OPTIONAL `: <type>` annotation and an OPTIONAL `= <default>` initializer (e.g. `local: bool = false`)
+ * — bound at type-macro expansion by `expand_macro_type`. A trailing `params name` binds the variadic
+ * node pack (`is_params`), and must be last. `pos` is at the `(`.
  *
  * @param tokens  the token stream
  * @param pos     the index of the parameter list's opening `(`
- * @return        the parsed untyped parameters + the index past the closing `)`, or a parse error
- * @throws        a missing parameter name, a `params` pack not in last position, or an unclosed list
- * @since 0.4-macros (§14 A1)
+ * @return        the parsed parameters + the index past the closing `)`, or a parse error
+ * @throws        a missing parameter name, a malformed `: type` / `= default`, a `params` pack not in
+ *                last position, or an unclosed list
+ * @since 0.4-macros (§14 A1; typed/defaulted params added for §14 Form 2)
  */
 fn parse_macro_params(tokens: []lexer::Token, pos: u64): ParsedList<Param> | error {
     var p = pos + 1
@@ -1640,11 +1643,27 @@ fn parse_macro_params(tokens: []lexer::Token, pos: u64): ParsedList<Param> | err
         var is_pack = is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "params" && is_name_at(tokens, p + 1)
         if is_pack { p = p + 1 }
         if !is_name_at(tokens, p) {
-            return err_at(tokens, p, "expected a macro parameter name — macro params are untyped nodes (§14.1)")
+            return err_at(tokens, p, "expected a macro parameter name (§14.1)")
         }
         var name = tokens[p].text
         p = p + 1
-        params = teko::list::push(params, Param { name = name; has_type = false; type_ann = no_type(); is_params = is_pack; has_default = false; default_expr = no_expr() })
+        var has_type = false
+        var type_ann = no_type()
+        if is_kind_at(tokens, p, lexer::TokenKind::Colon) {
+            var pt = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+            has_type = true
+            type_ann = pt.node
+            p = pt.next
+        }
+        var has_default = false
+        var default_expr = no_expr()
+        if is_kind_at(tokens, p, lexer::TokenKind::Assign) {
+            var de = match parse_expr(tokens, p + 1) { Parsed<Expr> as x => x; error as e => return e }
+            has_default = true
+            default_expr = de.node
+            p = de.next
+        }
+        params = teko::list::push(params, Param { name = name; has_type = has_type; type_ann = type_ann; is_params = is_pack; has_default = has_default; default_expr = default_expr })
         if is_pack && is_kind_at(tokens, p, lexer::TokenKind::Comma) {
             return err_at(tokens, p, "a `params` pack must be the last macro parameter")
         }
