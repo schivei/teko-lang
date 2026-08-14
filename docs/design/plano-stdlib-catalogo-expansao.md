@@ -372,6 +372,20 @@ So HTTP/WS/Redis/MQTT/mail are *mostly pure* and only inherit FFI through the so
 (§10):** `serve` is designed to `spawn` one coroutine per connection over `chan<T>`; the sync
 `accept`→handle loop ships first, the concurrent server is additive.
 
+**Acoplamento OBRIGATÓRIO — rede ⇄ segurança + compressão (ruling do dono).** `net` **não é uma camada
+isolada**: cada protocolo assenta sobre **segurança** e **compressão**, e esse suporte é **requisito**, não
+opcional.
+- **Segurança:** transporte cifrado **TLS/DTLS + mTLS** (N3) → **X.509** (C-X509: cadeia, SAN, revogação) →
+  **primitivas crypto** (hash/mac/aead/kex/pk, C1–C7) + **CSPRNG** (C6); **assinaturas** JOSE / XML-DSig /
+  COSE (tokens, SAML, WebAuthn); **forwarded / trusted-proxy** (N5-FWD) para segurança atrás de reverse-proxy;
+  SSH (kex/aead). O `net::server` (N5-SRV) reúne TLS+mTLS+forwarded como recursos de primeira classe.
+- **Compressão:** HTTP `Content-Encoding` **gzip/brotli** + **response-compression** (N5-SRV, estático ou
+  dinâmico a gosto do dev); framing comprimido em http2/3; compressão em PGP.
+- **Consequência de sequenciamento:** a fase de `net` **depende** das camadas **crypto** (C1–C7, C-X509,
+  signatures) e **compress** (deflate/gzip/brotli — já implementadas) estarem prontas. Não existe "só o
+  socket": o socket é o transporte; a **rede útil e segura exige a pilha de segurança+compressão por baixo**.
+  Sequenciar `net` **após** (ou junto de) essas camadas — nunca antes.
+
 > **Do NOT source the pre-reboot `feat/phase-19-networking` branches** (C/WASM reactor, pre-reboot
 > syntax). The only portable input is RFC/NIST byte vectors, taken from the specs directly.
 
