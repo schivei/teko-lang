@@ -143,7 +143,9 @@ teko::
 ├─ encoding  (formatos ABERTOS; fechados o dev implementa)
 │  ├─ json · xml · csv · toml · ini · yaml                                             [texto]
 │  ├─ cbor · msgpack · bson · protobuf · asn1                                          [binário]
+│  ├─ fixed            pointer-file / fixed-width (schema offset+largura)             [colunas fixas]
 │  └─ base64 · url · mime (form-urlencoded · multipart)                               [web]
+│     (marcação: tags de crase → parser sintetizado na AST; type-first + schema-first; validate|ugly)
 ├─ compress
 │  ├─ deflate/inflate ✅ · gzip ✅ · zlib ✅ · zip
 │  └─ brotli · lzma · zstd (puro OU [FFI])            ;  #embed → VFS readonly in-memory (design)
@@ -400,7 +402,8 @@ os FECHADOS/proprietários o dev implementa** (a stdlib dá as primitivas) — r
 | # | Module | Surface (sketch) | Deps | Feasibility | Tier |
 |---|---|---|---|---|---|
 | S-JSON | `teko::encoding::json` (extend) | `exp fn parse(s: str): Json\|error` · `exp fn encode(j: Json): str` · streaming | none | **pure** | **P1** |
-| S-CSV | `teko::encoding::csv` (extend) | RFC 4180: read/write, quoting/escape, header row, delimitador configurável | none | **pure** | **P1** |
+| S-CSV | `teko::encoding::csv` (extend) | RFC 4180: read/write, quoting/escape, header row, delimitador configurável · **schema de colunas** (nome/tipo/ordem) | none | **pure** | **P1** |
+| S-FIXED | `teko::encoding::fixed` | **pointer-file / fixed-width**: schema de posições fixas (campo → offset+largura+tipo+padding) — arquivos de colunas fixas (bancário/mainframe/legacy) | none | **pure** | **P2** |
 | S-TOML / S-INI | `teko::encoding::{toml,ini}` | config: TOML 1.0 + INI/properties | none | **pure** | **P2** |
 | S-PB | `teko::encoding::protobuf` | varint/zigzag/length-delimited wire codec; `.proto` compiler is a later tool | none | **pure**; gates gRPC | **P2** |
 | S-ASN1 | `teko::encoding::asn1` | DER/BER encode+decode + PEM framing | none | **pure**; gates x509/PK | **P2** |
@@ -458,6 +461,16 @@ type A = struct `json="schema.json;schema2.json" xml="a.xsd;b.xsd"` { … }
   pode buscar; URI privada → mapeia para arquivo local.
 - **Compõe com o type-first:** o schema externo valida/dirige a forma; os tags de campo mapeiam nomes/opções.
   Ambos alimentam a **mesma síntese** do parser por-tipo na AST, em compile-time.
+- **Validação é opt-in — `validate` vs `ugly` (ruling do dono).** O binding **diz se quer validar** pelo schema:
+  `validate` = **estrito** (rejeita input que viola o schema, erro de decode); `ugly` = **tolerante/best-effort**
+  (parseia o que dá, **sem** validação). É uma opção da tag (ex.: `xml="a.xsd" mode="validate"` / `mode="ugly"`).
+  O parser sintetizado carrega ou não o passo de validação conforme a escolha — sem custo quando `ugly`.
+- **Schemas para formatos SEM schema padrão (ruling do dono).** Formatos que não têm linguagem de schema ganham
+  um **schema Teko-nativo**, alimentando a mesma síntese:
+  - **CSV** — schema de **colunas** (nome/tipo/ordem, header, delimitador).
+  - **pointer-file / fixed-width** (`teko::encoding::fixed`) — schema de **posições fixas**: cada campo por
+    **offset+largura** (+tipo/formato/preenchimento) — arquivos de colunas fixas (bancário/mainframe/legacy).
+  Assim o mesmo mecanismo (tags/schema → parser sintetizado por-tipo) serve JSON/XML **e** CSV/fixed-width.
 
 ---
 
