@@ -68,8 +68,8 @@ pub type TCall = struct { callee: parser::Path; args: []TExpr; call_ns: str; is_
 
 // control-flow expressions carry TYPED blocks/arms (B.20/B.15). The `pattern` stays
 // syntactic (it binds; pattern typing itself is C7a); `guard` is valid iff has_when.
-pub type TArm = struct { pattern: @Pattern(); has_when: bool; guard: TExpr; body: []TStatement }   /* pub: TMatchExpr.arms surface + the .tkb codec (C7.16). body is a STATEMENT BLOCK, like a TIfExpr branch (B.20) */
-pub type TIfExpr = struct { cond: TExpr; then_blk: []TStatement; has_else: bool; else_blk: []TStatement }
+pub type TArm = struct { pattern: @Pattern(); has_when: bool; guard: TExpr; body: []@TStatement() }   /* pub: TMatchExpr.arms surface + the .tkb codec (C7.16). body is a STATEMENT BLOCK, like a TIfExpr branch (B.20) */
+pub type TIfExpr = struct { cond: TExpr; then_blk: []@TStatement(); has_else: bool; else_blk: []@TStatement() }
 pub type TMatchExpr = struct { subject: TExpr; arms: []TArm }
 pub type TCast = struct { expr: TExpr }   // `x to T` (C2): the cast's target IS this node's resolved `.type`
 pub type TFieldAccess = struct { receiver: TExpr; field: str }   // `x.field` (C3): `.type` is the field's resolved type (B.29 field-read)
@@ -123,7 +123,7 @@ pub type TPathExpr = struct { enum_name: str; member: str; ordinal: u64; value: 
 // function `__tkclo_<lift_id>` and its env struct.
 pub type TLambdaParam = struct { name: str; type: Type }
 pub type TCapture = struct { name: str; type: Type; by_ref: bool }
-pub type TLambda = struct { params: []TLambdaParam; body: []TStatement; captures: []TCapture; ret: Type; lift_id: u64 }
+pub type TLambda = struct { params: []TLambdaParam; body: []@TStatement(); captures: []TCapture; ret: Type; lift_id: u64 }
 
 /**
  * TBorrow — the typed prefix `&x` safe mutable-borrow expression (AL wave F1.2). `operand` is the
@@ -143,7 +143,7 @@ pub type TBorrow = struct { operand: TExpr }
  * @field body  the typed statements; the trailing statement's value is the block's result
  * @since §9 E
  */
-pub type TBlockExpr = struct { body: []TStatement }
+pub type TBlockExpr = struct { body: []@TStatement() }
 
 /**
  * TExprKind — the TYPED expression node kind, retired from a nominal `variant` to the §9.D inline union
@@ -192,14 +192,14 @@ pub type TReturn = struct { has_value: bool; value: TExpr; values: []TExpr }
  *              do NOT leak past the loop
  * @field body  the iteration body (folded head + user statements)
  */
-pub type TLoopStmt = struct { label: str; init: []TStatement; body: []TStatement }
+pub type TLoopStmt = struct { label: str; init: []@TStatement(); body: []@TStatement() }
 pub type TBreakStmt = struct { label: str }   // label empty = innermost loop
 pub type TContinueStmt = struct { label: str }   // label empty = innermost loop
 pub type TExprStmt = struct { expr: TExpr }
 // `defer { stmts }` (C7.18) — scoped cleanup block typed in void context; executes LIFO
 // at function exit (return, break-out-of-fn). Panic does NOT run deferred blocks.
 // Nested `defer` is rejected (body may not itself contain a TDeferStmt).
-pub type TDeferStmt = struct { body: []TStatement }
+pub type TDeferStmt = struct { body: []@TStatement() }
 
 /**
  * `adopt [name] { stmts }` typed — the ADOPTER region block (the C1 closer). Its body is typed
@@ -210,7 +210,7 @@ pub type TDeferStmt = struct { body: []TStatement }
  * @field name  the optional bound name (empty = anonymous adopter).
  * @field body  the typed statements executed inside the adopter region.
  */
-pub type TAdoptStmt = struct { name: str; body: []TStatement }
+pub type TAdoptStmt = struct { name: str; body: []@TStatement() }
 
 /**
  * `{ stmts }` typed — a BARE BLOCK opening a lexical scope (0.3.1 §6). Its body is typed in void
@@ -221,9 +221,9 @@ pub type TAdoptStmt = struct { name: str; body: []TStatement }
  *
  * @field body  the typed statements executed inside the lexical scope.
  */
-pub type TBlockStmt = struct { body: []TStatement }
+pub type TBlockStmt = struct { body: []@TStatement() }
 
-pub type TStatement = variant TBinding | TAssign | TReturn | TLoopStmt | TBreakStmt | TContinueStmt | TExprStmt | TDeferStmt | TAdoptStmt | TBlockStmt
+macro TStatement() { lowering { checker::TBinding | checker::TAssign | checker::TReturn | checker::TLoopStmt | checker::TBreakStmt | checker::TContinueStmt | checker::TExprStmt | checker::TDeferStmt | checker::TAdoptStmt | checker::TBlockStmt } }
 
 // --- typed top-level items + program (mirror the checker's Item/Program — E5c) ---
 pub type TFunction = struct {
@@ -232,7 +232,7 @@ pub type TFunction = struct {
     type_constraints: []@ConstraintExpr()   /* (W11/S6) PARALLEL to type_params — checked by the monomorph pass when a param is bound to a concrete type */
     params: []parser::Param   // immutable params (B.21) — carried from the parser unchanged
     return_type: Type   // resolved (void when the function has no `-> ret` — M.3)
-    body: []TStatement
+    body: []@TStatement()
     vis: parser::Visibility   // private / pub / exp (carried from the parsed decl; only exp reaches the `.tkh` — M.4)
     has_doc: bool   // a `/** … */` doc precedes it? (carried for the `.tkh` — FnSig keeps docs)
     doc: str   // the doc span (valid iff has_doc)
@@ -299,7 +299,7 @@ pub type TConstDecl = struct { name: str; namespace: str; ty: Type; init: TExpr;
  *
  * @since §9.D (retired from a `variant` of the typed item kinds)
  */
-macro TItem() { lowering { checker::TFunction | parser::TypeDecl | parser::UseDecl | checker::TStatement | checker::TConstDecl } }
+macro TItem() { lowering { checker::TFunction | parser::TypeDecl | parser::UseDecl | @TStatement() | checker::TConstDecl } }
 pub type TProgram = struct { items: []@TItem() }
 
 // (#88) a placeholder typed expr for a TAssign's `target` when kind != Field (never read — gated by
@@ -309,5 +309,5 @@ pub fn no_texpr(): TExpr {
 }
 
 // --- env-threading carriers: the typed pass advances the env, like check_* did ---
-type TypedStmt = struct { node: TStatement; env: Env }   // a typed statement + the env it leaves (bindings extend it)
-type TypedBlock = struct { stmts: []TStatement; env: Env }   // a typed block + its final env
+type TypedStmt = struct { node: @TStatement(); env: Env }   /* a typed statement + the env it leaves (bindings extend it) */
+type TypedBlock = struct { stmts: []@TStatement(); env: Env }   /* a typed block + its final env */

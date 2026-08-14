@@ -276,7 +276,7 @@ fn mark_expr(e: TExpr, escaping: bool, ref acc: []str) {
  * @param tail  true iff the block's trailing value is returned
  * @param acc   the escaping-name accumulator (by-reference, write-through, grown in place)
  */
-fn mark_block(body: []TStatement, tail: bool, ref acc: []str) {
+fn mark_block(body: []@TStatement(), tail: bool, ref acc: []str) {
     var i = 0
     loop {
         if i >= body.len { break }
@@ -296,7 +296,7 @@ fn mark_block(body: []TStatement, tail: bool, ref acc: []str) {
  * @param tail  true iff `s` is the block's last statement and its trailing value is returned
  * @param acc   the escaping-name accumulator (by-reference, write-through, grown in place)
  */
-fn mark_stmt(s: TStatement, tail: bool, ref acc: []str) {
+fn mark_stmt(s: @TStatement(), tail: bool, ref acc: []str) {
     match s {
         // a binding RHS escapes (the value lives on through the bound name; conservatively the
         // name may itself later escape — we do not run a second fixpoint pass).
@@ -374,7 +374,7 @@ pub fn fn_frees_old_vars(f: TFunction): []str {
  * @param body     the block currently being walked
  * @param acc      the collected-name accumulator (by-reference, grown in place)
  */
-fn collect_frees_old_names(fn_body: []TStatement, body: []TStatement, ref acc: []str) {
+fn collect_frees_old_names(fn_body: []@TStatement(), body: []@TStatement(), ref acc: []str) {
     var i = 0
     loop {
         if i >= body.len { break }
@@ -383,7 +383,7 @@ fn collect_frees_old_names(fn_body: []TStatement, body: []TStatement, ref acc: [
     }
 }
 
-fn collect_frees_old_stmt(fn_body: []TStatement, s: TStatement, ref acc: []str) {
+fn collect_frees_old_stmt(fn_body: []@TStatement(), s: @TStatement(), ref acc: []str) {
     match s {
         TAssign as a => {
             if assign_is_self_append(a) && !str_set_has(acc.value, a.name) && assign_frees_old(fn_body, a) {
@@ -402,7 +402,7 @@ fn collect_frees_old_stmt(fn_body: []TStatement, s: TStatement, ref acc: []str) 
     }
 }
 
-fn collect_frees_old_expr(fn_body: []TStatement, e: TExpr, ref acc: []str) {
+fn collect_frees_old_expr(fn_body: []@TStatement(), e: TExpr, ref acc: []str) {
     match e.kind {
         TIfExpr as f => {
             collect_frees_old_names(fn_body, f.then_blk, acc)
@@ -594,7 +594,7 @@ fn chain_stats_expr(e: TExpr, name: str): ChainStats {
     }
 }
 
-fn chain_stats_stmt(s: TStatement, name: str): ChainStats {
+fn chain_stats_stmt(s: @TStatement(), name: str): ChainStats {
     match s {
         TBinding as b => {
             var st = chain_stats_expr(b.value, name)
@@ -629,7 +629,7 @@ fn chain_stats_stmt(s: TStatement, name: str): ChainStats {
     }
 }
 
-fn chain_stats_block(body: []TStatement, name: str): ChainStats {
+fn chain_stats_block(body: []@TStatement(), name: str): ChainStats {
     var s = cs_zero()
     var i: u64 = 0
     loop { if i >= body.len { break }; s = cs_add(s, chain_stats_stmt(body[i], name)); i++ }
@@ -652,7 +652,7 @@ fn chain_stats_block(body: []TStatement, name: str): ChainStats {
  * @return         whether `name` escapes the frame
  * @since 0.3.1 (escaping-exclusion UAF fix)
  */
-fn name_escapes_body(fn_body: []TStatement, name: str): bool {
+fn name_escapes_body(fn_body: []@TStatement(), name: str): bool {
     var esc: []str = teko::list::empty()
     mark_block(fn_body, true, esc)
     str_set_has(esc, name)
@@ -661,7 +661,7 @@ fn name_escapes_body(fn_body: []TStatement, name: str): bool {
 // assign_frees_old — may THIS self-append's copy-grow PARK the old buffer for reuse? True iff the
 // whole-fn linear-chain proof above holds for the assigned name AND the name is frame-local (an
 // escaping accumulator is denied — see name_escapes_body). PUBLIC (codegen reads it).
-pub fn assign_frees_old(fn_body: []TStatement, a: TAssign): bool {
+pub fn assign_frees_old(fn_body: []@TStatement(), a: TAssign): bool {
     if !assign_is_self_append(a) { return false }
     if name_escapes_body(fn_body, a.name) { return false }
     var st = chain_stats_block(fn_body, a.name)
@@ -837,7 +837,7 @@ fn count_reads_expr(e: TExpr, name: str): i64 {
 }
 
 // count_reads_stmt — total reads of `name` in one statement (all sub-positions).
-fn count_reads_stmt(s: TStatement, name: str): i64 {
+fn count_reads_stmt(s: @TStatement(), name: str): i64 {
     match s {
         TBinding as b => count_reads_expr(b.value, name)
         TAssign as a => count_reads_expr(a.value, name) + (if parser::assign_has_target(a.kind) { count_reads_expr(a.target, name) } else { 0 })
@@ -853,7 +853,7 @@ fn count_reads_stmt(s: TStatement, name: str): i64 {
 }
 
 // count_reads_block — total reads of `name` across every statement of a block.
-fn count_reads_block(body: []TStatement, name: str): i64 {
+fn count_reads_block(body: []@TStatement(), name: str): i64 {
     var n: i64 = 0
     var i = 0
     loop {
@@ -885,7 +885,7 @@ fn count_reads_block(body: []TStatement, name: str): i64 {
  * @return          the count of safe inside reads
  * @since 0.3.1
  */
-fn count_block_local_reads(body: []TStatement, name: str, is_value: bool): i64 {
+fn count_block_local_reads(body: []@TStatement(), name: str, is_value: bool): i64 {
     var n: i64 = 0
     var i = 0
     loop {
@@ -911,7 +911,7 @@ fn count_block_local_reads(body: []TStatement, name: str, is_value: bool): i64 {
 // read of the name in the WHOLE function is a SAFE non-tail/non-assign read strictly inside B.
 // CONSERVATIVE: any read outside B, in B's tail value, or as an assignment RHS ⇒ false ⇒ route to
 // the enclosing region (the W8/leak-safe default). PUBLIC — both codegen engines read it.
-pub fn binding_is_block_local(escaping: []str, fn_body: []TStatement, block_body: []TStatement, is_value: bool, b: TBinding): bool {
+pub fn binding_is_block_local(escaping: []str, fn_body: []@TStatement(), block_body: []@TStatement(), is_value: bool, b: TBinding): bool {
     if !binding_is_frame_local(escaping, b) { return false }
     var name = match b.target {
         parser::SimpleName as sn => sn.name

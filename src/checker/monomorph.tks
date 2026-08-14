@@ -128,8 +128,8 @@ fn check_constraints(type_params: []str, type_constraints: []@ConstraintExpr(), 
 // rewrite-walk carriers: a rewritten node PLUS the instantiations it discovered. Teko has
 // no out-params, so the walk RETURNS both (the C twin threads an out-list pointer).
 type WExpr = struct { expr: TExpr; insts: []MonoInst }
-type WStmt = struct { stmt: TStatement; insts: []MonoInst }
-type WBlock = struct { stmts: []TStatement; insts: []MonoInst }
+type WStmt = struct { stmt: @TStatement(); insts: []MonoInst }
+type WBlock = struct { stmts: []@TStatement(); insts: []MonoInst }
 type WArm = struct { arm: TArm; insts: []MonoInst }
 /** A stamped free TFunction plus the instantiations its body discovered (#254 layer 3 — the
     method-stamp twin of WBlock, so a stamped instance method feeds the PHASE-2 fixpoint queue). */
@@ -783,7 +783,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             var wc = match mono_texpr(f.cond, s, items, table) { WExpr as w => w; error as er => return er }
             var wtb = match mono_block(f.then_blk, s, items, table) { WBlock as w => w; error as er => return er }
             var acc = mono_inst_concat(wc.insts, wtb.insts)
-            var eb: []TStatement = teko::list::empty()
+            var eb: []@TStatement() = teko::list::empty()
             if f.has_else {
                 var web = match mono_block(f.else_blk, s, items, table) { WBlock as w => w; error as er => return er }
                 eb = web.stmts
@@ -940,7 +940,7 @@ fn mono_arm(arm: TArm, s: Subst, items: []@TItem(), table: TypeTable): WArm | er
 }
 
 // rewrite a TStatement. TOTAL over every case; TAssign/TBinding substitute their `bound` type. (C: mono_tstmt.)
-fn mono_tstmt(st: TStatement, s: Subst, items: []@TItem(), table: TypeTable): WStmt | error {
+fn mono_tstmt(st: @TStatement(), s: Subst, items: []@TItem(), table: TypeTable): WStmt | error {
     match st {
         TBinding as b => {
             var wv = match mono_texpr(b.value, s, items, table) { WExpr as w => w; error as er => return er }
@@ -989,10 +989,10 @@ fn mono_tstmt(st: TStatement, s: Subst, items: []@TItem(), table: TypeTable): WS
 }
 
 // rewrite a block (a []TStatement). (C: mono_block.)
-fn mono_block(stmts: []TStatement, s: Subst, items: []@TItem(), table: TypeTable): WBlock | error {
+fn mono_block(stmts: []@TStatement(), s: Subst, items: []@TItem(), table: TypeTable): WBlock | error {
     // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
     // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
-    var out: []TStatement = teko::list::empty()
+    var out: []@TStatement() = teko::list::empty()
     var acc: []MonoInst = teko::list::empty()
     var i = 0
     loop {
@@ -1388,7 +1388,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
                     queue = mono_inst_concat(queue, wb.insts)
                 }
             }
-            TStatement as ts => {
+            (@TStatement()) as ts => {
                 var w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
                 kept = teko::list::push(kept, w.stmt)
                 queue = mono_inst_concat(queue, w.insts)

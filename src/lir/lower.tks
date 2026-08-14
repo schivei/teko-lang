@@ -6294,7 +6294,7 @@ fn lower_lambda(ctx: LowerCtx, e: checker::TExpr, lam: checker::TLambda): Lowere
 /** lower_stmt — lower one statement, extending the env on a `let` and signaling block
     termination on a `return`. Mirrors emit_stmt over the subset; out-of-subset statements
     honest-stop. */
-pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement): LowerStmtOut | error {
+pub fn lower_stmt(ctx: LowerCtx, s: @TStatement()): LowerStmtOut | error {
     match s {
         checker::TBinding as b => lower_binding(ctx, b)
         checker::TAssign as a => lower_assign(ctx, a)
@@ -7486,7 +7486,7 @@ fn contains_str(xs: []str, s: str): bool {
  * @param []str acc  the assignment targets gathered so far
  * @return []str  `acc` extended with every simple-assignment target found
  */
-fn collect_reassigned_stmts(stmts: []checker::TStatement, acc: []str): []str {
+fn collect_reassigned_stmts(stmts: []@TStatement(), acc: []str): []str {
     var out = acc
     var i: u64 = 0
     loop {
@@ -7510,7 +7510,7 @@ fn collect_reassigned_stmts(stmts: []checker::TStatement, acc: []str): []str {
  * @return []str  `acc` extended with this statement's simple-assignment
  *                targets
  */
-fn collect_reassigned_stmt(s: checker::TStatement, acc: []str): []str {
+fn collect_reassigned_stmt(s: @TStatement(), acc: []str): []str {
     match s {
         checker::TAssign as a => match a.kind { parser::AssignKind::Simple => teko::list::push(acc, a.name); _ => acc }
         checker::TBinding as b => collect_reassigned_value_expr(b.value, acc)
@@ -7620,7 +7620,7 @@ fn collect_reassigned_match(m: checker::TMatchExpr, acc: []str): []str {
  * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
  * @return         the distinct address-taken local names found
  */
-fn collect_addr_taken_locals(body: []checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo): []str {
+fn collect_addr_taken_locals(body: []@TStatement(), ref_fns: []LRefFnInfo, enums: []LEnumInfo): []str {
     addr_taken_stmts(body, ref_fns, enums, teko::list::empty())
 }
 
@@ -7653,7 +7653,7 @@ fn arg_needs_addr_slot(arg: checker::TExpr, enums: []LEnumInfo): bool {
  * @param acc      the names gathered so far
  * @return         `acc` extended with every address-taken name `stmts` contains
  */
-fn addr_taken_stmts(stmts: []checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str): []str {
+fn addr_taken_stmts(stmts: []@TStatement(), ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str): []str {
     var out = acc
     var i: u64 = 0
     loop {
@@ -7674,7 +7674,7 @@ fn addr_taken_stmts(stmts: []checker::TStatement, ref_fns: []LRefFnInfo, enums: 
  * @param acc      the names gathered so far
  * @return         `acc` extended with this statement's address-taken names
  */
-fn addr_taken_stmt(s: checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str): []str {
+fn addr_taken_stmt(s: @TStatement(), ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str): []str {
     match s {
         checker::TBinding as b => addr_taken_expr(b.value, ref_fns, enums, addr_taken_ref_binding(b, acc))
         checker::TAssign as a => addr_taken_expr(a.value, ref_fns, enums, acc)
@@ -7992,7 +7992,7 @@ fn append_all_u32(acc: []u32, xs: []u32): []u32 {
  * @param LEnv env  the pre-branch scalar environment (the promotable names)
  * @return []str  the distinct enclosing scalar names re-assigned in any arm
  */
-fn reassigned_scalars(arms: []checker::TStatement, env: LEnv): []str {
+fn reassigned_scalars(arms: []@TStatement(), env: LEnv): []str {
     var raw = collect_reassigned_stmts(arms, teko::list::empty())
     var out: []str = teko::list::empty()
     var i: u64 = 0
@@ -8131,7 +8131,7 @@ fn merge_value_args(value: u32, scalars: []u32): []u32 {
  * @param checker::TIfExpr f  the if node
  * @return []checker::TStatement  the then block, plus the else block when present
  */
-fn if_arm_stmts(f: checker::TIfExpr): []checker::TStatement {
+fn if_arm_stmts(f: checker::TIfExpr): []@TStatement() {
     if !f.has_else { return f.then_blk }
     var out = f.then_blk
     var i: u64 = 0
@@ -8150,8 +8150,8 @@ fn if_arm_stmts(f: checker::TIfExpr): []checker::TStatement {
  * @param []checker::TArm arms  the match's arms
  * @return []checker::TStatement  every arm body's statements, concatenated
  */
-fn match_arm_stmts(arms: []checker::TArm): []checker::TStatement {
-    var out: []checker::TStatement = teko::list::empty()
+fn match_arm_stmts(arms: []checker::TArm): []@TStatement() {
+    var out: []@TStatement() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= arms.len { break }
@@ -8488,7 +8488,7 @@ pub type LowerBlockValue = struct { ctx: LowerCtx; terminated: bool; vreg: u32 }
  * @throws      propagated from lowering any of the prefix statements
  * @since 0.3.1.0
  */
-fn lower_block_prefix(ctx: LowerCtx, body: []checker::TStatement): LowerStmtOut | error {
+fn lower_block_prefix(ctx: LowerCtx, body: []@TStatement()): LowerStmtOut | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -8524,7 +8524,7 @@ fn lower_block_prefix(ctx: LowerCtx, body: []checker::TStatement): LowerStmtOut 
  * @implNote         mirrors `emit_branch_value`'s "last statement is the value" shape
  *                   (`codegen.tks`)
  */
-fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LType, target_ty: checker::Type): LowerBlockValue | error {
+fn lower_block_value(ctx: LowerCtx, body: []@TStatement(), result_ty: LType, target_ty: checker::Type): LowerBlockValue | error {
     if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
     var pre = match lower_block_prefix(ctx, body) { LowerStmtOut as x => x; error as err => return err }
     if pre.terminated { return LowerBlockValue { ctx = pre.ctx; terminated = true; vreg = 0 } }
@@ -8544,7 +8544,7 @@ fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LTyp
  *                    contract)
  * @throws           propagated from lowering the tail statement
  */
-fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, target_ty: checker::Type): LowerBlockValue | error {
+fn lower_tail_stmt(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty: checker::Type): LowerBlockValue | error {
     match s {
         checker::TExprStmt as es => lower_tail_expr_stmt(ctx, es, result_ty, target_ty)
         _ => lower_tail_non_expr(ctx, s, result_ty)
@@ -8580,7 +8580,7 @@ fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, targ
  * @throws           propagated from lowering the tail statement
  * @since 0.3.1.0
  */
-fn lower_fn_tail(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, target_ty: checker::Type, line: u32, col: u32): LowerBlockValue | error {
+fn lower_fn_tail(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty: checker::Type, line: u32, col: u32): LowerBlockValue | error {
     match s {
         checker::TExprStmt as es => lower_conveyed_tail_expr_stmt(ctx, es, result_ty, target_ty, line, col)
         _ => lower_tail_non_expr(ctx, s, result_ty)
@@ -8711,7 +8711,7 @@ fn diverging_tail_value(ctx: LowerCtx, result_ty: LType): LowerBlockValue {
  *                    placeholder (`terminated=false`, matching `diverging_tail_value`)
  * @throws           propagated from lowering the tail statement itself
  */
-fn lower_tail_non_expr(ctx: LowerCtx, s: checker::TStatement, result_ty: LType): LowerBlockValue | error {
+fn lower_tail_non_expr(ctx: LowerCtx, s: @TStatement(), result_ty: LType): LowerBlockValue | error {
     var out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
     if out.terminated { return LowerBlockValue { ctx = out.ctx; terminated = true; vreg = 0 } }
     diverging_tail_value(out.ctx, result_ty)
@@ -11924,7 +11924,7 @@ pub type LowerBlockValueFat = struct { ctx: LowerCtx; terminated: bool; ptr: u32
  * @throws      when the block is empty, an inner statement fails to lower, or the tail is
  *              neither a value-yielding expression-statement nor a terminating `return`
  */
-fn lower_block_value_fat(ctx: LowerCtx, body: []checker::TStatement): LowerBlockValueFat | error {
+fn lower_block_value_fat(ctx: LowerCtx, body: []@TStatement()): LowerBlockValueFat | error {
     if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
     var pre = match lower_block_prefix_fat(ctx, body) { LowerStmtOut as x => x; error as err => return err }
     if pre.terminated { return LowerBlockValueFat { ctx = pre.ctx; terminated = true; ptr = 0; len = 0 } }
@@ -11943,7 +11943,7 @@ fn lower_block_value_fat(ctx: LowerCtx, body: []checker::TStatement): LowerBlock
  * @throws      propagated from lowering any of the prefix statements
  * @since 0.3.1
  */
-fn lower_block_prefix_fat(ctx: LowerCtx, body: []checker::TStatement): LowerStmtOut | error {
+fn lower_block_prefix_fat(ctx: LowerCtx, body: []@TStatement()): LowerStmtOut | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -11982,7 +11982,7 @@ fn lower_block_prefix_fat(ctx: LowerCtx, body: []checker::TStatement): LowerStmt
  * @throws      propagated from lowering the tail statement
  * @since 0.3.1
  */
-fn lower_fn_tail_fat(ctx: LowerCtx, s: checker::TStatement, line: u32, col: u32): LowerBlockValueFat | error {
+fn lower_fn_tail_fat(ctx: LowerCtx, s: @TStatement(), line: u32, col: u32): LowerBlockValueFat | error {
     match s {
         checker::TExprStmt as es => lower_conveyed_tail_expr_stmt_fat(ctx, es, line, col)
         _ => lower_tail_non_expr_fat(ctx, s)
@@ -12050,7 +12050,7 @@ fn lower_body_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt): LowerBl
  * @return     the fat value outcome
  * @throws     propagated from lowering the tail
  */
-fn lower_tail_stmt_fat(ctx: LowerCtx, s: checker::TStatement): LowerBlockValueFat | error {
+fn lower_tail_stmt_fat(ctx: LowerCtx, s: @TStatement()): LowerBlockValueFat | error {
     match s {
         checker::TExprStmt as es => lower_tail_expr_stmt_fat(ctx, es)
         _ => lower_tail_non_expr_fat(ctx, s)
@@ -12117,7 +12117,7 @@ fn diverging_tail_value_fat(ctx: LowerCtx): LowerBlockValueFat {
  *             the diverging-tail placeholder with `terminated=false`)
  * @throws     propagated from lowering the tail statement itself
  */
-fn lower_tail_non_expr_fat(ctx: LowerCtx, s: checker::TStatement): LowerBlockValueFat | error {
+fn lower_tail_non_expr_fat(ctx: LowerCtx, s: @TStatement()): LowerBlockValueFat | error {
     var out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
     if out.terminated { return LowerBlockValueFat { ctx = out.ctx; terminated = true; ptr = 0; len = 0 } }
     diverging_tail_value_fat(out.ctx)
@@ -14990,7 +14990,7 @@ fn texpr_kind_name(e: checker::TExpr): str {
 }
 
 /** tstmt_kind_name — a short spelling of a TStatement for the honest-stop message. */
-fn tstmt_kind_name(s: checker::TStatement): str {
+fn tstmt_kind_name(s: @TStatement()): str {
     match s {
         checker::TBinding => "binding"
         checker::TAssign => "assignment"
@@ -15008,7 +15008,7 @@ fn tstmt_kind_name(s: checker::TStatement): str {
 /** lower_block — lower a statement block into the current function/block, threading the env
     and stopping at the first terminator (a return closes the block; nothing after it is
     reachable in the N1 straight-line subset). */
-fn lower_block(ctx: LowerCtx, body: []checker::TStatement): LowerCtx | error {
+fn lower_block(ctx: LowerCtx, body: []@TStatement()): LowerCtx | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -15070,7 +15070,7 @@ fn lower_block(ctx: LowerCtx, body: []checker::TStatement): LowerCtx | error {
  *           (the pre-fix shape) was the confirmed UAF. `emit_region_drops`, run AFTER
  *           `own_returned_value`'s box, then never touches the value the `LRet` carries.
  */
-fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line: u32, col: u32): LowerCtx | error {
+fn lower_fn_body(ctx: LowerCtx, body: []@TStatement(), ret_ty: LType, line: u32, col: u32): LowerCtx | error {
     if body.len == 0 || ltype_is_void(ret_ty) { return lower_block(ctx, body) }
     if is_fat_type(ctx.ret_type) { return lower_fn_body_fat(ctx, body, line, col) }
     var pre = match lower_block_prefix(ctx, body) { LowerStmtOut as x => x; error as err => return err }
@@ -15110,7 +15110,7 @@ fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line
  *           stored and before the `LRet`, then reclaims the frame's own non-escaping scratch — the
  *           SAME shape `lower_return`/`lower_fn_body`/`close_function` each end on.
  */
-fn lower_fn_body_fat(ctx: LowerCtx, body: []checker::TStatement, line: u32, col: u32): LowerCtx | error {
+fn lower_fn_body_fat(ctx: LowerCtx, body: []@TStatement(), line: u32, col: u32): LowerCtx | error {
     if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
     var pre = match lower_block_prefix_fat(ctx, body) { LowerStmtOut as x => x; error as err => return err }
     if pre.terminated { return pre.ctx }
@@ -15550,7 +15550,7 @@ pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool): LowerPrelude 
 pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false): LModule | error {
     var prelude = match lower_prelude(prog, flat_symbols) { LowerPrelude as x => x; error as e => return e }
     var m = prelude.module
-    var loose: []checker::TStatement = teko::list::empty()
+    var loose: []@TStatement() = teko::list::empty()
     var lifted: []LFunc = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -16609,7 +16609,7 @@ fn collect_extern_fn(acc: []LExternFn, f: checker::TFunction): []LExternFn {
 
 /** LowerItemOut — the module + accumulated loose statements + the WHOLE-PROGRAM
     lifted closure/thunk-function table (A1-7, #382) after folding one top-level item. */
-pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; lifted: []LFunc }
+pub type LowerItemOut = struct { module: LModule; loose: []@TStatement(); lifted: []LFunc }
 
 /**
  * lower_item — fold one @TItem(): a function lowers into the module (given the
@@ -16639,10 +16639,10 @@ pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; 
  * per item, inside its own scoped child region — the entry point the Tier 2 lowering fusion needs
  * reachable (`docs/design/native-lowering-oom-por-funcao-0.3.1.md` §4b). Unchanged behavior.
  */
-pub fn lower_item(m: LModule, loose: []checker::TStatement, it: @TItem(), layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls): LowerItemOut | error {
+pub fn lower_item(m: LModule, loose: []@TStatement(), it: @TItem(), layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls): LowerItemOut | error {
     match it {
         checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls)
-        checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
+        (@TStatement()) as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
         _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
     }
@@ -16690,7 +16690,7 @@ fn const_decl_is_scalar(t: checker::Type): bool {
  * @param lifted  the whole-program lifted closure/thunk-function table
  * @return        the module unchanged (const decls emit no per-item code)
  */
-fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TConstDecl, lifted: []LFunc): LowerItemOut | error {
+fn lower_const_item(m: LModule, loose: []@TStatement(), cd: checker::TConstDecl, lifted: []LFunc): LowerItemOut | error {
     LowerItemOut { module = m; loose = loose; lifted = lifted }
 }
 
@@ -16718,7 +16718,7 @@ fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TCons
  *                               grown lifted table; the `error` arm when
  *                               `f`'s body fails to lower
  */
-fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls): LowerItemOut | error {
+fn lower_item_function(m: LModule, loose: []@TStatement(), f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls): LowerItemOut | error {
     if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     var lf = match lower_function(f, table, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
@@ -16757,7 +16757,7 @@ fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFu
  * virtual-main in its own scoped child region, after every item's window has already dropped
  * (`docs/design/native-lowering-oom-por-funcao-0.3.1.md` §4). Unchanged behavior.
  */
-pub fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, table: checker::TypeTable): LoweredFunction | error {
+pub fn lower_virtual_main(loose: []@TStatement(), layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, table: checker::TypeTable): LoweredFunction | error {
     var fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
     var ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
@@ -16797,7 +16797,7 @@ pub type LowerMainTail = struct { ctx: LowerCtx; has_value: bool; vreg: u32 }
  * @return LowerMainTail | error  the advanced context, plus whether a
  *                                trailing exit-code value was found
  */
-fn lower_main_tail(ctx: LowerCtx, body: []checker::TStatement): LowerMainTail | error {
+fn lower_main_tail(ctx: LowerCtx, body: []@TStatement()): LowerMainTail | error {
     if body.len == 0 { return LowerMainTail { ctx = ctx; has_value = false; vreg = 0 } }
     var cur = ctx
     var i: u64 = 0
@@ -16822,7 +16822,7 @@ fn lower_main_tail(ctx: LowerCtx, body: []checker::TStatement): LowerMainTail | 
  * @return LowerMainTail | error  the advanced context, plus whether `s`
  *                                supplied a trailing exit-code value
  */
-fn lower_main_tail_stmt(ctx: LowerCtx, s: checker::TStatement): LowerMainTail | error {
+fn lower_main_tail_stmt(ctx: LowerCtx, s: @TStatement()): LowerMainTail | error {
     match s {
         checker::TExprStmt as es => lower_main_tail_expr(ctx, es)
         _ => lower_main_tail_other(ctx, s)
@@ -16860,7 +16860,7 @@ fn lower_main_tail_expr(ctx: LowerCtx, es: checker::TExprStmt): LowerMainTail | 
  * @return LowerMainTail | error  the advanced context; never an exit-code
  *                                value
  */
-fn lower_main_tail_other(ctx: LowerCtx, s: checker::TStatement): LowerMainTail | error {
+fn lower_main_tail_other(ctx: LowerCtx, s: @TStatement()): LowerMainTail | error {
     var out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
     LowerMainTail { ctx = out.ctx; has_value = false; vreg = 0 }
 }

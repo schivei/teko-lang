@@ -1887,7 +1887,7 @@ fn svc_key_eq(key: TExpr, lit: str): TExpr {
  * @param e  the branch's value expression
  * @return   a one-element statement block
  */
-fn svc_tail_block(e: TExpr): []TStatement {
+fn svc_tail_block(e: TExpr): []@TStatement() {
     teko::list::push(teko::list::empty(), TExprStmt { expr = e })
 }
 
@@ -1898,7 +1898,7 @@ fn svc_tail_block(e: TExpr): []TStatement {
  * @param tname  the target type's name (for the diagnostic)
  * @return       a diverging panic statement block
  */
-fn svc_panic_block(tname: str): []TStatement {
+fn svc_panic_block(tname: str): []@TStatement() {
     var msg = svc_str_lit($"svc<{name_last_segment(tname)}>: no provider registered for the runtime key")
     var pseg = teko::list::push(teko::list::empty(), parser::Segment { name = "panic" })
     var pcall = TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = pseg }; args = teko::list::push(teko::list::empty(), msg); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
@@ -5709,7 +5709,7 @@ fn type_expr(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
 }
 
 // ---- the value-type a TYPED block yields: the last stmt's, if an ExprStmt; else void ----
-fn tblock_type(stmts: []TStatement): Type {
+fn tblock_type(stmts: []@TStatement()): Type {
     if stmts.len == 0 { return Void { } }
     match stmts[stmts.len - 1] {
         TExprStmt as es => es.expr.type
@@ -5774,7 +5774,7 @@ pub fn texpr_diverges(e: TExpr): bool {
     }
 }
 
-fn tblock_diverges(stmts: []TStatement): bool {
+fn tblock_diverges(stmts: []@TStatement()): bool {
     if stmts.len == 0 { return false }
     match stmts[stmts.len - 1] {
         TReturn => true
@@ -5806,7 +5806,7 @@ fn type_block(stmts: []@Statement(), env: Env, table: TypeTable): TypedBlock | e
     var cur = env
     // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
     // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
-    var out: []TStatement = teko::list::empty()
+    var out: []@TStatement() = teko::list::empty()
     var i = 0
     loop {
         if i >= stmts.len { break }
@@ -5874,7 +5874,7 @@ fn type_block(stmts: []@Statement(), env: Env, table: TypeTable): TypedBlock | e
  * @return     `out` with every element of `seq` appended in order
  * @since §9 F
  */
-fn splice_stmts(out: []TStatement, seq: []TStatement): []TStatement {
+fn splice_stmts(out: []@TStatement(), seq: []@TStatement()): []@TStatement() {
     var acc = out
     var i: u64 = 0
     loop {
@@ -6763,7 +6763,7 @@ fn type_exprstmt(es: parser::ExprStmt, env: Env, table: TypeTable): TypedStmt | 
  * @field env    the environment extended with the multiple binding's bound targets
  * @since §9 F
  */
-type TStmtSeq = struct { stmts: []TStatement; env: Env }
+type TStmtSeq = struct { stmts: []@TStatement(); env: Env }
 
 /**
  * mb_expr — wrap a synthesized expression `kind` at an unpositioned (0,0) source location for the
@@ -6968,7 +6968,7 @@ fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmt
     }
     var tname = mb_temp_name(mb, 0)
     var cur = define(env, tname, call.type, true)
-    var body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = tname }; bound = call.type; value = call })
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = tname }; bound = call.type; value = call })
     var i: u64 = 0
     loop {
         if i >= mb.targets.len { break }
@@ -7047,7 +7047,7 @@ fn type_multibind_parallel(mb: parser::MultiBind, env: Env, table: TypeTable): T
         return error { message = "multiple assignment: the number of targets and values must match (got " ~ teko::u64_to_str(mb.targets.len) ~ " targets, " ~ teko::u64_to_str(mb.values.len) ~ " values)" }
     }
     var cur = env
-    var body: []TStatement = teko::list::empty()
+    var body: []@TStatement() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= mb.values.len { break }
@@ -7095,7 +7095,7 @@ fn type_multibind_array(mb: parser::MultiBind, env: Env, table: TypeTable): TStm
     }
     var shape = mb_array_shape(mb.targets)
     var cur = env
-    var body: []TStatement = teko::list::empty()
+    var body: []@TStatement() = teko::list::empty()
     var aname = mb_temp_name(mb, 0)
     var astmt = mb_binding_stmt(parser::BindKind::Mut, aname, false, mb.type_ann, mb.values[0])
     var ats = match type_statement(astmt, cur, table) { TypedStmt as t => t; error as e => return e }
@@ -7483,7 +7483,7 @@ fn slice_element_widens(pt: Type, arg_type: Type): bool {
 
 // check every `return` reachable as a statement (descend into loop bodies and `if`-blocks;
 // match-arm returns await the divergence item — arm bodies are expressions, not statements).
-fn check_returns(stmts: []TStatement, ret: Type, table: TypeTable): error | null {
+fn check_returns(stmts: []@TStatement(), ret: Type, table: TypeTable): error | null {
     var i = 0
     loop {
         if i >= stmts.len { break }
@@ -7495,7 +7495,7 @@ fn check_returns(stmts: []TStatement, ret: Type, table: TypeTable): error | null
 
 // the trailing value-expr of a block (its last statement, when that is an expr-statement),
 // or null. (C: tblock_trailing.)
-fn tblock_trailing(stmts: []TStatement): TExpr | null {
+fn tblock_trailing(stmts: []@TStatement()): TExpr | null {
     if stmts.len == 0 { return null }
     match stmts[stmts.len - 1] {
         TExprStmt as es => es.expr
@@ -7505,7 +7505,7 @@ fn tblock_trailing(stmts: []TStatement): TExpr | null {
 
 // the block's trailing value-expr IF it is a numeric literal (else null) — for the if/match
 // literal cross-adoption (a `64` branch adopts a sibling's numeric type). (C: tl/el + NUMBER tag.)
-fn trailing_number(stmts: []TStatement): TExpr | null {
+fn trailing_number(stmts: []@TStatement()): TExpr | null {
     match tblock_trailing(stmts) {
         TExpr as t => match t.kind { TNumber => t; _ => null }
         null => null
@@ -7728,20 +7728,20 @@ fn retype_literal(e: TExpr, to: Type): TExpr {
  * @param to     the destination type each contributing branch leaf adopts
  * @return       the block with its trailing expression re-typed to `to`, or the block unchanged
  */
-fn retype_block_trailing(stmts: []TStatement, to: Type): []TStatement {
+fn retype_block_trailing(stmts: []@TStatement(), to: Type): []@TStatement() {
     if stmts.len == 0 { return stmts }
     if tblock_diverges(stmts) { return stmts }
     match stmts[stmts.len - 1] {
         TExprStmt as es => {
             var last_index = stmts.len - 1
-            var out: []TStatement = teko::list::empty()
+            var out: []@TStatement() = teko::list::empty()
             var i = 0
             loop {
                 if i >= last_index { break }
                 out = teko::list::push(out, stmts[i])
                 i++
             }
-            var last: TStatement = TExprStmt { expr = retype_literal(es.expr, to) }
+            var last: @TStatement() = TExprStmt { expr = retype_literal(es.expr, to) }
             teko::list::push(out, last)
         }
         _ => stmts
@@ -7761,7 +7761,7 @@ fn retype_block_trailing(stmts: []TStatement, to: Type): []TStatement {
  * @return       the body with its adopting union return/trailing leaves born at their member, else
  *               `stmts` unchanged
  */
-fn retype_union_returns(stmts: []TStatement, ret: Type, table: TypeTable): []TStatement {
+fn retype_union_returns(stmts: []@TStatement(), ret: Type, table: TypeTable): []@TStatement() {
     match ret {
         Variant => retype_return_positions(stmts, ret, table, true)
         _ => stmts
@@ -7781,10 +7781,10 @@ fn retype_union_returns(stmts: []TStatement, ret: Type, table: TypeTable): []TSt
  * @param retype_trailing  true iff the block's final expr-statement is a return-position value
  * @return                 the block with its return-position literal leaves born at their member
  */
-fn retype_return_positions(stmts: []TStatement, ret: Type, table: TypeTable, retype_trailing: bool): []TStatement {
+fn retype_return_positions(stmts: []@TStatement(), ret: Type, table: TypeTable, retype_trailing: bool): []@TStatement() {
     if stmts.len == 0 { return stmts }
     var last = stmts.len - 1
-    var out: []TStatement = teko::list::empty()
+    var out: []@TStatement() = teko::list::empty()
     var i = 0
     loop {
         if i >= stmts.len { break }
@@ -7810,7 +7810,7 @@ fn retype_return_positions(stmts: []TStatement, ret: Type, table: TypeTable, ret
  * @param is_trailing  true iff `s` is a return-position trailing expr-statement
  * @return             the statement with its return-position literal leaves born at their member
  */
-fn retype_return_stmt(s: TStatement, ret: Type, table: TypeTable, is_trailing: bool): TStatement {
+fn retype_return_stmt(s: @TStatement(), ret: Type, table: TypeTable, is_trailing: bool): @TStatement() {
     match s {
         TReturn as r => {
             if !r.has_value { return s }
@@ -7889,7 +7889,7 @@ fn yields_declared_return(value: TExpr, ret: Type, table: TypeTable): bool {
     assignable_to(value.type, ret, table) || numeric_widens_implicitly(value.type, ret) || literal_adopts(value, ret)
 }
 
-fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable): error | null {
+fn check_return_stmt(s: @TStatement(), ret: Type, table: TypeTable): error | null {
     match s {
         TReturn as r => {
             if r.has_value {
@@ -7969,7 +7969,7 @@ fn reject_ref_return(ret: Type): error | null {
 
 // the trailing-value check — ONLY when the last statement is an expression (else: NO claim, the
 // guard against false-rejecting a body that ends in a diverging loop/if/match — the every-path item).
-fn check_trailing_value(stmts: []TStatement, ret: Type, table: TypeTable): error | null {
+fn check_trailing_value(stmts: []@TStatement(), ret: Type, table: TypeTable): error | null {
     if stmts.len == 0 { return null }
     match stmts[stmts.len - 1] {
         TExprStmt as es => {
@@ -8049,7 +8049,7 @@ fn check_labels_inexpr(e: TExpr, scope: []str, in_loop: bool, seen: []str): Labe
  * @return LabelCheck  a LabelCheck: failed=false with the accumulated `seen` on success, else the
  *                 first violation's message
  */
-fn check_labels(stmts: []TStatement, scope: []str, in_loop: bool, seen: []str): LabelCheck {
+fn check_labels(stmts: []@TStatement(), scope: []str, in_loop: bool, seen: []str): LabelCheck {
     var acc = seen
     var i = 0
     loop {
@@ -8475,7 +8475,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         if !ret_ok {
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
-        var no_body: []TStatement = teko::list::empty()
+        var no_body: []@TStatement() = teko::list::empty()
         return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
@@ -8504,7 +8504,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         // (§4 G) the `base` super-binding: a self→base upcast bound to the fixed name `base`, the sole
         // super path. Prepended as the method body's FIRST statement.
         var base_kw_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "base" }; bound = base_bound; value = cast_val }
-        var prefixed: []TStatement = teko::list::push(teko::list::empty(), base_kw_stmt)
+        var prefixed: []@TStatement() = teko::list::push(teko::list::empty(), base_kw_stmt)
         var si = 0
         loop { if si >= ret_stmts.len { break }; prefixed = teko::list::push(prefixed, ret_stmts[si]); si++ }
         prefixed
@@ -8561,7 +8561,7 @@ fn fn_has_ref_param(tf: TFunction): bool {
  * @param Spine spine  the function's spine fact
  * @return error?  null when sound, else the first reject error
  */
-fn check_ref_storability_block(stmts: []TStatement, spine: Spine): error | null {
+fn check_ref_storability_block(stmts: []@TStatement(), spine: Spine): error | null {
     var i = 0
     loop {
         if i >= stmts.len { break }
@@ -8580,7 +8580,7 @@ fn check_ref_storability_block(stmts: []TStatement, spine: Spine): error | null 
  * @param Spine spine  the function's spine fact
  * @return error?  null when sound, else the reject error
  */
-fn check_ref_storability_stmt(s: TStatement, spine: Spine): error | null {
+fn check_ref_storability_stmt(s: @TStatement(), spine: Spine): error | null {
     match s {
         TBinding as b => match check_ref_bind_storable(b, spine) { error as e => return e; null => check_ref_storability_expr(b.value, spine) }
         TAssign as a => match check_ref_assign_storable(a, spine) { error as e => return e; null => check_ref_storability_expr(a.value, spine) }
@@ -8790,7 +8790,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
         if !ret_ok {
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
-        var no_body: []TStatement = teko::list::empty()
+        var no_body: []@TStatement() = teko::list::empty()
         return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
@@ -9377,7 +9377,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     var cenv = pre.env
     program = drop_comptime_items(program)
     var items: []@TItem() = teko::list::empty()
-    var mainbody: []TStatement = teko::list::empty()
+    var mainbody: []@TStatement() = teko::list::empty()
     var diags: []str = pre.diags
     var cur = cenv
     var i = 0
@@ -9582,7 +9582,7 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
     var cenv = pre.env
     program = drop_comptime_items(program)
     var items: []@TItem() = teko::list::empty()
-    var mainbody: []TStatement = teko::list::empty()   // the loose top-level statements (the virtual-main), for label validation
+    var mainbody: []@TStatement() = teko::list::empty()   /* the loose top-level statements (the virtual-main), for label validation */
     var cur = cenv   // threaded virtual-main scope: each loose binding extends it for the next statement (mirrors typer.c's `cur`)
     var i = 0
     loop {

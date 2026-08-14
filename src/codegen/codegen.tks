@@ -1441,7 +1441,7 @@ fn cg_binding_is_slice_element_borrow(b: checker::TBinding): bool {
  * @return           the C cleanup text, or an error propagated from a name/symbol lookup
  * @since #122 (W10b.CLASS)
  */
-fn cg_class_cleanup_text(prog: CgProg, escaping: []str, fn_body: []checker::TStatement, has_tail: bool, tail_expr: checker::TExpr): str | error {
+fn cg_class_cleanup_text(prog: CgProg, escaping: []str, fn_body: []@TStatement(), has_tail: bool, tail_expr: checker::TExpr): str | error {
     var out: []byte = teko::list::empty()
     var i = 0
     loop {
@@ -1773,7 +1773,7 @@ fn cg_emit_fnptr_sig_ex(buf: []byte, prog: CgProg, t: checker::Type, with_env: b
 // each argument ONCE and DISPATCHES on `env`: a NON-capturing closure / named-fn value (env == NULL)
 // calls with the no-env ABI `R(params)`; a CAPTURING closure (env != NULL) calls with the env-first
 // ABI `R(void*, params)`. The callee is a local of function type (its name is the callee's last seg).
-fn emit_closure_call(buf: []byte, prog: CgProg, ret_type: checker::Type, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_closure_call(buf: []byte, prog: CgProg, ret_type: checker::Type, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var nm = c.callee.segments[c.callee.segments.len - 1].name
     var out = cb(buf, "({ ")
     // bind each argument to a temp (single evaluation, preserving side effects).
@@ -3090,7 +3090,7 @@ pub fn cast_may_lose(src: checker::PrimKind, dst: checker::PrimKind): bool {
 // read-only `prog` through the expr/stmt chain (the same functional-vs-static divergence the
 // file header notes for cbuf*→[]byte and err**→|error). It is needed only at the variant
 // frontier (emit_as / the match emitters), but the chain that can reach those carries it.
-fn emit_div_mod(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_div_mod(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var prim = match e.type {
         checker::Prim as p => p
         _ => return error { message = "codegen: division/modulo on a non-primitive type not yet supported" }
@@ -3136,7 +3136,7 @@ fn emit_div_mod(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinar
  * @throws          when the target's declared type is not primitive/numeric, or `%=` targets
  *                  a float (no C float modulo operator)
  */
-fn emit_div_mod_assign(buf: []byte, prog: CgProg, a: checker::TAssign, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_div_mod_assign(buf: []byte, prog: CgProg, a: checker::TAssign, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var prim = match a.bound {
         checker::Prim as p => p
         _ => return error { message = "codegen: division/modulo-assign on a non-primitive type not yet supported" }
@@ -3167,7 +3167,7 @@ fn emit_div_mod_assign(buf: []byte, prog: CgProg, a: checker::TAssign, escaping:
 // without it they compile to the plain C operator — zero overhead.
 // Float +,-,* fall through to emit_binary's plain-C path (float overflow ≠ panic).
 // (C: the `if (bop == TK_TOKEN_PLUS || …)` block inside TK_TEXPR_BINARY.)
-fn emit_arith(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_arith(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var prim = match e.type {
         checker::Prim as p => p
         _ => return error { message = "codegen: arithmetic on a non-primitive type not yet supported" }
@@ -3197,7 +3197,7 @@ fn emit_arith(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary,
 // eval_binary/apply_int_op mask exactly. Bitwise/float shift is checker-rejected, so
 // a non-integer result type reaching here is an internal invariant break.
 // (C: the `if (bop == TK_TOKEN_SHL || bop == TK_TOKEN_SHR)` block inside TK_TEXPR_BINARY.)
-fn emit_shift(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_shift(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var prim = match e.type {
         checker::Prim as p => p
         _ => return error { message = "codegen: shift on a non-integer type not yet supported" }
@@ -3223,7 +3223,7 @@ fn emit_shift(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary,
 // on integer prims go through emit_arith (C7.15 overflow guards); `<<`, `>>` on
 // integer prims go through emit_shift (#49 width-masked count); everything else
 // emits plain C `(L op R)`. (C: TK_TEXPR_BINARY branch of emit_expr.)
-fn emit_binary(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_binary(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if b.op == lexer::TokenKind::Slash || b.op == lexer::TokenKind::Percent {
         return emit_div_mod(buf, prog, e, b, escaping, regions, fn_body, dctx)
     }
@@ -3254,7 +3254,7 @@ fn emit_binary(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary
     is `-1` (all 32 bits), not the width-masked `255` the interpreter computes — the cast re-narrows to the
     declared width so both engines agree (#265: exposed the first time the u8 `~` test ran natively).
     Other unaries (`-`, `!`) need no mask — their result already fits the operand width. */
-fn emit_unary(buf: []byte, prog: CgProg, u: checker::TUnary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_unary(buf: []byte, prog: CgProg, u: checker::TUnary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var op = match unop_c(u.op) { str as s => s; error as err => return err }
     var mask_type = cg_bnot_mask_type(u)
     var out = cb(buf, "(")
@@ -3425,7 +3425,7 @@ fn cg_variant_member_payload_comparable(t: checker::Type): bool {
  * @throws          propagated from emitting either operand, or from `emit_slice_eq` when the
  *                  `[]T` element is a shape this codegen does not close (see its own doc)
  */
-fn emit_content_eq(buf: []byte, prog: CgProg, route: CgCmpRoute, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_content_eq(buf: []byte, prog: CgProg, route: CgCmpRoute, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     match route {
         CgCmpRoute::StrEq => emit_runtime_eq_call(buf, prog, "tk_str_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
         CgCmpRoute::CharEq => emit_runtime_eq_call(buf, prog, "tk_char_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
@@ -3450,7 +3450,7 @@ fn emit_content_eq(buf: []byte, prog: CgProg, route: CgCmpRoute, op: lexer::Toke
  * @return       the appended buffer
  * @throws       propagated from emitting either operand
  */
-fn emit_runtime_eq_call(buf: []byte, prog: CgProg, rtfn: str, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_runtime_eq_call(buf: []byte, prog: CgProg, rtfn: str, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var out = cb(buf, "(")
     if op == lexer::TokenKind::Ne { out = cb(out, "!") }
     out = cb(out, rtfn)
@@ -3548,7 +3548,7 @@ fn cg_slice_elem_of(t: checker::Type): checker::Type {
  *                  emitting either operand
  * @since 0.3.1.0 (igualdade-char-slice)
  */
-fn emit_slice_eq(buf: []byte, prog: CgProg, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_slice_eq(buf: []byte, prog: CgProg, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var elem = cg_slice_elem_of(lhs.type)
     var plan = match cg_slice_eq_plan(elem) { CgSliceEqPlan as p => p; error as err => return err }
     var t = $"_teq{buf.len}"
@@ -3607,7 +3607,7 @@ fn emit_slice_eq(buf: []byte, prog: CgProg, op: lexer::TokenKind, lhs: checker::
  * @throws          when the variant's C type or a member's key cannot be emitted, or the non-`null`
  *                  member has no defined payload comparison (`cg_variant_member_payload_comparable`)
  */
-fn cg_emit_variant_member_cmp(buf: []byte, prog: CgProg, cmp: CgVariantMemberCmp, eq: bool, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn cg_emit_variant_member_cmp(buf: []byte, prog: CgProg, cmp: CgVariantMemberCmp, eq: bool, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var is_null_member = match cmp.member.type { checker::Null => true; _ => false }
     if !is_null_member && !cg_variant_member_payload_comparable(cmp.member.type) {
         return error { message = "codegen: comparing a tagged union to a non-null, non-numeric member is not yet supported" }
@@ -3658,7 +3658,7 @@ fn cg_emit_variant_member_cmp(buf: []byte, prog: CgProg, cmp: CgVariantMemberCmp
  *                  from `cg_emit_variant_member_cmp` on an unsupported member payload, or from
  *                  `emit_content_eq`/`emit_slice_eq` on an unclosed element shape
  */
-fn emit_compare(buf: []byte, prog: CgProg, c: checker::TCompare, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_compare(buf: []byte, prog: CgProg, c: checker::TCompare, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if c.rest.len == 0 { return emit_expr_ctx(buf, prog, checker::Void { }, c.first, escaping, regions, fn_body, dctx) }
     var out = cb(buf, "(")
     var prev = c.first
@@ -3697,7 +3697,7 @@ fn emit_compare(buf: []byte, prog: CgProg, c: checker::TCompare, escaping: []str
  * @throws          propagated from `cg_emit_variant_member_cmp`, from `emit_content_eq` on an
  *                  unclosed `[]T` element shape, or from emitting either operand
  */
-fn emit_compare_term(buf: []byte, prog: CgProg, prev: checker::TExpr, term: checker::TCmpTerm, op: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_compare_term(buf: []byte, prog: CgProg, prev: checker::TExpr, term: checker::TCmpTerm, op: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var is_eq = term.op == lexer::TokenKind::EqEq || term.op == lexer::TokenKind::Ne
     var vm_cmp = if is_eq { cg_variant_member_cmp(prog, prev, term.operand) } else { null }
     match vm_cmp {
@@ -3767,7 +3767,7 @@ fn cg_cast_target_is_variant(prog: CgProg, t: checker::Type): bool {
  * @throws          when the target is not an emittable cast destination (a non-integer guard
  *                  target, a non-float source tag) or the operand fails to emit
  */
-fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var inner = c.expr
     if cg_cast_target_is_variant(prog, e.type) { return emit_as(buf, prog, e.type, inner, escaping, regions, fn_body, dctx) }
     // Extract source/dest prims when both sides are primitive (else: a plain C cast).
@@ -3894,7 +3894,7 @@ fn get_push_elem(e: checker::TExpr, c: checker::TCall): checker::Type | error {
 // `[]elem`. type_assign may overwrite the call's type to the sentinel when assigning push(xs,i)
 // back to a sentinel-typed xs; get_push_elem recovers the element. Lower to an inline
 // copy-append GNU stmt-expr. (C: the `push` arm.)
-fn emit_list_push(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, frame: str): []byte | error {
+fn emit_list_push(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, frame: str): []byte | error {
     var elem = match get_push_elem(e, c) { checker::Type as t => t; error as err => return err }
     var bN = $"_sb{buf.len}"
     var iN = $"_si{buf.len + 1}"
@@ -3948,7 +3948,7 @@ fn emit_list_push(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCal
  * @param frame     `""` for the root region; else a frame region variable name
  * @return          the emitted C, or `error` on a context-less sentinel / malformed call
  */
-fn emit_list_with_cap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, frame: str): []byte | error {
+fn emit_list_with_cap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, frame: str): []byte | error {
     var elem = match e.type {
         checker::Slice as sl => match sl.element {
             checker::Void => return error { message = "codegen: teko::list::with_cap() needs a known slice type from context (annotate the binding)" }
@@ -3997,7 +3997,7 @@ fn emit_list_with_cap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::
  * @param dctx      the defer context threaded through nested expr emission
  * @return          the emitted C, or `error` on a malformed call / non-reference receiver
  */
-fn emit_list_grow_inplace(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_list_grow_inplace(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if c.args.len != 2 { return error { message = "codegen: teko::list::grow_inplace has the wrong arity (internal)" } }
     var elem = match c.args[0].type {
         checker::Reference as r => match r.inner { checker::Slice as sl => sl.element; _ => return error { message = "codegen: teko::list::grow_inplace receiver is not a `ref []T` (internal)" } }
@@ -4025,7 +4025,7 @@ fn emit_list_grow_inplace(buf: []byte, prog: CgProg, c: checker::TCall, escaping
  * primitive is already a plain two-argument C call, so this is inlined rather than routed through
  * `emit_host_ffi` (which exists for FIXED-ABI struct-returning FFI bottoms, not this).
  */
-fn emit_buf_ptr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_buf_ptr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var out = cb(buf, "(uint8_t *)tk_region_alloc(")
     out = cb(out, cg_enclosing_region_expr(regions))
     out = cb(out, ", (size_t)(")
@@ -4088,7 +4088,7 @@ fn emit_ptr_wrap_guard(buf: []byte, addr_c: str, tag_c: str): []byte {
  * @throws          when the call's arity is not 1 (internal — the checker guarantees it)
  * @since 0.3.1 (§5 Part A)
  */
-fn emit_ptr_unwrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_ptr_unwrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if c.args.len != 1 { return error { message = "codegen: ptr::__unwrap expects one argument (internal)" } }
     var a = fresh_named("_pu", buf.len to i64)
     var out = cb(buf, "({ void *")
@@ -4125,7 +4125,7 @@ fn emit_ptr_unwrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCa
  * @throws          when the call's arity/type-arg count is not 1 (internal — the checker guarantees it)
  * @since 0.3.1 (§5 Part A)
  */
-fn emit_ptr_wrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_ptr_wrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if c.args.len != 1 { return error { message = "codegen: __wrap expects one (receiver) argument (internal)" } }
     if c.type_args.len != 1 { return error { message = "codegen: __wrap expects one type argument (internal)" } }
     var ttype = c.type_args[0]
@@ -4168,7 +4168,7 @@ fn emit_ptr_wrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall
  * @param DeferCtx dctx  the defer context
  * @return []byte | error  the buffer with the copy-and-terminate stmt-expr appended, or a codegen error
  */
-fn emit_as_cstr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_as_cstr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var v = $"_ac{buf.len}"
     var out = cb(buf, $"({{ tk_str {v}_s = (")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -4193,7 +4193,7 @@ fn emit_as_cstr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, r
  * @param DeferCtx dctx  the defer context
  * @return []byte | error  the buffer with the bounded-scan stmt-expr appended, or a codegen error
  */
-fn emit_str_from_c(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_str_from_c(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var v = $"_sfc{buf.len}"
     var out = cb(buf, $"({{ const uint8_t *{v}_p = (const uint8_t *)(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -4220,7 +4220,7 @@ fn emit_str_from_c(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str
  * @param DeferCtx dctx  the defer context
  * @return []byte | error  the buffer with the named-region alloc-and-terminate stmt-expr appended, or a codegen error
  */
-fn emit_region_buf(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_region_buf(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var v = $"_rb{buf.len}"
     var out = cb(buf, $"({{ tk_region *{v}_r = (tk_region *)(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -4238,7 +4238,7 @@ fn emit_region_buf(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str
 // the method's concrete C signature — `R (*)(void *, params…)`, the receiver riding as the
 // ABI-identical `void *` data word — and call it. Rides emit_closure_call's cast-and-call scheme
 // (the tk_closure machinery the plan's D3 row names). Mirror of codegen.c::emit_iface_call.
-fn emit_iface_call(buf: []byte, prog: CgProg, ret_type: checker::Type, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_iface_call(buf: []byte, prog: CgProg, ret_type: checker::Type, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var p = c.callee
     var f = match c.callee_type { checker::Func as ff => ff; _ => return error { message = "codegen: malformed interface-dispatch node (internal)" } }
     if p.segments.len < 2 || c.args.len == 0 || c.args.len != f.params.len {
@@ -4374,7 +4374,7 @@ fn cg_call_is_user_declared(prog: CgProg, c: checker::TCall): bool {
  * @return            the buffer with the concat fold appended
  * @throws            when the argument type or expression fails to emit
  */
-fn emit_concat_fold(buf: []byte, prog: CgProg, arg: checker::TExpr, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_concat_fold(buf: []byte, prog: CgProg, arg: checker::TExpr, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var cs = $"_cs{buf.len}"
     var ci = $"_ci{buf.len}"
     var ca = $"_ca{buf.len}"
@@ -4421,7 +4421,7 @@ fn cg_bound_is_str(t: checker::Type): bool {
     match t { checker::Str => true; _ => false }
 }
 
-fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     // (W10b.D3) a DYNAMIC contract-method call dispatches through the receiver's vtable —
     // FIRST, before any builtin name-sniffing below could collide with a method name.
     if c.is_iface_dispatch { return emit_iface_call(buf, prog, ret_type, c, escaping, regions, fn_body, dctx) }
@@ -4766,7 +4766,7 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
 // emit_field_access — a TFieldAccess -> `(recv.field)`. (C: TK_TEXPR_FIELD_ACCESS branch.)
 // W5-idx — `.len`: a `str` lowers to the runtime tk_str's `.len` member (`(recv).len`); a
 // slice's `.len` reads its tk_slice_<elem> `.len` member (same {ptr,len} shape as tk_str -> u64).
-fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var is_slice = match fa.receiver.type { checker::Slice => true; _ => false }
     if is_slice && fa.field == "len" {
         var o = cb(buf, "(")   // `.len` of a tk_slice_<elem> — same {ptr,len} shape as tk_str -> u64
@@ -4868,7 +4868,7 @@ fn cg_expr_diverges(e: checker::TExpr): bool {
 // index PANICS with the SAME message as the interpreter's eval_index (M.1). A slice receiver uses the
 // SAME bounds-checked shape, with the element C type substituted for tk_byte and reading
 // `(recv).ptr[i]` with a `(tk_panic_oob(), (<elem>){0})` fallback. (C: the TK_TEXPR_INDEX branch.)
-fn emit_index(buf: []byte, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_index(buf: []byte, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     // slice subscript: the SAME bounds-checked stmt-expr as str, with the element type
     // substituted for tk_byte and a 0-of-element fallback after the panic.
     match ix.receiver.type {
@@ -4947,7 +4947,7 @@ fn emit_index(buf: []byte, prog: CgProg, e: checker::TExpr, ix: checker::TIndex,
 // The EMPTY set `x in []` still EVALUATES the lhs once (single-eval), then yields false — so a
 // side-effecting lhs runs identically in the interpreter (which evaluates the lhs before its zero-iteration
 // loop). interpreter==native even for `[]`. (C: the TK_TEXPR_IN branch of emit_expr.)
-fn emit_in(buf: []byte, prog: CgProg, ie: checker::TInExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_in(buf: []byte, prog: CgProg, ie: checker::TInExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if ie.elems.len == 0 {
         var z = cb(buf, "({ (void)(")
         z = match emit_expr_ctx(z, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -4988,7 +4988,7 @@ fn emit_in(buf: []byte, prog: CgProg, ie: checker::TInExpr, escaping: []str, reg
 // concrete empty literal. Plain elements: allocate N slots, fill by index via emit_as.
 // Spread elements (`..xs`): when present, build via tk_slice_push into a dynamic accumulator
 // (mirrors the slow path in the C twin codegen.c — see its TK_TEXPR_ARRAY / has_spread branch).
-fn emit_array_lit(buf: []byte, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_array_lit(buf: []byte, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var elem = match e.type { checker::Slice as s => s.element; _ => return error { message = "codegen: array literal is not a slice type (internal)" } }
     if a.elements.len == 0 {
         var z = cb(buf, "(")
@@ -5146,7 +5146,7 @@ fn fmt_family_takes_prec(fc_low: byte, is_flt: bool): bool {
  * @return            the buffer with the interpolation fold appended
  * @throws            when a hole expression or an unrecognized format spec fails to emit
  */
-fn emit_interp(buf: []byte, prog: CgProg, in: checker::TInterp, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_interp(buf: []byte, prog: CgProg, in: checker::TInterp, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var nsegs = in.pieces.len + in.holes.len
     var out = buf
     var concat_open = if str_region.len > 0 { teko::str::concat("tk_str_concat_r(", str_region, ", ") } else { "tk_str_concat(" }
@@ -5344,7 +5344,7 @@ fn cg_find_struct_field_type(prog: CgProg, sname: str, fname: str): @TypeExpr() 
 // (`error { message = … }`). E2-NATIVE: `error` is now the runtime tk_error struct
 // (teko_rt.h); `error { message = s }` emits tk_error_make(s) which fills the other
 // diagnostic fields with zero defaults (C1.3 additive). (C: TK_TEXPR_STRUCT_INIT branch.)
-fn emit_struct_init(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_struct_init(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     return emit_struct_init_framed(buf, prog, e, si, "", escaping, regions, fn_body, dctx)
 }
 
@@ -5383,7 +5383,7 @@ fn emit_struct_init(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::T
  * @return          the buffer with the compound literal (or per-object class construct) appended
  * @throws          error propagated from emitting a field type or a field value
  */
-fn emit_struct_init_framed(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_struct_init_framed(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var is_class = match e.type {
         checker::Named as nm => cg_is_class_named(prog, nm.name)
         _ => false
@@ -5443,7 +5443,7 @@ fn emit_struct_init_framed(buf: []byte, prog: CgProg, e: checker::TExpr, si: che
  * @return          the buffer with the compound literal appended
  * @throws          error propagated from emitting a field type or a field value
  */
-fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var name = match e.type {
         checker::Named as nm => nm.name
         // E2-NATIVE: `error { message = s }` → tk_error_make(s); the checker ensures exactly
@@ -5608,7 +5608,7 @@ fn fresh_tmp_name(buf_len: i64): str {
 // can open its own arm region — and a TBinding non-tail block-local routes to the arm region opened
 // by emit_branch_value. The TAIL value (the `sink =` line) is emitted with cur_block_is_value=TRUE
 // so a binding flowing into it is NOT block-local (routes to the enclosing region — the W9 trap).
-fn emit_stmt_value(buf: []byte, prog: CgProg, ret_type: checker::Type, s: checker::TStatement, slot: checker::Type, sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement): []byte | error {
+fn emit_stmt_value(buf: []byte, prog: CgProg, ret_type: checker::Type, s: @TStatement(), slot: checker::Type, sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement()): []byte | error {
     match s {
         checker::TReturn => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
         checker::TBreakStmt => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
@@ -5645,7 +5645,7 @@ fn emit_stmt_value(buf: []byte, prog: CgProg, ret_type: checker::Type, s: checke
 // emit_stmt_value FIRST, THEN the region drops — so the yielded value is fully materialized into the
 // enclosing region before its non-tail siblings are freed (never a UAF). No block-local binding ⇒ no
 // region ⇒ byte-identical to the pre-W9 value-branch output. (C: `emit_branch_value`.)
-fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: []checker::TStatement, slot: checker::Type, sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: []@TStatement(), slot: checker::Type, sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     if !want_block {
         // No block-local binding: emit exactly as the pre-W9 path (no region), but with live context.
@@ -5707,7 +5707,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: [
 // cc -std=c23). (interpreter parity: eval_expr's TIfExpr runs exec_if and yields the taken branch's
 // trailing NORMAL value; a divergent branch is an honest stop — see emit_stmt_value.)
 // (C: `emit_if_value`.)
-fn emit_if_value(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, f: checker::TIfExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_if_value(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, f: checker::TIfExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if !f.has_else { return error { message = "codegen: if-without-else used as a value not yet supported" } }
     // The temp name is `_tk<buflen>` frozen at the CURRENT length (the buffer is about to
     // grow). Capture it once and reuse it for the declaration AND the trailing read, so both
@@ -5978,7 +5978,7 @@ fn cg_wrap_open(buf: []byte, v: checker::Type, mkey: str): []byte | error {
  * @return          `buf` with the wrapped compound literal appended, or an error
  * @throws          when `value`'s key is unreachable in `expected` (an internal caller-guard bug)
  */
-fn emit_variant_wrap(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_variant_wrap(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     match expected {
         checker::Variant as bva => match cg_union_box_member(prog, bva) {
             checker::Type as bx => {
@@ -6068,7 +6068,7 @@ fn emit_variant_wrap_exact_pass(buf: []byte, prog: CgProg, ret_type: checker::Ty
  * @return          the wrapped buffer, or `null` when no member is a base `vkey` subclasses
  * @since 0.3.1
  */
-fn emit_variant_wrap_widen_pass(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, vkey: str, n: i64, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | null | error {
+fn emit_variant_wrap_widen_pass(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, vkey: str, n: i64, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | null | error {
     var w = 0
     loop {
         if w >= n { break }
@@ -6104,7 +6104,7 @@ fn emit_variant_wrap_widen_pass(buf: []byte, prog: CgProg, ret_type: checker::Ty
  * @return          the wrapped buffer, or `null` when no member transitively reaches `vkey`
  * @since 0.3.1
  */
-fn emit_variant_wrap_transitive_pass(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, vkey: str, n: i64, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | null | error {
+fn emit_variant_wrap_transitive_pass(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, vkey: str, n: i64, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | null | error {
     var j = 0
     loop {
         if j >= n { break }
@@ -6208,7 +6208,7 @@ fn cg_emit_union_present_str(buf: []byte, prog: CgProg, uni: checker::Type, mem:
  * @throws           error propagated from the null/error arm emission
  * @since 0.3.1 (null-union C6 — FFI `error | null` result arms)
  */
-fn cg_emit_ffi_ures(buf: []byte, prog: CgProg, result_ty: checker::Type, ures_tmp: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn cg_emit_ffi_ures(buf: []byte, prog: CgProg, result_ty: checker::Type, ures_tmp: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var nulllit = checker::TExpr { kind = checker::TNullLit { }; type = result_ty; line = 0; col = 0 }
     var o = cb(buf, ures_tmp)
     o = cb(o, ".ok ? ")
@@ -6297,7 +6297,7 @@ fn cg_wrap_elem_str_contract(buf: []byte, prog: CgProg, en: checker::Named, vtyp
 // the result struct is bound to one temp, then both arms read it. `kind` selects the shape:
 // "sres"(str|error) "ures"(error?) "slres"([]str|error) "u64res"(u64|error) "args" "run".
 // (C: `emit_host_ffi`.)
-fn emit_host_ffi(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, kind: str, rtfn: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_host_ffi(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCall, kind: str, rtfn: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var t = $"_h{buf.len}"   // unique temp per call site
     var str_t = checker::Str { }
     var err_t = checker::Error { }
@@ -6664,7 +6664,7 @@ fn cg_name_last_segment_offset(name: str): u64 {
 // in a return context, so a diverging value-form-match arm inside `value` cannot occur). The C uses
 // a `g_cg_ret_type` STATIC for that; here ret_type is THREADED (Teko has no module-mutable), so a
 // return-context caller (binding/assign/return/tail/arm sink) uses emit_as_r to pass it down.
-fn emit_as(buf: []byte, prog: CgProg, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_as(buf: []byte, prog: CgProg, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     emit_as_r(buf, prog, checker::Void { }, expected, value, escaping, regions, fn_body, dctx)
 }
 
@@ -6747,7 +6747,7 @@ fn cg_value_already_boxed(prog: CgProg, bx: checker::Type, vt: checker::Type): b
     }
 }
 
-fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: checker::Type, inner: checker::Type, value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: checker::Type, inner: checker::Type, value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var bxN = fresh_named("_ubx", buf.len to i64)
     var out = cb(buf, "({ ")
     out = match emit_type(out, prog, inner) { []byte as o => o; error as e => return e }
@@ -6785,11 +6785,11 @@ fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: checker::Type, inn
  * @param dctx      the enclosing `defer` context
  * @return          the buffer with the representation-correct wrapped value appended
  */
-fn emit_as_r(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_as_r(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     emit_as_r_in(buf, prog, ret_type, expected, value, "", escaping, regions, fn_body, dctx)
 }
 
-fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     match expected {
         checker::Reference => {
             match value.type {
@@ -7598,7 +7598,7 @@ fn cg_emit_pat_binds(buf: []byte, prog: CgProg, pat: @Pattern(), subj: str, subj
 // path)? True when its trailing statement is a return/break/continue, or a trailing if-with-
 // else / match whose every branch / arm diverges. Mirrors the checker's tblock_diverges so a
 // diverging arm body lowers as real control flow, not a value commit. (C: `cg_block_diverges`.)
-fn cg_block_diverges(stmts: []checker::TStatement): bool {
+fn cg_block_diverges(stmts: []@TStatement()): bool {
     if stmts.len == 0 { return false }
     match stmts[stmts.len - 1] {
         checker::TReturn => true
@@ -7625,7 +7625,7 @@ fn cg_block_diverges(stmts: []checker::TStatement): bool {
 // cg_block_diverges_jump — does a block diverge via a `break`/`continue` (NOT a `return`)? Such
 // a jump can't escape a GNU stmt-expr, so a match used as a SUB-expression honest-stops on it —
 // the same frontier the interpreter enforces (eval_match). A `return` divergence is fine. (C: `cg_block_diverges_jump`.)
-fn cg_block_diverges_jump(stmts: []checker::TStatement): bool {
+fn cg_block_diverges_jump(stmts: []@TStatement()): bool {
     if stmts.len == 0 { return false }
     match stmts[stmts.len - 1] {
         checker::TBreakStmt => true
@@ -7653,7 +7653,7 @@ fn cg_block_diverges_jump(stmts: []checker::TStatement): bool {
 // control flow (a `return …;` leaves the whole function) and never commits to `sink`. A break/
 // continue divergence is an HONEST STOP (it can't escape a stmt-expr), the same frontier the interpreter
 // enforces (eval_match). (C: `emit_arm_value`.)
-fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: checker::TExpr, body: []checker::TStatement, sink: str, ci: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: checker::TExpr, body: []@TStatement(), sink: str, ci: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if cg_block_diverges_jump(body) {
         return error { message = "codegen: break/continue inside a `match` used as a sub-expression not yet supported" }
     }
@@ -7790,7 +7790,7 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: c
  * @return          the buffer with the value-match statement-expression appended
  * @throws          the first emission error from a subject, guard, pattern or arm body
  */
-fn emit_match_value(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, m: checker::TMatchExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_match_value(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, m: checker::TMatchExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     // S2/W9: `escaping`/`regions`/`fn_body` thread the enclosing block-region context so each value-arm
     // can open its OWN arm region for its block-local NON-tail bindings (emit_arm_value). The subject
     // and guards are emitted in the SAME enclosing context (the C twin reads its live globals there).
@@ -7860,7 +7860,7 @@ fn emit_match_value(buf: []byte, prog: CgProg, ret_type: checker::Type, e: check
  * @return          the buffer with the tail-match brace block appended
  * @throws          the first emission error from a subject, guard, pattern or arm body
  */
-fn emit_match_tail(buf: []byte, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: checker::Type, indent: str, escaping: []str, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_match_tail(buf: []byte, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: checker::Type, indent: str, escaping: []str, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var subj = fresh_named("_s", buf.len to i64)
     var done = teko::str::concat(fresh_named("tk_mt", buf.len to i64 + 1), "_done")
     var subjT = m.subject.type
@@ -7946,7 +7946,7 @@ fn emit_match_tail_fallthrough_return(buf: []byte, prog: CgProg, ret_type: check
 // while(0)` + break) precisely because an arm body is a BLOCK that may contain `break`/`continue`
 // targeting an ENCLOSING loop — those must be real C break/continue, never swallowed by a wrapper
 // (mirrors the interpreter propagating the arm's flow). (C: `emit_match_stmt`.)
-fn emit_match_stmt(buf: []byte, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool): []byte | error {
+fn emit_match_stmt(buf: []byte, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     var subj = fresh_named("_s", buf.len to i64)
     var done = teko::str::concat(fresh_named("tk_m", buf.len to i64 + 1), "_done")   // unique commit label (str concat — no `+` on str)
     var subjT = m.subject.type   // for optional / variant pattern lowering
@@ -8084,7 +8084,7 @@ fn emit_expr_ret(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker:
 // globals) so a value-position `if`/`match` REACHED FROM HERE can open its OWN arm region for its
 // block-local NON-tail bindings (emit_if_value/emit_match_value → emit_branch_value/emit_arm_value).
 // Every other expr just forwards the context unchanged. (C: `emit_expr` — globals, no threading.)
-fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     match e.kind {
         checker::TNumber as n => emit_number(buf, prog, e, n)
         // (W10a) a bare top-level-fn reference used as a VALUE → a `tk_closure` literal carrying the
@@ -8167,7 +8167,7 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker:
  * @throws          propagated from emitting the block's type or any of its statements
  * @since           §9 E
  */
-fn emit_block_expr(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, blk: checker::TBlockExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_block_expr(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, blk: checker::TBlockExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var tmp = fresh_tmp_name(buf.len to i64)
     var out = cb(buf, "({ ")
     out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
@@ -8200,7 +8200,7 @@ fn emit_block_expr(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checke
  * @throws         error propagated from emitting the borrow's operand expression
  * @since 0.x (#AL/F1.4)
  */
-fn emit_borrow(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::TBorrow, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_borrow(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::TBorrow, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var out = cb(buf, "&")
     emit_expr_ctx(out, prog, ret_type, b.operand, escaping, regions, fn_body, dctx)
 }
@@ -8210,7 +8210,7 @@ fn lam_fn_name(id: u64): str { teko::str::concat("__tkclo_", teko::u64_to_str(id
 
 // (W10) emit a closure literal. Non-capturing → `(tk_closure){ &__tkclo_<id>, (void*)0 }`. Capturing
 // → allocate + fill the env struct, then `(tk_closure){ &__tkclo_<id>, env }` (env-first ABI).
-fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLambda, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLambda, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if lam.captures.len == 0 {
         var out = cb(buf, "(tk_closure){ (void*)&")
         out = cb_fn_name(out, "", lam_fn_name(lam.lift_id))
@@ -8437,7 +8437,7 @@ fn str_list_has(xs: []str, name: str): bool {
  * @return           the declared block-local slice accumulator names
  * @since 0.3.1
  */
-fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []checker::TStatement, body: []checker::TStatement, is_value: bool): []str {
+fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []@TStatement(), body: []@TStatement(), is_value: bool): []str {
     var acc: []str = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -8472,7 +8472,7 @@ fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []checker::TSta
  * @return           true iff `b` is a block-local slice binding
  * @since 0.3.1
  */
-fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []checker::TStatement, body: []checker::TStatement, is_value: bool, b: checker::TBinding): bool {
+fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []@TStatement(), body: []@TStatement(), is_value: bool, b: checker::TBinding): bool {
     match b.bound {
         checker::Slice => checker::binding_is_block_local(escaping, fn_body, body, is_value, b)
         _ => false
@@ -8528,7 +8528,7 @@ type LoopDeferFrame = struct {
  */
 type DeferCtx = struct {
     /** the live stack of registered TDeferStmt nodes (push order; `.len` == the C's ndefers). */
-    defers: []checker::TStatement
+    defers: []@TStatement()
     /** the active loop-scope defer-base stack (for break/continue target firing). */
     loops: []LoopDeferFrame
     /** the coverage-instrumentation context; `cov.on == false` (the default) emits zero `tk_cov_*`. */
@@ -8558,7 +8558,7 @@ fn dctx_empty(): DeferCtx {
 // emit_defers (which walks g_cg_defers[base..ndefers) backwards). A defer body never contains a return/
 // break/continue/defer (checker-enforced), so each body statement emits with NO active region/defer
 // scope of its own (regions/dctx empty) — exactly matching the C twin's emit_stmt at base context.
-fn emit_defers(buf: []byte, defers: []checker::TStatement, defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []checker::TStatement): []byte | error {
+fn emit_defers(buf: []byte, defers: []@TStatement(), defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []@TStatement()): []byte | error {
     var out = buf
     var i = defers.len
     loop {
@@ -8581,7 +8581,7 @@ fn emit_defers(buf: []byte, defers: []checker::TStatement, defer_floor: u64, pro
 
 // (W9.3) dctx_register — return `dctx` with statement `s` pushed onto the defer stack (used when a
 // TDeferStmt is reached). Mirrors the C `g_cg_defers[g_cg_ndefers++] = s` registration (emits nothing).
-fn dctx_register(dctx: DeferCtx, s: checker::TStatement): DeferCtx {
+fn dctx_register(dctx: DeferCtx, s: @TStatement()): DeferCtx {
     DeferCtx { defers = teko::list::push(dctx.defers, s); loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
 }
 
@@ -8591,7 +8591,7 @@ fn dctx_register(dctx: DeferCtx, s: checker::TStatement): DeferCtx {
 // emit_exprstmt_tail tail-if branch / emit_match_tail arm) builds the full list with this, then fires
 // `emit_defers([base, len))`. Same defer NODES as emit_block_tail's incremental accumulation, so the
 // fired bytes match the C twin's emit_defers exactly. (C: g_cg_ndefers after the block emits.)
-fn cg_append_direct_defers(defers: []checker::TStatement, body: []checker::TStatement): []checker::TStatement {
+fn cg_append_direct_defers(defers: []@TStatement(), body: []@TStatement()): []@TStatement() {
     var out = defers
     var i: u64 = 0
     loop {
@@ -8727,7 +8727,7 @@ fn cg_binding_routes_str_to_local_region(prog: CgProg, b: checker::TBinding): bo
 // cg_block_has_block_local — does loop body B have any TOP-LEVEL binding proven BLOCK-local and
 // region-routable? Drives whether emit_loop opens a region — none ⇒ no region ⇒ byte-identical to
 // the pre-S2 output for that loop. `is_value` = whether B yields a value (loop bodies do NOT).
-fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []checker::TStatement, block: []checker::TStatement, is_value: bool): bool {
+fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []@TStatement(), block: []@TStatement(), is_value: bool): bool {
     var i: u64 = 0
     loop {
         if i >= block.len { break }
@@ -8750,7 +8750,7 @@ fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []checker::T
 // (emit_as). S2: `regions`/`fn_body`/`cur_block`/`cur_block_is_value` thread the active loop-body
 // region stack + the per-block escape context so a block-local binding routes to its region and
 // break/continue/return drop the right regions. (C: `emit_block`.)
-fn emit_block(buf: []byte, body: []checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool): []byte | error {
+fn emit_block(buf: []byte, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     var out = buf
     // (W9.3) Accumulate THIS block's direct defers incrementally (a `return`/`break`/`continue` at
     // statement i then sees only the defers registered at 0..i-1). emit_block does NOT fire its own
@@ -8780,7 +8780,7 @@ fn emit_block(buf: []byte, body: []checker::TStatement, in_main: bool, prog: CgP
 // fall-through past the arm. break/continue/return inside the arm drop it via the region-stack
 // helpers (break/continue CROSS it down to the target loop; return drops everything). No block-local
 // binding ⇒ no region ⇒ byte-identical to emit_block (the pre-S2 statement-arm path). (C: emit_block_region.)
-fn emit_block_region(buf: []byte, body: []checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_block_region(buf: []byte, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     // (W9.3) EVERY statement-arm is a DEFER SCOPE — even with no S2 region — so a defer inside the arm
     // fires at the arm's fall-through (before the arm's region, if any, drops). `base` = the in-scope
     // defer count at arm entry; the fall-through fires `[base, base+direct)` LIFO.
@@ -8816,7 +8816,7 @@ fn emit_block_region(buf: []byte, body: []checker::TStatement, in_main: bool, pr
 // which the checker types as a statement but the interpreter still drains for its branch value). A void
 // expr-statement, or any non-expr trailing statement, emits normally (no value).
 // (C: `emit_exprstmt_tail`.)
-fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     match x.kind {
         checker::TIfExpr as f => {
             var bh = emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, teko::list::empty()), indent)
@@ -8893,7 +8893,7 @@ fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: CgPro
 // emit_block_tail — W5a: emit a FUNCTION/MAIN/branch body where the LAST statement, if it is
 // an expr-statement carrying a value, `return`s that value (via emit_exprstmt_tail). All but
 // the last statement emit normally. (C: `emit_block_tail`.)
-fn emit_block_tail(buf: []byte, body: []checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_block_tail(buf: []byte, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var out = buf
     // (W9.3) Accumulate THIS block's own direct defers incrementally as we iterate, so a `return` at
     // statement i fires only the defers registered at statements 0..i-1 (LIFO, all enclosing scopes).
@@ -8958,7 +8958,7 @@ fn emit_block_tail(buf: []byte, body: []checker::TStatement, in_main: bool, prog
  * @return                   the buffer with the lowered `if` appended
  * @throws                   the first emission error from the condition or a branch body
  */
-fn emit_if_stmt(buf: []byte, f: checker::TIfExpr, line: u32, col: u32, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool): []byte | error {
+fn emit_if_stmt(buf: []byte, f: checker::TIfExpr, line: u32, col: u32, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     var out = cb(buf, indent)
     out = cb(out, "if (")
     out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -8987,7 +8987,7 @@ fn emit_if_stmt(buf: []byte, f: checker::TIfExpr, line: u32, col: u32, in_main: 
 // emit_binding — a TBinding. BindTarget: only SimpleName is lowered for M0 (destructuring
 // is the honest barrier). `const` prefix for a const binding; the type rides `.bound`.
 // (C: TK_TSTMT_BINDING branch.)
-fn emit_binding(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::TBinding, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool): []byte | error {
+fn emit_binding(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::TBinding, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     var name = match b.target {
         parser::SimpleName as sn => sn.name
         parser::DestructurePattern => return error { message = "codegen: destructuring binding not yet supported" }
@@ -9122,7 +9122,7 @@ fn emit_assign_lvalue(buf: []byte, prog: CgProg, a: checker::TAssign): []byte | 
  * @throws          when the target is not a slice index, its element type is unsupported, or a child
  *                  expression fails to emit
  */
-fn emit_index_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_index_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var ix = match a.target.kind { checker::TIndex as ti => ti; _ => return error { message = "codegen: index-assign target is not a subscript (internal)" } }
     var elem = match ix.receiver.type { checker::Slice as sl => sl.element; _ => return error { message = "codegen: index-assign receiver is not a slice (internal)" } }
     var wstmp = $"_ws{buf.len}"
@@ -9170,7 +9170,7 @@ fn emit_index_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: chec
  * @return          the buffer with the element store appended, or a codegen error
  * @throws          when a shift-assign targets a non-integer element, or a child expression fails to emit
  */
-fn emit_index_store_body(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, wstmp: str, witmp: str, elem: checker::Type, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_index_store_body(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, wstmp: str, witmp: str, elem: checker::Type, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {
         var prim = match elem { checker::Prim as p => p; _ => return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
         if !cg_prim_is_int(prim.kind) { return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
@@ -9210,7 +9210,7 @@ fn emit_index_slot(buf: []byte, wstmp: str, witmp: str): []byte {
     cb(out, "]")
 }
 
-fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var is_index = match a.kind { parser::AssignKind::Index => true; _ => false }
     if is_index { return emit_index_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body, dctx) }
     var op = match assignop_c(a.op) { str as s => s; error as err => return err }
@@ -9338,7 +9338,7 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
  *                   emit
  * @see              CG_MAIN_RETURN_OPEN
  */
-fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     // (W9.3) A `return` leaves EVERY enclosing scope: fire ALL in-scope defers (base 0) LIFO — one
     // sweep, innermost-block-first across all nesting — BEFORE dropping any region, so a defer body can
     // still read any block-local. THEN drop all block regions (innermost-first), THEN the frame region.
@@ -9396,7 +9396,7 @@ fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, re
  * @param dctx the defer context
  * @return the buffer with the loop emitted, or a codegen error
  */
-fn emit_loop(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_loop(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if l.init.len == 0 { return emit_loop_while(buf, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx) }
     var out = cb(buf, indent)
     out = cb(out, "{\n")
@@ -9429,7 +9429,7 @@ fn emit_loop(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgProg, re
  * @param dctx the defer context
  * @return the buffer with the while-loop emitted, or a codegen error
  */
-fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var labeled = l.label.len > 0
     var out = cb(buf, indent)
     out = cb(out, "while (1) {\n")
@@ -9606,7 +9606,7 @@ fn cov_collect_expr(e: checker::TExpr, acc: []u32): []u32 {
  * @return   the distinct 1-based source lines to mark at statement entry (empty when none)
  * @since #265
  */
-fn stmt_cov_lines(s: checker::TStatement): []u32 {
+fn stmt_cov_lines(s: @TStatement()): []u32 {
     var acc: []u32 = teko::list::empty()
     match s {
         checker::TBinding as b => cov_collect_expr(b.value, acc)
@@ -9666,7 +9666,7 @@ fn emit_cov_lines(buf: []byte, ctx: CovCtx, lines: []u32, indent: str): []byte {
  * @return        the buffer with this statement's C text appended
  * @throws        propagated from whichever branch lowers the statement's own sub-expressions
  */
-fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool): []byte | error {
+fn emit_stmt(buf: []byte, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     var b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
         var ob = cb(b0, indent); ob = cb(ob, "tk_region_enter("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
@@ -9687,7 +9687,7 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, r
  * @return    the buffer with the statement's C text appended
  * @since 0.3.1
  */
-fn emit_stmt_dispatch(b0: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool): []byte | error {
+fn emit_stmt_dispatch(b0: []byte, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     match s {
         checker::TBinding as b => emit_binding(b0, prog, ret_type, b, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
         checker::TAssign as a => emit_assign(b0, prog, ret_type, a, indent, frame, escaping, regions, fn_body, dctx)
@@ -9760,7 +9760,7 @@ fn emit_stmt_dispatch(b0: []byte, s: checker::TStatement, in_main: bool, prog: C
  * @return         the buffer with this statement's C text appended
  * @throws         propagated from replaying a pending defer or emitting `expr` itself
  */
-fn emit_expr_stmt_default(buf: []byte, expr: checker::TExpr, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, indent: str): []byte | error {
+fn emit_expr_stmt_default(buf: []byte, expr: checker::TExpr, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, indent: str): []byte | error {
     var b1 = if checker::texpr_diverges(expr) {
         match emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
     } else { buf }
@@ -9805,7 +9805,7 @@ fn emit_expr_stmt_default(buf: []byte, expr: checker::TExpr, prog: CgProg, escap
  * @param DeferCtx dctx  the threaded defer/coverage context
  * @return []byte | error  the buffer with the adopter block emitted, or a codegen error
  */
-fn emit_adopt(buf: []byte, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
+fn emit_adopt(buf: []byte, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, a.body)
     var region = fresh_named("_tkad", buf.len to i64)
@@ -9914,7 +9914,7 @@ fn cg_expr_calls_self(e: checker::TExpr, ns: str, name: str): bool {
  * @param name   the enclosing function's bare name
  * @return       true iff a direct self-recursive call appears anywhere within the block
  */
-fn cg_block_calls_self(stmts: []checker::TStatement, ns: str, name: str): bool {
+fn cg_block_calls_self(stmts: []@TStatement(), ns: str, name: str): bool {
     var i = 0
     loop {
         if i >= stmts.len { break }
@@ -10026,7 +10026,7 @@ fn emit_function_sig(buf: []byte, prog: CgProg, f: checker::TFunction): []byte |
 // cg_stmt_c_terminates — does this statement, AS LOWERED, guarantee C control doesn't fall through
 // past it? A `return`/break/continue does; a trailing value-expr lowers to `return <v>;` so it does
 // too — EXCEPT a `match`/`if` value tail, whose exhaustiveness C cannot see. (C: cg_stmt_c_terminates.)
-fn cg_stmt_c_terminates(s: checker::TStatement): bool {
+fn cg_stmt_c_terminates(s: @TStatement()): bool {
     match s {
         checker::TReturn => true
         checker::TBreakStmt => true
@@ -10057,7 +10057,7 @@ fn cg_same_named_struct(a: checker::Type, b: checker::Type): bool {
 // frame-local AND routable? (MEM Step 1 routes only top-level
 // bindings; sub-scope bindings stay on root in this first cut.) Drives whether emit_function opens
 // a frame region at all — none ⇒ no region ⇒ zero output change (the fixpoint-preserving default).
-fn fn_body_has_frame_local(prog: CgProg, escaping: []str, body: []checker::TStatement): bool {
+fn fn_body_has_frame_local(prog: CgProg, escaping: []str, body: []@TStatement()): bool {
     var i: u64 = 0
     loop {
         if i >= body.len { break }
@@ -10214,7 +10214,7 @@ fn cg_dctx_bracket(dctx: DeferCtx): DeferCtx {
  * @return          true iff `s` must be conveyance-bracketed
  * @since 0.3.1
  */
-fn cg_conveys_escape_deep(escaping: []str, s: checker::TStatement): bool {
+fn cg_conveys_escape_deep(escaping: []str, s: @TStatement()): bool {
     match s {
         checker::TBinding as b => binding_conveys_escape(escaping, cg_target_name(b.target))
         checker::TAssign as a => binding_conveys_escape(escaping, a.name)
@@ -10277,7 +10277,7 @@ fn cg_arms_have_escaping_write(escaping: []str, arms: []checker::TArm): bool {
  *                  contains an escaping write
  * @since 0.3.1
  */
-fn cg_block_has_escaping_write(escaping: []str, body: []checker::TStatement): bool {
+fn cg_block_has_escaping_write(escaping: []str, body: []@TStatement()): bool {
     var i: u64 = 0
     loop {
         if i >= body.len { break }
@@ -10973,7 +10973,7 @@ fn cg_collect_expr_opts(set: CgTypeSet, e: checker::TExpr): CgTypeSet {
     }
     s
 }
-fn cg_collect_block_opts(set: CgTypeSet, stmts: []checker::TStatement): CgTypeSet {
+fn cg_collect_block_opts(set: CgTypeSet, stmts: []@TStatement()): CgTypeSet {
     var s = set
     var i = 0
     loop {
@@ -11444,7 +11444,7 @@ fn cg_emit_types_ordered(buf: []byte, prog: CgProg): []byte | error {
                 set = cg_collect_type_opts(set, f.return_type)
                 set = cg_collect_block_opts(set, f.body)
             }
-            checker::TStatement as st => { set = cg_collect_block_opts(set, teko::list::push(teko::list::empty(), st)) }
+            (@TStatement()) as st => { set = cg_collect_block_opts(set, teko::list::push(teko::list::empty(), st)) }
             _ => { }
         }
         i++
@@ -11752,7 +11752,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
                 var nb = cg_lift_block(f.body, acc)
                 items = teko::list::push(items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra })
             }
-            checker::TStatement as ts => {
+            (@TStatement()) as ts => {
                 var ns = cg_lift_stmt(ts, acc)
                 items = teko::list::push(items, ns)
             }
@@ -11776,8 +11776,8 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
  * @param acc    the lift-id counter + synthesized-fn/capturing-lambda accumulator (by-reference)
  * @return       the block with every lambda literal stamped
  */
-fn cg_lift_block(stmts: []checker::TStatement, ref acc: StampAcc): []checker::TStatement {
-    var out: []checker::TStatement = teko::list::empty()
+fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
+    var out: []@TStatement() = teko::list::empty()
     var i = 0
     loop { if i >= stmts.len { break }; out = teko::mem::push_fo(out, cg_lift_stmt(stmts[i], acc)); i++ }
     out
@@ -11791,7 +11791,7 @@ fn cg_lift_block(stmts: []checker::TStatement, ref acc: StampAcc): []checker::TS
  * @param acc  the lift-id counter + synthesized-fn/capturing-lambda accumulator (by-reference)
  * @return     the statement with every lambda literal stamped
  */
-fn cg_lift_stmt(s: checker::TStatement, ref acc: StampAcc): checker::TStatement {
+fn cg_lift_stmt(s: @TStatement(), ref acc: StampAcc): @TStatement() {
     match s {
         checker::TBinding as b => checker::TBinding { kind = b.kind; target = b.target; bound = b.bound; value = cg_lift_expr(b.value, acc) }
         checker::TAssign as a => checker::TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = cg_lift_expr(a.value, acc); deref = a.deref; target = if parser::assign_has_target(a.kind) { cg_lift_expr(a.target, acc) } else { a.target } }
@@ -12620,7 +12620,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
             checker::TFunction as f => { if !f.is_extern { b = match emit_function_mode(b, prog, f, mode) { []byte as o => o; error as err => return err } } }
             parser::TypeDecl => { }   // emitted in the type-decl passes above
             parser::UseDecl => { }   // imports are a no-op at the C level (M0)
-            checker::TStatement => { }   // a loose Statement → virtual-main, second pass
+            (@TStatement()) as _gb3 => { }   /* a loose Statement → virtual-main, second pass */
             checker::TConstDecl => { }
         }
         i++
@@ -12699,7 +12699,7 @@ fn emit_program_main_body(buf: []byte, prog: CgProg, cov: bool): []byte | error 
     loop {
         if li >= prog.items.len { break }
         match prog.items[li] {
-            checker::TStatement => { last_stmt = li }
+            (@TStatement()) as _gb4 => { last_stmt = li }
             _ => { }
         }
         li++
@@ -12721,7 +12721,7 @@ fn emit_program_main_body(buf: []byte, prog: CgProg, cov: bool): []byte | error 
             parser::TypeDecl => { }   // handled in the type-decl passes
             parser::UseDecl => { }   // no-op
             checker::TConstDecl => { }
-            checker::TStatement as s => {
+            (@TStatement()) as s => {
                 // The virtual-main has no variant return slot (its tail value is the int exit
                 // code), so ret_type is void — emit_as never wraps for void.
                 if j == last_stmt {

@@ -2348,7 +2348,7 @@ fn fold_children(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr 
  * @since         §9 E
  */
 fn fold_block_expr(blk: TBlockExpr, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
-    var body = match fold_block(blk.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+    var body = match fold_block(blk.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TBlockExpr { body = body }; type = e.type; line = e.line; col = e.col }
 }
 
@@ -2612,8 +2612,8 @@ fn fold_in(n: TInExpr, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): 
  */
 fn fold_if(f: TIfExpr, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
     var cond = match fold_expr(f.cond, table, env, agg) { error as x => return x; TExpr as v => v }
-    var then_blk = match fold_block(f.then_blk, table, env, agg) { error as x => return x; []TStatement as v => v }
-    var else_blk = match fold_block(f.else_blk, table, env, agg) { error as x => return x; []TStatement as v => v }
+    var then_blk = match fold_block(f.then_blk, table, env, agg) { error as x => return x; []@TStatement() as v => v }
+    var else_blk = match fold_block(f.else_blk, table, env, agg) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TIfExpr { cond = cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = e.type; line = e.line; col = e.col }
 }
 
@@ -2680,7 +2680,7 @@ fn fold_arm(arm: TArm, table: TypeTable, env: Env, agg: AggConstMap): TArm | err
     var guard = if arm.has_when {
         match fold_expr(arm.guard, table, env, agg) { error as x => return x; TExpr as v => v }
     } else { arm.guard }
-    var body = match fold_block(arm.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+    var body = match fold_block(arm.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
     TArm { pattern = arm.pattern; has_when = arm.has_when; guard = guard; body = body }
 }
 
@@ -2697,7 +2697,7 @@ fn fold_arm(arm: TArm, table: TypeTable, env: Env, agg: AggConstMap): TArm | err
  * @since #comptime-fold
  */
 fn fold_lambda(lam: TLambda, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
-    var body = match fold_block(lam.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+    var body = match fold_block(lam.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TLambda { params = lam.params; body = body; captures = lam.captures; ret = lam.ret; lift_id = lam.lift_id }; type = e.type; line = e.line; col = e.col }
 }
 
@@ -2789,12 +2789,12 @@ fn fold_array(a: TArrayLit, e: TExpr, table: TypeTable, env: Env, agg: AggConstM
  * @return       the block with each statement folded, or the first located error
  * @since #comptime-fold
  */
-fn fold_block(stmts: []TStatement, table: TypeTable, env: Env, agg: AggConstMap): []TStatement | error {
-    var out: []TStatement = teko::list::empty()
+fn fold_block(stmts: []@TStatement(), table: TypeTable, env: Env, agg: AggConstMap): []@TStatement() | error {
+    var out: []@TStatement() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= stmts.len { break }
-        var s = match fold_stmt(stmts[i], table, env, agg) { error as x => return x; TStatement as v => v }
+        var s = match fold_stmt(stmts[i], table, env, agg) { error as x => return x; (@TStatement()) as v => v }
         out = teko::list::push(out, s)
         i++
     }
@@ -2813,7 +2813,7 @@ fn fold_block(stmts: []TStatement, table: TypeTable, env: Env, agg: AggConstMap)
  * @return       the statement with folded children, or a located error
  * @since #comptime-fold
  */
-fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap): TStatement | error {
+fn fold_stmt(st: @TStatement(), table: TypeTable, env: Env, agg: AggConstMap): @TStatement() | error {
     match st {
         TBinding as b => {
             var v = match fold_expr(b.value, table, env, agg) { error as x => return x; TExpr as f => f }
@@ -2822,8 +2822,8 @@ fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap): TSta
         TAssign as a => fold_assign(a, table, env, agg)
         TReturn as r => fold_return(r, st, table, env, agg)
         TLoopStmt as l => {
-            var init = match fold_block(l.init, table, env, agg) { error as x => return x; []TStatement as v => v }
-            var body = match fold_block(l.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            var init = match fold_block(l.init, table, env, agg) { error as x => return x; []@TStatement() as v => v }
+            var body = match fold_block(l.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
             TLoopStmt { label = l.label; init = init; body = body }
         }
         TBreakStmt => st
@@ -2833,15 +2833,15 @@ fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap): TSta
             TExprStmt { expr = v }
         }
         TDeferStmt as d => {
-            var body = match fold_block(d.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            var body = match fold_block(d.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
             TDeferStmt { body = body }
         }
         TAdoptStmt as a => {
-            var body = match fold_block(a.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            var body = match fold_block(a.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
             TAdoptStmt { name = a.name; body = body }
         }
         TBlockStmt as b => {
-            var body = match fold_block(b.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            var body = match fold_block(b.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
             TBlockStmt { body = body }
         }
     }
@@ -2858,7 +2858,7 @@ fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap): TSta
  * @return       the return with a folded value, or a located error
  * @since #comptime-fold
  */
-fn fold_return(r: TReturn, st: TStatement, table: TypeTable, env: Env, agg: AggConstMap): TStatement | error {
+fn fold_return(r: TReturn, st: @TStatement(), table: TypeTable, env: Env, agg: AggConstMap): @TStatement() | error {
     if !r.has_value { return st }
     var v = match fold_expr(r.value, table, env, agg) { error as x => return x; TExpr as f => f }
     TReturn { has_value = true; value = v; values = teko::list::empty() }
@@ -2875,7 +2875,7 @@ fn fold_return(r: TReturn, st: TStatement, table: TypeTable, env: Env, agg: AggC
  * @return       the assignment with folded children, or a located error
  * @since #comptime-fold
  */
-fn fold_assign(a: TAssign, table: TypeTable, env: Env, agg: AggConstMap): TStatement | error {
+fn fold_assign(a: TAssign, table: TypeTable, env: Env, agg: AggConstMap): @TStatement() | error {
     var value = match fold_expr(a.value, table, env, agg) { error as x => return x; TExpr as f => f }
     if parser::assign_has_target(a.kind) {
         var target = match fold_expr(a.target, table, env, agg) { error as x => return x; TExpr as f => f }
@@ -2945,7 +2945,7 @@ fn fold_item(it: @TItem(), table: TypeTable, env: Env, agg: AggConstMap, ctors: 
     match it {
         TFunction as f => fold_function(f, table, env, agg)
         TConstDecl as cd => fold_const_decl(cd, table, env, agg, ctors)
-        TStatement as s => match fold_stmt(s, table, env, agg) { error as x => return x; TStatement as v => v }
+        (@TStatement()) as s => match fold_stmt(s, table, env, agg) { error as x => return x; (@TStatement()) as v => v }
         _ => it
     }
 }
@@ -2962,7 +2962,7 @@ fn fold_item(it: @TItem(), table: TypeTable, env: Env, agg: AggConstMap, ctors: 
  * @since #comptime-fold
  */
 fn fold_function(f: TFunction, table: TypeTable, env: Env, agg: AggConstMap): @TItem() | error {
-    var body = match fold_block(f.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+    var body = match fold_block(f.body, table, env, agg) { error as x => return x; []@TStatement() as v => v }
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra }
 }
 
@@ -3012,7 +3012,7 @@ type LocalConstMap = struct { names: []str; inits: []TExpr }
  * @field map    the local-const map the block leaves (its own bindings recorded)
  * @since #comptime-fold
  */
-type LpBlock = struct { stmts: []TStatement; map: LocalConstMap }
+type LpBlock = struct { stmts: []@TStatement(); map: LocalConstMap }
 
 /**
  * LpStmt — the result of local-propagating one statement: the rewritten statement plus the map it
@@ -3023,7 +3023,7 @@ type LpBlock = struct { stmts: []TStatement; map: LocalConstMap }
  * @field map   the local-const map the statement leaves
  * @since #comptime-fold
  */
-type LpStmt = struct { stmt: TStatement; map: LocalConstMap }
+type LpStmt = struct { stmt: @TStatement(); map: LocalConstMap }
 
 /**
  * LpItem — the result of local-propagating one top-level item: the rewritten item plus the map it
@@ -3440,7 +3440,7 @@ fn lp_array(a: TArrayLit, e: TExpr, m: LocalConstMap): TExpr {
  * @return       the block with local-const references substituted
  * @since #comptime-fold
  */
-fn lp_scope_block(stmts: []TStatement, m: LocalConstMap): []TStatement { lp_block(stmts, m).stmts }
+fn lp_scope_block(stmts: []@TStatement(), m: LocalConstMap): []@TStatement() { lp_block(stmts, m).stmts }
 
 /**
  * lp_block — local-propagate a straight-line block, THREADING the map through its statements in order
@@ -3453,9 +3453,9 @@ fn lp_scope_block(stmts: []TStatement, m: LocalConstMap): []TStatement { lp_bloc
  * @return       the rewritten statements plus the map the block leaves
  * @since #comptime-fold
  */
-fn lp_block(stmts: []TStatement, m: LocalConstMap): LpBlock {
+fn lp_block(stmts: []@TStatement(), m: LocalConstMap): LpBlock {
     var cur = m
-    var out: []TStatement = teko::list::empty()
+    var out: []@TStatement() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= stmts.len { break }
@@ -3477,7 +3477,7 @@ fn lp_block(stmts: []TStatement, m: LocalConstMap): LpBlock {
  * @return    the statement with local-const references substituted, plus the map it leaves
  * @since #comptime-fold
  */
-fn lp_stmt(st: TStatement, m: LocalConstMap): LpStmt {
+fn lp_stmt(st: @TStatement(), m: LocalConstMap): LpStmt {
     match st {
         TBinding as b => lp_binding(b, m)
         TAssign as a => LpStmt { stmt = lp_assign(a, m); map = m }
@@ -3518,7 +3518,7 @@ fn lp_binding(b: TBinding, m: LocalConstMap): LpStmt {
  * @return   the loop with local-const references substituted
  * @since #comptime-fold
  */
-fn lp_loop(l: TLoopStmt, m: LocalConstMap): TStatement {
+fn lp_loop(l: TLoopStmt, m: LocalConstMap): @TStatement() {
     var ib = lp_block(l.init, m)
     var body = lp_scope_block(l.body, ib.map)
     TLoopStmt { label = l.label; init = ib.stmts; body = body }
@@ -3533,7 +3533,7 @@ fn lp_loop(l: TLoopStmt, m: LocalConstMap): TStatement {
  * @return   the adopt with local-const references substituted
  * @since #comptime-fold
  */
-fn lp_adopt(a: TAdoptStmt, m: LocalConstMap): TStatement {
+fn lp_adopt(a: TAdoptStmt, m: LocalConstMap): @TStatement() {
     var scoped = lp_remove(m, a.name)
     TAdoptStmt { name = a.name; body = lp_scope_block(a.body, scoped) }
 }
@@ -3547,7 +3547,7 @@ fn lp_adopt(a: TAdoptStmt, m: LocalConstMap): TStatement {
  * @return    the return with its value substituted
  * @since #comptime-fold
  */
-fn lp_return(r: TReturn, st: TStatement, m: LocalConstMap): TStatement {
+fn lp_return(r: TReturn, st: @TStatement(), m: LocalConstMap): @TStatement() {
     if !r.has_value { return st }
     TReturn { has_value = true; value = lp_expr(r.value, m); values = teko::list::empty() }
 }
@@ -3562,7 +3562,7 @@ fn lp_return(r: TReturn, st: TStatement, m: LocalConstMap): TStatement {
  * @return   the assignment with local-const references substituted
  * @since #comptime-fold
  */
-fn lp_assign(a: TAssign, m: LocalConstMap): TStatement {
+fn lp_assign(a: TAssign, m: LocalConstMap): @TStatement() {
     var value = lp_expr(a.value, m)
     if parser::assign_has_target(a.kind) {
         return TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = lp_expr(a.target, m) }
@@ -3596,7 +3596,7 @@ fn lp_function(f: TFunction): @TItem() {
 fn lp_top_item(it: @TItem(), top: LocalConstMap): LpItem {
     match it {
         TFunction as f => LpItem { item = lp_function(f); map = top }
-        TStatement as s => {
+        (@TStatement()) as s => {
             var r = lp_stmt(s, top)
             LpItem { item = r.stmt; map = r.map }
         }

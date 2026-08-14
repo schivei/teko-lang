@@ -299,7 +299,7 @@ fn fold_expr_propagates_overflow() {
  * @param value  the binding's typed initializer
  * @return       the typed `let` binding statement
  */
-fn cf_let(name: str, value: TExpr): TStatement { TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
+fn cf_let(name: str, value: TExpr): @TStatement() { TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
 
 /**
  * cf_const_bind — a `const NAME = value` typed LOCAL binding (a `BindKind::Const` statement, distinct
@@ -309,7 +309,7 @@ fn cf_let(name: str, value: TExpr): TStatement { TBinding { kind = parser::BindK
  * @param value  the binding's typed initializer
  * @return       the typed local `const` binding statement
  */
-fn cf_const_bind(name: str, value: TExpr): TStatement { TBinding { kind = parser::BindKind::Const; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
+fn cf_const_bind(name: str, value: TExpr): @TStatement() { TBinding { kind = parser::BindKind::Const; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
 
 /**
  * cf_mut — a `mut NAME = value` typed local binding, the boundary CF3 must never propagate (a later
@@ -319,7 +319,7 @@ fn cf_const_bind(name: str, value: TExpr): TStatement { TBinding { kind = parser
  * @param value  the binding's typed initializer
  * @return       the typed `mut` binding statement
  */
-fn cf_mut(name: str, value: TExpr): TStatement { TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
+fn cf_mut(name: str, value: TExpr): @TStatement() { TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
 
 /**
  * cf_destructure — a `let { a; b } = value` typed destructure binding, whose names CF3 never records
@@ -329,7 +329,7 @@ fn cf_mut(name: str, value: TExpr): TStatement { TBinding { kind = parser::BindK
  * @param value  the aggregate initializer
  * @return       the typed destructure binding statement
  */
-fn cf_destructure(names: []str, value: TExpr): TStatement { TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = names }; bound = value.type; value = value } }
+fn cf_destructure(names: []str, value: TExpr): @TStatement() { TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = names }; bound = value.type; value = value } }
 
 /**
  * cf_var — a typed local reference `TVar` of type `t` (a use site CF3 may substitute with the
@@ -368,7 +368,7 @@ fn cf_return_of(prog: TProgram, name: str): TExpr | null {
  * @param body  the typed statement block
  * @return      the returned typed expression, or null
  */
-fn cf_block_return(body: []TStatement): TExpr | null {
+fn cf_block_return(body: []@TStatement()): TExpr | null {
     var i: u64 = 0
     loop {
         if i >= body.len { break }
@@ -424,7 +424,7 @@ fn cf_return_is_var(prog: TProgram, name: str) {
  * @param body  its typed statement block
  * @return      the folded program
  */
-fn cf_fn_of(name: str, body: []TStatement): TProgram {
+fn cf_fn_of(name: str, body: []@TStatement()): TProgram {
     var items = teko::list::push(teko::list::empty(), c_fn(name, body))
     match inline_consts(TProgram { items = items }) {
         TProgram as out => return out
@@ -443,7 +443,7 @@ fn cf_fn_of(name: str, body: []TStatement): TProgram {
 fn cf3_local_const_binding_folds() {
     var init = cf_bin(lexer::TokenKind::Pipe, cf_num(240, u8t()), cf_num(15, u8t()), u8t())
     var let_k = cf_const_bind("k", init)
-    var body: []TStatement = teko::list::push(teko::list::empty(), let_k)
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), let_k)
     body = teko::list::push(body, c_ret(cf_var("k", u8t())))
     cf_return_is_num(cf_fn_of("f", body), "f", 255)
 }
@@ -458,7 +458,7 @@ fn cf3_destructure_shadow_kills_const() {
     var outer_a = cf_let("a", cf_num(5, u64t()))
     var names = teko::list::push(teko::list::empty(), "a")
     var de = cf_destructure(names, cf_var("pt", Named { name = "Pt" }))
-    var body: []TStatement = teko::list::push(teko::list::empty(), outer_a)
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), outer_a)
     body = teko::list::push(body, de)
     body = teko::list::push(body, c_ret(cf_var("a", u64t())))
     cf_return_is_var(cf_fn_of("f", body), "f")
@@ -488,7 +488,7 @@ fn cf3_walk_covers_expr_and_stmt_arms() {
     var array_use = te(TArrayLit { elements = teko::list::push(teko::list::empty(), TArrayElem { is_spread = false; expr = cf_var("a", u64t()) }) }, Slice { element = u64t() })
     var field_use = te(TFieldAccess { receiver = cf_var("s", Named { name = "N" }); field = "v" }, u64t())
 
-    var body: []TStatement = teko::list::push(teko::list::empty(), cf_let("a", cf_num(255, u64t())))
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), cf_let("a", cf_num(255, u64t())))
     body = teko::list::push(body, cf_mut("m", cf_num(0, u64t())))
     body = teko::list::push(body, TAssign { kind = parser::AssignKind::Simple; name = "m"; op = lexer::TokenKind::Assign; bound = u64t(); value = cf_var("a", u64t()); deref = false; target = no_texpr() })
     body = teko::list::push(body, TAssign { kind = parser::AssignKind::Field; name = ""; op = lexer::TokenKind::Assign; bound = u64t(); value = cf_var("a", u64t()); deref = false; target = field_use })
@@ -503,7 +503,7 @@ fn cf3_walk_covers_expr_and_stmt_arms() {
     body = teko::list::push(body, texpr_stmt(interp_dyn))
     body = teko::list::push(body, texpr_stmt(array_use))
     body = teko::list::push(body, texpr_stmt(te(TBorrow { operand = cf_var("m", u64t()) }, Reference { inner = u64t() })))
-    var loopbody: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(cf_bin(lexer::TokenKind::Plus, cf_var("li", u64t()), cf_num(0, u64t()), u64t())))
+    var loopbody: []@TStatement() = teko::list::push(teko::list::empty(), texpr_stmt(cf_bin(lexer::TokenKind::Plus, cf_var("li", u64t()), cf_num(0, u64t()), u64t())))
     loopbody = teko::list::push(loopbody, TBreakStmt { label = "" })
     loopbody = teko::list::push(loopbody, TContinueStmt { label = "" })
     var loop_init = teko::list::push(teko::list::empty(), cf_let("li", cf_bin(lexer::TokenKind::Shl, cf_var("a", u64t()), cf_num(1, u64t()), u64t())))
@@ -537,7 +537,7 @@ fn cf3_match_arm_pattern_shadow() {
     arms = teko::list::push(arms, arm_field)
     arms = teko::list::push(arms, arm_alt)
     var me = te(TMatchExpr { subject = cf_var("a", u64t()); arms = arms }, Void { })
-    var body: []TStatement = teko::list::push(teko::list::empty(), cf_let("a", cf_num(255, u64t())))
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), cf_let("a", cf_num(255, u64t())))
     body = teko::list::push(body, texpr_stmt(me))
     body = teko::list::push(body, c_ret(cf_var("a", u64t())))
     cf_return_is_num(cf_fn_of("m", body), "m", 255)
@@ -561,7 +561,7 @@ fn cf3_lambda_body_not_propagated() {
     var lam_body = teko::list::push(teko::list::empty(), texpr_stmt(cf_var("a", u64t())))
     var lam_ty = Func { params = teko::list::empty(); ret = u64t(); variadic = false; param_names = teko::list::empty(); n_required = 0; defaults = teko::list::empty(); ret_extra = teko::list::empty() }
     var lam = te(TLambda { params = teko::list::empty(); body = lam_body; captures = teko::list::empty(); ret = u64t(); lift_id = 0 }, lam_ty)
-    var body: []TStatement = teko::list::push(teko::list::empty(), cf_let("a", cf_num(255, u64t())))
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), cf_let("a", cf_num(255, u64t())))
     body = teko::list::push(body, cf_let("f", lam))
     body = teko::list::push(body, c_ret(cf_var("a", u64t())))
     var out = cf_fn_of("lz", body)
@@ -614,7 +614,7 @@ fn cf_second_binding_value(prog: TProgram, name: str): TExpr | null {
  *
  * @param body  the statement block
  */
-fn cf3_assert_first_stmt_var(body: []TStatement) {
+fn cf3_assert_first_stmt_var(body: []@TStatement()) {
     teko::assert::is_true(body.len > 0)
     match body[0] {
         TExprStmt as es => match es.expr.kind {

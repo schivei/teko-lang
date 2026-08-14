@@ -110,7 +110,7 @@ fn cx_item(it: @TItem(), ctx: CxCtx): @TItem() | error {
     match it {
         TFunction as f => cx_function(f, ctx)
         TConstDecl as cd => cx_const_decl(cd, ctx)
-        TStatement as s => match cx_stmt(s, ctx) { error as x => return x; TStatement as v => v }
+        (@TStatement()) as s => match cx_stmt(s, ctx) { error as x => return x; (@TStatement()) as v => v }
         _ => it
     }
 }
@@ -125,7 +125,7 @@ fn cx_item(it: @TItem(), ctx: CxCtx): @TItem() | error {
  * @since 0.4-macros (§14 Family-B B3)
  */
 fn cx_function(f: TFunction, ctx: CxCtx): @TItem() | error {
-    var body = match cx_block(f.body, ctx) { error as x => return x; []TStatement as v => v }
+    var body = match cx_block(f.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra }
 }
 
@@ -151,12 +151,12 @@ fn cx_const_decl(cd: TConstDecl, ctx: CxCtx): @TItem() | error {
  * @return       the block with each statement expanded, or the first fold error
  * @since 0.4-macros (§14 Family-B B3)
  */
-fn cx_block(stmts: []TStatement, ctx: CxCtx): []TStatement | error {
-    var out: []TStatement = teko::list::empty()
+fn cx_block(stmts: []@TStatement(), ctx: CxCtx): []@TStatement() | error {
+    var out: []@TStatement() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= stmts.len { break }
-        var s = match cx_stmt(stmts[i], ctx) { error as x => return x; TStatement as v => v }
+        var s = match cx_stmt(stmts[i], ctx) { error as x => return x; (@TStatement()) as v => v }
         out = teko::list::push(out, s)
         i++
     }
@@ -172,7 +172,7 @@ fn cx_block(stmts: []TStatement, ctx: CxCtx): []TStatement | error {
  * @return     the statement with comptime calls expanded, or the first fold error
  * @since 0.4-macros (§14 Family-B B3)
  */
-fn cx_stmt(st: TStatement, ctx: CxCtx): TStatement | error {
+fn cx_stmt(st: @TStatement(), ctx: CxCtx): @TStatement() | error {
     match st {
         TBinding as b => {
             var v = match cx_expr(b.value, ctx) { error as x => return x; TExpr as f => f }
@@ -181,8 +181,8 @@ fn cx_stmt(st: TStatement, ctx: CxCtx): TStatement | error {
         TAssign as a => cx_assign(a, ctx)
         TReturn as r => cx_return(r, st, ctx)
         TLoopStmt as l => {
-            var init = match cx_block(l.init, ctx) { error as x => return x; []TStatement as v => v }
-            var body = match cx_block(l.body, ctx) { error as x => return x; []TStatement as v => v }
+            var init = match cx_block(l.init, ctx) { error as x => return x; []@TStatement() as v => v }
+            var body = match cx_block(l.body, ctx) { error as x => return x; []@TStatement() as v => v }
             TLoopStmt { label = l.label; init = init; body = body }
         }
         TBreakStmt => st
@@ -192,15 +192,15 @@ fn cx_stmt(st: TStatement, ctx: CxCtx): TStatement | error {
             TExprStmt { expr = v }
         }
         TDeferStmt as d => {
-            var body = match cx_block(d.body, ctx) { error as x => return x; []TStatement as v => v }
+            var body = match cx_block(d.body, ctx) { error as x => return x; []@TStatement() as v => v }
             TDeferStmt { body = body }
         }
         TAdoptStmt as a => {
-            var body = match cx_block(a.body, ctx) { error as x => return x; []TStatement as v => v }
+            var body = match cx_block(a.body, ctx) { error as x => return x; []@TStatement() as v => v }
             TAdoptStmt { name = a.name; body = body }
         }
         TBlockStmt as b => {
-            var body = match cx_block(b.body, ctx) { error as x => return x; []TStatement as v => v }
+            var body = match cx_block(b.body, ctx) { error as x => return x; []@TStatement() as v => v }
             TBlockStmt { body = body }
         }
     }
@@ -215,7 +215,7 @@ fn cx_stmt(st: TStatement, ctx: CxCtx): TStatement | error {
  * @return     the return with an expanded value, or the first fold error
  * @since 0.4-macros (§14 Family-B B3)
  */
-fn cx_return(r: TReturn, st: TStatement, ctx: CxCtx): TStatement | error {
+fn cx_return(r: TReturn, st: @TStatement(), ctx: CxCtx): @TStatement() | error {
     if !r.has_value { return st }
     var v = match cx_expr(r.value, ctx) { error as x => return x; TExpr as f => f }
     TReturn { has_value = true; value = v; values = teko::list::empty() }
@@ -230,7 +230,7 @@ fn cx_return(r: TReturn, st: TStatement, ctx: CxCtx): TStatement | error {
  * @return     the assignment with expanded children, or the first fold error
  * @since 0.4-macros (§14 Family-B B3)
  */
-fn cx_assign(a: TAssign, ctx: CxCtx): TStatement | error {
+fn cx_assign(a: TAssign, ctx: CxCtx): @TStatement() | error {
     var value = match cx_expr(a.value, ctx) { error as x => return x; TExpr as f => f }
     if parser::assign_has_target(a.kind) {
         var target = match cx_expr(a.target, ctx) { error as x => return x; TExpr as f => f }
@@ -464,8 +464,8 @@ fn cx_in(n: TInExpr, e: TExpr, ctx: CxCtx): TExpr | error {
  */
 fn cx_if(f: TIfExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     var cond = match cx_expr(f.cond, ctx) { error as x => return x; TExpr as v => v }
-    var then_blk = match cx_block(f.then_blk, ctx) { error as x => return x; []TStatement as v => v }
-    var else_blk = match cx_block(f.else_blk, ctx) { error as x => return x; []TStatement as v => v }
+    var then_blk = match cx_block(f.then_blk, ctx) { error as x => return x; []@TStatement() as v => v }
+    var else_blk = match cx_block(f.else_blk, ctx) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TIfExpr { cond = cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = e.type; line = e.line; col = e.col }
 }
 
@@ -525,7 +525,7 @@ fn cx_arm(arm: TArm, ctx: CxCtx): TArm | error {
     var guard = if arm.has_when {
         match cx_expr(arm.guard, ctx) { error as x => return x; TExpr as v => v }
     } else { arm.guard }
-    var body = match cx_block(arm.body, ctx) { error as x => return x; []TStatement as v => v }
+    var body = match cx_block(arm.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TArm { pattern = arm.pattern; has_when = arm.has_when; guard = guard; body = body }
 }
 
@@ -540,7 +540,7 @@ fn cx_arm(arm: TArm, ctx: CxCtx): TArm | error {
  * @since 0.4-macros (§14 Family-B B3)
  */
 fn cx_lambda(lam: TLambda, e: TExpr, ctx: CxCtx): TExpr | error {
-    var body = match cx_block(lam.body, ctx) { error as x => return x; []TStatement as v => v }
+    var body = match cx_block(lam.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TLambda { params = lam.params; body = body; captures = lam.captures; ret = lam.ret; lift_id = lam.lift_id }; type = e.type; line = e.line; col = e.col }
 }
 
@@ -554,7 +554,7 @@ fn cx_lambda(lam: TLambda, e: TExpr, ctx: CxCtx): TExpr | error {
  * @since 0.4-macros (§14 Family-B B3)
  */
 fn cx_block_expr(blk: TBlockExpr, e: TExpr, ctx: CxCtx): TExpr | error {
-    var body = match cx_block(blk.body, ctx) { error as x => return x; []TStatement as v => v }
+    var body = match cx_block(blk.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TBlockExpr { body = body }; type = e.type; line = e.line; col = e.col }
 }
 
