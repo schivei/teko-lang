@@ -12,8 +12,8 @@ use teko::lexer
  * @return     the field's number, or `null` when absent / not a number / `v` not an object
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn num_field(v: json::JsonValue, key: str): f64 | null {
-    var fv = match object_field(v, key) { json::JsonValue as x => x; null => return null }
+fn num_field(v: @JsonValue(), key: str): f64 | null {
+    var fv = match object_field(v, key) { (@JsonValue()) as x => x; null => return null }
     match fv {
         json::JsonNumber as n => n.value
         _ => null
@@ -28,9 +28,9 @@ fn num_field(v: json::JsonValue, key: str): f64 | null {
  * @return     the cursor position, or `null`
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn position_of(req: json::JsonValue): Pos | null {
-    var params = match object_field(req, "params") { json::JsonValue as v => v; null => return null }
-    var pos = match object_field(params, "position") { json::JsonValue as v => v; null => return null }
+fn position_of(req: @JsonValue()): Pos | null {
+    var params = match object_field(req, "params") { (@JsonValue()) as v => v; null => return null }
+    var pos = match object_field(params, "position") { (@JsonValue()) as v => v; null => return null }
     var line = match num_field(pos, "line") { f64 as v => v; null => return null }
     var character = match num_field(pos, "character") { f64 as v => v; null => return null }
     Pos { line = line to u32; col = character to u32 }
@@ -120,7 +120,7 @@ fn resolve_symbol_at(path: str, text: str, line0: u32, char0: u32): Symbol | nul
  * @return     the JSON `MarkupContent`
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn hover_contents(sym: Symbol): json::JsonValue {
+fn hover_contents(sym: Symbol): @JsonValue() {
     var code = teko::str::concat("```teko\n", sym.signature, "\n```")
     var value = if sym.doc.len > 0 { teko::str::concat(code, "\n\n", sym.doc) } else { code }
     jobj(["kind", "value"], [jstr("markdown"), jstr(value)])
@@ -146,7 +146,7 @@ fn path_to_uri(path: str): str {
  * @return     the JSON `Range`
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn symbol_range(sym: Symbol): json::JsonValue {
+fn symbol_range(sym: Symbol): @JsonValue() {
     var line0 = if sym.line > 0 { sym.line - 1 } else { 0 }
     var col0 = if sym.col > 0 { sym.col - 1 } else { 0 }
     var end_col = col0 + (sym.name.len to u32)
@@ -161,7 +161,7 @@ fn symbol_range(sym: Symbol): json::JsonValue {
  * @return     the JSON `Location`
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn definition_location(sym: Symbol): json::JsonValue {
+fn definition_location(sym: Symbol): @JsonValue() {
     jobj(["uri", "range"], [jstr(path_to_uri(sym.file)), symbol_range(sym)])
 }
 
@@ -175,7 +175,7 @@ fn definition_location(sym: Symbol): json::JsonValue {
  * @return       the resolved symbol, or `null`
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn navigation_symbol(store: DocStore, req: json::JsonValue): Symbol | null {
+fn navigation_symbol(store: DocStore, req: @JsonValue()): Symbol | null {
     var uri = match format_uri(req) { str as u => u; null => return null }
     var text = match store_get(store, uri) { str as t => t; null => return null }
     var pos = match position_of(req) { Pos as p => p; null => return null }
@@ -192,7 +192,7 @@ fn navigation_symbol(store: DocStore, req: json::JsonValue): Symbol | null {
  * @return       the store (unchanged) and the `Hover`-or-null response
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn hover_response(store: DocStore, req: json::JsonValue): Dispatch {
+fn hover_response(store: DocStore, req: @JsonValue()): Dispatch {
     var id = request_id(req)
     match navigation_symbol(store, req) {
         Symbol as sym => dispatch_of(store, one_message(response(id, jobj(["contents"], [hover_contents(sym)]))))
@@ -210,7 +210,7 @@ fn hover_response(store: DocStore, req: json::JsonValue): Dispatch {
  * @return       the store (unchanged) and the `Location`-or-null response
  * @since 0.3.1.0 (LSP crumb F)
  */
-fn definition_response(store: DocStore, req: json::JsonValue): Dispatch {
+fn definition_response(store: DocStore, req: @JsonValue()): Dispatch {
     var id = request_id(req)
     match navigation_symbol(store, req) {
         Symbol as sym => dispatch_of(store, one_message(response(id, definition_location(sym))))
@@ -248,9 +248,9 @@ fn completion_kind_code(kind: SymKind): f64 {
  * @return     the JSON `CompletionItem`
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn symbol_completion_item(sym: Symbol): json::JsonValue {
+fn symbol_completion_item(sym: Symbol): @JsonValue() {
     var keys: []str = ["label", "kind", "detail"]
-    var values: []json::JsonValue = [jstr(sym.name), jnum(completion_kind_code(sym.kind)), jstr(sym.signature)]
+    var values: []@JsonValue() = [jstr(sym.name), jnum(completion_kind_code(sym.kind)), jstr(sym.signature)]
     if sym.doc.len > 0 {
         keys = teko::list::push(keys, "documentation")
         values = teko::list::push(values, jstr(sym.doc))
@@ -268,8 +268,8 @@ fn symbol_completion_item(sym: Symbol): json::JsonValue {
  * @return      one completion item per symbol
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn symbol_completion_items(syms: []Symbol): []json::JsonValue {
-    var out: []json::JsonValue = teko::list::empty()
+fn symbol_completion_items(syms: []Symbol): []@JsonValue() {
+    var out: []@JsonValue() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= syms.len { break }
@@ -303,7 +303,7 @@ const RESERVED_KEYWORDS: []str = [
  * @return      the JSON `CompletionItem`
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn keyword_completion_item(word: str): json::JsonValue {
+fn keyword_completion_item(word: str): @JsonValue() {
     jobj(["label", "kind"], [jstr(word), jnum(14.0)])
 }
 
@@ -315,8 +315,8 @@ fn keyword_completion_item(word: str): json::JsonValue {
  * @return  every reserved keyword's completion item
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn keyword_completion_items(): []json::JsonValue {
-    var out: []json::JsonValue = teko::list::empty()
+fn keyword_completion_items(): []@JsonValue() {
+    var out: []@JsonValue() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= RESERVED_KEYWORDS.len { break }
@@ -336,7 +336,7 @@ fn keyword_completion_items(): []json::JsonValue {
  * @return       `base` followed by `extra`
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn append_all(head: []json::JsonValue, extra: []json::JsonValue): []json::JsonValue {
+fn append_all(head: []@JsonValue(), extra: []@JsonValue()): []@JsonValue() {
     var out = head
     var i: u64 = 0
     loop {
@@ -360,7 +360,7 @@ fn append_all(head: []json::JsonValue, extra: []json::JsonValue): []json::JsonVa
  * @return       the candidate items (keywords, plus symbols when a parseable buffer is open)
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn document_completion_items(store: DocStore, req: json::JsonValue): []json::JsonValue {
+fn document_completion_items(store: DocStore, req: @JsonValue()): []@JsonValue() {
     var uri = match format_uri(req) { str as u => u; null => return teko::list::empty() }
     var keywords = keyword_completion_items()
     var text = match store_get(store, uri) { str as t => t; null => return keywords }
@@ -382,7 +382,7 @@ fn document_completion_items(store: DocStore, req: json::JsonValue): []json::Jso
  * @return       the store (unchanged) and the `CompletionItem[]` response
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn completion_response(store: DocStore, req: json::JsonValue): Dispatch {
+fn completion_response(store: DocStore, req: @JsonValue()): Dispatch {
     var id = request_id(req)
     dispatch_of(store, one_message(response(id, jarr(document_completion_items(store, req)))))
 }

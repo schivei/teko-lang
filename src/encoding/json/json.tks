@@ -67,10 +67,17 @@ pub type JsonNull = struct { }   // `null`
 pub type JsonBool = struct { value: bool }   // `true` / `false`
 pub type JsonNumber = struct { value: f64 }   // any JSON number (int or float; RFC 8259 has one numeric grammar)
 pub type JsonString = struct { value: str }   // a decoded (escapes resolved) string
-pub type JsonArray = struct { items: []JsonValue }   // `[...]` — see the interpreter-workaround note above for why this is a slice
-pub type JsonObject = struct { keys: []str; values: []JsonValue }   // `{...}` — parallel slices, source order preserved (see rationale above)
+pub type JsonArray = struct { items: []@JsonValue() }   /* `[...]` — see the interpreter-workaround note above for why this is a slice */
+pub type JsonObject = struct { keys: []str; values: []@JsonValue() }   /* `{...}` — parallel slices, source order preserved (see rationale above) */
 
-pub type JsonValue = variant JsonNull | JsonBool | JsonNumber | JsonString | JsonArray | JsonObject
+/**
+ * JsonValue — the JSON DOM value, retired from a nominal `variant` to the §9.D inline union
+ * `@JsonValue()`: `null`, a bool, a number, a string, an array, or an object. The recursive members
+ * (`JsonArray`/`JsonObject` carry `[]@JsonValue()`) box under CR1.
+ *
+ * @since §9.D (retired from a `variant` of the six JSON value kinds)
+ */
+macro JsonValue() { lowering { json::JsonNull | json::JsonBool | json::JsonNumber | json::JsonString | json::JsonArray | json::JsonObject } }
 
 // --- small ASCII classification helpers (not in the language's builtin char-ops set —
 // `is_alpha`/`is_digit`/`is_space` exist but not a hex-digit or JSON-specific whitespace
@@ -102,7 +109,7 @@ fn hex_digit_value(b: byte): i64 {
 // a parse result: the position just past what was consumed, plus the value built.
 // Threaded through by return value (no mutable out-param — the same idiom `teko::regex`
 // uses for its own `PState`).
-pub type PResult = struct { pos: u64; value: JsonValue }
+pub type PResult = struct { pos: u64; value: @JsonValue() }
 
 fn skip_ws(p: []byte, pos: u64): u64 {
     var at = pos
@@ -128,7 +135,7 @@ fn parse_value(p: []byte, pos: u64): PResult | error {
 }
 
 // matches a fixed ASCII keyword (`true`/`false`/`null`) starting at `pos`.
-fn parse_literal(p: []byte, pos: u64, word: str, value: JsonValue): PResult | error {
+fn parse_literal(p: []byte, pos: u64, word: str, value: @JsonValue()): PResult | error {
     var i: u64 = 0
     loop {
         if i >= word.len { break }
@@ -146,7 +153,7 @@ fn parse_object(p: []byte, pos: u64): PResult | error {
     // pos is at '{'
     var at = skip_ws(p, pos + 1)
     var keys: []str = teko::list::empty()
-    var values: []JsonValue = teko::list::empty()
+    var values: []@JsonValue() = teko::list::empty()
     if at < p.len && p[at] == b'}' { return PResult { pos = at + 1; value = JsonObject { keys = keys; values = values } } }
     loop {
         at = skip_ws(p, at)
@@ -175,7 +182,7 @@ fn parse_object(p: []byte, pos: u64): PResult | error {
 fn parse_array(p: []byte, pos: u64): PResult | error {
     // pos is at '['
     var at = skip_ws(p, pos + 1)
-    var items: []JsonValue = teko::list::empty()
+    var items: []@JsonValue() = teko::list::empty()
     if at < p.len && p[at] == b']' { return PResult { pos = at + 1; value = JsonArray { items = items } } }
     loop {
         var val_res = match parse_value(p, at) { PResult as v => v; error as e => return e }
@@ -460,7 +467,7 @@ fn pow10_signed(n: i64): f64 {
 
 // decode(text) — parse a complete JSON document. Trailing (non-whitespace) input after
 // the top-level value is an error (RFC 8259 §2 — a JSON text is EXACTLY one value).
-pub fn decode(text: str): JsonValue | error {
+pub fn decode(text: str): @JsonValue() | error {
     var bytes = bytes_of_str(text)
     var result = match parse_value(bytes, 0) { PResult as r => r; error as e => return e }
     var after = skip_ws(bytes, result.pos)
@@ -473,7 +480,7 @@ pub fn decode(text: str): JsonValue | error {
 // --- the encoder: JsonValue -> str, always total (a well-formed tree is always
 // representable, so no `| error` — mirrors teko::compress::write_zip's totality). ---
 
-pub fn encode(value: JsonValue): str {
+pub fn encode(value: @JsonValue()): str {
     match value {
         JsonNull => "null"
         JsonBool as b => if b.value { "true" } else { "false" }
@@ -484,7 +491,7 @@ pub fn encode(value: JsonValue): str {
     }
 }
 
-fn encode_array(items: []JsonValue): str {
+fn encode_array(items: []@JsonValue()): str {
     var out = "["
     var i: u64 = 0
     loop {
@@ -496,7 +503,7 @@ fn encode_array(items: []JsonValue): str {
     out ~ "]"
 }
 
-fn encode_object(keys: []str, values: []JsonValue): str {
+fn encode_object(keys: []str, values: []@JsonValue()): str {
     var out = "{"
     var i: u64 = 0
     loop {
@@ -602,7 +609,7 @@ fn trim_trailing_zeros(digits: str): str {
 // object sizes make this the right complexity/simplicity trade for now (matches the
 // parallel-slices shape; a hashed lookup is exactly what `teko::collections::Map`
 // integration — noted above — will later provide for large/hot-path objects).
-pub fn object_get(obj: JsonObject, key: str): JsonValue | null {
+pub fn object_get(obj: JsonObject, key: str): @JsonValue() | null {
     var i: u64 = 0
     loop {
         if i >= obj.keys.len { break }
@@ -625,7 +632,7 @@ fn str_eq(a: str, b: str): bool {
 
 // array_get(arr, index) — bounds-checked element access, or `null` when out of range
 // (mirrors object_get's absent-key shape so callers handle "missing" uniformly).
-pub fn array_get(arr: JsonArray, index: u64): JsonValue | null {
+pub fn array_get(arr: JsonArray, index: u64): @JsonValue() | null {
     if index >= arr.items.len { return null }
     arr.items[index]
 }

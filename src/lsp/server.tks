@@ -8,7 +8,7 @@ use teko::encoding::json
  * @return   the JSON string value
  * @since 0.3.1.0
  */
-fn jstr(s: str): json::JsonValue {
+fn jstr(s: str): @JsonValue() {
     json::JsonString { value = s }
 }
 
@@ -20,7 +20,7 @@ fn jstr(s: str): json::JsonValue {
  * @return   the JSON number value
  * @since 0.3.1.0
  */
-fn jnum(v: f64): json::JsonValue {
+fn jnum(v: f64): @JsonValue() {
     json::JsonNumber { value = v }
 }
 
@@ -31,7 +31,7 @@ fn jnum(v: f64): json::JsonValue {
  * @return  the JSON null value
  * @since 0.3.1.0
  */
-fn jnull(): json::JsonValue {
+fn jnull(): @JsonValue() {
     json::JsonNull { }
 }
 
@@ -43,7 +43,7 @@ fn jnull(): json::JsonValue {
  * @return   the JSON boolean value
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn jbool(b: bool): json::JsonValue {
+fn jbool(b: bool): @JsonValue() {
     json::JsonBool { value = b }
 }
 
@@ -57,7 +57,7 @@ fn jbool(b: bool): json::JsonValue {
  * @return        the JSON object value
  * @since 0.3.1.0
  */
-fn jobj(keys: []str, values: []json::JsonValue): json::JsonValue {
+fn jobj(keys: []str, values: []@JsonValue()): @JsonValue() {
     json::JsonObject { keys = keys; values = values }
 }
 
@@ -70,7 +70,7 @@ fn jobj(keys: []str, values: []json::JsonValue): json::JsonValue {
  * @return     the field value, or `null` when absent / `req` is not an object
  * @since 0.3.1.0
  */
-fn object_field(req: json::JsonValue, key: str): json::JsonValue | null {
+fn object_field(req: @JsonValue(), key: str): @JsonValue() | null {
     match req {
         json::JsonObject as o => json::object_get(o, key)
         _ => null
@@ -84,7 +84,7 @@ fn object_field(req: json::JsonValue, key: str): json::JsonValue | null {
  * @return   the string, or `null` when `v` is not a JSON string
  * @since 0.3.1.0
  */
-fn as_str(v: json::JsonValue): str | null {
+fn as_str(v: @JsonValue()): str | null {
     match v {
         json::JsonString as s => s.value
         _ => null
@@ -99,9 +99,9 @@ fn as_str(v: json::JsonValue): str | null {
  * @return     the `id` value, or JSON `null`
  * @since 0.3.1.0
  */
-fn request_id(req: json::JsonValue): json::JsonValue {
+fn request_id(req: @JsonValue()): @JsonValue() {
     match object_field(req, "id") {
-        json::JsonValue as v => v
+        (@JsonValue()) as v => v
         null => jnull()
     }
 }
@@ -115,10 +115,10 @@ fn request_id(req: json::JsonValue): json::JsonValue {
  * @return     true when an `id` field is present
  * @since 0.3.1.0
  */
-fn has_id(req: json::JsonValue): bool {
+fn has_id(req: @JsonValue()): bool {
     match object_field(req, "id") {
-        json::JsonValue => true
         null => false
+        _ => true
     }
 }
 
@@ -130,9 +130,9 @@ fn has_id(req: json::JsonValue): bool {
  * @return      the method name, or ""
  * @since 0.3.1.0
  */
-pub fn method_of(body: json::JsonValue): str {
+pub fn method_of(body: @JsonValue()): str {
     match object_field(body, "method") {
-        json::JsonValue as v => match as_str(v) { str as s => s; null => "" }
+        (@JsonValue()) as v => match as_str(v) { str as s => s; null => "" }
         null => ""
     }
 }
@@ -145,7 +145,7 @@ pub fn method_of(body: json::JsonValue): str {
  * @return        the response DOM
  * @since 0.3.1.0
  */
-fn response(id: json::JsonValue, result: json::JsonValue): json::JsonValue {
+fn response(id: @JsonValue(), result: @JsonValue()): @JsonValue() {
     jobj(["jsonrpc", "id", "result"], [jstr("2.0"), id, result])
 }
 
@@ -160,7 +160,7 @@ fn response(id: json::JsonValue, result: json::JsonValue): json::JsonValue {
  * @return         the error response DOM
  * @since 0.3.1.0
  */
-fn error_response(id: json::JsonValue, code: i64, message: str): json::JsonValue {
+fn error_response(id: @JsonValue(), code: i64, message: str): @JsonValue() {
     var err = jobj(["code", "message"], [jnum(code to f64), jstr(message)])
     jobj(["jsonrpc", "id", "error"], [jstr("2.0"), id, err])
 }
@@ -174,7 +174,7 @@ fn error_response(id: json::JsonValue, code: i64, message: str): json::JsonValue
  * @return  the `CompletionOptions` DOM
  * @since 0.3.1.0 (LSP crumb G)
  */
-fn completion_options(): json::JsonValue {
+fn completion_options(): @JsonValue() {
     jobj(["triggerCharacters"], [jarr([jstr("."), jstr(":")])])
 }
 
@@ -192,7 +192,7 @@ fn completion_options(): json::JsonValue {
  * @return    the `initialize` response DOM
  * @since 0.3.1.0
  */
-fn initialize_result(id: json::JsonValue): json::JsonValue {
+fn initialize_result(id: @JsonValue()): @JsonValue() {
     var server_info = jobj(["name", "version"], [jstr("teko"), jstr(teko::env::version())])
     var capability_keys = ["textDocumentSync", "documentFormattingProvider", "hoverProvider", "definitionProvider", "completionProvider"]
     var capability_values = [jnum(1.0), jbool(true), jbool(true), jbool(true), completion_options()]
@@ -225,9 +225,9 @@ type DocRef = struct {
  * @return     the field's string, or `null` when absent / not a string / `v` not an object
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn str_field(v: json::JsonValue, key: str): str | null {
+fn str_field(v: @JsonValue(), key: str): str | null {
     match object_field(v, key) {
-        json::JsonValue as fv => as_str(fv)
+        (@JsonValue()) as fv => as_str(fv)
         null => null
     }
 }
@@ -240,8 +240,8 @@ fn str_field(v: json::JsonValue, key: str): str | null {
  * @return     the `textDocument` object, or `null`
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn text_document_of(req: json::JsonValue): json::JsonValue | null {
-    var params = match object_field(req, "params") { json::JsonValue as v => v; null => return null }
+fn text_document_of(req: @JsonValue()): @JsonValue() | null {
+    var params = match object_field(req, "params") { (@JsonValue()) as v => v; null => return null }
     object_field(params, "textDocument")
 }
 
@@ -254,8 +254,8 @@ fn text_document_of(req: json::JsonValue): json::JsonValue | null {
  * @return     the opened document, or `null`
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn open_doc(req: json::JsonValue): DocRef | null {
-    var td = match text_document_of(req) { json::JsonValue as v => v; null => return null }
+fn open_doc(req: @JsonValue()): DocRef | null {
+    var td = match text_document_of(req) { (@JsonValue()) as v => v; null => return null }
     var uri = match str_field(td, "uri") { str as s => s; null => return null }
     var text = match str_field(td, "text") { str as s => s; null => return null }
     DocRef { uri = uri; text = text }
@@ -271,11 +271,11 @@ fn open_doc(req: json::JsonValue): DocRef | null {
  * @return     the changed document, or `null`
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn change_doc(req: json::JsonValue): DocRef | null {
-    var td = match text_document_of(req) { json::JsonValue as v => v; null => return null }
+fn change_doc(req: @JsonValue()): DocRef | null {
+    var td = match text_document_of(req) { (@JsonValue()) as v => v; null => return null }
     var uri = match str_field(td, "uri") { str as s => s; null => return null }
-    var params = match object_field(req, "params") { json::JsonValue as v => v; null => return null }
-    var changes = match object_field(params, "contentChanges") { json::JsonValue as v => v; null => return null }
+    var params = match object_field(req, "params") { (@JsonValue()) as v => v; null => return null }
+    var changes = match object_field(params, "contentChanges") { (@JsonValue()) as v => v; null => return null }
     match changes {
         json::JsonArray as arr => {
             if arr.items.len == 0 { return null }
@@ -294,8 +294,8 @@ fn change_doc(req: json::JsonValue): DocRef | null {
  * @return     the closed document's uri, or `null`
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn close_uri(req: json::JsonValue): str | null {
-    var td = match text_document_of(req) { json::JsonValue as v => v; null => return null }
+fn close_uri(req: @JsonValue()): str | null {
+    var td = match text_document_of(req) { (@JsonValue()) as v => v; null => return null }
     str_field(td, "uri")
 }
 
@@ -307,7 +307,7 @@ fn close_uri(req: json::JsonValue): str | null {
  * @return   a one-element outgoing list
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn one_message(v: json::JsonValue): []json::JsonValue {
+fn one_message(v: @JsonValue()): []@JsonValue() {
     teko::list::push(teko::list::empty(), v)
 }
 
@@ -317,7 +317,7 @@ fn one_message(v: json::JsonValue): []json::JsonValue {
  * @return  an empty outgoing list
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn no_messages(): []json::JsonValue {
+fn no_messages(): []@JsonValue() {
     teko::list::empty()
 }
 
@@ -348,7 +348,7 @@ type Dispatch = struct {
     /** the document store after handling the message. */
     store: DocStore
     /** the messages to frame and write (a response and/or a notification; empty for silence). */
-    out: []json::JsonValue
+    out: []@JsonValue()
 }
 
 /**
@@ -447,7 +447,7 @@ fn store_remove(store: DocStore, uri: str): DocStore {
  * @return       the paired dispatch
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn dispatch_of(store: DocStore, out: []json::JsonValue): Dispatch {
+fn dispatch_of(store: DocStore, out: []@JsonValue()): Dispatch {
     Dispatch { store = store; out = out }
 }
 
@@ -460,7 +460,7 @@ fn dispatch_of(store: DocStore, out: []json::JsonValue): Dispatch {
  * @return       the updated store and the `publishDiagnostics` notification (or nothing)
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn open_dispatch(store: DocStore, req: json::JsonValue): Dispatch {
+fn open_dispatch(store: DocStore, req: @JsonValue()): Dispatch {
     match open_doc(req) {
         DocRef as d => dispatch_of(store_put(store, d.uri, d.text), one_message(diagnostics_notification(d.uri, d.text)))
         null => dispatch_of(store, no_messages())
@@ -476,7 +476,7 @@ fn open_dispatch(store: DocStore, req: json::JsonValue): Dispatch {
  * @return       the updated store and the `publishDiagnostics` notification (or nothing)
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn change_dispatch(store: DocStore, req: json::JsonValue): Dispatch {
+fn change_dispatch(store: DocStore, req: @JsonValue()): Dispatch {
     match change_doc(req) {
         DocRef as d => dispatch_of(store_put(store, d.uri, d.text), one_message(diagnostics_notification(d.uri, d.text)))
         null => dispatch_of(store, no_messages())
@@ -492,7 +492,7 @@ fn change_dispatch(store: DocStore, req: json::JsonValue): Dispatch {
  * @return       the store without the document and the clearing notification (or nothing)
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn close_dispatch(store: DocStore, req: json::JsonValue): Dispatch {
+fn close_dispatch(store: DocStore, req: @JsonValue()): Dispatch {
     match close_uri(req) {
         str as uri => dispatch_of(store_remove(store, uri), one_message(publish_diagnostics(uri, teko::list::empty())))
         null => dispatch_of(store, no_messages())
@@ -548,7 +548,7 @@ fn end_position_of(text: str): Pos {
  * @return          the JSON `TextEdit`
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn text_edit_full(text: str, new_text: str): json::JsonValue {
+fn text_edit_full(text: str, new_text: str): @JsonValue() {
     var ep = end_position_of(text)
     var range = jobj(["start", "end"], [encode_position(0, 0), encode_position(ep.line, ep.col)])
     jobj(["range", "newText"], [range, jstr(new_text)])
@@ -563,8 +563,8 @@ fn text_edit_full(text: str, new_text: str): json::JsonValue {
  * @return     the document URI, or `null`
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn format_uri(req: json::JsonValue): str | null {
-    var td = match text_document_of(req) { json::JsonValue as v => v; null => return null }
+fn format_uri(req: @JsonValue()): str | null {
+    var td = match text_document_of(req) { (@JsonValue()) as v => v; null => return null }
     str_field(td, "uri")
 }
 
@@ -581,7 +581,7 @@ fn format_uri(req: json::JsonValue): str | null {
  * @return       the store (unchanged) and the `TextEdit[]`-or-null response
  * @since 0.3.1.0 (LSP crumb B)
  */
-fn format_response(store: DocStore, req: json::JsonValue): Dispatch {
+fn format_response(store: DocStore, req: @JsonValue()): Dispatch {
     var id = request_id(req)
     var uri = match format_uri(req) { str as u => u; null => return dispatch_of(store, one_message(response(id, jnull()))) }
     var text = match store_get(store, uri) { str as t => t; null => return dispatch_of(store, one_message(response(id, jnull()))) }
@@ -607,9 +607,9 @@ fn format_response(store: DocStore, req: json::JsonValue): Dispatch {
  * @return       the updated store and the outgoing messages (empty for silence)
  * @since 0.3.1.0
  */
-pub fn handle_request(store: DocStore, req: json::JsonValue): Dispatch {
+pub fn handle_request(store: DocStore, req: @JsonValue()): Dispatch {
     var method = match object_field(req, "method") {
-        json::JsonValue as v => match as_str(v) { str as s => s; null => return dispatch_of(store, no_messages()) }
+        (@JsonValue()) as v => match as_str(v) { str as s => s; null => return dispatch_of(store, no_messages()) }
         null => return dispatch_of(store, no_messages())
     }
     var id = request_id(req)
@@ -635,7 +635,7 @@ pub fn handle_request(store: DocStore, req: json::JsonValue): Dispatch {
  * @param msgs  the outgoing messages, in send order
  * @since 0.3.1.0 (LSP crumb A)
  */
-fn write_all(msgs: []json::JsonValue) {
+fn write_all(msgs: []@JsonValue()) {
     var i: u64 = 0
     loop {
         if i >= msgs.len { break }
