@@ -212,8 +212,8 @@ arithmetic** (crypto must not panic on int overflow) is the `teko::math::checked
 | C2 | `teko::crypto::mac` | `exp fn hmac_sha256(key, msg: []byte): []byte` · `poly1305` · `cmac`/`gmac` (over AES) | C1, C4 | **pure** | **P1/P2** |
 | C3 | `teko::crypto::kdf` | `exp fn hkdf_sha256(ikm, salt, info: []byte, len: u64): []byte` · `pbkdf2_sha256(...)` | C1, C2 | **pure** | **P2** |
 | C3b| `teko::crypto::password` | `exp fn argon2id(pw, salt: []byte, ...): []byte` · `scrypt` · `legacy bcrypt`; `exp fn verify(...)` | C3 | **pure** (memory-hard, heavy) | **P2** |
-| C4 | `teko::crypto::cipher` | `exp fn aes_ctr(key, nonce, data: []byte): []byte` · CBC/CFB/OFB · `chacha20(...)`; `legacy des3` | C0; wrapping-arith | **pure**, constant-time (audit) | **P2** |
-| C5 | `teko::crypto::aead` | `exp fn aes_gcm_seal(key, nonce, aad, pt): []byte` · `open(...): []byte \| error` · `chacha20_poly1305_seal/open` | C4, C2, C6 | **pure** — RFC 8439 vectors | **P2** |
+| C4 | `teko::crypto::cipher` | **AES-128/192/256** em **CBC / CTR / CFB / OFB** (`aes_cbc`/`aes_ctr`/… — key-size pela chave 16/24/32 B) · `chacha20(...)`; `legacy des3` | C0; wrapping-arith | **pure**, constant-time (audit) | **P2** |
+| C5 | `teko::crypto::aead` | **AES-128/256-GCM** (`aes_gcm_seal`/`open` — a norma empresarial **AES-256-GCM**) · **AES-CCM** · `chacha20_poly1305_seal/open` | C4, C2, C6 | **pure** — RFC 8439/NIST vectors | **P2** |
 | C6 | `teko::crypto::rand` | `exp fn rand_bytes(n: u64): []byte \| error` (fill a `Buf`) | KEYSTONE-BUF; **FFI** `getrandom`/`getentropy`/`BCryptGenRandom` `#os` | **needs FFI** (no non-native fallback) | **P1** |
 | C7 | `teko::crypto::pk` (asymmetric) | `exp fn x25519(sk, pk: []byte): []byte` · `ed25519_sign/verify` · RSA-OAEP/PSS · ECDSA P-256 · ECDH | C0, C1, C6, S-ASN1, `math::bigint` | **pure** for X25519/Ed25519; provider or bigint for RSA/ECDSA | **P2/P3** |
 | C8 | `teko::crypto::x509` | `exp fn parse_cert(der: []byte): Cert \| error` · `verify_chain(...)` · SAN match | S-ASN1, C7, C1 | **pure** | **P3** |
@@ -285,12 +285,16 @@ pure-Teko *codecs* (`.tkt`-testable); only the socket/TLS syscalls are FFI.
 | N5 | `teko::net::http` | `exp type Request`/`Response` · header map · `exp fn get(url: str): Response\|error` · `exp fn serve(addr, handler: fn(Request): Response): error?` · URL parser | N1 (client), N3 (https), S-JSON, `compress::gzip` | parser/encoder **pure**; transport via N1/N3 | **P2** |
 | N6 | `teko::net::ws` | RFC 6455 upgrade + frame codec (fin/opcode/mask) | N5, C1 (SHA-1 accept-key) | codec **pure** | **P2** |
 | N7 | `teko::net::sse` | `text/event-stream` codec (client+server) | N5 | **pure** | **P3** |
+| N7b | `teko::net::http` realtime | **polling** (GET repetido) + **long-polling** (GET pendurado) helpers sobre N5 — as 4 opções realtime são WS (N6) · SSE (N7) · polling · long-polling, igualmente importantes | N5 | **pure** | **P2** |
 | N8 | `teko::net::http2` | HPACK + binary framing + stream multiplexing | N3 (ALPN) | codec **pure**, large; gates gRPC | **P3** |
 | N10 | `teko::net::http3` | HTTP/3 over QUIC + QPACK | N-QUIC | **pure** codec | **P3** |
 | N11 | `teko::net::mqtt` | MQTT 3.1.1/5.0 client (connect/pub/sub/QoS) | N1 (+N3) | codec **pure** | **P3** |
 | N13 | `teko::net::redis` | RESP2/RESP3 codec + command layer | N1 (+N3) | **pure** | **P3** |
 | N14 | `teko::net::{smtp,imap,pop3}` | mail send/retrieve; STARTTLS via N3 | N1, N3 | **pure** codec | **P3** |
 | N16 | `teko::net::ssh` | client transport+auth+channels | N1, C4/C5/C7 (kex/aead) | **pure**, heavy | **P3** |
+| N17 | `teko::net::sftp` | SFTP — subsistema de transferência de arquivos **sobre SSH** | N16 | **pure** | **P3** |
+| N18 | `teko::net::ftp` | FTP/FTPS (canal de controle + dados; **legacy mas muito usado**) | N1, N3 | **pure** codec | **P3** |
+| N19 | `teko::net::telnet` | Telnet (legacy, ainda usado em equipamento de rede/serial-over-IP) | N1 | **pure** | **P3** |
 
 **Native-feasibility note.** Every protocol splits into a **pure-Teko codec** (parse/encode — the bulk,
 `.tkt`-testable against RFC byte vectors) and a **thin FFI transport** (N1/N2 sockets, N3 TLS provider).
@@ -306,11 +310,14 @@ So HTTP/WS/Redis/MQTT/mail are *mostly pure* and only inherit FFI through the so
 ### D. Encoding / serialization — `teko::encoding::*` (feeds net + db)
 
 `teko::encoding::{base64,csv,json,url}` exist. Expansion adds the formats net/db/crypto need. All pure
-Teko, `.tkt`-testable, **no keystone** — parallelizable now.
+Teko, `.tkt`-testable, **no keystone** — parallelizable now. **Formatos ABERTOS/padrão entram na stdlib;
+os FECHADOS/proprietários o dev implementa** (a stdlib dá as primitivas) — ruling do dono.
 
 | # | Module | Surface (sketch) | Deps | Feasibility | Tier |
 |---|---|---|---|---|---|
 | S-JSON | `teko::encoding::json` (extend) | `exp fn parse(s: str): Json\|error` · `exp fn encode(j: Json): str` · streaming | none | **pure** | **P1** |
+| S-CSV | `teko::encoding::csv` (extend) | RFC 4180: read/write, quoting/escape, header row, delimitador configurável | none | **pure** | **P1** |
+| S-TOML / S-INI | `teko::encoding::{toml,ini}` | config: TOML 1.0 + INI/properties | none | **pure** | **P2** |
 | S-PB | `teko::encoding::protobuf` | varint/zigzag/length-delimited wire codec; `.proto` compiler is a later tool | none | **pure**; gates gRPC | **P2** |
 | S-ASN1 | `teko::encoding::asn1` | DER/BER encode+decode + PEM framing | none | **pure**; gates x509/PK | **P2** |
 | S-XML | `teko::encoding::xml` | pull + DOM parser + encoder; namespaces | none | **pure** | **P2** |
