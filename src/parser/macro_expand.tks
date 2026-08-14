@@ -150,8 +150,31 @@ fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
             var ns = match walk_stmt(s, prog, no_holes(), depth) { Statement as x => x; error as e => return e }
             Item { content = ns; namespace = it.namespace; file = it.file }
         }
+        ConstDecl as cd => {
+            var ncd = match rewrite_const_decl(cd, prog, depth) { ConstDecl as x => x; error as e => return e }
+            Item { content = ncd; namespace = it.namespace; file = it.file }
+        }
         _ => it
     }
+}
+
+/**
+ * rewrite_const_decl — expand `@Type()` macros in a `const NAME: TYPE = value` declaration (§14 A4
+ * type-position completeness): a module-level `const` carries BOTH a type annotation (a type position,
+ * like a field or a parameter) and an initializer expression (which may hold `@macro()` value calls).
+ * Reused for a `const` item and for a trait's `consts` list. Inert when neither holds a macro.
+ *
+ * @param cd     the const declaration to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the const declaration with its type annotation and initializer expanded
+ * @throws       when an inner type-macro or value-macro expansion fails
+ * @since        §9.D sweep (Family-A type-macro completeness — const type annotations)
+ */
+fn rewrite_const_decl(cd: ConstDecl, prog: Program, depth: u64): ConstDecl | error {
+    var ty = match walk_type(cd.ty, prog, depth) { TypeExpr as t => t; error as e => return e }
+    var iv = match walk_expr(cd.init, prog, no_holes(), depth) { Expr as x => x; error as e => return e }
+    ConstDecl { name = cd.name; ty = ty; init = iv; vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col }
 }
 
 /**
@@ -202,10 +225,39 @@ fn rewrite_params(params: []Param, prog: Program, depth: u64): []Param | error {
 }
 
 /**
- * rewrite_type_decl — expand `@Type()` macros in a type declaration's FIELD annotations (§14 A4): a
- * struct or class field whose type is `[]@Type()` (the §9.D inline-union abbreviation) re-parses to the
- * spliced type. Other body kinds pass through in A4 — their type positions gain macro support
- * incrementally; inert on today's corpus regardless.
+ * rewrite_lambda_params — expand `@Type()` macros in each TYPED lambda parameter's annotation (§14 A4
+ * type-position completeness): `(x: @T()) => …` is a type position exactly like a function parameter. An
+ * untyped lambda parameter (`x =>`) passes through. Inert when no annotation holds a macro.
+ *
+ * @param params the lambda parameters to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the rewritten lambda parameters, or an error
+ * @throws       when an inner type-macro expansion fails
+ * @since        §9.D sweep (Family-A type-macro completeness — lambda parameter annotations)
+ */
+fn rewrite_lambda_params(params: []LambdaParam, prog: Program, depth: u64): []LambdaParam | error {
+    var out: []LambdaParam = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        var p = params[i]
+        var ta = p.type_ann
+        if p.has_type {
+            ta = match walk_type(p.type_ann, prog, depth) { TypeExpr as t => t; error as e => return e }
+        }
+        out = teko::list::push(out, LambdaParam { name = p.name; has_type = p.has_type; type_ann = ta })
+        i++
+    }
+    out
+}
+
+/**
+ * rewrite_type_decl — expand `@Type()` macros in a type declaration's type positions (§14 A4): a struct
+ * or class field annotation (`[]@Type()`, the §9.D inline-union abbreviation), a variant body's union
+ * type-expression, a newtype's backing type, and a transparent alias's target. Enum/flags/extern bodies
+ * and interface/trait method signatures carry no directly-spliceable type position here. Inert on today's
+ * corpus regardless.
  *
  * @param td     the type declaration to rewrite
  * @param prog   the program
@@ -223,6 +275,18 @@ fn rewrite_type_decl(td: TypeDecl, prog: Program, depth: u64): TypeDecl | error 
         ClassBody as cb => {
             var fs = match rewrite_fields(cb.fields, prog, depth) { []Field as f => f; error as e => return e }
             ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fs; methods = cb.methods; consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }
+        }
+        VariantBody as vb => {
+            var te = match walk_type(vb.type_expr, prog, depth) { TypeExpr as t => t; error as e => return e }
+            VariantBody { type_expr = te }
+        }
+        NewtypeBody as nt => {
+            var bk = match walk_type(nt.backing, prog, depth) { TypeExpr as t => t; error as e => return e }
+            NewtypeBody { backing = bk; methods = nt.methods }
+        }
+        AliasBody as ab => {
+            var al = match walk_type(ab.alias, prog, depth) { TypeExpr as t => t; error as e => return e }
+            AliasBody { alias = al }
         }
         _ => td.body
     }
@@ -580,7 +644,8 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
     match e.kind {
         MacroCall as mc => {
             var sargs = match walk_exprs(mc.args, prog, holes, depth) { []Expr as a => a; error as er => return er }
-            expand_macro_call(MacroCall { callee = mc.callee; args = sargs; callee_type_args = mc.callee_type_args }, prog, depth)
+            var cta = match walk_types(mc.callee_type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            expand_macro_call(MacroCall { callee = mc.callee; args = sargs; callee_type_args = cta }, prog, depth)
         }
         Var as v => {
             if holes.active {
@@ -615,12 +680,15 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
         }
         Call as cl => {
             var args = match walk_exprs(cl.args, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            with_kind(e, Call { callee = cl.callee; args = args; arg_names = cl.arg_names; owner_type_args = cl.owner_type_args; callee_type_args = cl.callee_type_args })
+            var ota = match walk_types(cl.owner_type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            var cta = match walk_types(cl.callee_type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            with_kind(e, Call { callee = cl.callee; args = args; arg_names = cl.arg_names; owner_type_args = ota; callee_type_args = cta })
         }
         MethodCall as mc2 => {
             var recv = match walk_expr(mc2.receiver, prog, holes, depth) { Expr as x => x; error as er => return er }
             var args = match walk_exprs(mc2.args, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            with_kind(e, MethodCall { receiver = recv; method = mc2.method; args = args; arg_names = mc2.arg_names; type_args = mc2.type_args })
+            var ta = match walk_types(mc2.type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            with_kind(e, MethodCall { receiver = recv; method = mc2.method; args = args; arg_names = mc2.arg_names; type_args = ta })
         }
         IfExpr as f => {
             var cond = match walk_expr(f.cond, prog, holes, depth) { Expr as x => x; error as er => return er }
@@ -639,11 +707,13 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
         }
         Cast as ct => {
             var x = match walk_expr(ct.expr, prog, holes, depth) { Expr as y => y; error as er => return er }
-            with_kind(e, Cast { expr = x; target = ct.target })
+            var tgt = match walk_type(ct.target, prog, depth) { TypeExpr as t => t; error as er => return er }
+            with_kind(e, Cast { expr = x; target = tgt })
         }
         StructLit as sl => {
             var fv = match walk_exprs(sl.field_vals, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            with_kind(e, StructLit { type_path = sl.type_path; type_args = sl.type_args; field_names = sl.field_names; field_vals = fv })
+            var ta = match walk_types(sl.type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            with_kind(e, StructLit { type_path = sl.type_path; type_args = ta; field_names = sl.field_names; field_vals = fv })
         }
         Index as ix => {
             var recv = match walk_expr(ix.receiver, prog, holes, depth) { Expr as x => x; error as er => return er }
@@ -664,8 +734,9 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
             with_kind(e, ArrayLit { elements = els })
         }
         Lambda as lam => {
+            var lp = match rewrite_lambda_params(lam.params, prog, depth) { []LambdaParam as p => p; error as er => return er }
             var b = match walk_stmts(lam.body, prog, holes, depth) { []Statement as s => s; error as er => return er }
-            with_kind(e, Lambda { params = lam.params; body = b })
+            with_kind(e, Lambda { params = lp; body = b })
         }
         Borrow as bo => {
             var o = match walk_expr(bo.operand, prog, holes, depth) { Expr as x => x; error as er => return er }
