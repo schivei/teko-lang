@@ -17,7 +17,7 @@ pub type NumberedInst = struct {
     /**
      * inst — the machine instruction at this point.
      */
-    inst: MInst
+    inst: @MInst()
 }
 
 /**
@@ -63,7 +63,7 @@ fn reverse_u32(list: []u32): []u32 {
  * @param u32 id  the block id
  * @return []MInst  the block's instructions, or empty
  */
-fn block_insts_of(f: MFunc, id: u32): []MInst {
+fn block_insts_of(f: MFunc, id: u32): []@MInst() {
     var i: u64 = 0
     loop {
         if i >= f.blocks.len { break }
@@ -400,7 +400,7 @@ fn ir_call(ret: MReg, has_result: bool, us: []MReg): InstRegs {
  * @param MInst inst  the instruction to decompose
  * @return InstRegs  its def/use decomposition
  */
-pub fn inst_regs(inst: MInst): InstRegs {
+pub fn inst_regs(inst: @MInst()): InstRegs {
     match inst {
         MAlu as x => ir_def_use(x.dst, two_regs(x.a, x.b))
         MAluImm as x => ir_def_use(x.dst, one_reg(x.a))
@@ -551,7 +551,7 @@ fn reg_in(list: []MReg, r: MReg): bool {
  * @param MInst inst  the instruction
  * @return bool  true iff it is a terminator
  */
-fn is_terminator(inst: MInst): bool {
+fn is_terminator(inst: @MInst()): bool {
     match inst {
         MRet => true
         MBranch => true
@@ -585,7 +585,7 @@ type TargetOpt = struct {
  * @param MInst inst  the instruction
  * @return TargetOpt  its branch target, or none
  */
-fn terminator_target(inst: MInst): TargetOpt {
+fn terminator_target(inst: @MInst()): TargetOpt {
     match inst {
         MBranch as x => TargetOpt { has = true; target = x.target }
         MBranchCond as x => TargetOpt { has = true; target = x.target }
@@ -1831,7 +1831,7 @@ fn map_regs_list(list: []MReg, table: []SubstEntry): []MReg {
  * @param []SubstEntry table  the substitution table
  * @return MInst  the rewritten instruction
  */
-pub fn map_minst_regs(inst: MInst, table: []SubstEntry): MInst {
+pub fn map_minst_regs(inst: @MInst(), table: []SubstEntry): @MInst() {
     match inst {
         MAlu as x => MAlu { op = x.op; wide = x.wide; dst = subst_find(table, x.dst); a = subst_find(table, x.a); b = subst_find(table, x.b) }
         MAluImm as x => MAluImm { op = x.op; wide = x.wide; dst = subst_find(table, x.dst); a = subst_find(table, x.a); imm = x.imm }
@@ -1874,7 +1874,7 @@ pub fn map_minst_regs(inst: MInst, table: []SubstEntry): MInst {
  * @param MInst x  the instruction
  * @return []MInst  the singleton list
  */
-fn minst_single(x: MInst): []MInst {
+fn minst_single(x: @MInst()): []@MInst() {
     teko::list::push(teko::list::empty(), x)
 }
 
@@ -1885,7 +1885,7 @@ fn minst_single(x: MInst): []MInst {
  * @param []MInst b  the suffix list
  * @return []MInst  the concatenation
  */
-fn minst_cat(a: []MInst, b: []MInst): []MInst {
+fn minst_cat(a: []@MInst(), b: []@MInst()): []@MInst() {
     var out = a
     var i: u64 = 0
     loop {
@@ -1905,7 +1905,7 @@ fn minst_cat(a: []MInst, b: []MInst): []MInst {
  * @param u64 slot  the absolute frame slot
  * @return []MInst  the reload sequence
  */
-fn emit_gpr_reload(sv: MReg, slot: u64): []MInst {
+fn emit_gpr_reload(sv: MReg, slot: u64): []@MInst() {
     var fa = frame_addr_inst(sv, slot)
     var ld = load_inst(MMemSize::X, false, sv, MMem { base_reg = sv; offset = 0 to i32 })
     teko::list::push(minst_single(fa), ld)
@@ -1921,7 +1921,7 @@ fn emit_gpr_reload(sv: MReg, slot: u64): []MInst {
  * @param u64 slot  the absolute frame slot
  * @return []MInst  the store sequence
  */
-fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u64): []MInst {
+fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u64): []@MInst() {
     var fa = frame_addr_inst(asv, slot)
     var st = store_inst(MMemSize::X, dsv, MMem { base_reg = asv; offset = 0 to i32 })
     teko::list::push(minst_single(fa), st)
@@ -1938,7 +1938,7 @@ fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u64): []MInst {
  * @param u64 slot  the absolute frame slot
  * @return []MInst  the reload sequence
  */
-fn emit_spill_reload(sv: MReg, slot: u64): []MInst {
+fn emit_spill_reload(sv: MReg, slot: u64): []@MInst() {
     if sv.reg_class == MRegClass::FPR { return minst_single(fspill_inst(sv, slot, true)) }
     emit_gpr_reload(sv, slot)
 }
@@ -1954,7 +1954,7 @@ fn emit_spill_reload(sv: MReg, slot: u64): []MInst {
  * @param u64 slot  the absolute frame slot
  * @return []MInst  the store sequence
  */
-fn emit_spill_store(dsv: MReg, asv: MReg, slot: u64): []MInst {
+fn emit_spill_store(dsv: MReg, asv: MReg, slot: u64): []@MInst() {
     if dsv.reg_class == MRegClass::FPR { return minst_single(fspill_inst(dsv, slot, false)) }
     emit_gpr_store(dsv, asv, slot)
 }
@@ -2005,7 +2005,7 @@ type UseAcc = struct {
     /**
      * reloads — the reload instructions so far (emitted before the inst).
      */
-    reloads: []MInst
+    reloads: []@MInst()
     /**
      * nth — the next spill-reload scratch index.
      */
@@ -2028,7 +2028,7 @@ type UseAcc = struct {
  * @param u64 frame_base  the first spill frame slot index
  * @return []MInst  the reloads ++ the rewritten instruction ++ the store
  */
-pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64): []MInst {
+pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: @MInst(), frame_base: u64): []@MInst() {
     var ir = inst_regs(inst)
     var acc = UseAcc { table = teko::list::empty(); reloads = teko::list::empty(); nth = 0 to u32 }
     var ui: u64 = 0
@@ -2038,7 +2038,7 @@ pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base:
         ui++
     }
     var table = acc.table
-    var stores: []MInst = teko::list::empty()
+    var stores: []@MInst() = teko::list::empty()
     if ir.has_def {
         var d = ir.def_reg
         if !d.is_phys {
@@ -2116,7 +2116,7 @@ fn append_spill_slots(abi: AbiDescriptor, frame: []lir::LAlloca, spills: u64): [
  * @return MBlock  the rewritten block
  */
 fn rewrite_block(abi: AbiDescriptor, sr: ScanResult, b: MBlock, frame_base: u64): MBlock {
-    var insts: []MInst = teko::list::empty()
+    var insts: []@MInst() = teko::list::empty()
     var ii: u64 = 0
     loop {
         if ii >= b.insts.len { break }

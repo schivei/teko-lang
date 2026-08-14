@@ -20,7 +20,7 @@ type NumberedInstX86 = struct {
     /**
      * inst — the x86 machine instruction at this point.
      */
-    inst: MInstX86
+    inst: @MInstX86()
 }
 
 /**
@@ -63,7 +63,7 @@ const SHIFT_COUNT_REG_X86: MReg = preg(1, MRegClass::GPR)
  * @param MInstX86 inst  the instruction to decompose
  * @return InstRegs  its def/use decomposition (the neutral `InstRegs`, reused)
  */
-fn inst_regs_x86(inst: MInstX86): InstRegs {
+fn inst_regs_x86(inst: @MInstX86()): InstRegs {
     match inst {
         MMovImmX86 as x => ir_def(x.dst)
         MMovX86 as x => ir_def_use(x.dst, one_reg(x.src))
@@ -103,7 +103,7 @@ fn inst_regs_x86(inst: MInstX86): InstRegs {
  * @param MInstX86 inst  the instruction
  * @return bool  true iff it is a terminator
  */
-fn is_terminator_x86(inst: MInstX86): bool {
+fn is_terminator_x86(inst: @MInstX86()): bool {
     match inst {
         MRetX86 => true
         MJmpX86 => true
@@ -121,7 +121,7 @@ fn is_terminator_x86(inst: MInstX86): bool {
  * @param MInstX86 inst  the instruction
  * @return TargetOpt  its branch target, or none
  */
-fn terminator_target_x86(inst: MInstX86): TargetOpt {
+fn terminator_target_x86(inst: @MInstX86()): TargetOpt {
     match inst {
         MJmpX86 as x => TargetOpt { has = true; target = x.target }
         MJccX86 as x => TargetOpt { has = true; target = x.target }
@@ -138,7 +138,7 @@ fn terminator_target_x86(inst: MInstX86): TargetOpt {
  * @param u32 id  the block id
  * @return []MInstX86  the block's instructions, or empty
  */
-fn block_insts_of_x86(f: MFuncX86, id: u32): []MInstX86 {
+fn block_insts_of_x86(f: MFuncX86, id: u32): []@MInstX86() {
     var i: u64 = 0
     loop {
         if i >= f.blocks.len { break }
@@ -541,7 +541,7 @@ fn compute_intervals_x86(stream: []NumberedInstX86, order: []u32, reachable: []u
  * @param []SubstEntry table  the substitution table
  * @return MInstX86  the rewritten instruction
  */
-fn map_minst_x86(inst: MInstX86, table: []SubstEntry): MInstX86 {
+fn map_minst_x86(inst: @MInstX86(), table: []SubstEntry): @MInstX86() {
     match inst {
         MMovImmX86 as x => movimm_x86(subst_find(table, x.dst), x.imm64, x.wide)
         MMovX86 as x => mov_x86(subst_find(table, x.dst), subst_find(table, x.src), x.wide)
@@ -580,7 +580,7 @@ fn map_minst_x86(inst: MInstX86, table: []SubstEntry): MInstX86 {
  * @param MInstX86 x  the instruction
  * @return []MInstX86  the singleton list
  */
-fn minst_x86_single(x: MInstX86): []MInstX86 {
+fn minst_x86_single(x: @MInstX86()): []@MInstX86() {
     teko::list::push(teko::list::empty(), x)
 }
 
@@ -592,7 +592,7 @@ fn minst_x86_single(x: MInstX86): []MInstX86 {
  * @param []MInstX86 b  the suffix list
  * @return []MInstX86  the concatenation
  */
-fn minst_x86_cat(a: []MInstX86, b: []MInstX86): []MInstX86 {
+fn minst_x86_cat(a: []@MInstX86(), b: []@MInstX86()): []@MInstX86() {
     var out = a
     var i: u64 = 0
     loop {
@@ -614,7 +614,7 @@ fn minst_x86_cat(a: []MInstX86, b: []MInstX86): []MInstX86 {
  * @param u64 slot  the absolute frame slot
  * @return []MInstX86  the reload sequence
  */
-fn emit_gpr_reload_x86(sv: MReg, slot: u64): []MInstX86 {
+fn emit_gpr_reload_x86(sv: MReg, slot: u64): []@MInstX86() {
     var fa = frame_addr_x86(sv, slot)
     var ld = load_x86(MMemSizeX86::Q, false, sv, MMem { base_reg = sv; offset = 0 to i32 })
     teko::list::push(minst_x86_single(fa), ld)
@@ -631,7 +631,7 @@ fn emit_gpr_reload_x86(sv: MReg, slot: u64): []MInstX86 {
  * @param u64 slot  the absolute frame slot
  * @return []MInstX86  the reload sequence
  */
-fn emit_spill_reload_x86(sv: MReg, slot: u64): []MInstX86 {
+fn emit_spill_reload_x86(sv: MReg, slot: u64): []@MInstX86() {
     if sv.reg_class == MRegClass::FPR { return minst_x86_single(fspill_x86(sv, slot, true)) }
     emit_gpr_reload_x86(sv, slot)
 }
@@ -647,7 +647,7 @@ fn emit_spill_reload_x86(sv: MReg, slot: u64): []MInstX86 {
  * @param u64 slot  the absolute frame slot
  * @return []MInstX86  the store sequence
  */
-fn emit_spill_store_x86(dsv: MReg, asv: MReg, slot: u64): []MInstX86 {
+fn emit_spill_store_x86(dsv: MReg, asv: MReg, slot: u64): []@MInstX86() {
     if dsv.reg_class == MRegClass::FPR { return minst_x86_single(fspill_x86(dsv, slot, false)) }
     emit_gpr_store_x86(dsv, asv, slot)
 }
@@ -663,7 +663,7 @@ fn emit_spill_store_x86(dsv: MReg, asv: MReg, slot: u64): []MInstX86 {
  * @param u64 slot  the absolute frame slot
  * @return []MInstX86  the store sequence
  */
-fn emit_gpr_store_x86(dsv: MReg, asv: MReg, slot: u64): []MInstX86 {
+fn emit_gpr_store_x86(dsv: MReg, asv: MReg, slot: u64): []@MInstX86() {
     var fa = frame_addr_x86(asv, slot)
     var st = store_x86(MMemSizeX86::Q, dsv, MMem { base_reg = asv; offset = 0 to i32 })
     teko::list::push(minst_x86_single(fa), st)
@@ -686,7 +686,7 @@ type UseAccX86 = struct {
     /**
      * reloads — the reload instructions so far (emitted before the inst).
      */
-    reloads: []MInstX86
+    reloads: []@MInstX86()
     /**
      * nth — the next spill-reload scratch index.
      */
@@ -738,7 +738,7 @@ fn add_use_subst_x86(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u6
  * @param u64 frame_base  the first spill frame slot index
  * @return []MInstX86  the reloads ++ the rewritten instruction ++ the store
  */
-fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: MInstX86, frame_base: u64): []MInstX86 {
+fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: @MInstX86(), frame_base: u64): []@MInstX86() {
     var ir = inst_regs_x86(inst)
     var acc = UseAccX86 { table = teko::list::empty(); reloads = teko::list::empty(); nth = 0 to u32 }
     var ui: u64 = 0
@@ -748,7 +748,7 @@ fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: MInstX86, frame_ba
         ui++
     }
     var table = acc.table
-    var stores: []MInstX86 = teko::list::empty()
+    var stores: []@MInstX86() = teko::list::empty()
     if ir.has_def {
         var d = ir.def_reg
         if !d.is_phys {
@@ -785,7 +785,7 @@ fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: MInstX86, frame_ba
  * @return MBlockX86  the rewritten block
  */
 fn rewrite_block_x86(abi: AbiDescriptor, sr: ScanResult, b: MBlockX86, frame_base: u64): MBlockX86 {
-    var insts: []MInstX86 = teko::list::empty()
+    var insts: []@MInstX86() = teko::list::empty()
     var ii: u64 = 0
     loop {
         if ii >= b.insts.len { break }
