@@ -702,10 +702,31 @@ fn walk_stmts(ss: []Statement, prog: Program, holes: MacroHoles, depth: u64): []
 }
 
 /**
+ * walk_binding_type_ann — expand any Family-A `@Type()` macro in a LOCAL binding's TYPE ANNOTATION
+ * (§14 A4 completeness): a `var x: @Foo() = …` / `var a, b: @Foo() = …` annotation is a TYPE position
+ * exactly like a parameter, a return, or a struct field, so the same pre-pass must expand it — otherwise
+ * a body-level `@Type()` survives to type resolution and honest-stops. Inert when the binding carries no
+ * explicit annotation (`has_type` false) or when the annotation holds no macro (`walk_type` no-op).
+ *
+ * @param has_type  whether the binding declared an explicit annotation
+ * @param type_ann  the binding's annotation type-expression
+ * @param prog      the program (macro lookup surface)
+ * @param depth     the current expansion depth
+ * @return          the rewritten annotation, unchanged when there is nothing to expand
+ * @throws          when an inner type-macro expansion fails
+ * @since           §9.D sweep (Family-A type-macro completeness in body annotations)
+ */
+fn walk_binding_type_ann(has_type: bool, type_ann: TypeExpr, prog: Program, depth: u64): TypeExpr | error {
+    if !has_type { return type_ann }
+    walk_type(type_ann, prog, depth)
+}
+
+/**
  * walk_stmt — the Family-A expansion walk over ONE statement (§14 A3): each expression the statement
- * carries is walked (macro calls expanded), each nested block re-walked. A `LoweringFrag` in a normal
- * statement position passes through unchanged (the checker honest-stops it — it is legal only in a macro
- * body, which this walk never descends into as statements).
+ * carries is walked (macro calls expanded), each `@Type()` in a local binding's annotation is expanded,
+ * and each nested block re-walked. A `LoweringFrag` in a normal statement position passes through
+ * unchanged (the checker honest-stops it — it is legal only in a macro body, which this walk never
+ * descends into as statements).
  *
  * @param s      the statement to rewrite
  * @param prog   the program
@@ -719,7 +740,8 @@ fn walk_stmt(s: Statement, prog: Program, holes: MacroHoles, depth: u64): Statem
     match s {
         Binding as b => {
             var v = match walk_expr(b.value, prog, holes, depth) { Expr as x => x; error as er => return er }
-            Binding { kind = b.kind; target = b.target; has_type = b.has_type; type_ann = b.type_ann; is_ref = b.is_ref; value = v }
+            var ta = match walk_binding_type_ann(b.has_type, b.type_ann, prog, depth) { TypeExpr as t => t; error as er => return er }
+            Binding { kind = b.kind; target = b.target; has_type = b.has_type; type_ann = ta; is_ref = b.is_ref; value = v }
         }
         Assign as a => {
             var v = match walk_expr(a.value, prog, holes, depth) { Expr as x => x; error as er => return er }
@@ -756,7 +778,8 @@ fn walk_stmt(s: Statement, prog: Program, holes: MacroHoles, depth: u64): Statem
         }
         MultiBind as mb => {
             var vs = match walk_exprs(mb.values, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            MultiBind { kind = mb.kind; shape = mb.shape; targets = mb.targets; has_type = mb.has_type; type_ann = mb.type_ann; values = vs; line = mb.line; col = mb.col }
+            var ta = match walk_binding_type_ann(mb.has_type, mb.type_ann, prog, depth) { TypeExpr as t => t; error as er => return er }
+            MultiBind { kind = mb.kind; shape = mb.shape; targets = mb.targets; has_type = mb.has_type; type_ann = ta; values = vs; line = mb.line; col = mb.col }
         }
         LoweringFrag => s
     }
