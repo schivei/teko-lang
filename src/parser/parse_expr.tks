@@ -167,6 +167,21 @@ fn self_sentinel_path(): Path {
     Path { segments = teko::list::push(teko::list::empty(), Segment { name = "self" }) }
 }
 
+/**
+ * dot_sentinel_path — the SENTINEL `type_path` for a `.{ … }` target-typed construction (§4.1): a
+ * ZERO-segment `Path`. A construction literal always carries a type prefix (`Name { … }` — one or more
+ * segments — or `self { … }` — the reserved single segment `self`), so an EMPTY segment list is an
+ * unambiguous marker no nominal or `self` prefix can spell. The checker (`is_dot_sentinel`) recognises
+ * it and resolves the construction against the CONTEXT's expected type instead of a named prefix.
+ * Reusing the ordinary `StructLit` shape adds no AST field, so the `.tkb` layout is unchanged.
+ *
+ * @return  a zero-segment path — the `.{ … }` sentinel
+ * @since   §4.1
+ */
+fn dot_sentinel_path(): Path {
+    Path { segments = teko::list::empty() }
+}
+
 // ---- string interpolation `$"…{expr}…"` (self-host parity) ----
 // decode `\` + one byte (the same escape set lexer::read_str decodes), appending the decoded
 // byte to `bytes`; returns the bytes + the index AFTER the escape. A malformed escape errors.
@@ -389,6 +404,9 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         return err_at(tokens, pos, "`_` is a write-only discard and cannot be read — it carries no value (valid only as the LHS of `_ = expr`, a pattern wildcard, or a discard parameter)")
     }
     var k = kind_at(tokens, pos)
+    if k == lexer::TokenKind::Dot && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
+        return parse_struct_lit(tokens, pos + 1, dot_sentinel_path(), teko::list::empty())
+    }
     if k == lexer::TokenKind::LParen && lambda_ahead(tokens, pos) {
         return parse_lambda(tokens, pos)   // (W10) a closure literal beats the grouping branch below
     }

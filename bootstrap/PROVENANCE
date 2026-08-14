@@ -1,61 +1,57 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): ONDA DAS TRAITS — trait = self-contained concrete
-# mixin (flattened into a composer, traits compose traits) + retirement of the compiler-shadow
-# structural traits. The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested
-# self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by
-# scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
+# RESEED (hand-harvest, by-hand per owner order): SELF-CONSTRUCTION R1 — the ADDITIVE `.{ … }`
+# target-typed construction capability (§4.1). The owner did NOT edit bootstrap/teko.c by hand; the
+# file is the harvested self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's
+# kv_field; enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
 #
-# onda das traits (§9.4 revised)
+# self-construction R1 — target-typed `.{ … }` (§4.1), additive
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (docs/design/plano-onda-traits.md, docs/design/mudancas-superficie-0.3.1.md §9.4):
-#   - STRUCTURAL-TRAIT RETIREMENT: `src/checker/synth.tks` deleted in full (synthesize_structural_methods
-#     + every mk_* AST constructor); the recognizers (`is_structural_trait`/`structural_trait_canonical`,
-#     resolve.tks), the fold PASS 2 (`synthesize_structural` and helpers, collect.tks), the bodyless-
-#     requirement cluster, and the structural constraint-satisfaction branch (monomorph.tks) all removed.
-#     Zero live usage (Eq/Ord/Hash/Clone/Default were compiler-shadow with no derive in the corpus), so
-#     the deletion is behavior-preserving — the removed C never ran on this source.
-#   - TRAIT = MIXIN AST, in `src/parser/ast.tks`: `TraitBody` gains `implements: []str` (composed
-#     traits/carried interfaces); the `.tkb` codec (`src/emit/tkb_*.tks`) round-trips it in parity.
-#   - PARSER, in `src/parser/parse_decl.tks`: `trait [& A & B] { … }` (leading-`&` composition list,
-#     contextual head extended to `&`); a bodyless trait method is a named parse error (a trait is a
-#     concrete mixin, not a contract of signatures).
-#   - CHECKER: the SHARED AST-equality composition merge (`src/checker/merge.tks` —
-#     functions_ast_equal/fields_ast_equal/consts_ast_equal + MergeDisposition + merge_named_members)
-#     reconciles same-name members (identical AST absorbs the idempotent diamond; a same-signature
-#     different body is a named no-silent-override error; a distinct signature is an overload pending
-#     §9A). `fold_trait_members` flattens each composed trait's EFFECTIVE surface through it, and
-#     `effective_interface_methods` dedups identical methods across extends. `src/checker/trait_compose.tks`
-#     adds transitive cycle-guarded trait-composes-trait flatten, the `self.X` self-containment scan, and
-#     the trait-carries-interface conformance. Trait-is-not-a-type guards: a trait in a constraint,
-#     a type position, a match subject/case, or a value upcast is a named error.
-#   - CODEGEN, in `src/codegen/codegen.tks`: a composed trait is no longer treated as an interface
-#     needing a vtable, and emits no forward fat-pointer typedef (its members are flattened, not
-#     dispatched) — this is what lets a class/service compose a trait.
-#     All corpus-inert: the compiler's own sources declare no trait.
+# WHAT ENTERS (docs/design/plano-self-construction.md, docs/design/mudancas-superficie-0.3.1.md §4.1):
+#   - PARSER, in `src/parser/parse_expr.tks`: a leading `.` followed by `{` in `parse_atom` parses a
+#     `.{ … }` construction as a `StructLit` carrying the ZERO-segment `dot_sentinel_path()` — an
+#     unambiguous marker (every nominal or `self` prefix has >= 1 segment). Parsed UNCONDITIONALLY
+#     (the leading `.` self-delimits, no `allow_struct` gate); the `self { … }` construct STILL parses
+#     (R1 is additive — the removal is R2). Zero new AST field (the `.tkb` layout is unchanged).
+#   - CHECKER, in `src/checker/typer.tks`: `is_dot_sentinel` + `dot_construct_target` resolve a
+#     `.{ … }`'s target from the context's `expected` type (a concrete struct/class, an already-stamped
+#     generic instance, or a generic self-return phantom `Foo__g__T` remapped by the mono pass); no
+#     target ⇒ an honest "needs a known target type" error (`.{ … }` never infers by back-flow). The
+#     canonical name is taken from `expected`, so the emitted `TStructInit` widens into the return/slot
+#     by exact `type_eq` — closing the self-return gap the retired `self { … }` could not. A generic
+#     owner's `-> self` return is now phantom-stamped (`self_return_named`) so a `.{ … }` self-construct
+#     widens into it. `construct_target` gains the `.{ … }` branch alongside `self`/explicit/bare.
+#   - RETURN-TARGET THREADING, in `src/checker/scope.tks` + `typer.tks`: `Env` gains `ret_expected`
+#     (the body's return type, `Void` for a value-less body), set by `type_method`/`type_function` and
+#     read at the two tail slots a `.{ … }` can occupy — a `return .{…}` value and a function's trailing
+#     `.{…}` expression. The read is dot-sentinel-gated, so it is INERT on all existing (dot-free)
+#     source. Arguments route a `.{ … }` through the parameter type (`expr_is_dot_construction`).
+#   - `src/` PRODUCT UNCHANGED: the compiler's own sources still use `self { … }`/`Name { … }`; nothing
+#     in `src/` uses `.{ … }` yet (the sweep + `self { … }` removal is R2). The new codegen path does
+#     not exist — `.{ … }` lowers to the SAME `TStructInit` the nominal/`self` forms produce, so
+#     codegen is untouched and the new parser/checker paths are corpus-inert on this source.
 #
-# ACCEPT fixture (examples/regressions/trait_mixin): flatten + self=host, a static-fn factory
-# flattened through the host, the idempotent diamond, trait-composes-trait, and a trait flattened into
-# a `service`. REJECT fixtures, split by pipeline stage (a fold or signature error is a HARD boundary):
-# examples/regressions/trait_mixin_reject (bodyless method, trait-as-type, undeclared self.X,
-# incompletely-carried interface), trait_type_reject (trait in a match case, trait in a constraint),
-# trait_fold_reject (two composed traits with differing bodies, a host redefining a composed member).
+# ACCEPT fixture (examples/regressions/dot_construction): the seven `.{ … }` slots — a `static fn … :
+# self` trailing value and `return`, an annotated binding, a call argument, a nested field, a generic
+# self-return (phantom per width), and the coexisting NOMINAL `Name { … }` form. REJECT fixture
+# (examples/regressions/dot_construction_reject, EXPECT_COMPILE_FAIL): a `.{ … }` in an un-annotated
+# binding and a `.{ … }` as an `if` scrutinee, each a "needs a known target type" diagnostic.
 #
-# FIXPOINT. The COMMITTED artifact self-reproduces DIRECTLY (the corpus uses no trait form, so the new
-# codegen is inert on this source and even the predecessor seed emits the stable C): compiling
-# bootstrap/teko.c with cc into a compiler and rebuilding the source produced a byte-identical teko.c
-# (sha256 below), and the second and third self-host generations were byte-identical to the first.
+# FIXPOINT. The COMMITTED artifact self-reproduces: cc(bootstrap/teko.c) -> gen0; gen0 builds src ->
+# gen1 (emits teko.c); gen1 -> gen2 -> gen3, and all three emitted teko.c are BYTE-IDENTICAL
+# (sha256 below). The new parser/checker paths are inert on the dot-free compiler source, so even the
+# predecessor seed emits the stable C. A TEKO_MEM_PARANOID=1 build of the same source exits 0
+# (self-reported peak 3630.2 MB — no regression against the pre-R1 3639.1 MB baseline). Every capped
+# build (`ulimit -v 6291456`) peaked ~4.15 GB (tree, incl. cc), well under the 6 GB cap.
 #   cc(bootstrap/teko.c) -> gen;  TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == below.
-# A TEKO_MEM_PARANOID=1 build of the same source exits 0 (peak 3639.1 MB).
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
 # ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  f1d6519263880a5a6166a5eed81de77443117851544e3f875c9937e7cd525bfa
+sha256:  e335871c2dbae247d7bb68f8f19bcfb2e0b1d2b07147131968140e5e1a28f841
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (trait = self-contained concrete mixin
-         flattened into a composer, traits compose traits, AST-equality composition merge, trait-is-not-a-
-         type guards, and the retirement of the compiler-shadow structural traits), byte-identical on
-         rebuild; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the additive `.{ … }` target-typed
+         construction capability of §4.1; `self { … }` still accepted, `src/` product unchanged),
+         byte-identical on rebuild across three generations; no unrecovered legacy artifact underlies it.

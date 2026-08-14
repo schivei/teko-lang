@@ -3284,7 +3284,8 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                 // contract element too (heterogeneous `[]Shape` args), like the binding-annotation path.
                 var is_arr = match dargs[ti].kind { parser::ArrayLit => true; _ => false }
                 var iface_arr_target = is_arr && is_iface_slice(f.params[ti], table)
-                var a = if (is_lam && pt_is_func) || iface_arr_target || arg_wants_expected(dargs[ti], f.params[ti]) {
+                var is_dot_arg = expr_is_dot_construction(dargs[ti])
+                var a = if (is_lam && pt_is_func) || iface_arr_target || is_dot_arg || arg_wants_expected(dargs[ti], f.params[ti]) {
                     match type_value_expected(dargs[ti], f.params[ti], env, table) { TExpr as te => te; error as e => return e }
                 } else {
                     match type_expr(dargs[ti], env, table) { TExpr as te => te; error as e => return e }
@@ -4300,6 +4301,111 @@ fn is_self_sentinel(path: parser::Path): bool {
 }
 
 /**
+ * is_dot_sentinel — is `path` the `.{ … }` target-typed construction sentinel (§4.1)? The parser emits
+ * a ZERO-segment path for `.{ … }`; every nominal or `self` prefix carries at least one segment, so an
+ * empty segment list is an unambiguous marker the checker resolves against the CONTEXT's expected type.
+ *
+ * @param path  the construction literal's `type_path`
+ * @return      true iff `path` is the `.{ … }` (empty) sentinel
+ * @since §4.1
+ */
+fn is_dot_sentinel(path: parser::Path): bool {
+    path.segments.len == 0
+}
+
+/**
+ * dot_no_target_error — the §4.1 "no target type" diagnostic for a `.{ … }` used where the context
+ * supplies no single constructible named type (a bare `var x = .{…}`, a scrutinee, a non-Named or
+ * union expectation). `.{ … }` never infers by back-flow — the target comes ONLY from the immediate
+ * slot — so this fires the moment the resolved `expected` is not a single Named struct/class.
+ *
+ * @return  the located no-target error
+ * @since §4.1
+ */
+fn dot_no_target_error(): error {
+    error { message = "`.{ … }` needs a known target type here — annotate the binding/return or write the type explicitly (`Name { … }`)" }
+}
+
+/**
+ * dot_construct_target — resolve a `.{ … }` construction (§4.1) to its ConstructTarget from the
+ * CONTEXT's `expected` type. The node is stamped with `expected`'s CANONICAL name (the same name the
+ * return/slot already carries), so the emitted `TStructInit` widens into the target by exact `type_eq`
+ * — this is what closes the self-return gap the retired `self { … }` construct could not. Three shapes
+ * of `expected` are constructible: a concrete non-generic struct/class (its own decl types the fields);
+ * an already-stamped generic instance `Foo__g__i64` (arity-0, found directly); and a generic-INSTANCE
+ * spelling `Foo__g__T` (a phantom carrying an in-scope type-param — e.g. a generic self-return
+ * `-> List<T>`), whose ABSTRACT template (found by stem) types the fields and which the mono pass
+ * remaps. A bare generic BASE (arity > 0) is constructible ONLY as the ENCLOSING generic owner's
+ * `self` return — phantom-stamped as `self { … }` was, so the mono pass remaps it with the concrete
+ * instance; any OTHER bare generic base, or any non-Named/union `expected`, has no single target — an
+ * honest no-target error.
+ *
+ * @param expected  the flow-target type resolved from the immediate slot (return / binding / arg / field)
+ * @param env       the typing environment (its `owner_type` decides the `is_self` gate)
+ * @param table     the folded type table
+ * @return          the resolved construction target, or the located no-target error
+ * @since §4.1
+ */
+fn dot_construct_target(expected: Type, env: Env, table: TypeTable): ConstructTarget | error {
+    var en = match expected { Named as n => n; _ => return dot_no_target_error() }
+    match type_table_find(table, en.name, "") {
+        parser::TypeDecl as td => {
+            if td.type_params.len > 0 {
+                if !dot_targets_owner(en.name, env) { return dot_no_target_error() }
+                var phantom = self_inst_spelling(name_last_segment(en.name), td.type_params)
+                return ConstructTarget { name = phantom; decl = td; is_self = true }
+            }
+            ConstructTarget { name = en.name; decl = td; is_self = dot_targets_owner(en.name, env) }
+        }
+        error => {
+            if !name_is_g_instance(en.name) { return dot_no_target_error() }
+            var stem = split_generic_instance_name(en.name).stem
+            var tmpl = match type_table_find(table, stem, "") { parser::TypeDecl as t => t; error => return dot_no_target_error() }
+            ConstructTarget { name = en.name; decl = tmpl; is_self = dot_targets_owner(en.name, env) }
+        }
+    }
+}
+
+/**
+ * dot_targets_owner — does a `.{ … }`'s resolved target name the ENCLOSING type (so its class-literal
+ * owner gate is bypassed, exactly as a `self`-construction was)? True when there is an owner and the
+ * target's base (the generic stem, or the last nominal segment) equals the owner's base. For a struct
+ * the gate is never reached, so this only matters for a class self-factory; a `.{ … }` targeting a
+ * DIFFERENT class than the owner stays gated.
+ *
+ * @param name  the target type's canonical name
+ * @param env   the typing environment (its `owner_type` names the enclosing type)
+ * @return      true iff `name` is (an instance of) the enclosing owner type
+ * @since §4.1
+ */
+fn dot_targets_owner(name: str, env: Env): bool {
+    if env.owner_type == "" { return false }
+    named_case_name(name) == named_case_name(env.owner_type)
+}
+
+/**
+ * self_return_named — the canonical Named type a `-> self` return resolves to (§4.1): the enclosing
+ * type's canonical name, PHANTOM-stamped (`Cell__g__T`) when the owner is generic so it matches the
+ * `Cell__g__T` a `.{ … }` self-construction stamps, letting the mono pass remap the return and the
+ * construction together. A non-generic owner keeps its plain canonical name (byte-identical to the
+ * previous `qualify(ns, name)`). This closes the generic-owner half of the self-return gap: a generic
+ * `-> self` previously returned the BARE base, which no construction of the owner could widen into.
+ *
+ * @param struct_name  the enclosing type's bare name (`td.name`)
+ * @param cur_ns       the enclosing namespace
+ * @param table        the folded type table
+ * @return             the canonical (phantom for a generic owner) self-return type
+ * @since §4.1
+ */
+fn self_return_named(struct_name: str, cur_ns: str, table: TypeTable): Type {
+    var canon = qualify(cur_ns, struct_name)
+    match type_table_find(table, canon, "") {
+        parser::TypeDecl as td => if td.type_params.len == 0 { Named { name = canon } } else { Named { name = self_inst_spelling(name_last_segment(canon), td.type_params) } }
+        error => Named { name = canon }
+    }
+}
+
+/**
  * is_error_literal_prefix — does `sl` construct the one builtin constructible type, `error { message
  * = <str> }` (B.1)? A bare single-segment `error` with no explicit type-arguments; `error` is a
  * reserved builtin name no user type can shadow, so the syntactic test matches `builtin_type`.
@@ -4419,19 +4525,22 @@ fn bare_construct_target(sl: parser::StructLit, env: Env, table: TypeTable): Con
 }
 
 /**
- * construct_target — dispatch a construction literal's PREFIX (§9 B, ruling 4) to its resolved
- * ConstructTarget: `self { … }`, `Foo<A..> { … }`, or bare `Foo { … }`. The prefix ALWAYS decides the
- * arity — there is no nameless `{ … }` construction and a bare prefix never borrows arity from the
- * flow target.
+ * construct_target — dispatch a construction literal's PREFIX (§9 B / §4.1) to its resolved
+ * ConstructTarget: `.{ … }` (target-typed — resolved from `expected`), `self { … }`, `Foo<A..> { … }`,
+ * or bare `Foo { … }`. Every prefix but `.{ … }` decides its OWN arity — there is no nameless `{ … }`
+ * construction and a bare prefix never borrows arity from the flow target; only `.{ … }` reads the
+ * target from `expected` (and errors when the context supplies none).
  *
  * @param sl        the construction literal
- * @param expected  the flow-target type (used only to check agreement with an explicit instance)
+ * @param expected  the flow-target type: the whole target for `.{ … }`, else only an explicit-instance
+ *                  agreement check
  * @param env       the typing environment
  * @param table     the folded type table
  * @return          the resolved construction target, or a located error
- * @since §9 B
+ * @since §9 B (§4.1 adds the `.{ … }` sentinel)
  */
 fn construct_target(sl: parser::StructLit, expected: Type, env: Env, table: TypeTable): ConstructTarget | error {
+    if is_dot_sentinel(sl.type_path) { return dot_construct_target(expected, env, table) }
     if is_self_sentinel(sl.type_path) { return self_construct_target(env, table) }
     if sl.type_args.len > 0 { return explicit_inst_target(sl, expected, env, table) }
     bare_construct_target(sl, env, table)
@@ -5394,6 +5503,11 @@ fn type_block(stmts: []parser::Statement, env: Env, table: TypeTable): TypedBloc
         if i + 1 == stmts.len {
             match stmts[i] {
                 ExprStmt as es => {
+                    if expr_is_dot_construction(es.expr) && !type_is_void(cur.ret_expected) {
+                        var te = match type_dot_tail(es.expr, cur, table) { TExpr as x => x; error as e => return e }
+                        out = teko::mem::push_fo(out, TExprStmt { expr = te })
+                        handled = true
+                    }
                     match es.expr.kind {
                         IfExpr as f => {
                             if f.has_else {
@@ -6246,9 +6360,45 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt | error
     TypedStmt { node = TAssign { kind = parser::AssignKind::Simple; name = a.name; op = a.op; bound = tb.type; value = adopt_sentinel_slice_type(coerced, tb.type); deref = false; target = no_texpr() }; env = env }
 }
 
+/**
+ * expr_is_dot_construction — is `e` a `.{ … }` target-typed construction (§4.1)? True for a StructLit
+ * whose `type_path` is the empty dot-sentinel — the only expression shape that needs a target type
+ * threaded from its slot instead of resolving on its own.
+ *
+ * @param e  the parsed expression
+ * @return   true iff `e` is a `.{ … }` construction
+ * @since §4.1
+ */
+fn expr_is_dot_construction(e: parser::Expr): bool {
+    match e.kind { parser::StructLit as sl => is_dot_sentinel(sl.type_path); _ => false }
+}
+
+/**
+ * type_dot_tail — type a `.{ … }` construction that sits in a tail slot (a `return .{…}` value or a
+ * function's trailing `.{…}` expression) against `env.ret_expected` (§4.1), restamping the source
+ * position onto the emitted node the way `type_expr` does. The caller has already checked
+ * `expr_is_dot_construction(e)` and that `env.ret_expected` is not `Void`.
+ *
+ * @param e      the `.{ … }` construction expression
+ * @param env    the typing environment (its `ret_expected` is the construction's target)
+ * @param table  the folded type table
+ * @return       the typed construction node, or a located error (no-target when the slot is untyped)
+ * @since §4.1
+ */
+fn type_dot_tail(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
+    match type_value_expected(e, env.ret_expected, env, table) {
+        TExpr as te => TExpr { kind = te.kind; type = te.type; line = e.line; col = e.col }
+        error as inner => if inner.line == 0 { teko::error::err_loc(inner, e.line, e.col) } else { inner }
+    }
+}
+
 fn type_return(r: parser::Return, env: Env, table: TypeTable): TypedStmt | error {
     if r.has_value && expr_is_svc_claim(r.value) { return svc_escape_error() }
-    var v = match type_expr(r.value, env, table) { TExpr as te => te; error as e => return e }
+    var v = if r.has_value && expr_is_dot_construction(r.value) && !type_is_void(env.ret_expected) {
+        match type_dot_tail(r.value, env, table) { TExpr as te => te; error as e => return e }
+    } else {
+        match type_expr(r.value, env, table) { TExpr as te => te; error as e => return e }
+    }
     TypedStmt { node = TReturn { has_value = r.has_value; value = v; values = teko::list::empty() }; env = env }   // value gated by has_value (B.20); the return-type match is enforced by type_function's check_returns (C5)
 }
 
@@ -7995,7 +8145,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     // under the fixed name `base`. It is now the SOLE path to super (the named binding was retired).
     if inject_base { local = define(local, "base", canonical_base_type(base_name, env.cur_ns), true) }
     var ret = if f.has_return && return_type_is_self(f.return_type) {
-        Named { name = qualify(env.cur_ns, struct_name) }
+        self_return_named(struct_name, env.cur_ns, table)
     } else {
         match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }
     }
@@ -8013,7 +8163,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
-    var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
+    var tb = match type_block(f.body, with_ret_expected(local, ret), tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }
     match reject_ref_return(ret) { null => { }; error as e => return e }   // §3: ref-return retired
@@ -8328,7 +8478,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
         return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
-    var tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
+    var tb = match type_block(f.body, with_ret_expected(local, ret), tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: each `return e` matches `ret`
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: trailing value (when present) matches
     match reject_ref_return(ret) { null => { }; error as e => return e }   // §3: ref-return retired

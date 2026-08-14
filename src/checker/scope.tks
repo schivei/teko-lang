@@ -69,7 +69,14 @@ type ValBinding = struct {
  *  only turns `lookup_binding`'s global scan from a reverse O(n) linear scan into an O(log n + c)
  *  binary search that returns the SAME binding (design section 5). `nidx_empty()` before `seal`, where
  *  a lookup finds nothing and falls through as before. */
-pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; file: str; base_index: NameIndex }
+/** `ret_expected` (§4.1) — the RETURN target type of the function/method body CURRENTLY being typed
+ *  (`Void` outside any value-returning body, e.g. a `void` function or a top-level statement). Set once
+ *  per body by `type_method`/`type_function` from the computed return type, and read at the two tail
+ *  positions a `.{ … }` target-typed construction can occupy: a `return .{…}` value and a function's
+ *  trailing `.{…}` expression. `.{ … }` never reads it in a non-tail slot (a bare `.{}` in expression
+ *  position resolves against `Void` and honestly errors), so it is the same per-body fact as
+ *  `owner_type`/`cur_ns`, carried without threading a parameter through every expression typer. */
+pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; file: str; base_index: NameIndex; ret_expected: Type }
 
 /**
  * env_empty — an empty environment: no bindings, no current namespace, not inside any class method,
@@ -77,7 +84,7 @@ pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns
  *
  * @return a fresh empty Env
  */
-pub fn env_empty(): Env { Env { base_slots = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; file = ""; base_index = nidx_empty() } }
+pub fn env_empty(): Env { Env { base_slots = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; file = ""; base_index = nidx_empty(); ret_expected = Void { } } }
 
 /**
  * seal — move the accumulated bindings into the immutable `base` segment and build the lateral
@@ -95,7 +102,7 @@ pub fn seal(env: Env): Env {
     var b = env.base_slots
     var i: u64 = 0
     loop { if i >= env.bindings.len { break }; b = teko::list::push(b, env.bindings[i]); i++ }
-    Env { base_slots = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = nidx_build(nidx_names_of(b)) }
+    Env { base_slots = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = nidx_build(nidx_names_of(b)); ret_expected = env.ret_expected }
 }
 
 /**
@@ -107,7 +114,7 @@ pub fn seal(env: Env): Env {
  * @return     `env` with `cur_ns` set to `ns`
  * @since #41
  */
-pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index } }
+pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected } }
 
 /**
  * with_file — set the source file of the item about to be typed. The twin of `with_ns`, set
@@ -120,7 +127,7 @@ pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bind
  * @return      `env` with `file` set
  * @since       0.3.1
  */
-pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; file = file; base_index = env.base_index } }
+pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; file = file; base_index = env.base_index; ret_expected = env.ret_expected } }
 
 /**
  * with_owner — set the DECLARING class of the method body about to be typed; "" clears it (used when
@@ -131,7 +138,21 @@ pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; 
  * @return       `env` with `owner_type` set to `owner`
  * @since W10b.CLASS
  */
-pub fn with_owner(env: Env, owner: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; file = env.file; base_index = env.base_index } }
+pub fn with_owner(env: Env, owner: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected } }
+
+/**
+ * with_ret_expected — set the RETURN target type of the function/method body about to be typed (§4.1),
+ * the twin of `with_owner`/`with_ns`. Read only at the tail positions a `.{ … }` target-typed
+ * construction can occupy (a `return .{…}` value and a trailing `.{…}` expression); `Void` means the
+ * body returns no value, so a `.{ … }` in it has no target and honestly errors. Carries `base_index`
+ * unchanged (only `ret_expected` moves).
+ *
+ * @param env  the environment to derive from
+ * @param t    the body's resolved return type, or `Void` for a value-less body
+ * @return     `env` with `ret_expected` set to `t`
+ * @since §4.1
+ */
+pub fn with_ret_expected(env: Env, t: Type): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = t } }
 
 /**
  * binding_is_writable — the SINGLE decision point for "may this binding be written through?"
@@ -165,7 +186,7 @@ fn binding_is_writable(t: Type, is_mut: bool): bool {
  * @return        `env` extended with the new local binding
  */
 pub fn define(env: Env, name: str, t: Type, is_mut: bool): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
 }
 
 /**
@@ -181,7 +202,7 @@ pub fn define(env: Env, name: str, t: Type, is_mut: bool): Env {
  * @since #41
  */
 pub fn define_fn(env: Env, name: str, t: Type, ns: str): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
 }
 
 /**
@@ -200,7 +221,7 @@ pub fn define_fn(env: Env, name: str, t: Type, ns: str): Env {
  * @since #594
  */
 pub fn define_const(env: Env, name: str, t: Type, ns: str, vis: parser::Visibility): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
 }
 
 // a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
