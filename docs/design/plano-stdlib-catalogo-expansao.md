@@ -410,6 +410,34 @@ os FECHADOS/proprietários o dev implementa** (a stdlib dá as primitivas) — r
 | S-BSON | `teko::encoding::bson` | MongoDB document codec | none | **pure**; gates DB-MONGO | **P3** |
 | S-MIME | form-urlencoded · multipart · base64-MIME | (ride with N5) | S base64 (✅) | **pure** | **P2** |
 
+**Marcação de conversão nativo↔serializável — tags de crase, COMPTIME, zero-reflection em runtime (ruling do
+dono).** Campos ganham uma **tag de crase** estilo Go (a crase **está livre** na sintaxe), namespaced por
+formato — **não é anotação** (Java/C#), é uma spec de marcação lida em **comptime**:
+```teko
+exp type User = struct {
+    id:      u64          `json:"id" xml:"@id"`          // @ = atributo XML
+    name:    str          `json:"name"`
+    email:   str | null   `json:"email,omitempty"`       // nullable = o TIPO diz
+    tags:    []str        `json:"tags"`
+    extra:   Json         `json:",catchall"`             // catch-all dos campos extras
+}
+```
+- **Comptime sabe, runtime não (Lei M.0 — zero reflection).** `encoding::{json,xml,csv}::encode<T>`/`decode<T>`
+  é `comptime`-driven (§14.2): percorre campos+tags de `T` no compile-time e **emite acesso direto** — em
+  runtime só há leituras geradas, **nenhuma reflexão**. **Enabler (capacidade nova):** uma **reflexão-de-campos
+  em comptime** (iterar campo → nome/tipo/tag/visibilidade); hoje não existe (Teko é zero-reflection).
+- **Nullability vem do TIPO do campo — não de schema nem de atributo (ruling do dono).** `T | null` (§9.D
+  union-com-null) = nulável; `T` = obrigatório não-nulo. **O tipo É o schema.** O comptime lê:
+  - **encode:** `T|null` nulo → `null` (JSON) por default, ou **omitido** com `omitempty`; XML → ausência do
+    elemento/atributo ou `xsi:nil`.
+  - **decode:** campo `T` (obrigatório) ausente/`null` no JSON → **erro de decode**; campo `T|null` → aceita
+    ausente/null.
+- **XML é mais simples** (nullability = presença de elemento/atributo + `xsi:nil`). **JSON sem schema** resolve
+  pelo próprio `T | null` — não precisa de schema externo.
+- **Catch-all** para os campos extras/dinâmicos do JSON: um campo marcado `json:",catchall"` captura o resto —
+  valores como **`str | null`** (stringly) ou um **`Json`** value (tipado). Cada formato dono da sua
+  mini-gramática de tag (`omitempty`, `@attr`/namespace no XML, coluna/ordem no CSV), como no Go.
+
 ---
 
 ### E. Compression — `teko::compress::*` (extend the existing module)
