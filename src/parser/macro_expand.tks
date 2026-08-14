@@ -803,38 +803,107 @@ fn walk_pattern(p: Pattern, prog: Program, depth: u64): Pattern | error {
             BindPattern { type_name = bp.type_name; has_binding = bp.has_binding; binding = bp.binding; is_slice = bp.is_slice; slice_type = st; type_args = ta }
         }
         AltPattern as ap => {
-            var opts = match walk_patterns(ap.options, prog, depth) { []Pattern as x => x; error as e => return e }
+            var opts = match walk_group_options(ap.options, prog, depth) { []Pattern as x => x; error as e => return e }
             AltPattern { options = opts }
         }
         GroupBindPattern as gp => {
-            var opts = match walk_patterns(gp.options, prog, depth) { []Pattern as x => x; error as e => return e }
+            var opts = match walk_group_options(gp.options, prog, depth) { []Pattern as x => x; error as e => return e }
             GroupBindPattern { options = opts; binding = gp.binding }
+        }
+        MacroPattern as mp => {
+            var opts = match macro_pattern_options(mp, prog, depth) { []Pattern as x => x; error as e => return e }
+            if opts.len == 1 { opts[0] } else { AltPattern { options = opts } }
         }
         _ => p
     }
 }
 
 /**
- * walk_patterns — expand type macros across a pattern LIST (an alternation's / grouped bind's options),
- * preserving order (§14 A4).
+ * walk_group_options — expand type macros across a grouped-bind / alternation option LIST, SPLICING any
+ * `@Type()` option (§9.D CR3) into the union cases it names. An ordinary option is walked in place
+ * (`walk_pattern`); a `MacroPattern` option `(@ns::Union())` is replaced by the bare `BindPattern` for
+ * EACH of its expanded union members, in source order. This is the pattern-side twin of a `@Type()`
+ * splicing into a union's members in type position — it is what lets `(@X()) as v` bind the whole nested
+ * union member after `type X = variant …` retires to `@X()`.
  *
- * @param ps     the patterns to rewrite
+ * @param ps     the option patterns (a group's or an alternation's)
  * @param prog   the program (macro lookup surface)
  * @param depth  the current expansion depth
- * @return       the rewritten patterns, or an error
- * @throws       when an inner type-macro expansion fails
- * @since        §9.D sweep (Family-A type-macro completeness — pattern type positions)
+ * @return       the options with every `@Type()` spliced to its cases, or an error
+ * @throws       when an inner type-macro expansion fails or does not yield named cases
+ * @since        §9.D CR3
  */
-fn walk_patterns(ps: []Pattern, prog: Program, depth: u64): []Pattern | error {
+fn walk_group_options(ps: []Pattern, prog: Program, depth: u64): []Pattern | error {
     var out: []Pattern = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= ps.len { break }
-        var np = match walk_pattern(ps[i], prog, depth) { Pattern as x => x; error as e => return e }
-        out = teko::list::push(out, np)
+        match ps[i] {
+            MacroPattern as mp => {
+                var cases = match macro_pattern_options(mp, prog, depth) { []Pattern as c => c; error as e => return e }
+                var j: u64 = 0
+                loop {
+                    if j >= cases.len { break }
+                    out = teko::list::push(out, cases[j])
+                    j++
+                }
+            }
+            _ => {
+                var np = match walk_pattern(ps[i], prog, depth) { Pattern as x => x; error as e => return e }
+                out = teko::list::push(out, np)
+            }
+        }
         i++
     }
     out
+}
+
+/**
+ * macro_pattern_options — expand a pattern-position `@Type()` (§9.D CR3) into the bare `BindPattern` option
+ * for each of its union cases. The macro node is expanded exactly as a type position (`walk_type`), yielding a
+ * union `A | B | …` (or a lone `A`); each member — which must be a named case — becomes a bindingless
+ * `BindPattern` carrying that case's path and any generic args. A member that is not a named type is a
+ * located error (a pattern-position `@Type()` must name a union of cases).
+ *
+ * @param mp     the pattern-position macro node
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the union cases as bare `BindPattern` options, or a located error
+ * @throws       when the macro does not expand to a union of named cases
+ * @since        §9.D CR3
+ */
+fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []Pattern | error {
+    var te = match walk_type(mp.macro_call, prog, depth) { TypeExpr as t => t; error as e => return e }
+    append_case_options(te, teko::list::empty())
+}
+
+/**
+ * append_case_options — collect the bare-case `BindPattern` options of an expanded type-macro union onto
+ * `acc` (§9.D CR3): a `NamedType` yields one bindingless `BindPattern`; a `UnionType` recurses over its
+ * members, preserving source order; any other shape is a located error. Kept nested-union-tolerant so a
+ * `@X()` that expands to a union whose members are themselves named cases resolves fully.
+ *
+ * @param te   the expanded type-expression (a union, or a lone named case)
+ * @param acc  the options collected so far
+ * @return     `acc` extended with this type's case options, or a located error
+ * @throws     when a member is not a named case
+ * @since      §9.D CR3
+ */
+fn append_case_options(te: TypeExpr, acc: []Pattern): []Pattern | error {
+    match te {
+        NamedType as nt => teko::list::push(acc, BindPattern { type_name = nt.path; has_binding = false; binding = ""; is_slice = false; slice_type = null; type_args = nt.args })
+        UnionType as ut => {
+            var out = acc
+            var i: u64 = 0
+            loop {
+                if i >= ut.members.len { break }
+                out = match append_case_options(ut.members[i], out) { []Pattern as x => x; error as e => return e }
+                i++
+            }
+            out
+        }
+        _ => error { message = "a `@Type()` macro in a pattern position must expand to a union of named cases (§9.D CR3)" }
+    }
 }
 
 /**
