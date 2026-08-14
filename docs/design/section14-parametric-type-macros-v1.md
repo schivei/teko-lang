@@ -1,131 +1,119 @@
-# §14 — Parametric type-macros / comptime-computed types (design v1)
+# §14 — Parametric type-macros (comptime `if`-select), design v1
 
 > **Status:** DESIGN. PASSO A of the owner's ruling: this document + the crumb-plan are the artefact to
 > REVIEW before any build. No `.tks` edited, no build, no reseed until the owner approves. Companion:
 > `section14-macro-comptime-impl-v1.md` (A0–A4 / B1–B5, the engine this extends),
 > `plano-9d-capabilities-crumbs-r1.md` (the §9.D sweep that consumes this feature).
+>
+> **Scope (owner-reduced):** NO loops, NO `text::join`, NO general `${string}`→type. The feature is
+> exactly **type-macro parameters + a comptime `if` over the bool param**.
 
 ## 1. Goal
 
-Let a Family-A **type-macro** compute its lowered type from **parameters** and **compile-time body logic**,
-then splice a **computed string** as the lowered `TypeExpr`. The driving consumer is the §9.D sweep's
-remaining 14 variants (all cross-namespace, incl. the 6 roots), authored as:
+Let a Family-A **type-macro** take a bool parameter and select its lowered type with a compile-time
+`if`, so the §9.D sweep's remaining 14 cross-namespace variants (incl. the 6 roots) are authored as:
 
 ```teko
 /** Type — the checker's resolved-type union (§9.D sweep). */
 macro Type(local: bool = false) {
-    var q = if local { "" } else { "checker::" }
-    var out = ""
-    var i = 0
-    loop {
-        if i >= members.len { break }
-        if i > 0 { out = teko::str::concat(out, " | ") }
-        out = teko::str::concat(out, teko::str::concat(q, members[i]))
-        i++
-    }
-    lowering { ${out} }
+    if local { lowering { Named | Prim | Slice } }
+    else     { lowering { checker::Named | checker::Prim | checker::Slice } }
 }
 ```
 
-so a root union of N members is written ONCE as a bare member list, prefixed with its home namespace by
-default (`if !local` ⇒ qualified `checker::Named | checker::Prim | …`, which the checker
-self-qualification fix, `check_named`, resolves at BOTH same- and cross-namespace use sites). `@Type()`
-yields the qualified union; `@Type(true)` yields the bare union (an escape hatch for a same-file spot that
-must be bare). The three engine gaps this closes are exactly the three "later crumb" TODOs already named in
-the code (`single_lowering_frag`, `frag_has_hole`, `expand_macro_type`).
+`@Type()` ⇒ `local=false` ⇒ the `else` branch ⇒ the **qualified** union
+`checker::Named | checker::Prim | checker::Slice`, which the checker self-qualification fix (`check_named`)
+resolves at BOTH same- and cross-namespace use sites. `@Type(true)` ⇒ the bare union (escape hatch for a
+rare same-file bare spot). Semantics: `if !local` ⇒ default qualified, cross-ns-safe at every site — no
+self-`use` anywhere.
 
-## 2. The load-bearing decision: WHERE the body evaluates (phase tension)
+## 2. Form chosen: Form 2 (comptime `if`-select), and why (least engine delta)
 
-- Family-A `@Type()` expansion is a **PRE-type-check syntactic pass**: `expand_macros_syntactic`
-  (`src/parser/macro_expand.tks`) rewrites the **untyped** `parser::Program` in `frontend_check` BEFORE
-  `checked_program_of`. It has NO `TypeTable` and NO typed AST.
-- Family-B's `eval_const` (`src/checker/comptime_fold.tks`) is **POST-check**: it evaluates a **typed**
-  `TExpr` against a `TypeTable` into a `ConstValue`. B3's own bodies do not yet execute locals/loops
-  (`cx_body_value` handles a single value expression only — "a comptime with locals or control flow is a
-  later crumb").
+The owner offered two forms; **Form 2 is the smaller engine delta**:
 
-**Therefore the type-macro body cannot call `eval_const` directly** — it must be evaluated by a
-syntactic-phase interpreter over **untyped** `parser::Statement`/`parser::Expr`, in a **restricted value
-domain**. "Reuse the B3 engine" is thus *partial*, and this is the decision to confirm:
+| | Form 1 (`var ns = if … ; lowering { ${ns}B }`) | **Form 2 (`if local { lowering{…} } else { lowering{…} }`)** |
+|---|---|---|
+| params | yes | yes |
+| comptime eval | a `var` bound to an `if`-expr yielding a **string** | just a bool **condition** (`local` / `!local`) |
+| splice | `${string}` glued as a name **prefix** → re-lex/re-parse | **none** — branches are LITERAL `lowering{}` blocks |
+| lexer reentrancy | yes (tokenize the prefix string, glue to ident) | **no** |
+| authoring | members written 1× | members written 2× (bare + qualified) |
 
-- **NEW (unavoidable):** the DRIVER — executing a statement sequence (`var`/`if`/`loop`) over the untyped
-  AST with a small value environment. Call it `macro_eval` (new, in `src/parser/`, pre-check).
-- **SHARED with B3 (recommended):** the VALUE PRIMITIVES — integer arithmetic, string concat, comparison,
-  boolean logic. `eval_const`'s `ConstValue`-level operator cases can be factored into a phase-agnostic
-  helper set (operating on a plain value union, no `TypeTable`) that BOTH `eval_const` (wrapping its
-  `ConstValue`) and `macro_eval` call, so the two evaluators never drift on `1+1` or `concat`.
-  Alternatively `macro_eval` mirrors them (smaller diff, risk of drift). **Recommendation: factor the
-  shared core** — but this is an owner call (it touches B3's internals). The restricted domain is small:
-  `bool`, `i64`, `str`, `[]str` — no floats, no structs, no user calls beyond a pure whitelist.
+Form 2 needs **no string values, no `${}` substitution, and no re-lexing** — only (1) type-macro params
+and (2) relaxing "the body is exactly one `lowering{}`" to "the body is one `lowering{}` **or** one
+comptime `if/else` whose branches are `lowering{}` blocks", picking the branch by the bool condition. The
+2× authoring cost is the trade for the far smaller motor. **Recommendation: Form 2.**
 
-The value domain is deliberately minimal: enough for "prefix a member list and join with ` | `", not a
-general comptime language. Everything outside the whitelist is a located "not yet supported in a
-type-macro body" error.
+No B3 needed: the condition's only free name is a bool param bound to a bool literal, so a ~10-line
+bool-expr reader (BoolLit / param `Var` / unary `!`) evaluates it — `eval_const` (typed, post-check) is
+neither reachable in this pre-check phase nor required here.
 
-## 3. Crumb sequence (each additive + INERT + fixpoint gen1==gen2==gen3)
+## 3. Crumb sequence (each additive + INERT + fixpoint gen1==gen2==gen3, guarded)
 
 **PT1 — Typed, defaulted macro parameters.**
-- `parse_macro_params` (`src/parser/parse_decl.tks`) today forces every macro param untyped, no default.
-  Extend it to accept an OPTIONAL `: <type>` and `= <default-expr>` (`has_type`/`type_ann`,
-  `has_default`/`default_expr` already exist on `Param`); a bare untyped param stays legal (value macros).
-- `expand_macro_type` (`src/parser/macro_expand.tks`) today ignores `mt.args`. Bind each param → value:
-  the call's positional `mt.args[i]` when present, else the param's `default_expr`; evaluate via
-  `macro_eval`'s arg evaluator (restricted literals: `true`/`false`, int, str). Produces the initial value
-  env.
+- `parse_macro_params` (`src/parser/parse_decl.tks`) forces every macro param untyped, no default. Extend
+  it to accept an OPTIONAL `: <type>` and `= <default-expr>` (the `Param` fields `has_type`/`type_ann`,
+  `has_default`/`default_expr` already exist); a bare untyped param stays legal (value macros unaffected).
+- `expand_macro_type` (`src/parser/macro_expand.tks`) ignores `mt.args` today. Bind the (single, bool)
+  param → the call's `mt.args[0]` when present, else the param's `default_expr`. The bound value is a
+  `BoolLit` node; no evaluation beyond reading the literal.
 - INERT: no `src/` type-macro declares a param yet.
 
-**PT2 — Comptime body execution.**
-- Replace `single_lowering_frag` with `split_macro_body`: a body = zero-or-more leading `Statement`s + one
-  trailing `LoweringFrag`. A value macro (expr position) keeps the "exactly one lowering" rule; only the
-  TYPE-position path gains leading statements.
-- Add `macro_eval(stmts, env) -> ValueEnv | error`: execute `var` bindings, `if`, and bounded `loop`
-  (guarded by `max_macro_depth`-style iteration cap to forbid non-termination), evaluating expressions in
-  the restricted domain (str/bool/i64/[]str; `teko::str::concat`, array literal/index/`.len`, comparisons,
-  bool ops). Starts from PT1's param env, returns the final env.
-- INERT: no `src/` macro has a non-`lowering` body statement yet.
+**PT2 — Comptime `if`-select over lowering blocks.**
+- Replace `single_lowering_frag(md)` with `select_lowering_frag(md, param_binds)`:
+  - body `[LoweringFrag]` → that frag (today's behaviour, unchanged).
+  - body `[<if-statement>]` → read the condition with `macro_cond_bool(cond, param_binds)` (BoolLit /
+    param `Var` / unary `!`; anything else is a located "a type-macro `if` condition must be a bool
+    parameter or its negation" error), then recurse into the chosen branch's statement list and select ITS
+    `LoweringFrag`. (Guarded by a small nesting cap; the branch must itself resolve to exactly one
+    lowering.)
+- `frag_has_hole` / the `${}` rejection in `expand_macro_type` is UNCHANGED — Form 2 introduces no holes.
+- INERT: no `src/` macro body is an `if` yet.
 
-**PT3 — `${name}` → type splice.**
-- In `expand_macro_type`, drop the `frag_has_hole` rejection for the value-env case: for each `${name}` in
-  the lowering tokens, look up `name` in the PT2 value env, require a `str` value, `lexer::tokenize` its
-  content to tokens, splice them in place of `${name}`, then `parse_type` the fragment (reentrant, as the
-  path already does) and `walk_type` the result (recursion-safe, depth-guarded). A `${name}` naming no
-  env value, or a non-`str` value, is a located error.
-- INERT: no `src/` type-macro uses `${}` yet.
-
-**PT4 — RESEED (inert).** Re-harvest `bootstrap/teko.c` while PT1–PT3 are inert, via the SAME C-route
+**PT3 — RESEED (inert).** Re-harvest `bootstrap/teko.c` while PT1–PT2 are inert, via the SAME C-route
 self-reproduction just proven (cc the emitted teko.c → rebuild → byte-identical; native gen1==gen2==gen3;
-provenance gate). This is done BEFORE any parametric use enters `src/`, so CI's C lane always has a capable
-seed — the exact lesson from the §14 reseed that motivated this doc.
+`provenance_gate.sh` PASS). Done BEFORE any parametric use enters `src/`, so CI's C lane always has a
+capable seed — the exact lesson from the §14 reseed that motivated this feature.
 
-**PT5+ — Author the roots + finish the sweep.** Only now rewrite the 14 remaining variants as parametric
-macros (`if !local`, default qualified). Complete 15/32 → 32/32, one root per fixpointed increment
-(leaves→roots). Attempt `Decl` (#3): `Parsed<@Decl()>` = a generic over an inline union — if the union
+**PT4+ — Author the roots + finish the sweep.** Only now rewrite the 14 remaining variants as `if !local`
+macros (bare branch + qualified `else`). Complete 15/32 → 32/32, one root per fixpointed increment
+(leaves→roots). Attempt `Decl` (#3): `Parsed<@Decl()>` is a generic over an inline union — if the union
 type-arg mangle surfaces the `cg_opt_mangle_texpr` buffer-twin gap, fix it in scope (mirror the `_str`
 twin, `SliceType`+`UnionType`); if the monomorph/byte-agreement shape genuinely breaks, revert and report.
 
-## 4. `if !local` semantics (default cross-ns-safe)
+## 4. Signatures added / touched (Form 2)
 
-`local` defaults to `false` ⇒ the body prefixes each member with its home namespace (`checker::`,
-`parser::`, …). Qualified members resolve everywhere (the `check_named` self-qualification fix), so the
-DEFAULT is always correct at any use site — the author never thinks about it. `@X(true)` drops the prefix
-for the rare same-file position that needs bare members. No use site ever needs a self-`use`.
+- `parse_macro_params` (extend): parse optional `: <type>` and `= <default>` per param.
+- `fn macro_cond_bool(cond: parser::Expr, binds: MacroParamBinds): bool | error` — new, in
+  `src/parser/macro_expand.tks`: evaluate a type-macro `if` condition (BoolLit / bool-param `Var` /
+  unary `!`).
+- `type MacroParamBinds = struct { names: []str; vals: []bool }` — new: the bound bool params for one
+  expansion (A4's type macros are parameterless today, so this starts empty and stays empty until PT4).
+- `fn select_lowering_frag(md: MacroDecl, binds: MacroParamBinds): LoweringFrag | error` — replaces
+  `single_lowering_frag`; the `[LoweringFrag]` path is byte-identical to today.
+- `expand_macro_type` (touch): build `MacroParamBinds` from `mt.args`/defaults, call
+  `select_lowering_frag`. The value-macro path (`expand_macro_call`) is untouched.
 
-## 5. Risks / open questions for the owner
+## 5. Byte-identical-inert strategy
 
-1. **Shared value-core vs mirror (§2).** Factor `eval_const`'s value ops into a phase-agnostic core shared
-   with `macro_eval` (no drift, but edits B3), or mirror them in `macro_eval` (smaller, risk of drift)?
-   Recommendation: factor. **Owner call.**
-2. **Body domain scope.** Proposed whitelist: `str`/`bool`/`i64`/`[]str`, `var`/`if`/bounded-`loop`,
-   `teko::str::concat`, array literal/index/`.len`, comparisons, bool logic. Anything else → honest error.
-   Is this enough for the roots (yes, for prefix+join), and is the cap on `loop` iterations acceptable as
-   the non-termination guard?
-3. **Reseed cadence (PT4).** Confirm the reseed lands while inert, before PT5 — mirroring the fix just
-   applied — so the C lane never breaks on a parametric use.
-4. **Is the feature worth it vs literal qualified members?** With the `check_named` fix, literal
-   `checker::A | checker::B | …` already works at every site (proven, TFSpecKind). The parametric macro's
-   value is DRY authoring of 15–26-member root unions (write the bare member list once) + the `local`
-   toggle. The owner has ruled to build it; recorded here so the trade-off is explicit.
+Every crumb is additive and exercised by NOTHING in `src/` until PT4: an existing parameterless type-macro
+with a lone `lowering{}` body takes the unchanged path, so PT1–PT2 emit an identical `teko.c` — fixpoint
+gen1==gen2==gen3 per crumb. The reseed (PT3) lands while inert. Only PT4 introduces the first `@X(...)` /
+`if`-bodied macro, and each such retirement is its own fixpointed increment. Guard: every build
+`( ulimit -v 6291456 )`.
 
-**No law tension:** Teko-only (all Teko-side, `teko_rt.*` frozen); W15/Javadoc on every new declaration;
-each crumb additive/inert with a byte-identical fixpoint; the reseed precedes any parametric use. The one
-item RELAYED for the owner is the shared-value-core decision (risk 1).
+## 6. Risks / notes for the owner
+
+1. **Trade-off recorded (not a blocker).** With the `check_named` self-qualification fix, a NON-parametric
+   `macro X() { lowering { ns::A | ns::B } }` already resolves at every site (proven, TFSpecKind, 15/32).
+   Form 2's marginal value is the `local` toggle (a bare-members escape hatch); members are written 2×, so
+   it is not DRY. You have ruled to build it — recorded so the cost/benefit is explicit.
+2. **Condition domain.** Proposed: `BoolLit`, a bool-param `Var`, and unary `!` only. Enough for
+   `if local` / `if !local`. Broader bool logic (`&&`/`||`/`==`) can be added later if a root needs it; I
+   propose starting minimal. Confirm.
+3. **Reseed cadence (PT3).** Confirm the reseed lands while inert, before PT4 — mirroring the §14 reseed
+   just applied — so the C lane never breaks on a parametric use.
+
+**No law tension:** Teko-only (`teko_rt.*` frozen); W15/Javadoc on every new declaration; each crumb
+additive/inert with a byte-identical fixpoint; the reseed precedes any parametric use. Nothing here needs
+B3, loops, strings, or `${}`.
