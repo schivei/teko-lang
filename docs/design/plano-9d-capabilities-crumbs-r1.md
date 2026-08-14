@@ -278,17 +278,21 @@ contributes ALL its option names.
 ```teko
 /**
  * group_bind_subunion — resolve a `GroupBindPattern`'s bound TYPE: the anonymous `Variant` over the
- * group's option case-names, as a SUB-UNION of the match subject. Every option must be a direct case of
- * the subject's variant view (`is_direct_case_of`, match.tks:66); the result reuses the members' own
- * resolved types in SOURCE ORDER, so the bound `v` is byte-identical to the boxed nested variant the
- * subject already carries at that tag slot — no re-tag, no re-box (§9.D nested-group byte-identity).
+ * group's option case-names, as a SUB-UNION of the match subject. [CORRECTED 2026-08-14 — NESTED, per
+ * the shipped impl `fd750b33`; the earlier "flat / direct case" phrasing was self-contradictory.] The
+ * group's options collectively identify ONE NESTED union member `(… | …)` the subject already carries at
+ * a tag slot, matched by TYPE-EQUALITY of that nested `Variant` member (NOT each option as a separate
+ * direct case of the subject — the flat reading is retired; `resolve_type` keeps nested unions nested).
+ * The result reuses the nested member's own resolved types in SOURCE ORDER, so the bound `v` is
+ * byte-identical to the boxed nested variant at that tag slot — no re-tag, no re-box (§9.D nested-group
+ * byte-identity).
  *
  * @param gp        the grouped bind pattern
  * @param subject   the match subject's resolved type
  * @param table     the program type table
  * @param ref_ns    the match arm's referencing namespace
  * @return          the anonymous sub-union `Variant` bound to the pattern's identifier
- * @throws          when an option is not a direct case of the subject
+ * @throws          when the group's options do not match one nested union member of the subject
  * @since           §9.D capability (c)
  */
 fn group_bind_subunion(gp: GroupBindPattern, subject: Type, table: TypeTable, ref_ns: str): Type | error
