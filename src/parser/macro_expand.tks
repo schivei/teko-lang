@@ -874,33 +874,53 @@ fn walk_group_options(ps: []@Pattern(), prog: Program, depth: u64): []@Pattern()
  */
 fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []@Pattern() | error {
     var te = match walk_type(mp.macro_call, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
-    append_case_options(te, teko::list::empty())
-}
-
-/**
- * append_case_options — collect the bare-case `BindPattern` options of an expanded type-macro union onto
- * `acc` (§9.D CR3): a `NamedType` yields one bindingless `BindPattern`; a `UnionType` recurses over its
- * members, preserving source order; any other shape is a located error. Kept nested-union-tolerant so a
- * `@X()` that expands to a union whose members are themselves named cases resolves fully.
- *
- * @param te   the expanded type-expression (a union, or a lone named case)
- * @param acc  the options collected so far
- * @return     `acc` extended with this type's case options, or a located error
- * @throws     when a member is not a named case
- * @since      §9.D CR3
- */
-fn append_case_options(te: @TypeExpr(), acc: []@Pattern()): []@Pattern() | error {
     match te {
-        NamedType as nt => teko::list::push(acc, BindPattern { type_name = nt.path; has_binding = false; binding = ""; is_slice = false; slice_type = null; type_args = nt.args })
         UnionType as ut => {
-            var out = acc
+            var out: []@Pattern() = teko::list::empty()
             var i: u64 = 0
             loop {
                 if i >= ut.members.len { break }
-                out = match append_case_options(ut.members[i], out) { []@Pattern() as x => x; error as e => return e }
+                var opt = match union_member_option(ut.members[i]) { (@Pattern()) as p => p; error as e => return e }
+                out = teko::list::push(out, opt)
                 i++
             }
             out
+        }
+        NamedType => {
+            var opt = match union_member_option(te) { (@Pattern()) as p => p; error as e => return e }
+            teko::list::push(teko::list::empty(), opt)
+        }
+        _ => error { message = "a `@Type()` macro in a pattern position must expand to a union of named cases (§9.D CR3)" }
+    }
+}
+
+/**
+ * union_member_option — the ONE pattern option a single top-level union member of an expanded
+ * type-macro contributes (§9.D CR3 / union-of-unions). A `NamedType` member yields a bindingless
+ * `BindPattern` (a bare case). A `UnionType` member — the shape a §9.D union-of-unions leaves NESTED,
+ * e.g. `@TStatement()` inside `@TItem()` — yields a bindingless `GroupBindPattern` over ITS members,
+ * mirroring how the TYPE side keeps that member nested: the resolved candidate then matches the
+ * subject's nested `Variant` member by `type_eq` (`group_bind_subunion`) instead of a flattened case
+ * list that would no longer align with the boxed nested member. Any other shape is a located error.
+ *
+ * @param te  one member of the expanded macro union
+ * @return    the member's pattern option (bare case, or nested group), or a located error
+ * @throws    when a member is not a named case or a nested union of named cases
+ * @since      §9.D CR3 (union-of-unions follow-on)
+ */
+fn union_member_option(te: @TypeExpr()): @Pattern() | error {
+    match te {
+        NamedType as nt => BindPattern { type_name = nt.path; has_binding = false; binding = ""; is_slice = false; slice_type = null; type_args = nt.args }
+        UnionType as ut => {
+            var opts: []@Pattern() = teko::list::empty()
+            var i: u64 = 0
+            loop {
+                if i >= ut.members.len { break }
+                var o = match union_member_option(ut.members[i]) { (@Pattern()) as p => p; error as e => return e }
+                opts = teko::list::push(opts, o)
+                i++
+            }
+            GroupBindPattern { options = opts; binding = "" }
         }
         _ => error { message = "a `@Type()` macro in a pattern position must expand to a union of named cases (§9.D CR3)" }
     }
