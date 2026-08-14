@@ -422,10 +422,14 @@ exp type User = struct {
     extra:   Json         `json:",catchall"`             // catch-all dos campos extras
 }
 ```
-- **Comptime sabe, runtime não (Lei M.0 — zero reflection).** `encoding::{json,xml,csv}::encode<T>`/`decode<T>`
-  é `comptime`-driven (§14.2): percorre campos+tags de `T` no compile-time e **emite acesso direto** — em
-  runtime só há leituras geradas, **nenhuma reflexão**. **Enabler (capacidade nova):** uma **reflexão-de-campos
-  em comptime** (iterar campo → nome/tipo/tag/visibilidade); hoje não existe (Teko é zero-reflection).
+- **Comptime sabe, runtime não — a tag SINTETIZA um parser (ruling do dono, visão).** A crase de mapeamento
+  **orienta o compilador a CONSTRUIR um parser/serializador dedicado POR-TIPO, na AST**, no compile-time — uma
+  rotina gerada (`parse_T`/`serialize_T`) de acesso direto — **usada em runtime**. **NÃO** é reflexão de runtime
+  (o compilador já construiu o parser), **NEM** inline por call-site: é **um parser gerado por tipo**, embutido
+  na AST, honrando a Lei M.0 (zero reflection em runtime). **Enabler (capacidade nova):** uma **reflexão-de-campos
+  em COMPTIME** (iterar campo → nome/tipo/tag/visibilidade) que **alimenta a síntese** desse parser; hoje não
+  existe (Teko é zero-reflection). `encoding::{json,xml,csv}::encode<T>`/`decode<T>` é a superfície; o corpo é o
+  parser sintetizado.
 - **Nullability vem do TIPO do campo — não de schema nem de atributo (ruling do dono).** `T | null` (§9.D
   union-com-null) = nulável; `T` = obrigatório não-nulo. **O tipo É o schema.** O comptime lê:
   - **encode:** `T|null` nulo → `null` (JSON) por default, ou **omitido** com `omitempty`; XML → ausência do
