@@ -4,8 +4,9 @@ Registro vivo das impressões sobre o **estilo de deliberação do dono** e dos 
 agente resolver tensões sobre o que já foi definido como fechado — sem reabrir o que está selado, e sem
 pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
 
-## Idioma e papel
-- Comunicação **sempre em PT-BR**.
+## Idioma e papel (fatos persistentes do dono)
+- Comunicação **sempre em PT-BR**; idioma regional **PT-BR**.
+- **Timezone: `America/Sao_Paulo`** (UTC−03). Datas/horas e o "bom dia"/"boa noite" referem-se a este fuso.
 - O dono é o **único merger de trunk** do teko-lang (compilador AOT all-native, self-hosting, escrito em
   Teko). O trabalho flui por **agentes**, **um reseed de cada vez**, cada um independentemente gated.
 
@@ -135,6 +136,13 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
 - **Ler as palavras do dono ao pé da letra.** *"Stdlib é 9-ops"* era *"Stdlib **e** 9-ops"* (dois itens
   distintos, não identidade). Não inflar uma conjunção em tese. Quando o dono corrige a grafia de uma
   palavra, a diferença é semântica e importa.
+- **🚨 UM RESTART = VAZAMENTO DE MEMÓRIA = INCIDENTE (ruling do dono).** Um restart do container **nunca é
+  normal**. Significa **uma de duas coisas**: (a) algum agente ou comando executou **algo fora dos padrões**
+  (build sem `ulimit`, backend `native`, sem `--no-verify`, `teko test`, builds em paralelo), ou (b) o leak
+  do `monomorph` (item 13) **precisa de correção imediata**. Ao ver um restart: **parar, identificar o
+  agente/comando culpado, e ou blindar (teto de memória) ou consertar o leak** — não re-disparar cegamente.
+  Todo build de agente é **obrigatoriamente** guardado por `ulimit -v` (teto tight, ~6 GB sobre os 3.5 normais)
+  e **para+reporta** ao bater no teto (o OOM localiza o construct que dispara o leak = achado para consertar).
 - **A memória é a restrição dura, não só o `teko test`.** O build seco **também** vaza (via `monomorph`) e
   derruba o container sem `ulimit`. Toda invocação de build de agente vai com teto de memória, um build de
   cada vez. Dois crashes seguidos ensinaram isto.
