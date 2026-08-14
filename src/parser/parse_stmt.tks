@@ -314,7 +314,7 @@ fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
     if is_multibind_shape(tokens, pos + 1) {
         return parse_multibind(tokens, pos + 1, kind)
     }
-    var tgt = match parse_bind_target(tokens, pos + 1) { Parsed<BindTarget> as x => x; error as e => return e }
+    var tgt = match parse_bind_target(tokens, pos + 1) { Parsed<@BindTarget()> as x => x; error as e => return e }
     var ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
     if ann.has_type && is_ref_grafia_annotation(ann.type_ann) {
         return err_at(tokens, tgt.next, "a reference binding is written `ref x: T = e` — a `var`/`const` annotation may not be a bare `ref T` (the `ref` is the binding modifier, not part of the bound value's type; a `ref T | null` union member is still fine)")
@@ -620,7 +620,7 @@ fn is_binding_head(tokens: []lexer::Token, pos: u64): bool {
  * @throws        when the target, annotation, `=`, or value fails to parse
  */
 fn parse_ref_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
-    var tgt = match parse_bind_target(tokens, pos + 1) { Parsed<BindTarget> as x => x; error as e => return e }
+    var tgt = match parse_bind_target(tokens, pos + 1) { Parsed<@BindTarget()> as x => x; error as e => return e }
     var ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
     if !is_kind_at(tokens, ann.next, lexer::TokenKind::Assign) {
         return err_at(tokens, ann.next, "a `ref` binding requires an initializer (`ref x: T = e`) — a reference is write-through and can never be left unbound (definite-assignment)")
@@ -632,10 +632,10 @@ fn parse_ref_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | erro
 
 // a binding target: a simple name or a destructure `{ x; y }` (B.13). `pos` after the kw.
 // Reuses parse_field_names for the `{ … }` name list.
-fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<BindTarget> | error {
+fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<@BindTarget()> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::LBrace) {
         var names = match parse_field_names(tokens, pos) { ParsedList<str> as x => x; error as e => return e }
-        return Parsed<BindTarget> { node = DestructurePattern { names = names.items }; next = names.next }
+        return Parsed<@BindTarget()> { node = DestructurePattern { names = names.items }; next = names.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Underscore) {
         return err_at(tokens, pos, "`_` is the write-only discard and cannot be a `var`/`const` target — drop the keyword and write `_ = expr` to evaluate an expression and discard its result")
@@ -643,7 +643,7 @@ fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<BindTarget> | err
     if !is_name_at(tokens, pos) {
         return err_at(tokens, pos, "expected a name or `{ … }` after `var`/`const`")
     }
-    Parsed<BindTarget> { node = SimpleName { name = tokens[pos].text }; next = pos + 1 }
+    Parsed<@BindTarget()> { node = SimpleName { name = tokens[pos].text }; next = pos + 1 }
 }
 
 /**
