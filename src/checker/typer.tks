@@ -3294,6 +3294,35 @@ fn overload_suffix_for_decl(env: Env, ns: str, name: str, tf: TFunction, table: 
 }
 
 /**
+ * overload_suffix_for_method — the §9 A symbol suffix for a METHOD DEFINITION, the receiver-aware twin
+ * of `overload_suffix_for_decl`. A method carries an IMPLICIT untyped receiver param (`self`), which
+ * `build_overload_sig`'s plain `resolve_type` cannot resolve — so it reconstructs the method's full
+ * signature through `method_func_type` (the SAME resolver `collect` used to register the binding),
+ * which maps the receiver to the owner type. The rebuilt `this` therefore mangles byte-identically to
+ * the call-side candidate (`overload_members_funcs`), so an overloaded method's DEFINITION and its call
+ * agree on the suffixed symbol (without this, both overloads emit the bare symbol and cc rejects the
+ * duplicate). "" unless `(method_ns, name)` is a real overload set — so a non-overloaded method keeps
+ * its historic unsuffixed symbol (ruling 6 / fixpoint).
+ *
+ * @param env        the SEALED typing environment
+ * @param method_ns  the method's pseudo-namespace (`<owner-ns>::<Type>`)
+ * @param m          the method's parsed declaration (its receiver + operand annotations)
+ * @param owner_bare the owning type's bare name (for `self` resolution)
+ * @param ref_ns     the owning type's declaring namespace (for annotation resolution)
+ * @param table      the resolved type table
+ * @return           the suffix to stamp on the method's `TFunction`, "" when not an overload set
+ * @since §9 A (§9-ops method-overload emission)
+ */
+fn overload_suffix_for_method(env: Env, method_ns: str, m: parser::Function, owner_bare: str, ref_ns: str, table: TypeTable): str {
+    if !env_is_overloaded(env, method_ns, m.name) { return "" }
+    var ft = match method_func_type(m, owner_bare, table, ref_ns) { Type as t => t; error => return "" }
+    match ft {
+        Func as f => overload_suffix_of(f, overload_members_funcs(env, method_ns, m.name))
+        _ => ""
+    }
+}
+
+/**
  * select_overload — choose exactly ONE overload of the call `c` from the candidate bindings `cands`,
  * at the call site, in compile time (rulings 2/3). Each candidate that is a function is scored: its
  * call SHAPE must bind (`resolve_defargs`/`pack_variadic_args` — this is where a named/default argument
@@ -9008,7 +9037,7 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
             TFunction as x => x
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
-        var mov = overload_suffix_for_decl(env, method_ns, mf.name, mf, table)
+        var mov = overload_suffix_for_method(env, method_ns, methods[mi], td.name, item_ns, table)
         var stamped = TFunction { overload_suffix = mov; name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size; ret_extra = mf.ret_extra }
         out = teko::list::push(out, stamped)
         mi++

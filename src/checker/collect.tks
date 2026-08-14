@@ -1967,7 +1967,8 @@ fn fold_trait_consts(type_name: str, tname: str, consts: []parser::ConstDecl, tr
  * (§9.4) through the shared AST-equality merge (`merge_named_members`). A same-name method absorbs
  * when identical; a same-signature different-body pair is a named error (no silent override — whether
  * the existing member is the composer's own, R8, or an earlier composed trait's, R7); a
- * distinct-signature pair would overload, which is not yet resolved across composition (§9A).
+ * distinct-signature pair OVERLOADS across composition — both members coexist on the flattened surface
+ * and `select_overload` (§9A) picks at the call site (M-C push-both).
  *
  * @param type_name     the composer's name (for diagnostics)
  * @param tname         the composed trait's name (for diagnostics)
@@ -1976,8 +1977,8 @@ fn fold_trait_consts(type_name: str, tname: str, consts: []parser::ConstDecl, tr
  * @param trait_methods the composed trait's own methods
  * @param table         the type table (for signature resolution)
  * @return              the accumulated methods with the trait's methods merged in, or an error
- * @throws              when a same-name method cannot absorb (differing body / unresolved overload)
- * @since 0.3.1 (§9.4 revised)
+ * @throws              when a same-name method cannot absorb (a same-signature different-body Conflict)
+ * @since 0.3.1 (§9.4 revised; §9A Overload branch)
  */
 fn fold_trait_methods(type_name: str, tname: str, own_methods: []parser::Function, methods: []parser::Function, trait_methods: []parser::Function, table: TypeTable): []parser::Function | error {
     var out = methods
@@ -1988,14 +1989,47 @@ fn fold_trait_methods(type_name: str, tname: str, own_methods: []parser::Functio
         if tm.body.len == 0 { mi++; continue }
         var idx = method_index_by_name(out, tm.name)
         if idx < 0 { out = teko::list::push(out, trait_method_as_member(tm)); mi++; continue }
-        match merge_named_members(out[idx to u64], tm, table, "", type_name) {
-            Absorb => { }
-            Conflict => return method_merge_error(type_name, tname, tm.name, own_methods)
-            Overload => return error { message = $"method '{tm.name}' on '{type_name}' would overload trait '{tname}'s '{tm.name}' (a different signature) — method overloading across composition is not yet resolved (§9A)" }
+        match reconcile_composed_method(type_name, tname, own_methods, out, tm, table) {
+            []parser::Function as m => out = m
+            error as e => return e
         }
         mi++
     }
     out
+}
+
+/**
+ * reconcile_composed_method — merge one composed trait method `tm` (already known to collide by NAME
+ * with an accumulated member) into the flattened surface `out`, reconciling against EVERY same-name
+ * member (§9.4/§9A): an AST-identical member absorbs it (drop the duplicate); a same-signature
+ * different-body member is a `Conflict` (named error); when it overloads EVERY same-name member (each a
+ * distinct signature) both coexist — push it so `select_overload` resolves the call site. Scanning all
+ * same-name members (not only the first) keeps a three-way overload set correct.
+ *
+ * @param type_name    the composer's name (for diagnostics)
+ * @param tname        the composed trait's name (for diagnostics)
+ * @param own_methods  the composer's own methods (R8-vs-R7 diagnostic)
+ * @param out          the accumulated flattened method surface
+ * @param tm           the composed trait method to reconcile
+ * @param table        the type table (for signature resolution)
+ * @return             the surface with `tm` absorbed or appended as an overload, or a Conflict error
+ * @throws             when a same-signature different-body member conflicts with `tm`
+ * @since 0.3.1 (§9A Overload branch)
+ */
+fn reconcile_composed_method(type_name: str, tname: str, own_methods: []parser::Function, out: []parser::Function, tm: parser::Function, table: TypeTable): []parser::Function | error {
+    var i: u64 = 0
+    loop {
+        if i >= out.len { break }
+        if out[i].name == tm.name {
+            match merge_named_members(out[i], tm, table, "", type_name) {
+                Absorb => return out
+                Conflict => return method_merge_error(type_name, tname, tm.name, own_methods)
+                Overload => { }
+            }
+        }
+        i++
+    }
+    teko::list::push(out, trait_method_as_member(tm))
 }
 
 /**
@@ -2584,12 +2618,92 @@ fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function): []str
  */
 fn validate_interface_body(reg: TypeReg, ib: parser::InterfaceBody, table: TypeTable): []str {
     var diags = interface_bodyless_diags(reg, ib.methods)
+    diags = concat_diags(diags, interface_operator_wellformed_diags(reg, ib.methods, table))
     var seen = teko::list::push(teko::list::empty(), qualify(reg.namespace, name_last_segment(reg.decl.name)))
     var eff = match effective_interface_methods(ib, reg.namespace, table, seen) {
         []parser::Function as m => m
         error as e => return concat_diags(diags, one_diag(decl_error_diag(reg, e)))
     }
-    concat_diags(diags, interface_conflict_diags(reg, eff, table))
+    diags = concat_diags(diags, interface_conflict_diags(reg, eff, table))
+    concat_diags(diags, interface_operator_counterpart_diags(reg, eff))
+}
+
+/**
+ * interface_operator_wellformed_diags — validate each `operator` member of an interface at DEFINITION
+ * (§6): a recognized dunder, the right arity, a `self` operand, and a return type matching the
+ * operator's class (comparison → `bool`, arithmetic → `self`) — the SAME well-formedness pass
+ * `check_operator_invariants` runs on a struct/class operator, applied here to the interface's bodyless
+ * contract operators.
+ *
+ * @param reg      the interface's registration
+ * @param methods  the interface's own methods, in declaration order
+ * @param table    the whole collected type table
+ * @return         one diagnostic per malformed operator, in declaration order
+ * @since §6 (9-ops)
+ */
+fn interface_operator_wellformed_diags(reg: TypeReg, methods: []parser::Function, table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].is_operator {
+            match check_one_operator(reg.decl, methods[i], reg.namespace, table) {
+                error as e => diags = teko::list::push(diags, decl_error_diag(reg, e))
+                null => { }
+            }
+        }
+        i++
+    }
+    diags
+}
+
+/**
+ * interface_operator_counterpart_diags — enforce the interface-operator counterpart obligation at the
+ * CONTRACT level (§9.4, D1): an interface that LISTS a comparison operator must ALSO list its mandated
+ * counterpart — `__eq`⟂`__ne`, `__lt`⟂`__gt`, `__le`⟂`__ge` and their reflections — so a conformer is
+ * held to BOTH by the contract (the joint via a mixin like `NeByEq` satisfies it over the flattened
+ * surface, D3). Scans the EFFECTIVE operator set, so an inherited counterpart (via `extends`) also
+ * satisfies. The first operator whose counterpart is absent yields a diagnostic naming it.
+ *
+ * @param reg      the interface's registration
+ * @param eff      the interface's effective method set (own + inherited)
+ * @return         one diagnostic per operator whose mandated counterpart the contract omits
+ * @since §9.4 (9-ops, D1)
+ */
+fn interface_operator_counterpart_diags(reg: TypeReg, eff: []parser::Function): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= eff.len { break }
+        if eff[i].is_operator {
+            var want = comparator_counterpart(eff[i].name)
+            if want != "" && !effective_lists_operator(eff, want) {
+                diags = teko::list::push(diags, decl_diag(reg, $"interface `operator {eff[i].name}` requires its counter-part `operator {want}` in the same contract — the contract must list both signatures (§9.4)"))
+            }
+        }
+        i++
+    }
+    diags
+}
+
+/**
+ * effective_lists_operator — does the effective method set `eff` list an `operator` member named
+ * `name`? The counterpart scan matches only actual operators, never an ordinary method that happens to
+ * share a dunder-like name.
+ *
+ * @param eff   the effective method set
+ * @param name  the operator dunder sought
+ * @return      true iff an operator named `name` is present
+ * @since §9.4 (9-ops, D1)
+ */
+fn effective_lists_operator(eff: []parser::Function, name: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= eff.len { break }
+        if eff[i].is_operator && eff[i].name == name { return true }
+        i++
+    }
+    false
 }
 
 /**
