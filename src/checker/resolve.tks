@@ -39,11 +39,12 @@ pub type TypeTable = struct {
     regs: []TypeReg
     /** the lateral hash index over `name_last_segment(regs[i].name)`, or empty until `tt_freeze` */
     by_last: NameIndex
-    /** the program's `comptime` declarations (§14 Family-B), attached once at `pre_walk` so the typer
-        can resolve a `@name(...)` call to its returning `ComptimeDecl` and the post-monomorph
-        `expand_comptime` pass can re-consult it. Empty on every table until the attach; carried
-        read-only thereafter, orthogonal to `regs`/`by_last`. */
-    comptimes: []parser::ComptimeDecl
+    /** the program's `comptime` declarations WITH their declaring namespace (§14 Family-B), attached
+        once at `pre_walk` so the typer can resolve a `@name(...)` call to its returning `ComptimeDecl`
+        and the post-monomorph `expand_comptime` pass can re-consult it AND type the body under the
+        comptime's own namespace. Empty on every table until the attach; carried read-only thereafter,
+        orthogonal to `regs`/`by_last`. */
+    comptimes: []ComptimeReg
 }
 
 /**
@@ -158,9 +159,21 @@ pub fn tt_freeze(t: TypeTable): TypeTable {
  * @return       `t` carrying `decls` as its comptime registry
  * @since 0.4-macros (§14 Family-B B1)
  */
-pub fn tt_with_comptimes(t: TypeTable, decls: []parser::ComptimeDecl): TypeTable {
+pub fn tt_with_comptimes(t: TypeTable, decls: []ComptimeReg): TypeTable {
     TypeTable { regs = t.regs; by_last = t.by_last; comptimes = decls }
 }
+
+/**
+ * ComptimeReg — a registered `comptime` declaration (§14 Family-B): the parsed declaration plus the
+ * NAMESPACE it was declared in. The namespace lets `expand_comptime` type the comptime body under the
+ * comptime's own module, so a type/const the body references (e.g. its `[]FieldInfo` descriptor element)
+ * resolves exactly as it does at the declaration site.
+ *
+ * @field decl       the parsed comptime declaration
+ * @field namespace  the namespace the declaration was collected under
+ * @since 0.4-macros (§14 Family-B B5)
+ */
+pub type ComptimeReg = struct { decl: parser::ComptimeDecl; namespace: str }
 
 /**
  * tt_find_comptime — the `comptime` declaration in `t`'s registry whose name equals `name`, or null
@@ -172,11 +185,11 @@ pub fn tt_with_comptimes(t: TypeTable, decls: []parser::ComptimeDecl): TypeTable
  * @return      the matching `ComptimeDecl`, or null when none is registered under `name`
  * @since 0.4-macros (§14 Family-B B1)
  */
-pub fn tt_find_comptime(t: TypeTable, name: str): parser::ComptimeDecl | null {
+pub fn tt_find_comptime(t: TypeTable, name: str): ComptimeReg | null {
     var i: u64 = 0
     loop {
         if i >= t.comptimes.len { break }
-        if t.comptimes[i].name == name { return t.comptimes[i] }
+        if t.comptimes[i].decl.name == name { return t.comptimes[i] }
         i++
     }
     null

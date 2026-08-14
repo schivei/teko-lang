@@ -5583,7 +5583,7 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
 fn type_macro_call(mc: parser::MacroCall, env: Env, table: TypeTable): TExpr | error {
     var name = if mc.callee.segments.len > 0 { mc.callee.segments[mc.callee.segments.len - 1].name } else { "" }
     match tt_find_comptime(table, name) {
-        parser::ComptimeDecl as cd => type_comptime_call(mc, cd, env, table)
+        ComptimeReg as reg => type_comptime_call(mc, reg.decl, env, table)
         null => error { message = $"`@{name}` names no `comptime` in scope — a `@name(...)` call must resolve to a `comptime` declaration (§14 Family-B)" }
     }
 }
@@ -9517,16 +9517,16 @@ fn pre_walk(program: parser::Program, col: CollectOutcome): PreWalk {
  * writes `comptime`, so this returns an empty list on the current corpus (plan §7 inertness).
  *
  * @param program  the trait-folded, base-canonicalized program
- * @return         every top-level `ComptimeDecl`, in declaration order
+ * @return         every top-level `ComptimeDecl` with its declaring namespace, in declaration order
  * @since 0.4-macros (§14 Family-B B1)
  */
-fn collect_comptime_decls(program: parser::Program): []parser::ComptimeDecl {
-    var out: []parser::ComptimeDecl = teko::list::empty()
+fn collect_comptime_decls(program: parser::Program): []ComptimeReg {
+    var out: []ComptimeReg = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= program.items.len { break }
         match program.items[i].content {
-            parser::ComptimeDecl as cd => out = teko::list::push(out, cd)
+            parser::ComptimeDecl as cd => out = teko::list::push(out, ComptimeReg { decl = cd; namespace = program.items[i].namespace })
             _ => { }
         }
         i++

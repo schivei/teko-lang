@@ -641,7 +641,7 @@ fn cx_maybe_comptime(c: TCall, e: TExpr, ctx: CxCtx): TExpr | error {
     var name = cx_call_name(c)
     match tt_find_comptime(ctx.table, name) {
         null => error { message = $"internal: comptime call `@{name}` resolved to no `comptime` declaration at expansion (§14 Family-B B3)" }
-        parser::ComptimeDecl as cd => cx_eval_comptime(c, cd, e, ctx)
+        ComptimeReg as reg => cx_eval_comptime(c, reg.decl, reg.namespace, e, ctx)
     }
 }
 
@@ -668,20 +668,22 @@ fn cx_call_name(c: TCall): str {
  *
  * @param c    the comptime call
  * @param cd   the resolved comptime declaration
+ * @param ns   the comptime's declaring namespace (the body types under it)
  * @param e    the enclosing call expression (its type/position)
  * @param ctx  the walk context
  * @return     the folded literal, or a located error
  * @since 0.4-macros (§14 Family-B B3)
  */
-fn cx_eval_comptime(c: TCall, cd: parser::ComptimeDecl, e: TExpr, ctx: CxCtx): TExpr | error {
+fn cx_eval_comptime(c: TCall, cd: parser::ComptimeDecl, ns: str, e: TExpr, ctx: CxCtx): TExpr | error {
     if ctx.depth >= cx_max_depth() { return error { message = $"comptime call `@{cd.name}` nests deeper than {cx_max_depth() to u64} frames — a recursive comptime cannot be folded (§14 Family-B B3)" } }
     if cd.type_params.len != c.type_args.len { return error { message = $"comptime `@{cd.name}` expects {cd.type_params.len} type argument(s), got {c.type_args.len}" } }
     if c.args.len != cd.params.len { return error { message = $"comptime `@{cd.name}` expects {cd.params.len} argument(s), got {c.args.len}" } }
     var tb = CxTypeBinds { names = cd.type_params; types = c.type_args }
+    var rc = CxRefl { tb = tb; table = ctx.table; fields_elem = cx_slice_elem_name(cd.ret) }
     var binds = match cx_bind_args(cd, c, ctx) { error as x => return x; CxBinds as b => b }
     var bodyval0 = match cx_body_value(cd) { null => return error { message = $"comptime `@{cd.name}`'s body is not a single value expression — a statement-body comptime is not yet foldable (§14 Family-B B3.1)" }; parser::Expr as bv => bv }
-    var bodyval = match cx_reflect_expr(bodyval0, tb) { error as x => return x; parser::Expr as bv => bv }
-    var env = match cx_param_env(cd, ctx) { error as x => return x; Env as v => v }
+    var bodyval = match cx_reflect_expr(bodyval0, rc) { error as x => return x; parser::Expr as bv => bv }
+    var env = match cx_param_env(cd, ns, ctx) { error as x => return x; Env as v => v }
     var typed = match type_expr(bodyval, env, ctx.table) { error as x => return x; TExpr as v => v }
     var frame = CxCtx { table = ctx.table; binds = binds; depth = ctx.depth + (1 to u32) }
     var substituted = match cx_expr(typed, frame) { error as x => return x; TExpr as v => v }
@@ -704,6 +706,19 @@ fn cx_eval_comptime(c: TCall, cd: parser::ComptimeDecl, e: TExpr, ctx: CxCtx): T
 type CxTypeBinds = struct { names: []str; types: []Type }
 
 /**
+ * CxRefl — the reflection walk context (§14 B4/B5): the type-parameter binding, the type table (for the
+ * `T.fields` field-view projection, B5), and the element type name of the comptime's declared `[]Elem`
+ * return (the struct each `T.fields` descriptor is built as). Threaded read-only through the untyped
+ * reflection rewrite.
+ *
+ * @field tb           the type-parameter binding
+ * @field table        the folded type table (resolves `T`'s field views for `T.fields`)
+ * @field fields_elem  the element type name of a `[]Elem` return (empty when the return is not a slice)
+ * @since 0.4-macros (§14 Family-B B5)
+ */
+type CxRefl = struct { tb: CxTypeBinds; table: TypeTable; fields_elem: str }
+
+/**
  * cx_type_bind — the concrete `Type` bound to type-parameter `name` in `tb`, or null when `name` is not
  * a bound type parameter (an ordinary field access, not reflection).
  *
@@ -723,41 +738,41 @@ fn cx_type_bind(tb: CxTypeBinds, name: str): Type | null {
 }
 
 /**
- * cx_reflect_expr — resolve `T.size` / `T.name` type reflection over the bound type parameters in an
- * UNTYPED comptime body value BEFORE it is typed (§14 B4): a type parameter reflected with `.size`
- * becomes a `usize`-valued integer literal, with `.name` a string literal of the type's rendered name.
- * Recurses the const-expression grammar (binary/unary/cast/index/call arguments); a leaf and any other
- * shape pass through unchanged. A reflection field the body reads that is NOT resolvable here (a type
- * whose slot size the checker cannot compute) is a located error rather than a silently-wrong fold.
+ * cx_reflect_expr — resolve `T.size` / `T.name` / `T.fields` type reflection over the bound type
+ * parameters in an UNTYPED comptime body value BEFORE it is typed (§14 B4/B5): a type parameter
+ * reflected with `.size` becomes an integer literal, with `.name` a string literal, with `.fields` an
+ * array literal of field descriptors. Recurses the const-expression grammar (binary/unary/cast/index/
+ * call arguments); a leaf and any other shape pass through unchanged. A reflection field that is NOT
+ * resolvable here is a located error rather than a silently-wrong fold.
  *
  * @param e   the untyped body value expression
- * @param tb  the type-parameter binding
+ * @param rc  the reflection walk context
  * @return    the body value with reflection resolved to literals, or a located error
  * @since 0.4-macros (§14 Family-B B4)
  */
-fn cx_reflect_expr(e: parser::Expr, tb: CxTypeBinds): parser::Expr | error {
+fn cx_reflect_expr(e: parser::Expr, rc: CxRefl): parser::Expr | error {
     match e.kind {
-        parser::FieldAccess as fa => cx_reflect_field(fa, e, tb)
+        parser::FieldAccess as fa => cx_reflect_field(fa, e, rc)
         parser::Binary as b => {
-            var l = match cx_reflect_expr(b.left, tb) { error as x => return x; parser::Expr as v => v }
-            var r = match cx_reflect_expr(b.right, tb) { error as x => return x; parser::Expr as v => v }
+            var l = match cx_reflect_expr(b.left, rc) { error as x => return x; parser::Expr as v => v }
+            var r = match cx_reflect_expr(b.right, rc) { error as x => return x; parser::Expr as v => v }
             parser::Expr { kind = parser::Binary { op = b.op; left = l; right = r }; line = e.line; col = e.col }
         }
         parser::Unary as u => {
-            var o = match cx_reflect_expr(u.operand, tb) { error as x => return x; parser::Expr as v => v }
+            var o = match cx_reflect_expr(u.operand, rc) { error as x => return x; parser::Expr as v => v }
             parser::Expr { kind = parser::Unary { op = u.op; operand = o }; line = e.line; col = e.col }
         }
         parser::Cast as c => {
-            var o = match cx_reflect_expr(c.expr, tb) { error as x => return x; parser::Expr as v => v }
+            var o = match cx_reflect_expr(c.expr, rc) { error as x => return x; parser::Expr as v => v }
             parser::Expr { kind = parser::Cast { expr = o; target = c.target }; line = e.line; col = e.col }
         }
         parser::Index as ix => {
-            var recv = match cx_reflect_expr(ix.receiver, tb) { error as x => return x; parser::Expr as v => v }
-            var idx = match cx_reflect_expr(ix.index, tb) { error as x => return x; parser::Expr as v => v }
+            var recv = match cx_reflect_expr(ix.receiver, rc) { error as x => return x; parser::Expr as v => v }
+            var idx = match cx_reflect_expr(ix.index, rc) { error as x => return x; parser::Expr as v => v }
             parser::Expr { kind = parser::Index { receiver = recv; index = idx }; line = e.line; col = e.col }
         }
         parser::Call as cl => {
-            var args = match cx_reflect_args(cl.args, tb) { error as x => return x; []parser::Expr as v => v }
+            var args = match cx_reflect_args(cl.args, rc) { error as x => return x; []parser::Expr as v => v }
             parser::Expr { kind = parser::Call { callee = cl.callee; args = args; arg_names = cl.arg_names; owner_type_args = cl.owner_type_args; callee_type_args = cl.callee_type_args }; line = e.line; col = e.col }
         }
         _ => e
@@ -768,16 +783,16 @@ fn cx_reflect_expr(e: parser::Expr, tb: CxTypeBinds): parser::Expr | error {
  * cx_reflect_args — resolve reflection in each argument of a call within a comptime body, in order.
  *
  * @param args  the untyped argument expressions
- * @param tb    the type-parameter binding
+ * @param rc    the reflection walk context
  * @return      the arguments with reflection resolved, or the first located error
  * @since 0.4-macros (§14 Family-B B4)
  */
-fn cx_reflect_args(args: []parser::Expr, tb: CxTypeBinds): []parser::Expr | error {
+fn cx_reflect_args(args: []parser::Expr, rc: CxRefl): []parser::Expr | error {
     var out: []parser::Expr = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= args.len { break }
-        var a = match cx_reflect_expr(args[i], tb) { error as x => return x; parser::Expr as v => v }
+        var a = match cx_reflect_expr(args[i], rc) { error as x => return x; parser::Expr as v => v }
         out = teko::list::push(out, a)
         i++
     }
@@ -786,51 +801,131 @@ fn cx_reflect_args(args: []parser::Expr, tb: CxTypeBinds): []parser::Expr | erro
 
 /**
  * cx_reflect_field — resolve one field access as type reflection when its receiver names a bound type
- * parameter and its field is `size` / `name` (§14 B4): `.size` folds to the type's slot size (a `usize`
- * literal), `.name` to the type's rendered name (a string literal). Any other receiver or field is an
+ * parameter and its field is `size` / `name` / `fields` (§14 B4/B5). Any other receiver or field is an
  * ordinary field access whose receiver is reflection-resolved and rebuilt.
  *
  * @param fa  the untyped field access
  * @param e   the enclosing expression (its position)
- * @param tb  the type-parameter binding
+ * @param rc  the reflection walk context
  * @return    the reflected literal, or the field access rebuilt with a reflection-resolved receiver, or
- *            a located error when the reflected size is not computable
+ *            a located error when the reflection is not resolvable
  * @since 0.4-macros (§14 Family-B B4)
  */
-fn cx_reflect_field(fa: parser::FieldAccess, e: parser::Expr, tb: CxTypeBinds): parser::Expr | error {
+fn cx_reflect_field(fa: parser::FieldAccess, e: parser::Expr, rc: CxRefl): parser::Expr | error {
     var recv_name = match fa.receiver.kind { parser::Var as v => v.name; _ => "" }
     if recv_name != "" {
-        match cx_type_bind(tb, recv_name) {
-            Type as t => return cx_reflect_of(t, fa.field, e, recv_name)
+        match cx_type_bind(rc.tb, recv_name) {
+            Type as t => return cx_reflect_of(t, fa.field, e, recv_name, rc)
             null => { }
         }
     }
-    var r = match cx_reflect_expr(fa.receiver, tb) { error as x => return x; parser::Expr as v => v }
+    var r = match cx_reflect_expr(fa.receiver, rc) { error as x => return x; parser::Expr as v => v }
     parser::Expr { kind = parser::FieldAccess { receiver = r; field = fa.field }; line = e.line; col = e.col }
 }
 
 /**
  * cx_reflect_of — the reflection literal for a bound type `t` and reflection field `field`: `size` ->
- * the slot-size `usize` literal, `name` -> the rendered-name string literal; any other field on a bound
- * type parameter is a located error (only `.size`/`.name` reflection exists, Extent-1). A `.size` whose
- * type the checker cannot slot-size (an aggregate needing LIR layout) is a located error.
+ * the slot-size integer literal, `name` -> the rendered-name string literal, `fields` -> the field-view
+ * array literal (B5); any other field on a bound type parameter is a located error (Extent-1/Extent-3).
+ * A `.size` whose type the checker cannot slot-size (an aggregate needing LIR layout) is a located error.
  *
  * @param t      the bound concrete type
  * @param field  the reflection field name
  * @param e      the enclosing expression (its position for the produced literal)
  * @param tname  the type-parameter name (for diagnostics)
+ * @param rc     the reflection walk context (for the `fields` projection)
  * @return       the reflection literal, or a located error
  * @since 0.4-macros (§14 Family-B B4)
  */
-fn cx_reflect_of(t: Type, field: str, e: parser::Expr, tname: str): parser::Expr | error {
+fn cx_reflect_of(t: Type, field: str, e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
     if field == "name" { return parser::Expr { kind = parser::StrLit { text = type_render(t) }; line = e.line; col = e.col } }
+    if field == "fields" { return cx_reflect_fields(t, e, tname, rc) }
     if field == "size" {
         match cx_type_size(t) {
             u32 as sz => return parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(sz to u64); fval = 0.0 }; line = e.line; col = e.col }
             null => return error { message = $"comptime `{tname}.size` is not foldable for `{type_render(t)}` — an aggregate's slot size needs layout, not yet reachable at comptime (§14 B4)" }
         }
     }
-    error { message = $"comptime type reflection has only `.size` and `.name` — `{tname}.{field}` is not a reflection field (§14 B4 Extent-1)" }
+    error { message = $"comptime type reflection has only `.size`, `.name` and `.fields` — `{tname}.{field}` is not a reflection field (§14 B4/B5)" }
+}
+
+/**
+ * cx_reflect_fields — the `T.fields` reflection (§14 B5, Extent-3, GUARDED): the compile-time field view
+ * of the bound type `t`, projected as an untyped array literal of field DESCRIPTORS — one struct literal
+ * of the comptime's `[]Elem` return element type per field, in declaration order. Each descriptor is
+ * populated by the well-known descriptor field names `name` (the field's declared name) and
+ * `is_nullable` (true iff the field's resolved type is a `X | null` union, §9.D). DESCRIPTORS ONLY — it
+ * NEVER reads a field's runtime value (Law M.0 / §14.2 guardrail). A non-field-shaped type, or a return
+ * that is not a `[]Struct`, is a located error.
+ *
+ * @param t      the bound concrete type whose fields are reflected
+ * @param e      the enclosing expression (its position)
+ * @param tname  the type-parameter name (for diagnostics)
+ * @param rc     the reflection walk context (the type table + the descriptor element type name)
+ * @return       the untyped `[]Elem` array literal of field descriptors, or a located error
+ * @since 0.4-macros (§14 Family-B B5)
+ */
+fn cx_reflect_fields(t: Type, e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
+    if rc.fields_elem == "" { return error { message = $"comptime `{tname}.fields` requires the comptime to return a `[]Struct` descriptor slice (§14 B5)" } }
+    var type_name = match t { Named as n => n.name; _ => return error { message = $"comptime `{tname}.fields` needs a field-shaped type — `{type_render(t)}` has no fields (§14 B5)" } }
+    var fvs = match deriver_field_view(type_name, rc.table) { []FieldView as v => v; error as x => return x }
+    var elems: []parser::ArrayElem = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= fvs.len { break }
+        elems = teko::list::push(elems, parser::ArrayElem { is_spread = false; expr = cx_field_descriptor(fvs[i], rc.fields_elem, e) })
+        i++
+    }
+    parser::Expr { kind = parser::ArrayLit { elements = elems }; line = e.line; col = e.col }
+}
+
+/**
+ * cx_field_descriptor — one field descriptor struct literal for `T.fields` (§14 B5): a `<Elem> { name =
+ * "<field>", is_nullable = <bool> }` untyped struct literal, where `is_nullable` is true iff the field's
+ * resolved type is a `X | null` union. The typer validates it against the declared descriptor type.
+ *
+ * @param fv    the field view (declared name + resolved type)
+ * @param elem  the descriptor element type name (the comptime's `[]Elem` element)
+ * @param e     the enclosing expression (its position)
+ * @return      the untyped field-descriptor struct literal
+ * @since 0.4-macros (§14 Family-B B5)
+ */
+fn cx_field_descriptor(fv: FieldView, elem: str, e: parser::Expr): parser::Expr {
+    var names = teko::list::push(teko::list::push(teko::list::empty(), "name"), "is_nullable")
+    var name_lit = parser::Expr { kind = parser::StrLit { text = fv.name }; line = e.line; col = e.col }
+    var null_lit = parser::Expr { kind = parser::BoolLit { value = variant_has_null_member(fv.type) }; line = e.line; col = e.col }
+    var vals = teko::list::push(teko::list::push(teko::list::empty(), name_lit), null_lit)
+    parser::Expr { kind = parser::StructLit { type_path = cx_path1(elem); type_args = teko::list::empty(); field_names = names; field_vals = vals }; line = e.line; col = e.col }
+}
+
+/**
+ * cx_path1 — a single-segment path naming `name` (the descriptor element type in a `T.fields` struct
+ * literal).
+ *
+ * @param name  the bare type name
+ * @return      the one-segment path
+ * @since 0.4-macros (§14 Family-B B5)
+ */
+fn cx_path1(name: str): parser::Path {
+    parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
+}
+
+/**
+ * cx_slice_elem_name — the element type NAME of a `[]Named` return type expression, or "" when the
+ * return is not a slice of a named type. Drives the descriptor struct literal `T.fields` builds.
+ *
+ * @param te  the comptime's declared return type expression
+ * @return    the slice element's named type, or "" when the return is not `[]Named`
+ * @since 0.4-macros (§14 Family-B B5)
+ */
+fn cx_slice_elem_name(te: parser::TypeExpr): str {
+    match te {
+        parser::SliceType as sl => match sl.element {
+            parser::NamedType as nm => if nm.path.segments.len > 0 { nm.path.segments[nm.path.segments.len - 1].name } else { "" }
+            _ => ""
+        }
+        _ => ""
+    }
 }
 
 /**
@@ -924,20 +1019,22 @@ fn cx_bind_args(cd: parser::ComptimeDecl, c: TCall, ctx: CxCtx): CxBinds | error
 }
 
 /**
- * cx_param_env — an environment defining each of a comptime's parameters at its resolved type, so the
- * body types against them. The parameters are the only names a foldable (B3) comptime body reads.
+ * cx_param_env — an environment, SCOPED to the comptime's declaring namespace `ns`, defining each of a
+ * comptime's parameters at its resolved type, so the body types against them AND any type/const the body
+ * references (its `[]FieldInfo` descriptor element, B5) resolves exactly as at the declaration site.
  *
  * @param cd   the resolved comptime declaration
+ * @param ns   the comptime's declaring namespace
  * @param ctx  the walk context
- * @return     the parameter-bound environment, or a parameter-type resolution error
+ * @return     the parameter-bound, namespace-scoped environment, or a parameter-type resolution error
  * @since 0.4-macros (§14 Family-B B3)
  */
-fn cx_param_env(cd: parser::ComptimeDecl, ctx: CxCtx): Env | error {
-    var env = env_empty()
+fn cx_param_env(cd: parser::ComptimeDecl, ns: str, ctx: CxCtx): Env | error {
+    var env = with_ns(env_empty(), ns)
     var i: u64 = 0
     loop {
         if i >= cd.params.len { break }
-        var pty = match resolve_type(cd.params[i].type_ann, ctx.table, "") { Type as t => t; error as x => return x }
+        var pty = match resolve_type(cd.params[i].type_ann, ctx.table, ns) { Type as t => t; error as x => return x }
         env = define(env, cd.params[i].name, pty, false)
         i++
     }
