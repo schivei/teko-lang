@@ -1,0 +1,659 @@
+use teko::lexer
+
+/**
+ * MAX_MACRO_DEPTH — the bounded expansion depth for Family-A macro expansion (§14 A3). A `@macro` whose
+ * expansion re-introduces a `@macro` call recurses; past this fixed limit the expander stops with a
+ * located error rather than looping forever. A pure constant, so self-host generations are byte-identical.
+ *
+ * @return the maximum macro-expansion nesting depth
+ * @since 0.4-macros (§14 A3)
+ */
+fn max_macro_depth(): u64 { 64 to u64 }
+
+/**
+ * MacroHoles — the injection-hole substitution active during ONE macro expansion (§14 A3): the caller's
+ * INTACT argument nodes, indexed positionally by the macro's parameter list. `active` is false in the
+ * top-level program walk (no substitution — only `@macro` calls expand); it is true while re-walking a
+ * spliced `lowering` fragment, where a `__mhole_<i>` placeholder Var is replaced by `args[i]`.
+ *
+ * @field active true iff a hole substitution is in effect (inside a spliced fragment)
+ * @field args   the caller's argument expressions, positional by macro parameter index
+ * @since 0.4-macros (§14 A3)
+ */
+type MacroHoles = struct { active: bool; args: []Expr }
+
+/**
+ * no_holes — the empty hole context for the top-level program walk (no substitution in effect).
+ *
+ * @return an inactive `MacroHoles`
+ * @since 0.4-macros (§14 A3)
+ */
+fn no_holes(): MacroHoles { MacroHoles { active = false; args = teko::list::empty() } }
+
+/**
+ * hole_placeholder_prefix — the reserved identifier prefix a `${param}` injection hole re-parses to
+ * inside a spliced `lowering` fragment (§14 A3). A `${x}` for the macro's i-th parameter becomes the
+ * placeholder Var `__mhole_<i>`, which the hole-substitution walk then replaces with the caller's i-th
+ * argument. The prefix is reserved (double-underscore) so it never collides with a user identifier.
+ *
+ * @return the placeholder identifier prefix
+ * @since 0.4-macros (§14 A3)
+ */
+fn hole_placeholder_prefix(): str { "__mhole_" }
+
+/**
+ * expand_macros_syntactic — the Family-A pre-pass (§14 A3): rewrite every `@macro`-call in the UNTYPED,
+ * os-pruned program into its produced AST fragment, to a bounded depth, BEFORE type-check. A `@name(...)`
+ * whose callee resolves to a `MacroDecl` is replaced by that macro's `lowering { … }` fragment, re-parsed
+ * in the call's grammatical position with each `${param}` hole filled by the caller's intact argument. A
+ * `comptime` `@name(...)` (Family B) is LEFT for the post-type-check fold pass. INERT FAST-PATH: a program
+ * declaring no macro and calling no `@` returns UNCHANGED (the compiler corpus), so the pass is
+ * byte-identical there; only a program that actually uses macros is walked and rewritten.
+ *
+ * @param prog  the parsed, os-pruned program (types do NOT exist yet)
+ * @return      the program with every Family-A call expanded, or the first expansion error
+ * @throws      an expansion-depth-exceeded diagnostic, or a malformed macro body / hole
+ * @since 0.4-macros (§14 A3)
+ */
+pub fn expand_macros_syntactic(prog: Program): Program | error {
+    if !program_has_macros(prog) { return prog }
+    var out: []Item = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        if item_is_macro_decl(prog.items[i]) { i++; continue }
+        var it = match rewrite_item(prog.items[i], prog, 0 to u64) { Item as x => x; error as e => return e }
+        out = teko::list::push(out, it)
+        i++
+    }
+    Program { items = out }
+}
+
+/**
+ * item_is_macro_decl — is `it` a Family-A `MacroDecl` (§14 A3)? Such a declaration is CONSUMED by the
+ * expansion pass — it defines a compile-time rewrite, emits no runtime code, and is dropped from the
+ * output so it never reaches type-check. A `ComptimeDecl` is NOT dropped here (Family B is folded by a
+ * later, post-type-check pass).
+ *
+ * @param it  the item to test
+ * @return    true iff the item is a macro declaration to drop
+ * @since 0.4-macros (§14 A3)
+ */
+fn item_is_macro_decl(it: Item): bool {
+    match it.content {
+        MacroDecl => true
+        _ => false
+    }
+}
+
+/**
+ * program_has_macros — does `prog` declare a macro/comptime OR call `@name(...)` anywhere (§14 A3)? The
+ * INERT gate for `expand_macros_syntactic`: false ⇒ the program is returned unchanged (the compiler's own
+ * corpus, byte-identical). A cheap item-level scan plus a shallow statement/expr scan.
+ *
+ * @param prog  the parsed program
+ * @return      true iff the program uses the macro/comptime facility
+ * @since 0.4-macros (§14 A3)
+ */
+fn program_has_macros(prog: Program): bool {
+    var i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        if item_has_macro(prog.items[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * item_has_macro — is one flattened item a macro or comptime DECLARATION (§14 A3)? A `@name(...)` call
+ * always resolves to such a declaration somewhere in the flattened program, so the presence of any
+ * `MacroDecl`/`ComptimeDecl` is a sufficient (and cheap) signal that the program uses the facility — no
+ * deep body scan needed for the inert gate.
+ *
+ * @param it  the item to test
+ * @return    true iff the item is a macro/comptime declaration
+ * @since 0.4-macros (§14 A3)
+ */
+fn item_has_macro(it: Item): bool {
+    match it.content {
+        MacroDecl => true
+        ComptimeDecl => true
+        _ => false
+    }
+}
+
+/**
+ * rewrite_item — expand every Family-A macro call inside ONE item's function/statement body (§14 A3). A
+ * type/const/use/macro/comptime declaration carries no expandable call in a Family-A position, so it
+ * passes through; a function or loose statement has its body walked.
+ *
+ * @param it     the item to rewrite
+ * @param prog   the whole program (the macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the rewritten item, or an expansion error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A3)
+ */
+fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
+    match it.content {
+        Function as f => {
+            var nb = match walk_stmts(f.body, prog, no_holes(), depth) { []Statement as s => s; error as e => return e }
+            Item { content = with_fn_body(f, nb); namespace = it.namespace; file = it.file }
+        }
+        Statement as s => {
+            var ns = match walk_stmt(s, prog, no_holes(), depth) { Statement as x => x; error as e => return e }
+            Item { content = ns; namespace = it.namespace; file = it.file }
+        }
+        _ => it
+    }
+}
+
+/**
+ * with_fn_body — a copy of `f` carrying the rewritten statement body `body` (§14 A3), every other field
+ * preserved. The functional update the macro walk uses to thread an expanded function body back.
+ *
+ * @param f     the function to copy
+ * @param body  the rewritten body statements
+ * @return      `f` with its body replaced
+ * @since 0.4-macros (§14 A3)
+ */
+fn with_fn_body(f: Function, body: []Statement): Function {
+    Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
+}
+
+/**
+ * macro_decl_by_name — the `MacroDecl` a `@name(...)` call resolves to (§14 A3), matched by the call's
+ * LAST path segment against every top-level macro declaration, or null when none (a `comptime` call, or
+ * an unknown name, is left for a later pass / the checker).
+ *
+ * @param prog  the program to search
+ * @param name  the macro name (the call's last segment)
+ * @return      the matching macro declaration, or null
+ * @since 0.4-macros (§14 A3)
+ */
+fn macro_decl_by_name(prog: Program, name: str): MacroDecl | null {
+    var i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i].content {
+            MacroDecl as md => { if md.name == name { return md } }
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * expand_macro_call — expand ONE Family-A `@macro(...)` call in an expression position (§14 A3): resolve
+ * the callee to its `MacroDecl`, take the macro body's single `lowering { … }` fragment, splice its raw
+ * token run with each `${param}` hole re-parsed to a `__mhole_<i>` placeholder, parse the run as an
+ * `Expr` in the call's position, then substitute each placeholder with the caller's intact argument and
+ * recursively expand the result (bounded by `max_macro_depth`). A `@comptime` call is left untouched for
+ * the Family-B fold pass.
+ *
+ * @param mc     the macro call node
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the expanded expression (or the original `MacroCall` for a Family-B call), or an error
+ * @throws       an over-depth error, an unsupported multi-fragment body, or a malformed hole
+ * @since 0.4-macros (§14 A3)
+ */
+fn expand_macro_call(mc: MacroCall, prog: Program, depth: u64): Expr | error {
+    if depth >= max_macro_depth() {
+        return err_expand(mc, "macro expansion exceeded the maximum depth (a macro that expands to itself?) — §14")
+    }
+    var name = macro_call_name(mc)
+    var md = match macro_decl_by_name(prog, name) { MacroDecl as m => m; null => return Expr { kind = mc; line = 0; col = 0 } }
+    var frag = match single_lowering_frag(md) { LoweringFrag as lf => lf; error as e => return e }
+    var subst = match splice_hole_tokens(frag.tokens, md, mc) { []lexer::Token as t => t; error as e => return e }
+    var parsed = match parse_expr(subst, 0 to u64) { Parsed<Expr> as pe => pe.node; error as e => return err_expand(mc, teko::str::concat("the `lowering` fragment does not parse as an expression: ", e.message)) }
+    walk_expr(parsed, prog, MacroHoles { active = true; args = mc.args }, depth + 1 to u64)
+}
+
+/**
+ * single_lowering_frag — the SOLE `lowering { … }` fragment of a macro body (§14 A3). A3 supports a macro
+ * whose body is exactly one lowering fragment (the expression-template case); a body with none, or with
+ * comptime logic / multiple fragments, is a located "not yet supported" error (reported for later crumbs).
+ *
+ * @param md  the macro declaration
+ * @return    the single fragment, or an error when the body is not a lone fragment
+ * @throws    when the macro body is empty, multi-statement, or not a single `lowering` fragment
+ * @since 0.4-macros (§14 A3)
+ */
+fn single_lowering_frag(md: MacroDecl): LoweringFrag | error {
+    if md.body.len != 1 {
+        return error { message = teko::str::concat("macro `", teko::str::concat(md.name, "`: §14 A3 supports a body of exactly one `lowering { … }` fragment (comptime logic / multiple fragments arrive in a later crumb)")) }
+    }
+    match md.body[0] {
+        LoweringFrag as lf => lf
+        _ => error { message = teko::str::concat("macro `", teko::str::concat(md.name, "`: its body must be a single `lowering { … }` fragment (§14 A3)")) }
+    }
+}
+
+/**
+ * splice_hole_tokens — rewrite a `lowering` fragment's raw token run for re-parsing (§14 A3): each
+ * `${param}` hole (the four tokens `$ { <ident> }`) collapses to ONE placeholder identifier token
+ * `__mhole_<i>`, where `i` is the index of `param` in the macro's parameter list; every other token is
+ * copied verbatim. An unknown hole name (not a macro parameter) is a located error.
+ *
+ * @param toks  the fragment's raw token run
+ * @param md    the macro declaration (its parameter list resolves a hole name to an index)
+ * @param mc    the call node (for error location)
+ * @return      the placeholder-substituted token run, or a malformed-hole error
+ * @throws      when a `${…}` hole is malformed or names a non-parameter
+ * @since 0.4-macros (§14 A3)
+ */
+fn splice_hole_tokens(toks: []lexer::Token, md: MacroDecl, mc: MacroCall): []lexer::Token | error {
+    var out: []lexer::Token = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= toks.len { break }
+        if toks[i].kind == lexer::TokenKind::Dollar {
+            if i + 3 >= toks.len || toks[i + 1].kind != lexer::TokenKind::LBrace || toks[i + 2].kind != lexer::TokenKind::Ident || toks[i + 3].kind != lexer::TokenKind::RBrace {
+                return err_expand(mc, "a `${…}` injection hole must be `${param}` — a single macro-parameter name in braces (§14.2)")
+            }
+            var hole_name = toks[i + 2].text
+            var idx = param_index(md, hole_name)
+            if idx < 0 {
+                return err_expand(mc, teko::str::concat("`${", teko::str::concat(hole_name, "}` names no parameter of this macro (§14.2)")))
+            }
+            out = teko::list::push(out, lexer::Token { kind = lexer::TokenKind::Ident; text = teko::str::concat(hole_placeholder_prefix(), teko::u64_to_str(idx to u64)); line = toks[i].line; col = toks[i].col })
+            i = i + 4
+            continue
+        }
+        out = teko::list::push(out, toks[i])
+        i++
+    }
+    out
+}
+
+/**
+ * param_index — the 0-based index of parameter `name` in macro `md`'s parameter list, or -1 when absent
+ * (§14 A3). Maps a `${name}` hole to the caller's positional argument.
+ *
+ * @param md    the macro declaration
+ * @param name  the parameter name sought
+ * @return      the parameter index, or -1
+ * @since 0.4-macros (§14 A3)
+ */
+fn param_index(md: MacroDecl, name: str): i64 {
+    var i: u64 = 0
+    loop {
+        if i >= md.params.len { break }
+        if md.params[i].name == name { return i to i64 }
+        i++
+    }
+    -1 to i64
+}
+
+/**
+ * hole_index_of — the argument index a placeholder Var name encodes (§14 A3): `__mhole_<i>` ⇒ `i`, or -1
+ * when `name` is not a hole placeholder. Read by `subst_holes_expr` to select the caller's argument.
+ *
+ * @param name  the identifier name under test
+ * @return      the encoded argument index, or -1
+ * @since 0.4-macros (§14 A3)
+ */
+fn hole_index_of(name: str): i64 {
+    var pfx = hole_placeholder_prefix()
+    if name.len <= pfx.len { return -1 to i64 }
+    var i: u64 = 0
+    loop {
+        if i >= pfx.len { break }
+        if name[i] != pfx[i] { return -1 to i64 }
+        i++
+    }
+    match parse_u64_digits(teko::str::slice(name, pfx.len, name.len)) { u64 as v => v to i64; null => -1 to i64 }
+}
+
+/**
+ * parse_u64_digits — parse a run of ASCII digits to a `u64`, or null when `s` is empty or non-numeric
+ * (§14 A3). The tiny inverse of `teko::u64_to_str` the placeholder decoder needs.
+ *
+ * @param s  the digit string
+ * @return   the parsed value, or null
+ * @since 0.4-macros (§14 A3)
+ */
+fn parse_u64_digits(s: str): u64 | null {
+    if s.len == 0 { return null }
+    var v: u64 = 0 to u64
+    var i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        if s[i] < b'0' || s[i] > b'9' { return null }
+        v = v * (10 to u64) + ((s[i] to u64) - (b'0' to u64))
+        i++
+    }
+    v
+}
+
+/**
+ * macro_call_name — the target name of a `@name(...)` call: its path's last segment (§14 A3).
+ *
+ * @param mc  the macro call
+ * @return    the call's last-segment name, or "" for an empty path
+ * @since 0.4-macros (§14 A3)
+ */
+fn macro_call_name(mc: MacroCall): str {
+    if mc.callee.segments.len == 0 { return "" }
+    mc.callee.segments[mc.callee.segments.len - 1].name
+}
+
+/**
+ * err_expand — a located Family-A expansion diagnostic, positioned on the `@call` (§14 A3).
+ *
+ * @param mc   the offending macro call
+ * @param msg  the diagnostic text
+ * @return     the located error
+ * @since 0.4-macros (§14 A3)
+ */
+fn err_expand(mc: MacroCall, msg: str): error {
+    var line = if mc.callee.segments.len > 0 { 0 to u32 } else { 0 to u32 }
+    error { message = msg }
+}
+
+/**
+ * with_kind — a copy of `e` carrying a new `kind`, preserving its source position (§14 A3). The
+ * functional-update the expansion walk uses to rebuild an expression from its rewritten children.
+ *
+ * @param e     the original expression (its line/col are kept)
+ * @param k     the rewritten expression kind
+ * @return      a fresh `Expr` with `k` at `e`'s position
+ * @since 0.4-macros (§14 A3)
+ */
+fn with_kind(e: Expr, k: ExprKind): Expr { Expr { kind = k; line = e.line; col = e.col } }
+
+/**
+ * walk_exprs — expand every Family-A macro call across an expression LIST (§14 A3), preserving order.
+ *
+ * @param es     the expressions to walk
+ * @param prog   the program (macro lookup surface)
+ * @param holes  the active hole substitution (inactive at the top level)
+ * @param depth  the current expansion depth
+ * @return       the rewritten list, or the first expansion error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A3)
+ */
+fn walk_exprs(es: []Expr, prog: Program, holes: MacroHoles, depth: u64): []Expr | error {
+    var out: []Expr = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= es.len { break }
+        var x = match walk_expr(es[i], prog, holes, depth) { Expr as e => e; error as er => return er }
+        out = teko::list::push(out, x)
+        i++
+    }
+    out
+}
+
+/**
+ * walk_cmpterms — expand macro calls inside a comparison chain's terms (§14 A3).
+ *
+ * @param ts     the comparison terms
+ * @param prog   the program
+ * @param holes  the active hole substitution
+ * @param depth  the current expansion depth
+ * @return       the rewritten terms, or the first error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A3)
+ */
+fn walk_cmpterms(ts: []CmpTerm, prog: Program, holes: MacroHoles, depth: u64): []CmpTerm | error {
+    var out: []CmpTerm = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= ts.len { break }
+        var o = match walk_expr(ts[i].operand, prog, holes, depth) { Expr as e => e; error as er => return er }
+        out = teko::list::push(out, CmpTerm { op = ts[i].op; operand = o })
+        i++
+    }
+    out
+}
+
+/**
+ * walk_arrayelems — expand macro calls inside array-literal elements (§14 A3), preserving spread flags.
+ *
+ * @param els    the array elements
+ * @param prog   the program
+ * @param holes  the active hole substitution
+ * @param depth  the current expansion depth
+ * @return       the rewritten elements, or the first error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A3)
+ */
+fn walk_arrayelems(els: []ArrayElem, prog: Program, holes: MacroHoles, depth: u64): []ArrayElem | error {
+    var out: []ArrayElem = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= els.len { break }
+        var x = match walk_expr(els[i].expr, prog, holes, depth) { Expr as e => e; error as er => return er }
+        out = teko::list::push(out, ArrayElem { is_spread = els[i].is_spread; expr = x })
+        i++
+    }
+    out
+}
+
+/**
+ * walk_arms — expand macro calls inside every match arm's guard and body (§14 A3), preserving patterns.
+ *
+ * @param arms   the match arms
+ * @param prog   the program
+ * @param holes  the active hole substitution
+ * @param depth  the current expansion depth
+ * @return       the rewritten arms, or the first error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A3)
+ */
+fn walk_arms(arms: []Arm, prog: Program, holes: MacroHoles, depth: u64): []Arm | error {
+    var out: []Arm = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        var g = match walk_expr(arms[i].guard, prog, holes, depth) { Expr as e => e; error as er => return er }
+        var b = match walk_stmts(arms[i].body, prog, holes, depth) { []Statement as s => s; error as er => return er }
+        out = teko::list::push(out, Arm { pattern = arms[i].pattern; has_when = arms[i].has_when; guard = g; body = b })
+        i++
+    }
+    out
+}
+
+/**
+ * walk_expr — the Family-A expansion walk over ONE expression (§14 A3): a `@macro` call expands (its
+ * lowering fragment re-parsed and hole-filled), a `__mhole_<i>` placeholder Var substitutes the caller's
+ * i-th argument when a hole substitution is active, and every other node rebuilds from its rewritten
+ * children. A Family-B `@comptime` call is returned unchanged (left for the fold pass).
+ *
+ * @param e      the expression to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param holes  the active hole substitution (inactive at the top level)
+ * @param depth  the current expansion depth
+ * @return       the rewritten expression, or an expansion error
+ * @throws       when an inner expansion fails or a hole index is out of range
+ * @since 0.4-macros (§14 A3)
+ */
+fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | error {
+    match e.kind {
+        MacroCall as mc => {
+            var sargs = match walk_exprs(mc.args, prog, holes, depth) { []Expr as a => a; error as er => return er }
+            expand_macro_call(MacroCall { callee = mc.callee; args = sargs; callee_type_args = mc.callee_type_args }, prog, depth)
+        }
+        Var as v => {
+            if holes.active {
+                var hi = hole_index_of(v.name)
+                if hi >= 0 to i64 {
+                    if (hi to u64) >= holes.args.len { return error { message = "internal: macro hole index out of range (§14 A3)" } }
+                    return walk_expr(holes.args[hi to u64], prog, holes, depth)
+                }
+            }
+            e
+        }
+        Number => e
+        StrLit => e
+        ByteLit => e
+        CharLit => e
+        BoolLit => e
+        NullLit => e
+        PathExpr => e
+        Binary as b => {
+            var l = match walk_expr(b.left, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var r = match walk_expr(b.right, prog, holes, depth) { Expr as x => x; error as er => return er }
+            with_kind(e, Binary { op = b.op; left = l; right = r })
+        }
+        Unary as u => {
+            var o = match walk_expr(u.operand, prog, holes, depth) { Expr as x => x; error as er => return er }
+            with_kind(e, Unary { op = u.op; operand = o })
+        }
+        Compare as c => {
+            var f = match walk_expr(c.first, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var rest = match walk_cmpterms(c.rest, prog, holes, depth) { []CmpTerm as t => t; error as er => return er }
+            with_kind(e, Compare { first = f; rest = rest })
+        }
+        Call as cl => {
+            var args = match walk_exprs(cl.args, prog, holes, depth) { []Expr as x => x; error as er => return er }
+            with_kind(e, Call { callee = cl.callee; args = args; arg_names = cl.arg_names; owner_type_args = cl.owner_type_args; callee_type_args = cl.callee_type_args })
+        }
+        MethodCall as mc2 => {
+            var recv = match walk_expr(mc2.receiver, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var args = match walk_exprs(mc2.args, prog, holes, depth) { []Expr as x => x; error as er => return er }
+            with_kind(e, MethodCall { receiver = recv; method = mc2.method; args = args; arg_names = mc2.arg_names; type_args = mc2.type_args })
+        }
+        IfExpr as f => {
+            var cond = match walk_expr(f.cond, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var tb = match walk_stmts(f.then_blk, prog, holes, depth) { []Statement as s => s; error as er => return er }
+            var eb = match walk_stmts(f.else_blk, prog, holes, depth) { []Statement as s => s; error as er => return er }
+            with_kind(e, IfExpr { cond = cond; then_blk = tb; has_else = f.has_else; else_blk = eb })
+        }
+        MatchExpr as m => {
+            var subj = match walk_expr(m.subject, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var arms = match walk_arms(m.arms, prog, holes, depth) { []Arm as a => a; error as er => return er }
+            with_kind(e, MatchExpr { subject = subj; arms = arms })
+        }
+        FieldAccess as fa => {
+            var recv = match walk_expr(fa.receiver, prog, holes, depth) { Expr as x => x; error as er => return er }
+            with_kind(e, FieldAccess { receiver = recv; field = fa.field })
+        }
+        Cast as ct => {
+            var x = match walk_expr(ct.expr, prog, holes, depth) { Expr as y => y; error as er => return er }
+            with_kind(e, Cast { expr = x; target = ct.target })
+        }
+        StructLit as sl => {
+            var fv = match walk_exprs(sl.field_vals, prog, holes, depth) { []Expr as x => x; error as er => return er }
+            with_kind(e, StructLit { type_path = sl.type_path; type_args = sl.type_args; field_names = sl.field_names; field_vals = fv })
+        }
+        Index as ix => {
+            var recv = match walk_expr(ix.receiver, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var idx = match walk_expr(ix.index, prog, holes, depth) { Expr as x => x; error as er => return er }
+            with_kind(e, Index { receiver = recv; index = idx })
+        }
+        Interp as in => {
+            var hs = match walk_exprs(in.holes, prog, holes, depth) { []Expr as x => x; error as er => return er }
+            with_kind(e, Interp { pieces = in.pieces; holes = hs; specs = in.specs })
+        }
+        InExpr as n => {
+            var lhs = match walk_expr(n.lhs, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var elems = match walk_exprs(n.elems, prog, holes, depth) { []Expr as x => x; error as er => return er }
+            with_kind(e, InExpr { lhs = lhs; elems = elems })
+        }
+        ArrayLit as a => {
+            var els = match walk_arrayelems(a.elements, prog, holes, depth) { []ArrayElem as x => x; error as er => return er }
+            with_kind(e, ArrayLit { elements = els })
+        }
+        Lambda as lam => {
+            var b = match walk_stmts(lam.body, prog, holes, depth) { []Statement as s => s; error as er => return er }
+            with_kind(e, Lambda { params = lam.params; body = b })
+        }
+        Borrow as bo => {
+            var o = match walk_expr(bo.operand, prog, holes, depth) { Expr as x => x; error as er => return er }
+            with_kind(e, Borrow { operand = o })
+        }
+        Block as blk => {
+            var b = match walk_stmts(blk.body, prog, holes, depth) { []Statement as s => s; error as er => return er }
+            with_kind(e, Block { body = b })
+        }
+    }
+}
+
+/**
+ * walk_stmts — expand macro calls across a statement LIST (§14 A3), preserving order.
+ *
+ * @param ss     the statements to walk
+ * @param prog   the program
+ * @param holes  the active hole substitution
+ * @param depth  the current expansion depth
+ * @return       the rewritten statements, or the first error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A3)
+ */
+fn walk_stmts(ss: []Statement, prog: Program, holes: MacroHoles, depth: u64): []Statement | error {
+    var out: []Statement = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= ss.len { break }
+        var s = match walk_stmt(ss[i], prog, holes, depth) { Statement as x => x; error as er => return er }
+        out = teko::list::push(out, s)
+        i++
+    }
+    out
+}
+
+/**
+ * walk_stmt — the Family-A expansion walk over ONE statement (§14 A3): each expression the statement
+ * carries is walked (macro calls expanded), each nested block re-walked. A `LoweringFrag` in a normal
+ * statement position passes through unchanged (the checker honest-stops it — it is legal only in a macro
+ * body, which this walk never descends into as statements).
+ *
+ * @param s      the statement to rewrite
+ * @param prog   the program
+ * @param holes  the active hole substitution
+ * @param depth  the current expansion depth
+ * @return       the rewritten statement, or an expansion error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A3)
+ */
+fn walk_stmt(s: Statement, prog: Program, holes: MacroHoles, depth: u64): Statement | error {
+    match s {
+        Binding as b => {
+            var v = match walk_expr(b.value, prog, holes, depth) { Expr as x => x; error as er => return er }
+            Binding { kind = b.kind; target = b.target; has_type = b.has_type; type_ann = b.type_ann; is_ref = b.is_ref; value = v }
+        }
+        Assign as a => {
+            var v = match walk_expr(a.value, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var t = match walk_expr(a.target, prog, holes, depth) { Expr as x => x; error as er => return er }
+            Assign { kind = a.kind; name = a.name; op = a.op; value = v; deref = a.deref; target = t }
+        }
+        Return as r => {
+            var v = match walk_expr(r.value, prog, holes, depth) { Expr as x => x; error as er => return er }
+            var vs = match walk_exprs(r.values, prog, holes, depth) { []Expr as x => x; error as er => return er }
+            Return { has_value = r.has_value; value = v; values = vs }
+        }
+        LoopStmt as l => {
+            var init = match walk_stmts(l.init, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            var body = match walk_stmts(l.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            LoopStmt { label = l.label; init = init; body = body }
+        }
+        BreakStmt => s
+        ContinueStmt => s
+        ExprStmt as es => {
+            var x = match walk_expr(es.expr, prog, holes, depth) { Expr as y => y; error as er => return er }
+            ExprStmt { expr = x }
+        }
+        DeferStmt as d => {
+            var b = match walk_stmts(d.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            DeferStmt { body = b }
+        }
+        AdoptStmt as ad => {
+            var b = match walk_stmts(ad.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            AdoptStmt { name = ad.name; body = b }
+        }
+        BlockStmt as bs => {
+            var b = match walk_stmts(bs.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            BlockStmt { body = b }
+        }
+        MultiBind as mb => {
+            var vs = match walk_exprs(mb.values, prog, holes, depth) { []Expr as x => x; error as er => return er }
+            MultiBind { kind = mb.kind; shape = mb.shape; targets = mb.targets; has_type = mb.has_type; type_ann = mb.type_ann; values = vs; line = mb.line; col = mb.col }
+        }
+        LoweringFrag => s
+    }
+}

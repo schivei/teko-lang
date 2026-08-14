@@ -465,13 +465,15 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool): Frontend | error {
     // --- C7.1f: keep only the target OS's `#os("…")` function variants (conditional compilation) ---
     var selected = prune_os(pf.parsed, target_os(pf.manifest))
 
+    var expanded = match parser::expand_macros_syntactic(selected) { parser::Program as p => p; error as e => return e }
+
     // --- C7.10: load dep .tkl packages and prepend their typed items before type-checking ---
     // The dep's TProgram items carry their own namespaces (set when they were originally checked);
     // we pre-seed the collection environment with them so the project's code can call dep functions
     // and reference dep types. m.deps is empty when there is no [dependencies] section → no-op.
     var dep_prog = match load_deps_program(pf.manifest) { checker::TProgram as p => p; error as e => return e }
 
-    var checked = match checked_program_of(selected, dep_prog, !quiet, tty, pf.diags) { checker::TProgram as c => c; error as e => return e }
+    var checked = match checked_program_of(expanded, dep_prog, !quiet, tty, pf.diags) { checker::TProgram as c => c; error as e => return e }
 
     Frontend { prog = checked; manifest = pf.manifest }
 }
