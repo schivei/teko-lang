@@ -122,14 +122,19 @@ teko::
 │  ├─ rand         CSPRNG                                                              [FFI getrandom]
 │  ├─ pk           X25519 · Ed25519 · RSA-OAEP/PSS · ECDSA P-256 · ECDH               (sym="sync" / asym="async")
 │  ├─ x509         parse_cert · verify_chain · SAN
+│  ├─ jose         JWS (assinatura) · JWE (encriptação) · JWK/JWKS · JWT        [sobre JSON]
+│  ├─ xmldsig      XML-DSig sign/verify · C14N · XML-Enc                        [sobre XML]
+│  ├─ cose         COSE sign/encrypt (WebAuthn/FIDO2, IoT)                      [sobre CBOR]
 │  ├─ pgp          OpenPGP (RFC 9580)
 │  ├─ openssl      provider libcrypto/libssl (simétrica+assimétrica, pilha inteira)   [FFI]
 │  └─ gpg          GnuPG/gpgme (PGP/GPG)                                               [FFI]
 ├─ net  (OSI 4–7; codec puro, transporte de socket [FFI])
 │  ├─ tcp · udp · unix                                                                 [L4]
-│  ├─ tls · dtls                                                                       [L5/6]
+│  ├─ tls · dtls        + mTLS/Client-Side-Certificate                                 [L5/6]
 │  ├─ dns                                                                              [FFI getaddrinfo]
 │  ├─ http · http2 · http3                                                            [L7 web]
+│  ├─ server           nativo (Kestrel/nginx-like): estático+dinâmico · response-compress · sem CGI
+│  ├─ <forwarded>      atrás de reverse-proxy: X-Forwarded-* + PROXY protocol (proxies confiáveis)
 │  ├─ ws · sse · <polling> · <long-polling>                                           [realtime]
 │  ├─ mqtt · redis                                                                     [mensageria/cache]
 │  ├─ smtp · imap · pop3                                                               [mail]
@@ -277,7 +282,10 @@ arithmetic** (crypto must not panic on int overflow) is the `teko::math::checked
 | C6 | `teko::crypto::rand` | `exp fn rand_bytes(n: u64): []byte \| error` (fill a `Buf`) | KEYSTONE-BUF; **FFI** `getrandom`/`getentropy`/`BCryptGenRandom` `#os` | **needs FFI** (no non-native fallback) | **P1** |
 | C7 | `teko::crypto::pk` (asymmetric) | `exp fn x25519(sk, pk: []byte): []byte` · `ed25519_sign/verify` · RSA-OAEP/PSS · ECDSA P-256 · ECDH | C0, C1, C6, S-ASN1, `math::bigint` | **pure** for X25519/Ed25519; provider or bigint for RSA/ECDSA | **P2/P3** |
 | C8 | `teko::crypto::x509` | `exp fn parse_cert(der: []byte): Cert \| error` · `verify_chain(...)` · SAN match | S-ASN1, C7, C1 | **pure** | **P3** |
-| C9 | app security helpers | `exp fn jwt_sign/verify(...)` · `totp(...)`/`hotp(...)` (RFC 6238/4226) · COSE | C1/C2/C3/C7 + S-JSON | **pure** | **P3** |
+| C9 | app security helpers | `totp(...)`/`hotp(...)` (RFC 6238/4226) · password-hash helpers | C1/C2 | **pure** | **P3** |
+| C-JOSE | `teko::crypto::jose` | **JOSE sobre JSON** — **JWS** (assinatura) · **JWE** (encriptação) · **JWK/JWKS** (chaves) · **JWT** | C1/C2/C3/C7 + S-JSON/base64url | **pure** | **P3** |
+| C-XMLSIG | `teko::crypto::xmldsig` | **XML Signature (XML-DSig)** sign/verify + **C14N** (canonicalization) · XML-Enc | C1/C7 + S-XML | **pure** | **P3** |
+| C-COSE | `teko::crypto::cose` | **COSE sobre CBOR** — sign1/mac/encrypt (WebAuthn/FIDO2, IoT) | C1/C7 + S-CBOR | **pure** | **P3** |
 | C-PGP | `teko::crypto::pgp` | OpenPGP (RFC 9580) encrypt/decrypt/sign/verify, ASCII armor, keyring | C1/C4/C5/C7/C6 + `compress::zlib` | **pure**, top-of-stack | **P3** |
 
 **Native-feasibility note.** The whole hash/MAC/KDF/cipher/AEAD stack is pure Teko over `[]byte` —
@@ -334,7 +342,7 @@ pure-Teko *codecs* (`.tkt`-testable); only the socket/TLS syscalls are FFI.
 
 | # | Module | Surface (sketch) | Deps | Native-feasibility | Tier |
 |---|---|---|---|---|---|
-| N3 | `teko::net::tls` | `exp type TlsStream { read/write/close }` (same shape as TcpStream) · `exp fn client(tcp: TcpStream, sni: str): TlsStream\|error` · server; ALPN | N1; **FFI** OS provider (Secure Transport / OpenSSL `libssl` / SChannel) `#os` — OR pure-Teko on C4/C5/C7 later | **needs FFI (provider first)** | **P2** |
+| N3 | `teko::net::tls` | `exp type TlsStream { read/write/close }` · `exp fn client(tcp, sni, client_cert?: Cert): TlsStream\|error` · server; ALPN; **mTLS — Client-Side Certificate** (server exige+verifica o cert do cliente, client apresenta o seu) | N1, C-X509; **FFI** OS provider (Secure Transport / OpenSSL `libssl` / SChannel) `#os` — OR pure-Teko on C4/C5/C7 later | **needs FFI (provider first)** | **P2** |
 | N3b | `teko::net::dtls` | datagram TLS over UDP (WebRTC/QUIC-adjacent) | N2, N3 | provider/pure | **P3** |
 
 **Layer 7 — application:**
@@ -343,6 +351,8 @@ pure-Teko *codecs* (`.tkt`-testable); only the socket/TLS syscalls are FFI.
 |---|---|---|---|---|---|
 | N4 | `teko::net::dns` | `exp fn resolve(host: str): []SocketAddr\|error` | N0; **FFI** `getaddrinfo/freeaddrinfo` | **needs FFI**; later pure DoH/DoT | **P2** |
 | N5 | `teko::net::http` | `exp type Request`/`Response` · header map · `exp fn get(url: str): Response\|error` · `exp fn serve(addr, handler: fn(Request): Response): error?` · URL parser | N1 (client), N3 (https), S-JSON, `compress::gzip` | parser/encoder **pure**; transport via N1/N3 | **P2** |
+| N5-SRV | `teko::net::server` | **servidor HTTP nativo próprio** (estilo Kestrel/nginx, **sem CGI**): estático + dinâmico · TLS + **mTLS** · **response-compression** (gzip/brotli por `Accept-Encoding`, estático OU dinâmico **a gosto do dev**) · roteamento · keep-alive · suporte nativo **atrás de outro forward-proxy** | N5, N3, `compress::{gzip,brotli}` | **pure** (transporte via N1/N3) | **P2** |
+| N5-FWD | `teko::net::http` forwarded | **rodar atrás de reverse-proxy com segurança**: parse/trust de `X-Forwarded-For/Proto/Host` + **PROXY protocol** (v1/v2), com **lista de proxies confiáveis** (não confiar cego) | N5 | **pure** | **P2** |
 | N6 | `teko::net::ws` | RFC 6455 upgrade + frame codec (fin/opcode/mask) | N5, C1 (SHA-1 accept-key) | codec **pure** | **P2** |
 | N7 | `teko::net::sse` | `text/event-stream` codec (client+server) | N5 | **pure** | **P3** |
 | N7b | `teko::net::http` realtime | **polling** (GET repetido) + **long-polling** (GET pendurado) helpers sobre N5 — as 4 opções realtime são WS (N6) · SSE (N7) · polling · long-polling, igualmente importantes | N5 | **pure** | **P2** |
