@@ -33,6 +33,13 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   Nada de terceiro construto.
 - **Precisão de mecânica de runtime.** O dono pensa em fat header vs thin transiente, `ref` = alias de
   slot, residência de arena (F1/F2). Registrar a **mecânica**, não só a superfície.
+- **FFI é OPCIONAL, nunca obrigatório; erro tarde e no uso (ruling do dono).** Todo recurso da stdlib
+  respaldado por lib externa (OpenSSL, GPG, SQLite, Oracle/ODBC, brotli/lzma/zstd, …) é **opt-in**: quem não
+  usa **compila/linka/roda sem a lib**. **Erro só se o dev usar** o recurso cuja lib falta, e — **salvo alguns
+  casos — link DINÂMICO → erro de RUNTIME** (símbolo ausente no load/1ª chamada), não de compilação. Refina o
+  KEYSTONE-LINK ("não linkar o não-usado" → "falhar só no uso, dinamicamente"). Impl **puro-Teko** = default
+  zero-dep; provider FFI = alternativa. E o padrão **"bindar, não reimplementar"** (OpenSSL/GPG); cada binding
+  sync-first + `await`→`Intent` async por cima.
 
 ## Sequenciamento
 - **Destrava dependência primeiro.** Antecipar itens do caminho crítico (item 14 antes da Intent).
