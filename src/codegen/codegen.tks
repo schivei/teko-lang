@@ -1833,6 +1833,17 @@ fn cg_opt_mangle(buf: []byte, inner: checker::Type): []byte | error {
             checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
             _ => cg_opt_mangle(cb(buf, "slice_"), sl.element)
         }
+        checker::Variant as va => {
+            var out = cb(buf, "u")
+            var i = 0
+            loop {
+                if i >= va.members.len { break }
+                out = cb(out, "_")
+                out = match cg_member_key(out, va.members[i]) { []byte as o => o; error as e => return e }
+                i++
+            }
+            out
+        }
         _ => error { message = "codegen: optional/slice inner type not yet supported" }
     }
 }
@@ -1866,8 +1877,32 @@ fn cg_opt_mangle_str(inner: checker::Type): str | error {
             checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
             _ => { var elem_s = match cg_opt_mangle_str(sl.element) { str as s => s; error as e => return e }; teko::str::concat("slice_", elem_s) }
         }
+        checker::Variant as va => cg_union_mangle_str(va)
         _ => error { message = "codegen: optional/slice inner type not yet supported" }
     }
+}
+
+/**
+ * cg_union_mangle_str — the `u_<member keys>` inner mangle suffix of a resolved anonymous union, the str
+ * twin of `cg_opt_mangle`'s §9.D `Variant` arm: `u` then, per member in SOURCE ORDER, `_` + the member's
+ * key (`cg_member_key_str`, which adds the C-keyword `_` guard). Byte-identical to `cg_variant_typename`'s
+ * `tk_u_<keys>` minus the `tk_` prefix, so a `[](A | B)` typedef name agrees whichever path emits it.
+ *
+ * @param va  the resolved anonymous union (already null-first normalized at build)
+ * @return    the `u_<keys>` suffix, or a member-key mangle error
+ * @throws    when a member's key cannot be mangled (untyped empty slice/optional element)
+ * @since     §9.D capability (b)
+ */
+fn cg_union_mangle_str(va: checker::Variant): str | error {
+    var out = "u"
+    var i = 0
+    loop {
+        if i >= va.members.len { break }
+        var k = match cg_member_key_str(va.members[i]) { str as s => s; error as e => return e }
+        out = teko::str::concat(out, teko::str::concat("_", k))
+        i++
+    }
+    out
 }
 
 // cg_is_c_keyword — does `s` collide with a C(23) keyword? A variant member KEY (a union
@@ -2592,6 +2627,33 @@ fn cg_texpr_inst_name(stem: str, args: []parser::TypeExpr): str {
     out
 }
 
+/**
+ * cg_emit_slice_type_expr — emit the C typedef name for a SYNTACTIC slice `[]T` in a signature/field
+ * position (the extracted `emit_type_expr` slice arm). A plain element keeps the fast texpr suffix
+ * (`tk_slice_<elem>`); a UNION element (`[](A | B)`, §9.D b) resolves to the null-normalized
+ * `checker::Slice{Variant}` and reuses the resolved slice typedef (`cg_slice_typename` → `cg_opt_mangle`'s
+ * §9.D `Variant` arm), so a `[]union` USE names the same `tk_slice_u_<keys>` the DECL collected — one
+ * canonicalizer (`cg_union_normalize_null`), byte-agreement by construction (mirroring the top-level
+ * `UnionType` idiom).
+ *
+ * @param buf     the C-symbol byte buffer to append to
+ * @param prog    the codegen program (decls for union resolution)
+ * @param st      the slice type expression
+ * @param ref_ns  the referencing namespace (for union resolution)
+ * @return        the extended buffer, or a mangle error
+ * @throws        when a union element's member key cannot be mangled
+ * @since         §9.D capability (b)
+ */
+fn cg_emit_slice_type_expr(buf: []byte, prog: CgProg, st: parser::SliceType, ref_ns: str): []byte | error {
+    match st.element {
+        parser::UnionType => match cg_te_to_type_ns(prog, ref_ns, st) {
+            checker::Slice as sl => cg_slice_typename(buf, sl.element)
+            _ => cg_opt_mangle_texpr(cb(buf, "tk_slice_"), st.element)
+        }
+        _ => cg_opt_mangle_texpr(cb(buf, "tk_slice_"), st.element)
+    }
+}
+
 fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str): []byte | error {
     match te {
         parser::NamedType as nt => {
@@ -2646,9 +2708,7 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str):
             // a user-defined named aggregate -> its mangled typedef name (matches emit_type).
             mangle_type_name(buf, "", cdname)
         }
-        // SLICE `[]T` in a signature / field position → the generated `tk_slice_<elem>` struct (the
-        // same name cg_slice_typename produces from the resolved type, so decl + ref agree).
-        parser::SliceType as st => cg_opt_mangle_texpr(cb(buf, "tk_slice_"), st.element)
+        parser::SliceType as st => cg_emit_slice_type_expr(buf, prog, st, ref_ns)
         // INLINE union `A | B | …` in a signature/field position → the generated tk_u_<keys>
         // tagged-union struct (B-cg2); the typedef is stamped in the prelude. (C: emit_type_expr TEXPR_UNION arm.)
         parser::UnionType as ut => {
