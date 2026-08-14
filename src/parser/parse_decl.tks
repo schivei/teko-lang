@@ -707,19 +707,24 @@ fn value_member_is_operator(tokens: []lexer::Token, pos: u64): bool {
 
 /**
  * parse_operator_member — parse ONE `operator __dunder(<params>): <ret> { <body> }` declaration in a
- * value-type body (§9 ruling 1). Operators are STATIC (every operand is written explicitly — NO
- * synthetic `self` receiver is injected) and READONLY; the parsed `Function` carries
- * `is_operator = true`, `is_static = true`, and the dunder as its `name`. `self` may appear as a
- * param/return TYPE (`left: self`) — it is parsed as an ordinary named type and resolved to the
- * owner by the checker.
+ * value-type / struct / class / trait body (bodied) or an interface body (bodyless, §6/§9.4). Operators
+ * are STATIC (every operand is written explicitly — NO synthetic `self` receiver is injected) and
+ * READONLY; the parsed `Function` carries `is_operator = true`, `is_static = true`, and the dunder as
+ * its `name`. `self` may appear as a param/return TYPE (`left: self`) — it is parsed as an ordinary
+ * named type and resolved to the owner by the checker. When `allow_bodyless` is true and no `{` follows
+ * the return type, the operator is a bodyless CONTRACT member (an interface's required operator) and
+ * parses with an empty body; when false a `{ … }` body is mandatory (operator is behaviour).
  *
- * @param tokens  the token stream
- * @param pos     the member's first token (an optional leading doc, then `operator`)
- * @return        the parsed operator `Function` + the resume index
- * @throws        a missing dunder name, a malformed parameter list/return type, or a missing body
- * @since §9
+ * @param tokens          the token stream
+ * @param pos             the member's first token (an optional leading doc, then `operator`)
+ * @param allow_bodyless  true in an interface body (a bodyless operator contract is legal), false in a
+ *                        value-type/struct/class/trait body (a real body is required)
+ * @return                the parsed operator `Function` + the resume index
+ * @throws                a missing dunder name, a malformed parameter list/return type, or a missing
+ *                        body when a body is required
+ * @since §9 (§6/§9.4 extends to struct/class/interface/trait)
  */
-fn parse_operator_member(tokens: []lexer::Token, pos: u64): Parsed<Function> | error {
+fn parse_operator_member(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parsed<Function> | error {
     var p = pos
     var has_doc = false
     var doc = ""
@@ -750,6 +755,9 @@ fn parse_operator_member(tokens: []lexer::Token, pos: u64): Parsed<Function> | e
         p = ret.next
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+        if allow_bodyless {
+            return Parsed<Function> { node = Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params.items; has_return = has_return; return_type = return_type; body = teko::list::empty(); vis = Visibility::Pub; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = true; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = true }; next = p }
+        }
         return err_at(tokens, p, "expected '{' for the operator body")
     }
     var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
@@ -778,7 +786,7 @@ fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedList<Functi
     }
     loop {
         if value_member_is_operator(tokens, p) {
-            var op = match parse_operator_member(tokens, p) { Parsed<Function> as x => x; error as e => return e }
+            var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
             methods = teko::list::push(methods, op.node)
             p = op.next
         } else {
@@ -879,7 +887,11 @@ fn parse_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
         return ParsedStructBody { fields = fields; methods = methods; consts = consts; next = p + 1 }
     }
     loop {
-        if struct_item_is_method(tokens, p) {
+        if value_member_is_operator(tokens, p) {
+            var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
+            methods = teko::list::push(methods, op.node)
+            p = op.next
+        } else if struct_item_is_method(tokens, p) {
             var m = match parse_member_fn_or_accessor(tokens, p, false) { Parsed<Decl> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a struct method must parse to a Function") }
             methods = teko::list::push(methods, mf)
@@ -945,7 +957,11 @@ fn parse_class_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
         return ParsedStructBody { fields = fields; methods = methods; consts = consts; next = p + 1 }
     }
     loop {
-        if class_item_is_method(tokens, p) {
+        if value_member_is_operator(tokens, p) {
+            var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
+            methods = teko::list::push(methods, op.node)
+            p = op.next
+        } else if class_item_is_method(tokens, p) {
             var m = match parse_member_fn_or_accessor(tokens, p, false) { Parsed<Decl> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a class method must parse to a Function") }
             methods = teko::list::push(methods, mf)
@@ -1131,13 +1147,19 @@ fn parse_interface_body(tokens: []lexer::Token, pos: u64): Parsed<TypeBody> | er
         return Parsed<TypeBody> { node = InterfaceBody { extends = ext.items; methods = methods }; next = p + 1 }
     }
     loop {
-        var idoc = peel_leading_doc(tokens, p)
-        var imc = peek_member_const(tokens, idoc.next)
-        if imc.is_const || imc.bad_override { return reject_const_member(tokens, imc.kw_pos) }
-        var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<Decl> as x => x; error as e => return e }
-        var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "an interface member must be a method signature (`fn …`)") }
-        methods = teko::list::push(methods, mf)
-        p = m.next
+        if value_member_is_operator(tokens, p) {
+            var op = match parse_operator_member(tokens, p, true) { Parsed<Function> as x => x; error as e => return e }
+            methods = teko::list::push(methods, op.node)
+            p = op.next
+        } else {
+            var idoc = peel_leading_doc(tokens, p)
+            var imc = peek_member_const(tokens, idoc.next)
+            if imc.is_const || imc.bad_override { return reject_const_member(tokens, imc.kw_pos) }
+            var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<Decl> as x => x; error as e => return e }
+            var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "an interface member must be a method signature (`fn …`)") }
+            methods = teko::list::push(methods, mf)
+            p = m.next
+        }
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
         if !is_sep(tokens, p) { return err_at(tokens, p, "expected ';', a newline, or '}' after an interface method") }
         p = skip_seps(tokens, p)
@@ -1193,7 +1215,11 @@ fn parse_trait_members(tokens: []lexer::Token, pos: u64): ParsedStructBody | err
         return ParsedStructBody { fields = fields; methods = methods; consts = consts; next = p + 1 }
     }
     loop {
-        if struct_item_is_method(tokens, p) {
+        if value_member_is_operator(tokens, p) {
+            var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
+            methods = teko::list::push(methods, op.node)
+            p = op.next
+        } else if struct_item_is_method(tokens, p) {
             var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<Decl> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a trait method must parse to a Function") }
             if mf.body.len == 0 {

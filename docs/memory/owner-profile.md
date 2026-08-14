@@ -46,13 +46,6 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
 
 ## Sequenciamento
 - **Destrava dependência primeiro.** Antecipar itens do caminho crítico (item 14 antes da Intent).
-- **ADIANTAR pré-requisitos FORA da posição de origem — proativamente (ruling do dono, aprendido a duras
-  penas).** Um item sequenciado "por último" na ordem nominal deve ser **puxado para frente** quando é
-  pré-requisito de outro. Caso concreto: **§14 (macro/comptime) ANTES do §9.D** — o sweep do §9.D (~2000
-  sítios) só é sustentável com `@Type()`, que é §14. Disparei o §9.D antes do §14 → o implementer HALTOU
-  (premissa falsa). O dono: *"tu tem itens de outras posições que precisam ser adiantados, como 14 macro
-  antes de 9.D, isso era claro para mim."* Lição: mapear a cadeia de pré-requisitos e **re-sequenciar sozinho**
-  (a ordem nominal do §11/§12 não é sagrada quando um item destrava outro).
 - **Adiar alto-churn pro fim.** `exp`/`pub` (visibilidade) **por último** — muitas falhas a corrigir, e a
   grafia é forward-compatible, então atrasá-la minimiza retrabalho.
 - **Design-ahead pro arquiteto.** Passar itens abertos/definidos pelo **arquiteto** e **versionar** o
