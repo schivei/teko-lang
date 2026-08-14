@@ -442,6 +442,23 @@ exp type User = struct {
   valores como **`str | null`** (stringly) ou um **`Json`** value (tipado). Cada formato dono da sua
   mini-gramática de tag (`omitempty`, `@attr`/namespace no XML, coluna/ordem no CSV), como no Go.
 
+**Schema-first também — "refletir" um schema para o tipo (ruling do dono).** Além do type-first (campo↔tag, o
+tipo é o schema), um **tipo pode declarar schema(s) externo(s)** por tag de crase **no nível do tipo** — o
+compilador **reflete o schema** para construir/validar o parser sintetizado:
+```teko
+type A = struct `json="schema.json;schema2.json" xml="a.xsd;b.xsd"` { … }
+```
+- **Multi-schema** separados por `;` (composição/fallback). JSON Schema para `json=`, XSD para `xml=`; lidos no
+  **compile-time** e refletidos na síntese do parser por-tipo.
+- **Aliases/prefixos de namespace são DINÂMICOS e NÃO-CONFIÁVEIS.** Em XML o prefixo (`x:`, `sch:`) é local ao
+  documento e arbitrário (`x:sch="…"` — o `x` muda entre docs). O parser sintetizado **resolve por URI de
+  namespace, NUNCA pelo prefixo** — remapeia o prefixo que o documento usar para a URI esperada.
+- **Namespace = URI, com inferência de PATH LOCAL.** O namespace é uma **URI** (identificador lógico); se **não
+  for pública/resolvível**, o compilador **infere um caminho local** para o schema (comum em XML). URI pública →
+  pode buscar; URI privada → mapeia para arquivo local.
+- **Compõe com o type-first:** o schema externo valida/dirige a forma; os tags de campo mapeiam nomes/opções.
+  Ambos alimentam a **mesma síntese** do parser por-tipo na AST, em compile-time.
+
 ---
 
 ### E. Compression — `teko::compress::*` (extend the existing module)
