@@ -5,7 +5,7 @@
 
 pub type LiteralPattern = struct { value: Expr }   // a scalar literal
 pub type RangePattern = struct { lo: Expr; hi: Expr }   // lo ..= hi (inclusive)
-pub type AltPattern = struct { options: []Pattern }   // a | b | … (value axis)
+pub type AltPattern = struct { options: []@Pattern() }   /* a | b | … (value axis) */
 /**
  * BindPattern — a named / binding / slice pattern: `Foo`, `Foo as x`, or `[]T as x`. A bare `Foo`
  * (no binder) has `has_binding = false` (P3b). A slice pattern (`is_slice`) leaves `type_name` unused
@@ -43,7 +43,7 @@ pub type NullPattern = struct { }   // null — matches the NONE of an optional 
  * @field binding  the bound identifier `v`
  * @since §9.D capability (c)
  */
-pub type GroupBindPattern = struct { options: []Pattern; binding: str }
+pub type GroupBindPattern = struct { options: []@Pattern(); binding: str }
 
 /**
  * MacroPattern — a `@name(...)` type-macro call standing in a PATTERN-primary position (§9.D CR3): the
@@ -59,10 +59,18 @@ pub type GroupBindPattern = struct { options: []Pattern; binding: str }
  */
 pub type MacroPattern = struct { macro_call: TypeExpr }
 
-pub type Pattern = variant LiteralPattern | RangePattern | AltPattern | GroupBindPattern | BindPattern | FieldPattern | WildcardPattern | NullPattern | MacroPattern
+/**
+ * Pattern — the `match`-arm pattern axis, retired from a nominal `variant` to the §9.D inline union
+ * `@Pattern()`: a scalar literal, an inclusive range, an alternation, a grouped bind, a named/binding/
+ * slice pattern, a field destructure, wildcard/null, or (§9.D CR3) a `MacroPattern` expanded away before
+ * type-check. Recursive members (`AltPattern`/`GroupBindPattern` carry `[]@Pattern()`) box under CR1.
+ *
+ * @since §9.D (retired from `type Pattern = variant …`)
+ */
+macro Pattern() { lowering { parser::LiteralPattern | parser::RangePattern | parser::AltPattern | parser::GroupBindPattern | parser::BindPattern | parser::FieldPattern | parser::WildcardPattern | parser::NullPattern | parser::MacroPattern } }
 
 pub type Arm = struct {
-    pattern: Pattern
+    pattern: @Pattern()
     has_when: bool   // a `when` guard present? (does NOT count for exhaustiveness)
     guard: Expr   // the guard condition (when has_when)
     body: []Statement   // the arm body is a STATEMENT BLOCK, exactly like an `if` branch (B.20):

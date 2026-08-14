@@ -791,7 +791,7 @@ fn walk_arrayelems(els: []ArrayElem, prog: Program, holes: MacroHoles, depth: u6
  * @throws       when an inner type-macro expansion fails
  * @since        §9.D sweep (Family-A type-macro completeness — match-arm pattern type positions)
  */
-fn walk_pattern(p: Pattern, prog: Program, depth: u64): Pattern | error {
+fn walk_pattern(p: @Pattern(), prog: Program, depth: u64): @Pattern() | error {
     match p {
         BindPattern as bp => {
             var st = bp.slice_type
@@ -803,15 +803,15 @@ fn walk_pattern(p: Pattern, prog: Program, depth: u64): Pattern | error {
             BindPattern { type_name = bp.type_name; has_binding = bp.has_binding; binding = bp.binding; is_slice = bp.is_slice; slice_type = st; type_args = ta }
         }
         AltPattern as ap => {
-            var opts = match walk_group_options(ap.options, prog, depth) { []Pattern as x => x; error as e => return e }
+            var opts = match walk_group_options(ap.options, prog, depth) { []@Pattern() as x => x; error as e => return e }
             AltPattern { options = opts }
         }
         GroupBindPattern as gp => {
-            var opts = match walk_group_options(gp.options, prog, depth) { []Pattern as x => x; error as e => return e }
+            var opts = match walk_group_options(gp.options, prog, depth) { []@Pattern() as x => x; error as e => return e }
             GroupBindPattern { options = opts; binding = gp.binding }
         }
         MacroPattern as mp => {
-            var opts = match macro_pattern_options(mp, prog, depth) { []Pattern as x => x; error as e => return e }
+            var opts = match macro_pattern_options(mp, prog, depth) { []@Pattern() as x => x; error as e => return e }
             if opts.len == 1 { opts[0] } else { AltPattern { options = opts } }
         }
         _ => p
@@ -833,14 +833,14 @@ fn walk_pattern(p: Pattern, prog: Program, depth: u64): Pattern | error {
  * @throws       when an inner type-macro expansion fails or does not yield named cases
  * @since        §9.D CR3
  */
-fn walk_group_options(ps: []Pattern, prog: Program, depth: u64): []Pattern | error {
-    var out: []Pattern = teko::list::empty()
+fn walk_group_options(ps: []@Pattern(), prog: Program, depth: u64): []@Pattern() | error {
+    var out: []@Pattern() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= ps.len { break }
         match ps[i] {
             MacroPattern as mp => {
-                var cases = match macro_pattern_options(mp, prog, depth) { []Pattern as c => c; error as e => return e }
+                var cases = match macro_pattern_options(mp, prog, depth) { []@Pattern() as c => c; error as e => return e }
                 var j: u64 = 0
                 loop {
                     if j >= cases.len { break }
@@ -849,7 +849,7 @@ fn walk_group_options(ps: []Pattern, prog: Program, depth: u64): []Pattern | err
                 }
             }
             _ => {
-                var np = match walk_pattern(ps[i], prog, depth) { Pattern as x => x; error as e => return e }
+                var np = match walk_pattern(ps[i], prog, depth) { (@Pattern()) as x => x; error as e => return e }
                 out = teko::list::push(out, np)
             }
         }
@@ -872,7 +872,7 @@ fn walk_group_options(ps: []Pattern, prog: Program, depth: u64): []Pattern | err
  * @throws       when the macro does not expand to a union of named cases
  * @since        §9.D CR3
  */
-fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []Pattern | error {
+fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []@Pattern() | error {
     var te = match walk_type(mp.macro_call, prog, depth) { TypeExpr as t => t; error as e => return e }
     append_case_options(te, teko::list::empty())
 }
@@ -889,7 +889,7 @@ fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []Pattern
  * @throws     when a member is not a named case
  * @since      §9.D CR3
  */
-fn append_case_options(te: TypeExpr, acc: []Pattern): []Pattern | error {
+fn append_case_options(te: TypeExpr, acc: []@Pattern()): []@Pattern() | error {
     match te {
         NamedType as nt => teko::list::push(acc, BindPattern { type_name = nt.path; has_binding = false; binding = ""; is_slice = false; slice_type = null; type_args = nt.args })
         UnionType as ut => {
@@ -897,7 +897,7 @@ fn append_case_options(te: TypeExpr, acc: []Pattern): []Pattern | error {
             var i: u64 = 0
             loop {
                 if i >= ut.members.len { break }
-                out = match append_case_options(ut.members[i], out) { []Pattern as x => x; error as e => return e }
+                out = match append_case_options(ut.members[i], out) { []@Pattern() as x => x; error as e => return e }
                 i++
             }
             out
@@ -923,7 +923,7 @@ fn walk_arms(arms: []Arm, prog: Program, holes: MacroHoles, depth: u64): []Arm |
     var i: u64 = 0
     loop {
         if i >= arms.len { break }
-        var pat = match walk_pattern(arms[i].pattern, prog, depth) { Pattern as p => p; error as er => return er }
+        var pat = match walk_pattern(arms[i].pattern, prog, depth) { (@Pattern()) as p => p; error as er => return er }
         var g = match walk_expr(arms[i].guard, prog, holes, depth) { Expr as e => e; error as er => return er }
         var b = match walk_stmts(arms[i].body, prog, holes, depth) { []Statement as s => s; error as er => return er }
         out = teko::list::push(out, Arm { pattern = pat; has_when = arms[i].has_when; guard = g; body = b })
