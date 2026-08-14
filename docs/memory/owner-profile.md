@@ -188,3 +188,12 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   NOT-drained** só **sem agentes** (build seco concorrente com reseed compete por memória) e com **build seco
   de confirmação** antes de drenar. Nunca mexer nas worktrees de trabalho paralelo do dono (`cargo/*`,
   `theory/*`, `native/*`).
+
+## Lições da wave 0.3.1 — 2026-08-14 (sessão autônoma noturna)
+
+- **Container é orquestração, NÃO build.** PROIBIDO `teko test .` e `TEKO_MEM_PARANOID` locais (derrubam o container). Build/fixpoint GUARDADO plano (`ulimit -v 6291456`, ~3.6-4.3GB, sem test/mem-paranoid) é a fronteira tolerada. Toda validação (fixpoint, testes, mem-paranoid, regressões) é via CI no PR #110.
+- **Reseed é validado por CI (`teko test .` + fixpoint), NÃO por guarded build.** O build `--no-verify` não compila os `.tkt`; drift de teste, match não-exaustivo sobre variante nova, e gaps de lowering nativo só afloram no `teko test .` do CI. Disciplina: cada crumb que adiciona/muda variante faz grep+update de TODOS os sites de match (produto `.tks` E teste `.tkt`). Provado 4×: Env drift (c0f5e780), len, §14-match, native-gaps.
+- **Não assumir "pré-existente" sem ler o log.** Descartei o match não-exaustivo do §14 como "len pré-existente" — era regressão nova. Ler, não assumir.
+- **Memória: era inflação de PICO (sobre-alocação transitória), não leak.** O `mem-paranoid` mede arena não-liberada → correu limpo em todos os passes pesados (2×). Os restarts eram pico do 9-ops (`value_op_owner` alocando no caminho quente) + execução local pesada. Fix: `methods_declare_operator` alloc-free.
+- **False-green da rota-C.** O Probe D corria `cc` incondicionalmente, mascarando honest-stops do backend nativo. O gate estrito (falha-se-há-C) desmascara o backlog `.32` do subset N1/N2 — a native-test-lane vermelha é WIP-conhecido por design, não regressão. O gate `mem-paranoid` conflaciona Q1(memória, sem leak) com Q2(completude nativa, WIP).
+- **Coordination hazard:** worktrees que compartilham o ref `fix/retirement` movem o main tree. Agentes design usam worktree ISOLADO (`-b <fresh> origin/fix/retirement`); folds via detached-worktree merge+push sem tocar o ref compartilhado.
