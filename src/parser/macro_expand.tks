@@ -613,14 +613,86 @@ fn walk_arrayelems(els: []ArrayElem, prog: Program, holes: MacroHoles, depth: u6
  * @throws       when an inner expansion fails
  * @since 0.4-macros (§14 A3)
  */
+/**
+ * walk_pattern — expand `@Type()` macros in a match-arm pattern's TYPE positions (§14 A4 type-position
+ * completeness): a `Foo<@T()> as x` bind pattern's explicit generic args, a `[]@T() as x` slice pattern's
+ * element type, and — recursively — the sub-patterns of an alternation or a grouped bind. Every other
+ * pattern shape carries no type position. Inert when nothing holds a macro.
+ *
+ * @param p      the pattern to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the rewritten pattern, or an error
+ * @throws       when an inner type-macro expansion fails
+ * @since        §9.D sweep (Family-A type-macro completeness — match-arm pattern type positions)
+ */
+fn walk_pattern(p: Pattern, prog: Program, depth: u64): Pattern | error {
+    match p {
+        BindPattern as bp => {
+            var st = bp.slice_type
+            match bp.slice_type {
+                TypeExpr as t => { st = match walk_type(t, prog, depth) { TypeExpr as x => x; error as e => return e } }
+                null => { }
+            }
+            var ta = match walk_types(bp.type_args, prog, depth) { []TypeExpr as x => x; error as e => return e }
+            BindPattern { type_name = bp.type_name; has_binding = bp.has_binding; binding = bp.binding; is_slice = bp.is_slice; slice_type = st; type_args = ta }
+        }
+        AltPattern as ap => {
+            var opts = match walk_patterns(ap.options, prog, depth) { []Pattern as x => x; error as e => return e }
+            AltPattern { options = opts }
+        }
+        GroupBindPattern as gp => {
+            var opts = match walk_patterns(gp.options, prog, depth) { []Pattern as x => x; error as e => return e }
+            GroupBindPattern { options = opts; binding = gp.binding }
+        }
+        _ => p
+    }
+}
+
+/**
+ * walk_patterns — expand type macros across a pattern LIST (an alternation's / grouped bind's options),
+ * preserving order (§14 A4).
+ *
+ * @param ps     the patterns to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the rewritten patterns, or an error
+ * @throws       when an inner type-macro expansion fails
+ * @since        §9.D sweep (Family-A type-macro completeness — pattern type positions)
+ */
+fn walk_patterns(ps: []Pattern, prog: Program, depth: u64): []Pattern | error {
+    var out: []Pattern = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= ps.len { break }
+        var np = match walk_pattern(ps[i], prog, depth) { Pattern as x => x; error as e => return e }
+        out = teko::list::push(out, np)
+        i++
+    }
+    out
+}
+
+/**
+ * walk_arms — expand macros across a `match` expression's arms (§14 A3/A4): each arm's PATTERN type
+ * positions (`walk_pattern`), its `when` guard expression, and its statement body.
+ *
+ * @param arms   the match arms to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param holes  the active hole substitution
+ * @param depth  the current expansion depth
+ * @return       the rewritten arms, or an error
+ * @throws       when an inner expansion fails
+ * @since        0.4-macros (§14 A3)
+ */
 fn walk_arms(arms: []Arm, prog: Program, holes: MacroHoles, depth: u64): []Arm | error {
     var out: []Arm = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= arms.len { break }
+        var pat = match walk_pattern(arms[i].pattern, prog, depth) { Pattern as p => p; error as er => return er }
         var g = match walk_expr(arms[i].guard, prog, holes, depth) { Expr as e => e; error as er => return er }
         var b = match walk_stmts(arms[i].body, prog, holes, depth) { []Statement as s => s; error as er => return er }
-        out = teko::list::push(out, Arm { pattern = arms[i].pattern; has_when = arms[i].has_when; guard = g; body = b })
+        out = teko::list::push(out, Arm { pattern = pat; has_when = arms[i].has_when; guard = g; body = b })
         i++
     }
     out
