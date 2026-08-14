@@ -650,3 +650,62 @@ fn return_type_colon_accepted_in_class_and_interface_methods() {
     teko::assert::is_true(module_ok("type Geo = interface {\n    fn area(self): i64\n}"))
     teko::assert::is_true(module_ok("type Geo = interface {\n    fn area(self): i64\n    fn scaled(self, k: i64): i64\n}"))
 }
+
+/** first_decl_is_macro — does `source` parse to a module whose first decl is a `MacroDecl`? */
+fn first_decl_is_macro(source: str): bool {
+    var m = match module_of(source) { Module as mm => mm; error => return false }
+    if m.decls.len == 0 { return false }
+    match m.decls[0] { MacroDecl => true; _ => false }
+}
+
+/** first_decl_is_comptime — does `source` parse to a module whose first decl is a `ComptimeDecl`? */
+fn first_decl_is_comptime(source: str): bool {
+    var m = match module_of(source) { Module as mm => mm; error => return false }
+    if m.decls.len == 0 { return false }
+    match m.decls[0] { ComptimeDecl => true; _ => false }
+}
+
+/** expr_is_macro_call — does `source` parse to a `MacroCall` expression at position 0? */
+fn expr_is_macro_call(source: str): bool {
+    var toks = match lexer::tokenize(source) { []lexer::Token as ts => ts; error => return false }
+    match parse_expr(toks, 0) { Parsed<Expr> as pe => match pe.node.kind { MacroCall => true; _ => false }; error => false }
+}
+
+/** expr_is_call — does `source` parse to an ordinary runtime `Call` expression at position 0? */
+fn expr_is_call(source: str): bool {
+    var toks = match lexer::tokenize(source) { []lexer::Token as ts => ts; error => return false }
+    match parse_expr(toks, 0) { Parsed<Expr> as pe => match pe.node.kind { Call => true; _ => false }; error => false }
+}
+
+/**
+ * parses_macro_and_comptime_decls — a `macro name(untyped params) { }` and a
+ * `comptime name<T>(params): T { }` both round-trip to their own `Decl` variant (§14.1 A1).
+ */
+#test
+fn parses_macro_and_comptime_decls() {
+    teko::assert::is_true(first_decl_is_macro("macro emit(x) { }"))
+    teko::assert::is_true(first_decl_is_macro("macro pair(a, b) { }"))
+    teko::assert::is_true(first_decl_is_comptime("comptime answer(): i64 { 42 }"))
+    teko::assert::is_true(first_decl_is_comptime("comptime sizeof<T>(): u64 { 0 to u64 }"))
+}
+
+/**
+ * parses_at_macro_call — `@name(...)` / `@name<T>()` parses to a `MacroCall`, while a bare `name(...)`
+ * (no `@`) stays an ordinary runtime `Call` (§14.1 A1).
+ */
+#test
+fn parses_at_macro_call() {
+    teko::assert::is_true(expr_is_macro_call("@answer()"))
+    teko::assert::is_true(expr_is_macro_call("@sizeof<i32>()"))
+    teko::assert::is_true(expr_is_call("answer()"))
+}
+
+/**
+ * rejects_macro_return_and_comptime_without_return — a `macro` may NOT declare a return type (it emits,
+ * it does not yield), and a `comptime` MUST declare one (the inlined literal's type) — §14.1.
+ */
+#test
+fn rejects_macro_return_and_comptime_without_return() {
+    teko::assert::is_true(module_errors("macro emit(x): i64 { }"))
+    teko::assert::is_true(module_errors("comptime answer() { 42 }"))
+}

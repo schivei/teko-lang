@@ -197,6 +197,19 @@ pub type Compare = struct { first: Expr; rest: []CmpTerm }   // a<b<c chain, kep
  *                        codec persists `checker::TCall`, not `parser::Call`
  */
 pub type Call = struct { callee: Path; args: []Expr; arg_names: []str; owner_type_args: []TypeExpr; callee_type_args: []TypeExpr }   // explicit call-site generic args in TWO independent positions: owner_type_args = the `<…>` on the TYPE before `::` (`Type<T>::m` — binds the type's params, retargeted to the instance owner); callee_type_args = the `<…>` on the FUNCTION/METHOD (`foo<T>()`, `Type::m<T>()` — binds the callee's own type-params). Either/both/neither may be present (`Map<K,V>::fold<Acc>()`). Empty for a bare/inferred call.
+
+/**
+ * MacroCall — an `@name(...)` call site in the untyped AST (§14): a compiler-executed call the resolver
+ * routes to a `MacroDecl` (Family A, expanded pre-type-check) or a `ComptimeDecl` (Family B, folded
+ * post-type-check) by the resolved declaration's family. A BARE call (no `@`) never produces this node —
+ * it stays an ordinary runtime `Call`. Carries `callee_type_args` for `@sizeof<T>()`/`@fields<T>()`.
+ *
+ * @field callee           the macro/comptime name path (the `@name` target)
+ * @field args             the raw call-site argument expressions (nodes for Family A; folded for B)
+ * @field callee_type_args the explicit `<T…>` type arguments (`@sizeof<i32>()`), else empty
+ * @since 0.4-macros (§14 A1)
+ */
+pub type MacroCall = struct { callee: Path; args: []Expr; callee_type_args: []TypeExpr }
 pub type IfExpr = struct {   // if/else is an EXPRESSION (B.20)
     cond: Expr
     then_blk: []Statement
@@ -289,7 +302,7 @@ pub type Block = struct { body: []Statement }
 // `TExpr` (tast.tks) and the C `tk_expr` (ast.h), so EVERY expression node carries its 1-based
 // source position. The parser stamps line/col from the node's first token; the checker copies
 // it onto the typed node and onto type-errors, so a message points at the failing expression.
-pub type ExprKind = variant Number | Var | Call | IfExpr | MatchExpr | StrLit | ByteLit | CharLit | BoolLit | NullLit | Binary | Unary | Compare | FieldAccess | MethodCall | Cast | PathExpr | StructLit | Index | Interp | InExpr | ArrayLit | Lambda | Borrow | Block
+pub type ExprKind = variant Number | Var | Call | IfExpr | MatchExpr | StrLit | ByteLit | CharLit | BoolLit | NullLit | Binary | Unary | Compare | FieldAccess | MethodCall | Cast | PathExpr | StructLit | Index | Interp | InExpr | ArrayLit | Lambda | Borrow | Block | MacroCall
 pub type Expr = struct { kind: ExprKind; line: u32; col: u32 }
 
 // --- statements ---
@@ -823,7 +836,38 @@ pub type ConstDecl = struct { name: str; ty: TypeExpr; init: Expr; vis: Visibili
  *
  * @since #594 widened with ConstDecl (was `Function | TypeDecl`).
  */
-pub type Decl = variant Function | TypeDecl | ConstDecl
+/**
+ * MacroDecl — a Family-A syntactic macro declaration (`macro name(params) { body }`, §14.1).
+ * Pre-type-check, copy-in-place, ENLARGES the AST via `lowering`/`${}`; it has NO return type (a
+ * `macro` always emits, never yields a value — the value case is `ComptimeDecl`). Native-only: there is
+ * NO `extern macro`. Params are anonymous nodes (untyped until materialized), so arity is free and a
+ * trailing `is_params` param binds the variadic node pack.
+ *
+ * @field name    the macro's declared name (the `@name(...)` call target)
+ * @field params  the anonymous parameter list; a trailing `is_params` param binds the node pack
+ * @field body    the macro body statements (comptime logic + `lowering { … }` blocks; no return type)
+ * @field vis     visibility (`pub`/`exp`/internal)
+ * @since 0.4-macros (§14 A1)
+ */
+pub type MacroDecl = struct { name: str; params: []Param; body: []Statement; vis: Visibility }
+
+/**
+ * ComptimeDecl — a Family-B comptime-evaluation declaration (`comptime name(params): T { body }`,
+ * §14.1). Post-type-check, args are typed comptime-KNOWN values; the body folds to a value INLINED as a
+ * literal at the call site. Native-only: there is NO `extern comptime`. Carries a return type (the
+ * inlined literal's type); a `<T…>` generic list lets a comptime infer a runtime arg's type (§14.2).
+ *
+ * @field name         the comptime macro's name (the `@name(...)` call target)
+ * @field type_params  the `<T…>` generic params (empty for a non-generic comptime)
+ * @field params       typed parameters; a trailing `is_params` param binds a typed pack
+ * @field ret          the return type — the inlined literal's type
+ * @field body         the body statements, folded by `eval_const` over typed values
+ * @field vis          visibility (`pub`/`exp`/internal)
+ * @since 0.4-macros (§14 A1)
+ */
+pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param; ret: TypeExpr; body: []Statement; vis: Visibility }
+
+pub type Decl = variant Function | TypeDecl | ConstDecl | MacroDecl | ComptimeDecl
 pub type MainFile = struct { uses: []UseDecl; body: []Statement }   // main.tks: the `use` header + the VIRTUAL MAIN's body (statements only — no type/fn decls)
 pub type Module = struct { uses: []UseDecl; decls: []Decl }   // a module: the `use` header + declarations (no loose statements)
 type File = variant MainFile | Module   // a `.tks` is exactly one; the file's role decides (main.tks ⇔ an executable `.tkp`)
@@ -840,6 +884,6 @@ type File = variant MainFile | Module   // a `.tks` is exactly one; the file's r
  *
  * @since #594 widened with ConstDecl (was `UseDecl | Statement | Function | TypeDecl`).
  */
-pub type ItemKind = variant UseDecl | Statement | Function | TypeDecl | ConstDecl
+pub type ItemKind = variant UseDecl | Statement | Function | TypeDecl | ConstDecl | MacroDecl | ComptimeDecl
 pub type Item = struct { content: ItemKind; namespace: str; file: str }   // a flattened top-level item + its source namespace (A3) + source file (W-loc-2: assemble tags it so a flattened-program error resolves to file:line:col; empty on the single-file compile/run path)
 pub type Program = struct { items: []Item }   // the flat item list the checker consumes

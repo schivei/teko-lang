@@ -176,6 +176,7 @@ fn lam_collect_expr(e: parser::Expr, ref refs: []str, ref bound: []str, ref writ
         parser::ArrayLit as a => { var i = 0; loop { if i >= a.elements.len { break }; lam_collect_expr(a.elements[i].expr, refs, bound, writes); i++ } }
         parser::Lambda as lam => { var i = 0; loop { if i >= lam.params.len { break }; bound = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound, writes) }
         parser::Block as blk => lam_collect_block(blk.body, refs, bound, writes)
+        parser::MacroCall as mc => { var i = 0; loop { if i >= mc.args.len { break }; lam_collect_expr(mc.args[i], refs, bound, writes); i++ } }
         parser::Number => { }
         parser::StrLit => { }
         parser::ByteLit => { }
@@ -5561,7 +5562,23 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
         parser::Lambda as lam => type_lambda(lam, Void { }, env, table)   // (W10) no target here → un-annotated params error (ruling 3); a binding/call-arg threads the target
         parser::Borrow as b => type_borrow_expr(b, env, table)   // &x safe borrow (AL wave F1)
         parser::Block as blk => type_block_expr(blk, env, table)
+        parser::MacroCall as mc => macro_call_not_expanded(mc)
     }
+}
+
+/**
+ * macro_call_not_expanded — the A1 honest-stop for a `@name(...)` macro/comptime call reaching the
+ * checker (§14). Family-A calls are rewritten pre-type-check and Family-B calls folded post-monomorph;
+ * until those passes land, any surviving `MacroCall` is a located diagnostic. INERT: no corpus source
+ * writes `@`/`macro`/`comptime`, so this is never reached on the current corpus (plan §7 inertness).
+ *
+ * @param mc  the untyped macro-call node
+ * @return    the located "not yet expanded" diagnostic
+ * @since 0.4-macros (§14 A1)
+ */
+fn macro_call_not_expanded(mc: parser::MacroCall): TExpr | error {
+    var name = if mc.callee.segments.len > 0 { mc.callee.segments[mc.callee.segments.len - 1].name } else { "" }
+    error { message = $"`@{name}` is a macro/comptime call — the §14 expansion passes are not yet wired (macro/comptime crumb A1 lands the nodes only)" }
 }
 
 /**
@@ -9153,6 +9170,8 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable): TItem | error {
             var ti = match type_const_decl(cd, fenv, table) { TConstDecl as x => x; error as e => return e }
             TConstDecl { name = ti.name; namespace = item.namespace; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col }
         }
+        parser::MacroDecl => return error { message = "internal: a `macro` declaration reached typed-item production — a Family-A macro is expanded pre-type-check (§14 A1 lands the nodes only; the expansion pass is a later crumb)" }
+        parser::ComptimeDecl => return error { message = "internal: a `comptime` declaration reached typed-item production — a Family-B comptime decl is consumed by the fold pass (§14 A1 lands the nodes only; the fold pass is a later crumb)" }
     }
 }
 

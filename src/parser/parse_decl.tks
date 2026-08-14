@@ -1606,6 +1606,118 @@ fn with_outer_doc(node: Decl, has_doc: bool, doc: str): Decl {
 }
 
 /**
+ * parse_macro_decl — parse a Family-A `macro name(params) { body }` declaration (§14.1). `pos` is at the
+ * `macro` keyword (the caller has peeled the doc/visibility); `vis` is the declared visibility. A macro
+ * has NO return type (it emits code, never yields a value) and NO `extern` form. The body parses as an
+ * ordinary statement block; the `lowering { … }`/`${}` splice handling lands in A2.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the `macro` keyword
+ * @param vis     the declared visibility
+ * @return        the parsed MacroDecl (as a Decl) + the resume index, or a located parse error
+ * @throws        a missing name, a malformed parameter list, a stray return type, or a missing body
+ * @since 0.4-macros (§14 A1)
+ */
+/**
+ * parse_macro_params — parse a Family-A macro's `(a, b, params tail)` parameter list (§14.1). Unlike a
+ * function's, a macro parameter is an ANONYMOUS NODE — untyped until materialized — so each is a bare
+ * identifier (`has_type = false`, no `: T`). A trailing `params name` binds the variadic node pack
+ * (`is_params`, the same modifier a variadic function uses), and must be last. `pos` is at the `(`.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the parameter list's opening `(`
+ * @return        the parsed untyped parameters + the index past the closing `)`, or a parse error
+ * @throws        a missing parameter name, a `params` pack not in last position, or an unclosed list
+ * @since 0.4-macros (§14 A1)
+ */
+fn parse_macro_params(tokens: []lexer::Token, pos: u64): ParsedList<Param> | error {
+    var p = pos + 1
+    var params: []Param = teko::list::empty()
+    if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return ParsedList<Param> { items = params; next = p + 1 }
+    }
+    loop {
+        var is_pack = is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "params" && is_name_at(tokens, p + 1)
+        if is_pack { p = p + 1 }
+        if !is_name_at(tokens, p) {
+            return err_at(tokens, p, "expected a macro parameter name — macro params are untyped nodes (§14.1)")
+        }
+        var name = tokens[p].text
+        p = p + 1
+        params = teko::list::push(params, Param { name = name; has_type = false; type_ann = no_type(); is_params = is_pack; has_default = false; default_expr = no_expr() })
+        if is_pack && is_kind_at(tokens, p, lexer::TokenKind::Comma) {
+            return err_at(tokens, p, "a `params` pack must be the last macro parameter")
+        }
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = p + 1
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return err_at(tokens, p, "expected ')' to close the macro parameter list")
+    }
+    ParsedList<Param> { items = params; next = p + 1 }
+}
+
+fn parse_macro_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parsed<Decl> | error {
+    var p = pos + 1
+    if !is_kind_at(tokens, p, lexer::TokenKind::Ident) {
+        return err_at(tokens, p, "expected a macro name after `macro`")
+    }
+    var name = tokens[p].text
+    p = p + 1
+    if !is_kind_at(tokens, p, lexer::TokenKind::LParen) {
+        return err_at(tokens, p, "expected '(' for the macro's parameter list")
+    }
+    var params = match parse_macro_params(tokens, p) { ParsedList<Param> as x => x; error as e => return e }
+    p = params.next
+    if is_return_type_intro_at(tokens, p) {
+        return err_at(tokens, p, "a `macro` has no return type — a macro emits code, it does not yield a value; use `comptime` for a value (§14.1)")
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+        return err_at(tokens, p, "expected '{' for the macro body")
+    }
+    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    Parsed<Decl> { node = MacroDecl { name = name; params = params.items; body = blk.items; vis = vis }; next = blk.next }
+}
+
+/**
+ * parse_comptime_decl — parse a Family-B `comptime name<T…>(params): T { body }` declaration (§14.1).
+ * `pos` is at the `comptime` keyword; `vis` is the declared visibility. Carries a MANDATORY return type
+ * (the inlined literal's type) and an optional `<T…>` generic list; there is NO `extern` form.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the `comptime` keyword
+ * @param vis     the declared visibility
+ * @return        the parsed ComptimeDecl (as a Decl) + the resume index, or a located parse error
+ * @throws        a missing name, a malformed type-param/parameter list, a missing return type, or body
+ * @since 0.4-macros (§14 A1)
+ */
+fn parse_comptime_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parsed<Decl> | error {
+    var p = pos + 1
+    if !is_kind_at(tokens, p, lexer::TokenKind::Ident) {
+        return err_at(tokens, p, "expected a comptime name after `comptime`")
+    }
+    var name = tokens[p].text
+    p = p + 1
+    var tps = match parse_type_params(tokens, p) { ParsedTypeParams as x => x; error as e => return e }
+    p = tps.next
+    if !is_kind_at(tokens, p, lexer::TokenKind::LParen) {
+        return err_at(tokens, p, "expected '(' for the comptime's parameter list")
+    }
+    var params = match parse_params(tokens, p) { ParsedList<Param> as x => x; error as e => return e }
+    p = params.next
+    if !is_return_type_intro_at(tokens, p) {
+        return err_at(tokens, p, "a `comptime` must declare a return type — the inlined literal's type (§14.1)")
+    }
+    var ret = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+    p = ret.next
+    if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+        return err_at(tokens, p, "expected '{' for the comptime body")
+    }
+    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    Parsed<Decl> { node = ComptimeDecl { name = name; type_params = tps.names; params = params.items; ret = ret.node; body = blk.items; vis = vis }; next = blk.next }
+}
+
+/**
  * parse_const_decl — parse a module-level `const NAME: Type = <const-expr>` (#594),
  * reached from `parse_decl` after the optional doc/`pub`/`exp` peel. The type
  * annotation is MANDATORY at module scope (unlike a local `const`, whose type may
@@ -1829,6 +1941,16 @@ fn parse_decl(tokens: []lexer::Token, pos: u64): Parsed<Decl> | error {
         var d = match parse_const_decl(tokens, k, vis) { Parsed<Decl> as x => x; error as e => return e }
         return Parsed<Decl> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
     }
+    if is_kind_at(tokens, k, lexer::TokenKind::Macro) {
+        if saw_extern { return err_at(tokens, k, "there is no `extern macro` — a macro is native-only (§14)") }
+        var d = match parse_macro_decl(tokens, k, vis) { Parsed<Decl> as x => x; error as e => return e }
+        return Parsed<Decl> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+    }
+    if is_kind_at(tokens, k, lexer::TokenKind::Comptime) {
+        if saw_extern { return err_at(tokens, k, "there is no `extern comptime` — a comptime is native-only (§14)") }
+        var d = match parse_comptime_decl(tokens, k, vis) { Parsed<Decl> as x => x; error as e => return e }
+        return Parsed<Decl> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+    }
     if saw_extern {
         return err_at(tokens, k, "expected `fn` or `type` after `extern`")
     }
@@ -1881,6 +2003,8 @@ fn is_decl_head_token(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Type) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Flags) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Const) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Macro) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Comptime) ||
     is_unsafe_modifier_at(tokens, pos)
 }
 

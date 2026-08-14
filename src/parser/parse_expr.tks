@@ -384,12 +384,56 @@ fn parse_lambda(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
     Parsed<Expr> { node = Expr { kind = Lambda { params = params; body = body }; line = tokens[pos].line; col = tokens[pos].col }; next = p }
 }
 
+/**
+ * parse_macro_call — parse an `@name(...)` / `@name<T…>(...)` compiler-executed call (§14) into a
+ * `MacroCall` node. `pos` is at the `At` token. The resolver later routes the node to a `MacroDecl`
+ * (Family A) or `ComptimeDecl` (Family B) by the resolved declaration's family; a BARE `name(...)` (no
+ * `@`) never reaches here — it stays an ordinary `Call`. An `@name` MUST be followed by an argument
+ * list (optionally after a `<T…>` type-argument list).
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the `@` token
+ * @return        the parsed MacroCall expression + the resume index, or a located parse error
+ * @throws        a missing name, a `<…>` not followed by `(`, or a missing argument list
+ * @since 0.4-macros (§14 A1)
+ */
+fn parse_macro_call(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
+    var p = pos + 1
+    if !is_name_at(tokens, p) {
+        return err_at(tokens, p, "expected a macro/comptime name after `@`")
+    }
+    var pp = match parse_path(tokens, p) { Parsed<Path> as x => x; error as e => return e }
+    var type_args: []TypeExpr = teko::list::empty()
+    var after = pp.next
+    if is_kind_at(tokens, after, lexer::TokenKind::Lt) {
+        match parse_type_args(tokens, after) {
+            ParsedTypeArgs as ta => {
+                if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LParen) {
+                    type_args = ta.args
+                    after = ta.next
+                } else {
+                    return err_at(tokens, after, "expected `(` after `@name<…>` — a macro/comptime call takes an argument list")
+                }
+            }
+            error as e => return e
+        }
+    }
+    if !is_kind_at(tokens, after, lexer::TokenKind::LParen) {
+        return err_at(tokens, after, "expected `(` — `@name` is a macro/comptime call and needs an argument list")
+    }
+    var ca = match parse_call_args(tokens, after) { ParsedCallArgs as x => x; error as e => return e }
+    Parsed<Expr> { node = Expr { kind = MacroCall { callee = pp.node; args = ca.args; callee_type_args = type_args }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
+}
+
 fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     if !has_token(tokens, pos) { return err_at(tokens, pos, "expected an expression") }
     if is_kind_at(tokens, pos, lexer::TokenKind::Underscore) {
         return err_at(tokens, pos, "`_` is a write-only discard and cannot be read — it carries no value (valid only as the LHS of `_ = expr`, a pattern wildcard, or a discard parameter)")
     }
     var k = kind_at(tokens, pos)
+    if k == lexer::TokenKind::At {
+        return parse_macro_call(tokens, pos)
+    }
     if k == lexer::TokenKind::Dot && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
         return parse_struct_lit(tokens, pos + 1, dot_sentinel_path(), teko::list::empty())
     }
