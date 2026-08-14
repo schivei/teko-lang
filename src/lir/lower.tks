@@ -3161,6 +3161,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | er
     if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_load_u64_call(c.callee) { return lower_load_u64_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_store_u64_call(c.callee) { return lower_store_u64_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_len_builtin_call(c.callee) { return lower_len_builtin_call(ctx, e, c) }
     var sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
@@ -13724,6 +13725,46 @@ fn lower_ref_deref_read(ctx: LowerCtx, e: checker::TExpr, fa: checker::TFieldAcc
     already-lowered fat pair, read directly (no `load` — A1-4, #382, §2.3). */
 fn lower_len_field(ctx: LowerCtx, fa: checker::TFieldAccess): Lowered | error {
     var fo = match lower_fat_expr(ctx, fa.receiver) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = fo.ctx; vreg = fo.len }
+}
+
+/**
+ * is_len_builtin_call — is this the unresolved builtin `len(s)` CALL (checker scope.tks:1095:
+ * `len(str): u64`)? The checker leaves a builtin with an EMPTY `call_ns` (its "a builtin, or nothing"
+ * signal), so keying on `call_ns.len == 0` (the caller's guard) plus a last segment of `len` is safe:
+ * a USER function named `len` resolves to a declaration and carries a NON-empty `call_ns`, so it never
+ * reaches here. Distinct from the `.len` FIELD form (`lower_len_field`, reached via a `TFieldAccess`) —
+ * this is the CALL spelling `teko::str::len(x)`, the rare form the corpus uses at
+ * `checker_test.tkt:619`/`:627` that the N1 subset never lowered.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff the path's last segment is the bare builtin name `len`
+ * @since 0.3.1 (len-builtin-call lowering)
+ */
+fn is_len_builtin_call(callee: parser::Path): bool {
+    callee.segments.len > 0 && callee.segments[callee.segments.len - 1].name == "len"
+}
+
+/**
+ * lower_len_builtin_call — lower the builtin `len(s)` CALL as the LENGTH half of its single fat argument's
+ * `{ptr, len}` pair: the SAME fat-length read `lower_len_field` performs for `s.len` (no `load` — the
+ * length is already in a VReg once the arg lowers via `lower_fat_expr`), sourced from the call argument
+ * instead of a field receiver. NO runtime call is emitted — a `str`/slice is already a fat value, so its
+ * length is in hand. The `u64` result is the length VReg directly, matching `e.type` (`u64`). Since
+ * `lower_fat_expr` (lower.tks:11019) already dispatches a fat-returning `TCall` to `lower_call_fat`, a
+ * complex argument such as `mono_type_mangle(...)` (a call returning `str`) lowers with no extra plumbing.
+ *
+ * @param ctx  the lowering context
+ * @param e    the `len(...)` call expression (its type is `u64`)
+ * @param c    the call node (exactly one fat argument)
+ * @return     the length half of the argument's fat pair, as a `u64` value
+ * @throws     when `len` is called with other than one argument (internal — the checker enforces arity),
+ *             or propagated from lowering the argument
+ * @since 0.3.1 (len-builtin-call lowering)
+ */
+fn lower_len_builtin_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowered | error {
+    if c.args.len != 1 { return error { message = "native backend N1: builtin `len` expects one argument (internal)" } }
+    var fo = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
     Lowered { ctx = fo.ctx; vreg = fo.len }
 }
 
