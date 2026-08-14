@@ -1,0 +1,105 @@
+/**
+ * Adder — a mixin trait contributing an `i32`-operand `k` method (§9A Overload branch). Composed with
+ * a host that declares a `str`-operand `k`, the two distinct signatures coexist on the flattened
+ * surface and `select_overload` picks at the call site.
+ *
+ * @since operator_overload_compose (§9A fixture)
+ */
+type Adder = trait {
+    /**
+     * k — the `i32` overload of the coexisting method set: `x + 10` as an `i64`.
+     *
+     * @param x  the integer operand
+     * @return   `x + 10`
+     */
+    fn k(x: i32): i64 { (x to i64) + 10 }
+}
+
+/**
+ * Host — a struct composing `Adder` (its `i32` `k`) and declaring its OWN `str` `k`. The two `k`
+ * methods overload across composition (G6): `H.k(5)` runs the trait's leg, `H.k("ab")` the host's.
+ */
+type Host = struct Adder {
+    /** tag — an unused datum so the host has state; keeps the struct non-empty. */
+    tag: i64
+    /**
+     * k — the `str` overload of the coexisting method set: `x.len + 20` as an `i64`.
+     *
+     * @param x  the string operand
+     * @return   `x.len + 20`
+     */
+    fn k(x: str): i64 { (x.len to i64) + 20 }
+}
+
+/**
+ * AddLeft — a mixin trait contributing an `i32`-operand `operator __add` that returns its LEFT operand
+ * unchanged (a self return with no construction, legal in a mixin). Composed with `AddRight`, the two
+ * distinct `__add` signatures overload across composition (G6 for operators).
+ *
+ * @since operator_overload_compose (§9A fixture)
+ */
+type AddLeft = trait {
+    /**
+     * __add — the `(self, i32)` overload: returns the left operand, so `p + 3` is `p`.
+     *
+     * @param left   the left operand (the box)
+     * @param right  the integer addend (ignored)
+     * @return       the left operand unchanged
+     */
+    operator __add(left: self, right: i32): self { left }
+}
+
+/**
+ * AddRight — a mixin trait contributing a `(self, self)` `operator __add` that returns its RIGHT
+ * operand. Composed with `AddLeft`, `box + other` selects THIS leg and yields `other`.
+ *
+ * @since operator_overload_compose (§9A fixture)
+ */
+type AddRight = trait {
+    /**
+     * __add — the `(self, self)` overload: returns the right operand, so `p + q` is `q`.
+     *
+     * @param left   the left operand (ignored)
+     * @param right  the right operand (the box)
+     * @return       the right operand unchanged
+     */
+    operator __add(left: self, right: self): self { right }
+}
+
+/**
+ * Box — a struct composing BOTH `__add` mixins, so `operator __add` overloads across composition: the
+ * `(self, i32)` leg returns the left box, the `(self, self)` leg returns the right box, and
+ * `select_overload` picks by operand type at each `+` (G6 for operators).
+ */
+type Box = struct AddLeft & AddRight {
+    /** v — the box's payload, read back to witness which operand a `+` returned. */
+    v: i64
+}
+
+/**
+ * method_overload_compose — the two `k` overloads picked across composition (G6): `Host.k(5)` is 15
+ * (trait leg) and `Host.k("ab")` is 22 (host leg), summing to 37.
+ *
+ * @return  37
+ */
+pub fn method_overload_compose(): i64 {
+    var h = Host { tag = 0 }
+    var a = Host::k(h, 5 to i32)
+    var b = Host::k(h, "ab")
+    a + b
+}
+
+/**
+ * operator_overload_compose_probe — the two `__add` overloads picked across composition (G6 for
+ * operators): `(box5 + 3).v` is 5 (the `(self, i32)` leg returns the left box) and
+ * `(box5 + box9).v` is 9 (the `(self, self)` leg returns the right box), summing to 14.
+ *
+ * @return  14
+ */
+pub fn operator_overload_compose_probe(): i64 {
+    var box5 = Box { v = 5 }
+    var box9 = Box { v = 9 }
+    var left = (box5 + 3).v
+    var right = (box5 + box9).v
+    left + right
+}
