@@ -922,3 +922,168 @@ fn eval_const_folds_inline_struct_field() {
 fn eval_const_folds_str_to_bytes() {
     cf_agg_first_is(cf_cast(cf_str("hi"), Slice { element = bytet() }), empty_agg(), 2 to u64, 0x68 to u64)
 }
+
+/**
+ * cf_bytes_eq — structural equality of two byte sequences (the `CVBytes` payload oracle).
+ *
+ * @param a  the left byte sequence
+ * @param b  the right byte sequence
+ * @return   true iff `a` and `b` have the same length and bytes
+ */
+fn cf_bytes_eq(a: []byte, b: []byte): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * cf_elems_eq — structural equality of two comptime-value lists (the `CVAgg` payload oracle), pairwise
+ * `cf_cv_eq` in order.
+ *
+ * @param a  the left element list
+ * @param b  the right element list
+ * @return   true iff the lists have the same length and equal elements in order
+ */
+fn cf_elems_eq(a: []ConstValue, b: []ConstValue): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if !cf_cv_eq(a[i], b[i]) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * cf_cv_eq — structural equality of two comptime values (the B2 round-trip oracle): same kind and same
+ * payload, recursing into an aggregate's elements. Integer equality compares the two's-complement bits;
+ * float equality compares the raw IEEE bits and the width flag; bytes compare length and every byte.
+ *
+ * @param a  the left comptime value
+ * @param b  the right comptime value
+ * @return   true iff `a` and `b` are the same value
+ */
+fn cf_cv_eq(a: ConstValue, b: ConstValue): bool {
+    match a.kind {
+        CVInt as ai => match b.kind { CVInt as bi => ai.bits == bi.bits; _ => false }
+        CVBool as ab => match b.kind { CVBool as bb => ab.v == bb.v; _ => false }
+        CVFloat as af => match b.kind { CVFloat as bf => af.bits == bf.bits && af.is_f32 == bf.is_f32; _ => false }
+        CVBytes as aby => match b.kind { CVBytes as bby => cf_bytes_eq(aby.data, bby.data); _ => false }
+        CVAgg as aag => match b.kind { CVAgg as bag => cf_elems_eq(aag.elems, bag.elems); _ => false }
+    }
+}
+
+/**
+ * cf_rt — the B2 round-trip gate: reconstruct `v` at type `ty` via `comptime_literal_of` (against
+ * `table`), re-`eval_const` the produced literal, and assert the recovered value equals `v`. A null
+ * reconstruction (no literal form) or a failed re-evaluation fails the test.
+ *
+ * @param v      the comptime value to round-trip
+ * @param ty     the value's declared type (drives the reconstructed literal's shape)
+ * @param table  the type table (resolves a named struct's field views)
+ */
+fn cf_rt(v: ConstValue, ty: Type, table: TypeTable) {
+    var lit = match comptime_literal_of(v, ty, table, 0 to u32, 0 to u32) {
+        TExpr as e => e
+        null => { teko::assert::is_true(false); return }
+    }
+    match eval_const(lit, table, empty_env(), empty_agg()) {
+        ConstValue as re => teko::assert::is_true(cf_cv_eq(v, re))
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * cf_rt_null — assert `comptime_literal_of` produces NO literal form for `v` at type `ty` (the caller
+ * then leaves the site unfolded / diagnoses).
+ *
+ * @param v   the comptime value with no literal form at `ty`
+ * @param ty  the type against which reconstruction must decline
+ */
+fn cf_rt_null(v: ConstValue, ty: Type) {
+    match comptime_literal_of(v, ty, empty_table(), 0 to u32, 0 to u32) {
+        null => teko::assert::is_true(true)
+        TExpr => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * cf_point_table — a type table registering `struct Point { x: i64; y: i64 }`, the fixture the aggregate
+ * round-trip resolves field views against.
+ *
+ * @return  a type table holding `Point`
+ */
+fn cf_point_table(): TypeTable {
+    var fields = teko::list::push(teko::list::push(teko::list::empty(), fv_field("x", named_t("i64"))), fv_field("y", named_t("i64")))
+    var item = fv_struct_item_derives("Point", fields, teko::list::empty())
+    fv_table(teko::list::push(teko::list::empty(), item))
+}
+
+/**
+ * comptime_literal_of_roundtrips_scalars — the B2 scalar gate: a bool, an f64, a str, and a char each
+ * reconstruct to a literal that re-evaluates to the identical comptime value.
+ */
+#test
+fn comptime_literal_of_roundtrips_scalars() {
+    cf_rt(ConstValue { kind = CVInt { bits = 42 to u64; ty = i64t() } }, i64t(), empty_table())
+    cf_rt(ConstValue { kind = CVBool { v = true } }, boolt(), empty_table())
+    cf_rt(ConstValue { kind = CVBool { v = false } }, boolt(), empty_table())
+    cf_rt(ConstValue { kind = CVFloat { bits = teko::f64_bits(3.5); is_f32 = false } }, f64t(), empty_table())
+    cf_rt(ConstValue { kind = CVBytes { data = bytes_of_str("hello") } }, strt(), empty_table())
+    cf_rt(ConstValue { kind = CVBytes { data = bytes_of_str("A") } }, Char { }, empty_table())
+}
+
+/**
+ * cf_cvagg — a `CVAgg` comptime value wrapping the ordered child values `elems` (the test-side
+ * constructor, mirroring the product `cv_agg`).
+ *
+ * @param elems  the child comptime values, in order
+ * @return       the aggregate comptime value
+ */
+fn cf_cvagg(elems: []ConstValue): ConstValue { ConstValue { kind = CVAgg { elems = elems } } }
+
+/**
+ * comptime_literal_of_roundtrips_slices — the B2 aggregate gate over slices: a `[]i64` and a nested
+ * `[][]i64` reconstruct (recursing per element) to literals that re-evaluate to the identical aggregate.
+ */
+#test
+fn comptime_literal_of_roundtrips_slices() {
+    var e10 = ConstValue { kind = CVInt { bits = 10 to u64; ty = i64t() } }
+    var e20 = ConstValue { kind = CVInt { bits = 20 to u64; ty = i64t() } }
+    var e30 = ConstValue { kind = CVInt { bits = 30 to u64; ty = i64t() } }
+    var flat = cf_cvagg(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), e10), e20), e30))
+    cf_rt(flat, Slice { element = i64t() }, empty_table())
+    var inner_a = cf_cvagg(teko::list::push(teko::list::push(teko::list::empty(), e10), e20))
+    var inner_b = cf_cvagg(teko::list::push(teko::list::empty(), e30))
+    var nested = cf_cvagg(teko::list::push(teko::list::push(teko::list::empty(), inner_a), inner_b))
+    cf_rt(nested, Slice { element = Slice { element = i64t() } }, empty_table())
+}
+
+/**
+ * comptime_literal_of_roundtrips_struct — the B2 aggregate gate over a named struct: a `Point` aggregate
+ * reconstructs (resolving field views) to a `TStructInit` that re-evaluates to the identical aggregate.
+ */
+#test
+fn comptime_literal_of_roundtrips_struct() {
+    var ex = ConstValue { kind = CVInt { bits = 30 to u64; ty = i64t() } }
+    var ey = ConstValue { kind = CVInt { bits = 12 to u64; ty = i64t() } }
+    var point = cf_cvagg(teko::list::push(teko::list::push(teko::list::empty(), ex), ey))
+    cf_rt(point, Named { name = "Point" }, cf_point_table())
+}
+
+/**
+ * comptime_literal_of_declines_no_literal_form — the B2 decline gate: an f32 float, and an aggregate at
+ * a non-aggregate type, have no literal form and reconstruct to null.
+ */
+#test
+fn comptime_literal_of_declines_no_literal_form() {
+    cf_rt_null(ConstValue { kind = CVFloat { bits = teko::f64_bits(1.0); is_f32 = true } }, f64t())
+    var agg = cf_cvagg(teko::list::push(teko::list::empty(), ConstValue { kind = CVInt { bits = 1 to u64; ty = i64t() } }))
+    cf_rt_null(agg, boolt())
+}

@@ -2023,6 +2023,209 @@ fn int_literal_of(ci: CVInt, ty: Type, line: u32, col: u32): TExpr | null {
 }
 
 /**
+ * comptime_literal_of — the FULL-domain inverse of `eval_const`: reconstruct a literal `TExpr` for ANY
+ * `ConstValue` kind (`CVInt`/`CVBool`/`CVFloat`/`CVBytes`/`CVAgg`) typed `ty` at (`line`, `col`), the
+ * capability the Family-B comptime engine (`expand_comptime`) needs to splice a `@comptime()` result
+ * back into the typed AST. Distinct from `literal_of`: the Layer-1a fold keeps its INTEGER-ONLY inverse
+ * (`literal_of`) so a const-aggregate read over a `[]str`/`[]bool`/`[]f64` const still falls through to
+ * the gate-free rebuild (`fold_index_children`) and the self-host corpus stays byte-identical (the
+ * 0.3.1.0 const-slice invariant); this fuller inverse is reached ONLY from the comptime pass, which no
+ * source uses until the seed adopts `@`. Scalars reconstruct directly (Opt-1); an aggregate rebuilds as
+ * a `TArrayLit` (slice element type) or a `TStructInit` (the named struct's resolved field views),
+ * recursing per element. A kind with no literal form for `ty` (an `f32`, an unknown aggregate shape, a
+ * child that fails to reconstruct) returns null so the caller can surface a call-site diagnostic.
+ *
+ * @param v      the computed comptime value
+ * @param ty     the type the call site resolved (the reconstructed literal's `.type`)
+ * @param table  the type table (resolves a named struct's field views for the aggregate case)
+ * @param line   the original expression's source line (diagnostics/position)
+ * @param col    the original expression's source column
+ * @return       a literal `TExpr` carrying `v` typed `ty`, or null when `v` has no literal form
+ * @since #comptime-fold (Family-B B2)
+ */
+pub fn comptime_literal_of(v: ConstValue, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+    match v.kind {
+        CVInt as ci => int_literal_of(ci, ty, line, col)
+        CVBool as cb => bool_literal_of(cb, ty, line, col)
+        CVFloat as cf => float_literal_of(cf, ty, line, col)
+        CVBytes as cbytes => bytes_literal_of(cbytes, ty, line, col)
+        CVAgg as ag => agg_literal_of(ag, ty, table, line, col)
+    }
+}
+
+/**
+ * bool_literal_of — reconstruct a `TBoolLit` from a boolean comptime value `cb`, typed `ty` at
+ * (`line`, `col`). Round-trips exactly: `eval_const` reads `TBoolLit.value` straight back into a
+ * `CVBool`.
+ *
+ * @param cb    the boolean comptime value
+ * @param ty    the reconstructed literal's type (the resolved bool prim)
+ * @param line  the original expression's source line
+ * @param col   the original expression's source column
+ * @return      the `TBoolLit` literal
+ * @since #comptime-fold (Family-B B2)
+ */
+fn bool_literal_of(cb: CVBool, ty: Type, line: u32, col: u32): TExpr | null {
+    TExpr { kind = TBoolLit { value = cb.v }; type = ty; line = line; col = col }
+}
+
+/**
+ * float_literal_of — reconstruct a float `TNumber` from a float comptime value `cf`, typed `ty` at
+ * (`line`, `col`). Only f64 has a literal form the fold carries (matching `eval_float_literal`); an
+ * `f32` returns null (its dedicated `f32_bits` reconstruction is not yet exposed). The `value` carrier
+ * is a zero `NumInt` (meaningless when `is_float`); `fval` is decoded byte-exactly from the raw bits so
+ * a re-`eval_const` yields the identical `CVFloat`.
+ *
+ * @param cf    the float comptime value
+ * @param ty    the reconstructed literal's type (the resolved f64 prim)
+ * @param line  the original expression's source line
+ * @param col   the original expression's source column
+ * @return      the float `TNumber` literal, or null for an f32
+ * @since #comptime-fold (Family-B B2)
+ */
+fn float_literal_of(cf: CVFloat, ty: Type, line: u32, col: u32): TExpr | null {
+    if cf.is_f32 { return null }
+    TExpr { kind = TNumber { is_float = true; value = parser::numint_of_u64(0); fval = teko::f64_from_bits(cf.bits) }; type = ty; line = line; col = col }
+}
+
+/**
+ * bytes_literal_of — reconstruct a string/char/byte-slice literal from a bytes comptime value `cb`,
+ * typed `ty` at (`line`, `col`). A `str` becomes a `TStrLit`, a `char` a `TCharLit` (both round-trip
+ * through `bytes_of_str`), and a `[]byte` an array of `byte` literals; any other type has no bytes
+ * literal form and returns null.
+ *
+ * @param cb    the bytes comptime value
+ * @param ty    the reconstructed literal's type
+ * @param line  the original expression's source line
+ * @param col   the original expression's source column
+ * @return      the string/char/byte-array literal, or null when `ty` carries no bytes literal
+ * @since #comptime-fold (Family-B B2)
+ */
+fn bytes_literal_of(cb: CVBytes, ty: Type, line: u32, col: u32): TExpr | null {
+    match ty {
+        Str => TExpr { kind = TStrLit { text = str_of_bytes(cb.data) }; type = ty; line = line; col = col }
+        Char => TExpr { kind = TCharLit { bytes = str_of_bytes(cb.data) }; type = ty; line = line; col = col }
+        Slice as sl => byte_array_literal_of(cb, sl, ty, line, col)
+        _ => null
+    }
+}
+
+/**
+ * byte_array_literal_of — reconstruct a `[]byte` array literal from a bytes comptime value `cb` whose
+ * declared type is the slice `sl`; each byte becomes a `TByteLit` element. Null when `sl`'s element is
+ * not `byte`.
+ *
+ * @param cb    the bytes comptime value
+ * @param sl    the slice type carried on `ty`
+ * @param ty    the reconstructed literal's type (the `[]byte` slice)
+ * @param line  the original expression's source line
+ * @param col   the original expression's source column
+ * @return      the `[]byte` `TArrayLit`, or null when the slice element is not `byte`
+ * @since #comptime-fold (Family-B B2)
+ */
+fn byte_array_literal_of(cb: CVBytes, sl: Slice, ty: Type, line: u32, col: u32): TExpr | null {
+    if !is_byte_type(sl.element) { return null }
+    var elems: []TArrayElem = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= cb.data.len { break }
+        var lit = TExpr { kind = TByteLit { value = cb.data[i] }; type = sl.element; line = line; col = col }
+        elems = teko::list::push(elems, TArrayElem { is_spread = false; expr = lit })
+        i++
+    }
+    TExpr { kind = TArrayLit { elements = elems }; type = ty; line = line; col = col }
+}
+
+/**
+ * agg_literal_of — reconstruct an aggregate literal from an aggregate comptime value `ag`, typed `ty`
+ * at (`line`, `col`): a slice type rebuilds a `TArrayLit` (every element at the slice element type), a
+ * named struct type rebuilds a `TStructInit` (every field at its resolved field-view type, in
+ * declaration order). Any other type — or an aggregate whose children fail to reconstruct — returns
+ * null so the caller leaves the site unfolded / reports a diagnostic.
+ *
+ * @param ag     the aggregate comptime value
+ * @param ty     the reconstructed literal's type
+ * @param table  the type table (resolves the named struct's field views)
+ * @param line   the original expression's source line
+ * @param col    the original expression's source column
+ * @return       the array / struct literal, or null when `ty` is not an aggregate shape
+ * @since #comptime-fold (Family-B B2)
+ */
+fn agg_literal_of(ag: CVAgg, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+    match ty {
+        Slice as sl => array_literal_of(ag, sl.element, ty, table, line, col)
+        Named as nm => struct_literal_of(ag, nm, ty, table, line, col)
+        _ => null
+    }
+}
+
+/**
+ * array_literal_of — reconstruct a `TArrayLit` from an aggregate value `ag` whose declared element type
+ * is `elem_ty`, recursing `comptime_literal_of` into each element. Null when any element has no literal
+ * form (the whole aggregate then leaves no literal form).
+ *
+ * @param ag       the aggregate comptime value
+ * @param elem_ty  the slice's element type (every child's reconstructed type)
+ * @param ty       the reconstructed literal's type (the slice)
+ * @param table    the type table (forwarded to each child reconstruction)
+ * @param line     the original expression's source line
+ * @param col      the original expression's source column
+ * @return         the `TArrayLit`, or null when an element cannot be reconstructed
+ * @since #comptime-fold (Family-B B2)
+ */
+fn array_literal_of(ag: CVAgg, elem_ty: Type, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+    var elems: []TArrayElem = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= ag.elems.len { break }
+        var child = match comptime_literal_of(ag.elems[i], elem_ty, table, line, col) {
+            TExpr as lit => lit
+            null => return null
+        }
+        elems = teko::list::push(elems, TArrayElem { is_spread = false; expr = child })
+        i++
+    }
+    TExpr { kind = TArrayLit { elements = elems }; type = ty; line = line; col = col }
+}
+
+/**
+ * struct_literal_of — reconstruct a `TStructInit` from an aggregate value `ag` whose declared type is
+ * the named struct `nm`: resolve the struct's field views (`deriver_field_view`), then reconstruct each
+ * child at its field's resolved type, in declaration order. Null when the type is not a field-shaped
+ * type, when the arity disagrees, or when a field child has no literal form.
+ *
+ * @param ag     the aggregate comptime value (children in field declaration order)
+ * @param nm     the named struct type
+ * @param ty     the reconstructed literal's type (the named struct)
+ * @param table  the type table (resolves the field views)
+ * @param line   the original expression's source line
+ * @param col    the original expression's source column
+ * @return       the `TStructInit`, or null when the struct cannot be reconstructed
+ * @since #comptime-fold (Family-B B2)
+ */
+fn struct_literal_of(ag: CVAgg, nm: Named, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+    var fvs = match deriver_field_view(nm.name, table) {
+        []FieldView as v => v
+        error => return null
+    }
+    if fvs.len != ag.elems.len { return null }
+    var names: []str = teko::list::empty()
+    var vals: []TExpr = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= fvs.len { break }
+        var child = match comptime_literal_of(ag.elems[i], fvs[i].type, table, line, col) {
+            TExpr as lit => lit
+            null => return null
+        }
+        names = teko::list::push(names, fvs[i].name)
+        vals = teko::list::push(vals, child)
+        i++
+    }
+    TExpr { kind = TStructInit { field_names = names; field_vals = vals }; type = ty; line = line; col = col }
+}
+
+/**
  * fold_expr — the Layer-1a fold driver (CF2): rewrite `e` so every name-free, provably-const INTEGER
  * op-tree becomes the literal it evaluates to (`literal_of(eval_const(e))`), and every other node is
  * rebuilt around its folded children (a partially-const tree folds its const sub-trees). Composed
