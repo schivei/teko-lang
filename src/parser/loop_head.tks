@@ -7,9 +7,9 @@ use teko::lexer
  *
  * @param head  the statement to place first
  * @param rest  the following statements, in order
- * @return      a new `[]Statement` = `[head, ...rest]`
+ * @return      a new `[]@Statement()` = `[head, ...rest]`
  */
-fn prepend_stmt(head: Statement, rest: []Statement): []Statement {
+fn prepend_stmt(head: @Statement(), rest: []@Statement()): []@Statement() {
     var out = teko::list::push(teko::list::empty(), head)
     var i: u64 = 0
     loop {
@@ -26,7 +26,7 @@ fn prepend_stmt(head: Statement, rest: []Statement): []Statement {
  *
  * @return  a `BreakStmt` targeting the innermost loop
  */
-fn loop_break(): Statement {
+fn loop_break(): @Statement() {
     BreakStmt { label = "" }
 }
 
@@ -52,7 +52,7 @@ fn loop_not(e: Expr, line: u32, col: u32): Expr {
  * @param col   the source column to stamp on the synthesized nodes
  * @return      the `if !<cond> { break }` statement
  */
-fn loop_cond_break(cond: Expr, line: u32, col: u32): Statement {
+fn loop_cond_break(cond: Expr, line: u32, col: u32): @Statement() {
     var neg = loop_not(cond, line, col)
     var brk = teko::list::push(teko::list::empty(), loop_break())
     var iff = Expr { kind = IfExpr { cond = neg; then_blk = brk; has_else = false; else_blk = teko::list::empty() }; line = line; col = col }
@@ -80,12 +80,12 @@ fn loop_temp(kind: str, line: u32, col: u32): str {
  * @param value  the initializer expression
  * @return       the `mut` binding statement
  */
-fn loop_mut_binding(name: str, value: Expr): Statement {
+fn loop_mut_binding(name: str, value: Expr): @Statement() {
     Binding { kind = BindKind::Mut; target = SimpleName { name = name }; has_type = false; type_ann = no_type(); is_ref = false; value = value }
 }
 
 /**
- * loop_counter_binding — a `mut <name>[: T] = <value>` binding as a `Statement`, the range counter
+ * loop_counter_binding — a `mut <name>[: T] = <value>` binding as a `@Statement()`, the range counter
  * carrying the user's optional type annotation (#517).
  *
  * @param name      the counter name
@@ -94,7 +94,7 @@ fn loop_mut_binding(name: str, value: Expr): Statement {
  * @param type_ann  the counter's type annotation (valid iff `has_type`)
  * @return          the `mut` counter binding statement
  */
-fn loop_counter_binding(name: str, value: Expr, has_type: bool, type_ann: TypeExpr): Statement {
+fn loop_counter_binding(name: str, value: Expr, has_type: bool, type_ann: TypeExpr): @Statement() {
     Binding { kind = BindKind::Mut; target = SimpleName { name = name }; has_type = has_type; type_ann = type_ann; is_ref = false; value = value }
 }
 
@@ -143,7 +143,7 @@ fn loop_one(line: u32, col: u32): Expr {
  * @param value  the right-hand side
  * @return       the assignment statement
  */
-fn loop_assign_simple(name: str, op: lexer::TokenKind, value: Expr): Statement {
+fn loop_assign_simple(name: str, op: lexer::TokenKind, value: Expr): @Statement() {
     Assign { kind = AssignKind::Simple; name = name; op = op; value = value; deref = false; target = no_expr() }
 }
 
@@ -174,7 +174,7 @@ fn loop_less(lo: Expr, hi: Expr, inclusive: bool, line: u32, col: u32): Expr {
  * @param col   the source column to stamp
  * @return      the `if <cond> { <then> }` statement
  */
-fn loop_if_then(cond: Expr, then: Statement, line: u32, col: u32): Statement {
+fn loop_if_then(cond: Expr, then: @Statement(), line: u32, col: u32): @Statement() {
     var blk = teko::list::push(teko::list::empty(), then)
     var iff = Expr { kind = IfExpr { cond = cond; then_blk = blk; has_else = false; else_blk = teko::list::empty() }; line = line; col = col }
     ExprStmt { expr = iff }
@@ -189,9 +189,9 @@ fn loop_if_then(cond: Expr, then: Statement, line: u32, col: u32): Statement {
  * @param label  the UPPER_SNAKE prefix label, or "" when unlabeled
  * @return  the parsed loop statement, or a parse error
  */
-fn parse_loop_infinite(tokens: []lexer::Token, brace_pos: u64, label: str): Parsed<Statement> | error {
-    var blk = match parse_block(tokens, brace_pos) { ParsedList<Statement> as x => x; error as e => return e }
-    Parsed<Statement> { node = LoopStmt { label = label; init = teko::list::empty(); body = blk.items }; next = blk.next }
+fn parse_loop_infinite(tokens: []lexer::Token, brace_pos: u64, label: str): Parsed<@Statement()> | error {
+    var blk = match parse_block(tokens, brace_pos) { ParsedList<@Statement()> as x => x; error as e => return e }
+    Parsed<@Statement()> { node = LoopStmt { label = label; init = teko::list::empty(); body = blk.items }; next = blk.next }
 }
 
 /**
@@ -206,14 +206,14 @@ fn parse_loop_infinite(tokens: []lexer::Token, brace_pos: u64, label: str): Pars
  * @param col  the loop keyword's source column (stamped on synthesized nodes)
  * @return  the parsed loop statement, or a parse error
  */
-fn parse_loop_while(tokens: []lexer::Token, cond_pos: u64, label: str, line: u32, col: u32): Parsed<Statement> | error {
+fn parse_loop_while(tokens: []lexer::Token, cond_pos: u64, label: str, line: u32, col: u32): Parsed<@Statement()> | error {
     var cond = match parse_expr_no_struct(tokens, cond_pos) { Parsed<Expr> as x => x; error as e => return e }
     if !is_kind_at(tokens, cond.next, lexer::TokenKind::LBrace) {
         return err_at(tokens, cond.next, "expected '{' after the loop condition")
     }
-    var blk = match parse_block(tokens, cond.next) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, cond.next) { ParsedList<@Statement()> as x => x; error as e => return e }
     var body = prepend_stmt(loop_cond_break(cond.node, line, col), blk.items)
-    Parsed<Statement> { node = LoopStmt { label = label; init = teko::list::empty(); body = body }; next = blk.next }
+    Parsed<@Statement()> { node = LoopStmt { label = label; init = teko::list::empty(); body = body }; next = blk.next }
 }
 
 /**
@@ -232,9 +232,9 @@ fn parse_loop_while(tokens: []lexer::Token, cond_pos: u64, label: str, line: u32
  * @param col        the loop keyword's source column
  * @return           the `init` preamble statement list
  */
-fn loop_range_init(name: str, lo: Expr, hi: Expr, has_type: bool, type_ann: TypeExpr, hi_name: str, first_name: str, line: u32, col: u32): []Statement {
+fn loop_range_init(name: str, lo: Expr, hi: Expr, has_type: bool, type_ann: TypeExpr, hi_name: str, first_name: str, line: u32, col: u32): []@Statement() {
     var counter = loop_counter_binding(name, lo, has_type, type_ann)
-    var init: []Statement = teko::list::push(teko::list::empty(), counter)
+    var init: []@Statement() = teko::list::push(teko::list::empty(), counter)
     init = teko::list::push(init, loop_mut_binding(hi_name, hi))
     init = teko::list::push(init, loop_mut_binding(first_name, loop_bool(true, line, col)))
     init
@@ -247,7 +247,7 @@ fn loop_range_init(name: str, lo: Expr, hi: Expr, has_type: bool, type_ann: Type
  * @param src  the statements to append
  * @return     `dst` with `src` appended
  */
-fn loop_append_all(dst: []Statement, src: []Statement): []Statement {
+fn loop_append_all(dst: []@Statement(), src: []@Statement()): []@Statement() {
     var out = dst
     var i: u64 = 0
     loop {
@@ -272,11 +272,11 @@ fn loop_append_all(dst: []Statement, src: []Statement): []Statement {
  * @param col         the loop keyword's source column
  * @return            the folded body statement list
  */
-fn loop_first_guarded_body(step: Statement, guard_cond: Expr, first_name: str, body: []Statement, line: u32, col: u32): []Statement {
+fn loop_first_guarded_body(step: @Statement(), guard_cond: Expr, first_name: str, body: []@Statement(), line: u32, col: u32): []@Statement() {
     var guarded_step = loop_if_then(loop_not(loop_var(first_name, line, col), line, col), step, line, col)
     var clear_first = loop_assign_simple(first_name, lexer::TokenKind::Assign, loop_bool(false, line, col))
     var guard = loop_cond_break(guard_cond, line, col)
-    var full: []Statement = teko::list::push(teko::list::empty(), guarded_step)
+    var full: []@Statement() = teko::list::push(teko::list::empty(), guarded_step)
     full = teko::list::push(full, clear_first)
     full = teko::list::push(full, guard)
     loop_append_all(full, body)
@@ -295,7 +295,7 @@ fn loop_first_guarded_body(step: Statement, guard_cond: Expr, first_name: str, b
  * @param col        the loop keyword's source column
  * @return           the folded body statement list
  */
-fn loop_range_body(name: str, hi_name: str, first_name: str, inclusive: bool, body: []Statement, line: u32, col: u32): []Statement {
+fn loop_range_body(name: str, hi_name: str, first_name: str, inclusive: bool, body: []@Statement(), line: u32, col: u32): []@Statement() {
     var step = loop_assign_simple(name, lexer::TokenKind::PlusEq, loop_one(line, col))
     var guard_cond = loop_less(loop_var(name, line, col), loop_var(hi_name, line, col), inclusive, line, col)
     loop_first_guarded_body(step, guard_cond, first_name, body, line, col)
@@ -317,18 +317,18 @@ fn loop_range_body(name: str, hi_name: str, first_name: str, inclusive: bool, bo
  * @param col      the loop keyword's source column
  * @return         the parsed loop statement, or a parse error
  */
-fn parse_loop_range(tokens: []lexer::Token, tgt: Parsed<@BindTarget()>, ann: Annotation, lo: Parsed<Expr>, inclusive: bool, label: str, line: u32, col: u32): Parsed<Statement> | error {
+fn parse_loop_range(tokens: []lexer::Token, tgt: Parsed<@BindTarget()>, ann: Annotation, lo: Parsed<Expr>, inclusive: bool, label: str, line: u32, col: u32): Parsed<@Statement()> | error {
     var hi = match parse_expr_no_struct(tokens, lo.next + 1) { Parsed<Expr> as x => x; error as e => return e }
     if !is_kind_at(tokens, hi.next, lexer::TokenKind::LBrace) {
         return err_at(tokens, hi.next, "expected '{' after the loop range")
     }
     var name = match tgt.node { SimpleName as sn => sn.name; _ => return err_at(tokens, lo.next, "a range loop binds a single name, not a destructure") }
-    var blk = match parse_block(tokens, hi.next) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, hi.next) { ParsedList<@Statement()> as x => x; error as e => return e }
     var hi_name = loop_temp("hi", line, col)
     var first_name = loop_temp("first", line, col)
     var init = loop_range_init(name, lo.node, hi.node, ann.has_type, ann.type_ann, hi_name, first_name, line, col)
     var body = loop_range_body(name, hi_name, first_name, inclusive, blk.items, line, col)
-    Parsed<Statement> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
+    Parsed<@Statement()> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
 }
 
 /**
@@ -346,7 +346,7 @@ fn parse_loop_range(tokens: []lexer::Token, tgt: Parsed<@BindTarget()>, ann: Ann
  * @param col       the loop keyword's source column
  * @return          the parsed loop statement, or a parse error
  */
-fn parse_loop_three_part(tokens: []lexer::Token, tgt: Parsed<@BindTarget()>, ann: Annotation, init_pos: u64, label: str, line: u32, col: u32): Parsed<Statement> | error {
+fn parse_loop_three_part(tokens: []lexer::Token, tgt: Parsed<@BindTarget()>, ann: Annotation, init_pos: u64, label: str, line: u32, col: u32): Parsed<@Statement()> | error {
     var a = match parse_expr(tokens, init_pos) { Parsed<Expr> as x => x; error as e => return e }
     if !is_kind_at(tokens, a.next, lexer::TokenKind::Semicolon) {
         return err_at(tokens, a.next, "expected ';' after the loop init")
@@ -355,17 +355,17 @@ fn parse_loop_three_part(tokens: []lexer::Token, tgt: Parsed<@BindTarget()>, ann
     if !is_kind_at(tokens, cond.next, lexer::TokenKind::Semicolon) {
         return err_at(tokens, cond.next, "expected ';' after the loop condition")
     }
-    var step = match parse_statement(tokens, cond.next + 1) { Parsed<Statement> as x => x; error as e => return e }
+    var step = match parse_statement(tokens, cond.next + 1) { Parsed<@Statement()> as x => x; error as e => return e }
     if !is_kind_at(tokens, step.next, lexer::TokenKind::LBrace) {
         return err_at(tokens, step.next, "expected '{' after the loop step")
     }
     var name = match tgt.node { SimpleName as sn => sn.name; _ => return err_at(tokens, init_pos, "a 3-part loop binds a single counter name, not a destructure") }
-    var blk = match parse_block(tokens, step.next) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, step.next) { ParsedList<@Statement()> as x => x; error as e => return e }
     var first_name = loop_temp("first", line, col)
-    var init: []Statement = teko::list::push(teko::list::empty(), loop_counter_binding(name, a.node, ann.has_type, ann.type_ann))
+    var init: []@Statement() = teko::list::push(teko::list::empty(), loop_counter_binding(name, a.node, ann.has_type, ann.type_ann))
     init = teko::list::push(init, loop_mut_binding(first_name, loop_bool(true, line, col)))
     var body = loop_first_guarded_body(step.node, cond.node, first_name, blk.items, line, col)
-    Parsed<Statement> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
+    Parsed<@Statement()> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
 }
 
 /**
@@ -403,7 +403,7 @@ pub type LoopElemBind = struct { elem: str; has_index: bool; index: str }
  * @param value  the initializer expression
  * @return       the `let` binding statement
  */
-fn loop_let_binding(name: str, value: Expr): Statement {
+fn loop_let_binding(name: str, value: Expr): @Statement() {
     Binding { kind = BindKind::Let; target = SimpleName { name = name }; has_type = false; type_ann = no_type(); is_ref = false; value = value }
 }
 
@@ -459,7 +459,7 @@ fn loop_slice_index(recv_name: str, idx_name: str, line: u32, col: u32): Expr {
  * @param col        the source column to stamp
  * @return           the `<recv>[<idx>] = <elem>` element-store statement
  */
-fn loop_slice_writeback(recv_name: str, idx_name: str, elem_name: str, line: u32, col: u32): Statement {
+fn loop_slice_writeback(recv_name: str, idx_name: str, elem_name: str, line: u32, col: u32): @Statement() {
     Assign { kind = AssignKind::Index; name = ""; op = lexer::TokenKind::Assign; value = loop_var(elem_name, line, col); deref = false; target = loop_slice_index(recv_name, idx_name, line, col) }
 }
 
@@ -504,7 +504,7 @@ fn loop_assign_writes_name(a: Assign, name: str): bool {
  * @param name   the element name under test
  * @return       true iff some reachable statement writes `name`
  */
-fn loop_body_writes_name(stmts: []Statement, name: str): bool {
+fn loop_body_writes_name(stmts: []@Statement(), name: str): bool {
     var i: u64 = 0
     loop {
         if i >= stmts.len { break }
@@ -523,7 +523,7 @@ fn loop_body_writes_name(stmts: []Statement, name: str): bool {
  * @param name  the element name under test
  * @return      true iff `s` (or a nested body) writes `name`
  */
-fn loop_stmt_writes_name(s: Statement, name: str): bool {
+fn loop_stmt_writes_name(s: @Statement(), name: str): bool {
     match s {
         Assign as a => loop_assign_writes_name(a, name)
         ExprStmt as es => loop_expr_writes_name(es.expr, name)
@@ -585,10 +585,10 @@ fn loop_match_writes_name(arms: []Arm, name: str): bool {
  * @param col        the loop keyword's source column
  * @return           the element-binding body (binds + user statements [+ write-back])
  */
-fn loop_slice_elem_binds(bind: LoopElemBind, recv_name: str, idx_name: str, writeback: bool, body: []Statement, line: u32, col: u32): []Statement {
+fn loop_slice_elem_binds(bind: LoopElemBind, recv_name: str, idx_name: str, writeback: bool, body: []@Statement(), line: u32, col: u32): []@Statement() {
     var read = loop_slice_index(recv_name, idx_name, line, col)
     var elem_bind = if writeback { loop_mut_binding(bind.elem, read) } else { loop_let_binding(bind.elem, read) }
-    var out: []Statement = teko::list::push(teko::list::empty(), elem_bind)
+    var out: []@Statement() = teko::list::push(teko::list::empty(), elem_bind)
     if bind.has_index {
         out = teko::list::push(out, loop_let_binding(bind.index, loop_var(idx_name, line, col)))
     }
@@ -666,11 +666,11 @@ fn loop_head_is_foreach(tokens: []lexer::Token, after: u64): bool {
  * @param col     the loop keyword's source column
  * @return        the parsed loop statement, or a parse error
  */
-fn parse_loop_foreach_slice(tokens: []lexer::Token, bind: LoopElemBind, src: Parsed<Expr>, label: str, line: u32, col: u32): Parsed<Statement> | error {
+fn parse_loop_foreach_slice(tokens: []lexer::Token, bind: LoopElemBind, src: Parsed<Expr>, label: str, line: u32, col: u32): Parsed<@Statement()> | error {
     if !is_kind_at(tokens, src.next, lexer::TokenKind::LBrace) {
         return err_at(tokens, src.next, "expected '{' after the loop iterable")
     }
-    var blk = match parse_block(tokens, src.next) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, src.next) { ParsedList<@Statement()> as x => x; error as e => return e }
     var idx_name = loop_temp("i", line, col)
     var hi_name = loop_temp("hi", line, col)
     var first_name = loop_temp("first", line, col)
@@ -681,15 +681,15 @@ fn parse_loop_foreach_slice(tokens: []lexer::Token, bind: LoopElemBind, src: Par
         var hi = loop_field_access(src_var, "len", line, col)
         var init = loop_range_init(idx_name, loop_zero(line, col), hi, true, loop_u64_type(), hi_name, first_name, line, col)
         var body = loop_range_body(idx_name, hi_name, first_name, false, binds, line, col)
-        return Parsed<Statement> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
+        return Parsed<@Statement()> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
     }
     var src_name = loop_temp("src", line, col)
     var binds = loop_slice_elem_binds(bind, src_name, idx_name, false, blk.items, line, col)
     var hi = loop_field_access(src_name, "len", line, col)
-    var init: []Statement = teko::list::push(teko::list::empty(), loop_let_binding(src_name, src.node))
+    var init: []@Statement() = teko::list::push(teko::list::empty(), loop_let_binding(src_name, src.node))
     init = loop_append_all(init, loop_range_init(idx_name, loop_zero(line, col), hi, true, loop_u64_type(), hi_name, first_name, line, col))
     var body = loop_range_body(idx_name, hi_name, first_name, false, binds, line, col)
-    Parsed<Statement> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
+    Parsed<@Statement()> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
 }
 
 /**
@@ -720,7 +720,7 @@ fn loop_expr_root_name_of_var(e: Expr): str {
  * @param col       the loop keyword's source column
  * @return          the parsed loop statement, or a parse error
  */
-fn parse_loop_binding(tokens: []lexer::Token, head_pos: u64, label: str, line: u32, col: u32): Parsed<Statement> | error {
+fn parse_loop_binding(tokens: []lexer::Token, head_pos: u64, label: str, line: u32, col: u32): Parsed<@Statement()> | error {
     var tgt = match parse_bind_target(tokens, head_pos + 1) { Parsed<@BindTarget()> as x => x; error as e => return e }
     var ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
     if is_kind_at(tokens, ann.next, lexer::TokenKind::In) {
@@ -771,7 +771,7 @@ fn is_var_loop_head(tokens: []lexer::Token, pos: u64): bool {
  * @param label  the UPPER_SNAKE prefix label, or "" when unlabeled
  * @return  the parsed loop statement, or a parse error
  */
-fn parse_loop(tokens: []lexer::Token, loop_pos: u64, label: str): Parsed<Statement> | error {
+fn parse_loop(tokens: []lexer::Token, loop_pos: u64, label: str): Parsed<@Statement()> | error {
     var after = loop_pos + 1
     if is_kind_at(tokens, after, lexer::TokenKind::LBrace) {
         return parse_loop_infinite(tokens, after, label)

@@ -471,7 +471,7 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
             from_lib = tokens[p].text
             p = p + 1
         }
-        var no_body: []Statement = teko::list::empty()
+        var no_body: []@Statement() = teko::list::empty()
         return Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = true; c_symbol = c_symbol; from_lib = from_lib; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false }; next = p }
     }
     // (W10b.CLASS increment 2) `abstract fn …` — a SIGNATURE ONLY, no body (abstract classes only;
@@ -479,13 +479,13 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
     if (is_abstract || allow_bodyless) && !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         if has_arena_size { return err_at(tokens, p, "`#arena_size(…)` may not precede an `abstract fn` (there is no Teko body to size)") }
         if ret_types.len > 0 { return err_at(tokens, p, "a bodyless (`abstract`/interface) function may not declare a multiple-return `( A, B )` signature yet") }
-        var no_body: []Statement = teko::list::empty()
+        var no_body: []@Statement() = teko::list::empty()
         return Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false }; next = p }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the function body")
     }
-    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
     Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size; ret_types = ret_types; is_operator = false }; next = blk.next }
 }
 
@@ -598,14 +598,14 @@ fn parse_accessor(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parse
         return err_at(tokens, p, "a setter returns nothing — drop the `: T` after `set " ~ prop ~ "(value: T)`")
     }
     var sym = (if is_getter { "__get_" } else { "__set_" }) ~ prop
-    var body: []Statement = teko::list::empty()
+    var body: []@Statement() = teko::list::empty()
     if allow_bodyless && !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return Parsed<@Decl()> { node = accessor_function(sym, injected, has_return, return_type, body, vis, has_doc, doc, name_line, name_col, is_intern, is_getter, is_setter, prop); next = p }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the accessor body")
     }
-    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
     Parsed<@Decl()> { node = accessor_function(sym, injected, has_return, return_type, blk.items, vis, has_doc, doc, name_line, name_col, is_intern, is_getter, is_setter, prop); next = blk.next }
 }
 
@@ -632,7 +632,7 @@ fn parse_accessor(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parse
  * @return             the assembled accessor Function
  * @since §9 properties
  */
-fn accessor_function(sym: str, params: []Param, has_return: bool, return_type: TypeExpr, body: []Statement, vis: Visibility, has_doc: bool, doc: str, line: u32, col: u32, is_intern: bool, is_getter: bool, is_setter: bool, prop: str): Function {
+fn accessor_function(sym: str, params: []Param, has_return: bool, return_type: TypeExpr, body: []@Statement(), vis: Visibility, has_doc: bool, doc: str, line: u32, col: u32, is_intern: bool, is_getter: bool, is_setter: bool, prop: str): Function {
     Function {
         name = sym; type_params = teko::list::empty(); type_constraints = teko::list::empty()
         params = params; has_return = has_return; return_type = return_type; body = body
@@ -760,7 +760,7 @@ fn parse_operator_member(tokens: []lexer::Token, pos: u64, allow_bodyless: bool)
         }
         return err_at(tokens, p, "expected '{' for the operator body")
     }
-    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
     Parsed<Function> { node = Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = Visibility::Pub; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = true; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = true }; next = blk.next }
 }
 
@@ -1694,7 +1694,7 @@ fn parse_macro_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parsed<@
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the macro body")
     }
-    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
     Parsed<@Decl()> { node = MacroDecl { name = name; params = params.items; body = blk.items; vis = vis }; next = blk.next }
 }
 
@@ -1732,7 +1732,7 @@ fn parse_comptime_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parse
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the comptime body")
     }
-    var blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
+    var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
     Parsed<@Decl()> { node = ComptimeDecl { name = name; type_params = tps.names; params = params.items; ret = ret.node; body = blk.items; vis = vis }; next = blk.next }
 }
 

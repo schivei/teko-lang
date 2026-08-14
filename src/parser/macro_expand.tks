@@ -139,15 +139,15 @@ fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
     match it.content {
         Function as f => {
             var fs = match rewrite_fn_sig(f, prog, depth) { Function as x => x; error as e => return e }
-            var nb = match walk_stmts(fs.body, prog, no_holes(), depth) { []Statement as s => s; error as e => return e }
+            var nb = match walk_stmts(fs.body, prog, no_holes(), depth) { []@Statement() as s => s; error as e => return e }
             Item { content = with_fn_body(fs, nb); namespace = it.namespace; file = it.file }
         }
         TypeDecl as td => {
             var nd = match rewrite_type_decl(td, prog, depth) { TypeDecl as x => x; error as e => return e }
             Item { content = nd; namespace = it.namespace; file = it.file }
         }
-        Statement as s => {
-            var ns = match walk_stmt(s, prog, no_holes(), depth) { Statement as x => x; error as e => return e }
+        (@Statement()) as s => {
+            var ns = match walk_stmt(s, prog, no_holes(), depth) { (@Statement()) as x => x; error as e => return e }
             Item { content = ns; namespace = it.namespace; file = it.file }
         }
         ConstDecl as cd => {
@@ -326,7 +326,7 @@ fn rewrite_fields(fields: []Field, prog: Program, depth: u64): []Field | error {
  * @return      `f` with its body replaced
  * @since 0.4-macros (§14 A3)
  */
-fn with_fn_body(f: Function, body: []Statement): Function {
+fn with_fn_body(f: Function, body: []@Statement()): Function {
     Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
 }
 
@@ -545,7 +545,7 @@ fn select_lowering_frag(md: MacroDecl, binds: MacroParamBinds): LoweringFrag | e
  * @throws       when the list is not a single lowering or a well-formed comptime `if/else`
  * @since §14 Form 2
  */
-fn select_lowering_from(stmts: []Statement, mname: str, binds: MacroParamBinds): LoweringFrag | error {
+fn select_lowering_from(stmts: []@Statement(), mname: str, binds: MacroParamBinds): LoweringFrag | error {
     if stmts.len != 1 {
         return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: its body must be a single `lowering { … }` or a single comptime `if/else` selecting one (§14 Form 2)")) }
     }
@@ -925,7 +925,7 @@ fn walk_arms(arms: []Arm, prog: Program, holes: MacroHoles, depth: u64): []Arm |
         if i >= arms.len { break }
         var pat = match walk_pattern(arms[i].pattern, prog, depth) { (@Pattern()) as p => p; error as er => return er }
         var g = match walk_expr(arms[i].guard, prog, holes, depth) { Expr as e => e; error as er => return er }
-        var b = match walk_stmts(arms[i].body, prog, holes, depth) { []Statement as s => s; error as er => return er }
+        var b = match walk_stmts(arms[i].body, prog, holes, depth) { []@Statement() as s => s; error as er => return er }
         out = teko::list::push(out, Arm { pattern = pat; has_when = arms[i].has_when; guard = g; body = b })
         i++
     }
@@ -998,8 +998,8 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
         }
         IfExpr as f => {
             var cond = match walk_expr(f.cond, prog, holes, depth) { Expr as x => x; error as er => return er }
-            var tb = match walk_stmts(f.then_blk, prog, holes, depth) { []Statement as s => s; error as er => return er }
-            var eb = match walk_stmts(f.else_blk, prog, holes, depth) { []Statement as s => s; error as er => return er }
+            var tb = match walk_stmts(f.then_blk, prog, holes, depth) { []@Statement() as s => s; error as er => return er }
+            var eb = match walk_stmts(f.else_blk, prog, holes, depth) { []@Statement() as s => s; error as er => return er }
             with_kind(e, IfExpr { cond = cond; then_blk = tb; has_else = f.has_else; else_blk = eb })
         }
         MatchExpr as m => {
@@ -1041,7 +1041,7 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
         }
         Lambda as lam => {
             var lp = match rewrite_lambda_params(lam.params, prog, depth) { []LambdaParam as p => p; error as er => return er }
-            var b = match walk_stmts(lam.body, prog, holes, depth) { []Statement as s => s; error as er => return er }
+            var b = match walk_stmts(lam.body, prog, holes, depth) { []@Statement() as s => s; error as er => return er }
             with_kind(e, Lambda { params = lp; body = b })
         }
         Borrow as bo => {
@@ -1049,7 +1049,7 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
             with_kind(e, Borrow { operand = o })
         }
         Block as blk => {
-            var b = match walk_stmts(blk.body, prog, holes, depth) { []Statement as s => s; error as er => return er }
+            var b = match walk_stmts(blk.body, prog, holes, depth) { []@Statement() as s => s; error as er => return er }
             with_kind(e, Block { body = b })
         }
     }
@@ -1066,12 +1066,12 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
  * @throws       when an inner expansion fails
  * @since 0.4-macros (§14 A3)
  */
-fn walk_stmts(ss: []Statement, prog: Program, holes: MacroHoles, depth: u64): []Statement | error {
-    var out: []Statement = teko::list::empty()
+fn walk_stmts(ss: []@Statement(), prog: Program, holes: MacroHoles, depth: u64): []@Statement() | error {
+    var out: []@Statement() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= ss.len { break }
-        var s = match walk_stmt(ss[i], prog, holes, depth) { Statement as x => x; error as er => return er }
+        var s = match walk_stmt(ss[i], prog, holes, depth) { (@Statement()) as x => x; error as er => return er }
         out = teko::list::push(out, s)
         i++
     }
@@ -1113,7 +1113,7 @@ fn walk_binding_type_ann(has_type: bool, type_ann: TypeExpr, prog: Program, dept
  * @throws       when an inner expansion fails
  * @since 0.4-macros (§14 A3)
  */
-fn walk_stmt(s: Statement, prog: Program, holes: MacroHoles, depth: u64): Statement | error {
+fn walk_stmt(s: @Statement(), prog: Program, holes: MacroHoles, depth: u64): @Statement() | error {
     match s {
         Binding as b => {
             var v = match walk_expr(b.value, prog, holes, depth) { Expr as x => x; error as er => return er }
@@ -1131,8 +1131,8 @@ fn walk_stmt(s: Statement, prog: Program, holes: MacroHoles, depth: u64): Statem
             Return { has_value = r.has_value; value = v; values = vs }
         }
         LoopStmt as l => {
-            var init = match walk_stmts(l.init, prog, holes, depth) { []Statement as x => x; error as er => return er }
-            var body = match walk_stmts(l.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            var init = match walk_stmts(l.init, prog, holes, depth) { []@Statement() as x => x; error as er => return er }
+            var body = match walk_stmts(l.body, prog, holes, depth) { []@Statement() as x => x; error as er => return er }
             LoopStmt { label = l.label; init = init; body = body }
         }
         BreakStmt => s
@@ -1142,15 +1142,15 @@ fn walk_stmt(s: Statement, prog: Program, holes: MacroHoles, depth: u64): Statem
             ExprStmt { expr = x }
         }
         DeferStmt as d => {
-            var b = match walk_stmts(d.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            var b = match walk_stmts(d.body, prog, holes, depth) { []@Statement() as x => x; error as er => return er }
             DeferStmt { body = b }
         }
         AdoptStmt as ad => {
-            var b = match walk_stmts(ad.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            var b = match walk_stmts(ad.body, prog, holes, depth) { []@Statement() as x => x; error as er => return er }
             AdoptStmt { name = ad.name; body = b }
         }
         BlockStmt as bs => {
-            var b = match walk_stmts(bs.body, prog, holes, depth) { []Statement as x => x; error as er => return er }
+            var b = match walk_stmts(bs.body, prog, holes, depth) { []@Statement() as x => x; error as er => return er }
             BlockStmt { body = b }
         }
         MultiBind as mb => {

@@ -78,7 +78,7 @@ fn type_var(v: parser::Var, env: Env): TExpr | error {
  * @param bound   accumulates every internally-bound name (by-reference, write-through)
  * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
  */
-fn lam_collect_block(stmts: []parser::Statement, ref refs: []str, ref bound: []str, ref writes: []str) {
+fn lam_collect_block(stmts: []@Statement(), ref refs: []str, ref bound: []str, ref writes: []str) {
     var i = 0
     loop { if i >= stmts.len { break }; lam_collect_stmt(stmts[i], refs, bound, writes); i++ }
 }
@@ -97,7 +97,7 @@ fn lam_collect_block(stmts: []parser::Statement, ref refs: []str, ref bound: []s
  * @param bound   accumulates every internally-bound name (by-reference, write-through)
  * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
  */
-fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str, ref writes: []str) {
+fn lam_collect_stmt(s: @Statement(), ref refs: []str, ref bound: []str, ref writes: []str) {
     match s {
         parser::Binding as b => {
             lam_collect_expr(b.value, refs, bound, writes)
@@ -2703,7 +2703,7 @@ fn method_mutates_self_guarded(sname: str, m: parser::Function, table: TypeTable
  * @return         true iff some statement mutates self
  * @since item-14
  */
-fn stmts_mutate_self(sname: str, stmts: []parser::Statement, table: TypeTable, visited: []str): bool {
+fn stmts_mutate_self(sname: str, stmts: []@Statement(), table: TypeTable, visited: []str): bool {
     var i = 0 to u64
     loop {
         if i >= stmts.len { break }
@@ -2725,7 +2725,7 @@ fn stmts_mutate_self(sname: str, stmts: []parser::Statement, table: TypeTable, v
  * @return         true iff the statement mutates self
  * @since item-14
  */
-fn stmt_mutates_self(sname: str, s: parser::Statement, table: TypeTable, visited: []str): bool {
+fn stmt_mutates_self(sname: str, s: @Statement(), table: TypeTable, visited: []str): bool {
     match s {
         parser::Assign as a => {
             if assign_target_is_self(a) { return true }
@@ -5802,7 +5802,7 @@ fn tblock_diverges(stmts: []TStatement): bool {
 }
 
 // ---- a typed block: thread the env, collect the typed statements ----
-fn type_block(stmts: []parser::Statement, env: Env, table: TypeTable): TypedBlock | error {
+fn type_block(stmts: []@Statement(), env: Env, table: TypeTable): TypedBlock | error {
     var cur = env
     // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
     // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
@@ -6863,7 +6863,7 @@ fn mb_len(recv: parser::Expr): parser::Expr {
  * @return          the synthesized `parser::Binding` statement
  * @since §9 F
  */
-fn mb_binding_stmt(kind: parser::BindKind, name: str, has_type: bool, ann: parser::TypeExpr, value: parser::Expr): parser::Statement {
+fn mb_binding_stmt(kind: parser::BindKind, name: str, has_type: bool, ann: parser::TypeExpr, value: parser::Expr): @Statement() {
     parser::Binding { kind = kind; target = parser::SimpleName { name = name }; has_type = has_type; type_ann = ann; is_ref = false; value = value }
 }
 
@@ -6879,14 +6879,14 @@ fn mb_binding_stmt(kind: parser::BindKind, name: str, has_type: bool, ann: parse
  * @return       the synthesized guard statement
  * @since §9 F
  */
-fn mb_guard_stmt(temp: str, op: lexer::TokenKind, bound: u64, msg: str): parser::Statement {
+fn mb_guard_stmt(temp: str, op: lexer::TokenKind, bound: u64, msg: str): @Statement() {
     var term = parser::CmpTerm { op = op; operand = mb_u64_lit(bound) }
     var cond = mb_expr(parser::Compare { first = mb_len(mb_var(temp)); rest = teko::list::push(teko::list::empty(), term) })
     var pseg = teko::list::push(teko::list::empty(), parser::Segment { name = "panic" })
     var pargs = teko::list::push(teko::list::empty(), mb_expr(parser::StrLit { text = msg }))
     var pnames = teko::list::push(teko::list::empty(), "")
     var pcall = mb_expr(parser::Call { callee = parser::Path { segments = pseg }; args = pargs; arg_names = pnames; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() })
-    var then_blk = teko::list::push(teko::list::empty(), parser::ExprStmt { expr = pcall })
+    var then_blk: []@Statement() = teko::list::push(teko::list::empty(), parser::ExprStmt { expr = pcall })
     parser::ExprStmt { expr = mb_expr(parser::IfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = teko::list::empty() }) }
 }
 
@@ -7170,7 +7170,7 @@ fn type_multibind(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq |
  * @return       the contributed statements plus the advanced env, or an error
  * @since §9 F
  */
-fn top_level_stmt_nodes(s: parser::Statement, env: Env, table: TypeTable): TStmtSeq | error {
+fn top_level_stmt_nodes(s: @Statement(), env: Env, table: TypeTable): TStmtSeq | error {
     match s {
         parser::MultiBind as mb => type_multibind(mb, env, table)
         _ => {
@@ -7180,7 +7180,7 @@ fn top_level_stmt_nodes(s: parser::Statement, env: Env, table: TypeTable): TStmt
     }
 }
 
-fn type_statement(s: parser::Statement, env: Env, table: TypeTable): TypedStmt | error {
+fn type_statement(s: @Statement(), env: Env, table: TypeTable): TypedStmt | error {
     match s {
         parser::Binding as b => type_binding(b, env, table)
         parser::Assign as a => type_assign(a, env, table)
@@ -7443,7 +7443,7 @@ fn coerce_argument_into(a: TExpr, pt: Type, table: TypeTable): TExpr | error {
     a case→variant widen (emit_as tags the union, including a bare `T`→`T | null` present-wrap), a
     class→interface/base upcast (fat-pointer build), and a `[]E_a`→`[]E_p` element widen where
     `E_a != E_p` (the slice is REBUILT element-wise — bare `[]i64`→`[]i64 | null` or covariant
-    `[]Return`→`[]Statement`; #265: the native gate cc-compiles these for the first time, so a
+    `[]Return`→`[]@Statement()`; #265: the native gate cc-compiles these for the first time, so a
     widened arg-type would hide the element mismatch and cc would reject the distinct `tk_slice_*`
     struct). */
 fn arg_keeps_narrow_type(pt: Type, arg_type: Type, table: TypeTable): bool {
@@ -9252,7 +9252,7 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable): TItem | error {
             normalize_inst_decl(cd, table)   // (W9.4) rewrite `Gen<i64>` member refs to the bare stamped `Gen__g__i64` (no-op when none); else passes through (collect resolved its fields)
         }
         parser::UseDecl as ud => ud   // seed no-op (alias resolution is the checker's, later)
-        parser::Statement as s => {
+        (@Statement()) as s => {
             var ts = match type_statement(s, fenv, table) { TypedStmt as x => x; error as e => return e }
             ts.node
         }
@@ -9398,7 +9398,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
             _ => { }
         }
         match it.content {
-            parser::Statement as s => match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
+            (@Statement()) as s => match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
                 TStmtSeq as seq => {
                     var si: u64 = 0
                     loop {
@@ -9614,7 +9614,7 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
         // file/line/col (err_loc) AND preserves expected/actual (err_typed) — mirror of typer.c's
         // surface_at. The error value now carries those adornments per the E2 contract.
         match it.content {
-            parser::Statement as s => {
+            (@Statement()) as s => {
                 var seq = match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
                     TStmtSeq as x => x
                     error as e => return surface_at(it.file, line, col, e)

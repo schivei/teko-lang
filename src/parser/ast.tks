@@ -212,9 +212,9 @@ pub type Call = struct { callee: Path; args: []Expr; arg_names: []str; owner_typ
 pub type MacroCall = struct { callee: Path; args: []Expr; callee_type_args: []TypeExpr }
 pub type IfExpr = struct {   // if/else is an EXPRESSION (B.20)
     cond: Expr
-    then_blk: []Statement
+    then_blk: []@Statement()
     has_else: bool
-    else_blk: []Statement
+    else_blk: []@Statement()
 }
 pub type MatchExpr = struct { subject: Expr; arms: []Arm }   // match is an EXPRESSION (B.15)
 
@@ -282,7 +282,7 @@ pub type ArrayLit = struct { elements: []ArrayElem }   // [ e0, e1, … ] — a 
 // inferred (no `-> R` on a literal). The checker types it to a `Func` and lifts it to a top-level
 // function + capture env. (`.type` ends up the closure's Func type.)
 pub type LambdaParam = struct { name: str; has_type: bool; type_ann: TypeExpr }
-pub type Lambda = struct { params: []LambdaParam; body: []Statement }
+pub type Lambda = struct { params: []LambdaParam; body: []@Statement() }
 
 /**
  * Block — (§9 E, ruling 7) a Block-B in EXPRESSION position: `{ stmt* trailing_expr }`. A lexical
@@ -295,7 +295,7 @@ pub type Lambda = struct { params: []LambdaParam; body: []Statement }
  * @field body  the parsed statements; the trailing statement's value is the block's result
  * @since §9 E
  */
-pub type Block = struct { body: []Statement }
+pub type Block = struct { body: []@Statement() }
 
 // (C1-POS/E1) Expr is a STRUCT WRAPPER over the variant of node kinds — mirroring the typed
 // `TExpr` (tast.tks) and the C `tk_expr` (ast.h), so EVERY expression node carries its 1-based
@@ -403,7 +403,7 @@ pub type Return = struct { has_value: bool; value: Expr; values: []Expr }
  *              the loop (checker scope / codegen brace)
  * @field body  the iteration body (folded head + user statements)
  */
-pub type LoopStmt = struct { label: str; init: []Statement; body: []Statement }
+pub type LoopStmt = struct { label: str; init: []@Statement(); body: []@Statement() }
 pub type BreakStmt = struct { label: str }   // break [NAME] — label empty = innermost loop
 pub type ContinueStmt = struct { label: str }   // continue [NAME] — label empty = innermost loop
 pub type ExprStmt = struct { expr: Expr }   // a bare expression on its own line
@@ -411,7 +411,7 @@ pub type ExprStmt = struct { expr: Expr }   // a bare expression on its own line
 // (normal return, early return inside a loop, break out of a function).
 // Panic does NOT run deferred blocks (simplifies implementation).
 // Nested `defer` is rejected by the checker.
-pub type DeferStmt = struct { body: []Statement }
+pub type DeferStmt = struct { body: []@Statement() }
 
 /**
  * `adopt [name] { stmts }` — opens an ADOPTER region; every object allocated lexically inside
@@ -424,7 +424,7 @@ pub type DeferStmt = struct { body: []Statement }
  *              code reference the region handle.
  * @field body  the statements executed inside the adopter region.
  */
-pub type AdoptStmt = struct { name: str; body: []Statement }
+pub type AdoptStmt = struct { name: str; body: []@Statement() }
 
 /**
  * `{ stmts }` at STATEMENT position — a BARE BLOCK that opens a lexical scope (0.3.1 §6). The block
@@ -435,7 +435,7 @@ pub type AdoptStmt = struct { name: str; body: []Statement }
  *
  * @field body  the statements executed inside the lexical scope, `;`/newline separated.
  */
-pub type BlockStmt = struct { body: []Statement }
+pub type BlockStmt = struct { body: []@Statement() }
 
 /**
  * BindName — a positional target in a multiple-binding form (§9 F) that binds its slot's value to a
@@ -491,7 +491,7 @@ pub type MultiTargetKind = enum { Parallel; ArrayDecomp }
 /**
  * MultiBind — the MULTIPLE binding statement `var|const TARGETS [: T] = VALUES` (§9 F). Deliberately
  * separate from `Binding` (which stays byte-identical, the sole path the compiler's own fixpoint
- * exercises): the whole new surface is one new `Statement` case, and the checker desugars it to
+ * exercises): the whole new surface is one new `@Statement()` case, and the checker desugars it to
  * already-existing typed nodes, leaving codegen/LIR untouched.
  *
  * @field kind      the mutability the binder declared (`Const`/`Mut`).
@@ -519,7 +519,7 @@ pub type MultiBind = struct {
 /**
  * LoweringFrag — a `lowering { … }` fragment inside a Family-A macro body (§14.2): the RAW token run
  * between the braces, captured VERBATIM (not parsed as statements). At expansion (Family-A pre-pass) the
- * run is re-parsed in the GRAMMATICAL POSITION of the `@call` — an `Expr`/`Statement` in value position,
+ * run is re-parsed in the GRAMMATICAL POSITION of the `@call` — an `Expr`/`@Statement()` in value position,
  * a `TypeExpr` in a type annotation (`[]@Type()`, §9.D) — with each `${expr}` injection hole (a
  * `Dollar` `{` … `}` sub-run in the captured tokens) filled by the caller's intact argument node
  * (§5.1-Opt-1, context-polymorphic). A `LoweringFrag` is legal ONLY in a macro body; anywhere else it is
@@ -530,7 +530,15 @@ pub type MultiBind = struct {
  */
 pub type LoweringFrag = struct { tokens: []lexer::Token }
 
-pub type Statement = variant Binding | Assign | Return | LoopStmt | BreakStmt | ContinueStmt | ExprStmt | DeferStmt | AdoptStmt | BlockStmt | MultiBind | LoweringFrag
+/**
+ * Statement — a statement node, retired from a nominal `variant` to the §9.D inline union `@Statement()`:
+ * a binding, assignment, return, loop, break/continue, expression-statement, defer, adopt, block,
+ * multi-bind, or a `lowering` fragment. Recursive members (loops/blocks carry `[]@Statement()`) box under
+ * CR1; `@ItemKind()` keeps `@Statement()` as a nested member.
+ *
+ * @since §9.D (retired from a `variant` of the statement kinds)
+ */
+macro Statement() { lowering { parser::Binding | parser::Assign | parser::Return | parser::LoopStmt | parser::BreakStmt | parser::ContinueStmt | parser::ExprStmt | parser::DeferStmt | parser::AdoptStmt | parser::BlockStmt | parser::MultiBind | parser::LoweringFrag } }
 
 /**
  * Generic type-parameter CONSTRAINTS (W11/S6, 2026-07-01). `<T: @ConstraintExpr()>` is a DEDICATED
@@ -573,7 +581,7 @@ pub type Function = struct {
     params: []Param
     has_return: bool   // `-> ret` present? (absent = Unit return; P5a)
     return_type: TypeExpr   // the return type (valid iff has_return)
-    body: []Statement
+    body: []@Statement()
     vis: Visibility   // private (default) / pub / exp
     has_doc: bool   // a `/** … */` doc precedes it?
     doc: str   // the doc span (valid iff has_doc)
@@ -893,7 +901,7 @@ pub type ConstDecl = struct { name: str; ty: TypeExpr; init: Expr; vis: Visibili
  * @field vis     visibility (`pub`/`exp`/internal)
  * @since 0.4-macros (§14 A1)
  */
-pub type MacroDecl = struct { name: str; params: []Param; body: []Statement; vis: Visibility }
+pub type MacroDecl = struct { name: str; params: []Param; body: []@Statement(); vis: Visibility }
 
 /**
  * ComptimeDecl — a Family-B comptime-evaluation declaration (`comptime name(params): T { body }`,
@@ -909,7 +917,7 @@ pub type MacroDecl = struct { name: str; params: []Param; body: []Statement; vis
  * @field vis          visibility (`pub`/`exp`/internal)
  * @since 0.4-macros (§14 A1)
  */
-pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param; ret: TypeExpr; body: []Statement; vis: Visibility }
+pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param; ret: TypeExpr; body: []@Statement(); vis: Visibility }
 
 /**
  * Decl — a top-level declaration, retired from a nominal `variant` to the §9.D inline union `@Decl()`:
@@ -918,7 +926,7 @@ pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param;
  * @since §9.D (retired from a `variant` of the declaration kinds)
  */
 macro Decl() { lowering { parser::Function | parser::TypeDecl | parser::ConstDecl | parser::MacroDecl | parser::ComptimeDecl } }
-pub type MainFile = struct { uses: []UseDecl; body: []Statement }   // main.tks: the `use` header + the VIRTUAL MAIN's body (statements only — no type/fn decls)
+pub type MainFile = struct { uses: []UseDecl; body: []@Statement() }   /* main.tks: the `use` header + the VIRTUAL MAIN's body (statements only — no type/fn decls) */
 pub type Module = struct { uses: []UseDecl; decls: []@Decl() }   /* a module: the `use` header + declarations (no loose statements) */
 
 // --- the FLATTENED item/program — the CHECKER's input view (mirror of the C tk_item /
@@ -931,9 +939,9 @@ pub type Module = struct { uses: []UseDecl; decls: []@Decl() }   /* a module: th
  * payload: a `use`, a loose statement (main files), a `fn`, a `type`/`flags`, or a
  * module-level `const` (ConstDecl, #594).
  *
- * @since #594 widened with ConstDecl (was `UseDecl | Statement | Function | TypeDecl`).
+ * @since #594 widened with ConstDecl (was `UseDecl | @Statement() | Function | TypeDecl`).
  */
-macro ItemKind() { lowering { UseDecl | Statement | Function | TypeDecl | ConstDecl | MacroDecl | ComptimeDecl } }
+macro ItemKind() { lowering { UseDecl | @Statement() | Function | TypeDecl | ConstDecl | MacroDecl | ComptimeDecl } }
 
 /**
  * Item — a flattened top-level item: its payload plus source provenance. The `content` union (§9.D
