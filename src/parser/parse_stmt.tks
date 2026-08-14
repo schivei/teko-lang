@@ -4,10 +4,65 @@ use teko::lexer
 
 // dispatch a statement. P4a: `return [expr]` and a bare-expression statement. P4b–P4d add
 // bindings, assignment, loop/break/continue.
+/**
+ * is_lowering_head — does the statement position at `pos` open a `lowering { … }` fragment (§14.2)?
+ * `lowering` is CONTEXTUAL (like `trait`/`params`) — NOT a reserved word — so it means "lowering
+ * fragment" ONLY when `Ident("lowering")` is immediately followed by `{`; anywhere else it stays an
+ * ordinary identifier. Legal only inside a macro body; the checker honest-stops it elsewhere.
+ *
+ * @param tokens  the token stream
+ * @param pos     the statement position under test
+ * @return        true iff `pos` opens a `lowering { … }` fragment
+ * @since 0.4-macros (§14 A2)
+ */
+fn is_lowering_head(tokens: []lexer::Token, pos: u64): bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "lowering" && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace)
+}
+
+/**
+ * parse_lowering_frag — capture a `lowering { … }` fragment (§14.2) as a RAW token run. `pos` is at the
+ * contextual `lowering`; the balanced brace run between the fragment's `{` and its matching `}` is
+ * stored VERBATIM (holes included) in a `LoweringFrag`, to be re-parsed in the `@call`'s grammatical
+ * position at Family-A expansion (§5.1-Opt-1). Nested `{ … }` (a block, a struct literal, an inner
+ * `${expr}` hole) increments the brace depth so the fragment ends only at its OWN closing `}`.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the contextual `lowering` identifier
+ * @return        the captured `LoweringFrag` statement + the index past the closing `}`, or an error
+ * @throws        a missing `{`, or an unterminated fragment (no matching `}`)
+ * @since 0.4-macros (§14 A2)
+ */
+fn parse_lowering_frag(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
+    var lb = pos + 1
+    if !is_kind_at(tokens, lb, lexer::TokenKind::LBrace) {
+        return err_at(tokens, lb, "expected '{' after `lowering`")
+    }
+    var p = lb + 1
+    var depth: u64 = 1
+    var frag: []lexer::Token = teko::list::empty()
+    loop {
+        if !has_token(tokens, p) {
+            return err_at(tokens, p, "unterminated `lowering { … }` fragment — missing '}'")
+        }
+        if is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+            depth = depth + 1
+        } else if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
+            depth = depth - 1
+            if depth == 0 { break }
+        }
+        frag = teko::list::push(frag, tokens[p])
+        p = p + 1
+    }
+    Parsed<Statement> { node = LoweringFrag { tokens = frag }; next = p + 1 }
+}
+
 fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
     if !has_token(tokens, pos) { return err_at(tokens, pos, "expected a statement") }
     if is_kind_at(tokens, pos, lexer::TokenKind::Hash) {
         return parse_attributed_binding(tokens, pos)
+    }
+    if is_lowering_head(tokens, pos) {
+        return parse_lowering_frag(tokens, pos)
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Return) {
         // `return` with an optional value: bare `return` ends at a separator or `}`.

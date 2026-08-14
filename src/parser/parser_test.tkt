@@ -709,3 +709,32 @@ fn rejects_macro_return_and_comptime_without_return() {
     teko::assert::is_true(module_errors("macro emit(x): i64 { }"))
     teko::assert::is_true(module_errors("comptime answer() { 42 }"))
 }
+
+/** macro_body_has_lowering — does `source` parse to a module whose first macro decl body contains a `LoweringFrag`? */
+fn macro_body_has_lowering(source: str): bool {
+    var m = match module_of(source) { Module as mm => mm; error => return false }
+    if m.decls.len == 0 { return false }
+    match m.decls[0] {
+        MacroDecl as md => {
+            var i = 0
+            var found = false
+            loop {
+                if i >= md.body.len { break }
+                match md.body[i] { LoweringFrag => found = true; _ => { } }
+                i++
+            }
+            found
+        }
+        _ => false
+    }
+}
+
+/**
+ * parses_lowering_fragment_in_macro_body — a `lowering { … }` fragment inside a macro body parses to a
+ * `LoweringFrag` statement (§14.2 A2), including one carrying a `${expr}` injection hole.
+ */
+#test
+fn parses_lowering_fragment_in_macro_body() {
+    teko::assert::is_true(macro_body_has_lowering("macro dbg(x) { lowering { println(x) } }"))
+    teko::assert::is_true(macro_body_has_lowering("macro dbg(x) { lowering { f(${x}) } }"))
+}
