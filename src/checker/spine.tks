@@ -95,7 +95,7 @@ pub type PtTop = struct { }
  * lexical `adopt { }` region id (§5.1 — the ADOPT escape fact). Fixed height ≤ 3
  * (`PtFrame < concrete site < PtTop`).
  */
-pub type PointsTo = variant PtFrame | PtRoot | PtParam | PtAdopter | PtTop
+macro PointsTo() { lowering { PtFrame | PtRoot | PtParam | PtAdopter | PtTop } }
 
 /**
  * A `BfParam` payload — WHICH parameter a `Reference` cell borrows (its referent's param slot).
@@ -162,7 +162,7 @@ pub type UsTop = struct { }
  * non-scalar joins both to `UsShared`. `⊤` (UsTop) ⇒ `Shared` (the safe direction: a shared cell may
  * not be `free`d). Fixed height ≤ 3 (`UsUnique < UsShared < UsTop`).
  */
-pub type Unique = variant UsUnique | UsShared | UsTop
+macro Unique() { lowering { UsUnique | UsShared | UsTop } }
 
 /**
  * The per-cell fact for one function — parallel arrays keyed by cell index (Teko has no Map in the
@@ -176,9 +176,9 @@ pub type Unique = variant UsUnique | UsShared | UsTop
  */
 pub type Spine = struct {
     cells: []Cell
-    pt: []PointsTo
+    pt: []@PointsTo()
     bf: []@BorrowedFrom()
-    us: []Unique
+    us: []@Unique()
 }
 
 /**
@@ -388,8 +388,8 @@ fn add_match_cells(m: TMatchExpr, cells: []Cell): []Cell {
  * @param []Cell cells  the cell universe
  * @return []PointsTo  the seeded points-to axis
  */
-fn seed_pt(cells: []Cell): []PointsTo {
-    var acc: []PointsTo = teko::list::empty()
+fn seed_pt(cells: []Cell): []@PointsTo() {
+    var acc: []@PointsTo() = teko::list::empty()
     var i = 0
     loop {
         if i >= cells.len { break }
@@ -432,8 +432,8 @@ fn seed_bf(cells: []Cell): []@BorrowedFrom() {
  * @param []Cell cells  the cell universe
  * @return []Unique  the seeded unique-vs-shared axis
  */
-fn seed_us(cells: []Cell): []Unique {
-    var acc: []Unique = teko::list::empty()
+fn seed_us(cells: []Cell): []@Unique() {
+    var acc: []@Unique() = teko::list::empty()
     var i = 0
     loop {
         if i >= cells.len { break }
@@ -450,7 +450,7 @@ fn seed_us(cells: []Cell): []Unique {
  * @param PointsTo p  the points-to value
  * @return u32  its lattice rank
  */
-fn pt_rank(p: PointsTo): u32 {
+fn pt_rank(p: @PointsTo()): u32 {
     match p {
         PtFrame => 0
         PtParam => 1
@@ -469,7 +469,7 @@ fn pt_rank(p: PointsTo): u32 {
  * @param PointsTo b  the second points-to value
  * @return bool  true iff both name the identical concrete allocation site
  */
-fn pt_same_site(a: PointsTo, b: PointsTo): bool {
+fn pt_same_site(a: @PointsTo(), b: @PointsTo()): bool {
     match a {
         PtParam as pa => match b { PtParam as pb => pa.id.index == pb.id.index; _ => false }
         PtAdopter as aa => match b { PtAdopter as ab => adopter_same(aa.id, ab.id); _ => false }
@@ -502,7 +502,7 @@ fn adopter_same(a: PtAdopterId, b: PtAdopterId): bool {
  * @param PointsTo b  the incoming points-to value
  * @return PointsTo  the least upper bound of `a` and `b`
  */
-fn pt_join(a: PointsTo, b: PointsTo): PointsTo {
+fn pt_join(a: @PointsTo(), b: @PointsTo()): @PointsTo() {
     var ra = pt_rank(a)
     var rb = pt_rank(b)
     if ra == 2 { return PtTop { } }
@@ -521,7 +521,7 @@ fn pt_join(a: PointsTo, b: PointsTo): PointsTo {
  * @field pt           the points-to axis so far
  * @field next_region  the next unused adopter region id
  */
-type PtTransferState = struct { pt: []PointsTo; next_region: u32 }
+type PtTransferState = struct { pt: []@PointsTo(); next_region: u32 }
 
 /**
  * Return the points-to axis with index `i` replaced by `v` (parallel arrays are rebuilt by copy —
@@ -532,8 +532,8 @@ type PtTransferState = struct { pt: []PointsTo; next_region: u32 }
  * @param PointsTo v  the new points-to value
  * @return []PointsTo  the axis with element `i` set to `v`
  */
-fn set_pt(pt: []PointsTo, i: u32, v: PointsTo): []PointsTo {
-    var acc: []PointsTo = teko::list::empty()
+fn set_pt(pt: []@PointsTo(), i: u32, v: @PointsTo()): []@PointsTo() {
+    var acc: []@PointsTo() = teko::list::empty()
     var k = 0
     loop {
         if k >= pt.len { break }
@@ -558,7 +558,7 @@ fn set_pt(pt: []PointsTo, i: u32, v: PointsTo): []PointsTo {
  * @param u32 region  the enclosing adopter's region id
  * @return []PointsTo  the axis with the named cell joined to `PtAdopter(region)`
  */
-fn join_pt_adopter_at(cells: []Cell, pt: []PointsTo, name: str, region: u32): []PointsTo {
+fn join_pt_adopter_at(cells: []Cell, pt: []@PointsTo(), name: str, region: u32): []@PointsTo() {
     var idx = cell_index(cells, name, "")
     if idx < 0 { return pt }
     set_pt(pt, idx to u32, pt_join(pt[idx to u32], PtAdopter { id = PtAdopterId { region = region; top = false } }))
@@ -706,7 +706,7 @@ fn pt_transfer_adopt(a: TAdoptStmt, cells: []Cell, state: PtTransferState): PtTr
  * @param Unique u  the unique-vs-shared value
  * @return u32  its lattice rank
  */
-fn us_rank(u: Unique): u32 {
+fn us_rank(u: @Unique()): u32 {
     match u {
         UsUnique => 0
         UsShared => 1
@@ -723,7 +723,7 @@ fn us_rank(u: Unique): u32 {
  * @param Unique b  the incoming unique-vs-shared value
  * @return Unique  the least upper bound of `a` and `b`
  */
-fn us_join(a: Unique, b: Unique): Unique {
+fn us_join(a: @Unique(), b: @Unique()): @Unique() {
     if us_rank(a) >= us_rank(b) { return a }
     b
 }
@@ -766,7 +766,7 @@ fn rhs_is_alias_source(e: TExpr): bool {
  * @param str src  the aliased source name
  * @return []Unique  the axis with both cells joined to `UsShared`
  */
-fn mark_alias_shared(cells: []Cell, us: []Unique, dst: str, src: str): []Unique {
+fn mark_alias_shared(cells: []Cell, us: []@Unique(), dst: str, src: str): []@Unique() {
     join_us_at(cells, join_us_at(cells, us, dst, ""), src, "")
 }
 
@@ -780,7 +780,7 @@ fn mark_alias_shared(cells: []Cell, us: []Unique, dst: str, src: str): []Unique 
  * @param str field  the cell's one-hop field ("" for a bare cell)
  * @return []Unique  the axis with the named cell joined to `UsShared`
  */
-fn join_us_at(cells: []Cell, us: []Unique, name: str, field: str): []Unique {
+fn join_us_at(cells: []Cell, us: []@Unique(), name: str, field: str): []@Unique() {
     var idx = cell_index(cells, name, field)
     if idx < 0 { return us }
     set_us(us, idx to u32, us_join(us[idx to u32], UsShared { }))
@@ -795,8 +795,8 @@ fn join_us_at(cells: []Cell, us: []Unique, name: str, field: str): []Unique {
  * @param Unique v  the new unique-vs-shared value
  * @return []Unique  the axis with element `i` set to `v`
  */
-fn set_us(us: []Unique, i: u32, v: Unique): []Unique {
-    var acc: []Unique = teko::list::empty()
+fn set_us(us: []@Unique(), i: u32, v: @Unique()): []@Unique() {
+    var acc: []@Unique() = teko::list::empty()
     var k = 0
     loop {
         if k >= us.len { break }
@@ -822,7 +822,7 @@ fn set_us(us: []Unique, i: u32, v: Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with this block's aliases joined to `UsShared`
  */
-fn transfer_block(body: []TStatement, cells: []Cell, us: []Unique): []Unique {
+fn transfer_block(body: []TStatement, cells: []Cell, us: []@Unique()): []@Unique() {
     var acc = us
     var i = 0
     loop {
@@ -845,7 +845,7 @@ fn transfer_block(body: []TStatement, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with the expression's arm-body aliases joined
  */
-fn transfer_expr(e: TExpr, cells: []Cell, us: []Unique): []Unique {
+fn transfer_expr(e: TExpr, cells: []Cell, us: []@Unique()): []@Unique() {
     match e.kind {
         TIfExpr as f => transfer_block(f.else_blk, cells, transfer_block(f.then_blk, cells, us))
         TMatchExpr as m => transfer_match(m, cells, us)
@@ -863,7 +863,7 @@ fn transfer_expr(e: TExpr, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with every arm body's aliases joined
  */
-fn transfer_match(m: TMatchExpr, cells: []Cell, us: []Unique): []Unique {
+fn transfer_match(m: TMatchExpr, cells: []Cell, us: []@Unique()): []@Unique() {
     var acc = us
     var i = 0
     loop {
@@ -885,7 +885,7 @@ fn transfer_match(m: TMatchExpr, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with this statement's aliases joined to `UsShared`
  */
-fn transfer_stmt(s: TStatement, cells: []Cell, us: []Unique): []Unique {
+fn transfer_stmt(s: TStatement, cells: []Cell, us: []@Unique()): []@Unique() {
     match s {
         TBinding as b => transfer_expr(b.value, cells, transfer_binding(b, cells, us))
         TAssign as a => transfer_expr(a.value, cells, transfer_assign(a, cells, us))
@@ -909,7 +909,7 @@ fn transfer_stmt(s: TStatement, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with this binding's alias (if any) joined to `UsShared`
  */
-fn transfer_binding(b: TBinding, cells: []Cell, us: []Unique): []Unique {
+fn transfer_binding(b: TBinding, cells: []Cell, us: []@Unique()): []@Unique() {
     var src = binding_alias_src_name(b.value)
     if src == "" { return us }
     match b.target {
@@ -962,7 +962,7 @@ fn borrow_referent_name(e: TExpr): str {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with this assignment's alias (if any) joined to `UsShared`
  */
-fn transfer_assign(a: TAssign, cells: []Cell, us: []Unique): []Unique {
+fn transfer_assign(a: TAssign, cells: []Cell, us: []@Unique()): []@Unique() {
     if !rhs_is_alias_source(a.value) { return us }
     match a.kind {
         parser::AssignKind::Simple => mark_alias_shared(cells, us, a.name, alias_src_name(a.value))
@@ -1026,7 +1026,7 @@ fn bind_target_name(t: parser::BindTarget): str {
  * @param []Unique us  the unique-vs-shared axis so far (post direct-alias transfer)
  * @return []Unique  the axis with this block's captures joined to `UsShared`
  */
-fn capture_block(body: []TStatement, cells: []Cell, us: []Unique): []Unique {
+fn capture_block(body: []TStatement, cells: []Cell, us: []@Unique()): []@Unique() {
     var acc = us
     var i = 0
     loop {
@@ -1047,7 +1047,7 @@ fn capture_block(body: []TStatement, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with this statement's captures joined to `UsShared`
  */
-fn capture_stmt(s: TStatement, cells: []Cell, us: []Unique): []Unique {
+fn capture_stmt(s: TStatement, cells: []Cell, us: []@Unique()): []@Unique() {
     match s {
         TBinding as b => capture_binding(b, cells, us)
         TAssign as a => capture_assign(a, cells, us)
@@ -1071,7 +1071,7 @@ fn capture_stmt(s: TStatement, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with this binding's captures joined
  */
-fn capture_binding(b: TBinding, cells: []Cell, us: []Unique): []Unique {
+fn capture_binding(b: TBinding, cells: []Cell, us: []@Unique()): []@Unique() {
     capture_expr(b.value, cells, mark_field_extract(b.value, cells, us), bind_target_name(b.target))
 }
 
@@ -1085,7 +1085,7 @@ fn capture_binding(b: TBinding, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with this assignment's captures joined
  */
-fn capture_assign(a: TAssign, cells: []Cell, us: []Unique): []Unique {
+fn capture_assign(a: TAssign, cells: []Cell, us: []@Unique()): []@Unique() {
     var excl = match a.kind {
         parser::AssignKind::Simple => a.name
         _ => ""
@@ -1104,7 +1104,7 @@ fn capture_assign(a: TAssign, cells: []Cell, us: []Unique): []Unique {
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with the field-extract base (if any) joined to `UsShared`
  */
-fn mark_field_extract(v: TExpr, cells: []Cell, us: []Unique): []Unique {
+fn mark_field_extract(v: TExpr, cells: []Cell, us: []@Unique()): []@Unique() {
     match v.kind {
         TFieldAccess as fa => {
             if type_is_scalar(v.type) { return us }
@@ -1127,7 +1127,7 @@ fn mark_field_extract(v: TExpr, cells: []Cell, us: []Unique): []Unique {
  * @param str exclude  the self-thread name to leave unique ("" = none)
  * @return []Unique  the axis with this expression's captures joined
  */
-fn capture_expr(e: TExpr, cells: []Cell, us: []Unique, exclude: str): []Unique {
+fn capture_expr(e: TExpr, cells: []Cell, us: []@Unique(), exclude: str): []@Unique() {
     match e.kind {
         TCall as c => capture_call(c, cells, us, exclude)
         TStructInit as si => capture_operands(si.field_vals, cells, us, exclude)
@@ -1157,7 +1157,7 @@ fn capture_expr(e: TExpr, cells: []Cell, us: []Unique, exclude: str): []Unique {
  * @param str exclude  the self-thread name to leave unique
  * @return []Unique  the axis with this call's captured arguments joined
  */
-fn capture_call(c: TCall, cells: []Cell, us: []Unique, exclude: str): []Unique {
+fn capture_call(c: TCall, cells: []Cell, us: []@Unique(), exclude: str): []@Unique() {
     capture_operands(c.args, cells, us, exclude)
 }
 
@@ -1172,7 +1172,7 @@ fn capture_call(c: TCall, cells: []Cell, us: []Unique, exclude: str): []Unique {
  * @param str exclude  the self-thread name to leave unique
  * @return []Unique  the axis with these operands' captures joined
  */
-fn capture_operands(ops: []TExpr, cells: []Cell, us: []Unique, exclude: str): []Unique {
+fn capture_operands(ops: []TExpr, cells: []Cell, us: []@Unique(), exclude: str): []@Unique() {
     var acc = us
     var i = 0
     loop {
@@ -1193,7 +1193,7 @@ fn capture_operands(ops: []TExpr, cells: []Cell, us: []Unique, exclude: str): []
  * @param str exclude  the self-thread name to leave unique
  * @return []Unique  the axis with this operand's capture (if any) joined
  */
-fn capture_operand(op: TExpr, cells: []Cell, us: []Unique, exclude: str): []Unique {
+fn capture_operand(op: TExpr, cells: []Cell, us: []@Unique(), exclude: str): []@Unique() {
     var acc = us
     if is_nonscalar_bare_local(op) {
         var nm = alias_src_name(op)
@@ -1211,7 +1211,7 @@ fn capture_operand(op: TExpr, cells: []Cell, us: []Unique, exclude: str): []Uniq
  * @param str exclude  the self-thread name to leave unique
  * @return []Unique  the axis with the chain's captures joined
  */
-fn capture_cmp(cm: TCompare, cells: []Cell, us: []Unique, exclude: str): []Unique {
+fn capture_cmp(cm: TCompare, cells: []Cell, us: []@Unique(), exclude: str): []@Unique() {
     var acc = capture_expr(cm.first, cells, us, exclude)
     var i = 0
     loop {
@@ -1232,7 +1232,7 @@ fn capture_cmp(cm: TCompare, cells: []Cell, us: []Unique, exclude: str): []Uniqu
  * @param str exclude  the self-thread name to leave unique
  * @return []Unique  the axis with the elements' captures joined
  */
-fn capture_array(al: TArrayLit, cells: []Cell, us: []Unique, exclude: str): []Unique {
+fn capture_array(al: TArrayLit, cells: []Cell, us: []@Unique(), exclude: str): []@Unique() {
     var acc = us
     var i = 0
     loop {
@@ -1252,7 +1252,7 @@ fn capture_array(al: TArrayLit, cells: []Cell, us: []Unique, exclude: str): []Un
  * @param []Unique us  the unique-vs-shared axis so far
  * @return []Unique  the axis with every arm body's captures joined
  */
-fn capture_match(m: TMatchExpr, cells: []Cell, us: []Unique): []Unique {
+fn capture_match(m: TMatchExpr, cells: []Cell, us: []@Unique()): []@Unique() {
     var acc = us
     var i = 0
     loop {
