@@ -1453,8 +1453,8 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
             k++
             continue
         }
-        var rt = match resolve_type(req.params[rstart + k].type_ann, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
-        var it = match resolve_type(ip.type_ann, table, ref_ns) { Type as t => t; error => return false }
+        var rt = match sig_return_type(req.params[rstart + k].type_ann, table, ref_ns, self_type) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace; a `self`-typed operator operand (§6) binds to the conforming type
+        var it = match sig_return_type(ip.type_ann, table, ref_ns, self_type) { Type as t => t; error => return false }
         if !type_eq(rt, it) { return false }
         k++
     }
@@ -1468,16 +1468,18 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
 }
 
 /**
- * Resolve a contract/method RETURN type-expression, binding a bare `self` (§4) return to the
- * conforming type (§7 IService's `static ctor(): self`). When the return is the `self` atom the
- * result is the conforming type named by `self_type` (its canonical name); otherwise it resolves
- * ordinarily in `ref_ns`. With no self context (`self_type == ""`) a `self` return is unresolvable.
+ * Resolve a contract/method type-expression, binding a bare `self` (§4/§6) to the conforming type: a
+ * `self` RETURN (§7 IService's `static ctor(): self`) or a `self`-typed operator OPERAND (§6, an
+ * interface `operator __eq(left: self, right: self)` and its implementer both bind `self` to the
+ * conforming type, so their signatures match). When the type-expression is the `self` atom the result
+ * is the conforming type named by `self_type` (its canonical name); otherwise it resolves ordinarily in
+ * `ref_ns`. With no self context (`self_type == ""`) a `self` type-expression is unresolvable.
  *
- * @param te         the return type-expression
+ * @param te         the type-expression (a return type or a `self`-typed operand)
  * @param table      the folded type table
  * @param ref_ns     the namespace the type-expression was written in
  * @param self_type  the conforming type's name to bind `self` to (empty = no self context)
- * @return           the resolved return Type
+ * @return           the resolved Type
  * @throws           when `self` has no binding context, or the type-expression fails to resolve
  */
 fn sig_return_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str, self_type: str): Type | error {

@@ -817,16 +817,42 @@ fn type_body_operators(body: parser::TypeBody): []parser::Function {
 }
 
 /**
- * body_declares_operator — does `body` declare at least one `operator` member (§6)? The cheap predicate
- * `value_op_owner` uses so a PLAIN struct/class (no operator) returns "" and never enters the dunder
- * lookup, while a struct/class carrying an operator owns dispatch for its instances.
+ * methods_declare_operator — does any member of `methods` carry `is_operator`? A scan that returns on
+ * the first operator, allocating NOTHING — the hot-path predicate `value_op_owner` runs per operand.
+ *
+ * @param methods  the body's members
+ * @return         true iff at least one member is an operator
+ * @since §6 (9-ops)
+ */
+fn methods_declare_operator(methods: []parser::Function): bool {
+    var i = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].is_operator { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * body_declares_operator — does `body` declare at least one `operator` member (§6)? Allocation-free:
+ * a plain struct/class returns false after a bare scan, never building a filtered list, so
+ * `value_op_owner` stays zero-alloc on the checker's hottest path.
  *
  * @param body  the type declaration's body
  * @return      true iff the body declares one or more operators
  * @since §6 (9-ops)
  */
 fn body_declares_operator(body: parser::TypeBody): bool {
-    type_body_operators(body).len > 0
+    match body {
+        parser::NewtypeBody as nb => methods_declare_operator(nb.methods)
+        parser::EnumBody as eb => methods_declare_operator(eb.methods)
+        parser::FlagsBody as fb => methods_declare_operator(fb.methods)
+        parser::StructBody as sb => methods_declare_operator(sb.methods)
+        parser::ClassBody as cb => methods_declare_operator(cb.methods)
+        parser::InterfaceBody as ib => methods_declare_operator(ib.methods)
+        _ => false
+    }
 }
 
 /**
@@ -1021,6 +1047,129 @@ fn dispatch_binop_operator(dn: str, left: parser::Expr, right: parser::Expr, l: 
 }
 
 /**
+ * ConstraintOp — the interface a generic operator dispatches through (§6): the interface (from a
+ * type-parameter's constraint) that DECLARES the sought dunder, and the operator's resolved return
+ * type (self → the type-parameter, else the contract's declared return).
+ */
+type ConstraintOp = struct {
+    /** iface — the constraint interface that owns the operator (the D3 dispatch key). */
+    iface: str
+    /** ret — the operator's return type resolved in the type-parameter's context. */
+    ret: Type
+}
+
+/**
+ * NoConstraintOp — the sentinel `constraint_op_owner` returns when `t` is not a constrained
+ * type-parameter whose constraint interface declares the sought operator.
+ */
+type NoConstraintOp = struct { }
+
+/**
+ * operand_is_type_param — is `t` a generic TYPE-PARAMETER (a `resolve::type_param_table` synthetic
+ * decl), rather than a concrete named type? Gates the generic operator dispatch: `a op b` over a
+ * type-parameter routes through the constraint contract, never the primitive operator classes.
+ *
+ * @param t      the operand's resolved type
+ * @param table  the folded type table (carries the enclosing generic's type-params)
+ * @return       true iff `t` names an in-scope type-parameter
+ * @since §6 (9-ops)
+ */
+fn operand_is_type_param(t: Type, table: TypeTable): bool {
+    var name = match t { Named as n => n.name; _ => return false }
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => is_type_param_decl(td)
+        error => false
+    }
+}
+
+/**
+ * constraint_op_owner — the (interface, return type) a binary operator on a CONSTRAINED type-parameter
+ * dispatches through (§6/§9.4 generic operator dispatch), or `NoConstraintOp` when `t` is not a
+ * type-parameter whose constraint interface declares `dn`. The generic mirror of `value_op_owner`:
+ * when `a: T` and `T: IEq`, `a == b` resolves `__eq` against IEq's contract and lowers to the ordinary
+ * constraint-method dispatch (`type_contract_dispatch`) that `monomorph` concretizes to the argument
+ * type's own operator (`rekey_struct_constraint_dispatch` for a struct receiver; the class vtable
+ * otherwise). Reuses #254's shipped generic-method-on-`T` machinery — no new lowering surface.
+ *
+ * @param t      the operand's resolved type (possibly a constrained type-parameter)
+ * @param dn     the dunder sought (`dunder_of_binop`)
+ * @param table  the folded type table
+ * @return       the (interface, return type) to dispatch, or `NoConstraintOp`
+ * @since §6 (9-ops)
+ */
+fn constraint_op_owner(t: Type, dn: str, table: TypeTable): ConstraintOp | NoConstraintOp {
+    var name = match t { Named as n => n.name; _ => return NoConstraintOp { } }
+    var decl = match type_table_find(table, name, "") { parser::TypeDecl as td => td; error => return NoConstraintOp { } }
+    if !is_type_param_decl(decl) { return NoConstraintOp { } }
+    var extends = match decl.body { parser::InterfaceBody as ib => ib.extends; _ => return NoConstraintOp { } }
+    var owner = match method_owner_interface(extends, dn, table) { str as o => o; null => return NoConstraintOp { } }
+    var ops = match iface_methods_by_name(owner, table) { []parser::Function as f => f; error => return NoConstraintOp { } }
+    var k = 0
+    loop {
+        if k >= ops.len { break }
+        if ops[k].is_operator && ops[k].name == dn {
+            var rt = match operator_operand_type(ops[k].return_type, name, table) { Type as ty => ty; error => Prim { kind = PrimKind::Bool } }
+            return ConstraintOp { iface = owner; ret = rt }
+        }
+        k++
+    }
+    NoConstraintOp { }
+}
+
+/**
+ * build_constraint_operator_call — lower a matched generic binary operator to the STATIC contract
+ * dispatch `<T's constraint iface>::<dn>(left, right)` (§6), by synthesizing the equivalent
+ * `left.<dn>(right)` method-call and routing it through `type_method_call`/`type_contract_dispatch` —
+ * the SAME constraint-method lowering `x.method()` on a type-parameter already uses (#254). The
+ * receiver `left` becomes the operator's first operand; `monomorph` concretizes the call to the bound
+ * argument type's own operator.
+ *
+ * @param dn     the dunder name
+ * @param left   the RAW left operand expression
+ * @param right  the RAW right operand expression
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed contract-dispatch expression, or a type error
+ * @since §6 (9-ops)
+ */
+fn build_constraint_operator_call(dn: str, left: parser::Expr, right: parser::Expr, env: Env, table: TypeTable): TExpr | error {
+    var mc = parser::MethodCall { receiver = left; method = dn; args = teko::list::push(teko::list::empty(), right); arg_names = teko::list::push(teko::list::empty(), ""); type_args = teko::list::empty() }
+    type_method_call(mc, env, table)
+}
+
+/**
+ * dispatch_constraint_binop — dispatch a binary operator whose operand is a constrained type-parameter
+ * to its constraint contract (§6), ruling-8 ordered: the LEFT operand's constraint first, then the
+ * RIGHT's. When neither operand's constraint interface declares the operator, the operator is NOT
+ * guaranteed by the constraint — a located error naming the operator and the type-parameter, so a
+ * generic that uses `==` on an unconstrained `T` is rejected at the typing site (never silently
+ * lowered).
+ *
+ * @param dn     the dunder name (`dunder_of_binop`)
+ * @param left   the RAW left operand expression
+ * @param right  the RAW right operand expression
+ * @param l      the typed left operand
+ * @param r      the typed right operand
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the lowered contract-dispatch expression, or the "not guaranteed" error
+ * @throws       when neither operand's constraint declares `operator <dn>`
+ * @since §6 (9-ops)
+ */
+fn dispatch_constraint_binop(dn: str, left: parser::Expr, right: parser::Expr, l: TExpr, r: TExpr, env: Env, table: TypeTable): TExpr | error {
+    match constraint_op_owner(l.type, dn, table) {
+        ConstraintOp => return build_constraint_operator_call(dn, left, right, env, table)
+        NoConstraintOp => { }
+    }
+    match constraint_op_owner(r.type, dn, table) {
+        ConstraintOp => return build_constraint_operator_call(dn, left, right, env, table)
+        NoConstraintOp => { }
+    }
+    var tp = if operand_is_type_param(l.type, table) { type_render(l.type) } else { type_render(r.type) }
+    error { message = $"`operator {dn}` is not guaranteed by the constraint on type parameter `{tp}` — constrain it with an interface that declares `operator {dn}` (e.g. `IEq`/`IOrd`) (§6)" }
+}
+
+/**
  * owner_has_unary_operator — does the value-type `owner_canonical` declare a UNARY `operator <dn>`
  * (one operand) accepting `o` (§9 ruling 2 — `~` → `__bnot`)? The single-operand analogue of
  * `owner_has_matching_operator`.
@@ -1090,18 +1239,18 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
     var lk = bignum_kind(l0.type)
     var rk = bignum_kind(r0.type)
     if lk != "" || rk != "" { return type_bignum_binop(b.op, l0, r0, lk, rk) }
-    if value_op_owner(l0.type, table) != "" || value_op_owner(r0.type, table) != "" {
-        var dn = dunder_of_binop(b.op)
-        if dn != "" {
-            match dispatch_binop_operator(dn, b.left, b.right, l0, r0, env, table) {
-                TExpr as te => return te
-                NoOperator => {
-                    l0 = operand_reduced_to_base(l0, table)
-                    r0 = operand_reduced_to_base(r0, table)
-                }
-                error as e => return e
+    var op_dn = dunder_of_binop(b.op)
+    if op_dn != "" && (value_op_owner(l0.type, table) != "" || value_op_owner(r0.type, table) != "") {
+        match dispatch_binop_operator(op_dn, b.left, b.right, l0, r0, env, table) {
+            TExpr as te => return te
+            NoOperator => {
+                l0 = operand_reduced_to_base(l0, table)
+                r0 = operand_reduced_to_base(r0, table)
             }
+            error as e => return e
         }
+    } else if op_dn != "" && (operand_is_type_param(l0.type, table) || operand_is_type_param(r0.type, table)) {
+        return dispatch_constraint_binop(op_dn, b.left, b.right, l0, r0, env, table)
     }
     var ops = adopt_binop_operands(l0, r0)
     var l = ops.l
@@ -1183,18 +1332,21 @@ fn compare_has_value_type(c: parser::Compare, env: Env, table: TypeTable): bool 
 }
 
 /**
- * operand_is_value_type — does the expression `e` type to a NAMED value-type (§9)? A typing error is
- * reported as NOT a value-type (the caller's main path re-types and surfaces the real error).
+ * operand_is_value_type — does the expression `e` type to a NAMED value-type OR a generic
+ * type-parameter (§9/§6)? A value-type owns operator dispatch by declaration; a type-parameter routes
+ * its comparison through the constraint contract (`compare_value_term` resolves the exact operator or
+ * reports "not guaranteed"). A typing error is reported as NEITHER (the caller's main path re-types and
+ * surfaces the real error), so a primitive-only chain stays on the historic `TCompare` path.
  *
  * @param e      the operand expression
  * @param env    the typing environment
  * @param table  the folded type table
- * @return       true iff `e` types to a value-type
- * @since §9
+ * @return       true iff `e` types to a value-type or a type-parameter
+ * @since §9 (§6 extends to constrained type-parameters)
  */
 fn operand_is_value_type(e: parser::Expr, env: Env, table: TypeTable): bool {
     match type_expr(e, env, table) {
-        TExpr as te => value_op_owner(te.type, table) != ""
+        TExpr as te => value_op_owner(te.type, table) != "" || operand_is_type_param(te.type, table)
         error => false
     }
 }
@@ -1218,10 +1370,12 @@ fn single_primitive_compare(op: lexer::TokenKind, l: TExpr, r: TExpr): TExpr | e
 }
 
 /**
- * compare_value_term — the boolean of ONE comparison term when at least one operand is a value-type
- * (§9 rulings 3/8): dispatch the comparison dunder to a user `operator` (which must return `bool`),
- * or — no match — reduce each value-type operand to its base and compare primitively. Returns a
- * `bool`-typed expression either way, so the chain composes with `&&`.
+ * compare_value_term — the boolean of ONE comparison term when at least one operand is a value-type or
+ * a type-parameter (§9 rulings 3/8, §6): dispatch the comparison dunder to a user `operator` (which
+ * must return `bool`) on a value-type owner; else, when an operand is a constrained type-parameter,
+ * dispatch through its constraint contract (`dispatch_constraint_binop`, which reports "not guaranteed"
+ * when the constraint lacks the operator); else reduce each value-type operand to its base and compare
+ * primitively. Returns a `bool`-typed expression either way, so the chain composes with `&&`.
  *
  * @param op    the comparison operator token
  * @param le    the RAW left operand expression
@@ -1231,20 +1385,26 @@ fn single_primitive_compare(op: lexer::TokenKind, l: TExpr, r: TExpr): TExpr | e
  * @param env   the typing environment
  * @param table the folded type table
  * @return      the boolean term expression, or a type error
- * @throws      when a matched comparison operator does not return `bool` (ruling 3), or the fallback
- *              primitive compare is incomparable
- * @since §9
+ * @throws      when a matched comparison operator does not return `bool` (ruling 3), the constraint does
+ *              not guarantee the operator (§6), or the fallback primitive compare is incomparable
+ * @since §9 (§6 extends to constrained type-parameters)
  */
 fn compare_value_term(op: lexer::TokenKind, le: parser::Expr, l: TExpr, re: parser::Expr, r: TExpr, env: Env, table: TypeTable): TExpr | error {
     var dn = dunder_of_binop(op)
     match dispatch_binop_operator(dn, le, re, l, r, env, table) {
         TExpr as te => {
             if !is_bool(te.type) { return error { message = $"a comparison `operator {dn}` must return `bool` (§9 ruling 3)" } }
-            te
+            return te
         }
-        NoOperator => single_primitive_compare(op, operand_reduced_to_base(l, table), operand_reduced_to_base(r, table))
-        error as e => e
+        NoOperator => { }
+        error as e => return e
     }
+    if operand_is_type_param(l.type, table) || operand_is_type_param(r.type, table) {
+        var te = match dispatch_constraint_binop(dn, le, re, l, r, env, table) { TExpr as t => t; error as e => return e }
+        if !is_bool(te.type) { return error { message = $"a comparison `operator {dn}` must return `bool` (§9 ruling 3)" } }
+        return te
+    }
+    single_primitive_compare(op, operand_reduced_to_base(l, table), operand_reduced_to_base(r, table))
 }
 
 /**
