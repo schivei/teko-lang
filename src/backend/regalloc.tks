@@ -1044,12 +1044,15 @@ pub type Spilled = struct {
 }
 
 /**
- * RegAssignment — the allocation outcome for one virtual register: kept
- * `InReg` or `Spilled` to the stack.
+ * RegAssignment — the allocation outcome for one virtual register: the inline union `InReg | Spilled`
+ * (kept in a register, or spilled to the stack), abbreviated by this Family-A type macro (§9.D sweep)
+ * so the multi-site `[]@RegAssignment()` uses stay legible. Expands, pre-type-check, in every type
+ * position (signature, field, and local annotation).
  *
- * @since #384 A3-3
+ * @return  the inline union `InReg | Spilled`
+ * @since   #384 A3-3 (retired from `type … = variant` to `@Type()`, §9.D sweep)
  */
-pub type RegAssignment = variant InReg | Spilled
+macro RegAssignment() { lowering { InReg | Spilled } }
 
 /**
  * ScanResult — the linear-scan output: one assignment per virtual interval,
@@ -1061,7 +1064,7 @@ pub type ScanResult = struct {
     /**
      * assignments — one `RegAssignment` per virtual interval.
      */
-    assignments: []RegAssignment
+    assignments: []@RegAssignment()
     /**
      * used_callee_saved — the callee-saved physregs the scan assigned.
      */
@@ -1409,8 +1412,8 @@ fn remove_active(active: []ActiveEntry, vreg_id: u32): []ActiveEntry {
  * @param u64 slot  its new spill slot
  * @return []RegAssignment  the updated assignments
  */
-fn mark_spilled(assignments: []RegAssignment, vreg_id: u32, slot: u64): []RegAssignment {
-    var out: []RegAssignment = teko::list::empty()
+fn mark_spilled(assignments: []@RegAssignment(), vreg_id: u32, slot: u64): []@RegAssignment() {
+    var out: []@RegAssignment() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= assignments.len { break }
@@ -1460,7 +1463,7 @@ fn add_unique_u32(list: []u32, x: u32): []u32 {
 fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet): ScanResult {
     var sorted = sort_by_start(ivals.virt)
     var active: []ActiveEntry = teko::list::empty()
-    var assignments: []RegAssignment = teko::list::empty()
+    var assignments: []@RegAssignment() = teko::list::empty()
     var used_callee: []u32 = teko::list::empty()
     var next_slot: u64 = 0
     var i: u64 = 0
@@ -1554,7 +1557,7 @@ type CallUnsafeAssignment = struct {
  * @param RegAssignment a  the assignment to check
  * @return []CallUnsafeAssignment  `out`, with `a`'s violation appended when applicable
  */
-fn push_call_unsafe_assignment(out: []CallUnsafeAssignment, abi: AbiDescriptor, virt: []LiveInterval, a: RegAssignment): []CallUnsafeAssignment {
+fn push_call_unsafe_assignment(out: []CallUnsafeAssignment, abi: AbiDescriptor, virt: []LiveInterval, a: @RegAssignment()): []CallUnsafeAssignment {
     match a {
         InReg as r => {
             var lookup = lookup_call_safety(virt, r.vreg_id)
