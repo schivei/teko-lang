@@ -1,52 +1,49 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): SELF-CONSTRUCTION R2 — the SWEEP of the corpus's
-# `self { … }` constructions to `.{ … }` and the REMOVAL of the `self { … }` construction form (§4.1).
-# The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host output, proven a
-# fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh,
-# which only ever judges this record on a SWAP.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): §14 macro/comptime + §9.D inline-union
+# capabilities + the §9.D variant-retirement sweep. The previous bootstrap/teko.c was harvested BEFORE
+# §14 landed (A0 = be9dcc86) and so had no `@Type()` expander; while §14 was inert the swept tree still
+# compiled, but the §9.D sweep now USES `@Type()` in `src/`, so a gen0 built from the stale seed could no
+# longer parse the corpus and the CI C lane stopped compiling. This record re-harvests the seed from a
+# §14+§9.D-capable generation at the current tip. Format and parser: scripts/degrau.sh's kv_field;
+# enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
 #
-# self-construction R2 — sweep + `self { … }` removal (§4.1), atomic
+# §14 + §9.D reseed — macro/comptime pre-pass, inline-union capabilities, and the variant sweep
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (docs/design/plano-self-construction.md, docs/design/mudancas-superficie-0.3.1.md §4.1):
-#   - SWEEP: every `self { … }` construction in `src/` is rewritten to the target-typed `.{ … }`
-#     (R1's additive capability): `src/collections/list.tks` (`List<T>::make`) and
-#     `src/collections/map.tks` (`Map<V>::make`). Both target the generic self-instance the mono pass
-#     remaps, byte-for-byte the type the retired `self { … }` produced. NOT touched: `operator … : self
-#     { <expr> }` (self is a RETURN TYPE with an expression body, not a construction).
-#   - REMOVAL, in `src/parser/parse_expr.tks`: the `SelfKw` + `LBrace` branch of `parse_atom` and
-#     `self_sentinel_path` are deleted — a `self { … }` no longer parses as a construction (`self` reads
-#     as a bare receiver, the following `{` is a parse error). In `src/checker/typer.tks`:
-#     `is_self_sentinel`, `self_construct_target`, and the `is_self_sentinel` branch of
-#     `construct_target` are deleted. `self` remains ONLY a receiver (`self.x`) and a type (`(): self`,
-#     `p: self`). PRESERVED: `self_inst_spelling` (`src/checker/resolve.tks`) — the generic phantom
-#     spelling, now the surviving reuse shared by `dot_construct_target`/`self_return_named` and the
-#     mono remap. Stale doc/diagnostic references to `self { … }` construction are updated to `.{ … }`.
-#   - `.{ … }` and the NOMINAL `Name { … }` are the two remaining construction forms.
+# WHAT ENTERS (docs/design/section14-macro-comptime-impl-v1.md, plano-9d-capabilities-crumbs-r1.md):
+#   - §14 A0-A4 Family-A syntactic macros: `macro Name() { lowering { … } }` and the `@Name()` type-macro
+#     pre-pass (`src/parser/macro_expand.tks`, `expand_macros_syntactic`) that expands `@Type()` in EVERY
+#     type position — signatures, fields, local `var`/`MultiBind` annotations, `const` declarations, cast
+#     targets, struct-literal / call / method-call / macro-call type-args, lambda parameters, variant /
+#     newtype / alias type-decl bodies, and match-arm pattern type positions. Plus §14 B1-B5 comptime
+#     reflection (`T.size`/`T.name`, `@fields<T>()`).
+#   - §9.D capabilities (a) grouped inline-union types `(A | B)`, (b) union-mangle byte-agreement so a
+#     `[](A | B)` names one typedef, and (c) the anonymous group-bind pattern `(B | C) as v`.
+#   - The §9.D SWEEP in progress: `type X = variant …` declarations retired to inline `|` unions,
+#     abbreviated by `@X()` Family-A macros whose lowerings qualify members by their home namespace
+#     (`ns::A | ns::B`) so they resolve at both same- and cross-namespace use sites (checker
+#     self-qualification fix, `check_named`). Retired so far: FSpecKind, MergeDisposition, ConstValueKind,
+#     RegAssignment, BorrowedFrom, ResidenceTier, RegexNode, Unique, PointsTo, ItemKind, LOp, MInst,
+#     MInstX86, File, TFSpecKind.
 #
-# FIXTURES: examples/regressions/type_overload swept (`self { … }` factories -> `.{ … }`,
-# `self_static`/`self_instance` scenarios -> `dot_static`/`dot_instance`); type_overload_reject's
-# `self_free` reframed to `dot_no_target` (with `self { … }` removed, that form is a parse error
-# everywhere — its "no enclosing type" reject is gone). NEW examples/regressions/self_ctor_removed_err
-# (EXPECT_COMPILE_FAIL): a `self { … }` in a method body is a parse error, while `self._n` (receiver)
-# and `(): self` (type) in the SAME file stay valid.
+# FIXPOINT. The COMMITTED artifact SELF-REPRODUCES via the C route (the reseed-bootstrap.yml criterion):
+#   cc -std=c2x bootstrap/teko.c -> gen (scripts/build_gen1_from_c.sh);
+#   TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == sha256(bootstrap/teko.c) == below.
+# Verified this run: the emitted teko.c, cc-compiled and used to rebuild the tip, re-emits itself
+# byte-identically; and the native self-host chain gen1 == gen2 == gen3 is byte-identical at the same
+# sha. Every capped build (`ulimit -v 6291456`) peaked ~3.85 GB (well under the 6 GB cap).
 #
-# FIXPOINT. The COMMITTED artifact self-reproduces from the R1 seed (which understands `.{ … }`):
-# cc(R1 bootstrap/teko.c) -> gen0; gen0 builds the swept src -> gen1 (emits teko.c); gen1 -> gen2 ->
-# gen3, and all three emitted teko.c are BYTE-IDENTICAL (sha256 below). The swept corpus uses no
-# `self { … }`, so the removal is behavior-preserving on this source (`.{ … }` lowers to the same
-# `TStructInit`). A TEKO_MEM_PARANOID=1 build of the same source exits 0 (self-reported peak 3628.5 MB
-# — no regression against the pre-R1 3639.1 MB baseline). Every capped build (`ulimit -v 6291456`)
-# peaked ~4.15 GB (tree, incl. cc), well under the 6 GB cap.
-#   cc(bootstrap/teko.c) -> gen;  TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == below.
-#
-# `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
-# ordered sequence. `commit: pending drain` — the landing commit is written in this same change.
+# `run: hand-harvest` — no CI run produced this file: the canonical reseed-bootstrap.yml flow seeds from
+# the RELEASED binary, which predates the 0.3.1 surface AND §14 and so cannot build this tree; the harvest
+# is therefore LOCAL on fix/retirement, forward-only, and its correctness is guaranteed by the C-route
+# self-reproduction above rather than by a CI run-id. `commit: pending drain` — the landing commit is
+# written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  9e5fe4e6a33f829d4b9f3b2e50806ebfc6bb5aaa25855c96653d2f4408439299
+sha256:  37057a1a7ec1a31e642209a3e5af11d707bc03a5b9dbfac41e8ba56f5f38ad31
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the sweep of the corpus's `self { … }`
-         constructions to `.{ … }` and the removal of the `self { … }` construction form, §4.1),
-         byte-identical on rebuild across three generations; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (§14 macro/comptime + §9.D inline-union
+         capabilities + the in-progress §9.D variant-retirement sweep), byte-identical on rebuild across
+         three native generations AND on the cc-route re-emission; no unrecovered legacy artifact
+         underlies it.
