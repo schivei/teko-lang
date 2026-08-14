@@ -221,6 +221,22 @@ RSA/ECDSA (C7). **Recommendation:** ship the pure-Teko C0–C5 first; C6 rand as
 lands; X25519/Ed25519 (self-contained, well-specified) as the earliest hand-rolled public-key; RSA/ECDSA
 provider-first, pure-Teko later on `math::bigint`.
 
+**Lane FFI-provider (ruling do dono — *"não vamos implementar os mesmos, mas temos que ter suporte"*).** Ao
+lado das implementações puras acima, a stdlib expõe **bindings FFI para provedores do sistema**, para quem
+prefere o provedor auditado do SO em vez do código Teko — **sync E async**. Não reimplementamos; **bindamos**:
+- **`teko::crypto::openssl`** — `extern` para `libcrypto`/`libssl` (OpenSSL / LibreSSL / BoringSSL): a pilha
+  inteira por uma superfície comum — hash (`EVP_Digest*`), HMAC, cipher/AEAD (`EVP_*`), KDF, PK
+  (RSA/EC/Ed25519/X25519), X.509. O **mesmo binding serve o `net::tls`** provider-first (N3).
+- **`teko::crypto::gpg`** — `extern` para **GPG/OpenPGP** via `gpgme` (`libgpgme`) ou o executável `gpg`:
+  encrypt/decrypt/sign/verify, keyring, ASCII armor. É o **caminho FFI para PGP/GPG** ao lado do
+  `crypto::pgp` puro (C-PGP) — para quem já tem GnuPG no sistema.
+- **Outras libs** entram pelo mesmo padrão (libsodium para primitivas modernas, etc.), todas curadas.
+- **Sync/async:** cada binding é **sync-first**; a variante `await`→`Intent<T>` (§10.3) envolve por cima
+  **sem reescrita** — as operações pesadas (assinatura RSA, KDF memory-hard, handshake) ganham a async antes.
+
+Todos ridem **KEYSTONE-LINK** (quem não chama o provider não linka a lib) e `#os` para lib/símbolo por
+plataforma. As impls puras ficam como alternativa **zero-dependência**; o provider é opt-in.
+
 **Supporting: `teko::math::bigint` + `teko::math::checked`.** `checked` (`wrapping_*`/`checked_*`/
 `saturating_*`) already exists (M1). `bigint` — a general constant-time big-integer for C7 — is a
 **math** module (not crypto-private): `exp type BigInt` with `add/mul/mod_exp/inverse`. Pure Teko, P2,
@@ -297,14 +313,24 @@ Teko, `.tkt`-testable, **no keystone** — parallelizable now.
 
 ### E. Compression — `teko::compress::*` (extend the existing module)
 
-`teko::compress` ships CRC-32 + ZIP STORE. All extensions are pure Teko over `[]byte`, `.tkt`-testable,
-reused by HTTP `Content-Encoding`, archives, PGP.
+`teko::compress` já traz CRC-32 + ZIP STORE, **e DEFLATE/inflate/gzip/zlib JÁ ESTÃO IMPLEMENTADOS** em
+`src/compress/` (`deflate.tks`, `inflate.tks`, `gzip.tks`, `zlib.tks` + `inflate_test.tkt`). Extensões são
+puro Teko sobre `[]byte`, `.tkt`-testáveis, reusadas por HTTP `Content-Encoding`, arquivos, PGP.
+
+**Por que é crítica — o `#embed` depende dela (ruling do dono).** A pragma **`#embed("local_path")`** é um
+**VFS readonly in-memory**: bakeia artefatos do projeto na data-readonly do binário **comprimidos no tempo de
+compilação** e os **descomprime no runtime** ao serem lidos, sem dependência de filesystem. Consome
+`compress`. **STATUS: `#embed` NÃO foi implementado** — está como *design-ahead* em
+`docs/design/embed-vfs.md`, adiado por você como *"supérfluo por hora"* (2026-07-20). Como a compressão que
+ele exige **já existe**, destravá-lo é passo curto; fica **elevado de importância** agora (avaliar
+agendamento).
 
 | # | Module | Surface (sketch) | Deps | Feasibility | Tier |
 |---|---|---|---|---|---|
-| Z-DEFLATE | `teko::compress::deflate` | `exp fn deflate(src: []byte, level: i32): []byte` · `exp fn inflate(src: []byte): []byte\|error` | CRC-32 (✅) | **pure**; the keystone others wrap | **P1** |
-| Z-GZIP | `teko::compress::gzip` | RFC 1952 framing over DEFLATE | Z-DEFLATE | **pure**; default HTTP encoding | **P1** |
-| Z-ZLIB | `teko::compress::zlib` | RFC 1950 framing (Adler-32) | Z-DEFLATE | **pure** | **P1** |
+| Z-DEFLATE | `teko::compress::deflate` | `exp fn deflate(src: []byte, level: i32): []byte` · `exp fn inflate(src: []byte): []byte\|error` | CRC-32 (✅) | **✅ IMPLEMENTADO** (`src/compress/`) | **feito** |
+| Z-GZIP | `teko::compress::gzip` | RFC 1952 framing over DEFLATE | Z-DEFLATE | **✅ IMPLEMENTADO** | **feito** |
+| Z-ZLIB | `teko::compress::zlib` | RFC 1950 framing (Adler-32) | Z-DEFLATE | **✅ IMPLEMENTADO** | **feito** |
+| Z-EMBED | `#embed` + VFS readonly | pragma top-level + VFS global readonly; compress no compile, inflate no runtime | Z-DEFLATE (✅), pragma/parser, data-readonly | **design-ahead** (`embed-vfs.md`) — **não implementado** | **a agendar** |
 | Z-ZIP+deflate | extend existing ZIP | method=8 entries | Z-DEFLATE | **pure** | **P2** |
 | Z-BROTLI / Z-LZMA / Z-ZSTD | `teko::compress::{brotli,lzma,zstd}` | modern encodings | none | **pure**, large | **P3** |
 
