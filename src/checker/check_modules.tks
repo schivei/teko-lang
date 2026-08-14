@@ -103,6 +103,23 @@ fn name_exists_anywhere(table: TypeTable, name: str): bool {
 }
 
 /**
+ * qualifier_names_enclosing_ns — does a single-segment type-reference prefix name the file's OWN
+ * enclosing namespace? A namespace may qualify its own members `ns::X` from within `ns` without a
+ * self-`use` (owner ruling, §9.D sweep): the actual resolver already matches `ns::X` by namespace
+ * (`type_ref_ns`/`qualifier_selects_ns`), so this teaches the namespace-rules linter the same — the
+ * prefix `ns` is the last segment of the enclosing namespace path `ref_ns` (e.g. `checker` for
+ * `teko::checker`).
+ *
+ * @param qualifier  the written single-segment prefix (`path.segments[0].name`)
+ * @param ref_ns     the fully-qualified namespace the reference is written in
+ * @return           true iff the prefix names the enclosing namespace itself
+ * @since            §9.D sweep (self-qualification without a self-`use`)
+ */
+fn qualifier_names_enclosing_ns(qualifier: str, ref_ns: str): bool {
+    qualifier == name_last_segment(ref_ns)
+}
+
+/**
  * check_named — check ONE `Named` type reference (its path) used inside namespace `ref_ns`. A
  * BUILT-IN name (`u8`…/`str`/`byte`/`error`) is never namespaced and passes immediately; a name the
  * built-in table rejects outright (a removed 128-bit type) also passes here, since the resolver
@@ -129,10 +146,14 @@ fn check_named(path: parser::Path, ref_ns: str, table: TypeTable, al: []AliasBin
 
     // QUALIFIED / ABSOLUTE: resolve the target namespace.
     var target_ns = ""
-    if path.segments.len == 2 {   // single-segment prefix = a `use` alias
+    if path.segments.len == 2 {   // single-segment prefix = a `use` alias, or the file's OWN namespace
         target_ns = alias_target(al, ref_ns, path.segments[0].name)
         if target_ns == "" {
-            return error { message = "qualified type reference with an unbound alias — add `use teko::<ns>` (the prefix binds nothing)" }
+            if qualifier_names_enclosing_ns(path.segments[0].name, ref_ns) {
+                target_ns = ref_ns
+            } else {
+                return error { message = "qualified type reference with an unbound alias — add `use teko::<ns>` (the prefix binds nothing)" }
+            }
         }
     } else {
         target_ns = join_n(path, path.segments.len - 1)   // absolute: teko::a::b::Type → "teko::a::b"
