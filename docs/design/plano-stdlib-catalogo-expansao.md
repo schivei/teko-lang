@@ -414,8 +414,12 @@ os FECHADOS/proprietários o dev implementa** (a stdlib dá as primitivas) — r
 | S-MIME | form-urlencoded · multipart · base64-MIME | (ride with N5) | S base64 (✅) | **pure** | **P2** |
 
 **Marcação de conversão nativo↔serializável — tags de crase, COMPTIME, zero-reflection em runtime (ruling do
-dono).** Campos ganham uma **tag de crase** estilo Go (a crase **está livre** na sintaxe), namespaced por
-formato — **não é anotação** (Java/C#), é uma spec de marcação lida em **comptime**:
+dono).** **Escopo: SÓ `struct` (DTO), NÃO `class`** (ruling do dono). A serialização é para **dados** — o
+struct é o DTO; a `class` tem comportamento/identidade e **não** é serializável direto. Precisa serializar
+uma class? O dev faz a conversão **struct↔class** como bem entender (a stdlib não impõe). Isso simplifica a
+síntese: o parser por-tipo só existe para structs. Campos ganham uma **tag de crase** estilo Go (a crase
+**está livre** na sintaxe), namespaced por formato — **não é anotação** (Java/C#), é uma spec lida em
+**comptime**:
 ```teko
 exp type User = struct {
     id:      u64          `json:"id" xml:"@id"`          // @ = atributo XML
