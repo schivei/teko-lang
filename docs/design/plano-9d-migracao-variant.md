@@ -497,3 +497,39 @@ Grupo `own_native` (o compilador a compilar corpus próprio). Exit = valor obser
 `plano-match-universal-e-migracao-variant.md` (a fundação do match + o §4.2 que este doc RESOLVE),
 `plano-item14-value-struct-mutavel.md` (cabeçalho fat), `interface-value-type.md` (fat pointer + a
 spine-gate do struct→interface), `mudancas-superficie-0.3.1.md` §9.2b/§9.4 (o ban selado).*
+
+---
+
+## 12. Os dois últimos (`TStatement`, `Type`) — SELADO (2026-08-14): falsos-forks, migração mecânica
+
+A sessão filha `§9.D sweep` travou em `TStatement` (`src/checker/tast.tks:226`) e `Type`
+(`src/checker/type.tks:166`) alegando "2 design calls". **Ruling do dono: ambos são falsos-forks — a
+migração é 100% mecânica, sem uma linha de capacidade nova.**
+
+**Q1 — união-de-uniões (`@TItem()` contém `@TStatement()`).** NÃO é fork. O expansor JÁ splica/achata
+`@X()` aninhado no corpo `lowering` — precedente PROVADO: `src/parser/ast.tks:944`
+`macro ItemKind() { lowering { UseDecl | @Statement() | Function | … } }` já chama `@Statement()` dentro
+do corpo. Suporte via `rewrite_type_decl`→`walk_type` (`macro_expand.tks:269-294`) + recursão
+depth-bounded (`max_macro_depth`, `macro_expand.tks:361`). E `union_collect` (`resolve.tks:1676`) achata
++ dedupa + null-normaliza.
+
+**Q2 — o "duplo-null" de `@Type() | null`.** NÃO é colisão. Regra do dono: o `null`/`error` de
+SUPERFÍCIE e o `Null`/`Error` de BACKEND são o MESMO elemento — o swap superfície→backend acontece no
+front-end (`lexer.tks:357` `"null" → TokenKind::Null`; `resolve.tks:2032` `named_type_is_null(nt) →
+Null {}`). No backend só existe `Null`; não há "null de superfície" solto pra colidir. Elementos
+repetidos DEDUPAM sem erro (`union_collect` colapsa null repetido num líder — `resolve.tks:1929/1945/2623`).
+Sempre foi assim (ex. `type T = S | error | null` com `S = A | null`). **Sem marcador novo, sem família
+nova.** Verbatim do dono: *"o agente não precisa se preocupar com colisões, nunca ocorrerão, e precisa
+usar as ferramentas que já deliberamos. Se uma macro não consegue chamar outra, então é ensinar a ser
+feito."* — verificado: já sabe chamar (`ItemKind`), nada a ensinar.
+
+**Crumb mecânico (para a filha fechar 32/32):**
+1. `type TStatement = variant TBinding | … | TBlockStmt` (`tast.tks:226`) →
+   `macro TStatement() { lowering { TBinding | … | TBlockStmt } }`.
+2. `type Type = variant Prim | … | Null` (`type.tks:166`) →
+   `macro Type() { lowering { Prim | … | Null } }`.
+3. No corpo de `macro TItem()` (`tast.tks:302`): `checker::TStatement` → `@TStatement()`.
+4. Reescrever os usos de `TStatement`/`Type` → `@TStatement()`/`@Type()`; os sites `Type | null` viram
+   `@Type() | null` (o `union_collect` colapsa o null — sem tratamento especial).
+5. Gate: reseed + `teko test .` no CI. Fixtures novas: round-trip de união-de-uniões (`@TItem()`
+   contendo `@TStatement()`) + `@Type()`-anulável.
