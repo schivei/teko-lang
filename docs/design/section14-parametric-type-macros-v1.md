@@ -8,6 +8,19 @@
 > **Scope (owner-reduced):** NO loops, NO `text::join`, NO general `${string}`→type. The feature is
 > exactly **type-macro parameters + a comptime `if` over the bool param**.
 
+## 0. Owner ruling — three macro families (text→AST→value)
+
+The macro system is THREE families (revises the older "no third class"), split by the pipeline stage
+each expands at:
+- **A · `macro`** — expands the **AST** via `lowering` (post-lexer, pre-type-check). **Form 2 (this
+  wave) lives here.**
+- **B · `comptime`** — a function EXECUTED without expanding the AST; returns values inlined at the
+  call site (B1–B5).
+- **C · `generator`** — expands BEFORE the lexer, manipulating the **source STRING**. **Form 1**
+  (`var ns = if … ; lowering { ${ns}B }` — string concat / `${string}` name-prefix) does NOT die; it
+  MOVES to this new family C (pre-lexer), FUTURE work, out of `macro`'s scope. Recorded so it is not
+  lost.
+
 ## 1. Goal
 
 Let a Family-A **type-macro** take a bool parameter and select its lowered type with a compile-time

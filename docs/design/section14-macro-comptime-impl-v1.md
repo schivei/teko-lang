@@ -69,6 +69,17 @@ Family A rewrites `parser::Program` (§5.1-A of plano-macro). Family B rewrites 
 `project.tks:367` (§B.1-Opt-1). Serialization's per-type synthesis is a THIRD pass at the same
 post-monomorph slot, a thin driver over Family B (§4 recon below).
 
+**Owner ruling 2026-08-14 — the macro system is THREE families, along the text→AST→value boundary**
+(revises the older "no third class"). Each expands at a different pipeline stage:
+- **A · `macro`** — expands the **AST** via `lowering` (runs POST-lexer, PRE-type-check;
+  `expand_macros_syntactic`). Parametric type-macros (comptime `if`-select, Form 2) live here —
+  `section14-parametric-type-macros-v1.md`.
+- **B · `comptime`** — a function EXECUTED without expanding the AST; returns values inlined at the
+  call site (POST-type-check; `expand_comptime`). B1–B5.
+- **C · `generator`** — expands BEFORE the lexer, manipulating the SOURCE STRING of the written code.
+  The `${string}`/concat/prefix authoring (the parametric-type-macro "Form 1") belongs HERE, not in
+  `macro`; it is a NEW family, FUTURE work, not this wave.
+
 ### 1.4 Serialization substrate — `@fields<T>()` projects over `FieldView`
 
 - `pub type FieldView = struct { name: str; type: Type }` — `src/checker/collect.tks:1618`.
