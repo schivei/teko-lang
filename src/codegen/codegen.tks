@@ -1606,17 +1606,52 @@ fn cg_name_reaches_byvalue(prog: CgProg, from: str, to: str, seen: []str): bool 
         _ => false   // enum/alias — no by-value aggregate edges
     }
 }
-// cg_field_boxed — is the struct `sname`'s field of declared type `fte` a recursive back-edge
-// (→ box as pointer)? A NAMED `Y` field is boxed iff its by-value content
-// reaches BACK to `sname`. A SLICE field is already a pointer (never boxed); an inline-UNION
-// field is left unboxed (none close a cycle in the corpus). (C: `cg_field_boxed`.)
+/**
+ * cg_field_boxed — is the struct `sname`'s field of declared type `fte` a recursive back-edge that
+ * must be stored as a heap POINTER to keep the C struct finite? True when `fte` is a NAMED type OR an
+ * INLINE-TAG union (a by-value-embedded union — NOT a niche/box-optional, which is already a handle)
+ * whose by-value content reaches BACK to `sname`. A slice / function type is already a pointer and
+ * never boxes. This is the finitizing indirection a §9.D retired variant needs: an inline union that
+ * carries itself by value through a member's struct field is boxed exactly as the named variant it
+ * replaced already was, anchored on the forward-declarable `tk_u_<keys>` typedef. (C: `cg_field_boxed`.)
+ *
+ * @param prog   the typed program (field / representation resolution)
+ * @param sname  the enclosing struct's canonical name (the back-edge target)
+ * @param fte    the field's syntactic type annotation
+ * @return       true iff the field must be emitted as a boxed heap pointer
+ */
 fn cg_field_boxed(prog: CgProg, sname: str, fte: parser::TypeExpr): bool {
     var is_box_candidate = match fte {
         parser::NamedType => true
+        parser::UnionType as ut => cg_union_field_inline_tag(prog, sname, ut)
         _ => false
     }
     if !is_box_candidate { return false }
     cg_te_reaches_byvalue(prog, fte, sname, teko::list::empty())
+}
+
+/**
+ * cg_union_field_inline_tag — is the inline-union field type `ut` (resolved in `sname`'s namespace)
+ * stored BY VALUE as an `{ tag; union }` inline-tag struct — as opposed to a niche or box-in-arena
+ * OPTIONAL, which is already an 8-byte handle? Only an inline-tag union embedded by value can close a
+ * by-value size cycle, so only it is a boxing candidate; the two-member `{ null, X }` niche/box optionals
+ * carry their own pointer indirection (`cg_union_box_member` / `cg_union_niche_member`) and must NOT be
+ * double-boxed here. A multi-member union that merely lists a `Null` case (e.g. a retired `Type`) is
+ * inline-tag, not a two-member optional, so it correctly boxes.
+ *
+ * @param prog   the typed program (union representation classification)
+ * @param sname  the enclosing struct's canonical name (its namespace resolves the member paths)
+ * @param ut     the inline-union field type
+ * @return       true iff `ut` resolves to the by-value inline-tag representation
+ */
+fn cg_union_field_inline_tag(prog: CgProg, sname: str, ut: parser::UnionType): bool {
+    match cg_te_to_type_ns(prog, checker::name_qualifier(sname), parser::UnionType { members = ut.members }) {
+        checker::Variant as va => match union_repr_class(prog, va, false) {
+            UnionRepr::InlineTag => true
+            _ => false
+        }
+        _ => false
+    }
 }
 
 // cg_variant_has_member — does variant decl `d` have a member whose bare name is `member`?
