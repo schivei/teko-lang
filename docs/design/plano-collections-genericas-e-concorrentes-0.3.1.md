@@ -1,6 +1,8 @@
 # Plano — expansão de `teko::collections`: coleções **genéricas** + **concorrentes** (estilo C#)
 
-> **Versão:** v1 (2026-08-14). **Status:** DESIGN-AHEAD (architect). Read-only no código-produto —
+> **Versão:** v2 (2026-08-14) — §3 (concorrentes) REESCRITO por ruling do dono (2026-08-13): modelo B
+> (shared-memory sob lock/interlocked), SUPERSEDE o plano chan-actor da v1. §1–§2 (genéricas) intactos.
+> **Status:** DESIGN-AHEAD (architect). Read-only no código-produto —
 > NENHUM `.tks` de produto editado, NENHUM build, NENHUM reseed, NENHUM `teko test .` (fuga de
 > memória do `monomorph` — crasha o container; nunca correr). Este documento É o artefacto; o único
 > commit desta carga é ele próprio.
@@ -17,9 +19,11 @@
 >   doc). **É a dependência-chave das genéricas com chave/ordem.**
 > - **#254** (métodos-em-genérico + static factories `T::make()`): DONE
 >   (`docs/design/drain-254-L4L5-class-factories.md`, `[HISTÓRICO]`). É a base viva que `List`/`Map` já usam.
-> - **Modelo de concorrência §10** (memória isolada + `chan<T>` MPSC + `spawn`/`join`, NÃO shared-memory-
->   com-locks): `docs/design/concorrencia-isolate-spawn-chan-0.3.1.md` (SELADO) e
->   `docs/design/concorrencia-adiantada-s8.md`. **É a dependência-chave das concorrentes.**
+> - **Modelo de concorrência §10** (ISOLAMENTO por omissão: memória isolada + `chan<T>` MPSC +
+>   `spawn`/`join`; partilha-sob-lock quando EXPLICITAMENTE declarada — o padrão `Arc<Mutex<T>>`, §3.2):
+>   `docs/design/concorrencia-isolate-spawn-chan-0.3.1.md` (SELADO) e
+>   `docs/design/concorrencia-adiantada-s8.md`. Dependência-chave das concorrentes: a fundação F1
+>   (thread por tarefa) + F2 (região partilhada, já semeada em `tk_region_program`).
 > **Lei permanente:** Teko-only (`.tks`), W15 + Javadoc-completo em TODA declaração, law-first, reseed
 > disciplinado (`cc -std=c2x`, `--no-verify`), fixpoint byte-idêntico.
 
@@ -75,8 +79,8 @@
 **Conclusão do RECON:** `List`/`Map`/os combinadores existem e são a fundação. O que falta para as
 GENÉRICAS é (i) `IHash` (interface de método, desenhada aqui), (ii) o dispatch genérico de operador
 `IEq`/`IOrd` (que o 9-ops entrega), (iii) os tipos-coleção novos por cima dos combinadores. O que
-falta para as CONCORRENTES é reconciliar o modelo C# (shared-memory+lock) com o §10 (isolado+`chan`) —
-a tensão central do §3.
+falta para as CONCORRENTES é a fundação F1+F2 do §10 sob o modelo B (shared-memory sob lock/interlocked,
+ruling do dono), reconciliado com o §10 pelo padrão `Arc<Mutex<T>>` — o desenho do §3.
 
 ---
 
@@ -355,133 +359,381 @@ coleção mutável devolve o wrapper.
 
 ---
 
-## 3. Coleções CONCORRENTES — a tensão central (§10) e as 3+ formas de resolvê-la
+## 3. Coleções CONCORRENTES — o modelo B (shared-memory sob lock/interlocked), sancionado pelo dono
 
-### 3.1 A tensão, dita sem rodeio
-C# `System.Collections.Concurrent` é **memória partilhada + lock/CAS interno**: um `ConcurrentDictionary`
-é UM objeto que N threads mutam ao mesmo tempo, protegido por `Monitor`/`Interlocked`. **Teko §10 é o
-OPOSTO por lei:** memória ISOLADA por tarefa (`isolate` = raiz de heap própria, "como se fosse outro
-programa", `codegen.tks:8828`), dados só cruzam fronteira por **cópia via `chan<T>`** (MPSC, um leitor)
-ou por valor de retorno de `join`. **Não há shared-memory-com-lock em Teko, e o §10 é explícito que
-tê-la sem a fundação de arena-por-tarefa (F1) reabre exatamente o bug que o modelo existe para fechar**
-(`concorrencia-isolate-spawn-chan-0.3.1.md` §8.1). Copiar o C# cegamente VIOLARIA o §10. Logo a
-pergunta não é "como faço um lock" — é **"que forma dá semântica concorrente de coleção DENTRO do
-modelo isolado+chan"**. Três formas concretas, com exemplo, e uma recomendação por tipo.
+> **Esta secção SUPERSEDE o plano chan-actor anterior** (Opções A/C por `chan`), por ruling do dono
+> (2026-08-13). O que muda é o MODELO de memória concorrente, não as coleções genéricas do §1–§2 (que
+> ficam intactas). A ruling e a sua reconciliação com o §10 são a lei desta secção.
 
-### 3.2 Opção A — **Actor: a coleção vive numa tarefa dona; acesso por `chan` (comando/resposta)**
-A coleção é normal (não-concorrente, um só mutador — a própria tarefa dona). N clientes NÃO tocam a
-coleção; enviam **comandos** por um `chan<Cmd>` MPSC; a tarefa dona é o único leitor, aplica cada
-comando na sua coleção privada, e devolve respostas por um `chan` de retorno cujo id vem no comando.
-**É o modelo canônico do §10** (memória isolada, dados por cópia, um dono) — zero lock, zero shared
-memory. Alinha 1:1 com o handle-por-id (`ChanId = u64`, §3.4 do doc §10).
+### 3.1 A ruling do dono — B (shared-memory + lock/interlocked), não o actor-via-`chan`
+O dono **recusou** as opções baseadas em `chan` que a versão anterior deste doc recomendava — Opção A
+(actor: a coleção vive numa tarefa dona, acesso por comando/resposta em `chan`) e Opção C
+(`BlockingCollection` como wrapper fino sobre `chan<T>`) — com o veredicto: *"arquitetura demais para
+algo simples"*. O modelo escolhido é **Opção B: coleções concorrentes de MEMÓRIA PARTILHADA protegidas
+por lock / interlocked (CAS lock-free)**, textual: *"(B) é simples e metal, como a maioria das
+linguagens, foco em velocidade e economia de memória."*
 
-```teko
-/**
- * Command to a ConcurrentDictionary actor — carries the operation, its operands, and the reply-channel
- * id the owner task answers on. A value type copied across the chan boundary (no shared reference — the
- * §10 law). `reply` is a ChanId (a u64 NAME, never a pointer — §3.4 of the concurrency design).
- *
- * @since 0.3.1
- */
-pub type DictCmd<K: IEq & IHash, V> = struct {
-    /** 0 = insert, 1 = get, 2 = remove — the operation selector. */
-    op: u8
-    /** The key operand, copied into the owner's isolate. */
-    key: K
-    /** The value operand (insert only; ignored otherwise). */
-    val: V
-    /** The reply-channel id the owner sends the result back on. */
-    reply: u64
-}
+**Precisão que a versão anterior errou:** ela rotulou o `System.Collections.Concurrent` do C# como
+"lock" (`Monitor`). É impreciso. O C# usa **`Interlocked` (CAS lock-free) para o estado de palavra
+única** (contadores, cabeças de pilha/fila, flags de estado) e **locks FINOS/segmentados** (o
+*striping* por bucket do `ConcurrentDictionary`) só onde a estrutura obriga, com **esperas apoiadas em
+futex** (`SemaphoreSlim`/`Monitor` degradam para futex no Linux, `WaitOnAddress` no Windows) — **NÃO**
+um mutex global por objeto. Capturar isto com precisão É o pedido do dono ("velocidade e economia"):
+lock-free onde der, lock fino onde não der, nunca um lock global.
+
+### 3.2 A reconciliação com o §10 — o padrão `Arc<Mutex<T>>`, NÃO uma violação de lei
+A versão anterior enquadrava B como *"viola o §10"*. **Sob a ruling, esse enquadramento está errado, e
+corrige-se law-first.** O §10 (`concorrencia-isolate-spawn-chan-0.3.1.md`) sela o ISOLAMENTO como o
+**default**: uma tarefa nasce com raiz de heap própria — *"como se fosse outro programa"*
+(`codegen.tks:8828`, a ruling de fronteira de isolate do dono, 2026-07-27), e dados cruzam a fronteira
+por cópia via `chan<T>` (§5) ou por retorno de `join` (§4.1). Uma coleção concorrente de memória
+partilhada é o **`Arc<Mutex<T>>`**: a fuga EXPLÍCITA, marcada e opt-in, para partilha-mutável-sob-lock —
+exatamente o que Rust (`Arc<Mutex<T>>`), C# (`System.Collections.Concurrent`), Java
+(`java.util.concurrent`) e C++ (`std::mutex`) TODOS oferecem por cima de um default de isolamento.
+
+**O §10 passa a ler-se "isolado por omissão, partilhado-sob-lock quando EXPLICITAMENTE declarado", não
+"isolado sempre".** Uma coleção concorrente a partilhar memória entre tarefas **não dissolve** o §10 —
+é uma **exceção sancionada** dele, pela MESMA lógica que já abençoa `chan`: estado partilhado gerido
+pelo runtime, atrás de uma API estreita, nunca heap-de-utilizador cru a atravessar a fronteira. O que o
+§10 §8.1 mede como *"o pior, e é bloqueante"* é a partilha **acidental e não-marcada** de arena entre
+tarefas (duas raias a fazer `arena_push`/`pop` na mesma pilha, sem fronteira) — B **não** é isso: é uma
+região partilhada DELIBERADA (F2, §3.4), com sincronização real por baixo, marcada no tipo.
+
+### 3.3 O que B exige do runtime C — a exceção sancionada (`teko_rt.{c,h}`)
+A lei Teko-only NÃO cobre o runtime C (`src/runtime/teko_rt.{c,h}` é a exceção mantida). B precisa de
+duas famílias de primitiva, e **o runtime já carrega o idioma de ambas** — isto é promoção, não
+partida do zero:
+- o idioma atómico C11 já está em produto: `tk_region_gen_next` usa `__atomic_add_fetch(...,
+  __ATOMIC_RELAXED)` (`teko_rt.c:1570`) para carimbar gerações sem colisão entre tarefas;
+- um `tk_spin_lock`/`tk_spin_unlock` test-and-set (`__atomic_exchange_n`/`__atomic_store_n`,
+  `teko_rt.c:1588`/`:1595`) já guarda os singletons Categoria-B, **sem `<pthread.h>`**.
+
+O que falta é promover isto a primitivas de bloqueio de verdade (apoiadas em futex, não spin puro) e
+expor RMW atómico nomeado. Prototipos C a acrescentar (metal, sem dependência nova além do que o SO já
+dá — `futex(2)`/`WaitOnAddress`):
+
+```c
+/* Interlocked (lock-free CAS) — o caminho de velocidade do owner, sobre o idioma __atomic já em
+ * teko_rt.c:1570. u64-wide, o suficiente para cabeças de pilha/fila, contadores e flags de estado. */
+uint64_t tk_atomic_load (const uint64_t *cell);
+void     tk_atomic_store(uint64_t *cell, uint64_t v);
+uint64_t tk_atomic_add  (uint64_t *cell, uint64_t delta);          /* fetch-add, devolve o ANTERIOR  */
+bool     tk_atomic_cas  (uint64_t *cell, uint64_t expected, uint64_t desired); /* compare-and-swap */
+
+/* Lock fino apoiado em futex — a promoção do tk_spin_lock (teko_rt.c:1588) para bloqueio real:
+ * spin curto e depois park no futex, para que um lock de bucket contido não queime CPU. */
+void tk_mutex_lock  (uint64_t *word);                              /* 0=livre, 1=tomado; futex-park */
+void tk_mutex_unlock(uint64_t *word);                              /* liberta + futex-wake um esperante */
 ```
 
-Exemplo de uso: `let d = teko::collections::concurrent::dict_actor_spawn<StrKey, i64>()` devolve um
-`ChanId` de comandos; `dict_send(d, insert_cmd(k, v))`; um `get` envia o comando com um `reply` chan e
-faz `pop` da resposta. **Prós:** puro §10, seguro por construção, sem primitiva de runtime nova.
-**Contras:** cada operação é uma ida-e-volta por `chan` (custo de datagrama, §6 do doc §10); verbose
-sem açúcar. **É o default correto.**
+Os gêmeos Teko (`exp fn`, como `str_hash`/`str_cmp` em `teko_rt.tks:529`/`:536`) são a superfície que os
+`.tks` de coleção chamam. **Nenhum é um `chan`; nenhum copia dados na fronteira — são os tijolos de
+sincronização de memória partilhada que B exige e que o actor evitava pagando cópia por operação.**
 
-### 3.3 Opção B — **coleção com lock interno via primitiva de runtime (o modelo C#)**
-Um `ConcurrentDictionary` real: UM objeto, mutado por N tarefas, protegido por um mutex do runtime
-(`tk_mutex_lock`/`unlock`, a acrescentar em `teko_rt.c` — C mantido, exceção da lei). **Isto é o C#
-literal e COLIDE com o §10:** exige shared-memory entre tarefas, que o §10 §8.1 mede como "o pior, e é
-bloqueante" SEM a fundação F1 (arena-por-tarefa). Além disso o objeto teria de morar numa região
-imortal (F2, o §3.3 do doc §10) para não pendurar quando a tarefa criadora rebobina. **Prós:** API
-idêntica ao C#, sem ida-e-volta por chan. **Contras:** viola o modelo isolado; exige F1+F2 (não
-aterraram); exige mutex no runtime C; o handle NÃO pode ser um `Ref` cacheado (§3.4). **Recomendo NÃO
-construir** — é o "atalho" que o §10 §8.4 nomeia como estritamente pior.
+### 3.4 O assento de memória — a região do programa (F2), JÁ semeada no runtime
+Uma coleção concorrente **não pode viver numa arena por-tarefa**: seria libertada quando a tarefa
+criadora rebobina o seu `tk_arena_pop`, pendurando toda tarefa que ainda a partilha. Tem de morar numa
+região **imortal, de nenhuma tarefa** — a região do programa (F2, §3.3 do doc §10). **Achado que muda o
+cálculo de bloqueio:** essa região **já existe** — `tk_region_program()` (`teko_rt.c:2305`) constrói
+*"uma região que NÃO é raiz de nenhuma tarefa, logo sobrevive tanto ao `tk_arena_pop` de uma tarefa
+(que só rebobina a raiz DELA) quanto à saída da tarefa (que só liberta o registo DELA)"*, libertada no
+fim do processo por `tk_regions_free_all` (logo continua leak-clean). É o assento exato da coleção
+concorrente — o mesmo assento que o `chan` singleton já reclamava.
 
-### 3.4 Opção C — **`BlockingCollection<T>` = fila sobre `chan<T>` nativo (o transporte JÁ dá tudo)**
-O `chan<T>` MPSC do §10 (`chan_bounded`/`push`/`pop`/`close`, `concorrencia-isolate-spawn-chan-0.3.1.md`
-§5) JÁ É uma `BlockingCollection<T>` produtor-consumidor: limitado (contrapressão sem perda, §6.3),
-`push` atómico (1 syscall, §5.3), `pop` devolve item/`null`/fechado, fecho por contagem de produtores
-do kernel. `BlockingCollection<T>` é um **wrapper fino, thin**, sobre um `ChanId` — traduz a superfície
-C# (`Add`/`Take`/`CompleteAdding`/`IsCompleted`) para as chamadas de chan.
+**O que ainda falta (o bloqueio real, idêntico ao da família `chan`):** o **modo de threads de SO
+concorrentes (F1)** não aterrou — o comentário do próprio runtime crava que os atómicos/spinlock só se
+armam onde uma corrida é *"realmente possível"* e que *"o modo de thread que precisa da coisa real (S8)
+não aterrou"* (`teko_rt.c:1585`); sem GNU atomics degradam para no-op, correto para a realidade
+single-threaded de hoje. Logo a família concorrente é **FASE-2, bloqueada em F1+F2** — F2 já semeada
+(`tk_region_program`), F1 (raiz+thread por tarefa, `tk_task`/`tk_task_current`, §3.2 do doc §10) por
+aterrar. É a MESMA dependência-chave que a família `chan` tem; B não acrescenta uma dependência nova de
+fundação — só troca o transporte-por-cópia por sincronização-sobre-a-região-partilhada.
 
-```teko
-/**
- * BlockingCollection<T> — a bounded producer-consumer queue: the C# `BlockingCollection` surface as a
- * thin wrapper over the native MPSC `chan<T>` (§5 of the concurrency design). Holds ONLY a ChanId (a
- * u64 name, no cached state — §3.4); every method is a chan call. `add` is `chan push` (atomic, refuses
- * with backpressure when full — never drops), `take` is `chan pop` (item / empty-now / completed),
- * `complete_adding` is `chan close`. MPSC by construction: N producers, ONE consumer (a second consumer
- * is a named runtime error, never a silent race — §5.1). This is the §10-native concurrent collection:
- * data crosses the task boundary by COPY through the OS transport, not by shared memory.
- *
- * GATE: requires the §10 chan surface (chan_bounded/push/pop/close) to land. Blocked until then.
- *
- * @since 0.3.1
- */
-pub type BlockingCollection<T> = struct {
-    /** The backing MPSC channel id — a name resolved against the process registry on every use. */
-    chan: u64
+### 3.5 Postura de VELOCIDADE — lock-free onde a estrutura permite, striped onde não
+A régua do "foco em velocidade" do dono, por forma de estrutura:
 
-    /**
-     * Add `x`, blocking (bounded backpressure) until there is room; errors if the collection is
-     * completed. Atomic — one syscall, no TOCTOU (§5.3).
-     *
-     * @param x  the item to add
-     * @return   `null` on success, or an `error` if completed/closed
-     */
-    pub fn add(x: T): null | error { teko::threads::push(teko::threads::chan_writer(self.chan)!, x) }
-
-    /**
-     * Take one item; `null` when none is available right now, an `error`-carrying variant when the
-     * collection is completed and drained.
-     *
-     * @return the next item, `null` if empty now, or `error` if completed and empty
-     */
-    pub fn take(): T | error | null { teko::threads::pop(teko::threads::chan_reader(self.chan)!) }
-}
-```
-
-**Prós:** ZERO máquina nova — reusa o transporte medido em 3 plataformas (§6 do doc §10); é §10-nativo;
-o caso concorrente mais comum (pipeline produtor-consumidor) fica trivial. **Contras:** só cobre a
-forma fila (não um dicionário concorrente de acesso aleatório). **Recomendo construir — é a coleção
-concorrente §10-nativa por excelência.**
-
-### 3.5 Recomendação por tipo concorrente
-| tipo C# | forma recomendada em Teko | porquê |
+| estrutura | sincronização | porquê |
 |---|---|---|
-| `BlockingCollection<T>` | **Opção C** (wrapper sobre `chan<T>`) | o transporte §10 já É isto |
-| `ConcurrentQueue<T>` | **Opção C** (chan MPSC, sem bound) ou **A** | fila = chan; ordem FIFO nativa |
-| `ConcurrentStack<T>` | **Opção A** (actor LIFO) | chan é FIFO; LIFO exige dono com estado |
-| `ConcurrentBag<T>` | **Opção A** (actor multiset) | sem ordem; dono agrega |
-| `ConcurrentDictionary<K,V>` | **Opção A** (actor sobre `Dictionary`) | acesso aleatório exige dono; chan não indexa |
+| contador / flag / estado de palavra única | **lock-free (`tk_atomic_add`/`tk_atomic_cas`)** | um CAS numa palavra; zero park no caminho quente |
+| `ConcurrentStack<T>` | **CAS lock-free na cabeça** (Treiber) | push/pop = um CAS na cabeça sobre um nó por índice |
+| `ConcurrentQueue<T>` | **CAS lock-free** (Michael-Scott) ou **dois locks** (head/tail) | produtor e consumidor não disputam a mesma palavra |
+| `ConcurrentDictionary<K,V>` | **locks FINOS striped por bucket/segmento** | escritas em buckets distintos não se serializam; leitura pode ser lock-free |
+| `ConcurrentBag<T>` | **buffer thread-local + roubo sob lock fino** | o caso sem-ordem: cada tarefa escreve no seu, rouba raramente |
+| `BlockingCollection<T>` (bounded) | **mutex fino + condvar (futex) para bloqueio/contrapressão** | espera de "cheio"/"vazio" precisa de park, não de spin |
 
-**Síntese:** a família concorrente Teko é **duas formas, não uma**: (C) `chan`-wrapper para as filas
-(o caminho quente, zero máquina nova), (A) actor-sobre-coleção-genérica para dicionário/stack/bag
-(acesso aleatório/ordem própria). **Nunca a Opção B (lock+shared-memory)** — reconciliação com o §10:
-"dados só cruzam por cópia; um dono por coleção". Isto NÃO copia o C# cegamente; entrega a MESMA
-CAPACIDADE (coleções seguras sob concorrência) pela física de memória do Teko.
+**Lei de desenho:** NUNCA um lock global por coleção. O `ConcurrentDictionary` estripa (um array de
+palavras de lock, `hash(k) % n_stripes` escolhe qual) — é o coração da "velocidade" do C# e o que o
+dono está a pedir por nome. O lock-free (Treiber/Michael-Scott) é preferido onde a estrutura é uma
+cabeça de palavra única; o striped entra onde há N slots independentes.
 
-### 3.6 O que fica FASE-2 (após §10 aterrar F1/chan)
-Toda a família concorrente é **BLOQUEADA no §10** (a superfície `chan`/`spawn` ainda não é produto —
-`concorrencia-isolate-spawn-chan-0.3.1.md` §4.2 mede que `cabi fn` e a família chan não compilam hoje).
-O que se ADIANTA agora (compila/valida sem o §10): os **shapes de comando** (`DictCmd` etc., structs
-value puros), o **doc-contrato** de cada tipo (Javadoc + assinaturas honestas), e o `BlockingCollection`
-como **skeleton com honest-stop** (`panic("blocked on §10 chan surface")`) até o chan aterrar. Quando o
-§10 fechar, o implementer troca o honest-stop pelas chamadas chan em minutos.
+### 3.6 Economia de MEMÓRIA — por que B bate o actor (pungente em pleno incidente de memória)
+O outro eixo do dono ("economia de memória"). Contabilidade concreta de um `ConcurrentDictionary` sob N
+tarefas produtoras:
+
+- **Modelo B (escolhido):** UM objeto — os três arrays paralelos (`keys`/`hashes`/`vals`, §2) na região
+  do programa — mais um array de palavras de lock (o striping, `n_stripes × 8 bytes`, tipicamente
+  16–64 palavras). Fim. Cada operação muta em-lugar sob o lock do seu bucket; **zero cópia por
+  operação, zero buffer intermédio.**
+- **Modelo actor (recusado):** uma **tarefa dona** viva o tempo todo (a sua própria raiz de arena +
+  pilha) segurando a coleção, MAIS um `chan<Cmd>` MPSC com um **buffer limitado** (cada slot uma cópia
+  do comando + operandos), MAIS um `chan` de resposta **por cliente** (mais buffers), MAIS **uma cópia
+  do comando na escrita e uma cópia da resposta na leitura** por CADA operação. Para N clientes a fazer
+  M operações: O(N) canais + O(buffer) memória parada + O(M) cópias transitórias.
+
+**B é uma ordem de grandeza mais magro em memória parada e não faz cópia por operação** — exatamente o
+que se quer em pleno incidente de fuga de memória do `monomorph`. O custo que B paga em troca é
+CPU-de-sincronização (o CAS/lock), não memória — e o dono pediu velocidade, que o lock-free/striped
+entrega sem o imposto de memória do actor.
+
+### 3.7 A superfície por tipo concorrente — todos Opção B agora
+Vivem em `teko::collections::concurrent` (paralelo a `System.Collections.Concurrent`). A coluna GATE é
+**F1+F2** para todos (§3.4) — o assento partilhado + o modo de thread.
+
+| tipo C# | forma B em Teko | sincronização | fundação de reuso |
+|---|---|---|---|
+| `ConcurrentDictionary<K,V>` | dict com buckets striped | **locks finos striped** (§3.5) | os arrays paralelos de `Dictionary<K,V>` (§2.3), na região F2 |
+| `ConcurrentQueue<T>` | fila lock-free | **CAS (Michael-Scott)** ou dois locks | nós por índice sobre `[]T` em F2 |
+| `ConcurrentStack<T>` | pilha lock-free | **CAS na cabeça (Treiber)** | cabeça `u64` atómica + nós por índice |
+| `ConcurrentBag<T>` | multiset sem ordem | **thread-local + roubo sob lock fino** | um `List<T>` por tarefa + índice de roubo |
+| `BlockingCollection<T>` | fila limitada bloqueante | **mutex fino + condvar/futex** | `ConcurrentQueue` + contagem de capacidade |
+
+```teko
+/**
+ * ConcurrentDictionary<K, V> — o `System.Collections.Concurrent.ConcurrentDictionary` do C#: UM mapa de
+ * hash de memória PARTILHADA que N tarefas mutam ao mesmo tempo, seguro por STRIPING de locks finos
+ * (nunca um lock global — §3.5). Generaliza `Dictionary<K, V>` (§2.3) para acesso concorrente: a mesma
+ * representação de três arrays paralelos, mas ancorada na REGIÃO DO PROGRAMA (F2, `tk_region_program`,
+ * teko_rt.c:2305) — imortal, de nenhuma tarefa — para que sobreviva ao `tk_arena_pop` da tarefa que a
+ * criou. Cada bucket cai num de `n_stripes` locks por `hash(k) % n_stripes`: escritas em buckets
+ * distintos NÃO se serializam. É o padrão `Arc<Mutex<T>>` sancionado (§3.2): a fuga explícita, marcada,
+ * opt-in, para partilha-sob-lock — o default do §10 continua a ser ISOLAMENTO.
+ *
+ * GATE: FASE-2, bloqueado em F1 (thread por tarefa, §3.2 do doc §10) + F2 (região partilhada — já
+ * semeada). Requer as primitivas `tk_mutex_lock`/`tk_atomic_*` do runtime (§3.3). Constrangimento de
+ * chave idêntico ao `Dictionary`: `K: IEq & IHash` (§2.2, via 9-ops).
+ *
+ * @see teko::collections::Dictionary (o mapa sequencial que este torna concorrente)
+ * @see concorrencia-isolate-spawn-chan-0.3.1.md §3.3 (a região F2 onde vive)
+ * @since 0.3.1
+ */
+pub type ConcurrentDictionary<K: IEq & IHash, V> = class {
+    /** O id da região-do-programa (F2) onde os arrays vivem — resolvido pelo runtime, nunca cacheado como ponteiro (§3.4 do doc §10). */
+    intern region: u64
+    /** As palavras de lock do striping — `stripes[hash(k) % stripes.len]` guarda o bucket de `k`. Um lock fino, nunca global. */
+    intern stripes: []u64
+    /** As chaves, paralelas a `hashes`/`vals`, na região F2. */
+    intern keys: []K
+    /** O hash cacheado de cada chave, comparado antes da chave completa (rejeição barata de colisão). */
+    intern hashes: []u64
+    /** Os valores, paralelos a `keys`. */
+    intern vals: []V
+
+    /**
+     * Constrói um `ConcurrentDictionary<K, V>` vazio na região do programa (F2), com `n_stripes` locks.
+     *
+     * @param n_stripes  quantos locks finos repartir os buckets (potência de 2; mais = menos contenção, mais memória)
+     * @return           um dicionário concorrente vazio, ancorado em F2
+     */
+    pub static fn make(n_stripes: u64): ConcurrentDictionary<K, V> {
+        .{ region = teko::runtime::region_program(); stripes = stripes_make(n_stripes);
+           keys = teko::list::empty(); hashes = teko::list::empty(); vals = teko::list::empty() }
+    }
+
+    /**
+     * Insere ou atualiza `v` para `k`, tomando SÓ o lock do bucket de `k` (striping — §3.5): tarefas a
+     * escrever chaves de buckets distintos não se serializam. Semântica de referência partilhada.
+     *
+     * @param k  a chave a inserir ou atualizar
+     * @param v  o valor a associar a `k`
+     */
+    pub fn insert(k: K, v: V) {
+        var s = k.hash() % self.stripes.len
+        teko::threads::mutex_lock(ref self.stripes[s])
+        defer teko::threads::mutex_unlock(ref self.stripes[s])
+        var at = dict_find_index<K>(self.keys, self.hashes, k.hash(), k)
+        if at < self.keys.len { self.vals = arr_replace_at(self.vals, at, v); return }
+        self.keys = teko::list::push(self.keys, k)
+        self.hashes = teko::list::push(self.hashes, k.hash())
+        self.vals = teko::list::push(self.vals, v)
+    }
+
+    /**
+     * O valor de `k`, ou `null` quando ausente — sob o lock do bucket de `k` (a leitura toma o mesmo
+     * lock fino; uma variante lock-free de leitura é ADITIVA quando a representação estabilizar).
+     *
+     * @param k  a chave a procurar
+     * @return   o valor associado, ou `null` se `k` não estiver presente
+     */
+    pub fn get(k: K): V | null {
+        var s = k.hash() % self.stripes.len
+        teko::threads::mutex_lock(ref self.stripes[s])
+        defer teko::threads::mutex_unlock(ref self.stripes[s])
+        var at = dict_find_index<K>(self.keys, self.hashes, k.hash(), k)
+        if at >= self.keys.len { return null }
+        self.vals[at]
+    }
+}
+```
+
+```teko
+/**
+ * ConcurrentStack<T> — pilha concorrente LOCK-FREE (a pilha de Treiber): push e pop são cada um UM
+ * `tk_atomic_cas` (§3.3) na palavra da cabeça, sem lock nenhum — o caminho de velocidade puro do dono
+ * (§3.5). Os nós vivem por índice num `[]T` na região do programa (F2); `head` é o índice do topo,
+ * mutado só por CAS. Um `pop` que perde a corrida do CAS relê a cabeça e tenta de novo (o retry-loop
+ * clássico). Zero cópia por operação, zero park — pura economia de memória (§3.6).
+ *
+ * GATE: FASE-2, F1+F2 (§3.4). Requer `tk_atomic_cas`/`tk_atomic_load` (§3.3). Sem constrangimento em
+ * `T` (a pilha não compara nem ordena `T`, só o carrega).
+ *
+ * @since 0.3.1
+ */
+pub type ConcurrentStack<T> = class {
+    /** O id da região-do-programa (F2) onde os nós vivem. */
+    intern region: u64
+    /** O índice do topo, mutado SÓ por `tk_atomic_cas` — a única palavra de sincronização (lock-free). */
+    intern head: u64
+    /** Os nós por índice; `next[i]` é o índice do nó abaixo de `i`. */
+    intern next: []u64
+    /** O payload paralelo a `next`. */
+    intern vals: []T
+
+    /**
+     * Constrói um `ConcurrentStack<T>` vazio na região do programa (F2).
+     *
+     * @return uma pilha concorrente vazia, ancorada em F2
+     */
+    pub static fn make(): ConcurrentStack<T> {
+        .{ region = teko::runtime::region_program(); head = 0; next = teko::list::empty(); vals = teko::list::empty() }
+    }
+
+    /**
+     * Empilha `x` por CAS na cabeça (Treiber): monta o nó, aponta o seu `next` para a cabeça atual, e
+     * faz `tk_atomic_cas` para publicar; repete se outra tarefa venceu a corrida.
+     *
+     * @param x  o elemento a empilhar
+     */
+    pub fn push(x: T) { concurrent_stack_push<T>(ref self.head, ref self.next, ref self.vals, x) }
+
+    /**
+     * Desempilha o topo por CAS, ou `null` quando vazia (o caminho null de domínio disjunto).
+     *
+     * @return o antigo topo, ou `null` se a pilha estava vazia
+     */
+    pub fn pop(): T | null { concurrent_stack_pop<T>(ref self.head, self.next, self.vals) }
+}
+```
+
+### 3.8 A sub-família NOVA que o doc antigo perdeu — primitivas de COORDENAÇÃO (`teko::threads::sync`)
+Distintas das coleções: **não guardam dados de utilizador, coordenam tarefas.** `WaitGroup`
+(≈ `sync.WaitGroup` do Go / `CountdownEvent` do .NET), `Barrier`, `Semaphore`, `Latch`, e um contador
+`Atomic<T>`. Desenham-se como **handles-por-id (como `ChanId`: um `u64` NOME, apoiado em futex), a expor
+ops atómicas estreitas** (`add`/`done`/`wait`, `acquire`/`release`, …). São **§10-compatíveis pela
+MESMA razão que já abençoa o `chan` e o `WaitGroup` do §7 do doc §10**: estado partilhado gerido pelo
+runtime atrás de um handle estreito, resolvido por consulta ao registo de nomes (F3,
+`teko_rt.c:2317`) a cada uso — **nunca heap-de-utilizador cru a atravessar a fronteira**, nunca um
+ponteiro cacheado (§3.4 do doc §10). Vivem em `teko::threads::sync`, ao lado de `chan`/`spawn` do §10.
+
+```teko
+/**
+ * WaitGroup — um contador de tarefas em voo (≈ `sync.WaitGroup` do Go / `CountdownEvent` do .NET), pela
+ * MESMA disciplina de handle-por-id do §3.4 do doc §10: o handle carrega SÓ o id, todo predicado é uma
+ * consulta ao registo (F3). `add`/`done` deixam a contagem crescer DEPOIS do lançamento (o caso que
+ * `fork_join`, de contagem estática, não cobre — §7.2 do doc §10). Implementado sobre `tk_atomic_add`
+ * (a contagem) + futex (o `wait` que bloqueia até zero) — §3.3, sem máquina de segurança de memória
+ * nova. §10-compatível pela razão que abençoa `chan`: shared-state gerido pelo runtime atrás de um id.
+ *
+ * GATE: FASE-2, F1+F2 (§3.4). É a formalização do `wg_*` que o §7.2 do doc §10 deixou integrator-pinned.
+ *
+ * @see concorrencia-isolate-spawn-chan-0.3.1.md §7.2 (o WaitGroup por fechar que este fixa)
+ * @since 0.3.1
+ */
+pub type WaitGroup = struct {
+    /** O id no registo de nomes (F3) — resolvido a cada uso, nunca um ponteiro cacheado (§3.4 do doc §10). */
+    id: u64
+
+    /**
+     * Soma `n` tarefas esperadas à contagem, por `tk_atomic_add` (§3.3).
+     *
+     * @param n  quantas tarefas a mais esperar
+     * @return   `null` em sucesso, `error` se o grupo já disparou
+     */
+    pub fn add(n: u64): null | error { teko::threads::sync::wg_add(self.id, n) }
+
+    /**
+     * Assinala que uma tarefa terminou (decrementa por CAS); acorda os esperantes se chegar a zero.
+     *
+     * @return `null` em sucesso, `error` se a contagem já era zero (done a mais)
+     */
+    pub fn done(): null | error { teko::threads::sync::wg_done(self.id) }
+
+    /**
+     * Bloqueia (park no futex) até a contagem chegar a zero.
+     *
+     * @return `null` quando todas terminaram, `error` se o grupo foi destruído sob espera
+     */
+    pub fn wait(): null | error { teko::threads::sync::wg_wait(self.id) }
+}
+```
+
+```teko
+/**
+ * Atomic<T> — um contador/célula de palavra única com RMW lock-free (≈ `Interlocked`/`std::atomic`),
+ * a peça de "interlocked" que o dono nomeou. Handle-por-id (§3.4 do doc §10) sobre uma palavra na
+ * região do programa (F2); toda a op é um `tk_atomic_*` (§3.3), nunca um lock. É o tijolo mais barato
+ * da família concorrente — uma palavra, um CAS.
+ *
+ * GATE: FASE-2, F1+F2. `T` restrito hoje a um valor que caiba numa palavra (`u64`/`i64`/`bool`/enum);
+ * a forma genérica larga é ADITIVA. Requer `tk_atomic_load/store/add/cas` (§3.3).
+ *
+ * @since 0.3.1
+ */
+pub type Atomic<T> = struct {
+    /** O id da célula no registo (F3), resolvido a cada op. */
+    id: u64
+
+    /**
+     * Lê o valor atual (leitura atómica).
+     *
+     * @return o valor corrente da célula
+     */
+    pub fn load(): T { teko::threads::sync::atomic_load<T>(self.id) }
+
+    /**
+     * Soma `delta` e devolve o valor ANTERIOR (fetch-add atómico).
+     *
+     * @param delta  a quantia a somar
+     * @return       o valor antes da soma
+     */
+    pub fn fetch_add(delta: T): T { teko::threads::sync::atomic_add<T>(self.id, delta) }
+
+    /**
+     * Compare-and-swap: escreve `desired` só se o valor atual for `expected`.
+     *
+     * @param expected  o valor que se espera encontrar
+     * @param desired   o valor a escrever se a expectativa bater
+     * @return          `true` se o swap ocorreu (o valor era `expected`)
+     */
+    pub fn compare_and_swap(expected: T, desired: T): bool { teko::threads::sync::atomic_cas<T>(self.id, expected, desired) }
+}
+```
+
+`Semaphore` (`acquire`/`release`, contagem sob `tk_atomic_add` + park no futex quando a zero),
+`Barrier` (N tarefas esperam umas pelas outras num ponto; a última liberta todas), e `Latch` (uma
+contagem regressiva de disparo único, ≈ `CountDownLatch` do Java) seguem o MESMO molde: `struct
+{ id: u64 }`, ops atómicas estreitas, park no futex, ancoradas em F2, resolvidas por F3. Todas
+FASE-2/F1+F2; todas §10-compatíveis pela razão do `chan`.
+
+### 3.9 O que fica FASE-2 (após F1+F2) e o que se ADIANTA agora
+Toda a família concorrente + coordenação é **BLOQUEADA em F1+F2** (§3.4): F2 já semeada
+(`tk_region_program`, `teko_rt.c:2305`), F1 (thread+raiz por tarefa) por aterrar, e as primitivas
+`tk_mutex_lock`/`tk_atomic_*` (§3.3) por acrescentar ao runtime. O que se **ADIANTA agora** (compila/
+valida sem F1): os **tipos-handle** (`WaitGroup`/`Atomic<T>`/`Semaphore` como `struct { id: u64 }`,
+value puros), os **doc-contratos** Javadoc de toda a família, e os **skeletons com honest-stop**
+(`panic("blocked on F1+F2 shared-region + thread mode")`) para cada tipo concorrente. Quando F1
+aterrar (e as 4+2 primitivas C entrarem no `teko_rt.{c,h}`), o implementer troca os honest-stops pelas
+chamadas `mutex_lock`/`atomic_cas`/`atomic_add` em minutos — a representação (arrays paralelos em F2,
+striping, cabeça atómica) já está desenhada aqui.
 
 ---
 
@@ -495,10 +747,12 @@ como **skeleton com honest-stop** (`panic("blocked on §10 chan surface")`) até
                         │            (com IHash abaixo)   ├─ FASE 1b (após 9-ops)
                         └─► IOrd ─► SortedSet, SortedDictionary, PriorityQueue
 IHash (ESTE doc, §2.2) ──► HashSet, Dictionary  ..................  FASE 1b (junto com 9-ops)
-§10 (chan/spawn, BLOQUEADO) ─► BlockingCollection, Concurrent*  ...  FASE 2 (após §10)
+§10 F2 (região partilhada — JÁ semeada, tk_region_program) ─┐
+§10 F1 (thread+raiz por tarefa — BLOQUEADO) ───────────────┼─► Concurrent* + teko::threads::sync  ... FASE 2
+runtime C: tk_mutex_lock/tk_atomic_* (§3.3, por acrescentar)┘      (modelo B: shared-memory sob lock/interlocked)
 ```
 
-### 4.2 Faseamento (genéricas primeiro, concorrentes após §10)
+### 4.2 Faseamento (genéricas primeiro, concorrentes após F1+F2)
 - **Fase 1a — genéricas SEM capacidade (constrói já, só depende de #254 DONE):** os combinadores novos
   (`arr_insert_at`/`arr_swap`/`arr_reverse`/`arr_slice`), `Deque`, `Queue`, `Stack`, `LinkedList`
   (forma free-list), read-only wrappers das sequências. `.tkt` two-instantiation cada.
@@ -506,9 +760,12 @@ IHash (ESTE doc, §2.2) ──► HashSet, Dictionary  ..................  FASE 
   + adaptadores prim; `Dictionary<K: IEq & IHash, V>`, `HashSet<T: IEq & IHash>`, `SortedSet<T: IOrd>`,
   `SortedDictionary`, `PriorityQueue`. Migração do `Map<V>` → `Dictionary<StrKey,V>` é ADITIVA (o `Map`
   fica como alias/atalho `str`; não se remove — quebraria `teko::env`).
-- **Fase 2 — concorrentes (após §10 chan/spawn aterrar):** `BlockingCollection` (Opção C),
-  `ConcurrentQueue`; depois os actors (`ConcurrentDictionary`/`Stack`/`Bag`, Opção A). Adianta-se AGORA
-  o skeleton + os shapes de comando + o Javadoc (§3.6).
+- **Fase 2 — concorrentes + coordenação (após F1 aterrar; F2 já semeada, `tk_region_program`):** o
+  modelo B (§3) — `ConcurrentDictionary` (striped), `ConcurrentQueue`/`ConcurrentStack` (lock-free CAS),
+  `ConcurrentBag`, `BlockingCollection` (mutex+futex), e a sub-família `teko::threads::sync`
+  (`WaitGroup`/`Atomic<T>`/`Semaphore`/`Barrier`/`Latch`). Requer as primitivas C
+  `tk_mutex_lock`/`tk_atomic_*` (§3.3) no `teko_rt.{c,h}`. Adianta-se AGORA os tipos-handle value puros,
+  o Javadoc-contrato de toda a família, e os skeletons com honest-stop (§3.9).
 
 ### 4.3 Ordem de fixpoint e blast-radius
 - **Auto-fixpoint do compilador:** TODA esta carga é **corpus de stdlib novo** — não toca maquinaria de
@@ -542,12 +799,17 @@ ramo correu (axis-law: testa-se o valor, nunca um efeito incidental).
 - **REJEITAR** (`examples/regressions/diagnostics/`): `dict_key_no_ihash` — `Dictionary<Plain, V>` com
   `Plain` sem `IHash` → `Then diagnostic` de "constraint IHash não satisfeita" (prova o gate).
 
-**Fase 2 (`.tkr` projeto, após §10):**
-- `examples/regressions/blocking_collection/` — `main.tks` cria um `BlockingCollection<i64>`, um produtor
-  (spawn) faz N `add`, o consumidor `take` até fechar, soma → `exit`/stdout codifica a soma. Prova o
-  wrapper sobre chan MPSC end-to-end.
-- `examples/regressions/concurrent_dict_actor/` — actor `Dictionary` sob 2 produtores; asserção de que
-  todas as inserções aparecem (fan-in por chan, um dono). Prova a Opção A.
+**Fase 2 (`.tkr` projeto, após F1+F2 — modelo B):**
+- `examples/regressions/concurrent_dict_striped/` — `main.tks` cria um `ConcurrentDictionary<StrKey,i64>`
+  na região F2, faz `spawn` de N tarefas que `insert` em chaves disjuntas (buckets distintos → striping
+  sem serializar), `join` todas, e soma os `get` → `exit`/stdout codifica a soma. Prova a partilha-sob-
+  lock-fino end-to-end (o padrão `Arc<Mutex>` sancionado, §3.2).
+- `examples/regressions/concurrent_stack_cas/` — `ConcurrentStack<i64>` sob 2 tarefas a `push` em
+  paralelo e uma a `pop`; asserção de que a contagem final e a soma batem (prova o CAS lock-free de
+  Treiber sem itens perdidos/duplicados, §3.7).
+- `examples/regressions/waitgroup_barrier/` — `WaitGroup` a esperar N tarefas cuja contagem cresce em
+  runtime (`add` após lançamento); `exit` codifica que o `wait` só retorna após o último `done`. Prova a
+  coordenação `teko::threads::sync` (§3.8) e o `tk_atomic_add` + futex.
 
 ### 4.5 Codec `.tkb` / backend
 Nenhum node novo. `Dictionary`/`SortedSet`/etc. são `class`/`struct` genéricos comuns — round-trip pelo
@@ -558,10 +820,17 @@ já round-trip desde §9 (`is_operator` serializado). **Zero superfície de code
 
 ## 5. Tensões de lei (law-first) + HALT
 
-- **T-1 — copiar `System.Collections.Concurrent` (shared-memory+lock) violaria o §10.** RESOLVIDO
-  law-first (§3): o §10 SELA "memória isolada, dados por cópia via chan, um dono". A Opção B (lock) é
-  recusada; entrega-se a MESMA capacidade por (C) chan-wrapper e (A) actor. **Não é HALT** — a lei dá a
-  resposta; o C# é a inspiração de NOMES/superfície, não do modelo de memória.
+- **T-1 — o modelo de memória das coleções concorrentes: shared-memory-sob-lock (B) vs. actor-via-chan.**
+  RESOLVIDO por RULING DO DONO (2026-08-13), reconciliado law-first (§3.2). O plano anterior recusava a
+  Opção B como "viola o §10" e recomendava chan-actor. O dono INVERTEU: recusou o chan-actor como
+  *"arquitetura demais"* e escolheu **B — shared-memory sob lock/interlocked (CAS lock-free)**, *"simples
+  e metal... velocidade e economia de memória"*. A reconciliação com o §10 é o padrão **`Arc<Mutex<T>>`**:
+  o ISOLAMENTO continua o default (§10 = "isolado por omissão, partilhado-sob-lock quando explicitamente
+  declarado"); a coleção concorrente é a fuga EXPLÍCITA, marcada, opt-in — uma exceção SANCIONADA do §10,
+  não a sua dissolução, pela MESMA lógica que já abençoa `chan` (shared-state gerido pelo runtime atrás de
+  um handle estreito, §3.8). O C# é a inspiração do modelo AGORA, com a precisão que o doc antigo errou:
+  `Interlocked`/striped/futex, não um lock global (§3.1). **Não é HALT** — a ruling é a lei; o design
+  contrata contra a fundação F1+F2 do §10 (F2 já semeada, `tk_region_program`).
 - **T-2 — `IHash` como interface de método vs. a ruling D18 (`Hashable`≡`Hash` structural).** DECISION_LOG
   D18 (:161) colapsou `Hashable`/`Comparable` em traits ESTRUTURAIS derivados. Mas `map.tks:8-18` mede
   que o trait estrutural é OPACO num type-param (não despacha por `K`). A régua §9.4 do 9-ops substitui a
@@ -579,9 +848,11 @@ já round-trip desde §9 (`is_operator` serializado). **Zero superfície de code
   pure-Teko (precedente `List`/`Map`); `exp` fica para export C-ABI. **Não é HALT.**
 
 **SEM HALT.** Todas as tensões resolvem law-first: as genéricas reusam #254 + o 9-ops + `IHash`; as
-concorrentes reconciliam-se com o §10 por chan-wrapper/actor em vez de lock. As dependências abertas
-(9-ops, §10) têm plano/design SELADO — este doc contrata contra a forma DECLARADA delas e adianta tudo
-o que não precisa da API bloqueada (§3.6, §4.2).
+concorrentes adotam o modelo B (shared-memory sob lock/interlocked) por ruling do dono, reconciliado com
+o §10 pelo padrão `Arc<Mutex<T>>` (fuga explícita e sancionada, não violação). As dependências abertas
+(9-ops; §10 F1; as primitivas C `tk_mutex_lock`/`tk_atomic_*`) têm plano/design SELADO ou seam já em
+produto (F2 = `tk_region_program`, o idioma atómico = `teko_rt.c:1570`/`:1588`) — este doc contrata
+contra a forma DECLARADA delas e adianta tudo o que não precisa da API bloqueada (§3.9, §4.2).
 
 ---
 
@@ -589,18 +860,26 @@ o que não precisa da API bloqueada (§3.6, §4.2).
 
 **Constrói JÁ (só #254, DONE):** os combinadores novos em `collections.tks`; `Deque`/`Queue`/`Stack`/
 `LinkedList`(free-list); read-only wrappers; os `.tkt` two-instantiation. Adianta AGORA (compila sem a
-dep): `IHash` + `StrKey` + adaptadores (interface de método, não precisa da camada operador); os shapes
-de comando concorrentes (`DictCmd`, structs value); o skeleton `BlockingCollection` com honest-stop; o
-Javadoc-contrato de toda a família.
+dep): `IHash` + `StrKey` + adaptadores (interface de método, não precisa da camada operador); os
+tipos-handle da família concorrente/coordenação (`ConcurrentDictionary`/`ConcurrentStack` como classes
+com skeleton, `WaitGroup`/`Atomic<T>`/`Semaphore` como `struct { id: u64 }` value puros); os skeletons
+com honest-stop (`panic("blocked on F1+F2")`); o Javadoc-contrato de toda a família.
 
 **Bloqueado em 9-ops (próximo reseed) —** resume em minutos quando aterrar: `Dictionary<K: IEq & IHash,
 V>`, `HashSet<T: IEq & IHash>`, `SortedSet`/`SortedDictionary`/`PriorityQueue<T: IOrd>`, e a migração
 aditiva `Map`→`Dictionary<StrKey,V>`. (O `==`/`<` genérico sobre `T` é a crumb 4 do doc 9-ops.)
 
-**Bloqueado em §10 (chan/spawn) —** resume trocando os honest-stops por chamadas chan: `BlockingCollection`
-(Opção C, wrapper sobre `chan<T>`), `ConcurrentQueue`; depois os actors `ConcurrentDictionary`/`Stack`/
-`Bag` (Opção A, `spawn` + `chan<Cmd>`). **Nunca a Opção B (lock+shared-memory) — viola o §10.**
+**Bloqueado em §10 F1 + primitivas C (modelo B) —** resume trocando os honest-stops por chamadas
+`mutex_lock`/`atomic_cas`/`atomic_add`: `ConcurrentDictionary` (striped, §3.5), `ConcurrentQueue`/
+`ConcurrentStack` (CAS lock-free), `ConcurrentBag`, `BlockingCollection` (mutex+futex), e a sub-família
+`teko::threads::sync` (`WaitGroup`/`Atomic<T>`/`Semaphore`/`Barrier`/`Latch`). **Modelo B, sancionado
+pelo dono — shared-memory sob lock/interlocked, reconciliado com o §10 pelo padrão `Arc<Mutex<T>>`
+(§3.2).** F2 (a região partilhada) já está semeada no runtime (`tk_region_program`, `teko_rt.c:2305`);
+faltam F1 (thread por tarefa) e as primitivas C `tk_mutex_lock`/`tk_atomic_*` (§3.3).
 
 **ADJACENTE (reportado, NÃO construído aqui):** `sort<T: IOrd>` genérico (destravado pelo 9-ops);
 `LinkedList` por-ponteiro (quando a pilha genérica suportar nós auto-referentes); `PriorityQueue<E,P>`
-com chave de prioridade separada; broadcast/multi-processo dos canais (§6.4 do doc §10).
+com chave de prioridade separada; leitura lock-free do `ConcurrentDictionary` (variante aditiva quando a
+representação estabilizar, §3.7); broadcast/multi-processo dos canais (§6.4 do doc §10). **Reportar para
+cima:** a versão anterior deste doc (v1, chan-actor) fica SUPERSEDED por esta secção §3 reescrita — o
+integrador dobra em `fix/retirement`.
