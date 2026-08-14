@@ -703,7 +703,7 @@ fn cx_eval_comptime(c: TCall, cd: parser::ComptimeDecl, ns: str, e: TExpr, ctx: 
  * @field types  PARALLEL to `names` — each type parameter's resolved concrete `Type` argument
  * @since 0.4-macros (§14 Family-B B4)
  */
-type CxTypeBinds = struct { names: []str; types: []Type }
+type CxTypeBinds = struct { names: []str; types: []@Type() }
 
 /**
  * CxRefl — the reflection walk context (§14 B4/B5): the type-parameter binding, the type table (for the
@@ -727,7 +727,7 @@ type CxRefl = struct { tb: CxTypeBinds; table: TypeTable; fields_elem: str }
  * @return      the bound type, or null when `name` is not a bound type parameter
  * @since 0.4-macros (§14 Family-B B4)
  */
-fn cx_type_bind(tb: CxTypeBinds, name: str): Type | null {
+fn cx_type_bind(tb: CxTypeBinds, name: str): @Type() | null {
     var i: u64 = 0
     loop {
         if i >= tb.names.len { break }
@@ -815,7 +815,7 @@ fn cx_reflect_field(fa: parser::FieldAccess, e: parser::Expr, rc: CxRefl): parse
     var recv_name = match fa.receiver.kind { parser::Var as v => v.name; _ => "" }
     if recv_name != "" {
         match cx_type_bind(rc.tb, recv_name) {
-            Type as t => return cx_reflect_of(t, fa.field, e, recv_name, rc)
+            (@Type()) as t => return cx_reflect_of(t, fa.field, e, recv_name, rc)
             null => { }
         }
     }
@@ -837,7 +837,7 @@ fn cx_reflect_field(fa: parser::FieldAccess, e: parser::Expr, rc: CxRefl): parse
  * @return       the reflection literal, or a located error
  * @since 0.4-macros (§14 Family-B B4)
  */
-fn cx_reflect_of(t: Type, field: str, e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
+fn cx_reflect_of(t: @Type(), field: str, e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
     if field == "name" { return parser::Expr { kind = parser::StrLit { text = type_render(t) }; line = e.line; col = e.col } }
     if field == "fields" { return cx_reflect_fields(t, e, tname, rc) }
     if field == "size" {
@@ -865,7 +865,7 @@ fn cx_reflect_of(t: Type, field: str, e: parser::Expr, tname: str, rc: CxRefl): 
  * @return       the untyped `[]Elem` array literal of field descriptors, or a located error
  * @since 0.4-macros (§14 Family-B B5)
  */
-fn cx_reflect_fields(t: Type, e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
+fn cx_reflect_fields(t: @Type(), e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
     if rc.fields_elem == "" { return error { message = $"comptime `{tname}.fields` requires the comptime to return a `[]Struct` descriptor slice (§14 B5)" } }
     var type_name = match t { Named as n => n.name; _ => return error { message = $"comptime `{tname}.fields` needs a field-shaped type — `{type_render(t)}` has no fields (§14 B5)" } }
     var fvs = match deriver_field_view(type_name, rc.table) { []FieldView as v => v; error as x => return x }
@@ -938,7 +938,7 @@ fn cx_slice_elem_name(te: @TypeExpr()): str {
  * @return   the slot size in bytes, or null when the size needs LIR layout
  * @since 0.4-macros (§14 Family-B B4)
  */
-fn cx_type_size(t: Type): u32 | null {
+fn cx_type_size(t: @Type()): u32 | null {
     match t {
         Prim as p => cx_prim_size(p.kind)
         Byte => 1 to u32
@@ -1006,7 +1006,7 @@ fn cx_bind_args(cd: parser::ComptimeDecl, c: TCall, ctx: CxCtx): CxBinds | error
             ConstValue as v => v
             error => return error { message = $"comptime `@{cd.name}`'s argument `{cd.params[i].name}` must be a compile-time constant (§14.2 comptime-known)" }
         }
-        var pty = match resolve_type(cd.params[i].type_ann, ctx.table, "") { Type as t => t; error as x => return x }
+        var pty = match resolve_type(cd.params[i].type_ann, ctx.table, "") { (@Type()) as t => t; error as x => return x }
         var lit = match comptime_literal_of(cv, pty, ctx.table, c.args[i].line, c.args[i].col) {
             TExpr as l => l
             null => return error { message = $"comptime `@{cd.name}`'s argument `{cd.params[i].name}` has no literal form for its parameter type (§14 Family-B B3)" }
@@ -1034,7 +1034,7 @@ fn cx_param_env(cd: parser::ComptimeDecl, ns: str, ctx: CxCtx): Env | error {
     var i: u64 = 0
     loop {
         if i >= cd.params.len { break }
-        var pty = match resolve_type(cd.params[i].type_ann, ctx.table, ns) { Type as t => t; error as x => return x }
+        var pty = match resolve_type(cd.params[i].type_ann, ctx.table, ns) { (@Type()) as t => t; error as x => return x }
         env = define(env, cd.params[i].name, pty, false)
         i++
     }

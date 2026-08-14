@@ -357,7 +357,7 @@ fn enum_carrier_ltype(): LType { LType::I32 }
     that forgot it would silently size every enum as an 8-byte pointer at THAT site only, and a
     per-site disagreement about one type's width is the corruption this parameter prevents.
     This is where the semantic type dies and the machine begins. */
-pub fn ltype_of(t: checker::Type, enums: []LEnumInfo): LType {
+pub fn ltype_of(t: @Type(), enums: []LEnumInfo): LType {
     match t {
         checker::Prim as p => ltype_of_prim(p.kind)
         checker::Byte => LType::I8
@@ -1062,7 +1062,7 @@ pub type LVariantDef = struct { name: str; ty: checker::Variant }
  *
  * @since 0.3.1.0 (degrau 25 — the union-field placement)
  */
-pub type LFieldDecls = struct { name: str; field_names: []str; field_types: []checker::Type }
+pub type LFieldDecls = struct { name: str; field_names: []str; field_types: []@Type() }
 
 /**
  * LExternFn — one declared `extern fn`'s resolved namespace + Teko name + the
@@ -1141,7 +1141,7 @@ pub type LowerCtx = struct {
     func: LFunc; block_id: u32; env: LEnv
     layouts: []LStructLayout; rodata: []LRodata; enums: []LEnumInfo; lifted: []LFunc
     defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
-    flat_symbols: bool; ret_type: checker::Type
+    flat_symbols: bool; ret_type: @Type()
     has_ret_len_slot: bool; ret_len_slot: u32
     /**
      * variants — the program's declared-`variant` table, threaded read-only exactly like `enums`:
@@ -2304,7 +2304,7 @@ fn is_same_width_float_cast(src: checker::PrimKind, dst: checker::PrimKind): boo
  * @return bool  true iff `t` is `Prim{kind = PrimKind::U64}`
  * @since 0.3.1
  */
-fn is_u64_type(t: checker::Type): bool {
+fn is_u64_type(t: @Type()): bool {
     match t {
         checker::Prim as p => p.kind == checker::PrimKind::U64
         _ => false
@@ -2320,7 +2320,7 @@ fn is_u64_type(t: checker::Type): bool {
  * @return bool  true iff `t` is an opaque `Ptr`
  * @since 0.3.1
  */
-fn is_ptr_byte_type(t: checker::Type): bool {
+fn is_ptr_byte_type(t: @Type()): bool {
     match t {
         checker::Ptr => true
         _ => false
@@ -2339,7 +2339,7 @@ fn is_ptr_byte_type(t: checker::Type): bool {
  * @return bool  true iff one side is `u64` and the other is `ptr<byte>`, in either direction
  * @since 0.3.1
  */
-fn is_u64_ptr_byte_reinterpret_cast(src: checker::Type, dst: checker::Type): bool {
+fn is_u64_ptr_byte_reinterpret_cast(src: @Type(), dst: @Type()): bool {
     (is_u64_type(src) && is_ptr_byte_type(dst)) || (is_ptr_byte_type(src) && is_u64_type(dst))
 }
 
@@ -2371,7 +2371,7 @@ fn is_u64_ptr_byte_reinterpret_cast(src: checker::Type, dst: checker::Type): boo
  *          from `enum_ordinal_kind_of` for a non-enum Named, or the catch-all for str/slice/
  *          func/ptr/… )
  */
-fn prim_kind_of(t: checker::Type, enums: []LEnumInfo, site: str = "expression"): checker::PrimKind | error {
+fn prim_kind_of(t: @Type(), enums: []LEnumInfo, site: str = "expression"): checker::PrimKind | error {
     match t {
         checker::Prim as p => p.kind
         checker::Byte => checker::PrimKind::U8
@@ -2404,7 +2404,7 @@ fn prim_kind_of(t: checker::Type, enums: []LEnumInfo, site: str = "expression"):
  * @param site  which lowering construct asked (see the labels at the call sites)
  * @return      the N1/N2 honest-stop message, naming both
  */
-fn non_prim_stop(t: checker::Type, site: str): str {
+fn non_prim_stop(t: @Type(), site: str): str {
     var msg = "native backend N1: `" ~ checker::type_render(t) ~ "` has no single PrimKind, asked by the " ~ site ~ " (N2)"
     teko::io::eprintln("teko: TRACE prim_kind_of stop: " ~ msg)
     msg
@@ -2476,7 +2476,7 @@ pub type CmpChain = struct { ctx: LowerCtx; bools: []u32 }
 /** lower_compare_terms — lower each rest-operand once (never re-lowering a shared node),
     emitting the ICmp/FCmp opcode chosen by the LEFT operand's PrimKind for each adjacent
     pair. */
-fn lower_compare_terms(ctx: LowerCtx, e: checker::TExpr, prev_type: checker::Type, prev_vreg: u32, rest: []checker::TCmpTerm): CmpChain | error {
+fn lower_compare_terms(ctx: LowerCtx, e: checker::TExpr, prev_type: @Type(), prev_vreg: u32, rest: []checker::TCmpTerm): CmpChain | error {
     var cur = ctx
     var pv = prev_vreg
     var pt = prev_type
@@ -2526,7 +2526,7 @@ fn lower_bool_and(ctx: LowerCtx, a_vreg: u32, b_vreg: u32, line: u32, col: u32):
  * @return bool  whether `t` is `str`
  * @since 0.3.1.0 (degrau 7 — string equality)
  */
-fn is_str_type(t: checker::Type): bool {
+fn is_str_type(t: @Type()): bool {
     match t {
         checker::Str => true
         _ => false
@@ -2545,7 +2545,7 @@ fn is_str_type(t: checker::Type): bool {
  * @return bool  whether `t` is `char`
  * @since 0.3.1.0 (igualdade-char-slice)
  */
-fn is_char_type(t: checker::Type): bool {
+fn is_char_type(t: @Type()): bool {
     match t {
         checker::Char => true
         _ => false
@@ -2664,7 +2664,7 @@ pub type LSliceEqPlan = struct {
  *                        (unreachable given the precondition)
  * @since 0.3.1.0 (igualdade-char-slice)
  */
-fn slice_elem_of(t: checker::Type): checker::Type {
+fn slice_elem_of(t: @Type()): @Type() {
     match t { checker::Slice as sl => sl.element; _ => checker::Void { } }
 }
 
@@ -2698,7 +2698,7 @@ fn slice_elem_of(t: checker::Type): checker::Type {
  * @throws  when `elem` is a shape this backend does not yet close (see above)
  * @since 0.3.1.0 (igualdade-char-slice)
  */
-fn slice_eq_plan(elem: checker::Type): LSliceEqPlan | error {
+fn slice_eq_plan(elem: @Type()): LSliceEqPlan | error {
     match elem {
         checker::Char => LSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
         checker::Str => LSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false }
@@ -2745,7 +2745,7 @@ pub type SliceEqArgs = struct { ctx: LowerCtx; args: []u32 }
  * @return SliceEqArgs  the (possibly advanced) context plus the ordered argument VRegs
  * @since 0.3.1.0 (igualdade-char-slice)
  */
-fn slice_eq_call_args(ctx: LowerCtx, a: LoweredFat, b: LoweredFat, elem: checker::Type, plan: LSliceEqPlan, enums: []LEnumInfo, line: u32, col: u32): SliceEqArgs {
+fn slice_eq_call_args(ctx: LowerCtx, a: LoweredFat, b: LoweredFat, elem: @Type(), plan: LSliceEqPlan, enums: []LEnumInfo, line: u32, col: u32): SliceEqArgs {
     var args: []u32 = teko::list::empty()
     args = teko::list::push(args, a.ptr)
     args = teko::list::push(args, a.len)
@@ -2862,7 +2862,7 @@ fn fat_eq_call_args(a: LoweredFat, b: LoweredFat): []u32 {
  * @return checker::Variant?  `t`'s union payload, or `null` when `t` is not variant-shaped
  * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
  */
-fn variant_type_of(t: checker::Type, variants: []LVariantDef): checker::Variant | null {
+fn variant_type_of(t: @Type(), variants: []LVariantDef): checker::Variant | null {
     match expand_named_variant(t, variants) {
         checker::Variant as v => v
         _ => null
@@ -2884,7 +2884,7 @@ fn variant_type_of(t: checker::Type, variants: []LVariantDef): checker::Variant 
  * @return bool  whether `member` is the case `ty` names
  * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
  */
-fn variant_cmp_member_matches(member: checker::Type, ty: checker::Type, variants: []LVariantDef): bool {
+fn variant_cmp_member_matches(member: @Type(), ty: @Type(), variants: []LVariantDef): bool {
     match member {
         checker::Null => match ty { checker::Null => true; _ => false }
         _ => variant_member_type_matches(member, ty, variants)
@@ -2909,7 +2909,7 @@ fn variant_cmp_member_matches(member: checker::Type, ty: checker::Type, variants
  *          checker's `variant_has_member` already guarantees the fit)
  * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
  */
-fn variant_index_of_member_type(members: []checker::Type, member_ty: checker::Type, variants: []LVariantDef): u32 | error {
+fn variant_index_of_member_type(members: []@Type(), member_ty: @Type(), variants: []LVariantDef): u32 | error {
     var i: u64 = 0
     loop {
         if i >= members.len { break }
@@ -2932,7 +2932,7 @@ fn variant_index_of_member_type(members: []checker::Type, member_ty: checker::Ty
  * @return bool  whether `t`'s payload may be compared as one word
  * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
  */
-fn variant_cmp_payload_comparable(t: checker::Type): bool {
+fn variant_cmp_payload_comparable(t: @Type()): bool {
     match t {
         checker::Prim as p => p.kind != checker::PrimKind::Bool
         checker::Byte => true
@@ -3329,7 +3329,7 @@ fn lower_call_args(ctx: LowerCtx, c: checker::TCall): LoweredArgs | error {
  * @param c  the call node
  * @return   the callee's parameter types, positionally parallel to `c.args`, or an empty list
  */
-fn callee_param_types(c: checker::TCall): []checker::Type {
+fn callee_param_types(c: checker::TCall): []@Type() {
     match c.callee_type {
         checker::Func as f => if f.variadic { teko::list::empty() } else { f.params }
         _ => teko::list::empty()
@@ -3344,7 +3344,7 @@ fn callee_param_types(c: checker::TCall): []checker::Type {
  * @param i       the argument index
  * @return        the parameter's declared type, or `null`
  */
-fn param_type_at(params: []checker::Type, i: u64): checker::Type | null {
+fn param_type_at(params: []@Type(), i: u64): @Type() | null {
     if i >= params.len { return null }
     params[i]
 }
@@ -3362,9 +3362,9 @@ fn param_type_at(params: []checker::Type, i: u64): checker::Type | null {
  * @return       the advanced context + the argument's VReg(s), in ABI order
  * @throws       propagated from lowering (or coercing) the argument
  */
-fn lower_arg_into_param(ctx: LowerCtx, decl: checker::Type | null, arg: checker::TExpr): LoweredArgs | error {
+fn lower_arg_into_param(ctx: LowerCtx, decl: @Type() | null, arg: checker::TExpr): LoweredArgs | error {
     match union_field_placement(ctx, decl) {
-        checker::Type as bound => {
+        (@Type()) as bound => {
             var lo = match lower_value_into_type(ctx, bound, arg) { Lowered as x => x; error as err => return err }
             LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
         }
@@ -3386,10 +3386,10 @@ fn lower_arg_into_param(ctx: LowerCtx, decl: checker::Type | null, arg: checker:
  * @return      the advanced context + the argument's ABI-flattened VReg(s)
  * @throws      propagated from lowering/widening the argument
  */
-fn lower_fat_arg_into_param(ctx: LowerCtx, decl: checker::Type | null, arg: checker::TExpr): LoweredArgs | error {
+fn lower_fat_arg_into_param(ctx: LowerCtx, decl: @Type() | null, arg: checker::TExpr): LoweredArgs | error {
     if !is_fat_type(arg.type) { return lower_arg_vregs(ctx, arg) }
     match decl {
-        checker::Type as d => {
+        (@Type()) as d => {
             var fo = match lower_fat_expr_into_type(ctx, d, arg) { LoweredFat as x => x; error as err => return err }
             LoweredArgs { ctx = fo.ctx; vregs = two_args(fo.ptr, fo.len) }
         }
@@ -3413,7 +3413,7 @@ fn lower_fat_arg_into_param(ctx: LowerCtx, decl: checker::Type | null, arg: chec
  * @return        the advanced context + the ABI-flattened argument VRegs, in order
  * @throws        propagated from lowering any argument, or from `lower_addr_of_arg`
  */
-fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, params: []checker::Type, i: u64): LoweredArgs | error {
+fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, params: []@Type(), i: u64): LoweredArgs | error {
     if i >= args.len { return LoweredArgs { ctx = ctx; vregs = teko::list::empty() } }
     var is_ref_pos = i < rf.len && rf[i] && arg_needs_auto_ref(args[i])
     var one = match if is_ref_pos { lower_addr_of_arg(ctx, args[i]) } else { lower_arg_into_param(ctx, param_type_at(params, i), args[i]) } { LoweredArgs as x => x; error as err => return err }
@@ -3533,7 +3533,7 @@ fn is_last_index_of_call(callee: parser::Path): bool {
  * @return   the variant's own two members, in declared order
  * @throws   when `e.type` is not a `Variant` (an internal invariant break)
  */
-fn last_index_of_variant_members(e: checker::TExpr): []checker::Type | error {
+fn last_index_of_variant_members(e: checker::TExpr): []@Type() | error {
     match e.type {
         checker::Variant as v => v.members
         _ => error { message = "native backend N1: `last_index_of`'s result is not a variant (internal)" }
@@ -3625,7 +3625,7 @@ fn lower_last_index_of_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall)
     if c.args.len != 2 {
         return error { message = "native backend N1: `last_index_of` expects exactly two str arguments (internal)" }
     }
-    var members = match last_index_of_variant_members(e) { []checker::Type as m => m; error as err => return err }
+    var members = match last_index_of_variant_members(e) { []@Type() as m => m; error as err => return err }
     var ok_index = match variant_member_index_of(members, checker::Prim { kind = checker::PrimKind::U64 }, ctx.variants) { u32 as x => x; error as err => return err }
     var err_index = match variant_member_index_of(members, checker::Error { }, ctx.variants) { u32 as x => x; error as err => return err }
     var hay = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
@@ -3685,7 +3685,7 @@ fn is_str_from_utf8_call(callee: parser::Path): bool {
  * @return   the variant's own members, in declared order
  * @throws   when `e.type` is not a `Variant` (an internal invariant break)
  */
-fn ffi_result_variant_members(e: checker::TExpr): []checker::Type | error {
+fn ffi_result_variant_members(e: checker::TExpr): []@Type() | error {
     match e.type {
         checker::Variant as v => v.members
         _ => error { message = "native backend N1: a host-FFI call's result is not a variant (internal)" }
@@ -4008,8 +4008,8 @@ fn lower_ffi_error_else_arm(br: FfiBranch, out_ptr: u32, out_len: u32, err_index
  * @throws           when `e.type` is not the expected variant, or propagated from the arguments
  * @since 0.3.1.0 degrau 34
  */
-fn lower_ffi_fat_or_error_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall, ok_symbol: str, ok_member: checker::Type): Lowered | error {
-    var members = match ffi_result_variant_members(e) { []checker::Type as m => m; error as err => return err }
+fn lower_ffi_fat_or_error_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall, ok_symbol: str, ok_member: @Type()): Lowered | error {
+    var members = match ffi_result_variant_members(e) { []@Type() as m => m; error as err => return err }
     var ok_index = match variant_member_index_of(members, ok_member, ctx.variants) { u32 as x => x; error as err => return err }
     var err_index = match variant_member_index_of(members, checker::Error { }, ctx.variants) { u32 as x => x; error as err => return err }
     var slots = match lower_ffi_twin_call(ctx, c, ok_symbol, e.line, e.col) { FfiOutSlots as x => x; error as err => return err }
@@ -4678,7 +4678,7 @@ pub type LoweredArgs = struct { ctx: LowerCtx; vregs: []u32 }
  * @param []checker::Type params  the callee's declared parameter types (`callee_param_types`)
  * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
  */
-fn lower_args(ctx: LowerCtx, args: []checker::TExpr, params: []checker::Type): LoweredArgs | error {
+fn lower_args(ctx: LowerCtx, args: []checker::TExpr, params: []@Type()): LoweredArgs | error {
     lower_args_from(ctx, args, params, 0)
 }
 
@@ -4701,7 +4701,7 @@ fn lower_args(ctx: LowerCtx, args: []checker::TExpr, params: []checker::Type): L
  * @param u64 start  the first index to lower (0 lowers every argument)
  * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
  */
-fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, params: []checker::Type, start: u64): LoweredArgs | error {
+fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, params: []@Type(), start: u64): LoweredArgs | error {
     var cur = ctx
     var vregs: []u32 = teko::list::empty()
     var i: u64 = start
@@ -4813,7 +4813,7 @@ type ExternNarrow = struct { width: u32; is_signed: bool }
  * @param checker::Type t  the callee's declared return type
  * @return ExternNarrow | null  the narrowing shape, or `null` when `t` needs none
  */
-fn extern_return_narrow(t: checker::Type): ExternNarrow | null {
+fn extern_return_narrow(t: @Type()): ExternNarrow | null {
     match t {
         checker::Prim as p => extern_return_narrow_of_prim(p.kind)
         checker::Byte => ExternNarrow { width = 8; is_signed = false }
@@ -4930,7 +4930,7 @@ fn apply_native_c_return_narrow(lo: Lowered, externs: []LExternFn, c: checker::T
 /** type_is_void — is `t` the Void marker (no value)? Shared by call lowering (a void call
     emits a valueless instruction) and if-expression lowering (a Void-typed `if` is really an
     if-STATEMENT — its merge carries zero block-args). */
-fn type_is_void(t: checker::Type): bool {
+fn type_is_void(t: @Type()): bool {
     match t { checker::Void => true; _ => false }
 }
 
@@ -5611,7 +5611,7 @@ fn lower_iface_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowere
  * @return     `null` when the receiver is a legal fat-pointer contract value
  * @throws     the named stop when the receiver is an aggregate (a polymorphic base class)
  */
-fn aggregate_receiver_dispatch_stop(ctx: LowerCtx, t: checker::Type): error | null {
+fn aggregate_receiver_dispatch_stop(ctx: LowerCtx, t: @Type()): error | null {
     var name = match t { checker::Named as n => n.name; _ => return null }
     match find_struct_layout(ctx.layouts, name) {
         LStructLayout => error { message = teko::str::concat("native backend N1: dynamic dispatch through the polymorphic base class `", name, "` is not yet lowered — a class instance carries no vtable (N2)") }
@@ -5628,7 +5628,7 @@ fn aggregate_receiver_dispatch_stop(ctx: LowerCtx, t: checker::Type): error | nu
  * @param checker::Type t  the type to narrow
  * @return checker::Func | error  the resolved signature
  */
-fn func_type_of(t: checker::Type): checker::Func | error {
+fn func_type_of(t: @Type()): checker::Func | error {
     match t {
         checker::Func as f => f
         _ => error { message = "native backend N1: function-value reference is not Func-typed (internal)" }
@@ -5645,7 +5645,7 @@ fn func_type_of(t: checker::Type): checker::Func | error {
  *                           entry carries its integer width, not `Ptr`)
  * @return []LType  their machine classes, in order
  */
-fn types_to_ltypes(ts: []checker::Type, enums: []LEnumInfo): []LType {
+fn types_to_ltypes(ts: []@Type(), enums: []LEnumInfo): []LType {
     var out: []LType = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -6415,7 +6415,7 @@ type SliceWidenPlan = struct {
  * @throws     when `u` is an aggregate whose whole-type byte width this backend does not pin
  *             (`unsized_aggregate_push_stop`, the same stop a push of `u` would raise)
  */
-fn slice_widen_plan(u: checker::Type, ctx: LowerCtx): SliceWidenPlan | error {
+fn slice_widen_plan(u: @Type(), ctx: LowerCtx): SliceWidenPlan | error {
     match u {
         checker::Null => return SliceWidenPlan { mode = 3 to i32; stride = ltype_size(ltype_of(u, ctx.enums)) to u64; pcopy = 0 to u64 }
         _ => { }
@@ -6441,7 +6441,7 @@ fn slice_widen_plan(u: checker::Type, ctx: LowerCtx): SliceWidenPlan | error {
  * @param t  a resolved type
  * @return   `t`'s concrete element type, or `null` when there is none to widen against
  */
-fn slice_element_of(t: checker::Type): checker::Type | null {
+fn slice_element_of(t: @Type()): @Type() | null {
     match t {
         checker::Slice as s => match s.element { checker::Void => null; _ => s.element }
         _ => null
@@ -6478,16 +6478,16 @@ fn slice_element_of(t: checker::Type): checker::Type | null {
  * @param u      the source slice's element type
  * @return       `u`'s declared tag in `vwide`, or `null` when `u` is not a direct member
  */
-fn slice_widen_member_tag(vwide: checker::Variant, u: checker::Type): u32 | null {
+fn slice_widen_member_tag(vwide: checker::Variant, u: @Type()): u32 | null {
     match u {
         checker::Null => variant_null_member_index(vwide)
         _ => direct_variant_member_index(vwide.members, u)
     }
 }
 
-fn lower_fat_expr_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr): LoweredFat | error {
-    var bel = match slice_element_of(bound) { checker::Type as t => t; null => return lower_fat_expr(ctx, value) }
-    var uel = match slice_element_of(value.type) { checker::Type as t => t; null => return lower_fat_expr(ctx, value) }
+fn lower_fat_expr_into_type(ctx: LowerCtx, bound: @Type(), value: checker::TExpr): LoweredFat | error {
+    var bel = match slice_element_of(bound) { (@Type()) as t => t; null => return lower_fat_expr(ctx, value) }
+    var uel = match slice_element_of(value.type) { (@Type()) as t => t; null => return lower_fat_expr(ctx, value) }
     var vwide = match expand_named_variant(bel, ctx.variants) { checker::Variant as v => v; _ => return lower_fat_expr(ctx, value) }
     var tag = match slice_widen_member_tag(vwide, uel) { u32 as ix => ix; null => return lower_fat_expr(ctx, value) }
     var plan = match slice_widen_plan(uel, ctx) { SliceWidenPlan as p => p; error as err => return err }
@@ -6561,7 +6561,7 @@ fn lower_binding_direct(ctx: LowerCtx, b: checker::TBinding, name: str): LowerSt
  * @return      whether the binding site owes this local a scalar frame slot
  * @since       0.3.1 (own-backend `ref`-binding placement gap)
  */
-fn needs_scalar_slot(ctx: LowerCtx, name: str, ty: checker::Type): bool {
+fn needs_scalar_slot(ctx: LowerCtx, name: str, ty: @Type()): bool {
     contains_str(ctx.addr_taken, name) && is_register_value_type(ty, ctx.enums)
 }
 
@@ -6603,7 +6603,7 @@ fn bind_reference_local(ctx: LowerCtx, b: checker::TBinding, name: str): LowerSt
  * @param col   the binding's source column
  * @return      the context with the slot allocated, seeded, and bound
  */
-fn bind_addr_taken_scalar(lo: Lowered, name: str, ty: checker::Type, line: u32, col: u32): LowerStmtOut {
+fn bind_addr_taken_scalar(lo: Lowered, name: str, ty: @Type(), line: u32, col: u32): LowerStmtOut {
     var lt = ltype_of(ty, lo.ctx.enums)
     var slot = ctx_alloc(lo.ctx)
     var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, ltype_size(lt), ltype_align(lt), line, col))
@@ -6667,7 +6667,7 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32): LowerStmtOu
  * @throws  propagated from lowering the value or the wrapper's payload
  * @since 0.3.1 (null-union C7 own-backend gap)
  */
-fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr): Lowered | error {
+fn lower_value_into_type(ctx: LowerCtx, bound: @Type(), value: checker::TExpr): Lowered | error {
     match bound { checker::Reference => return lower_value_into_reference(ctx, value); _ => { } }
     match expand_named_variant(bound, ctx.variants) {
         checker::Variant as v => {
@@ -6712,7 +6712,7 @@ fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TE
  * @return       `value` retagged to `bound` when the arm-join widen applies, else `null`
  * @since 0.3.1 (native arm-join variant-tag widen — the `ref_target_type` self-host blocker)
  */
-fn arm_join_retag_into(bound: checker::Type, v: checker::Variant, value: checker::TExpr, ctx: LowerCtx): checker::TExpr | null {
+fn arm_join_retag_into(bound: @Type(), v: checker::Variant, value: checker::TExpr, ctx: LowerCtx): checker::TExpr | null {
     var is_join = match value.kind { checker::TMatchExpr => true; checker::TIfExpr => true; _ => false }
     if !is_join { return null }
     match expand_named_variant(value.type, ctx.variants) {
@@ -6761,7 +6761,7 @@ fn variant_tag_layout_matches(nt: checker::Variant, v: checker::Variant, variant
  * @return          whether every member reaches a case of `v`
  * @since 0.3.1 (native arm-join variant-tag widen)
  */
-fn variant_all_members_reach(members: []checker::Type, v: checker::Variant, variants: []LVariantDef): bool {
+fn variant_all_members_reach(members: []@Type(), v: checker::Variant, variants: []LVariantDef): bool {
     var j: u64 = 0
     loop {
         if j >= members.len { break }
@@ -6937,7 +6937,7 @@ fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::
  * @return bool  whether every `nt` member has a matching member (hence a tag) in `v`
  * @since 0.3.1.0 (native-narrow-union-into-wider-variant widen)
  */
-fn variant_all_members_in(nt_members: []checker::Type, v: checker::Variant, variants: []LVariantDef): bool {
+fn variant_all_members_in(nt_members: []@Type(), v: checker::Variant, variants: []LVariantDef): bool {
     var i: u64 = 0
     loop {
         if i >= nt_members.len { break }
@@ -8524,7 +8524,7 @@ fn lower_block_prefix(ctx: LowerCtx, body: []@TStatement()): LowerStmtOut | erro
  * @implNote         mirrors `emit_branch_value`'s "last statement is the value" shape
  *                   (`codegen.tks`)
  */
-fn lower_block_value(ctx: LowerCtx, body: []@TStatement(), result_ty: LType, target_ty: checker::Type): LowerBlockValue | error {
+fn lower_block_value(ctx: LowerCtx, body: []@TStatement(), result_ty: LType, target_ty: @Type()): LowerBlockValue | error {
     if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
     var pre = match lower_block_prefix(ctx, body) { LowerStmtOut as x => x; error as err => return err }
     if pre.terminated { return LowerBlockValue { ctx = pre.ctx; terminated = true; vreg = 0 } }
@@ -8544,7 +8544,7 @@ fn lower_block_value(ctx: LowerCtx, body: []@TStatement(), result_ty: LType, tar
  *                    contract)
  * @throws           propagated from lowering the tail statement
  */
-fn lower_tail_stmt(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty: checker::Type): LowerBlockValue | error {
+fn lower_tail_stmt(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty: @Type()): LowerBlockValue | error {
     match s {
         checker::TExprStmt as es => lower_tail_expr_stmt(ctx, es, result_ty, target_ty)
         _ => lower_tail_non_expr(ctx, s, result_ty)
@@ -8580,7 +8580,7 @@ fn lower_tail_stmt(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty:
  * @throws           propagated from lowering the tail statement
  * @since 0.3.1.0
  */
-fn lower_fn_tail(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty: checker::Type, line: u32, col: u32): LowerBlockValue | error {
+fn lower_fn_tail(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty: @Type(), line: u32, col: u32): LowerBlockValue | error {
     match s {
         checker::TExprStmt as es => lower_conveyed_tail_expr_stmt(ctx, es, result_ty, target_ty, line, col)
         _ => lower_tail_non_expr(ctx, s, result_ty)
@@ -8609,7 +8609,7 @@ fn lower_fn_tail(ctx: LowerCtx, s: @TStatement(), result_ty: LType, target_ty: c
  * @throws           propagated from `lower_tail_expr_stmt`
  * @since 0.3.1.0
  */
-fn lower_conveyed_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: checker::Type, line: u32, col: u32): LowerBlockValue | error {
+fn lower_conveyed_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: @Type(), line: u32, col: u32): LowerBlockValue | error {
     if ctx.bracket_depth > 0 { return lower_tail_expr_stmt(ctx, es, result_ty, target_ty) }
     var left = emit_region_leaves(ctx, line, col)
     var marked = ctx_with_bracket_depth(left, 1)
@@ -8643,7 +8643,7 @@ fn lower_conveyed_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_t
  * @throws  propagated from lowering the tail expression
  * @since 0.3.1 (null-union C7 own-backend gap)
  */
-fn lower_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: checker::Type): LowerBlockValue | error {
+fn lower_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: @Type()): LowerBlockValue | error {
     if type_is_void(es.expr.type) {
         var diverging = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
         return diverging_tail_value(diverging.ctx, result_ty)
@@ -8812,7 +8812,7 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
  * (for a `str` subject) its length VReg (`is_fat=false` leaves `len` unused)
  * (A1-5, #382).
  */
-type MatchSubj = struct { ty: checker::Type; vreg: u32; is_fat: bool; len: u32 }
+type MatchSubj = struct { ty: @Type(); vreg: u32; is_fat: bool; len: u32 }
 
 /**
  * MatchSubjOut — the context after lowering a `match`'s subject exactly ONCE,
@@ -8849,7 +8849,7 @@ fn lower_match_subject(ctx: LowerCtx, subject: checker::TExpr): MatchSubjOut | e
  * against) + its own Type (a `match` binding loads the payload at this Type's
  * machine class) (A1-5, #382).
  */
-type VariantMember = struct { index: u32; ty: checker::Type }
+type VariantMember = struct { index: u32; ty: @Type() }
 
 /**
  * find_variant_member — the member of `members` whose CASE NAME is
@@ -8888,7 +8888,7 @@ type VariantMember = struct { index: u32; ty: checker::Type }
  *          via a shared generic base (an ambiguity this backend refuses
  *          rather than resolves by position)
  */
-fn find_variant_member(members: []checker::Type, case_name: str): VariantMember | error {
+fn find_variant_member(members: []@Type(), case_name: str): VariantMember | error {
     var i: u64 = 0
     var first: i64 = -1
     loop {
@@ -8920,7 +8920,7 @@ fn find_variant_member(members: []checker::Type, case_name: str): VariantMember 
  * @return bool  whether `a` and `b` are genuinely different cases wearing the
  *               same case name
  */
-fn generic_case_ambiguous(a: checker::Type, b: checker::Type): bool {
+fn generic_case_ambiguous(a: @Type(), b: @Type()): bool {
     match a {
         checker::Named as an => match b {
             checker::Named as bn => an.name != bn.name && (checker::split_generic_instance_name(an.name).is_generic || checker::split_generic_instance_name(bn.name).is_generic)
@@ -8963,7 +8963,7 @@ fn generic_case_ambiguous(a: checker::Type, b: checker::Type): bool {
  * @param str case_name  the pattern's case name to test against
  * @return bool  whether `member` is the case `case_name` names
  */
-fn variant_member_named(member: checker::Type, case_name: str): bool {
+fn variant_member_named(member: @Type(), case_name: str): bool {
     match member {
         checker::Named as n => checker::named_case_name(n.name) == case_name
         checker::Error => case_name == error_struct_name()
@@ -8991,7 +8991,7 @@ fn variant_member_named(member: checker::Type, case_name: str): bool {
  * @throws  when no member of `members` matches `value_ty` (an internal invariant break — the
  *          checker already guarantees an assignable value names some member)
  */
-fn variant_member_index_of(members: []checker::Type, value_ty: checker::Type, variants: []LVariantDef): u32 | error {
+fn variant_member_index_of(members: []@Type(), value_ty: @Type(), variants: []LVariantDef): u32 | error {
     var i: u64 = 0
     loop {
         if i >= members.len { break }
@@ -9028,7 +9028,7 @@ fn variant_member_index_of(members: []checker::Type, value_ty: checker::Type, va
  *                                expansion arm
  * @return bool  whether `member` is the case `value_ty` belongs to
  */
-fn variant_member_type_matches(member: checker::Type, value_ty: checker::Type, variants: []LVariantDef): bool {
+fn variant_member_type_matches(member: @Type(), value_ty: @Type(), variants: []LVariantDef): bool {
     match member {
         checker::Named as mn => variant_named_member_matches(mn.name, value_ty, variants)
         checker::Error => match value_ty { checker::Error => true; _ => false }
@@ -9058,7 +9058,7 @@ fn variant_member_type_matches(member: checker::Type, value_ty: checker::Type, v
  *               case `value_ty` belongs to
  * @since 0.3.1.0 (degrau 23 — nested named-variant member matching, #382)
  */
-fn variant_named_member_matches(member_name: str, value_ty: checker::Type, variants: []LVariantDef): bool {
+fn variant_named_member_matches(member_name: str, value_ty: @Type(), variants: []LVariantDef): bool {
     if variant_named_directly(member_name, value_ty) { return true }
     match find_variant_def(variants, member_name) {
         LVariantDef as def => variant_any_member_matches(def.ty.members, value_ty, variants)
@@ -9076,7 +9076,7 @@ fn variant_named_member_matches(member_name: str, value_ty: checker::Type, varia
  * @return bool  whether `value_ty` is `Named { name = member_name }`
  * @since 0.3.1.0 (degrau 23 — nested named-variant member matching, #382)
  */
-fn variant_named_directly(member_name: str, value_ty: checker::Type): bool {
+fn variant_named_directly(member_name: str, value_ty: @Type()): bool {
     match value_ty {
         checker::Named as vn => vn.name == member_name
         _ => false
@@ -9095,7 +9095,7 @@ fn variant_named_directly(member_name: str, value_ty: checker::Type): bool {
  * @return bool  whether some member of `members` matches `value_ty`
  * @since 0.3.1.0 (degrau 23 — nested named-variant member matching, #382)
  */
-fn variant_any_member_matches(members: []checker::Type, value_ty: checker::Type, variants: []LVariantDef): bool {
+fn variant_any_member_matches(members: []@Type(), value_ty: @Type(), variants: []LVariantDef): bool {
     var i: u64 = 0
     loop {
         if i >= members.len { break }
@@ -9151,7 +9151,7 @@ fn variant_null_member_index(v: checker::Variant): u32 | null {
  */
 type NullUnionShape = struct {
     /** payload — the union's sole non-null member type (drives the payload's machine SHAPE). */
-    payload: checker::Type
+    payload: @Type()
 
     /** payload_index — that member's declared index, the tag a PRESENT value carries. */
     payload_index: u32
@@ -9247,7 +9247,7 @@ fn lower_variant_tag_eq_test(ctx: LowerCtx, subj: MatchSubj, index: i64, line: u
  * @return LowerCtx  the context with `binding` bound to the loaded payload
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
  */
-fn bind_case_payload(ctx: LowerCtx, base_vreg: u32, ty: checker::Type, binding: str): LowerCtx {
+fn bind_case_payload(ctx: LowerCtx, base_vreg: u32, ty: @Type(), binding: str): LowerCtx {
     if is_fat_type(ty) { return bind_fat_case_payload(ctx, base_vreg, binding) }
     bind_scalar_case_payload(ctx, base_vreg, ltype_of(ty, ctx.enums), binding)
 }
@@ -9309,7 +9309,7 @@ fn bind_fat_case_payload(ctx: LowerCtx, base_vreg: u32, binding: str): LowerCtx 
  * @return LowerCtx  the context with `binding` bound to the loaded payload
  * @since 0.3.1 (null-union C7 own-backend gap)
  */
-fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: checker::Type, binding: str): LowerCtx {
+fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: @Type(), binding: str): LowerCtx {
     bind_case_payload(ctx, subj.vreg, payload, binding)
 }
 
@@ -9460,7 +9460,7 @@ fn lower_null_absent_widened(ctx: LowerCtx, index: u32, e: checker::TExpr): Lowe
  * @return         whether an inner wrapper must be built for `e` first
  * @since 0.3.1.0 (degrau 25 — the nested union payload)
  */
-fn payload_needs_inner_wrapper(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr): bool {
+fn payload_needs_inner_wrapper(ctx: LowerCtx, payload: @Type(), e: checker::TExpr): bool {
     match expand_named_variant(payload, ctx.variants) {
         checker::Variant => match expand_named_variant(e.type, ctx.variants) { checker::Variant => false; _ => true }
         _ => false
@@ -9531,7 +9531,7 @@ fn lower_variant_construct(ctx: LowerCtx, v: checker::Variant, value: checker::T
  * @throws  propagated from lowering `value`
  * @since 0.3.1.0 (degrau 23 — factored out of `lower_variant_construct`, #382)
  */
-fn build_variant_wrapper(ctx: LowerCtx, index: i64, pty: checker::Type, value: checker::TExpr): Lowered | error {
+fn build_variant_wrapper(ctx: LowerCtx, index: i64, pty: @Type(), value: checker::TExpr): Lowered | error {
     var slot = ctx_alloc(ctx)
     var with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), value.line, value.col))
     store_variant_payload(with_alloca, slot.vreg, index, pty, value)
@@ -9548,7 +9548,7 @@ fn build_variant_wrapper(ctx: LowerCtx, index: i64, pty: checker::Type, value: c
  * @return u32?  the matching member's declared index, or `null` when none matches DIRECTLY
  * @since 0.3.1.0 (degrau 23 — split out of the pre-degrau-23 `variant_member_type_matches`, #382)
  */
-fn direct_variant_member_index(members: []checker::Type, value_ty: checker::Type): u32 | null {
+fn direct_variant_member_index(members: []@Type(), value_ty: @Type()): u32 | null {
     var i: u64 = 0
     loop {
         if i >= members.len { break }
@@ -9571,7 +9571,7 @@ fn direct_variant_member_index(members: []checker::Type, value_ty: checker::Type
  * @param checker::Type value_ty  the value's own resolved type
  * @return bool  whether `member` is DIRECTLY the case `value_ty` belongs to
  */
-fn variant_member_direct_match(member: checker::Type, value_ty: checker::Type): bool {
+fn variant_member_direct_match(member: @Type(), value_ty: @Type()): bool {
     match member {
         checker::Named as mn => variant_named_directly(mn.name, value_ty)
         checker::Error => match value_ty { checker::Error => true; _ => false }
@@ -9643,7 +9643,7 @@ fn lower_nested_variant_construct(ctx: LowerCtx, v: checker::Variant, value: che
  * @return NestedAliasMember?  the first covering alias member, or `null`
  * @since 0.3.1.0 (degrau 23 — nested named-variant construction, #382)
  */
-fn find_nested_alias_member(members: []checker::Type, value_ty: checker::Type, variants: []LVariantDef): NestedAliasMember | null {
+fn find_nested_alias_member(members: []@Type(), value_ty: @Type(), variants: []LVariantDef): NestedAliasMember | null {
     var i: u64 = 0
     loop {
         if i >= members.len { break }
@@ -9668,7 +9668,7 @@ fn find_nested_alias_member(members: []checker::Type, value_ty: checker::Type, v
  * @return NestedAliasMember?  `member`'s own alias info when it covers `value_ty`, else `null`
  * @since 0.3.1.0 (degrau 23 — nested named-variant construction, #382)
  */
-fn nested_alias_member_at(member: checker::Type, index: u32, value_ty: checker::Type, variants: []LVariantDef): NestedAliasMember | null {
+fn nested_alias_member_at(member: @Type(), index: u32, value_ty: @Type(), variants: []LVariantDef): NestedAliasMember | null {
     match member {
         checker::Named as mn => match find_variant_def(variants, mn.name) {
             LVariantDef as def => nested_alias_member_if_covers(index, mn.name, def.ty, value_ty, variants)
@@ -9692,7 +9692,7 @@ fn nested_alias_member_at(member: checker::Type, index: u32, value_ty: checker::
  * @return NestedAliasMember?  the populated result when `inner` covers `value_ty`, else `null`
  * @since 0.3.1.0 (degrau 23 — nested named-variant construction, #382)
  */
-fn nested_alias_member_if_covers(index: u32, name: str, inner: checker::Variant, value_ty: checker::Type, variants: []LVariantDef): NestedAliasMember | null {
+fn nested_alias_member_if_covers(index: u32, name: str, inner: checker::Variant, value_ty: @Type(), variants: []LVariantDef): NestedAliasMember | null {
     if variant_any_member_matches(inner.members, value_ty, variants) { return NestedAliasMember { index = index; name = name; expansion = inner } }
     null
 }
@@ -9714,7 +9714,7 @@ fn nested_alias_member_if_covers(index: u32, name: str, inner: checker::Variant,
  *          whose whole-type width this backend does not pin
  * @since 0.3.1.0 (degrau 23 — nested named-variant construction, #382)
  */
-fn store_scalar_variant_payload_value(base_vreg: u32, pty: checker::Type, vo: Lowered, pos: checker::TExpr): Lowered | error {
+fn store_scalar_variant_payload_value(base_vreg: u32, pty: @Type(), vo: Lowered, pos: checker::TExpr): Lowered | error {
     var box_bytes = match variant_payload_box_bytes(pty, vo.ctx) { u32 as n => n; error as err => return err }
     var owned = box_aggregate_value(vo, box_bytes, pos)
     var paddr = ctx_alloc(owned.ctx)
@@ -9814,7 +9814,7 @@ fn store_variant_tag(ctx: LowerCtx, base_vreg: u32, index: i64, line: u32, col: 
  * @return Lowered  the wrapper's base address
  * @throws  propagated from lowering `e`
  */
-fn store_variant_payload(ctx: LowerCtx, base_vreg: u32, index: i64, pty: checker::Type, e: checker::TExpr): Lowered | error {
+fn store_variant_payload(ctx: LowerCtx, base_vreg: u32, index: i64, pty: @Type(), e: checker::TExpr): Lowered | error {
     var tagged = store_variant_tag(ctx, base_vreg, index, e.line, e.col)
     if is_fat_type(pty) { return store_fat_variant_payload(tagged.ctx, base_vreg, e) }
     store_scalar_variant_payload(tagged.ctx, base_vreg, pty, e)
@@ -9838,7 +9838,7 @@ fn store_variant_payload(ctx: LowerCtx, base_vreg: u32, index: i64, pty: checker
  * @throws     `unsized_aggregate_push_stop` for a non-register aggregate whose whole-type width is
  *             not pinned
  */
-fn variant_payload_box_bytes(pty: checker::Type, ctx: LowerCtx): u32 | error {
+fn variant_payload_box_bytes(pty: @Type(), ctx: LowerCtx): u32 | error {
     if is_register_value_type(pty, ctx.enums) { return 0 to u32 }
     match aggregate_box_bytes(pty, ctx) {
         u32 as n => n
@@ -9868,7 +9868,7 @@ fn variant_payload_box_bytes(pty: checker::Type, ctx: LowerCtx): u32 | error {
  *          non-register aggregate whose whole-type width this backend does not pin
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 8 — the owned payload)
  */
-fn store_scalar_variant_payload(ctx: LowerCtx, base_vreg: u32, pty: checker::Type, e: checker::TExpr): Lowered | error {
+fn store_scalar_variant_payload(ctx: LowerCtx, base_vreg: u32, pty: @Type(), e: checker::TExpr): Lowered | error {
     var vo = match lower_expr(ctx, e) { Lowered as x => x; error as err => return err }
     var box_bytes = match variant_payload_box_bytes(pty, ctx) { u32 as n => n; error as err => return err }
     var owned = box_aggregate_value(vo, box_bytes, e)
@@ -10002,7 +10002,7 @@ fn find_value_carrier(enums: []LEnumInfo, name: str): LEnumInfo | null {
  * @return checker::Type  `t`'s expanded union when it names a declared variant, else `t` itself
  * @since 0.3.1.0 (the declared-variant match-arm miscompilation)
  */
-fn expand_named_variant(t: checker::Type, variants: []LVariantDef): checker::Type {
+fn expand_named_variant(t: @Type(), variants: []LVariantDef): @Type() {
     var name = match t {
         checker::Named as n => n.name
         _ => return t
@@ -10360,7 +10360,7 @@ fn lower_named_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, n: checker::Nam
  * @return PatternTest  the computed tag-equality test
  * @throws  when `case_name` names no member of `members`
  */
-fn lower_variant_case_test(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, case_name: str, line: u32, col: u32): PatternTest | error {
+fn lower_variant_case_test(ctx: LowerCtx, subj: MatchSubj, members: []@Type(), case_name: str, line: u32, col: u32): PatternTest | error {
     var vm = match find_variant_member(members, case_name) { VariantMember as x => x; error as err => return err }
     lower_variant_tag_eq_test(ctx, subj, vm.index to i64, line, col)
 }
@@ -10484,7 +10484,7 @@ fn bind_whole_subject(ctx: LowerCtx, subj: MatchSubj, name: str): LowerCtx {
  * @throws  when `bp` selects no member of `members`
  * @since 0.3.1.0 (degrau 6 — the slice match pattern)
  */
-fn variant_case_of_bind_pattern(members: []checker::Type, bp: parser::BindPattern): VariantMember | error {
+fn variant_case_of_bind_pattern(members: []@Type(), bp: parser::BindPattern): VariantMember | error {
     if bp.is_slice { return find_variant_slice_member(members) }
     find_variant_member(members, bind_pattern_case_name(bp))
 }
@@ -10502,7 +10502,7 @@ fn variant_case_of_bind_pattern(members: []checker::Type, bp: parser::BindPatter
  *          a variant with no slice case would not have type-checked)
  * @since 0.3.1.0 (degrau 6 — the slice match pattern)
  */
-fn find_variant_slice_member(members: []checker::Type): VariantMember | error {
+fn find_variant_slice_member(members: []@Type()): VariantMember | error {
     var i: u64 = 0
     loop {
         if i >= members.len { break }
@@ -10552,7 +10552,7 @@ fn lower_field_pattern_binds(ctx: LowerCtx, subj: MatchSubj, fp: parser::FieldPa
  * @throws  when the case is unresolvable, not a struct, or a requested field is
  *          unknown
  */
-fn lower_variant_field_binds(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, fp: parser::FieldPattern): LowerCtx | error {
+fn lower_variant_field_binds(ctx: LowerCtx, subj: MatchSubj, members: []@Type(), fp: parser::FieldPattern): LowerCtx | error {
     var vm = match find_variant_member(members, field_pattern_case_name(fp)) { VariantMember as x => x; error as err => return err }
     var sname = match vm.ty { checker::Named as n => n.name; _ => return error { message = "native backend N1: field match pattern requires a struct case (internal)" } }
     var layout = match find_struct_layout(ctx.layouts, sname) { LStructLayout as l => l; error as err => return err }
@@ -10984,7 +10984,7 @@ fn lower_match_subject_conveyed(ctx: LowerCtx, m: checker::TMatchExpr): MatchSub
 /** is_fat_type — is `t` a fat-pointer-VALUED type (`str` or `[]T`)? Selects the
     ptr+len lowering path (`lower_fat_expr`/`lenv_bind_fat`) over the plain scalar one
     (A1-4, #382). */
-fn is_fat_type(t: checker::Type): bool {
+fn is_fat_type(t: @Type()): bool {
     match t {
         checker::Str => true
         checker::Slice => true
@@ -11321,7 +11321,7 @@ fn lower_list_empty(ctx: LowerCtx, e: checker::TExpr): LoweredFat {
  */
 fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str): LoweredFat | error {
     if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` expects (slice, item) (internal)" } }
-    var elem = match push_elem_type(e, cl) { checker::Type as t => t; error as err => return err }
+    var elem = match push_elem_type(e, cl) { (@Type()) as t => t; error as err => return err }
     var dst_fat = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
     if is_fat_type(elem) { return lower_fat_element_push(dst_fat, cl.args[1], sym, e) }
     lower_scalar_element_push(dst_fat, elem, cl.args[1], sym, e)
@@ -11351,7 +11351,7 @@ fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: st
  * @throws      on an aggregate element whose byte width this backend cannot pin
  *              (`push_box_bytes`), or propagated from lowering the item
  */
-fn lower_scalar_element_push(dst_fat: LoweredFat, elem: checker::Type, item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
+fn lower_scalar_element_push(dst_fat: LoweredFat, elem: @Type(), item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
     var box_bytes = match push_box_bytes(elem, dst_fat.ctx) { u32 as n => n; error as err => return err }
     var elem_lt = ltype_of(elem, dst_fat.ctx.enums)
     if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
@@ -11416,7 +11416,7 @@ fn lower_fat_element_push(dst_fat: LoweredFat, item: checker::TExpr, sym: str, e
  * @throws     for an aggregate whose width is not a whole-type fact in this backend
  *             (`unsized_aggregate_push_stop`)
  */
-fn push_box_bytes(t: checker::Type, ctx: LowerCtx): u32 | error {
+fn push_box_bytes(t: @Type(), ctx: LowerCtx): u32 | error {
     if is_register_value_type(t, ctx.enums) { return 0 to u32 }
     match aggregate_box_bytes(t, ctx) {
         u32 as n => n
@@ -11442,7 +11442,7 @@ fn push_box_bytes(t: checker::Type, ctx: LowerCtx): u32 | error {
  * @return     the byte width, or `null` for a register value and for every aggregate whose width
  *             this backend pins no whole-type answer for
  */
-fn aggregate_box_bytes(t: checker::Type, ctx: LowerCtx): u32 | null {
+fn aggregate_box_bytes(t: @Type(), ctx: LowerCtx): u32 | null {
     if is_register_value_type(t, ctx.enums) { return null }
     match expand_named_variant(t, ctx.variants) {
         checker::Named as n => named_layout_bytes(n, ctx)
@@ -11481,7 +11481,7 @@ fn named_layout_bytes(n: checker::Named, ctx: LowerCtx): u32 | null {
  * @param t  the element type that is not a register value
  * @return   the form's name, as the stop's message spells it
  */
-fn aggregate_form_name(t: checker::Type): str {
+fn aggregate_form_name(t: @Type()): str {
     match t {
         checker::Named as n => teko::str::concat("the nominal type `", teko::str::concat(n.name, "`, which has no registered layout"))
         checker::Func => "a CLOSURE, whose captured environment is a second allocation this copy would alias"
@@ -11592,7 +11592,7 @@ fn emit_elem_box(v: Lowered, bytes: u32, line: u32, col: u32): Lowered {
  * @param ctx  the lowering context (its registered layouts and declared-variant table)
  * @return     the byte width the return must own, or 0 for a value that escapes safely as it is
  */
-fn returned_aggregate_box_bytes(t: checker::Type, ctx: LowerCtx): u32 {
+fn returned_aggregate_box_bytes(t: @Type(), ctx: LowerCtx): u32 {
     if is_fat_type(t) { return 0 to u32 }
     match aggregate_box_bytes(t, ctx) {
         u32 as n => n
@@ -11629,7 +11629,7 @@ fn own_returned_value(v: Lowered, line: u32, col: u32): Lowered {
  * @param ctx  the lowering context (its registered layouts and declared-variant table)
  * @return     the alignment, or `null` in exactly the cases `aggregate_box_bytes` answers `null`
  */
-fn aggregate_box_align(t: checker::Type, ctx: LowerCtx): u32 | null {
+fn aggregate_box_align(t: @Type(), ctx: LowerCtx): u32 | null {
     if is_register_value_type(t, ctx.enums) { return null }
     match expand_named_variant(t, ctx.variants) {
         checker::Named as n => named_layout_align(n, ctx)
@@ -11771,7 +11771,7 @@ fn own_bound_value(v: Lowered, e: checker::TExpr): Lowered {
  * @param ctx  the lowering context (its registered layouts and declared-variant table)
  * @return     the byte width to copy, or 0 for a value no container needs to own
  */
-fn embedded_aggregate_box_bytes(t: checker::Type, ctx: LowerCtx): u32 {
+fn embedded_aggregate_box_bytes(t: @Type(), ctx: LowerCtx): u32 {
     if is_fat_type(t) { return 0 to u32 }
     match aggregate_box_bytes(t, ctx) {
         u32 as n => n
@@ -11809,7 +11809,7 @@ fn own_embedded_value(v: Lowered, e: checker::TExpr): Lowered {
  * @param enums  the program's declared-enum table (an enum's carrier IS a register value)
  * @return       true iff a value of `t` is the whole datum, not a pointer to it
  */
-fn is_register_value_type(t: checker::Type, enums: []LEnumInfo): bool {
+fn is_register_value_type(t: @Type(), enums: []LEnumInfo): bool {
     match t {
         checker::Prim => true
         checker::Byte => true
@@ -11831,7 +11831,7 @@ fn is_register_value_type(t: checker::Type, enums: []LEnumInfo): bool {
  * @return    the element type the pushed buffer holds
  * @throws    when neither the call, its base, nor its item carries a concrete type (internal)
  */
-fn push_elem_type(e: checker::TExpr, cl: checker::TCall): checker::Type | error {
+fn push_elem_type(e: checker::TExpr, cl: checker::TCall): @Type() | error {
     match e.type {
         checker::Slice as sl => match sl.element { checker::Void => { }; _ => return sl.element }
         _ => return error { message = "native backend N1: `teko::list::push` result is not a slice (internal)" }
@@ -12364,7 +12364,7 @@ fn lower_var_fat(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar): LoweredFat
  * @return   the value's stored image width in bytes: 16 for `str`, and — until N112.3 — 16 for a slice
  * @since 0.3.1.0 (#112 N112.0/N112.1, raiz-comum R0)
  */
-fn fat_value_bytes(t: checker::Type): u32 {
+fn fat_value_bytes(t: @Type()): u32 {
     if is_str_type(t) { return str_fat_value_bytes() }
     slice_fat_value_bytes()
 }
@@ -12592,7 +12592,7 @@ fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata): LoweredFat | e
  * @return          the element count the fat pair's len half carries
  * @throws          when `t` is neither a str nor a slice (unreachable for an interned aggregate)
  */
-fn const_fat_len(t: checker::Type, byte_len: u32, enums: []LEnumInfo): u32 | error {
+fn const_fat_len(t: @Type(), byte_len: u32, enums: []LEnumInfo): u32 | error {
     match t {
         checker::Str => byte_len
         checker::Slice as s => const_slice_len(s.element, byte_len, enums)
@@ -12616,7 +12616,7 @@ fn const_fat_len(t: checker::Type, byte_len: u32, enums: []LEnumInfo): u32 | err
  * @return          the element count
  * @throws          when the element's machine stride is zero (unreachable — rejected at serialize)
  */
-fn const_slice_len(element: checker::Type, byte_len: u32, enums: []LEnumInfo): u32 | error {
+fn const_slice_len(element: @Type(), byte_len: u32, enums: []LEnumInfo): u32 | error {
     var stride = elem_byte_stride(element, enums)
     if stride == 0 { return error { message = "native backend N1: aggregate const slice has a zero-stride element (internal)" } }
     byte_len / stride
@@ -13152,7 +13152,7 @@ fn lower_in_expr(ctx: LowerCtx, e: checker::TExpr, ine: checker::TInExpr): Lower
  * @return str  the registered layout's name
  * @throws  when `t` is a shape this backend does not yet resolve a struct layout for
  */
-fn named_type_name(t: checker::Type): str | error {
+fn named_type_name(t: @Type()): str | error {
     match t {
         checker::Named as n => n.name
         checker::Error => error_struct_name()
@@ -13529,7 +13529,7 @@ fn store_struct_fields(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, fie
  * @param field  the field name to look up
  * @return  the field's declared type, or `null` when the table names none
  */
-fn find_field_decl_type(decls: []LFieldDecls, sname: str, field: str): checker::Type | null {
+fn find_field_decl_type(decls: []LFieldDecls, sname: str, field: str): @Type() | null {
     var i: u64 = 0
     loop {
         if i >= decls.len { break }
@@ -13548,7 +13548,7 @@ fn find_field_decl_type(decls: []LFieldDecls, sname: str, field: str): checker::
  * @param field  the field name to look up
  * @return  the field's declared type, or `null`
  */
-fn field_type_in_decls(fd: LFieldDecls, field: str): checker::Type | null {
+fn field_type_in_decls(fd: LFieldDecls, field: str): @Type() | null {
     var i: u64 = 0
     loop {
         if i >= fd.field_names.len { break }
@@ -13574,8 +13574,8 @@ fn field_type_in_decls(fd: LFieldDecls, field: str): checker::Type | null {
  * @param decl  the field's declared type, or `null` when the table names none
  * @return  the declared type when it is a union placement, else `null`
  */
-fn union_field_placement(ctx: LowerCtx, decl: checker::Type | null): checker::Type | null {
-    var d = match decl { checker::Type as t => t; null => return null }
+fn union_field_placement(ctx: LowerCtx, decl: @Type() | null): @Type() | null {
+    var d = match decl { (@Type()) as t => t; null => return null }
     match expand_named_variant(d, ctx.variants) { checker::Variant => d; _ => null }
 }
 
@@ -13636,16 +13636,16 @@ fn union_field_placement(ctx: LowerCtx, decl: checker::Type | null): checker::Ty
  * @return       the placed (and, when needed, widened) (ptr, len) pair
  * @throws       propagated from lowering/widening the value
  */
-fn store_field_fat_value(ctx: LowerCtx, decl: checker::Type | null, value: checker::TExpr): LoweredFat | error {
+fn store_field_fat_value(ctx: LowerCtx, decl: @Type() | null, value: checker::TExpr): LoweredFat | error {
     match decl {
-        checker::Type as d => lower_fat_expr_into_type(ctx, d, value)
+        (@Type()) as d => lower_fat_expr_into_type(ctx, d, value)
         null => lower_fat_expr(ctx, value)
     }
 }
 
-fn store_struct_field(ctx: LowerCtx, base_vreg: u32, offset: u32, decl: checker::Type | null, value: checker::TExpr, line: u32, col: u32): LowerCtx | error {
+fn store_struct_field(ctx: LowerCtx, base_vreg: u32, offset: u32, decl: @Type() | null, value: checker::TExpr, line: u32, col: u32): LowerCtx | error {
     match union_field_placement(ctx, decl) {
-        checker::Type as bound => {
+        (@Type()) as bound => {
             var uo = match lower_value_into_type(ctx, bound, value) { Lowered as x => x; error as err => return err }
             var owned = box_aggregate_value_at(uo, variant_wrapper_bytes(), line, col)
             var uaddr = ctx_alloc(owned.ctx)
@@ -13772,7 +13772,7 @@ fn lower_len_builtin_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): 
 
 /** slice_element_type — the element type of a `[]T` (Slice) type; any other receiver shape
     (a `str`'s fat pointer arrives with A1-4) is out of the A1-3 subset. */
-fn slice_element_type(t: checker::Type): checker::Type | error {
+fn slice_element_type(t: @Type()): @Type() | error {
     match t {
         checker::Slice as s => s.element
         _ => error { message = "native backend N1: index receiver is not a slice (N2)" }
@@ -13934,7 +13934,7 @@ fn lower_index_str(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Lower
  * @param enums  the program's declared-enum table (`ltype_of`'s own requirement)
  * @return       the element's byte stride inside a slice buffer
  */
-fn elem_byte_stride(t: checker::Type, enums: []LEnumInfo): u32 {
+fn elem_byte_stride(t: @Type(), enums: []LEnumInfo): u32 {
     if is_fat_type(t) { return fat_value_bytes(t) }
     ltype_size(ltype_of(t, enums))
 }
@@ -13948,7 +13948,7 @@ fn elem_byte_stride(t: checker::Type, enums: []LEnumInfo): u32 {
  * @param enums  the program's declared-enum table
  * @return       the element's byte alignment
  */
-fn elem_byte_align(t: checker::Type, enums: []LEnumInfo): u32 {
+fn elem_byte_align(t: @Type(), enums: []LEnumInfo): u32 {
     if is_fat_type(t) { return ltype_align(LType::Ptr) }
     ltype_align(ltype_of(t, enums))
 }
@@ -13970,7 +13970,7 @@ fn elem_byte_align(t: checker::Type, enums: []LEnumInfo): u32 {
  */
 fn lower_index_fat(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): LoweredFat | error {
     var ro = match lower_fat_expr(ctx, ix.receiver) { LoweredFat as x => x; error as err => return err }
-    var et = match slice_element_type(ix.receiver.type) { checker::Type as t => t; error as err => return err }
+    var et = match slice_element_type(ix.receiver.type) { (@Type()) as t => t; error as err => return err }
     var addr_out = match guarded_index_addr(ro.ctx, ro.ptr, ro.len, ix.index, fat_value_bytes(et), e.line, e.col) { Lowered as x => x; error as err => return err }
     load_fat_slot(addr_out.ctx, addr_out.vreg, e.line, e.col)
 }
@@ -13992,7 +13992,7 @@ fn lower_index_fat(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Lower
  */
 fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Lowered | error {
     var ro = match lower_fat_expr(ctx, ix.receiver) { LoweredFat as x => x; error as err => return err }
-    match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
+    match slice_element_type(ix.receiver.type) { (@Type()) as _gt2 => { }; error as err => return err }
     var elem_ty = ltype_of(e.type, ro.ctx.enums)
     var addr_out = match guarded_index_addr(ro.ctx, ro.ptr, ro.len, ix.index, elem_byte_stride(e.type, ro.ctx.enums), e.line, e.col) { Lowered as x => x; error as err => return err }
     var r = ctx_alloc(addr_out.ctx)
@@ -14030,7 +14030,7 @@ fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Low
  * @throws     when `e.type` is not a slice, or propagated from lowering an element
  */
 fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit): Lowered | error {
-    var elem_t = match slice_element_type(e.type) { checker::Type as t => t; error as err => return err }
+    var elem_t = match slice_element_type(e.type) { (@Type()) as t => t; error as err => return err }
     var stride = elem_byte_stride(elem_t, ctx.enums)
     var total = (al.elements.len to u32) * stride
     var slot = ctx_alloc(ctx)
@@ -14042,7 +14042,7 @@ fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit): Lo
 /** store_array_elements — lower each non-spread element in turn, storing it at its
     constant `index * stride` offset from `base` (`store_array_elem`); the result VReg is
     `base` itself. */
-fn store_array_elements(ctx: LowerCtx, base_vreg: u32, elem_t: checker::Type, elements: []checker::TArrayElem, stride: u32, line: u32, col: u32): Lowered | error {
+fn store_array_elements(ctx: LowerCtx, base_vreg: u32, elem_t: @Type(), elements: []checker::TArrayElem, stride: u32, line: u32, col: u32): Lowered | error {
     var cur = ctx
     var i: u64 = 0
     loop {
@@ -14060,7 +14060,7 @@ fn store_array_elements(ctx: LowerCtx, base_vreg: u32, elem_t: checker::Type, el
     (`elem_t`, 0.3.1.0 degrau 10) lowers through the fat-pointer producer path and writes BOTH
     halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape a mutable fat local's frame
     slot uses); every other element lowers plainly and writes its single machine word. */
-fn store_array_elem(ctx: LowerCtx, base_vreg: u32, offset: u32, elem_t: checker::Type, expr: checker::TExpr, line: u32, col: u32): LowerCtx | error {
+fn store_array_elem(ctx: LowerCtx, base_vreg: u32, offset: u32, elem_t: @Type(), expr: checker::TExpr, line: u32, col: u32): LowerCtx | error {
     if is_fat_type(elem_t) {
         var fo = match lower_fat_expr(ctx, expr) { LoweredFat as x => x; error as err => return err }
         var addr = ctx_alloc(fo.ctx)
@@ -14364,7 +14364,7 @@ fn store_assign_aggregate_ref(ctx: LowerCtx, addr: u32, a: checker::TAssign): Lo
  * @param t  the aggregate type this backend assigns no whole-type byte width
  * @return   the honest stop, always
  */
-fn unsized_aggregate_ref_stop(t: checker::Type): error {
+fn unsized_aggregate_ref_stop(t: @Type()): error {
     error { message = teko::str::concat("native backend N1: a reference deref-assignment whose target is ", teko::str::concat(aggregate_form_name(t), " — this copies the new value's bytes directly into the handle's pointee storage, which needs a byte width the type alone fixes (N2)")) }
 }
 
@@ -14850,7 +14850,7 @@ fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAs
  */
 fn lower_assign_index(ctx: LowerCtx, a: checker::TAssign): LowerStmtOut | error {
     var ix = match a.target.kind { checker::TIndex as ti => ti; _ => return error { message = "native backend N1: index-assignment target is not a subscript (internal)" } }
-    match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
+    match slice_element_type(ix.receiver.type) { (@Type()) as _gt3 => { }; error as err => return err }
     var ro = match lower_fat_expr(ctx, ix.receiver) { LoweredFat as x => x; error as err => return err }
     var io = match lower_expr(ro.ctx, ix.index) { Lowered as x => x; error as err => return err }
     var checked = lower_index_bounds_guard(io.ctx, io.vreg, ro.len, a.target.line, a.target.col)
@@ -14953,7 +14953,7 @@ fn store_assign_aggregate_elem(ctx: LowerCtx, addr: u32, a: checker::TAssign): L
  * @param t  the aggregate element type this backend assigns no whole-type byte width
  * @return   the honest stop, always
  */
-fn unsized_aggregate_elem_stop(t: checker::Type): error {
+fn unsized_aggregate_elem_stop(t: @Type()): error {
     error { message = teko::str::concat("native backend N1: an element write whose element is ", aggregate_form_name(t), " — this backend holds aggregate slice elements BY ADDRESS and boxes the written value into fresh storage, which needs a byte width the element type alone fixes (N2)") }
 }
 
@@ -15738,7 +15738,7 @@ fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::Typ
  * @return       `acc`, extended when `te` disagrees
  */
 fn fat_divergence_line_of(acc: []str, te: @TypeExpr(), table: checker::TypeTable, rtable: checker::TypeTable, ns: str, place: str, owner: str, name: str): []str {
-    var truth = match checker::resolve_type(te, rtable, ns) { checker::Type as t => t; error => return acc }
+    var truth = match checker::resolve_type(te, rtable, ns) { (@Type()) as t => t; error => return acc }
     var semantic = is_fat_type(truth)
     if typeexpr_is_fat(te, table) == semantic { return acc }
     teko::list::push(acc, teko::str::concat(place, " `", name, "` of `", owner, "`: syntax says ", fat_word(!semantic), ", the checker says ", fat_word(semantic)))
@@ -16053,7 +16053,7 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
  * @param known  every struct layout resolved so far
  * @return       the field's nested struct layout, or `null` (a scalar/fat/variant/forward-ref field)
  */
-fn struct_layout_of_resolved(rft: checker::Type, te: @TypeExpr(), known: []LStructLayout): LStructLayout | null {
+fn struct_layout_of_resolved(rft: @Type(), te: @TypeExpr(), known: []LStructLayout): LStructLayout | null {
     match rft {
         checker::Named as n => match find_known_struct_layout(known, n.name) {
             LStructLayout as l => return l
@@ -16408,7 +16408,7 @@ fn typeexpr_is_fat(te: @TypeExpr(), table: checker::TypeTable): bool {
  * @return        the field's byte size
  * @since #594 T-B6
  */
-fn field_layout_size(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type): u32 {
+fn field_layout_size(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: @Type()): u32 {
     if field_is_fat_resolved(te, table, rft) { return fat_value_bytes(fat_field_width_type(rft)) }
     field_size_of(ft, nested)
 }
@@ -16425,7 +16425,7 @@ fn field_layout_size(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, t
  * @return     `rft` when it is a fat type, else a `[]T` sentinel selecting the slice width arm
  * @since 0.3.1.0 (#112 N112.1, A2)
  */
-fn fat_field_width_type(rft: checker::Type): checker::Type {
+fn fat_field_width_type(rft: @Type()): @Type() {
     if is_fat_type(rft) { return rft }
     checker::Slice { element = checker::Str { } }
 }
@@ -16448,7 +16448,7 @@ fn fat_field_width_type(rft: checker::Type): checker::Type {
  * @return       whether the field holds a fat-pointer `{ptr, len}` value
  * @since 0.3.1.0 raiz A — fat-field layout unification
  */
-fn field_is_fat_resolved(te: @TypeExpr(), table: checker::TypeTable, rft: checker::Type): bool {
+fn field_is_fat_resolved(te: @TypeExpr(), table: checker::TypeTable, rft: @Type()): bool {
     typeexpr_is_fat(te, table) || is_fat_type(rft)
 }
 
@@ -16465,7 +16465,7 @@ fn field_is_fat_resolved(te: @TypeExpr(), table: checker::TypeTable, rft: checke
  * @return        the field's byte alignment
  * @since #594 T-B6
  */
-fn field_layout_align(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type): u32 {
+fn field_layout_align(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: @Type()): u32 {
     if field_is_fat_resolved(te, table, rft) { return ltype_align(LType::Ptr) }
     field_align_of(ft, nested)
 }
@@ -16657,7 +16657,7 @@ pub fn lower_item(m: LModule, loose: []@TStatement(), it: @TItem(), layouts: []L
  * @param t  the residual const's resolved value type
  * @return   whether `t` is a scalar (inline-at-use) const type
  */
-fn const_decl_is_scalar(t: checker::Type): bool {
+fn const_decl_is_scalar(t: @Type()): bool {
     match t {
         checker::Slice => false
         checker::Str => false

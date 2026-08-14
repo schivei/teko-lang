@@ -228,7 +228,7 @@ fn const_fold_binary_expr(b: checker::TBinary): i64 | error {
  * @param t  the slice element type
  * @return   whether it is a materializable flat scalar
  */
-fn const_is_flat_scalar(t: checker::Type): bool {
+fn const_is_flat_scalar(t: @Type()): bool {
     match t {
         checker::Prim => true
         checker::Byte => true
@@ -324,7 +324,7 @@ fn const_str_bytes(init: checker::TExpr): []byte | error {
  * @return         the concatenated element images
  * @throws         when an element is a spread or is not a foldable flat scalar
  */
-fn const_array_bytes(element: checker::Type, a: checker::TArrayLit, enums: []LEnumInfo): []byte | error {
+fn const_array_bytes(element: @Type(), a: checker::TArrayLit, enums: []LEnumInfo): []byte | error {
     var stride = elem_byte_stride(element, enums)
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -414,7 +414,7 @@ fn const_array_literal(init: checker::TExpr): checker::TArrayLit | error {
  * @throws            when an element is a spread, or its own target is not materializable
  * @since 0.3.1.0 degrau const-slice
  */
-fn const_fat_array_image(const_name: str, element: checker::Type, a: checker::TArrayLit, enums: []LEnumInfo): ConstImage | error {
+fn const_fat_array_image(const_name: str, element: @Type(), a: checker::TArrayLit, enums: []LEnumInfo): ConstImage | error {
     var img = const_image_flat(teko::list::empty())
     var i: u64 = 0
     loop {
@@ -526,7 +526,7 @@ fn append_rodata(a: []LRodata, b: []LRodata): []LRodata {
  * @throws            when the initializer is not an array literal, an element is a spread, or the
  *                    element type is neither a flat scalar nor a fat `str`/`[]T`
  */
-fn const_slice_image(const_name: str, element: checker::Type, init: checker::TExpr, enums: []LEnumInfo): ConstImage | error {
+fn const_slice_image(const_name: str, element: @Type(), init: checker::TExpr, enums: []LEnumInfo): ConstImage | error {
     var a = match const_array_literal(init) { checker::TArrayLit as x => x; error as e => return e }
     if const_is_flat_scalar(element) {
         return match const_array_bytes(element, a, enums) { []byte as b => const_image_flat(b); error as e => return e }
@@ -590,7 +590,7 @@ fn const_struct_field_bytes(layout: LStructLayout, si: checker::TStructInit, j: 
  * @throws           when the member is not a str/slice (internal), or the initializer is not materializable
  * @since #594 T-B6; 0.3.1.0 degrau const-slice (nested leaves)
  */
-fn const_fat_target_image(owner: str, member_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo): ConstImage | error {
+fn const_fat_target_image(owner: str, member_ty: @Type(), vexpr: checker::TExpr, enums: []LEnumInfo): ConstImage | error {
     match member_ty {
         checker::Str => match const_str_bytes(vexpr) { []byte as b => const_image_flat(b); error as e => return e }
         checker::Slice as s => const_slice_image(owner, s.element, vexpr, enums)
@@ -622,7 +622,7 @@ fn const_fat_target_image(owner: str, member_ty: checker::Type, vexpr: checker::
  * @throws            when the initializer is not materializable (non-literal, spread, or ptr element)
  * @since #594 T-B6; 0.3.1.0 degrau const-slice (elements + nested leaves)
  */
-fn const_fat_member(owner: str, member_key: str, slot_off: u32, member_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo): FatMemberImage | error {
+fn const_fat_member(owner: str, member_key: str, slot_off: u32, member_ty: @Type(), vexpr: checker::TExpr, enums: []LEnumInfo): FatMemberImage | error {
     var target = match const_fat_target_image(const_nested_owner(owner, member_key), member_ty, vexpr, enums) { ConstImage as x => x; error as e => return e }
     var count = match const_fat_len(member_ty, target.bytes.len to u32, enums) { u32 as c => c; error as e => return e }
     var leaf_sym = const_leaf_symbol(owner, member_key)
@@ -970,7 +970,7 @@ fn check_struct_fat_span_at(const_name: str, layout: LStructLayout, si: checker:
  * @return            whether a fat value would overrun the field's allotted span
  * @since 0.3.1.0 raiz A — fat-field layout unification
  */
-fn fat_slot_underflows(layout: LStructLayout, j: u64, value_type: checker::Type): bool {
+fn fat_slot_underflows(layout: LStructLayout, j: u64, value_type: @Type()): bool {
     if !is_fat_type(value_type) { return false }
     field_allotted_span(layout, j) < fat_value_bytes(value_type)
 }
@@ -1016,8 +1016,8 @@ fn field_index_of(layout: LStructLayout, field: str): u64 | null {
  * @return            `null` when the placement is safe or non-fat; the fatal honest-stop otherwise
  * @since 0.3.1.0 raiz A — fat-field layout unification
  */
-fn check_store_fat_span(ctx: LowerCtx, layout: LStructLayout, field_name: str, decl: checker::Type | null, value: checker::TExpr): null | error {
-    match union_field_placement(ctx, decl) { checker::Type => return null; null => { } }
+fn check_store_fat_span(ctx: LowerCtx, layout: LStructLayout, field_name: str, decl: @Type() | null, value: checker::TExpr): null | error {
+    match union_field_placement(ctx, decl) { (@Type()) as _gt1 => return null; null => { } }
     var j = match field_index_of(layout, field_name) { u64 as k => k; null => return null }
     if !fat_slot_underflows(layout, j, value.type) { return null }
     error { message = $"native fat-field store guard: struct '{layout.name}' fat field '{field_name}' was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_value_bytes(value.type)} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the fat pointer/length store overruns the following field" }
@@ -1349,7 +1349,7 @@ fn collect_field_decls_decl(acc: []LFieldDecls, td: parser::TypeDecl, dtable: ch
 fn field_decls_of(name: str, fields: []parser::Field, dtable: checker::TypeTable): LFieldDecls {
     var ns = checker::name_qualifier(name)
     var names: []str = teko::list::empty()
-    var types: []checker::Type = teko::list::empty()
+    var types: []@Type() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= fields.len { break }
@@ -1369,9 +1369,9 @@ fn field_decls_of(name: str, fields: []parser::Field, dtable: checker::TypeTable
  * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
  * @return        the resolved declared type, or `Void` when the annotation does not resolve
  */
-fn resolved_field_type(te: @TypeExpr(), ns: str, dtable: checker::TypeTable): checker::Type {
+fn resolved_field_type(te: @TypeExpr(), ns: str, dtable: checker::TypeTable): @Type() {
     match checker::resolve_type(te, dtable, ns) {
-        checker::Type as t => t
+        (@Type()) as t => t
         error => unresolved_named_fallback(te)
     }
 }
@@ -1398,7 +1398,7 @@ fn resolved_field_type(te: @TypeExpr(), ns: str, dtable: checker::TypeTable): ch
  * @param te  the annotation `resolve_type` could not resolve
  * @return    a bare `Named` for a named annotation, else the `Void` "no declared type" marker
  */
-fn unresolved_named_fallback(te: @TypeExpr()): checker::Type {
+fn unresolved_named_fallback(te: @TypeExpr()): @Type() {
     match te {
         parser::NamedType as nt => checker::Named { name = type_path_joined(nt.path) }
         _ => checker::Void { }
@@ -1440,7 +1440,7 @@ fn type_path_joined(p: parser::Path): str {
  */
 fn variant_body_expanded(vb: parser::VariantBody, ns: str, table: checker::TypeTable): checker::Variant {
     var resolved = match checker::resolve_type(vb.type_expr, table, ns) {
-        checker::Type as t => t
+        (@Type()) as t => t
         error => return checker::Variant { members = nominal_member_types(vb.type_expr) }
     }
     match resolved {
@@ -1458,7 +1458,7 @@ fn variant_body_expanded(vb: parser::VariantBody, ns: str, table: checker::TypeT
  * @param te  the variant body's type-expr (a union of member types)
  * @return    one nominal member type per declared member, in order
  */
-fn nominal_member_types(te: @TypeExpr()): []checker::Type {
+fn nominal_member_types(te: @TypeExpr()): []@Type() {
     match te {
         parser::UnionType as ut => union_member_types(ut.members)
         _ => teko::list::empty()
@@ -1473,8 +1473,8 @@ fn nominal_member_types(te: @TypeExpr()): []checker::Type {
  * @param members  the union's member type-exprs
  * @return         one nominal member type per member, in order
  */
-fn union_member_types(members: []@TypeExpr()): []checker::Type {
-    var out: []checker::Type = teko::list::empty()
+fn union_member_types(members: []@TypeExpr()): []@Type() {
+    var out: []@Type() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= members.len { break }

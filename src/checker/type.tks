@@ -95,9 +95,9 @@ pub fn prim_width(k: PrimKind): u32 {
  * a struct). Byte/Str/error/void are markers (no payload).
  */
 pub type Prim = struct { kind: PrimKind }
-pub type Slice = struct { element: Type }   // []T — recursive (B.8)
+pub type Slice = struct { element: @Type() }   /* []T — recursive (B.8) */
 pub type Named = struct { name: str }   // a user type, equal by NAME (nominal)
-pub type Variant = struct { members: []Type }   // A | B | … (two or more); members are COMPLETE types
+pub type Variant = struct { members: []@Type() }   /* A | B | … (two or more); members are COMPLETE types */
 /**
  * Func — a function TYPE `(params): ret` (ret may be void). `variadic` = the last param is a C#-style
  * `params` slice (false for closures/FFI/lambda types). DEFARGS: `param_names` parallel to `params`
@@ -117,7 +117,7 @@ pub type Variant = struct { members: []Type }   // A | B | … (two or more); me
  *                    tuple `Type` — multi-valuedness lives as this list on the signature, never as a
  *                    typeable value.
  */
-pub type Func = struct { params: []Type; ret: Type; variadic: bool; param_names: []str; n_required: u64; defaults: []parser::Expr; ret_extra: []Type }
+pub type Func = struct { params: []@Type(); ret: @Type(); variadic: bool; param_names: []str; n_required: u64; defaults: []parser::Expr; ret_extra: []@Type() }
 pub type Byte = struct { }   // the octet type
 pub type Char = struct { }   // a UTF-8 codepoint (1–4 bytes); distinct by tag, runtime layout == []byte
 pub type Str = struct { }   // validated UTF-8
@@ -129,7 +129,7 @@ pub type Void = struct { }   // return-only marker; legal ONLY as Func.ret
  */
 pub type Ptr = struct {
     /** the pointed-to type, or `null` for the opaque `ptr` ≡ `ptr<void>` ≡ `*void` (pointer-only, NOT the value-`void`). */
-    inner: Type | null
+    inner: @Type() | null
 }
 /**
  * Uptr — the checker representation of `uptr`, the opaque word-size unsigned integer FFI authors
@@ -151,7 +151,7 @@ pub type Uptr = struct { }   // (C7.1a) opaque word-size unsigned — transport-
  * is passed where `Reference` (i.e., `ref T`) is expected. C representation = bare `<T> *` today
  * (the `{p, metadata}` struct wrapper waits until regions/DI add metadata fields — W9+).
  */
-pub type Reference = struct { inner: Type }
+pub type Reference = struct { inner: @Type() }
 
 /**
  * The `null` unit type — the sole member of its own domain, a 1-byte zero-fill
@@ -163,24 +163,24 @@ pub type Reference = struct { inner: Type }
 pub type Null = struct { }
 
 // a semantic type. (Compiler-managed indirection for the recursive cases.)
-pub type Type = variant Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null
+macro Type() { lowering { checker::Prim | checker::Byte | checker::Char | checker::Str | checker::Slice | checker::Named | checker::Variant | checker::Func | checker::Error | checker::Void | checker::Ptr | checker::Uptr | checker::Reference | checker::Null } }
 
 // `void` recognition (M.3): the checker (Z2a) calls this to admit void in a
 // `Func.ret` position and to reject it everywhere else (value / binding / member).
-fn type_is_void(t: Type): bool {
+fn type_is_void(t: @Type()): bool {
     match t { Void => true; _ => false }
 }
 
 // (S-mem) two ptr inners equal: both null (opaque ptr) → equal; one null → not; else by type.
-fn ptr_inner_eq(a: Type | null, b: Type | null): bool {
+fn ptr_inner_eq(a: @Type() | null, b: @Type() | null): bool {
     match a {
-        null => match b { null => true; Type => false }
-        Type as ta => match b { null => false; Type as tb => type_eq(ta, tb) }
+        null => match b { null => true; (@Type()) as _gt5 => false }
+        (@Type()) as ta => match b { null => false; (@Type()) as tb => type_eq(ta, tb) }
     }
 }
 
 // nominal type equality (B.13): structural over the shape, but Named is by name.
-fn type_eq(a: Type, b: Type): bool {
+fn type_eq(a: @Type(), b: @Type()): bool {
     match a {
         Prim as pa => match b { Prim as pb => pa.kind == pb.kind; _ => false }
         Byte => match b { Byte => true; _ => false }
@@ -189,7 +189,7 @@ fn type_eq(a: Type, b: Type): bool {
         /* native `error` — the backend marker `Error{}` and a nominal reference to the checker's own
            `type Error` (`Named{"teko::checker::Error"}`, the form `@Type()`'s `Error` member resolves to)
            are the SAME element: a `@Type()` already carries the error case, so a surface `| error` unioned
-           onto it must DEDUPLICATE rather than emit a second tag (§9.D Type retirement). */
+           onto it must DEDUPLICATE rather than emit a second tag (§9.D @Type() retirement). */
         Error => match b { Error => true; Named as nb => nb.name == "teko::checker::Error"; _ => false }
         Void => match b { Void => true; _ => false }   // return-only marker
         // []T == []U iff elements equal (built-in unary former). A `teko::list::empty()` carries
@@ -213,14 +213,14 @@ fn type_eq(a: Type, b: Type): bool {
         Reference as ra => match b { Reference as rb => type_eq(ra.inner, rb.inner); _ => false }   // (MEM-1b) Ref<T> equal by referenced type (never null)
         /* the absence case — `Null{}` and the checker's own `type Null` (`Named{"teko::checker::Null"}`,
            `@Type()`'s `Null` member) are the SAME element, so a surface `| null` DEDUPLICATES against it
-           (§9.D Type retirement). Matched here by `type_eq`; `from_is_bare_null` is deliberately NOT
+           (§9.D @Type() retirement). Matched here by `type_eq`; `from_is_bare_null` is deliberately NOT
            widened, so a nominal `Named{…::Null}` member is never hoisted as a nullable-union marker. */
         Null => match b { Null => true; Named as nb => nb.name == "teko::checker::Null"; _ => false }
     }
 }
 
 // element-wise equality of two type lists (same length, each equal in order).
-fn types_eq(xs: []Type, ys: []Type): bool {
+fn types_eq(xs: []@Type(), ys: []@Type()): bool {
     if xs.len != ys.len { return false }
     var i = 0
     loop {
@@ -243,7 +243,7 @@ fn types_eq(xs: []Type, ys: []Type): bool {
  * @param t  the type to scan
  * @return   true iff `t` carries a `Reference` anywhere a value is stored
  */
-fn type_contains_ref(t: Type): bool {
+fn type_contains_ref(t: @Type()): bool {
     match t {
         Reference => true
         Slice as s => type_contains_ref(s.element)
@@ -253,7 +253,7 @@ fn type_contains_ref(t: Type): bool {
 }
 
 // any-of helper for type_contains_ref over a variant's member list.
-fn types_contain_ref(xs: []Type): bool {
+fn types_contain_ref(xs: []@Type()): bool {
     var i = 0
     loop {
         if i >= xs.len { break }
@@ -277,7 +277,7 @@ fn types_contain_ref(xs: []Type): bool {
  * @return   true iff `t` is a `Variant` whose members are exactly `{ null, Reference }`
  * @since 0.3.0.30 (null-union C5)
  */
-fn is_ref_null_variant(t: Type): bool {
+fn is_ref_null_variant(t: @Type()): bool {
     var ms = match t { Variant as v => v.members; _ => return false }
     if ms.len != 2 { return false }
     var has_null = false

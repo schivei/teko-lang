@@ -99,16 +99,16 @@ fn const_type_located(e: error, cd: parser::ConstDecl): error {
  * @return        the const's resolved value type, or a located error on an unknown type
  * @since #594
  */
-fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str): Type | error {
+fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str): @Type() | error {
     match resolve_type(cd.ty, table, ref_ns) {
-        Type as t => t
+        (@Type()) as t => t
         error as e => const_type_located(e, cd)
     }
 }
 
-fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): Type | error {
+fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): @Type() | error {
     var tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
-    var params: []Type = teko::list::empty()
+    var params: []@Type() = teko::list::empty()
     var param_names: []str = teko::list::empty()
     var defaults: []parser::Expr = teko::list::empty()
     var n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — the first has_default param's index; TRAILING-ONLY (rule A) means every param after it also defaults
@@ -119,7 +119,7 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): Type | error {
             return error { message = "a `_` discard parameter is only allowed when implementing an interface method or overriding a base method — a plain function must name its parameters" }
         }
         var pt = match resolve_type(f.params[i].type_ann, tbl, ref_ns) {
-            Type as t => t
+            (@Type()) as t => t
             error as e => return e
         }
         params = teko::list::push(params, pt)
@@ -133,7 +133,7 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): Type | error {
     // No `-> ret` ⇒ a void return (M.3) — f.return_type is the empty no_type() placeholder, NOT a
     // value type, so it must not be resolved. Mirrors typer.tks's function typer.
     var ret = if f.has_return {
-        match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
+        match resolve_type(f.return_type, tbl, ref_ns) { (@Type()) as t => t; error as e => return e }
     } else {
         Void { }
     }
@@ -199,9 +199,9 @@ fn return_type_is_self(te: @TypeExpr()): bool {
     }
 }
 
-fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref_ns: str): Type | error {
+fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref_ns: str): @Type() | error {
     var tbl = method_type_param_table(receiver_canonical_name(struct_name, ref_ns, table), f.type_params, f.type_constraints, "", table)
-    var params: []Type = teko::list::empty()
+    var params: []@Type() = teko::list::empty()
     var param_names: []str = teko::list::empty()
     var defaults: []parser::Expr = teko::list::empty()
     var n_required: u64 = f.params.len
@@ -210,13 +210,13 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
     loop {
         if i >= f.params.len { break }
         var pt = if !f.params[i].has_type && f.params[i].name == "_" {
-            match discard_param_type(disc_gov, i to u64, tbl, ref_ns) { Type as t => t; error as e => return e }
+            match discard_param_type(disc_gov, i to u64, tbl, ref_ns) { (@Type()) as t => t; error as e => return e }
         } else if !f.params[i].has_type {
             Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
         } else if return_type_is_self(f.params[i].type_ann) {
             Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
         } else {
-            match resolve_type(f.params[i].type_ann, tbl, ref_ns) { Type as t => t; error as e => return e }
+            match resolve_type(f.params[i].type_ann, tbl, ref_ns) { (@Type()) as t => t; error as e => return e }
         }
         params = teko::list::push(params, pt)
         param_names = teko::list::push(param_names, f.params[i].name)
@@ -235,7 +235,7 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
         if return_type_is_self(f.return_type) {
             Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
         } else {
-            match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
+            match resolve_type(f.return_type, tbl, ref_ns) { (@Type()) as t => t; error as e => return e }
         }
     } else {
         Void { }
@@ -332,7 +332,7 @@ fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env): SigOu
  */
 fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTable, env: Env): SigOutcome {
     match func_type(f, table, item.namespace) {
-        Type as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace); diags = teko::list::empty() }
+        (@Type()) as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace); diags = teko::list::empty() }
         error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, f.line, f.col, e)) }
     }
 }
@@ -349,7 +349,7 @@ fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTabl
  */
 fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: TypeTable, env: Env): SigOutcome {
     match collect_const_sig(cd, table, item.namespace) {
-        Type as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis); diags = teko::list::empty() }
+        (@Type()) as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis); diags = teko::list::empty() }
         error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, cd.line, cd.col, e)) }
     }
 }
@@ -406,7 +406,7 @@ fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: 
     loop {
         if i >= methods.len { break }
         match method_func_type(methods[i], td.name, table, item.namespace) {
-            Type as t => { out = define_fn(out, methods[i].name, t, method_ns) }
+            (@Type()) as t => { out = define_fn(out, methods[i].name, t, method_ns) }
             error as e => { diags = teko::list::push(diags, located_diag(item.file, methods[i].line, methods[i].col, e)) }
         }
         i++
@@ -468,7 +468,7 @@ fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env): Sig
     loop {
         if mi >= methods.len { break }
         match method_func_type(methods[mi], inst.name, table, "") {
-            Type as t => { out = define_fn(out, methods[mi].name, t, inst.name) }
+            (@Type()) as t => { out = define_fn(out, methods[mi].name, t, inst.name) }
             error as e => { diags = teko::list::push(diags, located_diag(inst.file, methods[mi].line, methods[mi].col, e)) }
         }
         mi++
@@ -1454,15 +1454,15 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
             k++
             continue
         }
-        var rt = match sig_return_type(req.params[rstart + k].type_ann, table, ref_ns, self_type) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace; a `self`-typed operator operand (§6) binds to the conforming type
-        var it = match sig_return_type(ip.type_ann, table, ref_ns, self_type) { Type as t => t; error => return false }
+        var rt = match sig_return_type(req.params[rstart + k].type_ann, table, ref_ns, self_type) { (@Type()) as t => t; error => return false }   /* (#109 W2) source-ref types resolve in the conforming type's namespace; a `self`-typed operator operand (§6) binds to the conforming type */
+        var it = match sig_return_type(ip.type_ann, table, ref_ns, self_type) { (@Type()) as t => t; error => return false }
         if !type_eq(rt, it) { return false }
         k++
     }
     if req.has_return != impl_m.has_return { return false }
     if req.has_return {
-        var rr = match sig_return_type(req.return_type, table, ref_ns, self_type) { Type as t => t; error => return false }
-        var ir = match sig_return_type(impl_m.return_type, table, ref_ns, self_type) { Type as t => t; error => return false }
+        var rr = match sig_return_type(req.return_type, table, ref_ns, self_type) { (@Type()) as t => t; error => return false }
+        var ir = match sig_return_type(impl_m.return_type, table, ref_ns, self_type) { (@Type()) as t => t; error => return false }
         if !type_eq(rr, ir) { return false }
     }
     true
@@ -1483,7 +1483,7 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
  * @return           the resolved Type
  * @throws           when `self` has no binding context, or the type-expression fails to resolve
  */
-fn sig_return_type(te: @TypeExpr(), table: TypeTable, ref_ns: str, self_type: str): Type | error {
+fn sig_return_type(te: @TypeExpr(), table: TypeTable, ref_ns: str, self_type: str): @Type() | error {
     if return_type_is_self(te) {
         if self_type == "" { return error { message = "a `self` return has no enclosing type in this context" } }
         return Named { name = receiver_canonical_name(self_type, ref_ns, table) }
@@ -1618,7 +1618,7 @@ fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Fu
  * @field type  the field's resolved type
  * @since 0.3.1
  */
-pub type FieldView = struct { name: str; type: Type }
+pub type FieldView = struct { name: str; type: @Type() }
 
 /**
  * resolve_field_view — resolve one `parser::Field` into a `FieldView` in `owner_ns` (the field's OWN
@@ -1633,7 +1633,7 @@ pub type FieldView = struct { name: str; type: Type }
  */
 fn resolve_field_view(f: parser::Field, table: TypeTable, owner_ns: str): FieldView | error {
     match resolve_type(f.type_ann, table, owner_ns) {
-        Type as t => FieldView { name = f.name; type = t }
+        (@Type()) as t => FieldView { name = f.name; type = t }
         error as e => e
     }
 }
@@ -2450,7 +2450,7 @@ fn validate_one_type_decl(reg: TypeReg, table: TypeTable): []str {
  */
 fn validate_field_slot(reg: TypeReg, field_name: str, ann: @TypeExpr(), tbl: TypeTable, table: TypeTable): []str {
     var ft = match resolve_type(ann, tbl, reg.namespace) {
-        Type as t => t
+        (@Type()) as t => t
         error as e => return one_diag(decl_error_diag(reg, e))
     }
     match ft {
@@ -2889,14 +2889,14 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
         match dep.items[j] {
             TFunction as f => {
                 var dtbl = type_param_table(f.type_params, f.type_constraints, "", t)
-                var params: []Type = teko::list::empty()
+                var params: []@Type() = teko::list::empty()
                 var param_names: []str = teko::list::empty()
                 var defaults: []parser::Expr = teko::list::empty()
                 var n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — see func_type
                 var pi: u64 = 0
                 loop {
                     if pi >= f.params.len { break }
-                    var pt = match resolve_type(f.params[pi].type_ann, dtbl, f.namespace) { Type as ty => ty; error as err => return err }   // (#109 W1) ref_ns = the dep fn's declaring namespace
+                    var pt = match resolve_type(f.params[pi].type_ann, dtbl, f.namespace) { (@Type()) as ty => ty; error as err => return err }   /* (#109 W1) ref_ns = the dep fn's declaring namespace */
                     params = teko::list::push(params, pt)
                     param_names = teko::list::push(param_names, f.params[pi].name)
                     if f.params[pi].has_default {

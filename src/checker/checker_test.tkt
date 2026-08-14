@@ -25,13 +25,13 @@ fn path1(name: str): parser::Path { parser::Path { segments = teko::list::push(t
 fn named_t(name: str): @TypeExpr() { parser::NamedType { path = path1(name); args = teko::list::empty() } }
 
 // --- Type/env constructors ---
-fn u32t(): Type { Prim { kind = PrimKind::U32 } }
-fn u8t(): Type { Prim { kind = PrimKind::U8 } }
-fn i64t(): Type { Prim { kind = PrimKind::I64 } }
-fn boolt(): Type { Prim { kind = PrimKind::Bool } }
+fn u32t(): @Type() { Prim { kind = PrimKind::U32 } }
+fn u8t(): @Type() { Prim { kind = PrimKind::U8 } }
+fn i64t(): @Type() { Prim { kind = PrimKind::I64 } }
+fn boolt(): @Type() { Prim { kind = PrimKind::Bool } }
 fn empty_env(): Env { Env { base_slots = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; file = ""; base_index = nidx_empty(); ret_expected = Void { } } }
 fn empty_table(): TypeTable { tt_empty() }
-fn prim_is(t: Type, k: PrimKind): bool { match t { Prim as p => p.kind == k; _ => false } }
+fn prim_is(t: @Type(), k: PrimKind): bool { match t { Prim as p => p.kind == k; _ => false } }
 
 // (2026-07-01) `~` and the FULL string-literal-kind matrix — plain/verbatim/multi-line all
 // decode to a plain StrLit by parse time (no flag leaks), so they fold identically; an
@@ -93,10 +93,10 @@ fn chain_stats_descends_loop_init() {
 }
 
 // --- C2 cast helpers ---
-fn i8t(): Type { Prim { kind = PrimKind::I8 } }
-fn i16t(): Type { Prim { kind = PrimKind::I16 } }
-fn i32t(): Type { Prim { kind = PrimKind::I32 } }
-fn strt(): Type { Str { } }
+fn i8t(): @Type() { Prim { kind = PrimKind::I8 } }
+fn i16t(): @Type() { Prim { kind = PrimKind::I16 } }
+fn i32t(): @Type() { Prim { kind = PrimKind::I32 } }
+fn strt(): @Type() { Str { } }
 /**
  * f32t — the `f32` primitive type, for the W-RULE tests below (`cast-width-hygiene-0.3.1.md`
  * C1). `u16t`/`u64t` (`comptime_fold_test.tkt`) and `f64t` (`consteval_test.tkt`) already
@@ -105,11 +105,11 @@ fn strt(): Type { Str { } }
  *
  * @return the `f32` primitive type
  */
-fn f32t(): Type { Prim { kind = PrimKind::F32 } }
+fn f32t(): @Type() { Prim { kind = PrimKind::F32 } }
 fn cast_of(varname: str, target_name: str): parser::Cast {
     parser::Cast { expr = e_var(varname); target = named_t(target_name) }
 }
-fn cast_types_to(varname: str, src: Type, target_name: str, want: PrimKind): bool {
+fn cast_types_to(varname: str, src: @Type(), target_name: str, want: PrimKind): bool {
     var env = define(empty_env(), varname, src, false)
     match type_cast(cast_of(varname, target_name), env, empty_table()) { TExpr as te => prim_is(te.type, want); error => false }
 }
@@ -142,8 +142,8 @@ fn same_type_cast_is_redundant_warning() {
 }
 
 // --- byte↔int cast helpers (byte casts AS u8 — B.36) ---
-fn bytet(): Type { Byte { } }
-fn cast_types_to_byte(varname: str, src: Type): bool {
+fn bytet(): @Type() { Byte { } }
+fn cast_types_to_byte(varname: str, src: @Type()): bool {
     var env = define(empty_env(), varname, src, false)
     match type_cast(cast_of(varname, "byte"), env, empty_table()) { TExpr as te => type_eq(te.type, Byte { }); error => false }
 }
@@ -172,8 +172,8 @@ fn foo_table(): TypeTable {
     tt_freeze(tt_push(tt_empty(), TypeReg { name = "Foo"; namespace = ""; file = ""; vis = parser::Visibility::Private; decl = foo_decl() }))
 }
 // --- C7: pattern checking + exhaustiveness over a variant Color = RED | GREEN | BLUE ---
-fn color_subject(): Type {
-    var members: []Type = teko::list::empty()
+fn color_subject(): @Type() {
+    var members: []@Type() = teko::list::empty()
     members = teko::list::push(members, Named { name = "RED" })
     members = teko::list::push(members, Named { name = "GREEN" })
     members = teko::list::push(members, Named { name = "BLUE" })
@@ -239,9 +239,9 @@ fn checker_basic_predicates() {
     teko::assert::is_true(prim_width(PrimKind::U64) == 64)
     teko::assert::is_true(prim_width(PrimKind::I8) == 8)
     // types_eq
-    var ts1: []Type = teko::list::push(teko::list::empty(), i64t())
-    var ts2: []Type = teko::list::push(teko::list::empty(), i64t())
-    var ts3: []Type = teko::list::push(teko::list::empty(), u32t())
+    var ts1: []@Type() = teko::list::push(teko::list::empty(), i64t())
+    var ts2: []@Type() = teko::list::push(teko::list::empty(), i64t())
+    var ts3: []@Type() = teko::list::push(teko::list::empty(), u32t())
     teko::assert::is_true(types_eq(teko::list::empty(), teko::list::empty()))
     teko::assert::is_true(types_eq(ts1, ts2))
     teko::assert::is_false(types_eq(ts1, ts3))
@@ -257,12 +257,12 @@ fn checker_basic_predicates() {
 #test
 fn checker_render_and_join() {
     // render_members directly — two-member variant renders with " | "
-    var m1: []Type = teko::list::push(teko::list::empty(), i64t())
-    var m2: []Type = teko::list::push(m1, Str { })
+    var m1: []@Type() = teko::list::push(teko::list::empty(), i64t())
+    var m2: []@Type() = teko::list::push(m1, Str { })
     var rms = render_members(m2)
     teko::assert::is_true(teko::str::contains(rms, "|"))
     // render_func directly — "(i64): str"
-    var fparams: []Type = teko::list::push(teko::list::empty(), i64t())
+    var fparams: []@Type() = teko::list::push(teko::list::empty(), i64t())
     var rf = render_func(Func { params = fparams; ret = Str { }; variadic = false; param_names = []; n_required = (fparams).len; defaults = []; ret_extra = teko::list::empty() })
     teko::assert::is_true(teko::str::contains(rf, "->"))
     // union_collect directly — accumulate two types
@@ -315,7 +315,7 @@ fn subst_unify_inference() {
     var tbl = tt_empty()
     var params: []str = teko::list::push(teko::list::empty(), "T")
     var s0 = Subst { params = params; names = teko::list::empty(); types = teko::list::empty() }
-    var patT: Type = Named { name = "T" }
+    var patT: @Type() = Named { name = "T" }
 
     // unify Named{T} ~ i64 binds T=i64; subst_type then yields i64.
     var s1 = match unify(patT, i64t(), s0, tbl) { Subst as x => x; error => s0 }
@@ -324,7 +324,7 @@ fn subst_unify_inference() {
     teko::assert::is_true(match subst_type(Named { name = "Other" }, s1) { Named as n => n.name == "Other"; _ => false })
 
     // unify []T ~ []str binds T=str; subst []T → []str (structural recursion).
-    var patSlice: Type = Slice { element = Named { name = "T" } }
+    var patSlice: @Type() = Slice { element = Named { name = "T" } }
     var s2 = match unify(patSlice, Slice { element = Str { } }, s0, tbl) { Subst as x => x; error => s0 }
     teko::assert::is_true(match subst_type(patSlice, s2) { Slice as sl => match sl.element { Str => true; _ => false }; _ => false })
 
@@ -332,7 +332,7 @@ fn subst_unify_inference() {
     teko::assert::is_true(match unify(patSlice, Slice { element = Void { } }, s0, tbl) { Subst => false; error => true })
 
     // collect_sig_type_params over Func{(T): T} → ["T"] (deduped).
-    var sig: Type = Func { params = teko::list::push(teko::list::empty(), Named { name = "T" }); ret = Named { name = "T" }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Named { name = "T" })).len; defaults = []; ret_extra = teko::list::empty() }
+    var sig: @Type() = Func { params = teko::list::push(teko::list::empty(), Named { name = "T" }); ret = Named { name = "T" }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Named { name = "T" })).len; defaults = []; ret_extra = teko::list::empty() }
     var tps = collect_sig_type_params(sig, tbl, teko::list::empty())
     teko::assert::is_true(tps.len == 1)
     teko::assert::is_true(tps[0] == "T")
@@ -360,7 +360,7 @@ fn resolves_generic_type_instantiation() {
     var inst = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Box" }) }; args = one }
     // (#110) `resolve_type` returns `Type | error`; `Named` is a case of the INNER `Type` variant,
     // not a direct case of the outer `Type | error` subject — double-match (Type as t => match t {…}).
-    teko::assert::is_true(match resolve_type(inst, tbl, "") { Type as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })
+    teko::assert::is_true(match resolve_type(inst, tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })
 
     // wrong arity Box<i64, str> → error
     var two: []@TypeExpr() = teko::list::push(teko::list::empty(), ttype_named("i64"))
@@ -369,10 +369,10 @@ fn resolves_generic_type_instantiation() {
     teko::assert::is_true(match resolve_type(inst2, tbl, "") { error => true; _ => false })
 
     // a plain `Box` (no args) still resolves nominally — no regression. (#110: double-match, see above.)
-    teko::assert::is_true(match resolve_type(ttype_named("Box"), tbl, "") { Type as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })
+    teko::assert::is_true(match resolve_type(ttype_named("Box"), tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })
 
     // generic_inst_name / type_mangle directly: Box + [i64, str] → "Box__g__i64__str".
-    var at: []Type = teko::list::push(teko::list::empty(), i64t())
+    var at: []@Type() = teko::list::push(teko::list::empty(), i64t())
     at = teko::list::push(at, Str { })
     teko::assert::is_true(generic_inst_name("Box", at) == "Box__g__i64__str")
 }
@@ -409,14 +409,14 @@ fn splits_and_recovers_a_generic_instance_names_base() {
 #test
 fn resolves_ptr_generic() {
     var ptr_i64 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), ttype_named("i64")) }
-    var pi = match resolve_type(ptr_i64, empty_table(), "") { Type as t => t; error => { teko::assert::is_true(false); return } }
+    var pi = match resolve_type(ptr_i64, empty_table(), "") { (@Type()) as t => t; error => { teko::assert::is_true(false); return } }
     // STRUCTURE (interpreter-safe): ptr<i64> → Ptr{inner present = i64}; opaque ptr = Ptr{inner null}; distinct.
     // (exact `ptr_i64`/`ptr<i64>` mangle/render is verified via real codegen, not here — the interpreter drops
     // a self-recursive match arm's string prefix; see selfhost-interp-perf.)
-    teko::assert::is_true(match pi { Ptr as p => match p.inner { null => false; Type as t => match t { Prim => true; _ => false } }; _ => false })
+    teko::assert::is_true(match pi { Ptr as p => match p.inner { null => false; (@Type()) as t => match t { Prim => true; _ => false } }; _ => false })
     teko::assert::is_true(type_eq(pi, pi))
-    var bare = match resolve_type(ttype_named("ptr"), empty_table(), "") { Type as t => t; error => { teko::assert::is_true(false); return } }
-    teko::assert::is_true(match bare { Ptr as p => match p.inner { null => true; Type => false }; _ => false })   // opaque ptr = null inner
+    var bare = match resolve_type(ttype_named("ptr"), empty_table(), "") { (@Type()) as t => t; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(match bare { Ptr as p => match p.inner { null => true; (@Type()) as _gt2 => false }; _ => false })   /* opaque ptr = null inner */
     teko::assert::is_true(!type_eq(bare, pi))   // opaque ptr ≠ ptr<i64>
 }
 
@@ -487,10 +487,10 @@ fn bind_pattern_explicit_type_args_resolves_instance() {
     var bp = parser::BindPattern { type_name = path1("Box"); has_binding = true; binding = "x"; is_slice = false; slice_type = null; type_args = args }
     // (#110) bind_pattern_type returns `Type | error`; Named is a case of the INNER `Type` variant —
     // double-match the outer Type case first.
-    teko::assert::is_true(match bind_pattern_type(bp, tbl, "") { Type as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })   // (#109 W1) ref_ns = "" in the test
+    teko::assert::is_true(match bind_pattern_type(bp, tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })   /* (#109 W1) ref_ns = "" in the test */
     // a bare bind (no type-args) keeps the base name (no regression).
     var plain = parser::BindPattern { type_name = path1("Box"); has_binding = true; binding = "x"; is_slice = false; slice_type = null; type_args = teko::list::empty() }
-    teko::assert::is_true(match bind_pattern_type(plain, tbl, "") { Type as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })   // (#109 W1) ref_ns = "" in the test
+    teko::assert::is_true(match bind_pattern_type(plain, tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })   /* (#109 W1) ref_ns = "" in the test */
 }
 
 // ---------------------------------------------------------------------------
@@ -503,11 +503,11 @@ fn bind_pattern_explicit_type_args_resolves_instance() {
 // ---------------------------------------------------------------------------
 
 // a typed VAR expr of a given type.
-fn tvar(name: str, t: Type): TExpr { TExpr { kind = TVar { name = name; is_func = false; func_ns = "" }; type = t; line = 0; col = 0 } }
+fn tvar(name: str, t: @Type()): TExpr { TExpr { kind = TVar { name = name; is_func = false; func_ns = "" }; type = t; line = 0; col = 0 } }
 // a typed integer literal (i64).
 fn tnum(v: i64): TExpr { TExpr { kind = TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = i64t(); line = 0; col = 0 } }
 // a generic TFunction `fn NAME<T>(x: PARAMSPELL): RET { body }`.
-fn gfn(name: str, param_ann: @TypeExpr(), ret: Type, body: []@TStatement()): TFunction {
+fn gfn(name: str, param_ann: @TypeExpr(), ret: @Type(), body: []@TStatement()): TFunction {
     var tps: []str = teko::list::push(teko::list::empty(), "T")
     var tcs: []@ConstraintExpr() = teko::list::push(teko::list::empty(), parser::NoConstraint { })
     var p = parser::Param { name = "x"; has_type = true; type_ann = param_ann; is_params = false; has_default = false; default_expr = e_num(0) }
@@ -515,11 +515,11 @@ fn gfn(name: str, param_ann: @TypeExpr(), ret: Type, body: []@TStatement()): TFu
     TFunction { overload_suffix = ""; name = name; type_params = tps; type_constraints = tcs; params = params; return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty() }
 }
 // a non-generic TFunction with a hand-built body.
-fn plainfn(name: str, ret: Type, body: []@TStatement()): TFunction {
+fn plainfn(name: str, ret: @Type(), body: []@TStatement()): TFunction {
     TFunction { overload_suffix = ""; name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty() }
 }
 // a typed call `NAME(arg)` with result type `rt`.
-fn tcall1(name: str, arg: TExpr, rt: Type): TExpr {
+fn tcall1(name: str, arg: TExpr, rt: @Type()): TExpr {
     var callee = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
     var args = teko::list::push(teko::list::empty(), arg)
     TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = rt; line = 0; col = 0 }
@@ -777,9 +777,9 @@ fn block_local_read_only_inside_block_is_block_local() {
 
 #test
 fn block_local_boxed_union_binding_is_block_local() {
-    var members: []Type = teko::list::push(teko::list::empty(), Null { })
+    var members: []@Type() = teko::list::push(teko::list::empty(), Null { })
     members = teko::list::push(members, Named { name = "Node" })
-    var union_t: Type = Variant { members = members }
+    var union_t: @Type() = Variant { members = members }
     var binding = TBinding {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = "n" }
@@ -1109,9 +1109,9 @@ fn subst_method_sig_names_skips_return_type_when_has_return_is_false() {
 }
 
 /** bigint_named — the `bigint` surface type (the runtime `BigInt` struct's canonical name). */
-fn bigint_named(): Type { Named { name = "teko::numeric::bigint::BigInt" } }
+fn bigint_named(): @Type() { Named { name = "teko::numeric::bigint::BigInt" } }
 /** dec_named — the `dec` surface type (the runtime `Decimal` struct's canonical name). */
-fn dec_named(): Type { Named { name = "teko::numeric::dec::Decimal" } }
+fn dec_named(): @Type() { Named { name = "teko::numeric::dec::Decimal" } }
 /** call_lowers_to — does a lowered operator `TExpr` call `<ns>::<fn>`? */
 fn call_lowers_to(te: TExpr, ns: str, fn_name: str): bool {
     match te.kind {
@@ -1335,7 +1335,7 @@ fn d1_class1_same_type_cast_keeps_its_node() {
  *
  * @return  the `Func` type `type_call`'s in-scope lookup resolves for such a declaration
  */
-fn shadow_exit_func(): Type {
+fn shadow_exit_func(): @Type() {
     Func { params = teko::list::push(teko::list::empty(), i32t()); ret = strt(); variadic = false; param_names = teko::list::push(teko::list::empty(), "code"); n_required = 1; defaults = teko::list::empty(); ret_extra = teko::list::empty() }
 }
 
@@ -1815,8 +1815,8 @@ fn var_binding_type_checks_end_to_end() {
  * @param pt  the sole parameter type
  * @return    `Func { (pt): i64 }`
  */
-fn one_param_func(pt: Type): Type {
-    var ps: []Type = teko::list::push(teko::list::empty(), pt)
+fn one_param_func(pt: @Type()): @Type() {
+    var ps: []@Type() = teko::list::push(teko::list::empty(), pt)
     Func { params = ps; ret = i64t(); variadic = false; param_names = []; n_required = 1 to u64; defaults = []; ret_extra = teko::list::empty() }
 }
 

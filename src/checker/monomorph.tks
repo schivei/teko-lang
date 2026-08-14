@@ -50,13 +50,13 @@ type MonoInst = struct { fn_name: str; mangled: str; s: Subst; owner_ns: str }
  * @param table     the folded type table
  * @return true iff `concrete` satisfies the atom
  */
-fn constraint_atom_satisfied(atom_name: str, concrete: Type, table: TypeTable): bool {
+fn constraint_atom_satisfied(atom_name: str, concrete: @Type(), table: TypeTable): bool {
     match type_table_find(table, atom_name, "") {   // (#109 W1) constraint-atom probe on a resolved name — no referencing ns
         parser::TypeDecl as td => {
             match td.body {
                 parser::VariantBody as vb => {
                     match resolve_type(vb.type_expr, table, "") {   // (#109 W1) variant-body expansion for constraint check — no referencing ns
-                        Type as t => match t {
+                        (@Type()) as t => match t {
                             Variant as v => {
                                 var i = 0
                                 loop {
@@ -83,7 +83,7 @@ fn constraint_atom_satisfied(atom_name: str, concrete: Type, table: TypeTable): 
 // parser's precedence — this just walks the already-built AND/OR tree, no precedence here).
 // The MULTI-field cases (ConstraintAnd/ConstraintOr) are matched BEFORE the single-/zero-field
 // cases (ConstraintAtom/NoConstraint) for correctness.
-fn constraint_satisfied(c: @ConstraintExpr(), concrete: Type, table: TypeTable): bool {
+fn constraint_satisfied(c: @ConstraintExpr(), concrete: @Type(), table: TypeTable): bool {
     match c {
         parser::ConstraintAnd as a => constraint_satisfied(a.left, concrete, table) && constraint_satisfied(a.right, concrete, table)
         parser::ConstraintOr as o => constraint_satisfied(o.left, concrete, table) || constraint_satisfied(o.right, concrete, table)
@@ -112,7 +112,7 @@ fn check_constraints(type_params: []str, type_constraints: []@ConstraintExpr(), 
             parser::NoConstraint => { }
             _ => {
                 var bound = match subst_find_inst(s, type_params[i]) {
-                    Type as t => t
+                    (@Type()) as t => t
                     null => return error { message = teko::string::concat("internal: monomorphization did not bind type parameter '", type_params[i], "'") }
                 }
                 if !constraint_satisfied(type_constraints[i], bound, table) {
@@ -147,7 +147,7 @@ type WFnList = struct { fns: []TFunction; insts: []MonoInst }
  * @param t  the concrete type to mangle
  * @return   its symbol-safe name fragment
  */
-fn mono_type_mangle(t: Type): str {
+fn mono_type_mangle(t: @Type()): str {
     match t {
         Prim as p => prim_name(p.kind)
         Str => "str"
@@ -233,7 +233,7 @@ fn mono_inst_concat(a: []MonoInst, b: []MonoInst): []MonoInst {
  * @param t  the resolved semantic type
  * @return   the syntactic type-expr codegen re-checks against `t`
  */
-pub fn type_to_texpr(t: Type): @TypeExpr() {   /* (W10) pub: codegen synthesizes lifted-lambda fn params from resolved Types */
+pub fn type_to_texpr(t: @Type()): @TypeExpr() {   /* (W10) pub: codegen synthesizes lifted-lambda fn params from resolved Types */
     match t {
         Prim as p => mono_named_texpr(prim_name(p.kind))
         Str => mono_named_texpr("str")
@@ -271,7 +271,7 @@ fn subst_typeexpr(te: @TypeExpr(), s: Subst): @TypeExpr() {
                 var nm = nt.path.segments[0].name
                 if is_type_param(nm, s.params) {
                     match subst_find_inst(s, nm) {
-                        Type as ct => return type_to_texpr(ct)
+                        (@Type()) as ct => return type_to_texpr(ct)
                         null => { }
                     }
                 }
@@ -319,7 +319,7 @@ fn subst_typeexpr_args(args: []@TypeExpr(), s: Subst): []@TypeExpr() {
 
 // find a type-param's bound concrete type in a Subst (the Subst's parallel names/types arrays).
 // (resolve.tks keeps subst_find private; monomorph needs its own copy. C: subst_find_inst.)
-fn subst_find_inst(s: Subst, name: str): Type | null {
+fn subst_find_inst(s: Subst, name: str): @Type() | null {
     var i = 0
     loop {
         if i >= s.names.len { break }
@@ -554,7 +554,7 @@ fn fn_sig_type_params(gf: TFunction, ptable: TypeTable, table: TypeTable): []str
         if i >= gf.params.len { break }
         if gf.params[i].has_type {
             match resolve_type(gf.params[i].type_ann, ptable, gf.namespace) {
-                Type as pt => acc = collect_sig_type_params(pt, table, acc)
+                (@Type()) as pt => acc = collect_sig_type_params(pt, table, acc)
                 error => { }
             }
         }
@@ -615,7 +615,7 @@ fn mono_call_subst(gf: TFunction, cl: TCall, args: []TExpr, s: Subst, owner_tps:
     loop {
         if gi >= args.len { break }   // args.len == gf.params.len (arity checked at typing); bound by the rewritten-arg list
         match resolve_type(gf.params[gi].type_ann, ptable, gf.namespace) {   // (#109 W1) ref_ns = the generic fn's declaring namespace
-            Type as pat => match unify(pat, args[gi].type, infs, table) {
+            (@Type()) as pat => match unify(pat, args[gi].type, infs, table) {
                 Subst as x => infs = x
                 error as er => { if !lenient { return er } }   // a receiver/owner-typed param binds no method type-param — skip when lenient
             }
@@ -1122,8 +1122,8 @@ fn instance_type_subst(template: parser::TypeDecl, inst: parser::TypeDecl, table
  */
 fn unify_field_pair(s: Subst, pat_ann: @TypeExpr(), con_ann: @TypeExpr(), ptable: TypeTable, table: TypeTable): Subst {
     match resolve_type(pat_ann, ptable, "") {
-        Type as pat => match resolve_type(con_ann, table, "") {
-            Type as concrete => match unify(pat, concrete, s, table) { Subst as x => x; error => s }
+        (@Type()) as pat => match resolve_type(con_ann, table, "") {
+            (@Type()) as concrete => match unify(pat, concrete, s, table) { Subst as x => x; error => s }
             error => s
         }
         error => s
@@ -1230,7 +1230,7 @@ fn instance_method_subst(template: parser::TypeDecl, template_ns: str, inst: par
  * @return           `s` with `from_name → to_type` added to params + names/types
  * @since onda-3 (#254)
  */
-fn subst_add_type_remap(s: Subst, from_name: str, to_type: Type): Subst {
+fn subst_add_type_remap(s: Subst, from_name: str, to_type: @Type()): Subst {
     Subst { params = teko::list::push(s.params, from_name); names = teko::list::push(s.names, from_name); types = teko::list::push(s.types, to_type) }
 }
 

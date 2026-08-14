@@ -20,7 +20,7 @@ use teko::parser
  * @see            docs/design/safety-spine.md §B2.1(a); docs/design/ref-transparent-model.md §7
  * @since          0.3.1.0-beta (#389 SP-1)
  */
-pub fn type_reaches_ref(t: Type, table: TypeTable, visited: []str): bool {
+pub fn type_reaches_ref(t: @Type(), table: TypeTable, visited: []str): bool {
     match t {
         Reference => true
         Slice as s => type_reaches_ref(s.element, table, visited)
@@ -40,7 +40,7 @@ pub fn type_reaches_ref(t: Type, table: TypeTable, visited: []str): bool {
  * @param visited  the recursion guard, threaded unchanged into each member
  * @return         true iff any element of `xs` reaches a `Reference`
  */
-fn types_reach_ref(xs: []Type, table: TypeTable, visited: []str): bool {
+fn types_reach_ref(xs: []@Type(), table: TypeTable, visited: []str): bool {
     var i = 0
     loop {
         if i >= xs.len { break }
@@ -124,7 +124,7 @@ fn type_decl_reaches_ref(td: parser::TypeDecl, table: TypeTable, visited: []str)
  */
 fn type_expr_reaches_ref(te: @TypeExpr(), table: TypeTable, visited: []str, owner_ns: str): bool {
     match resolve_type(te, table, owner_ns) {
-        Type as t => type_reaches_ref(t, table, visited)
+        (@Type()) as t => type_reaches_ref(t, table, visited)
         error => true
     }
 }
@@ -187,7 +187,7 @@ fn any_field_view_reaches_ref(views: []FieldView, table: TypeTable, visited: []s
  * @param t  the type under test
  * @return   true iff `t` is a `Func`
  */
-fn type_is_func(t: Type): bool {
+fn type_is_func(t: @Type()): bool {
     match t { Func => true; _ => false }
 }
 
@@ -392,7 +392,7 @@ fn u32_list_has(xs: []u32, v: u32): bool {
  * @param table  the program's type table
  * @return       the fallback accumulator for a value of type `t`
  */
-fn borrow_fallback(t: Type, table: TypeTable): BorrowAcc {
+fn borrow_fallback(t: @Type(), table: TypeTable): BorrowAcc {
     if type_reaches_ref(t, table, teko::list::empty()) { return widen_borrow() }
     if type_is_func(t) { return widen_borrow() }
     no_borrow()
@@ -436,7 +436,7 @@ fn resolve_borrow(e: TExpr, ctx: BorrowCtx, chain: []str, table: TypeTable): Bor
  * @param table  the program's type table
  * @return       the borrow contribution of reading `v`
  */
-fn resolve_var_borrow(v: TVar, t: Type, ctx: BorrowCtx, chain: []str, table: TypeTable): BorrowAcc {
+fn resolve_var_borrow(v: TVar, t: @Type(), ctx: BorrowCtx, chain: []str, table: TypeTable): BorrowAcc {
     if v.is_func { return no_borrow() }
     var pidx = str_list_index(ctx.param_names, v.name)
     if pidx >= 0 { return param_borrow(pidx to u32, t, table) }
@@ -458,7 +458,7 @@ fn resolve_var_borrow(v: TVar, t: Type, ctx: BorrowCtx, chain: []str, table: Typ
  * @param table  the program's type table
  * @return       `single_borrow(idx)` when relevant, else `no_borrow()`
  */
-fn param_borrow(idx: u32, t: Type, table: TypeTable): BorrowAcc {
+fn param_borrow(idx: u32, t: @Type(), table: TypeTable): BorrowAcc {
     if type_reaches_ref(t, table, teko::list::empty()) || type_is_func(t) {
         return single_borrow(idx)
     }
@@ -532,7 +532,7 @@ fn capture_as_var(c: TCapture): TExpr {
  * @param table        the program's type table
  * @return             the borrow contribution of the call's result
  */
-fn resolve_call_borrow(call: TCall, result_type: Type, ctx: BorrowCtx, chain: []str, table: TypeTable): BorrowAcc {
+fn resolve_call_borrow(call: TCall, result_type: @Type(), ctx: BorrowCtx, chain: []str, table: TypeTable): BorrowAcc {
     if call.is_closure_call { return borrow_fallback(result_type, table) }
     match borrow_summary_env_find(ctx.env, call_target_key(call)) {
         BorrowSummary as callee => compose_call_borrow(call, callee, ctx, chain, table)

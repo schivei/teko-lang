@@ -26,7 +26,7 @@ pub type ConstValue = struct { kind: CVInt | CVFloat | CVBool | CVBytes | CVAgg 
  * @field ty    the declared integer type (drives width, signedness, wrap/overflow)
  * @since #comptime-fold
  */
-pub type CVInt = struct { bits: u64; ty: Type }
+pub type CVInt = struct { bits: u64; ty: @Type() }
 
 /**
  * CVFloat — a float comptime value: the raw IEEE-754 bits (so re-emission and
@@ -88,7 +88,7 @@ type IntInfo = struct { width: u32; is_signed: bool }
  * @return      the integer ConstValue
  * @since #comptime-fold
  */
-fn cv_int(bits: u64, ty: Type): ConstValue { ConstValue { kind = CVInt { bits = bits; ty = ty } } }
+fn cv_int(bits: u64, ty: @Type()): ConstValue { ConstValue { kind = CVInt { bits = bits; ty = ty } } }
 
 /**
  * cv_float — wrap raw IEEE-754 bits into a float ConstValue.
@@ -265,7 +265,7 @@ fn is_all_ones(bits: u64, w: u32): bool { mask_to_width(bits, w) == width_mask(w
  * @return   the width/signedness, or an error when `t` is not an integer type the fold carries
  * @since #comptime-fold
  */
-fn int_info(t: Type): IntInfo | error {
+fn int_info(t: @Type()): IntInfo | error {
     match t {
         Prim as p => {
             if !prim_is_int(p.kind) { return error { message = "comptime fold: type is not an integer" } }
@@ -430,7 +430,7 @@ fn eval_number(n: TNumber, e: TExpr): ConstValue | error {
  * @return       the integer comptime value, or a located error
  * @since #comptime-fold
  */
-fn eval_int_literal(value: parser::NumInt, t: Type, e: TExpr): ConstValue | error {
+fn eval_int_literal(value: parser::NumInt, t: @Type(), e: TExpr): ConstValue | error {
     match int_info(t) {
         error => return const_form_error("comptime fold: a non-integer type on an integer literal (#comptime-fold)", e)
         IntInfo as info => encode_int_literal(value, info, t, e)
@@ -452,7 +452,7 @@ fn eval_int_literal(value: parser::NumInt, t: Type, e: TExpr): ConstValue | erro
  * @return       the integer comptime value, or a located out-of-range error
  * @since #comptime-fold
  */
-fn encode_int_literal(value: parser::NumInt, info: IntInfo, t: Type, e: TExpr): ConstValue | error {
+fn encode_int_literal(value: parser::NumInt, info: IntInfo, t: @Type(), e: TExpr): ConstValue | error {
     if value.neg {
         if !info.is_signed { return const_form_error("negative literal is out of range for an unsigned type (#comptime-fold)", e) }
         if value.mag > msb_value(info.width) { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
@@ -474,7 +474,7 @@ fn encode_int_literal(value: parser::NumInt, info: IntInfo, t: Type, e: TExpr): 
  * @return      the float comptime value, or a located error
  * @since #comptime-fold
  */
-fn eval_float_literal(fval: f64, t: Type, e: TExpr): ConstValue | error {
+fn eval_float_literal(fval: f64, t: @Type(), e: TExpr): ConstValue | error {
     match t {
         Prim as p => {
             if p.kind == PrimKind::F64 { return cv_float(teko::f64_bits(fval), false) }
@@ -514,7 +514,7 @@ fn eval_cast_expr(c: TCast, e: TExpr, table: TypeTable, env: Env, agg: AggConstM
  * @return        the converted comptime value, or a located error
  * @since #comptime-fold
  */
-fn apply_cast(v: ConstValue, target: Type, e: TExpr): ConstValue | error {
+fn apply_cast(v: ConstValue, target: @Type(), e: TExpr): ConstValue | error {
     match int_info(target) {
         IntInfo as dst => cast_to_int(v, target, dst, e)
         error => cast_to_non_int(v, target, e)
@@ -535,7 +535,7 @@ fn apply_cast(v: ConstValue, target: Type, e: TExpr): ConstValue | error {
  * @return        the byte-array aggregate value, or a located error
  * @since #comptime-fold
  */
-fn cast_to_non_int(v: ConstValue, target: Type, e: TExpr): ConstValue | error {
+fn cast_to_non_int(v: ConstValue, target: @Type(), e: TExpr): ConstValue | error {
     if !is_byte_slice(target) { return const_form_error("comptime fold: this cast target is not yet supported (#comptime-fold)", e) }
     match v.kind {
         CVBytes as cb => cv_agg(bytes_to_cv_elems(cb.data))
@@ -571,7 +571,7 @@ fn bytes_to_cv_elems(data: []byte): []ConstValue {
  * @return   true iff `t` is `[]byte`
  * @since #comptime-fold
  */
-fn is_byte_slice(t: Type): bool {
+fn is_byte_slice(t: @Type()): bool {
     match t {
         Slice as sl => is_byte_type(sl.element)
         _ => false
@@ -585,7 +585,7 @@ fn is_byte_slice(t: Type): bool {
  * @return   true iff `t` is `byte`
  * @since #comptime-fold
  */
-fn is_byte_type(t: Type): bool {
+fn is_byte_type(t: @Type()): bool {
     match t {
         Byte => true
         _ => false
@@ -604,7 +604,7 @@ fn is_byte_type(t: Type): bool {
  * @return        the integer comptime value, or a located error
  * @since #comptime-fold
  */
-fn cast_to_int(v: ConstValue, target: Type, dst: IntInfo, e: TExpr): ConstValue | error {
+fn cast_to_int(v: ConstValue, target: @Type(), dst: IntInfo, e: TExpr): ConstValue | error {
     match v.kind {
         CVInt as ci => cast_int_to_int(ci, target, dst, e)
         CVBool as cb => cv_int(if cb.v { 1 to u64 } else { 0 to u64 }, target)
@@ -623,7 +623,7 @@ fn cast_to_int(v: ConstValue, target: Type, dst: IntInfo, e: TExpr): ConstValue 
  * @return        the re-ranged integer value, or a located error
  * @since #comptime-fold
  */
-fn cast_int_to_int(ci: CVInt, target: Type, dst: IntInfo, e: TExpr): ConstValue | error {
+fn cast_int_to_int(ci: CVInt, target: @Type(), dst: IntInfo, e: TExpr): ConstValue | error {
     match int_info(ci.ty) {
         error as x => return x
         IntInfo as src => cast_int_widths(ci.bits, src, target, dst, e)
@@ -644,7 +644,7 @@ fn cast_int_to_int(ci: CVInt, target: Type, dst: IntInfo, e: TExpr): ConstValue 
  * @return        the re-encoded integer value, or a located out-of-range error
  * @since #comptime-fold
  */
-fn cast_int_widths(bits: u64, src: IntInfo, target: Type, dst: IntInfo, e: TExpr): ConstValue | error {
+fn cast_int_widths(bits: u64, src: IntInfo, target: @Type(), dst: IntInfo, e: TExpr): ConstValue | error {
     if is_negative(bits, src) {
         if !dst.is_signed { return const_form_error("constant is out of range for the cast target (a negative value to an unsigned type) (#comptime-fold)", e) }
         var m = twos_neg(bits, src.width)
@@ -766,7 +766,7 @@ fn int_unary_at(op: lexer::TokenKind, ci: CVInt, info: IntInfo, e: TExpr): Const
  * @return      the negated integer value, or a located out-of-range error
  * @since #comptime-fold
  */
-fn int_negate(a: u64, info: IntInfo, ty: Type, e: TExpr): ConstValue | error {
+fn int_negate(a: u64, info: IntInfo, ty: @Type(), e: TExpr): ConstValue | error {
     if !info.is_signed {
         if mask_to_width(a, info.width) == (0 to u64) { return cv_int(0 to u64, ty) }
         return const_form_error("negation of a non-zero unsigned constant is out of range (#comptime-fold)", e)
@@ -1325,7 +1325,7 @@ fn int_binop_dispatch(op: lexer::TokenKind, la: CVInt, ra: CVInt, info: IntInfo,
  * @return      the folded sum, or a located overflow error
  * @since #comptime-fold
  */
-fn int_add(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr): ConstValue | error {
+fn int_add(a: u64, b: u64, info: IntInfo, ty: @Type(), e: TExpr): ConstValue | error {
     var raw = a + b
     var res = mask_to_width(raw, info.width)
     if int_add_overflows(a, b, res, raw, info) { return const_form_error("integer overflow in a constant `+` (out of range for its type) (#comptime-fold)", e) }
@@ -1370,7 +1370,7 @@ fn int_add_overflows(a: u64, b: u64, res: u64, raw: u64, info: IntInfo): bool {
  * @return      the folded difference, or a located overflow error
  * @since #comptime-fold
  */
-fn int_sub(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr): ConstValue | error {
+fn int_sub(a: u64, b: u64, info: IntInfo, ty: @Type(), e: TExpr): ConstValue | error {
     var res = mask_to_width(a + twos_neg(b, info.width), info.width)
     if int_sub_overflows(a, b, res, info) { return const_form_error("integer overflow in a constant `-` (out of range for its type) (#comptime-fold)", e) }
     cv_int(res, ty)
@@ -1410,7 +1410,7 @@ fn int_sub_overflows(a: u64, b: u64, res: u64, info: IntInfo): bool {
  * @return      the folded product, or a located overflow error
  * @since #comptime-fold
  */
-fn int_mul(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr): ConstValue | error {
+fn int_mul(a: u64, b: u64, info: IntInfo, ty: @Type(), e: TExpr): ConstValue | error {
     var res = mask_to_width(a * b, info.width)
     if int_mul_overflows(a, b, info) { return const_form_error("integer overflow in a constant `*` (out of range for its type) (#comptime-fold)", e) }
     cv_int(res, ty)
@@ -1501,7 +1501,7 @@ fn mul_mag_overflows(x: u64, y: u64): bool { x != (0 to u64) && ((x * y) / x != 
  * @throws        a located error when the divisor is zero or a signed `MIN / -1` overflows
  * @since #comptime-fold
  */
-fn int_divrem(is_div: bool, a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr): ConstValue | error {
+fn int_divrem(is_div: bool, a: u64, b: u64, info: IntInfo, ty: @Type(), e: TExpr): ConstValue | error {
     if mask_to_width(b, info.width) == (0 to u64) { return divrem_zero_error(is_div, e) }
     if info.is_signed && is_min_bits(a, info) && is_all_ones(b, info.width) { return const_form_error("integer overflow in a constant signed division (MIN / -1) (#comptime-fold)", e) }
     if !info.is_signed { return cv_int(mask_to_width(if is_div { a / b } else { a % b }, info.width), ty) }
@@ -1537,7 +1537,7 @@ fn divrem_zero_error(is_div: bool, e: TExpr): error {
  * @return      the folded signed quotient
  * @since #comptime-fold
  */
-fn int_div_signed(ua: u64, ub: u64, a: u64, b: u64, info: IntInfo, ty: Type): ConstValue | error {
+fn int_div_signed(ua: u64, ub: u64, a: u64, b: u64, info: IntInfo, ty: @Type()): ConstValue | error {
     var uq = ua / ub
     var neg = bit_set(a, info.width - 1) != bit_set(b, info.width - 1)
     var res = if neg { twos_neg(uq, info.width) } else { uq }
@@ -1556,7 +1556,7 @@ fn int_div_signed(ua: u64, ub: u64, a: u64, b: u64, info: IntInfo, ty: Type): Co
  * @return      the folded signed remainder
  * @since #comptime-fold
  */
-fn int_rem_signed(ua: u64, ub: u64, a: u64, info: IntInfo, ty: Type): ConstValue | error {
+fn int_rem_signed(ua: u64, ub: u64, a: u64, info: IntInfo, ty: @Type()): ConstValue | error {
     var ur = ua % ub
     var neg = bit_set(a, info.width - 1)
     var res = if neg { twos_neg(ur, info.width) } else { ur }
@@ -1678,7 +1678,7 @@ fn float_div(x: f64, y: f64, e: TExpr): ConstValue | error {
  * @return   whether `t` is an integer/byte type the fold carries
  * @since #comptime-fold
  */
-fn cf_is_int_type(t: Type): bool {
+fn cf_is_int_type(t: @Type()): bool {
     match int_info(t) {
         IntInfo => true
         error => false
@@ -1987,7 +1987,7 @@ fn cv_int_to_numint(bits: u64, info: IntInfo): parser::NumInt | null {
  * @return      a literal `TExpr` carrying `v` typed `ty`, or null when `v` has no literal form
  * @since #comptime-fold
  */
-fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32): TExpr | null {
+fn literal_of(v: ConstValue, ty: @Type(), line: u32, col: u32): TExpr | null {
     match v.kind {
         CVInt as ci => int_literal_of(ci, ty, line, col)
         _ => null
@@ -2005,7 +2005,7 @@ fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32): TExpr | null {
  * @return      the `TNumber` literal, or null when unrepresentable
  * @since #comptime-fold
  */
-fn int_literal_of(ci: CVInt, ty: Type, line: u32, col: u32): TExpr | null {
+fn int_literal_of(ci: CVInt, ty: @Type(), line: u32, col: u32): TExpr | null {
     match int_info(ty) {
         error => null
         IntInfo as info => match cv_int_to_numint(ci.bits, info) {
@@ -2036,7 +2036,7 @@ fn int_literal_of(ci: CVInt, ty: Type, line: u32, col: u32): TExpr | null {
  * @return       a literal `TExpr` carrying `v` typed `ty`, or null when `v` has no literal form
  * @since #comptime-fold (Family-B B2)
  */
-pub fn comptime_literal_of(v: ConstValue, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+pub fn comptime_literal_of(v: ConstValue, ty: @Type(), table: TypeTable, line: u32, col: u32): TExpr | null {
     match v.kind {
         CVInt as ci => int_literal_of(ci, ty, line, col)
         CVBool as cb => bool_literal_of(cb, ty, line, col)
@@ -2058,7 +2058,7 @@ pub fn comptime_literal_of(v: ConstValue, ty: Type, table: TypeTable, line: u32,
  * @return      the `TBoolLit` literal
  * @since #comptime-fold (Family-B B2)
  */
-fn bool_literal_of(cb: CVBool, ty: Type, line: u32, col: u32): TExpr | null {
+fn bool_literal_of(cb: CVBool, ty: @Type(), line: u32, col: u32): TExpr | null {
     TExpr { kind = TBoolLit { value = cb.v }; type = ty; line = line; col = col }
 }
 
@@ -2076,7 +2076,7 @@ fn bool_literal_of(cb: CVBool, ty: Type, line: u32, col: u32): TExpr | null {
  * @return      the float `TNumber` literal, or null for an f32
  * @since #comptime-fold (Family-B B2)
  */
-fn float_literal_of(cf: CVFloat, ty: Type, line: u32, col: u32): TExpr | null {
+fn float_literal_of(cf: CVFloat, ty: @Type(), line: u32, col: u32): TExpr | null {
     if cf.is_f32 { return null }
     TExpr { kind = TNumber { is_float = true; value = parser::numint_of_u64(0); fval = teko::f64_from_bits(cf.bits) }; type = ty; line = line; col = col }
 }
@@ -2094,7 +2094,7 @@ fn float_literal_of(cf: CVFloat, ty: Type, line: u32, col: u32): TExpr | null {
  * @return      the string/char/byte-array literal, or null when `ty` carries no bytes literal
  * @since #comptime-fold (Family-B B2)
  */
-fn bytes_literal_of(cb: CVBytes, ty: Type, line: u32, col: u32): TExpr | null {
+fn bytes_literal_of(cb: CVBytes, ty: @Type(), line: u32, col: u32): TExpr | null {
     match ty {
         Str => TExpr { kind = TStrLit { text = str_of_bytes(cb.data) }; type = ty; line = line; col = col }
         Char => TExpr { kind = TCharLit { bytes = str_of_bytes(cb.data) }; type = ty; line = line; col = col }
@@ -2116,7 +2116,7 @@ fn bytes_literal_of(cb: CVBytes, ty: Type, line: u32, col: u32): TExpr | null {
  * @return      the `[]byte` `TArrayLit`, or null when the slice element is not `byte`
  * @since #comptime-fold (Family-B B2)
  */
-fn byte_array_literal_of(cb: CVBytes, sl: Slice, ty: Type, line: u32, col: u32): TExpr | null {
+fn byte_array_literal_of(cb: CVBytes, sl: Slice, ty: @Type(), line: u32, col: u32): TExpr | null {
     if !is_byte_type(sl.element) { return null }
     var elems: []TArrayElem = teko::list::empty()
     var i: u64 = 0
@@ -2144,7 +2144,7 @@ fn byte_array_literal_of(cb: CVBytes, sl: Slice, ty: Type, line: u32, col: u32):
  * @return       the array / struct literal, or null when `ty` is not an aggregate shape
  * @since #comptime-fold (Family-B B2)
  */
-fn agg_literal_of(ag: CVAgg, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+fn agg_literal_of(ag: CVAgg, ty: @Type(), table: TypeTable, line: u32, col: u32): TExpr | null {
     match ty {
         Slice as sl => array_literal_of(ag, sl.element, ty, table, line, col)
         Named as nm => struct_literal_of(ag, nm, ty, table, line, col)
@@ -2166,7 +2166,7 @@ fn agg_literal_of(ag: CVAgg, ty: Type, table: TypeTable, line: u32, col: u32): T
  * @return         the `TArrayLit`, or null when an element cannot be reconstructed
  * @since #comptime-fold (Family-B B2)
  */
-fn array_literal_of(ag: CVAgg, elem_ty: Type, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+fn array_literal_of(ag: CVAgg, elem_ty: @Type(), ty: @Type(), table: TypeTable, line: u32, col: u32): TExpr | null {
     var elems: []TArrayElem = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -2196,7 +2196,7 @@ fn array_literal_of(ag: CVAgg, elem_ty: Type, ty: Type, table: TypeTable, line: 
  * @return       the `TStructInit`, or null when the struct cannot be reconstructed
  * @since #comptime-fold (Family-B B2)
  */
-fn struct_literal_of(ag: CVAgg, nm: Named, ty: Type, table: TypeTable, line: u32, col: u32): TExpr | null {
+fn struct_literal_of(ag: CVAgg, nm: Named, ty: @Type(), table: TypeTable, line: u32, col: u32): TExpr | null {
     var fvs = match deriver_field_view(nm.name, table) {
         []FieldView as v => v
         error => return null
@@ -4027,7 +4027,7 @@ fn cf_format_none_prim(v: ConstValue, p: Prim): []byte | error {
  * @return         the rendered bytes, or an error to leave the hole runtime
  * @since #comptime-fold
  */
-fn cf_format_none(v: ConstValue, hole_ty: Type): []byte | error {
+fn cf_format_none(v: ConstValue, hole_ty: @Type()): []byte | error {
     match hole_ty {
         Str => cf_bytes_value(v)
         Char => cf_bytes_value(v)
@@ -4058,7 +4058,7 @@ fn cf_format_none(v: ConstValue, hole_ty: Type): []byte | error {
  * @throws         an error for a float / dynamic / unrecognized spec, or a value/type kind mismatch
  * @since #comptime-fold
  */
-pub fn comptime_format(v: ConstValue, sp: TFSpec, hole_ty: Type): []byte | error {
+pub fn comptime_format(v: ConstValue, sp: TFSpec, hole_ty: @Type()): []byte | error {
     match sp.kind {
         TFSpecStatic as fs => cf_format_static(v, fs.s)
         TFSpecDynamic => error { message = "comptime fold: a dynamic format spec is not folded (#comptime-fold)" }
@@ -4095,7 +4095,7 @@ fn cf_is_const_literal(e: TExpr): bool {
  * @return   whether the natural-form fold applies
  * @since #comptime-fold
  */
-fn cf_none_spec_ok(t: Type): bool {
+fn cf_none_spec_ok(t: @Type()): bool {
     match t {
         Str => true
         Char => true
@@ -4116,7 +4116,7 @@ fn cf_none_spec_ok(t: Type): bool {
  * @return      whether the static-spec fold applies
  * @since #comptime-fold
  */
-fn cf_static_spec_ok(spec: str, t: Type): bool {
+fn cf_static_spec_ok(spec: str, t: @Type()): bool {
     if !cf_is_int_type(t) { return false }
     if spec.len == (0 to u64) { return false }
     var fc_low = cf_spec_lead_low(spec)

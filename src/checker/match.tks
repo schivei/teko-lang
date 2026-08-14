@@ -17,7 +17,7 @@ fn enum_has_member(eb: parser::EnumBody, name: str): bool {
 // carry NO data). `U8` and `PrimKind::U8` both name member "U8" (by the LAST path segment, like the
 // `Type::Member` enum-value form). `_` matches anything; an Alt checks each option; `as x` binds the
 // whole enum value. (Mirror of match.c check_enum_pattern.)
-fn check_enum_pattern(p: @Pattern(), subject: Type, eb: parser::EnumBody, env: Env, table: TypeTable): Env | error {
+fn check_enum_pattern(p: @Pattern(), subject: @Type(), eb: parser::EnumBody, env: Env, table: TypeTable): Env | error {
     match p {
         parser::WildcardPattern => env
         parser::BindPattern as bp => {
@@ -63,7 +63,7 @@ fn check_enum_pattern(p: @Pattern(), subject: Type, eb: parser::EnumBody, env: E
  * @return                 true iff `named` is a legal discriminant of the subject
  * @see                    subclass_reaches, type_conforms_to
  */
-fn is_direct_case_of(named: Type, subject_variant: Type, raw_subject: Type, table: TypeTable): bool {
+fn is_direct_case_of(named: @Type(), subject_variant: @Type(), raw_subject: @Type(), table: TypeTable): bool {
     if type_eq(named, raw_subject) { return true }
     match subject_variant {
         Variant as v => {
@@ -91,7 +91,7 @@ fn is_direct_case_of(named: Type, subject_variant: Type, raw_subject: Type, tabl
  * @param table    the program's type table
  * @return         true iff `named` legally discriminates `subject`
  */
-fn is_type_discriminant_of(named: Type, subject: Type, table: TypeTable): bool {
+fn is_type_discriminant_of(named: @Type(), subject: @Type(), table: TypeTable): bool {
     match subject {
         Named as sn => match named {
             Named as an => {
@@ -117,7 +117,7 @@ fn is_type_discriminant_of(named: Type, subject: Type, table: TypeTable): bool {
  * @param table            the program's type table
  * @return                 the placed rejection error
  */
-fn discriminant_mismatch_error(named: Type, subject: Type, subject_variant: Type, table: TypeTable): error {
+fn discriminant_mismatch_error(named: @Type(), subject: @Type(), subject_variant: @Type(), table: TypeTable): error {
     match subject {
         Named as sn => {
             if is_polymorphic_base(sn.name, table) { return error { message = $"'{type_render(named)}' is not a subclass of '{sn.name}'" } }
@@ -135,7 +135,7 @@ fn discriminant_mismatch_error(named: Type, subject: Type, subject_variant: Type
 // member Type when found (the arm binds exactly that case), else null (fall to resolve_named/R0-R4).
 // A non-variant subject (subject_variant is not a Variant) yields null — nothing contextual to bind.
 // Mirror of match.c::variant_member_by_name.
-fn variant_member_by_name(subject_variant: Type, last: str): Type | null {
+fn variant_member_by_name(subject_variant: @Type(), last: str): @Type() | null {
     match subject_variant {
         Variant as v => {
             var i = 0
@@ -157,7 +157,7 @@ fn variant_member_by_name(subject_variant: Type, last: str): Type | null {
 // only to build a concrete, pasteable hint (`FooBar as v => match v { Foo as x => … }` rather than
 // the whole `FooBar | error` union, which is not a nameable bind pattern). Mirror of
 // match.c::find_containing_case (returns null when no direct member's expansion contains `named`).
-fn find_containing_case(named: Type, subject: Type, table: TypeTable): Type | null {
+fn find_containing_case(named: @Type(), subject: @Type(), table: TypeTable): @Type() | null {
     match subject {
         Variant as v => {
             var i = 0
@@ -187,10 +187,10 @@ fn find_containing_case(named: Type, subject: Type, table: TypeTable): Type | nu
 // own expansion contains the arm's case (the common shape — a nested named variant), the hint
 // names THAT member (a real, pasteable bind pattern); otherwise it falls back to the whole subject.
 // Mirror of match.c::skip_level_error.
-fn skip_level_error(arm_type: Type, subject: Type, table: TypeTable): error {
+fn skip_level_error(arm_type: @Type(), subject: @Type(), table: TypeTable): error {
     var arm_s = type_render(arm_type)
     var subj_s = type_render(subject)
-    var hint_s = match find_containing_case(arm_type, subject, table) { Type as t => type_render(t); null => subj_s }
+    var hint_s = match find_containing_case(arm_type, subject, table) { (@Type()) as t => type_render(t); null => subj_s }
     error { message = $"'{arm_s}' is not a direct case of '{subj_s}' — match the outer case first ({hint_s} as v => match v {{ {arm_s} as x => … }})" }
 }
 
@@ -201,7 +201,7 @@ fn skip_level_error(arm_type: Type, subject: Type, table: TypeTable): error {
  * @param t  the subject's variant view (from `expand_variant`)
  * @return   true iff `t` is a `Variant` one of whose members is `Null`
  */
-fn variant_has_null_member(t: Type): bool {
+fn variant_has_null_member(t: @Type()): bool {
     match t {
         Variant as v => {
             var i = 0
@@ -228,7 +228,7 @@ fn variant_has_null_member(t: Type): bool {
  * @throws       when `t` names a trait
  * @since 0.3.1 (§9.4 revised)
  */
-fn reject_trait_in_match(t: Type, table: TypeTable, where: str): null | error {
+fn reject_trait_in_match(t: @Type(), table: TypeTable, where: str): null | error {
     match t {
         Named as n => if is_trait_name(n.name, table) { error { message = $"cannot match on trait `{n.name}` in {where} position — a trait has no discriminant (§9.4)" } } else { null }
         _ => null
@@ -269,7 +269,7 @@ fn reject_trait_case(p: @Pattern(), table: TypeTable): null | error {
  * @param table    the type table
  * @return         the env extended with the pattern's bindings, or an error
  */
-fn check_pattern(p: @Pattern(), subject: Type, env: Env, table: TypeTable): Env | error {
+fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): Env | error {
     match reject_trait_in_match(subject, table, "subject") { error as e => return e; null => { } }
     match reject_trait_case(p, table) { error as e => return e; null => { } }
     // ENUM subject (C7b): member patterns, not type binds — detected before the generic match so a
@@ -306,11 +306,11 @@ fn check_pattern(p: @Pattern(), subject: Type, env: Env, table: TypeTable): Env 
             // against the subject variant's members — a bare cross-namespace case name still binds.
             var ct = if !bp.is_slice && bp.type_args.len == 0 {
                 match variant_member_by_name(subject_variant, bp.type_name.segments[bp.type_name.segments.len - 1].name) {
-                    Type as m => m
-                    null => match bind_pattern_type(bp, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109) ref_ns = the match's enclosing namespace → R0-R4
+                    (@Type()) as m => m
+                    null => match bind_pattern_type(bp, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }   /* (#109) ref_ns = the match's enclosing namespace → R0-R4 */
                 }
             } else {
-                match bind_pattern_type(bp, table, env.cur_ns) { Type as t => t; error as e => return e }
+                match bind_pattern_type(bp, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
             }
             // (#110) reject a SKIP-LEVEL arm: `ct` names a type that is not a direct case of the
             // subject's own union (it may be a case of an INNER variant nested inside one of the
@@ -332,8 +332,8 @@ fn check_pattern(p: @Pattern(), subject: Type, env: Env, table: TypeTable): Env 
             // (#109 W2, R5) resolve the case name CONTEXTUALLY against the subject variant's members
             // first (a bare cross-namespace case still binds), else fall to resolve_named/R0-R4.
             var nt = match variant_member_by_name(subject_variant, fp.type_name.segments[fp.type_name.segments.len - 1].name) {
-                Type as m => m
-                null => match resolve_named(fp.type_name, table, env.cur_ns, 0) { Type as t => t; error as e => return e }
+                (@Type()) as m => m
+                null => match resolve_named(fp.type_name, table, env.cur_ns, 0) { (@Type()) as t => t; error as e => return e }
             }
             var name = match nt {
                 Named as n => n.name
@@ -354,7 +354,7 @@ fn check_pattern(p: @Pattern(), subject: Type, env: Env, table: TypeTable): Env 
             var i = 0
             loop {
                 if i >= fp.fields.len { break }
-                var ft = match field_type(sb_fields, fp.fields[i], table, type_ns_of(table, name)) { Type as t => t; error as e => return e }
+                var ft = match field_type(sb_fields, fp.fields[i], table, type_ns_of(table, name)) { (@Type()) as t => t; error as e => return e }
                 e2 = define(e2, fp.fields[i], ft, false)   // B.21 — match-binding immutable
                 i++
             }
@@ -391,7 +391,7 @@ fn check_pattern(p: @Pattern(), subject: Type, env: Env, table: TypeTable): Env 
             env   // binds nothing
         }
         parser::GroupBindPattern as gp => {
-            var sub = match group_bind_subunion(gp, subject, table, env.cur_ns) { Type as t => t; error as e => return e }
+            var sub = match group_bind_subunion(gp, subject, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
             define(env, gp.binding, sub, false)
         }
         parser::MacroPattern => error { message = "internal: an unexpanded @Type() macro reached pattern checking — it should be expanded by the Family-A pre-pass (§9.D CR3)" }
@@ -414,11 +414,11 @@ fn check_pattern(p: @Pattern(), subject: Type, env: Env, table: TypeTable): Env 
  * @throws         when an option is not a bare case name, or the group is not a nested member of the subject
  * @since          §9.D capability (c)
  */
-fn group_bind_subunion(gp: parser::GroupBindPattern, subject: Type, table: TypeTable, ref_ns: str): Type | error {
+fn group_bind_subunion(gp: parser::GroupBindPattern, subject: @Type(), table: TypeTable, ref_ns: str): @Type() | error {
     var subject_variant = expand_variant(subject, table)
-    var candidate = match group_candidate(gp, table, ref_ns) { Type as t => t; error as e => return e }
+    var candidate = match group_candidate(gp, table, ref_ns) { (@Type()) as t => t; error as e => return e }
     match group_member_of(subject_variant, candidate) {
-        Type as m => m
+        (@Type()) as m => m
         null => error { message = "the grouped bind '(… | …) as v' does not match a nested union member of the subject — its options must be exactly the cases of one nested `(… | …)` member (§9.D)" }
     }
 }
@@ -436,12 +436,12 @@ fn group_bind_subunion(gp: parser::GroupBindPattern, subject: Type, table: TypeT
  * @throws        when an option is not a bare case name or does not resolve
  * @since         §9.D capability (c)
  */
-fn group_candidate(gp: parser::GroupBindPattern, table: TypeTable, ref_ns: str): Type | error {
-    var opts: []Type = teko::list::empty()
+fn group_candidate(gp: parser::GroupBindPattern, table: TypeTable, ref_ns: str): @Type() | error {
+    var opts: []@Type() = teko::list::empty()
     var i = 0
     loop {
         if i >= gp.options.len { break }
-        var ot = match group_option_type(gp.options[i], table, ref_ns) { Type as t => t; error as e => return e }
+        var ot = match group_option_type(gp.options[i], table, ref_ns) { (@Type()) as t => t; error as e => return e }
         opts = teko::list::push(opts, ot)
         i++
     }
@@ -459,7 +459,7 @@ fn group_candidate(gp: parser::GroupBindPattern, table: TypeTable, ref_ns: str):
  * @throws        when the option is not a bare case name
  * @since         §9.D capability (c)
  */
-fn group_option_type(p: @Pattern(), table: TypeTable, ref_ns: str): Type | error {
+fn group_option_type(p: @Pattern(), table: TypeTable, ref_ns: str): @Type() | error {
     match p {
         parser::BindPattern as bp => if bp.is_slice { error { message = "a grouped bind option must be a bare case name, not a slice pattern" } } else { bind_pattern_type(bp, table, ref_ns) }
         // a NESTED group option — the §9.D union-of-unions member the expander left nested (e.g.
@@ -480,7 +480,7 @@ fn group_option_type(p: @Pattern(), table: TypeTable, ref_ns: str): Type | error
  * @return                 the matching nested member, or null
  * @since                  §9.D capability (c)
  */
-fn group_member_of(subject_variant: Type, candidate: Type): Type | null {
+fn group_member_of(subject_variant: @Type(), candidate: @Type()): @Type() | null {
     match subject_variant {
         Variant as v => {
             var i = 0
@@ -518,7 +518,7 @@ fn has_wildcard(arms: []parser::Arm): bool {
 // so exhaustiveness over a `variant Gen<i64> | …` covers the `Gen<i64> as x` arm by the member's name.
 fn bind_case_name(bp: parser::BindPattern, table: TypeTable, ref_ns: str): str {
     if bp.type_args.len > 0 {
-        var ct = match bind_pattern_type(bp, table, ref_ns) { Type as t => t; error => Void { } }   // (#109 W2) generic-instance case name resolves in the match's namespace
+        var ct = match bind_pattern_type(bp, table, ref_ns) { (@Type()) as t => t; error => Void { } }   /* (#109 W2) generic-instance case name resolves in the match's namespace */
         match ct {
             Named as n => return n.name
             _ => { }
@@ -557,7 +557,7 @@ fn arm_case_names(p: @Pattern(), table: TypeTable, ref_ns: str): []str {
 // (validates arity / rejects non-generic-with-args), so exhaustiveness/binding use the stamped type.
 // (#109 W1) `ref_ns` = the namespace of the match arm (referencing ns for the pattern's type name);
 // threaded to resolve_type/resolve_named, unused until W2's R0-R5 rules.
-fn bind_pattern_type(bp: parser::BindPattern, table: TypeTable, ref_ns: str): Type | error {
+fn bind_pattern_type(bp: parser::BindPattern, table: TypeTable, ref_ns: str): @Type() | error {
     if bp.is_slice {
         match bp.slice_type {
             (@TypeExpr()) as st => resolve_type(st, table, ref_ns)
@@ -573,28 +573,28 @@ fn bind_pattern_type(bp: parser::BindPattern, table: TypeTable, ref_ns: str): Ty
 // Does some UNGUARDED arm cover variant member `mem` by resolved-TYPE equality? Covers the
 // non-nominal members of a `T | error` style variant (prim/byte/str/slice/error) — the arm is a
 // bind whose resolved type equals the member. NAMED (nominal) members use some_arm_names instead.
-fn some_arm_covers_type(arms: []parser::Arm, mem: Type, table: TypeTable, ref_ns: str): bool {
+fn some_arm_covers_type(arms: []parser::Arm, mem: @Type(), table: TypeTable, ref_ns: str): bool {
     var i = 0
     loop {
         if i >= arms.len { break }
         if !arms[i].has_when {
             match arms[i].pattern {
                 parser::BindPattern as bp => {
-                    match bind_pattern_type(bp, table, ref_ns) { Type as t => { if type_eq(t, mem) { return true } }; error => { } }   // (#109 W2) coverage check resolves the arm pattern in the match's namespace
+                    match bind_pattern_type(bp, table, ref_ns) { (@Type()) as t => { if type_eq(t, mem) { return true } }; error => { } }   /* (#109 W2) coverage check resolves the arm pattern in the match's namespace */
                 }
                 parser::AltPattern as ap => {
                     var j = 0
                     loop {
                         if j >= ap.options.len { break }
                         match ap.options[j] {
-                            parser::BindPattern as bp => { match bind_pattern_type(bp, table, ref_ns) { Type as t => { if type_eq(t, mem) { return true } }; error => { } } }   // (#109 W2) coverage check resolves the arm pattern in the match's namespace
+                            parser::BindPattern as bp => { match bind_pattern_type(bp, table, ref_ns) { (@Type()) as t => { if type_eq(t, mem) { return true } }; error => { } } }   /* (#109 W2) coverage check resolves the arm pattern in the match's namespace */
                             _ => { }
                         }
                         j++
                     }
                 }
                 parser::GroupBindPattern as gp => {
-                    match group_candidate(gp, table, ref_ns) { Type as cand => { if type_eq(cand, mem) { return true } }; error => { } }
+                    match group_candidate(gp, table, ref_ns) { (@Type()) as cand => { if type_eq(cand, mem) { return true } }; error => { } }
                 }
                 _ => { }
             }
@@ -625,7 +625,7 @@ fn some_arm_names(arms: []parser::Arm, name: str, table: TypeTable, ref_ns: str)
 
 // every member of the variant must be covered by some unguarded arm: NAMED (nominal) members by
 // name; non-nominal members (prim/byte/str/slice/error — the `T | error` idiom) by resolved-type.
-fn variant_covered(arms: []parser::Arm, members: []Type, table: TypeTable, ref_ns: str): bool {
+fn variant_covered(arms: []parser::Arm, members: []@Type(), table: TypeTable, ref_ns: str): bool {
     var i = 0
     loop {
         if i >= members.len { break }
@@ -734,7 +734,7 @@ fn class_covered(arms: []parser::Arm, subs: []str, table: TypeTable, ref_ns: str
  * @param ref_ns   the match site's namespace
  * @return         true iff the arms cover the subject exhaustively
  */
-fn exhaustive(arms: []parser::Arm, subject: Type, table: TypeTable, ref_ns: str): bool {
+fn exhaustive(arms: []parser::Arm, subject: @Type(), table: TypeTable, ref_ns: str): bool {
     if has_wildcard(arms) { return true }
     match subject {   // an ENUM subject — exhaustive iff EVERY member is named (C7b)
         Named as n => {
@@ -769,7 +769,7 @@ fn exhaustive(arms: []parser::Arm, subject: Type, table: TypeTable, ref_ns: str)
  * @param ref_ns   the match site's namespace
  * @return         true iff the arms cover the class/interface subject exhaustively
  */
-fn exhaustive_type_subject(arms: []parser::Arm, subject: Type, table: TypeTable, ref_ns: str): bool {
+fn exhaustive_type_subject(arms: []parser::Arm, subject: @Type(), table: TypeTable, ref_ns: str): bool {
     match subject {
         Named as n => {
             if is_polymorphic_base(n.name, table) {
