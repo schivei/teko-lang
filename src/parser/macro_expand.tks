@@ -401,6 +401,171 @@ fn single_lowering_frag(md: MacroDecl): LoweringFrag | error {
 }
 
 /**
+ * MacroParamBinds — the bool parameters bound for ONE type-macro expansion (§14 Form 2): parallel
+ * name/value slices. A pre-Form-2 type-macro is parameterless, so this is empty for every current call and
+ * stays empty until the §9.D sweep authors an `@X(true)`-style parametric macro; an empty binds makes
+ * `select_lowering_frag` byte-identical to the retired `single_lowering_frag`.
+ *
+ * @field names  the bound parameters' names, declaration order
+ * @field vals   each parameter's bound bool value, parallel to `names`
+ * @since §14 Form 2 (parametric type-macros)
+ */
+type MacroParamBinds = struct { names: []str; vals: []bool }
+
+/**
+ * macro_bind_of — the bound bool value of parameter `name`, or null when `name` is not a bound bool
+ * parameter of the current type-macro expansion (§14 Form 2).
+ *
+ * @param binds  the parameter bindings for this expansion
+ * @param name   the parameter name to look up
+ * @return       the bound bool, or null when `name` is not a bound parameter
+ * @since §14 Form 2
+ */
+fn macro_bind_of(binds: MacroParamBinds, name: str): bool | null {
+    var i: u64 = 0
+    loop {
+        if i >= binds.names.len { break }
+        if binds.names[i] == name { return binds.vals[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * macro_cond_bool — evaluate a type-macro `if` CONDITION to a bool at expansion time (§14 Form 2). The
+ * minimal comptime domain: a `true`/`false` literal, a bound bool PARAMETER reference, or a unary `!` over
+ * one of those. Anything else is a located error — a type-macro condition must be a bool parameter or its
+ * negation. No B3, no `TypeTable`: the only free names are the expansion's bool params.
+ *
+ * @param cond   the `if` condition expression
+ * @param binds  the parameter bindings for this expansion
+ * @return       the condition's bool value, or a located error
+ * @throws       when the condition is not a bool literal, a bound bool parameter, or `!` of one
+ * @since §14 Form 2
+ */
+fn macro_cond_bool(cond: Expr, binds: MacroParamBinds): bool | error {
+    match cond.kind {
+        BoolLit as b => b.value
+        Var as v => match macro_bind_of(binds, v.name) {
+            bool as x => x
+            null => error { message = teko::str::concat("a type-macro `if` condition must be a bool parameter or its negation — `", teko::str::concat(v.name, "` is not a bound bool parameter (§14 Form 2)")) }
+        }
+        Unary as u => if u.op == lexer::TokenKind::Bang {
+            match macro_cond_bool(u.operand, binds) { bool as x => !x; error as e => return e }
+        } else {
+            error { message = "a type-macro `if` condition supports only the `!` unary operator (§14 Form 2)" }
+        }
+        _ => error { message = "a type-macro `if` condition must be a bool literal, a bool parameter, or `!` of one (§14 Form 2)" }
+    }
+}
+
+/**
+ * macro_arg_bool — read a type-macro bool ARGUMENT (or a parameter's default) to a bool at expansion time
+ * (§14 Form 2): a `true`/`false` literal, or `!` of one. A non-literal argument is a located error (a
+ * type-macro's bool argument must be a compile-time literal).
+ *
+ * @param e      the argument (or default) expression
+ * @param pname  the parameter's name, for the diagnostic
+ * @return       the argument's bool value, or a located error
+ * @throws       when the argument is not a bool literal or `!` of one
+ * @since §14 Form 2
+ */
+fn macro_arg_bool(e: Expr, pname: str): bool | error {
+    match e.kind {
+        BoolLit as b => b.value
+        Unary as u => if u.op == lexer::TokenKind::Bang {
+            match macro_arg_bool(u.operand, pname) { bool as x => !x; error as er => return er }
+        } else {
+            error { message = teko::str::concat("type-macro argument `", teko::str::concat(pname, "` must be a bool literal `true`/`false` (§14 Form 2)")) }
+        }
+        _ => error { message = teko::str::concat("type-macro argument `", teko::str::concat(pname, "` must be a bool literal `true`/`false` (§14 Form 2)")) }
+    }
+}
+
+/**
+ * macro_bind_params — bind a type-macro's declared parameters for one expansion (§14 Form 2): each
+ * parameter takes the call's positional argument when present, else its declared `= default`; the value is
+ * read as a bool by `macro_arg_bool`. A parameterless macro yields an empty binds (the inert case). A
+ * parameter with neither an argument nor a default is a located error.
+ *
+ * @param md  the macro declaration
+ * @param mt  the type-position macro call
+ * @return    the parameter bindings, or a located error
+ * @throws    when a parameter has no argument and no default, or an argument is not a bool literal
+ * @since §14 Form 2
+ */
+fn macro_bind_params(md: MacroDecl, mt: MacroType): MacroParamBinds | error {
+    var names: []str = teko::list::empty()
+    var vals: []bool = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= md.params.len { break }
+        var argexpr = no_expr()
+        if i < mt.args.len {
+            argexpr = mt.args[i]
+        } else if md.params[i].has_default {
+            argexpr = md.params[i].default_expr
+        } else {
+            return error { message = teko::str::concat("type-macro `", teko::str::concat(md.name, teko::str::concat("`: parameter `", teko::str::concat(md.params[i].name, "` needs an argument or a default (§14 Form 2)")))) }
+        }
+        var b = match macro_arg_bool(argexpr, md.params[i].name) { bool as x => x; error as e => return e }
+        names = teko::list::push(names, md.params[i].name)
+        vals = teko::list::push(vals, b)
+        i++
+    }
+    MacroParamBinds { names = names; vals = vals }
+}
+
+/**
+ * select_lowering_frag — the `lowering { … }` fragment a type-macro expansion uses, resolving any §14
+ * Form 2 comptime `if`-select over the bool params. A body that is a single `lowering { … }` returns it
+ * directly (byte-identical to `single_lowering_frag`); a body that is a single `if cond { … } else { … }`
+ * evaluates `cond` (a bool param) and recurses into the taken branch. Any other body shape, or an `if`
+ * without an `else`, is a located error.
+ *
+ * @param md     the macro declaration
+ * @param binds  the parameter bindings for this expansion
+ * @return       the selected `lowering` fragment, or a located error
+ * @throws       when the body is not a lowering or a well-formed comptime `if/else` selecting one
+ * @since §14 Form 2
+ */
+fn select_lowering_frag(md: MacroDecl, binds: MacroParamBinds): LoweringFrag | error {
+    select_lowering_from(md.body, md.name, binds)
+}
+
+/**
+ * select_lowering_from — the `lowering { … }` fragment a statement list resolves to (§14 Form 2), used by
+ * `select_lowering_frag` and by its own recursion into a chosen `if` branch. The list must be exactly one
+ * statement: a `lowering { … }`, or a comptime `if/else` whose taken branch itself resolves to one.
+ *
+ * @param stmts  the body / branch statement list
+ * @param mname  the macro's name, for diagnostics
+ * @param binds  the parameter bindings for this expansion
+ * @return       the selected `lowering` fragment, or a located error
+ * @throws       when the list is not a single lowering or a well-formed comptime `if/else`
+ * @since §14 Form 2
+ */
+fn select_lowering_from(stmts: []Statement, mname: str, binds: MacroParamBinds): LoweringFrag | error {
+    if stmts.len != 1 {
+        return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: its body must be a single `lowering { … }` or a single comptime `if/else` selecting one (§14 Form 2)")) }
+    }
+    match stmts[0] {
+        LoweringFrag as lf => lf
+        ExprStmt as es => match es.expr.kind {
+            IfExpr as iff => {
+                if !iff.has_else {
+                    return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a comptime `if` selecting a lowering must have an `else` — both branches must lower (§14 Form 2)")) }
+                }
+                var c = match macro_cond_bool(iff.cond, binds) { bool as x => x; error as e => return e }
+                if c { select_lowering_from(iff.then_blk, mname, binds) } else { select_lowering_from(iff.else_blk, mname, binds) }
+            }
+            _ => error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a type-macro body must be a `lowering { … }` or a comptime `if/else` (§14 Form 2)")) }
+        }
+        _ => error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a type-macro body must be a `lowering { … }` or a comptime `if/else` (§14 Form 2)")) }
+    }
+}
+
+/**
  * splice_hole_tokens — rewrite a `lowering` fragment's raw token run for re-parsing (§14 A3): each
  * `${param}` hole (the four tokens `$ { <ident> }`) collapses to ONE placeholder identifier token
  * `__mhole_<i>`, where `i` is the index of `param` in the macro's parameter list; every other token is
@@ -980,7 +1145,8 @@ fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): TypeExpr | error
     }
     var name = macro_type_name(mt)
     var md = match macro_decl_by_name(prog, name) { MacroDecl as m => m; null => return mt }
-    var frag = match single_lowering_frag(md) { LoweringFrag as lf => lf; error as e => return e }
+    var binds = match macro_bind_params(md, mt) { MacroParamBinds as b => b; error as e => return e }
+    var frag = match select_lowering_frag(md, binds) { LoweringFrag as lf => lf; error as e => return e }
     if frag_has_hole(frag.tokens) {
         return error { message = teko::str::concat("macro `", teko::str::concat(name, "`: a `${}` hole in a TYPE-position `lowering` fragment is not yet supported (§14 A4 handles the parameterless `@Type()` abbreviation)")) }
     }
