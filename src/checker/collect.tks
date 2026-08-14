@@ -6,12 +6,12 @@ use teko::parser
 type Collected = struct { types: TypeTable; env: Env }
 
 /**
- * The `self` type-atom as a TypeExpr — a single-segment `NamedType` named "self" (§4). Used to
+ * The `self` type-atom as a @TypeExpr() — a single-segment `NamedType` named "self" (§4). Used to
  * build the synthesized IService contract's `static ctor(): self` return (§7 DI).
  *
  * @return the `self` type-expression
  */
-fn self_type_expr(): parser::TypeExpr {
+fn self_type_expr(): @TypeExpr() {
     parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "self" }) }; args = teko::list::empty() }
 }
 
@@ -192,7 +192,7 @@ pub fn receiver_canonical_name(struct_name: str, ref_ns: str, table: TypeTable):
  * @param te  the return type-expression
  * @return    true iff `te` is the bare `self` type atom
  */
-fn return_type_is_self(te: parser::TypeExpr): bool {
+fn return_type_is_self(te: @TypeExpr()): bool {
     match te {
         parser::NamedType as nt => nt.args.len == 0 && nt.path.segments.len == 1 && nt.path.segments[0].name == "self"
         _ => false
@@ -573,7 +573,7 @@ fn mret_path_sym(p: parser::Path): str {
  * @return    the mangled identifier fragment
  * @since §9 F
  */
-fn mret_type_sym(te: parser::TypeExpr): str {
+fn mret_type_sym(te: @TypeExpr()): str {
     match te {
         parser::NamedType as nt => {
             if nt.args.len == 0 { return mret_path_sym(nt.path) }
@@ -619,7 +619,7 @@ fn mret_type_sym(te: parser::TypeExpr): str {
  * @return       the aggregate struct's bare name
  * @since §9 F
  */
-fn mret_mangle(types: []parser::TypeExpr): str {
+fn mret_mangle(types: []@TypeExpr()): str {
     var s = MRET_PREFIX
     var i: u64 = 0
     loop {
@@ -655,7 +655,7 @@ fn mret_field_name(slot: u64): str {
  * @return        the synthesized top-level struct item
  * @since §9 F
  */
-fn mret_struct_item(ns: str, file: str, mangle: str, types: []parser::TypeExpr): parser::Item {
+fn mret_struct_item(ns: str, file: str, mangle: str, types: []@TypeExpr()): parser::Item {
     var fields: []parser::Field = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -676,7 +676,7 @@ fn mret_struct_item(ns: str, file: str, mangle: str, types: []parser::TypeExpr):
  * @return        the `NamedType` return-type expression
  * @since §9 F
  */
-fn mret_named_type(mangle: str): parser::TypeExpr {
+fn mret_named_type(mangle: str): @TypeExpr() {
     parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = mangle }) }; args = teko::list::empty() }
 }
 
@@ -1483,7 +1483,7 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
  * @return           the resolved Type
  * @throws           when `self` has no binding context, or the type-expression fails to resolve
  */
-fn sig_return_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str, self_type: str): Type | error {
+fn sig_return_type(te: @TypeExpr(), table: TypeTable, ref_ns: str, self_type: str): Type | error {
     if return_type_is_self(te) {
         if self_type == "" { return error { message = "a `self` return has no enclosing type in this context" } }
         return Named { name = receiver_canonical_name(self_type, ref_ns, table) }
@@ -1610,7 +1610,7 @@ fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Fu
 
 /**
  * FieldView — one field of a type's compile-time FIELD VIEW: its declared name and its fully
- * RESOLVED `Type` (not just the source `TypeExpr`). The borrow-reachability walk consumes it to
+ * RESOLVED `Type` (not just the source `@TypeExpr()`). The borrow-reachability walk consumes it to
  * decide whether a type transitively reaches a `Reference`. Compiler-internal only: no surface
  * syntax reaches this shape, and it carries no runtime value or metadata (Law M.0 — zero reflection).
  *
@@ -2448,7 +2448,7 @@ fn validate_one_type_decl(reg: TypeReg, table: TypeTable): []str {
  * @param table       the whole collected type table (retained for signature parity)
  * @return            the slot's diagnostics (at most one — the first gate it trips)
  */
-fn validate_field_slot(reg: TypeReg, field_name: str, ann: parser::TypeExpr, tbl: TypeTable, table: TypeTable): []str {
+fn validate_field_slot(reg: TypeReg, field_name: str, ann: @TypeExpr(), tbl: TypeTable, table: TypeTable): []str {
     var ft = match resolve_type(ann, tbl, reg.namespace) {
         Type as t => t
         error as e => return one_diag(decl_error_diag(reg, e))

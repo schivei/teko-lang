@@ -172,7 +172,7 @@ fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
  * @since        §9.D sweep (Family-A type-macro completeness — const type annotations)
  */
 fn rewrite_const_decl(cd: ConstDecl, prog: Program, depth: u64): ConstDecl | error {
-    var ty = match walk_type(cd.ty, prog, depth) { TypeExpr as t => t; error as e => return e }
+    var ty = match walk_type(cd.ty, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
     var iv = match walk_expr(cd.init, prog, no_holes(), depth) { Expr as x => x; error as e => return e }
     ConstDecl { name = cd.name; ty = ty; init = iv; vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col }
 }
@@ -192,7 +192,7 @@ fn rewrite_fn_sig(f: Function, prog: Program, depth: u64): Function | error {
     var ps = match rewrite_params(f.params, prog, depth) { []Param as p => p; error as e => return e }
     var rt = f.return_type
     if f.has_return {
-        rt = match walk_type(f.return_type, prog, depth) { TypeExpr as t => t; error as e => return e }
+        rt = match walk_type(f.return_type, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
     }
     Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = ps; has_return = f.has_return; return_type = rt; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
 }
@@ -216,7 +216,7 @@ fn rewrite_params(params: []Param, prog: Program, depth: u64): []Param | error {
         var p = params[i]
         var ta = p.type_ann
         if p.has_type {
-            ta = match walk_type(p.type_ann, prog, depth) { TypeExpr as t => t; error as e => return e }
+            ta = match walk_type(p.type_ann, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
         }
         out = teko::list::push(out, Param { name = p.name; has_type = p.has_type; type_ann = ta; is_params = p.is_params; has_default = p.has_default; default_expr = p.default_expr })
         i++
@@ -244,7 +244,7 @@ fn rewrite_lambda_params(params: []LambdaParam, prog: Program, depth: u64): []La
         var p = params[i]
         var ta = p.type_ann
         if p.has_type {
-            ta = match walk_type(p.type_ann, prog, depth) { TypeExpr as t => t; error as e => return e }
+            ta = match walk_type(p.type_ann, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
         }
         out = teko::list::push(out, LambdaParam { name = p.name; has_type = p.has_type; type_ann = ta })
         i++
@@ -277,15 +277,15 @@ fn rewrite_type_decl(td: TypeDecl, prog: Program, depth: u64): TypeDecl | error 
             ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fs; methods = cb.methods; consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }
         }
         VariantBody as vb => {
-            var te = match walk_type(vb.type_expr, prog, depth) { TypeExpr as t => t; error as e => return e }
+            var te = match walk_type(vb.type_expr, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
             VariantBody { type_expr = te }
         }
         NewtypeBody as nt => {
-            var bk = match walk_type(nt.backing, prog, depth) { TypeExpr as t => t; error as e => return e }
+            var bk = match walk_type(nt.backing, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
             NewtypeBody { backing = bk; methods = nt.methods }
         }
         AliasBody as ab => {
-            var al = match walk_type(ab.alias, prog, depth) { TypeExpr as t => t; error as e => return e }
+            var al = match walk_type(ab.alias, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
             AliasBody { alias = al }
         }
         _ => td.body
@@ -310,7 +310,7 @@ fn rewrite_fields(fields: []Field, prog: Program, depth: u64): []Field | error {
     loop {
         if i >= fields.len { break }
         var fl = fields[i]
-        var ta = match walk_type(fl.type_ann, prog, depth) { TypeExpr as t => t; error as e => return e }
+        var ta = match walk_type(fl.type_ann, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
         out = teko::list::push(out, Field { name = fl.name; type_ann = ta; vis = fl.vis; is_intern = fl.is_intern; has_doc = fl.has_doc; doc = fl.doc; is_readonly = fl.is_readonly })
         i++
     }
@@ -796,10 +796,10 @@ fn walk_pattern(p: @Pattern(), prog: Program, depth: u64): @Pattern() | error {
         BindPattern as bp => {
             var st = bp.slice_type
             match bp.slice_type {
-                TypeExpr as t => { st = match walk_type(t, prog, depth) { TypeExpr as x => x; error as e => return e } }
+                (@TypeExpr()) as t => { st = match walk_type(t, prog, depth) { (@TypeExpr()) as x => x; error as e => return e } }
                 null => { }
             }
-            var ta = match walk_types(bp.type_args, prog, depth) { []TypeExpr as x => x; error as e => return e }
+            var ta = match walk_types(bp.type_args, prog, depth) { []@TypeExpr() as x => x; error as e => return e }
             BindPattern { type_name = bp.type_name; has_binding = bp.has_binding; binding = bp.binding; is_slice = bp.is_slice; slice_type = st; type_args = ta }
         }
         AltPattern as ap => {
@@ -873,7 +873,7 @@ fn walk_group_options(ps: []@Pattern(), prog: Program, depth: u64): []@Pattern()
  * @since        §9.D CR3
  */
 fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []@Pattern() | error {
-    var te = match walk_type(mp.macro_call, prog, depth) { TypeExpr as t => t; error as e => return e }
+    var te = match walk_type(mp.macro_call, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
     append_case_options(te, teko::list::empty())
 }
 
@@ -889,7 +889,7 @@ fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []@Patter
  * @throws     when a member is not a named case
  * @since      §9.D CR3
  */
-fn append_case_options(te: TypeExpr, acc: []@Pattern()): []@Pattern() | error {
+fn append_case_options(te: @TypeExpr(), acc: []@Pattern()): []@Pattern() | error {
     match te {
         NamedType as nt => teko::list::push(acc, BindPattern { type_name = nt.path; has_binding = false; binding = ""; is_slice = false; slice_type = null; type_args = nt.args })
         UnionType as ut => {
@@ -950,7 +950,7 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
     match e.kind {
         MacroCall as mc => {
             var sargs = match walk_exprs(mc.args, prog, holes, depth) { []Expr as a => a; error as er => return er }
-            var cta = match walk_types(mc.callee_type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            var cta = match walk_types(mc.callee_type_args, prog, depth) { []@TypeExpr() as t => t; error as er => return er }
             expand_macro_call(MacroCall { callee = mc.callee; args = sargs; callee_type_args = cta }, prog, depth)
         }
         Var as v => {
@@ -986,14 +986,14 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
         }
         Call as cl => {
             var args = match walk_exprs(cl.args, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            var ota = match walk_types(cl.owner_type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
-            var cta = match walk_types(cl.callee_type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            var ota = match walk_types(cl.owner_type_args, prog, depth) { []@TypeExpr() as t => t; error as er => return er }
+            var cta = match walk_types(cl.callee_type_args, prog, depth) { []@TypeExpr() as t => t; error as er => return er }
             with_kind(e, Call { callee = cl.callee; args = args; arg_names = cl.arg_names; owner_type_args = ota; callee_type_args = cta })
         }
         MethodCall as mc2 => {
             var recv = match walk_expr(mc2.receiver, prog, holes, depth) { Expr as x => x; error as er => return er }
             var args = match walk_exprs(mc2.args, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            var ta = match walk_types(mc2.type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            var ta = match walk_types(mc2.type_args, prog, depth) { []@TypeExpr() as t => t; error as er => return er }
             with_kind(e, MethodCall { receiver = recv; method = mc2.method; args = args; arg_names = mc2.arg_names; type_args = ta })
         }
         IfExpr as f => {
@@ -1013,12 +1013,12 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
         }
         Cast as ct => {
             var x = match walk_expr(ct.expr, prog, holes, depth) { Expr as y => y; error as er => return er }
-            var tgt = match walk_type(ct.target, prog, depth) { TypeExpr as t => t; error as er => return er }
+            var tgt = match walk_type(ct.target, prog, depth) { (@TypeExpr()) as t => t; error as er => return er }
             with_kind(e, Cast { expr = x; target = tgt })
         }
         StructLit as sl => {
             var fv = match walk_exprs(sl.field_vals, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            var ta = match walk_types(sl.type_args, prog, depth) { []TypeExpr as t => t; error as er => return er }
+            var ta = match walk_types(sl.type_args, prog, depth) { []@TypeExpr() as t => t; error as er => return er }
             with_kind(e, StructLit { type_path = sl.type_path; type_args = ta; field_names = sl.field_names; field_vals = fv })
         }
         Index as ix => {
@@ -1093,7 +1093,7 @@ fn walk_stmts(ss: []@Statement(), prog: Program, holes: MacroHoles, depth: u64):
  * @throws          when an inner type-macro expansion fails
  * @since           §9.D sweep (Family-A type-macro completeness in body annotations)
  */
-fn walk_binding_type_ann(has_type: bool, type_ann: TypeExpr, prog: Program, depth: u64): TypeExpr | error {
+fn walk_binding_type_ann(has_type: bool, type_ann: @TypeExpr(), prog: Program, depth: u64): @TypeExpr() | error {
     if !has_type { return type_ann }
     walk_type(type_ann, prog, depth)
 }
@@ -1117,7 +1117,7 @@ fn walk_stmt(s: @Statement(), prog: Program, holes: MacroHoles, depth: u64): @St
     match s {
         Binding as b => {
             var v = match walk_expr(b.value, prog, holes, depth) { Expr as x => x; error as er => return er }
-            var ta = match walk_binding_type_ann(b.has_type, b.type_ann, prog, depth) { TypeExpr as t => t; error as er => return er }
+            var ta = match walk_binding_type_ann(b.has_type, b.type_ann, prog, depth) { (@TypeExpr()) as t => t; error as er => return er }
             Binding { kind = b.kind; target = b.target; has_type = b.has_type; type_ann = ta; is_ref = b.is_ref; value = v }
         }
         Assign as a => {
@@ -1155,7 +1155,7 @@ fn walk_stmt(s: @Statement(), prog: Program, holes: MacroHoles, depth: u64): @St
         }
         MultiBind as mb => {
             var vs = match walk_exprs(mb.values, prog, holes, depth) { []Expr as x => x; error as er => return er }
-            var ta = match walk_binding_type_ann(mb.has_type, mb.type_ann, prog, depth) { TypeExpr as t => t; error as er => return er }
+            var ta = match walk_binding_type_ann(mb.has_type, mb.type_ann, prog, depth) { (@TypeExpr()) as t => t; error as er => return er }
             MultiBind { kind = mb.kind; shape = mb.shape; targets = mb.targets; has_type = mb.has_type; type_ann = ta; values = vs; line = mb.line; col = mb.col }
         }
         LoweringFrag => s
@@ -1196,7 +1196,7 @@ fn frag_has_hole(toks: []lexer::Token): bool {
 /**
  * expand_macro_type — expand ONE `@macro(...)` call standing in a TYPE position (§14 A4): resolve the
  * callee to its `MacroDecl`, take the body's single `lowering { … }` fragment, and re-parse its raw
- * token run as a `TypeExpr` (context-polymorphic splice, §5.1-Opt-1 — an `@Type()` yields a union
+ * token run as a `@TypeExpr()` (context-polymorphic splice, §5.1-Opt-1 — an `@Type()` yields a union
  * `A | B | …`), then recursively expand any nested type macros. A `@comptime` name, or an unknown name,
  * is left as a `MacroType` for the resolve honest-stop. A4 supports a PARAMETERLESS type macro (no
  * `${}` holes); a hole is a located "not yet supported" error.
@@ -1204,11 +1204,11 @@ fn frag_has_hole(toks: []lexer::Token): bool {
  * @param mt     the type-position macro call
  * @param prog   the program (macro lookup surface)
  * @param depth  the current expansion depth
- * @return       the spliced `TypeExpr`, or an expansion error
+ * @return       the spliced `@TypeExpr()`, or an expansion error
  * @throws       an over-depth error, an unsupported hole, or a fragment that does not parse as a type
  * @since 0.4-macros (§14 A4)
  */
-fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): TypeExpr | error {
+fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): @TypeExpr() | error {
     if depth >= max_macro_depth() {
         return error { message = "macro expansion exceeded the maximum depth in a type position (a macro that expands to itself?) — §14 A4" }
     }
@@ -1235,24 +1235,24 @@ fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): TypeExpr | error
  * @throws       when an inner expansion fails
  * @since 0.4-macros (§14 A4)
  */
-fn walk_type(te: TypeExpr, prog: Program, depth: u64): TypeExpr | error {
+fn walk_type(te: @TypeExpr(), prog: Program, depth: u64): @TypeExpr() | error {
     match te {
         MacroType as mt => expand_macro_type(mt, prog, depth)
         NamedType as nt => {
-            var args = match walk_types(nt.args, prog, depth) { []TypeExpr as a => a; error as er => return er }
+            var args = match walk_types(nt.args, prog, depth) { []@TypeExpr() as a => a; error as er => return er }
             NamedType { path = nt.path; args = args }
         }
         SliceType as st => {
-            var el = match walk_type(st.element, prog, depth) { TypeExpr as t => t; error as er => return er }
+            var el = match walk_type(st.element, prog, depth) { (@TypeExpr()) as t => t; error as er => return er }
             SliceType { element = el }
         }
         UnionType as ut => {
-            var ms = match walk_types(ut.members, prog, depth) { []TypeExpr as m => m; error as er => return er }
+            var ms = match walk_types(ut.members, prog, depth) { []@TypeExpr() as m => m; error as er => return er }
             UnionType { members = ms }
         }
         FunctionType as ft => {
-            var ps = match walk_types(ft.params, prog, depth) { []TypeExpr as p => p; error as er => return er }
-            var r = match walk_type(ft.ret, prog, depth) { TypeExpr as t => t; error as er => return er }
+            var ps = match walk_types(ft.params, prog, depth) { []@TypeExpr() as p => p; error as er => return er }
+            var r = match walk_type(ft.ret, prog, depth) { (@TypeExpr()) as t => t; error as er => return er }
             FunctionType { params = ps; ret = r }
         }
     }
@@ -1268,12 +1268,12 @@ fn walk_type(te: TypeExpr, prog: Program, depth: u64): TypeExpr | error {
  * @throws       when an inner expansion fails
  * @since 0.4-macros (§14 A4)
  */
-fn walk_types(tes: []TypeExpr, prog: Program, depth: u64): []TypeExpr | error {
-    var out: []TypeExpr = teko::list::empty()
+fn walk_types(tes: []@TypeExpr(), prog: Program, depth: u64): []@TypeExpr() | error {
+    var out: []@TypeExpr() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= tes.len { break }
-        var t = match walk_type(tes[i], prog, depth) { TypeExpr as x => x; error as er => return er }
+        var t = match walk_type(tes[i], prog, depth) { (@TypeExpr()) as x => x; error as er => return er }
         out = teko::list::push(out, t)
         i++
     }

@@ -196,7 +196,7 @@ pub type Compare = struct { first: Expr; rest: []CmpTerm }   // a<b<c chain, kep
  *                        callee's own type-params; empty for a bare/inferred call. TRANSIENT: the `.tkb`
  *                        codec persists `checker::TCall`, not `parser::Call`
  */
-pub type Call = struct { callee: Path; args: []Expr; arg_names: []str; owner_type_args: []TypeExpr; callee_type_args: []TypeExpr }   // explicit call-site generic args in TWO independent positions: owner_type_args = the `<…>` on the TYPE before `::` (`Type<T>::m` — binds the type's params, retargeted to the instance owner); callee_type_args = the `<…>` on the FUNCTION/METHOD (`foo<T>()`, `Type::m<T>()` — binds the callee's own type-params). Either/both/neither may be present (`Map<K,V>::fold<Acc>()`). Empty for a bare/inferred call.
+pub type Call = struct { callee: Path; args: []Expr; arg_names: []str; owner_type_args: []@TypeExpr(); callee_type_args: []@TypeExpr() }   /* explicit call-site generic args in TWO independent positions: owner_type_args = the `<…>` on the TYPE before `::` (`Type<T>::m` — binds the type's params, retargeted to the instance owner); callee_type_args = the `<…>` on the FUNCTION/METHOD (`foo<T>()`, `Type::m<T>()` — binds the callee's own type-params). Either/both/neither may be present (`Map<K,V>::fold<Acc>()`). Empty for a bare/inferred call. */
 
 /**
  * MacroCall — an `@name(...)` call site in the untyped AST (§14): a compiler-executed call the resolver
@@ -209,7 +209,7 @@ pub type Call = struct { callee: Path; args: []Expr; arg_names: []str; owner_typ
  * @field callee_type_args the explicit `<T…>` type arguments (`@sizeof<i32>()`), else empty
  * @since 0.4-macros (§14 A1)
  */
-pub type MacroCall = struct { callee: Path; args: []Expr; callee_type_args: []TypeExpr }
+pub type MacroCall = struct { callee: Path; args: []Expr; callee_type_args: []@TypeExpr() }
 pub type IfExpr = struct {   // if/else is an EXPRESSION (B.20)
     cond: Expr
     then_blk: []@Statement()
@@ -240,9 +240,9 @@ pub type MethodCall = struct {
      */
     arg_names: []str
     /** type_args — explicit call-site generic args `recv.m<T>(…)` (empty for the inferred `recv.m(…)`). */
-    type_args: []TypeExpr
+    type_args: []@TypeExpr()
 }
-pub type Cast = struct { expr: Expr; target: TypeExpr }   // x to T — explicit conversion; preserves→ok / loses→compile-error (E7; M.0+M.1)
+pub type Cast = struct { expr: Expr; target: @TypeExpr() }   /* x to T — explicit conversion; preserves→ok / loses→compile-error (E7; M.0+M.1) */
 /**
  * Borrow — the prefix `&x` safe mutable-borrow expression (AL wave F1). Takes a live
  * borrow of the operand lvalue, surfacing the auto-ref that is implicit in argument
@@ -254,7 +254,7 @@ pub type Cast = struct { expr: Expr; target: TypeExpr }   // x to T — explicit
  */
 pub type Borrow = struct { operand: Expr }   // &x — safe mutable borrow (AL wave F1)
 pub type PathExpr = struct { path: Path }   // a qualified path as a VALUE — Enum::Member (e.g. PrimKind::U32), module statics (P2; the F2/Part-1 AST had only single-name Var)
-pub type StructLit = struct { type_path: Path; type_args: []TypeExpr; field_names: []str; field_vals: []Expr }   // Name { field = value, … } — a struct VALUE constructor (W4a); (W9.4) type_args = explicit `Foo<i64>{ … }` generic args (empty for bare `Foo { … }`); parallel slices (.len replaces nfields)
+pub type StructLit = struct { type_path: Path; type_args: []@TypeExpr(); field_names: []str; field_vals: []Expr }   /* Name { field = value, … } — a struct VALUE constructor (W4a); (W9.4) type_args = explicit `Foo<i64>{ … }` generic args (empty for bare `Foo { … }`); parallel slices (.len replaces nfields) */
 pub type Index = struct { receiver: Expr; index: Expr }   // recv[index] — str→byte, []T→T (W5-idx)
 // Format spec for a single $"…{expr:spec}…" hole. Three variants:
 //   FSpecNone    — no colon in hole (existing behavior)
@@ -281,7 +281,7 @@ pub type ArrayLit = struct { elements: []ArrayElem }   // [ e0, e1, … ] — a 
 // ExprStmt, like a fn body), so the trailing value is the closure's result. The return type is
 // inferred (no `-> R` on a literal). The checker types it to a `Func` and lifts it to a top-level
 // function + capture env. (`.type` ends up the closure's Func type.)
-pub type LambdaParam = struct { name: str; has_type: bool; type_ann: TypeExpr }
+pub type LambdaParam = struct { name: str; has_type: bool; type_ann: @TypeExpr() }
 pub type Lambda = struct { params: []LambdaParam; body: []@Statement() }
 
 /**
@@ -341,7 +341,7 @@ pub type Binding = struct {
     kind: BindKind
     target: @BindTarget()
     has_type: bool
-    type_ann: TypeExpr
+    type_ann: @TypeExpr()
     is_ref: bool
     value: Expr
 }
@@ -510,7 +510,7 @@ pub type MultiBind = struct {
     shape: MultiTargetKind
     targets: []@BindElem()
     has_type: bool
-    type_ann: TypeExpr
+    type_ann: @TypeExpr()
     values: []Expr
     line: u32
     col: u32
@@ -520,7 +520,7 @@ pub type MultiBind = struct {
  * LoweringFrag — a `lowering { … }` fragment inside a Family-A macro body (§14.2): the RAW token run
  * between the braces, captured VERBATIM (not parsed as statements). At expansion (Family-A pre-pass) the
  * run is re-parsed in the GRAMMATICAL POSITION of the `@call` — an `Expr`/`@Statement()` in value position,
- * a `TypeExpr` in a type annotation (`[]@Type()`, §9.D) — with each `${expr}` injection hole (a
+ * a `@TypeExpr()` in a type annotation (`[]@Type()`, §9.D) — with each `${expr}` injection hole (a
  * `Dollar` `{` … `}` sub-run in the captured tokens) filled by the caller's intact argument node
  * (§5.1-Opt-1, context-polymorphic). A `LoweringFrag` is legal ONLY in a macro body; anywhere else it is
  * a checker honest-stop. INERT until the corpus writes a macro (no `lowering` in `src/`).
@@ -566,7 +566,7 @@ pub type NoConstraint = struct { }   // sentinel: the type-param has no `: …` 
 macro ConstraintExpr() { lowering { parser::ConstraintAtom | parser::ConstraintAnd | parser::ConstraintOr | parser::NoConstraint } }
 
 // --- top-level items ---
-pub type Param = struct { name: str; has_type: bool; type_ann: TypeExpr; is_params: bool; has_default: bool; default_expr: Expr }   // immutable (B.21); is_params = C#-style variadic modifier (2026-07-01), trailing-only, type_ann must be a Slice; has_default/default_expr = DEFARGS (2026-07-01) — TRAILING-ONLY (once one param defaults, every later param must too), default_expr valid iff has_default; has_type = OOP A1 (2026-07-01) — false ONLY for a struct method's 1st param (the RECEIVER, name free, type injected by the checker as the enclosing struct); every other param is always typed (type_ann valid iff has_type)
+pub type Param = struct { name: str; has_type: bool; type_ann: @TypeExpr(); is_params: bool; has_default: bool; default_expr: Expr }   /* immutable (B.21); is_params = C#-style variadic modifier (2026-07-01), trailing-only, type_ann must be a Slice; has_default/default_expr = DEFARGS (2026-07-01) — TRAILING-ONLY (once one param defaults, every later param must too), default_expr valid iff has_default; has_type = OOP A1 (2026-07-01) — false ONLY for a struct method's 1st param (the RECEIVER, name free, type injected by the checker as the enclosing struct); every other param is always typed (type_ann valid iff has_type) */
 
 // Visibility — a declaration's REACH (LEGISLATION "Visibility — pub vs exp"; B.9).
 // Private (default, no keyword) = own namespace only; Pub = across the project's
@@ -580,7 +580,7 @@ pub type Function = struct {
     type_constraints: []@ConstraintExpr()   /* (W11/S6) PARALLEL to type_params (same length); NoConstraint{} = no `: …` clause */
     params: []Param
     has_return: bool   // `-> ret` present? (absent = Unit return; P5a)
-    return_type: TypeExpr   // the return type (valid iff has_return)
+    return_type: @TypeExpr()   /* the return type (valid iff has_return) */
     body: []@Statement()
     vis: Visibility   // private (default) / pub / exp
     has_doc: bool   // a `/** … */` doc precedes it?
@@ -640,10 +640,10 @@ pub type Function = struct {
      * ruling 3). EMPTY for a single-return fn (which keeps using `return_type`), so every existing
      * `Function { … }` literal only appends `ret_types = teko::list::empty()` and nothing changes
      * (fixpoint). The `( )` are parsed ONLY in this signature position, so multi-valuedness never
-     * enters `TypeExpr` — there is no first-class tuple type.
+     * enters `@TypeExpr()` — there is no first-class tuple type.
      * @since §9 F
      */
-    ret_types: []TypeExpr
+    ret_types: []@TypeExpr()
     /**
      * is_operator — this member is an `operator __dunder(left: …, right: …)` declaration (§9
      * ruling 1), NOT an ordinary method. Operators are STATIC (no injected receiver — every operand
@@ -698,7 +698,7 @@ pub type StructBody = struct { fields: []Field; methods: []Function; implements:
  *                    field carries false. Orthogonal to `vis`/`is_intern` (reach) and to a get-only
  *                    property (encapsulation): `readonly` freezes, `get`-only encapsulates.
  */
-pub type Field = struct { name: str; type_ann: TypeExpr; vis: Visibility; is_intern: bool; has_doc: bool; doc: str; is_readonly: bool }
+pub type Field = struct { name: str; type_ann: @TypeExpr(); vis: Visibility; is_intern: bool; has_doc: bool; doc: str; is_readonly: bool }
 /**
  * EnumBody — an `enum Name { A; B; … }` body: the member names, in declaration order. §9 adds an
  * optional trailing method block `enum Dir { N; S } { fn oposto(): Dir { … } }` (ruling 12): a
@@ -723,8 +723,8 @@ pub type EnumBody = struct { members: []str; methods: []Function }
  *                  12); empty for a flags type with no method block (additive-inert)
  */
 pub type FlagsBody = struct { members: []str; values: []u64; methods: []Function }
-pub type VariantBody = struct { type_expr: TypeExpr }   // a union (A.8)
-pub type AliasBody = struct { alias: TypeExpr }   // `type Name = <type-expr>` — a TRANSPARENT alias (self-host parity)
+pub type VariantBody = struct { type_expr: @TypeExpr() }   /* a union (A.8) */
+pub type AliasBody = struct { alias: @TypeExpr() }   /* `type Name = <type-expr>` — a TRANSPARENT alias (self-host parity) */
 /**
  * NewtypeBody — a PRIMITIVE-backed value-type WITH a body: `type Celsius = f32 { <members> }`
  * (§9 rulings 10/11). NOMINAL and NON-transparent — unlike `AliasBody` it does NOT resolve-through to
@@ -740,7 +740,7 @@ pub type AliasBody = struct { alias: TypeExpr }   // `type Name = <type-expr>` �
  * @field backing  the backing type-expr (the primitive the value IS, or an indexed type for `[]`)
  * @field methods  the interleaved readonly instance methods + operators, in source order
  */
-pub type NewtypeBody = struct { backing: TypeExpr; methods: []Function }
+pub type NewtypeBody = struct { backing: @TypeExpr(); methods: []Function }
 pub type ExternBody = struct { }   // `extern type Name` — an OPAQUE foreign handle (C7.1a; lowers to `void *`)
 // (W10b.CLASS, 2026-07-01) a class's KIND — Teko INVERTS the usual default: SEALED (final,
 // instantiable, NOT inheritable) is the DEFAULT (bare `class`); `abstract class` = inheritable,
@@ -879,7 +879,7 @@ pub type UseDecl = struct {
  * @param col     the `const` keyword's source column
  * @since #594
  */
-pub type ConstDecl = struct { name: str; ty: TypeExpr; init: Expr; vis: Visibility; has_doc: bool; doc: str; line: u32; col: u32 }
+pub type ConstDecl = struct { name: str; ty: @TypeExpr(); init: Expr; vis: Visibility; has_doc: bool; doc: str; line: u32; col: u32 }
 
 // --- R-main: a `.tks` file is a MAIN (executable entry) or a MODULE. ---
 /**
@@ -917,7 +917,7 @@ pub type MacroDecl = struct { name: str; params: []Param; body: []@Statement(); 
  * @field vis          visibility (`pub`/`exp`/internal)
  * @since 0.4-macros (§14 A1)
  */
-pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param; ret: TypeExpr; body: []@Statement(); vis: Visibility }
+pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param; ret: @TypeExpr(); body: []@Statement(); vis: Visibility }
 
 /**
  * Decl — a top-level declaration, retired from a nominal `variant` to the §9.D inline union `@Decl()`:

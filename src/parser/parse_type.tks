@@ -19,7 +19,7 @@ use teko::lexer
  *
  * @return the `()` sentinel type-expression
  */
-fn delegate_unit_ret(): TypeExpr {
+fn delegate_unit_ret(): @TypeExpr() {
     NamedType { path = Path { segments = teko::list::push(teko::list::empty(), Segment { name = "()" }) }; args = teko::list::empty() }
 }
 
@@ -68,7 +68,7 @@ fn parse_delegate_type(tokens: []lexer::Token, pos: u64): ParsedType | error {
         }
         return err_at(tokens, pos, "`func` needs a return type: write `func<R>` (a zero-parameter function returning `R`)")
     }
-    var args: []TypeExpr = teko::list::empty()
+    var args: []@TypeExpr() = teko::list::empty()
     var p = pos + 2
     var pend = 0 to u64
     loop {
@@ -89,7 +89,7 @@ fn parse_delegate_type(tokens: []lexer::Token, pos: u64): ParsedType | error {
         return ParsedType { node = FunctionType { params = args; ret = delegate_unit_ret() }; next = p; pending_gt = pend }
     }
     if args.len == 0 { return err_at(tokens, pos, "`func<>` is empty — a `func` needs at least a return type: write `func<R>`") }
-    var params: []TypeExpr = teko::list::empty()
+    var params: []@TypeExpr() = teko::list::empty()
     var i = 0 to u64
     loop { if i >= args.len - 1 { break }; params = teko::list::push(params, args[i]); i++ }
     ParsedType { node = FunctionType { params = params; ret = args[args.len - 1] }; next = p; pending_gt = pend }
@@ -139,7 +139,7 @@ fn is_ref_grafia_at(tokens: []lexer::Token, pos: u64): bool {
  * @param inner  the referenced (pointee) type
  * @return       a `NamedType` `Ref<inner>` resolving to `checker::Reference{inner}`
  */
-fn wrap_ref_type(inner: TypeExpr): TypeExpr {
+fn wrap_ref_type(inner: @TypeExpr()): @TypeExpr() {
     var segs = teko::list::push(teko::list::empty(), Segment { name = "Ref" })
     var args = teko::list::push(teko::list::empty(), inner)
     NamedType { path = Path { segments = segs }; args = args }
@@ -148,7 +148,7 @@ fn wrap_ref_type(inner: TypeExpr): TypeExpr {
 /**
  * parse_macro_type — parse an `@name(...)` / `@name<T>()` compiler-executed call standing in a TYPE
  * position (§14 A4) into a `MacroType` node. `pos` is at the `At` token. The Family-A pre-pass later
- * expands it, re-parsing the macro's `lowering` fragment as a `TypeExpr` (context-polymorphic splice).
+ * expands it, re-parsing the macro's `lowering` fragment as a `@TypeExpr()` (context-polymorphic splice).
  * An `@name` here MUST be followed by an argument list (optionally after a `<T…>` type-argument list).
  *
  * @param tokens  the token stream
@@ -163,7 +163,7 @@ fn parse_macro_type(tokens: []lexer::Token, pos: u64): ParsedType | error {
         return err_at(tokens, p, "expected a macro name after `@` in a type position (§14.4)")
     }
     var pp = match parse_path(tokens, p) { Parsed<Path> as x => x; error as e => return e }
-    var type_args: []TypeExpr = teko::list::empty()
+    var type_args: []@TypeExpr() = teko::list::empty()
     var after = pp.next
     if is_kind_at(tokens, after, lexer::TokenKind::Lt) {
         match parse_type_args(tokens, after) {
@@ -297,7 +297,7 @@ pub fn is_reserved_type_name(name: str): bool {
  * @param te  the parsed annotation type-expression
  * @return    true iff the annotation is a top-level `ref T`
  */
-pub fn is_ref_grafia_annotation(te: TypeExpr): bool {
+pub fn is_ref_grafia_annotation(te: @TypeExpr()): bool {
     match te {
         NamedType as nt => nt.args.len == 1 && hide_ref_surface_at(nt.path)
         _ => false
@@ -328,7 +328,7 @@ fn parse_named(tokens: []lexer::Token, pos: u64): ParsedType | error {
     }
     var plain = ParsedType { node = NamedType { path = pp.node; args = teko::list::empty() }; next = pp.next; pending_gt = 0 }
     if !is_kind_at(tokens, pp.next, lexer::TokenKind::Lt) { return plain }
-    var args: []TypeExpr = teko::list::empty()
+    var args: []@TypeExpr() = teko::list::empty()
     var p = pp.next + 1
     loop {
         var a = match parse_type(tokens, p) { ParsedType as x => x; error => return plain }   // not a type → backtrack
@@ -357,7 +357,7 @@ fn parse_named(tokens: []lexer::Token, pos: u64): ParsedType | error {
 // `<` stays a comparison). The `>>` (Shr) compound closes THIS list with one `>` and leaves pending_gt.
 fn parse_type_args(tokens: []lexer::Token, pos: u64): ParsedTypeArgs | error {
     if !is_kind_at(tokens, pos, lexer::TokenKind::Lt) { return err_at(tokens, pos, "expected '<' to open a type-argument list") }
-    var args: []TypeExpr = teko::list::empty()
+    var args: []@TypeExpr() = teko::list::empty()
     var p = pos + 1
     loop {
         var a = match parse_type(tokens, p) { ParsedType as x => x; error as e => return e }   // not a type → backtrack
@@ -394,7 +394,7 @@ fn parse_slice(tokens: []lexer::Token, pos: u64): ParsedType | error {
 // more → a UnionType.
 fn parse_type(tokens: []lexer::Token, pos: u64): ParsedType | error {
     var first = match parse_type_primary(tokens, pos) { ParsedType as x => x; error as e => return e }
-    var members: []TypeExpr = teko::list::empty()
+    var members: []@TypeExpr() = teko::list::empty()
     members = teko::list::push(members, first.node)
     var p = first.next
     var pend = first.pending_gt

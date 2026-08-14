@@ -2022,7 +2022,7 @@ fn variant_member_admissible(member: Type, siblings: []Type, table: TypeTable): 
 // Threaded down every recursion (slice element / union members / fn-type params+ret / optional
 // inner) and into resolve_named/resolve_generic_inst unchanged. Reserved for W2's R0-R5 rules;
 // the W1 body IGNORES it (behavior byte-identical).
-pub fn resolve_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str): Type | error {
+pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): Type | error {
     // (#109 W1) reserved for the R0-R5 rules (W2)
     match te {
         // A plain name resolves as before; generic type-ARGUMENTS `Box<i64>` (S4 type-generics)
@@ -2677,7 +2677,7 @@ fn null_member_last(members: []Type): []Type {
 // are not yet walked (a later crumb) — those surface as an "unknown type" at typing, not silently.
 
 // substitute type-parameter NAMES with their argument type-exprs throughout a (syntactic) type-expr.
-fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeExpr): parser::TypeExpr {
+fn subst_texpr_names(te: @TypeExpr(), params: []str, args: []@TypeExpr()): @TypeExpr() {
     match te {
         parser::NamedType as nt => {
             if nt.path.segments.len == 1 && nt.args.len == 0 {
@@ -2689,20 +2689,20 @@ fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeEx
                     k++
                 }
             }
-            var nargs: []parser::TypeExpr = teko::list::empty()
+            var nargs: []@TypeExpr() = teko::list::empty()
             var j = 0
             loop { if j >= nt.args.len { break }; nargs = teko::list::push(nargs, subst_texpr_names(nt.args[j], params, args)); j++ }
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = subst_texpr_names(st.element, params, args) }
         parser::UnionType as ut => {
-            var ms: []parser::TypeExpr = teko::list::empty()
+            var ms: []@TypeExpr() = teko::list::empty()
             var i = 0
             loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_texpr_names(ut.members[i], params, args)); i++ }
             parser::UnionType { members = ms }
         }
         parser::FunctionType as fnt => {   // (W10a) recurse into params + return
-            var nps: []parser::TypeExpr = teko::list::empty()
+            var nps: []@TypeExpr() = teko::list::empty()
             var i = 0
             loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_texpr_names(fnt.params[i], params, args)); i++ }
             parser::FunctionType { params = nps; ret = subst_texpr_names(fnt.ret, params, args) }
@@ -2726,7 +2726,7 @@ fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeEx
  * @return        the method with its param annotations + return type substituted to concrete types
  * @since onda-3 (#254)
  */
-fn subst_method_sig_names(f: parser::Function, params: []str, args: []parser::TypeExpr): parser::Function {
+fn subst_method_sig_names(f: parser::Function, params: []str, args: []@TypeExpr()): parser::Function {
     var nps: []parser::Param = teko::list::empty()
     var i = 0
     loop {
@@ -2754,7 +2754,7 @@ fn subst_method_sig_names(f: parser::Function, params: []str, args: []parser::Ty
  * @return        the methods with their signatures substituted
  * @since onda-3 (#254)
  */
-fn subst_methods_names(methods: []parser::Function, params: []str, args: []parser::TypeExpr): []parser::Function {
+fn subst_methods_names(methods: []parser::Function, params: []str, args: []@TypeExpr()): []parser::Function {
     var out: []parser::Function = teko::list::empty()
     var i = 0
     loop { if i >= methods.len { break }; out = teko::list::push(out, subst_method_sig_names(methods[i], params, args)); i++ }
@@ -2774,7 +2774,7 @@ fn subst_methods_names(methods: []parser::Function, params: []str, args: []parse
  * @return        the body with fields AND method signatures substituted to concrete types
  * @since onda-3 (#254)
  */
-fn subst_body_names(body: @TypeBody(), params: []str, args: []parser::TypeExpr): @TypeBody() {
+fn subst_body_names(body: @TypeBody(), params: []str, args: []@TypeExpr()): @TypeBody() {
     match body {
         parser::StructBody as sb => {
             var nf: []parser::Field = teko::list::empty()
@@ -2796,7 +2796,7 @@ fn subst_body_names(body: @TypeBody(), params: []str, args: []parser::TypeExpr):
 
 // collect every generic-type USE (a NamedType carrying args) reachable in a type-expr — innermost
 // first, so a nested `Box<i64>` inside `[]Box<i64>` is stamped before the enclosing use.
-fn collect_texpr_insts(te: parser::TypeExpr, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_texpr_insts(te: @TypeExpr(), acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     match te {
         parser::NamedType as nt => {
@@ -2823,7 +2823,7 @@ fn collect_texpr_insts(te: parser::TypeExpr, acc: []parser::TypeExpr): []parser:
  * @return     `acc` extended with every generic use found in the method's signature and body
  * @since onda-3 (#254)
  */
-fn collect_method_insts(f: parser::Function, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_method_insts(f: parser::Function, acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     var i = 0
     loop { if i >= f.params.len { break }; if f.params[i].has_type { out = collect_texpr_insts(f.params[i].type_ann, out) }; i++ }
@@ -2839,14 +2839,14 @@ fn collect_method_insts(f: parser::Function, acc: []parser::TypeExpr): []parser:
  * @return        `acc` extended with every generic use found in the methods
  * @since onda-3 (#254)
  */
-fn collect_methods_insts(methods: []parser::Function, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_methods_insts(methods: []parser::Function, acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     var i = 0
     loop { if i >= methods.len { break }; out = collect_method_insts(methods[i], out); i++ }
     out
 }
 
-fn collect_body_insts(body: @TypeBody(), acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_body_insts(body: @TypeBody(), acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     match body {
         parser::StructBody as sb => {
@@ -2866,7 +2866,7 @@ fn collect_body_insts(body: @TypeBody(), acc: []parser::TypeExpr): []parser::Typ
     out
 }
 
-fn collect_stmts_insts(stmts: []@Statement(), acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_stmts_insts(stmts: []@Statement(), acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     var i = 0
     loop { if i >= stmts.len { break }; out = collect_stmt_insts(stmts[i], out); i++ }
@@ -2876,7 +2876,7 @@ fn collect_stmts_insts(stmts: []@Statement(), acc: []parser::TypeExpr): []parser
 // (W9.4) collect the generic instance a construction-site / bind-pattern type-arg list names: synthesize
 // the NamedType `<path><args>` and run it through collect_texpr_insts (which pushes it AND recurses into
 // the args), so `Foo<i64>{…}` / `Foo<i64> as x` get `Foo__g__i64` stamped exactly like an annotation.
-fn collect_site_args(path: parser::Path, args: []parser::TypeExpr, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_site_args(path: parser::Path, args: []@TypeExpr(), acc: []@TypeExpr()): []@TypeExpr() {
     if args.len == 0 { return acc }
     collect_texpr_insts(parser::NamedType { path = path; args = args }, acc)
 }
@@ -2893,7 +2893,7 @@ fn collect_site_args(path: parser::Path, args: []parser::TypeExpr, acc: []parser
  * @return     `acc` plus the factory instance's synthetic NamedType (or `acc` unchanged)
  * @since onda-3 (#254 L5)
  */
-fn collect_call_site_args(call: parser::Call, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_call_site_args(call: parser::Call, acc: []@TypeExpr()): []@TypeExpr() {
     if call.owner_type_args.len == 0 { return acc }   // the OWNER `<…>` (`Cell<i64>::make`) stamps the type instance; method `<…>` bind elsewhere
     if call.callee.segments.len < 2 { return acc }
     var owner_name = call.callee.segments[call.callee.segments.len - 2].name
@@ -2901,7 +2901,7 @@ fn collect_call_site_args(call: parser::Call, acc: []parser::TypeExpr): []parser
 }
 
 // (W9.4) walk an expression for construction-site type-args (`Foo<i64>{…}`) and nested patterns.
-fn collect_expr_insts(e: parser::Expr, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_expr_insts(e: parser::Expr, acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     match e.kind {
         parser::StructLit as sl => {
@@ -2958,7 +2958,7 @@ fn collect_expr_insts(e: parser::Expr, acc: []parser::TypeExpr): []parser::TypeE
 }
 
 // (W9.4) walk a pattern for bind-pattern type-args (`Foo<i64> as x`, incl alt options).
-fn collect_pattern_insts(p: @Pattern(), acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_pattern_insts(p: @Pattern(), acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     match p {
         parser::BindPattern as bp => { if !bp.is_slice { out = collect_site_args(bp.type_name, bp.type_args, out) } }
@@ -2968,7 +2968,7 @@ fn collect_pattern_insts(p: @Pattern(), acc: []parser::TypeExpr): []parser::Type
     out
 }
 
-fn collect_stmt_insts(s: @Statement(), acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_stmt_insts(s: @Statement(), acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     match s {
         parser::Binding as b => { if b.has_type { out = collect_texpr_insts(b.type_ann, out) }; out = collect_expr_insts(b.value, out) }
@@ -2984,7 +2984,7 @@ fn collect_stmt_insts(s: @Statement(), acc: []parser::TypeExpr): []parser::TypeE
     out
 }
 
-fn collect_item_insts(it: parser::Item, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_item_insts(it: parser::Item, acc: []@TypeExpr()): []@TypeExpr() {
     var out = acc
     match it.content {
         parser::Function as f => {
@@ -3009,7 +3009,7 @@ fn collect_item_insts(it: parser::Item, acc: []parser::TypeExpr): []parser::Type
  * scope-less bare table probe whose answer is whichever same-bare-named type happens to sit earliest
  * in the table — i.e. an answer decided by source-discovery order rather than by the program.
  */
-type InstSite = struct { site: parser::TypeExpr; ref_ns: str }
+type InstSite = struct { site: @TypeExpr(); ref_ns: str }
 
 /**
  * Tag a freshly collected batch of instantiation sites with the namespace that wrote them and append
@@ -3021,7 +3021,7 @@ type InstSite = struct { site: parser::TypeExpr; ref_ns: str }
  * @param acc     the worklist so far
  * @return        `acc` extended with every site, each tagged with `ref_ns`
  */
-fn tag_inst_sites(sites: []parser::TypeExpr, ref_ns: str, acc: []InstSite): []InstSite {
+fn tag_inst_sites(sites: []@TypeExpr(), ref_ns: str, acc: []InstSite): []InstSite {
     var out = acc
     var i = 0
     loop {
@@ -3126,7 +3126,7 @@ fn resolve_inst_args(nt: parser::NamedType, table: TypeTable, ref_ns: str, templ
  * @param template_ns  the template's declaring namespace (the retry scope)
  * @return          the concrete type, or null when it resolves in neither scope
  */
-fn resolve_inst_arg(arg: parser::TypeExpr, table: TypeTable, ref_ns: str, template_ns: str): Type | null {
+fn resolve_inst_arg(arg: @TypeExpr(), table: TypeTable, ref_ns: str, template_ns: str): Type | null {
     match resolve_type(arg, table, ref_ns) { Type as t => return t; error => { } }
     if template_ns == ref_ns { return null }
     match resolve_type(arg, table, template_ns) { Type as t => t; error => null }
@@ -3303,7 +3303,7 @@ pub fn table_generic_instances(table: TypeTable): []parser::TypeDecl {
 // `ptr<T>`/`Ref<T>` (which resolve to Ptr/Ref, not a Named instance) keep their structural shape and
 // their args are normalized recursively. NO-OP when the expr carries no generic-instance reference.
 // (C: tk_normalize_inst_texpr.)
-fn normalize_inst_texpr(te: parser::TypeExpr, table: TypeTable): parser::TypeExpr {
+fn normalize_inst_texpr(te: @TypeExpr(), table: TypeTable): @TypeExpr() {
     match te {
         parser::NamedType as nt => {
             if nt.args.len > 0 {
@@ -3325,20 +3325,20 @@ fn normalize_inst_texpr(te: parser::TypeExpr, table: TypeTable): parser::TypeExp
                 }
             }
             // not a stamped instance (plain name, type-param, or builtin) → recurse into the args.
-            var nargs: []parser::TypeExpr = teko::list::empty()
+            var nargs: []@TypeExpr() = teko::list::empty()
             var j = 0
             loop { if j >= nt.args.len { break }; nargs = teko::list::push(nargs, normalize_inst_texpr(nt.args[j], table)); j++ }
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = normalize_inst_texpr(st.element, table) }
         parser::UnionType as ut => {
-            var ms: []parser::TypeExpr = teko::list::empty()
+            var ms: []@TypeExpr() = teko::list::empty()
             var i = 0
             loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, normalize_inst_texpr(ut.members[i], table)); i++ }
             parser::UnionType { members = ms }
         }
         parser::FunctionType as fnt => {   // (W10a) normalize params + return
-            var nps: []parser::TypeExpr = teko::list::empty()
+            var nps: []@TypeExpr() = teko::list::empty()
             var i = 0
             loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, normalize_inst_texpr(fnt.params[i], table)); i++ }
             parser::FunctionType { params = nps; ret = normalize_inst_texpr(fnt.ret, table) }

@@ -22,7 +22,7 @@ fn one_stmt(e: parser::Expr): []@Statement() { teko::list::push(teko::list::empt
 /** loop_stmt — a `loop { body }` statement widened to the `Statement` variant (see ret_stmt). */
 fn loop_stmt(body: []@Statement()): @Statement() { parser::LoopStmt { label = ""; init = teko::list::empty(); body = body } }
 fn path1(name: str): parser::Path { parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) } }
-fn named_t(name: str): parser::TypeExpr { parser::NamedType { path = path1(name); args = teko::list::empty() } }
+fn named_t(name: str): @TypeExpr() { parser::NamedType { path = path1(name); args = teko::list::empty() } }
 
 // --- Type/env constructors ---
 fn u32t(): Type { Prim { kind = PrimKind::U32 } }
@@ -51,7 +51,7 @@ fn types_compare_and_unary() {
 }
 
 // build a `fn NAME(x: u32): <ret> { body }` for the function/return tests.
-fn mk_fn(name: str, ret: parser::TypeExpr, body: []@Statement()): parser::Function {
+fn mk_fn(name: str, ret: @TypeExpr(), body: []@Statement()): parser::Function {
     var p = parser::Param { name = "x"; has_type = true; type_ann = named_t("u32"); is_params = false; has_default = false; default_expr = e_num(0) }
     var params = teko::list::push(teko::list::empty(), p)
     parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; has_return = true; return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = false; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false }
@@ -339,7 +339,7 @@ fn subst_unify_inference() {
 }
 
 // (S4 type-generics) a single-segment NamedType type-expr with no args.
-fn ttype_named(name: str): parser::TypeExpr {
+fn ttype_named(name: str): @TypeExpr() {
     parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() }
 }
 // a table with one GENERIC struct decl: `type Box<T> = struct { value: T }`.
@@ -363,7 +363,7 @@ fn resolves_generic_type_instantiation() {
     teko::assert::is_true(match resolve_type(inst, tbl, "") { Type as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })
 
     // wrong arity Box<i64, str> → error
-    var two: []parser::TypeExpr = teko::list::push(teko::list::empty(), ttype_named("i64"))
+    var two: []@TypeExpr() = teko::list::push(teko::list::empty(), ttype_named("i64"))
     two = teko::list::push(two, ttype_named("str"))
     var inst2 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Box" }) }; args = two }
     teko::assert::is_true(match resolve_type(inst2, tbl, "") { error => true; _ => false })
@@ -429,11 +429,11 @@ fn resolves_ptr_generic() {
 // ---------------------------------------------------------------------------
 
 // a `Ref<INNER>` type-expr where INNER is itself a (hand-built) type-expr.
-fn ref_te_of(inner: parser::TypeExpr): parser::TypeExpr {
+fn ref_te_of(inner: @TypeExpr()): @TypeExpr() {
     parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Ref" }) }; args = teko::list::push(teko::list::empty(), inner) }
 }
 // a `Ref<NAME>` type-expr over a plain named type.
-fn ref_te(name: str): parser::TypeExpr { ref_te_of(ttype_named(name)) }
+fn ref_te(name: str): @TypeExpr() { ref_te_of(ttype_named(name)) }
 
 #test
 /**
@@ -474,7 +474,7 @@ fn mem_ref_not_collection_or_variant() {
     // []Ref<Ref<i64>> → error.
     teko::assert::is_true(match resolve_type(parser::SliceType { element = ref_te_of(ref_te("i64")) }, empty_table(), "") { error => true; _ => false })
     // Ref<Ref<i64>> | i64 → error (a reference may not be a variant member).
-    var members: []parser::TypeExpr = teko::list::push(teko::list::push(teko::list::empty(), ref_te_of(ref_te("i64"))), ttype_named("i64"))
+    var members: []@TypeExpr() = teko::list::push(teko::list::push(teko::list::empty(), ref_te_of(ref_te("i64"))), ttype_named("i64"))
     teko::assert::is_true(match resolve_type(parser::UnionType { members = members }, empty_table(), "") { error => true; _ => false })
 }
 
@@ -507,7 +507,7 @@ fn tvar(name: str, t: Type): TExpr { TExpr { kind = TVar { name = name; is_func 
 // a typed integer literal (i64).
 fn tnum(v: i64): TExpr { TExpr { kind = TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = i64t(); line = 0; col = 0 } }
 // a generic TFunction `fn NAME<T>(x: PARAMSPELL): RET { body }`.
-fn gfn(name: str, param_ann: parser::TypeExpr, ret: Type, body: []TStatement): TFunction {
+fn gfn(name: str, param_ann: @TypeExpr(), ret: Type, body: []TStatement): TFunction {
     var tps: []str = teko::list::push(teko::list::empty(), "T")
     var tcs: []@ConstraintExpr() = teko::list::push(teko::list::empty(), parser::NoConstraint { })
     var p = parser::Param { name = "x"; has_type = true; type_ann = param_ann; is_params = false; has_default = false; default_expr = e_num(0) }
@@ -903,7 +903,7 @@ fn tr_program_ok(items: []parser::Item): bool {
  * @param ret   the comptime's declared return type
  * @return      the `ComptimeDecl` item
  */
-fn b1_comptime_item(name: str, ret: parser::TypeExpr): parser::Item {
+fn b1_comptime_item(name: str, ret: @TypeExpr()): parser::Item {
     parser::Item { content = parser::ComptimeDecl { name = name; type_params = teko::list::empty(); params = teko::list::empty(); ret = ret; body = teko::list::empty(); vis = parser::Visibility::Private }; namespace = ""; file = "" }
 }
 
@@ -926,7 +926,7 @@ fn b1_call(name: str): parser::Expr {
  * @param callee  the comptime callee name the body returns
  * @return        the `Function` item
  */
-fn b1_user_fn(name: str, ret: parser::TypeExpr, callee: str): parser::Item {
+fn b1_user_fn(name: str, ret: @TypeExpr(), callee: str): parser::Item {
     var ret_stmt: @Statement() = parser::Return { has_value = true; value = b1_call(callee); values = teko::list::empty() }
     var body = teko::list::push(teko::list::empty(), ret_stmt)
     parser::Item { content = mk_fn(name, ret, body); namespace = ""; file = "" }
@@ -1043,7 +1043,7 @@ fn s6_and_constraint_mono_rejects_non_conforming_concrete() {
  * `Type` (name + type, no runtime value). See TEKO_ROADMAP_TRAITS.md TR2. TR3 (a later unit)
  * synthesizes structural-trait bodies (Eq/Ord/Hash/Clone/Default) from it.
  */
-fn fv_field(name: str, type_ann: parser::TypeExpr): parser::Field { parser::Field { name = name; type_ann = type_ann; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false } }
+fn fv_field(name: str, type_ann: @TypeExpr()): parser::Field { parser::Field { name = name; type_ann = type_ann; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false } }
 fn fv_struct_item_derives(name: str, fields: []parser::Field, derives: []str): parser::Item {
     parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = derives; consts = teko::list::empty(); is_readonly = false }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0}; namespace = ""; file = "" }
 }

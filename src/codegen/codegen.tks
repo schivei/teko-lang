@@ -1544,7 +1544,7 @@ fn cg_nameset_seen(seen: []str, n: str): bool { cg_str_in(seen, n) }
 
 // cg_te_reaches_byvalue — does this type-expr's BY-VALUE content reach the named type `to`?
 // (C: `cg_te_reaches_byvalue`.)
-fn cg_te_reaches_byvalue(prog: CgProg, te: parser::TypeExpr, to: str, seen: []str): bool {
+fn cg_te_reaches_byvalue(prog: CgProg, te: @TypeExpr(), to: str, seen: []str): bool {
     match te {
         parser::NamedType as nt => {
             var stem = nt.path.segments[nt.path.segments.len - 1].name
@@ -1620,7 +1620,7 @@ fn cg_name_reaches_byvalue(prog: CgProg, from: str, to: str, seen: []str): bool 
  * @param fte    the field's syntactic type annotation
  * @return       true iff the field must be emitted as a boxed heap pointer
  */
-fn cg_field_boxed(prog: CgProg, sname: str, fte: parser::TypeExpr): bool {
+fn cg_field_boxed(prog: CgProg, sname: str, fte: @TypeExpr()): bool {
     var is_box_candidate = match fte {
         parser::NamedType => true
         parser::UnionType as ut => cg_union_field_inline_tag(prog, sname, ut)
@@ -2605,7 +2605,7 @@ fn cg_union_texpr_mangle_str(ut: parser::UnionType): str | error {
 
 // cg_opt_mangle_texpr_str — the SYNTACTIC mangle suffix as a STRING (str twin of
 // cg_opt_mangle_texpr). Agrees byte-for-byte with cg_opt_mangle_str. (C: `cg_opt_mangle_texpr`.)
-fn cg_opt_mangle_texpr_str(te: parser::TypeExpr): str | error {
+fn cg_opt_mangle_texpr_str(te: @TypeExpr()): str | error {
     match te {
         parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
         parser::SliceType as st => { var inner_s = match cg_opt_mangle_texpr_str(st.element) { str as s => s; error as e => return e }; teko::str::concat("slice_", inner_s) }
@@ -2616,7 +2616,7 @@ fn cg_opt_mangle_texpr_str(te: parser::TypeExpr): str | error {
 
 // cg_member_key_texpr_str — a SYNTACTIC member's key (str). A C-keyword key (`bool`) → `bool_`
 // so the union field, construction, and destructure agree. (C: `cg_member_key_texpr`.)
-fn cg_member_key_texpr_str(m: parser::TypeExpr): str | error {
+fn cg_member_key_texpr_str(m: @TypeExpr()): str | error {
     var k = match cg_opt_mangle_texpr_str(m) { str as s => s; error as e => return e }
     if cg_is_c_keyword(k) { teko::str::concat(k, "_") } else { k }
 }
@@ -2667,7 +2667,7 @@ fn cg_variant_typename_texpr(buf: []byte, te: parser::UnionType): []byte | error
 // (S4) a type-expr → its mangle fragment, matching checker::type_mangle (prim/str/byte/named → the
 // name, slice_/opt_ prefixes, a nested generic use → its own instance name). So the instance name a
 // generic USE emits agrees byte-for-byte with the stamped decl's name.
-fn cg_texpr_mangle(te: parser::TypeExpr): str {
+fn cg_texpr_mangle(te: @TypeExpr()): str {
     match te {
         parser::NamedType as nt => {
             var last = nt.path.segments[nt.path.segments.len - 1].name
@@ -2712,14 +2712,14 @@ fn cg_union_texpr_inst_mangle(ut: parser::UnionType): str {
  * @param m  the syntactic union member
  * @return   true iff `m` is the bare `null` member
  */
-fn cg_texpr_member_is_null(m: parser::TypeExpr): bool {
+fn cg_texpr_member_is_null(m: @TypeExpr()): bool {
     match m {
         parser::NamedType as nt => nt.args.len == 0 && nt.path.segments.len == 1 && nt.path.segments[0].name == "null"
         _ => false
     }
 }
 // `<base>__g__<arg0>[__<arg1>…]` over type-arg exprs (matches checker::generic_inst_name).
-fn cg_texpr_inst_name(stem: str, args: []parser::TypeExpr): str {
+fn cg_texpr_inst_name(stem: str, args: []@TypeExpr()): str {
     var out = teko::str::concat(stem, "__g__")
     var i = 0
     loop {
@@ -2758,7 +2758,7 @@ fn cg_emit_slice_type_expr(buf: []byte, prog: CgProg, st: parser::SliceType, ref
     }
 }
 
-fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str): []byte | error {
+fn emit_type_expr(buf: []byte, prog: CgProg, te: @TypeExpr(), ref_ns: str): []byte | error {
     match te {
         parser::NamedType as nt => {
             var last = nt.path.segments[nt.path.segments.len - 1].name
@@ -2837,7 +2837,7 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str):
 // The deterministic optional-mangle SUFFIX for a SYNTACTIC inner type-expr (the struct-field /
 // member position twin of cg_opt_mangle). Must agree byte-for-byte with cg_opt_mangle.
 // (C: `cg_opt_mangle_texpr`.)
-fn cg_opt_mangle_texpr(buf: []byte, te: parser::TypeExpr): []byte | error {
+fn cg_opt_mangle_texpr(buf: []byte, te: @TypeExpr()): []byte | error {
     match te {
         parser::NamedType as nt => cb_str(buf, checker::name_last_segment(nt.path.segments[nt.path.segments.len - 1].name))
         _ => error { message = "codegen: optional inner type-expr not yet supported" }
@@ -4825,7 +4825,7 @@ fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escap
     // auto-box: reading a recursive back-edge field derefs the heap pointer.
     var fa_boxed = match fa.receiver.type {
         checker::Named as nm => match cg_find_struct_field_type(prog, nm.name, fa.field) {
-            parser::TypeExpr as fte => cg_field_boxed(prog, nm.name, fte)
+            (@TypeExpr()) as fte => cg_field_boxed(prog, nm.name, fte)
             null => false
         }
         _ => false
@@ -5299,7 +5299,7 @@ fn emit_interp(buf: []byte, prog: CgProg, in: checker::TInterp, str_region: str,
 // use the EFFECTIVE (base-inherited) field set so an optional field declared on an ancestor is
 // found from a derived class's construction — matching emit_type_decl's class body.
 // (C: cg_find_struct_field_type.)
-fn cg_find_struct_field_type(prog: CgProg, sname: str, fname: str): parser::TypeExpr | null {
+fn cg_find_struct_field_type(prog: CgProg, sname: str, fname: str): @TypeExpr() | null {
     var i = 0
     loop {
         if i >= prog.items.len { break }
@@ -5474,14 +5474,14 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
         // value into it (`({ T *_bxN = tk_alloc(sizeof *_bxN); *_bxN = (val); _bxN; })`). The
         // unique id is the buffer length (the functional uniquifier).
         var boxed = match fte_opt {
-            parser::TypeExpr as fte => cg_field_boxed(prog, name, fte)
+            (@TypeExpr()) as fte => cg_field_boxed(prog, name, fte)
             null => false
         }
         var bxid = out.len to i64
         var bxN = fresh_named("_bx", bxid)
         if boxed {
             out = cb(out, "({ ")
-            match fte_opt { parser::TypeExpr as fte => { out = match emit_type_expr(out, prog, fte, checker::name_qualifier(name)) { []byte as o => o; error as err => return err } }; null => { } }
+            match fte_opt { (@TypeExpr()) as fte => { out = match emit_type_expr(out, prog, fte, checker::name_qualifier(name)) { []byte as o => o; error as err => return err } }; null => { } }
             out = cb(out, " *"); out = cb(out, bxN)
             // MEM Step 1: frame-local boxes ride the frame region (`tk_region_alloc(<frame>, …)`),
             // freed at the function's exit edge; everything else rides root `tk_alloc` (safe leak).
@@ -5499,7 +5499,7 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
                 checker::Slice as sl => match sl.element {
                     checker::Void => {
                         match fte_opt {
-                            parser::TypeExpr as fte => match fte {
+                            (@TypeExpr()) as fte => match fte {
                                 parser::SliceType as st => {
                                     out = cb(out, "(")
                                     out = match emit_type_expr(out, prog, fte, checker::name_qualifier(name)) { []byte as o => o; error as err => return err }
@@ -5528,7 +5528,7 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
             // emit plainly when nothing was built.
             var exp_t: checker::Type = checker::Void { }
             match fte_opt {
-                parser::TypeExpr as fte => match fte {
+                (@TypeExpr()) as fte => match fte {
                     parser::NamedType as nt => { exp_t = checker::Named { name = cg_canon_name_ns(prog, nt.path, checker::name_qualifier(name)) } }
                     parser::SliceType as st => match st.element {
                         parser::NamedType as ent => {
@@ -7061,7 +7061,7 @@ fn cg_emit_case_key_str(pat: @Pattern()): str | error {
             if bp.is_slice {
                 match bp.slice_type {
                     null => error { message = "codegen: slice pattern without a slice type (internal)" }
-                    parser::TypeExpr as st => cg_member_key_texpr_str(st)
+                    (@TypeExpr()) as st => cg_member_key_texpr_str(st)
                 }
             } else if bp.type_args.len > 0 {
                 // (W9.4) `Gen<i64> as x` — the case is the STAMPED instance `Gen__g__i64`, matching the
@@ -7239,14 +7239,14 @@ fn cg_kind_descend(prog: CgProg, subjT: checker::Type, pat: @Pattern()): CgKindD
     var d = match cg_find_decl(prog, sname) { parser::TypeDecl as dd => dd; error => return null }
     var sb = match d.body { parser::StructBody as s => s; _ => return null }
     // find a field named `kind` whose type-ann is a NAMED type.
-    var kfte: parser::TypeExpr | null = null
+    var kfte: @TypeExpr() | null = null
     var i = 0
     loop {
         if i >= sb.fields.len { break }
         if sb.fields[i].name == "kind" { kfte = sb.fields[i].type_ann; break }
         i++
     }
-    var fte = match kfte { null => return null; parser::TypeExpr as t => t }
+    var fte = match kfte { null => return null; (@TypeExpr()) as t => t }
     var vname = match fte { parser::NamedType as nt => cg_canon_name(prog, cg_path_last(nt.path)); _ => return null }
     if !cg_named_is_variant(prog, vname) { return null }
     var v = checker::Named { name = vname }
@@ -10516,7 +10516,7 @@ fn cb_upper(buf: []byte, s: str): []byte {
 
 // variant_member_name — a variant member's bare last path segment (the union field name for a
 // NAMED member). Kept for the cg_variant_has_member scan. (C: `variant_member_name`.)
-fn variant_member_name(m: parser::TypeExpr): str | error {
+fn variant_member_name(m: @TypeExpr()): str | error {
     match m {
         parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
         _ => error { message = "codegen: a variant member must be a named type" }
@@ -11008,7 +11008,7 @@ fn cg_collect_block_opts(set: CgTypeSet, stmts: []checker::TStatement): CgTypeSe
  *  typedef — a field-ONLY element (never surfaced by an expression) is otherwise stored bare and
  *  dangles (the #109 bare-name gap). The typedef NAME mangle (name_last_segment, always bare) is
  *  unaffected; only the element BODY is qualified. The prim mapping mirrors emit_type_expr exactly. */
-fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: parser::TypeExpr): checker::Type {
+fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: @TypeExpr()): checker::Type {
     match te {
         parser::NamedType as nt => {
             var last = nt.path.segments[nt.path.segments.len - 1].name
@@ -11092,7 +11092,7 @@ fn cg_register_field_list(set: CgTypeSet, prog: CgProg, ref_ns: str, fields: []p
 
 /** Register a variant decl body's member typedefs: a UnionType recurses per-member (each named
  *  member owns its tk_t_<Name>); any other body registers its single type-expr directly. */
-fn cg_register_variant_body(set: CgTypeSet, prog: CgProg, ref_ns: str, te: parser::TypeExpr): CgTypeSet {
+fn cg_register_variant_body(set: CgTypeSet, prog: CgProg, ref_ns: str, te: @TypeExpr()): CgTypeSet {
     match te {
         parser::UnionType as ut => {
             var s = set
@@ -11331,7 +11331,7 @@ fn cg_texpr_union_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, ut: parser:
     cg_uvar_emitted_key(em, set, cg_variant_key(va))
 }
 // By-value readiness of a field/member SYNTACTIC type-expr (struct field / variant member).
-fn cg_texpr_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, te: parser::TypeExpr, owner_ns: str): bool {
+fn cg_texpr_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, te: @TypeExpr(), owner_ns: str): bool {
     match te {
         parser::NamedType as nt => {
             var stem = nt.path.segments[nt.path.segments.len - 1].name
@@ -12082,7 +12082,7 @@ fn cg_emit_vtthunk_def(buf: []byte, prog: CgProg, cd_name: str, idd_name: str, m
  * @throws            when the receiver's C type cannot be emitted (an internal inconsistency)
  * @since #291 (trait/interface vtable dispatch UB fix)
  */
-fn cg_emit_vtthunk_receiver(buf: []byte, prog: CgProg, cd_name: str, recv_ann: parser::TypeExpr, recv_ns: str): []byte | error {
+fn cg_emit_vtthunk_receiver(buf: []byte, prog: CgProg, cd_name: str, recv_ann: @TypeExpr(), recv_ns: str): []byte | error {
     var thunk_base = cg_vtthunk_base_name(recv_ann)
     if thunk_base.len > 0 && cg_is_polymorphic_base(prog, thunk_base) {
         var out = cb_tysym(cb(buf, "(tk_base_"), thunk_base)
@@ -12104,7 +12104,7 @@ fn cg_emit_vtthunk_receiver(buf: []byte, prog: CgProg, cd_name: str, recv_ann: p
  * @return          the annotation's last path segment name, or "" if it is not a `NamedType`
  * @since #291 (trait/interface vtable dispatch UB fix)
  */
-fn cg_vtthunk_base_name(recv_ann: parser::TypeExpr): str {
+fn cg_vtthunk_base_name(recv_ann: @TypeExpr()): str {
     match recv_ann {
         parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
         _ => ""

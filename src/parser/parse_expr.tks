@@ -89,13 +89,13 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
  * @throws                when a name after `::` is missing, or a `(` does not follow the factory tail
  * @since onda-3 (#254 L5)
  */
-fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, owner_type_args: []TypeExpr, origin: u64): Parsed<Expr> | error {
+fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, owner_type_args: []@TypeExpr(), origin: u64): Parsed<Expr> | error {
     var tail = match parse_path(tokens, at_colons + 1) { Parsed<Path> as x => x; error as e => return e }
     var full = path_concat(head_path, tail.node)
     // OPTIONAL explicit METHOD type-args on the factory: `Type<A>::func<B>(…)` — SPECULATIVE, commit
     // only when the `<…>` closes AND a `(` follows (mirrors the other call-site sites). Otherwise the
     // resume point stays at the tail and the `(` check below reports the missing paren.
-    var callee_type_args: []TypeExpr = teko::list::empty()
+    var callee_type_args: []@TypeExpr() = teko::list::empty()
     var after = tail.next
     if is_kind_at(tokens, tail.next, lexer::TokenKind::Lt) {
         match parse_type_args(tokens, tail.next) {
@@ -119,7 +119,7 @@ fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: 
 // Field VALUES parse with struct allowed (they sit inside the literal's braces).
 // (W9.4) `type_args` are the explicit construction-site generic args (empty for the bare
 // `Name { … }` form). `pos` is at the `{`.
-fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args: []TypeExpr): Parsed<Expr> | error {
+fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args: []@TypeExpr()): Parsed<Expr> | error {
     var p = skip_seps(tokens, pos + 1)   // consume `{`, skip leading separators
     if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {   // empty literal `Name { }`
         return Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = teko::list::empty(); field_vals = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
@@ -403,7 +403,7 @@ fn parse_macro_call(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
         return err_at(tokens, p, "expected a macro/comptime name after `@`")
     }
     var pp = match parse_path(tokens, p) { Parsed<Path> as x => x; error as e => return e }
-    var type_args: []TypeExpr = teko::list::empty()
+    var type_args: []@TypeExpr() = teko::list::empty()
     var after = pp.next
     if is_kind_at(tokens, after, lexer::TokenKind::Lt) {
         match parse_type_args(tokens, after) {

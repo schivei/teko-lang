@@ -222,18 +222,18 @@ fn mono_inst_concat(a: []MonoInst, b: []MonoInst): []MonoInst {
 }
 
 /**
- * type_to_texpr — semantic `Type` → syntactic `TypeExpr`. A stamped fn's params are SYNTACTIC
+ * type_to_texpr — semantic `Type` → syntactic `@TypeExpr()`. A stamped fn's params are SYNTACTIC
  * (`parser::Param.type_ann`, resolved by codegen at emit), so substituting the param `T` means
- * rewriting the syntactic annotation to the concrete type's `TypeExpr`. Prim → `NamedType{[prim_name]}`,
+ * rewriting the syntactic annotation to the concrete type's `@TypeExpr()`. Prim → `NamedType{[prim_name]}`,
  * Named → `NamedType{[name]}`, Str → `NamedType`, Byte → `NamedType`, Slice → `SliceType`. A
- * Variant is not expressible as a single `TypeExpr` (a generic param can only bind to such via a
- * future S6) — it falls back to a Named placeholder so a `TypeExpr` is always produced.
+ * Variant is not expressible as a single `@TypeExpr()` (a generic param can only bind to such via a
+ * future S6) — it falls back to a Named placeholder so a `@TypeExpr()` is always produced.
  * (C: type_to_texpr.)
  *
  * @param t  the resolved semantic type
  * @return   the syntactic type-expr codegen re-checks against `t`
  */
-pub fn type_to_texpr(t: Type): parser::TypeExpr {   // (W10) pub: codegen synthesizes lifted-lambda fn params from resolved Types
+pub fn type_to_texpr(t: Type): @TypeExpr() {   /* (W10) pub: codegen synthesizes lifted-lambda fn params from resolved Types */
     match t {
         Prim as p => mono_named_texpr(prim_name(p.kind))
         Str => mono_named_texpr("str")
@@ -249,14 +249,14 @@ pub fn type_to_texpr(t: Type): parser::TypeExpr {   // (W10) pub: codegen synthe
         Void => mono_named_texpr("()")   // (0.3.1 §2) the UNSPELLABLE unit sentinel — `void` is no longer a surface type name; `builtin_type` still maps `()` -> Void
         Variant => mono_named_texpr("variant")
         Func as f => {   // (W10a) reconstruct a FunctionType `func<…, R>` / `action<…>` (not a placeholder name)
-            var ps: []parser::TypeExpr = teko::list::empty()
+            var ps: []@TypeExpr() = teko::list::empty()
             var i = 0
             loop { if i >= f.params.len { break }; ps = teko::list::push(ps, type_to_texpr(f.params[i])); i++ }
             parser::FunctionType { params = ps; ret = type_to_texpr(f.ret) }
         }
     }
 }
-fn mono_named_texpr(name: str): parser::TypeExpr {
+fn mono_named_texpr(name: str): @TypeExpr() {
     var seg = parser::Segment { name = name }
     parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), seg) }; args = teko::list::empty() }
 }
@@ -264,7 +264,7 @@ fn mono_named_texpr(name: str): parser::TypeExpr {
 // substitute the type-params in a SYNTACTIC TypeExpr through a Subst: a NamedType whose last
 // segment is a bound type-param → that type's TypeExpr; otherwise recurse structurally. This
 // rewrites a stamped fn's param annotations (the `T` → the concrete spelling). (C: subst_typeexpr.)
-fn subst_typeexpr(te: parser::TypeExpr, s: Subst): parser::TypeExpr {
+fn subst_typeexpr(te: @TypeExpr(), s: Subst): @TypeExpr() {
     match te {
         parser::NamedType as nt => {
             if nt.path.segments.len == 1 {
@@ -280,13 +280,13 @@ fn subst_typeexpr(te: parser::TypeExpr, s: Subst): parser::TypeExpr {
         }
         parser::SliceType as st => parser::SliceType { element = subst_typeexpr(st.element, s) }
         parser::UnionType as ut => {
-            var ms: []parser::TypeExpr = teko::list::empty()
+            var ms: []@TypeExpr() = teko::list::empty()
             var i = 0
             loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_typeexpr(ut.members[i], s)); i++ }
             parser::UnionType { members = ms }
         }
         parser::FunctionType as fnt => {   // (W10a) substitute through params + return
-            var nps: []parser::TypeExpr = teko::list::empty()
+            var nps: []@TypeExpr() = teko::list::empty()
             var i = 0
             loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_typeexpr(fnt.params[i], s)); i++ }
             parser::FunctionType { params = nps; ret = subst_typeexpr(fnt.ret, s) }
@@ -306,8 +306,8 @@ fn subst_typeexpr(te: parser::TypeExpr, s: Subst): parser::TypeExpr {
  * @param s     the active `{type-param → concrete}` substitution
  * @return      the arguments each recursively substituted through `s`
  */
-fn subst_typeexpr_args(args: []parser::TypeExpr, s: Subst): []parser::TypeExpr {
-    var out: []parser::TypeExpr = teko::list::empty()
+fn subst_typeexpr_args(args: []@TypeExpr(), s: Subst): []@TypeExpr() {
+    var out: []@TypeExpr() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= args.len { break }
@@ -1120,7 +1120,7 @@ fn instance_type_subst(template: parser::TypeDecl, inst: parser::TypeDecl, table
  * @return         the Subst extended with this field's binding, or `s` unchanged when it does not unify
  * @since onda-3 (#254)
  */
-fn unify_field_pair(s: Subst, pat_ann: parser::TypeExpr, con_ann: parser::TypeExpr, ptable: TypeTable, table: TypeTable): Subst {
+fn unify_field_pair(s: Subst, pat_ann: @TypeExpr(), con_ann: @TypeExpr(), ptable: TypeTable, table: TypeTable): Subst {
     match resolve_type(pat_ann, ptable, "") {
         Type as pat => match resolve_type(con_ann, table, "") {
             Type as concrete => match unify(pat, concrete, s, table) { Subst as x => x; error => s }

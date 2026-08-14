@@ -407,12 +407,12 @@ fn ltype_of_int_prim(k: checker::PrimKind): LType {
 }
 
 /** ltype_of_typeexpr — the machine class of a PARAMETER or FIELD annotation (a syntactic
-    parser::TypeExpr, since a TFunction carries no resolved Func and a StructBody carries no
+    @TypeExpr(), since a TFunction carries no resolved Func and a StructBody carries no
     resolved field types). A name that resolves to a declared `enum` maps to that enum's integer
     carrier (`enum_carrier_ltype`, the SAME answer `ltype_of` gives the resolved type — one type,
     one width); a single-segment primitive name maps by width; every other shape (compound path,
     slice, optional, union, function) collapses to Ptr. */
-pub fn ltype_of_typeexpr(te: parser::TypeExpr, enums: []LEnumInfo): LType {
+pub fn ltype_of_typeexpr(te: @TypeExpr(), enums: []LEnumInfo): LType {
     match te {
         parser::NamedType as nt => ltype_of_named_path(nt.path, enums)
         _ => LType::Ptr
@@ -3189,7 +3189,7 @@ pub type LRefFnInfo = struct { ns: str; name: str; ref_flags: []bool }
  * @param te  the parameter's syntactic type annotation
  * @return    whether `te` is `Ref<...>`
  */
-fn is_ref_param_ann(te: parser::TypeExpr): bool {
+fn is_ref_param_ann(te: @TypeExpr()): bool {
     match named_type_name_of(te) { str as n => n == "Ref"; null => false }
 }
 
@@ -15737,7 +15737,7 @@ fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::Typ
  * @param name   the parameter's or field's own name — for the diagnostic
  * @return       `acc`, extended when `te` disagrees
  */
-fn fat_divergence_line_of(acc: []str, te: parser::TypeExpr, table: checker::TypeTable, rtable: checker::TypeTable, ns: str, place: str, owner: str, name: str): []str {
+fn fat_divergence_line_of(acc: []str, te: @TypeExpr(), table: checker::TypeTable, rtable: checker::TypeTable, ns: str, place: str, owner: str, name: str): []str {
     var truth = match checker::resolve_type(te, rtable, ns) { checker::Type as t => t; error => return acc }
     var semantic = is_fat_type(truth)
     if typeexpr_is_fat(te, table) == semantic { return acc }
@@ -16026,7 +16026,7 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
  * optional/union/function annotation, or a forward reference to a not-yet-
  * registered struct) (#414, #382).
  *
- * @param parser::TypeExpr te  the field's syntactic type annotation
+ * @param @TypeExpr() te  the field's syntactic type annotation
  * @param []LStructLayout known  every struct layout resolved so far
  * @return LStructLayout?  the matching nested layout, or `null`
  */
@@ -16053,7 +16053,7 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
  * @param known  every struct layout resolved so far
  * @return       the field's nested struct layout, or `null` (a scalar/fat/variant/forward-ref field)
  */
-fn struct_layout_of_resolved(rft: checker::Type, te: parser::TypeExpr, known: []LStructLayout): LStructLayout | null {
+fn struct_layout_of_resolved(rft: checker::Type, te: @TypeExpr(), known: []LStructLayout): LStructLayout | null {
     match rft {
         checker::Named as n => match find_known_struct_layout(known, n.name) {
             LStructLayout as l => return l
@@ -16064,7 +16064,7 @@ fn struct_layout_of_resolved(rft: checker::Type, te: parser::TypeExpr, known: []
     struct_layout_of_field(te, known)
 }
 
-fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout): LStructLayout | null {
+fn struct_layout_of_field(te: @TypeExpr(), known: []LStructLayout): LStructLayout | null {
     // Struct layouts are keyed by CANONICAL (qualified) name — `find_struct_layout` is called at
     // field-access time with `named_type_name(arg.type)`, a `resolve_named`-qualified name. A field
     // whose annotation is itself written QUALIFIED (`decl: parser::TypeDecl`, `sig: checker::TFuncSig`
@@ -16092,12 +16092,12 @@ fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout): LStruct
 /**
  * named_type_name_of — the bare name of a single-segment Named type annotation
  * (`Point`, not `a::Point`); `null` for a multi-segment path or any other
- * TypeExpr shape (#414, #382).
+ * @TypeExpr() shape (#414, #382).
  *
- * @param parser::TypeExpr te  the syntactic type annotation
+ * @param @TypeExpr() te  the syntactic type annotation
  * @return str?  the single segment's name, or `null`
  */
-fn named_type_name_of(te: parser::TypeExpr): str | null {
+fn named_type_name_of(te: @TypeExpr()): str | null {
     match te {
         parser::NamedType as nt => single_segment_name(nt.path)
         _ => null
@@ -16344,7 +16344,7 @@ fn typeexpr_is_fat_decl_body(body: @TypeBody(), table: checker::TypeTable, visit
  * @param visited  the alias-chain recursion guard
  * @return         whether `te` denotes a fat-pointer-VALUED type (`str` or `[]T`)
  */
-fn typeexpr_is_fat_walk(te: parser::TypeExpr, table: checker::TypeTable, visited: []str): bool {
+fn typeexpr_is_fat_walk(te: @TypeExpr(), table: checker::TypeTable, visited: []str): bool {
     match te {
         parser::SliceType => true
         parser::NamedType as nt => typeexpr_is_fat_named(nt, table, visited)
@@ -16388,7 +16388,7 @@ fn typeexpr_is_fat_walk(te: parser::TypeExpr, table: checker::TypeTable, visited
  *                    an `is_fat_type`-typed value can carry
  * @since 0.3.1.0 raiz A, crumb R0
  */
-fn typeexpr_is_fat(te: parser::TypeExpr, table: checker::TypeTable): bool {
+fn typeexpr_is_fat(te: @TypeExpr(), table: checker::TypeTable): bool {
     typeexpr_is_fat_walk(te, table, teko::list::empty())
 }
 
@@ -16408,7 +16408,7 @@ fn typeexpr_is_fat(te: parser::TypeExpr, table: checker::TypeTable): bool {
  * @return        the field's byte size
  * @since #594 T-B6
  */
-fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type): u32 {
+fn field_layout_size(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type): u32 {
     if field_is_fat_resolved(te, table, rft) { return fat_value_bytes(fat_field_width_type(rft)) }
     field_size_of(ft, nested)
 }
@@ -16448,7 +16448,7 @@ fn fat_field_width_type(rft: checker::Type): checker::Type {
  * @return       whether the field holds a fat-pointer `{ptr, len}` value
  * @since 0.3.1.0 raiz A — fat-field layout unification
  */
-fn field_is_fat_resolved(te: parser::TypeExpr, table: checker::TypeTable, rft: checker::Type): bool {
+fn field_is_fat_resolved(te: @TypeExpr(), table: checker::TypeTable, rft: checker::Type): bool {
     typeexpr_is_fat(te, table) || is_fat_type(rft)
 }
 
@@ -16465,7 +16465,7 @@ fn field_is_fat_resolved(te: parser::TypeExpr, table: checker::TypeTable, rft: c
  * @return        the field's byte alignment
  * @since #594 T-B6
  */
-fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type): u32 {
+fn field_layout_align(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type): u32 {
     if field_is_fat_resolved(te, table, rft) { return ltype_align(LType::Ptr) }
     field_align_of(ft, nested)
 }
