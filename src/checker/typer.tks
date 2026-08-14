@@ -5608,8 +5608,22 @@ fn type_comptime_call(mc: parser::MacroCall, cd: parser::ComptimeDecl, env: Env,
     var args = match type_comptime_args(mc.args, env, table) { []TExpr as a => a; error as e => return e }
     var targs = match resolve_type_args(mc.callee_type_args, table, env.cur_ns) { []Type as t => t; error as e => return e }
     var ret = match resolve_type(cd.ret, table, env.cur_ns) { Type as t => t; error as e => return e }
-    TExpr { kind = TCall { overload_suffix = ""; callee = mc.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = targs; ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = mc.callee; args = args; call_ns = comptime_call_ns(); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = targs; ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
 }
+
+/**
+ * comptime_call_ns — the reserved `TCall.call_ns` sentinel that marks a `TCall` as a Family-B comptime
+ * call (§14). A `@name(...)` and a runtime `name(...)` collapse to the SAME `TCall` shape, and §14.2's
+ * no-shadow principle intends a comptime and a runtime function to co-exist under one name (e.g. the
+ * comptime `@sizeof<T>()` beside the runtime `sizeof(v)`); this sentinel — a leading `@`, which no real
+ * namespace can carry — is how `expand_comptime` tells the comptime call from the runtime one without a
+ * new typed-AST variant or field. The node is replaced by its folded literal before codegen, so the
+ * sentinel never reaches lowering.
+ *
+ * @return  the reserved comptime-call namespace sentinel
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+pub fn comptime_call_ns(): str { "@comptime" }
 
 /**
  * type_comptime_args — type each argument of a comptime call in order, stopping at the first error. The
