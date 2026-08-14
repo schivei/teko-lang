@@ -794,18 +794,75 @@ fn value_type_body_methods(body: parser::TypeBody): []parser::Function {
 }
 
 /**
- * value_op_owner — the value-type NAME that owns operator/method lookup for `t`, or "" when `t` is a
- * RAW primitive (ruling 7's trigger: the dunder lookup runs iff at least one operand is NOT a raw
+ * type_body_operators — the `operator` members declared DIRECTLY in any body kind (§6/§9.4): a
+ * value-type (Newtype/Enum/Flags), a struct, a class, or an interface (whose operators are bodyless
+ * contract members). The single accessor the operator dispatch (`owner_has_matching_operator`) and the
+ * definition validator (`check_operator_invariants`) share across every carrier. Only members carrying
+ * `is_operator` are returned; ordinary methods and fields are filtered out.
+ *
+ * @param body  the type declaration's body
+ * @return      the body's operator members, or empty when the body declares none
+ * @since §6 (9-ops)
+ */
+fn type_body_operators(body: parser::TypeBody): []parser::Function {
+    match body {
+        parser::NewtypeBody as nb => operator_members(nb.methods)
+        parser::EnumBody as eb => operator_members(eb.methods)
+        parser::FlagsBody as fb => operator_members(fb.methods)
+        parser::StructBody as sb => operator_members(sb.methods)
+        parser::ClassBody as cb => operator_members(cb.methods)
+        parser::InterfaceBody as ib => operator_members(ib.methods)
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * body_declares_operator — does `body` declare at least one `operator` member (§6)? The cheap predicate
+ * `value_op_owner` uses so a PLAIN struct/class (no operator) returns "" and never enters the dunder
+ * lookup, while a struct/class carrying an operator owns dispatch for its instances.
+ *
+ * @param body  the type declaration's body
+ * @return      true iff the body declares one or more operators
+ * @since §6 (9-ops)
+ */
+fn body_declares_operator(body: parser::TypeBody): bool {
+    type_body_operators(body).len > 0
+}
+
+/**
+ * is_value_type_body — is `body` a prim/enum/flags-backed VALUE-TYPE body (§9 ruling 10)? Distinguishes
+ * the value-type carriers (which own the ruling-10 invariants — no fields, a readonly transient `self`,
+ * a definition-level counterpart obligation) from struct/class/interface carriers, whose operators are
+ * validated for well-formedness only.
+ *
+ * @param body  the type declaration's body
+ * @return      true iff the body is a Newtype/Enum/Flags value-type body
+ * @since §6 (9-ops)
+ */
+fn is_value_type_body(body: parser::TypeBody): bool {
+    match body {
+        parser::NewtypeBody => true
+        parser::EnumBody => true
+        parser::FlagsBody => true
+        _ => false
+    }
+}
+
+/**
+ * value_op_owner — the NAME that owns operator/method lookup for `t`, or "" when `t` does not own any
+ * operator dispatch (ruling 7's trigger: the dunder lookup runs iff at least one operand is NOT a raw
  * primitive). A `Named` type whose decl is a `NewtypeBody`, `EnumBody`, or `FlagsBody` (a NAMED
- * value-type counts as non-primitive) returns its canonical name; every `Prim`/`Byte`/`Str`/`Slice`/
- * a plain struct/class/… returns "". Because the compiler's own corpus declares ZERO value-types,
- * and two raw primitives both yield "", the operator branch is never entered for any primitive pair —
- * the historic primitive path is byte-identical (plan §8 fixpoint argument).
+ * value-type counts as non-primitive) always returns its canonical name; a `StructBody`/`ClassBody`
+ * returns its name ONLY when it declares at least one `operator` member (§6, `body_declares_operator`)
+ * so `a + b` over two PLAIN structs never enters the dunder lookup. Every `Prim`/`Byte`/`Str`/`Slice`/
+ * a plain data struct returns "". Because the compiler's own corpus declares ZERO value-types and ZERO
+ * operator-carrying structs, and two raw primitives both yield "", the operator branch is never entered
+ * for any primitive pair — the historic primitive path is byte-identical (plan §8 fixpoint argument).
  *
  * @param t      the operand's resolved type
  * @param table  the folded type table
- * @return       the owning value-type's canonical name, or ""
- * @since §9
+ * @return       the owning type's canonical name, or ""
+ * @since §9 (§6 extends to operator-carrying struct/class)
  */
 fn value_op_owner(t: Type, table: TypeTable): str {
     match t {
@@ -814,6 +871,8 @@ fn value_op_owner(t: Type, table: TypeTable): str {
                 parser::NewtypeBody => n.name
                 parser::EnumBody => n.name
                 parser::FlagsBody => n.name
+                parser::StructBody => if body_declares_operator(td.body) { n.name } else { "" }
+                parser::ClassBody => if body_declares_operator(td.body) { n.name } else { "" }
                 _ => ""
             }
             error => ""
@@ -872,7 +931,7 @@ fn operator_operand_type(te: parser::TypeExpr, owner_canonical: str, table: Type
  */
 fn owner_has_matching_operator(owner_canonical: str, dn: str, l: TExpr, r: TExpr, table: TypeTable): bool {
     var methods = match type_table_find(table, owner_canonical, "") {
-        parser::TypeDecl as td => value_type_body_methods(td.body)
+        parser::TypeDecl as td => type_body_operators(td.body)
         error => teko::list::empty()
     }
     var i = 0
@@ -975,7 +1034,7 @@ fn dispatch_binop_operator(dn: str, left: parser::Expr, right: parser::Expr, l: 
  */
 fn owner_has_unary_operator(owner_canonical: str, dn: str, o: TExpr, table: TypeTable): bool {
     var methods = match type_table_find(table, owner_canonical, "") {
-        parser::TypeDecl as td => value_type_body_methods(td.body)
+        parser::TypeDecl as td => type_body_operators(td.body)
         error => teko::list::empty()
     }
     var i = 0
@@ -8660,32 +8719,37 @@ fn operator_members(methods: []parser::Function): []parser::Function {
 }
 
 /**
- * check_operator_invariants — validate a value-type declaration's `operator` members at DEFINITION
- * (§9 rulings 1–5). Per operator: `check_one_operator` (name, arity, `self`, return type, index
- * carrier); across operators: `check_comparator_counterparts` (ruling 5). Inert for every non
- * value-type body and for a value-type with no operators (`operator_members` is empty), so the
- * compiler's own corpus never triggers it (plan §8 fixpoint argument). Ruling 10 (no fields, no
- * statics, no consts) is enforced earlier by the parser.
+ * check_operator_invariants — validate a type declaration's `operator` members at DEFINITION (§9
+ * rulings 1–5, §6/§9.4). Per operator, on EVERY carrier (value-type, struct, class): `check_one_operator`
+ * (name, arity, `self`, return type, index carrier). Only a VALUE-TYPE body additionally owns the
+ * ruling-10 invariants: `check_value_type_self_readonly` (a transient readonly `self`) and the
+ * DEFINITION-level counterpart obligation `check_comparator_counterparts` (D2 — a lone value-type must
+ * write both sides of a comparison pair, since it cannot compose a mixin). A struct/class does NOT face
+ * the definition-level counterpart obligation here: its counterpart may be flattened in from a trait
+ * (e.g. `NeByEq`), and the obligation is discharged by interface conformance over the FLATTENED methods
+ * (D1). Inert for a body with no operators, so the compiler's own corpus never triggers it (plan §8).
  *
- * @param td      the value-type declaration
+ * @param td      the type declaration
  * @param ref_ns  the declaration's namespace (for return/backing resolution)
  * @param table   the folded type table
  * @return        null when every operator is well-formed, else the first located diagnostic
- * @throws        the first ruling violation among the value-type's operators
- * @since §9
+ * @throws        the first ruling violation among the type's operators
+ * @since §9 (§6/§9.4 extends the well-formedness pass to struct/class)
  */
 fn check_operator_invariants(td: parser::TypeDecl, ref_ns: str, table: TypeTable): null | error {
-    var methods = value_type_body_methods(td.body)
+    var ops = type_body_operators(td.body)
     var i = 0
     loop {
-        if i >= methods.len { break }
-        if methods[i].is_operator {
-            match check_one_operator(td, methods[i], ref_ns, table) { error as e => return e; null => { } }
-        }
+        if i >= ops.len { break }
+        match check_one_operator(td, ops[i], ref_ns, table) { error as e => return e; null => { } }
         i++
     }
-    match check_value_type_self_readonly(td, methods, table) { error as e => return e; null => { } }
-    check_comparator_counterparts(methods)
+    if is_value_type_body(td.body) {
+        var vmethods = value_type_body_methods(td.body)
+        match check_value_type_self_readonly(td, vmethods, table) { error as e => return e; null => { } }
+        match check_comparator_counterparts(vmethods) { error as e => return e; null => { } }
+    }
+    null
 }
 
 /**
