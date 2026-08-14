@@ -1,48 +1,43 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, by-hand per owner order): SELF-CONSTRUCTION R1 — the ADDITIVE `.{ … }`
-# target-typed construction capability (§4.1). The owner did NOT edit bootstrap/teko.c by hand; the
-# file is the harvested self-host output, proven a fixpoint. Format and parser: scripts/degrau.sh's
-# kv_field; enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
+# RESEED (hand-harvest, by-hand per owner order): SELF-CONSTRUCTION R2 — the SWEEP of the corpus's
+# `self { … }` constructions to `.{ … }` and the REMOVAL of the `self { … }` construction form (§4.1).
+# The owner did NOT edit bootstrap/teko.c by hand; the file is the harvested self-host output, proven a
+# fixpoint. Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh,
+# which only ever judges this record on a SWAP.
 #
-# self-construction R1 — target-typed `.{ … }` (§4.1), additive
+# self-construction R2 — sweep + `self { … }` removal (§4.1), atomic
 # ---------------------------------------------------------------------------------------------
 # WHAT ENTERS (docs/design/plano-self-construction.md, docs/design/mudancas-superficie-0.3.1.md §4.1):
-#   - PARSER, in `src/parser/parse_expr.tks`: a leading `.` followed by `{` in `parse_atom` parses a
-#     `.{ … }` construction as a `StructLit` carrying the ZERO-segment `dot_sentinel_path()` — an
-#     unambiguous marker (every nominal or `self` prefix has >= 1 segment). Parsed UNCONDITIONALLY
-#     (the leading `.` self-delimits, no `allow_struct` gate); the `self { … }` construct STILL parses
-#     (R1 is additive — the removal is R2). Zero new AST field (the `.tkb` layout is unchanged).
-#   - CHECKER, in `src/checker/typer.tks`: `is_dot_sentinel` + `dot_construct_target` resolve a
-#     `.{ … }`'s target from the context's `expected` type (a concrete struct/class, an already-stamped
-#     generic instance, or a generic self-return phantom `Foo__g__T` remapped by the mono pass); no
-#     target ⇒ an honest "needs a known target type" error (`.{ … }` never infers by back-flow). The
-#     canonical name is taken from `expected`, so the emitted `TStructInit` widens into the return/slot
-#     by exact `type_eq` — closing the self-return gap the retired `self { … }` could not. A generic
-#     owner's `-> self` return is now phantom-stamped (`self_return_named`) so a `.{ … }` self-construct
-#     widens into it. `construct_target` gains the `.{ … }` branch alongside `self`/explicit/bare.
-#   - RETURN-TARGET THREADING, in `src/checker/scope.tks` + `typer.tks`: `Env` gains `ret_expected`
-#     (the body's return type, `Void` for a value-less body), set by `type_method`/`type_function` and
-#     read at the two tail slots a `.{ … }` can occupy — a `return .{…}` value and a function's trailing
-#     `.{…}` expression. The read is dot-sentinel-gated, so it is INERT on all existing (dot-free)
-#     source. Arguments route a `.{ … }` through the parameter type (`expr_is_dot_construction`).
-#   - `src/` PRODUCT UNCHANGED: the compiler's own sources still use `self { … }`/`Name { … }`; nothing
-#     in `src/` uses `.{ … }` yet (the sweep + `self { … }` removal is R2). The new codegen path does
-#     not exist — `.{ … }` lowers to the SAME `TStructInit` the nominal/`self` forms produce, so
-#     codegen is untouched and the new parser/checker paths are corpus-inert on this source.
+#   - SWEEP: every `self { … }` construction in `src/` is rewritten to the target-typed `.{ … }`
+#     (R1's additive capability): `src/collections/list.tks` (`List<T>::make`) and
+#     `src/collections/map.tks` (`Map<V>::make`). Both target the generic self-instance the mono pass
+#     remaps, byte-for-byte the type the retired `self { … }` produced. NOT touched: `operator … : self
+#     { <expr> }` (self is a RETURN TYPE with an expression body, not a construction).
+#   - REMOVAL, in `src/parser/parse_expr.tks`: the `SelfKw` + `LBrace` branch of `parse_atom` and
+#     `self_sentinel_path` are deleted — a `self { … }` no longer parses as a construction (`self` reads
+#     as a bare receiver, the following `{` is a parse error). In `src/checker/typer.tks`:
+#     `is_self_sentinel`, `self_construct_target`, and the `is_self_sentinel` branch of
+#     `construct_target` are deleted. `self` remains ONLY a receiver (`self.x`) and a type (`(): self`,
+#     `p: self`). PRESERVED: `self_inst_spelling` (`src/checker/resolve.tks`) — the generic phantom
+#     spelling, now the surviving reuse shared by `dot_construct_target`/`self_return_named` and the
+#     mono remap. Stale doc/diagnostic references to `self { … }` construction are updated to `.{ … }`.
+#   - `.{ … }` and the NOMINAL `Name { … }` are the two remaining construction forms.
 #
-# ACCEPT fixture (examples/regressions/dot_construction): the seven `.{ … }` slots — a `static fn … :
-# self` trailing value and `return`, an annotated binding, a call argument, a nested field, a generic
-# self-return (phantom per width), and the coexisting NOMINAL `Name { … }` form. REJECT fixture
-# (examples/regressions/dot_construction_reject, EXPECT_COMPILE_FAIL): a `.{ … }` in an un-annotated
-# binding and a `.{ … }` as an `if` scrutinee, each a "needs a known target type" diagnostic.
+# FIXTURES: examples/regressions/type_overload swept (`self { … }` factories -> `.{ … }`,
+# `self_static`/`self_instance` scenarios -> `dot_static`/`dot_instance`); type_overload_reject's
+# `self_free` reframed to `dot_no_target` (with `self { … }` removed, that form is a parse error
+# everywhere — its "no enclosing type" reject is gone). NEW examples/regressions/self_ctor_removed_err
+# (EXPECT_COMPILE_FAIL): a `self { … }` in a method body is a parse error, while `self._n` (receiver)
+# and `(): self` (type) in the SAME file stay valid.
 #
-# FIXPOINT. The COMMITTED artifact self-reproduces: cc(bootstrap/teko.c) -> gen0; gen0 builds src ->
-# gen1 (emits teko.c); gen1 -> gen2 -> gen3, and all three emitted teko.c are BYTE-IDENTICAL
-# (sha256 below). The new parser/checker paths are inert on the dot-free compiler source, so even the
-# predecessor seed emits the stable C. A TEKO_MEM_PARANOID=1 build of the same source exits 0
-# (self-reported peak 3630.2 MB — no regression against the pre-R1 3639.1 MB baseline). Every capped
-# build (`ulimit -v 6291456`) peaked ~4.15 GB (tree, incl. cc), well under the 6 GB cap.
+# FIXPOINT. The COMMITTED artifact self-reproduces from the R1 seed (which understands `.{ … }`):
+# cc(R1 bootstrap/teko.c) -> gen0; gen0 builds the swept src -> gen1 (emits teko.c); gen1 -> gen2 ->
+# gen3, and all three emitted teko.c are BYTE-IDENTICAL (sha256 below). The swept corpus uses no
+# `self { … }`, so the removal is behavior-preserving on this source (`.{ … }` lowers to the same
+# `TStructInit`). A TEKO_MEM_PARANOID=1 build of the same source exits 0 (self-reported peak 3628.5 MB
+# — no regression against the pre-R1 3639.1 MB baseline). Every capped build (`ulimit -v 6291456`)
+# peaked ~4.15 GB (tree, incl. cc), well under the 6 GB cap.
 #   cc(bootstrap/teko.c) -> gen;  TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == below.
 #
 # `run: hand-harvest` — no CI run produced this file; harvested by hand on the branch, in the owner's
@@ -50,8 +45,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  e335871c2dbae247d7bb68f8f19bcfb2e0b1d2b07147131968140e5e1a28f841
+sha256:  9e5fe4e6a33f829d4b9f3b2e50806ebfc6bb5aaa25855c96653d2f4408439299
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the additive `.{ … }` target-typed
-         construction capability of §4.1; `self { … }` still accepted, `src/` product unchanged),
+legacy:  none — this is an exact, self-reproducing hand harvest (the sweep of the corpus's `self { … }`
+         constructions to `.{ … }` and the removal of the `self { … }` construction form, §4.1),
          byte-identical on rebuild across three generations; no unrecovered legacy artifact underlies it.

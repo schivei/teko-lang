@@ -1213,7 +1213,7 @@ pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []parser::Con
  * the user-type lookup applies R3 (bare = strict own-ns) / R4/R0 (qualified = last + qualifier). Under
  * §9 B the lookup is ARITY-SELECTIVE: `resolve_named` is the arity-0 entry (`Foo`), so a bare name
  * NEVER borrows the arity of a coexisting `Foo<T>` — a bare reference to a name that exists only as a
- * generic is a diagnosed error naming the fix (`write Foo<…>` / `self { … }`), not a silent match.
+ * generic is a diagnosed error naming the fix (`write Foo<…>` / `.{ … }`), not a silent match.
  *
  * @param path    the WRITTEN reference path
  * @param table   the folded type table
@@ -1262,7 +1262,7 @@ fn unknown_named_error(name: str, table: TypeTable, arity: u64): error {
         match type_table_find(table, name, "") {
             parser::TypeDecl as td => {
                 if td.type_params.len > 0 {
-                    return error { message = $"`{name}` names a generic type — write `{name}<…>` (or `self {{ … }}` to construct the enclosing type)" }
+                    return error { message = $"`{name}` names a generic type — write `{name}<…>` (or `.{{ … }}` to construct the target type)" }
                 }
             }
             error => { }
@@ -2223,14 +2223,14 @@ pub fn named_case_name(name: str): str {
 }
 
 /**
- * self_inst_spelling — the PHANTOM generic-instance name for a `self { … }` construction inside a
- * generic template (§9 B, ruling 6's explicit replacement for the deleted self-construct inference):
- * the enclosing type's OWN type-params, in order, mangled exactly as `resolve_generic_inst` mangles
- * `-> Box<T>` (`Box__g__T`). The template body's `self`-init, its `-> Box<T>` return, and any `Box<T>`
- * local all carry this SAME spelling, so the mono pass's single `phantom → concrete` remap
- * (`instance_method_subst_l5`) retargets them together (#254 L4/L5). It is the SINGLE source of that
- * spelling — shared by the `self` branch of `type_struct_lit` and the mono remap — so the two can
- * never drift (a drift would silently break the remap). Reuses `generic_inst_name` over the owner's
+ * self_inst_spelling — the PHANTOM generic-instance name for an ENCLOSING-owner construction inside a
+ * generic template (§4.1 — the surviving reuse of the retired `self { … }` machinery): the enclosing
+ * type's OWN type-params, in order, mangled exactly as `resolve_generic_inst` mangles `-> Box<T>`
+ * (`Box__g__T`). The template body's `.{ … }` owner-self construct, its `-> Box<T>`/`-> self` return,
+ * and any `Box<T>` local all carry this SAME spelling, so the mono pass's single `phantom → concrete`
+ * remap (`instance_method_subst_l5`) retargets them together (#254 L4/L5). It is the SINGLE source of
+ * that spelling — shared by `dot_construct_target`/`self_return_named` and the mono remap — so the two
+ * can never drift (a drift would silently break the remap). Reuses `generic_inst_name` over the owner's
  * params-as-Named so the spelling cannot drift from the resolver's either.
  *
  * @param base_name     the bare base (`Box`)

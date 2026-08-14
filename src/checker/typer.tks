@@ -4273,31 +4273,18 @@ fn type_match_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable): TA
 }
 
 /**
- * ConstructTarget — the resolved prefix of a construction literal (§9 B): the CANONICAL type `name`
- * the node is tagged with, its `decl` (whose fields the values type against), and whether this is a
- * `self { … }` construction (which bypasses the class-literal owner gate). The three prefix forms —
- * `self { … }`, `Foo<A..> { … }` and bare `Foo { … }` — all reduce to one of these.
+ * ConstructTarget — the resolved prefix of a construction literal (§9 B / §4.1): the CANONICAL type
+ * `name` the node is tagged with, its `decl` (whose fields the values type against), and whether the
+ * construction is of the ENCLOSING owner type (which bypasses the class-literal owner gate). The prefix
+ * forms — `.{ … }` (target-typed), `Foo<A..> { … }` and bare `Foo { … }` — all reduce to one of these.
  */
 type ConstructTarget = struct {
-    /** the canonical result-type name the `TStructInit` node carries (a phantom `Base__g__…` for a generic self/instance construct). */
+    /** the canonical result-type name the `TStructInit` node carries (a phantom `Base__g__…` for a generic owner-self construct). */
     name: str
     /** the declaration whose fields the literal's values are typed against (the abstract template for a phantom instance). */
     decl: parser::TypeDecl
-    /** true iff this is a `self { … }` construction — it is legal inside the owner's own methods, so the class-literal owner gate is bypassed. */
+    /** true iff this constructs the ENCLOSING owner type — it is legal inside the owner's own methods, so the class-literal owner gate is bypassed. */
     is_self: bool
-}
-
-/**
- * is_self_sentinel — is `path` the `self` type-INITIALIZATION sentinel (§9 B, ruling 5)? The parser
- * emits a single-segment path naming the reserved word `self` for `self { … }`; no user type can
- * spell it, so this test is unambiguous.
- *
- * @param path  the construction literal's `type_path`
- * @return      true iff `path` is the `self` sentinel
- * @since §9 B
- */
-fn is_self_sentinel(path: parser::Path): bool {
-    path.segments.len == 1 && path.segments[0].name == "self"
 }
 
 /**
@@ -4439,34 +4426,6 @@ fn type_error_literal(sl: parser::StructLit, env: Env, table: TypeTable): TExpr 
     TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { }; line = 0; col = 0 }
 }
 
-/**
- * self_construct_target — resolve a `self { … }` construction to its ConstructTarget (§9 B, ruling
- * 6's explicit replacement for the deleted self-construct inference). The enclosing type is
- * `env.owner_type` (set in a static OR instance method, so `self { … }` is legal in both); a generic
- * owner keeps its abstract TEMPLATE decl (fields type against `T`) and is tagged with the phantom
- * `Base__g__<owner-params>` spelling (`self_inst_spelling`) that the mono pass remaps to the concrete
- * instance. Errors when there is no enclosing type.
- *
- * @param env    the typing environment (its `owner_type` names the enclosing type)
- * @param table  the folded type table
- * @return       the self construction target, or a located error
- * @since §9 B
- */
-fn self_construct_target(env: Env, table: TypeTable): ConstructTarget | error {
-    if env.owner_type == "" {
-        return error { message = "`self { … }` is only valid inside a method (there is no enclosing type here)" }
-    }
-    var owner = env.owner_type
-    var decl = match type_table_find(table, owner, "") {
-        parser::TypeDecl as td => td
-        error => return error { message = $"internal: enclosing type `{owner}` not found for `self {{ … }}`" }
-    }
-    if decl.type_params.len == 0 {
-        return ConstructTarget { name = owner; decl = decl; is_self = true }
-    }
-    var phantom = self_inst_spelling(name_last_segment(owner), decl.type_params)
-    ConstructTarget { name = phantom; decl = decl; is_self = true }
-}
 
 /**
  * explicit_inst_target — resolve a `Foo<A..> { … }` construction (§9 B, ruling 4): the explicit
@@ -4526,10 +4485,11 @@ fn bare_construct_target(sl: parser::StructLit, env: Env, table: TypeTable): Con
 
 /**
  * construct_target — dispatch a construction literal's PREFIX (§9 B / §4.1) to its resolved
- * ConstructTarget: `.{ … }` (target-typed — resolved from `expected`), `self { … }`, `Foo<A..> { … }`,
- * or bare `Foo { … }`. Every prefix but `.{ … }` decides its OWN arity — there is no nameless `{ … }`
+ * ConstructTarget: `.{ … }` (target-typed — resolved from `expected`), `Foo<A..> { … }`, or bare
+ * `Foo { … }`. Every prefix but `.{ … }` decides its OWN arity — there is no nameless `{ … }`
  * construction and a bare prefix never borrows arity from the flow target; only `.{ … }` reads the
- * target from `expected` (and errors when the context supplies none).
+ * target from `expected` (and errors when the context supplies none). The retired `self { … }` prefix
+ * is gone (§4.1) — `self` is only a receiver / a type.
  *
  * @param sl        the construction literal
  * @param expected  the flow-target type: the whole target for `.{ … }`, else only an explicit-instance
@@ -4537,31 +4497,32 @@ fn bare_construct_target(sl: parser::StructLit, env: Env, table: TypeTable): Con
  * @param env       the typing environment
  * @param table     the folded type table
  * @return          the resolved construction target, or a located error
- * @since §9 B (§4.1 adds the `.{ … }` sentinel)
+ * @since §9 B (§4.1 replaces the `self { … }` sentinel with the `.{ … }` one)
  */
 fn construct_target(sl: parser::StructLit, expected: Type, env: Env, table: TypeTable): ConstructTarget | error {
     if is_dot_sentinel(sl.type_path) { return dot_construct_target(expected, env, table) }
-    if is_self_sentinel(sl.type_path) { return self_construct_target(env, table) }
     if sl.type_args.len > 0 { return explicit_inst_target(sl, expected, env, table) }
     bare_construct_target(sl, env, table)
 }
 
 /**
- * type_struct_lit — type a construction literal, whose prefix is ALWAYS an explicit type (§9 B,
- * ruling 4): `Foo { … }` (arity 0), `Foo<i64> { … }` (name + explicit type-args) or `self { … }` (the
- * enclosing type / Self, inside a static OR instance method). There is NO nameless `{ … }`
- * construction — a bare `{` in expression position is always a block. The prefix decides the arity: a
- * bare `Foo` resolves the ARITY-0 declaration always (never borrowing type-args from `expected`,
- * ruling 7); `Foo<A..>` resolves the instance at that arity; `self` resolves `env.owner_type` (phantom
- * -stamped when the owner is generic). The builtin `error { message = <str> }` is the one non-Named
- * constructible type. Once the prefix is resolved the shared tail requires EXACTLY the declared
- * fields (once each — M.1), checks per-field value types, and emits the typed children in the
- * struct's DECLARED order so interpreter and codegen lower identically.
+ * type_struct_lit — type a construction literal (§9 B / §4.1): `Foo { … }` (arity 0), `Foo<i64> { … }`
+ * (name + explicit type-args) or `.{ … }` (target-typed — resolved from `expected`). There is NO
+ * nameless `{ … }` construction — a bare `{` in expression position is always a block. A NOMINAL prefix
+ * decides the arity: a bare `Foo` resolves the ARITY-0 declaration always (never borrowing type-args
+ * from `expected`, ruling 7); `Foo<A..>` resolves the instance at that arity. A `.{ … }` prefix reads
+ * its whole target from `expected` (a concrete type, a stamped instance, or a generic owner-self
+ * phantom). The builtin `error { message = <str> }` is the one non-Named constructible type. Once the
+ * prefix is resolved the shared tail requires EXACTLY the declared fields (once each — M.1), checks
+ * per-field value types, and emits the typed children in the struct's DECLARED order so codegen lowers
+ * identically for every prefix.
  *
- * @param sl        the parsed construction literal (`type_path` = the `self` sentinel for `self {…}`)
- * @param expected  the flow-target type — used ONLY for an explicit instance's agreement check and a
- *                  field value's nested expectation, NEVER to retarget a bare generic prefix (ruling 7)
- * @param env       the typing environment (its `owner_type` resolves `self`)
+ * @param sl        the parsed construction literal (`type_path` = the empty `.{ … }` sentinel for a
+ *                  target-typed construction)
+ * @param expected  the flow-target type — the WHOLE target for `.{ … }`; for a nominal prefix, used
+ *                  ONLY for an explicit instance's agreement check and a field value's nested
+ *                  expectation, NEVER to retarget a bare generic prefix (ruling 7)
+ * @param env       the typing environment (its `owner_type` gates a same-owner class construction)
  * @param table     the collected type table
  * @return          the typed `TStructInit`, or a located error
  * @since §9 B (rewrites the W4a/S4/W9.4 construction path)
@@ -6218,7 +6179,7 @@ fn property_write(fa: parser::FieldAccess, a: parser::Assign, env: Env, table: T
  * field itself is `readonly`, OR its declaring struct is a `readonly struct` (which freezes every
  * field — the parser already propagated the freeze to each Field, so the per-field flag alone
  * suffices, and the struct-level flag is checked too for robustness). A frozen field is writable ONLY
- * through a `self { … }` construction or a declaration default; every `recv.field = v` /
+ * through a construction (`.{ … }` / `Name { … }`) or a declaration default; every `recv.field = v` /
  * `self.field = v` targeting it is rejected (the construction path is a StructInit, NOT a
  * field-assign, so it never reaches this guard). Returns false for a non-struct, an unknown type, or
  * an ordinary field — inert on today's corpus (no struct is marked readonly).
