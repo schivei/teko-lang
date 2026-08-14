@@ -1,0 +1,109 @@
+/**
+ * Parsed — a single parsed node + resume index (the real parser's generic result, the shape that
+ * exposed the §9.D generic-over-inline-union blocker): its `node` field has the type-parameter type `T`.
+ *
+ * @field node  the parsed node of type-parameter type `T`
+ * @field next  the resume index
+ */
+pub type Parsed<T> = struct { node: T; next: u64 }
+
+/** Leaf — a leaf case of the first inline union `@ValA()`. */
+pub type Leaf = struct { }
+
+/**
+ * Pair — the recursive case of `@ValA()`: it carries a `[]@ValA()` (a slice back-edge, so no boxing).
+ *
+ * @field items  the nested values
+ */
+pub type Pair = struct { items: []@ValA() }
+
+/**
+ * ValA — the first retired inline union `Leaf | Pair`.
+ *
+ * @return  the inline union `Leaf | Pair`
+ */
+pub macro ValA() { lowering { Leaf | Pair } }
+
+/** Red — a case of the SECOND, distinct inline union `@ValB()`. */
+pub type Red = struct { }
+
+/** Blue — a case of the second inline union `@ValB()`. */
+pub type Blue = struct { }
+
+/**
+ * ValB — a SECOND, distinct inline union `Red | Blue`. Before the fix it shared the generic-instance
+ * stamp `Parsed__g__variant` with `@ValA()`, so the two `Parsed<…>` instances collided.
+ *
+ * @return  the inline union `Red | Blue`
+ */
+pub macro ValB() { lowering { Red | Blue } }
+
+/**
+ * Wrap — a struct with a DIRECT inline-union field (`@ValA()`), the `Arm.pattern` shape: a value read
+ * off a `Parsed<@ValA()>.node` must widen into this field's declared union type.
+ *
+ * @field held  the held value
+ */
+pub type Wrap = struct { held: @ValA() }
+
+/**
+ * kind_a — 1 for `Leaf`, 2 for `Pair` (classify a `@ValA()` value).
+ *
+ * @param v  the value to classify
+ * @return   the member ordinal
+ */
+fn kind_a(v: @ValA()): i64 {
+    match v { Leaf as l => 1; Pair as p => 2 }
+}
+
+/**
+ * kind_b — 1 for `Red`, 2 for `Blue` (classify a `@ValB()` value).
+ *
+ * @param v  the value to classify
+ * @return   the member ordinal
+ */
+fn kind_b(v: @ValB()): i64 {
+    match v { Red as r => 1; Blue as b => 2 }
+}
+
+/**
+ * field_readback — read a `T`-typed `node` (`= Leaf`) off a `Parsed<@ValA()>` and widen it into a
+ * DIRECT union field (`Wrap.held`), then classify: 1. Before the fix, the read-back `node` carried the
+ * nameless `variant` type and would not widen into the declared `@ValA()` field.
+ *
+ * @return  1
+ */
+pub fn field_readback(): i64 {
+    var p = Parsed<@ValA()> { node = Leaf { }; next = 0 }
+    var w = Wrap { held = p.node }
+    kind_a(w.held)
+}
+
+/**
+ * slice_readback — push a `T`-typed `node` (`= Pair`) off a `Parsed<@ValA()>` into a directly-typed
+ * `[]@ValA()` and read the length: 1. Guards the "push item type does not match slice element type"
+ * relapse (the read-back node's type must equal the directly-resolved union element type).
+ *
+ * @return  1
+ */
+pub fn slice_readback(): i64 {
+    var empty: []@ValA() = teko::list::empty()
+    var p = Parsed<@ValA()> { node = Pair { items = empty }; next = 0 }
+    var xs: []@ValA() = teko::list::empty()
+    xs = teko::list::push(xs, p.node)
+    xs.len to i64
+}
+
+/**
+ * distinct_insts — build `Parsed<@ValA()>` AND `Parsed<@ValB()>` and read both `node` fields: the two
+ * generic instances must be DISTINCT (before the fix both stamped to `Parsed__g__variant` and collided,
+ * so one union's node was read with the other's members). Encodes both ordinals: `Leaf`=1, `Red`=1 →
+ * `1 * 10 + 1` = 11.
+ *
+ * @return  11
+ */
+pub fn distinct_insts(): i64 {
+    var pa = Parsed<@ValA()> { node = Leaf { }; next = 0 }
+    var pb = Parsed<@ValB()> { node = Red { }; next = 0 }
+    kind_a(pa.node) * 10 + kind_b(pb.node)
+}

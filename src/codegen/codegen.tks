@@ -2674,9 +2674,48 @@ fn cg_texpr_mangle(te: parser::TypeExpr): str {
             if nt.args.len == 0 { last } else { cg_texpr_inst_name(last, nt.args) }
         }
         parser::SliceType as st => teko::str::concat("slice_", cg_texpr_mangle(st.element))
-        parser::UnionType => "variant"
+        parser::UnionType as ut => cg_union_texpr_inst_mangle(ut)
         parser::FunctionType => "func"   // (W10a) matches checker type_mangle's Func fragment
         parser::MacroType => ""
+    }
+}
+
+/**
+ * cg_union_texpr_inst_mangle — the codegen twin of the checker's `variant_mangle`: the STRUCTURE-
+ * ENCODING generic-instance fragment of an inline union type-arg. `u`, then (if the union lists `null`)
+ * `_null`, then per NON-null member IN SOURCE ORDER `_` + that member's `cg_texpr_mangle`. The null-first
+ * order mirrors `union_normalize_null`, so a `Base<A | B>` USE names the same `Base__g__u_A_B` the
+ * checker's `generic_inst_name` stamped — replacing the old lossy constant `"variant"` that collapsed
+ * every inline union to one `Base__g__variant` stamp (a 2-unions-per-base collision, the §9.D blocker).
+ *
+ * @param ut  the inline-union type-arg
+ * @return    the `u[_null]_<member fragments>` instance fragment
+ */
+fn cg_union_texpr_inst_mangle(ut: parser::UnionType): str {
+    var out = "u"
+    if cg_texpr_union_has_null(ut) { out = teko::str::concat(out, "_null") }
+    var i = 0
+    loop {
+        if i >= ut.members.len { break }
+        if !cg_texpr_member_is_null(ut.members[i]) {
+            out = teko::str::concat(out, teko::str::concat("_", cg_texpr_mangle(ut.members[i])))
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * cg_texpr_member_is_null — is a syntactic union member the bare `null` case (a single-segment `null`
+ * `NamedType`)? The null-first gate of `cg_union_texpr_inst_mangle`, mirroring `cg_texpr_union_has_null`.
+ *
+ * @param m  the syntactic union member
+ * @return   true iff `m` is the bare `null` member
+ */
+fn cg_texpr_member_is_null(m: parser::TypeExpr): bool {
+    match m {
+        parser::NamedType as nt => nt.args.len == 0 && nt.path.segments.len == 1 && nt.path.segments[0].name == "null"
+        _ => false
     }
 }
 // `<base>__g__<arg0>[__<arg1>…]` over type-arg exprs (matches checker::generic_inst_name).

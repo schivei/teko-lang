@@ -2194,10 +2194,58 @@ pub fn type_mangle(t: Type): str {
         Ptr => "ptr"
         Uptr => "uptr"
         Reference as r => teko::str::concat("ref_", type_mangle(r.inner))   // (MEM-1b)
-        Variant => "variant"
+        Variant as v => variant_mangle(v)
         Func => "func"
         Null => "null"
     }
+}
+
+/**
+ * variant_mangle — the symbol-safe, STRUCTURE-ENCODING name fragment of an inline `Variant` (`A | B |
+ * …`): `u`, then (if the union lists `null`) `_null`, then per NON-null member IN SOURCE ORDER `_` +
+ * that member's own `type_mangle`. This is the null-FIRST order `union_normalize_null` canonicalizes to,
+ * spelled explicitly here so it holds even for a variant that reached mangling un-normalized, and so the
+ * codegen twin (`cg_texpr_mangle`'s `UnionType` arm) agrees byte-for-byte. A bare constant `"variant"`
+ * collapsed every distinct inline union to ONE stamp, so `Parsed<A | B>` and `Parsed<C | D>` shared the
+ * generic-instance name `Parsed__g__variant` and a value read back off a `T`-typed field lost its real
+ * members (widening / type-eq then failed — the §9.D retired-variant blocker, and a latent 2-unions-per-
+ * base collision). Encoding the members makes each inline union a DISTINCT stamp (`Parsed__g__u_A_B`)
+ * that round-trips. Members are Named / prim / slice leaves whose `type_mangle` does NOT descend into
+ * this union again, so the walk terminates. Mirrors the member-encoding `overload_variant_mangle` (the
+ * overload-key twin) and codegen's `tk_u_<keys>` union naming.
+ *
+ * @param v  the inline variant to mangle
+ * @return   the `u[_null]_<member fragments>` symbol fragment
+ */
+fn variant_mangle(v: Variant): str {
+    var out = "u"
+    if variant_lists_null(v.members) { out = teko::str::concat(out, "_null") }
+    var i = 0
+    loop {
+        if i >= v.members.len { break }
+        if !from_is_bare_null(v.members[i]) {
+            out = teko::str::concat(out, teko::str::concat("_", type_mangle(v.members[i])))
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * variant_lists_null — does a variant's member list contain a bare `null` case? The null-first gate of
+ * `variant_mangle`, matching `union_normalize_null`'s presence test.
+ *
+ * @param members  the variant's member types
+ * @return         true iff some member is the bare `Null` type
+ */
+fn variant_lists_null(members: []Type): bool {
+    var i = 0
+    loop {
+        if i >= members.len { break }
+        if from_is_bare_null(members[i]) { return true }
+        i++
+    }
+    false
 }
 
 // (S4) the mangled name of a generic INSTANCE: `<base>__g__<arg0>[__<arg1>…]` over the args IN
