@@ -1,49 +1,51 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): §14 macro/comptime + §9.D inline-union
-# capabilities + the §9.D variant-retirement sweep. The previous bootstrap/teko.c was harvested BEFORE
-# §14 landed (A0 = be9dcc86) and so had no `@Type()` expander; while §14 was inert the swept tree still
-# compiled, but the §9.D sweep now USES `@Type()` in `src/`, so a gen0 built from the stale seed could no
-# longer parse the corpus and the CI C lane stopped compiling. This record re-harvests the seed from a
-# §14+§9.D-capable generation at the current tip. Format and parser: scripts/degrau.sh's kv_field;
-# enforced by scripts/provenance_gate.sh, which only ever judges this record on a SWAP.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): §14 Form 2 parametric type-macros, on
+# top of the earlier §14 macro/comptime + §9.D reseed. This re-harvest puts the PARAMETRIC type-macro
+# capability (a comptime `if`-select over a bool parameter, selecting between literal `lowering{}` blocks)
+# into the seed WHILE IT IS INERT — before any `@X(local)` parametric macro enters `src/` (the §9.D root
+# retirements will author them). This is the lesson from the previous reseed: land the seed's new
+# capability before the corpus uses it, so CI's C lane never builds a gen0 that cannot parse the tree.
+# Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only
+# ever judges this record on a SWAP.
 #
-# §14 + §9.D reseed — macro/comptime pre-pass, inline-union capabilities, and the variant sweep
+# §14 Form 2 reseed — parametric type-macros (comptime if-select)
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (docs/design/section14-macro-comptime-impl-v1.md, plano-9d-capabilities-crumbs-r1.md):
-#   - §14 A0-A4 Family-A syntactic macros: `macro Name() { lowering { … } }` and the `@Name()` type-macro
-#     pre-pass (`src/parser/macro_expand.tks`, `expand_macros_syntactic`) that expands `@Type()` in EVERY
-#     type position — signatures, fields, local `var`/`MultiBind` annotations, `const` declarations, cast
-#     targets, struct-literal / call / method-call / macro-call type-args, lambda parameters, variant /
-#     newtype / alias type-decl bodies, and match-arm pattern type positions. Plus §14 B1-B5 comptime
-#     reflection (`T.size`/`T.name`, `@fields<T>()`).
-#   - §9.D capabilities (a) grouped inline-union types `(A | B)`, (b) union-mangle byte-agreement so a
-#     `[](A | B)` names one typedef, and (c) the anonymous group-bind pattern `(B | C) as v`.
-#   - The §9.D SWEEP in progress: `type X = variant …` declarations retired to inline `|` unions,
-#     abbreviated by `@X()` Family-A macros whose lowerings qualify members by their home namespace
-#     (`ns::A | ns::B`) so they resolve at both same- and cross-namespace use sites (checker
-#     self-qualification fix, `check_named`). Retired so far: FSpecKind, MergeDisposition, ConstValueKind,
-#     RegAssignment, BorrowedFrom, ResidenceTier, RegexNode, Unique, PointsTo, ItemKind, LOp, MInst,
-#     MInstX86, File, TFSpecKind.
+# WHAT ENTERS (docs/design/section14-parametric-type-macros-v1.md, PT1+PT2):
+#   - PT1: `parse_macro_params` accepts an OPTIONAL `: <type>` and `= <default>` per macro parameter
+#     (e.g. `local: bool = false`); bare untyped params stay legal.
+#   - PT2: a type-macro body may be a comptime `if/else` selecting between LITERAL `lowering{}` blocks.
+#     `expand_macro_type` binds the params from the call's args / defaults (`macro_bind_params`) and
+#     `select_lowering_frag` resolves the body — a lone `lowering{}` (byte-identical to the retired
+#     `single_lowering_frag`) or an `if cond { … } else { … }` whose condition `macro_cond_bool` reads
+#     (a bool literal, a bound bool param, or `!` of one; no B3, no `TypeTable`). Value macros unchanged.
+#   Carried forward from the prior reseed: §14 A0-A4 / B1-B5 (the `@Type()` type-position expander over
+#   every type position, incl. match-arm patterns; comptime reflection), §9.D capabilities (a)/(b)/(c),
+#   the checker self-qualification fix (`ns::X` inside `ns` without a self-`use`), and the §9.D sweep so
+#   far: FSpecKind, MergeDisposition, ConstValueKind, RegAssignment, BorrowedFrom, ResidenceTier,
+#   RegexNode, Unique, PointsTo, ItemKind, LOp, MInst, MInstX86, File, TFSpecKind (15 retired).
+#
+# INERT. No `src/` macro declares a parametric (`local: bool`) type-macro or an `if`-bodied type-macro
+# yet, so PT1+PT2 are exercised by nothing in the corpus: the self-host is byte-identical to the
+# pre-Form-2 tree, and this seed's ONLY delta is the added (dormant) capability.
 #
 # FIXPOINT. The COMMITTED artifact SELF-REPRODUCES via the C route (the reseed-bootstrap.yml criterion):
 #   cc -std=c2x bootstrap/teko.c -> gen (scripts/build_gen1_from_c.sh);
 #   TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == sha256(bootstrap/teko.c) == below.
 # Verified this run: the emitted teko.c, cc-compiled and used to rebuild the tip, re-emits itself
-# byte-identically; and the native self-host chain gen1 == gen2 == gen3 is byte-identical at the same
-# sha. Every capped build (`ulimit -v 6291456`) peaked ~3.85 GB (well under the 6 GB cap).
+# byte-identically; and the native chain gen1 == gen2 == gen3 is byte-identical at the same sha. Every
+# capped build (`ulimit -v 6291456`) peaked ~3.85 GB (well under the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: the canonical reseed-bootstrap.yml flow seeds from
-# the RELEASED binary, which predates the 0.3.1 surface AND §14 and so cannot build this tree; the harvest
-# is therefore LOCAL on fix/retirement, forward-only, and its correctness is guaranteed by the C-route
-# self-reproduction above rather than by a CI run-id. `commit: pending drain` — the landing commit is
-# written in this same change.
+# the RELEASED binary, which predates the 0.3.1 surface AND §14, so the harvest is LOCAL on
+# fix/retirement, forward-only, and its correctness rests on the C-route self-reproduction above rather
+# than a CI run-id. `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  37057a1a7ec1a31e642209a3e5af11d707bc03a5b9dbfac41e8ba56f5f38ad31
+sha256:  5321a354fe1af974e75e33b19af050e46a4a5e4e16d792a5ddeb68f43ab52a3c
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§14 macro/comptime + §9.D inline-union
-         capabilities + the in-progress §9.D variant-retirement sweep), byte-identical on rebuild across
+legacy:  none — this is an exact, self-reproducing hand harvest (§14 Form 2 parametric type-macros on top
+         of §14 macro/comptime + §9.D + the in-progress variant sweep), byte-identical on rebuild across
          three native generations AND on the cc-route re-emission; no unrecovered legacy artifact
          underlies it.
