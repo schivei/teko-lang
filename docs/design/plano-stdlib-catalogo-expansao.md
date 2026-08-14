@@ -154,6 +154,12 @@ teko::
 │  └─ sqlite · oracle                                                                  [FFI]
 ├─ odbc            universal — connect_32/connect_64 (pela bitness do driver)          [FFI]
 ├─ rpc             jsonrpc · grpc · amqp · socks5
+├─ collections     list · map (✅ existem)  → expandir: genéricas + concorrentes (estilo C#)
+├─ time            data/hora/duração/timezone                                          [✅ existe · src/time]
+├─ fs · path       arquivos/diretórios/caminhos                                        [✅ existe · src/fs, src/io]
+├─ process         subprocessos do SO                                                  [✅ existe · src/process]
+├─ env             variáveis de ambiente / config                                      [✅ existe · src/env]
+├─ journal         logging estruturado (= "log")                                       [✅ existe · src/journal]
 ├─ math            bigint · checked
 ├─ mem             Buf · as_ptr · buf_slice/buf_ptr                                    [KEYSTONE-BUF]
 ├─ sys             constantes libc per-OS/arch
