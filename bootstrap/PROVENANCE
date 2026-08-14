@@ -1,47 +1,36 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §9.D `Type`-retirement marker dedup,
-# on top of the union-of-unions group-option reseed (itself on top of CR1+CR2+CR3, §14 Form 2 parametric
-# type-macros, §14 macro/comptime, §9.D, and the variant sweep). This re-harvest folds ONE correction rung
-# that landed in `src/` after the last reseed — the checker-marker `type_eq` bridge plus `union_dedup` — so
-# CI's C lane never builds a gen0 that emits a duplicate-tag union once `type Type = variant …` is inlined.
-# Standing reseed lesson: land the seed's new capability BEFORE the corpus uses it.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the FINAL §9.D self-host — the seed is
+# now the compiler built from a tree in which ALL 32 `type X = variant` declarations have been retired to
+# the inline union `@X()`, including the checker's own central `type Type`. This locks the completed sweep
+# into the seed so CI's C lane bootstraps from a Type-retired gen0. It sits on top of the marker-dedup
+# reseed (which sits on the union-of-unions group-option, CR1+CR2+CR3, §14 Form 2 parametric type-macros,
+# §14 macro/comptime, §9.D, and the sweep). Standing reseed lesson: land the seed's new capability BEFORE
+# the corpus uses it — every capability this seed needs (the §14 macro pre-pass, the CR1-CR3 rungs, the
+# nested group-option, and the Error/Null marker dedup) entered the seed in an EARLIER reseed, so this one
+# adds no new capability: it only advances the seed's OWN source to the finished corpus.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only
 # ever judges this record on a SWAP.
 #
-# TYPE-RETIREMENT MARKER DEDUP reseed
+# FINAL §9.D SELF-HOST reseed
 # ---------------------------------------------------------------------------------------------
-# WHAT ENTERS (committed to `src/` on fix/retirement in this same change):
-#   - checker (`type.tks`): `type_eq` now equates the backend markers `Error{}` / `Null{}` with a nominal
-#     reference to the checker's own `type Error` / `type Null` (`Named{"teko::checker::Error"}` /
-#     `Named{"teko::checker::Null"}`) — the form `@Type()`'s `Error` / `Null` members resolve to. They are
-#     the SAME element; the nominal `type Type = variant … | Error | … | Null` only KEPT them apart because
-#     it was opaque. `from_is_bare_null` is deliberately NOT widened, so a nominal `…::Null` member is never
-#     hoisted as a nullable-union absence marker (which would reshape the `Type` variant and break its
-#     exhaustiveness), and `resolve_named` is untouched, so `Error { }` / `Null { }` STRUCT construction
-#     still resolves the nominal struct.
-#   - checker (`resolve.tks`): `union_dedup` drops `type_eq` duplicate members WITHOUT flattening (unlike
-#     `union_collect`, which `type_join` uses), and `resolve_type`'s `UnionType` arm runs it before
-#     `union_normalize_null`. An annotated `@Type() | error` / `@Type() | null` — the surface adds the case
-#     the `@Type()` already carries — collapses to ONE member instead of two members mangling to the one
-#     backend tag (`TK_TAG_…_ERROR` / `_NULL`, a C enumerator redeclaration).
-#   Carried forward from the prior reseeds: §9.D CR1/CR2/CR3, the union-of-unions nested group-option,
-#   §14 A0-A4 / B1-B5, §14 Form 2 parametric type-macros, §9.D capabilities (a)/(b)/(c), and the §9.D sweep
-#   so far (31 unions retired before this reseed, TStatement last).
-#
-# THIS RUNG IS INERT AT THIS COMMIT. No `src/` union yet lists a case twice — the nominal `Type` keeps its
-# `Error`/`Null` members as a single opaque variant reference, and no other union pairs a backend marker
-# with its nominal twin — so `type_eq`'s new arms and `union_dedup` change NOTHING in today's corpus: the
-# self-host is byte-identical whether or not the capability is present (verified: gen1 == gen2 == gen3 with
-# the seed that PREDATES this rung). Landed ahead of its first use — the `Type` retirement, the final one of
-# the 32, authors the first `@Type() | error` / `@Type() | null`.
+# WHAT CHANGED since the last reseed: `src/` retired the final two unions — `type TStatement = variant`
+# (the first union-of-unions, whose `@TItem()` member stays nested and binds through the group-option) and
+# `type Type = variant` (the checker's 14-case type model). No `bootstrap/teko.c` CAPABILITY is new here;
+# the marker-dedup and nested group-option that these retirements exercise were both landed inert in prior
+# reseeds. This harvest simply re-emits the seed from the now-complete tree so the committed gen0 is itself
+# a `@Type()`-based compiler.
+#   Carried forward: §9.D CR1/CR2/CR3, the union-of-unions nested group-option, the Error/Null marker
+#   `type_eq` dedup + `union_dedup`, §14 A0-A4 / B1-B5, §14 Form 2 parametric type-macros, §9.D
+#   capabilities (a)/(b)/(c). The sweep is COMPLETE: 32 of 32 `type X = variant` retired to `@X()`.
 #
 # FIXPOINT. The COMMITTED artifact SELF-REPRODUCES via the C route (the reseed-bootstrap.yml criterion):
 #   cc -std=c2x bootstrap/teko.c -> gen (scripts/build_gen1_from_c.sh);
 #   TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == sha256(bootstrap/teko.c) == below.
 # Verified this run: the emitted teko.c, cc-compiled and used to rebuild the tip, re-emits itself
-# byte-identically; and the C-route chain gen1 == gen2 == gen3 is byte-identical at the same sha. Every
-# capped build (`ulimit -v 6291456`) peaked ~3.50 GB (well under the 6 GB cap).
+# byte-identically; and the C-route chain gen1 == gen2 == gen3 is byte-identical (binary sha
+# 306120da…) at the same emitted-C sha. Every capped build (`ulimit -v 6291456`) peaked ~3.91 GB
+# (well under the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: the canonical reseed-bootstrap.yml flow seeds from
 # the RELEASED binary, which predates the 0.3.1 surface AND §14, so the harvest is LOCAL on
@@ -50,9 +39,10 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  d79dbfc3fc272bc8120d7de098867a2cdaa077b7e80bb94538882bdf1394ef0d
+sha256:  6dd23da9ea5b670a3f4aa00ffc1f4c288bda30d6fe509fcdf09aa1fec01db205
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (§9.D Type-retirement marker dedup on top
-         of the union-of-unions group-option + CR1+CR2+CR3 + §14 Form 2 parametric type-macros + §14
-         macro/comptime + §9.D + the variant sweep), byte-identical on rebuild across three C-route
-         generations AND on the cc-route re-emission; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the completed §9.D sweep: all 32
+         `type X = variant` retired to `@X()`, on top of the union-of-unions group-option + Error/Null
+         marker dedup + CR1+CR2+CR3 + §14 Form 2 parametric type-macros + §14 macro/comptime + §9.D),
+         byte-identical on rebuild across three C-route generations AND on the cc-route re-emission; no
+         unrecovered legacy artifact underlies it.
