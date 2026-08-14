@@ -2201,6 +2201,21 @@ static void tk_canary_check_region(tk_region *r, const char *where) {
     abort();
 }
 
+// __dso_handle — glibc's atexit() lives in libc_nonshared.a and takes the ADDRESS of a per-DSO handle
+// to register process-exit finalizers through __cxa_atexit. The compiler's own crtbeginS.o normally
+// DEFINES this symbol, but teko's DIRECT ld link (link_object_elf_direct, project.tks:2163 — no cc
+// driver) deliberately omits crtbeginS.o, so on a strict x86_64-glibc toolchain (binutils 2.42) the
+// hidden reference from atexit.oS is undefined and the FINAL link fails ("hidden symbol __dso_handle
+// isn't defined"). Provide it WEAK + hidden from the maintained runtime: when a crtbeginS.o IS on the
+// line (the cc-driver route, build_cc_argv) its STRONG definition wins; on the direct-ld route this
+// satisfies the reference. The VALUE is irrelevant for a MAIN executable — atexit passes &__dso_handle
+// and program-exit finalization sweeps the NULL-keyed handler list regardless. aarch64-glibc links
+// clean (it never left the reference undefined), so this is inert there; macOS/Windows/musl are not
+// __GLIBC__ and never compile it (avoiding any clash with the system ___dso_handle on Mach-O).
+#if defined(__GLIBC__)
+__attribute__((weak, visibility("hidden"))) void *__dso_handle = 0;
+#endif
+
 // tk_termination_hook_once — register the leak-clean atexit hook exactly once, whichever of the
 // root region or the program region is materialized first. atexit fires on normal main return AND
 // on libc exit() (tk_exit's path), so a NORMALLY-terminating program is leak-clean too;
