@@ -1,5 +1,16 @@
 # Plano — §9.D: banir `type X = variant` e migrar os ~28 ADTs nomeados SEM a virada valor→referência
 
+> **⚑ SUPERSEDED em parte (2026-08-14).** A RECOMENDAÇÃO deste doc (Solução A / wrapper
+> `struct { case: … }`) foi retirada por ruling do dono: a forma-alvo é a **união `|` inline
+> por-extenso**. Uma BUILD do implementer provou a premissa antiga FALSA (a união bare `A | B`
+> funciona, mas a forma que a migração exige não parseia/codegen/match). O re-plano vigente —
+> capability-PRs segmentados (parser `(A|B)`, mangle de união, match de grupo anónimo), a correção da
+> contagem para **29** (faltava `MergeDisposition`), e a dependência do §14/`@Type()` — está em
+> **`docs/design/plano-9d-capabilities-inline-uniao-v1.md`**. A ESPINHA deste doc (classificação
+> por-ADT, ordem folhas→raízes, blast-radius, wire `.tkb`, dissolução do crux valor→referência)
+> permanece válida e é citada por aquele; só a representação-alvo e o segmento de capacidades mudam.
+
+
 > **⚑ RULING DO DONO (supera a recomendação abaixo).** A forma-alvo **NÃO** é a "Solução A /
 > newtype-tagged-value-union" (wrapper `struct { case: … }`) que este doc recomenda. É a **união `|`
 > estrutural inline, escrita POR EXTENSO** em cada campo — sem wrapper, sem alias, sem `newtype`. O
