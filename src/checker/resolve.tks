@@ -961,8 +961,8 @@ fn surface_intersect(a: []parser::Function, b: []parser::Function, table: TypeTa
     hold, so both surfaces' methods are safe); `Or` signature-matches INTERSECTS them (only what
     every reachable branch guarantees is universally safe); a struct/variant atom or NoConstraint
     contributes an empty (opaque-only) surface; a trait atom is atom_surface's named TR1 stop.
-    Recursive over the ConstraintExpr tree, mirroring constraint_satisfied's shape. */
-pub fn constraint_surface(c: parser::ConstraintExpr, table: TypeTable): []parser::Function | error {
+    Recursive over the @ConstraintExpr() tree, mirroring constraint_satisfied's shape. */
+pub fn constraint_surface(c: @ConstraintExpr(), table: TypeTable): []parser::Function | error {
     match c {
         parser::ConstraintAnd as a => {
             var l = match constraint_surface(a.left, table) { []parser::Function as f => f; error as e => return e }
@@ -1057,7 +1057,7 @@ fn interfaces_surviving(names: []str, surface: []parser::Function, table: TypeTa
     interface — the synthetic type-param's `extends` names it, and `method_owner_interface` keys the
     vtable slot off it via the now-trait-aware `iface_methods_by_name`. Recursive, mirroring
     constraint_surface's shape — the two stay in lockstep by construction. */
-fn constraint_interfaces(c: parser::ConstraintExpr, table: TypeTable): []str | error {
+fn constraint_interfaces(c: @ConstraintExpr(), table: TypeTable): []str | error {
     match c {
         parser::ConstraintAnd as a => {
             var l = match constraint_interfaces(a.left, table) { []str as s => s; error as e => return e }
@@ -1120,7 +1120,7 @@ pub fn method_owner_interface(ifaces: []str, method: str, table: TypeTable): str
     opaque fallback: type_param_table has no error channel (mirrors S4's total-function shape), so
     the SAME error re-surfaces, named, the moment the body actually operates on T (crumb 4/6) or a
     concrete instantiation is checked (check_constraints) — never silently ignored (M.1). */
-fn type_param_extends(c: parser::ConstraintExpr, table: TypeTable): []str {
+fn type_param_extends(c: @ConstraintExpr(), table: TypeTable): []str {
     var no_interfaces: []str = teko::list::empty()
     match constraint_interfaces(c, table) {
         []str as ifaces => ifaces
@@ -1131,7 +1131,7 @@ fn type_param_extends(c: parser::ConstraintExpr, table: TypeTable): []str {
 /** (S6) the constraint at index `i`, or NoConstraint when the caller supplied fewer constraints
     than type-params (the parser's own invariant keeps them same-length, but callers that build
     `type_constraints` by hand — tests, synthetic tables — may not). */
-fn constraint_at(type_constraints: []parser::ConstraintExpr, i: u64): parser::ConstraintExpr {
+fn constraint_at(type_constraints: []@ConstraintExpr(), i: u64): @ConstraintExpr() {
     if i < type_constraints.len { return type_constraints[i] }
     parser::NoConstraint { }
 }
@@ -1146,13 +1146,14 @@ fn constraint_at(type_constraints: []parser::ConstraintExpr, i: u64): parser::Co
     (type_method_call) can recompute the REAL reason a swallowed error occurred (a trait atom / an
     unknown atom / a Risco-3 ambiguity) instead of a generic "deferred" message (M.1 fail-loud even
     when type_param_extends itself has to swallow the error, S4's total-function shape). The two
-    `body` arms are DIFFERENT members of the wider `TypeBody` variant; the arm-join infers the
-    narrow `InterfaceBody | ExternBody` union while the binding is the wider `TypeBody` — native
-    codegen widens each arm into `TypeBody` (fix/selfhost-arm-join-widen), so this natural form (was
+    `body` arms are DIFFERENT members of the wider `@TypeBody()` variant; the arm-join infers the
+    narrow `InterfaceBody | ExternBody` union while the binding is the wider `@TypeBody()` — native
+    codegen widens each arm into `@TypeBody()` (fix/selfhost-arm-join-widen), so this natural form (was
     a per-arm whole-TypeReg workaround under #99) compiles on the self-host BUILD too. */
-fn type_param_reg(name: str, own_constraint: parser::ConstraintExpr, ns: str, table: TypeTable): TypeReg {
+fn type_param_reg(name: str, own_constraint: @ConstraintExpr(), ns: str, table: TypeTable): TypeReg {
     var ifaces: []str = type_param_extends(own_constraint, table)
-    var body: parser::TypeBody = if ifaces.len > 0 { parser::InterfaceBody { extends = ifaces; methods = teko::list::empty() } } else { parser::ExternBody { } }
+    var body: @TypeBody() = parser::ExternBody { }
+    if ifaces.len > 0 { body = parser::InterfaceBody { extends = ifaces; methods = teko::list::empty() } }
     var carried_constraints = teko::list::push(teko::list::empty(), own_constraint)
     var d = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = carried_constraints; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
     TypeReg { name = name; namespace = ns; file = ""; vis = parser::Visibility::Private; decl = d }
@@ -1179,7 +1180,7 @@ fn type_param_reg(name: str, own_constraint: parser::ConstraintExpr, ns: str, ta
  */
 pub fn max_generic_arity(): u64 { 16 }
 
-pub fn type_param_table(type_params: []str, type_constraints: []parser::ConstraintExpr, ns: str, table: TypeTable): TypeTable {
+pub fn type_param_table(type_params: []str, type_constraints: []@ConstraintExpr(), ns: str, table: TypeTable): TypeTable {
     if type_params.len == 0 { return table }
     var tbl = tt_empty()
     var i = 0
@@ -1225,8 +1226,8 @@ fn concat_tps(a: []str, b: []str): []str {
  * @return   a new list holding every constraint of `a` followed by every constraint of `b`
  * @since onda-3 (#254)
  */
-fn concat_tcs(a: []parser::ConstraintExpr, b: []parser::ConstraintExpr): []parser::ConstraintExpr {
-    var out: []parser::ConstraintExpr = teko::list::empty()
+fn concat_tcs(a: []@ConstraintExpr(), b: []@ConstraintExpr()): []@ConstraintExpr() {
+    var out: []@ConstraintExpr() = teko::list::empty()
     var i = 0
     loop { if i >= a.len { break }; out = teko::list::push(out, a[i]); i++ }
     var j = 0
@@ -1251,7 +1252,7 @@ fn concat_tcs(a: []parser::ConstraintExpr, b: []parser::ConstraintExpr): []parse
  * @return            a type-param table over `owner_tps ++ mtps` / `owner_tcs ++ mtcs`
  * @since onda-3 (#254)
  */
-pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []parser::ConstraintExpr, ns: str, table: TypeTable): TypeTable {
+pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []@ConstraintExpr(), ns: str, table: TypeTable): TypeTable {
     match type_table_find(table, owner_name, "") {
         parser::TypeDecl as td => type_param_table(concat_tps(td.type_params, mtps), concat_tcs(td.type_constraints, mtcs), ns, table)
         error => type_param_table(mtps, mtcs, ns, table)
@@ -2773,7 +2774,7 @@ fn subst_methods_names(methods: []parser::Function, params: []str, args: []parse
  * @return        the body with fields AND method signatures substituted to concrete types
  * @since onda-3 (#254)
  */
-fn subst_body_names(body: parser::TypeBody, params: []str, args: []parser::TypeExpr): parser::TypeBody {
+fn subst_body_names(body: @TypeBody(), params: []str, args: []parser::TypeExpr): @TypeBody() {
     match body {
         parser::StructBody as sb => {
             var nf: []parser::Field = teko::list::empty()
@@ -2845,7 +2846,7 @@ fn collect_methods_insts(methods: []parser::Function, acc: []parser::TypeExpr): 
     out
 }
 
-fn collect_body_insts(body: parser::TypeBody, acc: []parser::TypeExpr): []parser::TypeExpr {
+fn collect_body_insts(body: @TypeBody(), acc: []parser::TypeExpr): []parser::TypeExpr {
     var out = acc
     match body {
         parser::StructBody as sb => {
@@ -3400,7 +3401,7 @@ fn normalize_inst_methods(methods: []parser::Function, table: TypeTable): []pars
  * @return       the body with fields AND method signatures' generic-instance refs normalized
  * @since onda-3 (#254)
  */
-fn normalize_inst_body(body: parser::TypeBody, table: TypeTable): parser::TypeBody {
+fn normalize_inst_body(body: @TypeBody(), table: TypeTable): @TypeBody() {
     match body {
         parser::StructBody as sb => {
             var nf: []parser::Field = teko::list::empty()
