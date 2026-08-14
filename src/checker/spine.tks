@@ -143,7 +143,7 @@ pub type BfTop = struct { }
  * referents (a binding names at most one RHS) — so `BorrowedFrom` carries no join in this build.
  * `⊤` (BfTop) ⇒ referent unknown ⇒ the outlives proof FAILS ⇒ REJECT.
  */
-pub type BorrowedFrom = variant BfNone | BfParam | BfLocal | BfTop
+macro BorrowedFrom() { lowering { BfNone | BfParam | BfLocal | BfTop } }
 
 /**
  * The cell is the SOLE live handle to its target — safe to `free` / move.
@@ -177,7 +177,7 @@ pub type Unique = variant UsUnique | UsShared | UsTop
 pub type Spine = struct {
     cells: []Cell
     pt: []PointsTo
-    bf: []BorrowedFrom
+    bf: []@BorrowedFrom()
     us: []Unique
 }
 
@@ -408,10 +408,10 @@ fn seed_pt(cells: []Cell): []PointsTo {
  * slot); every other cell starts `BfNone`. Parallel to `cells` by index.
  *
  * @param []Cell cells  the cell universe
- * @return []BorrowedFrom  the seeded borrowed-from axis
+ * @return []@BorrowedFrom()  the seeded borrowed-from axis
  */
-fn seed_bf(cells: []Cell): []BorrowedFrom {
-    var acc: []BorrowedFrom = teko::list::empty()
+fn seed_bf(cells: []Cell): []@BorrowedFrom() {
+    var acc: []@BorrowedFrom() = teko::list::empty()
     var i = 0
     loop {
         if i >= cells.len { break }
@@ -1267,13 +1267,13 @@ fn capture_match(m: TMatchExpr, cells: []Cell, us: []Unique): []Unique {
  * Return the borrowed-from axis with index `i` replaced by `v` (parallel arrays rebuilt by copy —
  * the compiler corpus has no in-place slice write for a value element). Mirrors `set_us`.
  *
- * @param []BorrowedFrom bf  the borrowed-from axis
+ * @param []@BorrowedFrom() bf  the borrowed-from axis
  * @param u32 i  the cell index to replace
- * @param BorrowedFrom v  the new borrowed-from value
- * @return []BorrowedFrom  the axis with element `i` set to `v`
+ * @param @BorrowedFrom() v  the new borrowed-from value
+ * @return []@BorrowedFrom()  the axis with element `i` set to `v`
  */
-fn set_bf(bf: []BorrowedFrom, i: u32, v: BorrowedFrom): []BorrowedFrom {
-    var acc: []BorrowedFrom = teko::list::empty()
+fn set_bf(bf: []@BorrowedFrom(), i: u32, v: @BorrowedFrom()): []@BorrowedFrom() {
+    var acc: []@BorrowedFrom() = teko::list::empty()
     var k = 0
     loop {
         if k >= bf.len { break }
@@ -1296,10 +1296,10 @@ fn set_bf(bf: []BorrowedFrom, i: u32, v: BorrowedFrom): []BorrowedFrom {
  *
  * @param []TStatement body  the typed statement block
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
- * @return []BorrowedFrom  the axis with this block's ref-to-local inheritances applied
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
+ * @return []@BorrowedFrom()  the axis with this block's ref-to-local inheritances applied
  */
-fn bf_transfer_block(body: []TStatement, cells: []Cell, bf: []BorrowedFrom): []BorrowedFrom {
+fn bf_transfer_block(body: []TStatement, cells: []Cell, bf: []@BorrowedFrom()): []@BorrowedFrom() {
     var acc = bf
     var i = 0
     loop {
@@ -1316,10 +1316,10 @@ fn bf_transfer_block(body: []TStatement, cells: []Cell, bf: []BorrowedFrom): []B
  *
  * @param TExpr e  the typed expression
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
- * @return []BorrowedFrom  the axis with the arm bodies' inheritances applied
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
+ * @return []@BorrowedFrom()  the axis with the arm bodies' inheritances applied
  */
-fn bf_transfer_expr(e: TExpr, cells: []Cell, bf: []BorrowedFrom): []BorrowedFrom {
+fn bf_transfer_expr(e: TExpr, cells: []Cell, bf: []@BorrowedFrom()): []@BorrowedFrom() {
     match e.kind {
         TIfExpr as f => bf_transfer_block(f.else_blk, cells, bf_transfer_block(f.then_blk, cells, bf))
         TMatchExpr as m => bf_transfer_match(m, cells, bf)
@@ -1334,10 +1334,10 @@ fn bf_transfer_expr(e: TExpr, cells: []Cell, bf: []BorrowedFrom): []BorrowedFrom
  *
  * @param TMatchExpr m  the typed match expression
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
- * @return []BorrowedFrom  the axis with every arm body's inheritances applied
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
+ * @return []@BorrowedFrom()  the axis with every arm body's inheritances applied
  */
-fn bf_transfer_match(m: TMatchExpr, cells: []Cell, bf: []BorrowedFrom): []BorrowedFrom {
+fn bf_transfer_match(m: TMatchExpr, cells: []Cell, bf: []@BorrowedFrom()): []@BorrowedFrom() {
     var acc = bf
     var i = 0
     loop {
@@ -1356,10 +1356,10 @@ fn bf_transfer_match(m: TMatchExpr, cells: []Cell, bf: []BorrowedFrom): []Borrow
  *
  * @param TStatement s  the typed statement
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
- * @return []BorrowedFrom  the axis with this statement's ref-to-local inheritance applied
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
+ * @return []@BorrowedFrom()  the axis with this statement's ref-to-local inheritance applied
  */
-fn bf_transfer_stmt(s: TStatement, cells: []Cell, bf: []BorrowedFrom): []BorrowedFrom {
+fn bf_transfer_stmt(s: TStatement, cells: []Cell, bf: []@BorrowedFrom()): []@BorrowedFrom() {
     match s {
         TBinding as b => bf_transfer_expr(b.value, cells, bf_transfer_binding(b, cells, bf))
         TAssign as a => bf_transfer_expr(a.value, cells, bf)
@@ -1382,10 +1382,10 @@ fn bf_transfer_stmt(s: TStatement, cells: []Cell, bf: []BorrowedFrom): []Borrowe
  *
  * @param TBinding b  the typed binding
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
- * @return []BorrowedFrom  the axis with this binding's inheritance applied (or unchanged)
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
+ * @return []@BorrowedFrom()  the axis with this binding's inheritance applied (or unchanged)
  */
-fn bf_transfer_binding(b: TBinding, cells: []Cell, bf: []BorrowedFrom): []BorrowedFrom {
+fn bf_transfer_binding(b: TBinding, cells: []Cell, bf: []@BorrowedFrom()): []@BorrowedFrom() {
     if !type_contains_ref(b.bound) { return bf }
     match b.value.kind {
         TVar as v => match b.target {
@@ -1405,12 +1405,12 @@ fn bf_transfer_binding(b: TBinding, cells: []Cell, bf: []BorrowedFrom): []Borrow
  * conservatively rejects).
  *
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
  * @param parser::BindTarget target  the ref-bind's target
  * @param TBorrow tb  the `&x` borrow value
- * @return []BorrowedFrom  the axis with the borrow handle's `BfLocal` seeded (or unchanged)
+ * @return []@BorrowedFrom()  the axis with the borrow handle's `BfLocal` seeded (or unchanged)
  */
-fn bf_seed_borrow(cells: []Cell, bf: []BorrowedFrom, target: parser::BindTarget, tb: TBorrow): []BorrowedFrom {
+fn bf_seed_borrow(cells: []Cell, bf: []@BorrowedFrom(), target: parser::BindTarget, tb: TBorrow): []@BorrowedFrom() {
     match tb.operand.kind {
         TVar as v => match target {
             parser::SimpleName as sn => bf_seed_local_at(cells, bf, sn.name, v.name)
@@ -1427,12 +1427,12 @@ fn bf_seed_borrow(cells: []Cell, bf: []BorrowedFrom, target: parser::BindTarget,
  * single definite assignment.
  *
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
  * @param str dst  the ref-bind handle's target name
  * @param str referent  the borrowed local's name
- * @return []BorrowedFrom  the axis with `dst` borrowing `referent` as `BfLocal` (or unchanged)
+ * @return []@BorrowedFrom()  the axis with `dst` borrowing `referent` as `BfLocal` (or unchanged)
  */
-fn bf_seed_local_at(cells: []Cell, bf: []BorrowedFrom, dst: str, referent: str): []BorrowedFrom {
+fn bf_seed_local_at(cells: []Cell, bf: []@BorrowedFrom(), dst: str, referent: str): []@BorrowedFrom() {
     var di = cell_index(cells, dst, "")
     if di < 0 { return bf }
     set_bf(bf, di to u32, BfLocal { id = BfLocalId { name = referent } })
@@ -1444,12 +1444,12 @@ fn bf_seed_local_at(cells: []Cell, bf: []BorrowedFrom, dst: str, referent: str):
  * reads `BfNone` for `dst` and rejects).
  *
  * @param []Cell cells  the cell universe
- * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @param []@BorrowedFrom() bf  the borrowed-from axis so far
  * @param str dst  the ref-to-local binding's target name
  * @param str src  the RHS source variable name
- * @return []BorrowedFrom  the axis with `dst` inheriting `src`'s borrowed-from (or unchanged)
+ * @return []@BorrowedFrom()  the axis with `dst` inheriting `src`'s borrowed-from (or unchanged)
  */
-fn bf_inherit_at(cells: []Cell, bf: []BorrowedFrom, dst: str, src: str): []BorrowedFrom {
+fn bf_inherit_at(cells: []Cell, bf: []@BorrowedFrom(), dst: str, src: str): []@BorrowedFrom() {
     var di = cell_index(cells, dst, "")
     if di < 0 { return bf }
     var si = cell_index(cells, src, "")
