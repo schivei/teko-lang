@@ -50,6 +50,13 @@ Each module proposal carries five fixed fields, so the owner can weigh them unif
   copy-in primitives (`str_from_cstr`, `bytes_from_ptr`) or a `teko_rt` shim. **Variadic extern is
   forbidden.** Opaque handles are `extern type` (lowers to `void *`). This is why the byte-buffer
   keystone below gates all socket/crypto FFI.
+- **FFI é OPCIONAL, nunca obrigatório (ruling do dono).** Todo recurso da stdlib respaldado por lib externa
+  (OpenSSL, GPG, SQLite, Oracle/ODBC, brotli/lzma/zstd, …) é **opt-in**: um programa que não o usa **compila,
+  linka e roda sem a lib**. **Erro só se o dev usar** o recurso cuja lib falta. E, **salvo alguns casos, o
+  link é DINÂMICO** → o erro é de **RUNTIME** (símbolo/lib ausente no load ou na 1ª chamada), **não de
+  compilação**. Isto refina o KEYSTONE-LINK: não é só "não linkar o não-usado", é **falhar tarde e só no
+  uso**, dinamicamente. As implementações **puro-Teko** (quando existem) são o default zero-dependência; o
+  provider FFI é a alternativa.
 - **No index-assignment.** State arrays (cipher S-boxes, hash blocks, sort scratch) are built
   functionally or through an arena-backed byte region — never `buf[i] = x`.
 - **`#os("unix")`/`#os("windows")`** guards per-OS shape differences; name-only differences resolve in
@@ -332,7 +339,14 @@ agendamento).
 | Z-ZLIB | `teko::compress::zlib` | RFC 1950 framing (Adler-32) | Z-DEFLATE | **✅ IMPLEMENTADO** | **feito** |
 | Z-EMBED | `#embed` + VFS readonly | pragma top-level + VFS global readonly; compress no compile, inflate no runtime | Z-DEFLATE (✅), pragma/parser, data-readonly | **design-ahead** (`embed-vfs.md`) — **não implementado** | **a agendar** |
 | Z-ZIP+deflate | extend existing ZIP | method=8 entries | Z-DEFLATE | **pure** | **P2** |
-| Z-BROTLI / Z-LZMA / Z-ZSTD | `teko::compress::{brotli,lzma,zstd}` | modern encodings | none | **pure**, large | **P3** |
+| Z-BROTLI | `teko::compress::brotli` | Brotli (RFC 7932) encode/decode; usado por HTTP `Content-Encoding: br` | Z-DEFLATE (partilha Huffman) | **puro** (grande) **OU FFI opcional** → `libbrotlienc`/`libbrotlidec` | **P3** |
+| Z-LZMA / Z-ZSTD | `teko::compress::{lzma,zstd}` | encodings modernos (xz, zstd) | none | **puro** (grande) **OU FFI opcional** → `liblzma`/`libzstd` | **P3** |
+
+**FFI de extensão é OPCIONAL (ruling do dono).** As extensões pesadas (brotli/lzma/zstd) podem vir por FFI
+para não reimplementar, **mas a lib externa NUNCA é obrigatória**: um programa que não usa a extensão
+compila, linka e roda **sem a lib**. **Erro só se o dev usar** o recurso cuja lib falta — e, **salvo alguns
+casos, o link é dinâmico**, então **o erro é de RUNTIME** (símbolo/lib ausente no load ou na 1ª chamada), não
+de compilação. Ver a regra geral em §0 (FFI opcional).
 
 ---
 
