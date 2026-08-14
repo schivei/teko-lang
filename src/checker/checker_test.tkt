@@ -895,6 +895,75 @@ fn tr_program_ok(items: []parser::Item): bool {
     match type_program(parser::Program { items = items }) { TProgram => true; error => false }
 }
 
+/**
+ * b1_comptime_item — a `comptime NAME(): <ret> { }` item (§14 Family-B B1). Its body is DROPPED before
+ * the typed-item walk, so an empty body suffices for the call-site typing gate.
+ *
+ * @param name  the comptime declaration's name
+ * @param ret   the comptime's declared return type
+ * @return      the `ComptimeDecl` item
+ */
+fn b1_comptime_item(name: str, ret: parser::TypeExpr): parser::Item {
+    parser::Item { content = parser::ComptimeDecl { name = name; type_params = teko::list::empty(); params = teko::list::empty(); ret = ret; body = teko::list::empty(); vis = parser::Visibility::Private }; namespace = ""; file = "" }
+}
+
+/**
+ * b1_call — a `@name()` comptime-call expression (§14 Family-B B1).
+ *
+ * @param name  the callee name (a `@name(...)` last path segment)
+ * @return      the `MacroCall` expression
+ */
+fn b1_call(name: str): parser::Expr {
+    ek(parser::MacroCall { callee = path1(name); args = teko::list::empty(); callee_type_args = teko::list::empty() })
+}
+
+/**
+ * b1_user_fn — a `fn NAME(x: u32): <ret> { return @callee() }` item that returns a comptime-call result,
+ * so `type_program` types the `@callee()` at the function's return type.
+ *
+ * @param name    the wrapping function's name
+ * @param ret     the function's declared return type (and the expected comptime result type)
+ * @param callee  the comptime callee name the body returns
+ * @return        the `Function` item
+ */
+fn b1_user_fn(name: str, ret: parser::TypeExpr, callee: str): parser::Item {
+    var ret_stmt: parser::Statement = parser::Return { has_value = true; value = b1_call(callee); values = teko::list::empty() }
+    var body = teko::list::push(teko::list::empty(), ret_stmt)
+    parser::Item { content = mk_fn(name, ret, body); namespace = ""; file = "" }
+}
+
+/**
+ * comptime_call_types_with_ret — B1: a `@answer()` call resolves to `comptime answer(): i64` and types
+ * with its declared `ret`, so a `fn (): i64` returning it type-checks.
+ */
+#test
+fn comptime_call_types_with_ret() {
+    var cd = b1_comptime_item("answer", named_t("i64"))
+    var user = b1_user_fn("use_answer", named_t("i64"), "answer")
+    teko::assert::is_true(tr_program_ok(items2(cd, user)))
+}
+
+/**
+ * comptime_call_ret_type_flows — B1: the comptime's `ret` flows to the call site — a `comptime flag(): bool`
+ * returned from a `fn (): i64` is a type error (the ret type is enforced), so the program is rejected.
+ */
+#test
+fn comptime_call_ret_type_flows() {
+    var cd = b1_comptime_item("flag", named_t("bool"))
+    var user = b1_user_fn("use_flag", named_t("i64"), "flag")
+    teko::assert::is_true(!tr_program_ok(items2(cd, user)))
+}
+
+/**
+ * comptime_call_unknown_rejected — B1: a `@nope()` call that names no `comptime` is a located call-site
+ * diagnostic, so the program is rejected.
+ */
+#test
+fn comptime_call_unknown_rejected() {
+    var user = b1_user_fn("use_nope", named_t("i64"), "nope")
+    teko::assert::is_true(!tr_program_ok(teko::list::push(teko::list::empty(), user)))
+}
+
 #test
 fn trait_fold_class_gains_members() {
     // a CLASS deriving a trait: folded field participates in a factory's class literal, the

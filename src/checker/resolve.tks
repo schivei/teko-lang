@@ -39,6 +39,11 @@ pub type TypeTable = struct {
     regs: []TypeReg
     /** the lateral hash index over `name_last_segment(regs[i].name)`, or empty until `tt_freeze` */
     by_last: NameIndex
+    /** the program's `comptime` declarations (§14 Family-B), attached once at `pre_walk` so the typer
+        can resolve a `@name(...)` call to its returning `ComptimeDecl` and the post-monomorph
+        `expand_comptime` pass can re-consult it. Empty on every table until the attach; carried
+        read-only thereafter, orthogonal to `regs`/`by_last`. */
+    comptimes: []parser::ComptimeDecl
 }
 
 /**
@@ -49,7 +54,7 @@ pub type TypeTable = struct {
  * @since 0.3.1 (CK1.4)
  */
 pub fn tt_empty(): TypeTable {
-    TypeTable { regs = teko::list::empty(); by_last = nidx_empty() }
+    TypeTable { regs = teko::list::empty(); by_last = nidx_empty(); comptimes = teko::list::empty() }
 }
 
 /**
@@ -87,7 +92,7 @@ pub fn tt_at(t: TypeTable, i: u64): TypeReg {
  * @since 0.3.1 (CK1.4)
  */
 pub fn tt_push(t: TypeTable, r: TypeReg): TypeTable {
-    TypeTable { regs = teko::list::push(t.regs, r); by_last = nidx_empty() }
+    TypeTable { regs = teko::list::push(t.regs, r); by_last = nidx_empty(); comptimes = t.comptimes }
 }
 
 /**
@@ -140,7 +145,41 @@ fn tt_last_names(regs: []TypeReg): []str {
  */
 pub fn tt_freeze(t: TypeTable): TypeTable {
     if tt_indexed(t) { return t }
-    TypeTable { regs = t.regs; by_last = nidx_build(tt_last_names(t.regs)) }
+    TypeTable { regs = t.regs; by_last = nidx_build(tt_last_names(t.regs)); comptimes = t.comptimes }
+}
+
+/**
+ * tt_with_comptimes — `t` with its `comptime`-declaration registry replaced by `decls` (§14 Family-B).
+ * Preserves `regs` and the frozen `by_last` index unchanged — the registry is orthogonal to the type
+ * registrations, attached once at `pre_walk` and carried read-only.
+ *
+ * @param t      the type table (typically already frozen)
+ * @param decls  the program's `comptime` declarations
+ * @return       `t` carrying `decls` as its comptime registry
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+pub fn tt_with_comptimes(t: TypeTable, decls: []parser::ComptimeDecl): TypeTable {
+    TypeTable { regs = t.regs; by_last = t.by_last; comptimes = decls }
+}
+
+/**
+ * tt_find_comptime — the `comptime` declaration in `t`'s registry whose name equals `name`, or null
+ * (the §14 Family-B call-site resolver — a `@name(...)` that names no comptime is a diagnostic). Matches
+ * on the bare declared name; comptime decls are top-level and named uniquely per the parser.
+ *
+ * @param t     the type table carrying the comptime registry
+ * @param name  the callee name to resolve (a `@name(...)` call's last path segment)
+ * @return      the matching `ComptimeDecl`, or null when none is registered under `name`
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+pub fn tt_find_comptime(t: TypeTable, name: str): parser::ComptimeDecl | null {
+    var i: u64 = 0
+    loop {
+        if i >= t.comptimes.len { break }
+        if t.comptimes[i].name == name { return t.comptimes[i] }
+        i++
+    }
+    null
 }
 
 /**

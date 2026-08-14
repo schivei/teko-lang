@@ -5563,23 +5563,97 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable): TExpr | error {
         parser::Lambda as lam => type_lambda(lam, Void { }, env, table)   // (W10) no target here → un-annotated params error (ruling 3); a binding/call-arg threads the target
         parser::Borrow as b => type_borrow_expr(b, env, table)   // &x safe borrow (AL wave F1)
         parser::Block as blk => type_block_expr(blk, env, table)
-        parser::MacroCall as mc => macro_call_not_expanded(mc)
+        parser::MacroCall as mc => type_macro_call(mc, env, table)
     }
 }
 
 /**
- * macro_call_not_expanded — the A1 honest-stop for a `@name(...)` macro/comptime call reaching the
- * checker (§14). Family-A calls are rewritten pre-type-check and Family-B calls folded post-monomorph;
- * until those passes land, any surviving `MacroCall` is a located diagnostic. INERT: no corpus source
- * writes `@`/`macro`/`comptime`, so this is never reached on the current corpus (plan §7 inertness).
+ * type_macro_call — type a surviving `@name(...)` call (§14). After the Family-A expansion pass, every
+ * remaining `MacroCall` is a Family-B COMPTIME call: resolve `name` in the table's comptime registry and
+ * type it like a fn call whose result type is the comptime's declared `ret` (`type_comptime_call`); a
+ * `@name` that names no comptime is a located call-site diagnostic. INERT: no corpus source writes `@`,
+ * so neither arm is reached on the current corpus (plan §7 inertness).
  *
- * @param mc  the untyped macro-call node
- * @return    the located "not yet expanded" diagnostic
- * @since 0.4-macros (§14 A1)
+ * @param mc     the untyped macro-call node
+ * @param env    the type environment (resolves the arguments and the result type's namespace)
+ * @param table  the type table (carries the comptime registry)
+ * @return       the typed comptime call, or a located diagnostic when `name` names no comptime
+ * @since 0.4-macros (§14 Family-B B1)
  */
-fn macro_call_not_expanded(mc: parser::MacroCall): TExpr | error {
+fn type_macro_call(mc: parser::MacroCall, env: Env, table: TypeTable): TExpr | error {
     var name = if mc.callee.segments.len > 0 { mc.callee.segments[mc.callee.segments.len - 1].name } else { "" }
-    error { message = $"`@{name}` is a macro/comptime call — the §14 expansion passes are not yet wired (macro/comptime crumb A1 lands the nodes only)" }
+    match tt_find_comptime(table, name) {
+        parser::ComptimeDecl as cd => type_comptime_call(mc, cd, env, table)
+        null => error { message = $"`@{name}` names no `comptime` in scope — a `@name(...)` call must resolve to a `comptime` declaration (§14 Family-B)" }
+    }
+}
+
+/**
+ * type_comptime_call — type a `@name(...)` call that resolves to the `comptime` declaration `cd` (§14
+ * Family-B). Each argument is type-checked as an ordinary expression (the ARG-must-be-comptime-known
+ * constraint is enforced later, when `expand_comptime` evaluates the call post-monomorph); the call's
+ * result type is `cd.ret` resolved at the call site. The node is a plain `TCall` — the same shape a
+ * direct call produces — so no typed-AST variant is added: `expand_comptime` re-identifies it by
+ * consulting the comptime registry on the callee name, then replaces it with the folded literal. Its
+ * `callee_type` is a `Void` placeholder (the node is replaced before codegen; it is never lowered).
+ *
+ * @param mc     the untyped macro-call node
+ * @param cd     the resolved comptime declaration
+ * @param env    the type environment (resolves the arguments and the result type's namespace)
+ * @param table  the type table
+ * @return       the typed call (`.type` == the resolved `ret`), or the first argument/type error
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+fn type_comptime_call(mc: parser::MacroCall, cd: parser::ComptimeDecl, env: Env, table: TypeTable): TExpr | error {
+    var args = match type_comptime_args(mc.args, env, table) { []TExpr as a => a; error as e => return e }
+    var targs = match resolve_type_args(mc.callee_type_args, table, env.cur_ns) { []Type as t => t; error as e => return e }
+    var ret = match resolve_type(cd.ret, table, env.cur_ns) { Type as t => t; error as e => return e }
+    TExpr { kind = TCall { overload_suffix = ""; callee = mc.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = targs; ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
+}
+
+/**
+ * type_comptime_args — type each argument of a comptime call in order, stopping at the first error. The
+ * arguments are typed as ordinary expressions; `expand_comptime` later requires each to fold to a
+ * comptime value.
+ *
+ * @param args   the untyped argument expressions
+ * @param env    the type environment
+ * @param table  the type table
+ * @return       the typed arguments, or the first argument error
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+fn type_comptime_args(args: []parser::Expr, env: Env, table: TypeTable): []TExpr | error {
+    var out: []TExpr = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        var a = match type_expr(args[i], env, table) { TExpr as te => te; error as e => return e }
+        out = teko::list::push(out, a)
+        i++
+    }
+    out
+}
+
+/**
+ * resolve_type_args — resolve each explicit call-site type argument of a comptime call to a concrete
+ * `Type` in `ref_ns`, in order, stopping at the first resolution error.
+ *
+ * @param targs   the explicit type-argument expressions (`@name<T>(...)`)
+ * @param table   the type table
+ * @param ref_ns  the referencing namespace (the call site's)
+ * @return        the resolved types, or the first resolution error
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+fn resolve_type_args(targs: []parser::TypeExpr, table: TypeTable, ref_ns: str): []Type | error {
+    var out: []Type = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= targs.len { break }
+        var t = match resolve_type(targs[i], table, ref_ns) { Type as ty => ty; error as e => return e }
+        out = teko::list::push(out, t)
+        i++
+    }
+    out
 }
 
 /**
@@ -9173,7 +9247,7 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable): TItem | error {
             TConstDecl { name = ti.name; namespace = item.namespace; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col }
         }
         parser::MacroDecl => return error { message = "internal: a `macro` declaration reached typed-item production — a Family-A macro is expanded pre-type-check (§14 A1 lands the nodes only; the expansion pass is a later crumb)" }
-        parser::ComptimeDecl => return error { message = "internal: a `comptime` declaration reached typed-item production — a Family-B comptime decl is consumed by the fold pass (§14 A1 lands the nodes only; the fold pass is a later crumb)" }
+        parser::ComptimeDecl => return error { message = "internal: a `comptime` declaration reached typed-item production — a Family-B comptime decl is captured by the comptime registry and dropped before the item walk (§14 Family-B B1)" }
     }
 }
 
@@ -9287,6 +9361,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     if pre.cut { return PreMono { prog = TProgram { items = teko::list::empty() }; table = pre.types; diags = pre.diags } }
     var types = pre.types
     var cenv = pre.env
+    program = drop_comptime_items(program)
     var items: []TItem = teko::list::empty()
     var mainbody: []TStatement = teko::list::empty()
     var diags: []str = pre.diags
@@ -9412,13 +9487,71 @@ type PreWalk = struct {
 fn pre_walk(program: parser::Program, col: CollectOutcome): PreWalk {
     var table = col.collected.types
     var module_diags = check_modules(program, table)
-    var types = tt_freeze(instantiate_types(program, table))
+    var types = tt_with_comptimes(tt_freeze(instantiate_types(program, table)), collect_comptime_decls(program))
     var insts = register_instance_methods(col.collected.env, types)
     var diags = concat_diags(col.decl_diags, col.sig_diags)
     diags = concat_diags(diags, module_diags)
     diags = concat_diags(diags, insts.diags)
     var cut = col.sig_diags.len > 0 || insts.diags.len > 0
     PreWalk { types = types; env = seal(insts.env); diags = diags; cut = cut }
+}
+
+/**
+ * collect_comptime_decls — the program's `comptime` declarations (§14 Family-B), in item order, the
+ * registry `pre_walk` attaches to the type table so the typer resolves a `@name(...)` call to its
+ * returning `ComptimeDecl` and `expand_comptime` re-consults it post-monomorph. INERT: no corpus source
+ * writes `comptime`, so this returns an empty list on the current corpus (plan §7 inertness).
+ *
+ * @param program  the trait-folded, base-canonicalized program
+ * @return         every top-level `ComptimeDecl`, in declaration order
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+fn collect_comptime_decls(program: parser::Program): []parser::ComptimeDecl {
+    var out: []parser::ComptimeDecl = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        match program.items[i].content {
+            parser::ComptimeDecl as cd => out = teko::list::push(out, cd)
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * item_is_comptime_decl — is `it` a Family-B `comptime` declaration (§14)? Such an item is CONSUMED by
+ * the comptime registry (`collect_comptime_decls`) and dropped before the typed-item walk, so it never
+ * reaches `type_item` and never appears in the typed program.
+ *
+ * @param it  the item to classify
+ * @return    true iff `it.content` is a `ComptimeDecl`
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+fn item_is_comptime_decl(it: parser::Item): bool {
+    match it.content { parser::ComptimeDecl => true; _ => false }
+}
+
+/**
+ * drop_comptime_items — `program` with every Family-B `comptime` declaration removed (§14). Called AFTER
+ * `pre_walk` has captured the comptime registry, so the typed-item walk iterates only the items that
+ * lower: a `comptime` contributes a compile-time value, never a typed item. INERT: no corpus source
+ * writes `comptime`, so this returns `program` unchanged on the current corpus (plan §7 inertness).
+ *
+ * @param program  the folded program whose items the typer is about to walk
+ * @return         `program` with its `ComptimeDecl` items filtered out
+ * @since 0.4-macros (§14 Family-B B1)
+ */
+fn drop_comptime_items(program: parser::Program): parser::Program {
+    var out: []parser::Item = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        if !item_is_comptime_decl(program.items[i]) { out = teko::list::push(out, program.items[i]) }
+        i++
+    }
+    parser::Program { items = out }
 }
 
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
@@ -9433,6 +9566,7 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
     if pre.diags.len > 0 { return diags_error(pre.diags) }
     var types = pre.types
     var cenv = pre.env
+    program = drop_comptime_items(program)
     var items: []TItem = teko::list::empty()
     var mainbody: []TStatement = teko::list::empty()   // the loose top-level statements (the virtual-main), for label validation
     var cur = cenv   // threaded virtual-main scope: each loose binding extends it for the next statement (mirrors typer.c's `cur`)
