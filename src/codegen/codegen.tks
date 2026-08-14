@@ -2539,12 +2539,42 @@ fn cg_emit_variant_ctype(buf: []byte, v: checker::Type): []byte | error {
     }
 }
 
+/**
+ * cg_union_texpr_mangle_str — the mangle SUFFIX of a SYNTACTIC nested anonymous union member
+ * `(B | C | …)`: `u` then, per member in SOURCE order, `_` followed by that member's key. Byte-identical
+ * to the resolved-type `cg_opt_mangle`'s `Variant` arm (both `u_<keys>`, the same keyword-escape via
+ * `cg_member_key_texpr_str`), so a nested union member `A | (B | C)` names ONE typedef whether the DECL
+ * or a USE emits it (§9.D). A nested union bearing `null` is refused: the type-expr path has no
+ * resolution seam to null-normalize, and the resolved path already owns every null-bearing union — the
+ * §9.D sweep threads this edge only when a nested null-bearing member first appears.
+ *
+ * @param ut  the syntactic nested union type-expr
+ * @return    its `u_<keys>` mangle suffix
+ * @throws    when the nested union bears `null`, or a member's key cannot be mangled
+ * @since     §9.D capability (c)
+ */
+fn cg_union_texpr_mangle_str(ut: parser::UnionType): str | error {
+    if cg_texpr_union_has_null(ut) {
+        return error { message = "codegen: a nested union member bearing `null` is not yet mangled on the type-expr path (§9.D sweep follow-up)" }
+    }
+    var out = "u"
+    var i = 0
+    loop {
+        if i >= ut.members.len { break }
+        var k = match cg_member_key_texpr_str(ut.members[i]) { str as s => s; error as e => return e }
+        out = teko::str::concat(out, teko::str::concat("_", k))
+        i++
+    }
+    out
+}
+
 // cg_opt_mangle_texpr_str — the SYNTACTIC mangle suffix as a STRING (str twin of
 // cg_opt_mangle_texpr). Agrees byte-for-byte with cg_opt_mangle_str. (C: `cg_opt_mangle_texpr`.)
 fn cg_opt_mangle_texpr_str(te: parser::TypeExpr): str | error {
     match te {
         parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
         parser::SliceType as st => { var inner_s = match cg_opt_mangle_texpr_str(st.element) { str as s => s; error as e => return e }; teko::str::concat("slice_", inner_s) }
+        parser::UnionType as ut => cg_union_texpr_mangle_str(ut)
         _ => error { message = "codegen: optional inner type-expr not yet supported" }
     }
 }
@@ -6942,8 +6972,32 @@ fn cg_emit_case_key_str(pat: parser::Pattern): str | error {
             } else { cg_case_name_escaped(cg_path_last(bp.type_name)) }
         }
         parser::FieldPattern as fp => cg_case_name_escaped(cg_path_last(fp.type_name))
+        parser::GroupBindPattern as gp => cg_group_case_key(gp)
         _ => error { message = "codegen: case key over a non-bind/field pattern (internal)" }
     }
+}
+
+/**
+ * cg_group_case_key — the tag KEY of a `GroupBindPattern`'s nested union member (§9.D c): `u` then, per
+ * option in source order, `_` + the option's case key. Byte-identical to `cg_member_key`'s `u_<keys>`
+ * over the resolved nested `Variant` member (the same escaping via `cg_case_name_escaped`), so the arm's
+ * tag test and bind name the exact tag constant the subject's union decl emitted for that member.
+ *
+ * @param gp  the grouped bind pattern
+ * @return    the nested member's `u_<keys>` tag key, or an option-key error
+ * @throws    when an option is not a bare case-name pattern
+ * @since     §9.D capability (c)
+ */
+fn cg_group_case_key(gp: parser::GroupBindPattern): str | error {
+    var out = "u"
+    var i = 0
+    loop {
+        if i >= gp.options.len { break }
+        var k = match cg_emit_case_key_str(gp.options[i]) { str as s => s; error as e => return e }
+        out = teko::str::concat(out, teko::str::concat("_", k))
+        i++
+    }
+    out
 }
 
 // cg_case_name_escaped — keyword-escape a case name (the union FIELD identifier + tag-suffix
@@ -7054,6 +7108,15 @@ fn emit_pat_test(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, var
                 return cb(out, ")")
             }
             error { message = "codegen: `null` pattern over a non-optional subject (internal)" }
+        }
+        parser::GroupBindPattern => {
+            var out = cb(buf, "(")
+            out = cb(out, subj)
+            out = cb(out, ".tag == ")
+            out = match cg_emit_tag_prefix(out, variantT) { []byte as o => o; error as err => return err }
+            var ck = match cg_emit_case_key_str(pat) { str as s => s; error as err => return err }
+            out = cb_upper(out, ck)
+            cb(out, ")")
         }
     }
 }
@@ -7294,6 +7357,17 @@ fn emit_pat_binds(buf: []byte, pat: parser::Pattern, subj: str, indent: str): []
                 i++
             }
             out
+        }
+        parser::GroupBindPattern as gp => {
+            var out = cb(buf, indent)
+            out = cb(out, "auto ")
+            out = cb_str(out, gp.binding)
+            out = cb(out, " = ")
+            out = cb(out, subj)
+            out = cb(out, ".as.")
+            var ck = match cg_emit_case_key_str(pat) { str as s => s; error as err => return err }
+            out = cb_str(out, ck)
+            cb(out, ";\n")
         }
         _ => buf   // WILDCARD/LITERAL/RANGE/ALT/NULL bind nothing
     }

@@ -2,6 +2,43 @@
 
 use teko::lexer
 
+/**
+ * Parse a §9.D capability (c) GROUP-BIND pattern `(B | C | …) as v`: a parenthesized nested-union case
+ * that binds the whole nested `(B | C)` member of the subject to `v`. A `(` in pattern position is
+ * otherwise always a parse error today (inert), so this spelling is unambiguous. The options are bare
+ * case primaries separated by `|`; the `as <name>` binder is REQUIRED — a parenthesized group without a
+ * binder is not a supported form (a bare `b | c` alternation is the unparenthesized `AltPattern` form).
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the opening `(`
+ * @return        the parsed `GroupBindPattern` and the index past the bound name
+ * @throws        when the group is unclosed, lacks the required `as`, or the binder is not a name
+ * @since         §9.D capability (c)
+ */
+fn parse_group_bind_pattern(tokens: []lexer::Token, pos: u64): Parsed<Pattern> | error {
+    var opts: []Pattern = teko::list::empty()
+    var first = match parse_pattern_primary(tokens, pos + 1) { Parsed<Pattern> as x => x; error as e => return e }
+    opts = teko::list::push(opts, first.node)
+    var gp = first.next
+    loop {
+        if !is_kind_at(tokens, gp, lexer::TokenKind::Pipe) { break }
+        var opt = match parse_pattern_primary(tokens, gp + 1) { Parsed<Pattern> as x => x; error as e => return e }
+        opts = teko::list::push(opts, opt.node)
+        gp = opt.next
+    }
+    if !is_kind_at(tokens, gp, lexer::TokenKind::RParen) {
+        return err_at(tokens, gp, "expected ')' to close a grouped bind pattern '(B | C) as v'")
+    }
+    gp = gp + 1
+    if !is_kind_at(tokens, gp, lexer::TokenKind::As) {
+        return err_at(tokens, gp, "a parenthesized group must bind: write '(B | C) as v'")
+    }
+    if !is_name_at(tokens, gp + 1) {
+        return err_at(tokens, gp + 1, "expected a name after `as` in a grouped bind pattern '(B | C) as v'")
+    }
+    Parsed<Pattern> { node = GroupBindPattern { options = opts; binding = tokens[gp + 1].text }; next = gp + 2 }
+}
+
 // the BASE pattern: wildcard or a scalar literal. (Bind/field added in P3b; range/alt
 // wrap this in parse_pattern at P3c.)
 fn parse_pattern_primary(tokens: []lexer::Token, pos: u64): Parsed<Pattern> | error {
@@ -51,6 +88,9 @@ fn parse_pattern_primary(tokens: []lexer::Token, pos: u64): Parsed<Pattern> | er
             return err_at(tokens, ty.next + 1, "expected a name (or `_`) after `as` in a slice pattern")
         }
         return Parsed<Pattern> { node = BindPattern { type_name = Path { segments = teko::list::empty() }; has_binding = true; binding = tokens[ty.next + 1].text; is_slice = true; slice_type = ty.node; type_args = teko::list::empty() }; next = ty.next + 2 }
+    }
+    if k == lexer::TokenKind::LParen {
+        return parse_group_bind_pattern(tokens, pos)
     }
     if k == lexer::TokenKind::Ident {
         // `Foo as x` (bind), `Foo { f; g }` (field destructure), or bare `Foo` (match the

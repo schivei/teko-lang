@@ -1,0 +1,117 @@
+/**
+ * A — the standalone case of the subject union `A | (B | C)`: a DIRECT (non-nested) member that the
+ * group-bind arm must NOT claim (§9.D c).
+ *
+ * @field a  a payload an arm reads back
+ */
+type A = struct { a: i64 }
+
+/**
+ * B — the first case of the NESTED anonymous union `(B | C)` inside `A | (B | C)` (§9.D c).
+ *
+ * @field b  a payload the re-match reads back through the bound `v`
+ */
+type B = struct { b: i64 }
+
+/**
+ * C — the second case of the NESTED anonymous union `(B | C)` inside `A | (B | C)` (§9.D c).
+ *
+ * @field c  a payload the re-match reads back through the bound `v`
+ */
+type C = struct { c: i64 }
+
+/**
+ * mk_a — an `A` widened into the union-of-unions `A | (B | C)` (a value at the DIRECT `A` member slot).
+ *
+ * @return  an `A` as an `A | (B | C)`
+ */
+fn mk_a(): A | (B | C) { A { a = 1 } }
+
+/**
+ * mk_b — a `B` widened first into the nested group `(B | C)` and then into `A | (B | C)`, so the outer
+ * union carries the boxed nested variant at its `(B | C)` member slot (§9.D c byte-identity).
+ *
+ * @return  a `B` as an `A | (B | C)`, seated in the nested `(B | C)` member
+ */
+fn mk_b(): A | (B | C) {
+    var inner: (B | C) = B { b = 20 }
+    inner
+}
+
+/**
+ * mk_c — a `C` widened through the nested group `(B | C)` into `A | (B | C)` (the `C`-carrying twin of
+ * `mk_b`).
+ *
+ * @return  a `C` as an `A | (B | C)`, seated in the nested `(B | C)` member
+ */
+fn mk_c(): A | (B | C) {
+    var inner: (B | C) = C { c = 30 }
+    inner
+}
+
+/**
+ * arm_of — the arm ORDINAL a subject selects: `1` for the direct `A` arm, `2` for the group-bind arm
+ * `(B | C) as v` (§9.D c). Proves the group arm fires on a nested member and is DISTINCT from the direct
+ * `A` arm — the parenthesized `(B | C) as v` matches the nested `(B | C)` member as a whole.
+ *
+ * @param x  the union-of-unions subject
+ * @return   1 when `x` is the direct `A`, 2 when `x` is the nested `(B | C)`
+ */
+fn arm_of(x: A | (B | C)): i64 {
+    match x {
+        A as a => 1
+        (B | C) as v => 2
+    }
+}
+
+/**
+ * inner_of — bind the nested member with `(B | C) as v` and RE-MATCH the bound `v`: the group-bind
+ * aliases the boxed nested variant byte-identically, so `v` re-matches to `B`/`C` and their payload reads
+ * back (§9.D c). The direct `A` arm reads its own payload. Encodes which leaf ran: `A.a`, `100 + B.b`,
+ * or `200 + C.c`.
+ *
+ * @param x  the union-of-unions subject
+ * @return   `A.a` for the direct case, `100 + B.b` for a nested `B`, `200 + C.c` for a nested `C`
+ */
+fn inner_of(x: A | (B | C)): i64 {
+    match x {
+        A as a => a.a
+        (B | C) as v => match v {
+            B as b => 100 + b.b
+            C as c => 200 + c.c
+        }
+    }
+}
+
+/**
+ * group_arm_probe — the group-bind arm fires on a nested member and is distinct from the direct arm:
+ * `arm_of(mk_a())` is `1` and `arm_of(mk_c())` is `2`, so `1 * 10 + 2` = 12 encodes BOTH ordinals in
+ * order (§9.D c).
+ *
+ * @return  12
+ */
+pub fn group_arm_probe(): i64 {
+    arm_of(mk_a()) * 10 + arm_of(mk_c())
+}
+
+/**
+ * rebind_inner_probe — the bound `v` re-matches to its leaf and the leaf payload reads back through the
+ * alias: `inner_of(mk_c())` is `200 + 30` = 230, proving `(B | C) as v` binds the whole nested variant
+ * byte-identically (§9.D c).
+ *
+ * @return  230
+ */
+pub fn rebind_inner_probe(): i64 {
+    inner_of(mk_c())
+}
+
+/**
+ * group_exhaustive_probe — a `match` whose ONLY arms are the direct `A` and the group `(B | C) as v` is
+ * EXHAUSTIVE without a `_` (the group covers the nested member for exhaustiveness, §9.D c). Exercises the
+ * direct arm and the nested `B` leaf: `inner_of(mk_a())` = 1 and `inner_of(mk_b())` = 120, summing to 121.
+ *
+ * @return  121
+ */
+pub fn group_exhaustive_probe(): i64 {
+    inner_of(mk_a()) + inner_of(mk_b())
+}

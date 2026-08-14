@@ -390,6 +390,103 @@ fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable):
             }
             env   // binds nothing
         }
+        parser::GroupBindPattern as gp => {
+            var sub = match group_bind_subunion(gp, subject, table, env.cur_ns) { Type as t => t; error as e => return e }
+            define(env, gp.binding, sub, false)
+        }
+    }
+}
+
+/**
+ * group_bind_subunion — resolve a `GroupBindPattern`'s bound TYPE: the NESTED `Variant` member of the
+ * match subject whose members are exactly the group's options (in source order). The group is built into
+ * a candidate anonymous union and matched by `type_eq` against the subject's DIRECT members; the found
+ * member is returned UNCHANGED, so the bound `v` aliases the boxed nested variant the subject already
+ * carries at that tag slot — no re-tag, no re-box (§9.D nested-group byte-identity). Errors when an
+ * option is not a bare case name, or when no subject member is the union of exactly those options.
+ *
+ * @param gp       the grouped bind pattern
+ * @param subject  the match subject's resolved type
+ * @param table    the program type table
+ * @param ref_ns   the match arm's referencing namespace
+ * @return         the subject's nested `Variant` member the group binds, or a located error
+ * @throws         when an option is not a bare case name, or the group is not a nested member of the subject
+ * @since          §9.D capability (c)
+ */
+fn group_bind_subunion(gp: parser::GroupBindPattern, subject: Type, table: TypeTable, ref_ns: str): Type | error {
+    var subject_variant = expand_variant(subject, table)
+    var candidate = match group_candidate(gp, table, ref_ns) { Type as t => t; error as e => return e }
+    match group_member_of(subject_variant, candidate) {
+        Type as m => m
+        null => error { message = "the grouped bind '(… | …) as v' does not match a nested union member of the subject — its options must be exactly the cases of one nested `(… | …)` member (§9.D)" }
+    }
+}
+
+/**
+ * group_candidate — the anonymous sub-union a `GroupBindPattern`'s options describe: each option resolved
+ * to its case type, in source order, null-normalized (so it matches how the subject's nested `(… | …)`
+ * member was itself resolved). Independent of the subject — used both to bind (`group_bind_subunion`) and
+ * to test exhaustive coverage (`some_arm_covers_type`).
+ *
+ * @param gp      the grouped bind pattern
+ * @param table   the program type table
+ * @param ref_ns  the match arm's referencing namespace
+ * @return        the group's anonymous `Variant`, or the first option-resolution error
+ * @throws        when an option is not a bare case name or does not resolve
+ * @since         §9.D capability (c)
+ */
+fn group_candidate(gp: parser::GroupBindPattern, table: TypeTable, ref_ns: str): Type | error {
+    var opts: []Type = teko::list::empty()
+    var i = 0
+    loop {
+        if i >= gp.options.len { break }
+        var ot = match group_option_type(gp.options[i], table, ref_ns) { Type as t => t; error as e => return e }
+        opts = teko::list::push(opts, ot)
+        i++
+    }
+    Variant { members = union_normalize_null(opts) }
+}
+
+/**
+ * group_option_type — the resolved case TYPE of one `GroupBindPattern` option: a non-slice `BindPattern`'s
+ * named case; a slice pattern or any other shape is a located error (an option must be a bare case name).
+ *
+ * @param p       the option pattern
+ * @param table   the program type table
+ * @param ref_ns  the match arm's referencing namespace
+ * @return        the option's resolved type, or a located error
+ * @throws        when the option is not a bare case name
+ * @since         §9.D capability (c)
+ */
+fn group_option_type(p: parser::Pattern, table: TypeTable, ref_ns: str): Type | error {
+    match p {
+        parser::BindPattern as bp => if bp.is_slice { error { message = "a grouped bind option must be a bare case name, not a slice pattern" } } else { bind_pattern_type(bp, table, ref_ns) }
+        _ => error { message = "a grouped bind option '(… | …) as v' must be a bare case name" }
+    }
+}
+
+/**
+ * group_member_of — the DIRECT member of `subject_variant` that is `type_eq` to `candidate` (the group's
+ * anonymous sub-union), or null when no member matches. The subject is kept nested, so a nested
+ * `(B | C)` member is a `Variant` sitting at one tag slot; this finds THAT member so the bind aliases it.
+ *
+ * @param subject_variant  the subject's one-level variant view
+ * @param candidate        the group's anonymous sub-union
+ * @return                 the matching nested member, or null
+ * @since                  §9.D capability (c)
+ */
+fn group_member_of(subject_variant: Type, candidate: Type): Type | null {
+    match subject_variant {
+        Variant as v => {
+            var i = 0
+            loop {
+                if i >= v.members.len { break }
+                if type_eq(v.members[i], candidate) { return v.members[i] }
+                i++
+            }
+            null
+        }
+        _ => null
     }
 }
 
@@ -490,6 +587,9 @@ fn some_arm_covers_type(arms: []parser::Arm, mem: Type, table: TypeTable, ref_ns
                         }
                         j++
                     }
+                }
+                parser::GroupBindPattern as gp => {
+                    match group_candidate(gp, table, ref_ns) { Type as cand => { if type_eq(cand, mem) { return true } }; error => { } }
                 }
                 _ => { }
             }
