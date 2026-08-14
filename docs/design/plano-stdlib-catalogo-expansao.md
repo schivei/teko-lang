@@ -238,8 +238,11 @@ prefere o provedor auditado do SO em vez do código Teko — **sync E async**. N
   encrypt/decrypt/sign/verify, keyring, ASCII armor. É o **caminho FFI para PGP/GPG** ao lado do
   `crypto::pgp` puro (C-PGP) — para quem já tem GnuPG no sistema.
 - **Outras libs** entram pelo mesmo padrão (libsodium para primitivas modernas, etc.), todas curadas.
-- **Sync/async:** cada binding é **sync-first**; a variante `await`→`Intent<T>` (§10.3) envolve por cima
-  **sem reescrita** — as operações pesadas (assinatura RSA, KDF memory-hard, handshake) ganham a async antes.
+- **Simétrica ("sync") e assimétrica ("async") — de CHAVE, não de execução (ruling do dono).** O provider
+  cobre **ambas as famílias**: **simétrica / "sync" = chave-única** (AES, ChaCha20, AEAD, HMAC — uma chave
+  secreta compartilhada) e **assimétrica / "async" = par de chaves public/private** (RSA, EC/ECDSA, Ed25519,
+  X25519 — assinatura, verificação, KEM, troca de chave). Espelha a pilha pura (C4/C5 simétrica; C7
+  assimétrica). *(Nota: o modelo de execução `await`→`Intent`, §10.3, é ortogonal e já coberto no §0.)*
 
 Todos ridem **KEYSTONE-LINK** (quem não chama o provider não linka a lib) e `#os` para lib/símbolo por
 plataforma. As impls puras ficam como alternativa **zero-dependência**; o provider é opt-in.

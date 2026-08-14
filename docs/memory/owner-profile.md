@@ -38,8 +38,11 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   usa **compila/linka/roda sem a lib**. **Erro só se o dev usar** o recurso cuja lib falta, e — **salvo alguns
   casos — link DINÂMICO → erro de RUNTIME** (símbolo ausente no load/1ª chamada), não de compilação. Refina o
   KEYSTONE-LINK ("não linkar o não-usado" → "falhar só no uso, dinamicamente"). Impl **puro-Teko** = default
-  zero-dep; provider FFI = alternativa. E o padrão **"bindar, não reimplementar"** (OpenSSL/GPG); cada binding
-  sync-first + `await`→`Intent` async por cima.
+  zero-dep; provider FFI = alternativa. E o padrão **"bindar, não reimplementar"** (OpenSSL/GPG).
+- **CUIDADO com "sync/async" do dono no contexto cripto = simétrico/assimétrico de CHAVE, NÃO execução.**
+  "sync" = **chave-única** (simétrica: AES/ChaCha/AEAD/HMAC); "async" = **par public/private** (assimétrica:
+  RSA/EC/Ed25519/X25519). O provider deve cobrir **as duas famílias**. Não confundir com o modelo de execução
+  `await`→`Intent` (§10.3), que é ortogonal. (Já errei isto uma vez — o dono corrigiu.)
 
 ## Sequenciamento
 - **Destrava dependência primeiro.** Antecipar itens do caminho crítico (item 14 antes da Intent).
