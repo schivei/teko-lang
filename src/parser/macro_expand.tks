@@ -138,8 +138,13 @@ fn item_has_macro(it: Item): bool {
 fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
     match it.content {
         Function as f => {
-            var nb = match walk_stmts(f.body, prog, no_holes(), depth) { []Statement as s => s; error as e => return e }
-            Item { content = with_fn_body(f, nb); namespace = it.namespace; file = it.file }
+            var fs = match rewrite_fn_sig(f, prog, depth) { Function as x => x; error as e => return e }
+            var nb = match walk_stmts(fs.body, prog, no_holes(), depth) { []Statement as s => s; error as e => return e }
+            Item { content = with_fn_body(fs, nb); namespace = it.namespace; file = it.file }
+        }
+        TypeDecl as td => {
+            var nd = match rewrite_type_decl(td, prog, depth) { TypeDecl as x => x; error as e => return e }
+            Item { content = nd; namespace = it.namespace; file = it.file }
         }
         Statement as s => {
             var ns = match walk_stmt(s, prog, no_holes(), depth) { Statement as x => x; error as e => return e }
@@ -147,6 +152,105 @@ fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
         }
         _ => it
     }
+}
+
+/**
+ * rewrite_fn_sig — expand `@Type()` macros in a function's SIGNATURE (§14 A4): each parameter's type
+ * annotation and the return type. The body is walked separately (statement expansion).
+ *
+ * @param f      the function whose signature to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       `f` with signature type macros expanded, or an error
+ * @throws       when an inner type expansion fails
+ * @since 0.4-macros (§14 A4)
+ */
+fn rewrite_fn_sig(f: Function, prog: Program, depth: u64): Function | error {
+    var ps = match rewrite_params(f.params, prog, depth) { []Param as p => p; error as e => return e }
+    var rt = f.return_type
+    if f.has_return {
+        rt = match walk_type(f.return_type, prog, depth) { TypeExpr as t => t; error as e => return e }
+    }
+    Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = ps; has_return = f.has_return; return_type = rt; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
+}
+
+/**
+ * rewrite_params — expand `@Type()` macros in each typed parameter's annotation (§14 A4), preserving
+ * every other field. An untyped parameter passes through.
+ *
+ * @param params the parameters to rewrite
+ * @param prog   the program
+ * @param depth  the current expansion depth
+ * @return       the rewritten parameters, or an error
+ * @throws       when an inner type expansion fails
+ * @since 0.4-macros (§14 A4)
+ */
+fn rewrite_params(params: []Param, prog: Program, depth: u64): []Param | error {
+    var out: []Param = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        var p = params[i]
+        var ta = p.type_ann
+        if p.has_type {
+            ta = match walk_type(p.type_ann, prog, depth) { TypeExpr as t => t; error as e => return e }
+        }
+        out = teko::list::push(out, Param { name = p.name; has_type = p.has_type; type_ann = ta; is_params = p.is_params; has_default = p.has_default; default_expr = p.default_expr })
+        i++
+    }
+    out
+}
+
+/**
+ * rewrite_type_decl — expand `@Type()` macros in a type declaration's FIELD annotations (§14 A4): a
+ * struct or class field whose type is `[]@Type()` (the §9.D inline-union abbreviation) re-parses to the
+ * spliced type. Other body kinds pass through in A4 — their type positions gain macro support
+ * incrementally; inert on today's corpus regardless.
+ *
+ * @param td     the type declaration to rewrite
+ * @param prog   the program
+ * @param depth  the current expansion depth
+ * @return       the declaration with field type macros expanded, or an error
+ * @throws       when an inner type expansion fails
+ * @since 0.4-macros (§14 A4)
+ */
+fn rewrite_type_decl(td: TypeDecl, prog: Program, depth: u64): TypeDecl | error {
+    var nb = match td.body {
+        StructBody as sb => {
+            var fs = match rewrite_fields(sb.fields, prog, depth) { []Field as f => f; error as e => return e }
+            StructBody { fields = fs; methods = sb.methods; implements = sb.implements; consts = sb.consts; is_readonly = sb.is_readonly }
+        }
+        ClassBody as cb => {
+            var fs = match rewrite_fields(cb.fields, prog, depth) { []Field as f => f; error as e => return e }
+            ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fs; methods = cb.methods; consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }
+        }
+        _ => td.body
+    }
+    TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = nb; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col }
+}
+
+/**
+ * rewrite_fields — expand `@Type()` macros in each field's type annotation (§14 A4), preserving every
+ * other field attribute.
+ *
+ * @param fields the fields to rewrite
+ * @param prog   the program
+ * @param depth  the current expansion depth
+ * @return       the rewritten fields, or an error
+ * @throws       when an inner type expansion fails
+ * @since 0.4-macros (§14 A4)
+ */
+fn rewrite_fields(fields: []Field, prog: Program, depth: u64): []Field | error {
+    var out: []Field = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        var fl = fields[i]
+        var ta = match walk_type(fl.type_ann, prog, depth) { TypeExpr as t => t; error as e => return e }
+        out = teko::list::push(out, Field { name = fl.name; type_ann = ta; vis = fl.vis; is_intern = fl.is_intern; has_doc = fl.has_doc; doc = fl.doc; is_readonly = fl.is_readonly })
+        i++
+    }
+    out
 }
 
 /**
@@ -656,4 +760,121 @@ fn walk_stmt(s: Statement, prog: Program, holes: MacroHoles, depth: u64): Statem
         }
         LoweringFrag => s
     }
+}
+
+/**
+ * macro_type_name — the target name of an `@name(...)` type-position call: its path's last segment.
+ *
+ * @param mt  the macro-type node
+ * @return    the call's last-segment name, or "" for an empty path
+ * @since 0.4-macros (§14 A4)
+ */
+fn macro_type_name(mt: MacroType): str {
+    if mt.callee.segments.len == 0 { return "" }
+    mt.callee.segments[mt.callee.segments.len - 1].name
+}
+
+/**
+ * frag_has_hole — does a `lowering` fragment's token run contain a `${…}` injection hole (§14 A4)? A
+ * TYPE-position macro is parameterless in A4 (the §9.D `@Type()` abbreviation), so a hole is a located
+ * "not yet supported" signal (value→type hole splicing arrives in a later crumb).
+ *
+ * @param toks  the fragment's raw token run
+ * @return      true iff a `Dollar` token (hole marker) is present
+ * @since 0.4-macros (§14 A4)
+ */
+fn frag_has_hole(toks: []lexer::Token): bool {
+    var i: u64 = 0
+    loop {
+        if i >= toks.len { break }
+        if toks[i].kind == lexer::TokenKind::Dollar { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * expand_macro_type — expand ONE `@macro(...)` call standing in a TYPE position (§14 A4): resolve the
+ * callee to its `MacroDecl`, take the body's single `lowering { … }` fragment, and re-parse its raw
+ * token run as a `TypeExpr` (context-polymorphic splice, §5.1-Opt-1 — an `@Type()` yields a union
+ * `A | B | …`), then recursively expand any nested type macros. A `@comptime` name, or an unknown name,
+ * is left as a `MacroType` for the resolve honest-stop. A4 supports a PARAMETERLESS type macro (no
+ * `${}` holes); a hole is a located "not yet supported" error.
+ *
+ * @param mt     the type-position macro call
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the spliced `TypeExpr`, or an expansion error
+ * @throws       an over-depth error, an unsupported hole, or a fragment that does not parse as a type
+ * @since 0.4-macros (§14 A4)
+ */
+fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): TypeExpr | error {
+    if depth >= max_macro_depth() {
+        return error { message = "macro expansion exceeded the maximum depth in a type position (a macro that expands to itself?) — §14 A4" }
+    }
+    var name = macro_type_name(mt)
+    var md = match macro_decl_by_name(prog, name) { MacroDecl as m => m; null => return mt }
+    var frag = match single_lowering_frag(md) { LoweringFrag as lf => lf; error as e => return e }
+    if frag_has_hole(frag.tokens) {
+        return error { message = teko::str::concat("macro `", teko::str::concat(name, "`: a `${}` hole in a TYPE-position `lowering` fragment is not yet supported (§14 A4 handles the parameterless `@Type()` abbreviation)")) }
+    }
+    var parsed = match parse_type(frag.tokens, 0 to u64) { ParsedType as pt => pt.node; error as e => return error { message = teko::str::concat("the `lowering` fragment does not parse as a type: ", e.message) } }
+    walk_type(parsed, prog, depth + 1 to u64)
+}
+
+/**
+ * walk_type — the Family-A expansion walk over ONE type-expression (§14 A4): a `@macro()` in a type
+ * position expands (its lowering fragment re-parsed as a type), and every other type node rebuilds from
+ * its rewritten children. A no-op on a plain type (inert).
+ *
+ * @param te     the type-expression to rewrite
+ * @param prog   the program (macro lookup surface)
+ * @param depth  the current expansion depth
+ * @return       the rewritten type-expression, or an expansion error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A4)
+ */
+fn walk_type(te: TypeExpr, prog: Program, depth: u64): TypeExpr | error {
+    match te {
+        MacroType as mt => expand_macro_type(mt, prog, depth)
+        NamedType as nt => {
+            var args = match walk_types(nt.args, prog, depth) { []TypeExpr as a => a; error as er => return er }
+            NamedType { path = nt.path; args = args }
+        }
+        SliceType as st => {
+            var el = match walk_type(st.element, prog, depth) { TypeExpr as t => t; error as er => return er }
+            SliceType { element = el }
+        }
+        UnionType as ut => {
+            var ms = match walk_types(ut.members, prog, depth) { []TypeExpr as m => m; error as er => return er }
+            UnionType { members = ms }
+        }
+        FunctionType as ft => {
+            var ps = match walk_types(ft.params, prog, depth) { []TypeExpr as p => p; error as er => return er }
+            var r = match walk_type(ft.ret, prog, depth) { TypeExpr as t => t; error as er => return er }
+            FunctionType { params = ps; ret = r }
+        }
+    }
+}
+
+/**
+ * walk_types — expand type macros across a type-expression LIST (§14 A4), preserving order.
+ *
+ * @param tes    the type-expressions to walk
+ * @param prog   the program
+ * @param depth  the current expansion depth
+ * @return       the rewritten list, or the first error
+ * @throws       when an inner expansion fails
+ * @since 0.4-macros (§14 A4)
+ */
+fn walk_types(tes: []TypeExpr, prog: Program, depth: u64): []TypeExpr | error {
+    var out: []TypeExpr = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= tes.len { break }
+        var t = match walk_type(tes[i], prog, depth) { TypeExpr as x => x; error as er => return er }
+        out = teko::list::push(out, t)
+        i++
+    }
+    out
 }

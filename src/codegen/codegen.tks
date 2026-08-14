@@ -1572,6 +1572,7 @@ fn cg_te_reaches_byvalue(prog: CgProg, te: parser::TypeExpr, to: str, seen: []st
         }
         parser::SliceType => false   // a slice is a pointer — not a by-value edge
         parser::FunctionType => false   // (W10a) a function pointer — not a by-value aggregate edge
+        parser::MacroType => false
     }
 }
 // cg_name_reaches_byvalue — does named type `from` reach named type `to` through by-value edges?
@@ -2575,6 +2576,7 @@ fn cg_texpr_mangle(te: parser::TypeExpr): str {
         parser::SliceType as st => teko::str::concat("slice_", cg_texpr_mangle(st.element))
         parser::UnionType => "variant"
         parser::FunctionType => "func"   // (W10a) matches checker type_mangle's Func fragment
+        parser::MacroType => ""
     }
 }
 // `<base>__g__<arg0>[__<arg1>…]` over type-arg exprs (matches checker::generic_inst_name).
@@ -2664,6 +2666,7 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str):
         }
         // (W10a) a function-type field/param annotation → the uniform `tk_closure` (teko_rt.h).
         parser::FunctionType => cb(buf, "tk_closure")
+        parser::MacroType => error { message = "internal: an unexpanded @Type() macro reached codegen — it should be expanded by the Family-A pre-pass (§14 A4)" }
     }
 }
 
@@ -10771,6 +10774,7 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: parser::TypeExpr): checker::T
             checker::Variant { members = cg_union_normalize_null(mem) }
         }
         parser::FunctionType => checker::Func { params = teko::list::empty(); ret = checker::Void { }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() }
+        parser::MacroType => checker::Void { }
     }
 }
 
@@ -11074,6 +11078,7 @@ fn cg_texpr_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, te: parser::TypeE
         parser::SliceType => true   // pointer (slice typedef pre-emitted)
         parser::UnionType as ut => cg_texpr_union_ready(prog, em, set, ut, owner_ns)
         parser::FunctionType => true   // (W10a) tk_closure is a runtime type — always ready
+        parser::MacroType => false
     }
 }
 // Is a named decl's body emittable now (all its by-value field/member deps already emitted)?
