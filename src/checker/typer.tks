@@ -9083,7 +9083,7 @@ fn check_value_type_self_readonly(td: parser::TypeDecl, methods: []parser::Funct
  * registration exactly, so codegen and the interpreter mangle and resolve method calls to these SAME items).
  *
  * Called from both `type_program` and `type_program_with_deps`' main loops, alongside the ordinary
- * TypeDecl pass-through — a struct with methods contributes MULTIPLE `TItem`s, not one.
+ * TypeDecl pass-through — a struct with methods contributes MULTIPLE `@TItem()`s, not one.
  *
  * @param td       the struct or class declaration whose methods to type
  * @param item_ns  the declaration's own namespace
@@ -9093,7 +9093,7 @@ fn check_value_type_self_readonly(td: parser::TypeDecl, methods: []parser::Funct
  * @return         one typed item per method body
  * @throws         when a method body fails to type
  */
-fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []TItem | error {
+fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []@TItem() | error {
     match check_operator_invariants(td, item_ns, table) { error as e => return e; null => { } }
     // (W10b.CLASS) a class's methods are typed/stamped by this SAME pass — only the methods
     // list's source differs; a class method is otherwise identical to a struct method. Increment
@@ -9119,7 +9119,7 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
         parser::FlagsBody as fb => { methods = fb.methods }
         _ => { }
     }
-    var out: []TItem = teko::list::empty()
+    var out: []@TItem() = teko::list::empty()
     var method_ns = if item_ns == "" { td.name } else { item_ns ~ "::" ~ td.name }
     var mi = 0
     loop {
@@ -9166,11 +9166,11 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
  * @param file     the type's source file (for located error surfacing)
  * @param env      the pass-2 environment (namespace-scoped to the type's module)
  * @param table    the program's type table
- * @return         one `TConstDecl` TItem per effective member const, or a located error
+ * @return         one `TConstDecl` @TItem() per effective member const, or a located error
  * @throws         a type/const-expr error in a member const's initializer, surfaced at its position
  * @since #594
  */
-fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []TItem | error {
+fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []@TItem() | error {
     var eff = match td.body {
         parser::ClassBody as cb => match effective_class_consts(cb, table) { []parser::ConstDecl as c => c; error as e => return e }
         parser::StructBody as sb => sb.consts
@@ -9178,7 +9178,7 @@ fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: E
         _ => teko::list::empty()
     }
     var type_canonical = qualify(item_ns, td.name)
-    var out: []TItem = teko::list::empty()
+    var out: []@TItem() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= eff.len { break }
@@ -9229,7 +9229,7 @@ fn type_const_decl(cd: parser::ConstDecl, env: Env, table: TypeTable): TConstDec
     TConstDecl { name = cd.name; namespace = env.cur_ns; ty = at; init = v; vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col }
 }
 
-fn type_item(item: parser::Item, env: Env, table: TypeTable): TItem | error {
+fn type_item(item: parser::Item, env: Env, table: TypeTable): @TItem() | error {
     // Stamp the item's source file onto the env, the twin of the `with_ns` the caller already
     // does. Only the checker's WARNING surface reads it: an error is positioned on the way out
     // by `surface_at`, which has the file in hand, but a warning is printed where it is found
@@ -9306,7 +9306,7 @@ pub type PreMono = struct {
     /**
      * every DECLARATION-boundary type error collected while typing the item list, in item order
      * (empty when the program typed cleanly). An item that fails to type contributes its
-     * diagnostic here and NO `TItem` — the walk continues with the next top-level declaration, so
+     * diagnostic here and NO `@TItem()` — the walk continues with the next top-level declaration, so
      * one build reports every declaration's defect instead of stopping at the first (owner ruling
      * 2026-07-26). The caller must NOT proceed to monomorphization when this is non-empty: `prog`
      * is a PARTIAL program by construction.
@@ -9376,7 +9376,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     var types = pre.types
     var cenv = pre.env
     program = drop_comptime_items(program)
-    var items: []TItem = teko::list::empty()
+    var items: []@TItem() = teko::list::empty()
     var mainbody: []TStatement = teko::list::empty()
     var diags: []str = pre.diags
     var cur = cenv
@@ -9413,20 +9413,20 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
             }
             _ => {
                 match type_item(it, ienv, types) {
-                    TItem as ti => {
+                    (@TItem()) as ti => {
                         items = teko::list::push(items, ti)
                         // (OOP A1) a struct TypeDecl also contributes its METHOD bodies as extra items.
                         match it.content {
                             parser::TypeDecl as td => {
                                 match type_struct_methods(td, it.namespace, it.file, ienv, types) {
-                                    []TItem as mitems => {
+                                    []@TItem() as mitems => {
                                         var mi2 = 0
                                         loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
                                     }
                                     error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
                                 }
                                 match type_type_member_consts(td, it.namespace, it.file, ienv, types) {
-                                    []TItem as citems => {
+                                    []@TItem() as citems => {
                                         var ci2 = 0
                                         loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
                                     }
@@ -9447,7 +9447,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     if lc.failed { diags = teko::list::push(diags, lc.message) }
     // For the result, prepend dep items so the TProgram contains the full program (dep + project).
     // This allows subsequent operations (codegen, interpreter, coverage) to see all items.
-    var all_items: []TItem = teko::list::empty()
+    var all_items: []@TItem() = teko::list::empty()
     var di: u64 = 0
     loop {
         if di >= dep_prog.items.len { break }
@@ -9581,7 +9581,7 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
     var types = pre.types
     var cenv = pre.env
     program = drop_comptime_items(program)
-    var items: []TItem = teko::list::empty()
+    var items: []@TItem() = teko::list::empty()
     var mainbody: []TStatement = teko::list::empty()   // the loose top-level statements (the virtual-main), for label validation
     var cur = cenv   // threaded virtual-main scope: each loose binding extends it for the next statement (mirrors typer.c's `cur`)
     var i = 0
@@ -9630,17 +9630,17 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
             }
             _ => {
                 var ti = match type_item(it, ienv, types) {
-                    TItem as x => x
+                    (@TItem()) as x => x
                     error as e => return surface_at(it.file, line, col, e)
                 }
                 items = teko::list::push(items, ti)
                 // (OOP A1) a struct TypeDecl also contributes its METHOD bodies as extra items.
                 match it.content {
                     parser::TypeDecl as td => {
-                        var mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
+                        var mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
                         var mi2 = 0
                         loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
-                        var citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
+                        var citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
                         var ci2 = 0
                         loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
                     }

@@ -2918,11 +2918,11 @@ pub fn fold_program(prog: TProgram, agg: AggConstMap): TProgram | error {
     var table = fold_empty_table()
     var env = env_empty()
     var ctors = collect_const_ctors(prog.items)
-    var out: []TItem = teko::list::empty()
+    var out: []@TItem() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        var it = match fold_item(prog.items[i], table, env, agg, ctors) { error as x => return x; TItem as v => v }
+        var it = match fold_item(prog.items[i], table, env, agg, ctors) { error as x => return x; (@TItem()) as v => v }
         out = teko::list::push(out, it)
         i++
     }
@@ -2941,7 +2941,7 @@ pub fn fold_program(prog: TProgram, agg: AggConstMap): TProgram | error {
  * @return       the item with its op-trees folded, or a located error
  * @since #comptime-fold
  */
-fn fold_item(it: TItem, table: TypeTable, env: Env, agg: AggConstMap, ctors: []TFunction): TItem | error {
+fn fold_item(it: @TItem(), table: TypeTable, env: Env, agg: AggConstMap, ctors: []TFunction): @TItem() | error {
     match it {
         TFunction as f => fold_function(f, table, env, agg)
         TConstDecl as cd => fold_const_decl(cd, table, env, agg, ctors)
@@ -2961,7 +2961,7 @@ fn fold_item(it: TItem, table: TypeTable, env: Env, agg: AggConstMap, ctors: []T
  * @return       the function with a folded body, or a located error
  * @since #comptime-fold
  */
-fn fold_function(f: TFunction, table: TypeTable, env: Env, agg: AggConstMap): TItem | error {
+fn fold_function(f: TFunction, table: TypeTable, env: Env, agg: AggConstMap): @TItem() | error {
     var body = match fold_block(f.body, table, env, agg) { error as x => return x; []TStatement as v => v }
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra }
 }
@@ -2982,7 +2982,7 @@ fn fold_function(f: TFunction, table: TypeTable, env: Env, agg: AggConstMap): TI
  * @return       the const declaration with a folded, canonicalized initializer, or a located error
  * @since #comptime-fold
  */
-fn fold_const_decl(cd: TConstDecl, table: TypeTable, env: Env, agg: AggConstMap, ctors: []TFunction): TItem | error {
+fn fold_const_decl(cd: TConstDecl, table: TypeTable, env: Env, agg: AggConstMap, ctors: []TFunction): @TItem() | error {
     var init = match fold_expr(cd.init, table, env, agg) { error as x => return x; TExpr as v => v }
     TConstDecl { name = cd.name; namespace = cd.namespace; ty = cd.ty; init = canonicalize_const_ctors(init, ctors); vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col }
 }
@@ -3035,7 +3035,7 @@ type LpStmt = struct { stmt: TStatement; map: LocalConstMap }
  * @field map   the top-level local-const map the item leaves
  * @since #comptime-fold
  */
-type LpItem = struct { item: TItem; map: LocalConstMap }
+type LpItem = struct { item: @TItem(); map: LocalConstMap }
 
 /**
  * lp_empty — an empty local-const map, the fresh scope a function body (and the loose top-level
@@ -3578,7 +3578,7 @@ fn lp_assign(a: TAssign, m: LocalConstMap): TStatement {
  * @return   the function with local-const references substituted in its body
  * @since #comptime-fold
  */
-fn lp_function(f: TFunction): TItem {
+fn lp_function(f: TFunction): @TItem() {
     var body = lp_block(f.body, lp_empty()).stmts
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra }
 }
@@ -3593,7 +3593,7 @@ fn lp_function(f: TFunction): TItem {
  * @return     the item with local-const references substituted, plus the top-level map it leaves
  * @since #comptime-fold
  */
-fn lp_top_item(it: TItem, top: LocalConstMap): LpItem {
+fn lp_top_item(it: @TItem(), top: LocalConstMap): LpItem {
     match it {
         TFunction as f => LpItem { item = lp_function(f); map = top }
         TStatement as s => {
@@ -3621,7 +3621,7 @@ fn lp_top_item(it: TItem, top: LocalConstMap): LpItem {
  */
 pub fn propagate_locals(prog: TProgram): TProgram {
     var top = lp_empty()
-    var out: []TItem = teko::list::empty()
+    var out: []@TItem() = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }

@@ -210,7 +210,7 @@ type RTFunction = struct { r: Reader; value: checker::TFunction }
 type RConstDecl = struct { r: Reader; value: parser::ConstDecl }
 type RConstDecls = struct { r: Reader; value: []parser::ConstDecl }
 type RTConstDecl = struct { r: Reader; value: checker::TConstDecl }
-type RTItem = struct { r: Reader; value: checker::TItem }
+type RTItem = struct { r: Reader; value: @TItem() }
 type RProgram = struct { r: Reader; value: checker::TProgram }
 type RPExpr = struct { r: Reader; value: parser::Expr }   // (C7.16) match framing
 type RPattern = struct { r: Reader; value: @Pattern() }
@@ -635,7 +635,7 @@ fn read_fields(r: Reader, table: []str): RFields | error {
 /**
  * Read one static type-member `ConstDecl` SIGNATURE: inverse of `write_constdecl` (#594 crumb 8) —
  * name + type_ann + vis + has_doc + doc + line + col. The initializer was not serialized (the body
- * codec carries signatures only; the value rides the hoisted module-level `TConstDecl` TItem), so it
+ * codec carries signatures only; the value rides the hoisted module-level `TConstDecl` @TItem()), so it
  * reconstructs as `parser::no_expr()`, exactly as `read_params` stubs a dropped default.
  *
  * @param r      the reader cursor at the member const's first field
@@ -897,11 +897,11 @@ fn read_tfunction(r: Reader, table: []str): RTFunction | error {
     RTFunction { r = fr.r; value = checker::TFunction { overload_suffix = ""; name = nm.value; type_params = tp.value; type_constraints = tc.value; params = ps.value; return_type = rt.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; namespace = ns.value; file = fl.value; line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0; c_symbol = cs.value; from_lib = fr.value; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty() } }
 }
 /**
- * Read a module-level `TConstDecl` TItem: inverse of `write_tconstdecl` (#594 crumb 8) — name +
+ * Read a module-level `TConstDecl` @TItem(): inverse of `write_tconstdecl` (#594 crumb 8) — name +
  * namespace + value type + typed initializer + vis + has_doc + doc + line + col. The initializer
  * rides in full (unlike a body member const), so a consuming module inlines the value identically.
  *
- * @param r      the reader cursor at the const's first field (past the TItem tag)
+ * @param r      the reader cursor at the const's first field (past the @TItem() tag)
  * @param table  the interned string table
  * @return RTConstDecl | error  the decoded module const plus the advanced cursor
  */
@@ -929,7 +929,7 @@ fn read_titem(r: Reader, table: []str): RTItem | error {
 fn read_program(r: Reader, table: []str): RProgram | error {
     var n = match read_u64(r) { RU64 as x => x; error as e => return e }
     var rr = n.r
-    var xs: []checker::TItem = teko::list::empty()
+    var xs: []@TItem() = teko::list::empty()
     var i = 0
     loop { if i >= n.value { break }; var it = match read_titem(rr, table) { RTItem as x => x; error as e => return e }; xs = teko::list::push(xs, it.value); rr = it.r; i++ }
     RProgram { r = rr; value = checker::TProgram { items = xs } }
