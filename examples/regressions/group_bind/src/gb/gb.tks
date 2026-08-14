@@ -115,3 +115,53 @@ pub fn rebind_inner_probe(): i64 {
 pub fn group_exhaustive_probe(): i64 {
     inner_of(mk_a()) + inner_of(mk_b())
 }
+
+/**
+ * OptBox — a struct carrying an OPTIONAL nested union `(B | C) | null` (§9.D c over an optional): the
+ * present case is the whole nested `(B | C)` member, the absent case is `null`. Mirrors the real-corpus
+ * shape `object_field(...): (…union…) | null` where the whole union is bound as one value.
+ *
+ * @field w  the optional nested union: a present `(B | C)`, or `null`
+ */
+type OptBox = struct { w: (B | C) | null }
+
+/**
+ * mk_opt_b — a `B` widened into the OPTIONAL nested union `(B | C) | null` and boxed into an `OptBox`
+ * (the present case, seated in the `(B | C)` member).
+ *
+ * @return  an `OptBox` whose `w` is a present `B`
+ */
+fn mk_opt_b(): OptBox {
+    var inner: (B | C) = B { b = 40 }
+    OptBox { w = inner }
+}
+
+/**
+ * opt_arm_of — classify an `OptBox`'s optional group-bind field `(B | C) | null`: the group-bind
+ * `(B | C) as v` binds the WHOLE present nested union (then re-matched to its leaf), `null` is the
+ * absent case. Exercises the group-bind over an OPTIONAL (nullable) subject — the nullable-pointer/
+ * niche representation — distinct from the value-union group-bind (§9.D c).
+ *
+ * @param o  the box whose optional nested-union field is classified
+ * @return   `300 + B.b` / `400 + C.c` for a present leaf, `-1` when absent
+ */
+fn opt_arm_of(o: OptBox): i64 {
+    match o.w {
+        (B | C) as v => match v {
+            B as b => 300 + b.b
+            C as c => 400 + c.c
+        }
+        null => -1
+    }
+}
+
+/**
+ * group_opt_probe — the group-bind arm binds the whole present union of an OPTIONAL `(B | C) | null`
+ * field and re-matches its leaf: `opt_arm_of(mk_opt_b())` = `300 + 40` = 340, proving `(B | C) as v`
+ * over a nullable subject tests presence and binds the dereferenced union (§9.D c over an optional).
+ *
+ * @return  340
+ */
+pub fn group_opt_probe(): i64 {
+    opt_arm_of(mk_opt_b())
+}

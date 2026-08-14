@@ -6649,6 +6649,30 @@ fn cg_emit_inline_null(buf: []byte, expected: checker::Type): []byte | error {
     cb(o, "0 }")
 }
 
+/**
+ * cg_value_already_boxed — is `vt` ALREADY a box-optional whose boxed payload mangles identically to
+ * `bx` (the target `X | null`'s payload `X`)? True only for another `X | null` value — an existing heap
+ * handle to pass through unchanged; FALSE for the bare payload `X` (including an inline union widening
+ * INTO the optional), which must be boxed. This distinguishes the pass-through case from the widen-and-
+ * box case that a raw `cg_mangle_eq(expected, value.type)` conflated: an inline `X | null` and its inner
+ * inline union `X` both have an erroring (empty-key) mangle, so `cg_mangle_eq` reported them equal and
+ * the payload was copied straight into the pointer slot instead of being boxed.
+ *
+ * @param prog  the typed program (box-member classification)
+ * @param bx    the target box-optional's payload type `X`
+ * @param vt    the source value's resolved type
+ * @return      true iff `vt` is itself a box-optional whose payload mangles identically to `bx`
+ */
+fn cg_value_already_boxed(prog: CgProg, bx: checker::Type, vt: checker::Type): bool {
+    match vt {
+        checker::Variant as vv => match cg_union_box_member(prog, vv) {
+            checker::Type as vbx => cg_mangle_eq(bx, vbx)
+            null => false
+        }
+        _ => false
+    }
+}
+
 fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: checker::Type, inner: checker::Type, value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx): []byte | error {
     var bxN = fresh_named("_ubx", buf.len to i64)
     var out = cb(buf, "({ ")
@@ -6722,7 +6746,7 @@ fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: ch
                 match value.kind {
                     checker::TNullLit => return cb(buf, "0")
                     _ => {
-                        if cg_mangle_eq(expected, value.type) { return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx) }
+                        if cg_value_already_boxed(prog, bx, value.type) { return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx) }
                         return cg_emit_box_construct(buf, prog, ret_type, bx, value, box_region, escaping, regions, fn_body, dctx)
                     }
                 }
@@ -7265,11 +7289,22 @@ fn cg_emit_fatptr_pat_binds(buf: []byte, prog: CgProg, pat: parser::Pattern, sub
     }
 }
 
-// cg_emit_pat_test — TOP-LEVEL pattern test (handles an OPTIONAL subject — REBOOT_PLAN §202).
-// `subjT` is the subject's resolved type; `subj` is the subject temp name (a tk_opt_<inner>
-// struct when optional). For an optional subject: `null` ⇒ `(!_s.present)`; a bare bind/wildcard
-// over a NON-variant present value ⇒ `(_s.present)`; otherwise ⇒ `(_s.present && <inner test>)`.
-// For a non-optional subject it delegates to emit_pat_test. (C: `cg_emit_pat_test`.)
+/**
+ * cg_emit_pat_test — emit the TOP-LEVEL boolean test that `subj` matches `pat`, handling an
+ * OPTIONAL subject (REBOOT_PLAN §202). For a niche-encoded optional a `null` pattern tests the
+ * niche, a bind/field/group-bind tests "not the niche"; for a box-encoded (nullable-pointer)
+ * optional `null` ⇒ `(subj == 0)` and a bind/field/group-bind ⇒ `(subj != 0)`. A §9.D group-bind
+ * `(A | B) as v` over such an optional binds the WHOLE present union, so it tests presence exactly
+ * like a bare bind. For a non-optional subject it delegates to `emit_pat_test`. Mirrors the C twin.
+ *
+ * @param subj   the subject temp name (a niche value or nullable pointer when optional)
+ * @param subjT  the subject's resolved type
+ * @param pat    the arm pattern under test
+ * @param prog   the codegen program (type/decl lookups)
+ * @param buf    the output byte buffer being appended to
+ * @return       `buf` with the boolean test appended
+ * @throws       when an inner case key or tag prefix cannot be emitted
+ */
 fn cg_emit_pat_test(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, subjT: checker::Type): []byte | error {
     // AST descend: `match e { Number => }` over `e: Expr = struct{kind: ExprKind}` lowers on e.kind.
     match cg_kind_descend(prog, subjT, pat) {
@@ -7287,6 +7322,7 @@ fn cg_emit_pat_test(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, 
                     parser::WildcardPattern => return cb(buf, "1")
                     parser::BindPattern => return cg_emit_niche_not_null(buf, subj, nx)
                     parser::FieldPattern => return cg_emit_niche_not_null(buf, subj, nx)
+                    parser::GroupBindPattern => return cg_emit_niche_not_null(buf, subj, nx)
                     _ => { }
                 }
             }
@@ -7302,6 +7338,7 @@ fn cg_emit_pat_test(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, 
                     parser::WildcardPattern => return cb(buf, "1")
                     parser::BindPattern => { var o = cb(buf, "("); o = cb(o, subj); return cb(o, " != 0)") }
                     parser::FieldPattern => { var o = cb(buf, "("); o = cb(o, subj); return cb(o, " != 0)") }
+                    parser::GroupBindPattern => { var o = cb(buf, "("); o = cb(o, subj); return cb(o, " != 0)") }
                     _ => { }
                 }
             }
@@ -7373,11 +7410,23 @@ fn emit_pat_binds(buf: []byte, pat: parser::Pattern, subj: str, indent: str): []
     }
 }
 
-// cg_emit_pat_binds — TOP-LEVEL pattern binds (handles an OPTIONAL subject — REBOOT_PLAN §202).
-// For an optional present pattern the inner value is `_s.value`: a bare `T as x` binds it
-// directly (any non-variant inner); a FIELD destructure reads fields off it directly; a variant
-// inner binds via the variant union. For a non-optional subject it delegates to emit_pat_binds.
-// (C: `cg_emit_pat_binds`.)
+/**
+ * cg_emit_pat_binds — emit the TOP-LEVEL bindings a pattern introduces, handling an OPTIONAL
+ * subject (REBOOT_PLAN §202). For a niche-encoded optional the present value IS `subj`, so a
+ * bind/group-bind names it directly; for a box-encoded (nullable-pointer) optional the present
+ * value is `(*(subj))`, so a bind/group-bind names the dereference. A §9.D group-bind `(A | B) as v`
+ * binds the WHOLE present union under `v` (its inner cases are then matched on that value), exactly
+ * mirroring a bare `T as v`. For a non-optional subject it delegates to `emit_pat_binds`. Mirrors the C twin.
+ *
+ * @param subj    the subject temp name (a niche value or nullable pointer when optional)
+ * @param subjT   the subject's resolved type
+ * @param pat     the arm pattern whose bindings are emitted
+ * @param indent  the leading whitespace for each emitted binding line
+ * @param prog    the codegen program (type/decl lookups)
+ * @param buf     the output byte buffer being appended to
+ * @return        `buf` with the binding declarations appended
+ * @throws        when an inner case key cannot be emitted
+ */
 fn cg_emit_pat_binds(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, subjT: checker::Type, indent: str): []byte | error {
     // AST descend (mirror cg_emit_pat_test): a case pattern over `Expr`/`TExpr` binds off `.kind`.
     match cg_kind_descend(prog, subjT, pat) {
@@ -7402,6 +7451,14 @@ fn cg_emit_pat_binds(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str,
                         }
                         return buf
                     }
+                    parser::GroupBindPattern as ngp => {
+                        var o = cb(buf, indent)
+                        o = cb(o, "auto ")
+                        o = cb_str(o, ngp.binding)
+                        o = cb(o, " = ")
+                        o = cb(o, subj)
+                        return cb(o, ";\n")
+                    }
                     _ => return buf
                 }
             }
@@ -7423,6 +7480,14 @@ fn cg_emit_pat_binds(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str,
                             return cb(o, "));\n")
                         }
                         return buf
+                    }
+                    parser::GroupBindPattern as bgp => {
+                        var o = cb(buf, indent)
+                        o = cb(o, "auto ")
+                        o = cb_str(o, bgp.binding)
+                        o = cb(o, " = (*(")
+                        o = cb(o, subj)
+                        return cb(o, "));\n")
                     }
                     _ => return buf
                 }
