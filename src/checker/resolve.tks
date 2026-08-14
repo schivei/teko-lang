@@ -1944,6 +1944,37 @@ fn named_type_is_null(nt: parser::NamedType): bool {
  * @param members  the resolved union members (source order)
  * @return         the members with any bare-null member collapsed to a single leading `Null`
  */
+/**
+ * union_dedup — drop `type_eq` DUPLICATE members from a union member list, keeping the FIRST of each
+ * (source order preserved). Unlike `union_collect` (which flattens nested `Variant`s and is used only by
+ * `type_join`), this does NOT flatten — a nested `(A | B)` member stays one member, preserving §9.D
+ * nested-group byte-identity. The §9.D `Type` retirement needs it: `@Type()` already carries the `Error`
+ * and `Null` cases, so an annotated `@Type() | error` / `@Type() | null` lists that case TWICE — once as
+ * the union's own member (`Named{"teko::checker::Error"}`) and once as the surface marker (`Error{}`),
+ * which `type_eq` now equates — and without this dedup both would reach codegen as two members mangling to
+ * the ONE backend tag (`TK_TAG_…_ERROR` / `_NULL`), a C enumerator redeclaration.
+ *
+ * @param members  the resolved union members (source order)
+ * @return         the members with `type_eq` duplicates removed, first occurrence kept
+ */
+fn union_dedup(members: []Type): []Type {
+    var out: []Type = teko::list::empty()
+    var i = 0
+    loop {
+        if i >= members.len { break }
+        var dup = false
+        var j = 0
+        loop {
+            if j >= out.len { break }
+            if type_eq(out[j], members[i]) { dup = true; break }
+            j++
+        }
+        if !dup { out = teko::list::push(out, members[i]) }
+        i++
+    }
+    out
+}
+
 fn union_normalize_null(members: []Type): []Type {
     var has_null = false
     var i = 0
@@ -2063,7 +2094,7 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): Type | erro
                 }
                 j++
             }
-            Variant { members = union_normalize_null(members) }
+            Variant { members = union_normalize_null(union_dedup(members)) }
         }
         // (W10a) FunctionType `(A, B): R` → Func { params; ret ; variadic = false }. The return MAY be `void`
         // (a function value can return nothing); params must be COMPLETE value types (void/ref

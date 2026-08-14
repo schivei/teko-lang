@@ -186,7 +186,11 @@ fn type_eq(a: Type, b: Type): bool {
         Byte => match b { Byte => true; _ => false }
         Char => match b { Char => true; _ => false }   // char == char only (distinct from byte / []byte)
         Str => match b { Str => true; _ => false }
-        Error => match b { Error => true; _ => false }   // native `error`
+        /* native `error` — the backend marker `Error{}` and a nominal reference to the checker's own
+           `type Error` (`Named{"teko::checker::Error"}`, the form `@Type()`'s `Error` member resolves to)
+           are the SAME element: a `@Type()` already carries the error case, so a surface `| error` unioned
+           onto it must DEDUPLICATE rather than emit a second tag (§9.D Type retirement). */
+        Error => match b { Error => true; Named as nb => nb.name == "teko::checker::Error"; _ => false }
         Void => match b { Void => true; _ => false }   // return-only marker
         // []T == []U iff elements equal (built-in unary former). A `teko::list::empty()` carries
         // the SENTINEL slice (its element is the `Void` marker; the C twin uses a NULL element
@@ -198,7 +202,7 @@ fn type_eq(a: Type, b: Type): bool {
             }
             _ => false
         }
-        Named as na => match b { Named as nb => na.name == nb.name; _ => false }
+        Named as na => match b { Named as nb => na.name == nb.name; Error => na.name == "teko::checker::Error"; Null => na.name == "teko::checker::Null"; _ => false }
         Variant as va => match b { Variant as vb => types_eq(va.members, vb.members); _ => false }
         Func as fa => match b {
             Func as fb => type_eq(fa.ret, fb.ret) && types_eq(fa.params, fb.params)
@@ -207,7 +211,11 @@ fn type_eq(a: Type, b: Type): bool {
         Ptr as pa => match b { Ptr as pb => ptr_inner_eq(pa.inner, pb.inner); _ => false }   // ptr<T> equal by pointed type (null inner = opaque ptr)
         Uptr => match b { Uptr => true; _ => false }   // (C7.1a) opaque, same-kind only
         Reference as ra => match b { Reference as rb => type_eq(ra.inner, rb.inner); _ => false }   // (MEM-1b) Ref<T> equal by referenced type (never null)
-        Null => match b { Null => true; _ => false }
+        /* the absence case — `Null{}` and the checker's own `type Null` (`Named{"teko::checker::Null"}`,
+           `@Type()`'s `Null` member) are the SAME element, so a surface `| null` DEDUPLICATES against it
+           (§9.D Type retirement). Matched here by `type_eq`; `from_is_bare_null` is deliberately NOT
+           widened, so a nominal `Named{…::Null}` member is never hoisted as a nullable-union marker. */
+        Null => match b { Null => true; Named as nb => nb.name == "teko::checker::Null"; _ => false }
     }
 }
 
