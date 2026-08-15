@@ -1213,6 +1213,12 @@ byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML a
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
+**✅ `encoding::toml` + `encoding::ini` ENTREGUES (`7695a869`).** TOML v1.0.0 (struct-tagged `TomlValue`) +
+INI (estilo `configparser`, cross-check Python). **`parse_manifest` (`src/build/manifest.tks`) trocado pra usar
+`teko::encoding::toml`** — validado por: (1) build 2-gen VERDE (gen2 lê `teko.tkp` com o parser novo), (2)
+exemplo `.tkp` construído verde com o compilador-parser-novo, (3) **fixpoint byte-idêntico**. Achado #4
+(colisão de tag cross-namespace) descoberto e contornado aqui. INI mantém `.tkt`; TOML sem `.tkt` (dogfood).
+
 **💡 TOML valida por DOGFOODING (ruling do dono 2026-08-15): os `.tkp` JÁ SÃO TOML.** Então a lane TOML
 **não gera `.tkt`** — o melhor teste é **trocar o leitor de projeto** (`parse_manifest` em `src/build/manifest.tks`,
 ~160 ln) pra usar `teko::encoding::toml::parse_toml` + mapear o `TomlValue` Table → struct `Manifest`, e deixar
