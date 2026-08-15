@@ -1,13 +1,17 @@
 /**
- * `teko::crypto::hash` (C1) — the SHA-2 hash family: SHA-256 and SHA-512, each with a
- * streaming `init`/`update`/`finalize` API AND a one-shot convenience wrapper. Per issue
- * #194 (C0+C1+C6): pure Teko, no OS dependency, testable via `.tkt` unit tests against the
- * FIPS 180-4 / NIST known-answer vectors.
+ * `teko::crypto::hash` (C1) — the crypto hash-primitive family, each with a streaming
+ * `init`/`update`/`finalize` API AND a one-shot convenience wrapper. Per issue #194 and the
+ * stdlib catalog §1.5 (`teko::crypto::hash`): pure Teko, no OS dependency, testable via
+ * `.tkt` unit tests against the FIPS 180-4 / FIPS 202 / RFC 7693 known-answer vectors.
  *
- * DEFERRED (reported, not silently dropped — M.3 honesty): SHA-3/Keccak, SHAKE128/256,
- * BLAKE2b/2s, and the `legacy` SHA-1/MD5 primitives that TEKO_ROADMAP_NET_CRYPTO.md §3
- * groups under the same C1 unit are NOT in this increment. This file ships SHA-256 + SHA-512
- * (the SHA-2 family) as a first gate-able slice; the remainder stays open under #194.
+ * FAMILIES SHIPPED:
+ *   - SHA-2: SHA-256 and SHA-512 (FIPS 180-4).
+ *   - SHA-3 / Keccak: SHA3-256, SHA3-512, and the SHAKE128/SHAKE256 extendable-output
+ *     functions (FIPS 202), all over the shared Keccak-f[1600] sponge.
+ *   - BLAKE2b (RFC 7693), parameterized output length plus a BLAKE2b-512 wrapper.
+ *   - LEGACY (interop only, `@deprecated`): MD5 (RFC 1321) and SHA-1 (FIPS 180-4). Both are
+ *     cryptographically broken and MUST NOT be used for new security work — they ship only so
+ *     callers can read legacy formats (M.3 honesty: labelled, not hidden).
  *
  * TOTAL, NO PANICS. Every function here operates on caller-supplied `[]byte` and always
  * succeeds — there is no host/entropy dependency and no malformed-input domain (any byte
@@ -16,9 +20,13 @@
  * well-defined under `TEKO_OVERFLOW_DEBUG` (roadmap open decision #4) — plain `+` would trip
  * the debug overflow guard on the very wraparound the algorithm requires.
  *
- * NO INDEX-ASSIGNMENT. The 8-word running state and the 64/80-word message schedule are
- * both rebuilt via `teko::list::push` each round rather than mutated in place, the same
- * discipline `teko::compress`'s CRC-32 table and `teko::crypto::ct_eq` already use.
+ * PUBLIC SURFACE IS `exp` (stdlib catalog §0 framing, forward-compatible with the §11
+ * self-`.tkh` split): the user-facing digest functions are `exp`; the block/permutation
+ * helpers are file-local private.
+ *
+ * NO INDEX-ASSIGNMENT. The running state words, the message schedules, and the Keccak lane
+ * array are all rebuilt via `teko::list::push` each round rather than mutated in place, the
+ * same discipline `teko::compress`'s CRC-32 table and `teko::crypto::ct_eq` already use.
  */
 
 /**
@@ -26,7 +34,7 @@
  * tail bytes (fewer than 64) and the total message length seen so far (needed by the
  * length-suffix padding at `finalize` time).
  */
-pub type Sha256State = struct {
+exp type Sha256State = struct {
     /** the eight 32-bit working words `h0..h7`, in order */
     h: []u32
     /** buffered input bytes not yet forming a complete 64-byte block */
@@ -39,7 +47,7 @@ pub type Sha256State = struct {
  * The 64-bit running state of an in-progress SHA-512 computation, plus the unprocessed
  * tail bytes (fewer than 128) and the total message length seen so far.
  */
-pub type Sha512State = struct {
+exp type Sha512State = struct {
     /** the eight 64-bit working words `h0..h7`, in order */
     h: []u64
     /** buffered input bytes not yet forming a complete 128-byte block */
@@ -115,7 +123,7 @@ const SHA256_K: []u32 = [
  *
  * @return  a fresh `Sha256State` ready to accept message bytes
  */
-pub fn sha256_init(): Sha256State {
+exp fn sha256_init(): Sha256State {
     Sha256State { h = SHA256_IV; pending = teko::list::empty(); total_len = 0 }
 }
 
@@ -299,7 +307,7 @@ fn bytes_slice(data: []byte, from: u64, to: u64): []byte {
  * @param data   the next chunk of message bytes
  * @return       the updated state after absorbing every complete block in `data`
  */
-pub fn sha256_update(state: Sha256State, data: []byte): Sha256State {
+exp fn sha256_update(state: Sha256State, data: []byte): Sha256State {
     var joined = bytes_concat(state.pending, data)
     var h = state.h
     var off: u64 = 0
@@ -347,7 +355,7 @@ fn sha2_pad(pending: []byte, total_len: u64, is_512: bool): []byte {
  * @param state  the state after every `sha256_update` call for this message
  * @return       the 32-byte SHA-256 digest
  */
-pub fn sha256_finalize(state: Sha256State): []byte {
+exp fn sha256_finalize(state: Sha256State): []byte {
     var padded = sha2_pad(state.pending, state.total_len, false)
     var h = state.h
     var off: u64 = 0
@@ -373,7 +381,7 @@ pub fn sha256_finalize(state: Sha256State): []byte {
  * @param data  the complete message to hash
  * @return      the 32-byte SHA-256 digest
  */
-pub fn sha256_of(data: []byte): []byte {
+exp fn sha256_of(data: []byte): []byte {
     sha256_finalize(sha256_update(sha256_init(), data))
 }
 
@@ -384,7 +392,7 @@ pub fn sha256_of(data: []byte): []byte {
  * @param data  the complete message to hash
  * @return      the SHA-256 digest of `data` as 64 lowercase hex characters
  */
-pub fn sha256_hex_of(data: []byte): str {
+exp fn sha256_hex_of(data: []byte): str {
     teko::crypto::to_hex(sha256_of(data))
 }
 
@@ -435,7 +443,7 @@ const SHA512_K: []u64 = [
  *
  * @return  a fresh `Sha512State` ready to accept message bytes
  */
-pub fn sha512_init(): Sha512State {
+exp fn sha512_init(): Sha512State {
     Sha512State { h = SHA512_IV; pending = teko::list::empty(); total_len = 0 }
 }
 
@@ -516,7 +524,7 @@ fn sha512_compress(h: []u64, block: []byte): []u64 {
  * @param data   the next chunk of message bytes
  * @return       the updated state after absorbing every complete block in `data`
  */
-pub fn sha512_update(state: Sha512State, data: []byte): Sha512State {
+exp fn sha512_update(state: Sha512State, data: []byte): Sha512State {
     var joined = bytes_concat(state.pending, data)
     var h = state.h
     var off: u64 = 0
@@ -537,7 +545,7 @@ pub fn sha512_update(state: Sha512State, data: []byte): Sha512State {
  * @param state  the state after every `sha512_update` call for this message
  * @return       the 64-byte SHA-512 digest
  */
-pub fn sha512_finalize(state: Sha512State): []byte {
+exp fn sha512_finalize(state: Sha512State): []byte {
     var padded = sha2_pad(state.pending, state.total_len, true)
     var h = state.h
     var off: u64 = 0
@@ -563,7 +571,7 @@ pub fn sha512_finalize(state: Sha512State): []byte {
  * @param data  the complete message to hash
  * @return      the 64-byte SHA-512 digest
  */
-pub fn sha512_of(data: []byte): []byte {
+exp fn sha512_of(data: []byte): []byte {
     sha512_finalize(sha512_update(sha512_init(), data))
 }
 
@@ -574,6 +582,1224 @@ pub fn sha512_of(data: []byte): []byte {
  * @param data  the complete message to hash
  * @return      the SHA-512 digest of `data` as 128 lowercase hex characters
  */
-pub fn sha512_hex_of(data: []byte): str {
+exp fn sha512_hex_of(data: []byte): str {
     teko::crypto::to_hex(sha512_of(data))
+}
+
+/**
+ * Left-rotate a 32-bit word by `count` bits — the `ROTL` primitive MD5 (RFC 1321) and SHA-1
+ * (FIPS 180-4) apply in every round. A rotation amount that is a multiple of 32 (including 0)
+ * returns `x` unchanged, avoiding the undefined `x >> 32` shift-by-width.
+ *
+ * @param x      the word to rotate
+ * @param count  the rotation amount in bits
+ * @return       `x` rotated left by `count` bits
+ */
+fn rotl32(x: u32, count: u32): u32 {
+    var c = count % 32
+    if c == 0 { return x }
+    (x << c) | (x >> (32 - c))
+}
+
+/**
+ * Left-rotate a 64-bit word by `count` bits — the `ROT` primitive the Keccak-f[1600]
+ * permutation (FIPS 202) applies in the rho step. A rotation amount that is a multiple of 64
+ * (including the rho offset 0 for lane (0,0)) returns `x` unchanged, avoiding the undefined
+ * `x >> 64` shift-by-width.
+ *
+ * @param x      the word to rotate
+ * @param count  the rotation amount in bits
+ * @return       `x` rotated left by `count` bits
+ */
+fn rotl64(x: u64, count: u32): u64 {
+    var c = count % 64
+    if c == 0 { return x }
+    (x << (c to u64)) | (x >> ((64 - c) to u64))
+}
+
+/**
+ * Reads a little-endian 32-bit word out of `block` at byte offset `off` (4 bytes,
+ * least-significant byte first) — the wire order MD5 (RFC 1321) mandates for its message words.
+ *
+ * @param block  the block being read
+ * @param off    the starting byte offset
+ * @return       the little-endian `u32` at `block[off..off+4)`
+ */
+fn le_u32_at(block: []byte, off: u64): u32 {
+    var b0 = block[off] to u32
+    var b1 = block[off + 1] to u32
+    var b2 = block[off + 2] to u32
+    var b3 = block[off + 3] to u32
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+/**
+ * Reads a little-endian 64-bit word out of `block` at byte offset `off` (8 bytes,
+ * least-significant byte first) — the wire order BLAKE2b (RFC 7693) and the Keccak sponge
+ * (FIPS 202) mandate for message/state words.
+ *
+ * @param block  the block being read
+ * @param off    the starting byte offset
+ * @return       the little-endian `u64` at `block[off..off+8)`
+ */
+fn le_u64_at(block: []byte, off: u64): u64 {
+    var lo = le_u32_at(block, off) to u64
+    var hi = le_u32_at(block, off + 4) to u64
+    lo | (hi << 32)
+}
+
+/**
+ * Appends the little-endian bytes of a 32-bit word to `buf` (least-significant byte first) —
+ * the inverse of `le_u32_at`, used to render the MD5 digest.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the word to append
+ * @return     `buf` with `x`'s four little-endian bytes appended
+ */
+fn push_le_u32(buf: []byte, x: u32): []byte {
+    var b = buf
+    b = teko::list::push(b, (x & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
+    b
+}
+
+/**
+ * Appends the little-endian bytes of a 64-bit word to `buf` (least-significant byte first) —
+ * the inverse of `le_u64_at`, used to render the MD5 length suffix and the BLAKE2b digest.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the word to append
+ * @return     `buf` with `x`'s eight little-endian bytes appended
+ */
+fn push_le_u64(buf: []byte, x: u64): []byte {
+    var b = buf
+    b = push_le_u32(b, (x & 0xFFFFFFFF) to u32)
+    b = push_le_u32(b, ((x >> 32) & 0xFFFFFFFF) to u32)
+    b
+}
+
+/**
+ * The 32-bit running state of an in-progress MD5 computation (RFC 1321), plus the unprocessed
+ * tail bytes (fewer than 64) and the total message length seen so far.
+ */
+exp type Md5State = struct {
+    /** the four 32-bit working words `a,b,c,d`, in order */
+    h: []u32
+    /** buffered input bytes not yet forming a complete 64-byte block */
+    pending: []byte
+    /** total message length processed so far, in bytes */
+    total_len: u64
+}
+
+/**
+ * MD5_IV — the four MD5 initial state words `A,B,C,D` (RFC 1321 §3.3), in little-endian
+ * word order. A module const lowered to global data — only ever read by index.
+ */
+const MD5_IV: []u32 = [
+    0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476
+]
+
+/**
+ * MD5_K — the 64 MD5 round constants `K(i) = floor(2^32 * abs(sin(i+1)))` (RFC 1321 §3.4),
+ * in round order. A module const lowered to global data — the compress loop indexes it directly.
+ */
+const MD5_K: []u32 = [
+    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
+    0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
+    0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+    0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
+    0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
+    0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
+]
+
+/**
+ * MD5_S — the 64 MD5 per-round left-rotation amounts (RFC 1321 §3.4), in round order. A module
+ * const lowered to global data — the compress loop indexes it directly.
+ */
+const MD5_S: []u32 = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+]
+
+/**
+ * Creates a fresh MD5 state (the RFC 1321 initial words, no buffered input, zero length) — the
+ * starting point for a streaming `md5_update`/`md5_finalize` sequence.
+ *
+ * @deprecated MD5 is cryptographically broken (practical collisions). Legacy interop only.
+ * @return  a fresh `Md5State` ready to accept message bytes
+ */
+exp fn md5_init(): Md5State {
+    Md5State { h = MD5_IV; pending = teko::list::empty(); total_len = 0 }
+}
+
+/**
+ * Selects the MD5 round function `F/G/H/I` and message-word index `g` for round `i` (RFC 1321
+ * §3.4) — returned packed as the low 32 bits (`f`) and the index in the high bits is instead
+ * returned via `md5_g` since Teko has no tuple; this returns only the mixed `f` word.
+ *
+ * @param i  the round number, 0..63
+ * @param b  working word `b`
+ * @param c  working word `c`
+ * @param d  working word `d`
+ * @return   the round function output `f` for round `i`
+ */
+fn md5_f(i: u64, b: u32, c: u32, d: u32): u32 {
+    if i < 16 { return (b & c) | ((~b) & d) }
+    if i < 32 { return (d & b) | ((~d) & c) }
+    if i < 48 { return b ^ c ^ d }
+    c ^ (b | (~d))
+}
+
+/**
+ * The message-word index `g` MD5 selects for round `i` (RFC 1321 §3.4).
+ *
+ * @param i  the round number, 0..63
+ * @return   the index into the 16-word message block for round `i`
+ */
+fn md5_g(i: u64): u64 {
+    if i < 16 { return i }
+    if i < 32 { return (5 * i + 1) % 16 }
+    if i < 48 { return (3 * i + 5) % 16 }
+    (7 * i) % 16
+}
+
+/**
+ * Compresses one 64-byte block into `h` (RFC 1321 §3.4) — 64 rounds over the 16 little-endian
+ * message words, then feeds the working variables back into `h` via modular addition.
+ *
+ * @param h      the four current state words `a,b,c,d`
+ * @param block  the 64-byte block to absorb
+ * @return       the updated four state words after this block
+ */
+fn md5_compress(h: []u32, block: []byte): []u32 {
+    var m: []u32 = teko::list::empty()
+    var j: u64 = 0
+    loop {
+        if j >= 16 { break }
+        m = teko::list::push(m, le_u32_at(block, j * 4))
+        j++
+    }
+    var a = h[0]
+    var b = h[1]
+    var c = h[2]
+    var d = h[3]
+    var i: u64 = 0
+    loop {
+        if i >= 64 { break }
+        var f = md5_f(i, b, c, d)
+        var g = md5_g(i)
+        f = teko::math::wrapping_add_u32(teko::math::wrapping_add_u32(f, a), teko::math::wrapping_add_u32(MD5_K[i], m[g]))
+        a = d
+        d = c
+        c = b
+        b = teko::math::wrapping_add_u32(b, rotl32(f, MD5_S[i]))
+        i++
+    }
+    var out: []u32 = teko::list::empty()
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[0], a))
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[1], b))
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[2], c))
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[3], d))
+    out
+}
+
+/**
+ * Feeds `data` into an in-progress MD5 computation: joins it with any buffered tail, compresses
+ * every complete 64-byte block, and buffers the shorter remainder for the next call.
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state after absorbing every complete block in `data`
+ */
+exp fn md5_update(state: Md5State, data: []byte): Md5State {
+    var joined = bytes_concat(state.pending, data)
+    var h = state.h
+    var off: u64 = 0
+    loop {
+        if joined.len - off < 64 { break }
+        h = md5_compress(h, bytes_slice(joined, off, off + 64))
+        off = off + 64
+    }
+    Md5State { h = h; pending = bytes_slice(joined, off, joined.len); total_len = state.total_len + data.len }
+}
+
+/**
+ * Builds the MD5 padding (RFC 1321 §3.1): a single `0x80` byte, zero bytes up to the length that
+ * leaves exactly 8 bytes free in a 64-byte block, then the message length in BITS as a
+ * little-endian 64-bit suffix.
+ *
+ * @param pending    the buffered tail bytes (fewer than one block)
+ * @param total_len  the total message length seen so far, in bytes
+ * @return           `pending` followed by the `0x80` marker, zero padding, and the length suffix
+ */
+fn md5_pad(pending: []byte, total_len: u64): []byte {
+    var out = pending
+    out = teko::list::push(out, 0x80 to byte)
+    loop {
+        if (out.len + 8) % 64 == 0 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    push_le_u64(out, total_len * 8)
+}
+
+/**
+ * Completes an MD5 computation: pads the buffered tail, compresses the final block(s), and
+ * renders the four state words as 16 little-endian bytes (the 128-bit digest).
+ *
+ * @param state  the state after every `md5_update` call for this message
+ * @return       the 16-byte MD5 digest
+ */
+exp fn md5_finalize(state: Md5State): []byte {
+    var padded = md5_pad(state.pending, state.total_len)
+    var h = state.h
+    var off: u64 = 0
+    loop {
+        if off >= padded.len { break }
+        h = md5_compress(h, bytes_slice(padded, off, off + 64))
+        off = off + 64
+    }
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= h.len { break }
+        out = push_le_u32(out, h[i])
+        i++
+    }
+    out
+}
+
+/**
+ * One-shot MD5 (RFC 1321): hashes the whole of `data` in a single call.
+ *
+ * @deprecated MD5 is cryptographically broken (practical collisions). Legacy interop only —
+ *             use `sha256_of` or `blake2b512_of` for new work.
+ * @param data  the complete message to hash
+ * @return      the 16-byte MD5 digest
+ */
+exp fn md5_of(data: []byte): []byte {
+    md5_finalize(md5_update(md5_init(), data))
+}
+
+/**
+ * `md5_of`, rendered as a lowercase hex string — the form every published MD5 vector uses.
+ *
+ * @deprecated MD5 is cryptographically broken (practical collisions). Legacy interop only.
+ * @param data  the complete message to hash
+ * @return      the MD5 digest of `data` as 32 lowercase hex characters
+ */
+exp fn md5_hex_of(data: []byte): str {
+    teko::crypto::to_hex(md5_of(data))
+}
+
+/**
+ * The 32-bit running state of an in-progress SHA-1 computation (FIPS 180-4), plus the
+ * unprocessed tail bytes (fewer than 64) and the total message length seen so far.
+ */
+exp type Sha1State = struct {
+    /** the five 32-bit working words `h0..h4`, in order */
+    h: []u32
+    /** buffered input bytes not yet forming a complete 64-byte block */
+    pending: []byte
+    /** total message length processed so far, in bytes */
+    total_len: u64
+}
+
+/**
+ * SHA1_IV — the five SHA-1 initial hash values `H(0)` (FIPS 180-4 §5.3.1). A module const
+ * lowered to global data — only ever read by index.
+ */
+const SHA1_IV: []u32 = [
+    0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0
+]
+
+/**
+ * Creates a fresh SHA-1 state (the FIPS 180-4 initial hash values, no buffered input, zero
+ * length) — the starting point for a streaming `sha1_update`/`sha1_finalize` sequence.
+ *
+ * @deprecated SHA-1 is cryptographically broken (practical collisions). Legacy interop only.
+ * @return  a fresh `Sha1State` ready to accept message bytes
+ */
+exp fn sha1_init(): Sha1State {
+    Sha1State { h = SHA1_IV; pending = teko::list::empty(); total_len = 0 }
+}
+
+/**
+ * The SHA-1 round function output `f` for round `t` (FIPS 180-4 §6.1.2).
+ *
+ * @param t  the round number, 0..79
+ * @param b  working word `b`
+ * @param c  working word `c`
+ * @param d  working word `d`
+ * @return   the round function output `f` for round `t`
+ */
+fn sha1_f(t: u64, b: u32, c: u32, d: u32): u32 {
+    if t < 20 { return (b & c) | ((~b) & d) }
+    if t < 40 { return b ^ c ^ d }
+    if t < 60 { return (b & c) | (b & d) | (c & d) }
+    b ^ c ^ d
+}
+
+/**
+ * The SHA-1 round constant `K(t)` for round `t` (FIPS 180-4 §4.2.1).
+ *
+ * @param t  the round number, 0..79
+ * @return   the round constant for round `t`
+ */
+fn sha1_k(t: u64): u32 {
+    if t < 20 { return 0x5a827999 }
+    if t < 40 { return 0x6ed9eba1 }
+    if t < 60 { return 0x8f1bbcdc }
+    0xca62c1d6
+}
+
+/**
+ * Compresses one 64-byte block into `h` (FIPS 180-4 §6.1.2) — builds the 80-word message
+ * schedule, runs the 80 compression rounds, then feeds the working variables back into `h`.
+ *
+ * @param h      the five current state words `h0..h4`
+ * @param block  the 64-byte block to absorb
+ * @return       the updated five state words after this block
+ */
+fn sha1_compress(h: []u32, block: []byte): []u32 {
+    var w: []u32 = teko::list::empty()
+    var t: u64 = 0
+    loop {
+        if t >= 16 { break }
+        w = teko::list::push(w, be_u32_at(block, t * 4))
+        t++
+    }
+    loop {
+        if t >= 80 { break }
+        w = teko::list::push(w, rotl32(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16], 1))
+        t++
+    }
+    var a = h[0]
+    var b = h[1]
+    var c = h[2]
+    var d = h[3]
+    var e = h[4]
+    var i: u64 = 0
+    loop {
+        if i >= 80 { break }
+        var f = sha1_f(i, b, c, d)
+        var temp = teko::math::wrapping_add_u32(teko::math::wrapping_add_u32(rotl32(a, 5), f), teko::math::wrapping_add_u32(teko::math::wrapping_add_u32(e, sha1_k(i)), w[i]))
+        e = d
+        d = c
+        c = rotl32(b, 30)
+        b = a
+        a = temp
+        i++
+    }
+    var out: []u32 = teko::list::empty()
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[0], a))
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[1], b))
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[2], c))
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[3], d))
+    out = teko::list::push(out, teko::math::wrapping_add_u32(h[4], e))
+    out
+}
+
+/**
+ * Feeds `data` into an in-progress SHA-1 computation: joins it with any buffered tail,
+ * compresses every complete 64-byte block, and buffers the shorter remainder.
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state after absorbing every complete block in `data`
+ */
+exp fn sha1_update(state: Sha1State, data: []byte): Sha1State {
+    var joined = bytes_concat(state.pending, data)
+    var h = state.h
+    var off: u64 = 0
+    loop {
+        if joined.len - off < 64 { break }
+        h = sha1_compress(h, bytes_slice(joined, off, off + 64))
+        off = off + 64
+    }
+    Sha1State { h = h; pending = bytes_slice(joined, off, joined.len); total_len = state.total_len + data.len }
+}
+
+/**
+ * Completes a SHA-1 computation: pads the buffered tail (the big-endian 64-bit length suffix
+ * SHA-1 shares with SHA-256, FIPS 180-4 §5.1.1), compresses the final block(s), and renders the
+ * five state words as 20 big-endian bytes (the 160-bit digest).
+ *
+ * @param state  the state after every `sha1_update` call for this message
+ * @return       the 20-byte SHA-1 digest
+ */
+exp fn sha1_finalize(state: Sha1State): []byte {
+    var padded = sha2_pad(state.pending, state.total_len, false)
+    var h = state.h
+    var off: u64 = 0
+    loop {
+        if off >= padded.len { break }
+        h = sha1_compress(h, bytes_slice(padded, off, off + 64))
+        off = off + 64
+    }
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= h.len { break }
+        out = push_be_u32(out, h[i])
+        i++
+    }
+    out
+}
+
+/**
+ * One-shot SHA-1 (FIPS 180-4): hashes the whole of `data` in a single call.
+ *
+ * @deprecated SHA-1 is cryptographically broken (practical collisions). Legacy interop only —
+ *             use `sha256_of` for new work.
+ * @param data  the complete message to hash
+ * @return      the 20-byte SHA-1 digest
+ */
+exp fn sha1_of(data: []byte): []byte {
+    sha1_finalize(sha1_update(sha1_init(), data))
+}
+
+/**
+ * `sha1_of`, rendered as a lowercase hex string — the form every published SHA-1 vector uses.
+ *
+ * @deprecated SHA-1 is cryptographically broken (practical collisions). Legacy interop only.
+ * @param data  the complete message to hash
+ * @return      the SHA-1 digest of `data` as 40 lowercase hex characters
+ */
+exp fn sha1_hex_of(data: []byte): str {
+    teko::crypto::to_hex(sha1_of(data))
+}
+
+/**
+ * The in-progress state of a Keccak sponge (FIPS 202): the 25-lane 1600-bit permutation state,
+ * the unabsorbed tail bytes (fewer than `rate`), the byte rate, and the domain-separation
+ * suffix that distinguishes SHA-3 (`0x06`) from SHAKE (`0x1f`).
+ */
+exp type KeccakState = struct {
+    /** the 25 64-bit lanes of the Keccak-f[1600] state, indexed `x + 5*y` */
+    lanes: []u64
+    /** buffered input bytes not yet forming a complete `rate`-byte block */
+    pending: []byte
+    /** the sponge rate in bytes (block size); `200 - rate` is the capacity in bytes */
+    rate: u64
+    /** the domain-separation suffix byte (`0x06` for SHA-3, `0x1f` for SHAKE) */
+    suffix: byte
+}
+
+/**
+ * KECCAK_RC — the 24 Keccak-f[1600] round constants for the iota step (FIPS 202 §3.2.5). A
+ * module const lowered to global data.
+ */
+const KECCAK_RC: []u64 = [
+    0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
+    0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+    0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+    0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
+    0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
+    0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008
+]
+
+/**
+ * KECCAK_RHO — the 25 Keccak-f[1600] rho rotation offsets (FIPS 202 §3.2.2), flattened by lane
+ * index `x + 5*y`. A module const lowered to global data.
+ */
+const KECCAK_RHO: []u32 = [
+    0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14
+]
+
+/**
+ * The theta step of Keccak-f[1600] (FIPS 202 §3.2.1): each lane is XORed with a parity fold of
+ * the two neighbouring columns.
+ *
+ * @param a  the 25-lane input state
+ * @return   the 25-lane state after theta
+ */
+fn keccak_theta(a: []u64): []u64 {
+    var c: []u64 = teko::list::empty()
+    var x: u64 = 0
+    loop {
+        if x >= 5 { break }
+        c = teko::list::push(c, a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20])
+        x++
+    }
+    var out: []u64 = teko::list::empty()
+    var idx: u64 = 0
+    loop {
+        if idx >= 25 { break }
+        var xx = idx % 5
+        var d = c[(xx + 4) % 5] ^ rotl64(c[(xx + 1) % 5], 1)
+        out = teko::list::push(out, a[idx] ^ d)
+        idx++
+    }
+    out
+}
+
+/**
+ * The combined rho + pi steps of Keccak-f[1600] (FIPS 202 §3.2.2–3.2.3): each lane is rotated
+ * by its rho offset then relocated to `(y, (2x+3y) mod 5)`.
+ *
+ * @param a  the 25-lane input state (after theta)
+ * @return   the 25-lane state after rho and pi
+ */
+fn keccak_rho_pi(a: []u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var y: u64 = 0
+    loop {
+        if y >= 5 { break }
+        var x: u64 = 0
+        loop {
+            if x >= 5 { break }
+            var srcx = (x + 3 * y) % 5
+            var sidx = srcx + 5 * x
+            out = teko::list::push(out, rotl64(a[sidx], KECCAK_RHO[sidx]))
+            x++
+        }
+        y++
+    }
+    out
+}
+
+/**
+ * The chi step of Keccak-f[1600] (FIPS 202 §3.2.4): a non-linear row-wise mix of each lane with
+ * the two lanes to its right in the same row.
+ *
+ * @param a  the 25-lane input state (after rho and pi)
+ * @return   the 25-lane state after chi
+ */
+fn keccak_chi(a: []u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var y: u64 = 0
+    loop {
+        if y >= 5 { break }
+        var x: u64 = 0
+        loop {
+            if x >= 5 { break }
+            var i0 = x + 5 * y
+            var i1 = ((x + 1) % 5) + 5 * y
+            var i2 = ((x + 2) % 5) + 5 * y
+            out = teko::list::push(out, a[i0] ^ ((~a[i1]) & a[i2]))
+            x++
+        }
+        y++
+    }
+    out
+}
+
+/**
+ * The iota step of Keccak-f[1600] (FIPS 202 §3.2.5): XOR the round constant into lane (0,0).
+ *
+ * @param a   the 25-lane input state (after chi)
+ * @param rc  the round constant for this round
+ * @return    the 25-lane state after iota
+ */
+fn keccak_iota(a: []u64, rc: u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 25 { break }
+        var v = a[i]
+        if i == 0 { v = v ^ rc }
+        out = teko::list::push(out, v)
+        i++
+    }
+    out
+}
+
+/**
+ * The full Keccak-f[1600] permutation (FIPS 202 §3.3): 24 rounds of theta, rho, pi, chi, iota.
+ *
+ * @param state  the 25-lane input state
+ * @return       the 25-lane permuted state
+ */
+fn keccak_f(state: []u64): []u64 {
+    var a = state
+    var r: u64 = 0
+    loop {
+        if r >= 24 { break }
+        a = keccak_theta(a)
+        a = keccak_rho_pi(a)
+        a = keccak_chi(a)
+        a = keccak_iota(a, KECCAK_RC[r])
+        r++
+    }
+    a
+}
+
+/**
+ * The all-zero 25-lane Keccak state — the sponge's initial value before any absorption.
+ *
+ * @return  a fresh 25-lane state of all zeros
+ */
+fn keccak_zero_state(): []u64 {
+    var s: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 25 { break }
+        s = teko::list::push(s, 0 to u64)
+        i++
+    }
+    s
+}
+
+/**
+ * XORs one `rate`-byte block (read as little-endian 64-bit lanes) into the first `rate/8` lanes
+ * of the sponge state — the absorption XOR of FIPS 202 §4.
+ *
+ * @param state  the current 25-lane state
+ * @param block  the byte buffer holding the block
+ * @param off    the offset of the block within `block`
+ * @param rate   the sponge rate in bytes
+ * @return       the 25-lane state with the block XORed into its rate lanes
+ */
+fn keccak_absorb_block(state: []u64, block: []byte, off: u64, rate: u64): []u64 {
+    var lanes = rate / 8
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 25 { break }
+        var v = state[i]
+        if i < lanes { v = v ^ le_u64_at(block, off + i * 8) }
+        out = teko::list::push(out, v)
+        i++
+    }
+    out
+}
+
+/**
+ * Builds the final `rate`-byte sponge block for the trailing `msg[off..]` bytes: the tail,
+ * the domain-separation suffix, zero padding, and the `0x80` high bit in the last byte — the
+ * `pad10*1` multi-rate padding of FIPS 202 §5.1 fused with the domain suffix.
+ *
+ * @param msg     the whole message
+ * @param off     the offset of the trailing partial block (a multiple of `rate`)
+ * @param rate    the sponge rate in bytes
+ * @param suffix  the domain-separation suffix byte
+ * @return        exactly `rate` bytes: the padded final block
+ */
+fn keccak_final_block(msg: []byte, off: u64, rate: u64, suffix: byte): []byte {
+    var out: []byte = teko::list::empty()
+    var i = off
+    loop {
+        if i >= msg.len { break }
+        out = teko::list::push(out, msg[i])
+        i++
+    }
+    out = teko::list::push(out, suffix)
+    loop {
+        if out.len % rate == 0 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    keccak_set_high_bit(out)
+}
+
+/**
+ * Returns `block` with the most-significant bit of its last byte set (`|= 0x80`) — the closing
+ * `1` bit of the Keccak `pad10*1` padding.
+ *
+ * @param block  the padded block
+ * @return       `block` with `0x80` ORed into its final byte
+ */
+fn keccak_set_high_bit(block: []byte): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= block.len { break }
+        var v = block[i]
+        if i == block.len - 1 { v = ((v to u32) | 0x80) to byte }
+        out = teko::list::push(out, v)
+        i++
+    }
+    out
+}
+
+/**
+ * Squeezes `out_len` output bytes from a saturated sponge (FIPS 202 §4): emit `rate` bytes of
+ * state, permute, repeat until `out_len` bytes are produced.
+ *
+ * @param state    the 25-lane state after the last absorption
+ * @param rate     the sponge rate in bytes
+ * @param out_len  the number of output bytes requested
+ * @return         exactly `out_len` output bytes
+ */
+fn keccak_squeeze(state: []u64, rate: u64, out_len: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var st = state
+    loop {
+        if out.len >= out_len { break }
+        var i: u64 = 0
+        loop {
+            if i >= rate { break }
+            if out.len >= out_len { break }
+            var lane = st[i / 8]
+            var shift = (i % 8) * 8
+            out = teko::list::push(out, ((lane >> shift) & 0xFF) to byte)
+            i++
+        }
+        if out.len >= out_len { break }
+        st = keccak_f(st)
+    }
+    out
+}
+
+/**
+ * Creates a fresh Keccak sponge state for the given rate and domain suffix — the low-level
+ * starting point behind `sha3_256_init`/`shake128_init`.
+ *
+ * @param rate    the sponge rate in bytes (`136` SHA3-256, `72` SHA3-512, `168` SHAKE128)
+ * @param suffix  the domain-separation suffix (`0x06` SHA-3, `0x1f` SHAKE)
+ * @return        a fresh `KeccakState`
+ */
+exp fn keccak_init(rate: u64, suffix: byte): KeccakState {
+    KeccakState { lanes = keccak_zero_state(); pending = teko::list::empty(); rate = rate; suffix = suffix }
+}
+
+/**
+ * Feeds `data` into an in-progress Keccak sponge: joins it with any buffered tail, absorbs every
+ * complete `rate`-byte block, and buffers the shorter remainder.
+ *
+ * @param state  the sponge state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated sponge state
+ */
+exp fn keccak_update(state: KeccakState, data: []byte): KeccakState {
+    var joined = bytes_concat(state.pending, data)
+    var lanes = state.lanes
+    var off: u64 = 0
+    loop {
+        if joined.len - off < state.rate { break }
+        lanes = keccak_f(keccak_absorb_block(lanes, joined, off, state.rate))
+        off = off + state.rate
+    }
+    KeccakState { lanes = lanes; pending = bytes_slice(joined, off, joined.len); rate = state.rate; suffix = state.suffix }
+}
+
+/**
+ * Completes a Keccak computation: pads and absorbs the buffered tail as the final block, then
+ * squeezes `out_len` output bytes.
+ *
+ * @param state    the sponge state after every `keccak_update` call
+ * @param out_len  the number of output bytes requested (32 SHA3-256, 64 SHA3-512, any for SHAKE)
+ * @return         exactly `out_len` output bytes
+ */
+exp fn keccak_finalize(state: KeccakState, out_len: u64): []byte {
+    var fb = keccak_final_block(state.pending, 0, state.rate, state.suffix)
+    var lanes = keccak_f(keccak_absorb_block(state.lanes, fb, 0, state.rate))
+    keccak_squeeze(lanes, state.rate, out_len)
+}
+
+/**
+ * Creates a fresh SHA3-256 sponge (rate 136, suffix `0x06`) for streaming.
+ *
+ * @return  a `KeccakState` configured for SHA3-256
+ */
+exp fn sha3_256_init(): KeccakState {
+    keccak_init(136, 0x06 to byte)
+}
+
+/**
+ * One-shot SHA3-256 (FIPS 202): the 32-byte SHA3-256 digest of `data`.
+ *
+ * @param data  the complete message to hash
+ * @return      the 32-byte SHA3-256 digest
+ */
+exp fn sha3_256_of(data: []byte): []byte {
+    keccak_finalize(keccak_update(sha3_256_init(), data), 32)
+}
+
+/**
+ * `sha3_256_of`, rendered as a lowercase hex string.
+ *
+ * @param data  the complete message to hash
+ * @return      the SHA3-256 digest of `data` as 64 lowercase hex characters
+ */
+exp fn sha3_256_hex_of(data: []byte): str {
+    teko::crypto::to_hex(sha3_256_of(data))
+}
+
+/**
+ * Creates a fresh SHA3-512 sponge (rate 72, suffix `0x06`) for streaming.
+ *
+ * @return  a `KeccakState` configured for SHA3-512
+ */
+exp fn sha3_512_init(): KeccakState {
+    keccak_init(72, 0x06 to byte)
+}
+
+/**
+ * One-shot SHA3-512 (FIPS 202): the 64-byte SHA3-512 digest of `data`.
+ *
+ * @param data  the complete message to hash
+ * @return      the 64-byte SHA3-512 digest
+ */
+exp fn sha3_512_of(data: []byte): []byte {
+    keccak_finalize(keccak_update(sha3_512_init(), data), 64)
+}
+
+/**
+ * `sha3_512_of`, rendered as a lowercase hex string.
+ *
+ * @param data  the complete message to hash
+ * @return      the SHA3-512 digest of `data` as 128 lowercase hex characters
+ */
+exp fn sha3_512_hex_of(data: []byte): str {
+    teko::crypto::to_hex(sha3_512_of(data))
+}
+
+/**
+ * Creates a fresh SHAKE128 sponge (rate 168, suffix `0x1f`) for streaming.
+ *
+ * @return  a `KeccakState` configured for SHAKE128
+ */
+exp fn shake128_init(): KeccakState {
+    keccak_init(168, 0x1f to byte)
+}
+
+/**
+ * One-shot SHAKE128 (FIPS 202) — the extendable-output function: produces `out_len` output
+ * bytes for `data`.
+ *
+ * @param data     the complete message to hash
+ * @param out_len  the number of output bytes requested
+ * @return         exactly `out_len` SHAKE128 output bytes
+ */
+exp fn shake128_of(data: []byte, out_len: u64): []byte {
+    keccak_finalize(keccak_update(shake128_init(), data), out_len)
+}
+
+/**
+ * Creates a fresh SHAKE256 sponge (rate 136, suffix `0x1f`) for streaming.
+ *
+ * @return  a `KeccakState` configured for SHAKE256
+ */
+exp fn shake256_init(): KeccakState {
+    keccak_init(136, 0x1f to byte)
+}
+
+/**
+ * One-shot SHAKE256 (FIPS 202) — the extendable-output function: produces `out_len` output
+ * bytes for `data`.
+ *
+ * @param data     the complete message to hash
+ * @param out_len  the number of output bytes requested
+ * @return         exactly `out_len` SHAKE256 output bytes
+ */
+exp fn shake256_of(data: []byte, out_len: u64): []byte {
+    keccak_finalize(keccak_update(shake256_init(), data), out_len)
+}
+
+/**
+ * The in-progress state of a BLAKE2b computation (RFC 7693): the eight 64-bit chaining words,
+ * the unprocessed tail (up to 128 bytes — the final block is deferred so it can be flagged
+ * `last`), the count of bytes already compressed, and the requested digest length.
+ */
+exp type Blake2bState = struct {
+    /** the eight 64-bit chaining words `h0..h7` */
+    h: []u64
+    /** buffered input bytes not yet compressed (the final ≤128-byte block is held back) */
+    pending: []byte
+    /** count of message bytes already fed to `blake2b_compress` (the `t` counter base) */
+    compressed: u64
+    /** the requested digest length in bytes (1..64) */
+    out_len: u64
+}
+
+/**
+ * BLAKE2B_SIGMA — the 12 message-word permutations of BLAKE2b (RFC 7693 §2.7), flattened to 192
+ * entries (12 rounds x 16 indices). A module const lowered to global data.
+ */
+const BLAKE2B_SIGMA: []u64 = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3,
+    11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4,
+    7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8,
+    9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13,
+    2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9,
+    12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11,
+    13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10,
+    6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5,
+    10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3
+]
+
+/**
+ * Returns `v` with its four lanes at `ia`/`ib`/`ic`/`id` replaced by `na`/`nb`/`nc`/`nd` — the
+ * functional (no index-assignment) equivalent of writing back the four working words a G mix
+ * updates.
+ *
+ * @param v   the 16-lane working vector
+ * @param ia  index of the first lane to replace
+ * @param na  new value for lane `ia`
+ * @param ib  index of the second lane to replace
+ * @param nb  new value for lane `ib`
+ * @param ic  index of the third lane to replace
+ * @param nc  new value for lane `ic`
+ * @param id  index of the fourth lane to replace
+ * @param nd  new value for lane `id`
+ * @return    a fresh 16-lane vector with the four lanes replaced
+ */
+fn blake2b_set4(v: []u64, ia: u64, na: u64, ib: u64, nb: u64, ic: u64, nc: u64, id: u64, nd: u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= v.len { break }
+        var val = v[i]
+        if i == ia { val = na }
+        if i == ib { val = nb }
+        if i == ic { val = nc }
+        if i == id { val = nd }
+        out = teko::list::push(out, val)
+        i++
+    }
+    out
+}
+
+/**
+ * The BLAKE2b G mixing function (RFC 7693 §3.1) applied to the four working lanes
+ * `a`/`b`/`c`/`d` of `v` with message words `x` and `y`.
+ *
+ * @param v  the 16-lane working vector
+ * @param a  index of working lane `a`
+ * @param b  index of working lane `b`
+ * @param c  index of working lane `c`
+ * @param d  index of working lane `d`
+ * @param x  the first message word for this mix
+ * @param y  the second message word for this mix
+ * @return   a fresh 16-lane vector after the G mix
+ */
+fn blake2b_g(v: []u64, a: u64, b: u64, c: u64, d: u64, x: u64, y: u64): []u64 {
+    var va = v[a]
+    var vb = v[b]
+    var vc = v[c]
+    var vd = v[d]
+    va = teko::math::wrapping_add_u64(teko::math::wrapping_add_u64(va, vb), x)
+    vd = rotr64(vd ^ va, 32)
+    vc = teko::math::wrapping_add_u64(vc, vd)
+    vb = rotr64(vb ^ vc, 24)
+    va = teko::math::wrapping_add_u64(teko::math::wrapping_add_u64(va, vb), y)
+    vd = rotr64(vd ^ va, 16)
+    vc = teko::math::wrapping_add_u64(vc, vd)
+    vb = rotr64(vb ^ vc, 63)
+    blake2b_set4(v, a, va, b, vb, c, vc, d, vd)
+}
+
+/**
+ * Builds the 16-lane BLAKE2b working vector `v` from the chaining state and the byte counter,
+ * XORing the low/high counter halves into `v[12]`/`v[13]` and, for the final block, the
+ * inversion mask into `v[14]` (RFC 7693 §3.2). BLAKE2b reuses the SHA-512 IV as its own IV.
+ *
+ * @param h     the eight chaining words
+ * @param t0    the low 64 bits of the byte counter
+ * @param t1    the high 64 bits of the byte counter
+ * @param last  true for the final block (applies the `f0` inversion to `v[14]`)
+ * @return      the initialized 16-lane working vector
+ */
+fn blake2b_init_v(h: []u64, t0: u64, t1: u64, last: bool): []u64 {
+    var v: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        v = teko::list::push(v, h[i])
+        i++
+    }
+    v = teko::list::push(v, SHA512_IV[0])
+    v = teko::list::push(v, SHA512_IV[1])
+    v = teko::list::push(v, SHA512_IV[2])
+    v = teko::list::push(v, SHA512_IV[3])
+    v = teko::list::push(v, SHA512_IV[4] ^ t0)
+    v = teko::list::push(v, SHA512_IV[5] ^ t1)
+    var mask = if last { ~(0 to u64) } else { 0 to u64 }
+    v = teko::list::push(v, SHA512_IV[6] ^ mask)
+    v = teko::list::push(v, SHA512_IV[7])
+    v
+}
+
+/**
+ * Compresses one 128-byte block into the chaining state (RFC 7693 §3.2): 12 rounds of eight G
+ * mixes over the 16 little-endian message words, then folds the working vector back into `h`.
+ *
+ * @param h      the eight current chaining words
+ * @param block  the 128-byte block to absorb
+ * @param t0     the low 64 bits of the byte counter after this block
+ * @param t1     the high 64 bits of the byte counter after this block
+ * @param last   true for the final block
+ * @return       the updated eight chaining words after this block
+ */
+fn blake2b_compress(h: []u64, block: []byte, t0: u64, t1: u64, last: bool): []u64 {
+    var m: []u64 = teko::list::empty()
+    var j: u64 = 0
+    loop {
+        if j >= 16 { break }
+        m = teko::list::push(m, le_u64_at(block, j * 8))
+        j++
+    }
+    var v = blake2b_init_v(h, t0, t1, last)
+    var r: u64 = 0
+    loop {
+        if r >= 12 { break }
+        var s = r * 16
+        v = blake2b_g(v, 0, 4, 8, 12, m[BLAKE2B_SIGMA[s]], m[BLAKE2B_SIGMA[s + 1]])
+        v = blake2b_g(v, 1, 5, 9, 13, m[BLAKE2B_SIGMA[s + 2]], m[BLAKE2B_SIGMA[s + 3]])
+        v = blake2b_g(v, 2, 6, 10, 14, m[BLAKE2B_SIGMA[s + 4]], m[BLAKE2B_SIGMA[s + 5]])
+        v = blake2b_g(v, 3, 7, 11, 15, m[BLAKE2B_SIGMA[s + 6]], m[BLAKE2B_SIGMA[s + 7]])
+        v = blake2b_g(v, 0, 5, 10, 15, m[BLAKE2B_SIGMA[s + 8]], m[BLAKE2B_SIGMA[s + 9]])
+        v = blake2b_g(v, 1, 6, 11, 12, m[BLAKE2B_SIGMA[s + 10]], m[BLAKE2B_SIGMA[s + 11]])
+        v = blake2b_g(v, 2, 7, 8, 13, m[BLAKE2B_SIGMA[s + 12]], m[BLAKE2B_SIGMA[s + 13]])
+        v = blake2b_g(v, 3, 4, 9, 14, m[BLAKE2B_SIGMA[s + 14]], m[BLAKE2B_SIGMA[s + 15]])
+        r++
+    }
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        out = teko::list::push(out, h[i] ^ v[i] ^ v[i + 8])
+        i++
+    }
+    out
+}
+
+/**
+ * Builds the BLAKE2b initial chaining state for an unkeyed digest of `out_len` bytes: the IV
+ * with the parameter block (digest length, key length 0, fanout 1, depth 1) XORed into `h[0]`
+ * (RFC 7693 §2.5).
+ *
+ * @param out_len  the requested digest length in bytes (1..64)
+ * @return         the eight initial chaining words
+ */
+fn blake2b_init_h(out_len: u64): []u64 {
+    var h: []u64 = teko::list::empty()
+    var param0 = (0x01010000 to u64) ^ out_len
+    h = teko::list::push(h, SHA512_IV[0] ^ param0)
+    var i: u64 = 1
+    loop {
+        if i >= 8 { break }
+        h = teko::list::push(h, SHA512_IV[i])
+        i++
+    }
+    h
+}
+
+/**
+ * Copies `remaining` bytes from `data[off..]` into a fresh 128-byte block, zero-padded — the
+ * BLAKE2b final-block shape (the message tail is zero-extended to a full block; the length lives
+ * in the `t` counter, not in the padding).
+ *
+ * @param data       the whole message
+ * @param off        the offset of the trailing tail
+ * @param remaining  the number of tail bytes (0..128)
+ * @return           a 128-byte block: the tail followed by zeros
+ */
+fn blake2b_pad_block(data: []byte, off: u64, remaining: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= remaining { break }
+        out = teko::list::push(out, data[off + i])
+        i++
+    }
+    loop {
+        if out.len >= 128 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    out
+}
+
+/**
+ * Creates a fresh BLAKE2b state for an unkeyed digest of `out_len` bytes — the starting point
+ * for a streaming `blake2b_update`/`blake2b_finalize` sequence.
+ *
+ * @param out_len  the requested digest length in bytes (1..64)
+ * @return         a fresh `Blake2bState`
+ */
+exp fn blake2b_init(out_len: u64): Blake2bState {
+    Blake2bState { h = blake2b_init_h(out_len); pending = teko::list::empty(); compressed = 0; out_len = out_len }
+}
+
+/**
+ * Feeds `data` into an in-progress BLAKE2b computation: joins it with any buffered tail and
+ * compresses every block that is provably NOT the last (BLAKE2b must flag the final block, so at
+ * least one byte is always held back), buffering the remainder.
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state
+ */
+exp fn blake2b_update(state: Blake2bState, data: []byte): Blake2bState {
+    var joined = bytes_concat(state.pending, data)
+    var h = state.h
+    var compressed = state.compressed
+    var off: u64 = 0
+    loop {
+        if joined.len - off <= 128 { break }
+        compressed = compressed + 128
+        h = blake2b_compress(h, bytes_slice(joined, off, off + 128), compressed, 0, false)
+        off = off + 128
+    }
+    Blake2bState { h = h; pending = bytes_slice(joined, off, joined.len); compressed = compressed; out_len = state.out_len }
+}
+
+/**
+ * Completes a BLAKE2b computation: compresses the buffered tail as the final block (flagged
+ * `last`, with the full byte count in the `t` counter) and renders the chaining words as
+ * `out_len` little-endian bytes.
+ *
+ * @param state  the state after every `blake2b_update` call for this message
+ * @return       the `out_len`-byte BLAKE2b digest
+ */
+exp fn blake2b_finalize(state: Blake2bState): []byte {
+    var total = state.compressed + state.pending.len
+    var fblock = blake2b_pad_block(state.pending, 0, state.pending.len)
+    var h = blake2b_compress(state.h, fblock, total, 0, true)
+    var full: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        full = push_le_u64(full, h[i])
+        i++
+    }
+    bytes_slice(full, 0, state.out_len)
+}
+
+/**
+ * One-shot BLAKE2b (RFC 7693) with a caller-chosen digest length: hashes the whole of `data`.
+ *
+ * @param data     the complete message to hash
+ * @param out_len  the requested digest length in bytes (1..64)
+ * @return         the `out_len`-byte BLAKE2b digest
+ */
+exp fn blake2b_of(data: []byte, out_len: u64): []byte {
+    blake2b_finalize(blake2b_update(blake2b_init(out_len), data))
+}
+
+/**
+ * One-shot BLAKE2b-512 (RFC 7693): the full 64-byte BLAKE2b digest of `data`.
+ *
+ * @param data  the complete message to hash
+ * @return      the 64-byte BLAKE2b-512 digest
+ */
+exp fn blake2b512_of(data: []byte): []byte {
+    blake2b_of(data, 64)
+}
+
+/**
+ * `blake2b512_of`, rendered as a lowercase hex string — the form the RFC 7693 vectors use.
+ *
+ * @param data  the complete message to hash
+ * @return      the BLAKE2b-512 digest of `data` as 128 lowercase hex characters
+ */
+exp fn blake2b512_hex_of(data: []byte): str {
+    teko::crypto::to_hex(blake2b512_of(data))
 }
