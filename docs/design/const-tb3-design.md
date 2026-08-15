@@ -15,10 +15,10 @@ LIR, honest-stop `honest_data_reloc` em `encode_rodata`; ELF `ElfObject.rodata_r
 > writers Mach-O (arm64) e COFF (x86-64) a CAPACIDADE de emitir uma relocation cujo
 > campo relocado fica DENTRO de `__const`/`.rdata` (um ponteiro data→data de um const
 > Tier-B). **Nenhum produtor a exercita ainda** — o honest-stop de T-B1 em
-> `encode_rodata` permanece e só abre em T-B5 (quando a cadeia encoder→writer→interpretador
+> `encode_rodata` permanece e só abre em T-B5 (quando a cadeia encoder→writer→motor legado
 > estiver completa). Como hoje toda relocation que chega aos writers é `sect == Text`,
 > a partição rodata é sempre vazia, o objeto é **byte-idêntico** e todos os
-> goldens/fixpoint ficam intactos. **encode_*/wasm/interpretador intocados; honest-stop
+> goldens/fixpoint ficam intactos. **encode_*/wasm/motor legado intocados; honest-stop
 > permanece; sem seed bump** (o 🔑 SEED BUMP #3 é depois de T-B5, plano §8).
 
 ---
@@ -646,7 +646,7 @@ O **fixpoint gen1==gen2** + ambas as engines são a prova viva final. **QED.**
 
 Todas constroem `EncodedModule`/`EncodedModuleX86` À MÃO e chamam o `pub fn`
 `emit_macho`/`emit_coff` diretamente — o precedente de `co_abs64_module` e das
-fixtures ELF T-B2. Rodam idênticas no interpretador e no harness nativo. Offsets computados
+fixtures ELF T-B2. Rodam idênticas no motor legado e no harness nativo. Offsets computados
 abaixo; o implementer os confirma na 1ª run verde e os fixa (como as fixtures ELF/
 Mach-O existentes).
 
@@ -813,10 +813,10 @@ o arquivo compila a cada passo.
 | E6 | `src/backend/objfile_coff.tks` | `emit_coff_sections` `.rdata` reloc-ptr condicional; `emit_coff` costura (partição + `coff_build_relocs` reusada + 2ª tabela + fold de dados) (§2.3) | **todos** os goldens COFF byte-idênticos (`parts.rdata` vazia) |
 | E7 | `objfile_macho_test.tkt` + `objfile_coff_test.tkt` | fixtures §4 (mo_rodata_ptr + colapso; co_rodata_ptr + colapso; unitárias §4.5) | os próprios testes novos (verde) |
 
-> Writers ELF/wasm e o interpretador **NÃO são tocados** em T-B3 (ELF é T-B2, wasm T-B4, interpretador
+> Writers ELF/wasm e o motor legado **NÃO são tocados** em T-B3 (ELF é T-B2, wasm T-B4, motor legado
 > T-B5). `encode_*.tks` só muda em `minst.tks` (o enum `MRelocKind` + o arm de nome) —
 > o honest-stop `encode_rodata` de T-B1 **permanece** intocado. Sem edição de
-> `lower.tks`/`lir_interp.tks`.
+> `lower.tks`/`lir_oracle.tks`.
 
 **Ritual points:**
 
@@ -824,8 +824,8 @@ o arquivo compila a cada passo.
 - **RITUAL POINT — fim de T-B3:** gate COMPLETO — todos os goldens de backend
   byte-idênticos (`objfile_macho_test.tkt`, `objfile_coff_test.tkt`,
   `objfile_elf_test.tkt`, um backend ELF writer, `encode_*_test.tkt`,
-  `minst_test.tkt`, `lower_test.tkt`, `lir_interp_test.tkt`, `tkb_test.tkt`) +
-  **fixpoint gen1==gen2** + ambas as engines (interpretador + nativo) + 100% de cobertura do
+  `minst_test.tkt`, `lower_test.tkt`, `lir_oracle_test.tkt`, `tkb_test.tkt`) +
+  **fixpoint gen1==gen2** + ambas as engines (motor legado + nativo) + 100% de cobertura do
   delta (as fixtures §4.1/§4.3 cobrem o braço rodata-reloc; §4.2/§4.4 o colapso; §4.5
   os helpers/arms novos; os goldens existentes o braço `parts.rodata` vazia). **Sem
   seed bump** — T-B3 não adiciona capacidade que o corpus use (o 🔑 SEED BUMP #3 é
@@ -891,9 +891,9 @@ implementer):
 - **Popular a partição `rodata`/`rdata`** a partir de um const Tier-B real: o
   `encode_rodata` deixar de honest-stopar e produzir `Reloc`/`RelocX86` com
   `sect=Rodata` (offset `__const`/`.rdata`-relativo, kind `Abs64`) a partir de
-  `LRodata.relocs`. Isso é o crumb que fecha a cadeia (junto com T-B4 wasm + T-B5 interpretador);
+  `LRodata.relocs`. Isso é o crumb que fecha a cadeia (junto com T-B4 wasm + T-B5 motor legado);
   só então `parts.rodata` é não-vazia em compilação real. Até lá, o caminho `__const`/
   `.rdata` reloc só é exercitado pelas fixtures §4.
-- **T-B4 (wasm)** e **T-B5 (interpretador)** completam a cadeia; o 🔑 SEED BUMP #3 (depois de
+- **T-B4 (wasm)** e **T-B5 (motor legado)** completam a cadeia; o 🔑 SEED BUMP #3 (depois de
   T-B5) libera T-B6 (migrar os ABI descriptors). Nada disso bloqueia T-B3 — os dois
   writers estão prontos.

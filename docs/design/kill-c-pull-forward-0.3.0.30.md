@@ -1,6 +1,6 @@
 # Kill-C PULL-FORWARD into 0.3.0.30 — own-backend maturity inventory + FFI own-native validation
 
-> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+> **[NOTA]** — este documento descreve oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (#524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
 
 > **Status:** DESIGN-AHEAD, doc-only. **NOT implemented — the owner ratifies before code.** Addendum to
 > `docs/design/star-ref-and-ffi-0.3.1.md`. **Owner standing rule:** *everything that can be pulled
@@ -30,7 +30,7 @@
 > `src/lir/lir.tks`, `` (32 honest-stops, dominated by the
 > `B1-fp` float family + i128), `src/backend/encode_*`, `objfile_{elf,macho,coff}.tks`,
 > `src/codegen/codegen.tks` (`cb_fn_name` the `__` mangle; `f.c_symbol` extern no-mangle at :7515),
-> the IMPORT convention `docs/design/drain-fase3-stdlib-order.md:127/136/146` + the interpreter-retirement decision
+> the IMPORT convention `docs/design/drain-fase3-stdlib-order.md:127/136/146` + the native-only consolidation decision
 > (`extern fn … = "SYM" from "lib"`), `src/build/regression.tks` + `docs/design/tkr-regression-format.md`,
 > `teko.tkp` `[tests]`/`[platforms]`.
 
@@ -47,7 +47,7 @@ The own AOT backend is **mature in its BOTTOM half, immature in its TOP half:**
 | **encode** | `` | mature, tested (~80 KB each); full integer/mem/control instruction set. |
 | **regalloc** | `` | present, tested. |
 | **objfile** | `objfile_{elf,macho,coff}.tks`, um backend ELF writer | emit **relocatable objects** with undef symbols + relocations; needs completion to the **whole-program** section/symbol/reloc set + **`.a` archive** emission. Final link is the **system `ld`**; the own **E1 linker** (`objfile_elf.tks:383`) is a LATER *link-independence* epic, **NOT a kill-C prerequisite** (§4). |
-| **oracle** | `lir_interp.tks`, `minst_interp.tks` | interpret the covered subset, **mirroring the C backend's honest-stops** — how the native path is validated **without producing binaries** today. |
+| **oracle** | `lir_oracle.tks`, `minst_oracle.tks` | run the covered subset, **mirroring the C backend's honest-stops** — how the native path is validated **without producing binaries** today. |
 
 **The 60 `lower.tks` honest-stops, categorized:**
 
@@ -78,7 +78,7 @@ float/i128 isel** (own-native, no external dep). Objfile emission must complete 
 
 | item | verdict | detail |
 |---|---|---|
-| integer comparisons; bitwise/shift; `~`; remainder | **PODE .30** | LIR/isel/encode/interp ready — `lower.tks` completion |
+| integer comparisons; bitwise/shift; `~`; remainder | **PODE .30** | LIR/isel/encode/oracle ready — `lower.tks` completion |
 | fat-pointer (str/slice) ABI + lowering | **PODE .30** | pin the fat ABI once |
 | struct/field/index; match; if-value; destructuring; integer interpolation | **PODE .30** | mem ops / variant repr known |
 | **float family** (+ float interpolation/match) | **DEP DURA (own-native)** | X = own-backend float isel (`B1-fp`) + FPR regalloc/spill — no external dep; residual SW13 |
@@ -119,7 +119,7 @@ float/i128 isel** (own-native, no external dep). Objfile emission must complete 
 ## 3. The .30 pull-forward crumb sequence
 
 Each is own-native, additive, seed-safe, riding **GATE-G + fixpoint gen1==gen2**; lowering crumbs are
-validated by the **interp oracle** + backend unit tests.
+validated by the **oracle** + backend unit tests.
 
 | crumb | size | closes | notes |
 |---|---|---|---|
@@ -135,7 +135,7 @@ validated by the **interp oracle** + backend unit tests.
 | **KP10** **`cabi` callback** + **`exp fn` C-ABI export** (explicit `= "SYM"` or flattened canonical, §5.2.1) + FFI-safe gate | M | FFI G3 / reverse-FFI | objfile GLOBAL/FUNC; NO `#[export]` |
 | **KP11** **`emit_c_header` `.h`** (prototypes + `#define` consts; close G5) | M | reverse-FFI | pure text |
 | **KP12** **macro resolver** Tier 0 + Tier 2 + Tier 3 honest-error | L | FFI macros | Tier 1 link via system `ld` |
-| **KP13** **vararg ABI rule set** (SysV/AAPCS64/Win64) + interp | M | FFI KC1 | native call via system `ld` |
+| **KP13** **vararg ABI rule set** (SysV/AAPCS64/Win64) + oracle | M | FFI KC1 | native call via system `ld` |
 | **KP14** **`#cconv` + `teko::ffi::errno()`** | S–M | FFI G4 | common cconv cases |
 | **KP15** **`teko_rt_init/shutdown`** + panic-not-into-C | S | reverse-FFI | own-native |
 | **KP16** complete whole-program **`.o`** + **`.a` archive** writer | L | §2(b) | the kill-C substrate |
@@ -224,7 +224,7 @@ explicit `= "SYM"` (import-symmetric) **or** flattened canonical default, §5.2.
 **The owner's steer:** for IMPORT (FFI-in) the convention is already ratified — the dev names the C
 symbol EXPLICITLY in the `extern` clause: **`[pub|exp] extern fn name(...): R = "c_symbol" from "lib"`**
 (verified: `drain-fase3-stdlib-order.md:127/136/146` — `pub extern fn sqrt(x: f64): f64 = "sqrt" from
-"m"`; the interpreter-retirement decision — `exp extern fn cov_merge(path: str): bool = "tk_cov_merge" from
+"m"`; the native-only consolidation decision — `exp extern fn cov_merge(path: str): bool = "tk_cov_merge" from
 "teko_rt"`; also `embed-vfs.md`). The C symbol lives in the **`= "SYM"`** clause, the library in
 **`from "lib"`**. **EXPORT is the mirror of this** — the same `= "SYM"` clause names the C symbol; **no
 new `#[export]` attribute.**

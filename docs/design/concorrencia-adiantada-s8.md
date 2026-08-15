@@ -740,7 +740,7 @@ Cada crumb entrega algo isoladamente gate-ável. **Ponto ritual** = onde o gate 
 passar: `teko build . --no-verify --release && ./bin/teko test .` + fixpoint `gen1 == gen2`
 byte-idêntico + `scripts/no_emitted_c.sh`. Crumbs de desenho e de fixture pulam o fixpoint.
 
-**Nota de forma, importante:** a pauta pedia fixtures "interpretador e nativo". **O interpretador foi aposentado em
+**Nota de forma, importante:** a pauta pedia fixtures "motor legado e nativo". **O motor legado foi aposentado em
 2026-07-13 (#524)** — AOT nativo é o único motor. Toda fixture abaixo tem um único par
 entrada → exit code, no caminho nativo. Registrar isso é obrigação; entregar um par que não existe
 mais seria pior.

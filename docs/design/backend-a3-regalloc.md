@@ -1,22 +1,22 @@
 # A3 / N2c — linear-scan register allocation (crumb plan)
 
-> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+> **[NOTA]** — este documento descreve oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (#524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
 
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave (umbrella
 `remodel/backend-build`). Issue **#384**. Branch `fix/issue-384-regalloc` (the A3 mini-umbrella;
 PR #398, base `remodel/backend-build`, already carrying A1+A2). Base for the design:
 `docs/design/own-backend-architecture.md` §3.4 (regalloc) and its pipeline diagram (`:118-123`),
-grounded in the merged A2 code (`src/backend/minst.tks`, `isel_arm64.tks`, `minst_interp.tks`, PR
+grounded in the merged A2 code (`src/backend/minst.tks`, `isel_arm64.tks`, `minst_oracle.tks`, PR
 #397) and A1's LIR (`src/lir/lir.tks`).
 
 > This is a PLAN. It designs the target-independent **linear-scan register allocator** over A2's
 > machine IR plus the **AAPCS64 ABI descriptor** that parameterizes it, decomposes A3 into ordered,
 > independently gate-able sub-sub-PRs, and specifies the verification (the no-overlap invariant test
-> + post-alloc interp-equivalence + golden dumps). A3 emits **no machine bytes** (A4) and does **no
+> + post-alloc oracle-equivalence + golden dumps). A3 emits **no machine bytes** (A4) and does **no
 > prologue/epilogue emission** (deferred, §6.1): it consumes an `MFunc` carrying virtual `MReg`s +
 > ABI pins and produces an `MFunc` in which every `MReg` is physical (a colored register, or a
 > reserved scratch fed by a spill load/store), the pins honored, no two overlapping live ranges
-> sharing a physical register. The selected form re-interpreted after allocation still yields the
+> sharing a physical register. The selected form re-run after allocation still yields the
 > same exit code.
 
 ---
@@ -94,7 +94,7 @@ the flattened numbering (§3.1) — with two carve-outs:
 
 - **Flags** (`MCmp`/`MFCmp`/`MCmpImm` set them; `MCSet`/`MBranchCond` read them) are NOT registers
   and are NOT allocated. A2 always emits the compare and its consumer adjacently within one block
-  (the fusion invariant, `minst_interp.tks:251-255` records the "single pending slot" model), so
+  (the fusion invariant, `minst_oracle.tks:251-255` records the "single pending slot" model), so
   the allocator never has to keep two flag-defs live at once and simply ignores flags.
 - **A pinned physical def with no later register use** (the `select_ret` `MMov preg(0), value` then
   `MRet`, `isel_arm64.tks:1056-1059`) has its fixed interval **extended to the block terminator**,
@@ -123,31 +123,31 @@ sit right at the call, a value crossing the call is already forced off them by t
 merely *between* a pin-setup move and the call is forced off that one reg by the fixed-interval
 overlap. Both filters compose.
 
-### 1.4 Spill slots reuse `MFunc.frame`; the interp already runs the physical form
+### 1.4 Spill slots reuse `MFunc.frame`; the oracle already runs the physical form
 
 `MFunc.frame: []lir::LAlloca` (`minst.tks:837`) is A2-4's frame-slot table — one `LAlloca{bytes,
 align}` (`lir.tks:80`) per selected `LAlloca`, grown by `append_frame` (`minst.tks:1338`). A3
 **reuses this table for spill slots**: each spilled vreg gets a fresh `LAlloca` slot appended, and
 the spill store/reload are ordinary `MFrameAddr` + `MStore`/`MLoad` against that slot. This buys
-the allocator a free oracle: the `minst_interp` (`minst_interp.tks`) already models
+the allocator a free oracle: the `minst_oracle` (`minst_oracle.tks`) already models
 
-- four physical/virtual register files (`MRegFile`, `minst_interp.tks:259`) — a fully-colored
-  (`is_phys=true`) function runs through the physical vectors with no interp change;
+- four physical/virtual register files (`MRegFile`, `minst_oracle.tks:259`) — a fully-colored
+  (`is_phys=true`) function runs through the physical vectors with no oracle change;
 - entry args seeded into physical GPR arg registers (`seed_params`, `:395`) and results read from
-  x0 (`interp_ret`/`interp_call`, `:802`/`:901`);
+  x0 (`oracle_ret`/`oracle_call`, `:802`/`:901`);
 - `MFrameAddr(slot)` → a stable per-slot address (`frame_slot_addr`, `:843`) and `MStore`/`MLoad`
-  round-tripping through it (`:867`/`:882`), with **base==dst legal** (`interp_load` reads the base
+  round-tripping through it (`:867`/`:882`), with **base==dst legal** (`oracle_load` reads the base
   before writing the dst, `:868-871`) — so the one-register reload micro-sequence `frame_addr sv,#k;
-  ldr sv,[sv,#0]` interprets correctly.
+  ldr sv,[sv,#0]` runs correctly.
 
-**Consequence: A3 needs ZERO new interp cases.** The post-alloc equivalence oracle is
-`minst_interp(regalloc(sel)) == minst_interp(sel)` over the runnable (`tk_exit`-terminated) subset,
-reusing the A2 interpreter verbatim (§4). The one gap is honest and named: `minst_interp` only
-*executes* `tk_exit` calls — user-function/`tk_*` calls are golden-dump-only until the interp
-recurses into callees (`minst_interp.tks:901-908`), so it does **not** model caller-saved
+**Consequence: A3 needs ZERO new oracle cases.** The post-alloc equivalence oracle is
+`minst_oracle(regalloc(sel)) == minst_oracle(sel)` over the runnable (`tk_exit`-terminated) subset,
+reusing the A2 oracle verbatim (§4). The one gap is honest and named: `minst_oracle` only
+*executes* `tk_exit` calls — user-function/`tk_*` calls are golden-dump-only until the oracle
+recurses into callees (`minst_oracle.tks:901-908`), so it does **not** model caller-saved
 clobbering at a real call. The cross-call clobber correctness is therefore proven by (a) the
 structural no-overlap + call-clobber invariant tests (§4.1) and (b) A4's real C-vs-own byte
-differential — never claimed from the interp (M.3).
+differential — never claimed from the oracle (M.3).
 
 ---
 
@@ -224,7 +224,7 @@ pub type AbiDescriptor = struct {
     /**
      * spill_slot_bytes — the byte size of one spill slot (8: a whole X or D
      * register; the value is stored full-width, never masked, matching the
-     * size-agnostic interp §1.4).
+     * size-agnostic oracle §1.4).
      */
     spill_slot_bytes: u32
     /**
@@ -590,8 +590,8 @@ fn rewrite_func(abi: AbiDescriptor, f: MFunc, sr: ScanResult): MFunc { … }
 
 Each `Spilled` vreg reserves a fresh slot by appending an `LAlloca{bytes = abi.spill_slot_bytes;
 align = abi.spill_slot_align}` to `MFunc.frame` (`append_frame`, `minst.tks:1338`); the `Spilled.slot`
-is that entry's index. The interp resolves each slot to a distinct stable address
-(`frame_slot_addr`, `minst_interp.tks:843`), so a store→reload round-trips (§1.4). The
+is that entry's index. The oracle resolves each slot to a distinct stable address
+(`frame_slot_addr`, `minst_oracle.tks:843`), so a store→reload round-trips (§1.4). The
 byte-offset-from-FP/SP resolution of `MFrameAddr` and the prologue/epilogue that reserves the frame
 and saves `used_callee_saved` are A4's (deferred, §6.1) — A3 finalizes the *slot table*, not the
 stack-pointer arithmetic.
@@ -622,10 +622,10 @@ pub fn regalloc_module(abi: AbiDescriptor, m: MModule): MModule | error { … }
 
 ---
 
-## 4. Verification — the no-overlap invariant + post-alloc interp-equivalence
+## 4. Verification — the no-overlap invariant + post-alloc oracle-equivalence
 
 Two legs, both machine-byte-free (A3 emits nothing to link), mirroring how A2 pairs a structural
-golden check with the interp oracle.
+golden check with the oracle.
 
 ### 4.1 The structural invariants (the no-overlap + pin + all-physical tests)
 
@@ -641,23 +641,23 @@ in `regalloc.tks` the test drives) asserts:
 3. **Pins honored** — every original physical pin (arg/ret/`MCall.uses`) still holds its ISA
    register in the output (the allocator did not steal x0 from a `tk_exit` code, etc.).
 4. **Call-clobber** — no colored value whose interval crosses a call point sits in a caller-saved
-   register (the §1.3 property the interp cannot see, §1.4).
+   register (the §1.3 property the oracle cannot see, §1.4).
 
-### 4.2 The post-alloc interp-equivalence (the semantics oracle)
+### 4.2 The post-alloc oracle-equivalence (the semantics oracle)
 
-Reusing the A2 `minst_interp` verbatim (§1.4), assert for each runnable fixture:
+Reusing the A2 `minst_oracle` verbatim (§1.4), assert for each runnable fixture:
 
 ```
-minst_interp(regalloc_module(aapcs64(), select_module(m)), "main", args)
-    == minst_interp(select_module(m), "main", args)
+minst_oracle(regalloc_module(aapcs64(), select_module(m)), "main", args)
+    == minst_oracle(select_module(m), "main", args)
 ```
 
 i.e. allocation only renames registers / adds spill moves, never changes semantics — the exit code
-is preserved. Because A2 already proved `minst_interp(select_module(m)) == interp_lmodule(m)`, this
+is preserved. Because A2 already proved `minst_oracle(select_module(m)) == oracle_lmodule(m)`, this
 transitively pins the colored form to the LIR oracle. The fixture corpus is A2's own runnable
 fixtures (the straight-line, control-flow, and memory programs that terminate in `tk_exit`), driven
 through regalloc — a KNOWN-GOOD oracle for exactly the programs A2 proved select correctly. A
-fixture reaching a `minst_interp` honest-stop (a real user call, §1.4) is compared at the
+fixture reaching a `minst_oracle` honest-stop (a real user call, §1.4) is compared at the
 honest-stop identically on both sides, never at a fabricated value (the A2 §4 precedent).
 
 ### 4.3 Golden allocation dump
@@ -719,18 +719,18 @@ its new code**; each names the fixtures that PROVE it. No machine bytes in any o
   than a **tiny test descriptor**'s pool spills the furthest-next-use. The **no-overlap invariant
   check** (§4.1.2) is asserted directly on `linear_scan`'s output.
 
-### A3-4 · the rewrite pass + frame finalization + post-alloc interp-equivalence
+### A3-4 · the rewrite pass + frame finalization + post-alloc oracle-equivalence
 - **Scope:** `map_minst_regs` (the total 29-case register-field walk), `rewrite_inst` (spill
   reload/store expansion, §3.4), `rewrite_func` + frame finalization (§3.5), `regalloc_func`, and
   `regalloc_module`. The **all-physical + no-overlap + pins-honored + call-clobber** structural
-  checks (§4.1) and the **post-alloc interp-equivalence harness** (§4.2) land here, reusing the A2
-  `minst_interp` verbatim (zero new interp cases, §1.4).
+  checks (§4.1) and the **post-alloc oracle-equivalence harness** (§4.2) land here, reusing the A2
+  `minst_oracle` verbatim (zero new oracle cases, §1.4).
 - **Files:** `src/backend/regalloc.tks` (+ the rewrite); tests `src/backend/regalloc_test.tkt` (+ a
-  `regalloc_interp_test.tkt` for the equivalence leg, or fold into `regalloc_test.tkt`).
+  `regalloc_oracle_test.tkt` for the equivalence leg, or fold into `regalloc_test.tkt`).
 - **Deps:** A3-3.
 - **Proven by:** golden colored-dump (a two-param add → all `%pN`, a spilled value → the
   `frame_addr`/`ldr`/`str` sequence via the tiny descriptor) + the four structural invariants over
-  the colored form + `minst_interp(regalloc(sel)) == minst_interp(sel)` on A2's runnable
+  the colored form + `minst_oracle(regalloc(sel)) == minst_oracle(sel)` on A2's runnable
   straight-line/control/memory/`tk_exit` fixtures. **A3 CLOSES here.**
 
 ### Ordering
@@ -754,7 +754,7 @@ A3 finalizes the *frame slot table* (`MFunc.frame` grows one entry per spill) an
 callee-saved registers, `SUB sp, sp, #framesize`) or resolve `MFrameAddr`'s slot→FP/SP byte offset.
 That is A4's job: `MFrameAddr` is defined as "resolved once A3 finalizes the frame layout"
 (`minst.tks:594-603`) — A3 delivers the *layout* (slot count + save-set), A4 does the stack-pointer
-arithmetic and the actual STP/LDP encoding alongside the Mach-O frame. **Law-first:** the interp
+arithmetic and the actual STP/LDP encoding alongside the Mach-O frame. **Law-first:** the oracle
 models registers + slots directly and needs no stack pointer (§1.4), so the A3 gate is complete
 without prologue emission (M.4 — no hidden cost added, the frame data is honestly recorded for A4);
 splitting stack-pointer materialization to the encoder keeps A3 doing one thing (M.1). Named A4
@@ -779,7 +779,7 @@ back-edges stop.
 > (`rpo_block_order`) and threads it — `number_insts` flattens in RPO (so every def precedes its uses;
 > the inversion is gone) and `has_back_edge` tests RPO position (so acyclic nesting has no retreating
 > edge and allocates, while a real `loop` latch→header still retreats and honest-stops). Renumber, not
-> reorder: block ids + `MFunc.blocks` order + branch targets are untouched, so the interp is provably
+> reorder: block ids + `MFunc.blocks` order + branch targets are untouched, so the oracle is provably
 > unaffected. See `docs/design/backend-443-rpo-numbering.md`.
 
 > **✅ REFINED by #385 A4-6 (dead-block reachability filter), 2026-07-10.** #443 fixed the acyclic
@@ -797,7 +797,7 @@ back-edges stop.
 
 Named follow-up: **A3-loop** — live-range holes / interval union over back-edges (the
 standard linear-scan-with-holes extension), landed when A1/A2 exercise `loop` end-to-end through the
-interp. This is stated up front so no one claims A3 covers loops.
+oracle. This is stated up front so no one claims A3 covers loops.
 
 > **✅ LANDED by #389 F2 (loop-liveness extension), 2026-07-13.** The honest-stop is REMOVED across
 > all three regalloc backends (`regalloc.tks`/`regalloc_x86.tks`/um regalloc): each

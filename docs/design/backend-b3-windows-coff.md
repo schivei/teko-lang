@@ -683,12 +683,12 @@ placement, and the FIRST executing own==C differential that runs the artifact NA
 | `.obj` well-formedness (`llvm-readobj --sections/--symbols/--relocations` / `llvm-objdump` / `lld-link`) | ✓ | ✓ (llvm tools cross-format) |
 | **executing `C-native == own-native` differential** | ✓ (runs the PE natively) | honest-skip (cannot run PE) |
 
-### 6.3 The interp oracle — NO parallel `minst_x86_interp` (inherited from B1's R-2)
+### 6.3 The oracle — NO parallel `minst_x86_oracle` (inherited from B1's R-2)
 
 B3 adds no instruction semantics (it reuses `MInstX86` whole), so the oracle question is B1's exactly:
-the target-independent LIR interp + the assembler-cross-checked goldens + the EXECUTING Windows
-differential (a runner that runs the artifact natively) cover the oracle role. No parallel interp is
-built (inherited `B1-interp`, REPORTED not blocking).
+the target-independent LIR oracle + the assembler-cross-checked goldens + the EXECUTING Windows
+differential (a runner that runs the artifact natively) cover the oracle role. No parallel oracle is
+built (inherited `B1-oracle`, REPORTED not blocking).
 
 ---
 
@@ -763,7 +763,7 @@ the COFF `.o` via host `clang -target x86_64-windows` (which drives `lld-link`) 
   `Symbol` stay single-sourced. A future extraction — a neutral "object skeleton" describing
   sections/symbols/relocs that each format renders — is the same DRY-sweep candidate B1's R-1 / B2's
   R-1 raise. REPORTED for the integrator to sequence (a 0.3.1 DRY-sweep companion), not a B3 blocker.
-- **R-2 · No parallel `minst_x86_interp`.** §6.3 — inherited from B1's R-2; the LIR interp + goldens +
+- **R-2 · No parallel `minst_x86_oracle`.** §6.3 — inherited from B1's R-2; the LIR oracle + goldens +
   the executing Windows differential cover the oracle role. REPORTED.
 - **R-3 · `own_print_exit` (LIR builtin-call surface).** The KNOWN-STOP (`diff_c_own.sh:190`, `println`
   vs `tk_println`) is a shared LIR-lowering gap — it KNOWN-STOPs identically on the Windows lane (the

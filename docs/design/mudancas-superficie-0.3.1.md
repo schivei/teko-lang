@@ -1166,7 +1166,7 @@ zip; brotli/lzma/zstd; #embed→VFS) → `math` (bigint·checked). Cada lane pov
 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20, cmac_aes/gmac_aes ligados) · `aead` 🔄 (GCM/CCM/ChaCha20-Poly1305,
 rodando). Costuras crypto: `3des` legacy · `password` (Argon2id/scrypt) · `pk` (bigint) · `rand` (FFI).
 Depois do crypto: `sort` mono → `encoding` → `compress` → `math`. **CI:** todos os drains batem no baseline
-(11 jobs nativas .32/#594 = vermelho-conhecido por design; tier VM verde). Validação de vetores no CI
+(11 jobs nativas .32/#594 = vermelho-conhecido por design; tier legado verde). Validação de vetores no CI
 (subagentes sem `gh` auth pra buscar o compilador real — a disciplina do projeto valida por CI; cada
 subagente passa `teko fmt --check` local, que pega lex/parse).
 

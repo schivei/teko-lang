@@ -9,7 +9,7 @@ shipped through L3 (struct methods) and deferred at L4/L5 as a genuine design ga
 **Unblocks:** #163 (collections `Map`/`List`/`Set`/`BTree` are generic CLASSES with factories like
 `Map::new()` / `Map<K,V>::new()`).
 **Rule:** every snippet is full-Javadoc, `.tks`-only. C twins FROZEN (only `teko_rt.{c,h}` maintained —
-none needed here). Ritual per crumb = full gate (gen1 native `#test` + `./bin/teko test .` interpreter +
+none needed here). Ritual per crumb = full gate (gen1 native `#test` + `./bin/teko test .` legacy engine +
 FIXPOINT gen1==gen2 byte-identical + `diff_c_own.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit).
 
 ---
@@ -188,7 +188,7 @@ ONE more remap: `phantom → inst`, where `phantom = phantom_self_inst_name(base
 (built from the SAME `generic_inst_name` so the spelling matches 2a). Then
 `subst_type(Named{"Box__g__T"}, s)` (`resolve.tks:1039`) resolves to `Named{"Box__g__i64"}` and the
 `TStructInit` arm at `monomorph.tks:547-558` rewrites `type = nt = Named{"Box__g__i64"}`
-automatically — codegen/interpreter emit the concrete instance.
+automatically — codegen/legacy engine emit the concrete instance.
 
 ```teko
 /**
@@ -352,10 +352,10 @@ Add `retarget_generic_static_callee` (call at `type_call` head, `typer.tks:878`)
 no-op when `type_args` empty. **Fixture:** `generic_class_factory` runs both engines.
 
 **Crumb L5.3 — corpus `#test`s.**
-Add generic-class-factory + self-construct `#test`s to `checker/generics_test.tkt` (interpreter covers the
-mono method path both engines). Gate: full interpreter gate.
+Add generic-class-factory + self-construct `#test`s to `checker/generics_test.tkt` (legacy engine covers the
+mono method path both engines). Gate: full legacy engine gate.
 
-### Fixtures (interpreter==native unless noted)
+### Fixtures (legacy engine==native unless noted)
 
 - **`examples/regressions/generic_method_self_construct/`** (proves L4). Struct:
   `type Box<T> = struct { value: T; pub fn dup(self): Box<T> { Box { value = self.value } };
@@ -369,11 +369,11 @@ mono method path both engines). Gate: full interpreter gate.
   pub fn read(self): T { self.v } }`. Program:
   `Cell<i64>::make(7).read()` + `Cell<str>::make("ab").read().len` → **exit (7+2)=9** (two distinct
   instantiations prove the factory stamps per instance; the `str` case proves the parser type-arg
-  path + arena-per-object ref semantics on a non-scalar). cc-rejects / interpreter-panics today; both pass
+  path + arena-per-object ref semantics on a non-scalar). cc-rejects / legacy engine-panics today; both pass
   after L5. **Second file** with the bare `Cell::make(...)` under a `let x: Cell<i64> = Cell::make(7)`
   annotation is OPTIONAL (bare-form inference is out of scope — include only as an xfail note).
-- **`checker/generics_test.tkt`** — interpreter `#test`s mirroring both above (self-returning method + static
-  factory, ≥2 instances) so the mono method path is exercised in the interpreter gate.
+- **`checker/generics_test.tkt`** — legacy engine `#test`s mirroring both above (self-returning method + static
+  factory, ≥2 instances) so the mono method path is exercised in the legacy engine gate.
 
 ---
 

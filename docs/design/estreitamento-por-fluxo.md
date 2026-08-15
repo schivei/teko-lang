@@ -791,7 +791,7 @@ vagão.
 
 ## 8. As fixtures
 
-Cada uma é um projecto mínimo (`.tkp` + `src/main.tks`), gate no interpretador de LIR **e** no
+Cada uma é um projecto mínimo (`.tkp` + `src/main.tks`), gate no motor legado de LIR **e** no
 nativo. Exit code é o contrato.
 
 ### 8.1 POSITIVAS — o que tem de passar a compilar

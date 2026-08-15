@@ -21,7 +21,7 @@ So the ONLY open piece of the generic layer is **#254**. #163 collections needs 
 either monomorphic-buildable now, or blocked only on a sibling stdlib root, not on generics.
 
 `teko::list::{empty,push,...}` is today a **builtin free-function** surface (used pervasively
-in the compiler — `scope.tks`, the interpreter's Teko twin). There is NO `List`/`Map`/`Set` class file yet.
+in the compiler — `scope.tks`, the legacy engine's Teko twin). There is NO `List`/`Map`/`Set` class file yet.
 `-lm` is ALREADY linked (`src/build/project.tks:423` adds `-lm` unless freestanding), so
 `math::real` (#186) needs zero new link wiring — only `extern fn ... from "m"` declarations
 plus a manifest `[extern.libs.*]` entry pattern (see crumbs).
@@ -97,8 +97,8 @@ add a `.tks` + a `.tkt`; no `.c`/`.h`.
 Ritual points (where the FULL gate must pass — both engines · paranoid · diff_c_own ·
 parity · fixpoint): at the END of EACH crumb that adds a new `.tks` to the corpus, because
 every new corpus file changes the self-build. Extern-touching crumbs additionally must run
-the **native** leg (the interpreter rejects `extern fn` with `vm_unsupported` — see `time.tks` header),
-so their `.tkt` fixtures gate `teko build` output, and interpreter fixtures assert the honest-stop.
+the **native** leg (`extern fn` requires native codegen — see `time.tks` header),
+so their `.tkt` fixtures gate `teko build` output, and legacy engine fixtures assert the honest-stop.
 
 ---
 
@@ -116,7 +116,7 @@ externs. `-lm` already linked; the extern `from "m"` names the libm soname.
    up if a manifest row is needed, do not silently add). Gate: none (config only).
 
 2. **the extern surface** — one `extern fn` per libm entry, `f64 -> f64` (and 2-arg for
-   `pow`/`atan2`/`hypot`). Native-only (interpreter honest-stops). Doc-comment EVERY decl:
+   `pow`/`atan2`/`hypot`). Native-only (legacy engine honest-stops). Doc-comment EVERY decl:
 
 ```teko
 /**
@@ -149,13 +149,13 @@ pub extern fn atan2(y: f64, x: f64): f64 = "atan2" from "m"
 ```
    Full set: `sqrt cbrt exp exp2 expm1 log log2 log10 log1p pow(2) sin cos tan asin acos
    atan atan2(2) sinh cosh tanh asinh acosh atanh hypot(2) fmod(2) floor ceil round trunc`.
-   Gate: **full ritual** (native leg authoritative; interpreter fixture asserts honest-stop).
+   Gate: **full ritual** (native leg authoritative; legacy engine fixture asserts honest-stop).
 
 3. **precision-vector fixtures** `real_test.tkt` — `#test` cases asserting each fn against
-   known values within an ULP tolerance helper. Because the interpreter can't call externs, these
+   known values within an ULP tolerance helper. Because the legacy engine can't call externs, these
    fixtures are `teko build`-gated (native): input `f64` → expected `f64` within epsilon.
    Add a `fn approx_eq(a: f64, b: f64, eps: f64): bool` guard in the `.tkt`.
-   Expected exit codes: native run exit 0 (all assert pass); interpreter run of an extern caller =
+   Expected exit codes: native run exit 0 (all assert pass); legacy engine run of an extern caller =
    honest-stop nonzero (assert the stop, per `time_test` precedent).
 
 **Type shapes touched:** none in compiler core. New: ~30 `pub extern fn` in `teko::math`.
@@ -235,7 +235,7 @@ pub fn zlib(raw: []byte): []byte { ... }
 
 **Fixtures `compress_test.tkt`:** known DEFLATE vectors (RFC test payloads) →
 inflate==expected; round-trip `inflate(deflate(x))==x` over several inputs; gzip/zlib
-header-byte assertions; empty-input edge (exit 0). interpreter==native parity REQUIRED (pure Teko,
+header-byte assertions; empty-input edge (exit 0). legacy engine==native parity REQUIRED (pure Teko,
 both engines run it). Expected: exit 0 both engines.
 **Risk:** DEFLATE is the largest single algorithm here — split into inflate/deflate/wrappers
 sub-PRs. Memory: LZ77 window + Huffman tables allocate; watch self-build peak (auto-reported)
@@ -312,7 +312,7 @@ hashes require.
 1. **SHA-256** (`hash.tks`) — the reference hash; pure `[]byte`, wrapping u32 add/rotate
    (use `teko::math::checked` wrapping mode). `pub fn sha256(data: []byte): []byte` (32-byte
    digest). Gate: full ritual. Fixtures: NIST vectors (`""`, `"abc"`, the 448-bit message).
-   Exit 0 BOTH engines (pure Teko — interpreter==native REQUIRED).
+   Exit 0 BOTH engines (pure Teko — legacy engine==native REQUIRED).
 2. **SHA-512 / SHA-224 / SHA-384** — 64-bit variant + truncations. Gate: full ritual.
 3. **SHA-3 / Keccak** — the permutation is `[]u64` state; distinct code path. Gate: full ritual.
 4. **BLAKE2b/2s** + **MD5-legacy** (marked `@deprecated` in Javadoc — legacy only). Gate: full ritual.
@@ -332,8 +332,8 @@ pub extern fn secure_bytes(n: u64): []byte = "tk_rt_secure_bytes" from "teko_rt"
 ```
    This requires a `tk_rt_secure_bytes` in `src/runtime/teko_rt.c` (maintained C, per the
    no-mirroring ruling — this is the runtime seam, NOT a frozen twin; the implementer edits
-   `teko_rt.c`/`.h`). Gate: full ritual, native leg authoritative; interpreter asserts honest-stop.
-   Fixtures: `secure_bytes(32).len == 32`, two calls differ (native only); interpreter = honest-stop.
+   `teko_rt.c`/`.h`). Gate: full ritual, native leg authoritative; legacy engine asserts honest-stop.
+   Fixtures: `secure_bytes(32).len == 32`, two calls differ (native only); legacy engine = honest-stop.
 
 **Type shapes:** hashes are `[]byte -> []byte`. Runtime seam adds `tk_rt_secure_bytes`.
 **Risk/law tension:** MD5 shipped as `@deprecated`-tagged (legacy interop only) — law-clean
@@ -358,12 +358,12 @@ its "Crumb-plan de architect entra como comentário aqui"). Summary of the 5-cru
    `StructBody` (currently `methods = empty()`); ADD a `ClassBody` arm. Gate: full ritual.
 3. **`monomorph.tks`** — new pass: per-instantiation re-type/rewrite method bodies
    (recursive, incl. self-construction `Box<T>{...}`); emit method-sets per instance in
-   BOTH codegen and the interpreter. Gate: full ritual + fixpoint (gen1==gen2) — this is the highest-risk
-   crumb (touches codegen AND the interpreter).
+   BOTH codegen and the legacy engine. Gate: full ritual + fixpoint (gen1==gen2) — this is the highest-risk
+   crumb (touches codegen AND the legacy engine).
 4. **typer return-type-as-expected** — thread declared return type as expected-context so
    `fn box_make<T>(v: T): Box<T> { Box { value = v } }` infers. Gate: full ritual.
 5. **fixtures** — `generics_test.tkt` gains: generic struct WITH method; generic class with
-   factory+methods; method that constructs its own type; trait-fold chain. interpreter==native parity.
+   factory+methods; method that constructs its own type; trait-fold chain. legacy engine==native parity.
 
 **Sequencing law:** #254 shares machinery (monomorph/typer/resolve/collect) with the
 now-CLOSED #162; verify no residual conflict on branch base. #254 must MERGE before #163
@@ -398,10 +398,10 @@ deliverable now.
 
 ## 4. Risks + law tensions (cross-cutting)
 
-- **interpreter==native parity split:** pure-Teko modules (#192, #189, #194-hash, #163) MUST pass on
-  BOTH engines. Extern-touching (#186, #194-rand) run native-authoritative + interpreter honest-stop
+- **legacy engine==native parity split:** pure-Teko modules (#192, #189, #194-hash, #163) MUST pass on
+  BOTH engines. Extern-touching (#186, #194-rand) run native-authoritative + legacy engine honest-stop
   fixtures (the `time.tks` precedent). Sequence extern crumbs so their `.tkt` never asserts
-  a value the interpreter can't produce.
+  a value the legacy engine can't produce.
 - **Self-build memory:** each new corpus `.tks` grows gen-1; DEFLATE (#192) and hashes
   (#194) allocate the most — use arenas, amortized push, watch auto-reported peak (≤ the
   standing floor). Report regressions, don't absorb.

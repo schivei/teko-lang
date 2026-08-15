@@ -45,7 +45,7 @@ RG (READY-GATE, no keystone dep)         ── ready NOW, drain in parallel-of-
 ╔═══════════════════════════════ KEYSTONE CLUSTER K-A : onda-3 monomorph+128 ═══════════════════════════════╗
 ║   #299 ──(ready, PR#307)                                                                                   ║
 ║   #290 ──(ready)──►  #254 ──(needs #290)──►  #294 (needs #254)                                             ║
-║   #301 ──(ready; interpreter half probe-gated)                                                                      ║
+║   #301 ──(ready; legacy engine half probe-gated)                                                                      ║
 ║        │                                                                                                    ║
 ║        └── #254 is THE monomorphization keystone → unblocks #163 (collections) + generic stdlib methods    ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════════════╝
@@ -56,7 +56,7 @@ RG (READY-GATE, no keystone dep)         ── ready NOW, drain in parallel-of-
                      └────────────────────────────────────┘
 
 ╔═══════════════════════════════ KEYSTONE CLUSTER K-B : native test-gate ═══════════════════════════════════╗
-║   #265 (line/branch native instrumentation)  ──►  native enforces 3 floors  ──►  CI flip (interpreter→nightly)      ║
+║   #265 (line/branch native instrumentation)  ──►  native enforces 3 floors  ──►  CI flip (legacy engine→nightly)      ║
 ║   #168 (compile-once partition; Phase-B full BLOCKED on C7.16, but 1595→366MB win lands WITHOUT it)        ║
 ║   #265 is lever-B of #249; unblocks the memory+speed headline for the whole gate                           ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════════════╝
@@ -107,8 +107,8 @@ QUALIDADE  ── #167 #168 #249 #265 #270 #282 ready ; #234 BLOCKED on onda-4 c
 ### K-A — onda-3 monomorphization + 128-bit (crumbs in `drain-onda3-subcluster-A.md`)
 - **Order is FIXED: `#290 → #301 → #254 → #294`** (methods lower through #290's keying; #294 needs #254's stamped method as its direct target). #299 is independent (128-bit literal panic) and rides in first via PR #307.
 - **#254 is THE monomorphization keystone.** It unblocks #163 (collections as generic classes) and every generic stdlib method. 5 layers, re-verified site counts (L1 = 2 fn-body edits; L2 = 3 sites incl. a ClassBody passthrough bug; L4 needs an `Env.expected_ret` field — a WIDE change, every `Env {…}` literal must default it).
-- **Under-scoping caught** in ALL FOUR roots (the #296 lesson): #290 = 3 sites (not 2), #301 = 5 native + 1 interpreter probe (not 3), #254 as above, #294 = 2 sites. Trust the drain doc's counts, not the parent cluster doc's estimates.
-- **#301 interpreter half is PROBE-GATED** (`TEKO_TRACE` the `reseat` repro). The native mangle half is fully specified and unblocks the `ReadFn | error` union-arm + `flat_map` (feeds #184).
+- **Under-scoping caught** in ALL FOUR roots (the #296 lesson): #290 = 3 sites (not 2), #301 = 5 native + 1 legacy engine probe (not 3), #254 as above, #294 = 2 sites. Trust the drain doc's counts, not the parent cluster doc's estimates.
+- **#301 legacy engine half is PROBE-GATED** (`TEKO_TRACE` the `reseat` repro). The native mangle half is fully specified and unblocks the `ReadFn | error` union-arm + `flat_map` (feeds #184).
 - **#294 ruling (a) APPLIED law-first** (autonomous call, logged for LTS review): a constraint is a monomorphization gate, not a dynamic-dispatch promotion → constraint-bound structs dispatch DIRECT to the stamped method, no vtable, no new rep. Heterogeneous struct-as-contract collections are explicitly OUT of scope (report-only, not an issue).
 
 ### K-B — native test-gate #265 + #168 (crumbs in `drain-265-168-native-gate.md`)
@@ -116,7 +116,7 @@ QUALIDADE  ── #167 #168 #249 #265 #270 #282 ready ; #234 BLOCKED on onda-4 c
 - **#265 Track A** (A0 fixtures → A1 thread `CovCtx` all-`cov_off()` byte-identical → A2 line mark → A3/A4 branch marks → A5 `tk_cov_line_at`/`tk_cov_branch_at` explicit-fn runtime entry points → A6 swap floor → A7 comment-truth). **A5 is the single load-bearing decision**: stack-only keying attributes every native mark to the TEST → false 0%; the `_at` entry points in the maintained `teko_rt.{c,h}` seam fix it (Teko-only law satisfied — runtime seam is NOT a frozen twin).
 - **Fixpoint SAFE:** all instrumentation gated on `TestCov`/`CovCtx.on`; the `Program` path (the fixpoint oracle) emits ZERO `tk_cov_*` and is never touched. Fixture 6 makes byte-identity a hard gate.
 - **#168 headline (1595→366 MB) lands WITHOUT C7.16** via B1 (reuse `fe`, no re-front-end) + B2-lite (process-boundary isolation). Full per-context `.tkb` partition (B3) is BLOCKED on C7.16 → honest-stop doc-comment only.
-- **Track C (CI flip)** demotes interpreter to a nightly lane — gated on fixture 8 (interpreter==native floor parity over the 79 `examples/regressions/`). This is the main-integrity-safe way to leave the interpreter gate off PR CI.
+- **Track C (CI flip)** demotes legacy engine to a nightly lane — gated on fixture 8 (legacy engine==native floor parity over the 79 `examples/regressions/`). This is the main-integrity-safe way to leave the legacy engine gate off PR CI.
 - **Coupling:** #265 IS lever-B of #249 and makes #168 actually faster. Sequence #265 before the #249 lever-B claim and before #234's final sweep (which benefits from the faster/leaner gate).
 
 ### Stdlib-root keystones (Onda-5)
@@ -142,7 +142,7 @@ Legend: **[R]** ready NOW · **[K]** keystone · **[B:#n]** blocked-by · **[S/M
 | Seq | Issue | State | Effort |
 |-----|-------|-------|--------|
 | 1.1 | **#290** [R][K-prereq] same-bare cross-ns method dispatch (3 sites) | ready | S |
-| 1.2 | **#301** [R] closure-in-Ref round-trip (native half load-bearing; interpreter half probe-gated) | ready | M |
+| 1.2 | **#301** [R] closure-in-Ref round-trip (native half load-bearing; legacy engine half probe-gated) | ready | M |
 | 1.3 | **#254** [K][B:#290] generic-type methods — THE monomorph keystone (5 layers) | after 1.1 | L |
 | 1.4 | **#294** [B:#254] struct-through-constraint dispatch (ruling (a), 2 sites) | after 1.3 | M |
 
@@ -153,7 +153,7 @@ Legend: **[R]** ready NOW · **[K]** keystone · **[B:#n]** blocked-by · **[S/M
 |-----|-------|-------|--------|
 | 2.1 | **#265** [K] native line/branch instrumentation (A0→A7) | ready | M |
 | 2.2 | **#168** [B:#265-A6 for the win] compile-once partition (B1+B2-lite; B3 honest-stop) | after 2.1 | M |
-| 2.3 | (CI flip, Track C) interpreter→nightly | gated on fixture-8 parity | S (CI-config) |
+| 2.3 | (CI flip, Track C) legacy engine→nightly | gated on fixture-8 parity | S (CI-config) |
 
 > Do K-B early: it makes every subsequent PR's CI leaner+faster (the whole backlog benefits). It is INDEPENDENT of K-A — could run in parallel-of-one interleaved with Batch 1 if the integrator prefers speed on CI first. Recommended: Batch 0 → Batch 2 (leaner CI) → Batch 1 → onward.
 
@@ -256,7 +256,7 @@ Off the self-build critical path — schedule opportunistically between heavier 
 
 ### OPEN design decisions the owner should resolve BEFORE the relevant batch
 - **#174 regex: NFA vs backtracking — NOT chosen.** Blocks the regex half of #174 (spec `{n,m}`, non-greedy, backreferences marked optional). `str_from_utf8` + encoding scope is clear. **Decision needed before Batch 3.3.**
-- **#301 interpreter half is probe-gated** — the `TEKO_TRACE reseat` probe pins snapshot vs `coerce_to` vs merge. Land whichever the probe proves; the native half ships regardless. Not a blocker for #254.
+- **#301 legacy engine half is probe-gated** — the `TEKO_TRACE reseat` probe pins snapshot vs `coerce_to` vs merge. Land whichever the probe proves; the native half ships regardless. Not a blocker for #254.
 - **#254 layer-4 `Env.expected_ret`** — a WIDE change (every `Env {…}` literal must default the new field). Name-verify `type_expr_expected`/`type_value_expected` before editing. Flagged as the highest-churn crumb.
 - **#233 LSP has NO start gate** — DEFERRED "until compiler stabilizes." Owner defines the stabilization trigger, or it stays parked.
 - **#182 TCC bundle DEFERRED post-alpha** — macOS needs Apple SDK (accepted per pre-alpha ruling); not an alpha blocker. Confirm it stays out of the alpha drain.
@@ -276,7 +276,7 @@ Issues never spawn issues; each delivers 100% of its proposal with no regression
 ## 6. Per-PR ritual (every merge)
 1. Agent drafts on `fix/issue-NN` (isolated worktree), base `main`.
 2. CI runs `verify-both`: native #test gate + fixpoint gen1==gen2 byte-identical + `diff_c_own.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit (W15). ~6 m.
-3. Full gate at the END of every crumb that adds a new corpus `.tks` (self-build changes). Extern-touching crumbs = native-authoritative + interpreter honest-stop fixtures.
+3. Full gate at the END of every crumb that adds a new corpus `.tks` (self-build changes). Extern-touching crumbs = native-authoritative + legacy engine honest-stop fixtures.
 4. Undraft only when ALL checks green. Integrator merges serially (CLEAN-only, no exceptions). Push after each green merge; keep the PR body's `Closes #NN` current.
 5. Bump the 4th version field in `teko.tkp` on each code merge (manual; triggers the alpha release/tag).
 6. FAXINA: kill orphan research sub-agents, prune merged local branches + orphan worktrees at session end.

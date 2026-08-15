@@ -143,7 +143,7 @@ regression in this opcode's encoding?* Two live checks exist:
 | objfile | `` | 71 | object-file bytes per format | yes (surface) |
 | minst (structural) | `minst_test.tkt` + `_x86`/`` | 32 | MInst shape/builders | yes (surface) |
 | **T2-eligible subtotal** | | **754** | | |
-| minst_interp (ORACLE, since retired along with the file itself) | `minst_interp_test.tkt` | 35 | differential oracle | **NO → T3** |
+| minst_oracle (ORACLE, since retired along with the file itself) | `minst_oracle_test.tkt` | 35 | differential oracle | **NO → T3** |
 
 ### 2.2 The honest split inside the 754
 
@@ -186,7 +186,7 @@ not "safe-proven."**
 | Group | Count | Why it stays |
 | --- | --- | --- |
 | Backend sole-guards | ~570–640 of the 754 golden vectors | ONLY oracle for a rare/unique opcode the differentials never run; frozen-ISA correctness |
-| Oracles (since retired along with both files) | `lir_interp_test.tkt` (36) + `minst_interp_test.tkt` (35) | differential-agreement engines (issue #221) — LIR and machine-code interpreters for validation |
+| Oracles (since retired along with both files) | `lir_oracle_test.tkt` (36) + `minst_oracle_test.tkt` (35) | differential-agreement engines (issue #221) — LIR and machine-code oracles for validation |
 | Law/invariant | checker 280 + spine 73 + borrow 44 + comptime_fold 48 + consteval 22 + const 16 + generics 20 + closures 12 (≈495) | encode the type/borrow/safety-spine/const CONTRACTS — the Constitution/Laws surface |
 | Fixture unit-backing | parser 126 (incl. 20 `rejects_malformed_*`, 13 discard) + lexer 19 | the reason any fixture can be thinned; delete these and the fixtures lose their branch |
 | Owner-pinned negatives | the 35 `EXPECT_COMPILE_FAIL` minus the T1.2 cluster | each fixed by a dated owner ruling; not proven same-branch-redundant |
@@ -269,7 +269,7 @@ means "did we test the new branch?".
 | `regalloc*.tks` | ~3,800 | fixpoint + own==C differential |
 | `stackify.tks` | ~5,480 | wasm-validate (WABT) + wasmtime differential |
 | `objfile_*.tks` | ~3,650 | host toolchain (`readelf`/`otool`/`llvm-readobj`/`ld -r`) + differential |
-| `abi_*.tks` (in isel/minst) + `minst*.tks` | ~7,900 | own==C differential (calling convention proven by executed calls) + LIR/MInst interp oracle |
+| `abi_*.tks` (in isel/minst) + `minst*.tks` | ~7,900 | own==C differential (calling convention proven by executed calls) + LIR/MInst oracle |
 | **Backend frozen subtotal** | **31,850 (34 % of the 93,738-line source)** | |
 
 ### 6.2 Per-scenario floor impact and recommendation

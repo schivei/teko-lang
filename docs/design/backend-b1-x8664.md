@@ -1,6 +1,6 @@
 # B1 / N3 — x86-64 SysV ABI + ELF object emission (crumb plan)
 
-> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+> **[NOTA]** — este documento descreve oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (#524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
 
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave. Issue **#386**. Branch
 `fix/issue-386-x8664` (the B1 mini-umbrella; base = the umbrella `remodel/backend-build` carrying
@@ -8,7 +8,7 @@ A1→A4 + #443, seed `teko 0.3.0.6-beta`). Base for the design:
 `docs/design/own-backend-architecture.md` §2.1 (target #3, x86-64 SysV ELF) + §3.3/§3.4/§3.5,
 `docs/design/backend-a4-encoder.md` (the proven encoder/object/differential pattern this MIRRORS),
 grounded in the merged code (`src/backend/{minst,isel_arm64,regalloc,abi_aapcs64,encode_arm64,
-objfile_macho,minst_interp}.tks`, `src/build/project.tks`, `scripts/diff_c_own.sh`).
+objfile_macho,minst_oracle}.tks`, `src/build/project.tks`, `scripts/diff_c_own.sh`).
 
 > This is a PLAN. It brings the **SECOND ISA** into the own AOT backend: x86-64 SysV on Linux ELF.
 > It proves the pipeline's target-independence claims (`own-backend-architecture.md` §2.2 — "N3–N5
@@ -28,7 +28,7 @@ objfile_macho,minst_interp}.tks`, `src/build/project.tks`, `scripts/diff_c_own.s
   `MBlockX86`/`MModuleX86`) that **reuses the ISA-neutral** `MReg`/`MRegClass`/`MCond`/`MMem`/
   `vreg`/`preg`/`AbiDescriptor` and the **register-abstract linear-scan core** (`linear_scan`/
   `candidate_pool`/`ScanResult`/`assign_lookup`) verbatim. Generalizing `MInst` LOSES: it blasts
-  three frozen total-matches (`minst_interp`, `encode_arm64`'s `encode_inst_word`, `regalloc`'s
+  three frozen total-matches (`minst_oracle`, `encode_arm64`'s `encode_inst_word`, `regalloc`'s
   `inst_regs`/`map_minst_regs`) and risks the shipped A4 differential — the opposite of
   smallest-blast (M.1) and of a settled, byte-tested reference (M.5). Parallel IR is exactly what
   `own-backend-architecture.md` §3.3 prescribes ("per-ISA modules, LIR → MInst keyed by target").
@@ -99,7 +99,7 @@ file by file:
 | `MFunc`/`MBlock`/`MModule` | `minst.tks:796,823,847` | embed `[]MInst` (arm64) |
 | `inst_regs`/`map_minst_regs`/`rewrite_inst` + the `MFunc`-walking `compute_intervals`/`rewrite_*`/`regalloc_func`/`regalloc_module`/`all_physical` | `regalloc.tks:407,1464,1622,…` | total matches over the 29-case `MInst` |
 | `encode_inst_word`/`encode_func`/`encode_module`/`compute_frame_layout`/`emit_prologue`/`emit_epilogue`/`FrameLayout`/`EncWord`/`Reloc`/`EncodedFunc`/`EncodedModule` | `encode_arm64.tks` | fixed-4-byte-word encoder; `EncWord` is a `u32`; `Reloc.kind: MRelocKind` |
-| `minst_interp` | `minst_interp.tks` | total match over arm64 `MInst` semantics |
+| `minst_oracle` | `minst_oracle.tks` | total match over arm64 `MInst` semantics |
 | `emit_macho` + `MachoLayout` | `objfile_macho.tks` | Mach-O container |
 | `select_module` | `isel_arm64.tks:1866` | AArch64 selection (three-address, ADRP+ADD, MOVZ/MOVK chains) |
 
@@ -124,7 +124,7 @@ winner"). It has a **clear winner**; recorded, not opened.
 
 - **M.1 (small/orthogonal) + smallest blast radius.** Generalizing `MInst` to span both ISAs forces
   new cases (or an abstract re-shape) into a variant that FOUR frozen total-matches exhaustively
-  cover: `minst_interp` (`minst_interp.tks`), `encode_inst_word` (`encode_arm64.tks:1416`),
+  cover: `minst_oracle` (`minst_oracle.tks`), `encode_inst_word` (`encode_arm64.tks:1416`),
   `inst_regs` (`regalloc.tks:407`), `map_minst_regs` (`regalloc.tks:1464`). Every one would gain
   dead x86 arms or break — churning the shipped, byte-tested A4 reference and risking its
   differential. The parallel IR touches ZERO frozen code (it only ADDS files + reuses the neutral
@@ -207,7 +207,7 @@ instruction exists — the smallest possible first step.
 ## 4. `isel_x86_64.tks` — selection + the two-address strategy (B1-3)
 
 Mirrors `isel_arm64.tks`'s structure exactly: a `SelCtxX86` (in-progress `MFuncX86`, the `class_of`
-side-table `VInfoTable` — REUSED, it is neutral, `isel_arm64.tks:31`), the RPO block interplay with
+side-table `VInfoTable` — REUSED, it is neutral, `isel_arm64.tks:31`), the RPO block oraclelay with
 #443 reachability, and a total per-case walk over the LIR. Four x86-specific selection shapes:
 
 ### 4.1 The `MInstX86` alphabet (declared in `minst_x86.tks`, B1-2)
@@ -672,19 +672,19 @@ the `<stem>.o` MUST exist. `native.yml` already carries a `linux-x86_64` leg in 
 | **executing `C==own` differential** | ✓ (runs the ELF) | honest-skip (cannot run x86) |
 | `check_macho`/arm64 differential | honest-skip | ✓ (unchanged) |
 
-### 8.3 The interp oracle — NO parallel `minst_x86_interp` for the MVP (grounded)
+### 8.3 The oracle — NO parallel `minst_x86_oracle` for the MVP (grounded)
 
-`minst_interp` is a total match over arm64 `MInst` semantics (`minst_interp.tks:10-17`) — it does
+`minst_oracle` is a total match over arm64 `MInst` semantics (`minst_oracle.tks:10-17`) — it does
 NOT generalize to `MInstX86` (different instructions: two-address RMW, SETcc, CQO, fixed-reg div).
-A full parallel `minst_x86_interp` is therefore **deferred, not built for B1**, because its role —
+A full parallel `minst_x86_oracle` is therefore **deferred, not built for B1**, because its role —
 a PRE-machine oracle catching lowering/isel bugs before bytes — is covered three ways for x86 without
-it: (a) the **target-independent LIR interp** (`interp_lmodule`, `own-backend-architecture.md` §2.3,
+it: (a) the **target-independent LIR oracle** (`oracle_lmodule`, `own-backend-architecture.md` §2.3,
 the "fourth oracle") validates the program semantics pre-isel, SHARED across targets; (b) the
 **assembler-cross-checked golden byte-vectors** validate each encoding; (c) the **executing
 linux-x86_64 differential** validates end-to-end on a runner that actually runs the artifact — the
-very thing arm64 lacked (its differential is macOS-only, which is WHY A4 needed the interp). So the
-x86 pipeline is at least as well-oracled as arm64 was, minus a large parallel interp. `minst_x86_interp`
-is a named future add (`B1-interp`, optional), REPORTED not blocking (§10 R-2).
+very thing arm64 lacked (its differential is macOS-only, which is WHY A4 needed the oracle). So the
+x86 pipeline is at least as well-oracled as arm64 was, minus a large parallel oracle. `minst_x86_oracle`
+is a named future add (`B1-oracle`, optional), REPORTED not blocking (§10 R-2).
 
 ---
 
@@ -699,7 +699,7 @@ is a named future add (`B1-interp`, optional), REPORTED not blocking (§10 R-2).
 | `B1-bigimm` | B1-5 | (near-N/A — `movabs` covers imm64; named for symmetry only) | — |
 | `B1-bigframe` | B1-6 | (near-N/A — `sub rsp,imm32` covers 2 GB; named for symmetry) | — |
 | `B1-redzone` | B1-6 | the 128-byte SysV red-zone leaf optimization (we always reserve) | an optimization pass |
-| `B1-interp` | (oracle) | a parallel `minst_x86_interp` (LIR-interp + goldens + real diff cover it) | optional (§10 R-2) |
+| `B1-oracle` | (oracle) | a parallel `minst_x86_oracle` (LIR-oracle + goldens + real diff cover it) | optional (§10 R-2) |
 | FPR spill | — inherited | `detect_fpr_spill` analog errors before encode (A3's `A3-fpr-spill`) | A3's follow-up |
 | `loop` back-edge | — inherited | regalloc honest-stops (`A3-loop`) before encode | A3's `A3-loop` |
 | i128 register-pair ops | — inherited | isel never emits them (rides A2's i128 route) | A2's i128 route |
@@ -748,8 +748,8 @@ linker), NOT at #386 — recorded so no one claims independence prematurely (M.3
   structure, once the compiler has the generic-over-instruction-type capability to express it without
   the silent-collision hazard — would single-source the walk too. REPORTED for the integrator to
   sequence (likely a 0.3.1 DRY-sweep companion), not a B1 blocker.
-- **R-2 · No parallel `minst_x86_interp`.** §8.3 — the LIR interp + goldens + the real linux
-  differential cover the oracle role; a parallel interp is an optional later add. REPORTED.
+- **R-2 · No parallel `minst_x86_oracle`.** §8.3 — the LIR oracle + goldens + the real linux
+  differential cover the oracle role; a parallel oracle is an optional later add. REPORTED.
 - **R-3 · `own_print_exit` (LIR builtin-call surface).** The KNOWN-STOP `diff_c_own.sh:128` (`_println`
   vs `_tk_println`) is a LIR-lowering gap (LIR's builtin table is narrower than codegen's), shared
   across ALL targets — it will KNOWN-STOP identically on the x86 lane. Already a reported finding;
@@ -795,7 +795,7 @@ B1 adds NO new fixtures; it adds the x86 own-native column to the existing corpu
 | `own_match_exit` | `match k { 0 => exit(7); _ => exit(9) }` | (per k) | ✓ | ✓ | ✓ | **linux-run** |
 | `own_print_exit` | `println` then `exit` | — | ✓ | ✓ | KSTOP | **KSTOP** (R-3, inherited) |
 
-The exit(n)-scoped corpus is exactly the frameless-`main`/interp-validated subset (the A4 §9.2
+The exit(n)-scoped corpus is exactly the frameless-`main`/oracle-validated subset (the A4 §9.2
 convention); a trailing-value framed `main` rides the same `MRetX86`+prologue path the frame goldens
 exercise (the A4 §8 caveat carries over — no NEW divergence).
 
@@ -850,7 +850,7 @@ A4 (done, #385) ─▶ B1-1 ─▶ B1-2 ─▶ B1-3 ─▶ B1-4 ─▶ B1-5 ─�
   (§4.1). **Proven by:** printer golden tests + type surface.
 - **B1-3 · `isel_x86_64.tks`** — `select_module_x86`: two-address copy-at-isel (§4.2), fixed-reg
   div/rem (§4.4), single `lea rip` addressing (§4.3), SysV arg/result lowering (§4.5). **Proven by:**
-  golden `MInstX86`-dump + the shared LIR-interp equivalence over the corpus subset.
+  golden `MInstX86`-dump + the shared LIR-oracle equivalence over the corpus subset.
 - **B1-4 · `regalloc_x86.tks`** — `inst_regs_x86`/`map_minst_x86`/`rewrite_inst_x86`/
   `regalloc_func_x86`/`regalloc_module_x86` calling the shared scan core (§5). **Proven by:**
   regalloc-x86 tests (no live-range overlap in a physreg) + `all_physical_x86` + a spill fixture.
