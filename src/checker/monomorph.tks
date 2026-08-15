@@ -88,8 +88,36 @@ fn constraint_satisfied(c: @ConstraintExpr(), concrete: @Type(), table: TypeTabl
         parser::ConstraintAnd as a => constraint_satisfied(a.left, concrete, table) && constraint_satisfied(a.right, concrete, table)
         parser::ConstraintOr as o => constraint_satisfied(o.left, concrete, table) || constraint_satisfied(o.right, concrete, table)
         parser::ConstraintAtom as a => constraint_atom_satisfied(a.name, concrete, table)
+        parser::ConstraintForm as f => constraint_form_satisfied(f, concrete, table)
         parser::ConstraintNotNull => constraint_notnull_satisfied(concrete, table)
         parser::NoConstraint => true
+    }
+}
+/**
+ * constraint_form_satisfied — a FORM-word term (§9.2b): the concrete type-argument must have the required
+ * SHAPE. `class` → any class (a `service` is a class too); `struct` → a value struct; `service` → a
+ * service, and when a lifetime is named (`service singleton`) its declared lifetime must MATCH — a service
+ * of the wrong lifetime fails here (the honest instantiation-point failure, never a silent coercion). A
+ * non-nominal type-argument (a prim/slice/union/…) has none of these forms and never satisfies a form word.
+ *
+ * @param cf       the form-word term
+ * @param concrete the concrete type bound to the type parameter at this instantiation
+ * @param table    the folded type table
+ * @return true iff `concrete` has the required form (and lifetime, for `service <lifetime>`)
+ */
+fn constraint_form_satisfied(cf: parser::ConstraintForm, concrete: @Type(), table: TypeTable): bool {
+    var name = match concrete { Named as n => n.name; _ => return false }
+    if cf.form == "class" { return is_class_name(name, table) }
+    if cf.form == "struct" { return is_struct_name(name, table) }
+    if cf.form == "service" {
+        if !is_service_name(name, table) { return false }
+        if !cf.has_lifetime { return true }
+        match service_lifetime_of(name, table) {
+            parser::ServiceLifetime as lt => lifetime_eq(lt, cf.lifetime)
+            null => false
+        }
+    } else {
+        false
     }
 }
 /**

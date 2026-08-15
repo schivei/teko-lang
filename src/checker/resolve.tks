@@ -975,6 +975,8 @@ pub fn constraint_surface(c: @ConstraintExpr(), table: TypeTable): []parser::Fun
             surface_intersect(l, r, table)
         }
         parser::ConstraintAtom as a => atom_surface(a.name, table)
+        /* (§9.2b) a form word forces shape, not conformance — it contributes NO callable surface. */
+        parser::ConstraintForm => { var form_surface: []parser::Function = teko::list::empty(); form_surface }
         /* (§9.2b) `notnull` is a modifier, not an interface — it contributes NO callable surface. */
         parser::ConstraintNotNull => { var notnull_surface: []parser::Function = teko::list::empty(); notnull_surface }
         parser::NoConstraint => { var empty_surface: []parser::Function = teko::list::empty(); empty_surface }
@@ -1078,6 +1080,8 @@ fn constraint_interfaces(c: @ConstraintExpr(), table: TypeTable): []str | error 
             var no_interfaces: []str = teko::list::empty()
             no_interfaces
         }
+        /* (§9.2b) a form word names no interface — it forces shape, not conformance. */
+        parser::ConstraintForm => { var form_ifaces: []str = teko::list::empty(); form_ifaces }
         /* (§9.2b) `notnull` names no interface — a modifier, not a conformance term. */
         parser::ConstraintNotNull => { var notnull_ifaces: []str = teko::list::empty(); notnull_ifaces }
         parser::NoConstraint => { var no_interfaces: []str = teko::list::empty(); no_interfaces }
@@ -1513,6 +1517,51 @@ pub fn is_struct_name(name: str, table: TypeTable): bool {
     match type_table_find(table, name, "") {
         parser::TypeDecl as td => match td.body { parser::StructBody => true; _ => false }
         error => false
+    }
+}
+
+/**
+ * is_service_name — is `name` declared as a `service` (a sealed class marked `is_service`, §7 DI)? The
+ * form-word twin of is_class_name/is_struct_name, used by the §9.2b `service`-form constraint term.
+ *
+ * @param name   a resolved (canonical or bare) type name
+ * @param table  the program's type table
+ * @return       true iff `name`'s TypeDecl is a `service`
+ */
+pub fn is_service_name(name: str, table: TypeTable): bool {
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => match td.body { parser::ClassBody as cb => cb.is_service; _ => false }
+        error => false
+    }
+}
+
+/**
+ * service_lifetime_of — the declared arena lifetime of the service `name`, or `null` when `name` is not
+ * a service. Read by the §9.2b `service <lifetime>` constraint term to force HOW a service lives.
+ *
+ * @param name   a resolved type name
+ * @param table  the program's type table
+ * @return       the service's ServiceLifetime, or null when `name` is not a service
+ */
+fn service_lifetime_of(name: str, table: TypeTable): parser::ServiceLifetime | null {
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => match td.body { parser::ClassBody as cb => if cb.is_service { cb.service_lifetime } else { null }; _ => null }
+        error => null
+    }
+}
+
+/**
+ * lifetime_eq — equality of two service lifetimes (`singleton`/`scoped`/`transient`).
+ *
+ * @param a  the first lifetime
+ * @param b  the second lifetime
+ * @return   true iff they are the same lifetime
+ */
+pub fn lifetime_eq(a: parser::ServiceLifetime, b: parser::ServiceLifetime): bool {
+    match a {
+        parser::ServiceLifetime::Singleton => match b { parser::ServiceLifetime::Singleton => true; _ => false }
+        parser::ServiceLifetime::Scoped => match b { parser::ServiceLifetime::Scoped => true; _ => false }
+        parser::ServiceLifetime::Transient => match b { parser::ServiceLifetime::Transient => true; _ => false }
     }
 }
 

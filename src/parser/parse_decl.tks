@@ -109,9 +109,30 @@ fn parse_params(tokens: []lexer::Token, pos: u64): ParsedList<Param> | error {
 // (W11/S6, 2026-07-01) `<T: A & B | C>` — a constraint ATOM: a bare nominal name (a
 // variant/struct the type-param must nominally belong to). Never `?`/null/void (a
 // constraint targets a concrete nominal type, matching the `<T?>` ban below).
+/* (§9.2b) is the token at `pos` a service-lifetime word (`singleton`/`scoped`/`transient`)? Contextual,
+   so `service` in a constraint takes a following lifetime word but stops before `&`/`|`/`>`/anything else. */
+fn is_service_lifetime_at(tokens: []lexer::Token, pos: u64): bool {
+    if !is_name_at(tokens, pos) { return false }
+    var w = tokens[pos].text
+    w == "singleton" || w == "scoped" || w == "transient"
+}
 fn parse_constraint_atom(tokens: []lexer::Token, pos: u64): Parsed<@ConstraintExpr()> | error {
+    /* (§9.2b) FORM-word terms — force the type-argument's SHAPE (`class`/`struct`/`service [lifetime]`). */
+    if is_kind_at(tokens, pos, lexer::TokenKind::Class) {
+        return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "class"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1 }
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Struct) {
+        return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "struct"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1 }
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Service) {
+        if is_service_lifetime_at(tokens, pos + 1) {
+            var lt = match parse_service_lifetime(tokens, pos + 1) { Parsed<ServiceLifetime> as x => x; error as e => return e }
+            return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "service"; has_lifetime = true; lifetime = lt.node }; next = lt.next }
+        }
+        return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "service"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1 }
+    }
     if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) {
-        return err_at(tokens, pos, "expected a constraint name (a nominal variant/struct) in a type-parameter constraint")
+        return err_at(tokens, pos, "expected a constraint term (a form word `class`/`service`/`struct`, an interface/type name, or `notnull`) in a type-parameter constraint")
     }
     var name = tokens[pos].text
     var p = pos + 1
