@@ -1,0 +1,212 @@
+/**
+ * Tests for `teko::encoding::msgpack` — the MessagePack encoder + decoder. Byte-exact checks against
+ * the specification's format vectors across every family: positive/negative fixint and the
+ * `uint8/16/32/64` and `int8/16/32/64` widths at their boundaries, `nil`/`bool`, `str` (fixstr and
+ * `str8`), `bin8`, `array`/`map` (including nesting), the `float64` encoding plus a `float32` decode,
+ * and the extension type (`fixext1`, `fixext4`, `ext8`); plus the malformed-input error cases (M.1
+ * fail-loud via `error`, never a panic): a truncated integer, a short array, trailing bytes, the
+ * never-used `0xc1` byte, and a truncated string. This file lives under `teko::encoding::msgpack`
+ * (namespace = directory), so the functions under test are called bare, mirroring
+ * `teko::encoding::base64::base64_test.tkt`.
+ */
+
+/**
+ * Builds a `[]byte` from a slice of integer literals (spec byte vectors read as ints).
+ *
+ * @param xs  the byte values as ints
+ * @return    the values as a byte slice
+ */
+fn bytes_lit(xs: []i64): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, xs[i] to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Compares two byte slices for exact equality.
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   true when both have the same length and identical bytes
+ */
+fn slices_equal(a: []byte, b: []byte): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Unwraps a `MsgValue | error` decode result — a failure in a "should succeed" test is itself a test
+ * failure.
+ *
+ * @param result  the decode outcome under test
+ * @return        the value on success, or nil (after failing) on error
+ */
+fn expect_value(result: MsgValue | error): MsgValue {
+    match result {
+        MsgValue as v => v
+        error => { teko::assert::is_true(false); msg_nil() }
+    }
+}
+
+/**
+ * Asserts a decode result is an `error` (a "should fail" case).
+ *
+ * @param result  the decode outcome under test
+ */
+fn expect_error(result: MsgValue | error) {
+    match result {
+        MsgValue => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * Asserts a value encodes to an expected vector and that the vector decodes back to an equal value.
+ *
+ * @param v     the value under test
+ * @param want  the expected encoded bytes
+ */
+fn assert_vector(v: MsgValue, want: []byte) {
+    teko::assert::is_true(slices_equal(encode(v), want))
+    teko::assert::is_true(msg_equal(v, expect_value(decode(want))))
+}
+
+/**
+ * Collects two values into a slice.
+ *
+ * @param a  the first value
+ * @param b  the second value
+ * @return   the two-element slice
+ */
+fn pair(a: MsgValue, b: MsgValue): []MsgValue {
+    var out: []MsgValue = teko::list::empty()
+    out = teko::list::push(out, a)
+    out = teko::list::push(out, b)
+    out
+}
+
+/**
+ * The unsigned integer families encode with the shortest format at their boundaries and round-trip.
+ */
+#test
+fn unsigned_integer_formats_match_spec() {
+    assert_vector(msg_uint(0), bytes_lit([0x00]))
+    assert_vector(msg_uint(127), bytes_lit([0x7f]))
+    assert_vector(msg_uint(128), bytes_lit([0xcc, 0x80]))
+    assert_vector(msg_uint(256), bytes_lit([0xcd, 0x01, 0x00]))
+    assert_vector(msg_uint(65536), bytes_lit([0xce, 0x00, 0x01, 0x00, 0x00]))
+    assert_vector(msg_uint(4294967296), bytes_lit([0xcf, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]))
+}
+
+/**
+ * The negative integer families encode with the shortest signed format at their boundaries and
+ * round-trip.
+ */
+#test
+fn negative_integer_formats_match_spec() {
+    assert_vector(msg_int(-1), bytes_lit([0xff]))
+    assert_vector(msg_int(-32), bytes_lit([0xe0]))
+    assert_vector(msg_int(-33), bytes_lit([0xd0, 0xdf]))
+    assert_vector(msg_int(-129), bytes_lit([0xd1, 0xff, 0x7f]))
+    assert_vector(msg_int(-32769), bytes_lit([0xd2, 0xff, 0xff, 0x7f, 0xff]))
+    assert_vector(msg_int(-2147483649), bytes_lit([0xd3, 0xff, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff]))
+}
+
+/**
+ * nil, bool, str, and bin formats encode and round-trip.
+ */
+#test
+fn scalar_formats_match_spec() {
+    assert_vector(msg_nil(), bytes_lit([0xc0]))
+    assert_vector(msg_bool(false), bytes_lit([0xc2]))
+    assert_vector(msg_bool(true), bytes_lit([0xc3]))
+    assert_vector(msg_str(""), bytes_lit([0xa0]))
+    assert_vector(msg_str("hello"), bytes_lit([0xa5, 0x68, 0x65, 0x6c, 0x6c, 0x6f]))
+    assert_vector(msg_bin(bytes_lit([0x01, 0x02, 0x03])), bytes_lit([0xc4, 0x03, 0x01, 0x02, 0x03]))
+}
+
+/**
+ * A 32-byte string crosses from fixstr into the str8 format.
+ */
+#test
+fn long_string_uses_str8() {
+    var s = ""
+    var i: u64 = 0
+    loop {
+        if i >= 32 { break }
+        s = concat(s, "a")
+        i++
+    }
+    var got = encode(msg_str(s))
+    teko::assert::eq_u64(got.len, 34)
+    teko::assert::is_true(got[0] == 0xd9 to byte)
+    teko::assert::is_true(got[1] == 0x20 to byte)
+    teko::assert::is_true(msg_equal(msg_str(s), expect_value(decode(got))))
+}
+
+/**
+ * array and map formats encode and round-trip, including a nested array-in-map.
+ */
+#test
+fn container_formats_match_spec() {
+    assert_vector(msg_array(teko::list::empty()), bytes_lit([0x90]))
+    var xs: []MsgValue = teko::list::empty()
+    xs = teko::list::push(xs, msg_uint(1))
+    xs = teko::list::push(xs, msg_uint(2))
+    xs = teko::list::push(xs, msg_uint(3))
+    assert_vector(msg_array(xs), bytes_lit([0x93, 0x01, 0x02, 0x03]))
+    assert_vector(msg_map(teko::list::empty(), teko::list::empty()), bytes_lit([0x80]))
+    assert_vector(msg_map(pair(msg_uint(1), msg_uint(3)), pair(msg_uint(2), msg_uint(4))), bytes_lit([0x82, 0x01, 0x02, 0x03, 0x04]))
+    var mv: []MsgValue = teko::list::empty()
+    mv = teko::list::push(mv, msg_array(pair(msg_str("x"), msg_bool(true))))
+    var mk: []MsgValue = teko::list::empty()
+    mk = teko::list::push(mk, msg_str("k"))
+    var doc = msg_map(mk, mv)
+    teko::assert::is_true(msg_equal(doc, expect_value(decode(encode(doc)))))
+}
+
+/**
+ * float64 encodes exactly and a float32 input decodes to the value it denotes.
+ */
+#test
+fn float_formats_match_spec() {
+    assert_vector(msg_float(1.5), bytes_lit([0xcb, 0x3f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+    var back = expect_value(decode(bytes_lit([0xca, 0x3f, 0xc0, 0x00, 0x00])))
+    teko::assert::is_true(back.kind == MsgKind::Float)
+    teko::assert::eq_f64(back.real, 1.5, 0.0)
+}
+
+/**
+ * Extension formats encode and round-trip: a fixext1, a fixext4 with a negative type code, and an
+ * ext8.
+ */
+#test
+fn extension_formats_match_spec() {
+    assert_vector(msg_ext(5, bytes_lit([0x99])), bytes_lit([0xd4, 0x05, 0x99]))
+    assert_vector(msg_ext(-1, bytes_lit([0x0a, 0x0b, 0x0c, 0x0d])), bytes_lit([0xd6, 0xff, 0x0a, 0x0b, 0x0c, 0x0d]))
+    assert_vector(msg_ext(1, bytes_lit([0x01, 0x02, 0x03])), bytes_lit([0xc7, 0x03, 0x01, 0x01, 0x02, 0x03]))
+}
+
+/**
+ * Malformed inputs decode to a checked error: a truncated integer, a short array, trailing bytes,
+ * the never-used `0xc1` byte, and a truncated string.
+ */
+#test
+fn malformed_inputs_are_errors() {
+    expect_error(decode(bytes_lit([0xcc])))
+    expect_error(decode(bytes_lit([0x93, 0x01, 0x02])))
+    expect_error(decode(bytes_lit([0x00, 0x00])))
+    expect_error(decode(bytes_lit([0xc1])))
+    expect_error(decode(bytes_lit([0xa5, 0x68, 0x69])))
+}
