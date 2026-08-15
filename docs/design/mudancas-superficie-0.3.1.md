@@ -1130,8 +1130,8 @@ minimiza esse retrabalho (a superfície já nasce triada).
 | §9.2b solver de constraint de forma | §7, §10 | 2 | ✅ | ✅ **ENTREGUE** — notnull + form-words/`service [lifetime]` + disjunção (drenado em `fix/retirement`, `cf0c70b5`) |
 | **§13 item-14 fat-header** | §10 (Intent/Ctx) | 1 | ✅ (§1,§4.1) | ✅ **ENTREGUE** (2026-08-15) — fat header `tk_struct_hdr` (crumb 5) + layout FAT (6a) + receiver-as-ref/`self` gruda (6b) + fixtures A1-A4 + reseed; drenado por ff em `fix/retirement` `6f4d78ba`; sweep 32/32 verde |
 | §7 DI service/svc | §10 | 1 | ✅ | ✅ **Part A ENTREGUE** (2026-08-15, `0a246dfe`) — kind `service`+`ServiceLifetime`, `svc`/`has_svc` comp-time, gate `IService`, conserto da crash `svc<iface>`, DI-anotação aposentada, **costura `svc_scope_expr(lifetime, regions)` congelada** (program-root); fixture `service_svc` 11/11 parity, fixpoint inert, lanes verdes. **Part B (binding arena por-thread) = costura deixada p/ Doc 1 §8.** |
-| **§14 Família B (comptime)** | — | 0 | ✅ | 🔄 parcial · **← TOPO** |
-| §15 global | (stdlib) | — | — | 🔄 parcial |
+| **§14 Família B (comptime)** | — | 0 | ✅ | ✅ **ENTREGUE** (engine B2–B5 já aterrissada `da82d0bd`/`583707d7`/`3b8d9b0c`/`f3768297`/`a0586372`; fixtures `comptime_expand`/`reflect`/`fields`; fixpoint tri-gen byte-id). **Açúcar de alcance `exp global comptime sizeof/typename/fields` pende §15 `global`.** |
+| **§15 global** | (§14 sugar, §11) | — | ✅ (mecanismo) | 🔄 ausente no lexer/parser · **← TOPO** |
 | §11 visibilidade `exp`/`pub` | §16, §17 | 2 | ⏳ (stdlib) | ⏳ ordem: PENÚLTIMA |
 | §10 concorrência | — | 0 | ❌ | ⏳ design-only (sink) |
 | §16 FFI libc-direct | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
@@ -1143,14 +1143,16 @@ arena (**§7 Parte B**, **§10**), "finalizar" = fazer a porção Doc 2 + deixar
 (`svc_scope_expr` etc.) como o ponto exato de encaixe do Doc 1 §8. Só quando TODAS as porções Doc-2
 estiverem feitas é que o Doc 1 entra (o dono analisa antes).
 
-**Topo atual (mais-dependido com deps resolvidas):** **§14 Família B (comptime)** — §7 Part A aterrissou
-(`0a246dfe`). Ordem de moagem restante (um reseed por vez, sem parar no meio): **§14 (comptime) → §15
-(global) → frente stdlib (destrava §11) → §11 `exp`/`pub` → §16/§17 → §10 (porção Doc 2)**. Cada item vai
-até a sua completude Doc-2; as costuras de arena (§7-B `svc_scope_expr`, §10-substância) ficam nomeadas para
-o Doc 1, que vem INTEIRO depois — e só depois desta lista fechar.
+**Topo atual (mais-dependido com deps resolvidas):** **§15 `global`** — o engine do §14 (comptime B2–B5)
+já estava aterrissado (subagente verificou; fixpoint tri-gen byte-id). §15 é o MECANISMO do modificador
+`global` (byte-idêntico: aceita `global`, mantém a injeção; a migração shadow→global por-símbolo é fase
+posterior gated na stdlib) — e destrava o açúcar `exp global comptime sizeof/typename/fields` do §14.
+Ordem de moagem restante: **§15 (global, mecanismo) → frente stdlib (destrava §11) → §11 `exp`/`pub` →
+§16/§17 → §10 (porção Doc 2)**. Cada item vai até a completude Doc-2; as costuras (arena §7-B/§10, migração
+por-símbolo §15) ficam nomeadas para depois — o Doc 1 vem INTEIRO só quando esta lista fechar.
 
-**Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, **§7 Part A ✅**. Restam 6 itens (§14, §15,
-§11, §16, §17, §10) + a frente stdlib.
+**Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, **§14 Família B ✅**. Restam 5
+itens (§15, §11, §16, §17, §10) + a frente stdlib.
 
 ---
 
