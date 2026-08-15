@@ -1187,11 +1187,21 @@ Python int nativo+C exit 0). **Encoding p/ assinatura COMPLETO** (base64+xml+cbo
 (`383271e0` — `rsa.tks`: PKCS#1-v1.5 + PSS sign/verify sobre bigint, SHA-256/384/512; keys por componentes
 brutos n/e/d, sem ASN.1; non-CRT YAGNI. Cross-check byte-exato vs Python `cryptography` 41: PKCS1v1.5 assina
 idêntico, PSS aceito pelo verifier OpenSSL. Lane fechou gap: adicionou **SHA-384** a `hash.tks` — faltava).
-Desbloqueia **RS256/384/512 + PS256/384/512** (JOSE) · `rsa-sha256` (XML-DSig) · RSA COSE. **Falta pk parte 2:**
-ECDSA-P256 + Ed25519 (aritmética de curva) → aí `jose`/`xmldsig`/`cose` fecham o conjunto de algs comum de uma
-vez. Encoding restante (csv/toml/ini/yaml/protobuf/asn1/fixed) fica pra depois.
-**Achado de compilador extra (seed .31):** `pub` é keyword reservada, não pode ser nome de parâmetro
-(`fn f(pub: T)` → erro); contornado nomeando `pubkey`.
+Desbloqueia **RS256/384/512 + PS256/384/512** (JOSE) · `rsa-sha256` (XML-DSig) · RSA COSE. **`crypto::pk`
+parte 2 ✅** (`e46821f0` — `ec_p256.tks`: ECDSA/NIST P-256 short-Weierstrass afim sobre bigint, sign(k
+externo)/verify, SEC1 `04||X||Y`, SHA-256/384/512; `ed25519.tks`: Ed25519 RFC 8032 completo, adição Edwards
+unificada, `d`/base/`sqrt(-1)` computados dos inteiros RFC, não hex-mágicos. Cross-check: Ed25519 vs RFC 8032
+§7.1 TEST 1/2/3 byte-exato; ECDSA P-256 (r,s) aceito pelo verifier OpenSSL de `cryptography`). **`crypto::pk`
+COMPLETO** (RSA + ECDSA-P256 + Ed25519) → agora `jose`/`xmldsig`/`cose` fecham o conjunto comum
+(HS/RS/PS/ES/EdDSA) de uma vez. Encoding restante (csv/toml/ini/yaml/protobuf/asn1/fixed) fica pra depois.
+**Achados de compilador extras (seed .31, TODOS stale-seed/tree-mismatch — contornados; merecem re-check no
+toolchain real):** (a) `pub` E `base` são keywords reservadas, não podem ser nome de parâmetro (contornado:
+`pubkey`, `ground`). (b) `bigint::of(n)` p/ `i64` positivo pequeno retorna com flag de sinal negativo no seed
+(reproduzido ISOLADO em `bigint.tks` intocado; análogo estrutural manual compila/roda certo → artefato de
+seed velho, não defeito de fonte). (c) `byte ^ byte` (XOR bitwise entre dois `byte`) é rejeitado pelo checker
+do seed ("B.38 needs integer not float") — afeta idêntico o já-landed `rsa_test.tkt` (l.202/258), i.e.
+limitação de seed pré-existente/compartilhada, não introduzida. O seed .31 já falha type-check em grande parte
+da árvore self-hosted atual ("unknown type") num checkout limpo — daí a prova offline ser o registro válido.
 **⚠️ FORK DE NAMESPACE (decisão do dono):** §1.5 do catálogo diz `teko::math::bigint`, mas o **engine já
 existe** como `teko::numeric::bigint` (lastreia `dec`, literais `123bi`, e `teko::math::checked` já aponta
 callers >64-bit pra ele). O subagente **estendeu o engine existente** (regra "estenda não duplique"), NÃO
