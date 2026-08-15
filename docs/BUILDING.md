@@ -14,8 +14,7 @@ No other dependencies: the compiler links **nothing beyond libc** (no libm on ma
 
 ## 2. The execution model
 
-Native is the sole execution engine — there is no interpreter of any kind in the toolchain or
-in generated programs:
+Native is the sole execution engine, in the toolchain and in generated programs:
 
 - `teko build` lowers the checked program to C, then invokes `cc` for an optimized release
   binary. Production path.

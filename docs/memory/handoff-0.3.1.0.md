@@ -385,7 +385,7 @@ Outro achado seu, também calado: `FCmpLt`/`FCmpLe` iam para o `lt`/`le` do inte
 
 ### PARAGENS QUE FICAM NOMEADAS, não escondidas
 
-`pin_args`/`select_param` com >8 argumentos de uma classe (janela de arity, **simétrica** GPR/FPR — não é buraco de floats); `UCVTF` codifica e é testado mas é **inalcançável** porque `LUnOp` não declara `IToF` sem sinal; `minst_interp` sem a família float (espelha o gap do interp da LIR); `%` sobre floats é **recusado** pelo checker e `x / 0.0` **armadilha**.
+`pin_args`/`select_param` com >8 argumentos de uma classe (janela de arity, **simétrica** GPR/FPR — não é buraco de floats); `UCVTF` codifica e é testado mas é **inalcançável** porque `LUnOp` não declara `IToF` sem sinal; `minst_oracle` sem a família float (espelha o gap do oracle da LIR); `%` sobre floats é **recusado** pelo checker e `x / 0.0` **armadilha**.
 
 ### O QUE FICOU POR MEDIR, e a razão é a máquina
 
@@ -1880,7 +1880,7 @@ O que segue é o que se usa em todo despacho:
   defeito do C.
 - **mingw é PROIBIDO.** Cross-compiling é objetivo declarado, **depois** dos nativos, e nunca por
   mingw. MSVC no Windows. Linker nativo em vez de `cc`/`gcc` quando houver binário fim-a-fim.
-- **Zero menções ao interpretador retirado** em texto novo.
+- **Zero menções ao motor legado retirado** em texto novo.
 - **`void` é banido. Sobrecarga é banida.** Ao invocar uma das quatro referências de desenho
   (superfície → Rust, controlo → Zig, addins → C#, comportamentos → Go), **verificar que a NOSSA
   superfície suporta o que a referência oferece.** Eu escorreguei nisto hoje.
@@ -3012,7 +3012,7 @@ A rede de *releases* não é alcançável da caixa (`cannot list releases … ne
 
 ```
 teko-ci: FATAL: pinned ladder rung 71c763d0… FAILED to build — the pin in LADDER_RUNGS is obsolete.
-  src/lir/lir_interp.tks:126:4: type 'i128' was removed (0.3.1)
+  src/lir/lir_oracle.tks:126:4: type 'i128' was removed (0.3.1)
   src/parser/parse_pattern.tks:7:4:  unknown type: Pattern
 ```
 

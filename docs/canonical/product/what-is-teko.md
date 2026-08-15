@@ -10,7 +10,7 @@ programmer to learn a borrow checker.
 ## The pillars
 
 - **All-native output.** `teko build` compiles straight to a native object and links it — no
-  GC, no interpreter in the shipped binary.
+  GC; the shipped binary is native machine code.
 - **Native debug iteration.** `teko run` compiles the same checked program natively at `-O0`
   and runs it immediately — fast, native debugging, full optimization control via `-O` flags
   when you want it.

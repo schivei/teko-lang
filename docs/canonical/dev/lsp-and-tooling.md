@@ -77,7 +77,7 @@ heavy to justify on every push, but light enough to run on a schedule/PR-label b
 | **`teko fmt`** | The canonical formatter — zero-option, gofmt-style: there is exactly one formatting of any program. `--check` is a CI gate; comment re-attachment (comments aren't AST nodes) reconciles the token stream against the formatted output. Proven idempotent (`fmt(fmt(x)) == fmt(x)`) and behavior-preserving over the whole compiler's own source tree. | Parser/AST |
 | **`teko doc`** | A documentation generator: walks `pub`/`exp` items and their doc-comments into HTML (a static site), Markdown, and a machine-readable JSON index — the same index the LSP's hover feeds from, so the two never describe an item differently. | Parser/AST |
 | **`teko lint`** | Style/best-practice checks beyond type errors, reusing the checker's own structures — the language's law-encoded conventions (no `match` on `bool`, `loop`-only, prefer `[..xs, x]` over a push chain), unused-import and shadowing hints. `--fix` mechanizes the safely-automatable subset. | Checker |
-| **`teko repl`** | An interactive read-eval-print session: incrementally evaluate expressions/declarations and inspect values without a full build cycle. | The checked-program tree-walk that also backs fast dev iteration |
+| **`teko repl`** | An interactive read-eval-print session: incrementally evaluate expressions/declarations and inspect values without a full build cycle. | The native -O0 compile-and-run that also backs fast dev iteration |
 
 All four are ordinary `teko` subcommands, implemented as Teko source paired with tests exactly
 like every other compiler module — no bespoke plugin architecture, no external process to
@@ -85,9 +85,6 @@ install separately.
 
 ## A note on `teko repl`'s foundation
 
-`teko repl`'s original design leaned on a tree-walking interpreter to evaluate expressions
-incrementally without invoking full codegen. Since the interpreter's retirement as a production execution engine (see
-`self-host-fixpoint.md`), the REPL's evaluation strategy is restated on top of the native
-backend's fast, unoptimized (`-O0`) debug-compile-and-run path rather than a tree-walker — the
-observable behavior (incremental, interactive evaluation) is unchanged; the mechanism
-underneath it necessarily is.
+`teko repl` evaluates expressions incrementally on top of the native backend's fast, unoptimized
+(`-O0`) debug-compile-and-run path (see `self-host-fixpoint.md`). The observable behavior is
+incremental, interactive evaluation.

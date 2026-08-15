@@ -81,9 +81,8 @@ The largest stage, and the one that owns most of the language's guarantees:
 `lower.tks` walks the TAST once and emits LIR: virtual-register operations over explicit
 basic blocks with block arguments (simpler than full SSA — no phi nodes to reconcile).
 Architecture-agnostic: nothing in this stage knows whether the target is x86_64 or arm64.
-`lir_interp.tks` is an LIR interpreter used as an **oracle** — it lets the test suite assert
-that a native backend's compiled behavior matches a direct, backend-independent evaluation of
-the same IR, an additional differential-correctness check on top of the C-vs-native comparison.
+A native backend's compiled behavior is checked against the transpile-to-C path (the
+C-vs-native differential-correctness comparison).
 
 ### Native backend (`src/backend/`)
 Consumes LIR, produces real machine code. See `native-backend.md` for the full architecture

@@ -255,15 +255,15 @@ Medido no mapa de N=500, não deduzido. `AUSENTE` = zero bytes atribuídos, isto
 |---|---|---|---|---|
 | 1 | `backend/isel_arm64.tks:91` `vinfo_set` | 479,1 MB / 326 133 (22,3 %) | 477,2 MB / 326 506 (**91,7 %**) | **passa a dominar**; conserto já existe em `7fe67987`, por integrar |
 | 2 | `backend/regalloc.tks` `sort_by_start` | 1628,8 MB / 115 785 (75,9 %) | **AUSENTE** (→ `merge_runs`, 5,8 MB / 228) | **CONSERTADO aqui** |
-| 3 | `lir/lir_interp.tks:73` `rf_set` | AUSENTE | AUSENTE | **não corre na compilação** — é do interpretador de LIR |
-| 4 | `backend/minst_interp.tks:156` `iv_set` | AUSENTE | AUSENTE | **não corre na compilação** — interpretador de máquina |
-| 5 | `backend/minst_interp.tks:246` `mem_set` | AUSENTE | AUSENTE | **não corre na compilação** — idem |
+| 3 | `lir/lir_oracle.tks:73` `rf_set` | AUSENTE | AUSENTE | **não corre na compilação** — é do motor legado de LIR |
+| 4 | `backend/minst_oracle.tks:156` `iv_set` | AUSENTE | AUSENTE | **não corre na compilação** — motor legado de máquina |
+| 5 | `backend/minst_oracle.tks:246` `mem_set` | AUSENTE | AUSENTE | **não corre na compilação** — idem |
 | 6 | `backend/minst.tks:1451` `mreg_list_set` (+ `minst_x86.tks:1246`) | AUSENTE | AUSENTE | não aparece: o custo é O(params), abaixo do limiar do mapa |
 | 7 | `backend/minst.tks:1404` `append_minst` (gémeo x86) | 5,6 MB / 39 416 (0,26 %) | 5,6 MB / 39 480 (**1,08 %**) | sobe em fracção, não em bytes; 3º no mapa dos dois consertos |
 
 **A correcção que a medição faz ao relatório anterior:** `rf_set`, `iv_set` e `mem_set` foram
 contados como irmãos do defeito, e têm mesmo a mesma FORMA — mas **nenhum deles corre no
-caminho de compilação**. Vivem nos interpretadores (`lir_interp`, `minst_interp`), que só o
+caminho de compilação**. Vivem nos motores legados (`lir_oracle`, `minst_oracle`), que só o
 portão de teste invoca. Encontrar o símbolo não é encontrar o comportamento: custam zero num
 `teko build`.
 

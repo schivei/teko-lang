@@ -137,7 +137,7 @@ Degrau 1 (`71c763d0`) construído com a réplica do seed publicado:
 ✗ src/build/init.tks:282:58: the `T?` nullable sugar has been removed — write 'T | null' instead
 ✗ src/time/time.tks:86:15:  type 'i128' was removed (0.3.1)
 … 124 diagnósticos de tipo/açúcar removidos, em ~40 ficheiros
-   (isel_arm64, isel_riscv, minst_interp, stackify, progress, borrow, collect,
+   (isel_arm64, isel_riscv, minst_oracle, stackify, progress, borrow, collect,
     comptime_fold, consteval, di, initanalysis, …)
    + unknown type: Tkr / TkrFeature / TkrMatch / Type
 ```

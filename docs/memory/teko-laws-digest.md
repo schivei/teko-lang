@@ -16,7 +16,7 @@ This does not soften "no new C emissions" — that ruling is about the compiler 
 
 Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `tk_u64_to_str_len` — out-parameter-length twins of three existing builders, because the native backend's `LCall` captures a result in ONE register while a `tk_str` returned by value occupies the two-eightbyte SysV/AAPCS64 pair. Thin wrappers over their own twins, owning no logic, mirroring `tk_slice_push`'s established `(…, &out_len)` shape.
 
-**Twins retired (2026-07-13, #524):** the tree-walking interpreter, REPL, C bootstrap all retired; native AOT sole engine.
+**Twins retired (2026-07-13, #524):** native AOT is the sole engine.
 
 **W15-from-now:** code quality (doc-comments only, no inline; flatten, extract; cyclomatic <N) applied continuously, not deferred.
 
@@ -98,7 +98,7 @@ Das quatro referências, **só o C# faz isto** — refina A MESMA variável por 
   carriers de 128 bits que eram provas carregando peso, e em três lugares distintos a substituição foi
   uma frase de doc-comment que deixou de ser verdadeira: os `@throws panics on overflow` do
   `teko::time` (a flag nunca é definida), o "wrapping, never checked" do `numint_to_i64` (é UB de
-  signed), e o "as fixtures são não-negativas" do `lir_interp` (com i64, u64 de bit alto é negativo —
+  signed), e o "as fixtures são não-negativas" do `lir_oracle` (com i64, u64 de bit alto é negativo —
   o oráculo divergiu do backend que ele valida). O contra-exemplo correto está no mesmo trem:
   `numint_hi`/`numint_lo`, com prova escrita e verificável no doc-comment. **Frase sobrevive a
   refactor; significado não.**

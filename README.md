@@ -20,7 +20,7 @@
 
 Teko is a compiled, statically-typed programming language with a **fully self-hosting compiler**: the compiler is written in Teko itself and compiles its own source tree to a working native binary — and that binary rebuilds itself to a byte-identical fixpoint (generation 2 == generation 3).
 
-- **All-native output.** `teko build` lowers your program to C and hands it to the host C compiler — no GC, no interpreter in production binaries. (C is the current lowering target; an own AOT backend is the 0.3 direction, not yet shipped.)
+- **All-native output.** `teko build` lowers your program to C and hands it to the host C compiler — no GC; production binaries are native machine code. (C is the current lowering target; an own AOT backend is the 0.3 direction, not yet shipped.)
 - **Native debug iteration.** `teko run` compiles the same checked program natively under `-O0` and executes it immediately in-process — fast, native debugging with full optimization choice via `-O` flags.
 - **Tests are part of the build.** `teko build` runs your `#test` functions **before** codegen; failing tests or a coverage floor below the manifest's threshold **bar the release**. Coverage can be exported as Cobertura XML (`--coverage`).
 - **Errors are values.** Functions return `T | error`; the `?` family (`T?`, `?.`, `??`) handles absence. There is no `null` outside `T?`, no exceptions, no `never`.

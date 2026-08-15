@@ -474,7 +474,7 @@ calcular largura de valor gordo com `ltype_size(ltype_of(t))`.**
 
 **O que NÃO se faz, e porquê.** Não se acrescenta uma classe gorda à `LType` nem um segundo VReg de
 resultado à `LInst`. Isso obrigaria a mexer nos dois isels, no regalloc, no stackify, no printer e
-no interpretador de LIR (`src/lir/lir_interp.tks`) — e não resolveria nada que a convenção de slot
+no motor legado de LIR (`src/lir/lir_oracle.tks`) — e não resolveria nada que a convenção de slot
 escondido (repr. 6) não resolva já, provada a funcionar (sonda `fatret`: nativo e C ambos 0). A
 doença é ARITMÉTICA DISPERSA, não a LIR de um word. Isto alinha com o ruling do dono no degrau 6
 (*"uniformity is the opposite of what has bitten this lane"*).
@@ -740,7 +740,7 @@ paragem a apontar-lhes o sítio, e o `fixpoint` é cego a eles por construção.
 
 **Correcção de raiz.** Seis crumbs, **um ficheiro de produto** (`src/lir/lower.tks`) mais três
 entradas em `src/runtime/teko_rt.{c,h}`. Zero mudanças em `src/lir/lir.tks`, zero em
-`src/backend/**`, zero em regalloc/stackify/printer/`lir_interp.tks`. Nenhuma funcionalidade nova de
+`src/backend/**`, zero em regalloc/stackify/printer/`lir_oracle.tks`. Nenhuma funcionalidade nova de
 linguagem, portanto nenhuma restrição de seed de bootstrap.
 
 **A comparação:** a correcção de raiz custa aproximadamente o mesmo que **3** degraus e fecha **10**,
