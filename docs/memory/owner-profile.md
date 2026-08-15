@@ -85,6 +85,12 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
 ## Git / registro
 - Onda drena em **`fix/retirement`**, **sem PR**, **forward-only** (force-push desabilitado); fetch+rebase
   antes de push.
+- **RESTRIÇÃO (ruling do dono 2026-08-15): todo trabalho drena DIRETO na umbrella `fix/retirement`, SEM
+  abrir PR novo** — o PR umbrella já cobre a onda. Um agente em branch isolada **entrega ali** e o
+  coordenador **dreno por ff/merge** na `fix/retirement` (nunca abrir PR por crumb/feature). **Nova branch
+  SEMPRE se baseia no ÚLTIMO HEAD de `origin/fix/retirement`** (fetch primeiro → `git worktree add -b
+  <fresco> origin/fix/retirement`), nunca de um ponto antigo — senão o drain diverge. Regra dada após eu
+  abrir o PR #118 por engano (fechado) em vez de drenar `feat/shape-constraint-solver` por ff.
 - Commits: **English Conventional-Commits**, **sem trailers** (no `Co-Authored-By`, no "Generated with"),
   **sem identificador de modelo** em nada versionado (só no chat).
 - Decisões vivem no **Doc 2** (`docs/design/mudancas-superficie-0.3.1.md`, a lei) + conversa; atualizadas
