@@ -1316,10 +1316,12 @@ de C.
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
-`teko fmt --check` verde local. O **verde in-tree** vem na sequência do dono: (1) Doc 2 → 100%; (2) corrigir
-os testes da **perna C** do CI → fecha verde (é onde as fixtures `.tkt` carimbam, via backend C); (3) Doc 1
-→ então a **perna native** fecha. Os subagentes não têm `gh` auth pra buscar o compilador real (blocker de
-ambiente), então a prova offline é o interim aceito até a perna C.
+**build real** (compile, nunca `teko test .` — testes só no CI, é OOM certo local). **CORREÇÃO DO DONO
+(2026-08-15): garantir que AMBAS as pernas (C e native) compilem É O TRABALHO da Doc-2, não uma pré-condição.**
+Eu tratava a perna-native-verde como bloqueio do §16 ("não pode arrancar o `teko_rt` até a native se sustentar")
+— ERRADO. Reescrever o runtime C→Teko/FFI (§16) é **justamente o que fecha a perna native**; a vermelha de hoje
+é o estado que esse trabalho conserta. Então: dentro da Doc-2, a reescrita do runtime deixa **as duas pernas
+compilando**; os testes rodam no CI (nunca local). Nada de "native depois da Doc-1".
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
