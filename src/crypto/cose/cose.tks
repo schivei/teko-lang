@@ -1,0 +1,565 @@
+use teko::crypto
+use teko::encoding::cbor
+use teko::numeric::bigint
+
+/**
+ * `teko::crypto::cose` — COSE (CBOR Object Signing and Encryption, RFC 9052 structures / RFC 9053
+ * algorithms), the CBOR document-signing lane completing the trio started by
+ * `teko::crypto::jose` (JSON) and `teko::crypto::xmldsig` (XML). Composes the already-shipped
+ * `teko::encoding::cbor` struct-tagged `CborValue`/`encode_canonical`/`decode` engine with the
+ * already-shipped `teko::crypto` primitive layer (`rsa`, `ec_p256`, `ed25519`, `mac`).
+ *
+ * SCOPE: `COSE_Sign1` (`cose_sign1.tks`, single-signer, tag 18) and `COSE_Mac0`
+ * (`cose_mac0.tks`, tag 17) — RFC 9052 §4.2/§6.2, the two structures that cover the overwhelming
+ * majority of real COSE deployments (WebAuthn/FIDO2 attestation, CWT). Multi-signer `COSE_Sign`
+ * (tag 98) and encryption (`COSE_Encrypt`/`COSE_Encrypt0`) are explicitly OUT OF SCOPE — a
+ * documented follow-on, not a gap in this unit (mirroring `teko::crypto::jose`'s JWE exclusion).
+ *
+ * ALGORITHMS (RFC 9053 §2/§3 `alg` label 1 registry values): `ES256` (-7, ECDSA P-256 +
+ * SHA-256), `EdDSA` (-8, Ed25519), `PS256` (-37, RSASSA-PSS + SHA-256, salt length 32),
+ * `RS256` (-257, RSASSA-PKCS1-v1_5 + SHA-256, the RFC 8812 COSE addition), and `HMAC 256/256`
+ * (5, for `COSE_Mac0` only). `ES256`'s signature is the RAW `r || s` 64-byte concatenation
+ * (RFC 9053 §2.1), the same fixed-width encoding `teko::crypto::jose::jws` uses for JOSE ES256 —
+ * `teko::crypto::ec_p256::ecdsa_p256_sign`/`verify` already speak that shape natively.
+ *
+ * KEYS ARE CALLER-SUPPLIED `teko::crypto` key types wrapped in the tagged structs `CoseSigningKey`
+ * / `CoseVerificationKey` below (mirroring `teko::crypto::xmldsig`'s `SigningKey`/
+ * `VerificationKey` tagged-struct choice) — NOT a `COSE_Key` (RFC 9052 §7) CBOR structure. Parsing
+ * `COSE_Key` maps is a documented follow-on, not implemented here (the issue explicitly scopes
+ * key material as caller-supplied).
+ *
+ * DETERMINISTIC/CANONICAL CBOR. Every structure this unit builds is rendered with
+ * `cbor::encode_canonical` (RFC 8949 §4.2.1 preferred serialization + sorted map keys) — the
+ * signing-stable form RFC 9052 §14 recommends. The protected header bucket is always present
+ * (at minimum carrying `alg`, label 1); the unprotected bucket optionally carries `kid`
+ * (label 4). Content is always EMBEDDED (never the `nil` detached-payload form RFC 9052 §4.2
+ * also allows) — a documented follow-on, matching this unit's JOSE/XML-DSig siblings' embedded-
+ * by-default posture.
+ *
+ * ERRORS ARE VALUES, reusing `teko::crypto::CryptoError` (`crypto.tks`) — no new error type.
+ * Verification never panics: a malformed CBOR document, a wrong-shape COSE structure, an
+ * unsupported `alg`, a key/alg family mismatch, or a tampered signature/tag is a `CryptoError`.
+ *
+ * NO INDEX-ASSIGNMENT. Every byte/list buffer here is built by `teko::list::push` (functional
+ * growth), the same discipline every sibling crypto file in this project uses.
+ */
+
+/**
+ * The COSE signature/MAC algorithm this unit implements (RFC 9053 §2/§3, the `alg` header
+ * parameter, label 1). `Hmac256` (HMAC 256/256) is meaningful only for `COSE_Mac0`; the other
+ * four are meaningful only for `COSE_Sign1`.
+ */
+exp type CoseAlg = enum { ES256; EdDSA; PS256; RS256; Hmac256 }
+
+/**
+ * The RFC 9053 IANA COSE Algorithms registry integer for `alg` — the exact value the protected
+ * header's label-1 member carries.
+ *
+ * @param alg  the algorithm
+ * @return     the registry integer (`-7`, `-8`, `-37`, `-257`, or `5`)
+ */
+fn cose_alg_label(alg: CoseAlg): i64 {
+    match alg {
+        ES256 => -7
+        EdDSA => -8
+        PS256 => -37
+        RS256 => -257
+        Hmac256 => 5
+    }
+}
+
+/**
+ * Parses an RFC 9053 registry integer back into a `CoseAlg`. Any value outside this unit's five
+ * supported algorithms fails closed as a `CryptoError` rather than being silently ignored.
+ *
+ * @param label  the registry integer read off a protected header
+ * @return       the matching `CoseAlg`, or a `CryptoError` for an unsupported/unknown label
+ * @throws       `CryptoError` when `label` names an algorithm this unit does not implement
+ */
+fn cose_alg_from_label(label: i64): CoseAlg | crypto::CryptoError {
+    if label == -7 { return CoseAlg::ES256 }
+    if label == -8 { return CoseAlg::EdDSA }
+    if label == -37 { return CoseAlg::PS256 }
+    if label == -257 { return CoseAlg::RS256 }
+    if label == 5 { return CoseAlg::Hmac256 }
+    crypto::crypto_error("cose: unsupported or unknown alg label")
+}
+
+/**
+ * Which concrete key `CoseSigningKey` carries — selects which of its fields is meaningful.
+ */
+exp type CoseSigningKeyKind = enum { RsaPrivate; EcdsaPrivate; Ed25519Private }
+
+/**
+ * A `COSE_Sign1` signing key for one algorithm family. A tagged struct (mirrors
+ * `teko::crypto::xmldsig`'s `SigningKey` — see this module's header) rather than an inline
+ * `@Macro()` union: only one of `rsa_key`/`ec_scalar`/`ed_secret` is meaningful, selected by
+ * `kind`. Built via `cose_signing_key_rsa`/`cose_signing_key_ecdsa`/`cose_signing_key_ed25519`.
+ */
+exp type CoseSigningKey = struct {
+    /** which key family this is; selects which field below carries meaning */
+    kind: CoseSigningKeyKind
+    /** the RSA private key (`RS256`/`PS256`); meaningful only when `kind == RsaPrivate` */
+    rsa_key: crypto::RsaPrivateKey
+    /** the EC P-256 private scalar `d` (`ES256`); meaningful only when `kind == EcdsaPrivate` */
+    ec_scalar: bigint::BigInt
+    /** the Ed25519 32-byte secret seed (`EdDSA`); meaningful only when `kind == Ed25519Private` */
+    ed_secret: []byte
+}
+
+/**
+ * Which concrete key `CoseVerificationKey` carries — selects which of its fields is meaningful.
+ */
+exp type CoseVerificationKeyKind = enum { RsaPublic; EcdsaPublic; Ed25519Public }
+
+/**
+ * A `COSE_Sign1` verification key for one algorithm family. A tagged struct (see
+ * `CoseSigningKey`'s doc): only one of `rsa_key`/`ec_point`/`ed_public` is meaningful, selected
+ * by `kind`. Built via `cose_verification_key_rsa`/`cose_verification_key_ecdsa`/
+ * `cose_verification_key_ed25519`.
+ */
+exp type CoseVerificationKey = struct {
+    /** which key family this is; selects which field below carries meaning */
+    kind: CoseVerificationKeyKind
+    /** the RSA public key (`RS256`/`PS256`); meaningful only when `kind == RsaPublic` */
+    rsa_key: crypto::RsaPublicKey
+    /** the EC P-256 public point `Q` (`ES256`); meaningful only when `kind == EcdsaPublic` */
+    ec_point: crypto::P256Point
+    /** the Ed25519 32-byte public key (`EdDSA`); meaningful only when `kind == Ed25519Public` */
+    ed_public: []byte
+}
+
+/**
+ * The all-zero `RsaPrivateKey` placeholder `CoseSigningKey`'s non-RSA constructors carry in the
+ * (unused) `rsa_key` field.
+ *
+ * @return  an `RsaPrivateKey` of `n = d = e = 0`
+ */
+fn cose_zero_rsa_private_key(): crypto::RsaPrivateKey {
+    crypto::RsaPrivateKey { n = bigint::zero(); d = bigint::zero(); e = bigint::zero() }
+}
+
+/**
+ * The all-zero `RsaPublicKey` placeholder `CoseVerificationKey`'s non-RSA constructors carry in
+ * the (unused) `rsa_key` field.
+ *
+ * @return  an `RsaPublicKey` of `n = e = 0`
+ */
+fn cose_zero_rsa_public_key(): crypto::RsaPublicKey {
+    crypto::RsaPublicKey { n = bigint::zero(); e = bigint::zero() }
+}
+
+/**
+ * The point-at-infinity `P256Point` placeholder `CoseVerificationKey`'s non-EC constructors
+ * carry in the (unused) `ec_point` field.
+ *
+ * @return  the P-256 point at infinity
+ */
+fn cose_zero_p256_point(): crypto::P256Point {
+    crypto::P256Point { infinity = true; x = bigint::zero(); y = bigint::zero() }
+}
+
+/**
+ * Builds a `CoseSigningKey` for `RS256`/`PS256` from an RSA private key.
+ *
+ * @param key  the signer's RSA private key
+ * @return     a `CoseSigningKey` of kind `RsaPrivate`
+ */
+exp fn cose_signing_key_rsa(key: crypto::RsaPrivateKey): CoseSigningKey {
+    CoseSigningKey { kind = CoseSigningKeyKind::RsaPrivate; rsa_key = key; ec_scalar = bigint::zero(); ed_secret = teko::list::empty() }
+}
+
+/**
+ * Builds a `CoseSigningKey` for `ES256` from an EC P-256 private scalar.
+ *
+ * @param scalar  the signer's private scalar `d`
+ * @return        a `CoseSigningKey` of kind `EcdsaPrivate`
+ */
+exp fn cose_signing_key_ecdsa(scalar: bigint::BigInt): CoseSigningKey {
+    CoseSigningKey { kind = CoseSigningKeyKind::EcdsaPrivate; rsa_key = cose_zero_rsa_private_key(); ec_scalar = scalar; ed_secret = teko::list::empty() }
+}
+
+/**
+ * Builds a `CoseSigningKey` for `EdDSA` from an Ed25519 32-byte secret seed.
+ *
+ * @param secret_key_32  the signer's 32-byte secret key seed
+ * @return               a `CoseSigningKey` of kind `Ed25519Private`
+ */
+exp fn cose_signing_key_ed25519(secret_key_32: []byte): CoseSigningKey {
+    CoseSigningKey { kind = CoseSigningKeyKind::Ed25519Private; rsa_key = cose_zero_rsa_private_key(); ec_scalar = bigint::zero(); ed_secret = secret_key_32 }
+}
+
+/**
+ * Builds a `CoseVerificationKey` for `RS256`/`PS256` from an RSA public key.
+ *
+ * @param key  the signer's RSA public key
+ * @return     a `CoseVerificationKey` of kind `RsaPublic`
+ */
+exp fn cose_verification_key_rsa(key: crypto::RsaPublicKey): CoseVerificationKey {
+    CoseVerificationKey { kind = CoseVerificationKeyKind::RsaPublic; rsa_key = key; ec_point = cose_zero_p256_point(); ed_public = teko::list::empty() }
+}
+
+/**
+ * Builds a `CoseVerificationKey` for `ES256` from an EC P-256 public point.
+ *
+ * @param point  the signer's public point `Q`
+ * @return       a `CoseVerificationKey` of kind `EcdsaPublic`
+ */
+exp fn cose_verification_key_ecdsa(point: crypto::P256Point): CoseVerificationKey {
+    CoseVerificationKey { kind = CoseVerificationKeyKind::EcdsaPublic; rsa_key = cose_zero_rsa_public_key(); ec_point = point; ed_public = teko::list::empty() }
+}
+
+/**
+ * Builds a `CoseVerificationKey` for `EdDSA` from an Ed25519 32-byte public key.
+ *
+ * @param public_key_32  the signer's 32-byte compressed public key
+ * @return               a `CoseVerificationKey` of kind `Ed25519Public`
+ */
+exp fn cose_verification_key_ed25519(public_key_32: []byte): CoseVerificationKey {
+    CoseVerificationKey { kind = CoseVerificationKeyKind::Ed25519Public; rsa_key = cose_zero_rsa_public_key(); ec_point = cose_zero_p256_point(); ed_public = public_key_32 }
+}
+
+/**
+ * Concatenates `a` then `b` into a fresh `[]byte` — this namespace's own copy of the block-join
+ * helper every crypto file in this project carries privately (mirroring `teko::crypto::rsa`'s
+ * `rsa_bytes_concat`).
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   a fresh slice holding `a`'s bytes followed by `b`'s bytes
+ */
+fn cose_bytes_concat(a: []byte, b: []byte): []byte {
+    var out = a
+    var i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * The sub-slice `data[from..to)` as a fresh `[]byte` — this namespace's own copy of the
+ * sub-slicing helper every crypto file in this project carries privately.
+ *
+ * @param data  the source slice
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `data[from..to)`
+ */
+fn cose_bytes_slice(data: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, data[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Builds a fresh `[]CborValue` of exactly four elements, in order — the shared shape every
+ * length-4 CBOR array this unit constructs (`Sig_structure`, `MAC_structure`, and the top-level
+ * `COSE_Sign1`/`COSE_Mac0` array itself) is built from, since this project's array-literal
+ * convention for non-primitive element types is a chain of `teko::list::push` calls, not a
+ * bracket literal.
+ *
+ * @param a  the first element
+ * @param b  the second element
+ * @param c  the third element
+ * @param d  the fourth element
+ * @return   `[a, b, c, d]`
+ */
+fn cose_four(a: cbor::CborValue, b: cbor::CborValue, c: cbor::CborValue, d: cbor::CborValue): []cbor::CborValue {
+    var out: []cbor::CborValue = teko::list::empty()
+    out = teko::list::push(out, a)
+    out = teko::list::push(out, b)
+    out = teko::list::push(out, c)
+    out = teko::list::push(out, d)
+    out
+}
+
+/**
+ * The value mapped to integer label `label` in CBOR map `map`, or `null` when no key of `map`
+ * encodes to that integer.
+ *
+ * @param map    a decoded CBOR map
+ * @param label  the integer header label to look up
+ * @return       the mapped value, or `null` when absent
+ */
+fn cose_map_get(map: cbor::CborValue, label: i64): cbor::CborValue | null {
+    var target = cbor::cbor_int(label)
+    var i: u64 = 0
+    loop {
+        if i >= map.keys.len { break }
+        if cbor::cbor_equal(map.keys[i], target) { return map.vals[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * Converts a decoded CBOR integer item (`Uint` or `Nint`) to an `i64`, rejecting a magnitude too
+ * large to fit and any non-integer kind. Every COSE `alg`/`kid`-adjacent label this unit reads
+ * fits comfortably in this range; a `CryptoError` here signals a malformed or out-of-registry
+ * header rather than an authoring bug.
+ *
+ * @param v  the decoded CBOR item
+ * @return   the equivalent `i64`, or a `CryptoError`
+ * @throws   `CryptoError` when `v` is not an integer kind, or its magnitude exceeds `i64`'s range
+ */
+fn cose_cbor_to_i64(v: cbor::CborValue): i64 | crypto::CryptoError {
+    if v.kind == cbor::CborKind::Uint {
+        if v.uint > 0x7FFFFFFFFFFFFFFF { return crypto::crypto_error("cose: header integer exceeds i64 range") }
+        return v.uint to i64
+    }
+    if v.kind == cbor::CborKind::Nint {
+        if v.uint > 0x7FFFFFFFFFFFFFFE { return crypto::crypto_error("cose: header integer exceeds i64 range") }
+        return -1 - (v.uint to i64)
+    }
+    crypto::crypto_error("cose: header value is not an integer")
+}
+
+/**
+ * Builds the protected header bucket's SERIALIZED content for `alg`: a canonical CBOR map
+ * `{1: alg_label}` — the bytes that become the top-level array's `protected` byte string
+ * (RFC 9052 §3.1). `alg` is always carried in the protected (integrity-covered) bucket, never
+ * the unprotected one.
+ *
+ * @param alg  the signature/MAC algorithm
+ * @return     the canonical CBOR encoding of `{1: alg_label}`
+ */
+fn cose_protected_header_bytes(alg: CoseAlg): []byte {
+    var keys: []cbor::CborValue = teko::list::push(teko::list::empty(), cbor::cbor_int(1))
+    var vals: []cbor::CborValue = teko::list::push(teko::list::empty(), cbor::cbor_int(cose_alg_label(alg)))
+    cbor::encode_canonical(cbor::cbor_map(keys, vals))
+}
+
+/**
+ * Builds the unprotected header bucket: a CBOR map carrying `kid` (label 4) when non-empty, else
+ * the empty map. `kid` is conventionally unprotected (RFC 9052 §3.1) since it is an identifier,
+ * not security-relevant metadata.
+ *
+ * @param kid  the key identifier, or an empty slice to omit it
+ * @return     the unprotected header map
+ */
+fn cose_unprotected_header(kid: []byte): cbor::CborValue {
+    if kid.len == 0 {
+        return cbor::cbor_map(teko::list::empty(), teko::list::empty())
+    }
+    var keys: []cbor::CborValue = teko::list::push(teko::list::empty(), cbor::cbor_int(4))
+    var vals: []cbor::CborValue = teko::list::push(teko::list::empty(), cbor::cbor_bytes(kid))
+    cbor::cbor_map(keys, vals)
+}
+
+/**
+ * Decodes a protected header bucket's raw bytes back into its CBOR map, treating an empty byte
+ * string as the empty map (RFC 9052 §3.1: "If there are no protected Header Parameters, the byte
+ * string is a zero-length byte string").
+ *
+ * @param protected_bytes  the protected header bucket's raw bytes (the array's `protected` bstr)
+ * @return                 the decoded header map, or a `CryptoError`
+ * @throws                 `CryptoError` on malformed CBOR, or a top-level item that is not a map
+ */
+fn cose_decode_protected_map(protected_bytes: []byte): cbor::CborValue | crypto::CryptoError {
+    if protected_bytes.len == 0 {
+        return cbor::cbor_map(teko::list::empty(), teko::list::empty())
+    }
+    var v = match cbor::decode(protected_bytes) {
+        cbor::CborValue as x => x
+        error => return crypto::crypto_error("cose: malformed protected header CBOR")
+    }
+    if v.kind != cbor::CborKind::Map {
+        return crypto::crypto_error("cose: protected header is not a CBOR map")
+    }
+    v
+}
+
+/**
+ * Reads the `alg` header parameter (label 1) off a decoded protected header map.
+ *
+ * @param protected_map  the decoded protected header map
+ * @return                the algorithm, or a `CryptoError`
+ * @throws                `CryptoError` when `alg` is missing, not an integer, or names an
+ *                        unsupported algorithm
+ */
+fn cose_header_alg(protected_map: cbor::CborValue): CoseAlg | crypto::CryptoError {
+    var label_val = match cose_map_get(protected_map, 1) {
+        cbor::CborValue as v => v
+        null => return crypto::crypto_error("cose: protected header is missing 'alg' (label 1)")
+    }
+    var label = match cose_cbor_to_i64(label_val) {
+        i64 as n => n
+        crypto::CryptoError as e => return e
+    }
+    cose_alg_from_label(label)
+}
+
+/**
+ * The raw bytes mapped to label 4 (`kid`) in `map`, or an empty slice when absent or not a byte
+ * string.
+ *
+ * @param map  a decoded header map (protected or unprotected)
+ * @return     the `kid` bytes, or an empty slice
+ */
+fn cose_kid_bytes(map: cbor::CborValue): []byte {
+    match cose_map_get(map, 4) {
+        cbor::CborValue as v => if v.kind == cbor::CborKind::Bytes { v.bytes } else { teko::list::empty() }
+        null => teko::list::empty()
+    }
+}
+
+/**
+ * Reads the `kid` header parameter (label 4) off a header pair, preferring the unprotected
+ * bucket (RFC 9052 §3.1's conventional placement) and falling back to the protected one.
+ *
+ * @param protected_map    the decoded protected header map
+ * @param unprotected_map  the decoded unprotected header map
+ * @return                 the `kid` bytes, or an empty slice when absent from both
+ */
+fn cose_header_kid(protected_map: cbor::CborValue, unprotected_map: cbor::CborValue): []byte {
+    var from_unprotected = cose_kid_bytes(unprotected_map)
+    if from_unprotected.len > 0 { return from_unprotected }
+    cose_kid_bytes(protected_map)
+}
+
+/**
+ * `alg`/`kid`, read off either a `COSE_Sign1` or a `COSE_Mac0` document — the caller-facing
+ * summary `cose_read_headers` returns, useful for selecting the right verification key before
+ * calling `cose_sign1_verify`/`cose_mac0_verify`.
+ */
+exp type CoseHeaders = struct {
+    /** the `alg` header parameter (label 1) */
+    alg: CoseAlg
+    /** the `kid` header parameter (label 4), or an empty slice when absent */
+    kid: []byte
+}
+
+/**
+ * Unwraps a top-level decoded CBOR item into the length-4 array every `COSE_Sign1`/`COSE_Mac0`
+ * document is: accepts either form RFC 9052 allows, a CBOR tag wrapping the array (this unit
+ * checks the tag number equals `expected_tag` when `check_tag` is true) or a bare untagged array.
+ *
+ * @param check_tag     whether to reject a tag number other than `expected_tag`
+ * @param expected_tag  the tag number a tagged document must carry when `check_tag` is true
+ * @param v             the top-level decoded CBOR item
+ * @return              the unwrapped array item, or a `CryptoError`
+ * @throws              `CryptoError` when `v` is neither a tag nor an array, or (when checked)
+ *                       carries the wrong tag number
+ */
+fn cose_unwrap_top_level(check_tag: bool, expected_tag: u64, v: cbor::CborValue): cbor::CborValue | crypto::CryptoError {
+    if v.kind == cbor::CborKind::Tag {
+        if check_tag && v.uint != expected_tag {
+            return crypto::crypto_error("cose: unexpected CBOR tag number")
+        }
+        return v.items[0]
+    }
+    if v.kind == cbor::CborKind::Array { return v }
+    crypto::crypto_error("cose: expected a CBOR array or a tagged CBOR array")
+}
+
+/**
+ * The four fields common to both `COSE_Sign1` (RFC 9052 §4.2) and `COSE_Mac0` (§6.2): both are
+ * `[protected, unprotected, payload, trailer]`, where `trailer` is the signature for `Sign1` and
+ * the MAC tag for `Mac0`.
+ */
+type CoseFourTuple = struct {
+    /** the raw protected header bucket bytes (the array's `protected` bstr content) */
+    protected: []byte
+    /** the decoded unprotected header map */
+    unprotected: cbor::CborValue
+    /** the payload bytes (detached/`nil` payloads are not supported — see this module's header) */
+    payload: []byte
+    /** the trailing byte string: the signature (`Sign1`) or the MAC tag (`Mac0`) */
+    trailer: []byte
+}
+
+/**
+ * Validates and extracts a `CoseFourTuple` from an already-unwrapped top-level array item.
+ *
+ * @param content  the unwrapped `[protected, unprotected, payload, trailer]` array
+ * @return         the extracted fields, or a `CryptoError` naming the shape violation
+ * @throws         `CryptoError` when `content` is not a 4-element array, or an element is not
+ *                 the CBOR kind RFC 9052 requires (byte string / map / byte string / byte string)
+ */
+fn cose_extract_four_tuple(content: cbor::CborValue): CoseFourTuple | crypto::CryptoError {
+    if content.kind != cbor::CborKind::Array || content.items.len != 4 {
+        return crypto::crypto_error("cose: expected a 4-element COSE array")
+    }
+    var protected_item = content.items[0]
+    if protected_item.kind != cbor::CborKind::Bytes {
+        return crypto::crypto_error("cose: protected header must be a byte string")
+    }
+    var unprotected_item = content.items[1]
+    if unprotected_item.kind != cbor::CborKind::Map {
+        return crypto::crypto_error("cose: unprotected header must be a map")
+    }
+    var payload_item = content.items[2]
+    if payload_item.kind != cbor::CborKind::Bytes {
+        return crypto::crypto_error("cose: detached payload is not supported; payload must be a byte string")
+    }
+    var trailer_item = content.items[3]
+    if trailer_item.kind != cbor::CborKind::Bytes {
+        return crypto::crypto_error("cose: trailing signature/tag must be a byte string")
+    }
+    CoseFourTuple { protected = protected_item.bytes; unprotected = unprotected_item; payload = payload_item.bytes; trailer = trailer_item.bytes }
+}
+
+/**
+ * Decodes `cose_bytes` and extracts its `CoseFourTuple`, requiring a tag-18/tag-17-shaped
+ * document (a bare array, or one tagged EXACTLY `expected_tag`) — the shared entry point
+ * `cose_sign1_verify`/`cose_mac0_verify` build on.
+ *
+ * @param expected_tag  the tag number a tagged document must carry (18 for `Sign1`, 17 for
+ *                      `Mac0`)
+ * @param cose_bytes    the candidate encoded COSE document
+ * @return              the extracted fields, or a `CryptoError`
+ * @throws              `CryptoError` on malformed CBOR, a wrong tag number, or a shape violation
+ */
+fn cose_decode_four_tuple(expected_tag: u64, cose_bytes: []byte): CoseFourTuple | crypto::CryptoError {
+    var v = match cbor::decode(cose_bytes) {
+        cbor::CborValue as x => x
+        error => return crypto::crypto_error("cose: malformed CBOR input")
+    }
+    var content = match cose_unwrap_top_level(true, expected_tag, v) {
+        cbor::CborValue as c => c
+        crypto::CryptoError as e => return e
+    }
+    cose_extract_four_tuple(content)
+}
+
+/**
+ * Reads the `alg`/`kid` headers off ANY `COSE_Sign1` or `COSE_Mac0` document, without checking a
+ * specific tag number — a convenience for picking the right verification key/algorithm handling
+ * before calling `cose_sign1_verify`/`cose_mac0_verify` on the same bytes.
+ *
+ * @param cose_bytes  the candidate encoded COSE document
+ * @return            the document's `alg`/`kid`, or a `CryptoError`
+ * @throws            `CryptoError` on malformed CBOR, a shape violation, a missing/invalid `alg`,
+ *                    or an unsupported algorithm
+ */
+exp fn cose_read_headers(cose_bytes: []byte): CoseHeaders | crypto::CryptoError {
+    var v = match cbor::decode(cose_bytes) {
+        cbor::CborValue as x => x
+        error => return crypto::crypto_error("cose: malformed CBOR input")
+    }
+    var content = match cose_unwrap_top_level(false, 0, v) {
+        cbor::CborValue as c => c
+        crypto::CryptoError as e => return e
+    }
+    var four = match cose_extract_four_tuple(content) {
+        CoseFourTuple as t => t
+        crypto::CryptoError as e => return e
+    }
+    var protected_map = match cose_decode_protected_map(four.protected) {
+        cbor::CborValue as m => m
+        crypto::CryptoError as e => return e
+    }
+    var alg = match cose_header_alg(protected_map) {
+        CoseAlg as a => a
+        crypto::CryptoError as e => return e
+    }
+    CoseHeaders { alg = alg; kid = cose_header_kid(protected_map, four.unprotected) }
+}
