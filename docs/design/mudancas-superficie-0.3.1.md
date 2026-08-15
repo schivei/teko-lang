@@ -1156,15 +1156,14 @@ mecanismo-limpo estão entregues. Os 4 restantes NÃO têm deps resolvidas sem u
   MECANISMO já existe (`src/emit/header.tks`/`tkh.tks` `emit_tkh`/`read_tkh`, `parser::Visibility`
   private/pub/exp, "only exp reaches the `.tkh`"); falta **ativar enforcement** + **triagem item-a-item**
   (gated na stdlib pronta). Modelo corrigido em §11.1 (sem `exp`/`pub` = **namespace-local**, não file-local).
-- **§16 — remover o runtime C, virar FFI-do-SO (clarificação do dono 2026-08-15).** §16 = **remover as deps
-  de `src/runtime/teko_rt.c`/`teko_rt.h`/`win32_compat.h`** e trocá-las por **FFI direto ao SO (target)**
-  (libc/syscalls por plataforma). Deps: **§16 → §17** (precisa de `#os`/`#arch` pra selecionar o FFI
-  por-target — ruling do dono: "17 antes de 16") **→ §11**. **RULING DO DONO (2026-08-15): §16 é PRÉ-Doc-1**
-  (a Doc-1 é construída sobre a base já FFI-migrada; nada de "pós"). **⚠️ TENSÃO A RESOLVER:** o plano §12
-  carrega um lock *"nothing lands until teko is 100% native AND the native gate is green"*, e a sequência
-  anterior do dono punha a **perna native verde DEPOIS da Doc-1**. Se §16 exige o native-gate-verde e ele é
-  pré-Doc-1, então **fechar a perna native também sobe pra pré-Doc-1** (dentro da Doc 2), OU o gate do §16 é o
-  C-leg-verde (não o native). Preciso do dono nesse ponto (ver mensagem).
+- **§16 — TROCAR TODAS as dependências C por Teko + FFI-do-SO (ruling do dono 2026-08-15, "sem exceções ou
+  desculpas").** §16 = **substituir `src/runtime/teko_rt.c`/`teko_rt.h`/`win32_compat.h` INTEIROS** — as duas
+  metades: o **shim de SO** (I/O/syscalls/`win32_compat`) E o **alocador de arena** (`tk_alloc`/`tk_region_root`)
+  — por **Teko sobre FFI-do-SO** (a arena vira Teko sobre `mmap`/syscalls do target). **Reescrever o que for
+  necessário, sem exceção.** Deps: **§16 → §17** (`#os`/`#arch` pra selecionar o FFI por-target — "17 antes de
+  16") **→ §11**. **TUDO isso é Doc-2, PRÉ-Doc-1.** (Correção: eu tinha inventado um "split §16 / arena=Doc-1 /
+  tensão de native-gate" — ERRADO. A Doc-1 NÃO reconstrói memória; a Doc-1 só **MELHORA** a arena-Teko que o
+  §16 já produziu. Sem circularidade.)
 - **§17 `#if`/`#os`/`#arch`** — `#os` já existe; falta `#arch`/`#if`; gated no §11; **habilita o §16** (vem
   antes dele).
 - **§10 concorrência — 100% DESIGN, 0% IMPLEMENTAÇÃO (checado no código 2026-08-15).** Design fechado
@@ -1193,11 +1192,13 @@ document-signing (jose✅·xmldsig✅·cose🔄) → **keystone de genéricos (#
 **§10 concorrência** (`spawn`/`chan<T>`/`await`/`Intent<T>`/`teko::threads`) → §11 → **§17 → §16 (FFI-do-SO,
 remove teko_rt)** → **stdlib que depende de FFI** (`crypto::rand`/`openssl`/`gpg` · `net` · `db` · `odbc` ·
 `rpc`) → `ui`. **SÓ ENTÃO o Doc-1.**
-**CORREÇÃO DO DONO (2026-08-15): NADA disso é "pós-Doc-1".** Eu tinha posto §16/FFI-stdlib/`ui` como
-pós-Doc-1 — ERRADO. **É PRÉ-Doc-1.** A Doc-1 (remodel de arena/memória, que mata o OOM) é construída **por
-último, sobre base sólida e completa** — incluindo tudo que eu deliberara "pra depois". A Doc-1 mexe **só** no
-backend/memória, sobre um terreno 100% pronto. Ou seja a Doc 2 é grande (toda a linguagem + stdlib completa +
-FFI + ui) e a Doc 1 é focada (arena/memória).
+**CORREÇÃO DO DONO (2026-08-15): NADA disso é "pós-Doc-1". É PRÉ-Doc-1.** Eu tinha posto §16/FFI-stdlib/`ui`
+como pós-Doc-1 — ERRADO. **Divisão definitiva (ruling do dono): a Doc-2 TROCA TODAS as dependências C** por
+Teko + FFI-do-SO (reescrevendo o que for necessário, **sem exceções ou desculpas** — inclui reimplementar o
+alocador de arena em Teko sobre `mmap`/syscalls); **a Doc-1 apenas MELHORA** essa arena-Teko (otimização, NÃO
+reconstrução). Doc-2 é grande (toda a linguagem + stdlib completa + FFI + `ui` + a reescrita do runtime C→Teko)
+e é PRÉ-Doc-1 por inteiro; a Doc-1 é o passo final e focado de **melhoria da arena**, sobre um terreno 100%
+pronto e já livre de C.
 
 **Progresso stdlib monomórfica — NÚCLEO CRYPTO ✅ COMPLETO:** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`)
 · `kdf` ✅ (`e804f474`) · `cipher` ✅ (`d5299449` — AES 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20,
@@ -1307,10 +1308,11 @@ coordenador nem subagente — roda `teko test .` ou variante. Validação local 
 execução dos `.tkt` é exclusiva do CI. Todo brief de subagente carrega isso como HARD RULE.
 
 **🧭 RELAÇÃO Doc 2 → Doc 1 (ruling do dono 2026-08-15): a Doc 2 prepara TODO o terreno pra a Doc 1 seguir,
-dando suporte total ao que virá.** Ou seja, toda a superfície de linguagem/stdlib que o Doc 1 (o remodel de
-memória/arena/backend, incl. o fim do OOM) vai precisar tem que estar PRONTA antes — por isso §10, genéricos,
-§11, §17 entram na Doc 2 (não são "deferidos"). O Doc 1 então mexe só no backend/arena com impacto mínimo,
-sobre um terreno completo.
+dando suporte total ao que virá.** A Doc 2 = toda a superfície de linguagem/stdlib + **trocar TODAS as deps C
+por Teko+FFI** (§16/§17, inclusive reimplementar a arena em Teko) — reescrevendo o que for necessário, sem
+exceções. §10, genéricos, §11, §16, §17, FFI-stdlib, `ui` entram TODOS na Doc 2 (nada "deferido"). A **Doc 1
+apenas MELHORA a arena** (já em Teko) — otimização final, não reconstrução — sobre um terreno completo e livre
+de C.
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
