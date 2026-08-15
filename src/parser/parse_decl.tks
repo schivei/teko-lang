@@ -115,7 +115,14 @@ fn parse_constraint_atom(tokens: []lexer::Token, pos: u64): Parsed<@ConstraintEx
     }
     var name = tokens[pos].text
     var p = pos + 1
+    /* (§9.2b) `notnull` — the non-null MODIFIER term (contextual: reserved only in a constraint). */
+    if name == "notnull" { return Parsed<@ConstraintExpr()> { node = ConstraintNotNull { }; next = p } }
     Parsed<@ConstraintExpr()> { node = ConstraintAtom { name = name }; next = p }
+}
+/* (§9.2b) is `c` a bare `notnull` term? Used to reject it as a `|` alternative — it is a modifier
+   (`class & notnull`), never a shape-alternative; only a `&` conjunct or the sole term may be `notnull`. */
+fn is_notnull_constraint(c: @ConstraintExpr()): bool {
+    match c { parser::ConstraintNotNull => true; _ => false }
 }
 // `&`-term: one or more atoms joined by `&` (AND), left-associative.
 fn parse_constraint_and(tokens: []lexer::Token, pos: u64): Parsed<@ConstraintExpr()> | error {
@@ -135,7 +142,10 @@ fn parse_constraint_expr(tokens: []lexer::Token, pos: u64): Parsed<@ConstraintEx
     var left = match parse_constraint_and(tokens, pos) { Parsed<@ConstraintExpr()> as x => x; error as e => return e }
     loop {
         if !is_kind_at(tokens, left.next, lexer::TokenKind::Pipe) { break }
+        /* (§9.2b) `notnull` is a modifier, never a `|` alternative — reject it on either side of the `|`. */
+        if is_notnull_constraint(left.node) { return err_at(tokens, pos, "`notnull` may not be a `|` alternative — it is a non-null modifier, use it with `&` (e.g. `class & notnull`) (§9.2b)") }
         var right = match parse_constraint_and(tokens, left.next + 1) { Parsed<@ConstraintExpr()> as x => x; error as e => return e }
+        if is_notnull_constraint(right.node) { return err_at(tokens, left.next + 1, "`notnull` may not be a `|` alternative — it is a non-null modifier, use it with `&` (e.g. `class & notnull`) (§9.2b)") }
         left = Parsed<@ConstraintExpr()> { node = ConstraintOr { left = left.node; right = right.node }; next = right.next }
     }
     left

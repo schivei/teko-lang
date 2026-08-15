@@ -88,7 +88,32 @@ fn constraint_satisfied(c: @ConstraintExpr(), concrete: @Type(), table: TypeTabl
         parser::ConstraintAnd as a => constraint_satisfied(a.left, concrete, table) && constraint_satisfied(a.right, concrete, table)
         parser::ConstraintOr as o => constraint_satisfied(o.left, concrete, table) || constraint_satisfied(o.right, concrete, table)
         parser::ConstraintAtom as a => constraint_atom_satisfied(a.name, concrete, table)
+        parser::ConstraintNotNull => constraint_notnull_satisfied(concrete, table)
         parser::NoConstraint => true
+    }
+}
+/**
+ * constraint_notnull_satisfied — the `notnull` term (§9.2b): the concrete type-argument may be neither
+ * the bare absence `Null` nor a nullable union (`X | null`, a `Variant` carrying a `Null` member). A
+ * user `Named` whose declaration expands to a null-bearing variant is caught too (via `expand_variant`).
+ *
+ * @param concrete the concrete type bound to the type parameter at this instantiation
+ * @param table    the folded type table
+ * @return true iff `concrete` admits no null
+ */
+fn constraint_notnull_satisfied(concrete: @Type(), table: TypeTable): bool {
+    match concrete { Null => return false; _ => { } }
+    match expand_variant(concrete, table) {
+        Variant as v => {
+            var i = 0
+            loop {
+                if i >= v.members.len { break }
+                match v.members[i] { Null => return false; _ => { } }
+                i++
+            }
+            true
+        }
+        _ => true
     }
 }
 /**
