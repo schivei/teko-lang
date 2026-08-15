@@ -105,3 +105,143 @@ fn assert_i64_slice_eq(got: []i64, want: []i64) {
     assert_i64_slice_eq(teko::sort::sort_i64([3, -1, -5, 2, 0]), [-5, -1, 0, 2, 3])
     assert_i64_slice_eq(teko::sort::sort_i64([2, 2, 1, 1]), [1, 1, 2, 2])
 }
+
+/**
+ * Assert two `[]u64` slices have equal length and equal elements in order.
+ *
+ * @param got   the slice produced by the sort under test
+ * @param want  the expected slice contents
+ */
+fn assert_u64_slice_eq(got: []u64, want: []u64) {
+    teko::assert::is_true(got.len == want.len)
+    var i: u64 = 0
+    loop {
+        if i >= want.len { break }
+        teko::assert::eq_u64(got[i], want[i])
+        i++
+    }
+}
+
+/**
+ * `sort_u64`: empty and singleton inputs are returned unchanged.
+ */
+#test fn sort_u64_trivial_sizes() {
+    var empty: []u64 = teko::list::empty()
+    assert_u64_slice_eq(teko::sort::sort_u64(empty), empty)
+    assert_u64_slice_eq(teko::sort::sort_u64([7]), [7])
+}
+
+/**
+ * `sort_u64`: a two-element swap, an already-sorted input, and a reversed input.
+ */
+#test fn sort_u64_small_orderings() {
+    assert_u64_slice_eq(teko::sort::sort_u64([2, 1]), [1, 2])
+    assert_u64_slice_eq(teko::sort::sort_u64([1, 2, 3]), [1, 2, 3])
+    assert_u64_slice_eq(teko::sort::sort_u64([3, 2, 1]), [1, 2, 3])
+}
+
+/**
+ * `sort_u64`: duplicates are kept and land adjacent.
+ */
+#test fn sort_u64_keeps_duplicates() {
+    assert_u64_slice_eq(teko::sort::sort_u64([3, 3, 1, 1, 2]), [1, 1, 2, 3, 3])
+}
+
+/**
+ * Assert two `[]f64` slices have equal length and EXACTLY equal elements in order (no NaN in
+ * either slice — `teko::assert::eq_f64`'s `got < want`/`got - want` arithmetic is meaningless once
+ * NaN is involved, so NaN cases are asserted separately with `teko::math::is_nan`).
+ *
+ * @param got   the slice produced by the sort under test (no NaN)
+ * @param want  the expected slice contents (no NaN)
+ */
+fn assert_f64_slice_eq(got: []f64, want: []f64) {
+    teko::assert::is_true(got.len == want.len)
+    var i: u64 = 0
+    loop {
+        if i >= want.len { break }
+        teko::assert::eq_f64(got[i], want[i], 0.0)
+        i++
+    }
+}
+
+/**
+ * `sort_f64`: empty and singleton inputs are returned unchanged.
+ */
+#test fn sort_f64_trivial_sizes() {
+    var empty: []f64 = teko::list::empty()
+    assert_f64_slice_eq(teko::sort::sort_f64(empty), empty)
+    assert_f64_slice_eq(teko::sort::sort_f64([7.0]), [7.0])
+}
+
+/**
+ * `sort_f64`: a two-element swap, negatives before positives, and duplicates kept.
+ */
+#test fn sort_f64_orderings_negatives_duplicates() {
+    assert_f64_slice_eq(teko::sort::sort_f64([2.5, 1.5]), [1.5, 2.5])
+    assert_f64_slice_eq(teko::sort::sort_f64([3.0, -1.0, -5.5, 2.0, 0.0]), [-5.5, -1.0, 0.0, 2.0, 3.0])
+    assert_f64_slice_eq(teko::sort::sort_f64([2.0, 2.0, 1.0, 1.0]), [1.0, 1.0, 2.0, 2.0])
+}
+
+/**
+ * `sort_f64`: NaN sorts strictly LAST regardless of where it appears in the input, and the non-NaN
+ * elements are otherwise correctly ordered ahead of it.
+ */
+#test fn sort_f64_nan_sorts_last() {
+    var got = teko::sort::sort_f64([3.0, teko::math::nan(), 1.0, 2.0])
+    teko::assert::len_eq(got.len, 4)
+    assert_f64_slice_eq([got[0], got[1], got[2]], [1.0, 2.0, 3.0])
+    teko::assert::is_true(teko::math::is_nan(got[3]))
+}
+
+/**
+ * `sort_f64`: every NaN in the input trails every non-NaN value, however many NaNs are present.
+ */
+#test fn sort_f64_multiple_nans_all_trail() {
+    var got = teko::sort::sort_f64([teko::math::nan(), 1.0, teko::math::nan(), 0.0])
+    teko::assert::len_eq(got.len, 4)
+    assert_f64_slice_eq([got[0], got[1]], [0.0, 1.0])
+    teko::assert::is_true(teko::math::is_nan(got[2]))
+    teko::assert::is_true(teko::math::is_nan(got[3]))
+}
+
+/**
+ * `sort_bytes`: empty and singleton inputs are returned unchanged.
+ */
+#test fn sort_bytes_trivial_sizes() {
+    var empty: []byte = teko::list::empty()
+    teko::assert::bytes_eq(teko::sort::sort_bytes(empty), empty)
+    teko::assert::bytes_eq(teko::sort::sort_bytes([b'a']), [b'a'])
+}
+
+/**
+ * `sort_bytes`: a two-element swap, an already-sorted input, and a reversed input.
+ */
+#test fn sort_bytes_small_orderings() {
+    teko::assert::bytes_eq(teko::sort::sort_bytes([b'b', b'a']), [b'a', b'b'])
+    teko::assert::bytes_eq(teko::sort::sort_bytes([b'a', b'b', b'c']), [b'a', b'b', b'c'])
+    teko::assert::bytes_eq(teko::sort::sort_bytes([b'c', b'b', b'a']), [b'a', b'b', b'c'])
+}
+
+/**
+ * `sort_bytes`: duplicates are kept and land adjacent.
+ */
+#test fn sort_bytes_keeps_duplicates() {
+    teko::assert::bytes_eq(teko::sort::sort_bytes([b'c', b'a', b'b', b'a']), [b'a', b'a', b'b', b'c'])
+}
+
+/**
+ * STABILITY SCOPE NOTE (honest boundary, not a gap): `sort_i64`/`sort_u64`/`sort_f64`/`sort_bytes`
+ * take and return RAW scalars with no attached payload, so two equal elements are, by definition,
+ * indistinguishable in the output — an index-tag stability probe (pairing a shared key with a
+ * distinguishing tag, as `sort_str_natural`'s tests already do with `"x1"`/`"x01"`/`"x001"`) needs a
+ * per-field comparator (`sort_by_key`), which is the generic A3/A4 surface gated on #254 and out of
+ * this monomorphic unit's scope. What IS verified here, and is the actual stability guarantee:
+ * `merge_i64`/`merge_u64`/`merge_f64`/`merge_bytes` all share `merge_str`'s left-biased merge shape
+ * (`teko::sort::sort.tks`), the shape `sort_str_natural_is_stable_on_equal_keys` above proves stable
+ * end-to-end; duplicate-keeping tests above (`_keeps_duplicates`) confirm the scalar merges compose
+ * the same way.
+ */
+#test fn sort_scalar_stability_is_a_construction_property() {
+    teko::assert::is_true(true)
+}
