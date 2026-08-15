@@ -1125,7 +1125,8 @@ minimiza esse retrabalho (a superfície já nasce triada).
 - §10 Intent → **§9** (properties get/set, l.906) e → **§13** (o `pub set` acerta a mesma instância, l.910/1069)
 - §10 concorrência → **§7 + §9.2b (solver de forma) + conformidade-estática-de-interface** (os 3 pré-reqs, §12 l.1134-1138) e → **§13** (Ctx, l.1144)
 - §7 DI → **§9.2b + conformidade-de-interface** · §9.2b → **§9 + conformidade-de-interface**
-- §16, §17 → **§11** · §11 → expansão-da-stdlib
+- §17 → **§11** · **§16 → §17** (FFI por-target precisa de `#os`/`#arch`; ruling dono "17 antes de 16") **→ §11** · §11 → expansão-da-stdlib
+- §10 concorrência → **keystone genéricos (#254)** (`chan<T>`/`Intent<T>` são genéricos) + **runtime de threads**; ruling dono: **100% antes do Doc-1**
 
 **Estado (2026-08-15):**
 
@@ -1151,11 +1152,27 @@ estiverem feitas é que o Doc 1 entra (o dono analisa antes).
 
 **CAUDA ENTANGLED — sem próximo mecanismo limpo (2026-08-15, aguarda decisão do dono).** Os 6 itens de
 mecanismo-limpo estão entregues. Os 4 restantes NÃO têm deps resolvidas sem uma decisão de sequenciamento:
-- **§11 `exp`/`pub`** — deferido-por-último pelo dono (alto churn); depende da **expansão da stdlib**.
-- **§16 libc-direct** — plano §12: *"Nothing here lands before §11"* + **lock duro** *"nothing lands until
-  teko is 100% native AND the native gate is green"* (backlog nativo `.32`/#594 = Doc-1/backend).
-- **§17 `#if`/`#os`/`#arch`** — `#os` já existe; falta `#arch`/`#if`; também gated no §11 (plano §12).
-- **§10 concorrência** — porção Doc-2 gated na costura de arena do §7-B (Doc 1) + Ctx.
+- **§11 `exp`/`pub`** — deferido-por-último pelo dono (alto churn); depende da **expansão da stdlib**. O
+  MECANISMO já existe (`src/emit/header.tks`/`tkh.tks` `emit_tkh`/`read_tkh`, `parser::Visibility`
+  private/pub/exp, "only exp reaches the `.tkh`"); falta **ativar enforcement** + **triagem item-a-item**
+  (gated na stdlib pronta). Modelo corrigido em §11.1 (sem `exp`/`pub` = **namespace-local**, não file-local).
+- **§16 — remover o runtime C, virar FFI-do-SO (clarificação do dono 2026-08-15).** §16 = **remover as deps
+  de `src/runtime/teko_rt.c`/`teko_rt.h`/`win32_compat.h`** e trocá-las por **FFI direto ao SO (target)**
+  (libc/syscalls por plataforma). Deps: **§16 → §17** (precisa de `#os`/`#arch` pra selecionar o FFI
+  por-target — ruling do dono: "17 antes de 16") **→ §11** + **lock duro** *"nothing lands until teko is
+  100% native AND the native gate is green"* (Doc-1/backend). Ou seja §16 é essencialmente pós-Doc-1.
+- **§17 `#if`/`#os`/`#arch`** — `#os` já existe; falta `#arch`/`#if`; gated no §11; **habilita o §16** (vem
+  antes dele).
+- **§10 concorrência — 100% DESIGN, 0% IMPLEMENTAÇÃO (checado no código 2026-08-15).** Design fechado
+  (§10.5 modelo + §10.6 ref/UAF). Implementação = ZERO: não há `spawn`/`chan`/`await`/`Intent` no
+  lexer/parser nem namespace `teko::threads` — só docs de design + probes (`examples/probes/chan_dgram`,
+  `spawn_redirected_probe`). Falta TODA a superfície: `spawn`→thread-do-SO, `chan<T>` MPSC + `IChannelKind<T>`
+  + `OsChan`/`MemChan`, `await`→`Intent<T>`, atribuição-múltipla, `teko::threads`, regras de checker (ref não
+  cruza fronteira, `<ref T>` rejeitado, transporte singleton). **NÃO é monomórfico** — `chan<T>`/`Intent<T>`
+  são **genéricos** → dependem do **keystone de genéricos (#254)** + de um **runtime de threads**. **RULING
+  DO DONO (2026-08-15): §10 tem que estar 100% ANTES do Doc-1** (Doc-1 precisa de tudo pronto p/ menor
+  impacto). **CONSEQUÊNCIA (fork p/ o dono): os genéricos (keystone) teriam que entrar ANTES do Doc-1** pra
+  habilitar o §10 — o que os move de "gated/depois" pra "antes do Doc-1". Aguarda confirmação da sequência.
 
 **DECISÃO DO DONO (2026-08-15): (A) — expandir a stdlib.** Escopo = a árvore autoritativa §1.5 de
 `plano-stdlib-catalogo-expansao.md` (8+ áreas). Dirijo TODA a fatia **monomórfica** (puro-Teko, sem
