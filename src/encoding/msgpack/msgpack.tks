@@ -1,0 +1,993 @@
+/**
+ * `teko::encoding::msgpack` — a pure-Teko MessagePack encoder + decoder over `[]byte` (catalog
+ * entry S-MSGPACK, §1.5), following the MessagePack specification
+ * (github.com/msgpack/msgpack/blob/master/spec.md). Pure Teko, no C twin: like
+ * `teko::encoding::cbor` / `teko::encoding::json`, a library with zero OS/FFI dependency ships as
+ * `.tks` + `.tkt` only.
+ *
+ * VALUE MODEL — a TAGGED STRUCT, not an inline union. `MsgValue` carries a `MsgKind` discriminant
+ * plus the union of every format family's payload; `kind` selects which fields are meaningful (the
+ * `teko::encoding::cbor` tag-struct discipline). MessagePack keeps the integer and the string
+ * type-families split by wire type, so the model preserves that: `Uint` vs `Int` (a decoded `uintN`
+ * stays unsigned, an `intN` stays signed) and `Str` (UTF-8 text) vs `Bin` (opaque bytes).
+ *
+ * SCOPE (this unit). The whole MessagePack type system: `nil`, `bool`, integers (positive/negative
+ * fixint, `uint8/16/32/64`, `int8/16/32/64`), `float32` and `float64` (both decoded to an `f64`),
+ * `str` (fixstr, `str8/16/32`), `bin` (`bin8/16/32`), `array` (fixarray, `array16/32`), `map`
+ * (fixmap, `map16/32`), and the extension type (`fixext1/2/4/8/16`, `ext8/16/32`) carrying a signed
+ * type code and its payload. Every multi-byte integer is big-endian (the MessagePack byte order).
+ *
+ * PREFERRED ENCODING. `encode` emits the shortest format for every integer, string, binary, array,
+ * and map length; floats always use the 64-bit form (`float64`), while decoding accepts both
+ * `float32` and `float64` so narrow inputs round-trip by value.
+ *
+ * ERROR MODEL (M.1 fail-loud / M.3 honest types). `decode(p: []byte): MsgValue | error` — a
+ * truncated value, the never-used `0xc1` byte, or trailing bytes after the top-level value is a
+ * checked failure, never a panic. `encode` is total (a well-formed `MsgValue` always has a
+ * rendering) so it returns `[]byte`, not `[]byte | error`.
+ */
+
+/**
+ * The kind discriminant of a `MsgValue`: which MessagePack type-family it holds (see the module
+ * doc's VALUE MODEL note). `Int` is a signed integer, `Uint` an unsigned one; `Str` is UTF-8 text,
+ * `Bin` opaque bytes; `Ext` is an application extension.
+ */
+exp type MsgKind = enum {
+    Nil; Bool; Uint; Int; Float; Str; Bin; Array; Map; Ext
+}
+
+/**
+ * One MessagePack value as a tagged struct spanning every `MsgKind` (see the module doc's VALUE
+ * MODEL note): `kind` selects which fields below carry meaning.
+ */
+exp type MsgValue = struct {
+    /**
+     * Which MessagePack type-family this is; selects which of the fields below are meaningful.
+     */
+    kind: MsgKind
+    /**
+     * The unsigned value for `Uint`. Zero otherwise.
+     */
+    uint_val: u64
+    /**
+     * The signed value for `Int`, and the extension type code for `Ext`. Zero otherwise.
+     */
+    int_val: i64
+    /**
+     * The floating-point value for `Float`. Zero otherwise.
+     */
+    real: f64
+    /**
+     * The boolean value for `Bool`. `false` otherwise.
+     */
+    flag: bool
+    /**
+     * The text content for `Str`. Empty otherwise.
+     */
+    text: str
+    /**
+     * The payload bytes for `Bin` and `Ext`. Empty otherwise.
+     */
+    bytes: []byte
+    /**
+     * The elements for `Array`. Empty otherwise.
+     */
+    items: []MsgValue
+    /**
+     * The keys of a `Map`, parallel to `vals`. Empty otherwise.
+     */
+    keys: []MsgValue
+    /**
+     * The values of a `Map`, parallel to `keys`. Empty otherwise.
+     */
+    vals: []MsgValue
+}
+
+/**
+ * A decoded value paired with the offset just past it — the internal cursor result threaded through
+ * the recursive decoder.
+ */
+type MsgRead = struct {
+    /**
+     * The value decoded at the requested offset.
+     */
+    value: MsgValue
+    /**
+     * The offset of the first byte AFTER the decoded value.
+     */
+    pos: u64
+}
+
+/**
+ * A fresh empty `[]byte`, the default for the byte-carrying field of a `MsgValue`.
+ *
+ * @return  an empty byte slice
+ */
+fn no_bytes(): []byte {
+    teko::list::empty()
+}
+
+/**
+ * A fresh empty `[]MsgValue`, the default for the child-carrying fields of a `MsgValue`.
+ *
+ * @return  an empty value slice
+ */
+fn no_vals(): []MsgValue {
+    teko::list::empty()
+}
+
+/**
+ * Builds a `MsgValue` from every field explicitly — the single constructor the builders funnel
+ * through so each records only the fields its kind uses and leaves the rest at defaults.
+ *
+ * @param kind      the value's kind discriminant
+ * @param uint_val  the unsigned value (see `MsgValue.uint_val`)
+ * @param int_val   the signed value / ext type (see `MsgValue.int_val`)
+ * @param real      the floating-point value (see `MsgValue.real`)
+ * @param flag      the boolean value (see `MsgValue.flag`)
+ * @param text      the string content (see `MsgValue.text`)
+ * @param bytes     the binary / ext payload (see `MsgValue.bytes`)
+ * @param items     the array elements (see `MsgValue.items`)
+ * @param keys      the map keys (see `MsgValue.keys`)
+ * @param vals      the map values (see `MsgValue.vals`)
+ * @return          the assembled value
+ */
+fn mk_value(kind: MsgKind, uint_val: u64, int_val: i64, real: f64, flag: bool, text: str, bytes: []byte, items: []MsgValue, keys: []MsgValue, vals: []MsgValue): MsgValue {
+    MsgValue { kind = kind; uint_val = uint_val; int_val = int_val; real = real; flag = flag; text = text; bytes = bytes; items = items; keys = keys; vals = vals }
+}
+
+/**
+ * The `nil` value.
+ *
+ * @return  the MessagePack nil value
+ */
+exp fn msg_nil(): MsgValue {
+    mk_value(MsgKind::Nil, 0, 0, 0.0, false, "", no_bytes(), no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Wraps a boolean.
+ *
+ * @param b  the boolean
+ * @return   the MessagePack boolean value
+ */
+exp fn msg_bool(b: bool): MsgValue {
+    mk_value(MsgKind::Bool, 0, 0, 0.0, b, "", no_bytes(), no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Wraps an unsigned integer (encoded as the shortest unsigned format).
+ *
+ * @param v  the unsigned value
+ * @return   the MessagePack unsigned-integer value
+ */
+exp fn msg_uint(v: u64): MsgValue {
+    mk_value(MsgKind::Uint, v, 0, 0.0, false, "", no_bytes(), no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Wraps a signed integer, choosing an unsigned representation for non-negative values (so a
+ * non-negative round-trips as the `Uint` a decoder reconstructs from a positive fixint / `uintN`)
+ * and the signed representation for negative ones.
+ *
+ * @param v  the signed value
+ * @return   the MessagePack integer value
+ */
+exp fn msg_int(v: i64): MsgValue {
+    if v >= 0 { return msg_uint(v to u64) }
+    mk_int(v)
+}
+
+/**
+ * Wraps a strictly-signed integer, preserving the `Int` kind regardless of sign — used by the
+ * decoder so an `intN` wire value stays signed.
+ *
+ * @param v  the signed value
+ * @return   the MessagePack signed-integer value
+ */
+fn mk_int(v: i64): MsgValue {
+    mk_value(MsgKind::Int, 0, v, 0.0, false, "", no_bytes(), no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Wraps a floating-point number (encoded as `float64`).
+ *
+ * @param x  the value
+ * @return   the MessagePack float value
+ */
+exp fn msg_float(x: f64): MsgValue {
+    mk_value(MsgKind::Float, 0, 0, x, false, "", no_bytes(), no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Wraps a UTF-8 string.
+ *
+ * @param s  the text
+ * @return   the MessagePack string value
+ */
+exp fn msg_str(s: str): MsgValue {
+    mk_value(MsgKind::Str, 0, 0, 0.0, false, s, no_bytes(), no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Wraps opaque binary data.
+ *
+ * @param b  the bytes
+ * @return   the MessagePack binary value
+ */
+exp fn msg_bin(b: []byte): MsgValue {
+    mk_value(MsgKind::Bin, 0, 0, 0.0, false, "", b, no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Wraps a sequence of elements as an array.
+ *
+ * @param items  the elements
+ * @return       the MessagePack array value
+ */
+exp fn msg_array(items: []MsgValue): MsgValue {
+    mk_value(MsgKind::Array, 0, 0, 0.0, false, "", no_bytes(), items, no_vals(), no_vals())
+}
+
+/**
+ * Wraps parallel key/value slices as a map. `keys[i]` maps to `vals[i]`; the two slices must have
+ * the same length.
+ *
+ * @param keys  the map keys
+ * @param vals  the map values, parallel to `keys`
+ * @return      the MessagePack map value
+ */
+exp fn msg_map(keys: []MsgValue, vals: []MsgValue): MsgValue {
+    mk_value(MsgKind::Map, 0, 0, 0.0, false, "", no_bytes(), no_vals(), keys, vals)
+}
+
+/**
+ * Wraps an application extension: a signed type code and its payload bytes.
+ *
+ * @param ext_type  the extension type code (`-128 .. 127`)
+ * @param data      the payload bytes
+ * @return          the MessagePack extension value
+ */
+exp fn msg_ext(ext_type: i64, data: []byte): MsgValue {
+    mk_value(MsgKind::Ext, 0, ext_type, 0.0, false, "", data, no_vals(), no_vals(), no_vals())
+}
+
+/**
+ * Appends every byte of `more` to `out`, returning the grown slice (functional accumulation, no
+ * index-assignment).
+ *
+ * @param out   the accumulator
+ * @param more  the bytes to append
+ * @return      `out` followed by `more`
+ */
+fn append_all(out: []byte, more: []byte): []byte {
+    var acc = out
+    var i: u64 = 0
+    loop {
+        if i >= more.len { break }
+        acc = teko::list::push(acc, more[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * Appends the low `count` bytes of `v` to `out` in big-endian order (MessagePack's integer layout).
+ *
+ * @param out    the accumulator
+ * @param v      the value whose bytes are emitted
+ * @param count  how many low-order bytes to emit (1, 2, 4, or 8)
+ * @return       `out` followed by the big-endian bytes
+ */
+fn append_be(out: []byte, v: u64, count: u64): []byte {
+    var acc = out
+    var i = count
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        acc = teko::list::push(acc, ((v >> (i * 8)) & 0xFF) to byte)
+    }
+    acc
+}
+
+/**
+ * Appends the low `count` bytes of a signed `i64` to `out` in big-endian order, extracting each
+ * byte with a masked shift in the signed domain so no negative-to-unsigned cast is performed.
+ *
+ * @param out    the accumulator
+ * @param v      the signed value
+ * @param count  how many low-order bytes to emit (1, 2, 4, or 8)
+ * @return       `out` followed by the big-endian bytes
+ */
+fn append_be_i64(out: []byte, v: i64, count: u64): []byte {
+    var acc = out
+    var i = count
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        acc = teko::list::push(acc, ((v >> (i * 8)) & 0xFF) to byte)
+    }
+    acc
+}
+
+/**
+ * Encodes an unsigned integer in the shortest format: positive fixint, `uint8`, `uint16`, `uint32`,
+ * or `uint64`.
+ *
+ * @param out  the accumulator
+ * @param u    the unsigned value
+ * @return     `out` with the encoded integer appended
+ */
+fn encode_uint(out: []byte, u: u64): []byte {
+    if u < 128 { return teko::list::push(out, u to byte) }
+    if u <= 0xFF { return append_be(teko::list::push(out, 0xCC to byte), u, 1) }
+    if u <= 0xFFFF { return append_be(teko::list::push(out, 0xCD to byte), u, 2) }
+    if u <= 0xFFFFFFFF { return append_be(teko::list::push(out, 0xCE to byte), u, 4) }
+    append_be(teko::list::push(out, 0xCF to byte), u, 8)
+}
+
+/**
+ * Encodes a negative integer in the shortest signed format: negative fixint, `int8`, `int16`,
+ * `int32`, or `int64`.
+ *
+ * @param out  the accumulator
+ * @param v    the negative value
+ * @return     `out` with the encoded integer appended
+ */
+fn encode_int(out: []byte, v: i64): []byte {
+    if v >= -32 { return teko::list::push(out, (v & 0xFF) to byte) }
+    if v >= -128 { return append_be_i64(teko::list::push(out, 0xD0 to byte), v, 1) }
+    if v >= -32768 { return append_be_i64(teko::list::push(out, 0xD1 to byte), v, 2) }
+    if v >= -2147483648 { return append_be_i64(teko::list::push(out, 0xD2 to byte), v, 4) }
+    append_be_i64(teko::list::push(out, 0xD3 to byte), v, 8)
+}
+
+/**
+ * Encodes a UTF-8 string in the shortest string format: fixstr, `str8`, `str16`, or `str32`.
+ *
+ * @param out  the accumulator
+ * @param s    the text
+ * @return     `out` with the encoded string appended
+ */
+fn encode_str(out: []byte, s: str): []byte {
+    var raw = bytes_of_str(s)
+    var head = string_head(raw.len)
+    append_all(append_all(out, head), raw)
+}
+
+/**
+ * Builds the head bytes for a string of the given byte length.
+ *
+ * @param n  the string byte length
+ * @return   the fixstr / `str8` / `str16` / `str32` head bytes
+ */
+fn string_head(n: u64): []byte {
+    if n < 32 { return teko::list::push(no_bytes(), (0xA0 | n) to byte) }
+    if n <= 0xFF { return append_be(teko::list::push(no_bytes(), 0xD9 to byte), n, 1) }
+    if n <= 0xFFFF { return append_be(teko::list::push(no_bytes(), 0xDA to byte), n, 2) }
+    append_be(teko::list::push(no_bytes(), 0xDB to byte), n, 4)
+}
+
+/**
+ * Encodes opaque binary data in the shortest binary format: `bin8`, `bin16`, or `bin32`.
+ *
+ * @param out  the accumulator
+ * @param b    the bytes
+ * @return     `out` with the encoded binary appended
+ */
+fn encode_bin(out: []byte, b: []byte): []byte {
+    var head: []byte = no_bytes()
+    if b.len <= 0xFF {
+        head = append_be(teko::list::push(no_bytes(), 0xC4 to byte), b.len, 1)
+    } else if b.len <= 0xFFFF {
+        head = append_be(teko::list::push(no_bytes(), 0xC5 to byte), b.len, 2)
+    } else {
+        head = append_be(teko::list::push(no_bytes(), 0xC6 to byte), b.len, 4)
+    }
+    append_all(append_all(out, head), b)
+}
+
+/**
+ * Encodes an array: the shortest array head (fixarray, `array16`, `array32`) then each element.
+ *
+ * @param out    the accumulator
+ * @param items  the array elements
+ * @return       `out` with the encoded array appended
+ */
+fn encode_array(out: []byte, items: []MsgValue): []byte {
+    var acc = append_all(out, container_head(0x90 to byte, 0xDC to byte, 0xDD to byte, items.len))
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        acc = encode_value(acc, items[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * Encodes a map: the shortest map head (fixmap, `map16`, `map32`) then each key/value pair.
+ *
+ * @param out   the accumulator
+ * @param keys  the map keys
+ * @param vals  the map values, parallel to `keys`
+ * @return      `out` with the encoded map appended
+ */
+fn encode_map(out: []byte, keys: []MsgValue, vals: []MsgValue): []byte {
+    var acc = append_all(out, container_head(0x80 to byte, 0xDE to byte, 0xDF to byte, keys.len))
+    var i: u64 = 0
+    loop {
+        if i >= keys.len { break }
+        acc = encode_value(encode_value(acc, keys[i]), vals[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * Builds the head bytes for an array or map of `n` elements: the fixed form (`fix | n`) when
+ * `n < 16`, else the 16- or 32-bit count form.
+ *
+ * @param fix    the fixed-form base byte (`0x90` array, `0x80` map)
+ * @param wide16 the 16-bit-count marker (`0xDC` array, `0xDE` map)
+ * @param wide32 the 32-bit-count marker (`0xDD` array, `0xDF` map)
+ * @param n      the element count
+ * @return       the head bytes
+ */
+fn container_head(fix: byte, wide16: byte, wide32: byte, n: u64): []byte {
+    if n < 16 { return teko::list::push(no_bytes(), ((fix to u64) | n) to byte) }
+    if n <= 0xFFFF { return append_be(teko::list::push(no_bytes(), wide16), n, 2) }
+    append_be(teko::list::push(no_bytes(), wide32), n, 4)
+}
+
+/**
+ * Encodes an extension value: the shortest extension head (`fixext1/2/4/8/16` or `ext8/16/32`), the
+ * signed type-code byte, then the payload.
+ *
+ * @param out  the accumulator
+ * @param v    the extension value
+ * @return     `out` with the encoded extension appended
+ */
+fn encode_ext(out: []byte, v: MsgValue): []byte {
+    var acc = append_all(out, ext_head(v.bytes.len))
+    acc = append_be_i64(acc, v.int_val, 1)
+    append_all(acc, v.bytes)
+}
+
+/**
+ * Builds the head bytes for an extension payload of `n` bytes, choosing a `fixext` marker for the
+ * fixed sizes (1, 2, 4, 8, 16) and an `ext8/16/32` length-prefixed marker otherwise.
+ *
+ * @param n  the payload byte length
+ * @return   the extension head bytes
+ */
+fn ext_head(n: u64): []byte {
+    if n == 1 { return teko::list::push(no_bytes(), 0xD4 to byte) }
+    if n == 2 { return teko::list::push(no_bytes(), 0xD5 to byte) }
+    if n == 4 { return teko::list::push(no_bytes(), 0xD6 to byte) }
+    if n == 8 { return teko::list::push(no_bytes(), 0xD7 to byte) }
+    if n == 16 { return teko::list::push(no_bytes(), 0xD8 to byte) }
+    if n <= 0xFF { return append_be(teko::list::push(no_bytes(), 0xC7 to byte), n, 1) }
+    if n <= 0xFFFF { return append_be(teko::list::push(no_bytes(), 0xC8 to byte), n, 2) }
+    append_be(teko::list::push(no_bytes(), 0xC9 to byte), n, 4)
+}
+
+/**
+ * Encodes one `MsgValue` onto the accumulator, recursing through arrays and maps. Total: every
+ * well-formed value has a rendering.
+ *
+ * @param out  the accumulator
+ * @param v    the value to encode
+ * @return     `out` with `v`'s encoding appended
+ */
+fn encode_value(out: []byte, v: MsgValue): []byte {
+    match v.kind {
+        MsgKind::Nil => teko::list::push(out, 0xC0 to byte)
+        MsgKind::Bool => teko::list::push(out, (if v.flag { 0xC3 } else { 0xC2 }) to byte)
+        MsgKind::Uint => encode_uint(out, v.uint_val)
+        MsgKind::Int => encode_int(out, v.int_val)
+        MsgKind::Float => append_be(teko::list::push(out, 0xCB to byte), f64_bits(v.real), 8)
+        MsgKind::Str => encode_str(out, v.text)
+        MsgKind::Bin => encode_bin(out, v.bytes)
+        MsgKind::Array => encode_array(out, v.items)
+        MsgKind::Map => encode_map(out, v.keys, v.vals)
+        MsgKind::Ext => encode_ext(out, v)
+    }
+}
+
+/**
+ * Encodes a complete `MsgValue` to a fresh byte slice using the shortest format throughout.
+ *
+ * @param v  the value to encode
+ * @return   the MessagePack byte encoding
+ */
+exp fn encode(v: MsgValue): []byte {
+    encode_value(no_bytes(), v)
+}
+
+/**
+ * A decode failure with a message naming the offending offset.
+ *
+ * @param what  the failure description
+ * @param pos   the offset at which the failure was detected
+ * @return      the checked error
+ */
+fn read_error(what: str, pos: u64): error {
+    error { message = concat("msgpack: ", what, " at offset ", i64_to_str(pos to i64)) }
+}
+
+/**
+ * Reads `count` bytes big-endian from `p` at `pos` into a `u64`. The caller has already
+ * bounds-checked `pos + count <= p.len`.
+ *
+ * @param p      the input
+ * @param pos    the offset of the most-significant byte
+ * @param count  how many bytes to read (1, 2, 4, or 8)
+ * @return       the assembled unsigned value
+ */
+fn read_be_u(p: []byte, pos: u64, count: u64): u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= count { break }
+        v = (v << 8) | (p[pos + i] to u64)
+        i++
+    }
+    v
+}
+
+/**
+ * Reads a big-endian signed integer of 1, 2, or 4 bytes from `p` at `pos`, sign-extending to
+ * `i64` (the width keeps the intermediate below `2^32`, so no high-bit unsigned-to-signed cast is
+ * needed).
+ *
+ * @param p      the input
+ * @param pos    the offset of the most-significant byte
+ * @param count  the width in bytes (1, 2, or 4)
+ * @return       the sign-extended value
+ */
+fn read_be_signed(p: []byte, pos: u64, count: u64): i64 {
+    var u = read_be_u(p, pos, count)
+    var bits = count * 8
+    if ((u >> (bits - 1)) & 1) == 1 { return (u to i64) - ((1 to i64) << bits) }
+    u to i64
+}
+
+/**
+ * Reads a big-endian signed `int64` from `p` at `pos` by combining a sign-extended high word with
+ * the unsigned low word (`value = high_signed * 2^32 + low`), avoiding a high-bit unsigned-to-signed
+ * cast.
+ *
+ * @param p    the input
+ * @param pos  the offset of the most-significant byte
+ * @return     the reconstructed signed value
+ */
+fn read_be_i64(p: []byte, pos: u64): i64 {
+    var high = read_be_signed(p, pos, 4)
+    var low = read_be_u(p, pos + 4, 4) to i64
+    high * 4294967296 + low
+}
+
+/**
+ * Converts a 32-bit IEEE 754 single-precision bit pattern to the exact `f64` it denotes by
+ * rebuilding the double's fields (an exact widening). Zeros, subnormals, normals, infinities, and
+ * NaN are all handled.
+ *
+ * @param s  the 32-bit single pattern (in the low bits of the `u64`)
+ * @return   the equivalent double-precision value
+ */
+fn single_to_f64(s: u64): f64 {
+    var sign = (s >> 31) & 0x1
+    var ebits = (s >> 23) & 0xFF
+    var mant = s & 0x7FFFFF
+    if ebits == 0 {
+        if mant == 0 { return f64_from_bits(sign << 63) }
+        return subnormal_single(sign, mant)
+    }
+    if ebits == 0xFF { return f64_from_bits((sign << 63) | 0x7FF0000000000000 | (if mant != 0 { (0x8000000000000 | (mant << 29)) } else { 0 })) }
+    var exp64 = (ebits + 1023 - 127)
+    f64_from_bits((sign << 63) | (exp64 << 52) | (mant << 29))
+}
+
+/**
+ * Builds the `f64` value of a subnormal single (`mant * 2^-149`, signed).
+ *
+ * @param sign  the sign bit
+ * @param mant  the 23-bit mantissa
+ * @return      the equivalent double-precision value
+ */
+fn subnormal_single(sign: u64, mant: u64): f64 {
+    var mag = (mant to f64) * f64_from_bits(((1023 - 149) to u64) << 52)
+    if sign == 1 { return -mag }
+    mag
+}
+
+/**
+ * Takes `n` bytes out of `p` starting at `pos`, bounds-checked.
+ *
+ * @param p    the input
+ * @param pos  the offset of the first byte
+ * @param n    how many bytes to take
+ * @return     the taken bytes, or `error` when truncated
+ */
+fn take_bytes(p: []byte, pos: u64, n: u64): []byte | error {
+    if pos + n > p.len { return read_error("truncated value", pos) }
+    var out: []byte = no_bytes()
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, p[pos + i])
+        i++
+    }
+    out
+}
+
+/**
+ * Reads `len` bytes as a UTF-8 string value at `pos`.
+ *
+ * @param p    the input
+ * @param pos  the offset of the string's first byte
+ * @param len  the byte length
+ * @return     the string value and the offset past it, or `error`
+ */
+fn read_str(p: []byte, pos: u64, len: u64): MsgRead | error {
+    var raw = match take_bytes(p, pos, len) { []byte as b => b; error as e => return e }
+    MsgRead { value = msg_str(str_of_bytes(raw)); pos = pos + len }
+}
+
+/**
+ * Reads `len` bytes as a binary value at `pos`.
+ *
+ * @param p    the input
+ * @param pos  the offset of the binary's first byte
+ * @param len  the byte length
+ * @return     the binary value and the offset past it, or `error`
+ */
+fn read_bin(p: []byte, pos: u64, len: u64): MsgRead | error {
+    var raw = match take_bytes(p, pos, len) { []byte as b => b; error as e => return e }
+    MsgRead { value = msg_bin(raw); pos = pos + len }
+}
+
+/**
+ * Reads `n` elements as an array value starting at `pos`.
+ *
+ * @param p    the input
+ * @param pos  the offset of the first element
+ * @param n    the element count
+ * @return     the array value and the offset past it, or `error`
+ */
+fn read_array(p: []byte, pos: u64, n: u64): MsgRead | error {
+    var items: []MsgValue = no_vals()
+    var at = pos
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var el = match decode_at(p, at) { MsgRead as r => r; error as e => return e }
+        items = teko::list::push(items, el.value)
+        at = el.pos
+        i++
+    }
+    MsgRead { value = msg_array(items); pos = at }
+}
+
+/**
+ * Reads `n` key/value pairs as a map value starting at `pos`.
+ *
+ * @param p    the input
+ * @param pos  the offset of the first key
+ * @param n    the pair count
+ * @return     the map value and the offset past it, or `error`
+ */
+fn read_map(p: []byte, pos: u64, n: u64): MsgRead | error {
+    var keys: []MsgValue = no_vals()
+    var vals: []MsgValue = no_vals()
+    var at = pos
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var k = match decode_at(p, at) { MsgRead as r => r; error as e => return e }
+        var v = match decode_at(p, k.pos) { MsgRead as r => r; error as e => return e }
+        keys = teko::list::push(keys, k.value)
+        vals = teko::list::push(vals, v.value)
+        at = v.pos
+        i++
+    }
+    MsgRead { value = msg_map(keys, vals); pos = at }
+}
+
+/**
+ * Reads an extension value of payload length `len` starting at `pos` (the type-code byte precedes
+ * the payload).
+ *
+ * @param p    the input
+ * @param pos  the offset of the type-code byte
+ * @param len  the payload byte length
+ * @return     the extension value and the offset past it, or `error`
+ */
+fn read_ext(p: []byte, pos: u64, len: u64): MsgRead | error {
+    if pos + 1 > p.len { return read_error("truncated extension type", pos) }
+    var ext_type = read_be_signed(p, pos, 1)
+    var data = match take_bytes(p, pos + 1, len) { []byte as b => b; error as e => return e }
+    MsgRead { value = msg_ext(ext_type, data); pos = pos + 1 + len }
+}
+
+/**
+ * Requires `count` bytes to be available at `pos`, returning an error otherwise.
+ *
+ * @param p      the input
+ * @param pos    the offset of the first required byte
+ * @param count  how many bytes are required
+ * @return       `null` when in range, else the truncation error
+ */
+fn need(p: []byte, pos: u64, count: u64): error | null {
+    if pos + count > p.len { return read_error("truncated value", pos) }
+    null
+}
+
+/**
+ * Decodes exactly one MessagePack value at `pos`, dispatching on the leading format byte.
+ *
+ * @param p    the input
+ * @param pos  the offset of the value's leading byte
+ * @return     the decoded value and the offset past it, or `error`
+ */
+fn decode_at(p: []byte, pos: u64): MsgRead | error {
+    if pos >= p.len { return read_error("unexpected end of input", pos) }
+    var b = p[pos] to u64
+    if b < 0x80 { return MsgRead { value = msg_uint(b); pos = pos + 1 } }
+    if b >= 0xE0 { return MsgRead { value = mk_int((b to i64) - 256); pos = pos + 1 } }
+    if b >= 0xA0 && b <= 0xBF { return read_str(p, pos + 1, b & 0x1F) }
+    if b >= 0x90 && b <= 0x9F { return read_array(p, pos + 1, b & 0x0F) }
+    if b >= 0x80 && b <= 0x8F { return read_map(p, pos + 1, b & 0x0F) }
+    decode_prefixed(p, pos, b)
+}
+
+/**
+ * Decodes the prefixed (non-fixed) formats — nil, bool, the `binN`/`extN` families, the float and
+ * sized integer families, the `fixext` sizes, and the `strN`/`arrayN`/`mapN` count forms.
+ *
+ * @param p    the input
+ * @param pos  the offset of the value's leading byte
+ * @param b    the leading format byte
+ * @return     the decoded value and the offset past it, or `error`
+ */
+fn decode_prefixed(p: []byte, pos: u64, b: u64): MsgRead | error {
+    if b == 0xC0 { return MsgRead { value = msg_nil(); pos = pos + 1 } }
+    if b == 0xC2 { return MsgRead { value = msg_bool(false); pos = pos + 1 } }
+    if b == 0xC3 { return MsgRead { value = msg_bool(true); pos = pos + 1 } }
+    if b == 0xCA { return decode_float32(p, pos) }
+    if b == 0xCB { return decode_float64(p, pos) }
+    var scalar = decode_scalar(p, pos, b)
+    match scalar {
+        MsgRead as r => return r
+        error as e => return e
+        null => null
+    }
+    decode_container(p, pos, b)
+}
+
+/**
+ * Decodes the fixed-width scalar families (`uintN`, `intN`), or `null` when `b` is not one of them.
+ *
+ * @param p    the input
+ * @param pos  the offset of the value's leading byte
+ * @param b    the leading format byte
+ * @return     the decoded scalar and offset, `null` when not a scalar family, or `error` on
+ *             truncation
+ */
+fn decode_scalar(p: []byte, pos: u64, b: u64): MsgRead | error | null {
+    if b == 0xCC || b == 0xCD || b == 0xCE || b == 0xCF { return decode_uint(p, pos, b) }
+    if b == 0xD0 || b == 0xD1 || b == 0xD2 || b == 0xD3 { return decode_sint(p, pos, b) }
+    null
+}
+
+/**
+ * Decodes a `uintN` value (`b` selects the width).
+ *
+ * @param p    the input
+ * @param pos  the offset of the leading byte
+ * @param b    the leading format byte (`0xCC..0xCF`)
+ * @return     the unsigned value and offset, or `error`
+ */
+fn decode_uint(p: []byte, pos: u64, b: u64): MsgRead | error {
+    var n = (1 to u64) << (b - 0xCC)
+    match need(p, pos + 1, n) { error as e => return e; null => null }
+    MsgRead { value = msg_uint(read_be_u(p, pos + 1, n)); pos = pos + 1 + n }
+}
+
+/**
+ * Decodes an `intN` value (`b` selects the width), keeping the `Int` kind.
+ *
+ * @param p    the input
+ * @param pos  the offset of the leading byte
+ * @param b    the leading format byte (`0xD0..0xD3`)
+ * @return     the signed value and offset, or `error`
+ */
+fn decode_sint(p: []byte, pos: u64, b: u64): MsgRead | error {
+    var n = (1 to u64) << (b - 0xD0)
+    match need(p, pos + 1, n) { error as e => return e; null => null }
+    if n == 8 { return MsgRead { value = mk_int(read_be_i64(p, pos + 1)); pos = pos + 9 } }
+    MsgRead { value = mk_int(read_be_signed(p, pos + 1, n)); pos = pos + 1 + n }
+}
+
+/**
+ * Decodes the length-prefixed container families: `binN`, `extN`, `strN`, `arrayN`, `mapN`, and the
+ * `fixext` sizes.
+ *
+ * @param p    the input
+ * @param pos  the offset of the value's leading byte
+ * @param b    the leading format byte
+ * @return     the decoded value and offset, or `error` (including the never-used `0xC1`)
+ */
+fn decode_container(p: []byte, pos: u64, b: u64): MsgRead | error {
+    if b == 0xC4 || b == 0xC5 || b == 0xC6 { return decode_length_then(p, pos, b, 0xC4, false) }
+    if b == 0xD9 || b == 0xDA || b == 0xDB { return decode_length_then(p, pos, b, 0xD9, true) }
+    if b == 0xDC { return decode_wide_array_map(p, pos, 2, true) }
+    if b == 0xDD { return decode_wide_array_map(p, pos, 4, true) }
+    if b == 0xDE { return decode_wide_array_map(p, pos, 2, false) }
+    if b == 0xDF { return decode_wide_array_map(p, pos, 4, false) }
+    if b >= 0xD4 && b <= 0xD8 { return read_ext(p, pos + 1, fixext_len(b)) }
+    if b == 0xC7 || b == 0xC8 || b == 0xC9 { return decode_ext_prefixed(p, pos, b) }
+    read_error("reserved or unknown format byte", pos)
+}
+
+/**
+ * The payload length of a `fixext` marker (`0xD4` = 1, `0xD5` = 2, `0xD6` = 4, `0xD7` = 8,
+ * `0xD8` = 16).
+ *
+ * @param b  the `fixext` marker byte
+ * @return   the payload byte length
+ */
+fn fixext_len(b: u64): u64 {
+    (1 to u64) << (b - 0xD4)
+}
+
+/**
+ * Decodes a `binN` or `strN` value: the length field (its width from `b - base`), then the bytes,
+ * wrapped as a string when `is_str`.
+ *
+ * @param p       the input
+ * @param pos     the offset of the leading byte
+ * @param b       the leading format byte
+ * @param base_byte  the family's base byte (`0xC4` bin, `0xD9` str)
+ * @param is_str  whether to produce a string (else a binary)
+ * @return        the value and offset, or `error`
+ */
+fn decode_length_then(p: []byte, pos: u64, b: u64, base_byte: u64, is_str: bool): MsgRead | error {
+    var width = (1 to u64) << (b - base_byte)
+    match need(p, pos + 1, width) { error as e => return e; null => null }
+    var len = read_be_u(p, pos + 1, width)
+    if is_str { return read_str(p, pos + 1 + width, len) }
+    read_bin(p, pos + 1 + width, len)
+}
+
+/**
+ * Decodes an `array16/32` or `map16/32`: the count field of the given width, then the elements or
+ * pairs.
+ *
+ * @param p         the input
+ * @param pos       the offset of the leading byte
+ * @param width     the count-field width (2 or 4)
+ * @param is_array  whether the container is an array (else a map)
+ * @return          the value and offset, or `error`
+ */
+fn decode_wide_array_map(p: []byte, pos: u64, width: u64, is_array: bool): MsgRead | error {
+    match need(p, pos + 1, width) { error as e => return e; null => null }
+    var n = read_be_u(p, pos + 1, width)
+    if is_array { return read_array(p, pos + 1 + width, n) }
+    read_map(p, pos + 1 + width, n)
+}
+
+/**
+ * Decodes an `ext8/16/32` value: the length field (its width from `b - 0xC7`), then the type-code
+ * byte and payload.
+ *
+ * @param p    the input
+ * @param pos  the offset of the leading byte
+ * @param b    the leading format byte (`0xC7..0xC9`)
+ * @return     the extension value and offset, or `error`
+ */
+fn decode_ext_prefixed(p: []byte, pos: u64, b: u64): MsgRead | error {
+    var width = (1 to u64) << (b - 0xC7)
+    match need(p, pos + 1, width) { error as e => return e; null => null }
+    var len = read_be_u(p, pos + 1, width)
+    read_ext(p, pos + 1 + width, len)
+}
+
+/**
+ * Decodes a `float32` value at `pos`.
+ *
+ * @param p    the input
+ * @param pos  the offset of the leading byte
+ * @return     the float value and offset, or `error`
+ */
+fn decode_float32(p: []byte, pos: u64): MsgRead | error {
+    match need(p, pos + 1, 4) { error as e => return e; null => null }
+    MsgRead { value = msg_float(single_to_f64(read_be_u(p, pos + 1, 4))); pos = pos + 5 }
+}
+
+/**
+ * Decodes a `float64` value at `pos`.
+ *
+ * @param p    the input
+ * @param pos  the offset of the leading byte
+ * @return     the float value and offset, or `error`
+ */
+fn decode_float64(p: []byte, pos: u64): MsgRead | error {
+    match need(p, pos + 1, 8) { error as e => return e; null => null }
+    MsgRead { value = msg_float(f64_from_bits(read_be_u(p, pos + 1, 8))); pos = pos + 9 }
+}
+
+/**
+ * Decodes a complete MessagePack document: exactly one top-level value, with any trailing bytes
+ * reported as a checked error.
+ *
+ * @param p  the input bytes
+ * @return   the decoded value, or `error` on malformed input or trailing bytes
+ */
+exp fn decode(p: []byte): MsgValue | error {
+    var r = match decode_at(p, 0) { MsgRead as x => x; error as e => return e }
+    if r.pos != p.len { return read_error("trailing bytes after top-level value", r.pos) }
+    r.value
+}
+
+/**
+ * Structurally compares two `MsgValue` trees for equality, recursing through arrays and maps (in
+ * slice order). Floats compare by `f64` bit pattern (the round-trip identity relation); `Int` and
+ * `Uint` are distinct kinds and never compare equal even at the same numeric magnitude.
+ *
+ * @param a  the first value
+ * @param b  the second value
+ * @return   true when the two trees are structurally identical
+ */
+exp fn msg_equal(a: MsgValue, b: MsgValue): bool {
+    if a.kind != b.kind { return false }
+    match a.kind {
+        MsgKind::Nil => true
+        MsgKind::Bool => a.flag == b.flag
+        MsgKind::Uint => a.uint_val == b.uint_val
+        MsgKind::Int => a.int_val == b.int_val
+        MsgKind::Float => f64_bits(a.real) == f64_bits(b.real)
+        MsgKind::Str => bytes_equal(bytes_of_str(a.text), bytes_of_str(b.text))
+        MsgKind::Bin => bytes_equal(a.bytes, b.bytes)
+        MsgKind::Ext => a.int_val == b.int_val && bytes_equal(a.bytes, b.bytes)
+        MsgKind::Array => vals_equal(a.items, b.items)
+        MsgKind::Map => vals_equal(a.keys, b.keys) && vals_equal(a.vals, b.vals)
+    }
+}
+
+/**
+ * Compares two byte slices for exact equality.
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   true when both have the same length and identical bytes
+ */
+fn bytes_equal(a: []byte, b: []byte): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Compares two `MsgValue` slices elementwise with `msg_equal`.
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   true when both have the same length and structurally equal elements
+ */
+fn vals_equal(a: []MsgValue, b: []MsgValue): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if !msg_equal(a[i], b[i]) { return false }
+        i++
+    }
+    true
+}
