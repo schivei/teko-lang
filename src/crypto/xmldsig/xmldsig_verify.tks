@@ -1,0 +1,435 @@
+use teko::crypto
+use teko::encoding::base64
+use teko::encoding::xml
+use teko::numeric::bigint
+
+/**
+ * `teko::crypto::xmldsig` verification: `xmldsig_verify` (a document possibly carrying an
+ * enveloped `Signature`, and — via `Reference URI="#id"` — an enveloping `Signature`'s own
+ * `Object`, or a same-document detached reference) and `xmldsig_verify_detached` (a standalone
+ * `Signature` checked against a single caller-supplied external node). Both re-derive the exact
+ * canonical bytes that were signed/digested rather than trusting anything the wire claims about
+ * shape, and never panic: every structural or cryptographic failure is a `CryptoError`.
+ */
+
+/**
+ * Checks that `kind` is the `VerificationKeyKind` `alg` requires.
+ *
+ * @param alg   the signature algorithm the `SignedInfo` declares
+ * @param kind  the candidate verification key's kind
+ * @return      `null` when they match, a `CryptoError` naming the mismatch otherwise
+ */
+fn require_key_matches_verification_alg(alg: SignatureAlg, kind: VerificationKeyKind): crypto::CryptoError | null {
+    match alg {
+        RsaSha256 => if kind == VerificationKeyKind::RsaPublic { null } else { crypto::crypto_error("xmldsig: rsa-sha256 requires an RSA public key") }
+        EcdsaSha256 => if kind == VerificationKeyKind::EcdsaPublic { null } else { crypto::crypto_error("xmldsig: ecdsa-sha256 requires an EC P-256 public point") }
+        HmacSha256 => if kind == VerificationKeyKind::HmacSecret { null } else { crypto::crypto_error("xmldsig: hmac-sha256 requires a shared secret") }
+    }
+}
+
+/**
+ * ECDSA P-256 verification of the XML-DSig fixed 64-byte `r || s` signature encoding (the
+ * inverse of `xmldsig_sign.tks`'s `p256_sig_to_bytes`). Never panics: a wrong-length signature is
+ * simply `false`.
+ *
+ * @param point    the signer's public point `Q`
+ * @param message  the canonical `SignedInfo` bytes the signature covers
+ * @param sig      the candidate 64-byte `r || s` signature
+ * @return         `true` iff `sig` is a genuine ECDSA P-256/SHA-256 signature of `message`
+ */
+fn verify_ecdsa(point: crypto::P256Point, message: []byte, sig: []byte): bool {
+    if sig.len != 64 {
+        return false
+    }
+    var r = bigint::from_bytes_be(xmldsig_bytes_slice(sig, 0, 32))
+    var s = bigint::from_bytes_be(xmldsig_bytes_slice(sig, 32, 64))
+    crypto::ecdsa_p256_verify(point, crypto::EcHashAlg::Sha256, message, r, s)
+}
+
+/**
+ * Checks `sig` under `alg`/`key` over `message` — the one flat exhaustive dispatch every
+ * `SignatureAlg` member routes through. Never panics.
+ *
+ * @param alg      the signature algorithm
+ * @param key      the candidate verification key
+ * @param message  the canonical `SignedInfo` bytes the signature covers
+ * @param sig      the candidate signature
+ * @return         `true` iff `sig` is a genuine signature under `key`/`alg`
+ */
+fn verify_raw(alg: SignatureAlg, key: VerificationKey, message: []byte, sig: []byte): bool {
+    match alg {
+        RsaSha256 => crypto::rsa_verify_pkcs1v15(key.rsa_key, crypto::RsaHashAlg::Sha256, message, sig)
+        HmacSha256 => crypto::ct_eq(crypto::hmac_sha256_of(key.hmac_secret, message), sig)
+        EcdsaSha256 => verify_ecdsa(key.ec_point, message, sig)
+    }
+}
+
+/**
+ * The direct-child text content of the first `local_name`-named element under `parent`.
+ *
+ * @param parent      the element to search
+ * @param local_name  the local element name to find
+ * @return            that child's text content, or a `CryptoError` naming the missing element
+ * @throws            `CryptoError` when `parent` has no such child
+ */
+fn extract_text_child(parent: xml::XmlNode, local_name: str): str | crypto::CryptoError {
+    match first_child_local(parent, local_name) {
+        xml::XmlNode as n => xml::text_content(n)
+        null => crypto::crypto_error(concat("xmldsig_verify: missing element ", local_name))
+    }
+}
+
+/**
+ * The `attr_name` attribute of the first `child_local`-named element under `parent`.
+ *
+ * @param parent      the element to search
+ * @param child_local the local element name to find
+ * @param attr_name   the attribute to read off that child
+ * @return            the attribute's value, or a `CryptoError` naming what is missing
+ * @throws            `CryptoError` when `parent` has no such child, or the child has no such
+ *                     attribute
+ */
+fn extract_attribute_child(parent: xml::XmlNode, child_local: str, attr_name: str): str | crypto::CryptoError {
+    var child = match first_child_local(parent, child_local) {
+        xml::XmlNode as n => n
+        null => return crypto::crypto_error(concat("xmldsig_verify: missing element ", child_local))
+    }
+    match xml::get_attribute(child, attr_name) {
+        str as s => s
+        null => crypto::crypto_error(concat("xmldsig_verify: missing attribute ", attr_name))
+    }
+}
+
+/**
+ * The `SignatureAlg` a `SignedInfo`'s `SignatureMethod` child declares.
+ *
+ * @param signed_info  the `SignedInfo` element
+ * @return             the declared signature algorithm, or a `CryptoError`
+ * @throws             `CryptoError` when `SignatureMethod`/its `Algorithm` is missing or names an
+ *                      unsupported algorithm
+ */
+fn extract_signature_alg(signed_info: xml::XmlNode): SignatureAlg | crypto::CryptoError {
+    var alg_uri = match extract_attribute_child(signed_info, "SignatureMethod", "Algorithm") {
+        str as s => s
+        crypto::CryptoError as e => return e
+    }
+    signature_alg_from_uri(alg_uri)
+}
+
+/**
+ * Recursively searches `node`'s subtree (including `node` itself) for the first Element carrying
+ * an `Id`/`ID`/`id` attribute equal to `id` — the fragment-identifier lookup XML-DSig's `#id`
+ * `Reference` `URI` form needs (this module does not implement full XML `ID`-typed-attribute
+ * DTD/XSD resolution; it accepts any of the three common spellings, matching real-world XML-DSig
+ * producers).
+ *
+ * @param node  the subtree to search
+ * @param id    the `Id` value to find
+ * @return      the first matching element, or `null` if none exists
+ */
+fn find_by_id(node: xml::XmlNode, id: str): xml::XmlNode | null {
+    if node.kind == xml::NodeKind::Element && matches_id(node, id) {
+        return node
+    }
+    var i: u64 = 0
+    loop {
+        if i >= node.children.len { break }
+        var found = find_by_id(node.children[i], id)
+        match found {
+            xml::XmlNode as n => return n
+            null => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * Reports whether `node` carries an `Id`, `ID`, or `id` attribute equal to `id`.
+ *
+ * @param node  the element to test
+ * @param id    the value to match
+ * @return      true when any of the three spellings equals `id`
+ */
+fn matches_id(node: xml::XmlNode, id: str): bool {
+    if attribute_equals(node, "Id", id) { return true }
+    if attribute_equals(node, "ID", id) { return true }
+    attribute_equals(node, "id", id)
+}
+
+/**
+ * Reports whether `node`'s `attr_name` attribute, if present, equals `value`.
+ *
+ * @param node       the element to inspect
+ * @param attr_name  the attribute name
+ * @param value      the value to compare against
+ * @return           true when the attribute is present and equal to `value`
+ */
+fn attribute_equals(node: xml::XmlNode, attr_name: str, value: str): bool {
+    match xml::get_attribute(node, attr_name) {
+        str as v => xmldsig_str_eq(v, value)
+        null => false
+    }
+}
+
+/**
+ * Resolves a `Reference`'s `URI` to the node its digest covers: `""` is the enveloped whole
+ * document (its `Signature` stripped per the enveloped-signature transform); `"#id"` is looked up
+ * first within `signature_node` (the enveloping shape's own `Object`) and then within the whole
+ * document (a same-document detached reference); any other form (an external URI) is
+ * unsupported — this module never dereferences a network or filesystem resource.
+ *
+ * @param signed_document  the whole parsed document
+ * @param signature_node   the `Signature` element found within it
+ * @param uri              the `Reference`'s `URI` attribute
+ * @return                 the resolved target node, or a `CryptoError`
+ * @throws                 `CryptoError` when `uri` names an external resource, or no element
+ *                          with a matching `Id` exists
+ */
+fn resolve_reference_target(signed_document: xml::XmlNode, signature_node: xml::XmlNode, uri: str): xml::XmlNode | crypto::CryptoError {
+    if uri.len == 0 {
+        return strip_signature_children(signed_document)
+    }
+    if uri[0] == b'#' {
+        var id = xmldsig_slice_from(uri, 1)
+        match find_by_id(signature_node, id) {
+            xml::XmlNode as n => return n
+            null => { }
+        }
+        match find_by_id(signed_document, id) {
+            xml::XmlNode as n => return n
+            null => { }
+        }
+        return crypto::crypto_error(concat("xmldsig_verify: no element with Id ", id))
+    }
+    crypto::crypto_error(concat("xmldsig_verify: external Reference URI not supported: ", uri))
+}
+
+/**
+ * Verifies one `Reference`'s digest: reads its `DigestMethod`/`DigestValue`, resolves its target
+ * (`resolve_reference_target`), re-digests it, and compares.
+ *
+ * @param signed_document  the whole parsed document
+ * @param signature_node   the `Signature` element found within it
+ * @param reference        the `Reference` element to check
+ * @return                 `true` iff the recomputed digest matches, or a `CryptoError` on a
+ *                         structural problem (missing element, unresolvable target)
+ */
+fn verify_one_reference(signed_document: xml::XmlNode, signature_node: xml::XmlNode, reference: xml::XmlNode): bool | crypto::CryptoError {
+    var uri = match xml::get_attribute(reference, "URI") {
+        str as s => s
+        null => ""
+    }
+    var digest_alg_uri_value = match extract_attribute_child(reference, "DigestMethod", "Algorithm") {
+        str as s => s
+        crypto::CryptoError as e => return e
+    }
+    var alg = match digest_alg_from_uri(digest_alg_uri_value) {
+        DigestAlg as a => a
+        crypto::CryptoError as e => return e
+    }
+    var expected_digest = match extract_text_child(reference, "DigestValue") {
+        str as s => s
+        crypto::CryptoError as e => return e
+    }
+    var target = match resolve_reference_target(signed_document, signature_node, uri) {
+        xml::XmlNode as n => n
+        crypto::CryptoError as e => return e
+    }
+    var actual_digest = base64::encode_standard(digest_node(alg, target))
+    xmldsig_str_eq(actual_digest, expected_digest)
+}
+
+/**
+ * Verifies every `Reference` child of `signed_info` against `signed_document`/`signature_node`
+ * (`verify_one_reference`). Requires at least one `Reference` (a `SignedInfo` with none is
+ * malformed) and requires ALL to pass.
+ *
+ * @param signed_document  the whole parsed document
+ * @param signature_node   the `Signature` element found within it
+ * @param signed_info      the `SignedInfo` whose `Reference` children to check
+ * @return                 `true` iff every `Reference` digest matches, or a `CryptoError`
+ * @throws                 `CryptoError` when a `Reference` is malformed, unresolvable, or its
+ *                          digest fails to match, or `SignedInfo` has no `Reference` at all
+ */
+fn verify_references(signed_document: xml::XmlNode, signature_node: xml::XmlNode, signed_info: xml::XmlNode): bool | crypto::CryptoError {
+    var children = xml::element_children(signed_info)
+    var i: u64 = 0
+    var checked: u64 = 0
+    loop {
+        if i >= children.len { break }
+        var c = children[i]
+        if xmldsig_str_eq(c.local, "Reference") {
+            var ok = match verify_one_reference(signed_document, signature_node, c) {
+                bool as v => v
+                crypto::CryptoError as e => return e
+            }
+            if !ok {
+                return crypto::crypto_error("xmldsig_verify: digest mismatch")
+            }
+            checked = checked + 1
+        }
+        i++
+    }
+    if checked == 0 {
+        return crypto::crypto_error("xmldsig_verify: SignedInfo has no Reference elements")
+    }
+    true
+}
+
+/**
+ * Verifies a `Signature`'s `SignatureValue` alone (not its `Reference` digests): checks the
+ * declared `SignatureMethod` matches `key`'s family, re-canonicalizes `signed_info_node` (already
+ * namespace-inlined by the caller), and checks the signature bytes.
+ *
+ * @param signature_node   the `Signature` element
+ * @param signed_info_node the `SignedInfo` element, already namespace-inlined
+ * @param key              the candidate verification key
+ * @return                 `true` iff the signature is genuine, or a `CryptoError` on a structural
+ *                          problem (missing `SignatureValue`, malformed base64, key/alg mismatch)
+ */
+fn verify_signature_value(signature_node: xml::XmlNode, signed_info_node: xml::XmlNode, key: VerificationKey): bool | crypto::CryptoError {
+    var sig_alg = match extract_signature_alg(signed_info_node) {
+        SignatureAlg as a => a
+        crypto::CryptoError as e => return e
+    }
+    match require_key_matches_verification_alg(sig_alg, key.kind) {
+        null => { }
+        crypto::CryptoError as e => return e
+    }
+    var signature_value = match extract_text_child(signature_node, "SignatureValue") {
+        str as s => s
+        crypto::CryptoError as e => return e
+    }
+    var raw_sig = match base64::decode_standard(signature_value) {
+        []byte as b => b
+        error => return crypto::crypto_error("xmldsig_verify: SignatureValue is not valid base64")
+    }
+    var signing_bytes = bytes_of_str(xml::canonicalize(signed_info_node))
+    verify_raw(sig_alg, key, signing_bytes, raw_sig)
+}
+
+/**
+ * Verifies a `Signature` found anywhere within `signed_document` (matching XML-DSig's enveloped
+ * shape, and — through `Reference URI="#id"` resolution — the enveloping shape's own `Object` and
+ * a same-document detached reference): checks `SignatureValue`, then every `Reference` digest.
+ *
+ * @param signed_document  the parsed document, carrying a `Signature` element somewhere within it
+ * @param key              the verifier's key (must match the declared `SignatureMethod` family)
+ * @return                 `true` on a fully valid signature, or a `CryptoError` naming the first
+ *                          failure
+ * @throws                 `CryptoError` when no `Signature`/`SignedInfo` is found, the key/alg
+ *                          family mismatches, the signature itself fails, or any `Reference`
+ *                          digest fails to match
+ */
+exp fn xmldsig_verify(signed_document: xml::XmlNode, key: VerificationKey): bool | crypto::CryptoError {
+    var signature_node = match find_element_with_inlined_namespaces(signed_document, "Signature", ns_scope_root()) {
+        xml::XmlNode as n => n
+        null => return crypto::crypto_error("xmldsig_verify: no Signature element found")
+    }
+    var signed_info_node = match find_element_with_inlined_namespaces(signature_node, "SignedInfo", ns_scope_root()) {
+        xml::XmlNode as n => n
+        null => return crypto::crypto_error("xmldsig_verify: Signature has no SignedInfo")
+    }
+    var sig_ok = match verify_signature_value(signature_node, signed_info_node, key) {
+        bool as v => v
+        crypto::CryptoError as e => return e
+    }
+    if !sig_ok {
+        return crypto::crypto_error("xmldsig_verify: signature verification failed")
+    }
+    verify_references(signed_document, signature_node, signed_info_node)
+}
+
+/**
+ * Verifies a `Signature` element that lives APART from the content it covers (a fully external
+ * detached signature — see this module's header): checks `SignatureValue`, then digests
+ * `referenced_node` once and compares it against every `Reference`'s `DigestValue` (a
+ * single-target simplification — there is no document to resolve a `Reference`'s `URI` against,
+ * so every `Reference` is checked against the same caller-supplied node).
+ *
+ * @param signature_node   the standalone `Signature` element
+ * @param referenced_node  the externally-held node the signature covers
+ * @param key              the verifier's key (must match the declared `SignatureMethod` family)
+ * @return                 `true` on a fully valid signature, or a `CryptoError` naming the first
+ *                          failure
+ * @throws                 `CryptoError` when `SignedInfo` is missing, the key/alg family
+ *                          mismatches, the signature itself fails, or any `Reference` digest
+ *                          fails to match `referenced_node`
+ */
+exp fn xmldsig_verify_detached(signature_node: xml::XmlNode, referenced_node: xml::XmlNode, key: VerificationKey): bool | crypto::CryptoError {
+    var signed_info_node = match find_element_with_inlined_namespaces(signature_node, "SignedInfo", ns_scope_root()) {
+        xml::XmlNode as n => n
+        null => return crypto::crypto_error("xmldsig_verify_detached: Signature has no SignedInfo")
+    }
+    var sig_ok = match verify_signature_value(signature_node, signed_info_node, key) {
+        bool as v => v
+        crypto::CryptoError as e => return e
+    }
+    if !sig_ok {
+        return crypto::crypto_error("xmldsig_verify_detached: signature verification failed")
+    }
+    verify_references_against(signed_info_node, referenced_node)
+}
+
+/**
+ * Verifies every `Reference` child of `signed_info` against the single `referenced_node` (see
+ * `xmldsig_verify_detached`'s single-target simplification).
+ *
+ * @param signed_info      the `SignedInfo` whose `Reference` children to check
+ * @param referenced_node  the externally-held node every `Reference` is checked against
+ * @return                 `true` iff every `Reference` digest matches `referenced_node`, or a
+ *                         `CryptoError`
+ * @throws                 `CryptoError` when a `Reference` is malformed, its digest fails to
+ *                          match, or `SignedInfo` has no `Reference` at all
+ */
+fn verify_references_against(signed_info: xml::XmlNode, referenced_node: xml::XmlNode): bool | crypto::CryptoError {
+    var children = xml::element_children(signed_info)
+    var i: u64 = 0
+    var checked: u64 = 0
+    loop {
+        if i >= children.len { break }
+        var c = children[i]
+        if xmldsig_str_eq(c.local, "Reference") {
+            var ok = match verify_one_reference_against(referenced_node, c) {
+                bool as v => v
+                crypto::CryptoError as e => return e
+            }
+            if !ok {
+                return crypto::crypto_error("xmldsig_verify_detached: digest mismatch")
+            }
+            checked = checked + 1
+        }
+        i++
+    }
+    if checked == 0 {
+        return crypto::crypto_error("xmldsig_verify_detached: SignedInfo has no Reference elements")
+    }
+    true
+}
+
+/**
+ * Verifies one `Reference`'s digest against the fixed `referenced_node` (the detached single-
+ * target form of `verify_one_reference`, skipping `URI` resolution entirely).
+ *
+ * @param referenced_node  the externally-held node the `Reference` is checked against
+ * @param reference        the `Reference` element to check
+ * @return                 `true` iff the recomputed digest matches, or a `CryptoError` on a
+ *                         structural problem
+ */
+fn verify_one_reference_against(referenced_node: xml::XmlNode, reference: xml::XmlNode): bool | crypto::CryptoError {
+    var digest_alg_uri_value = match extract_attribute_child(reference, "DigestMethod", "Algorithm") {
+        str as s => s
+        crypto::CryptoError as e => return e
+    }
+    var alg = match digest_alg_from_uri(digest_alg_uri_value) {
+        DigestAlg as a => a
+        crypto::CryptoError as e => return e
+    }
+    var expected_digest = match extract_text_child(reference, "DigestValue") {
+        str as s => s
+        crypto::CryptoError as e => return e
+    }
+    var actual_digest = base64::encode_standard(digest_node(alg, referenced_node))
+    xmldsig_str_eq(actual_digest, expected_digest)
+}
