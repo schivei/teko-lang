@@ -1,48 +1,60 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the FINAL §9.D self-host — the seed is
-# now the compiler built from a tree in which ALL 32 `type X = variant` declarations have been retired to
-# the inline union `@X()`, including the checker's own central `type Type`. This locks the completed sweep
-# into the seed so CI's C lane bootstraps from a Type-retired gen0. It sits on top of the marker-dedup
-# reseed (which sits on the union-of-unions group-option, CR1+CR2+CR3, §14 Form 2 parametric type-macros,
-# §14 macro/comptime, §9.D, and the sweep). Standing reseed lesson: land the seed's new capability BEFORE
-# the corpus uses it — every capability this seed needs (the §14 macro pre-pass, the CR1-CR3 rungs, the
-# nested group-option, and the Error/Null marker dedup) entered the seed in an EARLIER reseed, so this one
-# adds no new capability: it only advances the seed's OWN source to the finished corpus.
+# RESEED (hand-harvest, local on feat/shape-constraint-solver, forward-only): the §9.2b SHAPE-CONSTRAINT
+# SOLVER. The seed now parses and solves the full §9.2b constraint grammar, on top of the completed §9.D
+# sweep (all 32 `type X = variant` retired to `@X()`) it inherits from fix/retirement. Standing reseed
+# lesson: land the seed's new capability BEFORE the corpus uses it — here the seed must carry the new
+# constraint GRAMMAR, because a `.tks` that writes `<T: class & Ifce | str>` or `<K: service singleton>`
+# cannot be parsed by a gen0 that predates it.
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only
 # ever judges this record on a SWAP.
 #
-# FINAL §9.D SELF-HOST reseed
+# §9.2b SHAPE-CONSTRAINT SOLVER reseed
 # ---------------------------------------------------------------------------------------------
-# WHAT CHANGED since the last reseed: `src/` retired the final two unions — `type TStatement = variant`
-# (the first union-of-unions, whose `@TItem()` member stays nested and binds through the group-option) and
-# `type Type = variant` (the checker's 14-case type model). No `bootstrap/teko.c` CAPABILITY is new here;
-# the marker-dedup and nested group-option that these retirements exercise were both landed inert in prior
-# reseeds. This harvest simply re-emits the seed from the now-complete tree so the committed gen0 is itself
-# a `@Type()`-based compiler.
-#   Carried forward: §9.D CR1/CR2/CR3, the union-of-unions nested group-option, the Error/Null marker
-#   `type_eq` dedup + `union_dedup`, §14 A0-A4 / B1-B5, §14 Form 2 parametric type-macros, §9.D
-#   capabilities (a)/(b)/(c). The sweep is COMPLETE: 32 of 32 `type X = variant` retired to `@X()`.
+# WHAT ENTERS (committed to `src/` on feat/shape-constraint-solver in this same lane):
+#   - parser (`ast.tks`, `parse_decl.tks`): two new `@ConstraintExpr()` members — `ConstraintForm`
+#     (the form words `class`/`struct`/`service`, the last optionally carrying a `ServiceLifetime`) and
+#     `ConstraintNotNull` (the `notnull` modifier). The constraint grammar reads the form keywords, a
+#     contextual lifetime word after `service`, and a contextual `notnull`; it REJECTS `notnull` on
+#     either side of a `|` (a modifier is never a shape-alternative).
+#   - checker (`monomorph.tks`, `resolve.tks`, `merge.tks`): `constraint_form_satisfied` resolves a form
+#     word against the type-argument's declaration (reusing `is_class_name`/`is_struct_name`, adding
+#     `is_service_name`/`service_lifetime_of`/`lifetime_eq`), and a named lifetime must MATCH — the §9.2b
+#     honest-lifetime ruling, where a wrong-lifetime transport fails at the instantiation point instead of
+#     being coerced to singleton. `constraint_notnull_satisfied` rejects a null/nullable type-argument.
+#     A constraint atom naming no TypeDecl now falls back to `builtin_type`, so a CONCRETE type term
+#     (`str`, `i64`, …) forces identity. Form/notnull terms name no interface and contribute no callable
+#     surface. The pre-existing ConstraintAnd/ConstraintOr tree supplies the disjunction of conjunctions.
+#   - emit (`tkb_write.tks`, `tkb_frame.tks`, `tkb_read.tks`): the two new members ride the `.tkb` codec
+#     as constraint tags 4 (NotNull) and 5 (Form: interned form word + has_lifetime u8 + lifetime u8).
+#   Carried forward: the completed §9.D sweep and every rung under it (CR1/CR2/CR3, the union-of-unions
+#   nested group-option, the Error/Null marker dedup, §14 A0-A4 / B1-B5, §14 Form 2 parametric
+#   type-macros, §9.D capabilities (a)/(b)/(c)).
+#
+# NOT INERT — AND THAT IS WHY IT MUST BE SEEDED. The compiler's own `src/` writes no §9.2b constraint
+# yet, so the self-host is byte-identical either way; but the regression corpus DOES
+# (`examples/regressions/shape_constraint*`), and §7 DI and §10 concurrency — the two items this one
+# unblocks — will write them in `src/`. A gen0 without this grammar cannot parse those sources.
 #
 # FIXPOINT. The COMMITTED artifact SELF-REPRODUCES via the C route (the reseed-bootstrap.yml criterion):
 #   cc -std=c2x bootstrap/teko.c -> gen (scripts/build_gen1_from_c.sh);
 #   TEKO_BACKEND=c gen build . -> bin;  sha256(bin/teko.c) == sha256(bootstrap/teko.c) == below.
 # Verified this run: the emitted teko.c, cc-compiled and used to rebuild the tip, re-emits itself
 # byte-identically; and the C-route chain gen1 == gen2 == gen3 is byte-identical (binary sha
-# 306120da…) at the same emitted-C sha. Every capped build (`ulimit -v 6291456`) peaked ~3.91 GB
+# 044ca515…) at the same emitted-C sha. Every capped build (`ulimit -v 6291456`) peaked ~3.92 GB
 # (well under the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: the canonical reseed-bootstrap.yml flow seeds from
-# the RELEASED binary, which predates the 0.3.1 surface AND §14, so the harvest is LOCAL on
-# fix/retirement, forward-only, and its correctness rests on the C-route self-reproduction above rather
-# than a CI run-id. `commit: pending drain` — the landing commit is written in this same change.
+# the RELEASED binary, which predates the 0.3.1 surface AND §14, so the harvest is LOCAL on this lane,
+# forward-only, and its correctness rests on the C-route self-reproduction above rather than a CI run-id.
+# `commit: pending drain` — the landing commit is written in this same change.
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  6dd23da9ea5b670a3f4aa00ffc1f4c288bda30d6fe509fcdf09aa1fec01db205
+sha256:  568f9c0c5b4973b0bac08db7e22c692361d2e93883727bc3fb9800f17ff61bc6
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the completed §9.D sweep: all 32
-         `type X = variant` retired to `@X()`, on top of the union-of-unions group-option + Error/Null
-         marker dedup + CR1+CR2+CR3 + §14 Form 2 parametric type-macros + §14 macro/comptime + §9.D),
-         byte-identical on rebuild across three C-route generations AND on the cc-route re-emission; no
-         unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §9.2b shape-constraint solver on top
+         of the completed §9.D sweep + the union-of-unions group-option + Error/Null marker dedup +
+         CR1+CR2+CR3 + §14 Form 2 parametric type-macros + §14 macro/comptime), byte-identical on rebuild
+         across three C-route generations AND on the cc-route re-emission; no unrecovered legacy artifact
+         underlies it.
