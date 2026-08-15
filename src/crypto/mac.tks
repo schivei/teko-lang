@@ -733,6 +733,21 @@ exp fn cmac_with_cipher(encrypt_block: func<[]byte, []byte>, msg: []byte): []byt
 }
 
 /**
+ * CMAC-AES (NIST SP 800-38B) — the one-liner wiring of `cmac_with_cipher` onto AES. The key is
+ * expanded ONCE and the resulting schedule is captured by the injected block cipher
+ * `(b) => aes_encrypt_block_ks(ks, b)`, so every CBC-MAC block reuses the same schedule.
+ *
+ * @param key  the AES key (16, 24, or 32 bytes) — the CMAC key size follows the AES key size
+ * @param msg  the message to authenticate, any length (including empty)
+ * @return     the 16-byte CMAC-AES tag, or a `CryptoError` on an invalid key length
+ * @throws     `CryptoError` when `key.len` is not 16, 24, or 32
+ */
+exp fn cmac_aes(key: []byte, msg: []byte): []byte | CryptoError {
+    var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
+    cmac_with_cipher((b: []byte) => aes_encrypt_block_ks(ks, b), msg)
+}
+
+/**
  * A 128-bit value as two big-endian 64-bit halves — the GF(2^128) element GHASH multiplies over.
  */
 type GfBlock = struct {
@@ -908,4 +923,20 @@ exp fn gmac_with_cipher(encrypt_block: func<[]byte, []byte>, iv: []byte, aad: []
     var h = encrypt_block(zero_block16())
     var s = match ghash(h, gmac_build_input(aad)) { []byte as x => x; CryptoError as e => return e }
     xor_block(s, encrypt_block(gmac_j0(iv)))
+}
+
+/**
+ * GMAC-AES (NIST SP 800-38D) — the one-liner wiring of `gmac_with_cipher` onto AES with the common
+ * 96-bit IV. The key is expanded ONCE and captured by the injected block cipher
+ * `(b) => aes_encrypt_block_ks(ks, b)`, reusing the schedule for both `H = E(0)` and `E(J0)`.
+ *
+ * @param key  the AES key (16, 24, or 32 bytes) — the GMAC key size follows the AES key size
+ * @param iv   the 12-byte (96-bit) initialization vector
+ * @param aad  the additional authenticated data, any length
+ * @return     the 16-byte GMAC-AES tag, or a `CryptoError` on an invalid key/IV length
+ * @throws     `CryptoError` when `key.len` is not 16/24/32 or `iv.len != 12`
+ */
+exp fn gmac_aes(key: []byte, iv: []byte, aad: []byte): []byte | CryptoError {
+    var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
+    gmac_with_cipher((b: []byte) => aes_encrypt_block_ks(ks, b), iv, aad)
 }
