@@ -5637,14 +5637,14 @@ to be audited. A **closed system, without gaps.**
   the package/pre-linker model is recorded in LEGISLATION. (The pre-linker + loader are future — pipeline phase.)
 - **First-binary backend = TRANSPILE-TO-C (legislator's choice).** *WAS* — the materialization stages
   (LEGISLATION) named stage 1 = `.tkb` *interpreted* (the bootstrap step) and stage 2 = AOT-native (what ships),
-  implying the first runnable would be an interpreter over the typed tree / `.tkb`. *IS* — for the FIRST
-  executable, the legislator chose to **skip the stage-1 interpreter** and go straight to **transpiling the
+  implying the first runnable would be an legacy engine over the typed tree / `.tkb`. *IS* — for the FIRST
+  executable, the legislator chose to **skip the stage-1 legacy engine** and go straight to **transpiling the
   typed tree to C**, letting the host `cc` produce a native binary. *WHY* — **M.5** (reuse the host toolchain;
-  do not write a native codegen — or even an interpreter — when lowering to C reaches a real binary fastest)
+  do not write a native codegen — or even an legacy engine — when lowering to C reaches a real binary fastest)
   **+ M.0** (the metal mapping is direct: Teko ints→stdint, the operators→C operators) **+ M.4** (it still rests
   on the completed checker/typed-AST). Transpile-to-C is thus a *realization of stage 2* (AOT-native via C), not
   a new stage. **Teko targets BOTH execution modes:** (1) transpile-to-C / AOT (this, first) and (2) the
-  `.tkb` interpreter (stage 1) — the interpreter is a **planned future mode**, not dropped; it just does not gate the
+  `.tkb` legacy engine (stage 1) — the legacy engine is a **planned future mode**, not dropped; it just does not gate the
   first binary (its real prerequisite is the statement/program-level `.tkb` codec, today expression-only). The full path is defined in
   TEKO_ROADMAP_BINARY.md (F0 compile the C mirror → F1 wire the pipeline → F2 emit C + call cc → F3 minimal
   runtime; M0 = a `main.tks` of integer arithmetic + print runs as a native binary).
@@ -6483,9 +6483,9 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
     C/Rust/Zig sense — **compatible with running on a host OS**.
   - **"Bare-metal" — the aspiration, not now:** no OS, device drivers, bare hardware.
     The north star, years away.
-  - **Three materialization stages (build-order, M.4):** **(1) `.tkb`** — IL/bytecode,
-    *interpreted*: the **first materialization** and bootstrap stepping-stone (least
-    "metal," simplest to reach; IO via the interpreter's host syscalls). **(2) AOT-native
+  - **Three materialization stages (build-order, M.4):** **(1) `.tkb`** — the serialized IL
+    form: the **first materialization** and bootstrap stepping-stone (least
+    "metal," simplest to reach; IO via the legacy engine's host syscalls). **(2) AOT-native
     on a host OS** — **the LTS**: native code, no GC, no hidden runtime — the *ethos*
     fully realized; IO via direct host syscalls — **this is what ships**. **(3) bare-metal**
     — the aspiration: native, no OS, IO via drivers; isolated behind the IO boundary
@@ -6519,7 +6519,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
 - **Is (the IO boundary — `teko::io`):** the stdlib module that does file/console IO is
   the **named, thin, isolated** boundary between Teko and the host. Its **interface**
   (`read_file`, `write_file`) is **stable across the materialization stages** (B.34); only
-  its **implementation** descends the stack: the `.tkb` interpreter (stage 1) and the
+  its **implementation** descends the stack: the `.tkb` legacy engine (stage 1) and the
   AOT-native code (stage 2) implement it as host syscalls; a bare-metal target (stage 3)
   would implement it as device drivers. So the aspiration is reachable by **swapping the
   boundary's implementation**, not redesigning.
@@ -6633,7 +6633,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
      nullable**: `Value? | i32` is illegal → the dev declares `type Val = Value | i32` and marks the
      *return* `-> Val?`. The two failure domains are **disjoint**: value-absence flows through
      `?.`/`??`; recoverable error flows through `match`. The seed implements `T?` **fully** (model +
-     parser + checker + codegen + interpreter). *(Already canon: `REBOOT_PLAN §202–203`; `LEGISLATION §75` "`?`
+     parser + checker + codegen + legacy engine). *(Already canon: `REBOOT_PLAN §202–203`; `LEGISLATION §75` "`?`
      is reserved strictly for nullability"; B.2.)*
   4. **`error` is the NATIVE lowercase type.** It **supersedes** `Error` / `teko::Error` / `Valor |
      Error`. *(Already lowercase in `src/core.tks`.)*
@@ -6693,7 +6693,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   - Plus the existing **`bool`** (two values, boolean algebra) and **`byte`** (an octet, newtype over `u8` —
     B.36). **This supersedes the seed's narrower `u8…u64`/`i8…i64` set.**
   - **Staging:** **Tier 1** (`u128`/`i128` + `f16`/`f32`/`f64`) is implemented **now** (lexer → checker →
-    codegen → interpreter, end-to-end); **`dec`** and **`bigint`** are **named-but-deferred** — larger,
+    codegen → legacy engine, end-to-end); **`dec`** and **`bigint`** are **named-but-deferred** — larger,
     **runtime-backed** types (a 512-bit decimal; a heap-limb bignum) that land when their runtime is built.
 
 - **Is (the three float rulings, ratified):**
@@ -6714,7 +6714,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   never silent. **M.3** (honest, explicit) — the **literal default is documented** (`f64`) and a narrower
   width is *asked for* by **annotation**, not silently chosen; each type names exactly what it is (`dec` is
   decimal, not binary float; `byte` is an octet, not a number). **M.4** (build order) — Tier 1 enters because
-  lexer/checker/codegen/interpreter carry it; `dec`/`bigint` are **deferred behind their runtime**, named now so the
+  lexer/checker/codegen/legacy engine carry it; `dec`/`bigint` are **deferred behind their runtime**, named now so the
   spelling is reserved without building ahead of the layer. **M.5** (austere) — naming the deferred types
   costs nothing; only Tier 1 carries implementation weight in the seed.
 
@@ -6736,13 +6736,13 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
 - **Was:** the AOT backend was **transpile-to-C** — the codegen lowered the typed tree to **C**, and the host
   **`cc`** compiled it to a native binary (the legislator's original choice — §B.34/§B.35; TEKO_ROADMAP_BINARY
   Fase 2 "TC"). *Why then:* **M.5** (reuse the host toolchain; realize stage-2 AOT-native without writing a
-  native code generator). Two execution modes were planned: (1) transpile-to-C/AOT, (2) the `.tkb` interpreter.
+  native code generator). Two execution modes were planned: (1) transpile-to-C/AOT, (2) the `.tkb` legacy engine.
 
 - **Is (legislator, 2026-06-24):** **transpile-to-C is REVOKED** as the destination architecture. Teko will
   build its **OWN native backend** — a direct native code generator (typed tree / `.tkb` → native object/binary),
   realizing the Constitution's **stage-2 (AOT-native on a host OS)** *without* `cc` as an intermediary.
   **Sequencing:** *conclude ALL current work FIRST*; the native backend is **not started** until the rest is
-  done. The **`.tkb` interpreter (stage-1)** is **unaffected** and stays (debug/test + differential-correctness anchor).
+  done. The **`.tkb` legacy engine (stage-1)** is **unaffected** and stays (debug/test + differential-correctness anchor).
 
 - **Why:** **M.0** (the *ethos* is the metal — native code with no C middleman is closer to the silicon than
   "native via a transpiled C intermediary"). **M.4** (build order — the front end + checker + middle must be
@@ -6752,12 +6752,12 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
 
 - **Resolved (operational, legislator 2026-06-24):** transpile-to-C is **revoked as PRIMARY but RETAINED — kept
   fully equalized — as a permanent FALLBACK and DIFFERENTIAL-CORRECTNESS COMPARATIVE.** *Why:* "we need to keep a
-  fallback and comparative." So **three** execution paths must agree: the `.tkb` **interpreter**, the **transpile-to-C/`cc`**
+  fallback and comparative." So **three** execution paths must agree: the `.tkb` **legacy engine**, the **transpile-to-C/`cc`**
   path (fallback + comparative), and the future **native backend** (primary). **Every wave lands in ALL active
-  paths — codegen is NOT frozen** (W4/W5 etc. go into interpreter *and* codegen now; the native backend later).
+  paths — codegen is NOT frozen** (W4/W5 etc. go into legacy engine *and* codegen now; the native backend later).
 
 - **Agent rule:** do **not** start the native backend yet; **conclude the current equalization** first, applying
-  each wave to **both** the interpreter and the transpile-to-C codegen (they + the future native backend are the differential
+  each wave to **both** the legacy engine and the transpile-to-C codegen (they + the future native backend are the differential
   anchor — M.1). Do not delete the C path. The Constitution's three materialization stages are unchanged (only
   stage-2's *shipping implementation* moves from C-transpile to a native codegen; C-transpile lives on as fallback).
 
@@ -6766,7 +6766,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
 - **Was (§B.38):** the native numeric set was **`u8…u128`/`i8…i128`** + **`f16`/`f32`/`f64`** + `dec` +
   `bigint`, staged as **Tier 1** (`u128`/`i128` + the three floats) implemented now, `dec`/`bigint`
   named-but-deferred. The ~11 internal carrier subsystems (the parser's `Number.value`, the const-fold
-  value, the two differential interpreters, the LIR constant, codegen's digit printer, `bigint`'s own
+  value, the two differential legacy engines, the LIR constant, codegen's digit printer, `bigint`'s own
   internal magnitude, `FlagsBody`'s bit-values, and the `teko::time`/`teko_rt` timestamp chain) were all
   typed `i128`/`u128` to carry a *user's* potential 128-bit value losslessly through the pipeline.
 
@@ -6779,7 +6779,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   `scope.tks::builtin_type` honestly rejects the three names with a diagnostic naming the escape hatch,
   rather than falling through to a generic "unknown type" error (M.3). Every internal carrier the ~11
   subsystems used is narrowed to a plain `i64`/`u64` (a sign+64-bit-magnitude pair for the literal/
-  const-fold carriers, a raw 64-bit two's-complement register for the two interpreters), and the whole
+  const-fold carriers, a raw 64-bit two's-complement register for the two legacy engines), and the whole
   128-bit backend topology (register-pair isel routes on multiple targets, the wasm `C1-i128`/`C1-f16`
   honest-stops, the `PrimKind`/`LType` enum members and their match cascades) is deleted as dead code —
   no producer can ever construct a value needing it again.
@@ -6793,7 +6793,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   a silent truncation ("compilar em falso" was explicitly considered and rejected — the reframe makes
   honest rejection affordable instead). **M.3** (name the barrier) — the three honest-stop diagnostics
   name exactly what was removed and where to go instead. **M.5** (austerity) — deleting ~11 carrier
-  subsystems' 128-bit special-casing plus the register-pair backend topology (isel/ABI/interp arms with
+  subsystems' 128-bit special-casing plus the register-pair backend topology (isel/ABI/oracle arms with
   no remaining producer) is pure weight reduction; nothing shipped ever depended on a value actually
   exceeding 64 bits (the only producers were the 128-bit tests/fixtures themselves, swept first).
 

@@ -191,7 +191,7 @@ invent nullable references. Disjoint failure domains preserved (null → `?.`/`?
 - Generics: monomorphization stamps concrete native code per instantiation — zero runtime dispatch, zero
   boxing, no vtable. Identical to hand-written per-type code. Dictionaries (Option B) are **rejected** —
   they are the "caixa-preta aberta-em-runtime" the doctrine forbids (boxing + fn-pointer dispatch).
-- ref: a `ref` is a bare address into a region (native) / a `{arena, ptr}` value tag (interpreter). No indirection
+- ref: a `ref` is a bare address into a region (native) / a `{arena, ptr}` value tag (legacy engine). No indirection
   tower.
 - Concurrency: 1:1 OS threads (clone syscall) + channels (futex/mutex) — no hidden executor, no green-
   thread runtime. async/await is **rejected** (hidden executor = anti-M.0).
@@ -239,7 +239,7 @@ invent nullable references. Disjoint failure domains preserved (null → `?.`/`?
 | Concurrency | **NO** | nothing — seed is single-threaded, short-lived, already thread-ready |
 
 **The actual self-host frontier is none of the five evolution areas.** It is the **slice-value layer +
-function params in codegen/interpreter + optionals** (`TEKO_CORRECTION_PLAN`). Finishing that — *not* generics,
+function params in codegen/legacy engine + optionals** (`TEKO_CORRECTION_PLAN`). Finishing that — *not* generics,
 arenas, ref, or concurrency — completes self-host. The only evolution-adjacent action justified now is the
 **allocation seam** (a no-cost forward-compatibility discipline), which also honors the collections study's
 "forward-compatible signature" promise for the memory layer.
@@ -249,7 +249,7 @@ arenas, ref, or concurrency — completes self-host. The only evolution-adjacent
 ```
 SEED / NOW (no evolution features):
   [done]  print/interp · list COPY-append · parse/to_string per-type · []T read-side
-  [next]  slice-value layer + fn params in codegen/interpreter + optionals   ← FINISHES SELF-HOST (not evolution)
+  [next]  slice-value layer + fn params in codegen/legacy engine + optionals   ← FINISHES SELF-HOST (not evolution)
   [now, no-cost]  tk_alloc() allocation SEAM + str/slice stay {ptr,len} views   ← the swap point
         │
         ▼  ──────────────────────────── self-host complete; M.4: design with real duplication data
@@ -272,7 +272,7 @@ EVOLUTION (staged, dependency-ordered):
                   inject + binding → (interfaces → OOP).   deps: S2 (+ S3 for inject-by-ref / use(&x)).
 
   S4  GENERICS (unconstrained, monomorphization)          can proceed in parallel with S1–S3
-        fn f<T>, type Box<T>, Map<K,V> shape; monomorphization pass: checker → expand → codegen/interpreter.
+        fn f<T>, type Box<T>, Map<K,V> shape; monomorphization pass: checker → expand → codegen/legacy engine.
         first customers: Result<T> / T|error family (thin, one type var — early validation);
         value List<T>; Box<T> (once ref exists).
         deps: self-host (M.4 data). Independent of arenas for the MECHANISM; ref-based instances need S3.

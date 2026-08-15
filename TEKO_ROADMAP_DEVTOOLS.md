@@ -64,8 +64,8 @@ unhandled-`match`-arm hints. `teko lint <path>`, `--fix` for the mechanical ones
 per-lint fixtures.
 
 ### ▪ DT3 — `teko repl` (RETIRED)
-Superseded by the interpreter retirement (DECISION_LOG D37, 2026-07-12): the REPL depended on the
-tree-walking interpreter's evaluate-without-codegen capability, which no longer exists now that native
+Superseded by the native-only consolidation (DECISION_LOG D37, 2026-07-12): the REPL depended on the
+tree-walking legacy engine's evaluate-without-codegen capability, which no longer exists now that native
 is the sole execution engine. `teko repl` falls back to the generic "not a project" path (exit 1); the
 dev-loop equivalent is `teko run` (native debug build-and-exec, `cargo run`-style).
 

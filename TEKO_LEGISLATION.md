@@ -93,7 +93,7 @@ because redefinition is a legislative act.)*
   generics).** `T?` in type position, `?.` safe access, `??` Elvis. **A variant member cannot be
   nullable**: `Value? | i32` is illegal → declare `type Val = Value | i32` and mark the *return*
   `-> Val?`. The two failure domains are **disjoint**: value-absence → `?.`/`??`; recoverable error →
-  `match`. The seed implements `T?` **fully** (model + parser + checker + codegen + interpreter). **Governing
+  `match`. The seed implements `T?` **fully** (model + parser + checker + codegen). **Governing
   Law: M.1** (disjoint domains, each fully handled; nullable-member excluded by construction) **+ M.2**
   (`?` marks nullability at the type). *(Canon: REBOOT_PLAN §202–203; §75 below. → HISTORY §B.2, §B.37.)*
 - **`error` is the NATIVE lowercase type.** It **supersedes** `Error` / `teko::Error` / `Valor |
@@ -357,9 +357,9 @@ because redefinition is a legislative act.)*
   `cc` produced the binary — HISTORY §B.34/§B.35; TEKO_ROADMAP_BINARY Fase 2 "TC"). **Sequencing (M.4):
   conclude ALL current work FIRST**, then build the native backend — it is not started until the rest is done.
   **Transpile-to-C is REVOKED as the PRIMARY/shipping backend but RETAINED — kept fully equalized — as a
-  permanent FALLBACK and a DIFFERENTIAL-CORRECTNESS COMPARATIVE** (legislator, 2026-06-24). So THREE execution
-  paths must stay behaviorally equivalent: the **`.tkb` interpreter (stage-1)**, the **transpile-to-C/`cc`
-  path** (fallback + comparative), and the future **native backend** (primary). **Every wave (value layer,
+  permanent FALLBACK and a DIFFERENTIAL-CORRECTNESS COMPARATIVE** (legislator, 2026-06-24). So the execution
+  paths must stay behaviorally equivalent: the **transpile-to-C/`cc`
+  path** (fallback + comparative), and the **native backend** (primary). **Every wave (value layer,
   execution, …) lands in ALL active paths** — codegen is NOT frozen. **Governing Law: M.0** (native code is the
   metal *ethos*, no C middleman) **+ M.4** (build order — finish the front/middle before the new back) **+ M.1**
   (three agreeing paths = differential-correctness safety net) **+ M.3** (the shipping path is honestly native).
@@ -394,7 +394,7 @@ because redefinition is a legislative act.)*
   is an **ethos** (no GC, no hidden runtime, no managed heap; you control memory via arenas — B.7; visible
   costs; a thin, explicit host boundary), **not** a deployment target — fully compatible with a host OS.
   **Bare-metal** (no OS, drivers, bare hardware) is the **aspiration**, years away. Three materialization
-  stages (build-order): **(1) `.tkb`** — IL/bytecode, interpreted, the first materialization and bootstrap
+  stages (build-order): **(1) `.tkb`** — the serialized IL form, the first materialization and bootstrap
   step; **(2) AOT-native on a host OS** — the **LTS**, the ethos fully realized, **what ships**; **(3)
   bare-metal** — the aspiration, isolated behind the IO boundary. Teko ships stage 2 and **never claims**
   stage 3 for what ships; "metal" reads as the ethos, never as bare-metal. **Governing Law: M.3** (the
@@ -403,9 +403,9 @@ because redefinition is a legislative act.)*
   CONSTITUTION M.0; HISTORY §B.34.)*
   - **First-binary realization = TRANSPILE-TO-C.** Stage 2 (AOT-native) is first realized by **lowering the
     typed tree to C** and letting the host `cc` produce the binary — reusing the toolchain (**M.5**), not a
-    bespoke native codegen. **Both execution modes are planned:** transpile-to-C/AOT (first) and the **stage-1
-    `.tkb` interpreter** — it is a **future mode** (not dropped), it just does not gate the first binary
-    (it needs the statement/program `.tkb` codec, today expression-only). The path is TEKO_ROADMAP_BINARY.md.
+    bespoke native codegen. Native AOT is the execution model; the `.tkb` serialized form is the
+    packaging/bootstrap IL (it needs the statement/program `.tkb` codec, today expression-only). The path
+    is TEKO_ROADMAP_BINARY.md.
     *(legislator's choice — → HISTORY first-binary backend.)*
 - **IO is slurp (whole-file `[]byte`), not streams — for the seed.** `read_file(path): []byte | error`,
   (open, read all, close), `write_file(path, []byte): error?` (↺ superseded the **illegal**
@@ -419,7 +419,7 @@ because redefinition is a legislative act.)*
 - **The IO boundary (`teko::io`) is the thin, named, swappable host edge.** The stdlib module doing
   file/console IO is the isolated boundary between Teko and the host; its **interface** (`read_file`,
   `write_file`) is **stable across the stages**, while its **implementation** descends the stack
-  (interpreter syscalls → AOT syscalls → bare-metal drivers). The aspiration is reached by swapping the
+  (host syscalls → AOT syscalls → bare-metal drivers). The aspiration is reached by swapping the
   implementation, not redesigning. **Governing Law: M.4** (a clean isolated layer) **+ M.3** (named, not
   magic) **+ M.0** (thin over syscalls, no fat IO runtime). *(→ HISTORY §B.35.)*
 
