@@ -28,6 +28,14 @@ type ValBinding = struct {
     ns: str
     is_const: bool
     vis: parser::Visibility
+    /**
+     * is_global — the binding was declared `global` (§15): resolvable BARE (unqualified) from ANY
+     * namespace, not only its own or the local scope, mirroring how a core name like `str` resolves.
+     * False for locals and for ordinary namespaced fns/consts (additive-inert), so pre-migration
+     * resolution is byte-identical: the unqualified branch only gains a disjunct that is constantly
+     * false across the current corpus.
+     */
+    is_global: bool
 }
 
 // the environment: a FLAT list of bindings PLUS the namespace currently being type-checked, so an
@@ -186,7 +194,7 @@ fn binding_is_writable(t: @Type(), is_mut: bool): bool {
  * @return        `env` extended with the new local binding
  */
 pub fn define(env: Env, name: str, t: @Type(), is_mut: bool): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub; is_global = false }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
 }
 
 /**
@@ -194,15 +202,16 @@ pub fn define(env: Env, name: str, t: @Type(), is_mut: bool): Env {
  * the mutable `bindings`; carries `base_index` unchanged (the index covers only the sealed `base`,
  * which `define*` never touches).
  *
- * @param env   the environment to extend
- * @param name  the function's bound identifier
- * @param t     the function's resolved type
- * @param ns    the namespace the function is declared in
- * @return      `env` extended with the function binding
+ * @param env        the environment to extend
+ * @param name       the function's bound identifier
+ * @param t          the function's resolved type
+ * @param ns         the namespace the function is declared in
+ * @param is_global  whether the fn was declared `global` (§15) — bare-reachable from any namespace
+ * @return           `env` extended with the function binding
  * @since #41
  */
-pub fn define_fn(env: Env, name: str, t: @Type(), ns: str): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
+pub fn define_fn(env: Env, name: str, t: @Type(), ns: str, is_global: bool): Env {
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub; is_global = is_global }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
 }
 
 /**
@@ -215,13 +224,14 @@ pub fn define_fn(env: Env, name: str, t: @Type(), ns: str): Env {
  * @param name  the constant's identifier
  * @param t     the constant's resolved value type
  * @param ns    the namespace the const is declared in
- * @param vis   the const's declaring visibility — gates a cross-namespace `ns::NAME` reference to a
- *              `private` const (#594 crumb 8c, issue #613)
- * @return      `env` extended with the const binding
+ * @param vis       the const's declaring visibility — gates a cross-namespace `ns::NAME` reference to a
+ *                  `private` const (#594 crumb 8c, issue #613)
+ * @param is_global whether the const was declared `global` (§15) — bare-reachable from any namespace
+ * @return          `env` extended with the const binding
  * @since #594
  */
-pub fn define_const(env: Env, name: str, t: @Type(), ns: str, vis: parser::Visibility): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
+pub fn define_const(env: Env, name: str, t: @Type(), ns: str, vis: parser::Visibility, is_global: bool): Env {
+    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis; is_global = is_global }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected }
 }
 
 // a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
@@ -359,6 +369,10 @@ fn ns_matches_call_qualifier(b_ns: str, callee: parser::Path): bool {
  * namespace satisfies the callee's full qualifier (`ns_matches_call_qualifier`). Shared by
  * `lookup_call` and `call_ns` so both scans apply one identical rule.
  *
+ * A `global` binding (§15) is reachable BARE from any namespace, so the unqualified branch accepts it
+ * in addition to a local (ns empty) and a same-namespace function. The qualified branch is unchanged —
+ * a `global` fn stays reachable by its full path too (global is additive, not exclusive).
+ *
  * @param b         a candidate value binding (already known to share the callee's last-segment name)
  * @param callee    the call callee path
  * @param cur_ns    the calling namespace (for the unqualified same-namespace case)
@@ -367,7 +381,7 @@ fn ns_matches_call_qualifier(b_ns: str, callee: parser::Path): bool {
  * @since onda-3 (#290)
  */
 fn call_binding_matches(b: ValBinding, callee: parser::Path, cur_ns: str, qualified: bool): bool {
-    if !qualified { return b.ns.len == 0 || b.ns == cur_ns }
+    if !qualified { return b.ns.len == 0 || b.ns == cur_ns || b.is_global }
     b.ns.len != 0 && ns_matches_call_qualifier(b.ns, callee)
 }
 
@@ -504,6 +518,30 @@ pub fn lookup_call_candidates(env: Env, callee: parser::Path): []ValBinding {
         i++
     }
     out
+}
+
+/**
+ * call_has_global_overload — does the bare call `callee` have MORE THAN ONE resolving candidate, at
+ * least one of which is a `global` binding (§15)? This is the gate that routes a cross-namespace global
+ * overload through `select_overload`, which the per-namespace `env_is_overloaded` gate cannot see (two
+ * `global` fns of the same bare name live in DIFFERENT namespaces, so neither namespace is an overload
+ * set on its own). INERT on the current corpus: no binding is `global`, so the `is_global` conjunct is
+ * constantly false and this returns false for every call — byte-identical.
+ *
+ * @param env     the typing environment
+ * @param callee  the call callee path
+ * @return        true iff the candidate set has 2+ members and at least one was declared `global`
+ */
+pub fn call_has_global_overload(env: Env, callee: parser::Path): bool {
+    var cands = lookup_call_candidates(env, callee)
+    if cands.len < 2 { return false }
+    var i: u64 = 0
+    loop {
+        if i >= cands.len { break }
+        if cands[i].is_global { return true }
+        i++
+    }
+    false
 }
 
 /**

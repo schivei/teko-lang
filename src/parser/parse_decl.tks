@@ -239,6 +239,39 @@ fn consume_static_modifier(tokens: []lexer::Token, pos: u64): Parsed<bool> {
 }
 
 /**
+ * consume_global_modifier — consume the optional `global` keyword (§15) in the declaration modifier
+ * chain, in its sealed slot right after the visibility run (`pub`/`exp`) and before `intern`. A
+ * `global` fn/type/const is reachable WITHOUT its namespace qualifier; the flag is a distinct axis
+ * from visibility, so it is parsed universally and carried inert until a decl uses it. A `global` on
+ * a type-body member is accepted here and rejected by the checker (globals are namespace-level only,
+ * §15), so the modifier chain never special-cases position.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index at the (possible) `global` keyword
+ * @return        Parsed<bool> — whether `global` was present, and the index just after it
+ */
+fn consume_global_modifier(tokens: []lexer::Token, pos: u64): Parsed<bool> {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::Global) { return Parsed<bool> { node = false; next = pos } }
+    Parsed<bool> { node = true; next = pos + 1 }
+}
+
+/**
+ * is_variable_binding_head — whether the token at `pos` opens a variable binding (`var`/`let`/`mut`),
+ * used to reject `global var …` at the top level (§15: a variable is never global — there is no mutable
+ * global state). `var` is a contextual identifier in Teko, so both the `let`/`mut` keywords and the
+ * `var` identifier spelling are recognized.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index just past a consumed `global` modifier
+ * @return        true iff the next token begins a variable binding
+ */
+fn is_variable_binding_head(tokens: []lexer::Token, pos: u64): bool {
+    if is_kind_at(tokens, pos, lexer::TokenKind::Let) { return true }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Mut) { return true }
+    is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "var"
+}
+
+/**
  * inject_synthetic_receiver — prepend the synthetic receiver `self` (param[0], has_type=false; the
  * type is injected by the checker as the enclosing type) to a method's user-written params. This is
  * the single point where the §4 synthetic receiver is born; every downstream consumer
@@ -406,6 +439,9 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
         export_c_symbol = ov.node
         p = ov.next
     }
+    var global_mod = consume_global_modifier(tokens, p)
+    var is_global = global_mod.node
+    p = global_mod.next
     // (W10b.CLASS, 2026-07-01) `intern` widens reach to "also visible to inheritors" — combines
     // WITH the vis above, not a 4th tier; meaningful only inside a class body, but parsed
     // universally (harmless elsewhere, matching how `pub`/`exp` parse even where meaningless).
@@ -503,7 +539,7 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
             p = p + 1
         }
         var no_body: []@Statement() = teko::list::empty()
-        return Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = true; c_symbol = c_symbol; from_lib = from_lib; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false }; next = p }
+        return Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = true; c_symbol = c_symbol; from_lib = from_lib; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false; is_global = is_global }; next = p }
     }
     // (W10b.CLASS increment 2) `abstract fn …` — a SIGNATURE ONLY, no body (abstract classes only;
     // enforced by the checker, not the parser). A bare `;`/newline/`}` follows instead of `{`.
@@ -511,13 +547,13 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
         if has_arena_size { return err_at(tokens, p, "`#arena_size(…)` may not precede an `abstract fn` (there is no Teko body to size)") }
         if ret_types.len > 0 { return err_at(tokens, p, "a bodyless (`abstract`/interface) function may not declare a multiple-return `( A, B )` signature yet") }
         var no_body: []@Statement() = teko::list::empty()
-        return Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false }; next = p }
+        return Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false; is_global = is_global }; next = p }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the function body")
     }
     var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
-    Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size; ret_types = ret_types; is_operator = false }; next = blk.next }
+    Parsed<@Decl()> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; is_static = is_static; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = has_arena_size; arena_size = arena_size; ret_types = ret_types; is_operator = false; is_global = is_global }; next = blk.next }
 }
 
 /**
@@ -673,7 +709,7 @@ fn accessor_function(sym: str, params: []Param, has_return: bool, return_type: @
         is_getter = is_getter; is_setter = is_setter; accessor_prop = prop
         has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty()
         is_operator = false
-    }
+   ; is_global = false }
 }
 
 /**
@@ -787,12 +823,12 @@ fn parse_operator_member(tokens: []lexer::Token, pos: u64, allow_bodyless: bool)
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         if allow_bodyless {
-            return Parsed<Function> { node = Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params.items; has_return = has_return; return_type = return_type; body = teko::list::empty(); vis = Visibility::Pub; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = true; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = true }; next = p }
+            return Parsed<Function> { node = Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params.items; has_return = has_return; return_type = return_type; body = teko::list::empty(); vis = Visibility::Pub; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = true; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = true; is_global = false }; next = p }
         }
         return err_at(tokens, p, "expected '{' for the operator body")
     }
     var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
-    Parsed<Function> { node = Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = Visibility::Pub; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = true; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = true }; next = blk.next }
+    Parsed<Function> { node = Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = Visibility::Pub; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = true; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = true; is_global = false }; next = blk.next }
 }
 
 /**
@@ -863,6 +899,7 @@ fn struct_item_is_method(tokens: []lexer::Token, pos: u64): bool {
     if is_kind_at(tokens, k, lexer::TokenKind::Doc) { k = skip_seps(tokens, k + 1) }   // (#111) own-line doc
     if is_kind_at(tokens, k, lexer::TokenKind::Pub) { k = k + 1 }
     else if is_kind_at(tokens, k, lexer::TokenKind::Exp) { k = k + 1 }
+    if is_kind_at(tokens, k, lexer::TokenKind::Global) { k = k + 1 }
     if is_kind_at(tokens, k, lexer::TokenKind::Static) { k = k + 1 }   // (§4 D3) `static fn` factory in a struct body
     if is_kind_at(tokens, k, lexer::TokenKind::Fn) { return true }
     accessor_kind_at(tokens, pos) != 0 to u64
@@ -967,6 +1004,7 @@ fn class_item_is_method(tokens: []lexer::Token, pos: u64): bool {
     if is_kind_at(tokens, k, lexer::TokenKind::Doc) { k = skip_seps(tokens, k + 1) }   // (#111) own-line doc
     if is_kind_at(tokens, k, lexer::TokenKind::Pub) { k = k + 1 }
     else if is_kind_at(tokens, k, lexer::TokenKind::Exp) { k = k + 1 }
+    if is_kind_at(tokens, k, lexer::TokenKind::Global) { k = k + 1 }
     if is_kind_at(tokens, k, lexer::TokenKind::Intern) { k = k + 1 }
     if is_kind_at(tokens, k, lexer::TokenKind::Abstract) { k = k + 1 }
     else if is_kind_at(tokens, k, lexer::TokenKind::Virtual) { k = k + 1 }
@@ -1459,6 +1497,9 @@ fn parse_flags_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
         vis = Visibility::Exp
         p = p + 1
     }
+    var global_mod = consume_global_modifier(tokens, p)
+    var is_global = global_mod.node
+    p = global_mod.next
     if !is_kind_at(tokens, p, lexer::TokenKind::Flags) {
         return err_at(tokens, p, "expected `flags`")
     }
@@ -1481,7 +1522,7 @@ fn parse_flags_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
         methods = mb.items
         body_next = mb.next
     }
-    Parsed<@Decl()> { node = TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = FlagsBody { members = ms.items; values = teko::list::empty(); methods = methods }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col }; next = body_next }
+    Parsed<@Decl()> { node = TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = FlagsBody { members = ms.items; values = teko::list::empty(); methods = methods }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = body_next }
 }
 
 // `[doc] [pub|exp] type Name = <body>` (B.13, nominal). Doc + visibility precede `type`.
@@ -1504,6 +1545,9 @@ fn parse_type_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
         vis = Visibility::Exp
         p = p + 1
     }
+    var global_mod = consume_global_modifier(tokens, p)
+    var is_global = global_mod.node
+    p = global_mod.next
     var is_extern = false   // C7.1a: `extern type Name` (opaque foreign handle)
     if is_kind_at(tokens, p, lexer::TokenKind::Extern) {
         is_extern = true
@@ -1527,13 +1571,13 @@ fn parse_type_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     p = tps.next
     if is_extern {
         // `extern type Name` — an OPAQUE foreign handle: no `= <body>`, lowers to `void *`.
-        return Parsed<@Decl()> { node = TypeDecl { name = name; type_params = tps.names; type_constraints = tps.constraints; body = ExternBody { }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col }; next = p }
+        return Parsed<@Decl()> { node = TypeDecl { name = name; type_params = tps.names; type_constraints = tps.constraints; body = ExternBody { }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = p }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::Assign) {
         return err_at(tokens, p, "expected '=' in a type declaration")
     }
     var body = match parse_type_body(tokens, p + 1) { Parsed<@TypeBody()> as x => x; error as e => return e }
-    Parsed<@Decl()> { node = TypeDecl { name = name; type_params = tps.names; type_constraints = tps.constraints; body = body.node; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col }; next = body.next }
+    Parsed<@Decl()> { node = TypeDecl { name = name; type_params = tps.names; type_constraints = tps.constraints; body = body.node; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = body.next }
 }
 
 // `parse_module` returns Parsed<Module> (an instance of the result.tks generic).
@@ -1629,9 +1673,9 @@ fn peel_leading_doc(tokens: []lexer::Token, pos: u64): ParsedLeadingDoc {
 fn with_outer_doc(node: @Decl(), has_doc: bool, doc: str): @Decl() {
     if !has_doc { return node }
     match node {
-        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = true; doc = doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
-        TypeDecl as td => TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = td.body; vis = td.vis; has_doc = true; doc = doc; line = td.line; col = td.col }
-        ConstDecl as cd => ConstDecl { name = cd.name; ty = cd.ty; init = cd.init; vis = cd.vis; has_doc = true; doc = doc; line = cd.line; col = cd.col }
+        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = true; doc = doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator; is_global = f.is_global }
+        TypeDecl as td => TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = td.body; vis = td.vis; has_doc = true; doc = doc; line = td.line; col = td.col; is_global = td.is_global }
+        ConstDecl as cd => ConstDecl { name = cd.name; ty = cd.ty; init = cd.init; vis = cd.vis; has_doc = true; doc = doc; line = cd.line; col = cd.col; is_global = cd.is_global }
         _ => node
     }
 }
@@ -1734,14 +1778,15 @@ fn parse_macro_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parsed<@
  * `pos` is at the `comptime` keyword; `vis` is the declared visibility. Carries a MANDATORY return type
  * (the inlined literal's type) and an optional `<T…>` generic list; there is NO `extern` form.
  *
- * @param tokens  the token stream
- * @param pos     the index of the `comptime` keyword
- * @param vis     the declared visibility
- * @return        the parsed ComptimeDecl (as a @Decl()) + the resume index, or a located parse error
- * @throws        a missing name, a malformed type-param/parameter list, a missing return type, or body
+ * @param tokens    the token stream
+ * @param pos       the index of the `comptime` keyword
+ * @param vis       the declared visibility
+ * @param is_global whether a `global` modifier (§15) preceded it — a bare-reachable comptime (§14 sugar)
+ * @return          the parsed ComptimeDecl (as a @Decl()) + the resume index, or a located parse error
+ * @throws          a missing name, a malformed type-param/parameter list, a missing return type, or body
  * @since 0.4-macros (§14 A1)
  */
-fn parse_comptime_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parsed<@Decl()> | error {
+fn parse_comptime_decl(tokens: []lexer::Token, pos: u64, vis: Visibility, is_global: bool): Parsed<@Decl()> | error {
     var p = pos + 1
     if !is_kind_at(tokens, p, lexer::TokenKind::Ident) {
         return err_at(tokens, p, "expected a comptime name after `comptime`")
@@ -1764,7 +1809,7 @@ fn parse_comptime_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parse
         return err_at(tokens, p, "expected '{' for the comptime body")
     }
     var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
-    Parsed<@Decl()> { node = ComptimeDecl { name = name; type_params = tps.names; params = params.items; ret = ret.node; body = blk.items; vis = vis }; next = blk.next }
+    Parsed<@Decl()> { node = ComptimeDecl { name = name; type_params = tps.names; params = params.items; ret = ret.node; body = blk.items; vis = vis; is_global = is_global }; next = blk.next }
 }
 
 /**
@@ -1775,15 +1820,17 @@ fn parse_comptime_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parse
  * parsed as a full expression here and validated as a const-expr later, in the
  * checker (`is_const_expr`), so parse errors stay syntactic.
  *
- * @param tokens  the full token stream
- * @param start   the index of the `const` keyword
- * @param vis     the visibility peeled by `parse_decl`
- * @return        the parsed ConstDecl and the index just past its initializer
- * @throws        a located error on a missing name, a missing `: Type`, a missing
- *                `=`, or an ill-formed initializer expression
+ * @param tokens    the full token stream
+ * @param start     the index of the `const` keyword
+ * @param vis       the visibility peeled by `parse_decl`
+ * @param is_global whether a `global` modifier (§15) preceded it — a bare-reachable const; false for
+ *                  a type-member const (globals are namespace-level only)
+ * @return          the parsed ConstDecl and the index just past its initializer
+ * @throws          a located error on a missing name, a missing `: Type`, a missing
+ *                  `=`, or an ill-formed initializer expression
  * @since #594
  */
-fn parse_const_decl(tokens: []lexer::Token, start: u64, vis: Visibility): Parsed<@Decl()> | error {
+fn parse_const_decl(tokens: []lexer::Token, start: u64, vis: Visibility, is_global: bool): Parsed<@Decl()> | error {
     var kw_line: u32 = tokens[start].line
     var kw_col: u32 = tokens[start].col
     var p = start + 1
@@ -1801,7 +1848,7 @@ fn parse_const_decl(tokens: []lexer::Token, start: u64, vis: Visibility): Parsed
         return err_at(tokens, p, "expected `=` and an initializer for a `const`")
     }
     var init = match parse_expr(tokens, p + 1) { Parsed<Expr> as x => x; error as e => return e }
-    var cd = ConstDecl { name = name; ty = ty.node; init = init.node; vis = vis; has_doc = false; doc = ""; line = kw_line; col = kw_col }
+    var cd = ConstDecl { name = name; ty = ty.node; init = init.node; vis = vis; has_doc = false; doc = ""; line = kw_line; col = kw_col; is_global = is_global }
     Parsed<@Decl()> { node = cd; next = init.next }
 }
 
@@ -1932,9 +1979,9 @@ fn reject_const_body_member(tokens: []lexer::Token, brace_pos: u64): error | nul
  * @since #594
  */
 fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility, has_doc: bool, doc: str): Parsed<ConstDecl> | error {
-    var d = match parse_const_decl(tokens, pos, vis) { Parsed<@Decl()> as x => x; error as e => return e }
+    var d = match parse_const_decl(tokens, pos, vis, false) { Parsed<@Decl()> as x => x; error as e => return e }
     var parsed_const = match d.node { ConstDecl as c => c; _ => return err_at(tokens, pos, "internal: a member const must parse to a ConstDecl") }
-    var cd = ConstDecl { name = parsed_const.name; ty = parsed_const.ty; init = parsed_const.init; vis = parsed_const.vis; has_doc = has_doc; doc = doc; line = parsed_const.line; col = parsed_const.col }
+    var cd = ConstDecl { name = parsed_const.name; ty = parsed_const.ty; init = parsed_const.init; vis = parsed_const.vis; has_doc = has_doc; doc = doc; line = parsed_const.line; col = parsed_const.col; is_global = parsed_const.is_global }
     Parsed<ConstDecl> { node = cd; next = d.next }
 }
 
@@ -1967,6 +2014,12 @@ fn parse_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
         vis = Visibility::Exp
         k = skip_export_override_peek(tokens, k + 1)
     }
+    var global_peek = consume_global_modifier(tokens, k)
+    var is_global = global_peek.node
+    k = global_peek.next
+    if is_global && is_variable_binding_head(tokens, k) {
+        return err_at(tokens, k, "`global` is not allowed on a variable — only on a namespace-level fn, type, or const (§15)")
+    }
     var saw_extern = false
     if is_kind_at(tokens, k, lexer::TokenKind::Extern) {
         saw_extern = true
@@ -1988,17 +2041,18 @@ fn parse_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     if is_kind_at(tokens, k, lexer::TokenKind::Const) {
         if saw_extern { return err_at(tokens, k, "expected `fn` or `type` after `extern`") }
         match reject_fn_only_attrs_on_type(tokens, k, attrs) { error as e => return e; null => { } }
-        var d = match parse_const_decl(tokens, k, vis) { Parsed<@Decl()> as x => x; error as e => return e }
+        var d = match parse_const_decl(tokens, k, vis, is_global) { Parsed<@Decl()> as x => x; error as e => return e }
         return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Macro) {
         if saw_extern { return err_at(tokens, k, "there is no `extern macro` — a macro is native-only (§14)") }
+        if is_global { return err_at(tokens, k, "`global` is not allowed on a macro (§15) — global reach applies to a fn, type, const, or comptime; a macro is resolved by name at expansion time") }
         var d = match parse_macro_decl(tokens, k, vis) { Parsed<@Decl()> as x => x; error as e => return e }
         return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Comptime) {
         if saw_extern { return err_at(tokens, k, "there is no `extern comptime` — a comptime is native-only (§14)") }
-        var d = match parse_comptime_decl(tokens, k, vis) { Parsed<@Decl()> as x => x; error as e => return e }
+        var d = match parse_comptime_decl(tokens, k, vis, is_global) { Parsed<@Decl()> as x => x; error as e => return e }
         return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
     }
     if saw_extern {
@@ -2048,6 +2102,7 @@ fn is_decl_head_token(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Hash) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Pub) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Exp) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Global) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Extern) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Fn) ||
     is_kind_at(tokens, pos, lexer::TokenKind::Type) ||

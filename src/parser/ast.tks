@@ -673,6 +673,16 @@ pub type Function = struct {
      * changes (additive-inert, fixpoint).
      */
     is_operator: bool
+    /**
+     * is_global — this Function was declared `global` (§15): a namespace-level fn reachable WITHOUT
+     * its namespace qualifier, exactly as `str`/`error` are today, now made explicit. It is a distinct
+     * axis from `vis` (reach) and from `is_intern`/`is_static` — the AMBIENT-SURFACE axis, not a fourth
+     * visibility tier, and it does NOT gate `exp`/`pub` enforcement (that is §11). False on every
+     * ordinary fn (additive-inert), so each pre-migration `Function { … }` reproduces byte-for-byte.
+     * A `global` on a type member (method) is rejected by the checker (globals are namespace-level
+     * only); the flag is carried on every Function so the modifier chain never special-cases position.
+     */
+    is_global: bool
 }
 /**
  * StructBody — a `struct [I & …] { fields; methods; consts }` body (OOP A1). A struct's members
@@ -860,6 +870,14 @@ pub type TypeDecl = struct {   // nominal (B.13)
     doc: str   // the doc span (valid iff has_doc)
     line: u32   // the name's 1-based source line (W-loc-2 diagnostics)
     col: u32   // the name's 1-based source column (W-loc-2 diagnostics)
+    /**
+     * is_global — this TypeDecl was declared `global` (§15): a namespace-level type bare-resolvable
+     * from ANY namespace, mirroring how a root-scope type like `str` resolves today. Default false, so
+     * every existing `TypeDecl { … }` literal only appends `is_global = false` and nothing changes
+     * (additive-inert). Precedence keeps a same-name own-namespace or root type winning over a global,
+     * so a global never shadows a local; a name clash BETWEEN two globals is the checker's collision.
+     */
+    is_global: bool
 }
 /**
  * A `use` declaration, in one of three forms (S1, the 0.1.0.0-beta remodel §3.1):
@@ -896,9 +914,11 @@ pub type UseDecl = struct {
  * @param doc     the attached doc-comment text (valid iff has_doc)
  * @param line    the `const` keyword's source line
  * @param col     the `const` keyword's source column
+ * @param is_global whether the const was declared `global` (§15) — bare-reachable from any namespace;
+ *                default false (additive-inert), a name clash between two globals is a checker error
  * @since #594
  */
-pub type ConstDecl = struct { name: str; ty: @TypeExpr(); init: Expr; vis: Visibility; has_doc: bool; doc: str; line: u32; col: u32 }
+pub type ConstDecl = struct { name: str; ty: @TypeExpr(); init: Expr; vis: Visibility; has_doc: bool; doc: str; line: u32; col: u32; is_global: bool }
 
 // --- R-main: a `.tks` file is a MAIN (executable entry) or a MODULE. ---
 /**
@@ -934,9 +954,11 @@ pub type MacroDecl = struct { name: str; params: []Param; body: []@Statement(); 
  * @field ret          the return type — the inlined literal's type
  * @field body         the body statements, folded by `eval_const` over typed values
  * @field vis          visibility (`pub`/`exp`/internal)
+ * @field is_global    declared `global` (§15) — the comptime is reachable bare from any namespace; the
+ *                     §14 comptime registry honours it. Default false (additive-inert).
  * @since 0.4-macros (§14 A1)
  */
-pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param; ret: @TypeExpr(); body: []@Statement(); vis: Visibility }
+pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param; ret: @TypeExpr(); body: []@Statement(); vis: Visibility; is_global: bool }
 
 /**
  * Decl — a top-level declaration, retired from a nominal `variant` to the §9.D inline union `@Decl()`:

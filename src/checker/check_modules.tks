@@ -242,7 +242,140 @@ fn check_modules(prog: parser::Program, table: TypeTable): []str {
         diags = concat_diags(diags, item_module_diags(prog.items[i], table, al))
         i++
     }
+    diags = concat_diags(diags, check_global_signature_collisions(prog, table))
+    concat_diags(diags, check_global_type_collisions(prog))
+}
+
+/**
+ * global_fn_signature_key — the §9 A overload key of a `global` fn declaration: its bare name joined
+ * with the `_`-mangle of its parameter types, in signature order. Two `global` fns share a key iff they
+ * expose the SAME exported signature (§15 ruling 3) — the collision condition. Returns the resolving
+ * error when a parameter type cannot be resolved (collection already reports that, so the caller skips
+ * the item rather than double-reporting).
+ *
+ * @param f      the parsed global function
+ * @param table  the folded type table
+ * @param ns     the function's declaring namespace
+ * @return       the signature key, or the parameter-type resolution error
+ */
+fn global_fn_signature_key(f: parser::Function, table: TypeTable, ns: str): str | error {
+    match func_type(f, table, ns) {
+        (@Type()) as t => match t {
+            Func as fn_t => f.name ~ "#" ~ overload_types_mangle(fn_t)
+            _ => error { message = "internal: a function signature did not resolve to a Func type" }
+        }
+        error as e => e
+    }
+}
+
+/**
+ * check_global_signature_collisions — enforce §15 ruling 3: two `global` declarations sharing an
+ * exported signature (same bare name AND same parameter-type list) are a compile error; different
+ * signatures coexist as an overload set. Reports one diagnostic per extra colliding global, naming the
+ * earlier declaration's namespace. INERT on the current corpus — no declaration is `global` yet, so no
+ * key ever repeats.
+ *
+ * @param prog   the trait-folded program
+ * @param table  the folded type table
+ * @return       the collision diagnostics, in declaration order (empty when every global signature is unique)
+ */
+fn check_global_signature_collisions(prog: parser::Program, table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i].content {
+            parser::Function as f => if f.is_global {
+                diags = concat_diags(diags, global_fn_collision_at(prog, table, i, f))
+            }
+            _ => { }
+        }
+        i++
+    }
     diags
+}
+
+/**
+ * global_fn_collision_at — the collision diagnostic (if any) contributed by the global fn at item `i`:
+ * an earlier global fn sharing its signature key. Scans only the items BEFORE `i`, so a set of N
+ * colliding globals reports N-1 diagnostics (each later one against the first it meets), never the same
+ * pair twice.
+ *
+ * @param prog   the program
+ * @param table  the folded type table
+ * @param i      the index of the global fn under test
+ * @param f      that global fn
+ * @return       a single-element diagnostic list on a collision, else empty
+ */
+fn global_fn_collision_at(prog: parser::Program, table: TypeTable, i: u64, f: parser::Function): []str {
+    var key = match global_fn_signature_key(f, table, prog.items[i].namespace) { str as k => k; error => return teko::list::empty() }
+    var j: u64 = 0
+    loop {
+        if j >= i { break }
+        match prog.items[j].content {
+            parser::Function as g => if g.is_global {
+                match global_fn_signature_key(g, table, prog.items[j].namespace) {
+                    str as gk => if gk == key {
+                        return one_diag(located_diag(prog.items[i].file, f.line, f.col, error { message = $"duplicate `global` signature for '{f.name}' — also declared `global` with the same signature in namespace '{prog.items[j].namespace}' (§15). Different signatures coexist as overloads; identical ones collide." }))
+                    }
+                    error => { }
+                }
+            }
+            _ => { }
+        }
+        j++
+    }
+    teko::list::empty()
+}
+
+/**
+ * check_global_type_collisions — the §15 ruling 3 twin for `global` TYPES: two `global type`
+ * declarations of the SAME name AND the SAME generic arity collide (arity is part of the signature, so
+ * `Foo` and `Foo<T>` do NOT collide — §9 B). Reports one diagnostic per extra colliding global type.
+ * INERT on the current corpus — no type is `global` yet.
+ *
+ * @param prog  the trait-folded program
+ * @return      the collision diagnostics, in declaration order
+ */
+fn check_global_type_collisions(prog: parser::Program): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i].content {
+            parser::TypeDecl as d => if d.is_global {
+                diags = concat_diags(diags, global_type_collision_at(prog, i, d))
+            }
+            _ => { }
+        }
+        i++
+    }
+    diags
+}
+
+/**
+ * global_type_collision_at — the collision diagnostic (if any) for the global type at item `i`: an
+ * earlier global type of the same name and same arity. Scans only the earlier items, so N colliding
+ * globals report N-1 diagnostics.
+ *
+ * @param prog  the program
+ * @param i     the index of the global type under test
+ * @param d     that global type declaration
+ * @return      a single-element diagnostic list on a collision, else empty
+ */
+fn global_type_collision_at(prog: parser::Program, i: u64, d: parser::TypeDecl): []str {
+    var j: u64 = 0
+    loop {
+        if j >= i { break }
+        match prog.items[j].content {
+            parser::TypeDecl as e => if e.is_global && e.name == d.name && e.type_params.len == d.type_params.len {
+                return one_diag(located_diag(prog.items[i].file, d.line, d.col, error { message = $"duplicate `global` type '{d.name}' — also declared `global` with the same arity in namespace '{prog.items[j].namespace}' (§15)" }))
+            }
+            _ => { }
+        }
+        j++
+    }
+    teko::list::empty()
 }
 
 /**

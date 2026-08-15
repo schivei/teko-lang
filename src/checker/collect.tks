@@ -33,7 +33,7 @@ fn iservice_ctor_sig(): parser::Function {
         is_getter = false; is_setter = false; accessor_prop = ""
         has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty()
         is_operator = false
-    }
+   ; is_global = false }
 }
 
 /**
@@ -48,7 +48,7 @@ fn iservice_decl(): parser::TypeDecl {
         name = "IService"; type_params = teko::list::empty(); type_constraints = teko::list::empty()
         body = parser::InterfaceBody { extends = teko::list::empty(); methods = teko::list::push(teko::list::empty(), iservice_ctor_sig()) }
         vis = parser::Visibility::Exp; has_doc = false; doc = ""; line = 0; col = 0
-    }
+   ; is_global = false }
 }
 
 // gather ALL user type declarations first (so a forward reference resolves).
@@ -332,7 +332,7 @@ fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env): SigOu
  */
 fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTable, env: Env): SigOutcome {
     match func_type(f, table, item.namespace) {
-        (@Type()) as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace); diags = teko::list::empty() }
+        (@Type()) as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace, f.is_global); diags = teko::list::empty() }
         error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, f.line, f.col, e)) }
     }
 }
@@ -349,7 +349,7 @@ fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTabl
  */
 fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: TypeTable, env: Env): SigOutcome {
     match collect_const_sig(cd, table, item.namespace) {
-        (@Type()) as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis); diags = teko::list::empty() }
+        (@Type()) as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis, cd.is_global); diags = teko::list::empty() }
         error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, cd.line, cd.col, e)) }
     }
 }
@@ -405,8 +405,13 @@ fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: 
     var i = 0
     loop {
         if i >= methods.len { break }
+        if methods[i].is_global {
+            diags = teko::list::push(diags, located_diag(item.file, methods[i].line, methods[i].col, error { message = "`global` is not allowed on a type member — only on a namespace-level fn, type, or const (§15)" }))
+            i++
+            continue
+        }
         match method_func_type(methods[i], td.name, table, item.namespace) {
-            (@Type()) as t => { out = define_fn(out, methods[i].name, t, method_ns) }
+            (@Type()) as t => { out = define_fn(out, methods[i].name, t, method_ns, false) }
             error as e => { diags = teko::list::push(diags, located_diag(item.file, methods[i].line, methods[i].col, e)) }
         }
         i++
@@ -468,7 +473,7 @@ fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env): Sig
     loop {
         if mi >= methods.len { break }
         match method_func_type(methods[mi], inst.name, table, "") {
-            (@Type()) as t => { out = define_fn(out, methods[mi].name, t, inst.name) }
+            (@Type()) as t => { out = define_fn(out, methods[mi].name, t, inst.name, false) }
             error as e => { diags = teko::list::push(diags, located_diag(inst.file, methods[mi].line, methods[mi].col, e)) }
         }
         mi++
@@ -664,7 +669,7 @@ fn mret_struct_item(ns: str, file: str, mangle: str, types: []@TypeExpr()): pars
         i = i + 1
     }
     var body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty(); is_readonly = false }
-    var decl = parser::TypeDecl { name = mangle; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0 }
+    var decl = parser::TypeDecl { name = mangle; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; is_global = false }
     parser::Item { content = decl; namespace = ns; file = file }
 }
 
@@ -796,7 +801,7 @@ fn mret_rewrite_arms(arms: []parser::Arm, mangle: str): []parser::Arm {
  * @since §9 F
  */
 fn mret_rewrite_fn(f: parser::Function, mangle: str): parser::Function {
-    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = true; return_type = mret_named_type(mangle); body = mret_rewrite_returns(f.body, mangle); vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
+    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = true; return_type = mret_named_type(mangle); body = mret_rewrite_returns(f.body, mangle); vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator; is_global = f.is_global }
 }
 
 /**
@@ -906,17 +911,17 @@ pub fn canon_class_bases(program: parser::Program): parser::Program {
                     parser::ClassBody as cb => {
                         if cb.has_base || cb.implements.len > 0 {
                             var cbase = if cb.has_base { canon_ref_name(cb.base_name, table, it.namespace) } else { cb.base_name }
-                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cbase; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = canon_ref_list(cb.implements, table, it.namespace); fields = cb.fields; methods = cb.methods; consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col }
+                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cbase; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = canon_ref_list(cb.implements, table, it.namespace); fields = cb.fields; methods = cb.methods; consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; is_global = td.is_global }
                         }
                     }
                     parser::StructBody as sb => {
                         if sb.implements.len > 0 {
-                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::StructBody { fields = sb.fields; methods = sb.methods; implements = canon_ref_list(sb.implements, table, it.namespace); consts = sb.consts; is_readonly = sb.is_readonly }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col }
+                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::StructBody { fields = sb.fields; methods = sb.methods; implements = canon_ref_list(sb.implements, table, it.namespace); consts = sb.consts; is_readonly = sb.is_readonly }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; is_global = td.is_global }
                         }
                     }
                     parser::InterfaceBody as ifb => {
                         if ifb.extends.len > 0 {
-                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::InterfaceBody { extends = canon_ref_list(ifb.extends, table, it.namespace); methods = ifb.methods }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col }
+                            content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::InterfaceBody { extends = canon_ref_list(ifb.extends, table, it.namespace); methods = ifb.methods }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; is_global = td.is_global }
                         }
                     }
                     _ => { }
@@ -1826,7 +1831,7 @@ fn const_index_by_name(consts: []parser::ConstDecl, name: str): i64 {
  * @since 0.3.1 (§9.4 revised)
  */
 fn trait_method_as_member(tm: parser::Function): parser::Function {
-    parser::Function { name = tm.name; type_params = tm.type_params; type_constraints = tm.type_constraints; params = tm.params; has_return = tm.has_return; return_type = tm.return_type; body = tm.body; vis = parser::Visibility::Pub; has_doc = tm.has_doc; doc = tm.doc; line = tm.line; col = tm.col; is_test = tm.is_test; is_extern = tm.is_extern; c_symbol = tm.c_symbol; from_lib = tm.from_lib; os_guard = tm.os_guard; is_intern = tm.is_intern; is_abstract = tm.is_abstract; is_virtual = tm.is_virtual; is_override = tm.is_override; is_static = tm.is_static; is_getter = tm.is_getter; is_setter = tm.is_setter; accessor_prop = tm.accessor_prop; has_arena_size = tm.has_arena_size; arena_size = tm.arena_size; ret_types = tm.ret_types; is_operator = tm.is_operator }
+    parser::Function { name = tm.name; type_params = tm.type_params; type_constraints = tm.type_constraints; params = tm.params; has_return = tm.has_return; return_type = tm.return_type; body = tm.body; vis = parser::Visibility::Pub; has_doc = tm.has_doc; doc = tm.doc; line = tm.line; col = tm.col; is_test = tm.is_test; is_extern = tm.is_extern; c_symbol = tm.c_symbol; from_lib = tm.from_lib; os_guard = tm.os_guard; is_intern = tm.is_intern; is_abstract = tm.is_abstract; is_virtual = tm.is_virtual; is_override = tm.is_override; is_static = tm.is_static; is_getter = tm.is_getter; is_setter = tm.is_setter; accessor_prop = tm.accessor_prop; has_arena_size = tm.has_arena_size; arena_size = tm.arena_size; ret_types = tm.ret_types; is_operator = tm.is_operator; is_global = tm.is_global }
 }
 
 /**
@@ -2214,7 +2219,7 @@ fn fold_class_item(it: parser::Item, td: parser::TypeDecl, cb: parser::ClassBody
  * @since 0.3.1
  */
 fn item_with_body(it: parser::Item, td: parser::TypeDecl, body: @TypeBody()): parser::Item {
-    var decl = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = body; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col }
+    var decl = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = body; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; is_global = td.is_global }
     parser::Item { content = decl; namespace = it.namespace; file = it.file }
 }
 
@@ -2907,7 +2912,7 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
                 }
                 var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
                 var ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults; ret_extra = teko::list::empty() }
-                e = define_fn(e, f.name, ft, f.namespace)
+                e = define_fn(e, f.name, ft, f.namespace, false)
             }
             _ => { }
         }
@@ -2935,7 +2940,7 @@ fn seed_dep_consts(env: Env, dep: TProgram): Env {
     loop {
         if k >= dep.items.len { break }
         match dep.items[k] {
-            TConstDecl as c => if dep_const_is_exported(c) { e = define_const(e, c.name, c.ty, c.namespace, c.vis) }
+            TConstDecl as c => if dep_const_is_exported(c) { e = define_const(e, c.name, c.ty, c.namespace, c.vis, false) }
             _ => { }
         }
         k++

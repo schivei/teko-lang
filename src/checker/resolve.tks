@@ -699,11 +699,36 @@ fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str, arity: u64): 
         i++
     }
     match resolve_root_scope_reg(last, table, ref_ns, arity) { TypeReg as r => return r; null => { } }
+    match resolve_global_type_reg(last, table, arity) { TypeReg as r => return r; null => { } }
     match resolve_bare_g_instance(last, table) { TypeReg as r => return r; null => { } }
     match reject_or_unknown_bare_type(last, table, ref_ns) {
         NotUserType => NotUserType { }
         error as e => e
     }
+}
+
+/**
+ * resolve_global_type_reg — a `global` type (§15) is bare-visible from ANY namespace, mirroring how a
+ * root-scope type resolves. Scanned AFTER own-namespace and root (so a same-name local or root type
+ * still wins, preserving today's precedence), and arity-selective like its siblings (§9 B). Reads the
+ * `global` flag off the registration's parsed declaration; a name clash BETWEEN two globals is caught
+ * separately by the collision pass, not here.
+ *
+ * @param last   the referenced bare type name
+ * @param table  the folded type table
+ * @param arity  the reference's syntactic generic arity
+ * @return       the matching global registration, or null when none is declared `global` at this arity
+ */
+fn resolve_global_type_reg(last: str, table: TypeTable, arity: u64): TypeReg | null {
+    var cands = tt_cands(table, last)
+    var k: u64 = 0
+    loop {
+        if k >= cands.count { break }
+        var r = tt_cand_reg(table, cands, k)
+        if r.name == last && r.decl.is_global && r.decl.type_params.len == arity { return r }
+        k++
+    }
+    null
 }
 
 /**
@@ -880,6 +905,20 @@ fn type_ref_ns(path: parser::Path, table: TypeTable, ref_ns: str): str {
             var r = tt_cand_reg(table, cands, i)
             if r.name == last && r.namespace == ref_ns { return ref_ns }
             i++
+        }
+        var ri: u64 = 0
+        loop {
+            if ri >= cands.count { break }
+            var r = tt_cand_reg(table, cands, ri)
+            if r.name == last && r.namespace == "" { return "" }
+            ri++
+        }
+        var gi: u64 = 0
+        loop {
+            if gi >= cands.count { break }
+            var r = tt_cand_reg(table, cands, gi)
+            if r.name == last && r.decl.is_global { return r.namespace }
+            gi++
         }
         return ""
     }
@@ -1163,7 +1202,7 @@ fn type_param_reg(name: str, own_constraint: @ConstraintExpr(), ns: str, table: 
     var body: @TypeBody() = parser::ExternBody { }
     if ifaces.len > 0 { body = parser::InterfaceBody { extends = ifaces; methods = teko::list::empty() } }
     var carried_constraints = teko::list::push(teko::list::empty(), own_constraint)
-    var d = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = carried_constraints; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    var d = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = carried_constraints; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_global = false }
     TypeReg { name = name; namespace = ns; file = ""; vis = parser::Visibility::Private; decl = d }
 }
 
@@ -2824,7 +2863,7 @@ fn subst_method_sig_names(f: parser::Function, params: []str, args: []@TypeExpr(
         i++
     }
     var nret = if f.has_return { subst_texpr_names(f.return_type, params, args) } else { f.return_type }
-    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
+    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator; is_global = f.is_global }
 }
 
 /**
@@ -3232,7 +3271,7 @@ fn resolve_inst_arg(arg: @TypeExpr(), table: TypeTable, ref_ns: str, template_ns
 fn stamped_instance_decl(template: TypeReg, mangled: str, nt: parser::NamedType, argtypes: []@Type(), table: TypeTable): parser::TypeDecl {
     var gen = template.decl
     var nbody = subst_body_names(gen.body, gen.type_params, nt.args)
-    parser::TypeDecl { name = mangled; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = nbody; vis = gen.vis; has_doc = false; doc = ""; line = gen.line; col = gen.col }
+    parser::TypeDecl { name = mangled; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = nbody; vis = gen.vis; has_doc = false; doc = ""; line = gen.line; col = gen.col; is_global = false }
 }
 
 /**
@@ -3456,7 +3495,7 @@ fn normalize_inst_method(f: parser::Function, table: TypeTable): parser::Functio
         i++
     }
     var nret = if f.has_return { normalize_inst_texpr(f.return_type, table) } else { f.return_type }
-    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator }
+    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator; is_global = f.is_global }
 }
 
 /**
@@ -3510,7 +3549,7 @@ fn normalize_inst_body(body: @TypeBody(), table: TypeTable): @TypeBody() {
 // variant member is `Gen<i64>`), so the syntactic body codegen/interpreter read agrees with the resolved
 // type. A NO-OP when the body has no generic-instance reference. (C: tk_normalize_inst_decl.)
 pub fn normalize_inst_decl(d: parser::TypeDecl, table: TypeTable): parser::TypeDecl {
-    parser::TypeDecl { name = d.name; type_params = d.type_params; type_constraints = d.type_constraints; body = normalize_inst_body(d.body, table); vis = d.vis; has_doc = d.has_doc; doc = d.doc; line = d.line; col = d.col }
+    parser::TypeDecl { name = d.name; type_params = d.type_params; type_constraints = d.type_constraints; body = normalize_inst_body(d.body, table); vis = d.vis; has_doc = d.has_doc; doc = d.doc; line = d.line; col = d.col; is_global = d.is_global }
 }
 
 // (W9.4) normalize EVERY stamped generic-instance decl's body in the table, so table_generic_instances
