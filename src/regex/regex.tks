@@ -52,16 +52,10 @@
 // if/when Teko gains in-place mutation (index assignment / mutable arrays) and a real
 // state-table NFA becomes expressible.
 //
-// A SECOND, NARROWER workaround lives in the AST shape itself: every "single child"
+// A SECOND, NARROWER shape choice lives in the AST itself: every "single child"
 // field (RStar/RPlus/ROpt/RGroup's operand) is stored as `[]RegexNode` (a ONE-element
-// slice), never a bare `inner: RegexNode`, and always read back via `[0]`. This routes
-// around a confirmed defect in the (now-retired) tree-walking interpreter (native was always unaffected): reading a
-// BARE variant-typed struct field off a variable that is itself bound by an enclosing
-// `match … as x =>` arm returns a corrupted value (reproduced in isolation — a
-// self-referential variant is not even required; any variant-typed struct field
-// triggers it). The identical field wrapped as a one-element `[]T` and read via `[0]`
-// was unaffected — slices already went through a different (correct) interpreter code path.
-// This module's workaround predates the interpreter's retirement and was never unwound.
+// slice), never a bare `inner: RegexNode`, and always read back via `[0]`. This
+// one-element-slice shape was never unwound.
 
 // --- the AST (RegexNode) — one named struct per arm (no inline variant bodies; the
 // canonical pattern used by e.g. checker::Type — inline anonymous variant bodies are
@@ -87,7 +81,7 @@ pub type RAlt = struct { branches: []@RegexNode() }
 
 /**
  * RStar — a Kleene star `x*` (0 or more, greedy). Its `inner` is a ONE-element `[]@RegexNode()` (never a
- * bare `@RegexNode()` field) — the interpreter workaround noted above; built via `one(node)`, read via
+ * bare `@RegexNode()` field) — the one-element-slice shape noted above; built via `one(node)`, read via
  * `one_of(x.inner)`.
  *
  * @field inner  the one-element operand slice
@@ -135,7 +129,7 @@ macro RegexNode() { lowering { RChar | RAny | RClass | RConcat | RAlt | RStar | 
 // structs stay pure data), so every operation is a free function taking `Regex` by value.
 pub type Regex = struct { pattern: str; ast: @RegexNode() }
 
-// --- the []RegexNode-of-one helper pair (the interpreter workaround plumbing) ---
+// --- the []RegexNode-of-one helper pair (the one-element-slice plumbing) ---
 
 fn one(node: @RegexNode()): []@RegexNode() { teko::list::push(teko::list::empty(), node) }
 fn one_of(wrapped: []@RegexNode()): @RegexNode() { wrapped[0] }
