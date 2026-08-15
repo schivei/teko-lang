@@ -76,7 +76,7 @@ ports that reuse the whole LIR + lowering + regalloc frame and swap only isel/en
 
 The correctness bar is a **3-way differential** built on the four oracles that already exist:
 
-- **Interpreter** (`teko run`) — the language oracle (retiring, but kept until C-vs-own is trusted).
+- **Legacy engine** (`teko run`) — the language oracle (retired once C-vs-own was trusted).
 - **C-native** — `tk_emit_c` → `run_cc` → binary (the trusted, self-hosting production path).
 - **own-native** — the new backend's binary.
 - **LIR oracle** (`src/lir/lir_oracle.tks`) — the "FOURTH oracle" (`:1-8`): runs the LIR

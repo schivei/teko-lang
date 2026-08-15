@@ -743,7 +743,7 @@ a reasoned rewrite; the ONE thought-spot is moving `width_mask`/`msb_value`'s to
 128→64 (`comptime_fold.tks:148-215`). Confirmed: no fold mask genuinely needs >64 (ops mirror the dying
 surface widths). Folded into crumb R1.
 
-**(g) Interpreter carrier BEHAVIOR — the one substantive semantic choice.** The differential legacy engines
+**(g) Legacy-engine carrier BEHAVIOR — the one substantive semantic choice.** The differential legacy engines
 hold an **unmasked i128** carrier today (`lir_oracle.tks:11`); moving to a **64-bit wrapping `i64`**
 carrier (§2.2) changes intermediate-overflow behavior: an i64/u64 arithmetic result that momentarily
 exceeded 64 bits used to be held wide and only masked at a `to` cast — it now **wraps mod 2^64 at the
