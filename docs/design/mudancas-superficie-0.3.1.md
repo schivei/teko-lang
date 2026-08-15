@@ -1213,6 +1213,13 @@ byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML a
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
+**💡 TOML valida por DOGFOODING (ruling do dono 2026-08-15): os `.tkp` JÁ SÃO TOML.** Então a lane TOML
+**não gera `.tkt`** — o melhor teste é **trocar o leitor de projeto** (`parse_manifest` em `src/build/manifest.tks`,
+~160 ln) pra usar `teko::encoding::toml::parse_toml` + mapear o `TomlValue` Table → struct `Manifest`, e deixar
+o **próprio compilador lendo seus `.tkp`** ser o teste. **Validação = build de 2 gerações:** gen1(seed, parser
+velho) constrói gen2 do source novo; então **gen2 constrói de novo lendo `teko.tkp` com o parser NOVO** — verde
+nesse passo prova o TOML sobre `.tkp` real. (INI mantém `.tkt` — não é dogfooded.)
+
 **Ordem de drive (revisada — a ordem é praticidade, NÃO uma restrição a "só monomórfico"; ver correção do
 dono acima):** núcleo crypto ✅ → `sort` ✅ → `encoding` — a lista COMPLETA
 do §1.5: **texto** (json✅ · xml✅+C14N · csv · toml · ini · yaml), **binário** (cbor · msgpack · **bson** ·
