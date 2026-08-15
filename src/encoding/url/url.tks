@@ -4,15 +4,21 @@
  * (the `teko::regex` / `teko::encoding::json` precedent: library code with zero OS/FFI
  * dependency ships as `.tks` + `.tkt` only, and both engines get it automatically).
  *
- * TWO ENCODINGS, ONE ESCAPE ENGINE. RFC 3986 §2.3 "unreserved" characters (`A-Z a-z 0-9 - _ . ~`)
+ * THREE ENCODINGS, ONE ESCAPE ENGINE. RFC 3986 §2.3 "unreserved" characters (`A-Z a-z 0-9 - _ . ~`)
  * never need escaping; everything else percent-encodes to `%XX` (uppercase hex, per §2.1's
  * recommendation and universal practice). `application/x-www-form-urlencoded` (the HTML-form
  * body/query-string convention) is the SAME percent-escape engine with one addition: a space
  * encodes as `+` instead of `%20` (and `decode_form` accepts `+` back as a space, on top of
- * ordinary `%XX` decoding) — so `percent_encode`/`percent_decode` and
- * `encode_form_component`/`decode_form_component` share one core, parameterized by whether `+`
- * means space (M.5 — one source of truth, mirrors `teko::encoding::base64`'s one-engine-per-
- * alphabet-flag shape).
+ * ordinary `%XX` decoding). RFC 3986 §3.3's `pchar` grammar (`unreserved / pct-encoded /
+ * sub-delims / ":" / "@"`) also lets a full PATH segment sequence leave sub-delims, `:`, `@`,
+ * and the `/` segment separator un-escaped — `encode_path`/`decode_path` swap in that wider
+ * "path-safe" set instead of the bare unreserved set. So `percent_encode`/`percent_decode`,
+ * `encode_form_component`/`decode_form_component`, and `encode_path`/`decode_path` all share one
+ * core, parameterized by whether `+` means space and by which byte-safe predicate applies (M.5 —
+ * one source of truth, mirrors `teko::encoding::base64`'s one-engine-per-alphabet-flag shape).
+ * Percent-decoding itself never depends on which bytes were considered "safe" to leave unescaped
+ * (a `%XX` escape decodes the same way regardless of context), so `decode_path` is exactly
+ * `percent_decode` under a path-scoped name for API symmetry with `encode_path`.
  *
  * ERROR MODEL (M.1 fail-loud / M.3 honest types). Decoding is `str -> str | error`: a `%` not
  * followed by two hex digits is a checked failure, never a panic. Encoding is total (any `str`
@@ -20,8 +26,8 @@
  */
 
 /**
- * Is `b` one of RFC 3986 §2.3's UNRESERVED characters (never percent-encoded under either
- * encoding)? — letters, digits, and `- _ . ~`.
+ * Is `b` one of RFC 3986 §2.3's UNRESERVED characters (never percent-encoded under any of the
+ * three encodings)? — letters, digits, and `- _ . ~`.
  *
  * @param b  the byte to classify
  * @return   true when `b` is unreserved
@@ -31,6 +37,46 @@ fn is_unreserved(b: byte): bool {
     if b >= b'a' && b <= b'z' { return true }
     if b >= b'0' && b <= b'9' { return true }
     b == b'-' || b == b'_' || b == b'.' || b == b'~'
+}
+
+/**
+ * Is `b` one of RFC 3986 §2.2's SUB-DELIMS (`! $ & ' ( ) * + , ; =`) — reserved characters that
+ * `pchar` (§3.3) still allows unescaped inside a path segment?
+ *
+ * @param b  the byte to classify
+ * @return   true when `b` is a sub-delimiter
+ */
+fn is_sub_delim(b: byte): bool {
+    b == b'!' || b == b'$' || b == b'&' || b == b'\'' || b == b'(' || b == b')' || b == b'*' ||
+    b == b'+' || b == b',' || b == b';' || b == b'='
+}
+
+/**
+ * Is `b` safe to leave un-escaped inside an RFC 3986 §3.3 PATH — the `pchar` grammar
+ * (`unreserved / pct-encoded / sub-delims / ":" / "@"`) plus the `/` segment separator itself
+ * (a full path is a `/`-joined sequence of segments, so `/` stays literal at this level; encode
+ * one segment in isolation and `/` would need escaping instead)?
+ *
+ * @param b  the byte to classify
+ * @return   true when `b` may appear un-escaped in a path
+ */
+fn is_path_safe(b: byte): bool {
+    if is_unreserved(b) { return true }
+    if is_sub_delim(b) { return true }
+    b == b':' || b == b'@' || b == b'/'
+}
+
+/**
+ * Dispatches to the byte-safety predicate for the encoding mode in effect: `is_path_safe` under
+ * path mode, `is_unreserved` otherwise (component/form mode).
+ *
+ * @param b          the byte to classify
+ * @param path_mode  whether the wider path-safe set applies
+ * @return           true when `b` may appear un-escaped under this mode
+ */
+fn is_safe_byte(b: byte, path_mode: bool): bool {
+    if path_mode { return is_path_safe(b) }
+    is_unreserved(b)
 }
 
 /**
@@ -61,16 +107,17 @@ fn append_percent_escape(out: []byte, b: byte): []byte {
 }
 
 /**
- * Encodes `text` byte-by-byte: unreserved bytes pass through verbatim, a space becomes `+`
- * when `space_as_plus` is set (the form-urlencoded convention), and every other byte
- * percent-escapes as `%XX`. The one shared engine behind both `percent_encode` and
- * `encode_form_component` (M.5).
+ * Encodes `text` byte-by-byte: a space becomes `+` when `space_as_plus` is set (the
+ * form-urlencoded convention), a byte the mode's safety predicate (`is_safe_byte`) allows
+ * passes through verbatim, and every other byte percent-escapes as `%XX`. The one shared engine
+ * behind `percent_encode`, `encode_form_component`, AND `encode_path` (M.5).
  *
  * @param text           the text to encode
  * @param space_as_plus  whether a space (`0x20`) renders as `+` instead of `%20`
+ * @param path_mode      whether the wider RFC 3986 §3.3 path-safe byte set applies
  * @return               the percent-encoded text
  */
-fn encode_with(text: str, space_as_plus: bool): str {
+fn encode_with(text: str, space_as_plus: bool, path_mode: bool): str {
     var input = bytes_of_str(text)
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -79,7 +126,7 @@ fn encode_with(text: str, space_as_plus: bool): str {
         var b = input[i]
         if space_as_plus && b == b' ' {
             out = teko::list::push(out, b'+')
-        } else if is_unreserved(b) {
+        } else if is_safe_byte(b, path_mode) {
             out = teko::list::push(out, b)
         } else {
             out = append_percent_escape(out, b)
@@ -98,7 +145,7 @@ fn encode_with(text: str, space_as_plus: bool): str {
  * @return      the percent-encoded text
  */
 pub fn percent_encode(text: str): str {
-    encode_with(text, false)
+    encode_with(text, false, false)
 }
 
 /**
@@ -110,7 +157,21 @@ pub fn percent_encode(text: str): str {
  * @return      the form-urlencoded text
  */
 pub fn encode_form_component(text: str): str {
-    encode_with(text, true)
+    encode_with(text, true, false)
+}
+
+/**
+ * Percent-encodes `text` as an RFC 3986 §3.3 PATH: like `percent_encode`, except sub-delimiters
+ * (`! $ & ' ( ) * + , ; =`), `:`, `@`, and `/` also pass through un-escaped (the `pchar` grammar
+ * plus the `/` segment separator) instead of only the bare unreserved set. Use this for a whole
+ * path string (e.g. `/users/jane doe/profile`); a single path SEGMENT that may itself contain a
+ * literal `/` still needs `percent_encode` instead. Total (M.3): always succeeds.
+ *
+ * @param text  the path text to encode
+ * @return      the path-encoded text
+ */
+pub fn encode_path(text: str): str {
+    encode_with(text, false, true)
 }
 
 /**
@@ -203,6 +264,20 @@ pub fn percent_decode(text: str): str | error {
 }
 
 /**
+ * Decodes a percent-encoded RFC 3986 §3.3 PATH produced by `encode_path`. Percent-decoding has
+ * no dependency on which bytes the encoder chose to leave un-escaped (a `%XX` escape always
+ * decodes the same way, and every un-escaped byte passes through the same way), so this is
+ * exactly `percent_decode` under a path-scoped name — kept as its own entry point purely for
+ * API symmetry with `encode_path`.
+ *
+ * @param text  the path-encoded text
+ * @return      the decoded text, or `error` for a malformed escape or invalid UTF-8 result
+ */
+pub fn decode_path(text: str): str | error {
+    percent_decode(text)
+}
+
+/**
  * Decodes one `application/x-www-form-urlencoded` component: `%XX` escapes become their
  * byte AND a literal `+` decodes to a space (the HTML-form convention).
  *
@@ -214,9 +289,14 @@ pub fn decode_form_component(text: str): str | error {
 }
 
 /**
- * One decoded `key=value` pair from a parsed form-urlencoded query/body string.
+ * One decoded `key=value` pair from a parsed form-urlencoded query/body string. `pub` (not
+ * private): `parse_form`/`encode_form` are `pub fn`s that take/return `[]FormField`, so the type
+ * itself must be nameable from other files for those functions to be usable at all (constructing
+ * a `FormField { .. }` literal to build `encode_form`'s input, or naming it in a `match` pattern
+ * on `parse_form`'s result) — fixed alongside `teko::encoding::mime`, the type's first external
+ * consumer.
  */
-type FormField = struct {
+pub type FormField = struct {
     /**
      * The decoded field name.
      */
