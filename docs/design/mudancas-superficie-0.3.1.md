@@ -1159,8 +1159,12 @@ mecanismo-limpo estão entregues. Os 4 restantes NÃO têm deps resolvidas sem u
 - **§16 — remover o runtime C, virar FFI-do-SO (clarificação do dono 2026-08-15).** §16 = **remover as deps
   de `src/runtime/teko_rt.c`/`teko_rt.h`/`win32_compat.h`** e trocá-las por **FFI direto ao SO (target)**
   (libc/syscalls por plataforma). Deps: **§16 → §17** (precisa de `#os`/`#arch` pra selecionar o FFI
-  por-target — ruling do dono: "17 antes de 16") **→ §11** + **lock duro** *"nothing lands until teko is
-  100% native AND the native gate is green"* (Doc-1/backend). Ou seja §16 é essencialmente pós-Doc-1.
+  por-target — ruling do dono: "17 antes de 16") **→ §11**. **RULING DO DONO (2026-08-15): §16 é PRÉ-Doc-1**
+  (a Doc-1 é construída sobre a base já FFI-migrada; nada de "pós"). **⚠️ TENSÃO A RESOLVER:** o plano §12
+  carrega um lock *"nothing lands until teko is 100% native AND the native gate is green"*, e a sequência
+  anterior do dono punha a **perna native verde DEPOIS da Doc-1**. Se §16 exige o native-gate-verde e ele é
+  pré-Doc-1, então **fechar a perna native também sobe pra pré-Doc-1** (dentro da Doc 2), OU o gate do §16 é o
+  C-leg-verde (não o native). Preciso do dono nesse ponto (ver mensagem).
 - **§17 `#if`/`#os`/`#arch`** — `#os` já existe; falta `#arch`/`#if`; gated no §11; **habilita o §16** (vem
   antes dele).
 - **§10 concorrência — 100% DESIGN, 0% IMPLEMENTAÇÃO (checado no código 2026-08-15).** Design fechado
@@ -1186,10 +1190,14 @@ exige genéricos). Escopo real antes do Doc-1: a stdlib §1.5 INTEIRA (incl. as 
 `crypto` (hash→mac→kdf→cipher→aead) ✅ → `sort` ✅ → `encoding`
 (json✅·xml✅·cbor✅·bson✅·msgpack✅·base64/url/mime✅ · csv·toml·ini·yaml·protobuf·asn1·fixed) → `bigint` ✅ →
 document-signing (jose✅·xmldsig✅·cose🔄) → **keystone de genéricos (#254)** → `collections`/`sort<T:Ord>` →
-**§10 concorrência** (`spawn`/`chan<T>`/`await`/`Intent<T>`/`teko::threads`) → §11 → §17. **Só depois o Doc-1.**
-**Fica de fato p/ depois do Doc-1 (não é "gated agora" por escolha minha, é dep técnica real):**
-`crypto::rand`/`openssl`/`gpg` · `net` · `db`(wire-socket) · `odbc` · `rpc` → precisam de §16 (FFI-do-SO) que é
-pós-Doc-1; `ui` → P4.
+**§10 concorrência** (`spawn`/`chan<T>`/`await`/`Intent<T>`/`teko::threads`) → §11 → **§17 → §16 (FFI-do-SO,
+remove teko_rt)** → **stdlib que depende de FFI** (`crypto::rand`/`openssl`/`gpg` · `net` · `db` · `odbc` ·
+`rpc`) → `ui`. **SÓ ENTÃO o Doc-1.**
+**CORREÇÃO DO DONO (2026-08-15): NADA disso é "pós-Doc-1".** Eu tinha posto §16/FFI-stdlib/`ui` como
+pós-Doc-1 — ERRADO. **É PRÉ-Doc-1.** A Doc-1 (remodel de arena/memória, que mata o OOM) é construída **por
+último, sobre base sólida e completa** — incluindo tudo que eu deliberara "pra depois". A Doc-1 mexe **só** no
+backend/memória, sobre um terreno 100% pronto. Ou seja a Doc 2 é grande (toda a linguagem + stdlib completa +
+FFI + ui) e a Doc 1 é focada (arena/memória).
 
 **Progresso stdlib monomórfica — NÚCLEO CRYPTO ✅ COMPLETO:** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`)
 · `kdf` ✅ (`e804f474`) · `cipher` ✅ (`d5299449` — AES 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20,
