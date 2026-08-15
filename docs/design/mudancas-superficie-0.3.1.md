@@ -1159,7 +1159,14 @@ keystone/#254/FFI), SERIAL (src/ reseeda), autônomo via subagentes, nesta ordem
 zip; brotli/lzma/zstd; #embed→VFS) → `math` (bigint·checked). Cada lane povoa o `exp`/`pub` forward-compatible.
 **Metade GATED (não entra agora, costura nomeada):** genéricos (`sort<T:Ord>`/`collections`) → 9-ops(✅)+#254;
 `crypto::rand`/`openssl`/`gpg` · todo `net` · `db`(FFI+wire-socket) · `odbc` · `rpc` → KEYSTONE-BUF+§16(Doc-1);
-`ui` → P4. Lane 1 (`crypto::hash`) DESPACHADO.
+`ui` → P4.
+
+**Progresso stdlib monomórfica (crypto):** `hash` ✅ (`f861db43` — SHA-2/3, SHAKE, BLAKE2b, MD5/SHA-1) ·
+`mac` ✅ (`6f6d5ca4` — HMAC, Poly1305, CMAC/GMAC cipher-seam) · `kdf` 🔄 (HKDF/PBKDF2, rodando) · `cipher`
+⏳ (AES/ChaCha20 — destrava CMAC/GMAC full) · `aead` ⏳. Depois: `sort` mono → `encoding` → `compress` →
+`math`. **CI:** drains verdes contra o baseline (11-jobs nativas .32/#594 = vermelho-conhecido; tier VM
+verde). Validação de vetores u32 no CI (blocker de ambiente: subagentes sem `gh` auth pra buscar o
+compilador real — a disciplina do projeto já valida por CI).
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
