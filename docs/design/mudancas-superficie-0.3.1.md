@@ -1175,14 +1175,21 @@ mecanismo-limpo estão entregues. Os 4 restantes NÃO têm deps resolvidas sem u
   habilitar o §10 — o que os move de "gated/depois" pra "antes do Doc-1". Aguarda confirmação da sequência.
 
 **DECISÃO DO DONO (2026-08-15): (A) — expandir a stdlib.** Escopo = a árvore autoritativa §1.5 de
-`plano-stdlib-catalogo-expansao.md` (8+ áreas). Dirijo TODA a fatia **monomórfica** (puro-Teko, sem
-keystone/#254/FFI), SERIAL (src/ reseeda), autônomo via subagentes, nesta ordem:
-`crypto` (hash→mac→kdf→cipher→aead, tudo sobre `[]byte`, vetores NIST/RFC) → `sort` `<mono>` → `encoding`
-(json✅·xml·csv·toml·ini·yaml·cbor·msgpack·bson·protobuf·asn1·fixed·base64/url/mime) → `compress` (completar
-zip; brotli/lzma/zstd; #embed→VFS) → `math` (bigint·checked). Cada lane povoa o `exp`/`pub` forward-compatible.
-**Metade GATED (não entra agora, costura nomeada):** genéricos (`sort<T:Ord>`/`collections`) → 9-ops(✅)+#254;
-`crypto::rand`/`openssl`/`gpg` · todo `net` · `db`(FFI+wire-socket) · `odbc` · `rpc` → KEYSTONE-BUF+§16(Doc-1);
-`ui` → P4.
+`plano-stdlib-catalogo-expansao.md` (8+ áreas). **CORREÇÃO DO DONO (2026-08-15): a Doc 2 / a expansão da
+stdlib NÃO é "monomórfica-só" — o dono NUNCA afirmou isso.** O enquadramento "fatia monomórfica (sem
+keystone/#254/FFI)" era caracterização MINHA (coordenador) e está RETIRADO — ele indevidamente empurrava
+genéricos e §10 pra "depois", contra o ruling do dono de que **§10 tem que estar 100% antes do Doc-1** (e §10
+exige genéricos). Escopo real antes do Doc-1: a stdlib §1.5 INTEIRA (incl. as partes genéricas —
+`collections`/`sort<T:Ord>`) + o **keystone de genéricos (#254)** + **§10 concorrência** + §11/§17.
+**Sequência de execução (praticidade, não restrição de escopo):** as lanes que POR ACASO são puro-Teco-sobre-
+`[]byte` (crypto/encoding) já estão rodando e drenando primeiro por já estarem prontas para implementar;
+`crypto` (hash→mac→kdf→cipher→aead) ✅ → `sort` ✅ → `encoding`
+(json✅·xml✅·cbor✅·bson✅·msgpack✅·base64/url/mime✅ · csv·toml·ini·yaml·protobuf·asn1·fixed) → `bigint` ✅ →
+document-signing (jose✅·xmldsig✅·cose🔄) → **keystone de genéricos (#254)** → `collections`/`sort<T:Ord>` →
+**§10 concorrência** (`spawn`/`chan<T>`/`await`/`Intent<T>`/`teko::threads`) → §11 → §17. **Só depois o Doc-1.**
+**Fica de fato p/ depois do Doc-1 (não é "gated agora" por escolha minha, é dep técnica real):**
+`crypto::rand`/`openssl`/`gpg` · `net` · `db`(wire-socket) · `odbc` · `rpc` → precisam de §16 (FFI-do-SO) que é
+pós-Doc-1; `ui` → P4.
 
 **Progresso stdlib monomórfica — NÚCLEO CRYPTO ✅ COMPLETO:** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`)
 · `kdf` ✅ (`e804f474`) · `cipher` ✅ (`d5299449` — AES 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20,
@@ -1194,7 +1201,8 @@ cmac_aes/gmac_aes) · `aead` ✅ (`92f48fe6` — AES-GCM, ChaCha20-Poly1305, AES
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
-**Ordem de drive monomórfico (revisada):** núcleo crypto ✅ → `sort` mono ✅ → `encoding` — a lista COMPLETA
+**Ordem de drive (revisada — a ordem é praticidade, NÃO uma restrição a "só monomórfico"; ver correção do
+dono acima):** núcleo crypto ✅ → `sort` ✅ → `encoding` — a lista COMPLETA
 do §1.5: **texto** (json✅ · xml✅+C14N · csv · toml · ini · yaml), **binário** (cbor · msgpack · **bson** ·
 protobuf · asn1), `fixed` (colunas fixas), **web** (base64✅ · url✅ · mime✅) → `math`/`numeric::bigint` ✅ →
 `crypto::pk` (PRÓXIMO) → `crypto::jose`+`xmldsig`+`cose` (assinatura de documento) → `compress` (completar) → `password`. (BSON
@@ -1280,6 +1288,12 @@ que junta todos os `.tkt` do namespace) não aparecem no dreno. Levantados (a co
   seed; afeta `rsa_test.tkt` (l.202/258) e outros. Provável limitação de seed; re-checar no toolchain atual.
 Nenhum desses bloqueia o dreno das lanes de PRODUTO (`.tks` compilam verde no build real); são exclusivos do
 caminho de teste, endereçados na Fase 2.
+
+**🔒 REGRA DO DONO (2026-08-15): TESTES SÓ NO CI.** Ninguém — nem coordenador nem subagente — executa o gate de
+teste localmente (`teko test .` ou qualquer variante). É política, não conselho anti-crash. A validação local
+permitida é **compilação/build** (`teko <dir> -o <out> --no-verify --release`, que COMPILA mas não roda teste)
++ cross-check offline em Python. A execução dos `.tkt` é responsabilidade exclusiva do CI. Todo brief de
+subagente carrega essa regra como HARD RULE.
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
