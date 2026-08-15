@@ -1092,9 +1092,15 @@ Três camadas, uma regra por camada (ruling do dono):
   do monólito e, portanto, o que o programa final enxerga ao linkar. Toda a superfície de API que o dev
   usa — tipos, funções, operadores, consts, `global`s — é `exp`. Regra prática: **se o dev pode escrever o
   nome, é `exp`**.
-- **`pub` = interno ao compilador/monólito** — visível entre namespaces do próprio Teko, **mas fora do
+- **`pub` = visível só pelo próprio projeto/monólito** — entre namespaces do próprio Teko, **mas fora do
   self-`.tkh`**. É o encapsulamento de implementação: o dev nunca vê, o programa final não linka contra.
-- **privado (sem modificador) = file-local** — nem outros namespaces do monólito enxergam.
+- **(sem `exp`/`pub`) = namespace-local** — visível entre **arquivos-irmãos do mesmo namespace** (o
+  namespace = diretório), mas **não** por outros namespaces. **Não há nível file-local**: o mais estreito é o
+  namespace. **Consequência real (ruling do dono 2026-08-15, confirmado pelo compilador):** dois `fn`/`type`
+  nus homônimos em arquivos-irmãos do MESMO namespace **colidem** (overload ambíguo) — foi a causa do
+  incidente da perna C (`rotl32`/`le_u32_at` entre `cipher.tks`/`hash.tks`/`mac.tks` no `teko::crypto` flat).
+  Helpers internos compartilhados entre arquivos de um namespace precisam de **nome distinto** ou de uma
+  ÚNICA definição; querer "file-local" não é possível.
 
 **Consequência de triagem:** popular `exp` corretamente **é** o trabalho da expansão-da-stdlib (§11-antes);
 a §11 depois só **formaliza/enforça**. O que hoje lê como `exp` por default (forward-compatible, tudo lê como
