@@ -1128,8 +1128,8 @@ minimiza esse retrabalho (a superfície já nasce triada).
 | §9 operador (9-ops) | §9.4, §10, §9.2b | 3 | ✅ | ✅ entregue (parse+dispatch+counterpart §9.4; fixtures) |
 | conformidade-estática-de-interface | §7, §10, §9.2b | 3 | ✅ | ✅ largely done (`type_conforms_to`, vtable, IService auto-conf) |
 | §9.2b solver de constraint de forma | §7, §10 | 2 | ✅ | ✅ **ENTREGUE** — notnull + form-words/`service [lifetime]` + disjunção (drenado em `fix/retirement`, `cf0c70b5`) |
-| **§13 item-14 fat-header** | §10 (Intent/Ctx) | 1 | ✅ (§1,§4.1) | 🔄 superfície `readonly` aterrissando; **cabeçalho `uptr` em codegen/lir NÃO iniciado** · **antecipado** · **← TOPO** |
-| §7 DI service/svc | §10 | 1 | ✅ (§9.2b feito) | 🔄 superfície; falta a costura de arena (Doc 1 §8) |
+| **§13 item-14 fat-header** | §10 (Intent/Ctx) | 1 | ✅ (§1,§4.1) | ✅ **ENTREGUE** (2026-08-15) — fat header `tk_struct_hdr` (crumb 5) + layout FAT (6a) + receiver-as-ref/`self` gruda (6b) + fixtures A1-A4 + reseed; drenado por ff em `fix/retirement` `6f4d78ba`; sweep 32/32 verde |
+| §7 DI service/svc | §10 | 1 | ✅ (§9.2b feito) | 🔄 superfície; **falta a costura de arena (Doc 1 §8) — LIMIAR DO DOC 1** · **← TOPO** |
 | §14 Família B (comptime) | — | 0 | ✅ | 🔄 parcial |
 | §15 global | (stdlib) | — | — | 🔄 parcial |
 | §11 visibilidade `exp`/`pub` | §16, §17 | 2 | ⏳ (stdlib) | ⏳ ordem: PENÚLTIMA |
@@ -1137,10 +1137,13 @@ minimiza esse retrabalho (a superfície já nasce triada).
 | §16 FFI libc-direct | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
 | §17 `#if`/`#os`/`#arch` | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
 
-**Topo atual (mais-dependido com deps resolvidas):** **§13 item-14 fat-header** (in-deg 1, **antecipado**)
-— o §9.2b aterrissou (`cf0c70b5` em `fix/retirement`), então §7 destravou (deps ✅) mas ainda pende a
-costura de arena (Doc 1 §8), e o item-14 tem precedência de antecipação. Ordem derivada: **§13 → §7 →
-§10**; depois o cluster de ordem (§11 → §16/§17); e só então o Doc 1.
+**Topo atual (mais-dependido com deps resolvidas):** **§7 DI service/svc** (in-deg 1) — o item-14
+aterrissou (`6f4d78ba`), então §7 é agora o mais-dependido com deps ✅. **PORÉM: o trabalho restante do §7
+é a costura de arena = Doc 1 §8 → LIMIAR DO DOC 1.** Os únicos itens Doc-2 puros que restam sem tocar Doc 1
+são **§14 Família B (comptime, parcial)** e **§15 global (parcial)** — ambos in-deg 0 (ninguém depende
+deles). O resto (§10 concorrência, §11/§16/§17) está bloqueado por Doc 1 (arena/Ctx) ou pela expansão da
+stdlib. Ordem derivada: **§7 (superfície) → [LIMIAR] → §14/§15 residuais** — e o **Doc 1 inteiro fica para
+depois da análise do dono** (regra: o dono analisa tudo antes do Doc 1).
 
 ---
 
