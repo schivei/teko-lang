@@ -1,0 +1,534 @@
+/**
+ * `teko::encoding::ini` — a pure-Teko INI config-file parse/write. Pure Teko, no C twin (the
+ * `teko::encoding::cbor`/`teko::encoding::toml` precedent: library code with zero OS/FFI
+ * dependency ships as `.tks` + `.tkt` only, and both engines pick it up automatically).
+ *
+ * INI HAS NO FORMAL SPEC, so this unit matches the common Python `configparser` behavior (the
+ * de-facto reference every other INI reader is measured against): `[section]` headers; `key =
+ * value` or `key : value` pairs (the first `=`/`:` on the line is the separator — matches
+ * `configparser`'s default `delimiters = ('=', ':')`); `;` and `#` line comments (only when they
+ * are the FIRST non-whitespace character of a line — `configparser`'s default
+ * `inline_comment_prefixes = None`, so a `#`/`;` inside a value is literal content, never a
+ * comment); leading/trailing whitespace trimmed from section names, keys, and values.
+ *
+ * TWO DOCUMENTED DIVERGENCES FROM BARE `configparser` (KISS extensions, not bugs — M.3 honest):
+ *   1. GLOBAL SECTION. `configparser` raises `MissingSectionHeaderError` on a `key = value` line
+ *      before the first `[section]` header; this unit instead collects such lines into a section
+ *      named `""` (the empty string) — a common, more permissive INI convention (many non-Python
+ *      INI readers allow it), and the shape the task's own `IniDocument` model calls for.
+ *   2. OPTIONAL QUOTING. A value that is a full `"..."` span (opening AND closing quote, at least
+ *      2 bytes) has its outer quotes stripped (no escape processing inside — a plain span, mirroring
+ *      the common `.properties`-adjacent convention some INI dialects use); `configparser` never
+ *      strips quotes (`"x"` parses as the literal three-character value `"x"`). A caller comparing
+ *      against Python must avoid quoted values, or account for this stripping by hand.
+ *   3. KEY CASE. `configparser` lower-cases option names by default (`optionxform = str.lower`);
+ *      this unit preserves EXACT source case for keys (matching every other codec in this stdlib,
+ *      which preserves source text/order rather than applying a Python-specific default
+ *      transform). `ini_get` is exact-case. A caller cross-checking against `configparser` should
+ *      use already-lowercase keys to sidestep the difference.
+ *
+ * VALUE MODEL. `IniDocument` = an ordered `[]IniSection`; each `IniSection` = a name plus an
+ * ordered `[]IniEntry` of `key`/`value` pairs — the same "parallel/ordered slices, source order
+ * preserved" idiom `teko::encoding::json::JsonObject` and `teko::encoding::csv::CsvRow` use.
+ *
+ * ERROR MODEL (M.1 fail-loud / M.3 honest types). `parse_ini(str): IniDocument | error` — an
+ * unterminated `[section` header or a line with neither `=` nor `:` is a checked failure, never a
+ * panic. `write_ini` is total (any `IniDocument` has a valid INI rendering) so it returns `str`
+ * bare.
+ */
+
+/**
+ * One `key = value` (or `key : value`) pair, already trimmed and (optionally) unquoted.
+ */
+exp type IniEntry = struct {
+    /**
+     * The entry's key, exact source case, trimmed.
+     */
+    key: str
+    /**
+     * The entry's value, trimmed, with a full `"..."` span's outer quotes stripped (see the
+     * module doc's divergence #2).
+     */
+    value: str
+}
+
+/**
+ * One `[name]` section: its name plus its entries, in source order. The document's leading
+ * "global" section (keys appearing before any `[header]`) has `name == ""` (see the module doc's
+ * divergence #1).
+ */
+exp type IniSection = struct {
+    /**
+     * The section's name, trimmed (`""` for the global/default section).
+     */
+    name: str
+    /**
+     * The section's entries, in source order.
+     */
+    entries: []IniEntry
+}
+
+/**
+ * A complete INI document: its sections, in source order.
+ */
+exp type IniDocument = struct {
+    /**
+     * The document's sections, in source order.
+     */
+    sections: []IniSection
+}
+
+/**
+ * A fresh, empty INI document — the starting point for building one programmatically (grow it
+ * with `ini_set`), and what `parse_ini` starts folding lines into.
+ *
+ * @return  an empty `IniDocument`
+ */
+exp fn ini_empty(): IniDocument {
+    IniDocument { sections = teko::list::empty() }
+}
+
+/**
+ * Finds `name`'s index among `doc.sections`.
+ *
+ * @param doc   the document to search
+ * @param name  the section name to look up
+ * @return      the index, or `-1` when absent
+ */
+fn find_section_index(doc: IniDocument, name: str): i64 {
+    var i: u64 = 0
+    loop {
+        if i >= doc.sections.len { break }
+        if doc.sections[i].name == name { return i to i64 }
+        i++
+    }
+    -1
+}
+
+/**
+ * Finds `key`'s index among `section.entries`.
+ *
+ * @param section  the section to search
+ * @param key      the key to look up
+ * @return         the index, or `-1` when absent
+ */
+fn find_entry_index(section: IniSection, key: str): i64 {
+    var i: u64 = 0
+    loop {
+        if i >= section.entries.len { break }
+        if section.entries[i].key == key { return i to i64 }
+        i++
+    }
+    -1
+}
+
+/**
+ * Returns `doc` with an empty `name` section appended when it is not already present (a no-op
+ * when it already exists).
+ *
+ * @param doc   the document to extend
+ * @param name  the section name to ensure
+ * @return      the (possibly unchanged) document
+ */
+fn ensure_section(doc: IniDocument, name: str): IniDocument {
+    if find_section_index(doc, name) >= 0 { return doc }
+    var section = IniSection { name = name; entries = teko::list::empty() }
+    IniDocument { sections = teko::list::push(doc.sections, section) }
+}
+
+/**
+ * Returns `section` with `key` set to `value`: replacing an existing entry in place when `key` is
+ * already present, else appending a new one at the end.
+ *
+ * @param section  the section to update
+ * @param key      the key to set
+ * @param value    the value to set it to
+ * @return         the updated section
+ */
+fn set_entry(section: IniSection, key: str, value: str): IniSection {
+    var idx = find_entry_index(section, key)
+    if idx < 0 {
+        var grown = teko::list::push(section.entries, IniEntry { key = key; value = value })
+        return IniSection { name = section.name; entries = grown }
+    }
+    var entries: []IniEntry = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= section.entries.len { break }
+        if (i to i64) == idx { entries = teko::list::push(entries, IniEntry { key = key; value = value }) } else { entries = teko::list::push(entries, section.entries[i]) }
+        i++
+    }
+    IniSection { name = section.name; entries = entries }
+}
+
+/**
+ * Returns `doc` with `section`'s `key` set to `value` (creating the section first when absent —
+ * the ONLY way to grow an `IniDocument`, no index-assignment, per house style).
+ *
+ * @param doc      the document to update
+ * @param section  the target section's name (`""` for the global section)
+ * @param key      the key to set
+ * @param value    the value to set it to
+ * @return         the updated document
+ */
+exp fn ini_set(doc: IniDocument, section: str, key: str, value: str): IniDocument {
+    var with_section = ensure_section(doc, section)
+    var idx = find_section_index(with_section, section)
+    var sections: []IniSection = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= with_section.sections.len { break }
+        if (i to i64) == idx { sections = teko::list::push(sections, set_entry(with_section.sections[i], key, value)) } else { sections = teko::list::push(sections, with_section.sections[i]) }
+        i++
+    }
+    IniDocument { sections = sections }
+}
+
+/**
+ * Looks up section `name` in `doc`.
+ *
+ * @param doc   the document to search
+ * @param name  the section name
+ * @return      the section, or `null` when absent
+ */
+exp fn ini_get_section(doc: IniDocument, name: str): IniSection | null {
+    var idx = find_section_index(doc, name)
+    if idx < 0 { return null }
+    doc.sections[idx to u64]
+}
+
+/**
+ * Looks up `section`'s `key`.
+ *
+ * @param doc      the document to search
+ * @param section  the section name
+ * @param key      the key (exact case — see the module doc's divergence #3)
+ * @return         the value, or `null` when the section or key is absent
+ */
+exp fn ini_get(doc: IniDocument, section: str, key: str): str | null {
+    var s = match ini_get_section(doc, section) { IniSection as sec => sec; null => return null }
+    var idx = find_entry_index(s, key)
+    if idx < 0 { return null }
+    s.entries[idx to u64].value
+}
+
+/**
+ * A checked `IniDocument | error` failure carrying a byte offset (mirrors
+ * `teko::encoding::cbor::read_error`).
+ *
+ * @param what  the failure description
+ * @param pos   the offset at which the failure was detected
+ * @return      the checked error
+ */
+fn ini_error(what: str, pos: u64): error {
+    error { message = concat("ini: ", what, " at offset ", i64_to_str(pos to i64)) }
+}
+
+/**
+ * Reports whether `b` is INI inline whitespace (space, tab, or carriage return).
+ *
+ * @param b  the byte to classify
+ * @return   true for space, tab, or `\r`
+ */
+fn is_ini_ws(b: byte): bool {
+    b == b' ' || b == b'\t' || b == b'\r'
+}
+
+/**
+ * Skips a run of inline whitespace.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset just past the whitespace run
+ */
+fn skip_ws(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at < input.len && (input[at] == b' ' || input[at] == b'\t') { at = at + 1; continue }
+        break
+    }
+    at
+}
+
+/**
+ * Skips from `pos` to (but not past) the next `\n`, or to end of input.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset of the `\n` that ends the line, or `input.len`
+ */
+fn skip_to_eol(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at >= input.len || input[at] == b'\n' { break }
+        at = at + 1
+    }
+    at
+}
+
+/**
+ * Consumes one newline (`\n` or `\r\n`) at `pos`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the newline's first byte
+ * @return       the offset just past the consumed newline
+ */
+fn consume_newline(input: []byte, pos: u64): u64 {
+    if input[pos] == b'\r' && pos + 1 < input.len && input[pos + 1] == b'\n' { return pos + 2 }
+    pos + 1
+}
+
+/**
+ * Skips every blank line and `;`/`#` comment line starting at `pos`, landing on the first byte of
+ * real content (a `[section]` header or a `key = value` line), or `input.len`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset of the next line's real content, or `input.len`
+ */
+fn skip_blank_lines(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        var p = skip_ws(input, at)
+        if p >= input.len { return p }
+        if input[p] == b'\n' || input[p] == b'\r' { at = consume_newline(input, p); continue }
+        if input[p] == b';' || input[p] == b'#' { at = skip_to_eol(input, p); continue }
+        return p
+    }
+    at
+}
+
+/**
+ * Copies `input[from, to)` into a fresh `str`.
+ *
+ * @param input  the source bytes
+ * @param from   the inclusive start offset
+ * @param to     the exclusive end offset
+ * @return       a fresh `str` holding `input[from, to)`
+ */
+fn bytes_range_str(input: []byte, from: u64, to: u64): str {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, input[i])
+        i++
+    }
+    str(out)
+}
+
+/**
+ * Trims leading/trailing INI inline whitespace from `s`.
+ *
+ * @param s  the text to trim
+ * @return   `s` with leading/trailing whitespace removed
+ */
+fn trim_str(s: str): str {
+    var b = bytes_of_str(s)
+    var start: u64 = 0
+    loop {
+        if start < b.len && is_ini_ws(b[start]) { start = start + 1; continue }
+        break
+    }
+    var end = b.len
+    loop {
+        if end > start && is_ini_ws(b[end - 1]) { end = end - 1; continue }
+        break
+    }
+    slice(s, start, end)
+}
+
+/**
+ * Strips a value's outer `"..."` quotes when it is a full quoted span (see the module doc's
+ * divergence #2).
+ *
+ * @param v  the trimmed value text
+ * @return   `v` with its outer quotes stripped, or `v` unchanged when it is not fully quoted
+ */
+fn strip_optional_quotes(v: str): str {
+    var b = bytes_of_str(v)
+    if b.len >= 2 && b[0] == b'"' && b[b.len - 1] == b'"' { return slice(v, 1, b.len - 1) }
+    v
+}
+
+/**
+ * A parsed `[section]` header's name plus the offset just past its line.
+ */
+type SectionNameStep = struct {
+    /**
+     * The decoded (trimmed) section name.
+     */
+    key: str
+    /**
+     * The offset just past the construct's line.
+     */
+    next: u64
+}
+
+/**
+ * A parsed `key = value` (or `key : value`) line plus the offset just past it.
+ */
+type IniLineStep = struct {
+    /**
+     * The trimmed key.
+     */
+    key: str
+    /**
+     * The trimmed, (optionally) unquoted value.
+     */
+    value: str
+    /**
+     * The offset just past the line.
+     */
+    next: u64
+}
+
+/**
+ * Parses a `[section]` header (input positioned at the opening `[`).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the opening `[`
+ * @return       the trimmed section name and the offset just past its line, or `error` when the
+ *               header is unterminated
+ */
+fn parse_section_header(input: []byte, pos: u64): SectionNameStep | error {
+    var at = pos + 1
+    var start = at
+    loop {
+        if at >= input.len || input[at] == b'\n' || input[at] == b'\r' { return ini_error("unterminated section header", pos) }
+        if input[at] == b']' { break }
+        at = at + 1
+    }
+    var name = trim_str(bytes_range_str(input, start, at))
+    var after_bracket = at + 1
+    var line_tail = skip_ws(input, after_bracket)
+    if line_tail < input.len && (input[line_tail] == b';' || input[line_tail] == b'#') { line_tail = skip_to_eol(input, line_tail) }
+    var after = if line_tail < input.len && (input[line_tail] == b'\n' || input[line_tail] == b'\r') { consume_newline(input, line_tail) } else { line_tail }
+    SectionNameStep { key = name; next = after }
+}
+
+/**
+ * Parses a `key = value` (or `key : value`) line (input positioned at the key's first byte): the
+ * FIRST `=` or `:` on the line is the separator.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the key's first byte
+ * @return       the parsed key/value and the offset just past the line, or `error` when the line
+ *               has no `=`/`:` separator
+ */
+fn parse_ini_line(input: []byte, pos: u64): IniLineStep | error {
+    var at = pos
+    var sep_pos = pos
+    var found_sep = false
+    loop {
+        if at >= input.len || input[at] == b'\n' || input[at] == b'\r' { break }
+        if !found_sep && (input[at] == b'=' || input[at] == b':') {
+            found_sep = true
+            sep_pos = at
+        }
+        at = at + 1
+    }
+    if !found_sep { return ini_error("missing '=' or ':' separator", pos) }
+    var key = trim_str(bytes_range_str(input, pos, sep_pos))
+    if key.len == 0 { return ini_error("empty key", pos) }
+    var value = strip_optional_quotes(trim_str(bytes_range_str(input, sep_pos + 1, at)))
+    var after = if at < input.len { consume_newline(input, at) } else { at }
+    IniLineStep { key = key; value = value; next = after }
+}
+
+/**
+ * Parses a complete INI document.
+ *
+ * @param text  the document source text
+ * @return      the parsed document, or `error` when a section header is unterminated or a
+ *              non-blank, non-comment line has no `=`/`:` separator
+ */
+exp fn parse_ini(text: str): IniDocument | error {
+    var input = bytes_of_str(text)
+    var doc = ini_empty()
+    var current = ""
+    var have_current = false
+    var pos = skip_blank_lines(input, 0)
+    loop {
+        if pos >= input.len { break }
+        if input[pos] == b'[' {
+            var h = match parse_section_header(input, pos) { SectionNameStep as s => s; error as e => return e }
+            current = h.key
+            have_current = true
+            doc = ensure_section(doc, current)
+            pos = skip_blank_lines(input, h.next)
+            continue
+        }
+        var kv = match parse_ini_line(input, pos) { IniLineStep as s => s; error as e => return e }
+        var target = if have_current { current } else { "" }
+        doc = ini_set(doc, target, kv.key, kv.value)
+        pos = skip_blank_lines(input, kv.next)
+    }
+    doc
+}
+
+/**
+ * Appends `s`'s bytes to `out`.
+ *
+ * @param out  the accumulator
+ * @param s    the text to append
+ * @return     `out` with `s`'s bytes appended
+ */
+fn bytes_append_str(out: []byte, s: str): []byte {
+    var b = bytes_of_str(s)
+    var o = out
+    var i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        o = teko::list::push(o, b[i])
+        i++
+    }
+    o
+}
+
+/**
+ * Renders one section: a `[name]` header line (omitted entirely for the global `""` section)
+ * followed by each entry as a `key = value` line.
+ *
+ * @param out      the accumulator
+ * @param section  the section to render
+ * @return         `out` with the rendered section appended
+ */
+fn append_section(out: []byte, section: IniSection): []byte {
+    var o = out
+    if section.name.len > 0 {
+        o = teko::list::push(o, b'[')
+        o = bytes_append_str(o, section.name)
+        o = teko::list::push(o, b']')
+        o = teko::list::push(o, b'\n')
+    }
+    var i: u64 = 0
+    loop {
+        if i >= section.entries.len { break }
+        o = bytes_append_str(o, section.entries[i].key)
+        o = bytes_append_str(o, " = ")
+        o = bytes_append_str(o, section.entries[i].value)
+        o = teko::list::push(o, b'\n')
+        i++
+    }
+    o
+}
+
+/**
+ * Renders `doc` as INI text: each section's `[name]` header (the global `""` section renders with
+ * no header line) followed by its `key = value` lines, in source order. Total (M.3): any
+ * `IniDocument` has a valid INI rendering.
+ *
+ * @param doc  the document to render
+ * @return     the rendered INI text
+ */
+exp fn write_ini(doc: IniDocument): str {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= doc.sections.len { break }
+        out = append_section(out, doc.sections[i])
+        i++
+    }
+    str(out)
+}

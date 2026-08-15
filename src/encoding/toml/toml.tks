@@ -1,0 +1,430 @@
+/**
+ * `teko::encoding::toml` — a pure-Teko TOML v1.0.0 (https://toml.io/en/v1.0.0) decoder + encoder
+ * over `str`. Pure Teko, no C twin (the `teko::encoding::cbor` / `teko::encoding::json`
+ * precedent: library code with zero OS/FFI dependency ships as `.tks` only, and both engines pick
+ * it up automatically). NO `.tkt` FIXTURE OF ITS OWN, BY DESIGN: `.tkp` project manifests ARE
+ * TOML, so `teko::build::manifest`'s `parse_manifest` reads every real `.tkp` in this repository
+ * (including the project's own `teko.tkp`) through `parse_toml` — the best test for a TOML
+ * decoder inside a TOML-consuming compiler is dogfooding it on the compiler's own manifests, not
+ * a parallel fixture. See `teko::build::manifest_test.tkt` for the coverage this buys.
+ *
+ * VALUE MODEL — a TAGGED STRUCT (this file), not an `@Macro()` inline union: `TomlValue` carries
+ * a `TomlKind` discriminant plus the union of every kind's payload fields, mirroring
+ * `teko::encoding::cbor::CborValue`. `Table` is a pair of parallel slices (`keys`/`vals`, source
+ * order preserved), the same "n unlabeled things walked in lockstep" idiom
+ * `teko::encoding::json::JsonObject` uses. The three extra bookkeeping fields (`t_sealed`,
+ * `t_opened`, `a_of_tables`) exist only to let the PARSER (`toml_parse.tks`) enforce TOML's
+ * table-redefinition rules; a value built through the public constructors below never needs them
+ * (they default to `false`).
+ *
+ * THIS FILE is the value model shared by every file in this namespace: `TomlKind`/`TomlValue`,
+ * the public constructors, the accessors, and structural equality. `toml_parse.tks` (the decoder)
+ * and `toml_encode.tks` (the encoder) are its siblings — the same three-file split
+ * `teko::crypto::jose` uses for its core/import/protocol files.
+ *
+ * SCOPE (this unit, TOML v1.0.0). Keys: bare, quoted (basic/literal), and dotted (implicit
+ * super-tables). Values: basic and literal strings (single- and multi-line, with the multi-line
+ * basic string's line-ending-backslash trim and the "1 or 2 extra quotes before the closing
+ * delimiter are literal" rule); integers (decimal with `+`/`-` and `_` separators, and unsigned
+ * hex/octal/binary); floats (fraction and/or exponent, `_` separators, `inf`/`+inf`/`-inf`/`nan`);
+ * booleans; arrays (heterogeneous, per TOML 1.0.0 §Array — multi-line with comments); inline
+ * tables; standard `[table]` headers (including dotted, nested); array-of-tables `[[table]]`
+ * headers (including nested arrays of tables). Comments (`#` to end of line) and blank lines are
+ * skipped everywhere they are grammatically allowed.
+ *
+ * NAMED SEAM #1 (honest — M.3): DATETIME. TOML's four datetime forms (offset date-time, local
+ * date-time, local date, local time) are validated for SHAPE (digit counts, separators, and the
+ * obvious range checks — month `01`-`12`, hour `00`-`23`, minute `00`-`59`, second `00`-`60` for a
+ * leap second) and kept as their original source text in `TomlValue.text` (`kind = DateTime`);
+ * this unit does NOT validate day-of-month against the actual calendar (`1979-02-30` parses) and
+ * does no date/time ARITHMETIC. A full proleptic-Gregorian calendar engine is out of scope for a
+ * config-file codec; a caller needing calendar math parses `TomlValue.text` with a dedicated
+ * date/time library. This mirrors `teko::encoding::cbor`'s own NAMED SEAM precedent (float
+ * preferred-width refinement) — documented, not faked.
+ *
+ * NAMED SEAM #2 (honest — M.3): TABLE-REDEFINITION COMPLETENESS. The TOML spec's "a table/key may
+ * be defined at most once" invariant is enforced for the load-bearing cases: an exact duplicate
+ * `key = value` in the same table, an exact duplicate `[same.header]`, and every direct type
+ * conflict (assigning through a key that already holds a non-table/non-array-of-tables value, or
+ * `[[header]]`-ing a key that is not itself an array created by `[[header]]`). The full TOML
+ * compliance-suite nuance around exactly which dotted-key/header interleavings are legal beyond
+ * those cases (e.g. the precise legality of extending a table that was opened by `[header]` via a
+ * LATER dotted key at a different sub-path) is not exhaustively cross-checked against the spec's
+ * complete test corpus; well-formed configuration files (including the TOML v1.0.0 site's own
+ * example document and the classic array-of-tables `fruits`/`varieties` example) parse correctly.
+ *
+ * ERROR MODEL (M.1 fail-loud / M.3 honest types). `toml_parse::parse_toml(str): TomlValue | error`
+ * — any malformed input is a checked failure, never a panic. `toml_encode::encode_toml` is total
+ * (a well-formed `TomlValue` tree always has a rendering) so it returns `str` bare.
+ */
+
+/**
+ * The kind discriminant of a `TomlValue`: which TOML value shape it holds. `String` covers every
+ * TOML string form (basic/literal, single/multi-line — all normalize to the same decoded `text`);
+ * `DateTime` holds one of the four TOML datetime forms as validated source text (see this file's
+ * NAMED SEAM #1); `Array` holds `items` (heterogeneous, in source order); `Table` holds the
+ * parallel `keys`/`vals` slices (source order preserved).
+ */
+exp type TomlKind = enum {
+    String; Integer; Float; Boolean; DateTime; Array; Table
+}
+
+/**
+ * One TOML value as a tagged struct spanning every `TomlKind` (see the module doc's VALUE MODEL
+ * note): `kind` selects which fields below carry meaning. `t_sealed`/`t_opened`/`a_of_tables` are
+ * parser-internal bookkeeping (see the module doc) — a value assembled through the constructors
+ * below always has them at their default (`false`).
+ */
+exp type TomlValue = struct {
+    /**
+     * Which TOML value shape this is; selects which of the fields below are meaningful.
+     */
+    kind: TomlKind
+    /**
+     * The decoded text for `String`, and the validated original source text for `DateTime`. Empty
+     * otherwise.
+     */
+    text: str
+    /**
+     * The value for `Integer`. Zero otherwise.
+     */
+    int_val: i64
+    /**
+     * The value for `Float`. Zero otherwise.
+     */
+    float_val: f64
+    /**
+     * The value for `Boolean`. `false` otherwise.
+     */
+    bool_val: bool
+    /**
+     * The elements, in source order, for `Array`. Empty otherwise.
+     */
+    items: []TomlValue
+    /**
+     * The keys, in source order, for `Table`. Empty otherwise.
+     */
+    keys: []str
+    /**
+     * The values for `Table`, parallel to `keys`. Empty otherwise.
+     */
+    vals: []TomlValue
+    /**
+     * PARSER-INTERNAL. `Table` only: `true` for an inline table (`{ ... }`), which TOML forbids
+     * extending after its closing `}`. Always `false` on a value built through the constructors.
+     */
+    t_sealed: bool
+    /**
+     * PARSER-INTERNAL. `Table` only: `true` once this exact table has been explicitly opened by a
+     * `[header]` (guards against a duplicate identical header). Always `false` on a value built
+     * through the constructors.
+     */
+    t_opened: bool
+    /**
+     * PARSER-INTERNAL. `Array` only: `true` when this array was created by (and remains
+     * extendable through) an `[[header]]` array-of-tables declaration. Always `false` on a value
+     * built through the constructors.
+     */
+    a_of_tables: bool
+}
+
+/**
+ * A fresh empty `[]TomlValue`, the default for the child-carrying fields of a `TomlValue`.
+ *
+ * @return  an empty value slice
+ */
+fn no_items(): []TomlValue {
+    teko::list::empty()
+}
+
+/**
+ * A fresh empty `[]str`, the default for `TomlValue.keys`.
+ *
+ * @return  an empty string slice
+ */
+fn no_keys(): []str {
+    teko::list::empty()
+}
+
+/**
+ * Builds a `TomlValue` from every field explicitly — the single constructor every other builder
+ * in this namespace funnels through, so each records only the fields its kind uses and leaves the
+ * rest at defaults.
+ *
+ * @param kind         the value's kind discriminant
+ * @param text         the string / datetime text (see `TomlValue.text`)
+ * @param int_val      the integer value (see `TomlValue.int_val`)
+ * @param float_val    the float value (see `TomlValue.float_val`)
+ * @param bool_val     the boolean value (see `TomlValue.bool_val`)
+ * @param items        the array elements (see `TomlValue.items`)
+ * @param keys         the table keys (see `TomlValue.keys`)
+ * @param vals         the table values (see `TomlValue.vals`)
+ * @param t_sealed     whether a `Table` is a sealed inline table (see `TomlValue.t_sealed`)
+ * @param t_opened     whether a `Table` has been explicitly `[header]`-opened (see `TomlValue.t_opened`)
+ * @param a_of_tables  whether an `Array` is an `[[header]]` array of tables (see `TomlValue.a_of_tables`)
+ * @return             the assembled value
+ */
+fn mk_value(kind: TomlKind, text: str, int_val: i64, float_val: f64, bool_val: bool, items: []TomlValue, keys: []str, vals: []TomlValue, t_sealed: bool, t_opened: bool, a_of_tables: bool): TomlValue {
+    TomlValue { kind = kind; text = text; int_val = int_val; float_val = float_val; bool_val = bool_val; items = items; keys = keys; vals = vals; t_sealed = t_sealed; t_opened = t_opened; a_of_tables = a_of_tables }
+}
+
+/**
+ * Appends every byte of `more` to `out`, returning the grown slice (functional accumulation, no
+ * index-assignment) — shared by `toml_parse.tks` and `toml_encode.tks`, mirroring
+ * `teko::encoding::cbor`'s helper of the same name.
+ *
+ * @param out   the accumulator
+ * @param more  the bytes to append
+ * @return      `out` followed by `more`
+ */
+fn append_all(out: []byte, more: []byte): []byte {
+    var acc = out
+    var i: u64 = 0
+    loop {
+        if i >= more.len { break }
+        acc = teko::list::push(acc, more[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * Wraps a decoded string as a `TomlValue` (every TOML string form — basic, literal, single- or
+ * multi-line — decodes to this one kind).
+ *
+ * @param s  the decoded text
+ * @return   the TOML string value
+ */
+exp fn toml_string(s: str): TomlValue {
+    mk_value(TomlKind::String, s, 0, 0.0, false, no_items(), no_keys(), no_items(), false, false, false)
+}
+
+/**
+ * Wraps a signed 64-bit integer as a `TomlValue`.
+ *
+ * @param v  the integer value
+ * @return   the TOML integer value
+ */
+exp fn toml_integer(v: i64): TomlValue {
+    mk_value(TomlKind::Integer, "", v, 0.0, false, no_items(), no_keys(), no_items(), false, false, false)
+}
+
+/**
+ * Wraps a floating-point number as a `TomlValue`.
+ *
+ * @param v  the float value
+ * @return   the TOML float value
+ */
+exp fn toml_float(v: f64): TomlValue {
+    mk_value(TomlKind::Float, "", 0, v, false, no_items(), no_keys(), no_items(), false, false, false)
+}
+
+/**
+ * Wraps a boolean as a `TomlValue`.
+ *
+ * @param v  the boolean value
+ * @return   the TOML boolean value
+ */
+exp fn toml_boolean(v: bool): TomlValue {
+    mk_value(TomlKind::Boolean, "", 0, 0.0, v, no_items(), no_keys(), no_items(), false, false, false)
+}
+
+/**
+ * Wraps caller-supplied text as a TOML datetime value, UNVALIDATED (the parser's own datetime
+ * reader validates shape before ever calling this — see the module doc's NAMED SEAM #1). A caller
+ * building a document programmatically is responsible for supplying valid TOML datetime text
+ * (e.g. `"1979-05-27T07:32:00Z"`).
+ *
+ * @param raw  the datetime source text, exactly as it should render
+ * @return     the TOML datetime value
+ */
+exp fn toml_datetime(raw: str): TomlValue {
+    mk_value(TomlKind::DateTime, raw, 0, 0.0, false, no_items(), no_keys(), no_items(), false, false, false)
+}
+
+/**
+ * Wraps a sequence of values as a TOML array, in the given order. TOML 1.0.0 permits
+ * heterogeneous arrays, so `items` may mix kinds freely.
+ *
+ * @param items  the elements, in order
+ * @return       the TOML array value
+ */
+exp fn toml_array(items: []TomlValue): TomlValue {
+    mk_value(TomlKind::Array, "", 0, 0.0, false, items, no_keys(), no_items(), false, false, false)
+}
+
+/**
+ * A fresh, empty TOML table (no bookkeeping flags set) — the starting point for building a
+ * document programmatically (grow it with `toml_table_set`), and the shape `parse_toml`'s root
+ * value and every nested table start from.
+ *
+ * @return  an empty TOML table value
+ */
+exp fn toml_table_empty(): TomlValue {
+    mk_value(TomlKind::Table, "", 0, 0.0, false, no_items(), no_keys(), no_items(), false, false, false)
+}
+
+/**
+ * Returns a new table equal to `table` with `key` set to `value`: replacing the existing entry in
+ * place (preserving its position) when `key` is already present, else appending a new entry at
+ * the end. This is the ONLY way to grow a `Table` value (no index-assignment, per house style);
+ * unlike the parser's internal leaf-setter, this NEVER errors on an existing key — it is the
+ * ergonomic "build a document" API, not the strict "decode TOML text" one.
+ *
+ * @param table  the table to extend (must have `kind == Table`; a non-table is returned unchanged)
+ * @param key    the key to set
+ * @param value  the value to set it to
+ * @return       the updated table
+ */
+exp fn toml_table_set(table: TomlValue, key: str, value: TomlValue): TomlValue {
+    if table.kind != TomlKind::Table { return table }
+    var new_keys: []str = no_keys()
+    var new_vals: []TomlValue = no_items()
+    var replaced = false
+    var i: u64 = 0
+    loop {
+        if i >= table.keys.len { break }
+        new_keys = teko::list::push(new_keys, table.keys[i])
+        if table.keys[i] == key {
+            new_vals = teko::list::push(new_vals, value)
+            replaced = true
+        } else {
+            new_vals = teko::list::push(new_vals, table.vals[i])
+        }
+        i++
+    }
+    if !replaced {
+        new_keys = teko::list::push(new_keys, key)
+        new_vals = teko::list::push(new_vals, value)
+    }
+    mk_value(TomlKind::Table, table.text, table.int_val, table.float_val, table.bool_val, table.items, new_keys, new_vals, table.t_sealed, table.t_opened, table.a_of_tables)
+}
+
+/**
+ * Looks up `key` in `table`'s direct entries (one level, no dotted-path traversal — see
+ * `toml_get_path` for that).
+ *
+ * @param table  the table to search (a non-table always misses)
+ * @param key    the key to look up
+ * @return       the value at `key`, or `null` when `table` is not a table or has no such key
+ */
+exp fn toml_get(table: TomlValue, key: str): TomlValue | null {
+    if table.kind != TomlKind::Table { return null }
+    var i: u64 = 0
+    loop {
+        if i >= table.keys.len { break }
+        if table.keys[i] == key { return table.vals[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * Looks up a dot-separated path of BARE keys (e.g. `"servers.alpha.ip"`), walking nested tables
+ * one segment at a time via `toml_get`. For a path containing a key that itself needs quoting
+ * (spaces, dots, etc. inside the key name) call `toml_get` directly, segment by segment.
+ *
+ * @param table         the root table to search from
+ * @param dotted_path   the dot-separated key path
+ * @return              the value at the end of the path, or `null` when any segment misses or
+ *                       resolves to a non-table before the path is exhausted
+ */
+exp fn toml_get_path(table: TomlValue, dotted_path: str): TomlValue | null {
+    var segments = split_on_dot(dotted_path)
+    var current = table
+    var i: u64 = 0
+    loop {
+        if i >= segments.len { return current }
+        var next = match toml_get(current, segments[i]) { TomlValue as v => v; null => return null }
+        current = next
+        i++
+    }
+    current
+}
+
+/**
+ * Splits `s` on `.` into its segments (no trimming — a `toml_get_path` caller is expected to pass
+ * a clean bare-key path).
+ *
+ * @param s  the dot-separated text
+ * @return   the segments, in order
+ */
+fn split_on_dot(s: str): []str {
+    var bytes = bytes_of_str(s)
+    var out: []str = teko::list::empty()
+    var start: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= bytes.len {
+            out = teko::list::push(out, slice(s, start, i))
+            return out
+        }
+        if bytes[i] == b'.' {
+            out = teko::list::push(out, slice(s, start, i))
+            start = i + 1
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * Structurally compares two `TomlValue` trees for equality, recursing through arrays and tables
+ * (in slice order — two tables with the same entries in a different order are NOT equal, matching
+ * `teko::encoding::cbor::cbor_equal`'s slice-order convention). Floats compare by `f64` bit
+ * pattern (so `NaN` equals `NaN`, and `-0.0` differs from `0.0`). The parser-internal bookkeeping
+ * fields (`t_sealed`/`t_opened`/`a_of_tables`) are NOT compared — they carry no value-level
+ * meaning.
+ *
+ * @param a  the first value
+ * @param b  the second value
+ * @return   true when the two trees are structurally identical
+ */
+exp fn toml_equal(a: TomlValue, b: TomlValue): bool {
+    if a.kind != b.kind { return false }
+    match a.kind {
+        TomlKind::String => a.text == b.text
+        TomlKind::DateTime => a.text == b.text
+        TomlKind::Integer => a.int_val == b.int_val
+        TomlKind::Boolean => a.bool_val == b.bool_val
+        TomlKind::Float => f64_bits(a.float_val) == f64_bits(b.float_val)
+        TomlKind::Array => items_equal(a.items, b.items)
+        TomlKind::Table => keys_equal(a.keys, b.keys) && items_equal(a.vals, b.vals)
+    }
+}
+
+/**
+ * Compares two `TomlValue` slices elementwise with `toml_equal`.
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   true when both have the same length and structurally equal elements
+ */
+fn items_equal(a: []TomlValue, b: []TomlValue): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if !toml_equal(a[i], b[i]) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Compares two `[]str` slices for elementwise equality.
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   true when both have the same length and identical strings at every index
+ */
+fn keys_equal(a: []str, b: []str): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}

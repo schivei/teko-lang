@@ -1,0 +1,1554 @@
+/**
+ * `teko::encoding::toml` — the DECODER. Hand-written recursive-descent scanner over the source
+ * document's raw UTF-8 bytes (the `teko::encoding::json`/`teko::encoding::csv` precedent: TOML's
+ * structural grammar is pure ASCII — punctuation, digits, keywords — so scanning by byte index is
+ * correct; only string CONTENTS carry arbitrary UTF-8, copied through verbatim except inside a
+ * recognized escape).
+ *
+ * SHAPE. Every scan step returns a small step-result struct (`{ ...; next: u64 }`, the offset just
+ * past what was consumed) threaded through by return value — the same "no mutable out-param"
+ * discipline `teko::encoding::cbor`'s `CborRead`/`ArgRead` use. The table-building side (dotted
+ * keys, `[header]`, `[[header]]`) is the one genuinely TOML-specific piece: `descend_table` +
+ * `attach_child` implement the single navigation rule that makes both plain nesting AND
+ * array-of-tables nesting work uniformly — "when a path segment resolves to an array created by
+ * `[[header]]`, the effective table is its LAST element" — so `set_leaf_at`/`open_table_at`/
+ * `open_array_table_at` share one walk instead of three.
+ */
+
+/**
+ * One scanned key plus the offset just past it.
+ */
+type KeyStep = struct {
+    /**
+     * The decoded key text (bare, or the decoded content of a quoted key).
+     */
+    key: str
+    /**
+     * The offset just past the key (past its closing quote for a quoted key).
+     */
+    next: u64
+}
+
+/**
+ * A dotted key path (one or more segments) plus the offset just past it (trailing whitespace
+ * already skipped).
+ */
+type KeyPathStep = struct {
+    /**
+     * The path's segments, in order (a single-element slice for a plain, non-dotted key).
+     */
+    keys: []str
+    /**
+     * The offset just past the path.
+     */
+    next: u64
+}
+
+/**
+ * A parsed `[table]` / `[[table]]` header plus the offset just past its terminating line end.
+ */
+type HeaderStep = struct {
+    /**
+     * The header's key path.
+     */
+    path: []str
+    /**
+     * Whether this was an `[[array-of-tables]]` header (vs a plain `[table]` header).
+     */
+    is_array: bool
+    /**
+     * The offset just past the header's line (its trailing comment/newline already consumed).
+     */
+    next: u64
+}
+
+/**
+ * A parsed `key = value` line plus the offset just past its terminating line end.
+ */
+type KeyValStep = struct {
+    /**
+     * The (possibly dotted) key path this line assigns.
+     */
+    path: []str
+    /**
+     * The assigned value.
+     */
+    value: TomlValue
+    /**
+     * The offset just past the line.
+     */
+    next: u64
+}
+
+/**
+ * One parsed value plus the offset just past it.
+ */
+type ValStep = struct {
+    /**
+     * The parsed value.
+     */
+    value: TomlValue
+    /**
+     * The offset just past the value.
+     */
+    next: u64
+}
+
+/**
+ * A scanned run of digits (underscores already stripped) plus the offset just past it.
+ */
+type DigitRunResult = struct {
+    /**
+     * The digit bytes, in order, with any `_` separators removed.
+     */
+    out: []byte
+    /**
+     * The offset just past the scanned run.
+     */
+    next: u64
+}
+
+/**
+ * A decoded string body plus the offset just past its closing delimiter.
+ */
+type PStrStep = struct {
+    /**
+     * The decoded text.
+     */
+    text: str
+    /**
+     * The offset just past the closing delimiter.
+     */
+    next: u64
+}
+
+/**
+ * One decoded escape sequence's bytes plus the offset just past it.
+ */
+type EscStep = struct {
+    /**
+     * The UTF-8 bytes the escape decodes to.
+     */
+    bytes: []byte
+    /**
+     * The offset just past the escape sequence.
+     */
+    next: u64
+}
+
+/**
+ * The outcome of testing for a multi-line basic string's line-ending-backslash trim at a given
+ * `\`.
+ */
+type ContStep = struct {
+    /**
+     * Whether a line-ending-backslash trim was found at the tested position.
+     */
+    matched: bool
+    /**
+     * When `matched`, the offset just past every trimmed whitespace/newline byte; otherwise the
+     * original position, unused by the caller.
+     */
+    next: u64
+}
+
+/**
+ * The result of resolving one intermediate path segment while walking into a table: the table to
+ * recurse into, whether it was reached through the LAST element of an `[[header]]` array of
+ * tables (in which case writing the recursion's result back means replacing that array's last
+ * element, not the slot directly), and — when it was — the array value itself (needed to rebuild
+ * it).
+ */
+type DescendResult = struct {
+    /**
+     * The table to recurse into (freshly created and empty when the segment's key was absent).
+     */
+    child: TomlValue
+    /**
+     * Whether `child` came from the last element of an array-of-tables (see the type doc).
+     */
+    via_array: bool
+    /**
+     * The full array value `child` was taken from, meaningful only when `via_array`.
+     */
+    container_array: TomlValue
+}
+
+/**
+ * A `TomlValue | error` failure carrying a byte offset — the checked failure every LEXICAL scan
+ * step in this file returns (mirrors `teko::encoding::cbor::read_error`).
+ *
+ * @param what  the failure description
+ * @param pos   the offset at which the failure was detected
+ * @return      the checked error
+ */
+fn toml_error(what: str, pos: u64): error {
+    error { message = concat("toml: ", what, " at offset ", i64_to_str(pos to i64)) }
+}
+
+/**
+ * A checked failure carrying no byte offset — used for the SEMANTIC (tree-shape) failures the
+ * table-building helpers below report (duplicate keys, duplicate headers, type conflicts), which
+ * have no single meaningful source offset to point at.
+ *
+ * @param what  the failure description
+ * @return      the checked error
+ */
+fn semantic_error(what: str): error {
+    error { message = concat("toml: ", what) }
+}
+
+/**
+ * Reports whether `b` is TOML inline whitespace (space or tab — TOML's `wschar`; newlines are
+ * never "just whitespace" in this grammar).
+ *
+ * @param b  the byte to classify
+ * @return   true for space or tab
+ */
+fn is_toml_ws(b: byte): bool {
+    b == b' ' || b == b'\t'
+}
+
+/**
+ * Skips a run of inline whitespace (spaces/tabs only — never newlines or comments).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset just past the whitespace run
+ */
+fn skip_ws(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at < input.len && is_toml_ws(input[at]) { at = at + 1; continue }
+        break
+    }
+    at
+}
+
+/**
+ * Skips from `pos` to (but not past) the next `\n`, or to end of input — used for `#` comments.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset of the `\n` that ends the comment, or `input.len`
+ */
+fn skip_to_eol(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at >= input.len || input[at] == b'\n' { break }
+        at = at + 1
+    }
+    at
+}
+
+/**
+ * Skips every run of inline whitespace, `#` comment, and newline starting at `pos` — the
+ * between-constructs skip used at the top level of a document (before a header, a `key = value`
+ * line, or end of input).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset of the next meaningful byte, or `input.len`
+ */
+fn skip_ws_nl_comments(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at >= input.len { break }
+        var b = input[at]
+        if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' { at = at + 1; continue }
+        if b == b'#' { at = skip_to_eol(input, at); continue }
+        break
+    }
+    at
+}
+
+/**
+ * Skips inline whitespace, then an optional `#` comment, then requires the line to end (a `\n`,
+ * `\r\n`, or end of input) — the trailing-content check every header/key-value line ends with.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset just past the construct's last meaningful byte
+ * @return       the offset just past the consumed line ending, or `error` when unconsumed content
+ *               remains before the next newline
+ */
+fn expect_line_end(input: []byte, pos: u64): u64 | error {
+    var at = skip_ws(input, pos)
+    if at < input.len && input[at] == b'#' { at = skip_to_eol(input, at) }
+    if at >= input.len { return at }
+    if at + 1 < input.len && input[at] == b'\r' && input[at + 1] == b'\n' { return at + 2 }
+    if input[at] == b'\n' { return at + 1 }
+    toml_error("expected end of line", at)
+}
+
+/**
+ * Reports whether `b` is a bare-key character (`A`-`Z`, `a`-`z`, `0`-`9`, `_`, or `-`).
+ *
+ * @param b  the byte to classify
+ * @return   true when `b` may appear in an unquoted key
+ */
+fn is_bare_key_char(b: byte): bool {
+    (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z') || (b >= b'0' && b <= b'9') || b == b'_' || b == b'-'
+}
+
+/**
+ * Reports whether `input[pos]` is in bounds and a bare-key character.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to classify
+ * @return       true when `pos` is in range and `is_bare_key_char` there
+ */
+fn is_bare_key_char_at(input: []byte, pos: u64): bool {
+    pos < input.len && is_bare_key_char(input[pos])
+}
+
+/**
+ * Reports whether `b` is an ASCII decimal digit.
+ *
+ * @param b  the byte to classify
+ * @return   true for `0`-`9`
+ */
+fn is_digit_byte(b: byte): bool {
+    b >= b'0' && b <= b'9'
+}
+
+/**
+ * Reports whether `input[pos]` is in bounds and an ASCII decimal digit.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to classify
+ * @return       true when `pos` is in range and holds a digit
+ */
+fn is_digit_at(input: []byte, pos: u64): bool {
+    pos < input.len && is_digit_byte(input[pos])
+}
+
+/**
+ * Reports whether the fixed ASCII text `word` occurs at `input[pos .. pos + word.len)`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to test
+ * @param word   the literal text to match
+ * @return       true when `word` occurs at `pos`
+ */
+fn matches_literal(input: []byte, pos: u64, word: str): bool {
+    var wb = bytes_of_str(word)
+    if pos + wb.len > input.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= wb.len { break }
+        if input[pos + i] != wb[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Reports whether three consecutive `q` bytes occur at `input[pos .. pos + 3)` — the triple-quote
+ * delimiter test shared by every string form.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to test
+ * @param q      the quote byte (`"` or `'`)
+ * @return       true when `pos + 3 <= input.len` and all three bytes equal `q`
+ */
+fn at_triple(input: []byte, pos: u64, q: byte): bool {
+    pos + 3 <= input.len && input[pos] == q && input[pos + 1] == q && input[pos + 2] == q
+}
+
+/**
+ * Maps one ASCII hex digit to its value (`0`-`15`), or `-1` when `b` is not a hex digit.
+ *
+ * @param b  the byte to classify
+ * @return   the hex value, or `-1`
+ */
+fn radix_digit_value(b: byte): i64 {
+    if b >= b'0' && b <= b'9' { return (b to i64) - (b'0' to i64) }
+    if b >= b'a' && b <= b'f' { return (b to i64) - (b'a' to i64) + 10 }
+    if b >= b'A' && b <= b'F' { return (b to i64) - (b'A' to i64) + 10 }
+    -1
+}
+
+/**
+ * Reports whether `b` is a valid digit for `radix` (2, 8, 10, or 16).
+ *
+ * @param b      the byte to classify
+ * @param radix  the radix
+ * @return       true when `b`'s digit value is in `[0, radix)`
+ */
+fn digit_valid_for_radix(b: byte, radix: u64): bool {
+    var v = radix_digit_value(b)
+    v >= 0 && (v to u64) < radix
+}
+
+/**
+ * Copies `input[from, to)` into a fresh `str` (assumes the range is valid UTF-8 — true here
+ * because every caller slices within an already-validated TOML source).
+ *
+ * @param input  the source bytes
+ * @param from   the inclusive start offset
+ * @param to     the exclusive end offset
+ * @return       a fresh `str` holding `input[from, to)`
+ */
+fn slice_bytes_str(input: []byte, from: u64, to: u64): str {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, input[i])
+        i++
+    }
+    str(out)
+}
+
+/**
+ * Wraps a single byte as a fresh one-element `[]byte`.
+ *
+ * @param b  the byte
+ * @return   a fresh `[]byte` holding just `b`
+ */
+fn one_byte_slice(b: byte): []byte {
+    teko::list::push(teko::list::empty(), b)
+}
+
+/**
+ * Appends the UTF-8 encoding of Unicode scalar value `cp` to `out` (hand-encoded — no builtin
+ * "codepoint -> bytes" exists, mirroring `teko::encoding::json::codepoint_to_str`'s table,
+ * generalized to append to a byte accumulator instead of building a `str` via `~`).
+ *
+ * @param out  the accumulator
+ * @param cp   the Unicode scalar value to encode (the caller has already excluded surrogates)
+ * @return     `out` with `cp`'s UTF-8 encoding appended
+ */
+fn push_codepoint_utf8(out: []byte, cp: u32): []byte {
+    if cp <= 0x7F { return teko::list::push(out, cp to byte) }
+    if cp <= 0x7FF {
+        var o = teko::list::push(out, (0xC0 | (cp >> 6)) to byte)
+        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+    }
+    if cp <= 0xFFFF {
+        var o = teko::list::push(out, (0xE0 | (cp >> 12)) to byte)
+        o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
+        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+    }
+    var o = teko::list::push(out, (0xF0 | (cp >> 18)) to byte)
+    o = teko::list::push(o, (0x80 | ((cp >> 12) & 0x3F)) to byte)
+    o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
+    teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+}
+
+/**
+ * Reads exactly `n` ASCII hex digits starting at `pos`, returning their value.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the first hex digit
+ * @param n      how many hex digits to read (4 for `\u`, 8 for `\U`)
+ * @return       the assembled value, or `error` when truncated or non-hex
+ */
+fn read_hex_n(input: []byte, pos: u64, n: u64): u32 | error {
+    if pos + n > input.len { return toml_error("truncated unicode escape", pos) }
+    var v: u32 = 0
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var d = radix_digit_value(input[pos + i])
+        if d < 0 { return toml_error("invalid hex digit in unicode escape", pos + i) }
+        v = (v * 16) + (d to u32)
+        i++
+    }
+    v
+}
+
+/**
+ * Parses one key (bare, or a single-line basic/literal quoted string) starting at `pos`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the key's first byte
+ * @return       the decoded key and the offset just past it, or `error`
+ */
+fn parse_key(input: []byte, pos: u64): KeyStep | error {
+    if pos >= input.len { return toml_error("expected key", pos) }
+    var b = input[pos]
+    if b == b'"' {
+        var s = match parse_basic_single(input, pos + 1) { PStrStep as r => r; error as e => return e }
+        return KeyStep { key = s.text; next = s.next }
+    }
+    if b == b'\'' {
+        var s = match parse_literal_single(input, pos + 1) { PStrStep as r => r; error as e => return e }
+        return KeyStep { key = s.text; next = s.next }
+    }
+    if !is_bare_key_char(b) { return toml_error("invalid key", pos) }
+    var at = pos
+    loop {
+        if at < input.len && is_bare_key_char(input[at]) { at = at + 1; continue }
+        break
+    }
+    KeyStep { key = slice_bytes_str(input, pos, at); next = at }
+}
+
+/**
+ * Parses a dotted key path — one key, then zero or more `.`-separated further keys, whitespace
+ * around each `.` allowed.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the path's first key
+ * @return       the path's segments and the offset just past it, or `error`
+ */
+fn parse_key_path(input: []byte, pos: u64): KeyPathStep | error {
+    var k1 = match parse_key(input, pos) { KeyStep as k => k; error as e => return e }
+    var keys: []str = teko::list::push(teko::list::empty(), k1.key)
+    var at = skip_ws(input, k1.next)
+    loop {
+        if at < input.len && input[at] == b'.' {
+            at = skip_ws(input, at + 1)
+            var kn = match parse_key(input, at) { KeyStep as k => k; error as e => return e }
+            keys = teko::list::push(keys, kn.key)
+            at = skip_ws(input, kn.next)
+            continue
+        }
+        break
+    }
+    KeyPathStep { keys = keys; next = at }
+}
+
+/**
+ * Decodes one basic-string escape sequence at `input[at]` (`input[at] == '\\'`).
+ *
+ * @param input  the source bytes
+ * @param at     the offset of the escape's leading `\`
+ * @return       the decoded bytes and the offset just past the escape, or `error`
+ */
+fn decode_basic_escape(input: []byte, at: u64): EscStep | error {
+    if at + 1 >= input.len { return toml_error("unterminated escape sequence", at) }
+    var esc = input[at + 1]
+    if esc == b'"' { return EscStep { bytes = one_byte_slice(b'"'); next = at + 2 } }
+    if esc == b'\\' { return EscStep { bytes = one_byte_slice(b'\\'); next = at + 2 } }
+    if esc == b'b' { return EscStep { bytes = one_byte_slice(0x08 to byte); next = at + 2 } }
+    if esc == b't' { return EscStep { bytes = one_byte_slice(0x09 to byte); next = at + 2 } }
+    if esc == b'n' { return EscStep { bytes = one_byte_slice(0x0A to byte); next = at + 2 } }
+    if esc == b'f' { return EscStep { bytes = one_byte_slice(0x0C to byte); next = at + 2 } }
+    if esc == b'r' { return EscStep { bytes = one_byte_slice(0x0D to byte); next = at + 2 } }
+    if esc == b'u' {
+        var cp = match read_hex_n(input, at + 2, 4) { u32 as c => c; error as e => return e }
+        if cp >= 0xD800 && cp <= 0xDFFF { return toml_error("invalid unicode scalar value in \\u escape", at) }
+        return EscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp); next = at + 6 }
+    }
+    if esc == b'U' {
+        var cp2 = match read_hex_n(input, at + 2, 8) { u32 as c => c; error as e => return e }
+        if cp2 > 0x10FFFF || (cp2 >= 0xD800 && cp2 <= 0xDFFF) { return toml_error("invalid unicode scalar value in \\U escape", at) }
+        return EscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp2); next = at + 10 }
+    }
+    toml_error("invalid escape sequence", at)
+}
+
+/**
+ * Parses a single-line basic string's body (input positioned just past the opening `"`).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the first content byte
+ * @return       the decoded text and the offset just past the closing `"`, or `error`
+ */
+fn parse_basic_single(input: []byte, pos: u64): PStrStep | error {
+    var out: []byte = teko::list::empty()
+    var at = pos
+    loop {
+        if at >= input.len { return toml_error("unterminated string", at) }
+        var b = input[at]
+        if b == b'"' { return PStrStep { text = str(out); next = at + 1 } }
+        if b == b'\n' || b == b'\r' { return toml_error("newline in single-line string", at) }
+        if b == b'\\' {
+            var step = match decode_basic_escape(input, at) { EscStep as e2 => e2; error as e => return e }
+            out = append_all(out, step.bytes)
+            at = step.next
+            continue
+        }
+        out = teko::list::push(out, b)
+        at = at + 1
+    }
+    toml_error("unreachable", at)
+}
+
+/**
+ * Parses a single-line literal string's body (input positioned just past the opening `'`) — no
+ * escape processing at all, every byte before the closing `'` is copied through verbatim.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the first content byte
+ * @return       the decoded text and the offset just past the closing `'`, or `error`
+ */
+fn parse_literal_single(input: []byte, pos: u64): PStrStep | error {
+    var at = pos
+    loop {
+        if at >= input.len { return toml_error("unterminated string", at) }
+        var b = input[at]
+        if b == b'\'' { return PStrStep { text = slice_bytes_str(input, pos, at); next = at + 1 } }
+        if b == b'\n' || b == b'\r' { return toml_error("newline in single-line string", at) }
+        at = at + 1
+    }
+    toml_error("unreachable", at)
+}
+
+/**
+ * Skips a single newline (`\n` or `\r\n`) at `pos`, when present — the "trim the newline
+ * immediately following the opening delimiter" rule every multi-line string form has.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset just past the opening triple-quote delimiter
+ * @return       the offset just past the trimmed newline, or `pos` unchanged
+ */
+fn trim_leading_newline(input: []byte, pos: u64): u64 {
+    if pos < input.len && input[pos] == b'\n' { return pos + 1 }
+    if pos + 1 < input.len && input[pos] == b'\r' && input[pos + 1] == b'\n' { return pos + 2 }
+    pos
+}
+
+/**
+ * Counts the run of consecutive `q` bytes starting at `pos`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start counting from
+ * @param q      the byte to count
+ * @return       how many consecutive `q` bytes occur at `pos`
+ */
+fn count_quotes(input: []byte, pos: u64, q: byte): u64 {
+    var at = pos
+    loop {
+        if at < input.len && input[at] == q { at = at + 1; continue }
+        break
+    }
+    at - pos
+}
+
+/**
+ * Appends `n` copies of `q` to `out`.
+ *
+ * @param out  the accumulator
+ * @param q    the byte to repeat
+ * @param n    how many copies to append
+ * @return     `out` with `n` copies of `q` appended
+ */
+fn append_quote_run(out: []byte, q: byte, n: u64): []byte {
+    var acc = out
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        acc = teko::list::push(acc, q)
+        i++
+    }
+    acc
+}
+
+/**
+ * Tests for a multi-line basic string's line-ending-backslash trim at `at` (`input[at] == '\\'`):
+ * a `\` followed by only inline whitespace then a newline trims itself AND every following
+ * whitespace/newline byte, up to (not including) the next non-whitespace byte.
+ *
+ * @param input  the source bytes
+ * @param at     the offset of the candidate `\`
+ * @return       whether the trim applies, and if so the offset just past everything it consumes
+ */
+fn try_line_continuation(input: []byte, at: u64): ContStep {
+    var p = at + 1
+    loop {
+        if p < input.len && is_toml_ws(input[p]) { p = p + 1; continue }
+        break
+    }
+    var is_crlf = p + 1 < input.len && input[p] == b'\r' && input[p + 1] == b'\n'
+    var is_lf = p < input.len && input[p] == b'\n'
+    if !is_crlf && !is_lf { return ContStep { matched = false; next = at } }
+    var q = if is_crlf { p + 2 } else { p + 1 }
+    loop {
+        if q < input.len && (is_toml_ws(input[q]) || input[q] == b'\n' || input[q] == b'\r') { q = q + 1; continue }
+        break
+    }
+    ContStep { matched = true; next = q }
+}
+
+/**
+ * Parses a multi-line basic string's body (input positioned just past the opening `"""`, and past
+ * any newline immediately following it). Escapes decode as in the single-line form, PLUS the
+ * line-ending-backslash trim (`try_line_continuation`). A run of 3-5 consecutive `"` closes the
+ * string, with any of the first `run - 3` quotes kept as literal content (the "1 or 2 extra
+ * quotes before the closer are literal" rule); a run longer than 5 is treated the same way
+ * (`run - 3` literal quotes then close) as a deliberately lenient superset of the strict grammar.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the first content byte
+ * @return       the decoded text and the offset just past the closing delimiter, or `error`
+ */
+fn parse_multiline_basic(input: []byte, pos: u64): PStrStep | error {
+    var at = trim_leading_newline(input, pos)
+    var out: []byte = teko::list::empty()
+    loop {
+        if at >= input.len { return toml_error("unterminated multi-line string", at) }
+        var b = input[at]
+        if b == b'"' {
+            var n = count_quotes(input, at, b'"')
+            if n >= 3 {
+                var extra = n - 3
+                out = append_quote_run(out, b'"', extra)
+                return PStrStep { text = str(out); next = at + extra + 3 }
+            }
+            out = append_quote_run(out, b'"', n)
+            at = at + n
+            continue
+        }
+        if b == b'\\' {
+            var cont = try_line_continuation(input, at)
+            if cont.matched {
+                at = cont.next
+                continue
+            }
+            var step = match decode_basic_escape(input, at) { EscStep as e2 => e2; error as e => return e }
+            out = append_all(out, step.bytes)
+            at = step.next
+            continue
+        }
+        out = teko::list::push(out, b)
+        at = at + 1
+    }
+    toml_error("unreachable", at)
+}
+
+/**
+ * Parses a multi-line literal string's body (input positioned just past the opening `'''`, and
+ * past any newline immediately following it) — verbatim, no escape processing; closes the same
+ * way `parse_multiline_basic` does, with `'` in place of `"`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the first content byte
+ * @return       the decoded text and the offset just past the closing delimiter, or `error`
+ */
+fn parse_multiline_literal(input: []byte, pos: u64): PStrStep | error {
+    var at = trim_leading_newline(input, pos)
+    var out: []byte = teko::list::empty()
+    loop {
+        if at >= input.len { return toml_error("unterminated multi-line string", at) }
+        var b = input[at]
+        if b == b'\'' {
+            var n = count_quotes(input, at, b'\'')
+            if n >= 3 {
+                var extra = n - 3
+                out = append_quote_run(out, b'\'', extra)
+                return PStrStep { text = str(out); next = at + extra + 3 }
+            }
+            out = append_quote_run(out, b'\'', n)
+            at = at + n
+            continue
+        }
+        out = teko::list::push(out, b)
+        at = at + 1
+    }
+    toml_error("unreachable", at)
+}
+
+/**
+ * Parses any TOML string value (basic/literal, single- or multi-line) starting at `pos`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the opening delimiter
+ * @return       the string value and the offset just past it, or `error`
+ */
+fn parse_toml_string(input: []byte, pos: u64): ValStep | error {
+    var b = input[pos]
+    if b == b'"' {
+        if at_triple(input, pos, b'"') {
+            var m = match parse_multiline_basic(input, pos + 3) { PStrStep as r => r; error as e => return e }
+            return ValStep { value = toml_string(m.text); next = m.next }
+        }
+        var s = match parse_basic_single(input, pos + 1) { PStrStep as r => r; error as e => return e }
+        return ValStep { value = toml_string(s.text); next = s.next }
+    }
+    if at_triple(input, pos, b'\'') {
+        var ml = match parse_multiline_literal(input, pos + 3) { PStrStep as r => r; error as e => return e }
+        return ValStep { value = toml_string(ml.text); next = ml.next }
+    }
+    var sl = match parse_literal_single(input, pos + 1) { PStrStep as r => r; error as e => return e }
+    ValStep { value = toml_string(sl.text); next = sl.next }
+}
+
+/**
+ * Scans a run of decimal digits with `_` separators (each `_` must sit strictly between two
+ * digits), applying TOML's `dec-int`/`unsigned-dec-int` leading-zero rule when `restrict_leading_zero`:
+ * a leading `0` may only stand alone (no further digit or `_` may follow it).
+ *
+ * @param input                   the source bytes
+ * @param pos                     the offset of the run's first digit
+ * @param restrict_leading_zero   whether a leading `0` must be the entire run (integer parts);
+ *                                `false` for fraction/exponent digits, which allow leading zeros
+ * @return                        the digit bytes (underscores stripped) and the offset just past
+ *                                the run, or `error`
+ */
+fn scan_uint_digits(input: []byte, pos: u64, restrict_leading_zero: bool): DigitRunResult | error {
+    if pos >= input.len || !is_digit_byte(input[pos]) { return toml_error("expected digit", pos) }
+    var out: []byte = teko::list::push(teko::list::empty(), input[pos])
+    var first = input[pos]
+    var at = pos + 1
+    if restrict_leading_zero && first == b'0' {
+        if at < input.len && (is_digit_byte(input[at]) || input[at] == b'_') {
+            return toml_error("leading zero not allowed", pos)
+        }
+        return DigitRunResult { out = out; next = at }
+    }
+    loop {
+        if at < input.len && is_digit_byte(input[at]) { out = teko::list::push(out, input[at]); at = at + 1; continue }
+        if at < input.len && input[at] == b'_' {
+            if at + 1 >= input.len || !is_digit_byte(input[at + 1]) { return toml_error("invalid underscore placement", at) }
+            at = at + 1
+            continue
+        }
+        break
+    }
+    DigitRunResult { out = out; next = at }
+}
+
+/**
+ * Scans a run of `radix`-digits with `_` separators (each `_` must sit strictly between two valid
+ * digits), no leading-zero restriction (hex/octal/binary integers permit any leading digits).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the run's first digit
+ * @param radix  the radix (2, 8, or 16)
+ * @return       the digit bytes (underscores stripped) and the offset just past the run, or `error`
+ */
+fn scan_radix_digits(input: []byte, pos: u64, radix: u64): DigitRunResult | error {
+    if pos >= input.len || !digit_valid_for_radix(input[pos], radix) { return toml_error("expected digit", pos) }
+    var out: []byte = teko::list::push(teko::list::empty(), input[pos])
+    var at = pos + 1
+    loop {
+        if at < input.len && digit_valid_for_radix(input[at], radix) {
+            out = teko::list::push(out, input[at])
+            at = at + 1
+            continue
+        }
+        if at < input.len && input[at] == b'_' {
+            if at + 1 >= input.len || !digit_valid_for_radix(input[at + 1], radix) {
+                return toml_error("invalid underscore placement", at)
+            }
+            at = at + 1
+            continue
+        }
+        break
+    }
+    DigitRunResult { out = out; next = at }
+}
+
+/**
+ * Folds a digit run into a `u64` magnitude, checked against overflow (`teko::math::checked_mul_u64`
+ * / `checked_add_u64`).
+ *
+ * @param digits  the digit bytes (as scanned by `scan_uint_digits`/`scan_radix_digits`)
+ * @param radix   the radix the digits are in
+ * @return        the assembled magnitude, or `error` on overflow
+ */
+fn digits_to_u64_checked(digits: []byte, radix: u64): u64 | error {
+    var mag: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= digits.len { break }
+        var dv = radix_digit_value(digits[i]) to u64
+        var m1 = match teko::math::checked_mul_u64(mag, radix) { u64 as m => m; error as e2 => return semantic_error("integer literal out of range") }
+        var m2 = match teko::math::checked_add_u64(m1, dv) { u64 as m => m; error as e2 => return semantic_error("integer literal out of range") }
+        mag = m2
+        i++
+    }
+    mag
+}
+
+/**
+ * Applies a sign to a decimal magnitude, producing a valid `i64` without ever casting a
+ * bit-pattern that doesn't fit its target width (negative `i64`<->`u64` casts trap): the
+ * `i64::MIN` boundary magnitude is handed off to `teko::math::i64_min()` directly rather than cast.
+ *
+ * @param mag       the non-negative magnitude
+ * @param negative  whether the literal had a leading `-`
+ * @return          the signed value, or `error` when `mag` is out of the `i64` range for its sign
+ */
+fn decimal_magnitude_to_i64(mag: u64, negative: bool): i64 | error {
+    var i64_max_u: u64 = 9223372036854775807
+    var i64_min_mag: u64 = 9223372036854775808
+    if !negative {
+        if mag > i64_max_u { return semantic_error("integer literal out of range") }
+        return mag to i64
+    }
+    if mag == i64_min_mag { return teko::math::i64_min() }
+    if mag > i64_min_mag { return semantic_error("integer literal out of range") }
+    var pos_i = mag to i64
+    -pos_i
+}
+
+/**
+ * Parses an unsigned hex (`0x`), octal (`0o`), or binary (`0b`) integer literal (input positioned
+ * at the leading `0`).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the leading `0`
+ * @return       the integer value and the offset just past it, or `error`
+ */
+fn parse_radix_integer(input: []byte, pos: u64): ValStep | error {
+    var marker = input[pos + 1]
+    var radix: u64 = if marker == b'x' { 16 } else if marker == b'o' { 8 } else { 2 }
+    var dr = match scan_radix_digits(input, pos + 2, radix) { DigitRunResult as d => d; error as e => return e }
+    var mag = match digits_to_u64_checked(dr.out, radix) { u64 as m => m; error as e => return e }
+    if mag > 9223372036854775807 { return semantic_error("hex/octal/binary integer literal exceeds this codec's i64 range") }
+    ValStep { value = toml_integer(mag to i64); next = dr.next }
+}
+
+/**
+ * Assembles the underscore-stripped, `strtod`-legal text of a decimal/float literal from its
+ * scanned parts, ready for `teko::float::parse`.
+ *
+ * @param has_sign      whether a leading sign was present
+ * @param sign_neg      the sign, when `has_sign`
+ * @param int_digits    the integer-part digits
+ * @param has_frac      whether a fraction part was present
+ * @param frac_digits   the fraction-part digits, when `has_frac`
+ * @param has_exp       whether an exponent part was present
+ * @param exp_has_sign  whether the exponent had its own sign, when `has_exp`
+ * @param exp_sign_neg  the exponent's sign, when `exp_has_sign`
+ * @param exp_digits    the exponent-part digits, when `has_exp`
+ * @return              the assembled float text
+ */
+fn build_float_text(has_sign: bool, sign_neg: bool, int_digits: []byte, has_frac: bool, frac_digits: []byte, has_exp: bool, exp_has_sign: bool, exp_sign_neg: bool, exp_digits: []byte): str {
+    var out: []byte = teko::list::empty()
+    if has_sign { out = teko::list::push(out, if sign_neg { b'-' } else { b'+' }) }
+    out = append_all(out, int_digits)
+    if has_frac {
+        out = teko::list::push(out, b'.')
+        out = append_all(out, frac_digits)
+    }
+    if has_exp {
+        out = teko::list::push(out, b'e')
+        if exp_has_sign { out = teko::list::push(out, if exp_sign_neg { b'-' } else { b'+' }) }
+        out = append_all(out, exp_digits)
+    }
+    str(out)
+}
+
+/**
+ * Parses a decimal integer or float literal (input positioned just past any leading sign).
+ *
+ * @param input      the source bytes
+ * @param pos        the offset of the integer part's first digit
+ * @param has_sign   whether a leading `+`/`-` was already consumed
+ * @param sign_neg   the sign, when `has_sign`
+ * @return           the parsed value and the offset just past it, or `error`
+ */
+fn parse_decimal_or_float(input: []byte, pos: u64, has_sign: bool, sign_neg: bool): ValStep | error {
+    var ip = match scan_uint_digits(input, pos, true) { DigitRunResult as d => d; error as e => return e }
+    var at = ip.next
+    var is_float = false
+    var has_frac = false
+    var frac_digits: []byte = teko::list::empty()
+    if at < input.len && input[at] == b'.' {
+        is_float = true
+        has_frac = true
+        var fp = match scan_uint_digits(input, at + 1, false) { DigitRunResult as d => d; error as e => return e }
+        frac_digits = fp.out
+        at = fp.next
+    }
+    var has_exp = false
+    var exp_has_sign = false
+    var exp_sign_neg = false
+    var exp_digits: []byte = teko::list::empty()
+    if at < input.len && (input[at] == b'e' || input[at] == b'E') {
+        is_float = true
+        has_exp = true
+        var eat = at + 1
+        if eat < input.len && (input[eat] == b'+' || input[eat] == b'-') {
+            exp_has_sign = true
+            exp_sign_neg = input[eat] == b'-'
+            eat = eat + 1
+        }
+        var ep = match scan_uint_digits(input, eat, false) { DigitRunResult as d => d; error as e => return e }
+        exp_digits = ep.out
+        at = ep.next
+    }
+    if is_float {
+        var text = build_float_text(has_sign, sign_neg, ip.out, has_frac, frac_digits, has_exp, exp_has_sign, exp_sign_neg, exp_digits)
+        return ValStep { value = toml_float(teko::float::parse(text)); next = at }
+    }
+    var mag = match digits_to_u64_checked(ip.out, 10) { u64 as m => m; error as e => return e }
+    var iv = match decimal_magnitude_to_i64(mag, has_sign && sign_neg) { i64 as v => v; error as e => return e }
+    ValStep { value = toml_integer(iv); next = at }
+}
+
+/**
+ * Parses a number (decimal integer, hex/octal/binary integer, decimal float, or the special float
+ * forms `inf`/`nan` with an optional sign).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the literal's first byte (a sign, a digit, `i`, or `n`)
+ * @return       the parsed value and the offset just past it, or `error`
+ */
+fn parse_number(input: []byte, pos: u64): ValStep | error {
+    var at = pos
+    var has_sign = false
+    var sign_neg = false
+    if at < input.len && (input[at] == b'+' || input[at] == b'-') {
+        has_sign = true
+        sign_neg = input[at] == b'-'
+        at = at + 1
+    }
+    if matches_literal(input, at, "inf") {
+        var v = if sign_neg { -teko::math::inf() } else { teko::math::inf() }
+        return ValStep { value = toml_float(v); next = at + 3 }
+    }
+    if matches_literal(input, at, "nan") {
+        return ValStep { value = toml_float(teko::math::nan()); next = at + 3 }
+    }
+    if !has_sign && at + 1 < input.len && input[at] == b'0' && (input[at + 1] == b'x' || input[at + 1] == b'o' || input[at + 1] == b'b') {
+        return parse_radix_integer(input, at)
+    }
+    parse_decimal_or_float(input, at, has_sign, sign_neg)
+}
+
+/**
+ * Reads a two-digit decimal value at `pos` (the caller has already confirmed both bytes are
+ * digits).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the first digit
+ * @return       the two-digit value, `0..99`
+ */
+fn digit_pair_value(input: []byte, pos: u64): i64 {
+    ((input[pos] to i64) - (b'0' to i64)) * 10 + ((input[pos + 1] to i64) - (b'0' to i64))
+}
+
+/**
+ * Reports whether `input` at `pos` looks like the start of a `YYYY-` date prefix — the signal
+ * `parse_value` uses to route into `parse_datetime` instead of `parse_number`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to test
+ * @return       true when 4 digits followed by `-` occur at `pos`
+ */
+fn looks_like_date(input: []byte, pos: u64): bool {
+    pos + 5 <= input.len && is_digit_at(input, pos) && is_digit_at(input, pos + 1) && is_digit_at(input, pos + 2) && is_digit_at(input, pos + 3) && input[pos + 4] == b'-'
+}
+
+/**
+ * Reports whether `input` at `pos` looks like the start of an `HH:` time prefix — the signal
+ * `parse_value` uses to route a bare local-time value into `parse_datetime`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to test
+ * @return       true when 2 digits followed by `:` occur at `pos`
+ */
+fn looks_like_time(input: []byte, pos: u64): bool {
+    pos + 3 <= input.len && is_digit_at(input, pos) && is_digit_at(input, pos + 1) && input[pos + 2] == b':'
+}
+
+/**
+ * Validates a `YYYY-MM-DD` date's shape and obvious ranges (month `01`-`12`, day `01`-`31` — NOT
+ * the actual calendar, see the module doc's NAMED SEAM #1).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the date's first digit
+ * @return       `null` on success, or `error`
+ */
+fn validate_date_part(input: []byte, pos: u64): error | null {
+    if pos + 10 > input.len { return toml_error("truncated date", pos) }
+    if !(is_digit_at(input, pos) && is_digit_at(input, pos + 1) && is_digit_at(input, pos + 2) && is_digit_at(input, pos + 3)) { return toml_error("invalid date", pos) }
+    if input[pos + 4] != b'-' { return toml_error("invalid date", pos) }
+    if !(is_digit_at(input, pos + 5) && is_digit_at(input, pos + 6)) { return toml_error("invalid date", pos) }
+    if input[pos + 7] != b'-' { return toml_error("invalid date", pos) }
+    if !(is_digit_at(input, pos + 8) && is_digit_at(input, pos + 9)) { return toml_error("invalid date", pos) }
+    var month = digit_pair_value(input, pos + 5)
+    var day = digit_pair_value(input, pos + 8)
+    if month < 1 || month > 12 { return toml_error("month out of range", pos) }
+    if day < 1 || day > 31 { return toml_error("day out of range", pos) }
+    null
+}
+
+/**
+ * Validates an `HH:MM:SS[.fraction]` time's shape and ranges (hour `00`-`23`, minute `00`-`59`,
+ * second `00`-`60` to allow a leap second).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the time's first digit
+ * @return       the offset just past the time (including any fractional-seconds digits), or `error`
+ */
+fn validate_time_part(input: []byte, pos: u64): u64 | error {
+    if pos + 8 > input.len { return toml_error("truncated time", pos) }
+    if !(is_digit_at(input, pos) && is_digit_at(input, pos + 1)) { return toml_error("invalid time", pos) }
+    if input[pos + 2] != b':' { return toml_error("invalid time", pos) }
+    if !(is_digit_at(input, pos + 3) && is_digit_at(input, pos + 4)) { return toml_error("invalid time", pos) }
+    if input[pos + 5] != b':' { return toml_error("invalid time", pos) }
+    if !(is_digit_at(input, pos + 6) && is_digit_at(input, pos + 7)) { return toml_error("invalid time", pos) }
+    var hour = digit_pair_value(input, pos)
+    var minute = digit_pair_value(input, pos + 3)
+    var second = digit_pair_value(input, pos + 6)
+    if hour > 23 { return toml_error("hour out of range", pos) }
+    if minute > 59 { return toml_error("minute out of range", pos) }
+    if second > 60 { return toml_error("second out of range", pos) }
+    var at = pos + 8
+    if at < input.len && input[at] == b'.' {
+        at = at + 1
+        if !is_digit_at(input, at) { return toml_error("invalid fractional seconds", at) }
+        loop {
+            if at < input.len && is_digit_byte(input[at]) { at = at + 1; continue }
+            break
+        }
+    }
+    at
+}
+
+/**
+ * Validates a `+HH:MM`/`-HH:MM` UTC offset's shape and ranges (input positioned at the leading
+ * sign).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the leading `+`/`-`
+ * @return       the offset just past the offset, or `error`
+ */
+fn validate_offset_part(input: []byte, pos: u64): u64 | error {
+    if pos + 6 > input.len { return toml_error("truncated offset", pos) }
+    if !(is_digit_at(input, pos + 1) && is_digit_at(input, pos + 2)) { return toml_error("invalid offset", pos) }
+    if input[pos + 3] != b':' { return toml_error("invalid offset", pos) }
+    if !(is_digit_at(input, pos + 4) && is_digit_at(input, pos + 5)) { return toml_error("invalid offset", pos) }
+    var oh = digit_pair_value(input, pos + 1)
+    var om = digit_pair_value(input, pos + 4)
+    if oh > 23 { return toml_error("offset hour out of range", pos) }
+    if om > 59 { return toml_error("offset minute out of range", pos) }
+    pos + 6
+}
+
+/**
+ * Parses one of TOML's four datetime forms (offset date-time, local date-time, local date, local
+ * time), keeping the original source text (see the module doc's NAMED SEAM #1).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the datetime's first byte
+ * @return       the datetime value and the offset just past it, or `error`
+ */
+fn parse_datetime(input: []byte, pos: u64): ValStep | error {
+    var has_date = looks_like_date(input, pos)
+    var date_end = pos
+    if has_date {
+        match validate_date_part(input, pos) { null => { }; error as e => return e }
+        date_end = pos + 10
+    }
+    var cursor = date_end
+    var has_time = !has_date
+    var time_start = cursor
+    if has_date && cursor < input.len && (input[cursor] == b'T' || input[cursor] == b't' || input[cursor] == b' ') {
+        var sep = input[cursor]
+        var candidate = cursor + 1
+        if sep != b' ' || looks_like_time(input, candidate) {
+            has_time = true
+            time_start = candidate
+        }
+    }
+    if !has_time {
+        return ValStep { value = toml_datetime(slice_bytes_str(input, pos, date_end)); next = date_end }
+    }
+    var tend = match validate_time_part(input, time_start) { u64 as p => p; error as e => return e }
+    var end = tend
+    if has_date {
+        if end < input.len && (input[end] == b'Z' || input[end] == b'z') {
+            end = end + 1
+        } else if end < input.len && (input[end] == b'+' || input[end] == b'-') {
+            end = match validate_offset_part(input, end) { u64 as p => p; error as e => return e }
+        }
+    }
+    ValStep { value = toml_datetime(slice_bytes_str(input, pos, end)); next = end }
+}
+
+/**
+ * Parses one TOML value at `pos`, dispatching on its leading byte.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the value's first byte
+ * @return       the parsed value and the offset just past it, or `error`
+ */
+fn parse_value(input: []byte, pos: u64): ValStep | error {
+    if pos >= input.len { return toml_error("expected value", pos) }
+    var b = input[pos]
+    if b == b'"' || b == b'\'' { return parse_toml_string(input, pos) }
+    if b == b't' && matches_literal(input, pos, "true") && !is_bare_key_char_at(input, pos + 4) { return ValStep { value = toml_boolean(true); next = pos + 4 } }
+    if b == b'f' && matches_literal(input, pos, "false") && !is_bare_key_char_at(input, pos + 5) { return ValStep { value = toml_boolean(false); next = pos + 5 } }
+    if b == b'[' { return parse_array(input, pos) }
+    if b == b'{' { return parse_inline_table(input, pos) }
+    if is_digit_byte(b) && looks_like_date(input, pos) { return parse_datetime(input, pos) }
+    if is_digit_byte(b) && looks_like_time(input, pos) { return parse_datetime(input, pos) }
+    if is_digit_byte(b) || b == b'+' || b == b'-' || b == b'i' || b == b'n' { return parse_number(input, pos) }
+    toml_error("unexpected character in value", pos)
+}
+
+/**
+ * Parses an array literal (input positioned at the opening `[`), allowing whitespace, comments,
+ * and newlines freely between elements, plus a trailing comma before the closing `]`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the opening `[`
+ * @return       the array value and the offset just past the closing `]`, or `error`
+ */
+fn parse_array(input: []byte, pos: u64): ValStep | error {
+    var at = skip_ws_nl_comments(input, pos + 1)
+    var items: []TomlValue = teko::list::empty()
+    if at < input.len && input[at] == b']' { return ValStep { value = toml_array(items); next = at + 1 } }
+    loop {
+        var v = match parse_value(input, at) { ValStep as s => s; error as e => return e }
+        items = teko::list::push(items, v.value)
+        at = skip_ws_nl_comments(input, v.next)
+        if at < input.len && input[at] == b',' {
+            at = skip_ws_nl_comments(input, at + 1)
+            if at < input.len && input[at] == b']' { return ValStep { value = toml_array(items); next = at + 1 } }
+            continue
+        }
+        if at < input.len && input[at] == b']' { return ValStep { value = toml_array(items); next = at + 1 } }
+        return toml_error("expected ',' or ']' in array", at)
+    }
+    toml_error("unreachable", at)
+}
+
+/**
+ * Marks a table value as a SEALED inline table (never extendable — see `TomlValue.t_sealed`).
+ *
+ * @param t  the table to seal
+ * @return   the same table with `t_sealed` set
+ */
+fn with_sealed(t: TomlValue): TomlValue {
+    mk_value(t.kind, t.text, t.int_val, t.float_val, t.bool_val, t.items, t.keys, t.vals, true, t.t_opened, t.a_of_tables)
+}
+
+/**
+ * Parses an inline table literal (input positioned at the opening `{`) — spec-strict: NO newline
+ * is permitted anywhere inside (a raw `\n`/`\r` before the closing `}` is a checked error).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the opening `{`
+ * @return       the (sealed) table value and the offset just past the closing `}`, or `error`
+ */
+fn parse_inline_table(input: []byte, pos: u64): ValStep | error {
+    var at = skip_ws(input, pos + 1)
+    if at < input.len && input[at] == b'}' { return ValStep { value = with_sealed(toml_table_empty()); next = at + 1 } }
+    var table = toml_table_empty()
+    loop {
+        if at < input.len && (input[at] == b'\n' || input[at] == b'\r') { return toml_error("newline inside inline table", at) }
+        var kp = match parse_key_path(input, at) { KeyPathStep as k => k; error as e => return e }
+        var at2 = skip_ws(input, kp.next)
+        if at2 >= input.len || input[at2] != b'=' { return toml_error("expected '=' in inline table", at2) }
+        at2 = skip_ws(input, at2 + 1)
+        var v = match parse_value(input, at2) { ValStep as s => s; error as e => return e }
+        table = match set_leaf_path(table, kp.keys, v.value) { TomlValue as t => t; error as e => return e }
+        at = skip_ws(input, v.next)
+        if at < input.len && input[at] == b',' { at = skip_ws(input, at + 1); continue }
+        if at < input.len && input[at] == b'}' { at = at + 1; break }
+        return toml_error("expected ',' or '}' in inline table", at)
+    }
+    ValStep { value = with_sealed(table); next = at }
+}
+
+/**
+ * Finds `key`'s index among `table.keys`.
+ *
+ * @param table  the table to search (unconditionally, regardless of `kind`)
+ * @param key    the key to look up
+ * @return       the index, or `-1` when absent
+ */
+fn find_key_index(table: TomlValue, key: str): i64 {
+    var i: u64 = 0
+    loop {
+        if i >= table.keys.len { break }
+        if table.keys[i] == key { return i to i64 }
+        i++
+    }
+    -1
+}
+
+/**
+ * Resolves one intermediate path segment: the table `key` names inside `table`, descending
+ * through the LAST element of an `[[header]]` array of tables when that's what `key` holds (see
+ * `DescendResult`'s doc for why this one rule covers both plain and array-of-tables nesting).
+ *
+ * @param table  the table being navigated
+ * @param key    the segment's key
+ * @return       the child to recurse into, or `error` on a sealed inline table or a type conflict
+ */
+fn descend_table(table: TomlValue, key: str): DescendResult | error {
+    var idx = find_key_index(table, key)
+    if idx < 0 {
+        return DescendResult { child = toml_table_empty(); via_array = false; container_array = toml_table_empty() }
+    }
+    var val = table.vals[idx to u64]
+    if val.kind == TomlKind::Table {
+        if val.t_sealed { return semantic_error(concat("cannot extend sealed inline table '", key, "'")) }
+        return DescendResult { child = val; via_array = false; container_array = val }
+    }
+    if val.kind == TomlKind::Array && val.a_of_tables && val.items.len > 0 {
+        return DescendResult { child = val.items[val.items.len - 1]; via_array = true; container_array = val }
+    }
+    semantic_error(concat("key '", key, "' is not a table"))
+}
+
+/**
+ * Rebuilds `arr` (an array-of-tables value) with its LAST element replaced by `new_last`.
+ *
+ * @param arr       the array value (assumed non-empty)
+ * @param new_last  the replacement for the final element
+ * @return          the rebuilt array
+ */
+fn replace_last_item(arr: TomlValue, new_last: TomlValue): TomlValue {
+    var n = arr.items.len
+    var out: []TomlValue = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        if i == n - 1 { out = teko::list::push(out, new_last) } else { out = teko::list::push(out, arr.items[i]) }
+        i++
+    }
+    mk_value(arr.kind, arr.text, arr.int_val, arr.float_val, arr.bool_val, out, arr.keys, arr.vals, arr.t_sealed, arr.t_opened, arr.a_of_tables)
+}
+
+/**
+ * Writes a recursion's updated child back into `table` under `key`, replacing the array's last
+ * element first when `d.via_array` (see `descend_table`).
+ *
+ * @param table  the table to update
+ * @param key    the segment's key
+ * @param child  the updated child (a table)
+ * @param d      the `descend_table` result that produced `child`'s PRE-update value
+ * @return       the updated table
+ */
+fn attach_child(table: TomlValue, key: str, child: TomlValue, d: DescendResult): TomlValue {
+    if d.via_array { return toml_table_set(table, key, replace_last_item(d.container_array, child)) }
+    toml_table_set(table, key, child)
+}
+
+/**
+ * Inserts a brand-new leaf `key = value` into `table`, erroring when `key` is already present
+ * (TOML forbids defining the same key twice).
+ *
+ * @param table  the table to insert into
+ * @param key    the leaf key
+ * @param value  the value to set
+ * @return       the updated table, or `error` on a duplicate key
+ */
+fn insert_new_leaf(table: TomlValue, key: str, value: TomlValue): TomlValue | error {
+    if find_key_index(table, key) >= 0 { return semantic_error(concat("duplicate key '", key, "'")) }
+    toml_table_set(table, key, value)
+}
+
+/**
+ * Walks `path[i..]` from `table`, setting the final segment to `value` and creating every
+ * intermediate table along the way (auto-vivification for dotted keys).
+ *
+ * @param table  the table at `path[i]`'s level
+ * @param path   the full key path
+ * @param i      the index of the segment to resolve at this level
+ * @param value  the value to set at the path's end
+ * @return       the updated `table`, or `error`
+ */
+fn set_leaf_at(table: TomlValue, path: []str, i: u64, value: TomlValue): TomlValue | error {
+    if i == path.len - 1 { return insert_new_leaf(table, path[i], value) }
+    var d = match descend_table(table, path[i]) { DescendResult as r => r; error as e => return e }
+    var updated = match set_leaf_at(d.child, path, i + 1, value) { TomlValue as t => t; error as e => return e }
+    attach_child(table, path[i], updated, d)
+}
+
+/**
+ * Sets `value` at `path` within `root` (a `key = value` line's full effective path — the current
+ * `[header]`'s path plus the line's own possibly-dotted key).
+ *
+ * @param root   the document root table
+ * @param path   the full key path (non-empty)
+ * @param value  the value to set
+ * @return       the updated root, or `error`
+ */
+fn set_leaf_path(root: TomlValue, path: []str, value: TomlValue): TomlValue | error {
+    if path.len == 0 { return semantic_error("empty key path") }
+    set_leaf_at(root, path, 0, value)
+}
+
+/**
+ * Marks a table value as explicitly opened by a `[header]` (guards against a duplicate identical
+ * header — see `TomlValue.t_opened`).
+ *
+ * @param t  the table to mark
+ * @return   the same table with `t_opened` set
+ */
+fn with_opened(t: TomlValue): TomlValue {
+    mk_value(t.kind, t.text, t.int_val, t.float_val, t.bool_val, t.items, t.keys, t.vals, t.t_sealed, true, t.a_of_tables)
+}
+
+/**
+ * Opens (creating if absent, else re-opening once) the FINAL segment of a `[header]` path.
+ *
+ * @param table  the table at the header path's last segment
+ * @param key    the final segment's key
+ * @return       the updated table, or `error` on a duplicate header / type conflict
+ */
+fn open_final_table(table: TomlValue, key: str): TomlValue | error {
+    var idx = find_key_index(table, key)
+    if idx < 0 { return toml_table_set(table, key, with_opened(toml_table_empty())) }
+    var val = table.vals[idx to u64]
+    if val.kind != TomlKind::Table || val.t_sealed || val.t_opened { return semantic_error(concat("duplicate or conflicting table header '", key, "'")) }
+    toml_table_set(table, key, with_opened(val))
+}
+
+/**
+ * Walks `path[i..]` from `table`, opening the final segment as a `[header]` table.
+ *
+ * @param table  the table at `path[i]`'s level
+ * @param path   the full header path
+ * @param i      the index of the segment to resolve at this level
+ * @return       the updated `table`, or `error`
+ */
+fn open_table_at(table: TomlValue, path: []str, i: u64): TomlValue | error {
+    if i == path.len - 1 { return open_final_table(table, path[i]) }
+    var d = match descend_table(table, path[i]) { DescendResult as r => r; error as e => return e }
+    var updated = match open_table_at(d.child, path, i + 1) { TomlValue as t => t; error as e => return e }
+    attach_child(table, path[i], updated, d)
+}
+
+/**
+ * Opens a `[header]` path within `root`.
+ *
+ * @param root  the document root table
+ * @param path  the header's key path (non-empty)
+ * @return      the updated root, or `error`
+ */
+fn open_table_path(root: TomlValue, path: []str): TomlValue | error {
+    if path.len == 0 { return semantic_error("empty table header") }
+    open_table_at(root, path, 0)
+}
+
+/**
+ * Opens (creating if absent, else appending a fresh table when it already is one) the FINAL
+ * segment of an `[[header]]` array-of-tables path.
+ *
+ * @param table  the table at the header path's last segment
+ * @param key    the final segment's key
+ * @return       the updated table, or `error` on a type conflict
+ */
+fn open_final_array_table(table: TomlValue, key: str): TomlValue | error {
+    var idx = find_key_index(table, key)
+    if idx < 0 {
+        var one: []TomlValue = teko::list::push(teko::list::empty(), toml_table_empty())
+        var arr = mk_value(TomlKind::Array, "", 0, 0.0, false, one, no_keys(), no_items(), false, false, true)
+        return toml_table_set(table, key, arr)
+    }
+    var val = table.vals[idx to u64]
+    if val.kind != TomlKind::Array || !val.a_of_tables { return semantic_error(concat("key '", key, "' is not an array of tables")) }
+    var grown = mk_value(val.kind, val.text, val.int_val, val.float_val, val.bool_val, teko::list::push(val.items, toml_table_empty()), val.keys, val.vals, val.t_sealed, val.t_opened, val.a_of_tables)
+    toml_table_set(table, key, grown)
+}
+
+/**
+ * Walks `path[i..]` from `table`, opening the final segment as an `[[header]]` array of tables.
+ *
+ * @param table  the table at `path[i]`'s level
+ * @param path   the full header path
+ * @param i      the index of the segment to resolve at this level
+ * @return       the updated `table`, or `error`
+ */
+fn open_array_table_at(table: TomlValue, path: []str, i: u64): TomlValue | error {
+    if i == path.len - 1 { return open_final_array_table(table, path[i]) }
+    var d = match descend_table(table, path[i]) { DescendResult as r => r; error as e => return e }
+    var updated = match open_array_table_at(d.child, path, i + 1) { TomlValue as t => t; error as e => return e }
+    attach_child(table, path[i], updated, d)
+}
+
+/**
+ * Opens an `[[header]]` array-of-tables path within `root`.
+ *
+ * @param root  the document root table
+ * @param path  the header's key path (non-empty)
+ * @return      the updated root, or `error`
+ */
+fn open_array_table_path(root: TomlValue, path: []str): TomlValue | error {
+    if path.len == 0 { return semantic_error("empty table header") }
+    open_array_table_at(root, path, 0)
+}
+
+/**
+ * Concatenates two key-path slices (the current `[header]` context followed by a line's own,
+ * possibly-dotted key).
+ *
+ * @param a  the prefix path
+ * @param b  the suffix path
+ * @return   `a` followed by `b`
+ */
+fn concat_path(a: []str, b: []str): []str {
+    var out = a
+    var i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Parses a `[table]` or `[[array-of-tables]]` header (input positioned at the opening `[`).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the opening `[`
+ * @return       the header's path, array-ness, and the offset just past its line, or `error`
+ */
+fn parse_header(input: []byte, pos: u64): HeaderStep | error {
+    var is_array = pos + 1 < input.len && input[pos + 1] == b'['
+    var at = if is_array { pos + 2 } else { pos + 1 }
+    at = skip_ws(input, at)
+    var kp = match parse_key_path(input, at) { KeyPathStep as k => k; error as e => return e }
+    at = kp.next
+    if at >= input.len || input[at] != b']' { return toml_error("expected ']'", at) }
+    at = at + 1
+    if is_array {
+        if at >= input.len || input[at] != b']' { return toml_error("expected ']]'", at) }
+        at = at + 1
+    }
+    var after = match expect_line_end(input, at) { u64 as p => p; error as e => return e }
+    HeaderStep { path = kp.keys; is_array = is_array; next = after }
+}
+
+/**
+ * Parses a `key = value` line (input positioned at the key's first byte).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the key's first byte
+ * @return       the line's key path, value, and the offset just past its line, or `error`
+ */
+fn parse_keyval(input: []byte, pos: u64): KeyValStep | error {
+    var kp = match parse_key_path(input, pos) { KeyPathStep as k => k; error as e => return e }
+    var at = kp.next
+    if at >= input.len || input[at] != b'=' { return toml_error("expected '='", at) }
+    at = skip_ws(input, at + 1)
+    var v = match parse_value(input, at) { ValStep as s => s; error as e => return e }
+    var after = match expect_line_end(input, v.next) { u64 as p => p; error as e => return e }
+    KeyValStep { path = kp.keys; value = v.value; next = after }
+}
+
+/**
+ * Parses a complete TOML v1.0.0 document into its root table.
+ *
+ * @param text  the document source text
+ * @return      the root table, or `error` on any malformed input
+ */
+exp fn parse_toml(text: str): TomlValue | error {
+    var input = bytes_of_str(text)
+    var root = toml_table_empty()
+    var cursor: []str = teko::list::empty()
+    var pos = skip_ws_nl_comments(input, 0)
+    loop {
+        if pos >= input.len { break }
+        if input[pos] == b'[' {
+            var h = match parse_header(input, pos) { HeaderStep as s => s; error as e => return e }
+            if h.is_array {
+                root = match open_array_table_path(root, h.path) { TomlValue as r => r; error as e => return e }
+            } else {
+                root = match open_table_path(root, h.path) { TomlValue as r => r; error as e => return e }
+            }
+            cursor = h.path
+            pos = skip_ws_nl_comments(input, h.next)
+            continue
+        }
+        var kv = match parse_keyval(input, pos) { KeyValStep as s => s; error as e => return e }
+        var full_path = concat_path(cursor, kv.path)
+        root = match set_leaf_path(root, full_path, kv.value) { TomlValue as r => r; error as e => return e }
+        pos = skip_ws_nl_comments(input, kv.next)
+    }
+    root
+}

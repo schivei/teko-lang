@@ -1,10 +1,19 @@
-// src/build/manifest.tks   (namespace 'teko::build')
-//
-// The `.tkp` manifest reader — the FIRST step of project-based compilation: the
-// manifest is read BEFORE any Teko is parsed (LEGISLATION: "standalone simple
-// parser"). TOML because it is explicit and *typed* (no coercion lies — M.3),
-// commentable (M.2), and minimal (M.5). This parses a MINIMAL TOML SUBSET — enough
-// for `.tkp`, not full TOML.
+use teko::encoding::toml
+
+/**
+ * `src/build/manifest.tks` (namespace `teko::build`) — the `.tkp` manifest reader, the FIRST
+ * step of project-based compilation: the manifest is read BEFORE any Teko is parsed
+ * (LEGISLATION: "standalone simple parser"). TOML because it is explicit and *typed* (no
+ * coercion lies — M.3), commentable (M.2), and minimal (M.5).
+ *
+ * `.tkp` IS FULL TOML v1.0.0 (dogfooding — no bespoke subset). `parse_manifest` parses the
+ * whole manifest text with `teko::encoding::toml::parse_toml` (the real TOML v1.0.0 decoder,
+ * `src/encoding/toml/`) and then MAPS the resulting root table into the `Manifest` struct below
+ * — same fields, same defaults, same M.1/M.3 error behavior as the hand-rolled line scanner this
+ * replaced. The hand-rolled TOML-VALUE-LEXER helpers below (`mf_read_quoted`/`mf_read_array`/
+ * `mf_read_int`/`mf_read_str_list`/…) are KEPT, not dead code: `src/build/tkr.tks`'s `.tkr`
+ * regressor-file reader reuses them verbatim for its own (non-TOML) line grammar.
+ */
 
 /**
  * The code-generation backend a build lowers through. `C` emits C and links it with the
@@ -551,165 +560,213 @@ fn artifact_from_kind(spelling: str): Artifact | error {
 }
 
 /**
+ * Reads `t`'s `key` as a string, or `default` when the key is absent or not itself a string
+ * (M.5 forward-compatible: an unexpected shape degrades to the default rather than erroring —
+ * the fields this reads are all optional).
+ *
+ * @param t        the table to read
+ * @param key      the key to read
+ * @param default  the fallback
+ * @return         the string value, or `default`
+ */
+fn mf2_str(t: toml::TomlValue, key: str, default: str): str {
+    match toml::toml_get(t, key) {
+        toml::TomlValue as v => if v.kind == toml::TomlKind::String { v.text } else { default }
+        null => default
+    }
+}
+
+/**
+ * Reads `t`'s `key` as a boolean, or `default` when the key is absent or not itself a boolean.
+ *
+ * @param t        the table to read
+ * @param key      the key to read
+ * @param default  the fallback
+ * @return         the boolean value, or `default`
+ */
+fn mf2_bool(t: toml::TomlValue, key: str, default: bool): bool {
+    match toml::toml_get(t, key) {
+        toml::TomlValue as v => if v.kind == toml::TomlKind::Boolean { v.bool_val } else { default }
+        null => default
+    }
+}
+
+/**
+ * Reads `t`'s `key` as a non-negative integer, or `default` when the key is absent, not itself
+ * an integer, or negative (the `[coverage]` floors this feeds are percentages).
+ *
+ * @param t        the table to read
+ * @param key      the key to read
+ * @param default  the fallback
+ * @return         the integer value, or `default`
+ */
+fn mf2_u64(t: toml::TomlValue, key: str, default: u64): u64 {
+    match toml::toml_get(t, key) {
+        toml::TomlValue as v => if v.kind == toml::TomlKind::Integer && v.int_val >= 0 { v.int_val to u64 } else { default }
+        null => default
+    }
+}
+
+/**
+ * Reads `t`'s `key` as a nested table, or a fresh empty table when the key is absent or not
+ * itself a table — so every section reader below can unconditionally recurse without a
+ * presence check of its own.
+ *
+ * @param t    the table to read
+ * @param key  the key to read
+ * @return     the nested table, or an empty one
+ */
+fn mf2_table(t: toml::TomlValue, key: str): toml::TomlValue {
+    match toml::toml_get(t, key) {
+        toml::TomlValue as v => if v.kind == toml::TomlKind::Table { v } else { toml::toml_table_empty() }
+        null => toml::toml_table_empty()
+    }
+}
+
+/**
+ * Flattens `v` to a `[]str`: a single string becomes a one-element list (the `regression =
+ * "solo.tkr"` ≡ `regression = ["solo.tkr"]` ergonomic shorthand `mf_read_str_list` used to
+ * provide); a string array keeps its String elements (any non-string element is silently
+ * dropped — M.5); anything else yields an empty list.
+ *
+ * @param v  the value to flatten
+ * @return   the flattened string list
+ */
+fn mf2_value_to_str_list(v: toml::TomlValue): []str {
+    if v.kind == toml::TomlKind::String { return teko::list::push(teko::list::empty(), v.text) }
+    if v.kind != toml::TomlKind::Array { return teko::list::empty() }
+    var out: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= v.items.len { break }
+        if v.items[i].kind == toml::TomlKind::String { out = teko::list::push(out, v.items[i].text) }
+        i++
+    }
+    out
+}
+
+/**
+ * Reads `t`'s `key` via `mf2_value_to_str_list`, or an empty list when the key is absent.
+ *
+ * @param t    the table to read
+ * @param key  the key to read
+ * @return     the flattened string list, or an empty one
+ */
+fn mf2_str_list(t: toml::TomlValue, key: str): []str {
+    match toml::toml_get(t, key) {
+        toml::TomlValue as v => mf2_value_to_str_list(v)
+        null => teko::list::empty()
+    }
+}
+
+/**
+ * Folds every `key = value` entry of a resolved `[extern.libs…]` table into `accum` at ONE
+ * nesting level: an `Array`-valued entry is a lib spec list (global when `!is_os`, deferred to
+ * `os` when `is_os`); a `Table`-valued entry is a per-OS `[extern.libs.<key>]` deferred SECTION,
+ * so it recurses with `is_os = true` and `key` as the new `os`. This one function replaces the
+ * old parser's `sec == "extern.libs" || sec == "extern.libs.os"` branch pair: the TOML tree
+ * already tells global and deferred entries apart by SHAPE (array vs. table), where the line
+ * scanner had to track it by hand in `sec`/`sec_os`.
+ *
+ * @param accum  the accumulators so far
+ * @param libs   the resolved `[extern.libs]` table (global entries and/or per-OS sub-tables)
+ * @param is_os  true when `libs` is itself already a deferred per-OS section
+ * @param os     the section key of a deferred entry (ignored when `!is_os`)
+ * @return       the updated accumulators
+ */
+fn mf2_fold_libs_table(accum: ExternLibsAccum, libs: toml::TomlValue, is_os: bool, os: str): ExternLibsAccum {
+    var acc = accum
+    var i: u64 = 0
+    loop {
+        if i >= libs.keys.len { break }
+        var key = libs.keys[i]
+        var val = libs.vals[i]
+        if val.kind == toml::TomlKind::Array {
+            acc = parse_extern_libs_entry(acc, key, mf2_value_to_str_list(val), is_os, os)
+        } else if val.kind == toml::TomlKind::Table {
+            acc = mf2_fold_libs_table(acc, val, true, key)
+        }
+        i++
+    }
+    acc
+}
+
+/**
  * parse_manifest — read a `.tkp` source into a `Manifest`, or fail honestly (M.3 — no silent
- * coercion), one line at a time. `sec` tracks the current table as a tag string
- * ("root"/"artifact"/"deps"/"aliases"/"coverage"/"tests"/"extern"/"extern.libs"/"other"). The
- * recognized TOML subset: top-level `key = "value"` (name/source/version/suffix/description), a
- * `[table]` header, `[artifact] kind`/`abi`, keys under `[dependencies]`/`[aliases]`, unquoted
- * integers under `[coverage]`, and `key = ["a", "b"]` arrays. A missing required field
- * (name/source), a malformed line, or an unrecognized `[artifact] kind` is an error. An absent
- * `[artifact]` section is NOT: the artifact defaults to `Artifact::Binary`.
+ * coercion): parses `src` as a full TOML v1.0.0 document (`teko::encoding::toml::parse_toml`)
+ * and maps its root table's `name`/`source`/`version`/`suffix`/`description`, `[artifact]
+ * kind`/`abi`, every key of `[dependencies]`/`[aliases]`, `[platforms] targets`, the
+ * `[coverage]` integer floors, `[tests] regression`/`targets`/`gate`, the `[extern]` scalars,
+ * and the `[extern.libs]`/`[extern.libs.<key>]` link specs into a `Manifest`. A missing required
+ * field (name/source), a malformed TOML document, or an unrecognized `[artifact] kind` is an
+ * error. An absent `[artifact]` section is NOT: the artifact defaults to `Artifact::Binary`.
  *
  * @param src  the whole `.tkp` text
  * @return     the parsed manifest, with `backend` left at its `C` default
- * @throws     when a required field is missing, a line is malformed, or a value is unrecognized
+ * @throws     when a required field is missing, the TOML is malformed, or a value is unrecognized
  */
 fn parse_manifest(src: str): Manifest | error {
+    var root = match toml::parse_toml(src) { toml::TomlValue as t => t; error as e => return e }
+
     var name = ""
-    var source = ""
-    var artifact = Artifact::Binary   // default (executable) until `[artifact] kind = "…"`
-    var abi = ""
-    var deps: []str = teko::list::empty()
-    var aliases: []str = teko::list::empty()
-    var version = ""
-    var suffix = ""
-    var description = ""   // `description = "…"` — embedded in the binary metadata (C7.1k)
-    var platforms: []str = teko::list::empty()   // [platforms] targets — the OSes this project targets
-    var cov_functions: u64 = 80   // D4 floors — default 80 when [coverage] / its keys are absent
-    var cov_lines: u64 = 80
-    var cov_branches: u64 = 80
-    var link_flags: []str = teko::list::empty()   // [extern.libs] resolved cc link flags (C7.1e)
-    var link_lib_name: []str = teko::list::empty()
-    var link_mode: []str = teko::list::empty()
-    var os_lib_os: []str = teko::list::empty()   // [extern.libs.<os>] — deferred per-OS flags, keyed by OS (C7.1f)
-    var os_lib_flag: []str = teko::list::empty()   // [extern.libs.<os>] — the resolved flag (parallel to os_lib_os)
-    var os_lib_name: []str = teko::list::empty()
-    var os_lib_mode: []str = teko::list::empty()
-    var cc = ""   // [extern] scalars (C7.1f) — cross/driver knobs
-    var target = ""
-    var sysroot = ""
-    var freestanding = false
-    var test_regression_files: []str = teko::list::empty()
-    var test_gate = true
-    var test_default_targets: []str = teko::list::push(teko::list::empty(), HOST_TARGET)
-    var sec_os = ""   // the OS of the current `[extern.libs.<os>]` section
     var have_name = false
-    var have_source = false
-    var sec = "root"
-
-    var p: u64 = 0
-    loop {
-        if p >= src.len { break }
-        // slice the current line [p, eol); leave p past the newline for the next turn.
-        var eol = p
-        loop {
-            if eol >= src.len { break }
-            if src[eol] == b'\n' { break }
-            eol = eol + 1
-        }
-        var line = teko::str::slice(src, p, eol)
-        if eol < src.len { p = eol + 1 } else { p = eol }
-
-        var i = mf_skip_spaces(line, 0)
-        var c = mf_at(line, i)
-
-        if c == 0 || c == b'#' {
-            // blank or comment line — skip
-        } else if c == b'[' {
-            // a table header `[name]`
-            var ke = mf_key_end(line, i + 1)
-            var nm = teko::str::slice(line, i + 1, ke)
-            var j = mf_skip_spaces(line, ke)
-            if mf_at(line, j) != b']' { return error { message = "malformed table header (expected ']')" } }
-            if nm == "artifact" { sec = "artifact" }
-            else if nm == "dependencies" { sec = "deps" }
-            else if nm == "aliases" { sec = "aliases" }
-            else if nm == "platforms" { sec = "platforms" }   // C7.1k: OSes this project targets (CI matrix)
-            else if nm == "coverage" { sec = "coverage" }
-            else if nm == "tests" { sec = "tests" }
-            else if nm == "extern.libs" { sec = "extern.libs" }   // C7.1e: libraries to link (all OSes)
-            else if mf_starts_with(nm, "extern.libs.") { sec = "extern.libs.os"; sec_os = teko::str::slice_from(nm, 12) }   // C7.1f: per-OS libs
-            else if nm == "extern" { sec = "extern" }   // C7.1f: cc/target/sysroot/freestanding scalars
-            else { sec = "other" }   // [extern.search] / unknown — deferred
-        } else {
-            // a `key = value` pair
-            var ke = mf_key_end(line, i)
-            if ke == i { return error { message = "malformed line (expected a key or '[table]')" } }
-            var key = teko::str::slice(line, i, ke)
-            var eq = mf_skip_spaces(line, ke)
-            if mf_at(line, eq) != b'=' { return error { message = "malformed key/value (expected '=')" } }
-            var v = mf_skip_spaces(line, eq + 1)
-
-            if sec == "root" {
-                // name / source / version / suffix are top-level quoted strings.
-                var q = match mf_read_quoted(line, v) { MfQuoted as x => x; error as e => return e }
-                if key == "name" { name = q.text; have_name = true }
-                else if key == "source" { source = q.text; have_source = true }
-                else if key == "version" { version = q.text }
-                else if key == "suffix" { suffix = q.text }
-                else if key == "description" { description = q.text }
-                // unknown top-level keys are ignored (forward-compatible — M.5).
-            } else if sec == "coverage" {
-                // [coverage] functions / lines / branches — UNQUOTED integer floors (default 80 each).
-                if key == "functions" { cov_functions = mf_read_int(line, v) }
-                else if key == "lines" { cov_lines = mf_read_int(line, v) }
-                else if key == "branches" { cov_branches = mf_read_int(line, v) }
-            } else if sec == "tests" {
-                if key == "regression" {
-                    test_regression_files = match mf_read_str_list(line, v) { []str as xs => xs; error as e => return e }
-                } else if key == "targets" {
-                    test_default_targets = match mf_read_str_list(line, v) { []str as xs => xs; error as e => return e }
-                } else if key == "gate" {
-                    test_gate = mf_at(line, v) == b't'
-                }
-            } else if sec == "artifact" {
-                if key == "kind" {
-                    var q = match mf_read_quoted(line, v) { MfQuoted as x => x; error as e => return e }
-                    artifact = match artifact_from_kind(q.text) { Artifact as a => a; error as e => return e }
-                }
-                if key == "abi" {
-                    var q = match mf_read_quoted(line, v) { MfQuoted as x => x; error as e => return e }
-                    if q.text == "c" { abi = "c" } else { abi = "" }
-                }
-            } else if sec == "deps" {
-                deps = teko::list::push(deps, key)
-            } else if sec == "aliases" {
-                aliases = teko::list::push(aliases, key)
-            } else if sec == "platforms" {
-                // [platforms] targets = ["macos", "linux", "windows"] — the OSes the project's CI builds.
-                if key == "targets" {
-                    var arr = match mf_read_array(line, v) { MfArray as a => a; error as e => return e }
-                    platforms = arr.items
-                }
-            } else if sec == "extern" {
-                // [extern] scalars (C7.1f): cc/target/sysroot are quoted strings; freestanding is a bool.
-                if key == "cc" || key == "target" || key == "sysroot" {
-                    var q = match mf_read_quoted(line, v) { MfQuoted as x => x; error as e => return e }
-                    if key == "cc" { cc = q.text } else if key == "target" { target = q.text } else { sysroot = q.text }
-                } else if key == "freestanding" {
-                    freestanding = mf_at(line, v) == b't'   // `true` → true, anything else → false
-                }
-                // `prefer` and other [extern] keys are ignored for now (static/shared mode deferred).
-            } else if sec == "extern.libs" || sec == "extern.libs.os" {
-                var arr = match mf_read_array(line, v) { MfArray as a => a; error as e => return e }
-                var accum = ExternLibsAccum { link_flags = link_flags; link_lib_name = link_lib_name; link_mode = link_mode; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; os_lib_name = os_lib_name; os_lib_mode = os_lib_mode }
-                var updated = parse_extern_libs_entry(accum, key, arr.items, sec == "extern.libs.os", sec_os)
-                link_flags = updated.link_flags
-                link_lib_name = updated.link_lib_name
-                link_mode = updated.link_mode
-                os_lib_os = updated.os_lib_os
-                os_lib_flag = updated.os_lib_flag
-                os_lib_name = updated.os_lib_name
-                os_lib_mode = updated.os_lib_mode
-            }
-            // "other" → keys ignored (M.5)
-        }
+    match toml::toml_get(root, "name") {
+        toml::TomlValue as v => { have_name = true; if v.kind == toml::TomlKind::String { name = v.text } }
+        null => { }
     }
-
+    var source = ""
+    var have_source = false
+    match toml::toml_get(root, "source") {
+        toml::TomlValue as v => { have_source = true; if v.kind == toml::TomlKind::String { source = v.text } }
+        null => { }
+    }
     if !have_name { return error { message = "manifest missing required field 'name'" } }
     if !have_source { return error { message = "manifest missing required field 'source'" } }
 
-    Manifest { name = name; artifact = artifact; abi = abi; source = source; deps = deps; aliases = aliases; version = version; suffix = suffix; description = description; platforms = platforms; cov_functions = cov_functions; cov_lines = cov_lines; cov_branches = cov_branches; link_flags = link_flags; link_lib_name = link_lib_name; link_mode = link_mode; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; os_lib_name = os_lib_name; os_lib_mode = os_lib_mode; cc = cc; target = target; sysroot = sysroot; freestanding = freestanding; test_regression_files = test_regression_files; test_gate = test_gate; test_default_targets = test_default_targets; backend = Backend::C }
+    var version = mf2_str(root, "version", "")
+    var suffix = mf2_str(root, "suffix", "")
+    var description = mf2_str(root, "description", "")
+
+    var artifact_table = mf2_table(root, "artifact")
+    var artifact = Artifact::Binary
+    match toml::toml_get(artifact_table, "kind") {
+        toml::TomlValue as v => {
+            var spelling = if v.kind == toml::TomlKind::String { v.text } else { "" }
+            artifact = match artifact_from_kind(spelling) { Artifact as a => a; error as e => return e }
+        }
+        null => { }
+    }
+    var abi_raw = mf2_str(artifact_table, "abi", "")
+    var abi = if abi_raw == "c" { "c" } else { "" }
+
+    var deps = mf2_table(root, "dependencies").keys
+    var aliases = mf2_table(root, "aliases").keys
+    var platforms = mf2_str_list(mf2_table(root, "platforms"), "targets")
+
+    var coverage_table = mf2_table(root, "coverage")
+    var cov_functions = mf2_u64(coverage_table, "functions", 80)
+    var cov_lines = mf2_u64(coverage_table, "lines", 80)
+    var cov_branches = mf2_u64(coverage_table, "branches", 80)
+
+    var tests_table = mf2_table(root, "tests")
+    var test_regression_files = mf2_str_list(tests_table, "regression")
+    var test_gate = mf2_bool(tests_table, "gate", true)
+    var test_default_targets = match toml::toml_get(tests_table, "targets") {
+        toml::TomlValue as v => mf2_value_to_str_list(v)
+        null => teko::list::push(teko::list::empty(), HOST_TARGET)
+    }
+
+    var extern_table = mf2_table(root, "extern")
+    var cc = mf2_str(extern_table, "cc", "")
+    var target = mf2_str(extern_table, "target", "")
+    var sysroot = mf2_str(extern_table, "sysroot", "")
+    var freestanding = mf2_bool(extern_table, "freestanding", false)
+
+    var libs_table = mf2_table(extern_table, "libs")
+    var empty_accum = ExternLibsAccum { link_flags = teko::list::empty(); link_lib_name = teko::list::empty(); link_mode = teko::list::empty(); os_lib_os = teko::list::empty(); os_lib_flag = teko::list::empty(); os_lib_name = teko::list::empty(); os_lib_mode = teko::list::empty() }
+    var libs_accum = mf2_fold_libs_table(empty_accum, libs_table, false, "")
+
+    Manifest { name = name; artifact = artifact; abi = abi; source = source; deps = deps; aliases = aliases; version = version; suffix = suffix; description = description; platforms = platforms; cov_functions = cov_functions; cov_lines = cov_lines; cov_branches = cov_branches; link_flags = libs_accum.link_flags; link_lib_name = libs_accum.link_lib_name; link_mode = libs_accum.link_mode; os_lib_os = libs_accum.os_lib_os; os_lib_flag = libs_accum.os_lib_flag; os_lib_name = libs_accum.os_lib_name; os_lib_mode = libs_accum.os_lib_mode; cc = cc; target = target; sysroot = sysroot; freestanding = freestanding; test_regression_files = test_regression_files; test_gate = test_gate; test_default_targets = test_default_targets; backend = Backend::C }
 }
 
 /**
