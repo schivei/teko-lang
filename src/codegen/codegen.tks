@@ -4549,7 +4549,161 @@ fn cg_bound_is_str(t: @Type()): bool {
     match t { checker::Str => true; _ => false }
 }
 
+/**
+ * svc_scope_expr — THE §7 PART-A BACKEND SEAM: the C expression naming the arena region a service of
+ * `lifetime` is materialized into and cached under. The direct analogue of `emit_ptr_wrap_guard` (§5):
+ * Part A fills it with the simplest thing that is CORRECT, and Doc 1 §8 replaces the body — two lines,
+ * no change to this signature, to the typer, to any type, or to any fixture.
+ *
+ * PART A (here, now):
+ *   * `Singleton` — `tk_region_root()`, the task's root region: one materialization for the whole run,
+ *     which is exactly what "singleton" means at this phase.
+ *   * `Scoped`    — the enclosing frame/block region (`cg_enclosing_region_expr`), so the instance dies
+ *     with the scope that claimed it.
+ *   * `Transient` — `""`, the empty expression, meaning NO SLOT: every claim builds fresh, so there is
+ *     nothing to look up and nothing to register.
+ *
+ * DOC 1 §8 (Part B, deliberately NOT done here): `Singleton` becomes the THREAD's root slot and
+ * `Scoped` a THREAD sub-root. That is the per-thread arena binding, and it is the ONLY thing this
+ * function hides from the rest of the backend — `svc_type_id` (the slot tag) and every caller stay
+ * untouched across that swap.
+ *
+ * @param lifetime  the service's declared lifetime
+ * @param regions   the active block/frame region stack (the `Scoped` answer reads its innermost entry)
+ * @return          the C expression of the caching region, or `""` when the lifetime caches nothing
+ * @since §7 Part A
+ */
+/**
+ * emit_svc_slot_call — emit a caching service materialization: look the instance up in `scope` under
+ * the service's deterministic slot tag (`svc_type_id`), and call the `ctor()` factory ONLY on a miss,
+ * registering the result so the next claim finds it (§7 Part A).
+ *
+ * A service is a sealed CLASS, so its value is already a pointer in this backend — the same width the
+ * arena registry stores — which is why the slot needs no boxing and the hit path is a plain cast.
+ * Registration is always into the region `scope` names; `tk_region_lookup` is the half that walks UP
+ * the parent chain, so a `Scoped` claim still finds an ancestor's instance when one exists.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing return type, threaded into the factory call
+ * @param e         the call's typed expression node (carries the service type)
+ * @param c         the `ctor()` call to guard
+ * @param scope     the region C expression from `svc_scope_expr` (never empty here)
+ * @param escaping  the frame's escaping-name set
+ * @param regions   the active region stack
+ * @param fn_body   the enclosing function body
+ * @param dctx      the defer/coverage context
+ * @return          the buffer with the slot-guarded materialization appended
+ * @throws          when the service type or the factory call fails to emit
+ * @since §7 Part A
+ */
+fn emit_svc_slot_call(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, scope: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var sname = match e.type { checker::Named as nm => nm.name; _ => return error { message = "codegen: a service ctor call must have a named type (§7)" } }
+    var id = checker::svc_type_id(sname)
+    var rN = fresh_named("_svcr", buf.len to i64)
+    var hN = fresh_named("_svch", buf.len to i64)
+    var out = cb(buf, "({ tk_region *")
+    out = cb(out, rN)
+    out = cb(out, " = ")
+    out = cb(out, scope)
+    out = cb(out, "; void *")
+    out = cb(out, hN)
+    out = cb(out, " = tk_region_lookup(")
+    out = cb(out, rN)
+    out = cb(out, ", ")
+    out = cb_str(out, teko::u64_to_str(id))
+    out = cb(out, "ULL); ")
+    out = cb(out, hN)
+    out = cb(out, " ? (")
+    out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
+    out = cb(out, ")")
+    out = cb(out, hN)
+    out = cb(out, " : ({ ")
+    out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
+    var vN = fresh_named("_svcv", buf.len to i64)
+    out = cb(out, " ")
+    out = cb(out, vN)
+    out = cb(out, " = ")
+    out = match emit_call_inner(out, prog, ret_type, e, c, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "; tk_region_register(")
+    out = cb(out, rN)
+    out = cb(out, ", ")
+    out = cb_str(out, teko::u64_to_str(id))
+    out = cb(out, "ULL, (void *)")
+    out = cb(out, vN)
+    out = cb(out, "); ")
+    out = cb(out, vN)
+    cb(out, "; }); })")
+}
+
+fn svc_scope_expr(lifetime: parser::ServiceLifetime, regions: []RegionFrame): str {
+    match lifetime {
+        parser::ServiceLifetime::Singleton => "tk_region_root()"
+        parser::ServiceLifetime::Scoped => cg_enclosing_region_expr(regions)
+        parser::ServiceLifetime::Transient => ""
+    }
+}
+
+/**
+ * cg_service_ctor_lifetime — the lifetime of the service whose `ctor()` factory this call targets, or
+ * `null` when the call is not a service materialization (§7).
+ *
+ * A service's `ctor()` is the IService contract factory and the SOLE way an instance comes into being
+ * (`svc<T>()` inlines to exactly this call, `svc_ctor_texpr`), so recognising it here is what lets the
+ * lifetime — a property of the DECLARATION — reach the emission without threading a new field through
+ * the typed AST and the `.tkb` wire.
+ *
+ * @param prog  the typed program (decl lookup)
+ * @param c     the call under emission
+ * @return      the target service's lifetime, or `null`
+ * @since §7 Part A
+ */
+fn cg_service_ctor_lifetime(prog: CgProg, c: checker::TCall): parser::ServiceLifetime | null {
+    if c.args.len != 0 { return null }
+    var segs = c.callee.segments
+    if segs.len < 2 { return null }
+    if !teko::runtime::str_eq(segs[segs.len - 1].name, "ctor") { return null }
+    var owner = segs[segs.len - 2].name
+    match cg_find_decl(prog, owner) {
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => if cb.is_service { cb.service_lifetime } else { null }
+            _ => null
+        }
+        error => null
+    }
+}
+
+/**
+ * emit_call — a call in expression position. The §7 gate runs FIRST: a SERVICE materialization routes
+ * through the lifetime's arena slot (look the instance up in the region `svc_scope_expr` names, build
+ * and register only on a miss), because a `Singleton`/`Scoped` claim must reuse the cached instance
+ * rather than construct a second one. A `Transient` service names no region and falls straight through
+ * to the ordinary emission, building fresh — which is what transient means.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing return type
+ * @param e         the call's typed expression node
+ * @param c         the call node
+ * @param escaping  the frame's escaping-name set
+ * @param regions   the active region stack
+ * @param fn_body   the enclosing function body
+ * @param dctx      the defer/coverage context
+ * @return          the buffer with the call appended
+ * @throws          when the call fails to emit
+ */
 fn emit_call(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    match cg_service_ctor_lifetime(prog, c) {
+        parser::ServiceLifetime as lt => {
+            var scope = svc_scope_expr(lt, regions)
+            if scope.len > 0 { return emit_svc_slot_call(buf, prog, ret_type, e, c, scope, escaping, regions, fn_body, dctx) }
+        }
+        null => { }
+    }
+    emit_call_inner(buf, prog, ret_type, e, c, escaping, regions, fn_body, dctx)
+}
+
+fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     // (W10b.D3) a DYNAMIC contract-method call dispatches through the receiver's vtable —
     // FIRST, before any builtin name-sniffing below could collide with a method name.
     if c.is_iface_dispatch { return emit_iface_call(buf, prog, ret_type, c, escaping, regions, fn_body, dctx) }
