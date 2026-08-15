@@ -1173,16 +1173,25 @@ dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** p
 
 **Ordem de drive monomórfico (revisada):** núcleo crypto ✅ → `sort` mono ✅ → `encoding` — a lista COMPLETA
 do §1.5: **texto** (json✅ · xml✅+C14N · csv · toml · ini · yaml), **binário** (cbor · msgpack · **bson** ·
-protobuf · asn1), `fixed` (colunas fixas), **web** (base64✅ · url✅ · mime✅) → `math` (bigint) → `crypto::pk` →
-`crypto::jose`+`xmldsig`+`cose` (assinatura de documento) → `compress` (completar) → `password`. (BSON
+protobuf · asn1), `fixed` (colunas fixas), **web** (base64✅ · url✅ · mime✅) → `math`/`numeric::bigint` ✅ →
+`crypto::pk` (PRÓXIMO) → `crypto::jose`+`xmldsig`+`cose` (assinatura de documento) → `compress` (completar) → `password`. (BSON
 pareia com `db::mongodb`.) Costuras que ficam FFI/pesquisa: `rand` (getrandom FFI), `3des` legacy,
 `openssl`/`gpg` (providers FFI).
 
 **Entregues stdlib (2026-08-15):** crypto core ✅ (`hash`/`mac`/`kdf`/`cipher`/`aead`) · `sort` mono ✅
 (`813f83b7`) · `encoding::base64`/`url`/`mime` ✅ (`a1cbeb8e`) · `encoding::xml`+C14N ✅ (`4c636a7e`) ·
-`encoding::cbor`/`msgpack`/`bson` ✅ (`c052fa9f`, bson byte-exato vs pymongo). **Encoding p/ assinatura
-COMPLETO** (base64+xml+cbor) → **pivot pro caminho de assinatura:** `math` (bigint, RODANDO) → `crypto::pk`
-→ `jose`/`xmldsig`/`cose`. Encoding restante (csv/toml/ini/yaml/protobuf/asn1/fixed) fica pra depois.
+`encoding::cbor`/`msgpack`/`bson` ✅ (`c052fa9f`, bson byte-exato vs pymongo) · **`bigint` ops crypto ✅**
+(`18dc3345` — DivMod/gcd/shl/shr/bit_len, **`mod_pow`** square-and-multiply, **`mod_inverse`** Euclides
+estendido, I2OSP/OS2IP `from_bytes_be`/`to_bytes_be`, from/to_hex, from/to_dec_str; RSA-ready, cross-check vs
+Python int nativo+C exit 0). **Encoding p/ assinatura COMPLETO** (base64+xml+cbor) + **`bigint` pronto** →
+**pivot pro caminho de assinatura:** `crypto::pk` → `jose`/`xmldsig`/`cose`. Encoding restante
+(csv/toml/ini/yaml/protobuf/asn1/fixed) fica pra depois.
+**⚠️ FORK DE NAMESPACE (decisão do dono):** §1.5 do catálogo diz `teko::math::bigint`, mas o **engine já
+existe** como `teko::numeric::bigint` (lastreia `dec`, literais `123bi`, e `teko::math::checked` já aponta
+callers >64-bit pra ele). O subagente **estendeu o engine existente** (regra "estenda não duplique"), NÃO
+criou `math::bigint`. `crypto::pk` (interno) pode `use teko::numeric::bigint` já. **Recomendação:** adotar
+`numeric::bigint` como canônico e corrigir §1.5 do catálogo (evita duplicação de engine bignum). Alternativa:
+alias `math::bigint`→`numeric::bigint` quando conveniente. Aguarda ruling do dono de §1.5.
 Costuras: `encoding::csv` `type CsvRow` visibility bug (lane csv); `pub→exp` dos módulos antigos DEFERIDO ao
 §11; cbor float shortest-form + bson decimal128-arith são follow-on. **Dica validável:** value-trees
 **struct-tagged** (não inline-union) deixam o seed velho RODAR os vetores → prova comportamental real.
