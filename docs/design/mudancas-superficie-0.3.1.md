@@ -1151,10 +1151,15 @@ mecanismo-limpo estão entregues. Os 4 restantes NÃO têm deps resolvidas sem u
 - **§17 `#if`/`#os`/`#arch`** — `#os` já existe; falta `#arch`/`#if`; também gated no §11 (plano §12).
 - **§10 concorrência** — porção Doc-2 gated na costura de arena do §7-B (Doc 1) + Ctx.
 
-**Fork ao dono (sequenciamento da cauda):** (A) lançar a **frente stdlib** (destrava §11 → §16/§17); (B)
-fazer o **mecanismo do §11** agora, separando-o da aplicação deferida (reordena a regra "exp/pub por
-último"); (C) considerar a lista Doc-2 no seu fim-limpo e passar ao **Doc 1 / stdlib** para a análise do
-dono. A pipeline autônoma PAROU aqui — não lanço a stdlib nem reordeno §11 sem o martelo.
+**DECISÃO DO DONO (2026-08-15): (A) — expandir a stdlib.** Escopo = a árvore autoritativa §1.5 de
+`plano-stdlib-catalogo-expansao.md` (8+ áreas). Dirijo TODA a fatia **monomórfica** (puro-Teko, sem
+keystone/#254/FFI), SERIAL (src/ reseeda), autônomo via subagentes, nesta ordem:
+`crypto` (hash→mac→kdf→cipher→aead, tudo sobre `[]byte`, vetores NIST/RFC) → `sort` `<mono>` → `encoding`
+(json✅·xml·csv·toml·ini·yaml·cbor·msgpack·bson·protobuf·asn1·fixed·base64/url/mime) → `compress` (completar
+zip; brotli/lzma/zstd; #embed→VFS) → `math` (bigint·checked). Cada lane povoa o `exp`/`pub` forward-compatible.
+**Metade GATED (não entra agora, costura nomeada):** genéricos (`sort<T:Ord>`/`collections`) → 9-ops(✅)+#254;
+`crypto::rand`/`openssl`/`gpg` · todo `net` · `db`(FFI+wire-socket) · `odbc` · `rpc` → KEYSTONE-BUF+§16(Doc-1);
+`ui` → P4. Lane 1 (`crypto::hash`) DESPACHADO.
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
