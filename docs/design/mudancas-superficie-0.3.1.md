@@ -1131,7 +1131,7 @@ minimiza esse retrabalho (a superfície já nasce triada).
 | **§13 item-14 fat-header** | §10 (Intent/Ctx) | 1 | ✅ (§1,§4.1) | ✅ **ENTREGUE** (2026-08-15) — fat header `tk_struct_hdr` (crumb 5) + layout FAT (6a) + receiver-as-ref/`self` gruda (6b) + fixtures A1-A4 + reseed; drenado por ff em `fix/retirement` `6f4d78ba`; sweep 32/32 verde |
 | §7 DI service/svc | §10 | 1 | ✅ | ✅ **Part A ENTREGUE** (2026-08-15, `0a246dfe`) — kind `service`+`ServiceLifetime`, `svc`/`has_svc` comp-time, gate `IService`, conserto da crash `svc<iface>`, DI-anotação aposentada, **costura `svc_scope_expr(lifetime, regions)` congelada** (program-root); fixture `service_svc` 11/11 parity, fixpoint inert, lanes verdes. **Part B (binding arena por-thread) = costura deixada p/ Doc 1 §8.** |
 | **§14 Família B (comptime)** | — | 0 | ✅ | ✅ **ENTREGUE** (engine B2–B5 já aterrissada `da82d0bd`/`583707d7`/`3b8d9b0c`/`f3768297`/`a0586372`; fixtures `comptime_expand`/`reflect`/`fields`; fixpoint tri-gen byte-id). **Açúcar de alcance `exp global comptime sizeof/typename/fields` pende §15 `global`.** |
-| **§15 global** | (§14 sugar, §11) | — | ✅ (mecanismo) | 🔄 ausente no lexer/parser · **← TOPO** |
+| **§15 global** | (§14 sugar, §11) | — | ✅ | ✅ **Mecanismo ENTREGUE** (2026-08-15, `21bbe7ae`) — `global` no lexer/parser/AST (`is_global`), resolução sem-namespace (bare), colisão de assinatura/tipo, composição `exp global comptime` (destrava açúcar §14); byte-idêntico (fixpoint tri-gen), fixtures `global_access`(39)/`global_reject`(4). **Migração shadow→global por-símbolo = costura gated na stdlib.** |
 | §11 visibilidade `exp`/`pub` | §16, §17 | 2 | ⏳ (stdlib) | ⏳ ordem: PENÚLTIMA |
 | §10 concorrência | — | 0 | ❌ | ⏳ design-only (sink) |
 | §16 FFI libc-direct | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
@@ -1143,16 +1143,21 @@ arena (**§7 Parte B**, **§10**), "finalizar" = fazer a porção Doc 2 + deixar
 (`svc_scope_expr` etc.) como o ponto exato de encaixe do Doc 1 §8. Só quando TODAS as porções Doc-2
 estiverem feitas é que o Doc 1 entra (o dono analisa antes).
 
-**Topo atual (mais-dependido com deps resolvidas):** **§15 `global`** — o engine do §14 (comptime B2–B5)
-já estava aterrissado (subagente verificou; fixpoint tri-gen byte-id). §15 é o MECANISMO do modificador
-`global` (byte-idêntico: aceita `global`, mantém a injeção; a migração shadow→global por-símbolo é fase
-posterior gated na stdlib) — e destrava o açúcar `exp global comptime sizeof/typename/fields` do §14.
-Ordem de moagem restante: **§15 (global, mecanismo) → frente stdlib (destrava §11) → §11 `exp`/`pub` →
-§16/§17 → §10 (porção Doc 2)**. Cada item vai até a completude Doc-2; as costuras (arena §7-B/§10, migração
-por-símbolo §15) ficam nomeadas para depois — o Doc 1 vem INTEIRO só quando esta lista fechar.
+**CAUDA ENTANGLED — sem próximo mecanismo limpo (2026-08-15, aguarda decisão do dono).** Os 6 itens de
+mecanismo-limpo estão entregues. Os 4 restantes NÃO têm deps resolvidas sem uma decisão de sequenciamento:
+- **§11 `exp`/`pub`** — deferido-por-último pelo dono (alto churn); depende da **expansão da stdlib**.
+- **§16 libc-direct** — plano §12: *"Nothing here lands before §11"* + **lock duro** *"nothing lands until
+  teko is 100% native AND the native gate is green"* (backlog nativo `.32`/#594 = Doc-1/backend).
+- **§17 `#if`/`#os`/`#arch`** — `#os` já existe; falta `#arch`/`#if`; também gated no §11 (plano §12).
+- **§10 concorrência** — porção Doc-2 gated na costura de arena do §7-B (Doc 1) + Ctx.
 
-**Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, **§14 Família B ✅**. Restam 5
-itens (§15, §11, §16, §17, §10) + a frente stdlib.
+**Fork ao dono (sequenciamento da cauda):** (A) lançar a **frente stdlib** (destrava §11 → §16/§17); (B)
+fazer o **mecanismo do §11** agora, separando-o da aplicação deferida (reordena a regra "exp/pub por
+último"); (C) considerar a lista Doc-2 no seu fim-limpo e passar ao **Doc 1 / stdlib** para a análise do
+dono. A pipeline autônoma PAROU aqui — não lanço a stdlib nem reordeno §11 sem o martelo.
+
+**Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
+(6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
 
 ---
 
