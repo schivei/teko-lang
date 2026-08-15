@@ -1,0 +1,138 @@
+/**
+ * Tests for `teko::encoding::url` — RFC 3986 percent-encoding (component and path variants) plus
+ * `application/x-www-form-urlencoded` pair encode/decode. Covers reserved-character correctness
+ * (a component escapes `/`, a path leaves it literal), round-trips, and malformed-input error
+ * cases (M.1 fail-loud via `error`, never a panic). This file lives under `teko::encoding::url`
+ * (namespace = directory), so the functions under test are called bare, mirroring
+ * `teko::encoding::base64::base64_test.tkt`'s convention.
+ */
+
+/**
+ * Unwraps a `str | error` decode result — a failure in a "should succeed" test is itself a test
+ * failure (mirrors `teko::encoding::base64::base64_test.tkt`'s `expect_ok` shape).
+ *
+ * @param result  the decode outcome under test
+ * @return        the decoded text on success, or `""` (after failing the assertion) on error
+ */
+fn expect_ok(result: str | error): str {
+    match result {
+        str as s => s
+        error => { teko::assert::is_true(false); "" }
+    }
+}
+
+/**
+ * Asserts that `result` is an `error` (a "should fail" decode case).
+ *
+ * @param result  the decode outcome under test
+ */
+fn expect_error(result: str | error) {
+    match result {
+        str => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+#test
+fn percent_encode_escapes_reserved_component_characters() {
+    teko::assert::eq_str(percent_encode("a b/c?d#e&f=g%h"), "a%20b%2Fc%3Fd%23e%26f%3Dg%25h")
+}
+
+#test
+fn percent_encode_leaves_unreserved_characters_bare() {
+    teko::assert::eq_str(percent_encode("Az09-_.~"), "Az09-_.~")
+}
+
+#test
+fn percent_encode_decode_round_trips_over_reserved_and_unicode_text() {
+    var cases = ["", "hello world", "a/b?c=d&e#f", "café 😀", "100%"]
+    var i: u64 = 0
+    loop {
+        if i >= cases.len { break }
+        var encoded = percent_encode(cases[i])
+        var decoded = expect_ok(percent_decode(encoded))
+        teko::assert::eq_str(decoded, cases[i])
+        i++
+    }
+}
+
+#test
+fn percent_decode_rejects_truncated_escape() {
+    expect_error(percent_decode("abc%2"))
+}
+
+#test
+fn percent_decode_rejects_invalid_hex_digit() {
+    expect_error(percent_decode("abc%zz"))
+}
+
+#test
+fn encode_path_leaves_slash_and_sub_delims_bare() {
+    teko::assert::eq_str(encode_path("/users/jane doe/profile?x"), "/users/jane%20doe/profile%3Fx")
+    teko::assert::eq_str(encode_path("a:b@c,d;e=f"), "a:b@c,d;e=f")
+}
+
+#test
+fn encode_path_still_escapes_space_and_query_delimiters() {
+    teko::assert::eq_str(encode_path("a b"), "a%20b")
+    teko::assert::eq_str(encode_path("a#b"), "a%23b")
+}
+
+#test
+fn decode_path_round_trips_encode_path() {
+    var original = "/a b/c:d@e,f;g=h?i#j"
+    var decoded = expect_ok(decode_path(encode_path(original)))
+    teko::assert::eq_str(decoded, original)
+}
+
+#test
+fn encode_form_component_uses_plus_for_space() {
+    teko::assert::eq_str(encode_form_component("a b+c"), "a+b%2Bc")
+}
+
+#test
+fn decode_form_component_accepts_plus_and_percent20_as_space() {
+    teko::assert::eq_str(expect_ok(decode_form_component("a+b")), "a b")
+    teko::assert::eq_str(expect_ok(decode_form_component("a%20b")), "a b")
+}
+
+#test
+fn parse_form_decodes_ampersand_separated_pairs_in_order() {
+    var fields = match parse_form("name=Jane+Doe&city=S%C3%A3o+Paulo&empty") {
+        []FormField as fs => fs
+        error => { teko::assert::is_true(false); teko::list::empty() }
+    }
+    teko::assert::len_eq(fields.len, 3)
+    teko::assert::eq_str(fields[0].key, "name")
+    teko::assert::eq_str(fields[0].value, "Jane Doe")
+    teko::assert::eq_str(fields[1].key, "city")
+    teko::assert::eq_str(fields[1].value, "São Paulo")
+    teko::assert::eq_str(fields[2].key, "empty")
+    teko::assert::eq_str(fields[2].value, "")
+}
+
+#test
+fn encode_form_and_parse_form_round_trip() {
+    var fields: []FormField = teko::list::empty()
+    fields = teko::list::push(fields, FormField { key = "q"; value = "a b&c" })
+    fields = teko::list::push(fields, FormField { key = "page"; value = "2" })
+    var body = encode_form(fields)
+    var parsed = match parse_form(body) {
+        []FormField as fs => fs
+        error => { teko::assert::is_true(false); teko::list::empty() }
+    }
+    teko::assert::len_eq(parsed.len, 2)
+    teko::assert::eq_str(parsed[0].key, "q")
+    teko::assert::eq_str(parsed[0].value, "a b&c")
+    teko::assert::eq_str(parsed[1].key, "page")
+    teko::assert::eq_str(parsed[1].value, "2")
+}
+
+#test
+fn parse_form_of_empty_body_yields_no_fields() {
+    var fields = match parse_form("") {
+        []FormField as fs => fs
+        error => { teko::assert::is_true(false); teko::list::empty() }
+    }
+    teko::assert::len_eq(fields.len, 0)
+}
