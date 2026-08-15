@@ -34,7 +34,7 @@ from-scratch design when its time comes, not as a patch on the removed code.)
 | **Register allocation** | `regalloc.tks`, `regalloc_x86.tks` | Linear-scan allocation over LIR virtual registers, shared machinery across architectures |
 | **ABI lowering** | `abi_sysv64.tks`, `abi_win64.tks`, `abi_aapcs64.tks` | Per-target calling-convention detail: argument classification (registers vs. stack slots), the SysV/Win64 register-count difference, the AAPCS64 Apple variant |
 | **Encoding** | `encode_x86_64.tks` (+`_consts.tks`), `encode_arm64.tks` (+`_consts.tks`) | Concrete instruction → machine bytes + relocations. arm64 is fixed-width (4 bytes/instruction, table-driven); x86_64 is variable-width (REX/ModRM/SIB prefixes) |
-| **Machine-instruction interpreter** | `minst.tks`, `minst_interp.tks`, `minst_x86.tks` | An oracle that interprets the encoded machine-instruction stream directly, letting the test suite assert emitted bytes execute the intended semantics without booting a real CPU/OS process for every check |
+| **Machine instructions** | `minst.tks`, `minst_x86.tks` | The per-architecture machine-instruction representation isel emits and encoding consumes |
 | **Object writers** | `objfile_elf.tks`, `objfile_macho.tks`, `objfile_coff.tks` | Bytes + symbol table + relocations → the target's native object-file format |
 | **Archive writers** | `objfile_ar.tks`, `objfile_ar_macho.tks`, `objfile_ar_coff.tks` | Static-library (`.a`/`.lib`) archive containers per platform, for the `static` artifact kind |
 | **Debug info** | `dwarf.tks` | DWARF line/info/abbrev emission — see `debugger.md` |
@@ -75,18 +75,15 @@ the interim.
 
 ## Verification
 
-Every native-backend claim is checked against **two independent oracles**, not against itself:
-
-1. **The LIR interpreter** (`src/lir/lir_interp.tks`) — evaluates the same LIR the backend
-   compiles, directly, as a backend-independent semantic reference.
-2. **The transpile-to-C path** — the same TAST, lowered to C and compiled by the host `cc`,
-   run and compared byte-for-byte / exit-code-for-exit-code against the native object's
-   behavior on the same inputs.
+Every native-backend claim is checked against an independent oracle, not against itself:
+**the transpile-to-C path** — the same TAST, lowered to C and compiled by the host `cc`,
+run and compared byte-for-byte / exit-code-for-exit-code against the native object's
+behavior on the same inputs.
 
 A native-backend regression is therefore always distinguishable from a front-end regression:
-if the C path and the LIR interpreter agree with each other but disagree with the native
-object, the bug is in encoding/selection/register-allocation, not in the checker or the
-lowering that feeds both paths.
+if the C path disagrees with the native object on a program both were built from, the bug is
+in encoding/selection/register-allocation, not in the checker or the lowering that feeds both
+paths.
 
 ## Debug information
 

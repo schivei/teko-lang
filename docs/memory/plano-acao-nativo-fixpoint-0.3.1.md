@@ -51,16 +51,16 @@ reprodução de build permitida **dentro de agente** (nunca no loop principal).
   sobre a casca/render CANÔNICA; rejeitar duplicatas; NÃO re-fiar `project.tks` (RunSummary idêntico);
   os 2 testes net-novos vão pro `journal_test.tkt` (não criar `summary_test.tkt`). `journal-impl`
   fica ABANDONADA (sem drain).
-- **B2. Remover REPL + remanescente do interpretador** (mantendo **teko doc** e **teko lint**, que apoiam o LSP):
+- **B2. Remover REPL + remanescente do motor legado** (mantendo **teko doc** e **teko lint**, que apoiam o LSP):
   refazer a reconstrução linear EXCLUINDO os commits do REPL (`devtools-repl`: `repl.tks`,
   `repl_cli_test.sh`, a fiação `teko::repl::run_cli` em `main.tks`, entradas de help do REPL) e
-  qualquer código remanescente do interpretador. NÃO por revert à mão — pelo redo do dreno na ordem certa.
+  qualquer código remanescente do motor legado. NÃO por revert à mão — pelo redo do dreno na ordem certa.
 - **B3.** Após B2, a `fix/union` linear deve compilar a rota C sem o `c == c'X'` (o bug do REPL some
   com a remoção). Reconfirmar via theory.
 
 ## Frente C — higiene do vagão / PR
 
-- **C1.** `fix/union` linear, sem REPL/interpretador, com journal reconciliado e o fix nativo → PR #107
+- **C1.** `fix/union` linear, sem REPL/motor legado, com journal reconciliado e o fix nativo → PR #107
   (`fix/union → remodel`) verde. Coleta do seed pós-fixpoint via CI, com PROVENANCE.
 - **C2.** Drenos já consolidados (keystone, fat-field, native-diag, tests-native-no-c, docs/tooling):
   verificar que seguem íntegros após B2.
@@ -81,8 +81,8 @@ reprodução de build permitida **dentro de agente** (nunca no loop principal).
 
 1. **A (nativo)** é a meta da noite — prioridade máxima. Agente reproduz + diagnostica + corrige o
    `collect_stmt_insts`, prova gen2→gen3, corrige a theory pra `setarch -R`, coleta via CI.
-2. **B (journal + REPL/interpretador)** em paralelo — agente aplica a solução do journal e refaz o dreno sem
-   REPL/interpretador.
+2. **B (journal + REPL/motor legado)** em paralelo — agente aplica a solução do journal e refaz o dreno sem
+   REPL/motor legado.
 3. **C/D** ao fechar A/B. **E** diferido.
 
 ## Invariantes (leis do dono)
@@ -90,5 +90,5 @@ reprodução de build permitida **dentro de agente** (nunca no loop principal).
 - Coleta de seed SEMPRE via CI (nunca seed privado local não rastreado — foi o que quebrou antes).
 - Reprodução de build só DENTRO de agente, com `setarch -R` pra determinismo.
 - História do vagão LINEAR (sem merges); drenos por precedência de data.
-- REPL e remanescente do interpretador FORA; teko doc e teko lint FICAM.
+- REPL e remanescente do motor legado FORA; teko doc e teko lint FICAM.
 - Nada de enquete no loop principal; reportar avanços, não cada iteração.

@@ -7,7 +7,7 @@ an orientation to the same discipline for someone reading the canonical architec
 
 1. **Native is the sole engine.** The compiler's canonical source is Teko
    (`src/**/*.tks`); the only C in the tree is `teko_rt`/`assert` (the FFI seam) — see
-   `ffi-and-runtime.md`. There is no interpreter, no C bootstrap left as a production
+   `ffi-and-runtime.md`. There is no C bootstrap left as a production
    path; CI seeds every build from the latest released `teko` binary and climbs the rung
    ladder only when a genuine capability gap demands it (`self-host-fixpoint.md`).
 2. **The native gate is mandatory.** Every change passes `teko test .` with coverage enforced,
