@@ -15899,7 +15899,7 @@ fn collect_struct_layout_item(acc: []LStructLayout, it: @TItem(), table: checker
  */
 fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable, enums: []LEnumInfo, dtable: checker::TypeTable): []LStructLayout | error {
     match td.body {
-        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums, table, dtable))
+        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums, table, dtable, true))
         parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table, enums, dtable)
         _ => acc
     }
@@ -15923,7 +15923,7 @@ fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, tab
         []parser::Field as fs => fs
         error as e => return e
     }
-    teko::list::push(acc, layout_of_fields(name, fields, acc, enums, table, dtable))
+    teko::list::push(acc, layout_of_fields(name, fields, acc, enums, table, dtable, false))
 }
 
 /**
@@ -15997,12 +15997,21 @@ fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeT
  *               construction (0.3.1.0 raiz A — fat-field layout unification)
  * @return LStructLayout  the resolved size/align/per-field offsets
  */
-fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable): LStructLayout {
+fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable, with_hdr: bool): LStructLayout {
     var ns = checker::name_qualifier(name)
     var field_names: []str = teko::list::empty()
     var field_types: []LType = teko::list::empty()
     var field_sizes: []u32 = teko::list::empty()
     var field_aligns: []u32 = teko::list::empty()
+    /* (item-14 §13.2) a value-struct is FAT: seed the layout with the header's self-pointer word so
+       every declared field shifts by exactly one word, matching the C emitter's `tk_struct_hdr __hdr`
+       FIRST member. `with_hdr` is false for a CLASS, which already owns an arena and so needs none. */
+    if with_hdr {
+        field_names = teko::list::push(field_names, struct_hdr_field_name())
+        field_types = teko::list::push(field_types, LType::Ptr)
+        field_sizes = teko::list::push(field_sizes, ltype_size(LType::Ptr))
+        field_aligns = teko::list::push(field_aligns, ltype_align(LType::Ptr))
+    }
     var i: u64 = 0
     loop {
         if i >= fields.len { break }
