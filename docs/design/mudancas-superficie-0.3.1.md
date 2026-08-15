@@ -1183,9 +1183,15 @@ pareia com `db::mongodb`.) Costuras que ficam FFI/pesquisa: `rand` (getrandom FF
 `encoding::cbor`/`msgpack`/`bson` ✅ (`c052fa9f`, bson byte-exato vs pymongo) · **`bigint` ops crypto ✅**
 (`18dc3345` — DivMod/gcd/shl/shr/bit_len, **`mod_pow`** square-and-multiply, **`mod_inverse`** Euclides
 estendido, I2OSP/OS2IP `from_bytes_be`/`to_bytes_be`, from/to_hex, from/to_dec_str; RSA-ready, cross-check vs
-Python int nativo+C exit 0). **Encoding p/ assinatura COMPLETO** (base64+xml+cbor) + **`bigint` pronto** →
-**pivot pro caminho de assinatura:** `crypto::pk` → `jose`/`xmldsig`/`cose`. Encoding restante
-(csv/toml/ini/yaml/protobuf/asn1/fixed) fica pra depois.
+Python int nativo+C exit 0). **Encoding p/ assinatura COMPLETO** (base64+xml+cbor) + **`bigint` pronto** + **`crypto::pk` RSA ✅**
+(`383271e0` — `rsa.tks`: PKCS#1-v1.5 + PSS sign/verify sobre bigint, SHA-256/384/512; keys por componentes
+brutos n/e/d, sem ASN.1; non-CRT YAGNI. Cross-check byte-exato vs Python `cryptography` 41: PKCS1v1.5 assina
+idêntico, PSS aceito pelo verifier OpenSSL. Lane fechou gap: adicionou **SHA-384** a `hash.tks` — faltava).
+Desbloqueia **RS256/384/512 + PS256/384/512** (JOSE) · `rsa-sha256` (XML-DSig) · RSA COSE. **Falta pk parte 2:**
+ECDSA-P256 + Ed25519 (aritmética de curva) → aí `jose`/`xmldsig`/`cose` fecham o conjunto de algs comum de uma
+vez. Encoding restante (csv/toml/ini/yaml/protobuf/asn1/fixed) fica pra depois.
+**Achado de compilador extra (seed .31):** `pub` é keyword reservada, não pode ser nome de parâmetro
+(`fn f(pub: T)` → erro); contornado nomeando `pubkey`.
 **⚠️ FORK DE NAMESPACE (decisão do dono):** §1.5 do catálogo diz `teko::math::bigint`, mas o **engine já
 existe** como `teko::numeric::bigint` (lastreia `dec`, literais `123bi`, e `teko::math::checked` já aponta
 callers >64-bit pra ele). O subagente **estendeu o engine existente** (regra "estenda não duplique"), NÃO
