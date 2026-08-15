@@ -5,7 +5,9 @@
  * `.tkt` unit tests against the FIPS 180-4 / FIPS 202 / RFC 7693 known-answer vectors.
  *
  * FAMILIES SHIPPED:
- *   - SHA-2: SHA-256 and SHA-512 (FIPS 180-4).
+ *   - SHA-2: SHA-256, SHA-384, and SHA-512 (FIPS 180-4). SHA-384 shares SHA-512's compression
+ *     function, block size, and length-suffix padding — only its initial hash values and its
+ *     truncation to the first six (of eight) output words differ.
  *   - SHA-3 / Keccak: SHA3-256, SHA3-512, and the SHAKE128/SHAKE256 extendable-output
  *     functions (FIPS 202), all over the shared Keccak-f[1600] sponge.
  *   - BLAKE2b (RFC 7693), parameterized output length plus a BLAKE2b-512 wrapper.
@@ -584,6 +586,115 @@ exp fn sha512_of(data: []byte): []byte {
  */
 exp fn sha512_hex_of(data: []byte): str {
     teko::crypto::to_hex(sha512_of(data))
+}
+
+/**
+ * SHA384_IV — the eight SHA-384 initial hash values `H(0)` (FIPS 180-4 §5.3.4): the first 64
+ * bits of the fractional parts of the square roots of the 9th through 16th primes, in order
+ * `h0..h7`. SHA-384 shares SHA-512's compression function, block size, and length-suffix
+ * padding — only this IV and the 48-byte (six-word) truncated output differ.
+ */
+const SHA384_IV: []u64 = [
+    0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17, 0x152fecd8f70e5939,
+    0x67332667ffc00b31, 0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4
+]
+
+/**
+ * The 64-bit running state of an in-progress SHA-384 computation, plus the unprocessed tail
+ * bytes (fewer than 128) and the total message length seen so far. Structurally identical to
+ * `Sha512State` (same compression function and block size); kept as its own type so a caller
+ * can never feed a SHA-512 state into a SHA-384 finalize (or vice versa) and get a
+ * wrongly-sized digest.
+ */
+exp type Sha384State = struct {
+    /** the eight 64-bit working words `h0..h7`, in order (only the first six survive truncation) */
+    h: []u64
+    /** buffered input bytes not yet forming a complete 128-byte block */
+    pending: []byte
+    /** total message length processed so far, in bytes */
+    total_len: u64
+}
+
+/**
+ * Creates a fresh SHA-384 state (the FIPS 180-4 initial hash values, no buffered input, zero
+ * total length) — the starting point for a streaming `sha384_update`/`sha384_finalize`
+ * sequence.
+ *
+ * @return  a fresh `Sha384State` ready to accept message bytes
+ */
+exp fn sha384_init(): Sha384State {
+    Sha384State { h = SHA384_IV; pending = teko::list::empty(); total_len = 0 }
+}
+
+/**
+ * Feeds `data` into an in-progress SHA-384 computation: joins it with any buffered tail,
+ * compresses every complete 128-byte block (reusing SHA-512's compression function), and
+ * buffers the shorter remainder for the next call (or `sha384_finalize`).
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state after absorbing every complete block in `data`
+ */
+exp fn sha384_update(state: Sha384State, data: []byte): Sha384State {
+    var joined = bytes_concat(state.pending, data)
+    var h = state.h
+    var off: u64 = 0
+    loop {
+        if joined.len - off < 128 { break }
+        h = sha512_compress(h, bytes_slice(joined, off, off + 128))
+        off = off + 128
+    }
+    Sha384State { h = h; pending = bytes_slice(joined, off, joined.len); total_len = state.total_len + data.len }
+}
+
+/**
+ * Completes a SHA-384 computation: pads the buffered tail (the same 128-bit length suffix
+ * SHA-384 shares with SHA-512), compresses the resulting final block(s), and renders only the
+ * first SIX state words as 48 big-endian bytes (the 384-bit digest) — the truncation that
+ * distinguishes SHA-384 from SHA-512 (FIPS 180-4 §6.5).
+ *
+ * @param state  the state after every `sha384_update` call for this message
+ * @return       the 48-byte SHA-384 digest
+ */
+exp fn sha384_finalize(state: Sha384State): []byte {
+    var padded = sha2_pad(state.pending, state.total_len, true)
+    var h = state.h
+    var off: u64 = 0
+    loop {
+        if off >= padded.len { break }
+        h = sha512_compress(h, bytes_slice(padded, off, off + 128))
+        off = off + 128
+    }
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 6 { break }
+        out = push_be_u64(out, h[i])
+        i++
+    }
+    out
+}
+
+/**
+ * One-shot SHA-384: hashes the whole of `data` in a single call. Equivalent to
+ * `sha384_finalize(sha384_update(sha384_init(), data))`.
+ *
+ * @param data  the complete message to hash
+ * @return      the 48-byte SHA-384 digest
+ */
+exp fn sha384_of(data: []byte): []byte {
+    sha384_finalize(sha384_update(sha384_init(), data))
+}
+
+/**
+ * `sha384_of`, rendered as a lowercase hex string — the form every published known-answer
+ * vector uses.
+ *
+ * @param data  the complete message to hash
+ * @return      the SHA-384 digest of `data` as 96 lowercase hex characters
+ */
+exp fn sha384_hex_of(data: []byte): str {
+    teko::crypto::to_hex(sha384_of(data))
 }
 
 /**

@@ -32,6 +32,23 @@ fn sha512_of_multi_block_message() {
 }
 
 /**
+ * SHA-384 of a 200-byte message — exceeds one 128-byte block, exercising `sha384_update`'s
+ * multi-block absorption loop (the same SHA-512 compression path SHA-384 reuses) cross-checked
+ * against Python's `hashlib.sha384`.
+ */
+#test
+fn sha384_of_multi_block_message() {
+    var msg = ""
+    var i = 0
+    loop {
+        if i >= 200 { break }
+        msg = teko::str::concat(msg, "a")
+        i++
+    }
+    teko::assert::is_true(sha384_hex_of(bytes_of_str(msg)) == "0691b6e978614b67d60557b2a2cddd53406508522efa21c624dbbfa8ab6e726d5c586b489c7c09f24109a64c10211d48")
+}
+
+/**
  * The 56-byte NIST/FIPS reference message (`"abc...pq"`, FIPS 180-4 §B) as a `[]byte` — the
  * shared long known-answer-vector input for the SHA-3, BLAKE2b, and legacy fixtures below.
  *
@@ -59,6 +76,21 @@ fn sha256_short_vectors() {
 fn sha512_short_vectors() {
     teko::assert::is_true(sha512_hex_of(bytes_of_str("")) == "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e")
     teko::assert::is_true(sha512_hex_of(bytes_of_str("abc")) == "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+}
+
+/**
+ * SHA-384 empty-string, `"abc"`, and 56-byte known-answer vectors (FIPS 180-4), plus a
+ * streaming/one-shot cross-check spanning the 128-byte inner-block boundary.
+ */
+#test
+fn sha384_short_vectors_and_streaming() {
+    teko::assert::is_true(sha384_hex_of(bytes_of_str("")) == "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b")
+    teko::assert::is_true(sha384_hex_of(bytes_of_str("abc")) == "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7")
+    teko::assert::is_true(sha384_hex_of(nist_msg_56()) == "3391fdddfc8dc7393707a65b1b4709397cf8b1d162af05abfe8f450de5f36bc6b0455a8520bc4e6f5fe95b1fe3c8452b")
+    var s = sha384_init()
+    s = sha384_update(s, bytes_of_str("ab"))
+    s = sha384_update(s, bytes_of_str("c"))
+    teko::assert::is_true(teko::crypto::to_hex(sha384_finalize(s)) == sha384_hex_of(bytes_of_str("abc")))
 }
 
 /**
