@@ -1289,11 +1289,20 @@ que junta todos os `.tkt` do namespace) não aparecem no dreno. Levantados (a co
 Nenhum desses bloqueia o dreno das lanes de PRODUTO (`.tks` compilam verde no build real); são exclusivos do
 caminho de teste, endereçados na Fase 2.
 
-**🔒 REGRA DO DONO (2026-08-15): TESTES SÓ NO CI.** Ninguém — nem coordenador nem subagente — executa o gate de
-teste localmente (`teko test .` ou qualquer variante). É política, não conselho anti-crash. A validação local
-permitida é **compilação/build** (`teko <dir> -o <out> --no-verify --release`, que COMPILA mas não roda teste)
-+ cross-check offline em Python. A execução dos `.tkt` é responsabilidade exclusiva do CI. Todo brief de
-subagente carrega essa regra como HARD RULE.
+**🔒 REGRA DO DONO (2026-08-15): TESTES SÓ NO CI — porque `teko test .` local é CRASH CERTO DE OOM.**
+(Correção do dono: eu tinha dito "é política, não crash" — ERRADO. É crash de OOM.) Rodar o gate de teste
+localmente estoura a memória (o vazamento de monomorfização / o modelo de memória ainda-não-consertado), com
+certeza, não por acaso. **Esse OOM é a própria razão de existir a divisão Doc 2 / Doc 1:** o **Doc 1
+(arena/backend)** é o que conserta o modelo de memória; a política CI-only é CONSEQUÊNCIA disso. Ninguém —
+coordenador nem subagente — roda `teko test .` ou variante. Validação local permitida = **compilação/build**
+(`teko <dir> -o <out> --no-verify --release`, COMPILA mas não roda teste) + cross-check offline em Python. A
+execução dos `.tkt` é exclusiva do CI. Todo brief de subagente carrega isso como HARD RULE.
+
+**🧭 RELAÇÃO Doc 2 → Doc 1 (ruling do dono 2026-08-15): a Doc 2 prepara TODO o terreno pra a Doc 1 seguir,
+dando suporte total ao que virá.** Ou seja, toda a superfície de linguagem/stdlib que o Doc 1 (o remodel de
+memória/arena/backend, incl. o fim do OOM) vai precisar tem que estar PRONTA antes — por isso §10, genéricos,
+§11, §17 entram na Doc 2 (não são "deferidos"). O Doc 1 então mexe só no backend/arena com impacto mínimo,
+sobre um terreno completo.
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
