@@ -1127,9 +1127,9 @@ minimiza esse retrabalho (a superfície já nasce triada).
 |------|---------------|:---:|:---:|-------------|
 | §9 operador (9-ops) | §9.4, §10, §9.2b | 3 | ✅ | ✅ entregue (parse+dispatch+counterpart §9.4; fixtures) |
 | conformidade-estática-de-interface | §7, §10, §9.2b | 3 | ✅ | ✅ largely done (`type_conforms_to`, vtable, IService auto-conf) |
-| **§9.2b solver de constraint de forma** | **§7, §10** | **2** | **✅** | 🔄 **PARCIAL** — falta `notnull` + `service [lifetime]` como termo + disjunção completa |
-| §13 item-14 fat-header | §10 (Intent/Ctx) | 1 | ✅ (§1,§4.1) | 🔄 superfície `readonly` aterrissando; **cabeçalho `uptr` em codegen/lir NÃO iniciado** · **antecipado** |
-| §7 DI service/svc | §10 | 1 | ❌ (precisa §9.2b) | 🔄 superfície; bloqueado no solver (+ arena, Doc 1 §8) |
+| §9.2b solver de constraint de forma | §7, §10 | 2 | ✅ | ✅ **ENTREGUE** — notnull + form-words/`service [lifetime]` + disjunção (drenado em `fix/retirement`, `cf0c70b5`) |
+| **§13 item-14 fat-header** | §10 (Intent/Ctx) | 1 | ✅ (§1,§4.1) | 🔄 superfície `readonly` aterrissando; **cabeçalho `uptr` em codegen/lir NÃO iniciado** · **antecipado** · **← TOPO** |
+| §7 DI service/svc | §10 | 1 | ✅ (§9.2b feito) | 🔄 superfície; falta a costura de arena (Doc 1 §8) |
 | §14 Família B (comptime) | — | 0 | ✅ | 🔄 parcial |
 | §15 global | (stdlib) | — | — | 🔄 parcial |
 | §11 visibilidade `exp`/`pub` | §16, §17 | 2 | ⏳ (stdlib) | ⏳ ordem: PENÚLTIMA |
@@ -1137,9 +1137,10 @@ minimiza esse retrabalho (a superfície já nasce triada).
 | §16 FFI libc-direct | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
 | §17 `#if`/`#os`/`#arch` | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
 
-**Topo atual (mais-dependido com deps resolvidas):** **§9.2b — solver de constraint de forma** (in-deg 2,
-deps ✅), que destrava §7 **e** §10. Runner-up: **§13 item-14 fat-header** (in-deg 1, antecipado). Ordem
-derivada: **§9.2b → §13 → §7 → §10**; depois o cluster de ordem (§11 → §16/§17); e só então o Doc 1.
+**Topo atual (mais-dependido com deps resolvidas):** **§13 item-14 fat-header** (in-deg 1, **antecipado**)
+— o §9.2b aterrissou (`cf0c70b5` em `fix/retirement`), então §7 destravou (deps ✅) mas ainda pende a
+costura de arena (Doc 1 §8), e o item-14 tem precedência de antecipação. Ordem derivada: **§13 → §7 →
+§10**; depois o cluster de ordem (§11 → §16/§17); e só então o Doc 1.
 
 ---
 
