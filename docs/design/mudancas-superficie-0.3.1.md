@@ -1179,12 +1179,19 @@ pareia com `db::mongodb`.) Costuras que ficam FFI/pesquisa: `rand` (getrandom FF
 `openssl`/`gpg` (providers FFI).
 
 **Entregues stdlib (2026-08-15):** crypto core ✅ (`hash`/`mac`/`kdf`/`cipher`/`aead`) · `sort` mono ✅
-(`813f83b7`) · `encoding::base64`/`url`/`mime` ✅ (`a1cbeb8e`) · `encoding::xml`+C14N ✅ (`4c636a7e`). Rodando:
-`encoding` binário (cbor/msgpack/bson). Costuras stdlib abertas: `encoding::csv` `type CsvRow` visibility bug
-(consertar no lane csv); `pub→exp` retrofit dos módulos antigos (base64/url/csv) DEFERIDO ao sweep §11
-(forward-compatible; novos já nascem `exp`); `xmldsig` consome o C14N inclusivo já pronto + acopla o
-Exclusive-C14N/transforms. **Dica validável:** value-trees como **struct-tagged** (não inline-union) deixam
-o seed velho rodar os vetores → prova comportamental real (não só `fmt`), como o `xml` fez.
+(`813f83b7`) · `encoding::base64`/`url`/`mime` ✅ (`a1cbeb8e`) · `encoding::xml`+C14N ✅ (`4c636a7e`) ·
+`encoding::cbor`/`msgpack`/`bson` ✅ (`c052fa9f`, bson byte-exato vs pymongo). **Encoding p/ assinatura
+COMPLETO** (base64+xml+cbor) → **pivot pro caminho de assinatura:** `math` (bigint, RODANDO) → `crypto::pk`
+→ `jose`/`xmldsig`/`cose`. Encoding restante (csv/toml/ini/yaml/protobuf/asn1/fixed) fica pra depois.
+Costuras: `encoding::csv` `type CsvRow` visibility bug (lane csv); `pub→exp` dos módulos antigos DEFERIDO ao
+§11; cbor float shortest-form + bson decimal128-arith são follow-on. **Dica validável:** value-trees
+**struct-tagged** (não inline-union) deixam o seed velho RODAR os vetores → prova comportamental real.
+
+**⚠️ ACHADOS DE COMPILADOR (seed `0.3.0.31-beta`, reportados pelos lanes; contornados in-module):**
+(1) **cast-trap** — cast `i64→u64` de negativo (e `u64→i64` bit-alto) **SIGABRT em runtime**; código stdlib
+que casta negativos entre signedness precisa contornar (carry/borrow u64-puro). (2) **codegen quirk** — dois
+`loop` sequenciais compartilhando um `i64` mutado miscompilam (guard do 1º não pula). Ambos merecem olhar
+compiler-side; podem já estar corrigidos na árvore atual (o seed é `.31`, a árvore está à frente).
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
