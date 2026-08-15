@@ -1266,6 +1266,21 @@ ANTES de drenar — `fmt --check` sozinho é insuficiente. E **reseedar** quando
 p/ o ladder precisar do degrau (regra do dono: "o reseed é local e ocorre quando precisa fazer a escada
 chegar ao objetivo").
 
+**🟠 DÍVIDA DE TESTE p/ a FASE 2 "corrigir testes da perna C" (achado 2026-08-15, escopo fechado).** O build
+`--no-verify --release` (usado no dreno) NÃO compila os `.tkt`, então erros no caminho de TESTE (`teko test .`,
+que junta todos os `.tkt` do namespace) não aparecem no dreno. Levantados (a corrigir na Fase 2, não agora):
+- **Colisão de helper nos `.tkt` de crypto** (mesma classe do incidente — namespace flat): `hex_val`×4,
+  `hex_bytes`×4 (aead/cipher/kdf/mac), `byte_range`×2, `repeat_byte`×2 (kdf/mac), `hexed`×2 (aead/cipher) —
+  **corpos byte-idênticos** entre arquivos. Fix: consolidar numa definição única (helper compartilhado) ou
+  nomes distintos por arquivo. Baixo risco, mas **não dá pra build-validar `.tkt` sem `teko test .`** (proibido,
+  risco de crash) — por isso fica pra Fase 2, junto com:
+- **`const struct: initializer binds no field __hdr`** no codegen — um `const` de value-struct não popula o
+  header fat do item-14; reproduz SEM as lanes novas (pré-existente, backend). Bloqueia o `teko test .` no gen1.
+- **`byte ^ byte` (B.38 "needs integer not float")** — XOR bitwise entre dois `byte` rejeitado pelo checker do
+  seed; afeta `rsa_test.tkt` (l.202/258) e outros. Provável limitação de seed; re-checar no toolchain atual.
+Nenhum desses bloqueia o dreno das lanes de PRODUTO (`.tks` compilam verde no build real); são exclusivos do
+caminho de teste, endereçados na Fase 2.
+
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
 `teko fmt --check` verde local. O **verde in-tree** vem na sequência do dono: (1) Doc 2 → 100%; (2) corrigir
