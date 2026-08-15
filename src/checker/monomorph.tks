@@ -76,7 +76,14 @@ fn constraint_atom_satisfied(atom_name: str, concrete: @Type(), table: TypeTable
                 _ => match concrete { Named as n => n.name == atom_name; _ => false }   // exact nominal-name match
             }
         }
-        error => false   // the atom names no TypeDecl at all — unsatisfiable, never silently ignored
+        /* (§9.2b) the atom names no TypeDecl — try a CONCRETE built-in type (`str`, `i64`, `bool`, …),
+           which forces IDENTITY: `<T: str>` admits exactly `str`. A name that is neither a declared type
+           nor a built-in stays unsatisfiable (never silently ignored — M.1). */
+        error => match builtin_type(atom_name) {
+            (@Type()) as bt => type_eq(concrete, bt)
+            NotBuiltinType => false
+            error => false
+        }
     }
 }
 // The full boolean tree over atoms: `&` = both must hold, `|` = either must hold (matches the
