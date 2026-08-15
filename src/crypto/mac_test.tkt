@@ -131,6 +131,21 @@ fn hmac_sha512_rfc4231() {
 }
 
 /**
+ * HMAC-SHA-384 against every RFC 4231 known-answer vector (test cases 1..7), cross-checked
+ * against Python `hmac.new(key, msg, hashlib.sha384)`.
+ */
+#test
+fn hmac_sha384_rfc4231() {
+    teko::assert::is_true(hmac_sha384_hex_of(repeat_byte(0x0b, 20), bytes_of_str("Hi There")) == "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6")
+    teko::assert::is_true(hmac_sha384_hex_of(bytes_of_str("Jefe"), bytes_of_str("what do ya want for nothing?")) == "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649")
+    teko::assert::is_true(hmac_sha384_hex_of(repeat_byte(0xaa, 20), repeat_byte(0xdd, 50)) == "88062608d3e6ad8a0aa2ace014c8a86f0aa635d947ac9febe83ef4e55966144b2a5ab39dc13814b94e3ab6e101a34f27")
+    teko::assert::is_true(hmac_sha384_hex_of(byte_range(1, 25), repeat_byte(0xcd, 50)) == "3e8a69b7783c25851933ab6290af6ca77a9981480850009cc5577c6e1f573b4e6801dd23c4a7d679ccf8a386c674cffb")
+    teko::assert::is_true(hmac_sha384_hex_of(repeat_byte(0x0c, 20), bytes_of_str("Test With Truncation")) == "3abf34c3503b2a23a46efc619baef897f4c8e42c934ce55ccbae9740fcbc1af4ca62269e2a37cd88ba926341efe4aeea")
+    teko::assert::is_true(hmac_sha384_hex_of(repeat_byte(0xaa, 131), bytes_of_str("Test Using Larger Than Block-Size Key - Hash Key First")) == "4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952")
+    teko::assert::is_true(hmac_sha384_hex_of(repeat_byte(0xaa, 131), bytes_of_str("This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.")) == "6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e")
+}
+
+/**
  * Streaming HMAC-SHA-256 equals the one-shot: feeding a message in three uneven chunks through
  * `hmac_sha256_update` (spanning the 64-byte inner-block boundary) matches `hmac_sha256_of`.
  */
@@ -159,6 +174,19 @@ fn hmac_sha512_streaming_matches_oneshot() {
 }
 
 /**
+ * Streaming HMAC-SHA-384 equals the one-shot across the 128-byte inner-block boundary.
+ */
+#test
+fn hmac_sha384_streaming_matches_oneshot() {
+    var key = repeat_byte(0xaa, 20)
+    var msg = byte_range(0, 300)
+    var s = hmac_sha384_init(key)
+    s = hmac_sha384_update(s, byte_range(0, 130))
+    s = hmac_sha384_update(s, byte_range(130, 170))
+    teko::assert::is_true(to_hex(hmac_sha384_finalize(s)) == to_hex(hmac_sha384_of(key, msg)))
+}
+
+/**
  * HMAC-SHA3-256 known-answer vectors (cross-checked against Python `hmac`/`hashlib.sha3_256`):
  * an ASCII key/message, RFC 4231 test case 1's inputs, and a 200-byte key that exceeds the
  * 136-byte SHA3-256 block (exercising the long-key hashing path).
@@ -172,7 +200,7 @@ fn hmac_sha3_256_vectors() {
 
 /**
  * HMAC constant-time verification accepts the genuine tag and rejects a forged one, across the
- * SHA-256, SHA-512, and SHA3-256 variants.
+ * SHA-256, SHA-384, SHA-512, and SHA3-256 variants.
  */
 #test
 fn hmac_verify_accepts_and_rejects() {
@@ -180,6 +208,8 @@ fn hmac_verify_accepts_and_rejects() {
     var msg = bytes_of_str("The quick brown fox jumps over the lazy dog")
     teko::assert::is_true(hmac_sha256_verify(key, msg, hmac_sha256_of(key, msg)))
     teko::assert::is_true(!hmac_sha256_verify(key, msg, repeat_byte(0, 32)))
+    teko::assert::is_true(hmac_sha384_verify(key, msg, hmac_sha384_of(key, msg)))
+    teko::assert::is_true(!hmac_sha384_verify(key, msg, repeat_byte(0, 48)))
     teko::assert::is_true(hmac_sha512_verify(key, msg, hmac_sha512_of(key, msg)))
     teko::assert::is_true(!hmac_sha512_verify(key, msg, repeat_byte(0, 64)))
     teko::assert::is_true(hmac_sha3_256_verify(key, msg, hmac_sha3_256_of(key, msg)))

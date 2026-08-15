@@ -1,0 +1,310 @@
+use teko::crypto
+use teko::encoding::base64
+use teko::encoding::json
+
+/**
+ * `teko::crypto::jose` — JSON Object Signing and Encryption (JOSE): JWS compact serialization
+ * (RFC 7515), JWK key import (RFC 7517/7518), and JWT claims (RFC 7519), composed entirely on top
+ * of the already-shipped `teko::crypto` primitive layer (`teko::crypto::mac` HMAC,
+ * `teko::crypto::rsa` RSASSA-PKCS1-v1_5/PSS, `teko::crypto::ec_p256` ECDSA P-256,
+ * `teko::crypto::ed25519` EdDSA) and `teko::encoding::base64`/`teko::encoding::json`. This is the
+ * JSON document-signing lane the project owner asked for directly ("JSON e XML precisam de
+ * stdlib para assinar documento").
+ *
+ * SCOPE: JWS (sign/verify) + JWK (key import) + JWT (claims). JWE (encryption) is explicitly OUT
+ * OF SCOPE — it needs RSA-OAEP and ECDH-ES, neither of which exists in `teko::crypto` yet; that is
+ * a documented follow-on, not a gap in this unit.
+ *
+ * ALGORITHMS: `HS256`/`HS384`/`HS512` (HMAC-SHA-2), `RS256`/`RS384`/`RS512` (RSASSA-PKCS1-v1_5),
+ * `PS256`/`PS384`/`PS512` (RSASSA-PSS, salt length = hash length per JOSE), `ES256` (ECDSA
+ * P-256 + SHA-256), and `EdDSA` (Ed25519). `ES384`/`ES512` are GATED — `teko::crypto::ec_p256`
+ * only implements the P-256 curve, and JOSE `ES384`/`ES512` need P-384/P-521, which do not exist
+ * yet — `jws_alg_from_name` simply never maps those two names, so any attempt to use them is a
+ * clean `CryptoError`, not a silent wrong answer.
+ *
+ * THIS FILE is the shared core every other file in this namespace builds on (mirroring
+ * `teko::crypto::crypto`'s role for `mac`/`rsa`/`ec_p256`/`ed25519`): the `JwsAlg` enum and its
+ * name mapping, the compact-serialization splitter, the signing-input builder, and the protected
+ * header JSON encoder (with RFC 7515-agnostic but PyJWT-compatible alphabetically-sorted header
+ * keys, so a byte-identical cross-check against `jwt.encode(..., sort_headers=True)` — PyJWT's
+ * default — is possible). `teko::crypto::jose::jwk` (key import), `::jws` (sign/verify), and
+ * `::jwt` (claims) are its siblings.
+ *
+ * ERRORS ARE VALUES, reusing `teko::crypto::CryptoError` (`crypto.tks`) — no new error type.
+ *
+ * NO INDEX-ASSIGNMENT. Every byte/string buffer here is built by `teko::list::push` (functional
+ * growth) or by rebuilding a fresh slice, the same discipline every sibling crypto file uses.
+ */
+
+/**
+ * The JWS/JWT signature algorithm (RFC 7518 §3.1's `"alg"` header values this unit implements).
+ * `EdDSA` is the one member whose JOSE spelling is not `<Family><HashBits>` (RFC 8037 §3.1).
+ */
+exp type JwsAlg = enum { HS256; HS384; HS512; RS256; RS384; RS512; PS256; PS384; PS512; ES256; EdDSA }
+
+/**
+ * The RFC 7518/8037 `"alg"` header string for `alg`.
+ *
+ * @param alg  the algorithm
+ * @return     the exact JOSE header spelling (e.g. `"HS256"`, `"EdDSA"`)
+ */
+exp fn jws_alg_name(alg: JwsAlg): str {
+    match alg {
+        HS256 => "HS256"
+        HS384 => "HS384"
+        HS512 => "HS512"
+        RS256 => "RS256"
+        RS384 => "RS384"
+        RS512 => "RS512"
+        PS256 => "PS256"
+        PS384 => "PS384"
+        PS512 => "PS512"
+        ES256 => "ES256"
+        EdDSA => "EdDSA"
+    }
+}
+
+/**
+ * Parses an RFC 7518/8037 `"alg"` header string back into a `JwsAlg`. Deliberately never maps
+ * `"none"` (the unsecured-JWS algorithm) or `"ES384"`/`"ES512"` (P-384/P-521 are not implemented
+ * — see this module's header) — every caller of this function is a JWS/JWT verifier, and an
+ * unmapped name simply fails closed as a `CryptoError` rather than accepting an insecure or
+ * unsupported algorithm.
+ *
+ * @param name  the header's `"alg"` string
+ * @return      the matching `JwsAlg`, or a `CryptoError` for an unknown/unsupported/insecure name
+ * @throws      `CryptoError` when `name` is not one of this unit's supported algorithms
+ */
+exp fn jws_alg_from_name(name: str): JwsAlg | crypto::CryptoError {
+    if name == "HS256" { return JwsAlg::HS256 }
+    if name == "HS384" { return JwsAlg::HS384 }
+    if name == "HS512" { return JwsAlg::HS512 }
+    if name == "RS256" { return JwsAlg::RS256 }
+    if name == "RS384" { return JwsAlg::RS384 }
+    if name == "RS512" { return JwsAlg::RS512 }
+    if name == "PS256" { return JwsAlg::PS256 }
+    if name == "PS384" { return JwsAlg::PS384 }
+    if name == "PS512" { return JwsAlg::PS512 }
+    if name == "ES256" { return JwsAlg::ES256 }
+    if name == "EdDSA" { return JwsAlg::EdDSA }
+    crypto::crypto_error(concat("jose: unsupported or insecure alg '", name, "'"))
+}
+
+/**
+ * Reports whether `a` sorts strictly before `b` by unsigned byte comparison — the ordering
+ * `jose_sort_header_entries` sorts the protected header's keys by, matching PyJWT's
+ * `json.dumps(header, sort_keys=True)` default so a byte-identical cross-check is possible.
+ *
+ * @param a  the first string
+ * @param b  the second string
+ * @return   `true` iff `a` sorts strictly before `b`
+ */
+fn jose_str_less(a: str, b: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= a.len || i >= b.len { break }
+        if a[i] != b[i] { return a[i] < b[i] }
+        i++
+    }
+    a.len < b.len
+}
+
+/**
+ * The first offset at or after `from` where `s[offset] == target`, or `s.len` when `target` does
+ * not occur — the compact-serialization `'.'` scanner (a `u64` sentinel of `s.len` rather than a
+ * negative `i64`, per this codebase's documented seed trap around signed/unsigned casts).
+ *
+ * @param s      the string to scan
+ * @param target the byte to find
+ * @param from   the inclusive starting offset
+ * @return       the first matching offset, or `s.len` when not found
+ */
+fn jose_find_byte(s: str, target: byte, from: u64): u64 {
+    var i = from
+    loop {
+        if i >= s.len { break }
+        if s[i] == target { return i }
+        i++
+    }
+    s.len
+}
+
+/**
+ * Concatenates `a` then `b` into a fresh `[]byte` — this file's own copy of the block-join helper
+ * every crypto file in this project carries privately (mirroring `teko::crypto::rsa`'s
+ * `rsa_bytes_concat`).
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   a fresh slice holding `a`'s bytes followed by `b`'s bytes
+ */
+exp fn jose_bytes_concat(a: []byte, b: []byte): []byte {
+    var out = a
+    var i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * One (key, value) pair of a JOSE protected header — the unit `jose_sort_header_entries` reorders
+ * and `jose_build_header_json` renders.
+ */
+type JoseHeaderEntry = struct {
+    /** the header member name */
+    key: str
+    /** the header member value */
+    value: @JsonValue()
+}
+
+/**
+ * The header entries of `obj`, as a `[]JoseHeaderEntry` — the zip of its parallel `keys`/`values`
+ * slices into the single-list shape `jose_sort_header_entries`'s selection sort works over.
+ *
+ * @param obj  a JSON object (typically the caller's protected-header extras)
+ * @return     one entry per (key, value) pair, in `obj`'s original order
+ */
+fn jose_header_entries_of(obj: json::JsonObject): []JoseHeaderEntry {
+    var out: []JoseHeaderEntry = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= obj.keys.len { break }
+        out = teko::list::push(out, JoseHeaderEntry { key = obj.keys[i]; value = obj.values[i] })
+        i++
+    }
+    out
+}
+
+/**
+ * Selection-sorts `entries` ascending by key (`jose_str_less`), rebuilding a fresh list at every
+ * step rather than mutating in place (no index-assignment) — `O(n^2)`, which is fine for a JOSE
+ * protected header's handful of members (`alg`, `typ`, `kid`, ...).
+ *
+ * @param entries  the entries to sort
+ * @return         `entries` in ascending key order
+ */
+fn jose_sort_header_entries(entries: []JoseHeaderEntry): []JoseHeaderEntry {
+    var remaining = entries
+    var out: []JoseHeaderEntry = teko::list::empty()
+    loop {
+        if remaining.len == 0 { break }
+        var best: u64 = 0
+        var i: u64 = 1
+        loop {
+            if i >= remaining.len { break }
+            if jose_str_less(remaining[i].key, remaining[best].key) { best = i }
+            i++
+        }
+        out = teko::list::push(out, remaining[best])
+        var rest: []JoseHeaderEntry = teko::list::empty()
+        var j: u64 = 0
+        loop {
+            if j >= remaining.len { break }
+            if j != best { rest = teko::list::push(rest, remaining[j]) }
+            j++
+        }
+        remaining = rest
+    }
+    out
+}
+
+/**
+ * Builds the RFC 7515 protected header JSON text for `alg`, merging in `extra` (e.g. `kid`,
+ * `typ`) and rendering every member — `alg` included — in ascending key order. Sorting matches
+ * PyJWT's `sort_headers=True` default (`json.dumps(header, sort_keys=True)`), so signing the same
+ * `alg`/`extra`/key against the same input reproduces PyJWT's exact header bytes. `extra` MUST
+ * NOT already contain an `"alg"` key (the caller supplies the algorithm only via `alg`).
+ *
+ * @param alg    the signature algorithm (rendered as its own `"alg"` member)
+ * @param extra  the caller's additional header members (`"kid"`, `"typ"`, ...), MUST NOT include
+ *               `"alg"`
+ * @return       the compact (no whitespace) protected header JSON text, e.g.
+ *               `{"alg":"HS256","typ":"JWT"}`
+ */
+exp fn jose_build_header_json(alg: JwsAlg, extra: json::JsonObject): str {
+    var entries = jose_header_entries_of(extra)
+    entries = teko::list::push(entries, JoseHeaderEntry { key = "alg"; value = json::JsonString { value = jws_alg_name(alg) } })
+    var sorted = jose_sort_header_entries(entries)
+    var keys: []str = teko::list::empty()
+    var values: []@JsonValue() = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= sorted.len { break }
+        keys = teko::list::push(keys, sorted[i].key)
+        values = teko::list::push(values, sorted[i].value)
+        i++
+    }
+    json::encode(json::JsonObject { keys = keys; values = values })
+}
+
+/**
+ * An empty protected-header-extras object — the convenience `jws_sign`/`jwt_sign` caller passes
+ * when it has no `kid`/extra members to add beyond `alg`.
+ *
+ * @return  a `JsonObject` with no members
+ */
+exp fn jose_empty_header_extra(): json::JsonObject {
+    json::JsonObject { keys = teko::list::empty(); values = teko::list::empty() }
+}
+
+/**
+ * The three raw (still base64url-text / still-encoded) segments of an RFC 7515 §3.1 JWS compact
+ * serialization: `BASE64URL(header) || "." || BASE64URL(payload) || "." || BASE64URL(signature)`.
+ * `header_b64`/`payload_b64` are kept as the EXACT substrings taken from the token — the JWS
+ * signing input is defined over those exact bytes, never a re-encoding of the parsed header/
+ * payload (RFC 7515 §5.2 step 8).
+ */
+exp type JwsParts = struct {
+    /** the exact `BASE64URL(header)` substring from the token */
+    header_b64: str
+    /** the exact `BASE64URL(payload)` substring from the token */
+    payload_b64: str
+    /** the decoded signature bytes */
+    signature: []byte
+}
+
+/**
+ * Splits an RFC 7515 §3.1 JWS compact serialization into its three segments, requiring EXACTLY
+ * two `'.'` separators (never fewer, never more) and a valid base64url signature segment.
+ *
+ * @param token  the compact serialization to split
+ * @return       the three segments, or a `CryptoError` describing the malformed shape
+ * @throws       `CryptoError` on a wrong segment count or a non-base64url signature segment
+ */
+exp fn jws_split_compact(token: str): JwsParts | crypto::CryptoError {
+    var first_dot = jose_find_byte(token, b'.', 0)
+    if first_dot >= token.len {
+        return crypto::crypto_error("jws: malformed compact serialization (missing '.')")
+    }
+    var second_dot = jose_find_byte(token, b'.', first_dot + 1)
+    if second_dot >= token.len {
+        return crypto::crypto_error("jws: malformed compact serialization (missing second '.')")
+    }
+    var third_dot = jose_find_byte(token, b'.', second_dot + 1)
+    if third_dot < token.len {
+        return crypto::crypto_error("jws: malformed compact serialization (too many '.' segments)")
+    }
+    var header_b64 = str_slice_chars(token, 0, first_dot to i64)
+    var payload_b64 = str_slice_chars(token, (first_dot + 1) to i64, second_dot to i64)
+    var sig_b64 = str_slice_chars(token, (second_dot + 1) to i64, token.len to i64)
+    var sig = match base64::decode_url_safe_no_pad(sig_b64) {
+        []byte as b => b
+        error => return crypto::crypto_error("jws: invalid base64url signature segment")
+    }
+    JwsParts { header_b64 = header_b64; payload_b64 = payload_b64; signature = sig }
+}
+
+/**
+ * The JWS signing input `ASCII(BASE64URL(header) || "." || BASE64URL(payload))` (RFC 7515 §5.1
+ * step 8) — the exact bytes every algorithm signs/verifies over.
+ *
+ * @param header_b64   the base64url-encoded protected header segment
+ * @param payload_b64  the base64url-encoded payload segment
+ * @return              the ASCII bytes of `header_b64 || "." || payload_b64`
+ */
+exp fn jose_signing_input(header_b64: str, payload_b64: str): []byte {
+    bytes_of_str(concat(header_b64, ".", payload_b64))
+}

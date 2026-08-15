@@ -10,9 +10,12 @@
  * `*_finalize` states) already in this namespace.
  *
  * FAMILIES SHIPPED:
- *   - HMAC (RFC 2104 / RFC 4231) over SHA-256, SHA-512, and SHA3-256, each with a streaming
- *     `init`/`update`/`finalize` API (SHA-2 variants) plus one-shot, hex, and constant-time
- *     `verify` wrappers.
+ *   - HMAC (RFC 2104 / RFC 4231) over SHA-256, SHA-384, SHA-512, and SHA3-256, each with a
+ *     streaming `init`/`update`/`finalize` API (SHA-2 variants) plus one-shot, hex, and
+ *     constant-time `verify` wrappers. SHA-384 was added alongside `teko::crypto::jose` (JWS
+ *     `HS384`) — it shares SHA-512's 128-byte block size, so it is the same
+ *     `hmac_key0`/`xor_with_byte` plumbing over `sha384_init`/`sha384_update`/`sha384_finalize`
+ *     (`teko::crypto::hash`).
  *   - Poly1305 (RFC 8439) — the one-time authenticator, one-shot plus hex and `verify`.
  *   - CMAC (NIST SP 800-38B) — the subkey derivation (`cmac_gen_subkeys`, independently
  *     NIST-testable) and the full CBC-MAC parameterized on an injected 128-bit block cipher
@@ -248,6 +251,85 @@ exp fn hmac_sha512_hex_of(key: []byte, msg: []byte): str {
  */
 exp fn hmac_sha512_verify(key: []byte, msg: []byte, tag: []byte): bool {
     ct_eq(hmac_sha512_of(key, msg), tag)
+}
+
+/**
+ * The streaming state of an in-progress HMAC-SHA-384 computation — the SHA-384 analogue of
+ * `HmacSha256` (128-byte block, shared with SHA-512; 48-byte tag).
+ */
+exp type HmacSha384 = struct {
+    /** the inner SHA-384 state, primed with `K0 ⊕ ipad` and advanced by every message chunk */
+    inner: Sha384State
+    /** the outer key block `K0 ⊕ opad`, hashed with the inner digest at finalize time */
+    outer: []byte
+}
+
+/**
+ * Starts a streaming HMAC-SHA-384 keyed by `key` (RFC 2104), block size 128 bytes (shared with
+ * SHA-512).
+ *
+ * @param key  the secret key, any length (hashed down if longer than the 128-byte block)
+ * @return     a fresh `HmacSha384` ready to accept message bytes
+ */
+exp fn hmac_sha384_init(key: []byte): HmacSha384 {
+    var k0 = hmac_key0(key, 128, (m: []byte) => sha384_of(m))
+    HmacSha384 { inner = sha384_update(sha384_init(), xor_with_byte(k0, 0x36)); outer = xor_with_byte(k0, 0x5c) }
+}
+
+/**
+ * Feeds `data` into an in-progress HMAC-SHA-384 computation — may be called any number of times.
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state after absorbing `data`
+ */
+exp fn hmac_sha384_update(state: HmacSha384, data: []byte): HmacSha384 {
+    HmacSha384 { inner = sha384_update(state.inner, data); outer = state.outer }
+}
+
+/**
+ * Completes an HMAC-SHA-384 computation: hashes `(K0 ⊕ opad) || inner_digest` into the 48-byte tag.
+ *
+ * @param state  the state after every `hmac_sha384_update` call for this message
+ * @return       the 48-byte HMAC-SHA-384 tag
+ */
+exp fn hmac_sha384_finalize(state: HmacSha384): []byte {
+    var inner_digest = sha384_finalize(state.inner)
+    sha384_finalize(sha384_update(sha384_update(sha384_init(), state.outer), inner_digest))
+}
+
+/**
+ * One-shot HMAC-SHA-384: the 48-byte tag authenticating `msg` under `key`.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the complete message to authenticate
+ * @return     the 48-byte HMAC-SHA-384 tag
+ */
+exp fn hmac_sha384_of(key: []byte, msg: []byte): []byte {
+    hmac_sha384_finalize(hmac_sha384_update(hmac_sha384_init(key), msg))
+}
+
+/**
+ * `hmac_sha384_of`, rendered as a lowercase hex string.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the complete message to authenticate
+ * @return     the HMAC-SHA-384 tag of `msg` as 96 lowercase hex characters
+ */
+exp fn hmac_sha384_hex_of(key: []byte, msg: []byte): str {
+    to_hex(hmac_sha384_of(key, msg))
+}
+
+/**
+ * Constant-time HMAC-SHA-384 verification (see `hmac_sha256_verify`).
+ *
+ * @param key  the secret key, any length
+ * @param msg  the message whose authenticity is in question
+ * @param tag  the tag to check against the recomputed one
+ * @return     `true` iff `tag` is the genuine HMAC-SHA-384 tag of `msg` under `key`
+ */
+exp fn hmac_sha384_verify(key: []byte, msg: []byte, tag: []byte): bool {
+    ct_eq(hmac_sha384_of(key, msg), tag)
 }
 
 /**

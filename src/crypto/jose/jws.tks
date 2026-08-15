@@ -1,0 +1,481 @@
+use teko::crypto
+use teko::encoding::base64
+use teko::encoding::json
+use teko::numeric::bigint
+
+/**
+ * `teko::crypto::jose::jws` — JWS compact serialization sign/verify (RFC 7515), composed on top
+ * of `teko::crypto::jose::jwk`'s imported key material and `teko::crypto::jose::jose_*` shared
+ * plumbing (the `JwsAlg` enum, the sorted-header JSON builder, the compact-serialization
+ * splitter, the signing-input builder).
+ *
+ * ALGORITHM DISPATCH is two flat exhaustive `match`es on `JwsAlg` (`jws_sign_raw`/
+ * `jws_verify_raw`), each routing to one family-specific helper that pattern-matches the
+ * `@JoseKey()` union for the right key shape — an `HS*` alg with a non-`JwkOct` key, or an `RS*`/
+ * `PS*`/`ES256`/`EdDSA` alg with the wrong key family, is a `CryptoError` (sign) / `false`
+ * (verify), never a panic and never a silent fallback to the wrong algorithm.
+ *
+ * `ES256`'s JOSE signature is the RAW `r || s` concatenation (RFC 7518 §3.4), each a fixed
+ * 32-byte big-endian field — NOT the DER `SEQUENCE` `teko::crypto::ec_p256` never produces
+ * either (that primitive already returns/accepts a raw `(r, s)` pair). Signing draws a fresh
+ * random nonce per RFC 6979's threat model (`teko::crypto::ec_p256::ecdsa_p256_sign` takes the
+ * nonce as a caller-supplied parameter — see that file's header — so this file is the one that
+ * sources it from `teko::crypto::secure_bytes` and retries on the astronomically rare invalid
+ * draw).
+ *
+ * VERIFICATION NEVER PANICS: every structural failure (a malformed compact serialization, an
+ * unmapped/insecure `alg`, a key/alg family mismatch, a tampered signature) is a `CryptoError`.
+ * `jws_verify` recomputes the signing input from the EXACT header/payload substrings taken off
+ * the wire (`jws_split_compact`), never a re-encoding of the parsed header — RFC 7515 §5.2 step 8.
+ */
+
+/**
+ * The `teko::crypto::rsa` hash algorithm `alg`'s SHA-2 member selects. Only meaningful for the
+ * six `RS*`/`PS*` members of `JwsAlg`; any other member falls back to `Sha256` (unreachable in
+ * practice — every call site routes through `jws_sign_rsa_pkcs1`/`jws_sign_rsa_pss` or their
+ * verify counterparts, which are themselves only reached for `RS*`/`PS*` algs).
+ *
+ * @param alg  the JWS algorithm
+ * @return     the matching `RsaHashAlg`
+ */
+fn jose_rsa_hash_alg(alg: JwsAlg): crypto::RsaHashAlg {
+    match alg {
+        RS256 => crypto::RsaHashAlg::Sha256
+        RS384 => crypto::RsaHashAlg::Sha384
+        RS512 => crypto::RsaHashAlg::Sha512
+        PS256 => crypto::RsaHashAlg::Sha256
+        PS384 => crypto::RsaHashAlg::Sha384
+        PS512 => crypto::RsaHashAlg::Sha512
+        _ => crypto::RsaHashAlg::Sha256
+    }
+}
+
+/**
+ * The PSS salt length in bytes for a `PS*` member of `JwsAlg` — JOSE fixes it to the hash's own
+ * digest length (RFC 7518 §3.5). Only meaningful for `PS256`/`PS384`/`PS512`; any other member
+ * falls back to 32 (unreachable in practice, see `jose_rsa_hash_alg`).
+ *
+ * @param alg  the JWS algorithm
+ * @return     32, 48, or 64
+ */
+fn jose_pss_salt_len(alg: JwsAlg): u64 {
+    match alg {
+        PS384 => 48
+        PS512 => 64
+        _ => 32
+    }
+}
+
+/**
+ * The HMAC tag of `msg` under `secret`, dispatching to the `HS*` member's SHA-2 size
+ * (`teko::crypto::mac`). Only meaningful for `HS256`/`HS384`/`HS512`; any other member falls
+ * back to HMAC-SHA-256 (unreachable in practice — every call site is reached only for `HS*`
+ * algs).
+ *
+ * @param alg     the JWS algorithm
+ * @param secret  the shared HMAC secret
+ * @param msg     the bytes to authenticate (the JWS signing input)
+ * @return        the HMAC tag
+ */
+fn jose_hmac_of(alg: JwsAlg, secret: []byte, msg: []byte): []byte {
+    match alg {
+        HS384 => crypto::hmac_sha384_of(secret, msg)
+        HS512 => crypto::hmac_sha512_of(secret, msg)
+        _ => crypto::hmac_sha256_of(secret, msg)
+    }
+}
+
+/**
+ * The sub-slice `data[from..to)` as a fresh `[]byte` — this file's own copy of the block-slicing
+ * helper every crypto file in this project carries privately.
+ *
+ * @param data  the source slice
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `data[from..to)`
+ */
+fn jws_bytes_slice(data: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, data[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Encodes a P-256 `(r, s)` pair as the JOSE `ES256` fixed 64-byte `r || s` concatenation (RFC
+ * 7518 §3.4), each component zero-padded to exactly 32 bytes.
+ *
+ * @param sig  the raw ECDSA signature
+ * @return     the 64-byte JOSE signature, or a `CryptoError` if a component does not fit 32 bytes
+ * @throws     `CryptoError` when `r` or `s` is out of the representable 32-byte range
+ */
+fn jose_p256_sig_to_jose(sig: crypto::P256Signature): []byte | crypto::CryptoError {
+    var r_bytes = match bigint::to_bytes_be_padded(sig.r, 32) {
+        []byte as b => b
+        error => return crypto::crypto_error("jws: ES256 signature 'r' does not fit 32 bytes")
+    }
+    var s_bytes = match bigint::to_bytes_be_padded(sig.s, 32) {
+        []byte as b => b
+        error => return crypto::crypto_error("jws: ES256 signature 's' does not fit 32 bytes")
+    }
+    jose_bytes_concat(r_bytes, s_bytes)
+}
+
+/**
+ * ECDSA P-256 signing over `message` with a fresh random nonce per attempt (RFC 6979's threat
+ * model — a reused or predictable nonce leaks the private scalar), retrying on the
+ * astronomically rare invalid draw (`k` outside `[1, order)`, or a degenerate `r`/`s` of zero)
+ * `teko::crypto::ec_p256::ecdsa_p256_sign` reports as a `CryptoError`. A bounded 16-attempt cap
+ * turns a hypothetical broken CSPRNG into a `CryptoError` rather than an infinite loop.
+ *
+ * @param scalar   the signer's private scalar `d`
+ * @param message  the message to sign (the JWS signing input)
+ * @return         the raw `(r, s)` signature, or a `CryptoError` on repeated invalid nonce draws
+ * @throws         `CryptoError` after 16 failed nonce draws
+ */
+fn jose_es256_sign(scalar: bigint::BigInt, message: []byte): crypto::P256Signature | crypto::CryptoError {
+    var attempt: u64 = 0
+    loop {
+        if attempt >= 16 {
+            return crypto::crypto_error("jws: ES256 signing failed to derive a valid ECDSA nonce")
+        }
+        var k = bigint::from_bytes_be(crypto::secure_bytes(32))
+        match crypto::ecdsa_p256_sign(scalar, crypto::EcHashAlg::Sha256, message, k) {
+            crypto::P256Signature as sig => return sig
+            crypto::CryptoError => attempt = attempt + 1
+        }
+    }
+    crypto::crypto_error("jws: ES256 signing unreachable")
+}
+
+/**
+ * `HS*` signing: requires an imported `"oct"` secret.
+ *
+ * @param alg            the `HS*` algorithm
+ * @param key            the signer's key
+ * @param signing_input  the JWS signing input
+ * @return               the HMAC tag, or a `CryptoError` on a wrong key family
+ * @throws               `CryptoError` when `key` is not `JwkOct`
+ */
+fn jws_sign_hmac(alg: JwsAlg, key: @JoseKey(), signing_input: []byte): []byte | crypto::CryptoError {
+    match key {
+        JwkOct as k => jose_hmac_of(alg, k.secret, signing_input)
+        _ => crypto::crypto_error("jws: HS* signing requires an 'oct' key")
+    }
+}
+
+/**
+ * `RS*` signing: requires an imported RSA private key.
+ *
+ * @param alg            the `RS*` algorithm
+ * @param key            the signer's key
+ * @param signing_input  the JWS signing input
+ * @return               the RSASSA-PKCS1-v1_5 signature, or a `CryptoError`
+ * @throws               `CryptoError` when `key` is not `JwkRsaPrivate`, or per
+ *                        `rsa_sign_pkcs1v15` (a too-small modulus)
+ */
+fn jws_sign_rsa_pkcs1(alg: JwsAlg, key: @JoseKey(), signing_input: []byte): []byte | crypto::CryptoError {
+    match key {
+        JwkRsaPrivate as k => crypto::rsa_sign_pkcs1v15(k.key, jose_rsa_hash_alg(alg), signing_input)
+        _ => crypto::crypto_error("jws: RS* signing requires an RSA private key")
+    }
+}
+
+/**
+ * `PS*` signing: requires an imported RSA private key. Draws a fresh random salt (length = hash
+ * length, RFC 7518 §3.5) from `teko::crypto::secure_bytes` per signature.
+ *
+ * @param alg            the `PS*` algorithm
+ * @param key            the signer's key
+ * @param signing_input  the JWS signing input
+ * @return               the RSASSA-PSS signature, or a `CryptoError`
+ * @throws               `CryptoError` when `key` is not `JwkRsaPrivate`, or per `rsa_sign_pss`
+ *                        (a too-small modulus)
+ */
+fn jws_sign_rsa_pss(alg: JwsAlg, key: @JoseKey(), signing_input: []byte): []byte | crypto::CryptoError {
+    match key {
+        JwkRsaPrivate as k => crypto::rsa_sign_pss(k.key, jose_rsa_hash_alg(alg), signing_input, crypto::secure_bytes(jose_pss_salt_len(alg)))
+        _ => crypto::crypto_error("jws: PS* signing requires an RSA private key")
+    }
+}
+
+/**
+ * `ES256` signing: requires an imported EC P-256 private key.
+ *
+ * @param key            the signer's key
+ * @param signing_input  the JWS signing input
+ * @return               the 64-byte `r || s` signature, or a `CryptoError`
+ * @throws               `CryptoError` when `key` is not `JwkEcPrivate`, or per `jose_es256_sign`
+ */
+fn jws_sign_es256(key: @JoseKey(), signing_input: []byte): []byte | crypto::CryptoError {
+    match key {
+        JwkEcPrivate as k => {
+            var sig = match jose_es256_sign(k.scalar, signing_input) {
+                crypto::P256Signature as s => s
+                crypto::CryptoError as e => return e
+            }
+            jose_p256_sig_to_jose(sig)
+        }
+        _ => crypto::crypto_error("jws: ES256 signing requires an EC P-256 private key")
+    }
+}
+
+/**
+ * `EdDSA` signing: requires an imported OKP Ed25519 private key.
+ *
+ * @param key            the signer's key
+ * @param signing_input  the JWS signing input
+ * @return               the 64-byte Ed25519 signature, or a `CryptoError`
+ * @throws               `CryptoError` when `key` is not `JwkOkpPrivate`
+ */
+fn jws_sign_eddsa(key: @JoseKey(), signing_input: []byte): []byte | crypto::CryptoError {
+    match key {
+        JwkOkpPrivate as k => crypto::ed25519_sign(k.secret_key, signing_input)
+        _ => crypto::crypto_error("jws: EdDSA signing requires an OKP Ed25519 key")
+    }
+}
+
+/**
+ * Computes the raw signature bytes for `alg` over `signing_input` under `key` — the one flat
+ * exhaustive dispatch every `JwsAlg` member routes through.
+ *
+ * @param alg            the signature algorithm
+ * @param key            the signer's key
+ * @param signing_input  the JWS signing input
+ * @return               the raw (not-yet-base64url) signature bytes, or a `CryptoError`
+ * @throws               `CryptoError` on a key/alg family mismatch or an underlying primitive
+ *                        failure
+ */
+fn jws_sign_raw(alg: JwsAlg, key: @JoseKey(), signing_input: []byte): []byte | crypto::CryptoError {
+    match alg {
+        HS256 => jws_sign_hmac(alg, key, signing_input)
+        HS384 => jws_sign_hmac(alg, key, signing_input)
+        HS512 => jws_sign_hmac(alg, key, signing_input)
+        RS256 => jws_sign_rsa_pkcs1(alg, key, signing_input)
+        RS384 => jws_sign_rsa_pkcs1(alg, key, signing_input)
+        RS512 => jws_sign_rsa_pkcs1(alg, key, signing_input)
+        PS256 => jws_sign_rsa_pss(alg, key, signing_input)
+        PS384 => jws_sign_rsa_pss(alg, key, signing_input)
+        PS512 => jws_sign_rsa_pss(alg, key, signing_input)
+        ES256 => jws_sign_es256(key, signing_input)
+        EdDSA => jws_sign_eddsa(key, signing_input)
+    }
+}
+
+/**
+ * Signs `payload` under `alg`/`key` and returns the RFC 7515 §3.1 compact serialization: builds
+ * the protected header (merging `alg` into `protected_header_extra`, keys sorted ascending —
+ * `jose_build_header_json`), base64url-encodes header and payload, signs the resulting signing
+ * input, and appends the base64url-encoded signature.
+ *
+ * @param alg                     the signature algorithm
+ * @param key                     the signer's key (matching `alg`'s family — see the per-family
+ *                                `jws_sign_*` helpers)
+ * @param protected_header_extra  additional header members (e.g. `kid`), MUST NOT include `alg`
+ * @param payload                 the payload bytes to sign
+ * @return                        the compact serialization, or a `CryptoError`
+ * @throws                        `CryptoError` on a key/alg family mismatch or an underlying
+ *                                primitive failure
+ */
+exp fn jws_sign(alg: JwsAlg, key: @JoseKey(), protected_header_extra: json::JsonObject, payload: []byte): str | crypto::CryptoError {
+    var header_b64 = base64::encode_url_safe_no_pad(bytes_of_str(jose_build_header_json(alg, protected_header_extra)))
+    var payload_b64 = base64::encode_url_safe_no_pad(payload)
+    var sig = match jws_sign_raw(alg, key, jose_signing_input(header_b64, payload_b64)) {
+        []byte as s => s
+        crypto::CryptoError as e => return e
+    }
+    concat(header_b64, ".", payload_b64, ".", base64::encode_url_safe_no_pad(sig))
+}
+
+/**
+ * `HS*` verification: requires an imported `"oct"` secret; any other key family is `false`.
+ *
+ * @param alg            the `HS*` algorithm
+ * @param key            the candidate verification key
+ * @param signing_input  the JWS signing input
+ * @param sig            the candidate signature
+ * @return               `true` iff `sig` is the genuine HMAC tag under `key`
+ */
+fn jws_verify_hmac(alg: JwsAlg, key: @JoseKey(), signing_input: []byte, sig: []byte): bool {
+    match key {
+        JwkOct as k => crypto::ct_eq(jose_hmac_of(alg, k.secret, signing_input), sig)
+        _ => false
+    }
+}
+
+/**
+ * `RS*` verification: accepts an imported RSA public OR private key (a private JWK carries the
+ * public `(n, e)` too); any other key family is `false`.
+ *
+ * @param alg            the `RS*` algorithm
+ * @param key            the candidate verification key
+ * @param signing_input  the JWS signing input
+ * @param sig            the candidate signature
+ * @return               `true` iff `sig` is a valid RSASSA-PKCS1-v1_5 signature under `key`
+ */
+fn jws_verify_rsa_pkcs1(alg: JwsAlg, key: @JoseKey(), signing_input: []byte, sig: []byte): bool {
+    match key {
+        JwkRsaPublic as k => crypto::rsa_verify_pkcs1v15(k.key, jose_rsa_hash_alg(alg), signing_input, sig)
+        JwkRsaPrivate as k => crypto::rsa_verify_pkcs1v15(crypto::RsaPublicKey { n = k.key.n; e = k.key.e }, jose_rsa_hash_alg(alg), signing_input, sig)
+        _ => false
+    }
+}
+
+/**
+ * `PS*` verification: accepts an imported RSA public OR private key; any other key family is
+ * `false`.
+ *
+ * @param alg            the `PS*` algorithm
+ * @param key            the candidate verification key
+ * @param signing_input  the JWS signing input
+ * @param sig            the candidate signature
+ * @return               `true` iff `sig` is a valid RSASSA-PSS signature under `key`
+ */
+fn jws_verify_rsa_pss(alg: JwsAlg, key: @JoseKey(), signing_input: []byte, sig: []byte): bool {
+    match key {
+        JwkRsaPublic as k => crypto::rsa_verify_pss(k.key, jose_rsa_hash_alg(alg), signing_input, sig)
+        JwkRsaPrivate as k => crypto::rsa_verify_pss(crypto::RsaPublicKey { n = k.key.n; e = k.key.e }, jose_rsa_hash_alg(alg), signing_input, sig)
+        _ => false
+    }
+}
+
+/**
+ * `ES256` verification: accepts an imported EC P-256 public OR private key; any other key family
+ * is `false`. Rejects a signature that is not exactly 64 bytes before attempting to split it.
+ *
+ * @param key            the candidate verification key
+ * @param signing_input  the JWS signing input
+ * @param sig            the candidate signature
+ * @return               `true` iff `sig` is a valid ECDSA P-256 signature under `key`
+ */
+fn jws_verify_es256(key: @JoseKey(), signing_input: []byte, sig: []byte): bool {
+    if sig.len != 64 { return false }
+    var r = bigint::from_bytes_be(jws_bytes_slice(sig, 0, 32))
+    var s = bigint::from_bytes_be(jws_bytes_slice(sig, 32, 64))
+    match key {
+        JwkEcPublic as k => crypto::ecdsa_p256_verify(k.point, crypto::EcHashAlg::Sha256, signing_input, r, s)
+        JwkEcPrivate as k => crypto::ecdsa_p256_verify(k.point, crypto::EcHashAlg::Sha256, signing_input, r, s)
+        _ => false
+    }
+}
+
+/**
+ * `EdDSA` verification: accepts an imported OKP Ed25519 public OR private key (the public key is
+ * derived from the secret on the fly); any other key family is `false`.
+ *
+ * @param key            the candidate verification key
+ * @param signing_input  the JWS signing input
+ * @param sig            the candidate signature
+ * @return               `true` iff `sig` is a valid Ed25519 signature under `key`
+ */
+fn jws_verify_eddsa(key: @JoseKey(), signing_input: []byte, sig: []byte): bool {
+    match key {
+        JwkOkpPublic as k => crypto::ed25519_verify(k.public_key, signing_input, sig)
+        JwkOkpPrivate as k => {
+            var pk = match crypto::ed25519_public_key_from_secret(k.secret_key) {
+                []byte as p => p
+                crypto::CryptoError => return false
+            }
+            crypto::ed25519_verify(pk, signing_input, sig)
+        }
+        _ => false
+    }
+}
+
+/**
+ * Checks `sig` under `alg`/`key` over `signing_input` — the one flat exhaustive dispatch every
+ * `JwsAlg` member routes through. Never panics.
+ *
+ * @param alg            the signature algorithm
+ * @param key            the candidate verification key
+ * @param signing_input  the JWS signing input
+ * @param sig            the candidate signature
+ * @return               `true` iff `sig` is a genuine signature under `key`/`alg`
+ */
+fn jws_verify_raw(alg: JwsAlg, key: @JoseKey(), signing_input: []byte, sig: []byte): bool {
+    match alg {
+        HS256 => jws_verify_hmac(alg, key, signing_input, sig)
+        HS384 => jws_verify_hmac(alg, key, signing_input, sig)
+        HS512 => jws_verify_hmac(alg, key, signing_input, sig)
+        RS256 => jws_verify_rsa_pkcs1(alg, key, signing_input, sig)
+        RS384 => jws_verify_rsa_pkcs1(alg, key, signing_input, sig)
+        RS512 => jws_verify_rsa_pkcs1(alg, key, signing_input, sig)
+        PS256 => jws_verify_rsa_pss(alg, key, signing_input, sig)
+        PS384 => jws_verify_rsa_pss(alg, key, signing_input, sig)
+        PS512 => jws_verify_rsa_pss(alg, key, signing_input, sig)
+        ES256 => jws_verify_es256(key, signing_input, sig)
+        EdDSA => jws_verify_eddsa(key, signing_input, sig)
+    }
+}
+
+/**
+ * The protected header's `"alg"` member of an already-split JWS, mapped to a `JwsAlg`. Rejects a
+ * missing/non-string `"alg"` and, via `jws_alg_from_name`, `"none"` and any unsupported name.
+ *
+ * @param header_b64  the exact base64url header segment from the token
+ * @return            the header's algorithm, or a `CryptoError`
+ * @throws            `CryptoError` on invalid base64url/UTF-8/JSON, a non-object header, a
+ *                    missing/non-string `"alg"`, or an unsupported/insecure `"alg"` value
+ */
+fn jws_header_alg(header_b64: str): JwsAlg | crypto::CryptoError {
+    var header_bytes = match base64::decode_url_safe_no_pad(header_b64) {
+        []byte as b => b
+        error => return crypto::crypto_error("jws: invalid base64url header segment")
+    }
+    var header_text = match str_from_utf8(header_bytes) {
+        str as s => s
+        error => return crypto::crypto_error("jws: protected header is not valid UTF-8")
+    }
+    var header_value = match json::decode(header_text) {
+        (@JsonValue()) as v => v
+        error => return crypto::crypto_error("jws: protected header is not valid JSON")
+    }
+    var header_obj = match header_value {
+        json::JsonObject as o => o
+        _ => return crypto::crypto_error("jws: protected header is not a JSON object")
+    }
+    var alg_name = match json::object_get(header_obj, "alg") {
+        (@JsonValue()) as v => match v {
+            json::JsonString as s => s.value
+            _ => return crypto::crypto_error("jws: protected header 'alg' is not a string")
+        }
+        null => return crypto::crypto_error("jws: protected header is missing 'alg'")
+    }
+    jws_alg_from_name(alg_name)
+}
+
+/**
+ * Verifies an RFC 7515 §3.1 compact serialization and returns the decoded payload on success:
+ * splits the token, reads `alg` off the (untrusted) protected header, recomputes the signing
+ * input from the EXACT header/payload substrings on the wire, and checks the signature under
+ * `key`.
+ *
+ * @param key    the verifier's key (must match the header's `alg` family — see the per-family
+ *               `jws_verify_*` helpers)
+ * @param token  the compact serialization to verify
+ * @return       the decoded payload bytes, or a `CryptoError`
+ * @throws       `CryptoError` on a malformed token, an unsupported/insecure `alg`, a key/alg
+ *               family mismatch, or a signature that fails to verify
+ */
+exp fn jws_verify(key: @JoseKey(), token: str): []byte | crypto::CryptoError {
+    var parts = match jws_split_compact(token) {
+        JwsParts as p => p
+        crypto::CryptoError as e => return e
+    }
+    var alg = match jws_header_alg(parts.header_b64) {
+        JwsAlg as a => a
+        crypto::CryptoError as e => return e
+    }
+    var signing_input = jose_signing_input(parts.header_b64, parts.payload_b64)
+    if !jws_verify_raw(alg, key, signing_input, parts.signature) {
+        return crypto::crypto_error("jws: signature verification failed")
+    }
+    match base64::decode_url_safe_no_pad(parts.payload_b64) {
+        []byte as b => b
+        error => crypto::crypto_error("jws: invalid base64url payload segment")
+    }
+}

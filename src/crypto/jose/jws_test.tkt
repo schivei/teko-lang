@@ -1,0 +1,603 @@
+use teko::crypto
+use teko::encoding::base64
+use teko::encoding::json
+use teko::numeric::bigint
+
+/**
+ * Tests for `teko::crypto::jose::jws` and `teko::crypto::jose::jwk`: JWS compact serialization
+ * sign/verify across every algorithm this unit implements (`HS256/384/512`, `RS256`, `PS256`,
+ * `ES256`, `EdDSA`), plus JWK import through `jwk_to_sign_key`/`jwk_to_verify_key`.
+ *
+ * CROSS-CHECK METHODOLOGY (every vector below traces to one of these):
+ *   - HS256/384/512, RS256, and EdDSA are DETERMINISTIC. Their expected tokens are
+ *     BYTE-IDENTICAL to `PyJWT 2.7.0`'s `jwt.encode(payload, key, algorithm=...)` (PyJWT sorts
+ *     protected header keys by default — `json.dumps(header, sort_keys=True)` — which is exactly
+ *     why `jose_build_header_json` always renders `alg`/`kid`/`typ` in ascending key order: it is
+ *     the one header shape that reproduces PyJWT's bytes exactly). The RSA key came from
+ *     `cryptography 41.0.7`'s `rsa.generate_private_key`; the Ed25519 key from
+ *     `ed25519.Ed25519PrivateKey.generate()`.
+ *   - PS256 and ES256 are RANDOMIZED (PSS salt / ECDSA nonce), so no byte-identical token is
+ *     possible. Instead: (a) `jws_verify` is checked to ACCEPT a token PyJWT/`cryptography`
+ *     produced under the same key (`tok_ps256_external`/`tok_es256_external` — the strongest
+ *     "our verifier implements the real algorithm" proof), and (b) a fresh self-signed token
+ *     round-trips through this unit's own `jws_verify`.
+ *   - The claims payload for every JWT-shaped vector is the literal
+ *     `{"sub":"1234567890","name":"John Doe","iat":1516239022}` (RFC 7515 Appendix A.1's own
+ *     example payload), reproduced verbatim as `claims_json` so `jwt_sign`'s "sign the exact
+ *     bytes the caller supplies" contract lines up with PyJWT's own `json.dumps(payload,
+ *     separators=(",",":"))` (no `sort_keys` on the PAYLOAD — only the header sorts).
+ *
+ * This file lives under `teko::crypto::jose` (namespace = directory), so `jws_sign`/`jws_verify`/
+ * `jwt_sign`/`jwk_to_sign_key`/`jwk_to_verify_key`/... are called bare, mirroring
+ * `teko::crypto::rsa_test.tkt`.
+ */
+
+/**
+ * The RFC 7515 Appendix A.1 example claims, reproduced verbatim as the exact JSON text every
+ * PyJWT vector below signs (see this file's header for why the exact bytes matter).
+ *
+ * @return  the claims JSON text
+ */
+fn jt_claims(): str {
+    "{\"sub\":\"1234567890\",\"name\":\"John Doe\",\"iat\":1516239022}"
+}
+
+/**
+ * Decodes a base64url-no-pad string into bytes, failing the test (rather than propagating an
+ * `error`) on a malformed fixture — every call site below passes a value this file's own header
+ * already asserts is valid base64url.
+ *
+ * @param text  the base64url-no-pad text
+ * @return      the decoded bytes
+ */
+fn jt_b64u(text: str): []byte {
+    match base64::decode_url_safe_no_pad(text) {
+        []byte as b => b
+        error => { teko::assert::is_true(false); teko::list::empty() }
+    }
+}
+
+/**
+ * The `bigint::BigInt` a hex fixture decodes to, failing the test on malformed hex.
+ *
+ * @param hex  the hexadecimal text
+ * @return     the parsed value
+ */
+fn jt_bigint_hex(hex: str): bigint::BigInt {
+    match bigint::from_hex(hex) {
+        bigint::BigInt as b => b
+        error => { teko::assert::is_true(false); bigint::zero() }
+    }
+}
+
+/**
+ * The `str` value of a `str | CryptoError` a vector expects to succeed.
+ *
+ * @param r  the union to unwrap
+ * @return   the contained string
+ */
+fn jt_unwrap_str(r: str | crypto::CryptoError): str {
+    match r {
+        str as s => s
+        crypto::CryptoError => { teko::assert::is_true(false); "" }
+    }
+}
+
+/**
+ * The `@JoseKey()` value of a `@JoseKey() | CryptoError` a vector expects to succeed.
+ *
+ * @param r  the union to unwrap
+ * @return   the contained key
+ */
+fn jt_unwrap_key(r: @JoseKey() | crypto::CryptoError): @JoseKey() {
+    match r {
+        crypto::CryptoError => { teko::assert::is_true(false); JwkOct { secret = teko::list::empty() } }
+        (@JoseKey()) as k => k
+    }
+}
+
+/**
+ * The RFC 4231-style shared HMAC secret every HS*/`"oct"` fixture below uses, ASCII `"your-256-
+ * bit-secret"` — the jwt.io/PyJWT canonical demo key, base64url `eW91ci0yNTYtYml0LXNlY3JldA`.
+ *
+ * @return  the `"oct"` key
+ */
+fn jt_hs_key(): @JoseKey() {
+    JwkOct { secret = bytes_of_str("your-256-bit-secret") }
+}
+
+/**
+ * HS256 signing matches PyJWT's `jwt.encode(claims, "your-256-bit-secret", algorithm="HS256")`
+ * byte-for-byte (HMAC is deterministic), and `jws_verify`/`jwt_verify` accept the result and
+ * recover the exact claims text.
+ */
+#test
+fn hs256_matches_pyjwt_and_round_trips() {
+    var want = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::HS256, jt_hs_key(), jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_hs_key(), tok)), jt_claims())
+}
+
+/**
+ * HS384 signing matches PyJWT's `algorithm="HS384"` byte-for-byte.
+ */
+#test
+fn hs384_matches_pyjwt() {
+    var want = "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.RGFdh_VuEuURSubru7xP4rbaA4boUyueI7rEm75l1cNdE9gQ7H6mx2DYpauBjX5S"
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::HS384, jt_hs_key(), jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_hs_key(), tok)), jt_claims())
+}
+
+/**
+ * HS512 signing matches PyJWT's `algorithm="HS512"` byte-for-byte.
+ */
+#test
+fn hs512_matches_pyjwt() {
+    var want = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.pazba9Pj009HgANP4pTCQAHpXNU7pVbjIGff_plktSzsa9rXTGzFngaawzXGEO6Q0Hx5dtGi-dMDlIadV81o3Q"
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::HS512, jt_hs_key(), jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_hs_key(), tok)), jt_claims())
+}
+
+/**
+ * `jws_sign` with an extra `kid` header (and no `typ`, unlike `jwt_sign`) matches PyJWT's
+ * `api_jws.encode(b"hello jose", secret, algorithm="HS256", headers={"kid": "test-key-1"})` —
+ * proving the sorted-header builder and a non-JSON raw payload both work.
+ */
+#test
+fn jws_sign_with_kid_header_matches_pyjwt() {
+    var want = "eyJhbGciOiJIUzI1NiIsImtpZCI6InRlc3Qta2V5LTEifQ.aGVsbG8gam9zZQ.OOm9VsEn9dDeIYqT8vfRH-4VeCDazZAOcm3FeQCK-DA"
+    var extra_keys: []str = teko::list::empty()
+    extra_keys = teko::list::push(extra_keys, "kid")
+    var extra_values: []@JsonValue() = teko::list::empty()
+    extra_values = teko::list::push(extra_values, json::JsonString { value = "test-key-1" })
+    var extra = json::JsonObject { keys = extra_keys; values = extra_values }
+    var tok = jt_unwrap_str(jws_sign(JwsAlg::HS256, jt_hs_key(), extra, bytes_of_str("hello jose")))
+    teko::assert::eq_str(tok, want)
+}
+
+/**
+ * The 1024-bit RSA test key's modulus, as hex (`cryptography.hazmat`-generated; see this file's
+ * header for the cross-check methodology).
+ *
+ * @return  the modulus hex text
+ */
+fn jt_rsa_n_hex(): str {
+    "d32978d22989dbe238af01ee93a20f06975b3b9530f3bd775c9ea2bb32aa7a278ae2724ca7c1ec82b7512154e2f1f0e5f049dbfd8ca18e1b1f087607bb74df3279635d7c58b8b199e5040d81b66bec95329d7af456287aec9c26144963898b299a5f2d1cb6a32a27a5c4e097f3bcd624d4fafff470952b721c31f8e2e3b05f25"
+}
+
+/**
+ * The RSA test key's public exponent, as hex (`65537`).
+ *
+ * @return  the exponent hex text
+ */
+fn jt_rsa_e_hex(): str {
+    "10001"
+}
+
+/**
+ * The RSA test key's private exponent, as hex.
+ *
+ * @return  the private exponent hex text
+ */
+fn jt_rsa_d_hex(): str {
+    "8be262569f0be36d266dd112d21c3e65f86888bd1993ae44df477bb81525580ccff599106ce58b9f407f6f5c43875135920bebbf38a5617558068be22d6d8bd938847516b9763d7e41130354993cc1542a7058584d6fc5f736eab1a0197619f592e91cd0846b6f1e250c5a835513e32d9522f78c7ee9ecf9b1aaf5b4e70616a1"
+}
+
+/**
+ * The assembled RSA test private key (raw `RsaPrivateKey`, not via a JWK) — the "oct"-analogous
+ * shortcut `jwk_rsa_sign_verify_round_trip` cross-checks against the full JWK-import path.
+ *
+ * @return  the `"RSA"` sign key
+ */
+fn jt_rsa_sign_key(): @JoseKey() {
+    var priv = match crypto::rsa_private_key_from_hex(jt_rsa_n_hex(), jt_rsa_d_hex(), jt_rsa_e_hex()) {
+        crypto::RsaPrivateKey as k => k
+        crypto::CryptoError => { teko::assert::is_true(false); crypto::RsaPrivateKey { n = bigint::zero(); d = bigint::zero(); e = bigint::zero() } }
+    }
+    JwkRsaPrivate { key = priv }
+}
+
+/**
+ * The assembled RSA test public key.
+ *
+ * @return  the `"RSA"` verify key
+ */
+fn jt_rsa_verify_key(): @JoseKey() {
+    var pubkey = match crypto::rsa_public_key_from_hex(jt_rsa_n_hex(), jt_rsa_e_hex()) {
+        crypto::RsaPublicKey as k => k
+        crypto::CryptoError => { teko::assert::is_true(false); crypto::RsaPublicKey { n = bigint::zero(); e = bigint::zero() } }
+    }
+    JwkRsaPublic { key = pubkey }
+}
+
+/**
+ * RS256 signing matches PyJWT's `jwt.encode(claims, pem, algorithm="RS256")` byte-for-byte
+ * (RSASSA-PKCS1-v1_5 is deterministic), and `jwt_verify` accepts it.
+ */
+#test
+fn rs256_matches_pyjwt_and_round_trips() {
+    var want = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SQ2CF8JygIt9BWngEpeNwNiq5JyS3IWsHSEbZe5kn38Ip-X2cvCw9sEzOHUadPWlIEu_Azg98J-rZXCWNnJohUWw7vgGWmwpdgWTSXlrndymfVsFDHMB9-4G81_6bCS1f4QG8y0Ox-mnH-WLKzc-ZuJj1hAYIdxWv37xg4I1sc8"
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::RS256, jt_rsa_sign_key(), jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_rsa_verify_key(), tok)), jt_claims())
+}
+
+/**
+ * `jws_verify` ACCEPTS a PS256 token `PyJWT`/`cryptography` produced under the same RSA key (PSS
+ * is randomized, so no byte-identical token is possible — see this file's header), and a
+ * freshly self-signed PS256 token round-trips.
+ */
+#test
+fn ps256_verify_accepts_pyjwt_token_and_round_trips() {
+    var external = "eyJhbGciOiJQUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.QI8EvxV8Y7UfQpAeL7VyyruWQmqj2-5pJ-bJFAupBbk2JRSmfuSUMFnww4A9zzH7QBex8XN6M6ZrKEwyCRBtPlwetBI02eTN4Y5a7j-U5UKHoGg2y70bb0sqHWlz9Mtu22aoC0AAah63VvS9-IIErLZgKm0IWfT579GytvfyOng"
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_rsa_verify_key(), external)), jt_claims())
+
+    var fresh = jt_unwrap_str(jwt_sign(JwsAlg::PS256, jt_rsa_sign_key(), jt_claims()))
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_rsa_verify_key(), fresh)), jt_claims())
+}
+
+/**
+ * The P-256 test key's private scalar `d`, as hex (`cryptography.hazmat`-generated).
+ *
+ * @return  the scalar hex text
+ */
+fn jt_ec_d_hex(): str {
+    "951b2b9f52db2b6a705f78266b65c844fbcbf22c3db3626c544d22074480530c"
+}
+
+/**
+ * The P-256 test key's public X coordinate, as hex.
+ *
+ * @return  the X coordinate hex text
+ */
+fn jt_ec_x_hex(): str {
+    "567a3af8b8e40a9da1a19d0210e1eab0850896491a0b8c31037f79ed9e2fbab7"
+}
+
+/**
+ * The P-256 test key's public Y coordinate, as hex.
+ *
+ * @return  the Y coordinate hex text
+ */
+fn jt_ec_y_hex(): str {
+    "f585ef934bafe467a832531ed3b8dfb3fc0f17774f14a59a3be160c7d1ca25a4"
+}
+
+/**
+ * The assembled P-256 test public point.
+ *
+ * @return  the P-256 point
+ */
+fn jt_ec_point(): crypto::P256Point {
+    crypto::P256Point { infinity = false; x = jt_bigint_hex(jt_ec_x_hex()); y = jt_bigint_hex(jt_ec_y_hex()) }
+}
+
+/**
+ * The assembled EC P-256 test sign key.
+ *
+ * @return  the `"EC"` sign key
+ */
+fn jt_ec_sign_key(): @JoseKey() {
+    JwkEcPrivate { scalar = jt_bigint_hex(jt_ec_d_hex()); point = jt_ec_point() }
+}
+
+/**
+ * The assembled EC P-256 test verify key.
+ *
+ * @return  the `"EC"` verify key
+ */
+fn jt_ec_verify_key(): @JoseKey() {
+    JwkEcPublic { point = jt_ec_point() }
+}
+
+/**
+ * `jws_verify` ACCEPTS an ES256 token `PyJWT`/`cryptography` produced under the same P-256 key
+ * (ECDSA is randomized — see this file's header), and a freshly self-signed ES256 token
+ * round-trips.
+ */
+#test
+fn es256_verify_accepts_pyjwt_token_and_round_trips() {
+    var external = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.O7GzTu-CJEtWSZo7CGYwciPk99yiWCURYDACeXmho0-qbO12AzrBV80bvRfE6R5cxRhUpe_853fv04jmtaNx3Q"
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_ec_verify_key(), external)), jt_claims())
+
+    var fresh = jt_unwrap_str(jwt_sign(JwsAlg::ES256, jt_ec_sign_key(), jt_claims()))
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_ec_verify_key(), fresh)), jt_claims())
+}
+
+/**
+ * The Ed25519 test key's secret seed, as base64url-no-pad (`cryptography.hazmat`-generated).
+ *
+ * @return  the secret seed, base64url-no-pad
+ */
+fn jt_ed_priv_b64u(): str {
+    "-TLtZ18kn2REdmmWuDxULLXyyPOcZPnJO5-krISxxL4"
+}
+
+/**
+ * The Ed25519 test key's public key, as base64url-no-pad.
+ *
+ * @return  the public key, base64url-no-pad
+ */
+fn jt_ed_pub_b64u(): str {
+    "mXsvrCbC7teFND62ezrDQiZlqp52zl1ZGxWOE9HUh3M"
+}
+
+/**
+ * The assembled Ed25519 test sign key.
+ *
+ * @return  the `"OKP"` sign key
+ */
+fn jt_ed_sign_key(): @JoseKey() {
+    JwkOkpPrivate { secret_key = jt_b64u(jt_ed_priv_b64u()) }
+}
+
+/**
+ * The assembled Ed25519 test verify key.
+ *
+ * @return  the `"OKP"` verify key
+ */
+fn jt_ed_verify_key(): @JoseKey() {
+    JwkOkpPublic { public_key = jt_b64u(jt_ed_pub_b64u()) }
+}
+
+/**
+ * EdDSA signing matches PyJWT's `jwt.encode(claims, pem, algorithm="EdDSA")` byte-for-byte
+ * (Ed25519 signing is deterministic), and `jwt_verify` accepts it.
+ */
+#test
+fn eddsa_matches_pyjwt_and_round_trips() {
+    var want = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.fiHH-0Z9EiEdfbcFa60z_k24fcw0k6frrRkgCLEWzLc7_M03h9MnJ50G1N8G-mNeYwL876A8QVUcWgxtkZXCCg"
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::EdDSA, jt_ed_sign_key(), jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(jt_ed_verify_key(), tok)), jt_claims())
+}
+
+/**
+ * `jws_verify` rejects `alg:"none"` (the unsecured-JWS algorithm) with a `CryptoError`, never
+ * accepting it as a valid (unsigned) signature.
+ */
+#test
+fn jws_verify_rejects_alg_none() {
+    var tok = "eyJhbGciOiJub25lIn0.e30."
+    match jws_verify(jt_hs_key(), tok) {
+        []byte => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * `jws_verify` rejects a tampered payload (one flipped base64url character) with a
+ * `CryptoError`, never accepting a mismatched signature.
+ */
+#test
+fn jws_verify_rejects_tampered_payload() {
+    var tampered = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfA.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    match jws_verify(jt_hs_key(), tampered) {
+        []byte => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * `jws_verify` rejects a genuine token checked under the WRONG `"oct"` secret with a
+ * `CryptoError`.
+ */
+#test
+fn jws_verify_rejects_wrong_key() {
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::HS256, jt_hs_key(), jt_claims()))
+    var wrong_key = JwkOct { secret = bytes_of_str("a different secret entirely") }
+    match jws_verify(wrong_key, tok) {
+        []byte => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * `jws_verify` rejects an `RS256`-alg token checked under an `"oct"` key (a key/alg family
+ * mismatch), never silently accepting it.
+ */
+#test
+fn jws_verify_rejects_key_family_mismatch() {
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::RS256, jt_rsa_sign_key(), jt_claims()))
+    match jws_verify(jt_hs_key(), tok) {
+        []byte => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * `jws_alg_name`/`jws_alg_from_name` round-trip for every supported algorithm, and
+ * `jws_alg_from_name` rejects `"none"` and the gated `"ES384"`/`"ES512"`.
+ */
+#test
+fn alg_name_round_trips_and_gates_unsupported() {
+    teko::assert::eq_str(jws_alg_name(JwsAlg::HS256), "HS256")
+    teko::assert::eq_str(jws_alg_name(JwsAlg::PS512), "PS512")
+    teko::assert::eq_str(jws_alg_name(JwsAlg::EdDSA), "EdDSA")
+
+    match jws_alg_from_name("HS256") {
+        JwsAlg => teko::assert::is_true(true)
+        crypto::CryptoError => teko::assert::is_true(false)
+    }
+    match jws_alg_from_name("none") {
+        JwsAlg => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+    match jws_alg_from_name("ES384") {
+        JwsAlg => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+    match jws_alg_from_name("ES512") {
+        JwsAlg => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * The `"oct"` JWK JSON document for `jt_hs_key`'s secret (RFC 7518 §6.4.1).
+ *
+ * @return  the JWK JSON text
+ */
+fn jt_jwk_oct_json(): str {
+    "{\"kty\":\"oct\",\"k\":\"eW91ci0yNTYtYml0LXNlY3JldA\"}"
+}
+
+/**
+ * Importing and using an `"oct"` JWK produces the SAME HS256 token as the raw `JwkOct` struct
+ * (`hs256_matches_pyjwt_and_round_trips`) — proving `jwk_to_sign_key`/`jwk_to_verify_key` extract
+ * the identical secret bytes.
+ */
+#test
+fn jwk_oct_sign_verify_round_trip() {
+    var want = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    var sign_key = jt_unwrap_key(jwk_to_sign_key(jt_jwk_oct_json()))
+    var verify_key = jt_unwrap_key(jwk_to_verify_key(jt_jwk_oct_json()))
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::HS256, sign_key, jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(verify_key, tok)), jt_claims())
+}
+
+/**
+ * The `"RSA"` private JWK JSON document for `jt_rsa_sign_key`'s key (RFC 7518 §6.3.2), and its
+ * public-only counterpart (§6.3.1).
+ *
+ * @return  the private JWK JSON text
+ */
+fn jt_jwk_rsa_private_json(): str {
+    "{\"kty\":\"RSA\",\"n\":\"0yl40imJ2-I4rwHuk6IPBpdbO5Uw8713XJ6iuzKqeieK4nJMp8HsgrdRIVTi8fDl8Enb_YyhjhsfCHYHu3TfMnljXXxYuLGZ5QQNgbZr7JUynXr0Vih67JwmFEljiYspml8tHLajKielxOCX87zWJNT6__RwlStyHDH44uOwXyU\",\"e\":\"AQAB\",\"d\":\"i-JiVp8L420mbdES0hw-ZfhoiL0Zk65E30d7uBUlWAzP9ZkQbOWLn0B_b1xDh1E1kgvrvzilYXVYBoviLW2L2TiEdRa5dj1-QRMDVJk8wVQqcFhYTW_F9zbqsaAZdhn1kukc0IRrbx4lDFqDVRPjLZUi94x-6ez5sar1tOcGFqE\"}"
+}
+
+/**
+ * @return  the public-only `"RSA"` JWK JSON text (same `n`/`e` as `jt_jwk_rsa_private_json`)
+ */
+fn jt_jwk_rsa_public_json(): str {
+    "{\"kty\":\"RSA\",\"n\":\"0yl40imJ2-I4rwHuk6IPBpdbO5Uw8713XJ6iuzKqeieK4nJMp8HsgrdRIVTi8fDl8Enb_YyhjhsfCHYHu3TfMnljXXxYuLGZ5QQNgbZr7JUynXr0Vih67JwmFEljiYspml8tHLajKielxOCX87zWJNT6__RwlStyHDH44uOwXyU\",\"e\":\"AQAB\"}"
+}
+
+/**
+ * Importing and using an `"RSA"` JWK produces the SAME RS256 token as the raw `JwkRsaPrivate`
+ * struct (`rs256_matches_pyjwt_and_round_trips`), and the public-only JWK (no `d`) verifies it.
+ */
+#test
+fn jwk_rsa_sign_verify_round_trip() {
+    var want = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SQ2CF8JygIt9BWngEpeNwNiq5JyS3IWsHSEbZe5kn38Ip-X2cvCw9sEzOHUadPWlIEu_Azg98J-rZXCWNnJohUWw7vgGWmwpdgWTSXlrndymfVsFDHMB9-4G81_6bCS1f4QG8y0Ox-mnH-WLKzc-ZuJj1hAYIdxWv37xg4I1sc8"
+    var sign_key = jt_unwrap_key(jwk_to_sign_key(jt_jwk_rsa_private_json()))
+    var verify_key = jt_unwrap_key(jwk_to_verify_key(jt_jwk_rsa_public_json()))
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::RS256, sign_key, jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(verify_key, tok)), jt_claims())
+}
+
+/**
+ * `jwk_to_sign_key` fails closed with a `CryptoError` when the JWK is public-only (no `d`) —
+ * importing for signing REQUIRES the private component.
+ */
+#test
+fn jwk_to_sign_key_rejects_public_only_rsa() {
+    match jwk_to_sign_key(jt_jwk_rsa_public_json()) {
+        (@JoseKey()) as k => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * The `"EC"` private JWK JSON document for `jt_ec_sign_key`'s key (RFC 7518 §6.2.2), and its
+ * public-only counterpart (§6.2.1).
+ *
+ * @return  the private JWK JSON text
+ */
+fn jt_jwk_ec_private_json(): str {
+    "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"Vno6-LjkCp2hoZ0CEOHqsIUIlkkaC4wxA3957Z4vurc\",\"y\":\"9YXvk0uv5GeoMlMe07jfs_wPF3dPFKWaO-Fgx9HKJaQ\",\"d\":\"lRsrn1LbK2pwX3gma2XIRPvL8iw9s2JsVE0iB0SAUww\"}"
+}
+
+/**
+ * @return  the public-only `"EC"` JWK JSON text (same `x`/`y` as `jt_jwk_ec_private_json`)
+ */
+fn jt_jwk_ec_public_json(): str {
+    "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"Vno6-LjkCp2hoZ0CEOHqsIUIlkkaC4wxA3957Z4vurc\",\"y\":\"9YXvk0uv5GeoMlMe07jfs_wPF3dPFKWaO-Fgx9HKJaQ\"}"
+}
+
+/**
+ * Importing an `"EC"` JWK (private for signing, public-only for verifying — no `d`) round-trips
+ * an ES256 token (randomized, so checked by round-trip rather than byte-identity — see this
+ * file's header).
+ */
+#test
+fn jwk_ec_sign_verify_round_trip() {
+    var sign_key = jt_unwrap_key(jwk_to_sign_key(jt_jwk_ec_private_json()))
+    var verify_key = jt_unwrap_key(jwk_to_verify_key(jt_jwk_ec_public_json()))
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::ES256, sign_key, jt_claims()))
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(verify_key, tok)), jt_claims())
+}
+
+/**
+ * `jwk_to_verify_key` rejects an `"EC"` JWK naming an unimplemented curve (`P-384`, the `ES384`
+ * curve — see this project's `jose.tks` header) with a `CryptoError`, never silently treating it
+ * as P-256.
+ */
+#test
+fn jwk_rejects_unsupported_ec_curve() {
+    var bad = "{\"kty\":\"EC\",\"crv\":\"P-384\",\"x\":\"Vno6-LjkCp2hoZ0CEOHqsIUIlkkaC4wxA3957Z4vurc\",\"y\":\"9YXvk0uv5GeoMlMe07jfs_wPF3dPFKWaO-Fgx9HKJaQ\"}"
+    match jwk_to_verify_key(bad) {
+        (@JoseKey()) as k => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * The `"OKP"` private JWK JSON document for `jt_ed_sign_key`'s key (RFC 8037 §2), and its
+ * public-only counterpart.
+ *
+ * @return  the private JWK JSON text
+ */
+fn jt_jwk_okp_private_json(): str {
+    "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"mXsvrCbC7teFND62ezrDQiZlqp52zl1ZGxWOE9HUh3M\",\"d\":\"-TLtZ18kn2REdmmWuDxULLXyyPOcZPnJO5-krISxxL4\"}"
+}
+
+/**
+ * @return  the public-only `"OKP"` JWK JSON text (same `x` as `jt_jwk_okp_private_json`)
+ */
+fn jt_jwk_okp_public_json(): str {
+    "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"mXsvrCbC7teFND62ezrDQiZlqp52zl1ZGxWOE9HUh3M\"}"
+}
+
+/**
+ * Importing and using an `"OKP"` JWK produces the SAME EdDSA token as the raw `JwkOkpPrivate`
+ * struct (`eddsa_matches_pyjwt_and_round_trips`), and the public-only JWK verifies it.
+ */
+#test
+fn jwk_okp_sign_verify_round_trip() {
+    var want = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.fiHH-0Z9EiEdfbcFa60z_k24fcw0k6frrRkgCLEWzLc7_M03h9MnJ50G1N8G-mNeYwL876A8QVUcWgxtkZXCCg"
+    var sign_key = jt_unwrap_key(jwk_to_sign_key(jt_jwk_okp_private_json()))
+    var verify_key = jt_unwrap_key(jwk_to_verify_key(jt_jwk_okp_public_json()))
+    var tok = jt_unwrap_str(jwt_sign(JwsAlg::EdDSA, sign_key, jt_claims()))
+    teko::assert::eq_str(tok, want)
+    teko::assert::eq_str(jt_unwrap_str(jwt_verify(verify_key, tok)), jt_claims())
+}
+
+/**
+ * `jwk_to_verify_key` rejects malformed JSON, a non-object top-level value, a missing `kty`, and
+ * an unsupported `kty` — every failure a `CryptoError`, never a panic.
+ */
+#test
+fn jwk_import_rejects_malformed_input() {
+    match jwk_to_verify_key("not json") {
+        (@JoseKey()) as k => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+    match jwk_to_verify_key("[1,2,3]") {
+        (@JoseKey()) as k => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+    match jwk_to_verify_key("{\"k\":\"AAAA\"}") {
+        (@JoseKey()) as k => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+    match jwk_to_verify_key("{\"kty\":\"unknown-family\"}") {
+        (@JoseKey()) as k => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}

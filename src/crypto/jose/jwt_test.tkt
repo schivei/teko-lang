@@ -1,0 +1,116 @@
+use teko::crypto
+
+/**
+ * Tests for `teko::crypto::jose::jwt`: claims round-tripping and the `jwt_claim_str`/
+ * `jwt_claim_number` read accessors, over the RFC 7515 Appendix A.1 example claims (see
+ * `jws_test.tkt`'s header for the full HS256/RS256/EdDSA cross-check methodology `jwt_sign`
+ * itself already inherits from `jws_sign`).
+ *
+ * This file lives under `teko::crypto::jose` (namespace = directory), so `jwt_sign`/`jwt_verify`/
+ * `jwt_claim_str`/`jwt_claim_number` are called bare.
+ */
+
+/**
+ * The RFC 7515 Appendix A.1 example claims (see `jws_test.tkt`'s `jt_claims`).
+ *
+ * @return  the claims JSON text
+ */
+fn jwtt_claims(): str {
+    "{\"sub\":\"1234567890\",\"name\":\"John Doe\",\"iat\":1516239022}"
+}
+
+/**
+ * The shared HMAC `"oct"` test key (see `jws_test.tkt`'s `jt_hs_key`).
+ *
+ * @return  the `"oct"` key
+ */
+fn jwtt_key(): @JoseKey() {
+    JwkOct { secret = bytes_of_str("your-256-bit-secret") }
+}
+
+/**
+ * The `str` value of a `str | CryptoError` a vector expects to succeed.
+ *
+ * @param r  the union to unwrap
+ * @return   the contained string
+ */
+fn jwtt_unwrap_str(r: str | crypto::CryptoError): str {
+    match r {
+        str as s => s
+        crypto::CryptoError => { teko::assert::is_true(false); "" }
+    }
+}
+
+/**
+ * `jwt_sign` then `jwt_verify` recovers the EXACT claims text unchanged — the payload is signed
+ * and returned verbatim, never re-serialized.
+ */
+#test
+fn jwt_sign_verify_round_trip() {
+    var tok = jwtt_unwrap_str(jwt_sign(JwsAlg::HS256, jwtt_key(), jwtt_claims()))
+    teko::assert::eq_str(jwtt_unwrap_str(jwt_verify(jwtt_key(), tok)), jwtt_claims())
+}
+
+/**
+ * `jwt_claim_str` reads the `"sub"` and `"name"` string claims out of the claims JSON.
+ */
+#test
+fn jwt_claim_str_reads_string_claims() {
+    teko::assert::eq_str(jwtt_unwrap_str(jwt_claim_str(jwtt_claims(), "sub")), "1234567890")
+    teko::assert::eq_str(jwtt_unwrap_str(jwt_claim_str(jwtt_claims(), "name")), "John Doe")
+}
+
+/**
+ * `jwt_claim_number` reads the `"iat"` `NumericDate` claim out of the claims JSON.
+ */
+#test
+fn jwt_claim_number_reads_numeric_claim() {
+    match jwt_claim_number(jwtt_claims(), "iat") {
+        f64 as v => teko::assert::eq_f64(v, 1516239022.0, 0.0001)
+        crypto::CryptoError => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * `jwt_claim_str`/`jwt_claim_number` return a `CryptoError` for a missing claim, never a panic.
+ */
+#test
+fn jwt_claim_missing_is_crypto_error() {
+    match jwt_claim_str(jwtt_claims(), "missing") {
+        str => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+    match jwt_claim_number(jwtt_claims(), "missing") {
+        f64 => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * `jwt_claim_str` rejects a claim whose value is not a JSON string (e.g. `"iat"`, a number), and
+ * `jwt_claim_number` rejects a claim whose value is not a JSON number (e.g. `"sub"`, a string).
+ */
+#test
+fn jwt_claim_wrong_type_is_crypto_error() {
+    match jwt_claim_str(jwtt_claims(), "iat") {
+        str => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+    match jwt_claim_number(jwtt_claims(), "sub") {
+        f64 => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * `jwt_verify` rejects a tampered JWT the same way `jws_verify` does (`jwt_verify` is a thin
+ * layer over it — see `jws_test.tkt`'s `jws_verify_rejects_tampered_payload`).
+ */
+#test
+fn jwt_verify_rejects_tampered_token() {
+    var tampered = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfA.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    match jwt_verify(jwtt_key(), tampered) {
+        str => teko::assert::is_true(false)
+        crypto::CryptoError => teko::assert::is_true(true)
+    }
+}
