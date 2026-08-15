@@ -1161,14 +1161,18 @@ zip; brotli/lzma/zstd; #embed→VFS) → `math` (bigint·checked). Cada lane pov
 `crypto::rand`/`openssl`/`gpg` · todo `net` · `db`(FFI+wire-socket) · `odbc` · `rpc` → KEYSTONE-BUF+§16(Doc-1);
 `ui` → P4.
 
-**Progresso stdlib monomórfica (crypto):** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`) · `kdf` ✅
-(`e804f474` — HKDF/PBKDF2; vetor c=16.7M cortado do CI por tempo) · `cipher` ✅ (`d5299449` — AES
-128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20, cmac_aes/gmac_aes ligados) · `aead` 🔄 (GCM/CCM/ChaCha20-Poly1305,
-rodando). Costuras crypto: `3des` legacy · `password` (Argon2id/scrypt) · `pk` (bigint) · `rand` (FFI).
-Depois do crypto: `sort` mono → `encoding` → `compress` → `math`. **CI:** todos os drains batem no baseline
-(11 jobs nativas .32/#594 = vermelho-conhecido por design; tier VM verde). Validação de vetores no CI
-(subagentes sem `gh` auth pra buscar o compilador real — a disciplina do projeto valida por CI; cada
-subagente passa `teko fmt --check` local, que pega lex/parse).
+**Progresso stdlib monomórfica — NÚCLEO CRYPTO ✅ COMPLETO:** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`)
+· `kdf` ✅ (`e804f474`) · `cipher` ✅ (`d5299449` — AES 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20,
+cmac_aes/gmac_aes) · `aead` ✅ (`92f48fe6` — AES-GCM, ChaCha20-Poly1305, AES-CCM). Costuras crypto pra
+depois: `3des` legacy · `password` (Argon2id/scrypt) · `pk` (bigint) · `rand` (FFI). Próximo na fatia
+monomórfica: `sort` mono → `encoding` → `compress` → `math`.
+
+**VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
+subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
+`teko fmt --check` verde local. O **verde in-tree** vem na sequência do dono: (1) Doc 2 → 100%; (2) corrigir
+os testes da **perna C** do CI → fecha verde (é onde as fixtures `.tkt` carimbam, via backend C); (3) Doc 1
+→ então a **perna native** fecha. Os subagentes não têm `gh` auth pra buscar o compilador real (blocker de
+ambiente), então a prova offline é o interim aceito até a perna C.
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
