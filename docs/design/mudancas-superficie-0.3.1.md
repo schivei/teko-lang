@@ -1163,9 +1163,18 @@ zip; brotli/lzma/zstd; #embed→VFS) → `math` (bigint·checked). Cada lane pov
 
 **Progresso stdlib monomórfica — NÚCLEO CRYPTO ✅ COMPLETO:** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`)
 · `kdf` ✅ (`e804f474`) · `cipher` ✅ (`d5299449` — AES 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20,
-cmac_aes/gmac_aes) · `aead` ✅ (`92f48fe6` — AES-GCM, ChaCha20-Poly1305, AES-CCM). Costuras crypto pra
-depois: `3des` legacy · `password` (Argon2id/scrypt) · `pk` (bigint) · `rand` (FFI). Próximo na fatia
-monomórfica: `sort` mono → `encoding` → `compress` → `math`.
+cmac_aes/gmac_aes) · `aead` ✅ (`92f48fe6` — AES-GCM, ChaCha20-Poly1305, AES-CCM).
+
+**ASSINATURA DE DOCUMENTO (ruling do dono 2026-08-15 — JSON e XML precisam assinar).** No catálogo §1.5:
+`crypto::jose` (JWS/JWE/JWK/JWT sobre JSON) · `crypto::xmldsig` (XML-DSig/C14N/XML-Enc sobre XML) ·
+`crypto::cose` (COSE sobre CBOR). Cadeia de dep (tudo monomórfico, cabe na Fase 1): **JWS/HMAC (HS256)** já
+dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
+`crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
+
+**Ordem de drive monomórfico (revisada):** núcleo crypto ✅ → `sort` mono → `encoding` (json✅/xml/base64/
+cbor/…) → `math` (bigint) → `crypto::pk` → `crypto::jose`+`xmldsig`+`cose` (assinatura de documento) →
+`compress` (completar) → `password`. Costuras que ficam FFI/pesquisa: `rand` (getrandom FFI), `3des` legacy,
+`openssl`/`gpg` (providers FFI).
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
