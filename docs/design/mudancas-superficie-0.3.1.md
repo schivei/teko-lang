@@ -1161,12 +1161,14 @@ zip; brotli/lzma/zstd; #embed→VFS) → `math` (bigint·checked). Cada lane pov
 `crypto::rand`/`openssl`/`gpg` · todo `net` · `db`(FFI+wire-socket) · `odbc` · `rpc` → KEYSTONE-BUF+§16(Doc-1);
 `ui` → P4.
 
-**Progresso stdlib monomórfica (crypto):** `hash` ✅ (`f861db43` — SHA-2/3, SHAKE, BLAKE2b, MD5/SHA-1) ·
-`mac` ✅ (`6f6d5ca4` — HMAC, Poly1305, CMAC/GMAC cipher-seam) · `kdf` 🔄 (HKDF/PBKDF2, rodando) · `cipher`
-⏳ (AES/ChaCha20 — destrava CMAC/GMAC full) · `aead` ⏳. Depois: `sort` mono → `encoding` → `compress` →
-`math`. **CI:** drains verdes contra o baseline (11-jobs nativas .32/#594 = vermelho-conhecido; tier VM
-verde). Validação de vetores u32 no CI (blocker de ambiente: subagentes sem `gh` auth pra buscar o
-compilador real — a disciplina do projeto já valida por CI).
+**Progresso stdlib monomórfica (crypto):** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`) · `kdf` ✅
+(`e804f474` — HKDF/PBKDF2; vetor c=16.7M cortado do CI por tempo) · `cipher` ✅ (`d5299449` — AES
+128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20, cmac_aes/gmac_aes ligados) · `aead` 🔄 (GCM/CCM/ChaCha20-Poly1305,
+rodando). Costuras crypto: `3des` legacy · `password` (Argon2id/scrypt) · `pk` (bigint) · `rand` (FFI).
+Depois do crypto: `sort` mono → `encoding` → `compress` → `math`. **CI:** todos os drains batem no baseline
+(11 jobs nativas .32/#594 = vermelho-conhecido por design; tier VM verde). Validação de vetores no CI
+(subagentes sem `gh` auth pra buscar o compilador real — a disciplina do projeto valida por CI; cada
+subagente passa `teko fmt --check` local, que pega lex/parse).
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
