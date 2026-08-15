@@ -150,3 +150,56 @@ pub fn make_enhi(): EnHi { return EnHi::ctor() }
  * @return i64  the constructed provider's greeting
  */
 pub fn factory_greet(): i64 { return make_enhi().greet() }
+
+/**
+ * A STATEFUL singleton — the probe that pins the §7 Part-A seam (`svc_scope_expr`). Every claim of a
+ * `singleton` must reach the SAME materialization (the one cached in the task-root region), so a
+ * mutation made through one claim is visible through the next. Before the seam was wired every claim
+ * built a fresh instance and this counted 1, 1.
+ *
+ * @since §7 Part A
+ */
+type Tally = service singleton {
+    n: i64
+    /** @return self  a fresh `Tally` at zero — called ONCE per run, on the first claim. */
+    pub static fn ctor(): Tally { return Tally { n = 0 } }
+    /** @return i64  the counter AFTER this increment. */
+    pub fn bump(): i64 { self.n = self.n + 1; return self.n }
+}
+
+/**
+ * A STATEFUL transient — the counterpart probe. A `transient` names NO arena slot, so every claim
+ * builds fresh and each one counts from zero. This is what keeps the seam honest: if the slot logic
+ * ever leaked into `Transient`, this scenario changes.
+ *
+ * @since §7 Part A
+ */
+type Spark = service transient {
+    n: i64
+    /** @return self  a fresh `Spark` at zero — called on EVERY claim. */
+    pub static fn ctor(): Spark { return Spark { n = 0 } }
+    /** @return i64  the counter AFTER this increment. */
+    pub fn bump(): i64 { self.n = self.n + 1; return self.n }
+}
+
+/**
+ * Two singleton claims share ONE instance: the second `bump` continues the first's count.
+ *
+ * @return i64  12 — the first claim reads 1, the second reads 2
+ */
+pub fn singleton_shared(): i64 {
+    var a = svc<Tally>().bump()
+    var b = svc<Tally>().bump()
+    return a * 10 + b
+}
+
+/**
+ * Two transient claims are INDEPENDENT: each starts from zero.
+ *
+ * @return i64  11 — both claims read 1
+ */
+pub fn transient_independent(): i64 {
+    var a = svc<Spark>().bump()
+    var b = svc<Spark>().bump()
+    return a * 10 + b
+}
