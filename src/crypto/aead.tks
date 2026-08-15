@@ -1,0 +1,530 @@
+/**
+ * `teko::crypto::aead` (C5) — the authenticated-encryption-with-associated-data family: the
+ * modes that combine confidentiality (a cipher) with integrity (a MAC over the ciphertext and
+ * the associated data) in one operation, so a single `seal`/`open` pair both encrypts and
+ * authenticates. Per the stdlib catalog §1.5 (`teko::crypto::aead`: AES-256-GCM · AES-CCM ·
+ * ChaCha20-Poly1305) this is pure Teko over `[]byte`, no OS dependency, testable via `.tkt`
+ * against the published NIST/RFC known-answer vectors.
+ *
+ * FLAT SURFACE (the convention shipped by `teko::crypto::hash`/`mac`/`kdf`/`cipher`): the
+ * functions live directly under `teko::crypto` — `teko::crypto::aes_gcm_seal`, not
+ * `teko::crypto::aead::…` — so they compose the sibling primitives already in this namespace
+ * by direct call.
+ *
+ * AEAD IS COMPOSITION, NOT REIMPLEMENTATION. Every mode here is assembled from the cipher and
+ * MAC primitives of `teko::crypto::cipher` and `teko::crypto::mac`:
+ *   - AES-GCM (NIST SP 800-38D): GCTR over `aes_ctr` for confidentiality, `ghash` for the
+ *     GF(2^128) universal hash, and `aes_encrypt_block_ks` for the hash subkey `H = E_K(0)` and
+ *     the tag mask `E_K(J0)`. The 96-bit-nonce path (`J0 = IV ‖ 0^31 ‖ 1`).
+ *   - ChaCha20-Poly1305 (RFC 8439 §2.8): `chacha20` for confidentiality (message counter 1) and
+ *     for the one-time Poly1305 key (block-0 keystream, counter 0), `poly1305` for the tag over
+ *     the padded AAD ‖ ciphertext ‖ length block.
+ *   - AES-CCM (NIST SP 800-38C): CBC-MAC over the formatted `B0 ‖ AAD ‖ plaintext` blocks for the
+ *     tag, CTR over `aes_ctr` (counter blocks `A_i`) for confidentiality, the tag masked by
+ *     `E_K(A0)`. Nonce 7..13 bytes, tag length one of {4,6,8,10,12,14,16}.
+ *
+ * TAG VERIFICATION IS CONSTANT-TIME. `open` recomputes the tag and compares it against the
+ * received tag with `ct_eq` (the fold-with-OR compare that never short-circuits), so a forged
+ * tag leaks nothing through timing and a failure returns a `CryptoError` — never a panic, never
+ * a partial plaintext.
+ *
+ * PUBLIC SURFACE IS `exp` (catalog §0 framing); the block formatting, padding, and length-block
+ * plumbing are file-local private.
+ *
+ * NO INDEX-ASSIGNMENT. Every output buffer, counter block, and MAC input is built via
+ * `teko::list::push` (functional growth) — the same discipline the sibling crypto files use.
+ */
+
+/**
+ * The sub-slice `data[from..to)` as a fresh `[]byte` — the block/segment splitter this file uses
+ * (each crypto file carries its own file-local slicer per the namespace convention).
+ *
+ * @param data  the source slice
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `data[from..to)`
+ */
+fn aead_slice(data: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, data[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Appends every byte of `src` to `dst` — how the modes concatenate ciphertext with tag and
+ * assemble their MAC inputs.
+ *
+ * @param dst  the buffer to extend
+ * @param src  the bytes to append
+ * @return     `dst` followed by `src`
+ */
+fn aead_append(dst: []byte, src: []byte): []byte {
+    var out = dst
+    var i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        out = teko::list::push(out, src[i])
+        i++
+    }
+    out
+}
+
+/**
+ * A fresh 16-byte all-zero block — the CBC-MAC seed and the GHASH-subkey / all-zero cipher input.
+ *
+ * @return  16 zero bytes
+ */
+fn aead_zero16(): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 16 { break }
+        out = teko::list::push(out, 0 to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Right-pads `buf` with zero bytes to the next multiple of 16 (a no-op when it is already a
+ * multiple, including the empty buffer) — the `pad16` of RFC 8439 §2.8 and the block alignment
+ * GHASH / CBC-MAC inputs require.
+ *
+ * @param buf  the buffer to pad
+ * @return     `buf` extended with zeros to a whole number of 16-byte blocks
+ */
+fn aead_pad16(buf: []byte): []byte {
+    var out = buf
+    loop {
+        if out.len % 16 == 0 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    out
+}
+
+/**
+ * XORs the first `n` bytes of two slices into a fresh `n`-byte slice — the tag mask (GCM's full
+ * 16-byte `S ⊕ E_K(J0)`, CCM's `T ⊕ MSB_t(E_K(A0))` truncated to the tag length).
+ *
+ * @param a  the first slice (at least `n` bytes)
+ * @param b  the second slice (at least `n` bytes)
+ * @param n  the number of bytes to XOR
+ * @return   a fresh `n`-byte slice with `a[i] ⊕ b[i]` at every index
+ */
+fn aead_xor_n(a: []byte, b: []byte, n: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Appends the low `n` bytes of `x` to `buf` in big-endian order — the length-field and
+ * counter-field encoder GCM (8-byte bit lengths) and CCM (`q`-byte counters) share.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the value whose low `n` bytes are emitted, most-significant first
+ * @param n    the number of bytes to emit (1..8)
+ * @return     `buf` with `x`'s `n` big-endian bytes appended
+ */
+fn aead_push_be(buf: []byte, x: u64, n: u64): []byte {
+    var out = buf
+    var i = n
+    loop {
+        if i == 0 { break }
+        i--
+        out = teko::list::push(out, ((x >> (i * 8)) & 0xFF) to byte)
+    }
+    out
+}
+
+/**
+ * Appends `x` to `buf` as 8 little-endian bytes — the length-block encoder ChaCha20-Poly1305
+ * uses (RFC 8439 §2.8: `le64(len(AAD)) ‖ le64(len(ciphertext))`).
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the value to emit, least-significant byte first
+ * @return     `buf` with `x`'s eight little-endian bytes appended
+ */
+fn aead_push_le64(buf: []byte, x: u64): []byte {
+    var out = buf
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        out = teko::list::push(out, ((x >> (i * 8)) & 0xFF) to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * The GCM pre-counter block `J0` for a 96-bit IV (NIST SP 800-38D §7.1): `IV ‖ 0^31 ‖ 1`, i.e.
+ * the 12 IV bytes followed by `0x00000001`.
+ *
+ * @param nonce  the 12-byte (96-bit) initialization vector
+ * @return       the 16-byte `J0` block
+ */
+fn gcm_j0(nonce: []byte): []byte {
+    var out = aead_slice(nonce, 0, nonce.len)
+    out = teko::list::push(out, 0 to byte)
+    out = teko::list::push(out, 0 to byte)
+    out = teko::list::push(out, 0 to byte)
+    out = teko::list::push(out, 1 to byte)
+    out
+}
+
+/**
+ * Increments the low 32 bits of a 16-byte counter block mod 2^32, leaving the leading 96 bits
+ * fixed (NIST SP 800-38D §6.2 `inc32`) — the block GCTR begins at, `inc32(J0)`.
+ *
+ * @param block  the 16-byte counter block
+ * @return       the fresh 16-byte block with its rightmost 32-bit word incremented
+ */
+fn gcm_inc32(block: []byte): []byte {
+    var c = ((block[12] to u32) << 24) | ((block[13] to u32) << 16) | ((block[14] to u32) << 8) | (block[15] to u32)
+    c = teko::math::wrapping_add_u32(c, 1)
+    var out = aead_slice(block, 0, 12)
+    out = teko::list::push(out, ((c >> 24) & 0xFF) to byte)
+    out = teko::list::push(out, ((c >> 16) & 0xFF) to byte)
+    out = teko::list::push(out, ((c >> 8) & 0xFF) to byte)
+    out = teko::list::push(out, (c & 0xFF) to byte)
+    out
+}
+
+/**
+ * Assembles the GHASH input for GCM (NIST SP 800-38D §7.1): the AAD zero-padded to a 16-byte
+ * boundary, the ciphertext zero-padded to a 16-byte boundary, then the length block
+ * `[len(AAD)]_64 ‖ [len(C)]_64` measured in BITS.
+ *
+ * @param aad  the additional authenticated data, any length
+ * @param ct   the ciphertext, any length
+ * @return     the pre-assembled GHASH input bytes
+ */
+fn gcm_ghash_input(aad: []byte, ct: []byte): []byte {
+    var out = aead_pad16(aead_slice(aad, 0, aad.len))
+    out = aead_pad16(aead_append(out, ct))
+    out = aead_push_be(out, aad.len * 8, 8)
+    out = aead_push_be(out, ct.len * 8, 8)
+    out
+}
+
+/**
+ * Computes the 16-byte GCM authentication tag over `ct`/`aad` under an expanded key: the GHASH of
+ * the assembled input, masked by `E_K(J0)` (NIST SP 800-38D §7.1, tag `T = GCTR_K(J0, S)` with a
+ * full-length tag). Shared by `aes_gcm_seal` and `aes_gcm_open` so both derive the tag identically.
+ *
+ * @param ks     the expanded AES key
+ * @param nonce  the 12-byte (96-bit) IV
+ * @param aad    the additional authenticated data, any length
+ * @param ct     the ciphertext to authenticate, any length
+ * @return       the 16-byte tag, or a `CryptoError` if GHASH rejects its (16-byte) hash subkey
+ * @throws       `CryptoError` propagated from `ghash`
+ */
+fn gcm_tag(ks: AesKey, nonce: []byte, aad: []byte, ct: []byte): []byte | CryptoError {
+    var h = aes_encrypt_block_ks(ks, aead_zero16())
+    var s = match ghash(h, gcm_ghash_input(aad, ct)) { []byte as x => x; CryptoError as e => return e }
+    aead_xor_n(s, aes_encrypt_block_ks(ks, gcm_j0(nonce)), 16)
+}
+
+/**
+ * AES-GCM authenticated encryption (NIST SP 800-38D) with a 96-bit nonce — the enterprise-norm
+ * AEAD (AES-256-GCM when the key is 32 bytes; AES-128/192-GCM follow the key size). Encrypts
+ * `plaintext` under GCTR and appends the 16-byte authentication tag over `aad ‖ ciphertext`.
+ *
+ * @param key        the AES key (16, 24, or 32 bytes)
+ * @param nonce      the 12-byte (96-bit) nonce — MUST be unique per key (M.3: the caller owns that
+ *                   contract; nonce reuse is catastrophic for GCM)
+ * @param aad        the additional authenticated data, authenticated but not encrypted, any length
+ * @param plaintext  the message to encrypt, any length (including empty)
+ * @return           `ciphertext ‖ tag` (`plaintext.len + 16` bytes), or a `CryptoError` on a bad
+ *                   key/nonce length
+ * @throws           `CryptoError` when `key.len` is not 16/24/32 or `nonce.len != 12`
+ */
+exp fn aes_gcm_seal(key: []byte, nonce: []byte, aad: []byte, plaintext: []byte): []byte | CryptoError {
+    if nonce.len != 12 { return crypto_error("aes_gcm: nonce must be exactly 12 bytes (96-bit)") }
+    var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
+    var ct = match aes_ctr(key, gcm_inc32(gcm_j0(nonce)), plaintext) { []byte as c => c; CryptoError as e => return e }
+    var tag = match gcm_tag(ks, nonce, aad, ct) { []byte as t => t; CryptoError as e => return e }
+    aead_append(ct, tag)
+}
+
+/**
+ * AES-GCM authenticated decryption (NIST SP 800-38D): splits `ct_tag` into ciphertext and the
+ * trailing 16-byte tag, recomputes the tag over `aad ‖ ciphertext`, and — only if the recomputed
+ * tag matches the received tag in constant time — returns the GCTR-decrypted plaintext. A tag
+ * mismatch yields a `CryptoError` and no plaintext (M.1: authentication failure never leaks the
+ * decryption).
+ *
+ * @param key     the AES key (16, 24, or 32 bytes)
+ * @param nonce   the 12-byte (96-bit) nonce used to seal
+ * @param aad     the additional authenticated data presented at seal time
+ * @param ct_tag  the sealed `ciphertext ‖ tag`, at least 16 bytes
+ * @return        the recovered plaintext, or a `CryptoError` on a bad length or a failed tag
+ * @throws        `CryptoError` when the key/nonce length is invalid, `ct_tag` is shorter than the
+ *                16-byte tag, or the authentication tag does not verify
+ */
+exp fn aes_gcm_open(key: []byte, nonce: []byte, aad: []byte, ct_tag: []byte): []byte | CryptoError {
+    if nonce.len != 12 { return crypto_error("aes_gcm: nonce must be exactly 12 bytes (96-bit)") }
+    if ct_tag.len < 16 { return crypto_error("aes_gcm: input shorter than the 16-byte tag") }
+    var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
+    var ct = aead_slice(ct_tag, 0, ct_tag.len - 16)
+    var recv = aead_slice(ct_tag, ct_tag.len - 16, ct_tag.len)
+    var tag = match gcm_tag(ks, nonce, aad, ct) { []byte as t => t; CryptoError as e => return e }
+    if !ct_eq(tag, recv) { return crypto_error("aes_gcm: authentication failed") }
+    aes_ctr(key, gcm_inc32(gcm_j0(nonce)), ct)
+}
+
+/**
+ * Derives the ChaCha20-Poly1305 one-time Poly1305 key (RFC 8439 §2.6): the first 32 bytes of the
+ * ChaCha20 block-0 keystream under `key`/`nonce` (counter 0).
+ *
+ * @param key    the 32-byte ChaCha20 key
+ * @param nonce  the 12-byte nonce
+ * @return       the 32-byte one-time Poly1305 key, or a `CryptoError` on a bad key/nonce length
+ * @throws       `CryptoError` propagated from `chacha20`
+ */
+fn chacha_poly_key(key: []byte, nonce: []byte): []byte | CryptoError {
+    var block0 = match chacha20(key, nonce, 0 to u32, aead_append(aead_zero16(), aead_zero16())) { []byte as b => b; CryptoError as e => return e }
+    aead_slice(block0, 0, 32)
+}
+
+/**
+ * Assembles the Poly1305 MAC input for ChaCha20-Poly1305 (RFC 8439 §2.8): the AAD zero-padded to
+ * a 16-byte boundary, the ciphertext zero-padded to a 16-byte boundary, then
+ * `le64(len(AAD)) ‖ le64(len(ciphertext))` measured in BYTES.
+ *
+ * @param aad  the additional authenticated data, any length
+ * @param ct   the ciphertext, any length
+ * @return     the pre-assembled Poly1305 MAC input bytes
+ */
+fn chacha_mac_input(aad: []byte, ct: []byte): []byte {
+    var out = aead_pad16(aead_slice(aad, 0, aad.len))
+    out = aead_pad16(aead_append(out, ct))
+    out = aead_push_le64(out, aad.len)
+    out = aead_push_le64(out, ct.len)
+    out
+}
+
+/**
+ * ChaCha20-Poly1305 authenticated encryption (RFC 8439 §2.8): encrypts `plaintext` with ChaCha20
+ * (message counter 1) and appends the 16-byte Poly1305 tag over the padded `aad ‖ ciphertext ‖
+ * length block`, keyed by the block-0 one-time key.
+ *
+ * @param key        the 32-byte ChaCha20 key
+ * @param nonce      the 12-byte nonce — MUST be unique per key (M.3: nonce reuse breaks the scheme)
+ * @param aad        the additional authenticated data, authenticated but not encrypted, any length
+ * @param plaintext  the message to encrypt, any length (including empty)
+ * @return           `ciphertext ‖ tag` (`plaintext.len + 16` bytes), or a `CryptoError` on a bad
+ *                   key/nonce length
+ * @throws           `CryptoError` when `key.len != 32` or `nonce.len != 12`
+ */
+exp fn chacha20_poly1305_seal(key: []byte, nonce: []byte, aad: []byte, plaintext: []byte): []byte | CryptoError {
+    var otk = match chacha_poly_key(key, nonce) { []byte as k => k; CryptoError as e => return e }
+    var ct = match chacha20(key, nonce, 1 to u32, plaintext) { []byte as c => c; CryptoError as e => return e }
+    var tag = match poly1305(otk, chacha_mac_input(aad, ct)) { []byte as t => t; CryptoError as e => return e }
+    aead_append(ct, tag)
+}
+
+/**
+ * ChaCha20-Poly1305 authenticated decryption (RFC 8439 §2.8): splits `ct_tag` into ciphertext and
+ * the trailing 16-byte tag, recomputes the Poly1305 tag over the padded `aad ‖ ciphertext ‖ length
+ * block`, and — only if it matches the received tag in constant time — returns the ChaCha20-
+ * decrypted plaintext. A tag mismatch yields a `CryptoError` and no plaintext.
+ *
+ * @param key     the 32-byte ChaCha20 key
+ * @param nonce   the 12-byte nonce used to seal
+ * @param aad     the additional authenticated data presented at seal time
+ * @param ct_tag  the sealed `ciphertext ‖ tag`, at least 16 bytes
+ * @return        the recovered plaintext, or a `CryptoError` on a bad length or a failed tag
+ * @throws        `CryptoError` when the key/nonce length is invalid, `ct_tag` is shorter than the
+ *                16-byte tag, or the authentication tag does not verify
+ */
+exp fn chacha20_poly1305_open(key: []byte, nonce: []byte, aad: []byte, ct_tag: []byte): []byte | CryptoError {
+    if ct_tag.len < 16 { return crypto_error("chacha20_poly1305: input shorter than the 16-byte tag") }
+    var otk = match chacha_poly_key(key, nonce) { []byte as k => k; CryptoError as e => return e }
+    var ct = aead_slice(ct_tag, 0, ct_tag.len - 16)
+    var recv = aead_slice(ct_tag, ct_tag.len - 16, ct_tag.len)
+    var tag = match poly1305(otk, chacha_mac_input(aad, ct)) { []byte as t => t; CryptoError as e => return e }
+    if !ct_eq(tag, recv) { return crypto_error("chacha20_poly1305: authentication failed") }
+    chacha20(key, nonce, 1 to u32, ct)
+}
+
+/**
+ * Validates the CCM nonce and tag-length parameters and returns the derived length-field size
+ * `q = 15 − nonce.len` (NIST SP 800-38C §5.4): the nonce is 7..13 bytes and the tag length is one
+ * of {4,6,8,10,12,14,16}.
+ *
+ * @param nonce    the CCM nonce
+ * @param tag_len  the requested tag length in bytes
+ * @return         the length-field size `q` (2..8), or a `CryptoError` on an invalid parameter
+ * @throws         `CryptoError` when `nonce.len` is outside 7..13 or `tag_len` is not an even value
+ *                 in 4..16
+ */
+fn ccm_params(nonce: []byte, tag_len: u64): u64 | CryptoError {
+    if nonce.len < 7 || nonce.len > 13 { return crypto_error("aes_ccm: nonce must be 7..13 bytes") }
+    if tag_len < 4 || tag_len > 16 || tag_len % 2 != 0 { return crypto_error("aes_ccm: tag length must be one of 4,6,8,10,12,14,16") }
+    15 - nonce.len
+}
+
+/**
+ * Builds the CCM first block `B0` (NIST SP 800-38C §A.2.1): the flags byte (Adata bit, encoded
+ * `(t−2)/2`, encoded `q−1`), the nonce `N`, and the plaintext length `Q` as `q` big-endian bytes.
+ *
+ * @param nonce    the CCM nonce (`n` bytes, `n = 15 − q`)
+ * @param q        the length-field size in bytes
+ * @param aad_len  the AAD length (only its presence — nonzero — sets the Adata flag)
+ * @param pt_len   the plaintext length, encoded into the `q`-byte length field
+ * @param tag_len  the tag length in bytes, encoded into the flags
+ * @return         the 16-byte `B0` block
+ */
+fn ccm_b0(nonce: []byte, q: u64, aad_len: u64, pt_len: u64, tag_len: u64): []byte {
+    var adata = if aad_len > 0 { 1 to u64 } else { 0 to u64 }
+    var flag_byte = 64 * adata + 8 * ((tag_len - 2) / 2) + (q - 1)
+    var out: []byte = teko::list::empty()
+    out = teko::list::push(out, (flag_byte & 0xFF) to byte)
+    out = aead_append(out, nonce)
+    out = aead_push_be(out, pt_len, q)
+    out
+}
+
+/**
+ * Formats the CCM associated-data blocks (NIST SP 800-38C §A.2.2): a length prefix encoding
+ * `len(AAD)` — 2 bytes for `a < 2^16 − 2^8`, `0xff 0xfe` plus 4 bytes for `a < 2^32`, else
+ * `0xff 0xff` plus 8 bytes — followed by the AAD, zero-padded to a 16-byte boundary. Empty AAD
+ * contributes no blocks.
+ *
+ * @param aad  the additional authenticated data, any length
+ * @return     the formatted, block-aligned AAD bytes (empty when `aad` is empty)
+ */
+fn ccm_format_aad(aad: []byte): []byte {
+    if aad.len == 0 { return teko::list::empty() }
+    var out: []byte = teko::list::empty()
+    if aad.len < 65280 {
+        out = aead_push_be(out, aad.len, 2)
+    } else if aad.len < 4294967296 {
+        out = teko::list::push(out, 0xff to byte)
+        out = teko::list::push(out, 0xfe to byte)
+        out = aead_push_be(out, aad.len, 4)
+    } else {
+        out = teko::list::push(out, 0xff to byte)
+        out = teko::list::push(out, 0xff to byte)
+        out = aead_push_be(out, aad.len, 8)
+    }
+    out = aead_append(out, aad)
+    aead_pad16(out)
+}
+
+/**
+ * Assembles the full CBC-MAC input for CCM: `B0 ‖ formatted-AAD ‖ zero-padded-plaintext`, every
+ * segment 16-byte aligned (NIST SP 800-38C §A.2).
+ *
+ * @param nonce    the CCM nonce
+ * @param q        the length-field size in bytes
+ * @param aad      the additional authenticated data, any length
+ * @param pt       the plaintext, any length
+ * @param tag_len  the tag length in bytes (folded into `B0`)
+ * @return         the block-aligned CBC-MAC input
+ */
+fn ccm_mac_input(nonce: []byte, q: u64, aad: []byte, pt: []byte, tag_len: u64): []byte {
+    var out = ccm_b0(nonce, q, aad.len, pt.len, tag_len)
+    out = aead_append(out, ccm_format_aad(aad))
+    aead_pad16(aead_append(out, pt))
+}
+
+/**
+ * Runs plain CBC-MAC over the block-aligned CCM input (NIST SP 800-38C §6.1): `Y ← E_K(Y ⊕ B_i)`
+ * for each 16-byte block, `Y` seeded to zero (so the first step is `E_K(B0)`).
+ *
+ * @param ks      the expanded AES key
+ * @param blocks  the block-aligned CBC-MAC input (a whole number of 16-byte blocks)
+ * @return        the 16-byte CBC-MAC result `Y` (the tag is its leading bytes)
+ */
+fn ccm_cbc_mac(ks: AesKey, blocks: []byte): []byte {
+    var y = aead_zero16()
+    var off: u64 = 0
+    loop {
+        if off >= blocks.len { break }
+        y = aes_encrypt_block_ks(ks, aead_xor_n(y, aead_slice(blocks, off, off + 16), 16))
+        off = off + 16
+    }
+    y
+}
+
+/**
+ * Builds a CCM counter block `A_i` (NIST SP 800-38C §A.3): the flags byte `q−1`, the nonce `N`,
+ * and the counter `i` as `q` big-endian bytes. `A0` masks the tag; `A1, A2, …` keystream the
+ * plaintext.
+ *
+ * @param nonce  the CCM nonce
+ * @param q      the length-field size in bytes
+ * @param i      the counter value for this block
+ * @return       the 16-byte counter block `A_i`
+ */
+fn ccm_ctr_block(nonce: []byte, q: u64, i: u64): []byte {
+    var out: []byte = teko::list::empty()
+    out = teko::list::push(out, ((q - 1) & 0xFF) to byte)
+    out = aead_append(out, nonce)
+    aead_push_be(out, i, q)
+}
+
+/**
+ * AES-CCM authenticated encryption (NIST SP 800-38C): CBC-MACs the formatted `B0 ‖ AAD ‖
+ * plaintext` for the tag `T`, CTR-encrypts the plaintext from counter block `A1`, masks the tag
+ * with `E_K(A0)`, and returns `ciphertext ‖ MSB_tag_len(T ⊕ E_K(A0))`.
+ *
+ * @param key        the AES key (16, 24, or 32 bytes)
+ * @param nonce      the 7..13-byte nonce — MUST be unique per key (M.3: the caller owns that
+ *                   contract)
+ * @param aad        the additional authenticated data, authenticated but not encrypted, any length
+ * @param plaintext  the message to encrypt, any length (including empty)
+ * @param tag_len    the tag length in bytes, one of {4,6,8,10,12,14,16}
+ * @return           `ciphertext ‖ tag` (`plaintext.len + tag_len` bytes), or a `CryptoError` on a
+ *                   bad key/nonce length or tag length
+ * @throws           `CryptoError` when `key.len` is not 16/24/32, `nonce.len` is outside 7..13, or
+ *                   `tag_len` is not an even value in 4..16
+ */
+exp fn aes_ccm_seal(key: []byte, nonce: []byte, aad: []byte, plaintext: []byte, tag_len: u64): []byte | CryptoError {
+    var q = match ccm_params(nonce, tag_len) { u64 as v => v; CryptoError as e => return e }
+    var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
+    var y = ccm_cbc_mac(ks, ccm_mac_input(nonce, q, aad, plaintext, tag_len))
+    var ct = match aes_ctr(key, ccm_ctr_block(nonce, q, 1), plaintext) { []byte as c => c; CryptoError as e => return e }
+    var s0 = aes_encrypt_block_ks(ks, ccm_ctr_block(nonce, q, 0))
+    aead_append(ct, aead_xor_n(y, s0, tag_len))
+}
+
+/**
+ * AES-CCM authenticated decryption (NIST SP 800-38C): splits `ct_tag` into ciphertext and the
+ * trailing `tag_len`-byte tag, CTR-decrypts the ciphertext from counter block `A1`, recomputes the
+ * CBC-MAC tag over the recovered plaintext, and — only if the masked tag matches the received tag
+ * in constant time — returns the plaintext. A tag mismatch yields a `CryptoError` and no plaintext.
+ *
+ * @param key      the AES key (16, 24, or 32 bytes)
+ * @param nonce    the 7..13-byte nonce used to seal
+ * @param aad      the additional authenticated data presented at seal time
+ * @param ct_tag   the sealed `ciphertext ‖ tag`, at least `tag_len` bytes
+ * @param tag_len  the tag length in bytes, one of {4,6,8,10,12,14,16}
+ * @return         the recovered plaintext, or a `CryptoError` on a bad length or a failed tag
+ * @throws         `CryptoError` when a parameter is invalid, `ct_tag` is shorter than `tag_len`, or
+ *                 the authentication tag does not verify
+ */
+exp fn aes_ccm_open(key: []byte, nonce: []byte, aad: []byte, ct_tag: []byte, tag_len: u64): []byte | CryptoError {
+    var q = match ccm_params(nonce, tag_len) { u64 as v => v; CryptoError as e => return e }
+    var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
+    if ct_tag.len < tag_len { return crypto_error("aes_ccm: input shorter than the tag") }
+    var ct = aead_slice(ct_tag, 0, ct_tag.len - tag_len)
+    var recv = aead_slice(ct_tag, ct_tag.len - tag_len, ct_tag.len)
+    var pt = match aes_ctr(key, ccm_ctr_block(nonce, q, 1), ct) { []byte as p => p; CryptoError as e => return e }
+    var y = ccm_cbc_mac(ks, ccm_mac_input(nonce, q, aad, pt, tag_len))
+    var s0 = aes_encrypt_block_ks(ks, ccm_ctr_block(nonce, q, 0))
+    if !ct_eq(aead_xor_n(y, s0, tag_len), recv) { return crypto_error("aes_ccm: authentication failed") }
+    pt
+}
