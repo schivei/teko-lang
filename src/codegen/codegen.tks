@@ -1211,6 +1211,134 @@ fn cg_find_decl_ns_scan(prog: CgProg, last: str, qual: str, ref_ns: str, qualifi
 // (W10b.CLASS increment 3) is `name` a class (as opposed to a struct/enum/…)? A class is a
 // REFERENCE type — every use lowers to a pointer (emit_type_expr), so field access through one
 // needs a deref (`->`, i.e. `(*recv).field`) instead of a struct's plain `.field`.
+/**
+ * cg_is_struct_named — is `name` a declared value `struct` (as opposed to a class/interface/…)? The
+ * value-type twin of `cg_is_class_named`, and the gate for the item-14 fat-struct receiver ABI: only a
+ * VALUE struct passes its receiver as a header pointer, because a class is already a pointer.
+ *
+ * @param prog  the typed program (decl lookup)
+ * @param name  the resolved type name
+ * @return      true iff `name`'s decl body is a StructBody
+ * @since item-14
+ */
+/**
+ * cg_var_is_struct_self — is this variable reference the `self` receiver of a VALUE-STRUCT method,
+ * i.e. the one name this backend holds as a pointer while the checker types it as the struct itself
+ * (item-14 §13.2)?
+ *
+ * No function-level context is threaded to answer it, and none is needed: `self` is a keyword, so it
+ * binds ONLY as a method receiver, and a `self` whose resolved type is a value struct can therefore
+ * only be a value-struct method's receiver. A CLASS method's `self` has a class type and is excluded,
+ * because a class value is already a pointer here and the field-access path derefs it on its own.
+ *
+ * @param prog  the typed program (decl lookup)
+ * @param e     the variable's typed expression node (carries the resolved type)
+ * @param v     the variable node
+ * @return      true iff `v` is a value-struct `self` and must be dereferenced
+ * @since item-14
+ */
+/**
+ * cg_expr_is_addressable — is this typed expression a C LVALUE, so `&` may be taken of it directly?
+ * True for the storage-shaped nodes (a variable, a field read, an index read) and for a struct literal
+ * (a C compound literal IS an lvalue, C99 §6.5.2.5). Everything else — a call result above all — is a
+ * temporary with no address, so a receiver of that shape must be spilled first.
+ *
+ * @param e  the expression under test
+ * @return   true iff `&(<e>)` is legal C
+ * @since item-14
+ */
+fn cg_expr_is_addressable(e: checker::TExpr): bool {
+    match e.kind {
+        checker::TVar => true
+        checker::TFieldAccess => true
+        checker::TIndex => true
+        checker::TStructInit => true
+        _ => false
+    }
+}
+
+/**
+ * cg_emit_self_addr — emit the RECEIVER of a value-struct method call as the header pointer its ABI
+ * now takes (item-14 §13.2).
+ *
+ * An ADDRESSABLE receiver emits `&(<recv>)`, so the callee writes through the caller's own
+ * materialization — this is what makes an in-place mutation STICK, and it is the whole point of the
+ * item. A non-addressable receiver (a call result, e.g. `mk().bump()`) has no storage to write back
+ * to, so it is spilled into a temporary whose address is passed instead: the mutation lands on the
+ * temporary and is discarded, which is the correct meaning of mutating a value nobody kept.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing return type (threaded for the inner emission)
+ * @param recv      the receiver expression
+ * @param escaping  the enclosing function's escaping-name set
+ * @param regions   the active region stack
+ * @param fn_body   the enclosing function body
+ * @param dctx      the defer context
+ * @return          `buf` followed by a `tk_t_<mangle> *`-valued expression
+ * @since item-14
+ */
+fn cg_emit_self_addr(buf: []byte, prog: CgProg, ret_type: @Type(), recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    if cg_expr_is_addressable(recv) {
+        var oa = cb(buf, "&(")
+        oa = match emit_expr_ctx(oa, prog, ret_type, recv, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        return cb(oa, ")")
+    }
+    var tN = fresh_named("_rcv", buf.len to i64)
+    var ot = cb(buf, "({ ")
+    ot = match emit_type(ot, prog, recv.type) { []byte as o => o; error as err => return err }
+    ot = cb(ot, " ")
+    ot = cb(ot, tN)
+    ot = cb(ot, " = ")
+    ot = match emit_expr_ctx(ot, prog, ret_type, recv, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    ot = cb(ot, "; &")
+    ot = cb(ot, tN)
+    cb(ot, "; })")
+}
+
+fn cg_var_is_struct_self(prog: CgProg, e: checker::TExpr, v: checker::TVar): bool {
+    if !teko::runtime::str_eq(v.name, "self") { return false }
+    match e.type {
+        checker::Named as nm => cg_is_struct_named(prog, nm.name)
+        _ => false
+    }
+}
+
+fn cg_is_struct_named(prog: CgProg, name: str): bool {
+    match cg_find_decl(prog, name) {
+        parser::TypeDecl as td => match td.body { parser::StructBody => true; _ => false }
+        error => false
+    }
+}
+
+/**
+ * cg_struct_self_recv — the value-struct type `f`'s implicit `self` receiver names, or `null` when `f`
+ * is not a value-struct instance method (item-14 §13.2).
+ *
+ * `self` is the fixed name the PARSER injects for a method's receiver (`parse_decl.tks`, the only
+ * parameter it leaves untyped) and `self` is a keyword, so no user parameter can wear that name — the
+ * check is exact rather than heuristic. The checker later fills the receiver's annotation in, which is
+ * why the type is read here rather than the (by-then always-true) `has_type` flag.
+ *
+ * A CLASS receiver returns `null` on purpose: a class value is ALREADY a pointer in this backend
+ * (`emit_struct_init_framed` arena-allocates and yields `tk_t_X *`), so its mutation already sticks
+ * through `(*self)` and it needs no second indirection.
+ *
+ * @param prog  the typed program (decl lookup)
+ * @param f     the function under emission
+ * @return      the receiver's struct type name, or `null`
+ * @since item-14
+ */
+fn cg_struct_self_recv(prog: CgProg, f: checker::TFunction): str | null {
+    if f.params.len == 0 { return null }
+    if !teko::runtime::str_eq(f.params[0].name, "self") { return null }
+    var nt = match f.params[0].type_ann { parser::NamedType as x => x; _ => return null }
+    if nt.path.segments.len == 0 { return null }
+    var nm = nt.path.segments[nt.path.segments.len - 1].name
+    if !cg_is_struct_named(prog, nm) { return null }
+    nm
+}
+
 fn cg_is_class_named(prog: CgProg, name: str): bool {
     match cg_find_decl(prog, name) {
         parser::TypeDecl as td => match td.body { parser::ClassBody => true; _ => false }
@@ -4723,6 +4851,9 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c:
             checker::TFunction as cf => {
                 if j < cf.params.len {
                     var cf_ref_ns = cg_fn_ref_ns(prog, cf.namespace)
+                    /* (item-14 §13.2) the value-struct receiver rides as the HEADER POINTER — the same
+                       auto-`&` the `Ref<T>` parameter below performs, injected for `self`. */
+                    var is_self_recv = if j != 0 { false } else { match cg_struct_self_recv(prog, cf) { str => true; null => false } }
                     match cf.params[j].type_ann {
                         parser::NamedType as nt => {
                             var pn = nt.path.segments[nt.path.segments.len - 1].name
@@ -4730,7 +4861,11 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c:
                             // type (`&x`); forward an already-reference arg plainly. NOT emit_as_r (Ref
                             // is not a user variant). `&` takes the address of the `mut` lvalue (the
                             // checker proved it's a `mut` variable).
-                            if pn == "Ref" {
+                            if is_self_recv {
+                                /* (item-14 §13.2) the receiver of a value-struct method — the header
+                                   pointer, the auto-`ref` twin of the `Ref<T>` case just below. */
+                                out = match cg_emit_self_addr(out, prog, ret_type, c.args[j], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                            } else if pn == "Ref" {
                                 var arg_is_ref = match c.args[j].type { checker::Reference => true; _ => false }
                                 if !arg_is_ref { out = cb(out, "&") }
                                 out = match emit_expr_ctx(out, prog, ret_type, c.args[j], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -8091,6 +8226,12 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr
         // C function's address (env = NULL; named fns capture nothing). A plain local emits its name.
         checker::TVar as v => if v.is_func {
             cb(cb_fn_name(cb(buf, "(tk_closure){ (void*)&"), v.func_ns, v.name), ", (void*)0 }")
+        } else if cg_var_is_struct_self(prog, e, v) {
+            /* (item-14 §13.2) inside a value-struct method `self` IS the header pointer, so every use
+               of it derefs. One rule covers every position uniformly: `self.x` becomes `((*self).x)`
+               (a write through the caller's materialization — the mutation sticks), while passing or
+               returning `self` yields `(*self)`, a COPY, which is exactly value semantics. */
+            cb(cb_ident(cb(buf, "(*"), v.name), ")")
         } else {
             cb_ident(buf, v.name)
         }
@@ -10010,12 +10151,17 @@ fn emit_function_sig(buf: []byte, prog: CgProg, f: checker::TFunction): []byte |
         out = cb(out, "void")
     } else {
         var ref_ns = cg_fn_ref_ns(prog, f.namespace)
+        /* (item-14 §13.2) a value-struct method takes its receiver as the HEADER POINTER, not a copy —
+           `self` is a ref, so a write through it STICKS on the caller's materialization instead of dying
+           with a by-value parameter. Mirrors the `ref<T>` parameter position (LIR degrau 18). */
+        var self_is_ref = match cg_struct_self_recv(prog, f) { str => true; null => false }
         var i: u64 = 0
         loop {
             if i >= f.params.len { break }
             if i > 0 { out = cb(out, ", ") }
             out = match emit_type_expr(out, prog, f.params[i].type_ann, ref_ns) { []byte as o => o; error as err => return err }
             out = cb(out, " ")
+            if i == 0 && self_is_ref { out = cb(out, "*") }
             out = cb_ident(out, f.params[i].name)
             i++
         }
