@@ -1171,9 +1171,11 @@ cmac_aes/gmac_aes) · `aead` ✅ (`92f48fe6` — AES-GCM, ChaCha20-Poly1305, AES
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
-**Ordem de drive monomórfico (revisada):** núcleo crypto ✅ → `sort` mono → `encoding` (json✅/xml/base64/
-cbor/…) → `math` (bigint) → `crypto::pk` → `crypto::jose`+`xmldsig`+`cose` (assinatura de documento) →
-`compress` (completar) → `password`. Costuras que ficam FFI/pesquisa: `rand` (getrandom FFI), `3des` legacy,
+**Ordem de drive monomórfico (revisada):** núcleo crypto ✅ → `sort` mono → `encoding` — a lista COMPLETA
+do §1.5: **texto** (json✅ · xml · csv · toml · ini · yaml), **binário** (cbor · msgpack · **bson** ·
+protobuf · asn1), `fixed` (colunas fixas), **web** (base64 · url · mime) → `math` (bigint) → `crypto::pk` →
+`crypto::jose`+`xmldsig`+`cose` (assinatura de documento) → `compress` (completar) → `password`. (BSON
+pareia com `db::mongodb`.) Costuras que ficam FFI/pesquisa: `rand` (getrandom FFI), `3des` legacy,
 `openssl`/`gpg` (providers FFI).
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
