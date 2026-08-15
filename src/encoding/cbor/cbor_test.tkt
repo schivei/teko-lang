@@ -1,0 +1,250 @@
+/**
+ * Tests for `teko::encoding::cbor` — the CBOR (RFC 8949) encoder + decoder. Covers the Appendix A
+ * example vectors across every major type: unsigned and negative integers (including the 64-bit
+ * boundary), byte and text strings (with escape and multibyte cases), definite arrays and maps
+ * (including nesting), tagged values, the simple values (`false`/`true`/`null`/`undefined`) and all
+ * three IEEE 754 float widths, indefinite-length strings/arrays/maps, canonical (sorted-key) map
+ * encoding, and the malformed-input error cases (M.1 fail-loud via `error`, never a panic): a
+ * truncated argument, a truncated string, a short array, trailing bytes, a reserved
+ * additional-information value, and a stray break. This file lives under `teko::encoding::cbor`
+ * (namespace = directory), so the functions under test are called bare, mirroring
+ * `teko::encoding::base64::base64_test.tkt`'s convention.
+ */
+
+/**
+ * Builds a `[]byte` from a slice of integer literals (spec byte vectors read as ints).
+ *
+ * @param xs  the byte values as ints
+ * @return    the values as a byte slice
+ */
+fn bytes_lit(xs: []i64): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, xs[i] to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Compares two byte slices for exact equality.
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   true when both have the same length and identical bytes
+ */
+fn slices_equal(a: []byte, b: []byte): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Unwraps a `CborValue | error` decode result — a failure in a "should succeed" test is itself a
+ * test failure.
+ *
+ * @param result  the decode outcome under test
+ * @return        the decoded value on success, or `null` (after failing) on error
+ */
+fn expect_value(result: CborValue | error): CborValue {
+    match result {
+        CborValue as v => v
+        error => { teko::assert::is_true(false); cbor_null() }
+    }
+}
+
+/**
+ * Asserts that a decode result is an `error` (a "should fail" case).
+ *
+ * @param result  the decode outcome under test
+ */
+fn expect_error(result: CborValue | error) {
+    match result {
+        CborValue => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * Asserts a value encodes to an expected vector and that the vector decodes back to an equal value.
+ *
+ * @param v     the value under test
+ * @param want  the expected encoded bytes
+ */
+fn assert_vector(v: CborValue, want: []byte) {
+    teko::assert::is_true(slices_equal(encode(v), want))
+    teko::assert::is_true(cbor_equal(v, expect_value(decode(want))))
+}
+
+/**
+ * Asserts a float vector decodes to a float item equal to an expected `f64`.
+ *
+ * @param vec   the encoded float vector
+ * @param want  the expected value
+ */
+fn assert_float(vec: []byte, want: f64) {
+    var v = expect_value(decode(vec))
+    teko::assert::is_true(v.kind == CborKind::Float)
+    teko::assert::eq_f64(v.real, want, 0.0)
+}
+
+/**
+ * Collects two values into a slice.
+ *
+ * @param a  the first value
+ * @param b  the second value
+ * @return   the two-element slice
+ */
+fn pair(a: CborValue, b: CborValue): []CborValue {
+    var out: []CborValue = teko::list::empty()
+    out = teko::list::push(out, a)
+    out = teko::list::push(out, b)
+    out
+}
+
+/**
+ * Unsigned integers encode with the preferred head and round-trip (Appendix A).
+ */
+#test
+fn unsigned_integers_match_appendix_a() {
+    assert_vector(cbor_uint(0), bytes_lit([0x00]))
+    assert_vector(cbor_uint(23), bytes_lit([0x17]))
+    assert_vector(cbor_uint(24), bytes_lit([0x18, 0x18]))
+    assert_vector(cbor_uint(1000), bytes_lit([0x19, 0x03, 0xe8]))
+    assert_vector(cbor_uint(1000000), bytes_lit([0x1a, 0x00, 0x0f, 0x42, 0x40]))
+    assert_vector(cbor_uint(1000000000000), bytes_lit([0x1b, 0x00, 0x00, 0x00, 0xe8, 0xd4, 0xa5, 0x10, 0x00]))
+    assert_vector(cbor_uint(18446744073709551615), bytes_lit([0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]))
+}
+
+/**
+ * Negative integers encode via the `-1 - n` argument and round-trip (Appendix A).
+ */
+#test
+fn negative_integers_match_appendix_a() {
+    assert_vector(cbor_int(-1), bytes_lit([0x20]))
+    assert_vector(cbor_int(-10), bytes_lit([0x29]))
+    assert_vector(cbor_int(-100), bytes_lit([0x38, 0x63]))
+    assert_vector(cbor_int(-1000), bytes_lit([0x39, 0x03, 0xe7]))
+}
+
+/**
+ * Byte and text strings encode with their length head and round-trip, including escapes and a
+ * multibyte code point (Appendix A).
+ */
+#test
+fn strings_match_appendix_a() {
+    assert_vector(cbor_bytes(bytes_lit([0x01, 0x02, 0x03, 0x04])), bytes_lit([0x44, 0x01, 0x02, 0x03, 0x04]))
+    assert_vector(cbor_text(""), bytes_lit([0x60]))
+    assert_vector(cbor_text("IETF"), bytes_lit([0x64, 0x49, 0x45, 0x54, 0x46]))
+    assert_vector(cbor_text("\"\\"), bytes_lit([0x62, 0x22, 0x5c]))
+    assert_vector(cbor_text("ü"), bytes_lit([0x62, 0xc3, 0xbc]))
+}
+
+/**
+ * Arrays and maps encode with a definite-length head and round-trip, including nesting (Appendix A).
+ */
+#test
+fn containers_match_appendix_a() {
+    assert_vector(cbor_array(teko::list::empty()), bytes_lit([0x80]))
+    var inner1 = cbor_array(pair(cbor_uint(2), cbor_uint(3)))
+    var inner2 = cbor_array(pair(cbor_uint(4), cbor_uint(5)))
+    var nested = cbor_array(teko::list::push(pair(cbor_uint(1), inner1), inner2))
+    assert_vector(nested, bytes_lit([0x83, 0x01, 0x82, 0x02, 0x03, 0x82, 0x04, 0x05]))
+    assert_vector(cbor_map(teko::list::empty(), teko::list::empty()), bytes_lit([0xa0]))
+    var mk = pair(cbor_text("a"), cbor_text("b"))
+    var mv = pair(cbor_uint(1), cbor_array(pair(cbor_uint(2), cbor_uint(3))))
+    assert_vector(cbor_map(mk, mv), bytes_lit([0xa2, 0x61, 0x61, 0x01, 0x61, 0x62, 0x82, 0x02, 0x03]))
+}
+
+/**
+ * Tagged values encode the tag number plus content and round-trip (Appendix A).
+ */
+#test
+fn tags_match_appendix_a() {
+    assert_vector(cbor_tag(1, cbor_uint(1363896240)), bytes_lit([0xc1, 0x1a, 0x51, 0x4b, 0x67, 0xb0]))
+    assert_vector(cbor_tag(23, cbor_bytes(bytes_lit([0x01, 0x02, 0x03, 0x04]))), bytes_lit([0xd7, 0x44, 0x01, 0x02, 0x03, 0x04]))
+}
+
+/**
+ * The simple values `false`/`true`/`null`/`undefined` and a bare simple round-trip (Appendix A).
+ */
+#test
+fn simple_values_match_appendix_a() {
+    assert_vector(cbor_bool(false), bytes_lit([0xf4]))
+    assert_vector(cbor_bool(true), bytes_lit([0xf5]))
+    assert_vector(cbor_null(), bytes_lit([0xf6]))
+    assert_vector(cbor_undefined(), bytes_lit([0xf7]))
+    assert_vector(cbor_simple(16), bytes_lit([0xf0]))
+    assert_vector(cbor_simple(255), bytes_lit([0xf8, 0xff]))
+}
+
+/**
+ * All three IEEE 754 float widths decode to the value they denote (Appendix A), and a constructed
+ * float encodes as the 64-bit form.
+ */
+#test
+fn floats_decode_across_widths() {
+    assert_float(bytes_lit([0xf9, 0x00, 0x00]), 0.0)
+    assert_float(bytes_lit([0xf9, 0x3c, 0x00]), 1.0)
+    assert_float(bytes_lit([0xf9, 0x3e, 0x00]), 1.5)
+    assert_float(bytes_lit([0xf9, 0x7b, 0xff]), 65504.0)
+    assert_float(bytes_lit([0xf9, 0xc4, 0x00]), -4.0)
+    assert_float(bytes_lit([0xf9, 0x04, 0x00]), 0.00006103515625)
+    assert_float(bytes_lit([0xfa, 0x47, 0xc3, 0x50, 0x00]), 100000.0)
+    assert_float(bytes_lit([0xfb, 0x7e, 0x37, 0xe4, 0x3c, 0x88, 0x00, 0x75, 0x9c]), 1.0e+300)
+    assert_vector(cbor_float(1.5), bytes_lit([0xfb, 0x3f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+}
+
+/**
+ * Indefinite-length byte strings, text strings, arrays, and maps decode to the same value as their
+ * definite forms (Appendix A).
+ */
+#test
+fn indefinite_length_items_decode() {
+    var joined = cbor_bytes(bytes_lit([0x01, 0x02, 0x03, 0x04, 0x05]))
+    teko::assert::is_true(cbor_equal(joined, expect_value(decode(bytes_lit([0x5f, 0x42, 0x01, 0x02, 0x43, 0x03, 0x04, 0x05, 0xff])))))
+    teko::assert::is_true(cbor_equal(cbor_text("streaming"), expect_value(decode(bytes_lit([0x7f, 0x65, 0x73, 0x74, 0x72, 0x65, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x67, 0xff])))))
+    teko::assert::is_true(cbor_equal(cbor_array(teko::list::empty()), expect_value(decode(bytes_lit([0x9f, 0xff])))))
+    var mk = pair(cbor_text("a"), cbor_text("b"))
+    var mv = pair(cbor_uint(1), cbor_array(pair(cbor_uint(2), cbor_uint(3))))
+    teko::assert::is_true(cbor_equal(cbor_map(mk, mv), expect_value(decode(bytes_lit([0xbf, 0x61, 0x61, 0x01, 0x61, 0x62, 0x9f, 0x02, 0x03, 0xff, 0xff])))))
+}
+
+/**
+ * Canonical encoding sorts map keys into bytewise lexicographic order of their encodings
+ * (RFC 8949 §4.2.1).
+ */
+#test
+fn canonical_encoding_sorts_map_keys() {
+    var keys: []CborValue = teko::list::empty()
+    keys = teko::list::push(keys, cbor_uint(10))
+    keys = teko::list::push(keys, cbor_uint(1))
+    keys = teko::list::push(keys, cbor_text("z"))
+    var vals: []CborValue = teko::list::empty()
+    vals = teko::list::push(vals, cbor_uint(0))
+    vals = teko::list::push(vals, cbor_uint(0))
+    vals = teko::list::push(vals, cbor_uint(0))
+    var got = encode_canonical(cbor_map(keys, vals))
+    teko::assert::is_true(slices_equal(got, bytes_lit([0xa3, 0x01, 0x00, 0x0a, 0x00, 0x61, 0x7a, 0x00])))
+}
+
+/**
+ * Malformed inputs decode to a checked error (M.1 fail-loud): a truncated argument, a truncated
+ * string, a short array, trailing bytes, a reserved additional-information value, and a stray break.
+ */
+#test
+fn malformed_inputs_are_errors() {
+    expect_error(decode(bytes_lit([0x18])))
+    expect_error(decode(bytes_lit([0x44, 0x01, 0x02])))
+    expect_error(decode(bytes_lit([0x83, 0x01, 0x02])))
+    expect_error(decode(bytes_lit([0x00, 0x00])))
+    expect_error(decode(bytes_lit([0x1c])))
+    expect_error(decode(bytes_lit([0xff])))
+}
