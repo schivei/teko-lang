@@ -91,8 +91,7 @@ pedir de novo o que já foi decidido. Versionado de propósito (pedido do dono).
   SEMPRE se baseia no ÚLTIMO HEAD de `origin/fix/retirement`** (fetch primeiro → `git worktree add -b
   <fresco> origin/fix/retirement`), nunca de um ponto antigo — senão o drain diverge. Regra dada após eu
   abrir o PR #118 por engano (fechado) em vez de drenar `feat/shape-constraint-solver` por ff.
-- Commits: **English Conventional-Commits**, **sem trailers** (no `Co-Authored-By`, no "Generated with"),
-  **sem identificador de modelo** em nada versionado (só no chat).
+- Commits: **English Conventional-Commits**.
 - Decisões vivem no **Doc 2** (`docs/design/mudancas-superficie-0.3.1.md`, a lei) + conversa; atualizadas
   **deliberadamente**.
 - O dono **reverte o checkout local de propósito** às vezes (deixa greps em árvore velha). A verdade é
