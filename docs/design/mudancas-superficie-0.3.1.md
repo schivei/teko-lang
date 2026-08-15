@@ -1107,6 +1107,40 @@ minimiza esse retrabalho (a superfície já nasce triada).
 `global` compõe direto: **`exp global …`** = superfície ambiente exportada (`println`, `sizeof`, `list`,
 `str`); **`pub global …`** = global visível ao monólito mas fora do self-`.tkh`.
 
+### 11.2 Grafo de dependências dos itens restantes — ordenação topológica (MANTIDO ATUALIZADO)
+
+> **Regra do dono:** o item **mais dependido** cujas dependências estão **resolvidas (ou nulas)** é
+> executado **primeiro**. Escopo: só os itens **restantes do Doc 2** — o **Doc 1** (backend/arena) vem
+> inteiro **depois**, porque **o Doc 2 resolve as dependências do Doc 1**. Esta seção é **re-computada e
+> atualizada a cada item que aterrissa** (marca ✅/🔄/⏳ + re-eleição do topo).
+
+**Arestas (X → Y = X depende de Y), extraídas do texto:**
+- §9.4 (interface-obriga-operador) → **§9** (habilitado pelo overload de operador, l.563)
+- §10 Intent → **§9** (properties get/set, l.906) e → **§13** (o `pub set` acerta a mesma instância, l.910/1069)
+- §10 concorrência → **§7 + §9.2b (solver de forma) + conformidade-estática-de-interface** (os 3 pré-reqs, §12 l.1134-1138) e → **§13** (Ctx, l.1144)
+- §7 DI → **§9.2b + conformidade-de-interface** · §9.2b → **§9 + conformidade-de-interface**
+- §16, §17 → **§11** · §11 → expansão-da-stdlib
+
+**Estado (2026-08-15):**
+
+| Item | dependido por | in-deg | deps resolvidas? | status impl |
+|------|---------------|:---:|:---:|-------------|
+| §9 operador (9-ops) | §9.4, §10, §9.2b | 3 | ✅ | ✅ entregue (parse+dispatch+counterpart §9.4; fixtures) |
+| conformidade-estática-de-interface | §7, §10, §9.2b | 3 | ✅ | ✅ largely done (`type_conforms_to`, vtable, IService auto-conf) |
+| **§9.2b solver de constraint de forma** | **§7, §10** | **2** | **✅** | 🔄 **PARCIAL** — falta `notnull` + `service [lifetime]` como termo + disjunção completa |
+| §13 item-14 fat-header | §10 (Intent/Ctx) | 1 | ✅ (§1,§4.1) | 🔄 superfície `readonly` aterrissando; **cabeçalho `uptr` em codegen/lir NÃO iniciado** · **antecipado** |
+| §7 DI service/svc | §10 | 1 | ❌ (precisa §9.2b) | 🔄 superfície; bloqueado no solver (+ arena, Doc 1 §8) |
+| §14 Família B (comptime) | — | 0 | ✅ | 🔄 parcial |
+| §15 global | (stdlib) | — | — | 🔄 parcial |
+| §11 visibilidade `exp`/`pub` | §16, §17 | 2 | ⏳ (stdlib) | ⏳ ordem: PENÚLTIMA |
+| §10 concorrência | — | 0 | ❌ | ⏳ design-only (sink) |
+| §16 FFI libc-direct | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
+| §17 `#if`/`#os`/`#arch` | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
+
+**Topo atual (mais-dependido com deps resolvidas):** **§9.2b — solver de constraint de forma** (in-deg 2,
+deps ✅), que destrava §7 **e** §10. Runner-up: **§13 item-14 fat-header** (in-deg 1, antecipado). Ordem
+derivada: **§9.2b → §13 → §7 → §10**; depois o cluster de ordem (§11 → §16/§17); e só então o Doc 1.
+
 ---
 
 ## 12. Decisões — todas resolvidas pelo dono (2026-08-10)
