@@ -346,7 +346,7 @@ former constructions that STAY until Phase B/C7; C4 only rewrites `T?` in ANNOTA
   `checker_test.tkt` (sfa/co 1019-1024, TCoalesce 1784, sfa+co 1936-1937, np_smc/sfa/co 3314-3434),
   `comptime_fold_test.tkt` (coalesce_use/safe_use 717-725), `spine_test.tkt` (1553-1554),
   `lower_test.tkt` (lwt_coalesce* / lwt_safe_field_access 1737-1795), `tkb_test.tkt` (TCoalesce 134-137),
-  `lir_interp_test.tkt` (iwt_coalesce_exit 494), `codegen_test.tkt` (TSafeFieldAccess/TCoalesce 1419-1451).
+  `lir_oracle_test.tkt` (iwt_coalesce_exit 494), `codegen_test.tkt` (TSafeFieldAccess/TCoalesce 1419-1451).
 
 **C6 — delete `T?` TYPE sugar.** [RITUAL] + [FIXPOINT].
 - Lexer: remove `TokenKind::Question` (`src/lexer/token.tks` 102) and its map entry

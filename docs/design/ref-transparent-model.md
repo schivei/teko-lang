@@ -228,7 +228,7 @@ Até a análise transitiva (a *spine*) existir: `Ref`-dentro-de-agregado-que-esc
 ## 11. Migração & relação com #497
 
 - **`-> void` (#497):** some a annotation de superfície; o **tipo Void interno fica**. 57 sites .tks + 2 .tkt migram. `fn` sem `-> T` = retorna nada.
-- **Gotcha stable-seed:** remover keyword / trocar superfície de `Ref<T>` para `ref` exige que o seed estável parseie a forma antiga até src/ migrar; ordem: migrar src/ → remover a aceitação antiga. Ou deprecated-alias na transição. O parser aceita ambas, mas só `ref` gera bytecode.
+- **Gotcha stable-seed:** remover keyword / trocar superfície de `Ref<T>` para `ref` exige que o seed estável parseie a forma antiga até src/ migrar; ordem: migrar src/ → remover a aceitação antiga. Ou deprecated-alias na transição. O parser aceita ambas, mas só `ref` gera código.
 - **`escape.tks`:** o checker one-depth atual é substrato; A1–A6 o reescrevem para field-sensitive/transitivo/interprocedural (a *spine*).
 
 ---

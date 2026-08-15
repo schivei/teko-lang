@@ -614,7 +614,7 @@ per lifetime, and (2) the runtime SUPPORT that inline code reads/writes. Both ar
 
 1. **Per-arena scoped registry** — REUSE the existing native `tk_region_register(region, id, ptr)` /
    `tk_region_lookup(region, id): ptr` already on the region (`di.tks:368` names them as the DI
-   lifetime cache; `di_cache` is the interpreter twin). It is a small per-region map `service_id ->
+   lifetime cache; `di_cache` is the legacy-engine twin). It is a small per-region map `service_id ->
    instance ptr` on the `tk_region` header. No NEW structure is required for the storage; the only
    possible addition is a `tk_region_parent(region): region` accessor for the ancestry walk — add it
    ONLY if not already exposed (a one-line read accessor, within the runtime exception, behavior-

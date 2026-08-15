@@ -212,7 +212,7 @@ site is expected to; asserted in §8.
 
 Executing arbitrary Teko at compile time: a `const fn` marker (a fn callable in const
 context), comptime bounded loops, and bounded recursion — this is a **large** feature
-(a comptime interpreter over the typed AST with a step/recursion budget, a purity
+(a comptime evaluator over the typed AST with a step/recursion budget, a purity
 boundary excluding IO/allocation-with-runtime-identity, and a determinism guarantee).
 **Honest size: L, plausibly multiple L crumbs** — it is a second evaluator that must
 match runtime semantics for the *whole executable subset*, not just the const-expr
@@ -649,7 +649,7 @@ standalone formatter; M.1 dischargeable by the oracle).
 
 **Q1 — Layer 3 scope (const fn / comptime loops / recursion). The M.5 decision.**
 The mandate (Layers 1–2) does not need Layer 3. Layer 3 is a large capability (an
-AST-executing comptime interpreter with budgets + a purity boundary) governed by M.5's
+AST-executing comptime evaluator with budgets + a purity boundary) governed by M.5's
 burden-of-proof.
 > **Recommendation:** do **not** adopt Zig-style arbitrary comptime wholesale. Ratify
 > Layers 1–2 as the mandate now. Treat Layer 3 as a **separately ratifiable

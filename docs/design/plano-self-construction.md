@@ -390,7 +390,7 @@ para args que já tipam sozinhos (nominal struct-lit ignora um `expected` redund
 O codegen consome `TStructInit` pela `e.type` resolvida (`codegen.tks:1346, 5180-5279, 7826,
 9273, 9590, 11592`), **nunca** por um path de superfície. Como o checker já entrega o nome
 concreto, o codegen não distingue `.{}` de `Name{}`/`self{}`. Nenhuma edição em
-`src/codegen/`. Idem interpretador (aposentado). **O gate byte-identidade gen2==gen3 é
+`src/codegen/`. Idem motor legado (aposentado). **O gate byte-identidade gen2==gen3 é
 preservado por construção** — a AST typada é a mesma que a via nominal produziria.
 
 ### 3.4 Sweep do `self { }` no corpus (source-only) — inventário EXATO

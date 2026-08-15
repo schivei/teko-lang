@@ -1,13 +1,13 @@
 # A4 / N2d — arm64 encoder + Mach-O object + link via system `ld` (crumb plan)
 
-> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+> **[NOTA]** — este documento descreve oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (#524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
 
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave. Issue **#385**. Branch
 `fix/issue-385-encoder` (the A4 mini-umbrella; base = the umbrella carrying A1+A2+A3+#443). Base for
 the design: `docs/design/own-backend-architecture.md` §3.5 (object emission) + §5 (D-2 runtime link,
 D-5 system-linker sequencing), `docs/design/backend-a3-regalloc.md` §3.5/§6.1 (the frame deferral A4
 owns), grounded in the merged code (`src/backend/minst.tks`, `regalloc.tks`, `abi_aapcs64.tks`,
-`minst_interp.tks`, `src/lir/lir.tks`, `src/build/project.tks`).
+`minst_oracle.tks`, `src/lir/lir.tks`, `src/build/project.tks`).
 
 > This is a PLAN. It designs **the KEYSTONE**: the first point where the own backend produces a REAL
 > native executable to diff against the C backend — "the birth of the C-vs-own differential". A4
@@ -39,9 +39,9 @@ owns), grounded in the merged code (`src/backend/minst.tks`, `regalloc.tks`, `ab
   callee-saved save list **re-derived by scanning the physical `MFunc`** — `MFunc` does not carry
   `used_callee_saved`, §3.1 — and a `slot → SP-offset` map). The encoder consumes it to prepend the
   prologue and to expand `MFrameAddr → ADD dst, sp, #off` and `MRet → epilogue + ret`, **without
-  mutating the block stream** — so the A3 interp oracle stays valid on the pre-encode `MFunc`.
+  mutating the block stream** — so the A3 oracle stays valid on the pre-encode `MFunc`.
 - **Differential:** a new `scripts/diff_c_own.sh` leg over an **`exit(n)`-terminated** integer/control
-  corpus: `C-native exit == own-native exit (== interp)`. Gated on **macOS-arm64** (needs the host
+  corpus: `C-native exit == own-native exit (== oracle)`. Gated on **macOS-arm64** (needs the host
   Mach-O `ld`); honest-skip elsewhere with a named reason.
 - **No genuine HALT.** Two decisions are resolved law-first and recorded (§7): re-derive the
   callee-saved set (M.1) and use a temporary `TEKO_BACKEND=native` env seam (M.4, D1 supersedes). One
@@ -69,8 +69,8 @@ owns), grounded in the merged code (`src/backend/minst.tks`, `regalloc.tks`, `ab
 
 The entry function is the synthesized virtual-`main`: `new_func("main", 0, [], I32)`
 (`lower.tks:4054`) — symbol `main`, nullary, returns i32. On Mach-O it becomes the defined symbol
-`_main`, exactly the entry the C crt0 calls. The interp oracle runs it as `minst_interp(m, "main",
-args)` (`minst_interp.tks:1117`); only `tk_exit` executes (exit code read from x0, `interp_call`
+`_main`, exactly the entry the C crt0 calls. The oracle runs it as `minst_oracle(m, "main",
+args)` (`minst_oracle.tks:1117`); only `tk_exit` executes (exit code read from x0, `oracle_call`
 `:901`), every other call is golden-dump-only.
 
 **The three tables ride through unchanged** into the object: `MModule.rodata` (`[]LRodata` — interned
@@ -415,9 +415,9 @@ pub fn encode_module(abi: AbiDescriptor, m: MModule): EncodedModule | error { �
 
 A3 finalized the *slot table* (`MFunc.frame`) and recorded nothing else; the prologue/epilogue and the
 `MFrameAddr` SP/FP-offset resolution are A4's (`backend-a3-regalloc.md` §6.1, §3.5). A4 does them as a
-**pure side-table** the encoder consumes — the block stream is NOT rewritten, so the A3 interp oracle
-still runs the pre-encode `MFunc` unchanged (the interp models slots directly via `frame_slot_addr`,
-`minst_interp.tks:843`, and has no SP — mutating `MFrameAddr` into SP arithmetic would break it).
+**pure side-table** the encoder consumes — the block stream is NOT rewritten, so the A3 oracle
+still runs the pre-encode `MFunc` unchanged (the oracle models slots directly via `frame_slot_addr`,
+`minst_oracle.tks:843`, and has no SP — mutating `MFrameAddr` into SP arithmetic would break it).
 
 ### 3.1 The callee-saved save-set is RE-DERIVED (not carried)
 
@@ -438,7 +438,7 @@ that could desync, and keeps A3's output type frozen (§7, D-A).
  * byte size, the ordered callee-saved registers to save/restore (re-derived by
  * scanning, §3.1), and the SP-relative byte offset of EVERY frame slot. Purely
  * a side-table the encoder reads; the block stream is never rewritten (so the
- * A3 interp oracle stays valid).
+ * A3 oracle stays valid).
  *
  * @since #385 A4-2
  */
@@ -643,12 +643,12 @@ the keystone corpus does not read argv; see §6 `A4-args`.)
 ### 5.3 The differential gate
 
 A new leg — `scripts/diff_c_own.sh` (or an own arm inside `diff_c_own.sh`) — over an
-**`exit(n)`-terminated** integer/control corpus (the subset the interp already runs, §1). Per fixture:
+**`exit(n)`-terminated** integer/control corpus (the subset the oracle already runs, §1). Per fixture:
 
 1. **C-native** (trusted): `teko <fixture> -o <cbin>` (default path) → run → capture exit + stdout.
 2. **own-native**: `TEKO_BACKEND=native teko <fixture> -o <ownbin>` → run → capture exit + stdout.
-3. **assert** `C-native == own-native` on exit code AND stdout; optionally a third `== interp` leg via
-   a tiny `minst_interp`/`interp_lmodule` harness for a pre-machine cross-check.
+3. **assert** `C-native == own-native` on exit code AND stdout; optionally a third `== oracle` leg via
+   a tiny `minst_oracle`/`oracle_lmodule` harness for a pre-machine cross-check.
 
 **Gated on macOS-arm64** (the highest-RAM lane, the native-test-gate ruling; needs the host Mach-O
 `ld`); on any other host the leg **honest-skips** with a named reason (`"A4 own-backend differential
@@ -735,7 +735,7 @@ of line 8449:
 **Resolution (law-consistent, no deferral).** The ratified semantic (#421/#423) is: a trailing loose
 expression IS the process exit code. Both backends implement it; they are ALIGNED. The differential
 corpus is scoped to `exit(n)`-terminated fixtures not to sidestep a divergence (there is none) but
-because that is (a) exactly the subset the LIR interp oracle validates and (b) the own-backend's
+because that is (a) exactly the subset the LIR oracle validates and (b) the own-backend's
 frameless-`main` first light (`bl _tk_exit`, no `MRet`). This exit(n)-corpus convention is codified in
 `scripts/diff_c_own.sh`'s header.
 
@@ -831,7 +831,7 @@ A3 (done) + #443 (done) ─▶ A4-1 ─▶ A4-2 ─▶ A4-3 ─▶ A4-4 ─▶ A
   stop. **Proven by:** header/symtab/reloc golden bytes + `otool`/`nm` well-formedness on macOS-arm64.
 - **A4-5 · link + differential (KEYSTONE)** — `emit_native` in `src/build/project.tks`, `link_object`
   (extracted from `run_cc`), the `TEKO_BACKEND=native` seam, `scripts/diff_c_own.sh`, the §9.2
-  fixtures; the `A4-args` stop. **Proven by:** `own-native == C-native (== interp)` exit codes over the
+  fixtures; the `A4-args` stop. **Proven by:** `own-native == C-native (== oracle)` exit codes over the
   corpus on macOS-arm64 (honest-skip elsewhere). **#385 CLOSES.**
 
 **Files:** new `src/backend/encode_arm64.tks`, `src/backend/objfile_macho.tks`,

@@ -112,14 +112,14 @@ Both eliminate the per-call arena. That is the win the owner is buying.
 | LIR rodata (WORKS) | `src/lir/lir.tks:143` (`LRodata`), `:262` (`LGlobalAddr`), `lower.tks:3759` (`intern_rodata`) | string literals already intern rodata + reference it |
 | LIR global (STUB) | `src/lir/lir.tks:148` (`LGlobal`) | "top-level consts are a later construct" — we DO NOT use this |
 | Backend honest-stops | `encode_x86_64.tks:1489/1495`, `encode_arm64.tks:1858`, um backend encoder | ALL gate on `m.globals.len > 0`, **never** on `m.rodata` |
-| rodata emission (WORKS) | `encode_*.tks encode_rodata`, `objfile_{elf,macho,coff}.tks`, `lir_interp.tks:206/527` | `LRodata`→bytes+symbol+reloc already emitted on every backend and available at runtime |
+| rodata emission (WORKS) | `encode_*.tks encode_rodata`, `objfile_{elf,macho,coff}.tks`, `lir_oracle.tks:206/527` | `LRodata`→bytes+symbol+reloc already emitted on every backend and available at runtime |
 
 ### 2.1 The critical insight (validated)
 
 The honest-stops that block "top-level data" fire only on **`m.globals`** (the
 `LGlobal` table), never on **`m.rodata`**. String literals already flow read-only
 data + a `Pc32`/`Abs64` relocation through **every** backend (C, x86_64, arm64,
-interpreter (`rodata_base_of` / `interp_global_addr`). Therefore:
+legacy engine (`rodata_base_of` / `oracle_global_addr`). Therefore:
 
 - **Scalars never touch data at all** (inlined literals).
 - **Aggregates reuse the rodata path** — no `LGlobal`, so no honest-stop is
@@ -657,7 +657,7 @@ consts" becomes **N consts + M enums + K flags**.
   (their names are the API). ~12 consts.
 - `src/math/math.tks`: `pi/e/sqrt2/ln2/ln10` (Tier 0 f64), `exponent_mask/
   mantissa_mask/sign_mask` (Tier 0 u64 hex). ~8 consts.
-- `src/lir/lir_interp.tks:359` `block_step_budget` (Tier 0). `src/io/stream.tks:262`
+- `src/lir/lir_oracle.tks:359` `block_step_budget` (Tier 0). `src/io/stream.tks:262`
   `default_chunk_size` (Tier 0). ~2 consts.
 - `src/compress/*`: `zlib_cmf`, `adler32_modulus`, `zip_fixed_dos_date`,
   `max_huffman_bits`, `max_stored_block_len`, `gzip_cm_deflate` (Tier 0/1). Some of
@@ -998,7 +998,7 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
   `objfile_elf.tks:455`) + its relas.
 - **T-B3** Mach-O + COFF writers: emit rodata-section (`.rdata`) local relocations
   whose patch site is inside the data section.
-- **T-B5** interpretador de LIR (`lir_interp.tks:527`): resolve a rodata-INTERNAL pointer field to its target rodata base at typed load. **🔑 SEED BUMP #3 after T-B5** — the data-reloc
+- **T-B5** motor legado de LIR (`lir_oracle.tks:527`): resolve a rodata-INTERNAL pointer field to its target rodata base at typed load. **🔑 SEED BUMP #3 after T-B5** — the data-reloc
   capability is now in the seed; later crumbs may use pointer-bearing aggregate
   consts. (T-B1..T-B6 may each tag an intermediate `-beta` if a later T-B crumb's
   source uses an earlier one's capability.)
@@ -1065,14 +1065,14 @@ No genuine unresolved tension → no HALT.
   two-segment arm for `TypeName::NAME`.
 - migration (crumbs 9–11), names `UPPER_SNAKE`: `src/math/*`, `src/compress/*`,
   `src/backend/objfile_*.tks`, `src/backend/isel_*.tks`,
-  `src/lir/lir_interp.tks`, `src/io/stream.tks`, `src/backend/minst.tks`,
+  `src/lir/lir_oracle.tks`, `src/io/stream.tks`, `src/backend/minst.tks`,
   `src/compress/gzip.tks`.
 - RULING-2 sweep (crumbs S1–S6): `encode_x86_64.tks`, `encode_arm64.tks`,
   um backend encoder, `objfile_*.tks` — frozen bytes.
 - **Feature + Tier A: ZERO backend encoder/writer changes, ZERO C twins.**
 - **Tier B ONLY (crumbs T-B1–T-B6, pointer-bearing aggregates):** the 3 native
   encoders (reloc section tag), ELF/Mach-O/COFF writers (data-section relocs)
-  data emitter, and the removed interpreter crumb (T-B5).
+  data emitter, and the removed legacy-engine crumb (T-B5).
 
 ## 11. Note on bootstrap ordering — MULTIPLE seed bumps (owner 2026-07-15)
 

@@ -89,8 +89,8 @@ the desugar bridge (C5) makes `T?` ≡ `T | null` before the corpus is rewritten
   the base §6.2/§6.5 targets. Any crumb changing representation carries one.
 - **[RITUAL: dual-engine]** — the fixture runs on native (the C backend; and, where in the
   differential corpus, the own AOT backend via `scripts/diff_c_own.sh`). *(This ritual line
-  predates the retirement of the LIR-interp oracle that had itself replaced the tree-walking
-  interpreter, #524 — native is now the sole engine.)*
+  predates the retirement of the LIR oracle that had itself replaced the tree-walking
+  legacy engine, #524 — native is now the sole engine.)*
 - **[RITUAL: full gate]** — the whole `teko test .` suite + all `scripts/*_regressions.sh`
   legs `completed + success`. Reserved for C7 (the ratified end-state).
 
@@ -154,7 +154,7 @@ tagged path (with the `uint8` tag, once C3 lands, for any null-bearing union).
   `Reference => return error{…}` arm with the shape-aware helper below.
 - `src/backend/*` / `src/lir/lower.tks` — the LIR/own-backend value model learns
   the niche load (a bare pointer whose 0 is `null`) and the `uint8`-tag load. The
-  LIR-interp oracle carries `Null` as a zero word already (`lower.tks` null lit).
+  LIR oracle carries `Null` as a zero word already (`lower.tks` null lit).
 
 ### New / changed function shapes (copy-paste, full Javadoc)
 
@@ -217,7 +217,7 @@ fn cg_union_tag_ctype(buf: []byte, v: checker::Variant): []byte | error
   field still `EXPECT_COMPILE_FAIL`s (R4 intact).
 - `t/repr_niche_roundtrip.tks` (checker/codegen unit) — a niche `ClassRef|null`
   and a tagged `i32|null` each round-trip null↔present with identical observable
-  behavior on the LIR-interp oracle and native.
+  behavior on the LIR oracle and native.
 
 ### Ritual gate
 
@@ -277,7 +277,7 @@ parser does not cover. This crumb adds a binding/field attribute channel:
   non-null construct; load-through on read); honor `#inline` by flipping THAT
   binding/field to the inline-tag struct. One switch serves local + field.
 - `src/lir/lower.tks` + `src/backend/*` — the box handle's alloc/load in the LIR
-  and own backend; the LIR-interp oracle models the handle as a boxed word.
+  and own backend; the LIR oracle models the handle as a boxed word.
 
 ### New / changed function shapes (copy-paste, full Javadoc)
 
@@ -578,7 +578,7 @@ This is REMOVED code that OFFSETS the C1/C3 additions (base §7).
 ### Ritual gate
 
 Fixpoint (final ratified end-state; `gen1==gen2`) + FULL GATE (whole `teko test .`
-+ every `scripts/*_regressions.sh` leg `completed + success`, LIR-interp oracle + native).
++ every `scripts/*_regressions.sh` leg `completed + success`, LIR oracle + native).
 
 ---
 

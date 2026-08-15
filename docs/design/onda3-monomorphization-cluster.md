@@ -1,4 +1,4 @@
-# Onda-3 — the monomorphization + interpreter + 128-bit keystone cluster
+# Onda-3 — the monomorphization + legacy engine + 128-bit keystone cluster
 
 **Status:** DESIGN-AHEAD (architect). No product code changed. Ready to implement the instant #300 merges.
 **Seed:** `0.0.1.37-alpha` (teko.tkp).
@@ -23,7 +23,7 @@ different implementer.
   (`src/checker/monomorph.tks`), the method→free-fn lowering, and the codegen mangle/dispatch seam.
 - **Sub-cluster B — the 128-bit arithmetic family (INDEPENDENT).**
   `#296` (u128 normalization trapping, historical) and `#299` (codegen `cb_i128` negative `Number` literal). Both are
-  self-contained two's-complement-reinterpret bugs — one historically interpreter-only, one native-only — touching neither the
+  self-contained two's-complement-reinterpret bugs — one historically legacy engine-only, one native-only — touching neither the
   mono pass nor dispatch. They gate the u128/i128 math family (#185/#187/#194), not the generic stdlib.
 
 **Recommendation:** run B in parallel with A from day one (two implementers, two branches). B is small,
@@ -39,11 +39,11 @@ low-risk, and unblocks the 128-bit math family without waiting on A. A is the re
 - **Root:** (historically) — inside `fn norm_int(raw: i128, signed: bool, width: u8)` the unsigned
   128-bit arm is `else { raw to u128 }`. `raw` is the `i128` carrier; a u128 with the high bit set is
   stored as a *negative* i128, and `i128 to u128` is a **checked** cast that PANICS on a negative source
-  ("impossible conversion"). So `u128::MAX`, `2^127`, any high-bit value: the former interpreter would panic; native lowers it as a
+  ("impossible conversion"). So `u128::MAX`, `2^127`, any high-bit value: the former legacy engine would panic; native lowers it as a
   plain two's-complement `(unsigned __int128)` and is correct → **divergence historically present.**
-- **Layer:** none of the five mono layers — this is the **value-normalization** layer (historically in interpreter) (the `.tks`
-  stand-in for the C `tag` switch), entirely inside the interpreter.
-- **Kind:** historically interpreter-only.
+- **Layer:** none of the five mono layers — this is the **value-normalization** layer (historically in legacy engine) (the `.tks`
+  stand-in for the C `tag` switch), entirely inside the legacy engine.
+- **Kind:** historically legacy engine-only.
 - **The idiom already exists** three functions up: `wrap_hole_to_u64` ((historically)) does the non-trapping
   reinterpret as `(raw & mask) to u64`. #296 is the u128-width sibling: there is no 128-bit-wide
   non-trapping cast primitive, so the fix builds the u128 from its two masked 64-bit halves.
@@ -104,10 +104,10 @@ Grounded against the current tree:
   classes nominally (so the struct *satisfies* the constraint — `constraint_atom_satisfied`,
   `monomorph.tks:72`), but the codegen upcast + `tk_vt_<T>_<iface>` vtable are gated on
   `cg_is_class_named` (`codegen.tks:441`, and every `tk_vt_`/`tk_base_` site). A struct has no fat-pointer
-  `{data, vtable}` rep, so a `x.measure()` on a constraint-bound struct either panicked in the former interpreter (no vtable
+  `{data, vtable}` rep, so a `x.measure()` on a constraint-bound struct either panicked in the former legacy engine (no vtable
   to name-dispatch through as a value) or emits an upcast to a never-generated symbol natively.
 - **Layer:** straddles **stamp/rewrite-calls** (`rekey_iface_dispatch`) and **codegen** (vtable emission).
-- **Kind:** both engines (former interpreter panic; native cc-reject / miscompile).
+- **Kind:** both engines (former legacy engine panic; native cc-reject / miscompile).
 - **Design fork (see §4):** structs are value types with no vtable slot. There are two law-clean
   resolutions; one is a genuine scope decision → **HALT candidate** (resolved below, but flagged).
 
@@ -120,13 +120,13 @@ Grounded against the current tree:
   `codegen.tks:849`) and the annotation path (`codegen.tks:1214`) DO know `checker::Func => "tk_closure"` —
   the mangle family is the sole gap. Also `cg_opt_mangle_texpr_str` (`codegen.tks:1086`) has no
   `FunctionType` arm (its `_` is the syntactic twin of the same gap).
-- **Former interpreter root:** a closure (`FuncVal`) re-seated into a `Ref` cell (`cell_set`) is dropped across a call
+- **Former legacy engine root:** a closure (`FuncVal`) re-seated into a `Ref` cell (`cell_set`) is dropped across a call
   boundary. The cell store threads back correctly for scalars (`with_cells(caller, fe.env.cells)`,
   historically at (historically)), so the drop is in the closure-value *capture-vs-cell* path: a `FuncVal` carries its
   `cap_vals` by SNAPSHOT (`eval_lambda_call`, historically at (historically)), so a closure written into a cell after
   capture is not observed by an already-captured copy. Minimal repro (from #301): `reseat(cell: Ref<IntFn>, n)`
   returns wrong values on BOTH engines.
-- **Layer:** native = **codegen** (the mangle leaf, layer-5); historically the interpreter handled ref-cell/closure
+- **Layer:** native = **codegen** (the mangle leaf, layer-5); historically the legacy engine handled ref-cell/closure
   semantics (not in the mono layer). Same *conceptual* root as #294/#254: a function type is a first-class value the
   aggregate-lowering seams do not fully cover.
 - **Kind:** both engines. Gate of `flat_map` (ITER0 #184, parked) and of `ReadFn | error` union arms
@@ -188,7 +188,7 @@ Grounded against the current tree:
     generic `Iterator<T>` whose element is a closure (the ITER0 generic layer).
   - `#294` depends on the §4 scope ruling, not on code. Once ruled, it slots after #254 (it reuses the
     stamped-method machinery for the struct case).
-- **Historically interpreter-only:** #296. **Native-only:** #299. **Both engines:** #254, #294, #301, #290.
+- **Historically legacy engine-only:** #296. **Native-only:** #299. **Both engines:** #254, #294, #301, #290.
 
 **Recommended landing order (A):** `#290` → `#301` → `#254` → `#294`. **(B) in parallel:** `#296` + `#299`.
 
@@ -203,9 +203,9 @@ clean keying + mangle base; #294 is the ruled scope decision layered on the stam
 > All snippets are full-Javadoc, `.tks`-only. C twins are FROZEN — do NOT touch `.c/.h` except the
 > maintained runtime seam (`teko_rt.{c,h}`), which none of these need. Ritual = the full gate
 > (`teko-verify-both-with-test-gate`): gen1 `teko . -o bin` (native #test gate) + `./bin/teko test .`
-> (historically interpreter) + FIXPOINT `gen1==gen2` byte-identical + `diff_vm_native.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit.
+> (historically legacy engine) + FIXPOINT `gen1==gen2` byte-identical + `diff_c_own.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit.
 
-### B/#296 — u128 non-trapping reinterpret (formerly interpreter-specific, ~1 crumb)
+### B/#296 — u128 non-trapping reinterpret (formerly legacy engine-specific, ~1 crumb)
 
 **File:** (historically). **Touches:** `norm_int` (1586). **Adds:** one helper.
 
@@ -218,7 +218,7 @@ two masked 64-bit halves (no 128-bit-wide checked cast exists, so we go through 
 /**
  * Reinterpret an i128 carrier's raw BITS as a u128, two's-complement, never trapping.
  *
- * Historically, the interpreter carried integer Values in an i128; a u128 with the high bit set was stored as a
+ * Historically, the legacy engine carried integer Values in an i128; a u128 with the high bit set was stored as a
  * NEGATIVE i128, and a checked `i128 to u128` would PANIC on it ("impossible conversion") — this was a historical divergence from native (which lowers a u128 as a plain `(unsigned __int128)` reinterpret). There is no
  * 128-bit-wide non-trapping cast op, so we rebuild the value from its two 64-bit halves: the low
  * half is masked out non-trapping (`wrap_hole_to_u64`), the high half is the arithmetic shift's low
@@ -496,8 +496,8 @@ checker::Func => "func"
 parser::FunctionType => "func"
 ```
 
-**#301 crumb 2 — ref-cell closure round-trip (historically interpreter-specific).**
-Historically, the interpreter would drop a `FuncVal` re-seated into a cell across a call boundary because `eval_lambda_call` (historically at (historically)) would bind captures by SNAPSHOT (`fv.cap_vals`). Design: a closure that must observe a
+**#301 crumb 2 — ref-cell closure round-trip (historically legacy engine-specific).**
+Historically, the legacy engine would drop a `FuncVal` re-seated into a cell across a call boundary because `eval_lambda_call` (historically at (historically)) would bind captures by SNAPSHOT (`fv.cap_vals`). Design: a closure that must observe a
 cell WRITE performed after its capture must capture the CELL INDEX (a `RefVal`), not the value — which is
 already the sound pattern (#300's "make_counter returns 1,1,1" proof). For the `reseat(cell: Ref<IntFn>, n)`
 repro, the fix is to ensure a `Ref<Fn>` cell's `.value` write (`cell_set`) and read (`cell_get`) carry the
