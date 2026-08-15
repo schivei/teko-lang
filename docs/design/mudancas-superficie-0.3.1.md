@@ -1273,6 +1273,16 @@ emitir o struct de C ESTREITO onde o largo é esperado → GCC rejeita (`incompa
 'tk_u_MsgRead_error' but 'tk_u_null_MsgRead_error'`). Contornado em `msgpack::decode_scalar` (destructure +
 re-return single-arm). **Isto é bug de compilador na árvore ATUAL** (não seed velho) — o widening subtipo→supertipo
 de união no `return` precisa ser coagido no codegen. Merece fix compiler-side.
+(4) **codegen: colisão de TAG de união cross-namespace (REAL, árvore atual — LANDMINE tree-wide).** A
+constante do enum de tag C de uma união `T | error` / `T | null` é nomeada **só pelo nome BARE (sem
+namespace) de `T`**. Dois structs homônimos em **namespaces DIFERENTES**, ambos usados numa união
+`T|error`/`T|null`, geram a **MESMA** constante C (ex.: `teko::encoding::toml::KeyStep` e
+`teko::encoding::ini::KeyStep` → ambos `TK_TAG_U_KEYSTEP_ERROR_KEYSTEP`) → `cc` falha (`incompatible
+types`), mesmo os dois type-checando isolados. Contornado renomeando (ini `KeyStep`→`SectionNameStep`).
+**Fix compiler-side real:** qualificar o tag por namespace no codegen. **Regra de coordenação até lá:**
+structs de stdlib usados em uniões de erro/null precisam de **nome único tree-wide** (hoje só `NsScope` e
+`Symbol` se repetem — internos do compilador, não colidem por não estarem ambos em união erro/null; toda
+lane nova deve conferir). Auditar com `grep -rhoE 'type ([A-Z]\w*) = struct' src/ | sort | uniq -d`.
 
 **🔴 INCIDENTE — perna C do CI quebrou (2026-08-15) + correção de PROCESSO.** Causa raiz (diagnosticada
 reproduzindo o build da perna C localmente, gen1 do `bootstrap/teko.c`): as lanes de stdlib validaram só com
