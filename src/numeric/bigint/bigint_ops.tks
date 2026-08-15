@@ -1,0 +1,532 @@
+/**
+ * src/numeric/bigint/bigint_ops.tks (namespace 'teko::numeric::bigint') — the crypto-facing
+ * operation surface layered on the arbitrary-precision engine in `bigint.tks`. It adds the
+ * number-theoretic and serialization primitives that public-key cryptography (RSA / ECDSA, via
+ * `teko::crypto::pk`) consumes: error-returning division (`divmod` / `modulo`), the greatest common
+ * divisor (`gcd`), bit shifts (`shl` / `shr`), magnitude bitwise logic (`bit_and` / `bit_or` /
+ * `bit_xor`), modular exponentiation (`mod_pow`) and the modular inverse (`mod_inverse`), plus
+ * big-endian byte and hex/decimal serialization (`from_bytes_be` / `to_bytes_be` /
+ * `to_bytes_be_padded` / `from_hex` / `to_hex` / `from_dec_str` / `to_dec_str`).
+ *
+ * ONE ENGINE, NOT TWO. This unit does not re-implement limb arithmetic — it reuses the base-2^32
+ * schoolbook helpers (`mag_add`/`mag_mul`/`mag_divmod`/…) and the sign+magnitude `BigInt` already in
+ * `bigint.tks`. The 32-bit limb width of that engine is what keeps every intermediate below 2^64, so
+ * no limb multiply overflows and no `i64`/`u64` signedness cast is ever needed (the negative-cast
+ * runtime trap of the seed is structurally unreachable from here).
+ *
+ * ERRORS ARE VALUES. Division by zero, a non-positive modulus, a non-invertible element, a negative
+ * value asked for an unsigned encoding, and a value too wide for a fixed-length field are all
+ * RETURNED as `error`, never a panic — matching the whole-namespace ground rule the engine's own
+ * `checked` sibling follows.
+ *
+ * `mod_pow` is left-to-right square-and-multiply with a reduction after every step; it is correct and
+ * RSA/ECDSA-ready but NOT constant-time (it branches on exponent bits). A constant-time Montgomery
+ * ladder is a hardening follow-up that needs limb-level access this layer deliberately does not take.
+ */
+
+/**
+ * The quotient-and-remainder pair returned by `divmod`.
+ */
+exp type DivMod = struct {
+    /** The truncated quotient `a / b` (rounded toward zero), signed as `a`/`b`'s sign XOR. */
+    quot: BigInt
+    /** The remainder `a - quot*b`, carrying the sign of the dividend `a` (truncated convention). */
+    rem: BigInt
+}
+
+/**
+ * Read magnitude limb `i`, or `0` when `i` is past the end. Lets the bitwise operators walk two
+ * unequal-length magnitudes without an out-of-range read.
+ *
+ * @param a  the magnitude
+ * @param i  the limb index
+ * @return   `a[i]` when in range, else `0`
+ */
+fn limb_at(a: []u64, i: u64): u64 {
+    if i >= a.len { return 0 }
+    a[i]
+}
+
+/**
+ * The `2^n` magnitude — a single set bit at position `n`. The scale factor behind `shl`/`shr`.
+ *
+ * @param n  the power of two
+ * @return   the normalized magnitude of `2^n`
+ */
+fn pow2_mag(n: u64): []u64 {
+    mag_setbit(teko::list::empty(), n)
+}
+
+/**
+ * Euclidean reduction of `n` modulo a NONZERO `m`, returning the canonical representative in
+ * `[0, |m|)`. Assumes the caller has already rejected a zero modulus; the public `modulo` is the
+ * guarded entry point.
+ *
+ * @param n  the value to reduce
+ * @param m  the modulus (must be nonzero; only its magnitude is used)
+ * @return   the non-negative residue of `n` in `[0, |m|)`
+ */
+fn reduce(n: BigInt, m: BigInt): BigInt {
+    var dm = mag_divmod(n.limbs, m.limbs)
+    if mag_is_zero(dm.r) { return zero() }
+    if n.neg { return mk(false, mag_sub(m.limbs, dm.r)) }
+    mk(false, dm.r)
+}
+
+/**
+ * Modular multiply — `(x * y) mod m` reduced to `[0, |m|)`. The inner step of `mod_pow`.
+ *
+ * @param x  the left factor
+ * @param y  the right factor
+ * @param m  the nonzero modulus
+ * @return   `(x * y) mod m`, non-negative
+ */
+fn mulmod(x: BigInt, y: BigInt, m: BigInt): BigInt {
+    reduce(mul(x, y), m)
+}
+
+/**
+ * Truncating division of `a` by `b`, returning both the quotient and the remainder. The quotient
+ * rounds toward zero and the remainder takes the sign of the dividend (the machine-int `/`/`%`
+ * convention). A zero divisor is a returned error, never a panic.
+ *
+ * @param a  the dividend
+ * @param b  the divisor
+ * @return   the quotient/remainder pair
+ * @throws   when `b` is zero
+ */
+exp fn divmod(a: BigInt, b: BigInt): DivMod | error {
+    if is_zero(b) { return error { message = "bigint::divmod: division by zero" } }
+    var dm = mag_divmod(a.limbs, b.limbs)
+    DivMod { quot = mk(a.neg != b.neg, dm.q); rem = mk(a.neg, dm.r) }
+}
+
+/**
+ * Euclidean modulo — the non-negative residue of `n` modulo `m` in `[0, |m|)`. Unlike `rem` (which
+ * takes the dividend's sign), this always returns a value in `[0, |m|)`, the representative crypto
+ * arithmetic expects. A zero modulus is a returned error.
+ *
+ * @param n  the value to reduce
+ * @param m  the modulus
+ * @return   the non-negative residue of `n` in `[0, |m|)`
+ * @throws   when `m` is zero
+ */
+exp fn modulo(n: BigInt, m: BigInt): BigInt | error {
+    if is_zero(m) { return error { message = "bigint::modulo: zero modulus" } }
+    reduce(n, m)
+}
+
+/**
+ * The greatest common divisor of `a` and `b`, always non-negative (`gcd(0, 0) = 0`). Euclid's
+ * algorithm over the operand magnitudes, so the sign of either input does not affect the result.
+ *
+ * @param a  the first value
+ * @param b  the second value
+ * @return   the non-negative greatest common divisor
+ */
+exp fn gcd(a: BigInt, b: BigInt): BigInt {
+    var x = mag_norm(a.limbs)
+    var y = mag_norm(b.limbs)
+    loop {
+        if mag_is_zero(y) { break }
+        var r = mag_divmod(x, y)
+        x = y
+        y = r.r
+    }
+    mk(false, x)
+}
+
+/**
+ * Left shift — `x * 2^n`, preserving the sign. A logical shift of the magnitude (bigint has no fixed
+ * width, so no bits are lost).
+ *
+ * @param x  the value
+ * @param n  the shift amount in bits
+ * @return   `x << n`
+ */
+exp fn shl(x: BigInt, n: u64): BigInt {
+    if is_zero(x) { return zero() }
+    if n == 0 { return x }
+    mk(x.neg, mag_mul(x.limbs, pow2_mag(n)))
+}
+
+/**
+ * Right shift — the magnitude of `x` divided by `2^n`, truncated toward zero, with the sign of `x`
+ * preserved. (This is a magnitude shift, not an arithmetic floor toward negative infinity.)
+ *
+ * @param x  the value
+ * @param n  the shift amount in bits
+ * @return   `x >> n` (truncating the magnitude)
+ */
+exp fn shr(x: BigInt, n: u64): BigInt {
+    if is_zero(x) { return zero() }
+    if n == 0 { return x }
+    var dm = mag_divmod(x.limbs, pow2_mag(n))
+    mk(x.neg, dm.q)
+}
+
+/**
+ * The number of significant bits in the magnitude of `x` (`0` for zero). Useful for sizing modular
+ * exponentiation and byte fields.
+ *
+ * @param x  the value
+ * @return   the bit length of `|x|`
+ */
+exp fn bit_length(x: BigInt): u64 {
+    mag_bitlen(x.limbs)
+}
+
+/**
+ * Is `x` even? Reads bit 0 of the magnitude.
+ *
+ * @param x  the value
+ * @return   `true` iff `x` is divisible by two
+ */
+exp fn is_even(x: BigInt): bool {
+    mag_bit(x.limbs, 0) == 0
+}
+
+/**
+ * Bitwise AND of two NON-NEGATIVE values (over their magnitudes). Negative operands are rejected:
+ * bigint has no fixed width, so a two's-complement AND has no finite representation here.
+ *
+ * @param a  the first value (must be non-negative)
+ * @param b  the second value (must be non-negative)
+ * @return   `a & b`
+ * @throws   when either operand is negative
+ */
+exp fn bit_and(a: BigInt, b: BigInt): BigInt | error {
+    if a.neg || b.neg { return error { message = "bigint::bit_and: negative operand" } }
+    var n = if a.limbs.len < b.limbs.len { a.limbs.len } else { b.limbs.len }
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, a.limbs[i] & b.limbs[i])
+        i = i + 1
+    }
+    mk(false, out)
+}
+
+/**
+ * Bitwise OR of two NON-NEGATIVE values (over their magnitudes). Negative operands are rejected.
+ *
+ * @param a  the first value (must be non-negative)
+ * @param b  the second value (must be non-negative)
+ * @return   `a | b`
+ * @throws   when either operand is negative
+ */
+exp fn bit_or(a: BigInt, b: BigInt): BigInt | error {
+    if a.neg || b.neg { return error { message = "bigint::bit_or: negative operand" } }
+    var n = if a.limbs.len > b.limbs.len { a.limbs.len } else { b.limbs.len }
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, limb_at(a.limbs, i) | limb_at(b.limbs, i))
+        i = i + 1
+    }
+    mk(false, out)
+}
+
+/**
+ * Bitwise XOR of two NON-NEGATIVE values (over their magnitudes). Negative operands are rejected.
+ *
+ * @param a  the first value (must be non-negative)
+ * @param b  the second value (must be non-negative)
+ * @return   `a ^ b`
+ * @throws   when either operand is negative
+ */
+exp fn bit_xor(a: BigInt, b: BigInt): BigInt | error {
+    if a.neg || b.neg { return error { message = "bigint::bit_xor: negative operand" } }
+    var n = if a.limbs.len > b.limbs.len { a.limbs.len } else { b.limbs.len }
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, limb_at(a.limbs, i) ^ limb_at(b.limbs, i))
+        i = i + 1
+    }
+    mk(false, out)
+}
+
+/**
+ * Modular exponentiation — `base^exponent mod modulus`, the core RSA/ECDSA operation. Left-to-right
+ * square-and-multiply with a reduction after every squaring and multiply, so intermediates never
+ * exceed the modulus width. The result is the canonical representative in `[0, modulus)`.
+ *
+ * NOT constant-time: it branches on the exponent's bits. A constant-time ladder is a documented
+ * hardening follow-up (see this file's header).
+ *
+ * @param ground    the base
+ * @param exponent  the exponent (must be non-negative)
+ * @param modulus   the modulus (must be strictly positive)
+ * @return          `ground^exponent mod modulus`, in `[0, modulus)`
+ * @throws          when `modulus <= 0` or `exponent < 0`
+ */
+exp fn mod_pow(ground: BigInt, exponent: BigInt, modulus: BigInt): BigInt | error {
+    if is_zero(modulus) || is_neg(modulus) { return error { message = "bigint::mod_pow: modulus must be positive" } }
+    if is_neg(exponent) { return error { message = "bigint::mod_pow: negative exponent" } }
+    if eq(modulus, one()) { return zero() }
+    var result = one()
+    var acc = reduce(ground, modulus)
+    var nbits = mag_bitlen(exponent.limbs)
+    var i: u64 = 0
+    loop {
+        if i >= nbits { break }
+        if mag_bit(exponent.limbs, i) == 1 { result = mulmod(result, acc, modulus) }
+        acc = mulmod(acc, acc, modulus)
+        i = i + 1
+    }
+    result
+}
+
+/**
+ * The modular inverse — the unique `y` in `[0, modulus)` with `a*y ≡ 1 (mod modulus)`, via the
+ * iterative extended Euclidean algorithm. Exists exactly when `gcd(a, modulus) = 1`; otherwise a
+ * returned error names the non-invertible input.
+ *
+ * @param a        the value to invert
+ * @param modulus  the modulus (must be greater than one)
+ * @return         `a^-1 mod modulus`, in `[0, modulus)`
+ * @throws         when `modulus <= 1`, or when `a` is not invertible modulo `modulus`
+ */
+exp fn mod_inverse(a: BigInt, modulus: BigInt): BigInt | error {
+    if cmp(modulus, one()) <= 0 { return error { message = "bigint::mod_inverse: modulus must be > 1" } }
+    var newr = reduce(a, modulus)
+    if is_zero(newr) { return error { message = "bigint::mod_inverse: value not invertible" } }
+    var t = zero()
+    var newt = one()
+    var r = modulus
+    loop {
+        if is_zero(newr) { break }
+        var q = div(r, newr)
+        var nt = sub(t, mul(q, newt))
+        t = newt
+        newt = nt
+        var nr = sub(r, mul(q, newr))
+        r = newr
+        newr = nr
+    }
+    if cmp(r, one()) > 0 { return error { message = "bigint::mod_inverse: value not invertible" } }
+    if is_neg(t) { return add(t, modulus) }
+    t
+}
+
+/**
+ * The minimal big-endian magnitude bytes of `x` (the empty vector for zero). The shared core of the
+ * unsigned byte encoders.
+ *
+ * @param x  the value (only its magnitude is read)
+ * @return   the most-significant-first bytes of `|x|`, with no leading zero byte
+ */
+fn mag_bytes_be(x: BigInt): []byte {
+    var digs: []byte = teko::list::empty()
+    var m = x.limbs
+    loop {
+        if mag_is_zero(m) { break }
+        var dm = mag_divmod_small(m, 256)
+        digs = teko::list::push(digs, dm.r to byte)
+        m = dm.q
+    }
+    var out: []byte = teko::list::empty()
+    var i = digs.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        out = teko::list::push(out, digs[i])
+    }
+    out
+}
+
+/**
+ * Left-pad a byte vector to `length` with leading zero bytes. Errors when the input is already wider
+ * than `length`.
+ *
+ * @param raw     the minimal big-endian bytes
+ * @param length  the desired fixed length
+ * @return        the zero-padded fixed-length vector
+ * @throws        when `raw` is longer than `length`
+ */
+fn pad_be(raw: []byte, length: u64): []byte | error {
+    if raw.len > length { return error { message = "bigint::to_bytes_be_padded: value wider than field" } }
+    var out: []byte = teko::list::empty()
+    var pad = length - raw.len
+    var i: u64 = 0
+    loop {
+        if i >= pad { break }
+        out = teko::list::push(out, 0 to byte)
+        i = i + 1
+    }
+    var j: u64 = 0
+    loop {
+        if j >= raw.len { break }
+        out = teko::list::push(out, raw[j])
+        j = j + 1
+    }
+    out
+}
+
+/**
+ * Parse an unsigned big-endian byte string into a non-negative `BigInt` (`OS2IP`). The empty input
+ * and any all-zero input both denote zero.
+ *
+ * @param bytes  the most-significant-first magnitude bytes
+ * @return       the non-negative value they encode
+ */
+exp fn from_bytes_be(bytes: []byte): BigInt {
+    var mag: []u64 = teko::list::empty()
+    var b256 = one_limb(256)
+    var i: u64 = 0
+    loop {
+        if i >= bytes.len { break }
+        mag = mag_add(mag_mul(mag, b256), one_limb(bytes[i] to u64))
+        i = i + 1
+    }
+    mk(false, mag)
+}
+
+/**
+ * The minimal unsigned big-endian encoding of a NON-NEGATIVE `x` (`I2OSP` with no fixed width). Zero
+ * encodes as a single `0x00` byte. Negative values are rejected (this encoding is unsigned).
+ *
+ * @param x  the value (must be non-negative)
+ * @return   the most-significant-first magnitude bytes (a single `0x00` for zero)
+ * @throws   when `x` is negative
+ */
+exp fn to_bytes_be(x: BigInt): []byte | error {
+    if is_neg(x) { return error { message = "bigint::to_bytes_be: negative value" } }
+    if is_zero(x) { return teko::list::push(teko::list::empty(), 0 to byte) }
+    mag_bytes_be(x)
+}
+
+/**
+ * The fixed-length unsigned big-endian encoding of a NON-NEGATIVE `x` (`I2OSP` with an explicit
+ * length), left-padded with zero bytes. This is the form RSA uses for a key-width octet string.
+ *
+ * @param x       the value (must be non-negative)
+ * @param length  the exact output length in bytes
+ * @return        the `length`-byte most-significant-first encoding
+ * @throws        when `x` is negative, or its magnitude needs more than `length` bytes
+ */
+exp fn to_bytes_be_padded(x: BigInt, length: u64): []byte | error {
+    if is_neg(x) { return error { message = "bigint::to_bytes_be_padded: negative value" } }
+    match pad_be(mag_bytes_be(x), length) {
+        []byte as out => out
+        error as e => e
+    }
+}
+
+/**
+ * Map a nibble in `[0, 16)` to its lowercase hexadecimal ASCII byte.
+ *
+ * @param nib  the nibble value, in `[0, 16)`
+ * @return     the hex digit byte (`'0'..'9'`, `'a'..'f'`)
+ */
+fn hex_digit(nib: u64): byte {
+    if nib < 10 { return ((b'0' to u64) + nib) to byte }
+    ((b'a' to u64) + nib - 10) to byte
+}
+
+/**
+ * The hexadecimal value of an ASCII hex digit, or an error for a non-hex byte.
+ *
+ * @param c  the candidate hex-digit byte
+ * @return   the nibble value in `[0, 16)`
+ * @throws   when `c` is not a hexadecimal digit
+ */
+fn hex_value(c: byte): u64 | error {
+    if c >= b'0' && c <= b'9' { return (c to u64) - (b'0' to u64) }
+    if c >= b'a' && c <= b'f' { return (c to u64) - (b'a' to u64) + 10 }
+    if c >= b'A' && c <= b'F' { return (c to u64) - (b'A' to u64) + 10 }
+    error { message = "bigint::from_hex: invalid hex digit" }
+}
+
+/**
+ * Render `x` as a lowercase hexadecimal string with the sign of `x` (a leading `-` for a negative
+ * value, no leading zeros, `"0"` for zero, no `0x` prefix).
+ *
+ * @param x  the value
+ * @return   the hexadecimal text
+ */
+exp fn to_hex(x: BigInt): str {
+    if is_zero(x) { return "0" }
+    var digs: []byte = teko::list::empty()
+    var m = x.limbs
+    loop {
+        if mag_is_zero(m) { break }
+        var dm = mag_divmod_small(m, 16)
+        digs = teko::list::push(digs, hex_digit(dm.r))
+        m = dm.q
+    }
+    var out: []byte = teko::list::empty()
+    if x.neg { out = teko::list::push(out, b'-') }
+    var i = digs.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        out = teko::list::push(out, digs[i])
+    }
+    match teko::text::str_from_utf8(out) {
+        str as s => s
+        error => ""
+    }
+}
+
+/**
+ * Parse a hexadecimal string into a `BigInt`. Accepts an optional leading `+`/`-`, an optional `0x`
+ * or `0X` prefix, hex digits of either case, and `_` group separators. An empty or malformed string
+ * is a returned error.
+ *
+ * @param s  the hexadecimal text
+ * @return   the parsed value, or an error describing the malformed input
+ * @throws   when `s` is empty, carries no digit, or contains a non-hex character
+ */
+exp fn from_hex(s: str): BigInt | error {
+    if s.len == 0 { return error { message = "bigint::from_hex: empty string" } }
+    var i: u64 = 0
+    var neg = false
+    if s[0] == b'-' { neg = true; i = 1 } else { if s[0] == b'+' { i = 1 } }
+    if i + 1 < s.len && s[i] == b'0' && (s[i + 1] == b'x' || s[i + 1] == b'X') { i = i + 2 }
+    var sixteen = one_limb(16)
+    var mag: []u64 = teko::list::empty()
+    var saw_digit = false
+    loop {
+        if i >= s.len { break }
+        var c = s[i]
+        if c == b'_' { i = i + 1; continue }
+        match hex_value(c) {
+            u64 as v => {
+                mag = mag_add(mag_mul(mag, sixteen), one_limb(v))
+                saw_digit = true
+            }
+            error as e => { return e }
+        }
+        i = i + 1
+    }
+    if !saw_digit { return error { message = "bigint::from_hex: no digits" } }
+    mk(neg, mag)
+}
+
+/**
+ * Parse a decimal string into a `BigInt`. The named crypto/serialization spelling of the engine's
+ * `from_str` (same acceptance: optional sign, decimal digits, `_` separators).
+ *
+ * @param s  the decimal text
+ * @return   the parsed value, or an error describing the malformed input
+ * @throws   when `s` is empty, carries no digit, or contains a non-decimal character
+ */
+exp fn from_dec_str(s: str): BigInt | error {
+    from_str(s)
+}
+
+/**
+ * Render `x` to its canonical decimal string. The named crypto/serialization spelling of the
+ * engine's `to_str`.
+ *
+ * @param x  the value
+ * @return   the decimal text
+ */
+exp fn to_dec_str(x: BigInt): str {
+    to_str(x)
+}
