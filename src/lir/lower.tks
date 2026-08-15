@@ -876,8 +876,8 @@ fn cast_widens_to_64(src: checker::PrimKind, dst: checker::PrimKind): bool {
  * `IOr` it feeds is a 64-bit op whose result the isel records `wide=true`, and its `or r64, r/m`
  * reads the source operand's whole register — which a narrow value already holds ZERO-EXTENDED
  * (every 32-bit x86 op clears the upper half), so the ORed value is the operand's exact
- * non-negative widening with no bit changed. The value's identity is preserved (`0 | v == v`, the
- * LIR interpreter oracle's own reading), and only the width TRACKING advances — which is what a
+ * non-negative widening with no bit changed. The value's identity is preserved (`0 | v == v`),
+ * and only the width TRACKING advances — which is what a
  * widening `to i64`/`to u64` cast owes the isel so its later uses select the 64-bit form.
  *
  * @param operand  the already-lowered narrow operand
@@ -13110,7 +13110,7 @@ fn lower_interp(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp): Lowered
 /** lower_in_expr — `lhs in [e0, e1, …]`: the lhs lowers ONCE, then each element compares
     equal via `ICmpEq`/`FCmpEq` (by the lhs's PrimKind), ORed together bitwise (`IOr` — the
     comparisons are always 0/1, so a bitwise OR IS a boolean OR; `IOr` is declared but not yet
-    RUN by the interp oracle, N2 — this closes the LOWERING honest-stop only, mirroring
+    RUN by the oracle, N2 — this closes the LOWERING honest-stop only, mirroring
     `lower_interp`'s own scope note) (A1-4, #382). A non-primitive lhs/element (e.g. a `str`
     membership test) is out of the A1-4 subset via `prim_kind_of`'s existing honest-stop. */
 fn lower_in_expr(ctx: LowerCtx, e: checker::TExpr, ine: checker::TInExpr): Lowered | error {
@@ -13461,7 +13461,7 @@ fn field_type_of(layout: LStructLayout, field: str): LType | error {
  * lower_struct_init — `Name { f = v, … }`: alloca a slot sized/aligned per the struct's
  * registered layout, then store each field's lowered value at its offset (declared order). The
  * struct's "value" is its alloca'd BASE ADDRESS (a Ptr VReg) — the memory model every aggregate
- * in the A1-3 subset shares (§5.1: the interp is an exit-code oracle, not a byte-accurate
+ * in the A1-3 subset shares (§5.1: the oracle is exit-code only, not a byte-accurate
  * simulator; A2+ isel reads the real byte layout off LStructLayout, not off this VReg's class).
  *
  * The `error` branch (0.3.1.0 degrau 22) additionally zeros every field the literal itself did
@@ -14086,7 +14086,7 @@ fn lower_array_lit_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit)
 
 /** bool_lit_value — a bool literal's i64 register carrier (1 = true, 0 = false — the released
     seed does not implement a `bool to <numeric>` cast, so this picks the constant explicitly,
-    mirroring the interp's own bool_to_i64 and lower_bool_and's zero constant). */
+    mirroring the oracle's own bool_to_i64 and lower_bool_and's zero constant). */
 fn bool_lit_value(v: bool): i64 { if v { 1 } else { 0 } }
 
 /** lower_byte_lit — a byte literal -> its value widened to the i64 carrier. */
@@ -14168,7 +14168,7 @@ fn utf8_codepoint(s: str): i64 {
 }
 
 /** lower_char_lit — a char literal -> its decoded codepoint (the LIR's scalar
-    representation of `char` — the interp is an exit-code oracle, not a layout verifier, §5.1). */
+    representation of `char` — the oracle is exit-code only, not a layout verifier, §5.1). */
 fn lower_char_lit(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit): Lowered {
     var r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, utf8_codepoint(c.bytes), e.line, e.col)); vreg = r.vreg }
@@ -15151,10 +15151,7 @@ type ParamBind = struct {
 /**
  * bind_fn_params — bind every declared parameter into the function prologue, in order,
  * threading the running func/env/register-index through `bind_param` (`lower_function`'s
- * prologue, extracted so the fat-vs-scalar branch lives in exactly one place). Named
- * distinctly from the (retired) LIR interpreter's OWN `bind_params` (a different block-arg
- * binder function over `[]u32` — this module has no overload-by-type, so the two cannot
- * share a name).
+ * prologue, extracted so the fat-vs-scalar branch lives in exactly one place).
  *
  * @param LFunc func  the (still paramless-bodied) function to extend — its entry block (id 0)
  *                     receives one `param` inst per incoming register

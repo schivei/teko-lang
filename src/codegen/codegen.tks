@@ -63,7 +63,7 @@ type CgMode = enum { Program; TestPlain; TestCov; TestAnalyze; ProgramCov }
  *
  * Carries whether line/branch `tk_cov_*_at` calls are emitted and the OWNING production fn's
  * `prog.items` index (so interior line/branch marks key on the same `fn` the static floor walk
- * queries — `line_coverage`/`branch_coverage` in the interpreter's Teko twin use `i to u64`). `on == false` is the
+ * queries — `line_coverage`/`branch_coverage` in teko::coverage use `i to u64`). `on == false` is the
  * default for every non-TestCov path (via `cov_off()`) → NO `tk_cov_*` emitted → byte-identical
  * output → the gen1==gen2 fixpoint is structurally untouched.
  *
@@ -121,8 +121,7 @@ fn emit_cov_line(buf: []byte, ctx: CovCtx, line: u32, indent: str): []byte {
 
 /**
  * emit_cov_branch — under an active CovCtx, append one `tk_cov_branch_at(<fn_idx>, line, col,
- * outcome)` mark for a taken branch outcome (the native twin of the interpreter's exec_if/exec_match
- * cov_branch). No-op when off → byte-identical.
+ * outcome)` mark for a taken branch outcome. No-op when off → byte-identical.
  *
  * @param buf     the emission buffer
  * @param ctx     the coverage context
@@ -965,7 +964,7 @@ fn cg_type_table(prog: CgProg): checker::TypeTable {
 // ---------------------------------------------------------------------------
 
 // cg_path_last — the bare last segment of a path (cases/types match by their final
-// identifier, like the interpreter's path_last). (C: `cg_path_last`.)
+// identifier). (C: `cg_path_last`.)
 fn cg_path_last(p: parser::Path): str {
     if p.segments.len == 0 { "" } else { p.segments[p.segments.len - 1].name }
 }
@@ -3321,8 +3320,7 @@ fn emit_arith(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary,
 
 // emit_shift — #49: the `<<`/`>>` path for INTEGER prims. Routes through tk_shl_*/
 // tk_shr_* helpers (teko_rt.h) that mask the shift count by (width - 1) instead of
-// leaving an out-of-range count as plain C UB — a DEFINED result matching the interpreter's
-// eval_binary/apply_int_op mask exactly. Bitwise/float shift is checker-rejected, so
+// leaving an out-of-range count as plain C UB — a DEFINED result. Bitwise/float shift is checker-rejected, so
 // a non-integer result type reaching here is an internal invariant break.
 // (C: the `if (bop == TK_TOKEN_SHL || bop == TK_TOKEN_SHR)` block inside TK_TEXPR_BINARY.)
 fn emit_shift(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
@@ -3379,8 +3377,8 @@ fn emit_binary(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinary
 
 /** emit_unary — a TUnary -> `(op X)`. Bitwise NOT (`~`) on an integer prim TRUNCATES back to the
     operand's C type (`(uint8_t)(~x)`): C promotes a sub-int operand to `int` before `~`, so `~(u8)0`
-    is `-1` (all 32 bits), not the width-masked `255` the interpreter computes — the cast re-narrows to the
-    declared width so both engines agree (#265: exposed the first time the u8 `~` test ran natively).
+    is `-1` (all 32 bits), not the width-masked `255` the declared type requires — the cast re-narrows to the
+    declared width (#265: exposed the first time the u8 `~` test ran natively).
     Other unaries (`-`, `!`) need no mask — their result already fits the operand width. */
 fn emit_unary(buf: []byte, prog: CgProg, u: checker::TUnary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var op = match unop_c(u.op) { str as s => s; error as err => return err }
@@ -4752,7 +4750,7 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
     }
     // E2 (native): err_loc/err_typed adorn an error VALUE with diagnostic position/types.
     // `error` is now the full tk_error struct (E2-NATIVE), so these call tk_error_loc /
-    // tk_error_types (teko_rt.h) which return a modified copy — native parity with the interpreter.
+    // tk_error_types (teko_rt.h) which return a modified copy.
     if p.segments.len >= 1 && !user_declared {
         var pe = p.segments[p.segments.len - 1].name
         if pe == "err_loc" {
@@ -4874,7 +4872,7 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             else if last == "fdiv" { builtin = "tk_fdiv"; has_builtin = true }   // (f64,f64) -> f64
             else if last == "f64_bits" { builtin = "tk_f64_bits"; has_builtin = true }   // (f64) -> u64
             else if last == "f64_from_bits" { builtin = "tk_f64_from_bits"; has_builtin = true }   // (u64) -> f64
-            // D3 — test-coverage sink (host side-channel): the interpreter marks executed production fns.
+            // D3 — test-coverage sink (host side-channel): marks executed production fns.
             else if last == "cov_reset" { builtin = "tk_cov_reset"; has_builtin = true }   // () -> void
             else if last == "cov_mark" { builtin = "tk_cov_mark"; has_builtin = true }   // (u64) -> void
             else if last == "cov_distinct" { builtin = "tk_cov_distinct"; has_builtin = true }   // () -> u64
@@ -5063,7 +5061,7 @@ fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escap
         return cb(o, ".len)")
     }
     // E2 (native): error values are now the full tk_error struct (E2-NATIVE), so
-    // field access reads the real struct fields — native parity with the interpreter. Mirrors codegen.c.
+    // field access reads the real struct fields. Mirrors codegen.c.
     var is_error = match fa.receiver.type { checker::Error => true; _ => false }
     if is_error {
         var oe = cb(buf, "((")
@@ -5154,7 +5152,7 @@ fn cg_expr_diverges(e: checker::TExpr): bool {
 //   ({ tk_str _sN = <recv>; uint64_t _iN = <idx>; _iN < _sN.len ? _sN.ptr[_iN]
 //                                              : (tk_panic_oob(), (tk_byte)0); })
 // tk_panic_oob is declared in teko_rt.h (the generated TU's runtime header) — an out-of-bounds
-// index PANICS with the SAME message as the interpreter's eval_index (M.1). A slice receiver uses the
+// index PANICS with the standard out-of-range message (M.1). A slice receiver uses the
 // SAME bounds-checked shape, with the element C type substituted for tk_byte and reading
 // `(recv).ptr[i]` with a `(tk_panic_oob(), (<elem>){0})` fallback. (C: the TK_TEXPR_INDEX branch.)
 fn emit_index(buf: []byte, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
@@ -5234,8 +5232,7 @@ fn emit_index(buf: []byte, prog: CgProg, e: checker::TExpr, ix: checker::TIndex,
 //   ({ tk_str _invN = <lhs>; tk_str_eq(_invN, <e0>) || tk_str_eq(_invN, <e1>) || …; })
 // The temp `_inv<buf.len>` uses the buffer length as the functional uniquifier (see emit_index).
 // The EMPTY set `x in []` still EVALUATES the lhs once (single-eval), then yields false — so a
-// side-effecting lhs runs identically in the interpreter (which evaluates the lhs before its zero-iteration
-// loop). interpreter==native even for `[]`. (C: the TK_TEXPR_IN branch of emit_expr.)
+// side-effecting lhs still runs once, even for `[]`. (C: the TK_TEXPR_IN branch of emit_expr.)
 fn emit_in(buf: []byte, prog: CgProg, ie: checker::TInExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if ie.elems.len == 0 {
         var z = cb(buf, "({ (void)(")
@@ -5381,8 +5378,8 @@ fn emit_array_lit(buf: []byte, prog: CgProg, e: checker::TExpr, a: checker::TArr
 // emit_interp — $"…{expr}…" (self-host parity). Lower to nested tk_str_concat over the piece
 // literals and the holes: pieces[0] ++ str(holes[0]) ++ pieces[1] ++ … . A piece literal is the
 // SAME (tk_str){…} emission as TStrLit. A `str` hole is the str expr directly; an INTEGER hole is
-// wrapped in i64_to_str/u64_to_str (by the hole's signedness) — the SAME runtime builders the interpreter
-// calls, so interpreter==codegen byte-for-byte. Concats nest left-to-right (matching the interpreter's accumulator).
+// wrapped in i64_to_str/u64_to_str (by the hole's signedness) — the runtime builders. Concats nest
+// left-to-right (accumulator order).
 fn emit_piece_lit(buf: []byte, piece: str): []byte {
     var out = cb(buf, "(tk_str){ (const tk_byte *)\"")
     out = cb_cstr_escaped(out, piece)
@@ -5399,8 +5396,7 @@ fn emit_piece_lit(buf: []byte, piece: str): []byte {
  * take ONLY the value — `tk_fmt_x_upper(v)` / `tk_fmt_x_lower(v)` / `tk_fmt_b(v)` /
  * `tk_fmt_n_i(v)`. Every other family (`f`/`e`/`g`/`p`/`d`, and `n` on a float) takes a
  * second precision-or-width argument. Emitting the second argument for a one-argument helper
- * makes the generated C fail to compile (too many arguments) — the native path breaks while
- * the interpreter keeps producing output, a interpreter==native divergence.
+ * makes the generated C fail to compile (too many arguments).
  *
  * @param fc_low  the spec's normalized (lowercased) leading format character
  * @param is_flt  true when the hole's static type is a float (f32/f64)
@@ -5414,7 +5410,7 @@ fn fmt_family_takes_prec(fc_low: byte, is_flt: bool): bool {
 }
 /**
  * emit_interp — lower a `$"…{expr}…"` interpolation to the nested-`tk_str_concat` fold over its
- * piece literals and holes (interpreter==codegen byte-for-byte), optionally routing the fold through the
+ * piece literals and holes, optionally routing the fold through the
  * scope-region builder `tk_str_concat_r(str_region, …)` (0.3.1 modelo-de-memoria §9, crumb C3).
  *
  * When `str_region` is empty the fold uses the root builder `tk_str_concat` (the historical,
@@ -5627,9 +5623,8 @@ fn cg_find_struct_field_type(prog: CgProg, sname: str, fname: str): @TypeExpr() 
 
 // emit_struct_init — W4c `Name { f = v, … }` -> a C compound literal in DECLARED field
 // order:  (tk_t_<MANGLE>){ .<field> = <val>, … }. The checker already reordered
-// field_names/field_vals into the struct's declared order (expr.tks), so both backends
-// lower identically (differential equivalence with the interpreter, which stores fields in the
-// same order). The node's `.type` is Named (a user struct -> mangle its name) or Error
+// field_names/field_vals into the struct's declared order (expr.tks), so the emitted
+// fields follow the declared order. The node's `.type` is Named (a user struct -> mangle its name) or Error
 // (`error { message = … }`). E2-NATIVE: `error` is now the runtime tk_error struct
 // (teko_rt.h); `error { message = s }` emits tk_error_make(s) which fills the other
 // diagnostic fields with zero defaults (C1.3 additive). (C: TK_TEXPR_STRUCT_INIT branch.)
@@ -5866,7 +5861,7 @@ fn emit_charlit(buf: []byte, ch: checker::TCharLit): []byte | error {
 }
 
 // ---------------------------------------------------------------------------
-// W5a — `if`-as-a-VALUE + IMPLICIT trailing-return (differential parity with the interpreter).
+// W5a — `if`-as-a-VALUE + IMPLICIT trailing-return.
 // ---------------------------------------------------------------------------
 
 // is_void_type — true iff a resolved Type is `void`. (C: `e->type.tag == TK_TYPE_VOID`.)
@@ -5888,8 +5883,8 @@ fn fresh_tmp_name(buf_len: i64): str {
 
 // emit_stmt_value — emit ONE branch statement in VALUE position: its trailing value is
 // assigned to `sink`. A RETURN/break/continue inside a branch DIVERGES, but an `if` used as a
-// SUB-expression cannot express that as a value, so it is an honest barrier here — EXACTLY
-// matching the interpreter (eval_expr's TIfExpr stops on a divergent branch). A value-carrying expr
+// SUB-expression cannot express that as a value, so it is an honest barrier here (a divergent
+// branch stops the value flow). A value-carrying expr
 // statement -> `<sink> = <expr>;`. Anything else (void expr-stmt, loop, binding, assign) ->
 // emitted normally (no value). (C: `emit_stmt_value`.)
 // `escaping`/`regions`/`fn_body` thread the enclosing block-region context: a non-tail statement
@@ -5993,7 +5988,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: @Type(), body: []@TSta
 //   ({ <Ctype> _tkN; if (<cond>) { <then…> } else { <else…> } _tkN; })
 // Each branch assigns its trailing value to `_tkN`; `<Ctype>` is the if-node's resolved
 // branch type. clang/gcc accept stmt-exprs under the host cc (the codebase already targets
-// cc -std=c23). (interpreter parity: eval_expr's TIfExpr runs exec_if and yields the taken branch's
+// cc -std=c23). (The `if` yields the taken branch's
 // trailing NORMAL value; a divergent branch is an honest stop — see emit_stmt_value.)
 // (C: `emit_if_value`.)
 fn emit_if_value(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr, f: checker::TIfExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
@@ -6023,7 +6018,7 @@ fn emit_if_value(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr
 }
 
 // ---------------------------------------------------------------------------
-// W5b — VARIANT-VALUE WRAPPING + MATCH lowering (differential parity with the interpreter).
+// W5b — VARIANT-VALUE WRAPPING + MATCH lowering.
 // ---------------------------------------------------------------------------
 
 // fresh_named — a fresh temp `<prefix><len>` (a sibling of fresh_tmp_name for the match
@@ -6947,8 +6942,7 @@ fn cg_name_last_segment_offset(name: str): u64 {
 //   (tk_t_<Variant>){ .tag = TK_TAG_<UPPER Variant>_<UPPER member>, .as.<member> = <value> }
 // else emit the value plainly. The tag suffix + union field are spelled EXACTLY as
 // emit_type_decl spells them (cb_upper tag; the member's bare name field), so wrap + decl
-// agree. The interpreter needs no wrap (its struct value already carries the case name); this
-// synthesizes the C equivalent — the W4c-deferred variant-value layer. (C: `emit_as`.)
+// agree. This synthesizes the tag + union carrier — the W4c-deferred variant-value layer. (C: `emit_as`.)
 // emit_as — wrap `value` into `expected` (the ret_type-less convenience form: most callers are not
 // in a return context, so a diverging value-form-match arm inside `value` cannot occur). The C uses
 // a `g_cg_ret_type` STATIC for that; here ret_type is THREADED (Teko has no module-mutable), so a
@@ -7293,7 +7287,7 @@ fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: @Type(), expected: @Type(),
 
 // cg_emit_lit_pattern — emit an AST LITERAL pattern bound as a C constant comparable to the
 // subject temp `_s` (which already has the subject's C type, so a bare C number/byte literal
-// compares correctly — the interpreter's lit_as borrows the subject's width/sign for the same reason).
+// compares correctly at the subject's width/sign).
 // A str literal is a (tk_str){…} compound literal with an EXPLICIT length (same form as
 // TStrLit — the bytes may hold NUL); the CALLER must compare it via tk_str_eq, never `==`
 // (see emit_pat_test). (C: `cg_emit_lit_pattern`.)
@@ -7912,8 +7906,8 @@ fn cg_block_diverges(stmts: []@TStatement()): bool {
 }
 
 // cg_block_diverges_jump — does a block diverge via a `break`/`continue` (NOT a `return`)? Such
-// a jump can't escape a GNU stmt-expr, so a match used as a SUB-expression honest-stops on it —
-// the same frontier the interpreter enforces (eval_match). A `return` divergence is fine. (C: `cg_block_diverges_jump`.)
+// a jump can't escape a GNU stmt-expr, so a match used as a SUB-expression honest-stops on it.
+// A `return` divergence is fine. (C: `cg_block_diverges_jump`.)
 fn cg_block_diverges_jump(stmts: []@TStatement()): bool {
     if stmts.len == 0 { return false }
     match stmts[stmts.len - 1] {
@@ -7940,8 +7934,7 @@ fn cg_block_diverges_jump(stmts: []@TStatement()): bool {
 // normally; the trailing value flows into `sink`, wrapped to the match result type via emit_as,
 // then `break` commits. A `return`-DIVERGING arm (`=> return e` — THE dominant idiom) emits real
 // control flow (a `return …;` leaves the whole function) and never commits to `sink`. A break/
-// continue divergence is an HONEST STOP (it can't escape a stmt-expr), the same frontier the interpreter
-// enforces (eval_match). (C: `emit_arm_value`.)
+// continue divergence is an HONEST STOP (it can't escape a stmt-expr). (C: `emit_arm_value`.)
 fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: @Type(), match_e: checker::TExpr, body: []@TStatement(), sink: str, ci: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     if cg_block_diverges_jump(body) {
         return error { message = "codegen: break/continue inside a `match` used as a sub-expression not yet supported" }
@@ -8060,7 +8053,7 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: @Type(), match_e: checker
  * with `_r = <body>; break;` inside a `do {…} while (0)`:
  * `({ <SubjCType> _sN = (<subject>); <ResultCType> _rN = {0}; do { if (<test0>) { <binds0>
  * [if (<guard0>)] { <arm body → _rN; break;> } } … } while (0); _rN; })`. The non-`else` `if`
- * chain gives the interpreter's first-match-with-guard order; a failed guard falls through to the next arm.
+ * chain gives the first-match-with-guard order; a failed guard falls through to the next arm.
  * Exhaustiveness is checker-guaranteed, so the chain always commits before the `while (0)` exits —
  * but C cannot prove it, so `_rN` is zero-initialized (`= {0}`, universal C zero-init for scalar,
  * struct and union) to make the fallthrough read well-defined; the winning arm overwrites it, so
@@ -8128,7 +8121,7 @@ fn emit_match_value(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TE
  * brace block holding the subject temp.
  *
  * The FIRST winning arm runs its block and then `goto`s a unique commit label past the chain, so
- * the search stops at the first match (mirroring the interpreter). The `goto` is essential: a tail match in
+ * the search stops at the first match. The `goto` is essential: a tail match in
  * a `-> void` fn has arm bodies that do NOT diverge (no implicit `return`), so without the commit
  * jump MULTIPLE arms would fall through and all fire. A failed `when` guard naturally falls through
  * to the next arm (the goto is INSIDE the guard block). `ret_type` threads the fn return type so a
@@ -8234,7 +8227,7 @@ fn emit_match_tail_fallthrough_return(buf: []byte, prog: CgProg, ret_type: @Type
 // then `goto`s a unique commit label past the chain. The commit uses a GOTO (not a `do {…}
 // while(0)` + break) precisely because an arm body is a BLOCK that may contain `break`/`continue`
 // targeting an ENCLOSING loop — those must be real C break/continue, never swallowed by a wrapper
-// (mirrors the interpreter propagating the arm's flow). (C: `emit_match_stmt`.)
+// (the arm's flow propagates through). (C: `emit_match_stmt`.)
 fn emit_match_stmt(buf: []byte, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     var subj = fresh_named("_s", buf.len to i64)
     var done = teko::str::concat(fresh_named("tk_m", buf.len to i64 + 1), "_done")   // unique commit label (str concat — no `+` on str)
@@ -8318,8 +8311,7 @@ fn emit_number(buf: []byte, prog: CgProg, e: checker::TExpr, n: checker::TNumber
     // lowering (type_flags_method, typer.tks) — is a NAMED type whose decl is `flags`. Emit it
     // cast to the flags' own typedef'd carrier (`tk_t_<Name>`, the SAME uint chosen by member
     // count as the flags typedef itself emits — FlagsBody above), reusing that carrier via its
-    // typedef name instead of re-deriving uint8_t/uint16_t/… a second time. Mirrors the interpreter's
-    // flags_carrier_of (interpreter twin, #50).
+    // typedef name instead of re-deriving uint8_t/uint16_t/… a second time (#50).
     match e.type {
         checker::Named as nm => {
             if cg_named_is_flags(prog, nm.name) {
@@ -9103,12 +9095,12 @@ fn emit_block_region(buf: []byte, body: []@TStatement(), in_main: bool, prog: Cg
 }
 
 // emit_exprstmt_tail — W5a: emit a TRAILING expr-statement (a block's last statement) as an
-// IMPLICIT RETURN of its value (mirrors the interpreter: a block's trailing NORMAL value is the
+// IMPLICIT RETURN of its value (a block's trailing NORMAL value is the
 // function's/main's value — B.20). A trailing `if` is lowered as DIRECT control flow (each
 // branch recursively tail-emitted), so `return`/`break`/`continue` inside a branch propagate
-// via C's own semantics — exactly like the interpreter's exec_if. This direct form works whether the
+// via C's own semantics. This direct form works whether the
 // trailing `if` is typed as a value (a function-body tail) or as `void` (a virtual-main tail,
-// which the checker types as a statement but the interpreter still drains for its branch value). A void
+// which the checker types as a statement but still yields a branch value). A void
 // expr-statement, or any non-expr trailing statement, emits normally (no value).
 // (C: `emit_exprstmt_tail`.)
 fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
@@ -9224,12 +9216,12 @@ fn emit_block_tail(buf: []byte, body: []@TStatement(), in_main: bool, prog: CgPr
  * emit_if_stmt — W5a: emit an `if` in STATEMENT position as plain C control flow
  * (`if (<cond>) { <then…> } [else { <else…> }]`). Each branch is emitted via emit_block_region
  * (NON-tail, value discarded), so `break`/`continue`/`return` inside a branch propagate via C's own
- * semantics — mirroring the interpreter, which routes a statement-position `if` to exec_if as CONTROL FLOW,
+ * semantics — a statement-position `if` is pure CONTROL FLOW,
  * never the value path. (The TAIL `if` takes emit_exprstmt_tail; a SUB-expression `if` takes
  * emit_if_value; this is the INTERIOR statement case.)
  *
  * (#265 Track A, A3) `line`/`col` are the if-node's own position (the enclosing TExpr's e.line/e.col,
- * matching cov_addsite in the interpreter's Teko twin): a `tk_cov_branch_at(fn, line, col, 0)` heads the then-block and a
+ * matching cov_addsite in teko::coverage): a `tk_cov_branch_at(fn, line, col, 0)` heads the then-block and a
  * `tk_cov_branch_at(fn, line, col, 1)` heads the else. The else mark is SYNTHESIZED even when the
  * source has no `else` (an empty skip-path `else {}` carrying only the mark) — the static walk always
  * counts 2 outcomes, so without the outcome-1 mark the branch floor is unreachable at 100%. The
@@ -9401,7 +9393,7 @@ fn emit_assign_lvalue(buf: []byte, prog: CgProg, a: checker::TAssign): []byte | 
  * receiver slice and the index into single-eval temps, bounds-checks the index against `.len` (the
  * SAME positioned `tk_panic_oob_at` as a read subscript), then writes the element in place through
  * the shared `{ptr,len}` buffer. A shift-assign (`<<=`/`>>=`) routes through the width-masked
- * `tk_shl_/tk_shr_` runtime helper — matching the bare `<<`/`>>` operator and the interpreter — instead of the
+ * `tk_shl_/tk_shr_` runtime helper — matching the bare `<<`/`>>` operator — instead of the
  * UB-prone C compound shift; every other op emits the plain C compound store.
  *
  * @param buf       the output buffer
@@ -9557,7 +9549,7 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: @Type(), a: checker::TAssign
         }
     }
     // #61 — `<<=`/`>>=` must NOT emit the raw C compound operator: an out-of-range shift count
-    // is C UB natively, while the interpreter (#49, compound_apply) computes a DEFINED width-masked
+    // is C UB natively; the contract (#49) is a DEFINED width-masked
     // result. Rewrite as `lvalue = tk_shl_<w>(lvalue, rhs)` / tk_shr_<w>, routing through the
     // SAME teko_rt.h helpers the binary `<<`/`>>` operator uses (emit_shift). SAFE to evaluate
     // the lvalue twice: the assign-statement grammar (parse_stmt) admits only two lvalue shapes
@@ -9792,7 +9784,7 @@ fn cb_indent_deeper(indent: str): str {
 // region (SAFE, M.5), and a frame-local binding only inside a branch falls back to root.
 /**
  * cov_push_line — add `line` to the distinct-line accumulator `acc` (skip 0 = unpositioned). Mirrors
- * the interpreter's Teko twin's cov_addline dedup so the emitted marks match the interpreter's distinct-line set. Linear dedup: a
+ * teko::coverage's cov_addline dedup so the emitted marks match its distinct-line set. Linear dedup: a
  * single statement spans few lines.
  *
  * @param acc   the distinct lines gathered so far
@@ -9813,7 +9805,7 @@ fn cov_push_line(acc: []u32, line: u32): []u32 {
  * child EXCEPT the conditional bodies of a nested if/match (then/else blocks and arm bodies are
  * SEPARATE statements — emit_stmt marks their lines when THEY emit, control-sensitively). The
  * if/match's own line + its cond/subject/guards ARE collected (they evaluate unconditionally).
- * This mirrors the interpreter, which marks `e.line` at every eval_expr head reached by control flow, so a
+ * The static walk marks `e.line` at every expr head reached by control flow, so a
  * multi-line expression (the `cb(cb(...))` / `match emit(...) { … }` idiom pervasive in this
  * codebase) contributes ALL its lines — the fix for the statement-head-only undercount.
  *
@@ -9891,8 +9883,8 @@ fn cov_collect_expr(e: checker::TExpr, acc: []u32): []u32 {
 }
 
 /**
- * stmt_cov_lines — the distinct source lines the interpreter would mark for a statement, unconditionally
- * (#265 Track A, A2). Matches `cov_walk_stmt` in the interpreter's Teko twin: a binding/assign RHS, a return value, an
+ * stmt_cov_lines — the distinct source lines to mark for a statement, unconditionally
+ * (#265 Track A, A2). Matches `cov_walk_stmt` in teko::coverage: a binding/assign RHS, a return value, an
  * expr-statement's expr (also covers a statement-position if/match — its own line + cond/subject,
  * the branch bodies self-marking as separate statements). Loops (no own expr), break/continue and
  * defer carry no lines of their own → empty.
@@ -9918,7 +9910,7 @@ fn stmt_cov_lines(s: @TStatement()): []u32 {
 /**
  * emit_cov_lines — under an active CovCtx, emit a `tk_cov_line_at` mark for EACH distinct line of a
  * statement's unconditionally-reached expr subtree (byte-identical when off). One-per-line, keyed on
- * the owning fn, matching the interpreter's per-eval line set exactly for the common multi-line-expression case.
+ * the owning fn, covering the common multi-line-expression case.
  *
  * @param buf     the emission buffer
  * @param ctx     the coverage context
@@ -9988,8 +9980,8 @@ fn emit_stmt_dispatch(b0: []byte, s: @TStatement(), in_main: bool, prog: CgProg,
         checker::TAssign as a => emit_assign(b0, prog, ret_type, a, indent, frame, escaping, regions, fn_body, dctx)
         checker::TReturn as r => emit_return(b0, prog, r, in_main, ret_type, indent, frame, escaping, regions, fn_body, dctx)
         checker::TExprStmt as es => {
-            // W5a — an `if` in statement position runs as CONTROL FLOW (mirrors the interpreter's
-            // exec_stmt → exec_if), so break/continue/return inside a branch propagate. W5b —
+            // W5a — an `if` in statement position runs as CONTROL FLOW,
+            // so break/continue/return inside a branch propagate. W5b —
             // a `match` in statement position runs each winning arm body for effect.
             match es.expr.kind {
                 checker::TIfExpr as f => emit_if_stmt(b0, f, es.expr.line, es.expr.col, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
@@ -10709,7 +10701,7 @@ fn cg_emit_arena_presize(buf: []byte, n: u64): []byte {
 /** emit_function_cov — emit_function with an optional `tk_cov_mark(cov_idx)` entry prologue (#265,
     the native-gate TestCov profile). `cov_idx < 0` emits NO prologue → byte-identical to the
     historical emission (Program/TestPlain and every ordinary caller). A `cov_idx >= 0` marks this
-    production function's items-index on entry — the mark the interpreter does in eval_call — AND turns on the
+    production function's items-index on entry — the executed-function mark — AND turns on the
     interior line/branch instrumentation (Track A) via a live CovCtx threaded on `dctx.cov`, so every
     `tk_cov_line_at`/`tk_cov_branch_at` interior mark keys on THIS function's items-index (cov_idx). */
 fn emit_function_cov(buf: []byte, prog: CgProg, f: checker::TFunction, cov_idx: i64): []byte | error {
@@ -11284,8 +11276,8 @@ fn cg_collect_block_opts(set: CgTypeSet, stmts: []@TStatement()): CgTypeSet {
         if i >= stmts.len { break }
         match stmts[i] {
             checker::TBinding as b => { s = cg_collect_type_opts(s, b.bound); s = cg_collect_expr_opts(s, b.value) }
-            // collect a.bound too (the target's declared type — the SAME present-wrap target as the
-            // interpreter's coerce_to(a.bound)): a deref-assign `r.value = v` through a `Ref<T?>` has bound=`T?`,
+            // collect a.bound too (the target's declared type — the present-wrap target,
+            // coerce_to(a.bound)): a deref-assign `r.value = v` through a `Ref<T?>` has bound=`T?`,
             // and that optional's tk_opt_<T> typedef must be emitted even when the value's own type is a
             // bare `T` (widened) — mirrors the TBinding arm collecting b.bound.
             checker::TAssign as a => { s = cg_collect_type_opts(s, a.bound); s = cg_collect_expr_opts(s, a.value); if parser::assign_has_target(a.kind) { s = cg_collect_expr_opts(s, a.target) } }
@@ -13393,7 +13385,7 @@ fn emit_function_mode(buf: []byte, prog: CgProg, f: checker::TFunction, mode: Cg
 }
 
 /** fn_items_index — the `prog.items` index of `f` (its coverage id, shared across processes). Matches
-    by identity of namespace + name + line (the fields the interpreter's cov marks key on). (#265) */
+    by identity of namespace + name + line (the fields the cov marks key on). (#265) */
 fn fn_items_index(prog: CgProg, f: checker::TFunction): u64 {
     var i: u64 = 0
     loop {

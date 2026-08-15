@@ -379,7 +379,7 @@ fn type_tilde_chain(b: parser::Binary, env: Env, table: TypeTable): TExpr | erro
     type_call(call, env, table)
 }
 /** `~` is desugared WHOLESALE (chain-flattened + literal-folded) BEFORE the generic operand-typing
-    below — it never reaches a plain TBinary node (codegen/interpreter see an ordinary TCall or TStrLit,
+    below — it never reaches a plain TBinary node (codegen sees an ordinary TCall or TStrLit,
     nothing new to handle, mirroring how `params` needed no engine changes).
     (S6, issue #162) operators over a constrained type-param T stay a HONEST STOP, intentionally —
     no operator-trait exists yet to authorize `+`/`-`/… the way an interface constraint authorizes
@@ -724,7 +724,7 @@ fn type_bitwise_binop(op: lexer::TokenKind, l: TExpr, r: TExpr): TExpr | error {
 
 /**
  * type_logical_binop — type a logical operator (`&& ||`): bool operands, bool result, short-circuit
- * (matches C + the interpreter).
+ * (matches C).
  *
  * @param op  the logical operator token
  * @param l   the typed left operand
@@ -1532,8 +1532,8 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
                 elem
             }
         }
-        // (#57) CONCRETIZE a SENTINEL base (bare empty()) to []elem so codegen can EMIT it; the interpreter
-        // ignores a slice's element type but codegen's emit_list_empty REQUIRES it. (Mirror expr.c.)
+        // (#57) CONCRETIZE a SENTINEL base (bare empty()) to []elem so codegen can EMIT it;
+        // codegen's emit_list_empty REQUIRES the slice's element type. (Mirror expr.c.)
         var arr_expr = match elem { Void => TExpr { kind = s.kind; type = Slice { element = result_elem }; line = s.line; col = s.col }; _ => s }
         var args = teko::list::push(teko::list::push(teko::list::empty(), arr_expr), x)
         TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Slice { element = result_elem }; line = 0; col = 0 }
@@ -2378,7 +2378,7 @@ fn type_flags_method(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr 
         return TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
     }
     // any/none: compare (recv & mask) against a zero-valued flags literal (the same pattern as
-    // an enum ordinal cast — codegen/interpreter read the NAMED flags type off the node, not the literal).
+    // an enum ordinal cast — codegen reads the NAMED flags type off the node, not the literal).
     var zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = rt; line = 0; col = 0 }
     var cmp_op = if is_none { lexer::TokenKind::EqEq } else { lexer::TokenKind::Ne }
     var term = TCmpTerm { op = cmp_op; operand = zero }
@@ -2518,11 +2518,11 @@ fn type_param_call_error(decl: parser::TypeDecl, table: TypeTable): error | null
  * segment; `ns_matches_call_qualifier` then compares `b.ns` against that whole canonical string
  * (equals, or ends-with `::<class>`), disambiguating two same-bare classes. Keeping the qualifier in
  * ONE segment — rather than splitting it back to `[..ns.., Class]` — means the callee never starts
- * with `teko`, so it never trips the interpreter's `teko`-rooted builtin name-sniffer (which would otherwise
+ * with `teko`, so it never trips the `teko`-rooted builtin name-sniffer (which would otherwise
  * treat a method named `len`/`str`/`parse`/… on a `teko::…` class as a string builtin). Mirrors how
  * FIELD access already resolves off the canonical `Named` via the type table (why fields never
- * regressed). Both backends read only the LAST segment (the method) plus `TCall.call_ns`, so the
- * qualifier's shape is transparent to codegen and the interpreter.
+ * regressed). Codegen reads only the LAST segment (the method) plus `TCall.call_ns`, so the
+ * qualifier's shape is transparent to codegen.
  *
  * @param struct_name  the receiver's canonical class name (`ns::…::Class`, or bare at the root ns)
  * @param method       the dispatched method's bare name
@@ -2968,8 +2968,8 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     // type is a `virtual`/`abstract` class, the value may hold a subclass, so the call dispatches
     // dynamically through the base's vtable — exactly the D3 mechanism, keyed on the base class as
     // the "contract". The slot is the method's index in the base's EFFECTIVE method list (the same
-    // order codegen's `tk_vt_<Sub>_<Base>` build uses). The receiver rides args[0]; both engines
-    // resolve the CONCRETE override (interpreter by the payload's class name, native via the vtable slot).
+    // order codegen's `tk_vt_<Sub>_<Base>` build uses). The receiver rides args[0]; native
+    // resolves the CONCRETE override via the vtable slot.
     // A `sealed` class is never a base — is_polymorphic_base filters it — so its calls stay direct.
     match decl.body {
         parser::ClassBody as bcb => {
@@ -3806,7 +3806,7 @@ fn cast_check(from: @Type(), to: @Type()): error | null {
  * only (comptime folding deferred). Only the int-literal → int-target case is statically
  * range-checkable (B.38, u8..u64/i8..i64); float→int / int→float / float→float constant
  * conversions are runtime-guarded (trunc toward zero, overflow/NaN/∞ → panic — §5) — the checker
- * permits them, the fit is codegen/interpreter's.
+ * permits them, the fit is codegen's.
  *
  * @param e       the candidate literal expression
  * @param target  the cast/annotation target type
@@ -4336,8 +4336,8 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable): TExpr
 
 // ---- `?.` safe navigation (NP-OOP, issue #116) — the shared checker DESUGAR ----
 // `recv?.member…` on a CLASS/INTERFACE optional lowers IN THE CHECKER to the equivalent
-// typed match (no new TAST node, so the interpreter and native codegen run it through their
-// existing match/method/field machinery — twin-identical by construction):
+// typed match (no new TAST node, so native codegen runs it through its
+// existing match/method/field machinery):
 //     match recv { null => null; <Inner> as __tkqL_C => __tkqL_C.<member…> }
 // typed `R?` (an already-optional R stays R?; a void R makes the whole safe call void —
 // statement position only, with an EMPTY null-arm body).
@@ -4364,7 +4364,7 @@ fn unread_guard_placeholder(): TExpr {
  * capture — a semantic contradiction, owner ruling). `resolve_foreach_arm`, BEFORE any
  * pattern-matching/exhaustiveness/codegen ever sees a for-each match's arms, rewrites this
  * placeholder into a REAL `T as x` bind (T = the iterator's resolved element type) — the SAME
- * sound, pre-existing named-bind mechanism `Foo as v` already uses, so interpreter/native/LIR need NO
+ * sound, pre-existing named-bind mechanism `Foo as v` already uses, so native/LIR need NO
  * special case.
  *
  * @param p  the arm pattern to classify
@@ -4379,9 +4379,9 @@ fn is_foreach_elem_placeholder(p: @Pattern()): bool {
 
 /**
  * elem_type_name — the RUNTIME-facing BARE name of a for-each iterator's element type `t` — the
- * SAME bare, unqualified spelling interpreter's `bind_case_name`/`val_type_matches` and codegen's
- * `cg_path_last`/`cg_emit_case_key_str` already compare against for an ordinary `Foo as v` bind
- * (mirrors the "#109 W3 bare-vs-bare" convention throughout match.tks/the interpreter's twin/codegen.tks — the
+ * SAME bare, unqualified spelling codegen's
+ * `cg_path_last`/`cg_emit_case_key_str` already compares against for an ordinary `Foo as v` bind
+ * (mirrors the "#109 W3 bare-vs-bare" convention throughout match.tks/codegen.tks — the
  * runtime never carries a namespace). Handles the realistic element-type shapes (prim, byte, char,
  * str, a named struct/class/enum); every other `Type` case is a clean, named internal error (not
  * yet supported by the for-each desugar).
@@ -4479,8 +4479,8 @@ fn resolve_foreach_placeholders(arms: []parser::Arm, subject: @Type()): []parser
  * `resolve_foreach_arm`'s shape), binds the element name directly to the ALREADY-KNOWN type (no
  * re-derivation needed — it came straight from `_it`'s resolved return type), types the body against
  * that binding, and the emitted `TArm.pattern` carries a REAL, bare-named `BindPattern`
- * (`elem_type_name`) — so interpreter's `pat_match`/codegen's `emit_pat_binds` see an ORDINARY named
- * bind and need no special case (#517, §5.4.1).
+ * (`elem_type_name`) — so codegen's `emit_pat_binds` sees an ORDINARY named
+ * bind and needs no special case (#517, §5.4.1).
  *
  * @param a        the syntactic placeholder arm
  * @param subject  the match's subject type (a `T | null` union; its non-null member is the
@@ -4888,7 +4888,7 @@ fn name_has_generic_base(mname: str, stem: str): bool {
 // ---- subscript index `recv[index]` (W5-idx) ----
 // The receiver is a `str` (-> byte) or a slice `[]T` (-> element type T); the index must be
 // an integer prim. str indexing/.len is fully lowered in both backends; slice values can't
-// be constructed yet, so a slice index type-checks here but is an honest stop in interpreter/codegen.
+// be constructed yet, so a slice index type-checks here but is an honest stop in codegen.
 fn type_index(ix: parser::Index, env: Env, table: TypeTable): TExpr | error {
     var recv = match type_expr(ix.receiver, env, table) { TExpr as te => te; error as e => return e }
     var idx = match type_expr(ix.index, env, table) { TExpr as te => te; error as e => return e }
@@ -4958,8 +4958,8 @@ fn datetime_formatter_of(t: @Type()): str {
  * Desugar a Date/Time interpolation hole with a calendar pattern into a `to_string` CALL.
  *
  * Rewrites `$"{d:yyyy-MM-dd}"` into `<ns>::date_to_string(d, "yyyy-MM-dd")` (or `time_to_string`),
- * typed here so codegen and the interpreter see an ordinary str-returning call — both engines then run the
- * SAME pure-Teko formatter, guaranteeing byte-identical output. The raw (un-typed) hole is reused
+ * typed here so codegen sees an ordinary str-returning call, running the
+ * pure-Teko formatter. The raw (un-typed) hole is reused
  * as the receiver so the call's own argument typing applies uniformly.
  *
  * @param raw_hole  the original (un-typed) hole expression
@@ -7439,7 +7439,7 @@ fn coerce_argument_into(a: TExpr, pt: @Type(), table: TypeTable): TExpr | error 
 
 /** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
     (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
-    arg must KEEP its narrow `arg_type` so codegen/interpreter see the concrete value they must wrap. True for:
+    arg must KEEP its narrow `arg_type` so codegen sees the concrete value it must wrap. True for:
     a case→variant widen (emit_as tags the union, including a bare `T`→`T | null` present-wrap), a
     class→interface/base upcast (fat-pointer build), and a `[]E_a`→`[]E_p` element widen where
     `E_a != E_p` (the slice is REBUILT element-wise — bare `[]i64`→`[]i64 | null` or covariant
@@ -9080,7 +9080,7 @@ fn check_value_type_self_readonly(td: parser::TypeDecl, methods: []parser::Funct
 /**
  * (OOP A1, 2026-07-01) Type-check EVERY method body on a struct TypeDecl and stamp each into a full
  * `TFunction` item (namespace = "<owning-ns>::<StructName>", mirroring `collect_signatures`'
- * registration exactly, so codegen and the interpreter mangle and resolve method calls to these SAME items).
+ * registration exactly, so codegen mangles and resolves method calls to these SAME items).
  *
  * Called from both `type_program` and `type_program_with_deps`' main loops, alongside the ordinary
  * TypeDecl pass-through — a struct with methods contributes MULTIPLE `@TItem()`s, not one.
@@ -9446,7 +9446,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     var lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())
     if lc.failed { diags = teko::list::push(diags, lc.message) }
     // For the result, prepend dep items so the TProgram contains the full program (dep + project).
-    // This allows subsequent operations (codegen, interpreter, coverage) to see all items.
+    // This allows subsequent operations (codegen, coverage) to see all items.
     var all_items: []@TItem() = teko::list::empty()
     var di: u64 = 0
     loop {
@@ -9571,7 +9571,7 @@ fn drop_comptime_items(program: parser::Program): parser::Program {
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
 pub fn type_program(raw_program: parser::Program): TProgram | error {
     // (TR0) FOLD trait derivations FIRST — every later stage (collect, conformance, typing,
-    // codegen layout, the interpreter) sees each deriver's already-folded body; a trait decl itself stays
+    // codegen layout) sees each deriver's already-folded body; a trait decl itself stays
     // registered (for honest value-position/instantiation errors) but is never emitted.
     var folded = fold_traits_collected(raw_program)
     if folded.diags.len > 0 { return diags_error(folded.diags) }

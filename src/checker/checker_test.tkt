@@ -410,9 +410,8 @@ fn splits_and_recovers_a_generic_instance_names_base() {
 fn resolves_ptr_generic() {
     var ptr_i64 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), ttype_named("i64")) }
     var pi = match resolve_type(ptr_i64, empty_table(), "") { (@Type()) as t => t; error => { teko::assert::is_true(false); return } }
-    // STRUCTURE (interpreter-safe): ptr<i64> → Ptr{inner present = i64}; opaque ptr = Ptr{inner null}; distinct.
-    // (exact `ptr_i64`/`ptr<i64>` mangle/render is verified via real codegen, not here — the interpreter drops
-    // a self-recursive match arm's string prefix; see selfhost-interp-perf.)
+    // STRUCTURE (structure-only): ptr<i64> → Ptr{inner present = i64}; opaque ptr = Ptr{inner null}; distinct.
+    // (exact `ptr_i64`/`ptr<i64>` mangle/render is verified via real codegen, not here.)
     teko::assert::is_true(match pi { Ptr as p => match p.inner { null => false; (@Type()) as t => match t { Prim => true; _ => false } }; _ => false })
     teko::assert::is_true(type_eq(pi, pi))
     var bare = match resolve_type(ttype_named("ptr"), empty_table(), "") { (@Type()) as t => t; error => { teko::assert::is_true(false); return } }
@@ -424,8 +423,8 @@ fn resolves_ptr_generic() {
 // MEM Step 0 — the checker ESCAPE GATE. A `Ref<T>` is memory-safe BY CONSTRUCTION: the ONLY
 // permitted flow is PARAMETER PASS-DOWN. These tests drive the checker functions DIRECTLY,
 // asserting each forbidden position yields `error` and the allowed forms still succeed.
-// Structure/error-only assertions (interpreter-safe; no message-string match — the interpreter drops a
-// self-recursive match arm's string prefix; mirrors resolves_ref_generic's discipline).
+// Structure/error-only assertions (structure-only; no message-string match; mirrors
+// resolves_ref_generic's discipline).
 // ---------------------------------------------------------------------------
 
 // a `Ref<INNER>` type-expr where INNER is itself a (hand-built) type-expr.
@@ -440,9 +439,9 @@ fn ref_te(name: str): @TypeExpr() { ref_te_of(ttype_named(name)) }
  * (MEM Step 0, R4) NOT a STRUCT FIELD — a `struct { r: Ref<…> }` is rejected at collect
  * (validate_type_decls); a struct with a scalar field collects fine.
  *
- * interpreter NOTE (see R2): the rejected field uses a CONSTRUCTION-REJECTED inner type (`Ref<Ref<i64>>`,
- * built by `ref_te_of(ref_te("i64"))` below) so R1's interpreter-reliable rejection drives the collect
- * error; the value-inner field (`Ref<i64>`) is instead rejected NATIVELY by the C twin's
+ * NOTE (see R2): the rejected field uses a CONSTRUCTION-REJECTED inner type (`Ref<Ref<i64>>`,
+ * built by `ref_te_of(ref_te("i64"))` below) so R1's reliable rejection drives the collect
+ * error; the value-inner field (`Ref<i64>`) is instead rejected by the
  * `tag == TK_TYPE_REF` check in the bare-position field validation.
  *
  * NOTE (bootstrap ordering, issue #285): the doc sits AFTER `#test` here (the pre-existing
@@ -465,9 +464,9 @@ fn mem_ref_not_struct_field() {
 }
 
 // (MEM Step 0, R4) NOT a SLICE ELEMENT / VARIANT MEMBER — `[]Ref<…>` and `Ref<…> | T` reject.
-// interpreter NOTE (see R2): a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`) so R1's interpreter-reliable rejection
+// NOTE (see R2): a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`) so R1's reliable rejection
 // drives the error out of the SliceType / UnionType arm; the value-inner element/member
-// (`[]Ref<i64>` / `Ref<i64> | T`) is rejected NATIVELY by the C twin's `el.tag == TK_TYPE_REF` /
+// (`[]Ref<i64>` / `Ref<i64> | T`) is rejected by the `el.tag == TK_TYPE_REF` /
 // `m.tag == TK_TYPE_REF` checks.
 #test
 fn mem_ref_not_collection_or_variant() {
@@ -536,7 +535,7 @@ fn find_titem_fn(prog: TProgram, name: str): bool {
     }
     false
 }
-// is there a stamped instance of `bare` (a fn whose name contains "<bare>__g__")? interpreter-robust:
+// is there a stamped instance of `bare` (a fn whose name contains "<bare>__g__")? robust:
 // it checks the synthetic `__g__` infix, not the full type-arg spelling.
 fn has_stamped_instance(prog: TProgram, bare: str): bool {
     var needle = teko::str::concat(bare, "__g__")
@@ -605,7 +604,7 @@ fn mono_slice_and_optional_mangle() {
     // a Slice TYPE-ARG (T bound to []i64) drives the slice_<elem> mangle branch in mono_type_mangle:
     // fn idh<T>(x: T): T called with arg of type []i64 → T = []i64 → instance idh__g__slice_i64.
     // (The exact slice_ spelling depends on a recursive-match string compose; assert the stamped
-    // instance EXISTS via the synthetic `__g__` infix — interpreter-robust, and still exercises the branch.)
+    // instance EXISTS via the synthetic `__g__` infix — robust, and still exercises the branch.)
     var hbody = teko::list::push(teko::list::empty(), treturn(tvar("x", Named { name = "T" })))
     var idh = gfn("idh", named_t("T"), Named { name = "T" }, hbody)
     var slice_arg = tvar("s", Slice { element = i64t() })
@@ -624,7 +623,7 @@ fn mono_slice_and_optional_mangle() {
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Void { }), "void"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Ptr { inner = null }), "ptr"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Uptr { }), "uptr"))
-    teko::assert::is_true(teko::str::len(mono_type_mangle(Reference { inner = i64t() })) > 0)   // (MEM-1b) recursive mangle — len-only (interpreter prefix-drop)
+    teko::assert::is_true(teko::str::len(mono_type_mangle(Reference { inner = i64t() })) > 0)   // (MEM-1b) recursive mangle — len-only
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Named { name = "Foo" }), "Foo"))
 }
 

@@ -11,8 +11,7 @@
 // the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
 // so the shared front-end returns a small `Frontend` struct (prog + manifest), as
 // `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
-// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
-// diverged to is retired, #524).
+// codegen→cc backend; `run` additionally executes the resulting binary.
 
 use teko::parser
 use teko::lexer
@@ -5210,7 +5209,7 @@ fn finish_static_archive(dir: str, od: str, stem: str, obj: []byte, symbols: []t
  * A reverse byte scan finds the rightmost of a POSIX '/' and a Windows '\', so a POSIX path
  * with no '\' splits at exactly its last '/' — byte-identical to a plain last-'/' split. The
  * scan is used instead of teko::str::last_index_of as a minimal freestanding implementation
- * (predates the retired interpreter, which did not implement that builtin; kept as-is).
+ * (kept as-is).
  *
  * @param path  an argv[0]-style invocation path, POSIX- or Windows-separated
  * @return      the directory portion of `path`, or "." when it carries no separator
@@ -5232,8 +5231,7 @@ fn dirname_of(path: str): str {
  * POSIX-or-Windows-separator scan, so together `dirname_of(p) ~ "/" ~ basename_of(p)`
  * reconstructs a separator-normalized `p`), used by the regression runner (0.3.1 C0) to split a
  * manifest-listed `.tkr` FILE path into its regressor directory and basename without a
- * `teko::str::last_index_of` call (a minimal freestanding implementation, predating the retired
- * interpreter, which did not implement that builtin).
+ * `teko::str::last_index_of` call (a minimal freestanding implementation).
  *
  * @param path  an argv[0]-style invocation path, POSIX- or Windows-separated
  * @return      the segment after the rightmost separator, or `path` unchanged when it carries none
@@ -5366,7 +5364,7 @@ fn ensure_rt_dir_abs() {
 /** compile_project — the `teko build <dir>` entry with every default: the D4 gate ON, no coverage
  *  report, no `--no-verify`, optimization OFF (the dev/CI default level 0), and the NATIVE gate (the
  *  default since #168). Delegates to compile_project_g. Mirrors driver.c::tk_compile_project (the C
- *  seed's interpreter-only entry).
+ *  seed's entry).
  *
  *  @param dir      the project directory
  *  @param out_dir  the build output directory (`-o`, default "bin")
@@ -6375,9 +6373,9 @@ fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, bac
 /** run_gate_native — the D4 test-gate body run NATIVELY (the DEFAULT since #168; the own-AOT-backend
  *  gate binary since 0.3.1.0 tests-native-no-c): run every `#test` compiled-native (`run_native_gate`,
  *  fail-fast), then rebuild the release program. Because `run_native_gate` runs the compiled tests in
- *  a CHILD process, this compiler's own peak stays codegen-only (~366 MB) instead of the retired interpreter
- *  gate's in-process functional-env balloon (~1.5 GB) — the #168 memory-debt fix. Since #524 (interpreter
- *  retirement) this is the SOLE gate engine.
+ *  a CHILD process, this compiler's own peak stays codegen-only (~366 MB) instead of the former
+ *  in-process gate's functional-env balloon (~1.5 GB) — the #168 memory-debt fix. This is the
+ *  SOLE gate engine.
  *
  *  COVERAGE FLOORS ARE SKIPPED HERE (v1 gap, 0.3.1.0 tests-native-no-c — see `native_gate_run`'s doc):
  *  the native gate has no coverage instrumentation yet, so `report_native_coverage`/
@@ -6408,8 +6406,8 @@ fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: Pars
 }
 
 /**
- * run_gate — the D4 test-gate body: run every `#test` NATIVELY (#265, the sole engine after
- * interpreter retirement), then enforce the three coverage floors and rebuild the release program.
+ * run_gate — the D4 test-gate body: run every `#test` NATIVELY (#265, the sole engine),
+ * then enforce the three coverage floors and rebuild the release program.
  *
  * @param dir      the project directory (diagnostics)
  * @param out_dir  the output directory (default "bin")
@@ -6437,7 +6435,7 @@ fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: b
 /** compile_project_g — the build with the D4 TEST GATE (ON BY DEFAULT; `--no-test` is IGNORED for a
  *  build — a release MUST run its tests). Assemble WITH the `.tkt` tests, run them on the NATIVE gate
  *  FIRST (fail-fast — a failed assertion aborts the build before any emission), THEN codegen the
- *  production program (tests stripped, run_gate). Since #524 (interpreter retirement) the gate is ALWAYS native
+ *  production program (tests stripped, run_gate). The gate is ALWAYS native
  *  (#265, child-process tests, ~366 MB compiler peak) — the only engine. The ONLY skips are a project
  *  with NO `#test` functions (build_no_tests_present), or an explicit `no_verify=true` (issue #249
  *  lever A — `--no-verify`, build_ungated): a CI-only escape hatch for a self-host chain that has
@@ -6668,7 +6666,7 @@ fn has_backend_flag(args: []str, start: u64): bool {
  *  too), `--native-gate` (#265, now an inert no-op), `--release`,
  *  `--opt=<n>` (the optimization axis), and `--no-tty` (BUILD-OUTPUT OBSERVABILITY) — every
  *  recognized build flag — so none of them is mistaken for the project. The legacy alternate-gate
- *  flag was removed outright with the interpreter (#524, M3), and `--backend` was removed outright too (owner ruling
+ *  flag was removed outright (#524, M3), and `--backend` was removed outright too (owner ruling
  *  2026-07-24, `has_backend_flag`, rejected upstream in `main.tks` before this runs): a stray
  *  occurrence of either now falls through as an unknown positional, the honest "not a project"
  *  signal that the flag is gone.
@@ -6752,7 +6750,7 @@ fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram
 }
 
 /**
- * build_debug_and_report — the `teko run` build entry (post-interpreter): create `out_dir` (and any missing
+ * build_debug_and_report — the `teko run` build entry: create `out_dir` (and any missing
  * parents — `mkdir_p`, since `target/debug` is two levels deep), build `prog` to `<out_dir>/<stem>`
  * with the DEBUG profile (`build_debug_binary`), and on success report the peak memory cost (#148).
  * Mirrors `codegen_and_report` but drives the debug link line and takes the explicit `stem`/`out_dir`
@@ -6780,13 +6778,13 @@ fn build_debug_and_report(dir: str, stem: str, out_dir: str, prog: checker::TPro
 const DEBUG_SCRATCH_DIR: str = "target/debug"
 
 /**
- * The `teko run <dir>` entry (post-interpreter): build the project with the DEBUG profile and EXECUTE the
+ * The `teko run <dir>` entry: build the project with the DEBUG profile and EXECUTE the
  * resulting native binary — the `cargo run` / `go run` shape. Same front-end as `teko build` but
  * WITHOUT the `.tkt` tests (a run, not a gate) and WITHOUT the D4 coverage floors: this is the fast
  * debug-iteration command. The debug profile links with `-g` (DWARF for the E4 native stack trace,
  * fed by the `.tsym` map), assertions ON, and no optimization (see build_cc_argv's `debug` seam).
  * The binary is built to a scratch dir, then run; the returned status is the PROGRAM's own exit code
- * (teko::exit(n): n, a panic -> non-zero) — the exact contract the retired interpreter `run` path had.
+ * (teko::exit(n): n, a panic -> non-zero) — the exact contract the `run` path defines.
  * When the resolved target is NOT this host's (`resolved_cross_note`), the binary is emitted and the
  * RUN is honestly skipped with the emitted-not-run line (R3/C5): this host cannot exec a cross
  * artifact, and reporting that is the honest answer — never a fabricated run status.
@@ -8221,7 +8219,7 @@ const TEST_REGR_RC_ENV: str = "TEKO_TEST_REGR_RC"
 const STAGE_SELECT_FAILED: i32 = 2
 
 /**
- * test_project — the `teko test <dir>` entry (D2, post-interpreter), STAGED ACROSS PROCESSES since 0.3.1.0.
+ * test_project — the `teko test <dir>` entry (D2), STAGED ACROSS PROCESSES since 0.3.1.0.
  *
  * A `teko test` run has five steps: compile the project with its `.tkt` tests into a gate binary,
  * `cc` it, run it, compile each `.tkr` regressor, run each regressor. Three of the five already ran
