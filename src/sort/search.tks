@@ -1,0 +1,310 @@
+/**
+ * `teko::sort` search primitives over an already-ascending-sorted slice: `is_sorted_*` verifies the
+ * precondition every `bsearch_*`/`partition_point_*`/`nth_*` call relies on, `bsearch_*` finds a key
+ * by binary search, and `partition_point_*` finds the boundary of a caller-supplied predicate by the
+ * same halving search. One family per concrete element type (`i64`/`u64`/`f64`/`str`/`byte`) — the
+ * monomorphic fast paths; see `teko::sort::sort.tks` for the merge sort that produces their input.
+ */
+
+/**
+ * Whether `xs` is already sorted ascending under the native signed order — the precondition
+ * `bsearch_i64`/`nth_i64`/`partition_point_i64` assume without re-checking. An empty slice and a
+ * single-element slice are trivially sorted.
+ *
+ * @param xs  the slice to check
+ * @return    `true` iff no element is greater than the one immediately after it
+ */
+exp fn is_sorted_i64(xs: []i64): bool {
+    var i: u64 = 0
+    loop {
+        if i + 1 >= xs.len { break }
+        if xs[i] > xs[i + 1] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Binary search for `key` in `xs`, which MUST already be sorted ascending (see `is_sorted_i64`).
+ * When `key` occurs more than once, the index returned is unspecified among the occurrences (any
+ * one of them satisfies `xs[result] == key`).
+ *
+ * @param xs   the ascending-sorted slice to search
+ * @param key  the value sought
+ * @return     an index `i` with `xs[i] == key`, or `null` if `key` is absent from `xs`
+ */
+exp fn bsearch_i64(xs: []i64, key: i64): u64 | null {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if xs[mid] < key { lo = mid + 1; continue }
+        if xs[mid] > key { hi = mid; continue }
+        return mid
+    }
+    null
+}
+
+/**
+ * The partition point of `xs` under `pred`: the smallest index `i` such that `pred(xs[i])` is
+ * `false`, assuming `xs` is partitioned by `pred` (every element for which `pred` holds precedes
+ * every element for which it does not — the shape `bsearch_i64`'s use case and a sorted-by-key range
+ * both produce). Returns `xs.len` when `pred` holds for every element.
+ *
+ * @param xs    the partitioned slice to search
+ * @param pred  the partitioning predicate
+ * @return      the first index at which `pred` is `false` (or `xs.len`)
+ */
+exp fn partition_point_i64(xs: []i64, pred: func<i64, bool>): u64 {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if pred(xs[mid]) { lo = mid + 1; continue }
+        hi = mid
+    }
+    lo
+}
+
+/**
+ * Whether `xs` is already sorted ascending under the native unsigned order. An empty slice and a
+ * single-element slice are trivially sorted.
+ *
+ * @param xs  the slice to check
+ * @return    `true` iff no element is greater than the one immediately after it
+ */
+exp fn is_sorted_u64(xs: []u64): bool {
+    var i: u64 = 0
+    loop {
+        if i + 1 >= xs.len { break }
+        if xs[i] > xs[i + 1] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Binary search for `key` in `xs`, which MUST already be sorted ascending (see `is_sorted_u64`).
+ * When `key` occurs more than once, the index returned is unspecified among the occurrences.
+ *
+ * @param xs   the ascending-sorted slice to search
+ * @param key  the value sought
+ * @return     an index `i` with `xs[i] == key`, or `null` if `key` is absent from `xs`
+ */
+exp fn bsearch_u64(xs: []u64, key: u64): u64 | null {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if xs[mid] < key { lo = mid + 1; continue }
+        if xs[mid] > key { hi = mid; continue }
+        return mid
+    }
+    null
+}
+
+/**
+ * The partition point of `xs` under `pred`: the smallest index `i` such that `pred(xs[i])` is
+ * `false`, assuming `xs` is partitioned by `pred`. Returns `xs.len` when `pred` holds for every
+ * element.
+ *
+ * @param xs    the partitioned slice to search
+ * @param pred  the partitioning predicate
+ * @return      the first index at which `pred` is `false` (or `xs.len`)
+ */
+exp fn partition_point_u64(xs: []u64, pred: func<u64, bool>): u64 {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if pred(xs[mid]) { lo = mid + 1; continue }
+        hi = mid
+    }
+    lo
+}
+
+/**
+ * Whether `xs` is already sorted ascending under `teko::sort::cmp_f64`'s NaN-last total order. An
+ * empty slice and a single-element slice are trivially sorted.
+ *
+ * @param xs  the slice to check
+ * @return    `true` iff no element orders after the one immediately after it
+ */
+exp fn is_sorted_f64(xs: []f64): bool {
+    var i: u64 = 0
+    loop {
+        if i + 1 >= xs.len { break }
+        if teko::sort::cmp_f64(xs[i], xs[i + 1]) > 0 { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Binary search for `key` in `xs` under `teko::sort::cmp_f64`'s NaN-last total order; `xs` MUST
+ * already be sorted ascending under that order (see `is_sorted_f64`). Searching for a NaN `key`
+ * finds any NaN present in `xs` (every NaN compares equal to every other NaN in this total order).
+ * When `key` occurs more than once, the index returned is unspecified among the occurrences.
+ *
+ * @param xs   the ascending-sorted slice to search
+ * @param key  the value sought
+ * @return     an index `i` with `xs[i]` equal to `key` under `cmp_f64`, or `null` if absent
+ */
+exp fn bsearch_f64(xs: []f64, key: f64): u64 | null {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        var c = teko::sort::cmp_f64(xs[mid], key)
+        if c < 0 { lo = mid + 1; continue }
+        if c > 0 { hi = mid; continue }
+        return mid
+    }
+    null
+}
+
+/**
+ * The partition point of `xs` under `pred`: the smallest index `i` such that `pred(xs[i])` is
+ * `false`, assuming `xs` is partitioned by `pred`. Returns `xs.len` when `pred` holds for every
+ * element.
+ *
+ * @param xs    the partitioned slice to search
+ * @param pred  the partitioning predicate
+ * @return      the first index at which `pred` is `false` (or `xs.len`)
+ */
+exp fn partition_point_f64(xs: []f64, pred: func<f64, bool>): u64 {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if pred(xs[mid]) { lo = mid + 1; continue }
+        hi = mid
+    }
+    lo
+}
+
+/**
+ * Whether `xs` is already sorted ascending under `teko::sort::cmp` (lexicographic byte order). An
+ * empty slice and a single-element slice are trivially sorted.
+ *
+ * @param xs  the slice to check
+ * @return    `true` iff no element orders after the one immediately after it
+ */
+exp fn is_sorted_str(xs: []str): bool {
+    var i: u64 = 0
+    loop {
+        if i + 1 >= xs.len { break }
+        if teko::sort::cmp(xs[i], xs[i + 1]) > 0 { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Binary search for `key` in `xs` under `teko::sort::cmp`'s lexicographic byte order; `xs` MUST
+ * already be sorted ascending under that order (see `is_sorted_str`). When `key` occurs more than
+ * once, the index returned is unspecified among the occurrences.
+ *
+ * @param xs   the ascending-sorted slice to search
+ * @param key  the string sought
+ * @return     an index `i` with `xs[i] == key`, or `null` if `key` is absent from `xs`
+ */
+exp fn bsearch_str(xs: []str, key: str): u64 | null {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        var c = teko::sort::cmp(xs[mid], key)
+        if c < 0 { lo = mid + 1; continue }
+        if c > 0 { hi = mid; continue }
+        return mid
+    }
+    null
+}
+
+/**
+ * The partition point of `xs` under `pred`: the smallest index `i` such that `pred(xs[i])` is
+ * `false`, assuming `xs` is partitioned by `pred`. Returns `xs.len` when `pred` holds for every
+ * element.
+ *
+ * @param xs    the partitioned slice to search
+ * @param pred  the partitioning predicate
+ * @return      the first index at which `pred` is `false` (or `xs.len`)
+ */
+exp fn partition_point_str(xs: []str, pred: func<str, bool>): u64 {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if pred(xs[mid]) { lo = mid + 1; continue }
+        hi = mid
+    }
+    lo
+}
+
+/**
+ * Whether `xs` is already sorted ascending as unsigned octets. An empty slice and a single-element
+ * slice are trivially sorted.
+ *
+ * @param xs  the slice to check
+ * @return    `true` iff no element is greater than the one immediately after it
+ */
+exp fn is_sorted_bytes(xs: []byte): bool {
+    var i: u64 = 0
+    loop {
+        if i + 1 >= xs.len { break }
+        if xs[i] > xs[i + 1] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Binary search for `key` in `xs`, which MUST already be sorted ascending (see `is_sorted_bytes`).
+ * When `key` occurs more than once, the index returned is unspecified among the occurrences.
+ *
+ * @param xs   the ascending-sorted slice to search
+ * @param key  the byte sought
+ * @return     an index `i` with `xs[i] == key`, or `null` if `key` is absent from `xs`
+ */
+exp fn bsearch_bytes(xs: []byte, key: byte): u64 | null {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if xs[mid] < key { lo = mid + 1; continue }
+        if xs[mid] > key { hi = mid; continue }
+        return mid
+    }
+    null
+}
+
+/**
+ * The partition point of `xs` under `pred`: the smallest index `i` such that `pred(xs[i])` is
+ * `false`, assuming `xs` is partitioned by `pred`. Returns `xs.len` when `pred` holds for every
+ * element.
+ *
+ * @param xs    the partitioned slice to search
+ * @param pred  the partitioning predicate
+ * @return      the first index at which `pred` is `false` (or `xs.len`)
+ */
+exp fn partition_point_bytes(xs: []byte, pred: func<byte, bool>): u64 {
+    var lo: u64 = 0
+    var hi: u64 = xs.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if pred(xs[mid]) { lo = mid + 1; continue }
+        hi = mid
+    }
+    lo
+}
