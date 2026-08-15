@@ -1204,9 +1204,12 @@ pronto e já livre de C.
 · `kdf` ✅ (`e804f474`) · `cipher` ✅ (`d5299449` — AES 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20,
 cmac_aes/gmac_aes) · `aead` ✅ (`92f48fe6` — AES-GCM, ChaCha20-Poly1305, AES-CCM).
 
-**ASSINATURA DE DOCUMENTO (ruling do dono 2026-08-15 — JSON e XML precisam assinar).** No catálogo §1.5:
-`crypto::jose` (JWS/JWE/JWK/JWT sobre JSON) · `crypto::xmldsig` (XML-DSig/C14N/XML-Enc sobre XML) ·
-`crypto::cose` (COSE sobre CBOR). Cadeia de dep (tudo monomórfico, cabe na Fase 1): **JWS/HMAC (HS256)** já
+**ASSINATURA DE DOCUMENTO ✅ TRIO COMPLETO (ruling do dono 2026-08-15 — JSON e XML precisam assinar).** No
+catálogo §1.5: **`crypto::jose` ✅** (JWS/JWK/JWT sobre JSON, `6473dfd4`) · **`crypto::xmldsig` ✅** (XML-DSig +
+C14N sobre XML, `a1355a57`) · **`crypto::cose` ✅** (COSE_Sign1/Mac0 sobre CBOR, `68d88e9f`). Cobre HS/RS/PS/ES256
+/EdDSA (JOSE), rsa-sha256/ecdsa-sha256/hmac-sha256 (XML-DSig), ES256/EdDSA/RS256/PS256/HMAC (COSE). Cross-check
+byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML assinam documento) SATISFEITO**
++ CBOR de bônus. Follow-ons documentados: JWE (RSA-OAEP/ECDH), COSE_Sign multi-signer/COSE_Key, exclusive-C14N. Cadeia de dep (tudo monomórfico, cabe na Fase 1): **JWS/HMAC (HS256)** já
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
