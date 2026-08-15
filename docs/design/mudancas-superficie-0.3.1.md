@@ -1217,6 +1217,31 @@ Costuras: `encoding::csv` `type CsvRow` visibility bug (lane csv); `pub→exp` d
 que casta negativos entre signedness precisa contornar (carry/borrow u64-puro). (2) **codegen quirk** — dois
 `loop` sequenciais compartilhando um `i64` mutado miscompilam (guard do 1º não pula). Ambos merecem olhar
 compiler-side; podem já estar corrigidos na árvore atual (o seed é `.31`, a árvore está à frente).
+(3) **codegen: widening de união no `return` (REAL, na árvore atual)** — retornar um valor de união de
+2-braços (`MsgRead | error`) de uma função declarada com 3-braços (`MsgRead | error | null`) faz o codegen
+emitir o struct de C ESTREITO onde o largo é esperado → GCC rejeita (`incompatible types when returning
+'tk_u_MsgRead_error' but 'tk_u_null_MsgRead_error'`). Contornado em `msgpack::decode_scalar` (destructure +
+re-return single-arm). **Isto é bug de compilador na árvore ATUAL** (não seed velho) — o widening subtipo→supertipo
+de união no `return` precisa ser coagido no codegen. Merece fix compiler-side.
+
+**🔴 INCIDENTE — perna C do CI quebrou (2026-08-15) + correção de PROCESSO.** Causa raiz (diagnosticada
+reproduzindo o build da perna C localmente, gen1 do `bootstrap/teko.c`): as lanes de stdlib validaram só com
+`teko fmt --check` (que só faz **parse**, NÃO type-check nem codegen), então dois defeitos reais passaram
+latentes e derrubaram o build: (a) **colisão de overload no namespace flat `teko::crypto`** — `fn` nu é
+**namespace-private** (visível entre arquivos-irmãos do mesmo diretório), então helpers homônimos
+independentes (`rotl32` cipher+hash, `le_u32_at`/`push_le_u32` hash-u32 + mac-u64) viraram overloads ambíguos;
+o checker REAL rejeita (`ambiguous call to overloaded…`). O subagente do jose achou que era "falso" (assumiu
+`fn`=file-private) — **é real**. Corrigido (`856e58dc`): deletado `rotl32` duplicado do cipher, renomeadas as
+variantes u64 do mac (`le_u32_at_u64`/`push_le_u32_u64`). (b) o achado (3) acima (msgpack widening). **RESEED
+faltante:** as lanes adicionaram módulos que o compilador **empacota no próprio binário** (C emitido 11.4→15.2
+MB) mas nunca reseedaram o `bootstrap/teko.c` — velho desde `e99ca8f2` (§7). Sem bootstrap atual, o ladder da
+perna C não alcança a ponta. **Reseed local (hand-harvest, `1c137b9f`)** feito: fixpoint C-route
+`gen2.c==gen3.c` byte-idêntico (sha `8fdb1893…`) + cc-route self-reproduce + `provenance_gate.sh` PASS, com
+PROVENANCE no formato item-14/§7. **CORREÇÃO DE PROCESSO (obrigatória p/ próximas lanes):** validar cada lane
+com **build REAL** (gen1 do `bootstrap/teko.c` compila a árvore+delta VERDE end-to-end: checker→codegen→cc)
+ANTES de drenar — `fmt --check` sozinho é insuficiente. E **reseedar** quando o C emitido mudar o bastante
+p/ o ladder precisar do degrau (regra do dono: "o reseed é local e ocorre quando precisa fazer a escada
+chegar ao objetivo").
 
 **VALIDAÇÃO (modelo correto — Teko NÃO tem VM):** os vetores crypto estão **offline-provados** (cada
 subagente cross-checa contra Python `hashlib`/`pycryptodome` + porta o algoritmo Teko exato pro Python) +
