@@ -113,7 +113,7 @@ propagado com operador `?`; **sem raise/on error/throw**; **sem tipo-tupla** (st
 cobrem; `(x,y)` é só desconstrução). `teko::Error` = struct fixo (`message`+`file`+`line` em
 compile-time); **sem stack trace** salvo via `.tsym` (debug symbols, evolução). **Contrato de
 saída:** fim→0, `exit(n)`→n, **panic→stderr+≠0** (irrecuperável). **Perfis de build**
-(interpretador-debug/nativo-release; severidade escala: higiene warning→erro, correção erro sempre).
+(motor legado-debug/nativo-release; severidade escala: higiene warning→erro, correção erro sempre).
 **Segurança:** defesa em profundidade, nativos protegidos, ataque de nomeação no registry.
 - **Rev. 8 (esta):** **refinamentos da escrita do primeiro código (o lexer).** Escrever o lexer
 validou a "cara" e corrigiu/cravou detalhes finos. **`++`/`--` statement-only** (uma forma `p++`;
@@ -962,14 +962,14 @@ se preciso** (princípio latente; o Error é o único caso hoje).
  módulo; closures = evolução.
 
 ### 2.21 Perfis de build e segurança
-**Perfis de build** (princípio; detalhes = evolução): **debug** (execução sobre o **interpretador**
+**Perfis de build** (princípio; detalhes = evolução): **debug** (execução sobre o **motor legado**
 do IL — iteração rápida) vs **release** (IL → **nativo**, bare metal, otimizado). Diferem em:
-execução (interpretador vs nativo), otimização, checagens de runtime (debug tudo ligado; release pode remover
+execução (motor legado vs nativo), otimização, checagens de runtime (debug tudo ligado; release pode remover
 as caras), e **severidade de análise** — **higiene** (não-usado, campo-morto) é *warning* em debug e
-*erro* em release; **correção** (tipo, init, exaustividade) é *erro sempre* (o interpretador não roda IL
-incorreto). **CI/CD roda release** (gate de qualidade). **Ressalva crítica:** interpretador e nativo devem ser
+*erro* em release; **correção** (tipo, init, exaustividade) é *erro sempre* (o motor legado não roda IL
+incorreto). **CI/CD roda release** (gate de qualidade). **Ressalva crítica:** motor legado e nativo devem ser
 **comportamentalmente equivalentes** (mesma semântica do IL; o teste final toca o nativo, não só o
-interpretador — família do gate de corretude diferencial do bootstrap). O interpretador já existe (Fase 3, KEEP-opcional).
+motor legado — família do gate de corretude diferencial do bootstrap). O motor legado já existe (Fase 3, KEEP-opcional).
 Feedback contínuo de warnings = **language server** (evolução). **Velocidade de compilação:** a Teko
 parte na frente do Rust por **não usar LLVM** (backend próprio) e adiar generics/borrow-check (os
 reais gargalos do Rust); quando a velocidade importar, ataca-se via **incrementalidade**
@@ -1106,7 +1106,7 @@ central); **`enum` sequencial** (`TokenKind`); `fn` + `return`; control-flow
 
 **NÃO inclui (vem na evolução em Teko):** `flags`; generics (o 1º compilador-Teko usa arrays
 concretos + symbol table à mão); `class`/`trait`/`interface`; DI/CQRS/convenções;
-`while`; **`loop … from`** (iteração — §2.16); `async`/`intent`/`await`; rede; `ref`/threads; macros; atributos; arenas com escopo; **generics + constraints** (positivas estilo C#; exclusão `!` aceita só **primitivas e classes seladas** — anti-monotonicidade evitada); OOP + `static`/`protected`/`virtual` + **`IError`** (interface); `raise`/`on error` (descartado — erro é valor); **tuplas** (descartado); **`.tsym`**/stack trace/debugger; **interpretador-debug/perfis**; **language server**; **registry**; compilação incremental; **capabilities/sandboxing**.
+`while`; **`loop … from`** (iteração — §2.16); `async`/`intent`/`await`; rede; `ref`/threads; macros; atributos; arenas com escopo; **generics + constraints** (positivas estilo C#; exclusão `!` aceita só **primitivas e classes seladas** — anti-monotonicidade evitada); OOP + `static`/`protected`/`virtual` + **`IError`** (interface); `raise`/`on error` (descartado — erro é valor); **tuplas** (descartado); **`.tsym`**/stack trace/debugger; **motor legado-debug/perfis**; **language server**; **registry**; compilação incremental; **capabilities/sandboxing**.
 
 > Na semente-C, `array`/`string` podem ser **mágica-C tosca** — é **molde descartável**. A versão
 > elegante (coleções como lib Teko) é da evolução. A semente nasce **funcional, não elegante**.
@@ -1119,7 +1119,7 @@ concretos + symbol table à mão); `class`/`trait`/`interface`; DI/CQRS/convenç
 |---|---|---|
 | P1 Type Checker | Inferência/mutabilidade/async | **REBUILD** — type-checker novo, pequeno |
 | P2 IL (ISA + `.tkb`) | OpCode enum, formato binário | **KEEP** — podar opcodes dos alvos cortados |
-| P3 interpretador + runtime | Interpretador, M:N, arena runtime | **KEEP (opcional)** — dev/debug; runtime compartilhado |
+| P3 motor legado + runtime | Motor legado, M:N, arena runtime | **KEEP (opcional)** — dev/debug; runtime compartilhado |
 | P4 Tooling `@` | Intrínsecos, stdlib | **REWORK** — `@` abolido; stdlib por import, reescrita em Teko |
 | P5 AOT (transpile-C / LLVM) | Fallbacks | **DROP** — emit direto ao metal é o keeper |
 | P6 Otimizações | fold/DCE/CSE sobre IL | **KEEP** — agnóstico de alvo |
