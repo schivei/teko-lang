@@ -64,6 +64,39 @@ typedef struct {
     uint64_t  len;
 } tk_slice_byte;
 
+// ─── item-14 §13.2: the FAT value-struct header ─────────────────────────────
+// tk_struct_hdr — the fat value-struct header: ONE self-pointer word that makes `self` a ref, so an
+// in-place mutation on a struct method STICKS, WITHOUT turning the struct into an object. It is
+// deliberately SMALLER than an object header — no vtable, no identity region — because a struct stays
+// a VALUE: it is copied on assignment/pass, has no heap identity, and costs no arena.
+//
+// The value semantics are preserved by RE-MATERIALIZATION: every copy gets a FRESH header pointing at
+// the copy itself (tk_struct_hdr_remat), so mutating a copy can never reach through to the original.
+// A struct whose header still pointed at the source would alias it — that is the one bug this type
+// exists to make impossible.
+//
+// Every value-struct C typedef embeds this as its FIRST member (`__hdr`), so a field's offset is its
+// declared offset plus one word, identically in both backends.
+typedef struct { uintptr_t self_ptr; } tk_struct_hdr;
+
+// tk_struct_hdr_of — materialize the header of the struct living at `p`: the self-pointer word is the
+// address of the materialization itself. Called at CONSTRUCTION (`Tipo { … }` / `.{ … }`).
+//
+// `p` is void* rather than tk_struct_hdr* because the caller holds a pointer to the whole generated
+// struct type (whose first member is the header) and C guarantees a pointer to a struct equals a
+// pointer to its first member — so no per-type helper is needed.
+static inline void tk_struct_hdr_of(void *p) {
+    ((tk_struct_hdr *)p)->self_ptr = (uintptr_t)p;
+}
+
+// tk_struct_hdr_remat — RE-materialize the header after a value COPY: `dst` holds a bitwise copy of
+// some source struct, so its header still carries the SOURCE's self-pointer; point it at `dst`. This
+// is what keeps value semantics honest — without it a mutation through the copy's `self` would land
+// on the original. Called on assignment, by-value argument passing, and by-value return.
+static inline void tk_struct_hdr_remat(void *dst) {
+    ((tk_struct_hdr *)dst)->self_ptr = (uintptr_t)dst;
+}
+
 // closure / function VALUE (W10a). The uniform runtime representation of a value of a function
 // type `(A, B) -> R`: a code pointer plus a captured-environment pointer. For a NAMED fn used as a
 // value (W10a) `env` is NULL and `fn` is the C function's address; calls cast `fn` back to the
