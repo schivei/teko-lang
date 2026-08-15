@@ -1,0 +1,508 @@
+use teko::numeric::bigint
+
+/**
+ * `teko::crypto::ec_p256` — ECDSA over NIST P-256 (secp256r1), the second lane of the
+ * document-signing critical path (RFC 6090 / FIPS 186-4 / SEC 1): it unblocks JOSE ES256 (and,
+ * via `EcHashAlg`, ES384/ES512), XML-DSig `ecdsa-sha256`, and P-256 COSE.
+ *
+ * BUILT ON `teko::numeric::bigint`. Every field/scalar operation (point add/double/scalar-mul,
+ * the modular arithmetic behind them) is `bigint::add`/`sub`/`mul`/`modulo`/`mod_inverse` from
+ * the existing arbitrary-precision engine — this file adds no new bignum arithmetic, only the
+ * P-256 curve constants, affine Weierstrass point arithmetic, and the ECDSA sign/verify
+ * primitives layered on top.
+ *
+ * AFFINE, NOT JACOBIAN. Points are plain affine `(x, y)` pairs (plus an `infinity` flag); every
+ * point add/double pays one field inversion (`bigint::mod_inverse`). This is the textbook
+ * SEC 1 §2.2.1 formulation — a Jacobian-coordinate speedup (no per-step inversion) is a pure
+ * performance follow-up that changes nothing about the values this file produces (YAGNI: the
+ * signature format and verification result are identical either way).
+ *
+ * DETERMINISTIC SIGNING, CALLER-SUPPLIED NONCE. `ecdsa_p256_sign` takes the ephemeral scalar `k`
+ * as a parameter rather than drawing it from an RNG — this keeps signing pure, testable against
+ * fixed known-answer vectors, and defers RFC 6979 deterministic-nonce derivation (or CSPRNG
+ * sourcing) to the caller, exactly like this namespace's RSA lane keeps PSS's salt caller-supplied
+ * (`teko::crypto::rsa::rsa_sign_pss`).
+ *
+ * ERRORS ARE VALUES. Every fallible operation (an out-of-range nonce, a malformed point encoding,
+ * a point failing the curve equation) returns `CryptoError` (`teko::crypto` core, `crypto.tks`).
+ * Verification never panics: an ill-formed public key, signature, or encoding simply yields
+ * `false`.
+ *
+ * NO INDEX-ASSIGNMENT. Every byte buffer here is built by `teko::list::push` (functional growth),
+ * the same discipline `teko::crypto::hash`/`rsa` already use.
+ */
+
+/**
+ * A point on the P-256 curve in affine coordinates, or the point at infinity (the group's
+ * identity element) when `infinity` is `true` — `x`/`y` are unspecified and ignored in that case.
+ */
+exp type P256Point = struct {
+    /** `true` iff this is the point at infinity (the additive identity); `x`/`y` are ignored */
+    infinity: bool
+    /** the affine X coordinate, meaningful only when `infinity` is `false` */
+    x: bigint::BigInt
+    /** the affine Y coordinate, meaningful only when `infinity` is `false` */
+    y: bigint::BigInt
+}
+
+/**
+ * An ECDSA signature: the pair `(r, s)`, both in `[1, order)` for a signature produced by
+ * `ecdsa_p256_sign` (SEC 1 §4.1.3).
+ */
+exp type P256Signature = struct {
+    /** the first signature component, `r = x-coordinate of k*G mod order` */
+    r: bigint::BigInt
+    /** the second signature component, `s = k^-1 * (z + r*d) mod order` */
+    s: bigint::BigInt
+}
+
+/**
+ * The hash algorithm an ECDSA operation is performed under. Limited to the three SHA-2 members
+ * JOSE/COSE pair with P-256 (ES256 is SHA-256 + P-256, the JOSE-critical combination); SHA-384/512
+ * are included for the less common ES384/ES512-with-P-256 pairings some profiles allow.
+ */
+exp type EcHashAlg = enum { Sha256; Sha384; Sha512 }
+
+/**
+ * Parse a hard-coded hexadecimal curve constant into a `BigInt`. Every caller passes a literal
+ * this file owns and has verified against the NIST P-256 domain parameters (FIPS 186-4 D.1.2.3),
+ * so a parse failure here is an authoring bug, not a caller-facing error — it panics rather than
+ * threading an `error` through every constant accessor.
+ *
+ * @param hex  the constant's hexadecimal text
+ * @return     the parsed value
+ */
+fn ec_p256_const_of_hex(hex: str): bigint::BigInt {
+    match bigint::from_hex(hex) {
+        bigint::BigInt as b => b
+        error as e => panic(e.message)
+    }
+}
+
+/**
+ * The P-256 field prime, `p = 2^256 - 2^224 + 2^192 + 2^96 - 1` (FIPS 186-4 D.1.2.3).
+ *
+ * @return  the field prime `p`
+ */
+fn ec_p256_prime(): bigint::BigInt {
+    ec_p256_const_of_hex("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
+}
+
+/**
+ * The P-256 curve coefficient `a = p - 3` (FIPS 186-4 D.1.2.3 fixes `a` to this value for every
+ * NIST prime curve), derived from `ec_p256_prime` rather than a second hex literal so the two
+ * constants can never drift apart.
+ *
+ * @return  the curve coefficient `a`
+ */
+fn ec_p256_a(): bigint::BigInt {
+    bigint::sub(ec_p256_prime(), bigint::of(3))
+}
+
+/**
+ * The P-256 curve coefficient `b` (FIPS 186-4 D.1.2.3).
+ *
+ * @return  the curve coefficient `b`
+ */
+fn ec_p256_b(): bigint::BigInt {
+    ec_p256_const_of_hex("5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b")
+}
+
+/**
+ * The order of the P-256 base point (the size of the cyclic group ECDSA signs over), `n` in
+ * SEC 1's notation (FIPS 186-4 D.1.2.3).
+ *
+ * @return  the base point order `n`
+ */
+fn ec_p256_order(): bigint::BigInt {
+    ec_p256_const_of_hex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+}
+
+/**
+ * The P-256 base point `G`'s affine X coordinate (FIPS 186-4 D.1.2.3).
+ *
+ * @return  `G.x`
+ */
+fn ec_p256_gx(): bigint::BigInt {
+    ec_p256_const_of_hex("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")
+}
+
+/**
+ * The P-256 base point `G`'s affine Y coordinate (FIPS 186-4 D.1.2.3).
+ *
+ * @return  `G.y`
+ */
+fn ec_p256_gy(): bigint::BigInt {
+    ec_p256_const_of_hex("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")
+}
+
+/**
+ * The point at infinity — the additive identity of the P-256 curve group.
+ *
+ * @return  the point at infinity
+ */
+fn ec_p256_infinity(): P256Point {
+    P256Point { infinity = true; x = bigint::zero(); y = bigint::zero() }
+}
+
+/**
+ * The P-256 base point `G`, the generator of the signing group.
+ *
+ * @return  `G = (Gx, Gy)`, a finite (non-infinity) point
+ */
+exp fn ec_p256_generator(): P256Point {
+    P256Point { infinity = false; x = ec_p256_gx(); y = ec_p256_gy() }
+}
+
+/**
+ * Reduce `x` into the canonical field representative `[0, p)`. `p` is always positive, so this
+ * never observes `bigint::modulo`'s zero-modulus error in practice; a failure here is an
+ * authoring bug and panics rather than threading an error through every field operation.
+ *
+ * @param x  the value to reduce
+ * @return   `x mod p`, in `[0, p)`
+ */
+fn ec_p256_reduce_p(x: bigint::BigInt): bigint::BigInt {
+    match bigint::modulo(x, ec_p256_prime()) {
+        bigint::BigInt as b => b
+        error as e => panic(e.message)
+    }
+}
+
+/**
+ * Reduce `x` into the canonical scalar representative `[0, order)`. Same panic-on-authoring-bug
+ * reasoning as `ec_p256_reduce_p`, over the base point order instead of the field prime.
+ *
+ * @param x  the value to reduce
+ * @return   `x mod order`, in `[0, order)`
+ */
+fn ec_p256_reduce_n(x: bigint::BigInt): bigint::BigInt {
+    match bigint::modulo(x, ec_p256_order()) {
+        bigint::BigInt as b => b
+        error as e => panic(e.message)
+    }
+}
+
+/**
+ * Field addition modulo `p`.
+ *
+ * @param x  the left operand, in `[0, p)`
+ * @param y  the right operand, in `[0, p)`
+ * @return   `(x + y) mod p`
+ */
+fn ec_p256_fadd(x: bigint::BigInt, y: bigint::BigInt): bigint::BigInt {
+    ec_p256_reduce_p(bigint::add(x, y))
+}
+
+/**
+ * Field subtraction modulo `p`.
+ *
+ * @param x  the left operand, in `[0, p)`
+ * @param y  the right operand, in `[0, p)`
+ * @return   `(x - y) mod p`
+ */
+fn ec_p256_fsub(x: bigint::BigInt, y: bigint::BigInt): bigint::BigInt {
+    ec_p256_reduce_p(bigint::sub(x, y))
+}
+
+/**
+ * Field multiplication modulo `p`.
+ *
+ * @param x  the left operand, in `[0, p)`
+ * @param y  the right operand, in `[0, p)`
+ * @return   `(x * y) mod p`
+ */
+fn ec_p256_fmul(x: bigint::BigInt, y: bigint::BigInt): bigint::BigInt {
+    ec_p256_reduce_p(bigint::mul(x, y))
+}
+
+/**
+ * Field inversion modulo `p`. Every call site first establishes `x != 0 (mod p)` (the point
+ * arithmetic below never inverts a coordinate difference it has not just checked is nonzero), so
+ * a failure here is an authoring bug and panics rather than returning an error.
+ *
+ * @param x  the value to invert, nonzero in `[0, p)`
+ * @return   `x^-1 mod p`
+ */
+fn ec_p256_finv(x: bigint::BigInt): bigint::BigInt {
+    match bigint::mod_inverse(x, ec_p256_prime()) {
+        bigint::BigInt as b => b
+        error as e => panic(e.message)
+    }
+}
+
+/**
+ * Point doubling (SEC 1 §2.2.1): `2*p = p + p`. The point at infinity and a point of order two
+ * (`y = 0`, unreachable from any nonzero scalar multiple of the P-256 generator, but handled for
+ * totality) both double to the point at infinity.
+ *
+ * @param p  the point to double
+ * @return   `2*p`
+ */
+fn ec_p256_point_double(p: P256Point): P256Point {
+    if p.infinity { return p }
+    if bigint::is_zero(p.y) { return ec_p256_infinity() }
+    var numerator = ec_p256_fadd(ec_p256_fmul(bigint::of(3), ec_p256_fmul(p.x, p.x)), ec_p256_a())
+    var denominator = ec_p256_fmul(bigint::of(2), p.y)
+    var lambda = ec_p256_fmul(numerator, ec_p256_finv(denominator))
+    var x3 = ec_p256_fsub(ec_p256_fmul(lambda, lambda), ec_p256_fmul(bigint::of(2), p.x))
+    var y3 = ec_p256_fsub(ec_p256_fmul(lambda, ec_p256_fsub(p.x, x3)), p.y)
+    P256Point { infinity = false; x = x3; y = y3 }
+}
+
+/**
+ * Point addition (SEC 1 §2.2.1): `p + q` for two AFFINE points. Delegates to `ec_p256_point_double`
+ * when `p == q`, and returns the point at infinity when `p == -q` (equal X, opposite Y) — the two
+ * cases the general chord formula cannot handle (its denominator `x2 - x1` is zero in both).
+ *
+ * @param p  the left addend
+ * @param q  the right addend
+ * @return   `p + q`
+ */
+fn ec_p256_point_add(p: P256Point, q: P256Point): P256Point {
+    if p.infinity { return q }
+    if q.infinity { return p }
+    if bigint::eq(p.x, q.x) {
+        if bigint::eq(p.y, q.y) { return ec_p256_point_double(p) }
+        return ec_p256_infinity()
+    }
+    var lambda = ec_p256_fmul(ec_p256_fsub(q.y, p.y), ec_p256_finv(ec_p256_fsub(q.x, p.x)))
+    var x3 = ec_p256_fsub(ec_p256_fsub(ec_p256_fmul(lambda, lambda), p.x), q.x)
+    var y3 = ec_p256_fsub(ec_p256_fmul(lambda, ec_p256_fsub(p.x, x3)), p.y)
+    P256Point { infinity = false; x = x3; y = y3 }
+}
+
+/**
+ * Scalar multiplication `k*p` via right-to-left double-and-add: at each step, if the low bit of
+ * the remaining scalar is set the running result absorbs the current addend, then the addend is
+ * doubled and the scalar is halved. Requires `k` non-negative (every call site reduces its scalar
+ * into `[0, order)` or `[0, p)` first). NOT constant-time (branches on scalar bits), matching this
+ * namespace's `bigint::mod_pow` — a hardening follow-up, not a correctness gap.
+ *
+ * @param k  the scalar, non-negative
+ * @param p  the point to multiply
+ * @return   `k*p`
+ */
+fn ec_p256_scalar_mul(k: bigint::BigInt, p: P256Point): P256Point {
+    var result = ec_p256_infinity()
+    var addend = p
+    var exponent = k
+    loop {
+        if bigint::is_zero(exponent) { break }
+        if !bigint::is_even(exponent) { result = ec_p256_point_add(result, addend) }
+        addend = ec_p256_point_double(addend)
+        exponent = bigint::shr(exponent, 1)
+    }
+    result
+}
+
+/**
+ * Checks that a point satisfies the P-256 short Weierstrass equation `y^2 = x^3 + a*x + b (mod p)`.
+ * The point at infinity is vacuously on the curve (it is the group's identity, not a solution of
+ * the affine equation, but every curve-membership check in this file treats it as valid).
+ *
+ * @param p  the point to check
+ * @return   `true` iff `p` is the point at infinity or satisfies the curve equation
+ */
+exp fn ec_p256_is_on_curve(p: P256Point): bool {
+    if p.infinity { return true }
+    var lhs = ec_p256_fmul(p.y, p.y)
+    var x_cubed = ec_p256_fmul(ec_p256_fmul(p.x, p.x), p.x)
+    var rhs = ec_p256_fadd(ec_p256_fadd(x_cubed, ec_p256_fmul(ec_p256_a(), p.x)), ec_p256_b())
+    bigint::eq(lhs, rhs)
+}
+
+/**
+ * Concatenates `a` then `b` into a fresh `[]byte` — this file's own copy of the block-join helper
+ * every crypto file in this namespace carries privately (mirroring `rsa.tks`'s `rsa_bytes_concat`).
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   a fresh slice holding `a`'s bytes followed by `b`'s bytes
+ */
+fn ec_p256_bytes_concat(a: []byte, b: []byte): []byte {
+    var out = a
+    var i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * The sub-slice `data[from..to)` as a fresh `[]byte` — this file's own copy of the sub-slicing
+ * helper every crypto file in this namespace carries privately.
+ *
+ * @param data  the source slice
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `data[from..to)`
+ */
+fn ec_p256_bytes_slice(data: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, data[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Encodes a finite point as the uncompressed SEC 1 §2.3.3 octet string `0x04 || X || Y`, each
+ * coordinate a fixed 32-byte big-endian field (`I2OSP` via `bigint::to_bytes_be_padded`).
+ *
+ * @param p  the point to encode (must not be the point at infinity)
+ * @return   the 65-byte uncompressed encoding
+ * @throws   `CryptoError` when `p` is the point at infinity (SEC 1 has no uncompressed encoding
+ *           for it)
+ */
+exp fn ec_p256_point_to_uncompressed(p: P256Point): []byte | CryptoError {
+    if p.infinity {
+        return crypto_error("ec_p256_point_to_uncompressed: point at infinity has no encoding")
+    }
+    var xb = match bigint::to_bytes_be_padded(p.x, 32) {
+        []byte as b => b
+        error => return crypto_error("ec_p256_point_to_uncompressed: X coordinate out of range")
+    }
+    var yb = match bigint::to_bytes_be_padded(p.y, 32) {
+        []byte as b => b
+        error => return crypto_error("ec_p256_point_to_uncompressed: Y coordinate out of range")
+    }
+    var out: []byte = teko::list::empty()
+    out = teko::list::push(out, 0x04 to byte)
+    ec_p256_bytes_concat(ec_p256_bytes_concat(out, xb), yb)
+}
+
+/**
+ * Decodes an uncompressed SEC 1 §2.3.4 octet string `0x04 || X || Y` into a `P256Point`, rejecting
+ * anything but exactly 65 bytes starting with `0x04`, and rejecting a point that fails the curve
+ * equation (an off-curve "public key" is a forged/corrupted input, never accepted).
+ *
+ * @param bytes  the candidate uncompressed encoding
+ * @return       the decoded point, or a `CryptoError` describing why it was rejected
+ * @throws       `CryptoError` on a wrong length, a missing `0x04` prefix, or an off-curve point
+ */
+exp fn ec_p256_point_from_uncompressed(bytes: []byte): P256Point | CryptoError {
+    if bytes.len != 65 {
+        return crypto_error("ec_p256_point_from_uncompressed: expected a 65-byte 04||X||Y encoding")
+    }
+    if bytes[0] != 0x04 to byte {
+        return crypto_error("ec_p256_point_from_uncompressed: missing the 0x04 prefix")
+    }
+    var x = bigint::from_bytes_be(ec_p256_bytes_slice(bytes, 1, 33))
+    var y = bigint::from_bytes_be(ec_p256_bytes_slice(bytes, 33, 65))
+    var p = P256Point { infinity = false; x = x; y = y }
+    if !ec_p256_is_on_curve(p) {
+        return crypto_error("ec_p256_point_from_uncompressed: point does not satisfy the curve equation")
+    }
+    p
+}
+
+/**
+ * The digest of `message` under `alg`, dispatching to the matching `teko::crypto::hash` one-shot
+ * function.
+ *
+ * @param alg      the selected hash algorithm
+ * @param message  the bytes to hash
+ * @return         the digest (32, 48, or 64 bytes for SHA-256/384/512)
+ */
+fn ec_p256_hash(alg: EcHashAlg, message: []byte): []byte {
+    match alg {
+        Sha256 => sha256_of(message)
+        Sha384 => sha384_of(message)
+        Sha512 => sha512_of(message)
+    }
+}
+
+/**
+ * The ECDSA hash-to-scalar conversion (SEC 1 §4.1.3 step 5 / FIPS 186-4 §6.4): hash `message`
+ * under `alg`, then take the leftmost `min(hash_bits, order_bits)` bits of the digest as a
+ * big-endian integer. P-256's order is exactly 256 bits, so SHA-256 needs no truncation while
+ * SHA-384/512 are right-shifted down to the leading 256 bits.
+ *
+ * @param alg      the hash algorithm
+ * @param message  the message to hash
+ * @return         the integer `z` ECDSA signs/verifies against
+ */
+fn ec_p256_hash_to_scalar(alg: EcHashAlg, message: []byte): bigint::BigInt {
+    var digest = ec_p256_hash(alg, message)
+    var order_bits = bigint::bit_length(ec_p256_order())
+    var digest_bits = digest.len * 8
+    var z = bigint::from_bytes_be(digest)
+    if digest_bits > order_bits {
+        return bigint::shr(z, digest_bits - order_bits)
+    }
+    z
+}
+
+/**
+ * ECDSA signature generation over P-256 (SEC 1 §4.1.3 / FIPS 186-4 §6.4), with a CALLER-SUPPLIED
+ * ephemeral scalar `k` rather than one drawn from an RNG (see this file's header for why).
+ * Rejects `k` outside `[1, order)` and the two structurally-invalid-nonce outcomes SEC 1 names
+ * (`r == 0`, `s == 0`) as `CryptoError` rather than silently producing an unusable signature.
+ *
+ * @param priv_scalar  the signer's private scalar `d`, in `[1, order)`
+ * @param hash_alg     the hash algorithm
+ * @param message      the message to sign
+ * @param k            the ephemeral nonce, in `[1, order)`; MUST be single-use and unpredictable
+ *                      in real deployment — this primitive trusts the caller entirely
+ * @return             the signature `(r, s)`, or a `CryptoError` naming the invalid nonce
+ * @throws             `CryptoError` when `k` is out of range, or the resulting `r` or `s` is zero
+ */
+exp fn ecdsa_p256_sign(priv_scalar: bigint::BigInt, hash_alg: EcHashAlg, message: []byte, k: bigint::BigInt): P256Signature | CryptoError {
+    var order = ec_p256_order()
+    if bigint::is_zero(k) || bigint::is_neg(k) || bigint::cmp(k, order) >= 0 {
+        return crypto_error("ecdsa_p256_sign: nonce k out of range [1, order)")
+    }
+    var r_point = ec_p256_scalar_mul(k, ec_p256_generator())
+    if r_point.infinity {
+        return crypto_error("ecdsa_p256_sign: invalid nonce (k*G is the point at infinity)")
+    }
+    var r = ec_p256_reduce_n(r_point.x)
+    if bigint::is_zero(r) {
+        return crypto_error("ecdsa_p256_sign: invalid nonce (r == 0)")
+    }
+    var k_inv = match bigint::mod_inverse(k, order) {
+        bigint::BigInt as b => b
+        error => return crypto_error("ecdsa_p256_sign: nonce k is not invertible modulo the order")
+    }
+    var z = ec_p256_hash_to_scalar(hash_alg, message)
+    var s = ec_p256_reduce_n(bigint::mul(k_inv, ec_p256_reduce_n(bigint::add(z, ec_p256_reduce_n(bigint::mul(r, priv_scalar))))))
+    if bigint::is_zero(s) {
+        return crypto_error("ecdsa_p256_sign: invalid nonce (s == 0)")
+    }
+    P256Signature { r = r; s = s }
+}
+
+/**
+ * ECDSA signature verification over P-256 (SEC 1 §4.1.4 / FIPS 186-4 §6.4). Never panics: an
+ * out-of-range `r`/`s`, an off-curve public key, or a mismatching signature all simply yield
+ * `false`.
+ *
+ * @param pub_point  the signer's public point `Q = d*G`
+ * @param hash_alg   the hash algorithm the signature was produced under
+ * @param message    the message whose signature is being checked
+ * @param r          the signature's first component
+ * @param s          the signature's second component
+ * @return           `true` iff `(r, s)` is a genuine ECDSA signature of `message` under `pub_point`
+ */
+exp fn ecdsa_p256_verify(pub_point: P256Point, hash_alg: EcHashAlg, message: []byte, r: bigint::BigInt, s: bigint::BigInt): bool {
+    var order = ec_p256_order()
+    if bigint::is_zero(r) || bigint::is_neg(r) || bigint::cmp(r, order) >= 0 { return false }
+    if bigint::is_zero(s) || bigint::is_neg(s) || bigint::cmp(s, order) >= 0 { return false }
+    if pub_point.infinity || !ec_p256_is_on_curve(pub_point) { return false }
+    var s_inv = match bigint::mod_inverse(s, order) {
+        bigint::BigInt as b => b
+        error => return false
+    }
+    var z = ec_p256_hash_to_scalar(hash_alg, message)
+    var u1 = ec_p256_reduce_n(bigint::mul(z, s_inv))
+    var u2 = ec_p256_reduce_n(bigint::mul(r, s_inv))
+    var candidate = ec_p256_point_add(ec_p256_scalar_mul(u1, ec_p256_generator()), ec_p256_scalar_mul(u2, pub_point))
+    if candidate.infinity { return false }
+    bigint::eq(ec_p256_reduce_n(candidate.x), r)
+}
