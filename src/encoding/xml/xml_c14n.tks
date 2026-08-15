@@ -1,0 +1,577 @@
+/**
+ * `teko::encoding::xml` — Canonical XML 1.0 (INCLUSIVE) serialization, the prerequisite the
+ * `teko::crypto::xmldsig` lane consumes to produce a stable byte stream to digest and sign.
+ * Sibling file of `xml.tks` (same namespace): it builds on that unit's `XmlNode` DOM and
+ * reuses its private helpers (`str_eq`, `scope_*`, `NsScope`, ...), the module-private
+ * visibility the compiler grants files that share a namespace.
+ *
+ * WHAT C14N GUARANTEES (W3C REC-xml-c14n-20010315). Two XML documents that are equivalent
+ * under the XML Information Set produce byte-identical canonical forms, so a digest taken over
+ * the canonical bytes is stable across insignificant serialization differences. This
+ * implementation applies the inclusive-canonicalization rules over a DOM subtree:
+ *   - the element/attribute/text/PI/comment nodes are emitted in document order, UTF-8;
+ *   - empty elements are written as a start+end tag PAIR (`<a></a>`), never self-closed;
+ *   - attributes are sorted by (namespace URI, local name); namespace declarations are sorted
+ *     by prefix (the default namespace first) and rendered only where they change relative to
+ *     an output ancestor (superfluous declarations, including a redundant `xmlns=""`, are
+ *     dropped) — the inclusive namespace axis;
+ *   - text escapes `&`, `<`, `>` and a literal carriage return (`&#xD;`); attribute values
+ *     escape `&`, `<`, `"`, tab (`&#x9;`), newline (`&#xA;`) and carriage return (`&#xD;`);
+ *   - CDATA sections collapse into their (escaped) character content, since C14N has no CDATA;
+ *   - comments are omitted by `canonicalize` and kept by `canonicalize_with_comments`.
+ *
+ * SCOPE NOTE. The given node is treated as a COMPLETE subtree: only the namespaces declared on
+ * it and its descendants are in scope (a caller canonicalizing a sub-element that inherits
+ * ancestor namespaces must first inline those declarations onto the sub-element).
+ *
+ * NAMED SEAM (reported, not implemented here): EXCLUSIVE C14N (`xml-exc-c14n#`, the form
+ * enveloped/detached XML-DSig signatures usually reference) and XML-DSig transforms. Exclusive
+ * canonicalization differs only in the namespace axis — it renders a namespace node solely when
+ * it is "visibly utilized" by the element or one of its attributes, with an
+ * `InclusiveNamespaces PrefixList` escape hatch. The `xmldsig` lane layers that visibility
+ * filter on top of the traversal below; the inclusive form here is the correct, testable base.
+ */
+
+/**
+ * The result of looking up a prefix in the rendered-namespace state: whether any binding was
+ * emitted for the prefix by an output ancestor, and if so its URI. `found` is needed because
+ * an empty URI (`""`, an explicitly cancelled default namespace) is distinct from "never
+ * rendered".
+ */
+pub type NsLookup = struct {
+    /**
+     * True when an output ancestor rendered a binding for the queried prefix.
+     */
+    found: bool
+    /**
+     * The URI of the most recently rendered binding for the prefix (meaningful when `found`).
+     */
+    uri: str
+}
+
+/**
+ * Finds the most recently rendered binding for `prefix` in the output-namespace state.
+ *
+ * @param output  the namespaces already emitted, innermost last
+ * @param prefix  the prefix to look up (`""` for the default namespace)
+ * @return        whether a binding was rendered and its URI
+ */
+fn output_lookup(output: NsScope, prefix: str): NsLookup {
+    var i = output.prefixes.len
+    loop {
+        if i == 0 { break }
+        i--
+        if str_eq(output.prefixes[i], prefix) { return NsLookup { found = true; uri = output.uris[i] } }
+    }
+    NsLookup { found = false; uri = "" }
+}
+
+/**
+ * The distinct namespace prefixes currently in scope (each mapped to its most recent URI),
+ * excluding the reserved `xml` prefix, which C14N never renders.
+ */
+pub type NsBindings = struct {
+    /**
+     * The distinct in-scope prefixes (`""` for the default namespace).
+     */
+    prefixes: []str
+    /**
+     * The URIs, parallel to `prefixes`.
+     */
+    uris: []str
+}
+
+/**
+ * Collects the distinct in-scope bindings of a scope, keeping each prefix's most recent URI
+ * and dropping the reserved `xml` prefix.
+ *
+ * @param scope  the scope to distill
+ * @return       one entry per distinct prefix, latest binding wins
+ */
+fn distinct_bindings(scope: NsScope): NsBindings {
+    var prefixes: []str = teko::list::empty()
+    var uris: []str = teko::list::empty()
+    var i = scope.prefixes.len
+    loop {
+        if i == 0 { break }
+        i--
+        var prefix = scope.prefixes[i]
+        if str_eq(prefix, "xml") { continue }
+        if !contains_str(prefixes, prefix) {
+            prefixes = teko::list::push(prefixes, prefix)
+            uris = teko::list::push(uris, scope.uris[i])
+        }
+    }
+    NsBindings { prefixes = sort_str(prefixes, uris); uris = reorder_by_sorted(prefixes, uris) }
+}
+
+/**
+ * Reports whether `list` already contains `value`.
+ *
+ * @param list   the strings collected so far
+ * @param value  the string to test
+ * @return       true when `value` is present
+ */
+fn contains_str(list: []str, value: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= list.len { break }
+        if str_eq(list[i], value) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether `a` is lexicographically less than `b` by unsigned byte comparison (a
+ * shorter string that is a prefix of a longer one sorts first — the C14N ordering).
+ *
+ * @param a  the first string
+ * @param b  the second string
+ * @return   true when `a` sorts strictly before `b`
+ */
+fn str_less(a: str, b: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= a.len || i >= b.len { break }
+        if a[i] != b[i] { return a[i] < b[i] }
+        i++
+    }
+    a.len < b.len
+}
+
+/**
+ * Returns the prefix column sorted ascending by prefix (the default namespace `""` first),
+ * carrying `uris` along so `reorder_by_sorted` can rebuild the parallel URI column.
+ *
+ * @param prefixes  the prefixes to sort
+ * @param uris      the parallel URIs (unused here; sorted alongside via `reorder_by_sorted`)
+ * @return          the prefixes in ascending order
+ */
+fn sort_str(prefixes: []str, uris: []str): []str {
+    var order = sorted_indices_by_prefix(prefixes)
+    var out: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= order.len { break }
+        out = teko::list::push(out, prefixes[order[i]])
+        i++
+    }
+    out
+}
+
+/**
+ * Returns the URI column permuted into the same order `sort_str` puts the prefixes, so the two
+ * parallel columns stay aligned.
+ *
+ * @param prefixes  the original (unsorted) prefixes
+ * @param uris      the original (unsorted) URIs
+ * @return          the URIs reordered to match the sorted prefixes
+ */
+fn reorder_by_sorted(prefixes: []str, uris: []str): []str {
+    var order = sorted_indices_by_prefix(prefixes)
+    var out: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= order.len { break }
+        out = teko::list::push(out, uris[order[i]])
+        i++
+    }
+    out
+}
+
+/**
+ * Computes the permutation of indices that orders `prefixes` ascending (selection sort over a
+ * small list — elements rarely declare many namespaces).
+ *
+ * @param prefixes  the prefixes to order
+ * @return          indices into `prefixes` in ascending-prefix order
+ */
+fn sorted_indices_by_prefix(prefixes: []str): []u64 {
+    var order: []u64 = teko::list::empty()
+    var used: []bool = teko::list::empty()
+    var k: u64 = 0
+    loop {
+        if k >= prefixes.len { break }
+        used = teko::list::push(used, false)
+        k++
+    }
+    var n: u64 = 0
+    loop {
+        if n >= prefixes.len { break }
+        var best = first_unused(used)
+        var j: u64 = 0
+        loop {
+            if j >= prefixes.len { break }
+            if !used[j] && str_less(prefixes[j], prefixes[best]) { best = j }
+            j++
+        }
+        used = set_true(used, best)
+        order = teko::list::push(order, best)
+        n++
+    }
+    order
+}
+
+/**
+ * Returns the index of the first not-yet-used slot.
+ *
+ * @param used  the per-index used flags
+ * @return      the first index whose flag is false (or 0 when all are used)
+ */
+fn first_unused(used: []bool): u64 {
+    var i: u64 = 0
+    loop {
+        if i >= used.len { break }
+        if !used[i] { return i }
+        i++
+    }
+    0
+}
+
+/**
+ * Returns a copy of `used` with the flag at `index` set to true (no index-assignment; rebuild
+ * the slice, per the stdlib no-mutation-in-place law).
+ *
+ * @param used   the flags to update
+ * @param index  the index to mark used
+ * @return       a fresh slice with `index` flagged
+ */
+fn set_true(used: []bool, index: u64): []bool {
+    var out: []bool = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= used.len { break }
+        out = teko::list::push(out, if i == index { true } else { used[i] })
+        i++
+    }
+    out
+}
+
+/**
+ * The rendered namespace declarations for an element plus the updated output-namespace state
+ * threaded to its descendants.
+ */
+pub type NsRender = struct {
+    /**
+     * The serialized ` xmlns...="..."` declarations, in canonical order.
+     */
+    text: str
+    /**
+     * The output-namespace state after these declarations, for descendant change detection.
+     */
+    output: NsScope
+}
+
+/**
+ * Renders the namespace declarations for an element under inclusive C14N: for each distinct
+ * in-scope prefix (default first), emit a declaration only when it differs from what an output
+ * ancestor rendered, with the superfluous-empty-default rule (`xmlns=""` is emitted only to
+ * cancel an inherited non-empty default).
+ *
+ * @param full_scope  the element's complete in-scope bindings
+ * @param output      the namespaces already emitted by output ancestors
+ * @return            the ordered declaration text and the extended output state
+ */
+fn render_namespaces(full_scope: NsScope, output: NsScope): NsRender {
+    var bindings = distinct_bindings(full_scope)
+    var text: str = ""
+    var out = output
+    var i: u64 = 0
+    loop {
+        if i >= bindings.prefixes.len { break }
+        var prefix = bindings.prefixes[i]
+        var uri = bindings.uris[i]
+        if namespace_needs_render(out, prefix, uri) {
+            text = text ~ render_one_namespace(prefix, uri)
+            out = scope_extend(out, prefix, uri)
+        }
+        i++
+    }
+    NsRender { text = text; output = out }
+}
+
+/**
+ * Decides whether a namespace binding must be rendered at this element (see
+ * `render_namespaces`): render when it changes relative to output, except a `""`->`""` default
+ * that is not cancelling an inherited non-empty default.
+ *
+ * @param output  the output-namespace state
+ * @param prefix  the binding's prefix
+ * @param uri     the binding's URI
+ * @return        true when the declaration must be emitted here
+ */
+fn namespace_needs_render(output: NsScope, prefix: str, uri: str): bool {
+    var prior = output_lookup(output, prefix)
+    if prefix.len == 0 && uri.len == 0 {
+        return prior.found && prior.uri.len > 0
+    }
+    !prior.found || !str_eq(prior.uri, uri)
+}
+
+/**
+ * Serializes one namespace declaration in canonical form: ` xmlns="uri"` for the default
+ * namespace, ` xmlns:prefix="uri"` otherwise, with the URI attribute-escaped.
+ *
+ * @param prefix  the prefix (`""` for the default namespace)
+ * @param uri     the namespace URI
+ * @return        the ` xmlns...="..."` fragment (leading space included)
+ */
+fn render_one_namespace(prefix: str, uri: str): str {
+    if prefix.len == 0 {
+        return concat(" xmlns=\"", concat(c14n_escape_attr(uri), "\""))
+    }
+    concat(" xmlns:", concat(prefix, concat("=\"", concat(c14n_escape_attr(uri), "\""))))
+}
+
+/**
+ * The non-namespace attributes of an element, in C14N order (by namespace URI then local
+ * name).
+ *
+ * @param attrs  the element's attributes
+ * @return       the attributes excluding `xmlns` declarations, sorted canonically
+ */
+fn canonical_attributes(attrs: []XmlAttr): []XmlAttr {
+    var kept: []XmlAttr = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= attrs.len { break }
+        if !is_namespace_decl(attrs[i]) { kept = teko::list::push(kept, attrs[i]) }
+        i++
+    }
+    sort_attributes(kept)
+}
+
+/**
+ * Reports whether an attribute is a namespace declaration (`xmlns` or `xmlns:prefix`), which
+ * C14N handles on the namespace axis rather than as an ordinary attribute.
+ *
+ * @param a  the attribute to test
+ * @return   true when `a` declares a namespace
+ */
+fn is_namespace_decl(a: XmlAttr): bool {
+    str_eq(a.name, "xmlns") || str_eq(a.prefix, "xmlns")
+}
+
+/**
+ * Sorts attributes by (namespace URI, local name) using selection sort over the typically
+ * small list.
+ *
+ * @param attrs  the attributes to sort
+ * @return       the attributes in canonical order
+ */
+fn sort_attributes(attrs: []XmlAttr): []XmlAttr {
+    var used: []bool = teko::list::empty()
+    var k: u64 = 0
+    loop {
+        if k >= attrs.len { break }
+        used = teko::list::push(used, false)
+        k++
+    }
+    var out: []XmlAttr = teko::list::empty()
+    var n: u64 = 0
+    loop {
+        if n >= attrs.len { break }
+        var best = first_unused(used)
+        var j: u64 = 0
+        loop {
+            if j >= attrs.len { break }
+            if !used[j] && attr_less(attrs[j], attrs[best]) { best = j }
+            j++
+        }
+        used = set_true(used, best)
+        out = teko::list::push(out, attrs[best])
+        n++
+    }
+    out
+}
+
+/**
+ * Reports whether attribute `a` sorts before `b` in C14N order: primarily by namespace URI
+ * (the empty URI, an unprefixed attribute, first), then by local name.
+ *
+ * @param a  the first attribute
+ * @param b  the second attribute
+ * @return   true when `a` sorts strictly before `b`
+ */
+fn attr_less(a: XmlAttr, b: XmlAttr): bool {
+    if !str_eq(a.namespace_uri, b.namespace_uri) { return str_less(a.namespace_uri, b.namespace_uri) }
+    str_less(a.local, b.local)
+}
+
+/**
+ * Escapes text content for C14N: `&` -> `&amp;`, `<` -> `&lt;`, `>` -> `&gt;`, and a literal
+ * carriage return -> `&#xD;` (all other bytes verbatim).
+ *
+ * @param s  the decoded text
+ * @return   the C14N-escaped text
+ */
+fn c14n_escape_text(s: str): str {
+    var out: str = ""
+    var i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        var b = s[i]
+        if b == b'&' { out = out ~ "&amp;" } else if b == b'<' { out = out ~ "&lt;" } else if b == b'>' { out = out ~ "&gt;" } else if b == b'\r' { out = out ~ "&#xD;" } else { out = out ~ one_byte(b) }
+        i++
+    }
+    out
+}
+
+/**
+ * Escapes an attribute value for C14N: `&` -> `&amp;`, `<` -> `&lt;`, `"` -> `&quot;`, tab ->
+ * `&#x9;`, newline -> `&#xA;`, carriage return -> `&#xD;` (all other bytes verbatim).
+ *
+ * @param s  the decoded attribute value
+ * @return   the C14N-escaped value
+ */
+fn c14n_escape_attr(s: str): str {
+    var out: str = ""
+    var i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        out = out ~ c14n_escape_attr_byte(s[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Escapes one attribute-value byte for C14N (see `c14n_escape_attr`).
+ *
+ * @param b  the byte to escape
+ * @return   the escaped rendering of `b`
+ */
+fn c14n_escape_attr_byte(b: byte): str {
+    if b == b'&' { return "&amp;" }
+    if b == b'<' { return "&lt;" }
+    if b == b'"' { return "&quot;" }
+    if b == b'\t' { return "&#x9;" }
+    if b == b'\n' { return "&#xA;" }
+    if b == b'\r' { return "&#xD;" }
+    one_byte(b)
+}
+
+/**
+ * Canonicalizes one element and its subtree, threading the parent scope and the
+ * output-namespace state.
+ *
+ * @param node           the element node
+ * @param parent_scope   the namespace scope in effect above this element
+ * @param output         the namespaces rendered by output ancestors
+ * @param with_comments  whether comment nodes are preserved
+ * @return               the element's canonical XML text
+ */
+fn c14n_element(node: XmlNode, parent_scope: NsScope, output: NsScope, with_comments: bool): str {
+    var full_scope = scope_with_declarations(parent_scope, node.attributes)
+    var ns = render_namespaces(full_scope, output)
+    var attrs = canonical_attributes(node.attributes)
+    var out = concat("<", concat(node.name, concat(ns.text, render_attribute_list(attrs))))
+    out = out ~ ">"
+    out = out ~ c14n_children(node.children, full_scope, ns.output, with_comments)
+    out ~ concat("</", concat(node.name, ">"))
+}
+
+/**
+ * Renders a canonical attribute list, each as ` name="value"` with the value C14N-escaped.
+ *
+ * @param attrs  the attributes in canonical order
+ * @return       the concatenated ` name="value"` fragments
+ */
+fn render_attribute_list(attrs: []XmlAttr): str {
+    var out: str = ""
+    var i: u64 = 0
+    loop {
+        if i >= attrs.len { break }
+        out = out ~ concat(" ", concat(attrs[i].name, concat("=\"", concat(c14n_escape_attr(attrs[i].value), "\""))))
+        i++
+    }
+    out
+}
+
+/**
+ * Canonicalizes an element's children in document order.
+ *
+ * @param children       the child nodes
+ * @param scope          the element's full in-scope bindings (the children's parent scope)
+ * @param output         the output-namespace state after the element's own declarations
+ * @param with_comments  whether comment nodes are preserved
+ * @return               the concatenated canonical text of the children
+ */
+fn c14n_children(children: []XmlNode, scope: NsScope, output: NsScope, with_comments: bool): str {
+    var out: str = ""
+    var i: u64 = 0
+    loop {
+        if i >= children.len { break }
+        out = out ~ c14n_node(children[i], scope, output, with_comments)
+        i++
+    }
+    out
+}
+
+/**
+ * Canonicalizes a single node: recurse for an element, escape for text/CDATA, render a PI,
+ * and emit or drop a comment per `with_comments`.
+ *
+ * @param node           the node to canonicalize
+ * @param parent_scope   the namespace scope in effect above the node
+ * @param output         the output-namespace state from output ancestors
+ * @param with_comments  whether comment nodes are preserved
+ * @return               the node's canonical XML text
+ */
+fn c14n_node(node: XmlNode, parent_scope: NsScope, output: NsScope, with_comments: bool): str {
+    match node.kind {
+        NodeKind::Element => c14n_element(node, parent_scope, output, with_comments)
+        NodeKind::Text => c14n_escape_text(node.text)
+        NodeKind::CData => c14n_escape_text(node.text)
+        NodeKind::Comment => if with_comments { concat("<!--", concat(node.text, "-->")) } else { "" }
+        NodeKind::ProcessingInstruction => c14n_pi(node)
+    }
+}
+
+/**
+ * Renders a processing instruction canonically: `<?target?>` when it has no data, else
+ * `<?target data?>`.
+ *
+ * @param node  the PI node
+ * @return      the canonical PI text
+ */
+fn c14n_pi(node: XmlNode): str {
+    if node.text.len == 0 {
+        return concat("<?", concat(node.name, "?>"))
+    }
+    concat("<?", concat(node.name, concat(" ", concat(node.text, "?>"))))
+}
+
+/**
+ * Produces the inclusive Canonical XML 1.0 form of a node subtree, WITHOUT comments (the
+ * default C14N used for signing). Treats `node` as a complete subtree (see the module's SCOPE
+ * NOTE): only its own and its descendants' namespace declarations are in scope.
+ *
+ * @param node  the subtree root (normally the document element)
+ * @return      the canonical XML bytes as a `str`
+ */
+exp fn canonicalize(node: XmlNode): str {
+    c14n_node(node, root_scope(), empty_output(), false)
+}
+
+/**
+ * Produces the inclusive Canonical XML 1.0 form of a node subtree WITH comments preserved
+ * (the `#WithComments` variant).
+ *
+ * @param node  the subtree root (normally the document element)
+ * @return      the canonical XML bytes as a `str`, comments included
+ */
+exp fn canonicalize_with_comments(node: XmlNode): str {
+    c14n_node(node, root_scope(), empty_output(), true)
+}
+
+/**
+ * The empty output-namespace state an apex element starts from (nothing rendered by an output
+ * ancestor yet).
+ *
+ * @return  an empty namespace state
+ */
+fn empty_output(): NsScope {
+    NsScope { prefixes = teko::list::empty(); uris = teko::list::empty() }
+}

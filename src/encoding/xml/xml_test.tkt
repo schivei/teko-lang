@@ -1,0 +1,243 @@
+/**
+ * Tests for `teko::encoding::xml` — the XML 1.0 DOM parser + serializer. Covers a
+ * parse->serialize round-trip, nested elements, single- and double-quoted attributes,
+ * prefixed and default namespaces (with URI resolution) plus the reserved `xml` prefix,
+ * predefined entities and numeric character references, CDATA sections, comments, processing
+ * instructions, prolog skipping (`<?xml?>` / comment / `<!DOCTYPE>`), and the malformed-input
+ * error cases (M.1 fail-loud via `error`, never a panic): an unclosed / mismatched tag, an
+ * unquoted attribute, and an invalid entity reference. This file lives under
+ * `teko::encoding::xml` (namespace = directory), so the functions under test are called bare,
+ * mirroring `teko::encoding::mime::mime_test.tkt`'s convention.
+ */
+
+/**
+ * Unwraps a `XmlNode | error` parse result — a failure in a "should succeed" test is itself a
+ * test failure.
+ *
+ * @param result  the parse outcome under test
+ * @return        the parsed node on success, or a placeholder text node (after failing) on error
+ */
+fn expect_node(result: XmlNode | error): XmlNode {
+    match result {
+        XmlNode as node => node
+        error => { teko::assert::is_true(false); text_node("") }
+    }
+}
+
+/**
+ * Asserts that `result` is an `error` (a "should fail" parse case).
+ *
+ * @param result  the parse outcome under test
+ */
+fn expect_error(result: XmlNode | error) {
+    match result {
+        XmlNode => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * Reads an attribute value that must be present, failing the test when it is absent.
+ *
+ * @param node  the element to query
+ * @param name  the attribute's qualified name
+ * @return      the attribute value, or `""` (after failing) when absent
+ */
+fn attribute_value(node: XmlNode, name: str): str {
+    match get_attribute(node, name) {
+        str as value => value
+        null => { teko::assert::is_true(false); "" }
+    }
+}
+
+/**
+ * A minimal document round-trips through parse then serialize unchanged, and its root name is
+ * recovered.
+ */
+fn parse_then_serialize_round_trips_a_simple_document() {
+    var doc = "<root a=\"1\"><child>hi</child></root>"
+    var node = expect_node(parse(doc))
+    teko::assert::eq_str(node.name, "root")
+    teko::assert::eq_str(serialize(node), doc)
+}
+
+/**
+ * Nested elements are recovered with the right element-child count, and empty elements
+ * serialize back to the `/>` form.
+ */
+fn nested_elements_round_trip_and_count_element_children() {
+    var doc = "<a><b><c>x</c></b><b/></a>"
+    var node = expect_node(parse(doc))
+    teko::assert::len_eq(element_children(node).len, 2)
+    teko::assert::eq_str(serialize(node), doc)
+}
+
+/**
+ * Single-quoted and double-quoted attributes parse to the same values and serialize with
+ * double quotes.
+ */
+fn attributes_accept_single_and_double_quotes() {
+    var node = expect_node(parse("<e id='7' k=\"v\"/>"))
+    teko::assert::eq_str(attribute_value(node, "id"), "7")
+    teko::assert::eq_str(attribute_value(node, "k"), "v")
+    teko::assert::eq_str(serialize(node), "<e id=\"7\" k=\"v\"/>")
+}
+
+/**
+ * A prefixed element and a default-namespace child resolve to their declared namespace URIs.
+ */
+fn prefixed_and_default_namespaces_resolve_to_uris() {
+    var node = expect_node(parse("<x:root xmlns:x=\"urn:X\" xmlns=\"urn:D\"><child/></x:root>"))
+    teko::assert::eq_str(node.prefix, "x")
+    teko::assert::eq_str(node.local, "root")
+    teko::assert::eq_str(node.namespace_uri, "urn:X")
+    var child = element_children(node)[0]
+    teko::assert::eq_str(child.namespace_uri, "urn:D")
+}
+
+/**
+ * The reserved `xml` prefix resolves without an explicit declaration.
+ */
+fn reserved_xml_prefix_resolves_without_declaration() {
+    var node = expect_node(parse("<p xml:lang=\"en\"/>"))
+    teko::assert::eq_str(node.attributes[0].namespace_uri, "http://www.w3.org/XML/1998/namespace")
+}
+
+/**
+ * Predefined entities and numeric character references decode in both text and attribute
+ * positions, and text re-escapes on serialize.
+ */
+fn entities_and_char_refs_decode_and_reescape() {
+    var node = expect_node(parse("<t k=\"a&amp;b&lt;c\">x &amp; y &lt; z &#65; &#x42;</t>"))
+    teko::assert::eq_str(attribute_value(node, "k"), "a&b<c")
+    teko::assert::eq_str(text_content(node), "x & y < z A B")
+    teko::assert::eq_str(serialize(node), "<t k=\"a&amp;b&lt;c\">x &amp; y &lt; z A B</t>")
+}
+
+/**
+ * A CDATA section is taken verbatim (its `<`, `>`, `&` are not markup) and round-trips.
+ */
+fn cdata_section_is_verbatim_and_round_trips() {
+    var doc = "<d><![CDATA[a<b>&c]]></d>"
+    var node = expect_node(parse(doc))
+    teko::assert::eq_str(text_content(node), "a<b>&c")
+    teko::assert::eq_str(serialize(node), doc)
+}
+
+/**
+ * A comment child round-trips unchanged.
+ */
+fn comment_round_trips() {
+    var doc = "<r><!-- hi --><z/></r>"
+    var node = expect_node(parse(doc))
+    teko::assert::eq_str(serialize(node), doc)
+}
+
+/**
+ * A processing instruction inside content round-trips with its target and data.
+ */
+fn processing_instruction_round_trips() {
+    var doc = "<r><?target some data?></r>"
+    var node = expect_node(parse(doc))
+    teko::assert::eq_str(serialize(node), doc)
+}
+
+/**
+ * A prolog (`<?xml?>` declaration, a comment, and a `<!DOCTYPE>` marker) is skipped to reach
+ * the root element.
+ */
+fn prolog_declaration_comment_and_doctype_are_skipped() {
+    var node = expect_node(parse("<?xml version=\"1.0\"?><!-- top --><!DOCTYPE r><r/>"))
+    teko::assert::eq_str(node.name, "r")
+}
+
+/**
+ * A mismatched end tag is a checked error.
+ */
+fn mismatched_end_tag_is_an_error() {
+    expect_error(parse("<a><b></a>"))
+}
+
+/**
+ * An unclosed element is a checked error.
+ */
+fn unclosed_element_is_an_error() {
+    expect_error(parse("<a>"))
+}
+
+/**
+ * An unquoted attribute value is a checked error.
+ */
+fn unquoted_attribute_is_an_error() {
+    expect_error(parse("<e a=1/>"))
+}
+
+/**
+ * An unknown entity name is a checked error.
+ */
+fn unknown_entity_is_an_error() {
+    expect_error(parse("<t>&bogus;</t>"))
+}
+
+/**
+ * An entity reference with no terminating `;` is a checked error.
+ */
+fn unterminated_entity_is_an_error() {
+    expect_error(parse("<t>&amp</t>"))
+}
+
+/**
+ * An element that uses an unbound namespace prefix is a checked error.
+ */
+fn unbound_namespace_prefix_is_an_error() {
+    expect_error(parse("<y:a/>"))
+}
+
+/**
+ * Empty input and content after the root element are each a checked error.
+ */
+fn empty_input_and_trailing_content_are_errors() {
+    expect_error(parse(""))
+    expect_error(parse("<a></a><b></b>"))
+}
+
+/**
+ * Inclusive C14N writes empty elements as a start+end pair and preserves document order.
+ */
+fn canonicalize_pairs_empty_elements_and_keeps_order() {
+    var node = expect_node(parse("<b><a>x</a><e/></b>"))
+    teko::assert::eq_str(canonicalize(node), "<b><a>x</a><e></e></b>")
+}
+
+/**
+ * Inclusive C14N sorts attributes by namespace URI then local name, and CDATA collapses into
+ * escaped character content.
+ */
+fn canonicalize_sorts_attributes_and_flattens_cdata() {
+    var attrs = expect_node(parse("<e b='2' a='1'/>"))
+    teko::assert::eq_str(canonicalize(attrs), "<e a=\"1\" b=\"2\"></e>")
+    var cdata = expect_node(parse("<d><![CDATA[a<b>]]></d>"))
+    teko::assert::eq_str(canonicalize(cdata), "<d>a&lt;b&gt;</d>")
+}
+
+/**
+ * Inclusive C14N drops redundant namespace declarations but keeps an `xmlns=""` that cancels
+ * an inherited default namespace, and orders namespace nodes before attributes.
+ */
+fn canonicalize_normalizes_namespace_axis() {
+    var redundant = expect_node(parse("<e xmlns='urn:D'><c xmlns='urn:D'/></e>"))
+    teko::assert::eq_str(canonicalize(redundant), "<e xmlns=\"urn:D\"><c></c></e>")
+    var cancel = expect_node(parse("<e xmlns='urn:D'><c xmlns=''/></e>"))
+    teko::assert::eq_str(canonicalize(cancel), "<e xmlns=\"urn:D\"><c xmlns=\"\"></c></e>")
+    var ordered = expect_node(parse("<e xmlns:z='urn:Z' z:b='2' a='1'/>"))
+    teko::assert::eq_str(canonicalize(ordered), "<e xmlns:z=\"urn:Z\" a=\"1\" z:b=\"2\"></e>")
+}
+
+/**
+ * `canonicalize` omits comments while `canonicalize_with_comments` preserves them.
+ */
+fn canonicalize_omits_comments_unless_requested() {
+    var node = expect_node(parse("<r><!-- c --><z/></r>"))
+    teko::assert::eq_str(canonicalize(node), "<r><z></z></r>")
+    teko::assert::eq_str(canonicalize_with_comments(node), "<r><!-- c --><z></z></r>")
+}
