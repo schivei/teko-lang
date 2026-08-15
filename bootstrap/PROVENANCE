@@ -1,11 +1,22 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on feat/item14-fat-header, forward-only): the item-14 (§13) MUTABLE
-# VALUE STRUCT — the fat header plus the `self`-as-ref receiver ABI. This is the FIRST reseed in this
-# lane's history that is NOT byte-identical to its predecessor by construction: item-14 changes the
-# REPRESENTATION of every value struct, so the old seed's structs are thin and the new seed's are fat.
-# That is a legitimate representation migration (plan §5 "Half B"), not a regression, and it is why the
-# gate below is SELF-REPRODUCE rather than byte-identity with the frozen seed.
+# RESEED (hand-harvest, local on feat/section7-di-service, forward-only): the §7 Part-A BACKEND SEAM
+# `svc_scope_expr` — the point where a service's lifetime finally reaches the arena slot. §7's surface
+# had already landed and reseeded (40778f95); this harvest carries the seam that makes a `singleton`
+# actually a singleton (one materialization cached in the task root) and leaves `Transient` building
+# fresh. Doc 1 §8 swaps two lines of that one function (task root -> THREAD root, scoped -> thread
+# sub-root) and nothing else moves — not the signature, not `svc_type_id`, not the typer, not a fixture.
+#
+# GATE (unchanged in kind from the item-14 reseed): SELF-REPRODUCE.
+#   - C-route chain s1 == s2 == s3, byte-identical (sha 3f5868ae…): the seam is INERT on the compiler's
+#     own corpus, which declares no services, so the fixpoint never moved.
+#   - cc-route: cc bootstrap/teko.c -> gen; TEKO_BACKEND=c gen build . -> teko.c;
+#     sha256(teko.c) == sha256(bootstrap/teko.c) == below. Verified this run.
+#   - Behaviour: a `singleton` claimed twice shares ONE instance (12) while a `transient` builds fresh
+#     (11) — the behaviour that did not exist before the seam. `service_svc` 9/9 ACCEPT scenarios pass;
+#     `svc_reject` still rejects.
+# Every capped build (`ulimit -v 6291456`) peaked ~4.25 GB, well under the 6 GB cap.
+#
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only
 # ever judges this record on a SWAP.
 #
@@ -55,7 +66,7 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  368466ce0a3d5da5732476fa27f398c500f3b891d3899dd05531882ffaa31ac4
+sha256:  bb9a92c57da65b18f2afdf08683246d5a4ba49aa0a51e1649ca9fd8b63fea109
 since:   0.3.1.0
 legacy:  none — this is an exact, self-reproducing hand harvest (item-14 fat value struct + `self`-as-ref
          receiver ABI, on top of the completed §9.D sweep + §9.2b + §9 value-type operators + the item-14
