@@ -1137,13 +1137,17 @@ minimiza esse retrabalho (a superfície já nasce triada).
 | §16 FFI libc-direct | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
 | §17 `#if`/`#os`/`#arch` | — | 0 | ⏳ (§11) | ⏳ ordem: ÚLTIMA |
 
-**Topo atual (mais-dependido com deps resolvidas):** **§7 DI service/svc** (in-deg 1) — o item-14
-aterrissou (`6f4d78ba`), então §7 é agora o mais-dependido com deps ✅. **PORÉM: o trabalho restante do §7
-é a costura de arena = Doc 1 §8 → LIMIAR DO DOC 1.** Os únicos itens Doc-2 puros que restam sem tocar Doc 1
-são **§14 Família B (comptime, parcial)** e **§15 global (parcial)** — ambos in-deg 0 (ninguém depende
-deles). O resto (§10 concorrência, §11/§16/§17) está bloqueado por Doc 1 (arena/Ctx) ou pela expansão da
-stdlib. Ordem derivada: **§7 (superfície) → [LIMIAR] → §14/§15 residuais** — e o **Doc 1 inteiro fica para
-depois da análise do dono** (regra: o dono analisa tudo antes do Doc 1).
+**RULING DO DONO (2026-08-15): finalizar TODA esta lista (as porções Doc 2 dos 7 itens) ANTES de tocar o
+Doc 1.** Não descer pro Doc 1 no primeiro item que encosta na arena. Para os itens cuja *substância* é
+arena (**§7 Parte B**, **§10**), "finalizar" = fazer a porção Doc 2 + deixar a **costura nomeada**
+(`svc_scope_expr` etc.) como o ponto exato de encaixe do Doc 1 §8. Só quando TODAS as porções Doc-2
+estiverem feitas é que o Doc 1 entra (o dono analisa antes).
+
+**Topo atual (mais-dependido com deps resolvidas):** **§7 DI service/svc — Parte A (superfície)** (in-deg 1,
+despachado). Ordem de moagem da lista (um reseed por vez, sem parar no meio): **§7-A → §14 (comptime) → §15
+(global) → frente stdlib (destrava §11) → §11 `exp`/`pub` → §16/§17 → §10 (porção Doc 2)**. Cada item vai
+até a sua completude Doc-2; as costuras de arena (§7-B, §10-substância) ficam nomeadas para o Doc 1, que
+vem INTEIRO depois — e só depois desta lista fechar.
 
 ---
 
