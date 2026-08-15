@@ -1,0 +1,911 @@
+/**
+ * `teko::crypto::mac` (C2) — the message-authentication-code family: keyed authenticators that
+ * bind a secret key to a message so a verifier can detect any tampering. Per the stdlib catalog
+ * §1.5 (`teko::crypto::mac`: HMAC · Poly1305 · CMAC · GMAC) and issue #195, this is pure Teko
+ * over `[]byte`, no OS dependency, testable via `.tkt` against the published RFC/NIST vectors.
+ *
+ * FLAT SURFACE (convention shipped by `teko::crypto::hash`): the functions live directly under
+ * `teko::crypto` — `teko::crypto::hmac_sha256_of`, not `teko::crypto::mac::…` — reusing the hash
+ * primitives (`sha256_of`, `sha512_of`, `sha3_256_of`, the streaming `*_init`/`*_update`/
+ * `*_finalize` states) already in this namespace.
+ *
+ * FAMILIES SHIPPED:
+ *   - HMAC (RFC 2104 / RFC 4231) over SHA-256, SHA-512, and SHA3-256, each with a streaming
+ *     `init`/`update`/`finalize` API (SHA-2 variants) plus one-shot, hex, and constant-time
+ *     `verify` wrappers.
+ *   - Poly1305 (RFC 8439) — the one-time authenticator, one-shot plus hex and `verify`.
+ *   - CMAC (NIST SP 800-38B) — the subkey derivation (`cmac_gen_subkeys`, independently
+ *     NIST-testable) and the full CBC-MAC parameterized on an injected 128-bit block cipher
+ *     (`cmac_with_cipher`): AES is the Lane-4 cipher and does NOT exist yet, so the block cipher
+ *     is a SEAM (a `func<[]byte, []byte>` the caller supplies). Once `teko::crypto::aes` lands,
+ *     `cmac_aes(key, msg)` is `cmac_with_cipher((b) => aes_encrypt_block(key, b), msg)`.
+ *   - GMAC (NIST SP 800-38D) — the pure GF(2^128) `ghash` core (independently GCM-vector-testable)
+ *     and `gmac_with_cipher`, likewise SEAMED on the block cipher for the same reason.
+ *
+ * PUBLIC SURFACE IS `exp` (catalog §0 framing, forward-compatible with the §11 self-`.tkh`
+ * enforcement); internal limb arithmetic and byte plumbing are file-local private.
+ *
+ * NO INDEX-ASSIGNMENT. Every output buffer and every limb vector is built via `teko::list::push`
+ * (functional growth), the same discipline `teko::crypto::hash` and `teko::crypto::ct_eq` use.
+ */
+
+/**
+ * The sub-slice `data[from..to)` as a fresh `[]byte` — the block/tail splitter this file uses
+ * (the identically-named helper in `hash.tks` is file-local there, so `mac` carries its own).
+ *
+ * @param data  the source slice
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `data[from..to)`
+ */
+fn mac_bytes_slice(data: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, data[i])
+        i++
+    }
+    out
+}
+
+/**
+ * XORs every byte of `buf` with the constant `pad` — how HMAC derives its inner `K0 ⊕ ipad`
+ * and outer `K0 ⊕ opad` key blocks from the padded key `K0`.
+ *
+ * @param buf  the bytes to transform (the padded key block)
+ * @param pad  the constant XOR mask (`0x36` for ipad, `0x5c` for opad)
+ * @return     a fresh slice with `buf[i] ⊕ pad` at every index
+ */
+fn xor_with_byte(buf: []byte, pad: u32): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= buf.len { break }
+        out = teko::list::push(out, ((buf[i] to u32) ^ pad) to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Builds HMAC's block-sized key `K0` (RFC 2104 §2): a key longer than the hash's block size is
+ * first hashed, then the result (or the short key) is right-padded with zero bytes to exactly
+ * `block_size` bytes. The hash is injected as a `func` so one helper serves every underlying
+ * digest.
+ *
+ * @param key         the caller-supplied secret key, any length
+ * @param block_size  the hash's internal block size in bytes (64 SHA-256, 128 SHA-512, 136 SHA3-256)
+ * @param hash        the one-shot digest of the underlying hash, applied only to an oversized key
+ * @return            exactly `block_size` bytes: the (possibly hashed) key, zero-padded on the right
+ */
+fn hmac_key0(key: []byte, block_size: u64, hash: func<[]byte, []byte>): []byte {
+    var k = if key.len > block_size { hash(key) } else { key }
+    var out = mac_bytes_slice(k, 0, k.len)
+    loop {
+        if out.len >= block_size { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    out
+}
+
+/**
+ * The streaming state of an in-progress HMAC-SHA-256 computation: the inner SHA-256 state
+ * (already primed with `K0 ⊕ ipad` and every message chunk fed so far) and the outer key
+ * block `K0 ⊕ opad` applied once at finalize time.
+ */
+exp type HmacSha256 = struct {
+    /** the inner SHA-256 state, primed with `K0 ⊕ ipad` and advanced by every message chunk */
+    inner: Sha256State
+    /** the outer key block `K0 ⊕ opad`, hashed with the inner digest at finalize time */
+    outer: []byte
+}
+
+/**
+ * Starts a streaming HMAC-SHA-256 keyed by `key` (RFC 2104): primes the inner hash with
+ * `K0 ⊕ ipad` and stores the outer block `K0 ⊕ opad` for finalization. Feed message bytes with
+ * `hmac_sha256_update`, then `hmac_sha256_finalize`.
+ *
+ * @param key  the secret key, any length (hashed down if longer than the 64-byte block)
+ * @return     a fresh `HmacSha256` ready to accept message bytes
+ */
+exp fn hmac_sha256_init(key: []byte): HmacSha256 {
+    var k0 = hmac_key0(key, 64, (m: []byte) => sha256_of(m))
+    HmacSha256 { inner = sha256_update(sha256_init(), xor_with_byte(k0, 0x36)); outer = xor_with_byte(k0, 0x5c) }
+}
+
+/**
+ * Feeds `data` into an in-progress HMAC-SHA-256 computation — may be called any number of times.
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state after absorbing `data`
+ */
+exp fn hmac_sha256_update(state: HmacSha256, data: []byte): HmacSha256 {
+    HmacSha256 { inner = sha256_update(state.inner, data); outer = state.outer }
+}
+
+/**
+ * Completes an HMAC-SHA-256 computation: finishes the inner hash, then hashes
+ * `(K0 ⊕ opad) || inner_digest` to produce the 32-byte tag.
+ *
+ * @param state  the state after every `hmac_sha256_update` call for this message
+ * @return       the 32-byte HMAC-SHA-256 tag
+ */
+exp fn hmac_sha256_finalize(state: HmacSha256): []byte {
+    var inner_digest = sha256_finalize(state.inner)
+    sha256_finalize(sha256_update(sha256_update(sha256_init(), state.outer), inner_digest))
+}
+
+/**
+ * One-shot HMAC-SHA-256: the 32-byte tag authenticating `msg` under `key`.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the complete message to authenticate
+ * @return     the 32-byte HMAC-SHA-256 tag
+ */
+exp fn hmac_sha256_of(key: []byte, msg: []byte): []byte {
+    hmac_sha256_finalize(hmac_sha256_update(hmac_sha256_init(key), msg))
+}
+
+/**
+ * `hmac_sha256_of`, rendered as a lowercase hex string — the form RFC 4231's vectors use.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the complete message to authenticate
+ * @return     the HMAC-SHA-256 tag of `msg` as 64 lowercase hex characters
+ */
+exp fn hmac_sha256_hex_of(key: []byte, msg: []byte): str {
+    to_hex(hmac_sha256_of(key, msg))
+}
+
+/**
+ * Constant-time HMAC-SHA-256 verification: recomputes the tag over `msg`/`key` and compares it
+ * against `tag` with `ct_eq`, so the running time never leaks where a forged tag first diverges.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the message whose authenticity is in question
+ * @param tag  the tag to check against the recomputed one
+ * @return     `true` iff `tag` is the genuine HMAC-SHA-256 tag of `msg` under `key`
+ */
+exp fn hmac_sha256_verify(key: []byte, msg: []byte, tag: []byte): bool {
+    ct_eq(hmac_sha256_of(key, msg), tag)
+}
+
+/**
+ * The streaming state of an in-progress HMAC-SHA-512 computation — the SHA-512 analogue of
+ * `HmacSha256` (128-byte block, 64-byte tag).
+ */
+exp type HmacSha512 = struct {
+    /** the inner SHA-512 state, primed with `K0 ⊕ ipad` and advanced by every message chunk */
+    inner: Sha512State
+    /** the outer key block `K0 ⊕ opad`, hashed with the inner digest at finalize time */
+    outer: []byte
+}
+
+/**
+ * Starts a streaming HMAC-SHA-512 keyed by `key` (RFC 2104), block size 128 bytes.
+ *
+ * @param key  the secret key, any length (hashed down if longer than the 128-byte block)
+ * @return     a fresh `HmacSha512` ready to accept message bytes
+ */
+exp fn hmac_sha512_init(key: []byte): HmacSha512 {
+    var k0 = hmac_key0(key, 128, (m: []byte) => sha512_of(m))
+    HmacSha512 { inner = sha512_update(sha512_init(), xor_with_byte(k0, 0x36)); outer = xor_with_byte(k0, 0x5c) }
+}
+
+/**
+ * Feeds `data` into an in-progress HMAC-SHA-512 computation — may be called any number of times.
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state after absorbing `data`
+ */
+exp fn hmac_sha512_update(state: HmacSha512, data: []byte): HmacSha512 {
+    HmacSha512 { inner = sha512_update(state.inner, data); outer = state.outer }
+}
+
+/**
+ * Completes an HMAC-SHA-512 computation: hashes `(K0 ⊕ opad) || inner_digest` into the 64-byte tag.
+ *
+ * @param state  the state after every `hmac_sha512_update` call for this message
+ * @return       the 64-byte HMAC-SHA-512 tag
+ */
+exp fn hmac_sha512_finalize(state: HmacSha512): []byte {
+    var inner_digest = sha512_finalize(state.inner)
+    sha512_finalize(sha512_update(sha512_update(sha512_init(), state.outer), inner_digest))
+}
+
+/**
+ * One-shot HMAC-SHA-512: the 64-byte tag authenticating `msg` under `key`.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the complete message to authenticate
+ * @return     the 64-byte HMAC-SHA-512 tag
+ */
+exp fn hmac_sha512_of(key: []byte, msg: []byte): []byte {
+    hmac_sha512_finalize(hmac_sha512_update(hmac_sha512_init(key), msg))
+}
+
+/**
+ * `hmac_sha512_of`, rendered as a lowercase hex string.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the complete message to authenticate
+ * @return     the HMAC-SHA-512 tag of `msg` as 128 lowercase hex characters
+ */
+exp fn hmac_sha512_hex_of(key: []byte, msg: []byte): str {
+    to_hex(hmac_sha512_of(key, msg))
+}
+
+/**
+ * Constant-time HMAC-SHA-512 verification (see `hmac_sha256_verify`).
+ *
+ * @param key  the secret key, any length
+ * @param msg  the message whose authenticity is in question
+ * @param tag  the tag to check against the recomputed one
+ * @return     `true` iff `tag` is the genuine HMAC-SHA-512 tag of `msg` under `key`
+ */
+exp fn hmac_sha512_verify(key: []byte, msg: []byte, tag: []byte): bool {
+    ct_eq(hmac_sha512_of(key, msg), tag)
+}
+
+/**
+ * One-shot HMAC-SHA3-256 (RFC 2104 over FIPS 202): the 32-byte tag authenticating `msg` under
+ * `key`, using the SHA3-256 sponge whose HMAC block size is its 136-byte rate.
+ *
+ * @param key  the secret key, any length (hashed down if longer than the 136-byte block)
+ * @param msg  the complete message to authenticate
+ * @return     the 32-byte HMAC-SHA3-256 tag
+ */
+exp fn hmac_sha3_256_of(key: []byte, msg: []byte): []byte {
+    var k0 = hmac_key0(key, 136, (m: []byte) => sha3_256_of(m))
+    var inner = keccak_finalize(keccak_update(keccak_update(sha3_256_init(), xor_with_byte(k0, 0x36)), msg), 32)
+    keccak_finalize(keccak_update(keccak_update(sha3_256_init(), xor_with_byte(k0, 0x5c)), inner), 32)
+}
+
+/**
+ * `hmac_sha3_256_of`, rendered as a lowercase hex string.
+ *
+ * @param key  the secret key, any length
+ * @param msg  the complete message to authenticate
+ * @return     the HMAC-SHA3-256 tag of `msg` as 64 lowercase hex characters
+ */
+exp fn hmac_sha3_256_hex_of(key: []byte, msg: []byte): str {
+    to_hex(hmac_sha3_256_of(key, msg))
+}
+
+/**
+ * Constant-time HMAC-SHA3-256 verification (see `hmac_sha256_verify`).
+ *
+ * @param key  the secret key, any length
+ * @param msg  the message whose authenticity is in question
+ * @param tag  the tag to check against the recomputed one
+ * @return     `true` iff `tag` is the genuine HMAC-SHA3-256 tag of `msg` under `key`
+ */
+exp fn hmac_sha3_256_verify(key: []byte, msg: []byte, tag: []byte): bool {
+    ct_eq(hmac_sha3_256_of(key, msg), tag)
+}
+
+/**
+ * The precomputed Poly1305 one-time key: the clamped multiplier `r` as five 26-bit limbs, the
+ * four `r1..r4 × 5` reduction terms (exploiting `2^130 ≡ 5 (mod 2^130 − 5)`), and the four
+ * 32-bit little-endian words of the final addend `s` (RFC 8439 §2.5).
+ */
+type Poly1305Ctx = struct {
+    /** the five 26-bit limbs `r0..r4` of the clamped multiplier `r` (key bytes 0..15) */
+    r: []u64
+    /** `r1..r4` each pre-multiplied by 5, the `2^130 ≡ 5` partial-reduction terms */
+    s: []u64
+    /** the four 32-bit little-endian words of the addend `s` (key bytes 16..31) */
+    pad: []u64
+}
+
+/**
+ * Reads a little-endian 32-bit word out of `b` at byte offset `off`, widened to `u64` — the
+ * wire order Poly1305 (and every other little-endian primitive here) reads its input in.
+ *
+ * @param b    the byte slice being read
+ * @param off  the starting byte offset (`off+3` must be in bounds)
+ * @return     the little-endian 32-bit value at `b[off..off+4)`, zero-extended to `u64`
+ */
+fn le_u32_at(b: []byte, off: u64): u64 {
+    (b[off] to u64) | ((b[off + 1] to u64) << 8) | ((b[off + 2] to u64) << 16) | ((b[off + 3] to u64) << 24)
+}
+
+/**
+ * Appends the low 32 bits of `x` to `buf` in little-endian byte order — how the Poly1305 tag's
+ * four output words are serialized.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the value whose low 32 bits are emitted
+ * @return     `buf` with `x`'s four little-endian bytes appended
+ */
+fn push_le_u32(buf: []byte, x: u64): []byte {
+    var b = buf
+    b = teko::list::push(b, (x & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
+    b
+}
+
+/**
+ * Derives the Poly1305 context from a 32-bit little-endian key: clamps `r` (key bytes 0..15) to
+ * the RFC 8439 mask `0x0ffffffc0ffffffc0ffffffc0fffffff` split across the five 26-bit limbs,
+ * precomputes the `× 5` reduction terms, and captures the addend words (key bytes 16..31).
+ *
+ * @param key  the 32-byte one-time key (the caller guarantees the length)
+ * @return     the precomputed `Poly1305Ctx`
+ */
+fn poly1305_ctx(key: []byte): Poly1305Ctx {
+    var r0 = le_u32_at(key, 0) & 0x3ffffff
+    var r1 = (le_u32_at(key, 3) >> 2) & 0x3ffff03
+    var r2 = (le_u32_at(key, 6) >> 4) & 0x3ffc0ff
+    var r3 = (le_u32_at(key, 9) >> 6) & 0x3f03fff
+    var r4 = (le_u32_at(key, 12) >> 8) & 0x00fffff
+    var r: []u64 = teko::list::empty()
+    r = teko::list::push(r, r0)
+    r = teko::list::push(r, r1)
+    r = teko::list::push(r, r2)
+    r = teko::list::push(r, r3)
+    r = teko::list::push(r, r4)
+    var s: []u64 = teko::list::empty()
+    s = teko::list::push(s, r1 * 5)
+    s = teko::list::push(s, r2 * 5)
+    s = teko::list::push(s, r3 * 5)
+    s = teko::list::push(s, r4 * 5)
+    var pad: []u64 = teko::list::empty()
+    pad = teko::list::push(pad, le_u32_at(key, 16))
+    pad = teko::list::push(pad, le_u32_at(key, 20))
+    pad = teko::list::push(pad, le_u32_at(key, 24))
+    pad = teko::list::push(pad, le_u32_at(key, 28))
+    Poly1305Ctx { r = r; s = s; pad = pad }
+}
+
+/**
+ * Absorbs one 16-byte `block` into the Poly1305 accumulator `h` (five 26-bit limbs): adds the
+ * block (with the high `2^128` bit set via `hibit` for a full block, `0` for the padded final
+ * block), multiplies by `r`, and folds the result back mod `2^130 − 5`. Every intermediate fits
+ * a `u64` by the limb bounds, so the modular products never overflow.
+ *
+ * @param h      the accumulator's five 26-bit limbs before this block
+ * @param block  the 16-byte block to absorb
+ * @param hibit  `0x1000000` (`1 << 24`, the `2^128` term) for a full block, `0` for the final pad
+ * @param ctx    the precomputed key context
+ * @return       the accumulator's five 26-bit limbs after absorbing `block`
+ */
+fn poly1305_block(h: []u64, block: []byte, hibit: u64, ctx: Poly1305Ctx): []u64 {
+    var h0 = h[0] + (le_u32_at(block, 0) & 0x3ffffff)
+    var h1 = h[1] + ((le_u32_at(block, 3) >> 2) & 0x3ffffff)
+    var h2 = h[2] + ((le_u32_at(block, 6) >> 4) & 0x3ffffff)
+    var h3 = h[3] + ((le_u32_at(block, 9) >> 6) & 0x3ffffff)
+    var h4 = h[4] + ((le_u32_at(block, 12) >> 8) | hibit)
+    var r0 = ctx.r[0]
+    var r1 = ctx.r[1]
+    var r2 = ctx.r[2]
+    var r3 = ctx.r[3]
+    var r4 = ctx.r[4]
+    var s1 = ctx.s[0]
+    var s2 = ctx.s[1]
+    var s3 = ctx.s[2]
+    var s4 = ctx.s[3]
+    var d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1
+    var d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2
+    var d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3
+    var d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4
+    var d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0
+    var c = d0 >> 26
+    var n0 = d0 & 0x3ffffff
+    d1 = d1 + c
+    c = d1 >> 26
+    var n1 = d1 & 0x3ffffff
+    d2 = d2 + c
+    c = d2 >> 26
+    var n2 = d2 & 0x3ffffff
+    d3 = d3 + c
+    c = d3 >> 26
+    var n3 = d3 & 0x3ffffff
+    d4 = d4 + c
+    c = d4 >> 26
+    var n4 = d4 & 0x3ffffff
+    n0 = n0 + c * 5
+    c = n0 >> 26
+    n0 = n0 & 0x3ffffff
+    n1 = n1 + c
+    var out: []u64 = teko::list::empty()
+    out = teko::list::push(out, n0)
+    out = teko::list::push(out, n1)
+    out = teko::list::push(out, n2)
+    out = teko::list::push(out, n3)
+    out = teko::list::push(out, n4)
+    out
+}
+
+/**
+ * Builds the padded final Poly1305 block: the `msg[off..)` remainder (1..15 bytes) followed by
+ * the `0x01` high-bit marker and zero padding to 16 bytes. This block is absorbed with
+ * `hibit = 0` because the `0x01` byte already supplies the `2^(8·len)` term.
+ *
+ * @param msg  the whole message
+ * @param off  the offset of the remainder (strictly less than `msg.len`)
+ * @return     the 16-byte padded final block
+ */
+fn poly1305_pad_final(msg: []byte, off: u64): []byte {
+    var buf: []byte = teko::list::empty()
+    var i = off
+    loop {
+        if i >= msg.len { break }
+        buf = teko::list::push(buf, msg[i])
+        i++
+    }
+    buf = teko::list::push(buf, 0x01 to byte)
+    loop {
+        if buf.len >= 16 { break }
+        buf = teko::list::push(buf, 0 to byte)
+    }
+    buf
+}
+
+/**
+ * Finalizes the Poly1305 accumulator into the 16-byte tag: fully carries the limbs, does the
+ * constant-time conditional subtraction of `p = 2^130 − 5` (select `h` or `h − p` by a mask, no
+ * data-dependent branch), repacks the 130-bit result into four 32-bit words, adds the addend
+ * `s` mod `2^128`, and serializes the words little-endian.
+ *
+ * @param h    the accumulator's five 26-bit limbs after the last block
+ * @param ctx  the key context supplying the addend `s`
+ * @return     the 16-byte Poly1305 tag
+ */
+fn poly1305_emit(h: []u64, ctx: Poly1305Ctx): []byte {
+    var h0 = h[0]
+    var h1 = h[1]
+    var h2 = h[2]
+    var h3 = h[3]
+    var h4 = h[4]
+    var c = h1 >> 26
+    h1 = h1 & 0x3ffffff
+    h2 = h2 + c
+    c = h2 >> 26
+    h2 = h2 & 0x3ffffff
+    h3 = h3 + c
+    c = h3 >> 26
+    h3 = h3 & 0x3ffffff
+    h4 = h4 + c
+    c = h4 >> 26
+    h4 = h4 & 0x3ffffff
+    h0 = h0 + c * 5
+    c = h0 >> 26
+    h0 = h0 & 0x3ffffff
+    h1 = h1 + c
+    var g0 = h0 + 5
+    c = g0 >> 26
+    g0 = g0 & 0x3ffffff
+    var g1 = h1 + c
+    c = g1 >> 26
+    g1 = g1 & 0x3ffffff
+    var g2 = h2 + c
+    c = g2 >> 26
+    g2 = g2 & 0x3ffffff
+    var g3 = h3 + c
+    c = g3 >> 26
+    g3 = g3 & 0x3ffffff
+    var g4 = h4 + c
+    var use_g = (g4 >> 26) & 1
+    g4 = g4 & 0x3ffffff
+    var mask_g = teko::math::wrapping_sub_u64(0, use_g)
+    var mask_h = ~mask_g
+    h0 = (h0 & mask_h) | (g0 & mask_g)
+    h1 = (h1 & mask_h) | (g1 & mask_g)
+    h2 = (h2 & mask_h) | (g2 & mask_g)
+    h3 = (h3 & mask_h) | (g3 & mask_g)
+    h4 = (h4 & mask_h) | (g4 & mask_g)
+    var t0 = (h0 | (h1 << 26)) & 0xffffffff
+    var t1 = ((h1 >> 6) | (h2 << 20)) & 0xffffffff
+    var t2 = ((h2 >> 12) | (h3 << 14)) & 0xffffffff
+    var t3 = ((h3 >> 18) | (h4 << 8)) & 0xffffffff
+    var f = t0 + ctx.pad[0]
+    var o0 = f & 0xffffffff
+    f = t1 + ctx.pad[1] + (f >> 32)
+    var o1 = f & 0xffffffff
+    f = t2 + ctx.pad[2] + (f >> 32)
+    var o2 = f & 0xffffffff
+    f = t3 + ctx.pad[3] + (f >> 32)
+    var o3 = f & 0xffffffff
+    var out: []byte = teko::list::empty()
+    out = push_le_u32(out, o0)
+    out = push_le_u32(out, o1)
+    out = push_le_u32(out, o2)
+    out = push_le_u32(out, o3)
+    out
+}
+
+/**
+ * One-shot Poly1305 (RFC 8439 §2.5): the 16-byte one-time authenticator tag of `msg` under the
+ * 32-byte one-time `key`. The key MUST be used for exactly one message — reusing it across
+ * messages catastrophically breaks the scheme (M.3 honesty: the caller owns that contract).
+ *
+ * @param key  the 32-byte one-time key (`r` in bytes 0..15, `s` in bytes 16..31)
+ * @param msg  the message to authenticate, any length (including empty)
+ * @return     the 16-byte tag, or a `CryptoError` if `key` is not exactly 32 bytes
+ * @throws     `CryptoError` when `key.len != 32`
+ */
+exp fn poly1305(key: []byte, msg: []byte): []byte | CryptoError {
+    if key.len != 32 { return crypto_error("poly1305: key must be exactly 32 bytes") }
+    var ctx = poly1305_ctx(key)
+    var h: []u64 = teko::list::empty()
+    h = teko::list::push(h, 0)
+    h = teko::list::push(h, 0)
+    h = teko::list::push(h, 0)
+    h = teko::list::push(h, 0)
+    h = teko::list::push(h, 0)
+    var off: u64 = 0
+    loop {
+        if msg.len - off < 16 { break }
+        h = poly1305_block(h, mac_bytes_slice(msg, off, off + 16), 0x1000000, ctx)
+        off = off + 16
+    }
+    if off < msg.len {
+        h = poly1305_block(h, poly1305_pad_final(msg, off), 0, ctx)
+    }
+    poly1305_emit(h, ctx)
+}
+
+/**
+ * `poly1305`, rendered as a lowercase hex string.
+ *
+ * @param key  the 32-byte one-time key
+ * @param msg  the message to authenticate
+ * @return     the 16-byte tag as 32 lowercase hex characters, or a `CryptoError`
+ * @throws     `CryptoError` when `key.len != 32`
+ */
+exp fn poly1305_hex(key: []byte, msg: []byte): str | CryptoError {
+    var tag = match poly1305(key, msg) { []byte as t => t; CryptoError as e => return e }
+    to_hex(tag)
+}
+
+/**
+ * Constant-time Poly1305 verification: recomputes the tag over `msg`/`key` and compares it
+ * against `tag` with `ct_eq`.
+ *
+ * @param key  the 32-byte one-time key
+ * @param msg  the message whose authenticity is in question
+ * @param tag  the tag to check against the recomputed one
+ * @return     `true` iff `tag` is the genuine Poly1305 tag, or a `CryptoError` on a bad key
+ * @throws     `CryptoError` when `key.len != 32`
+ */
+exp fn poly1305_verify(key: []byte, msg: []byte, tag: []byte): bool | CryptoError {
+    var computed = match poly1305(key, msg) { []byte as t => t; CryptoError as e => return e }
+    ct_eq(computed, tag)
+}
+
+/**
+ * The two CMAC subkeys `K1` and `K2` (NIST SP 800-38B §6.1) derived from the block cipher's
+ * encryption of the all-zero block.
+ */
+type CmacSubkeys = struct {
+    /** `K1`, XORed into a complete final block */
+    k1: []byte
+    /** `K2`, XORed into a `10*`-padded incomplete (or empty) final block */
+    k2: []byte
+}
+
+/**
+ * A fresh 16-byte all-zero block — the CMAC/GMAC seed the injected cipher encrypts to derive its
+ * subkeys / hash key.
+ *
+ * @return  16 zero bytes
+ */
+fn zero_block16(): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 16 { break }
+        out = teko::list::push(out, 0 to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * XORs two 16-byte blocks — the CBC chaining and subkey-mixing primitive of CMAC/GMAC.
+ *
+ * @param a  the first 16-byte block
+ * @param b  the second 16-byte block
+ * @return   a fresh 16-byte block `a ⊕ b`
+ */
+fn xor_block(a: []byte, b: []byte): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 16 { break }
+        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Doubles a 16-byte block in GF(2^128) (NIST SP 800-38B §6.1): a left shift by one bit, with a
+ * conditional XOR of the Rb constant `0x87` into the low byte when the high bit was set. The
+ * conditional is masked (`msb * 0x87`), not branched, so it is constant-time in the input.
+ *
+ * @param b  the 16-byte block to double
+ * @return   the fresh 16-byte doubled block
+ */
+fn cmac_double(b: []byte): []byte {
+    var msb = (b[0] to u32) >> 7
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 16 { break }
+        var cur = (b[i] to u32) << 1
+        var nxt = if i + 1 < 16 { (b[i + 1] to u32) >> 7 } else { 0 to u32 }
+        var v = (cur | nxt) & 0xFF
+        if i == 15 { v = v ^ (msb * 0x87) }
+        out = teko::list::push(out, v to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Derives the CMAC subkeys `K1`, `K2` from `l = CIPH_K(0^128)` (NIST SP 800-38B §6.1):
+ * `K1 = dbl(L)`, `K2 = dbl(K1)`. Exposed on its own because it is independently testable against
+ * the NIST worked example without any actual block cipher.
+ *
+ * @param l  the block cipher's 16-byte encryption of the all-zero block
+ * @return   the `K1`/`K2` subkeys
+ */
+exp fn cmac_gen_subkeys(l: []byte): CmacSubkeys {
+    var k1 = cmac_double(l)
+    CmacSubkeys { k1 = k1; k2 = cmac_double(k1) }
+}
+
+/**
+ * The number of complete blocks CMAC feeds through plain CBC-MAC before the specially-treated
+ * final block: `ceil(len/16) − 1` for a non-empty message, `0` for the empty message.
+ *
+ * @param msg  the message
+ * @return     the count of leading full blocks preceding the final block
+ */
+fn cmac_prefix_block_count(msg: []byte): u64 {
+    if msg.len == 0 { return 0 }
+    (msg.len + 15) / 16 - 1
+}
+
+/**
+ * Applies the `10*` padding to an incomplete (0..15-byte) final CMAC block: appends `0x80` then
+ * zero bytes to 16.
+ *
+ * @param chunk  the 0..15-byte remainder
+ * @return       the 16-byte padded block
+ */
+fn cmac_pad10(chunk: []byte): []byte {
+    var out = mac_bytes_slice(chunk, 0, chunk.len)
+    out = teko::list::push(out, 0x80 to byte)
+    loop {
+        if out.len >= 16 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    out
+}
+
+/**
+ * Builds the final CMAC block (NIST SP 800-38B §6.2): a complete last block is XORed with `K1`;
+ * an incomplete or empty last block is `10*`-padded and XORed with `K2`.
+ *
+ * @param msg  the whole message
+ * @param sub  the CMAC subkeys
+ * @return     the 16-byte final block, ready to be XORed with the running CBC state
+ */
+fn cmac_last_block(msg: []byte, sub: CmacSubkeys): []byte {
+    if msg.len == 0 { return xor_block(cmac_pad10(teko::list::empty()), sub.k2) }
+    var complete = msg.len % 16 == 0
+    var start = if complete { msg.len - 16 } else { (msg.len / 16) * 16 }
+    var chunk = mac_bytes_slice(msg, start, msg.len)
+    if complete { return xor_block(chunk, sub.k1) }
+    xor_block(cmac_pad10(chunk), sub.k2)
+}
+
+/**
+ * CMAC (NIST SP 800-38B) parameterized on an injected 128-bit block cipher — the AES SEAM. AES is
+ * the Lane-4 `teko::crypto::cipher` primitive and does not exist yet, so `encrypt_block` (a
+ * single-block ECB encryption under an already-bound key) is supplied by the caller. When AES
+ * lands this becomes `cmac_with_cipher((b) => aes_encrypt_block(key, b), msg)`.
+ *
+ * @param encrypt_block  encrypts one 16-byte block under the (already-keyed) cipher
+ * @param msg            the message to authenticate, any length (including empty)
+ * @return               the 16-byte CMAC tag
+ */
+exp fn cmac_with_cipher(encrypt_block: func<[]byte, []byte>, msg: []byte): []byte {
+    var sub = cmac_gen_subkeys(encrypt_block(zero_block16()))
+    var last = cmac_last_block(msg, sub)
+    var prefix = cmac_prefix_block_count(msg)
+    var c = zero_block16()
+    var i: u64 = 0
+    loop {
+        if i >= prefix { break }
+        c = encrypt_block(xor_block(c, mac_bytes_slice(msg, i * 16, i * 16 + 16)))
+        i++
+    }
+    encrypt_block(xor_block(c, last))
+}
+
+/**
+ * A 128-bit value as two big-endian 64-bit halves — the GF(2^128) element GHASH multiplies over.
+ */
+type GfBlock = struct {
+    /** the most-significant 64 bits (bits 127..64) */
+    hi: u64
+    /** the least-significant 64 bits (bits 63..0) */
+    lo: u64
+}
+
+/**
+ * Reads a big-endian 64-bit word out of `b` at byte offset `off` — GHASH's block byte order.
+ *
+ * @param b    the byte slice being read
+ * @param off  the starting byte offset (`off+7` must be in bounds)
+ * @return     the big-endian 64-bit value at `b[off..off+8)`
+ */
+fn mac_be_u64_at(b: []byte, off: u64): u64 {
+    var acc: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        acc = (acc << 8) | (b[off + i] to u64)
+        i++
+    }
+    acc
+}
+
+/**
+ * Appends `x` to `buf` in big-endian byte order (8 bytes) — how a `GfBlock` half is serialized.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the 64-bit value to emit big-endian
+ * @return     `buf` with `x`'s eight big-endian bytes appended
+ */
+fn push_be_u64_mac(buf: []byte, x: u64): []byte {
+    var b = buf
+    var i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        b = teko::list::push(b, ((x >> ((7 - i) * 8)) & 0xFF) to byte)
+        i++
+    }
+    b
+}
+
+/**
+ * Multiplies two GF(2^128) elements under the GCM reduction polynomial (NIST SP 800-38D §6.3):
+ * the right-shift bit algorithm with reduction constant `R = 0xe1||0^120`. Constant-time — both
+ * the accumulate and the reduce are mask-selected (no data-dependent branch on the secret `H`).
+ *
+ * @param x  the first field element (typically the running hash XOR the next block)
+ * @param y  the second field element (typically the hash key `H`)
+ * @return   the product `x · y` in GF(2^128)
+ */
+fn gf_mul(x: GfBlock, y: GfBlock): GfBlock {
+    var z_hi: u64 = 0
+    var z_lo: u64 = 0
+    var v_hi = y.hi
+    var v_lo = y.lo
+    var i: u64 = 0
+    loop {
+        if i >= 128 { break }
+        var xbit = if i < 64 { (x.hi >> (63 - i)) & 1 } else { (x.lo >> (127 - i)) & 1 }
+        var mask_x = teko::math::wrapping_sub_u64(0, xbit)
+        z_hi = z_hi ^ (v_hi & mask_x)
+        z_lo = z_lo ^ (v_lo & mask_x)
+        var lsb = v_lo & 1
+        var new_hi = v_hi >> 1
+        var new_lo = (v_lo >> 1) | ((v_hi & 1) << 63)
+        var mask_lsb = teko::math::wrapping_sub_u64(0, lsb)
+        new_hi = new_hi ^ (0xe100000000000000 & mask_lsb)
+        v_hi = new_hi
+        v_lo = new_lo
+        i++
+    }
+    GfBlock { hi = z_hi; lo = z_lo }
+}
+
+/**
+ * Reads the 16-byte block at `off`, zero-padding on the right when the data ends inside it, as a
+ * `GfBlock` — how GHASH consumes an unaligned final block.
+ *
+ * @param data  the whole input
+ * @param off   the block's starting offset
+ * @return      the (possibly zero-padded) 16-byte block as a `GfBlock`
+ */
+fn ghash_block_at(data: []byte, off: u64): GfBlock {
+    var padded: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 16 { break }
+        var v = if off + i < data.len { data[off + i] } else { 0 to byte }
+        padded = teko::list::push(padded, v)
+        i++
+    }
+    GfBlock { hi = mac_be_u64_at(padded, 0); lo = mac_be_u64_at(padded, 8) }
+}
+
+/**
+ * GHASH (NIST SP 800-38D §6.4): the universal hash `Y_i = (Y_{i-1} ⊕ X_i) · H` over the
+ * 16-byte blocks of `data` (the final short block zero-padded), the pure GF(2^128) core of GMAC.
+ * The caller supplies the full GHASH input (AAD ‖ padding ‖ length block); this routine only does
+ * the block chaining, so it is independently GCM-vector-testable given `H`.
+ *
+ * @param h     the 16-byte hash subkey `H = CIPH_K(0^128)`
+ * @param data  the pre-assembled GHASH input, any length
+ * @return      the 16-byte GHASH value, or a `CryptoError` if `H` is not 16 bytes
+ * @throws      `CryptoError` when `h.len != 16`
+ */
+exp fn ghash(h: []byte, data: []byte): []byte | CryptoError {
+    if h.len != 16 { return crypto_error("ghash: H must be exactly 16 bytes") }
+    var hb = GfBlock { hi = mac_be_u64_at(h, 0); lo = mac_be_u64_at(h, 8) }
+    var y = GfBlock { hi = 0; lo = 0 }
+    var off: u64 = 0
+    loop {
+        if off >= data.len { break }
+        var blk = ghash_block_at(data, off)
+        y = gf_mul(GfBlock { hi = y.hi ^ blk.hi; lo = y.lo ^ blk.lo }, hb)
+        off = off + 16
+    }
+    push_be_u64_mac(push_be_u64_mac(teko::list::empty(), y.hi), y.lo)
+}
+
+/**
+ * Assembles the GHASH input for GMAC over authenticated-data-only (empty ciphertext): the AAD
+ * zero-padded to a 16-byte boundary, then the length block `[len(AAD)]_64 ‖ [0]_64` in bits.
+ *
+ * @param aad  the additional authenticated data, any length
+ * @return     the GHASH input bytes
+ */
+fn gmac_build_input(aad: []byte): []byte {
+    var out = mac_bytes_slice(aad, 0, aad.len)
+    loop {
+        if out.len % 16 == 0 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    out = push_be_u64_mac(out, aad.len * 8)
+    out = push_be_u64_mac(out, 0)
+    out
+}
+
+/**
+ * The GMAC pre-counter block `J0` for a 96-bit IV (NIST SP 800-38D §7.1): `IV ‖ 0^31 ‖ 1`, i.e.
+ * the 12 IV bytes followed by `0x00000001`.
+ *
+ * @param iv  the 12-byte (96-bit) initialization vector
+ * @return    the 16-byte `J0` block
+ */
+fn gmac_j0(iv: []byte): []byte {
+    var out = mac_bytes_slice(iv, 0, iv.len)
+    out = teko::list::push(out, 0 to byte)
+    out = teko::list::push(out, 0 to byte)
+    out = teko::list::push(out, 0 to byte)
+    out = teko::list::push(out, 1 to byte)
+    out
+}
+
+/**
+ * GMAC (NIST SP 800-38D) parameterized on an injected 128-bit block cipher — the AES SEAM, the
+ * GCM authentication tag over authenticated data with no ciphertext. Like `cmac_with_cipher`,
+ * `encrypt_block` is supplied by the caller because AES (Lane 4) does not exist yet; when it
+ * lands this becomes `gmac_with_cipher((b) => aes_encrypt_block(key, b), iv, aad)`. The IV is the
+ * common 96-bit form (`J0 = IV ‖ 0^31 ‖ 1`).
+ *
+ * @param encrypt_block  encrypts one 16-byte block under the (already-keyed) cipher
+ * @param iv             the 12-byte (96-bit) initialization vector
+ * @param aad            the additional authenticated data, any length
+ * @return               the 16-byte GMAC tag, or a `CryptoError` on a bad IV / hash key
+ * @throws               `CryptoError` when `iv.len != 12`
+ */
+exp fn gmac_with_cipher(encrypt_block: func<[]byte, []byte>, iv: []byte, aad: []byte): []byte | CryptoError {
+    if iv.len != 12 { return crypto_error("gmac_with_cipher: IV must be exactly 12 bytes (96-bit)") }
+    var h = encrypt_block(zero_block16())
+    var s = match ghash(h, gmac_build_input(aad)) { []byte as x => x; CryptoError as e => return e }
+    xor_block(s, encrypt_block(gmac_j0(iv)))
+}
