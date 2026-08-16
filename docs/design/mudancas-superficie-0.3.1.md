@@ -1220,6 +1220,18 @@ TDES ECB `fbe62b68…`, CBC + roundtrip — todos byte-exato vs pycryptodome 3.2
 **🏁 STDLIB "PRONTA-AGORA" COMPLETA:** crypto (core/pk/password/3des) · encoding (15 fmt) · sort · bigint · +
 o bug de compilador #4 corrigido. **Próxima fase = GENÉRICOS** (compiler-touching; impl dos crumbs desenhados).
 
+**▶️ FASE GENÉRICOS ABERTA — 9-ops keystone despachado (branch `feat/9ops-keystone`).** Scout mapeou o terreno
+(tudo design-ahead, 0 blockers externos — §9/§9A/#254 aterrissados): (1) **9-ops** (8 crumbs,
+`plano-9ops-…-0.3.1.md`) — operador em struct/class/interface + dispatch genérico `==`/`<` sobre `T: IEq/IOrd`,
+reusa #254+monomorph sem maquinaria nova; é a RAIZ que destrava tudo a jusante. (2) **generic-stack-completion**
+(5 gaps residuais de classe genérica, `generic-stack-completion.md`, ordem `#3→#1→#4+#5‖#2`, #1=dispatch de
+trait estrutural sobre `K: Hashable`, o flagship). (3) **collections-generics-fase1b** (`Dictionary<K:IEq&IHash,V>`,
+`HashSet`, `SortedSet`, `PriorityQueue`, `SortedDictionary` — `collections-generics-fase1b-crumbs.md`, GATED no
+reseed do 9-ops, stdlib pura). Hoje: `List<T>` shipa; `Map<V>` str-keyed com 3 workarounds (= gaps #1/#2/#3 do
+generic-stack). Colisões-irmãs do #4 (`Base__g__<arg>`, `TK_E_<E>_<M>`) são latentes mas NENHUM crumb de
+genéricos as exercita — sem fix antes. Implementer entrega crumbs 1-7 (parser→dispatch→corpus IEq/IOrd→fixtures);
+o coordenador faz o crumb 8 (fixpoint gen2==gen3 + reseed) no drain, padrão compiler-touching.
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
