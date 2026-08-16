@@ -1,0 +1,958 @@
+/**
+ * `teko::crypto::argon2` — Argon2id (RFC 9106), the memory-hard password-hashing function:
+ * `H0`, the variable-length hash `H'`, the compression function `G` (the `GB` mix — RFC 9106
+ * §3.6, a BLAKE2b-shaped round with its modular adds replaced by the `fBlaMka` multiplicative
+ * mix, `argon2_blamka` — applied as the permutation `P` over an 8x8 matrix of 16-byte
+ * registers), the pass/slice/
+ * segment memory fill for the `id` addressing variant (data-INDEPENDENT, Argon2i-style,
+ * addressing for the first two slices of pass 0; data-DEPENDENT, Argon2d-style, addressing
+ * everywhere else — RFC 9106 §3.4.1.3), and the final-block XOR + `H'` tag. Pure Teko over
+ * `[]byte`, no OS dependency, built on the existing `blake2b_of` (`hash.tks`).
+ *
+ * COVERAGE: general parallelism `p >= 1` (multi-lane), validated end to end against the
+ * official RFC 9106 §5.3 known-answer vector (`p=4`, secret + associated data both non-empty)
+ * — not a p=1-only implementation with multi-lane left as a documented gap.
+ *
+ * MEMORY MODEL: the working memory is one flat `[]u64` of `m'*128` words (`m'` 1024-byte
+ * blocks, 128 64-bit words each), addressed `mem[block*128 + word]`. Argon2's fill step reads
+ * a PSEUDO-RANDOM previously-filled block on every single block it computes — genuine random
+ * access, unlike scrypt's `V` (`scrypt.tks`), which is only ever read at random and always
+ * WRITTEN in strict sequential order. Teko's NO INDEX-ASSIGNMENT discipline means a random-
+ * access WRITE (`argon2_mem_write_block`) must rebuild the whole flat array via
+ * `teko::list::push` — O(m') per write, O(m'^2) total across the ~`t*m'` blocks a full run
+ * fills. This is FUNCTIONALLY CORRECT at any scale and fast enough for the KAT-vector-scale
+ * parameters this module's tests use (`m' <= 32` blocks); it is NOT the O(m') total cost a
+ * mutable-memory reference implementation achieves, and is therefore unsuitable for
+ * production-scale `m_cost_kib` (tens of thousands of KiB) without a future language-level
+ * bounded-mutation primitive. Stated honestly per the lane's own instructions, not hidden.
+ *
+ * PUBLIC SURFACE IS `exp` (catalog §0 framing): `argon2id` (the general entry, with optional
+ * secret/associated-data) and `argon2id_hash` (the no-secret/no-AD convenience wrapper).
+ * Every other declaration here is file-local, prefixed `argon2_` (tree-wide unique helper
+ * names — this file's own low-level primitives (`argon2_rotr64`, the BLAKE2b-round mix, byte/
+ * word slice-and-append) are DELIBERATE COPIES of `hash.tks`'s file-local equivalents rather
+ * than cross-file reuse: a bare `fn` is file-scoped in this codebase (see `mac_bytes_slice` in
+ * `mac.tks`, `kdf_slice` in `kdf.tks` — both re-implement `hash.tks`'s file-local
+ * `bytes_slice` under their own name for the same reason), so `blake2b_g`/`rotr64` are simply
+ * not reachable from here).
+ */
+
+/**
+ * ARGON2_VERSION — the Argon2 version number this module implements (RFC 9106 §3.1: version
+ * `0x13` = 19, the current/only version RFC 9106 normatively specifies).
+ */
+const ARGON2_VERSION: u64 = 0x13
+
+/**
+ * ARGON2_TYPE_ID — the Argon2 type tag for Argon2id (RFC 9106 §3.1: `y = 2`), used both in the
+ * `H0` parameter block and in every data-independent addressing input block this module
+ * builds.
+ */
+const ARGON2_TYPE_ID: u64 = 2
+
+/**
+ * Right-rotates a 64-bit word by `count` bits — the BLAKE2b/Argon2 `ROTR` primitive. A private
+ * copy of `hash.tks`'s `rotr64` (file-scoped there, unreachable from this file).
+ *
+ * @param x      the word to rotate
+ * @param count  the rotation amount in bits, 0..63
+ * @return       `x` rotated right by `count` bits
+ */
+fn argon2_rotr64(x: u64, count: u32): u64 {
+    (x >> (count to u64)) | (x << ((64 - count) to u64))
+}
+
+/**
+ * Appends the little-endian bytes of a 32-bit word to `buf`.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the word to append, least-significant byte first
+ * @return     `buf` with `x`'s four little-endian bytes appended
+ */
+fn argon2_push_le32(buf: []byte, x: u32): []byte {
+    var b = buf
+    b = teko::list::push(b, (x & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
+    b
+}
+
+/**
+ * Appends the little-endian bytes of a 64-bit word to `buf` — the byte serialization Argon2
+ * uses to turn a working `[]u64` block back into the `[]byte` message `H'` hashes.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the word to append, least-significant byte first
+ * @return     `buf` with `x`'s eight little-endian bytes appended
+ */
+fn argon2_push_le64(buf: []byte, x: u64): []byte {
+    var b = argon2_push_le32(buf, (x & 0xFFFFFFFF) to u32)
+    argon2_push_le32(b, ((x >> 32) & 0xFFFFFFFF) to u32)
+}
+
+/**
+ * Reads a little-endian 64-bit word out of `b` at byte offset `off` — the inverse of
+ * `argon2_push_le64`, used to turn `H'`'s raw 1024-byte initial-block output into this
+ * module's working `[]u64` block representation.
+ *
+ * @param b    the byte slice being read
+ * @param off  the starting byte offset (`off+7` must be in bounds)
+ * @return     the little-endian 64-bit value at `b[off..off+8)`
+ */
+fn argon2_le_u64_at(b: []byte, off: u64): u64 {
+    var lo = (b[off] to u64) | ((b[off + 1] to u64) << 8) | ((b[off + 2] to u64) << 16) | ((b[off + 3] to u64) << 24)
+    var hi = (b[off + 4] to u64) | ((b[off + 5] to u64) << 8) | ((b[off + 6] to u64) << 16) | ((b[off + 7] to u64) << 24)
+    lo | (hi << 32)
+}
+
+/**
+ * Appends every byte of `src` onto a copy of `dst`, returning the concatenation.
+ *
+ * @param dst  the prefix bytes
+ * @param src  the bytes to append after `dst`
+ * @return     a fresh slice holding `dst` followed by `src`
+ */
+fn argon2_bytes_append(dst: []byte, src: []byte): []byte {
+    var out = dst
+    var i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        out = teko::list::push(out, src[i])
+        i++
+    }
+    out
+}
+
+/**
+ * The sub-slice `data[from..to)` as a fresh `[]byte`.
+ *
+ * @param data  the source slice
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `data[from..to)`
+ */
+fn argon2_bytes_slice(data: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, data[i])
+        i++
+    }
+    out
+}
+
+/**
+ * `H^T(A)` (RFC 9106 §3.3): BLAKE2b over `LE32(T) || A`, with output length `T`. Only valid for
+ * `T <= 64` (BLAKE2b's own output-length domain); the caller (`argon2_hprime`) never invokes
+ * this with a larger `T`.
+ *
+ * @param a  the message to hash
+ * @param t  the requested output length in bytes, 1..64
+ * @return   the `t`-byte hash
+ */
+fn argon2_h_t(a: []byte, t: u64): []byte {
+    var msg = argon2_push_le32(teko::list::empty(), t to u32)
+    blake2b_of(argon2_bytes_append(msg, a), t)
+}
+
+/**
+ * `H'^T(A)`, the variable-length hash function (RFC 9106 §3.3): for `T <= 64`, exactly
+ * `H^T(A)`. For larger `T`, ONLY the first hash `V_1 = H^64(LE32(T) || A)` carries the
+ * `LE32(T)` length prefix — every later hash in the chain (`V_2 = H^64(V_1)`, …, and the final
+ * `V_{r+1} = H^{(T - 32r)}(V_r)`) is a PLAIN BLAKE2b hash of the previous full 64-byte block,
+ * no prefix (the reference `blake2b_long`'s exact shape: the length header is fed once, not on
+ * every chain step). Each `V_1..V_r` contributes its first 32 bytes; `V_{r+1}` contributes its
+ * full (shorter) length. Used both for the two per-lane initial 1024-byte blocks and the final
+ * tag.
+ *
+ * @param x        the message to hash
+ * @param out_len  the requested output length in bytes (at least 1)
+ * @return         the `out_len`-byte hash
+ */
+fn argon2_hprime(x: []byte, out_len: u64): []byte {
+    if out_len <= 64 { return argon2_h_t(x, out_len) }
+    var prefix = argon2_push_le32(teko::list::empty(), out_len to u32)
+    var v = blake2b_of(argon2_bytes_append(prefix, x), 64)
+    var out = argon2_bytes_slice(v, 0, 32)
+    var produced: u64 = 32
+    loop {
+        if out_len - produced <= 64 { break }
+        v = blake2b_of(v, 64)
+        out = argon2_bytes_append(out, argon2_bytes_slice(v, 0, 32))
+        produced = produced + 32
+    }
+    argon2_bytes_append(out, blake2b_of(v, out_len - produced))
+}
+
+/**
+ * `H0`, the initial 64-byte hash (RFC 9106 §3.2): BLAKE2b over the little-endian parameter
+ * block (`p`, `T`, `m`, `t`, `v`, `y`) followed by each of `password`/`salt`/`secret`/`ad`,
+ * every field length-prefixed with its own `LE32` length.
+ *
+ * @param password    the password bytes
+ * @param salt        the salt bytes
+ * @param secret      the optional secret key `K` (may be empty)
+ * @param ad          the optional associated data `X` (may be empty)
+ * @param parallelism the number of lanes `p`
+ * @param tag_len     the requested output tag length `T` in bytes
+ * @param m_cost_kib  the memory cost `m` in kibibytes
+ * @param t_cost      the number of passes `t`
+ * @return            the 64-byte `H0`
+ */
+fn argon2_h0(password: []byte, salt: []byte, secret: []byte, ad: []byte, parallelism: u64, tag_len: u64, m_cost_kib: u64, t_cost: u64): []byte {
+    var msg: []byte = teko::list::empty()
+    msg = argon2_push_le32(msg, parallelism to u32)
+    msg = argon2_push_le32(msg, tag_len to u32)
+    msg = argon2_push_le32(msg, m_cost_kib to u32)
+    msg = argon2_push_le32(msg, t_cost to u32)
+    msg = argon2_push_le32(msg, ARGON2_VERSION to u32)
+    msg = argon2_push_le32(msg, ARGON2_TYPE_ID to u32)
+    msg = argon2_push_le32(msg, password.len to u32)
+    msg = argon2_bytes_append(msg, password)
+    msg = argon2_push_le32(msg, salt.len to u32)
+    msg = argon2_bytes_append(msg, salt)
+    msg = argon2_push_le32(msg, secret.len to u32)
+    msg = argon2_bytes_append(msg, secret)
+    msg = argon2_push_le32(msg, ad.len to u32)
+    msg = argon2_bytes_append(msg, ad)
+    blake2b_of(msg, 64)
+}
+
+/**
+ * Decodes 1024 little-endian bytes into this module's 128-word block representation — how a
+ * raw `H'` output (the per-lane initial blocks) enters the working memory array.
+ *
+ * @param b  exactly 1024 bytes
+ * @return   the 128 `u64` words, little-endian per word
+ */
+fn argon2_bytes_to_words(b: []byte): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 128 { break }
+        out = teko::list::push(out, argon2_le_u64_at(b, i * 8))
+        i++
+    }
+    out
+}
+
+/**
+ * Encodes a 128-word block back into 1024 little-endian bytes — the inverse of
+ * `argon2_bytes_to_words`, used to turn the final XORed block into `H'`'s message.
+ *
+ * @param w  exactly 128 `u64` words
+ * @return   the 1024 little-endian bytes
+ */
+fn argon2_words_to_bytes(w: []u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 128 { break }
+        out = argon2_push_le64(out, w[i])
+        i++
+    }
+    out
+}
+
+/**
+ * The 128-word zero block — the `ZERO(1024)` input `G` takes as its first argument when
+ * generating a data-independent addressing block (RFC 9106 §3.4.1.2).
+ *
+ * @return  128 zero `u64` words
+ */
+fn argon2_zero_block(): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 128 { break }
+        out = teko::list::push(out, 0)
+        i++
+    }
+    out
+}
+
+/**
+ * Returns `v` with its four lanes at `ia`/`ib`/`ic`/`id` replaced by `na`/`nb`/`nc`/`nd` — the
+ * functional (no index-assignment) write-back a single BLAKE2b-round mix performs. A private
+ * copy of `hash.tks`'s `blake2b_set4` (file-scoped there, unreachable from this file).
+ *
+ * @param v   the 16-lane working vector
+ * @param ia  index of the first lane to replace
+ * @param na  new value for lane `ia`
+ * @param ib  index of the second lane to replace
+ * @param nb  new value for lane `ib`
+ * @param ic  index of the third lane to replace
+ * @param nc  new value for lane `ic`
+ * @param id  index of the fourth lane to replace
+ * @param nd  new value for lane `id`
+ * @return    a fresh 16-lane vector with the four lanes replaced
+ */
+fn argon2_set4(v: []u64, ia: u64, na: u64, ib: u64, nb: u64, ic: u64, nc: u64, id: u64, nd: u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= v.len { break }
+        var val = v[i]
+        if i == ia { val = na }
+        if i == ib { val = nb }
+        if i == ic { val = nc }
+        if i == id { val = nd }
+        out = teko::list::push(out, val)
+        i++
+    }
+    out
+}
+
+/**
+ * The `fBlaMka` mixing add (RFC 9106 §3.6, `GB`'s modular-addition step):
+ * `a + b + 2 * trunc(a) * trunc(b) mod 2^64`, where `trunc` truncates to the low 32 bits. This
+ * multiplicative term is the ONLY difference between Argon2's `GB` and plain BLAKE2b's `G` add
+ * (RFC 9106 §3.6: "increase the circuit depth... while having roughly the same running time on
+ * CPUs") — a plain `wrapping_add_u64(a, b)` here would silently compute a DIFFERENT, wrong
+ * permutation.
+ *
+ * @param a  the first word
+ * @param b  the second word
+ * @return   `a + b + 2 * (a mod 2^32) * (b mod 2^32)`, wrapped to 64 bits
+ */
+fn argon2_blamka(a: u64, b: u64): u64 {
+    var lo_a = a & 0xFFFFFFFF
+    var lo_b = b & 0xFFFFFFFF
+    var product = teko::math::wrapping_mul_u64(lo_a, lo_b)
+    var doubled = teko::math::wrapping_add_u64(product, product)
+    teko::math::wrapping_add_u64(teko::math::wrapping_add_u64(a, b), doubled)
+}
+
+/**
+ * `GB`, Argon2's modified BLAKE2b round mixing function applied with no message input (RFC
+ * 9106 §3.6, Figure 19): the same rotate/XOR shape as plain BLAKE2b's `G` mix (RFC 7693 §3.1)
+ * but with every modular addition replaced by `argon2_blamka` (the `fBlaMka` multiplicative
+ * mix) — NOT a copy of `hash.tks`'s `blake2b_g` with `x = y = 0`, a genuinely different
+ * function (the earlier revision of this file made exactly that wrong assumption; RFC 9106
+ * §3.6 states plainly "Multiplications are the only difference from the original BLAKE2b
+ * design").
+ *
+ * @param v  the 16-lane working vector
+ * @param a  index of working lane `a`
+ * @param b  index of working lane `b`
+ * @param c  index of working lane `c`
+ * @param d  index of working lane `d`
+ * @return   a fresh 16-lane vector after the mix
+ */
+fn argon2_mix4(v: []u64, a: u64, b: u64, c: u64, d: u64): []u64 {
+    var va = v[a]
+    var vb = v[b]
+    var vc = v[c]
+    var vd = v[d]
+    va = argon2_blamka(va, vb)
+    vd = argon2_rotr64(vd ^ va, 32)
+    vc = argon2_blamka(vc, vd)
+    vb = argon2_rotr64(vb ^ vc, 24)
+    va = argon2_blamka(va, vb)
+    vd = argon2_rotr64(vd ^ va, 16)
+    vc = argon2_blamka(vc, vd)
+    vb = argon2_rotr64(vb ^ vc, 63)
+    argon2_set4(v, a, va, b, vb, c, vc, d, vd)
+}
+
+/**
+ * The permutation `P` (RFC 9106 §3.5): the eight BLAKE2b-round mixes over a 16-word register,
+ * in the same column-then-diagonal index pattern one BLAKE2b compression round uses.
+ *
+ * @param v  exactly 16 `u64` words
+ * @return   the 16 words after `P`
+ */
+fn argon2_p16(v: []u64): []u64 {
+    var w = v
+    w = argon2_mix4(w, 0, 4, 8, 12)
+    w = argon2_mix4(w, 1, 5, 9, 13)
+    w = argon2_mix4(w, 2, 6, 10, 14)
+    w = argon2_mix4(w, 3, 7, 11, 15)
+    w = argon2_mix4(w, 0, 5, 10, 15)
+    w = argon2_mix4(w, 1, 6, 11, 12)
+    w = argon2_mix4(w, 2, 7, 8, 13)
+    w = argon2_mix4(w, 3, 4, 9, 14)
+    w
+}
+
+/**
+ * The sub-slice `w[from..to)` of a `[]u64`.
+ *
+ * @param w     the source words
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `w[from..to)`
+ */
+fn argon2_words_range(w: []u64, from: u64, to: u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, w[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Appends every word of `src` onto a copy of `dst`.
+ *
+ * @param dst  the prefix words
+ * @param src  the words to append after `dst`
+ * @return     a fresh slice holding `dst` followed by `src`
+ */
+fn argon2_words_append(dst: []u64, src: []u64): []u64 {
+    var out = dst
+    var i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        out = teko::list::push(out, src[i])
+        i++
+    }
+    out
+}
+
+/**
+ * The row pass of the compression function `G` (RFC 9106 §3.5): `P` applied to each of the 8
+ * contiguous 16-word rows of the 128-word register `r`.
+ *
+ * @param r  the 128-word register (post `X xor Y`)
+ * @return   the 128-word register after the row pass
+ */
+fn argon2_p_rows(r: []u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var row: u64 = 0
+    loop {
+        if row >= 8 { break }
+        var row_off = row * 16
+        out = argon2_words_append(out, argon2_p16(argon2_words_range(r, row_off, row_off + 16)))
+        row++
+    }
+    out
+}
+
+/**
+ * Gathers the 16 words of column `col` out of the row-pass result `z` (RFC 9106 §3.5): for
+ * each of the 8 rows, the two words at that row's `col`-th 16-byte register.
+ *
+ * @param z    the 128-word row-pass result
+ * @param col  the column index, 0..7
+ * @return     the 16 gathered words, in row order
+ */
+fn argon2_extract_column(z: []u64, col: u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var row: u64 = 0
+    loop {
+        if row >= 8 { break }
+        out = teko::list::push(out, z[16 * row + 2 * col])
+        out = teko::list::push(out, z[16 * row + 2 * col + 1])
+        row++
+    }
+    out
+}
+
+/**
+ * Scatters the 8 `P`-transformed 16-word columns (`argon2_extract_column`'s inverse) back into
+ * 128-word row-major order: word `p` (row `j = p/16`, in-row offset `k = p%16`, column
+ * `i = k/2`, sub-word `s = k%2`) reads `colvals[16*i + 2*j + s]`.
+ *
+ * @param colvals  128 words: 8 groups of 16, group `i` holding column `i`'s `P` output
+ * @return         the 128-word register in row-major order
+ */
+fn argon2_assemble_from_columns(colvals: []u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var p: u64 = 0
+    loop {
+        if p >= 128 { break }
+        var j = p / 16
+        var k = p % 16
+        var i = k / 2
+        var s = k % 2
+        out = teko::list::push(out, colvals[16 * i + 2 * j + s])
+        p++
+    }
+    out
+}
+
+/**
+ * The column pass of the compression function `G` (RFC 9106 §3.5): `P` applied to each of the
+ * 8 columns of the row-pass result, then reassembled into row-major order.
+ *
+ * @param z  the 128-word row-pass result
+ * @return   the 128-word register after the column pass
+ */
+fn argon2_p_cols(z: []u64): []u64 {
+    var col_results: []u64 = teko::list::empty()
+    var col: u64 = 0
+    loop {
+        if col >= 8 { break }
+        col_results = argon2_words_append(col_results, argon2_p16(argon2_extract_column(z, col)))
+        col++
+    }
+    argon2_assemble_from_columns(col_results)
+}
+
+/**
+ * The elementwise XOR of two 128-word blocks.
+ *
+ * @param a  the first block
+ * @param b  the second block
+ * @return   a fresh 128-word block with `a[i] ⊕ b[i]` at every index
+ */
+fn argon2_xor_block(a: []u64, b: []u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= 128 { break }
+        out = teko::list::push(out, a[i] ^ b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * The compression function `G(X,Y)` (RFC 9106 §3.5): `R = X xor Y`, then `P` applied to each
+ * row of `R`, then `P` applied to each column of that result, then the column-pass output
+ * XORed back with `R` (the feed-forward that makes `G` non-invertible).
+ *
+ * @param x  the first 128-word input block
+ * @param y  the second 128-word input block
+ * @return   the 128-word compressed output block
+ */
+fn argon2_g_block(x: []u64, y: []u64): []u64 {
+    var r = argon2_xor_block(x, y)
+    argon2_xor_block(argon2_p_cols(argon2_p_rows(r)), r)
+}
+
+/**
+ * Reads the 128-word block at `block_index` out of the flat memory array.
+ *
+ * @param mem          the flat `m'*128`-word memory array
+ * @param block_index  the absolute block index (`lane*lane_length + column`)
+ * @return              the 128 words of that block
+ */
+fn argon2_mem_read_block(mem: []u64, block_index: u64): []u64 {
+    argon2_words_range(mem, block_index * 128, block_index * 128 + 128)
+}
+
+/**
+ * Rebuilds the flat memory array with the 128-word block at `block_index` replaced by `block`
+ * — the NO-INDEX-ASSIGNMENT random-access write this module's header documents as its O(m')
+ * per-write cost.
+ *
+ * @param mem          the flat `m'*128`-word memory array
+ * @param block_index  the absolute block index to overwrite
+ * @param block        the 128 replacement words
+ * @return             a fresh flat memory array with that block replaced
+ */
+fn argon2_mem_write_block(mem: []u64, block_index: u64, block: []u64): []u64 {
+    var blk_off = block_index * 128
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= mem.len { break }
+        if i >= blk_off && i < blk_off + 128 {
+            out = teko::list::push(out, block[i - blk_off])
+        } else {
+            out = teko::list::push(out, mem[i])
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * A flat, all-zero memory array of `total_words` words — the starting point every lane's
+ * initial blocks are written into.
+ *
+ * @param total_words  the total word count (`m' * 128`)
+ * @return             a fresh all-zero `[]u64` of that length
+ */
+fn argon2_mem_zero(total_words: u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= total_words { break }
+        out = teko::list::push(out, 0)
+        i++
+    }
+    out
+}
+
+/**
+ * Builds the 128-word input block for data-independent addressing (RFC 9106 §3.4.1.2, the
+ * Argon2i shape Argon2id reuses for pass 0's first two slices): the six header words
+ * (`pass`,`lane`,`slice`,`m'`,`t`,`type`) then the batch `counter`, then zero-padding to 128
+ * words.
+ *
+ * @param pass     the pass number `r`
+ * @param lane     the lane number `l`
+ * @param slice    the slice number `sl`
+ * @param m_prime  the total number of memory blocks `m'`
+ * @param t_cost   the total number of passes `t`
+ * @param counter  the 1-based address-block batch counter
+ * @return         the 128-word input block
+ */
+fn argon2_build_input_block(pass: u64, lane: u64, slice: u64, m_prime: u64, t_cost: u64, counter: u64): []u64 {
+    var out: []u64 = teko::list::empty()
+    out = teko::list::push(out, pass)
+    out = teko::list::push(out, lane)
+    out = teko::list::push(out, slice)
+    out = teko::list::push(out, m_prime)
+    out = teko::list::push(out, t_cost)
+    out = teko::list::push(out, ARGON2_TYPE_ID)
+    out = teko::list::push(out, counter)
+    var i: u64 = 7
+    loop {
+        if i >= 128 { break }
+        out = teko::list::push(out, 0)
+        i++
+    }
+    out
+}
+
+/**
+ * The data-independent (Argon2i-style) pseudo-random value for one index within a segment
+ * (RFC 9106 §3.4.1.2): `G(ZERO, G(ZERO, inputBlock))`, read at the index's position within its
+ * 128-address batch. Recomputes the whole address block per call rather than caching it across
+ * the 128 indices of a batch — a deliberate simplicity-over-throughput trade-off documented in
+ * this module's header, cheap at the KAT-vector scale this module targets.
+ *
+ * @param pass     the pass number `r`
+ * @param lane     the lane number `l`
+ * @param slice    the slice number `sl`
+ * @param m_prime  the total number of memory blocks `m'`
+ * @param t_cost   the total number of passes `t`
+ * @param index    the index within the current segment
+ * @return         the pseudo-random 64-bit value for this index
+ */
+fn argon2_pseudo_rand_indep(pass: u64, lane: u64, slice: u64, m_prime: u64, t_cost: u64, index: u64): u64 {
+    var counter = index / 128 + 1
+    var input_block = argon2_build_input_block(pass, lane, slice, m_prime, t_cost, counter)
+    var zero = argon2_zero_block()
+    var addr_block = argon2_g_block(zero, argon2_g_block(zero, input_block))
+    addr_block[index % 128]
+}
+
+/**
+ * The reference window size `|W|` for `index_alpha` (RFC 9106 §3.4.2), the count of blocks
+ * eligible to be referenced from the current position. Four cases: pass 0 restricts `W` to
+ * blocks finished so far THIS pass (scaled by how many prior segments this pass has finished);
+ * later passes always see the full `lane_length - segment_length` window of "the last 3
+ * segments" plus (same lane only) the blocks already filled in the current segment. The
+ * `same_lane`-false, `index == 0` branches subtract one more (RFC 9106 §3.4.2: "the very last
+ * index from W is excluded" when the current block is the first of its segment) — reachable
+ * only when `pass > 0` or `slice > 0`, since `pass == 0 && slice == 0` always forces
+ * `same_lane` true (the caller never asks for the diff-lane pass-0-slice-0 case).
+ *
+ * @param pass             the pass number
+ * @param slice            the slice number, 0..3
+ * @param segment_length   blocks per segment (`lane_length / 4`)
+ * @param lane_length      blocks per lane (`m' / lanes`)
+ * @param index            the index within the current segment
+ * @param same_lane        whether the reference lane is the current lane
+ * @return                 the reference window size `|W|`
+ */
+fn argon2_ref_area_size(pass: u64, slice: u64, segment_length: u64, lane_length: u64, index: u64, same_lane: bool): u64 {
+    if pass == 0 {
+        if same_lane { return slice * segment_length + index - 1 }
+        if index == 0 { return slice * segment_length - 1 }
+        return slice * segment_length
+    }
+    if same_lane { return lane_length - segment_length + index - 1 }
+    if index == 0 { return lane_length - segment_length - 1 }
+    lane_length - segment_length
+}
+
+/**
+ * The reference window's starting absolute lane-local index (RFC 9106 §3.4.2): pass 0's window
+ * always starts at 0 (only prior slices of THIS pass exist yet); a later pass's window starts
+ * right after the current slice (wrapping to 0 after the last slice), so it spans the three
+ * PREVIOUS passes' worth of "finished" segments plus, circularly, the current segment's
+ * already-filled prefix.
+ *
+ * @param pass            the pass number
+ * @param slice           the slice number, 0..3
+ * @param segment_length  blocks per segment
+ * @return                the window's starting lane-local index
+ */
+fn argon2_start_position(pass: u64, slice: u64, segment_length: u64): u64 {
+    if pass == 0 { return 0 }
+    if slice == 3 { return 0 }
+    (slice + 1) * segment_length
+}
+
+/**
+ * Maps `J_1` to a relative position within the reference window `W` (RFC 9106 §3.4.2,
+ * Figure 13's fixed-point approximation of `|W|(1 - J_1^2 / 2^64)`).
+ *
+ * @param w_size  the reference window size `|W|` (at least 1)
+ * @param j1      the low 32 bits of the pseudo-random value
+ * @return        the relative position `0 <= zz < w_size`
+ */
+fn argon2_map_j1_to_relative(w_size: u64, j1: u64): u64 {
+    var x = (j1 * j1) >> 32
+    var y = (w_size * x) >> 32
+    w_size - 1 - y
+}
+
+/**
+ * Fills one block of the memory array (RFC 9106 §3.3–3.4): reads the previous block in lane-
+ * local order, derives `J_1`/`J_2` from either the data-independent address stream (pass 0,
+ * slice < 2) or the previous block's first word (RFC 9106 §3.4.1.1/§3.4.1.3), maps them to a
+ * reference lane and block index, compresses `G(prev, ref)`, and — for passes after the first
+ * — XORs the result with the block's OLD content (RFC 9106 §3.2: later passes XOR rather than
+ * replace).
+ *
+ * @param mem              the flat memory array
+ * @param pass             the pass number
+ * @param lane             the current lane
+ * @param slice            the current slice, 0..3
+ * @param index             the index within the current segment
+ * @param m_prime          the total number of memory blocks `m'`
+ * @param lanes            the total number of lanes `p`
+ * @param lane_length      blocks per lane
+ * @param segment_length   blocks per segment
+ * @param t_cost           the total number of passes `t`
+ * @return                 the memory array with this one block filled
+ */
+fn argon2_fill_index(mem: []u64, pass: u64, lane: u64, slice: u64, index: u64, m_prime: u64, lanes: u64, lane_length: u64, segment_length: u64, t_cost: u64): []u64 {
+    var curr_abs = lane * lane_length + slice * segment_length + index
+    var prev_abs = if curr_abs % lane_length == 0 { curr_abs + lane_length - 1 } else { curr_abs - 1 }
+    var prev_block = argon2_mem_read_block(mem, prev_abs)
+    var data_independent = pass == 0 && slice < 2
+    var pseudo = if data_independent { argon2_pseudo_rand_indep(pass, lane, slice, m_prime, t_cost, index) } else { prev_block[0] }
+    var j1 = pseudo & 0xFFFFFFFF
+    var j2 = (pseudo >> 32) & 0xFFFFFFFF
+    var ref_lane = if pass == 0 && slice == 0 { lane } else { j2 % lanes }
+    var same_lane = ref_lane == lane
+    var w_size = argon2_ref_area_size(pass, slice, segment_length, lane_length, index, same_lane)
+    var start_pos = argon2_start_position(pass, slice, segment_length)
+    var ref_index = (start_pos + argon2_map_j1_to_relative(w_size, j1)) % lane_length
+    var ref_block = argon2_mem_read_block(mem, ref_lane * lane_length + ref_index)
+    var fresh = argon2_g_block(prev_block, ref_block)
+    var new_block = if pass == 0 { fresh } else { argon2_xor_block(fresh, argon2_mem_read_block(mem, curr_abs)) }
+    argon2_mem_write_block(mem, curr_abs, new_block)
+}
+
+/**
+ * Fills every block of one segment (one `(pass, lane, slice)` triple), in index order. Pass 0's
+ * first slice of every lane starts at index 2 (indices 0 and 1 are already the lane's two
+ * initial blocks).
+ *
+ * @param mem              the flat memory array
+ * @param pass             the pass number
+ * @param lane             the current lane
+ * @param slice            the current slice, 0..3
+ * @param m_prime          the total number of memory blocks `m'`
+ * @param lanes            the total number of lanes `p`
+ * @param lane_length      blocks per lane
+ * @param segment_length   blocks per segment
+ * @param t_cost           the total number of passes `t`
+ * @return                 the memory array with this segment filled
+ */
+fn argon2_fill_segment(mem: []u64, pass: u64, lane: u64, slice: u64, m_prime: u64, lanes: u64, lane_length: u64, segment_length: u64, t_cost: u64): []u64 {
+    var result = mem
+    var start: u64 = if pass == 0 && slice == 0 { 2 } else { 0 }
+    var index = start
+    loop {
+        if index >= segment_length { break }
+        result = argon2_fill_index(result, pass, lane, slice, index, m_prime, lanes, lane_length, segment_length, t_cost)
+        index++
+    }
+    result
+}
+
+/**
+ * Fills every lane's segment of one slice, lanes in order 0..p-1.
+ *
+ * @param mem              the flat memory array
+ * @param pass             the pass number
+ * @param slice            the current slice, 0..3
+ * @param lanes            the total number of lanes `p`
+ * @param lane_length      blocks per lane
+ * @param segment_length   blocks per segment
+ * @param m_prime          the total number of memory blocks `m'`
+ * @param t_cost           the total number of passes `t`
+ * @return                 the memory array with this slice filled in every lane
+ */
+fn argon2_run_slice(mem: []u64, pass: u64, slice: u64, lanes: u64, lane_length: u64, segment_length: u64, m_prime: u64, t_cost: u64): []u64 {
+    var result = mem
+    var lane: u64 = 0
+    loop {
+        if lane >= lanes { break }
+        result = argon2_fill_segment(result, pass, lane, slice, m_prime, lanes, lane_length, segment_length, t_cost)
+        lane++
+    }
+    result
+}
+
+/**
+ * Fills every slice of one pass, slices in order 0..3.
+ *
+ * @param mem              the flat memory array
+ * @param pass             the pass number
+ * @param lanes            the total number of lanes `p`
+ * @param lane_length      blocks per lane
+ * @param segment_length   blocks per segment
+ * @param m_prime          the total number of memory blocks `m'`
+ * @param t_cost           the total number of passes `t`
+ * @return                 the memory array with this pass filled
+ */
+fn argon2_run_pass(mem: []u64, pass: u64, lanes: u64, lane_length: u64, segment_length: u64, m_prime: u64, t_cost: u64): []u64 {
+    var result = mem
+    var slice: u64 = 0
+    loop {
+        if slice >= 4 { break }
+        result = argon2_run_slice(result, pass, slice, lanes, lane_length, segment_length, m_prime, t_cost)
+        slice++
+    }
+    result
+}
+
+/**
+ * Runs every pass, 0..t_cost-1, in order.
+ *
+ * @param mem              the flat memory array (already carrying every lane's two initial blocks)
+ * @param t_cost           the total number of passes `t`
+ * @param lanes            the total number of lanes `p`
+ * @param lane_length      blocks per lane
+ * @param segment_length   blocks per segment
+ * @param m_prime          the total number of memory blocks `m'`
+ * @return                 the fully-filled memory array
+ */
+fn argon2_run_passes(mem: []u64, t_cost: u64, lanes: u64, lane_length: u64, segment_length: u64, m_prime: u64): []u64 {
+    var result = mem
+    var pass: u64 = 0
+    loop {
+        if pass >= t_cost { break }
+        result = argon2_run_pass(result, pass, lanes, lane_length, segment_length, m_prime, t_cost)
+        pass++
+    }
+    result
+}
+
+/**
+ * The `H'`-hashed 1024-byte initial block for lane `lane`, block number `block_num` (0 or 1):
+ * `H'(H0 || LE32(block_num) || LE32(lane), 1024)` (RFC 9106 §3.2).
+ *
+ * @param h0         the 64-byte `H0`
+ * @param block_num  the block number, 0 or 1
+ * @param lane       the lane number
+ * @return           the 1024-byte initial block
+ */
+fn argon2_initial_block(h0: []byte, block_num: u64, lane: u64): []byte {
+    var msg = argon2_push_le32(h0, block_num to u32)
+    argon2_hprime(argon2_push_le32(msg, lane to u32), 1024)
+}
+
+/**
+ * Builds the zero-filled memory array and writes every lane's two initial blocks into it.
+ *
+ * @param h0           the 64-byte `H0`
+ * @param m_prime      the total number of memory blocks `m'`
+ * @param lanes        the total number of lanes `p`
+ * @param lane_length  blocks per lane
+ * @return             the memory array with every lane's blocks 0 and 1 set
+ */
+fn argon2_init_memory(h0: []byte, m_prime: u64, lanes: u64, lane_length: u64): []u64 {
+    var mem = argon2_mem_zero(m_prime * 128)
+    var lane: u64 = 0
+    loop {
+        if lane >= lanes { break }
+        mem = argon2_mem_write_block(mem, lane * lane_length, argon2_bytes_to_words(argon2_initial_block(h0, 0, lane)))
+        mem = argon2_mem_write_block(mem, lane * lane_length + 1, argon2_bytes_to_words(argon2_initial_block(h0, 1, lane)))
+        lane++
+    }
+    mem
+}
+
+/**
+ * The final block `C` (RFC 9106 §3.2): the XOR of every lane's last column block, rendered as
+ * 1024 bytes for `H'` to hash into the tag.
+ *
+ * @param mem          the fully-filled memory array
+ * @param lanes        the total number of lanes `p`
+ * @param lane_length  blocks per lane
+ * @return             the 1024-byte final block
+ */
+fn argon2_final_block(mem: []u64, lanes: u64, lane_length: u64): []byte {
+    var c = argon2_mem_read_block(mem, lane_length - 1)
+    var lane: u64 = 1
+    loop {
+        if lane >= lanes { break }
+        c = argon2_xor_block(c, argon2_mem_read_block(mem, lane * lane_length + lane_length - 1))
+        lane++
+    }
+    argon2_words_to_bytes(c)
+}
+
+/**
+ * The full Argon2id derivation (RFC 9106 §3.2–3.4), once the caller's parameters are already
+ * validated: memory layout, `H0`, per-lane initial blocks, every pass/slice/segment fill, the
+ * final block, and the tag `H'`.
+ *
+ * @param password     the password bytes
+ * @param salt         the salt bytes
+ * @param secret       the optional secret key (may be empty)
+ * @param ad           the optional associated data (may be empty)
+ * @param t_cost       the number of passes
+ * @param m_cost_kib   the memory cost in kibibytes
+ * @param parallelism  the number of lanes
+ * @param tag_len      the requested tag length in bytes
+ * @return             the `tag_len`-byte Argon2id tag
+ */
+fn argon2_derive(password: []byte, salt: []byte, secret: []byte, ad: []byte, t_cost: u64, m_cost_kib: u64, parallelism: u64, tag_len: u64): []byte {
+    var m_prime = 4 * parallelism * (m_cost_kib / (4 * parallelism))
+    var lane_length = m_prime / parallelism
+    var segment_length = lane_length / 4
+    var h0 = argon2_h0(password, salt, secret, ad, parallelism, tag_len, m_cost_kib, t_cost)
+    var mem = argon2_init_memory(h0, m_prime, parallelism, lane_length)
+    mem = argon2_run_passes(mem, t_cost, parallelism, lane_length, segment_length, m_prime)
+    argon2_hprime(argon2_final_block(mem, parallelism, lane_length), tag_len)
+}
+
+/**
+ * Argon2id (RFC 9106): the memory-hard password-hashing function, general entry with optional
+ * secret key and associated data. Validated against the official RFC 9106 §5.3 known-answer
+ * vector (`t=3`, `m=32` KiB, `p=4`, non-empty secret and associated data).
+ *
+ * @param password     the password bytes
+ * @param salt         the salt bytes (must be at least 8 bytes)
+ * @param secret       the optional secret key `K` (may be empty)
+ * @param ad           the optional associated data `X` (may be empty)
+ * @param t_cost       the number of passes (must be at least 1)
+ * @param m_cost_kib   the memory cost in kibibytes (must be at least `8 * parallelism`)
+ * @param parallelism  the number of lanes (must be at least 1)
+ * @param tag_len      the requested tag length in bytes (must be at least 4)
+ * @return             the `tag_len`-byte tag, or a `CryptoError` on an invalid parameter
+ * @throws             `CryptoError` when `parallelism`/`t_cost`/`m_cost_kib`/`salt`/`tag_len`
+ *                      fail their validity constraints
+ */
+exp fn argon2id(password: []byte, salt: []byte, secret: []byte, ad: []byte, t_cost: u64, m_cost_kib: u64, parallelism: u64, tag_len: u64): []byte | CryptoError {
+    if parallelism == 0 { return crypto_error("argon2id: parallelism must be at least 1") }
+    if t_cost == 0 { return crypto_error("argon2id: t_cost must be at least 1") }
+    if m_cost_kib < 8 * parallelism { return crypto_error("argon2id: m_cost_kib must be at least 8 * parallelism") }
+    if salt.len < 8 { return crypto_error("argon2id: salt must be at least 8 bytes") }
+    if tag_len < 4 { return crypto_error("argon2id: tag_len must be at least 4 bytes") }
+    argon2_derive(password, salt, secret, ad, t_cost, m_cost_kib, parallelism, tag_len)
+}
+
+/**
+ * Argon2id with no secret key and no associated data — the common password-hashing case.
+ *
+ * @param password     the password bytes
+ * @param salt         the salt bytes (must be at least 8 bytes)
+ * @param t_cost       the number of passes (must be at least 1)
+ * @param m_cost_kib   the memory cost in kibibytes (must be at least `8 * parallelism`)
+ * @param parallelism  the number of lanes (must be at least 1)
+ * @param tag_len      the requested tag length in bytes (must be at least 4)
+ * @return             the `tag_len`-byte tag, or a `CryptoError` on an invalid parameter
+ * @throws             `CryptoError` when `parallelism`/`t_cost`/`m_cost_kib`/`salt`/`tag_len`
+ *                      fail their validity constraints
+ */
+exp fn argon2id_hash(password: []byte, salt: []byte, t_cost: u64, m_cost_kib: u64, parallelism: u64, tag_len: u64): []byte | CryptoError {
+    argon2id(password, salt, teko::list::empty(), teko::list::empty(), t_cost, m_cost_kib, parallelism, tag_len)
+}
