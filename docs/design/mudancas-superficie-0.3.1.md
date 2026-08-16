@@ -2002,6 +2002,18 @@ por-plataforma dos bindings vive atrás deles.
 - **O compilador CONVERTE tipos na fronteira FFI** (ruling do dono) — marshalling teko↔C **automático**
   (`str`↔`char*`+len, `i32`↔`int`, `size`↔palavra…) pra **reduzir a opacidade**: o dev **não embrulha tudo à
   mão**. Sub-decisão que resta: **quais conversões o compilador conhece** (a tabela) vs o que fica opaco.
+- **RUNTIME FFI — REQUISITO (ruling do dono 2026-08-16):** DUAS classes de FFI. **(1) Core (libc/syscalls, §16):**
+  libc está SEMPRE no target → `extern fn … from lib "c"` **linkado em compile-time**, sem exigir nada instalado
+  (libc universal). **(2) Libs OPCIONAIS (FFI-stdlib: rand/openssl/gpg/net/db/rpc):** NÃO estão sempre instaladas
+  → **FFI em RUNTIME** (`dlopen`/`dlsym` POSIX; `LoadLibrary`/`GetProcAddress` Windows). O programa **COMPILA SEM a
+  lib presente**; carrega por nome no RUN; **ausência = erro-como-valor** ("lib não encontrada"), não falha de
+  link. Objetivo: **teko NÃO exige tudo instalado na hora de COMPILAR** — só a máquina que RODA precisa da lib.
+  Mecanismo built sobre compile-time-FFI a **libdl** (universal). **Consistente com o Fork-D-indeferido:** não
+  precisa dos HEADERS (assinatura declarada em Teko, como `teko::sys`) nem da lib no compile — só do símbolo por
+  nome no run. **Satisfaz os transportes plugáveis do §10** (Kafka/Rabbit/WS, "dynamic-FFI §16-gated"). **Forma:**
+  o `extern fn … from lib` ganha uma **variante RUNTIME** (`from lib "ssl" runtime` / handle `dlopen`+`dlsym`
+  por-símbolo, per-`#os`) além da compile-time-linked. Desenhado no pass de **FFI-stdlib**; NÃO muda o §16-core
+  (`extern type`/libc compile-time).
 - **Fork D (extern macro / extern comptime de C) — INDEFERIDO** (ruling do dono): trazer macro/constante de
   **header C** exigiria um preprocessador/toolchain C (gcc/cc/clang) — **a dependência que estamos
   removendo**. Não cruzamos essa fronteira. Consequência: **constantes/flags de libc (`O_RDONLY`, `SEEK_SET`,
