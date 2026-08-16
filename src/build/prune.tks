@@ -77,3 +77,28 @@ pub fn eval_pred(p: parser::Pred, env: CcEnv): bool {
         parser::POr as o => eval_pred(o.left, env) || eval_pred(o.right, env)
     }
 }
+
+/**
+ * prune_cc — the §17 conditional-compilation PRUNE: keep exactly the top-level items whose `guard`
+ * predicate is satisfied by the build's constant environment, dropping the rest BEFORE macro
+ * expansion / name-resolution / type-check (so a pruned item referencing an unavailable per-platform
+ * symbol never reaches the checker). Generalizes the retired `prune_os` from a `Function`-only
+ * `os_guard` string to a per-`Item` `Pred` over os/arch/flags — the single uniform `item.guard` read
+ * covers `fn`, `type`, `const`, and extern items alike.
+ *
+ * @param program  the assembled, pre-check program
+ * @param env      the build-time constant environment (`CcEnv`)
+ * @return         a fresh `Program` of the surviving items, in source order
+ * @since §17
+ */
+pub fn prune_cc(program: parser::Program, env: CcEnv): parser::Program {
+    var kept: []parser::Item = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        var it = program.items[i]
+        if eval_pred(it.guard, env) { kept = teko::list::push(kept, it) }
+        i = i + 1
+    }
+    parser::Program { items = kept }
+}

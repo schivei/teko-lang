@@ -1596,6 +1596,7 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64): ParsedAttributes | e
     var os_guard = ""
     var has_arena_size = false
     var arena_size: u64 = 0 to u64
+    var guard = pred_true()
     loop {
         if !is_kind_at(tokens, start, lexer::TokenKind::Hash) { break }
         if !is_kind_at(tokens, start + 1, lexer::TokenKind::Ident) {
@@ -1610,6 +1611,7 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64): ParsedAttributes | e
             if !is_kind_at(tokens, start + 3, lexer::TokenKind::Str) { return err_at(tokens, start + 3, "expected a quoted OS name in `#os(\"…\")`") }
             os_guard = tokens[start + 3].text
             if !is_kind_at(tokens, start + 4, lexer::TokenKind::RParen) { return err_at(tokens, start + 4, "expected ')' to close `#os(…)`") }
+            guard = attr_guard_and(guard, pred_os(tokens[start + 3].text))
             start = skip_seps(tokens, start + 5)
         } else if attr == "arena_size" {
             if has_arena_size { return err_at(tokens, start + 1, "a function may carry only one `#arena_size(…)` directive") }
@@ -1623,7 +1625,24 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64): ParsedAttributes | e
             return err_at(tokens, start + 1, "unknown attribute (only `#test`, `#os(\"…\")`, `#arena_size(N)`, and the binding/field `#inline` are recognized)")
         }
     }
-    ParsedAttributes { is_test = is_test; os_guard = os_guard; has_arena_size = has_arena_size; arena_size = arena_size; next = start }
+    ParsedAttributes { is_test = is_test; os_guard = os_guard; has_arena_size = has_arena_size; arena_size = arena_size; guard = guard; next = start }
+}
+
+/**
+ * attr_guard_and — compose two §17 attribute predicates, collapsing the `PTrue` identity so a lone
+ * `#os`/`#arch` yields its bare atom rather than `PTrue && atom`. When both operands are non-trivial
+ * (a decl carries BOTH `#os` and `#arch`), they are ANDed.
+ *
+ * @param acc  the predicate accumulated from earlier attributes (`PTrue` if none yet)
+ * @param add  the predicate contributed by the current attribute
+ * @return     `add` when `acc` is `PTrue`, else `pred_and(acc, add)`
+ * @since §17
+ */
+fn attr_guard_and(acc: Pred, add: Pred): Pred {
+    match acc.kind {
+        PTrue => add
+        _ => pred_and(acc, add)
+    }
 }
 
 /** A parsed `u64` literal + the resume index (the `#arena_size(N)` argument's own tiny result
@@ -2000,7 +2019,7 @@ fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility, ha
  * @return        the parsed declaration and the position just past it
  * @throws        a plain `error` when `pos` is not the start of a valid declaration
  */
-fn parse_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
+fn parse_decl(tokens: []lexer::Token, pos: u64): ParsedDecl | error {
     var outer_doc = peel_leading_doc(tokens, pos)
     var attrs = match parse_decl_attributes(tokens, outer_doc.next) { ParsedAttributes as x => x; error as e => return e }
     var start = attrs.next
@@ -2028,32 +2047,32 @@ fn parse_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     if is_unsafe_modifier_at(tokens, k) { k = k + 1 }
     if is_kind_at(tokens, k, lexer::TokenKind::Fn) {
         var d = match parse_fn_decl_with_attrs(tokens, start, attrs) { Parsed<@Decl()> as x => x; error as e => return e }
-        return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+        return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Type) {
         var d = match parse_type_decl_with_attrs(tokens, start, k, attrs) { Parsed<@Decl()> as x => x; error as e => return e }
-        return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+        return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Flags) {
         var d = match parse_flags_decl_with_attrs(tokens, start, k, attrs) { Parsed<@Decl()> as x => x; error as e => return e }
-        return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+        return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Const) {
         if saw_extern { return err_at(tokens, k, "expected `fn` or `type` after `extern`") }
         match reject_fn_only_attrs_on_type(tokens, k, attrs) { error as e => return e; null => { } }
         var d = match parse_const_decl(tokens, k, vis, is_global) { Parsed<@Decl()> as x => x; error as e => return e }
-        return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+        return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Macro) {
         if saw_extern { return err_at(tokens, k, "there is no `extern macro` — a macro is native-only (§14)") }
         if is_global { return err_at(tokens, k, "`global` is not allowed on a macro (§15) — global reach applies to a fn, type, const, or comptime; a macro is resolved by name at expansion time") }
         var d = match parse_macro_decl(tokens, k, vis) { Parsed<@Decl()> as x => x; error as e => return e }
-        return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+        return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Comptime) {
         if saw_extern { return err_at(tokens, k, "there is no `extern comptime` — a comptime is native-only (§14)") }
         var d = match parse_comptime_decl(tokens, k, vis, is_global) { Parsed<@Decl()> as x => x; error as e => return e }
-        return Parsed<@Decl()> { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); next = d.next }
+        return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if saw_extern {
         return err_at(tokens, k, "expected `fn` or `type` after `extern`")
@@ -2146,10 +2165,12 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
     var hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
     var p = skip_trivia(tokens, hdr.next)
     var decls: []@Decl() = teko::list::empty()
+    var decl_guards: []Pred = teko::list::empty()
     loop {
         if !has_token(tokens, p) { break }
-        var d = match parse_decl(tokens, p) { Parsed<@Decl()> as x => x; error as e => return e }
+        var d = match parse_decl(tokens, p) { ParsedDecl as x => x; error as e => return e }
         decls = teko::list::push(decls, d.node)
+        decl_guards = teko::list::push(decl_guards, d.guard)
         p = d.next
         if !has_token(tokens, p) { break }
         if !is_sep(tokens, p) {
@@ -2157,5 +2178,5 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
         }
         p = skip_trivia(tokens, p)
     }
-    Parsed<Module> { node = Module { uses = hdr.items; decls = decls }; next = p }
+    Parsed<Module> { node = Module { uses = hdr.items; decls = decls; decl_guards = decl_guards }; next = p }
 }

@@ -35,12 +35,34 @@ type ParsedStructBody = struct { fields: []Field; methods: []Function; consts: [
  */
 type ReadonlyMarker = struct { present: bool; next: u64 }
 
-/** The leading-attribute block a `parse_decl` collects before the declaration keyword: the
- *  function-only `#test`/`#os`/`#arena_size` attributes. `has_arena_size`/`arena_size` carry the
- *  parsed `#arena_size(N)` byte budget (#453); `next` resumes at the doc/visibility/keyword that
- *  follows. (The annotation-DI `#singleton`/`#scoped`/`#transient`/`#inject` attributes were retired
- *  by §7 part 2.) */
-type ParsedAttributes = struct { is_test: bool; os_guard: str; has_arena_size: bool; arena_size: u64; next: u64 }
+/**
+ * ParsedAttributes — the leading-attribute block a `parse_decl` collects before the declaration
+ * keyword: `#test`/`#os`/`#arch`/`#arena_size`. `has_arena_size`/`arena_size` carry the parsed
+ * `#arena_size(N)` byte budget (#453); `guard` is the §17 conditional-compile predicate the
+ * `#os`/`#arch` attributes compose (`PTrue` when none present); `next` resumes at the
+ * doc/visibility/keyword that follows. (The annotation-DI `#singleton`/`#scoped`/`#transient`/
+ * `#inject` attributes were retired by §7 part 2.)
+ *
+ * @field is_test         true iff `#test` preceded the declaration (function-only)
+ * @field os_guard        the `#os("…")` OS name ("" = all OSes), kept for `.tkb`/merge byte-compat
+ * @field has_arena_size  true iff `#arena_size(N)` preceded the declaration
+ * @field arena_size      the parsed `#arena_size(N)` byte budget (valid iff `has_arena_size`)
+ * @field guard           the §17 conditional-compile predicate from `#os`/`#arch` (`PTrue` if none)
+ * @field next            the resume index — the doc/visibility/keyword after the attribute block
+ */
+type ParsedAttributes = struct { is_test: bool; os_guard: str; has_arena_size: bool; arena_size: u64; guard: Pred; next: u64 }
+
+/**
+ * ParsedDecl — one top-level declaration plus its §17 conditional-compile `guard` and the resume
+ * index. `parse_decl` returns this so `parse_module` can record each decl's guard PARALLEL to the
+ * decl in `Module.decl_guards`, without threading a field through every `@Decl()` variant. An
+ * unguarded declaration carries `Pred { kind = PTrue { } }`.
+ *
+ * @field node   the parsed declaration (`@Decl()` inline union)
+ * @field guard  the §17 predicate guarding the declaration (`PTrue` when unguarded)
+ * @field next   the index just past the declaration
+ */
+type ParsedDecl = struct { node: @Decl(); guard: Pred; next: u64 }
 
 /**
  * (issue #285) an OPTIONAL leading Javadoc `parse_decl` peels off BEFORE the `#…`

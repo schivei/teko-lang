@@ -981,7 +981,17 @@ pub type ComptimeDecl = struct { name: str; type_params: []str; params: []Param;
  */
 macro Decl() { lowering { parser::Function | parser::TypeDecl | parser::ConstDecl | parser::MacroDecl | parser::ComptimeDecl } }
 pub type MainFile = struct { uses: []UseDecl; body: []@Statement() }   /* main.tks: the `use` header + the VIRTUAL MAIN's body (statements only — no type/fn decls) */
-pub type Module = struct { uses: []UseDecl; decls: []@Decl() }   /* a module: the `use` header + declarations (no loose statements) */
+/**
+ * Module — a module file: the `use` header + declarations (no loose statements). `decl_guards` is
+ * PARALLEL to `decls` (same length): `decl_guards[i]` is the §17 conditional-compile predicate
+ * guarding `decls[i]` (`Pred { kind = PTrue { } }` when unguarded). The parser populates it; the
+ * flatten (`asm_module_items`) zips each decl with its guard onto the resulting `Item.guard`.
+ *
+ * @field uses         the module's `use` header
+ * @field decls        the module's top-level declarations, in source order
+ * @field decl_guards  the per-declaration §17 guard, PARALLEL to `decls`
+ */
+pub type Module = struct { uses: []UseDecl; decls: []@Decl(); decl_guards: []Pred }
 
 // --- the FLATTENED item/program — the CHECKER's input view (mirror of the C tk_item /
 //     tk_program in ast.h). The parser produces File/Module/Decl; the DRIVER flattens
@@ -1006,8 +1016,12 @@ macro ItemKind() { lowering { UseDecl | @Statement() | Function | TypeDecl | Con
  * @field namespace  the item's source namespace (A3)
  * @field file       the source file (W-loc-2: assemble tags it so a flattened-program error resolves to
  *                   file:line:col; empty on the single-file compile/run path)
+ * @field guard      the §17 conditional-compile predicate (`Pred`) — PRUNE-TIME ONLY: `prune_cc`
+ *                   (`src/build/prune.tks`) drops the item when the build's `CcEnv` does not satisfy
+ *                   it, strictly BEFORE the checker/`.tkb` serialization, so this field is erased
+ *                   before check and never reaches `.tkb`. `Pred { kind = PTrue { } }` = unguarded.
  */
-pub type Item = struct { content: @ItemKind(); namespace: str; file: str }
+pub type Item = struct { content: @ItemKind(); namespace: str; file: str; guard: Pred }
 pub type Program = struct { items: []Item }   // the flat item list the checker consumes
 
 /**

@@ -112,23 +112,36 @@ fn target_os(m: Manifest): str {
     teko::os()
 }
 
-// (C7.1f) drop every `#os("…")`-guarded function whose guard ≠ the target OS, so only the current
-// platform's variant compiles. Unguarded items (os_guard == "") always pass through.
-fn prune_os(program: parser::Program, tos: str): parser::Program {
-    var kept: []parser::Item = teko::list::empty()
-    var i = 0
-    loop {
-        if i >= program.items.len { break }
-        var it = program.items[i]
-        var keep = true
-        match it.content {
-            parser::Function as f => { if f.os_guard != "" && f.os_guard != tos { keep = false } }
-            _ => { }
-        }
-        if keep { kept = teko::list::push(kept, it) }
-        i++
+/**
+ * target_arch — the TARGET arch for §17 `#arch`/`arch ==` guard selection, the exact sibling of
+ * `target_os`: derived from the `[extern] target` triple's arch token when set (canonicalized
+ * `aarch64→arm64`, `amd64`/`x64`→`x86_64`), else the host `teko::arch()`.
+ *
+ * @param m  the resolved manifest (its `[extern] target` triple, if any)
+ * @return   "x86_64" | "arm64" | "unknown"
+ * @since §17
+ */
+fn target_arch(m: Manifest): str {
+    if m.target.len > 0 {
+        if teko::str::contains(m.target, "aarch64") || teko::str::contains(m.target, "arm64") { return "arm64" }
+        if teko::str::contains(m.target, "x86_64") || teko::str::contains(m.target, "amd64") || teko::str::contains(m.target, "x64") { return "x86_64" }
     }
-    parser::Program { items = kept }
+    teko::arch()
+}
+
+/**
+ * build_flags — the §17 build-flag set for the conditional-compile `CcEnv` (crumb F, DESIGN-AHEAD).
+ * The SOURCE of build flags (manifest `[build] flags` vs a CLI `--flag`) is a §17-adjacent decision
+ * not pinned by the sealed spec, so this is an honest-stop returning NO flags: every `PFlag` atom
+ * evaluates false (a conservative, sound default — a flag nobody sets prunes its `#if` off). When the
+ * owner pins the flag source, this reads it; no other §17 code changes.
+ *
+ * @param m  the resolved manifest (the eventual flag source)
+ * @return   the set build flags — empty until the flag source lands
+ * @since §17 (crumb F, honest-stop)
+ */
+fn build_flags(m: Manifest): []str {
+    teko::list::empty()
 }
 
 // =========================================================================
@@ -466,8 +479,7 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
  * @return       the checked program and manifest, or the first error
  */
 fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool): Frontend | error {
-    // --- C7.1f: keep only the target OS's `#os("…")` function variants (conditional compilation) ---
-    var selected = prune_os(pf.parsed, target_os(pf.manifest))
+    var selected = prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = build_flags(pf.manifest) })
 
     var expanded = match parser::expand_macros_syntactic(selected) { parser::Program as p => p; error as e => return e }
 
@@ -6007,7 +6019,7 @@ fn native_gate_harness_items(proj_ns: str, src: str): []parser::Item | error {
     var i: u64 = 0
     loop {
         if i >= raw.len { break }
-        out = teko::list::push(out, parser::Item { content = raw[i].content; namespace = proj_ns; file = "<native-test-gate>" })
+        out = teko::list::push(out, parser::Item { content = raw[i].content; namespace = proj_ns; file = "<native-test-gate>"; guard = raw[i].guard })
         i = i + 1
     }
     out

@@ -39,13 +39,13 @@ fn asm_main_items(mf: parser::MainFile): []parser::Item {
     var ui: u64 = 0
     loop {
         if ui >= mf.uses.len { break }
-        items = teko::list::push(items, parser::Item { content = mf.uses[ui]; namespace = ""; file = "" })
+        items = teko::list::push(items, parser::Item { content = mf.uses[ui]; namespace = ""; file = ""; guard = parser::pred_true() })
         ui = ui + 1
     }
     var si: u64 = 0
     loop {
         if si >= mf.body.len { break }
-        items = teko::list::push(items, parser::Item { content = mf.body[si]; namespace = ""; file = "" })
+        items = teko::list::push(items, parser::Item { content = mf.body[si]; namespace = ""; file = ""; guard = parser::pred_true() })
         si = si + 1
     }
     items
@@ -57,22 +57,37 @@ fn asm_module_items(m: parser::Module): []parser::Item {
     var ui: u64 = 0
     loop {
         if ui >= m.uses.len { break }
-        items = teko::list::push(items, parser::Item { content = m.uses[ui]; namespace = ""; file = "" })
+        items = teko::list::push(items, parser::Item { content = m.uses[ui]; namespace = ""; file = ""; guard = parser::pred_true() })
         ui = ui + 1
     }
     var di: u64 = 0
     loop {
         if di >= m.decls.len { break }
+        var g = asm_decl_guard(m, di)
         items = match m.decls[di] {
-            parser::Function as f => teko::list::push(items, parser::Item { content = f; namespace = ""; file = "" })
-            parser::TypeDecl as t => teko::list::push(items, parser::Item { content = t; namespace = ""; file = "" })
-            parser::ConstDecl as c => teko::list::push(items, parser::Item { content = c; namespace = ""; file = "" })
-            parser::MacroDecl as md => teko::list::push(items, parser::Item { content = md; namespace = ""; file = "" })
-            parser::ComptimeDecl as cd => teko::list::push(items, parser::Item { content = cd; namespace = ""; file = "" })
+            parser::Function as f => teko::list::push(items, parser::Item { content = f; namespace = ""; file = ""; guard = g })
+            parser::TypeDecl as t => teko::list::push(items, parser::Item { content = t; namespace = ""; file = ""; guard = g })
+            parser::ConstDecl as c => teko::list::push(items, parser::Item { content = c; namespace = ""; file = ""; guard = g })
+            parser::MacroDecl as md => teko::list::push(items, parser::Item { content = md; namespace = ""; file = ""; guard = g })
+            parser::ComptimeDecl as cd => teko::list::push(items, parser::Item { content = cd; namespace = ""; file = ""; guard = g })
         }
         di = di + 1
     }
     items
+}
+
+/**
+ * asm_decl_guard — the §17 conditional-compile guard for `m.decls[di]`: `m.decl_guards[di]` when the
+ * PARALLEL guard array covers the index, else `PTrue` (a defensive default for any producer that did
+ * not populate `decl_guards`). Keeps `asm_module_items` a single uniform zip.
+ *
+ * @param m   the parsed module (its `decls`/`decl_guards` parallel arrays)
+ * @param di  the declaration index
+ * @return    the guard for `decls[di]` (`PTrue` when out of range)
+ */
+fn asm_decl_guard(m: parser::Module, di: u64): parser::Pred {
+    if di < m.decl_guards.len { return m.decl_guards[di] }
+    parser::pred_true()
 }
 
 // parse + reconcile ONE file's tokens to its item list (entry → main-file parser; else module).
@@ -250,7 +265,7 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
         var k: u64 = 0
         loop {
             if k >= one.len { break }
-            merged = teko::list::push(merged, parser::Item { content = one[k].content; namespace = sf.namespace; file = sf.path })
+            merged = teko::list::push(merged, parser::Item { content = one[k].content; namespace = sf.namespace; file = sf.path; guard = one[k].guard })
             k = k + 1
         }
         i = i + 1
@@ -337,7 +352,7 @@ fn append_tagged_items(merged: []parser::Item, items: []parser::Item, sf: Source
     var i: u64 = 0
     loop {
         if i >= items.len { break }
-        out = teko::list::push(out, parser::Item { content = items[i].content; namespace = sf.namespace; file = sf.path })
+        out = teko::list::push(out, parser::Item { content = items[i].content; namespace = sf.namespace; file = sf.path; guard = items[i].guard })
         i = i + 1
     }
     out
