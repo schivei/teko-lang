@@ -1580,6 +1580,32 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
      capacidade está pronta); o que resta é a **migração wholesale** dos hot-paths pra esses levers = **Doc-1**
      (mesmo balde "melhora o consumo de memória"). A arena-Teko da Doc-2 (crumb D+) é allocation-free (opera em
      memória crua, sem `push`), então NÃO sofre disso; o §16 não constrói a migração AL-wave.
+     - **⚠️ SUPERSESSÃO (dono 2026-08-16): a AL-wave FOI UM WORKAROUND; o formato fixo é a resposta certa.** O dono:
+       "foi um workaround, mas deveria ter insistido no formato fixo". O copy-grow storm que a AL-wave MITIGA
+       (ref-push/`with_cap`/`grow_inplace`) é **ELIMINADO POR CONSTRUÇÃO** quando o array é fixo/imutável (sem
+       grow → sem copy-grow → sem "out of memory (str concat)" no emit — a raiz do OOM no cap que os reseeds
+       tocam). ⇒ a AL-wave (ref-push) NÃO é o alvo final; ela é **superseded pela ONDA DE ARRAYS-FIXOS** (abaixo).
+       A máquina de ref-push (`tk_slice_push_r`/`grow_inplace`/`with_cap`) e o array crescível `{ptr,len,cap}`
+       viram **legacy a varrer** junto com a onda. NÃO investir mais na migração AL-wave — ela é substituída, não
+       completada.
+- **🌊 ONDA ARRAYS-FIXOS + STRING-U32 (visão do dono 2026-08-16 — EM DELIBERAÇÃO, ainda NÃO ratificada; faltam
+  colocação + mecanismos de `isset`/reclaim).** Intenção de fundo: **arrays SEMPRE foram pra ser de tamanho fixo**
+  — fat-pointer `{ptr, len}` SEM cap, **imutável e contíguo**; a variabilidade/mutação é das COLEÇÕES (Table/Hash/
+  Map/Dictionary/List), não do array cru. O prêmio: como os tamanhos são **AST-computáveis (folhas→raiz)** e as
+  arenas formam uma **btree que lineariza numa árvore-de-ponteiros pré-alocada**, dá pra **pré-alocar tudo
+  estaticamente** → cura de fundo do OOM (vs. o in-loco/quase-aleatório de hoje). **7 pontos do dono:** (1) `[N]T`
+  fixo com leading-zeros + máquina `isset(a[i])`; `var a: []T = f()` já vem fixo de quem gera; (2) eliminar o
+  `push` de hoje — coleções têm os métodos de mutação dentro de si; (3) concat gera cópia nova (`a = [..a,
+  ..f()]`); (4) reatribuição apaga/marca-para-apagamento o valor anterior na arena; (5) array em `ref` não aceita
+  push (aceita reatribuição/ref-de-posição); (6) revisar TODOS os usos de array do compilador → init fixo+literal
+  (sem `teko::list::empty`/`push`); (7) trocar por coleção dedicada onde fizer sentido. **STRING:** internamente
+  **array de u32 (largura fixa, indexação O(1), sem cabeçalho por-char)** + **trim pra UTF-8 na barreira do metal**;
+  o fat só na string (`{qtd-chars, qtd-bytes, array-u32, encoding}`); o `char` vira **u32 puro** (vs. hoje: array
+  de bytes dinâmico com cabeçalho repetido por caractere). **ABERTO (o coordenador levantou, aguarda ruling):**
+  (A) colocação — capacidade = nova onda **Doc-2 DEPOIS do sweep do §16** (uma reescrita-de-emit por vez), pré-
+  alocação/espinha que a explora = **Doc-1**?; (B) `isset` p/ tipo-de-valor onde 0 é legal precisa de bitmap-de-
+  presença (ou `T` nullable/sentinela) — qual?; (C) ponto 4 exige reclaim por-objeto que a bump-arena não tem —
+  free-list/espinha? Registrar como lei só após esses rulings.
   **CONSEQUÊNCIA PRA O §16 (crumb D em diante):** a arena-Teko da Doc-2 só precisa ser CORRETA (region-per-object +
   deep-copy default + bulk-free + wrap-refcount escape-hatch), NÃO ótima. O pré-dimensionamento / retorno-virtual-
   sem-cópia / elisão-de-arena são Doc-1 — NÃO construir na Doc-2. O OOM no limite do cap durante os reseeds é
