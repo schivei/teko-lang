@@ -1568,6 +1568,18 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
      literais idênticos (strings, numéricos) e valores de constant-fold — emite UMA vez e referencia, em vez de
      duplicar — reduzindo o **tamanho do BINÁRIO final**. (Otimização de binário, distinta dos itens 1-3 que são
      de memória-de-arena; ambos no balde "melhora" da Doc-1.)
+  5. **Mitigar o excesso de `push` / copy-grow (dono 2026-08-16). NÃO é bug de feature faltando — os levers JÁ
+     EXISTEM.** O problema: `push` em excesso faz o array dobrar a capacidade → copy-grow do buffer inteiro →
+     bloat de arena (é o "out of memory (str concat)" do emit — o `codegen::cb` empurrando no buffer do `teko.c`
+     de 21 MB; instrumentado em #148 RA1/RA2; incidente "11.5 GB"). Mitigação = **usar array de tamanho conhecido
+     e literais em vez de `push`**. Verificado (2026-08-16) que os mecanismos EXISTEM: **`teko::list::with_cap`**
+     (pré-capacidade/reserve no tamanho conhecido → sem doubling — o "array de tamanho fixo onde se sabe o
+     tamanho"), **`teko::list::grow_inplace(ref x, v)` / `tk_slice_push_r`** (**ref-push** — não copia o buffer no
+     grow), e **array literais**. Isto é o work stream **AL-wave** (`al-wave-crumbs.md`/`al-wave-emit-throughput.md`,
+     RATIFICADO dono 2026-07-19; AL1 provado/fechado; AL3 = ref-push, o lever global). ⇒ **NÃO é bug** (a
+     capacidade está pronta); o que resta é a **migração wholesale** dos hot-paths pra esses levers = **Doc-1**
+     (mesmo balde "melhora o consumo de memória"). A arena-Teko da Doc-2 (crumb D+) é allocation-free (opera em
+     memória crua, sem `push`), então NÃO sofre disso; o §16 não constrói a migração AL-wave.
   **CONSEQUÊNCIA PRA O §16 (crumb D em diante):** a arena-Teko da Doc-2 só precisa ser CORRETA (region-per-object +
   deep-copy default + bulk-free + wrap-refcount escape-hatch), NÃO ótima. O pré-dimensionamento / retorno-virtual-
   sem-cópia / elisão-de-arena são Doc-1 — NÃO construir na Doc-2. O OOM no limite do cap durante os reseeds é
