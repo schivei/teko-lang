@@ -1528,9 +1528,14 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   entra** → o bulk-free O(1) do caminho por-valor fica INTACTO; collections TS resolvem a contenção cross-thread.
   Achado: **NÃO há refcount de objeto hoje** (classes são arena-per-object, freed por region-drop), então o
   refcount é maquinaria NOVA sobre a caixa-por-objeto existente — não há refcount pronto p/ reusar.
-- **`Table<…>` (ideia do dono):** collection multi-índice estilo tabela-de-banco (≤16 genéricos, troca atômica
-  multi-valor) — tratada como **tipo de collection à parte** (stdlib-genéricos), NÃO acoplada ao refcount (que usa
-  `Dictionary<addr,count>` no v1).
+- **`Table<…>` — collection própria (confirmado dono 2026-08-16):** uma **tabela em-memória enxuta**, multi-índice
+  (estilo tabela-de-banco, **≤16 genéricos** = o limite de type-args da Teko), com **acesso e trocas rápidas e
+  ATÔMICAS multi-valor** (apoia nas atômicas/sync já aterrissadas do §10) e **poder computacional** (índices
+  compostos). Exige seu **próprio conjunto de operações na stdlib** (query/index/swap-atômico). É **item de
+  stdlib-genéricos da Doc-2** (uma "fase1c" além da fase1b Dictionary/HashSet/Sorted*), **buildável agora** (a
+  maquinaria de genéricos está pronta), **NÃO bloqueia** §16/§10-(c). **NÃO acoplada ao refcount** (que usa
+  `Dictionary<addr,count>` no v1); o refcount pode migrar pro `Table` se este amadurecer. A despachar como lane
+  stdlib independente quando houver capacidade de build (evitar builds pesados em paralelo com o §16).
 - **PLACEMENT (recomendação, pendente confirmação):** o refcount-wrap é **Doc-1 (melhora a arena)**, NÃO baseline
   Doc-2 — porque a correção do §10/§16 não precisa dele (deep-copy + singletons-de-vida-de-programa em F2 bastam;
   singleton nunca é freed até o processo sair → sem refcount). É otimização/generalização pros escape-hatch
