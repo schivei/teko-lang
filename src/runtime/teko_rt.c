@@ -41,6 +41,8 @@
 #include <poll.h>     // poll — tk_rt_fd_wait_readable's exact-deadline wait on a pipe end (F5)
 #include <sys/random.h> // getentropy (macOS) / getrandom (Linux glibc>=2.25, musl) — teko::crypto::rand (#194 C6)
 #include <pthread.h>  // §16-TRANSITIONAL: pthread_create/detach/join for tk_thread_spawn (§10 C0a). Retired when teko_rt.c goes to FFI.
+#include <sys/socket.h> // §10 C0c: socket/bind/sendto/recvfrom — the tk_oschan AF_UNIX transport (Linux-first)
+#include <sys/un.h>     // §10 C0c: struct sockaddr_un — abstract-namespace reader name
 #endif
 #include <errno.h>    // errno/EEXIST — mkdir idempotence
 #include <time.h>     // clock_gettime, localtime_r, CLOCK_REALTIME — teko::time ROUND 0
@@ -2595,6 +2597,411 @@ uint64_t tk_thread_spawn_selftest(int64_t n) {
         tk_thread_join(h);
     }
     return tk_names_live_count() - baseline;   // MUST be 0: every task_begin/alloc/task_end balanced
+}
+
+// ============================ (§10 C0b) tk_memchan ================================================
+//
+// A bounded/unbounded in-process MPSC FIFO of opaque fixed-width elements. The struct SHELL lives in
+// the F2 program region (stable address, survives any producing task's tk_task_end); the ring buffer
+// and pthread objects are heap/OS resources tk_memchan_end releases. pthread mutex + two conds is the
+// right tool for a channel wait (milliseconds), not the atomic spinlock (microscopic critical
+// sections); pthread is already linked for C0a.
+struct tk_memchan {
+    unsigned char *buf;        // ring: cap*elem_size bytes (malloc — freeable at end; NOT arena)
+    uint64_t elem_size;
+    uint64_t cap;              // slot count (== bounds for bounded; current capacity when unbounded)
+    uint64_t head, tail, count;
+    int closed;                // guarded by lock
+    int unbounded;             // bounds == 0
+    pthread_mutex_t lock;
+    pthread_cond_t  not_empty; // recv waits here
+    pthread_cond_t  not_full;  // bounded send waits here
+};
+
+tk_memchan *tk_memchan_make(uint64_t elem_size, uint64_t bounds) {
+    if (elem_size == 0) elem_size = 1;
+    tk_memchan *ch = (tk_memchan *)tk_region_alloc(tk_region_program(), sizeof *ch);
+    ch->elem_size = elem_size;
+    ch->unbounded = (bounds == 0);
+    ch->cap = ch->unbounded ? 8u : bounds;
+    ch->buf = (unsigned char *)malloc((size_t)ch->cap * (size_t)elem_size);
+    if (ch->buf == NULL) tk_panic("out of memory");
+    ch->head = ch->tail = ch->count = 0;
+    ch->closed = 0;
+    pthread_mutex_init(&ch->lock, NULL);
+    pthread_cond_init(&ch->not_empty, NULL);
+    pthread_cond_init(&ch->not_full, NULL);
+    return ch;
+}
+
+// tk_memchan_grow — double an UNBOUNDED channel's ring, re-linearizing from head so the arena's lack
+// of realloc costs one malloc+copy at each capacity doubling. Caller holds the lock.
+static void tk_memchan_grow(tk_memchan *ch) {
+    uint64_t ncap = ch->cap * 2u;
+    unsigned char *nbuf = (unsigned char *)malloc((size_t)ncap * (size_t)ch->elem_size);
+    if (nbuf == NULL) tk_panic("out of memory");
+    for (uint64_t i = 0; i < ch->count; i += 1) {
+        uint64_t src = (ch->head + i) % ch->cap;
+        memcpy(nbuf + i * ch->elem_size, ch->buf + src * ch->elem_size, ch->elem_size);
+    }
+    free(ch->buf);
+    ch->buf = nbuf;
+    ch->cap = ncap;
+    ch->head = 0;
+    ch->tail = ch->count;
+}
+
+void tk_memchan_send(tk_memchan *ch, const void *elem) {
+    pthread_mutex_lock(&ch->lock);
+    if (ch->closed) { pthread_mutex_unlock(&ch->lock); return; }
+    if (ch->unbounded) {
+        if (ch->count == ch->cap) tk_memchan_grow(ch);
+    } else {
+        while (ch->count == ch->cap && !ch->closed) pthread_cond_wait(&ch->not_full, &ch->lock);
+        if (ch->closed) { pthread_mutex_unlock(&ch->lock); return; }
+    }
+    memcpy(ch->buf + ch->tail * ch->elem_size, elem, ch->elem_size);
+    ch->tail = (ch->tail + 1) % ch->cap;
+    ch->count += 1;
+    pthread_cond_signal(&ch->not_empty);
+    pthread_mutex_unlock(&ch->lock);
+}
+
+int tk_memchan_recv(tk_memchan *ch, void *out) {
+    pthread_mutex_lock(&ch->lock);
+    while (ch->count == 0 && !ch->closed) pthread_cond_wait(&ch->not_empty, &ch->lock);
+    if (ch->count == 0 && ch->closed) { pthread_mutex_unlock(&ch->lock); return 0; }
+    memcpy(out, ch->buf + ch->head * ch->elem_size, ch->elem_size);
+    ch->head = (ch->head + 1) % ch->cap;
+    ch->count -= 1;
+    pthread_cond_signal(&ch->not_full);
+    pthread_mutex_unlock(&ch->lock);
+    return 1;
+}
+
+void tk_memchan_close(tk_memchan *ch) {
+    pthread_mutex_lock(&ch->lock);
+    ch->closed = 1;
+    pthread_cond_broadcast(&ch->not_empty);
+    pthread_cond_broadcast(&ch->not_full);
+    pthread_mutex_unlock(&ch->lock);
+}
+
+void tk_memchan_end(tk_memchan *ch) {
+    pthread_mutex_lock(&ch->lock);
+    if (ch->buf == NULL) { pthread_mutex_unlock(&ch->lock); return; }  // already ended (idempotent)
+    ch->closed = 1;
+    pthread_cond_broadcast(&ch->not_empty);
+    pthread_cond_broadcast(&ch->not_full);
+    free(ch->buf);
+    ch->buf = NULL;
+    pthread_mutex_unlock(&ch->lock);
+    pthread_mutex_destroy(&ch->lock);
+    pthread_cond_destroy(&ch->not_empty);
+    pthread_cond_destroy(&ch->not_full);
+}
+
+uint64_t tk_memchan_make_u(uint64_t elem_size, uint64_t bounds) {
+    return (uint64_t)(uintptr_t)tk_memchan_make(elem_size, bounds);
+}
+void tk_memchan_send_u(uint64_t ch, uint64_t elem_addr) {
+    tk_memchan_send((tk_memchan *)(uintptr_t)ch, (const void *)(uintptr_t)elem_addr);
+}
+int64_t tk_memchan_recv_u(uint64_t ch, uint64_t out_addr) {
+    return (int64_t)tk_memchan_recv((tk_memchan *)(uintptr_t)ch, (void *)(uintptr_t)out_addr);
+}
+void tk_memchan_end_u(uint64_t ch) {
+    tk_memchan_end((tk_memchan *)(uintptr_t)ch);
+}
+
+// tk_memchan_selftest_arg / _producer — the producer half of the C0b selftest, reached through the
+// joinable spawn twin so the caller has a deterministic finish edge. The blob is this arg; the
+// producer frees it (tk_thread_start frees only the call record, never the blob).
+typedef struct { tk_memchan *ch; int64_t n; } tk_memchan_selftest_arg;
+static void tk_memchan_selftest_producer(void *blob) {
+    tk_memchan_selftest_arg a = *(tk_memchan_selftest_arg *)blob;
+    free(blob);
+    for (int64_t i = 0; i < a.n; i += 1) tk_memchan_send(a.ch, &i);
+    tk_memchan_close(a.ch);
+}
+
+uint64_t tk_memchan_selftest(int64_t n) {
+    if (n < 0) n = 0;
+    tk_memchan *ch = tk_memchan_make(sizeof(int64_t), 16);   // bounded-16 exercises the blocking send
+    tk_memchan_selftest_arg *arg = (tk_memchan_selftest_arg *)malloc(sizeof *arg);
+    if (arg == NULL) tk_panic("out of memory");
+    arg->ch = ch; arg->n = n;
+    uint64_t h = tk_thread_join_spawn(tk_memchan_selftest_producer, arg);
+    int64_t expect = 0, sum = 0, got = 0;
+    uint64_t rc = 0;
+    while (tk_memchan_recv(ch, &got)) {
+        if (got != expect) rc = 1;
+        sum += got;
+        expect += 1;
+    }
+    tk_thread_join(h);
+    if (expect != n) rc = 2;
+    if (n > 0 && sum != n * (n - 1) / 2) rc = 3;
+    tk_memchan_end(ch);
+    return rc;
+}
+
+// ============================ (§10 C5) tk_waitgroup ==============================================
+//
+// A manual counter with a blocking wait, F2-resident. add(n) before spawn is the race-free path;
+// done() via the worker's handle; wait() on the creator's ctx. Same pthread idiom as tk_memchan.
+struct tk_waitgroup { int64_t count; pthread_mutex_t lock; pthread_cond_t zero; };
+
+tk_waitgroup *tk_waitgroup_make(void) {
+    tk_waitgroup *wg = (tk_waitgroup *)tk_region_alloc(tk_region_program(), sizeof *wg);
+    wg->count = 0;
+    pthread_mutex_init(&wg->lock, NULL);
+    pthread_cond_init(&wg->zero, NULL);
+    return wg;
+}
+void tk_waitgroup_add(tk_waitgroup *wg, int64_t n) {
+    pthread_mutex_lock(&wg->lock);
+    wg->count += n;
+    if (wg->count <= 0) pthread_cond_broadcast(&wg->zero);
+    pthread_mutex_unlock(&wg->lock);
+}
+void tk_waitgroup_done(tk_waitgroup *wg) {
+    pthread_mutex_lock(&wg->lock);
+    wg->count -= 1;
+    if (wg->count <= 0) pthread_cond_broadcast(&wg->zero);
+    pthread_mutex_unlock(&wg->lock);
+}
+void tk_waitgroup_wait(tk_waitgroup *wg) {
+    pthread_mutex_lock(&wg->lock);
+    while (wg->count > 0) pthread_cond_wait(&wg->zero, &wg->lock);
+    pthread_mutex_unlock(&wg->lock);
+}
+void tk_waitgroup_end(tk_waitgroup *wg) {
+    pthread_mutex_destroy(&wg->lock);
+    pthread_cond_destroy(&wg->zero);
+}
+uint64_t tk_waitgroup_make_u(void) { return (uint64_t)(uintptr_t)tk_waitgroup_make(); }
+void tk_waitgroup_add_u(uint64_t wg, int64_t n) { tk_waitgroup_add((tk_waitgroup *)(uintptr_t)wg, n); }
+void tk_waitgroup_done_u(uint64_t wg) { tk_waitgroup_done((tk_waitgroup *)(uintptr_t)wg); }
+void tk_waitgroup_wait_u(uint64_t wg) { tk_waitgroup_wait((tk_waitgroup *)(uintptr_t)wg); }
+void tk_waitgroup_end_u(uint64_t wg) { tk_waitgroup_end((tk_waitgroup *)(uintptr_t)wg); }
+
+// tk_waitgroup_selftest_arg / _worker — n workers each done() once after an add(n); wait must return
+// only once every worker has signalled. Returns 0 when the barrier held.
+typedef struct { tk_waitgroup *wg; } tk_waitgroup_selftest_arg;
+static void tk_waitgroup_selftest_worker(void *blob) {
+    tk_waitgroup_selftest_arg a = *(tk_waitgroup_selftest_arg *)blob;
+    free(blob);
+    tk_waitgroup_done(a.wg);
+}
+uint64_t tk_waitgroup_selftest(int64_t n) {
+    if (n < 0) n = 0;
+    tk_waitgroup *wg = tk_waitgroup_make();
+    tk_waitgroup_add(wg, n);
+    for (int64_t i = 0; i < n; i += 1) {
+        tk_waitgroup_selftest_arg *arg = (tk_waitgroup_selftest_arg *)malloc(sizeof *arg);
+        if (arg == NULL) tk_panic("out of memory");
+        arg->wg = wg;
+        tk_thread_spawn(tk_waitgroup_selftest_worker, arg);
+    }
+    tk_waitgroup_wait(wg);
+    tk_waitgroup_end(wg);
+    return 0;
+}
+
+// ============================ (§10 C0c) tk_oschan ================================================
+//
+// An AF_UNIX SOCK_DGRAM MPSC transport (Linux-first — the abstract namespace and the socket ABI are
+// Linux's). One reader socket bound to a key-derived abstract name; N writers each with a lazily
+// opened, thread-local-cached socket. Datagram boundaries make each push atomic for free. Fixed-width
+// elements only in v1.
+#if !defined(_WIN32)
+struct tk_oschan {
+    int reader_fd;
+    uint64_t elem_size;
+    int bounded;                 // bounds != 0 => non-blocking send (observable EAGAIN back-pressure)
+    struct sockaddr_un addr;     // the reader's bound abstract name
+    socklen_t addrlen;
+    int ended;
+};
+
+// The reader's abstract-namespace name: sun_path[0]==0, then "tkchan:" and the key bytes. Truncates
+// an over-long key to fit sun_path rather than overrun it.
+static socklen_t tk_oschan_bind_name(struct sockaddr_un *a, const char *key, uint64_t key_len) {
+    memset(a, 0, sizeof *a);
+    a->sun_family = AF_UNIX;
+    a->sun_path[0] = 0;
+    const char *prefix = "tkchan:";
+    size_t plen = 7;
+    size_t room = sizeof(a->sun_path) - 1 - plen;
+    size_t klen = (size_t)key_len;
+    if (klen > room) klen = room;
+    memcpy(a->sun_path + 1, prefix, plen);
+    memcpy(a->sun_path + 1 + plen, key, klen);
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + plen + klen);
+}
+
+tk_oschan *tk_oschan_make(uint64_t elem_size, uint64_t bounds, const char *key, uint64_t key_len) {
+    if (elem_size == 0) elem_size = 1;
+    tk_oschan *ch = (tk_oschan *)tk_region_alloc(tk_region_program(), sizeof *ch);
+    memset(ch, 0, sizeof *ch);
+    ch->elem_size = elem_size;
+    ch->bounded = (bounds != 0);
+    ch->ended = 0;
+    ch->reader_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (ch->reader_fd < 0) tk_panic("oschan: socket failed");
+    ch->addrlen = tk_oschan_bind_name(&ch->addr, key, key_len);
+    if (bind(ch->reader_fd, (struct sockaddr *)&ch->addr, ch->addrlen) < 0) tk_panic("oschan: bind failed");
+    if (bounds != 0) {
+        int rcvbuf = (int)(bounds * elem_size * 2);
+        if (rcvbuf < 1024) rcvbuf = 1024;
+        setsockopt(ch->reader_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
+    }
+    return ch;
+}
+
+// A per-thread writer-socket cache keyed by the channel pointer: a writer never needs its own bound
+// name to sendto the reader. Bounded to a handful of channels per thread; overflow opens an
+// uncached socket (still correct, just not reused).
+#define TK_OSCHAN_WCACHE 8
+static _Thread_local struct { tk_oschan *ch; int fd; } tk_oschan_wcache[TK_OSCHAN_WCACHE];
+static _Thread_local int tk_oschan_wcache_n = 0;
+
+static int tk_oschan_writer_fd(tk_oschan *ch) {
+    for (int i = 0; i < tk_oschan_wcache_n; i += 1) {
+        if (tk_oschan_wcache[i].ch == ch) return tk_oschan_wcache[i].fd;
+    }
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) tk_panic("oschan: writer socket failed");
+    if (tk_oschan_wcache_n < TK_OSCHAN_WCACHE) {
+        tk_oschan_wcache[tk_oschan_wcache_n].ch = ch;
+        tk_oschan_wcache[tk_oschan_wcache_n].fd = fd;
+        tk_oschan_wcache_n += 1;
+    }
+    return fd;
+}
+
+int tk_oschan_send(tk_oschan *ch, const void *elem) {
+    int fd = tk_oschan_writer_fd(ch);
+    int flags = ch->bounded ? MSG_DONTWAIT : 0;
+    for (;;) {
+        ssize_t r = sendto(fd, elem, (size_t)ch->elem_size, flags, (struct sockaddr *)&ch->addr, ch->addrlen);
+        if (r == (ssize_t)ch->elem_size) return 0;
+        if (r < 0 && errno == EINTR) continue;
+        return -1;
+    }
+}
+
+int tk_oschan_recv(tk_oschan *ch, void *out) {
+    for (;;) {
+        ssize_t r = recvfrom(ch->reader_fd, out, (size_t)ch->elem_size, 0, NULL, NULL);
+        if (r == 0) return 0;                       // zero-length CLOSED sentinel
+        if (r < 0) { if (errno == EINTR) continue; return 0; }
+        return 1;
+    }
+}
+
+void tk_oschan_close(tk_oschan *ch) {
+    int fd = tk_oschan_writer_fd(ch);
+    sendto(fd, "", 0, 0, (struct sockaddr *)&ch->addr, ch->addrlen);
+}
+
+void tk_oschan_end(tk_oschan *ch) {
+    if (ch->ended) return;
+    ch->ended = 1;
+    tk_oschan_close(ch);
+    close(ch->reader_fd);
+    for (int i = 0; i < tk_oschan_wcache_n; i += 1) {
+        if (tk_oschan_wcache[i].ch == ch) { close(tk_oschan_wcache[i].fd); tk_oschan_wcache[i].ch = NULL; }
+    }
+}
+
+uint64_t tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len) {
+    return (uint64_t)(uintptr_t)tk_oschan_make(elem_size, bounds, (const char *)(uintptr_t)key_addr, key_len);
+}
+int64_t tk_oschan_send_u(uint64_t ch, uint64_t elem_addr) {
+    return (int64_t)tk_oschan_send((tk_oschan *)(uintptr_t)ch, (const void *)(uintptr_t)elem_addr);
+}
+int64_t tk_oschan_recv_u(uint64_t ch, uint64_t out_addr) {
+    return (int64_t)tk_oschan_recv((tk_oschan *)(uintptr_t)ch, (void *)(uintptr_t)out_addr);
+}
+void tk_oschan_end_u(uint64_t ch) { tk_oschan_end((tk_oschan *)(uintptr_t)ch); }
+
+// The content pattern each fan-in record's third word must hold — a function of writer id and seq so
+// two records differing in EITHER field differ in pattern (the proof is by content, never by count).
+static uint64_t tk_oschan_pattern(uint64_t id, uint64_t seq) {
+    return id * 1000003u + seq * 7919u + 12648430u;
+}
+typedef struct { tk_oschan *ch; int64_t id; int64_t r; } tk_oschan_selftest_arg;
+static void tk_oschan_selftest_writer(void *blob) {
+    tk_oschan_selftest_arg a = *(tk_oschan_selftest_arg *)blob;
+    free(blob);
+    for (int64_t s = 0; s < a.r; s += 1) {
+        uint64_t rec[3];
+        rec[0] = (uint64_t)a.id;
+        rec[1] = (uint64_t)s;
+        rec[2] = tk_oschan_pattern((uint64_t)a.id, (uint64_t)s);
+        tk_oschan_send(a.ch, rec);
+    }
+}
+uint64_t tk_oschan_selftest(int64_t w, int64_t r) {
+    if (w < 1) w = 1;
+    if (w > 8) w = 8;
+    if (r < 0) r = 0;
+    char key[48];
+    snprintf(key, sizeof key, "selftest-%d", (int)getpid());
+    tk_oschan *ch = tk_oschan_make(24, 0, key, strlen(key));   // unbounded => blocking send, no EAGAIN
+    uint64_t handles[8];
+    for (int64_t i = 0; i < w; i += 1) {
+        tk_oschan_selftest_arg *arg = (tk_oschan_selftest_arg *)malloc(sizeof *arg);
+        if (arg == NULL) tk_panic("out of memory");
+        arg->ch = ch; arg->id = i + 1; arg->r = r;
+        handles[i] = tk_thread_join_spawn(tk_oschan_selftest_writer, arg);
+    }
+    int64_t expected[9];
+    for (int i = 0; i < 9; i += 1) expected[i] = 0;
+    int64_t total = w * r;
+    uint64_t rc = 0;
+    for (int64_t got = 0; got < total; got += 1) {
+        uint64_t rec[3];
+        if (!tk_oschan_recv(ch, rec)) { rc = 4; break; }
+        uint64_t id = rec[0], seq = rec[1], pat = rec[2];
+        if (id < 1 || id > (uint64_t)w) { rc = 1; break; }
+        if (pat != tk_oschan_pattern(id, seq)) { rc = 2; break; }
+        if ((int64_t)seq != expected[id]) { rc = 3; break; }
+        expected[id] += 1;
+    }
+    for (int64_t i = 0; i < w; i += 1) tk_thread_join(handles[i]);
+    tk_oschan_end(ch);
+    return rc;
+}
+#else
+// Windows has no AF_UNIX abstract namespace; the mailslot port is a later crumb (§10.2). The symbols
+// exist so the surface links, but any use is program-fatal until the port lands.
+tk_oschan *tk_oschan_make(uint64_t elem_size, uint64_t bounds, const char *key, uint64_t key_len) {
+    (void)elem_size; (void)bounds; (void)key; (void)key_len; tk_panic("oschan: not supported on Windows yet"); return NULL;
+}
+int tk_oschan_send(tk_oschan *ch, const void *elem) { (void)ch; (void)elem; tk_panic("oschan: not supported on Windows yet"); return -1; }
+int tk_oschan_recv(tk_oschan *ch, void *out) { (void)ch; (void)out; tk_panic("oschan: not supported on Windows yet"); return 0; }
+void tk_oschan_close(tk_oschan *ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
+void tk_oschan_end(tk_oschan *ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
+uint64_t tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len) {
+    (void)elem_size; (void)bounds; (void)key_addr; (void)key_len; tk_panic("oschan: not supported on Windows yet"); return 0;
+}
+int64_t tk_oschan_send_u(uint64_t ch, uint64_t elem_addr) { (void)ch; (void)elem_addr; tk_panic("oschan: not supported on Windows yet"); return -1; }
+int64_t tk_oschan_recv_u(uint64_t ch, uint64_t out_addr) { (void)ch; (void)out_addr; tk_panic("oschan: not supported on Windows yet"); return 0; }
+void tk_oschan_end_u(uint64_t ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
+uint64_t tk_oschan_selftest(int64_t w, int64_t r) { (void)w; (void)r; tk_panic("oschan: not supported on Windows yet"); return 0; }
+#endif
+
+// (§10 C5) tk_region_deregister — bind type_id -> NULL in r's OWN table so a post-teardown
+// tk_region_lookup MISSES. The arg-flip twin of tk_region_register (never touches an ancestor's
+// table). A type_id that was never registered is a no-op.
+void tk_region_deregister(tk_region *r, uint64_t type_id) {
+    if (r == NULL) return;
+    for (size_t i = 0; i < r->nentries; i += 1) {
+        if (r->entries[i].type_id == type_id) { r->entries[i].instance = NULL; return; }
+    }
 }
 
 void *tk_alloc(size_t n) {

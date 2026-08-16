@@ -240,6 +240,99 @@ void       tk_thread_join(uint64_t handle);
 // tk_names_live_count delta from the pre-spawn baseline (MUST be 0 under TEKO_MEM_PARANOID=1).
 uint64_t   tk_thread_spawn_selftest(int64_t n);
 
+// (§10 C0b) tk_memchan — an in-process MPSC FIFO for opaque fixed-width elements, living in the F2
+// program region (tk_region_program) so it OUTLIVES the producing task's tk_task_end (a channel is
+// cross-task by construction). Type-erased: it moves `elem_size` raw bytes per element (the Teko
+// layer marshals T<->bytes). Bounded by a slot count; `bounds == 0` means UNBOUNDED (grows). All
+// send/recv are blocking (a bounded send blocks while full, a recv blocks while empty), released by
+// the close signal.
+typedef struct tk_memchan tk_memchan;
+// tk_memchan_make — allocate a channel of `bounds` slots of `elem_size` bytes each. The STRUCT SHELL
+// lives in the F2 program region (stable address for the registry); the ring BUFFER and the pthread
+// mutex/cond are heap/OS resources that tk_memchan_end releases (F2 has no per-entry free yet — see
+// the C5 teardown note). bounds==0 => unbounded (buffer doubles on demand). OOM => tk_panic.
+tk_memchan *tk_memchan_make(uint64_t elem_size, uint64_t bounds);
+// tk_memchan_send — copy `elem_size` bytes from `elem` into the FIFO tail. Blocks while a BOUNDED
+// channel is full; returns immediately once space exists or the channel is closed (a send on a
+// closed channel is a no-op — the producer contract closes exactly once).
+void        tk_memchan_send(tk_memchan *ch, const void *elem);
+// tk_memchan_recv — copy the FIFO head into `out` (`elem_size` bytes). Blocks while empty. Returns 1
+// when an element was delivered, 0 when the channel is CLOSED AND DRAINED (the `Closed` signal the
+// Teko Rx.pop surfaces). A single reader (MPSC) is assumed.
+int         tk_memchan_recv(tk_memchan *ch, void *out);
+// tk_memchan_close — mark closed and wake every blocked sender/receiver. Idempotent.
+void        tk_memchan_close(tk_memchan *ch);
+// tk_memchan_end — close + release the ring buffer and destroy the mutex/cond (the drop-cascade's
+// transport teardown). Idempotent. The F2 struct shell is reclaimed at process exit.
+void        tk_memchan_end(tk_memchan *ch);
+// tk_memchan_selftest — C-owned probe body reached through ONE plain-scalar extern (the
+// tk_thread_spawn_selftest pattern). Spawns a producer that sends 0..n-1 (i64), the caller thread
+// recv's them, asserts order+sum, then close+end. Returns 0 on success, a non-zero failure code
+// otherwise. Under TEKO_MEM_PARANOID=1 the arena live-count is asserted balanced by the caller.
+uint64_t    tk_memchan_selftest(int64_t n);
+// The u64-HANDLE ABI the Teko `extern fn` surface binds to (the tk_region_new_u convention): a
+// tk_memchan* travels through Teko as a `u64`, and the element buffer as a `u64` address, so these
+// thin twins take/return that width and cast at the boundary (no int<->pointer conversion warning).
+uint64_t    tk_memchan_make_u(uint64_t elem_size, uint64_t bounds);   // handle as a u64
+void        tk_memchan_send_u(uint64_t ch, uint64_t elem_addr);       // elem read from the u64 address
+int64_t     tk_memchan_recv_u(uint64_t ch, uint64_t out_addr);        // 1=value, 0=closed+drained
+void        tk_memchan_end_u(uint64_t ch);                            // close + release
+
+// (§10 C0c) tk_oschan — an AF_UNIX SOCK_DGRAM MPSC transport: ONE reader socket bound to a
+// key-derived ABSTRACT-namespace name (sun_path[0]==0, Linux — auto-removed on close, no filesystem
+// cleanup), N writers each sendto that name. Datagram boundaries make each `push` atomic for free (no
+// torn frame). Lives in F2 (tk_region_program). Fixed-width elements only in v1: `elem_size` raw
+// little-endian bytes per datagram. Fat T (str/slice) across the socket is a later frame — gated by
+// C3's checker.
+typedef struct tk_oschan tk_oschan;
+// tk_oschan_make — create+bind the reader socket to the abstract name derived from `key`; set
+// SO_RCVBUF from `bounds` (bounds==0 => the OS default, effectively unbounded). Returns the
+// F2-resident handle, or tk_panic on a socket/bind failure (the surface maps this to `make`'s error).
+tk_oschan  *tk_oschan_make(uint64_t elem_size, uint64_t bounds, const char *key, uint64_t key_len);
+// tk_oschan_send — sendto the reader's bound name (a writer socket is lazily opened per calling
+// thread and cached thread-local). Returns 0 on accept, -1 when the receive queue is full (EAGAIN
+// under MSG_DONTWAIT for a bounded channel); a blocking (bounds==0) send omits MSG_DONTWAIT.
+int         tk_oschan_send(tk_oschan *ch, const void *elem);
+// tk_oschan_recv — recvfrom the reader socket (blocking). Returns 1 with `out` filled (elem_size
+// bytes), or 0 on the CLOSED sentinel (a zero-length control datagram the producer's close sends).
+int         tk_oschan_recv(tk_oschan *ch, void *out);
+// tk_oschan_close — send the zero-length CLOSED sentinel so a blocked reader wakes and drains;
+// idempotent.
+void        tk_oschan_close(tk_oschan *ch);
+// tk_oschan_end — close + close(2) the reader fd (abstract name vanishes) + close cached writer fds.
+// Idempotent.
+void        tk_oschan_end(tk_oschan *ch);
+// tk_oschan_selftest — the fan-in proof as a C-owned body reached by one scalar extern: `w` writer
+// threads each send `r` records carrying (writer_id, seq, pattern=f(id,seq)); the reader verifies all
+// three per record (proof by CONTENT not count). Returns 0 on success.
+uint64_t    tk_oschan_selftest(int64_t w, int64_t r);
+// The u64-HANDLE ABI the Teko `extern fn` surface binds to (the tk_region_new_u convention). The key
+// bytes travel as a u64 address + a length so a Teko `str` reaches the C `const char *`.
+uint64_t    tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len);
+int64_t     tk_oschan_send_u(uint64_t ch, uint64_t elem_addr);        // 0=accept, -1=full (bounded)
+int64_t     tk_oschan_recv_u(uint64_t ch, uint64_t out_addr);         // 1=value, 0=closed
+void        tk_oschan_end_u(uint64_t ch);                             // close + tear down
+
+// (§10 C5) tk_waitgroup — a MANUAL counter with a blocking wait, F2-resident (survives producing
+// tasks). add(n)/done() mutate the count under a mutex; wait() blocks on a cond until the count
+// reaches zero.
+typedef struct tk_waitgroup tk_waitgroup;
+tk_waitgroup *tk_waitgroup_make(void);               // count=0, in tk_region_program
+void          tk_waitgroup_add(tk_waitgroup *wg, int64_t n);  // count += n (call before spawn = race-free)
+void          tk_waitgroup_done(tk_waitgroup *wg);   // count -= 1; broadcast not-busy at zero
+void          tk_waitgroup_wait(tk_waitgroup *wg);   // block while count > 0
+void          tk_waitgroup_end(tk_waitgroup *wg);    // destroy mutex/cond (drop-cascade)
+uint64_t      tk_waitgroup_selftest(int64_t n);      // n threads each done() after an add(n); wait returns 0
+// The u64-HANDLE ABI the Teko `extern fn` surface binds to (the tk_region_new_u convention).
+uint64_t      tk_waitgroup_make_u(void);             // handle as a u64
+void          tk_waitgroup_add_u(uint64_t wg, int64_t n);
+void          tk_waitgroup_done_u(uint64_t wg);
+void          tk_waitgroup_wait_u(uint64_t wg);
+void          tk_waitgroup_end_u(uint64_t wg);
+// (§10 C5) tk_region_deregister — bind `type_id` -> NULL in `r`'s OWN table so a post-teardown
+// tk_region_lookup MISSES (the drop-cascade key removal). The arg-flip twin of tk_region_register.
+void       tk_region_deregister(tk_region *r, uint64_t type_id);
+
 // (F2) tk_region_program — the PROGRAM region: one per process, owned by NO task, so an object in
 // it survives both a task's tk_arena_pop and that task's exit. F1 leaves the runtime with N task
 // roots and nothing else, so the singletons the owner's ruling places "in the program arena"
