@@ -2130,12 +2130,33 @@ fn variant_member_admissible(member: @Type(), siblings: []@Type(), table: TypeTa
             return error { message = "a reference cannot be stored in a struct/variant/collection" }
         }
         Named as nm => {
-            if is_interface_name(nm.name, table) {
+            if is_interface_name(nm.name, table) && !is_type_param_named(nm.name, table) {
                 return error { message = "an interface cannot be a variant member yet — bind the interface value on its own (no `I | error` unions)" }
             }
             null
         }
         _ => null
+    }
+}
+
+/**
+ * Is `name` a generic TYPE-PARAMETER's synthetic registration (a `type_param_table` decl) rather than a
+ * genuine user interface? A constrained type-param `T: IOrd` is registered by `type_param_reg` with an
+ * `InterfaceBody` (so `constraint_op_owner`/`type_contract_dispatch` can authorize calls on `T`), which
+ * makes `is_interface_name` report it as an interface. The synthetic decl is uniquely shaped — no own
+ * `type_params`, exactly one carried `type_constraints` entry (the param's own constraint) — where a real
+ * interface decl carries none. Used to tell a constrained type-param apart from an interface at the
+ * union-member gate, so a `T | null` return concretizes at mono instead of being rejected as "an interface".
+ *
+ * @param name   the resolved member name to classify
+ * @param table  the folded type table (with the enclosing generic's type-params registered)
+ * @return       true iff `name` resolves to a type-param's synthetic InterfaceBody decl
+ * @since fase1b-machinery (F1)
+ */
+fn is_type_param_named(name: str, table: TypeTable): bool {
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => td.type_params.len == 0 && td.type_constraints.len == 1
+        error => false
     }
 }
 
