@@ -1613,6 +1613,12 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64): ParsedAttributes | e
             if !is_kind_at(tokens, start + 4, lexer::TokenKind::RParen) { return err_at(tokens, start + 4, "expected ')' to close `#os(…)`") }
             guard = attr_guard_and(guard, pred_os(tokens[start + 3].text))
             start = skip_seps(tokens, start + 5)
+        } else if attr == "arch" {
+            if !is_kind_at(tokens, start + 2, lexer::TokenKind::LParen) { return err_at(tokens, start + 2, "expected '(' after `#arch`") }
+            if !is_kind_at(tokens, start + 3, lexer::TokenKind::Str) { return err_at(tokens, start + 3, "expected a quoted arch name in `#arch(\"…\")`") }
+            if !is_kind_at(tokens, start + 4, lexer::TokenKind::RParen) { return err_at(tokens, start + 4, "expected ')' to close `#arch(…)`") }
+            guard = attr_guard_and(guard, pred_arch(tokens[start + 3].text))
+            start = skip_seps(tokens, start + 5)
         } else if attr == "arena_size" {
             if has_arena_size { return err_at(tokens, start + 1, "a function may carry only one `#arena_size(…)` directive") }
             var parsed = match parse_arena_size_arg(tokens, start) { ParsedU64 as x => x; error as e => return e }
@@ -1622,7 +1628,7 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64): ParsedAttributes | e
         } else if attr == "inline" {
             return err_at(tokens, start + 1, "`#inline` attaches to a local binding (`#inline var …`) or a struct field (`#inline name: T`), not a declaration")
         } else {
-            return err_at(tokens, start + 1, "unknown attribute (only `#test`, `#os(\"…\")`, `#arena_size(N)`, and the binding/field `#inline` are recognized)")
+            return err_at(tokens, start + 1, "unknown attribute (only `#test`, `#os(\"…\")`, `#arch(\"…\")`, `#arena_size(N)`, and the binding/field `#inline` are recognized)")
         }
     }
     ParsedAttributes { is_test = is_test; os_guard = os_guard; has_arena_size = has_arena_size; arena_size = arena_size; guard = guard; next = start }
@@ -2086,8 +2092,8 @@ fn parse_fn_decl_with_attrs(tokens: []lexer::Token, start: u64, attrs: ParsedAtt
     parse_function(tokens, start, attrs.is_test, attrs.os_guard, false, false, attrs.has_arena_size, attrs.arena_size)
 }
 
-/** Parse a `type` declaration reached through `parse_decl`, applying the collected attributes:
- *  `#test`/`#os`/`#arena_size` may not precede a type. */
+/** Parse a `type` declaration reached through `parse_decl`. `#test`/`#arena_size` are function-only
+ *  and rejected here; the §17 `#os`/`#arch` guards are allowed and ride on the item's `Item.guard`. */
 fn parse_type_decl_with_attrs(tokens: []lexer::Token, start: u64, k: u64, attrs: ParsedAttributes): Parsed<@Decl()> | error {
     match reject_fn_only_attrs_on_type(tokens, k, attrs) { error as e => return e; null => { } }
     parse_type_decl(tokens, start)
@@ -2099,10 +2105,21 @@ fn parse_flags_decl_with_attrs(tokens: []lexer::Token, start: u64, k: u64, attrs
     parse_flags_decl(tokens, start)
 }
 
-/** The function-only attributes (`#test`, `#os`, `#arena_size`) are all rejected before a `type`. */
+/**
+ * reject_fn_only_attrs_on_type — reject the attributes that are FUNCTION-ONLY (`#test`,
+ * `#arena_size`) before a non-function declaration. The §17 conditional-compile guards
+ * (`#os`/`#arch`) are NOT function-only: they may precede any top-level item (`fn`/`type`/`flags`/
+ * `const`/extern), so they are deliberately NOT rejected here — their predicate rides on the item's
+ * `Item.guard` via `decl_guards` and prunes the whole declaration before type-check.
+ *
+ * @param tokens  the token stream (for the error position)
+ * @param k       the index of the declaration keyword the attributes precede
+ * @param attrs   the collected leading attributes
+ * @return        an error when a function-only attribute precedes this declaration, else `null`
+ * @throws        `#test`/`#arena_size` on a non-function declaration
+ */
 fn reject_fn_only_attrs_on_type(tokens: []lexer::Token, k: u64, attrs: ParsedAttributes): error | null {
     if attrs.is_test { return err_at(tokens, k, "`#test` may only precede a function") }
-    if attrs.os_guard != "" { return err_at(tokens, k, "`#os(\"…\")` may only precede a function") }
     if attrs.has_arena_size { return err_at(tokens, k, "`#arena_size(…)` may only precede a function, not a `type`") }
     null
 }
@@ -2168,6 +2185,18 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
     var decl_guards: []Pred = teko::list::empty()
     loop {
         if !has_token(tokens, p) { break }
+        if is_cc_if_start(tokens, p) {
+            var region = match parse_cc_region(tokens, p, pred_true()) { ParsedRegion as x => x; error as e => return e }
+            decls = append_decls(decls, region.decls)
+            decl_guards = append_guards(decl_guards, region.guards)
+            p = region.next
+            if !has_token(tokens, p) { break }
+            if !is_sep(tokens, p) {
+                return err_at(tokens, p, "expected ';' or a newline after a `#endif`")
+            }
+            p = skip_trivia(tokens, p)
+            continue
+        }
         var d = match parse_decl(tokens, p) { ParsedDecl as x => x; error as e => return e }
         decls = teko::list::push(decls, d.node)
         decl_guards = teko::list::push(decl_guards, d.guard)
