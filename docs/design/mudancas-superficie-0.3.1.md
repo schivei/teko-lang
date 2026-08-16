@@ -1615,6 +1615,16 @@ kernel. **`from "c"` (libc portável) está BANIDO.**
   `from "c"` vs `<stdlib.h>` — sem sentido: syscall na perna C é asm inline, sem símbolo/colisão) e **C6a**
   (`teko::env` via libc getenv — env vira Teko puro sobre `environ`). O **plano §11/§12** (refresh libc-FFI) fica
   SUPERSEDED por esta virada. **Novo keystone = o intrínseco de syscall** → re-roteado ao arquiteto.
+- **✅ KEYSTONE DE SYSCALL ATERRISSOU (`fb0ec8c7`, reseed `1a03a68e`, 2026-08-16).** `teko::sys::syscall0..6(nr,
+  a0..aN: i64): i64` builtins (estilo `f64_bits`) → lowering emite helpers `static inline tk_syscallN` no preâmbulo
+  com `asm volatile("syscall" ...)` x86_64 (`#if defined(__x86_64__)`/`#error`; aarch64 design-ahead), **use-gated**
+  (`cg_scan_syscall_arities`) → o corpus sem-syscall fica byte-idêntico (fixpoint LIMPO tc1==tc2==tc3, sem ladder).
+  `teko::sys` ganhou `SYS_EXIT_GROUP` x86_64(231)/aarch64(94). `#arch` prune CONFIRMADO funcional. MEM_PARANOID
+  exit 0 (nota: pico ~5.6 GB no limite do cap de 6 GB — um 1º run bateu no guard "out of memory (str concat)" do
+  emit e o re-run passou; artefato de pressão-de-memória do cap = território Doc-1, NÃO erro de correção). Fixture
+  `sys_exit_group` = `exit_group(42)` cru → exit 42. Native honest-stop (`_ =>` de `lower_call`). **Bridges
+  `ptr_word`/`ref_word` (args-ponteiro) e a migração de subsistemas (write→exit→clock_gettime→getrandom→ARENA-mmap)
+  são os próximos crumbs.**
 
 **🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
 1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
