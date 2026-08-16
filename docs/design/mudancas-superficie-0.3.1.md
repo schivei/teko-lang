@@ -1213,6 +1213,12 @@ byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML a
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
+**✅ `encoding::asn1` + `encoding::fixed` ENTREGUES (`154906bf`).** ASN.1 DER encode/decode (BER definite-length
+tolerante), INTEGER via bigint, OID, tagged explicit/implicit — cross-check byte-exato vs `asn1crypto` +
+decode field-a-field de um `SubjectPublicKeyInfo` RSA real do openssl (relevante p/ X.509/PKCS). fixed-width
+colunas. Nomes `Asn1*`/`Fixed*` únicos. **Novos traps (registrados abaixo):** `class` é keyword reservada;
+bitwise em `byte` bare trip B.38 (cast `to u64`).
+
 **✅ `encoding::yaml` ENTREGUE (`399deeef`).** YAML 1.2 core (struct-tagged `YamlValue`): block/flow maps+seqs,
 literal `|`/folded `>` com chomping, anchors/aliases, multi-doc, core-schema; cross-check PyYAML 6.0.1;
 deferrals honestos (tags `!!`, merge `<<`, directivas). Achou+consertou 2 bugs de parser via binário scratch
@@ -1278,6 +1284,10 @@ Costuras: `encoding::csv` `type CsvRow` visibility bug (lane csv); `pub→exp` d
 que casta negativos entre signedness precisa contornar (carry/borrow u64-puro). (2) **codegen quirk** — dois
 `loop` sequenciais compartilhando um `i64` mutado miscompilam (guard do 1º não pula). Ambos merecem olhar
 compiler-side; podem já estar corrigidos na árvore atual (o seed é `.31`, a árvore está à frente).
+(5) **`class` é keyword reservada** — não pode ser nome de param/campo/local (`TokenKind::Class`); contornar
+(`tag_class`). Junto de `pub`/`base`. (6) **bitwise em `byte` bare** (`b & 0x80`, `b << 4`, etc.) trip
+"B.38 needs integer not float" — castar operando `to u64` primeiro (como `cbor`/`bigint_ops` já fazem); é a
+generalização do `byte ^ byte` já visto no `rsa_test`.
 (3) **codegen: widening de união no `return` (REAL, na árvore atual)** — retornar um valor de união de
 2-braços (`MsgRead | error`) de uma função declarada com 3-braços (`MsgRead | error | null`) faz o codegen
 emitir o struct de C ESTREITO onde o largo é esperado → GCC rejeita (`incompatible types when returning
