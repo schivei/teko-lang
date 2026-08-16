@@ -1195,7 +1195,7 @@ exige genéricos). Escopo real antes do Doc-1: a stdlib §1.5 INTEIRA (incl. as 
 document-signing (jose✅·xmldsig✅·cose🔄) → **keystone de genéricos (#254)** → `collections`/`sort<T:Ord>` →
 **§10 concorrência** (`spawn`/`chan<T>`/`await`/`Intent<T>`/`teko::threads`) → §11 → **§17 → §16 (FFI-do-SO,
 remove teko_rt)** → **stdlib que depende de FFI** (`crypto::rand`/`openssl`/`gpg` · `net` · `db` · `odbc` ·
-`rpc`) → `ui`. **SÓ ENTÃO o Doc-1.**
+`rpc`). ~~→ `ui`~~ (**`ui` REMOVIDO do escopo — ruling dono 2026-08-16, ver abaixo**). **SÓ ENTÃO o Doc-1.**
 **CORREÇÃO DO DONO (2026-08-15): NADA disso é "pós-Doc-1". É PRÉ-Doc-1.** Eu tinha posto §16/FFI-stdlib/`ui`
 como pós-Doc-1 — ERRADO. **Divisão definitiva (ruling do dono): a Doc-2 TROCA TODAS as dependências C** por
 Teko + FFI-do-SO (reescrevendo o que for necessário, **sem exceções ou desculpas** — inclui reimplementar o
@@ -1203,6 +1203,12 @@ alocador de arena em Teko sobre `mmap`/syscalls); **a Doc-1 apenas MELHORA** ess
 reconstrução). Doc-2 é grande (toda a linguagem + stdlib completa + FFI + `ui` + a reescrita do runtime C→Teko)
 e é PRÉ-Doc-1 por inteiro; a Doc-1 é o passo final e focado de **melhoria da arena**, sobre um terreno 100%
 pronto e já livre de C.
+
+**⚖️ `ui` REMOVIDO DO ESCOPO (ruling dono 2026-08-16).** O `ui` era uma SUGESTÃO; sai da Doc-2 (e de todo o
+roadmap). Racional do dono: "com o poderio do FFI o desenvolvedor já conseguirá usar uma integração por ele
+mesmo para isso" — com a FFI-em-runtime (`dlopen`/`dlsym`) e a ABI-nativa-do-SO que o §16 entrega, o dev integra
+o toolkit que quiser (GTK/Qt/web/nativo) por conta própria; Teko NÃO embarca um `ui` na stdlib. ⇒ o terreno Doc-2
+termina em **FFI-stdlib** (rand/openssl/gpg/net/db/rpc); sem `ui`.
 
 **Progresso stdlib monomórfica — NÚCLEO CRYPTO ✅ COMPLETO:** `hash` ✅ (`f861db43`) · `mac` ✅ (`6f6d5ca4`)
 · `kdf` ✅ (`e804f474`) · `cipher` ✅ (`d5299449` — AES 128/192/256 {CBC,CTR,CFB,OFB}, ChaCha20,
@@ -1368,7 +1374,7 @@ gen2==gen3 do implementer). Fixtures: `generic_factory_owner_param` (F3, exit 47
 `retarget_generic_static_callee` (primo do gap #5); (b) o gap #2 forma-CONSTRUCT-aninhado continua latente (F3
 fechou só a forma factory-call). **GENÉRICOS COMPLETOS** (resta só F2 checker-order-bug com workaround são +
 limitações adjacentes rastreadas). Próximo: `sort<T:IOrd>` genérico (adjacente, destravado) → **§10 concorrência
-(100%)** → §11 → §17 → §16 → FFI-stdlib → ui.
+(100%)** → §11 → §17 → §16 → FFI-stdlib. (`ui` REMOVIDO — ruling dono 2026-08-16.)
 
 **⚠️ INCIDENTE DE INFRA (rewind de snapshot):** o container foi restaurado a um snapshot antigo (`6ce8675d`, 231
 commits atrás). **NADA de commitado/pushado perdido** — `origin/fix/retirement` @ `7721a1d7` intacto, resync por
