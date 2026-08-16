@@ -1391,6 +1391,19 @@ runtime ATUAL (sem §16); só transportes plugáveis-por-usuário (Kafka/Rabbit)
 LEAF** (o axis-2 parallel-codegen usa `fork_join` interno SEPARADO, não a superfície `spawn`/`chan`) → reseeds
 mecânicos. Vou dirigir C0a→A3 (desbloqueado) e PARAR em A4 até o ruling D2 do dono.
 
+**✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
+[]T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
+baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6
+sorts CONCRETOS de primitivos (`sort_str`/`sort_i64`/`sort_u64`/`sort_f64`/`sort_bytes`/`sort_str_natural`)
+intactos (o compilador os usa internamente). **Corpus NUNCA instancia → 0 stamped, emissão `ac9a9976`
+BYTE-IDÊNTICA com/sem delta** (mais limpo que "só typedefs inertes"; sem reseed). Fixture `generic_sort` (3
+instâncias: I64Key/StrKey/`Ver` struct derivando IOrd; estabilidade verificada) exit 55. **STDLIB §1.5 genéricos
+COMPLETA** (collections + sort<T:Ord>). **Achado adjacente (rastreado, fora de escopo):** `sort_by<T>(xs, less:
+func<T,T,bool>)` PULADO — a lowering de chamada-de-closure genérica não substitui o type-param no cast do
+ponteiro-de-função (emite `tk_t_T` em vez de `int64_t`); todo uso de `func<…>` no tree é a tipos CONCRETOS, então
+o caminho type-param nunca foi exercido. Bug de codegen, follow-up. Próximo: **§10 concorrência C0a→A3** (A4 espera
+ruling D2).
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
