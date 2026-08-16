@@ -1,0 +1,259 @@
+/**
+ * IEq — the equality CAPABILITY (§9.4): a type conforms by WRITING `operator __eq`, and its
+ * mandated counter-part `operator __ne` is part of the contract (equality by negation). A conformer
+ * writes `__ne` itself or composes the `NeByEq` mixin. A generic `<T: IEq>` dispatches `==`/`!=`
+ * through T's contract (real monomorph/vtable dispatch — the retired structural `Eq` could not),
+ * unlocking a `Map<K: IEq & IHash, V>`-style keyed container.
+ *
+ * @since 0.3.1 (§9.4)
+ */
+pub type IEq = interface {
+    /**
+     * __eq — equality of two `self` operands (§9 ruling 3, comparison → `bool`).
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` equals `right`
+     */
+    operator __eq(left: self, right: self): bool
+    /**
+     * __ne — inequality of two `self` operands, the mandated counter-part of `__eq` (§9 ruling 5).
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` differs from `right`
+     */
+    operator __ne(left: self, right: self): bool
+}
+
+/**
+ * IOrd — the total-ordering CAPABILITY (§9.4): a type conforms by providing all four comparators, and
+ * each obliges its sealed §9 counter-part — `__lt`⟂`__ge`, `__gt`⟂`__le` — so the contract lists both
+ * sides of every pair. A conformer typically WRITES `__lt` and composes the `GtByLt`/`LeByLt`/`GeByLt`
+ * mixins for the reflections. A generic `<T: IOrd>` dispatches ordering through T, unlocking a generic
+ * `sort<T: IOrd>` and ordered containers.
+ *
+ * @since 0.3.1 (§9.4)
+ */
+pub type IOrd = interface {
+    /**
+     * __lt — is `left` strictly less than `right`? The primitive comparator the reflection mixins
+     * derive the other three from (§9 ruling 3, comparison → `bool`).
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` orders before `right`
+     */
+    operator __lt(left: self, right: self): bool
+    /**
+     * __gt — is `left` strictly greater than `right`? The reflection of `__lt` with the operands
+     * swapped (`GtByLt` derives it).
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` orders after `right`
+     */
+    operator __gt(left: self, right: self): bool
+    /**
+     * __le — is `left` less than or equal to `right`? The negation of `right < left` (`LeByLt` derives
+     * it).
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` does not order after `right`
+     */
+    operator __le(left: self, right: self): bool
+    /**
+     * __ge — is `left` greater than or equal to `right`? The negation of `left < right` (`GeByLt`
+     * derives it).
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` does not order before `right`
+     */
+    operator __ge(left: self, right: self): bool
+}
+
+/**
+ * IHash — the hashing CAPABILITY, a METHOD interface (not an operator: there is no `operator hash`
+ * token). A type conforms by writing `fn hash(): u64`, dispatched through the generic-method-on-`T`
+ * path (#254, iface_methods_by_name/constraint_interfaces) — the half 9-ops's interface-operator
+ * layer does NOT deliver. A hash-keyed collection constrains its key `K: IEq & IHash`: `IHash.hash()`
+ * buckets a key (compared as a cheap `u64` before the full key), `IEq.__eq` disambiguates a collision.
+ * CONTRACT: two keys that compare `__eq`-equal MUST return the same `hash()` (hash-eq consistency) —
+ * violating it silently corrupts lookup, so a conformer's `hash` and `__eq` must read the same fields.
+ *
+ * @since 0.3.1 (§9.4)
+ * @see IEq (the equality half a hash-keyed collection also requires)
+ */
+pub type IHash = interface {
+    /**
+     * hash — a 64-bit hash of the receiver, stable within one process run. Two receivers that compare
+     * `__eq`-equal MUST return equal hashes (the hash-eq consistency law the keyed collections rely on).
+     *
+     * @return a 64-bit hash of the receiver
+     */
+    fn hash(): u64
+}
+
+/**
+ * NeByEq — the optional counter-part mixin for `IEq` (§9.4): flattens the obvious `__ne` body
+ * `!(left == right)` into a composer that already writes `__eq`, so the type satisfies IEq's mandated
+ * counter-part without hand-writing it. Self-contained: the body references only `==` on `self`, which
+ * the composing host provides. A type wanting a non-trivial `__ne` (e.g. NaN semantics) writes its own
+ * instead of composing this mixin.
+ *
+ * @since 0.3.1 (§9.4)
+ */
+pub type NeByEq = trait {
+    /**
+     * __ne — inequality by negating equality, `!(left == right)` (the composing host provides `__eq`).
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` differs from `right`
+     */
+    operator __ne(left: self, right: self): bool { !(left == right) }
+}
+
+/**
+ * GtByLt — the reflection mixin deriving `__gt` from `__lt` for an `IOrd` composer (§9.4):
+ * `left > right` is `right < left` with the operands swapped. Self-contained: the body references only
+ * `<` on `self`, which the composing host writes.
+ *
+ * @since 0.3.1 (§9.4)
+ */
+pub type GtByLt = trait {
+    /**
+     * __gt — greater-than by reflecting less-than, `right < left`.
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` orders after `right`
+     */
+    operator __gt(left: self, right: self): bool { right < left }
+}
+
+/**
+ * LeByLt — the reflection mixin deriving `__le` from `__lt` for an `IOrd` composer (§9.4):
+ * `left <= right` is `!(right < left)`. Self-contained: the body references only `<` on `self`.
+ *
+ * @since 0.3.1 (§9.4)
+ */
+pub type LeByLt = trait {
+    /**
+     * __le — less-than-or-equal by negating the swapped less-than, `!(right < left)`.
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` does not order after `right`
+     */
+    operator __le(left: self, right: self): bool { !(right < left) }
+}
+
+/**
+ * GeByLt — the reflection mixin deriving `__ge` from `__lt` for an `IOrd` composer (§9.4):
+ * `left >= right` is `!(left < right)`. Self-contained: the body references only `<` on `self`.
+ *
+ * @since 0.3.1 (§9.4)
+ */
+pub type GeByLt = trait {
+    /**
+     * __ge — greater-than-or-equal by negating less-than, `!(left < right)`.
+     *
+     * @param left   the left operand
+     * @param right  the right operand
+     * @return       true iff `left` does not order before `right`
+     */
+    operator __ge(left: self, right: self): bool { !(left < right) }
+}
+
+/**
+ * teko::cmp key adapters — the concrete capability conformers that make the hash- and order-keyed
+ * generic collections (`teko::collections::Dictionary`/`HashSet`/`SortedSet`/…) immediately usable
+ * with primitive keys. The interface model (9-ops + #254) requires a key type to EXPLICITLY conform
+ * `IEq`/`IHash`/`IOrd` (there is no implicit auto-derivation onto a bare `str`/`i64`); a value-type
+ * primitive cannot yet carry an interface capability directly (deferred in 9-ops T-1), so these thin
+ * wrapper structs supply the conformance. Each writes only the primitive comparator (`__eq`/`__lt`)
+ * plus `hash`, and composes the reflection mixins (`NeByEq`/`GtByLt`/`LeByLt`/`GeByLt`) for the rest.
+ * Both wrappers conform the FULL capability set (hashable AND totally ordered) because their backing
+ * primitives are both — so one wrapper serves every keyed collection.
+ */
+
+/**
+ * StrKey — a `str` wrapped as a hashable, totally-ordered key. `hash` is FNV-1a over the bytes
+ * (`teko::runtime::str_hash`, the same fold `Map<V>` proves), `__eq` is byte equality, `__lt` is the
+ * lexicographic byte order (`teko::runtime::str_compare`). Satisfies the hash-eq consistency law:
+ * two equal keys hash identically because both `hash` and `__eq` read the single `key` field.
+ *
+ * @since 0.3.1 (§9.4)
+ * @see IHash, IEq, IOrd
+ */
+pub type StrKey = struct IEq & IHash & NeByEq & IOrd & GtByLt & LeByLt & GeByLt {
+    /** The wrapped string — the sole field `hash`, `__eq` and `__lt` all read. */
+    key: str
+    /**
+     * __eq — byte equality of the two wrapped keys.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff the wrapped strings are byte-equal
+     */
+    operator __eq(left: self, right: self): bool { left.key == right.key }
+    /**
+     * __lt — lexicographic (unsigned byte) order of the two wrapped keys.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff `left` orders lexicographically before `right`
+     */
+    operator __lt(left: self, right: self): bool { teko::runtime::str_compare(left.key, right.key) < 0 }
+    /**
+     * hash — FNV-1a of the wrapped key's bytes (`teko::runtime::str_hash`), consistent with `__eq`.
+     *
+     * @return the FNV-1a hash of `key`
+     */
+    fn hash(): u64 { teko::runtime::str_hash(self.key) }
+}
+
+/**
+ * I64Key — an `i64` wrapped as a hashable, totally-ordered key (the primitive-adapter molde for a
+ * numeric key). `__eq`/`__lt` are the native integer comparisons; `hash` is a zig-zag fold that maps
+ * every `i64` (including negatives) to a distinct non-negative `u64` WITHOUT ever casting a negative
+ * `i64` to `u64` (a fail-loud SIGABRT): a non-negative `n` maps to `2n`, a negative `n` to `2*(-(n+1))+1`
+ * (whose subtrahend `-(n+1)` is always in `[0, i64::MAX]`, so the cast is total).
+ *
+ * @since 0.3.1 (§9.4)
+ * @see IHash, IEq, IOrd
+ */
+pub type I64Key = struct IEq & IHash & NeByEq & IOrd & GtByLt & LeByLt & GeByLt {
+    /** The wrapped integer — the sole field `hash`, `__eq` and `__lt` all read. */
+    n: i64
+    /**
+     * __eq — native equality of the two wrapped integers.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff the wrapped integers are equal
+     */
+    operator __eq(left: self, right: self): bool { left.n == right.n }
+    /**
+     * __lt — native less-than of the two wrapped integers.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff `left`'s integer is less than `right`'s
+     */
+    operator __lt(left: self, right: self): bool { left.n < right.n }
+    /**
+     * hash — a zig-zag fold of the wrapped integer to a non-negative `u64` (sign-safe, never casts a
+     * negative `i64` to `u64`).
+     *
+     * @return the zig-zag hash of `n`
+     */
+    fn hash(): u64 {
+        var v = self.n
+        if v < 0 { return ((0 - (v + 1)) to u64) * 2 + 1 }
+        (v to u64) * 2
+    }
+}

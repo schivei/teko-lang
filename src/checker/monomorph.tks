@@ -396,19 +396,23 @@ fn subst_find_inst(s: Subst, name: str): @Type() | null {
  * instance namespace (`Ctr__g__i64`), so the call must key off the instance too or the C symbol
  * mismatches ("undeclared identifier"). The Subst already carries `ns::Ctr -> Named{Ctr__g__i64}`
  * (instance_method_subst's receiver remap, in BOTH the canonical and bare spelling), so this reuses it
- * for the call key. A `call_ns` the Subst does not remap passes through UNCHANGED, so every free-fn /
- * cross-type call is byte-identical.
+ * for the call key. A `call_ns` the Subst does not remap by exact match is a PHANTOM generic-instance
+ * key (F3): a static-factory or phantom-receiver call (`Dictionary__g__StrKey__V::make`) whose owner
+ * embeds the bound type-param — the exact match misses, so it falls through to `subst_instance_name`,
+ * which concretizes the embedded token (`V -> i64`) to `Dictionary__g__StrKey__i64`. A `call_ns` that is
+ * neither a Subst key nor a phantom passes through UNCHANGED (byte-identical for every free-fn /
+ * cross-type call), because `subst_instance_name` is a strict no-op for a non-phantom name.
  *
- * @param call_ns  the TCall's current namespace key (the abstract owner for a sibling call)
- * @param s        the instance-method Subst (carries `owner-canon/owner-bare -> Named{instance}`)
- * @return         the instance namespace when `call_ns` is the remapped owner, else `call_ns` unchanged
- * @since generic-stack-completion (#163 follow-up, gap #3)
+ * @param call_ns  the TCall's current namespace key (the abstract owner, or a phantom factory owner)
+ * @param s        the instance/free-fn Subst (owner remaps + bound type-params)
+ * @return         the concrete namespace key when `call_ns` is a remapped owner or phantom, else unchanged
+ * @since generic-stack-completion (#163 follow-up, gap #3), phantom-owner fase1b-machinery (F3)
  */
 fn mono_rekey_call_ns(call_ns: str, s: Subst): str {
     if call_ns.len == 0 { return call_ns }
     match subst_find_inst(s, call_ns) {
-        (@Type()) as ct => match ct { Named as n => n.name; _ => call_ns }
-        null => call_ns
+        (@Type()) as ct => match ct { Named as n => n.name; _ => subst_instance_name(call_ns, s) }
+        null => subst_instance_name(call_ns, s)
     }
 }
 
@@ -417,21 +421,43 @@ fn mono_rekey_call_ns(call_ns: str, s: Subst): str {
  * instance Subst that `mono_rekey_call_ns` uses for the namespace key, so the emitted symbol's
  * namespace and the callee path agree. A sibling `self.count()` carries the callee `[ns::Ctr, count]`;
  * the qualifier `ns::Ctr` must re-key to `Ctr__g__i64` alongside the `call_ns` so downstream passes
- * that read the path (recursion detection, dispatch-key matching) see the instance too. A single-segment
- * callee (a free-fn call) or a qualifier the Subst does not remap passes through UNCHANGED.
+ * that read the path (recursion detection, dispatch-key matching) see the instance too. A qualifier the
+ * Subst does not remap by exact match is a PHANTOM factory owner (F3, `Dictionary__g__StrKey__V`) that
+ * falls through to `subst_instance_name`, concretizing the embedded token to `Dictionary__g__StrKey__i64`
+ * so the callee path and `call_ns` name the SAME stamped instance. A single-segment callee (a free-fn
+ * call) or a qualifier that is neither a Subst key nor a phantom passes through UNCHANGED
+ * (`subst_instance_name` is a strict no-op for a non-phantom name).
  *
  * @param callee  the TCall's callee path (`[..., qualifier, method]`)
- * @param s       the instance-method Subst (carries `owner-canon/owner-bare -> Named{instance}`)
- * @return        the callee with its qualifier re-keyed to the instance, else `callee` unchanged
- * @since generic-stack-completion (#163 follow-up, gap #3)
+ * @param s       the instance/free-fn Subst (owner remaps + bound type-params)
+ * @return        the callee with its qualifier re-keyed to the concrete instance, else `callee` unchanged
+ * @since generic-stack-completion (#163 follow-up, gap #3), phantom-owner fase1b-machinery (F3)
  */
 fn mono_rekey_callee_qualifier(callee: parser::Path, s: Subst): parser::Path {
     if callee.segments.len < 2 { return callee }
     var qual = callee.segments[callee.segments.len - 2].name
     match subst_find_inst(s, qual) {
-        (@Type()) as ct => match ct { Named as n => rewrite_iface_segment(callee, n.name); _ => callee }
-        null => callee
+        (@Type()) as ct => match ct { Named as n => rewrite_iface_segment(callee, n.name); _ => rekey_phantom_qualifier(callee, qual, s) }
+        null => rekey_phantom_qualifier(callee, qual, s)
     }
+}
+
+/**
+ * Re-key a phantom callee qualifier through `subst_instance_name`, rewriting the second-to-last segment
+ * only when the concretization actually changes it — the exact-miss fall-through shared by
+ * `mono_rekey_callee_qualifier`'s two non-remap arms (F3). A non-phantom qualifier (or a phantom none of
+ * whose tokens the Subst binds) leaves the callee byte-identical.
+ *
+ * @param callee  the TCall's callee path
+ * @param qual    the current qualifier (the second-to-last segment)
+ * @param s       the instance/free-fn Subst (bound type-params)
+ * @return        the callee with its qualifier concretized, or `callee` unchanged
+ * @since phantom-owner fase1b-machinery (F3)
+ */
+fn rekey_phantom_qualifier(callee: parser::Path, qual: str, s: Subst): parser::Path {
+    var concrete = subst_instance_name(qual, s)
+    if teko::runtime::str_eq(concrete, qual) { return callee }
+    rewrite_iface_segment(callee, concrete)
 }
 
 // ── the lookup of a generic TFunction by bare name ──────────────────────────────────────

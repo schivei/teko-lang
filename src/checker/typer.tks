@@ -2914,6 +2914,18 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         Variant => if variant_has_null_member(recv_t) { return require_narrowed(recv_t) }
         _ => { }
     }
+    match recv_t {
+        Named as rn => {
+            if name_is_phantom_instance(rn.name, table) {
+                var psegs = method_dispatch_callee(rn.name, mc.method).segments
+                var pcargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+                var pai: u64 = 0
+                loop { if pai >= mc.args.len { break }; pcargs = teko::list::push(pcargs, mc.args[pai]); pai++ }
+                return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = teko::list::empty(); callee_type_args = mc.type_args }, env, table)
+            }
+        }
+        _ => { }
+    }
     var struct_name = match recv_t { Named as n => n.name; _ => return error { message = "method typing is deferred (B.29 / M.4)" } }
     var decl = match type_table_find(table, struct_name, "") { parser::TypeDecl as td => td; error => return error { message = "method typing is deferred (B.29 / M.4)" } }
     match type_param_call_error(decl, table) { error as e => return e; null => { } }
@@ -3129,12 +3141,19 @@ fn rewrite_segment_at(p: parser::Path, idx: u64, name: str): parser::Path {
  * type-args (`callee_type_args`) are NOT consumed here — they bind the factory method's own params
  * downstream (`Map<str,i64>::fold<Acc>()`).
  *
+ * When an owner type-arg is an in-scope abstract type-param (`Dictionary<StrKey, V>::make()` inside a
+ * `Map<V>` method or a free `fn f<V>()`), the resolved instance is a PHANTOM (`Dictionary__g__StrKey__V`)
+ * that no `instantiate_types` site stamps and whose `make` is unregistered. The callee still rewrites to
+ * that phantom segment; `type_call` then routes the phantom-qualified callee to `type_phantom_instance_call`
+ * (F3), which resolves the factory's signature from the abstract TEMPLATE and defers the concrete stamp to
+ * the mono pass. A fully-concrete owner (`<StrKey, i64>`) rewrites to the real stamped instance as before.
+ *
  * @param c      the parsed static call (carrying owner_type_args)
  * @param table  the folded type table (arg resolution)
  * @param ref_ns the call's enclosing namespace
  * @return       the callee path with the owner segment mangled to the instance, or `c.callee` verbatim
  * @throws       when an owner type-arg fails to resolve
- * @since onda-3 (#254 L5)
+ * @since onda-3 (#254 L5), phantom-owner tolerance fase1b-machinery (F3)
  */
 fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str): parser::Path | error {
     if c.owner_type_args.len == 0 || c.callee.segments.len < 2 { return c.callee }
@@ -3144,6 +3163,166 @@ fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str
     var rt = match resolve_type(nt, table, ref_ns) { (@Type()) as t => t; error as e => return e }
     var inst = match rt { Named as n => n.name; _ => return c.callee }
     rewrite_segment_at(c.callee, owner_idx, inst)
+}
+
+/**
+ * split_phantom_args — split a phantom instance name's argument suffix (`StrKey__V`, everything after
+ * `Base__g__`) into one token per generic argument, on the `__` argument separator `generic_inst_name`
+ * emits between arguments. Simple (non-nested) argument mangles only: a nested generic argument carries
+ * its own `__g__`/`__` and is out of scope (gap #2); such a suffix splits into the wrong arity, which
+ * `phantom_owner_subst` then rejects with a clear diagnostic rather than mis-binding.
+ *
+ * @param suffix  the argument suffix (`generic_inst_name`'s tail after `Base__g__`)
+ * @return        the per-argument mangle tokens, in order
+ * @since fase1b-machinery (F3)
+ */
+fn split_phantom_args(suffix: str): []str {
+    var out: []str = teko::list::empty()
+    var start: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i + 1 >= suffix.len { break }
+        if suffix[i] == b'_' && suffix[i + 1] == b'_' {
+            out = teko::list::push(out, teko::str::slice(suffix, start, i))
+            i = i + 2
+            start = i
+            continue
+        }
+        i++
+    }
+    out = teko::list::push(out, teko::str::slice(suffix, start, suffix.len))
+    out
+}
+
+/**
+ * phantom_owner_subst — recover the `{template type-param -> argument type}` substitution encoded in a
+ * PHANTOM generic-instance name (`Dictionary__g__StrKey__V`), so a call whose owner/receiver is that
+ * phantom can be typed against the abstract template with its owner type-args bound. The suffix after the
+ * template stem's `__g__` marker is split into one token per template type-param; each token resolves as
+ * a type in the caller's namespace (a concrete key like `StrKey`/`i64`, or a still-abstract type-param
+ * like `V`). The recovered Subst re-mangles the template's phantom return (`Dictionary__g__K__V`) to the
+ * matching owner phantom (`Dictionary__g__StrKey__V`) and specializes each method parameter.
+ *
+ * @param phantom  the phantom instance name (`Base__g__arg1__arg2`)
+ * @param template the abstract template decl (its `type_params` name the recovered bindings, in order)
+ * @param table    the folded type table (argument-token resolution)
+ * @param ref_ns   the caller's namespace (resolves an abstract type-param token that is in scope)
+ * @return         the recovered substitution
+ * @throws         when the recovered argument count does not match the template's type-param count
+ *                 (a nested generic argument, gap #2, is the only way this arises on a well-typed owner)
+ * @since fase1b-machinery (F3)
+ */
+fn phantom_owner_subst(phantom: str, template: parser::TypeDecl, table: TypeTable, ref_ns: str): Subst | error {
+    var stem = split_generic_instance_name(phantom).stem
+    var start = stem.len + 5
+    if start >= phantom.len { return error { message = $"internal: malformed phantom instance name '{phantom}'" } }
+    var suffix = teko::str::slice(phantom, start, phantom.len)
+    var toks = split_phantom_args(suffix)
+    if toks.len != template.type_params.len {
+        return error { message = $"cannot resolve the generic factory owner '{phantom}' — a nested generic type-argument is not supported here" }
+    }
+    var types: []@Type() = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= toks.len { break }
+        var at = match resolve_phantom_arg_token(toks[i], table, ref_ns) { (@Type()) as tt => tt; error as e => return e }
+        types = teko::list::push(types, at)
+        i++
+    }
+    Subst { params = template.type_params; names = template.type_params; types = types }
+}
+
+/**
+ * resolve_phantom_arg_token — resolve one argument token recovered from a phantom instance name to its
+ * type (F3). A prim (`i64`) or an in-scope type-param (`V`) resolves through the ordinary `resolve_type`
+ * in the caller's namespace; a nominal type whose bare last-segment is the token but whose declaration
+ * is NOT bare-visible from the caller (`StrKey`, declared in `teko::cmp`, referenced from
+ * `teko::collections`) is recovered by qualified last-segment lookup — the phantom mangle dropped the
+ * qualifier, and the phantom is compiler-internal so bare-visibility does not gate it.
+ *
+ * @param tok     the bare argument token from the phantom's argument suffix
+ * @param table   the folded type table
+ * @param ref_ns  the caller's namespace (resolves a prim / in-scope type-param token directly)
+ * @return        the recovered argument type
+ * @throws        when the token names no prim, in-scope type-param, or registered type
+ * @since fase1b-machinery (F3)
+ */
+fn resolve_phantom_arg_token(tok: str, table: TypeTable, ref_ns: str): @Type() | error {
+    match resolve_type(parser::NamedType { path = single_seg_path(tok); args = teko::list::empty() }, table, ref_ns) {
+        (@Type()) as t => return t
+        error => { }
+    }
+    var qualified = qualified_type_name_by_last(tok, table)
+    if teko::runtime::str_eq(qualified, tok) {
+        return error { message = $"cannot resolve generic factory owner argument '{tok}'" }
+    }
+    Named { name = qualified }
+}
+
+/**
+ * type_phantom_instance_call — type a static-factory or instance-method call whose owner/receiver is a
+ * PHANTOM generic instance (`Dictionary<StrKey, V>::make()` retargeted to `Dictionary__g__StrKey__V::make`,
+ * or a `d.insert(…)` desugared onto a phantom-typed `d`), where at least one owner type-arg is an in-scope
+ * abstract type-param so no `instantiate_types` site stamped the instance and no concrete `make`/`insert`
+ * is registered. The signature is resolved against the abstract TEMPLATE and specialized by the owner
+ * substitution the phantom name encodes (`K -> StrKey`, `V -> V`), so the result type and every argument
+ * type match the concrete instance the mono pass will stamp. The emitted TCall keeps the phantom callee
+ * and namespace; `mono_rekey_call_ns`/`mono_rekey_callee_qualifier` (F3) concretize both once the enclosing
+ * generic binds the free type-param. A fully-concrete owner never reaches here (its real stamped instance
+ * resolves through the ordinary path), so the existing corpus is untouched.
+ *
+ * @param c      the retargeted / desugared call whose callee qualifier is a phantom instance
+ * @param env    the typing environment (its namespace resolves the phantom's abstract type-param token)
+ * @param table  the folded type table
+ * @return       the typed call carrying the phantom owner on its `call_ns` and result type
+ * @throws       when the phantom owner has no template, the method is absent, or an argument does not fit
+ * @since fase1b-machinery (F3)
+ */
+fn type_phantom_instance_call(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
+    var nseg = c.callee.segments.len
+    var phantom = c.callee.segments[nseg - 2].name
+    var mname = c.callee.segments[nseg - 1].name
+    var stem = split_generic_instance_name(phantom).stem
+    var template = match find_generic_template(table, stem) { TemplateReg as tr => tr; null => return error { message = $"unknown function: {mname}" } }
+    var s = match phantom_owner_subst(phantom, template.decl, table, env.cur_ns) { Subst as sub => sub; error as e => return e }
+    var methods = match template.decl.body {
+        parser::ClassBody as cb => cb.methods
+        parser::StructBody as sb => sb.methods
+        _ => return error { message = $"unknown function: {mname}" }
+    }
+    var found = false
+    var mfn = methods[0]
+    var mi: u64 = 0
+    loop {
+        if mi >= methods.len { break }
+        if teko::runtime::str_eq(methods[mi].name, mname) { found = true; mfn = methods[mi]; break }
+        mi++
+    }
+    if !found { return error { message = $"unknown function: {mname}" } }
+    var raw = match method_func_type(mfn, stem, table, template.namespace) { (@Type()) as t => t; error as e => return e }
+    var f0 = match raw { Func as ff => ff; _ => return error { message = "internal: phantom factory signature is not a function type" } }
+    var fsub = match subst_type(raw, s) { Func as ff => ff; _ => return error { message = "internal: phantom factory signature is not a function type" } }
+    var is_instance = mfn.params.len > 0 && !mfn.params[0].has_type
+    var want: []@Type() = teko::list::empty()
+    var wi: u64 = 0
+    loop {
+        if wi >= fsub.params.len { break }
+        if wi == 0 && is_instance { want = teko::list::push(want, Named { name = phantom }) } else { want = teko::list::push(want, fsub.params[wi]) }
+        wi++
+    }
+    var dargs = match resolve_call_args(f0, c.args, c.arg_names, env, table) { []parser::Expr as x => x; error as e => return e }
+    if dargs.len != want.len { return error { message = $"'{mname}' expects {want.len} argument(s), but {dargs.len} were given" } }
+    var targs: []TExpr = teko::list::empty()
+    var ai: u64 = 0
+    loop {
+        if ai >= dargs.len { break }
+        var a = match type_expr(dargs[ai], env, table) { TExpr as te => te; error as e => return e }
+        if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
+        a = match coerce_argument_into(a, want[ai], table) { TExpr as x => x; error as e => return e }
+        targs = teko::list::push(targs, a)
+        ai++
+    }
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = targs; call_ns = phantom; is_closure_call = false; callee_type = fsub; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = fsub.ret; line = 0; col = 0 }
 }
 
 /**
@@ -3436,6 +3615,9 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
     if c0.owner_type_args.len > 0 {
         var rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
         c = parser::Call { callee = rc; args = c0.args; arg_names = c0.arg_names; owner_type_args = c0.owner_type_args; callee_type_args = c0.callee_type_args }
+    }
+    if c.callee.segments.len >= 2 && name_is_phantom_instance(c.callee.segments[c.callee.segments.len - 2].name, table) {
+        return type_phantom_instance_call(c, env, table)
     }
     match type_list_builtin(c, env, table) {   // teko::list::empty / push (generic)
         TExpr as te => return te

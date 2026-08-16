@@ -1,0 +1,114 @@
+/**
+ * arr_replace_at — a copy of `xs` with the element at index `at` replaced by `v` (the value-functional
+ * overwrite a growable collection uses). An `at` outside `[0, xs.len)` yields an unchanged copy.
+ *
+ * @param xs  the source array
+ * @param at  the index to overwrite
+ * @param v   the replacement element
+ * @return    a fresh array equal to `xs` except at `at`, which holds `v`
+ */
+pub fn arr_replace_at<T>(xs: []T, at: u64, v: T): []T {
+    var out: []T = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if i == at { out = teko::list::push(out, v) } else { out = teko::list::push(out, xs[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * dict_find_index — the index of key `k` (precomputed hash `h`) in the parallel `keys`/`hashes` arrays,
+ * or `keys.len` when absent. The cheap `u64` hash rejects a non-match before the full `__eq`; an equal
+ * hash falls through to `keys[i] == k` (the generic `==` dispatch over `K: IEq`).
+ *
+ * @param keys    the key array
+ * @param hashes  the parallel cached-hash array (`hashes[i]` is `hash()` of `keys[i]`)
+ * @param h       the precomputed hash of the sought key
+ * @param k       the sought key
+ * @return        the index of `k` in `keys`, or `keys.len` if `k` is absent
+ */
+pub fn dict_find_index<K: IEq & IHash>(keys: []K, hashes: []u64, h: u64, k: K): u64 {
+    var i: u64 = 0
+    loop {
+        if i >= keys.len { break }
+        if hashes[i] == h && keys[i] == k { return i }
+        i++
+    }
+    keys.len
+}
+
+/**
+ * Dictionary<K: IEq & IHash, V> — a growable, reference-semantic hash map from an equatable/hashable key
+ * `K` to `V` values (the generic successor to a str-keyed map). Three parallel owned arrays
+ * (`keys`/`hashes`/`vals`), re-grown per mutation. Reduced to the surface this fixture exercises.
+ *
+ * @since fase1b-machinery (F3 fixture)
+ */
+pub type Dictionary<K: IEq & IHash, V> = class {
+    /** The keys, in insertion order — parallel to `hashes` and `vals`. */
+    intern keys: []K
+    /** Each key's cached hash, compared before the full key. */
+    intern hashes: []u64
+    /** The values, parallel to `keys`. */
+    intern vals: []V
+
+    /**
+     * Build an empty `Dictionary<K, V>` — the generic static factory.
+     *
+     * @return a fresh, empty `Dictionary<K, V>` at the caller's concrete key/value types
+     */
+    pub static fn make(): Dictionary<K, V> {
+        .{ keys = teko::list::empty(); hashes = teko::list::empty(); vals = teko::list::empty() }
+    }
+
+    /**
+     * Insert or update the value for `k`. A present key's value is overwritten in place; otherwise a
+     * new entry is appended.
+     *
+     * @param k  the key to insert or update
+     * @param v  the value to associate with `k`
+     */
+    pub fn insert(k: K, v: V) {
+        var h = k.hash()
+        var at = dict_find_index(self.keys, self.hashes, h, k)
+        if at < self.keys.len {
+            self.vals = arr_replace_at(self.vals, at, v)
+            return
+        }
+        self.keys = teko::list::push(self.keys, k)
+        self.hashes = teko::list::push(self.hashes, h)
+        self.vals = teko::list::push(self.vals, v)
+    }
+
+    /**
+     * The value associated with `k`, or `null` when `k` is absent.
+     *
+     * @param k  the key to look up
+     * @return   the associated value, or `null` if `k` is not present
+     */
+    pub fn get(k: K): V | null {
+        var at = dict_find_index(self.keys, self.hashes, k.hash(), k)
+        if at >= self.keys.len { return null }
+        self.vals[at]
+    }
+}
+
+/**
+ * to_dict — the FREE-generic factory-owner-type-param bridge (the F3 payload): builds a
+ * `Dictionary<StrKey, V>` from an ABSTRACT free-fn type-param `V` by calling the static factory
+ * `Dictionary<StrKey, V>::make()` — whose owner resolves to the PHANTOM `Dictionary__g__StrKey__V` while
+ * `V` is abstract — then inserting one `(StrKey, V)` entry. Before F3 this errored `unknown function:
+ * make`; the phantom-owner factory + method calls now resolve against the template and monomorphize to
+ * the caller's concrete `V`. Proves the fix is not class-specific (the free-fn form hits the same phantom).
+ *
+ * @param k  the key string (wrapped in a `StrKey` conformer)
+ * @param v  the value at the abstract type `V`
+ * @return   a `Dictionary<StrKey, V>` holding the single `(k, v)` entry
+ */
+pub fn to_dict<V>(k: str, v: V): Dictionary<StrKey, V> {
+    var d = Dictionary<StrKey, V>::make()
+    d.insert(StrKey { key = k }, v)
+    d
+}
