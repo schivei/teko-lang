@@ -1638,6 +1638,23 @@ kernel. **`from "c"` (libc portável) está BANIDO.**
   espera TODOS os subsistemas migrados). Enquanto a migração roda, o build de validação AINDA linka os 4 (eles
   proveem o não-migrado); o sweep é o passo FINAL. É também parte do "as duas pernas compilando" do critério de
   saída da Doc-2 (a perna C tem que buildar SEM o runtime-C-à-mão).**
+- **⚖️ CHECKLIST DO CRUMB DE SWEEP (ruling do dono 2026-08-16, "fazer o reseed E ajustar o CI a não incluir os
+  arquivos C deletados"):** o sweep é uma mudança COORDENADA, não um `rm`:
+  1. **Codegen:** parar de emitir `#include "teko_rt.h"` / `#include "assert.h"` (e o `../win32_compat.h` via
+     teko_rt.c) no `teko.c` — senão o C emitido não compila sem os headers. Isso muda o emit → **RESEED**.
+  2. **Deletar** os 4: `src/runtime/teko_rt.c`, `src/runtime/teko_rt.h`, `src/assert/assert.c`, `win32_compat.h`
+     (+ `src/assert/assert.h` se ficar órfão).
+  3. **Ajustar o CI + scripts de build/empacotamento** que hoje linkam/copiam esses arquivos (grep 2026-08-16, ~20):
+     `scripts/build_gen1_from_c.sh`, `build_with_seed_fallback.sh`, `native_linux_asset.sh`, `package_release.sh`
+     (o "PROVEN minimal standalone-bootstrap file set" vira só `teko.c`), `ci_full_mode.sh`, `ci_provision_teko.sh`,
+     `lone_binary_criterion.sh`, `no_emitted_c.sh`, `no_c_in_tests_gate_test.sh`, `install_share_runtime_test.sh`,
+     `region_drop_subtree_test.*`, `tk_arena_commit_test.*`, `task_memory_isolation_test.*`; workflows
+     `.github/workflows/reseed-bootstrap.yml`, `release.yml`, `codeql.yml`; `.github/sast-baseline.txt`,
+     `lsan-suppressions.txt`. A linha canônica vira **`cc bootstrap/teko.c -lm -o teko`** (sem `teko_rt.c`/
+     `assert.c`, sem `-I src/runtime -I src/assert`). Os testes-C-de-runtime (`*_test.c`) que exercitam a arena-C
+     morrem com ela (a arena Teko é testada por fixtures Teko).
+  4. **Provar** `cc bootstrap/teko.c -lm` (perna C, sem os 4) compila + `TEKO_BACKEND=c gen . -o out` re-emite
+     byte-idêntico (tc2==tc3) + MEM_PARANOID + PROVENANCE/`provenance_gate`. Esse é o gate de aceitação do §16.
 
 **🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
 1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
