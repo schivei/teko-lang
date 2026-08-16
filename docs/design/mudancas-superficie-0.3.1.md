@@ -1625,6 +1625,19 @@ kernel. **`from "c"` (libc portável) está BANIDO.**
   `sys_exit_group` = `exit_group(42)` cru → exit 42. Native honest-stop (`_ =>` de `lower_call`). **Bridges
   `ptr_word`/`ref_word` (args-ponteiro) e a migração de subsistemas (write→exit→clock_gettime→getrandom→ARENA-mmap)
   são os próximos crumbs.**
+- **⚖️ CRITÉRIO DE ACEITAÇÃO DO §16 = O SWEEP REAL (ruling do dono 2026-08-16).** A **prova de execução** do §16
+  NÃO é "adicionar as substituições Teko/syscall ao lado do runtime C". É **DELETAR** `src/runtime/teko_rt.c`,
+  `src/runtime/teko_rt.h`, `src/assert/assert.c` e `win32_compat.h` do código — **remover TODOS** — e o build
+  **ainda compilar E passar o fixpoint SEM eles**. A linha de build encolhe de `cc bootstrap/teko.c
+  src/runtime/teko_rt.c src/assert/assert.c -lm` para essencialmente **`cc bootstrap/teko.c -lm`** (só o C emitido,
+  auto-contido, falando com o SO por syscall inline / lib-nativa) — e tc2==tc3 se mantém. **CONSEQUÊNCIA:** o §16
+  só fecha quando TODO subsistema desses 4 arquivos (arena É um; mas também print, panic, assert, string/format,
+  threads/canais do §10, etc. — ~264 fns) estiver reimplementado em Teko/syscall; então o **crumb de SWEEP** apaga
+  os 4 arquivos e prova o build-sem-eles + fixpoint. Esse sweep é a materialização do "sweep de C" da lei e o
+  gate terminal do §16 (o crumb F da arena — deleção de `tk_region_*` — é só uma FATIA disso; o sweep completo
+  espera TODOS os subsistemas migrados). Enquanto a migração roda, o build de validação AINDA linka os 4 (eles
+  proveem o não-migrado); o sweep é o passo FINAL. É também parte do "as duas pernas compilando" do critério de
+  saída da Doc-2 (a perna C tem que buildar SEM o runtime-C-à-mão).**
 
 **🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
 1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
