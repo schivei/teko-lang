@@ -105,6 +105,9 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | err
         var blk = match parse_block(tokens, lbrace) { ParsedList<@Statement()> as x => x; error as e => return e }
         return Parsed<@Statement()> { node = DeferStmt { body = blk.items }; next = blk.next }
     }
+    if is_spawn_head(tokens, pos) {
+        return parse_spawn(tokens, pos)
+    }
     if is_adopt_head(tokens, pos) {
         return parse_adopt(tokens, pos)
     }
@@ -185,6 +188,43 @@ fn is_adopt_head(tokens: []lexer::Token, pos: u64): bool {
     if tokens[pos].text != "adopt" { return false }
     if is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) { return true }
     is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) && is_kind_at(tokens, pos + 2, lexer::TokenKind::LBrace)
+}
+
+/**
+ * is_spawn_head — is the token at `pos` a CONTEXTUAL `spawn` statement head (§10)? True ONLY for the
+ * ident text "spawn" immediately followed by another ident that begins a call — `spawn NAME(`,
+ * `spawn NAME.method(`, `spawn ns::NAME(`. Any other use of a symbol named `spawn` (an assignment
+ * target `spawn = …`, a bare expression `spawn`, a field/method receiver `spawn.x`, a call
+ * `spawn(...)` where spawn is itself the callee) is NOT a head and falls through to ordinary parsing,
+ * preserving the contextual-keyword invariant. The `spawn(` case is deliberately EXCLUDED — an
+ * LParen right after `spawn` means `spawn` is the callee, not the keyword.
+ *
+ * @param []lexer::Token tokens  the token stream
+ * @param u64 pos  the candidate statement-head index
+ * @return bool  true iff `pos` opens a `spawn <call>` statement
+ */
+fn is_spawn_head(tokens: []lexer::Token, pos: u64): bool {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) { return false }
+    if tokens[pos].text != "spawn" { return false }
+    is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident)
+}
+
+/**
+ * parse_spawn — parse a contextual `spawn <call>` at `pos` (the `spawn` ident; is_spawn_head true).
+ * Parses ONE full expression after the keyword and requires its kind to be a `Call` or `MethodCall`;
+ * anything else (a bare var, a binary expr, a literal) is a parse error — `spawn` runs a CALL, never
+ * an arbitrary expression. No block, no arguments of its own.
+ *
+ * @param []lexer::Token tokens  the token stream
+ * @param u64 pos  the index of the `spawn` ident
+ * @return Parsed<@Statement()> | error  the parsed Spawn and the index past the call, or a parse error
+ * @throws  the target is not a call (`spawn x`, `spawn 1 + 2`), or a parse error inside the call
+ */
+fn parse_spawn(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
+    var e = match parse_expr(tokens, pos + 1) { Parsed<Expr> as x => x; error as err => return err }
+    var ok = match e.node.kind { Call as _c => true; MethodCall as _m => true; _ => false }
+    if !ok { return err_at(tokens, pos + 1, "`spawn` must be followed by a call, e.g. `spawn worker(n, msg)`") }
+    Parsed<@Statement()> { node = Spawn { call = e.node }; next = e.next }
 }
 
 /**
