@@ -1551,6 +1551,23 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   raiz em vez de promoção-frame→região-externa) — MESMA FAMÍLIA, confirmando o meta-princípio (o compilador
   decide frame-local vs promovido vs refcounted). Dentro-da-thread: escape-analysis já resolve. Entre-threads:
   marshal (deep-copy, default) ou wrap-refcount (escape-hatch) — **AMBOS Doc-2** (a Doc-1 só faz tuning).
+- **⚖️ O QUE É O TUNING DE ARENA DA DOC-1 (dono 2026-08-16; já deliberado em `o-profiler-como-afinador-de-arenas-
+  0.3.1.md`, `ast-computed-arena-assessment-0.3.1.md`, `arena-especificacao-unica-0.3.1.md`). Define o limite
+  Doc-2/Doc-1 pra a arena — a Doc-2 (crumb D) entrega a arena CORRETA; estes 3 são otimizações da Doc-1, NÃO
+  pré-req de saída da Doc-2:**
+  1. **Pré-dimensionamento (arena inicia no tamanho certo).** Como o compilador SABE o tamanho das folhas/blocos,
+     inicia a arena já pela **soma dos slots esperados** (união → **o maior slot vence**) → reduz realocação e
+     **minimiza o consumo** (é EXATAMENTE o "nosso problema atual" — o OOM de MEM_PARANOID no limite do cap de 6 GB
+     que os crumbs vêm tocando; a Doc-1 o cura, não a Doc-2).
+  2. **Retorno virtual (backend sem cópia).** As funções, no backend, **não mais retornam por cópia** — alocam
+     DIRETO na arena do chamador (pai), reduzindo cópias. (Já é o modelo SEMÂNTICO — sem `ref` no retorno; a Doc-1
+     realiza a elisão física da cópia no backend.)
+  3. **Elisão de arena (não abre arena onde é desnecessário).** Ex.: `fn a(): T { b() }` → `a` NÃO abre arena
+     (só encaminha o resultado de `b`); idem retorno de constantes.
+  **CONSEQUÊNCIA PRA O §16 (crumb D em diante):** a arena-Teko da Doc-2 só precisa ser CORRETA (region-per-object +
+  deep-copy default + bulk-free + wrap-refcount escape-hatch), NÃO ótima. O pré-dimensionamento / retorno-virtual-
+  sem-cópia / elisão-de-arena são Doc-1 — NÃO construir na Doc-2. O OOM no limite do cap durante os reseeds é
+  esperado (território Doc-1) e não bloqueia o §16.
 
 **⚖️ §16 C6a HALT — DOIS ACHADOS DE COMPILADOR (implementer, 2026-08-16; ambos verificados empiricamente):**
 - **ACHADO A — CORRIGE o modelo "leaf = byte-idêntico".** Adicionar QUALQUER **função** ao `src/` do compilador
