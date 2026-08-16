@@ -1617,8 +1617,15 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
     liberado no bulk-free do drop da região. **A bump-arena NÃO ganha reclaim mid-região** → o core da arena (crumb
     D) fica INTACTO; a onda de arrays não altera o modelo da arena. (A redução de consumo vem da região ser curta
     + do pré-dimensionamento Doc-1, não de reclaim imediato.)
-  **⇒ ONDA RATIFICADA (dono 2026-08-16).** Sequência: **§16 (syscall+arena+sweep) → onda arrays-fixos+string-u32
-  (pre-Doc-1) → Doc-1 (pré-alocação/espinha + os outros tunings + multi-threading).**
+  - **(D) CODECS DE TEXTO MULTI-ENCODING NA STDLIB (dono 2026-08-16).** O campo `encoding` da string fat implica
+    a stdlib ganhar **codecs de CARACTERE** (UTF-8 default, + UTF-16, Latin-1, ASCII, …) — conversão/trim por-
+    encoding na barreira do metal. **DISTINTO** do encoding-set já entregue (base64/json/cbor/… = formatos de
+    DADOS/serialização; isto são codecs de TEXTO sobre o array-u32). **Colocação: pré-Doc-1, com a Doc-2 já
+    FECHADA** — parte da onda string-u32, construído sobre o novo modelo de string (não antes: exige o `{qtd-chars,
+    qtd-bytes, array-u32, encoding}` no lugar).
+  **⇒ ONDA RATIFICADA (dono 2026-08-16).** Sequência: **§16 (syscall+arena+sweep) → [Doc-2 fechada] → onda arrays-
+  fixos+string-u32 + codecs-de-texto (pre-Doc-1) → Doc-1 (pré-alocação/espinha + os outros tunings + multi-
+  threading).**
   **CONSEQUÊNCIA PRA O §16 (crumb D em diante):** a arena-Teko da Doc-2 só precisa ser CORRETA (region-per-object +
   deep-copy default + bulk-free + wrap-refcount escape-hatch), NÃO ótima. O pré-dimensionamento / retorno-virtual-
   sem-cópia / elisão-de-arena são Doc-1 — NÃO construir na Doc-2. O OOM no limite do cap durante os reseeds é
