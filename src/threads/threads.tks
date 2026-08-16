@@ -1,0 +1,145 @@
+/**
+ * IChannelKind — the extensible transport contract for a `chan<T>` (§10.2). A conformer is a
+ * `service singleton` that binds a key to some medium (in-process FIFO, AF_UNIX datagram, …) and
+ * moves values of `T` across it. `init` is the prior step that ties the transport to the constant
+ * channel key; `end` closes and drains. The constraint that references this interface is spelled BARE
+ * (`K: service singleton & IChannelKind`) — the nominal conformance gate needs no type argument
+ * (§10 batch Gap 1), and `T` flows through the owner `chan<T>` and the Rx/Tx wrappers.
+ *
+ * @param T  the element type carried across the channel (copied, never referenced — §10.6)
+ * @since 0.3.1 §10 C1
+ */
+pub type IChannelKind<T> = interface {
+    /**
+     * init — bind this transport to the channel's constant key (open the FIFO/socket/topic).
+     *
+     * @param key  the channel's constant key
+     */
+    fn init(key: str)
+    /**
+     * send — move one value across the transport (blocking per the channel's bounds).
+     *
+     * @param v  the value to send (by copy)
+     */
+    fn send(v: T)
+    /**
+     * recv — receive one value from the transport (blocking).
+     *
+     * @return  the next value
+     */
+    fn recv(): T
+    /**
+     * end — close and drain the transport.
+     */
+    fn end()
+}
+
+/**
+ * Closed — the specific `Rx.pop` sentinel meaning "the channel is closed AND drained" (§10.2 L711),
+ * distinct from a transport `error`. A nominal empty struct, so `T | Closed` is a two-level
+ * nominal-variant union the reader matches.
+ *
+ * @since 0.3.1 §10 C1
+ */
+pub type Closed = struct { }
+
+/**
+ * Rx — the single-reader handle of a `chan<T>`, resolved by key via `svc<Rx<T>>(key)` (§10.2).
+ * Opaque: it carries only the F2 channel registry id; every op is a monomorphized direct call into
+ * the concrete transport (constant key) or a function-pointer indirection (variable key). Never
+ * constructed by hand — the compiler registers it and `make` materializes it. The method bodies here
+ * are DELIBERATELY inert scaffolding that compiles today; the C4/C5 crumbs replace them with the real
+ * lowering (a constant-key channel monomorphizes `pop` to a direct `tk_*_recv` + decode).
+ *
+ * @param T  the element type
+ * @since 0.3.1 §10 C1
+ */
+pub type Rx<T> = struct {
+    /** _id — the channel's F2 registry type-id (svc_type_id of the derived channel-key symbol). */
+    _id: u64
+    /**
+     * pop — receive the next value, or `Closed` once the channel is closed and drained.
+     *
+     * @return  the next `T`, or `Closed`
+     */
+    pub fn pop(): T | Closed { Closed { } }
+    /**
+     * add — register one consumer on the channel's WaitGroup by this handle (the ctx is transient —
+     * §10.2 L713).
+     */
+    pub fn add() { }
+    /**
+     * done — signal this consumer's completion on the WaitGroup by this handle.
+     */
+    pub fn done() { }
+}
+
+/**
+ * Tx — a writer handle of a `chan<T>` (N per channel), resolved by `svc<Tx<T>>(key)`. The PRODUCER
+ * closes (§10.2 L710). `closed` observes drain; the reader observes `Closed`. The method bodies here
+ * are inert scaffolding replaced by the C4/C5 lowering.
+ *
+ * @param T  the element type
+ * @since 0.3.1 §10 C1
+ */
+pub type Tx<T> = struct {
+    /** _id — the channel's F2 registry type-id. */
+    _id: u64
+    /** _closed — set by `close`; read via `closed`. */
+    _closed: bool
+    /**
+     * send — send one value (by copy). Returns null; `closed` reports drain.
+     *
+     * @param v  the value to send
+     * @return   null
+     */
+    pub fn send(v: T): null { null }
+    /**
+     * close — the producer closes: invoke the transport `end` (close + drain); idempotent.
+     */
+    pub fn close() { }
+    /**
+     * add — register one producer on the WaitGroup by this handle.
+     */
+    pub fn add() { }
+    /**
+     * done — signal this producer's completion on the WaitGroup by this handle.
+     */
+    pub fn done() { }
+    /**
+     * closed — has the channel been closed (and is it draining/drained)?
+     *
+     * @return  true once `close` (or the transport `end`) has fired
+     */
+    pub get closed(): bool { self._closed }
+}
+
+/**
+ * Ctx — the channel's OWNER handle (§10.2 L789): a MANUAL WaitGroup plus the channel-lifetime
+ * teardown. Transient, resident in the creator's arena; when it drops it cascades `end` -> deregister
+ * key -> free the F2 singletons. `make` returns it; the creator alone holds it (workers reach
+ * add/done through their tx/rx handles). The method bodies here are inert scaffolding replaced by the
+ * C4/C5 lowering.
+ *
+ * @since 0.3.1 §10 C1
+ */
+pub type Ctx = struct {
+    /** _id — the channel's F2 registry type-id (identifies the WaitGroup + transport to tear down). */
+    _id: u64
+    /**
+     * add — register `n` awaited tasks on the WaitGroup (call BEFORE spawn for the race-free path —
+     * §10.2 L718).
+     *
+     * @param n  how many tasks to await
+     */
+    pub fn add(n: usize) { }
+    /**
+     * wait — block until the WaitGroup counter reaches zero.
+     */
+    pub fn wait() { }
+    /**
+     * close — the reserve close of the channel (invoke transport `end`); idempotent with the
+     * producer's close.
+     */
+    pub fn close() { }
+}
