@@ -1452,8 +1452,23 @@ vivo com o dono: `on canceled as c {}` como desenrolar-não-local capturável, n
   outros itens que dependem disso. **`#17 pragmas` adiantados AGORA** (aprovado). Doc-2 reordena:
   **§17 → §16 → §10-(c) + dependentes**, tudo ainda PRÉ-Doc-1. O que já aterrissou do §10 (spawn, canais
   runtime+concreto) fica; a superfície genérica dos canais + o `await` esperam (marshalling §5 / §16).
-- **PENDENTE do dono:** ruling §5 marshalling-de-`T` (POD-primeiro `sizeof`-no-monomorph vs recursivo-completo).
-  Design-ahead do (c) e desenho do §17 seguem; `marshal<T>` fica caixa-preta até o ruling.
+- **~~PENDENTE~~ RESOLVIDO — ruling do dono (2026-08-16) sobre marshalling-de-`T`:** NÃO é um menu de forks
+  (o meu "POD-primeiro vs recursivo / auto-walk vs interface" foi enquadramento errado meu, retirado). O dono
+  colapsou: **`marshal<T>` = walk-recursivo profundo ESTAMPADO NO MONOMORPH** (T concreto no stamp → tamanho+
+  layout conhecidos; o `sizeof<T>`-abstrato que travou o canal genérico **SOME** — a cópia nunca acontece no
+  corpo genérico, só no stamp concreto). Copia o dado apontado (bytes de str, elementos de slice, campos
+  aninhados) re-apontando na arena-ALVO — generaliza o packer ad-hoc do spawn (S3). **PRINCÍPIO CENTRAL
+  (C#-style):** a **fronteira de concorrência (spawn/await/canal) é TUDO cópia profunda, ZERO `ref`** (o
+  `ref`-guard já é lei: `tspawn_reject_ref_params` no S2; A3 do await reusa). **Única exceção = serviços
+  singleton**, compartilhados via F2+DI **por chave** (`svc<S>("key")`) — o único elo da arena-filha com a raiz;
+  handles de singleton dentro de valor copiado são CHAVES (escalares), não ponteiros → deep-copy-safe. **Por-
+  referência (`__wrap`/`__unwrap` rasos §5 Parte A) serve SÓ FFI (zona da ABI) + transferência-de-arena
+  (re-parent)** — NÃO toca a concorrência; ficam como estão (corretos nesse domínio). **CORREÇÃO DA SPEC §5:** o
+  marshal profundo estava marcado "Doc-1 Parte B" (deferido); como o §10/Doc-2 precisa dele por-valor e Doc-2
+  prepara TODO o terreno SEM EXCEÇÕES, ele **é puxado pra Doc-2** e **materializado junto do §16** (arena+FFI já
+  em Teko; o §10-(c)/canais-genéricos já são pós-§16). É **um crumb de codegen** (estampar `marshal<T>` no
+  monomorph) que serve spawn+canal+await de uma vez. `__wrap` raso-só-hoje = o defeito grave que a Parte-B-deferida
+  deixou aberto — fechado no §16.
 
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
