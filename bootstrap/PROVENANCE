@@ -1,46 +1,47 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the F1 + F4 generics-constraint checker
-# fixes, plus the collections-generics-fase1b LEAF corpus accumulated since the previous seed
-# (`481ebae5`, the gap-#3 reseed). What this harvest carries:
-#   - **F1 fix (compiler — checker)**: `src/checker/resolve.tks` — a constraint-bound type-parameter
-#     (`T: IOrd`, registered with an `InterfaceBody` surface) is now ADMITTED as a null-union member
-#     (`T | null`), where before `variant_member_admissible` rejected it as "an interface cannot be a
-#     variant member yet". New predicate `is_type_param_named` (exactly one constraint, zero own
-#     type-params) narrows the gate: a GENUINE interface value in a union stays rejected (that is the
-#     deferred #28 feature); only the false-positive on a constrained `T` is lifted. This unblocks
-#     `first_or_null<T: IOrd>(): T | null`, `PriorityQueue.dequeue(): T | null`, etc.
-#   - **F4 fix (compiler — checker/monomorph)**: `src/checker/monomorph.tks` — generic CLASS
-#     instantiations are now constraint-checked at monomorph (`check_instance_constraints`, wired into
-#     `monomorphize` after the `any_generic` guard, reusing `check_constraints` + `instance_type_subst`
-#     over `table_generic_instances`). `Dictionary<Plain, i64>` where `Plain` lacks `IHash` now FAILS
-#     with a clean "type parameter 'K' does not satisfy its constraint at this instantiation" diagnostic
-#     instead of a `cc`/link error on an undefined `Plain__hash`. Fail-loud (M.1).
-#   - **fase1b LEAF corpus since `481ebae5`** (folded in — leaf, did not itself require a reseed):
-#     `teko::cmp::IHash` + `StrKey`/`I64Key` key conformers; `Dictionary<K:IEq&IHash,V>`, `HashSet`,
-#     `SortedSet`/`PriorityQueue`/`SortedDictionary`; the `arr_*`/`sorted_insert`/`heap_*` combinators.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the F3 phantom-owner generic
+# factory/method-call fix (checker + monomorph). What this harvest carries:
+#   - **F3 fix (compiler — checker + monomorph)**: a static generic factory or method call whose owner
+#     type-args include an in-scope ABSTRACT type-param (`Dictionary<StrKey, V>::make()` inside
+#     `Map<V>::to_dictionary`, or a free `fn f<V>()`) resolves the owner to a PHANTOM instance
+#     (`Dictionary__g__StrKey__V`) that no site stamps and whose `make` is unregistered — it errored
+#     `unknown function: make`. Now: `type_phantom_instance_call` (`src/checker/typer.tks`) resolves the
+#     factory/method signature against the abstract TEMPLATE and specializes it with the owner
+#     substitution the phantom name encodes (`phantom_owner_subst`/`split_phantom_args`/
+#     `resolve_phantom_arg_token`, cross-namespace key via `qualified_type_name_by_last`), wired at
+#     `type_call` and desugared from `type_method_call` for a phantom-typed receiver; and the mono
+#     re-key (`mono_rekey_call_ns`/`mono_rekey_callee_qualifier`, `src/checker/monomorph.tks`) falls an
+#     exact `subst_find_inst` miss through to `subst_instance_name` (+ `rekey_phantom_qualifier`),
+#     concretizing `Dictionary__g__StrKey__V -> Dictionary__g__StrKey__i64`. Discovery needed NO new
+#     enqueue: the concrete instance is auto-found by the existing `stamp_inst_site` body re-scan when
+#     the enclosing generic is stamped. This is the static-factory analogue of the self-construct
+#     phantom `type_struct_lit` already tolerates; it UNBLOCKS the G6 `Map.to_dictionary` bridge (landed
+#     as a LEAF on top of this seed — it uses the factory feature, so it could not be built by the
+#     previous `3683d71e` seed).
 #
-# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL DIVERGENCE. F1+F4 no-op the compiler's OWN corpus (it has no
-# constrained-`T`-in-union and no constraint-violating class instantiation), so they change NO behavior
-# of the self-image. The emitted C differs from the previous seed only by: (a) the two new checker
-# functions + the guarded gate line + the wired call; (b) mechanical codegen temp-counter / source-loc
-# line shifts from the inserted lines; (c) the fase1b leaf conformers (concrete StrKey/I64Key methods —
-# NOT stamped generics; 0 generic collection functions stamped). The honest statement is "the new
-# compiler reproduces itself exactly".
+# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL DIVERGENCE. F3 no-ops the compiler's OWN corpus (it has no
+# phantom-owner factory/method call), so it changes NO behavior of the self-image. The emitted C differs
+# from the previous seed only by the new checker/mono functions + the wiring + mechanical codegen
+# temp-counter / source-loc line shifts. The honest statement is "the new compiler reproduces itself
+# exactly".
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen0 (cc from the PREVIOUS bootstrap `481ebae5`) built the tree → emitted teko.c
-#     `3683d71e` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `3683d71e`; tc2 -> gen2; gen2 built the
-#     tree → tc3 `3683d71e`. tc1 == tc2 == tc3, byte-identical (sha256 below). F1+F4 never fire on the
+#   - C-route chain: gen0 (cc from the PREVIOUS bootstrap `3683d71e`) built the tree → emitted teko.c
+#     `3d98db74` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `3d98db74`; tc2 -> gen2; gen2 built the
+#     tree → tc3 `3d98db74`. tc1 == tc2 == tc3, byte-identical (sha256 below). F3 never fires on the
 #     corpus, so the OLD compiler (gen0) and the NEW compiler (gen1) emit the self-image identically —
-#     the stable generation is reached at tc1 and reproduces exactly through tc3.
+#     the stable generation is reached at tc1 and reproduces exactly through tc3. gen0 (F3-incapable)
+#     compiles the F3 SOURCE fine because the compiler's own code does not USE the factory-phantom
+#     feature; the emitted gen1 IS F3-capable, which is what lets the G6 leaf ride on this seed.
 #   - cc-route: cc -std=c2x -w -g -I src/runtime -I src/assert bootstrap/teko.c src/runtime/teko_rt.c
 #     src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify --release -> out/teko.c;
 #     sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
-#   - Regression: `examples/regressions/type_param_union_return/` (F1 — `first_or_null<T: IOrd>(): T |
-#     null` builds+runs green, present-arm exit 7) and `examples/regressions/class_key_no_ihash/` (F4 —
-#     a `Dict<Plain, i64>` where `Plain` lacks `IHash` FAILS at monomorph with the clean constraint
-#     diagnostic instead of a link error). Both are the exact shapes these fixes address.
+#   - Regression: `examples/regressions/generic_factory_owner_param/` (a free `fn to_dict<V>():
+#     Dictionary<StrKey, V>` calling `Dictionary<StrKey, V>::make()` with `V` abstract, instantiated at
+#     `i64` and `str`) builds+runs green (exit 47) — the exact shape that errored `unknown function:
+#     make` before. `examples/regressions/map_to_dictionary/` (the G6 leaf on top) builds+runs green
+#     (exit 77).
 # Every capped build (`ulimit -v 6291456`) peaked under 5.4 GB, within the 6 GB cap.
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
@@ -52,9 +53,10 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  3683d71e1832d82c1338e8b255cecc912f68a5ec6562b95dc6b62e9d75b1f795
+sha256:  3d98db743cf05f9a79bc3fd666879c7e131bcb7abdd00e72de003ed90a30ea90
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the F1 union-of-constrained-T + F4
-         class-instantiation-constraint checker fixes + the accumulated fase1b leaf corpus), byte-
-         identical on rebuild across the stable C-route generations (tc1 == tc2 == tc3) AND on the
-         cc-route re-emission; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the F3 phantom-owner generic
+         factory/method-call checker+monomorph fix), byte-identical on rebuild across the stable
+         C-route generations (tc1 == tc2 == tc3) AND on the cc-route re-emission; no unrecovered legacy
+         artifact underlies it. The G6 `Map.to_dictionary` bridge rides on top as a LEAF (not in this
+         seed; the F3-capable seed compiler builds it).
