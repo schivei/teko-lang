@@ -1285,10 +1285,14 @@ namespace) de `T`**. Dois structs homônimos em **namespaces DIFERENTES**, ambos
 `T|error`/`T|null`, geram a **MESMA** constante C (ex.: `teko::encoding::toml::KeyStep` e
 `teko::encoding::ini::KeyStep` → ambos `TK_TAG_U_KEYSTEP_ERROR_KEYSTEP`) → `cc` falha (`incompatible
 types`), mesmo os dois type-checando isolados. Contornado renomeando (ini `KeyStep`→`SectionNameStep`).
-**Fix compiler-side real:** qualificar o tag por namespace no codegen. **Regra de coordenação até lá:**
-structs de stdlib usados em uniões de erro/null precisam de **nome único tree-wide** (hoje só `NsScope` e
-`Symbol` se repetem — internos do compilador, não colidem por não estarem ambos em união erro/null; toda
-lane nova deve conferir). Auditar com `grep -rhoE 'type ([A-Z]\w*) = struct' src/ | sort | uniq -d`.
+**Fix compiler-side real:** qualificar o tag por namespace no codegen. **RULING DO DONO (2026-08-16): é bug
+A SER RESOLVIDO, não só contornado.** 🔄 Em design (`teko-architect` → `docs/design/fix-union-tag-cross-
+namespace-codegen.md`): chokepoint `cg_member_key_str` (`codegen.tks` ~2092) + o path `Named` (l.6229 usa
+`name_last_segment` bare); esquema qualificado seguindo `mangle_type_name` (`:`→`_`/`__`), C-safe,
+keyword-escaped, builtins/error/null INALTERADOS; **renomeia o mangled de TODA união → reseed + fixpoint
+byte-idêntico obrigatórios.** **Regra de coordenação ATÉ o fix landar:** structs de stdlib usados em uniões de
+erro/null com **nome único tree-wide** (hoje só `NsScope`/`Symbol` repetem — internos, não colidem por não
+estarem ambos em união erro/null). Auditar: `grep -rhoE 'type ([A-Z]\w*) = struct' src/ | sort | uniq -d`.
 
 **🔴 INCIDENTE — perna C do CI quebrou (2026-08-15) + correção de PROCESSO.** Causa raiz (diagnosticada
 reproduzindo o build da perna C localmente, gen1 do `bootstrap/teko.c`): as lanes de stdlib validaram só com
