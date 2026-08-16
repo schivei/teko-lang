@@ -1503,6 +1503,21 @@ As 4 leis que isso sela:
    o join do pai nunca pendura. O waitgroup é um **canal de conclusão** (`Tx<bool>` singleton via DI + `chan.add()`).
 `arm<I: Intent<T>, T>` (type-param único no `__wrap<I>`) esquiva `__wrap<Intent<T>>` (type-arg genérico aninhado).
 
+**✅ §17 COMPILAÇÃO CONDICIONAL ENTREGUE (`4589eafe`..`c4681cc1`) + RESEED (`20d7cb9b`).** `#if/#elseif/#else/
+#endif` + `#os`/`#arch` (atalhos p/ item único) + predicados COMPOSTOS (`&&`/`||`/`!`+grupos), **podados no
+build-time ANTES do type-check**. Crumbs: **A** AST de predicado (`@PredKind()` = `PTrue|PEq|PFlag|PNot|PAnd|POr`)
++ avaliador puro-booleano `eval_pred` (`src/build/prune.tks`, curto-circuito, eixo-desconhecido/flag-ausente→false;
+NÃO é §14 comptime) · **B** `Item.guard: Pred` (só-prune, apagado antes do `.tkb`) + `prune_cc` (substitui
+`prune_os` no mesmo slot `frontend_check`) + `target_arch` · **C** `#arch` (canônico `"arm64"`; o `"arch64"` da
+spec era typo) · **D** guards em TODOS os itens de topo (fn/type/flags/const/extern) · **E** regiões
+`#if/#elseif/#else/#endif` + parser composto (`src/parser/parse_cc.tks`) · **F** `build_flags` honest-stop vazio
+(sem fonte de flag inventada). **RESEED (mudança de compilador B-E):** seed novo `20d7cb9b`; corpus sem guards →
+prune NO-OP → byte-idêntico por-plataforma → **tc1==tc2==tc3** (sem ladder); `provenance_gate.sh` PASS.
+Regressões: `s17_if_region` (arm `#if(os=="windows")` chama símbolo INEXISTENTE e é podado **antes** do
+type-check sem erro — prova prune-precede-checker) exit 42; `s17_arch` exit 64; `s17_composite` exit 99;
+`s17_if_reject` rejeita 3 diagnósticos. **§17 é o pré-req do §16** (seleciona FFI por-target + ucontext/Fiber e
+io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §16.**
+
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
 baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6

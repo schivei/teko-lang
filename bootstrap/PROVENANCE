@@ -1,44 +1,41 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §10 `spawn` batch — C0a maintained-C
-# thread primitive + S1/S2/S3 compiler surface (parser/checker/codegen). What this harvest carries:
-#   - **C0a (maintained-C)**: `src/runtime/teko_rt.{c,h}` — `tk_thread_spawn` (detached, fire-and-forget;
-#     the arena bracket `tk_task_begin`/`tk_task_end` runs INSIDE a static pthread start-routine, the
-#     `tk_test_run` setjmp-ownership precedent) + the await-batch twins `tk_thread_join_spawn`/
-#     `tk_thread_join` (compiled, unused) + `tk_thread_spawn_selftest`. `#include <pthread.h>` on the
-#     non-Windows branch (§16-TRANSITIONAL — thread creation goes to OS-FFI when teko_rt.c is retired).
-#   - **S1 (compiler — parser)**: `Spawn`/`TSpawn` nodes into the `@Statement()`/`@TStatement()` unions;
-#     contextual `spawn`+Ident recognition (`is_spawn_head`, modeled on `is_adopt_head`).
-#   - **S2 (compiler — checker)**: `type_spawn` + the spawn-boundary ref-guard (reject a `ref` param
-#     crossing the boundary — arena UAF) + copy-guard (reject uncopyable args).
-#   - **S3 (compiler — codegen)**: per-site ctx-blob + `cabi` trampoline + arg DEEP-COPY (scalars inline,
-#     `str`/slice bytes tail-packed with `ptr` re-pointed INSIDE the malloc'd block, so no spawning-arena
-#     pointer survives); the trampoline frees the blob after the target returns. Native backend
-#     honest-stops `TSpawn` (C backend is the target).
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §17 CONDITIONAL-COMPILATION machinery
+# (parser + build-time prune). What this harvest carries:
+#   - **§17 (compiler — parser + build prune)**: build-time conditional compilation.
+#     - Crumb A: the predicate AST (`@PredKind()` = `PTrue|PEq|PFlag|PNot|PAnd|POr`, `Pred` wrapper) +
+#       a pure boolean-over-constants evaluator (`src/build/prune.tks`: `CcEnv`, `eval_pred`) — short-
+#       circuit, total, unknown-axis/absent-flag → false; strictly a PRUNE evaluator, not §14 comptime.
+#     - Crumb B: `parser::Item` gained `guard: Pred` (prune-time only, erased before `.tkb`); `Module`
+#       gained `decl_guards`; `prune_cc` (driven by `CcEnv{target_os, target_arch, build_flags}`)
+#       replaces `prune_os` at the same `frontend_check` slot (before macros/deps/type-check). `#os`
+#       keeps `Function.os_guard` for `.tkb`/merge byte-compat.
+#     - Crumb C: `#arch("…")` attribute (canonical `"arm64"`; the sealed-spec `"arch64"` was a typo).
+#     - Crumb D: `#os`/`#arch`/`#if` widened to ALL top-level items (`fn`, `type`, `flags`, `const`,
+#       `extern`), not just functions.
+#     - Crumb E: `#if/#elseif/#else/#endif` regions + composite predicate parser (`src/parser/parse_cc.tks`,
+#       `||`/`&&`/`!`/grouping), first-true-wins as AND-of-NOTs, nested regions recurse.
+#     - Crumb F: `build_flags(m)` honest-stops empty (no flag source invented) → `PFlag` soundly false.
 #
-# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL CORPUS DIVERGENCE. S1-S3 no-op the compiler's OWN corpus (no
-# `.tks` in `src/` uses `spawn` — every `tk_spawn_*`/`tk_thread_spawn` token in the self-image is a
-# codegen STRING TEMPLATE, never an actual call). The emitted C differs from the previous seed by the new
-# parser/checker/codegen/runtime functions + mechanical temp-counter / source-loc shifts.
+# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL CORPUS DIVERGENCE. §17 no-ops the compiler's OWN corpus: `src/`
+# applies ZERO `#os`/`#arch`/`#if` guards, so every item's guard is `PTrue` and the prune is a no-op over
+# the tree → emitted C byte-identical PER PLATFORM (same platform → same survivors → same emit). The
+# emitted C differs from the previous seed only by the new parser/build source + mechanical shifts.
 #
-# GATE: SELF-REPRODUCE (a ONE-STEP LADDER, then a fixpoint).
-#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `3d98db74` — the F3 compiler,
-#     which has NO spawn codegen) built the tree → emitted a TRANSITIONAL teko.c `639ab3b2` (tc1); tc1 ->
-#     gen1 (the spawn-capable compiler); gen1 built the tree → tc2 `6cbfb13449415477a6a11f1447b867f2f8b
-#     99984795e6fd99aac8ab6a0740aed`; tc2 -> gen2; gen2 built the tree → tc3 `6cbfb134…`. **tc1 != tc2**
-#     (the one-generation ladder: the old F3 codegen numbers temps differently than the spawn compiler —
-#     a temp-name cascade), but **tc2 == tc3, byte-identical** — the STABLE spawn generation reproduces
-#     itself exactly. The seed is the STABLE generation (tc2 == tc3), NOT the transitional tc1.
+# GATE: SELF-REPRODUCE.
+#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `6cbfb134`) built the tree →
+#     emitted teko.c `20d7cb9b` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `20d7cb9b9cda38563d160e8da0
+#     cc621b2ecced97431348b92c89fac266fe7539`; tc2 -> gen2; gen2 built the tree → tc3 `20d7cb9b…`. tc1 ==
+#     tc2 == tc3, byte-identical (sha256 below). No ladder this harvest: the guard-free corpus makes the
+#     prune a no-op, so the OLD compiler (gen0) and the NEW (gen1) emit the self-image identically at tc1.
 #   - cc-route: cc -std=c2x -w -g -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
-#   - Regression: `examples/regressions/spawn_basic/` — four workers `spawn`ed, each writes a file named
-#     by its copied `i64` tag with its deep-copied `str` content; main bounded-polls for exact content.
-#     Runs exit 0 (`0.txt`..`3.txt` = `worker-0-hello`..`worker-3-hello`), threads ran and both scalar and
-#     `str` args survived the boundary; clean under `TEKO_MEM_PARANOID=1`. C0a selftest (`examples/probes/
-#     thread_spawn`) exits 42, `tk_names_live_count` drift 0 across 100 arena-per-thread cycles.
-# The C bootstrap ladder gained `-pthread` on the non-Windows link (build_gen1_from_c, build_with_seed_
-# fallback, native_linux_asset glibc+musl, package_release) so the C leg links `tk_thread_spawn`.
+#   - Regression: `examples/regressions/s17_if_region/` (`#if(os=="linux")`/`#elseif`/`#else` — only the
+#     matching arm survives; the `#if(os=="windows")` arm calls a NONEXISTENT symbol and is pruned BEFORE
+#     type-check without error, proving prune-precedes-checker) exit 42; `s17_arch` exit 64; `s17_composite`
+#     (`os=="linux" && arch=="x86_64"`) exit 99; `s17_if_reject` (EXPECT_COMPILE_FAIL) rejects with the
+#     expected diagnostics.
 # Every capped build (`ulimit -v 6291456`) peaked under 5.8 GB, within the 6 GB cap.
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
@@ -50,9 +47,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  6cbfb13449415477a6a11f1447b867f2f8b99984795e6fd99aac8ab6a0740aed
+sha256:  20d7cb9b9cda38563d160e8da0cc621b2ecced97431348b92c89fac266fe7539
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §10 spawn batch: C0a tk_thread_spawn
-         + S1-S3 parser/checker/codegen), byte-identical on rebuild across the stable C-route generations
-         (tc2 == tc3, the spawn-stable generation reached from 3d98db74 via one transitional tc1) AND on
-         the cc-route re-emission; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §17 conditional-compilation parser +
+         build-time prune), byte-identical on rebuild across the stable C-route generations (tc1 == tc2 ==
+         tc3, the guard-free corpus makes the prune a no-op so no ladder) AND on the cc-route re-emission;
+         no unrecovered legacy artifact underlies it.
