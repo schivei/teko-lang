@@ -1306,20 +1306,21 @@ namespace) de `T`**. Dois structs homônimos em **namespaces DIFERENTES**, ambos
 `T|error`/`T|null`, geram a **MESMA** constante C (ex.: `teko::encoding::toml::KeyStep` e
 `teko::encoding::ini::KeyStep` → ambos `TK_TAG_U_KEYSTEP_ERROR_KEYSTEP`) → `cc` falha (`incompatible
 types`), mesmo os dois type-checando isolados. Contornado renomeando (ini `KeyStep`→`SectionNameStep`).
-**Causa raiz REAL (diagnóstico do dono 2026-08-16, verificado — é UPSTREAM, não codegen puro):** o path de
-mangle SINTÁTICO (`cg_opt_mangle_texpr_str` `codegen.tks:2736`, `cg_texpr_mangle:2799`) mangleia o
-`parser::NamedType` pelo **último segmento do `path` como ESCRITO** (dentro de `toml`, o user escreve `KeyStep`
-bare) → chave "keystep". O path RESOLVIDO (`cg_opt_mangle_str:2042`) TEM o `nm.name` qualificado mas o encurta
-com `name_last_segment` **de propósito, pra CONCORDAR com o sintático**. Os dois foram forçados a bare porque
-**o `NamedType` sintático não carrega o nome resolvido/canônico**. **Fix (direção do dono): o RESOLVER
-substitui o nome canônico completo no `NamedType`** (reescreve o `path` ou adiciona slot `resolved_name`) → aí
-os dois paths mangleiam o nome cheio e concordam. **RULING DO DONO: bug A SER RESOLVIDO, não contornado.**
-🔄 Em design (`teko-architect` → `docs/design/fix-union-tag-cross-namespace-codegen.md`): resolver + os dois
-paths de mangle + auditar TODO consumidor da chave (typedef `tk_u_`, tag `TK_TAG_U_`, `.as.<key>`, destructure,
-stamp de genérico `Base__g__u_`); builtins/error/null/prim INALTERADOS; **minimizar churn** (ideal: união no
-namespace ROOT mangleia idêntico a hoje → reseed pequeno); **fixpoint byte-idêntico + reseed** do que mudar. **Regra de coordenação ATÉ o fix landar:** structs de stdlib usados em uniões de
-erro/null com **nome único tree-wide** (hoje só `NsScope`/`Symbol` repetem — internos, não colidem por não
-estarem ambos em união erro/null). Auditar: `grep -rhoE 'type ([A-Z]\w*) = struct' src/ | sort | uniq -d`.
+**✅ RESOLVIDO (`e98fd5b0`, aprovado pelo dono 2026-08-16).** O trace refutou a hipótese upstream com evidência:
+**resolver E dedup estavam CORRETOS** — `resolve_named` (`resolve.tks:1339`) monta `Named { name = qualify(...) }`
+(canônico), e `type_eq` (`type.tks:205`) compara o nome INTEIRO → mantém distintos (é por isso que não há erro
+de tipo duplicado; o critério do próprio dono, seguido até o fim, provou que o `Named.name` já é canônico). **O
+codegen é que estirpava** (`cg_opt_mangle_str:2036` chamava `name_last_segment` no nome cheio; os paths sintático
+e de pattern liam o spelling bare do AST). **Fix (codegen-only):** helper `cg_ns_c_key` (`::`→`__` sobre o nome
+CANÔNICO) nos 4 sítios — leaf resolvido, type-expr sintático, chave de case do match (via C3b subject-derived,
+não `ref_ns`, pois o namespace da função pode diferir do subject num match cross-import), stem `TK_TAG_<X>` de
+variant nomeada. Prim/error/null/builtin e uniões no namespace ROOT byte-idênticas. **Validação:** build gen2
+verde + FIXPOINT gen2==gen3 byte-idêntico (sha `898dc030`; o transitório gen_new emitido pelo compilador
+old-mangle NÃO é o seed — o estável gen_new2==gen_new3 é) + fixture `examples/regressions/union_tag_cross_ns`
+(a::Thing/b::Thing em `Thing|error`/`Thing|null`) build+run verde com símbolos DISTINTOS + **reseed do bootstrap**
+(`898dc030`, provenance_gate PASS). **Irmãos deixados p/ depois (mesma classe, fora do #4):** nomes de instância
+genérica `Base__g__<arg>` e constantes de enum `TK_E_<E>_<M>` — mesmo hazard de nome bare, precisam de mudança
+lockstep checker+codegen + reseed próprios (relevante quando os genéricos entrarem).
 
 **🔴 INCIDENTE — perna C do CI quebrou (2026-08-15) + correção de PROCESSO.** Causa raiz (diagnosticada
 reproduzindo o build da perna C localmente, gen1 do `bootstrap/teko.c`): as lanes de stdlib validaram só com
