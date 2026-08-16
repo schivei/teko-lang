@@ -1,0 +1,189 @@
+/**
+ * arr_replace_at — a copy of `xs` with the element at index `at` replaced by `v`. An `at` outside
+ * `[0, xs.len)` yields an unchanged copy.
+ *
+ * @param xs  the source array
+ * @param at  the index to overwrite
+ * @param v   the replacement element
+ * @return    a fresh array equal to `xs` except at `at`, which holds `v`
+ */
+pub fn arr_replace_at<T>(xs: []T, at: u64, v: T): []T {
+    var out: []T = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if i == at { out = teko::list::push(out, v) } else { out = teko::list::push(out, xs[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * dict_find_index — the index of key `k` (precomputed hash `h`) in the parallel `keys`/`hashes` arrays,
+ * or `keys.len` when absent (the generic `K: IEq & IHash` scan).
+ *
+ * @param keys    the key array
+ * @param hashes  the parallel cached-hash array (`hashes[i]` is `hash()` of `keys[i]`)
+ * @param h       the precomputed hash of the sought key
+ * @param k       the sought key
+ * @return        the index of `k` in `keys`, or `keys.len` if `k` is absent
+ */
+pub fn dict_find_index<K: IEq & IHash>(keys: []K, hashes: []u64, h: u64, k: K): u64 {
+    var i: u64 = 0
+    loop {
+        if i >= keys.len { break }
+        if hashes[i] == h && keys[i] == k { return i }
+        i++
+    }
+    keys.len
+}
+
+/**
+ * map_find_index — the index of str key `k` (precomputed hash `h`) in the parallel `keys`/`hashes`
+ * arrays, or `keys.len` when absent (the str-keyed scan `Map<V>` folds over).
+ *
+ * @param keys    the map's key array
+ * @param hashes  the parallel cached-hash array
+ * @param h       the precomputed hash of the sought key
+ * @param k       the sought key
+ * @return        the index of `k` in `keys`, or `keys.len` if `k` is absent
+ */
+pub fn map_find_index(keys: []str, hashes: []u64, h: u64, k: str): u64 {
+    var i: u64 = 0
+    loop {
+        if i >= keys.len { break }
+        if hashes[i] == h && keys[i] == k { return i }
+        i++
+    }
+    keys.len
+}
+
+/**
+ * Dictionary<K: IEq & IHash, V> — a growable, reference-semantic hash map from an equatable/hashable key
+ * `K` to `V` values (the generic successor to the str-keyed `Map<V>`). Reduced to the surface this
+ * fixture reads back through.
+ *
+ * @since fase1b (G6 fixture)
+ */
+pub type Dictionary<K: IEq & IHash, V> = class {
+    /** The keys, in insertion order — parallel to `hashes` and `vals`. */
+    intern keys: []K
+    /** Each key's cached hash, compared before the full key. */
+    intern hashes: []u64
+    /** The values, parallel to `keys`. */
+    intern vals: []V
+
+    /**
+     * Build an empty `Dictionary<K, V>` — the generic static factory.
+     *
+     * @return a fresh, empty `Dictionary<K, V>` at the caller's concrete key/value types
+     */
+    pub static fn make(): Dictionary<K, V> {
+        .{ keys = teko::list::empty(); hashes = teko::list::empty(); vals = teko::list::empty() }
+    }
+
+    /**
+     * Insert or update the value for `k`.
+     *
+     * @param k  the key to insert or update
+     * @param v  the value to associate with `k`
+     */
+    pub fn insert(k: K, v: V) {
+        var h = k.hash()
+        var at = dict_find_index(self.keys, self.hashes, h, k)
+        if at < self.keys.len {
+            self.vals = arr_replace_at(self.vals, at, v)
+            return
+        }
+        self.keys = teko::list::push(self.keys, k)
+        self.hashes = teko::list::push(self.hashes, h)
+        self.vals = teko::list::push(self.vals, v)
+    }
+
+    /**
+     * The value associated with `k`, or `null` when `k` is absent.
+     *
+     * @param k  the key to look up
+     * @return   the associated value, or `null` if `k` is not present
+     */
+    pub fn get(k: K): V | null {
+        var at = dict_find_index(self.keys, self.hashes, k.hash(), k)
+        if at >= self.keys.len { return null }
+        self.vals[at]
+    }
+}
+
+/**
+ * Map<V> — a str-keyed, reference-semantic hash map (the fixture twin of the stdlib `teko::collections::
+ * Map<V>`). Retained str-keyed; its `to_dictionary` is the ADDITIVE G6 bridge to the generic
+ * `Dictionary<StrKey, V>`.
+ *
+ * @since fase1b (G6 fixture)
+ */
+pub type Map<V> = class {
+    /** The keys, in insertion order — parallel to `hashes` and `vals`. */
+    intern keys: []str
+    /** Each key's cached hash, compared before the full key. */
+    intern hashes: []u64
+    /** The values, parallel to `keys`. */
+    intern vals: []V
+
+    /**
+     * Build an empty `Map<V>`.
+     *
+     * @return a fresh, empty `Map<V>` at the caller's concrete value type `V`
+     */
+    pub static fn make(): Map<V> {
+        .{ keys = teko::list::empty(); hashes = teko::list::empty(); vals = teko::list::empty() }
+    }
+
+    /**
+     * Insert or update the value for str key `k`.
+     *
+     * @param k  the key to insert or update
+     * @param v  the value to associate with `k`
+     */
+    pub fn insert(k: str, v: V) {
+        var h = teko::runtime::str_hash(k)
+        var at = map_find_index(self.keys, self.hashes, h, k)
+        if at < self.keys.len {
+            self.vals = arr_replace_at(self.vals, at, v)
+            return
+        }
+        self.keys = teko::list::push(self.keys, k)
+        self.hashes = teko::list::push(self.hashes, h)
+        self.vals = teko::list::push(self.vals, v)
+    }
+
+    /**
+     * The value associated with str key `k`, or `null` when `k` is absent.
+     *
+     * @param k  the key to look up
+     * @return   the associated value, or `null` if `k` is not present
+     */
+    pub fn get(k: str): V | null {
+        var at = map_find_index(self.keys, self.hashes, teko::runtime::str_hash(k), k)
+        if at >= self.keys.len { return null }
+        self.vals[at]
+    }
+
+    /**
+     * A `Dictionary<StrKey, V>` holding this map's current entries — the ADDITIVE G6 bridge from the
+     * str-keyed `Map<V>` to its generic successor. Each `str` key is wrapped in a `StrKey` conformer and
+     * inserted with its current value. Because `V` is the map's own value type-param, the factory
+     * `Dictionary<StrKey, V>::make()` and each `insert` dispatch through the phantom-owner generic-instance
+     * path (F3), monomorphized to the caller's concrete `V`.
+     *
+     * @return a fresh `Dictionary<StrKey, V>` with one entry per `(key, value)` pair of this map
+     */
+    pub fn to_dictionary(): Dictionary<lib::StrKey, V> {
+        var out = Dictionary<lib::StrKey, V>::make()
+        var i: u64 = 0
+        loop {
+            if i >= self.keys.len { break }
+            out.insert(lib::StrKey { key = self.keys[i] }, self.vals[i])
+            i++
+        }
+        out
+    }
+}
