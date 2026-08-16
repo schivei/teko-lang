@@ -1482,15 +1482,21 @@ fn arm<I: Intent<T>, T>(u: uptr) {
 }
 ```
 As 4 leis que isso sela:
-1. **`__wrap<T>()` RETORNA um `ref T`** que aliasa `*p` (`typer.tks:1654` tipa `T|error|null`; marshall-spec
-   `wrap<T>(p): ref T` zero-cost reinterpret). Não recebe-e-muta; retorna a referência. O braço `error` é a
-   Parte-B (validação), puxada pra Doc-2.
+1. **`__wrap<T>()` RETORNA um VALOR `T | error | null`** na arena do CALLER (retorno virtual) — **NÃO** um
+   `ref T` (retorno-por-referência foi REMOVIDO; `typer.tks:1654` tipa `T|error|null` e @throws se `T` for
+   referência). *(CORREÇÃO 2026-08-16: eu havia citado `wrap<T>(p): ref T` do `marshall-spec.md`, que está
+   **RETIRED/superseded**. Erro meu.)* **Consequência:** como devolve um VALOR auto-contido no caller (não um
+   alias de `*u`), `__wrap` **é OBRIGADO a deep-copiar/reconstruir** o `T` do dado apontado → **`__wrap` É o
+   marshal profundo** (não pode ser raso). O braço `error` é a Parte-B (validação), puxada pra Doc-2.
 2. **INVARIANTE-DO-WRAP (regra dura, elevada do `unsafe`):** o que passa por `__wrap` **NÃO pode residir na arena
    de quem faz o wrap** — tem de viver numa arena que SOBREVIVA ao wrapper. No braço, o `Intent` vive na arena do
    **PAI** (que espera → sobrevive ao braço), nunca na do braço → sem UAF. É o "event horizon" do §5.2.
-3. **Casca por-REFERÊNCIA + valor por-MARSHAL (deep-copy):** a casca do `Intent` cruza por `uptr`+`__wrap` (o pai
-   garante a vida — lifetime-safe); o VALOR escrito nela (`intent.value = user_func()`) atravessa arena-braço→
-   arena-pai e portanto **estampa o `marshal<T>`** no assign. Duas coisas cruzando, complementares.
+3. **~~Casca por-referência + valor por-marshal~~ EM REVISÃO (retorno-por-ref removido quebra o write-through):**
+   como `__wrap<I>(u)` devolve uma **CÓPIA** do Intent na arena do braço (retorno virtual), o braço NÃO pode
+   escrever no Intent do PAI segurando um handle vivo. O write-back correto (batendo com a fala do dono "o
+   contexto do await grava o intent na arena do pai"): **o braço produz seu resultado/Intent como VALOR e envia
+   pelo CANAL de conclusão; o contexto-do-await do PAI recebe (marshal→arena-do-pai) e grava.** O braço NÃO
+   aliasa o Intent do pai. *(Pendente confirmação do dono: write-back por canal vs write-through por `uptr` cru.)*
 4. **CANCEL-UNWIND REPLAYA `defer`:** o `defer` (C7.18, `ast.tks:410`, hoje dispara em return/break/continue/
    fall-off) tem de disparar TAMBÉM no desenrolar do cancel (CN1 estende o unwind pra replayar defers) — é assim
    que "braço cancelado ainda sinaliza o waitgroup" se cumpre: o `tx.send(!canceled); tx.done()` sempre dispara,
