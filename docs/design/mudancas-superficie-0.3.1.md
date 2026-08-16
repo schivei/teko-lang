@@ -1414,6 +1414,27 @@ arquivos por tag-`i64` copiado com conteúdo `str` deep-copiado, exit 0, MEM_PAR
 `char`/structs/classes/closures/`ref` honest-stop (batch posterior); Prim numérico/bool/`byte`/`str`/slices-deles
 copiáveis. Próximo §10: canais (`chan<T>`/`MemChan`/`OsChan`) → await front-end (A1-A3) → **A4 para no ruling D2**.
 
+**✅ §10 CANAIS — RUNTIME + SCAFFOLDING ENTREGUES (`a29a5d98`), SEM reseed (leaf); superfície genérica PARADA
+num pré-req.** LANDED: **C0b** `tk_memchan_*` (ring FIFO bounded/unbounded, mutex+cond, shell F2 via
+`tk_region_program`; probe exit 42), **C0c** `tk_oschan_*` (AF_UNIX DGRAM do probe, key abstract-namespace,
+sentinela CLOSED; probe exit 42), **C1** `src/threads/threads.tks` (`IChannelKind<T>` bare-atom, `Closed`,
+`Rx<T>`/`Tx<T>`/`Ctx` scaffolding), **C5-runtime** `tk_waitgroup_*`+`tk_region_deregister` (barreira 1000-worker,
+exit 42). **Gap-2 PROVADO:** `rx_pop_closed` exit 0 — `Rx__g__i32` estampa, match `i32 | Closed` fecha os dois
+braços (a composição união-genérica-com-membro-NOMINAL não-`null` está fechada, sem crumb de contingência).
+Canais CONCRETOS-`i64` end-to-end com spawn: `chan_memchan_spawn` (soma 4950, exit 0), `chan_oschan_spawn` (exit
+0) — **threads comunicam de verdade** pela superfície Teko. **SEM reseed:** C1 é leaf aditivo (emissão
+`6cbfb134`→`de499dad`, +21 linhas `Ctx`/`Closed`; `Rx`/`Tx` genéricos tree-shaken), runtime-C não muda `teko.c`;
+fixpoint 2-gen `de499dad`==`de499dad`. **HONEST-STOP (C2/C3/C4/C5-stdlib):** o conformer genérico
+`MemChan<T>`/`OsChan<T>` precisa mover um `T` abstrato pelo transporte byte-typed → exige **tamanho genérico
+`size_of<T>()`**, que NÃO existe pra type-param abstrato (`@sizeof<T>()` só folda em tipo CONCRETO; §5 marshall só
+entregou primitivas de endereço `ptr`/`uptr::__unwrap/__wrap`, sem tamanho). **DECISÃO DO DONO (pendente):** é a
+maquinaria de **marshalling de `T` cross-arena** que §5 deferiu — e é a MESMA que spawn (args gerais) e await
+(resultados gerais) vão precisar. Escalar/POD (bitwise `sizeof`) resolve com **fold de `@sizeof<T>` diferido ao
+monomorph** (T concreto no stamp); não-POD (str/ponteiros-de-arena) exige **deep-copy recursivo/serialize**
+(igual o spawn fez ad-hoc pros seus tipos fixos, generalizado). O implementer PAROU certo — não inventou. Próximo:
+resolver o marshalling-de-`T` (ruling §5) → destrava C2-C5-stdlib; e o **await/cancel opção (c)** (em desenho
+vivo com o dono: `on canceled as c {}` como desenrolar-não-local capturável, não-capturado→panic-cascade).
+
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
 baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6
