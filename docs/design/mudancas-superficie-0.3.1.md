@@ -1298,6 +1298,31 @@ paralelos p/ ESQUIVAR o #2). Despachando arquiteto para reconciliar o design vel
 a fase1b com âncoras frescas. **Task-6 (generic-stack-completion "5 gaps") re-escopada: só gap #3 era aplicável;
 #1 obsoleto; #2/#4/#5 sob avaliação como pré-reqs pontuais da fase1b.**
 
+**✅ collections-generics-fase1b G1-G5 + reject ENTREGUE (`f177be09`) — SEM reseed (corpus-folha).** Payoff dos
+genéricos: `IHash` (`fn hash():u64`, em `src/cmp/`) + chaves `StrKey`/`I64Key` (IEq&IHash&IOrd+mixins; I64Key.hash
+zig-zag sign-safe) + combinadores `arr_*`/`sorted_insert`/`heap_*` → **`Dictionary<K:IEq&IHash,V>`** +
+`dict_find_index` → **`HashSet<T:IEq&IHash>`** → **família ordenada** `SortedSet<T:IOrd>`/`PriorityQueue<T:IOrd>`/
+`SortedDictionary<K:IOrd,V>`. `Map<V>` INTACTO (str-keyed, `teko::env` depende). **Validação build-real do
+coordenador:** gen0(seed `481ebae5`) compila a árvore drenada VERDE, emissão `c6dacf4d` (== relatado pelo
+implementer), binário ok; implementer confirmou FIXPOINT gen1==gen2==`c6dacf4d`. **Corpus-folha → sem reseed** (o
+seed constrói a árvore; a emissão só cresce por 14 conformers CONCRETOS StrKey/I64Key + `arr_drop_u64_at`, não
+genéricos estampados — 0 funções genéricas de coleção estampadas; sem gate seed-vs-emissão). Fixtures rodam verde
+(7 cenários exit 0: dict/hashset/sorted roundtrips com `<StrKey>` e `<I64Key>`; reject `dict_key_no_ihash`
+falha-ao-compilar com o diagnóstico de constraint). W15 limpo, `bootstrap/` intocado.
+
+**⏳ G6 (`Map.to_dictionary`) PARADO — trip GENUÍNO do gap #2 (contra a reconciliação).** `Dictionary<StrKey, V>::make()`
+com o type-param `V` do dono nos type-args da FACTORY → "unknown function: make" (a reconciliação só analisou a
+forma struct-literal `StrKey{}`, perdeu a forma factory-call). **3 achados de maquinaria adjacentes** (implementer,
+sob TRIAGE de arquiteto): **F1** type-param constrangido por interface não pode ser membro de união (`T|null` com
+`T:IOrd` → "an interface cannot be a variant member yet", `resolve.tks:2134`; workaround guard-based entregue —
+`dequeue`/`pop` retornam `T` bare, guardados por `is_empty()`, fail-loud); **F2** re-key de monomorph erra quando
+o MESMO free-generic é instanciado no type-param (struct) E num `[]u64` concreto (workaround `arr_drop_u64_at`
+concreto); **F3=gap#2** a factory genérica com type-param do dono (bloqueia G6); **F4** constraints de instanciação
+de CLASSE não são checadas no mono (só free-generic) — `Dictionary<Plain>` link-falha em vez de diagnóstico limpo.
+Arquiteto triando qual é fix-agora vs workaround-aceitável vs ruling-do-dono, com plano ordenado. **Adjacente
+destravado, NÃO construído:** `sort<T:IOrd>` genérico, `teko::env`→Map. Próximo: triage → fixes de maquinaria →
+G6 → sort<T:IOrd> → §10 concorrência.
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
