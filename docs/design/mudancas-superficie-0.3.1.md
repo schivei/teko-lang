@@ -1536,10 +1536,12 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   maquinaria de genéricos está pronta), **NÃO bloqueia** §16/§10-(c). **NÃO acoplada ao refcount** (que usa
   `Dictionary<addr,count>` no v1); o refcount pode migrar pro `Table` se este amadurecer. A despachar como lane
   stdlib independente quando houver capacidade de build (evitar builds pesados em paralelo com o §16).
-- **PLACEMENT (recomendação, pendente confirmação):** o refcount-wrap é **Doc-1 (melhora a arena)**, NÃO baseline
-  Doc-2 — porque a correção do §10/§16 não precisa dele (deep-copy + singletons-de-vida-de-programa em F2 bastam;
-  singleton nunca é freed até o processo sair → sem refcount). É otimização/generalização pros escape-hatch
-  (ref-opaca retida, FFI-ponteiro-retido).
+- **PLACEMENT = Doc-2 (RULING do dono 2026-08-16; CORRIGE minha recomendação errada de Doc-1):** o wrap-refcount
+  é **CAPACIDADE de memória** → é terreno → **Doc-2** (parte da arena do §16). **A Doc-1 é SÓ TUNING** (performance
+  da arena já-pronta), NÃO adiciona capacidade. Então a arena do §16 inclui o wrap-refcount desde já (o deep-copy
+  é o default; o wrap-refcount é o escape-hatch do usuário — ambos Doc-2). **A ARENA está DESENHADA** pela síntese
+  de tudo que deliberamos (arena-per-object + escape-analysis + wrap-refcount + deep-copy-na-fronteira +
+  singletons-F2) — NÃO precisa de colaboração-de-design separada; o coordenador arquiteta+constrói do registro.
 - **JÁ TEMOS O PRECEDENTE — a ESCAPE-ANALYSIS (achado 2026-08-16):** `src/checker/escape.tks` ("the memory-model
   keystone") já faz "detecta-escape→estende-lifetime" **dentro de uma thread**: uma alocação que ESCAPA o frame
   (return/tail-expr/armazenada-fora) é colocada numa REGIÃO MAIS LONGEVA em vez da região-de-frame (bulk-freed na
@@ -1548,7 +1550,7 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   **frame/escopo**. **O wrap-refcount é a GENERALIZAÇÃO disso pro cross-arena/cross-thread** (tabela-refcount-na-
   raiz em vez de promoção-frame→região-externa) — MESMA FAMÍLIA, confirmando o meta-princípio (o compilador
   decide frame-local vs promovido vs refcounted). Dentro-da-thread: escape-analysis já resolve. Entre-threads:
-  marshal (deep-copy, Doc-2) ou wrap-refcount (Doc-1).
+  marshal (deep-copy, default) ou wrap-refcount (escape-hatch) — **AMBOS Doc-2** (a Doc-1 só faz tuning).
 
 **🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
 1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
