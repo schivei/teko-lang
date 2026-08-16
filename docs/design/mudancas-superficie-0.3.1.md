@@ -1366,6 +1366,31 @@ fechou só a forma factory-call). **GENÉRICOS COMPLETOS** (resta só F2 checker
 limitações adjacentes rastreadas). Próximo: `sort<T:IOrd>` genérico (adjacente, destravado) → **§10 concorrência
 (100%)** → §11 → §17 → §16 → FFI-stdlib → ui.
 
+**⚠️ INCIDENTE DE INFRA (rewind de snapshot):** o container foi restaurado a um snapshot antigo (`6ce8675d`, 231
+commits atrás). **NADA de commitado/pushado perdido** — `origin/fix/retirement` @ `7721a1d7` intacto, resync por
+ff. Perdido só o NÃO-commitado: o `sort<T:IOrd>` em voo (re-despachado) e o design-doc §10 (reconstruído do
+relatório do arquiteto, commitado). Lição: commitar design-docs de subagente imediatamente.
+
+**§10 CONCORRÊNCIA — DESIGN PRONTO (`plano-s10-concorrencia-crumbs.md`), 0% impl.** Spec selada (spawn / `chan<T>`
+transportes plugáveis / `Rx`/`Tx`/`Ctx` / await+`Intent<T>` / cancel / `teko::journal` / ns `teko::threads`).
+Runtime tem `tk_task_begin/end` (arena) + `tk_region_program` (F2) + `__atomic_*`, mas **SEM criação de thread OS e
+SEM scheduler**. **D1 (como spawn cria thread OS): CONSTRAINT-FORCED** → nova primitiva C mantida
+`tk_thread_spawn` em `teko_rt.{c,h}` (o bracket task_begin/end tem de viver no trampolim C; pthread-vs-clone é
+detalhe INTERNO do runtime, diferido a §16/§17). **D2 (modelo de suspensão do await): RULING-DO-DONO** — a spec
+§10.3 pede REACTOR ("cede, nunca bloqueia"), mas NO-VM torna a reificação-de-continuação um transform AOT/arena
+grande sem scaffolding. **PERGUNTA AO DONO (ver abaixo):** v1 **thread-per-await** (Opção a, `spawn`+`join`
+estrutural, simples, semântica de `Intent` idêntica) e diferir o reactor, OU investir já no lowering
+state-machine? **Recomendação do arquiteto: (a) para v1** — único modelo construível no runtime que existe após D1,
+preserva todos os observáveis do §10.3. **Só A4 (lowering do await) + metade-suspensão do CN1 (cancel) bloqueiam em
+D2;** todo o front-end de await (tipo `Intent<T>`, parser, checker-widening, reconhecimento de cancel) é
+independente-de-modelo. **Spine ordenada:** C0a `tk_thread_spawn` [C-rt, PRIMEIRO] → C0b `MemChan` → C0c `OsChan`
+(DGRAM do probe) → S1-S3 spawn (parser/checker/codegen, [C]) → C1-C5 canais+DI+WaitGroup ([L], C4 pode virar [C]
+se mono não substituir `T` no constraint de `K`) → A1-A3 await front-end ([UNBLOCKED]) → **A4 await-lowering
+[BLOQUEADO em D2]** → CN1 cancel → J1 journal. **§16-boundary confirmado:** transportes built-in + spawn caem no
+runtime ATUAL (sem §16); só transportes plugáveis-por-usuário (Kafka/Rabbit) são extensão §16-gated. **§10 fica
+LEAF** (o axis-2 parallel-codegen usa `fork_join` interno SEPARADO, não a superfície `spawn`/`chan`) → reseeds
+mecânicos. Vou dirigir C0a→A3 (desbloqueado) e PARAR em A4 até o ruling D2 do dono.
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
