@@ -1577,6 +1577,45 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   touching (um reseed p/ os dois). Trabalho parcial salvo em `feat/s16-c6a-env` `f62d8f3a` (fixture + módulo no
   espelho-local; set/unset verificados; get bloqueado no Achado B) — NÃO drenado.
 
+**🔴⚖️ VIRADA §16 — libc está FORA; o alvo é SYSCALL / ABI-NATIVA-DO-SO / TEKO-PURO (RULING DO DONO 2026-08-16).**
+Eu tinha ligado via `extern fn ... from "c"` (libc: getenv/setenv/clock_gettime). **ERRADO, no fundo.** (1) libc
+É C — ligar em libc não remove a dependência de C, só a move de `teko_rt.c` pra libc; o "sweep de C" fica
+incompleto. (2) **Overhead + dependência-C no NATIVE:** o binário native (alvo do seed-native da Doc-1) passaria a
+linkar+chamar libc (wrapper de libc por cima do syscall) — o dono quer o binário native falando DIRETO com o
+kernel. **`from "c"` (libc portável) está BANIDO.**
+- **A pergunta-chave do dono (e a resposta = o modelo a copiar):** como Rust/Go/Zig/.NET falam com o SO SEM
+  compilador C? Todas **declaram o símbolo externo e deixam o LINKER (ou loader dinâmico) resolvê-lo contra a
+  SHARED LIBRARY NATIVA do SO** — artefato binário de ABI estável que o SO já distribui; zero compilador C, zero
+  código C. Go no Linux faz **syscall cru** (instrução `syscall`, sem libc); no macOS/Windows chama libSystem/
+  kernel32 por stubs asm. Rust/.NET fazem bind da lib nativa via linker/`DllImport`. **O que se evita é o
+  COMPILADOR C + o CÓDIGO-FONTE C (`teko_rt.c`), NÃO a shared library.** Linkar a lib nativa é operação de LINKER —
+  exatamente a definição da perna-native ("linker-only, sem cc"). Bate.
+- **RULING (relaxa o "SEM EXCEÇÕES" absoluto):** "podemos exigir C para alguns casos; havendo shared library, nem
+  precisa de C." Ou seja: exigir a **shared library de ABI-C nativa do SO** (libSystem/kernel32) é ACEITÁVEL onde o
+  SO não dá syscall estável (Apple/Windows) — não é dependência de compilador C. O que morre é a libc-portável-como-
+  runtime-C que a gente arraste.
+- **MODELO CORRIGIDO (por-SO):**
+  | Caso | Mecanismo | compilador C? |
+  |---|---|---|
+  | **Linux — core/hot** | **syscall CRU = intrínseco de codegen** (asm inline `syscall` na perna C / instrução nativa na native), números no `teko::sys` | não |
+  | **macOS** | bind de símbolos do **libSystem.dylib** (ABI mandada pela Apple), resolvido pelo linker | não |
+  | **Windows** | bind de **kernel32.dll/ntdll.dll** (Win32/NT), resolvido pelo linker | não |
+  | **Sem syscall nem razão de lib** (env: `environ` é memória) | **Teko puro** sobre `environ` | não |
+  | **Libs opcionais** (openssl/gpg/db) | **FFI em runtime** (`dlopen`/`dlsym`) — ruling anterior | não |
+- **MECANISMO DO SYSCALL (avalizado pelo dono 2026-08-16, "emita assembly inline em teko.c"):** intrínseco de
+  codegen, como o `f64_bits`. **Perna C:** o codegen emite `asm volatile("syscall" ...)` inline no `teko.c` (a
+  perna C NÃO pode usar o wrapper `syscall()` da libc — é libc) com as convenções de registrador por-`#arch`
+  (x86_64: `rdi/rsi/rdx/r10/r8/r9`, ret em `rax`, clobber `rcx/r11/memory`; aarch64: `x0-x5` + `svc #0`). **Perna
+  native:** o codegen emite a instrução de syscall direto. **`teko::sys`** guarda os NÚMEROS por-`#os`/`#arch`
+  (`SYS_write`/`SYS_mmap`/`SYS_clock_gettime`/`SYS_getrandom`/`SYS_exit_group`…).
+- **SALVA:** **C1** (`extern type = struct` — syscalls E a ABI-nativa levam/retornam structs: `timespec`, `stat`…);
+  **C2** (`teko::sys` — agora guarda números de syscall + convenções de símbolo por-SO). A máquina de `extern fn`/
+  `extern struct` é reusável pro bind de lib-nativa (macOS/Windows).
+- **MORREM (framing libc, descartados — worktrees/branches removidos, NUNCA drenados):** **X1** (skip-set de
+  `from "c"` vs `<stdlib.h>` — sem sentido: syscall na perna C é asm inline, sem símbolo/colisão) e **C6a**
+  (`teko::env` via libc getenv — env vira Teko puro sobre `environ`). O **plano §11/§12** (refresh libc-FFI) fica
+  SUPERSEDED por esta virada. **Novo keystone = o intrínseco de syscall** → re-roteado ao arquiteto.
+
 **🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
 1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
 ordem ~10 fases (fácil→difícil): strings/format/char/float → env/print/os-arch → **I/O&fs** → time/random →
