@@ -1,0 +1,484 @@
+/**
+ * Tests for `teko::encoding::protobuf` — the Protocol Buffers WIRE FORMAT codec. Covers the
+ * varint codec across its byte-length boundaries, zigzag encode/decode, the wire-type/tag codec
+ * (including rejecting the deprecated group wire types and a zero field number), full message
+ * decode/encode against byte-exact vectors cross-checked against Python's
+ * `google.protobuf.internal.encoder`/`decoder` (the spec's own reference vectors for field 1
+ * varint 150 and field 2 string "testing" among them), repeated and packed fields, embedded
+ * messages, every scalar reader (`u64`/`i64`/zigzag `i64`/`bool` for varint, `u64`/`f64` for
+ * fixed64, `u32`/`f32` for fixed32, `bytes`/`str`/message/packed for length-delimited), and the
+ * malformed-input error cases (M.1 fail-loud via `error`, never a panic). This file lives under
+ * `teko::encoding::protobuf` (namespace = directory), so the functions under test are called
+ * bare, mirroring `teko::encoding::cbor::cbor_test.tkt`'s convention.
+ */
+
+/**
+ * Builds a `[]byte` from a slice of integer literals (spec byte vectors read as ints).
+ *
+ * @param xs  the byte values as ints
+ * @return    the values as a byte slice
+ */
+fn bytes_lit(xs: []i64): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, xs[i] to byte)
+        i++
+    }
+    out
+}
+
+/**
+ * Unwraps a `T | error` result — a failure in a "should succeed" test is itself a failure. Used
+ * for `ProtoVarintRead`.
+ *
+ * @param result  the outcome under test
+ * @return        the value on success, or a zeroed `ProtoVarintRead` (after failing) on error
+ */
+fn expect_varint(result: ProtoVarintRead | error): ProtoVarintRead {
+    match result {
+        ProtoVarintRead as r => r
+        error => { teko::assert::is_true(false); ProtoVarintRead { value = 0; pos = 0 } }
+    }
+}
+
+/**
+ * Unwraps a `ProtoMessage | error` decode result — a failure in a "should succeed" test is
+ * itself a failure.
+ *
+ * @param result  the decode outcome under test
+ * @return        the decoded message on success, or the empty message (after failing) on error
+ */
+fn expect_message(result: ProtoMessage | error): ProtoMessage {
+    match result {
+        ProtoMessage as m => m
+        error => { teko::assert::is_true(false); empty_message() }
+    }
+}
+
+/**
+ * Unwraps a `ProtoWireValue | error` result — a failure in a "should succeed" test is itself a
+ * failure.
+ *
+ * @param result  the outcome under test
+ * @return        the value on success, or a zeroed varint value (after failing) on error
+ */
+fn expect_value(result: ProtoWireValue | error): ProtoWireValue {
+    match result {
+        ProtoWireValue as v => v
+        error => { teko::assert::is_true(false); proto_varint(0) }
+    }
+}
+
+/**
+ * Unwraps a `u64 | error` result — a failure in a "should succeed" test is itself a failure.
+ *
+ * @param result  the outcome under test
+ * @return        the value on success, or `0` (after failing) on error
+ */
+fn expect_u64(result: u64 | error): u64 {
+    match result {
+        u64 as v => v
+        error => { teko::assert::is_true(false); 0 }
+    }
+}
+
+/**
+ * Unwraps an `i64 | error` result — a failure in a "should succeed" test is itself a failure.
+ *
+ * @param result  the outcome under test
+ * @return        the value on success, or `0` (after failing) on error
+ */
+fn expect_i64(result: i64 | error): i64 {
+    match result {
+        i64 as v => v
+        error => { teko::assert::is_true(false); 0 }
+    }
+}
+
+/**
+ * Unwraps a `str | error` result — a failure in a "should succeed" test is itself a failure.
+ *
+ * @param result  the outcome under test
+ * @return        the value on success, or `""` (after failing) on error
+ */
+fn expect_str(result: str | error): str {
+    match result {
+        str as s => s
+        error => { teko::assert::is_true(false); "" }
+    }
+}
+
+/**
+ * Asserts that a `T | error` decode/read result is an `error` (a "should fail" case). Generic
+ * over the success arm via the `ProtoMessage` instantiation, mirrored by `expect_error_varint`
+ * for the varint decoder's own union.
+ *
+ * @param result  the decode outcome under test
+ */
+fn expect_error_message(result: ProtoMessage | error) {
+    match result {
+        ProtoMessage => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * Asserts that a `ProtoVarintRead | error` decode result is an `error` (a "should fail" case).
+ *
+ * @param result  the decode outcome under test
+ */
+fn expect_error_varint(result: ProtoVarintRead | error) {
+    match result {
+        ProtoVarintRead => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * The varint codec round-trips across every byte-length boundary (1 through 10 bytes), matching
+ * the Python `google.protobuf.internal.encoder` reference vectors.
+ */
+#test
+fn varint_round_trips_across_length_boundaries() {
+    teko::assert::bytes_eq(encode_varint(0), bytes_lit([0x00]))
+    teko::assert::bytes_eq(encode_varint(1), bytes_lit([0x01]))
+    teko::assert::bytes_eq(encode_varint(127), bytes_lit([0x7f]))
+    teko::assert::bytes_eq(encode_varint(128), bytes_lit([0x80, 0x01]))
+    teko::assert::bytes_eq(encode_varint(150), bytes_lit([0x96, 0x01]))
+    teko::assert::bytes_eq(encode_varint(300), bytes_lit([0xac, 0x02]))
+    teko::assert::bytes_eq(encode_varint(16383), bytes_lit([0xff, 0x7f]))
+    teko::assert::bytes_eq(encode_varint(16384), bytes_lit([0x80, 0x80, 0x01]))
+    teko::assert::bytes_eq(encode_varint(4294967295), bytes_lit([0xff, 0xff, 0xff, 0xff, 0x0f]))
+    teko::assert::bytes_eq(encode_varint(4294967296), bytes_lit([0x80, 0x80, 0x80, 0x80, 0x10]))
+    teko::assert::bytes_eq(encode_varint(18446744073709551615), bytes_lit([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]))
+
+    teko::assert::eq_u64(expect_varint(decode_varint(bytes_lit([0x96, 0x01]), 0)).value, 150)
+    teko::assert::eq_u64(expect_varint(decode_varint(bytes_lit([0xac, 0x02]), 0)).pos, 2)
+    teko::assert::eq_u64(expect_varint(decode_varint(bytes_lit([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]), 0)).value, 18446744073709551615)
+}
+
+/**
+ * A malformed varint (truncated mid-continuation, or spanning more than 10 groups) decodes to a
+ * checked error, never a panic.
+ */
+#test
+fn malformed_varints_are_errors() {
+    expect_error_varint(decode_varint(bytes_lit([0x96]), 0))
+    expect_error_varint(decode_varint(bytes_lit([0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]), 0))
+}
+
+/**
+ * Zigzag encode/decode round-trip and match the Python reference formula
+ * `(n << 1) ^ (n >> 63)` across the small-magnitude range and the `i64` boundaries.
+ */
+#test
+fn zigzag_matches_reference_formula() {
+    teko::assert::eq_u64(zigzag_encode(0), 0)
+    teko::assert::eq_u64(zigzag_encode(-1), 1)
+    teko::assert::eq_u64(zigzag_encode(1), 2)
+    teko::assert::eq_u64(zigzag_encode(-2), 3)
+    teko::assert::eq_u64(zigzag_encode(2), 4)
+    teko::assert::eq_u64(zigzag_encode(2147483647), 4294967294)
+    teko::assert::eq_u64(zigzag_encode(-2147483648), 4294967295)
+    teko::assert::eq_u64(zigzag_encode(9223372036854775807), 18446744073709551614)
+    teko::assert::eq_u64(zigzag_encode(-9223372036854775807 - 1), 18446744073709551615)
+
+    teko::assert::eq_i64(zigzag_decode(0), 0)
+    teko::assert::eq_i64(zigzag_decode(1), -1)
+    teko::assert::eq_i64(zigzag_decode(2), 1)
+    teko::assert::eq_i64(zigzag_decode(3), -2)
+    teko::assert::eq_i64(zigzag_decode(4), 2)
+    teko::assert::eq_i64(zigzag_decode(18446744073709551614), 9223372036854775807)
+    teko::assert::eq_i64(zigzag_decode(18446744073709551615), -9223372036854775807 - 1)
+}
+
+/**
+ * Every wire-type code round-trips through `wire_type_code`/`wire_kind_of_code`; the deprecated
+ * group codes (3/4) and an undefined code are rejected.
+ */
+#test
+fn wire_type_codes_round_trip_and_reject_groups() {
+    teko::assert::eq_u64(wire_type_code(ProtoWireKind::Varint), 0)
+    teko::assert::eq_u64(wire_type_code(ProtoWireKind::Fixed64), 1)
+    teko::assert::eq_u64(wire_type_code(ProtoWireKind::LengthDelimited), 2)
+    teko::assert::eq_u64(wire_type_code(ProtoWireKind::Fixed32), 5)
+
+    match wire_kind_of_code(0, 0) { ProtoWireKind as k => teko::assert::is_true(k == ProtoWireKind::Varint); error => teko::assert::is_true(false) }
+    match wire_kind_of_code(5, 0) { ProtoWireKind as k => teko::assert::is_true(k == ProtoWireKind::Fixed32); error => teko::assert::is_true(false) }
+    match wire_kind_of_code(3, 0) { ProtoWireKind => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    match wire_kind_of_code(4, 0) { ProtoWireKind => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    match wire_kind_of_code(6, 0) { ProtoWireKind => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+}
+
+/**
+ * The tag codec matches the Python reference for every field/wire-type combination used
+ * elsewhere in this file, and rejects field number 0.
+ */
+#test
+fn tag_codec_matches_reference() {
+    teko::assert::bytes_eq(encode_tag(1, ProtoWireKind::Varint), bytes_lit([0x08]))
+    teko::assert::bytes_eq(encode_tag(2, ProtoWireKind::LengthDelimited), bytes_lit([0x12]))
+    teko::assert::bytes_eq(encode_tag(3, ProtoWireKind::Varint), bytes_lit([0x18]))
+    teko::assert::bytes_eq(encode_tag(4, ProtoWireKind::LengthDelimited), bytes_lit([0x22]))
+    teko::assert::bytes_eq(encode_tag(5, ProtoWireKind::Fixed64), bytes_lit([0x29]))
+    teko::assert::bytes_eq(encode_tag(6, ProtoWireKind::Varint), bytes_lit([0x30]))
+    teko::assert::bytes_eq(encode_tag(8, ProtoWireKind::Fixed32), bytes_lit([0x45]))
+    teko::assert::bytes_eq(encode_tag(10, ProtoWireKind::LengthDelimited), bytes_lit([0x52]))
+
+    var t = expect_message_tag(decode_tag(bytes_lit([0x08]), 0))
+    teko::assert::eq_u64(t.field_number, 1)
+    teko::assert::is_true(t.kind == ProtoWireKind::Varint)
+
+    match decode_tag(bytes_lit([0x00]), 0) { ProtoTagRead => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    match decode_tag(bytes_lit([0x0b]), 0) { ProtoTagRead => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+}
+
+/**
+ * Unwraps a `ProtoTagRead | error` result — a failure in a "should succeed" test is itself a
+ * failure.
+ *
+ * @param result  the decode outcome under test
+ * @return        the value on success, or a zeroed `ProtoTagRead` (after failing) on error
+ */
+fn expect_message_tag(result: ProtoTagRead | error): ProtoTagRead {
+    match result {
+        ProtoTagRead as r => r
+        error => { teko::assert::is_true(false); ProtoTagRead { field_number = 0; kind = ProtoWireKind::Varint; pos = 0 } }
+    }
+}
+
+/**
+ * The spec's own reference vectors round-trip: field 1 varint 150, and field 2 string "testing"
+ * (protobuf.dev/programming-guides/encoding examples), matched byte-exact against the Python
+ * `google.protobuf.internal.encoder` output.
+ */
+#test
+fn spec_reference_vectors_round_trip() {
+    var m1 = message_with_field(empty_message(), 1, proto_varint(150))
+    teko::assert::bytes_eq(encode_message(m1), bytes_lit([0x08, 0x96, 0x01]))
+    teko::assert::eq_u64(expect_u64(varint_as_u64(expect_value(first_field_value(expect_message(decode_message(bytes_lit([0x08, 0x96, 0x01]))), 1)))), 150)
+
+    var m2 = message_with_field(empty_message(), 2, proto_string("testing"))
+    teko::assert::bytes_eq(encode_message(m2), bytes_lit([0x12, 0x07, 0x74, 0x65, 0x73, 0x74, 0x69, 0x6e, 0x67]))
+    teko::assert::eq_str(expect_str(length_delimited_as_str(expect_value(first_field_value(expect_message(decode_message(bytes_lit([0x12, 0x07, 0x74, 0x65, 0x73, 0x74, 0x69, 0x6e, 0x67]))), 2)))), "testing")
+
+    var combined = message_with_field(m1, 2, proto_string("testing"))
+    teko::assert::bytes_eq(encode_message(combined), bytes_lit([0x08, 0x96, 0x01, 0x12, 0x07, 0x74, 0x65, 0x73, 0x74, 0x69, 0x6e, 0x67]))
+}
+
+/**
+ * A repeated (non-packed) field decodes as multiple `ProtoField` entries with the same number,
+ * every occurrence collected by `fields_by_number` in encounter order.
+ */
+#test
+fn repeated_field_preserves_every_occurrence() {
+    var wire = bytes_lit([0x18, 0x05, 0x18, 0x06])
+    var msg = expect_message(decode_message(wire))
+    teko::assert::len_eq(msg.fields.len, 2)
+    var vals = fields_by_number(msg, 3)
+    teko::assert::len_eq(vals.len, 2)
+    teko::assert::eq_u64(expect_u64(varint_as_u64(vals[0])), 5)
+    teko::assert::eq_u64(expect_u64(varint_as_u64(vals[1])), 6)
+
+    var built = message_with_field(message_with_field(empty_message(), 3, proto_varint(5)), 3, proto_varint(6))
+    teko::assert::bytes_eq(encode_message(built), wire)
+}
+
+/**
+ * A packed repeated varint field round-trips through `proto_packed_varints` /
+ * `length_delimited_as_packed_varints`, matching the Python reference vector for
+ * `[1, 2, 3, 150]`.
+ */
+#test
+fn packed_varint_field_round_trips() {
+    var packed: []u64 = teko::list::empty()
+    packed = teko::list::push(packed, 1)
+    packed = teko::list::push(packed, 2)
+    packed = teko::list::push(packed, 3)
+    packed = teko::list::push(packed, 150)
+    var msg = message_with_field(empty_message(), 4, proto_packed_varints(packed))
+    teko::assert::bytes_eq(encode_message(msg), bytes_lit([0x22, 0x05, 0x01, 0x02, 0x03, 0x96, 0x01]))
+
+    var decoded = expect_message(decode_message(bytes_lit([0x22, 0x05, 0x01, 0x02, 0x03, 0x96, 0x01])))
+    var got = match length_delimited_as_packed_varints(expect_value(first_field_value(decoded, 4))) { []u64 as xs => xs; error => teko::list::empty() }
+    teko::assert::len_eq(got.len, 4)
+    teko::assert::eq_u64(got[0], 1)
+    teko::assert::eq_u64(got[1], 2)
+    teko::assert::eq_u64(got[2], 3)
+    teko::assert::eq_u64(got[3], 150)
+}
+
+/**
+ * A `Fixed64` `double` field matches the Python reference vector for `3.14159`, exact bit for
+ * bit.
+ */
+#test
+fn fixed64_double_field_matches_reference() {
+    var wire = bytes_lit([0x29, 0x6e, 0x86, 0x1b, 0xf0, 0xf9, 0x21, 0x09, 0x40])
+    var msg = message_with_field(empty_message(), 5, proto_double(3.14159))
+    teko::assert::bytes_eq(encode_message(msg), wire)
+
+    var decoded = expect_message(decode_message(wire))
+    var got = fixed64_as_f64(expect_value(first_field_value(decoded, 5)))
+    match got {
+        f64 as d => teko::assert::eq_f64(d, 3.14159, 0.0)
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * A `Fixed32` `float` field decodes to the exact `f64`-widened value of the Python reference
+ * vector for `3.14` as an IEEE 754 single, and a raw `fixed32` `u32` field (the maximum value)
+ * round-trips exactly.
+ */
+#test
+fn fixed32_fields_match_reference() {
+    var float_wire = bytes_lit([0x45, 0xc3, 0xf5, 0x48, 0x40])
+    var decoded = expect_message(decode_message(float_wire))
+    var f = match fixed32_as_f32(expect_value(first_field_value(decoded, 8))) { f32 as v => v; error => 0.0 to f32 }
+    teko::assert::eq_f64(f to f64, 3.140000104904175, 0.0)
+
+    var max_wire = bytes_lit([0x4d, 0xff, 0xff, 0xff, 0xff])
+    var msg = message_with_field(empty_message(), 9, proto_fixed32(4294967295 to u32))
+    teko::assert::bytes_eq(encode_message(msg), max_wire)
+    var got = expect_message(decode_message(max_wire))
+    var u = match fixed32_as_u32(expect_value(first_field_value(got, 9))) { u32 as v => v; error => 0 to u32 }
+    teko::assert::eq_u64(u to u64, 4294967295)
+}
+
+/**
+ * An `int64` field carrying `-1` matches the Python reference (a 10-byte varint of the u64
+ * all-ones pattern), and `varint_as_i64` reinterprets it as plain two's complement while
+ * `varint_as_u64` reads the same bits as `u64::MAX`.
+ */
+#test
+fn plain_negative_int64_matches_reference() {
+    var wire = bytes_lit([0x38, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01])
+    var msg = message_with_field(empty_message(), 7, proto_varint(18446744073709551615))
+    teko::assert::bytes_eq(encode_message(msg), wire)
+
+    var decoded = expect_message(decode_message(wire))
+    var v = expect_value(first_field_value(decoded, 7))
+    teko::assert::eq_i64(expect_i64(varint_as_i64(v)), -1)
+    teko::assert::eq_u64(expect_u64(varint_as_u64(v)), 18446744073709551615)
+}
+
+/**
+ * An `sint64` field carrying `-2` matches the Python reference (zigzag code `3`), and
+ * `varint_as_sint64` recovers the original signed value.
+ */
+#test
+fn sint64_field_matches_reference() {
+    var wire = bytes_lit([0x30, 0x03])
+    var msg = message_with_field(empty_message(), 6, proto_sint(-2))
+    teko::assert::bytes_eq(encode_message(msg), wire)
+
+    var decoded = expect_message(decode_message(wire))
+    var v = expect_value(first_field_value(decoded, 6))
+    teko::assert::eq_i64(expect_i64(varint_as_sint64(v)), -2)
+}
+
+/**
+ * A `bool` field round-trips through `proto_bool_value`/`varint_as_bool`.
+ */
+#test
+fn bool_field_round_trips() {
+    var msg = message_with_field(message_with_field(empty_message(), 1, proto_bool_value(true)), 2, proto_bool_value(false))
+    var decoded = expect_message(decode_message(encode_message(msg)))
+    teko::assert::is_true(match varint_as_bool(expect_value(first_field_value(decoded, 1))) { bool as b => b; error => false })
+    teko::assert::is_false(match varint_as_bool(expect_value(first_field_value(decoded, 2))) { bool as b => b; error => true })
+}
+
+/**
+ * An embedded message (field 10, wrapping a `field1 = 150` sub-message) matches the Python
+ * reference and decodes recursively via `length_delimited_as_message`.
+ */
+#test
+fn embedded_message_matches_reference_and_decodes() {
+    var wire = bytes_lit([0x52, 0x03, 0x08, 0x96, 0x01])
+    var inner = message_with_field(empty_message(), 1, proto_varint(150))
+    var outer = message_with_field(empty_message(), 10, proto_embedded_message(inner))
+    teko::assert::bytes_eq(encode_message(outer), wire)
+
+    var decoded = expect_message(decode_message(wire))
+    var nested = expect_message(length_delimited_as_message(expect_value(first_field_value(decoded, 10))))
+    teko::assert::eq_u64(expect_u64(varint_as_u64(expect_value(first_field_value(nested, 1)))), 150)
+}
+
+/**
+ * Packed fixed32/fixed64 fields round-trip and reject a payload whose length is not a multiple
+ * of the element width.
+ */
+#test
+fn packed_fixed_width_fields_round_trip_and_validate_length() {
+    var f32s: []u32 = teko::list::empty()
+    f32s = teko::list::push(f32s, 1)
+    f32s = teko::list::push(f32s, 4294967295)
+    var wire32 = encode_message(message_with_field(empty_message(), 11, proto_packed_fixed32(f32s)))
+    var got32 = match length_delimited_as_packed_fixed32(expect_value(first_field_value(expect_message(decode_message(wire32)), 11))) { []u32 as xs => xs; error => teko::list::empty() }
+    teko::assert::len_eq(got32.len, 2)
+    teko::assert::eq_u64(got32[0] to u64, 1)
+    teko::assert::eq_u64(got32[1] to u64, 4294967295)
+
+    var f64s: []u64 = teko::list::empty()
+    f64s = teko::list::push(f64s, 1)
+    f64s = teko::list::push(f64s, 18446744073709551615)
+    var wire64 = encode_message(message_with_field(empty_message(), 12, proto_packed_fixed64(f64s)))
+    var got64 = match length_delimited_as_packed_fixed64(expect_value(first_field_value(expect_message(decode_message(wire64)), 12))) { []u64 as xs => xs; error => teko::list::empty() }
+    teko::assert::len_eq(got64.len, 2)
+    teko::assert::eq_u64(got64[0], 1)
+    teko::assert::eq_u64(got64[1], 18446744073709551615)
+
+    match length_delimited_as_packed_fixed32(proto_bytes(bytes_lit([0x01, 0x02, 0x03]))) { []u32 as _ => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    match length_delimited_as_packed_fixed64(proto_bytes(bytes_lit([0x01, 0x02, 0x03]))) { []u64 as _ => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+}
+
+/**
+ * `raw bytes` round-trip through `proto_bytes`/`length_delimited_as_bytes`.
+ */
+#test
+fn raw_bytes_field_round_trips() {
+    var payload = bytes_lit([0x01, 0x02, 0x03, 0x04])
+    var msg = message_with_field(empty_message(), 13, proto_bytes(payload))
+    var decoded = expect_message(decode_message(encode_message(msg)))
+    var got = match length_delimited_as_bytes(expect_value(first_field_value(decoded, 13))) { []byte as b => b; error => teko::list::empty() }
+    teko::assert::bytes_eq(got, payload)
+}
+
+/**
+ * A scalar reader applied to a `ProtoWireValue` of the wrong wire kind is a checked error.
+ */
+#test
+fn scalar_readers_reject_wrong_kind() {
+    match varint_as_u64(proto_fixed32(1 to u32)) { u64 as _ => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    match fixed64_as_f64(proto_varint(1)) { f64 as _ => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    match fixed32_as_u32(proto_bytes(bytes_lit([0x00]))) { u32 as _ => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    match length_delimited_as_str(proto_varint(1)) { str => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+}
+
+/**
+ * Malformed message-level inputs decode to a checked error (M.1 fail-loud): a truncated fixed64
+ * field, a truncated fixed32 field, a length-delimited value whose declared length overruns the
+ * input, a deprecated group wire type, and a zero field number.
+ */
+#test
+fn malformed_messages_are_errors() {
+    expect_error_message(decode_message(bytes_lit([0x29, 0x01, 0x02, 0x03])))
+    expect_error_message(decode_message(bytes_lit([0x45, 0x01, 0x02])))
+    expect_error_message(decode_message(bytes_lit([0x12, 0x0a, 0x01, 0x02])))
+    expect_error_message(decode_message(bytes_lit([0x0b])))
+    expect_error_message(decode_message(bytes_lit([0x00, 0x01])))
+}
+
+/**
+ * A field with no matching number decodes an empty `fields_by_number` result and a checked error
+ * from `first_field_value`.
+ */
+#test
+fn missing_field_is_absent() {
+    var msg = message_with_field(empty_message(), 1, proto_varint(1))
+    teko::assert::len_eq(fields_by_number(msg, 99).len, 0)
+    match first_field_value(msg, 99) { ProtoWireValue => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+}
