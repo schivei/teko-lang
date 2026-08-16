@@ -1,44 +1,44 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 arena sub-crumb B — the C-leg
-# `load_u64`/`store_u64` emitters, the first hard prerequisite for the Teko-arena-over-mmap keystone (the arena
-# core reads/writes its own state as words at raw mmap'd addresses; those loads/stores had a native-leg lowering
-# but NO C-backend emitter, so the arena core could not compile on the C leg). What this harvest carries:
-#   - **§16 arena crumb B (compiler — codegen)**: `emit_load_u64`/`emit_store_u64` (`codegen.tks`, beside
-#     `emit_ptr_word`), dispatched by bare last segment `load_u64`/`store_u64` in the `teko::mem` block:
-#     - `load_u64(addr: u64): u64`  → `((uint64_t)*(volatile uint64_t *)(uintptr_t)(<addr>))`
-#     - `store_u64(addr: u64, v: u64): void` → `(*(volatile uint64_t *)(uintptr_t)(<addr>) = (uint64_t)(<v>))`
-#     `volatile` for the same reason the syscall helpers clobber `"memory"`: the arena reads back words a sibling
-#     store or an mmap just wrote, and the optimiser must not elide/reorder across the raw address it cannot
-#     alias-analyze. The checker signatures (`scope.tks`) and the native lowering (`lir/lower.tks` → `LLoad`/
-#     `LStore`) were ALREADY present; this crumb adds only the missing C-backend emitters.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 arena sub-crumb C — the `word_ptr`
+# intrinsic (i64 -> ptr), the INVERSE of `ptr_word`. It completes the three raw primitives the allocation-free
+# arena core needs: the arena bumps a cursor in integer space and must hand each allocation back AS a `ptr` (so
+# codegen's existing `(uint8_t *)tk_region_alloc(…)` cast + region-handle ABI keep compiling). What this harvest
+# carries:
+#   - **§16 arena crumb C (compiler — checker + codegen)**: `teko::sys::word_ptr(w: i64): ptr`:
+#     - Checker (`scope.tks`, next to `ptr_word`): `Func { params = <[i64]>; ret = Ptr { inner = null } }`; the
+#       opaque `ptr` widens at the use-site via the existing `ptr_widens_to_opaque` path (like `buf_ptr`).
+#     - Codegen (`emit_word_ptr`, beside `emit_ptr_word`): `((void *)(uintptr_t)(<w>))` — a SPECIAL emitter (it
+#       needs the cast), dispatched by bare last segment `word_ptr`. Like `ptr_word`/`ref_word`/`f64_bits`, it is
+#       a compiler INTRINSIC (no surface `to`), the sanctioned reinterpret carve-out; `cast_check`/the opaque-ptr
+#       law stay intact (no user-facing `u64 -> ptr` cast is introduced).
+#     - Native leg: HONEST-STOP (falls into `lower_call`'s terminal `_ =>`, as `ptr_word`/`ref_word` do).
 #
-# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The compiler's own corpus (`src/`) has ZERO call
-# sites of `load_u64`/`store_u64` (grep-verified: only signature/dispatch/doc-comment declarations, no
-# invocations), so the new emitters never fire on the self-image; the emitted C differs from the previous seed
-# only by the new codegen SOURCE (the `emit_load_u64`/`emit_store_u64` fn bodies, which naturally appear in the
-# self-image as their own `cb(...)` string-literal payloads) plus the mechanical line/offset shifts it induces —
-# a function-add reseed with zero behavioral divergence. The `arena_loadstore` fixture is the only invoker.
+# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The compiler's own corpus (`src/`) has ZERO
+# `word_ptr` call sites, so the new emitter never fires on the self-image; the emitted C differs from the
+# previous seed only by the new checker/codegen SOURCE plus the mechanical line/offset shifts it induces (a
+# function-add reseed). The `arena_wordptr` fixture is the only invoker.
 #
-# NATIVE LEG — already lowered (`lir/lower.tks`); this crumb touches only the C leg. The C leg is the target.
+# NATIVE LEG — honest-stop; this crumb targets the C leg. Native lower is Doc-2 terminal.
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `1b61761d`) built the tree →
-#     emitted teko.c `7bc8eac4` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `7bc8eac4b925f069d341621086009b29
-#     a881d8aadcd8f81130705dbe65c9794a`; tc2 -> gen2; gen2 built the tree → tc3 `7bc8eac4…`. tc1 == tc2 == tc3,
-#     byte-identical (sha256 below). No ladder: the corpus invokes neither builtin, so gen0 and gen1 emit the
+#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `7bc8eac4`) built the tree →
+#     emitted teko.c `2fcb31b0` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `2fcb31b0b9b666e4c272db468b34097f
+#     cb4c38668604d4582cc37d68ebfab108`; tc2 -> gen2; gen2 built the tree → tc3 `2fcb31b0…`. tc1 == tc2 == tc3,
+#     byte-identical (sha256 below). No ladder: the corpus invokes no `word_ptr`, so gen0 and gen1 emit the
 #     self-image identically at tc1.
 #   - cc-route: cc -std=c2x -w -g -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
 #   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen . -o out --no-verify --release` exits 0 (whole-tree,
-#     clean through emit+cc). As with the prior syscall crumbs, a first capped run tripped the arena's own
-#     "out of memory (str concat)" guard at the emit at the ~5.6 GB / 6 GB-cap boundary and a re-run completed
-#     exit 0 — a cap-boundary memory-pressure artifact (Doc-1 territory), NOT a memory-correctness violation.
-#   - Regression: `examples/regressions/arena_loadstore/` — mmaps a page, `store_u64(addr, 0x1122334455667788)`,
-#     `load_u64(addr)` reads the sentinel back (round-trip match), munmaps; the built binary exits 0. Proves the
-#     C-leg load/store emitters operate correctly on real mmap'd memory (crumb A + B together).
-# The self-reported peak of the whole-tree build was ~5.6 GB (within the 6 GB cap; local ladder cc dropped
+#     clean through emit+cc). As with the prior crumbs, a first capped run tripped the arena's own "out of memory
+#     (str concat)" guard at the emit at the ~5.6 GB / 6 GB-cap boundary and a re-run completed exit 0 — a cap-
+#     boundary memory-pressure artifact (Doc-1 territory), NOT a memory-correctness violation.
+#   - Regression: `examples/regressions/arena_wordptr/` — round-trips `word_ptr(ptr_word(as_cstr("x")))` and
+#     writes 1 byte through the RECOVERED pointer via `syscall3(SYS_WRITE, 1, ptr_word(back), 1)`; the built
+#     binary prints `x` and exits 0. Proves `word_ptr` yields a working pointer (crumb C = the arena's outgoing
+#     address bridge).
+# The self-reported peak of the whole-tree build was ~5.6-5.8 GB (within the 6 GB cap; local ladder cc dropped
 # `-g` purely to fit the coordinator container's RAM — the emitted seed bytes are cc-flag-independent).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
@@ -50,9 +50,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  7bc8eac4b925f069d341621086009b29a881d8aadcd8f81130705dbe65c9794a
+sha256:  2fcb31b0b9b666e4c272db468b34097fcb4c38668604d4582cc37d68ebfab108
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 arena crumb B: C-leg load_u64/store_u64
-         emitters lowering to volatile word load/store over a raw address, inert on the corpus that invokes
-         neither), byte-identical on rebuild across the stable C-route generations (tc1 == tc2 == tc3, no ladder)
-         AND on the cc-route re-emission; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §16 arena crumb C: the word_ptr intrinsic,
+         i64 -> ptr, the inverse of ptr_word that lets the arena core hand back allocated pointers; inert on the
+         corpus that invokes no word_ptr), byte-identical on rebuild across the stable C-route generations (tc1
+         == tc2 == tc3, no ladder) AND on the cc-route re-emission; no unrecovered legacy artifact underlies it.
