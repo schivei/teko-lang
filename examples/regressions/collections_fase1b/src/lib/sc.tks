@@ -1,0 +1,201 @@
+/**
+ * scenario — announce a scenario's verdict on stdout and fail loudly on a regression. Prints
+ * `scenario <name>: ok` when `ok`, else `scenario <name>: BAD` and `exit(1)` so a relapse both names
+ * itself in the `.tkr` stdout pattern AND turns the exit non-zero.
+ *
+ * @param name  the scenario's self-identifying name
+ * @param ok    the scenario's pass/fail verdict
+ */
+fn scenario(name: str, ok: bool) {
+    if ok {
+        teko::io::println(teko::str::concat("scenario ", name, ": ok"))
+        return
+    }
+    teko::io::println(teko::str::concat("scenario ", name, ": BAD"))
+    exit(1)
+}
+
+/**
+ * unwrap_i64 — collapse a `Dictionary::get` result (`i64?`) to a plain `i64`, substituting `-1` for
+ * the null (missing-key) case, so a round-trip assertion reads without an inline match.
+ *
+ * @param got  the optional value returned by a `<…, i64>` lookup
+ * @return     the wrapped value, or `-1` when `got` is null
+ */
+fn unwrap_i64(got: i64 | null): i64 { match got { i64 as v => v; null => -1 } }
+
+/**
+ * unwrap_str — collapse a `Dictionary::get` result (`str?`) to a plain `str`, substituting `"?"` for
+ * the null case.
+ *
+ * @param got  the optional value returned by a `<…, str>` lookup
+ * @return     the wrapped value, or `"?"` when `got` is null
+ */
+fn unwrap_str(got: str | null): str { match got { str as v => v; null => "?" } }
+
+/**
+ * dictionary_roundtrip — G3: a `Dictionary<StrKey, i64>` insert / update-not-grow / get / contains /
+ * remove round-trip at two key-and-value instantiations (`<StrKey, i64>` and `<I64Key, str>`, the
+ * second exercising a negative-key hash), proving the hash-keyed map monomorphizes per key/value type.
+ *
+ * @return true iff every Dictionary assertion held
+ */
+fn dictionary_roundtrip(): bool {
+    var d = Dictionary<lib::StrKey, i64>::make()
+    d.insert(StrKey { key = "a" }, 1)
+    d.insert(StrKey { key = "b" }, 2)
+    d.insert(StrKey { key = "a" }, 9)
+    var ok = d.len() == 2 && unwrap_i64(d.get(StrKey { key = "a" })) == 9 && unwrap_i64(d.get(StrKey { key = "b" })) == 2
+    ok = ok && d.contains(StrKey { key = "a" }) && !d.contains(StrKey { key = "z" })
+    ok = ok && d.remove(StrKey { key = "a" }) && !d.remove(StrKey { key = "a" }) && d.len() == 1
+    var e = Dictionary<lib::I64Key, str>::make()
+    e.insert(I64Key { n = 5 }, "five")
+    e.insert(I64Key { n = -3 }, "neg")
+    ok && unwrap_str(e.get(I64Key { n = 5 })) == "five" && unwrap_str(e.get(I64Key { n = -3 })) == "neg"
+}
+
+/**
+ * hashset_membership — G4: a `HashSet<StrKey>` add / idempotent-add / contains / remove cycle plus a
+ * second `HashSet<I64Key>` instantiation, proving O(1)-membership monomorphizes per element type.
+ *
+ * @return true iff every HashSet assertion held
+ */
+fn hashset_membership(): bool {
+    var s = HashSet<lib::StrKey>::make()
+    var a1 = s.add(StrKey { key = "x" })
+    var a2 = s.add(StrKey { key = "y" })
+    var a3 = s.add(StrKey { key = "x" })
+    var ok = a1 && a2 && !a3 && s.len() == 2 && s.contains(StrKey { key = "x" }) && !s.contains(StrKey { key = "q" })
+    ok = ok && s.remove(StrKey { key = "x" }) && !s.contains(StrKey { key = "x" }) && s.len() == 1
+    var t = HashSet<lib::I64Key>::make()
+    ok && t.add(I64Key { n = 7 }) && !t.add(I64Key { n = 7 }) && t.contains(I64Key { n = 7 })
+}
+
+/**
+ * sortedset_ordering — G5: out-of-order inserts into a `SortedSet<I64Key>` emerge ascending, a
+ * duplicate `add` is a no-op (`false`), and a second `SortedSet<StrKey>` orders lexicographically.
+ *
+ * @return true iff every SortedSet assertion held
+ */
+fn sortedset_ordering(): bool {
+    var s = SortedSet<lib::I64Key>::make()
+    var i1 = s.add(I64Key { n = 5 })
+    var i2 = s.add(I64Key { n = 1 })
+    var i3 = s.add(I64Key { n = 3 })
+    var dup = s.add(I64Key { n = 3 })
+    var arr = s.to_array()
+    var ok = i1 && i2 && i3 && !dup && arr.len == 3 && arr[0].n == 1 && arr[1].n == 3 && arr[2].n == 5
+    ok = ok && s.contains(I64Key { n = 3 }) && !s.contains(I64Key { n = 4 })
+    var u = SortedSet<lib::StrKey>::make()
+    var _u1 = u.add(StrKey { key = "c" })
+    var _u2 = u.add(StrKey { key = "a" })
+    var _u3 = u.add(StrKey { key = "b" })
+    var sa = u.to_array()
+    ok && sa[0].key == "a" && sa[1].key == "b" && sa[2].key == "c"
+}
+
+/**
+ * priorityqueue_ordering — G5: a `PriorityQueue<I64Key>` dequeues its elements in ascending (min-first)
+ * order, and a second `PriorityQueue<StrKey>` peeks the lexicographic minimum. The empty case is
+ * guarded by `is_empty()` (a bare-`T` dequeue is fail-loud on empty, the interface-union caveat).
+ *
+ * @return true iff the min-heap emitted its elements in order
+ */
+fn priorityqueue_ordering(): bool {
+    var q = PriorityQueue<lib::I64Key>::make()
+    q.enqueue(I64Key { n = 5 })
+    q.enqueue(I64Key { n = 1 })
+    q.enqueue(I64Key { n = 3 })
+    q.enqueue(I64Key { n = 2 })
+    q.enqueue(I64Key { n = 4 })
+    var order: []i64 = teko::list::empty()
+    loop {
+        if q.is_empty() { break }
+        order = teko::list::push(order, q.dequeue().n)
+    }
+    var ok = order.len == 5 && order[0] == 1 && order[1] == 2 && order[2] == 3 && order[3] == 4 && order[4] == 5
+    var r = PriorityQueue<lib::StrKey>::make()
+    r.enqueue(StrKey { key = "m" })
+    r.enqueue(StrKey { key = "a" })
+    r.enqueue(StrKey { key = "z" })
+    ok && r.peek().key == "a"
+}
+
+/**
+ * sorteddict_ordering — G5: a `SortedDictionary<I64Key, str>` keeps its keys ascending across
+ * out-of-order inserts, updates a present key in place, and a second `SortedDictionary<StrKey, i64>`
+ * orders lexicographically.
+ *
+ * @return true iff every SortedDictionary assertion held
+ */
+fn sorteddict_ordering(): bool {
+    var d = SortedDictionary<lib::I64Key, str>::make()
+    d.insert(I64Key { n = 3 }, "c")
+    d.insert(I64Key { n = 1 }, "a")
+    d.insert(I64Key { n = 2 }, "b")
+    d.insert(I64Key { n = 2 }, "B")
+    var ks = d.keys()
+    var ok = ks.len == 3 && ks[0].n == 1 && ks[1].n == 2 && ks[2].n == 3
+    ok = ok && unwrap_str(d.get(I64Key { n = 2 })) == "B" && d.contains(I64Key { n = 1 }) && !d.contains(I64Key { n = 9 })
+    var e = SortedDictionary<lib::StrKey, i64>::make()
+    e.insert(StrKey { key = "b" }, 2)
+    e.insert(StrKey { key = "a" }, 1)
+    var ek = e.keys()
+    ok && ek[0].key == "a" && ek[1].key == "b"
+}
+
+/**
+ * combinators_edges — G2a: the un-gated array combinators (`arr_insert_at` / `arr_swap` /
+ * `arr_reverse` / `arr_slice`) at their edge cases over `i64`, proving the value-functional rebuilds.
+ *
+ * @return true iff every combinator assertion held
+ */
+fn combinators_edges(): bool {
+    var xs: []i64 = teko::list::empty()
+    xs = teko::list::push(xs, 1)
+    xs = teko::list::push(xs, 2)
+    xs = teko::list::push(xs, 3)
+    var ins = arr_insert_at(xs, 1, 9)
+    var ok = ins.len == 4 && ins[0] == 1 && ins[1] == 9 && ins[2] == 2 && ins[3] == 3
+    var app = arr_insert_at(xs, 99, 7)
+    ok = ok && app.len == 4 && app[3] == 7
+    var sw = arr_swap(xs, 0, 2)
+    ok = ok && sw[0] == 3 && sw[2] == 1 && sw[1] == 2
+    var rev = arr_reverse(xs)
+    ok = ok && rev[0] == 3 && rev[1] == 2 && rev[2] == 1
+    var sl = arr_slice(xs, 1, 3)
+    ok = ok && sl.len == 2 && sl[0] == 2 && sl[1] == 3
+    var empty = arr_slice(xs, 2, 1)
+    ok && empty.len == 0
+}
+
+/**
+ * ihash_consistency — G1: the hash-eq consistency law on the shipped conformers — two `StrKey`s (and
+ * two `I64Key`s) with equal payload return equal `hash()` AND compare `__eq`-equal; distinct payloads
+ * hash and compare distinct.
+ *
+ * @return true iff the consistency law held for both conformers
+ */
+fn ihash_consistency(): bool {
+    var a = StrKey { key = "abc" }
+    var b = StrKey { key = "abc" }
+    var c = StrKey { key = "xyz" }
+    var ok = a.hash() == b.hash() && a == b && a.hash() != c.hash() && a != c
+    var m = I64Key { n = -7 }
+    var n = I64Key { n = -7 }
+    var p = I64Key { n = 7 }
+    ok && m.hash() == n.hash() && m == n && m.hash() != p.hash() && m != p
+}
+
+/**
+ * run_all — drive every fase1b scenario in crumb order (G1 → G5), each announcing its own verdict.
+ */
+pub fn run_all() {
+    scenario("ihash_consistency", ihash_consistency())
+    scenario("combinators_edges", combinators_edges())
+    scenario("dictionary_roundtrip", dictionary_roundtrip())
+    scenario("hashset_membership", hashset_membership())
+    scenario("sortedset_ordering", sortedset_ordering())
+    scenario("priorityqueue_ordering", priorityqueue_ordering())
+    scenario("sorteddict_ordering", sorteddict_ordering())
+}
