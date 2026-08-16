@@ -1,0 +1,490 @@
+use teko::numeric::bigint
+
+/**
+ * `teko::encoding::asn1` decoding: identifier/length TLV codec (X.690 §8.1) plus per-kind content
+ * parsers, assembled by `der_decode`. See `asn1.tks`'s module doc for the BER DECODE TOLERANCE
+ * this side grants (any definite-length encoding, not just already-minimal DER) and the checked
+ * seams it declines (indefinite length; constructed string chunking).
+ */
+
+/**
+ * The widest representable `u64` value, `2^64 - 1` — the overflow guard `decode_base128` checks
+ * before shifting in another 7-bit group.
+ */
+const ASN1_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+
+/**
+ * A decoded identifier octet paired with the offset just past it.
+ */
+type Asn1IdentifierRead = struct {
+    /** The decoded tag class. */
+    tag_class: Asn1Class
+    /** Whether the content is constructed. */
+    constructed: bool
+    /** The tag number. */
+    num: u64
+    /** The offset of the first byte after the identifier octets. */
+    pos: u64
+}
+
+/**
+ * A decoded definite length paired with the offset just past it.
+ */
+type Asn1LengthRead = struct {
+    /** The decoded content length. */
+    value: u64
+    /** The offset of the first byte after the length octets. */
+    pos: u64
+}
+
+/**
+ * A decoded value paired with the offset just past its TLV — the internal cursor result threaded
+ * through the recursive decoder (the `teko::encoding::cbor` `CborRead` discipline).
+ */
+type Asn1TlvRead = struct {
+    /** The value decoded at the requested offset. */
+    value: Asn1Value
+    /** The offset of the first byte after the decoded TLV. */
+    pos: u64
+}
+
+/**
+ * A decoded base-128 group value paired with the offset just past it — shared by the identifier
+ * octet's high-tag-number form and an OBJECT IDENTIFIER's arc decoding.
+ */
+type Asn1ArcRead = struct {
+    /** The decoded value. */
+    value: u64
+    /** The offset of the first byte after the base-128 group. */
+    pos: u64
+}
+
+/**
+ * An `error` naming the offending byte offset — the structural (TLV-framing) failure shape.
+ *
+ * @param what  the failure description
+ * @param pos   the offset at which the failure was detected
+ * @return      the checked error
+ */
+fn decode_error(what: str, pos: u64): error {
+    error { message = concat("asn1: ", what, " at offset ", u64_to_str(pos)) }
+}
+
+/**
+ * An `error` with no offset — the content-level (already-framed) failure shape, used once a TLV's
+ * content bytes have already been isolated and no further absolute offset is meaningful.
+ *
+ * @param what  the failure description
+ * @return      the checked error
+ */
+fn content_error(what: str): error {
+    error { message = concat("asn1: ", what) }
+}
+
+/**
+ * Copies out `p[from, to)` as a fresh `[]byte`.
+ *
+ * @param p     the source bytes
+ * @param from  the inclusive start offset
+ * @param to    the exclusive end offset
+ * @return      the copied range
+ */
+fn bytes_slice(p: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, p[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Decodes one base-128 group sequence (X.690 §8.1.2.4.2 / §8.19.4) starting at `pos`: 7 bits per
+ * byte, most-significant group first, every byte but the last with its continuation bit (`0x80`)
+ * set.
+ *
+ * @param p    the input
+ * @param pos  the offset of the first group byte
+ * @return     the decoded value and the offset past it, or `error` on truncation or overflow
+ * @throws     when the input ends before a terminating (non-continuation) byte, or the decoded
+ *             value would exceed 64 bits
+ */
+fn decode_base128(p: []byte, pos: u64): Asn1ArcRead | error {
+    var v: u64 = 0
+    var i = pos
+    loop {
+        if i >= p.len { return decode_error("truncated base-128 value", pos) }
+        var b = p[i] to u64
+        if v > (ASN1_U64_MAX >> 7) { return decode_error("base-128 value exceeds 64 bits", pos) }
+        v = (v << 7) | (b & 0x7F)
+        i++
+        if (b & 0x80) == 0 { return Asn1ArcRead { value = v; pos = i } }
+    }
+}
+
+/**
+ * Decodes an identifier octet sequence (X.690 §8.1.2) at `pos`.
+ *
+ * @param p    the input
+ * @param pos  the offset of the leading identifier byte
+ * @return     the decoded class/constructed/number and the offset past it, or `error`
+ * @throws     when the input ends before the identifier is complete
+ */
+fn decode_identifier(p: []byte, pos: u64): Asn1IdentifierRead | error {
+    if pos >= p.len { return decode_error("unexpected end of input reading identifier", pos) }
+    var b = p[pos] to u64
+    var tag_class = class_of_bits((b >> 6) & 0x3)
+    var constructed = ((b >> 5) & 1) == 1
+    var num5 = b & 0x1F
+    if num5 < 31 { return Asn1IdentifierRead { tag_class = tag_class; constructed = constructed; num = num5; pos = pos + 1 } }
+    var arc = match decode_base128(p, pos + 1) { Asn1ArcRead as r => r; error as e => return e }
+    Asn1IdentifierRead { tag_class = tag_class; constructed = constructed; num = arc.value; pos = arc.pos }
+}
+
+/**
+ * Reads `count` bytes big-endian from `p` at `pos` into a `u64`. The caller has already
+ * bounds-checked `pos + count <= p.len`.
+ *
+ * @param p      the input
+ * @param pos    the offset of the first byte
+ * @param count  how many bytes to read
+ * @return       the assembled unsigned value
+ */
+fn read_be_u64(p: []byte, pos: u64, count: u64): u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= count { break }
+        v = (v << 8) | (p[pos + i] to u64)
+        i++
+    }
+    v
+}
+
+/**
+ * Decodes a definite length (X.690 §8.1.3) at `pos`: the short form under 128, else the long form
+ * (a length-of-length byte followed by that many big-endian length bytes). Indefinite length
+ * (`0x80`) is a checked error (see the module doc's BER DECODE TOLERANCE note); a long-form length
+ * wider than 8 bytes is likewise rejected (no ASN.1 value this module handles is that large).
+ *
+ * @param p    the input
+ * @param pos  the offset of the leading length byte
+ * @return     the decoded length and the offset past it, or `error`
+ * @throws     when the length is indefinite, wider than 8 bytes, or truncated
+ */
+fn decode_length(p: []byte, pos: u64): Asn1LengthRead | error {
+    if pos >= p.len { return decode_error("unexpected end of input reading length", pos) }
+    var b = p[pos] to u64
+    if b == 0x80 { return decode_error("indefinite length is not supported", pos) }
+    if b < 128 { return Asn1LengthRead { value = b; pos = pos + 1 } }
+    var nbytes = b & 0x7F
+    if nbytes > 8 { return decode_error("length field wider than 8 bytes is not supported", pos) }
+    if pos + 1 + nbytes > p.len { return decode_error("truncated length", pos) }
+    Asn1LengthRead { value = read_be_u64(p, pos + 1, nbytes); pos = pos + 1 + nbytes }
+}
+
+/**
+ * Decodes a BOOLEAN content (X.690 §8.2): exactly one byte, nonzero is `true` (BER-tolerant —
+ * DER canonically emits `0xFF`, but any nonzero byte is accepted on read).
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is not exactly one byte
+ */
+fn decode_boolean(content: []byte): Asn1Value | error {
+    if content.len != 1 { return content_error("BOOLEAN content must be exactly one byte") }
+    asn1_boolean(content[0] != 0)
+}
+
+/**
+ * Decodes an INTEGER content's two's-complement encoding (X.690 §8.3) into its `BigInt` value.
+ * Non-negative when the high bit of the first byte is clear; otherwise the negative value is
+ * `-(2^(8n) - raw)` where `raw` is the content read as an unsigned big-endian magnitude and `n`
+ * is the content length — the inverse of `asn1_encode.tks`'s `negative_integer_body`. Tolerates a
+ * non-minimal two's-complement body (BER decode tolerance); only the encoder enforces minimality.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is empty
+ */
+fn parse_integer_content(content: []byte): bigint::BigInt | error {
+    if content.len == 0 { return content_error("INTEGER content must not be empty") }
+    if ((content[0] to u64) & 0x80) == 0 { return bigint::from_bytes_be(content) }
+    var raw = bigint::from_bytes_be(content)
+    var full = bigint::shl(bigint::one(), 8 * content.len)
+    bigint::neg(bigint::sub(full, raw))
+}
+
+/**
+ * Decodes an INTEGER content into its `Asn1Value`.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         per `parse_integer_content`
+ */
+fn decode_integer(content: []byte): Asn1Value | error {
+    var x = match parse_integer_content(content) { bigint::BigInt as b => b; error as e => return e }
+    asn1_integer(x)
+}
+
+/**
+ * Decodes a BIT STRING content (X.690 §8.6): the leading unused-bit-count byte, then the payload.
+ * Delegates the `unused_bits <= 7` / empty-payload invariant to `asn1_bit_string`.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is empty, or per `asn1_bit_string`
+ */
+fn decode_bit_string(content: []byte): Asn1Value | error {
+    if content.len == 0 { return content_error("BIT STRING content must not be empty") }
+    var unused = content[0] to u64
+    asn1_bit_string(bytes_slice(content, 1, content.len), unused)
+}
+
+/**
+ * Decodes a NULL content (X.690 §8.8): must be empty.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is not empty
+ */
+fn decode_null(content: []byte): Asn1Value | error {
+    if content.len != 0 { return content_error("NULL content must be empty") }
+    asn1_null()
+}
+
+/**
+ * Splits an OBJECT IDENTIFIER's first base-128 group value back into its two source arcs, the
+ * inverse of `asn1_encode.tks`'s `40 * arcs[0] + arcs[1]` packing (X.690 §8.19.4): `arcs[0]` is
+ * 0, 1, or 2 depending on which third of `[0, 120)` `combined` falls in, and `arcs[1]` is the
+ * remainder.
+ *
+ * @param combined  the first decoded base-128 group value
+ * @return          the two-element arc prefix `[arcs[0], arcs[1]]`
+ */
+fn first_two_arcs(combined: u64): []u64 {
+    var a0: u64 = if combined < 40 { 0 } else { if combined < 80 { 1 } else { 2 } }
+    var out = teko::list::push(teko::list::empty(), a0)
+    teko::list::push(out, combined - a0 * 40)
+}
+
+/**
+ * Decodes an OBJECT IDENTIFIER content (X.690 §8.19) into its arc list, then builds the validated
+ * value via `asn1_oid`.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is empty, a base-128 group is malformed, or per `asn1_oid`
+ */
+fn decode_oid(content: []byte): Asn1Value | error {
+    if content.len == 0 { return content_error("OBJECT IDENTIFIER content must not be empty") }
+    var first = match decode_base128(content, 0) { Asn1ArcRead as r => r; error as e => return e }
+    var arcs = first_two_arcs(first.value)
+    var pos = first.pos
+    loop {
+        if pos >= content.len { break }
+        var next = match decode_base128(content, pos) { Asn1ArcRead as r => r; error as e => return e }
+        arcs = teko::list::push(arcs, next.value)
+        pos = next.pos
+    }
+    asn1_oid(arcs)
+}
+
+/**
+ * Decodes a UTF8String content: the bytes must be valid UTF-8.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is not valid UTF-8
+ */
+fn decode_utf8_string(content: []byte): Asn1Value | error {
+    var s = match teko::text::str_from_utf8(content) { str as t => t; error as e => return e }
+    asn1_utf8_string(s)
+}
+
+/**
+ * Decodes a PrintableString content, delegating its restricted-charset invariant to
+ * `asn1_printable_string`.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is not valid UTF-8, or per `asn1_printable_string`
+ */
+fn decode_printable_string(content: []byte): Asn1Value | error {
+    var s = match teko::text::str_from_utf8(content) { str as t => t; error as e => return e }
+    asn1_printable_string(s)
+}
+
+/**
+ * Decodes an IA5String content, delegating its 7-bit-ASCII invariant to `asn1_ia5_string`.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is not valid UTF-8, or per `asn1_ia5_string`
+ */
+fn decode_ia5_string(content: []byte): Asn1Value | error {
+    var s = match teko::text::str_from_utf8(content) { str as t => t; error as e => return e }
+    asn1_ia5_string(s)
+}
+
+/**
+ * Decodes a UTCTime content, delegating its canonical-form invariant to `asn1_utc_time`.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is not valid UTF-8, or per `asn1_utc_time`
+ */
+fn decode_utc_time(content: []byte): Asn1Value | error {
+    var s = match teko::text::str_from_utf8(content) { str as t => t; error as e => return e }
+    asn1_utc_time(s)
+}
+
+/**
+ * Decodes a GeneralizedTime content, delegating its canonical-form invariant to
+ * `asn1_generalized_time`.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         when `content` is not valid UTF-8, or per `asn1_generalized_time`
+ */
+fn decode_generalized_time(content: []byte): Asn1Value | error {
+    var s = match teko::text::str_from_utf8(content) { str as t => t; error as e => return e }
+    asn1_generalized_time(s)
+}
+
+/**
+ * Decodes zero or more back-to-back TLVs filling `content` exactly — the shared shape of a
+ * SEQUENCE/SET body and a constructed `Tagged` value's body.
+ *
+ * @param content  the bytes to decode as a run of TLVs
+ * @return         the decoded values, in order, or `error`
+ * @throws         when any child TLV is malformed
+ */
+fn decode_all(content: []byte): []Asn1Value | error {
+    var items: []Asn1Value = teko::list::empty()
+    var pos: u64 = 0
+    loop {
+        if pos >= content.len { break }
+        var r = match decode_tlv(content, pos) { Asn1TlvRead as x => x; error as e => return e }
+        items = teko::list::push(items, r.value)
+        pos = r.pos
+    }
+    items
+}
+
+/**
+ * Decodes a SEQUENCE content.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         per `decode_all`
+ */
+fn decode_sequence(content: []byte): Asn1Value | error {
+    var items = match decode_all(content) { []Asn1Value as xs => xs; error as e => return e }
+    asn1_sequence(items)
+}
+
+/**
+ * Decodes a SET content.
+ *
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ * @throws         per `decode_all`
+ */
+fn decode_set(content: []byte): Asn1Value | error {
+    var items = match decode_all(content) { []Asn1Value as xs => xs; error as e => return e }
+    asn1_set(items)
+}
+
+/**
+ * Dispatches a universal-class TLV's content to its kind-specific parser. `kind` is always a
+ * non-`Tagged` value here — it comes from `kind_of_universal_tag`, which never yields `Tagged`.
+ *
+ * @param kind     the decoded universal kind
+ * @param content  the TLV content bytes
+ * @return         the decoded value, or `error`
+ */
+fn decode_universal_value(kind: Asn1Tag, content: []byte): Asn1Value | error {
+    if kind == Asn1Tag::Boolean { return decode_boolean(content) }
+    if kind == Asn1Tag::Integer { return decode_integer(content) }
+    if kind == Asn1Tag::BitString { return decode_bit_string(content) }
+    if kind == Asn1Tag::OctetString { return asn1_octet_string(content) }
+    if kind == Asn1Tag::Null { return decode_null(content) }
+    if kind == Asn1Tag::ObjectIdentifier { return decode_oid(content) }
+    if kind == Asn1Tag::Utf8String { return decode_utf8_string(content) }
+    if kind == Asn1Tag::PrintableString { return decode_printable_string(content) }
+    if kind == Asn1Tag::IA5String { return decode_ia5_string(content) }
+    if kind == Asn1Tag::UtcTime { return decode_utc_time(content) }
+    if kind == Asn1Tag::GeneralizedTime { return decode_generalized_time(content) }
+    if kind == Asn1Tag::Sequence { return decode_sequence(content) }
+    decode_set(content)
+}
+
+/**
+ * Decodes a universal-class TLV whose identifier and length have already been read: resolves the
+ * tag number to its kind, then parses the content.
+ *
+ * @param id       the decoded identifier (`id.tag_class == Asn1Class::Universal`)
+ * @param content  the TLV content bytes
+ * @param end      the offset just past the TLV
+ * @return         the decoded value and `end`, or `error`
+ * @throws         when the tag number is not a supported universal kind, or per
+ *                 `decode_universal_value`
+ */
+fn decode_universal(id: Asn1IdentifierRead, content: []byte, end: u64): Asn1TlvRead | error {
+    var kind = match kind_of_universal_tag(id.num) { Asn1Tag as k => k; error as e => return e }
+    var value = match decode_universal_value(kind, content) { Asn1Value as v => v; error as e => return e }
+    Asn1TlvRead { value = value; pos = end }
+}
+
+/**
+ * Decodes a non-universal (application/context-specific/private) TLV whose identifier and length
+ * have already been read: a primitive tagged value keeps its raw content; a constructed one
+ * decodes its content as a run of child TLVs (see the module doc's TAGGED VALUES note).
+ *
+ * @param id       the decoded identifier (`id.tag_class != Asn1Class::Universal`)
+ * @param content  the TLV content bytes
+ * @param end      the offset just past the TLV
+ * @return         the decoded value and `end`, or `error`
+ * @throws         when a constructed tagged value's child TLVs are malformed
+ */
+fn decode_tagged(id: Asn1IdentifierRead, content: []byte, end: u64): Asn1TlvRead | error {
+    if !id.constructed { return Asn1TlvRead { value = asn1_tagged_primitive(id.tag_class, id.num, content); pos = end } }
+    var items = match decode_all(content) { []Asn1Value as xs => xs; error as e => return e }
+    Asn1TlvRead { value = asn1_tagged_constructed(id.tag_class, id.num, items); pos = end }
+}
+
+/**
+ * Decodes exactly one TLV at `pos`: identifier, then definite length, then dispatches on class.
+ *
+ * @param p    the input
+ * @param pos  the offset of the TLV's leading identifier byte
+ * @return     the decoded value and the offset past it, or `error`
+ * @throws     when the identifier/length is malformed, the content runs past the end of `p`, or
+ *             per `decode_universal`/`decode_tagged`
+ */
+fn decode_tlv(p: []byte, pos: u64): Asn1TlvRead | error {
+    var id = match decode_identifier(p, pos) { Asn1IdentifierRead as r => r; error as e => return e }
+    var len = match decode_length(p, id.pos) { Asn1LengthRead as r => r; error as e => return e }
+    var start = len.pos
+    var end = start + len.value
+    if end > p.len { return decode_error("truncated content", start) }
+    var content = bytes_slice(p, start, end)
+    if id.tag_class != Asn1Class::Universal { return decode_tagged(id, content, end) }
+    decode_universal(id, content, end)
+}
+
+/**
+ * Decodes a complete DER/BER document: exactly one top-level TLV, with any trailing bytes
+ * reported as a checked error (an ASN.1-encoded value is a single top-level TLV).
+ *
+ * @param bytes  the input bytes
+ * @return       the decoded value, or `error` on malformed input or trailing bytes
+ */
+exp fn der_decode(bytes: []byte): Asn1Value | error {
+    var r = match decode_tlv(bytes, 0) { Asn1TlvRead as x => x; error as e => return e }
+    if r.pos != bytes.len { return decode_error("trailing bytes after top-level value", r.pos) }
+    r.value
+}

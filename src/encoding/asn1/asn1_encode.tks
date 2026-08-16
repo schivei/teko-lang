@@ -1,0 +1,362 @@
+use teko::numeric::bigint
+
+/**
+ * `teko::encoding::asn1` DER encoding: identifier/length TLV codec (X.690 §8.1) plus per-kind
+ * content builders, assembled by `der_encode`. See `asn1.tks`'s module doc for the CANONICAL DER
+ * guarantees this side upholds (minimal identifier, minimal length, minimal two's-complement
+ * INTEGER body, sorted SET).
+ */
+
+/**
+ * A single-byte `[]byte`.
+ *
+ * @param b  the byte
+ * @return   a length-1 slice holding `b`
+ */
+fn single_byte(b: byte): []byte {
+    teko::list::push(no_bytes(), b)
+}
+
+/**
+ * Appends every byte of `more` to `out`, returning the grown slice (functional accumulation, no
+ * index-assignment — the `teko::encoding::cbor` `append_all` discipline).
+ *
+ * @param out   the accumulator
+ * @param more  the bytes to append
+ * @return      `out` followed by `more`
+ */
+fn append_all(out: []byte, more: []byte): []byte {
+    var acc = out
+    var i: u64 = 0
+    loop {
+        if i >= more.len { break }
+        acc = teko::list::push(acc, more[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * Encodes a non-negative value as base-128 big-endian groups (X.690 §8.1.2.4.2 / §8.19.4): the
+ * least-significant 7-bit group last, every group but the last with its continuation bit (`0x80`)
+ * set. Shared by the identifier octet's high-tag-number form and an OBJECT IDENTIFIER's arc
+ * encoding — the two places X.690 uses this exact group shape.
+ *
+ * @param v  the value to encode
+ * @return   the base-128 encoded bytes, most-significant group first
+ */
+fn encode_base128(v: u64): []byte {
+    var groups: []u64 = teko::list::empty()
+    var x = v
+    loop {
+        groups = teko::list::push(groups, x & 0x7F)
+        x = x >> 7
+        if x == 0 { break }
+    }
+    var out: []byte = no_bytes()
+    var i = groups.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        var g = groups[i]
+        var lead = if i > 0 { g | 0x80 } else { g }
+        out = teko::list::push(out, lead to byte)
+    }
+    out
+}
+
+/**
+ * Encodes an identifier octet sequence (X.690 §8.1.2): the class/constructed/number leading byte,
+ * with the base-128 high-tag-number form appended when `num >= 31`.
+ *
+ * @param tag_class    the tag class
+ * @param constructed  whether the content is constructed
+ * @param num          the tag number
+ * @return             the encoded identifier octets
+ */
+fn encode_identifier(tag_class: Asn1Class, constructed: bool, num: u64): []byte {
+    var pc: u64 = if constructed { 0x20 } else { 0 }
+    var lead = (class_bits(tag_class) << 6) | pc
+    if num < 31 { return single_byte((lead | num) to byte) }
+    append_all(single_byte((lead | 0x1F) to byte), encode_base128(num))
+}
+
+/**
+ * The minimal big-endian bytes of a nonzero `v` (no leading zero byte).
+ *
+ * @param v  the value, nonzero
+ * @return   the minimal big-endian encoding of `v`
+ */
+fn be_minimal_bytes(v: u64): []byte {
+    var rev: []byte = no_bytes()
+    var x = v
+    loop {
+        rev = teko::list::push(rev, (x & 0xFF) to byte)
+        x = x >> 8
+        if x == 0 { break }
+    }
+    var out: []byte = no_bytes()
+    var i = rev.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        out = teko::list::push(out, rev[i])
+    }
+    out
+}
+
+/**
+ * Encodes a definite length (X.690 §8.1.3): the short form (a single byte) under 128, else the
+ * minimal-width long form (a length-of-length byte followed by the minimal big-endian length).
+ *
+ * @param len  the content length
+ * @return     the encoded length octets
+ */
+fn encode_length(len: u64): []byte {
+    if len < 128 { return single_byte(len to byte) }
+    var body = be_minimal_bytes(len)
+    append_all(single_byte((0x80 | body.len) to byte), body)
+}
+
+/**
+ * Assembles one complete TLV: identifier, then length, then content.
+ *
+ * @param tag_class    the tag class
+ * @param constructed  whether the content is constructed
+ * @param num          the tag number
+ * @param content      the already-encoded content bytes
+ * @return             the full TLV encoding
+ */
+fn encode_tlv(tag_class: Asn1Class, constructed: bool, num: u64, content: []byte): []byte {
+    append_all(append_all(encode_identifier(tag_class, constructed, num), encode_length(content.len)), content)
+}
+
+/**
+ * Encodes a BOOLEAN body: `0xFF` for `true` (DER's canonical all-ones form), `0x00` for `false`.
+ *
+ * @param flag  the boolean value
+ * @return      the one-byte BOOLEAN body
+ */
+fn content_boolean(flag: bool): []byte {
+    single_byte((if flag { 0xFF } else { 0x00 }) to byte)
+}
+
+/**
+ * The minimal unsigned big-endian magnitude bytes of a non-negative `x`, with a leading `0x00`
+ * prepended when the high bit of the first byte is already set (so the value cannot be misread as
+ * negative in two's-complement).
+ *
+ * @param x  a non-negative value
+ * @return   the minimal unsigned INTEGER body for `x`
+ */
+fn positive_integer_body(x: bigint::BigInt): []byte {
+    var raw = match bigint::to_bytes_be(x) { []byte as b => b; error => no_bytes() }
+    if ((raw[0] to u64) & 0x80) != 0 { return append_all(single_byte(0), raw) }
+    raw
+}
+
+/**
+ * The minimal two's-complement INTEGER body of a strictly negative `x`. Finds the smallest byte
+ * width `w` such that `x` fits `[-2^(8w-1), 2^(8w-1) - 1]` (the magnitude's own minimal unsigned
+ * width `k`, or `k + 1` when the magnitude exceeds `2^(8k-1)`), then renders `2^(8w) - |x|` in
+ * exactly `w` bytes.
+ *
+ * @param x  a strictly negative value
+ * @return   the minimal two's-complement INTEGER body for `x`
+ */
+fn negative_integer_body(x: bigint::BigInt): []byte {
+    var mag = bigint::neg(x)
+    var raw = match bigint::to_bytes_be(mag) { []byte as b => b; error => no_bytes() }
+    var k = raw.len
+    var boundary = bigint::shl(bigint::one(), 8 * k - 1)
+    var width = if bigint::cmp(mag, boundary) <= 0 { k } else { k + 1 }
+    var twos = bigint::sub(bigint::shl(bigint::one(), 8 * width), mag)
+    match bigint::to_bytes_be_padded(twos, width) { []byte as b => b; error => no_bytes() }
+}
+
+/**
+ * Encodes an INTEGER body (X.690 §8.3): the minimal two's-complement encoding, `[0x00]` for zero.
+ *
+ * @param x  the value
+ * @return   the minimal INTEGER body for `x`
+ */
+fn content_integer(x: bigint::BigInt): []byte {
+    if bigint::is_zero(x) { return single_byte(0) }
+    if bigint::is_neg(x) { return negative_integer_body(x) }
+    positive_integer_body(x)
+}
+
+/**
+ * Encodes a BIT STRING body: the unused-bit count byte followed by the payload.
+ *
+ * @param payload      the bit-string content bytes
+ * @param unused_bits  the unused-bit count (`0..7`)
+ * @return             the BIT STRING body
+ */
+fn content_bit_string(payload: []byte, unused_bits: u64): []byte {
+    append_all(single_byte(unused_bits to byte), payload)
+}
+
+/**
+ * Encodes an OBJECT IDENTIFIER body (X.690 §8.19): the first two arcs packed into one base-128
+ * group via `40 * arcs[0] + arcs[1]`, then every remaining arc as its own base-128 group.
+ *
+ * @param arcs  the arc list (already validated by `asn1_oid`)
+ * @return      the OBJECT IDENTIFIER body
+ */
+fn content_oid(arcs: []u64): []byte {
+    var out = encode_base128(40 * arcs[0] + arcs[1])
+    var i: u64 = 2
+    loop {
+        if i >= arcs.len { break }
+        out = append_all(out, encode_base128(arcs[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * Encodes each child value in order and concatenates the results — the shared content shape of
+ * SEQUENCE and a constructed `Tagged` value.
+ *
+ * @param items  the child values, in order
+ * @return       the concatenated child encodings
+ */
+fn content_items(items: []Asn1Value): []byte {
+    var out: []byte = no_bytes()
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = append_all(out, der_encode(items[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * One SET member's own DER encoding, held for bytewise sorting.
+ */
+type Asn1SetEntry = struct {
+    /** The member's complete DER encoding. */
+    encoded: []byte
+}
+
+/**
+ * Reports whether encoded member `a` sorts strictly before encoded member `b` in bytewise
+ * lexicographic order (the `teko::encoding::cbor` canonical-map-key `bytes_less` discipline): a
+ * strict prefix sorts before its extension.
+ *
+ * @param a  the first member's encoding
+ * @param b  the second member's encoding
+ * @return   true when `a` sorts strictly before `b`
+ */
+fn set_entry_less(a: []byte, b: []byte): bool {
+    var i: u64 = 0
+    loop {
+        if i >= a.len { return b.len > a.len }
+        if i >= b.len { return false }
+        if a[i] != b[i] { return a[i] < b[i] }
+        i++
+    }
+}
+
+/**
+ * Inserts an already-encoded SET member into an already-sorted list, keeping it sorted (a
+ * functional insertion step, no index-assignment).
+ *
+ * @param sorted  the already-sorted entries
+ * @param e       the entry to insert
+ * @return        a new sorted list including `e`
+ */
+fn insert_set_entry(sorted: []Asn1SetEntry, e: Asn1SetEntry): []Asn1SetEntry {
+    var out: []Asn1SetEntry = teko::list::empty()
+    var placed = false
+    var i: u64 = 0
+    loop {
+        if i >= sorted.len { break }
+        if !placed && set_entry_less(e.encoded, sorted[i].encoded) {
+            out = teko::list::push(out, e)
+            placed = true
+        }
+        out = teko::list::push(out, sorted[i])
+        i++
+    }
+    if !placed { out = teko::list::push(out, e) }
+    out
+}
+
+/**
+ * Encodes each SET member and sorts the results into bytewise ascending order (the SET OF
+ * canonical rule, X.690 §11.6 — see the module doc's CANONICAL DER note for the honest
+ * simplification this applies to a general `SET`).
+ *
+ * @param items  the SET members
+ * @return       the concatenated, sorted member encodings
+ */
+fn content_set(items: []Asn1Value): []byte {
+    var sorted: []Asn1SetEntry = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        sorted = insert_set_entry(sorted, Asn1SetEntry { encoded = der_encode(items[i]) })
+        i++
+    }
+    var out: []byte = no_bytes()
+    var j: u64 = 0
+    loop {
+        if j >= sorted.len { break }
+        out = append_all(out, sorted[j].encoded)
+        j++
+    }
+    out
+}
+
+/**
+ * Builds the content bytes for every non-`Tagged` kind, dispatching on `v.kind`.
+ *
+ * @param v  the value (`v.kind != Asn1Tag::Tagged`)
+ * @return   the encoded content
+ */
+fn content_for(v: Asn1Value): []byte {
+    match v.kind {
+        Asn1Tag::Boolean => content_boolean(v.flag)
+        Asn1Tag::Integer => content_integer(v.integer)
+        Asn1Tag::BitString => content_bit_string(v.bytes, v.unused_bits)
+        Asn1Tag::OctetString => v.bytes
+        Asn1Tag::Null => no_bytes()
+        Asn1Tag::ObjectIdentifier => content_oid(v.oid)
+        Asn1Tag::Utf8String => bytes_of_str(v.text)
+        Asn1Tag::PrintableString => bytes_of_str(v.text)
+        Asn1Tag::IA5String => bytes_of_str(v.text)
+        Asn1Tag::UtcTime => bytes_of_str(v.text)
+        Asn1Tag::GeneralizedTime => bytes_of_str(v.text)
+        Asn1Tag::Sequence => content_items(v.items)
+        Asn1Tag::Set => content_set(v.items)
+        Asn1Tag::Tagged => no_bytes()
+    }
+}
+
+/**
+ * Encodes a `Tagged` value's TLV: its content is `content_items` when constructed, else the raw
+ * primitive payload verbatim.
+ *
+ * @param v  the tagged value (`v.kind == Asn1Tag::Tagged`)
+ * @return   the encoded TLV
+ */
+fn encode_tagged(v: Asn1Value): []byte {
+    var content = if v.constructed { content_items(v.items) } else { v.bytes }
+    encode_tlv(v.tag_class, v.constructed, v.tag_num, content)
+}
+
+/**
+ * Encodes a complete `Asn1Value` to canonical DER (see `asn1.tks`'s module doc for the exact
+ * canonical-form guarantees). Total over any value built through this module's validating
+ * constructors.
+ *
+ * @param v  the value to encode
+ * @return   the DER encoding
+ */
+exp fn der_encode(v: Asn1Value): []byte {
+    if v.kind == Asn1Tag::Tagged { return encode_tagged(v) }
+    encode_tlv(Asn1Class::Universal, is_constructed_kind(v.kind), universal_tag_num(v.kind), content_for(v))
+}

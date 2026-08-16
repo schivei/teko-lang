@@ -1,0 +1,127 @@
+/**
+ * Tests for `teko::encoding::fixed` — fixed-width column text. Covers byte-width column
+ * slicing, the liberal `\n`/`\r\n` line-ending read, the untrimmed vs. `parse_fixed_trimmed`
+ * trailing-space behavior, `write_fixed`'s pad/truncate/missing-field total rendering, a
+ * write-then-parse round trip, and the too-short-line error case (M.1 fail-loud via `error`,
+ * never a panic) — every numeric vector here is cross-checked against a hand-written Python
+ * fixed-width slice/pad. This file lives under `teko::encoding::fixed` (namespace = directory),
+ * so the functions under test are called bare, mirroring `teko::encoding::csv::csv_test.tkt`'s
+ * convention.
+ */
+
+/**
+ * Builds a `[]u64` of column widths from int literals.
+ *
+ * @param xs  the widths as ints
+ * @return    the widths as a `u64` slice
+ */
+fn widths_lit(xs: []i64): []u64 {
+    var out: []u64 = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, xs[i] to u64)
+        i++
+    }
+    out
+}
+
+/**
+ * Builds a `[]str` from its arguments, in order — a small literal-list convenience for record
+ * fields.
+ *
+ * @param a  the first field
+ * @param b  the second field
+ * @param c  the third field
+ * @return   `[a, b, c]`
+ */
+fn fields3(a: str, b: str, c: str): []str {
+    var out: []str = teko::list::empty()
+    out = teko::list::push(out, a)
+    out = teko::list::push(out, b)
+    out = teko::list::push(out, c)
+    out
+}
+
+/**
+ * Unwraps a `[]FixedRecord | error` parse result — a failure in a "should succeed" test is
+ * itself a test failure (mirrors `teko::encoding::csv::csv_test.tkt`'s `expect_ok` shape).
+ *
+ * @param result  the parse outcome under test
+ * @return        the parsed records on success, or an empty slice (after failing) on error
+ */
+fn expect_ok(result: []FixedRecord | error): []FixedRecord {
+    match result {
+        []FixedRecord as rs => rs
+        error => { teko::assert::is_true(false); teko::list::empty() }
+    }
+}
+
+/**
+ * Reports whether a `[]FixedRecord | error` result is the `error` arm.
+ *
+ * @param result  the outcome under test
+ * @return        true when `result` is `error`
+ */
+fn is_err(result: []FixedRecord | error): bool {
+    match result {
+        []FixedRecord => false
+        error => true
+    }
+}
+
+#test
+fn parse_fixed_slices_columns_by_byte_width_matching_a_python_slice() {
+    var widths = widths_lit([4, 6, 3])
+    var doc = "AB  CDEF  123\r\nWXYZfoobar456\n"
+    var records = expect_ok(parse_fixed(doc, widths))
+    teko::assert::len_eq(records.len, 2)
+    teko::assert::eq_str(records[0].fields[0], "AB  ")
+    teko::assert::eq_str(records[0].fields[1], "CDEF  ")
+    teko::assert::eq_str(records[0].fields[2], "123")
+    teko::assert::eq_str(records[1].fields[0], "WXYZ")
+    teko::assert::eq_str(records[1].fields[1], "foobar")
+    teko::assert::eq_str(records[1].fields[2], "456")
+}
+
+#test
+fn parse_fixed_trimmed_strips_trailing_spaces_matching_pythons_rstrip() {
+    var widths = widths_lit([4, 6, 3])
+    var records = expect_ok(parse_fixed_trimmed("AB  CDEF  123", widths))
+    teko::assert::eq_str(records[0].fields[0], "AB")
+    teko::assert::eq_str(records[0].fields[1], "CDEF")
+    teko::assert::eq_str(records[0].fields[2], "123")
+}
+
+#test
+fn parse_fixed_errors_on_a_line_shorter_than_the_declared_widths() {
+    var widths = widths_lit([4, 6, 3])
+    teko::assert::is_true(is_err(parse_fixed("AB", widths)))
+}
+
+#test
+fn write_fixed_pads_truncates_and_defaults_missing_fields_matching_python() {
+    var widths = widths_lit([4, 6, 3])
+    var records: []FixedRecord = teko::list::empty()
+    records = teko::list::push(records, FixedRecord { fields = fields3("A", "BB", "3") })
+    records = teko::list::push(records, FixedRecord { fields = fields3("ABCDEFG", "X", "Y") })
+    var lone: []str = teko::list::empty()
+    lone = teko::list::push(lone, "Z")
+    records = teko::list::push(records, FixedRecord { fields = lone })
+
+    var rendered = write_fixed(records, widths)
+    teko::assert::eq_str(rendered, "A   BB    3  \nABCDX     Y  \nZ            \n")
+}
+
+#test
+fn write_then_parse_round_trips_the_padded_fields() {
+    var widths = widths_lit([4, 6, 3])
+    var records: []FixedRecord = teko::list::empty()
+    records = teko::list::push(records, FixedRecord { fields = fields3("A", "BB", "3") })
+    var rendered = write_fixed(records, widths)
+    var back = expect_ok(parse_fixed(rendered, widths))
+    teko::assert::len_eq(back.len, 1)
+    teko::assert::eq_str(back[0].fields[0], "A   ")
+    teko::assert::eq_str(back[0].fields[1], "BB    ")
+    teko::assert::eq_str(back[0].fields[2], "3  ")
+}
