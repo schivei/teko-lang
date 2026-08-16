@@ -1453,6 +1453,41 @@ fn append_instance_methods(kept: []@TItem(), fns: []TFunction): []@TItem() {
     out
 }
 
+/**
+ * Gate every stamped generic CLASS/struct instance against its template's type-param constraints,
+ * mirroring the free-generic-fn check the fixpoint applies before stamping. `instantiate_types` stamps a
+ * class instance without an error channel, so a `Dictionary<Plain, i64>` whose `Plain` lacks `IHash`
+ * reaches codegen and link-fails on the missing `Plain__hash`; this raises the clean compile-time stop
+ * instead. The owner `{K -> Plain, V -> i64}` Subst is recovered from the instance's stamped fields
+ * (`instance_type_subst`), then `check_constraints` verifies each param. A no-op for an instance whose
+ * template has no constraints, and for the whole non-generic corpus (no stamped instances).
+ *
+ * @param table  the folded type table (source of stamped instances and their templates)
+ * @return       null when every class instance satisfies its constraints; the first violation otherwise
+ * @throws       error naming the first type-param whose concrete binding fails its constraint
+ * @since fase1b-machinery (F4)
+ */
+fn check_instance_constraints(table: TypeTable): error | null {
+    var insts = table_generic_instances(table)
+    var i = 0
+    loop {
+        if i >= insts.len { break }
+        var inst = insts[i]
+        var stem = g_instance_base(inst.name)
+        match find_generic_template(table, stem) {
+            TemplateReg as tr => {
+                if tr.decl.type_constraints.len > 0 {
+                    var s = instance_type_subst(tr.decl, inst, table)
+                    match check_constraints(tr.decl.type_params, tr.decl.type_constraints, s, table) { error as e => return e; null => { } }
+                }
+            }
+            null => { }
+        }
+        i++
+    }
+    null
+}
+
 // ── the driver ───────────────────────────────────────────────────────────────────────────
 // PHASE 1 — walk every NON-generic TFunction body and every loose top-level statement (with an
 // EMPTY subst) to collect SEED instantiations + rewritten bodies; DROP generic functions from the
@@ -1474,6 +1509,8 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         g++
     }
     if !any_generic { return prog }
+
+    match check_instance_constraints(table) { error as e => return e; null => { } }
 
     var empty_s = Subst { params = teko::list::empty(); names = teko::list::empty(); types = teko::list::empty() }
 
