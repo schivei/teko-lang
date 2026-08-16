@@ -1,52 +1,47 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 SYSCALL INTRINSIC keystone —
-# raw OS syscalls as a codegen intrinsic (the post-pivot §16 foundation: libc is OUT, the target is the OS's
-# native syscall/ABI, the way Go/Rust/Zig reach the kernel without a C compiler). What this harvest carries:
-#   - **§16 syscall intrinsic (compiler — checker + codegen)**: `teko::sys::syscall0`..`syscall6(nr, a0..aN:
-#     i64): i64` as compiler builtins (no `.tks` body, exactly like `f64_bits`). Args are `i64` register words
-#     (ptr/uptr cannot cast to i64 — `cast_check` forbids it); the return is a raw `i64` (a negative value is
-#     `-errno`; typed `Result` wrappers are ordinary `.tks` built on top).
-#     - Checker: seven `syscallN` builtins registered next to `f64_bits` (`scope.tks`), admitted at any
-#       `teko::sys::` qualifier depth by the existing `builtin_qualifier_ok`.
-#     - Codegen: seven dispatch arms (`last == "syscallN"` → `tk_syscallN(...)`) next to `f64_bits`. The
-#       lowering emits `static inline long tk_syscallN(...)` PREAMBLE helpers carrying `asm volatile("syscall"
-#       ...)` with the x86_64 register convention (`rax`=nr+ret, args `rdi rsi rdx r10 r8 r9`, clobber `rcx r11
-#       memory`), wrapped in `#if defined(__x86_64__)` / `#error` (aarch64 designed-ahead). The helpers are
-#       USE-GATED by a `cg_scan_syscall_arities` pre-scan (mirroring the `cg_lift_*` recursion) so only arities
-#       actually called are emitted — the C-leg intrinsic, exactly like the `f64_bits` intrinsic decision (no
-#       runtime symbol, no libc). `teko::sys` gained the `SYS_EXIT_GROUP` x86_64(231)/aarch64(94) number pair,
-#       `#os("linux") #arch(...)`-guarded.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 SYSCALL POINTER-BRIDGE intrinsics
+# (`ptr_word`/`ref_word`) + the `SYS_WRITE` proof — the second syscall crumb, letting a buffer/struct address
+# cross into a syscall register slot without libc. What this harvest carries:
+#   - **§16 syscall bridges (compiler — checker + codegen)**:
+#     - `teko::sys::ptr_word(p: ptr): i64` — ordinary builtin (`scope.tks`, beside the `syscallN` family),
+#       lowering (`emit_ptr_word`, hooked in the `as_cstr`/`buf_ptr` special-arm chain) to
+#       `((int64_t)(uintptr_t)(<p>))`. Takes an opaque `ptr` (e.g. from `teko::mem::as_cstr`) — the widening
+#       rides the existing `ptr_widens_to_opaque` path (the `bytes_from_ptr` precedent) — and yields its address
+#       as an `i64` for a syscall arg. The sanctioned opaque→int reinterpret, on the `f64_bits` carve-out.
+#     - `teko::sys::ref_word(x): i64` — an lvalue-checked SPECIAL form (`type_ref_word` in `typer.tks`, mirroring
+#       `type_ptr_unwrap`'s addressable-`var` proof, no type argument), lowering (`emit_ref_word`) to
+#       `((int64_t)(uintptr_t)&(<x>))`. A `lookup_call` check lets a real user `ref_word` declaration win over the
+#       intrinsic (declaration-beats-fallback). Unused by this crumb; wired for the next (`clock_gettime`).
+#     - `teko::sys::SYS_WRITE` (`sys.tks`): x86_64(1)/aarch64(64), `#os("linux") #arch(...)`-guarded.
 #
-# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The compiler's own corpus (`src/`) issues ZERO
-# syscalls, so the use-gated pre-scan emits NO `tk_syscallN` helper into the self-image; the emitted C differs
-# from the previous seed only by the new checker/codegen SOURCE plus the mechanical line/offset shifts that
-# source induces (a function-add reseed per the "leaf = byte-identical only for const-only" finding). Verified:
-# `static inline long tk_syscall1(` appears as real emitted C in the sys_exit_group fixture's output but only as
-# a quoted string literal (the emitter's own source data) in the compiler's own teko.c — genuinely use-gated.
+# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The compiler's own corpus (`src/`) calls neither
+# bridge nor any syscall, so both intrinsics — pure expression-level lowerings, no preamble helper — are fully
+# inert on the self-image; the emitted C differs from the previous seed only by the new checker/codegen SOURCE
+# plus the mechanical line/offset shifts it induces (a function-add reseed). Verified: the `(int64_t)(uintptr_t)`
+# casts + `tk_syscall3` helper appear as real emitted C only in the sys_write fixture's output, and in the
+# compiler's own teko.c only as quoted string literals inside `emit_ptr_word`/`emit_ref_word`/the syscall
+# emitter's own source — genuinely use-gated.
 #
-# NATIVE LEG — HONEST-STOP (by design). A `syscallN` call falls into the terminal `_ =>` of `lower_call`
-# (`src/lir/lower.tks`) — the same shape C1's `ExternStructBody` took; native lowering (emit the syscall
-# instruction directly) is DEFERRED to the terminal native-correction phase of Doc-2. The C leg is the target.
+# NATIVE LEG — HONEST-STOP (by design). The bridges lower only on the C leg; native lowering is DEFERRED to the
+# terminal native-correction phase of Doc-2. The C leg is the target.
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `c7ac134b`) built the tree →
-#     emitted teko.c `1a03a68e` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `1a03a68e0672548dd71fd2fcdc5e6476
-#     d9088d36e4c11baabf66bf8edb9ea767`; tc2 -> gen2; gen2 built the tree → tc3 `1a03a68e…`. tc1 == tc2 == tc3,
-#     byte-identical (sha256 below). No ladder: the corpus issues no syscall, so the OLD compiler (gen0) and the
-#     NEW (gen1) emit the self-image identically at tc1 (use-gated helpers absent from both).
+#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `1a03a68e`) built the tree →
+#     emitted teko.c `1b61761d` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `1b61761d2b7e55401e24d2b3f957ff2f
+#     74db4812af1f1b2cb6ed008694a34884`; tc2 -> gen2; gen2 built the tree → tc3 `1b61761d…`. tc1 == tc2 == tc3,
+#     byte-identical (sha256 below). No ladder: the corpus calls neither bridge, so gen0 and gen1 emit the
+#     self-image identically at tc1.
 #   - cc-route: cc -std=c2x -w -g -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
 #   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen . -o out --no-verify --release` exits 0 (whole-tree,
-#     clean through emit+cc). NOTE: MEM_PARANOID peaks right at the ~5.6 GB boundary of the 6 GB coordinator cap
-#     (the mode does not bulk-free, so the emit str-concat is the peak); a first capped run tripped the arena's
-#     own "out of memory (str concat)" guard at the emit and a re-run completed exit 0 — a cap-boundary memory-
-#     pressure artifact (Doc-1 territory), NOT a memory-correctness violation (the checker/monomorph/codegen
-#     8660/8660 paranoid checks all passed before the emit).
-#   - Regression: `examples/regressions/sys_exit_group/` — `teko::sys::syscall1(SYS_EXIT_GROUP, 42)` issues a
-#     real `exit_group(42)` syscall via the inline-asm helper, terminating the process directly (never reaching
-#     the trailing `exit(0)`); the harness observes exit 42.
+#     clean through emit+cc; peak 5767.9 MB). As with the keystone, a first capped run tripped the arena's own
+#     "out of memory (str concat)" guard at the emit at the ~5.6 GB / 6 GB-cap boundary and a re-run completed
+#     exit 0 — a cap-boundary memory-pressure artifact (Doc-1 territory), NOT a memory-correctness violation.
+#   - Regression: `examples/regressions/sys_write/` — `teko::sys::syscall3(SYS_WRITE, 1, ptr_word(as_cstr("hi\n")),
+#     3)` issues a real `write(1, buf, 3)` syscall via the inline-asm helper; the built binary prints `hi` to
+#     stdout and exits 0.
 # The self-reported peak of the whole-tree build was ~5.6 GB (within the 6 GB cap; local ladder cc dropped
 # `-g` purely to fit the coordinator container's RAM — the emitted seed bytes are cc-flag-independent).
 #
@@ -59,9 +54,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  1a03a68e0672548dd71fd2fcdc5e6476d9088d36e4c11baabf66bf8edb9ea767
+sha256:  1b61761d2b7e55401e24d2b3f957ff2f74db4812af1f1b2cb6ed008694a34884
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 raw-syscall codegen intrinsic:
-         teko::sys::syscall0..6 lowering to inline-asm `syscall` preamble helpers, use-gated so inert on the
-         syscall-free self-image), byte-identical on rebuild across the stable C-route generations (tc1 == tc2
-         == tc3, no ladder) AND on the cc-route re-emission; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §16 syscall pointer-bridge intrinsics
+         ptr_word/ref_word lowering to opaque→int address reinterprets, use-gated so inert on the corpus that
+         calls neither), byte-identical on rebuild across the stable C-route generations (tc1 == tc2 == tc3, no
+         ladder) AND on the cc-route re-emission; no unrecovered legacy artifact underlies it.
