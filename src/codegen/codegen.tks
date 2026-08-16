@@ -4579,6 +4579,29 @@ fn emit_ptr_word(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, 
 }
 
 /**
+ * `teko::sys::word_ptr(w: i64): ptr` (§16 §2.1, the arena sub-crumb C intrinsic) — the INVERSE of
+ * `emit_ptr_word`: casts the `i64` word (an arena cursor, or any address the arena has bumped
+ * over in integer space) back to an opaque `ptr` the caller can dereference/pass to a syscall.
+ * A compiler intrinsic (never a user `to` cast), the same `f64_bits`/`emit_ptr_word` carve-out —
+ * the arena must hand each allocation back AS a `ptr`, and this is the only place an integer
+ * becomes a `ptr`.
+ *
+ * @param []byte buf  the output buffer
+ * @param CgProg prog  the typed program (for arg emission)
+ * @param checker::TCall c  the typed call (args[0] = the `i64` word)
+ * @param []str escaping  the escape-analysis frame set
+ * @param []RegionFrame regions  the open region-frame stack
+ * @param []checker::TStatement fn_body  the enclosing function body (defer context)
+ * @param DeferCtx dctx  the defer context
+ * @return []byte | error  the buffer with the reinterpret-cast expression appended, or a codegen error
+ */
+fn emit_word_ptr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var out = cb(buf, "((void *)(uintptr_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, "))")
+}
+
+/**
  * `teko::mem::load_u64(addr: u64): u64` (§16 §2.2 arena sub-crumb B; `load_u64_signature`,
  * `src/checker/scope.tks`) — reads ONE 64-bit word at the caller-computed address `addr`, with
  * NO allocation. Emits a `volatile` dereference: the arena reads back a word a sibling
@@ -5119,6 +5142,7 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             if l == "str_from_c" { return emit_str_from_c(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "region_buf" { return emit_region_buf(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "ptr_word" { return emit_ptr_word(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "word_ptr" { return emit_word_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "load_u64" { return emit_load_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "store_u64" { return emit_store_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
         }
