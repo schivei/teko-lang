@@ -1580,8 +1580,24 @@ terminal da Doc-2** (perna C é o alvo do C1). **Doc-staleness anotada** (`plano
 operador) são superfície morta — real = `extern fn` + param `ref T` + arg local-plano; corrijo num crumb de doc.
 **Sequência de crumbs (plano §7): C1 ✅ → C2 `teko::sys` (leaf) → C3 str/text → C4 char/UTF-8 → C5 float-bits
 INTRÍNSECO (compiler-touching) → C6 env/os/arch/time/random (FFI) → C7 deleção de símbolos C (two-legs gate).**
-**§16 C2 DESPACHADO** (`teko::sys` skeleton + 4 consts de tempo `#os`-guarded; primeiro `#os` no corpus → o crumb
-decide empiricamente leaf-vs-reseed comparando o `teko.c` emitido).
+**✅ §16 C2 ENTREGUE (LEAF, drenado `1cb6e5f7`, 2026-08-16).** `src/sys/sys.tks` (`teko::sys`): 4 consts de tempo
+`#os`-guarded (`CLOCK_REALTIME`/`CLOCK_MONOTONIC` p/ linux+macos), literais transcritos da ABI, sem import de
+macro-C. **Verdict LEAF confirmado (coordenador, build real):** o `teko.c` emitido da árvore+C2 = seed `c7ac134b`
+BYTE-IDÊNTICO → seed reproduz a árvore, **sem reseed** (o módulo não é consumido pelo compilador; `consteval` vê 2
+consts após o prune, mas dead-code-elimina na emissão). Fixture `sys_clock` **exit 10** (=`CLOCK_MONOTONIC(1)*10 +
+CLOCK_REALTIME(0)`) provando o prune §17 manter o bloco linux e dropar macos (`consteval 2/2`, não 4). **Achado
+arquitetural (precedente):** projeto de regressão externo NÃO enxerga módulos `src/` internos do compilador — o
+fixture carrega um espelho local de `teko::sys` sob seu `src/sys/`, endereçado como `sys::` bare (mesmo precedente
+de `generic_sort`/`collections_fase1b`/`chan_dgram`). **Hazard de workflow anotado:** o implementer rodou `git
+checkout -B` no worktree PRINCIPAL (moveu meu branch); recuperado por `ff-only` — futuros briefs devem exigir
+worktree isolado, nunca `checkout` no principal.
+
+**§16 PRÓXIMA FASE (C3-C6) → ARQUITETO (design-open, 2026-08-16).** O C1 revelou que o `plano-s16-fundacao-crumbs.md`
+tem superfície MORTA (`ptr<T>` — `ptr` é opaco; `extern unsafe fn` — retirado §6; `ref` no call-site — é binding).
+As fases C3-C6 entram em marshalling FFI real (str↔cstr no `getenv`, `clock_gettime`, `getrandom`) + a escada do C5
+float-bits (intrínseco: gen0 ainda emite `tk_f64_bits` no tc1 → um-passo-de-ladder tc1≠tc2==tc3, deleção do símbolo
+C só depois do reseed). Roteado ao arquiteto p/ refrescar o plano contra a superfície real, selar o recipe str↔cstr,
+e nomear os próximos crumbs implementáveis em ordem com verdict leaf-vs-reseed — ANTES de firar implementer.
 
 **⚖️ `f64_bits`/`f64_from_bits` = INTRÍNSECO DE CODEGEN (ruling do dono 2026-08-16, "intrínseco de codegen então").**
 Na fase strings/format/**float** do §16, essas duas são o ÚNICO caso que não vira nem `extern fn` nem Teko puro:
