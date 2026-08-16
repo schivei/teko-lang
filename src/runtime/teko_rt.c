@@ -2307,6 +2307,44 @@ void tk_region_enter_u(uint64_t child) {
     tk_region_enter((tk_region *)(uintptr_t)child);
 }
 
+// ============================ (§16 crumb D) the arena-over-mmap P2 seam ===========================
+//
+// The Teko arena-over-mmap core (src/runtime/arena.tks) keeps ALL of its state INSIDE the raw memory
+// it mmaps, read/written as words — solving the bootstrap circularity (§1). It needs exactly ONE
+// mutable process word to reach that state: the address of its CONTROL block, which tk_alloc-shaped
+// entry points (called by generated code that carries no state) must recover. Rather than add a
+// module-mutable-word language surface, §1.3 reuses the maintained-C exception (the F1 tk_task seam
+// family) for this one word. _Thread_local mirrors F1's per-task discipline: each flow of control's
+// arena state is its own, exactly as tk_g_current_task already is. 0 until the arena's first-touch
+// path installs it; ADD-ALONGSIDE (no current caller — the arena core is unwired at crumb D).
+static _Thread_local uint64_t tk_g_arena_control = 0;
+
+// tk_arena_control_get — read this task's arena CONTROL-block address (0 until first init). The one
+// mutable process word P2 requires (docs/design/arena-em-teko.md §2), kept in the maintained-C seam
+// so the Teko arena needs NO module-mutable-state language surface. Allocation-free.
+uint64_t tk_arena_control_get(void) {
+    return tk_g_arena_control;
+}
+
+// tk_arena_control_set — install this task's arena CONTROL-block address (once, lazily, by the Teko
+// arena's first-touch path). The write half of the P2 seam. Allocation-free.
+void tk_arena_control_set(uint64_t addr) {
+    tk_g_arena_control = addr;
+}
+
+// tk_arena_paranoid — the cached TEKO_MEM_PARANOID probe, hoisted out of the C arena's free path
+// (the tk_paranoid static at tk_free_block) so the Teko arena reads the same oracle without a Teko
+// string / getenv-of-a-rodata-literal (§1.2 forbids a computed str on the arena path). Probed once,
+// lazily; 1 when the variable is set to a non-empty value, else 0. Allocation-free.
+uint64_t tk_arena_paranoid(void) {
+    static int tk_arena_paranoid_cache = -1;
+    if (tk_arena_paranoid_cache < 0) {
+        const char *e = getenv("TEKO_MEM_PARANOID");
+        tk_arena_paranoid_cache = (e != NULL && *e != '\0') ? 1 : 0;
+    }
+    return (uint64_t)tk_arena_paranoid_cache;
+}
+
 // tk_region_program — the PROGRAM region: one per process, owned by no task.
 //
 // (F2) F1 left the runtime with N task roots and nothing else, and an object allocated in a task

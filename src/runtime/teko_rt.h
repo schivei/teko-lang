@@ -383,6 +383,13 @@ uint64_t   tk_region_root_u(void);              // tk_region_root() as a handle
 uint64_t   tk_region_current_u(void);           // tk_region_current() as a handle (native captures R_ret at fn entry)
 void       tk_region_drop_u(uint64_t region);   // tk_region_drop((tk_region*)region)
 void       tk_region_enter_u(uint64_t child);   // tk_region_enter((tk_region*)child)
+// (§16 crumb D) the arena-over-mmap P2 seam — the ONE mutable process word (per-task, _Thread_local)
+// the Teko arena core recovers its CONTROL block through, plus the cached TEKO_MEM_PARANOID probe it
+// reads its poison oracle from. See the seam block in teko_rt.c and docs/design/plano-s16-arena-mmap.md
+// §1.3. ADD-ALONGSIDE at crumb D (the arena core is compiled but unwired; no caller yet).
+uint64_t   tk_arena_control_get(void);          // this task's arena CONTROL address, 0 until first init
+void       tk_arena_control_set(uint64_t addr); // install this task's arena CONTROL address (once, lazily)
+uint64_t   tk_arena_paranoid(void);             // cached TEKO_MEM_PARANOID probe (1 set/non-empty, else 0)
 // tk_region_register — bind `type_id` → `instance` in `r`'s OWN table (never an ancestor's; a
 // second registration of the same type_id in the same region OVERWRITES — the compiler is
 // expected to enforce true duplicate-registration errors at a higher DI layer; this is just the

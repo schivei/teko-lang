@@ -1,0 +1,884 @@
+/** The exit code a fully passing gate reports. */
+pub const GATE_OK: i32 = 42
+
+/** A word written and read back must compare equal; exit code when it does not. */
+pub const E_WORD_ROUNDTRIP: i32 = 30
+
+/** Adjacent words must not bleed into each other; exit code when one does. */
+pub const E_WORD_NEIGHBOUR: i32 = 31
+
+/** Rounding up must land on a multiple of the alignment and never shrink; exit code on failure. */
+pub const E_ROUND_UP: i32 = 32
+
+/** Rounding down must land on a multiple of the alignment and never grow; exit code on failure. */
+pub const E_ROUND_DOWN: i32 = 33
+
+/** A fresh control block must carry its sentinel; exit code when it does not. */
+pub const E_CONTROL_MAGIC: i32 = 50
+
+/** Two live allocations must never share an address; exit code when they do. */
+pub const E_ALLOC_ALIAS: i32 = 51
+
+/** Every allocation must land on the arena's payload alignment; exit code when one does not. */
+pub const E_ALLOC_ALIGN: i32 = 52
+
+/** A region must reuse its current chunk until that chunk is full; exit code when it does not. */
+pub const E_ALLOC_SHARES_CHUNK: i32 = 53
+
+/** A request larger than the default chunk must get a chunk of its own; exit code otherwise. */
+pub const E_ALLOC_OVERSIZE: i32 = 54
+
+/** Handed-out memory must be writable across its extent; exit code when it is not. */
+pub const E_ALLOC_WRITABLE: i32 = 55
+
+/** A dropped region must leave the live-region registry; exit code when it does not. */
+pub const E_DROP_UNLINK: i32 = 56
+
+/** The root must be opened once and stay the same region; exit code when it does not. */
+pub const E_ROOT_STABLE: i32 = 57
+
+/** Every region must carry a distinct, never-reused generation; exit code when one repeats. */
+pub const E_REGION_GEN: i32 = 58
+
+/** After the termination sweep the registry and root must both be empty; exit code otherwise. */
+pub const E_FREE_ALL_EMPTY: i32 = 59
+
+/** A subtree drop must take the whole subtree; exit code when a descendant survives. */
+pub const E_SUBTREE_KEEPS: i32 = 60
+
+/** A subtree drop must take ONLY the subtree; exit code when a sibling disappears. */
+pub const E_SUBTREE_TAKES_SIBLING: i32 = 61
+
+/** A registration must be readable back; exit code when a lookup misses it. */
+pub const E_REGISTER_MISS: i32 = 62
+
+/** Re-registering an identifier must overwrite, not append; exit code otherwise. */
+pub const E_REGISTER_OVERWRITE: i32 = 63
+
+/** A lookup must climb the parent chain and a nearer binding must shadow; exit code otherwise. */
+pub const E_LOOKUP_CHAIN: i32 = 64
+
+/** A rewind must release exactly what was allocated after the checkpoint; exit code otherwise. */
+pub const E_REWIND_EXTENT: i32 = 65
+
+/** A commit must keep everything the matching push covered; exit code when it rewinds. */
+pub const E_COMMIT_KEEPS: i32 = 66
+
+/** Push and pop must stay balanced past the stack's depth; exit code when they do not. */
+pub const E_MARK_DEPTH: i32 = 67
+
+/** With the oracle off, a freed block must be reused; exit code when it is not. */
+pub const E_REUSE_OFF: i32 = 68
+
+/** With the oracle on, a freed block must be poisoned; exit code when it is not. */
+pub const E_POISON_MISSING: i32 = 69
+
+/** With the oracle on, a freed block must NEVER be reused; exit code when it is. */
+pub const E_POISON_REUSED: i32 = 70
+
+/** The chunk count must match the C twin's packing rule exactly; exit code when it does not. */
+pub const E_PACKING: i32 = 71
+
+/** A drop-and-reallocate cycle must return memory to the allocator; exit code when it does not. */
+pub const E_VOLUME_LEAK: i32 = 72
+
+/** Every block handed out under volume must be distinct and aligned; exit code otherwise. */
+pub const E_VOLUME_BLOCK: i32 = 73
+
+/**
+ * The META-POOL header free-list must reuse a dropped region's header for the next region; exit code
+ * when a drop-then-new region lands on a DIFFERENT header address, which a disabled free-list (a
+ * one-mmap-per-header footprint blow-up) would cause. This is the non-vacuous META-POOL assert.
+ */
+pub const E_METAPOOL_NO_REUSE: i32 = 74
+
+/** How many create-fill-drop cycles the volume proof runs. */
+pub const VOLUME_CYCLES: u64 = 400
+
+/** How many blocks each volume cycle allocates. */
+pub const VOLUME_BLOCKS: u64 = 32
+
+/** How many bytes each volume block asks for: eight to a default chunk, exactly. */
+pub const VOLUME_BLOCK_BYTES: u64 = 8192
+
+/** How few cycles may reuse the first cycle's chunk address before the run counts as leaking. */
+pub const VOLUME_REUSE_MAJORITY: u64 = 2
+
+/**
+ * Fails loudly when an arena invariant does not hold, exiting with the invariant's own code so a
+ * failure names itself.
+ *
+ * @param held  the invariant's truth value
+ * @param code  the exit code identifying this invariant, used only on failure
+ * @return      nothing
+ */
+pub fn demand(held: bool, code: i32) {
+    if held { return }
+    exit(code)
+}
+
+/**
+ * Counts the regions currently on the live-region registry — the observable the drop and sweep
+ * checks assert on.
+ *
+ * @param control  the control block's base address
+ * @return         how many regions the registry holds
+ */
+pub fn registry_count(control: u64): u64 {
+    var region = ctrl_get(control, CTRL_REGS)
+    var count: u64 = 0
+    loop {
+        if region == 0 { break }
+        count++
+        region = region_get(region, REGION_REG_NEXT)
+    }
+    count
+}
+
+/**
+ * Tests whether a region is currently on the live-region registry.
+ *
+ * @param control  the control block's base address
+ * @param wanted   the region to look for
+ * @return         true when the registry still holds it
+ */
+pub fn registry_holds(control: u64, wanted: u64): bool {
+    var region = ctrl_get(control, CTRL_REGS)
+    loop {
+        if region == 0 { break }
+        if region == wanted { return true }
+        region = region_get(region, REGION_REG_NEXT)
+    }
+    false
+}
+
+/**
+ * Counts the chunks a region holds — the observable that tells a bump that reused its chunk from one
+ * that grew a new one.
+ *
+ * @param control  the control block's base address
+ * @param region   the region to measure
+ * @return         how many chunks the region's list holds
+ */
+pub fn chunk_count(control: u64, region: u64): u64 {
+    var chunk = region_get(region, REGION_HEAD)
+    var count: u64 = 0
+    loop {
+        if chunk == 0 { break }
+        count++
+        chunk = chunk_get(chunk, CHUNK_NEXT)
+    }
+    count
+}
+
+/**
+ * Counts the regions the subtree of `root` still holds on the live registry.
+ *
+ * @param control  the control block's base address
+ * @param root     the subtree's root
+ * @return         how many live regions reach `root`
+ */
+pub fn subtree_live_count(control: u64, root: u64): u64 {
+    var region = ctrl_get(control, CTRL_REGS)
+    var count: u64 = 0
+    loop {
+        if region == 0 { break }
+        if region_reaches(region, root) { count++ }
+        region = region_get(region, REGION_REG_NEXT)
+    }
+    count
+}
+
+/**
+ * Demands a block is writable across its extent by storing a distinctive word at its base and near
+ * its end and reading each back — the check that catches a bump offset that ran past its chunk.
+ *
+ * @param block  the block's base address
+ * @param bytes  the block's size (at least one word)
+ * @return       nothing
+ */
+pub fn demand_writable(block: u64, bytes: u64) {
+    var last = block + round_down_align(bytes) - WORD
+    store_word(block, WRITABLE_PATTERN)
+    store_word(last, WRITABLE_PATTERN)
+    demand(load_word(block) == WRITABLE_PATTERN, E_ALLOC_WRITABLE)
+    demand(load_word(last) == WRITABLE_PATTERN, E_ALLOC_WRITABLE)
+}
+
+/**
+ * Writes a word, reads it back, and demands the value survived — the round trip that makes every
+ * chunk header and region field trustworthy.
+ *
+ * @param slot   the address to write and read
+ * @param value  the word to round-trip
+ * @return       nothing
+ */
+pub fn demand_word_roundtrip(slot: u64, value: u64) {
+    store_word(slot, value)
+    demand(load_word(slot) == value, E_WORD_ROUNDTRIP)
+}
+
+/**
+ * Demands a word write does not disturb the word next to it — `used` bleeding into `cap` is the
+ * corruption class this arena must never have, and it is invisible to a round-trip test alone.
+ *
+ * @param first  the first of two adjacent word slots
+ * @return       nothing
+ */
+pub fn demand_no_neighbour_bleed(first: u64) {
+    var second = first + WORD
+    store_word(first, 0)
+    store_word(second, 0)
+    store_word(first, 18446744073709551615)
+    demand(load_word(second) == 0, E_WORD_NEIGHBOUR)
+    store_word(second, 18446744073709551615)
+    store_word(first, 0)
+    demand(load_word(second) == 18446744073709551615, E_WORD_NEIGHBOUR)
+}
+
+/**
+ * Demands `round_up_align` never shrinks a value and always lands on the alignment.
+ *
+ * @param n  the value to round
+ * @return   nothing
+ */
+pub fn demand_round_up(n: u64) {
+    var r = round_up_align(n)
+    demand(r >= n, E_ROUND_UP)
+    demand(r % ARENA_ALIGN == 0, E_ROUND_UP)
+    demand(r - n < ARENA_ALIGN, E_ROUND_UP)
+}
+
+/**
+ * Demands `round_down_align` never grows a value and always lands on the alignment.
+ *
+ * @param n  the value to round
+ * @return   nothing
+ */
+pub fn demand_round_down(n: u64) {
+    var r = round_down_align(n)
+    demand(r <= n, E_ROUND_DOWN)
+    demand(r % ARENA_ALIGN == 0, E_ROUND_DOWN)
+    demand(n - r < ARENA_ALIGN, E_ROUND_DOWN)
+}
+
+/**
+ * Round-trips the word values that break a naive byte-splitting store: zero, one, the all-ones word,
+ * the alternating patterns, and a value whose top byte is set while the rest is not.
+ *
+ * @param slot  the address to write and read
+ * @return      nothing
+ */
+pub fn demand_word_edge_values(slot: u64) {
+    demand_word_roundtrip(slot, 0)
+    demand_word_roundtrip(slot, 1)
+    demand_word_roundtrip(slot, 255)
+    demand_word_roundtrip(slot, 256)
+    demand_word_roundtrip(slot, 18446744073709551615)
+    demand_word_roundtrip(slot, 12297829382473034410)
+    demand_word_roundtrip(slot, 6148914691236517205)
+    demand_word_roundtrip(slot, 18374686479671623680)
+    demand_word_roundtrip(slot, 65536)
+    demand_word_roundtrip(slot, 4294967296)
+}
+
+/**
+ * Demands the alignment rounding holds across the boundaries where an off-by-one hides.
+ *
+ * @return  nothing
+ */
+pub fn demand_alignment_rounding() {
+    demand_round_up(0)
+    demand_round_up(1)
+    demand_round_up(ARENA_ALIGN - 1)
+    demand_round_up(ARENA_ALIGN)
+    demand_round_up(ARENA_ALIGN + 1)
+    demand_round_up(DEFAULT_CHUNK)
+    demand_round_up(DEFAULT_CHUNK + 1)
+    demand_round_down(0)
+    demand_round_down(1)
+    demand_round_down(ARENA_ALIGN - 1)
+    demand_round_down(ARENA_ALIGN)
+    demand_round_down(ARENA_ALIGN + 1)
+    demand_round_down(DEFAULT_CHUNK + 1)
+}
+
+/**
+ * Runs the word-seam gate: alignment rounding, then word round trips over the values that break a
+ * naive byte split, and the neighbour-bleed check, over one raw mmap'd page. Nothing else in this
+ * arena can be trusted until this passes.
+ *
+ * @return  `GATE_OK` when the seam holds; any other exit names the invariant that broke
+ */
+pub fn run_word_gate(): i32 {
+    demand_alignment_rounding()
+    var page = raw_mmap(4096)
+    demand(page != 0, E_WORD_ROUNDTRIP)
+    var slot = page + WORD
+    demand_word_edge_values(slot)
+    demand_no_neighbour_bleed(slot)
+    raw_munmap(page, 4096)
+    GATE_OK
+}
+
+/**
+ * Demands the META-POOL header free-list reuses a dropped region's header for the next region: a
+ * drop-then-new region lands on the SAME header ADDRESS under a FRESH generation. Non-vacuous — with
+ * the free-list disabled the new region is a fresh bump cell at a different address, exit 74. This is
+ * the mmap-specific footprint keystone: one mmap per 64 B header would blow the footprint up 64x.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_metapool_reuses_header(control: u64) {
+    var a = region_new(control, 0)
+    var a_gen = region_get(a, REGION_GEN)
+    region_drop(control, a)
+    var b = region_new(control, 0)
+    demand(b == a, E_METAPOOL_NO_REUSE)
+    demand(region_get(b, REGION_GEN) > a_gen, E_METAPOOL_NO_REUSE)
+    region_drop(control, b)
+}
+
+/**
+ * Demands small allocations SHARE one chunk and never alias each other — the whole point of a bump
+ * allocator.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_small_allocs_share_a_chunk(control: u64) {
+    var region = region_new(control, 0)
+    var first = region_alloc(control, region, 24)
+    var second = region_alloc(control, region, 24)
+    var third = region_alloc(control, region, 1)
+    demand(first != second, E_ALLOC_ALIAS)
+    demand(second != third, E_ALLOC_ALIAS)
+    demand(first % ARENA_ALIGN == 0, E_ALLOC_ALIGN)
+    demand(second % ARENA_ALIGN == 0, E_ALLOC_ALIGN)
+    demand(third % ARENA_ALIGN == 0, E_ALLOC_ALIGN)
+    demand(second - first == ARENA_ALIGN * 2, E_ALLOC_SHARES_CHUNK)
+    demand(third - second == ARENA_ALIGN * 2, E_ALLOC_SHARES_CHUNK)
+    demand(chunk_count(control, region) == 1, E_ALLOC_SHARES_CHUNK)
+    demand_writable(first, 24)
+    region_drop(control, region)
+}
+
+/**
+ * Demands a zero-size request still yields a distinct address — the C twin's `n -> 1`.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_zero_size_is_distinct(control: u64) {
+    var region = region_new(control, 0)
+    var first = region_alloc(control, region, 0)
+    var second = region_alloc(control, region, 0)
+    demand(first != 0, E_ALLOC_ALIAS)
+    demand(first != second, E_ALLOC_ALIAS)
+    region_drop(control, region)
+}
+
+/**
+ * Demands a request larger than the default chunk gets a chunk sized to it, prepended so the ordinary
+ * request order stays a LIFO.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_oversize_gets_its_own_chunk(control: u64) {
+    var region = region_new(control, 0)
+    var small = region_alloc(control, region, 32)
+    var huge = region_alloc(control, region, DEFAULT_CHUNK * 2)
+    demand(chunk_count(control, region) == 2, E_ALLOC_OVERSIZE)
+    demand(huge != small, E_ALLOC_ALIAS)
+    demand(huge % ARENA_ALIGN == 0, E_ALLOC_ALIGN)
+    var head = region_get(region, REGION_HEAD)
+    demand(chunk_get(head, CHUNK_CAP) == DEFAULT_CHUNK * 2, E_ALLOC_OVERSIZE)
+    demand_writable(huge, DEFAULT_CHUNK * 2)
+    region_drop(control, region)
+}
+
+/**
+ * Demands a region that outgrows its chunk prepends a new one and keeps allocating — the volume path.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_region_grows_past_one_chunk(control: u64) {
+    var region = region_new(control, 0)
+    var block = DEFAULT_CHUNK / 8
+    var previous: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= 20 { break }
+        var got = region_alloc(control, region, block)
+        demand(got != 0, E_ALLOC_ALIAS)
+        demand(got != previous, E_ALLOC_ALIAS)
+        demand(got % ARENA_ALIGN == 0, E_ALLOC_ALIGN)
+        demand_writable(got, block)
+        previous = got
+        i++
+    }
+    demand(chunk_count(control, region) >= 3, E_ALLOC_OVERSIZE)
+    region_drop(control, region)
+}
+
+/**
+ * Demands the root is opened once and stays the same region, and that every region carries a distinct
+ * generation stamp.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_root_and_generations(control: u64) {
+    var root = region_root(control)
+    demand(root == region_root(control), E_ROOT_STABLE)
+    demand(region_get(root, REGION_PARENT) == 0, E_ROOT_STABLE)
+    var a = region_new(control, 0)
+    var b = region_new(control, 0)
+    var root_gen = region_get(root, REGION_GEN)
+    var a_gen = region_get(a, REGION_GEN)
+    var b_gen = region_get(b, REGION_GEN)
+    demand(root_gen != 0, E_REGION_GEN)
+    demand(a_gen > root_gen, E_REGION_GEN)
+    demand(b_gen > a_gen, E_REGION_GEN)
+    region_drop(control, a)
+    var c = region_new(control, 0)
+    demand(region_get(c, REGION_GEN) > b_gen, E_REGION_GEN)
+    region_drop(control, b)
+    region_drop(control, c)
+}
+
+/**
+ * Demands a drop unlinks its region from the registry — from the head, the middle, and the tail.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_drop_unlinks_everywhere(control: u64) {
+    var before = registry_count(control)
+    var first = region_new(control, 0)
+    var middle = region_new(control, 0)
+    var last = region_new(control, 0)
+    demand(registry_count(control) == before + 3, E_DROP_UNLINK)
+    region_drop(control, middle)
+    demand(!registry_holds(control, middle), E_DROP_UNLINK)
+    demand(registry_holds(control, first), E_DROP_UNLINK)
+    demand(registry_holds(control, last), E_DROP_UNLINK)
+    region_drop(control, last)
+    demand(!registry_holds(control, last), E_DROP_UNLINK)
+    region_drop(control, first)
+    demand(registry_count(control) == before, E_DROP_UNLINK)
+    region_drop(control, 0)
+}
+
+/**
+ * Demands the termination sweep empties the registry and forgets the root, and that a second sweep is
+ * a no-op rather than a double free.
+ *
+ * @return  nothing
+ */
+pub fn demand_free_all_is_idempotent() {
+    var control = control_new()
+    var root = region_root(control)
+    _ = region_alloc(control, root, 100)
+    _ = region_new(control, root)
+    _ = region_new(control, 0)
+    demand(registry_count(control) == 3, E_FREE_ALL_EMPTY)
+    regions_free_all(control)
+    demand(registry_count(control) == 0, E_FREE_ALL_EMPTY)
+    demand(ctrl_get(control, CTRL_ROOT) == 0, E_FREE_ALL_EMPTY)
+    regions_free_all(control)
+    demand(registry_count(control) == 0, E_FREE_ALL_EMPTY)
+    control_free(control)
+}
+
+/**
+ * Demands a subtree drop takes the WHOLE subtree and NOTHING else — a three-level subtree beside an
+ * independent sibling tree; dropping the subtree's root leaves the sibling untouched and removes
+ * every descendant, including the grandchild two hops down.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_subtree_drop_is_exact(control: u64) {
+    var root = region_root(control)
+    var branch = region_new(control, root)
+    var child = region_new(control, branch)
+    var grandchild = region_new(control, child)
+    var sibling = region_new(control, root)
+    var cousin = region_new(control, sibling)
+    var orphan = region_new(control, 0)
+    _ = region_alloc(control, grandchild, 1000)
+    _ = region_alloc(control, cousin, 1000)
+    demand(subtree_live_count(control, branch) == 3, E_SUBTREE_KEEPS)
+    region_drop_subtree(control, branch)
+    demand(subtree_live_count(control, branch) == 0, E_SUBTREE_KEEPS)
+    demand(!registry_holds(control, child), E_SUBTREE_KEEPS)
+    demand(!registry_holds(control, grandchild), E_SUBTREE_KEEPS)
+    demand(registry_holds(control, sibling), E_SUBTREE_TAKES_SIBLING)
+    demand(registry_holds(control, cousin), E_SUBTREE_TAKES_SIBLING)
+    demand(registry_holds(control, orphan), E_SUBTREE_TAKES_SIBLING)
+    demand(registry_holds(control, root), E_SUBTREE_TAKES_SIBLING)
+    region_drop_subtree(control, sibling)
+    demand(!registry_holds(control, cousin), E_SUBTREE_KEEPS)
+    region_drop(control, orphan)
+    region_drop_subtree(control, 0)
+}
+
+/**
+ * Demands the per-region registry stores, overwrites and resolves, and that overwriting does not grow
+ * the table.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_registry_stores_and_overwrites(control: u64) {
+    var region = region_new(control, 0)
+    region_register(control, region, 7, 1000)
+    region_register(control, region, 9, 2000)
+    demand(region_lookup(region, 7) == 1000, E_REGISTER_MISS)
+    demand(region_lookup(region, 9) == 2000, E_REGISTER_MISS)
+    demand(region_lookup(region, 8) == 0, E_REGISTER_MISS)
+    demand(region_get(region, REGION_NENTRIES) == 2, E_REGISTER_OVERWRITE)
+    region_register(control, region, 7, 1001)
+    demand(region_lookup(region, 7) == 1001, E_REGISTER_OVERWRITE)
+    demand(region_get(region, REGION_NENTRIES) == 2, E_REGISTER_OVERWRITE)
+    region_register(control, region, 0, 0)
+    region_drop(control, region)
+}
+
+/**
+ * Demands the entry table survives its growth steps: more registrations than the first capacity must
+ * all still resolve, which proves the doubling carried the old contents over.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_registry_survives_growth(control: u64) {
+    var region = region_new(control, 0)
+    var i: u64 = 1
+    loop {
+        if i > 20 { break }
+        region_register(control, region, i, i * 100)
+        i++
+    }
+    demand(region_get(region, REGION_NENTRIES) == 20, E_REGISTER_MISS)
+    var k: u64 = 1
+    loop {
+        if k > 20 { break }
+        demand(region_lookup(region, k) == k * 100, E_REGISTER_MISS)
+        k++
+    }
+    region_drop(control, region)
+}
+
+/**
+ * Demands a lookup climbs the parent chain, a nearer binding shadows a farther one, and a lookup on a
+ * zero region resolves to nothing rather than reading through it.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_lookup_climbs_and_shadows(control: u64) {
+    var root = region_root(control)
+    var middle = region_new(control, root)
+    var leaf = region_new(control, middle)
+    region_register(control, root, 5, 500)
+    region_register(control, root, 6, 600)
+    region_register(control, middle, 6, 660)
+    demand(region_lookup(leaf, 5) == 500, E_LOOKUP_CHAIN)
+    demand(region_lookup(leaf, 6) == 660, E_LOOKUP_CHAIN)
+    demand(region_lookup(root, 6) == 600, E_LOOKUP_CHAIN)
+    demand(region_lookup(leaf, 4) == 0, E_LOOKUP_CHAIN)
+    demand(region_lookup(0, 5) == 0, E_LOOKUP_CHAIN)
+    region_drop_subtree(control, middle)
+}
+
+/**
+ * Demands a rewind releases exactly what was allocated after its checkpoint: the chunk count and the
+ * bump cursor both return, and the very next allocation lands back on the address the checkpoint
+ * left free.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_rewind_extent(control: u64) {
+    var root = region_root(control)
+    var kept = region_alloc(control, root, 64)
+    var chunks_before = chunk_count(control, root)
+    var used_before = chunk_get(region_get(root, REGION_HEAD), CHUNK_USED)
+    checkpoint_push(control)
+    var i: u64 = 0
+    loop {
+        if i >= 12 { break }
+        _ = region_alloc(control, root, DEFAULT_CHUNK / 2)
+        i++
+    }
+    demand(chunk_count(control, root) > chunks_before, E_REWIND_EXTENT)
+    checkpoint_pop(control)
+    demand(chunk_count(control, root) == chunks_before, E_REWIND_EXTENT)
+    demand(chunk_get(region_get(root, REGION_HEAD), CHUNK_USED) == used_before, E_REWIND_EXTENT)
+    var after = region_alloc(control, root, 64)
+    demand(after == kept + 64, E_REWIND_EXTENT)
+    demand_writable(kept, 64)
+}
+
+/**
+ * Demands a commit keeps everything its matching push covered, and that push and pop stay balanced
+ * past the stack's depth: a push deeper than the stack records nothing, so its pop must not rewind to
+ * a shallower scope's checkpoint.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_commit_and_depth(control: u64) {
+    var root = region_root(control)
+    checkpoint_push(control)
+    var live = region_alloc(control, root, 128)
+    var chunks = chunk_count(control, root)
+    checkpoint_commit(control)
+    demand(chunk_count(control, root) == chunks, E_COMMIT_KEEPS)
+    demand(ctrl_get(control, CTRL_MSP) == 0, E_COMMIT_KEEPS)
+    demand_writable(live, 128)
+    var deep_target = chunk_count(control, root)
+    var pushed: u64 = 0
+    loop {
+        if pushed >= MARK_SLOTS + 4 { break }
+        checkpoint_push(control)
+        pushed++
+    }
+    demand(ctrl_get(control, CTRL_MSP) == MARK_SLOTS + 4, E_MARK_DEPTH)
+    var popped: u64 = 0
+    loop {
+        if popped >= MARK_SLOTS + 4 { break }
+        checkpoint_pop(control)
+        popped++
+    }
+    demand(ctrl_get(control, CTRL_MSP) == 0, E_MARK_DEPTH)
+    demand(chunk_count(control, root) == deep_target, E_MARK_DEPTH)
+    checkpoint_pop(control)
+    checkpoint_commit(control)
+    demand(ctrl_get(control, CTRL_MSP) == 0, E_MARK_DEPTH)
+}
+
+/**
+ * Demands that with the oracle OFF a freed root block is parked and handed back to the next request
+ * of its class — the reuse that stops a never-dropped region's footprint from growing.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_reuse_when_oracle_off(control: u64) {
+    paranoid_set(control, false)
+    demand(!paranoid_enabled(control), E_REUSE_OFF)
+    var root = region_root(control)
+    var block = region_alloc(control, root, 96)
+    free_block(control, block, 96)
+    demand(region_alloc(control, root, 96) == block, E_REUSE_OFF)
+    var large = region_alloc(control, root, FREE_BIN_MAX_BYTES * 2)
+    free_block(control, large, FREE_BIN_MAX_BYTES * 2)
+    demand(region_alloc(control, root, FREE_BIN_MAX_BYTES * 2) == large, E_REUSE_OFF)
+}
+
+/**
+ * Demands that with the oracle ON a freed root block is POISONED and NEVER handed back, and that a
+ * block too small to hold a freenode is left untouched. This is the memory oracle that guards the
+ * free-old decree: arena reuse is invisible to a sanitizer, so without the poison a wrong linearity
+ * proof would corrupt in silence.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_poison_when_oracle_on(control: u64) {
+    paranoid_set(control, true)
+    demand(paranoid_enabled(control), E_POISON_MISSING)
+    var root = region_root(control)
+    var block = region_alloc(control, root, 96)
+    free_block(control, block, 96)
+    demand(load_word(block) == POISON_WORD, E_POISON_MISSING)
+    demand(load_word(block + 88) == POISON_WORD, E_POISON_MISSING)
+    demand(region_alloc(control, root, 96) != block, E_POISON_REUSED)
+    var short = region_alloc(control, root, 8)
+    store_word(short, 0)
+    free_block(control, short, 8)
+    demand(load_word(short) == 0, E_POISON_MISSING)
+    paranoid_set(control, false)
+}
+
+/**
+ * How many allocations of `size` bytes a default chunk holds, under the C twin's rule: the request is
+ * rounded up to the alignment and the chunk is bump-filled from offset zero.
+ *
+ * @param size  the requested block size in bytes
+ * @return      how many such blocks one default chunk serves, at least one
+ */
+pub fn blocks_per_default_chunk(size: u64): u64 {
+    var aligned = round_up_align(if size == 0 { 1 } else { size })
+    if aligned >= DEFAULT_CHUNK { return 1 }
+    DEFAULT_CHUNK / aligned
+}
+
+/**
+ * How many chunks `count` allocations of `size` bytes must occupy — the prediction the measured chunk
+ * list is compared against, computed from the rule rather than a previous run.
+ *
+ * @param count  how many blocks are allocated
+ * @param size   each block's requested size in bytes
+ * @return       the number of chunks the region must hold afterwards
+ */
+pub fn predicted_chunks(count: u64, size: u64): u64 {
+    var per_chunk = blocks_per_default_chunk(size)
+    var whole = count / per_chunk
+    if count % per_chunk == 0 { return whole }
+    whole + 1
+}
+
+/**
+ * Demands a fresh region's chunk list matches the prediction after `count` allocations of `size`, and
+ * that every block is distinct from the one before it and lands on the alignment.
+ *
+ * @param control  the control block's base address
+ * @param count    how many blocks to allocate
+ * @param size     each block's requested size in bytes
+ * @return         nothing
+ */
+pub fn demand_packing(control: u64, count: u64, size: u64) {
+    var region = region_new(control, 0)
+    var previous: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= count { break }
+        var block = region_alloc(control, region, size)
+        demand(block != previous, E_VOLUME_BLOCK)
+        demand(block % ARENA_ALIGN == 0, E_VOLUME_BLOCK)
+        previous = block
+        i++
+    }
+    demand(chunk_count(control, region) == predicted_chunks(count, size), E_PACKING)
+    region_drop(control, region)
+}
+
+/**
+ * Runs one create-fill-drop cycle and reports the first chunk's base address, so the caller can see
+ * whether a dropped region's memory really goes back to the kernel.
+ *
+ * @param control  the control block's base address
+ * @return         the address of the region's last chunk base, or 0 when it allocated none
+ */
+pub fn volume_cycle(control: u64): u64 {
+    var region = region_new(control, 0)
+    var i: u64 = 0
+    loop {
+        if i >= VOLUME_BLOCKS { break }
+        var block = region_alloc(control, region, VOLUME_BLOCK_BYTES)
+        demand(block != 0, E_VOLUME_BLOCK)
+        i++
+    }
+    var head = region_get(region, REGION_HEAD)
+    region_drop(control, region)
+    head
+}
+
+/**
+ * Demands that allocating, dropping and reallocating in volume returns memory rather than
+ * accumulating it: most cycles land on the very chunk address the first cycle used, which only
+ * happens if each drop's `munmap` really handed its pages back and the next `mmap` of the same size
+ * reused them. A leaking arena would move to a fresh address every cycle and match none.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn demand_volume_reclaims(control: u64) {
+    var first = volume_cycle(control)
+    var matched: u64 = 0
+    var cycle: u64 = 1
+    loop {
+        if cycle >= VOLUME_CYCLES { break }
+        if volume_cycle(control) == first { matched++ }
+        cycle++
+    }
+    demand(matched * VOLUME_REUSE_MAJORITY > VOLUME_CYCLES, E_VOLUME_LEAK)
+}
+
+/**
+ * Runs the volume gate: the packing prediction across the sizes where a bump allocator's rounding
+ * shows, then the drop-and-reallocate cycle that proves the pages come back.
+ *
+ * @return  `GATE_OK` when the volume behaviour matches; any other exit names the invariant
+ */
+pub fn run_volume_gate(): i32 {
+    var control = control_new()
+    demand_packing(control, 100, 1)
+    demand_packing(control, 100, ARENA_ALIGN)
+    demand_packing(control, 100, ARENA_ALIGN + 1)
+    demand_packing(control, 500, 64)
+    demand_packing(control, 300, 1024)
+    demand_packing(control, 200, 4096)
+    demand_packing(control, 40, DEFAULT_CHUNK / 2)
+    demand_packing(control, 8, DEFAULT_CHUNK)
+    demand_packing(control, 8, DEFAULT_CHUNK * 3)
+    demand_volume_reclaims(control)
+    control_free(control)
+    GATE_OK
+}
+
+/**
+ * Runs the arena's core gate over one control block: the META-POOL header reuse, small-alloc chunk
+ * sharing, zero-size distinctness, the oversize exclusive chunk, multi-chunk growth, the root and
+ * generation stamps, and drop unlinking — then the idempotent termination sweep on its own block.
+ *
+ * @return  `GATE_OK` when the core holds; any other exit names the invariant that broke
+ */
+pub fn run_core_gate(): i32 {
+    var control = control_new()
+    demand(control_is_live(control), E_CONTROL_MAGIC)
+    demand_metapool_reuses_header(control)
+    demand_small_allocs_share_a_chunk(control)
+    demand_zero_size_is_distinct(control)
+    demand_oversize_gets_its_own_chunk(control)
+    demand_region_grows_past_one_chunk(control)
+    demand_root_and_generations(control)
+    demand_drop_unlinks_everywhere(control)
+    control_free(control)
+    demand_free_all_is_idempotent()
+    GATE_OK
+}
+
+/**
+ * Runs the full behavioural gate over one control block: the subtree sweep, the per-region registry,
+ * the checkpoint stack past depth 64, and both halves of the memory oracle.
+ *
+ * @return  `GATE_OK` when the full arena holds; any other exit names the invariant that broke
+ */
+pub fn run_full_gate(): i32 {
+    var control = control_new()
+    demand_subtree_drop_is_exact(control)
+    demand_registry_stores_and_overwrites(control)
+    demand_registry_survives_growth(control)
+    demand_lookup_climbs_and_shadows(control)
+    demand_rewind_extent(control)
+    demand_commit_and_depth(control)
+    demand_reuse_when_oracle_off(control)
+    demand_poison_when_oracle_on(control)
+    control_free(control)
+    GATE_OK
+}
+
+/**
+ * Runs the complete arena-over-mmap gate: the word seam, the core, the full behavioural gate, and the
+ * volume proof, stopping at the first invariant that breaks. Every check asserts an observable — an
+ * address, a chunk count, a registry membership, a poisoned word — never the mere absence of a crash.
+ *
+ * @return  `GATE_OK` (42) when the whole arena holds; any other exit names the invariant that broke
+ */
+pub fn run_all_gates(): i32 {
+    var word = run_word_gate()
+    if word != GATE_OK { return word }
+    var core = run_core_gate()
+    if core != GATE_OK { return core }
+    var full = run_full_gate()
+    if full != GATE_OK { return full }
+    run_volume_gate()
+}
