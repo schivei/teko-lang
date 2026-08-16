@@ -1,0 +1,87 @@
+/**
+ * memchan_make — open an F2-resident in-process channel of `elem_size`-byte elements (`bounds==0`
+ * unbounded). The thin Teko binder over the C0b runtime primitive (`tk_memchan_make_u`).
+ *
+ * @param elem_size  the fixed byte width of each element
+ * @param bounds     the slot capacity, or 0 for unbounded
+ * @return           the channel handle (an F2 pointer as a u64)
+ * @since 0.3.1 §10
+ */
+pub extern fn memchan_make(elem_size: u64, bounds: u64): u64 = "tk_memchan_make_u" from "teko_rt"
+
+/**
+ * memchan_send — copy one element (read from the address `elem`) into the channel's FIFO tail; blocks
+ * while a bounded channel is full.
+ *
+ * @param ch    the channel handle
+ * @param elem  the address of the element to send (from `uptr::__unwrap`)
+ * @since 0.3.1 §10
+ */
+pub extern fn memchan_send(ch: u64, elem: uptr) = "tk_memchan_send_u" from "teko_rt"
+
+/**
+ * memchan_recv — copy the channel's FIFO head into the address `out`; blocks while empty.
+ *
+ * @param ch   the channel handle
+ * @param out  the address to receive into (from `uptr::__unwrap`)
+ * @return     1 when an element was delivered, 0 when the channel is closed and drained
+ * @since 0.3.1 §10
+ */
+pub extern fn memchan_recv(ch: u64, out: uptr): i64 = "tk_memchan_recv_u" from "teko_rt"
+
+/**
+ * memchan_close — mark the channel closed and wake every blocked end; the drained reader then
+ * observes the closed edge.
+ *
+ * @param ch  the channel handle
+ * @since 0.3.1 §10
+ */
+pub extern fn memchan_close(ch: u64) = "tk_memchan_close_u" from "teko_rt"
+
+/**
+ * memchan_end — close and release the channel's ring buffer and pthread objects.
+ *
+ * @param ch  the channel handle
+ * @since 0.3.1 §10
+ */
+pub extern fn memchan_end(ch: u64) = "tk_memchan_end_u" from "teko_rt"
+
+/**
+ * producer — the spawned worker half: send `n` ascending i64 values (0..n-1) into `ch`, then close.
+ * Each value's address is taken with `uptr::__unwrap<i64>` and the runtime copies its 8 bytes into
+ * the FIFO. Fire-and-forget; the reader's drain-to-Closed is the finish edge.
+ *
+ * @param ch  the channel handle (crossed the spawn boundary by copy)
+ * @param n   how many values to send
+ * @since 0.3.1 §10
+ */
+pub fn producer(ch: u64, n: i64) {
+    var i: i64 = 0
+    loop {
+        if i >= n { break }
+        var v = i
+        memchan_send(ch, uptr::__unwrap<i64>(v))
+        i = i + 1
+    }
+    memchan_close(ch)
+}
+
+/**
+ * consume_sum — the main-thread reader half: pop every value from `ch` until the Closed edge, summing
+ * them. Blocks on each recv until a value arrives or the channel is closed and drained.
+ *
+ * @param ch  the channel handle
+ * @return    the sum of every value received before Closed
+ * @since 0.3.1 §10
+ */
+pub fn consume_sum(ch: u64): i64 {
+    var sum: i64 = 0
+    var running = true
+    loop {
+        if !running { break }
+        var out: i64 = 0
+        var r = memchan_recv(ch, uptr::__unwrap<i64>(out))
+        if r == 0 { running = false } else { sum = sum + out }
+    }
+    sum
+}

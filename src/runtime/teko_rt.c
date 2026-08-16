@@ -2710,6 +2710,9 @@ void tk_memchan_send_u(uint64_t ch, uint64_t elem_addr) {
 int64_t tk_memchan_recv_u(uint64_t ch, uint64_t out_addr) {
     return (int64_t)tk_memchan_recv((tk_memchan *)(uintptr_t)ch, (void *)(uintptr_t)out_addr);
 }
+void tk_memchan_close_u(uint64_t ch) {
+    tk_memchan_close((tk_memchan *)(uintptr_t)ch);
+}
 void tk_memchan_end_u(uint64_t ch) {
     tk_memchan_end((tk_memchan *)(uintptr_t)ch);
 }
@@ -2919,12 +2922,16 @@ void tk_oschan_end(tk_oschan *ch) {
 uint64_t tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len) {
     return (uint64_t)(uintptr_t)tk_oschan_make(elem_size, bounds, (const char *)(uintptr_t)key_addr, key_len);
 }
+uint64_t tk_oschan_make_str(uint64_t elem_size, uint64_t bounds, tk_str key) {
+    return (uint64_t)(uintptr_t)tk_oschan_make(elem_size, bounds, (const char *)key.ptr, (uint64_t)key.len);
+}
 int64_t tk_oschan_send_u(uint64_t ch, uint64_t elem_addr) {
     return (int64_t)tk_oschan_send((tk_oschan *)(uintptr_t)ch, (const void *)(uintptr_t)elem_addr);
 }
 int64_t tk_oschan_recv_u(uint64_t ch, uint64_t out_addr) {
     return (int64_t)tk_oschan_recv((tk_oschan *)(uintptr_t)ch, (void *)(uintptr_t)out_addr);
 }
+void tk_oschan_close_u(uint64_t ch) { tk_oschan_close((tk_oschan *)(uintptr_t)ch); }
 void tk_oschan_end_u(uint64_t ch) { tk_oschan_end((tk_oschan *)(uintptr_t)ch); }
 
 // The content pattern each fan-in record's third word must hold — a function of writer id and seq so
@@ -2988,8 +2995,12 @@ void tk_oschan_end(tk_oschan *ch) { (void)ch; tk_panic("oschan: not supported on
 uint64_t tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len) {
     (void)elem_size; (void)bounds; (void)key_addr; (void)key_len; tk_panic("oschan: not supported on Windows yet"); return 0;
 }
+uint64_t tk_oschan_make_str(uint64_t elem_size, uint64_t bounds, tk_str key) {
+    (void)elem_size; (void)bounds; (void)key; tk_panic("oschan: not supported on Windows yet"); return 0;
+}
 int64_t tk_oschan_send_u(uint64_t ch, uint64_t elem_addr) { (void)ch; (void)elem_addr; tk_panic("oschan: not supported on Windows yet"); return -1; }
 int64_t tk_oschan_recv_u(uint64_t ch, uint64_t out_addr) { (void)ch; (void)out_addr; tk_panic("oschan: not supported on Windows yet"); return 0; }
+void tk_oschan_close_u(uint64_t ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
 void tk_oschan_end_u(uint64_t ch) { (void)ch; tk_panic("oschan: not supported on Windows yet"); }
 uint64_t tk_oschan_selftest(int64_t w, int64_t r) { (void)w; (void)r; tk_panic("oschan: not supported on Windows yet"); return 0; }
 #endif

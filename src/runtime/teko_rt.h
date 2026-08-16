@@ -276,6 +276,7 @@ uint64_t    tk_memchan_selftest(int64_t n);
 uint64_t    tk_memchan_make_u(uint64_t elem_size, uint64_t bounds);   // handle as a u64
 void        tk_memchan_send_u(uint64_t ch, uint64_t elem_addr);       // elem read from the u64 address
 int64_t     tk_memchan_recv_u(uint64_t ch, uint64_t out_addr);        // 1=value, 0=closed+drained
+void        tk_memchan_close_u(uint64_t ch);                          // mark closed, wake blocked ends
 void        tk_memchan_end_u(uint64_t ch);                            // close + release
 
 // (§10 C0c) tk_oschan — an AF_UNIX SOCK_DGRAM MPSC transport: ONE reader socket bound to a
@@ -309,8 +310,12 @@ uint64_t    tk_oschan_selftest(int64_t w, int64_t r);
 // The u64-HANDLE ABI the Teko `extern fn` surface binds to (the tk_region_new_u convention). The key
 // bytes travel as a u64 address + a length so a Teko `str` reaches the C `const char *`.
 uint64_t    tk_oschan_make_u(uint64_t elem_size, uint64_t bounds, uint64_t key_addr, uint64_t key_len);
+// tk_oschan_make_str — the same make with the key delivered as a Teko `str` fat pointer (the natural
+// binder for a `str` channel key), so a Teko caller needs no manual byte-address plumbing.
+uint64_t    tk_oschan_make_str(uint64_t elem_size, uint64_t bounds, tk_str key);
 int64_t     tk_oschan_send_u(uint64_t ch, uint64_t elem_addr);        // 0=accept, -1=full (bounded)
 int64_t     tk_oschan_recv_u(uint64_t ch, uint64_t out_addr);         // 1=value, 0=closed
+void        tk_oschan_close_u(uint64_t ch);                           // send the CLOSED sentinel
 void        tk_oschan_end_u(uint64_t ch);                             // close + tear down
 
 // (§10 C5) tk_waitgroup — a MANUAL counter with a blocking wait, F2-resident (survives producing
