@@ -1,0 +1,435 @@
+/**
+ * Tests for `teko::encoding::yaml` — the YAML 1.2 practical-subset decoder + encoder. Covers block
+ * mappings/sequences (including the compact `- key: value` / `- - item` forms), flow collections,
+ * plain/single-/double-quoted scalars, literal/folded block scalars with every chomping indicator,
+ * comments, the core-schema scalar resolution rules, anchors/aliases, multi-document streams, the
+ * documented DEFERRALS (checked errors, never mis-parses), and value round-tripping through the
+ * encoder. This file lives under `teko::encoding::yaml` (namespace = directory), so the functions
+ * under test are called bare, mirroring `teko::encoding::cbor::cbor_test.tkt`'s convention.
+ *
+ * CROSS-CHECK BASIS. Every expected value below that a plain PyYAML `yaml.safe_load` call could
+ * also produce was verified against PyYAML 6.0.1 (`python3 -c "import yaml; print(yaml.__version__)"`
+ * -> `6.0.1`) directly. Two cases are DELIBERATELY not matched to PyYAML's output, both documented at
+ * their test site: `merge_key_is_not_expanded` (PyYAML expands YAML 1.1's `<<` merge key; this
+ * subset stores it as a literal `"<<"` string key — a named DEFERRAL, see `yaml_parse.tks`'s module
+ * doc) and `octal_uses_0o_not_leading_zero` (PyYAML's YAML-1.1 resolver does not recognize `0o52` as
+ * an integer at all — it stays a string — while this unit's YAML-1.2 core schema resolves it to
+ * `42`; see `yaml_parse.tks`'s NAMED SEAM #2).
+ */
+
+/**
+ * Unwraps a `YamlValue | error` decode result — a failure in a "should succeed" test is itself a
+ * test failure (reported via `teko::assert::is_true(false)`, then a `Null` placeholder so the
+ * caller can keep going).
+ *
+ * @param result  the decode outcome under test
+ * @return        the decoded value on success, or a `Null` placeholder (after failing) on error
+ */
+fn expect_value(result: YamlValue | error): YamlValue {
+    match result {
+        YamlValue as v => v
+        error => { teko::assert::is_true(false); yaml_null() }
+    }
+}
+
+/**
+ * Asserts that a decode result is an `error` (a "should fail" case).
+ *
+ * @param result  the decode outcome under test
+ */
+fn expect_error(result: YamlValue | error) {
+    match result {
+        YamlValue => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * Unwraps a `yaml_get`/`yaml_index` lookup — a miss in a "should be present" test is itself a test
+ * failure.
+ *
+ * @param result  the lookup outcome under test
+ * @return        the value on success, or a `Null` placeholder (after failing) on a miss
+ */
+fn expect_present(result: YamlValue | null): YamlValue {
+    match result {
+        YamlValue as v => v
+        null => { teko::assert::is_true(false); yaml_null() }
+    }
+}
+
+/**
+ * Block mappings decode with correctly typed leaf values, and nested nodes resolve one level at a
+ * time via `yaml_get` (cross-checked against PyYAML 6.0.1).
+ */
+#test
+fn block_mapping_decodes_typed_leaves() {
+    var v = expect_value(parse_yaml("a: 1\nb: two\nc: true\n"))
+    teko::assert::is_true(v.kind == YamlKind::Map)
+    var a = expect_present(yaml_get(v, "a"))
+    teko::assert::is_true(a.kind == YamlKind::Int)
+    teko::assert::eq_i64(a.int_val, 1)
+    var b = expect_present(yaml_get(v, "b"))
+    teko::assert::eq_str(b.text, "two")
+    var c = expect_present(yaml_get(v, "c"))
+    teko::assert::is_true(c.kind == YamlKind::Bool)
+    teko::assert::is_true(c.bool_val)
+}
+
+/**
+ * Block sequences decode in source order, indexable via `yaml_index` (cross-checked).
+ */
+#test
+fn block_sequence_decodes_in_order() {
+    var v = expect_value(parse_yaml("- 1\n- 2\n- 3\n"))
+    teko::assert::is_true(v.kind == YamlKind::Seq)
+    teko::assert::len_eq(v.items.len, 3)
+    teko::assert::eq_i64(expect_present(yaml_index(v, 0)).int_val, 1)
+    teko::assert::eq_i64(expect_present(yaml_index(v, 2)).int_val, 3)
+}
+
+/**
+ * A nested block document (mapping-of-sequence, mapping-of-mapping) decodes correctly — the shape
+ * of a small real-world config file (cross-checked).
+ */
+#test
+fn nested_block_config_decodes() {
+    var v = expect_value(parse_yaml("server:\n  host: localhost\n  port: 8080\n  tls: false\nusers:\n  - alice\n  - bob\ntimeout: 30.5\n"))
+    var server = expect_present(yaml_get(v, "server"))
+    teko::assert::is_true(server.kind == YamlKind::Map)
+    teko::assert::eq_str(expect_present(yaml_get(server, "host")).text, "localhost")
+    teko::assert::eq_i64(expect_present(yaml_get(server, "port")).int_val, 8080)
+    teko::assert::is_true(!expect_present(yaml_get(server, "tls")).bool_val)
+    var users = expect_present(yaml_get(v, "users"))
+    teko::assert::len_eq(users.items.len, 2)
+    teko::assert::eq_str(expect_present(yaml_index(users, 0)).text, "alice")
+    teko::assert::eq_f64(expect_present(yaml_get(v, "timeout")).float_val, 30.5, 0.0)
+}
+
+/**
+ * A block sequence of block mappings (the "list of records" shape) decodes each entry — the compact
+ * `- key: value` form's first entry, plus its continuation entries at the same column (cross-checked).
+ */
+#test
+fn sequence_of_mappings_decodes() {
+    var v = expect_value(parse_yaml("- id: 1\n  name: alpha\n  active: true\n- id: 2\n  name: beta\n  active: false\n"))
+    teko::assert::len_eq(v.items.len, 2)
+    var e0 = expect_present(yaml_index(v, 0))
+    teko::assert::is_true(e0.kind == YamlKind::Map)
+    teko::assert::eq_str(expect_present(yaml_get(e0, "name")).text, "alpha")
+    var e1 = expect_present(yaml_index(v, 1))
+    teko::assert::is_true(!expect_present(yaml_get(e1, "active")).bool_val)
+}
+
+/**
+ * A compact nested sequence (`- - item`) decodes as a sequence of sequences (cross-checked).
+ */
+#test
+fn compact_nested_sequence_decodes() {
+    var v = expect_value(parse_yaml("- - 1\n  - 2\n- 3\n"))
+    teko::assert::len_eq(v.items.len, 2)
+    var inner = expect_present(yaml_index(v, 0))
+    teko::assert::is_true(inner.kind == YamlKind::Seq)
+    teko::assert::len_eq(inner.items.len, 2)
+    teko::assert::eq_i64(expect_present(yaml_index(v, 1)).int_val, 3)
+}
+
+/**
+ * Flow mappings and sequences decode with free interior whitespace, and nest freely into each other
+ * (cross-checked).
+ */
+#test
+fn flow_collections_nest() {
+    var v = expect_value(parse_yaml("a: [1, [2, 3], {b: 4}]\n"))
+    var a = expect_present(yaml_get(v, "a"))
+    teko::assert::len_eq(a.items.len, 3)
+    var inner_seq = expect_present(yaml_index(a, 1))
+    teko::assert::is_true(inner_seq.kind == YamlKind::Seq)
+    var inner_map = expect_present(yaml_index(a, 2))
+    teko::assert::is_true(inner_map.kind == YamlKind::Map)
+    teko::assert::eq_i64(expect_present(yaml_get(inner_map, "b")).int_val, 4)
+}
+
+/**
+ * A bare flow collection is a valid whole document (cross-checked).
+ */
+#test
+fn flow_collection_as_document_root() {
+    var v = expect_value(parse_yaml("[1, 2, 3]\n"))
+    teko::assert::is_true(v.kind == YamlKind::Seq)
+    teko::assert::len_eq(v.items.len, 3)
+    var empty_map = expect_value(parse_yaml("{}\n"))
+    teko::assert::is_true(empty_map.kind == YamlKind::Map)
+    teko::assert::len_eq(empty_map.keys.len, 0)
+}
+
+/**
+ * Single- and double-quoted scalars decode their escapes/doubled-quote content, never through
+ * core-schema resolution (a quoted `"42"` stays a string) (cross-checked).
+ */
+#test
+fn quoted_scalars_decode_escapes() {
+    var v = expect_value(parse_yaml("a: \"tab\\there\"\nb: 'it''s ok'\nc: \"42\"\n"))
+    teko::assert::eq_str(expect_present(yaml_get(v, "a")).text, "tab\there")
+    teko::assert::eq_str(expect_present(yaml_get(v, "b")).text, "it's ok")
+    var c = expect_present(yaml_get(v, "c"))
+    teko::assert::is_true(c.kind == YamlKind::Str)
+    teko::assert::eq_str(c.text, "42")
+}
+
+/**
+ * A literal (`|`) block scalar's every chomping indicator (default clip, `-` strip, `+` keep)
+ * produces the expected trailing-newline handling (cross-checked).
+ */
+#test
+fn literal_block_scalar_chomping() {
+    var clip = expect_value(parse_yaml("a: |\n  x\n  y\n\n\nb: 2\n"))
+    teko::assert::eq_str(expect_present(yaml_get(clip, "a")).text, "x\ny\n")
+    var strip = expect_value(parse_yaml("a: |-\n  x\n  y\n\n\nb: 2\n"))
+    teko::assert::eq_str(expect_present(yaml_get(strip, "a")).text, "x\ny")
+    var keep = expect_value(parse_yaml("a: |+\n  x\n  y\n\n\nb: 2\n"))
+    teko::assert::eq_str(expect_present(yaml_get(keep, "a")).text, "x\ny\n\n\n")
+    teko::assert::eq_i64(expect_present(yaml_get(clip, "b")).int_val, 2)
+    teko::assert::eq_i64(expect_present(yaml_get(strip, "b")).int_val, 2)
+    teko::assert::eq_i64(expect_present(yaml_get(keep, "b")).int_val, 2)
+}
+
+/**
+ * A folded (`>`) block scalar joins its lines with a space and strips its trailing newline under
+ * `-` (cross-checked).
+ */
+#test
+fn folded_block_scalar_joins_lines() {
+    var v = expect_value(parse_yaml("a: >-\n  x\n  y\n\n\nb: 2\n"))
+    teko::assert::eq_str(expect_present(yaml_get(v, "a")).text, "x y")
+}
+
+/**
+ * Plain scalars fold across a following more-indented line (a single line break becomes a space) —
+ * both a bare mapping value and a sequence-entry continuation (cross-checked).
+ */
+#test
+fn plain_scalar_folds_continuation_lines() {
+    var v = expect_value(parse_yaml("a: hello\n  world\n"))
+    teko::assert::eq_str(expect_present(yaml_get(v, "a")).text, "hello world")
+    var v2 = expect_value(parse_yaml("a: 1\n  2\n"))
+    teko::assert::eq_str(expect_present(yaml_get(v2, "a")).text, "1 2")
+}
+
+/**
+ * A plain scalar continuation line that ITSELF looks like an implicit mapping key (an unquoted
+ * `: `) is never folded in — YAML forbids a plain scalar from ever containing that sequence, so the
+ * dangling indented line is a checked error instead of silently becoming string content
+ * (cross-checked: PyYAML raises `mapping values are not allowed here` on this exact input).
+ */
+#test
+fn plain_scalar_never_folds_a_key_looking_line() {
+    expect_error(parse_yaml("a: 1\n b: 2\n"))
+}
+
+/**
+ * `#` comments are skipped wherever a line permits them, on both a whole-line comment and a
+ * trailing one (cross-checked).
+ */
+#test
+fn comments_are_skipped() {
+    var v = expect_value(parse_yaml("# a whole-line comment\na: 1 # trailing comment\nb: 2\n"))
+    teko::assert::eq_i64(expect_present(yaml_get(v, "a")).int_val, 1)
+    teko::assert::eq_i64(expect_present(yaml_get(v, "b")).int_val, 2)
+}
+
+/**
+ * An anchor (`&name`) and its alias (`*name`) resolve to structurally equal values, for both a
+ * mapping and a sequence anchor (cross-checked).
+ */
+#test
+fn anchors_and_aliases_resolve() {
+    var v = expect_value(parse_yaml("a: &anchor\n  x: 1\nb: *anchor\n"))
+    var a = expect_present(yaml_get(v, "a"))
+    var b = expect_present(yaml_get(v, "b"))
+    teko::assert::is_true(yaml_equal(a, b))
+    var v2 = expect_value(parse_yaml("base: &b [1, 2, 3]\nother: *b\n"))
+    var base = expect_present(yaml_get(v2, "base"))
+    var other = expect_present(yaml_get(v2, "other"))
+    teko::assert::is_true(yaml_equal(base, other))
+    teko::assert::len_eq(base.items.len, 3)
+}
+
+/**
+ * An alias to an undefined anchor is a checked error, never a panic.
+ */
+#test
+fn undefined_alias_is_an_error() {
+    expect_error(parse_yaml("a: *missing\n"))
+}
+
+/**
+ * The core-schema `null`, `bool`, `int` (decimal/`0x`/`0o`), and `float` (including `.inf`/`.nan`)
+ * resolution rules all apply as specified by YAML 1.2's core schema (cross-checked, except the two
+ * cases this file's module doc calls out).
+ */
+#test
+fn core_schema_scalar_resolution() {
+    var v = expect_value(parse_yaml("n1: null\nn2: ~\nn3:\nf1: 3.14\nf2: .inf\nf3: -.inf\nf4: .nan\nh1: 0x1A\ni1: -17\n"))
+    teko::assert::is_true(expect_present(yaml_get(v, "n1")).kind == YamlKind::Null)
+    teko::assert::is_true(expect_present(yaml_get(v, "n2")).kind == YamlKind::Null)
+    teko::assert::is_true(expect_present(yaml_get(v, "n3")).kind == YamlKind::Null)
+    teko::assert::eq_f64(expect_present(yaml_get(v, "f1")).float_val, 3.14, 0.000001)
+    var f2 = expect_present(yaml_get(v, "f2"))
+    teko::assert::is_true(teko::math::is_inf(f2.float_val) && f2.float_val > 0.0)
+    var f3 = expect_present(yaml_get(v, "f3"))
+    teko::assert::is_true(teko::math::is_inf(f3.float_val) && f3.float_val < 0.0)
+    teko::assert::is_true(teko::math::is_nan(expect_present(yaml_get(v, "f4")).float_val))
+    teko::assert::eq_i64(expect_present(yaml_get(v, "h1")).int_val, 26)
+    teko::assert::eq_i64(expect_present(yaml_get(v, "i1")).int_val, -17)
+}
+
+/**
+ * `0o52` (the YAML 1.2 core-schema octal form) resolves to `42` under this unit's YAML 1.2
+ * resolver. PyYAML implements YAML 1.1's resolver instead, which does NOT recognize `0o`-prefixed
+ * octal at all — `yaml.safe_load("a: 0o52\n")` returns the STRING `"0o52"` under PyYAML 6.0.1, not
+ * an integer. This is the module doc's NAMED SEAM #2, deliberately not matched here.
+ */
+#test
+fn octal_uses_0o_not_leading_zero() {
+    var v = expect_value(parse_yaml("a: 0o52\n"))
+    var a = expect_present(yaml_get(v, "a"))
+    teko::assert::is_true(a.kind == YamlKind::Int)
+    teko::assert::eq_i64(a.int_val, 42)
+}
+
+/**
+ * An integer literal too large for `i64` falls back to a plain string (an honest, documented
+ * simplification — this unit has no bignum kind, matching `teko::encoding::toml`'s own i64-only
+ * integer model) rather than erroring or silently truncating.
+ */
+#test
+fn oversized_integer_falls_back_to_string() {
+    var v = expect_value(parse_yaml("99999999999999999999999\n"))
+    teko::assert::is_true(v.kind == YamlKind::Str)
+}
+
+/**
+ * A multi-document stream separated by explicit `---` markers decodes every document in order via
+ * `parse_yaml_all`; `parse_yaml` itself rejects a multi-document stream (cross-checked: PyYAML's
+ * `safe_load` also rejects it, requiring `safe_load_all` for a stream).
+ */
+#test
+fn multi_document_stream_decodes_each_document() {
+    var docs = match parse_yaml_all("---\na: 1\n---\nb: 2\n") { []YamlValue as ds => ds; error => teko::list::empty() }
+    teko::assert::len_eq(docs.len, 2)
+    teko::assert::eq_i64(expect_present(yaml_get(docs[0], "a")).int_val, 1)
+    teko::assert::eq_i64(expect_present(yaml_get(docs[1], "b")).int_val, 2)
+    expect_error(parse_yaml("---\na: 1\n---\nb: 2\n"))
+}
+
+/**
+ * An explicit `...` document-end marker also separates documents in a stream (cross-checked: PyYAML
+ * accepts `a: 1\n...\n---\nb: 2\n...\n` under `safe_load_all` and returns `[{'a': 1}, {'b': 2}]`).
+ */
+#test
+fn explicit_document_end_marker_separates_documents() {
+    var docs = match parse_yaml_all("a: 1\n...\n---\nb: 2\n...\n") { []YamlValue as ds => ds; error => teko::list::empty() }
+    teko::assert::len_eq(docs.len, 2)
+    teko::assert::eq_i64(expect_present(yaml_get(docs[0], "a")).int_val, 1)
+    teko::assert::eq_i64(expect_present(yaml_get(docs[1], "b")).int_val, 2)
+}
+
+/**
+ * An entirely empty (or whitespace-only) input is the YAML `null` document, both for `parse_yaml`
+ * and as the empty-stream case of `parse_yaml_all` (cross-checked: PyYAML's `safe_load("")` returns
+ * `None`).
+ */
+#test
+fn empty_input_is_null() {
+    var v = expect_value(parse_yaml(""))
+    teko::assert::is_true(v.kind == YamlKind::Null)
+    var v2 = expect_value(parse_yaml("~\n"))
+    teko::assert::is_true(v2.kind == YamlKind::Null)
+    var docs = match parse_yaml_all("") { []YamlValue as ds => ds; error => teko::list::empty() }
+    teko::assert::len_eq(docs.len, 0)
+}
+
+/**
+ * A document whose root is a single scalar (no mapping/sequence at all) decodes directly to that
+ * scalar (cross-checked).
+ */
+#test
+fn scalar_document_root_decodes() {
+    var v = expect_value(parse_yaml("hello world\n"))
+    teko::assert::is_true(v.kind == YamlKind::Str)
+    teko::assert::eq_str(v.text, "hello world")
+}
+
+/**
+ * A `<<` merge key is stored as a literal string key (the value it aliases is NOT merged into the
+ * enclosing mapping) — this unit's documented merge-key DEFERRAL (see `yaml_parse.tks`'s module
+ * doc). PyYAML, following YAML 1.1, DOES expand it (`yaml.safe_load` on this input returns
+ * `{'defaults': {'a': 1, 'b': 2}, 'over': {'a': 1, 'b': 3}}`); this unit instead parses without
+ * error and leaves `over` holding a literal `"<<"` entry.
+ */
+#test
+fn merge_key_is_not_expanded() {
+    var v = expect_value(parse_yaml("defaults: &d\n  a: 1\n  b: 2\nover:\n  <<: *d\n  b: 3\n"))
+    var over = expect_present(yaml_get(v, "over"))
+    var merge_entry = expect_present(yaml_get(over, "<<"))
+    teko::assert::is_true(merge_entry.kind == YamlKind::Map)
+    teko::assert::eq_i64(expect_present(yaml_get(over, "b")).int_val, 3)
+}
+
+/**
+ * Every DEFERRED construct (see `yaml_parse.tks`'s module doc) surfaces a checked `error`, never a
+ * silent mis-parse: an explicit tag, a complex (non-scalar) mapping key, a truncated flow
+ * collection, and an unterminated quoted scalar.
+ */
+#test
+fn deferred_constructs_are_checked_errors() {
+    expect_error(parse_yaml("a: !!str foo\n"))
+    expect_error(parse_yaml("? [a, b]\n: value\n"))
+    expect_error(parse_yaml("a: [1, 2\n"))
+    expect_error(parse_yaml("a: 'unterminated\n"))
+}
+
+/**
+ * `parse_yaml`/`parse_yaml_all` never silently multiply an implicit document: once a bare
+ * (un-marked) document's own root construct ends, further top-level content without an explicit
+ * `---` is a checked error rather than a second implicit document.
+ */
+#test
+fn bare_stream_never_implicitly_starts_a_second_document() {
+    expect_error(parse_yaml_all("a: 1\nb: 2\n---\nc: 3\n"))
+}
+
+/**
+ * `parse_yaml(encode_yaml(v))` is structurally equal (`yaml_equal`) to `v`, for a mapping, a
+ * sequence-of-mappings, and a mapping containing every scalar kind (null/bool/int/float/str)
+ * including values that require quoting (`.inf`, empty-not-applicable-here but exercised via a
+ * string that looks like a number).
+ */
+#test
+fn encode_then_parse_round_trips() {
+    var v1 = expect_value(parse_yaml("a: 1\nb: two\nc: true\n"))
+    teko::assert::is_true(yaml_equal(v1, expect_value(parse_yaml(encode_yaml(v1)))))
+    var v2 = expect_value(parse_yaml("- id: 1\n  name: alpha\n- id: 2\n  name: beta\n"))
+    teko::assert::is_true(yaml_equal(v2, expect_value(parse_yaml(encode_yaml(v2)))))
+    var v3 = expect_value(parse_yaml("n: null\nf: 3.5\ns: \"looks-like-42\"\nq: \"42\"\ninf: .inf\n"))
+    teko::assert::is_true(yaml_equal(v3, expect_value(parse_yaml(encode_yaml(v3)))))
+    var v4 = yaml_seq(teko::list::empty())
+    teko::assert::is_true(yaml_equal(v4, expect_value(parse_yaml(encode_yaml(v4)))))
+    var v5 = yaml_map_empty()
+    teko::assert::is_true(yaml_equal(v5, expect_value(parse_yaml(encode_yaml(v5)))))
+}
+
+/**
+ * `yaml_get`/`yaml_index` miss cleanly (`null`, never a panic) on a non-mapping/non-sequence, an
+ * absent key, or an out-of-range index; the `yaml_to_*` scalar readers require an exact kind match.
+ */
+#test
+fn accessors_and_scalar_readers_are_honest() {
+    var v = expect_value(parse_yaml("a: 1\n"))
+    match yaml_get(v, "missing") { YamlValue => teko::assert::is_true(false); null => { } }
+    match yaml_index(v, 0) { YamlValue => teko::assert::is_true(false); null => { } }
+    var a = expect_present(yaml_get(v, "a"))
+    teko::assert::eq_i64(match yaml_to_int(a) { i64 as x => x; error => -1 }, 1)
+    match yaml_to_str(a) { str => teko::assert::is_true(false); error => { } }
+}

@@ -1,0 +1,1891 @@
+/**
+ * `teko::encoding::yaml` — the DECODER. Hand-written recursive-descent scanner over the source
+ * document's raw UTF-8 bytes (the `teko::encoding::toml`/`teko::encoding::json` precedent: YAML's
+ * structural grammar is pure ASCII — indentation, punctuation, the core-schema keywords — so
+ * scanning by byte index is correct; only scalar CONTENTS carry arbitrary UTF-8, copied through
+ * verbatim except inside a recognized escape).
+ *
+ * SHAPE. Block structure (mappings, sequences) is INDENTATION-driven: `next_content_line` walks the
+ * source one logical (non-blank, non-comment) line at a time, reporting its column of first content
+ * (`indent`) — a block mapping/sequence is a run of sibling lines sharing one `indent`, and a child
+ * value nests by being indented strictly more than its parent. Flow collections (`{ }`/`[ ]`) switch
+ * to plain byte-position scanning (the `teko::encoding::json` recursive-descent discipline) since
+ * flow content ignores line structure. Every scan step returns a small step-result struct threaded
+ * through by return value (`YamlLineInfo`/`YamlTextStep`/`YamlNodeStep`/…) — the same "no mutable
+ * out-param" discipline `teko::encoding::toml`'s `KeyStep`/`ValStep` use. The one genuinely mutable
+ * piece is `YamlAnchors`, a small reference-semantics CLASS (not threaded by return value) holding
+ * the `&name` -> value table a document's `*name` aliases resolve against — a class is the natural
+ * fit here (mirrors `teko::collections::List`) since every recursive call below shares the SAME live
+ * table, and threading an updated copy back through every return would obscure the actual algorithm
+ * for no benefit.
+ *
+ * SCOPE (this unit, YAML 1.2, PRACTICAL SUBSET). Block mappings and sequences (indentation-based,
+ * including the compact `- key: value` / `- - item` forms); flow mappings and sequences (`{ }`/
+ * `[ ]`, comma-separated, free interior whitespace/newlines/comments); plain scalars (including
+ * simple multi-line folding); single- and double-quoted scalars (with `\` escapes in the double
+ * form, doubled `''` in the single form, and line folding across a multi-line quote); literal (`|`)
+ * and folded (`>`) block scalars with explicit indentation indicators and chomping (`-` strip / `+`
+ * keep / default clip); `#` comments; the CORE-SCHEMA scalar resolution rules (`null`/`~`,
+ * `true`/`false`, decimal/`0x`/`0o` integers, `inf`/`nan` floats, else string); anchors (`&name`)
+ * and aliases (`*name`); and the explicit `---`/`...` document markers for `parse_yaml_all`'s
+ * multi-document streams.
+ *
+ * NAMED SEAM #1 (honest — M.3): FOLDING FIDELITY. Both plain scalars and folded (`>`) block scalars
+ * approximate the full YAML line-folding algorithm: consecutive non-blank lines join with a single
+ * space, a blank line becomes a newline (and a run of N consecutive blank lines becomes N
+ * newlines), and — for `>` block scalars only — a "more-indented" continuation line (one whose
+ * captured content itself starts with whitespace, i.e. it had extra leading columns beyond the
+ * block's detected indent) stays on its own line rather than folding. The full spec additionally
+ * treats a more-indented PLAIN-scalar continuation line the same way; this unit does not (a plain
+ * scalar's continuation lines are all trimmed to their own content before folding, so the
+ * "extra-indented stays literal" distinction is not preserved for plain scalars specifically). This
+ * is a deliberately simplified approximation, not the full spec algorithm — well-formed prose-style
+ * block/plain scalars (the overwhelmingly common case: wrapped descriptions, multi-line values)
+ * fold correctly; documents relying on the more-indented-plain-line nuance do not.
+ *
+ * NAMED SEAM #2 (honest — M.3): YAML 1.1 vs 1.2 RESOLVER. This unit follows the YAML 1.2 CORE
+ * SCHEMA (https://yaml.org/spec/1.2.2/#103-core-schema) for scalar resolution: only `true`/`false`
+ * (plus `True`/`TRUE`/`False`/`FALSE`) resolve as booleans, decimal integers never treat a leading
+ * zero as octal (`0o` is the only octal form), and `yes`/`no`/`on`/`off` are plain STRINGS. Widely
+ * used implementations such as PyYAML's `safe_load` still implement the older YAML 1.1 resolver
+ * (which also accepts `yes`/`no`/`on`/`off` as booleans, sexagesimal `1:30` numbers, and a bare
+ * leading-zero decimal as octal) — this is a genuine, well-known cross-implementation divergence,
+ * not a bug in either side, and this unit's cross-check fixture deliberately avoids the ambiguous
+ * 1.1-only tokens rather than silently matching PyYAML's looser behavior.
+ *
+ * DEFERRALS (honest — out of scope for this practical subset, a checked `error` rather than a
+ * mis-parse). Explicit YAML tags (`!foo`, `!!str`, …) are rejected. Merge keys (`<<: *anchor`) are
+ * NOT specially expanded (a `<<` key is stored literally like any other string key). Complex
+ * (non-scalar) mapping keys (`? [a, b]\n: value` / a flow collection as a flow-map key) are
+ * rejected. `%YAML`/`%TAG` directives are not recognized (a leading `%` line is treated as
+ * malformed content, since directives always precede a `---` this unit does not special-case).
+ * Flow-context PLAIN scalars are single-line only in this subset (a plain scalar directly inside
+ * `{ }`/`[ ]` does not fold across a newline; a quoted scalar or a block-context plain scalar both
+ * still may). Every one of these surfaces a checked `error`, never silent misinterpretation.
+ *
+ * ERROR MODEL (M.1 fail-loud / M.3 honest types). `parse_yaml(str): YamlValue | error` (single
+ * document) and `parse_yaml_all(str): []YamlValue | error` (every document in a `---`-separated
+ * stream) — any malformed or unsupported-construct input is a checked failure, never a panic.
+ */
+
+/**
+ * One scanned logical (non-blank, non-comment) source line: where it starts, its indentation column
+ * (count of leading spaces), where its content begins and ends, and whether it is the end of input
+ * or an explicit `---`/`...` document marker.
+ */
+type YamlLineInfo = struct {
+    /**
+     * The byte offset of this line's first byte (its true start, including any leading spaces).
+     */
+    line_start: u64
+    /**
+     * The number of leading space bytes before the first non-space byte (this line's column).
+     */
+    indent: u64
+    /**
+     * The byte offset of the first non-space byte (where this line's content begins).
+     */
+    content_start: u64
+    /**
+     * The byte offset of this line's terminating `\n`, or `input.len` when it is the source's last
+     * line.
+     */
+    line_end: u64
+    /**
+     * `true` when there is no further content line (the source is exhausted); every other field is
+     * then meaningless.
+     */
+    eof: bool
+    /**
+     * `true` when this line is exactly an explicit `---` document-start marker.
+     */
+    is_doc_start: bool
+    /**
+     * `true` when this line is exactly an explicit `...` document-end marker.
+     */
+    is_doc_end: bool
+}
+
+/**
+ * A decoded piece of text plus the byte offset just past it — the shared shape for every scalar/key
+ * scan in this file (a quoted or plain scalar's decoded text, or a mapping key's decoded text),
+ * mirroring `teko::encoding::toml`'s `PStrStep`/`KeyStep`.
+ */
+type YamlTextStep = struct {
+    /**
+     * The decoded text.
+     */
+    text: str
+    /**
+     * The offset just past what was scanned.
+     */
+    next: u64
+}
+
+/**
+ * One decoded double-quote escape sequence's bytes plus the offset just past it.
+ */
+type YamlEscStep = struct {
+    /**
+     * The UTF-8 bytes the escape decodes to.
+     */
+    bytes: []byte
+    /**
+     * The offset just past the escape sequence.
+     */
+    next: u64
+}
+
+/**
+ * A parsed `|`/`>` block-scalar HEADER (the indicator plus its optional chomping/explicit-indent
+ * modifiers) — everything needed before the block's content lines are collected.
+ */
+type YamlBlockHeader = struct {
+    /**
+     * `true` for `>` (folded); `false` for `|` (literal).
+     */
+    folded: bool
+    /**
+     * The chomping indicator: `b'-'` (strip), `b'+'` (keep), or `b'c'` (the default, clip).
+     */
+    chomp: byte
+    /**
+     * The explicit indentation indicator's value, or `0` when absent (auto-detect from the first
+     * content line).
+     */
+    explicit_indent: u64
+    /**
+     * The offset just past the header's line.
+     */
+    next: u64
+}
+
+/**
+ * A run of collected raw content lines (already stripped of the block's leading indentation, one
+ * `str` per line, an empty `str` marking a blank line) plus the offset to resume outer parsing at —
+ * shared by the literal/folded block-scalar body collector and the plain-scalar continuation
+ * scanner, both of which gather "lines that belong to this scalar" the same way.
+ */
+type YamlLinesStep = struct {
+    /**
+     * The collected lines, in order.
+     */
+    lines: []str
+    /**
+     * The offset to resume outer (structural) parsing at — the start of the first line that does
+     * NOT belong to the scalar.
+     */
+    next: u64
+}
+
+/**
+ * One parsed node (any `YamlValue`) plus the offset just past it — always the start of the next
+ * unconsumed LINE (never a mid-line offset), the invariant every block-level parser in this file
+ * relies on to resume scanning uniformly.
+ */
+type YamlNodeStep = struct {
+    /**
+     * The parsed value.
+     */
+    value: YamlValue
+    /**
+     * The offset of the next unconsumed line's first byte.
+     */
+    next: u64
+}
+
+/**
+ * The live `&name` -> value anchor table threaded through one document's parse: every `&name`
+ * definition seen so far accumulates here, and every `*name` alias resolves against it. A CLASS
+ * (reference semantics, see the module doc's SHAPE note) rather than a value threaded through return
+ * values — every recursive call below shares the one table a document's `parse_doc_node` creates.
+ */
+type YamlAnchors = class {
+    /** Anchor names, in definition order — parallel to `values`. */
+    intern names: []str
+    /** Each anchor's resolved value, parallel to `names`. */
+    intern values: []YamlValue
+
+    /**
+     * Builds a fresh, empty anchor table — one per document (anchors never persist across a `---`
+     * document boundary).
+     *
+     * @return  a fresh, empty anchor table
+     */
+    pub static fn make(): YamlAnchors {
+        YamlAnchors { names = teko::list::empty(); values = teko::list::empty() }
+    }
+
+    /**
+     * Records `value` under `name`. Redefining an already-used name is permitted (YAML allows
+     * anchor reuse); only the most recently defined value for a name is resolvable afterward.
+     *
+     * @param name   the anchor name, without its leading `&`
+     * @param value  the value it refers to
+     */
+    pub fn define(name: str, value: YamlValue) {
+        self.names = teko::list::push(self.names, name)
+        self.values = teko::list::push(self.values, value)
+    }
+
+    /**
+     * Resolves `name` to its most recently defined value.
+     *
+     * @param name  the alias name, without its leading `*`
+     * @return      the referenced value, or `error` when no anchor named `name` has been defined
+     *              earlier in this document (a forward reference — this subset does not support
+     *              them, matching the spec's own restriction)
+     */
+    pub fn resolve(name: str): YamlValue | error {
+        var i = self.names.len
+        loop {
+            if i == 0 { break }
+            i = i - 1
+            if self.names[i] == name { return self.values[i] }
+        }
+        semantic_error(concat("undefined alias '*", name, "'"))
+    }
+}
+
+/**
+ * A `YamlValue | error` failure carrying a byte offset — the checked failure every LEXICAL scan step
+ * in this file returns (mirrors `teko::encoding::toml::toml_error`).
+ *
+ * @param what  the failure description
+ * @param pos   the offset at which the failure was detected
+ * @return      the checked error
+ */
+fn yaml_error(what: str, pos: u64): error {
+    error { message = concat("yaml: ", what, " at offset ", i64_to_str(pos to i64)) }
+}
+
+/**
+ * A checked failure carrying no byte offset — used for SEMANTIC failures with no single meaningful
+ * source position (an undefined alias, an unsupported construct already localized by its caller).
+ *
+ * @param what  the failure description
+ * @return      the checked error
+ */
+fn semantic_error(what: str): error {
+    error { message = concat("yaml: ", what) }
+}
+
+/**
+ * Reports whether `b` is inline whitespace (space or tab).
+ *
+ * @param b  the byte to classify
+ * @return   true for space or tab
+ */
+fn is_blank_byte(b: byte): bool {
+    b == b' ' || b == b'\t'
+}
+
+/**
+ * Reports whether `b` is an ASCII decimal digit.
+ *
+ * @param b  the byte to classify
+ * @return   true for `0`-`9`
+ */
+fn is_digit_byte(b: byte): bool {
+    b >= b'0' && b <= b'9'
+}
+
+/**
+ * Reports whether `b` is a bare anchor/alias name character (`A`-`Z`, `a`-`z`, `0`-`9`, `_`, `-`).
+ *
+ * @param b  the byte to classify
+ * @return   true when `b` may appear in an anchor/alias name
+ */
+fn is_name_char(b: byte): bool {
+    (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z') || (b >= b'0' && b <= b'9') || b == b'_' || b == b'-'
+}
+
+/**
+ * Maps one ASCII hex digit to its value (`0`-`15`), or `-1` when `b` is not a hex digit.
+ *
+ * @param b  the byte to classify
+ * @return   the hex value, or `-1`
+ */
+fn radix_digit_value(b: byte): i64 {
+    if b >= b'0' && b <= b'9' { return (b to i64) - (b'0' to i64) }
+    if b >= b'a' && b <= b'f' { return (b to i64) - (b'a' to i64) + 10 }
+    if b >= b'A' && b <= b'F' { return (b to i64) - (b'A' to i64) + 10 }
+    -1
+}
+
+/**
+ * Removes every `\r` byte from `input` — run once, up front, so every later scan can treat `\n` as
+ * the sole line terminator (a plain preprocessing pass, the simplest correct way to accept both
+ * `\n` and `\r\n` source line endings without threading CRLF-awareness through every scanner).
+ *
+ * @param input  the raw source bytes
+ * @return       `input` with every `\r` byte removed
+ */
+fn strip_cr_bytes(input: []byte): []byte {
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= input.len { break }
+        if input[i] != b'\r' { out = teko::list::push(out, input[i]) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * Copies `input[from, to)` into a fresh `str` (the source is already-validated UTF-8, so any byte
+ * range copied verbatim stays valid UTF-8 as long as `from`/`to` never split a multibyte codepoint —
+ * true for every caller here, which only slices at ASCII structural boundaries).
+ *
+ * @param input  the source bytes
+ * @param from   the inclusive start offset
+ * @param to     the exclusive end offset
+ * @return       a fresh `str` holding `input[from, to)`
+ */
+fn slice_bytes_str(input: []byte, from: u64, to: u64): str {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, input[i])
+        i = i + 1
+    }
+    str(out)
+}
+
+/**
+ * Copies `bytes[from, to)` into a fresh `[]byte`.
+ *
+ * @param bytes  the source bytes
+ * @param from   the inclusive start offset
+ * @param to     the exclusive end offset
+ * @return       a fresh `[]byte` holding `bytes[from, to)`
+ */
+fn byte_subslice(bytes: []byte, from: u64, to: u64): []byte {
+    var out: []byte = teko::list::empty()
+    var i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, bytes[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * Wraps a single byte as a fresh one-element `[]byte`.
+ *
+ * @param b  the byte
+ * @return   a fresh `[]byte` holding just `b`
+ */
+fn one_byte_slice(b: byte): []byte {
+    teko::list::push(teko::list::empty(), b)
+}
+
+/**
+ * Appends the UTF-8 encoding of Unicode scalar value `cp` to `out` (hand-encoded, mirroring
+ * `teko::encoding::toml::push_codepoint_utf8`).
+ *
+ * @param out  the accumulator
+ * @param cp   the Unicode scalar value to encode
+ * @return     `out` with `cp`'s UTF-8 encoding appended
+ */
+fn push_codepoint_utf8(out: []byte, cp: u32): []byte {
+    if cp <= 0x7F { return teko::list::push(out, cp to byte) }
+    if cp <= 0x7FF {
+        var o = teko::list::push(out, (0xC0 | (cp >> 6)) to byte)
+        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+    }
+    if cp <= 0xFFFF {
+        var o = teko::list::push(out, (0xE0 | (cp >> 12)) to byte)
+        o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
+        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+    }
+    var o = teko::list::push(out, (0xF0 | (cp >> 18)) to byte)
+    o = teko::list::push(o, (0x80 | ((cp >> 12) & 0x3F)) to byte)
+    o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
+    teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+}
+
+/**
+ * Skips a run of inline whitespace (spaces/tabs only, never crossing a newline).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset just past the whitespace run
+ */
+fn skip_inline_ws(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at < input.len && is_blank_byte(input[at]) { at = at + 1; continue }
+        break
+    }
+    at
+}
+
+/**
+ * Skips every run of inline whitespace, `#` comment, and newline starting at `pos` — the free
+ * interior whitespace a FLOW collection allows between its tokens.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start from
+ * @return       the offset of the next meaningful byte, or `input.len`
+ */
+fn skip_flow_ws(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at >= input.len { break }
+        var b = input[at]
+        if b == b' ' || b == b'\t' || b == b'\n' { at = at + 1; continue }
+        if b == b'#' && (at == pos || is_blank_byte(input[at - 1]) || input[at - 1] == b'\n') { at = line_end_of(input, at); continue }
+        break
+    }
+    at
+}
+
+/**
+ * Finds the offset of the `\n` that ends the line starting at (or containing) `pos`, or
+ * `input.len` when `pos`'s line is the source's last.
+ *
+ * @param input  the source bytes
+ * @param pos    an offset within the line
+ * @return       the offset of that line's terminating `\n`, or `input.len`
+ */
+fn line_end_of(input: []byte, pos: u64): u64 {
+    var at = pos
+    loop {
+        if at >= input.len || input[at] == b'\n' { break }
+        at = at + 1
+    }
+    at
+}
+
+/**
+ * The offset just past the newline ending at `line_end` — the start of the following line, or
+ * `input.len` when `line_end` is already the source's end.
+ *
+ * @param input     the source bytes
+ * @param line_end  a line's terminating `\n` offset (or `input.len`)
+ * @return          the following line's start offset
+ */
+fn advance_past_newline(input: []byte, line_end: u64): u64 {
+    if line_end < input.len { return line_end + 1 }
+    input.len
+}
+
+/**
+ * Counts the leading space bytes at the start of the line `[from, line_end)` (tabs are never
+ * counted as indentation — YAML forbids tab indentation; a tab simply ends the indent run here,
+ * leaving it as ordinary content for whatever scans the line next).
+ *
+ * @param input     the source bytes
+ * @param from      the line's start offset
+ * @param line_end  the line's terminating `\n` offset (or `input.len`)
+ * @return          the number of leading space bytes
+ */
+fn leading_space_count(input: []byte, from: u64, line_end: u64): u64 {
+    var i = from
+    loop {
+        if i < line_end && input[i] == b' ' { i = i + 1; continue }
+        break
+    }
+    i - from
+}
+
+/**
+ * Reports whether the fixed ASCII text `word` occurs at `input[pos .. pos + word.len)`.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to test
+ * @param word   the literal text to match
+ * @return       true when `word` occurs at `pos`
+ */
+fn matches_literal(input: []byte, pos: u64, word: str): bool {
+    var wb = bytes_of_str(word)
+    if pos + wb.len > input.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= wb.len { break }
+        if input[pos + i] != wb[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * Reports whether the content run `[content_start, line_end)` is exactly the three-byte `---`
+ * document-start marker (the marker itself, then end of line, whitespace, or a comment).
+ *
+ * @param input          the source bytes
+ * @param content_start  the offset of the line's first non-space byte
+ * @param line_end       the line's terminating `\n` offset (or `input.len`)
+ * @return                true for an explicit document-start marker line
+ */
+fn is_doc_start_marker(input: []byte, content_start: u64, line_end: u64): bool {
+    if !matches_literal(input, content_start, "---") { return false }
+    var after = content_start + 3
+    after >= line_end || is_blank_byte(input[after]) || input[after] == b'#'
+}
+
+/**
+ * Reports whether the content run `[content_start, line_end)` is exactly the three-byte `...`
+ * document-end marker.
+ *
+ * @param input          the source bytes
+ * @param content_start  the offset of the line's first non-space byte
+ * @param line_end       the line's terminating `\n` offset (or `input.len`)
+ * @return                true for an explicit document-end marker line
+ */
+fn is_doc_end_marker(input: []byte, content_start: u64, line_end: u64): bool {
+    if !matches_literal(input, content_start, "...") { return false }
+    var after = content_start + 3
+    after >= line_end || is_blank_byte(input[after]) || input[after] == b'#'
+}
+
+/**
+ * Reports whether the line `[content_start, line_end)` is entirely blank or a whole-line `#`
+ * comment (nothing structurally meaningful on it).
+ *
+ * @param input          the source bytes
+ * @param content_start  the offset of the line's first non-space byte
+ * @param line_end       the line's terminating `\n` offset (or `input.len`)
+ * @return               true when the line contributes nothing to the document's structure
+ */
+fn is_blank_or_comment_line(input: []byte, content_start: u64, line_end: u64): bool {
+    content_start >= line_end || input[content_start] == b'#'
+}
+
+/**
+ * Finds the next STRUCTURALLY meaningful line at or after `pos` (which must already be a line
+ * START), skipping every blank and whole-line-comment line along the way and classifying an
+ * explicit `---`/`...` marker line when found.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset to start scanning from (a line start)
+ * @return       the next content line's info, or `eof = true` when the source is exhausted first
+ */
+fn next_content_line(input: []byte, pos: u64): YamlLineInfo {
+    var at = pos
+    loop {
+        if at >= input.len { return YamlLineInfo { line_start = at; indent = 0; content_start = at; line_end = at; eof = true; is_doc_start = false; is_doc_end = false } }
+        var line_end = line_end_of(input, at)
+        var indent = leading_space_count(input, at, line_end)
+        var content_start = at + indent
+        if is_blank_or_comment_line(input, content_start, line_end) {
+            at = advance_past_newline(input, line_end)
+            continue
+        }
+        var doc_start = indent == 0 && is_doc_start_marker(input, content_start, line_end)
+        var doc_end = indent == 0 && !doc_start && is_doc_end_marker(input, content_start, line_end)
+        return YamlLineInfo { line_start = at; indent = indent; content_start = content_start; line_end = line_end; eof = false; is_doc_start = doc_start; is_doc_end = doc_end }
+    }
+    YamlLineInfo { line_start = at; indent = 0; content_start = at; line_end = at; eof = true; is_doc_start = false; is_doc_end = false }
+}
+
+/**
+ * Reports whether `li` is an explicit document marker (`---` or `...`) — the boundary every
+ * block-collection loop stops at, in addition to a dedent.
+ *
+ * @param li  the line to test
+ * @return    true for a marker line
+ */
+fn is_marker_line(li: YamlLineInfo): bool {
+    li.is_doc_start || li.is_doc_end
+}
+
+/**
+ * The offset of the line following `li` — the natural resumption point once `li`'s own content has
+ * been fully consumed with no inline value.
+ *
+ * @param input  the source bytes
+ * @param li     the line just consumed
+ * @return       the following line's start offset
+ */
+fn line_start_after(input: []byte, li: YamlLineInfo): u64 {
+    advance_past_newline(input, li.line_end)
+}
+
+/**
+ * Reports whether a candidate child line may nest under a construct at `indent`: it exists, is not
+ * an explicit document marker, and is indented strictly more than `indent`.
+ *
+ * @param li      the candidate child line
+ * @param indent  the parent construct's indent
+ * @return        true when `li` may be parsed as a nested child
+ */
+fn valid_child(li: YamlLineInfo, indent: u64): bool {
+    !li.eof && !is_marker_line(li) && li.indent > indent
+}
+
+/**
+ * Reports whether `input[pos]` starts a block-sequence `-` indicator: a `-` immediately followed by
+ * a space or end of line (a bare `-` with no trailing space, e.g. inside a plain scalar, does not
+ * count).
+ *
+ * @param input     the source bytes
+ * @param pos       the offset to test
+ * @param line_end  the enclosing line's terminating `\n` offset (or `input.len`)
+ * @return          true when `pos` is a valid sequence-entry indicator
+ */
+fn is_dash_at(input: []byte, pos: u64, line_end: u64): bool {
+    pos < line_end && input[pos] == b'-' && (pos + 1 >= line_end || input[pos + 1] == b' ')
+}
+
+/**
+ * Reports whether `li`'s content starts a block-sequence entry (see `is_dash_at`).
+ *
+ * @param input  the source bytes
+ * @param li     the line to test
+ * @return       true when `li` is a sequence-entry line
+ */
+fn is_dash_line(input: []byte, li: YamlLineInfo): bool {
+    is_dash_at(input, li.content_start, li.line_end)
+}
+
+/**
+ * Trims trailing inline whitespace from `input[from, to)`, returning the trimmed text.
+ *
+ * @param input  the source bytes
+ * @param from   the inclusive start offset
+ * @param to     the exclusive end offset (before trimming)
+ * @return       the text with trailing spaces/tabs removed
+ */
+fn trim_trailing_ws_slice(input: []byte, from: u64, to: u64): str {
+    var e = to
+    loop {
+        if e > from && is_blank_byte(input[e - 1]) { e = e - 1; continue }
+        break
+    }
+    slice_bytes_str(input, from, e)
+}
+
+/**
+ * Requires the rest of the current line (from `pos`) to be inline whitespace optionally followed by
+ * a `#` comment, then a newline or end of input — the trailing-content check every single-line
+ * construct (a quoted/flow value, a block-scalar header) ends with.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset just past the construct's last meaningful byte
+ * @return       the offset just past the consumed newline (or `input.len`), or `error` when
+ *               unconsumed content remains before the next newline
+ */
+fn expect_line_end(input: []byte, pos: u64): u64 | error {
+    var at = skip_inline_ws(input, pos)
+    if at < input.len && input[at] == b'#' { at = line_end_of(input, at) }
+    if at >= input.len { return at }
+    if input[at] == b'\n' { return at + 1 }
+    yaml_error("expected end of line", at)
+}
+
+/**
+ * Attempts to read a plain implicit-mapping key (bare, single- or double-quoted) at `pos`, followed
+ * by its `:` delimiter (a colon immediately followed by whitespace or end of line — never mid-token,
+ * so `http://x` never false-triggers). Returns `null` (not an error) when `[pos, line_end)` does not
+ * look like a key line at all — the signal callers use to fall back to sequence/scalar parsing.
+ *
+ * @param input     the source bytes
+ * @param pos       the offset of the candidate key's first byte
+ * @param line_end  the enclosing line's terminating `\n` offset (or `input.len`)
+ * @return          the decoded key text and the offset just past `:` plus its following
+ *                  whitespace, or `null` when this is not a key line
+ */
+fn try_scan_key(input: []byte, pos: u64, line_end: u64): YamlTextStep | null {
+    if pos >= line_end { return null }
+    if input[pos] == b'{' || input[pos] == b'[' { return null }
+    if input[pos] == b'"' {
+        var q = match parse_double_quoted(input, pos) { YamlTextStep as s => s; error => return null }
+        var after = skip_inline_ws(input, q.next)
+        if after < line_end && input[after] == b':' && (after + 1 >= line_end || is_blank_byte(input[after + 1])) {
+            return YamlTextStep { text = q.text; next = skip_inline_ws(input, after + 1) }
+        }
+        return null
+    }
+    if input[pos] == b'\'' {
+        var sq = match parse_single_quoted(input, pos) { YamlTextStep as s => s; error => return null }
+        var after2 = skip_inline_ws(input, sq.next)
+        if after2 < line_end && input[after2] == b':' && (after2 + 1 >= line_end || is_blank_byte(input[after2 + 1])) {
+            return YamlTextStep { text = sq.text; next = skip_inline_ws(input, after2 + 1) }
+        }
+        return null
+    }
+    var i = pos
+    loop {
+        if i >= line_end { return null }
+        var b = input[i]
+        if b == b'#' && (i == pos || is_blank_byte(input[i - 1])) { return null }
+        if b == b':' && (i + 1 >= line_end || is_blank_byte(input[i + 1])) {
+            var key_text = trim_trailing_ws_slice(input, pos, i)
+            return YamlTextStep { text = key_text; next = skip_inline_ws(input, i + 1) }
+        }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * Scans a bare anchor/alias name (`is_name_char` bytes) starting at `pos`; at least one character
+ * is required.
+ *
+ * @param input     the source bytes
+ * @param pos       the offset of the name's first byte
+ * @param line_end  the enclosing line's terminating `\n` offset (or `input.len`)
+ * @return          the name and the offset just past it, or `error` when empty
+ */
+fn scan_token_name(input: []byte, pos: u64, line_end: u64): YamlTextStep | error {
+    var i = pos
+    loop {
+        if i < line_end && is_name_char(input[i]) { i = i + 1; continue }
+        break
+    }
+    if i == pos { return yaml_error("expected an anchor/alias name", pos) }
+    YamlTextStep { text = slice_bytes_str(input, pos, i); next = i }
+}
+
+/**
+ * Removes every trailing `\n` byte from `bytes`.
+ *
+ * @param bytes  the bytes to trim
+ * @return       `bytes` with every trailing `\n` removed
+ */
+fn strip_trailing_newlines(bytes: []byte): []byte {
+    var e = bytes.len
+    loop {
+        if e > 0 && bytes[e - 1] == b'\n' { e = e - 1; continue }
+        break
+    }
+    byte_subslice(bytes, 0, e)
+}
+
+/**
+ * Parses a `|`/`>` block-scalar header (input positioned at the indicator): the indicator itself,
+ * then in either order an optional chomping indicator (`-`/`+`) and an optional single-digit
+ * explicit indentation indicator (`1`-`9`), then the trailing-content check every header line ends
+ * with.
+ *
+ * @param input     the source bytes
+ * @param pos       the offset of the `|`/`>` indicator
+ * @param line_end  the header line's terminating `\n` offset (or `input.len`)
+ * @return          the parsed header, or `error`
+ */
+fn parse_block_header(input: []byte, pos: u64, line_end: u64): YamlBlockHeader | error {
+    var folded = input[pos] == b'>'
+    var at = pos + 1
+    var chomp: byte = b'c'
+    var explicit_indent: u64 = 0
+    var seen_chomp = false
+    var seen_indent = false
+    loop {
+        if at < line_end && (input[at] == b'-' || input[at] == b'+') && !seen_chomp {
+            chomp = input[at]
+            seen_chomp = true
+            at = at + 1
+            continue
+        }
+        if at < line_end && input[at] >= b'1' && input[at] <= b'9' && !seen_indent {
+            explicit_indent = ((input[at] to i64) - (b'0' to i64)) to u64
+            seen_indent = true
+            at = at + 1
+            continue
+        }
+        break
+    }
+    var after = match expect_line_end(input, at) { u64 as p => p; error as e => return e }
+    YamlBlockHeader { folded = folded; chomp = chomp; explicit_indent = explicit_indent; next = after }
+}
+
+/**
+ * Collects the raw content lines belonging to a block scalar starting at `start` (the first byte of
+ * the line right after the header): determines the block's indentation (explicit, or auto-detected
+ * from the first non-blank line — which must itself be indented more than `indent`, else the block
+ * is empty and the line belongs to whatever follows), then gathers every subsequent line whose
+ * leading-space count is at least that indentation (stripping exactly that many leading spaces),
+ * plus every blank line along the way, stopping at the first non-blank line that is LESS indented
+ * (which does not belong to the block and is given back to the caller).
+ *
+ * @param input            the source bytes
+ * @param start            the offset of the first byte after the header's line
+ * @param indent           the enclosing construct's own indent
+ * @param explicit_indent  the header's explicit indentation indicator, or `0` to auto-detect
+ * @return                 the collected lines (each already stripped of the block's indentation) and
+ *                         the offset to resume outer parsing at
+ */
+fn collect_block_lines(input: []byte, start: u64, indent: u64, explicit_indent: u64): YamlLinesStep {
+    var block_indent_signed = if explicit_indent > 0 { (indent + explicit_indent) to i64 } else { first_content_indent(input, start, indent) }
+    if block_indent_signed < 0 { return YamlLinesStep { lines = teko::list::empty(); next = start } }
+    var block_indent = block_indent_signed to u64
+    var lines: []str = teko::list::empty()
+    var pos = start
+    var resume = start
+    loop {
+        if pos >= input.len { break }
+        var line_end = line_end_of(input, pos)
+        var lc = leading_space_count(input, pos, line_end)
+        var blank = pos + lc == line_end
+        if blank {
+            lines = teko::list::push(lines, "")
+            pos = advance_past_newline(input, line_end)
+            resume = pos
+            continue
+        }
+        if lc < block_indent { break }
+        lines = teko::list::push(lines, slice_bytes_str(input, pos + block_indent, line_end))
+        pos = advance_past_newline(input, line_end)
+        resume = pos
+    }
+    YamlLinesStep { lines = lines; next = resume }
+}
+
+/**
+ * Auto-detects a block scalar's indentation: the leading-space count of the first non-blank line at
+ * or after `start`, PROVIDED that line is indented more than `indent` (the enclosing construct's own
+ * column) — a first non-blank line at or below `indent` does not belong to this block at all (the
+ * block is empty; that line is the next sibling/dedent instead).
+ *
+ * @param input   the source bytes
+ * @param start   the offset to start scanning from
+ * @param indent  the enclosing construct's own indent
+ * @return        the detected indentation, or `-1` when the block has no content
+ */
+fn first_content_indent(input: []byte, start: u64, indent: u64): i64 {
+    var p = start
+    loop {
+        if p >= input.len { break }
+        var le = line_end_of(input, p)
+        var lc = leading_space_count(input, p, le)
+        if p + lc != le {
+            if lc <= indent { return -1 }
+            return lc to i64
+        }
+        p = advance_past_newline(input, le)
+    }
+    -1
+}
+
+/**
+ * Joins a literal (`|`) block scalar's collected lines: each line followed by `\n`, then chomping
+ * applied to the trailing newline run.
+ *
+ * @param lines  the collected content lines
+ * @param chomp  the chomping indicator (`b'-'`/`b'+'`/`b'c'`)
+ * @return       the assembled scalar text
+ */
+fn join_literal_lines(lines: []str, chomp: byte): str {
+    if lines.len == 0 { return "" }
+    var out: []byte = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= lines.len { break }
+        out = append_all(out, bytes_of_str(lines[i]))
+        out = teko::list::push(out, b'\n')
+        i = i + 1
+    }
+    if chomp == b'+' { return str(out) }
+    var trimmed = strip_trailing_newlines(out)
+    if chomp == b'-' { return str(trimmed) }
+    str(teko::list::push(trimmed, b'\n'))
+}
+
+/**
+ * Joins a folded (`>`) block scalar's collected lines: consecutive plain lines join with a single
+ * space, a blank line (or a "more-indented" line — one whose captured content itself starts with
+ * whitespace) breaks the fold with a literal newline instead (see the module doc's NAMED SEAM #1),
+ * then chomping is applied the same way `join_literal_lines` applies it.
+ *
+ * @param lines  the collected content lines
+ * @param chomp  the chomping indicator (`b'-'`/`b'+'`/`b'c'`)
+ * @return       the assembled scalar text
+ */
+fn join_folded_lines(lines: []str, chomp: byte): str {
+    if lines.len == 0 { return "" }
+    var body: []byte = teko::list::empty()
+    var i: u64 = 0
+    var prev_more_indented = false
+    var prev_blank = false
+    loop {
+        if i >= lines.len { break }
+        var lb = bytes_of_str(lines[i])
+        var is_blank_l = lb.len == 0
+        var is_more = !is_blank_l && (lb[0] == b' ' || lb[0] == b'\t')
+        if i == 0 {
+            body = append_all(body, lb)
+        } else if is_blank_l || prev_blank || is_more || prev_more_indented {
+            body = teko::list::push(body, b'\n')
+            body = append_all(body, lb)
+        } else {
+            body = teko::list::push(body, b' ')
+            body = append_all(body, lb)
+        }
+        prev_blank = is_blank_l
+        prev_more_indented = is_more
+        i = i + 1
+    }
+    if chomp == b'+' { return str(teko::list::push(body, b'\n')) }
+    var trimmed = strip_trailing_newlines(body)
+    if chomp == b'-' { return str(trimmed) }
+    str(teko::list::push(trimmed, b'\n'))
+}
+
+/**
+ * Parses a complete `|`/`>` block scalar (header plus content lines) starting at `pos`.
+ *
+ * @param input   the source bytes
+ * @param pos     the offset of the `|`/`>` indicator
+ * @param cur     the line the indicator appears on
+ * @param indent  the enclosing construct's indent
+ * @return        the decoded text and the offset of the next unconsumed line, or `error`
+ */
+fn parse_block_scalar(input: []byte, pos: u64, cur: YamlLineInfo, indent: u64): YamlTextStep | error {
+    var header = match parse_block_header(input, pos, cur.line_end) { YamlBlockHeader as h => h; error as e => return e }
+    var collected = collect_block_lines(input, header.next, indent, header.explicit_indent)
+    var text = if header.folded { join_folded_lines(collected.lines, header.chomp) } else { join_literal_lines(collected.lines, header.chomp) }
+    YamlTextStep { text = text; next = collected.next }
+}
+
+/**
+ * Joins the physical-line segments of a quoted scalar (each already escape-decoded, one entry per
+ * source line the quote spans) the same way YAML line-folds a quoted scalar's interior newlines: a
+ * single line break folds to a space, and a run of N consecutive BLANK segments folds to N literal
+ * newlines instead (this is the same folding rule `join_folded_lines` applies to a folded block
+ * scalar's body, minus that rule's "more-indented line" exception, which has no equivalent inside a
+ * quoted scalar).
+ *
+ * @param lines  the per-physical-line segments, in order
+ * @return       the folded text
+ */
+fn fold_quoted_lines(lines: []str): str {
+    if lines.len == 0 { return "" }
+    var out: []byte = bytes_of_str(lines[0])
+    var blank_run: u64 = 0
+    var i: u64 = 1
+    loop {
+        if i >= lines.len { break }
+        if lines[i].len == 0 {
+            blank_run = blank_run + 1
+        } else if blank_run == 0 {
+            out = teko::list::push(out, b' ')
+            out = append_all(out, bytes_of_str(lines[i]))
+        } else {
+            var k: u64 = 0
+            loop {
+                if k >= blank_run { break }
+                out = teko::list::push(out, b'\n')
+                k = k + 1
+            }
+            out = append_all(out, bytes_of_str(lines[i]))
+            blank_run = 0
+        }
+        i = i + 1
+    }
+    var k2: u64 = 0
+    loop {
+        if k2 >= blank_run { break }
+        out = teko::list::push(out, b'\n')
+        k2 = k2 + 1
+    }
+    str(out)
+}
+
+/**
+ * Decodes one double-quoted-string escape sequence at `input[at]` (`input[at] == '\\'`). Supports
+ * the common short escapes (`\" \\ \/ \0 \a \b \t \n \v \f \r \e`), `\xXX`/`\uXXXX`/`\UXXXXXXXX`
+ * hex/Unicode escapes, and — handled by the caller, not here — the `\` immediately before a newline
+ * hard line-continuation.
+ *
+ * @param input  the source bytes
+ * @param at     the offset of the escape's leading `\`
+ * @return       the decoded bytes and the offset just past the escape, or `error`
+ */
+fn decode_double_escape(input: []byte, at: u64): YamlEscStep | error {
+    if at + 1 >= input.len { return yaml_error("unterminated escape sequence", at) }
+    var esc = input[at + 1]
+    if esc == b'"' { return YamlEscStep { bytes = one_byte_slice(b'"'); next = at + 2 } }
+    if esc == b'\\' { return YamlEscStep { bytes = one_byte_slice(b'\\'); next = at + 2 } }
+    if esc == b'/' { return YamlEscStep { bytes = one_byte_slice(b'/'); next = at + 2 } }
+    if esc == b'0' { return YamlEscStep { bytes = one_byte_slice(0x00 to byte); next = at + 2 } }
+    if esc == b'a' { return YamlEscStep { bytes = one_byte_slice(0x07 to byte); next = at + 2 } }
+    if esc == b'b' { return YamlEscStep { bytes = one_byte_slice(0x08 to byte); next = at + 2 } }
+    if esc == b't' { return YamlEscStep { bytes = one_byte_slice(0x09 to byte); next = at + 2 } }
+    if esc == b'n' { return YamlEscStep { bytes = one_byte_slice(0x0A to byte); next = at + 2 } }
+    if esc == b'v' { return YamlEscStep { bytes = one_byte_slice(0x0B to byte); next = at + 2 } }
+    if esc == b'f' { return YamlEscStep { bytes = one_byte_slice(0x0C to byte); next = at + 2 } }
+    if esc == b'r' { return YamlEscStep { bytes = one_byte_slice(0x0D to byte); next = at + 2 } }
+    if esc == b'e' { return YamlEscStep { bytes = one_byte_slice(0x1B to byte); next = at + 2 } }
+    if esc == b'x' {
+        var cp = match read_hex_n(input, at + 2, 2) { u32 as c => c; error as e => return e }
+        return YamlEscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp); next = at + 4 }
+    }
+    if esc == b'u' {
+        var cp2 = match read_hex_n(input, at + 2, 4) { u32 as c => c; error as e => return e }
+        if cp2 >= 0xD800 && cp2 <= 0xDFFF { return yaml_error("invalid unicode scalar value in \\u escape", at) }
+        return YamlEscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp2); next = at + 6 }
+    }
+    if esc == b'U' {
+        var cp3 = match read_hex_n(input, at + 2, 8) { u32 as c => c; error as e => return e }
+        if cp3 > 0x10FFFF || (cp3 >= 0xD800 && cp3 <= 0xDFFF) { return yaml_error("invalid unicode scalar value in \\U escape", at) }
+        return YamlEscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp3); next = at + 10 }
+    }
+    yaml_error("invalid escape sequence", at)
+}
+
+/**
+ * Reads exactly `n` ASCII hex digits starting at `pos`, returning their value.
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the first hex digit
+ * @param n      how many hex digits to read
+ * @return       the assembled value, or `error` when truncated or non-hex
+ */
+fn read_hex_n(input: []byte, pos: u64, n: u64): u32 | error {
+    if pos + n > input.len { return yaml_error("truncated escape", pos) }
+    var v: u32 = 0
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var d = radix_digit_value(input[pos + i])
+        if d < 0 { return yaml_error("invalid hex digit in escape", pos + i) }
+        v = (v * 16) + (d to u32)
+        i = i + 1
+    }
+    v
+}
+
+/**
+ * Parses a double-quoted scalar (input positioned at the opening `"`), decoding every escape and
+ * folding across any interior physical newline the same way `fold_quoted_lines` does — with one
+ * extra double-quote-only rule: a `\` immediately before a newline is a HARD line continuation (the
+ * newline and the following line's leading whitespace are both consumed with no fold artifact at
+ * all, matching the YAML spec's `\`-escaped line break).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the opening `"`
+ * @return       the decoded text and the offset just past the closing `"`, or `error`
+ */
+fn parse_double_quoted(input: []byte, pos: u64): YamlTextStep | error {
+    var at = pos + 1
+    var raw_lines: []str = teko::list::empty()
+    var cur: []byte = teko::list::empty()
+    loop {
+        if at >= input.len { return yaml_error("unterminated double-quoted string", at) }
+        var b = input[at]
+        if b == b'"' {
+            raw_lines = teko::list::push(raw_lines, str(cur))
+            return YamlTextStep { text = fold_quoted_lines(raw_lines); next = at + 1 }
+        }
+        if b == b'\n' {
+            raw_lines = teko::list::push(raw_lines, str(cur))
+            cur = teko::list::empty()
+            at = skip_inline_ws(input, at + 1)
+            continue
+        }
+        if b == b'\\' {
+            if at + 1 < input.len && input[at + 1] == b'\n' {
+                at = skip_inline_ws(input, at + 2)
+                continue
+            }
+            var step = match decode_double_escape(input, at) { YamlEscStep as e2 => e2; error as e => return e }
+            cur = append_all(cur, step.bytes)
+            at = step.next
+            continue
+        }
+        cur = teko::list::push(cur, b)
+        at = at + 1
+    }
+    yaml_error("unreachable", at)
+}
+
+/**
+ * Parses a single-quoted scalar (input positioned at the opening `'`) — no `\` escape processing at
+ * all (a `\` is ordinary content); a literal quote is written as a doubled `''`. Folds across any
+ * interior physical newline the same way `parse_double_quoted` does (minus the hard-continuation
+ * rule, which is double-quote-only).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the opening `'`
+ * @return       the decoded text and the offset just past the closing `'`, or `error`
+ */
+fn parse_single_quoted(input: []byte, pos: u64): YamlTextStep | error {
+    var at = pos + 1
+    var raw_lines: []str = teko::list::empty()
+    var cur: []byte = teko::list::empty()
+    loop {
+        if at >= input.len { return yaml_error("unterminated single-quoted string", at) }
+        var b = input[at]
+        if b == b'\'' {
+            if at + 1 < input.len && input[at + 1] == b'\'' {
+                cur = teko::list::push(cur, b'\'')
+                at = at + 2
+                continue
+            }
+            raw_lines = teko::list::push(raw_lines, str(cur))
+            return YamlTextStep { text = fold_quoted_lines(raw_lines); next = at + 1 }
+        }
+        if b == b'\n' {
+            raw_lines = teko::list::push(raw_lines, str(cur))
+            cur = teko::list::empty()
+            at = skip_inline_ws(input, at + 1)
+            continue
+        }
+        cur = teko::list::push(cur, b)
+        at = at + 1
+    }
+    yaml_error("unreachable", at)
+}
+
+/**
+ * Scans a plain (unquoted) BLOCK-context scalar's content on one physical line: from `start`
+ * (already at the first non-space byte) to a `#` comment (one preceded by whitespace) or the line's
+ * end, trimmed of trailing whitespace.
+ *
+ * @param input     the source bytes
+ * @param start     the offset of the line's first content byte
+ * @param line_end  the line's terminating `\n` offset (or `input.len`)
+ * @return          the trimmed content text
+ */
+fn scan_plain_line_content(input: []byte, start: u64, line_end: u64): str {
+    var end = line_end
+    var i = start
+    loop {
+        if i >= end { break }
+        if input[i] == b'#' && (i == start || is_blank_byte(input[i - 1])) { end = i; break }
+        i = i + 1
+    }
+    trim_trailing_ws_slice(input, start, end)
+}
+
+/**
+ * Scans a plain BLOCK-context scalar's CONTINUATION lines starting at `cursor` (a line start):
+ * blank lines are tentatively buffered (they fold to newlines if content follows), a whole-line
+ * comment, a dedent to `indent` or less, or a line that ITSELF looks like an implicit mapping key
+ * (`key:`/`key: value` — YAML forbids a plain scalar from ever containing an unquoted `: `, even
+ * across a folded continuation line) ends the scalar (giving any still-pending blank lines back to
+ * the caller, since trailing blank lines never belong to the scalar), and any other line —
+ * necessarily indented more than `indent` — contributes its trimmed content and keeps scanning.
+ *
+ * @param input   the source bytes
+ * @param cursor  the offset to start scanning from (a line start)
+ * @param indent  the enclosing construct's indent (the dedent floor)
+ * @return        the continuation lines found (`""` marking a folded blank line) and the offset to
+ *                resume outer parsing at
+ */
+fn plain_continuation_scan(input: []byte, cursor: u64, indent: u64): YamlLinesStep {
+    var lines: []str = teko::list::empty()
+    var pos = cursor
+    var resume = cursor
+    var pending_blanks: u64 = 0
+    loop {
+        if pos >= input.len { break }
+        var line_end = line_end_of(input, pos)
+        var lc = leading_space_count(input, pos, line_end)
+        var content_start = pos + lc
+        if is_blank_or_comment_line(input, content_start, line_end) {
+            if content_start == line_end {
+                pending_blanks = pending_blanks + 1
+                pos = advance_past_newline(input, line_end)
+                continue
+            }
+            break
+        }
+        if lc <= indent { break }
+        var looks_like_key = match try_scan_key(input, content_start, line_end) { YamlTextStep => true; null => false }
+        if looks_like_key { break }
+        var k: u64 = 0
+        loop {
+            if k >= pending_blanks { break }
+            lines = teko::list::push(lines, "")
+            k = k + 1
+        }
+        pending_blanks = 0
+        lines = teko::list::push(lines, scan_plain_line_content(input, content_start, line_end))
+        pos = advance_past_newline(input, line_end)
+        resume = pos
+    }
+    YamlLinesStep { lines = lines; next = resume }
+}
+
+/**
+ * Parses a plain (unquoted) BLOCK-context scalar starting at `pos`: its first line's content, plus
+ * any folded continuation lines (`plain_continuation_scan`). The returned text is UNRESOLVED raw
+ * text — the caller applies `resolve_scalar` to it.
+ *
+ * @param input   the source bytes
+ * @param pos     the offset of the scalar's first byte
+ * @param indent  the enclosing construct's indent
+ * @return        the raw scalar text and the offset of the next unconsumed line
+ */
+fn parse_plain_scalar(input: []byte, pos: u64, indent: u64): YamlTextStep {
+    var first_line_end = line_end_of(input, pos)
+    var first_text = scan_plain_line_content(input, pos, first_line_end)
+    var cursor = advance_past_newline(input, first_line_end)
+    var continuation = plain_continuation_scan(input, cursor, indent)
+    if continuation.lines.len == 0 { return YamlTextStep { text = first_text; next = cursor } }
+    var all_lines = teko::list::push(teko::list::empty(), first_text)
+    var i: u64 = 0
+    loop {
+        if i >= continuation.lines.len { break }
+        all_lines = teko::list::push(all_lines, continuation.lines[i])
+        i = i + 1
+    }
+    YamlTextStep { text = fold_quoted_lines(all_lines); next = continuation.next }
+}
+
+/**
+ * Scans a plain FLOW-context scalar starting at `pos`: raw text up to the first unquoted `,`, `[`,
+ * `]`, `{`, `}`, `#`-comment, newline, or a `:` that is itself followed by whitespace/end-of-input
+ * or one of those flow indicators (an unspaced `:` inside a token, e.g. `12:30:00`, stays part of
+ * the scalar). Single-line only in this subset (see the module doc's DEFERRALS).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the scalar's first byte
+ * @return       the trimmed raw text and the offset just past it, or `error` when empty
+ */
+fn parse_flow_plain_scalar(input: []byte, pos: u64): YamlTextStep | error {
+    var i = pos
+    loop {
+        if i >= input.len { break }
+        var b = input[i]
+        if b == b',' || b == b'[' || b == b']' || b == b'{' || b == b'}' || b == b'\n' { break }
+        if b == b':' && (i + 1 >= input.len || is_blank_byte(input[i + 1]) || input[i + 1] == b',' || input[i + 1] == b'[' || input[i + 1] == b']' || input[i + 1] == b'{' || input[i + 1] == b'}') { break }
+        if b == b'#' && (i == pos || is_blank_byte(input[i - 1])) { break }
+        i = i + 1
+    }
+    var text = trim_trailing_ws_slice(input, pos, i)
+    if text.len == 0 { return yaml_error("expected a value in flow collection", pos) }
+    YamlTextStep { text = text; next = i }
+}
+
+/**
+ * Parses one FLOW-context node at `pos`: an optional `&anchor` prefix, then an alias, a nested flow
+ * collection, a quoted scalar, or a plain flow scalar.
+ *
+ * @param input    the source bytes
+ * @param pos      the offset of the element's first byte
+ * @param anchors  the live anchor table
+ * @return         the parsed value and the offset just past it, or `error`
+ */
+fn parse_flow_element(input: []byte, pos: u64, anchors: YamlAnchors): YamlNodeStep | error {
+    var at = skip_flow_ws(input, pos)
+    if at >= input.len { return yaml_error("expected a value in flow collection", at) }
+    var anchor_name = ""
+    if input[at] == b'&' {
+        var name_step = match scan_flow_token_name(input, at + 1) { YamlTextStep as s => s; error as e => return e }
+        anchor_name = name_step.text
+        at = skip_flow_ws(input, name_step.next)
+    }
+    if at < input.len && input[at] == b'!' { return yaml_error("explicit YAML tags are not supported in this subset", at) }
+    if at < input.len && input[at] == b'*' {
+        var alias_step = match scan_flow_token_name(input, at + 1) { YamlTextStep as s => s; error as e => return e }
+        var resolved = match anchors.resolve(alias_step.text) { YamlValue as v => v; error as e => return e }
+        return YamlNodeStep { value = resolved; next = alias_step.next }
+    }
+    var resolved_step = match parse_flow_dispatch(input, at, anchors) { YamlNodeStep as s => s; error as e => return e }
+    if anchor_name.len > 0 { anchors.define(anchor_name, resolved_step.value) }
+    resolved_step
+}
+
+/**
+ * Dispatches one FLOW-context value (after any `&anchor`/alias prefix has already been consumed by
+ * the caller): a nested `{ }`/`[ ]` collection, a quoted scalar, or a plain flow scalar (resolved
+ * through the core schema).
+ *
+ * @param input    the source bytes
+ * @param at       the offset of the value's first byte
+ * @param anchors  the live anchor table
+ * @return         the parsed value and the offset just past it, or `error`
+ */
+fn parse_flow_dispatch(input: []byte, at: u64, anchors: YamlAnchors): YamlNodeStep | error {
+    if at >= input.len { return yaml_error("expected a value in flow collection", at) }
+    if input[at] == b'{' { return parse_flow_map(input, at, anchors) }
+    if input[at] == b'[' { return parse_flow_seq(input, at, anchors) }
+    if input[at] == b'"' {
+        var dq = match parse_double_quoted(input, at) { YamlTextStep as s => s; error as e => return e }
+        return YamlNodeStep { value = yaml_string(dq.text); next = dq.next }
+    }
+    if input[at] == b'\'' {
+        var sq = match parse_single_quoted(input, at) { YamlTextStep as s => s; error as e => return e }
+        return YamlNodeStep { value = yaml_string(sq.text); next = sq.next }
+    }
+    var plain = match parse_flow_plain_scalar(input, at) { YamlTextStep as s => s; error as e => return e }
+    YamlNodeStep { value = resolve_scalar(plain.text); next = plain.next }
+}
+
+/**
+ * Scans an anchor/alias name in FLOW context (byte-position based, unlike `scan_token_name`'s
+ * line-bounded scan).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the name's first byte
+ * @return       the name and the offset just past it, or `error` when empty
+ */
+fn scan_flow_token_name(input: []byte, pos: u64): YamlTextStep | error {
+    var i = pos
+    loop {
+        if i < input.len && is_name_char(input[i]) { i = i + 1; continue }
+        break
+    }
+    if i == pos { return yaml_error("expected an anchor/alias name", pos) }
+    YamlTextStep { text = slice_bytes_str(input, pos, i); next = i }
+}
+
+/**
+ * Parses a flow key's text: a quoted scalar decoded normally, or a plain run of text taken
+ * VERBATIM (never core-schema resolved — a flow mapping's key is always this unit's `str` key type,
+ * see `teko::encoding::yaml::YamlValue.keys`). A `{`/`[` at `pos` (a complex, non-scalar key) is a
+ * checked error (see the module doc's DEFERRALS).
+ *
+ * @param input  the source bytes
+ * @param pos    the offset of the key's first byte
+ * @return       the key text and the offset just past it, or `error`
+ */
+fn parse_flow_key_text(input: []byte, pos: u64): YamlTextStep | error {
+    if pos >= input.len { return yaml_error("expected a key in flow mapping", pos) }
+    if input[pos] == b'{' || input[pos] == b'[' { return yaml_error("complex (collection) mapping keys are not supported", pos) }
+    if input[pos] == b'"' { return parse_double_quoted(input, pos) }
+    if input[pos] == b'\'' { return parse_single_quoted(input, pos) }
+    parse_flow_plain_scalar(input, pos)
+}
+
+/**
+ * Parses a flow sequence `[ ... ]` (input positioned at the opening `[`), free interior whitespace
+ * and comments allowed between elements, with a trailing comma before the closing `]` permitted.
+ *
+ * @param input    the source bytes
+ * @param pos      the offset of the opening `[`
+ * @param anchors  the live anchor table
+ * @return         the sequence value and the offset just past the closing `]`, or `error`
+ */
+fn parse_flow_seq(input: []byte, pos: u64, anchors: YamlAnchors): YamlNodeStep | error {
+    var at = skip_flow_ws(input, pos + 1)
+    var items: []YamlValue = teko::list::empty()
+    if at < input.len && input[at] == b']' { return YamlNodeStep { value = yaml_seq(items); next = at + 1 } }
+    loop {
+        var el = match parse_flow_element(input, at, anchors) { YamlNodeStep as s => s; error as e => return e }
+        items = teko::list::push(items, el.value)
+        at = skip_flow_ws(input, el.next)
+        if at < input.len && input[at] == b',' {
+            at = skip_flow_ws(input, at + 1)
+            if at < input.len && input[at] == b']' { return YamlNodeStep { value = yaml_seq(items); next = at + 1 } }
+            continue
+        }
+        if at < input.len && input[at] == b']' { return YamlNodeStep { value = yaml_seq(items); next = at + 1 } }
+        return yaml_error("expected ',' or ']' in flow sequence", at)
+    }
+    yaml_error("unreachable", at)
+}
+
+/**
+ * Parses a flow mapping `{ ... }` (input positioned at the opening `{`), free interior whitespace
+ * and comments allowed, with a trailing comma before the closing `}` permitted.
+ *
+ * @param input    the source bytes
+ * @param pos      the offset of the opening `{`
+ * @param anchors  the live anchor table
+ * @return         the mapping value and the offset just past the closing `}`, or `error`
+ */
+fn parse_flow_map(input: []byte, pos: u64, anchors: YamlAnchors): YamlNodeStep | error {
+    var at = skip_flow_ws(input, pos + 1)
+    var map = yaml_map_empty()
+    if at < input.len && input[at] == b'}' { return YamlNodeStep { value = map; next = at + 1 } }
+    loop {
+        var key_step = match parse_flow_key_text(input, at) { YamlTextStep as s => s; error as e => return e }
+        var at2 = skip_flow_ws(input, key_step.next)
+        if at2 >= input.len || input[at2] != b':' { return yaml_error("expected ':' in flow mapping", at2) }
+        at2 = skip_flow_ws(input, at2 + 1)
+        var val_step = match parse_flow_element(input, at2, anchors) { YamlNodeStep as s => s; error as e => return e }
+        map = yaml_map_set(map, key_step.text, val_step.value)
+        at = skip_flow_ws(input, val_step.next)
+        if at < input.len && input[at] == b',' {
+            at = skip_flow_ws(input, at + 1)
+            if at < input.len && input[at] == b'}' { return YamlNodeStep { value = map; next = at + 1 } }
+            continue
+        }
+        if at < input.len && input[at] == b'}' { return YamlNodeStep { value = map; next = at + 1 } }
+        return yaml_error("expected ',' or '}' in flow mapping", at)
+    }
+    yaml_error("unreachable", at)
+}
+
+/**
+ * Parses the value after an optional `&anchor` prefix, following an implicit-mapping key or a
+ * sequence-entry `-` (input positioned right after the key's `:`/its whitespace, or the `-`'s
+ * whitespace): an alias, a `|`/`>` block scalar, a nested flow collection, a quoted scalar, or a
+ * plain scalar — falling back to a following more-indented line (or `null`) when nothing remains on
+ * the current line. This is the ONE place `&anchor`/`*alias`/tag detection happens, shared by every
+ * value position in the grammar.
+ *
+ * @param input    the source bytes
+ * @param pos      the offset to start scanning the value at
+ * @param cur      the line this value position appears on
+ * @param indent   the enclosing construct's indent
+ * @param anchors  the live anchor table
+ * @return         the parsed value and the offset of the next unconsumed line, or `error`
+ */
+fn parse_value_after_indicator(input: []byte, pos: u64, cur: YamlLineInfo, indent: u64, anchors: YamlAnchors): YamlNodeStep | error {
+    var at = pos
+    var anchor_name = ""
+    if at < cur.line_end && input[at] == b'&' {
+        var name_step = match scan_token_name(input, at + 1, cur.line_end) { YamlTextStep as s => s; error as e => return e }
+        anchor_name = name_step.text
+        at = skip_inline_ws(input, name_step.next)
+    }
+    if at < cur.line_end && input[at] == b'!' { return yaml_error("explicit YAML tags are not supported in this subset", at) }
+    if at >= cur.line_end || input[at] == b'#' { return value_from_following_line(input, cur, indent, anchors, anchor_name) }
+    if input[at] == b'*' {
+        var alias_step = match scan_token_name(input, at + 1, cur.line_end) { YamlTextStep as s => s; error as e => return e }
+        var resolved = match anchors.resolve(alias_step.text) { YamlValue as v => v; error as e => return e }
+        var after = match expect_line_end(input, alias_step.next) { u64 as p => p; error as e => return e }
+        return YamlNodeStep { value = resolved; next = after }
+    }
+    if input[at] == b'|' || input[at] == b'>' {
+        var block_step = match parse_block_scalar(input, at, cur, indent) { YamlTextStep as s => s; error as e => return e }
+        var bv = yaml_string(block_step.text)
+        if anchor_name.len > 0 { anchors.define(anchor_name, bv) }
+        return YamlNodeStep { value = bv; next = block_step.next }
+    }
+    if input[at] == b'{' || input[at] == b'[' {
+        var flow_step = match parse_flow_dispatch(input, at, anchors) { YamlNodeStep as s => s; error as e => return e }
+        var after2 = match expect_line_end(input, flow_step.next) { u64 as p => p; error as e => return e }
+        if anchor_name.len > 0 { anchors.define(anchor_name, flow_step.value) }
+        return YamlNodeStep { value = flow_step.value; next = after2 }
+    }
+    if input[at] == b'\'' || input[at] == b'"' {
+        var quote_step = if input[at] == b'\'' {
+            match parse_single_quoted(input, at) { YamlTextStep as s => s; error as e => return e }
+        } else {
+            match parse_double_quoted(input, at) { YamlTextStep as s => s; error as e => return e }
+        }
+        var sv = yaml_string(quote_step.text)
+        var after3 = match expect_line_end(input, quote_step.next) { u64 as p => p; error as e => return e }
+        if anchor_name.len > 0 { anchors.define(anchor_name, sv) }
+        return YamlNodeStep { value = sv; next = after3 }
+    }
+    var plain_step = parse_plain_scalar(input, at, indent)
+    var pv = resolve_scalar(plain_step.text)
+    if anchor_name.len > 0 { anchors.define(anchor_name, pv) }
+    YamlNodeStep { value = pv; next = plain_step.next }
+}
+
+/**
+ * Resolves a value position that had nothing left on its own line (after an optional bare
+ * `&anchor`, or no indicator at all): either the following more-indented line's node, or `null`
+ * when no such line exists.
+ *
+ * @param input        the source bytes
+ * @param cur          the line the (now-exhausted) value position appeared on
+ * @param indent       the enclosing construct's indent
+ * @param anchors      the live anchor table
+ * @param anchor_name  the anchor name to bind the resolved value under, or `""` for none
+ * @return             the resolved value and the offset of the next unconsumed line, or `error`
+ */
+fn value_from_following_line(input: []byte, cur: YamlLineInfo, indent: u64, anchors: YamlAnchors, anchor_name: str): YamlNodeStep | error {
+    var next_li = next_content_line(input, line_start_after(input, cur))
+    if valid_child(next_li, indent) {
+        var child = match parse_node(input, next_li, anchors) { YamlNodeStep as s => s; error as e => return e }
+        if anchor_name.len > 0 { anchors.define(anchor_name, child.value) }
+        return child
+    }
+    var nullv = yaml_null()
+    if anchor_name.len > 0 { anchors.define(anchor_name, nullv) }
+    YamlNodeStep { value = nullv; next = line_start_after(input, cur) }
+}
+
+/**
+ * Parses a block mapping starting at `li` (already confirmed by the caller to be a key line):
+ * repeatedly reads `key: value` entries at `li`'s own indent, stopping at end of input, a document
+ * marker, or a dedent.
+ *
+ * @param input    the source bytes
+ * @param li       the mapping's first key line
+ * @param anchors  the live anchor table
+ * @return         the mapping value and the offset of the next unconsumed line, or `error`
+ */
+fn parse_block_map(input: []byte, li: YamlLineInfo, anchors: YamlAnchors): YamlNodeStep | error {
+    var indent = li.indent
+    var map = yaml_map_empty()
+    var cur = li
+    loop {
+        var key_step = match try_scan_key(input, cur.content_start, cur.line_end) { YamlTextStep as k => k; null => return yaml_error("expected 'key:' in mapping", cur.content_start) }
+        var val_start = skip_inline_ws(input, key_step.next)
+        var resolved = if val_start >= cur.line_end || input[val_start] == b'#' {
+            value_from_following_line(input, cur, indent, anchors, "")
+        } else {
+            parse_value_after_indicator(input, val_start, cur, indent, anchors)
+        }
+        var step = match resolved { YamlNodeStep as s => s; error as e => return e }
+        map = yaml_map_set(map, key_step.text, step.value)
+        var next_li2 = next_content_line(input, step.next)
+        if next_li2.eof || is_marker_line(next_li2) || next_li2.indent != indent { return YamlNodeStep { value = map; next = step.next } }
+        cur = next_li2
+    }
+    yaml_error("unreachable", li.content_start)
+}
+
+/**
+ * Parses a block sequence starting at `li` (already confirmed by the caller to be a `-` line):
+ * repeatedly reads entries at `li`'s own indent, each either nesting a following more-indented
+ * block, a compact `- - item` nested sequence, a compact `- key: value` mapping (whose entries
+ * continue at the column right after the `-`), or an inline scalar/flow/quoted value.
+ *
+ * @param input    the source bytes
+ * @param li       the sequence's first `-` line
+ * @param anchors  the live anchor table
+ * @return         the sequence value and the offset of the next unconsumed line, or `error`
+ */
+fn parse_block_seq(input: []byte, li: YamlLineInfo, anchors: YamlAnchors): YamlNodeStep | error {
+    var indent = li.indent
+    var items: []YamlValue = teko::list::empty()
+    var cur = li
+    loop {
+        var step = match parse_seq_entry(input, cur, indent, anchors) { YamlNodeStep as s => s; error as e => return e }
+        items = teko::list::push(items, step.value)
+        var next_li2 = next_content_line(input, step.next)
+        if next_li2.eof || is_marker_line(next_li2) || next_li2.indent != indent { return YamlNodeStep { value = yaml_seq(items); next = step.next } }
+        if !is_dash_line(input, next_li2) { return yaml_error("expected '-' in sequence", next_li2.content_start) }
+        cur = next_li2
+    }
+    yaml_error("unreachable", li.content_start)
+}
+
+/**
+ * Parses one block-sequence entry's value: the compact-notation cases (a nested `- ` sequence or a
+ * `key:` mapping right after the dash) first, then falling back to the generic value grammar
+ * (`parse_value_after_indicator`, which itself falls back to a following more-indented line, or
+ * `null`, when nothing follows the dash).
+ *
+ * @param input    the source bytes
+ * @param cur      the entry's `-` line
+ * @param indent   the sequence's own indent (the dash's column)
+ * @param anchors  the live anchor table
+ * @return         the entry's value and the offset of the next unconsumed line, or `error`
+ */
+fn parse_seq_entry(input: []byte, cur: YamlLineInfo, indent: u64, anchors: YamlAnchors): YamlNodeStep | error {
+    var dash_pos = cur.content_start
+    var after_dash = dash_pos + 1
+    if after_dash < cur.line_end && input[after_dash] != b' ' { return yaml_error("expected a space after '-' in block sequence", after_dash) }
+    var val_start = skip_inline_ws(input, after_dash)
+    if val_start < cur.line_end && input[val_start] != b'#' {
+        if is_dash_at(input, val_start, cur.line_end) {
+            var synthetic = compact_line(cur, val_start)
+            return parse_block_seq(input, synthetic, anchors)
+        }
+        var key_try = try_scan_key(input, val_start, cur.line_end)
+        var is_key = match key_try { YamlTextStep => true; null => false }
+        if is_key {
+            var synthetic2 = compact_line(cur, val_start)
+            return parse_block_map(input, synthetic2, anchors)
+        }
+    }
+    parse_value_after_indicator(input, val_start, cur, indent, anchors)
+}
+
+/**
+ * Builds the synthetic `YamlLineInfo` a compact sequence entry's nested construct (`- - item` or
+ * `- key: value`) parses from: the SAME physical line as `cur`, but with its `indent`/`content_start`
+ * repositioned to `col` (the column right after the dash's own whitespace) — subsequent sibling
+ * lines of that nested construct are real, `col`-indented lines, so comparing against this synthetic
+ * `indent` works uniformly.
+ *
+ * @param cur  the entry's `-` line
+ * @param col  the offset right after the dash and its following whitespace
+ * @return     the synthetic line info for the nested construct
+ */
+fn compact_line(cur: YamlLineInfo, col: u64): YamlLineInfo {
+    YamlLineInfo { line_start = cur.line_start; indent = col - cur.line_start; content_start = col; line_end = cur.line_end; eof = false; is_doc_start = false; is_doc_end = false }
+}
+
+/**
+ * Parses one node at `li`: a block sequence (`li` is a `-` line), a block mapping (`li` is a key
+ * line), or — for anything else — the generic value grammar (`parse_value_after_indicator`, which
+ * handles an anchor prefix, an alias, a block scalar, a flow collection, a quoted scalar, or a
+ * plain scalar).
+ *
+ * @param input    the source bytes
+ * @param li       the node's first line
+ * @param anchors  the live anchor table
+ * @return         the parsed value and the offset of the next unconsumed line, or `error`
+ */
+fn parse_node(input: []byte, li: YamlLineInfo, anchors: YamlAnchors): YamlNodeStep | error {
+    if is_dash_line(input, li) { return parse_block_seq(input, li, anchors) }
+    var key_try = try_scan_key(input, li.content_start, li.line_end)
+    var is_key = match key_try { YamlTextStep => true; null => false }
+    if is_key { return parse_block_map(input, li, anchors) }
+    parse_value_after_indicator(input, li.content_start, li, li.indent, anchors)
+}
+
+/**
+ * Reports whether `text` is one of the core schema's `null` spellings (`""`, `~`, `null`, `Null`,
+ * `NULL`).
+ *
+ * @param s  the plain scalar text
+ * @return   true when `s` resolves to `null`
+ */
+fn is_null_token(s: str): bool {
+    s == "" || s == "~" || s == "null" || s == "Null" || s == "NULL"
+}
+
+/**
+ * Reports whether `text` is one of the core schema's `true` spellings.
+ *
+ * @param s  the plain scalar text
+ * @return   true when `s` resolves to boolean `true`
+ */
+fn is_true_token(s: str): bool {
+    s == "true" || s == "True" || s == "TRUE"
+}
+
+/**
+ * Reports whether `text` is one of the core schema's `false` spellings.
+ *
+ * @param s  the plain scalar text
+ * @return   true when `s` resolves to boolean `false`
+ */
+fn is_false_token(s: str): bool {
+    s == "false" || s == "False" || s == "FALSE"
+}
+
+/**
+ * Folds a magnitude's digits into a `u64`, overflow-checked (`teko::math::checked_mul_u64` /
+ * `checked_add_u64`), or `null` on overflow (a too-large integer literal simply is not a valid
+ * `Int` — `resolve_scalar` then falls through to trying it as a float, and finally a string).
+ *
+ * @param bytes  the digit bytes
+ * @param from   the inclusive start offset
+ * @param to     the exclusive end offset
+ * @param radix  the radix the digits are in
+ * @return       the assembled magnitude, or `null` on overflow
+ */
+fn fold_magnitude(bytes: []byte, from: u64, to: u64, radix: u64): u64 | null {
+    var mag: u64 = 0
+    var i = from
+    loop {
+        if i >= to { break }
+        var d = radix_digit_value(bytes[i])
+        if d < 0 { return null }
+        var m1 = match teko::math::checked_mul_u64(mag, radix) { u64 as m => m; error => return null }
+        var m2 = match teko::math::checked_add_u64(m1, d to u64) { u64 as m => m; error => return null }
+        mag = m2
+        i = i + 1
+    }
+    mag
+}
+
+/**
+ * Applies a sign to a non-negative magnitude, producing a valid `i64` without ever casting a
+ * bit-pattern that doesn't fit its target width (mirrors
+ * `teko::encoding::toml::decimal_magnitude_to_i64`).
+ *
+ * @param mag  the non-negative magnitude
+ * @param neg  whether the literal had a leading `-`
+ * @return     the signed value, or `null` when `mag` is out of the `i64` range for its sign
+ */
+fn apply_int_sign(mag: u64, neg: bool): i64 | null {
+    var i64_max_u: u64 = 9223372036854775807
+    var i64_min_mag: u64 = 9223372036854775808
+    if !neg {
+        if mag > i64_max_u { return null }
+        return mag to i64
+    }
+    if mag == i64_min_mag { return teko::math::i64_min() }
+    if mag > i64_min_mag { return null }
+    var pos_i = mag to i64
+    -pos_i
+}
+
+/**
+ * Attempts to parse `text` as a core-schema YAML integer: an optional sign, then a `0x` hex, `0o`
+ * octal, or plain decimal digit run (decimal NEVER treats a leading zero as octal — see the module
+ * doc's NAMED SEAM #2). Returns `null` (never `error`) when `text` does not look like an integer at
+ * all, or is one that overflows `i64` — either way `resolve_scalar` falls through to the next
+ * candidate kind.
+ *
+ * @param text  the plain scalar text
+ * @return      the parsed value, or `null`
+ */
+fn try_parse_yaml_int(text: str): i64 | null {
+    var bytes = bytes_of_str(text)
+    if bytes.len == 0 { return null }
+    var neg = bytes[0] == b'-'
+    var i: u64 = if bytes[0] == b'+' || bytes[0] == b'-' { 1 } else { 0 }
+    if i >= bytes.len { return null }
+    if i + 1 < bytes.len && bytes[i] == b'0' && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
+        if i + 2 >= bytes.len { return null }
+        var mag = match fold_magnitude(bytes, i + 2, bytes.len, 16) { u64 as m => m; null => return null }
+        return apply_int_sign(mag, neg)
+    }
+    if i + 1 < bytes.len && bytes[i] == b'0' && (bytes[i + 1] == b'o' || bytes[i + 1] == b'O') {
+        if i + 2 >= bytes.len { return null }
+        var mag2 = match fold_magnitude(bytes, i + 2, bytes.len, 8) { u64 as m => m; null => return null }
+        return apply_int_sign(mag2, neg)
+    }
+    var mag3 = match fold_magnitude(bytes, i, bytes.len, 10) { u64 as m => m; null => return null }
+    apply_int_sign(mag3, neg)
+}
+
+/**
+ * Recognizes the core schema's special float spellings: `.inf`/`.Inf`/`.INF` (optionally signed) and
+ * `.nan`/`.NaN`/`.NAN`.
+ *
+ * @param text  the plain scalar text
+ * @return      the special value, or `null` when `text` is not one of these exact spellings
+ */
+fn try_parse_special_float(text: str): f64 | null {
+    if text == ".inf" || text == ".Inf" || text == ".INF" || text == "+.inf" || text == "+.Inf" || text == "+.INF" { return teko::math::inf() }
+    if text == "-.inf" || text == "-.Inf" || text == "-.INF" { return -teko::math::inf() }
+    if text == ".nan" || text == ".NaN" || text == ".NAN" { return teko::math::nan() }
+    null
+}
+
+/**
+ * Reports whether `text` has the shape of a core-schema decimal float literal: an optional sign,
+ * then digits with a `.` (fraction), OR digits with an exponent (`[eE][+-]?digits`) — an integer
+ * with neither is rejected here (it is not a float; `resolve_scalar` tries `try_parse_yaml_int`
+ * first, so a plain integer never reaches this check anyway).
+ *
+ * @param text  the plain scalar text
+ * @return      true when `text` has float shape
+ */
+fn looks_like_float_shape(text: str): bool {
+    var bytes = bytes_of_str(text)
+    if bytes.len == 0 { return false }
+    var i: u64 = if bytes[0] == b'+' || bytes[0] == b'-' { 1 } else { 0 }
+    var digits_before: u64 = 0
+    loop {
+        if i < bytes.len && is_digit_byte(bytes[i]) { i = i + 1; digits_before = digits_before + 1; continue }
+        break
+    }
+    var has_dot = i < bytes.len && bytes[i] == b'.'
+    var digits_after: u64 = 0
+    if has_dot {
+        i = i + 1
+        loop {
+            if i < bytes.len && is_digit_byte(bytes[i]) { i = i + 1; digits_after = digits_after + 1; continue }
+            break
+        }
+    }
+    if digits_before == 0 && digits_after == 0 { return false }
+    var has_exp = i < bytes.len && (bytes[i] == b'e' || bytes[i] == b'E')
+    if !has_dot && !has_exp { return false }
+    if has_exp {
+        i = i + 1
+        if i < bytes.len && (bytes[i] == b'+' || bytes[i] == b'-') { i = i + 1 }
+        var exp_digits: u64 = 0
+        loop {
+            if i < bytes.len && is_digit_byte(bytes[i]) { i = i + 1; exp_digits = exp_digits + 1; continue }
+            break
+        }
+        if exp_digits == 0 { return false }
+    }
+    i == bytes.len
+}
+
+/**
+ * Attempts to parse `text` as a core-schema YAML float: the special `.inf`/`.nan` spellings first,
+ * then a general decimal float shape (`looks_like_float_shape`) delegated to `teko::float::parse`.
+ *
+ * @param text  the plain scalar text
+ * @return      the parsed value, or `null` when `text` does not look like a float
+ */
+fn try_parse_yaml_float(text: str): f64 | null {
+    match try_parse_special_float(text) { f64 as v => return v; null => { } }
+    if !looks_like_float_shape(text) { return null }
+    teko::float::parse(text)
+}
+
+/**
+ * Resolves a plain scalar's raw text through the YAML 1.2 CORE SCHEMA (see the module doc's NAMED
+ * SEAM #2): `null`, `bool`, `int`, `float`, else a plain string. A QUOTED scalar never goes through
+ * this function — its text is always a `Str` regardless of what it looks like.
+ *
+ * @param text  the plain scalar's raw text
+ * @return      the resolved value
+ */
+fn resolve_scalar(text: str): YamlValue {
+    if is_null_token(text) { return yaml_null() }
+    if is_true_token(text) { return yaml_bool(true) }
+    if is_false_token(text) { return yaml_bool(false) }
+    match try_parse_yaml_int(text) { i64 as v => return yaml_int(v); null => { } }
+    match try_parse_yaml_float(text) { f64 as v => return yaml_float(v); null => { } }
+    yaml_string(text)
+}
+
+/**
+ * Parses one document's root node starting at `li`, in a fresh anchor table (anchors never persist
+ * across a `---` document boundary).
+ *
+ * @param input  the source bytes
+ * @param li     the document root's first line
+ * @return       the document's value and the offset of the next unconsumed line, or `error`
+ */
+fn parse_doc_node(input: []byte, li: YamlLineInfo): YamlNodeStep | error {
+    var anchors = YamlAnchors::make()
+    parse_node(input, li, anchors)
+}
+
+/**
+ * Parses `text` as a `---`/`...`-separated stream of zero or more YAML documents, in source order.
+ * An input with no explicit document markers at all is a single IMPLICIT document — its root
+ * construct may only ever be ONE mapping/sequence/scalar; once that root construct's own dedent
+ * ends it, any further un-marked top-level content is a checked error (a stream needs an explicit
+ * `---` to introduce a second document — content just left dangling at column 0 is malformed, not a
+ * second implicit document). A wholly empty/whitespace-only input yields an empty slice (see
+ * `parse_yaml` for the single-document empty-input convention).
+ *
+ * @param text  the document source text
+ * @return      every document's root value, in order, or `error` on any malformed or
+ *              unsupported-construct input
+ */
+exp fn parse_yaml_all(text: str): []YamlValue | error {
+    var input = strip_cr_bytes(bytes_of_str(text))
+    var docs: []YamlValue = teko::list::empty()
+    var pos: u64 = 0
+    loop {
+        var li = next_content_line(input, pos)
+        if li.eof { break }
+        if li.is_doc_end {
+            pos = line_start_after(input, li)
+            continue
+        }
+        if li.is_doc_start {
+            var inline_start = skip_inline_ws(input, li.content_start + 3)
+            if inline_start < li.line_end && input[inline_start] != b'#' {
+                var inline_li = compact_line(li, inline_start)
+                var step = match parse_doc_node(input, inline_li) { YamlNodeStep as s => s; error as e => return e }
+                docs = teko::list::push(docs, step.value)
+                pos = step.next
+                continue
+            }
+            var after_marker = line_start_after(input, li)
+            var next_li = next_content_line(input, after_marker)
+            if next_li.eof || is_marker_line(next_li) {
+                docs = teko::list::push(docs, yaml_null())
+                pos = after_marker
+                continue
+            }
+            var step2 = match parse_doc_node(input, next_li) { YamlNodeStep as s => s; error as e => return e }
+            docs = teko::list::push(docs, step2.value)
+            pos = step2.next
+            continue
+        }
+        if docs.len > 0 { return yaml_error("expected '---' before a new document, or end of input", li.line_start) }
+        var step3 = match parse_doc_node(input, li) { YamlNodeStep as s => s; error as e => return e }
+        docs = teko::list::push(docs, step3.value)
+        pos = step3.next
+    }
+    docs
+}
+
+/**
+ * Parses `text` as a SINGLE YAML document (the common case). A wholly empty/whitespace-only input
+ * is the YAML `null` document (per spec, an empty stream's implicit document is `null`); an input
+ * containing more than one `---`-separated document is a checked error (use `parse_yaml_all` for a
+ * multi-document stream).
+ *
+ * @param text  the document source text
+ * @return      the document's root value, or `error` on malformed input, an unsupported construct,
+ *              or more than one document
+ */
+exp fn parse_yaml(text: str): YamlValue | error {
+    var docs = match parse_yaml_all(text) { []YamlValue as ds => ds; error as e => return e }
+    if docs.len == 0 { return yaml_null() }
+    if docs.len > 1 { return semantic_error("multiple YAML documents found; use parse_yaml_all") }
+    docs[0]
+}
