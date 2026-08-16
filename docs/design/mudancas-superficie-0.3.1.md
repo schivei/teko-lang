@@ -1157,13 +1157,17 @@ mecanismo-limpo estão entregues. Os 4 restantes NÃO têm deps resolvidas sem u
   private/pub/exp, "only exp reaches the `.tkh`"); falta **ativar enforcement** + **triagem item-a-item**
   (gated na stdlib pronta). Modelo corrigido em §11.1 (sem `exp`/`pub` = **namespace-local**, não file-local).
 - **§16 — TROCAR TODAS as dependências C por Teko + FFI-do-SO (ruling do dono 2026-08-15, "sem exceções ou
-  desculpas").** §16 = **substituir `src/runtime/teko_rt.c`/`teko_rt.h`/`win32_compat.h` INTEIROS** — as duas
-  metades: o **shim de SO** (I/O/syscalls/`win32_compat`) E o **alocador de arena** (`tk_alloc`/`tk_region_root`)
-  — por **Teko sobre FFI-do-SO** (a arena vira Teko sobre `mmap`/syscalls do target). **Reescrever o que for
-  necessário, sem exceção.** Deps: **§16 → §17** (`#os`/`#arch` pra selecionar o FFI por-target — "17 antes de
-  16") **→ §11**. **TUDO isso é Doc-2, PRÉ-Doc-1.** (Correção: eu tinha inventado um "split §16 / arena=Doc-1 /
-  tensão de native-gate" — ERRADO. A Doc-1 NÃO reconstrói memória; a Doc-1 só **MELHORA** a arena-Teko que o
-  §16 já produziu. Sem circularidade.)
+  desculpas").** §16 = **substituir `src/runtime/teko_rt.c`/`teko_rt.h`/`win32_compat.h` + `src/assert/assert.c`
+  INTEIROS** — as duas metades: o **shim de SO** (I/O/syscalls/`win32_compat`) E o **alocador de arena**
+  (`tk_alloc`/`tk_region_root`) — MAIS o **`assert.c`** (ruling do dono 2026-08-16: "assert.c é outro que ao
+  removermos as deps C precisará ser substituído também" — hoje linkado em TODO artefato ao lado do `teko_rt.c`,
+  logo cai no "SEM EXCEÇÕES") — por **Teko sobre FFI-do-SO** (a arena vira Teko sobre `mmap`/syscalls do target).
+  **Reescrever o que for necessário, sem exceção.** Deps: **§16 → §17** (`#os`/`#arch` pra selecionar o FFI
+  por-target — "17 antes de 16") **→ §11**. **TUDO isso é Doc-2, PRÉ-Doc-1.** (Correção: eu tinha inventado um
+  "split §16 / arena=Doc-1 / tensão de native-gate" — ERRADO. A Doc-1 NÃO reconstrói memória; a Doc-1 só
+  **MELHORA** a arena-Teko que o §16 já produziu. Sem circularidade.) **NOTA §10:** o `-pthread` transitório
+  (spawn C0a) e o `#include <pthread.h>` em `teko_rt.c` também são deps-C que o §16 aposenta — a criação-de-thread
+  vai a FFI-do-SO (`clone`/`pthread` via `extern`, per-target) junto com o resto.
 - **§17 `#if`/`#os`/`#arch`** — `#os` já existe; falta `#arch`/`#if`; gated no §11; **habilita o §16** (vem
   antes dele).
 - **§10 concorrência — 100% DESIGN, 0% IMPLEMENTAÇÃO (checado no código 2026-08-15).** Design fechado
