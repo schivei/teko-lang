@@ -1,0 +1,110 @@
+/**
+ * teko::collections::SortedDictionary<K: IOrd, V> — a growable, reference-semantic map kept in
+ * ascending `K` order (parallel owned `keys`/`vals`), so iteration is sorted and lookup is an
+ * O(log n) binary search over `<` (dispatched through `K: IOrd`) — the ordered dual of `Dictionary`
+ * (which needs `IEq & IHash`; no hashing here). `insert` binary-search-updates a present key in place
+ * or inserts a new `(k, v)` pair at its sorted position.
+ *
+ * @since 0.3.1
+ * @see teko::cmp::IOrd, Dictionary
+ */
+pub type SortedDictionary<K: IOrd, V> = class {
+    /** The keys, strictly ascending by `<` — binary-searchable; parallel to `vals`. */
+    intern keys: []K
+    /** The values, parallel to `keys` (the value for `keys[i]` is `vals[i]`). */
+    intern vals: []V
+
+    /**
+     * Build an empty `SortedDictionary<K, V>` — the generic static factory.
+     *
+     * @return a fresh, empty ordered map at the caller's concrete key/value types
+     */
+    pub static fn make(): SortedDictionary<K, V> {
+        .{ keys = teko::list::empty(); vals = teko::list::empty() }
+    }
+
+    /**
+     * The number of distinct keys currently held.
+     *
+     * @return the entry count
+     */
+    pub fn len(): u64 { self.keys.len }
+
+    /**
+     * Whether the ordered map holds no entries.
+     *
+     * @return `true` iff `len() == 0`
+     */
+    pub fn is_empty(): bool { self.keys.len == 0 }
+
+    /**
+     * Whether `k` is a key in the ordered map (binary search over `<`).
+     *
+     * @param k  the key to test
+     * @return   `true` iff `k` is present
+     */
+    pub fn contains(k: K): bool {
+        var at = sorted_key_lower_bound(self.keys, k)
+        at < self.keys.len && !(k < self.keys[at]) && !(self.keys[at] < k)
+    }
+
+    /**
+     * Insert or update `v` at `k`'s sorted position. A present key's value is overwritten in place
+     * (the entry count is unchanged); otherwise a new `(k, v)` pair is inserted at its sorted
+     * position (both parallel arrays shift up). Reference semantics.
+     *
+     * @param k  the key to insert or update
+     * @param v  the value to associate with `k`
+     */
+    pub fn insert(k: K, v: V) {
+        var at = sorted_key_lower_bound(self.keys, k)
+        if at < self.keys.len && !(k < self.keys[at]) && !(self.keys[at] < k) {
+            self.vals = arr_replace_at(self.vals, at, v)
+            return
+        }
+        self.keys = arr_insert_at(self.keys, at, k)
+        self.vals = arr_insert_at(self.vals, at, v)
+    }
+
+    /**
+     * The value associated with `k`, or `null` when `k` is absent — the null-propagating lookup
+     * (`V?`, the disjoint-domain null path).
+     *
+     * @param k  the key to look up
+     * @return   the associated value, or `null` if `k` is not present
+     */
+    pub fn get(k: K): V | null {
+        var at = sorted_key_lower_bound(self.keys, k)
+        if at >= self.keys.len || k < self.keys[at] || self.keys[at] < k { return null }
+        self.vals[at]
+    }
+
+    /**
+     * A fixed-size `[]K` snapshot of the ordered map's current keys, in ascending order. The returned
+     * array is an independent value; later mutations do not change it.
+     *
+     * @return the current keys as an ascending `[]K` value snapshot
+     */
+    pub fn keys(): []K { self.keys }
+}
+
+/**
+ * The lower-bound index of `k` in the ascending `keys` (over `<`, dispatched through `K: IOrd`): the
+ * first index `i` with `!(keys[i] < k)`, or `keys.len` when `k` is greater than every key. A FREE
+ * generic function (not a private method) per the sibling-link rule; the shared binary search the
+ * `SortedDictionary` `contains`/`insert`/`get` all pivot on.
+ *
+ * @param keys  the ascending key array
+ * @param k     the sought key
+ * @return      the lower-bound index of `k` in `keys`
+ */
+pub fn sorted_key_lower_bound<K: IOrd>(keys: []K, k: K): u64 {
+    var lo: u64 = 0
+    var hi: u64 = keys.len
+    loop {
+        if lo >= hi { break }
+        var mid = lo + (hi - lo) / 2
+        if keys[mid] < k { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}

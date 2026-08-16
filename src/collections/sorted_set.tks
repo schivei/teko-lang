@@ -1,0 +1,74 @@
+/**
+ * teko::collections::SortedSet<T: IOrd> — a growable, reference-semantic set kept in ascending order
+ * by `<` (dispatched through `T: IOrd`), so iteration is sorted and membership is an O(log n) binary
+ * search — the ordered dual of `HashSet` (which needs `IEq & IHash`). The single owned `items` array
+ * stays strictly ascending; `add` binary-search-inserts through the free `sorted_insert` helper and is
+ * idempotent (a present element is a no-op).
+ *
+ * @since 0.3.1
+ * @see teko::cmp::IOrd, HashSet
+ */
+pub type SortedSet<T: IOrd> = class {
+    /** The elements, strictly ascending by `<` — binary-searchable. */
+    intern items: []T
+
+    /**
+     * Build an empty `SortedSet<T>` — the generic static factory.
+     *
+     * @return a fresh, empty ordered set at the caller's concrete `T`
+     */
+    pub static fn make(): SortedSet<T> { .{ items = teko::list::empty() } }
+
+    /**
+     * The number of elements currently held.
+     *
+     * @return the element count
+     */
+    pub fn len(): u64 { self.items.len }
+
+    /**
+     * Whether the set holds no elements.
+     *
+     * @return `true` iff `len() == 0`
+     */
+    pub fn is_empty(): bool { self.items.len == 0 }
+
+    /**
+     * Add `x` at its sorted position if absent (idempotent); reference semantics.
+     *
+     * @param x  the element to add
+     * @return   `true` iff `x` was newly inserted (was absent)
+     */
+    pub fn add(x: T): bool {
+        var arr = self.items
+        var inserted = sorted_insert(&arr, x)
+        self.items = arr
+        inserted
+    }
+
+    /**
+     * Whether `x` is a member (binary search over `<`).
+     *
+     * @param x  the element to test
+     * @return   `true` iff `x` is present
+     */
+    pub fn contains(x: T): bool {
+        var arr = self.items
+        var lo: u64 = 0
+        var hi: u64 = arr.len
+        loop {
+            if lo >= hi { break }
+            var mid = lo + (hi - lo) / 2
+            if arr[mid] < x { lo = mid + 1 } else { hi = mid }
+        }
+        lo < arr.len && !(x < arr[lo]) && !(arr[lo] < x)
+    }
+
+    /**
+     * A fixed-size `[]T` snapshot of the set's current elements, in ascending order. The returned
+     * array is an independent value; later mutations do not change it.
+     *
+     * @return the current elements as an ascending `[]T` value snapshot
+     */
+    pub fn to_array(): []T { self.items }
+}
