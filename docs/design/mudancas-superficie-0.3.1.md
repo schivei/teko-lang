@@ -1343,6 +1343,29 @@ do `[]T` (type-param) dispara "argument type mismatch"; `HashSet.remove` (hashes
 bloqueia nada). Próximo: **batch B = F3** (factory com type-param do dono, `retarget_generic_static_callee` +
 mono `subst_instance_name` fall-through) → adota **G6** (`Map.to_dictionary`) → depois `sort<T:IOrd>` → §10.
 
+**✅ F3 + G6 ENTREGUES (`da075b18` F3 + reseed `c25a9f96`; `e6da376e` G6 leaf).** **F3** (checker+mono): uma
+chamada de factory/método estático genérico cujos owner-type-args incluem um type-param ABSTRATO
+(`Dictionary<StrKey,V>::make()` dentro de `Map<V>::to_dictionary`) resolvia o owner a um PHANTOM
+(`Dictionary__g__StrKey__V`) sem `make` registrado → "unknown function: make". **Correção do implementer (o crumb
+F3.1 do triage era PROVAVELMENTE INCOMPLETO** — "deixar na base" tipava o resultado como o phantom do TEMPLATE
+`__g__K__V`, quebrando `d.insert`): novo `type_phantom_instance_call` (`typer.tks`) resolve a assinatura contra o
+TEMPLATE e a especializa com a subst que o nome-phantom codifica (`phantom_owner_subst`/`split_phantom_args`/
+`resolve_phantom_arg_token` + `qualified_type_name_by_last` p/ chave cross-ns), ligado em `type_call` + desugar de
+`type_method_call`; mono re-key (`monomorph.tks:407/428`) cai o miss exato p/ `subst_instance_name` (+
+`rekey_phantom_qualifier`), concretizando `__g__StrKey__V→__g__StrKey__i64`. F3.3 discovery: SEM enqueue novo (o
+re-scan de `stamp_inst_site` já auto-descobre). **G6** (leaf, `src/collections/map.tks` +`to_dictionary():
+Dictionary<teko::cmp::StrKey,V>`; Map fica str-keyed, `teko::env` intacto). **RESEED 2-etapas (disciplina):** F3 é
+mudança de compilador → reseed a **seedF3 `3d98db74`** (fixpoint tc1==tc2==tc3, gate PASS; gen0 do seed anterior
+`3683d71e` compila o FONTE F3 pois o corpus não usa o feature); **G6 é FOLHA → SEM reseed próprio** (o seed
+F3-capaz constrói G6). Validação: gen0(seedF3) compila a árvore F3+G6 VERDE, emissão `ac9a9976` (== fixpoint
+gen2==gen3 do implementer). Fixtures: `generic_factory_owner_param` (F3, exit 47), `map_to_dictionary` (G6, exit
+77). **API de coleções genéricas COMPLETA.** **Limitações adjacentes reportadas (rastreadas, não bloqueiam):**
+(a) factory estático QUALIFICADA cross-ns (`ns::Type<…>::make()`) ainda perde o qualifier em
+`retarget_generic_static_callee` (primo do gap #5); (b) o gap #2 forma-CONSTRUCT-aninhado continua latente (F3
+fechou só a forma factory-call). **GENÉRICOS COMPLETOS** (resta só F2 checker-order-bug com workaround são +
+limitações adjacentes rastreadas). Próximo: `sort<T:IOrd>` genérico (adjacente, destravado) → **§10 concorrência
+(100%)** → §11 → §17 → §16 → FFI-stdlib → ui.
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
