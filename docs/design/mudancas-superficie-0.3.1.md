@@ -1491,12 +1491,12 @@ As 4 leis que isso sela:
 2. **INVARIANTE-DO-WRAP (regra dura, elevada do `unsafe`):** o que passa por `__wrap` **NÃO pode residir na arena
    de quem faz o wrap** — tem de viver numa arena que SOBREVIVA ao wrapper. No braço, o `Intent` vive na arena do
    **PAI** (que espera → sobrevive ao braço), nunca na do braço → sem UAF. É o "event horizon" do §5.2.
-3. **~~Casca por-referência + valor por-marshal~~ EM REVISÃO (retorno-por-ref removido quebra o write-through):**
-   como `__wrap<I>(u)` devolve uma **CÓPIA** do Intent na arena do braço (retorno virtual), o braço NÃO pode
-   escrever no Intent do PAI segurando um handle vivo. O write-back correto (batendo com a fala do dono "o
-   contexto do await grava o intent na arena do pai"): **o braço produz seu resultado/Intent como VALOR e envia
-   pelo CANAL de conclusão; o contexto-do-await do PAI recebe (marshal→arena-do-pai) e grava.** O braço NÃO
-   aliasa o Intent do pai. *(Pendente confirmação do dono: write-back por canal vs write-through por `uptr` cru.)*
+3. **WRITE-BACK = OPÇÃO A (canal + deep-copy), RESOLVIDO (ruling do dono 2026-08-16):** o braço produz seu
+   resultado/`Intent` como VALOR e **envia pelo CANAL de conclusão**; o contexto-do-await do PAI recebe (marshal
+   →arena-do-pai) e grava. O braço NÃO aliasa o Intent do pai (retorno-por-ref removido; `__wrap` devolveria
+   cópia). **"await = cópia profunda sem passagem de referência"** (dono). **Mas isso NÃO bloqueia** o usuário de
+   usar o escape-hatch `uptr`/`__wrap` que o dono demonstrou (o caminho wrap-refcount, quando ele quer
+   compartilhar em vez de copiar).
 4. **CANCEL-UNWIND REPLAYA `defer`:** o `defer` (C7.18, `ast.tks:410`, hoje dispara em return/break/continue/
    fall-off) tem de disparar TAMBÉM no desenrolar do cancel (CN1 estende o unwind pra replayar defers) — é assim
    que "braço cancelado ainda sinaliza o waitgroup" se cumpre: o `tx.send(!canceled); tx.done()` sempre dispara,
@@ -1535,6 +1535,15 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   Doc-2 — porque a correção do §10/§16 não precisa dele (deep-copy + singletons-de-vida-de-programa em F2 bastam;
   singleton nunca é freed até o processo sair → sem refcount). É otimização/generalização pros escape-hatch
   (ref-opaca retida, FFI-ponteiro-retido).
+- **JÁ TEMOS O PRECEDENTE — a ESCAPE-ANALYSIS (achado 2026-08-16):** `src/checker/escape.tks` ("the memory-model
+  keystone") já faz "detecta-escape→estende-lifetime" **dentro de uma thread**: uma alocação que ESCAPA o frame
+  (return/tail-expr/armazenada-fora) é colocada numa REGIÃO MAIS LONGEVA em vez da região-de-frame (bulk-freed na
+  saída), então o ponteiro sobrevive ao drop do frame → **sem UAF**. Conservadora (M.1/M.5: leak-safe, nunca UAF).
+  É exatamente o "recria ponteiro pro mesmo dado, cruza a fronteira sem UAF" do dono — para a fronteira de
+  **frame/escopo**. **O wrap-refcount é a GENERALIZAÇÃO disso pro cross-arena/cross-thread** (tabela-refcount-na-
+  raiz em vez de promoção-frame→região-externa) — MESMA FAMÍLIA, confirmando o meta-princípio (o compilador
+  decide frame-local vs promovido vs refcounted). Dentro-da-thread: escape-analysis já resolve. Entre-threads:
+  marshal (deep-copy, Doc-2) ou wrap-refcount (Doc-1).
 
 **🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
 1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
