@@ -1,0 +1,79 @@
+use teko::parser
+
+/**
+ * CcEnv — the conditional-compilation constant environment: the fixed build-time facts a §17
+ * predicate is evaluated against. `os`/`arch` come from the resolved target (the `[extern] target`
+ * triple, else the host); `flags` is the build's flag set (manifest/CLI — see crumb F). It is a pure
+ * data snapshot: constructed once per build, read-only during the prune.
+ *
+ * @field os           the target OS — `target_os(m)` ("linux"|"macos"|"windows"|"unknown")
+ * @field arch         the target arch — `target_arch(m)` ("x86_64"|"arm64"|"unknown")
+ * @field build_flags  the set build flags (empty until crumb F lands the flag source); named
+ *                     `build_flags` because bare `flags` is a reserved declaration keyword
+ * @since §17
+ */
+pub type CcEnv = struct {
+    /** the target OS — `target_os(m)` ("linux"|"macos"|"windows"|"unknown"). */
+    os: str
+    /** the target arch — `target_arch(m)` ("x86_64"|"arm64"|"unknown"). */
+    arch: str
+    /** the set build flags (empty until crumb F lands the flag source); bare `flags` is reserved. */
+    build_flags: []str
+}
+
+/**
+ * str_list_contains — membership of `needle` in the string list `xs`, a total linear scan. The §17
+ * `PFlag` atom uses it to test whether a build flag is present in `CcEnv.flags`.
+ *
+ * @param xs      the string list to scan
+ * @param needle  the string sought
+ * @return        true iff some element of `xs` equals `needle`
+ * @since §17
+ */
+fn str_list_contains(xs: []str, needle: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == needle { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * pred_axis_eq — resolve a `PEq` axis atom against the environment. `"os"` compares `env.os`,
+ * `"arch"` compares `env.arch`; any other axis name is false (unknown axes never match).
+ *
+ * @param e    the axis-equality atom
+ * @param env  the build-time constant environment
+ * @return     true iff the named axis equals `e.value`
+ * @since §17
+ */
+fn pred_axis_eq(e: parser::PEq, env: CcEnv): bool {
+    if e.axis == "os" { return env.os == e.value }
+    if e.axis == "arch" { return env.arch == e.value }
+    false
+}
+
+/**
+ * eval_pred — evaluate a §17 conditional-compile predicate against the build's constant
+ * environment, yielding whether the guarded item SURVIVES the prune. Pure, total, boolean-only: it
+ * reads `env` and the predicate tree and returns a `bool`; it computes no value and touches no
+ * checker/`comptime` state. `&&`/`||` short-circuit. An unknown axis or absent flag is simply false
+ * (a predicate nobody's target satisfies prunes the item, never errors).
+ *
+ * @param p    the predicate (an item's `guard`, or a `#if`-arm's composed predicate)
+ * @param env  the build-time constant environment (os/arch/flags)
+ * @return     true iff the guarded item survives on this target
+ * @since §17
+ */
+pub fn eval_pred(p: parser::Pred, env: CcEnv): bool {
+    match p.kind {
+        parser::PTrue => true
+        parser::PEq as e => pred_axis_eq(e, env)
+        parser::PFlag as f => str_list_contains(env.build_flags, f.name)
+        parser::PNot as n => !eval_pred(n.inner, env)
+        parser::PAnd as a => eval_pred(a.left, env) && eval_pred(a.right, env)
+        parser::POr as o => eval_pred(o.left, env) || eval_pred(o.right, env)
+    }
+}

@@ -1,0 +1,128 @@
+use teko::parser
+
+/**
+ * env_linux_x64 — a `CcEnv` fixed to linux/x86_64 with no build flags, the common truth-table base.
+ *
+ * @return  a `CcEnv { os = "linux"; arch = "x86_64"; build_flags = [] }`
+ */
+fn env_linux_x64(): CcEnv {
+    CcEnv { os = "linux"; arch = "x86_64"; build_flags = teko::list::empty() }
+}
+
+/**
+ * env_macos_arm64 — a `CcEnv` fixed to macos/arm64 with no build flags, the cross-target base.
+ *
+ * @return  a `CcEnv { os = "macos"; arch = "arm64"; build_flags = [] }`
+ */
+fn env_macos_arm64(): CcEnv {
+    CcEnv { os = "macos"; arch = "arm64"; build_flags = teko::list::empty() }
+}
+
+/**
+ * env_with_flag — a linux/x86_64 `CcEnv` carrying a single build flag, to exercise `PFlag`.
+ *
+ * @param flag  the one build flag present in the environment
+ * @return      a `CcEnv` on linux/x86_64 whose `build_flags` is `[flag]`
+ */
+fn env_with_flag(flag: str): CcEnv {
+    CcEnv { os = "linux"; arch = "x86_64"; build_flags = teko::list::push(teko::list::empty(), flag) }
+}
+
+#test
+/**
+ * prune_ptrue_is_always_kept — an unguarded item's `PTrue` predicate survives on every target.
+ */
+fn prune_ptrue_is_always_kept() {
+    teko::assert::is_true(eval_pred(parser::pred_true(), env_linux_x64()))
+    teko::assert::is_true(eval_pred(parser::pred_true(), env_macos_arm64()))
+}
+
+#test
+/**
+ * prune_os_axis_matches_only_its_os — `PEq("os", …)` is true iff `env.os` equals the value.
+ */
+fn prune_os_axis_matches_only_its_os() {
+    teko::assert::is_true(eval_pred(parser::pred_os("linux"), env_linux_x64()))
+    teko::assert::is_false(eval_pred(parser::pred_os("macos"), env_linux_x64()))
+    teko::assert::is_true(eval_pred(parser::pred_os("macos"), env_macos_arm64()))
+}
+
+#test
+/**
+ * prune_arch_axis_matches_only_its_arch — `PEq("arch", …)` is true iff `env.arch` equals the value.
+ */
+fn prune_arch_axis_matches_only_its_arch() {
+    teko::assert::is_true(eval_pred(parser::pred_arch("x86_64"), env_linux_x64()))
+    teko::assert::is_false(eval_pred(parser::pred_arch("arm64"), env_linux_x64()))
+    teko::assert::is_true(eval_pred(parser::pred_arch("arm64"), env_macos_arm64()))
+}
+
+#test
+/**
+ * prune_unknown_axis_never_matches — a `PEq` over an axis that is neither `os` nor `arch` is false.
+ */
+fn prune_unknown_axis_never_matches() {
+    var p = parser::Pred { kind = parser::PEq { axis = "cpu"; value = "x86_64" } }
+    teko::assert::is_false(eval_pred(p, env_linux_x64()))
+}
+
+#test
+/**
+ * prune_flag_present_vs_absent — `PFlag` is true iff the flag is in `env.build_flags`.
+ */
+fn prune_flag_present_vs_absent() {
+    var p = parser::Pred { kind = parser::PFlag { name = "debug" } }
+    teko::assert::is_true(eval_pred(p, env_with_flag("debug")))
+    teko::assert::is_false(eval_pred(p, env_linux_x64()))
+}
+
+#test
+/**
+ * prune_not_negates — `PNot` inverts its boxed operand's truth value.
+ */
+fn prune_not_negates() {
+    teko::assert::is_false(eval_pred(parser::pred_not(parser::pred_os("linux")), env_linux_x64()))
+    teko::assert::is_true(eval_pred(parser::pred_not(parser::pred_os("macos")), env_linux_x64()))
+}
+
+#test
+/**
+ * prune_and_truth_table — `PAnd` is true iff both operands are true (all four rows).
+ */
+fn prune_and_truth_table() {
+    var tt = parser::pred_and(parser::pred_os("linux"), parser::pred_arch("x86_64"))
+    var tf = parser::pred_and(parser::pred_os("linux"), parser::pred_arch("arm64"))
+    var ft = parser::pred_and(parser::pred_os("macos"), parser::pred_arch("x86_64"))
+    var ff = parser::pred_and(parser::pred_os("macos"), parser::pred_arch("arm64"))
+    teko::assert::is_true(eval_pred(tt, env_linux_x64()))
+    teko::assert::is_false(eval_pred(tf, env_linux_x64()))
+    teko::assert::is_false(eval_pred(ft, env_linux_x64()))
+    teko::assert::is_false(eval_pred(ff, env_linux_x64()))
+}
+
+#test
+/**
+ * prune_or_truth_table — `POr` is true iff either operand is true (all four rows).
+ */
+fn prune_or_truth_table() {
+    var tt = parser::pred_or(parser::pred_os("linux"), parser::pred_arch("x86_64"))
+    var tf = parser::pred_or(parser::pred_os("linux"), parser::pred_arch("arm64"))
+    var ft = parser::pred_or(parser::pred_os("macos"), parser::pred_arch("x86_64"))
+    var ff = parser::pred_or(parser::pred_os("macos"), parser::pred_arch("arm64"))
+    teko::assert::is_true(eval_pred(tt, env_linux_x64()))
+    teko::assert::is_true(eval_pred(tf, env_linux_x64()))
+    teko::assert::is_true(eval_pred(ft, env_linux_x64()))
+    teko::assert::is_false(eval_pred(ff, env_linux_x64()))
+}
+
+#test
+/**
+ * prune_composed_tree — a nested `os == "linux" && (arch == "arm64" || debug)` predicate: false on
+ * linux/x86_64 without the flag, true once the `debug` flag is present.
+ */
+fn prune_composed_tree() {
+    var inner = parser::pred_or(parser::pred_arch("arm64"), parser::Pred { kind = parser::PFlag { name = "debug" } })
+    var tree = parser::pred_and(parser::pred_os("linux"), inner)
+    teko::assert::is_false(eval_pred(tree, env_linux_x64()))
+    teko::assert::is_true(eval_pred(tree, env_with_flag("debug")))
+}

@@ -1009,3 +1009,175 @@ macro ItemKind() { lowering { UseDecl | @Statement() | Function | TypeDecl | Con
  */
 pub type Item = struct { content: @ItemKind(); namespace: str; file: str }
 pub type Program = struct { items: []Item }   // the flat item list the checker consumes
+
+/**
+ * PredKind — the build-time conditional-compile predicate node kind (§17). A boolean-over-constants
+ * tree over the `os`/`arch` axes and build flags, composed with `!`/`&&`/`||`. It is a PRUNE
+ * predicate ONLY: evaluated at the build-time prune (`eval_pred`), it computes no value and reopens
+ * no `comptime`/§14 machinery. Recursive arms (`PNot`/`PAnd`/`POr`) box their `Pred` operands under
+ * CR1, exactly as `@ExprKind()` boxes its recursive `Expr` members.
+ *
+ * @since §17
+ */
+macro PredKind() { lowering { parser::PTrue | parser::PEq | parser::PFlag | parser::PNot | parser::PAnd | parser::POr } }
+
+/**
+ * PTrue — the always-true predicate: an UNGUARDED top-level item (the `#os`-absent default). The
+ * prune keeps it on every target. Also the identity that `#if`-arm composition ANDs against.
+ *
+ * @since §17
+ */
+pub type PTrue = struct { }
+
+/**
+ * PEq — an axis-equality atom: `os == "linux"` (from `#os("linux")` or `#if(os == "linux")`) or
+ * `arch == "arm64"` (from `#arch("arm64")` or `#if(arch == "arm64")`). `axis` is `"os"` or `"arch"`;
+ * any other axis evaluates false (an unknown axis never matches).
+ *
+ * @field axis   the constant axis being compared — `"os"` | `"arch"`
+ * @field value  the string literal the axis must equal
+ * @since §17
+ */
+pub type PEq = struct {
+    /** the constant axis being compared — `"os"` | `"arch"`. */
+    axis: str
+    /** the string literal the axis must equal. */
+    value: str
+}
+
+/**
+ * PFlag — a build-flag atom: a bare identifier in `#if(<flag>)` that is true iff the flag is present
+ * in the build's flag set (`CcEnv.flags`). Enables `#if(debug)` / `#if(feature_x && os == "linux")`.
+ *
+ * @field name  the build-flag identifier
+ * @since §17
+ */
+pub type PFlag = struct {
+    /** the build-flag identifier. */
+    name: str
+}
+
+/**
+ * PNot — logical negation `!<pred>` of a boxed operand (§17 composite predicate).
+ *
+ * @field inner  the negated predicate
+ * @since §17
+ */
+pub type PNot = struct {
+    /** the negated predicate. */
+    inner: Pred
+}
+
+/**
+ * PAnd — logical conjunction `<left> && <right>` of boxed operands, short-circuit in `eval_pred`.
+ *
+ * @field left   the left conjunct
+ * @field right  the right conjunct
+ * @since §17
+ */
+pub type PAnd = struct {
+    /** the left conjunct. */
+    left: Pred
+    /** the right conjunct. */
+    right: Pred
+}
+
+/**
+ * POr — logical disjunction `<left> || <right>` of boxed operands, short-circuit in `eval_pred`.
+ *
+ * @field left   the left disjunct
+ * @field right  the right disjunct
+ * @since §17
+ */
+pub type POr = struct {
+    /** the left disjunct. */
+    left: Pred
+    /** the right disjunct. */
+    right: Pred
+}
+
+/**
+ * Pred — a conditional-compile predicate: the struct wrapper over `@PredKind()`, mirroring `Expr`
+ * over `@ExprKind()`. An UNGUARDED item carries `Pred { kind = PTrue { } }` (always kept), so the
+ * prune has a single uniform shape to evaluate for every item.
+ *
+ * @field kind  the predicate node (`@PredKind()` inline union)
+ * @since §17
+ */
+pub type Pred = struct {
+    /** the predicate node (`@PredKind()` inline union). */
+    kind: @PredKind()
+}
+
+/**
+ * pred_true — the always-true predicate wrapper, the guard every UNGUARDED top-level item carries.
+ * The single constructor the flatten/merge sites use so a `Pred { kind = PTrue { } }` literal is
+ * not repeated across the codebase.
+ *
+ * @return  a `Pred` wrapping `PTrue` (kept on every target)
+ * @since §17
+ */
+pub fn pred_true(): Pred {
+    Pred { kind = PTrue { } }
+}
+
+/**
+ * pred_os — the `#os("…")` shortcut predicate: `os == value`, the single-item sugar for
+ * `#if(os == value)`.
+ *
+ * @param value  the OS the guarded item requires ("linux"|"macos"|"windows")
+ * @return       a `Pred` wrapping `PEq { axis = "os"; value }`
+ * @since §17
+ */
+pub fn pred_os(value: str): Pred {
+    Pred { kind = PEq { axis = "os"; value = value } }
+}
+
+/**
+ * pred_arch — the `#arch("…")` shortcut predicate: `arch == value`, the single-item sugar for
+ * `#if(arch == value)`.
+ *
+ * @param value  the arch the guarded item requires ("x86_64"|"arm64")
+ * @return       a `Pred` wrapping `PEq { axis = "arch"; value }`
+ * @since §17
+ */
+pub fn pred_arch(value: str): Pred {
+    Pred { kind = PEq { axis = "arch"; value = value } }
+}
+
+/**
+ * pred_and — the conjunction constructor `<a> && <b>`, boxing both operands. Used to AND a `#os`
+ * with a `#arch` on one item, and to AND a `#if`-arm predicate with a decl's own inner guard.
+ *
+ * @param a  the left conjunct
+ * @param b  the right conjunct
+ * @return   a `Pred` wrapping `PAnd { left = a; right = b }`
+ * @since §17
+ */
+pub fn pred_and(a: Pred, b: Pred): Pred {
+    Pred { kind = PAnd { left = a; right = b } }
+}
+
+/**
+ * pred_or — the disjunction constructor `<a> || <b>`, boxing both operands.
+ *
+ * @param a  the left disjunct
+ * @param b  the right disjunct
+ * @return   a `Pred` wrapping `POr { left = a; right = b }`
+ * @since §17
+ */
+pub fn pred_or(a: Pred, b: Pred): Pred {
+    Pred { kind = POr { left = a; right = b } }
+}
+
+/**
+ * pred_not — the negation constructor `!<a>`, boxing the operand. Used to encode `#if`'s
+ * first-true-wins as an AND-of-NOTs against the earlier arms' predicates.
+ *
+ * @param a  the predicate to negate
+ * @return   a `Pred` wrapping `PNot { inner = a }`
+ * @since §17
+ */
+pub fn pred_not(a: Pred): Pred {
+    Pred { kind = PNot { inner = a } }
+}
