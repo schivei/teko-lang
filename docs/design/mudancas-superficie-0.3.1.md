@@ -1617,6 +1617,12 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
     **Runner de testes = a cura do `teko test .` OOM:** paralelizar com **teto-de-memória por-teste** (cada teste
     na sua thread+arena com limite) → o total fica bounded (hoje: todos num processo → OOM). ⇒ **A DOC-1 ESTÁ 100%
     NO PAPEL.**
+  - **DISCRIÇÃO DE ANTECIPAÇÃO (dono 2026-08-16): vale pra TODA a Doc-1, não só a onda de arrays.** Se qualquer
+    item da Doc-1 puder ser antecipado pro §16/§17 (de-riscar/evitar retrabalho), o coord pode fazer. Read do coord:
+    o candidato concreto é **string-u32 no §16** (migração do subsistema de string 1× no modelo novo — já marcado);
+    os 3 itens (pré-dimensionamento/retorno-virtual/multi-threading) NÃO encaixam naturalmente no §16/§17 (puxá-los
+    churnaria o §16 por ganho marginal) → ficam Doc-1, salvo encaixe claro que surja (ex.: pré-dimensionar um
+    buffer quente com o `with_cap` existente durante uma migração de subsistema).
 - **🌊 ONDA ARRAYS-FIXOS + STRING-U32 (visão do dono 2026-08-16 — EM DELIBERAÇÃO, ainda NÃO ratificada; faltam
   colocação + mecanismos de `isset`/reclaim).** Intenção de fundo: **arrays SEMPRE foram pra ser de tamanho fixo**
   — fat-pointer `{ptr, len}` SEM cap, **imutável e contíguo**; a variabilidade/mutação é das COLEÇÕES (Table/Hash/
