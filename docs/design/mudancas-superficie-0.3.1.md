@@ -1780,6 +1780,16 @@ sem a native compilando+fixpoint+memparanoid não há entrega. A validação-loc
 bugado hoje), MAS a native-verde nas 3 dimensões é **portão de saída não-negociável**, provado no CI. O ganho de
 `teko test .` local (o motivo do "testes só no CI") NÃO é portão Doc-2 — é o primeiro entregável da Doc-1
 (memória + multi-threading do compilador e dos testes).
+**SEQUENCIAMENTO (ruling do dono 2026-08-16): a perna native é a FASE TERMINAL da Doc-2, NÃO intercalada.**
+"Manter como tem feito, foco na perna C; quando fechar o Doc-2 [o terreno-C: §16/§10-(c)/§11/FFI-stdlib/ui com a
+perna C nas 3 dimensões verde], AÍ eu entro com as correções pra perna native fechar limpa." Ou seja: **NÃO
+persigo native-verde item-a-item** durante o §16/etc — sigo validando local em C (backend C, `--no-verify
+--release`) o tempo todo. A perna native é um **passo de correção DEDICADO no fim da Doc-2**, depois que todo o
+terreno-C está pronto — o momento certo porque a reescrita C→Teko/FFI (§16) muda muito do codegen que a native
+emite; consertar a native antes seria retrabalho. **Ordem de saída da Doc-2:** (I) terreno-C completo (perna C nos
+3 portões durante toda a jornada) → (II) **fase-native terminal**: consertar `const struct __hdr` + o que mais a
+native exigir, até as 3 dimensões native verdes no CI → (III) limiar Doc-1 atingido → avisar o dono. A fase-native
+é o ÚLTIMO trabalho da Doc-2, imediatamente antes do handoff.
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
