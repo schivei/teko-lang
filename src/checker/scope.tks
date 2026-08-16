@@ -1009,6 +1009,29 @@ pub fn assert_fat_arg_arity(last: str): u64 {
 }
 
 /**
+ * syscallN_signature — build the fixed `Func` signature for a `teko::sys::syscallN` raw-syscall
+ * builtin (§16): `nr` plus `arity` register arguments, every parameter AND the return `i64` — the
+ * machine word every syscall argument/result register is, agnostic to the caller's Teko type (§16
+ * §1.1). Shared by the seven `syscall0..syscall6` `builtin_fn` arms so the fixed-arity family is
+ * built from one place instead of seven hand-repeated literals.
+ *
+ * @param arity  the syscall's register-argument count (0..6, the Linux ceiling)
+ * @return       `Func { params = i64 x (arity + 1); ret = i64; ... }`
+ * @since §16
+ */
+fn syscallN_signature(arity: u64): @Type() {
+    var i64_t: @Type() = Prim { kind = PrimKind::I64 }
+    var ps: []@Type() = teko::list::push(tempty(), i64_t)
+    var i: u64 = 0 to u64
+    loop {
+        if i >= arity { break }
+        ps = teko::list::push(ps, i64_t)
+        i = i + (1 to u64)
+    }
+    Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = teko::list::empty() }
+}
+
+/**
  * Resolve an INJECTED built-in FUNCTION name to its `Func` type (mirrors `scope.c`'s
  * `tk_builtin_fn`): `print`/`println` + `teko::assert`, the self-host str/byte stdlib surface,
  * the D3 coverage sinks, the arena checkpoint/rewind/commit primitives, the heap-backed
@@ -1100,6 +1123,13 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "floor" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "f64_from_bits" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "f64_bits" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "syscall0" { return syscallN_signature(0 to u64) }
+    if name == "syscall1" { return syscallN_signature(1 to u64) }
+    if name == "syscall2" { return syscallN_signature(2 to u64) }
+    if name == "syscall3" { return syscallN_signature(3 to u64) }
+    if name == "syscall4" { return syscallN_signature(4 to u64) }
+    if name == "syscall5" { return syscallN_signature(5 to u64) }
+    if name == "syscall6" { return syscallN_signature(6 to u64) }
     match assert_builtin_fn(name) { (@Type()) as at => return at; null => { } }
     if name == "slice" {
         var p: []@Type() = teko::list::push(tempty(), str_t)   /* []Type: a heterogeneous param list (str, u64, u64) */

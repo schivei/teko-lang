@@ -5046,6 +5046,13 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             else if last == "fdiv" { builtin = "tk_fdiv"; has_builtin = true }   // (f64,f64) -> f64
             else if last == "f64_bits" { builtin = "tk_f64_bits"; has_builtin = true }   // (f64) -> u64
             else if last == "f64_from_bits" { builtin = "tk_f64_from_bits"; has_builtin = true }   // (u64) -> f64
+            else if last == "syscall0" { builtin = "tk_syscall0"; has_builtin = true }
+            else if last == "syscall1" { builtin = "tk_syscall1"; has_builtin = true }
+            else if last == "syscall2" { builtin = "tk_syscall2"; has_builtin = true }
+            else if last == "syscall3" { builtin = "tk_syscall3"; has_builtin = true }
+            else if last == "syscall4" { builtin = "tk_syscall4"; has_builtin = true }
+            else if last == "syscall5" { builtin = "tk_syscall5"; has_builtin = true }
+            else if last == "syscall6" { builtin = "tk_syscall6"; has_builtin = true }
             // D3 — test-coverage sink (host side-channel): marks executed production fns.
             else if last == "cov_reset" { builtin = "tk_cov_reset"; has_builtin = true }   // () -> void
             else if last == "cov_mark" { builtin = "tk_cov_mark"; has_builtin = true }   // (u64) -> void
@@ -13260,6 +13267,318 @@ fn cg_emit_all_vtable_defs(buf: []byte, prog: CgProg, vt_table: checker::TypeTab
     b
 }
 
+/**
+ * SyscallUse — records which raw-syscall arities (`teko::sys::syscall0..syscall6`) the program under
+ * emission calls, so the preamble emits ONLY the `tk_syscallN` helpers actually used (§16 §2.2). A
+ * program that calls no syscall at all (the compiler's own self-image) yields the all-false value,
+ * keeping the emitted preamble byte-identical to a build that never knew the intrinsic — the property
+ * that keeps the §16 reseed a clean fixpoint.
+ *
+ * @field s0  true iff some call site names `syscall0`
+ * @field s1  true iff some call site names `syscall1`
+ * @field s2  true iff some call site names `syscall2`
+ * @field s3  true iff some call site names `syscall3`
+ * @field s4  true iff some call site names `syscall4`
+ * @field s5  true iff some call site names `syscall5`
+ * @field s6  true iff some call site names `syscall6`
+ * @since §16
+ */
+type SyscallUse = struct {
+    /** true iff some call site names `syscall0`. */
+    s0: bool
+    /** true iff some call site names `syscall1`. */
+    s1: bool
+    /** true iff some call site names `syscall2`. */
+    s2: bool
+    /** true iff some call site names `syscall3`. */
+    s3: bool
+    /** true iff some call site names `syscall4`. */
+    s4: bool
+    /** true iff some call site names `syscall5`. */
+    s5: bool
+    /** true iff some call site names `syscall6`. */
+    s6: bool
+}
+
+/**
+ * cg_syscall_use_none — the empty `SyscallUse` (no arity called yet), the fold's starting value.
+ *
+ * @return  `SyscallUse` with every field `false`
+ * @since §16
+ */
+fn cg_syscall_use_none(): SyscallUse {
+    SyscallUse { s0 = false; s1 = false; s2 = false; s3 = false; s4 = false; s5 = false; s6 = false }
+}
+
+/**
+ * cg_mark_syscall_call — if `c` is a call to the §16 raw-syscall intrinsic (resolution mirrors
+ * `emit_call`'s builtin dispatch: not a user-declared function, and its callee is bare or
+ * `teko`-rooted — the two spellings codegen can lower), set the matching arity bit in `used`. Any
+ * other call (user-declared, or a differently-qualified/differently-named callee) leaves `used`
+ * untouched.
+ *
+ * @param prog  codegen's threaded program view (resolves whether `c`'s callee is user-declared)
+ * @param c     the checked call under inspection
+ * @param used  the arity bit-set accumulated so far
+ * @return      `used`, with the bit for `c`'s arity set when `c` calls `syscall0..syscall6`
+ * @since §16
+ */
+fn cg_mark_syscall_call(prog: CgProg, c: checker::TCall, used: SyscallUse): SyscallUse {
+    if cg_call_is_user_declared(prog, c) { return used }
+    var p = c.callee
+    var qualifier_ok = p.segments.len == 1 || p.segments[0].name == "teko"
+    if !qualifier_ok { return used }
+    var last = p.segments[p.segments.len - 1].name
+    if last == "syscall0" { return SyscallUse { s0 = true; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
+    if last == "syscall1" { return SyscallUse { s0 = used.s0; s1 = true; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
+    if last == "syscall2" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = true; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
+    if last == "syscall3" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = true; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
+    if last == "syscall4" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = true; s5 = used.s5; s6 = used.s6 } }
+    if last == "syscall5" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = true; s6 = used.s6 } }
+    if last == "syscall6" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = true } }
+    used
+}
+
+/**
+ * cg_scan_syscall_expr — fold `cg_mark_syscall_call` over every `TCall` reachable from `e`, recursing
+ * into every sub-expression the same shape `cg_lift_expr` already recurses through (so a syscall call
+ * nested inside a lambda body, an `if`/`match` arm, a struct-init field, an interpolation hole, … is
+ * found regardless of nesting).
+ *
+ * @param prog  codegen's threaded program view
+ * @param e     the expression to scan
+ * @param used  the arity bit-set accumulated so far
+ * @return      `used`, folded with every syscall call site reachable from `e`
+ * @since §16
+ */
+fn cg_scan_syscall_expr(prog: CgProg, e: checker::TExpr, used: SyscallUse): SyscallUse {
+    match e.kind {
+        checker::TLambda as lam => cg_scan_syscall_block(prog, lam.body, used)
+        checker::TBinary as b => cg_scan_syscall_expr(prog, b.right, cg_scan_syscall_expr(prog, b.left, used))
+        checker::TUnary as u => cg_scan_syscall_expr(prog, u.operand, used)
+        checker::TCompare as c => {
+            var acc = cg_scan_syscall_expr(prog, c.first, used)
+            var i = 0
+            loop { if i >= c.rest.len { break }; acc = cg_scan_syscall_expr(prog, c.rest[i].operand, acc); i++ }
+            acc
+        }
+        checker::TCall as cl => {
+            var acc = cg_mark_syscall_call(prog, cl, used)
+            var i = 0
+            loop { if i >= cl.args.len { break }; acc = cg_scan_syscall_expr(prog, cl.args[i], acc); i++ }
+            acc
+        }
+        checker::TIfExpr as f => {
+            var acc = cg_scan_syscall_block(prog, f.then_blk, cg_scan_syscall_expr(prog, f.cond, used))
+            cg_scan_syscall_block(prog, f.else_blk, acc)
+        }
+        checker::TMatchExpr as m => {
+            var acc = cg_scan_syscall_expr(prog, m.subject, used)
+            var i = 0
+            loop {
+                if i >= m.arms.len { break }
+                var a = m.arms[i]
+                if a.has_when { acc = cg_scan_syscall_expr(prog, a.guard, acc) }
+                acc = cg_scan_syscall_block(prog, a.body, acc)
+                i++
+            }
+            acc
+        }
+        checker::TCast as ct => cg_scan_syscall_expr(prog, ct.expr, used)
+        checker::TFieldAccess as fa => cg_scan_syscall_expr(prog, fa.receiver, used)
+        checker::TStructInit as si => {
+            var acc = used
+            var i = 0
+            loop { if i >= si.field_vals.len { break }; acc = cg_scan_syscall_expr(prog, si.field_vals[i], acc); i++ }
+            acc
+        }
+        checker::TIndex as ix => cg_scan_syscall_expr(prog, ix.index, cg_scan_syscall_expr(prog, ix.receiver, used))
+        checker::TInterp as in => {
+            var acc = used
+            var i = 0
+            loop {
+                if i >= in.holes.len { break }
+                acc = cg_scan_syscall_expr(prog, in.holes[i], acc)
+                if i < in.specs.len {
+                    match in.specs[i].kind {
+                        checker::TFSpecDynamic as fd => {
+                            var k = 0
+                            loop { if k >= fd.args.len { break }; acc = cg_scan_syscall_expr(prog, fd.args[k], acc); k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            acc
+        }
+        checker::TInExpr as ie => {
+            var acc = cg_scan_syscall_expr(prog, ie.lhs, used)
+            var i = 0
+            loop { if i >= ie.elems.len { break }; acc = cg_scan_syscall_expr(prog, ie.elems[i], acc); i++ }
+            acc
+        }
+        checker::TArrayLit as a => {
+            var acc = used
+            var i = 0
+            loop { if i >= a.elements.len { break }; acc = cg_scan_syscall_expr(prog, a.elements[i].expr, acc); i++ }
+            acc
+        }
+        checker::TBlockExpr as blk => cg_scan_syscall_block(prog, blk.body, used)
+        _ => used
+    }
+}
+
+/**
+ * cg_scan_syscall_stmt — fold `cg_scan_syscall_expr` over every expression a statement carries,
+ * recursing into every nested block (`loop`/`defer`/`adopt`/bare block) the same shape
+ * `cg_lift_stmt` already recurses through.
+ *
+ * @param prog  codegen's threaded program view
+ * @param s     the statement to scan
+ * @param used  the arity bit-set accumulated so far
+ * @return      `used`, folded with every syscall call site reachable from `s`
+ * @since §16
+ */
+fn cg_scan_syscall_stmt(prog: CgProg, s: @TStatement(), used: SyscallUse): SyscallUse {
+    match s {
+        checker::TBinding as b => cg_scan_syscall_expr(prog, b.value, used)
+        checker::TAssign as a => {
+            var acc = cg_scan_syscall_expr(prog, a.value, used)
+            if parser::assign_has_target(a.kind) { acc = cg_scan_syscall_expr(prog, a.target, acc) }
+            acc
+        }
+        checker::TReturn as r => if r.has_value { cg_scan_syscall_expr(prog, r.value, used) } else { used }
+        checker::TLoopStmt as l => cg_scan_syscall_block(prog, l.body, cg_scan_syscall_block(prog, l.init, used))
+        checker::TExprStmt as es => cg_scan_syscall_expr(prog, es.expr, used)
+        checker::TDeferStmt as d => cg_scan_syscall_block(prog, d.body, used)
+        checker::TAdoptStmt as a => cg_scan_syscall_block(prog, a.body, used)
+        checker::TBlockStmt as b => cg_scan_syscall_block(prog, b.body, used)
+        checker::TBreakStmt => used
+        checker::TContinueStmt => used
+        checker::TSpawn as sp => cg_scan_syscall_expr(prog, sp.call, used)
+    }
+}
+
+/**
+ * cg_scan_syscall_block — `cg_scan_syscall_stmt`, folded across a statement block in order.
+ *
+ * @param prog   codegen's threaded program view
+ * @param stmts  the block to scan
+ * @param used   the arity bit-set accumulated so far
+ * @return       `used`, folded with every syscall call site reachable from `stmts`
+ * @since §16
+ */
+fn cg_scan_syscall_block(prog: CgProg, stmts: []@TStatement(), used: SyscallUse): SyscallUse {
+    var acc = used
+    var i = 0
+    loop { if i >= stmts.len { break }; acc = cg_scan_syscall_stmt(prog, stmts[i], acc); i++ }
+    acc
+}
+
+/**
+ * cg_scan_syscall_arities — walk the typed program once and record which raw-syscall arities
+ * (`teko::sys::syscall0..syscall6`) any call site names, so the preamble emits EXACTLY the
+ * `static inline tk_syscallN` helpers the program uses and no others. A program with zero syscall
+ * calls (the compiler's OWN self-image) yields the empty set, so its emitted preamble is
+ * byte-identical to a build that never knew the intrinsic — the property that keeps the reseed a
+ * clean fixpoint (§16 §6).
+ *
+ * @param prog  the lowered/typed program being emitted
+ * @return      a `SyscallUse` bit-set naming the arities (0..6) reached by some call
+ * @since §16
+ */
+fn cg_scan_syscall_arities(prog: CgProg): SyscallUse {
+    var used = cg_syscall_use_none()
+    var i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { if !f.is_extern { used = cg_scan_syscall_block(prog, f.body, used) } }
+            (@TStatement()) as ts => { used = cg_scan_syscall_stmt(prog, ts, used) }
+            _ => { }
+        }
+        i++
+    }
+    used
+}
+
+/**
+ * cg_emit_syscall_helper_text — the VERBATIM x86_64-Linux `static inline long tk_syscallN(...)` body
+ * for one arity (musl-convention register asm: args `rdi rsi rdx r10 r8 r9`, `nr`+ret in `rax`,
+ * clobber `rcx r11 memory`).
+ *
+ * @param arity  the syscall's register-argument count (0..6)
+ * @return       the helper's full C source text, or `""` for an arity outside 0..6
+ * @since §16
+ */
+fn cg_emit_syscall_helper_text(arity: u64): str {
+    if arity == 0 to u64 {
+        return "static inline long tk_syscall0(long n) {\n    long ret;\n    __asm__ volatile (\"syscall\" : \"=a\"(ret) : \"a\"(n) : \"rcx\", \"r11\", \"memory\");\n    return ret;\n}\n"
+    }
+    if arity == 1 to u64 {
+        return "static inline long tk_syscall1(long n, long a1) {\n    long ret;\n    __asm__ volatile (\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1) : \"rcx\", \"r11\", \"memory\");\n    return ret;\n}\n"
+    }
+    if arity == 2 to u64 {
+        return "static inline long tk_syscall2(long n, long a1, long a2) {\n    long ret;\n    __asm__ volatile (\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2) : \"rcx\", \"r11\", \"memory\");\n    return ret;\n}\n"
+    }
+    if arity == 3 to u64 {
+        return "static inline long tk_syscall3(long n, long a1, long a2, long a3) {\n    long ret;\n    __asm__ volatile (\"syscall\"\n        : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3) : \"rcx\", \"r11\", \"memory\");\n    return ret;\n}\n"
+    }
+    if arity == 4 to u64 {
+        return "static inline long tk_syscall4(long n, long a1, long a2, long a3, long a4) {\n    long ret; register long r10 __asm__(\"r10\") = a4;\n    __asm__ volatile (\"syscall\"\n        : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3), \"r\"(r10) : \"rcx\", \"r11\", \"memory\");\n    return ret;\n}\n"
+    }
+    if arity == 5 to u64 {
+        return "static inline long tk_syscall5(long n, long a1, long a2, long a3, long a4, long a5) {\n    long ret; register long r10 __asm__(\"r10\") = a4; register long r8 __asm__(\"r8\") = a5;\n    __asm__ volatile (\"syscall\"\n        : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3), \"r\"(r10), \"r\"(r8) : \"rcx\", \"r11\", \"memory\");\n    return ret;\n}\n"
+    }
+    if arity == 6 to u64 {
+        return "static inline long tk_syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6) {\n    long ret;\n    register long r10 __asm__(\"r10\") = a4;\n    register long r8  __asm__(\"r8\")  = a5;\n    register long r9  __asm__(\"r9\")  = a6;\n    __asm__ volatile (\"syscall\"\n        : \"=a\"(ret)\n        : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3), \"r\"(r10), \"r\"(r8), \"r\"(r9)\n        : \"rcx\", \"r11\", \"memory\");\n    return ret;\n}\n"
+    }
+    ""
+}
+
+/**
+ * cg_syscall_use_any — does `used` name at least one syscall arity?
+ *
+ * @param used  the arity bit-set
+ * @return      true iff some field of `used` is `true`
+ * @since §16
+ */
+fn cg_syscall_use_any(used: SyscallUse): bool {
+    used.s0 || used.s1 || used.s2 || used.s3 || used.s4 || used.s5 || used.s6
+}
+
+/**
+ * cg_emit_syscall_helpers — append the x86_64-Linux `static inline long tk_syscallN(...)` raw-syscall
+ * helpers named by `used` to the preamble buffer, in ascending arity, each carrying the
+ * `asm volatile("syscall" ...)` with the SysV-Linux register convention. Emits NOTHING when `used`
+ * is empty — the use-gate that keeps the syscall-free corpus's own emitted preamble byte-identical
+ * (§16 §6). The emitted block is wrapped in a `#if defined(__x86_64__)` / `#error` C guard: this
+ * crumb validates x86_64 Linux only (aarch64 is a DESIGN-AHEAD note, §16 §2.5), so a build attempting
+ * to compile the generated C on any other host arch honest-stops at `cc` time rather than emitting a
+ * silently wrong `syscall` instruction.
+ *
+ * @param buf   the preamble byte buffer
+ * @param used  the arity bit-set from `cg_scan_syscall_arities`
+ * @return      `buf` with the requested helpers appended
+ * @since §16
+ */
+fn cg_emit_syscall_helpers(buf: []byte, used: SyscallUse): []byte {
+    if !cg_syscall_use_any(used) { return buf }
+    var out = cb(buf, "#if defined(__x86_64__) || defined(__amd64__)\n")
+    out = cb(out, "/* teko section 16 raw-syscall intrinsic (x86_64 Linux); emitted only for arities the program uses */\n")
+    if used.s0 { out = cb(out, cg_emit_syscall_helper_text(0 to u64)) }
+    if used.s1 { out = cb(out, cg_emit_syscall_helper_text(1 to u64)) }
+    if used.s2 { out = cb(out, cg_emit_syscall_helper_text(2 to u64)) }
+    if used.s3 { out = cb(out, cg_emit_syscall_helper_text(3 to u64)) }
+    if used.s4 { out = cb(out, cg_emit_syscall_helper_text(4 to u64)) }
+    if used.s5 { out = cb(out, cg_emit_syscall_helper_text(5 to u64)) }
+    if used.s6 { out = cb(out, cg_emit_syscall_helper_text(6 to u64)) }
+    out = cb(out, "#else\n")
+    out = cb(out, "#error \"teko section 16: the raw-syscall intrinsic is validated for x86_64 Linux only (aarch64 design-ahead, docs/design/plano-s16-syscall-intrinsic.md section 2.5)\"\n")
+    cb(out, "#endif\n\n")
+}
+
 /** tk_emit_c — the PROGRAM emission entry (the virtual-main over loose top-level statements).
     Kept as the public name every caller uses; delegates to tk_emit_c_mode with CgMode::Program so
     the historical output is byte-identical (the fixpoint is intact). (#265) */
@@ -13338,6 +13657,9 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     b = cb(b, "#pragma GCC diagnostic ignored \"-Wint-conversion\"\n")
     b = cb(b, "#pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"\n")
     b = cb(b, "#pragma GCC diagnostic ignored \"-Wimplicit-int\"\n\n")
+
+    var sc_used = cg_scan_syscall_arities(prog)
+    b = cg_emit_syscall_helpers(b, sc_used)
 
     // W4c — TYPE DECLS come FIRST (before any function that uses them). Two sub-passes:
     //   a) a forward `typedef struct tk_t_<M> tk_t_<M>;` for every struct/variant/class decl, so
