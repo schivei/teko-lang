@@ -1,47 +1,43 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 SYSCALL POINTER-BRIDGE intrinsics
-# (`ptr_word`/`ref_word`) + the `SYS_WRITE` proof — the second syscall crumb, letting a buffer/struct address
-# cross into a syscall register slot without libc. What this harvest carries:
-#   - **§16 syscall bridges (compiler — checker + codegen)**:
-#     - `teko::sys::ptr_word(p: ptr): i64` — ordinary builtin (`scope.tks`, beside the `syscallN` family),
-#       lowering (`emit_ptr_word`, hooked in the `as_cstr`/`buf_ptr` special-arm chain) to
-#       `((int64_t)(uintptr_t)(<p>))`. Takes an opaque `ptr` (e.g. from `teko::mem::as_cstr`) — the widening
-#       rides the existing `ptr_widens_to_opaque` path (the `bytes_from_ptr` precedent) — and yields its address
-#       as an `i64` for a syscall arg. The sanctioned opaque→int reinterpret, on the `f64_bits` carve-out.
-#     - `teko::sys::ref_word(x): i64` — an lvalue-checked SPECIAL form (`type_ref_word` in `typer.tks`, mirroring
-#       `type_ptr_unwrap`'s addressable-`var` proof, no type argument), lowering (`emit_ref_word`) to
-#       `((int64_t)(uintptr_t)&(<x>))`. A `lookup_call` check lets a real user `ref_word` declaration win over the
-#       intrinsic (declaration-beats-fallback). Unused by this crumb; wired for the next (`clock_gettime`).
-#     - `teko::sys::SYS_WRITE` (`sys.tks`): x86_64(1)/aarch64(64), `#os("linux") #arch(...)`-guarded.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 arena sub-crumb B — the C-leg
+# `load_u64`/`store_u64` emitters, the first hard prerequisite for the Teko-arena-over-mmap keystone (the arena
+# core reads/writes its own state as words at raw mmap'd addresses; those loads/stores had a native-leg lowering
+# but NO C-backend emitter, so the arena core could not compile on the C leg). What this harvest carries:
+#   - **§16 arena crumb B (compiler — codegen)**: `emit_load_u64`/`emit_store_u64` (`codegen.tks`, beside
+#     `emit_ptr_word`), dispatched by bare last segment `load_u64`/`store_u64` in the `teko::mem` block:
+#     - `load_u64(addr: u64): u64`  → `((uint64_t)*(volatile uint64_t *)(uintptr_t)(<addr>))`
+#     - `store_u64(addr: u64, v: u64): void` → `(*(volatile uint64_t *)(uintptr_t)(<addr>) = (uint64_t)(<v>))`
+#     `volatile` for the same reason the syscall helpers clobber `"memory"`: the arena reads back words a sibling
+#     store or an mmap just wrote, and the optimiser must not elide/reorder across the raw address it cannot
+#     alias-analyze. The checker signatures (`scope.tks`) and the native lowering (`lir/lower.tks` → `LLoad`/
+#     `LStore`) were ALREADY present; this crumb adds only the missing C-backend emitters.
 #
-# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The compiler's own corpus (`src/`) calls neither
-# bridge nor any syscall, so both intrinsics — pure expression-level lowerings, no preamble helper — are fully
-# inert on the self-image; the emitted C differs from the previous seed only by the new checker/codegen SOURCE
-# plus the mechanical line/offset shifts it induces (a function-add reseed). Verified: the `(int64_t)(uintptr_t)`
-# casts + `tk_syscall3` helper appear as real emitted C only in the sys_write fixture's output, and in the
-# compiler's own teko.c only as quoted string literals inside `emit_ptr_word`/`emit_ref_word`/the syscall
-# emitter's own source — genuinely use-gated.
+# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The compiler's own corpus (`src/`) has ZERO call
+# sites of `load_u64`/`store_u64` (grep-verified: only signature/dispatch/doc-comment declarations, no
+# invocations), so the new emitters never fire on the self-image; the emitted C differs from the previous seed
+# only by the new codegen SOURCE (the `emit_load_u64`/`emit_store_u64` fn bodies, which naturally appear in the
+# self-image as their own `cb(...)` string-literal payloads) plus the mechanical line/offset shifts it induces —
+# a function-add reseed with zero behavioral divergence. The `arena_loadstore` fixture is the only invoker.
 #
-# NATIVE LEG — HONEST-STOP (by design). The bridges lower only on the C leg; native lowering is DEFERRED to the
-# terminal native-correction phase of Doc-2. The C leg is the target.
+# NATIVE LEG — already lowered (`lir/lower.tks`); this crumb touches only the C leg. The C leg is the target.
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `1a03a68e`) built the tree →
-#     emitted teko.c `1b61761d` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `1b61761d2b7e55401e24d2b3f957ff2f
-#     74db4812af1f1b2cb6ed008694a34884`; tc2 -> gen2; gen2 built the tree → tc3 `1b61761d…`. tc1 == tc2 == tc3,
-#     byte-identical (sha256 below). No ladder: the corpus calls neither bridge, so gen0 and gen1 emit the
+#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `1b61761d`) built the tree →
+#     emitted teko.c `7bc8eac4` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `7bc8eac4b925f069d341621086009b29
+#     a881d8aadcd8f81130705dbe65c9794a`; tc2 -> gen2; gen2 built the tree → tc3 `7bc8eac4…`. tc1 == tc2 == tc3,
+#     byte-identical (sha256 below). No ladder: the corpus invokes neither builtin, so gen0 and gen1 emit the
 #     self-image identically at tc1.
 #   - cc-route: cc -std=c2x -w -g -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
 #   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen . -o out --no-verify --release` exits 0 (whole-tree,
-#     clean through emit+cc; peak 5767.9 MB). As with the keystone, a first capped run tripped the arena's own
+#     clean through emit+cc). As with the prior syscall crumbs, a first capped run tripped the arena's own
 #     "out of memory (str concat)" guard at the emit at the ~5.6 GB / 6 GB-cap boundary and a re-run completed
 #     exit 0 — a cap-boundary memory-pressure artifact (Doc-1 territory), NOT a memory-correctness violation.
-#   - Regression: `examples/regressions/sys_write/` — `teko::sys::syscall3(SYS_WRITE, 1, ptr_word(as_cstr("hi\n")),
-#     3)` issues a real `write(1, buf, 3)` syscall via the inline-asm helper; the built binary prints `hi` to
-#     stdout and exits 0.
+#   - Regression: `examples/regressions/arena_loadstore/` — mmaps a page, `store_u64(addr, 0x1122334455667788)`,
+#     `load_u64(addr)` reads the sentinel back (round-trip match), munmaps; the built binary exits 0. Proves the
+#     C-leg load/store emitters operate correctly on real mmap'd memory (crumb A + B together).
 # The self-reported peak of the whole-tree build was ~5.6 GB (within the 6 GB cap; local ladder cc dropped
 # `-g` purely to fit the coordinator container's RAM — the emitted seed bytes are cc-flag-independent).
 #
@@ -54,9 +50,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  1b61761d2b7e55401e24d2b3f957ff2f74db4812af1f1b2cb6ed008694a34884
+sha256:  7bc8eac4b925f069d341621086009b29a881d8aadcd8f81130705dbe65c9794a
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 syscall pointer-bridge intrinsics
-         ptr_word/ref_word lowering to opaque→int address reinterprets, use-gated so inert on the corpus that
-         calls neither), byte-identical on rebuild across the stable C-route generations (tc1 == tc2 == tc3, no
-         ladder) AND on the cc-route re-emission; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §16 arena crumb B: C-leg load_u64/store_u64
+         emitters lowering to volatile word load/store over a raw address, inert on the corpus that invokes
+         neither), byte-identical on rebuild across the stable C-route generations (tc1 == tc2 == tc3, no ladder)
+         AND on the cc-route re-emission; no unrecovered legacy artifact underlies it.
