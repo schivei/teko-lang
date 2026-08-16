@@ -1563,6 +1563,26 @@ por-plataforma (`O_RDONLY`/`CLOCK_*`/…, à mão, sem import de macro-C); (3) s
 é o mecanismo per-target. Quirks: Linux mmap/futex/AF_UNIX · macOS mmap-ANON/kqueue/getentropy · Windows
 VirtualAlloc/Events/SEM-AF_UNIX. **Pronto pro design pass do §16.**
 
+**✅ §16 C1 ENTREGUE + RESEED (`c7ac134b`, drenado em `fix/retirement` `03f2766d`, 2026-08-16).** O keystone da
+FFI: `extern type Name = struct { … }` — struct C-ABI **header-less** na fronteira extern. Parser ramifica o
+caminho `extern type` no `=` (sem `=` = `ExternBody` opaco; `= struct{…}` = novo `ExternStructBody`, rejeita
+métodos/consts); AST ganha `ExternStructBody` no union `TypeBody()` (tag `.tkb` 10); checker `extern_struct_field_ok`
+(campo = prim numérico/byte/ptr/uptr/extern-struct aninhado) + `extern_named_body_ok` alarga `extern_type_ok`
+(admite extern-struct por valor e out-pointer `ref T`); codegen `emit_extern_struct_typedef` emite o typedef **MENOS
+a linha `tk_struct_hdr __hdr`** (layout byte-idêntico ao struct C estrangeiro). **Gate coordenador (perna C, BUILD
+REAL):** gen0(seed `20d7cb9b`)→tc1 `c7ac134b`; tc1→gen1→tc2; tc2→gen2→tc3; **tc1==tc2==tc3 byte-idêntico, sem
+ladder** (corpus declara zero `extern type = struct` → arm de codegen inerte no self-image); **MEM_PARANOID árvore
+exit 0**; regressão `extern_type_struct` (`Timespec` = `struct timespec` libc, `clock_gettime` FFI, store+read
+`ts.sec`) **exit 0**; `provenance_gate.sh` PASS no swap. **Native honest-stop:** `ExternStructBody` cai no `_ =>`
+do native lower (`lir/lower.tks`, `lir/lower_const.tks`) — lowering native do extern-struct **diferida à fase-native
+terminal da Doc-2** (perna C é o alvo do C1). **Doc-staleness anotada** (`plano-s16-fundacao-crumbs.md §3.1`):
+`extern unsafe fn` (retirado §6), `ptr<Timespec>` (`ptr` opaco, sem arg), `ref` no call-site (é binding, não
+operador) são superfície morta — real = `extern fn` + param `ref T` + arg local-plano; corrijo num crumb de doc.
+**Sequência de crumbs (plano §7): C1 ✅ → C2 `teko::sys` (leaf) → C3 str/text → C4 char/UTF-8 → C5 float-bits
+INTRÍNSECO (compiler-touching) → C6 env/os/arch/time/random (FFI) → C7 deleção de símbolos C (two-legs gate).**
+**§16 C2 DESPACHADO** (`teko::sys` skeleton + 4 consts de tempo `#os`-guarded; primeiro `#os` no corpus → o crumb
+decide empiricamente leaf-vs-reseed comparando o `teko.c` emitido).
+
 **⚖️ `f64_bits`/`f64_from_bits` = INTRÍNSECO DE CODEGEN (ruling do dono 2026-08-16, "intrínseco de codegen então").**
 Na fase strings/format/**float** do §16, essas duas são o ÚNICO caso que não vira nem `extern fn` nem Teko puro:
 são **type-punning** (reinterpretar os bits crus de um `f64` como `u64` e vice-versa — não conversão numérica).
