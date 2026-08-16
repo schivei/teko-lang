@@ -1232,6 +1232,28 @@ generic-stack). Colisões-irmãs do #4 (`Base__g__<arg>`, `TK_E_<E>_<M>`) são l
 genéricos as exercita — sem fix antes. Implementer entrega crumbs 1-7 (parser→dispatch→corpus IEq/IOrd→fixtures);
 o coordenador faz o crumb 8 (fixpoint gen2==gen3 + reseed) no drain, padrão compiler-touching.
 
+**✅ 9-ops KEYSTONE COMPLETO (`b778b7d1`) — SEM reseed, e por quê (correção da minha própria moldura).** O
+implementer descobriu que a MAQUINARIA do 9-ops (parser `b4598494`, checker `9c374457`, dispatch-genérico
+`3cc60c2a`) já eram ANCESTRAIS do seed atual `e98fd5b0` (o reseed do #4) — ou seja, **já estava seedada**. O
+corpus `src/cmp/cmp.tks` (IEq/IOrd + NeByEq/GtByLt/LeByLt/GeByLt) fora DROPADO em `07588731` só porque
+_precedia_ esse reseed; agora compila. Logo o único delta do drain é o **corpus, um módulo-FOLHA de stdlib**
+que o compilador não consome. **Regra do dono: "módulos-folha não exigem reseed; mudança de compilador SIM."**
+Confirmado que NÃO há gate seed-vs-emissão: `provenance_gate.sh` só julga um SWAP de `bootstrap/teko.c`; seed
+INALTERADO = PASS trivial. Então NÃO reseei — deixar o seed como está é correto e CI-safe (o C-leg constrói
+gen0 do seed e compila a árvore verde). **Validação build-real do coordenador (mais forte que o exigido):**
+rodei a cadeia C-route completa (cc `bootstrap/teko.c`→gen0→emite tc1→gen1→tc2→gen2→tc3) sob `ulimit -v
+6291456` — **tc1==tc2==tc3 byte-idêntico**, sha `d33a61863b2b031551cfc8bdd5d5af419bbec521f7b9d79cd92d09f7295cb709`
+(a árvore-com-corpus AUTO-HOSPEDA byte-idêntico). Fixtures (crumb 7, já ancestrais): `capability_iface`
+(struct `__eq`, `index_of<T:IEq>`, `min2<T:IOrd>`, `NeByEq` joint), `operator_overload_compose` (overload de
+método E operador across-composition), 5/5 diagnósticos rejeitam com a mensagem esperada. **Byte-diff do corpus
+puro** (implementer): +163 bytes no `teko.c` = exatamente os 2 typedefs-portadores `tk_t_teko__cmp__IEq`/`IOrd`,
+ZERO funções estampadas (contagem 7173 imutável) — os contratos/mixins são inertes até USADOS por um genérico
+monomorfizado. **DESTRAVADO agora:** `sort<T:IOrd>` genérico e a migração `Map<K:IEq&IHash,V>` (a metade IEq
+entregue; falta `IHash` = interface de MÉTODO `fn hash():u64`, fora do escopo 9-ops) — âmbito stdlib adjacente.
+**LIMITE documentado (T-1):** um value-type (`type Ms = i64 {…}`) NÃO compõe trait-mixins — escreve os quatro
+operadores de `IOrd` à mão (síntese estrutural continua aposentada). Próximo: generic-stack-completion (agora
+desbloqueado) → collections-generics-fase1b.
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
