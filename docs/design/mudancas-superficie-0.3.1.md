@@ -1790,6 +1790,19 @@ emite; consertar a native antes seria retrabalho. **Ordem de saída da Doc-2:** 
 3 portões durante toda a jornada) → (II) **fase-native terminal**: consertar `const struct __hdr` + o que mais a
 native exigir, até as 3 dimensões native verdes no CI → (III) limiar Doc-1 atingido → avisar o dono. A fase-native
 é o ÚLTIMO trabalho da Doc-2, imediatamente antes do handoff.
+**⚖️ ENDPOINT DO BOOTSTRAP — o entregável FINAL da Doc-1 é um SEED NATIVE, não mais um seed de C (ruling do dono
+2026-08-16).** Hoje `bootstrap/teko.c` é um seed de C (reproduz por byte-identidade do C emitido). O arco completo:
+**C-seed → [Doc-2: as duas pernas verdes nos 3 portões] → [Doc-1: melhora arena + multi-threading, e no FIM VIRA O
+SEED de C→native] → SEED NATIVE.** Com isso a versão fecha **com binários nativos REAIS** (o seed passa a ser
+produzido/reproduzido pelo backend native) **e com o "sweep de C"** (a dependência de C — seed-de-C, backend-C como
+veículo de bootstrap — é varrida no final; a linguagem passa a se auto-hospedar em native puro). **POR QUE isso
+torna a perna-native-verde da Doc-2 não-negociável, e não só "higiene":** um seed native só é viável se a native
+**faz fixpoint byte-idêntico** (gen2==gen3 no backend native) — é exatamente essa propriedade que a fase-native
+terminal da Doc-2 garante. A Doc-2 entrega a native reproduzível; a Doc-1, no seu passo final, **flipa o seed pra
+native** e varre o C. Ou seja: o portão "native: compila+fixpoint+memparanoid" da Doc-2 **é a fundação do seed-
+native da Doc-1** — sem ele, a Doc-1 não teria de onde semear em native. (Detalhe de reprodutibilidade native —
+determinismo de codegen/link do backend native — é problema da Doc-1; a Doc-2 só precisa provar que a native fecha
+os 3 portões no CI.)
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
