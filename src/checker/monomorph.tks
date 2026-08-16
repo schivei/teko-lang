@@ -389,6 +389,51 @@ fn subst_find_inst(s: Subst, name: str): @Type() | null {
     null
 }
 
+/**
+ * Rewrite a stamped body's TCall namespace key through the instance Subst — a sibling instance-method
+ * call (`self.count()` inside `Ctr__g__i64::twice`) was typed against the ABSTRACT template, so its
+ * `call_ns` still names the template owner (`ns::Ctr`); the stamped `count` is emitted under the
+ * instance namespace (`Ctr__g__i64`), so the call must key off the instance too or the C symbol
+ * mismatches ("undeclared identifier"). The Subst already carries `ns::Ctr -> Named{Ctr__g__i64}`
+ * (instance_method_subst's receiver remap, in BOTH the canonical and bare spelling), so this reuses it
+ * for the call key. A `call_ns` the Subst does not remap passes through UNCHANGED, so every free-fn /
+ * cross-type call is byte-identical.
+ *
+ * @param call_ns  the TCall's current namespace key (the abstract owner for a sibling call)
+ * @param s        the instance-method Subst (carries `owner-canon/owner-bare -> Named{instance}`)
+ * @return         the instance namespace when `call_ns` is the remapped owner, else `call_ns` unchanged
+ * @since generic-stack-completion (#163 follow-up, gap #3)
+ */
+fn mono_rekey_call_ns(call_ns: str, s: Subst): str {
+    if call_ns.len == 0 { return call_ns }
+    match subst_find_inst(s, call_ns) {
+        (@Type()) as ct => match ct { Named as n => n.name; _ => call_ns }
+        null => call_ns
+    }
+}
+
+/**
+ * Rewrite a stamped body's TCall callee QUALIFIER (the second-to-last segment) through the same
+ * instance Subst that `mono_rekey_call_ns` uses for the namespace key, so the emitted symbol's
+ * namespace and the callee path agree. A sibling `self.count()` carries the callee `[ns::Ctr, count]`;
+ * the qualifier `ns::Ctr` must re-key to `Ctr__g__i64` alongside the `call_ns` so downstream passes
+ * that read the path (recursion detection, dispatch-key matching) see the instance too. A single-segment
+ * callee (a free-fn call) or a qualifier the Subst does not remap passes through UNCHANGED.
+ *
+ * @param callee  the TCall's callee path (`[..., qualifier, method]`)
+ * @param s       the instance-method Subst (carries `owner-canon/owner-bare -> Named{instance}`)
+ * @return        the callee with its qualifier re-keyed to the instance, else `callee` unchanged
+ * @since generic-stack-completion (#163 follow-up, gap #3)
+ */
+fn mono_rekey_callee_qualifier(callee: parser::Path, s: Subst): parser::Path {
+    if callee.segments.len < 2 { return callee }
+    var qual = callee.segments[callee.segments.len - 2].name
+    match subst_find_inst(s, qual) {
+        (@Type()) as ct => match ct { Named as n => rewrite_iface_segment(callee, n.name); _ => callee }
+        null => callee
+    }
+}
+
 // ── the lookup of a generic TFunction by bare name ──────────────────────────────────────
 // scan the program items for a generic TFunction (type_params.len > 0) whose name matches.
 // (C: find_generic_fn.)
@@ -828,12 +873,12 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
                     var sub = match mono_call_subst(gf, cl, args, s, teko::list::empty(), table) { Subst as x => x; error as er => return er }
                     var mangled = mono_mangle_name(bare, gf.type_params, sub)
                     // rewrite the callee's LAST segment to the mangled name (keep the leading segments + call_ns).
-                    var newcallee = rewrite_last_segment(cl.callee, mangled)
+                    var newcallee = mono_rekey_callee_qualifier(rewrite_last_segment(cl.callee, mangled), s)
                     var rec = MonoInst { fn_name = bare; mangled = mangled; s = sub; owner_ns = "" }
-                    WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
+                    WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcallee; args = args; call_ns = mono_rekey_call_ns(cl.call_ns, s); is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
                 }
                 null => {
-                    var passthrough = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }
+                    var passthrough = TCall { overload_suffix = cl.overload_suffix; callee = mono_rekey_callee_qualifier(cl.callee, s); args = args; call_ns = mono_rekey_call_ns(cl.call_ns, s); is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }
                     var rekeyed = rekey_iface_dispatch(passthrough, args, table)
                     WExpr { expr = TExpr { kind = rekeyed; type = nt; line = e.line; col = e.col }; insts = acc }
                 }
