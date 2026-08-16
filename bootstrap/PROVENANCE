@@ -1,51 +1,45 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the STDLIB EXPANSION wave. The
-# previous seed (40778f95 surface + e99ca8f2 §7 svc_scope_expr seam) predates every module the
-# monomorphic stdlib drive added to `src/` — all of which the compiler COMPILES INTO ITS OWN BINARY,
-# so the emitted C changed throughout. What entered `src/` since the last seed and is carried by this
-# harvest:
-#   - `teko::crypto` core: hash (SHA-2/3, SHAKE, BLAKE2b, MD5, SHA-1), mac (HMAC incl. SHA-384,
-#     Poly1305, CMAC/GMAC seams), kdf (HKDF, PBKDF2), cipher (AES-{128,192,256} CBC/CTR/CFB/OFB,
-#     ChaCha20), aead (AES-GCM/CCM, ChaCha20-Poly1305).
-#   - `teko::crypto` public-key: rsa (PKCS#1 v1.5 + PSS), ec_p256 (ECDSA/NIST P-256), ed25519 (RFC 8032)
-#     — all over the existing `teko::numeric::bigint` engine, extended here with the crypto operation
-#     surface (mod_pow, mod_inverse, I2OSP/OS2IP, hex/dec).
-#   - `teko::sort` (stable merge sort + search + select) and the `teko::encoding` family
-#     (base64/url/mime, xml + C14N, cbor, bson, msgpack).
-#   - The flat-namespace overload de-collision (rotl32 / le_u32_at / push_le_u32) and the
-#     msgpack::decode_scalar union-widening workaround (2-arm -> 3-arm return coerced explicitly) —
-#     the two source fixes that unbroke the C route in the first place.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the FINDING-#4 CODEGEN FIX + the accumulated
+# stdlib expansion since the previous seed (`8fdb1893`, the stdlib-expansion reseed). What this harvest carries:
+#   - **Finding #4 fix (codegen)**: `src/codegen/codegen.tks` — a `T | error` / `T | null` union's C tag
+#     constant and mangled name now qualify the member type by its CANONICAL namespace (`cg_ns_c_key`, `::`->`__`)
+#     across all four union-key sites (resolved leaf, syntactic type-expr, match-pattern case key, named-variant
+#     tag stem). Two same-bare-named structs in different namespaces (e.g. `a::Thing` vs `b::Thing`, both in a
+#     `Thing | error` union) now emit DISTINCT C symbols instead of colliding at `cc`. Prim/error/null/builtin
+#     and ROOT-namespace unions mangle byte-identically to before (bounded diff); only namespaced user types
+#     change — but the compiler's OWN corpus is heavily namespaced, so the emitted C diverges broadly.
+#   - The stdlib delta since `8fdb1893`: `crypto::pk` (rsa/ec_p256/ed25519), document-signing (jose/xmldsig/cose),
+#     `encoding` toml/ini/yaml/asn1/fixed/protobuf, and the `parse_manifest` TOML dogfood swap.
 #
-# NOT INERT — BY DESIGN. The compiler now bundles the whole monomorphic stdlib, so the emitted C
-# differs from the previous seed's throughout. The honest statement is not "nothing changed" but
-# "the new tree reproduces itself".
+# NOT INERT — BY DESIGN. The #4 mangle change renames every namespaced union in the emitted C throughout, so
+# this seed differs from the previous one broadly. The honest statement is "the new mangle reproduces itself".
 #
-# GATE: SELF-REPRODUCE (the coordinator's standing ruling for a reseed).
-#   - C-route chain: gen1 (cc from the PREVIOUS bootstrap/teko.c) built gen2; gen2 built gen3;
-#     gen2's emitted teko.c == gen3's emitted teko.c, byte-identical (sha256 below). A stdlib-bundling
-#     compiler compiled by a stdlib-bundling compiler reproduces itself.
-#   - cc-route: cc -std=c2x bootstrap/teko.c -> gen; TEKO_BACKEND=c gen . -o out --no-verify --release
-#     -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below. Verified this harvest.
-#   - Full build green end-to-end this harvest: checker 8100/8100, monomorph, consteval, codegen 7746,
-#     emit C, cc link -> a runnable `teko 0.3.0.31-beta`.
-# Every capped build (`ulimit -v 6291456`) stayed well under the 6 GB cap.
+# GATE: SELF-REPRODUCE.
+#   - C-route chain: gen_new (cc from the PREVIOUS bootstrap-era compiler) built gen_new2; gen_new2 built
+#     gen_new3; gen_new2's emitted teko.c == gen_new3's emitted teko.c, byte-identical (sha256 below). The
+#     transitional gen_new (emitted by the old-mangle compiler, bare names) is NOT the seed; the STABLE
+#     new-mangle generation (gen_new2 == gen_new3) is.
+#   - cc-route: cc -std=c2x bootstrap/teko.c -> gen; TEKO_BACKEND=c gen . -o out --no-verify --release ->
+#     out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below (this IS the gen_new2==gen_new3
+#     fixpoint verified this harvest).
+#   - Regression: `examples/regressions/union_tag_cross_ns/` (a::Thing / b::Thing in `Thing|error` and
+#     `Thing|null`, plus a same-bare named variant) builds+runs green under gen_new2 with distinct symbols
+#     `tk_u_union_tag_cross_ns__a__Thing_error` vs `...__b__Thing_error` — the exact shape that `cc`-failed before.
+# Every capped build (`ulimit -v 6291456`) peaked under 5 GB, within the 6 GB cap.
 #
-# `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
-# default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
-# forward-only, and its correctness rests on the self-reproduction above rather than a CI run-id. This
-# mirrors the item-14 and §7 hand-harvest reseeds already in this file's history.
+# `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the default
+# branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane, forward-only, and
+# its correctness rests on the self-reproduction above. Mirrors the item-14/section-7/stdlib-expansion harvests.
 # `commit: pending drain` — the landing commit is written in this same change.
 #
-# Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh, which only
-# ever judges this record on a SWAP.
+# Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (judges on a SWAP).
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  8fdb1893564ca1924b0b9fd963b85b4b27d6f60502ca5c0111d51b721a1fad15
+sha256:  898dc030935367ba9abdcdb8099a365658d1334d33cca773207be97d344c0596
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the monomorphic stdlib expansion:
-         crypto core + public-key over numeric::bigint + sort + encoding, plus the overload
-         de-collision and the msgpack union-widening fix), byte-identical on rebuild across the
-         C-route generations AND on the cc-route re-emission; no unrecovered legacy artifact underlies
-         it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the finding-#4 cross-namespace union-tag
+         codegen fix + the accumulated stdlib expansion), byte-identical on rebuild across the stable
+         new-mangle C-route generations (gen_new2 == gen_new3) AND on the cc-route re-emission; no unrecovered
+         legacy artifact underlies it.
