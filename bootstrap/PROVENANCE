@@ -1,43 +1,47 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the GENERIC-STACK-COMPLETION GAP #3
-# codegen/monomorph fix, plus the accumulated leaf-module stdlib since the previous seed (`898dc030`,
-# the finding-#4 reseed at `e98fd5b0`). What this harvest carries:
-#   - **Gap #3 fix (compiler — monomorph)**: `src/checker/monomorph.tks` — a stamped generic
-#     instance-method body's sibling call on `self` (e.g. `self.count()` inside `Ctr__g__i64::twice`)
-#     is now RE-KEYED from the abstract template owner to the concrete instance namespace, so its C
-#     symbol (`teko_..__Ctr__g__i64__count`) matches the emitted definition instead of link-failing as
-#     `teko_..__ct__Ctr__count`. New `mono_rekey_call_ns` + `mono_rekey_callee_qualifier`, wired into
-#     both TCall result arms of `mono_texpr`. This is the ROOT-DISPATCH re-key that gap #1 (the
-#     structural-trait flagship) also reuses. Because the change is a compiler change, it TRIGGERS this
-#     reseed (owner rule: "módulos-folha não exigem reseed; mudança de compilador SIM").
-#   - **Leaf-module stdlib since `898dc030`** (folded in here — none required a reseed on its own, but
-#     the seed had drifted behind them): `crypto` 3des/DES, `crypto` password (Argon2id/scrypt), and the
-#     `teko::cmp` comparison corpus (IEq/IOrd + NeByEq/GtByLt/LeByLt/GeByLt, the 9-ops crumb-6 corpus).
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the F1 + F4 generics-constraint checker
+# fixes, plus the collections-generics-fase1b LEAF corpus accumulated since the previous seed
+# (`481ebae5`, the gap-#3 reseed). What this harvest carries:
+#   - **F1 fix (compiler — checker)**: `src/checker/resolve.tks` — a constraint-bound type-parameter
+#     (`T: IOrd`, registered with an `InterfaceBody` surface) is now ADMITTED as a null-union member
+#     (`T | null`), where before `variant_member_admissible` rejected it as "an interface cannot be a
+#     variant member yet". New predicate `is_type_param_named` (exactly one constraint, zero own
+#     type-params) narrows the gate: a GENUINE interface value in a union stays rejected (that is the
+#     deferred #28 feature); only the false-positive on a constrained `T` is lifted. This unblocks
+#     `first_or_null<T: IOrd>(): T | null`, `PriorityQueue.dequeue(): T | null`, etc.
+#   - **F4 fix (compiler — checker/monomorph)**: `src/checker/monomorph.tks` — generic CLASS
+#     instantiations are now constraint-checked at monomorph (`check_instance_constraints`, wired into
+#     `monomorphize` after the `any_generic` guard, reusing `check_constraints` + `instance_type_subst`
+#     over `table_generic_instances`). `Dictionary<Plain, i64>` where `Plain` lacks `IHash` now FAILS
+#     with a clean "type parameter 'K' does not satisfy its constraint at this instantiation" diagnostic
+#     instead of a `cc`/link error on an undefined `Plain__hash`. Fail-loud (M.1).
+#   - **fase1b LEAF corpus since `481ebae5`** (folded in — leaf, did not itself require a reseed):
+#     `teko::cmp::IHash` + `StrKey`/`I64Key` key conformers; `Dictionary<K:IEq&IHash,V>`, `HashSet`,
+#     `SortedSet`/`PriorityQueue`/`SortedDictionary`; the `arr_*`/`sorted_insert`/`heap_*` combinators.
 #
-# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL DIVERGENCE. The gap #3 re-key is a no-op for every `call_ns`
-# the instance Subst does not remap (every existing call — the compiler corpus has ZERO generic
-# instances), so it changes NO behavior of the self-image. The emitted C nonetheless differs from the
-# previous seed: (a) the two new monomorph functions + the two wiring-site edits; (b) mechanical
-# source-location shifts — the compiler embeds source line/col literals for panic sites
-# (`_tk_cast_loc_line`, `tk_panic_oob_at`), and inserting ~50 lines into `monomorph.tks` shifts them
-# throughout; (c) the accumulated leaf-module emissions above. The honest statement is "the new
+# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL DIVERGENCE. F1+F4 no-op the compiler's OWN corpus (it has no
+# constrained-`T`-in-union and no constraint-violating class instantiation), so they change NO behavior
+# of the self-image. The emitted C differs from the previous seed only by: (a) the two new checker
+# functions + the guarded gate line + the wired call; (b) mechanical codegen temp-counter / source-loc
+# line shifts from the inserted lines; (c) the fase1b leaf conformers (concrete StrKey/I64Key methods —
+# NOT stamped generics; 0 generic collection functions stamped). The honest statement is "the new
 # compiler reproduces itself exactly".
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen0 (cc from the PREVIOUS bootstrap `898dc030`) built the tree → emitted teko.c
-#     `481ebae5` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `481ebae5`; tc2 -> gen2; gen2 built the
-#     tree → tc3 `481ebae5`. tc1 == tc2 == tc3, byte-identical (sha256 below). Because the re-key never
-#     fires on the corpus, the OLD compiler (gen0) and the NEW compiler (gen1) emit the self-image
-#     identically — the stable generation is reached at tc1 and reproduces exactly through tc3.
+#   - C-route chain: gen0 (cc from the PREVIOUS bootstrap `481ebae5`) built the tree → emitted teko.c
+#     `3683d71e` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `3683d71e`; tc2 -> gen2; gen2 built the
+#     tree → tc3 `3683d71e`. tc1 == tc2 == tc3, byte-identical (sha256 below). F1+F4 never fire on the
+#     corpus, so the OLD compiler (gen0) and the NEW compiler (gen1) emit the self-image identically —
+#     the stable generation is reached at tc1 and reproduces exactly through tc3.
 #   - cc-route: cc -std=c2x -w -g -I src/runtime -I src/assert bootstrap/teko.c src/runtime/teko_rt.c
 #     src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify --release -> out/teko.c;
 #     sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
-#   - Regression: `examples/regressions/generic_sibling_method/` (a `Ctr<T>` class whose `twice()` calls
-#     `self.count()` twice; `Ctr<i64>::make().twice() == 6`) LINK-fails under the previous seed's gen0
-#     and builds+runs green (exit 0, both scenarios) under the reseeded compiler — the exact shape that
-#     failed to link before.
-# Every capped build (`ulimit -v 6291456`) peaked under 5 GB, within the 6 GB cap.
+#   - Regression: `examples/regressions/type_param_union_return/` (F1 — `first_or_null<T: IOrd>(): T |
+#     null` builds+runs green, present-arm exit 7) and `examples/regressions/class_key_no_ihash/` (F4 —
+#     a `Dict<Plain, i64>` where `Plain` lacks `IHash` FAILS at monomorph with the clean constraint
+#     diagnostic instead of a link error). Both are the exact shapes these fixes address.
+# Every capped build (`ulimit -v 6291456`) peaked under 5.4 GB, within the 6 GB cap.
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -48,9 +52,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  481ebae5dfefd467b153425459f91de56a8c42998a6f05c748f1b71583479547
+sha256:  3683d71e1832d82c1338e8b255cecc912f68a5ec6562b95dc6b62e9d75b1f795
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the generic-stack-completion gap #3
-         monomorph re-key + the accumulated leaf-module stdlib since 898dc030), byte-identical on
-         rebuild across the stable C-route generations (tc1 == tc2 == tc3) AND on the cc-route
-         re-emission; no unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the F1 union-of-constrained-T + F4
+         class-instantiation-constraint checker fixes + the accumulated fase1b leaf corpus), byte-
+         identical on rebuild across the stable C-route generations (tc1 == tc2 == tc3) AND on the
+         cc-route re-emission; no unrecovered legacy artifact underlies it.

@@ -1323,6 +1323,26 @@ Arquiteto triando qual é fix-agora vs workaround-aceitável vs ruling-do-dono, 
 destravado, NÃO construído:** `sort<T:IOrd>` genérico, `teko::env`→Map. Próximo: triage → fixes de maquinaria →
 G6 → sort<T:IOrd> → §10 concorrência.
 
+**✅ TRIAGE das 4 achados: todos in-scope, NENHUM ruling-do-dono** (`fase1b-machinery-findings-triage.md`).
+**✅ F1 + F4 ENTREGUES + RESEED (`8611a99e`/`3e874682`, reseed neste commit).** **F1** (checker,
+`resolve.tks`): um type-param constrangido (`T:IOrd`, superfície InterfaceBody) agora é ADMITIDO como membro de
+união-null (`T|null`) — antes `variant_member_admissible` o rejeitava como "an interface cannot be a variant
+member yet". Novo predicado `is_type_param_named` (exatamente 1 constraint, 0 type-params próprios) estreita o
+gate: um VALOR de interface genuíno numa união continua rejeitado (é a feature #28 diferida); só o falso-positivo
+no `T` constrangido é liberado. Destrava `dequeue():T|null`/`pop():T|null`. **F4** (checker/monomorph,
+`monomorph.tks`): instanciações de CLASSE genérica agora são constraint-checadas no monomorph
+(`check_instance_constraints`) — `Dictionary<Plain,i64>` sem `IHash` FALHA com diagnóstico limpo em vez de
+link-error `Plain__hash`. Fail-loud. **RESEED:** F1+F4 NO-OPam o corpus do compilador → seed novo `3683d71e`;
+byte-diff mecânico (2 funções novas + gate + call + shifts de source-loc; sem divergência comportamental).
+**GATE self-reproduce:** cadeia C-route gen0(seed `481ebae5`)→tc1→gen1→tc2→gen2→tc3, **tc1==tc2==tc3==`3683d71e`**
+byte-idêntico; `provenance_gate.sh` PASS. Regressões: `type_param_union_return` (F1, exit 7) +
+`class_key_no_ihash` (F4, falha-limpa no monomorph). **F2 REPRODUZ (triage errou o "não reproduz"):** bug de
+inferência genérica na FASE-CHECKER, dependente de ORDEM — mesmo free-generic chamado num `[]u64` concreto ANTES
+do `[]T` (type-param) dispara "argument type mismatch"; `HashSet.remove` (hashes[]u64 primeiro) tripa,
+`Map`/`Dictionary` (keys primeiro) não. Workaround `arr_drop_u64_at` concreto MANTIDO (são), bug rastreado (não
+bloqueia nada). Próximo: **batch B = F3** (factory com type-param do dono, `retarget_generic_static_callee` +
+mono `subst_instance_name` fall-through) → adota **G6** (`Map.to_dictionary`) → depois `sort<T:IOrd>` → §10.
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
