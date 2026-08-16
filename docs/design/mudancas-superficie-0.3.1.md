@@ -1564,6 +1564,10 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
      realiza a elisão física da cópia no backend.)
   3. **Elisão de arena (não abre arena onde é desnecessário).** Ex.: `fn a(): T { b() }` → `a` NÃO abre arena
      (só encaminha o resultado de `b`); idem retorno de constantes.
+  4. **Reaproveitamento estático de literais + folded-como-constantes (dono 2026-08-16).** Deduplica/compartilha
+     literais idênticos (strings, numéricos) e valores de constant-fold — emite UMA vez e referencia, em vez de
+     duplicar — reduzindo o **tamanho do BINÁRIO final**. (Otimização de binário, distinta dos itens 1-3 que são
+     de memória-de-arena; ambos no balde "melhora" da Doc-1.)
   **CONSEQUÊNCIA PRA O §16 (crumb D em diante):** a arena-Teko da Doc-2 só precisa ser CORRETA (region-per-object +
   deep-copy default + bulk-free + wrap-refcount escape-hatch), NÃO ótima. O pré-dimensionamento / retorno-virtual-
   sem-cópia / elisão-de-arena são Doc-1 — NÃO construir na Doc-2. O OOM no limite do cap durante os reseeds é
