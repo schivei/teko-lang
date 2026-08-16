@@ -1171,6 +1171,7 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     argv = teko::list::push(argv, teko::str::concat(asrt, "/assert.c"))
     var keys = link_target_keys(m)
     argv = append_libm_flag(argv, m, keys.emit_os)
+    argv = append_pthread_flag(argv, m, keys.emit_os)
     var reachable = reachable_libs(prog)
     argv = append_reachable_link_flags(argv, m, reachable)
     argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
@@ -1186,6 +1187,12 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
  * LIBM_FLAG — the flag that links the C math library on the platforms that ship it separately.
  */
 const LIBM_FLAG: str = "-lm"
+
+/**
+ * PTHREAD_FLAG — the flag that links the POSIX threads runtime for tk_thread_spawn (§10 C0a). §16
+ * will retire libc: pthread is the transitional thread mechanism.
+ */
+const PTHREAD_FLAG: str = "-pthread"
 
 /**
  * append_libm_flag — link the math library, EXCEPT where the platform has none to link.
@@ -1208,6 +1215,25 @@ fn append_libm_flag(argv: []str, m: Manifest, emit_os: str): []str {
     if m.freestanding { return argv }
     if emit_os == WINDOWS_OS_NAME { return argv }
     teko::list::push(argv, LIBM_FLAG)
+}
+
+/**
+ * append_pthread_flag — append `-pthread` on every non-Windows, non-freestanding leg so the runtime's
+ * tk_thread_spawn (§10 C0a) links its pthread_create/detach/join. Additive and mechanical: `-pthread`
+ * governs the C compiler/linker invocation only — it never changes a byte of emitted `teko.c`, so the
+ * fixpoint stays byte-identical. Windows uses its own thread mechanism (deferred to §16) and a
+ * freestanding build links no threads runtime, so both are skipped.
+ *
+ * @param argv     the compile/link argument vector so far
+ * @param m        the resolved manifest (the freestanding switch)
+ * @param emit_os  the RESOLVED TARGET's own OS (`LinkTargetKeys.emit_os`)
+ * @return         `argv` with `-pthread` appended on non-Windows non-freestanding hosts, else unchanged
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn append_pthread_flag(argv: []str, m: Manifest, emit_os: str): []str {
+    if m.freestanding { return argv }
+    if emit_os == WINDOWS_OS_NAME { return argv }
+    teko::list::push(argv, PTHREAD_FLAG)
 }
 
 /**
@@ -2074,6 +2100,7 @@ fn compile_c_object_argv(cc: str, is_clang: bool, csrc: str, obj: str, rt: str, 
     argv = teko::list::push(argv, if is_clang { "-std=c23" } else { "-std=c2x" })
     argv = teko::list::push(argv, "-w")
     argv = teko::list::push(argv, if is_clang { "-ferror-limit=0" } else { "-fmax-errors=0" })
+    if !m.freestanding { argv = teko::list::push(argv, PTHREAD_FLAG) }
     var verval = if m.suffix.len > 0 { teko::str::concat(teko::str::concat(m.version, "-"), m.suffix) } else { m.version }
     argv = teko::list::push(argv, teko::str::concat("-DTEKO_VERSION_STRING=", verval))
     if strong_seed && !program_declares_assert_seed(prog) { argv = teko::list::push(argv, ASSERT_SEED_STRONG_FLAG) }

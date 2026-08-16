@@ -40,6 +40,7 @@
 #include <fcntl.h>    // O_WRONLY — /dev/null redirect for tk_rt_run_quiet (issue #73 cc probe); FD_CLOEXEC on a pipe pair (F5)
 #include <poll.h>     // poll — tk_rt_fd_wait_readable's exact-deadline wait on a pipe end (F5)
 #include <sys/random.h> // getentropy (macOS) / getrandom (Linux glibc>=2.25, musl) — teko::crypto::rand (#194 C6)
+#include <pthread.h>  // §16-TRANSITIONAL: pthread_create/detach/join for tk_thread_spawn (§10 C0a). Retired when teko_rt.c goes to FFI.
 #endif
 #include <errno.h>    // errno/EEXIST — mkdir idempotence
 #include <time.h>     // clock_gettime, localtime_r, CLOCK_REALTIME — teko::time ROUND 0
@@ -2519,6 +2520,81 @@ void tk_task_end(tk_task *previous) {
     ending->fn_stack = NULL; ending->fn_sp = 0; ending->fn_cap = 0;
     tk_g_current_task = previous;
     if (ending != &tk_g_main_task) free(ending);
+}
+
+// ============================ (§10 C0a) tk_thread_spawn ============================================
+//
+// The spawned thread's _Thread_local tk_g_current_task is INDEPENDENT of the spawning thread's (one
+// %fs-relative load per thread). tk_task_begin on the new thread starts from an EMPTY discipline (no
+// root, no marks) so its tk_arena_pop/tk_task_end can NEVER reach another task's allocations. Args do
+// not cross arenas because they were deep-copied into ctx_blob (libc heap, task-independent) by the
+// spawning thread BEFORE hand-off; the target reads only the blob, never the spawning arena. The copy
+// IS the isolation. pthread is the §16-TRANSITIONAL mechanism.
+
+// tk_thread_call — what pthread's void* start-routine slot carries: the codegen trampoline `entry`
+// and its ctx_blob, so ONE C start-routine serves every spawn-site. Malloc'd by the spawning thread,
+// freed FIRST thing on the new thread.
+typedef struct { void (*entry)(void *); void *ctx_blob; } tk_thread_call;
+
+// tk_thread_start — the pthread start-routine. The arena bracket lives HERE, invisible to emitted
+// code: tk_task_begin installs a FRESH sub-root arena for this thread, `entry(blob)` runs the
+// deep-copied args + the target, tk_task_end frees the whole arena. The blob is freed by `entry`
+// itself (the S3 trampoline); tk_thread_call is freed here.
+static void *tk_thread_start(void *raw) {
+    tk_thread_call call = *(tk_thread_call *)raw;
+    free(raw);
+    tk_task *saved = tk_task_begin();   // this thread's OWN sub-root arena (D1)
+    call.entry(call.ctx_blob);          // trampoline: unpack blob -> target(args) -> free(blob)
+    tk_task_end(saved);                 // the arena dies with the thread
+    return NULL;
+}
+
+void tk_thread_spawn(void (*entry)(void *), void *ctx_blob) {
+    tk_thread_call *call = malloc(sizeof *call);
+    if (call == NULL) tk_panic("out of memory");
+    call->entry = entry;
+    call->ctx_blob = ctx_blob;
+    pthread_t th;
+    if (pthread_create(&th, NULL, tk_thread_start, call) != 0) tk_panic("spawn: cannot create thread");
+    pthread_detach(th);                 // fire-and-forget: no join, no return, no handle (§10)
+}
+
+// tk_thread_handle — opaque, heap-boxed so a u64 can name it (AWAIT-BATCH twin).
+typedef struct { pthread_t th; } *tk_thread_handle;
+
+uint64_t tk_thread_join_spawn(void (*entry)(void *), void *ctx_blob) {
+    tk_thread_call *call = malloc(sizeof *call);
+    if (call == NULL) tk_panic("out of memory");
+    call->entry = entry; call->ctx_blob = ctx_blob;
+    tk_thread_handle h = malloc(sizeof *h);
+    if (h == NULL) tk_panic("out of memory");
+    if (pthread_create(&h->th, NULL, tk_thread_start, call) != 0) tk_panic("spawn: cannot create thread");
+    return (uint64_t)(uintptr_t)h;   // uintptr_t is unsigned — the i64->u64 neg-cast trap does not apply
+}
+
+void tk_thread_join(uint64_t handle) {
+    tk_thread_handle h = (tk_thread_handle)(uintptr_t)handle;
+    pthread_join(h->th, NULL);
+    free(h);
+}
+
+// tk_thread_spawn_paranoid_body — one thread's work: a fresh task, a handful of allocations, a clean
+// task end. Under TEKO_MEM_PARANOID=1 the freed blocks are poisoned + never parked, so a stray
+// cross-task pointer would corrupt and the live-count would drift.
+static void tk_thread_spawn_paranoid_body(void *unused) { (void)unused;
+    for (int i = 0; i < 32; i++) { volatile char *p = (volatile char *)tk_alloc(64 + (size_t)i); p[0] = (char)i; }
+}
+
+uint64_t tk_thread_spawn_selftest(int64_t n) {
+    uint64_t baseline = tk_names_live_count();
+    if (n < 0) n = 0;
+    // JOIN each thread — a detached spawn gives the test no finish edge, so the paranoid selftest uses
+    // the joinable twin to be deterministic (this is exactly why the twin is designed now).
+    for (int64_t i = 0; i < n; i++) {
+        uint64_t h = tk_thread_join_spawn(tk_thread_spawn_paranoid_body, NULL);
+        tk_thread_join(h);
+    }
+    return tk_names_live_count() - baseline;   // MUST be 0: every task_begin/alloc/task_end balanced
 }
 
 void *tk_alloc(size_t n) {

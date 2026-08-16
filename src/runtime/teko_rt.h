@@ -215,6 +215,31 @@ tk_task   *tk_task_current(void);               // the task owning this flow's m
 tk_task   *tk_task_begin(void);                 // create + install a fresh task with an EMPTY discipline; returns the task that was current
 void       tk_task_end(tk_task *previous);      // free the current task's regions and reinstall `previous`
 
+// (§10 C0a) tk_thread_spawn — fire-and-forget: start a DETACHED OS thread running `entry(ctx_blob)`
+// on its OWN sub-root arena. `entry` is the codegen trampoline (one per spawn-site, the sole caller
+// of the target fn); `ctx_blob` is a single self-contained malloc'd block holding a deep COPY of every
+// argument (packed by the spawning thread before the call). Ownership of `ctx_blob` passes to the
+// spawned thread, which frees it after `entry` returns. Never blocks the caller. Panics (never returns
+// an error) if the OS refuses the thread — a spawn that cannot start is program-fatal, matching
+// tk_task_begin's OOM panic. §16 will retire libc: pthread_create is the TRANSITIONAL mechanism;
+// clone(2)/CreateThread selection is an internal detail deferred to §16. Nothing outside this file may
+// assume pthreads.
+void       tk_thread_spawn(void (*entry)(void *), void *ctx_blob);
+// (§10 AWAIT-BATCH) tk_thread_join_spawn — the JOINABLE twin. Same contract as tk_thread_spawn but
+// returns an opaque handle for a later tk_thread_join to block on until the thread's `entry` returns.
+// UNUSED by the spawn surface (spawn is detached); declared now so the await lowering resumes quickly.
+// Do NOT wire a Teko surface to it in this batch.
+uint64_t   tk_thread_join_spawn(void (*entry)(void *), void *ctx_blob);
+// (§10 AWAIT-BATCH) tk_thread_join — block until the thread named by `handle` has returned, then free
+// the handle. UNUSED by the spawn surface. §16 will retire libc.
+void       tk_thread_join(uint64_t handle);
+// (§10 C0a) tk_thread_spawn_selftest — the C-owned probe body the `thread_spawn_paranoid` fixture
+// reaches through ONE ordinary extern call (the tk_test_capture_probe pattern — a Teko test cannot
+// pass a `void(*)(void*)`). Spawns `n` threads, each doing tk_task_begin/alloc/tk_task_end, JOINS
+// them all (deterministic — detached threads give the test no finish edge), then returns the
+// tk_names_live_count delta from the pre-spawn baseline (MUST be 0 under TEKO_MEM_PARANOID=1).
+uint64_t   tk_thread_spawn_selftest(int64_t n);
+
 // (F2) tk_region_program — the PROGRAM region: one per process, owned by NO task, so an object in
 // it survives both a task's tk_arena_pop and that task's exit. F1 leaves the runtime with N task
 // roots and nothing else, so the singletons the owner's ruling places "in the program arena"
