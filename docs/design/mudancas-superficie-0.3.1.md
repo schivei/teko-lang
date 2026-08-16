@@ -1470,6 +1470,33 @@ vivo com o dono: `on canceled as c {}` como desenrolar-não-local capturável, n
   monomorph) que serve spawn+canal+await de uma vez. `__wrap` raso-só-hoje = o defeito grave que a Parte-B-deferida
   deixou aberto — fechado no §16.
 
+**⚖️ FORMA CANÔNICA DO BRAÇO DE AWAIT + 4 LEIS (ruling do dono 2026-08-16, materialização A4/CN1 pós-§16):**
+o compilador gera, por braço do `await`, uma fn `arm<I: Intent<T>, T>(u: uptr)` e o pai faz `chan.add();
+spawn(arm<Intent<T>, T>(uptr::__unwrap(intent)))`. O corpo:
+```
+fn arm<I: Intent<T>, T>(u: uptr) {
+  var intent = match u.__wrap<I>() { I as i => i; error as e => panic(e) }   // ref pro Intent do PAI
+  var tx = svc<Tx<bool>>()
+  defer { tx.send(!intent.canceled); tx.done() }        // dispara em saída normal E no cancel-unwind
+  intent.value = user_func() on canceled as e { intent.canceled = true; intent.failure = e; null }  // marshal no assign
+}
+```
+As 4 leis que isso sela:
+1. **`__wrap<T>()` RETORNA um `ref T`** que aliasa `*p` (`typer.tks:1654` tipa `T|error|null`; marshall-spec
+   `wrap<T>(p): ref T` zero-cost reinterpret). Não recebe-e-muta; retorna a referência. O braço `error` é a
+   Parte-B (validação), puxada pra Doc-2.
+2. **INVARIANTE-DO-WRAP (regra dura, elevada do `unsafe`):** o que passa por `__wrap` **NÃO pode residir na arena
+   de quem faz o wrap** — tem de viver numa arena que SOBREVIVA ao wrapper. No braço, o `Intent` vive na arena do
+   **PAI** (que espera → sobrevive ao braço), nunca na do braço → sem UAF. É o "event horizon" do §5.2.
+3. **Casca por-REFERÊNCIA + valor por-MARSHAL (deep-copy):** a casca do `Intent` cruza por `uptr`+`__wrap` (o pai
+   garante a vida — lifetime-safe); o VALOR escrito nela (`intent.value = user_func()`) atravessa arena-braço→
+   arena-pai e portanto **estampa o `marshal<T>`** no assign. Duas coisas cruzando, complementares.
+4. **CANCEL-UNWIND REPLAYA `defer`:** o `defer` (C7.18, `ast.tks:410`, hoje dispara em return/break/continue/
+   fall-off) tem de disparar TAMBÉM no desenrolar do cancel (CN1 estende o unwind pra replayar defers) — é assim
+   que "braço cancelado ainda sinaliza o waitgroup" se cumpre: o `tx.send(!canceled); tx.done()` sempre dispara,
+   o join do pai nunca pendura. O waitgroup é um **canal de conclusão** (`Tx<bool>` singleton via DI + `chan.add()`).
+`arm<I: Intent<T>, T>` (type-param único no `__wrap<I>`) esquiva `__wrap<Intent<T>>` (type-arg genérico aninhado).
+
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
 baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6
