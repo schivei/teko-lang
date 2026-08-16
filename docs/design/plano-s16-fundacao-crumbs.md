@@ -851,3 +851,293 @@ C7 the deletion sweep follow; C7 is gated on C3/C5/C6 migrations landing.)
 
 No unresolved law tension → no HALT. All C3–C6 designs compile against machinery that exists
 on HEAD `2b720bfe`; C6a/C6b are LEAF and dispatchable immediately.
+
+# 12. Extern-C header-conflict fix + ordering (2026-08-16)
+
+> **Why this section exists.** The C6a HALT (Finding B, `mudancas-superficie-0.3.1.md §11.2`)
+> proved a codegen GAP: an `extern fn … from "c"` whose symbol is ALSO declared by a system
+> header teko's emit includes unconditionally hard-errors the `cc`. This section designs the
+> exact codegen fix, the mandatory crumb ORDERING (X1 fix-alone → X2 `teko::env`), the X1
+> ladder verdict and its fixture, and folds in Finding A (function-add → reseed). Verified on
+> `fix/retirement` HEAD `464c1fc7`. Where §11.3's "C6 = LEAF" and §11.4's "C6a batches the fix"
+> conflict with §12, **§12 wins** (both are corrected below).
+
+## 12.0 The verified gap (empirical)
+
+`extern fn c_getenv(name: ptr): ptr = "getenv" from "c"` makes the prototype pass
+(`codegen.tks:13425-13440`) emit `extern void* getenv(void* name);` — it forward-declares
+EVERY function except `from "teko_rt"` externs. The emitted `teko.c` ALWAYS `#include
+<stdlib.h>` (`codegen.tks:13329`), which ISO-mandates `char* getenv(const char*)`. `cc` then
+errors HARD:
+
+```
+error: conflicting types for 'getenv'; have 'void *(void *)'
+note:  previous declaration of 'getenv' with type 'char *(const char *)'
+```
+
+Confirmed under `cc (GCC) 13.3.0 -std=c2x` (the local leg). Three empirical facts drive the
+design:
+1. **"conflicting types" is a hard error, NOT a warning** — no `#pragma GCC diagnostic
+   ignored` silences it (it is a constraint violation, not a diagnostic-group warning). So the
+   ONLY fix is to not re-declare the header symbol.
+2. **Skipping the redeclaration and relying on `<stdlib.h>`'s `char*` decl COMPILES clean**
+   (the call-site `void*`↔`char*` mismatch is absorbed by the already-emitted `#pragma GCC
+   diagnostic ignored "-Wincompatible-pointer-types"`, `codegen.tks:13337`).
+3. **An UNDECLARED `from "c"` symbol still needs teko's own prototype.** With the pragma set,
+   an undeclared call *compiles* (implicit-decl downgraded), but implicit decl gives an `int`
+   return → a 64-bit pointer return is **truncated to 32 bits on LP64** (silent runtime
+   corruption). So `setenv`/`unsetenv` (POSIX, NOT declared by `<stdlib.h>` under `-std=c2x`)
+   and any custom-lib pointer-returning symbol MUST keep teko's forward decl. **A blanket
+   "skip all `from "c"`" is therefore REJECTED.**
+
+⇒ The fix must skip teko's prototype for EXACTLY the `from "c"` symbols the emit's
+unconditionally-included headers already declare, and keep it for all others.
+
+## 12.1 The codegen fix — approach (a), the header-declared skip-set
+
+**Chosen = Option (a)** (extend the prototype-pass skip), because it is the only option that
+is correct for BOTH cases at once:
+
+| Option | Header-declared (getenv) | Undeclared (setenv / custom ptr-return) | Verdict |
+|---|---|---|---|
+| (a) skip proto for header-declared `from "c"` symbols; keep for the rest | ✅ header's decl wins, no conflict | ✅ keeps teko's correct-typed proto | **CHOSEN** |
+| (b) call through a cast fn-pointer `((void*(*)(void*))getenv)(arg)` at the call site | ✅ (if declared) | ❌ casting `setenv` is "undeclared identifier" — still needs a proto, which re-conflicts; the pragma already absorbs the mismatch (a) relies on, so (b) buys nothing | rejected |
+| (c) stop including `<stdlib.h>`/`<math.h>` and emit only needed decls | — | — | rejected (large, risky; those includes back `malloc`/`abort`/`floor` — out of scope) |
+
+Option (a) mirrors the EXISTING precedent: the pass already skips `from "teko_rt"` externs
+("already declared in `teko_rt.h` with the correct FFI types; re-emitting conflicts",
+`codegen.tks:13425-13426`). The `from "c"` header-declared symbols are the identical shape of
+problem — a decl that already exists with an incompatible signature.
+
+**The collision set = function symbols declared by the headers teko emits UNCONDITIONALLY
+(`<stdlib.h>`, guarded `<string.h>`).** `<stdint.h>`/`<stdbool.h>` declare no functions
+(types/macros only). `<math.h>` is excluded on purpose: a teko `from "c"` binding of a math
+symbol uses `f64` params that lower to `double`, **matching** the header's `double`
+signature → compatible redeclaration, no conflict (the conflict is specific to teko's opaque
+`void*` vs a header's `char*`/other concrete pointer). `<string.h>` is included only when
+`spawn_sites.len > 0` (`codegen.tks:13331`), so its symbols are skipped ONLY under that guard
+(`string_included`) — outside it the symbol is genuinely undeclared and must keep its proto.
+
+### 12.1.1 The exact `codegen.tks` edit
+
+**Edit 1 — the prototype-pass loop body (`codegen.tks:13430-13438`).** Replace the inline
+skip predicate with a named gate that also has `spawn_sites` in scope (`spawn_sites` is bound
+at `codegen.tks:13324`, same fn `tk_emit_c_mode`):
+
+```teko
+        match prog.items[pi] {
+            checker::TFunction as f => {
+                if cg_extern_proto_needed(f, spawn_sites.len > 0) {
+                    b = match emit_function_sig(b, prog, f) { []byte as o => o; error as err => return err }
+                    b = cb(b, ";\n")
+                }
+            }
+            _ => { }
+        }
+```
+
+**Edit 2 — two new helper fns (place them immediately above `emit_function_sig` at
+`codegen.tks:10773`), in full Javadoc:**
+
+```teko
+/**
+ * cg_extern_proto_needed — does the file-scope prototype pass emit a forward declaration for
+ * `f`? A NON-extern function always needs its prototype (mutual recursion across the merged
+ * corpus; C23 makes an undeclared call an error). An extern is skipped in exactly two cases,
+ * because the symbol is ALREADY declared elsewhere with an incompatible signature and a
+ * re-declaration is a hard `cc` error ("conflicting types"): (1) `from "teko_rt"` — declared
+ * in `teko_rt.h` with the FFI struct types (the historic C7.2 skip); (2) `from "c"` whose
+ * symbol is declared by a system header teko's emit includes unconditionally
+ * (`cg_c_symbol_header_declared`) — e.g. `getenv` from `<stdlib.h>`. Every OTHER extern
+ * (undeclared POSIX like `setenv`, custom libs) KEEPS its prototype so the return/parameter
+ * types are correct — an implicit declaration would truncate a pointer return to `int`.
+ *
+ * @param f                the top-level function being considered by the prototype pass
+ * @param string_included  whether the emit's preamble included `<string.h>` (spawn sites > 0),
+ *                         which governs whether `<string.h>` symbols count as header-declared
+ * @return                 true to emit the forward declaration, false to rely on the existing
+ *                         (header / teko_rt.h) declaration
+ * @since §16 (C6a codegen fix)
+ */
+fn cg_extern_proto_needed(f: checker::TFunction, string_included: bool): bool {
+    if !f.is_extern { return true }
+    if f.from_lib == "teko_rt" { return false }
+    if f.from_lib == "c" && cg_c_symbol_header_declared(f.c_symbol, string_included) { return false }
+    true
+}
+
+/**
+ * cg_c_symbol_header_declared — is `sym` a C standard-library function declared by a header
+ * teko's emit includes UNCONDITIONALLY (`<stdlib.h>`, `codegen.tks:13329`) or, when spawn
+ * sites exist, `<string.h>` (`codegen.tks:13331`)? Such a symbol must NOT be re-declared by
+ * teko's prototype pass — the header's own (often `char*`-typed) declaration is authoritative
+ * and a conflicting re-declaration is a hard `cc` error. `<stdint.h>`/`<stdbool.h>` declare no
+ * functions; `<math.h>` is intentionally EXCLUDED because a teko `from "c"` math binding uses
+ * `f64`→`double` parameters that MATCH the header (compatible, no conflict). The set is the
+ * ISO C function surface of those headers; extend it when the corpus binds a further
+ * header-declared symbol via `from "c"`.
+ *
+ * @param sym              the raw foreign C symbol the extern binds (`f.c_symbol`)
+ * @param string_included  whether `<string.h>` was included (spawn sites > 0)
+ * @return                 true iff `sym` is declared by an unconditionally-included header
+ * @since §16 (C6a codegen fix)
+ */
+fn cg_c_symbol_header_declared(sym: str, string_included: bool): bool {
+    var stdlib_syms: []str = [
+        "getenv", "setenv_ignored_placeholder_never_matches",
+        "malloc", "calloc", "realloc", "free", "aligned_alloc",
+        "abort", "exit", "_Exit", "quick_exit", "atexit", "at_quick_exit", "system",
+        "abs", "labs", "llabs", "div", "ldiv", "lldiv",
+        "atoi", "atol", "atoll", "atof",
+        "strtol", "strtoll", "strtoul", "strtoull", "strtod", "strtof", "strtold",
+        "rand", "srand", "qsort", "bsearch",
+        "mblen", "mbtowc", "wctomb", "mbstowcs", "wcstombs"
+    ]
+    var i: u64 = 0
+    loop {
+        if i >= stdlib_syms.len { break }
+        if teko::runtime::str_eq(sym, stdlib_syms[i]) { return true }
+        i++
+    }
+    if !string_included { return false }
+    var string_syms: []str = [
+        "memcpy", "memmove", "memset", "memcmp", "memchr",
+        "strlen", "strcmp", "strncmp", "strcpy", "strncpy",
+        "strcat", "strncat", "strchr", "strrchr", "strstr", "strdup"
+    ]
+    var j: u64 = 0
+    loop {
+        if j >= string_syms.len { break }
+        if teko::runtime::str_eq(sym, string_syms[j]) { return true }
+        j++
+    }
+    false
+}
+```
+
+> **NOTE on the placeholder line.** `setenv`/`unsetenv` are deliberately NOT in the set — they
+> are POSIX, NOT declared by `<stdlib.h>` under `-std=c2x`, so they MUST keep teko's prototype
+> (§12.0 fact 3). The placeholder string documents that omission at the point of temptation;
+> the implementer may drop it and keep the comment. `str_eq` is the codegen-local idiom already
+> used at `codegen.tks:10830` (`teko::runtime::str_eq`); confirm the exact spelling at
+> implement time and match it.
+
+**Files changed by X1:** `src/codegen/codegen.tks` ONLY (two new fns + one predicate swap).
+`teko_rt.{c,h}` UNCHANGED. No new `from "c"` extern enters the tree in X1.
+
+## 12.2 The ordering hazard — CONFIRMED, and it CORRECTS the C6a "batch" note
+
+The HALT note (`mudancas-superficie-0.3.1.md:1575-1577`) proposed **batching** the codegen fix
+and the full `teko::env` into ONE crumb. **That batching DEADLOCKS — it must be SPLIT.** The
+task's ordering analysis is CONFIRMED:
+
+- **gen0** of the batched crumb = the CURRENT seed's compiler (OLD codegen, no skip). It is
+  what first compiles the tree into `tc1.c`. If that tree ALREADY contains `c_getenv`, gen0's
+  old codegen emits `extern void* getenv(void*)` into `tc1.c` → `cc tc1.c` fails → **tc1 binary
+  is never produced → no gen1 → deadlock.** The fix cannot travel in the same tree as the first
+  `from "c"` header-declared extern that exercises it.
+
+Therefore the fix must be SEEDED before any such extern enters the tree:
+
+- **Crumb X1 = the codegen fix ALONE.** The tree gains only the NEW codegen SOURCE (the two
+  helpers + the predicate swap) — NO `getenv` extern. gen0 (old codegen) compiles this tree
+  fine (its only `from "c"` extern is the pre-existing `rt_abort`, §12.3). Build the ladder,
+  **RESEED** — the fix is now in the seed.
+- **Crumb X2 = `teko::env`** (`get`/`set`/`unset` + the `c_getenv`/`c_setenv`/`c_unsetenv`
+  externs in `src/env/env.tks`). Now gen0-of-X2 = the reseeded FIXED compiler → its codegen
+  SKIPS the `getenv` proto → `tc1.c` clean → builds. Function-add to `src/` → **RESEED**
+  (Finding A, §12.4).
+
+X1 → X2 is IRON-ordered and un-batchable. (X2's `set`/`unset` were already proven green on
+`feat/s16-c6a-env f62d8f3a`; only `get`/`getenv` was blocked on X1.)
+
+## 12.3 X1 ladder verdict — ONE-STEP ladder (tc1 ≠ tc2 == tc3), driven by `rt_abort`
+
+**X1 is NOT a clean tc1==tc2==tc3 fixpoint — it is a ONE-STEP ladder**, and here is the exact
+reason the codegen-source change alters how the compiler emits its OWN externs:
+
+The compiler's own runtime binds `abort` via `from "c"` —
+`src/runtime/teko_rt.tks:697: exp extern fn rt_abort() = "abort" from "c"`. `abort` IS in the
+new skip-set (declared by `<stdlib.h>`). Today it escapes only by luck: teko emits `extern
+void abort(void);`, which is a COMPATIBLE redeclaration of `<stdlib.h>`'s `_Noreturn void
+abort(void)` (`_Noreturn` is a function specifier, not part of the type), so it compiles. Under
+the fix:
+
+- **gen0** (old codegen, current seed) emits `tc1.c` WITH `extern void abort(void);` (it does
+  not skip). `tc1.c` compiles (compatible) → **tc1 = the fixed compiler**.
+- **tc1** (new codegen) recompiles the tree → NOW skips `abort`'s prototype → `tc2.c` has NO
+  `extern void abort(void);` line. `tc2.c` compiles (`<stdlib.h>`'s decl wins; strictly better —
+  `_Noreturn` is now visible). **tc1.c ≠ tc2.c by exactly that one line.**
+- **tc2** (new codegen) → `tc3.c` also skips → **tc2 == tc3.**
+
+⇒ **One-step ladder: tc1 ≠ tc2 == tc3.** Reseed lands the stable `tc2`. This is the SAME shape
+as C5 (§11.2), and the coordinator runs the identical gate: gen0→tc1; tc1→gen1→tc2;
+tc2→gen2→tc3; assert `tc2 == tc3` byte-identical; `provenance_gate.sh` PASS on the swap;
+`MEM_PARANOID` tree exit 0. Skipping `abort`'s redeclaration is harmless-to-better, so the
+ladder converges cleanly at one step. (Do NOT special-case `abort` to force a clean fixpoint —
+that would need per-symbol header-signature knowledge codegen does not have, and the one-step
+ladder is the established, cheaper pattern.)
+
+### X1's regression fixture — `ffi_extern_header_symbol`
+
+A NEW regression project (leaf corpus, compiled by the RESEEDED fixed compiler — NOT merged
+into `src/`), proving a `from "c"` extern to a `<stdlib.h>`-declared symbol now compiles AND
+runs. It binds `getenv` (the exact symbol that C-compile-errored) and reads a var the harness
+sets in `main` via the already-green `setenv` path:
+
+- `examples/regressions/ffi_extern_header_symbol/src/hdrsym/hdrsym.tks` (namespace addressed
+  bare `hdrsym::`, the C2 mirror precedent):
+  - `extern fn c_getenv(name: ptr): ptr = "getenv" from "c"`
+  - `extern fn c_setenv(name: ptr, value: ptr, overwrite: i32): i32 = "setenv" from "c"`
+    (proves the KEEP side of the gate — `setenv` still gets teko's proto, still links)
+  - `pub fn get(name: str): str { teko::mem::str_from_c(c_getenv(teko::mem::as_cstr(name)), 131072 to u64) }`
+  - `pub fn set(n: str, v: str): i32 { c_setenv(teko::mem::as_cstr(n), teko::mem::as_cstr(v), 1 to i32) }`
+- `main.tks`: `_ = hdrsym::set("TEKO_HDRSYM", "7"); var v = hdrsym::get("TEKO_HDRSYM")`; parse
+  `v` to i64; `if v == 7 { exit(0) } exit(1)`. **Expected native exit code: 0.**
+
+This fixture is the FIRST direct proof that the getenv-class conflict is gone (it would fail
+`cc` on any pre-X1 compiler) while `setenv` (undeclared, proto kept) still resolves — i.e. it
+exercises BOTH sides of `cg_extern_proto_needed` in one binary.
+
+## 12.4 Reseed model note (Finding A folded in) — §16 crumb verdicts corrected
+
+**LAW (owner, `mudancas-superficie-0.3.1.md:1563`): a new FUNCTION in the compiler's `src/`
+→ RESEED; a const-only, unreferenced addition → leaf.** Any function added to `src/` shifts
+the tree-wide temp-var-ID counter → the emitted `teko.c` is no longer byte-identical → the
+seed must reproduce the grown tree. Only const-only additions (C2 `teko::sys`) DCE to a
+byte-identical self-image and stay leaf.
+
+Corrected §16 verdicts (supersede the §11.3/§11.4 "LEAF" rows for the function-bearing crumbs):
+
+| Crumb | Old verdict | Corrected verdict | Reason |
+|---|---|---|---|
+| **X1** codegen header-skip fix | — (new) | **RESEED** (one-step ladder, §12.3) | codegen change + alters own `abort` emission |
+| **X2 = C6a** `teko::env` get/set/unset | §11.4 "LEAF" | **RESEED** | function-add to `src/env/` (Finding A); requires X1 seeded first |
+| **C6b** `teko::time` | §11.3 "LEAF" | **RESEED** | function-add to `src/time/` (Finding A) |
+| C2 `teko::sys` (const-only) | LEAF | LEAF (unchanged) | consts, unreferenced → DCE byte-identical |
+| C5 float-bits intrinsic | RESEED | RESEED (unchanged) | compiler-consumed, one-step ladder |
+
+C-symbol DELETIONS (`tk_rt_getenv` etc.) remain a SEPARATE two-legs crumb (C7), never folded
+into a migration crumb.
+
+## 12.5 The implementer-ready spec for X1 (the FIRST crumb to dispatch)
+
+> **X1 — codegen: skip teko's forward declaration for `from "c"` externs whose symbol a
+> system header already declares.** In `src/codegen/codegen.tks`, add two fns above
+> `emit_function_sig` (`:10773`): `cg_extern_proto_needed(f, string_included)` (returns false
+> for `from "teko_rt"` externs and for `from "c"` externs whose `c_symbol` is header-declared,
+> true otherwise) and `cg_c_symbol_header_declared(sym, string_included)` (the ISO `<stdlib.h>`
+> function set always, plus the `<string.h>` set when `string_included`; `<math.h>` excluded —
+> its `double` signatures are compatible; `setenv`/`unsetenv` deliberately EXCLUDED — POSIX,
+> undeclared under `-std=c2x`, must keep their proto), both in full Javadoc per §12.1.1. Then
+> in the prototype pass (`:13430`) replace the inline `!(f.is_extern && f.from_lib ==
+> "teko_rt")` guard with `cg_extern_proto_needed(f, spawn_sites.len > 0)` (`spawn_sites` is in
+> scope at `:13324`). Add NO new `from "c"` extern to the tree. This is a ONE-STEP LADDER
+> (tc1 ≠ tc2 == tc3) because the compiler's own `rt_abort = "abort" from "c"`
+> (`src/runtime/teko_rt.tks:697`) enters the skip-set; the coordinator runs the C5-style
+> fixpoint gate and RESEEDS `bootstrap/teko.c`. Add regression
+> `examples/regressions/ffi_extern_header_symbol/` binding `getenv` (skip side) AND `setenv`
+> (keep side), harness sets then reads `TEKO_HDRSYM=7`, **expected native exit 0**, built by
+> the reseeded compiler. Local validation = COMPILE only (`--no-verify --release`,
+> `TEKO_BACKEND=c`, `ulimit -v 6291456`); NEVER `teko test .`. `teko_rt.{c,h}` UNCHANGED.
+> Only after X1 reseeds may X2 (`teko::env` with `c_getenv`) be dispatched.
