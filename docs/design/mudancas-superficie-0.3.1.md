@@ -1213,6 +1213,11 @@ byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML a
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
+**✅ `encoding::yaml` ENTREGUE (`399deeef`).** YAML 1.2 core (struct-tagged `YamlValue`): block/flow maps+seqs,
+literal `|`/folded `>` com chomping, anchors/aliases, multi-doc, core-schema; cross-check PyYAML 6.0.1;
+deferrals honestos (tags `!!`, merge `<<`, directivas). Achou+consertou 2 bugs de parser via binário scratch
+compilado (não `teko test .`). Nomes `Yaml*` únicos (sem colisão #4).
+
 **✅ `encoding::toml` + `encoding::ini` ENTREGUES (`7695a869`).** TOML v1.0.0 (struct-tagged `TomlValue`) +
 INI (estilo `configparser`, cross-check Python). **`parse_manifest` (`src/build/manifest.tks`) trocado pra usar
 `teko::encoding::toml`** — validado por: (1) build 2-gen VERDE (gen2 lê `teko.tkp` com o parser novo), (2)
