@@ -1276,6 +1276,28 @@ o OOP-hard-cut (D27) JÁ ATERRISSOU no lane (`self` reservado, factories `static
 snippet de fixture do design era pré-hard-cut e foi modernizado. Fold-in de collections (voltar `arr_*` a métodos
 privados de instância) DESTRAVADO mas DEFERIDO ao follow-up #163. Próximo: gap #1 (flagship, reusa este re-key).
 
+**⚠️ CORREÇÃO DE ROTA — gap #1 do generic-stack-completion é OBSOLETO (não apenas bloqueado).** Ao despachar o
+gap #1 (dispatch de trait-estrutural sobre `K: Hashable & Eq`), o implementer HALTOU com um achado airtight: a
+premissa do design ("a síntese estrutural já existe, `synth.tks`") é **FALSA no `fix/retirement`**. O commit
+`1aae1145` (2026-08-13) **APOSENTOU deliberadamente** toda a maquinaria de síntese estrutural — deletou
+`src/checker/synth.tks` (668 linhas), removeu `is_structural_trait`/`synthesize_structural_methods`, o braço
+estrutural de `atom_surface`/`constraint_interfaces`. Verificado: `synth.tks` AUSENTE, ZERO refs vivas. **Causa
+raiz:** `generic-stack-completion.md` foi desenhado em **2026-08-11** (última edição), contra o `main`
+pré-aposentadoria — ZERO referências a 9-ops/IEq/IOrd. O lane DIVERGIU: (1) aposentou o modelo trait-estrutural
+(`Eq`/`Hash`/`Hashable` auto-derivados) em 08-13; (2) no dia seguinte (08-14) ADICIONOU o modelo
+interface-capability do **9-ops** (`IEq`/`IOrd` + dispatch genérico de operador sobre `T: IEq`). **Gap #1 é o
+modelo velho; o 9-ops o SUPERA.** Un-aposentar `synth.tks` reverteria a decisão de aposentadoria do próprio dono
+— NÃO farei isso. **Caminho correto = o design ATUAL do lane: `collections-generics-fase1b-crumbs.md`**, que é
+construído sobre interfaces 9-ops: G1 fornece `IHash` ("a metade de hash que o 9-ops NÃO dá — ele só entrega
+operadores IEq/IOrd"), dispatch via **#254 method-over-`T`** (VIVO, `typer.tks:1107/2417/…`), `str_hash` já existe
+(`teko_rt.tks:529`, FNV-1a). `Map<K: IEq & IHash>` precisa de IEq (9-ops ✓) + IHash (fase1b G1) + #254 (✓) + o
+re-key do gap #3 (✓ aterrissado) — **NÃO precisa do gap #1.** **Gap #3 permanece válido** (era ROOT-DISPATCH,
+ortogonal à síntese — já entregue). **Gaps #2/#4/#5** (ROOT-NS/codegen) a AVALIAR: podem ainda ser bugs reais na
+fase1b (G3+ Dictionary/HashSet como param de free-fn = gap #4, factory cross-ns = gap #5; fase1b usa arrays
+paralelos p/ ESQUIVAR o #2). Despachando arquiteto para reconciliar o design velho contra o lane atual e liberar
+a fase1b com âncoras frescas. **Task-6 (generic-stack-completion "5 gaps") re-escopada: só gap #3 era aplicável;
+#1 obsoleto; #2/#4/#5 sob avaliação como pré-reqs pontuais da fase1b.**
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
