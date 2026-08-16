@@ -2437,8 +2437,81 @@ fn validate_one_type_decl(reg: TypeReg, table: TypeTable): []str {
         parser::ClassBody as cb => validate_class_body(reg, cb, tbl, table)
         parser::TraitBody as trb => validate_trait_body(reg, trb, tbl, table)
         parser::InterfaceBody as ib => validate_interface_body(reg, ib, table)
+        parser::ExternStructBody as esb => validate_extern_struct_body(reg, esb, table)
         _ => teko::list::empty()
     }
+}
+
+/**
+ * extern_struct_field_ok — is `t` admissible as a field of an `extern type … = struct` (§16)? A
+ * C-ABI struct field must itself have a stable, HEADER-LESS C representation: a numeric `Prim`, a
+ * `Byte`, an opaque/typed `Ptr`, a `Uptr`, or ANOTHER extern struct (nested C-ABI layout). A `Str`
+ * (fat `{ptr,len}`), a `Slice`, an ordinary Teko `Named` (fat header), a `Reference`, an `Error`, a
+ * `Void`, or a `Func` are REJECTED — each would inject a Teko-internal layout that does not match
+ * the foreign struct.
+ *
+ * @param t      the field's resolved type
+ * @param table  the resolved type table (to probe a `Named` field's body)
+ * @return       true iff `t` may appear as an extern-struct field
+ * @since §16 (FFI foundation)
+ */
+fn extern_struct_field_ok(t: @Type(), table: TypeTable): bool {
+    match t {
+        Prim => true
+        Byte => true
+        Ptr => true
+        Uptr => true
+        Named as nm => match type_table_find(table, nm.name, "") {
+            parser::TypeDecl as td => extern_named_body_ok(td.body)
+            error => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * An `extern type … = struct` body's diagnostics (§16): each field's declared type must be C-ABI
+ * admissible (extern_struct_field_ok), so the header-less C layout is byte-identical to the foreign
+ * struct. There is no conformance/method surface to check — an extern struct is fields-only (the
+ * parser already rejected methods/consts/interfaces in this position).
+ *
+ * @param reg    the extern struct's registration (blamed and located)
+ * @param esb    the extern-struct body (its C-ABI fields, in declaration order)
+ * @param table  the whole collected type table (to probe a `Named` field's body)
+ * @return       the body's diagnostics, in declaration order
+ * @since §16 (FFI foundation)
+ */
+fn validate_extern_struct_body(reg: TypeReg, esb: parser::ExternStructBody, table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var f: u64 = 0
+    loop {
+        if f >= esb.fields.len { break }
+        diags = concat_diags(diags, extern_struct_field_diag(reg, esb.fields[f].type_ann, table))
+        f++
+    }
+    diags
+}
+
+/**
+ * The C-ABI admissibility diagnostic for ONE extern-struct field (§16): resolve its annotation, then
+ * reject it if it is not a numeric prim/byte/ptr/uptr/nested-extern-struct. At most one diagnostic —
+ * a resolution failure, or the C-ABI gate.
+ *
+ * @param reg    the enclosing extern struct's registration (blamed and located)
+ * @param ann    the field's written type annotation
+ * @param table  the whole collected type table (to probe a `Named` field's body)
+ * @return       the field's diagnostics (at most one)
+ * @since §16 (FFI foundation)
+ */
+fn extern_struct_field_diag(reg: TypeReg, ann: @TypeExpr(), table: TypeTable): []str {
+    var ft = match resolve_type(ann, table, reg.namespace) {
+        (@Type()) as t => t
+        error as e => return one_diag(decl_error_diag(reg, e))
+    }
+    if !extern_struct_field_ok(ft, table) {
+        return one_diag(decl_diag(reg, "an extern type struct field must be a numeric prim, byte, ptr, uptr, or another extern struct"))
+    }
+    teko::list::empty()
 }
 
 /**

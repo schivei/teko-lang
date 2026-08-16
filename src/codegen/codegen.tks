@@ -5784,6 +5784,14 @@ fn cg_find_struct_field_type(prog: CgProg, sname: str, fname: str): @TypeExpr() 
                                 j++
                             }
                         }
+                        parser::ExternStructBody as esb => {
+                            var j = 0
+                            loop {
+                                if j >= esb.fields.len { break }
+                                if esb.fields[j].name == fname { return esb.fields[j].type_ann }
+                                j++
+                            }
+                        }
                         _ => { }
                     }
                 }
@@ -11551,7 +11559,41 @@ fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl): []byte | erro
             o = mangle_type_name(o, "", d.name)
             cb(o, ";\n\n")
         }
+        parser::ExternStructBody as esb => match emit_extern_struct_typedef(buf, prog, d, esb) { []byte as x => x; error as err => return err }
     }
+}
+
+/**
+ * emit_extern_struct_typedef — the codegen for an `extern type Name = struct { … }` (§16). It
+ * is the `StructBody` arm MINUS the fat `tk_struct_hdr __hdr` header line: a HEADER-LESS
+ * `typedef struct` whose field offsets are exactly C's, so the layout is byte-identical to the
+ * foreign C struct the FFI symbol expects. No auto-box (a C-ABI field is never a Teko back-edge).
+ *
+ * @param buf   the code buffer to append to
+ * @param prog  the codegen program context (type table, qualifier resolution)
+ * @param d     the extern-struct TypeDecl (its name mangles to `tk_t_<Name>`)
+ * @param esb   the parsed extern-struct body (the C-ABI fields, in declaration order)
+ * @return      the appended buffer, or a located codegen error from a field type it cannot name
+ * @throws      when a field type-expr is not emittable
+ * @since §16 (FFI foundation)
+ */
+fn emit_extern_struct_typedef(buf: []byte, prog: CgProg, d: parser::TypeDecl, esb: parser::ExternStructBody): []byte | error {
+    var out = cb(buf, "typedef struct ")
+    out = mangle_type_name(out, "", d.name)
+    out = cb(out, " {\n")
+    var i = 0
+    loop {
+        if i >= esb.fields.len { break }
+        out = cb(out, "    ")
+        out = match emit_type_expr(out, prog, esb.fields[i].type_ann, checker::name_qualifier(d.name)) { []byte as o => o; error as err => return err }
+        out = cb(out, " ")
+        out = cb_str(out, esb.fields[i].name)
+        out = cb(out, ";\n")
+        i++
+    }
+    out = cb(out, "} ")
+    out = mangle_type_name(out, "", d.name)
+    cb(out, ";\n\n")
 }
 
 /**
@@ -13352,6 +13394,13 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
                     // of contract type then just works).
                     parser::InterfaceBody => {
                         b = cb(b, "typedef struct { void *data; void *const *vtable; } ")
+                        b = mangle_type_name(b, "", d.name)
+                        b = cb(b, ";\n")
+                    }
+                    parser::ExternStructBody => {
+                        b = cb(b, "typedef struct ")
+                        b = mangle_type_name(b, "", d.name)
+                        b = cb(b, " ")
                         b = mangle_type_name(b, "", d.name)
                         b = cb(b, ";\n")
                     }

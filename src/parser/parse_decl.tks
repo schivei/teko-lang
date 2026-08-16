@@ -1525,6 +1525,39 @@ fn parse_flags_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     Parsed<@Decl()> { node = TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = FlagsBody { members = ms.items; values = teko::list::empty(); methods = methods }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = body_next }
 }
 
+/**
+ * parse_extern_type_body — the body of an `extern type Name …` declaration. `pos` is at the
+ * token following the type-params. Two shapes are legal:
+ *   - no `=` → an OPAQUE foreign handle (`ExternBody`, lowers to `void *`; back-compatible).
+ *   - `= struct { … }` → a C-ABI struct LAYOUT (`ExternStructBody`, header-less typedef).
+ * Anything else after `=` is rejected. An extern struct is fields-only: a method or const in
+ * the field list is a parse error.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index just past the type name and its type-params
+ * @return        the parsed extern body + resume index, or a located parse error
+ * @throws        a non-`struct` body after `=`, or a method/const inside the struct
+ * @since §16 (FFI foundation)
+ */
+fn parse_extern_type_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | error {
+    var p = pos
+    if !is_kind_at(tokens, p, lexer::TokenKind::Assign) {
+        return Parsed<@TypeBody()> { node = ExternBody { }; next = p }
+    }
+    p = p + 1
+    if !is_kind_at(tokens, p, lexer::TokenKind::Struct) {
+        return err_at(tokens, p, "an `extern type` is either opaque (`extern type Name`) or a C-ABI struct (`extern type Name = struct { … }`)")
+    }
+    if !is_kind_at(tokens, p + 1, lexer::TokenKind::LBrace) {
+        return err_at(tokens, p + 1, "expected '{' after `struct` in an `extern type`")
+    }
+    var fs = match parse_fields(tokens, p + 1) { ParsedStructBody as x => x; error as e => return e }
+    if fs.methods.len > 0 || fs.consts.len > 0 {
+        return err_at(tokens, p, "an extern struct declares only fields (no methods, consts, or interfaces)")
+    }
+    Parsed<@TypeBody()> { node = ExternStructBody { fields = fs.fields }; next = fs.next }
+}
+
 // `[doc] [pub|exp] type Name = <body>` (B.13, nominal). Doc + visibility precede `type`.
 // `pos` is at the doc, `pub`/`exp`, or `type`.
 fn parse_type_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
@@ -1570,8 +1603,8 @@ fn parse_type_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     var tps = match parse_type_params(tokens, p) { ParsedTypeParams as x => x; error as e => return e }   // (S4/W11) `type Box<T: A & B> = …`
     p = tps.next
     if is_extern {
-        // `extern type Name` — an OPAQUE foreign handle: no `= <body>`, lowers to `void *`.
-        return Parsed<@Decl()> { node = TypeDecl { name = name; type_params = tps.names; type_constraints = tps.constraints; body = ExternBody { }; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = p }
+        var eb = match parse_extern_type_body(tokens, p) { Parsed<@TypeBody()> as x => x; error as e => return e }
+        return Parsed<@Decl()> { node = TypeDecl { name = name; type_params = tps.names; type_constraints = tps.constraints; body = eb.node; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_global = is_global }; next = eb.next }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::Assign) {
         return err_at(tokens, p, "expected '=' in a type declaration")

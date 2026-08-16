@@ -4512,6 +4512,12 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable): TExpr
                 error as e => return property_read_or(e, name, fa.receiver, fa.field, env, table)
             }
         }
+        parser::ExternStructBody as esb => {
+            match field_type(esb.fields, fa.field, table, type_ns_of(table, name)) {
+                (@Type()) as t => return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = t; line = 0; col = 0 }
+                error as e => return e
+            }
+        }
         parser::InterfaceBody => return property_read_or(error { message = "an interface value exposes no fields — only its contract methods" }, name, fa.receiver, fa.field, env, table)
         _ => return error { message = $"type {name} is not a struct (no fields)" }
     }
@@ -4972,6 +4978,7 @@ fn type_struct_lit(sl: parser::StructLit, expected: @Type(), env: Env, table: Ty
     // final, incomplete-by-design).
     var sb_fields = match decl.body {
         parser::StructBody as s => s.fields
+        parser::ExternStructBody as esb => esb.fields
         parser::ClassBody as c => {
             match c.kind { ClassKind::Abstract => return error { message = $"`{name}` is abstract and cannot be instantiated directly" }; _ => { } }
             // (W10b.D1) invariant-safe construction — a class's `{…}` literal is legal ONLY inside
@@ -8465,12 +8472,13 @@ fn extern_null_union_ok(v: Variant): bool {
 }
 
 /**
- * C7.1a — is `t` legal across the `extern` boundary? A primitive (int/float/bool), `byte`,
- * `ptr`, `uptr`, an `extern type` opaque handle (a `Named` whose declaration IS an `ExternBody`),
- * or a `ptr<T> | null` absence union (C2b, `extern_null_union_ok`) — the only shapes that marshal
- * 1:1 across the C ABI. Rejects an ordinary Teko struct/enum/variant (unsupported by-value
- * aggregate FFI), `str`, and a slice/optional. `void` is handled by the CALLER, for the return
- * position only.
+ * C7.1a / §16 — is `t` legal across the `extern` boundary? A primitive (int/float/bool), `byte`,
+ * `ptr`, `uptr`, an `extern type` handle (a `Named` whose declaration is an `ExternBody` opaque
+ * handle or a §16 `ExternStructBody` C-ABI struct, passed BY VALUE), a `ref T` out-pointer whose
+ * inner is itself extern-admissible (lowers to `<inner> *` — the typed out-param convention), or a
+ * `ptr<T> | null` absence union (C2b, `extern_null_union_ok`) — the only shapes that marshal 1:1
+ * across the C ABI. Rejects an ordinary Teko struct/enum/variant (unsupported by-value aggregate
+ * FFI), `str`, and a slice/optional. `void` is handled by the CALLER, for the return position only.
  *
  * @param t      the resolved param or return type
  * @param table  the program's type table (to probe a `Named`'s declaration body)
@@ -8483,10 +8491,31 @@ fn extern_type_ok(t: @Type(), table: TypeTable): bool {
         Ptr => true
         Uptr => true
         Named as nm => match type_table_find(table, nm.name, "") {   // (#109 W1) extern-kind probe on a resolved name — no referencing ns
-            parser::TypeDecl as td => match td.body { parser::ExternBody => true; _ => false }
+            parser::TypeDecl as td => extern_named_body_ok(td.body)
             error => false
         }
+        Reference as rf => extern_type_ok(rf.inner, table)
         Variant as v => extern_null_union_ok(v)
+        _ => false
+    }
+}
+
+/**
+ * extern_named_body_ok — is a `Named` type whose declaration body is `body` admissible across the
+ * `extern` boundary? An opaque `ExternBody` (a `void *` handle) and a `§16` `ExternStructBody` (a
+ * header-less C-ABI struct passed BY VALUE, its layout byte-identical to the foreign C struct) are
+ * the two extern-kind bodies that marshal 1:1 across the C ABI. Every other body — an ordinary Teko
+ * struct/class/enum/variant/trait/interface/alias/newtype — carries a Teko-internal representation
+ * that does not match a foreign struct, so it is rejected.
+ *
+ * @param body  the resolved declaration body of the `Named` type
+ * @return      true iff a value of this named type may cross an `extern` signature
+ * @since §16 (FFI foundation)
+ */
+fn extern_named_body_ok(body: @TypeBody()): bool {
+    match body {
+        parser::ExternBody => true
+        parser::ExternStructBody => true
         _ => false
     }
 }
