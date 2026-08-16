@@ -1803,6 +1803,22 @@ native** e varre o C. Ou seja: o portão "native: compila+fixpoint+memparanoid" 
 native da Doc-1** — sem ele, a Doc-1 não teria de onde semear em native. (Detalhe de reprodutibilidade native —
 determinismo de codegen/link do backend native — é problema da Doc-1; a Doc-2 só precisa provar que a native fecha
 os 3 portões no CI.)
+**⚖️ DE-CONFLAÇÃO CRÍTICA — "backend C" ≠ "dependências C" (ruling do dono 2026-08-16).** "Foco na perna C" NÃO
+significa pular o sweep de C. Há DOIS sentidos de "C" que eu estava misturando:
+1. **BACKEND C** (`TEKO_BACKEND=c`): o compilador **emite código C**, que o `cc` compila. **ISSO FICA na Doc-2** —
+   é a "perna C" onde eu foco e valido local.
+2. **DEPENDÊNCIAS C** (`src/runtime/teko_rt.c`/`.h`, `src/assert/assert.c`, `win32_compat.h`): os arquivos C
+   escritos à mão que o C emitido `#include`/linka. **ESSES são varridos no §16** — trocados por Teko + **FFI
+   nativo** (extern/`dlopen`/syscall direto ao SO).
+**Portanto o §16 (e o §17) são feitos AINDA em `TEKO_BACKEND=c`, como já planejado.** O estado pós-§16 na perna C:
+o compilador **continua emitindo `teko.c`**, mas esse `teko.c` **não linka mais nenhum C à mão** — ele faz **FFI
+nativo direto ao SO/libc** (a arena reimplementada em Teko chama `mmap`/`munmap` via FFI; assert/panic/IO idem). A
+linha de build encolhe de `cc teko.c runtime/teko_rt.c assert/assert.c -o teko` para essencialmente `cc teko.c -lm
+-ldl -o teko` (só o C emitido + libs do SO). **O "sweep de C" do §16 = remover os .c/.h à mão, NÃO remover o
+backend-C.** O backend-C só é aposentado no FINAL da Doc-1 (o flip pra seed-native). Ou seja, dentro da Doc-2 eu
+FAÇO o sweep das dependências-C (§16) enquanto ainda emito C — as duas coisas convivem: emissão-C + zero-runtime-C-
+à-mão + FFI-nativo. É exatamente o que o §16 C1 (`extern type`, structs C-ABI) e o `teko::sys` (constantes curadas)
+existem pra habilitar.
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
