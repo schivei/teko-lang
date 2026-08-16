@@ -4578,6 +4578,56 @@ fn emit_ptr_word(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, 
     cb(out, "))")
 }
 
+/**
+ * `teko::mem::load_u64(addr: u64): u64` (§16 §2.2 arena sub-crumb B; `load_u64_signature`,
+ * `src/checker/scope.tks`) — reads ONE 64-bit word at the caller-computed address `addr`, with
+ * NO allocation. Emits a `volatile` dereference: the arena reads back a word a sibling
+ * `store_u64` — or a raw `mmap` — may just have written, so the optimiser must never elide or
+ * reorder the load across that address. UNSAFE BY CONTRACT, in the same sense as
+ * `bytes_from_ptr`/`as_cstr`: the checker cannot prove `addr` names live, aligned, in-bounds
+ * memory.
+ *
+ * @param []byte buf  the output buffer
+ * @param CgProg prog  the typed program (for arg emission)
+ * @param checker::TCall c  the typed call (args[0] = the `u64` address)
+ * @param []str escaping  the escape-analysis frame set
+ * @param []RegionFrame regions  the open region-frame stack
+ * @param []checker::TStatement fn_body  the enclosing function body (defer context)
+ * @param DeferCtx dctx  the defer context
+ * @return []byte | error  the buffer with the volatile-load expression appended, or a codegen error
+ */
+fn emit_load_u64(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var out = cb(buf, "((uint64_t)*(volatile uint64_t *)(uintptr_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, "))")
+}
+
+/**
+ * `teko::mem::store_u64(addr: u64, v: u64)` (§16 §2.2 arena sub-crumb B; `store_u64_signature`,
+ * `src/checker/scope.tks`) — writes ONE 64-bit word `v` at the caller-computed address `addr`,
+ * with NO allocation, the write-side twin of `emit_load_u64`'s `volatile` contract: the arena's
+ * next read (a sibling `load_u64`, or a raw `mmap`-backed reinterpret) must observe the write,
+ * so the optimiser must never elide or reorder it. Emits the assignment as a
+ * void-expression statement (the `Void {}` return type forbids reading it as a value). UNSAFE
+ * BY CONTRACT, same as `emit_load_u64`.
+ *
+ * @param []byte buf  the output buffer
+ * @param CgProg prog  the typed program (for arg emission)
+ * @param checker::TCall c  the typed call (args[0] = the `u64` address, args[1] = the `u64` value)
+ * @param []str escaping  the escape-analysis frame set
+ * @param []RegionFrame regions  the open region-frame stack
+ * @param []checker::TStatement fn_body  the enclosing function body (defer context)
+ * @param DeferCtx dctx  the defer context
+ * @return []byte | error  the buffer with the volatile-store assignment expression appended, or a codegen error
+ */
+fn emit_store_u64(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var out = cb(buf, "(*(volatile uint64_t *)(uintptr_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, ") = (uint64_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, "))")
+}
+
 
 // (W10b.D3) a DYNAMIC contract-method call through an interface value's vtable, as a GNU
 // statement-expression: bind the receiver ONCE (args[0] — a class instance is upcast on the fly
@@ -5069,6 +5119,8 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             if l == "str_from_c" { return emit_str_from_c(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "region_buf" { return emit_region_buf(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "ptr_word" { return emit_ptr_word(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "load_u64" { return emit_load_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "store_u64" { return emit_store_u64(buf, prog, c, escaping, regions, fn_body, dctx) }
         }
     }
     var builtin = ""
