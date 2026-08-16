@@ -7449,7 +7449,7 @@ fn type_spawn(s: parser::Spawn, env: Env, table: TypeTable): TypedStmt | error {
     var f = match tspawn_resolve_func(tc, env) { Func as fn0 => fn0; error as e => return e }
     match tspawn_reject_ref_params(f, tc.callee) { error as e => return e; bool => { } }
     match tspawn_reject_uncopyable_args(f, tc.callee) { error as e => return e; bool => { } }
-    TypedStmt { node = TSpawn { call = te }; env = env }
+    TypedStmt { node = TSpawn { call = te; id = 0 to u64 }; env = env }
 }
 
 /**
@@ -7534,7 +7534,6 @@ fn tspawn_type_copyable(t: @Type()): bool {
     match t {
         Prim => true
         Byte => true
-        Char => true
         Str => true
         Slice as sl => tspawn_scalar_type(sl.element)
         _ => false
@@ -7542,17 +7541,18 @@ fn tspawn_type_copyable(t: @Type()): bool {
 }
 
 /**
- * tspawn_scalar_type — is `t` a fixed-width scalar (an integer/float/bool prim, a `byte`, or a
- * `char`)? A slice of such elements is one contiguous byte run the S3 packer memcpys wholesale.
+ * tspawn_scalar_type — is `t` a fixed-width, POINTER-FREE scalar (an integer/float/bool prim or a
+ * `byte`)? Such a value is bitwise-copyable, so a slice of them is one contiguous byte run the S3
+ * packer memcpys wholesale. `char` is EXCLUDED — its runtime layout is a `{ptr,len}` byte view into
+ * the spawning arena, so it needs the fat tail-pack a later batch adds, not an inline copy.
  *
  * @param t  the element type
- * @return   true iff `t` is a fixed-width scalar
+ * @return   true iff `t` is a fixed-width, pointer-free scalar
  */
 fn tspawn_scalar_type(t: @Type()): bool {
     match t {
         Prim => true
         Byte => true
-        Char => true
         _ => false
     }
 }

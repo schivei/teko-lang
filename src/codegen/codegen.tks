@@ -10279,8 +10279,232 @@ fn emit_stmt_dispatch(b0: []byte, s: @TStatement(), in_main: bool, prog: CgProg,
         checker::TDeferStmt => b0
         checker::TAdoptStmt as a => emit_adopt(b0, a, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
         checker::TBlockStmt as b => emit_block_region(b0, b.body, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
-        checker::TSpawn => error { message = "internal: spawn codegen is not wired (codegen crumb S3)" }
+        checker::TSpawn as sp => emit_spawn(b0, sp, prog, escaping, regions, fn_body, dctx, indent)
     }
+}
+
+/**
+ * cg_spawn_arg_is_fat — does a spawn argument type carry a `{ptr,len}` payload the packer must
+ * tail-copy (a `str` or a slice), as opposed to a pointer-free scalar stored inline? Mirrors the
+ * checker's blob-copy predicate (`tspawn_type_copyable`/`tspawn_scalar_type`), so codegen never meets
+ * a type the checker did not clear.
+ *
+ * @param t  the argument type
+ * @return   true iff `t` is a fat (tail-packed) argument, false for an inline scalar
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn cg_spawn_arg_is_fat(t: @Type()): bool {
+    match t {
+        checker::Str => true
+        checker::Slice => true
+        _ => false
+    }
+}
+
+/**
+ * cg_ctype_text — the C type text for a resolved `@Type()`, as a `str` (a thin wrapper over
+ * `emit_type` for the spawn packer, which needs `sizeof(<elem>)` and a `(<elem> *)` cast inline).
+ *
+ * @param prog  the whole-program codegen context
+ * @param t     the resolved type
+ * @return      the C type spelling, or a propagated emit error
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn cg_ctype_text(prog: CgProg, t: @Type()): str | error {
+    var b = match emit_type(teko::list::empty(), prog, t) { []byte as o => o; error as e => return e }
+    str(b)
+}
+
+/**
+ * cg_spawn_target_name — append the C callee symbol for a spawn target: the raw `c_symbol` for a
+ * foreign `extern fn`, else the namespace-mangled name (`cb_fn_name`), exactly as `emit_call`'s
+ * resolved-user-call path names it, so definition and spawn trampoline call agree.
+ *
+ * @param buf   the C output buffer
+ * @param prog  the whole-program codegen context
+ * @param c     the typed call the spawn runs
+ * @return      the buffer with the callee symbol appended
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn cg_spawn_target_name(buf: []byte, prog: CgProg, c: checker::TCall): []byte {
+    var last = cg_path_last(c.callee)
+    match cg_find_function(prog, c.call_ns, last) {
+        checker::TFunction as cf => if cf.is_extern { cb(buf, cf.c_symbol) } else { cb_fn_name(buf, c.call_ns, last, c.overload_suffix) }
+        error => cb_fn_name(buf, c.call_ns, last, c.overload_suffix)
+    }
+}
+
+/**
+ * emit_spawn_thunks — append the top-level C thunks (ctx struct + packer + trampoline) for EVERY
+ * spawn-site in the program, in stamped-id order. Emitted after the function prototypes (so the target
+ * signatures exist) and before the function bodies (so a body's inline spawn site can reference the
+ * packer/trampoline). Empty (byte-identical output) when the program has no spawn.
+ *
+ * @param buf     the C output buffer
+ * @param prog    the whole-program codegen context
+ * @param spawns  the stamped spawn-sites collected by the lambda-lift pre-pass
+ * @return        the buffer with every site's three thunks appended, or a propagated emit error
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn emit_spawn_thunks(buf: []byte, prog: CgProg, spawns: []checker::TSpawn): []byte | error {
+    var out = buf
+    var i: u64 = 0
+    loop {
+        if i >= spawns.len { break }
+        out = match emit_spawn_thunk_one(out, prog, spawns[i]) { []byte as o => o; error as e => return e }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * emit_spawn_thunk_one — the three top-level C pieces for ONE spawn-site `sp` (id `k`): (1) a
+ * contiguous ctx struct holding a field per argument; (2) a `tk_spawn_pack_<k>` that `malloc`s one
+ * block, stores scalars inline and tail-copies each fat `str`/slice with its `ptr` re-pointed INSIDE
+ * the block (no spawning-arena pointer survives); (3) a `tk_spawn_tramp_<k>` that unpacks the block,
+ * calls the target, and frees the block. Fat payloads are 16-byte aligned in the tail so a
+ * slice-of-scalar element stays naturally aligned.
+ *
+ * @param buf   the C output buffer
+ * @param prog  the whole-program codegen context
+ * @param sp    the stamped spawn-site
+ * @return      the buffer with the site's struct/packer/trampoline appended, or an emit error
+ * @throws      the spawn target is not a resolved call
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn emit_spawn_thunk_one(buf: []byte, prog: CgProg, sp: checker::TSpawn): []byte | error {
+    var c = match sp.call.kind { checker::TCall as tc => tc; _ => return error { message = "internal: spawn target is not a call at codegen" } }
+    var k = sp.id
+    var args = c.args
+    var out = cb(buf, $"typedef struct {{ ")
+    var i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        out = match emit_type(out, prog, args[i].type) { []byte as o => o; error as e => return e }
+        out = cb(out, $" a{i}; ")
+        i = i + 1
+    }
+    if args.len == 0 { out = cb(out, "char _pad; ") }
+    out = cb(out, $"}} tk_spawn_ctx_{k};\n")
+    out = cb(out, $"static tk_spawn_ctx_{k} *tk_spawn_pack_{k}(")
+    if args.len == 0 { out = cb(out, "void") }
+    i = 0
+    loop {
+        if i >= args.len { break }
+        if i > 0 { out = cb(out, ", ") }
+        out = match emit_type(out, prog, args[i].type) { []byte as o => o; error as e => return e }
+        out = cb(out, $" a{i}")
+        i = i + 1
+    }
+    out = cb(out, $") {{\n    size_t _need = sizeof(tk_spawn_ctx_{k});\n")
+    i = 0
+    loop {
+        if i >= args.len { break }
+        if cg_spawn_arg_is_fat(args[i].type) {
+            var bytes_expr = match cg_spawn_fat_bytes(prog, args[i].type, i) { str as s => s; error as e => return e }
+            out = cb(out, $"    _need += 15u + {bytes_expr};\n")
+        }
+        i = i + 1
+    }
+    out = cb(out, $"    char *_blk = (char *)malloc(_need ? _need : 1); if (!_blk) tk_panic(\"out of memory\");\n")
+    out = cb(out, $"    tk_spawn_ctx_{k} *_c = (tk_spawn_ctx_{k} *)_blk;\n")
+    out = cb(out, $"    char *_tail = _blk + sizeof(tk_spawn_ctx_{k}); (void)_tail;\n")
+    i = 0
+    loop {
+        if i >= args.len { break }
+        out = match emit_spawn_pack_field(out, prog, args[i].type, i) { []byte as o => o; error as e => return e }
+        i = i + 1
+    }
+    out = cb(out, "    return _c;\n}\n")
+    out = cb(out, $"static void tk_spawn_tramp_{k}(void *_raw) {{\n    tk_spawn_ctx_{k} *_c = (tk_spawn_ctx_{k} *)_raw; (void)_c;\n    ")
+    out = cg_spawn_target_name(out, prog, c)
+    out = cb(out, "(")
+    i = 0
+    loop {
+        if i >= args.len { break }
+        if i > 0 { out = cb(out, ", ") }
+        out = cb(out, $"_c->a{i}")
+        i = i + 1
+    }
+    out = cb(out, ");\n    free(_raw);\n}\n")
+    out
+}
+
+/**
+ * cg_spawn_fat_bytes — the C expression for the byte count of a fat argument's payload: `a<i>.len` for
+ * a `str` (byte length), `a<i>.len * sizeof(<elem>)` for a slice of scalars.
+ *
+ * @param prog  the whole-program codegen context
+ * @param t     the fat argument type (a `str` or a slice)
+ * @param i     the argument index
+ * @return      the C byte-count expression, or a propagated emit error
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn cg_spawn_fat_bytes(prog: CgProg, t: @Type(), i: u64): str | error {
+    match t {
+        checker::Str => $"(size_t)a{i}.len"
+        checker::Slice as sl => {
+            var elem = match cg_ctype_text(prog, sl.element) { str as s => s; error as e => return e }
+            $"(size_t)a{i}.len * sizeof({elem})"
+        }
+        _ => error { message = "internal: cg_spawn_fat_bytes on a non-fat spawn argument" }
+    }
+}
+
+/**
+ * emit_spawn_pack_field — append the packer body line for ONE argument: an inline store for a scalar,
+ * or a 16-byte-aligned tail memcpy with the `ptr` re-pointed into the block for a `str`/slice.
+ *
+ * @param buf   the C output buffer
+ * @param prog  the whole-program codegen context
+ * @param t     the argument type
+ * @param i     the argument index
+ * @return      the buffer with the packer line appended, or a propagated emit error
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn emit_spawn_pack_field(buf: []byte, prog: CgProg, t: @Type(), i: u64): []byte | error {
+    match t {
+        checker::Str => cb(buf, $"    _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, (size_t)a{i}.len); _c->a{i}.ptr = (const tk_byte *)_tail; _c->a{i}.len = a{i}.len; _tail += a{i}.len;\n")
+        checker::Slice as sl => {
+            var elem = match cg_ctype_text(prog, sl.element) { str as s => s; error as e => return e }
+            cb(buf, $"    {{ size_t _n = (size_t)a{i}.len * sizeof({elem}); _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, _n); _c->a{i}.ptr = ({elem} *)_tail; _c->a{i}.len = a{i}.len; _tail += _n; }}\n")
+        }
+        _ => cb(buf, $"    _c->a{i} = a{i};\n")
+    }
+}
+
+/**
+ * emit_spawn — the inline spawn-site statement (§10): pack every argument into a fresh heap block on
+ * the SPAWNING thread (while its arena is live), then hand the block and the site's trampoline to
+ * `tk_thread_spawn`. Ownership of the block passes to the detached thread, which frees it after the
+ * target returns. The ctx struct/packer/trampoline are emitted top-level by `emit_spawn_thunks`.
+ *
+ * @param buf       the C output buffer
+ * @param sp        the stamped spawn-site
+ * @param prog      the whole-program codegen context
+ * @param escaping  the escaping-locals set (threaded to the arg emitters)
+ * @param regions   the open region frames (threaded to the arg emitters)
+ * @param fn_body   the enclosing function body (threaded to the arg emitters)
+ * @param dctx      the defer context (threaded to the arg emitters)
+ * @param indent    the current indentation
+ * @return          the buffer with the spawn-site block appended, or a propagated emit error
+ * @throws          the spawn target is not a resolved call
+ * @since 0.3.1 §10 (concurrency batch 1)
+ */
+fn emit_spawn(buf: []byte, sp: checker::TSpawn, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, indent: str): []byte | error {
+    var c = match sp.call.kind { checker::TCall as tc => tc; _ => return error { message = "internal: spawn target is not a call at codegen" } }
+    var k = sp.id
+    var out = cb(buf, indent)
+    out = cb(out, $"{{ tk_spawn_ctx_{k} *_sc = tk_spawn_pack_{k}(")
+    var i: u64 = 0
+    loop {
+        if i >= c.args.len { break }
+        if i > 0 { out = cb(out, ", ") }
+        out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[i], escaping, regions, fn_body, dctx) { []byte as o => o; error as e => return e }
+        i = i + 1
+    }
+    out = cb(out, $"); tk_thread_spawn(tk_spawn_tramp_{k}, _sc); }}\n")
+    out
 }
 
 /**
@@ -12291,11 +12515,11 @@ fn cg_format_c(src: str): []byte {
 // a plain function — emitted by the normal fn-emission, called via the W10a closure cast). Capturing
 // lambdas are stamped here too; their env-struct + env-first lifted fn are emitted by the capture
 // path (cg_emit_lambda_decls). The accumulator threads the id counter + the synthesized functions.
-type StampAcc = struct { next: u64; fns: []checker::TFunction; lams: []checker::TLambda }
-type LiftResult = struct { prog: checker::TProgram; lams: []checker::TLambda }
+type StampAcc = struct { next: u64; next_spawn: u64; fns: []checker::TFunction; lams: []checker::TLambda; spawns: []checker::TSpawn }
+type LiftResult = struct { prog: checker::TProgram; lams: []checker::TLambda; spawns: []checker::TSpawn }
 
 fn cg_lift_lambdas(prog: CgProg): LiftResult {
-    var acc = StampAcc { next = 0; fns = teko::list::empty(); lams = teko::list::empty() }
+    var acc = StampAcc { next = 0; next_spawn = 0; fns = teko::list::empty(); lams = teko::list::empty(); spawns = teko::list::empty() }
     var items: []@TItem() = teko::list::empty()
     var i = 0
     loop {
@@ -12316,7 +12540,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
     // append the synthesized lifted functions (non-capturing → a plain top-level fn).
     var j = 0
     loop { if j >= acc.fns.len { break }; items = teko::list::push(items, acc.fns[j]); j++ }
-    LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams }
+    LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams; spawns = acc.spawns }
 }
 /**
  * Rebuilds a statement block with every nested closure literal stamped (`cg_lift_stmt` per
@@ -12356,7 +12580,13 @@ fn cg_lift_stmt(s: @TStatement(), ref acc: StampAcc): @TStatement() {
         checker::TBlockStmt as b => checker::TBlockStmt { body = cg_lift_block(b.body, acc) }
         checker::TBreakStmt => s
         checker::TContinueStmt => s
-        checker::TSpawn as sp => checker::TSpawn { call = cg_lift_expr(sp.call, acc) }
+        checker::TSpawn as sp => {
+            var k = acc.next_spawn
+            acc = StampAcc { next = acc.next; next_spawn = k + 1; fns = acc.fns; lams = acc.lams; spawns = acc.spawns }
+            var stamped = checker::TSpawn { call = cg_lift_expr(sp.call, acc); id = k }
+            acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = acc.fns; lams = acc.lams; spawns = teko::list::push(acc.spawns, stamped) }
+            stamped
+        }
     }
 }
 /**
@@ -12380,7 +12610,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
     match e.kind {
         checker::TLambda as lam => {
             var id = acc.next
-            acc = StampAcc { next = id + 1; fns = acc.fns; lams = acc.lams }
+            acc = StampAcc { next = id + 1; next_spawn = acc.next_spawn; fns = acc.fns; lams = acc.lams; spawns = acc.spawns }
             var nbody = cg_lift_block(lam.body, acc)   // stamp nested lambdas first (ids > id)
             // synthesize a plain top-level fn for a NON-capturing lambda; capturing → emitted by the
             // capture path (recorded in `lams`).
@@ -12396,7 +12626,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
                 newlams = teko::list::push(newlams, stamped)
             }
             // preserve whatever `next` the nested recursion advanced to (never regress it).
-            acc = StampAcc { next = acc.next; fns = newfns; lams = newlams }
+            acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = newfns; lams = newlams; spawns = acc.spawns }
             checker::TExpr { kind = stamped; type = e.type; line = e.line; col = e.col }
         }
         checker::TBinary as b => checker::TExpr { kind = checker::TBinary { op = b.op; left = cg_lift_expr(b.left, acc); right = cg_lift_expr(b.right, acc) }; type = e.type; line = e.line; col = e.col }
@@ -13049,12 +13279,14 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     var _lr = cg_lift_lambdas(cg_prog_of(prog_ag))
     var prog = cg_prog_of(_lr.prog)
     var cap_lams = _lr.lams
+    var spawn_sites = _lr.spawns
     var b: []byte = teko::list::empty()
     b = cb(b, "// generated by teko (F2 backend) — do not edit\n")
     b = cb(b, "#include <stdint.h>\n")
     b = cb(b, "#include <stdbool.h>\n")
     b = cb(b, "#include <stdlib.h>\n")   // malloc/abort — slice copy-append (fixed+copy)
     b = cb(b, "#include <math.h>\n")   // floor/… — float ops the corpus lowers inline (link -lm)
+    if spawn_sites.len > 0 { b = cb(b, "#include <string.h>\n") }
     b = cb(b, "#include \"teko_rt.h\"\n")
     b = cb(b, "#include \"assert.h\"\n\n")   // teko::assert seed decls (driver adds its -I)
 
@@ -13163,6 +13395,8 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     // (W10) CAPTURING lambdas: env-struct typedefs + lifted-fn forward declarations (so a closure
     // literal `&__tkclo_<id>` + `sizeof(__tkenv_<id>)` resolve before the user functions).
     b = match cg_emit_lambda_decls(b, prog, cap_lams, true) { []byte as o => o; error as err => return err }
+    b = cb(b, "\n")
+    b = match emit_spawn_thunks(b, prog, spawn_sites) { []byte as o => o; error as err => return err }
     b = cb(b, "\n")
 
     // First pass: emit every top-level function. Type-decls are handled above; use-decls
