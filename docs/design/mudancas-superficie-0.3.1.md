@@ -1819,6 +1819,15 @@ backend-C.** O backend-C só é aposentado no FINAL da Doc-1 (o flip pra seed-na
 FAÇO o sweep das dependências-C (§16) enquanto ainda emito C — as duas coisas convivem: emissão-C + zero-runtime-C-
 à-mão + FFI-nativo. É exatamente o que o §16 C1 (`extern type`, structs C-ABI) e o `teko::sys` (constantes curadas)
 existem pra habilitar.
+**ADENDO — toolchain por perna (ruling do dono 2026-08-16):** a diferença entre as pernas é o que a linha de build
+aciona. **Perna C** (`TEKO_BACKEND=c`): emite `teko.c` → **`cc`/`clang`/`gcc` + linker** (`cc teko.c -lm -ldl -o
+teko` — compilador C traduz o C emitido, depois linka). **Perna NATIVE**: o compilador emite **código nativo direto**
+(objeto/máquina), então **APENAS O LINKER é acionado — SEM gcc/cc/clang** (`ld`/linker-da-plataforma resolve
+símbolos + libs do SO → binário). É a essência do "native real": zero toolchain C no caminho — só emit-native →
+link. Logo o **seed-native da Doc-1** é produzido assim (emit-native → `ld`), e o "sweep de C" final remove não só
+as deps-C mas o **próprio compilador C do toolchain** (a perna C precisa de `cc`; a perna native precisa só de
+`ld`). Durante a Doc-2 as duas convivem: valido em C (precisa de `cc`), e a native (linker-only) tem que fechar os
+3 portões no CI.
 
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
