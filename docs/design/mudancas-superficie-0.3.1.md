@@ -1435,6 +1435,26 @@ monomorph** (T concreto no stamp); não-POD (str/ponteiros-de-arena) exige **dee
 resolver o marshalling-de-`T` (ruling §5) → destrava C2-C5-stdlib; e o **await/cancel opção (c)** (em desenho
 vivo com o dono: `on canceled as c {}` como desenrolar-não-local capturável, não-capturado→panic-cascade).
 
+**⚖️ RULINGS DO DONO (2026-08-16) sobre a arquitetura do §10 await + ordenação:**
+- **Modelo do await = OPÇÃO (c)** — coroutines STACKFUL sobre controladores do SO via FFI (ucontext/Fibers pra
+  suspensão; io_uring/epoll/kqueue/IOCP pro reactor), escolhida sobre (a) thread-per-await (trava thread) e (b)
+  state-machine-stackless (emitir C quebra a perna nativa; o transform teria de ir ao IR). Rust/Zig provam que o
+  transform é AOT-possível, mas (c) põe a complexidade no **runtime-scheduler** (o lugar do §16), com `await`
+  baixando pra **chamadas de runtime** — backend-agnóstico.
+- **Semântica de cancel SELADA:** `<expr> on canceled as c { … }` é **superfície geral do dev** (+ gerada pelo
+  compilador no spawn-arm). `cancel(razão)` = **desenrolar não-local que MATA arenas** do ponto até a captura
+  (reusa a máquina de `panic`/`exit`, não `setjmp`-no-C); `c` amarra o **`error`** carregado. **Não-capturado →
+  desenrola até a raiz; o start-verdadeiro embrulha a `main` num `on canceled` que CONVERTE em `panic`** →
+  cascade → programa inteiro. `cancel()` fora de suspensão = panic direto. **When-all** (`await a,b,c=…`): o
+  **contexto-do-await** (não o pai) cria N braços (cada um = spawn c/ arena própria) + waitgroup(N) + slots; o pai
+  **cede** (coroutine yield), retomado quando o waitgroup zera. Paralelismo vem de spawnar os braços, não do modelo.
+- **ORDENAÇÃO (ruling): o §10-(c) entra APÓS o §16** (depende da infra OS-FFI que o §16 constrói), assim como
+  outros itens que dependem disso. **`#17 pragmas` adiantados AGORA** (aprovado). Doc-2 reordena:
+  **§17 → §16 → §10-(c) + dependentes**, tudo ainda PRÉ-Doc-1. O que já aterrissou do §10 (spawn, canais
+  runtime+concreto) fica; a superfície genérica dos canais + o `await` esperam (marshalling §5 / §16).
+- **PENDENTE do dono:** ruling §5 marshalling-de-`T` (POD-primeiro `sizeof`-no-monomorph vs recursivo-completo).
+  Design-ahead do (c) e desenho do §17 seguem; `marshal<T>` fica caixa-preta até o ruling.
+
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
 baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6
