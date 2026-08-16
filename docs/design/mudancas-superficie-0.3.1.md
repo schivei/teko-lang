@@ -1602,11 +1602,16 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   **array de u32 (largura fixa, indexação O(1), sem cabeçalho por-char)** + **trim pra UTF-8 na barreira do metal**;
   o fat só na string (`{qtd-chars, qtd-bytes, array-u32, encoding}`); o `char` vira **u32 puro** (vs. hoje: array
   de bytes dinâmico com cabeçalho repetido por caractere). **RESOLVIDO (rulings do dono 2026-08-16):**
-  - **(A) COLOCAÇÃO = PRE-DOC-1** (terreno, nova onda Doc-2). A CAPACIDADE (arrays-fixos + string-u32 + `T|null`-
-    default + semântica de concat/reatribuição) é pre-Doc-1, **sequenciada DEPOIS do sweep do §16** (uma reescrita-
-    de-emit por vez — coord). A **pré-alocação estática AST-computada (folhas→raiz) + a espinha/btree-de-ponteiros
-    que EXPLORA os tamanhos fixos** (a redução real de consumo em runtime) fica **Doc-1** (é o item-1 pré-
-    dimensionamento, agora HABILITADO pelos tamanhos fixos).
+  - **(A) COLOCAÇÃO = PRIMEIRA ETAPA DA DOC-1 (refinamento dono 2026-08-16: "meio que seria a primeira etapa da
+    doc1… mas se algo cabe na doc2 (16 ou 17), fique à vontade").** A CAPACIDADE (arrays-fixos + string-u32 +
+    `T|null`-default + concat/reatribuição + codecs) é a **1ª etapa da Doc-1**, NÃO um pré-Doc-1 separado — mas o
+    **coordenador tem discrição de puxar peças pra Doc-2 (§16/§17)** onde couber. **Caso concreto avaliado
+    (coord):** o **modelo string-u32 pode caber no §16** — o §16 já migra `teko_rt.c`'s string fns (`tk_str`/
+    `tk_ftoa`/`tk_fmt_*`/concat) pra Teko; migrar no modelo-velho (byte-array) e depois a onda refazer como u32 é
+    TRABALHO DOBRADO → quando o §16 chegar no subsistema de string, AVALIAR adotar u32 direto ali (migrar 1×).
+    **Arrays NÃO cabem no §16** (o §16 mexe no runtime C, não no uso-de-array do compilador) → ficam na 1ª etapa
+    da Doc-1. A **pré-alocação estática AST-computada + espinha/btree-de-ponteiros** que EXPLORA os tamanhos fixos
+    (a redução real de consumo) é a etapa Doc-1 SEGUINTE (item-1 pré-dimensionamento, habilitado pelos fixos).
   - **(B) `isset` = ARRAYS DEFAULT PARA `T | null` (dono: "não inventa maquinaria").** `var x: []T` estoca no
     backend como `[](T | null)`; slot não-inicializado = `null`; `isset(a[i])`/acesso = `match a[i] { null => …; _
     => … }`. Reusa a união existente (ZERO máquina nova de presença — nada de bitmap/sentinela). **O preço: acesso
@@ -1623,9 +1628,10 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
     DADOS/serialização; isto são codecs de TEXTO sobre o array-u32). **Colocação: pré-Doc-1, com a Doc-2 já
     FECHADA** — parte da onda string-u32, construído sobre o novo modelo de string (não antes: exige o `{qtd-chars,
     qtd-bytes, array-u32, encoding}` no lugar).
-  **⇒ ONDA RATIFICADA (dono 2026-08-16).** Sequência: **§16 (syscall+arena+sweep) → [Doc-2 fechada] → onda arrays-
-  fixos+string-u32 + codecs-de-texto (pre-Doc-1) → Doc-1 (pré-alocação/espinha + os outros tunings + multi-
-  threading).**
+  **⇒ ONDA RATIFICADA (dono 2026-08-16).** Sequência: **§16 (syscall+arena+sweep; string-u32 PODE ser adotado
+  aqui) → [Doc-2 fechada] → Doc-1 ETAPA 1 = onda arrays-fixos+string-u32+codecs → Doc-1 ETAPA 2+ = pré-alocação/
+  espinha + retorno-virtual + elisão-de-arena + reuso-de-literais + multi-threading.** (A fronteira Doc-2/Doc-1 é
+  fluida aqui por concessão do dono; o coord decide caso-a-caso o que adianta pro §16/§17.)
   **CONSEQUÊNCIA PRA O §16 (crumb D em diante):** a arena-Teko da Doc-2 só precisa ser CORRETA (region-per-object +
   deep-copy default + bulk-free + wrap-refcount escape-hatch), NÃO ótima. O pré-dimensionamento / retorno-virtual-
   sem-cópia / elisão-de-arena são Doc-1 — NÃO construir na Doc-2. O OOM no limite do cap durante os reseeds é
