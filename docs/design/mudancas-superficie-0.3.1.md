@@ -1563,6 +1563,20 @@ por-plataforma (`O_RDONLY`/`CLOCK_*`/…, à mão, sem import de macro-C); (3) s
 é o mecanismo per-target. Quirks: Linux mmap/futex/AF_UNIX · macOS mmap-ANON/kqueue/getentropy · Windows
 VirtualAlloc/Events/SEM-AF_UNIX. **Pronto pro design pass do §16.**
 
+**⚖️ `f64_bits`/`f64_from_bits` = INTRÍNSECO DE CODEGEN (ruling do dono 2026-08-16, "intrínseco de codegen então").**
+Na fase strings/format/**float** do §16, essas duas são o ÚNICO caso que não vira nem `extern fn` nem Teko puro:
+são **type-punning** (reinterpretar os bits crus de um `f64` como `u64` e vice-versa — não conversão numérica).
+Não há símbolo libc que faça bit-reinterpret (`extern fn from "c"` impossível), e a linguagem não expõe primitivo
+de reinterpret (Teko puro impossível). **Resolução = o modelo Rust/Zig:** o compilador **lowera direto** — union/
+`memcpy` no backend C, `bitcast` no nativo — com a fn `.tks` (`f64_bits(x)`) como **fachada fina** sobre o
+intrínseco (igual ao `f64::to_bits`→`mem::transmute` do Rust e ao `@bitCast` do Zig, ambos builtins de compilador,
+zero runtime). **Correção EMBUTIDA (não só higiene de §16):** o lowering DEVE emitir o pun em MEMÓRIA (memcpy/
+bitcast), **nunca** trânsito por registrador FP — em x87/32-bit carregar um *signaling NaN* num registrador FP
+CANONIZA os bits (o Rust apanhou disso); uma fn C recebendo `double` por valor perderia o payload do NaN. Efeito
+§16: `tk_f64_bits`/`tk_f64_from_bits` (`teko_rt.c:5264-5265`, memcpy) SOME sem deixar buraco → sem símbolo C, sem
+dep libc; o intrínseco "passa Teko-only". Consumidores atuais preservados: `protobuf` (wire IEEE-754), `comptime_
+fold` (const-fold bit-exato), `math` (inf/nan). **É crumb de CODEGEN na fila do §16, não crumb de FFI.**
+
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
 baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6
