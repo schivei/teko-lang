@@ -1254,6 +1254,28 @@ entregue; falta `IHash` = interface de MÉTODO `fn hash():u64`, fora do escopo 9
 operadores de `IOrd` à mão (síntese estrutural continua aposentada). Próximo: generic-stack-completion (agora
 desbloqueado) → collections-generics-fase1b.
 
+**✅ generic-stack-completion GAP #3 ENTREGUE + RESEED (`b300ee6a` fix, reseed neste commit).** O re-key
+ROOT-DISPATCH: o corpo de um método-de-instância genérico estampado que chama um IRMÃO em `self` (ex.
+`self.count()` dentro de `Ctr__g__i64::twice`) agora RE-CHAVEIA do dono-template abstrato para o namespace da
+instância concreta — o símbolo C (`..__Ctr__g__i64__count`) casa a definição em vez de falhar no link como
+`..__ct__Ctr__count`. Novas `mono_rekey_call_ns` + `mono_rekey_callee_qualifier` (`src/checker/monomorph.tks`),
+ligadas nos dois braços TCall de `mono_texpr`. Grounding-gap confirmado CANÔNICO (não bare), como o design
+previu. É o substrato que o gap #1 (flagship, dispatch de trait-estrutural sobre `K`) reusa. **MUDANÇA DE
+COMPILADOR → RESEED (regra do dono).** Novo seed `bootstrap/teko.c` sha
+`481ebae5dfefd467b153425459f91de56a8c42998a6f05c748f1b71583479547`. O byte-diff vs seed anterior NÃO é inerte
+(diverge de `d33a6186`) mas SEM divergência comportamental: (a) as 2 funções novas + 2 sítios de wiring; (b)
+shifts mecânicos de literais de source-location (`_tk_cast_loc_line`/`tk_panic_oob_at` — o compilador embute
+linha/col para panics; inserir ~50 linhas em monomorph.tks os desloca); (c) os módulos-folha acumulados desde o
+seed #4 (3des/password/cmp, dobrados aqui pois o seed derivara atrás deles). **GATE self-reproduce:** cadeia
+C-route gen0(seed anterior `898dc030`)→tc1→gen1→tc2→gen2→tc3, **tc1==tc2==tc3==`481ebae5`** byte-idêntico (o
+re-key NUNCA dispara no corpus — zero instâncias genéricas — logo compilador VELHO e NOVO emitem o self-image
+idêntico; o ponto-fixo é atingido em tc1). `provenance_gate.sh` PASS. Regressão
+`examples/regressions/generic_sibling_method/` (`Ctr<i64>::make().twice()==6`) LINK-falha no gen0 do seed
+anterior e builda+roda verde (exit 0) no compilador reseedado — a forma exata que falhava. **Achado colateral:**
+o OOP-hard-cut (D27) JÁ ATERRISSOU no lane (`self` reservado, factories `static fn`, self-construct `.{}`) — o
+snippet de fixture do design era pré-hard-cut e foi modernizado. Fold-in de collections (voltar `arr_*` a métodos
+privados de instância) DESTRAVADO mas DEFERIDO ao follow-up #163. Próximo: gap #1 (flagship, reusa este re-key).
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle

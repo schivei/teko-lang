@@ -1,45 +1,56 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the FINDING-#4 CODEGEN FIX + the accumulated
-# stdlib expansion since the previous seed (`8fdb1893`, the stdlib-expansion reseed). What this harvest carries:
-#   - **Finding #4 fix (codegen)**: `src/codegen/codegen.tks` — a `T | error` / `T | null` union's C tag
-#     constant and mangled name now qualify the member type by its CANONICAL namespace (`cg_ns_c_key`, `::`->`__`)
-#     across all four union-key sites (resolved leaf, syntactic type-expr, match-pattern case key, named-variant
-#     tag stem). Two same-bare-named structs in different namespaces (e.g. `a::Thing` vs `b::Thing`, both in a
-#     `Thing | error` union) now emit DISTINCT C symbols instead of colliding at `cc`. Prim/error/null/builtin
-#     and ROOT-namespace unions mangle byte-identically to before (bounded diff); only namespaced user types
-#     change — but the compiler's OWN corpus is heavily namespaced, so the emitted C diverges broadly.
-#   - The stdlib delta since `8fdb1893`: `crypto::pk` (rsa/ec_p256/ed25519), document-signing (jose/xmldsig/cose),
-#     `encoding` toml/ini/yaml/asn1/fixed/protobuf, and the `parse_manifest` TOML dogfood swap.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the GENERIC-STACK-COMPLETION GAP #3
+# codegen/monomorph fix, plus the accumulated leaf-module stdlib since the previous seed (`898dc030`,
+# the finding-#4 reseed at `e98fd5b0`). What this harvest carries:
+#   - **Gap #3 fix (compiler — monomorph)**: `src/checker/monomorph.tks` — a stamped generic
+#     instance-method body's sibling call on `self` (e.g. `self.count()` inside `Ctr__g__i64::twice`)
+#     is now RE-KEYED from the abstract template owner to the concrete instance namespace, so its C
+#     symbol (`teko_..__Ctr__g__i64__count`) matches the emitted definition instead of link-failing as
+#     `teko_..__ct__Ctr__count`. New `mono_rekey_call_ns` + `mono_rekey_callee_qualifier`, wired into
+#     both TCall result arms of `mono_texpr`. This is the ROOT-DISPATCH re-key that gap #1 (the
+#     structural-trait flagship) also reuses. Because the change is a compiler change, it TRIGGERS this
+#     reseed (owner rule: "módulos-folha não exigem reseed; mudança de compilador SIM").
+#   - **Leaf-module stdlib since `898dc030`** (folded in here — none required a reseed on its own, but
+#     the seed had drifted behind them): `crypto` 3des/DES, `crypto` password (Argon2id/scrypt), and the
+#     `teko::cmp` comparison corpus (IEq/IOrd + NeByEq/GtByLt/LeByLt/GeByLt, the 9-ops crumb-6 corpus).
 #
-# NOT INERT — BY DESIGN. The #4 mangle change renames every namespaced union in the emitted C throughout, so
-# this seed differs from the previous one broadly. The honest statement is "the new mangle reproduces itself".
+# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL DIVERGENCE. The gap #3 re-key is a no-op for every `call_ns`
+# the instance Subst does not remap (every existing call — the compiler corpus has ZERO generic
+# instances), so it changes NO behavior of the self-image. The emitted C nonetheless differs from the
+# previous seed: (a) the two new monomorph functions + the two wiring-site edits; (b) mechanical
+# source-location shifts — the compiler embeds source line/col literals for panic sites
+# (`_tk_cast_loc_line`, `tk_panic_oob_at`), and inserting ~50 lines into `monomorph.tks` shifts them
+# throughout; (c) the accumulated leaf-module emissions above. The honest statement is "the new
+# compiler reproduces itself exactly".
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen_new (cc from the PREVIOUS bootstrap-era compiler) built gen_new2; gen_new2 built
-#     gen_new3; gen_new2's emitted teko.c == gen_new3's emitted teko.c, byte-identical (sha256 below). The
-#     transitional gen_new (emitted by the old-mangle compiler, bare names) is NOT the seed; the STABLE
-#     new-mangle generation (gen_new2 == gen_new3) is.
-#   - cc-route: cc -std=c2x bootstrap/teko.c -> gen; TEKO_BACKEND=c gen . -o out --no-verify --release ->
-#     out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below (this IS the gen_new2==gen_new3
-#     fixpoint verified this harvest).
-#   - Regression: `examples/regressions/union_tag_cross_ns/` (a::Thing / b::Thing in `Thing|error` and
-#     `Thing|null`, plus a same-bare named variant) builds+runs green under gen_new2 with distinct symbols
-#     `tk_u_union_tag_cross_ns__a__Thing_error` vs `...__b__Thing_error` — the exact shape that `cc`-failed before.
+#   - C-route chain: gen0 (cc from the PREVIOUS bootstrap `898dc030`) built the tree → emitted teko.c
+#     `481ebae5` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `481ebae5`; tc2 -> gen2; gen2 built the
+#     tree → tc3 `481ebae5`. tc1 == tc2 == tc3, byte-identical (sha256 below). Because the re-key never
+#     fires on the corpus, the OLD compiler (gen0) and the NEW compiler (gen1) emit the self-image
+#     identically — the stable generation is reached at tc1 and reproduces exactly through tc3.
+#   - cc-route: cc -std=c2x -w -g -I src/runtime -I src/assert bootstrap/teko.c src/runtime/teko_rt.c
+#     src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify --release -> out/teko.c;
+#     sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
+#   - Regression: `examples/regressions/generic_sibling_method/` (a `Ctr<T>` class whose `twice()` calls
+#     `self.count()` twice; `Ctr<i64>::make().twice() == 6`) LINK-fails under the previous seed's gen0
+#     and builds+runs green (exit 0, both scenarios) under the reseeded compiler — the exact shape that
+#     failed to link before.
 # Every capped build (`ulimit -v 6291456`) peaked under 5 GB, within the 6 GB cap.
 #
-# `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the default
-# branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane, forward-only, and
-# its correctness rests on the self-reproduction above. Mirrors the item-14/section-7/stdlib-expansion harvests.
+# `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
+# default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
+# forward-only, and its correctness rests on the self-reproduction above. Mirrors the prior harvests.
 # `commit: pending drain` — the landing commit is written in this same change.
 #
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (judges on a SWAP).
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  898dc030935367ba9abdcdb8099a365658d1334d33cca773207be97d344c0596
+sha256:  481ebae5dfefd467b153425459f91de56a8c42998a6f05c748f1b71583479547
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the finding-#4 cross-namespace union-tag
-         codegen fix + the accumulated stdlib expansion), byte-identical on rebuild across the stable
-         new-mangle C-route generations (gen_new2 == gen_new3) AND on the cc-route re-emission; no unrecovered
-         legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the generic-stack-completion gap #3
+         monomorph re-key + the accumulated leaf-module stdlib since 898dc030), byte-identical on
+         rebuild across the stable C-route generations (tc1 == tc2 == tc3) AND on the cc-route
+         re-emission; no unrecovered legacy artifact underlies it.
