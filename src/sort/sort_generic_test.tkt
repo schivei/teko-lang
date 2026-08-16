@@ -1,0 +1,103 @@
+/**
+ * Assert a sorted `[]teko::cmp::I64Key` matches the expected wrapped integers in order — the
+ * whole-array check `teko::assert` lacks natively, specialized to the `I64Key` element the generic
+ * `sort<T: IOrd>` emits.
+ *
+ * @param got   the slice produced by `teko::sort::sort`
+ * @param want  the expected wrapped integers, in order
+ */
+fn assert_i64key_slice_eq(got: []teko::cmp::I64Key, want: []i64) {
+    teko::assert::is_true(got.len == want.len)
+    var i: u64 = 0
+    loop {
+        if i >= want.len { break }
+        teko::assert::is_true(got[i].n == want[i])
+        i++
+    }
+}
+
+/**
+ * Assert a sorted `[]teko::cmp::StrKey` matches the expected wrapped strings in order.
+ *
+ * @param got   the slice produced by `teko::sort::sort`
+ * @param want  the expected wrapped strings, in order
+ */
+fn assert_strkey_slice_eq(got: []teko::cmp::StrKey, want: []str) {
+    teko::assert::is_true(got.len == want.len)
+    var i: u64 = 0
+    loop {
+        if i >= want.len { break }
+        teko::assert::is_true(got[i].key == want[i])
+        i++
+    }
+}
+
+/**
+ * Build a `[]teko::cmp::I64Key` from a `[]i64` of raw integers (the generic sort's INPUT adapter — a
+ * raw `i64` primitive does not carry `IOrd`, so it is wrapped in the `I64Key` conformer first).
+ *
+ * @param ns  the raw integers to wrap
+ * @return    a fresh slice of `I64Key` wrapping each integer in order
+ */
+fn i64keys_of(ns: []i64): []teko::cmp::I64Key {
+    var out: []teko::cmp::I64Key = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= ns.len { break }
+        out = teko::list::push(out, teko::cmp::I64Key { n = ns[i] })
+        i++
+    }
+    out
+}
+
+/**
+ * Build a `[]teko::cmp::StrKey` from a `[]str` of raw strings (the generic sort's INPUT adapter).
+ *
+ * @param ss  the raw strings to wrap
+ * @return    a fresh slice of `StrKey` wrapping each string in order
+ */
+fn strkeys_of(ss: []str): []teko::cmp::StrKey {
+    var out: []teko::cmp::StrKey = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= ss.len { break }
+        out = teko::list::push(out, teko::cmp::StrKey { key = ss[i] })
+        i++
+    }
+    out
+}
+
+/**
+ * `sort<I64Key>`: empty and singleton inputs are returned unchanged (the first instantiation).
+ */
+#test fn sort_generic_i64key_trivial_sizes() {
+    var empty: []teko::cmp::I64Key = teko::list::empty()
+    assert_i64key_slice_eq(teko::sort::sort<teko::cmp::I64Key>(empty), [])
+    assert_i64key_slice_eq(teko::sort::sort<teko::cmp::I64Key>(i64keys_of([7])), [7])
+}
+
+/**
+ * `sort<I64Key>`: a reversed input, an already-sorted input, and negatives ordering before positives
+ * (the ordering dispatched through `I64Key::__le`).
+ */
+#test fn sort_generic_i64key_orderings() {
+    assert_i64key_slice_eq(teko::sort::sort<teko::cmp::I64Key>(i64keys_of([5, 1, 3, 2, 4])), [1, 2, 3, 4, 5])
+    assert_i64key_slice_eq(teko::sort::sort<teko::cmp::I64Key>(i64keys_of([1, 2, 3])), [1, 2, 3])
+    assert_i64key_slice_eq(teko::sort::sort<teko::cmp::I64Key>(i64keys_of([3, -1, 0, -5, 2])), [-5, -1, 0, 2, 3])
+}
+
+/**
+ * `sort<I64Key>`: duplicate keys are kept (a sort, not a dedup) and land adjacent.
+ */
+#test fn sort_generic_i64key_keeps_duplicates() {
+    assert_i64key_slice_eq(teko::sort::sort<teko::cmp::I64Key>(i64keys_of([3, 1, 2, 1, 3])), [1, 1, 2, 3, 3])
+}
+
+/**
+ * `sort<StrKey>`: the SECOND instantiation — a lexicographic reorder and an already-sorted input,
+ * proving `sort<T: IOrd>` monomorphizes independently per element type.
+ */
+#test fn sort_generic_strkey_orderings() {
+    assert_strkey_slice_eq(teko::sort::sort<teko::cmp::StrKey>(strkeys_of(["c", "a", "banana", "apple", "b"])), ["a", "apple", "b", "banana", "c"])
+    assert_strkey_slice_eq(teko::sort::sort<teko::cmp::StrKey>(strkeys_of(["a", "b", "c"])), ["a", "b", "c"])
+}
