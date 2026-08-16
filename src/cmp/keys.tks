@@ -1,0 +1,89 @@
+/**
+ * teko::cmp key adapters — the concrete capability conformers that make the hash- and order-keyed
+ * generic collections (`teko::collections::Dictionary`/`HashSet`/`SortedSet`/…) immediately usable
+ * with primitive keys. The interface model (9-ops + #254) requires a key type to EXPLICITLY conform
+ * `IEq`/`IHash`/`IOrd` (there is no implicit auto-derivation onto a bare `str`/`i64`); a value-type
+ * primitive cannot yet carry an interface capability directly (deferred in 9-ops T-1), so these thin
+ * wrapper structs supply the conformance. Each writes only the primitive comparator (`__eq`/`__lt`)
+ * plus `hash`, and composes the reflection mixins (`NeByEq`/`GtByLt`/`LeByLt`/`GeByLt`) for the rest.
+ * Both wrappers conform the FULL capability set (hashable AND totally ordered) because their backing
+ * primitives are both — so one wrapper serves every keyed collection.
+ */
+
+/**
+ * StrKey — a `str` wrapped as a hashable, totally-ordered key. `hash` is FNV-1a over the bytes
+ * (`teko::runtime::str_hash`, the same fold `Map<V>` proves), `__eq` is byte equality, `__lt` is the
+ * lexicographic byte order (`teko::runtime::str_compare`). Satisfies the hash-eq consistency law:
+ * two equal keys hash identically because both `hash` and `__eq` read the single `key` field.
+ *
+ * @since 0.3.1 (§9.4)
+ * @see IHash, IEq, IOrd
+ */
+pub type StrKey = struct IEq & IHash & NeByEq & IOrd & GtByLt & LeByLt & GeByLt {
+    /** The wrapped string — the sole field `hash`, `__eq` and `__lt` all read. */
+    key: str
+    /**
+     * __eq — byte equality of the two wrapped keys.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff the wrapped strings are byte-equal
+     */
+    operator __eq(left: self, right: self): bool { left.key == right.key }
+    /**
+     * __lt — lexicographic (unsigned byte) order of the two wrapped keys.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff `left` orders lexicographically before `right`
+     */
+    operator __lt(left: self, right: self): bool { teko::runtime::str_compare(left.key, right.key) < 0 }
+    /**
+     * hash — FNV-1a of the wrapped key's bytes (`teko::runtime::str_hash`), consistent with `__eq`.
+     *
+     * @return the FNV-1a hash of `key`
+     */
+    fn hash(): u64 { teko::runtime::str_hash(self.key) }
+}
+
+/**
+ * I64Key — an `i64` wrapped as a hashable, totally-ordered key (the primitive-adapter molde for a
+ * numeric key). `__eq`/`__lt` are the native integer comparisons; `hash` is a zig-zag fold that maps
+ * every `i64` (including negatives) to a distinct non-negative `u64` WITHOUT ever casting a negative
+ * `i64` to `u64` (a fail-loud SIGABRT): a non-negative `n` maps to `2n`, a negative `n` to `2*(-(n+1))+1`
+ * (whose subtrahend `-(n+1)` is always in `[0, i64::MAX]`, so the cast is total).
+ *
+ * @since 0.3.1 (§9.4)
+ * @see IHash, IEq, IOrd
+ */
+pub type I64Key = struct IEq & IHash & NeByEq & IOrd & GtByLt & LeByLt & GeByLt {
+    /** The wrapped integer — the sole field `hash`, `__eq` and `__lt` all read. */
+    n: i64
+    /**
+     * __eq — native equality of the two wrapped integers.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff the wrapped integers are equal
+     */
+    operator __eq(left: self, right: self): bool { left.n == right.n }
+    /**
+     * __lt — native less-than of the two wrapped integers.
+     *
+     * @param left   the left key
+     * @param right  the right key
+     * @return       true iff `left`'s integer is less than `right`'s
+     */
+    operator __lt(left: self, right: self): bool { left.n < right.n }
+    /**
+     * hash — a zig-zag fold of the wrapped integer to a non-negative `u64` (sign-safe, never casts a
+     * negative `i64` to `u64`).
+     *
+     * @return the zig-zag hash of `n`
+     */
+    fn hash(): u64 {
+        var v = self.n
+        if v < 0 { return ((0 - (v + 1)) to u64) * 2 + 1 }
+        (v to u64) * 2
+    }
+}
