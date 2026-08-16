@@ -1518,6 +1518,35 @@ type-check sem erro — prova prune-precede-checker) exit 42; `s17_arch` exit 64
 `s17_if_reject` rejeita 3 diagnósticos. **§17 é o pré-req do §16** (seleciona FFI por-target + ucontext/Fiber e
 io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §16.**
 
+**⚖️ MODELO DE MEMÓRIA POR-TIPO + refcount-wrap (design com o dono 2026-08-16):**
+- **META-PRINCÍPIO (lei):** o modelo de memória é **transparente por-tipo** ao dev — **valor** = deep-copy
+  (marshal na fronteira); **classe** = arena-per-object (caixa própria, semântica de ponteiro, `codegen.tks:5824`);
+  **wrapped** (serviço/ref-opaca/FFI) = refcount. **Extensível** (o dev pode definir a forma dele). Garantias:
+  **sem UAF + sem memory-leak**.
+- **refcount-wrap (mecanismo):** dict na arena RAIZ (endereço→count); `wrap` incrementa, `drop` decrementa; count
+  zero → libera tudo; senão remove só o ponteiro RASO (dado sobrevive p/ os holders restantes). **Só o wrapped
+  entra** → o bulk-free O(1) do caminho por-valor fica INTACTO; collections TS resolvem a contenção cross-thread.
+  Achado: **NÃO há refcount de objeto hoje** (classes são arena-per-object, freed por region-drop), então o
+  refcount é maquinaria NOVA sobre a caixa-por-objeto existente — não há refcount pronto p/ reusar.
+- **`Table<…>` (ideia do dono):** collection multi-índice estilo tabela-de-banco (≤16 genéricos, troca atômica
+  multi-valor) — tratada como **tipo de collection à parte** (stdlib-genéricos), NÃO acoplada ao refcount (que usa
+  `Dictionary<addr,count>` no v1).
+- **PLACEMENT (recomendação, pendente confirmação):** o refcount-wrap é **Doc-1 (melhora a arena)**, NÃO baseline
+  Doc-2 — porque a correção do §10/§16 não precisa dele (deep-copy + singletons-de-vida-de-programa em F2 bastam;
+  singleton nunca é freed até o processo sair → sem refcount). É otimização/generalização pros escape-hatch
+  (ref-opaca retida, FFI-ponteiro-retido).
+
+**🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
+1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
+ordem ~10 fases (fácil→difícil): strings/format/char/float → env/print/os-arch → **I/O&fs** → time/random →
+**ARENA (keystone, §16-core; Doc-1 melhora depois)** → panic/assert → process/exec → test(setjmp) →
+crash(opcional) → **threads/sync (pthread TRANSITÓRIO; clone/CreateThread fica §17+)**. **Gaps lado-compilador:**
+(1) **`extern type`** (struct C-ABI) não está na gramática; (2) módulo **`teko::sys`** de constantes curadas
+por-plataforma (`O_RDONLY`/`CLOCK_*`/…, à mão, sem import de macro-C); (3) syscall-externs diretos; callbacks
+(fn-pointer) ficam FORA do §16 (pthread segue via C). Saída ~6700 linhas Teko + ~200 de `teko::sys`. §17 (feito)
+é o mecanismo per-target. Quirks: Linux mmap/futex/AF_UNIX · macOS mmap-ANON/kqueue/getentropy · Windows
+VirtualAlloc/Events/SEM-AF_UNIX. **Pronto pro design pass do §16.**
+
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
 baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6
