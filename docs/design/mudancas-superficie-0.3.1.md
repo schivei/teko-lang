@@ -1213,6 +1213,12 @@ byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML a
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
+**✅ ENCODING SET COMPLETO (`d462c437`).** 15 formatos §1.5: asn1·base64·bson·cbor·csv·fixed·ini·json·mime·
+msgpack·**protobuf**·toml·url·xml·yaml. `encoding::protobuf` = wire format (varint/zigzag/wire-types 0/1/2/5/
+tag/message model), Proto* únicos, FIXPOINT gen2==gen3 byte-idêntico + MEM_PARANOID verde, cross-check vs Python
+protobuf. Seam honesto: sem `proto_float` (f32 encode) — o seed não expõe `f32_bits` (só `f64_bits`); decode f32
+funciona via widen/narrow.
+
 **✅ `encoding::asn1` + `encoding::fixed` ENTREGUES (`154906bf`).** ASN.1 DER encode/decode (BER definite-length
 tolerante), INTEGER via bigint, OID, tagged explicit/implicit — cross-check byte-exato vs `asn1crypto` +
 decode field-a-field de um `SubjectPublicKeyInfo` RSA real do openssl (relevante p/ X.509/PKCS). fixed-width
