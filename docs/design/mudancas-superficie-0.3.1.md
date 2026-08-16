@@ -1601,11 +1601,24 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   (sem `teko::list::empty`/`push`); (7) trocar por coleção dedicada onde fizer sentido. **STRING:** internamente
   **array de u32 (largura fixa, indexação O(1), sem cabeçalho por-char)** + **trim pra UTF-8 na barreira do metal**;
   o fat só na string (`{qtd-chars, qtd-bytes, array-u32, encoding}`); o `char` vira **u32 puro** (vs. hoje: array
-  de bytes dinâmico com cabeçalho repetido por caractere). **ABERTO (o coordenador levantou, aguarda ruling):**
-  (A) colocação — capacidade = nova onda **Doc-2 DEPOIS do sweep do §16** (uma reescrita-de-emit por vez), pré-
-  alocação/espinha que a explora = **Doc-1**?; (B) `isset` p/ tipo-de-valor onde 0 é legal precisa de bitmap-de-
-  presença (ou `T` nullable/sentinela) — qual?; (C) ponto 4 exige reclaim por-objeto que a bump-arena não tem —
-  free-list/espinha? Registrar como lei só após esses rulings.
+  de bytes dinâmico com cabeçalho repetido por caractere). **RESOLVIDO (rulings do dono 2026-08-16):**
+  - **(A) COLOCAÇÃO = PRE-DOC-1** (terreno, nova onda Doc-2). A CAPACIDADE (arrays-fixos + string-u32 + `T|null`-
+    default + semântica de concat/reatribuição) é pre-Doc-1, **sequenciada DEPOIS do sweep do §16** (uma reescrita-
+    de-emit por vez — coord). A **pré-alocação estática AST-computada (folhas→raiz) + a espinha/btree-de-ponteiros
+    que EXPLORA os tamanhos fixos** (a redução real de consumo em runtime) fica **Doc-1** (é o item-1 pré-
+    dimensionamento, agora HABILITADO pelos tamanhos fixos).
+  - **(B) `isset` = ARRAYS DEFAULT PARA `T | null` (dono: "não inventa maquinaria").** `var x: []T` estoca no
+    backend como `[](T | null)`; slot não-inicializado = `null`; `isset(a[i])`/acesso = `match a[i] { null => …; _
+    => … }`. Reusa a união existente (ZERO máquina nova de presença — nada de bitmap/sentinela). **O preço: acesso
+    a elemento SEMPRE exige `match`** (o dono aceitou explicitamente). Otimização futura (Doc-1): elidir o `match`
+    onde flow-analysis prova todos-não-null (ex.: `var a: []T = f()` que vem cheio) — não bloqueia.
+  - **(C) REATRIBUIÇÃO (ponto 4) = SÓ MARCAÇÃO, sem reclaim por-objeto (dono: "seria como ter um bucket na
+    arena").** O valor anterior é MARCADO (logicamente morto); o **consumo persiste enquanto a arena viver** e é
+    liberado no bulk-free do drop da região. **A bump-arena NÃO ganha reclaim mid-região** → o core da arena (crumb
+    D) fica INTACTO; a onda de arrays não altera o modelo da arena. (A redução de consumo vem da região ser curta
+    + do pré-dimensionamento Doc-1, não de reclaim imediato.)
+  **⇒ ONDA RATIFICADA (dono 2026-08-16).** Sequência: **§16 (syscall+arena+sweep) → onda arrays-fixos+string-u32
+  (pre-Doc-1) → Doc-1 (pré-alocação/espinha + os outros tunings + multi-threading).**
   **CONSEQUÊNCIA PRA O §16 (crumb D em diante):** a arena-Teko da Doc-2 só precisa ser CORRETA (region-per-object +
   deep-copy default + bulk-free + wrap-refcount escape-hatch), NÃO ótima. O pré-dimensionamento / retorno-virtual-
   sem-cópia / elisão-de-arena são Doc-1 — NÃO construir na Doc-2. O OOM no limite do cap durante os reseeds é
