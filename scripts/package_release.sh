@@ -116,7 +116,12 @@ if [ "${EMIT_SRC_BUNDLE:-0}" = "1" ]; then
 #          MSVC ABI IS supported; the 128-bit types that once forced libgcc are gone.)
 set -eu
 CC="${CC:-cc}"
-"$CC" -std=c23 -w -Iruntime -Iassert \
+# -pthread: teko_rt.c's tk_thread_spawn (§10 C0a) needs pthread on non-Windows (Windows uses
+# CreateThread). Kept off the Windows lane. Retired when teko_rt.c goes to FFI (§16).
+REL_PTHREAD="-pthread"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*|Windows_NT) REL_PTHREAD="" ;; esac
+# shellcheck disable=SC2086  # REL_PTHREAD is a flag and must word-split.
+"$CC" -std=c23 -w $REL_PTHREAD -Iruntime -Iassert \
     teko.c runtime/teko_rt.c assert/assert.c \
     -lm -o teko
 echo "built ./teko"
