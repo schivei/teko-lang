@@ -1766,6 +1766,21 @@ Eu tratava a perna-native-verde como bloqueio do §16 ("não pode arrancar o `te
 é o estado que esse trabalho conserta. Então: dentro da Doc-2, a reescrita do runtime deixa **as duas pernas
 compilando**; os testes rodam no CI (nunca local). Nada de "native depois da Doc-1".
 
+**⚖️ CRITÉRIO DE SAÍDA DA DOC-2 → ENTREGA À DOC-1 (ruling do dono 2026-08-16, afia o "ambas as pernas
+compilando"):** a Doc-2 só fecha quando **AMBAS as pernas — C E NATIVE — fecham 3 portões cada:**
+**(1) COMPILA** (árvore+delta atravessa checker→codegen→cc/native VERDE), **(2) FIXPOINT verde** (gen2==gen3
+byte-idêntico, em cada backend), **(3) MEMPARANOID verde** (`MEM_PARANOID` limpo em cada backend). São 3×2 = 6
+portões. **TESTES ESTÃO FORA DESTE CRITÉRIO** — explicitamente NÃO é sobre testes. `teko test .` (OOM local hoje)
+é **papel da Doc-1**, que o conserta quando **(a) melhora o consumo de memória** da arena E **(b) implementa
+multi-threading no compilador E nos testes**. A Doc-2 entrega à Doc-1 um terreno onde **as duas pernas compilam,
+fazem fixpoint e passam MEM_PARANOID** — nada além disso é pré-req de saída.
+**CONSEQUÊNCIA CONCRETA (muda escopo):** o bug pré-existente da perna NATIVE (`const struct: initializer binds no
+field __hdr` no codegen, :1737) **DEIXA de ser "roteie ao redor com `TEKO_BACKEND=c`" e VIRA must-fix da Doc-2** —
+sem a native compilando+fixpoint+memparanoid não há entrega. A validação-local segue em C (native local é caro/
+bugado hoje), MAS a native-verde nas 3 dimensões é **portão de saída não-negociável**, provado no CI. O ganho de
+`teko test .` local (o motivo do "testes só no CI") NÃO é portão Doc-2 — é o primeiro entregável da Doc-1
+(memória + multi-threading do compilador e dos testes).
+
 **Entregues (2026-08-15):** §9.D ✅, §9.2b ✅, §13 item-14 ✅, §7 Part A ✅, §14 Família B ✅, **§15 global ✅**
 (6 itens). Restam 4 (§11, §16, §17, §10) + a frente stdlib — todos na cauda entangled acima.
 
