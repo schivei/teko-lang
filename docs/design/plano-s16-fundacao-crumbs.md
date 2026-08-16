@@ -301,6 +301,12 @@ prune already in the seed.
 
 ## 3. The FFI-binding PATTERN (the reusable recipe)
 
+> **⚠️ SUPERSEDED IN PART by §11 REFRESH (2026-08-16, post-C1).** The rules below that name
+> `extern unsafe fn`, `ptr<byte>`/`ptr<T>`, and a call-site `ref` operator are STALE — C1
+> landed a different (simpler) real surface. Read §11 for the corrected str↔cstr recipe, the
+> real `extern fn … from "c"` + `ref T` parameter shape, and the worked `getenv` example.
+> The historical text is kept for provenance only.
+
 The recipe for turning ONE C-subsystem function into Teko+FFI. Each numbered rule cites the
 mechanism it rides.
 
@@ -591,3 +597,257 @@ NOTHING in THIS pass is blocked. §17 (`#os`/`#arch` + the prune) is landed
 existing, working machinery. The DEFERRED arena is blocked on the owner's memory-model pass
 (named, not designed). Everything designed above compiles against machinery that exists on
 HEAD `5f24ad9f`.
+
+---
+
+# 11. REFRESH 2026-08-16 (post-C1 surface) — C3–C6 against the REAL FFI surface
+
+> **Why this section exists.** C1 (`extern type = struct`, landed `c7ac134b`, drained
+> `03f2766d`) and C2 (`teko::sys`, landed `1cb6e5f7`) revealed that §3/§3.1/§4 above name
+> a FFI surface that DOES NOT EXIST. This section supersedes those parts for crumbs C3–C6.
+> Verified on `fix/retirement` HEAD `2b720bfe`. The historical text above is kept for
+> provenance; where it conflicts with §11, §11 wins.
+
+## 11.0 The three stale-surface corrections (verified against C1's landed code)
+
+| Stale (§3/§3.1/§4) | REAL surface (verified) | Evidence |
+|---|---|---|
+| `extern unsafe fn NAME(...)` | plain `extern fn NAME(p): ret = "symbol" from "c"` — `unsafe` retired (§6) | fixture `examples/regressions/extern_type_struct/src/ts/ts.tks:30` |
+| `ptr<byte>` / `ptr<Timespec>` | `ptr` is OPAQUE, takes NO type arg; an out-pointer to an extern struct is a `ref T` PARAMETER | `checker::scope.tks:646` (`ptr` → `Ptr{inner=null}`); `ts.tks:30` (`ts: ref Timespec`) |
+| call-site `ref ts` operator | `ref` is BINDING-only; the call-site argument is a plain local | `ts.tks:42` (`_ = clock_gettime(0, ts)`) |
+| `: ref T` virtual return | NO return-by-reference; every return allocates in the caller's arena | (no ref-return anywhere; arena is caller-owned) |
+
+The `ref T` parameter rides the EXISTING auto-`&` crossing at `codegen.tks:5194-5197`: a
+`Ref`-kind parameter (`pn == "Ref"`) with a non-reference argument emits `&arg`. A
+header-less `extern type = struct` local is the `&`-able source (the C1 keystone), so
+`clock_gettime(0, ts)` emits `clock_gettime(0, &ts)` with `ts` a `tk_t_…Timespec` — layout
+byte-identical to libc's `struct timespec`. This is proven GREEN by the C1 fixture.
+
+## 11.1 The str↔cstr FFI marshalling recipe (the load-bearing pattern)
+
+**The recipe is ALREADY FULLY WIRED — no new compiler work is needed for str↔cstr.** Both
+directions are `teko::mem` builtins that emit INLINE (GNU statement-expressions), needing
+NO `teko_rt.c` symbol:
+
+**(a) Teko `str` → C `char*` argument — `teko::mem::as_cstr(s: str): ptr`.**
+- Checker signature: `(str): ptr` (opaque `Ptr{inner=null}` return) — `scope.tks:686`,
+  registered at `scope.tks:1196`.
+- Codegen: `emit_as_cstr` (`codegen.tks:4471`). It bump-allocates `s.len + 1` octets **into
+  the ENCLOSING region** (`tk_region_alloc`, NOT `malloc`), copies the bytes byte-by-byte,
+  and writes `0` at index `s.len`. Returns the buffer address as an opaque `ptr` (a
+  `uint8_t *` cast). The NUL-terminated buffer lives in the ARENA; its address IS the `ptr`
+  — there is no `&`, no separate local. Bulk-freed with the enclosing region.
+- Pass that `ptr` directly at the extern fn's `ptr` parameter → lowers to `void *`; the
+  `char *` mismatch is absorbed by the emitted `#pragma GCC diagnostic ignored
+  "-Wincompatible-pointer-types"` (`codegen.tks:13337`).
+
+**(b) C `char*` return → Teko `str` — `teko::mem::str_from_c(p: ptr, max: u64): str`.**
+- Checker signature: `(ptr, u64): str` — `scope.tks:696`, registered at `scope.tks:1197`.
+- Codegen: `emit_str_from_c` (`codegen.tks:4496`). A BOUNDED inbound scan: reads at most
+  `max` octets from `p`, stops at the first `0`, copies into a fresh `str`. TOTAL — `p`
+  null OR `max == 0` both yield the empty `str` with no read; no `0` in `[0, max)` yields
+  exactly `max` octets (truncation, not a panic). Inline stmt-expr, no runtime symbol.
+- **NOTE — the brief said "via `str_from_cstr`".** `str_from_cstr` (the UNBOUNDED
+  `tk_str_from_cstr`, `teko_rt.c:353`) is NOT a checker-exposed Teko builtin (only `as_cstr`
+  and `str_from_c` are registered — `scope.tks:1196-1197`). Use the bounded **`str_from_c`**;
+  it is strictly better (no unbounded `strlen` on foreign memory) AND needs no C symbol. The
+  C `tk_str_from_cstr` symbol only backs the OLD `tk_rt_getenv` path and is retired in C7.
+
+**Adjacent buffer builtins (for `getrandom`, already wired):** `teko::mem::buf_ptr(len: u64):
+ptr` (allocate `len` arena octets, `scope.tks:672` / `emit_buf_ptr`) and
+`teko::mem::bytes_from_ptr(p: ptr, n: u64): []byte` (lift `n` foreign octets into a fresh
+`[]byte`, `codegen.tks:5017` → `tk_bytes_from_ptr`).
+
+### 11.1.1 Worked `getenv` example (REAL surface — copy verbatim)
+
+```teko
+/**
+ * MAX_ENV — the inbound-scan bound for an environment value. A value longer than this is
+ * truncated (never a panic); 128 KiB comfortably exceeds any realistic env var.
+ *
+ * @since §16 (C6)
+ */
+const MAX_ENV: u64 = 131072 to u64
+
+/**
+ * c_getenv — the raw libc `getenv(3)` (libc-direct). Takes a NUL-terminated C string by
+ * opaque `ptr` and returns the value as a NUL-terminated C string by opaque `ptr`, or the
+ * null pointer when the name is unset. FFI boundary (§16): the returned pointer borrows
+ * libc's `environ` storage and is only marshalled — never stored — on the Teko side.
+ *
+ * @param name  a NUL-terminated C string (produced by `teko::mem::as_cstr`)
+ * @return      the value as a C `char*` by opaque `ptr`, or the null pointer if unset
+ * @since §16 (C6)
+ */
+extern fn c_getenv(name: ptr): ptr = "getenv" from "c"
+
+/**
+ * get — read environment variable `name`, returning its value as an owned Teko `str`. The
+ * name crosses the boundary via `teko::mem::as_cstr` (a NUL-terminated copy bump-allocated
+ * in the enclosing region); the returned C string is copied back via `teko::mem::str_from_c`
+ * (a bounded inbound scan). TOTAL: an unset OR empty variable both yield the empty `str` — no
+ * panic, no foreign pointer escapes into Teko storage. (A future `str | null` form that
+ * distinguishes unset from empty waits on a `teko::mem::ptr_is_null` predicate — §11.2 C5.)
+ *
+ * @param name  the variable name
+ * @return      the value, or the empty `str` when unset/empty
+ * @since §16 (C6)
+ */
+pub fn get(name: str): str {
+    teko::mem::str_from_c(c_getenv(teko::mem::as_cstr(name)), MAX_ENV)
+}
+
+/**
+ * c_setenv — the raw libc `setenv(3)` (libc-direct). Both strings cross as NUL-terminated
+ * C strings by opaque `ptr`; `overwrite` is a plain `i32` flag (1 = replace, 0 = keep).
+ *
+ * @param name       a NUL-terminated C string (the variable name)
+ * @param value      a NUL-terminated C string (the new value)
+ * @param overwrite  1 to overwrite an existing value, 0 to keep it
+ * @return           0 on success, -1 on error (errno set — unread here)
+ * @since §16 (C6)
+ */
+extern fn c_setenv(name: ptr, value: ptr, overwrite: i32): i32 = "setenv" from "c"
+
+/**
+ * set — set environment variable `name` to `value`, overwriting any existing value. Both
+ * strings are marshalled with `teko::mem::as_cstr`.
+ *
+ * @param name   the variable name
+ * @param value  the new value
+ * @return       0 on success, -1 on error
+ * @since §16 (C6)
+ */
+pub fn set(name: str, value: str): i32 {
+    c_setenv(teko::mem::as_cstr(name), teko::mem::as_cstr(value), 1 to i32)
+}
+```
+
+That is the ENTIRE recipe: `as_cstr` outbound, `str_from_c` inbound, opaque `ptr` transport,
+`extern fn … from "c"`. It gates `getenv`/`setenv`/`unsetenv` and, generalised, most of libc.
+
+## 11.2 C5 — the float-bits CODEGEN INTRINSIC ladder
+
+Owner ruling (LAW §11.2, 2026-08-16): `f64_bits`/`f64_from_bits` become a **codegen
+intrinsic** — lower DIRECT to an inline union/`memcpy` in the C backend, **never** via an FP
+register (x87 signalling-NaN canonicalisation hazard). Today they are checker-recognised
+`teko::` builtins lowered by NAME-SUBSTITUTION to `tk_f64_bits`/`tk_f64_from_bits`
+(`codegen.tks:5047-5048`); the checker already types them, so no `.tks` façade FILE is needed
+— the "thin façade" is the already-recognised builtin name.
+
+**The change (C5, one crumb):**
+1. `codegen.tks` preamble (after `codegen.tks:13333`, right after the `#include`s) — emit
+   three `static inline` helpers with names DISTINCT from the `teko_rt.c` symbols, doing the
+   pun IN MEMORY (satisfies the x87 hazard rule):
+   ```c
+   static inline uint64_t tk_f64bits_i(double x){ uint64_t b; memcpy(&b,&x,sizeof b); return b; }
+   static inline double   tk_f64frombits_i(uint64_t u){ double x; memcpy(&x,&u,sizeof x); return x; }
+   ```
+   (`string.h` for `memcpy` — the `spawn_sites` guard at `codegen.tks:13331` already shows
+   the include pattern; make `memcpy` unconditional or add a small always-on include.)
+2. `codegen.tks:5047-5048` — repoint the two dispatch arms from `tk_f64_bits`/
+   `tk_f64_from_bits` to `tk_f64bits_i`/`tk_f64frombits_i`.
+3. `tk_fdiv` (`codegen.tks:5046`, `teko_rt.c:5263`) — the owner called it "trivially pure
+   Teko (guard + `/`)". Two admissible resolutions; **recommended = the inline twin** for a
+   single uniform ladder: emit `static inline double tk_fdiv_i(double a,double b){ if(b==0.0)
+   tk_panic_div0(); return a/b; }` in the same preamble and repoint arm 5046. (`tk_panic_div0`
+   is NOT retired, so it stays.) The alternative — a real `.tks` `fdiv` fn in `teko::float` +
+   deleting dispatch arm 5046 — also works but re-opens the builtin-shadow question, so the
+   inline twin is cleaner.
+4. **(recommended batch-in) `teko::mem::ptr_is_null(p: ptr): bool`** — a tiny new checker
+   builtin (`scope.tks`, beside `as_cstr`) + codegen arm emitting `((p) == NULL)`. It costs
+   one dispatch line, rides C5's reseed for free, and unblocks the richer `str | null`
+   `getenv`/`get` in C6. Optional but recommended here so C6 stays a pure leaf.
+
+**The ladder (one step — do NOT expect tc1==tc2).** `f64_bits`/`f64_from_bits` are used by
+the COMPILER itself (`codegen.tks:313`, `math.tks:94-178`, `comptime_fold.tks:480,805,1643`).
+- **gen0** = the current seed `bootstrap/teko.c` (old codegen). It compiles the C5 tree, but
+  its OWN codegen still lowers `teko::f64_bits` → `tk_f64_bits`. So **tc1's emitted C still
+  calls `tk_f64_bits`** → tc1 LINKS against `teko_rt.c`'s `tk_f64_bits`. **The symbol MUST
+  STAY in `teko_rt.c` for this crumb.**
+- **tc1** (the new-codegen binary) recompiles the tree: NOW it lowers `teko::f64_bits` →
+  `tk_f64bits_i` (inline preamble). **tc2's emitted C has no `tk_f64_bits` call.** tc2 == tc3
+  (stable inline). **One-step ladder: tc1 ≠ tc2 == tc3.** Reseed lands the stable tc2.
+- **`tk_f64_bits`/`tk_f64_from_bits`/`tk_fdiv` are DELETED from `teko_rt.c` only in a LATER
+  crumb (C7)**, after the reseed, once no leg references them. Deletion is ALWAYS a separate
+  two-legs crumb.
+
+Files changed by C5: `src/codegen/codegen.tks` (preamble + arms 5046-5048; optional
+`ptr_is_null` arm), `src/checker/scope.tks` (optional `ptr_is_null` signature). `teko_rt.c`
+UNCHANGED in C5 (symbols retained). Compiler-touching → **fixpoint (one-step ladder) +
+reseed**. Fixture F9 (`float_bits_roundtrip`, §5) green on the reseeded compiler.
+
+## 11.3 Leaf-vs-reseed verdict — C3, C4, C5, C6
+
+Two-legs rule (invariant): **deleting any hand-written C symbol is ALWAYS its own separate
+post-migration crumb (C7)**, gated on BOTH legs (cc `bootstrap/teko.c` green AND emitted
+`teko.c` links the shrunken `teko_rt.c`). Never fold a deletion into the migration crumb.
+
+| Crumb | Scope | Verdict | Why |
+|---|---|---|---|
+| **C3** str/text float renderers + `valid_utf8` → Teko | The float renderers (`ftoa`/`f64_g17`/`fmt_*`) and `valid_utf8`/`str_from_utf8` are **compiler-consumed** (`codegen.tks:314,5018,5112-5126`). Repointing them to a Teko renderer bakes the renderer into the compiler image. | **RESEED** (compiler-touching, one-step ladder like C5). | A pure ADD of a Teko renderer module (compiler still calls the C `tk_ftoa`) would be leaf, but that delivers nothing — the useful C3 deliverable repoints the compiler's own float formatting. C-symbol deletion (`tk_ftoa`/`tk_f64_g17`/`rt_valid_utf8`) deferred to C7. |
+| **C4** char/UTF-8 codepoint + category helpers → Teko | Pure `[]byte`/codepoint logic added as stdlib. The compiler's own `is_alpha`/`is_digit` stay on their byte-typed builtins (guarded `call_ns.len==0`, `codegen.tks:5102`) — NOT repointed. | **LEAF** (add-only; compiler self-image byte-identical, like C2). | New char ops are corpus-facing; the compiler does not consume them, so they dead-code-eliminate from the compiler binary. Any piece that IS compiler-consumed (`str_from_utf8`) rides C3's reseed, not C4. |
+| **C5** float-bits INTRINSIC + `fdiv` (+ opt. `ptr_is_null`) | §11.2. Codegen intrinsic + repointed builtin arms — compiler-consumed. | **RESEED** (compiler-touching, one-step ladder). | `f64_bits` is used by the compiler's own const-fold/codegen. Symbol deletion deferred to C7. |
+| **C6** env + os/arch + time + random FFI stdlib | ADDS `teko::env` (getenv/setenv/unsetenv), `teko::time` (clock_gettime via `extern type Timespec`), `teko::rand` (getrandom/getentropy), and pure `#os`/`#arch`-guarded `os()`/`arch()` fns. The compiler KEEPS its existing C path (`tk_rt_getenv`/`tk_rt_os`/`tk_rt_monotonic_ns`/… via its own builtin dispatch, UNCHANGED). | **LEAF** — UNBLOCKED (C1 keystone + C2 consts landed). | Same shape as C2: the new modules are not consumed by the compiler, so they dead-code-eliminate → emitted `teko.c` byte-identical → no reseed. **The migration** (repoint the compiler's own os/arch/getenv builtins to the Teko modules + remove the codegen builtin arms) **and the C-symbol deletion are C7** (compiler-touching + two-legs). os()/arch() as pure Teko fns MUST live behind the C7 migration to repoint the `os`/`arch` builtin arms (`codegen.tks:5128-5129`); in C6 they are new modules proven by a regression mirror, exactly like C2's `sys::` mirror. |
+
+## 11.4 The ordered next crumbs (implementer-ready) + the recommended FIRST
+
+Landed: **C1 ✅, C2 ✅.** Remaining foundation: **C3, C5, C6, then C7 (deletions).** These
+three are mutually independent (no ordering constraint between them); C7 depends on all.
+
+### ⭐ RECOMMENDED FIRST — **C6a: `teko::env` (getenv/setenv/unsetenv)** — LEAF, zero reseed
+
+**Why first:** (1) it is a pure LEAF (no reseed ceremony, no ladder — the safest immediate
+dispatch); (2) it is UNBLOCKED (C1+C2 landed); (3) it exercises the **load-bearing str↔cstr
+recipe (§11.1) end-to-end** on a real libc edge — validating the pattern that gates most of
+libc, so it de-risks all of C6/fs/net downstream for the least risk; (4) it is small and
+self-contained (one module, one fixture).
+
+- **Files:** new `src/env/env.tks` (namespace `teko::env`). NO compiler files touched. NO
+  `teko_rt.c` change (the old `tk_rt_getenv` stays until C7).
+- **Signatures (REAL surface, §11.1.1 verbatim):**
+  `const MAX_ENV: u64` · `extern fn c_getenv(name: ptr): ptr = "getenv" from "c"` ·
+  `pub fn get(name: str): str` · `extern fn c_setenv(name: ptr, value: ptr, overwrite: i32):
+  i32 = "setenv" from "c"` · `pub fn set(name: str, value: str): i32` ·
+  `extern fn c_unsetenv(name: ptr): i32 = "unsetenv" from "c"` · `pub fn unset(name: str):
+  i32`.
+- **Regression fixture** (`examples/regressions/ffi_env_roundtrip/`, with a local `src/env/`
+  mirror addressed bare as `env::` — the C2 precedent): `main.tks` does
+  `env::set("TEKO_FX", "42")`; then `var v = env::get("TEKO_FX")`; parse `v` to i64; `if v ==
+  42 { exit(0) } exit(1)`. **Expected native exit: 0.**
+- **Leaf-or-reseed:** LEAF. Validate COMPILE-only (`--no-verify --release`, `TEKO_BACKEND=c`,
+  `ulimit -v 6291456`); confirm the emitted `teko.c` for the tree+C6a is byte-identical to the
+  current seed (the C2 leaf proof). NO reseed.
+- **Ritual point:** none (leaf). The coordinator's leaf gate: build the fixture native binary,
+  run it (exit 0), confirm byte-identical compiler self-image.
+- **Native leg:** `extern fn … from "c"` already lowers on the C leg; native lowering honest-
+  stops per Doc-2's terminal-native phase (not this crumb).
+
+### SECOND — **C6b: `teko::time` (clock_gettime via `extern type Timespec`)** — LEAF
+
+The C1 fixture `extern_type_struct` ALREADY proves this exact shape. C6b promotes it to a
+stdlib module: `extern type Timespec = struct { sec: i64; nsec: i64 }`;
+`extern fn clock_gettime(clk: i32, ts: ref Timespec): i32 = "clock_gettime" from "c"`;
+`pub fn monotonic_ns(): i64` / `pub fn wall_ns(): i64` using `teko::sys::CLOCK_MONOTONIC`/
+`CLOCK_REALTIME` (C2). Call-site passes the plain local `ts` (NOT `ref ts`). Fixtures F4/F5
+(§5). LEAF (adds a module; compiler keeps `tk_rt_monotonic_ns`/`tk_wall_now_ns` until C7).
+
+### THIRD — **C5: float-bits intrinsic + `fdiv` (+ `ptr_is_null`)** — RESEED
+
+§11.2. The one compiler-touching foundation crumb; do it when a reseed is being spent anyway.
+Batching `ptr_is_null` here lets a LATER C6 revision give `env::get` the richer `str | null`
+return. Fixture F9. One-step ladder + reseed `bootstrap/teko.c` + `provenance_gate.sh`.
+
+(C6c `teko::rand` via `buf_ptr`/`bytes_from_ptr`, C6d pure `os()`/`arch()`, C3 renderers, and
+C7 the deletion sweep follow; C7 is gated on C3/C5/C6 migrations landing.)
+
+## 11.5 Risks / open items (post-C1)
+
+| # | item | resolution |
+|---|---|---|
+| R7 | `env::get` cannot distinguish "unset" from "empty" without a ptr-null test | v1 returns `str` (empty = both), TOTAL, needs nothing — LEAF-safe. The `str \| null` form waits on `teko::mem::ptr_is_null`, recommended to batch into C5 (§11.2 step 4). No HALT. |
+| R8 | C5 preamble helper name must NOT collide with the retained `teko_rt.c` symbol | use DISTINCT names (`tk_f64bits_i`/`tk_f64frombits_i`/`tk_fdiv_i`); the `teko_rt.c` symbol is deleted only in C7. §11.2. |
+| R9 | brief named `str_from_cstr` for inbound; only `str_from_c` (bounded) is checker-exposed | use `str_from_c(p, max)` — strictly better (no unbounded foreign `strlen`) and no C symbol. §11.1(b). |
+
+No unresolved law tension → no HALT. All C3–C6 designs compile against machinery that exists
+on HEAD `2b720bfe`; C6a/C6b are LEAF and dispatchable immediately.
