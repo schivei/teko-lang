@@ -7393,7 +7393,7 @@ fn type_statement(s: @Statement(), env: Env, table: TypeTable): TypedStmt | erro
         parser::BlockStmt as bs => type_block_stmt(bs, env, table)
         parser::MultiBind => error { message = "internal: a multiple binding must be spliced by the statement sequencer, not typed as a single statement" }
         parser::LoweringFrag => error { message = "a `lowering { … }` fragment is legal only inside a Family-A macro body — the macro expansion pass consumes it (§14 A2 lands the capture only; the expansion pass is crumb A3)" }
-        parser::Spawn => error { message = "internal: `spawn` type-checking is not wired (checker crumb S2)" }
+        parser::Spawn as sp => type_spawn(sp, env, table)
     }
 }
 
@@ -7427,6 +7427,146 @@ fn type_block_stmt(bs: parser::BlockStmt, env: Env, table: TypeTable): TypedStmt
 fn type_adopt(a: parser::AdoptStmt, env: Env, table: TypeTable): TypedStmt | error {
     var tb = match type_block(a.body, env, table) { TypedBlock as x => x; error as e => return e }
     TypedStmt { node = TAdoptStmt { name = a.name; body = tb.stmts }; env = env }
+}
+
+/**
+ * type_spawn — type-check a `spawn <call>` (§10). Types the call via the ordinary expr path (so
+ * arity/named-args/defaults are checked exactly as a bare call), then applies the two spawn-boundary
+ * rules against the resolved callee signature: NO `ref` parameter (a `Reference` names spawning-arena
+ * memory the detached thread would read after the scope drops — arena UAF), and every argument type
+ * must be blob-copyable (the S3 deep-copy must exist for it). The call's return type is discarded —
+ * spawn is fire-and-forget and never returns.
+ *
+ * @param s      the parsed spawn statement (its `.call.kind` is a Call/MethodCall — S1)
+ * @param env    the enclosing type environment (unchanged on return — spawn binds nothing)
+ * @param table  the program type table
+ * @return       the typed TSpawn, or a spawn-boundary violation / propagated call error
+ * @throws       a `ref` parameter crosses the boundary, or an argument type is not blob-copyable
+ */
+fn type_spawn(s: parser::Spawn, env: Env, table: TypeTable): TypedStmt | error {
+    var te = match type_expr(s.call, env, table) { TExpr as x => x; error as e => return e }
+    var tc = match te.kind { TCall as c => c; _ => return error { message = "`spawn` must be followed by a call, e.g. `spawn worker(n, msg)`" } }
+    var f = match tspawn_resolve_func(tc, env) { Func as fn0 => fn0; error as e => return e }
+    match tspawn_reject_ref_params(f, tc.callee) { error as e => return e; bool => { } }
+    match tspawn_reject_uncopyable_args(f, tc.callee) { error as e => return e; bool => { } }
+    TypedStmt { node = TSpawn { call = te }; env = env }
+}
+
+/**
+ * tspawn_resolve_func — resolve the callee's `Func` signature for the spawn boundary check. Prefers
+ * the typed call's own `callee_type` when it is a `Func` (set on the iface/method/general call
+ * paths), else falls back to `lookup_call` on the callee path (the free-function case). A target that
+ * resolves to no function type is an internal error — S1 already proved the target is a call.
+ *
+ * @param tc   the typed call
+ * @param env  the enclosing type environment (for the lookup fallback)
+ * @return     the resolved callee function type, or an error when it does not resolve to a `Func`
+ * @throws     the callee did not resolve to a function type
+ */
+fn tspawn_resolve_func(tc: TCall, env: Env): Func | error {
+    match tc.callee_type {
+        Func as f => return f
+        _ => { }
+    }
+    match lookup_call(env, tc.callee) {
+        (@Type()) as t => match t { Func as f => f; _ => error { message = "internal: spawn target did not resolve to a function type" } }
+        error as e => e
+    }
+}
+
+/**
+ * tspawn_reject_ref_params — the REF-GUARD. Scans the resolved callee signature and rejects the FIRST
+ * parameter typed `Reference` (a `ref T`): a `ref` may not cross the spawn boundary because it names
+ * memory in the spawning thread's arena, which the detached thread would dereference after the
+ * spawning scope has dropped it (use-after-free).
+ *
+ * @param f       the resolved callee function type (params already resolved to `@Type()`)
+ * @param callee  the call target path (for the message)
+ * @return        true when no param is a reference, else the rejection error
+ * @throws        a parameter is a `ref T`
+ */
+fn tspawn_reject_ref_params(f: Func, callee: parser::Path): bool | error {
+    var i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        match f.params[i] {
+            Reference => return error { message = $"{tspawn_target_name(callee)}: a `ref` parameter may not cross a `spawn` boundary — the reference names memory in the spawning thread's arena, which is freed when that scope exits (§10). Pass the value by copy instead." }
+            _ => { }
+        }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * tspawn_reject_uncopyable_args — reject the FIRST parameter whose type the S3 deep-copy cannot yet
+ * synthesize. Batch 1 copies scalars, `str`, and slices of scalars into the ctx-blob; a struct/class,
+ * a closure, a `ref`, or a raw pointer is honest-stopped with a message naming the later batch, so
+ * codegen never meets a type the checker did not clear.
+ *
+ * @param f       the resolved callee function type
+ * @param callee  the call target path (for the message)
+ * @return        true when every param is blob-copyable, else the rejection error
+ * @throws        a parameter type is not blob-copyable in batch 1
+ */
+fn tspawn_reject_uncopyable_args(f: Func, callee: parser::Path): bool | error {
+    var i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        if !tspawn_type_copyable(f.params[i]) {
+            return error { message = $"{tspawn_target_name(callee)}: a `spawn` argument of type `{type_render(f.params[i])}` cannot yet be copied across the thread boundary (batch 1 supports scalars, `str`, and slices of scalars; struct/class/closure/ref/pointer args are a later batch)" }
+        }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * tspawn_type_copyable — the batch-1 blob-copy predicate: true for a type whose bytes the S3 packer
+ * can deep-copy into a self-contained heap block. Scalars store inline; `str` and a slice-of-scalars
+ * tail-pack their bytes with the `ptr` re-pointed into the block. A slice whose element is itself fat
+ * (a `[]str`, a nested slice) needs recursive tail-packing and is a later batch, so it is rejected.
+ *
+ * @param t  the argument type
+ * @return   true iff the S3 packer can deep-copy `t` in batch 1
+ */
+fn tspawn_type_copyable(t: @Type()): bool {
+    match t {
+        Prim => true
+        Byte => true
+        Char => true
+        Str => true
+        Slice as sl => tspawn_scalar_type(sl.element)
+        _ => false
+    }
+}
+
+/**
+ * tspawn_scalar_type — is `t` a fixed-width scalar (an integer/float/bool prim, a `byte`, or a
+ * `char`)? A slice of such elements is one contiguous byte run the S3 packer memcpys wholesale.
+ *
+ * @param t  the element type
+ * @return   true iff `t` is a fixed-width scalar
+ */
+fn tspawn_scalar_type(t: @Type()): bool {
+    match t {
+        Prim => true
+        Byte => true
+        Char => true
+        _ => false
+    }
+}
+
+/**
+ * tspawn_target_name — the last path segment of a spawn call target, for diagnostics. Falls back to a
+ * generic label for the (unreachable) empty-path case.
+ *
+ * @param p  the call target path
+ * @return   the last segment name, or a generic label when the path is empty
+ */
+fn tspawn_target_name(p: parser::Path): str {
+    if p.segments.len == 0 { return "spawn target" }
+    p.segments[p.segments.len - 1].name
 }
 
 // ---- items + program (the evolved check_function/check_item/check_program — E5c) ----
@@ -8776,6 +8916,7 @@ fn check_ref_storability_stmt(s: @TStatement(), spine: Spine): error | null {
         TExprStmt as es => check_ref_storability_expr(es.expr, spine)
         TBreakStmt => null
         TContinueStmt => null
+        TSpawn as sp => check_ref_storability_expr(sp.call, spine)
     }
 }
 
