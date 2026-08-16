@@ -1395,6 +1395,25 @@ runtime ATUAL (sem §16); só transportes plugáveis-por-usuário (Kafka/Rabbit)
 LEAF** (o axis-2 parallel-codegen usa `fork_join` interno SEPARADO, não a superfície `spawn`/`chan`) → reseeds
 mecânicos. Vou dirigir C0a→A3 (desbloqueado) e PARAR em A4 até o ruling D2 do dono.
 
+**✅ §10 SPAWN ENTREGUE (`9549ec9f`..`f3a6a17e`) + `-pthread` no ladder (`268d0da9`) + RESEED (este commit).**
+`spawn f(args)` funcional — fire-and-forget, args por CÓPIA, sub-root arena. **C0a** (`teko_rt.{c,h}`):
+`tk_thread_spawn` (detached; bracket `tk_task_begin/end` DENTRO da start-routine pthread, precedente
+`tk_test_run`) + gêmeos join (await-batch, unused) + selftest (exit 42, drift 0 em 100 ciclos). **S1**
+(parser): nós `Spawn`/`TSpawn`, `spawn` contextual. **S2** (checker): ref-guard (sem `ref` cruzando a fronteira
+— UAF de arena) + copy-guard. **S3** (codegen): ctx-blob + trampolim `cabi` + DEEP-COPY (escalares inline;
+bytes de `str`/slice tail-packed com `ptr` re-apontado DENTRO do bloco malloc'd → nenhum ponteiro da
+arena-emissora sobrevive); trampolim libera o blob. Backend native honest-stop `TSpawn`. **`-pthread`
+propagado às 5 linhas cc-of-teko_rt.c do ladder** (build_gen1_from_c, build_with_seed_fallback, native_linux_asset
+glibc+musl, package_release; não-Windows) — o compilador já ganhou via `project.tks`. **RESEED:** S1-S3 NO-OPam
+o corpus (zero `spawn` em `src/`; todo `tk_spawn_*` no self-image é template de string). Seed novo `6cbfb134`.
+**GATE self-reproduce (ladder de 1 passo + fixpoint):** gen0(seed anterior `3d98db74`, F3, SEM codegen de spawn)
+emite tc1 TRANSITÓRIO `639ab3b2`; gen1 (spawn-capaz) emite tc2 `6cbfb134`; gen2 emite tc3 `6cbfb134`. **tc1!=tc2**
+(cascata de temp-name do codegen antigo — a ladder), mas **tc2==tc3 byte-idêntico** (a geração spawn-estável se
+reproduz). Seed = geração ESTÁVEL, não o tc1. `provenance_gate.sh` PASS. Fixture `spawn_basic`: 4 workers,
+arquivos por tag-`i64` copiado com conteúdo `str` deep-copiado, exit 0, MEM_PARANOID limpo. **Escopo batch-1:**
+`char`/structs/classes/closures/`ref` honest-stop (batch posterior); Prim numérico/bool/`byte`/`str`/slices-deles
+copiáveis. Próximo §10: canais (`chan<T>`/`MemChan`/`OsChan`) → await front-end (A1-A3) → **A4 para no ruling D2**.
+
 **✅ `sort<T:IOrd>` ENTREGUE (`2de16e63`) — SEM reseed (leaf, byte-IDÊNTICO).** `pub fn sort<T: IOrd>(xs: []T):
 []T` — merge sort estável top-down (`msort_ord`/`merge_ord`, left-biased no empate), ordenação via `<=`/`<`
 baixando ao `operator __le`/`__lt` de `T` (dispatch 9-ops). ADIÇÃO pura de 76 linhas em `src/sort/sort.tks`; os 6
