@@ -1213,6 +1213,14 @@ byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML a
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
+**✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
+Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
+(vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
+novo), build verde. **Dado concreto p/ Doc-1 (arena):** parâmetros grandes (scrypt N=1024/r=8/p=16, argon2
+O(m'²) writes) estouram OOM na arena sem-GC atual (lixo por-lane num arena não-liberado) — **correto no KAT,
+some com a melhoria de arena da Doc-1**. Achado: `base` também é reservado como nome de VARIÁVEL LOCAL (não só
+param).
+
 **✅ ENCODING SET COMPLETO (`d462c437`).** 15 formatos §1.5: asn1·base64·bson·cbor·csv·fixed·ini·json·mime·
 msgpack·**protobuf**·toml·url·xml·yaml. `encoding::protobuf` = wire format (varint/zigzag/wire-types 0/1/2/5/
 tag/message model), Proto* únicos, FIXPOINT gen2==gen3 byte-idêntico + MEM_PARANOID verde, cross-check vs Python
