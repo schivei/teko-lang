@@ -1552,6 +1552,31 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
   decide frame-local vs promovido vs refcounted). Dentro-da-thread: escape-analysis já resolve. Entre-threads:
   marshal (deep-copy, default) ou wrap-refcount (escape-hatch) — **AMBOS Doc-2** (a Doc-1 só faz tuning).
 
+**⚖️ §16 C6a HALT — DOIS ACHADOS DE COMPILADOR (implementer, 2026-08-16; ambos verificados empiricamente):**
+- **ACHADO A — CORRIGE o modelo "leaf = byte-idêntico".** Adicionar QUALQUER **função** ao `src/` do compilador
+  desloca o contador tree-wide de temp-var-ID → o `teko.c` emitido NÃO é byte-idêntico → **exige RESEED**. Só
+  adições **const-only** (C2 `teko::sys`) são leaf-sem-reseed de verdade (consts sem referência = DCE, footprint
+  zero). Funções são SEMPRE emitidas, independente de alcançabilidade. ⇒ **o veredito do arquiteto "C6 = LEAF"
+  estava ERRADO**: C6a/C6b (env/time trazem funções) são **RESEED** (comportamento inerte, byte-idêntico-no-
+  rebuild como o §17 — mas o seed precisa reproduzir a árvore crescida). Isto reconcilia com o histórico: os
+  módulos stdlib concretos (crypto/encoding) que aterrissaram TAMBÉM reseedaram (protobuf fez fixpoint+reseed);
+  só os genéricos (sort<T>, 0-stamped) e o C2 (const-only) foram byte-idênticos. **REGRA (lei): função nova no
+  `src/` → RESEED; const-only sem referência → leaf.**
+- **ACHADO B — GAP DE CODEGEN: extern-C colide com header-de-sistema.** `extern fn c_getenv(name: ptr): ptr =
+  "getenv" from "c"` emite `extern void* getenv(void* name);` (o pass de protótipos, `codegen.tks:13425-13436`,
+  declara TODA função exceto `from "teko_rt"`). Como o `teko.c` emitido SEMPRE faz `#include <stdlib.h>`, que
+  declara `char* getenv(const char*)` (ISO-mandado), o `cc` dá erro DURO "conflicting types for 'getenv'".
+  `setenv`/`unsetenv` NÃO batem (POSIX, não declarados por `<stdlib.h>` sob `-std=c2x`); `clock_gettime` (C1)
+  não bateu (`<time.h>` não é incluído incondicionalmente). ⇒ o gap é **símbolos libc declarados pelos headers
+  que o emit do teko inclui incondicionalmente**. **O PADRÃO DE FIX JÁ EXISTE:** o pass de protótipos JÁ pula
+  os externs `from "teko_rt"` ("já declarados em teko_rt.h com os tipos FFI corretos; re-emitir conflita") — a
+  mesma lógica precisa cobrir os símbolos header-declarados de `from "c"`. Compiler-touching (codegen) → reseed.
+  **ROTEADO ao arquiteto** p/ o design do fix (skip-set curado dos headers incluídos vs cast-por-fn-pointer no
+  call-site) — é a capacidade de codegen que destrava a FFI-a-libc em geral do §16. **BATCH:** como C6a já é
+  reseed (Achado A), o fix-de-codegen + `teko::env` completo (get/set/unset) entram num ÚNICO crumb compiler-
+  touching (um reseed p/ os dois). Trabalho parcial salvo em `feat/s16-c6a-env` `f62d8f3a` (fixture + módulo no
+  espelho-local; set/unset verificados; get bloqueado no Achado B) — NÃO drenado.
+
 **🗺️ §16 MAPEADO (scout, HEAD `41a1817e`):** **7861 linhas de C** em 4 arquivos (`teko_rt.c` 5515 + `teko_rt.h`
 1751 + `assert.c` 256 + `win32_compat.h` 339), ~264 fns públicas sobre ~242 libc/syscall. **21 subsistemas**,
 ordem ~10 fases (fácil→difícil): strings/format/char/float → env/print/os-arch → **I/O&fs** → time/random →
