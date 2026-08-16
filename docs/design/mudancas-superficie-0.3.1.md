@@ -1213,6 +1213,13 @@ byte-exato vs PyJWT/signxml/pycose+cryptography. **Intento do dono (JSON e XML a
 dá agora (HMAC ✅ + base64 + JSON ✅); **JWS/assinatura + XML-DSig + COSE** precisam de `math` (bigint) →
 `crypto::pk` (RSA-PSS/ECDSA-P256/Ed25519) → `encoding` (base64/xml/cbor) → aí `jose`/`xmldsig`/`cose`.
 
+**✅ `crypto` 3des/DES ENTREGUE (`10630a43`).** DES single-block (IP/FP/Feistel/S-boxes/PC-1/PC-2, tudo u64/u32)
++ 3DES/TDEA EDE (3-key e 2-key, rejeição de chave fraca) + modos ECB/CBC (seam de bloco) + PKCS#7; legacy/Sweet32
+documentado. **Validação COMPORTAMENTAL** (binário compilado rodado, não `teko test .`): DES KAT `3fa40e8a984d4815`,
+TDES ECB `fbe62b68…`, CBC + roundtrip — todos byte-exato vs pycryptodome 3.23/FIPS-46-3.
+**🏁 STDLIB "PRONTA-AGORA" COMPLETA:** crypto (core/pk/password/3des) · encoding (15 fmt) · sort · bigint · +
+o bug de compilador #4 corrigido. **Próxima fase = GENÉRICOS** (compiler-touching; impl dos crumbs desenhados).
+
 **✅ `crypto` password ENTREGUE (`12a23253`).** scrypt (RFC 7914, Salsa20/8+BlockMix+ROMix sobre pbkdf2_sha256) +
 Argon2id (RFC 9106, multi-lane p≥1, G/GB BlaMka, H'/H0). Cross-check byte-exato: RFC 7914 §12, RFC 9106 §5.3
 (vetor oficial t=3/m=32/p=4), `argon2-cffi` 25.1, `hashlib.scrypt`. Construído com o compilador pós-#4 (mangle
