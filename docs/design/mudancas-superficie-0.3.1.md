@@ -1285,12 +1285,18 @@ namespace) de `T`**. Dois structs homônimos em **namespaces DIFERENTES**, ambos
 `T|error`/`T|null`, geram a **MESMA** constante C (ex.: `teko::encoding::toml::KeyStep` e
 `teko::encoding::ini::KeyStep` → ambos `TK_TAG_U_KEYSTEP_ERROR_KEYSTEP`) → `cc` falha (`incompatible
 types`), mesmo os dois type-checando isolados. Contornado renomeando (ini `KeyStep`→`SectionNameStep`).
-**Fix compiler-side real:** qualificar o tag por namespace no codegen. **RULING DO DONO (2026-08-16): é bug
-A SER RESOLVIDO, não só contornado.** 🔄 Em design (`teko-architect` → `docs/design/fix-union-tag-cross-
-namespace-codegen.md`): chokepoint `cg_member_key_str` (`codegen.tks` ~2092) + o path `Named` (l.6229 usa
-`name_last_segment` bare); esquema qualificado seguindo `mangle_type_name` (`:`→`_`/`__`), C-safe,
-keyword-escaped, builtins/error/null INALTERADOS; **renomeia o mangled de TODA união → reseed + fixpoint
-byte-idêntico obrigatórios.** **Regra de coordenação ATÉ o fix landar:** structs de stdlib usados em uniões de
+**Causa raiz REAL (diagnóstico do dono 2026-08-16, verificado — é UPSTREAM, não codegen puro):** o path de
+mangle SINTÁTICO (`cg_opt_mangle_texpr_str` `codegen.tks:2736`, `cg_texpr_mangle:2799`) mangleia o
+`parser::NamedType` pelo **último segmento do `path` como ESCRITO** (dentro de `toml`, o user escreve `KeyStep`
+bare) → chave "keystep". O path RESOLVIDO (`cg_opt_mangle_str:2042`) TEM o `nm.name` qualificado mas o encurta
+com `name_last_segment` **de propósito, pra CONCORDAR com o sintático**. Os dois foram forçados a bare porque
+**o `NamedType` sintático não carrega o nome resolvido/canônico**. **Fix (direção do dono): o RESOLVER
+substitui o nome canônico completo no `NamedType`** (reescreve o `path` ou adiciona slot `resolved_name`) → aí
+os dois paths mangleiam o nome cheio e concordam. **RULING DO DONO: bug A SER RESOLVIDO, não contornado.**
+🔄 Em design (`teko-architect` → `docs/design/fix-union-tag-cross-namespace-codegen.md`): resolver + os dois
+paths de mangle + auditar TODO consumidor da chave (typedef `tk_u_`, tag `TK_TAG_U_`, `.as.<key>`, destructure,
+stamp de genérico `Base__g__u_`); builtins/error/null/prim INALTERADOS; **minimizar churn** (ideal: união no
+namespace ROOT mangleia idêntico a hoje → reseed pequeno); **fixpoint byte-idêntico + reseed** do que mudar. **Regra de coordenação ATÉ o fix landar:** structs de stdlib usados em uniões de
 erro/null com **nome único tree-wide** (hoje só `NsScope`/`Symbol` repetem — internos, não colidem por não
 estarem ambos em união erro/null). Auditar: `grep -rhoE 'type ([A-Z]\w*) = struct' src/ | sort | uniq -d`.
 
