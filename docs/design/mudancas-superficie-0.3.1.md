@@ -1594,6 +1594,29 @@ io_uring/kqueue/IOCP do §10-(c) por `#os`/`#arch`). **Próximo grande alvo = §
        A máquina de ref-push (`tk_slice_push_r`/`grow_inplace`/`with_cap`) e o array crescível `{ptr,len,cap}`
        viram **legacy a varrer** junto com a onda. NÃO investir mais na migração AL-wave — ela é substituída, não
        completada.
+- **⚖️ DOC-1 DESIGN FECHADO — mecanismos resolvidos (rulings dono 2026-08-16, respondendo as 3 perguntas do coord):**
+  - **(1) PRÉ-ALOCAÇÃO = tamanho BASE estático no ponto de materialização, NÃO cap.** Pré-alocar arena = declarar
+    estaticamente o tamanho inicial de TODAS as arenas no ponto onde nascem → ao nascer já têm um tamanho MÍNIMO
+    (base). **Loops NÃO precisam de contagem:** cada volta constrói-arena→processa→apaga-arena, então UM tamanho
+    basta (a arena por-iteração nasce e morre); idem recursão (cada frame é uma arena conhecida, nasce/morre por
+    chamada). **Não existe em Teko escapar de não conhecer todas as arenas** (o modelo garante conhecimento
+    estático; pode até ACHATAR/flatten quando folhas têm tamanho zero). **O que é dinâmico = objetos e strings/
+    arrays** (têm cópias pra evitar realloc) → o tamanho pré-computado é **base, não cap**; o **cap pode nascer no
+    dobro do base e crescer mais**. ⇒ a arena não é hard-fixed: base-pré-computado (mata o doubling-from-scratch) +
+    crescível pro conteúdo dinâmico.
+  - **(2) RETORNO VIRTUAL = sret + DETECÇÃO DE ENCAMINHAMENTO.** O ponteiro-destino é criado no CALLER e passado ao
+    CALLEE; o compilador reescreve a fn como "tem retorno mas recebe um ponteiro(ref) como parâmetro", e no ponto
+    de retorno **atribui o valor na ref e sai limpo** (sret/RVO). **+ Encaminhamento:** o compilador tem que
+    DETECTAR chamada-em-posição-de-retorno e **encaminhar a arena/sret do caller ao callee — MESMO quando a fn
+    abre arena** pros próprios locais. Ex.: `fn f(): T { var d = 12; var e = "abc"; f2(d, e) }` — `f` abre arena
+    (d/e), mas `f2(d,e)` é o retorno → passa a **arena do caller** a `f2` (f2 escreve direto no destino do caller;
+    a arena de d/e morre no retorno de f). Liga com a elisão-de-arena (item 3): o valor-de-retorno encaminha, a
+    arena-de-locais é local.
+  - **(3) MULTI-THREADING = confirmado ("exatamente tudo isso").** Compilador: lexer/parser paralelos por-arquivo;
+    checker/monomorph por ilha independente; codegen por-função; **arena por-thread** (as task-arenas do §10).
+    **Runner de testes = a cura do `teko test .` OOM:** paralelizar com **teto-de-memória por-teste** (cada teste
+    na sua thread+arena com limite) → o total fica bounded (hoje: todos num processo → OOM). ⇒ **A DOC-1 ESTÁ 100%
+    NO PAPEL.**
 - **🌊 ONDA ARRAYS-FIXOS + STRING-U32 (visão do dono 2026-08-16 — EM DELIBERAÇÃO, ainda NÃO ratificada; faltam
   colocação + mecanismos de `isset`/reclaim).** Intenção de fundo: **arrays SEMPRE foram pra ser de tamanho fixo**
   — fat-pointer `{ptr, len}` SEM cap, **imutável e contíguo**; a variabilidade/mutação é das COLEÇÕES (Table/Hash/
