@@ -1,42 +1,52 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §17 CONDITIONAL-COMPILATION machinery
-# (parser + build-time prune). What this harvest carries:
-#   - **§17 (compiler — parser + build prune)**: build-time conditional compilation.
-#     - Crumb A: the predicate AST (`@PredKind()` = `PTrue|PEq|PFlag|PNot|PAnd|POr`, `Pred` wrapper) +
-#       a pure boolean-over-constants evaluator (`src/build/prune.tks`: `CcEnv`, `eval_pred`) — short-
-#       circuit, total, unknown-axis/absent-flag → false; strictly a PRUNE evaluator, not §14 comptime.
-#     - Crumb B: `parser::Item` gained `guard: Pred` (prune-time only, erased before `.tkb`); `Module`
-#       gained `decl_guards`; `prune_cc` (driven by `CcEnv{target_os, target_arch, build_flags}`)
-#       replaces `prune_os` at the same `frontend_check` slot (before macros/deps/type-check). `#os`
-#       keeps `Function.os_guard` for `.tkb`/merge byte-compat.
-#     - Crumb C: `#arch("…")` attribute (canonical `"arm64"`; the sealed-spec `"arch64"` was a typo).
-#     - Crumb D: `#os`/`#arch`/`#if` widened to ALL top-level items (`fn`, `type`, `flags`, `const`,
-#       `extern`), not just functions.
-#     - Crumb E: `#if/#elseif/#else/#endif` regions + composite predicate parser (`src/parser/parse_cc.tks`,
-#       `||`/`&&`/`!`/grouping), first-true-wins as AND-of-NOTs, nested regions recurse.
-#     - Crumb F: `build_flags(m)` honest-stops empty (no flag source invented) → `PFlag` soundly false.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 crumb C1 keystone —
+# `extern type Name = struct { … }`, the header-less C-ABI struct type at the FFI boundary. What this
+# harvest carries:
+#   - **§16 C1 (compiler — parser + checker + codegen + tkb codec)**: a C-ABI struct at the extern seam.
+#     - Parser: the `extern type` path branches on `=`. No `=` keeps the opaque `ExternBody`; `= struct { … }`
+#       reuses `parse_fields` and wraps them in a new `ExternStructBody`, rejecting methods/consts/interfaces
+#       ("an extern struct declares only fields"). A non-struct body after `=` is a clear parse error.
+#     - AST: new `ExternStructBody { fields }` beside `ExternBody`, added to the `TypeBody()` union; the new
+#       union member surfaced the exhaustiveness arms in the checker (borrow), the header emit, and the `.tkb`
+#       codec (frame/write + reader tag **10**).
+#     - Checker: `extern_struct_field_ok` gates each field to a numeric prim, byte, ptr, uptr, or another
+#       extern struct (a validator pass reports a bad field); a shared `extern_named_body_ok` widens
+#       `extern_type_ok` to admit an extern struct by value and a `ref T` out-pointer whose inner is extern-
+#       admissible; field-projection and struct-literal construction gained the `ExternStructBody` arm.
+#     - Codegen: `emit_extern_struct_typedef` emits the `StructBody` typedef MINUS the `tk_struct_hdr __hdr`
+#       header line — the layout is byte-identical to the foreign C struct; a forward `typedef struct` is
+#       emitted for pointer fields. The `ref T`→C-pointer crossing rides the existing `&local` path.
 #
-# NOT INERT — BY DESIGN, BUT NO BEHAVIORAL CORPUS DIVERGENCE. §17 no-ops the compiler's OWN corpus: `src/`
-# applies ZERO `#os`/`#arch`/`#if` guards, so every item's guard is `PTrue` and the prune is a no-op over
-# the tree → emitted C byte-identical PER PLATFORM (same platform → same survivors → same emit). The
-# emitted C differs from the previous seed only by the new parser/build source + mechanical shifts.
+# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The compiler's own corpus (`src/`) declares ZERO
+# `extern type = struct`, so the new codegen arm (`emit_extern_struct_typedef`) NEVER fires on the self-image;
+# the emitted C differs from the previous seed only by the new parser/checker/codegen/codec SOURCE plus the
+# mechanical line/offset shifts that source induces. Same platform → same survivors → same emit.
+#
+# NATIVE LEG — HONEST-STOP (by design). The native/LIR paths (`lir/lower.tks` collect_struct_layout_decl,
+# `lir/lower_const.tks` collect_field_decls_decl) fall through their `_ =>` arm for `ExternStructBody`; native
+# lowering of the extern struct is DEFERRED to the terminal native-correction phase of Doc-2 (ruling: focus C
+# leg; native closes clean at the end). This does not affect the self-build (corpus inert) or the fixture (C
+# backend). The C leg is the explicit C1 target.
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `6cbfb134`) built the tree →
-#     emitted teko.c `20d7cb9b` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `20d7cb9b9cda38563d160e8da0
-#     cc621b2ecced97431348b92c89fac266fe7539`; tc2 -> gen2; gen2 built the tree → tc3 `20d7cb9b…`. tc1 ==
-#     tc2 == tc3, byte-identical (sha256 below). No ladder this harvest: the guard-free corpus makes the
-#     prune a no-op, so the OLD compiler (gen0) and the NEW (gen1) emit the self-image identically at tc1.
+#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `20d7cb9b`) built the tree →
+#     emitted teko.c `c7ac134b` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `c7ac134ba902c6f4389bc6e3a21ba
+#     26983035a731836284bc7b315d0723551f0`; tc2 -> gen2; gen2 built the tree → tc3 `c7ac134b…`. tc1 == tc2 ==
+#     tc3, byte-identical (sha256 below). No ladder this harvest: the corpus declares no extern struct, so the
+#     OLD compiler (gen0) and the NEW (gen1) emit the self-image identically at tc1.
 #   - cc-route: cc -std=c2x -w -g -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
-#   - Regression: `examples/regressions/s17_if_region/` (`#if(os=="linux")`/`#elseif`/`#else` — only the
-#     matching arm survives; the `#if(os=="windows")` arm calls a NONEXISTENT symbol and is pruned BEFORE
-#     type-check without error, proving prune-precedes-checker) exit 42; `s17_arch` exit 64; `s17_composite`
-#     (`os=="linux" && arch=="x86_64"`) exit 99; `s17_if_reject` (EXPECT_COMPILE_FAIL) rejects with the
-#     expected diagnostics.
-# Every capped build (`ulimit -v 6291456`) peaked under 5.8 GB, within the 6 GB cap.
+#   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen . -o out --no-verify --release` exits 0
+#     (whole-tree, clean).
+#   - Regression: `examples/regressions/extern_type_struct/` — `Timespec = struct { sec: i64; nsec: i64 }`
+#     matching libc `struct timespec`, `extern fn clock_gettime(clk: i32, ts: ref Timespec): i32 =
+#     "clock_gettime" from "c"`, stores `ts.sec` off the extern call and reads it back. Emitted C is header-
+#     less (`{ int64_t sec; int64_t nsec; }`, 0 `__hdr`), the ref→ptr crossing emits `&ts`, clock_gettime is
+#     redeclared over that typedef — the exact shape that C-compile-errored before C1. Exit 0.
+# The self-reported peak of the whole-tree build was ~5.66 GB (within the 6 GB cap; local ladder cc dropped
+# `-g` purely to fit the coordinator container's RAM — the emitted seed bytes are cc-flag-independent).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -47,9 +57,10 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  20d7cb9b9cda38563d160e8da0cc621b2ecced97431348b92c89fac266fe7539
+sha256:  c7ac134ba902c6f4389bc6e3a21ba26983035a731836284bc7b315d0723551f0
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §17 conditional-compilation parser +
-         build-time prune), byte-identical on rebuild across the stable C-route generations (tc1 == tc2 ==
-         tc3, the guard-free corpus makes the prune a no-op so no ladder) AND on the cc-route re-emission;
+legacy:  none — this is an exact, self-reproducing hand harvest (the §16 C1 extern-type-struct keystone:
+         header-less C-ABI struct at the FFI boundary — parser/checker/codegen/tkb-codec), byte-identical on
+         rebuild across the stable C-route generations (tc1 == tc2 == tc3; the corpus declares no extern
+         struct so the new codegen arm is inert on the self-image, no ladder) AND on the cc-route re-emission;
          no unrecovered legacy artifact underlies it.
