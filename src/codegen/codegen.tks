@@ -4405,6 +4405,31 @@ fn emit_ptr_unwrap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCa
 }
 
 /**
+ * emit_ref_word — lower `teko::sys::ref_word(x)` (§16 §1.2): the raw-syscall pointer-bridge
+ * intrinsic that takes the ADDRESS of the checker-proven addressable `var` argument and casts it to
+ * the `i64` word a syscall register slot needs. Reuses the C1 `ref T` -> `&local` address path
+ * exactly (`emit_ptr_unwrap`'s sibling): `((int64_t)(uintptr_t)&(<x>))`, plain (no seam, no
+ * statement-expression temp) — a pointer bridge has nothing to guard or unwrap later.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param c         the typed call (args[0] = the addressable `var` local)
+ * @param escaping  the escaping-binding set
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function body (defer context)
+ * @param dctx      the defer context
+ * @return          `buf` with the address-of-cast expression appended, or a codegen error
+ * @throws          when the call's arity is not 1 (internal — the checker guarantees it)
+ * @since §16
+ */
+fn emit_ref_word(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    if c.args.len != 1 { return error { message = "codegen: ref_word expects one argument (internal)" } }
+    var out = cb(buf, "((int64_t)(uintptr_t)&(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, "))")
+}
+
+/**
  * emit_ptr_wrap — lower `p.__wrap<T>()` (§5 Part A): the fallible recovery of the value behind the
  * opaque word into the union `T | error | null`. Emits a GNU statement-expression whose three arms
  * are built in the union's C representation via `emit_variant_wrap_str`:
@@ -4529,6 +4554,28 @@ fn emit_region_buf(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str
     out = cb(out, $"); tk_str {v}_s = (")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     cb(out, $"); uint8_t *{v} = (uint8_t *)tk_region_alloc({v}_r, (size_t){v}_len); uint64_t {v}_cn = ({v}_s.len < {v}_len) ? {v}_s.len : {v}_len; for (uint64_t {v}_i = 0; {v}_i < {v}_cn; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} if ({v}_cn < {v}_len) {{ {v}[{v}_cn] = 0; }} else if ({v}_len > 0) {{ {v}[{v}_len - 1] = 0; }} {v}; }})")
+}
+
+/**
+ * `teko::sys::ptr_word(p: ptr): i64` (§16 §1.2, the raw-syscall pointer-bridge intrinsic) — the
+ * SANCTIONED opaque-pointer-to-integer reinterpret: casts the opaque `ptr` argument (accepted via
+ * `ptr_widens_to_opaque` from any typed `ptr<T>`, e.g. `teko::mem::as_cstr`'s result) to the `i64`
+ * word a syscall argument register holds. A compiler intrinsic (never a user `to` cast), the same
+ * `f64_bits` carve-out — the ONLY place a `ptr` becomes an integer.
+ *
+ * @param []byte buf  the output buffer
+ * @param CgProg prog  the typed program (for arg emission)
+ * @param checker::TCall c  the typed call (args[0] = the opaque `ptr`)
+ * @param []str escaping  the escape-analysis frame set
+ * @param []RegionFrame regions  the open region-frame stack
+ * @param []checker::TStatement fn_body  the enclosing function body (defer context)
+ * @param DeferCtx dctx  the defer context
+ * @return []byte | error  the buffer with the reinterpret-cast expression appended, or a codegen error
+ */
+fn emit_ptr_word(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var out = cb(buf, "((int64_t)(uintptr_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, "))")
 }
 
 
@@ -4890,6 +4937,7 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
     if c.is_closure_call { return emit_closure_call(buf, prog, ret_type, c, escaping, regions, fn_body, dctx) }
     if c.call_ns == "teko::__ptr_unwrap" { return emit_ptr_unwrap(buf, prog, e, c, escaping, regions, fn_body, dctx) }
     if c.call_ns == "teko::__ptr_wrap" { return emit_ptr_wrap(buf, prog, e, c, escaping, regions, fn_body, dctx) }
+    if c.call_ns == "teko::__ref_word" { return emit_ref_word(buf, prog, c, escaping, regions, fn_body, dctx) }
     var p = c.callee
     var user_declared = cg_call_is_user_declared(prog, c)
     // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY. `empty()`
@@ -5020,6 +5068,7 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             if l == "as_cstr" { return emit_as_cstr(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "str_from_c" { return emit_str_from_c(buf, prog, c, escaping, regions, fn_body, dctx) }
             if l == "region_buf" { return emit_region_buf(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "ptr_word" { return emit_ptr_word(buf, prog, c, escaping, regions, fn_body, dctx) }
         }
     }
     var builtin = ""

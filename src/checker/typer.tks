@@ -1651,6 +1651,44 @@ fn type_ptr_unwrap(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrO
 }
 
 /**
+ * type_ref_word — recognize and type `teko::sys::ref_word(x)` (§16 §1.2, the second syscall-intrinsic
+ * bridge): the SPECIAL lvalue-checked form that takes the ADDRESS of an addressable `var` local and
+ * hands it back as the raw `i64` word a syscall register slot needs (the future
+ * `SYS_clock_gettime`/`SYS_stat` struct-pointer bridge — reused verbatim once that crumb lands).
+ * Mirrors `ptr::__unwrap<T>`'s addressable-lvalue proof (`type_ptr_unwrap`), but needs no explicit
+ * type argument: `x`'s own static type IS `T`, nothing to reinterpret, only its address to take. A
+ * real user declaration named `ref_word` (in scope, resolvable by `lookup_call`) WINS over this
+ * intrinsic — the same "declaration beats fallback" discipline `builtin_fn` callers already honour —
+ * so this only fires when no such declaration exists. Returns `NotPtrOp` when the callee's last
+ * segment is not `ref_word`, or when a user declaration shadows it, so `type_call` falls through to
+ * ordinary resolution.
+ *
+ * @param c      the raw call node (`ref_word(x)` / `teko::sys::ref_word(x)`)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       an `i64`-typed `TCall`, `NotPtrOp` when the path is not this intrinsic, or an error
+ * @throws       on a non-`teko`-rooted/non-bare qualifier, an explicit type argument, wrong arity, or
+ *               a non-addressable argument
+ * @since §16
+ */
+fn type_ref_word(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrOp | error {
+    var last = c.callee.segments[c.callee.segments.len - 1].name
+    if last != "ref_word" { return NotPtrOp { } }
+    match lookup_call(env, c.callee) { (@Type()) as _gt_rw => return NotPtrOp { }; error => { } }
+    if !builtin_qualifier_ok(c.callee) { return unresolved_builtin_qualifier_error(c.callee, last) }
+    if c.callee_type_args.len != 0 { return error { message = "`ref_word` takes no explicit type arguments" } }
+    if c.args.len != 1 { return error { message = "`ref_word` expects one argument (an addressable `var` variable)" } }
+    var a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    var is_mut_lvalue = match a.kind {
+        TVar as v => match lookup_binding(env, v.name) { ValBinding as vb => vb.is_mut; error => false }
+        _ => false
+    }
+    if !is_mut_lvalue { return error { message = "`ref_word` requires an addressable `var` variable — its address is what the opaque word wraps" } }
+    var rargs = teko::list::push(teko::list::empty(), a)
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = rargs; call_ns = "teko::__ref_word"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
+}
+
+/**
  * type_ptr_wrap — type the INSTANCE intrinsic `p.__wrap<T>()` on a `ptr`/`uptr` receiver (§5 Part
  * A): the fallible recovery of the value behind the opaque word. The result type is the FINAL union
  * `T | error | null` (null-first normalized, exactly as a written `T | error | null` resolves): the
@@ -3626,6 +3664,11 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
         NotListBuiltin => { }   // not a list builtin → fall through to the ordinary call
     }
     match type_ptr_unwrap(c, env, table) {
+        TExpr as te => return te
+        error as e => return e
+        NotPtrOp => { }
+    }
+    match type_ref_word(c, env, table) {
         TExpr as te => return te
         error as e => return e
         NotPtrOp => { }
