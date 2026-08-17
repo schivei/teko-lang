@@ -2100,7 +2100,7 @@ execução dos `.tkt` é exclusiva do CI. Todo brief de subagente carrega isso c
 **🧭 RELAÇÃO Doc 2 → Doc 1 (ruling do dono 2026-08-15): a Doc 2 prepara TODO o terreno pra a Doc 1 seguir,
 dando suporte total ao que virá.** A Doc 2 = toda a superfície de linguagem/stdlib + **trocar TODAS as deps C
 por Teko+FFI** (§16/§17, inclusive reimplementar a arena em Teko) — reescrevendo o que for necessário, sem
-exceções. §10, genéricos, §11, §16, §17, FFI-stdlib, `ui` entram TODOS na Doc 2 (nada "deferido"). A **Doc 1
+exceções. §10, genéricos, §11, §16, §17, FFI-stdlib entram TODOS na Doc 2 (nada "deferido"). A **Doc 1
 apenas MELHORA a arena** (já em Teko) — otimização final, não reconstrução — sobre um terreno completo e livre
 de C.
 
@@ -2128,7 +2128,7 @@ bugado hoje), MAS a native-verde nas 3 dimensões é **portão de saída não-ne
 `teko test .` local (o motivo do "testes só no CI") NÃO é portão Doc-2 — é o primeiro entregável da Doc-1
 (memória + multi-threading do compilador e dos testes).
 **SEQUENCIAMENTO (ruling do dono 2026-08-16): a perna native é a FASE TERMINAL da Doc-2, NÃO intercalada.**
-"Manter como tem feito, foco na perna C; quando fechar o Doc-2 [o terreno-C: §16/§10-(c)/§11/FFI-stdlib/ui com a
+"Manter como tem feito, foco na perna C; quando fechar o Doc-2 [o terreno-C: §16/§10-(c)/§11/FFI-stdlib com a
 perna C nas 3 dimensões verde], AÍ eu entro com as correções pra perna native fechar limpa." Ou seja: **NÃO
 persigo native-verde item-a-item** durante o §16/etc — sigo validando local em C (backend C, `--no-verify
 --release`) o tempo todo. A perna native é um **passo de correção DEDICADO no fim da Doc-2**, depois que todo o

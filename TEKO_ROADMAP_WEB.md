@@ -83,7 +83,7 @@ typed response encoded by content negotiation. The single biggest ergonomics win
 structural-`trait` decision.** **Verify:** `.tkt` binding + validation-failure → 400 problem+json.
 
 **▪ W9 — OpenAPI generation (PACKAGE).** **Deps:** W0, W8, **TRAITS (schema)**, doc-comments. Emit an OpenAPI 3.1
-spec from routes + typed handlers + doc-comments; optional Swagger-UI static serve. API-first. **Verify:**
+spec from routes + typed handlers + doc-comments. API-first. **Verify:**
 `.tkt` spec snapshot for a sample API.
 
 **▪ W10 — GraphQL (PACKAGE).** **Deps:** W0, S-JSON. Schema type system, query parser, executor +

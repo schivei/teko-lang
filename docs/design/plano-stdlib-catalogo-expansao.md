@@ -83,7 +83,6 @@ Networking L5/6 net::tls                no      —            add-on    YES (pr
 Networking L7   net::http              no      —            add-on    via L4
 Databases       db + db::postgres       no      link-keyst.  add-on    via L4 / sqlite FFI
 Protocols       net::proxy · grpc      no      —            add-on    via L4 + encoding
-GUI (research)  ui::*                   part.   —            add-on    YES (windowing)
 ```
 
 **Legend of the big gates (§2 details each):**
@@ -164,7 +163,6 @@ teko::
 ├─ mem             Buf · as_ptr · buf_slice/buf_ptr                                    [KEYSTONE-BUF]
 ├─ sys             constantes libc per-OS/arch
 ├─ io · iter       seams de composição (Reader/Writer/Iterator)
-└─ ui              window · widget                                                     [P4 pesquisa]
 ```
 
 **Regras de nomeação (ruling do dono).** (1) categoria = sub-namespace, sempre; (2) `teko::odbc` é
@@ -576,40 +574,11 @@ do we want HTTP/2." AMQP is an independent P3 frame codec.
 
 ---
 
-### H. Desktop / GUI — `teko::ui::*` (research tier, last)
-
-A native windowing surface. This is the largest and least-bounded area: it needs a per-platform windowing
-FFI, an event loop, and a rendering path — none of which exist. Proposed as a **research tier** with a
-concrete-but-honest seam so it is designed, not hand-waved.
-
-| # | Module | Surface (sketch) | Deps | Feasibility | Tier |
-|---|---|---|---|---|---|
-| U0 | `teko::ui` core | `exp type Window` (extern-type handle) · `exp fn open(title: str, w: u32, h: u32): Window\|error` · `exp type Event` (Close/Key/Mouse/Resize) · `exp fn poll(win: Window): Event?` | KEYSTONE-BUF; **FFI** platform windowing (Win32 `user32/gdi32` · Cocoa/AppKit · X11/Wayland or `libSDL2`) `#os` | **needs FFI** (heavy, per-platform) | **P4 (research)** |
-| U1 | `teko::ui::draw` | immediate-mode 2D: `exp fn fill_rect(...)` · `exp fn draw_text(...)` over a `Canvas` | U0; **FFI** platform 2D or software raster | **needs FFI / partial pure raster** | **P4** |
-| U2 | `teko::ui::widget` | retained widgets (Button/Label/TextField) over U1; layout | U1, #254 (generic containers), §10 (event loop) | **pure** over U1 | **P4** |
-
-**Native-feasibility note + recommended framing.** Three honest options for the owner to pick:
-1. **Bind an existing cross-platform toolkit (recommended for a first cut):** `extern` to `libSDL2`
-   (window+input+GL context) — ONE dependency, ONE `#os`-free code path, immediate pixels. Smallest FFI
-   surface, fastest to a running window; the dep is opt-in via KEYSTONE-LINK.
-2. **Per-platform native windowing (Win32 / Cocoa / X11-Wayland):** no external dep, but 3× the FFI
-   surface and the Cocoa path needs Objective-C message-send shims (a real cost — likely a `teko_rt`
-   shim, since §16 forbids variadic externs and `objc_msgSend` is variadic-shaped).
-3. **A retained widget toolkit in pure Teko over a thin raster+input seam:** the most Teko-idiomatic, the
-   most work; a **P4+** stretch.
-
-**Recommendation:** reserve the `teko::ui` namespace and design U0's `Window`/`Event` seam now (so it is
-forward-compatible), implement option 1 (SDL2-backed) as the first research spike, keep it strictly
-**P4** — it must not gate any of A–G. GUI is where "e o que mais entender necessário" lands: valuable,
-but the last phase.
-
----
-
 ## 4. Recommended SEQUENCE (phases — the owner picks the cut line)
 
 The ordering rule: **pure-Teko-over-`[]byte`/`str`/`f64` first (no keystone, immediate `.tkt` value),
 then the FFI transport keystones, then the protocol/driver fan-out, generics-gated surfaces slotting in
-when #254 lands, GUI last.**
+when #254 lands.**
 
 | Phase | Theme | Contents | Gate |
 |---|---|---|---|
@@ -617,12 +586,11 @@ when #254 lands, GUI last.**
 | **P1** | Pure wins (no keystone) | **sort** (A1/A2) · **crypto** C0/C1/C2 · **encoding** S-JSON · **compress** Z-DEFLATE/GZIP/ZLIB · crypto **C6 rand** (needs P0 BUF) | none / P0-BUF |
 | **P2** | Transport + web baseline | net N0/N1/N2/N3(provider TLS)/N4/N5/N6 · crypto C3/C4/C5 · encoding S-PB/S-ASN1/S-XML/S-MIME · **db** DB0/DB-PG/DB-SQLITE · protocols P-SOCKS/P-RPC · sort A3/A4 (**when #254 lands**) | P0-BUF, P0-LINK, #254 (A3/A4) |
 | **P3** | Cloud-native + breadth | net N8(H2)/N9|P-GRPC/N-QUIC/N10(H3)/N11(MQTT)/N13(Redis)/N14(mail)/N16(ssh) · P-AMQP · crypto C3b/C7/C8/C9/C-PGP + `math::bigint` · db DB-MY(+MariaDB)/DB-MSSQL/DB-MONGO/DB-CASS/DB-REDIS/DB-ORA(FFI)/DB-ODBC(FFI)/Pool · encoding S-YAML/S-CBOR/S-MSGPACK/S-BSON · compress brotli/lzma/zstd | as noted per unit |
-| **P4** | GUI (research) | `teko::ui` U0/U1/U2 (SDL2-backed spike first) | own research spike; gates nothing |
 
 **Parallelizable immediately (no keystone, no #254):** `{sort A1, crypto C0/C1, encoding S-JSON,
 compress Z-DEFLATE}` — four independent lanes that each ship `.tkt`-green value on day one. This is the
 concrete answer to "what lands first": **sorting + crypto-over-`[]byte` + JSON + DEFLATE**, then C6 rand
-+ the socket keystone, then TLS/HTTP, then DB, then gRPC/AMQP/QUIC, then GUI.
++ the socket keystone, then TLS/HTTP, then DB, then gRPC/AMQP/QUIC.
 
 ---
 
@@ -632,20 +600,19 @@ concrete answer to "what lands first": **sorting + crypto-over-`[]byte` + JSON +
 |---|---|---|---|
 | 1 | **TLS needs crypto + networking + x509** — a naive order builds HTTP before a secure transport exists | M.4 (layering) | N3 ships **provider-backed** (OpenSSL/SChannel/SecureTransport) in P2 so HTTPS works before pure-Teko crypto is complete; a pure-Teko TLS 1.3 is a P3 follow-on on C4/C5/C7/C8. Hand-rolling TLS first is a security liability (M.1). |
 | 2 | **gRPC needs HTTP/2 + protobuf** — high demand, deep dependency | M.4 | Keep gRPC **P3**, gated on N8 + S-PB. Ship **JSON-RPC (P-RPC)** in P2 as the *early* RPC answer so the RPC axis is not empty while HTTP/2 is built. |
-| 3 | **GUI needs a platform windowing FFI** — largest, least bounded | M.4, M.1 | Isolate to **P4 research**; reserve the namespace + `Window`/`Event` seam now; first spike is SDL2-backed (one opt-in dep) so it never gates A–G. |
-| 4 | **Hand-declared `teko::sys` constants can drift** from platform headers | M.3 (honest boundary) | Each constant carries `@see <header>` + a native regression asserting equality with the real macro (§2.2). Tested honesty beats a C-toolchain dep (M.4). |
-| 5 | **Crypto vs `TEKO_OVERFLOW_DEBUG`** — primitives must wrap, not panic | M.1 (fail-loud) vs crypto correctness | Use the explicit `teko::math::checked` `wrapping_*` family; confirm M1 lands before any C-family primitive. Do NOT rely on release-mode wrap. |
-| 6 | **Constant-time** — table lookups / `ct_eq` leak timing | M.1 (safety) | Hand-audited convention per unit (documented in each Javadoc); a `ct`-typed language feature is a **separate proposal**, not assumed by this catalog. |
-| 7 | **Generic surfaces (sort<T>, collections) gated on #254** | #254 open | Ship the **monomorphic** fast paths now (`sort_i64`/…); design the generic API (A3/A4) forward-compatible; implement when #254 closes. Do not block P1 on it. |
-| 8 | **No index-assignment** vs syscall-fills-buffer / cipher state arrays | ruling (no `buf[i]=x`) | Route ALL fill-in-place through KEYSTONE-BUF (`Buf` region, opaque until read back); build cipher/hash state functionally. This is why KEYSTONE-BUF is P0. |
-| 9 | **Variadic extern forbidden** vs `objc_msgSend`/`printf`-shaped APIs (GUI/logging) | §16 (no variadic extern) | Wrap fixed-arity shims in `teko_rt` (maintained C) where a variadic C API is unavoidable (Cocoa message-send) — the ONE sanctioned C seam. Prefer SDL2 (non-variadic) to avoid this entirely (risk 3). |
-| 10 | **self-`.tkh` bloat** if every codec is `exp` | exp/pub ruling | Curated `exp`: only the user-called entry points (`http::get`, `sha256`, `sort_i64`) are `exp`; parsers/state helpers stay `pub`. Generic templates expose the class, hide rebuild helpers (`pub`). |
-| 11 | **Legacy primitives** (MD5/SHA-1/3DES) invite misuse | M.1/M.3 | Ship ONLY where a live protocol needs them (SHA-1 for WS accept-key, MD5 for HTTP digest), Javadoc-`@deprecated` + `legacy`-marked, never the default of any family. |
-| 12 | **Reseed hazard** — a catalog module using a feature absent from the seed | bootstrap seed | This doc adds NO language feature; every entry is a library over existing constructs (`extern fn`, `class<T>`, unions, `Buf`). Sequence per-unit issues so each uses only seeded features; the generic-gated units wait for #254 to be seeded. |
+| 3 | **Hand-declared `teko::sys` constants can drift** from platform headers | M.3 (honest boundary) | Each constant carries `@see <header>` + a native regression asserting equality with the real macro (§2.2). Tested honesty beats a C-toolchain dep (M.4). |
+| 4 | **Crypto vs `TEKO_OVERFLOW_DEBUG`** — primitives must wrap, not panic | M.1 (fail-loud) vs crypto correctness | Use the explicit `teko::math::checked` `wrapping_*` family; confirm M1 lands before any C-family primitive. Do NOT rely on release-mode wrap. |
+| 5 | **Constant-time** — table lookups / `ct_eq` leak timing | M.1 (safety) | Hand-audited convention per unit (documented in each Javadoc); a `ct`-typed language feature is a **separate proposal**, not assumed by this catalog. |
+| 6 | **Generic surfaces (sort<T>, collections) gated on #254** | #254 open | Ship the **monomorphic** fast paths now (`sort_i64`/…); design the generic API (A3/A4) forward-compatible; implement when #254 closes. Do not block P1 on it. |
+| 7 | **No index-assignment** vs syscall-fills-buffer / cipher state arrays | ruling (no `buf[i]=x`) | Route ALL fill-in-place through KEYSTONE-BUF (`Buf` region, opaque until read back); build cipher/hash state functionally. This is why KEYSTONE-BUF is P0. |
+| 8 | **Variadic extern forbidden** vs `objc_msgSend`/`printf`-shaped APIs (logging) | §16 (no variadic extern) | Wrap fixed-arity shims in `teko_rt` (maintained C) where a variadic C API is unavoidable (Cocoa message-send) — the ONE sanctioned C seam. |
+| 9 | **self-`.tkh` bloat** if every codec is `exp` | exp/pub ruling | Curated `exp`: only the user-called entry points (`http::get`, `sha256`, `sort_i64`) are `exp`; parsers/state helpers stay `pub`. Generic templates expose the class, hide rebuild helpers (`pub`). |
+| 10 | **Legacy primitives** (MD5/SHA-1/3DES) invite misuse | M.1/M.3 | Ship ONLY where a live protocol needs them (SHA-1 for WS accept-key, MD5 for HTTP digest), Javadoc-`@deprecated` + `legacy`-marked, never the default of any family. |
+| 11 | **Reseed hazard** — a catalog module using a feature absent from the seed | bootstrap seed | This doc adds NO language feature; every entry is a library over existing constructs (`extern fn`, `class<T>`, unions, `Buf`). Sequence per-unit issues so each uses only seeded features; the generic-gated units wait for #254 to be seeded. |
 
 **No genuine unresolved law tension requires a HALT.** The mechanism (self-`.tkh`, §16 FFI, §10
 concurrency, exp/pub) is sealed; every area maps onto it library-first. The owner's remaining decisions
-are **priority/phase cuts** (which of P2/P3 first, whether GUI is funded at all) — argued part-by-part
+are **priority/phase cuts** (which of P2/P3 first) — argued part-by-part
 from the tables above, not blocked on any Law conflict.
 
 ---
