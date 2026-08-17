@@ -228,11 +228,16 @@ fn ar_store(address: u64, value: u64) {
     teko::mem::store_u64(address, value)
 }
 
+#if(os == "linux")
 /**
  * Maps `length` bytes of anonymous private read/write memory through the raw `mmap` syscall — the
  * arena's ONLY memory source, replacing `posix_memalign`/`malloc` wholesale. The kernel returns a
  * page-aligned address (so at least 16-aligned, subsuming `TK_ARENA_ALIGN`) or a value in the
  * `[-4095, -1]` `-errno` error band.
+ *
+ * This is the Linux arm: the raw `mmap` syscall numbers (`SYS_MMAP`) and the `PROT_*`/`MAP_*` flag
+ * values live in `teko::sys` behind `#os("linux")` guards, so the whole `mmap`/`munmap`/`exit_group`
+ * trio is `#os`-split — the non-Linux arm below never references a Linux-only `teko::sys` constant.
  *
  * @param length  the mapping size in bytes; the kernel rounds it up to whole pages
  * @return        the page-aligned base address, or 0 when the kernel refuses
@@ -267,6 +272,49 @@ fn ar_munmap(address: u64, length: u64) {
 fn ar_oom() {
     _ = teko::sys::syscall1(teko::sys::SYS_EXIT_GROUP, AR_OOM_CODE)
 }
+#else
+/**
+ * Non-Linux arm of `ar_mmap` — a compile-only STUB that always reports "no mapping" (returns 0).
+ *
+ * The §16 arena's memory source is the RAW `mmap` syscall, which needs the Darwin/Windows syscall
+ * NUMBERS plus the target's own register/error convention wired into the codegen syscall intrinsic
+ * (macOS: the BSD-class-tagged number and carry-flag error; Windows: the ntdll path) — none of which
+ * exists yet, and `teko::sys`'s `SYS_MMAP`/`PROT_*`/`MAP_*` constants are `#os("linux")`-only. This
+ * stub exists ONLY so `arena.tks` TYPE-CHECKS on a non-Linux target: the §16 arena is DORMANT (the L2
+ * flip is not done), so this arm is never reached at run time. It introduces NO library dependency —
+ * the real non-Linux memory source is a later §16 task that reuses the raw-syscall intrinsic.
+ *
+ * @param length  the requested mapping size in bytes (ignored — the stub maps nothing)
+ * @return        0, always ("the kernel refuses" — every allocation degrades to OOM here)
+ */
+fn ar_mmap(length: u64): u64 {
+    _ = length
+    0 to u64
+}
+
+/**
+ * Non-Linux arm of `ar_munmap` — a compile-only STUB that releases nothing (see `ar_mmap`'s non-Linux
+ * arm: the arena is dormant off Linux, so no mapping was ever obtained to release).
+ *
+ * @param address  the (never-obtained) mapping base — ignored
+ * @param length   the (never-obtained) mapping length — ignored
+ * @return         nothing
+ */
+fn ar_munmap(address: u64, length: u64) {
+    _ = address
+    _ = length
+}
+
+/**
+ * Non-Linux arm of `ar_oom` — a compile-only STUB. On Linux this raw-`exit_group`s; off Linux the
+ * arena is dormant and never allocates, so this is unreachable. It stays a no-op rather than calling
+ * `panic` (which would re-enter the arena) or a Linux-only `teko::sys` syscall constant.
+ *
+ * @return  nothing
+ */
+fn ar_oom() {
+}
+#endif
 
 /**
  * Reads a CONTROL-block field.
