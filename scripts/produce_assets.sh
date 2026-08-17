@@ -199,16 +199,22 @@ log "kind=$KIND seed=$SEED produces='$PRODUCES'"
 # ci_provision_teko.sh appends `.seed` to $GITHUB_PATH, which only affects LATER STEPS — this
 # script is one step, so it puts the seed on its own PATH as well. That also makes the script
 # runnable by hand outside Actions, which is the only way anyone debugs a producer.
-sh scripts/ci_provision_teko.sh "$SEED"
+#
+# PROVISIONING-PRODUCES-NOTHING IS NON-FATAL, and that is the whole recovery this path adds. When
+# there is NO published release candidate for the seed source AND no committed seed in
+# bootstrap/seeds/, ci_provision_teko.sh exits non-zero having staged nothing. That is not a broken
+# producer — it is a release-availability gap, and the tree already carries its own answer: a
+# DECLARED degrau (bootstrap/DEGRAU) names the C bridge that
+# scripts/build_with_seed_fallback.sh's rung -1 compiles with `cc`, needing no provisioned `teko`
+# at all. So a missing seed must not `exit 1` before the ladder; it must fall through to it. The
+# FAST PATH is untouched: when a seed IS provisioned, `teko` is on PATH and everything below behaves
+# exactly as it did before, the ladder still preferring the released seed and only falling back to
+# the degrau when the seed cannot reach the tip.
+sh scripts/ci_provision_teko.sh "$SEED" || log "no released/committed seed was available for '$SEED' — proceeding to the declared degrau ladder"
 if [ -d .seed ]; then
     PATH="$PWD/.seed:$PATH"
     export PATH
 fi
-command -v teko >/dev/null 2>&1 || {
-    log "provisioning reported success but no 'teko' is on PATH"
-    exit 1
-}
-teko --version
 
 # THE SEED VERSION IS RECORDED, and that is not decoration. gen0 is `seed(tree)` and gen1 is
 # `gen0(tree)`, so the emitted teko.c descends from the seed two links up: two runs of the SAME
@@ -219,7 +225,18 @@ teko --version
 # On a train that cuts a release per bump, a seed change between a PR's run and the merge push is
 # ordinary — and it is the single most likely honest explanation for two builds of one tree
 # disagreeing. nightly.yml's reproducibility gate reads this to tell that apart from a real defect.
-SEED_VERSION="$(teko --version 2>/dev/null || echo 'unknown')"
+#
+# WHEN NO SEED WAS PROVISIONED, SEED_VERSION DEGRADES TO `degrau` rather than crashing: there is no
+# `teko` to interrogate, and the gen0 that build_with_seed_fallback.sh will mint descends from the
+# declared C bridge, not from a released seed. Recording `degrau` states that honestly for the
+# reproducibility gate instead of pretending a seed version it never stood on.
+if command -v teko >/dev/null 2>&1; then
+    teko --version
+    SEED_VERSION="$(teko --version 2>/dev/null || echo 'unknown')"
+else
+    log "no 'teko' on PATH after provisioning — the declared degrau (bootstrap/DEGRAU) is the seed of last resort"
+    SEED_VERSION="degrau"
+fi
 
 # ── 2. the dry build + the ladder ─────────────────────────────────────────────────────────────
 sh scripts/build_with_seed_fallback.sh out
