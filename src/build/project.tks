@@ -98,7 +98,7 @@ fn project_frontend(dir: str): Frontend | error { project_frontend_sel(dir, fals
 fn project_frontend_sel(dir: str, include_tests: bool): Frontend | error {
     // Enter the project root so relative source paths resolve (the contained host edge).
     match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => { } }   // error? — null = success
-    frontend_body(include_tests, false, output_is_tty(false))
+    frontend_body(include_tests, false, output_is_tty(false), false)
 }
 
 // (C7.1f) #os conditional compilation — the TARGET OS for guard selection: derived from the
@@ -335,15 +335,17 @@ fn append_diags(a: []str, b: []str): []str {
  * @param tty       render the phases' in-place `\r` updates
  * @param parse_diags  the FILE-boundary lex/parse diagnostics the assembly already collected, so
  *                     they are reported alongside this phase's declaration-boundary ones
+ * @param explicit  the `--explicit` strong-typing gate (§11.2); threaded into the checker — false is
+ *                  the untouched default
  * @return          the fully checked and monomorphized program, or every collected diagnostic
  */
-fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, report: bool, tty: bool, parse_diags: []str): checker::TProgram | error {
+fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, report: bool, tty: bool, parse_diags: []str, explicit: bool): checker::TProgram | error {
     var mode = report_mode(!report, tty)
     var checker_phase = phase_begin("checker", count_unit_text(0, selected.items.len, "items"), mode)
     var last: u64 = 0
     var total_cell: u64 = selected.items.len
     var on_item = checker_tick_fn(checker_phase, last, total_cell)
-    var pre = match checker::type_program_with_deps_pre_mono(selected, dep_prog, on_item) {
+    var pre = match checker::type_program_with_deps_pre_mono(selected, dep_prog, on_item, explicit) {
         checker::PreMono as p => p
         error as e => {
             var all = append_diags(parse_diags, teko::list::push(teko::list::empty(), e.message))
@@ -476,9 +478,11 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
  * @param pf     the parsed program and manifest from `frontend_parse`
  * @param quiet  suppress the `checker`/`monomorph` phase output
  * @param tty    render the phases' in-place `\r` updates
+ * @param explicit  the `--explicit` strong-typing gate (§11.2); threaded into the checker — false is
+ *                  the untouched default (every internal gate/verification pass passes false)
  * @return       the checked program and manifest, or the first error
  */
-fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool): Frontend | error {
+fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Frontend | error {
     var selected = prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = build_flags(pf.manifest) })
 
     var expanded = match parser::expand_macros_syntactic(selected) { parser::Program as p => p; error as e => return e }
@@ -489,7 +493,7 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool): Frontend | error {
     // and reference dep types. m.deps is empty when there is no [dependencies] section → no-op.
     var dep_prog = match load_deps_program(pf.manifest) { checker::TProgram as p => p; error as e => return e }
 
-    var checked = match checked_program_of(expanded, dep_prog, !quiet, tty, pf.diags) { checker::TProgram as c => c; error as e => return e }
+    var checked = match checked_program_of(expanded, dep_prog, !quiet, tty, pf.diags, explicit) { checker::TProgram as c => c; error as e => return e }
 
     Frontend { prog = checked; manifest = pf.manifest }
 }
@@ -504,11 +508,13 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool): Frontend | error {
  * @param quiet          suppress the observability output
  * @param tty            render the `lexer`/`parser`/`checker`/`monomorph` phases'
  *                       in-place `\r` updates (BUILD-OUTPUT OBSERVABILITY)
+ * @param explicit       the `--explicit` strong-typing gate (§11.2), threaded into the checker — false
+ *                       is the untouched default
  * @return               the checked program and manifest, or the first error
  */
-fn frontend_body(include_tests: bool, quiet: bool, tty: bool): Frontend | error {
+fn frontend_body(include_tests: bool, quiet: bool, tty: bool, explicit: bool): Frontend | error {
     var pf = match frontend_parse(include_tests, quiet, tty) { ParsedFront as x => x; error as e => return e }
-    frontend_check(pf, quiet, tty)
+    frontend_check(pf, quiet, tty, explicit)
 }
 
 /**
@@ -5409,7 +5415,7 @@ fn ensure_rt_dir_abs() {
  *  @param out_dir  the build output directory (`-o`, default "bin")
  *  @return         0 on a fully gated, successfully built release, else the failing status
  *  @since #265 */
-fn compile_project(dir: str, out_dir: str): i32 { compile_project_g(dir, out_dir, false, false, 0, false, Backend::C, false, DebugInfo::None) }
+fn compile_project(dir: str, out_dir: str): i32 { compile_project_g(dir, out_dir, false, false, 0, false, Backend::C, false, DebugInfo::None, false) }
 
 // (#148) report_peak — the compiler prints its own memory cost at the end of a successful build
 // (peak RSS via teko::mem::peak_rss; 0 = unavailable on this host → print suppressed).
@@ -5632,9 +5638,10 @@ fn report_pt_census(prog: checker::TProgram) {
  *  where the `.tkt` gate outcome is already known deterministic from gen-1. This is the path
  *  `release.yml` drives with `--no-verify --release`, so the published seed links at `-O2`.
  *  `backend` is the resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390).
- *  `debug` is the requested `--debug=` level (D1.6), forwarded to `codegen_and_report`. */
-fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo): i32 {
-    var fe = match frontend_body(false, false, tty) { Frontend as f => f; error as e => return fail(dir, e.message) }
+ *  `debug` is the requested `--debug=` level (D1.6), forwarded to `codegen_and_report`.
+ *  `explicit` is the `--explicit` strong-typing gate (§11.2), threaded into the checker (false = default). */
+fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo, explicit: bool): i32 {
+    var fe = match frontend_body(false, false, tty, explicit) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug)
 }
 
@@ -6124,7 +6131,7 @@ fn native_gate_program(pf: ParsedFront, tty: bool): checker::TProgram | error {
         error as e => return e
     }
     var pf2 = ParsedFront { parsed = parser::Program { items = append_items(kept, harness_items) }; manifest = pf.manifest; diags = pf.diags }
-    match frontend_check(pf2, false, tty) { Frontend as fe => native_gate_unmark_tests(fe.prog); error as e => e }
+    match frontend_check(pf2, false, tty, false) { Frontend as fe => native_gate_unmark_tests(fe.prog); error as e => e }
 }
 
 /**
@@ -6405,7 +6412,7 @@ fn cobertura_path_of(out_dir: str, gen_cov: bool): str {
  *  `debug` is the requested `--debug=` level (D1.6), forwarded to `codegen_and_report`. */
 fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront, debug: DebugInfo): i32 {
     var pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest; diags = pf.diags }
-    var rel = match frontend_check(pf_prod, false, tty) { Frontend as f => f; error as e => return fail(dir, e.message) }
+    var rel = match frontend_check(pf_prod, false, tty, false) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start, debug)
 }
 
@@ -6493,18 +6500,20 @@ fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: b
  *  @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning (0.3.0.29)
  *  @param debug        the requested `--debug=` level (`--debug=lines`; `None` by default, D1.6),
  *                      forwarded down every branch to `codegen_and_report`/`backend`
+ *  @param explicit     the `--explicit` strong-typing gate (§11.2), threaded into the checker — false
+ *                      is the untouched default
  *  @return             0 on a fully gated, successfully built release, else the failing status
  *  @since #265 */
-fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool, debug: DebugInfo): i32 {
+fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool, debug: DebugInfo, explicit: bool): i32 {
     ensure_rt_dir_abs()
     match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => { } }
     var tty = output_is_tty(no_tty)
     var start = now_ns()
     if no_verify {
-        return build_ungated(dir, out_dir, opt, tty, start, backend, debug)
+        return build_ungated(dir, out_dir, opt, tty, start, backend, debug, explicit)
     }
     var pf = match frontend_parse(true, false, tty) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
-    match frontend_check(pf, false, tty) {
+    match frontend_check(pf, false, tty, explicit) {
         Frontend as fe => {
             if !has_tests(fe.prog) {
                 return build_no_tests_present(dir, out_dir, fe, opt, tty, start, backend, debug)
@@ -6599,6 +6608,27 @@ fn no_verify_of(args: []str): bool {
     loop {
         if i >= args.len { break }
         if args[i] == "--no-verify" { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * explicit_of — does `--explicit` appear in the args? (§11.2 EMISSÃO LIMPA.) Turns ON the checker's
+ * strong-typing gate: a `var`/`const` local without a type annotation and a provably-redundant widening
+ * cast become ERRORS. DEFAULT OFF — a build without the flag behaves exactly as before, so the flag can
+ * never break a codebase that has not been fully typed yet. Not read from the manifest and never wired
+ * into a build script or CI here (the codebase is still being typed); the CLI is its sole surface.
+ *
+ * @param args  the full CLI argument vector
+ * @return      true iff `--explicit` is present
+ * @since       §11.2
+ */
+fn explicit_of(args: []str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if args[i] == "--explicit" { return true }
         i = i + 1
     }
     false
@@ -6735,6 +6765,7 @@ fn project_arg_of(args: []str, start: u64): str {
         else if args[i] == "--per-commit-test" { i = i + 2 }
         else if args[i] == "--native-gate" { i = i + 1 }
         else if args[i] == "--release" { i = i + 1 }
+        else if args[i] == "--explicit" { i = i + 1 }
         else if args[i] == "--no-tty" { i = i + 1 }
         else if args[i] == "--analyzer" { i = i + 1 }
         else if args[i] == "--arith-cast-gate" { i = i + 1 }
@@ -8431,7 +8462,7 @@ fn test_stage_build(dir: str): i32 {
     match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => { } }
     var tty = output_is_tty(false)
     var pf = match frontend_parse(true, false, tty) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
-    var fe = match frontend_check(pf, false, tty) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    var fe = match frontend_check(pf, false, tty, false) { Frontend as x => x; error as e => return fail(dir, e.message) }
     report_arith_cast_rate(fe)
     var smrc = emit_sitemap_file(dir, GATE_OUT_DIR, fe.manifest, fe.prog)
     if smrc != 0 { return smrc }
@@ -8636,7 +8667,7 @@ fn report_analyzer(dir: str): i32 {
  */
 fn recheck_frontend_here(dir: str): Frontend | error {
     var phase = phase_begin("recheck", dir, report_mode(false, output_is_tty(false)))
-    match frontend_body(true, true, false) {
+    match frontend_body(true, true, false, false) {
         Frontend as fe => { phase_end_ok(phase, dir); fe }
         error as e => { phase_end_fail(phase, dir, e.message); e }
     }

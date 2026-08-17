@@ -1259,7 +1259,7 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
     var l = ops.l
     var r = ops.r
     if op_is_arith(b.op) || op_is_arith_bitwise(b.op) {
-        match redundant_widen_cast_of(l, r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
+        match redundant_widen_cast_of(l, r) { TExpr as bad => match explicit_cast_gate(env, bad) { error as ge => return ge; null => { } }; null => { } }
     }
     if op_is_shift(b.op) { return type_shift_binop(b.op, l, r) }
     if op_is_arith(b.op) { return type_arith_binop(b.op, l, r) }
@@ -1459,7 +1459,7 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable): TExpr | error {
         if type_is_void(raw.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
         var adopted = adopt_binop_operands(prev, raw)
         if i == 0 { first = adopted.l }
-        match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
+        match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => match explicit_cast_gate(env, bad) { error as ge => return ge; null => { } }; null => { } }
         if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
         var is_variant_member_pair = variant_has_member(adopted.l.type, adopted.r.type) || variant_has_member(adopted.r.type, adopted.l.type)
         if is_variant_member_pair && !op_is_eq_ne(c.rest[i].op) {
@@ -4239,42 +4239,27 @@ fn value_type_reduce(t: @Type(), table: TypeTable): @Type() {
 }
 
 /**
- * warn_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9):
- * a WARNING printed to stderr, never a build failure. Fires on a provable no-op
- * `to` (class 1 — same-type; class 3 — a lossless widen the W-RULE/B.22
- * sign-check already performs), never on a genuine narrow/widen the source
- * still needs.
+ * explicit_cast_gate — the `--explicit` rule for a PROVABLE no-op conversion (§11.2 EMISSÃO LIMPA,
+ * `cast-width-hygiene-0.3.1.md` §4/§9). Fires on a redundant `to` (class 1 — same-type; class 3 — a
+ * lossless widen the W-RULE/B.22 sign-check already performs), never on a genuine narrow/widen the
+ * source still needs.
  *
- * WHY IT IS NO LONGER AN ERROR (owner ruling 2026-07-27, REVERSING the
- * 2026-07-24 ruling that made it a hard failure — *"prefiro que falhe para
- * evitarmos de cair no mesmo erro"*): *"o cast, nestes casos, não deveria ser
- * falha, deveria ser warning, o que não nos exime de não ter warnings no
- * próprio compilador (lembra? <= 2%)."*
+ * The redundant `to` is IMPLICITNESS in cast clothing — the widen would occur with no `to` at all — so
+ * under `--explicit` it is an ERROR the writer must delete. Without the flag it is SILENT: the
+ * historical stderr WARNING is retired (owner ruling 2026-08-17, item C), and the caller keeps the
+ * `TCast` node in the typed tree so the D4 ARITH-CAST-RATE ≤ 2% ceiling (`metrics.tks`,
+ * `run_arith_cast_gate` in `project.tks`) still COUNTS it — the enforcement instrument the earlier
+ * warning-not-error reasoning moved the policy onto stays untouched and still hard.
  *
- * The reversal is not a softening of the policy — it moves enforcement to the
- * instrument that can actually carry it. D1-as-error made a redundant cast
- * UNSPELLABLE, and a bootstrap chain has two compilers that disagree about
- * which spelling is redundant: the released seed applies B.22 (*"operands must
- * be the same type — no promotion"*) and REQUIRES the cast, while a
- * locally-built gen1 has the W-RULE (`widen_int_binop`) and therefore proves
- * that same cast a no-op. As an error, no single source text satisfies both —
- * measured on the wagon: 17 of the 18 B.22 casts the seed demands make gen1
- * reject the tree outright. As a warning, one text compiles under both and the
- * seed's demand becomes payable.
- *
- * The ceiling that keeps redundant casts from returning en masse is D4, and it
- * is untouched and still HARD: ARITH-CAST-RATE ≤ 2% (`metrics.tks`,
- * `run_arith_cast_gate` in `project.tks`) fails the build. That is why the
- * same-type site below deliberately keeps the `TCast` node in the typed tree
- * instead of folding it away — a warned cast must still be COUNTED by the gate,
- * or downgrading this diagnostic would have quietly disabled the ≤2% ceiling
- * along with it.
- *
- * @param t  the redundant cast's own (unchanged) type
- * @since    0.3.1
+ * @param env  the current environment (its `explicit` flag drives the gate)
+ * @param e    the redundant cast's typed node (its own unchanged type is what is reported)
+ * @return     `null` when the flag is off (silent); a located error under `--explicit`
+ * @throws     when `env.explicit` and `e` is a provable no-op conversion
+ * @since      §11.2
  */
-fn warn_redundant_cast(env: Env, e: TExpr) {
-    teko::io::eprintln($"{diag_at(env.file, e.line, e.col, "")}warning: redundant cast: this `to {type_render(e.type)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
+fn explicit_cast_gate(env: Env, e: TExpr): error | null {
+    if !env.explicit { return null }
+    teko::error::err_loc(error { message = $"conversão desnecessária: `to {type_render(e.type)}` é um no-op provável — remova-o (--explicit)" }, e.line, e.col)
 }
 
 fn type_cast(c: parser::Cast, env: Env, table: TypeTable): TExpr | error {
@@ -4287,7 +4272,7 @@ fn type_cast(c: parser::Cast, env: Env, table: TypeTable): TExpr | error {
     // D4 ≤2% gate that now carries the policy.
     if type_eq(inner.type, target) {
         var noop = TExpr { kind = TCast { expr = inner }; type = target; line = inner.line; col = inner.col }
-        warn_redundant_cast(env, noop)
+        match explicit_cast_gate(env, noop) { error as ge => return ge; null => { } }
         return noop
     }
     // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
@@ -6605,7 +6590,35 @@ fn bind_value_into_annotation(v: TExpr, raw: parser::Expr, ann: @Type(), table: 
     }
 }
 
+/**
+ * explicit_binding_gate — the `--explicit` strong-typing rule for a `var`/`const` LOCAL (§11.2 EMISSÃO
+ * LIMPA): under the flag a named local declaration MUST carry its type annotation, because the untyped
+ * form makes the checker INFER the type from the initializer (`bound = v.type`), the silent implicitness
+ * the flag exists to forbid. Fires only for a SIMPLE named target that is not the `_` discard; a
+ * destructure-pattern target, a `_` discard (`_ = expr`), and a loop-head preamble binding (typed with
+ * the gate cleared by `type_loop`) are structural/compiler-generated, never a user signature, so they
+ * pass through. Inert when the flag is off — the default build sees `null` and behaves exactly as before.
+ *
+ * @param b    the parsed binding
+ * @param env  the current environment (its `explicit` flag drives the gate)
+ * @return     `null` when admissible; a located error when a named local omits its type under `--explicit`
+ * @throws     when `env.explicit` and the binding is a named, non-`_` local without a `: T` annotation
+ * @since       §11.2
+ */
+fn explicit_binding_gate(b: parser::Binding, env: Env): error | null {
+    if !env.explicit { return null }
+    if b.has_type { return null }
+    match b.target {
+        parser::SimpleName as sn => {
+            if sn.name == "_" { return null }
+            teko::error::err_loc(error { message = $"`{sn.name}`: declaração precisa de tipo explícito (--explicit)" }, b.value.line, b.value.col)
+        }
+        _ => null
+    }
+}
+
 fn type_binding(b: parser::Binding, env: Env, table: TypeTable): TypedStmt | error {
+    match explicit_binding_gate(b, env) { error as e => return e; null => { } }
     var v = match type_binding_value(b, env, table) { TExpr as te => te; error as e => return e }
     if type_is_mret_aggregate(v.type) {
         return error { message = "a multiple-return value cannot be bound to a single name — destructure it, e.g. `var a, b = f(…)` (a multiple-return call yields no first-class tuple value to capture)" }
@@ -6961,9 +6974,23 @@ fn type_return(r: parser::Return, env: Env, table: TypeTable): TypedStmt | error
  * @param table the type table
  * @return the typed loop statement paired with the UNCHANGED outer env, or a type error
  */
+/**
+ * type_loop — type a `loop { … }` statement: its desugared head preamble (`l.init`) then its body
+ * (`l.body`), the body scope inheriting the preamble's bindings (the counter/first-iteration flags).
+ * The preamble is typed with the `--explicit` gate CLEARED (`with_explicit(env, false)`): those
+ * bindings are compiler-generated and carry no user type annotation, so requiring one there would be a
+ * false positive; the flag is restored for the body so a real `var x = …` inside the loop is still gated.
+ *
+ * @param l      the parsed loop statement (already desugared head + body)
+ * @param env    the enclosing environment
+ * @param table  the program type table
+ * @return       the typed `TLoopStmt`, or a located error from the head/body
+ * @throws       on any typing error in the preamble or body
+ */
 fn type_loop(l: parser::LoopStmt, env: Env, table: TypeTable): TypedStmt | error {
-    var ib = match type_block(l.init, env, table) { TypedBlock as bk => bk; error as e => return e }
-    var bb = match type_block(l.body, ib.env, table) { TypedBlock as bk => bk; error as e => return e }
+    var ib = match type_block(l.init, with_explicit(env, false), table) { TypedBlock as bk => bk; error as e => return e }
+    var body_env = with_explicit(ib.env, env.explicit)
+    var bb = match type_block(l.body, body_env, table) { TypedBlock as bk => bk; error as e => return e }
     TypedStmt { node = TLoopStmt { label = l.label; init = ib.stmts; body = bb.stmts }; env = env }
 }
 
@@ -9737,7 +9764,7 @@ fn no_item_progress(done: u64, total: u64) { }
  * @throws             the first collection/typing/monomorphization error
  */
 pub fn type_program_with_deps(raw_program: parser::Program, dep_prog: TProgram): TProgram | error {
-    var pre = match type_program_with_deps_pre_mono(raw_program, dep_prog, no_item_progress) { PreMono as p => p; error as e => return e }
+    var pre = match type_program_with_deps_pre_mono(raw_program, dep_prog, no_item_progress, false) { PreMono as p => p; error as e => return e }
     if pre.diags.len > 0 { return error { message = join_checker_diags(pre.diags) } }
     var mono = match monomorphize(pre.prog, pre.table) { TProgram as mp => mp; error as e => return e }
     inline_consts(mono)
@@ -9752,10 +9779,12 @@ pub fn type_program_with_deps(raw_program: parser::Program, dep_prog: TProgram):
  * @param raw_program  the merged, un-typed program (project items only)
  * @param dep_prog     the already-typed dependency program (empty when depless)
  * @param on_item      called `(done, total)` after each top-level item is typed
+ * @param explicit     the `--explicit` strong-typing gate (§11.2); injected into the root Env and
+ *                     carried per-item — false is the untouched default behaviour
  * @return             the checked program (pre-monomorphization) and its type table
  * @throws             the first collection/typing error
  */
-pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: TProgram, on_item: ProgressFn): PreMono | error {
+pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: TProgram, on_item: ProgressFn, explicit: bool): PreMono | error {
     // (TR0) FOLD trait derivations first — PROJECT-LOCAL only (a dep's traits don't fold here:
     // the .tkb codec does not carry trait bodies — the same method-serialization gap as
     // struct/class methods — so a dep trait name in an `&`-list surfaces as the conformance
@@ -9763,7 +9792,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     var folded = fold_traits_collected(raw_program)
     if folded.diags.len > 0 { return PreMono { prog = TProgram { items = teko::list::empty() }; table = tt_empty(); diags = folded.diags } }
     var program = synthesize_mret_structs(canon_class_bases(folded.program))
-    var seed_empty = Collected { types = tt_empty(); env = env_empty() }
+    var seed_empty = Collected { types = tt_empty(); env = with_explicit(env_empty(), explicit) }
     var seed = match seed_from_dep(dep_prog, seed_empty.types, seed_empty.env) {
         Collected as s => s
         error as e => return e
