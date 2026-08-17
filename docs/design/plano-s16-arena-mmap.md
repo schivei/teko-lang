@@ -261,6 +261,17 @@ returned. `size_t n` becomes `u64 n` (identical on LP64).
 
 ### 4.2 Naming / provider flip — RECOMMEND codegen-retarget (task option b)
 
+> **SUPERSEDED (2026-08-17) by `docs/design/plano-s16-runtime-prelude-injection.md`.** The flip
+> mechanism below (retarget `cg_arena_sym` to the Teko symbols, backed by **weak
+> `teko_teko__runtime__*` forwarders in `teko_rt.c`** so ordinary programs still link) is now ILLEGAL:
+> the owner's freeze law (CLAUDE.md, 2026-08-17) forbids editing `teko_rt.c`/`.h`. The abandoned branch
+> `origin/feat/s16-arena-switchover-l2` @ `8ce490c5` implemented exactly that and is ABANDONED. The
+> re-designed, `teko_rt.c`-free flip lives in the runtime-prelude-injection doc: ordinary programs get
+> the arena DEFINITION from injected Teko source (not a forwarder), and per-`#os` routing is a codegen
+> `#if` `#define` ladder (Linux→Teko arena, macOS/Windows→the frozen-but-alive C arena). Read §4.1
+> (the `ptr`/`u64` ABI mirror) and §4.3 (the circularity) below — both still hold — but treat §4.2's
+> provider-flip and §5's single-global-L2 ladder as superseded by that doc's §2/§4/§5.
+
 The emitted symbol from a Teko fn is its MANGLED name (e.g. `tk_t_teko__rt__arena__region_alloc`),
 NOT `tk_region_alloc`. Two ways to make the emitted call resolve to the Teko body:
 
