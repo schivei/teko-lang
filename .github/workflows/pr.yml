@@ -805,6 +805,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # The rung -1 degrau compiler is C-linked directly by build_with_seed_fallback.sh, OUTSIDE
+          # teko's own run_cc (which already emits -Wl,/STACK via build_cc_argv). It therefore inherits
+          # Windows' ~1 MiB default main-thread stack and faults with 0xC00000FD (STATUS_STACK_OVERFLOW)
+          # in consteval while building the tip, cascading into a stale-seed fallback. Widen the PE stack
+          # reserve to 64 MiB (0x4000000) via the script's link-flag passthrough — Windows leg only.
+          TEKO_DEGRAU_LDFLAGS: "-Wl,/STACK:67108864"
         run: sh scripts/produce_assets.sh native windows-x86_64 windows-x86_64
 
       - name: Fixpoint — gen2 == gen3 over the same source, and no emitted C
