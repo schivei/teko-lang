@@ -1154,9 +1154,16 @@ sai 3× no seed), e emite **cast à toa**. Como o número dobrado é o do **host
    do Teko adotam a flag — recaída fica impossível (o build barra), inclusive as dos agentes.
 
 **Sequência de trabalho (drain+reseed no fluxo normal; TESTES SÓ NO CI):**
-1. 🔄 **flag `--explicit`** — gate em `type_binding` (`typer.tks:6636`, `env.explicit && !b.has_type`), campo
-   `explicit` no `Env` (`scope.tks`), parsing (`project.tks`), propagação, **reseed**. Escopo pendente:
-   `var`+`let` (proposto) vs incluir `const`.
+1. ✅ **flag `--explicit`** (2026-08-17, reseed `bea94859`, drenado em `fix/retirement` `7c9f2935`) — via
+   Env-threading: `Env.explicit` injetado no root, gate nos PONTOS DE INFERÊNCIA (diretriz do dono, não
+   varredura). `explicit_binding_gate` em `type_binding` barra `var`/`const` **nomeado** sem tipo; **EXCLUI**
+   aliases estruturais (match `as`, cabeçalho/var de loop — `type_loop` limpa a flag no preâmbulo), discard
+   `_`, e destructure. **Retorno fora do escopo** (Teko não infere retorno de fn nomeada; ausência de `→ T` já
+   é void completo); `const`/params/campos **já obrigatórios** no parser. `explicit_cast_gate` (o gate C):
+   conversão desnecessária vira **ERRO** sob a flag e **silenciosa** no default (o warning `warn_redundant_cast`
+   foi aposentado; o `TCast` fica, o teto D4 ainda conta). **Default OFF** — o checker nunca barra sem a flag
+   (inferência segue recurso da linguagem). Fixpoint **LIMPO** (tc1==tc2==tc3), MEM_PARANOID exit 0. Ainda
+   **NÃO ligada** em nenhum build (aguarda a codebase 100% tipada — passo 3).
 2. ⏳ **varredura de tipagem** — usar `--explicit` pra tipar toda a codebase até zerar.
 3. ⏳ **ligar `--explicit` nos builds + CI** (SÓ após 100% tipado, senão o build quebra) + atualizar memórias
    (o build seco passa a incluir `--explicit`).
