@@ -3191,3 +3191,12 @@ mesmos subsistemas). Empilhar reseed novo de keystone sobre base não-triada = f
 incremento mais seguro disponível é **monolith-emit crumb 0** (guardrail independente, sem dep de §11.2/
 REFRESH) — despachável no OK do dono. Ordem de motor quando destravar: triar husks → (§11.2 A/B/C → tool) e
 (§11 REFRESH → C3–C6) em paralelo → arena L2 FLIP → C-symbol deletion.
+
+### ⚠️ INSTABILIDADE DE AMBIENTE (2026-08-17) — o FS local reverte a um snapshot de 2026-08-13
+Sintoma: `fix/retirement` LOCAL aparece em `6ce8675d` (ponta de `feat/self-construction-dot`, estado de
+2026-08-13) mesmo depois de eu resetar pro origin e commitar. O reflog local PARA em 2026-08-13 — meus
+commits de 2026-08-17 nao aparecem no reflog local porque **o filesystem reverte periodicamente pro
+snapshot**. NAO e coordenador paralelo competindo — e o ambiente. **O ORIGIN e a unica fonte duravel.**
+Protocolo obrigatorio a cada batida/operacao: `git fetch origin fix/retirement && git reset --hard
+origin/fix/retirement` ANTES de trabalhar; `push` DEPOIS. Trabalho de subagente sobrevive so porque cada
+branch e pushada. Nao re-diagnosticar o "clobber" — e esperado.
