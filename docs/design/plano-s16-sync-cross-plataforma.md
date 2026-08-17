@@ -50,7 +50,7 @@ Verificado em `src/parser/parse_decl.tks`, `src/codegen/codegen.tks`, `src/codeg
 **Conclusão:** a infra FFI-da-ABI já linka libSystem (macOS) e kernel32/synchronization (Windows).
 Nenhum crumb-0 de compilador é necessário. O único ajuste de manifest é `[extern.libs.windows]`
 (+`synchronization`); `[extern.libs.macos]` fica VAZIO (libSystem é linkada implicitamente por
-`clang` via `-lSystem` default — `__ulock_*`, `mmap`, `munmap`, `mprotect` resolvem dela).
+`clang` via `-lSystem` default — `os_sync_wait_on_address`/`os_sync_wake_by_address_*`, `mmap`, `munmap`, `mprotect` resolvem dela).
 
 ### Toolchain do CI (decide a lib de link)
 
@@ -68,29 +68,28 @@ Nenhum crumb-0 de compilador é necessário. O único ajuste de manifest é `[ex
 | SO | Escolha | Símbolo(s) | Lib |
 |----|---------|-----------|-----|
 | linux | **INALTERADO** (syscall futex) | `SYS_FUTEX`+`FUTEX_WAIT/WAKE\|PRIVATE` | (syscall) |
-| macos-arm64 | **`__ulock_wait`/`__ulock_wake`** | `__ulock_wait`,`__ulock_wake` | libSystem (implícita) |
+| macos-arm64 | **`os_sync_wait_on_address`/`os_sync_wake_by_address_any`/`_all`** | idem | libSystem (implícita) |
 | windows-x86_64 | **`WaitOnAddress`/`WakeByAddressSingle`/`WakeByAddressAll`** | idem | synchronization |
 
-**macOS: `__ulock` vs `os_sync_wait_on_address` — recomendo `__ulock`.** Justificativa:
+**macOS: `os_sync_wait_on_address` — API PÚBLICA (ruling do dono: mirar na versão mais recente).**
+Justificativa:
 
-- **Compatibilidade (decisor):** `os_sync_wait_on_address` é público mas exige **macOS 14.4+**
-  (mar/2024) — piso duríssimo que quebra em qualquer imagem/máquina Darwin um pouco mais antiga.
-  `__ulock_wait`/`__ulock_wake` existem e são estáveis desde **10.12** (2016), cobrindo 100% da
-  base de instalação alvo (todo Mac arm64 já é ≥ 11.0).
-- **Estabilidade de ABI de-facto:** `__ulock_*` é "privado" mas é o alicerce de `libc++`
-  (`std::atomic::wait`), `libdispatch`, Rust `parking_lot`/std e Go. Apple não pode quebrá-lo sem
-  quebrar o próprio runtime. É a garantia pragmática que precisamos — não é atalho, é a MESMA
-  primitiva que o SO usa por baixo do `os_sync_*`.
-- **Encaixe semântico exato:** `UL_COMPARE_AND_WAIT` compara a palavra de **32 bits** em `addr`
-  contra `value` e bloqueia enquanto iguais — bit-a-bit a semântica do nosso futex de 32 bits.
-  `value` é passado por VALOR (não por ponteiro) → o ramo macos não precisa de scratch.
-- **`ULF_NO_ERRNO`:** faz `__ulock_*` retornar o negativo do erro no próprio retorno em vez de
-  escrever no `errno` (TLS de libc) — alinhado à disciplina §16 de não depender de estado de libc.
-- **Contra:** cabeçalhos não-documentados → transcrevemos as consts de operação à mão (é
-  exatamente a disciplina do `teko::sys`: valores da ABI transcritos, nunca de header C).
+- **API pública e suportada (decisor):** `os_sync_wait_on_address`/`os_sync_wake_by_address_any`/
+  `_all` são a interface OFICIAL e DOCUMENTADA da Apple para wait/wake por endereço
+  (`<os/os_sync_wait_on_address.h>`, libSystem). Sob a lei "sem atalhos", uma ABI pública estável
+  é a implementação REAL; `__ulock_*` é símbolo PRIVADO não-documentado (não é o alvo).
+- **Piso de versão:** exige **macOS 14.4+** (mar/2024). Ruling do dono — mirar na versão mais
+  recente do SO; não suportamos Darwin antigo. Todo alvo macos-arm64 relevante é ≥ 14.4.
+- **Encaixe semântico exato:** `os_sync_wait_on_address(addr, value, size, flags)` bloqueia
+  enquanto os `size` bytes em `addr` == `value` — com `size=4` é bit-a-bit a semântica do nosso
+  futex de 32 bits. `value` é passado por VALOR → o ramo macos NÃO precisa de scratch (diferente
+  do Windows). `os_sync_wake_by_address_any`/`_all` acordam um / todos.
+- **Sem consts de operação:** `flags` é `OS_SYNC_WAIT_ON_ADDRESS_NONE`/
+  `OS_SYNC_WAKE_BY_ADDRESS_NONE` = `0` — dispensa a família `UL_*`/`ULF_*` do `__ulock` privado.
+  Mais simples e sem transcrever ABI não-documentada.
 
-`os_sync_wait_on_address` fica REGISTRADO como upgrade futuro OPCIONAL (fast-path weak-linked) se
-algum dia o piso de versão subir para 14.4 — **não** como stub; `__ulock` é a implementação real.
+(`__ulock_wait`/`__ulock_wake` ficam apenas REGISTRADOS como o mecanismo de compat pré-14.4, NÃO
+adotados — a decisão é a API pública.)
 
 **Windows: `WaitOnAddress`/`WakeByAddress*` (Win8+).** É a API de futex do Win32, cobre todo
 Windows alvo. Alternativa `NtWaitForKeyedEvent` (ntdll) é mais baixa e exige handle de keyed-event
@@ -144,9 +143,9 @@ Todos são `const` Teko literais, transcritos da ABI do SO, `#os`-guardados (o �
 não-alvo antes do checker). Doc-comment completo W15 por const (padrão dos vizinhos linux).
 
 **macOS (`#os("macos")`):**
-- `UL_COMPARE_AND_WAIT: u32 = 1` — op `__ulock` de compare-and-wait de 32 bits.
-- `ULF_NO_ERRNO: u32 = 0x01000000` — retorno cru (sem escrever errno).
-- `ULF_WAKE_ALL: u32 = 0x00000100` — modificador de `__ulock_wake` para acordar TODOS.
+- `OS_SYNC_WAIT_ON_ADDRESS_NONE: u32 = 0` — flags default de `os_sync_wait_on_address`.
+- `OS_SYNC_WAKE_BY_ADDRESS_NONE: u32 = 0` — flags default de `os_sync_wake_by_address_*`.
+  (Ambas = 0; podem ser passadas como literal `0` no call-site — as consts existem por clareza W15.)
 - `PROT_NONE/READ/WRITE: i32 = 0/1/2` — iguais aos do Linux, mas bloco `#os("macos")` próprio.
 - `MAP_PRIVATE: i32 = 0x0002`, `MAP_ANON: i32 = 0x1000` — Darwin `<sys/mman.h>`.
 - `MAP_FAILED_WORD: u64 = 18446744073709551615` — `(void*)-1`, a sentinela de erro do `mmap`.
@@ -168,30 +167,43 @@ memória), cada uma `#os`-guardada, doc-comment W15 completo. Assinaturas C reai
 ### sync (sync.tks)
 ```
 /**
- * ulock_wait — libSystem `__ulock_wait(uint32_t operation, void *addr, uint64_t value,
- * uint32_t timeout_us)`: bloqueia enquanto a palavra de 32 bits em `addr` == baixo-32 de `value`.
- * `addr`/`value` passam em registrador inteiro (ABI arm64/x86_64), por isso `u64`.
+ * os_sync_wait_on_address — libSystem `int os_sync_wait_on_address(void *addr, uint64_t value,
+ * size_t size, os_sync_wait_on_address_flags_t flags)`: bloqueia enquanto os `size` bytes em `addr`
+ * == `value`. Com `size=4` é a semântica do nosso futex de 32 bits. `addr`/`value`/`size` passam em
+ * registrador inteiro (ABI arm64), por isso `u64`; `flags` é enum de 32 bits → `u32`.
  *
- * @param op          a operação `__ulock` (UL_COMPARE_AND_WAIT | ULF_NO_ERRNO)
- * @param addr        endereço da palavra futex de 32 bits
- * @param value       valor esperado (baixo-32 comparado)
- * @param timeout_us  timeout em microssegundos; 0 = infinito
- * @return            0/positivo em wake normal, negativo (-errno) sob ULF_NO_ERRNO — descartado
+ * @param addr   endereço da palavra futex de 32 bits
+ * @param value  valor esperado (comparado `size` bytes)
+ * @param size   bytes a comparar (4)
+ * @param flags  OS_SYNC_WAIT_ON_ADDRESS_NONE (0)
+ * @return       nº de waiters restantes / -1 em erro — descartado
  */
 #os("macos")
-extern fn ulock_wait(op: u32, addr: u64, value: u64, timeout_us: u32): i32 = "__ulock_wait" from "System"
+extern fn os_sync_wait_on_address(addr: u64, value: u64, size: u64, flags: u32): i32 = "os_sync_wait_on_address" from "System"
 
 /**
- * ulock_wake — libSystem `__ulock_wake(uint32_t operation, void *addr, uint64_t wake_value)`:
- * acorda um (ou todos, com ULF_WAKE_ALL) bloqueados na palavra em `addr`.
+ * os_sync_wake_by_address_any — libSystem `int os_sync_wake_by_address_any(void *addr, size_t size,
+ * os_sync_wake_by_address_flags_t flags)`: acorda UM waiter bloqueado na palavra em `addr`.
  *
- * @param op          a operação (UL_COMPARE_AND_WAIT [| ULF_WAKE_ALL] | ULF_NO_ERRNO)
- * @param addr        endereço da palavra futex de 32 bits
- * @param wake_value  0 para o modo compare-and-wait
- * @return            contagem/estado; descartado
+ * @param addr   endereço da palavra futex de 32 bits
+ * @param size   bytes (4)
+ * @param flags  OS_SYNC_WAKE_BY_ADDRESS_NONE (0)
+ * @return       0 em sucesso / -1 em erro — descartado
  */
 #os("macos")
-extern fn ulock_wake(op: u32, addr: u64, wake_value: u64): i32 = "__ulock_wake" from "System"
+extern fn os_sync_wake_by_address_any(addr: u64, size: u64, flags: u32): i32 = "os_sync_wake_by_address_any" from "System"
+
+/**
+ * os_sync_wake_by_address_all — libSystem `int os_sync_wake_by_address_all(void *addr, size_t size,
+ * os_sync_wake_by_address_flags_t flags)`: acorda TODOS os waiters na palavra em `addr`.
+ *
+ * @param addr   endereço da palavra futex de 32 bits
+ * @param size   bytes (4)
+ * @param flags  OS_SYNC_WAKE_BY_ADDRESS_NONE (0)
+ * @return       0 em sucesso / -1 em erro — descartado
+ */
+#os("macos")
+extern fn os_sync_wake_by_address_all(addr: u64, size: u64, flags: u32): i32 = "os_sync_wake_by_address_all" from "System"
 
 /**
  * WaitOnAddress — kernel32 `BOOL WaitOnAddress(volatile VOID *Address, PVOID CompareAddress,
@@ -285,7 +297,7 @@ fn futex_wait(addr: u64, expected: i64) {           // CORPO ATUAL, INALTERADO
 }
 #os("macos")
 fn futex_wait(addr: u64, expected: i64) {
-    _ = ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, addr, (expected to u64) & 0xffffffff, 0)
+    _ = os_sync_wait_on_address(addr, (expected to u64) & 0xffffffff, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE)
 }
 #os("windows")
 fn futex_wait(addr: u64, expected: i64) {
@@ -301,8 +313,8 @@ fn futex_wake(addr: u64, n: i64) {                   // CORPO ATUAL, INALTERADO
 }
 #os("macos")
 fn futex_wake(addr: u64, n: i64) {
-    if n == 1 { _ = ulock_wake(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, addr, 0) }
-    else { _ = ulock_wake(UL_COMPARE_AND_WAIT | ULF_WAKE_ALL | ULF_NO_ERRNO, addr, 0) }
+    if n == 1 { _ = os_sync_wake_by_address_any(addr, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE) }
+    else { _ = os_sync_wake_by_address_all(addr, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE) }
 }
 #os("windows")
 fn futex_wake(addr: u64, n: i64) {
@@ -379,8 +391,8 @@ arena.tks; thread.tks os RE-declara `#os`-guardados (ou o design pode centraliz�
 
 ```
 [extern.libs.macos]
-# libSystem é linkada implicitamente pelo clang (-lSystem default): __ulock_wait/__ulock_wake,
-# mmap/munmap/mprotect/_exit resolvem dela. NENHUMA entrada necessária.  (mantém vazio)
+# libSystem é linkada implicitamente pelo clang (-lSystem default): os_sync_wait_on_address/
+# os_sync_wake_by_address_*, mmap/munmap/mprotect/_exit resolvem dela. NENHUMA entrada necessária.  (mantém vazio)
 
 [extern.libs.windows]
 kernel32 = []          # já existe: FindFirstFileA…, + VirtualAlloc/VirtualFree/VirtualProtect/ExitProcess
@@ -472,7 +484,7 @@ TK_RT_DIR=$PWD/src/runtime TEKO_BACKEND=c /tmp/g0/teko . -o /tmp/x/teko --no-ver
 ```
 Sinal de PASS por crumb:
 - **Crumb 1:** os 3 targets type-checkam (consts novas visíveis só no alvo certo, podadas nos outros).
-- **Crumb 2/3/4:** macOS emite teko.c com `__ulock_wait`/`mmap`/… ; Windows com
+- **Crumb 2/3/4:** macOS emite teko.c com `os_sync_wait_on_address`/`mmap`/… ; Windows com
   `WaitOnAddress`/`VirtualAlloc`/… ; Linux emite teko.c **byte-idêntico** a `bootstrap/teko.c`.
 - O `"unknown type: sys"` de sync.tks:20,34 DESAPARECE nos 3 alvos (era o sintoma do CI vermelho).
 
@@ -486,9 +498,10 @@ split por baixo). Este fixture pertence ao crumb 5 (CI), não à validação loc
 
 ## 9. Riscos + tensões de lei (com resolução recomendada)
 
-1. **`__ulock` privado (macOS).** Risco: símbolo não-documentado. Resolução: é ABI de-facto congelada
-   (libc++/libdispatch dependem); alinhado à disciplina §16 de transcrever a ABI. Sem tensão de lei —
-   é implementação REAL, não atalho. `os_sync_*` fica como upgrade opcional futuro (não stub).
+1. **Piso macOS 14.4+ (`os_sync_wait_on_address`).** Risco: a API pública exige macOS 14.4+.
+   Resolução: ruling do dono — mirar na versão mais recente do SO; não suportamos Darwin antigo.
+   É a API PÚBLICA e documentada (não o símbolo privado `__ulock`), a implementação REAL alinhada à
+   lei "sem atalhos". Sem tensão de lei.
 2. **`buf_ptr` no caminho de `futex_wait`/`thr_guard` (Windows).** Risco: alocação na região da arena
    dentro de uma primitiva de sync/thread. Resolução: só no caminho LENTO (contendido) e só toca a
    arena por-tarefa — que NÃO usa o mutex esperado → sem re-entrância/deadlock. Alternativa sem
