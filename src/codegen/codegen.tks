@@ -13729,6 +13729,42 @@ fn cg_emit_syscall_helper_text(arity: u64): str {
 }
 
 /**
+ * cg_emit_syscall_helper_text_aarch64 — the VERBATIM aarch64-Linux `static inline long
+ * tk_syscallN(...)` body for one arity (register-pinned asm: args `x0 x1 x2 x3 x4 x5`, nr in `x8`,
+ * instruction `svc #0`, ret read back out of `x0` via a `"+r"` in/out constraint so the register that
+ * carries the first argument also carries the return value, matching the real AArch64 Linux syscall
+ * ABI), per `docs/design/plano-s16-syscall-intrinsic.md` §2.5.
+ *
+ * @param arity  the syscall's register-argument count (0..6)
+ * @return       the helper's full C source text, or `""` for an arity outside 0..6
+ * @since §16
+ */
+fn cg_emit_syscall_helper_text_aarch64(arity: u64): str {
+    if arity == 0 to u64 {
+        return "static inline long tk_syscall0(long n) {\n    register long x8 __asm__(\"x8\") = n;\n    register long x0 __asm__(\"x0\");\n    __asm__ volatile (\"svc #0\" : \"=r\"(x0) : \"r\"(x8) : \"memory\");\n    return x0;\n}\n"
+    }
+    if arity == 1 to u64 {
+        return "static inline long tk_syscall1(long n, long a1) {\n    register long x8 __asm__(\"x8\") = n;\n    register long x0 __asm__(\"x0\") = a1;\n    __asm__ volatile (\"svc #0\" : \"+r\"(x0) : \"r\"(x8) : \"memory\");\n    return x0;\n}\n"
+    }
+    if arity == 2 to u64 {
+        return "static inline long tk_syscall2(long n, long a1, long a2) {\n    register long x8 __asm__(\"x8\") = n;\n    register long x0 __asm__(\"x0\") = a1;\n    register long x1 __asm__(\"x1\") = a2;\n    __asm__ volatile (\"svc #0\" : \"+r\"(x0) : \"r\"(x8), \"r\"(x1) : \"memory\");\n    return x0;\n}\n"
+    }
+    if arity == 3 to u64 {
+        return "static inline long tk_syscall3(long n, long a1, long a2, long a3) {\n    register long x8 __asm__(\"x8\") = n;\n    register long x0 __asm__(\"x0\") = a1;\n    register long x1 __asm__(\"x1\") = a2;\n    register long x2 __asm__(\"x2\") = a3;\n    __asm__ volatile (\"svc #0\" : \"+r\"(x0) : \"r\"(x8), \"r\"(x1), \"r\"(x2) : \"memory\");\n    return x0;\n}\n"
+    }
+    if arity == 4 to u64 {
+        return "static inline long tk_syscall4(long n, long a1, long a2, long a3, long a4) {\n    register long x8 __asm__(\"x8\") = n;\n    register long x0 __asm__(\"x0\") = a1;\n    register long x1 __asm__(\"x1\") = a2;\n    register long x2 __asm__(\"x2\") = a3;\n    register long x3 __asm__(\"x3\") = a4;\n    __asm__ volatile (\"svc #0\" : \"+r\"(x0) : \"r\"(x8), \"r\"(x1), \"r\"(x2), \"r\"(x3) : \"memory\");\n    return x0;\n}\n"
+    }
+    if arity == 5 to u64 {
+        return "static inline long tk_syscall5(long n, long a1, long a2, long a3, long a4, long a5) {\n    register long x8 __asm__(\"x8\") = n;\n    register long x0 __asm__(\"x0\") = a1;\n    register long x1 __asm__(\"x1\") = a2;\n    register long x2 __asm__(\"x2\") = a3;\n    register long x3 __asm__(\"x3\") = a4;\n    register long x4 __asm__(\"x4\") = a5;\n    __asm__ volatile (\"svc #0\" : \"+r\"(x0) : \"r\"(x8), \"r\"(x1), \"r\"(x2), \"r\"(x3), \"r\"(x4) : \"memory\");\n    return x0;\n}\n"
+    }
+    if arity == 6 to u64 {
+        return "static inline long tk_syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6) {\n    register long x8 __asm__(\"x8\") = n;\n    register long x0 __asm__(\"x0\") = a1;\n    register long x1 __asm__(\"x1\") = a2;\n    register long x2 __asm__(\"x2\") = a3;\n    register long x3 __asm__(\"x3\") = a4;\n    register long x4 __asm__(\"x4\") = a5;\n    register long x5 __asm__(\"x5\") = a6;\n    __asm__ volatile (\"svc #0\" : \"+r\"(x0) : \"r\"(x8), \"r\"(x1), \"r\"(x2), \"r\"(x3), \"r\"(x4), \"r\"(x5) : \"memory\");\n    return x0;\n}\n"
+    }
+    ""
+}
+
+/**
  * cg_syscall_use_any — does `used` name at least one syscall arity?
  *
  * @param used  the arity bit-set
@@ -13740,14 +13776,56 @@ fn cg_syscall_use_any(used: SyscallUse): bool {
 }
 
 /**
- * cg_emit_syscall_helpers — append the x86_64-Linux `static inline long tk_syscallN(...)` raw-syscall
- * helpers named by `used` to the preamble buffer, in ascending arity, each carrying the
- * `asm volatile("syscall" ...)` with the SysV-Linux register convention. Emits NOTHING when `used`
- * is empty — the use-gate that keeps the syscall-free corpus's own emitted preamble byte-identical
- * (§16 §6). The emitted block is wrapped in a `#if defined(__x86_64__)` / `#error` C guard: this
- * crumb validates x86_64 Linux only (aarch64 is a DESIGN-AHEAD note, §16 §2.5), so a build attempting
- * to compile the generated C on any other host arch honest-stops at `cc` time rather than emitting a
- * silently wrong `syscall` instruction.
+ * cg_emit_syscall_helpers_x86_64 — append the x86_64 helper-text body for every arity `used` names,
+ * in ascending order, to `buf`.
+ *
+ * @param buf   the preamble byte buffer
+ * @param used  the arity bit-set from `cg_scan_syscall_arities`
+ * @return      `buf` with the requested x86_64 helpers appended
+ * @since §16
+ */
+fn cg_emit_syscall_helpers_x86_64(buf: []byte, used: SyscallUse): []byte {
+    var out = buf
+    if used.s0 { out = cb(out, cg_emit_syscall_helper_text(0 to u64)) }
+    if used.s1 { out = cb(out, cg_emit_syscall_helper_text(1 to u64)) }
+    if used.s2 { out = cb(out, cg_emit_syscall_helper_text(2 to u64)) }
+    if used.s3 { out = cb(out, cg_emit_syscall_helper_text(3 to u64)) }
+    if used.s4 { out = cb(out, cg_emit_syscall_helper_text(4 to u64)) }
+    if used.s5 { out = cb(out, cg_emit_syscall_helper_text(5 to u64)) }
+    if used.s6 { out = cb(out, cg_emit_syscall_helper_text(6 to u64)) }
+    out
+}
+
+/**
+ * cg_emit_syscall_helpers_aarch64 — append the aarch64 helper-text body for every arity `used`
+ * names, in ascending order, to `buf`.
+ *
+ * @param buf   the preamble byte buffer
+ * @param used  the arity bit-set from `cg_scan_syscall_arities`
+ * @return      `buf` with the requested aarch64 helpers appended
+ * @since §16
+ */
+fn cg_emit_syscall_helpers_aarch64(buf: []byte, used: SyscallUse): []byte {
+    var out = buf
+    if used.s0 { out = cb(out, cg_emit_syscall_helper_text_aarch64(0 to u64)) }
+    if used.s1 { out = cb(out, cg_emit_syscall_helper_text_aarch64(1 to u64)) }
+    if used.s2 { out = cb(out, cg_emit_syscall_helper_text_aarch64(2 to u64)) }
+    if used.s3 { out = cb(out, cg_emit_syscall_helper_text_aarch64(3 to u64)) }
+    if used.s4 { out = cb(out, cg_emit_syscall_helper_text_aarch64(4 to u64)) }
+    if used.s5 { out = cb(out, cg_emit_syscall_helper_text_aarch64(5 to u64)) }
+    if used.s6 { out = cb(out, cg_emit_syscall_helper_text_aarch64(6 to u64)) }
+    out
+}
+
+/**
+ * cg_emit_syscall_helpers — append the `static inline long tk_syscallN(...)` raw-syscall helpers
+ * named by `used` to the preamble buffer, each carrying the target's `asm volatile(...)` register
+ * convention (x86_64 SysV `syscall`/`rax..r9`, aarch64 Linux `svc #0`/`x0..x8`, per
+ * `docs/design/plano-s16-syscall-intrinsic.md` §2 and §2.5). Emits NOTHING when `used` is empty — the
+ * use-gate that keeps the syscall-free corpus's own emitted preamble byte-identical (§16 §6). The
+ * emitted block is wrapped in an `#if defined(__x86_64__) ... #elif defined(__aarch64__) ... #error`
+ * C guard, so a build attempting to compile the generated C on any other host arch honest-stops at
+ * `cc` time rather than emitting a silently wrong instruction.
  *
  * @param buf   the preamble byte buffer
  * @param used  the arity bit-set from `cg_scan_syscall_arities`
@@ -13758,15 +13836,12 @@ fn cg_emit_syscall_helpers(buf: []byte, used: SyscallUse): []byte {
     if !cg_syscall_use_any(used) { return buf }
     var out = cb(buf, "#if defined(__x86_64__) || defined(__amd64__)\n")
     out = cb(out, "/* teko section 16 raw-syscall intrinsic (x86_64 Linux); emitted only for arities the program uses */\n")
-    if used.s0 { out = cb(out, cg_emit_syscall_helper_text(0 to u64)) }
-    if used.s1 { out = cb(out, cg_emit_syscall_helper_text(1 to u64)) }
-    if used.s2 { out = cb(out, cg_emit_syscall_helper_text(2 to u64)) }
-    if used.s3 { out = cb(out, cg_emit_syscall_helper_text(3 to u64)) }
-    if used.s4 { out = cb(out, cg_emit_syscall_helper_text(4 to u64)) }
-    if used.s5 { out = cb(out, cg_emit_syscall_helper_text(5 to u64)) }
-    if used.s6 { out = cb(out, cg_emit_syscall_helper_text(6 to u64)) }
+    out = cg_emit_syscall_helpers_x86_64(out, used)
+    out = cb(out, "#elif defined(__aarch64__) || defined(__arm64__)\n")
+    out = cb(out, "/* teko section 16 raw-syscall intrinsic (aarch64 Linux); emitted only for arities the program uses */\n")
+    out = cg_emit_syscall_helpers_aarch64(out, used)
     out = cb(out, "#else\n")
-    out = cb(out, "#error \"teko section 16: the raw-syscall intrinsic is validated for x86_64 Linux only (aarch64 design-ahead, docs/design/plano-s16-syscall-intrinsic.md section 2.5)\"\n")
+    out = cb(out, "#error \"teko section 16: the raw-syscall intrinsic is validated for x86_64 and aarch64 Linux only (docs/design/plano-s16-syscall-intrinsic.md section 2 and 2.5)\"\n")
     cb(out, "#endif\n\n")
 }
 
