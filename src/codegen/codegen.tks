@@ -5225,6 +5225,10 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             else if last == "syscall5" { builtin = "tk_syscall5"; has_builtin = true }
             else if last == "syscall6" { builtin = "tk_syscall6"; has_builtin = true }
             else if last == "thread_clone" { builtin = "tk_thread_clone"; has_builtin = true }
+            else if last == "atomic_cas_u32" { builtin = "tk_atomic_cas_u32"; has_builtin = true }
+            else if last == "atomic_xchg_u32" { builtin = "tk_atomic_xchg_u32"; has_builtin = true }
+            else if last == "atomic_add_u32" { builtin = "tk_atomic_add_u32"; has_builtin = true }
+            else if last == "atomic_load_u32" { builtin = "tk_atomic_load_u32"; has_builtin = true }
             // D3 — test-coverage sink (host side-channel): marks executed production fns.
             else if last == "cov_reset" { builtin = "tk_cov_reset"; has_builtin = true }   // () -> void
             else if last == "cov_mark" { builtin = "tk_cov_mark"; has_builtin = true }   // (u64) -> void
@@ -13495,6 +13499,9 @@ type SyscallUse = struct {
     s6: bool
     /** true iff some call site names the §10 `thread_clone` raw thread-spawn intrinsic (plano §3). */
     clone: bool
+    /** true iff some call site names any §10 atomic RMW intrinsic (`atomic_cas_u32`/`atomic_xchg_u32`/
+     *  `atomic_add_u32`/`atomic_load_u32`, plano §6.2 / R5), gating the `tk_atomic_*` helper block. */
+    atomics: bool
 }
 
 /**
@@ -13504,7 +13511,7 @@ type SyscallUse = struct {
  * @since §16
  */
 fn cg_syscall_use_none(): SyscallUse {
-    SyscallUse { s0 = false; s1 = false; s2 = false; s3 = false; s4 = false; s5 = false; s6 = false; clone = false }
+    SyscallUse { s0 = false; s1 = false; s2 = false; s3 = false; s4 = false; s5 = false; s6 = false; clone = false; atomics = false }
 }
 
 /**
@@ -13527,14 +13534,15 @@ fn cg_mark_syscall_call(prog: CgProg, c: checker::TCall, used: SyscallUse): Sysc
     var qualifier_ok = p.segments.len == 1 || p.segments[0].name == "teko"
     if !qualifier_ok { return used }
     var last = p.segments[p.segments.len - 1].name
-    if last == "syscall0" { return SyscallUse { s0 = true; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
-    if last == "syscall1" { return SyscallUse { s0 = used.s0; s1 = true; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
-    if last == "syscall2" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = true; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
-    if last == "syscall3" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = true; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
-    if last == "syscall4" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = true; s5 = used.s5; s6 = used.s6; clone = used.clone } }
-    if last == "syscall5" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = true; s6 = used.s6; clone = used.clone } }
-    if last == "syscall6" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = true; clone = used.clone } }
-    if last == "thread_clone" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = true } }
+    if last == "syscall0" { return SyscallUse { s0 = true; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone; atomics = used.atomics } }
+    if last == "syscall1" { return SyscallUse { s0 = used.s0; s1 = true; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone; atomics = used.atomics } }
+    if last == "syscall2" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = true; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone; atomics = used.atomics } }
+    if last == "syscall3" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = true; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone; atomics = used.atomics } }
+    if last == "syscall4" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = true; s5 = used.s5; s6 = used.s6; clone = used.clone; atomics = used.atomics } }
+    if last == "syscall5" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = true; s6 = used.s6; clone = used.clone; atomics = used.atomics } }
+    if last == "syscall6" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = true; clone = used.clone; atomics = used.atomics } }
+    if last == "thread_clone" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = true; atomics = used.atomics } }
+    if last == "atomic_cas_u32" || last == "atomic_xchg_u32" || last == "atomic_add_u32" || last == "atomic_load_u32" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone; atomics = true } }
     used
 }
 
@@ -13898,6 +13906,46 @@ fn cg_emit_thread_clone_helper(buf: []byte, want: bool): []byte {
     cb(out, "#endif\n\n")
 }
 
+/**
+ * cg_emit_atomic_helpers_text — the VERBATIM `static inline` bodies of the four §10 atomic RMW
+ * intrinsics (plano §6.2 / R5), each a thin wrapper over a compiler `__atomic_*` builtin on a 32-bit
+ * word. `tk_atomic_cas_u32` is a VALUE compare-and-swap: it returns the word that WAS at `addr`
+ * (equal to `expected` on success, the actual current value on failure), the primitive the futex
+ * mutex's 0->1 lock transition needs to be race-free. `tk_atomic_xchg_u32` is an unconditional swap
+ * returning the prior word; `tk_atomic_add_u32` a fetch-and-add returning the prior word (the
+ * sequence condvar's `seq++`); `tk_atomic_load_u32` a sequentially-consistent load (a condvar's seq
+ * snapshot / the join word read). All four are `__ATOMIC_SEQ_CST` and portable across x86_64 and
+ * aarch64 (the compiler lowers them to `lock cmpxchg`/`xchg`/`xadd` or `ldaxr`/`stlxr`), so — unlike
+ * `tk_thread_clone` — they need no per-arch `#if` guard. `static inline` so an unused one costs
+ * nothing and raises no `-Wunused-function`.
+ *
+ * @return  the four helpers' full C source text
+ * @since §10-native
+ */
+fn cg_emit_atomic_helpers_text(): str {
+    "static inline long tk_atomic_cas_u32(long addr, long expected, long desired) {\n    unsigned int e = (unsigned int)expected;\n    __atomic_compare_exchange_n((unsigned int *)(unsigned long)addr, &e, (unsigned int)desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);\n    return (long)(unsigned long)e;\n}\nstatic inline long tk_atomic_xchg_u32(long addr, long value) {\n    return (long)(unsigned long)__atomic_exchange_n((unsigned int *)(unsigned long)addr, (unsigned int)value, __ATOMIC_SEQ_CST);\n}\nstatic inline long tk_atomic_add_u32(long addr, long delta) {\n    return (long)(unsigned long)__atomic_fetch_add((unsigned int *)(unsigned long)addr, (unsigned int)delta, __ATOMIC_SEQ_CST);\n}\nstatic inline long tk_atomic_load_u32(long addr) {\n    return (long)(unsigned long)__atomic_load_n((unsigned int *)(unsigned long)addr, __ATOMIC_SEQ_CST);\n}\n"
+}
+
+/**
+ * cg_emit_atomic_helpers — append the four `tk_atomic_*` §10 atomic RMW helpers to the preamble WHEN
+ * `want` (i.e. some call site named one of `teko::sys::atomic_cas_u32`/`atomic_xchg_u32`/
+ * `atomic_add_u32`/`atomic_load_u32`). Emits NOTHING otherwise — the use-gate that keeps the
+ * atomic-free corpus's preamble byte-identical (the compiler never calls an atomic intrinsic in its
+ * own source, so its self-image emits ZERO atomic helpers ⇒ a clean fixpoint, exactly as
+ * `thread_clone` and the `syscallN` family). No per-arch guard: the `__atomic_*` builtins the helpers
+ * wrap are portable across the supported targets.
+ *
+ * @param buf   the preamble byte buffer
+ * @param want  true iff the program calls a §10 atomic RMW intrinsic (`SyscallUse.atomics`)
+ * @return      `buf` with the four helpers appended when `want`, else `buf` unchanged
+ * @since §10-native
+ */
+fn cg_emit_atomic_helpers(buf: []byte, want: bool): []byte {
+    if !want { return buf }
+    var out = cb(buf, "/* teko section 10 atomic RMW intrinsics (futex mutex/condvar substrate); emitted only if the program uses one */\n")
+    cb(out, cg_emit_atomic_helpers_text())
+}
+
 /** tk_emit_c — the PROGRAM emission entry (the virtual-main over loose top-level statements).
     Kept as the public name every caller uses; delegates to tk_emit_c_mode with CgMode::Program so
     the historical output is byte-identical (the fixpoint is intact). (#265) */
@@ -13980,6 +14028,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     var sc_used = cg_scan_syscall_arities(prog)
     b = cg_emit_syscall_helpers(b, sc_used)
     b = cg_emit_thread_clone_helper(b, sc_used.clone)
+    b = cg_emit_atomic_helpers(b, sc_used.atomics)
 
     // W4c — TYPE DECLS come FIRST (before any function that uses them). Two sub-passes:
     //   a) a forward `typedef struct tk_t_<M> tk_t_<M>;` for every struct/variant/class decl, so

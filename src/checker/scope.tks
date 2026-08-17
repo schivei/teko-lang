@@ -1076,6 +1076,33 @@ fn thread_clone_signature(): @Type() {
 }
 
 /**
+ * atomic_rmw_signature — the fixed `Func` type of a §10 atomic read-modify-write intrinsic
+ * (`teko::sys::atomic_cas_u32`/`atomic_xchg_u32`/`atomic_load_u32`/`atomic_add_u32`, plano §6.2 / R5):
+ * `nargs` `i64` words in, one `i64` out (the machine-word raw convention the `syscallN` family also
+ * uses — every argument is an address or a 32-bit value carried in an `i64`, and the result is the
+ * word the operation observed). These are the atomic primitives the futex mutex and sequence condvar
+ * are built on: without a real compare-and-swap the 0->1 lock transition would race a plain
+ * load+store. Registered beside the `syscall*`/`thread_clone` family because, like them, each is a
+ * compiler builtin lowered to a bespoke `__atomic_*` helper (`tk_atomic_*`) rather than a declared
+ * `.tks` function.
+ *
+ * @param nargs  the intrinsic's argument count (1 for `load`, 2 for `xchg`/`add`, 3 for `cas`)
+ * @return       `Func { params = i64 x nargs; ret = i64; ... }`
+ * @since §10-native
+ */
+fn atomic_rmw_signature(nargs: u64): @Type() {
+    var i64_t: @Type() = Prim { kind = PrimKind::I64 }
+    var ps: []@Type() = tempty()
+    var i: u64 = 0 to u64
+    loop {
+        if i >= nargs { break }
+        ps = teko::list::push(ps, i64_t)
+        i = i + (1 to u64)
+    }
+    Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = teko::list::empty() }
+}
+
+/**
  * Resolve an INJECTED built-in FUNCTION name to its `Func` type (mirrors `scope.c`'s
  * `tk_builtin_fn`): `print`/`println` + `teko::assert`, the self-host str/byte stdlib surface,
  * the D3 coverage sinks, the arena checkpoint/rewind/commit primitives, the heap-backed
@@ -1175,6 +1202,10 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "syscall5" { return syscallN_signature(5 to u64) }
     if name == "syscall6" { return syscallN_signature(6 to u64) }
     if name == "thread_clone" { return thread_clone_signature() }
+    if name == "atomic_cas_u32" { return atomic_rmw_signature(3 to u64) }
+    if name == "atomic_xchg_u32" { return atomic_rmw_signature(2 to u64) }
+    if name == "atomic_add_u32" { return atomic_rmw_signature(2 to u64) }
+    if name == "atomic_load_u32" { return atomic_rmw_signature(1 to u64) }
     if name == "ptr_word" {
         var pwp: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
         return Func { params = pwp; ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = pwp.len; defaults = []; ret_extra = teko::list::empty() }
