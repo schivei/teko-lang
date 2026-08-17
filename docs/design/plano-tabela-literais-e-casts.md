@@ -69,21 +69,63 @@ Fold = pré-computar uma expressão constante em tempo de compilação.
 Princípio: **valor conhecido na emissão → pode dobrar (e dedupar o resultado); valor que depende de
 guarda → emite a expressão com referências, sem fold.**
 
-## 4. Disciplina de casts
+## 4. Conversões e casts
 
-Nenhuma parte relaxa a segurança da linguagem.
+O **mecanismo** de cast está OK — `x to T` é bem-vindo, e um `teko::casting<T, U>(t): U` unchecked
+que dá pânico também. O problema é o **volume**: o dono afirma com certeza que **95%+ das conversões
+na codebase são desnecessárias**. O trabalho é **eliminar** as desnecessárias, não redesenhar o cast.
+Nenhuma parte relaxa a segurança.
 
-1. **Todo cast permanece checado.** Não existe cast silencioso. Uma conversão que pode mudar o valor
-   ou perder (ex.: `i64 to i32`, `u64 to i64`) é sempre verificada.
-2. **Stdlib de verificação prévia.** Se o programador precisa castar, há uma forma de perguntar "esse
-   cast é possível?" e tratar como **valor** (errors-as-values), em vez de bater no `tk_panic_cast`
-   de surpresa. O abort deixa de ser o caminho normal.
-3. **A raiz do "cast à toa" é tipo errado na origem/destino.** A maioria dos casts **não deveria
-   existir** — some quando o valor **já nasce/está no tipo certo**. É uma **varredura nos tipos**, não
-   um truque de codegen que "adivinha" no-ops.
-   - `((int64_t)11ULL)` some porque o `11` **já é `i64`** (nasce no tipo certo, referenciado da tabela).
-   - `address to i64` some quando o tipo do argumento de syscall é uma **word de 64 bits** que casa com
-     `u64` — sem conversão checada que aborta em endereço alto.
+### 4.1 Três baldes
+
+1. **Segura e provável estaticamente → permitida, CUSTO ZERO** (sem checagem em runtime;
+   reinterpretação ou zero-extend). O conjunto das conversões seguras que devem ser possíveis:
+   - widening de inteiros (`u32→u64`, `i32→i64`, `u8→u64`…)
+   - `bool → número` (inteiros e floats)
+   - `f32 → f64`
+   - `char ↔ u32`
+   - `char → [4]byte` (e talvez `[4]byte → char`)
+   - `inteiros → bigint`
+   - `floats → decimal`
+   - `str → []char`
+   - entre **tipos estritos de mesmo tamanho e classe** — subtipo↔base, enums, flags
+     (`type word: i64`; `w to i64`; `u to word`): o `to` é **obrigatório pela estritude** (tipos
+     distintos), mas seguro, sem perda; pânico só se fosse impossível — e entre `word`/`i64` nunca é.
+   - Linha implícito-vs-explícito (proposta, a confirmar): **widening numérico é implícito** (o
+     compilador engole sem exigir `to`); **travessias de tipo nomeado** (subtipo↔base, enum, flag,
+     `char↔u32`, `int→bigint`, `float→decimal`, `str→[]char`) **exigem `to`**, mas são seguras e sem
+     custo.
+2. **Pode perder → CHECADA:** narrowing (`i64 to i32`), `u64↔i64` quando o sinal importa. Pânico, ou
+   erro-como-valor via **`teko::casting`** (já existe: `u64_to_u32`, `i64_to_i32`, `u64_to_i32`, … →
+   `T | error`). Estender onde faltar.
+3. **Desnecessária (as 95%) → ELIMINAR.** Três origens, a (b) é a maioria:
+   - **(b) tipo mal-casado na API** (MAIORIA) — a API escolheu o tipo errado (ex.: `i64` onde o
+     domínio é não-negativo → `u64`/word), espalhando `to` em todo chamador. Arrumar o tipo na fonte;
+     os `to` somem. Criar novos tipos onde ajuda (ex.: word de 64 bits nos args de syscall — sem
+     `u64→i64` que aborta em endereço alto).
+   - **(a) widening seguro** (minoria) — o compilador passa a aceitá-lo implícito (balde 1).
+   - **literais com `to` de inferência** — `var x = 42 to i64` usa o `to` como muleta pra dar tipo ao
+     literal. O certo é **tipar a variável**: `var x: i64 = 42` — o literal nasce no tipo, sem `to`.
+
+### 4.2 Convenção de tipagem (W15) — a raiz de grande parte do balde 3
+
+- **A codebase do Teko é tipada explícita e fortemente.** Zero inferência de variável na casa do
+  Teko; o literal nasce no tipo da declaração. Isso mata os `literal to T` de inferência, elimina a
+  maioria das conversões desnecessárias, e **baixa o custo de compilação** (o compilador para de
+  inferir).
+- **O checker NÃO barra.** A inferência continua um **recurso válido da linguagem** para o
+  desenvolvedor que USA Teko — a convenção é **interna** à codebase do compilador/stdlib, nunca uma
+  regra imposta que barre o usuário.
+- **Aplicação:** é um ferimento W15 disseminado que **até agentes que aplicam W15 passam direto**.
+  Logo: varredura da codebase para tipar tudo + os **briefs dos agentes exigem tipagem explícita**
+  como item de checklist (senão passam direto, como sempre passaram). A aderência é por disciplina e
+  revisão, não por barreira de compilador.
+
+### 4.3 Exemplos resolvidos
+
+- `((int64_t)11ULL)` some: o `11` **já é `i64`** (nasce no tipo, referenciado da tabela §2) — sem cast.
+- `address to i64` some: o argumento de syscall passa a ser uma **word de 64 bits** que casa com
+  `u64` — sem conversão checada que aborta em endereço alto (balde 3-b).
 
 ## 5. Conexões
 
