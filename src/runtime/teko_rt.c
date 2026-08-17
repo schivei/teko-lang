@@ -2562,7 +2562,15 @@ void tk_task_end(tk_task *previous) {
     if (ending != &tk_g_main_task) free(ending);
 }
 
+#ifndef _WIN32
 // ============================ (§10 C0a) tk_thread_spawn ============================================
+//
+// The whole §10 concurrency block (C0a thread-spawn, C0b memchan, C5 waitgroup) is pthread-backed and
+// therefore POSIX-only: <pthread.h> is itself #ifndef _WIN32-guarded, and the Windows compiler build
+// links no -pthread (see append_pthread_flag). Windows §10 concurrency is a later §16 native-lib task;
+// until then these definitions are simply absent on Windows. Nothing in the single-threaded teko
+// compiler calls them, so their absence is link-safe — codegen only emits tk_thread_spawn into USER
+// programs, which are out of scope here.
 //
 // The spawned thread's _Thread_local tk_g_current_task is INDEPENDENT of the spawning thread's (one
 // %fs-relative load per thread). tk_task_begin on the new thread starts from an EMPTY discipline (no
@@ -2849,6 +2857,7 @@ uint64_t tk_waitgroup_selftest(int64_t n) {
     tk_waitgroup_end(wg);
     return 0;
 }
+#endif // _WIN32 — end of the pthread-backed §10 concurrency block (C0a/C0b/C5)
 
 // ============================ (§10 C0c) tk_oschan ================================================
 //
