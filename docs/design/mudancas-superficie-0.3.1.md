@@ -1164,7 +1164,16 @@ sai 3× no seed), e emite **cast à toa**. Como o número dobrado é o do **host
    foi aposentado; o `TCast` fica, o teto D4 ainda conta). **Default OFF** — o checker nunca barra sem a flag
    (inferência segue recurso da linguagem). Fixpoint **LIMPO** (tc1==tc2==tc3), MEM_PARANOID exit 0. Ainda
    **NÃO ligada** em nenhum build (aguarda a codebase 100% tipada — passo 3).
-2. ⏳ **varredura de tipagem** — usar `--explicit` pra tipar toda a codebase até zerar.
+2. 🔄 **varredura de tipagem** — DIMENSIONADA (2026-08-17): ~**14.131** `var` sem tipo na codebase
+   (concentração: `lir/lower.tks` 1319, `codegen.tks` 1031, `typer.tks` 784, `project.tks` 446, `emit/
+   tkb_read.tks` 365, …). Escala massiva → **DECISÃO DE ESTRATÉGIA DO DONO PENDENTE**: (A) construir uma
+   FERRAMENTA de auto-anotação — o compilador já infere o tipo de cada `var`; um codemod insere
+   `: <tipo>` preservando formatação, roda uma vez sobre toda a árvore (risco: mapear tipo-INTERNO do
+   checker → tipo de SUPERFÍCIE grafável); (B) faseado por subsistema com agentes (inviável 100% manual
+   a 14k); (C) híbrido — a ferramenta gera o rascunho, agentes revisam por área. Recomendação do
+   coordenador: **(A)** ou **(C)**. NÃO despachar em massa sem a estratégia ratificada. Nota: tipar uma
+   `var` não deve mudar os bytes emitidos (o tipo anotado = o já inferido) → provável **sem reseed** por
+   arquivo-folha; confirmar no primeiro lote.
 3. ⏳ **ligar `--explicit` nos builds + CI** (SÓ após 100% tipado, senão o build quebra) + atualizar memórias
    (o build seco passa a incluir `--explicit`).
 4. ⏳ **tabela de literais** — emitir por referência + dedup + gating `#if` das guardadas → **reseed**.
