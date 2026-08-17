@@ -1,0 +1,135 @@
+/** The exit code a fully passing current-region-stack gate reports. */
+pub const GATE_OK: i32 = 42
+
+/** How many bytes each probe allocation asks for — one alignment-sized block, well inside a chunk. */
+pub const CUR_BLOCK_BYTES: u64 = 64
+
+/** The distinctive word written into a root-lifetime block to prove it survives a child drop. */
+pub const CUR_SENTINEL: u64 = 12297829382473034410
+
+/** With nothing entered, the current region must be the root; exit code when it is not. */
+pub const E_CUR_EMPTY_IS_ROOT: i32 = 70
+
+/** After entering a child, the current region must be that child; exit code when it is not. */
+pub const E_CUR_TOP_IS_CHILD: i32 = 71
+
+/** An allocation made while a child is current must land in the child; exit code otherwise. */
+pub const E_CUR_ALLOC_NOT_IN_CHILD: i32 = 72
+
+/** An allocation into the entered child must not disturb the root's chunk list; exit code otherwise. */
+pub const E_CUR_ROOT_DISTURBED: i32 = 73
+
+/** Leaving the child must restore the root as the current region; exit code when it does not. */
+pub const E_CUR_LEAVE_RESTORES_ROOT: i32 = 74
+
+/** After leaving, an allocation must land in the root; exit code otherwise. */
+pub const E_CUR_ALLOC_NOT_IN_ROOT: i32 = 75
+
+/** The child block and the root block must be distinct addresses; exit code when they alias. */
+pub const E_CUR_ALLOC_ALIAS: i32 = 76
+
+/** The child must be live on the registry before it is dropped; exit code otherwise. */
+pub const E_CUR_CHILD_MISSING: i32 = 77
+
+/** Dropping the child must remove it from the live-region registry; exit code when it survives. */
+pub const E_CUR_CHILD_NOT_FREED: i32 = 78
+
+/** The root must survive the child's drop; exit code when the drop takes the root too. */
+pub const E_CUR_ROOT_LOST: i32 = 79
+
+/** The root block's data must survive the child's drop; exit code when it is corrupted. */
+pub const E_CUR_ROOT_DATA_LOST: i32 = 80
+
+/**
+ * Fails loudly when an invariant does not hold, exiting with the invariant's own code so a failure
+ * names itself.
+ *
+ * @param held  the invariant's truth value
+ * @param code  the exit code identifying this invariant, used only on failure
+ * @return      nothing
+ */
+pub fn demand(held: bool, code: i32) {
+    if held { return }
+    exit(code)
+}
+
+/**
+ * Tests whether a region is currently on the live-region registry — the observable the drop check
+ * asserts on.
+ *
+ * @param control  the control block's base address
+ * @param wanted   the region to look for
+ * @return         true when the registry still holds it
+ */
+pub fn registry_holds(control: u64, wanted: u64): bool {
+    var region = ctrl_get(control, CTRL_REGS)
+    loop {
+        if region == 0 { break }
+        if region == wanted { return true }
+        region = region_get(region, REGION_REG_NEXT)
+    }
+    false
+}
+
+/**
+ * Tests whether `block` lands inside one of `region`'s chunks — the observable that proves an
+ * allocation was routed to the intended region, by walking the region's own chunk list and checking
+ * the block against each chunk's payload extent.
+ *
+ * @param region  the region whose chunk list is walked
+ * @param block   the allocated block's base address
+ * @return        true when the block lies within a chunk this region owns
+ */
+pub fn block_in_region(region: u64, block: u64): bool {
+    var chunk = region_get(region, REGION_HEAD)
+    loop {
+        if chunk == 0 { break }
+        var lo = chunk_payload(chunk)
+        var hi = lo + chunk_get(chunk, CHUNK_CAP)
+        if block >= lo && block < hi { return true }
+        chunk = chunk_get(chunk, CHUNK_NEXT)
+    }
+    false
+}
+
+/**
+ * Runs the current-region-stack gate (crumb D): with nothing entered the current region is the root;
+ * entering a child makes it current so `cur_alloc` lands in the child while the root is untouched;
+ * leaving restores the root so the next `cur_alloc` lands there; and dropping the child frees the
+ * child from the registry while the root and its data survive. Every check asserts an observable — a
+ * region identity, a chunk-membership, a registry membership, a surviving sentinel word — never the
+ * mere absence of a crash.
+ *
+ * @return  `GATE_OK` (42) when the current-region discipline holds; any other exit names the break
+ */
+pub fn run_current_region_gate(): i32 {
+    var control = control_new()
+    var root = region_root(control)
+    demand(cur_current(control) == root, E_CUR_EMPTY_IS_ROOT)
+    var root_head_before = region_get(root, REGION_HEAD)
+
+    var child = region_new(control, root)
+    cur_enter(control, child)
+    demand(cur_current(control) == child, E_CUR_TOP_IS_CHILD)
+
+    var child_block = cur_alloc(control, CUR_BLOCK_BYTES)
+    demand(block_in_region(child, child_block), E_CUR_ALLOC_NOT_IN_CHILD)
+    demand(region_get(root, REGION_HEAD) == root_head_before, E_CUR_ROOT_DISTURBED)
+
+    cur_leave(control)
+    demand(cur_current(control) == root, E_CUR_LEAVE_RESTORES_ROOT)
+
+    var root_block = cur_alloc(control, CUR_BLOCK_BYTES)
+    demand(block_in_region(root, root_block), E_CUR_ALLOC_NOT_IN_ROOT)
+    demand(root_block != child_block, E_CUR_ALLOC_ALIAS)
+    store_word(root_block, CUR_SENTINEL)
+
+    demand(registry_holds(control, child), E_CUR_CHILD_MISSING)
+    region_drop(control, child)
+    demand(!registry_holds(control, child), E_CUR_CHILD_NOT_FREED)
+    demand(registry_holds(control, root), E_CUR_ROOT_LOST)
+    demand(load_word(root_block) == CUR_SENTINEL, E_CUR_ROOT_DATA_LOST)
+
+    control_free(control)
+    GATE_OK
+}

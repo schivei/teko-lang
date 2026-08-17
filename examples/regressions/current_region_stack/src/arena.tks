@@ -1,0 +1,1282 @@
+/** The arena's payload alignment: the C twin's `TK_ARENA_ALIGN`, 16 on every supported target. */
+pub const ARENA_ALIGN: u64 = 16
+
+/** The default chunk payload the arena requests: the C twin's `TK_REGION_DEFAULT_CHUNK`. */
+pub const DEFAULT_CHUNK: u64 = 65536
+
+/** The width of the machine word every arena field occupies. */
+pub const WORD: u64 = 8
+
+/** Chunk field: the next chunk in the region's LIFO list, 0 at the end. */
+pub const CHUNK_NEXT: u64 = 0
+
+/** Chunk field: the payload's usable byte count. */
+pub const CHUNK_CAP: u64 = 8
+
+/** Chunk field: the bump cursor, i.e. how many payload bytes are already handed out. */
+pub const CHUNK_USED: u64 = 16
+
+/** The chunk header's size, and therefore the payload's offset from the page-aligned chunk base. */
+pub const CHUNK_HEADER: u64 = 32
+
+/** Region field: the current chunk, 0 while the region has never allocated (lazy head). */
+pub const REGION_HEAD: u64 = 0
+
+/** Region field: the INTRUSIVE link into the live-region registry (distinct from the tree edge). */
+pub const REGION_REG_NEXT: u64 = 8
+
+/** Region field: the arena TREE edge; 0 for the root or a deliberately parentless region. */
+pub const REGION_PARENT: u64 = 16
+
+/** Region field: the per-region type-to-instance entry array, 0 until the first registration. */
+pub const REGION_ENTRIES: u64 = 24
+
+/** Region field: how many entries of that array are in use. */
+pub const REGION_NENTRIES: u64 = 32
+
+/** Region field: how many entries that array can hold. */
+pub const REGION_ENTRIES_CAP: u64 = 40
+
+/** Region field: the unique generation stamp, never reused, so a recycled address reads as fresh. */
+pub const REGION_GEN: u64 = 48
+
+/** A region header's total size: seven words rounded up to the arena's alignment. */
+pub const REGION_BYTES: u64 = 64
+
+/** Entry field: the registered type's identifier. */
+pub const ENTRY_TYPE_ID: u64 = 0
+
+/** Entry field: the registered instance's address. */
+pub const ENTRY_INSTANCE: u64 = 8
+
+/** One entry's size: a type identifier and an instance address. */
+pub const ENTRY_BYTES: u64 = 16
+
+/** The entry array's first capacity, the C twin's `entries_cap == 0 ? 4` step. */
+pub const ENTRIES_FIRST_CAP: u64 = 4
+
+/** Control field: the sentinel proving the block was initialized. */
+pub const CTRL_MAGIC: u64 = 0
+
+/** Control field: the head of the live-region registry (the C twin's `tk_g_regs`). */
+pub const CTRL_REGS: u64 = 8
+
+/** Control field: the process root region (the C twin's `tk_g_root`), 0 until first demanded. */
+pub const CTRL_ROOT: u64 = 16
+
+/** Control field: the monotonic region-generation counter (the C twin's `tk_g_region_gen`). */
+pub const CTRL_GEN: u64 = 24
+
+/** Control field: the mark stack's depth (the C twin's `tk_arena_msp`). */
+pub const CTRL_MSP: u64 = 32
+
+/** Control field: the free list of blocks too large to bin (the C twin's `tk_free_large`). */
+pub const CTRL_FREE_LARGE: u64 = 40
+
+/** Control field: the head META-POOL slab, threaded through each slab's link word for teardown. */
+pub const CTRL_META_SLAB: u64 = 48
+
+/** Control field: the META-POOL bump cursor — the next free address in the current slab. */
+pub const CTRL_META_CURSOR: u64 = 56
+
+/** Control field: the exclusive end address of the current META-POOL slab. */
+pub const CTRL_META_END: u64 = 64
+
+/**
+ * Control field: the head of the region-header free-list — the META-POOL keystone. A freed 64 B
+ * header is threaded onto this single-linked list through its own first word so a later
+ * `region_new` reuses the SAME cell, mirroring `malloc/free` so the flip does not grow steady-state
+ * metadata. The fixture's non-vacuous header-reuse assert reads exactly this behaviour.
+ */
+pub const CTRL_HDR_FREE: u64 = 72
+
+/** Control field: the process PROGRAM region singleton (the C twin's `tk_region_program`). */
+pub const CTRL_PROGRAM: u64 = 80
+
+/**
+ * Control field: the `TEKO_MEM_PARANOID` oracle state (0 off, 1 on). Held as a directly-settable
+ * field the gate flips rather than an env probe, so both halves of the oracle are proven in one C-leg
+ * binary without a libc `getenv`/`setenv` (the native-leg probe's env path collides with `<stdlib.h>`
+ * on the C backend).
+ */
+pub const CTRL_PARANOID: u64 = 88
+
+/** Control field: the base of the mark stack (the C twin's `tk_arena_marks`). */
+pub const CTRL_MARKS: u64 = 128
+
+/** Mark field: the chunk the checkpoint was taken in. */
+pub const MARK_CHUNK: u64 = 0
+
+/** Mark field: that chunk's bump cursor at checkpoint time. */
+pub const MARK_USED: u64 = 8
+
+/** One mark's size: a chunk address and a bump cursor. */
+pub const MARK_BYTES: u64 = 16
+
+/** How many checkpoints the mark stack holds; a deeper push saves nothing, as in the C twin. */
+pub const MARK_SLOTS: u64 = 64
+
+/** Control field: the base of the size-class free bins (the C twin's `tk_free_bins`). */
+pub const CTRL_FREE_BINS: u64 = 1152
+
+/** How many size classes the free bins hold; class `i` is exactly `(i + 1) * ARENA_ALIGN` bytes. */
+pub const FREE_BINS: u64 = 4096
+
+/**
+ * Control field: the current-region stack pointer — how many child regions are entered (the C twin's
+ * `cur_rsp`). May exceed `CUR_STACK_SLOTS`; the push write is guarded, the count still increments, so
+ * push/leave stay balanced exactly as the C twin.
+ */
+pub const CTRL_CUR_SP: u64 = 33920
+
+/**
+ * Control field: the base of the current-region stack — `CUR_STACK_SLOTS` region handles; `alloc`
+ * bumps from the TOP, or from the root when the stack is empty (the C twin's `cur_regions`).
+ */
+pub const CTRL_CUR_STACK: u64 = 33928
+
+/**
+ * How many entered child regions the current-region stack holds; a deeper enter counts but saves no
+ * handle, matching the C twin's `TK_REGION_STACK_MAX`.
+ */
+pub const CUR_STACK_SLOTS: u64 = 64
+
+/**
+ * The control block's total size after the current-region stack: the scalars, the mark stack, the
+ * free bins, and the 64-slot current-region stack, rounded to the arena's alignment.
+ */
+pub const CTRL_BYTES: u64 = 34448
+
+/** The sentinel `control_new` writes so an uninitialized mapping is never mistaken for a live one. */
+pub const CTRL_MAGIC_VALUE: u64 = 2596069104
+
+/** Freenode field: the next parked block of the same class. */
+pub const FREENODE_NEXT: u64 = 0
+
+/** Freenode field: the parked block's usable byte count. */
+pub const FREENODE_BYTES: u64 = 8
+
+/** The smallest block that can be parked: one that has room for a freenode's two fields. */
+pub const FREENODE_BYTES_MIN: u64 = 16
+
+/** The largest block a size class can hold; anything bigger goes on the large list. */
+pub const FREE_BIN_MAX_BYTES: u64 = 65536
+
+/** How far the large list is scanned before giving up, so a long list never goes quadratic. */
+pub const FREE_LARGE_SCAN: u64 = 32
+
+/** The META-POOL slab size: 64 KB (16 pages), bump-allocated for fixed-size metadata. */
+pub const AR_META_SLAB: u64 = 65536
+
+/** A META-POOL slab's link word offset: threads the slab list for teardown. */
+pub const AR_SLAB_LINK: u64 = 0
+
+/** A META-POOL slab's size word offset: records the mapping length so teardown can munmap it. */
+pub const AR_SLAB_SIZE: u64 = 8
+
+/** A META-POOL slab's reserved header, before the first bump cell; holds the link and size words. */
+pub const AR_SLAB_HEADER: u64 = 16
+
+/** The exit code the raw OOM path issues via `exit_group`, when even mmap of the exact size fails. */
+pub const AR_OOM_CODE: i64 = 137
+
+/** `CTRL_PARANOID` when the oracle is off: freed blocks are parked and reused. */
+pub const PARANOID_OFF: u64 = 0
+
+/** `CTRL_PARANOID` when the oracle is on: freed blocks are poisoned and never reused. */
+pub const PARANOID_ON: u64 = 1
+
+/** The byte the poison writes over a freed block (the C twin's `memset(p, 0xDD, usable)`). */
+pub const POISON_BYTE: u64 = 221
+
+/** The word the poison writes over a freed block: eight `0xDD` bytes. */
+pub const POISON_WORD: u64 = 15987178197214944733
+
+/** A distinctive nonzero word the writability checks store and read back across a block's extent. */
+pub const WRITABLE_PATTERN: u64 = 12297829382473034410
+
+/**
+ * Rounds a size up to the arena's payload alignment — the `(n + 15) & ~15` the C twin applies to
+ * every request and bump offset, in arithmetic so it needs no cast.
+ *
+ * @param n  the size or offset to round
+ * @return   the smallest multiple of `ARENA_ALIGN` that is at least `n`
+ */
+pub fn round_up_align(n: u64): u64 {
+    var slack = n % ARENA_ALIGN
+    if slack == 0 { return n }
+    n + ARENA_ALIGN - slack
+}
+
+/**
+ * Rounds a size DOWN to the arena's payload alignment — the floor the C twin applies when PARKING a
+ * freed block, never a ceil: the caller's byte count is a true lower bound of the block's extent.
+ *
+ * @param n  the size to round
+ * @return   the largest multiple of `ARENA_ALIGN` that is at most `n`
+ */
+pub fn round_down_align(n: u64): u64 {
+    n - n % ARENA_ALIGN
+}
+
+/**
+ * Reads one machine word at a computed address — the whole raw READ surface, one non-allocating
+ * `LLoad` (`teko::mem::load_u64`). An allocator whose own reads allocate does not terminate.
+ *
+ * @param address  where to read
+ * @return         the word at `address`
+ */
+pub fn load_word(address: u64): u64 {
+    teko::mem::load_u64(address)
+}
+
+/**
+ * Writes one machine word at a computed address — the whole raw WRITE surface, one non-allocating
+ * `LStore` (`teko::mem::store_u64`).
+ *
+ * @param address  where to write
+ * @param value    the word to write
+ * @return         nothing
+ */
+pub fn store_word(address: u64, value: u64) {
+    teko::mem::store_u64(address, value)
+}
+
+/**
+ * Maps `length` bytes of anonymous private read/write memory through the raw `mmap` syscall — the
+ * arena's ONLY memory source. The kernel returns a page-aligned address (so at least 16-aligned,
+ * subsuming `TK_ARENA_ALIGN`) or a value in the `[-4095, -1]` `-errno` error band.
+ *
+ * @param length  the mapping size in bytes; the kernel rounds it up to whole pages
+ * @return        the page-aligned base address, or 0 when the kernel refuses
+ */
+pub fn raw_mmap(length: u64): u64 {
+    var result = teko::sys::syscall6(sys::SYS_MMAP, 0, length to i64,
+        sys::PROT_READ | sys::PROT_WRITE, sys::MAP_PRIVATE | sys::MAP_ANONYMOUS, -1, 0)
+    if result >= -4095 && result <= -1 { return 0 }
+    result to u64
+}
+
+/**
+ * Releases a mapping obtained from `raw_mmap` through the raw `munmap` syscall. The kernel rounds
+ * the length up to whole pages, so passing the request length unmaps exactly the pages `raw_mmap`
+ * obtained.
+ *
+ * @param address  the mapping's base address (page-aligned, as `mmap` returned)
+ * @param length   the mapping's request length
+ * @return         nothing
+ */
+pub fn raw_munmap(address: u64, length: u64) {
+    _ = teko::sys::syscall2(sys::SYS_MUNMAP, address to i64, length to i64)
+}
+
+/**
+ * Fails an unsatisfiable allocation the RAW way: `exit_group` with a static code, never a computed
+ * panic string (which would re-enter the arena it is failing inside).
+ *
+ * @return  nothing (the process terminates)
+ */
+pub fn raw_oom() {
+    _ = teko::sys::syscall1(sys::SYS_EXIT_GROUP, AR_OOM_CODE)
+}
+
+/**
+ * Reads a CONTROL-block field.
+ *
+ * @param control  the control block's base address
+ * @param field    the field's offset within the block
+ * @return         the field's current value
+ */
+pub fn ctrl_get(control: u64, field: u64): u64 {
+    load_word(control + field)
+}
+
+/**
+ * Writes a CONTROL-block field.
+ *
+ * @param control  the control block's base address
+ * @param field    the field's offset within the block
+ * @param value    the value to store
+ * @return         nothing
+ */
+pub fn ctrl_set(control: u64, field: u64, value: u64) {
+    store_word(control + field, value)
+}
+
+/**
+ * Maps a fresh META-POOL slab, recording its mapping size in the slab header and clearing its link
+ * word. A mapping failure is fatal — the arena cannot make progress without metadata storage.
+ *
+ * @param slab_bytes  the slab mapping size (`AR_META_SLAB`, or larger for an oversized cell)
+ * @return            the slab's base address, never 0
+ */
+pub fn meta_slab_new(slab_bytes: u64): u64 {
+    var slab = raw_mmap(slab_bytes)
+    if slab == 0 { raw_oom() }
+    store_word(slab + AR_SLAB_LINK, 0)
+    store_word(slab + AR_SLAB_SIZE, slab_bytes)
+    slab
+}
+
+/**
+ * Bump-allocates a fixed-size metadata cell of `bytes` from the META-POOL, growing by another slab
+ * when the current one is exhausted. A cell larger than a slab's bump capacity gets its own
+ * exactly-sized slab. This is the mmap-specific keystone: the kernel's minimum mapping is one page,
+ * so one mmap per 64 B header would be a 64x footprint blow-up — the META-POOL sub-allocates them.
+ *
+ * @param control  the control block's base address
+ * @param bytes    the cell size in bytes; rounded up to the arena's alignment
+ * @return         the cell's base address
+ */
+pub fn meta_alloc(control: u64, bytes: u64): u64 {
+    var size = round_up_align(bytes)
+    var cursor = ctrl_get(control, CTRL_META_CURSOR)
+    var end = ctrl_get(control, CTRL_META_END)
+    if cursor + size > end {
+        var need = AR_SLAB_HEADER + size
+        var slab_bytes = if need > AR_META_SLAB { round_up_align(need) } else { AR_META_SLAB }
+        var slab = meta_slab_new(slab_bytes)
+        store_word(slab + AR_SLAB_LINK, ctrl_get(control, CTRL_META_SLAB))
+        ctrl_set(control, CTRL_META_SLAB, slab)
+        cursor = slab + AR_SLAB_HEADER
+        ctrl_set(control, CTRL_META_END, slab + slab_bytes)
+    }
+    ctrl_set(control, CTRL_META_CURSOR, cursor + size)
+    cursor
+}
+
+/**
+ * Obtains a 64 B region header — from the header free-list when it is non-empty, else a fresh
+ * META-POOL cell. Reusing a freed header is the reuse `region_drop` feeds, and the property the
+ * META-POOL assert demands: a drop-then-new region lands on the SAME header address.
+ *
+ * @param control  the control block's base address
+ * @return         a region header's base address
+ */
+pub fn header_alloc(control: u64): u64 {
+    var recycled = ctrl_get(control, CTRL_HDR_FREE)
+    if recycled != 0 {
+        ctrl_set(control, CTRL_HDR_FREE, load_word(recycled))
+        return recycled
+    }
+    meta_alloc(control, REGION_BYTES)
+}
+
+/**
+ * Returns a region header to the free-list, threading it through the header's own first word so the
+ * next `region_new` reuses this exact cell — the malloc/free footprint mirror. Disabling this push
+ * (leaking the header) is what the non-vacuous META-POOL assert catches.
+ *
+ * @param control  the control block's base address
+ * @param region   the header to reclaim
+ * @return         nothing
+ */
+pub fn header_free(control: u64, region: u64) {
+    store_word(region, ctrl_get(control, CTRL_HDR_FREE))
+    ctrl_set(control, CTRL_HDR_FREE, region)
+}
+
+/**
+ * Opens a fresh control block by mapping the first META-POOL slab and carving the CONTROL block from
+ * the front of it. The mapping is zero-filled by the kernel, so every root field starts at its
+ * correct zero (empty registry, no root, generation 0, depth 0, oracle off); only the sentinel and
+ * the META-POOL cursor need writing. The control address is threaded explicitly rather than kept in
+ * a process word, which makes every function independently testable.
+ *
+ * @return  the control block's base address
+ */
+pub fn control_new(): u64 {
+    var slab = meta_slab_new(AR_META_SLAB)
+    var control = slab + AR_SLAB_HEADER
+    ctrl_set(control, CTRL_MAGIC, CTRL_MAGIC_VALUE)
+    ctrl_set(control, CTRL_META_SLAB, slab)
+    ctrl_set(control, CTRL_META_CURSOR, round_up_align(control + CTRL_BYTES))
+    ctrl_set(control, CTRL_META_END, slab + AR_META_SLAB)
+    control
+}
+
+/**
+ * Tests whether a control block carries its sentinel — the check a fresh mapping is told apart from
+ * a live one by.
+ *
+ * @param control  the control block's base address
+ * @return         true when the block was initialized by `control_new`
+ */
+pub fn control_is_live(control: u64): bool {
+    ctrl_get(control, CTRL_MAGIC) == CTRL_MAGIC_VALUE
+}
+
+/**
+ * Sets the memory oracle on or off directly. The gate flips this to prove both halves of the poison
+ * oracle in one binary; the real arena reads the same state from the maintained-C `tk_arena_paranoid`
+ * seam instead of a field.
+ *
+ * @param control  the control block's base address
+ * @param on       true to poison-and-never-reuse freed blocks, false to park them for reuse
+ * @return         nothing
+ */
+pub fn paranoid_set(control: u64, on: bool) {
+    ctrl_set(control, CTRL_PARANOID, if on { PARANOID_ON } else { PARANOID_OFF })
+}
+
+/**
+ * Reads whether the memory oracle is on.
+ *
+ * @param control  the control block's base address
+ * @return         true when freed blocks must be poisoned and never reused
+ */
+pub fn paranoid_enabled(control: u64): bool {
+    ctrl_get(control, CTRL_PARANOID) == PARANOID_ON
+}
+
+/**
+ * Releases a control block: frees every region it still owns, then unmaps every META-POOL slab
+ * (including the one the control block itself lives in, which is unmapped LAST). Every slab's own
+ * link is read BEFORE it is unmapped, so the control block is never touched after the walk starts.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn control_free(control: u64) {
+    regions_free_all(control)
+    var slab = ctrl_get(control, CTRL_META_SLAB)
+    loop {
+        if slab == 0 { break }
+        var next = load_word(slab + AR_SLAB_LINK)
+        var size = load_word(slab + AR_SLAB_SIZE)
+        raw_munmap(slab, size)
+        slab = next
+    }
+}
+
+/**
+ * Reads a chunk field.
+ *
+ * @param chunk  the chunk's base address
+ * @param field  the field's offset within the header
+ * @return       the field's current value
+ */
+pub fn chunk_get(chunk: u64, field: u64): u64 {
+    load_word(chunk + field)
+}
+
+/**
+ * Writes a chunk field.
+ *
+ * @param chunk  the chunk's base address
+ * @param field  the field's offset within the header
+ * @param value  the value to store
+ * @return       nothing
+ */
+pub fn chunk_set(chunk: u64, field: u64, value: u64) {
+    store_word(chunk + field, value)
+}
+
+/**
+ * The address of a chunk's payload — where its first allocation lands, on the arena's alignment.
+ *
+ * @param chunk  the chunk's base address
+ * @return       the payload's base address
+ */
+pub fn chunk_payload(chunk: u64): u64 {
+    chunk + CHUNK_HEADER
+}
+
+/**
+ * Maps one chunk with `payload` usable bytes from its OWN mmap, WITHOUT failing loudly — the try
+ * shape `region_grow`'s retry needs. A fresh chunk starts unlinked and empty.
+ *
+ * @param payload  how many payload bytes the chunk must offer
+ * @return         the chunk's base address, or 0 when the kernel refuses
+ */
+pub fn chunk_try(payload: u64): u64 {
+    var chunk = raw_mmap(CHUNK_HEADER + payload)
+    if chunk == 0 { return 0 }
+    chunk_set(chunk, CHUNK_NEXT, 0)
+    chunk_set(chunk, CHUNK_CAP, payload)
+    chunk_set(chunk, CHUNK_USED, 0)
+    chunk
+}
+
+/**
+ * Unmaps one chunk. Its mapping was `CHUNK_HEADER + cap` bytes, so that is the length handed to
+ * `munmap`; the kernel rounds it up to the same whole pages `chunk_try` mapped.
+ *
+ * @param chunk  the chunk's base address
+ * @return       nothing
+ */
+pub fn chunk_free(chunk: u64) {
+    raw_munmap(chunk, CHUNK_HEADER + chunk_get(chunk, CHUNK_CAP))
+}
+
+/**
+ * Unmaps a whole chunk list, reading each `next` BEFORE unmapping the node that holds it.
+ *
+ * @param head  the first chunk to release; 0 releases nothing
+ * @return      nothing
+ */
+pub fn chunk_free_list(head: u64) {
+    var chunk = head
+    loop {
+        if chunk == 0 { break }
+        var next = chunk_get(chunk, CHUNK_NEXT)
+        chunk_free(chunk)
+        chunk = next
+    }
+}
+
+/**
+ * Unmaps every chunk of a list up to, but NOT including, a stop chunk — the rewind's shape.
+ *
+ * @param head  the first chunk to release
+ * @param stop  the chunk to stop before; 0 releases the whole list
+ * @return      nothing
+ */
+pub fn chunk_free_until(head: u64, stop: u64) {
+    var chunk = head
+    loop {
+        if chunk == 0 { break }
+        if chunk == stop { break }
+        var next = chunk_get(chunk, CHUNK_NEXT)
+        chunk_free(chunk)
+        chunk = next
+    }
+}
+
+/**
+ * The bump offset a request of `size` bytes would occupy in a chunk, or the chunk's capacity plus
+ * one when it does not fit — the fit test and the offset in one computation.
+ *
+ * @param chunk  the chunk to measure
+ * @param size   the already-aligned request size
+ * @return       the aligned bump offset, or a value greater than the capacity when it will not fit
+ */
+pub fn chunk_fit_offset(chunk: u64, size: u64): u64 {
+    var cap = chunk_get(chunk, CHUNK_CAP)
+    var base_off = round_up_align(chunk_get(chunk, CHUNK_USED))
+    if base_off > cap { return cap + 1 }
+    if size > cap - base_off { return cap + 1 }
+    base_off
+}
+
+/**
+ * Tests whether a bump offset returned by `chunk_fit_offset` describes a real fit.
+ *
+ * @param chunk   the chunk the offset came from
+ * @param offset  the offset `chunk_fit_offset` returned
+ * @return        true when the request fits at that offset
+ */
+pub fn chunk_offset_fits(chunk: u64, offset: u64): bool {
+    offset <= chunk_get(chunk, CHUNK_CAP)
+}
+
+/**
+ * Reads a region field.
+ *
+ * @param region  the region's base address
+ * @param field   the field's offset within the header
+ * @return        the field's current value
+ */
+pub fn region_get(region: u64, field: u64): u64 {
+    load_word(region + field)
+}
+
+/**
+ * Writes a region field.
+ *
+ * @param region  the region's base address
+ * @param field   the field's offset within the header
+ * @param value   the value to store
+ * @return        nothing
+ */
+pub fn region_set(region: u64, field: u64, value: u64) {
+    store_word(region + field, value)
+}
+
+/**
+ * Opens a fresh empty region as a child of `parent`, prepends it onto the live-region registry, and
+ * stamps it with a never-reused generation. The header comes from the META-POOL (a reused cell when
+ * one is free); the head chunk is NOT mapped here — the C twin's lazy head.
+ *
+ * @param control  the control block's base address
+ * @param parent   the region's tree parent; 0 for the root or a deliberately parentless region
+ * @return         the new region's base address
+ */
+pub fn region_new(control: u64, parent: u64): u64 {
+    var region = header_alloc(control)
+    region_set(region, REGION_HEAD, 0)
+    region_set(region, REGION_REG_NEXT, ctrl_get(control, CTRL_REGS))
+    ctrl_set(control, CTRL_REGS, region)
+    region_set(region, REGION_PARENT, parent)
+    region_set(region, REGION_ENTRIES, 0)
+    region_set(region, REGION_NENTRIES, 0)
+    region_set(region, REGION_ENTRIES_CAP, 0)
+    var generation = ctrl_get(control, CTRL_GEN) + 1
+    ctrl_set(control, CTRL_GEN, generation)
+    region_set(region, REGION_GEN, generation)
+    region
+}
+
+/**
+ * The process root region, opened on first demand — the C twin's lazy `tk_g_root`.
+ *
+ * @param control  the control block's base address
+ * @return         the root region's base address
+ */
+pub fn region_root(control: u64): u64 {
+    var existing = ctrl_get(control, CTRL_ROOT)
+    if existing != 0 { return existing }
+    var root = region_new(control, 0)
+    ctrl_set(control, CTRL_ROOT, root)
+    root
+}
+
+/**
+ * The address of the current-region stack slot at `depth`.
+ *
+ * @param control  the control block's base address
+ * @param depth    the slot's position in the stack, below `CUR_STACK_SLOTS`
+ * @return         the slot's base address
+ */
+pub fn cur_slot(control: u64, depth: u64): u64 {
+    control + CTRL_CUR_STACK + depth * WORD
+}
+
+/**
+ * The region default allocation bumps from RIGHT NOW: the TOP of the current-region stack, or the
+ * root when nothing is entered. Mirrors the C twin's guarded read (`cur_rsp` in `(0, CUR_STACK_SLOTS]`
+ * reads a non-zero slot, else falls to root), so a stack that overflowed its slots still resolves to
+ * a defined region.
+ *
+ * @param control  the control block's base address
+ * @return         the current region's base address
+ */
+pub fn cur_current(control: u64): u64 {
+    var sp = ctrl_get(control, CTRL_CUR_SP)
+    if sp > 0 && sp <= CUR_STACK_SLOTS {
+        var region = load_word(cur_slot(control, sp - 1))
+        if region != 0 { return region }
+    }
+    region_root(control)
+}
+
+/**
+ * Push `child` as the current region: write it into the stack slot at the current depth (guarded by
+ * `CUR_STACK_SLOTS`) and increment the depth unconditionally, so a push past the cap still balances a
+ * later leave, exactly as the C twin's `tk_region_enter`.
+ *
+ * @param control  the control block's base address
+ * @param child    the child region to make current
+ * @return         nothing
+ */
+pub fn cur_enter(control: u64, child: u64) {
+    var sp = ctrl_get(control, CTRL_CUR_SP)
+    if sp < CUR_STACK_SLOTS { store_word(cur_slot(control, sp), child) }
+    ctrl_set(control, CTRL_CUR_SP, sp + 1)
+}
+
+/**
+ * Pop the current region, decrementing the depth when it is non-zero (a leave with an empty stack is
+ * a no-op), the C twin's `tk_region_leave`.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn cur_leave(control: u64) {
+    var sp = ctrl_get(control, CTRL_CUR_SP)
+    if sp == 0 { return }
+    ctrl_set(control, CTRL_CUR_SP, sp - 1)
+}
+
+/**
+ * Allocate `n` bytes in the CURRENT region — the fixture's `alloc` twin: routes through
+ * `cur_current`, so an allocation lands in the entered child when one is current, else in the root.
+ *
+ * @param control  the control block's base address
+ * @param n        the requested size in bytes
+ * @return         the allocated block's base address, never 0
+ */
+pub fn cur_alloc(control: u64, n: u64): u64 {
+    region_alloc(control, cur_current(control), n)
+}
+
+/**
+ * Hands out `size` already-aligned bytes from the region's current chunk, advancing the bump.
+ *
+ * @param region  the region to allocate from; its head chunk must fit the request
+ * @param offset  the bump offset `chunk_fit_offset` computed
+ * @param size    the already-aligned request size
+ * @return        the allocated block's base address
+ */
+pub fn region_bump(region: u64, offset: u64, size: u64): u64 {
+    var chunk = region_get(region, REGION_HEAD)
+    chunk_set(chunk, CHUNK_USED, offset + size)
+    chunk_payload(chunk) + offset
+}
+
+/**
+ * Prepends a fresh chunk big enough for `size` and hands the request its whole base. An ordinary
+ * request gets a default chunk so later small allocations share it; a request larger than the
+ * default gets a chunk sized exactly to it, with a retry at the exact size when the default-sized
+ * attempt fails. Exits the RAW way when both fail.
+ *
+ * @param control  the control block's base address
+ * @param region   the region to extend
+ * @param size     the already-aligned request size
+ * @return         the allocated block's base address
+ */
+pub fn region_grow(control: u64, region: u64, size: u64): u64 {
+    var want = if size > DEFAULT_CHUNK { size } else { DEFAULT_CHUNK }
+    var chunk = chunk_try(want)
+    if chunk == 0 {
+        if want != size { chunk = chunk_try(size) }
+    }
+    if chunk == 0 { raw_oom() }
+    chunk_set(chunk, CHUNK_USED, size)
+    chunk_set(chunk, CHUNK_NEXT, region_get(region, REGION_HEAD))
+    region_set(region, REGION_HEAD, chunk)
+    chunk_payload(chunk)
+}
+
+/**
+ * Allocates `n` bytes in `region` — the arena's central operation. A zero-size request becomes one
+ * byte so it still yields a DISTINCT pointer; the request is rounded up to the alignment; an
+ * explicitly freed block of the right class is reused before the bump advances (root only); otherwise
+ * the current chunk bumps, or a new chunk is prepended.
+ *
+ * @param control  the control block's base address
+ * @param region   the region to allocate in
+ * @param n        the requested size in bytes
+ * @return         the allocated block's base address, never 0
+ */
+pub fn region_alloc(control: u64, region: u64, n: u64): u64 {
+    var size = round_up_align(if n == 0 { 1 } else { n })
+    if region == ctrl_get(control, CTRL_ROOT) {
+        var reused = free_take(control, size)
+        if reused != 0 { return reused }
+    }
+    var head = region_get(region, REGION_HEAD)
+    if head != 0 {
+        var offset = chunk_fit_offset(head, size)
+        if chunk_offset_fits(head, offset) { return region_bump(region, offset, size) }
+    }
+    region_grow(control, region, size)
+}
+
+/**
+ * Unlinks a region from the live-region registry — done FIRST on every drop path, so a later sweep
+ * can never double-free a region an earlier drop already owns.
+ *
+ * @param control  the control block's base address
+ * @param region   the region to unlink
+ * @return         nothing
+ */
+pub fn registry_unlink(control: u64, region: u64) {
+    var head = ctrl_get(control, CTRL_REGS)
+    if head == region {
+        ctrl_set(control, CTRL_REGS, region_get(region, REGION_REG_NEXT))
+        return
+    }
+    var prev = head
+    loop {
+        if prev == 0 { break }
+        var next = region_get(prev, REGION_REG_NEXT)
+        if next == region {
+            region_set(prev, REGION_REG_NEXT, region_get(region, REGION_REG_NEXT))
+            break
+        }
+        prev = next
+    }
+}
+
+/**
+ * Releases a region's chunks and returns its header to the META-POOL free-list. The head is cleared
+ * BEFORE the chunks are unmapped, so a second walk over the same region frees nothing. The entry
+ * array is a leak-bounded META-POOL cell; it is dropped by clearing the reference.
+ *
+ * @param control  the control block's base address
+ * @param region   the region to release
+ * @return         nothing
+ */
+pub fn region_release(control: u64, region: u64) {
+    var head = region_get(region, REGION_HEAD)
+    region_set(region, REGION_HEAD, 0)
+    chunk_free_list(head)
+    region_set(region, REGION_ENTRIES, 0)
+    region_set(region, REGION_NENTRIES, 0)
+    region_set(region, REGION_ENTRIES_CAP, 0)
+    header_free(control, region)
+}
+
+/**
+ * Bulk-frees a region: every chunk it holds and its header, in one call. Tolerates a zero handle.
+ * The caller MUST drop its handle afterwards — the header is back on the free-list.
+ *
+ * @param control  the control block's base address
+ * @param region   the region to drop; 0 is a no-op
+ * @return         nothing
+ */
+pub fn region_drop(control: u64, region: u64) {
+    if region == 0 { return }
+    registry_unlink(control, region)
+    region_set(region, REGION_REG_NEXT, 0)
+    region_release(control, region)
+}
+
+/**
+ * Frees EVERY still-live region and empties the registry — the termination sweep. The whole list is
+ * detached into a local FIRST and each region is freed off the local, so a re-entrant call and a
+ * second call both see an empty registry and free nothing. Parked blocks are purged first.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn regions_free_all(control: u64) {
+    free_purge(control)
+    var region = ctrl_get(control, CTRL_REGS)
+    ctrl_set(control, CTRL_REGS, 0)
+    ctrl_set(control, CTRL_ROOT, 0)
+    ctrl_set(control, CTRL_PROGRAM, 0)
+    loop {
+        if region == 0 { break }
+        var next = region_get(region, REGION_REG_NEXT)
+        region_release(control, region)
+        region = next
+    }
+}
+
+/**
+ * Tests whether a region's parent chain reaches `root` — the subtree's membership predicate.
+ *
+ * @param region  the region to test
+ * @param root    the subtree's root
+ * @return        true when walking `region`'s parents arrives at `root`
+ */
+pub fn region_reaches(region: u64, root: u64): bool {
+    var current = region
+    loop {
+        if current == 0 { break }
+        if current == root { return true }
+        current = region_get(current, REGION_PARENT)
+    }
+    false
+}
+
+/**
+ * Collects every live region of `root`'s subtree onto a detached list, unlinking each from the
+ * registry as it goes. Collecting first keeps the walk undisturbed; unlinking as it collects keeps a
+ * second sweep from double-freeing. The detached list threads through the registry link.
+ *
+ * @param control  the control block's base address
+ * @param root     the subtree's root
+ * @return         the head of the detached doomed-region list, or 0 when none
+ */
+pub fn subtree_collect(control: u64, root: u64): u64 {
+    var doomed: u64 = 0
+    var current = ctrl_get(control, CTRL_REGS)
+    loop {
+        if current == 0 { break }
+        var next = region_get(current, REGION_REG_NEXT)
+        if region_reaches(current, root) {
+            registry_unlink(control, current)
+            region_set(current, REGION_REG_NEXT, doomed)
+            doomed = current
+        }
+        current = next
+    }
+    doomed
+}
+
+/**
+ * Drops `root` AND every live region whose parent chain reaches it, in one sweep. Tolerates a zero
+ * handle; the caller MUST drop its handle afterwards.
+ *
+ * @param control  the control block's base address
+ * @param root     the subtree's root; 0 is a no-op
+ * @return         nothing
+ */
+pub fn region_drop_subtree(control: u64, root: u64) {
+    if root == 0 { return }
+    var doomed = subtree_collect(control, root)
+    loop {
+        if doomed == 0 { break }
+        var next = region_get(doomed, REGION_REG_NEXT)
+        region_release(control, doomed)
+        doomed = next
+    }
+}
+
+/**
+ * The address of a region's entry slot at `index`.
+ *
+ * @param region  the region whose table is indexed
+ * @param index   the entry's position in the table
+ * @return        the entry's base address
+ */
+pub fn entry_slot(region: u64, index: u64): u64 {
+    region_get(region, REGION_ENTRIES) + index * ENTRY_BYTES
+}
+
+/**
+ * Finds the index of the entry bound to `type_id` in a region's OWN table, or the table's length
+ * when it is not bound. A linear scan, because arena entry counts are small.
+ *
+ * @param region   the region whose own table is searched
+ * @param type_id  the type identifier to find
+ * @return         the entry's index, or the table's length when absent
+ */
+pub fn entry_index_of(region: u64, type_id: u64): u64 {
+    var count = region_get(region, REGION_NENTRIES)
+    var i: u64 = 0
+    loop {
+        if i >= count { break }
+        if load_word(entry_slot(region, i) + ENTRY_TYPE_ID) == type_id { return i }
+        i++
+    }
+    count
+}
+
+/**
+ * Copies `word_count` machine words from `src` to `dst`, front to back — the raw carry-over the
+ * entry table's doubling needs, with no allocation of its own.
+ *
+ * @param dst         the destination base address
+ * @param src         the source base address
+ * @param word_count  how many words to copy
+ * @return            nothing
+ */
+pub fn words_copy(dst: u64, src: u64, word_count: u64) {
+    var i: u64 = 0
+    loop {
+        if i >= word_count { break }
+        store_word(dst + i * WORD, load_word(src + i * WORD))
+        i++
+    }
+}
+
+/**
+ * Grows a region's entry table to the next capacity — four entries the first time, then doubling —
+ * carrying the old contents over into a fresh META-POOL cell. The old cell is leak-bounded.
+ *
+ * @param control  the control block's base address
+ * @param region   the region whose table grows
+ * @return         nothing
+ */
+pub fn entries_grow(control: u64, region: u64) {
+    var old_cap = region_get(region, REGION_ENTRIES_CAP)
+    var new_cap = if old_cap == 0 { ENTRIES_FIRST_CAP } else { old_cap * 2 }
+    var old_table = region_get(region, REGION_ENTRIES)
+    var new_table = meta_alloc(control, new_cap * ENTRY_BYTES)
+    var used_words = region_get(region, REGION_NENTRIES) * ENTRY_BYTES / WORD
+    if used_words > 0 { words_copy(new_table, old_table, used_words) }
+    region_set(region, REGION_ENTRIES, new_table)
+    region_set(region, REGION_ENTRIES_CAP, new_cap)
+}
+
+/**
+ * Binds `type_id` to `instance` in a region's OWN table. A second binding of the same identifier
+ * OVERWRITES. Tolerates a zero region.
+ *
+ * @param control   the control block's base address
+ * @param region    the region to bind in; 0 is a no-op
+ * @param type_id   the type identifier to bind
+ * @param instance  the instance address to bind it to
+ * @return          nothing
+ */
+pub fn region_register(control: u64, region: u64, type_id: u64, instance: u64) {
+    if region == 0 { return }
+    var count = region_get(region, REGION_NENTRIES)
+    var found = entry_index_of(region, type_id)
+    if found < count {
+        store_word(entry_slot(region, found) + ENTRY_INSTANCE, instance)
+        return
+    }
+    if count == region_get(region, REGION_ENTRIES_CAP) { entries_grow(control, region) }
+    var slot = entry_slot(region, count)
+    store_word(slot + ENTRY_TYPE_ID, type_id)
+    store_word(slot + ENTRY_INSTANCE, instance)
+    region_set(region, REGION_NENTRIES, count + 1)
+}
+
+/**
+ * Resolves `type_id` by walking a region, then its parent, then its parent's parent — so a binding
+ * high in the tree shadows-and-is-shadowed correctly. Reports 0 when no region in the chain binds it.
+ *
+ * @param region   the region to start from; 0 resolves to 0
+ * @param type_id  the type identifier to resolve
+ * @return         the bound instance address, or 0
+ */
+pub fn region_lookup(region: u64, type_id: u64): u64 {
+    var current = region
+    loop {
+        if current == 0 { break }
+        var count = region_get(current, REGION_NENTRIES)
+        var found = entry_index_of(current, type_id)
+        if found < count { return load_word(entry_slot(current, found) + ENTRY_INSTANCE) }
+        current = region_get(current, REGION_PARENT)
+    }
+    0
+}
+
+/**
+ * The address of the mark stack slot at `depth`.
+ *
+ * @param control  the control block's base address
+ * @param depth    the slot's position in the stack, below `MARK_SLOTS`
+ * @return         the slot's base address
+ */
+pub fn mark_slot(control: u64, depth: u64): u64 {
+    control + CTRL_MARKS + depth * MARK_BYTES
+}
+
+/**
+ * Records the root region's current chunk and bump cursor into the mark stack slot at `depth`.
+ *
+ * @param control  the control block's base address
+ * @param depth    the slot to write, below `MARK_SLOTS`
+ * @return         nothing
+ */
+pub fn write_mark(control: u64, depth: u64) {
+    var head = region_get(region_root(control), REGION_HEAD)
+    var slot = mark_slot(control, depth)
+    store_word(slot + MARK_CHUNK, head)
+    if head == 0 {
+        store_word(slot + MARK_USED, 0)
+        return
+    }
+    store_word(slot + MARK_USED, chunk_get(head, CHUNK_USED))
+}
+
+/**
+ * Saves the root region's current bump position as a checkpoint. A push deeper than the stack holds
+ * saves nothing but STILL counts, so pushes and pops stay balanced.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn checkpoint_push(control: u64) {
+    var depth = ctrl_get(control, CTRL_MSP)
+    ctrl_set(control, CTRL_MSP, depth + 1)
+    if depth >= MARK_SLOTS { return }
+    write_mark(control, depth)
+}
+
+/**
+ * Rewinds the root region to the top checkpoint: every chunk mapped since it is unmapped and the
+ * checkpoint chunk's bump cursor restored. The free lists are purged first.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn checkpoint_pop(control: u64) {
+    var depth = ctrl_get(control, CTRL_MSP)
+    if depth == 0 { return }
+    ctrl_set(control, CTRL_MSP, depth - 1)
+    if depth - 1 >= MARK_SLOTS { return }
+    free_purge(control)
+    var slot = mark_slot(control, depth - 1)
+    var marked_chunk = load_word(slot + MARK_CHUNK)
+    var marked_used = load_word(slot + MARK_USED)
+    var root = region_root(control)
+    chunk_free_until(region_get(root, REGION_HEAD), marked_chunk)
+    region_set(root, REGION_HEAD, marked_chunk)
+    if marked_chunk != 0 { chunk_set(marked_chunk, CHUNK_USED, marked_used) }
+}
+
+/**
+ * Discards the top checkpoint WITHOUT rewinding, so everything mapped since the matching push stays
+ * live and folds into the checkpoint below it. Nothing was freed, so there is nothing to purge.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn checkpoint_commit(control: u64) {
+    var depth = ctrl_get(control, CTRL_MSP)
+    if depth == 0 { return }
+    ctrl_set(control, CTRL_MSP, depth - 1)
+}
+
+/**
+ * The address of the free bin holding blocks of exactly `bytes` usable bytes. Class `i` holds
+ * `(i + 1) * ARENA_ALIGN` bytes, so a single probe is an exact-size hit.
+ *
+ * @param control  the control block's base address
+ * @param bytes    an already-aligned, non-zero block size within `FREE_BIN_MAX_BYTES`
+ * @return         the bin slot's address
+ */
+pub fn free_bin_slot(control: u64, bytes: u64): u64 {
+    control + CTRL_FREE_BINS + (bytes / ARENA_ALIGN - 1) * WORD
+}
+
+/**
+ * Tests whether a block size is small enough to bin exactly.
+ *
+ * @param bytes  the already-aligned block size
+ * @return       true when a size class exists for it
+ */
+pub fn free_is_binnable(bytes: u64): bool {
+    if bytes == 0 { return false }
+    bytes <= FREE_BIN_MAX_BYTES
+}
+
+/**
+ * Reads a freenode field from a parked block.
+ *
+ * @param node   the parked block's base address
+ * @param field  the field's offset within the freenode
+ * @return       the field's current value
+ */
+pub fn freenode_get(node: u64, field: u64): u64 {
+    load_word(node + field)
+}
+
+/**
+ * Empties every free list — called wherever the chunks the parked blocks live inside are about to
+ * disappear. The bins are zeroed word by word rather than by a bulk memset (which the arena core
+ * forbids itself), because a parked block whose chunk is gone is a dangling address.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+pub fn free_purge(control: u64) {
+    var i: u64 = 0
+    loop {
+        if i >= FREE_BINS { break }
+        store_word(control + CTRL_FREE_BINS + i * WORD, 0)
+        i++
+    }
+    ctrl_set(control, CTRL_FREE_LARGE, 0)
+}
+
+/**
+ * Takes a parked block of exactly the right size class, or 0 when the class is empty.
+ *
+ * @param control  the control block's base address
+ * @param size     the already-aligned request size, within `FREE_BIN_MAX_BYTES`
+ * @return         a parked block's address, or 0
+ */
+pub fn free_take_binned(control: u64, size: u64): u64 {
+    var slot = free_bin_slot(control, size)
+    var node = load_word(slot)
+    if node == 0 { return 0 }
+    store_word(slot, freenode_get(node, FREENODE_NEXT))
+    node
+}
+
+/**
+ * Tests whether a parked block serves a request without a split: at least the request and at most
+ * twice it.
+ *
+ * @param bytes  the parked block's usable size
+ * @param size   the already-aligned request size
+ * @return       true when the block serves the request
+ */
+pub fn free_block_fits(bytes: u64, size: u64): bool {
+    if bytes < size { return false }
+    bytes <= size * 2
+}
+
+/**
+ * Takes a parked block off the large list that fits `size` without a split, scanning a bounded
+ * prefix so a long list cannot make allocation quadratic.
+ *
+ * @param control  the control block's base address
+ * @param size     the already-aligned request size
+ * @return         a parked block's address, or 0
+ */
+pub fn free_take_large(control: u64, size: u64): u64 {
+    var prev: u64 = 0
+    var node = ctrl_get(control, CTRL_FREE_LARGE)
+    var scanned: u64 = 0
+    loop {
+        if node == 0 { break }
+        if scanned >= FREE_LARGE_SCAN { break }
+        var next = freenode_get(node, FREENODE_NEXT)
+        var bytes = freenode_get(node, FREENODE_BYTES)
+        if free_block_fits(bytes, size) {
+            if prev == 0 { ctrl_set(control, CTRL_FREE_LARGE, next) } else { store_word(prev + FREENODE_NEXT, next) }
+            return node
+        }
+        prev = node
+        node = next
+        scanned++
+    }
+    0
+}
+
+/**
+ * Reuses an explicitly freed block for a request of `size` bytes, or reports 0 when none fits. The
+ * request is rounded UP to the bin granularity — never down — so a 24-byte request can never be
+ * handed a 16-byte block. The park side rounds DOWN; the asymmetry is the whole safety argument.
+ *
+ * @param control  the control block's base address
+ * @param size     the request size in bytes
+ * @return         a reusable block's address, or 0
+ */
+pub fn free_take(control: u64, size: u64): u64 {
+    var wanted = round_up_align(size)
+    if free_is_binnable(wanted) { return free_take_binned(control, wanted) }
+    free_take_large(control, wanted)
+}
+
+/**
+ * Parks a block on the list its size class names, so the next request of that class reuses it.
+ *
+ * @param control  the control block's base address
+ * @param block    the block's base address
+ * @param usable   the block's already-floored usable byte count
+ * @return         nothing
+ */
+pub fn free_park(control: u64, block: u64, usable: u64) {
+    store_word(block + FREENODE_BYTES, usable)
+    if free_is_binnable(usable) {
+        var slot = free_bin_slot(control, usable)
+        store_word(block + FREENODE_NEXT, load_word(slot))
+        store_word(slot, block)
+        return
+    }
+    store_word(block + FREENODE_NEXT, ctrl_get(control, CTRL_FREE_LARGE))
+    ctrl_set(control, CTRL_FREE_LARGE, block)
+}
+
+/**
+ * Poisons a freed block with `0xDD` bytes — the memory oracle's mark. The usable extent is a
+ * multiple of the alignment (so a multiple of the word), so the poison is written a word at a time.
+ *
+ * @param block   the block's base address
+ * @param usable  the already-floored usable byte count
+ * @return        nothing
+ */
+pub fn poison_block(block: u64, usable: u64) {
+    var i: u64 = 0
+    loop {
+        if i >= usable { break }
+        store_word(block + i, POISON_WORD)
+        i = i + WORD
+    }
+}
+
+/**
+ * Frees one explicitly released block. A bump arena cannot return a block to the bump, so the block
+ * is PARKED for reuse instead. The caller's byte count is a true LOWER bound of the extent, so it is
+ * rounded DOWN. A block too small to hold a freenode is leaked.
+ *
+ * UNDER the oracle the block is POISONED and NEVER parked: arena reuse is invisible to a sanitizer,
+ * so a wrong linearity proof would corrupt silently; with the poison, any read of a freed block
+ * yields the poison byte and a gate fails loudly instead.
+ *
+ * @param control  the control block's base address
+ * @param block    the block's base address; 0 is a no-op
+ * @param bytes    a lower bound of the block's usable size
+ * @return         nothing
+ */
+pub fn free_block(control: u64, block: u64, bytes: u64) {
+    if block == 0 { return }
+    var usable = round_down_align(bytes)
+    if paranoid_enabled(control) {
+        if usable > 0 { poison_block(block, usable) }
+        return
+    }
+    if usable < FREENODE_BYTES_MIN { return }
+    free_park(control, block, usable)
+}
