@@ -279,17 +279,74 @@ type CgArenaSym = enum {
 }
 
 /**
- * cg_arena_sym — the C symbol codegen emits for one arena/region primitive. TODAY every kind
- * resolves to the hand-written C runtime's `tk_*` export (`src/runtime/teko_rt.c`) — byte-identical
- * to what each call site spelled inline before this indirection existed. This is the SINGLE table a
- * later switch-over (§16 arena crumb E, step L2 — the Teko-over-mmap arena) retargets: every call
- * site already routes through here, so that flip touches only this function's bodies, not the ~18
- * call sites across the file.
+ * cg_arena_sym — the token codegen emits for one arena/region primitive at a call site (§16 arena
+ * crumb E — THE FLIP). Returns a STABLE per-kind preprocessor MACRO (`TK_ARENA_<suffix>`), never a
+ * bare C symbol: the macro is bound per-target by `cg_emit_arena_provider_ladder`'s preamble
+ * `#if defined(__linux__)` ladder — on Linux to the Teko-over-mmap arena's mangled symbol
+ * (`teko_teko__runtime__region_alloc`, …, defined by the injected `arena.tks`), on every OTHER target
+ * to the frozen-but-alive C arena export (`tk_region_alloc`, …). Routing every one of the ~197
+ * allocation call sites through this one macro is what keeps the one cross-`#os` `teko.c` a monolith:
+ * the SAME emitted text picks the Teko arena on Linux and the C arena elsewhere, all-or-nothing.
  *
  * @param kind  which arena/region primitive is being emitted
- * @return      the C symbol name to emit for `kind`
+ * @return      the `TK_ARENA_<suffix>` macro token to emit for `kind`
  */
 fn cg_arena_sym(kind: CgArenaSym): str {
+    teko::str::concat("TK_ARENA_", cg_arena_kind_suffix(kind))
+}
+
+/**
+ * cg_arena_kind_suffix — the stable last-segment name of one arena/region primitive, shared by the
+ * `TK_ARENA_<suffix>` call-site macro (`cg_arena_sym`) and the preamble ladder's `#define` for that
+ * same macro (`cg_emit_arena_provider_ladder`). Sourcing both from this one function keeps the macro
+ * NAME the call sites emit and the macro NAME the ladder binds correct-by-construction identical.
+ *
+ * @param kind  which arena/region primitive is being emitted
+ * @return      the primitive's suffix (`region_alloc`, `alloc`, `arena_push`, …)
+ */
+fn cg_arena_kind_suffix(kind: CgArenaSym): str {
+    match kind {
+        CgArenaSym::RegionAlloc => "region_alloc"
+        CgArenaSym::RegionNew => "region_new"
+        CgArenaSym::RegionDrop => "region_drop"
+        CgArenaSym::RegionDropSubtree => "region_drop_subtree"
+        CgArenaSym::RegionRoot => "region_root"
+        CgArenaSym::RegionCurrent => "region_current"
+        CgArenaSym::RegionEnter => "region_enter"
+        CgArenaSym::RegionLeave => "region_leave"
+        CgArenaSym::ArenaPush => "arena_push"
+        CgArenaSym::ArenaPop => "arena_pop"
+        CgArenaSym::ArenaCommit => "arena_commit"
+        CgArenaSym::RegionRegister => "region_register"
+        CgArenaSym::RegionLookup => "region_lookup"
+        CgArenaSym::Alloc => "alloc"
+    }
+}
+
+/**
+ * cg_arena_teko_sym — the mangled Teko-over-mmap arena symbol that backs one arena/region primitive
+ * on Linux (`src/runtime/arena.tks`, namespace `teko::runtime`). This is the Linux arm of the
+ * provider ladder: `region_alloc` binds to `teko_teko__runtime__region_alloc`, etc. The injected
+ * `arena.tks` DEFINES every one of these in the emitted `teko.c`, so the macro the ladder binds
+ * always resolves.
+ *
+ * @param kind  which arena/region primitive is being bound
+ * @return      the primitive's mangled `teko_teko__runtime__<suffix>` symbol
+ */
+fn cg_arena_teko_sym(kind: CgArenaSym): str {
+    teko::str::concat("teko_teko__runtime__", cg_arena_kind_suffix(kind))
+}
+
+/**
+ * cg_arena_c_sym — the frozen-but-alive C arena export (`src/runtime/teko_rt.c`) that backs one
+ * arena/region primitive on every NON-Linux target (macOS/Windows), the `#else` arm of the provider
+ * ladder, kept until the non-Linux Teko memory source lands (crumb F). `region_alloc` binds to
+ * `tk_region_alloc`, `alloc` to `tk_alloc`, `arena_push` to `tk_arena_push`, etc.
+ *
+ * @param kind  which arena/region primitive is being bound
+ * @return      the primitive's `tk_*` C export symbol
+ */
+fn cg_arena_c_sym(kind: CgArenaSym): str {
     match kind {
         CgArenaSym::RegionAlloc => "tk_region_alloc"
         CgArenaSym::RegionNew => "tk_region_new"
@@ -306,6 +363,72 @@ fn cg_arena_sym(kind: CgArenaSym): str {
         CgArenaSym::RegionLookup => "tk_region_lookup"
         CgArenaSym::Alloc => "tk_alloc"
     }
+}
+
+/**
+ * cg_arena_all_kinds — every `CgArenaSym` kind, in a fixed order, so `cg_emit_arena_provider_ladder`
+ * emits a `#define` for ALL of them (the ALL-OR-NOTHING law, §2.2: a target binds every arena kind to
+ * ONE provider, so an allocation and its matching drop never straddle two disjoint arenas).
+ *
+ * @return  the full list of arena/region primitive kinds
+ */
+fn cg_arena_all_kinds(): []CgArenaSym {
+    [
+        CgArenaSym::RegionAlloc, CgArenaSym::RegionNew, CgArenaSym::RegionDrop,
+        CgArenaSym::RegionDropSubtree, CgArenaSym::RegionRoot, CgArenaSym::RegionCurrent,
+        CgArenaSym::RegionEnter, CgArenaSym::RegionLeave, CgArenaSym::ArenaPush,
+        CgArenaSym::ArenaPop, CgArenaSym::ArenaCommit, CgArenaSym::RegionRegister,
+        CgArenaSym::RegionLookup, CgArenaSym::Alloc
+    ]
+}
+
+/**
+ * cg_emit_arena_provider_ladder — emit the per-`#os` arena PROVIDER ladder into the preamble (§16
+ * arena crumb E — THE FLIP). On a Linux target every `TK_ARENA_*` macro binds to the Teko-over-mmap
+ * arena's mangled symbol (`teko_teko__runtime__region_alloc`, …), defined by the injected `arena.tks`;
+ * on every OTHER target it binds to the C arena export (`tk_region_alloc`, …) in the frozen-but-alive
+ * `teko_rt.o`, keeping macOS/Windows correct until their real memory source lands (crumb F). Emitting a
+ * `#if defined(__linux__) … #else … #endif` ladder (never a host-time choice) keeps the one `teko.c` a
+ * cross-compiling monolith. The macros are ALL-OR-NOTHING per target: a target binds EVERY arena kind
+ * to ONE provider, so an allocation and its matching drop never straddle two arenas (§2.2).
+ *
+ * @param buf  the preamble byte buffer
+ * @return     `buf` with the provider ladder appended
+ */
+fn cg_emit_arena_provider_ladder(buf: []byte): []byte {
+    var out = cb(buf, "#if defined(__linux__)\n")
+    out = cg_emit_arena_ladder_arm(out, true)
+    out = cb(out, "#else\n")
+    out = cg_emit_arena_ladder_arm(out, false)
+    out = cb(out, "#endif\n\n")
+    out
+}
+
+/**
+ * cg_emit_arena_ladder_arm — emit one arm of the arena provider ladder: a `#define TK_ARENA_<suffix>
+ * <symbol>` line for EVERY arena kind, binding to the Teko arena's mangled symbols when `linux` is
+ * true and to the C `tk_*` exports otherwise. Iterating `cg_arena_all_kinds` guarantees the arm is
+ * complete (the ALL-OR-NOTHING law).
+ *
+ * @param buf    the preamble byte buffer
+ * @param linux  true for the Linux (Teko arena) arm, false for the non-Linux (C arena) arm
+ * @return       `buf` with this arm's `#define` lines appended
+ */
+fn cg_emit_arena_ladder_arm(buf: []byte, linux: bool): []byte {
+    var out = buf
+    var kinds = cg_arena_all_kinds()
+    var i = 0
+    loop {
+        if i >= kinds.len { break }
+        var kind = kinds[i]
+        out = cb(out, "#define TK_ARENA_")
+        out = cb(out, cg_arena_kind_suffix(kind))
+        out = cb(out, " ")
+        out = cb(out, if linux { cg_arena_teko_sym(kind) } else { cg_arena_c_sym(kind) })
+        out = cb(out, "\n")
+        i = i + 1
+    }
+    out
 }
 
 /**
@@ -14027,6 +14150,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
 
     var sc_used = cg_scan_syscall_arities(prog)
     b = cg_emit_syscall_helpers(b, sc_used)
+    b = cg_emit_arena_provider_ladder(b)
     b = cg_emit_thread_clone_helper(b, sc_used.clone)
     b = cg_emit_atomic_helpers(b, sc_used.atomics)
 
