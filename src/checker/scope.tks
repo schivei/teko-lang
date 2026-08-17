@@ -1052,6 +1052,30 @@ fn syscallN_signature(arity: u64): @Type() {
 }
 
 /**
+ * thread_clone_signature — the fixed `Func` type of the §10 raw thread-spawn intrinsic
+ * `teko::sys::thread_clone(entry, stack_top, arg, ctid_addr, flags): i64` (plano §3.2). Five `i64`
+ * words in, one `i64` out (the raw-syscall convention: the parent's return is the child tid, or
+ * `-errno`). Registered here beside the `syscall0..6` family because, like them, it is a compiler
+ * builtin lowered to a bespoke inline-asm helper (`tk_thread_clone`, plano §3.3) rather than a
+ * declared `.tks` function — `clone`'s child branch returns on a fresh stack and cannot flow through
+ * the generic `tk_syscallN` helper.
+ *
+ * @return  `Func { params = i64 x 5; ret = i64; ... }`
+ * @since §10-native
+ */
+fn thread_clone_signature(): @Type() {
+    var i64_t: @Type() = Prim { kind = PrimKind::I64 }
+    var ps: []@Type() = teko::list::push(tempty(), i64_t)
+    var i: u64 = 0 to u64
+    loop {
+        if i >= (4 to u64) { break }
+        ps = teko::list::push(ps, i64_t)
+        i = i + (1 to u64)
+    }
+    Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = teko::list::empty() }
+}
+
+/**
  * Resolve an INJECTED built-in FUNCTION name to its `Func` type (mirrors `scope.c`'s
  * `tk_builtin_fn`): `print`/`println` + `teko::assert`, the self-host str/byte stdlib surface,
  * the D3 coverage sinks, the arena checkpoint/rewind/commit primitives, the heap-backed
@@ -1150,6 +1174,7 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "syscall4" { return syscallN_signature(4 to u64) }
     if name == "syscall5" { return syscallN_signature(5 to u64) }
     if name == "syscall6" { return syscallN_signature(6 to u64) }
+    if name == "thread_clone" { return thread_clone_signature() }
     if name == "ptr_word" {
         var pwp: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
         return Func { params = pwp; ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = pwp.len; defaults = []; ret_extra = teko::list::empty() }

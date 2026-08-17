@@ -5224,6 +5224,7 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             else if last == "syscall4" { builtin = "tk_syscall4"; has_builtin = true }
             else if last == "syscall5" { builtin = "tk_syscall5"; has_builtin = true }
             else if last == "syscall6" { builtin = "tk_syscall6"; has_builtin = true }
+            else if last == "thread_clone" { builtin = "tk_thread_clone"; has_builtin = true }
             // D3 — test-coverage sink (host side-channel): marks executed production fns.
             else if last == "cov_reset" { builtin = "tk_cov_reset"; has_builtin = true }   // () -> void
             else if last == "cov_mark" { builtin = "tk_cov_mark"; has_builtin = true }   // (u64) -> void
@@ -13470,8 +13471,11 @@ fn cg_emit_all_vtable_defs(buf: []byte, prog: CgProg, vt_table: checker::TypeTab
  * @field s2  true iff some call site names `syscall2`
  * @field s3  true iff some call site names `syscall3`
  * @field s4  true iff some call site names `syscall4`
- * @field s5  true iff some call site names `syscall5`
- * @field s6  true iff some call site names `syscall6`
+ * @field s5     true iff some call site names `syscall5`
+ * @field s6     true iff some call site names `syscall6`
+ * @field clone  true iff some call site names the §10 `thread_clone` raw-spawn intrinsic (plano §3),
+ *               gating the bespoke `tk_thread_clone` child-branch helper the same way the arity bits
+ *               gate each `tk_syscallN` — inert in the compiler's own self-image (it never spawns).
  * @since §16
  */
 type SyscallUse = struct {
@@ -13489,6 +13493,8 @@ type SyscallUse = struct {
     s5: bool
     /** true iff some call site names `syscall6`. */
     s6: bool
+    /** true iff some call site names the §10 `thread_clone` raw thread-spawn intrinsic (plano §3). */
+    clone: bool
 }
 
 /**
@@ -13498,7 +13504,7 @@ type SyscallUse = struct {
  * @since §16
  */
 fn cg_syscall_use_none(): SyscallUse {
-    SyscallUse { s0 = false; s1 = false; s2 = false; s3 = false; s4 = false; s5 = false; s6 = false }
+    SyscallUse { s0 = false; s1 = false; s2 = false; s3 = false; s4 = false; s5 = false; s6 = false; clone = false }
 }
 
 /**
@@ -13511,7 +13517,8 @@ fn cg_syscall_use_none(): SyscallUse {
  * @param prog  codegen's threaded program view (resolves whether `c`'s callee is user-declared)
  * @param c     the checked call under inspection
  * @param used  the arity bit-set accumulated so far
- * @return      `used`, with the bit for `c`'s arity set when `c` calls `syscall0..syscall6`
+ * @return      `used`, with the bit for `c`'s arity set when `c` calls `syscall0..syscall6`, or the
+ *              `clone` bit set when `c` calls the §10 `thread_clone` intrinsic
  * @since §16
  */
 fn cg_mark_syscall_call(prog: CgProg, c: checker::TCall, used: SyscallUse): SyscallUse {
@@ -13520,13 +13527,14 @@ fn cg_mark_syscall_call(prog: CgProg, c: checker::TCall, used: SyscallUse): Sysc
     var qualifier_ok = p.segments.len == 1 || p.segments[0].name == "teko"
     if !qualifier_ok { return used }
     var last = p.segments[p.segments.len - 1].name
-    if last == "syscall0" { return SyscallUse { s0 = true; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
-    if last == "syscall1" { return SyscallUse { s0 = used.s0; s1 = true; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
-    if last == "syscall2" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = true; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
-    if last == "syscall3" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = true; s4 = used.s4; s5 = used.s5; s6 = used.s6 } }
-    if last == "syscall4" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = true; s5 = used.s5; s6 = used.s6 } }
-    if last == "syscall5" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = true; s6 = used.s6 } }
-    if last == "syscall6" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = true } }
+    if last == "syscall0" { return SyscallUse { s0 = true; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
+    if last == "syscall1" { return SyscallUse { s0 = used.s0; s1 = true; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
+    if last == "syscall2" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = true; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
+    if last == "syscall3" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = true; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = used.clone } }
+    if last == "syscall4" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = true; s5 = used.s5; s6 = used.s6; clone = used.clone } }
+    if last == "syscall5" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = true; s6 = used.s6; clone = used.clone } }
+    if last == "syscall6" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = true; clone = used.clone } }
+    if last == "thread_clone" { return SyscallUse { s0 = used.s0; s1 = used.s1; s2 = used.s2; s3 = used.s3; s4 = used.s4; s5 = used.s5; s6 = used.s6; clone = true } }
     used
 }
 
@@ -13845,6 +13853,51 @@ fn cg_emit_syscall_helpers(buf: []byte, used: SyscallUse): []byte {
     cb(out, "#endif\n\n")
 }
 
+/**
+ * cg_emit_thread_clone_helper_text_x86_64 — the VERBATIM x86_64-Linux `static long tk_thread_clone(...)`
+ * body: the §10 raw thread-spawn intrinsic (plano §3.3). `clone` is the one syscall that cannot ride the
+ * generic `tk_syscallN` helper — its child returns from the `syscall` instruction on the freshly-supplied
+ * stack with `rax == 0`, so the child branch must be handled IN the asm block (jump to `entry`, never
+ * `ret`). The helper pre-stores `entry` then `arg` at the top of the child stack (registers are not
+ * guaranteed across the child's first instruction), issues `clone(flags=rdi, stack=rsi, ptid=rdx=0,
+ * ctid=r10, tls=r8=0)`, and on the child side pops `entry`/`arg`, `call`s `entry(arg)` (the §4
+ * trampoline), then terminates THIS THREAD with `SYS_exit` (60, NOT `exit_group` — the process must
+ * survive). The parent falls through to return the child tid (or `-errno`). Classic musl `__clone` shape.
+ *
+ * @return  the helper's full C source text
+ * @since §10-native
+ */
+fn cg_emit_thread_clone_helper_text_x86_64(): str {
+    "static long tk_thread_clone(long entry, long stack_top, long arg, long ctid_addr, long flags) {\n    void **sp = (void **)stack_top;\n    *(--sp) = (void *)arg;\n    *(--sp) = (void *)entry;\n    long ret;\n    register long r10 __asm__(\"r10\") = ctid_addr;\n    register long r8 __asm__(\"r8\") = 0;\n    __asm__ volatile (\n        \"syscall\\n\\t\"\n        \"testq %%rax, %%rax\\n\\t\"\n        \"jnz 1f\\n\\t\"\n        \"popq %%rax\\n\\t\"\n        \"popq %%rdi\\n\\t\"\n        \"callq *%%rax\\n\\t\"\n        \"movq $60, %%rax\\n\\t\"\n        \"xorq %%rdi, %%rdi\\n\\t\"\n        \"syscall\\n\\t\"\n        \"1:\\n\\t\"\n        : \"=a\"(ret)\n        : \"a\"(56L), \"D\"(flags), \"S\"(sp), \"d\"(0L), \"r\"(r10), \"r\"(r8)\n        : \"rcx\", \"r11\", \"memory\", \"cc\");\n    return ret;\n}\n"
+}
+
+/**
+ * cg_emit_thread_clone_helper — append the `static long tk_thread_clone(...)` §10 raw thread-spawn
+ * helper to the preamble buffer WHEN `want` (i.e. some call site named `teko::sys::thread_clone`).
+ * Emits NOTHING otherwise — the use-gate that keeps the spawn-free corpus's own emitted preamble
+ * byte-identical (the compiler never spawns via the `thread_clone` surface, so its self-image emits
+ * ZERO thread helpers ⇒ a clean fixpoint). The block is wrapped in an `#if __x86_64__ ... #elif
+ * __aarch64__ (honest-stop #error) ... #else (#error)` C guard: aarch64's `clone` swaps the `ctid`/`tls`
+ * argument order (plano §3.4) and is not yet validated on the build host, so a build targeting it stops
+ * at `cc` time rather than emitting a silently-wrong instruction.
+ *
+ * @param buf   the preamble byte buffer
+ * @param want  true iff the program calls the §10 `thread_clone` intrinsic (`SyscallUse.clone`)
+ * @return      `buf` with the helper appended when `want`, else `buf` unchanged
+ * @since §10-native
+ */
+fn cg_emit_thread_clone_helper(buf: []byte, want: bool): []byte {
+    if !want { return buf }
+    var out = cb(buf, "#if defined(__x86_64__) || defined(__amd64__)\n")
+    out = cb(out, "/* teko section 10 raw thread-spawn intrinsic (x86_64 Linux); emitted only if the program spawns */\n")
+    out = cb(out, cg_emit_thread_clone_helper_text_x86_64())
+    out = cb(out, "#elif defined(__aarch64__) || defined(__arm64__)\n")
+    out = cb(out, "#error \"teko section 10 aarch64 thread_clone not yet validated on this host (docs/design/plano-s10-multithread-nativo.md section 3.4)\"\n")
+    out = cb(out, "#else\n")
+    out = cb(out, "#error \"teko section 10: thread_clone is validated for x86_64 Linux only (docs/design/plano-s10-multithread-nativo.md section 3)\"\n")
+    cb(out, "#endif\n\n")
+}
+
 /** tk_emit_c — the PROGRAM emission entry (the virtual-main over loose top-level statements).
     Kept as the public name every caller uses; delegates to tk_emit_c_mode with CgMode::Program so
     the historical output is byte-identical (the fixpoint is intact). (#265) */
@@ -13926,6 +13979,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
 
     var sc_used = cg_scan_syscall_arities(prog)
     b = cg_emit_syscall_helpers(b, sc_used)
+    b = cg_emit_thread_clone_helper(b, sc_used.clone)
 
     // W4c — TYPE DECLS come FIRST (before any function that uses them). Two sub-passes:
     //   a) a forward `typedef struct tk_t_<M> tk_t_<M>;` for every struct/variant/class decl, so
