@@ -1,52 +1,38 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 arena sub-crumb D — the TEKO ARENA CORE
-# + META-POOL over raw mmap. The heart of §16: a full region allocator authored in the allocation-free §1 dialect
-# (u64/i64 addresses + load_u64/store_u64 + ptr_word/word_ptr + syscall; ALL state inside the mmap'd memory),
-# ADD-ALONGSIDE (L1) and UNREFERENCED — codegen still calls the C tk_region_alloc; the switch-over is crumb E.
-#   - **§16 crumb D (compiler — new Teko runtime module + maintained-C seam)**:
-#     - `src/runtime/arena.tks` — the 12 C-ABI-mirroring entry points (`region_alloc(r: ptr, n: u64): ptr`,
-#       `region_new`, `region_drop`, `region_drop_subtree`, `region_root`/`region_current`/`region_program`,
-#       `arena_push`/`arena_pop`/`arena_commit`, `region_register`, `region_lookup`), namespace `teko::runtime`,
-#       over `mmap`/`munmap`. Chunk payloads are their own exclusive mmaps, munmap'd on drop; raw OOM issues
-#       `exit_group` (never a computed panic — that re-enters the arena).
-#     - **META-POOL** (§3, the mmap-specific keystone): 64 KB (`AR_META_SLAB`) anonymous-private mmap slabs bump-
-#       allocated for fixed-size metadata; the CONTROL block (33920 B: scalars + marks[64] + free_bins[4096])
-#       carved from the front of the first slab; a header free-list threads freed 64 B region headers through each
-#       header's own first word (`CTRL_HDR_FREE`) so `region_drop`->`header_free` and `region_new`->`header_alloc`
-#       recycle the same cell — mirroring malloc/free footprint so steady-state metadata does NOT grow (the fatal
-#       one-mmap-per-64B-header 64x blow-up is avoided). Entry arrays are leak-bounded META-POOL cells.
-#     - `src/runtime/teko_rt.{c,h}` — the ONLY C touched: the maintained-C P2 seam (3 additive fns) —
-#       `tk_arena_control_get`/`tk_arena_control_set` (`_Thread_local`, the ONE mutable process word) +
-#       `tk_arena_paranoid` (cached `TEKO_MEM_PARANOID`).
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §16 arena crumb E, STEP L0 — the
+# `cg_arena_sym` codegen indirection, a provable NO-OP refactor that de-risks the load-bearing L2 flip (the
+# arena provider swap). What this harvest carries:
+#   - **§16 crumb E / L0 (compiler — codegen refactor, no behavior)**: a new `CgArenaSym` enum (14 variants:
+#     `RegionAlloc`/`RegionNew`/`RegionDrop`/`RegionDropSubtree`/`RegionRoot`/`RegionCurrent`/`RegionEnter`/
+#     `RegionLeave`/`ArenaPush`/`ArenaPop`/`ArenaCommit`/`RegionRegister`/`RegionLookup`/`Alloc`) + `fn
+#     cg_arena_sym(kind): str` in `src/codegen/codegen.tks`. Every one of the ~40 emit sites of an arena C-symbol
+#     literal (call-site literals, interpolated fragments, bare "()" helpers, the `arena_push`/…-builtin name
+#     table) now routes through `cg_arena_sym`, returning the SAME `tk_*` strings as before. One localized change;
+#     the later L2 flip is a one-line change to this table's return values. Nothing else touched (no `arena.tks`,
+#     no builtin retirement).
 #
-# NOT INERT IN SOURCE, BUT NO BEHAVIORAL CORPUS DIVERGENCE. The arena fns are compiled into the self-image but
-# UNREFERENCED (codegen keeps emitting the C `tk_region_alloc`; ~18 call-sites remain), so they never run on the
-# self-image; the emitted C differs from the previous seed only by the new `arena.tks`/seam SOURCE + the
-# mechanical shifts it induces — a function-add reseed. Switch-over (retarget to the Teko arena) is crumb E.
-#
-# NATIVE LEG — the arena core is authored in the C-leg-buildable dialect; native lowering of any not-yet-lowered
-# construct is Doc-2 terminal. The C leg is the target.
+# NO BEHAVIOR CHANGE — PROVEN NO-OP. For EVERY program the compiler compiles, the OLD (pre-L0) and NEW (post-L0)
+# compilers emit BYTE-IDENTICAL C (verified by the implementer on a standalone non-self-referential probe: `diff`
+# empty, both run exit 0). The self-image's own `tk_region_alloc` source-literal count drops 18→~1 (now a single
+# `cg_arena_sym` match arm) — a self-hosting META-EFFECT (Teko source string literals compile straight into the
+# self-compiled C), NOT a behavior change; the arena is STILL the C `tk_region_alloc` (unwired — L2 flips it).
 #
 # GATE: SELF-REPRODUCE.
-#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `2fcb31b0`) built the tree →
-#     emitted teko.c `649eb6ed` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `649eb6ed4fd3655845bd66b8684268a19
-#     c6ceddba4ba23ecf1eac902ad09521f`; tc2 -> gen2; gen2 built the tree → tc3 `649eb6ed…`. tc1 == tc2 == tc3,
-#     byte-identical (sha256 below). No ladder: the arena fns are unreferenced, so gen0 and gen1 emit the self-
-#     image identically at tc1.
+#   - C-route chain: gen0 (cc, WITH `-pthread`, from the PREVIOUS bootstrap `649eb6ed`) built the tree →
+#     emitted teko.c `26b6ca48` (tc1); tc1 -> gen1; gen1 built the tree → tc2 `26b6ca48a39ad427d8c0d47278589207
+#     73b79d83f242c70ccbc8e0c546e47ffc`; both byte-identical (coordinator-confirmed tc1 == tc2; implementer
+#     additionally confirmed tc3 == tc2). Clean 3-gen fixpoint, no ladder (a pure indirection over the same
+#     strings — behavior-inert; the fn/enum add shifts temp-var IDs, hence distinct from the previous seed).
 #   - cc-route: cc -std=c2x -w -g -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
 #   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen . -o out --no-verify --release` exits 0 (whole-tree,
-#     clean through emit+cc; NO cap-boundary retry needed this harvest).
-#   - Regression: `examples/regressions/arena_mmap/` — the `arena_teko` probe promoted to the C leg + mmap fundo,
-#     replaying word-seam / core (META-POOL header reuse, small-alloc chunk sharing, zero-size distinctness,
-#     >64 KB exclusive chunk, multi-chunk growth, root/generations, drop-unlink, idempotent sweep) / full
-#     (subtree sweep, register/lookup shadow, rewind, commit + depth>64, free-list ceil/floor) / volume (packing
-#     prediction + munmap/mmap reclaim) asserts PLUS a META-POOL header-reuse assert. Exit 42 on all-pass; the
-#     META-POOL assert is non-vacuous (disabling the header free-list makes it exit 74).
-# The self-reported peak of the whole-tree build was ~5.6-5.8 GB (within the 6 GB cap; local ladder cc dropped
-# `-g` purely to fit the coordinator container's RAM — the emitted seed bytes are cc-flag-independent).
+#     implementer-confirmed). NOTE: the emit str-concat cap-boundary OOM (~5.6 GB / 6 GB cap) flaked one ladder
+#     generation and passed on retry — a cap-boundary memory-pressure artifact (Doc-1 territory: the arrays-fixos
+#     wave + AST pre-sizing cure it), NOT a memory-correctness violation.
+# The self-reported peaks were ~5.67-5.83 GB (within the 6 GB cap; local ladder cc dropped `-g` purely to fit the
+# coordinator container's RAM — the emitted seed bytes are cc-flag-independent).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -57,9 +43,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  649eb6ed4fd3655845bd66b8684268a19c6ceddba4ba23ecf1eac902ad09521f
+sha256:  26b6ca48a39ad427d8c0d4727858920773b79d83f242c70ccbc8e0c546e47ffc
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 Teko arena core + META-POOL over raw
-         mmap, add-alongside/unreferenced so inert on the self-image), byte-identical on rebuild across the
-         stable C-route generations (tc1 == tc2 == tc3, no ladder) AND on the cc-route re-emission; no
-         unrecovered legacy artifact underlies it.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §16 crumb E/L0 cg_arena_sym codegen
+         indirection, a proven no-op refactor that routes the ~40 arena-symbol emit sites through one table),
+         byte-identical on rebuild across the stable C-route generations (tc1 == tc2 == tc3, no ladder) AND on
+         the cc-route re-emission; no unrecovered legacy artifact underlies it.
