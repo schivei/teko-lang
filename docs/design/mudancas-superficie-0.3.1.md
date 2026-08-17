@@ -1120,6 +1120,51 @@ minimiza esse retrabalho (a superfície já nasce triada).
 > inteiro **depois**, porque **o Doc 2 resolve as dependências do Doc 1**. Esta seção é **re-computada e
 > atualizada a cada item que aterrissa** (marca ✅/🔄/⏳ + re-eleição do topo).
 
+---
+
+#### 🔄 ESTADO ATUAL (2026-08-17): EMISSÃO LIMPA — tabela de literais + fold + casts + tipagem forte (ANTES do §16)
+
+**RULING DO DONO (2026-08-17):** puxado pra Doc-2 e colocado **antes do §16**, porque é a **causa-raiz única**
+de quatro problemas — magic values no artefato, binário inchado (RODATA duplicado), cast à toa, e o **seed C
+não cross-compilável** (que o §16 precisa resolver). História linear aqui, **sem arquivo paralelo** (o
+antigo `plano-tabela-literais-e-casts.md` foi absorvido neste bloco).
+
+**O problema (raiz).** O codegen emite constantes/literais de forma ingênua: **dobra** toda constante para o
+valor no ponto de uso (`SYS_MUNMAP`→`((int64_t)11ULL)`), **não deduplica** literais (a string `"syscall2"`
+sai 3× no seed), e emite **cast à toa**. Como o número dobrado é o do **host que emitiu**, o `bootstrap/teko.c`
+— UM monólito compilado por `cc` em toda arquitetura/SO — carrega só o alvo do host e **quebra em arm64**.
+
+**O modelo.**
+1. **Tabela de literais estáticos.** Todo value-type imutável (primitiva, string, array de primitivas/strings)
+   vira **uma entrada nomeada deduplicada**; todo uso emite **referência** (nunca o valor dobrado). Emissão C
+   via `#define` (funciona em toda posição, inclusive tamanho de array fixo). Constantes de plataforma
+   (`#os`/`#arch`) saem **gated por `#if`** → o monólito carrega todos os alvos e o `cc` escolhe. **O
+   cross-compile do §16 é subcaso disto.**
+2. **Regra de fold.** Dobra só quando **nada guardado** participa da expressão; **algo guardado** (qualquer
+   entidade sob `#if`/`#os`/`#arch`, não só constante) **contamina qualquer fold**, tudo-ou-nada — os operandos
+   value-type entram na tabela e a conta fica pro C/runtime.
+3. **Conversões/casts (3 baldes).** Segura/custo-zero (widening numérico implícito; travessias de tipo nomeado
+   `subtipo↔base`/enum/flag/`char↔u32`/`int→bigint`/`float→decimal`/`str→[]char` **com `to`**) · pode-perder/
+   checada (via `teko::casting` **que já existe**, `T | error`) · desnecessária/eliminar (a **maioria** é tipo
+   mal-casado na API — ex.: `i64` onde o domínio é `u64`/word — mais `literal to T` de inferência). **Não
+   relaxa segurança**; a maioria dos casts some **arrumando os tipos** (criar tipos novos onde ajuda, ex.: word
+   de 64 bits nos args de syscall).
+4. **Convenção de tipagem forte.** A codebase do Teko é tipada explícita e fortemente, via a flag **`--explicit`**
+   (o checker só barra `var` sem tipo **com** a flag; **default off**, pra não travar quem usa Teko). Os builds
+   do Teko adotam a flag — recaída fica impossível (o build barra), inclusive as dos agentes.
+
+**Sequência de trabalho (drain+reseed no fluxo normal; TESTES SÓ NO CI):**
+1. 🔄 **flag `--explicit`** — gate em `type_binding` (`typer.tks:6636`, `env.explicit && !b.has_type`), campo
+   `explicit` no `Env` (`scope.tks`), parsing (`project.tks`), propagação, **reseed**. Escopo pendente:
+   `var`+`let` (proposto) vs incluir `const`.
+2. ⏳ **varredura de tipagem** — usar `--explicit` pra tipar toda a codebase até zerar.
+3. ⏳ **ligar `--explicit` nos builds + CI** (SÓ após 100% tipado, senão o build quebra) + atualizar memórias
+   (o build seco passa a incluir `--explicit`).
+4. ⏳ **tabela de literais** — emitir por referência + dedup + gating `#if` das guardadas → **reseed**.
+5. ⏳ **casts** — os 3 baldes; criar tipos que evitam conversão; estender `teko::casting` onde falta.
+
+---
+
 **Arestas (X → Y = X depende de Y), extraídas do texto:**
 - §9.4 (interface-obriga-operador) → **§9** (habilitado pelo overload de operador, l.563)
 - §10 Intent → **§9** (properties get/set, l.906) e → **§13** (o `pub set` acerta a mesma instância, l.910/1069)
