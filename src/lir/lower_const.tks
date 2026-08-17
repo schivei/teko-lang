@@ -664,6 +664,26 @@ fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStruc
 }
 
 /**
+ * const_hdr_field_into — write the synthetic item-14 (§13.2) value-struct header word as a
+ * pointer-sized run of zero bytes at its layout offset. The header is a self-reference the compiler
+ * seeds (never named in a user initializer), so — mirroring the non-const path, where `alloca`
+ * zero-inits the struct and only user fields are written, and the C backend, where the unspecified
+ * compound-literal field zero-fills — the const image leaves `__hdr` zero rather than searching the
+ * user's `TStructInit` for it (which would break the layout-iterates-every-field invariant).
+ *
+ * @param img       the blob + relocations + leaves accumulated over the preceding fields
+ * @param fieldoff  the header field's byte offset in the owning blob
+ * @return          the image with the header word zeroed at its offset
+ */
+fn const_hdr_field_into(img: ConstImage, fieldoff: u32): ConstImage {
+    ConstImage {
+        bytes = write_bytes_at(img.bytes, fieldoff to u64, zeros_bytes(ltype_size(LType::Ptr) to u64))
+        relocs = img.relocs
+        leaves = img.leaves
+    }
+}
+
+/**
  * const_struct_field_into — write ONE struct field into the blob accumulated so far: a FAT field
  * (`[]T`/`str`) contributes its 16-byte slot at the field's layout offset plus a relocation and its
  * leaves (`const_fat_member`); every other field contributes its little-endian scalar image
@@ -682,6 +702,7 @@ fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStruc
 fn const_struct_field_into(img: ConstImage, const_name: str, layout: LStructLayout, si: checker::TStructInit, j: u64, enums: []LEnumInfo): ConstImage | error {
     var field_name = layout.field_names[j]
     var fieldoff = layout.field_offsets[j]
+    if field_name == struct_hdr_field_name() { return const_hdr_field_into(img, fieldoff) }
     var vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error as e => return e }
     if !is_fat_type(vexpr.type) {
         var fb = match const_struct_field_bytes(layout, si, j) { []byte as x => x; error as e => return e }
