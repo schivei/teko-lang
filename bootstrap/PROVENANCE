@@ -1,41 +1,38 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): a C-LEG CROSS-PLATFORM FIX — the raw-syscall
-# helper preamble now emits an aarch64 branch (`svc #0`) instead of `#error` on non-x86_64. What this harvest
-# carries:
-#   - **§16 syscall aarch64 (compiler — codegen)**: since `src/runtime/arena.tks` (the §16 arena core) CALLS
-#     `syscall6`/`syscall2` and is part of the corpus, the use-gate emits the `tk_syscallN` helpers into the
-#     compiler's OWN `teko.c`. Those helpers were `#if defined(__x86_64__) … #else #error …#endif`, so EVERY
-#     non-x86_64 C build (linux-arm64, macos-arm64) failed to compile (`#error`) — the cross-platform C-leg break
-#     the owner observed ("one platform produced an artifact, the other didn't"). Fix (`codegen.tks`,
-#     `cg_emit_syscall_helpers` + new `cg_emit_syscall_helper_text_aarch64`/`cg_emit_syscall_helpers_{x86_64,
-#     aarch64}`): emit `#if defined(__x86_64__)||defined(__amd64__) … #elif defined(__aarch64__)||defined
-#     (__arm64__) … #else #error`, where the aarch64 body uses the Linux aarch64 syscall ABI (nr in `x8`, args in
-#     `x0..x5`, `svc #0`, return in `x0` via a `"+r"(x0)` in/out constraint, `"memory"` clobber). On macOS-arm64
-#     the arena is UNWIRED so the helper is dead code — it only needs to COMPILE (`svc #0` is valid aarch64
-#     assembly); it is not macOS-syscall-correct, which is native-lib terminal-phase territory. VERIFIED with a
-#     real cross-compile: `clang -target aarch64-linux-gnu -c` of the emitted 7-arity helper block → a valid ARM
-#     aarch64 ELF object, zero warnings.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §11.2 "EMISSÃO LIMPA" step 1 —
+# the `--explicit` STRONG-TYPING GATE lands in the compiler (checker), so the compiler's own emitted
+# teko.c gains the new gate logic. What this harvest carries:
+#   - **`--explicit` flag (compiler — checker + CLI)**: a new `Env.explicit: bool` threaded from the
+#     program root through the checker's inference/coercion points. Under `--explicit` (DEFAULT OFF,
+#     the checker never bars without it — inference stays a valid language feature for Teko users):
+#       * `explicit_binding_gate` in `type_binding` — a `var`/`const` binding whose target is a named
+#         `SimpleName` (never `_`, never a destructure/alias) with `!has_type` is an ERROR. Loop-head
+#         preamble is typed with the flag CLEARED (iteration vars never gated); match `as` aliases and
+#         discard `_` pass; return needs no gate (Teko never infers a named-fn return — absence of
+#         `→ T` is a complete void signature; `const`/params/fields are already mandatory in parser).
+#       * `explicit_cast_gate` (replaces the retired `warn_redundant_cast`) at its 3 sites — a
+#         provably-unnecessary conversion (same-type / redundant lossless-widen) is an ERROR under
+#         `--explicit` and SILENT in the default build (the historical stderr warning is gone; the
+#         `TCast` node is still kept so the D4 arith-cast-ratio ceiling still counts it).
+#   - Touch points: `scope.tks` (Env + `with_explicit` + 9 constructors), `typer.tks` (the two gates
+#     + `type_loop` flag-clear + `type_program_with_deps_pre_mono`), `project.tks` (`explicit_of`,
+#     `--explicit` parse + threading), `main.tks`, `lsp_api.tks`, `checker_test.tkt`.
 #
-# GATE: SELF-REPRODUCE — ONE-STEP LADDER (tc1 != tc2 == tc3).
-#   - `cg_emit_syscall_helpers` decides the preamble a compiler emits FOR ITSELF from the compiler binary's OWN
-#     compiled-in logic, not the source it is translating. So gen0 (the previous seed `26b6ca48`, old logic)
-#     emits the OLD x86_64-only preamble at tc1 even while emitting the new helper-text bodies for later use; only
-#     the gen1 binary (new logic) applies the aarch64 emission to ITSELF, producing the stable image at tc2.
-#   - C-route chain: gen0 (cc, `-pthread`, from bootstrap `26b6ca48`) built the tree → tc1 `4afdb38a` (TRANSITIONAL
-#     — old preamble); tc1 -> gen1; gen1 built the tree → tc2 `49e5a64c69d33680101a5a64a047e767b6a399a84b44bf394d
-#     78ba531b7c1a41` (new preamble, x86_64 + aarch64); tc2 -> gen2; gen2 built the tree → tc3 `49e5a64c…`. tc2 ==
-#     tc3, byte-identical (sha256 below). The seed committed here is the STABLE image tc2 == tc3, NOT the
-#     transitional tc1. Same one-step-ladder shape the f64_bits/§16-intrinsic reseeds take.
-#   - cc-route: cc -std=c2x -w -g -pthread -I src/runtime -I src/assert bootstrap/teko.c
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (tc1 == tc2 == tc3, NOT a one-step ladder).
+#   - The gate is DEFAULT-OFF and the removed warnings are stderr-only, so the emitted bytes of the
+#     WHOLE TREE are the same whether emitted by gen0 (old seed logic) or gen1 (new logic): the seed
+#     `49e5a64c` already converges on the new image in ONE pass, with no transitional preamble.
+#   - C-route chain: gen0 (cc, `-pthread`, from bootstrap `49e5a64c`) built the tree → tc1
+#     `bea94859…`; tc1 -> gen1; gen1 built the tree → tc2 `bea94859…`; tc2 -> gen2; gen2 built the
+#     tree → tc3 `bea94859…`. tc1 == tc2 == tc3, byte-identical (sha256 below).
+#   - cc-route: cc -std=c2x -w -O1 -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
-#   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen . -o out --no-verify --release` exits 0 (whole-tree).
-#   - Cross-arch: the emitted preamble now carries BOTH `#if defined(__x86_64__)` and `#elif defined(__aarch64__)`
-#     (`svc #0`); the `#else #error` is reachable only on a genuinely-unsupported arch. arm64 C builds no longer
-#     break.
-# The self-reported peak was ~5.7 GB (within the 6 GB cap; local ladder cc dropped `-g` purely to fit the
-# coordinator container's RAM — the emitted seed bytes are cc-flag-independent).
+#   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen1 . -o out --no-verify --release` exits 0
+#     (whole-tree). Self-reported peak ~5.8 GB (within the 6 GB cap).
+#   - Default build (no `--explicit`) is byte-identical to the pre-flag behavior; gen1 emitted ZERO
+#     redundant-cast warnings where gen0 printed 15 (item-C default-silence confirmed).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -46,9 +43,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  49e5a64c69d33680101a5a64a047e767b6a399a84b44bf394d78ba531b7c1a41
+sha256:  bea94859848256e1a8f64c9cf33b9040bd49dbc41abd2c3b3693c091c75bfb72
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 aarch64 raw-syscall helper: emit the
-         aarch64 `svc #0` intrinsic instead of `#error`, unbreaking the C-leg build on arm64 now that the arena
-         core calls syscalls in the corpus), byte-identical on rebuild across the stable C-route generations
-         (one-step ladder tc1 != tc2 == tc3) AND on the cc-route re-emission; no unrecovered legacy artifact.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §11.2 EMISSÃO LIMPA step 1: the
+         `--explicit` strong-typing gate + the redundant-cast gate, both DEFAULT OFF), byte-identical
+         on rebuild across the stable C-route generations (clean fixpoint tc1 == tc2 == tc3) AND on
+         the cc-route re-emission; no unrecovered legacy artifact.
