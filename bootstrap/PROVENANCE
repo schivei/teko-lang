@@ -1,57 +1,55 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): §16 CRUMB E — THE FLIP: the
-# Teko-over-mmap arena (`src/runtime/arena.tks`) is now the REAL allocator on Linux, while
-# macOS/Windows keep the frozen-but-alive C arena (`src/runtime/teko_rt.o`) until their real memory
-# source lands (crumb F). This is the load-bearing reseed of the whole plan
-# (`docs/design/plano-s16-runtime-prelude-injection.md` §2 + §4): the compiler's own self-build now
-# RUNS on the Teko arena. What this harvest carries:
-#   - **the per-`#os` provider ladder (codegen — `src/codegen/codegen.tks`)**: `cg_arena_sym` no
-#     longer returns a bare C symbol; it returns a STABLE per-kind preprocessor macro
-#     (`TK_ARENA_<suffix>`), and `cg_emit_arena_provider_ladder` emits ONE preamble
-#     `#if defined(__linux__) … #else … #endif` `#define` ladder that binds every `TK_ARENA_*` macro:
-#       * Linux arm  → the mangled Teko arena symbols (`teko_teko__runtime__region_alloc`, …),
-#         defined by the injected `arena.tks` (crumb I0) in every program's own teko.c.
-#       * non-Linux arm → the C arena exports (`tk_region_alloc`, …) in the frozen `teko_rt.o`.
-#     The macros are ALL-OR-NOTHING per target (§2.2): a target binds EVERY arena kind to ONE
-#     provider, so an allocation and its matching drop never straddle two disjoint arenas. The
-#     ~197 allocation call sites are byte-unchanged in shape — they already route through
-#     `cg_arena_sym` — so the flip is one localized table (`cg_arena_kind_suffix`/`cg_arena_teko_sym`/
-#     `cg_arena_c_sym`/`cg_arena_all_kinds`) plus one preamble ladder, with ZERO `teko_rt.c` edit.
-#   - **LIVE on Linux**: the self-image's own runtime memory (every `list::push`, scoped-function
-#     `region_enter`/`leave`, box alloc, DI region) now bump-allocates through the Teko-over-mmap
-#     arena. The emitted teko.c carries the ladder and every `TK_ARENA_*` call site (region_alloc,
-#     alloc, region_enter/leave, region_new/drop, region_root/current, …). macOS/Windows stay on the
-#     C arena via the `#else` arm — one cross-`#os` monolith teko.c, correct on every target.
-#   - Touch points: `src/codegen/codegen.tks` (the ladder + the macro table). NO `teko_rt.c`/`.h`
-#     edit (freeze law); the C arena stays linked-but-dead on Linux (its deletion is crumb F).
+# RESEED (hand-harvest, local on fix/retirement, forward-only): §10 M2 CANONICALIZATION — the raw
+# futex sync substrate and the thread-stack allocator move from their proving fixtures into their
+# canonical `teko::runtime` surface home, now that the M2 atomic-RMW intrinsics are seeded
+# (`docs/design/plano-s10-multithread-nativo.md` §6.2 / §4.1). What this harvest carries — all LEAF
+# `.tks` plus ONE front-end wiring change, with ZERO `teko_rt.c`/`.h` edit (freeze law honored):
+#   - **`src/runtime/sync.tks`** (namespace `teko::runtime`): the one-word 3-state futex mutex
+#     (`mtx_lock`/`mtx_unlock`), the sequence condvar (`cv_wait`/`cv_signal`/`cv_broadcast`) and the
+#     private `futex_wait`/`futex_wake` leaves, built purely in Teko over the seeded
+#     `teko::sys::atomic_cas_u32`/`atomic_xchg_u32`/`atomic_add_u32`/`atomic_load_u32` intrinsics
+#     (§10 R5) and the `SYS_FUTEX` wait/wake syscall.
+#   - **`src/runtime/thread.tks`** (namespace `teko::runtime`): `thread_stack_new`/`thread_stack_free`
+#     — a spawned thread's 2 MiB stack mapped over the raw `mmap` syscall with a `PROT_NONE` guard
+#     page laid at the low end via `mprotect`, `#if(os == "linux")`-guarded with a non-Linux
+#     type-check stub, mirroring `arena.tks`'s own `#os`-split discipline.
+#   - **`src/sys/sys.tks`**: the `SYS_MPROTECT` number (x86_64 10 / aarch64 226) the guard page needs.
+#   - **`src/build/project.tks`** (the ONE front-end wiring change): the runtime-prelude injector now
+#     ships MULTIPLE files per namespace — `rt_prelude_source_path` (one path) becomes
+#     `rt_prelude_paths_for` (a path list), and `inject_runtime_prelude` loops each so `teko::runtime`
+#     injects `arena.tks` + `sync.tks` + `thread.tks` into every ordinary program. The dedup guard is
+#     unchanged (per-namespace), so the compiler self-image — which DISCOVERS these files under its
+#     own `src/runtime/` — is still skipped for injection.
+#   - Because the self-image now discovers `sync.tks`, its own emitted teko.c gains the `tk_atomic_*`
+#     RMW helper block (use-gated on the atomic call sites `sync.tks` introduces) and the dormant
+#     sync/thread functions — the reason this leaf-canonicalization requires a reseed at all. The
+#     spawn substrate is UNTOUCHED (still pthread): M3/M4 do not land in this harvest.
 #
-# GATE: SELF-REPRODUCE ON THE TEKO ARENA — CLEAN FIXPOINT (gen2 == gen3).
-#   - C-route chain: gen0 (cc of the prior I0 seed) built the tree -> gen1 (new codegen, C arena,
-#     emits the ladder); gen1 -> gen2 (from the ladder emission, RUNNING ON THE TEKO ARENA);
-#     gen2 -> gen3 (also on the Teko arena). The fixpoint gate returns PASSED: gen2 == gen3 byte for
-#     byte, and gen2.c == gen3.c (22709514 bytes) — the Teko-arena compiler emits C byte-identical to
-#     the C-arena compiler, proving the arena is behavior-transparent. This harvested teko.c is that
-#     stable ladder emission (== gen2.c == gen3.c), a self-reproducing fixpoint.
-#   - `TEKO_MEM_PARANOID=1` full compiler build on the Teko arena exits 0 — the memory keystone
-#     (§5.1 top severity): the LIVE arena's poison path (`ar_poison`, 8×0xDD over each freed block,
-#     gated on `tk_arena_paranoid`) ran throughout a whole self-build with zero leak/use-after-free/
-#     live-count drift. Self-reported peak 5880.0 MB under paranoid (5703–5712 MB plain).
-#   - Non-Linux is correct-by-construction: the ladder `#else` arm binds every `TK_ARENA_*` macro to
-#     the frozen C `tk_*` export, so a macOS/Windows build still links the frozen-but-alive C arena.
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3).
+#   - C-route chain: gen0 (cc of the prior crumb-E seed) emitted the modified tree's teko.c == gen1's
+#     re-emission (byte-identical); gen1 -> gen2 (RUNNING ON THE TEKO ARENA); gen2 -> gen3. The
+#     fixpoint gate returns PASSED: gen2 == gen3 byte for byte, and gen2.c == gen3.c (22719448 bytes).
+#     This harvested teko.c IS that stable emission (== gen1.c == gen2.c == gen3.c).
+#   - The three canonicalized fixtures (`futex_mutex_counter`, `futex_condvar_barrier`,
+#     `thread_stack_new`) build + run to exit 0 under the reseeded compiler, consuming the injected
+#     canonical modules; `chan_memchan_spawn` and a diverse regression sample stay green (broad
+#     injection is behavior-transparent — the injected sync/thread functions allocate nothing).
+#   - `TEKO_MEM_PARANOID=1` full compiler self-build on the Teko arena exits 0 — the poison path ran
+#     through a whole self-build with zero leak/use-after-free/live-count drift. Self-reported peak
+#     5848.1 MB under paranoid (5754.6 MB plain).
 #
-# `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
-# default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
-# forward-only, and its correctness rests on the self-reproduction above. Mirrors the prior harvests.
+# `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane, forward-only,
+# its correctness resting on the self-reproduction above. Mirrors the prior harvests.
 # `commit: pending drain` — the landing commit is written in this same change.
 #
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (judges on a SWAP).
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  f0c3eeffe31c738b964328f62d9ee8a7f0ec09744577177650e3041b00e5d6ab
+sha256:  89342ff07a2db80b6b09a45c59352062367c582fb96e8d3d32369a138563851b
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 crumb E arena flip — the
-         Teko-over-mmap arena live as the Linux allocator, the C arena kept for non-Linux via the
-         ladder `#else` arm), byte-identical on rebuild across the Teko-arena C-route generations
+legacy:  none — this is an exact, self-reproducing hand harvest (the §10 M2 canonicalization: the
+         futex sync substrate + thread-stack allocator as canonical teko::runtime surface, injected
+         into every program), byte-identical on rebuild across the Teko-arena C-route generations
          (clean fixpoint gen2 == gen3, gen2.c == gen3.c); no unrecovered legacy artifact.

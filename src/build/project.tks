@@ -437,27 +437,36 @@ fn rt_inject_namespaces(): []str {
 }
 
 /**
- * Resolve the absolute on-disk path of the compiler-shipped runtime source file that DECLARES
- * namespace `ns`, staged relative to the runtime dir `rt`: `teko::runtime`'s `arena.tks` sits
- * beside `teko_rt.{c,h}` in `rt` itself, and `teko::sys`'s `sys.tks` lives in the `sys` sibling
- * dir — the same `<parent>/sys` shape `assert_dir` derives for the assert seed. Returns "" for a
- * namespace this injector does not ship, so the caller can skip it without a read.
+ * Resolve the absolute on-disk paths of the compiler-shipped runtime source files that DECLARE
+ * namespace `ns`, staged relative to the runtime dir `rt`. `teko::runtime` ships MULTIPLE files that
+ * all sit beside `teko_rt.{c,h}` in `rt` itself: the arena (`arena.tks`), the §10 futex mutex/condvar
+ * (`sync.tks`) and the §10 thread-stack allocator (`thread.tks`); `teko::sys`'s `sys.tks` lives in
+ * the `sys` sibling dir — the same `<parent>/sys` shape `assert_dir` derives for the assert seed.
+ * Returns an empty list for a namespace this injector does not ship, so the caller can skip it
+ * without a read.
  *
  * @param ns  the runtime namespace to resolve (the `rt_inject_namespaces` domain)
  * @param rt  the resolved runtime dir (`rt_dir()`, absolute after `ensure_rt_dir_abs`)
- * @return    the path of the file declaring `ns`, or "" when `ns` is not shipped by this injector
+ * @return    the paths of the files declaring `ns`, in link order, or an empty list when `ns` is not shipped
  * @since §16
  */
-fn rt_prelude_source_path(ns: str, rt: str): str {
-    if ns == "teko::runtime" { return teko::str::concat(rt, "/arena.tks") }
+fn rt_prelude_paths_for(ns: str, rt: str): []str {
+    var out: []str = teko::list::empty()
+    if ns == "teko::runtime" {
+        out = teko::list::push(out, teko::str::concat(rt, "/arena.tks"))
+        out = teko::list::push(out, teko::str::concat(rt, "/sync.tks"))
+        out = teko::list::push(out, teko::str::concat(rt, "/thread.tks"))
+        return out
+    }
     if ns == "teko::sys" {
         var parent = match teko::str::last_index_of(rt, "/") {
             u64 as i => teko::str::slice_to(rt, i)
             error => "."
         }
-        return teko::str::concat(parent, "/sys/sys.tks")
+        out = teko::list::push(out, teko::str::concat(parent, "/sys/sys.tks"))
+        return out
     }
-    ""
+    out
 }
 
 /**
@@ -531,12 +540,18 @@ fn inject_runtime_prelude(files: []SourceFile): []SourceFile | error {
             i = i + 1
             continue
         }
-        var path = rt_prelude_source_path(ns, rt)
-        match teko::io::read_file(path) {
-            str => { }
-            error => return error { message = teko::str::concat("runtime prelude: cannot read shipped source '", path, "' for namespace ", ns) }
+        var paths = rt_prelude_paths_for(ns, rt)
+        var j: u64 = 0
+        loop {
+            if j >= paths.len { break }
+            var path = paths[j]
+            match teko::io::read_file(path) {
+                str => { }
+                error => return error { message = teko::str::concat("runtime prelude: cannot read shipped source '", path, "' for namespace ", ns) }
+            }
+            prelude = teko::list::push(prelude, SourceFile { path = path; namespace = ns })
+            j = j + 1
         }
-        prelude = teko::list::push(prelude, SourceFile { path = path; namespace = ns })
         i = i + 1
     }
     dsc_append(prelude, files)

@@ -1,0 +1,106 @@
+/** STACK_BYTES — a spawned thread's fixed stack size: 2 MiB, the glibc default thread-stack size. */
+const STACK_BYTES: u64 = 2097152
+
+/** GUARD_BYTES — the `PROT_NONE` guard page laid at the LOW end of a thread stack (stacks grow down
+ *  toward it) so an overflow faults on the guard instead of silently corrupting the mapping below it.
+ *  One page. */
+const GUARD_BYTES: u64 = 4096
+
+#if(os == "linux")
+/**
+ * thr_mmap — map `length` bytes of anonymous private read/write memory through the raw `mmap`
+ * syscall, the backing store a spawned thread's stack is carved from. Returns the page-aligned base
+ * address, or 0 when the kernel refuses (a result in the `[-4095, -1]` `-errno` error band). This is
+ * the Linux arm: the `SYS_MMAP`/`PROT_*`/`MAP_*` numbers live in `teko::sys` behind `#os("linux")`
+ * guards, so the whole trio is `#os`-split and the non-Linux arm below references no Linux-only
+ * constant.
+ *
+ * @param length  the mapping size in bytes; the kernel rounds it up to whole pages
+ * @return        the page-aligned base address, or 0 when the kernel refuses
+ */
+fn thr_mmap(length: u64): u64 {
+    var result = teko::sys::syscall6(teko::sys::SYS_MMAP, 0, length to i64,
+        teko::sys::PROT_READ | teko::sys::PROT_WRITE,
+        teko::sys::MAP_PRIVATE | teko::sys::MAP_ANONYMOUS, -1, 0)
+    if result >= -4095 && result <= -1 { return 0 }
+    result to u64
+}
+
+/**
+ * thr_guard — turn the first `GUARD_BYTES` of a freshly mapped stack into a `PROT_NONE` guard page
+ * through the raw `mprotect` syscall, so a stack overflow (stacks grow DOWN toward the low end)
+ * faults on the guard rather than corrupting the mapping beneath it. The result is discarded: a
+ * guard that fails to arm degrades to an unguarded — but still usable — stack.
+ *
+ * @param low  the stack mapping's base (low) address, as `thr_mmap` returned
+ * @return      nothing
+ */
+fn thr_guard(low: u64) {
+    _ = teko::sys::syscall3(teko::sys::SYS_MPROTECT, low to i64, GUARD_BYTES to i64,
+        teko::sys::PROT_NONE)
+}
+
+/**
+ * thread_stack_free — release a stack obtained from `thread_stack_new` through the raw `munmap`
+ * syscall (plano §10 §4.1). The stack top the allocator returned is `STACK_BYTES` above the mapping
+ * low, so the whole region — guard page and all — is `munmap(top - STACK_BYTES, STACK_BYTES)`.
+ *
+ * @param stack_top  the stack top `thread_stack_new` returned
+ * @return           nothing
+ */
+pub fn thread_stack_free(stack_top: u64) {
+    _ = teko::sys::syscall2(teko::sys::SYS_MUNMAP, (stack_top - STACK_BYTES) to i64, STACK_BYTES to i64)
+}
+#else
+/**
+ * thr_mmap — non-Linux STUB (returns 0, "the kernel refuses"). The §10 native thread substrate's
+ * memory source is the raw `mmap` syscall, whose Darwin/Windows numbers and error conventions are a
+ * later §10 leg; `teko::sys`'s `SYS_MMAP`/`PROT_*`/`MAP_*` are `#os("linux")`-only. This arm exists
+ * ONLY so the module TYPE-CHECKS off Linux, where the raw-`clone` spawn path is honest-stopped and
+ * never reached.
+ *
+ * @param length  the requested mapping size in bytes (ignored — the stub maps nothing)
+ * @return        0, always
+ */
+fn thr_mmap(length: u64): u64 {
+    _ = length
+    0 to u64
+}
+
+/**
+ * thr_guard — non-Linux STUB (arms nothing). See `thr_mmap`'s non-Linux arm: the thread substrate is
+ * honest-stopped off Linux, so no stack is ever mapped to guard.
+ *
+ * @param low  the (never-obtained) stack base — ignored
+ * @return      nothing
+ */
+fn thr_guard(low: u64) {
+    _ = low
+}
+
+/**
+ * thread_stack_free — non-Linux STUB (releases nothing). See `thr_mmap`'s non-Linux arm.
+ *
+ * @param stack_top  the (never-obtained) stack top — ignored
+ * @return           nothing
+ */
+pub fn thread_stack_free(stack_top: u64) {
+    _ = stack_top
+}
+#endif
+
+/**
+ * thread_stack_new — allocate a spawned thread's stack (plano §10 §4.1): one `STACK_BYTES` anonymous
+ * private mapping with a `GUARD_BYTES` `PROT_NONE` guard laid at its LOW end (stacks grow down, so
+ * the guard is what a stack overflow hits first). Returns the STACK TOP — the highest usable
+ * address, the `stack_top` the §10 `thread_clone` intrinsic (M3) hands the kernel — or 0 when the
+ * mapping fails. The caller frees the whole region with `thread_stack_free(stack_top)`.
+ *
+ * @return  the stack's top (highest) address, or 0 when the mapping fails
+ */
+pub fn thread_stack_new(): u64 {
+    var low = thr_mmap(STACK_BYTES)
+    if low == 0 { return 0 }
+    thr_guard(low)
+    low + STACK_BYTES
+}

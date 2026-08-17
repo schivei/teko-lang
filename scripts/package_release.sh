@@ -115,6 +115,8 @@ if [ "${EMIT_SRC_BUNDLE:-0}" = "1" ]; then
     # C runtime probe dir: arena.tks (namespace teko::runtime) in runtime/, sys.tks (teko::sys) in
     # a sibling sys/. An install without them makes `teko build` of a user program fail to inject.
     cp "$SRC_DIR/runtime/arena.tks" "$SSTAGE/runtime/arena.tks"
+    cp "$SRC_DIR/runtime/sync.tks"  "$SSTAGE/runtime/sync.tks"
+    cp "$SRC_DIR/runtime/thread.tks" "$SSTAGE/runtime/thread.tks"
     cp "$SRC_DIR/sys/sys.tks"       "$SSTAGE/sys/sys.tks"
 
     # A ready-to-run build script inside the bundle (POSIX + a Windows note).
