@@ -285,8 +285,16 @@ declared_degrau_rung() {
   # hard link error. clang (x86_64-pc-windows-msvc, already on the runner) is monolithic, fast, and
   # needs no libm — the same Windows rules build_cc_argv already applies for gen1 and beyond.
   deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"; deg_tgt=""; deg_pthread="-pthread"
+  # deg_stack — Windows-only PE stack reserve. The default main-thread stack Windows reserves is
+  # ~1 MiB (vs Linux's 8 MiB), and teko's consteval phase recurses far deeper than that: the rung -1
+  # degrau compiler faults with 0xC00000FD (STATUS_STACK_OVERFLOW) partway through building the tip.
+  # Every other teko binary (gen1 and beyond) is linked by teko's OWN run_cc, which already emits
+  # `-Wl,/STACK:...` via build_cc_argv — but this rung -1 cc invocation is outside that path, so it
+  # must widen its own reserve. `-Wl,/STACK:<bytes>` reaches lld-link (the linker the MSVC-target
+  # clang driver invokes) and sets PE SizeOfStackReserve; 64 MiB (0x4000000) is deliberately generous.
+  deg_stack=""
   case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm=""; deg_tgt="--target=x86_64-pc-windows-msvc"; deg_pthread="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm=""; deg_tgt="--target=x86_64-pc-windows-msvc"; deg_pthread=""; deg_stack="-Wl,/STACK:67108864" ;;
   esac
   if ! command -v "$deg_cc" >/dev/null 2>&1; then
     log "rung -1: a degrau is declared at $cc_src but no $deg_cc is on PATH — skipping"
@@ -300,7 +308,7 @@ declared_degrau_rung() {
   # x86_64 lane SLOWER (780s -> 869s), so the flag was reverted everywhere. It survived in this
   # function only because rung -1 was written while the experiment was still live.
   log "rung -1: building the degrau's compiler from $cc_src (cc=$deg_cc)"
-  if ! "$deg_cc" "$deg_std" $deg_tgt -w -O2 $deg_pthread \
+  if ! "$deg_cc" "$deg_std" $deg_tgt -w -O2 $deg_pthread $deg_stack \
         -I src/runtime -I src/assert \
         "$cc_src" src/runtime/teko_rt.c src/assert/assert.c $deg_libm \
         -o "$cc_out/teko" >"$cc_log" 2>&1; then
