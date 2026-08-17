@@ -1,49 +1,45 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §10 native-multithread futex
-# SUBSTRATE — the atomic read-modify-write codegen intrinsics (M2 / plano §6.2, risk R5) — land in
-# the checker + C backend, so the compiler's own emitted teko.c gains the new builtins' registration,
-# dispatch, use-gate and helper emitter. What this harvest carries:
-#   - **atomic RMW codegen intrinsics (compiler — checker + codegen)**: plano §6.2 / R5, the atomic
-#     primitives the futex mutex and sequence condvar are built on. Without a real compare-and-swap
-#     the mutex's 0->1 lock transition would race a plain `load_u64`+`store_u64`, so the sync leaf is
-#     unsound until these exist. Four fixed-signature `i64`-word builtins, each lowered to a thin
-#     `__atomic_*` helper (the raw-syscall-intrinsic precedent, one notch simpler — no per-arch `#if`
-#     guard, the `__atomic_*` builtins are portable across x86_64/aarch64):
-#       * `teko::sys::atomic_cas_u32(addr, expected, desired): i64` -> `tk_atomic_cas_u32`, a VALUE
-#         compare-and-swap returning the observed word.
-#       * `teko::sys::atomic_xchg_u32(addr, value): i64` -> `tk_atomic_xchg_u32`, unconditional swap.
-#       * `teko::sys::atomic_add_u32(addr, delta): i64` -> `tk_atomic_add_u32`, fetch-and-add (the
-#         condvar sequence `seq++` and the completed-worker counters).
-#       * `teko::sys::atomic_load_u32(addr): i64` -> `tk_atomic_load_u32`, a seq-cst load.
-#       * `src/checker/scope.tks` — `atomic_rmw_signature(nargs)` registers the four beside the
-#         `syscall0..6`/`thread_clone` family as `Func { params = i64 x nargs; ret = i64 }`.
-#       * `src/codegen/codegen.tks` — `emit_call` dispatch to the `tk_atomic_*` symbols; a single
-#         `atomics` bit threaded through `SyscallUse` (set by `cg_mark_syscall_call`, scanned by the
-#         existing `cg_scan_syscall_*` walk); `cg_emit_atomic_helpers` emits the four `static inline`
-#         helpers ONLY when the program calls one of the intrinsics (a `static inline` unused helper
-#         costs nothing and raises no `-Wunused-function`).
-#   - **Inert in the compiler's own image**: the compiler never calls an atomic intrinsic in its own
-#     source (the atomics live only in the §10 sync leaf, which is exercised by regression fixtures
-#     built by gen1, NEVER by the compiler's corpus), so `SyscallUse.atomics` is always false for the
-#     self-build and ZERO atomic helpers are emitted into teko.c (the only `tk_atomic_*` text in the
-#     image is the string-literal helper body inside codegen's data) ⇒ a clean single-pass fixpoint,
-#     exactly as the `syscallN` and `thread_clone` intrinsic keystones were.
-#   - **Native leg honest-stops**: the atomic intrinsics are not in the native subset, so a call to
-#     one falls through `native_builtin_symbol` (`src/lir/lower.tks`) to the terminal builtin stop —
-#     the C leg is this pass's build+run target, the native lowering inherits them in Doc-2's terminal
-#     phase (the identical posture `syscallN`/`thread_clone` take).
-#   - Touch points: `src/checker/scope.tks`, `src/codegen/codegen.tks`.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): §16 ARENA CRUMB D — the Teko arena
+# provider's real current-region stack (`docs/design/plano-s16-runtime-prelude-injection.md` §3), the
+# prerequisite for the L2 flip. What this harvest carries:
+#   - **arena current-region stack (compiler-shipped runtime — `src/runtime/arena.tks`)**: the three
+#     missing provider fns and a real `region_current`, backed by a per-flow bounded stack in the
+#     arena's OWN mmap'd CONTROL block, mirroring the C twin (`teko_rt.c` `tk_region_enter`/
+#     `tk_region_leave`/`tk_region_current`/`tk_alloc`, `cur_regions[64]`/`cur_rsp`):
+#       * CONTROL layout additions APPENDED after the free bins: `CTRL_CUR_SP` (the stack pointer,
+#         the C twin's `cur_rsp`), `CTRL_CUR_STACK` (64 region handles, the C twin's `cur_regions`),
+#         `CUR_STACK_SLOTS = 64`, and `CTRL_BYTES` grown 33920 -> 34448 (the scalars + mark stack +
+#         free bins + the 64-slot current-region stack, alignment-rounded). The mapping is kernel
+#         zero-filled, so `CTRL_CUR_SP` starts at 0 = "root is current" with no init write.
+#       * `ar_cur_slot`/`ar_cur_current`/`ar_cur_enter`/`ar_cur_leave` — the allocation-free stack
+#         primitives. `ar_cur_current` reads the TOP (guarded `sp` in `(0, CUR_STACK_SLOTS]`, a
+#         non-zero slot) and falls to the root otherwise; `ar_cur_enter` writes the slot under the cap
+#         and increments unconditionally so an over-deep push still balances a later leave;
+#         `ar_cur_leave` decrements only when non-zero — byte-for-byte the C twin's discipline.
+#       * `region_enter`/`region_leave`/`alloc` (the three missing `CgArenaSym` kinds) + the real
+#         `region_current` replacing the root-only stub. `alloc` routes through
+#         `ar_region_alloc_w(control, ar_cur_current(control), n)` (the allocation-free dialect); the
+#         obs-histogram side effect of the C `tk_alloc` is diagnostic-only and deliberately NOT
+#         reproduced (the arena core forbids the computed-string path it would need).
+#   - **DORMANT after crumb D**: `cg_arena_sym` is UNFLIPPED, so the ~197 allocation call sites still
+#     route to the C arena; the self-image emits the new functions but RUNS on the C arena. Crumb D is
+#     additive and behavior-neutral for the self-build — the temp-id shift of the three new fns is the
+#     only emitted-C delta (ACHADO-A), so gen0 (cc of the prior seed) and gen1 emit the same whole-tree
+#     bytes: a one-pass convergence.
+#   - Touch points: `src/runtime/arena.tks` (+ the RF5 promoted-probe fixture
+#     `examples/regressions/current_region_stack`, a leaf, not in the self-image).
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (tc1 == tc2 == tc3).
-#   - The intrinsics are behavior-neutral for the self-build (dead code until a program calls an
-#     atomic builtin), so gen0 (cc of the prior seed) and gen1 emit the same whole-tree bytes: the
-#     C emitted by gen0 and by gen1 is byte-identical (sha256 below), a one-pass convergence.
+#   - The current-region stack is behavior-neutral for the self-build (the arena stays dormant), so
+#     gen0 and gen1 emit byte-identical whole-tree C (sha256 below).
 #   - C-route chain: gen0 (cc, `-pthread`, from the prior bootstrap) built the tree -> gen1; gen1's
 #     emitted C == gen0's emitted C; the C-route fixpoint gate returns PASSED (gen2 == gen3 byte for
-#     byte, gen2.c == gen3.c). The four atomic helpers were validated standalone (a single-threaded
-#     cas/xchg/add/load round-trip) and under real contention (an 8-thread futex-mutex counter and an
-#     8-thread futex-condvar barrier, both exit 0). Self-reported peak ~5.7 GB (within the 6 GB cap).
+#     byte, gen2.c == gen3.c, 22668287 bytes). `TEKO_MEM_PARANOID=1` full compiler build exits 0 (the
+#     memory keystone — the C arena's poison path stays clean, and the paranoid-build emitted C is
+#     byte-identical to the plain build). RF5 `current_region_stack` (enter-a-child /
+#     alloc-lands-in-child / leave / alloc-lands-in-root / drop-the-child, over the raw mmap fundo)
+#     exits 42 on the C leg. Self-reported peak 5742.1 MB (within the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -54,9 +50,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  10386eb02495570b125643c2388d830ddac7f270521287a3dc0d127d2e462ec9
+sha256:  49c6df6e521cb55e852c1e2af1cfe846bc5404d7416edf1580643d28e0b95cdb
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §10/M2 atomic RMW codegen
-         intrinsics — dead-code-in-corpus builtins gated on their own call sites), byte-identical on
+legacy:  none — this is an exact, self-reproducing hand harvest (the §16 arena crumb D current-region
+         stack — additive, behavior-neutral while the Teko arena stays dormant), byte-identical on
          rebuild across the stable C-route generations (clean fixpoint tc1 == tc2 == tc3); no
          unrecovered legacy artifact.
