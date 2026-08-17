@@ -1,38 +1,35 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §11.2 "EMISSÃO LIMPA" step 1 —
-# the `--explicit` STRONG-TYPING GATE lands in the compiler (checker), so the compiler's own emitted
-# teko.c gains the new gate logic. What this harvest carries:
-#   - **`--explicit` flag (compiler — checker + CLI)**: a new `Env.explicit: bool` threaded from the
-#     program root through the checker's inference/coercion points. Under `--explicit` (DEFAULT OFF,
-#     the checker never bars without it — inference stays a valid language feature for Teko users):
-#       * `explicit_binding_gate` in `type_binding` — a `var`/`const` binding whose target is a named
-#         `SimpleName` (never `_`, never a destructure/alias) with `!has_type` is an ERROR. Loop-head
-#         preamble is typed with the flag CLEARED (iteration vars never gated); match `as` aliases and
-#         discard `_` pass; return needs no gate (Teko never infers a named-fn return — absence of
-#         `→ T` is a complete void signature; `const`/params/fields are already mandatory in parser).
-#       * `explicit_cast_gate` (replaces the retired `warn_redundant_cast`) at its 3 sites — a
-#         provably-unnecessary conversion (same-type / redundant lossless-widen) is an ERROR under
-#         `--explicit` and SILENT in the default build (the historical stderr warning is gone; the
-#         `TCast` node is still kept so the D4 arith-cast-ratio ceiling still counts it).
-#   - Touch points: `scope.tks` (Env + `with_explicit` + 9 constructors), `typer.tks` (the two gates
-#     + `type_loop` flag-clear + `type_program_with_deps_pre_mono`), `project.tks` (`explicit_of`,
-#     `--explicit` parse + threading), `main.tks`, `lsp_api.tks`, `checker_test.tkt`.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the NATIVE-backend const-struct
+# `__hdr` fix lands in the LIR const lowering (`src/lir/lower_const.tks`), so the compiler's own
+# emitted teko.c gains the new guard. What this harvest carries:
+#   - **native const-struct `__hdr` guard (compiler — LIR)**: item-14 (§13.2) prepends a synthetic
+#     pointer-sized `__hdr` self-reference as the FIRST member of every value-struct layout, in both
+#     backends. The C backend leans on C's zero-init of unspecified compound-literal fields; the
+#     NATIVE const path iterates the FULL layout (including `__hdr`) and looked each field up in the
+#     user's `TStructInit` via `struct_init_value`. The user never binds `__hdr`, so a const struct
+#     raised `const struct: initializer binds no field \`__hdr\` (internal)` on the native leg.
+#       * Fix (`const_struct_field_into`): when the field is `struct_hdr_field_name()` (`__hdr`),
+#         skip the user-initializer lookup and write `ltype_size(LType::Ptr)` zero bytes at the
+#         field's offset via a new `const_hdr_field_into` helper — mirroring the non-const path
+#         (`alloca` zero-inits the struct, only user fields are written) and the C backend (the
+#         unspecified header member zero-fills). No ABI change; `__hdr` stays zero on both engines.
+#   - Touch points: `src/lir/lower_const.tks` (the `const_hdr_field_into` helper + the guard clause).
 #
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (tc1 == tc2 == tc3, NOT a one-step ladder).
-#   - The gate is DEFAULT-OFF and the removed warnings are stderr-only, so the emitted bytes of the
-#     WHOLE TREE are the same whether emitted by gen0 (old seed logic) or gen1 (new logic): the seed
-#     `49e5a64c` already converges on the new image in ONE pass, with no transitional preamble.
-#   - C-route chain: gen0 (cc, `-pthread`, from bootstrap `49e5a64c`) built the tree → tc1
-#     `bea94859…`; tc1 -> gen1; gen1 built the tree → tc2 `bea94859…`; tc2 -> gen2; gen2 built the
-#     tree → tc3 `bea94859…`. tc1 == tc2 == tc3, byte-identical (sha256 below).
-#   - cc-route: cc -std=c2x -w -O1 -pthread -I src/runtime -I src/assert bootstrap/teko.c
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (tc1 == tc2 == tc3).
+#   - The committed seed already carries the new guard, so gen0 (cc of this seed) and gen1 emit the
+#     same whole-tree bytes: the seed `441c6318` converges on its own image in ONE pass.
+#   - C-route chain: gen0 (cc, `-pthread`, from bootstrap `441c6318`) built the tree → tc1
+#     `441c6318…`; tc1 -> gen1; gen1 built the tree → tc2 `441c6318…`; tc2 -> gen2; gen2 built the
+#     tree → tc3 `441c6318…`. tc1 == tc2 == tc3, byte-identical (sha256 below). Verified locally:
+#     gen1's emitted C == gen2's emitted C == this seed, and gen1 binary == gen2 binary; the
+#     fixpoint gate returns PASSED (gen2 == gen3 byte for byte, gen2.c == gen3.c).
+#   - cc-route: cc -std=c2x -w -pthread -I src/runtime -I src/assert bootstrap/teko.c
 #     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
 #     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
-#   - MEM_PARANOID: `TEKO_BACKEND=c TEKO_MEM_PARANOID=1 gen1 . -o out --no-verify --release` exits 0
-#     (whole-tree). Self-reported peak ~5.8 GB (within the 6 GB cap).
-#   - Default build (no `--explicit`) is byte-identical to the pre-flag behavior; gen1 emitted ZERO
-#     redundant-cast warnings where gen0 printed 15 (item-C default-silence confirmed).
+#   - The bug is NATIVE-only and cannot be exercised on the Linux/C leg; the fix is correct by
+#     construction (it mirrors the non-const and C paths), and CI's macOS native fixpoint is its
+#     terminal proof. Self-reported peak ~5.7 GB (within the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -43,9 +40,10 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  bea94859848256e1a8f64c9cf33b9040bd49dbc41abd2c3b3693c091c75bfb72
+sha256:  441c6318c4bbe39ba03c97e857e1908ac45cdc5324cb6a76d5d92613145ab34a
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §11.2 EMISSÃO LIMPA step 1: the
-         `--explicit` strong-typing gate + the redundant-cast gate, both DEFAULT OFF), byte-identical
-         on rebuild across the stable C-route generations (clean fixpoint tc1 == tc2 == tc3) AND on
-         the cc-route re-emission; no unrecovered legacy artifact.
+legacy:  none — this is an exact, self-reproducing hand harvest (the native const-struct `__hdr`
+         guard in the LIR const lowering — skip the synthetic header field in the user-initializer
+         lookup and zero-fill it at its offset), byte-identical on rebuild across the stable C-route
+         generations (clean fixpoint tc1 == tc2 == tc3) AND on the cc-route re-emission; no
+         unrecovered legacy artifact.
