@@ -1,45 +1,52 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): §16 ARENA CRUMB D — the Teko arena
-# provider's real current-region stack (`docs/design/plano-s16-runtime-prelude-injection.md` §3), the
-# prerequisite for the L2 flip. What this harvest carries:
-#   - **arena current-region stack (compiler-shipped runtime — `src/runtime/arena.tks`)**: the three
-#     missing provider fns and a real `region_current`, backed by a per-flow bounded stack in the
-#     arena's OWN mmap'd CONTROL block, mirroring the C twin (`teko_rt.c` `tk_region_enter`/
-#     `tk_region_leave`/`tk_region_current`/`tk_alloc`, `cur_regions[64]`/`cur_rsp`):
-#       * CONTROL layout additions APPENDED after the free bins: `CTRL_CUR_SP` (the stack pointer,
-#         the C twin's `cur_rsp`), `CTRL_CUR_STACK` (64 region handles, the C twin's `cur_regions`),
-#         `CUR_STACK_SLOTS = 64`, and `CTRL_BYTES` grown 33920 -> 34448 (the scalars + mark stack +
-#         free bins + the 64-slot current-region stack, alignment-rounded). The mapping is kernel
-#         zero-filled, so `CTRL_CUR_SP` starts at 0 = "root is current" with no init write.
-#       * `ar_cur_slot`/`ar_cur_current`/`ar_cur_enter`/`ar_cur_leave` — the allocation-free stack
-#         primitives. `ar_cur_current` reads the TOP (guarded `sp` in `(0, CUR_STACK_SLOTS]`, a
-#         non-zero slot) and falls to the root otherwise; `ar_cur_enter` writes the slot under the cap
-#         and increments unconditionally so an over-deep push still balances a later leave;
-#         `ar_cur_leave` decrements only when non-zero — byte-for-byte the C twin's discipline.
-#       * `region_enter`/`region_leave`/`alloc` (the three missing `CgArenaSym` kinds) + the real
-#         `region_current` replacing the root-only stub. `alloc` routes through
-#         `ar_region_alloc_w(control, ar_cur_current(control), n)` (the allocation-free dialect); the
-#         obs-histogram side effect of the C `tk_alloc` is diagnostic-only and deliberately NOT
-#         reproduced (the arena core forbids the computed-string path it would need).
-#   - **DORMANT after crumb D**: `cg_arena_sym` is UNFLIPPED, so the ~197 allocation call sites still
-#     route to the C arena; the self-image emits the new functions but RUNS on the C arena. Crumb D is
-#     additive and behavior-neutral for the self-build — the temp-id shift of the three new fns is the
-#     only emitted-C delta (ACHADO-A), so gen0 (cc of the prior seed) and gen1 emit the same whole-tree
-#     bytes: a one-pass convergence.
-#   - Touch points: `src/runtime/arena.tks` (+ the RF5 promoted-probe fixture
-#     `examples/regressions/current_region_stack`, a leaf, not in the self-image).
+# RESEED (hand-harvest, local on fix/retirement, forward-only): §16 CRUMB I0 — the runtime-prelude
+# INJECTION SCAFFOLDING (`docs/design/plano-s16-runtime-prelude-injection.md` §1). The build
+# front-end now injects the compiler-shipped Teko runtime SOURCE into every ordinary program's file
+# set, so the Teko-over-mmap arena is compiled INTO each program's own teko.c. What this harvest
+# carries:
+#   - **the injection mechanism (build front-end — `src/build/project.tks`)**: four new functions
+#     wired into `frontend_parse`, right after the `main.tks` injection:
+#       * `rt_inject_namespaces` — the runtime namespaces injected into every ordinary program in
+#         link order: `teko::runtime` (the arena provider `arena.tks`) and `teko::sys` (the
+#         const-only ABI values the arena references). The intrinsics the arena also uses
+#         (`syscallN`/`ptr_word`/`word_ptr`/`load_u64`/`store_u64`) need no source — codegen lowers
+#         them — so they are absent.
+#       * `rt_prelude_source_path` — resolves each namespace to its shipped source relative to
+#         `rt_dir()`: `arena.tks` beside the C runtime, `sys.tks` in the `<parent>/sys` sibling dir
+#         (the same shape `assert_dir` derives for the assert seed).
+#       * `rt_already_present` — the DEDUP GUARD: skips a namespace the project's own discovered
+#         file set already declares, so the compiler self-image (which discovers `teko::runtime` +
+#         `teko::sys` under its own `src/` root) is SKIPPED and its emitted teko.c stays
+#         byte-identical.
+#       * `artifact_wants_runtime_prelude` — restricts injection to `Artifact::Binary`: a library
+#         kind (`Static`/`Shared`/`Package`) is linked INTO a binary that injects the runtime
+#         itself, so injecting it into the library too would double-define every arena symbol once
+#         the consuming binary loads the library's `.tkl` (the dedup guard cannot see across the
+#         dependency boundary). A library gets its arena from the final link.
+#       * `inject_runtime_prelude` — prepends the shipped runtime source files onto the discovered
+#         file set, skipping the deduped namespaces; they flow through parse -> prune -> check ->
+#         codegen like any source, emitting into the one teko.c.
+#   - **DORMANT (I0 is SCAFFOLDING)**: `cg_arena_sym` is UNFLIPPED, so an ordinary program COMPILES
+#     the injected Teko arena (dead code) but still USES the C arena. Behavior is unchanged; only an
+#     ordinary program's emitted C grows to carry the (unused) Teko arena. The compiler self-image
+#     DEDUPS the injection, so its own emitted C changes ONLY by the five new build functions above.
+#   - Touch points: `src/build/project.tks` (the injection); packaging staging of the runtime `.tks`
+#     set (`scripts/package_release.sh`, `install.sh`); the RF1 injection fixture
+#     `examples/regressions/user_prog_arena_alloc` (a leaf, not in the self-image).
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (tc1 == tc2 == tc3).
-#   - The current-region stack is behavior-neutral for the self-build (the arena stays dormant), so
-#     gen0 and gen1 emit byte-identical whole-tree C (sha256 below).
+#   - The injection is dedup-neutral for the self-build (its own discover already yields
+#     `teko::runtime` + `teko::sys`, so the injection is skipped), so the only self-image delta is
+#     the five new build-front-end functions themselves. gen0 (cc of the prior seed) and gen1 emit
+#     byte-identical whole-tree C.
 #   - C-route chain: gen0 (cc, `-pthread`, from the prior bootstrap) built the tree -> gen1; gen1's
 #     emitted C == gen0's emitted C; the C-route fixpoint gate returns PASSED (gen2 == gen3 byte for
-#     byte, gen2.c == gen3.c, 22668287 bytes). `TEKO_MEM_PARANOID=1` full compiler build exits 0 (the
-#     memory keystone — the C arena's poison path stays clean, and the paranoid-build emitted C is
-#     byte-identical to the plain build). RF5 `current_region_stack` (enter-a-child /
-#     alloc-lands-in-child / leave / alloc-lands-in-root / drop-the-child, over the raw mmap fundo)
-#     exits 42 on the C leg. Self-reported peak 5742.1 MB (within the 6 GB cap).
+#     byte, gen2.c == gen3.c, 22678872 bytes). `TEKO_MEM_PARANOID=1` full compiler build exits 0
+#     (the memory keystone — the C arena's poison path stays clean). RF1 `user_prog_arena_alloc`
+#     (an ordinary allocating program) builds with the injected arena DEFINED in its emitted C
+#     (`teko_teko__runtime__region_alloc` present, absent under the prior seed) and exits 0 on the
+#     still-dormant C arena. Self-reported peak 5665.3 MB (within the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -50,9 +57,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  49c6df6e521cb55e852c1e2af1cfe846bc5404d7416edf1580643d28e0b95cdb
+sha256:  383a660d6d27fc5d769742dc436c36cc507945f7dcf5f4061816b2999abe384d
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 arena crumb D current-region
-         stack — additive, behavior-neutral while the Teko arena stays dormant), byte-identical on
-         rebuild across the stable C-route generations (clean fixpoint tc1 == tc2 == tc3); no
-         unrecovered legacy artifact.
+legacy:  none — this is an exact, self-reproducing hand harvest (the §16 crumb I0 runtime-prelude
+         injection scaffolding — dedup-neutral for the self-image, the injected arena dormant while
+         `cg_arena_sym` stays on the C arena), byte-identical on rebuild across the stable C-route
+         generations (clean fixpoint tc1 == tc2 == tc3); no unrecovered legacy artifact.

@@ -418,6 +418,131 @@ type ParsedFront = struct {
 }
 
 /**
+ * The compiler-shipped runtime source namespaces that are compiled into every ordinary program so
+ * the Teko-over-mmap arena (and every future migrated runtime piece) is DEFINED inside that
+ * program's own `teko.c` — the §16 self-contained-`teko.c` mandate. `teko::runtime` is the arena
+ * provider (`arena.tks`); `teko::sys` carries the const-only ABI values the arena references
+ * (`SYS_MMAP`/`PROT_*`/`MAP_*`/`SYS_EXIT_GROUP`). The intrinsics the arena also uses
+ * (`syscallN`/`ptr_word`/`word_ptr`/`load_u64`/`store_u64`) need no source — codegen already
+ * lowers them — so they are absent from this list.
+ *
+ * @return  the runtime namespaces injected into every non-self-image program, in link order
+ * @since §16
+ */
+fn rt_inject_namespaces(): []str {
+    var ns: []str = teko::list::empty()
+    ns = teko::list::push(ns, "teko::runtime")
+    ns = teko::list::push(ns, "teko::sys")
+    ns
+}
+
+/**
+ * Resolve the absolute on-disk path of the compiler-shipped runtime source file that DECLARES
+ * namespace `ns`, staged relative to the runtime dir `rt`: `teko::runtime`'s `arena.tks` sits
+ * beside `teko_rt.{c,h}` in `rt` itself, and `teko::sys`'s `sys.tks` lives in the `sys` sibling
+ * dir — the same `<parent>/sys` shape `assert_dir` derives for the assert seed. Returns "" for a
+ * namespace this injector does not ship, so the caller can skip it without a read.
+ *
+ * @param ns  the runtime namespace to resolve (the `rt_inject_namespaces` domain)
+ * @param rt  the resolved runtime dir (`rt_dir()`, absolute after `ensure_rt_dir_abs`)
+ * @return    the path of the file declaring `ns`, or "" when `ns` is not shipped by this injector
+ * @since §16
+ */
+fn rt_prelude_source_path(ns: str, rt: str): str {
+    if ns == "teko::runtime" { return teko::str::concat(rt, "/arena.tks") }
+    if ns == "teko::sys" {
+        var parent = match teko::str::last_index_of(rt, "/") {
+            u64 as i => teko::str::slice_to(rt, i)
+            error => "."
+        }
+        return teko::str::concat(parent, "/sys/sys.tks")
+    }
+    ""
+}
+
+/**
+ * Does the project's OWN discovered file set already declare `ns`? True for the compiler
+ * self-image (its `src/runtime/arena.tks` yields `teko::runtime`, its `src/sys/sys.tks` yields
+ * `teko::sys`), false for an ordinary user program. This is the DEDUP GUARD: injecting a namespace
+ * a program already owns would double-define every symbol, so the self-image is skipped and its
+ * emitted `teko.c` stays byte-identical (the fixpoint is untouched).
+ *
+ * @param files  the already-discovered project file set
+ * @param ns     the candidate runtime namespace
+ * @return       true iff some discovered file already carries namespace `ns`
+ * @since §16
+ */
+fn rt_already_present(files: []SourceFile, ns: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        if files[i].namespace == ns { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * Does this artifact kind link a FINAL executable that must carry its OWN arena definition? Only
+ * `Artifact::Binary` does. A library kind (`Static`/`Shared`/`Package`) is linked INTO a binary
+ * that injects the runtime itself, so injecting the runtime into the library too would
+ * double-define every `teko_teko__runtime__*` symbol once the consuming binary loads the library's
+ * `.tkl` (its typed items are prepended by `load_deps` alongside the binary's own injected copy).
+ * The dedup guard `rt_already_present` cannot see across the dependency boundary, so the injection
+ * is restricted to executables at the source — a library gets its arena from the final link.
+ *
+ * @param a  the project's artifact kind
+ * @return   true iff the artifact is an executable that needs a locally-defined arena
+ * @since §16
+ */
+fn artifact_wants_runtime_prelude(a: Artifact): bool {
+    match a {
+        Artifact::Binary => true
+        Artifact::Static => false
+        Artifact::Shared => false
+        Artifact::Package => false
+    }
+}
+
+/**
+ * Prepend the compiler-shipped runtime source files (`rt_inject_namespaces`, each staged in the
+ * runtime dir `ensure_rt_dir_abs` already resolves) onto `files`, skipping any namespace
+ * `rt_already_present` reports (the self-image, which discovers them under its own `src/` root).
+ * The Teko runtime thus rides EVERY ordinary program's compilation and emits into its one
+ * `teko.c`, defining the mangled `teko_teko__runtime__*` arena symbols locally — with no
+ * `teko_rt.c` edit and no weak forwarder. §16 crumb I0 is SCAFFOLDING: the injected arena is
+ * emitted-but-dormant (`cg_arena_sym` still routes allocations to the C `tk_*` arena), so behavior
+ * is unchanged; only the emitted C of an ordinary program grows to carry the arena.
+ *
+ * @param files  the project's own discovered file set (post `main.tks` injection)
+ * @return       `files` with the runtime source prepended, or the first read error
+ * @throws       when a shipped runtime source file is missing from the runtime dir
+ * @since §16
+ */
+fn inject_runtime_prelude(files: []SourceFile): []SourceFile | error {
+    var rt = rt_dir()
+    var namespaces = rt_inject_namespaces()
+    var prelude: []SourceFile = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= namespaces.len { break }
+        var ns = namespaces[i]
+        if rt_already_present(files, ns) {
+            i = i + 1
+            continue
+        }
+        var path = rt_prelude_source_path(ns, rt)
+        match teko::io::read_file(path) {
+            str => { }
+            error => return error { message = teko::str::concat("runtime prelude: cannot read shipped source '", path, "' for namespace ", ns) }
+        }
+        prelude = teko::list::push(prelude, SourceFile { path = path; namespace = ns })
+        i = i + 1
+    }
+    dsc_append(prelude, files)
+}
+
+/**
  * The PARSE half of the front-end (manifest -> discover -> assemble), operating in
  * the CURRENT directory (the caller has already chdir'd). Reads and parses the
  * manifest, discovers the source tree, injects the project-root `main.tks`, checks
@@ -444,6 +569,10 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
     match teko::io::read_file("main.tks") {
         str => files = teko::list::push(files, SourceFile { path = "main.tks"; namespace = m.name })
         error => { }
+    }
+
+    if artifact_wants_runtime_prelude(m.artifact) {
+        files = match inject_runtime_prelude(files) { []SourceFile as f => f; error as e => return e }
     }
 
     // --- C7.9: A4 main-file rule — Binary REQUIRES main.tks; library kinds FORBID it ---
