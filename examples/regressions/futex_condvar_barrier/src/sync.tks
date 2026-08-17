@@ -1,0 +1,106 @@
+/**
+ * futex_wait — block the calling thread while the 32-bit word at `addr` still equals `expected`,
+ * on the process-private futex hash. Returns as soon as the word differs or a `FUTEX_WAKE` arrives;
+ * a mismatch at entry returns immediately (the kernel re-checks atomically), which is what closes the
+ * lost-wakeup window between the caller's last read and the wait.
+ *
+ * @param addr      the 32-bit futex word's address
+ * @param expected  the value the word must still hold for the wait to actually block
+ * @return          nothing (the raw syscall result is discarded — EAGAIN/EINTR just retry the caller)
+ */
+fn futex_wait(addr: u64, expected: i64) {
+    _ = teko::sys::syscall6(sys::SYS_FUTEX, addr to i64,
+        sys::FUTEX_WAIT | sys::FUTEX_PRIVATE_FLAG, expected, 0, 0, 0)
+}
+
+/**
+ * futex_wake — wake up to `n` threads blocked in `futex_wait` on the word at `addr`, on the
+ * process-private hash. Waking with no waiter present is a cheap no-op.
+ *
+ * @param addr  the 32-bit futex word's address
+ * @param n     the maximum number of waiters to wake (1 for the mutex hand-off)
+ * @return      nothing (the count actually woken is discarded)
+ */
+fn futex_wake(addr: u64, n: i64) {
+    _ = teko::sys::syscall6(sys::SYS_FUTEX, addr to i64,
+        sys::FUTEX_WAKE | sys::FUTEX_PRIVATE_FLAG, n, 0, 0, 0)
+}
+
+/**
+ * mtx_lock — acquire the one-word futex mutex at `m` (0 free / 1 locked-no-waiters / 2
+ * locked-with-waiters), the plano §6.2 three-state lock. The fast path is a single `atomic_cas_u32`
+ * 0->1; under contention the word is forced to 2 and the thread `futex_wait`s while it stays 2,
+ * re-attempting the 2-swap on every wake until it observes a prior 0 (a free lock it now owns).
+ *
+ * @param m  the mutex word's address
+ * @return   nothing; on return the caller holds the lock
+ */
+pub fn mtx_lock(m: u64) {
+    var c = teko::sys::atomic_cas_u32(m to i64, 0, 1)
+    if c == 0 { return }
+    if c != 2 { c = teko::sys::atomic_xchg_u32(m to i64, 2) }
+    loop {
+        if c == 0 { break }
+        futex_wait(m, 2)
+        c = teko::sys::atomic_xchg_u32(m to i64, 2)
+    }
+}
+
+/**
+ * mtx_unlock — release the futex mutex at `m`. The word is swapped to 0; if its prior value was 2
+ * (a waiter had forced the contended state) one waiter is woken to take the lock. A prior value of 1
+ * means no waiter, so no `futex_wake` syscall is issued.
+ *
+ * @param m  the mutex word's address (held by the caller)
+ * @return   nothing; on return the lock is free
+ */
+pub fn mtx_unlock(m: u64) {
+    if teko::sys::atomic_xchg_u32(m to i64, 0) == 2 { futex_wake(m, 1) }
+}
+
+/** INT_MAX — the 32-bit signed ceiling (0x7fffffff), the `FUTEX_WAKE` count meaning "wake every
+ *  waiter" for `cv_broadcast`. */
+const INT_MAX: i64 = 2147483647
+
+/**
+ * cv_wait — atomically drop the mutex `m` and block on the sequence condvar `seq` until a
+ * signal/broadcast advances it, then reacquire `m` before returning (plano §6.2). The sequence is
+ * snapshotted BEFORE the lock is dropped, so a signal that lands between the drop and the
+ * `futex_wait` is not lost: `futex_wait` sees the advanced sequence and returns at once, and the
+ * caller re-tests its own predicate under the reacquired lock.
+ *
+ * @param seq  the condvar's 32-bit sequence word address
+ * @param m    the mutex word address (held on entry, held again on return)
+ * @return     nothing
+ */
+pub fn cv_wait(seq: u64, m: u64) {
+    var s = teko::sys::atomic_load_u32(seq to i64)
+    mtx_unlock(m)
+    futex_wait(seq, s)
+    mtx_lock(m)
+}
+
+/**
+ * cv_signal — advance the condvar sequence at `seq` and wake ONE waiter (plano §6.2). The sequence
+ * bump is what makes a concurrent `cv_wait`'s snapshot stale, closing the lost-wakeup window.
+ *
+ * @param seq  the condvar's 32-bit sequence word address
+ * @return     nothing
+ */
+pub fn cv_signal(seq: u64) {
+    _ = teko::sys::atomic_add_u32(seq to i64, 1)
+    futex_wake(seq, 1)
+}
+
+/**
+ * cv_broadcast — advance the condvar sequence at `seq` and wake EVERY waiter (plano §6.2), the
+ * barrier-release primitive: all threads parked in `cv_wait` on `seq` are made runnable to re-test
+ * their predicate.
+ *
+ * @param seq  the condvar's 32-bit sequence word address
+ * @return     nothing
+ */
+pub fn cv_broadcast(seq: u64) {
+    _ = teko::sys::atomic_add_u32(seq to i64, 1)
+    futex_wake(seq, INT_MAX)
+}

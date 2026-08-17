@@ -1,0 +1,18 @@
+# futex_condvar_barrier.tkr — the §10 (plano-s10-multithread-nativo §6.2) futex-condvar fixture
+# (C backend). It proves the sequence condvar `cv_wait`/`cv_broadcast` — built in Teko over the futex
+# wait/wake syscall and the `teko::sys::atomic_add_u32`/`atomic_load_u32` intrinsics, paired with the
+# same one-word futex mutex the mutex fixture exercises — correctly parks and releases waiters. Eight
+# threads meet at a barrier: under the mutex each registers arrival; the LAST to arrive `cv_broadcast`s
+# the release, and every earlier arrival `cv_wait`s (re-testing the arrived-count predicate on each
+# wake) until the count reaches eight. After clearing, each bumps an atomic passed word. The main
+# thread bounded-polls that word for eight. A lost wakeup (a broadcast that failed to wake a parked
+# waiter) would hang the barrier and exhaust the poll; every waiter released -> exit 0.
+#
+# Spawned on the CURRENT (pthread) `spawn` substrate: the condvar is independent of thread creation,
+# so this validates the M2 sync leaf ahead of the M3 raw-clone flip.
+
+Feature: futex_condvar_barrier — a sequence condvar releases every waiter on broadcast
+
+  Scenario: eight_threads_rendezvous_at_a_barrier — the last arrival's broadcast wakes all the rest
+    When the program is built and run
+    Then it exits 0
