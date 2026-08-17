@@ -1,43 +1,49 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the §10 native-multithread keystone
-# `thread_clone` codegen intrinsic (M1) lands in the checker + C backend, so the compiler's own
-# emitted teko.c gains the new builtin's registration, dispatch, use-gate and helper emitter. What
-# this harvest carries:
-#   - **`thread_clone` codegen intrinsic (compiler — checker + codegen)**: plano §3, the ONE
-#     compiler-touching crumb of the §10 raw-multithread substrate (retiring pthread on Linux
-#     `clone(2)`). `clone` is the one syscall that cannot ride the generic `tk_syscallN` inline
-#     helper — its child returns from the `syscall` instruction on a freshly-supplied stack with
-#     `rax == 0`, so the child branch is handled IN the emitted asm block (jump to `entry`, never
-#     `ret`; classic musl `__clone` shape), terminating the thread with `SYS_exit` (60, NOT
-#     exit_group). Pieces:
-#       * `src/checker/scope.tks` — `thread_clone_signature()` registers the builtin beside the
-#         `syscall0..6` family as `Func { params = i64 x 5; ret = i64 }`
-#         (`entry, stack_top, arg, ctid_addr, flags` -> child tid / `-errno`).
-#       * `src/codegen/codegen.tks` — `emit_call` dispatch `thread_clone` -> `tk_thread_clone`; a
-#         `clone` bit threaded through `SyscallUse` (set by `cg_mark_syscall_call`, scanned by the
-#         existing `cg_scan_syscall_*` walk); `cg_emit_thread_clone_helper` emits the bespoke
-#         `static long tk_thread_clone(...)` x86_64-Linux child-branch helper ONLY when the program
-#         calls the intrinsic, wrapped in an `#if __x86_64__ ... #elif __aarch64__ (#error
-#         honest-stop, plano §3.4 ctid/tls swap) ... #else (#error)` guard.
-#   - **Inert in the compiler's own image**: the compiler never spawns via the `thread_clone`
-#     surface (its parallel codegen uses a private fork_join), so `SyscallUse.clone` is always
-#     false for the self-build and ZERO thread helpers are emitted into teko.c ⇒ the reseed is a
-#     clean single-pass fixpoint, exactly as the `syscallN` intrinsic keystone was.
-#   - **Native leg honest-stops**: `thread_clone` is not in the native subset, so it falls into
-#     `unresolved_builtin_stop` (`src/lir/lower.tks`) — the C leg is this pass's build+run target
-#     (plano §3.5), the native lowering inherits it in Doc-2's terminal phase.
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §10 native-multithread futex
+# SUBSTRATE — the atomic read-modify-write codegen intrinsics (M2 / plano §6.2, risk R5) — land in
+# the checker + C backend, so the compiler's own emitted teko.c gains the new builtins' registration,
+# dispatch, use-gate and helper emitter. What this harvest carries:
+#   - **atomic RMW codegen intrinsics (compiler — checker + codegen)**: plano §6.2 / R5, the atomic
+#     primitives the futex mutex and sequence condvar are built on. Without a real compare-and-swap
+#     the mutex's 0->1 lock transition would race a plain `load_u64`+`store_u64`, so the sync leaf is
+#     unsound until these exist. Four fixed-signature `i64`-word builtins, each lowered to a thin
+#     `__atomic_*` helper (the raw-syscall-intrinsic precedent, one notch simpler — no per-arch `#if`
+#     guard, the `__atomic_*` builtins are portable across x86_64/aarch64):
+#       * `teko::sys::atomic_cas_u32(addr, expected, desired): i64` -> `tk_atomic_cas_u32`, a VALUE
+#         compare-and-swap returning the observed word.
+#       * `teko::sys::atomic_xchg_u32(addr, value): i64` -> `tk_atomic_xchg_u32`, unconditional swap.
+#       * `teko::sys::atomic_add_u32(addr, delta): i64` -> `tk_atomic_add_u32`, fetch-and-add (the
+#         condvar sequence `seq++` and the completed-worker counters).
+#       * `teko::sys::atomic_load_u32(addr): i64` -> `tk_atomic_load_u32`, a seq-cst load.
+#       * `src/checker/scope.tks` — `atomic_rmw_signature(nargs)` registers the four beside the
+#         `syscall0..6`/`thread_clone` family as `Func { params = i64 x nargs; ret = i64 }`.
+#       * `src/codegen/codegen.tks` — `emit_call` dispatch to the `tk_atomic_*` symbols; a single
+#         `atomics` bit threaded through `SyscallUse` (set by `cg_mark_syscall_call`, scanned by the
+#         existing `cg_scan_syscall_*` walk); `cg_emit_atomic_helpers` emits the four `static inline`
+#         helpers ONLY when the program calls one of the intrinsics (a `static inline` unused helper
+#         costs nothing and raises no `-Wunused-function`).
+#   - **Inert in the compiler's own image**: the compiler never calls an atomic intrinsic in its own
+#     source (the atomics live only in the §10 sync leaf, which is exercised by regression fixtures
+#     built by gen1, NEVER by the compiler's corpus), so `SyscallUse.atomics` is always false for the
+#     self-build and ZERO atomic helpers are emitted into teko.c (the only `tk_atomic_*` text in the
+#     image is the string-literal helper body inside codegen's data) ⇒ a clean single-pass fixpoint,
+#     exactly as the `syscallN` and `thread_clone` intrinsic keystones were.
+#   - **Native leg honest-stops**: the atomic intrinsics are not in the native subset, so a call to
+#     one falls through `native_builtin_symbol` (`src/lir/lower.tks`) to the terminal builtin stop —
+#     the C leg is this pass's build+run target, the native lowering inherits them in Doc-2's terminal
+#     phase (the identical posture `syscallN`/`thread_clone` take).
 #   - Touch points: `src/checker/scope.tks`, `src/codegen/codegen.tks`.
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (tc1 == tc2 == tc3).
-#   - The intrinsic is behavior-neutral for the self-build (dead code until a user program spawns),
-#     so gen0 (cc of this seed) and gen1 emit the same whole-tree bytes: the seed `f1be9769`
-#     converges on its own image in ONE pass.
-#   - C-route chain: gen0 (cc, `-pthread`, from bootstrap) built the tree -> gen1; gen1's emitted C
-#     == this seed `f1be9769`; the C-route fixpoint gate returns PASSED (gen2 == gen3 byte for byte,
-#     gen2.c == gen3.c). The x86_64 child-branch helper was validated standalone (child runs
-#     `entry(arg)` on the fresh stack, delivers the ctx pointer, exits via `SYS_exit`). Self-reported
-#     peak ~5.7 GB (within the 6 GB cap).
+#   - The intrinsics are behavior-neutral for the self-build (dead code until a program calls an
+#     atomic builtin), so gen0 (cc of the prior seed) and gen1 emit the same whole-tree bytes: the
+#     C emitted by gen0 and by gen1 is byte-identical (sha256 below), a one-pass convergence.
+#   - C-route chain: gen0 (cc, `-pthread`, from the prior bootstrap) built the tree -> gen1; gen1's
+#     emitted C == gen0's emitted C; the C-route fixpoint gate returns PASSED (gen2 == gen3 byte for
+#     byte, gen2.c == gen3.c). The four atomic helpers were validated standalone (a single-threaded
+#     cas/xchg/add/load round-trip) and under real contention (an 8-thread futex-mutex counter and an
+#     8-thread futex-condvar barrier, both exit 0). Self-reported peak ~5.7 GB (within the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -48,9 +54,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  f1be97693b12b827393cb630a78cae59fe16c3eb79d3ee477ec88e51c32597f0
+sha256:  10386eb02495570b125643c2388d830ddac7f270521287a3dc0d127d2e462ec9
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §10/M1 `thread_clone` codegen
-         intrinsic — a dead-code-in-corpus builtin gated on its own call sites), byte-identical on
+legacy:  none — this is an exact, self-reproducing hand harvest (the §10/M2 atomic RMW codegen
+         intrinsics — dead-code-in-corpus builtins gated on their own call sites), byte-identical on
          rebuild across the stable C-route generations (clean fixpoint tc1 == tc2 == tc3); no
          unrecovered legacy artifact.
