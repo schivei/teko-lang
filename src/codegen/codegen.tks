@@ -267,6 +267,48 @@ fn cb_numint(buf: []byte, v: parser::NumInt): []byte {
 }
 
 /**
+ * CgArenaSym — the identity of one arena/region C runtime primitive that codegen emits as a call
+ * (or a bare name, e.g. as a match-arm's `builtin` string). Naming a `CgArenaSym` at each call site
+ * — rather than spelling the C symbol literal inline — routes every one of those ~15 emit sites
+ * through the single `cg_arena_sym` provider table (§16 arena crumb E, step L0), so a later
+ * switch-over to a different arena implementation is a one-table edit instead of an N-site hunt.
+ */
+type CgArenaSym = enum {
+    RegionAlloc; RegionNew; RegionDrop; RegionDropSubtree; RegionRoot; RegionCurrent;
+    RegionEnter; RegionLeave; ArenaPush; ArenaPop; ArenaCommit; RegionRegister; RegionLookup; Alloc
+}
+
+/**
+ * cg_arena_sym — the C symbol codegen emits for one arena/region primitive. TODAY every kind
+ * resolves to the hand-written C runtime's `tk_*` export (`src/runtime/teko_rt.c`) — byte-identical
+ * to what each call site spelled inline before this indirection existed. This is the SINGLE table a
+ * later switch-over (§16 arena crumb E, step L2 — the Teko-over-mmap arena) retargets: every call
+ * site already routes through here, so that flip touches only this function's bodies, not the ~18
+ * call sites across the file.
+ *
+ * @param kind  which arena/region primitive is being emitted
+ * @return      the C symbol name to emit for `kind`
+ */
+fn cg_arena_sym(kind: CgArenaSym): str {
+    match kind {
+        CgArenaSym::RegionAlloc => "tk_region_alloc"
+        CgArenaSym::RegionNew => "tk_region_new"
+        CgArenaSym::RegionDrop => "tk_region_drop"
+        CgArenaSym::RegionDropSubtree => "tk_region_drop_subtree"
+        CgArenaSym::RegionRoot => "tk_region_root"
+        CgArenaSym::RegionCurrent => "tk_region_current"
+        CgArenaSym::RegionEnter => "tk_region_enter"
+        CgArenaSym::RegionLeave => "tk_region_leave"
+        CgArenaSym::ArenaPush => "tk_arena_push"
+        CgArenaSym::ArenaPop => "tk_arena_pop"
+        CgArenaSym::ArenaCommit => "tk_arena_commit"
+        CgArenaSym::RegionRegister => "tk_region_register"
+        CgArenaSym::RegionLookup => "tk_region_lookup"
+        CgArenaSym::Alloc => "tk_alloc"
+    }
+}
+
+/**
  * F64_EXPONENT_SHIFT — the bit position of the IEEE-754 binary64 biased exponent field.
  */
 const F64_EXPONENT_SHIFT: u64 = 52 to u64
@@ -1602,7 +1644,7 @@ fn cg_class_cleanup_text(prog: CgProg, escaping: []str, fn_body: []@TStatement()
                             }
                             null => { }
                         }
-                        out = cb(out, "tk_region_drop(")
+                        out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "(")
                         out = cb_ident(out, name)
                         out = cb(out, "->__region); ")
                     }
@@ -4312,7 +4354,7 @@ fn emit_list_grow_inplace(buf: []byte, prog: CgProg, c: checker::TCall, escaping
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     out = cb(out, "), &"); out = cb(out, iN); out = cb(out, ", sizeof(")
     out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
-    out = cb(out, "), tk_region_current()); })")
+    out = cb(out, "), "); out = cb(out, cg_arena_sym(CgArenaSym::RegionCurrent)); out = cb(out, "()); })")
     out
 }
 
@@ -4326,7 +4368,7 @@ fn emit_list_grow_inplace(buf: []byte, prog: CgProg, c: checker::TCall, escaping
  * `emit_host_ffi` (which exists for FIXED-ABI struct-returning FFI bottoms, not this).
  */
 fn emit_buf_ptr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
-    var out = cb(buf, "(uint8_t *)tk_region_alloc(")
+    var out = cb(buf, "(uint8_t *)"); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "(")
     out = cb(out, cg_enclosing_region_expr(regions))
     out = cb(out, ", (size_t)(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -4498,7 +4540,9 @@ fn emit_as_cstr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, r
     var out = cb(buf, $"({{ tk_str {v}_s = (")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     var region = cg_enclosing_region_expr(regions)
-    cb(out, $"); uint8_t *{v} = (uint8_t *)tk_region_alloc({region}, (size_t)({v}_s.len + 1)); for (uint64_t {v}_i = 0; {v}_i < {v}_s.len; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} {v}[{v}_s.len] = 0; {v}; }})")
+    out = cb(out, $"); uint8_t *{v} = (uint8_t *)")
+    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    cb(out, $"({region}, (size_t)({v}_s.len + 1)); for (uint64_t {v}_i = 0; {v}_i < {v}_s.len; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} {v}[{v}_s.len] = 0; {v}; }})")
 }
 
 /**
@@ -4553,7 +4597,9 @@ fn emit_region_buf(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     out = cb(out, $"); tk_str {v}_s = (")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-    cb(out, $"); uint8_t *{v} = (uint8_t *)tk_region_alloc({v}_r, (size_t){v}_len); uint64_t {v}_cn = ({v}_s.len < {v}_len) ? {v}_s.len : {v}_len; for (uint64_t {v}_i = 0; {v}_i < {v}_cn; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} if ({v}_cn < {v}_len) {{ {v}[{v}_cn] = 0; }} else if ({v}_len > 0) {{ {v}[{v}_len - 1] = 0; }} {v}; }})")
+    out = cb(out, $"); uint8_t *{v} = (uint8_t *)")
+    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    cb(out, $"({v}_r, (size_t){v}_len); uint64_t {v}_cn = ({v}_s.len < {v}_len) ? {v}_s.len : {v}_len; for (uint64_t {v}_i = 0; {v}_i < {v}_cn; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} if ({v}_cn < {v}_len) {{ {v}[{v}_cn] = 0; }} else if ({v}_len > 0) {{ {v}[{v}_len - 1] = 0; }} {v}; }})")
 }
 
 /**
@@ -4900,7 +4946,7 @@ fn emit_svc_slot_call(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::
     out = cb(out, scope)
     out = cb(out, "; void *")
     out = cb(out, hN)
-    out = cb(out, " = tk_region_lookup(")
+    out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionLookup)); out = cb(out, "(")
     out = cb(out, rN)
     out = cb(out, ", ")
     out = cb_str(out, teko::u64_to_str(id))
@@ -4917,7 +4963,7 @@ fn emit_svc_slot_call(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::
     out = cb(out, vN)
     out = cb(out, " = ")
     out = match emit_call_inner(out, prog, ret_type, e, c, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-    out = cb(out, "; tk_region_register(")
+    out = cb(out, "; "); out = cb(out, cg_arena_sym(CgArenaSym::RegionRegister)); out = cb(out, "(")
     out = cb(out, rN)
     out = cb(out, ", ")
     out = cb_str(out, teko::u64_to_str(id))
@@ -4930,7 +4976,7 @@ fn emit_svc_slot_call(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::
 
 fn svc_scope_expr(lifetime: parser::ServiceLifetime, regions: []RegionFrame): str {
     match lifetime {
-        parser::ServiceLifetime::Singleton => "tk_region_root()"
+        parser::ServiceLifetime::Singleton => teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
         parser::ServiceLifetime::Scoped => cg_enclosing_region_expr(regions)
         parser::ServiceLifetime::Transient => ""
     }
@@ -5194,9 +5240,9 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             else if last == "cov_line_reset" { builtin = "tk_cov_line_reset"; has_builtin = true }   // () -> void
             else if last == "cov_line" { builtin = "tk_cov_line"; has_builtin = true }   // (u32) -> void
             else if last == "cov_line_hit" { builtin = "tk_cov_line_hit"; has_builtin = true }   // (u64,u32) -> bool
-            else if last == "arena_push" { builtin = "tk_arena_push"; has_builtin = true }   // (#109 test-gate memory) () -> void
-            else if last == "arena_pop" { builtin = "tk_arena_pop"; has_builtin = true }   // () -> void
-            else if last == "arena_commit" { builtin = "tk_arena_commit"; has_builtin = true }
+            else if last == "arena_push" { builtin = cg_arena_sym(CgArenaSym::ArenaPush); has_builtin = true }
+            else if last == "arena_pop" { builtin = cg_arena_sym(CgArenaSym::ArenaPop); has_builtin = true }
+            else if last == "arena_commit" { builtin = cg_arena_sym(CgArenaSym::ArenaCommit); has_builtin = true }
             else if last == "task_reset" { builtin = "tk_task_reset"; has_builtin = true }
             else if last == "intern_get" { builtin = "tk_intern_get"; has_builtin = true }
             else if last == "intern_put" { builtin = "tk_intern_put"; has_builtin = true }
@@ -5992,13 +6038,13 @@ fn emit_struct_init_framed(buf: []byte, prog: CgProg, e: checker::TExpr, si: che
         var pN = fresh_named("_clsp", id)
         var out = cb(buf, "({ tk_region *")
         out = cb(out, rN)
-        out = cb(out, " = tk_region_new(")
+        out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "(")
         out = cb(out, cg_enclosing_region_expr_framed(regions, frame))
         out = cb(out, "); ")
         out = match e.type { checker::Named as nm => mangle_type_name(out, "", nm.name); _ => out }
         out = cb(out, " *")
         out = cb(out, pN)
-        out = cb(out, " = tk_region_alloc(")
+        out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "(")
         out = cb(out, rN)
         out = cb(out, ", sizeof(*")
         out = cb(out, pN)
@@ -6084,9 +6130,9 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
             // MEM Step 1: frame-local boxes ride the frame region (`tk_region_alloc(<frame>, …)`),
             // freed at the function's exit edge; everything else rides root `tk_alloc` (safe leak).
             if frame.len > 0 {
-                out = cb(out, " = tk_region_alloc("); out = cb(out, frame); out = cb(out, ", sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+                out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "("); out = cb(out, frame); out = cb(out, ", sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
             } else {
-                out = cb(out, " = tk_alloc(sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+                out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::Alloc)); out = cb(out, "(sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
             }
         }
         // Sentinel fields emit a concrete literal directly (emit_expr can't, the type being unknown):
@@ -6273,7 +6319,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: @Type(), body: []@TSta
     var defer_floor = dctx.defers.len   // (W9.3) defer scope base for this value-arm
     var fall = cg_append_direct_defers(dctx.defers, body)
     var region = fresh_named("_tkbr", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
+    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
     var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) })
     var cur = dctx
     var i = 0
@@ -6294,7 +6340,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: @Type(), body: []@TSta
     // (W9.3) Tail is in the enclosing `sink`; fire THIS value-arm's defers (LIFO) BEFORE dropping its
     // region (idempotent + nulled for overlap safety).
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
-    out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
 
@@ -7415,8 +7461,8 @@ fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: @Type(), inner: @T
     out = match emit_type(out, prog, inner) { []byte as o => o; error as e => return e }
     out = cb(out, " *")
     out = cb(out, bxN)
-    out = cb(out, " = tk_region_alloc(")
-    out = cb(out, if box_region.len > 0 { box_region } else { "tk_region_root()" })
+    out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "(")
+    out = cb(out, if box_region.len > 0 { box_region } else { teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()") })
     out = cb(out, ", sizeof(")
     out = match emit_type(out, prog, inner) { []byte as o => o; error as e => return e }
     out = cb(out, ")); *")
@@ -8378,7 +8424,7 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: @Type(), match_e: checker
     var cur_blk = if want_block { body } else { teko::list::empty() }
     var out = buf
     if want_block {
-        out = cb(out, ci); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
+        out = cb(out, ci); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
     }
     var cur = dctx
     var i = 0
@@ -8420,10 +8466,10 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: @Type(), match_e: checker
                 if fall.len > defer_floor {
                     out = cb(out, "\n")
                     out = match emit_defers(out, fall, defer_floor, prog, ci, escaping, fn_body) { []byte as o => o; error as err => return err }
-                    out = cb(out, ci); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
+                    out = cb(out, ci); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
                 } else {
                     // No defers: keep the original inline ` tk_region_drop(…)` form (byte-identical to pre-W9.3).
-                    out = cb(out, " tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
+                    out = cb(out, " "); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
                 }
                 cb(out, " break;\n")
             } else if fall.len > defer_floor {
@@ -8904,7 +8950,7 @@ fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLamb
     // is materialized once. The env is region-allocated (root region — sound; escape promotes it).
     var out = cb(buf, "({ __tkenv_")
     out = cb(out, teko::u64_to_str(lam.lift_id))
-    out = cb(out, " *_tke = tk_region_alloc("); out = cb(out, cg_closure_env_region(dctx)); out = cb(out, ", sizeof(__tkenv_")
+    out = cb(out, " *_tke = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "("); out = cb(out, cg_closure_env_region(dctx)); out = cb(out, ", sizeof(__tkenv_")
     out = cb(out, teko::u64_to_str(lam.lift_id))
     out = cb(out, ")); ")
     var i = 0
@@ -9162,20 +9208,36 @@ fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []@TStatement(), bo
     }
 }
 
-// (S2 — arena parent-ptr tree, 2026-07-01) the C EXPRESSION TEXT for the region a NEW
-// `tk_region_new(...)` call should name as its parent: the innermost open block region if any,
-// else the process root. Twin of the C `cg_enclosing_region_expr` for call sites that never see a
-// live frame (VALUE-form if/match arms — C clears g_cg_frame="" before descending into those, so
-// omitting the frame branch here is not a divergence, it is the SAME invariant expressed
-// functionally instead of via a cleared global).
+/**
+ * cg_enclosing_region_expr — (S2, arena parent-ptr tree, 2026-07-01) the C EXPRESSION TEXT for the
+ * region a NEW `tk_region_new(...)` call should name as its parent: the innermost open block
+ * region if any, else the process root. Twin of the C `cg_enclosing_region_expr` for call sites
+ * that never see a live frame (VALUE-form if/match arms — C clears `g_cg_frame=""` before
+ * descending into those, so omitting the frame branch here is not a divergence, it is the SAME
+ * invariant expressed functionally instead of via a cleared global).
+ *
+ * @param regions  the active block/frame region stack
+ * @return         the innermost open region's C name, or the process root call expression
+ */
 fn cg_enclosing_region_expr(regions: []RegionFrame): str {
-    if regions.len > 0 { regions[regions.len - 1].name } else { "tk_region_root()" }
+    if regions.len > 0 { return regions[regions.len - 1].name }
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
-// The STATEMENT-form twin (if-stmt/match-stmt arms, loop bodies): these run WITHOUT a frame-clear
-// in C (only the value-form arms clear it), so `frame` may still be live — fall back to it before
-// the process root.
+
+/**
+ * cg_enclosing_region_expr_framed — the STATEMENT-form twin of `cg_enclosing_region_expr`
+ * (if-stmt/match-stmt arms, loop bodies): these run WITHOUT a frame-clear in C (only the
+ * value-form arms clear it), so `frame` may still be live — fall back to it before the process
+ * root.
+ *
+ * @param regions  the active block/frame region stack
+ * @param frame    the enclosing function's frame region name, or `""` when none is live
+ * @return         the innermost open region, else `frame` when live, else the process root call
+ */
 fn cg_enclosing_region_expr_framed(regions: []RegionFrame, frame: str): str {
-    if regions.len > 0 { regions[regions.len - 1].name } else if frame != "" { frame } else { "tk_region_root()" }
+    if regions.len > 0 { return regions[regions.len - 1].name }
+    if frame != "" { return frame }
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
 
 /**
@@ -9348,7 +9410,7 @@ fn cg_drop_regions_from(buf: []byte, indent: str, regions: []RegionFrame, defer_
     loop {
         if k <= defer_floor { break }
         var r = regions[k - 1]
-        out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
+        out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
         k = k - 1
     }
     out
@@ -9362,7 +9424,7 @@ fn cg_drop_all_regions(buf: []byte, indent: str, regions: []RegionFrame): []byte
     loop {
         if k == 0 { break }
         var r = regions[k - 1]
-        out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
+        out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
         k = k - 1
     }
     out
@@ -9478,7 +9540,7 @@ fn emit_block_region(buf: []byte, body: []@TStatement(), in_main: bool, prog: Cg
     // Open the arm region. Name by the buffer length at the creation point (the deterministic
     // `_tkbr<len>` uniquifier — matches the C twin's b->len read without a counter).
     var region = fresh_named("_tkbr", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
     var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) })
     // Emit the body with THIS block as the current block context (so block-local bindings route to
     // `region`) and the augmented region stack.
@@ -9486,7 +9548,7 @@ fn emit_block_region(buf: []byte, body: []@TStatement(), in_main: bool, prog: Cg
     // (W9.3) Normal fall-through exit edge: fire THIS arm's defers (LIFO) FIRST (so a defer body can
     // still read the arm's block-locals), THEN drop the arm region (idempotent + nulled for overlap).
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
-    out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
 
@@ -10137,7 +10199,7 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     var region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     var regs2 = regions
     if want_block {
-        out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+        out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
         regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) })
     }
     // emit the body with THIS block as the current block context (so a block-local binding routes to
@@ -10149,7 +10211,7 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     out = match emit_defers(out, fall, defer_floor, prog, inner, escaping, fn_body) { []byte as o => o; error as err => return err }
     // S2 — fall-through: drop this loop body's region (the next iteration's tk_region_new opens a fresh
     // one). Idempotent + nulled for overlap safety.
-    if want_block { out = cb(out, inner); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
+    if want_block { out = cb(out, inner); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
     out = cb(out, indent)
     out = cb(out, "}\n")
     // …and a break-target AFTER the loop.
@@ -10352,10 +10414,10 @@ fn emit_cov_lines(buf: []byte, ctx: CovCtx, lines: []u32, indent: str): []byte {
 fn emit_stmt(buf: []byte, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): []byte | error {
     var b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
-        var ob = cb(b0, indent); ob = cb(ob, "tk_region_enter("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
+        var ob = cb(b0, indent); ob = cb(ob, cg_arena_sym(CgArenaSym::RegionEnter)); ob = cb(ob, "("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
         var d2 = cg_dctx_bracket(dctx)
         var ob2 = match emit_stmt_dispatch(ob, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value) { []byte as o => o; error as err => return err }
-        ob2 = cb(ob2, indent); ob2 = cb(ob2, "tk_region_leave();\n")
+        ob2 = cb(ob2, indent); ob2 = cb(ob2, cg_arena_sym(CgArenaSym::RegionLeave)); ob2 = cb(ob2, "();\n")
         return ob2
     }
     emit_stmt_dispatch(b0, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
@@ -10717,11 +10779,11 @@ fn emit_adopt(buf: []byte, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, 
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, a.body)
     var region = fresh_named("_tkad", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
     var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = teko::list::empty() })
     out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { []byte as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
-    out = cb(out, indent); out = cb(out, "tk_region_drop_subtree("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDropSubtree)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
 
@@ -11019,7 +11081,8 @@ fn emit_function(buf: []byte, prog: CgProg, f: checker::TFunction): []byte | err
  * @return   `"NULL"` (own root) or `"tk_region_root()"` (child of the shared process root)
  */
 fn cg_frame_region_parent_expr(f: checker::TFunction): str {
-    if f.has_arena_size { "NULL" } else { "tk_region_root()" }
+    if f.has_arena_size { return "NULL" }
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
 
 /**
@@ -11032,7 +11095,7 @@ fn cg_frame_region_parent_expr(f: checker::TFunction): str {
  * @return the C initializer expression for `tk_region *_tkrr`
  * @since 0.3.1
  */
-fn cg_rr_init_expr(): str { "tk_region_current()" }
+fn cg_rr_init_expr(): str { teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()") }
 
 /**
  * cg_tkfr_init_expr — the C initializer for `_tkfr`, the FRAME REGION, under the M2 conveyance. An
@@ -11047,8 +11110,9 @@ fn cg_rr_init_expr(): str { "tk_region_current()" }
  * @since 0.3.1
  */
 fn cg_tkfr_init_expr(f: checker::TFunction, use_rr: bool): str {
-    if !use_rr { return teko::str::concat("tk_region_new(", cg_frame_region_parent_expr(f), ")") }
-    "tk_region_new(_tkrr)"
+    var region_new = cg_arena_sym(CgArenaSym::RegionNew)
+    if !use_rr { return teko::str::concat(region_new, "(", cg_frame_region_parent_expr(f), ")") }
+    teko::str::concat(region_new, "(_tkrr)")
 }
 
 /**
@@ -11223,7 +11287,7 @@ fn cg_emit_bracket_unwind(buf: []byte, indent: str, n: u64): []byte {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = cb(out, indent); out = cb(out, "tk_region_leave();\n")
+        out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionLeave)); out = cb(out, "();\n")
         i = i + 1
     }
     out
@@ -11245,8 +11309,8 @@ fn cg_emit_bracket_unwind(buf: []byte, indent: str, n: u64): []byte {
  */
 fn cg_frame_exit(buf: []byte, indent: str, frame: str, entered: bool): []byte {
     var out = buf
-    if entered { out = cb(out, indent); out = cb(out, "tk_region_leave();\n") }
-    if cg_tkfr_drop_active(entered) { out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, frame); out = cb(out, ");\n") }
+    if entered { out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionLeave)); out = cb(out, "();\n") }
+    if cg_tkfr_drop_active(entered) { out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, frame); out = cb(out, ");\n") }
     out
 }
 
@@ -11287,7 +11351,7 @@ fn cg_return_frame_exit(buf: []byte, indent: str, frame: str, dctx: DeferCtx): [
  */
 fn cg_closure_env_region(dctx: DeferCtx): str {
     if dctx.bracket_depth > 0 && dctx.rr.len > 0 { return dctx.rr }
-    "tk_region_root()"
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
 
 /**
@@ -11314,7 +11378,9 @@ fn cg_closure_env_region(dctx: DeferCtx): str {
  * @return     `buf` with the reservation call appended
  */
 fn cg_emit_arena_presize(buf: []byte, n: u64): []byte {
-    var out = cb(buf, "    (void)tk_region_alloc(_tkfr, ")
+    var out = cb(buf, "    (void)")
+    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb(out, "(_tkfr, ")
     var sized = cb_u64_digits(out, n)
     cb(sized, ");\n")
 }
@@ -11350,7 +11416,7 @@ fn emit_function_cov(buf: []byte, prog: CgProg, f: checker::TFunction, cov_idx: 
     if use_rr { out = cb(out, "    tk_region *_tkrr = "); out = cb(out, cg_rr_init_expr()); out = cb(out, ";\n") }
     if want_frame {
         out = cb(out, "    tk_region *_tkfr = "); out = cb(out, cg_tkfr_init_expr(f, use_rr)); out = cb(out, ";\n")
-        if use_rr { out = cb(out, "    tk_region_enter(_tkfr);\n") }
+        if use_rr { out = cb(out, "    "); out = cb(out, cg_arena_sym(CgArenaSym::RegionEnter)); out = cb(out, "(_tkfr);\n") }
         if f.has_arena_size { out = cg_emit_arena_presize(out, f.arena_size) }
     }
     // W5a — a fn body's trailing expr-statement carrying a value implicitly returns it.
@@ -14218,12 +14284,12 @@ fn cb_journal_call_exited(buf: []byte, label: str, code_expr: str): []byte {
  */
 fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool): []byte {
     var b = cb(buf, "    if (tk_test_shard_take()) {\n")
-    b = cb(b, "    tk_arena_push();\n")
+    b = cb(b, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPush)); b = cb(b, "();\n")
     b = emit_test_channel_open(b, f)
     if cov { b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n") }
     b = emit_test_captured_call(b, f)
     if cov { b = cb(b, "    tk_cov_leave();\n") }
-    b = cb(b, "    tk_arena_pop();\n")
+    b = cb(b, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPop)); b = cb(b, "();\n")
     b = cb(b, "    }\n")
     b
 }
@@ -14328,7 +14394,7 @@ fn test_label_of(f: checker::TFunction): str {
  * @since 0.3.0.29
  */
 fn emit_test_call_analyze(buf: []byte, f: checker::TFunction, idx: u64): []byte {
-    var b = cb(buf, "    tk_arena_push();\n")
+    var b = cb(buf, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPush)); b = cb(b, "();\n")
     b = emit_test_channel_open(b, f)
     b = cb(b, "    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_line_reset();\n")
     b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n")
@@ -14337,7 +14403,7 @@ fn emit_test_call_analyze(buf: []byte, f: checker::TFunction, idx: u64): []byte 
     b = cb(b, "    { const char *d = getenv(\"TEKO_ANALYZE_DIR\"); if (d) { char p[1024]; snprintf(p, sizeof p, \"%s/")
     b = cb_u64_digits(b, idx)
     b = cb(b, ".tkcov\", d); tk_cov_dump(p); } }\n")
-    b = cb(b, "    tk_arena_pop();\n")
+    b = cb(b, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPop)); b = cb(b, "();\n")
     b
 }
 
