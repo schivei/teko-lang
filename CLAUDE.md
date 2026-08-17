@@ -43,3 +43,11 @@ conversa com o dono é PT-BR.)
   um executável por (arch, SO), e ainda assim cross-compila.
 - Teko-only (.tks), W15 (doc-comments-only, flatten/extract, helpers com nome único
   tree-wide, sem index-assign), sem VM/GC, arena.
+- **§16 — C hand-written CONGELADO (lei do dono, 2026-08-17):** `src/runtime/teko_rt.c`,
+  `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h` NÃO podem mais ser
+  editados/estendidos/patcheados. Toda função de runtime vira **superfície Teko** (`src/*.tks`)
+  emitida no `teko.c`, feita **à mão em Teko** (raw syscall no Linux) ou via **FFI da ABI do SO**
+  (macOS libSystem / Windows kernel32-ntdll). O `teko.c` fica **auto-contido** — TUDO dentro dele,
+  zero C hand-written linkado. A única mudança que esses arquivos recebem é **deleção** conforme
+  cada pedaço migra. Se um bug/gap aparece num deles, **migra pra Teko**, não corrige em C.
+  Mapa completo: `docs/design/plano-s16-expurgo-libc-completo.md`.
