@@ -93,11 +93,19 @@ Nenhuma parte relaxa a segurança da linguagem.
   redução de binário já prevista.
 - **§16 monólito:** resolvido como subcaso (§2), não como trilho separado.
 
-## 6. Aberto (a fechar com o dono, NÃO decidir sozinho)
+## 6. Decisões ratificadas pelo dono (2026-08)
 
-- **Escopo/ordem de implementação:** um trabalho único (a tabela geral com as guardadas como caso
-  gated), ou começar estreito pelas constantes de plataforma (destravar arm64/monólito já) e expandir
-  a tabela depois? — pergunta em aberto; aguardando o dono.
-- **Forma exata da stdlib de verificação de cast** (nome/assinatura, erro-as-valor) — a desenhar.
-- **Tipo "word de 64 bits"** para argumentos de syscall (evitar `u64→i64` checado nos endereços) — a
-  desenhar junto com §16.
+- **Escopo: UM TRABALHO SÓ.** A tabela geral, com as constantes guardadas como caso gated dentro
+  dela — não dois trilhos (não "plataforma primeiro, resto depois"). A abordagem é integral e
+  coerente; a *implementação* ainda é em etapas verificáveis (cada etapa: gen1 compila + `gen2==gen3`),
+  mas o desenho é um só.
+- **Stdlib de cast: já existe `teko::casting`.** Oferece conversões checadas que retornam
+  `T | error` (errors-as-values) em vez de abortar — `u64_to_u32`, `i64_to_u32`, `u64_to_u8`,
+  `u32_to_u8`, `u64_to_u16`, `u32_to_u16`, `i64_to_i32`, `u32_to_i32`, `u64_to_i32`. Também há
+  `teko::math::checked` (aritmética checada). O trabalho é **reusar/estender** `teko::casting` (falta
+  ex.: a família de/para i64↔u64 de mesmo tamanho) e **substituir o `X to T` embutido** (que aborta
+  via `tk_panic_cast`) pelo caminho errors-as-values onde a falha é possível.
+- **Criar novos tipos para EVITAR conversões.** Onde a conversão existe só porque o tipo não bate,
+  cria-se o tipo certo e a conversão some. Caso concreto: um tipo "word de 64 bits" para os argumentos
+  de syscall, para que `address: u64` case sem `u64→i64` checado (que aborta em endereço com bit 63
+  setado). *Evitar* a conversão é preferível a *checá-la*.
