@@ -51,3 +51,6 @@ conversa com o dono é PT-BR.)
   zero C hand-written linkado. A única mudança que esses arquivos recebem é **deleção** conforme
   cada pedaço migra. Se um bug/gap aparece num deles, **migra pra Teko**, não corrige em C.
   Mapa completo: `docs/design/plano-s16-expurgo-libc-completo.md`.
+- **§16 — SEM ATALHOS (lei do dono, 2026-08-17):** nenhum workaround/degrade no expurgo do C. Toda
+  função de libc vira implementação **real** em Teko (raw syscall / FFI-da-ABI-do-SO). **Se existe em C,
+  existe em Teko.** Rulings ratificadas R1–R5 em `docs/design/plano-s16-expurgo-libc-completo.md` §5.

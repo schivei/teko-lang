@@ -313,53 +313,30 @@ o ruling §17 de threads) → não force. **F9 depende de TODAS** (é o `rm` pro
 
 ## §5 — Os 5 maiores riscos / questões que precisam de ruling do owner
 
-**R1 — Threads via `clone`/`futex` NÃO estão desenhados e o owner deferiu a §17+ (pthread
-transitório).** Consequência dura: o SWEEP (F9) **não pode apagar `teko_rt.c` enquanto `pthread_*`
-viver lá** — ou seja, o critério "delete os 4 arquivos" do owner COLIDE com "pthread fica §17+". 
-*Resolução recomendada (law-first):* o SWEEP do §16 fecha com threads ainda via a shared-library
-NATIVA do SO (Linux: `pthread` de libc/`libpthread` — que É a shared-lib nativa, bind por `extern fn`,
-NÃO código-C-nosso; o ruling explicitamente aceita a shared-lib nativa; macOS/Windows idem via
-libSystem/kernel32), e a reimplementação em `clone`/`futex` cru vem em §17. Isso satisfaz "sem
-`teko_rt.c`" (o corpo do spawn migra pra Teko chamando `extern fn pthread_create`) SEM exigir o
-clone/futex antes de §17. **HALT-condicional:** confirmar com o owner que "bind da shared-lib nativa
-`pthread`" conta como sweep-limpo do §16 (é consistente com o modelo Rust/.NET que o próprio ruling
-cita), OU se o §16 tem de esperar clone/futex (então F7 entra no critério terminal e o sweep atrasa).
+### **OVERARCHING LAW — SEM ATALHOS (lei do dono, 2026-08-17)**
+**NO shortcuts / workarounds — if it exists in C, it exists in Teko.** Toda função de libc vira implementação **real** em Teko (raw syscall na Linux / FFI-da-ABI-do-SO em macOS/Windows). Nenhum no-op, nenhum degrade sem ratificação explícita. Rulings R1–R5 ratificadas abaixo.
 
-**R2 — `setjmp`/`longjmp` do harness (#31) não tem superfície Teko — TENSÃO real (herdada, migração
-doc R3).** `tk_test_run` captura um panic sem matar a suíte; Teko não tem controle não-local. *Saídas:*
-(a) intrínseco de captura no backend native (ele já domina a stack no crash-handler) — RECOMENDADO, não
-deixa resíduo de C; (b) shim C mínimo de setjmp sobrevive à Fase 8 como último resíduo — mas isso
-**quebra o SWEEP** (não dá pra apagar `teko_rt.c` com um setjmp dentro). Precisa de ruling: o backend
-ganha o intrínseco de captura, ou o harness aceita rodar out-of-process (fork+exit-code, sem setjmp).
+---
 
-**R3 — `stat`/`dirent`/`sockaddr` têm LAYOUT que diverge por-SO, e o Windows não tem AF_UNIX.** Um
-`extern type = struct Stat` correto no Linux é ERRADO no macOS (Darwin `struct stat` tem campos/ordem
-diferentes). O C1 keystone é FFI-por-redeclaração: um campo errado é UB silencioso, não erro de
-compilação (fundacao R1). E os canais (#28) assumem AF_UNIX, que o Windows não expõe — é uma
-divergência de ARQUITETURA (named pipes), não um `#os` const. *Resolução:* cada struct-de-SO é um
-`extern type` sob `#os` (o monolith cc-emit já dá o mecanismo de const per-SO; estender p/ struct-layout
-per-SO é NOVO), **pinado por fixture que lê um campo escrito pelo syscall real** (fundacao F4/F5). Os
-canais precisam de um segundo transporte no Windows — REPORTAR ao vagão de §10/concorrência, não
-inventar aqui. Flag ao owner: confirmar que struct-layout-per-`#os` entra no mecanismo do monolith.
+**R1 — Threads: `clone`/`futex` (Linux) + FFI-to-OS-thread-API — RATIFIED (owner, 2026-08-17)** 
+**DECIDED:** threads = **raw `clone`/`futex` (Linux) + FFI-to-the-OS-thread-API (macOS libSystem, Windows kernel32/ntdll)**; pthread is **fully retired in §16, NOT deferred to §17**. The "keep pthread via FFI shared-lib" shortcut is **REJECTED**. 
+O §16 fecha com threads via raw syscall/FFI direto do kernel — sem trampolim C para `libpthread` (a shared-lib nativa será suportada apenas como transporte de FFI, não como implementação de runtime, quando #27 migrar). A justificativa: o modelo Rust/Go/Zig que o próprio ruling citou (no ruleset anterior) sai de libc; nós fazemos o mesmo — raw `clone` no Linux (SYS_clone intrinseco + context-switch), `CreateThread`/libSystem no Windows/macOS.
 
-**R4 — process/exec (#23-26) e `win32_compat.h` (#35-37) BLOQUEIAM em deps não-nossas:
-struct-by-value-FFI completo (reverse-FFI) + o linker próprio de import-lib do Windows (Fase E).** O
-bloco Win32 preenche `STARTUPINFOA`/`PROCESS_INFORMATION` por valor e resolve `kernel32`. Sem
-struct-by-value-FFI + o linker de import-lib, a metade-processo não vira Teko. *Resolução (sequenciar,
-não forçar):* a metade-fs (#15/#17/#18) precisa só de `TargetSymbol` (seleção-de-símbolo-`extern`-
-por-alvo, HOJE INEXISTENTE na declaração — migração doc §6) e sai na F4; a metade-processo espera a
-Fase E. **`TargetSymbol` é uma superfície-nova que precisa de ratificação do owner** antes da F4 fechar
-Windows (POSIX fecha sem ela via syscall cru).
+**R2 — `setjmp`/`longjmp`: backend intrinsic context-capture — RATIFIED (owner, 2026-08-17)**
+**DECIDED:** **build a backend context-capture/restore INTRINSIC** (a real setjmp/longjmp equivalent lowered by codegen). The out-of-process test-harness workaround is **REJECTED**. 
+`tk_test_run` captura panic + retorna via intrínseco do backend nativo (stack unwind + PC restore), não shim C. Fase 8 escreve o intrínseco; nenhum resíduo de setjmp sobrevive ao SWEEP.
 
-**R5 — `abort`/`math`/`backtrace`/`dladdr` e o gate de memória.** (a) `abort` (1397× no teko.c, via
-`tk_panic`) e `exit` viram `SYS_exit_group` — trivial, mas TODO caminho de panic passa a emitir o
-syscall inline; confirmar que não infla o emit além do cap de 6 GB (o keystone de syscall já notou pico
-~5.6 GB). (b) `backtrace`/`dladdr` (#33/#34) NÃO têm syscall equivalente — exigem unwinder próprio
-(ler `.eh_frame`) OU **degradar a "crash sem símbolos"**. *Resolução recomendada:* degradar
-backtrace/dladdr a no-op informativo no sweep (a diagnose de crash é opcional, owner marcou "crash
-opcional"), reintroduzindo o unwinder próprio como trabalho do backend/linker (Fase E), NÃO do §16-core.
-Isso remove `<execinfo.h>`/`<dlfcn.h>` sem bloquear o sweep. Confirmar que perder símbolos de crash
-temporariamente é aceitável.
+**R3 — struct layout per-`#os` (e possível per-`#arch`): CONFIRMED — RATIFIED (owner, 2026-08-17)**
+**DECIDED:** **CONFIRMED** — `stat`/`dirent`/`sockaddr` etc. get dedicated struct layouts **per `#os` (and possibly per `#arch`)** in the monolith mechanism. 
+Cada struct-de-SO (Darwin `stat` ≠ Linux `stat`) é um `extern type` guarded por `#os`, materializado no monolith cc-emit via `#if`. Windows sem AF_UNIX → transporte alternativo (Named Pipes) reportado a §10, não inventado aqui. Fixture pinada em cada layout (S9 via stat real).
+
+**R4 — per-target symbol binding: use pragmas + `.tkp` — RATIFIED (owner, 2026-08-17)**
+**DECIDED:** use the **existing pragmas + the `.tkp`** (which already carry FFI-instrumentation helpers) — do **NOT invent a new declaration form**. 
+`TargetSymbol` como forma sintática **não** ratificado; em vez disso, cada `extern fn` que diverge por target (ex: FS Windows vs POSIX) redeclara-se sob `#os` guarding. Pragma-FFI existente resolve a ligação de símbolo nativo. Metade-fs (F4) sai com essa regra; metade-processo (F6) atrasa até struct-by-value-FFI + linker import-lib (Fase E).
+
+**R5 — Backtrace/dladdr: BUILD in Teko — RATIFIED (owner, 2026-08-17)**
+**DECIDED:** **BUILD it in Teko** — no degrade-to-no-op. 
+`backtrace` e `dladdr` (#33/#34) ganham implementação própria em Teko (unwind `.eh_frame` / frame-pointers) quando Fase 8 rodar. Nenhuma degradação temporária a "sem símbolos"; o diagnose de crash é **obrigatório** no §16 (crash-optional era marcador anterior, agora revogado). Se o tamanho do emit inflar, refatora-se o backend; não degrada-se a função.
 
 ---
 
