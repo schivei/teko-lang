@@ -3148,3 +3148,46 @@ Extrapolei de uma sonda pequena para o programa grande, e de um eixo (o backend)
 memória do processo). **Uma medição correta com escopo apagado vira uma afirmação falsa.** A regra:
 toda tabela publicada diz **o que foi medido e sobre o quê** — e a conclusão não pode ser mais larga
 que a sonda.
+
+## 19. ESTADO DO §16 + BACKLOG DE DECISÕES DO DONO (coordenador, 2026-08-17, HEAD `73390048`)
+
+Registro de continuidade pós-compactação. Mapa levantado por scout (read-only) contra o log do origin.
+**Origin `fix/retirement` é a fonte de verdade** (o "snapshot rewind" citado no §10 perdeu só trabalho
+LOCAL não-commitado; o pushed ficou intacto).
+
+### §16 — o que POUSOU no origin (verificado)
+- **syscall-intrinsic:** COMPLETO — `syscall0..6` (C leg x86_64), aarch64 design-ahead, `ptr_word`/
+  `ref_word`/`word_ptr` bridges, `teko::sys` nums, prova `sys_exit_group`. (a333b7d7, dbf3a00e, bd4c0465…)
+- **arena-mmap:** crumbs A–E + L0/L1 pousados (mmap consts, load/store u64 emitters, `word_ptr`, arena
+  core + META-POOL sobre mmap, `cg_arena_sym`). (a7670646, bcd4cd0f, f130d83c, 5334cb78, 7f40d1d5)
+- **fundacao-crumbs:** C1 (`extern type = struct`, keystone) + C2 (`teko::sys` skeleton) pousados.
+
+### §16 — o que NÃO pousou (fronteira)
+- **arena L2 — O FLIP** (troca load-bearing pro arena Teko no self-build): NÃO iniciado. É o reseed
+  "assustador" multi-step (plano-s16-arena-mmap §5). Alto risco — NÃO despachar autônomo sem contexto pleno.
+- **fundacao C3–C6** (conversões FFI de leaf subsystems): design-only, **SUPERSEDIDOS pelo §11 REFRESH**
+  (§11.0, 2026-08-16, em plano-s16-fundacao-crumbs) que ainda **NÃO foi ratificado/aplicado**. Superfície
+  real difere (sem `extern unsafe fn`, sem `ptr<byte>` param; usa `extern fn` + `ref T`). C3–C6 travados
+  até o REFRESH ser ratificado.
+- **monolith-cc-emit** (consts guardados `#os`/`#arch` p/ C cross-arch): TODO design-only, crumbs 0–6.
+  Crumb 0 (validação loud de parse) é guardrail independente; crumb 6 (switch-over) aguarda ratificar A′.
+
+### DECISÕES PENDENTES DO DONO (bloqueiam a fronteira Doc-2)
+1. **§11.2 varredura A/B/C** — viabilidade RESOLVIDA pelo spike (98,4% easy, 0 não-grafável, sem-reseed
+   confirmado). Recomendação: (A) tool c/ renderer de superfície + (C) review leve dos ~13 arquivos
+   genéricos. **Aguarda ratificação A/B/C.** (registrado em mudancas-superficie §11.2, commit 73390048)
+2. **§11 REFRESH** — ratificar a superfície FFI corrigida (destrava fundacao C3–C6).
+3. **arena L2 FLIP** — go/no-go + timing do reseed multi-step (o coração do §16).
+4. **Husks `cargo-20-*`** — 6 worktrees (~360 commits cada, remote "gone", drains NÃO visíveis no log do
+   origin): `abi-c-sob-prefixo`, `c-types-marshalling`, `runtime-em-teko` (io/panic FFI), `extern-return-
+   narrowing`, `concorrencia-adiantada`, `musl-lane-e-observabilidade`. Disposição AMBÍGUA: undrained /
+   abandonados / pendentes de recovery? Só o dono sabe. **NÃO drenar nem despachar sobre eles sem a palavra
+   dele** (tocam runtime/arch/codegen — os mesmos subsistemas do §16). Husk `s7-di-removal` está DIRTY
+   (30+ arquivos não-commitados, em risco).
+
+### POR QUE NÃO DESPACHEI (nesta janela)
+§16 é coordenador-driven (meu), mas a base de integração está **incerta** (husks de disposição ambígua nos
+mesmos subsistemas). Empilhar reseed novo de keystone sobre base não-triada = fábrica de conflito. O
+incremento mais seguro disponível é **monolith-emit crumb 0** (guardrail independente, sem dep de §11.2/
+REFRESH) — despachável no OK do dono. Ordem de motor quando destravar: triar husks → (§11.2 A/B/C → tool) e
+(§11 REFRESH → C3–C6) em paralelo → arena L2 FLIP → C-symbol deletion.
