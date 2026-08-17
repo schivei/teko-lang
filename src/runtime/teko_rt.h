@@ -390,6 +390,28 @@ void       tk_region_enter_u(uint64_t child);   // tk_region_enter((tk_region*)c
 uint64_t   tk_arena_control_get(void);          // this task's arena CONTROL address, 0 until first init
 void       tk_arena_control_set(uint64_t addr); // install this task's arena CONTROL address (once, lazily)
 uint64_t   tk_arena_paranoid(void);             // cached TEKO_MEM_PARANOID probe (1 set/non-empty, else 0)
+// §16 arena crumb E / L2 — THE FLIP fallback-seed PROTOTYPES. codegen (cg_arena_sym) now emits the
+// Teko arena's mangled symbols (teko_teko__runtime__*) at every allocation site. EVERY emitted
+// program includes this header, so these declarations give the call sites the RIGHT signature — a
+// `void *`/`tk_region *` return is 64-bit-wide, NOT the implicit-int C would otherwise assume (which
+// TRUNCATES the region pointer and crashes). A program declaring `teko::runtime` (the self-image)
+// overrides the WEAK seeds in teko_rt.c with its own arena.tks definitions of the SAME signature;
+// an ordinary program links the weak seeds, which forward to the C `tk_*` arena. Mirrors the
+// assert-seed pair (seed in .c + prototypes in .h). See the seed block in teko_rt.c.
+void      *teko_teko__runtime__region_alloc(void *r, uint64_t n);
+void      *teko_teko__runtime__alloc(uint64_t n);
+void      *teko_teko__runtime__region_new(void *parent);
+void       teko_teko__runtime__region_drop(void *r);
+void       teko_teko__runtime__region_drop_subtree(void *r);
+void      *teko_teko__runtime__region_root(void);
+void      *teko_teko__runtime__region_current(void);
+void       teko_teko__runtime__region_enter(void *child);
+void       teko_teko__runtime__region_leave(void);
+void       teko_teko__runtime__arena_push(void);
+void       teko_teko__runtime__arena_pop(void);
+void       teko_teko__runtime__arena_commit(void);
+void       teko_teko__runtime__region_register(void *r, uint64_t type_id, void *instance);
+void      *teko_teko__runtime__region_lookup(void *r, uint64_t type_id);
 // tk_region_register — bind `type_id` → `instance` in `r`'s OWN table (never an ancestor's; a
 // second registration of the same type_id in the same region OVERWRITES — the compiler is
 // expected to enforce true duplicate-registration errors at a higher DI layer; this is just the

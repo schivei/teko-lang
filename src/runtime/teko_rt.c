@@ -2345,6 +2345,47 @@ uint64_t tk_arena_paranoid(void) {
     return (uint64_t)tk_arena_paranoid_cache;
 }
 
+// ============================================================================
+// §16 arena crumb E / L2 — THE FLIP FALLBACK SEEDS.
+//
+// After L2, codegen (cg_arena_sym) emits the Teko-over-mmap arena's MANGLED symbols
+// (teko_teko__runtime__region_alloc, …) at every allocation site instead of the C tk_* exports.
+// A program that itself declares `teko::runtime` — the compiler's OWN self-image (src/runtime/
+// arena.tks is in its source tree) — emits STRONG definitions of these symbols from arena.tks, so
+// its allocations run on the Teko arena and these seeds are OVERRIDDEN and discarded.
+//
+// A program that does NOT declare `teko::runtime` — every ORDINARY program the compiler builds, and
+// a non-Linux self-image where arena.tks's `SYS_MMAP`/`SYS_MUNMAP` syscalls prune away — has no
+// such definition, so these WEAK seeds are the sole providers and FORWARD each site to the C arena
+// (tk_region_alloc, …), the fallback §5 keeps until L3. This mirrors the assert seed's default-weak
+// dual role (src/assert/assert.c): the corpus's strong defs win when present, the seed fills in when
+// absent, and the flagless link line is unchanged so the FIXPOINT (which compares emitted teko.c,
+// not teko_rt.c) is untouched. The ABI matches — each Teko fn is `ptr`+`u64` = `void*`+`uint64_t`
+// (§4.1) — so `tk_region*` and `void*` cross implicitly here as they do at the emitted call sites.
+//
+// L3 removes both these seeds AND the C tk_* arena, once bundling the Teko arena into every emitted
+// program (or a per-target arena object) retires the fallback.
+#ifndef TK_ARENA_SEED_STRONG
+#define TK_ARENA_SEED_WEAK __attribute__((weak))
+#else
+#define TK_ARENA_SEED_WEAK
+#endif
+
+TK_ARENA_SEED_WEAK void *teko_teko__runtime__region_alloc(void *r, uint64_t n) { return tk_region_alloc((tk_region *)r, (size_t)n); }
+TK_ARENA_SEED_WEAK void *teko_teko__runtime__alloc(uint64_t n) { return tk_alloc((size_t)n); }
+TK_ARENA_SEED_WEAK void *teko_teko__runtime__region_new(void *parent) { return (void *)tk_region_new((tk_region *)parent); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__region_drop(void *r) { tk_region_drop((tk_region *)r); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__region_drop_subtree(void *r) { tk_region_drop_subtree((tk_region *)r); }
+TK_ARENA_SEED_WEAK void *teko_teko__runtime__region_root(void) { return (void *)tk_region_root(); }
+TK_ARENA_SEED_WEAK void *teko_teko__runtime__region_current(void) { return (void *)tk_region_current(); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__region_enter(void *child) { tk_region_enter((tk_region *)child); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__region_leave(void) { tk_region_leave(); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__arena_push(void) { tk_arena_push(); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__arena_pop(void) { tk_arena_pop(); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__arena_commit(void) { tk_arena_commit(); }
+TK_ARENA_SEED_WEAK void teko_teko__runtime__region_register(void *r, uint64_t type_id, void *instance) { tk_region_register((tk_region *)r, type_id, instance); }
+TK_ARENA_SEED_WEAK void *teko_teko__runtime__region_lookup(void *r, uint64_t type_id) { return tk_region_lookup((tk_region *)r, type_id); }
+
 // tk_region_program — the PROGRAM region: one per process, owned by no task.
 //
 // (F2) F1 left the runtime with N task roots and nothing else, and an object allocated in a task

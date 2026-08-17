@@ -694,7 +694,7 @@ fn cgt_emit_value_arm_no_region_when_no_context() {
     teko::assert::is_true(result.len > 0)
     teko::assert::is_true(teko::str::contains(result, "tmp"))
     // No live escape context ⇒ no value-arm region opened (leak-safe pre-W9 output).
-    teko::assert::is_true(!teko::str::contains(result, "tk_region_new"))
+    teko::assert::is_true(!teko::str::contains(result, "teko_teko__runtime__region_new"))
 }
 
 // A value `match` arm with a non-tail binding takes emit_arm_value's value path: the tail value
@@ -722,7 +722,7 @@ fn cgt_emit_value_match_arm_commits_tail() {
     var result = match emit_expr(cgt_empty(), prog, e_m) { []byte as o => str(o); error => "" }
     teko::assert::is_true(result.len > 0)
     teko::assert::is_true(teko::str::contains(result, "break;"))
-    teko::assert::is_true(!teko::str::contains(result, "tk_region_new"))
+    teko::assert::is_true(!teko::str::contains(result, "teko_teko__runtime__region_new"))
 }
 
 /** cgt_emit_loop_with_init — a loop with a NON-empty `init` wraps in a `{ }` C scope and emits the
@@ -885,9 +885,9 @@ fn cgt_emit_return_uses_escaping_region_context() {
     var ret = checker::TReturn { has_value = true; value = ret_expr; values = teko::list::empty() }
     var regions: []RegionFrame = teko::list::push(teko::list::empty(), RegionFrame { name = "_tkbr_ret"; label = ""; is_loop = false; defer_base = 0 to u64; decls = teko::list::empty() })
     var out = match emit_return(cgt_empty(), prog, ret, false, checker::Named { name = "RetClass" }, "    ", "", teko::list::empty(), regions, teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(out, "tk_region_drop(_tkbr_ret); _tkbr_ret = NULL;"))
-    teko::assert::is_true(teko::str::contains(out, "tk_region_new(tk_region_root())"))
-    teko::assert::is_true(!teko::str::contains(out, "tk_region_new(_tkbr_ret)"))
+    teko::assert::is_true(teko::str::contains(out, "teko_teko__runtime__region_drop(_tkbr_ret); _tkbr_ret = NULL;"))
+    teko::assert::is_true(teko::str::contains(out, "teko_teko__runtime__region_new(teko_teko__runtime__region_root())"))
+    teko::assert::is_true(!teko::str::contains(out, "teko_teko__runtime__region_new(_tkbr_ret)"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,8 +1020,9 @@ fn cgt_emit_defer() {
 /**
  * cgt_emit_adopt — (#337) verify the `adopt { }` lowering opens an adopter region and closes it
  * with the SUBTREE-drop primitive, and that a NESTED adopt opens a second (inner) region. The
- * emitted C must name tk_region_new (the adopter open) and tk_region_drop_subtree (the bulk-drop
- * at the brace), NOT the plain tk_region_drop — that distinction is what reclaims the per-object
+ * emitted C must name teko_teko__runtime__region_new (the adopter open) and
+ * teko_teko__runtime__region_drop_subtree (the bulk-drop at the brace), NOT the plain
+ * teko_teko__runtime__region_drop — that distinction is what reclaims the per-object
  * child regions instead of leaking them to the process root.
  */
 #test
@@ -1042,8 +1043,8 @@ fn cgt_emit_adopt() {
     var f = cgt_fn0("cgt_fn_adopt", "teko::cgt", ret_type, body)
     var r = match emit_function(cgt_empty(), prog, f) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(r, "cgt_fn_adopt"))
-    teko::assert::is_true(teko::str::contains(r, "tk_region_new"))
-    teko::assert::is_true(teko::str::contains(r, "tk_region_drop_subtree"))
+    teko::assert::is_true(teko::str::contains(r, "teko_teko__runtime__region_new"))
+    teko::assert::is_true(teko::str::contains(r, "teko_teko__runtime__region_drop_subtree"))
 
     var named_s: @TStatement() = checker::TAdoptStmt { name = "r"; body = inner_body }
     var nested_body: []@TStatement() = teko::list::push(cgt_empty_stmts(), named_s)
@@ -1054,7 +1055,7 @@ fn cgt_emit_adopt() {
     var f2 = cgt_fn0("cgt_fn_adopt_nested", "teko::cgt", ret_type, body2)
     var r2 = match emit_function(cgt_empty(), prog, f2) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(r2, "cgt_fn_adopt_nested"))
-    teko::assert::is_true(count_substr(r2, "tk_region_drop_subtree") >= 2)
+    teko::assert::is_true(count_substr(r2, "teko_teko__runtime__region_drop_subtree") >= 2)
 }
 
 /**
@@ -1646,7 +1647,7 @@ fn cgt_boxed_union_wrap_uses_requested_local_region() {
     var p = cgt_prog_with_pair16()
     var expected: @Type() = cgt_pair16_null()
     var wrapped = match emit_as_r_in(cgt_empty(), p, checker::Void { }, expected, cgt_pair16_expr(), "_tkbr0", teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(wrapped, "tk_region_alloc(_tkbr0, sizeof("))
+    teko::assert::is_true(teko::str::contains(wrapped, "teko_teko__runtime__region_alloc(_tkbr0, sizeof("))
 }
 
 #test
@@ -1654,7 +1655,7 @@ fn cgt_boxed_union_wrap_defaults_to_root_region() {
     var p = cgt_prog_with_pair16()
     var expected: @Type() = cgt_pair16_null()
     var wrapped = match emit_as_r(cgt_empty(), p, checker::Void { }, expected, cgt_pair16_expr(), teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(wrapped, "tk_region_alloc(tk_region_root(), sizeof("))
+    teko::assert::is_true(teko::str::contains(wrapped, "teko_teko__runtime__region_alloc(teko_teko__runtime__region_root(), sizeof("))
 }
 
 /**
@@ -1893,8 +1894,8 @@ fn cgt_the_harness_runs_every_body_under_capture() {
     teko::assert::is_true(teko::str::contains(one, cgt_captured_run_line()))
     teko::assert::is_true(teko::str::contains(one, "tk_test_report(teko_journal_rv);"))
     teko::assert::is_true(!teko::str::contains(one, "tk_test_end();"))
-    teko::assert::is_true(teko::str::contains(one, "tk_arena_push();"))
-    teko::assert::is_true(teko::str::contains(one, "tk_arena_pop();"))
+    teko::assert::is_true(teko::str::contains(one, "teko_teko__runtime__arena_push();"))
+    teko::assert::is_true(teko::str::contains(one, "teko_teko__runtime__arena_pop();"))
     teko::assert::is_true(teko::str::contains(one, "tk_test_begin("))
 }
 

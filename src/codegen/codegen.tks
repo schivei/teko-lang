@@ -279,32 +279,34 @@ type CgArenaSym = enum {
 }
 
 /**
- * cg_arena_sym — the C symbol codegen emits for one arena/region primitive. TODAY every kind
- * resolves to the hand-written C runtime's `tk_*` export (`src/runtime/teko_rt.c`) — byte-identical
- * to what each call site spelled inline before this indirection existed. This is the SINGLE table a
- * later switch-over (§16 arena crumb E, step L2 — the Teko-over-mmap arena) retargets: every call
- * site already routes through here, so that flip touches only this function's bodies, not the ~18
- * call sites across the file.
+ * cg_arena_sym — the C symbol codegen emits for one arena/region primitive. Every kind now resolves
+ * to the Teko-over-mmap arena's mangled export (`src/runtime/arena.tks`, namespace `teko::runtime`,
+ * so `teko_teko__runtime__*`) — the §16 arena crumb E, step L2 FLIP: the emitted allocation sites
+ * route to the Teko arena, making the compiler's own runtime memory the Teko-over-mmap arena. The
+ * ABI matches (each Teko fn is `ptr`+`u64` = `void*`+`uint64_t`), so the emitted call sites are
+ * unchanged. A program that does NOT itself declare `teko::runtime` (any ordinary program, or a
+ * non-Linux self-image where the mmap syscalls prune away) resolves these symbols against the WEAK
+ * `teko_rt.c` seeds that forward to the C `tk_*` arena — the fallback the L3 crumb later removes.
  *
  * @param kind  which arena/region primitive is being emitted
- * @return      the C symbol name to emit for `kind`
+ * @return      the mangled C symbol name to emit for `kind`
  */
 fn cg_arena_sym(kind: CgArenaSym): str {
     match kind {
-        CgArenaSym::RegionAlloc => "tk_region_alloc"
-        CgArenaSym::RegionNew => "tk_region_new"
-        CgArenaSym::RegionDrop => "tk_region_drop"
-        CgArenaSym::RegionDropSubtree => "tk_region_drop_subtree"
-        CgArenaSym::RegionRoot => "tk_region_root"
-        CgArenaSym::RegionCurrent => "tk_region_current"
-        CgArenaSym::RegionEnter => "tk_region_enter"
-        CgArenaSym::RegionLeave => "tk_region_leave"
-        CgArenaSym::ArenaPush => "tk_arena_push"
-        CgArenaSym::ArenaPop => "tk_arena_pop"
-        CgArenaSym::ArenaCommit => "tk_arena_commit"
-        CgArenaSym::RegionRegister => "tk_region_register"
-        CgArenaSym::RegionLookup => "tk_region_lookup"
-        CgArenaSym::Alloc => "tk_alloc"
+        CgArenaSym::RegionAlloc => "teko_teko__runtime__region_alloc"
+        CgArenaSym::RegionNew => "teko_teko__runtime__region_new"
+        CgArenaSym::RegionDrop => "teko_teko__runtime__region_drop"
+        CgArenaSym::RegionDropSubtree => "teko_teko__runtime__region_drop_subtree"
+        CgArenaSym::RegionRoot => "teko_teko__runtime__region_root"
+        CgArenaSym::RegionCurrent => "teko_teko__runtime__region_current"
+        CgArenaSym::RegionEnter => "teko_teko__runtime__region_enter"
+        CgArenaSym::RegionLeave => "teko_teko__runtime__region_leave"
+        CgArenaSym::ArenaPush => "teko_teko__runtime__arena_push"
+        CgArenaSym::ArenaPop => "teko_teko__runtime__arena_pop"
+        CgArenaSym::ArenaCommit => "teko_teko__runtime__arena_commit"
+        CgArenaSym::RegionRegister => "teko_teko__runtime__region_register"
+        CgArenaSym::RegionLookup => "teko_teko__runtime__region_lookup"
+        CgArenaSym::Alloc => "teko_teko__runtime__alloc"
     }
 }
 
@@ -5240,9 +5242,6 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
             else if last == "cov_line_reset" { builtin = "tk_cov_line_reset"; has_builtin = true }   // () -> void
             else if last == "cov_line" { builtin = "tk_cov_line"; has_builtin = true }   // (u32) -> void
             else if last == "cov_line_hit" { builtin = "tk_cov_line_hit"; has_builtin = true }   // (u64,u32) -> bool
-            else if last == "arena_push" { builtin = cg_arena_sym(CgArenaSym::ArenaPush); has_builtin = true }
-            else if last == "arena_pop" { builtin = cg_arena_sym(CgArenaSym::ArenaPop); has_builtin = true }
-            else if last == "arena_commit" { builtin = cg_arena_sym(CgArenaSym::ArenaCommit); has_builtin = true }
             else if last == "task_reset" { builtin = "tk_task_reset"; has_builtin = true }
             else if last == "intern_get" { builtin = "tk_intern_get"; has_builtin = true }
             else if last == "intern_put" { builtin = "tk_intern_put"; has_builtin = true }

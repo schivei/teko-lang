@@ -145,8 +145,29 @@ const CTRL_FREE_BINS: u64 = 1152
 /** How many size classes the free bins hold; class `i` is exactly `(i + 1) * ARENA_ALIGN` bytes. */
 const FREE_BINS: u64 = 4096
 
-/** The control block's total size: the scalars, the mark stack, and the free bins. */
-const CTRL_BYTES: u64 = 33920
+/**
+ * Control field: the current-region stack's depth (the C twin's `tk_task.cur_rsp`). `region_enter`
+ * pushes and `region_leave` pops; `region_current` reads the slot below the top. Kept in the
+ * per-flow CONTROL block so the current region — the one `alloc` bumps from by default — is
+ * per-task exactly as the C twin's per-task stack is.
+ */
+const CTRL_CUR_SP: u64 = 33920
+
+/**
+ * Control field: the base of the current-region stack (the C twin's `tk_task.cur_regions`), a
+ * fixed array of `CUR_STACK_SLOTS` region handles. Slot `i` holds the region entered at depth `i`.
+ */
+const CTRL_CUR_STACK: u64 = 33928
+
+/**
+ * How many nested current-region windows the stack holds (the C twin's `TK_REGION_STACK_MAX`). A
+ * push past the cap keeps counting the depth but stores nothing, so `region_current` degrades to
+ * the root for an over-deep enter — never handing back a garbage slot.
+ */
+const CUR_STACK_SLOTS: u64 = 64
+
+/** The control block's total size: the scalars, the mark stack, the free bins, and the current-region stack. */
+const CTRL_BYTES: u64 = 34440
 
 /** The sentinel `ar_control` writes so an uninitialized mapping is never mistaken for a live one. */
 const CTRL_MAGIC_VALUE: u64 = 2596069104
@@ -574,6 +595,53 @@ fn ar_region_root_w(control: u64): u64 {
     var root = ar_region_new_w(control, 0)
     ar_ctrl_set(control, CTRL_ROOT, root)
     root
+}
+
+/**
+ * Pushes `region` as the new current region — the C twin's `tk_region_enter`. A push past the stack
+ * cap keeps advancing the depth but stores nothing, so it degrades to the root on read rather than
+ * overrunning the fixed array.
+ *
+ * @param control  the control block's base address
+ * @param region   the region handle to make current
+ * @return         nothing
+ */
+fn ar_cur_push(control: u64, region: u64) {
+    var depth = ar_ctrl_get(control, CTRL_CUR_SP)
+    if depth < CUR_STACK_SLOTS {
+        ar_store(control + CTRL_CUR_STACK + depth * WORD, region)
+    }
+    ar_ctrl_set(control, CTRL_CUR_SP, depth + 1)
+}
+
+/**
+ * Pops the current-region stack — the C twin's `tk_region_leave`. A pop at depth zero is a no-op,
+ * so an unbalanced leave never underflows.
+ *
+ * @param control  the control block's base address
+ * @return         nothing
+ */
+fn ar_cur_pop(control: u64) {
+    var depth = ar_ctrl_get(control, CTRL_CUR_SP)
+    if depth == 0 { return }
+    ar_ctrl_set(control, CTRL_CUR_SP, depth - 1)
+}
+
+/**
+ * The current region the default allocation bumps from — the C twin's `tk_region_current`: the top
+ * of the current-region stack, or the root when the stack is empty, over-deep, or holds a null slot.
+ * A null or over-deep top degrades to the root so an unbalanced enter never hands back garbage.
+ *
+ * @param control  the control block's base address
+ * @return         the current region's base address
+ */
+fn ar_cur_top(control: u64): u64 {
+    var depth = ar_ctrl_get(control, CTRL_CUR_SP)
+    if depth > 0 && depth <= CUR_STACK_SLOTS {
+        var region = ar_load(control + CTRL_CUR_STACK + (depth - 1) * WORD)
+        if region != 0 { return region }
+    }
+    ar_region_root_w(control)
 }
 
 /**
@@ -1182,6 +1250,21 @@ pub fn region_alloc(r: ptr, n: u64): ptr {
 }
 
 /**
+ * alloc — allocate `n` bytes in the CURRENT region (C ABI: `void* tk_alloc(size_t)`), the
+ * root-region convenience: it bumps from the top of the current-region stack, which is the root
+ * when no child window is open. Equivalent to `region_alloc(region_current(), n)` with one control
+ * lookup.
+ *
+ * @param n  the requested size in bytes
+ * @return   the allocated block, never null
+ */
+pub fn alloc(n: u64): ptr {
+    var control = ar_control()
+    var address = ar_region_alloc_w(control, ar_cur_top(control), n)
+    teko::sys::word_ptr(address to i64)
+}
+
+/**
  * region_new — open a fresh child region of `parent` (C ABI: `tk_region* tk_region_new(tk_region*)`).
  *
  * @param parent  the tree parent handle; a null handle opens a parentless region
@@ -1225,13 +1308,14 @@ pub fn region_root(): ptr {
 
 /**
  * region_current — the region default allocation bump-allocates from RIGHT NOW (C ABI: `tk_region*
- * tk_region_current()`). This core has no enter/leave current-region stack, so with no child window
- * open the current region is the root — the honest single-frame model until crumb E wires the stack.
+ * tk_region_current()`): the top of this task's current-region stack, or the root when no child
+ * window is open. `region_enter`/`region_leave` move the top; an unbalanced or over-deep stack
+ * degrades to the root, so this never hands back a garbage handle.
  *
  * @return  the current region handle
  */
 pub fn region_current(): ptr {
-    teko::sys::word_ptr(ar_region_root_w(ar_control()) to i64)
+    teko::sys::word_ptr(ar_cur_top(ar_control()) to i64)
 }
 
 /**
@@ -1242,6 +1326,28 @@ pub fn region_current(): ptr {
  */
 pub fn region_program(): ptr {
     teko::sys::word_ptr(ar_region_program_w(ar_control()) to i64)
+}
+
+/**
+ * region_enter — push `child` as the current region (C ABI: `void tk_region_enter(tk_region*)`),
+ * the move-on-return open bracket: default allocations inside the window bump from `child` until
+ * the matching `region_leave`.
+ *
+ * @param child  the region handle to make current
+ * @return       nothing
+ */
+pub fn region_enter(child: ptr) {
+    ar_cur_push(ar_control(), teko::sys::ptr_word(child) to u64)
+}
+
+/**
+ * region_leave — pop the current-region stack (C ABI: `void tk_region_leave()`), the move-on-return
+ * close bracket restoring the enclosing current region. A leave with nothing entered is a no-op.
+ *
+ * @return  nothing
+ */
+pub fn region_leave() {
+    ar_cur_pop(ar_control())
 }
 
 /**
