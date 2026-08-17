@@ -1174,6 +1174,32 @@ sai 3× no seed), e emite **cast à toa**. Como o número dobrado é o do **host
    coordenador: **(A)** ou **(C)**. NÃO despachar em massa sem a estratégia ratificada. Nota: tipar uma
    `var` não deve mudar os bytes emitidos (o tipo anotado = o já inferido) → provável **sem reseed** por
    arquivo-folha; confirmar no primeiro lote.
+   - **SPIKE DE VIABILIDADE (2026-08-17) — viabilidade RESOLVIDA, aguarda só o A/B/C do dono.** Varredura
+     full-tree instrumentada: **10.609** bindings `var`/`const` sem tipo (a população exata que o gate
+     `--explicit` marca; menor que o ~14.131 textual porque este inclui vars de cabeçalho-de-loop — que o
+     gate limpa — + destructure + consts de módulo tipados por outro caminho). Todos os 10.609 são sites
+     distintos (sem duplo-count de monomorfização). Split: **EASY 10.444 (98,4%)** — prim/base 4534, tipo
+     nomeado 3884, slice `[]T` 1715, união-anônima `A|B` 311; **GENERIC instance 164 (1,5%)** (precisa de
+     renderer `base<args>` a partir dos type-args estruturados; ~93% em `src/parser/` via `Parsed<T>`,
+     concentrados em ~13 arquivos); **FUNC/closure 1**; **HARD/não-grafável 0** — as formas internal-only
+     (`Ref<T>`, slice-sentinela `[]_`, `void`/`null` puros) **não podem ocorrer em binding sem tipo**: o
+     `type_binding` já as rejeita independentemente da flag. **167 de 180 arquivos são 100% EASY.**
+   - **Hipótese sem-reseed CONFIRMADA:** protótipo (codemod) tipou `src/math/checked.tks` (16 vars) → árvore
+     recompilou VERDE (checker→codegen→cc, backend C) e o `teko.c` emitido ficou **byte-idêntico**
+     (22.619.975 B, sha256 `bea84859…` antes=depois). Anotar com o tipo já-inferido muda zero bytes → reseed
+     é **um único passo whole-tree**, não por-arquivo.
+   - **Recomendação do spike:** **(A) puro-ferramenta, mas a ferramenta OBRIGA um renderer de superfície
+     grafável** (distinto do `type_render`, que é diagnóstico) divergindo em 4 pontos: generic instance
+     `base<args>` (dos type-args estruturados, NÃO de-manglando a string achatada), `ptr<T>`,
+     `func<>`/`action<>`, e `ns::Name` cross-namespace. Com esse renderer o tool cobre ~100% (mecânico, sem
+     julgamento). Única razão p/ (C) híbrido: **review humano de estilo bounded aos ~13 arquivos genéricos**
+     do parser (as uniões demanglada ficam verbosas, ex. `Parsed<Binding | Assign | …>` — chamada de
+     legibilidade, não de correção). Rota: **construir o tool (A) com o renderer genérico → rodar tree-wide
+     → review C-style leve nos ~13 arquivos → 1 reseed whole-tree.**
+   - **⚠️ Achado adjacente (infra, fora do escopo do sweep):** o `.teko/teko` commitado está **STALE** vs
+     `fix/retirement` (é anterior aos tipos `func<>`, não compila o branch) e `fetch_teko.sh` é inutilizável
+     aqui sem `GH_TOKEN` válido. Todo agente neste branch bate na mesma parede e precisa hand-buildar
+     `bootstrap/teko.c`. Vale o integrador refrescar o seed commitado.
 3. ⏳ **ligar `--explicit` nos builds + CI** (SÓ após 100% tipado, senão o build quebra) + atualizar memórias
    (o build seco passa a incluir `--explicit`).
 4. ⏳ **tabela de literais** — emitir por referência + dedup + gating `#if` das guardadas → **reseed**.
