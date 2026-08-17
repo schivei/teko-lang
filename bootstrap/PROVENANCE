@@ -1,35 +1,43 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): the NATIVE-backend const-struct
-# `__hdr` fix lands in the LIR const lowering (`src/lir/lower_const.tks`), so the compiler's own
-# emitted teko.c gains the new guard. What this harvest carries:
-#   - **native const-struct `__hdr` guard (compiler — LIR)**: item-14 (§13.2) prepends a synthetic
-#     pointer-sized `__hdr` self-reference as the FIRST member of every value-struct layout, in both
-#     backends. The C backend leans on C's zero-init of unspecified compound-literal fields; the
-#     NATIVE const path iterates the FULL layout (including `__hdr`) and looked each field up in the
-#     user's `TStructInit` via `struct_init_value`. The user never binds `__hdr`, so a const struct
-#     raised `const struct: initializer binds no field \`__hdr\` (internal)` on the native leg.
-#       * Fix (`const_struct_field_into`): when the field is `struct_hdr_field_name()` (`__hdr`),
-#         skip the user-initializer lookup and write `ltype_size(LType::Ptr)` zero bytes at the
-#         field's offset via a new `const_hdr_field_into` helper — mirroring the non-const path
-#         (`alloca` zero-inits the struct, only user fields are written) and the C backend (the
-#         unspecified header member zero-fills). No ABI change; `__hdr` stays zero on both engines.
-#   - Touch points: `src/lir/lower_const.tks` (the `const_hdr_field_into` helper + the guard clause).
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the §10 native-multithread keystone
+# `thread_clone` codegen intrinsic (M1) lands in the checker + C backend, so the compiler's own
+# emitted teko.c gains the new builtin's registration, dispatch, use-gate and helper emitter. What
+# this harvest carries:
+#   - **`thread_clone` codegen intrinsic (compiler — checker + codegen)**: plano §3, the ONE
+#     compiler-touching crumb of the §10 raw-multithread substrate (retiring pthread on Linux
+#     `clone(2)`). `clone` is the one syscall that cannot ride the generic `tk_syscallN` inline
+#     helper — its child returns from the `syscall` instruction on a freshly-supplied stack with
+#     `rax == 0`, so the child branch is handled IN the emitted asm block (jump to `entry`, never
+#     `ret`; classic musl `__clone` shape), terminating the thread with `SYS_exit` (60, NOT
+#     exit_group). Pieces:
+#       * `src/checker/scope.tks` — `thread_clone_signature()` registers the builtin beside the
+#         `syscall0..6` family as `Func { params = i64 x 5; ret = i64 }`
+#         (`entry, stack_top, arg, ctid_addr, flags` -> child tid / `-errno`).
+#       * `src/codegen/codegen.tks` — `emit_call` dispatch `thread_clone` -> `tk_thread_clone`; a
+#         `clone` bit threaded through `SyscallUse` (set by `cg_mark_syscall_call`, scanned by the
+#         existing `cg_scan_syscall_*` walk); `cg_emit_thread_clone_helper` emits the bespoke
+#         `static long tk_thread_clone(...)` x86_64-Linux child-branch helper ONLY when the program
+#         calls the intrinsic, wrapped in an `#if __x86_64__ ... #elif __aarch64__ (#error
+#         honest-stop, plano §3.4 ctid/tls swap) ... #else (#error)` guard.
+#   - **Inert in the compiler's own image**: the compiler never spawns via the `thread_clone`
+#     surface (its parallel codegen uses a private fork_join), so `SyscallUse.clone` is always
+#     false for the self-build and ZERO thread helpers are emitted into teko.c ⇒ the reseed is a
+#     clean single-pass fixpoint, exactly as the `syscallN` intrinsic keystone was.
+#   - **Native leg honest-stops**: `thread_clone` is not in the native subset, so it falls into
+#     `unresolved_builtin_stop` (`src/lir/lower.tks`) — the C leg is this pass's build+run target
+#     (plano §3.5), the native lowering inherits it in Doc-2's terminal phase.
+#   - Touch points: `src/checker/scope.tks`, `src/codegen/codegen.tks`.
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (tc1 == tc2 == tc3).
-#   - The committed seed already carries the new guard, so gen0 (cc of this seed) and gen1 emit the
-#     same whole-tree bytes: the seed `441c6318` converges on its own image in ONE pass.
-#   - C-route chain: gen0 (cc, `-pthread`, from bootstrap `441c6318`) built the tree → tc1
-#     `441c6318…`; tc1 -> gen1; gen1 built the tree → tc2 `441c6318…`; tc2 -> gen2; gen2 built the
-#     tree → tc3 `441c6318…`. tc1 == tc2 == tc3, byte-identical (sha256 below). Verified locally:
-#     gen1's emitted C == gen2's emitted C == this seed, and gen1 binary == gen2 binary; the
-#     fixpoint gate returns PASSED (gen2 == gen3 byte for byte, gen2.c == gen3.c).
-#   - cc-route: cc -std=c2x -w -pthread -I src/runtime -I src/assert bootstrap/teko.c
-#     src/runtime/teko_rt.c src/assert/assert.c -lm -> gen; TEKO_BACKEND=c gen . -o out --no-verify
-#     --release -> out/teko.c; sha256(out/teko.c) == sha256(bootstrap/teko.c) == below.
-#   - The bug is NATIVE-only and cannot be exercised on the Linux/C leg; the fix is correct by
-#     construction (it mirrors the non-const and C paths), and CI's macOS native fixpoint is its
-#     terminal proof. Self-reported peak ~5.7 GB (within the 6 GB cap).
+#   - The intrinsic is behavior-neutral for the self-build (dead code until a user program spawns),
+#     so gen0 (cc of this seed) and gen1 emit the same whole-tree bytes: the seed `f1be9769`
+#     converges on its own image in ONE pass.
+#   - C-route chain: gen0 (cc, `-pthread`, from bootstrap) built the tree -> gen1; gen1's emitted C
+#     == this seed `f1be9769`; the C-route fixpoint gate returns PASSED (gen2 == gen3 byte for byte,
+#     gen2.c == gen3.c). The x86_64 child-branch helper was validated standalone (child runs
+#     `entry(arg)` on the fresh stack, delivers the ctx pointer, exits via `SYS_exit`). Self-reported
+#     peak ~5.7 GB (within the 6 GB cap).
 #
 # `run: hand-harvest` — no CI run produced this file: reseed-bootstrap.yml is not registered on the
 # default branch, so it cannot be workflow_dispatch'd via the API; the harvest is LOCAL on this lane,
@@ -40,10 +48,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  441c6318c4bbe39ba03c97e857e1908ac45cdc5324cb6a76d5d92613145ab34a
+sha256:  f1be97693b12b827393cb630a78cae59fe16c3eb79d3ee477ec88e51c32597f0
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the native const-struct `__hdr`
-         guard in the LIR const lowering — skip the synthetic header field in the user-initializer
-         lookup and zero-fill it at its offset), byte-identical on rebuild across the stable C-route
-         generations (clean fixpoint tc1 == tc2 == tc3) AND on the cc-route re-emission; no
+legacy:  none — this is an exact, self-reproducing hand harvest (the §10/M1 `thread_clone` codegen
+         intrinsic — a dead-code-in-corpus builtin gated on its own call sites), byte-identical on
+         rebuild across the stable C-route generations (clean fixpoint tc1 == tc2 == tc3); no
          unrecovered legacy artifact.
