@@ -3562,6 +3562,27 @@ fn overload_suffix_for_method(env: Env, method_ns: str, m: parser::Function, own
  * @throws       when 0 candidates fit, or >1 fit with no unique best
  * @since §9 A
  */
+/**
+ * bindings_same_signature — true iff every binding in `bs` has a `type_eq`-identical type. The §16
+ * target-variant arms of a `#os`/`#arch`-guarded runtime fn share ONE signature (they are the same
+ * function per target), so a call resolving to all of them is NOT an ambiguous overload — codegen
+ * `#if`-guards each arm onto the single C symbol. A genuine overload set has DISTINCT signatures.
+ *
+ * @param bs  the candidate bindings that all fit the call
+ * @return    true iff all bindings share one signature
+ * @since §16
+ */
+fn bindings_same_signature(bs: []ValBinding): bool {
+    if bs.len < 2 { return true }
+    var i: u64 = 1
+    loop {
+        if i >= bs.len { break }
+        if !type_eq(bs[0].type, bs[i].type) { return false }
+        i++
+    }
+    true
+}
+
 fn select_overload(cands: []ValBinding, c: parser::Call, env: Env, table: TypeTable): ValBinding | error {
     var name = c.callee.segments[c.callee.segments.len - 1].name
     var exacts: []ValBinding = teko::list::empty()
@@ -3609,9 +3630,15 @@ fn select_overload(cands: []ValBinding, c: parser::Call, env: Env, table: TypeTa
         }
     }
     if exacts.len == 1 { return exacts[0] }
-    if exacts.len >= 2 { return error { message = $"ambiguous call to overloaded '{name}': {exacts.len} candidates match with an exact signature — disambiguate with an explicit cast (e.g. `x to T`)" } }
+    if exacts.len >= 2 {
+        if bindings_same_signature(exacts) { return exacts[0] }
+        return error { message = $"ambiguous call to overloaded '{name}': {exacts.len} candidates match with an exact signature — disambiguate with an explicit cast (e.g. `x to T`)" }
+    }
     if widens.len == 1 { return widens[0] }
-    if widens.len >= 2 { return error { message = $"ambiguous call to overloaded '{name}': {widens.len} candidates match by implicit widening — disambiguate with an explicit cast (e.g. `x to T`)" } }
+    if widens.len >= 2 {
+        if bindings_same_signature(widens) { return widens[0] }
+        return error { message = $"ambiguous call to overloaded '{name}': {widens.len} candidates match by implicit widening — disambiguate with an explicit cast (e.g. `x to T`)" }
+    }
     error { message = $"no matching overload for '{name}' with the given argument types" }
 }
 
@@ -8899,7 +8926,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         var no_body: []@TStatement() = teko::list::empty()
-        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
+        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
     var tb = match type_block(f.body, with_ret_expected(local, ret), tbl) { TypedBlock as bk => bk; error as e => return e }
@@ -8934,7 +8961,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     } else {
         ret_stmts
     }
-    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
+    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -9215,7 +9242,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         var no_body: []@TStatement() = teko::list::empty()
-        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
+        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
     var tb = match type_block(f.body, with_ret_expected(local, ret), tbl) { TypedBlock as bk => bk; error as e => return e }
@@ -9225,7 +9252,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
     var lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())   // W5-cf-2: loop labels resolve + are unique
     if lc.failed { return error { message = lc.message } }
     var ret_stmts = retype_union_returns(tb.stmts, ret, table)
-    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty() }
+    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -9569,7 +9596,7 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
         var mov = overload_suffix_for_method(env, method_ns, methods[mi], td.name, item_ns, table)
-        var stamped = TFunction { overload_suffix = mov; name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size; ret_extra = mf.ret_extra }
+        var stamped = TFunction { overload_suffix = mov; name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size; ret_extra = mf.ret_extra; guard = parser::pred_true() }
         out = teko::list::push(out, stamped)
         mi++
     }
@@ -9664,7 +9691,7 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable): @TItem() | error {
             var tf = match type_function(f, fenv, table) { TFunction as x => x; error as e => return e }
             // (#49) stamp the declaring namespace from the parsed item so codegen mangles the C name.
             var ov = overload_suffix_for_decl(env, item.namespace, tf.name, tf, table)
-            TFunction { overload_suffix = ov; name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib; has_arena_size = tf.has_arena_size; arena_size = tf.arena_size; ret_extra = tf.ret_extra }
+            TFunction { overload_suffix = ov; name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib; has_arena_size = tf.has_arena_size; arena_size = tf.arena_size; ret_extra = tf.ret_extra; guard = item.guard }
         }
         parser::TypeDecl as td => {
             // (#109 W3) CANONICALIZE the decl name to "ns::Name" so codegen emits a namespace-distinct
