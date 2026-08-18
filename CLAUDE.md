@@ -115,7 +115,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
   um executável por (arch, SO), e ainda assim cross-compila.
 - Teko-only (.tks), W15 (doc-comments-only, flatten/extract, helpers com nome único
-  tree-wide, sem index-assign), sem VM/GC, arena.
+  tree-wide), sem VM/GC, arena.
+- **NO PUSHES (LEI DURA, dono 2026-08-18) — inverte o antigo W15 "no index-assign".** Array é
+  IMUTÁVEL; `teko::list::push`/`empty()`-em-loop está **PROIBIDO** — é a RAIZ dos 93% de memória
+  (profiler `tk_obs`: `tk_slice_push_r` = 4980 MB = 93%, 20,3M copy-grows que vazam na arena `root`
+  nunca-liberada). Construir array por **LITERAL** ou por **pré-alocação de `[]T` + atribuição
+  posicional `x[i] = y`** (a linguagem JÁ suporta: `typer.tks` `type_index_assign`, slice `[]T`;
+  `loop var i in 0..n { xs[i] = … }`). Tamanho desconhecido: pré-alocar+cortar (`slice[0..n]`) ou
+  builder amortizado in-place — NUNCA o `push` copy-grow. Index-assign passa de proibido a PREFERIDO.
 - **§16 — C hand-written CONGELADO (lei do dono, 2026-08-17):** `src/runtime/teko_rt.c`,
   `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h` NÃO podem mais ser
   editados/estendidos/patcheados. Toda função de runtime vira **superfície Teko** (`src/*.tks`)
