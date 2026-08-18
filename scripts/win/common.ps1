@@ -135,7 +135,7 @@ function Invoke-TekoBuild {
     if ($ExtraEnv) { foreach ($k in $ExtraEnv.Keys) { $savedExtra[$k] = [Environment]::GetEnvironmentVariable($k) } }
     Push-Location -LiteralPath $ProjDir
     try {
-        if ($RtDir) { $env:TK_RT_DIR = $RtDir } else { Remove-Item Env:TK_RT_DIR -ErrorAction SilentlyContinue }
+        if ($RtDir) { $env:TK_RT_DIR = ($RtDir -replace '\\','/') } else { Remove-Item Env:TK_RT_DIR -ErrorAction SilentlyContinue }
         $env:TEKO_BACKEND = $Backend
         if ($ExtraEnv) { foreach ($k in $ExtraEnv.Keys) { Set-Item -Path "Env:$k" -Value $ExtraEnv[$k] } }
         & $Bin . -o $Out --no-verify --release 2>&1 | ForEach-Object { Write-CiLog $Tag "  | $_" }
