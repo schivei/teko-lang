@@ -146,8 +146,9 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   - **Slot tipo-VALOR** (número/byte/char/bool/string/struct-de-valores): zero = default VÁLIDO, leitura
     de slot não-preenchido é segura (struct zerado é o "zero-value" do Go).
   - **Slot REFERÊNCIA não-null:** `of_len` zera o ponteiro (null = sentinela natural de não-preenchido,
-    custo memória ZERO); **o dev preenche**. Ler `x[i]` com ponteiro zero → **PÂNICO em runtime**
-    `arquivo:linha:coluna: "causa"` (não segfault cru). O compilador auto-compilando conhece tudo →
+    custo memória ZERO); **`x[i] = …` é trabalho do dev**. Segurar/ler o ponteiro `x[i]` é inofensivo;
+    **DESREFERENCIAR** um slot zero (`x[i].campo`/método) → **PÂNICO em runtime** `arquivo:linha:coluna:
+    "causa"` (guard de null-deref, não segfault cru). O compilador auto-compilando conhece tudo →
     preenche certo → nunca dispara; o guard é backstop pro usuário.
 - **RESEED ITERATIVO, o AGENTE faz (dono 2026-08-18):** o expurgo NÃO tem um reseed único no fim. É
   `ENSINAR → SEED → SWEEP → SEED`, quantas voltas precisar. Staging do bootstrap: pra varrer consumidores
