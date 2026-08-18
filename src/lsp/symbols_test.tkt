@@ -1,26 +1,15 @@
 use teko::parser
 
-/**
- * SYM_PATH — the fixture document's path, stamped onto every symbol `build_symbol_index` reads
- * out of it (its `file`).
- */
-const SYM_PATH: str = "/proj/sym.tks"
-
-/**
- * SYM_SRC — a module carrying one of each declaration `build_symbol_index` indexes: a documented
- * `fn`, a documented `type` with a field and an instance method, and a documented `const`.
- */
 const SYM_SRC: str = "/**\n * Doubles a number.\n */\npub fn double(x: i64): i64 { return x * 2 }\n\n/**\n * A point in 2D space.\n */\npub type Point = struct { x: i64; y: i64; fn len(self): i64 { return self.x } }\n\n/**\n * The circle constant, approximated.\n */\npub const PI: f64 = 3.14\n"
 
-/**
- * sym_program — `SYM_SRC` lexed and parsed into a `parser::Program`, the input `build_symbol_index`
- * consumes. A lex/parse fault degrades to an empty program rather than aborting the test — the
- * assertions below would then simply fail to find any symbol, naming the real defect.
- *
- * @return  the fixture module as a merged program
- */
+fn sym_path(): str {
+    var p = teko::test::scoped("lsp-sym-fixture.tks")
+    match teko::io::write_file(p, SYM_SRC) { error => { }; null => { } }
+    p
+}
+
 fn sym_program(): parser::Program {
-    match document_program(SYM_PATH, SYM_SRC) {
+    match document_program(sym_path(), SYM_SRC) {
         parser::Program as p => p
         error => parser::Program { items = teko::list::empty() }
     }
@@ -163,7 +152,7 @@ fn word_at_position_outside_any_token_is_null() {
  * engine `hover_response`/`definition_response` both call.
  */
 fn resolve_symbol_at_finds_the_function_symbol_under_the_cursor() {
-    var sym = match resolve_symbol_at(SYM_PATH, SYM_SRC, 3, 9) {
+    var sym = match resolve_symbol_at(sym_path(), SYM_SRC, 3, 9) {
         Symbol as s => s
         null => { teko::assert::is_true(false); return }
     }
@@ -177,7 +166,7 @@ fn resolve_symbol_at_finds_the_function_symbol_under_the_cursor() {
  * `Ident`) resolves to no symbol: the keyword position names no declaration.
  */
 fn resolve_symbol_at_on_a_keyword_is_null() {
-    match resolve_symbol_at(SYM_PATH, SYM_SRC, 3, 0) {
+    match resolve_symbol_at(sym_path(), SYM_SRC, 3, 0) {
         Symbol as s => teko::assert::eq_str(s.name, "<expected null>")
         null => { }
     }

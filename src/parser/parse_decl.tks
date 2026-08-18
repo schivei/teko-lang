@@ -418,13 +418,13 @@ fn parse_multi_return_types(tokens: []lexer::Token, pos: u64): ParsedList<@TypeE
 fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str, is_type_method: bool, allow_bodyless: bool, has_arena_size: bool, arena_size: u64): Parsed<@Decl()> | error {
     var p = pos
     var has_doc = false
-    var doc = ""
+    var doc = docspan_none()
     // (#111) an own-line doc comment attaches to the NEXT declaration: skip the significant
     // newline(s) between the `/** … */` and the modifiers/keyword that follow it. Same-line
     // placement (no newline in between) is unaffected — skip_seps is a no-op there.
     if is_kind_at(tokens, p, lexer::TokenKind::Doc) {
         has_doc = true
-        doc = tokens[p].text
+        doc = docspan_of(tokens[p].file, tokens[p].byte_off, tokens[p].text.len)
         p = skip_seps(tokens, p + 1)
     }
     var vis = Visibility::Private   // default: own-namespace only
@@ -607,10 +607,10 @@ fn accessor_kind_at(tokens: []lexer::Token, pos: u64): u64 {
 fn parse_accessor(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parsed<@Decl()> | error {
     var p = pos
     var has_doc = false
-    var doc = ""
+    var doc = docspan_none()
     if is_kind_at(tokens, p, lexer::TokenKind::Doc) {
         has_doc = true
-        doc = tokens[p].text
+        doc = docspan_of(tokens[p].file, tokens[p].byte_off, tokens[p].text.len)
         p = skip_seps(tokens, p + 1)
     }
     var vis = Visibility::Private
@@ -699,7 +699,7 @@ fn parse_accessor(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parse
  * @return             the assembled accessor Function
  * @since §9 properties
  */
-fn accessor_function(sym: str, params: []Param, has_return: bool, return_type: @TypeExpr(), body: []@Statement(), vis: Visibility, has_doc: bool, doc: str, line: u32, col: u32, is_intern: bool, is_getter: bool, is_setter: bool, prop: str): Function {
+fn accessor_function(sym: str, params: []Param, has_return: bool, return_type: @TypeExpr(), body: []@Statement(), vis: Visibility, has_doc: bool, doc: DocSpan, line: u32, col: u32, is_intern: bool, is_getter: bool, is_setter: bool, prop: str): Function {
     Function {
         name = sym; type_params = teko::list::empty(); type_constraints = teko::list::empty()
         params = params; has_return = has_return; return_type = return_type; body = body
@@ -794,10 +794,10 @@ fn value_member_is_operator(tokens: []lexer::Token, pos: u64): bool {
 fn parse_operator_member(tokens: []lexer::Token, pos: u64, allow_bodyless: bool): Parsed<Function> | error {
     var p = pos
     var has_doc = false
-    var doc = ""
+    var doc = docspan_none()
     if is_kind_at(tokens, p, lexer::TokenKind::Doc) {
         has_doc = true
-        doc = tokens[p].text
+        doc = docspan_of(tokens[p].file, tokens[p].byte_off, tokens[p].text.len)
         p = skip_seps(tokens, p + 1)
     }
     p = p + 1
@@ -1482,11 +1482,11 @@ fn parse_type_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | erro
 fn parse_flags_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     var p = pos
     var has_doc = false
-    var doc = ""
+    var doc = docspan_none()
     // (#111) an own-line doc comment attaches to the NEXT declaration; see parse_function.
     if is_kind_at(tokens, p, lexer::TokenKind::Doc) {
         has_doc = true
-        doc = tokens[p].text
+        doc = docspan_of(tokens[p].file, tokens[p].byte_off, tokens[p].text.len)
         p = skip_seps(tokens, p + 1)
     }
     var vis = Visibility::Private
@@ -1563,11 +1563,11 @@ fn parse_extern_type_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()>
 fn parse_type_decl(tokens: []lexer::Token, pos: u64): Parsed<@Decl()> | error {
     var p = pos
     var has_doc = false
-    var doc = ""
+    var doc = docspan_none()
     // (#111) an own-line doc comment attaches to the NEXT declaration; see parse_function.
     if is_kind_at(tokens, p, lexer::TokenKind::Doc) {
         has_doc = true
-        doc = tokens[p].text
+        doc = docspan_of(tokens[p].file, tokens[p].byte_off, tokens[p].text.len)
         p = skip_seps(tokens, p + 1)
     }
     var vis = Visibility::Private   // default: own-namespace only
@@ -1714,9 +1714,9 @@ fn parse_arena_size_arg(tokens: []lexer::Token, pos: u64): ParsedU64 | error {
  */
 fn peel_leading_doc(tokens: []lexer::Token, pos: u64): ParsedLeadingDoc {
     if !is_kind_at(tokens, pos, lexer::TokenKind::Doc) {
-        return ParsedLeadingDoc { has_doc = false; doc = ""; next = pos }
+        return ParsedLeadingDoc { has_doc = false; doc = docspan_none(); next = pos }
     }
-    ParsedLeadingDoc { has_doc = true; doc = tokens[pos].text; next = skip_seps(tokens, pos + 1) }
+    ParsedLeadingDoc { has_doc = true; doc = docspan_of(tokens[pos].file, tokens[pos].byte_off, tokens[pos].text.len); next = skip_seps(tokens, pos + 1) }
 }
 
 /**
@@ -1730,7 +1730,7 @@ fn peel_leading_doc(tokens: []lexer::Token, pos: u64): ParsedLeadingDoc {
  * @param doc      the outer doc-comment's text (valid iff has_doc)
  * @return         `node`, with `has_doc`/`doc` overridden to the outer doc when present
  */
-fn with_outer_doc(node: @Decl(), has_doc: bool, doc: str): @Decl() {
+fn with_outer_doc(node: @Decl(), has_doc: bool, doc: DocSpan): @Decl() {
     if !has_doc { return node }
     match node {
         Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = true; doc = doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator; is_global = f.is_global }
@@ -1908,7 +1908,7 @@ fn parse_const_decl(tokens: []lexer::Token, start: u64, vis: Visibility, is_glob
         return err_at(tokens, p, "expected `=` and an initializer for a `const`")
     }
     var init = match parse_expr(tokens, p + 1) { Parsed<Expr> as x => x; error as e => return e }
-    var cd = ConstDecl { name = name; ty = ty.node; init = init.node; vis = vis; has_doc = false; doc = ""; line = kw_line; col = kw_col; is_global = is_global }
+    var cd = ConstDecl { name = name; ty = ty.node; init = init.node; vis = vis; has_doc = false; doc = docspan_none(); line = kw_line; col = kw_col; is_global = is_global }
     Parsed<@Decl()> { node = cd; next = init.next }
 }
 
@@ -1981,7 +1981,7 @@ type MemberConstStep = struct { handled: bool; consts: []ConstDecl; next: u64 }
  * @throws         a located error on `override const` or a malformed member const
  * @since #594
  */
-fn try_parse_member_const(tokens: []lexer::Token, pos: u64, has_doc: bool, doc: str, consts: []ConstDecl): MemberConstStep | error {
+fn try_parse_member_const(tokens: []lexer::Token, pos: u64, has_doc: bool, doc: DocSpan, consts: []ConstDecl): MemberConstStep | error {
     var mc = peek_member_const(tokens, pos)
     if mc.bad_override { return err_at(tokens, mc.kw_pos, "a `const` member may not carry `override` — `override` is method-only") }
     if mc.is_const {
@@ -2038,7 +2038,7 @@ fn reject_const_body_member(tokens: []lexer::Token, brace_pos: u64): error | nul
  * @throws         a located error on a missing name / `: Type` / `=` / bad initializer
  * @since #594
  */
-fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility, has_doc: bool, doc: str): Parsed<ConstDecl> | error {
+fn parse_type_member_const(tokens: []lexer::Token, pos: u64, vis: Visibility, has_doc: bool, doc: DocSpan): Parsed<ConstDecl> | error {
     var d = match parse_const_decl(tokens, pos, vis, false) { Parsed<@Decl()> as x => x; error as e => return e }
     var parsed_const = match d.node { ConstDecl as c => c; _ => return err_at(tokens, pos, "internal: a member const must parse to a ConstDecl") }
     var cd = ConstDecl { name = parsed_const.name; ty = parsed_const.ty; init = parsed_const.init; vis = parsed_const.vis; has_doc = has_doc; doc = doc; line = parsed_const.line; col = parsed_const.col; is_global = parsed_const.is_global }
