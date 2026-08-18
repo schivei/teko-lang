@@ -3,66 +3,23 @@ use teko::lexer
 use teko::parser
 use teko::lir
 
-/**
- * rmt_prim — a resolved primitive Type for a PrimKind (the arithmetic operand
- * type the match arms and result carry).
- *
- * @param checker::PrimKind k  the primitive kind
- * @return checker::Type  the resolved `Prim` type
- */
 fn rmt_prim(k: checker::PrimKind): @Type() { checker::Prim { kind = k } }
 
-/**
- * rmt_num — an i64-typed integer-literal `TExpr` (a match subject or arm body).
- *
- * @param u64 v  the literal's integer value
- * @return checker::TExpr  the typed number node
- */
 fn rmt_num(v: u64): checker::TExpr {
     checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; type = rmt_prim(checker::PrimKind::I64); line = 0; col = 0 }
 }
 
-/**
- * rmt_int_pattern — an integer-literal pattern `v` (a refutable arm test).
- *
- * @param u64 v  the literal's integer value
- * @return @Pattern()  the literal pattern node
- */
 fn rmt_int_pattern(v: u64): @Pattern() {
     parser::LiteralPattern { value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; line = 0; col = 0 } }
 }
 
-/**
- * rmt_wild_pattern — a bare `_` wildcard pattern: the IRREFUTABLE final arm
- * whose unconditional match leaves the defensive fallback block dead (the A4-6
- * crux, #385).
- *
- * @return @Pattern()  the wildcard pattern node
- */
 fn rmt_wild_pattern(): @Pattern() { parser::WildcardPattern { } }
 
-/**
- * rmt_arm — an UNGUARDED match arm over `pat` whose body is the single value
- * `val` (an expression-statement tail feeding the merge block).
- *
- * @param @Pattern() pat  the arm's pattern
- * @param u64 val  the arm's tail value
- * @return checker::TArm  the typed arm node
- */
 fn rmt_arm(pat: @Pattern(), val: u64): checker::TArm {
     var body = teko::list::push(teko::list::empty(), checker::TExprStmt { expr = rmt_num(val) })
     checker::TArm { pattern = pat; has_when = false; guard = rmt_num(0 to u64); body = body }
 }
 
-/**
- * rmt_match_module — the selected module for `fn pick(): i64 { return match 5 {
- * 1 => 40, 2 => 41, _ => 42 } }`, driven through the REAL pipeline (checker
- * TAST → `lir::lower_function` → `select_module` isel). Its irrefutable final
- * arm leaves the defensive fallback block UNREACHABLE — the exact shape that
- * false-tripped the regalloc back-edge honest-stop before A4-6 (#385).
- *
- * @return MModule | error  the selected module, or a propagated lower/isel error
- */
 fn rmt_match_module(): MModule | error {
     var subject = rmt_num(5 to u64)
     var arm0 = rmt_arm(rmt_int_pattern(1 to u64), 40 to u64)
@@ -82,15 +39,6 @@ fn rmt_match_module(): MModule | error {
     select_module(lir::add_func(lir::empty_module(), lf))
 }
 
-/**
- * rmt_dead_block — the id of the single block of `f` NOT reachable from entry
- * (the match's defensive fallback), or `f`'s entry id when every block is
- * reachable (the defensive default, never taken by the match fixture).
- *
- * @param MFunc f  the selected function
- * @param []u32 reachable  the entry-reachable block ids
- * @return u32  the unreachable block id, or the entry id if none
- */
 fn rmt_dead_block(f: MFunc, reachable: []u32): u32 {
     var i: u64 = 0
     loop {
@@ -102,17 +50,6 @@ fn rmt_dead_block(f: MFunc, reachable: []u32): u32 {
     f.blocks[0].id
 }
 
-/**
- * rmt_has_raw_retreat — the PRE-A4-6 back-edge predicate: a retreating edge by
- * RPO position ALONE, ignoring source reachability. On the match CFG it is
- * true — the dead fallback's forward jump to the merge, the false-positive
- * A4-6 removes — so this documents the bug `natural_loops`'s reachability
- * filter now suppresses (#385).
- *
- * @param []NumberedInst stream  the RPO-numbered stream
- * @param []u32 order  the RPO block-id order
- * @return bool  true iff any terminator retreats in RPO, dead sources included
- */
 fn rmt_has_raw_retreat(stream: []NumberedInst, order: []u32): bool {
     var i: u64 = 0
     loop {
@@ -127,15 +64,6 @@ fn rmt_has_raw_retreat(stream: []NumberedInst, order: []u32): bool {
     false
 }
 
-/**
- * rmt_match_wildcard_fallback_is_reachability_excluded — the forensic root-cause
- * assert (#385, A4-6): the real match isel output has 8 blocks, one of which
- * (the defensive fallback past the irrefutable `_` arm) is UNREACHABLE. RPO
- * numbers it LAST via `append_unvisited`, so its forward jump to the merge
- * RETREATS by position (`pos(merge) <= pos(fallback)`) — the raw retreat the
- * pre-A4-6 predicate tripped on. `natural_loops` now excludes that dead source,
- * so the acyclic DAG correctly reports NO natural loop.
- */
 #test
 fn rmt_match_wildcard_fallback_is_reachability_excluded() {
     var mm = match rmt_match_module() { MModule as x => x; error => return }
@@ -156,21 +84,6 @@ fn rmt_match_wildcard_fallback_is_reachability_excluded() {
     teko::assert::is_true(natural_loops(stream, order, reachable).len == (0 to u64))
 }
 
-/**
- * rmt_regalloc_match_allocates_and_preserves — the end-to-end allocation assert
- * (#385, A4-6): the match module (which previously KNOWN_STOPped at
- * `regalloc_func` with the loop back-edge error) now allocates — every
- * register is physical afterward.
- *
- * The pre/post semantic-equivalence check this test used to
- * make (42, the wildcard arm for subject 5, unchanged by allocation) is
- * no longer made here — A4's C-vs-own
- * byte differential is the equivalence oracle, and it is not a per-test
- * fixture check but the whole-program own==C comparison the fixpoint/test
- * suite already runs. This test still proves what only IT can: that the
- * A4-6 back-edge fix lets this exact CFG shape (an unreachable defensive
- * fallback block) allocate at all, ending in every operand physical.
- */
 #test
 fn rmt_regalloc_match_allocates_and_preserves() {
     var mm = match rmt_match_module() { MModule as x => x; error => return }
@@ -181,11 +94,6 @@ fn rmt_regalloc_match_allocates_and_preserves() {
     teko::assert::is_true(all_physical(colored.funcs[0]))
 }
 
-/**
- * rmt_reachable_blocks_empty_function — `reachable_blocks` returns the empty set
- * for a function with no blocks (the defensive guard shared with
- * `rpo_block_order`), covering the empty-CFG branch of the new helper (#385).
- */
 #test
 fn rmt_reachable_blocks_empty_function() {
     var empty_f = MFunc { symbol = "main"; blocks = teko::list::empty(); frame = teko::list::empty() }

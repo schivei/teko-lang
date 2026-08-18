@@ -1,99 +1,38 @@
-/**
- * rx_v — a virtual GPR register operand (a B1-4 x86 regalloc-test shorthand).
- *
- * @param u32 id  the virtual register id
- * @return MReg  the virtual GPR register
- */
 fn rx_v(id: u32): MReg {
     vreg(id, MRegClass::GPR)
 }
 
-/**
- * rx_vf — a virtual FPR register operand (for the FPR-spill honest-stop).
- *
- * @param u32 id  the virtual register id
- * @return MReg  the virtual FPR register
- */
 fn rx_vf(id: u32): MReg {
     vreg(id, MRegClass::FPR)
 }
 
-/**
- * rx_p — a physical GPR register operand (a SysV pin).
- *
- * @param u32 id  the physical register id (x86 encoding order)
- * @return MReg  the physical GPR register
- */
 fn rx_p(id: u32): MReg {
     preg(id, MRegClass::GPR)
 }
 
-/**
- * rx_mem — a base-plus-displacement memory operand.
- *
- * @param MReg base  the base register
- * @param i32 offset  the byte displacement
- * @return MMem  the memory operand
- */
 fn rx_mem(reg: MReg, offset: i32): MMem {
     MMem { base_reg = reg; offset = offset }
 }
 
-/**
- * rx_func — a single-block `MFuncX86` named "main" with the given instruction
- * stream (an interval/rewrite-test fixture shorthand).
- *
- * @param []@MInstX86() insts  the block's instructions
- * @return MFuncX86  the built function
- */
 fn rx_func(insts: []@MInstX86()): MFuncX86 {
     var b = MBlockX86 { id = 0; params = teko::list::empty(); insts = insts }
     MFuncX86 { symbol = "main"; blocks = teko::list::push(teko::list::empty(), b); frame = teko::list::empty() }
 }
 
-/**
- * rx_named_func — a single-block `MFuncX86` with the given symbol + stream.
- *
- * @param str sym  the function symbol
- * @param []@MInstX86() insts  the block's instructions
- * @return MFuncX86  the function
- */
 fn rx_named_func(sym: str, insts: []@MInstX86()): MFuncX86 {
     var b = MBlockX86 { id = 0; params = teko::list::empty(); insts = insts }
     MFuncX86 { symbol = sym; blocks = teko::list::push(teko::list::empty(), b); frame = teko::list::empty() }
 }
 
-/**
- * rx_module_of — a single-function `MModuleX86` (empty rodata/globals/layouts).
- *
- * @param MFuncX86 f  the function
- * @return MModuleX86  the wrapping module
- */
 fn rx_module_of(f: MFuncX86): MModuleX86 {
     MModuleX86 { funcs = teko::list::push(teko::list::empty(), f); rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() }
 }
 
-/**
- * rx_intervals — `compute_intervals_x86` over `f`'s RPO-numbered stream,
- * computing the order once and threading it to both the numbering and the
- * back-edge test.
- *
- * @param MFuncX86 f  the function to analyze
- * @return IntervalSet | error  the intervals, or a back-edge honest-stop
- */
 fn rx_intervals(f: MFuncX86): IntervalSet | error {
     var o = rpo_block_order_x86(f)
     compute_intervals_x86(number_insts_x86(f, o), o, reachable_blocks_x86(f))
 }
 
-/**
- * rx_phys — the physreg `vreg_id` was assigned, or the sentinel 100000 if it
- * was spilled or absent.
- *
- * @param ScanResult scan  the scan result
- * @param u32 vreg_id  the virtual register
- * @return u32  its physreg, or 100000
- */
 fn rx_phys(scan: ScanResult, vreg_id: u32): u32 {
     var i: u64 = 0
     loop {
@@ -108,13 +47,6 @@ fn rx_phys(scan: ScanResult, vreg_id: u32): u32 {
     100000 to u32
 }
 
-/**
- * rx_spilled — whether `vreg_id` was spilled.
- *
- * @param ScanResult scan  the scan result
- * @param u32 vreg_id  the virtual register
- * @return bool  true iff spilled
- */
 fn rx_spilled(scan: ScanResult, vreg_id: u32): bool {
     var i: u64 = 0
     loop {
@@ -129,16 +61,6 @@ fn rx_spilled(scan: ScanResult, vreg_id: u32): bool {
     false
 }
 
-/**
- * rx_iv_has — whether `list` contains an interval with exactly `reg_id`/`start`/
- * `end`.
- *
- * @param []LiveInterval list  the intervals to search
- * @param u32 reg_id  the register id to match
- * @param u32 start  the start point to match
- * @param u32 end  the end point to match
- * @return bool  true iff such an interval is present
- */
 fn rx_iv_has(list: []LiveInterval, reg_id: u32, start: u32, end: u32): bool {
     var i: u64 = 0
     loop {
@@ -150,14 +72,6 @@ fn rx_iv_has(list: []LiveInterval, reg_id: u32, start: u32, end: u32): bool {
     false
 }
 
-/**
- * rx_iv_crosses — whether `list` has an interval for `reg_id` marked
- * `crosses_call`.
- *
- * @param []LiveInterval list  the intervals to search
- * @param u32 reg_id  the register id to match
- * @return bool  true iff a matching interval crosses a call
- */
 fn rx_iv_crosses(list: []LiveInterval, reg_id: u32): bool {
     var i: u64 = 0
     loop {
@@ -169,13 +83,6 @@ fn rx_iv_crosses(list: []LiveInterval, reg_id: u32): bool {
     false
 }
 
-/**
- * rx_inst_all_phys — whether every operand of one x86 instruction is physical
- * (via `inst_regs_x86`).
- *
- * @param @MInstX86() inst  the instruction
- * @return bool  true iff fully physical
- */
 fn rx_inst_all_phys(inst: @MInstX86()): bool {
     var ir = inst_regs_x86(inst)
     if ir.has_def {
@@ -190,13 +97,6 @@ fn rx_inst_all_phys(inst: @MInstX86()): bool {
     true
 }
 
-/**
- * rx_full_subst — a table mapping virtual ids `0..n-1` to a physical GPR (for
- * the `map_minst_x86` coverage test; every operand becomes physical).
- *
- * @param u32 n  the id count
- * @return []SubstEntry  the substitution table
- */
 fn rx_full_subst(n: u32): []SubstEntry {
     var t: []SubstEntry = teko::list::empty()
     var k: u32 = 0
@@ -208,12 +108,6 @@ fn rx_full_subst(n: u32): []SubstEntry {
     t
 }
 
-/**
- * rx_all_kinds — one instruction of every `MInstX86` case (unique virtual ids
- * `0..27`), for the `map_minst_x86` coverage test.
- *
- * @return []@MInstX86()  the 19-instruction stream
- */
 fn rx_all_kinds(): []@MInstX86() {
     var xs: []@MInstX86() = teko::list::empty()
     xs = teko::list::push(xs, movimm_x86(rx_v(0), 1, true))
@@ -251,14 +145,6 @@ fn rx_map_minst_covers_every_case() {
     }
 }
 
-/**
- * rx_entry_param_add_fixture — `mov v0=rdi; mov v1=rsi; mov v2=v0; add v2,v1;
- * mov rax=v2; ret` — the two-address add of two SysV-argument-pinned values. The
- * arg pins (RDI/RSI) are USED before any def (entry-live from point 0) and the
- * result pin (RAX) is defined with no later use (extended to the terminator).
- *
- * @return []@MInstX86()  the fixture stream
- */
 fn rx_entry_param_add_fixture(): []@MInstX86() {
     var insts: []@MInstX86() = teko::list::empty()
     insts = teko::list::push(insts, mov_x86(rx_v(0), rx_p(7), true))
@@ -277,14 +163,6 @@ fn rx_result_pin_without_terminator_is_not_extended() {
     teko::assert::is_true(rx_iv_has(iset.fixed, 0, 0, 0))
 }
 
-/**
- * rx_double_phys_def_fixture — `mov rax=#1; mov v0=rax; mov rax=#2; mov rcx=rax;
- * ret` — RAX is DEFINED twice with a use between, so its pin splits into two
- * intervals (`[0,1]` and `[2,3]`), exercising the physreg-redefinition split in
- * `phys_intervals_x86`.
- *
- * @return []@MInstX86()  the fixture stream
- */
 fn rx_double_phys_def_fixture(): []@MInstX86() {
     var insts: []@MInstX86() = teko::list::empty()
     insts = teko::list::push(insts, movimm_x86(rx_p(0), 1, true))
@@ -302,12 +180,6 @@ fn rx_repeated_physical_def_splits_into_two_pins() {
     teko::assert::is_true(rx_iv_has(iset.fixed, 0, 2, 3))
 }
 
-/**
- * rx_call_cross_fixture — `mov v0=#5; call tk_x; mov rax=v0; ret` — `v0` is live
- * across the call and must be marked `crosses_call`, then land callee-saved.
- *
- * @return []@MInstX86()  the fixture stream
- */
 fn rx_call_cross_fixture(): []@MInstX86() {
     var insts: []@MInstX86() = teko::list::empty()
     insts = teko::list::push(insts, movimm_x86(rx_v(0), 5, true))
@@ -328,13 +200,6 @@ fn rx_value_crossing_a_call_is_marked_and_callee_saved() {
     teko::assert::is_true(is_callee_saved(SYSV64, rx_p(p)))
 }
 
-/**
- * rx_shift_pin_fixture — `mov v10=#8; mov v11=#2; mov v20=v10; mov rcx=v11;
- * shl v20,cl; mov rax=v20; ret`. The shift's implicit RCX use overlaps the
- * shifted value `v20`, so the scan must keep `v20` off RCX (id 1).
- *
- * @return []@MInstX86()  the fixture stream
- */
 fn rx_shift_pin_fixture(): []@MInstX86() {
     var insts: []@MInstX86() = teko::list::empty()
     insts = teko::list::push(insts, movimm_x86(rx_v(10), 8, true))
@@ -360,13 +225,6 @@ fn rx_shifted_value_stays_off_the_rcx_pin() {
     teko::assert::is_true(all_physical_x86(cf))
 }
 
-/**
- * rx_spill_abi — a tiny GPR register file (allocatable R12/R13; spill scratch
- * R10/R11) that forces a spill under three-value pressure; no caller-saved so
- * `crosses_call` filtering does not interfere.
- *
- * @return AbiDescriptor  the tiny descriptor
- */
 fn rx_spill_abi(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = push_range(teko::list::empty(), 7, 7)
@@ -385,13 +243,6 @@ fn rx_spill_abi(): AbiDescriptor {
     }
 }
 
-/**
- * rx_spill_fixture — `mov v0=#3; v1=#5; v2=#7; mov v3=v0; add v3,v1;
- * mov v4=v3; add v4,v2; mov rax=v4; ret`; three values overlap under
- * `rx_spill_abi`'s two allocatable registers, forcing a GPR spill.
- *
- * @return []@MInstX86()  the fixture stream
- */
 fn rx_spill_fixture(): []@MInstX86() {
     var insts: []@MInstX86() = teko::list::empty()
     insts = teko::list::push(insts, movimm_x86(rx_v(0), 3, true))
@@ -417,12 +268,6 @@ fn rx_regalloc_gpr_spill_all_physical_and_frame_grows() {
     teko::assert::is_true(cf.frame.len > 0 to u64)
 }
 
-/**
- * rx_fpr_spill_abi — a register file with a single FPR (XMM0) so any function with
- * FPR pressure spills an FPR value; ample GPRs so only the FPRs spill.
- *
- * @return AbiDescriptor  the descriptor
- */
 fn rx_fpr_spill_abi(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = push_range(teko::list::empty(), 7, 7)
@@ -441,14 +286,6 @@ fn rx_fpr_spill_abi(): AbiDescriptor {
     }
 }
 
-/**
- * rx_fpr_spill_fixture — two FPR values live at once (loaded from `[rdi]`, then
- * both stored), forcing an FPR spill under `rx_fpr_spill_abi`'s single allocatable
- * XMM. Hand-built rather than selected from Teko source so the pressure is exactly
- * two live floats and the spill is certain.
- *
- * @return []@MInstX86()  the fixture stream
- */
 fn rx_fpr_spill_fixture(): []@MInstX86() {
     var mem = rx_mem(rx_p(7), 0 to i32)
     var insts: []@MInstX86() = teko::list::empty()
@@ -461,12 +298,6 @@ fn rx_fpr_spill_fixture(): []@MInstX86() {
 }
 
 #test
-/**
- * rx_regalloc_module_carries_tables_and_propagates — allocating a module colors
- * every function and carries the rodata table through untouched.
- *
- * @return void
- */
 fn rx_regalloc_module_carries_tables_and_propagates() {
     var f1 = rx_named_func("a", rx_entry_param_add_fixture())
     var f2 = rx_named_func("b", rx_entry_param_add_fixture())
@@ -481,28 +312,11 @@ fn rx_regalloc_module_carries_tables_and_propagates() {
     teko::assert::is_true(cm.rodata.len == 1 to u64)
 }
 
-/**
- * rx_dump — the printed machine text of an already-colored function (the
- * spill-shape reader).
- *
- * @param MFuncX86 f  the colored function
- * @return str  its rendered machine text
- */
 fn rx_dump(f: MFuncX86): str {
     minst_print_x86(add_mfunc_x86(empty_mmodule_x86(), f))
 }
 
 #test
-/**
- * rx_regalloc_fpr_spill_lowers_to_movsd — an FPR-value spill ALLOCATES (`B1-fp`,
- * closed 2026-07-29 — this used to be a named honest-stop inherited from A3): the
- * colored function is fully physical, its frame grew a spill slot, and the spilled
- * float rides `MFSpillX86` in BOTH directions. The store/reload assertions are the
- * point: without them a regression that dropped the spill traffic entirely would
- * still leave the function "fully physical" and pass.
- *
- * @return void
- */
 fn rx_regalloc_fpr_spill_lowers_to_movsd() {
     var f = rx_named_func("main", rx_fpr_spill_fixture())
     var cf = match regalloc_func_x86(rx_fpr_spill_abi(), f) { MFuncX86 as g => g; error => return }
@@ -513,14 +327,6 @@ fn rx_regalloc_fpr_spill_lowers_to_movsd() {
     teko::assert::str_contains(text, "movsd %pf14, [spill #0]")
 }
 
-/**
- * rx_dead_block_fixture — a reachable leaf (`mov rax=v0; ret`) plus an
- * UNREACHABLE block id 7 whose `jmp 0` retreats to the entry. The dead edge must
- * NOT count as a loop back-edge (the #455 reachability lesson), so allocation
- * succeeds even though block 7 lands last in the numbering and jumps backward.
- *
- * @return MFuncX86  the function with a dead retreating block
- */
 fn rx_dead_block_fixture(): MFuncX86 {
     var i0: []@MInstX86() = teko::list::empty()
     i0 = teko::list::push(i0, movimm_x86(rx_v(0), 5, true))

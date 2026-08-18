@@ -1,81 +1,24 @@
-/**
- * BYTE_MASK — the low-8-bit mask for narrowing a wider value to one emitted byte.
- *
- * @since 0.3.1.0
- */
 const BYTE_MASK: u64 = 0xFF
 
-/**
- * LEB_LOW7 — the low-7-bit mask for one LEB128 group.
- *
- * @since 0.3.1.0
- */
 const LEB_LOW7: u64 = 0x7F
 
-/**
- * LEB_MORE — the LEB128 continuation bit (set on every non-final group).
- *
- * @since 0.3.1.0
- */
 const LEB_MORE: u64 = 0x80
 
-/**
- * SLEB_SIGN — the sign bit of a 7-bit SLEB128 group, tested to decide termination.
- *
- * @since 0.3.1.0
- */
 const SLEB_SIGN: i64 = 0x40
 
-/**
- * SLEB_LOW7 — the signed low-7-bit mask for one SLEB128 group. The signed twin of `LEB_LOW7`, kept
- * `i64` so the mask against the signed accumulator has a lossless common type (a same-width
- * signed/unsigned mix has none).
- *
- * @since 0.3.1.0
- */
 const SLEB_LOW7: i64 = 0x7F
 
-/**
- * SLEB_MORE — the signed SLEB128 continuation bit. The signed twin of `LEB_MORE`, kept `i64` so it
- * ors cleanly into a signed group.
- *
- * @since 0.3.1.0
- */
 const SLEB_MORE: i64 = 0x80
 
-/**
- * emit_byte — append the low byte of `v` to `buf`.
- *
- * @param buf  the buffer to extend
- * @param v    the value whose low 8 bits are appended
- * @return     `buf` with one byte appended
- * @since 0.3.1.0
- */
 fn emit_byte(buf: []byte, v: u64): []byte {
     teko::list::push(buf, (v & BYTE_MASK) to byte)
 }
 
-/**
- * emit_u16_le — append `v`'s low 16 bits to `buf`, little-endian (DWARF `data2`).
- *
- * @param buf  the buffer to extend
- * @param v    the value whose low 16 bits are appended
- * @return     `buf` followed by two little-endian bytes
- * @since 0.3.1.0
- */
 fn emit_u16_le(buf: []byte, v: u64): []byte {
     var b0 = emit_byte(buf, v)
     emit_byte(b0, v >> 8)
 }
 
-/**
- * emit_u32_le_dw — append `v`'s low 32 bits to `buf`, little-endian (DWARF `sec_offset` / `data4`).
- *
- * @param buf  the buffer to extend
- * @param v    the value whose low 32 bits are appended
- * @return     `buf` followed by four little-endian bytes
- * @since 0.3.1.0
- */
 fn emit_u32_le_dw(buf: []byte, v: u64): []byte {
     var b = emit_byte(buf, v)
     b = emit_byte(b, v >> 8)
@@ -83,15 +26,6 @@ fn emit_u32_le_dw(buf: []byte, v: u64): []byte {
     emit_byte(b, v >> 24)
 }
 
-/**
- * emit_u64_le_dw — append `v`'s 64 bits to `buf`, little-endian (DWARF `data8`, used for the
- * function high_pc which is a size constant, not an address).
- *
- * @param buf  the buffer to extend
- * @param v    the value appended
- * @return     `buf` followed by eight little-endian bytes
- * @since 0.3.1.0
- */
 fn emit_u64_le_dw(buf: []byte, v: u64): []byte {
     var b = buf
     var shift: u64 = 0
@@ -103,27 +37,10 @@ fn emit_u64_le_dw(buf: []byte, v: u64): []byte {
     b
 }
 
-/**
- * emit_addr_slot — append the 8-byte placeholder for a relocated address (DWARF `addr` form). The
- * bytes are zero; a `DwReloc` recorded by the caller points the linker at the target symbol.
- *
- * @param buf  the buffer to extend
- * @return     `buf` followed by eight zero bytes
- * @since 0.3.1.0
- */
 fn emit_addr_slot(buf: []byte): []byte {
     emit_u64_le_dw(buf, 0 to u64)
 }
 
-/**
- * emit_cstr — append the bytes of `s` followed by a NUL terminator (DWARF `string` form: an
- * inline, NUL-terminated string).
- *
- * @param buf  the buffer to extend
- * @param s    the string to inline
- * @return     `buf` followed by `s`'s bytes and a NUL
- * @since 0.3.1.0
- */
 fn emit_cstr(buf: []byte, s: str): []byte {
     var b = buf
     var i: u64 = 0
@@ -135,15 +52,6 @@ fn emit_cstr(buf: []byte, s: str): []byte {
     teko::list::push(b, 0 to byte)
 }
 
-/**
- * uleb128 — append the unsigned LEB128 encoding of `v` to `buf` (DWARF's variable-length unsigned
- * integer: seven value bits per byte, low group first, the high bit set on every non-final byte).
- *
- * @param buf  the buffer to extend
- * @param v    the unsigned value to encode
- * @return     `buf` followed by the ULEB128 bytes
- * @since 0.3.1.0
- */
 pub fn uleb128(buf: []byte, v: u64): []byte {
     var b = buf
     var val = v
@@ -160,16 +68,6 @@ pub fn uleb128(buf: []byte, v: u64): []byte {
     b
 }
 
-/**
- * sleb128 — append the signed LEB128 encoding of `v` to `buf` (DWARF's variable-length signed
- * integer: seven value bits per byte, sign-extended, terminating when the remaining value and the
- * group's sign bit agree).
- *
- * @param buf  the buffer to extend
- * @param v    the signed value to encode
- * @return     `buf` followed by the SLEB128 bytes
- * @since 0.3.1.0
- */
 pub fn sleb128(buf: []byte, v: i64): []byte {
     var b = buf
     var val = v
@@ -187,217 +85,68 @@ pub fn sleb128(buf: []byte, v: i64): []byte {
     b
 }
 
-/**
- * DwReloc — one 8-byte address slot in an emitted DWARF section that needs an absolute
- * (`R_X86_64_64` / `ARM64_RELOC_UNSIGNED`) relocation to `symbol` with a zero addend. The address
- * a debugger reads is filled by the linker, not the writer.
- *
- * @since 0.3.1.0
- */
 pub type DwReloc = struct {
-    /** the byte offset of the 8-byte address slot within the section. */
     offset: u64
-    /** the target symbol name the relocation resolves against. */
     symbol: str
 }
 
-/**
- * DwSection — one emitted DWARF section: its raw bytes and the absolute-address relocations the
- * object writer must attach to it.
- *
- * @since 0.3.1.0
- */
 pub type DwSection = struct {
-    /** the section's raw bytes (address slots zeroed, filled by the relocations). */
     bytes: []byte
-    /** the absolute address relocations against the section. */
     relocs: []DwReloc
 }
 
-/**
- * DwSubprogram — one function to describe in the compile unit: its Teko name, its 1-based
- * declaration file index and line, the code symbol its low_pc relocates to, and its code size (the
- * high_pc, encoded as a `data8` offset from low_pc).
- *
- * @since 0.3.1.0
- */
 pub type DwSubprogram = struct {
-    /** the function's (Teko) name, inlined as the DIE's DW_AT_name. */
     name: str
-    /** the 1-based file-table index for DW_AT_decl_file. */
     decl_file: i64
-    /** the 1-based source line for DW_AT_decl_line. */
     decl_line: u32
-    /** the code symbol the function's low_pc relocates against. */
     symbol: str
-    /** the function's code size, the DW_AT_high_pc data8 offset from low_pc. */
     code_size: u64
 }
 
-/**
- * DwCompileUnit — the minimal DWARF-4 compile unit: the producer/language/name/comp_dir strings,
- * the text symbol the unit's low_pc relocates to, the total text size (the unit high_pc), and the
- * subprograms it contains.
- *
- * @since 0.3.1.0
- */
 pub type DwCompileUnit = struct {
-    /** DW_AT_producer, the compiler identification string. */
     producer: str
-    /** DW_AT_language, a DWARF language code (e.g. 0x0c = DW_LANG_C99), emitted as data2. */
     language: u32
-    /** DW_AT_name, the primary source file name. */
     name: str
-    /** DW_AT_comp_dir, the compilation directory. */
     comp_dir: str
-    /** the symbol the unit's low_pc relocates against (the first text symbol). */
     text_symbol: str
-    /** the total text size, the DW_AT_high_pc data8 offset from low_pc. */
     text_size: u64
-    /** the functions the unit describes, in address order. */
     subprograms: []DwSubprogram
 }
 
-/**
- * DwLineRow — one row of the DWARF-4 line-number program: the code-address advance since the
- * previous row, the source line at this address, and the 1-based file-table index the line belongs
- * to. The first row's `pc_advance` is 0 (it sits at the unit's set_address) and it establishes
- * column 1. `file` maps a row to one entry of the header's `file_names` table, so a program spanning
- * several `.tks` sources resolves each address to its own file (the line state machine's file
- * register defaults to 1, so a row keeping `file = 1` emits no set_file opcode).
- *
- * @since 0.3.1.0
- */
 pub type DwLineRow = struct {
-    /** the code-address advance (bytes) since the previous row. */
     pc_advance: u64
-    /** the 1-based source line at this address. */
     line: u32
-    /** the 1-based `file_names` index this row's line belongs to (1 = the primary file). */
     file: i64
 }
 
-/**
- * DW_TAG_COMPILE_UNIT — the DWARF tag for a compilation unit DIE.
- *
- * @since 0.3.1.0
- */
 const DW_TAG_COMPILE_UNIT: u64 = 0x11
 
-/**
- * DW_TAG_SUBPROGRAM — the DWARF tag for a subprogram (function) DIE.
- *
- * @since 0.3.1.0
- */
 const DW_TAG_SUBPROGRAM: u64 = 0x2e
 
-/**
- * DW_TAG_BASE_TYPE — the DWARF tag for a base (scalar) type DIE, the target of a variable's
- * DW_AT_type.
- *
- * @since 0.3.1.0
- */
 const DW_TAG_BASE_TYPE: u64 = 0x24
 
-/**
- * DW_TAG_FORMAL_PARAMETER — the DWARF tag for a function parameter DIE.
- *
- * @since 0.3.1.0
- */
 const DW_TAG_FORMAL_PARAMETER: u64 = 0x05
 
-/**
- * DW_TAG_VARIABLE — the DWARF tag for a local variable DIE.
- *
- * @since 0.3.1.0
- */
 const DW_TAG_VARIABLE: u64 = 0x34
 
-/**
- * DW_TAG_LEXICAL_BLOCK — the DWARF tag for a lexical scope DIE, used to nest a shadowing local so a
- * name that is rebound in an inner scope keeps a distinct location.
- *
- * @since 0.3.1.0
- */
 const DW_TAG_LEXICAL_BLOCK: u64 = 0x0b
 
-/**
- * DW_OP_FBREG — the DWARF location opcode addressing a slot at an SLEB128 offset from the function's
- * frame base (DW_AT_frame_base). Every local and parameter location the writer emits is this single
- * opcode plus its offset.
- *
- * @since 0.3.1.0
- */
 const DW_OP_FBREG: u64 = 0x91
 
-/**
- * ABBREV_FORMAL_PARAMETER — the `.debug_abbrev` code (4) of the formal_parameter abbreviation, the
- * leaf DIE emitted for a parameter.
- *
- * @since 0.3.1.0
- */
 const ABBREV_FORMAL_PARAMETER: u64 = 4
 
-/**
- * ABBREV_VARIABLE — the `.debug_abbrev` code (5) of the variable abbreviation, the leaf DIE emitted
- * for a local (top-level or shadowed).
- *
- * @since 0.3.1.0
- */
 const ABBREV_VARIABLE: u64 = 5
 
-/**
- * DW_ATE_BOOLEAN — the DW_AT_encoding value (0x02) of a boolean base type, one of the frozen scalar
- * encodings the writer may describe (D2.5).
- *
- * @since 0.3.1.0
- */
 pub const DW_ATE_BOOLEAN: u64 = 0x02
 
-/**
- * DW_ATE_SIGNED — the DW_AT_encoding value (0x05) of a signed-integer base type (`i8`..`i64`).
- *
- * @since 0.3.1.0
- */
 pub const DW_ATE_SIGNED: u64 = 0x05
 
-/**
- * DW_ATE_UNSIGNED — the DW_AT_encoding value (0x07) of an unsigned-integer base type
- * (`u8`..`u64`, `byte`).
- *
- * @since 0.3.1.0
- */
 pub const DW_ATE_UNSIGNED: u64 = 0x07
 
-/**
- * DW_ATE_FLOAT — the DW_AT_encoding value (0x04) of an IEEE-754 floating-point base type (`f32`,
- * `f64`), one of the frozen scalar encodings the writer may describe (D2.5).
- *
- * @since 0.3.1.0
- */
 pub const DW_ATE_FLOAT: u64 = 0x04
 
-/**
- * DW_OP_REG6_RBP_PLACEHOLDER — the DW_AT_frame_base expression the writer emits until the real
- * frame descriptor is wired in: the single opcode DW_OP_reg6 (0x56), naming x86-64 RBP as the frame
- * base so DW_OP_fbreg offsets read RBP-relative. It is a PLACEHOLDER: the true frame base (register
- * AND the prologue-dependent offset) is `compute_frame_layout`'s to supply once that hook is free
- * (see DwSubprogramLocals.frame_base_op). arm64 will substitute DW_OP_reg29 (x29) the same way.
- *
- * @since 0.3.1.0
- */
 pub const DW_OP_REG6_RBP_PLACEHOLDER: u64 = 0x56
 
-/**
- * debug_abbrev — the fixed `.debug_abbrev` table for the minimal unit: two abbreviations, a
- * compile_unit (with children) and a subprogram (leaf). The attribute/form pairs match the
- * gdb-and-lldb-verified golden (docs/design/debugger-poc/mini.s): the CU carries
- * producer/language/name/comp_dir/low_pc/high_pc/stmt_list; the subprogram carries
- * name/decl_file/decl_line/low_pc/high_pc/external.
- *
- * @return  the `.debug_abbrev` section bytes
- * @since 0.3.1.0
- */
 pub fn debug_abbrev(): []byte {
     var b: []byte = teko::list::empty()
     b = uleb128(b, 1 to u64)
@@ -424,35 +173,11 @@ pub fn debug_abbrev(): []byte {
     teko::list::push(b, 0x00 to byte)
 }
 
-/**
- * emit_pair — append one abbreviation attribute/form pair (or the `0x00 0x00` terminator) as two
- * bytes.
- *
- * @param buf   the buffer to extend
- * @param attr  the DW_AT attribute code
- * @param form  the DW_FORM form code
- * @return      `buf` followed by the two bytes
- * @since 0.3.1.0
- */
 fn emit_pair(buf: []byte, attr: u64, form: u64): []byte {
     var b0 = teko::list::push(buf, attr to byte)
     teko::list::push(b0, form to byte)
 }
 
-/**
- * emit_subprogram_die — append one subprogram DIE (abbrev 2) to `body`, recording the low_pc
- * relocation. Layout: abbrev code, name (string), decl_file (sdata), decl_line (data2), low_pc
- * (addr, relocated), high_pc (data8 code size). The `external` flag is `flag_present` and emits no
- * bytes.
- *
- * @param body    the DIE body accumulated so far
- * @param relocs  the relocations accumulated so far
- * @param base    the byte count of the section header preceding the body (for section-relative
- *                relocation offsets)
- * @param sub     the subprogram to describe
- * @return        the extended body and relocation list
- * @since 0.3.1.0
- */
 fn emit_subprogram_die(body: []byte, relocs: []DwReloc, base_off: u64, sub: DwSubprogram): DwSection {
     var b = teko::list::push(body, 0x02 to byte)
     b = emit_cstr(b, sub.name)
@@ -465,16 +190,6 @@ fn emit_subprogram_die(body: []byte, relocs: []DwReloc, base_off: u64, sub: DwSu
     DwSection { bytes = b; relocs = r }
 }
 
-/**
- * debug_info — the minimal `.debug_info` compile unit for `cu`: the DWARF-4 unit header, the
- * compile_unit DIE (with inline producer/name/comp_dir strings, relocated low_pc, high_pc, and a
- * stmt_list offset of 0), then one subprogram DIE per function, then the null-DIE terminator. The
- * emitted bytes and the absolute-address relocations reproduce the gdb-and-lldb-verified golden.
- *
- * @param cu  the compile unit to describe
- * @return    the `.debug_info` section bytes and its relocations
- * @since 0.3.1.0
- */
 pub fn debug_info(cu: DwCompileUnit): DwSection {
     var relocs: []DwReloc = teko::list::empty()
     var body: []byte = teko::list::empty()
@@ -507,27 +222,10 @@ pub fn debug_info(cu: DwCompileUnit): DwSection {
     DwSection { bytes = out; relocs = relocs }
 }
 
-/**
- * header_len_prefix — the byte count of the `.debug_info` unit header that precedes the DIE body
- * (unit_length 4 + version 2 + abbrev_offset 4 + address_size 1), so a low_pc slot's offset inside
- * the body maps to its offset inside the whole section.
- *
- * @return  the header prefix length (11)
- * @since 0.3.1.0
- */
 fn header_len_prefix(): u64 {
     11 to u64
 }
 
-/**
- * append_bytes_dw — `dst` with every byte of `src` appended, in order (no slice-concat builtin over
- * `[]byte` here).
- *
- * @param dst  the buffer to extend
- * @param src  the bytes to append
- * @return     `dst` followed by `src`
- * @since 0.3.1.0
- */
 fn append_bytes_dw(dst: []byte, src: []byte): []byte {
     var b = dst
     var i: u64 = 0
@@ -539,16 +237,6 @@ fn append_bytes_dw(dst: []byte, src: []byte): []byte {
     b
 }
 
-/**
- * line_header_body — the DWARF-4 line-program header body (everything the `header_length` field
- * counts: the instruction/statement parameters, the standard opcode-length table, the empty
- * include-directory list, one file-table entry per `files` name, and the file-list terminator).
- * Fixed except for the inlined file names; a single-element `files` reproduces the verified golden.
- *
- * @param files  the source file names, in file-table order (index 1 is the primary file)
- * @return       the header body bytes
- * @since 0.3.1.0
- */
 fn line_header_body(files: []str): []byte {
     var b: []byte = teko::list::empty()
     b = teko::list::push(b, 0x01 to byte)
@@ -563,17 +251,6 @@ fn line_header_body(files: []str): []byte {
     teko::list::push(b, 0x00 to byte)
 }
 
-/**
- * append_file_entries — append one DWARF-4 `file_names` entry per name in `files`: the
- * NUL-terminated name followed by the directory-index, mtime, and length ULEBs (all 0, since the
- * writer emits no include directories and no file metadata). The caller appends the list
- * terminator.
- *
- * @param buf    the header body accumulated so far
- * @param files  the source file names, in file-table order
- * @return       `buf` followed by the file entries
- * @since 0.3.1.0
- */
 fn append_file_entries(buf: []byte, files: []str): []byte {
     var b = buf
     var i: u64 = 0
@@ -588,14 +265,6 @@ fn append_file_entries(buf: []byte, files: []str): []byte {
     b
 }
 
-/**
- * append_std_opcode_lengths — the twelve standard-opcode operand-count bytes for opcode_base 13
- * (`00 01 01 01 01 00 00 00 01 00 00 01`), the DWARF-4 default set the golden uses.
- *
- * @param buf  the buffer to extend
- * @return     `buf` followed by the twelve bytes
- * @since 0.3.1.0
- */
 fn append_std_opcode_lengths(buf: []byte): []byte {
     var lens: []u64 = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]
     var b = buf
@@ -608,64 +277,18 @@ fn append_std_opcode_lengths(buf: []byte): []byte {
     b
 }
 
-/**
- * DW_LNS_COPY — the standard line opcode that appends the current row to the matrix.
- *
- * @since 0.3.1.0
- */
 const DW_LNS_COPY: u64 = 0x01
 
-/**
- * DW_LNS_ADVANCE_PC — the standard line opcode that advances the code address by a ULEB operand.
- *
- * @since 0.3.1.0
- */
 const DW_LNS_ADVANCE_PC: u64 = 0x02
 
-/**
- * DW_LNS_ADVANCE_LINE — the standard line opcode that advances the source line by an SLEB operand.
- *
- * @since 0.3.1.0
- */
 const DW_LNS_ADVANCE_LINE: u64 = 0x03
 
-/**
- * DW_LNS_SET_FILE — the standard line opcode that sets the current file register to a ULEB operand.
- *
- * @since 0.3.1.0
- */
 const DW_LNS_SET_FILE: u64 = 0x04
 
-/**
- * DW_LNS_SET_COLUMN — the standard line opcode that sets the column to a ULEB operand.
- *
- * @since 0.3.1.0
- */
 const DW_LNS_SET_COLUMN: u64 = 0x05
 
-/**
- * LINE_FIRST_FILE — the DWARF line state machine's initial file register (1). A row keeping this
- * file emits no set_file opcode, so a single-file program's line program is unchanged.
- *
- * @since 0.3.1.0
- */
 const LINE_FIRST_FILE: i64 = 1
 
-/**
- * emit_line_row — append one line-program row to `prog`. The first row (`first` true, `prev` the
- * initial line 1) advances the line and sets column 1 with no address advance; every later row
- * advances the code address then the line. When the row's file differs from the running file
- * register `cur_file`, a set_file opcode precedes the line advance; a row keeping the current file
- * emits no set_file, so a single-file program is unchanged. Each row ends with a copy.
- *
- * @param prog      the program bytes so far
- * @param row       the row to emit
- * @param prev      the source line of the previous row (1 before the first row)
- * @param cur_file  the file register before this row (1 before the first row)
- * @param first     true for the first row (sets column 1, no pc advance)
- * @return          the extended program bytes
- * @since 0.3.1.0
- */
 fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, cur_file: i64, first: bool): []byte {
     var b = prog
     if !first {
@@ -685,19 +308,6 @@ fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, cur_file: i64, first: 
     teko::list::push(b, DW_LNS_COPY to byte)
 }
 
-/**
- * debug_line — the minimal `.debug_line` program for a single compile unit: the DWARF-4 header, a
- * `set_address` extended opcode (relocated to `start_symbol`), one row per `rows` entry, a final
- * address advance, and `end_sequence`. The emitted bytes and the single set_address relocation
- * reproduce the gdb-and-lldb-verified golden.
- *
- * @param files             the source file names, in file-table order (index 1 is the primary file)
- * @param start_symbol      the code symbol the initial set_address relocates against
- * @param rows              the address→line rows (the first row sits at set_address)
- * @param final_pc_advance  the code advance emitted before end_sequence (past the last row)
- * @return                  the `.debug_line` section bytes and its single relocation
- * @since 0.3.1.0
- */
 pub fn debug_line(files: []str, start_symbol: str, rows: []DwLineRow, final_pc_advance: u64): DwSection {
     var header = line_header_body(files)
     var prog: []byte = teko::list::empty()
@@ -733,76 +343,25 @@ pub fn debug_line(files: []str, start_symbol: str, rows: []DwLineRow, final_pc_a
     DwSection { bytes = out; relocs = relocs }
 }
 
-/**
- * line_prefix_len — the byte count of the `.debug_line` unit header fields that precede the header
- * body (unit_length 4 + version 2 + header_length 4), so the set_address slot's offset inside the
- * program maps to its offset inside the whole section.
- *
- * @return  the prefix length (10)
- * @since 0.3.1.0
- */
 fn line_prefix_len(): u64 {
     10 to u64
 }
 
-/**
- * DwarfSink — the three PRODUCED section images (D1.3's output) an object writer sinks into a
- * native ELF or Mach-O object (D1.4/D1.5): the fixed `.debug_abbrev` bytes (never relocated) plus
- * the `.debug_info` and `.debug_line` sections with their absolute-address relocations. `present`
- * gates emission everywhere a writer consumes this type: false — the `DebugInfo::None` default —
- * means the object writer places NOTHING, so the object stays byte-for-byte identical to a build
- * with no debug axis at all (the FIXPOINT the sink must never disturb).
- *
- * @since 0.3.1.0
- */
 pub type DwarfSink = struct {
-    /** true iff the three sections below carry real content to place. */
     present: bool
-    /** the `.debug_abbrev` section bytes (valid iff `present`). */
     abbrev: []byte
-    /** the `.debug_info` section bytes + relocations (valid iff `present`). */
     info: DwSection
-    /** the `.debug_line` section bytes + relocations (valid iff `present`). */
     line: DwSection
 }
 
-/**
- * empty_dw_section — a `DwSection` with no bytes and no relocations, the filler `no_dwarf_sink`
- * gives its `info`/`line` fields.
- *
- * @return  the empty section
- * @since 0.3.1.0
- */
 fn empty_dw_section(): DwSection {
     DwSection { bytes = teko::list::empty(); relocs = teko::list::empty() }
 }
 
-/**
- * no_dwarf_sink — the absent `DwarfSink` (`present = false`): the value every ELF/Mach-O writer
- * entry point defaults to, so a build that never requests `--debug=lines` (`DebugInfo::None`)
- * places no DWARF bytes and stays byte-for-byte identical to today's object.
- *
- * @return  the absent sink
- * @since 0.3.1.0
- */
 pub fn no_dwarf_sink(): DwarfSink {
     DwarfSink { present = false; abbrev = teko::list::empty(); info = empty_dw_section(); line = empty_dw_section() }
 }
 
-/**
- * build_dwarf_sink — assemble the D1.3 producers (`debug_abbrev`/`debug_info`/`debug_line`) into a
- * `present = true` `DwarfSink`, the shape D1.4/D1.5's object writers consume. The single call site
- * a `--debug=lines` native build reaches once it has assembled `cu`/`files`/`rows` from the checked
- * program and the encoded module (`project.tks`'s build glue — the checker/LIR side of the D1.4/
- * D1.5 wiring); this function owns no knowledge of either.
- *
- * @param cu                the compile unit (`.debug_info`'s content)
- * @param files             the source file names, in file-table order (`.debug_line`'s header)
- * @param rows              the whole-unit address→line rows, in ascending address order
- * @param final_pc_advance  the code advance from the last row to the end of `.text`
- * @return                  the assembled, `present = true` sink
- * @since 0.3.1.0
- */
 pub fn build_dwarf_sink(cu: DwCompileUnit, files: []str, rows: []DwLineRow, final_pc_advance: u64): DwarfSink {
     DwarfSink {
         present = true
@@ -812,74 +371,25 @@ pub fn build_dwarf_sink(cu: DwCompileUnit, files: []str, rows: []DwLineRow, fina
     }
 }
 
-/**
- * DwBaseType — one scalar base type the compile unit describes (a DW_TAG_base_type DIE): its Teko
- * name, its size in bytes, and its DWARF `DW_AT_encoding` (one of the frozen `DW_ATE_*`). The DIE a
- * variable's `DW_AT_type` points at.
- *
- * @since 0.3.1.0
- */
 pub type DwBaseType = struct {
-    /** the type's Teko name, inlined as the DIE's DW_AT_name (e.g. "i32"). */
     name: str
-    /** the type's size in bytes, the DW_AT_byte_size data1. */
     byte_size: u64
-    /** the DWARF DW_AT_encoding (a frozen `DW_ATE_*` value), emitted as data1. */
     encoding: u64
 }
 
-/**
- * DwBaseTypeLookup — the outcome of `frozen_base_type` (option-struct, M.2): `found` is false when
- * the queried name is not one of the FROZEN scalar types (D2.5), in which case no `DW_TAG_base_type`
- * DIE is describable for it and the caller MUST NOT synthesize one from a guess. `base_type` carries
- * the described type only when `found`.
- *
- * @since 0.3.1.0
- */
 pub type DwBaseTypeLookup = struct {
-    /** true iff the queried name names a frozen scalar type. */
     found: bool
-    /** the described base type; valid only when `found`. */
     base_type: DwBaseType
 }
 
-/**
- * dw_bt_found — the found-branch `DwBaseTypeLookup` for one frozen `name`/`byte_size`/`encoding`
- * triple, extracted so `frozen_base_type`'s guard chain stays one line per type.
- *
- * @param name       the frozen type's Teko name
- * @param byte_size  the frozen type's DW_AT_byte_size
- * @param encoding   the frozen type's DW_AT_encoding (one of the `DW_ATE_*` constants)
- * @return           `found = true`, carrying the described base type
- * @since 0.3.1.0
- */
 fn dw_bt_found(name: str, byte_size: u64, encoding: u64): DwBaseTypeLookup {
     DwBaseTypeLookup { found = true; base_type = DwBaseType { name = name; byte_size = byte_size; encoding = encoding } }
 }
 
-/**
- * dw_bt_not_found — the not-found `DwBaseTypeLookup` `frozen_base_type` returns for any name outside
- * the frozen list.
- *
- * @return  `found = false`, with a zeroed placeholder `base_type`
- * @since 0.3.1.0
- */
 fn dw_bt_not_found(): DwBaseTypeLookup {
     DwBaseTypeLookup { found = false; base_type = DwBaseType { name = ""; byte_size = 0 to u64; encoding = 0 to u64 } }
 }
 
-/**
- * frozen_base_type — the D2.5 frozen registry: the ONLY Teko scalar type names the DWARF writer may
- * describe as a `DW_TAG_base_type`, each carrying its byte size and `DW_AT_encoding`. The list is
- * explicit and enumerated on purpose — a name outside it (a struct, a slice, `str`, or a future
- * scalar not yet reviewed) returns `found = false`, never a guessed description. Widening the
- * registry is a deliberate, reviewed addition to this function's guard chain, never an inferred
- * default.
- *
- * @param name  the Teko scalar type name (e.g. "i32", "f64", "bool", "byte")
- * @return      the described base type, or `found = false` when `name` is not frozen
- * @since 0.3.1.0
- */
 pub fn frozen_base_type(name: str): DwBaseTypeLookup {
     if name == "bool" { return dw_bt_found(name, 1 to u64, DW_ATE_BOOLEAN) }
     if name == "byte" { return dw_bt_found(name, 1 to u64, DW_ATE_UNSIGNED) }
@@ -893,122 +403,50 @@ pub fn frozen_base_type(name: str): DwBaseTypeLookup {
     if name == "i64" { return dw_bt_found(name, 8 to u64, DW_ATE_SIGNED) }
     if name == "f32" { return dw_bt_found(name, 4 to u64, DW_ATE_FLOAT) }
     if name == "f64" { return dw_bt_found(name, 8 to u64, DW_ATE_FLOAT) }
-    if name == "usize" { return dw_bt_found(name, 8 to u64, DW_ATE_UNSIGNED) }   // (§8) machine word — 8 bytes on the target
-    if name == "size" { return dw_bt_found(name, 8 to u64, DW_ATE_SIGNED) }   // (§8) machine word — 8 bytes on the target
+    if name == "usize" { return dw_bt_found(name, 8 to u64, DW_ATE_UNSIGNED) }
+    if name == "size" { return dw_bt_found(name, 8 to u64, DW_ATE_SIGNED) }
     dw_bt_not_found()
 }
 
-/**
- * DwLocal — one parameter or local variable of a function: its name, whether it is a formal
- * parameter (else a local), the index of its type in the unit's `base_types`, and its
- * `DW_OP_fbreg` frame-base offset. The offset is a PLACEHOLDER carried verbatim into the location
- * expression; the true value is `compute_frame_layout`'s slot offset, wired in once that hook is
- * free.
- *
- * @since 0.3.1.0
- */
 pub type DwLocal = struct {
-    /** the local's Teko name, inlined as the DIE's DW_AT_name. */
     name: str
-    /** true for a formal_parameter DIE, false for a variable DIE. */
     is_param: bool
-    /** the index into the unit's `base_types` this local's DW_AT_type resolves to. */
     type_index: u64
-    /** the DW_OP_fbreg SLEB128 offset from the frame base (PLACEHOLDER pending the frame layout). */
     fbreg_offset: i64
 }
 
-/**
- * DwScope — one lexical block: the locals a nested scope introduces. A name rebound in an inner
- * scope (a shadow) lives here so it keeps a location distinct from the outer binding.
- *
- * @since 0.3.1.0
- */
 pub type DwScope = struct {
-    /** the variables the lexical block introduces, in binding order. */
     locals: []DwLocal
 }
 
-/**
- * DwSubprogramLocals — a function described WITH its parameters, locals, and lexical blocks (the
- * `.debug_info` shape that lets a debugger name and locate variables). Extends the leaf
- * `DwSubprogram` with a frame base and children. `frame_base_op` is a PLACEHOLDER frame-base
- * expression opcode (`DW_OP_REG6_RBP_PLACEHOLDER` until `compute_frame_layout` supplies the real
- * register and offset).
- *
- * @since 0.3.1.0
- */
 pub type DwSubprogramLocals = struct {
-    /** the function's Teko name, the DIE's DW_AT_name. */
     name: str
-    /** the 1-based file-table index for DW_AT_decl_file. */
     decl_file: i64
-    /** the 1-based source line for DW_AT_decl_line. */
     decl_line: u32
-    /** the code symbol the function's low_pc relocates against. */
     symbol: str
-    /** the function's code size, the DW_AT_high_pc data8 offset from low_pc. */
     code_size: u64
-    /** the DW_AT_frame_base single-opcode expression (PLACEHOLDER: DW_OP_REG6_RBP_PLACEHOLDER). */
     frame_base_op: u64
-    /** the formal parameters, in signature order. */
     params: []DwLocal
-    /** the function-scope local variables, in binding order. */
     locals: []DwLocal
-    /** the lexical blocks (shadowing scopes) the function contains. */
     blocks: []DwScope
 }
 
-/**
- * DwLocalsUnit — a compile unit described WITH variable information: the same header strings and
- * text range as `DwCompileUnit`, plus the base types the variables reference and the subprograms
- * carrying parameters/locals.
- *
- * @since 0.3.1.0
- */
 pub type DwLocalsUnit = struct {
-    /** DW_AT_producer, the compiler identification string. */
     producer: str
-    /** DW_AT_language, a DWARF language code, emitted as data2. */
     language: u32
-    /** DW_AT_name, the primary source file name. */
     name: str
-    /** DW_AT_comp_dir, the compilation directory. */
     comp_dir: str
-    /** the symbol the unit's low_pc relocates against (the first text symbol). */
     text_symbol: str
-    /** the total text size, the DW_AT_high_pc data8 offset from low_pc. */
     text_size: u64
-    /** the scalar base types the unit's variables reference, in emission order. */
     base_types: []DwBaseType
-    /** the functions the unit describes, in address order. */
     subprograms: []DwSubprogramLocals
 }
 
-/**
- * DwLocalsInfo — the result of `debug_info_locals`: the emitted section and, alongside it, the
- * CU-relative byte offset of each base_type DIE (by `base_types` index), so a caller — or a test —
- * can confirm every `DW_AT_type` ref4 resolves to the intended base type.
- *
- * @since 0.3.1.0
- */
 pub type DwLocalsInfo = struct {
-    /** the `.debug_info` section bytes and its low_pc relocations. */
     section: DwSection
-    /** the CU-relative offset of each base_type DIE, indexed as `base_types`. */
     base_type_offsets: []u64
 }
 
-/**
- * debug_abbrev_locals — the `.debug_abbrev` table for a unit WITH variable information: six
- * abbreviations — compile_unit (children), base_type (leaf), subprogram (children, with
- * frame_base), formal_parameter (leaf, with type + location), variable (leaf, with type +
- * location), and lexical_block (children). Reproduces the readelf-verified golden of
- * docs/design/debugger-poc/locals.s.
- *
- * @return  the `.debug_abbrev` section bytes
- * @since 0.3.1.0
- */
 pub fn debug_abbrev_locals(): []byte {
     var b = emit_abbrev_compile_unit(teko::list::empty())
     b = emit_abbrev_base_type(b)
@@ -1019,15 +457,6 @@ pub fn debug_abbrev_locals(): []byte {
     teko::list::push(b, 0x00 to byte)
 }
 
-/**
- * emit_abbrev_compile_unit — append abbreviation 1, the compile_unit DIE (with children) carrying
- * producer/language/name/comp_dir/low_pc/high_pc/stmt_list. Identical to the minimal table's
- * abbreviation 1.
- *
- * @param buf  the table bytes so far
- * @return     `buf` followed by the abbreviation
- * @since 0.3.1.0
- */
 fn emit_abbrev_compile_unit(buf: []byte): []byte {
     var b = uleb128(buf, 1 to u64)
     b = uleb128(b, DW_TAG_COMPILE_UNIT)
@@ -1042,14 +471,6 @@ fn emit_abbrev_compile_unit(buf: []byte): []byte {
     emit_pair(b, 0x00, 0x00)
 }
 
-/**
- * emit_abbrev_base_type — append abbreviation 2, the base_type leaf DIE carrying
- * name/encoding/byte_size.
- *
- * @param buf  the table bytes so far
- * @return     `buf` followed by the abbreviation
- * @since 0.3.1.0
- */
 fn emit_abbrev_base_type(buf: []byte): []byte {
     var b = uleb128(buf, 2 to u64)
     b = uleb128(b, DW_TAG_BASE_TYPE)
@@ -1060,15 +481,6 @@ fn emit_abbrev_base_type(buf: []byte): []byte {
     emit_pair(b, 0x00, 0x00)
 }
 
-/**
- * emit_abbrev_subprogram_locals — append abbreviation 3, the subprogram DIE (with children) carrying
- * name/decl_file/decl_line/low_pc/high_pc/frame_base/external. The `children` flag and the
- * frame_base attribute are what distinguish it from the minimal table's leaf subprogram.
- *
- * @param buf  the table bytes so far
- * @return     `buf` followed by the abbreviation
- * @since 0.3.1.0
- */
 fn emit_abbrev_subprogram_locals(buf: []byte): []byte {
     var b = uleb128(buf, 3 to u64)
     b = uleb128(b, DW_TAG_SUBPROGRAM)
@@ -1083,16 +495,6 @@ fn emit_abbrev_subprogram_locals(buf: []byte): []byte {
     emit_pair(b, 0x00, 0x00)
 }
 
-/**
- * emit_abbrev_leaf_local — append a leaf-DIE abbreviation (formal_parameter or variable) carrying
- * name/type/location, under the given abbreviation `code` and DWARF `tag`.
- *
- * @param buf   the table bytes so far
- * @param code  the abbreviation code (4 for formal_parameter, 5 for variable)
- * @param tag   the DWARF tag (DW_TAG_FORMAL_PARAMETER or DW_TAG_VARIABLE)
- * @return      `buf` followed by the abbreviation
- * @since 0.3.1.0
- */
 fn emit_abbrev_leaf_local(buf: []byte, code: u64, tag: u64): []byte {
     var b = uleb128(buf, code)
     b = uleb128(b, tag)
@@ -1103,14 +505,6 @@ fn emit_abbrev_leaf_local(buf: []byte, code: u64, tag: u64): []byte {
     emit_pair(b, 0x00, 0x00)
 }
 
-/**
- * emit_abbrev_lexical_block — append abbreviation 6, the lexical_block DIE (with children, no
- * attributes) that nests a shadowing local.
- *
- * @param buf  the table bytes so far
- * @return     `buf` followed by the abbreviation
- * @since 0.3.1.0
- */
 fn emit_abbrev_lexical_block(buf: []byte): []byte {
     var b = uleb128(buf, 6 to u64)
     b = uleb128(b, DW_TAG_LEXICAL_BLOCK)
@@ -1118,18 +512,6 @@ fn emit_abbrev_lexical_block(buf: []byte): []byte {
     emit_pair(b, 0x00, 0x00)
 }
 
-/**
- * debug_info_locals — the `.debug_info` compile unit for `cu` WITH variable information: the DWARF-4
- * header, the compile_unit DIE, one base_type DIE per `base_types` (recording each DIE's offset),
- * then one subprogram DIE per function carrying its parameters, locals, and lexical blocks as
- * children, then the null terminators. Every `DW_AT_type` is a ref4 to the recorded base_type
- * offset; every location is a DW_OP_fbreg with the local's placeholder offset. Reproduces the
- * readelf-verified golden of docs/design/debugger-poc/locals.s.
- *
- * @param cu  the compile unit to describe
- * @return    the section bytes, its low_pc relocations, and the base_type DIE offsets
- * @since 0.3.1.0
- */
 pub fn debug_info_locals(cu: DwLocalsUnit): DwLocalsInfo {
     var relocs: []DwReloc = teko::list::empty()
     var body: []byte = teko::list::push(teko::list::empty(), 0x01 to byte)
@@ -1168,15 +550,6 @@ pub fn debug_info_locals(cu: DwLocalsUnit): DwLocalsInfo {
     DwLocalsInfo { section = DwSection { bytes = out; relocs = relocs }; base_type_offsets = base_type_offsets }
 }
 
-/**
- * emit_base_type_die — append one base_type DIE (abbrev 2): the abbrev code, the name string, the
- * DW_AT_encoding data1, and the DW_AT_byte_size data1.
- *
- * @param body  the DIE body accumulated so far
- * @param bt    the base type to describe
- * @return      the extended body
- * @since 0.3.1.0
- */
 fn emit_base_type_die(body: []byte, bt: DwBaseType): []byte {
     var b = teko::list::push(body, 0x02 to byte)
     b = emit_cstr(b, bt.name)
@@ -1184,19 +557,6 @@ fn emit_base_type_die(body: []byte, bt: DwBaseType): []byte {
     teko::list::push(b, bt.byte_size to byte)
 }
 
-/**
- * emit_locals_subprogram — append one subprogram DIE (abbrev 3) with its children, recording the
- * low_pc relocation. Layout: abbrev code, name, decl_file (sdata), decl_line (data2), low_pc (addr,
- * relocated), high_pc (data8 code size), frame_base (exprloc), then a formal_parameter DIE per
- * parameter, a variable DIE per local, a lexical_block per scope, and the null child terminator.
- *
- * @param body               the DIE body accumulated so far
- * @param relocs             the relocations accumulated so far
- * @param sub                the subprogram to describe
- * @param base_type_offsets  the CU-relative base_type DIE offsets, for each local's DW_AT_type ref4
- * @return                   the extended body and relocation list
- * @since 0.3.1.0
- */
 fn emit_locals_subprogram(body: []byte, relocs: []DwReloc, sub: DwSubprogramLocals, base_type_offsets: []u64): DwSection {
     var b = teko::list::push(body, 0x03 to byte)
     b = emit_cstr(b, sub.name)
@@ -1214,30 +574,11 @@ fn emit_locals_subprogram(body: []byte, relocs: []DwReloc, sub: DwSubprogramLoca
     DwSection { bytes = b; relocs = r }
 }
 
-/**
- * emit_frame_base — append the DW_AT_frame_base exprloc: a ULEB128 length of 1 followed by the
- * single frame-base opcode. The opcode is a PLACEHOLDER (DW_OP_REG6_RBP_PLACEHOLDER) until the real
- * frame descriptor is wired in.
- *
- * @param buf  the DIE body accumulated so far
- * @param op   the frame-base opcode
- * @return     the extended body
- * @since 0.3.1.0
- */
 fn emit_frame_base(buf: []byte, op: u64): []byte {
     var b = uleb128(buf, 1 to u64)
     teko::list::push(b, op to byte)
 }
 
-/**
- * emit_local_list — append a formal_parameter or variable DIE for each local in `locals`, in order.
- *
- * @param buf                the DIE body accumulated so far
- * @param locals             the locals to describe
- * @param base_type_offsets  the CU-relative base_type DIE offsets, for each local's DW_AT_type ref4
- * @return                   the extended body
- * @since 0.3.1.0
- */
 fn emit_local_list(buf: []byte, locals: []DwLocal, base_type_offsets: []u64): []byte {
     var b = buf
     var i: u64 = 0
@@ -1249,17 +590,6 @@ fn emit_local_list(buf: []byte, locals: []DwLocal, base_type_offsets: []u64): []
     b
 }
 
-/**
- * emit_local_die — append one leaf local DIE: the abbrev code (formal_parameter for a parameter,
- * variable otherwise), the name string, the DW_AT_type ref4 to its base type, and the DW_OP_fbreg
- * location.
- *
- * @param buf                the DIE body accumulated so far
- * @param local              the local to describe
- * @param base_type_offsets  the CU-relative base_type DIE offsets, indexed by `local.type_index`
- * @return                   the extended body
- * @since 0.3.1.0
- */
 fn emit_local_die(buf: []byte, local: DwLocal, base_type_offsets: []u64): []byte {
     var b = teko::list::push(buf, local_abbrev_code(local.is_param) to byte)
     b = emit_cstr(b, local.name)
@@ -1267,28 +597,11 @@ fn emit_local_die(buf: []byte, local: DwLocal, base_type_offsets: []u64): []byte
     emit_fbreg_location(b, local.fbreg_offset)
 }
 
-/**
- * local_abbrev_code — the abbreviation code for a local: formal_parameter when `is_param`, else
- * variable.
- *
- * @param is_param  whether the local is a formal parameter
- * @return          the abbreviation code
- * @since 0.3.1.0
- */
 fn local_abbrev_code(is_param: bool): u64 {
     if is_param { return ABBREV_FORMAL_PARAMETER }
     ABBREV_VARIABLE
 }
 
-/**
- * emit_fbreg_location — append a DW_AT_location exprloc: a ULEB128 length prefix followed by the
- * DW_OP_fbreg opcode and the SLEB128 frame-base offset (the placeholder slot offset).
- *
- * @param buf     the DIE body accumulated so far
- * @param offset  the DW_OP_fbreg offset from the frame base
- * @return        the extended body
- * @since 0.3.1.0
- */
 fn emit_fbreg_location(buf: []byte, offset: i64): []byte {
     var expr = teko::list::push(teko::list::empty(), DW_OP_FBREG to byte)
     expr = sleb128(expr, offset)
@@ -1296,15 +609,6 @@ fn emit_fbreg_location(buf: []byte, offset: i64): []byte {
     append_bytes_dw(b, expr)
 }
 
-/**
- * emit_scope_list — append one lexical_block DIE for each scope in `scopes`, in order.
- *
- * @param buf                the DIE body accumulated so far
- * @param scopes             the lexical blocks to describe
- * @param base_type_offsets  the CU-relative base_type DIE offsets, for each block local's ref4
- * @return                   the extended body
- * @since 0.3.1.0
- */
 fn emit_scope_list(buf: []byte, scopes: []DwScope, base_type_offsets: []u64): []byte {
     var b = buf
     var i: u64 = 0
@@ -1316,16 +620,6 @@ fn emit_scope_list(buf: []byte, scopes: []DwScope, base_type_offsets: []u64): []
     b
 }
 
-/**
- * emit_scope_block — append one lexical_block DIE (abbrev 6): the abbrev code, a variable DIE per
- * block local, and the null child terminator.
- *
- * @param buf                the DIE body accumulated so far
- * @param scope              the lexical block to describe
- * @param base_type_offsets  the CU-relative base_type DIE offsets, for each block local's ref4
- * @return                   the extended body
- * @since 0.3.1.0
- */
 fn emit_scope_block(buf: []byte, scope: DwScope, base_type_offsets: []u64): []byte {
     var b = teko::list::push(buf, 0x06 to byte)
     b = emit_local_list(b, scope.locals, base_type_offsets)
