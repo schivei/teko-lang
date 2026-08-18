@@ -3605,6 +3605,18 @@ _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col) {
     tk_panic_oob();
 }
 
+_Noreturn void tk_panic_null_deref_at(uint32_t line, uint32_t col) {
+    char buf[32];
+    snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
+    fputs(buf, stderr);
+    tk_panic("null reference dereference");
+}
+
+void *tk_nn(void *p, uint32_t line, uint32_t col) {
+    if (!p) tk_panic_null_deref_at(line, col);
+    return p;
+}
+
 // =========================================================================
 // Host-FFI + arithmetic bottoms (the lifting seam — see teko_rt.h). The
 // codegen-side emit_host_ffi turns each fixed-ABI result struct into the

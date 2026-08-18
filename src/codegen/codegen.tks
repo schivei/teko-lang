@@ -2981,6 +2981,18 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
     cb(out, ")")
 }
 
+fn cg_emit_nn_guard(buf: []byte, prog: CgProg, recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var out = cb(buf, "(")
+    out = match emit_type(out, prog, recv.type) { []byte as o => o; error as err => return err }
+    out = cb(out, ")tk_nn((void *)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, recv, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "), ")
+    out = cb(out, teko::u64_to_str(recv.line to u64))
+    out = cb(out, ", ")
+    out = cb(out, teko::u64_to_str(recv.col to u64))
+    cb(out, ")")
+}
+
 fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var is_slice = match fa.receiver.type { checker::Slice => true; _ => false }
     if is_slice && fa.field == "len" {
@@ -3021,9 +3033,9 @@ fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escap
             ob = cb_str(ob, fa.field)
             return cb(ob, ")")
         }
-        var oc = cb(buf, "((*(")
-        oc = match emit_expr_ctx(oc, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-        oc = cb(oc, ")).")
+        var oc = cb(buf, "((*")
+        oc = match cg_emit_nn_guard(oc, prog, fa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        oc = cb(oc, ").")
         oc = cb_str(oc, fa.field)
         return cb(oc, ")")
     }
