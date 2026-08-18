@@ -167,6 +167,22 @@ fn self_sentinel_path(): Path {
     Path { segments = teko::list::push(teko::list::empty(), Segment { name = "self" }) }
 }
 
+/**
+ * dot_sentinel_path — the SENTINEL `type_path` for a `.{ … }` target-typed construction (§4.1,
+ * ruling 2026-08-13): an EMPTY `Path` (zero segments). A leading `.` before a `{`-initializer
+ * carries no type name, so the construction lowers to the context's EXPECTED type; the checker
+ * (`type_struct_lit` → `dot_construct_target`) resolves the target from the slot's `expected`.
+ * The empty path is unambiguous: the `self` sentinel has one segment named `self`, a nominal
+ * literal has one-or-more user segments, and only the dot sentinel has zero. Reusing the ordinary
+ * `StructLit` shape adds no AST field, so the `.tkb` layout is unchanged.
+ *
+ * @return  a zero-segment path marking a target-typed `.{ … }` construction
+ * @since   §4.1 (2026-08-13)
+ */
+fn dot_sentinel_path(): Path {
+    Path { segments = teko::list::empty() }
+}
+
 // ---- string interpolation `$"…{expr}…"` (self-host parity) ----
 // decode `\` + one byte (the same escape set lexer::read_str decodes), appending the decoded
 // byte to `bytes`; returns the bytes + the index AFTER the escape. A malformed escape errors.
@@ -450,6 +466,9 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
     }
     if k == lexer::TokenKind::Match {
         return parse_match(tokens, pos)
+    }
+    if k == lexer::TokenKind::Dot && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
+        return parse_struct_lit(tokens, pos + 1, dot_sentinel_path(), teko::list::empty())
     }
     // §4 (D2/D1): `self` and `base` are reserved keywords, so they no longer pass `is_name_at`
     // (which powers path parsing). They are simple Var primaries — `self`/`base` resolve to the
