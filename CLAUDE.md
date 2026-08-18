@@ -85,7 +85,9 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   verificar/corrigir as pernas.
 
 ## Convenções da linguagem/codebase
-- **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
+- **Só existe `VAR` e `CONST` — `let`/`mut` NÃO existem, tudo é mutável** (ruling do dono). Interno:
+  `BindKind = enum { Var; Const }` — `Mut`→`Var`, `Let`→`Var` (sem repensar Let; discard/loop-var idem).
+  Params seguem imutáveis por B.21 (eixo separado, não é BindKind).
 - **NÃO DETECTAR/BARRAR O QUE NÃO EXISTE (lei do dono, recuperada 2026-08-18).** O compilador não
   escreve detecção, validação, ramo NEM mensagem para construção que a superfície NÃO produz ou que o
   parser já garante. `let`/`mut` não existem → o checker não deve ramificar em `BindKind::Mut`/`Let`
