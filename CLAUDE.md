@@ -96,7 +96,10 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 
 ## Leis de desenvolvimento (resumo — detalhe em docs/design/mudancas-superficie-0.3.1.md §11.2)
 - **TESTES SÓ NO CI.** `teko test .` local dá OOM (ninguém roda). Validação local =
-  **compilação** (`--no-verify --release`, `TEKO_BACKEND=c`, `ulimit -v 6291456`) +
+  **compilação** (`--no-verify --release`, `TEKO_BACKEND=c`, `ulimit -v 6815744`) +
+  <!-- guard subiu 6→6,5 GiB (dono 2026-08-18): o codegen do #os empurrou o virtual; residente
+       segue ~flat. A construção da AST é suspeita do pico — a otimizar. -->
+  <!-- linha de validação original abaixo mantém a métrica -->
   fixpoint (tc2==tc3) + cross-check offline.
 - **Forward-only, sem PR:** drenar para `fix/retirement` por ff/cherry-pick.
 - **PROVENANCE/reseed-via-CI = LEI REVOGADA (dono, revogada há tempo; reafirmado 2026-08-18).**
