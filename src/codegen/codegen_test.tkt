@@ -1893,3 +1893,79 @@ fn cgt_user_declared_beats_a_bare_builtin_name() {
     teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("teko::mem", "free")))
     teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "println")))
 }
+
+// ---------------------------------------------------------------------------
+// Group R: the `error` factory — `error::new` / `teko::error::new` / `error::join` /
+// `teko::error::join` (docs/design/fabrica-error-vocabulario-0.3.1.0.md). Both spellings resolve
+// identically because `emit_call` sniffs only the CALLEE's bare last segment (`pe`), the same
+// mechanism `err_loc`/`err_typed` already use just above these two branches.
+// ---------------------------------------------------------------------------
+
+/**
+ * A 2-segment path `a::b` — the SHORT spelling of a namespaced builtin call (`error::new`,
+ * `error::join`), as opposed to `cgt_path3`'s reserved-root `teko::a::b` spelling.
+ *
+ * @param a  the first segment
+ * @param b  the second (last) segment
+ * @return   the 2-segment path
+ */
+fn cgt_path2(a: str, b: str) -> parser::Path {
+    let s1: []parser::Segment = teko::list::push(teko::list::empty(), cgt_seg(a))
+    let s2: []parser::Segment = teko::list::push(s1, cgt_seg(b))
+    parser::Path { segments = s2 }
+}
+
+/** error_factory_new_emits_tk_error_make — `error::new("x")` lowers to `tk_error_make(<msg>)`,
+    the call-site twin of the literal `error { message = "x" }`. */
+#test
+fn error_factory_new_emits_tk_error_make() {
+    let msg_arg = checker::TExpr { kind = checker::TStrLit { text = "x" }; type = checker::Str { }; line = 0; col = 0 }
+    let args: []checker::TExpr = teko::list::push(teko::list::empty(), msg_arg)
+    let e = checker::TExpr {
+        kind = checker::TCall { callee = cgt_path2("error", "new"); args = args; call_ns = ""; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = checker::Error { }
+        line = 0; col = 0
+    }
+    let out = match emit_expr(cgt_empty(), cgt_prog(), e) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(out, "tk_error_make("))
+    teko::assert::is_true(teko::str::contains(out, "\"x\""))
+}
+
+/** error_factory_teko_new_same_as_bare — `teko::error::new(...)` (the 3-segment reserved-root
+    spelling the design measured as parsing identically to the 2-segment form) lowers the SAME
+    way, since `emit_call` reads only the last path segment. */
+#test
+fn error_factory_teko_new_same_as_bare() {
+    let msg_arg = checker::TExpr { kind = checker::TStrLit { text = "y" }; type = checker::Str { }; line = 0; col = 0 }
+    let args: []checker::TExpr = teko::list::push(teko::list::empty(), msg_arg)
+    let e = checker::TExpr {
+        kind = checker::TCall { callee = cgt_path3("teko", "error", "new"); args = args; call_ns = ""; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = checker::Error { }
+        line = 0; col = 0
+    }
+    let out = match emit_expr(cgt_empty(), cgt_prog(), e) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(out, "tk_error_make("))
+    teko::assert::is_true(teko::str::contains(out, "\"y\""))
+}
+
+/** error_factory_join_emits_flattened_concat — `error::join(a, b)` lowers to
+    `tk_error_make(tk_str_concat(tk_str_concat(a.message, "\n"), b.message))` — the dono's ratified
+    flattened concatenation, reusing the two error args' `.message` fields (the emitted C reads
+    `.message` off each, mirroring `emit_field_access`'s own `error` branch). */
+#test
+fn error_factory_join_emits_flattened_concat() {
+    let a = checker::TExpr { kind = checker::TVar { name = "a"; is_func = false; func_ns = "" }; type = checker::Error { }; line = 0; col = 0 }
+    let b = checker::TExpr { kind = checker::TVar { name = "b"; is_func = false; func_ns = "" }; type = checker::Error { }; line = 0; col = 0 }
+    let args: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), a), b)
+    let e = checker::TExpr {
+        kind = checker::TCall { callee = cgt_path2("error", "join"); args = args; call_ns = ""; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = checker::Error { }
+        line = 0; col = 0
+    }
+    let out = match emit_expr(cgt_empty(), cgt_prog(), e) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(out, "tk_error_make(tk_str_concat(tk_str_concat("))
+    teko::assert::is_true(teko::str::contains(out, ").message"))
+    teko::assert::is_true(teko::str::contains(out, "\\n"))
+    teko::assert::is_true(teko::str::contains(out, "(a)"))
+    teko::assert::is_true(teko::str::contains(out, "(b)"))
+}

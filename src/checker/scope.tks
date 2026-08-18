@@ -658,6 +658,29 @@ fn builtin_fn(name: str) -> Type | error {
         p = teko::list::push(p, str_t)
         return Func { params = p; ret = Error { }; variadic = false; param_names = []; n_required = (p).len; defaults = [] }
     }
+    // The `error` FACTORY (degrau 22 follow-up, `docs/design/fabrica-error-vocabulario-0.3.1.0.md`
+    // §2.2/§4): `error::new`/`teko::error::new`/`error::join` — both parse today with ZERO lexer,
+    // parser or grammar changes (`error` is a plain identifier, not a keyword; `teko::error::*` is
+    // already a populated builtin namespace alongside `err_loc`/`err_typed`), so registering them
+    // here (resolved by LAST path segment, like every other builtin above) is the whole surface.
+    // `new(msg: str) -> error` — the function-call twin of the literal `error { message = msg }`
+    // (the ONLY constructible shape today, `typer.tks`'s `type_struct_lit`); a pure alias, so every
+    // existing call site keeps working unchanged (the literal is NOT removed).
+    if name == "new" {
+        return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Error { }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] }
+    }
+    // `join(a: error, b: error) -> error` — the dono's ratified "concatenação achatada": ONE error
+    // whose message is `a`'s message and `b`'s message joined by `"\n"` (the SAME idiom already
+    // used 64x under 5 other names — `join_checker_diags`/`diags_error` in
+    // `src/checker/diagnostics.tks`). Flattened by design: the result carries only the composed
+    // `message`; it does not preserve `a`/`b`'s `file`/`line`/`col`/`expected`/`actual` (no list
+    // field exists to hold two sets of them — the same reason `errors.Join`'s `Unwrap() []error`
+    // has no Teko mirror, `degrau-22-error-layout-e-fabrica-0.3.1.0.md` §6.6).
+    if name == "join" {
+        mut p: []Type = teko::list::push(teko::list::empty(), Error { })   // []Type: (error, error)
+        p = teko::list::push(p, Error { })
+        return Func { params = p; ret = Error { }; variadic = false; param_names = []; n_required = (p).len; defaults = [] }
+    }
     // (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
     // `as_ptr` is the raw byte pointer of a `str` (borrows; pairs with `.len`; NOT NUL-terminated).
     if name == "as_ptr" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] } }

@@ -3578,6 +3578,28 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
             oe = match emit_expr_ctx(oe, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
             return cb(oe, ")")
         }
+        // The `error` FACTORY (`docs/design/fabrica-error-vocabulario-0.3.1.0.md`): `error::new`/
+        // `teko::error::new` and `error::join`/`teko::error::join`. Both resolve here the same way
+        // `err_loc`/`err_typed` do — by bare last segment, regardless of the 2- or 3-segment
+        // spelling — because `scope.tks::builtin_fn` registered them with no namespace check.
+        if pe == "new" {
+            // new(msg) -> tk_error_make(msg) — the call-site twin of the literal
+            // `error { message = msg }` (teko_rt.h already zeroes file/line/col/expected/actual).
+            mut on = cb(buf, "tk_error_make(")
+            on = match emit_expr_ctx(on, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+            return cb(on, ")")
+        }
+        if pe == "join" {
+            // join(a, b) -> tk_error_make(tk_str_concat(tk_str_concat(a.message, "\n"), b.message))
+            // — the dono's ratified flattened concatenation, the SAME `"\n"`-joined idiom
+            // `join_checker_diags` already uses. The result is message-only: tk_error_make zeroes
+            // file/line/col/expected/actual, same as the plain literal.
+            mut oj = cb(buf, "tk_error_make(tk_str_concat(tk_str_concat((")
+            oj = match emit_expr_ctx(oj, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+            oj = cb(oj, ").message, (tk_str){ (const tk_byte *)\"\\n\", 1 }), (")
+            oj = match emit_expr_ctx(oj, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+            return cb(oj, ").message))")
+        }
         // Phase 3 — `str`/`str_of_bytes` (([]byte) -> str). A []byte lowers to the generated struct
         // tk_slice_byte {uint8_t*,uint64_t}, a DISTINCT C type from tk_str — BRIDGE the slice to a
         // tk_str at the call site (single-eval via a temp), then tk_str_of_bytes COPIES it. Mirrors codegen.c.
