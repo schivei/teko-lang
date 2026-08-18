@@ -1,15 +1,11 @@
-// src/emit/tkb_test.tkt — tests for the .tkb codec (S1a/S1b). #test functions (no main).
-// Current Teko: typed nodes are module-qualified (`checker::`) and carry all fields (line/col).
 
 use teko::checker
 use teko::parser
 use teko::lexer
 
 fn i64ty(): @Type() { checker::Prim { kind = checker::PrimKind::I64 } }
-// a one-segment NamedType type-annotation (e.g. `i64`).
 fn nt(name: str): @TypeExpr() { parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() } }
 fn tnum(v: i64): checker::TExpr { checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = i64ty(); line = 0; col = 0 } }
-// drop the last byte of a `[]byte` (str's `slice` is text-only) — shared by header_test (same ns).
 fn drop_last(b: []byte): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -17,11 +13,7 @@ fn drop_last(b: []byte): []byte {
     out
 }
 
-/** ty_prim — an `i64` Prim, the leaf the descent tests wrap and re-read. */
 fn ty_prim(): @Type() { checker::Prim { kind = checker::PrimKind::I64 } }
-/** match_prim_arm — "prim" when `ty` is DIRECTLY a Prim, else "other". A bare outer-case arm over a
-    `@Type()` value: matches on the value's OWN case tag (the static union tag), no transparent
-    wrapper-descent. Native tag-match confirms this nominal-direct outcome (#265). */
 fn match_prim_arm(ty: @Type()): str {
     match ty { checker::Prim => "prim"; _ => "other" }
 }
@@ -32,14 +24,6 @@ fn descent_multifield_sibling_no_descend() {
     teko::assert::is_true(match_prim_arm(f) == "other")
 }
 
-/**
- * tnum_roundtrip — `write_texpr` then `read_texpr` reconstructs the exact same `NumInt` for `v`
- * (drop-128, 2026-07-24): a `TNumber`'s sign-magnitude carrier round-trips through the frozen
- * `hi:lo` u64-pair wire encoding (`numint_hi`/`numint_lo` on write, `numint_of_hilo` on read).
- *
- * @param v  the i64 value to round-trip
- * @return   true iff the decoded value equals `v`
- */
 fn tnum_roundtrip(v: i64): bool {
     var bytes = write_texpr(teko::list::empty(), st_empty(), tnum(v))
     var decoded = match read_texpr(Reader { data = bytes; pos = 0 }, teko::list::empty()) { RTExpr as x => x; error => return false }
@@ -47,12 +31,6 @@ fn tnum_roundtrip(v: i64): bool {
     parser::numint_to_i64(n.value) == v
 }
 
-/**
- * tnb_number_roundtrip — the `.tkb` `TNumber` codec survives every sign, including `i64::MIN`
- * (drop-128, 2026-07-24 — the SEED's pre-drop `(value >> 64) to u64` wire write panicked with
- * "impossible conversion" on ANY negative literal, since a negative source failed that checked
- * cast; `numint_hi`/`numint_lo`'s pure u64 arithmetic has no such barrier, #299).
- */
 #test
 fn tnb_number_roundtrip() {
     teko::assert::is_true(tnum_roundtrip(0))
@@ -64,7 +42,6 @@ fn tnb_number_roundtrip() {
     teko::assert::is_true(tnum_roundtrip(-9223372036854775807 - 1))
 }
 
-/** (#165 C7) whether two byte buffers are element-for-element equal (lengths + every byte). */
 fn bytes_equal(a: []byte, b: []byte): bool {
     if a.len != b.len { return false }
     var i: u64 = 0
@@ -76,15 +53,6 @@ fn bytes_equal(a: []byte, b: []byte): bool {
     true
 }
 
-/**
- * tkh_of_version — an otherwise VALID `.tkh` frame whose version field is overwritten with `ver`:
- * the `"TKH\0"` magic and the FNV-1a of the body both stay correct, which is exactly the shape a
- * pre-0.3.1 artifact has (its own bytes are internally consistent — only the version tells the
- * reader that its `PrimKind` ordinals are the retired ones).
- *
- * @param ver  the version number to stamp into the frame's version field (bytes 4..7, LE)
- * @return     the `.tkh` bytes of a one-function header, re-versioned
- */
 fn tkh_of_version(ver: byte): []byte {
     var sig = FnSig { name = "f"; params = teko::list::empty(); ret = i64ty(); has_doc = false; doc = "" }
     var h = Header { types = teko::list::empty(); fns = teko::list::push(teko::list::empty(), sig) }
@@ -99,22 +67,12 @@ fn tkh_of_version(ver: byte): []byte {
     out
 }
 
-/**
- * tkh_current_version_roundtrips — the `.tkh` frame this compiler WRITES is the one it reads back:
- * the guard added below must not reject the current writer's own output.
- */
 #test
 fn tkh_current_version_roundtrips() {
     var h = match read_tkh(tkh_of_version(2 to byte)) { Header as x => x; error => return teko::assert::is_true(false) }
     teko::assert::is_true(h.fns.len == 1)
 }
 
-/**
- * tkh_version_1_is_rejected — a version-1 `.tkh` (the pre-0.3.1 shape) is REJECTED with an honest
- * message, never read crooked: the drop-128 `PrimKind` renumbering reached the `.tkh` through the
- * `.tkb` codec it reuses wholesale, so an old artifact would decode every primitive into the wrong
- * type while passing both the magic and its own hash.
- */
 #test
 fn tkh_version_1_is_rejected() {
     var msg = match read_tkh(tkh_of_version(1 to byte)) { Header => ""; error as e => e.message }
@@ -122,14 +80,6 @@ fn tkh_version_1_is_rejected() {
     teko::assert::str_contains(msg, "must be rebuilt with the current compiler")
 }
 
-/**
- * trait_body_roundtrips_implements — the `.tkb` codec round-trips a TraitBody's new `implements`
- * list (§9.4): a trait carrying a field plus a `& A & B` composition list survives write then read
- * with its fields and its composed names intact, proving the codec's added field is in parity.
- *
- * @return true iff the decoded TraitBody equals the encoded one on fields and implements
- * @since 0.3.1 (§9.4 revised)
- */
 fn trait_body_roundtrips_implements(): bool {
     var f = parser::Field { name = "x"; type_ann = nt("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false }
     var impls = teko::list::push(teko::list::push(teko::list::empty(), "A"), "B")
@@ -143,12 +93,6 @@ fn trait_body_roundtrips_implements(): bool {
     }
 }
 
-/**
- * tkb_traitbody_implements_roundtrip — the #test wrapper asserting the TraitBody `implements`
- * round-trip holds (§9.4).
- *
- * @since 0.3.1 (§9.4 revised)
- */
 #test
 fn tkb_traitbody_implements_roundtrip() {
     teko::assert::is_true(trait_body_roundtrips_implements())

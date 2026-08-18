@@ -1,39 +1,13 @@
-// src/build/assemble.tks   (namespace 'teko::build')
-//
-// Multi-file project ASSEMBLY — the THIRD step of project-based compilation (after
-// the manifest read A1 and discovery A2). Given the discovered file set, read and
-// parse every file and MERGE all top-level items into ONE program, so the WHOLE
-// program is seen before it is resolved (M.1; REBOOT_PLAN §2.6 — "compila o projeto
-// inteiro de uma vez — vê todos os arquivos antes de resolver").
-//
-// THE RULE per file:
-//   * the file at the project root named `main.tks` → parsed as the entry MainFile
-//   * every other file                              → parsed as a Module
-// Every merged item is TAGGED with the SourceFile it came from — BOTH the `namespace`
-// (provenance for later codegen name-mangling) AND the `file` path (W-loc-2 — so the
-// checker's file:line:col diagnostics name WHERE the error is). The checker resolves
-// over one flat program; the merged program is the input it (tk_type_program) consumes.
-//
-// PER-FILE DIAGNOSTIC PREFIX (M.3 — name WHERE the error is). Any lex/parse error
-// surfaced for a file is prefixed with that SourceFile's path → `$"{sf.path}:{inner.message}"`.
-// Since an inner located error reads "line:col: text", this yields "path:line:col: text"
-// (the C23 seed's diag_file helper does exactly this "path:msg" prefix).
 
 use teko::parser
 use teko::lexer
 
-// Is this file the project ENTRY point? (basename == "main.tks".) Mirrors assemble.c::
-// is_main_file: a bare "main.tks", or one preceded by a path separator — so "domain.tks"
-// (which also ENDS with "main.tks") is NOT mistaken for the entry (it lives at the root).
 fn asm_is_main(path: str): bool {
     if !teko::str::ends_with(path, "main.tks") { return false }
     if path.len == 8 { return true }
     path[path.len - 9] == b'/'
 }
 
-// reconcile a parsed MainFile into a flat item list (uses → UseDecl items; body statements →
-// Statement items). namespace/file are stamped by the caller (assemble). Mirrors driver.tks's
-// main_file_to_program, kept local to this step (M.5 — DRY consolidation is a later sweep).
 fn asm_main_items(mf: parser::MainFile): []parser::Item {
     var items: []parser::Item = teko::list::empty()
     var ui: u64 = 0
@@ -51,7 +25,6 @@ fn asm_main_items(mf: parser::MainFile): []parser::Item {
     items
 }
 
-// reconcile a parsed Module into a flat item list (uses → UseDecl; decls → Function/TypeDecl).
 fn asm_module_items(m: parser::Module): []parser::Item {
     var items: []parser::Item = teko::list::empty()
     var ui: u64 = 0
@@ -76,21 +49,11 @@ fn asm_module_items(m: parser::Module): []parser::Item {
     items
 }
 
-/**
- * asm_decl_guard — the §17 conditional-compile guard for `m.decls[di]`: `m.decl_guards[di]` when the
- * PARALLEL guard array covers the index, else `PTrue` (a defensive default for any producer that did
- * not populate `decl_guards`). Keeps `asm_module_items` a single uniform zip.
- *
- * @param m   the parsed module (its `decls`/`decl_guards` parallel arrays)
- * @param di  the declaration index
- * @return    the guard for `decls[di]` (`PTrue` when out of range)
- */
 fn asm_decl_guard(m: parser::Module, di: u64): parser::Pred {
     if di < m.decl_guards.len { return m.decl_guards[di] }
     parser::pred_true()
 }
 
-// parse + reconcile ONE file's tokens to its item list (entry → main-file parser; else module).
 fn asm_parse(path: str, tokens: []lexer::Token): []parser::Item | error {
     if asm_is_main(path) {
         var mf = match parser::parse_main_file(tokens, 0) { parser::Parsed<parser::MainFile> as x => x.node; error as e => return e }
@@ -101,33 +64,11 @@ fn asm_parse(path: str, tokens: []lexer::Token): []parser::Item | error {
     }
 }
 
-/**
- * asm_lex_and_parse — lex `src` and parse it into ONE file's item list. Extracted so
- * `assemble_sel`'s per-file loop matches on a single result instead of holding a `tokens` binding
- * across two fallible steps: the collector needs the failure arms to fall through to the next file.
- * The `tokens` buffer dies at this function's lexical scope (its region drop reclaims it on every
- * exit edge) — the §6 replacement for the retired manual free.
- *
- * @param path  the source file's path (selects the entry-file vs module grammar)
- * @param src   the file's contents
- * @return      the file's parsed items, or the lex/parse error (already located, un-prefixed)
- * @since 0.3.1
- */
 fn asm_lex_and_parse(path: str, src: str): []parser::Item | error {
     var tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return e }
     match asm_parse(path, tokens) { []parser::Item as items => items; error as e => return e }
 }
 
-/**
- * How many of `files` are ELIGIBLE for lex/parse under `include_tests` — every file
- * except a `.tkt` test excluded from a production build/run. `assemble_sel`'s
- * `lexer`/`parser` observability phases use this as their known-upfront total (a
- * skipped `.tkt` never enters either phase's count).
- *
- * @param files          the discovered project file set
- * @param include_tests  true to count `.tkt` files too (the `teko test` path)
- * @return               the number of files `assemble_sel` will actually lex/parse
- */
 fn eligible_file_count(files: []SourceFile, include_tests: bool): u64 {
     var n: u64 = 0
     var i: u64 = 0
@@ -139,51 +80,17 @@ fn eligible_file_count(files: []SourceFile, include_tests: bool): u64 {
     n
 }
 
-/**
- * The `.tks` mirror of `assemble.c::tk_assemble`, run SILENTLY (no build-observability
- * output) — for callers that only want the merged program, not the `teko build`
- * phase reporting.
- *
- * @param files  the discovered project file set
- * @return       the merged program, or every collected lex/parse diagnostic as one error
- */
 fn assemble(files: []SourceFile): parser::Program | error {
     var a = match assemble_sel(files, false, false, false) { Assembled as x => x; error as e => return e }
     if a.diags.len > 0 { return error { message = join_diags(a.diags) } }
     a.program
 }
 
-/**
- * Assembled — the output of `assemble_sel`: the merged program built from every file that lexed
- * and parsed CLEANLY, plus one diagnostic per file that did not (`diags`, in file order).
- *
- * The two travel together because a lex/parse failure is isolated at the FILE boundary (owner
- * ruling 2026-07-26 — "checa o arquivo, registra o diagnóstico, segue para o próximo"): a bad file
- * contributes no items and does not stop the walk, so the files after it are still read, and the
- * CHECKER still runs over everything that parsed. One build therefore reports every file's
- * diagnostic, the same way `teko test` reports every test rather than stopping at the first
- * failure. `diags` empty ⇒ the assembly was clean and `program` is exactly what the
- * stop-at-the-first-error assembler produced (the success path is unchanged — the fixpoint is
- * untouched).
- *
- * @since 0.3.1
- */
 pub type Assembled = struct {
-    /** the merged program: every item of every file that lexed and parsed cleanly, in file order. */
     program: parser::Program
-    /** one `path:line:col: text` diagnostic per file that failed to lex or parse, in file order. */
     diags: []str
 }
 
-/**
- * join_diags — render a collected diagnostic list as the newline-separated block the driver prints
- * (and a `.tkr` compile-fail scenario substring-matches against). One diagnostic per line, in the
- * order they were collected, with no trailing newline — `fail` supplies the framing.
- *
- * @param diags  the collected diagnostics
- * @return       the diagnostics joined by newlines ("" for an empty list)
- * @since 0.3.1
- */
 pub fn join_diags(diags: []str): str {
     var out = ""
     var i: u64 = 0
@@ -196,33 +103,6 @@ pub fn join_diags(diags: []str): str {
     out
 }
 
-/**
- * The assembly core: read -> lex -> parse -> reconcile -> MERGE every eligible
- * file's items into ONE program (M.1 — the whole program is seen before it is
- * resolved). A `.tkt` test is NOT production source (it carries `#test` attributes
- * the module grammar rejects) unless `include_tests` says otherwise (the `teko
- * test` path, D2). Every merged item is re-stamped with its SourceFile's namespace
- * (codegen provenance) AND file path (W-loc-2 — the checker's file:line:col
- * diagnostics). Per-file lex/parse errors are prefixed with the file path ->
- * "path:line:col: text".
- *
- * Reports the `lexer`/`parser` BUILD-OUTPUT OBSERVABILITY phases when `report` is
- * set, replacing the historical one-line-per-file wall: each phase ticks its own
- * "N/M files" counter as files are processed and settles with the elapsed time — a
- * lex failure settles `lexer` failed; a parse failure settles `parser` failed (the
- * prior files having already lexed/parsed cleanly).
- *
- * @param files          the discovered project file set
- * @param include_tests  `false` (production build/run) skips every `.tkt`; `true`
- *                       (`teko test`) includes them so `#test` functions enter scope
- * @param report         print the `lexer`/`parser` phase lines (`false` for an
- *                       already-reported retry pass, or a silent caller)
- * @param tty            render the phases' in-place `\r` updates (irrelevant when
- *                       `report` is `false`)
- * @return               the merged program plus one diagnostic per file that failed to lex or
- *                       parse (`Assembled`), or an `error` when a file cannot be READ at all
- *                       (an I/O fault, not a source defect — nothing to report per-file)
- */
 fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: bool): Assembled | error {
     var merged: []parser::Item = teko::list::empty()
     var diags: []str = teko::list::empty()
@@ -241,10 +121,6 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
             continue
         }
         var src = match teko::io::read_file(sf.path) { str as s => s; error as e => return e }
-        // FILE-boundary isolation: a file that fails to lex or parse records its diagnostic,
-        // contributes no items, and does NOT stop the walk — the files after it are still read and
-        // the checker still runs over everything that parsed. The `ok` flag carries the verdict out
-        // of the value-position match, since a `continue` may not live inside one.
         var one: []parser::Item = teko::list::empty()
         var ok = true
         match asm_lex_and_parse(sf.path, src) {
@@ -280,34 +156,11 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
     Assembled { program = parser::Program { items = merged }; diags = diags }
 }
 
-/**
- * FileOverride — a (path, content) pair that stands in for a file's ON-DISK contents during
- * assembly: the editor's unsaved buffer for one open document (`docs/design/lsp-teko.md` §5.5).
- * `assemble_with_overrides` reads a file's text from here, when present, instead of from disk —
- * the seam that lets the LSP re-check the WHOLE project as the editor currently sees it, not as
- * the last save left it.
- *
- * @field path     the project-relative path the override replaces (matches a `SourceFile.path`)
- * @field content  the buffer's current text, used in place of a disk read for that path
- * @since 0.3.1.0 (LSP crumb E)
- */
 pub type FileOverride = struct {
-    /** the project-relative path the override replaces (matches a `SourceFile.path`). */
     path: str
-    /** the buffer's current text, used in place of a disk read for that path. */
     content: str
 }
 
-/**
- * overridden_content — the buffer `overrides` holds for `path`, or `null` when no override names
- * that path (a plain disk read applies). The override set is the small handful of currently-open
- * documents, never the whole project, so a linear scan is ample.
- *
- * @param overrides  the open buffers standing in for the disk
- * @param path       the file path to look up
- * @return           the override's content, or `null` when `path` is not overridden
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn overridden_content(overrides: []FileOverride, path: str): str | null {
     var i: u64 = 0
     loop {
@@ -318,16 +171,6 @@ fn overridden_content(overrides: []FileOverride, path: str): str | null {
     null
 }
 
-/**
- * read_source_with_overrides — `path`'s source text: the matching `FileOverride`'s buffer when one
- * names `path`, else the file read fresh from disk. The single read `assemble_with_overrides` makes
- * per file, so the override substitution is one seam rather than threaded through the whole loop.
- *
- * @param path       the file to read
- * @param overrides  the open buffers standing in for the disk
- * @return           the source text, or the I/O error from a disk read that missed the override set
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn read_source_with_overrides(path: str, overrides: []FileOverride): str | error {
     match overridden_content(overrides, path) {
         str as c => return c
@@ -336,17 +179,6 @@ fn read_source_with_overrides(path: str, overrides: []FileOverride): str | error
     match teko::io::read_file(path) { str as s => s; error as e => return e }
 }
 
-/**
- * append_tagged_items — `merged` with every entry of `items` appended, each RE-STAMPED with `sf`'s
- * namespace (A3 provenance) and path (W-loc-2) — the same per-file tagging `assemble_sel`'s own
- * loop applies before merging.
- *
- * @param merged  the merged item list built so far
- * @param items   one file's reconciled item list
- * @param sf      the source file `items` came from
- * @return        `merged` with `items` appended, tagged with `sf`'s namespace and path
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn append_tagged_items(merged: []parser::Item, items: []parser::Item, sf: SourceFile): []parser::Item {
     var out = merged
     var i: u64 = 0
@@ -358,22 +190,6 @@ fn append_tagged_items(merged: []parser::Item, items: []parser::Item, sf: Source
     out
 }
 
-/**
- * assemble_with_overrides — like `assemble`'s silent production build, but each file whose path
- * matches a `FileOverride` is lexed/parsed from that BUFFER instead of the disk — the LSP's
- * unsaved-document override (`docs/design/lsp-teko.md` §2.3, §5.5). Discovery, per-file lex/parse,
- * the FILE-boundary error isolation (a bad file records its diagnostic and the walk continues to
- * the next file — `Assembled`'s own doc), and the merge are otherwise IDENTICAL to `assemble_sel`;
- * only the source of each file's TEXT differs. `.tkt` test files are excluded, matching `assemble`'s
- * own production-build selection — the LSP re-checks the PROJECT the same way a build would, never
- * the test surface.
- *
- * @param files      the discovered project file set
- * @param overrides  the open, possibly-unsaved buffers that win over the disk for their paths
- * @return           the merged program plus one diagnostic per file that failed to lex or parse, or
- *                   an `error` when a non-overridden file cannot be READ at all
- * @since 0.3.1.0 (LSP crumb E)
- */
 pub fn assemble_with_overrides(files: []SourceFile, overrides: []FileOverride): Assembled | error {
     var merged: []parser::Item = teko::list::empty()
     var diags: []str = teko::list::empty()

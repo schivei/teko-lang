@@ -1,9 +1,4 @@
-// src/lexer/lexer_test.tkt — tests for teko::lexer. NO `main`: tests are PUBLIC
-// `#test` functions the compiler collects and runs (a runner — ALPHA). The C
-// mirror uses a `main` harness (the runner does not exist in the bootstrap).
 
-// helpers (not tests):
-// the kinds of the tokens of `source` (already validated), or error if it fails.
 fn kinds_of(source: str): []TokenKind | error {
     var toks = match tokenize(source) {
         []Token as ts => ts
@@ -19,7 +14,6 @@ fn kinds_of(source: str): []TokenKind | error {
     ks
 }
 
-// do the kinds of `source` equal `want`, in order?
 fn kinds_eq(source: str, want: []TokenKind): bool {
     var got = match kinds_of(source) {
         []TokenKind as ks => ks
@@ -35,7 +29,6 @@ fn kinds_eq(source: str, want: []TokenKind): bool {
     true
 }
 
-// does lexing `source` fail with an error?
 fn is_error(source: str): bool {
     match tokenize(source) {
         []Token => false
@@ -48,49 +41,30 @@ fn rejects_unexpected_byte() {
     teko::assert::is_true(is_error("1 ` 2"))
 }
 
-/**
- * lexes_at_call_marker — a bare `@` NOT followed by `"` is the §14 compiler-executed call marker, so
- * `@foo` lexes to `[At, Ident]` rather than the old unexpected-byte error.
- */
 #test
 fn lexes_at_call_marker() {
     teko::assert::is_true(kinds_eq("@foo", [TokenKind::At, TokenKind::Ident]))
 }
 
-/**
- * at_verbatim_string_still_one_token — `@"x"` still reads as ONE verbatim string: the string-start test
- * claims the `@` before the `At` branch can.
- */
 #test
 fn at_verbatim_string_still_one_token() {
     teko::assert::is_true(kinds_eq("@\"x\"", [TokenKind::Str]))
     teko::assert::is_true(one_str_text("@\"x\"") == "x")
 }
 
-/**
- * reserves_macro_and_comptime_keywords — `macro` and `comptime` are the two CLOSED §14 family keywords.
- */
 #test
 fn reserves_macro_and_comptime_keywords() {
     teko::assert::is_true(kinds_eq("macro", [TokenKind::Macro]))
     teko::assert::is_true(kinds_eq("comptime", [TokenKind::Comptime]))
 }
 
-/**
- * lexes_dollar_hole_marker — a bare `$` NOT followed by `"` is the §14 `${expr}` injection-hole marker,
- * so `${x}` lexes to `[Dollar, LBrace, Ident, RBrace]`; a `$"…"` still reads as one interpolated string.
- */
 #test
 fn lexes_dollar_hole_marker() {
     teko::assert::is_true(kinds_eq("${x}", [TokenKind::Dollar, TokenKind::LBrace, TokenKind::Ident, TokenKind::RBrace]))
     teko::assert::is_true(kinds_eq("$\"a\"", [TokenKind::Interp]))
 }
 
-// --- raw / verbatim strings `@"…"` and multi-line strings `"""…"""` ---
-// Both forms produce a plain TokenKind::Str carrying the DECODED bytes (the lexer
-// already decodes — read_str stores final bytes, not a source view).
 
-// the text (decoded bytes) of the single token of `source`, or "" on failure.
 fn one_str_text(source: str): str {
     var toks = match tokenize(source) {
         []Token as ts => ts
@@ -102,46 +76,27 @@ fn one_str_text(source: str): str {
 
 #test
 fn lexes_multiline_string_literal() {
-    // a multi-line string is a single Str token; it spans ≥2 lines (literal newline).
     teko::assert::is_true(kinds_eq("\"\"\"a\nb\"\"\"", [TokenKind::Str]))
     teko::assert::is_true(one_str_text("\"\"\"a\nb\"\"\"") == "a\nb")
-    // a lone `"` inside is LITERAL (only `"""` closes).
     teko::assert::is_true(one_str_text("\"\"\"a\"b\"\"\"") == "a\"b")
-    // escapes are processed normally: `\t` → a tab byte.
     teko::assert::is_true(one_str_text("\"\"\"a\\tb\"\"\"") == "a\tb")
-    // empty multi-line string `""""""` (six quotes).
     teko::assert::is_true(one_str_text("\"\"\"\"\"\"") == "")
 }
 
-// ---- orthogonal prefix modifiers ($ × @) × delimiters (single/multi) ----
 
-// the InterpRaw token's text is the FRESH inner bytes the lexer already resolved:
-// single-line verbatim has the `""`→`"` collapse applied; multi-line is as-is.
 #test
 fn interp_raw_token_text_is_resolved() {
-    // `$@"a""b{1}c"` → inner text `a"b{1}c` (collapse applied; hole span intact, backslash N/A).
     teko::assert::is_true(one_str_text("$@\"a\"\"b{1}c\"") == "a\"b{1}c")
-    // backslash literal in verbatim interp: `$@"x{1}\ny"` → inner `x{1}\ny`.
     teko::assert::is_true(one_str_text("$@\"x{1}\\ny\"") == "x{1}\\ny")
-    // multi-line verbatim: lone `"` literal — `$@"""a"b{1}c"""` → inner `a"b{1}c`.
     teko::assert::is_true(one_str_text("$@\"\"\"a\"b{1}c\"\"\"") == "a\"b{1}c")
 }
 
-// `{{`/`}}` doubling: the LEXER finds the closing quote correctly even with unbalanced literal
-// braces at depth 0. Plain Interp keeps the raw VIEW (parser collapses `{{`→`{`); verbatim
-// InterpRaw PRESERVES `{{`/`}}` as two bytes AS-IS (parser still does the collapse).
 #test
 fn lexes_brace_doubling_close_finding() {
-    // plain interp: `$"a{{b}}c"` is ONE Interp token (close found; braces balanced literal).
     teko::assert::is_true(kinds_eq("$\"a{{b}}c\"", [TokenKind::Interp]))
-    // plain interp UNBALANCED literal brace before the close: `$"a{{"` — close still found.
     teko::assert::is_true(kinds_eq("$\"a{{\"", [TokenKind::Interp]))
-    // plain interp token text is the raw VIEW (parser decodes): `$"a{{b}}c"` → `a{{b}}c`.
     teko::assert::is_true(one_str_text("$\"a{{b}}c\"") == "a{{b}}c")
-    // plain interp ending in a literal brace: `$"a{{"` → view `a{{`.
     teko::assert::is_true(one_str_text("$\"a{{\"") == "a{{")
-    // verbatim interp PRESERVES `{{`/`}}` as two bytes: `$@"{{x}}"` → inner `{{x}}`.
     teko::assert::is_true(one_str_text("$@\"{{x}}\"") == "{{x}}")
-    // order-free verbatim: `@$"{{x}}"` → inner `{{x}}` (preserved for the parser to collapse).
     teko::assert::is_true(one_str_text("@$\"{{x}}\"") == "{{x}}")
 }

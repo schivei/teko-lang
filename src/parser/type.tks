@@ -1,32 +1,11 @@
-// A path: one or more identifiers joined by `::` (lexer::Token, or just u64).
 pub type Segment = struct { name: str }
-pub type Path = struct { segments: []Segment }   // at least one
+pub type Path = struct { segments: []Segment }
 
-pub type NamedType = struct { path: Path; args: []@TypeExpr() }   /* u64 | lexer::Token; args = generic type-args (S4 — empty for a plain name, e.g. Box<i64>) */
-pub type SliceType = struct { element: @TypeExpr() }   /* []T (recursive — B.8) */
-pub type UnionType = struct { members: []@TypeExpr() }   /* A | B | … (two or more) */
-pub type FunctionType = struct { params: []@TypeExpr(); ret: @TypeExpr() }   /* a closure/function VALUE type; surface `func<…, R>` / `action<…>` (0.3.1 §2); checker maps to Func (an `action`/no-return `func` carries the unspellable `()` unit sentinel in `ret`) */
+pub type NamedType = struct { path: Path; args: []@TypeExpr() }
+pub type SliceType = struct { element: @TypeExpr() }
+pub type UnionType = struct { members: []@TypeExpr() }
+pub type FunctionType = struct { params: []@TypeExpr(); ret: @TypeExpr() }
 
-/**
- * MacroType — an `@name(...)` compiler-executed call standing in a TYPE position (§14 A4): a type
- * annotation like `members: []@Type()` (the §9.D inline-union abbreviation). The Family-A pre-pass
- * expands it, re-parsing the macro's `lowering { … }` fragment as a `@TypeExpr()` (context-polymorphic
- * splice, §5.1-Opt-1) — an `@Type()` yields a union `(A | B | …)`. A `MacroType` never reaches the
- * checker: `expand_macros_syntactic` replaces it pre-type-check; a survivor is a resolve honest-stop.
- *
- * @field callee           the macro name path (the `@name` target)
- * @field args             the raw call-site argument expressions (usually empty for a type macro)
- * @field callee_type_args the explicit `<T…>` type arguments (`@Type<i32>()`), else empty
- * @since 0.4-macros (§14 A4)
- */
 pub type MacroType = struct { callee: Path; args: []Expr; callee_type_args: []@TypeExpr() }
 
-/**
- * TypeExpr — a syntactic type-expression, retired from a nominal `variant` to the §9.D inline union
- * `@TypeExpr()`: a named type, a slice, a `|` union, a function type, or a `@name(...)` type-macro
- * (`MacroType`). Recursive members (`SliceType`/`UnionType`/`FunctionType` carry `@TypeExpr()` /
- * `[]@TypeExpr()`) box under CR1.
- *
- * @since §9.D (retired from `type TypeExpr = variant …`)
- */
 macro TypeExpr() { lowering { parser::NamedType | parser::SliceType | parser::UnionType | parser::FunctionType | parser::MacroType } }

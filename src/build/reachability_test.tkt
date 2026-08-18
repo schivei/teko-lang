@@ -1,49 +1,32 @@
 use teko::parser
 use teko::checker
 
-/**
- * priv_fn — a void-returning TFunction with a hand-built body, PRIVATE visibility (the common
- * case; reachability never treats a private fn as a root by itself).
- *
- * (Tests for teko::build reachability, C7.20; #test collected.) Every test below builds a typed
- * program BY HAND (checker::TFunction/TProgram literals, like checker_test.tkt's monomorphize
- * group K) so the call-graph closure and the roots (loose statements + `exp` functions) are
- * exercised directly, without a full front-end pass.
- */
 fn priv_fn(name: str, body: []@TStatement()): checker::TFunction {
     checker::TFunction { overload_suffix = ""; name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = checker::Void { }; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() }
 }
 
-/** exp_fn — an `exp`-visibility TFunction: a library's public surface, one reachability ROOT. */
 fn exp_fn(name: str, body: []@TStatement()): checker::TFunction {
     checker::TFunction { overload_suffix = ""; name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = checker::Void { }; body = body; vis = parser::Visibility::Exp; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() }
 }
 
-/** extern_fn — an extern TFunction (no body) bound to `lib` via `from_lib`. */
 fn extern_fn(name: str, lib: str): checker::TFunction {
     var no_body: []@TStatement() = teko::list::empty()
     checker::TFunction { overload_suffix = ""; name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = checker::Void { }; body = no_body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = true; c_symbol = "sym"; from_lib = lib; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() }
 }
 
-/** call_stmt — a typed no-arg call `NAME()` (void result — reachability only reads the name). */
 fn call_stmt(name: str): @TStatement() {
     var callee = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
     var ce = checker::TExpr { kind = checker::TCall { overload_suffix = ""; callee = callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = checker::Void { }; line = 0; col = 0 }
     checker::TExprStmt { expr = ce }
 }
 
-/** one_stmt — a single-statement body. */
 fn one_stmt(s: @TStatement()): []@TStatement() { teko::list::push(teko::list::empty(), s) }
 
-/** one_item — a single-function item list, the seed for building up a TProgram by hand. */
 fn one_item(f: checker::TFunction): []@TItem() { teko::list::push(teko::list::empty(), f) }
 
-/** push_item — append one more TFunction item to an item list. */
 fn push_item(items: []@TItem(), f: checker::TFunction): []@TItem() { teko::list::push(items, f) }
 
 #test
-/** A call inside a loop's run-once `init` preamble is reachable — the reachability walker descends
-    into `l.init` (and `l.body`) of a `TLoopStmt` (#517). */
 fn call_inside_loop_init_is_reachable() {
     var loop_init = one_stmt(call_stmt("raw_write"))
     var loop_s: @TStatement() = checker::TLoopStmt { label = ""; init = loop_init; body = one_stmt(checker::TBreakStmt { label = "" }) }
@@ -56,11 +39,6 @@ fn call_inside_loop_init_is_reachable() {
 }
 
 #test
-/**
- * A library artifact has NO virtual-main; its `exp` surface is the entry point a caller
- * outside this program reaches — so an exp fn's own calls must count as reachable even when
- * nothing IN this program calls the exp fn itself.
- */
 fn exp_function_is_its_own_root_even_when_uncalled_locally() {
     var pubapi = exp_fn("pubapi", one_stmt(call_stmt("crypto_init")))
     var items0 = one_item(extern_fn("crypto_init", "crypto"))
@@ -70,10 +48,6 @@ fn exp_function_is_its_own_root_even_when_uncalled_locally() {
 }
 
 #test
-/**
- * `let f = extern_fn` (TVar{is_func=true}) is a first-class reference, not a TCall — the walk
- * must still count it as reaching the extern's lib (W10a closures-over-fns shape).
- */
 fn function_taken_as_a_value_counts_as_a_use() {
     var fref = checker::TExpr { kind = checker::TVar { name = "raw_read"; is_func = true; func_ns = "" }; type = checker::Void { }; line = 0; col = 0 }
     var bound = checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "f" }; bound = checker::Void { }; value = fref }

@@ -1,37 +1,10 @@
-// src/parser/parse_stmt.tks   (namespace 'teko::parser')
 
 use teko::lexer
 
-// dispatch a statement. P4a: `return [expr]` and a bare-expression statement. P4b–P4d add
-// bindings, assignment, loop/break/continue.
-/**
- * is_lowering_head — does the statement position at `pos` open a `lowering { … }` fragment (§14.2)?
- * `lowering` is CONTEXTUAL (like `trait`/`params`) — NOT a reserved word — so it means "lowering
- * fragment" ONLY when `Ident("lowering")` is immediately followed by `{`; anywhere else it stays an
- * ordinary identifier. Legal only inside a macro body; the checker honest-stops it elsewhere.
- *
- * @param tokens  the token stream
- * @param pos     the statement position under test
- * @return        true iff `pos` opens a `lowering { … }` fragment
- * @since 0.4-macros (§14 A2)
- */
 fn is_lowering_head(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "lowering" && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace)
 }
 
-/**
- * parse_lowering_frag — capture a `lowering { … }` fragment (§14.2) as a RAW token run. `pos` is at the
- * contextual `lowering`; the balanced brace run between the fragment's `{` and its matching `}` is
- * stored VERBATIM (holes included) in a `LoweringFrag`, to be re-parsed in the `@call`'s grammatical
- * position at Family-A expansion (§5.1-Opt-1). Nested `{ … }` (a block, a struct literal, an inner
- * `${expr}` hole) increments the brace depth so the fragment ends only at its OWN closing `}`.
- *
- * @param tokens  the token stream
- * @param pos     the index of the contextual `lowering` identifier
- * @return        the captured `LoweringFrag` statement + the index past the closing `}`, or an error
- * @throws        a missing `{`, or an unterminated fragment (no matching `}`)
- * @since 0.4-macros (§14 A2)
- */
 fn parse_lowering_frag(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     var lb = pos + 1
     if !is_kind_at(tokens, lb, lexer::TokenKind::LBrace) {
@@ -65,7 +38,6 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | err
         return parse_lowering_frag(tokens, pos)
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Return) {
-        // `return` with an optional value: bare `return` ends at a separator or `}`.
         var after = pos + 1
         if !has_token(tokens, after) || is_sep(tokens, after) || is_kind_at(tokens, after, lexer::TokenKind::RBrace) {
             return Parsed<@Statement()> { node = Return { has_value = false; value = Expr { kind = Number { is_float = false; value = numint_of_u64(0); fval = 0.0 }; line = 0; col = 0 }; values = teko::list::empty() }; next = after }
@@ -84,7 +56,6 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | err
         return parse_loop(tokens, pos, "")
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Break) {
-        // optional label on the SAME line: `break NAME` (a separator would tokenize between)
         var label = ""
         var next = pos + 1
         if is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) { label = tokens[pos + 1].text; next = pos + 2 }
@@ -97,7 +68,6 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | err
         return Parsed<@Statement()> { node = ContinueStmt { label = label }; next = next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Defer) {
-        // `defer { stmts }` — a mandatory block must follow immediately (C7.18).
         var lbrace = pos + 1
         if !is_kind_at(tokens, lbrace, lexer::TokenKind::LBrace) {
             return err_at(tokens, lbrace, "expected '{' after `defer`")
@@ -123,8 +93,6 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | err
     if is_kind_at(tokens, pos, lexer::TokenKind::Ident) && is_assign_op(tokens, pos + 1) {
         return parse_assign(tokens, pos)
     }
-    // `i++` / `i--` — postfix increment/decrement STATEMENT sugar: desugar to the compound
-    // assignment `i += 1` / `i -= 1` (reuses assign typing and codegen; mut-guard included).
     if is_kind_at(tokens, pos, lexer::TokenKind::Ident) &&
     (is_kind_at(tokens, pos + 1, lexer::TokenKind::PlusPlus) || is_kind_at(tokens, pos + 1, lexer::TokenKind::MinusMinus)) {
         var op = if is_kind_at(tokens, pos + 1, lexer::TokenKind::PlusPlus) { lexer::TokenKind::PlusEq } else { lexer::TokenKind::MinusEq }
@@ -134,12 +102,6 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | err
         var blk = match parse_block(tokens, pos) { ParsedList<@Statement()> as x => x; error as e => return e }
         return Parsed<@Statement()> { node = BlockStmt { body = blk.items }; next = blk.next }
     }
-    // (#88) a general FIELD/deref-assign target: parse a full postfix EXPRESSION, then — if it is a
-    // field-access path (`recv.field`, possibly nested / indexed) AND an assign-op follows — treat it as
-    // an assignment target. Subsumes the old hardcoded `name.value op= …` (MEM-1b-ii) shape: the TYPER
-    // decides Ref-deref (`r.value` on a `Ref<T>`) vs a struct/class field write from the receiver TYPE.
-    // A field-access with NO assign-op, and any non-field expr (e.g. `obj.m()`), fall through to the
-    // expr-statement below UNCHANGED — method-call statements are never swallowed.
     var e = match parse_expr(tokens, pos) { Parsed<Expr> as x => x; error as e => return e }
     var is_field = match e.node.kind { FieldAccess as _fa => true; _ => false }
     if is_field && is_assign_op(tokens, e.next) {
@@ -156,33 +118,10 @@ fn parse_statement(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | err
     Parsed<@Statement()> { node = ExprStmt { expr = e.node }; next = e.next }
 }
 
-/**
- * is_block_stmt_head — does `pos` open a bare `{ … }` BLOCK STATEMENT (0.3.1 §6)? True iff the token
- * at `pos` is a `{`. A leading `{` is unambiguous at statement position: a struct literal is led by a
- * type NAME (an Ident), never a bare `{`, and a destructure `{ … }` only ever follows a binding
- * keyword (`let`/`mut`/`var`/`const`/`ref`), all dispatched before this — so a `{` here can only be a
- * block. The dispatcher tests this BEFORE the expression-statement fallback, which is what otherwise
- * rejects a leading `{` with `expected an expression`.
- *
- * @param tokens  the token stream
- * @param pos     the candidate statement-head index
- * @return        true iff `pos` opens a bare block statement
- */
 fn is_block_stmt_head(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::LBrace)
 }
 
-/**
- * is_adopt_head — is the token at `pos` a CONTEXTUAL `adopt` statement head? True only for the
- * ident text "adopt" immediately followed by `{` (`adopt { … }`) OR by an ident then `{`
- * (`adopt name { … }`). Any other use of a symbol named `adopt` (an assignment target, an
- * expression, a field/method receiver) is NOT a head and falls through to ordinary parsing, so a
- * local or namespace segment named `adopt` stays legal (the contextual-keyword invariant).
- *
- * @param []lexer::Token tokens  the token stream
- * @param u64 pos  the candidate statement-head index
- * @return bool  true when `pos` opens an adopter block
- */
 fn is_adopt_head(tokens: []lexer::Token, pos: u64): bool {
     if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) { return false }
     if tokens[pos].text != "adopt" { return false }
@@ -190,36 +129,12 @@ fn is_adopt_head(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) && is_kind_at(tokens, pos + 2, lexer::TokenKind::LBrace)
 }
 
-/**
- * is_spawn_head — is the token at `pos` a CONTEXTUAL `spawn` statement head (§10)? True ONLY for the
- * ident text "spawn" immediately followed by another ident that begins a call — `spawn NAME(`,
- * `spawn NAME.method(`, `spawn ns::NAME(`. Any other use of a symbol named `spawn` (an assignment
- * target `spawn = …`, a bare expression `spawn`, a field/method receiver `spawn.x`, a call
- * `spawn(...)` where spawn is itself the callee) is NOT a head and falls through to ordinary parsing,
- * preserving the contextual-keyword invariant. The `spawn(` case is deliberately EXCLUDED — an
- * LParen right after `spawn` means `spawn` is the callee, not the keyword.
- *
- * @param []lexer::Token tokens  the token stream
- * @param u64 pos  the candidate statement-head index
- * @return bool  true iff `pos` opens a `spawn <call>` statement
- */
 fn is_spawn_head(tokens: []lexer::Token, pos: u64): bool {
     if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) { return false }
     if tokens[pos].text != "spawn" { return false }
     is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident)
 }
 
-/**
- * parse_spawn — parse a contextual `spawn <call>` at `pos` (the `spawn` ident; is_spawn_head true).
- * Parses ONE full expression after the keyword and requires its kind to be a `Call` or `MethodCall`;
- * anything else (a bare var, a binary expr, a literal) is a parse error — `spawn` runs a CALL, never
- * an arbitrary expression. No block, no arguments of its own.
- *
- * @param []lexer::Token tokens  the token stream
- * @param u64 pos  the index of the `spawn` ident
- * @return Parsed<@Statement()> | error  the parsed Spawn and the index past the call, or a parse error
- * @throws  the target is not a call (`spawn x`, `spawn 1 + 2`), or a parse error inside the call
- */
 fn parse_spawn(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     var e = match parse_expr(tokens, pos + 1) { Parsed<Expr> as x => x; error as err => return err }
     var ok = match e.node.kind { Call as _c => true; MethodCall as _m => true; _ => false }
@@ -227,16 +142,6 @@ fn parse_spawn(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     Parsed<@Statement()> { node = Spawn { call = e.node }; next = e.next }
 }
 
-/**
- * parse_adopt — parse a contextual `adopt [name] { stmts }` at `pos` (the `adopt` ident). An
- * optional bound name (an ident before the `{`, the same `adopt NAME {` suffix shape) is captured;
- * a mandatory block then follows, reusing parse_block. Unlike `defer`, the body may contain
- * `return`/`break`/`continue` and nested `adopt` — no rejection here.
- *
- * @param []lexer::Token tokens  the token stream
- * @param u64 pos  the index of the `adopt` ident (is_adopt_head already true)
- * @return Parsed<@Statement()> | error  the parsed AdoptStmt and the index past its closing brace, or a parse error
- */
 fn parse_adopt(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     var name = ""
     var lbrace = pos + 1
@@ -248,10 +153,8 @@ fn parse_adopt(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     Parsed<@Statement()> { node = AdoptStmt { name = name; body = blk.items }; next = blk.next }
 }
 
-// a `{ … }` block: a sequence of statements, `;`/newline separated; empty `{ }` allowed;
-// trailing separator allowed. `pos` is at `{`. (Same separator shape as field lists — B.17.)
 fn parse_block(tokens: []lexer::Token, pos: u64): ParsedList<@Statement()> | error {
-    var p = skip_seps(tokens, pos + 1)   // consume `{`, skip leading separators
+    var p = skip_seps(tokens, pos + 1)
     var stmts: []@Statement() = teko::list::empty()
     loop {
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
@@ -264,22 +167,17 @@ fn parse_block(tokens: []lexer::Token, pos: u64): ParsedList<@Statement()> | err
         }
         p = skip_seps(tokens, p)
     }
-    ParsedList<@Statement()> { items = stmts; next = p + 1 }   /* consume `}` */
+    ParsedList<@Statement()> { items = stmts; next = p + 1 }
 }
 
-// a placeholder TypeExpr for an absent annotation (never read — gated by has_type).
 fn no_type(): @TypeExpr() {
     NamedType { path = Path { segments = teko::list::empty() }; args = teko::list::empty() }
 }
 
-// (2026-07-01 DEFARGS) a placeholder Expr for Param.default_expr when has_default=false —
-// never evaluated, mirrors no_type()'s sentinel convention.
 pub fn no_expr(): Expr {
     Expr { kind = NullLit { }; line = 0; col = 0 }
 }
 
-// an optional `: T` annotation. Absent → has_type=false (type_ann a placeholder). `pos`
-// is where the `:` would be.
 fn parse_annotation(tokens: []lexer::Token, pos: u64): Annotation | error {
     if !is_kind_at(tokens, pos, lexer::TokenKind::Colon) {
         return Annotation { has_type = false; type_ann = no_type(); next = pos }
@@ -288,23 +186,6 @@ fn parse_annotation(tokens: []lexer::Token, pos: u64): Annotation | error {
     Annotation { has_type = true; type_ann = ty.node; next = ty.next }
 }
 
-/**
- * parse_inline_binding — parse a local binding carrying the `#inline` layout attribute (C4's NEW
- * binding parse site): `#inline let|mut|var|const TARGET [: T] = value`. The attribute forces a
- * boxed-by-default union slot back to the in-frame inline-tag representation; it is recognized and
- * consumed here, then the binding parses normally. Only a `let`/`mut`/`var`/`const` may follow
- * `#inline` in statement position — any other statement after `#inline` is a precise placement error.
- *
- * NOTE (bounded C4 divergence, reported to the integrator): the parsed `#inline` flag is not yet
- * persisted onto the binding AST nor honored by codegen — the end-to-end layout flip is a flagged
- * remainder (see the C4 report). The parse site + `inline_attr_eligible` validator land in C4.
- *
- * @param tokens  the token stream
- * @param pos     the index of the leading `#` token
- * @return        the parsed binding statement (past the value), or a precise placement error
- * @throws        when `#` is not `#inline`, or `#inline` is not followed by a binding keyword
- * @since 0.3.0.30 (null-union C4)
- */
 fn parse_inline_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     if !is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) || tokens[pos + 1].text != "inline" {
         return err_at(tokens, pos + 1, "expected `inline` after `#` — only `#inline` attaches to a local binding")
@@ -316,18 +197,6 @@ fn parse_inline_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> 
     parse_binding(tokens, after)
 }
 
-/**
- * parse_attributed_binding — dispatch a `#`-attributed statement to its binding parse. `#inline`
- * keeps its layout-attribute parse; the annotation-DI binding lifetime `#singleton` (and the
- * rejected `#scoped`/`#transient`) were retired by §7 part 2, so any other `#name` is now a precise
- * placement error.
- *
- * @param tokens  the token stream
- * @param pos     the index of the leading `#` token
- * @return        the parsed binding statement, or a precise placement/rejection error
- * @throws        when `#` is not `#inline`, or is not followed by a binding keyword
- * @since 0.3.1
- */
 fn parse_attributed_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     if !is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) {
         return err_at(tokens, pos + 1, "expected an attribute name after `#` (only `#inline` attaches to a local binding)")
@@ -337,15 +206,6 @@ fn parse_attributed_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement
     err_at(tokens, pos + 1, "unknown binding attribute — only `#inline` (layout) attaches to a local binding")
 }
 
-/**
- * parse_binding — parse a `let|mut|var|const TARGET [: T] = value` binding at `pos` (B.13, B.21).
- * TARGET is a name or a destructure `{ x; y }` (`parse_bind_target`).
- *
- * @param tokens  the token stream
- * @param pos     the index of the binding keyword (`let`/`mut`/`const`), or of the contextual `var`
- *                head (`is_var_binding_head`)
- * @return        the parsed binding statement, or a parse error
- */
 fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     if is_ref_binding_head(tokens, pos + 1) {
         return err_at(tokens, pos + 1, "a reference binding is written `ref x: T` — the `ref` is itself the binding modifier; there is no `let ref`/`mut ref`/`var ref`/`const ref` (tripartite law: `let` protects a value, `mut`/`var` unlock a value, `ref` aliases — a reference is inherently mutable, so no immutable reference exists)")
@@ -366,20 +226,6 @@ fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error
     Parsed<@Statement()> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; is_ref = false; value = v.node }; next = v.next }
 }
 
-/**
- * parse_multibind — parse a MULTIPLE binding `var|const TARGETS [: T] = VALUES` (§9 F). `tpos` is the
- * first target token (right after the binding keyword). The target shape is an array decomposition
- * `[ a, _, .., b ]` (leading `[`) or a parallel name-list `a, _, c`; then an optional shared `: T`
- * annotation (ruling 1), `=`, and a comma-separated value list. The result is the single new
- * `MultiBind` statement (the checker desugars it to existing typed nodes).
- *
- * @param tokens  the token stream
- * @param tpos    the first target token (after `var`/`const`)
- * @param kind    the mutability the keyword declared (`Const`/`Mut`)
- * @return        the parsed `MultiBind` statement and the resume index, or a parse error
- * @throws        on a malformed target list, a missing `=`, or a malformed value list
- * @since §9 F
- */
 fn parse_multibind(tokens: []lexer::Token, tpos: u64, kind: BindKind): Parsed<@Statement()> | error {
     var line = tokens[tpos].line
     var col = tokens[tpos].col
@@ -398,17 +244,6 @@ fn parse_multibind(tokens: []lexer::Token, tpos: u64, kind: BindKind): Parsed<@S
     Parsed<@Statement()> { node = MultiBind { kind = kind; shape = shape; targets = tl.items; has_type = ann.has_type; type_ann = ann.type_ann; values = vals.items; line = line; col = col }; next = vals.next }
 }
 
-/**
- * parse_parallel_bind_targets — parse the comma-separated targets of a parallel multiple binding
- * `a, _, c` (§9 F). Each target is a NAME (`BindName`) or the `_` discard (`BindSkip`); the `..`
- * skip-range is rejected here (it is legal only inside an array decomposition, ruling 2).
- *
- * @param tokens  the token stream
- * @param pos     the first target token
- * @return        the parsed `BindElem` list and the resume index, or a parse error
- * @throws        when a target is neither a name nor `_`
- * @since §9 F
- */
 fn parse_parallel_bind_targets(tokens: []lexer::Token, pos: u64): ParsedList<@BindElem()> | error {
     var p = pos
     var elems: []@BindElem() = teko::list::empty()
@@ -430,17 +265,6 @@ fn parse_parallel_bind_targets(tokens: []lexer::Token, pos: u64): ParsedList<@Bi
     ParsedList<@BindElem()> { items = elems; next = p }
 }
 
-/**
- * parse_array_bind_targets — parse the bracketed targets of an array decomposition `[ a, _, .., b ]`
- * (§9 F, ruling 2). Each element is a NAME, the `_` discard, or exactly one `..` skip-range marker
- * (`BindRest`) that skips 0+ middle elements. `pos` is at the `[`.
- *
- * @param tokens  the token stream
- * @param pos     the `[` token position
- * @return        the parsed `BindElem` list and the index past `]`, or a parse error
- * @throws        on an empty `[]`, a second `..`, a missing `]`, or an unexpected token
- * @since §9 F
- */
 fn parse_array_bind_targets(tokens: []lexer::Token, pos: u64): ParsedList<@BindElem()> | error {
     var p = skip_seps(tokens, pos + 1)
     if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
@@ -476,17 +300,6 @@ fn parse_array_bind_targets(tokens: []lexer::Token, pos: u64): ParsedList<@BindE
     ParsedList<@BindElem()> { items = elems; next = p + 1 }
 }
 
-/**
- * paren_has_top_comma — does the parenthesized group that OPENS at `lpos` contain a comma at its top
- * nesting level (§9 F)? Scans from the `(` to its matching `)`, tracking (), [], {} depth; a comma at
- * depth 1 marks a multiple-return value list `return (a, b)`, distinguishing it from a grouped single
- * expression `return (a + b)` (no top comma) — which stays the ordinary single-return path.
- *
- * @param tokens  the token stream
- * @param lpos    the `(` token position
- * @return        true iff a top-level comma separates values inside the group
- * @since §9 F
- */
 fn paren_has_top_comma(tokens: []lexer::Token, lpos: u64): bool {
     var depth: i64 = 0
     var p = lpos
@@ -506,18 +319,6 @@ fn paren_has_top_comma(tokens: []lexer::Token, lpos: u64): bool {
     false
 }
 
-/**
- * parse_return_value_list — parse the comma-separated values of a multiple return `return (e1, e2, …)`
- * (§9 F, ruling 3). `pos` is at the `(`. The `( )` are recognized ONLY here (never a standalone
- * `(a, b)` expression, which stays a parse error), so there is no first-class tuple value.
- *
- * @param tokens  the token stream
- * @param pos     the `(` token position
- * @return        the parsed value list (length ≥ 2, guaranteed by the caller's top-comma test) and the
- *                index past `)`, or a parse error
- * @throws        on a malformed value expression or a missing `)`
- * @since §9 F
- */
 fn parse_return_value_list(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
     var p = skip_seps(tokens, pos + 1)
     var vals: []Expr = teko::list::empty()
@@ -534,19 +335,6 @@ fn parse_return_value_list(tokens: []lexer::Token, pos: u64): ParsedList<Expr> |
     ParsedList<Expr> { items = vals; next = p + 1 }
 }
 
-/**
- * parse_multibind_values — parse the comma-separated right-hand side of a multiple binding (§9 F):
- * one or more `parse_expr` values. A single value is either the sole array source (`ArrayDecomp`) or
- * a multiple-return call (`Parallel`); several values are the parallel list. Commas INSIDE an
- * expression (a call's arguments) are consumed by `parse_expr`, so only top-level commas separate
- * values.
- *
- * @param tokens  the token stream
- * @param pos     the first value token (after `=`)
- * @return        the parsed value `Expr` list and the resume index, or a parse error
- * @throws        when a value expression fails to parse
- * @since §9 F
- */
 fn parse_multibind_values(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
     var p = pos
     var vals: []Expr = teko::list::empty()
@@ -560,51 +348,17 @@ fn parse_multibind_values(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | 
     ParsedList<Expr> { items = vals; next = p }
 }
 
-/**
- * bind_kind_at — the `BindKind` a binding head at `pos` declares: `Const` for the `const` keyword,
- * `Mut` for the contextual `var` head (0.3.1 mudancas-superficie-0.3.1.md §1 — every local is an
- * always-mutable `var`). `let`/`mut` are RETIRED and rejected earlier in `parse_binding`, so
- * they never reach here.
- *
- * @param tokens  the token stream
- * @param pos     a binding head position already confirmed by the caller (`is_binding_head`)
- * @return        the `BindKind` to stamp on the resulting `Binding`
- */
 fn bind_kind_at(tokens: []lexer::Token, pos: u64): BindKind {
     if kind_at(tokens, pos) == lexer::TokenKind::Const { return BindKind::Const }
     BindKind::Mut
 }
 
-/**
- * is_ref_binding_head — does `pos` open a `ref`-modifier binding (0.3.0.30 Part A)? A reference
- * binding is spelled `ref NAME : T = e` (or `ref NAME = e`): the contextual `ref` identifier (never
- * a reserved word) immediately followed by a binding NAME and then a `:` (annotation) or `=` (init).
- * The name+`:`/`=` lookahead keeps a bare identifier `ref` used as a value/expression unaffected.
- *
- * @param tokens  the token stream
- * @param pos     the candidate `ref` position
- * @return        true iff `pos` opens a `ref`-modifier binding
- */
 fn is_ref_binding_head(tokens: []lexer::Token, pos: u64): bool {
     if !(is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "ref") { return false }
     if !is_name_at(tokens, pos + 1) { return false }
     is_kind_at(tokens, pos + 2, lexer::TokenKind::Colon) || is_kind_at(tokens, pos + 2, lexer::TokenKind::Assign)
 }
 
-/**
- * is_var_binding_head — does `pos` open a `var`-keyword binding (0.3.1 mudancas-superficie-0.3.1.md
- * §1)? `var` is CONTEXTUAL, like `ref`: recognized by the parser only in this exact head shape, never
- * reserved in the lexer's keyword table. The additive window cannot afford to reserve it outright —
- * the seed still builds `src/` written in `let`/`mut`, and `teko::env::var` (plus any local literally
- * named `var`) must keep parsing everywhere else. The head is the `var` identifier immediately
- * followed by either a destructure `{ … }`, or a binding NAME and then a `:` (annotation) or `=`
- * (init) — the same two-token lookahead `is_ref_binding_head` uses, plus the destructure alternative
- * `let`/`mut`/`const` already support via `parse_bind_target`.
- *
- * @param tokens  the token stream
- * @param pos     the candidate `var` position
- * @return        true iff `pos` opens a `var` binding
- */
 fn is_var_binding_head(tokens: []lexer::Token, pos: u64): bool {
     if !(is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "var") { return false }
     if is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) { return true }
@@ -613,52 +367,15 @@ fn is_var_binding_head(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos + 2, lexer::TokenKind::Colon) || is_kind_at(tokens, pos + 2, lexer::TokenKind::Assign)
 }
 
-/**
- * is_multibind_shape — does the target position `tpos` (right after `var`/`const`) open a MULTIPLE
- * binding (§9 F)? True for an array decomposition `[ … ]` (a leading `[`) or a parallel name-list
- * `a, …` (a name immediately followed by a comma). A single `var a =`/`var a :` and a field
- * destructure `var { … }` are NOT multiple and stay on the ordinary `Binding` path.
- *
- * @param tokens  the token stream
- * @param tpos    the target position (right after the binding keyword)
- * @return        true iff `tpos` opens an array-decomposition or parallel multiple binding
- * @since §9 F
- */
 fn is_multibind_shape(tokens: []lexer::Token, tpos: u64): bool {
     if is_kind_at(tokens, tpos, lexer::TokenKind::LBracket) { return true }
     is_name_at(tokens, tpos) && is_kind_at(tokens, tpos + 1, lexer::TokenKind::Comma)
 }
 
-/**
- * is_binding_head — does `pos` open an ordinary (non-`ref`) local binding: the reserved `let`/`mut`/
- * `const` keyword, or the contextual `var` head (`is_var_binding_head`)? Shared by the statement
- * dispatcher and the `#inline`/`#singleton` attribute parsers, so the four spellings stay in sync at
- * every call site that needs to recognize one.
- *
- * @param tokens  the token stream
- * @param pos     the candidate binding-keyword position
- * @return        true iff `pos` opens a `let`/`mut`/`var`/`const` binding
- */
 fn is_binding_head(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Const) || is_var_binding_head(tokens, pos)
 }
 
-/**
- * parse_ref_binding — parse a `ref NAME [: T] = e` reference binding (0.3.0.30 Part A). `ref` is the
- * binding modifier of the IDENTITY axis (`let`/`mut` are the mutability axis): the bound name
- * aliases its target with write-through semantics (R4) and is born mutable — there is no `ref mut`.
- * It desugars to a `mut` `Binding` carrying `is_ref = true`; an ANNOTATED `ref x: T` additionally
- * wraps the annotation in the internal `Ref<>` (checker `Reference{T}`), while an UN-annotated
- * `ref x = y` leaves the checker to infer `Ref<>` from the source (owner ruling 2026-07-30). The
- * `is_ref` flag is what makes the un-annotated form a reference at all: before it the modifier
- * survived ONLY inside the annotation, so `ref x = y` reached the checker indistinguishable from
- * `mut x = y` and was silently compiled into a COPY.
- *
- * @param tokens  the token stream
- * @param pos     the index of the leading `ref` token
- * @return        the parsed reference `Binding` and the index past the value, or a parse error
- * @throws        when the target, annotation, `=`, or value fails to parse
- */
 fn parse_ref_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     var tgt = match parse_bind_target(tokens, pos + 1) { Parsed<@BindTarget()> as x => x; error as e => return e }
     var ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
@@ -670,8 +387,6 @@ fn parse_ref_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | e
     Parsed<@Statement()> { node = Binding { kind = BindKind::Mut; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; is_ref = true; value = v.node }; next = v.next }
 }
 
-// a binding target: a simple name or a destructure `{ x; y }` (B.13). `pos` after the kw.
-// Reuses parse_field_names for the `{ … }` name list.
 fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<@BindTarget()> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::LBrace) {
         var names = match parse_field_names(tokens, pos) { ParsedList<str> as x => x; error as e => return e }
@@ -686,25 +401,11 @@ fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<@BindTarget()> | 
     Parsed<@BindTarget()> { node = SimpleName { name = tokens[pos].text }; next = pos + 1 }
 }
 
-/**
- * parse_discard_assign — parse the write-only discard-assign statement `_ = expr` (owner ruling
- * 2026-07-15): evaluate `expr` for its side effect and drop the result, binding nothing. The node
- * reuses the SimpleName "_" binding, which codegen lowers to `(void)(expr);`. Only a plain `=`
- * reaches here (the caller checks for it); a compound `_ += …` never matches, since the discard
- * carries no value to read-modify-write.
- *
- * @param tokens  the token stream
- * @param pos     the index of the leading `_` (Underscore) token
- * @return        the parsed discard Binding and the index past the value, or a parse error
- * @throws        when the discarded expression fails to parse
- */
 fn parse_discard_assign(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     var dv = match parse_expr(tokens, pos + 2) { Parsed<Expr> as x => x; error as e => return e }
     Parsed<@Statement()> { node = Binding { kind = BindKind::Let; target = SimpleName { name = "_" }; has_type = false; type_ann = no_type(); is_ref = false; value = dv.node }; next = dv.next }
 }
 
-// `name op= value` (B.4 — assignment is statement-only). Simple-name target; the op
-// (= += -= …) is captured. (is_assign_op already checked at dispatch.)
 fn parse_assign(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     var name = tokens[pos].text
     var op = kind_at(tokens, pos + 1)

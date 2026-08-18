@@ -1,11 +1,7 @@
-// src/emit/tkb_frame.tks  (namespace 'teko::emit')
 
 use teko::checker
 use teko::parser
 
-// write_u64 lives in tkb_buf.tks (same `teko::emit` namespace) — lo u32 then hi u32, the same
-// LE byte run this file used to spell inline. ONE definition (DRY; the generated C must have a
-// single `teko__emit__write_u64`, and a duplicate fn name in one namespace is not allowed).
 
 fn append_bytes(dst: []byte, src: []byte): []byte {
     var b = dst
@@ -18,7 +14,6 @@ fn append_bytes(dst: []byte, src: []byte): []byte {
     b
 }
 
-// --- collect every string into the table (pre-pass; mirrors the write helpers) ---
 
 fn collect_type_list(t: StrTable, xs: []@Type()): StrTable {
     var tab = t
@@ -63,7 +58,6 @@ fn collect_texprs(t: StrTable, xs: []checker::TExpr): StrTable {
     tab
 }
 
-// C6.7: collect strings from []TArrayElem — the is_spread flag carries no string, only recurse .expr.
 fn collect_array_elems(t: StrTable, xs: []checker::TArrayElem): StrTable {
     var tab = t
     var i = 0
@@ -86,7 +80,6 @@ fn collect_terms(t: StrTable, ts: []checker::TCmpTerm): StrTable {
     tab
 }
 
-// intern each interpolation piece (a literal str), in order. ($"…{expr}…" — frame collect.)
 fn collect_pieces(t: StrTable, ps: []str): StrTable {
     var tab = t
     var i = 0
@@ -98,7 +91,6 @@ fn collect_pieces(t: StrTable, ps: []str): StrTable {
     tab
 }
 
-// (C7.16) collect a BindTarget's name(s).
 fn collect_bindtarget(t: StrTable, bt: @BindTarget()): StrTable {
     match bt {
         parser::SimpleName as s => st_intern(t, s.name).table
@@ -106,7 +98,6 @@ fn collect_bindtarget(t: StrTable, bt: @BindTarget()): StrTable {
     }
 }
 
-// (C7.16) collect a []TStatement (mirrors write_tstatements).
 fn collect_tstatements(t: StrTable, xs: []@TStatement()): StrTable {
     var tab = t
     var i = 0
@@ -118,7 +109,6 @@ fn collect_tstatements(t: StrTable, xs: []@TStatement()): StrTable {
     tab
 }
 
-// (C7.16) collect a TStatement's strings (mirrors write_tstatement).
 fn collect_tstatement(t: StrTable, s: @TStatement()): StrTable {
     match s {
         checker::TBinding as bd => collect_strings(collect_type_strings(collect_bindtarget(t, bd.target), bd.bound), bd.value)
@@ -135,7 +125,6 @@ fn collect_tstatement(t: StrTable, s: @TStatement()): StrTable {
     }
 }
 
-// (C7.16) intern a struct-init's field names AND recurse each field value (write order = this order).
 fn collect_structinit(t: StrTable, si: checker::TStructInit): StrTable {
     var tab = t
     var i = 0
@@ -149,34 +138,28 @@ fn collect_structinit(t: StrTable, si: checker::TStructInit): StrTable {
 }
 
 fn collect_strings(t: StrTable, te: checker::TExpr): StrTable {
-    var t1 = collect_type_strings(t, te.type)   // the node's type may name things
+    var t1 = collect_type_strings(t, te.type)
     match te.kind {
-        checker::TVar as v => st_intern(st_intern(t1, v.name).table, v.func_ns).table   // (W10a) intern func_ns too
+        checker::TVar as v => st_intern(st_intern(t1, v.name).table, v.func_ns).table
         checker::TStrLit as s => st_intern(t1, s.text).table
-        checker::TCharLit as ch => st_intern(t1, ch.bytes).table   // (UTF-8 increment 1) intern the codepoint's UTF-8 bytes
+        checker::TCharLit as ch => st_intern(t1, ch.bytes).table
         checker::TBinary as b => collect_strings(collect_strings(t1, b.left), b.right)
         checker::TUnary as u => collect_strings(t1, u.operand)
         checker::TCompare as c => collect_terms(collect_strings(t1, c.first), c.rest)
-        // (W10b.D3) a dispatch node (tag 24) also serializes its method Func — intern its Named
-        // param/return names too (tag 7 never writes callee_type, so this is D3-only).
         checker::TCall as cl => {
             var tcal = collect_path(t1, cl.callee)
             var tct = if cl.is_iface_dispatch { collect_type_strings(tcal, cl.callee_type) } else { tcal }
             var targs = collect_texprs(tct, cl.args)
             st_intern(targs, cl.call_ns).table
         }
-        checker::TCast as c => collect_strings(t1, c.expr)   // S1a — recurse into the inner expr
-        checker::TFieldAccess as f => st_intern(collect_strings(t1, f.receiver), f.field).table   // S1b — receiver AND the field name (must intern)
-        checker::TInterp as in => collect_texprs(collect_pieces(t1, in.pieces), in.holes)   // $"…{expr}…" — intern pieces, recurse holes
-        // (C7.16) the kinds previously dropped to `_` — their strings/sub-exprs MUST be interned or the
-        // writer's st_find returns the not-found sentinel and the node fails to round-trip.
+        checker::TCast as c => collect_strings(t1, c.expr)
+        checker::TFieldAccess as f => st_intern(collect_strings(t1, f.receiver), f.field).table
+        checker::TInterp as in => collect_texprs(collect_pieces(t1, in.pieces), in.holes)
         checker::TStructInit as si => collect_structinit(t1, si)
         checker::TIndex as ix => collect_strings(collect_strings(t1, ix.receiver), ix.index)
         checker::TInExpr as ie => collect_texprs(collect_strings(t1, ie.lhs), ie.elems)
         checker::TArrayLit as a => collect_array_elems(t1, a.elements)
         checker::TPathExpr as pe => st_intern(st_intern(t1, pe.enum_name).table, pe.member).table
-        // (C7.16) IF: collect cond + both statement blocks. (TMatchExpr stays tag-only until the
-        // pattern codec lands.) TNumber/TByteLit/TBoolLit/TNullLit carry no strings → `_`.
         checker::TIfExpr as iff => collect_tstatements(collect_tstatements(collect_strings(t1, iff.cond), iff.then_blk), iff.else_blk)
         checker::TMatchExpr as m => collect_tarms(collect_strings(t1, m.subject), m.arms)
         checker::TBlockExpr as b => collect_tstatements(t1, b.body)
@@ -184,7 +167,6 @@ fn collect_strings(t: StrTable, te: checker::TExpr): StrTable {
     }
 }
 
-// (C7.16) PROGRAM-FRAMING collect pass (mirrors the write_* framing helpers).
 fn collect_typeexprs(t: StrTable, xs: []@TypeExpr()): StrTable {
     var tab = t
     var i = 0
@@ -196,7 +178,7 @@ fn collect_typeexpr(t: StrTable, te: @TypeExpr()): StrTable {
         parser::NamedType as n => collect_path(t, n.path)
         parser::SliceType as s => collect_typeexpr(t, s.element)
         parser::UnionType as u => collect_typeexprs(t, u.members)
-        parser::FunctionType as f => collect_typeexpr(collect_typeexprs(t, f.params), f.ret)   // (W10a)
+        parser::FunctionType as f => collect_typeexpr(collect_typeexprs(t, f.params), f.ret)
         parser::MacroType => t
     }
 }
@@ -212,39 +194,19 @@ fn collect_fields(t: StrTable, xs: []parser::Field): StrTable {
     loop { if i >= xs.len { break }; tab = collect_typeexpr(st_intern(tab, xs[i].name).table, xs[i].type_ann); i++ }
     tab
 }
-/**
- * Intern the SIGNATURE strings of one static type-member `ConstDecl` (#594 crumb 8): its name,
- * declared-type annotation, and doc-comment. The initializer expression is NOT collected — like a
- * parameter's default it does not ride the body codec; the member const's VALUE travels instead on
- * the hoisted module-level `TConstDecl` @TItem() (a full typed `TExpr`).
- *
- * @param t   the string table so far
- * @param cd  the member const declaration to collect from
- * @return    `t` with the const's name/type/doc strings interned
- */
 fn collect_constdecl(t: StrTable, cd: parser::ConstDecl): StrTable {
     collect_typeexpr(st_intern(st_intern(t, cd.name).table, cd.doc).table, cd.ty)
 }
-/**
- * Intern the strings of a type body's `consts` list (#594 crumb 8): the static member const surface
- * a struct/class/trait carries, in declaration order, mirroring `write_constdecls`.
- *
- * @param t   the string table so far
- * @param xs  the member const declarations to collect from
- * @return    `t` with every member const's signature strings interned
- */
 fn collect_constdecls(t: StrTable, xs: []parser::ConstDecl): StrTable {
     var tab = t
     var i = 0
     loop { if i >= xs.len { break }; tab = collect_constdecl(tab, xs[i]); i++ }
     tab
 }
-/** (#165 C5) collect a StructBody's fields + methods + implements + member consts strings. */
 fn collect_struct_body(t: StrTable, s: parser::StructBody): StrTable {
     collect_constdecls(collect_pieces(collect_functions(collect_fields(t, s.fields), s.methods), s.implements), s.consts)
 }
 
-/** (#165 C5) collect a ClassBody's base names + implements + fields + methods + member consts strings. */
 fn collect_class_body(t: StrTable, c: parser::ClassBody): StrTable {
     var bases = st_intern(st_intern(t, c.base_name).table, c.base_binding_name).table
     var impls = collect_pieces(bases, c.implements)
@@ -266,19 +228,17 @@ fn collect_typebody(t: StrTable, tb: @TypeBody()): StrTable {
         parser::TraitBody as trb => collect_pieces(collect_constdecls(collect_functions(collect_fields(t, trb.fields), trb.methods), trb.consts), trb.implements)
     }
 }
-/** (#165 C2) collect a ConstraintExpr's atom names (mirrors write_constraint). */
 fn collect_constraint(t: StrTable, c: @ConstraintExpr()): StrTable {
     match c {
         parser::ConstraintAtom as a => st_intern(t, a.name).table
         parser::ConstraintAnd as an => collect_constraint(collect_constraint(t, an.left), an.right)
         parser::ConstraintOr as o => collect_constraint(collect_constraint(t, o.left), o.right)
-        parser::ConstraintNotNull => t   /* (§9.2b) no interned name */
-        parser::ConstraintForm as f => st_intern(t, f.form).table   /* (§9.2b) intern the form word */
+        parser::ConstraintNotNull => t
+        parser::ConstraintForm as f => st_intern(t, f.form).table
         parser::NoConstraint => t
     }
 }
 
-/** (#165 C2) collect a []ConstraintExpr (mirrors write_constraints). */
 fn collect_constraints(t: StrTable, xs: []@ConstraintExpr()): StrTable {
     var tab = t
     var i = 0
@@ -293,7 +253,6 @@ fn collect_typedecl(t: StrTable, d: parser::TypeDecl): StrTable {
     st_intern(collect_typebody(cons, d.body), d.doc).table
 }
 
-/** (#165 C4) collect a parser::Function's SIGNATURE strings (mirrors write_function — body is stubbed). */
 fn collect_function(t: StrTable, f: parser::Function): StrTable {
     var tab = st_intern(t, f.name).table
     tab = collect_pieces(tab, f.type_params)
@@ -306,21 +265,12 @@ fn collect_function(t: StrTable, f: parser::Function): StrTable {
     st_intern(tab, f.os_guard).table
 }
 
-/** (#165 C4/C5) collect a []parser::Function (mirrors write_functions). */
 fn collect_functions(t: StrTable, xs: []parser::Function): StrTable {
     var tab = t
     var i = 0
     loop { if i >= xs.len { break }; tab = collect_function(tab, xs[i]); i++ }
     tab
 }
-/**
- * Intern a `UseDecl`'s strings ahead of `write_usedecl`: the path segments, the alias, and
- * (S1, the 0.1.0.0-beta remodel §3.1) every grouped-import name.
- *
- * @param StrTable t  the string table so far
- * @param parser::UseDecl u  the `UseDecl` to collect from
- * @return StrTable  `t` with the path/alias/names interned
- */
 fn collect_usedecl(t: StrTable, u: parser::UseDecl): StrTable {
     collect_pieces(st_intern(collect_path(t, u.path), u.alias).table, u.names)
 }
@@ -343,16 +293,6 @@ fn collect_titems(t: StrTable, xs: []@TItem()): StrTable {
     loop { if i >= xs.len { break }; tab = collect_titem(tab, xs[i]); i++ }
     tab
 }
-/**
- * Intern the strings of a module-level `TConstDecl` @TItem() (#594 crumb 8): its name, declaring
- * namespace, and doc, plus every string in its resolved value type and typed initializer. Mirrors
- * `write_tconstdecl`, so a `pub`/`exp` module const's typed initializer survives the `.tkb` round
- * trip and a consuming module inlines it identically.
- *
- * @param t   the string table so far
- * @param c   the typed module const to collect from
- * @return    `t` with the const's name/namespace/doc + type + initializer strings interned
- */
 fn collect_tconstdecl(t: StrTable, c: checker::TConstDecl): StrTable {
     var named = st_intern(st_intern(st_intern(t, c.name).table, c.namespace).table, c.doc).table
     collect_strings(collect_type_strings(named, c.ty), c.init)
@@ -368,11 +308,10 @@ fn collect_titem(t: StrTable, it: @TItem()): StrTable {
 }
 fn collect_program(t: StrTable, prog: checker::TProgram): StrTable { collect_titems(t, prog.items) }
 
-// (C7.16) MATCH FRAMING collect — pattern-expr / Pattern / TArm.
 fn collect_pexpr(t: StrTable, e: parser::Expr): StrTable {
     match e.kind {
         parser::StrLit as s => st_intern(t, s.text).table
-        _ => t   // Number/ByteLit carry no interned string
+        _ => t
     }
 }
 fn collect_patterns(t: StrTable, xs: []@Pattern()): StrTable {
@@ -409,30 +348,9 @@ fn collect_tarm(t: StrTable, a: checker::TArm): StrTable {
     collect_tstatements(tab, a.body)
 }
 
-// --- the frame: header (magic + version + hash) + the body ---
 
-/**
- * Wire format version of a single-TExpr `.tkb`. Bumped 1 → 2 in 0.3.1: the drop-128 family
- * removal (R2) deleted `PrimKind::{u64,i64,f32}` and RENUMBERED the surviving `PrimKind`
- * ordinals on the wire, so a pre-0.3.1 artifact would deserialize into the WRONG types if the
- * reader accepted it. Owner ruling 2026-07-24: an old `.tkb` must FAIL LOUD against the new
- * compiler (M.3) — rebuild the artifact; no retroactive support for pre-STS/LTS formats.
- * Bumped 3 → 4 in 0.3.1 §7: the DI redesign added the `is_service`/`service_lifetime` marks to the
- * `ClassBody` wire record and removed the old annotation-DI bytes (`di_kind`/`has_di_key`/`di_key`,
- * `has_inject`/`injects`) — a wire shape change. An old `.tkb` FAILS LOUD (M.3) — rebuild it.
- * @since 0.3.1 (drop-128 R2)
- */
 pub const TKB_EXPR_VERSION: u32 = 4
 
-/**
- * Wire format version of a whole-program `.tkb` (C7.16). Bumped 4 → 5 in 0.3.1 §6: the retirement
- * of `unsafe` removed the trailing `is_unsafe` byte from the `TypeDecl`/`Function` records (a wire
- * shape change, same standard bump procedure as the `PrimKind` renumbering of R2). An old `.tkb`
- * FAILS LOUD against the new compiler (M.3) — rebuild the artifact.
- * Bumped 5 → 6 in 0.3.1 §7: the DI redesign changed the `ClassBody`/`TypeDecl`/`Function` wire
- * records (service marks in, annotation-DI bytes out). An old `.tkb` FAILS LOUD (M.3) — rebuild it.
- * @since 0.3.1 (§6 retire unsafe)
- */
 pub const TKB_PROGRAM_VERSION: u32 = 6
 
 fn serialize(te: checker::TExpr): []byte {
@@ -445,21 +363,10 @@ fn serialize(te: checker::TExpr): []byte {
     out = write_u8(out, b'B')
     out = write_u8(out, 0)
     out = write_u32(out, TKB_EXPR_VERSION)
-    out = write_u64(out, h)   // FNV-1a of the body
+    out = write_u64(out, h)
     append_bytes(out, body)
 }
 
-/**
- * serialize_program — serialize a whole typed PROGRAM (C7.16). Same frame, VERSION 3 (program tree)
- * so the reader can't confuse it with a version-1 single-expr `.tkb` nor an older v2 that lacked
- * call_ns / type_params / type_constraints / method fidelity (#165). The KEYSTONE for `.tkl`
- * packaging. Propagates the `write_program` honest-stop when the program carries a target-conditional
- * const that may not yet cross a `.tkb` boundary (§16).
- *
- * @param prog  the typed program to serialize
- * @return      the framed `.tkb` bytes (magic, version, FNV-1a hash, body)
- * @throws      when the program carries a target-conditional const (`write_program`)
- */
 fn serialize_program(prog: checker::TProgram): []byte | error {
     var table = collect_program(st_empty(), prog)
     var body = match write_program(write_strtable(teko::list::empty(), table), table, prog) { []byte as o => o; error as e => return e }

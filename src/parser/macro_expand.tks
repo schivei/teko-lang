@@ -1,60 +1,13 @@
 use teko::lexer
 
-/**
- * MAX_MACRO_DEPTH — the bounded expansion depth for Family-A macro expansion (§14 A3). A `@macro` whose
- * expansion re-introduces a `@macro` call recurses; past this fixed limit the expander stops with a
- * located error rather than looping forever. A pure constant, so self-host generations are byte-identical.
- *
- * @return the maximum macro-expansion nesting depth
- * @since 0.4-macros (§14 A3)
- */
 fn max_macro_depth(): u64 { 64 to u64 }
 
-/**
- * MacroHoles — the injection-hole substitution active during ONE macro expansion (§14 A3): the caller's
- * INTACT argument nodes, indexed positionally by the macro's parameter list. `active` is false in the
- * top-level program walk (no substitution — only `@macro` calls expand); it is true while re-walking a
- * spliced `lowering` fragment, where a `__mhole_<i>` placeholder Var is replaced by `args[i]`.
- *
- * @field active true iff a hole substitution is in effect (inside a spliced fragment)
- * @field args   the caller's argument expressions, positional by macro parameter index
- * @since 0.4-macros (§14 A3)
- */
 type MacroHoles = struct { active: bool; args: []Expr }
 
-/**
- * no_holes — the empty hole context for the top-level program walk (no substitution in effect).
- *
- * @return an inactive `MacroHoles`
- * @since 0.4-macros (§14 A3)
- */
 fn no_holes(): MacroHoles { MacroHoles { active = false; args = teko::list::empty() } }
 
-/**
- * hole_placeholder_prefix — the reserved identifier prefix a `${param}` injection hole re-parses to
- * inside a spliced `lowering` fragment (§14 A3). A `${x}` for the macro's i-th parameter becomes the
- * placeholder Var `__mhole_<i>`, which the hole-substitution walk then replaces with the caller's i-th
- * argument. The prefix is reserved (double-underscore) so it never collides with a user identifier.
- *
- * @return the placeholder identifier prefix
- * @since 0.4-macros (§14 A3)
- */
 fn hole_placeholder_prefix(): str { "__mhole_" }
 
-/**
- * expand_macros_syntactic — the Family-A pre-pass (§14 A3): rewrite every `@macro`-call in the UNTYPED,
- * os-pruned program into its produced AST fragment, to a bounded depth, BEFORE type-check. A `@name(...)`
- * whose callee resolves to a `MacroDecl` is replaced by that macro's `lowering { … }` fragment, re-parsed
- * in the call's grammatical position with each `${param}` hole filled by the caller's intact argument. A
- * `comptime` `@name(...)` (Family B) is LEFT for the post-type-check fold pass. INERT FAST-PATH: a program
- * declaring no macro and calling no `@` returns UNCHANGED (the compiler corpus), so the pass is
- * byte-identical there; only a program that actually uses macros is walked and rewritten.
- *
- * @param prog  the parsed, os-pruned program (types do NOT exist yet)
- * @return      the program with every Family-A call expanded, or the first expansion error
- * @throws      an expansion-depth-exceeded diagnostic, or a malformed macro body / hole
- * @since 0.4-macros (§14 A3)
- */
 pub fn expand_macros_syntactic(prog: Program): Program | error {
     if !program_has_macros(prog) { return prog }
     var out: []Item = teko::list::empty()
@@ -69,16 +22,6 @@ pub fn expand_macros_syntactic(prog: Program): Program | error {
     Program { items = out }
 }
 
-/**
- * item_is_macro_decl — is `it` a Family-A `MacroDecl` (§14 A3)? Such a declaration is CONSUMED by the
- * expansion pass — it defines a compile-time rewrite, emits no runtime code, and is dropped from the
- * output so it never reaches type-check. A `ComptimeDecl` is NOT dropped here (Family B is folded by a
- * later, post-type-check pass).
- *
- * @param it  the item to test
- * @return    true iff the item is a macro declaration to drop
- * @since 0.4-macros (§14 A3)
- */
 fn item_is_macro_decl(it: Item): bool {
     match it.content {
         MacroDecl => true
@@ -86,15 +29,6 @@ fn item_is_macro_decl(it: Item): bool {
     }
 }
 
-/**
- * program_has_macros — does `prog` declare a macro/comptime OR call `@name(...)` anywhere (§14 A3)? The
- * INERT gate for `expand_macros_syntactic`: false ⇒ the program is returned unchanged (the compiler's own
- * corpus, byte-identical). A cheap item-level scan plus a shallow statement/expr scan.
- *
- * @param prog  the parsed program
- * @return      true iff the program uses the macro/comptime facility
- * @since 0.4-macros (§14 A3)
- */
 fn program_has_macros(prog: Program): bool {
     var i: u64 = 0
     loop {
@@ -105,16 +39,6 @@ fn program_has_macros(prog: Program): bool {
     false
 }
 
-/**
- * item_has_macro — is one flattened item a macro or comptime DECLARATION (§14 A3)? A `@name(...)` call
- * always resolves to such a declaration somewhere in the flattened program, so the presence of any
- * `MacroDecl`/`ComptimeDecl` is a sufficient (and cheap) signal that the program uses the facility — no
- * deep body scan needed for the inert gate.
- *
- * @param it  the item to test
- * @return    true iff the item is a macro/comptime declaration
- * @since 0.4-macros (§14 A3)
- */
 fn item_has_macro(it: Item): bool {
     match it.content {
         MacroDecl => true
@@ -123,18 +47,6 @@ fn item_has_macro(it: Item): bool {
     }
 }
 
-/**
- * rewrite_item — expand every Family-A macro call inside ONE item's function/statement body (§14 A3). A
- * type/const/use/macro/comptime declaration carries no expandable call in a Family-A position, so it
- * passes through; a function or loose statement has its body walked.
- *
- * @param it     the item to rewrite
- * @param prog   the whole program (the macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the rewritten item, or an expansion error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A3)
- */
 fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
     match it.content {
         Function as f => {
@@ -158,36 +70,12 @@ fn rewrite_item(it: Item, prog: Program, depth: u64): Item | error {
     }
 }
 
-/**
- * rewrite_const_decl — expand `@Type()` macros in a `const NAME: TYPE = value` declaration (§14 A4
- * type-position completeness): a module-level `const` carries BOTH a type annotation (a type position,
- * like a field or a parameter) and an initializer expression (which may hold `@macro()` value calls).
- * Reused for a `const` item and for a trait's `consts` list. Inert when neither holds a macro.
- *
- * @param cd     the const declaration to rewrite
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the const declaration with its type annotation and initializer expanded
- * @throws       when an inner type-macro or value-macro expansion fails
- * @since        §9.D sweep (Family-A type-macro completeness — const type annotations)
- */
 fn rewrite_const_decl(cd: ConstDecl, prog: Program, depth: u64): ConstDecl | error {
     var ty = match walk_type(cd.ty, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
     var iv = match walk_expr(cd.init, prog, no_holes(), depth) { Expr as x => x; error as e => return e }
     ConstDecl { name = cd.name; ty = ty; init = iv; vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col; is_global = cd.is_global }
 }
 
-/**
- * rewrite_fn_sig — expand `@Type()` macros in a function's SIGNATURE (§14 A4): each parameter's type
- * annotation and the return type. The body is walked separately (statement expansion).
- *
- * @param f      the function whose signature to rewrite
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       `f` with signature type macros expanded, or an error
- * @throws       when an inner type expansion fails
- * @since 0.4-macros (§14 A4)
- */
 fn rewrite_fn_sig(f: Function, prog: Program, depth: u64): Function | error {
     var ps = match rewrite_params(f.params, prog, depth) { []Param as p => p; error as e => return e }
     var rt = f.return_type
@@ -197,17 +85,6 @@ fn rewrite_fn_sig(f: Function, prog: Program, depth: u64): Function | error {
     Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = ps; has_return = f.has_return; return_type = rt; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator; is_global = f.is_global }
 }
 
-/**
- * rewrite_params — expand `@Type()` macros in each typed parameter's annotation (§14 A4), preserving
- * every other field. An untyped parameter passes through.
- *
- * @param params the parameters to rewrite
- * @param prog   the program
- * @param depth  the current expansion depth
- * @return       the rewritten parameters, or an error
- * @throws       when an inner type expansion fails
- * @since 0.4-macros (§14 A4)
- */
 fn rewrite_params(params: []Param, prog: Program, depth: u64): []Param | error {
     var out: []Param = teko::list::empty()
     var i: u64 = 0
@@ -224,18 +101,6 @@ fn rewrite_params(params: []Param, prog: Program, depth: u64): []Param | error {
     out
 }
 
-/**
- * rewrite_lambda_params — expand `@Type()` macros in each TYPED lambda parameter's annotation (§14 A4
- * type-position completeness): `(x: @T()) => …` is a type position exactly like a function parameter. An
- * untyped lambda parameter (`x =>`) passes through. Inert when no annotation holds a macro.
- *
- * @param params the lambda parameters to rewrite
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the rewritten lambda parameters, or an error
- * @throws       when an inner type-macro expansion fails
- * @since        §9.D sweep (Family-A type-macro completeness — lambda parameter annotations)
- */
 fn rewrite_lambda_params(params: []LambdaParam, prog: Program, depth: u64): []LambdaParam | error {
     var out: []LambdaParam = teko::list::empty()
     var i: u64 = 0
@@ -252,20 +117,6 @@ fn rewrite_lambda_params(params: []LambdaParam, prog: Program, depth: u64): []La
     out
 }
 
-/**
- * rewrite_type_decl — expand `@Type()` macros in a type declaration's type positions (§14 A4): a struct
- * or class field annotation (`[]@Type()`, the §9.D inline-union abbreviation), a variant body's union
- * type-expression, a newtype's backing type, and a transparent alias's target. Enum/flags/extern bodies
- * and interface/trait method signatures carry no directly-spliceable type position here. Inert on today's
- * corpus regardless.
- *
- * @param td     the type declaration to rewrite
- * @param prog   the program
- * @param depth  the current expansion depth
- * @return       the declaration with field type macros expanded, or an error
- * @throws       when an inner type expansion fails
- * @since 0.4-macros (§14 A4)
- */
 fn rewrite_type_decl(td: TypeDecl, prog: Program, depth: u64): TypeDecl | error {
     var nb = match td.body {
         StructBody as sb => {
@@ -293,17 +144,6 @@ fn rewrite_type_decl(td: TypeDecl, prog: Program, depth: u64): TypeDecl | error 
     TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = nb; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; is_global = td.is_global }
 }
 
-/**
- * rewrite_fields — expand `@Type()` macros in each field's type annotation (§14 A4), preserving every
- * other field attribute.
- *
- * @param fields the fields to rewrite
- * @param prog   the program
- * @param depth  the current expansion depth
- * @return       the rewritten fields, or an error
- * @throws       when an inner type expansion fails
- * @since 0.4-macros (§14 A4)
- */
 fn rewrite_fields(fields: []Field, prog: Program, depth: u64): []Field | error {
     var out: []Field = teko::list::empty()
     var i: u64 = 0
@@ -317,29 +157,10 @@ fn rewrite_fields(fields: []Field, prog: Program, depth: u64): []Field | error {
     out
 }
 
-/**
- * with_fn_body — a copy of `f` carrying the rewritten statement body `body` (§14 A3), every other field
- * preserved. The functional update the macro walk uses to thread an expanded function body back.
- *
- * @param f     the function to copy
- * @param body  the rewritten body statements
- * @return      `f` with its body replaced
- * @since 0.4-macros (§14 A3)
- */
 fn with_fn_body(f: Function, body: []@Statement()): Function {
     Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; is_static = f.is_static; is_getter = f.is_getter; is_setter = f.is_setter; accessor_prop = f.accessor_prop; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_types = f.ret_types; is_operator = f.is_operator; is_global = f.is_global }
 }
 
-/**
- * macro_decl_by_name — the `MacroDecl` a `@name(...)` call resolves to (§14 A3), matched by the call's
- * LAST path segment against every top-level macro declaration, or null when none (a `comptime` call, or
- * an unknown name, is left for a later pass / the checker).
- *
- * @param prog  the program to search
- * @param name  the macro name (the call's last segment)
- * @return      the matching macro declaration, or null
- * @since 0.4-macros (§14 A3)
- */
 fn macro_decl_by_name(prog: Program, name: str): MacroDecl | null {
     var i: u64 = 0
     loop {
@@ -353,21 +174,6 @@ fn macro_decl_by_name(prog: Program, name: str): MacroDecl | null {
     null
 }
 
-/**
- * expand_macro_call — expand ONE Family-A `@macro(...)` call in an expression position (§14 A3): resolve
- * the callee to its `MacroDecl`, take the macro body's single `lowering { … }` fragment, splice its raw
- * token run with each `${param}` hole re-parsed to a `__mhole_<i>` placeholder, parse the run as an
- * `Expr` in the call's position, then substitute each placeholder with the caller's intact argument and
- * recursively expand the result (bounded by `max_macro_depth`). A `@comptime` call is left untouched for
- * the Family-B fold pass.
- *
- * @param mc     the macro call node
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the expanded expression (or the original `MacroCall` for a Family-B call), or an error
- * @throws       an over-depth error, an unsupported multi-fragment body, or a malformed hole
- * @since 0.4-macros (§14 A3)
- */
 fn expand_macro_call(mc: MacroCall, prog: Program, depth: u64): Expr | error {
     if depth >= max_macro_depth() {
         return err_expand(mc, "macro expansion exceeded the maximum depth (a macro that expands to itself?) — §14")
@@ -380,16 +186,6 @@ fn expand_macro_call(mc: MacroCall, prog: Program, depth: u64): Expr | error {
     walk_expr(parsed, prog, MacroHoles { active = true; args = mc.args }, depth + 1 to u64)
 }
 
-/**
- * single_lowering_frag — the SOLE `lowering { … }` fragment of a macro body (§14 A3). A3 supports a macro
- * whose body is exactly one lowering fragment (the expression-template case); a body with none, or with
- * comptime logic / multiple fragments, is a located "not yet supported" error (reported for later crumbs).
- *
- * @param md  the macro declaration
- * @return    the single fragment, or an error when the body is not a lone fragment
- * @throws    when the macro body is empty, multi-statement, or not a single `lowering` fragment
- * @since 0.4-macros (§14 A3)
- */
 fn single_lowering_frag(md: MacroDecl): LoweringFrag | error {
     if md.body.len != 1 {
         return error { message = teko::str::concat("macro `", teko::str::concat(md.name, "`: §14 A3 supports a body of exactly one `lowering { … }` fragment (comptime logic / multiple fragments arrive in a later crumb)")) }
@@ -400,27 +196,8 @@ fn single_lowering_frag(md: MacroDecl): LoweringFrag | error {
     }
 }
 
-/**
- * MacroParamBinds — the bool parameters bound for ONE type-macro expansion (§14 Form 2): parallel
- * name/value slices. A pre-Form-2 type-macro is parameterless, so this is empty for every current call and
- * stays empty until the §9.D sweep authors an `@X(true)`-style parametric macro; an empty binds makes
- * `select_lowering_frag` byte-identical to the retired `single_lowering_frag`.
- *
- * @field names  the bound parameters' names, declaration order
- * @field vals   each parameter's bound bool value, parallel to `names`
- * @since §14 Form 2 (parametric type-macros)
- */
 type MacroParamBinds = struct { names: []str; vals: []bool }
 
-/**
- * macro_bind_of — the bound bool value of parameter `name`, or null when `name` is not a bound bool
- * parameter of the current type-macro expansion (§14 Form 2).
- *
- * @param binds  the parameter bindings for this expansion
- * @param name   the parameter name to look up
- * @return       the bound bool, or null when `name` is not a bound parameter
- * @since §14 Form 2
- */
 fn macro_bind_of(binds: MacroParamBinds, name: str): bool | null {
     var i: u64 = 0
     loop {
@@ -431,18 +208,6 @@ fn macro_bind_of(binds: MacroParamBinds, name: str): bool | null {
     null
 }
 
-/**
- * macro_cond_bool — evaluate a type-macro `if` CONDITION to a bool at expansion time (§14 Form 2). The
- * minimal comptime domain: a `true`/`false` literal, a bound bool PARAMETER reference, or a unary `!` over
- * one of those. Anything else is a located error — a type-macro condition must be a bool parameter or its
- * negation. No B3, no `TypeTable`: the only free names are the expansion's bool params.
- *
- * @param cond   the `if` condition expression
- * @param binds  the parameter bindings for this expansion
- * @return       the condition's bool value, or a located error
- * @throws       when the condition is not a bool literal, a bound bool parameter, or `!` of one
- * @since §14 Form 2
- */
 fn macro_cond_bool(cond: Expr, binds: MacroParamBinds): bool | error {
     match cond.kind {
         BoolLit as b => b.value
@@ -459,17 +224,6 @@ fn macro_cond_bool(cond: Expr, binds: MacroParamBinds): bool | error {
     }
 }
 
-/**
- * macro_arg_bool — read a type-macro bool ARGUMENT (or a parameter's default) to a bool at expansion time
- * (§14 Form 2): a `true`/`false` literal, or `!` of one. A non-literal argument is a located error (a
- * type-macro's bool argument must be a compile-time literal).
- *
- * @param e      the argument (or default) expression
- * @param pname  the parameter's name, for the diagnostic
- * @return       the argument's bool value, or a located error
- * @throws       when the argument is not a bool literal or `!` of one
- * @since §14 Form 2
- */
 fn macro_arg_bool(e: Expr, pname: str): bool | error {
     match e.kind {
         BoolLit as b => b.value
@@ -482,18 +236,6 @@ fn macro_arg_bool(e: Expr, pname: str): bool | error {
     }
 }
 
-/**
- * macro_bind_params — bind a type-macro's declared parameters for one expansion (§14 Form 2): each
- * parameter takes the call's positional argument when present, else its declared `= default`; the value is
- * read as a bool by `macro_arg_bool`. A parameterless macro yields an empty binds (the inert case). A
- * parameter with neither an argument nor a default is a located error.
- *
- * @param md  the macro declaration
- * @param mt  the type-position macro call
- * @return    the parameter bindings, or a located error
- * @throws    when a parameter has no argument and no default, or an argument is not a bool literal
- * @since §14 Form 2
- */
 fn macro_bind_params(md: MacroDecl, mt: MacroType): MacroParamBinds | error {
     var names: []str = teko::list::empty()
     var vals: []bool = teko::list::empty()
@@ -516,35 +258,10 @@ fn macro_bind_params(md: MacroDecl, mt: MacroType): MacroParamBinds | error {
     MacroParamBinds { names = names; vals = vals }
 }
 
-/**
- * select_lowering_frag — the `lowering { … }` fragment a type-macro expansion uses, resolving any §14
- * Form 2 comptime `if`-select over the bool params. A body that is a single `lowering { … }` returns it
- * directly (byte-identical to `single_lowering_frag`); a body that is a single `if cond { … } else { … }`
- * evaluates `cond` (a bool param) and recurses into the taken branch. Any other body shape, or an `if`
- * without an `else`, is a located error.
- *
- * @param md     the macro declaration
- * @param binds  the parameter bindings for this expansion
- * @return       the selected `lowering` fragment, or a located error
- * @throws       when the body is not a lowering or a well-formed comptime `if/else` selecting one
- * @since §14 Form 2
- */
 fn select_lowering_frag(md: MacroDecl, binds: MacroParamBinds): LoweringFrag | error {
     select_lowering_from(md.body, md.name, binds)
 }
 
-/**
- * select_lowering_from — the `lowering { … }` fragment a statement list resolves to (§14 Form 2), used by
- * `select_lowering_frag` and by its own recursion into a chosen `if` branch. The list must be exactly one
- * statement: a `lowering { … }`, or a comptime `if/else` whose taken branch itself resolves to one.
- *
- * @param stmts  the body / branch statement list
- * @param mname  the macro's name, for diagnostics
- * @param binds  the parameter bindings for this expansion
- * @return       the selected `lowering` fragment, or a located error
- * @throws       when the list is not a single lowering or a well-formed comptime `if/else`
- * @since §14 Form 2
- */
 fn select_lowering_from(stmts: []@Statement(), mname: str, binds: MacroParamBinds): LoweringFrag | error {
     if stmts.len != 1 {
         return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: its body must be a single `lowering { … }` or a single comptime `if/else` selecting one (§14 Form 2)")) }
@@ -565,19 +282,6 @@ fn select_lowering_from(stmts: []@Statement(), mname: str, binds: MacroParamBind
     }
 }
 
-/**
- * splice_hole_tokens — rewrite a `lowering` fragment's raw token run for re-parsing (§14 A3): each
- * `${param}` hole (the four tokens `$ { <ident> }`) collapses to ONE placeholder identifier token
- * `__mhole_<i>`, where `i` is the index of `param` in the macro's parameter list; every other token is
- * copied verbatim. An unknown hole name (not a macro parameter) is a located error.
- *
- * @param toks  the fragment's raw token run
- * @param md    the macro declaration (its parameter list resolves a hole name to an index)
- * @param mc    the call node (for error location)
- * @return      the placeholder-substituted token run, or a malformed-hole error
- * @throws      when a `${…}` hole is malformed or names a non-parameter
- * @since 0.4-macros (§14 A3)
- */
 fn splice_hole_tokens(toks: []lexer::Token, md: MacroDecl, mc: MacroCall): []lexer::Token | error {
     var out: []lexer::Token = teko::list::empty()
     var i: u64 = 0
@@ -602,15 +306,6 @@ fn splice_hole_tokens(toks: []lexer::Token, md: MacroDecl, mc: MacroCall): []lex
     out
 }
 
-/**
- * param_index — the 0-based index of parameter `name` in macro `md`'s parameter list, or -1 when absent
- * (§14 A3). Maps a `${name}` hole to the caller's positional argument.
- *
- * @param md    the macro declaration
- * @param name  the parameter name sought
- * @return      the parameter index, or -1
- * @since 0.4-macros (§14 A3)
- */
 fn param_index(md: MacroDecl, name: str): i64 {
     var i: u64 = 0
     loop {
@@ -621,14 +316,6 @@ fn param_index(md: MacroDecl, name: str): i64 {
     -1 to i64
 }
 
-/**
- * hole_index_of — the argument index a placeholder Var name encodes (§14 A3): `__mhole_<i>` ⇒ `i`, or -1
- * when `name` is not a hole placeholder. Read by `subst_holes_expr` to select the caller's argument.
- *
- * @param name  the identifier name under test
- * @return      the encoded argument index, or -1
- * @since 0.4-macros (§14 A3)
- */
 fn hole_index_of(name: str): i64 {
     var pfx = hole_placeholder_prefix()
     if name.len <= pfx.len { return -1 to i64 }
@@ -641,14 +328,6 @@ fn hole_index_of(name: str): i64 {
     match parse_u64_digits(teko::str::slice(name, pfx.len, name.len)) { u64 as v => v to i64; null => -1 to i64 }
 }
 
-/**
- * parse_u64_digits — parse a run of ASCII digits to a `u64`, or null when `s` is empty or non-numeric
- * (§14 A3). The tiny inverse of `teko::u64_to_str` the placeholder decoder needs.
- *
- * @param s  the digit string
- * @return   the parsed value, or null
- * @since 0.4-macros (§14 A3)
- */
 fn parse_u64_digits(s: str): u64 | null {
     if s.len == 0 { return null }
     var v: u64 = 0 to u64
@@ -662,53 +341,18 @@ fn parse_u64_digits(s: str): u64 | null {
     v
 }
 
-/**
- * macro_call_name — the target name of a `@name(...)` call: its path's last segment (§14 A3).
- *
- * @param mc  the macro call
- * @return    the call's last-segment name, or "" for an empty path
- * @since 0.4-macros (§14 A3)
- */
 fn macro_call_name(mc: MacroCall): str {
     if mc.callee.segments.len == 0 { return "" }
     mc.callee.segments[mc.callee.segments.len - 1].name
 }
 
-/**
- * err_expand — a located Family-A expansion diagnostic, positioned on the `@call` (§14 A3).
- *
- * @param mc   the offending macro call
- * @param msg  the diagnostic text
- * @return     the located error
- * @since 0.4-macros (§14 A3)
- */
 fn err_expand(mc: MacroCall, msg: str): error {
     var line = if mc.callee.segments.len > 0 { 0 to u32 } else { 0 to u32 }
     error { message = msg }
 }
 
-/**
- * with_kind — a copy of `e` carrying a new `kind`, preserving its source position (§14 A3). The
- * functional-update the expansion walk uses to rebuild an expression from its rewritten children.
- *
- * @param e     the original expression (its line/col are kept)
- * @param k     the rewritten expression kind
- * @return      a fresh `Expr` with `k` at `e`'s position
- * @since 0.4-macros (§14 A3)
- */
 fn with_kind(e: Expr, k: @ExprKind()): Expr { Expr { kind = k; line = e.line; col = e.col } }
 
-/**
- * walk_exprs — expand every Family-A macro call across an expression LIST (§14 A3), preserving order.
- *
- * @param es     the expressions to walk
- * @param prog   the program (macro lookup surface)
- * @param holes  the active hole substitution (inactive at the top level)
- * @param depth  the current expansion depth
- * @return       the rewritten list, or the first expansion error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A3)
- */
 fn walk_exprs(es: []Expr, prog: Program, holes: MacroHoles, depth: u64): []Expr | error {
     var out: []Expr = teko::list::empty()
     var i: u64 = 0
@@ -721,17 +365,6 @@ fn walk_exprs(es: []Expr, prog: Program, holes: MacroHoles, depth: u64): []Expr 
     out
 }
 
-/**
- * walk_cmpterms — expand macro calls inside a comparison chain's terms (§14 A3).
- *
- * @param ts     the comparison terms
- * @param prog   the program
- * @param holes  the active hole substitution
- * @param depth  the current expansion depth
- * @return       the rewritten terms, or the first error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A3)
- */
 fn walk_cmpterms(ts: []CmpTerm, prog: Program, holes: MacroHoles, depth: u64): []CmpTerm | error {
     var out: []CmpTerm = teko::list::empty()
     var i: u64 = 0
@@ -744,17 +377,6 @@ fn walk_cmpterms(ts: []CmpTerm, prog: Program, holes: MacroHoles, depth: u64): [
     out
 }
 
-/**
- * walk_arrayelems — expand macro calls inside array-literal elements (§14 A3), preserving spread flags.
- *
- * @param els    the array elements
- * @param prog   the program
- * @param holes  the active hole substitution
- * @param depth  the current expansion depth
- * @return       the rewritten elements, or the first error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A3)
- */
 fn walk_arrayelems(els: []ArrayElem, prog: Program, holes: MacroHoles, depth: u64): []ArrayElem | error {
     var out: []ArrayElem = teko::list::empty()
     var i: u64 = 0
@@ -767,30 +389,6 @@ fn walk_arrayelems(els: []ArrayElem, prog: Program, holes: MacroHoles, depth: u6
     out
 }
 
-/**
- * walk_arms — expand macro calls inside every match arm's guard and body (§14 A3), preserving patterns.
- *
- * @param arms   the match arms
- * @param prog   the program
- * @param holes  the active hole substitution
- * @param depth  the current expansion depth
- * @return       the rewritten arms, or the first error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A3)
- */
-/**
- * walk_pattern — expand `@Type()` macros in a match-arm pattern's TYPE positions (§14 A4 type-position
- * completeness): a `Foo<@T()> as x` bind pattern's explicit generic args, a `[]@T() as x` slice pattern's
- * element type, and — recursively — the sub-patterns of an alternation or a grouped bind. Every other
- * pattern shape carries no type position. Inert when nothing holds a macro.
- *
- * @param p      the pattern to rewrite
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the rewritten pattern, or an error
- * @throws       when an inner type-macro expansion fails
- * @since        §9.D sweep (Family-A type-macro completeness — match-arm pattern type positions)
- */
 fn walk_pattern(p: @Pattern(), prog: Program, depth: u64): @Pattern() | error {
     match p {
         BindPattern as bp => {
@@ -818,21 +416,6 @@ fn walk_pattern(p: @Pattern(), prog: Program, depth: u64): @Pattern() | error {
     }
 }
 
-/**
- * walk_group_options — expand type macros across a grouped-bind / alternation option LIST, SPLICING any
- * `@Type()` option (§9.D CR3) into the union cases it names. An ordinary option is walked in place
- * (`walk_pattern`); a `MacroPattern` option `(@ns::Union())` is replaced by the bare `BindPattern` for
- * EACH of its expanded union members, in source order. This is the pattern-side twin of a `@Type()`
- * splicing into a union's members in type position — it is what lets `(@X()) as v` bind the whole nested
- * union member after `type X = variant …` retires to `@X()`.
- *
- * @param ps     the option patterns (a group's or an alternation's)
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the options with every `@Type()` spliced to its cases, or an error
- * @throws       when an inner type-macro expansion fails or does not yield named cases
- * @since        §9.D CR3
- */
 fn walk_group_options(ps: []@Pattern(), prog: Program, depth: u64): []@Pattern() | error {
     var out: []@Pattern() = teko::list::empty()
     var i: u64 = 0
@@ -858,20 +441,6 @@ fn walk_group_options(ps: []@Pattern(), prog: Program, depth: u64): []@Pattern()
     out
 }
 
-/**
- * macro_pattern_options — expand a pattern-position `@Type()` (§9.D CR3) into the bare `BindPattern` option
- * for each of its union cases. The macro node is expanded exactly as a type position (`walk_type`), yielding a
- * union `A | B | …` (or a lone `A`); each member — which must be a named case — becomes a bindingless
- * `BindPattern` carrying that case's path and any generic args. A member that is not a named type is a
- * located error (a pattern-position `@Type()` must name a union of cases).
- *
- * @param mp     the pattern-position macro node
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the union cases as bare `BindPattern` options, or a located error
- * @throws       when the macro does not expand to a union of named cases
- * @since        §9.D CR3
- */
 fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []@Pattern() | error {
     var te = match walk_type(mp.macro_call, prog, depth) { (@TypeExpr()) as t => t; error as e => return e }
     match te {
@@ -894,20 +463,6 @@ fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []@Patter
     }
 }
 
-/**
- * union_member_option — the ONE pattern option a single top-level union member of an expanded
- * type-macro contributes (§9.D CR3 / union-of-unions). A `NamedType` member yields a bindingless
- * `BindPattern` (a bare case). A `UnionType` member — the shape a §9.D union-of-unions leaves NESTED,
- * e.g. `@TStatement()` inside `@TItem()` — yields a bindingless `GroupBindPattern` over ITS members,
- * mirroring how the TYPE side keeps that member nested: the resolved candidate then matches the
- * subject's nested `Variant` member by `type_eq` (`group_bind_subunion`) instead of a flattened case
- * list that would no longer align with the boxed nested member. Any other shape is a located error.
- *
- * @param te  one member of the expanded macro union
- * @return    the member's pattern option (bare case, or nested group), or a located error
- * @throws    when a member is not a named case or a nested union of named cases
- * @since      §9.D CR3 (union-of-unions follow-on)
- */
 fn union_member_option(te: @TypeExpr()): @Pattern() | error {
     match te {
         NamedType as nt => BindPattern { type_name = nt.path; has_binding = false; binding = ""; is_slice = false; slice_type = null; type_args = nt.args }
@@ -926,18 +481,6 @@ fn union_member_option(te: @TypeExpr()): @Pattern() | error {
     }
 }
 
-/**
- * walk_arms — expand macros across a `match` expression's arms (§14 A3/A4): each arm's PATTERN type
- * positions (`walk_pattern`), its `when` guard expression, and its statement body.
- *
- * @param arms   the match arms to rewrite
- * @param prog   the program (macro lookup surface)
- * @param holes  the active hole substitution
- * @param depth  the current expansion depth
- * @return       the rewritten arms, or an error
- * @throws       when an inner expansion fails
- * @since        0.4-macros (§14 A3)
- */
 fn walk_arms(arms: []Arm, prog: Program, holes: MacroHoles, depth: u64): []Arm | error {
     var out: []Arm = teko::list::empty()
     var i: u64 = 0
@@ -952,20 +495,6 @@ fn walk_arms(arms: []Arm, prog: Program, holes: MacroHoles, depth: u64): []Arm |
     out
 }
 
-/**
- * walk_expr — the Family-A expansion walk over ONE expression (§14 A3): a `@macro` call expands (its
- * lowering fragment re-parsed and hole-filled), a `__mhole_<i>` placeholder Var substitutes the caller's
- * i-th argument when a hole substitution is active, and every other node rebuilds from its rewritten
- * children. A Family-B `@comptime` call is returned unchanged (left for the fold pass).
- *
- * @param e      the expression to rewrite
- * @param prog   the program (macro lookup surface)
- * @param holes  the active hole substitution (inactive at the top level)
- * @param depth  the current expansion depth
- * @return       the rewritten expression, or an expansion error
- * @throws       when an inner expansion fails or a hole index is out of range
- * @since 0.4-macros (§14 A3)
- */
 fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | error {
     match e.kind {
         MacroCall as mc => {
@@ -1075,17 +604,6 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
     }
 }
 
-/**
- * walk_stmts — expand macro calls across a statement LIST (§14 A3), preserving order.
- *
- * @param ss     the statements to walk
- * @param prog   the program
- * @param holes  the active hole substitution
- * @param depth  the current expansion depth
- * @return       the rewritten statements, or the first error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A3)
- */
 fn walk_stmts(ss: []@Statement(), prog: Program, holes: MacroHoles, depth: u64): []@Statement() | error {
     var out: []@Statement() = teko::list::empty()
     var i: u64 = 0
@@ -1098,41 +616,11 @@ fn walk_stmts(ss: []@Statement(), prog: Program, holes: MacroHoles, depth: u64):
     out
 }
 
-/**
- * walk_binding_type_ann — expand any Family-A `@Type()` macro in a LOCAL binding's TYPE ANNOTATION
- * (§14 A4 completeness): a `var x: @Foo() = …` / `var a, b: @Foo() = …` annotation is a TYPE position
- * exactly like a parameter, a return, or a struct field, so the same pre-pass must expand it — otherwise
- * a body-level `@Type()` survives to type resolution and honest-stops. Inert when the binding carries no
- * explicit annotation (`has_type` false) or when the annotation holds no macro (`walk_type` no-op).
- *
- * @param has_type  whether the binding declared an explicit annotation
- * @param type_ann  the binding's annotation type-expression
- * @param prog      the program (macro lookup surface)
- * @param depth     the current expansion depth
- * @return          the rewritten annotation, unchanged when there is nothing to expand
- * @throws          when an inner type-macro expansion fails
- * @since           §9.D sweep (Family-A type-macro completeness in body annotations)
- */
 fn walk_binding_type_ann(has_type: bool, type_ann: @TypeExpr(), prog: Program, depth: u64): @TypeExpr() | error {
     if !has_type { return type_ann }
     walk_type(type_ann, prog, depth)
 }
 
-/**
- * walk_stmt — the Family-A expansion walk over ONE statement (§14 A3): each expression the statement
- * carries is walked (macro calls expanded), each `@Type()` in a local binding's annotation is expanded,
- * and each nested block re-walked. A `LoweringFrag` in a normal statement position passes through
- * unchanged (the checker honest-stops it — it is legal only in a macro body, which this walk never
- * descends into as statements).
- *
- * @param s      the statement to rewrite
- * @param prog   the program
- * @param holes  the active hole substitution
- * @param depth  the current expansion depth
- * @return       the rewritten statement, or an expansion error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A3)
- */
 fn walk_stmt(s: @Statement(), prog: Program, holes: MacroHoles, depth: u64): @Statement() | error {
     match s {
         Binding as b => {
@@ -1186,27 +674,11 @@ fn walk_stmt(s: @Statement(), prog: Program, holes: MacroHoles, depth: u64): @St
     }
 }
 
-/**
- * macro_type_name — the target name of an `@name(...)` type-position call: its path's last segment.
- *
- * @param mt  the macro-type node
- * @return    the call's last-segment name, or "" for an empty path
- * @since 0.4-macros (§14 A4)
- */
 fn macro_type_name(mt: MacroType): str {
     if mt.callee.segments.len == 0 { return "" }
     mt.callee.segments[mt.callee.segments.len - 1].name
 }
 
-/**
- * frag_has_hole — does a `lowering` fragment's token run contain a `${…}` injection hole (§14 A4)? A
- * TYPE-position macro is parameterless in A4 (the §9.D `@Type()` abbreviation), so a hole is a located
- * "not yet supported" signal (value→type hole splicing arrives in a later crumb).
- *
- * @param toks  the fragment's raw token run
- * @return      true iff a `Dollar` token (hole marker) is present
- * @since 0.4-macros (§14 A4)
- */
 fn frag_has_hole(toks: []lexer::Token): bool {
     var i: u64 = 0
     loop {
@@ -1217,21 +689,6 @@ fn frag_has_hole(toks: []lexer::Token): bool {
     false
 }
 
-/**
- * expand_macro_type — expand ONE `@macro(...)` call standing in a TYPE position (§14 A4): resolve the
- * callee to its `MacroDecl`, take the body's single `lowering { … }` fragment, and re-parse its raw
- * token run as a `@TypeExpr()` (context-polymorphic splice, §5.1-Opt-1 — an `@Type()` yields a union
- * `A | B | …`), then recursively expand any nested type macros. A `@comptime` name, or an unknown name,
- * is left as a `MacroType` for the resolve honest-stop. A4 supports a PARAMETERLESS type macro (no
- * `${}` holes); a hole is a located "not yet supported" error.
- *
- * @param mt     the type-position macro call
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the spliced `@TypeExpr()`, or an expansion error
- * @throws       an over-depth error, an unsupported hole, or a fragment that does not parse as a type
- * @since 0.4-macros (§14 A4)
- */
 fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): @TypeExpr() | error {
     if depth >= max_macro_depth() {
         return error { message = "macro expansion exceeded the maximum depth in a type position (a macro that expands to itself?) — §14 A4" }
@@ -1247,18 +704,6 @@ fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): @TypeExpr() | er
     walk_type(parsed, prog, depth + 1 to u64)
 }
 
-/**
- * walk_type — the Family-A expansion walk over ONE type-expression (§14 A4): a `@macro()` in a type
- * position expands (its lowering fragment re-parsed as a type), and every other type node rebuilds from
- * its rewritten children. A no-op on a plain type (inert).
- *
- * @param te     the type-expression to rewrite
- * @param prog   the program (macro lookup surface)
- * @param depth  the current expansion depth
- * @return       the rewritten type-expression, or an expansion error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A4)
- */
 fn walk_type(te: @TypeExpr(), prog: Program, depth: u64): @TypeExpr() | error {
     match te {
         MacroType as mt => expand_macro_type(mt, prog, depth)
@@ -1282,16 +727,6 @@ fn walk_type(te: @TypeExpr(), prog: Program, depth: u64): @TypeExpr() | error {
     }
 }
 
-/**
- * walk_types — expand type macros across a type-expression LIST (§14 A4), preserving order.
- *
- * @param tes    the type-expressions to walk
- * @param prog   the program
- * @param depth  the current expansion depth
- * @return       the rewritten list, or the first error
- * @throws       when an inner expansion fails
- * @since 0.4-macros (§14 A4)
- */
 fn walk_types(tes: []@TypeExpr(), prog: Program, depth: u64): []@TypeExpr() | error {
     var out: []@TypeExpr() = teko::list::empty()
     var i: u64 = 0

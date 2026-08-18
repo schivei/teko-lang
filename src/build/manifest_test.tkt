@@ -1,31 +1,15 @@
-// src/build/manifest_test.tkt — tests for teko::build manifest reader. #test collected.
-// (Uses bare `assert`, the current .tkt convention; teko::assert migration is crumb B2.)
 
-// did the parse succeed?
 fn parses(src: str): bool {
     match parse_manifest(src) { Manifest => true; error => false }
 }
 
 #test
-/**
- * tests_section_malformed_regression_errors — a `regression` value that is neither a quoted string
- * nor an array is an honest error (M.3 — no coercion). @since 0.3.0.29
- *
- * @return void
- */
 fn tests_section_malformed_regression_errors() {
     teko::assert::is_false(parses("name = \"app\"\nsource = \"src\"\n[tests]\nregression = 42\n"))
     teko::assert::is_true(parses("name = \"app\"\nsource = \"src\"\n[tests]\nregression = [\"a\"]\n"))
 }
 
 #test
-/**
- * test_regression_files_is_an_explicit_ordered_file_list — `[tests] regression` parses into
- * `Manifest.test_regression_files`, in list order, with the bare-string shorthand normalizing to a
- * 1-element list (0.3.1 C0 — no directory discovery, no glob).
- *
- * @return void
- */
 fn test_regression_files_is_an_explicit_ordered_file_list() {
     match parse_manifest("name = \"app\"\nsource = \"src\"\n[tests]\nregression = [\"a.tkr\", \"b/c.tkr\"]\n") {
         Manifest as m => {
@@ -45,10 +29,6 @@ fn test_regression_files_is_an_explicit_ordered_file_list() {
     }
 }
 
-/**
- * `[artifact] abi = "c"` sets the reverse-FFI ABI on the manifest; its absence (or any other value)
- * leaves the native Teko ABI (empty string) — FFI-D.
- */
 #test
 fn ffx_manifest_parses_abi_c() {
     match parse_manifest("name = \"lib\"\nsource = \"src\"\n[artifact]\nkind = \"static\"\nabi = \"c\"\n") {
@@ -61,38 +41,15 @@ fn ffx_manifest_parses_abi_c() {
     }
 }
 
-/**
- * mf_minimal_manifest — the smallest manifest that parses, the stand-in `mf_parse_or_die` returns
- * when its input does not parse (its empty columns then fail the caller's field assertions, so a
- * parse regression still reads as a test failure).
- *
- * @return a manifest with no `[extern.libs]` columns at all
- */
 fn mf_minimal_manifest(): Manifest {
     match parse_manifest("name = \"x\"\nsource = \"src\"\n") { Manifest as m => m; error => mf_minimal_manifest() }
 }
 
-/**
- * mf_parse_or_die — parse `src` and hand back the Manifest, degrading to `mf_minimal_manifest` when
- * it does not parse, so a `.tkp` fixture's field assertions can be written without a `match` around
- * every one of them.
- *
- * @param src  the `.tkp` text to parse
- * @return     the parsed manifest, or the minimal stand-in
- */
 fn mf_parse_or_die(src: str): Manifest {
     match parse_manifest(src) { Manifest as m => m; error => mf_minimal_manifest() }
 }
 
 #test
-/**
- * mf_extern_spec_preserves_the_linkage_mode — the `static:`/`shared:` prefix is no longer stripped
- * and thrown away: the flag resolves exactly as before (`-l<name>`, a leading `lib` dropped) while
- * the MODE survives in its own column, which is what lets the R4 static rule and the R5 shared rule
- * be told apart (teko-target-crosslink-0.3.1.md §4.3).
- *
- * @return void
- */
 fn mf_extern_spec_preserves_the_linkage_mode() {
     var st = mf_extern_spec("static:foo")
     teko::assert::is_true(st.flag == "-lfoo")
@@ -109,14 +66,6 @@ fn mf_extern_spec_preserves_the_linkage_mode() {
 }
 
 #test
-/**
- * mf_extern_spec_strips_the_mode_prefix_before_the_path_test — the ratified §4.2 spelling
- * `static:vendor/x86_64-linux/libfoo.a` must resolve to the FILE, not leak the literal `static:`
- * prefix onto the link line (the pre-0.3.1 order tested for a path first, so a mode-prefixed path
- * was passed to `cc` verbatim). A bare path with no prefix takes its mode from the extension.
- *
- * @return void
- */
 fn mf_extern_spec_strips_the_mode_prefix_before_the_path_test() {
     var pathed = mf_extern_spec("static:vendor/x86_64-linux/libfoo.a")
     teko::assert::is_true(pathed.flag == "vendor/x86_64-linux/libfoo.a")
@@ -132,14 +81,6 @@ fn mf_extern_spec_strips_the_mode_prefix_before_the_path_test() {
 }
 
 #test
-/**
- * extern_libs_section_key_accepts_a_full_os_arch — the ratified §4.2 arch-key fill: a
- * `[extern.libs.<os-arch>]` section key is captured VERBATIM in `os_lib_os` (the parser already
- * accepted the shape — this pins it), alongside the bare-OS form it does not displace, each entry
- * carrying its own declared mode.
- *
- * @return void
- */
 fn extern_libs_section_key_accepts_a_full_os_arch() {
     var m = mf_parse_or_die("name = \"app\"\nsource = \"src\"\n[extern.libs.x86_64-linux]\nfoo = [\"static:vendor/x86_64-linux/libfoo.a\"]\n[extern.libs.linux]\nm = [\"shared:m\"]\n")
     teko::assert::is_true(m.os_lib_os.len == 2)
@@ -153,13 +94,6 @@ fn extern_libs_section_key_accepts_a_full_os_arch() {
 }
 
 #test
-/**
- * global_extern_libs_carry_their_mode_column — the global `[extern.libs]` section grows the same
- * mode column as the per-section ones, so a globally-declared `static:`/`shared:` lib is subject to
- * the same R4/R5 rules; an empty array (the key resolves itself) declares no mode.
- *
- * @return void
- */
 fn global_extern_libs_carry_their_mode_column() {
     var m = mf_parse_or_die("name = \"app\"\nsource = \"src\"\n[extern.libs]\nfoo = [\"static:foo\"]\nkernel32 = []\n")
     teko::assert::is_true(m.link_flags.len == 2)
@@ -170,50 +104,19 @@ fn global_extern_libs_carry_their_mode_column() {
     teko::assert::is_true(m.link_mode[1] == "")
 }
 
-/**
- * mf_kind_manifest — the smallest manifest that declares `[artifact] kind = "<spelling>"`, so a
- * kind assertion reads as one call instead of an escaped literal per case.
- *
- * @param spelling  the `kind` value to write into the manifest text
- * @return          a two-field manifest plus an `[artifact]` section carrying `spelling`
- * @since 0.3.1
- */
 fn mf_kind_manifest(spelling: str): str {
     "name = \"app\"\nsource = \"src\"\n[artifact]\nkind = \"" ~ spelling ~ "\"\n"
 }
 
-/**
- * mf_kind_resolves — does a manifest declaring `kind = "<spelling>"` parse and select `want`?
- *
- * @param spelling  the `kind` value under test
- * @param want      the `Artifact` member that spelling must select
- * @return          true iff the manifest parses AND its artifact is `want`
- * @since 0.3.1
- */
 fn mf_kind_resolves(spelling: str, want: Artifact): bool {
     match parse_manifest(mf_kind_manifest(spelling)) { Manifest as m => m.artifact == want; error => false }
 }
 
-/**
- * mf_kind_rejection — the message `parse_manifest` fails with for `kind = "<spelling>"`, or `""`
- * when that manifest parses (which every caller asserts as a defect: the spelling is not accepted).
- *
- * @param spelling  the `kind` value under test
- * @return          the rejection message, or `""` when the manifest parsed instead
- * @since 0.3.1
- */
 fn mf_kind_rejection(spelling: str): str {
     match parse_manifest(mf_kind_manifest(spelling)) { Manifest => ""; error as e => e.message }
 }
 
 #test
-/**
- * mf_every_accepted_kind_resolves_to_its_own_member — the four accepted spellings still select the
- * artifact they always did (the half of the unknown-kind fix that proves the GOOD path survived),
- * and `artifact_kind_table` agrees with each of them row by row.
- *
- * @return void
- */
 fn mf_every_accepted_kind_resolves_to_its_own_member() {
     teko::assert::is_true(mf_kind_resolves("binary", Artifact::Binary))
     teko::assert::is_true(mf_kind_resolves("static", Artifact::Static))
@@ -229,15 +132,6 @@ fn mf_every_accepted_kind_resolves_to_its_own_member() {
 }
 
 #test
-/**
- * mf_unknown_artifact_kind_is_a_hard_error — an unrecognized `[artifact] kind` FAILS the manifest
- * read instead of falling back to `Artifact::Binary`. A typo (`"binari"`) used to build an
- * executable in silence, and so did a kind nobody implemented (`"tool"`) — a hidden error that never
- * fired (M.3). The message must name the offending spelling AND enumerate the accepted set, so the
- * writer can see both what was read and what is allowed.
- *
- * @return void
- */
 fn mf_unknown_artifact_kind_is_a_hard_error() {
     var typo = mf_kind_rejection("binari")
     teko::assert::is_true(typo.len > 0)
@@ -252,14 +146,6 @@ fn mf_unknown_artifact_kind_is_a_hard_error() {
 }
 
 #test
-/**
- * mf_absent_artifact_section_keeps_the_binary_default — an absent `[artifact]` section (and a present
- * one that declares no `kind`) still yields `Artifact::Binary`. This is NOT the unknown-kind case:
- * declaring nothing is legitimate and every such project must keep building, so the hard error
- * belongs to an unrecognized spelling alone.
- *
- * @return void
- */
 fn mf_absent_artifact_section_keeps_the_binary_default() {
     match parse_manifest("name = \"app\"\nsource = \"src\"\n") {
         Manifest as m => teko::assert::is_true(m.artifact == Artifact::Binary)

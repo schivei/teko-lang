@@ -1,21 +1,5 @@
-/**
- * src/build/regr_group_test.tkt   (namespace `teko::build`)
- *
- * The unit surface of the grouped regression builds (`regr_group.tks`). Everything here is a PURE
- * function over source text — the classification of a snippet's tail, the bare names it claims, the
- * generated module/dispatcher text, the group key. The end-to-end proof that the fold preserves
- * every verdict is the regression phase itself; these tests pin the decisions that phase depends on,
- * so a wrong one fails here with a name instead of failing there as a mystery build.
- */
 
 #test
-/**
- * snippet_tail_is_value_sees_a_trailing_expression — the virtual-main tail rule: a bare expression
- * IS the program's exit code, so the fold has to wrap it in `exit(…)`. Covers the shapes the .31
- * corpus actually ends on — a bare call, a parenthesized call with a cast, and an arithmetic sum.
- *
- * @return void
- */
 fn snippet_tail_is_value_sees_a_trailing_expression() {
     teko::assert::is_true(snippet_tail_is_value("total()"))
     teko::assert::is_true(snippet_tail_is_value("(probe()) to i32"))
@@ -24,14 +8,6 @@ fn snippet_tail_is_value_sees_a_trailing_expression() {
 }
 
 #test
-/**
- * snippet_tail_is_value_rejects_a_void_statement — the other half of the tail rule: a statement that
- * produces no value must be left ALONE, never wrapped in `exit(…)`. Covers a diverging call, a
- * binding, a bare `if`, a `match`, a `loop`, and an ASSIGNMENT — the one void shape that opens with
- * an ordinary expression instead of a keyword.
- *
- * @return void
- */
 fn snippet_tail_is_value_rejects_a_void_statement() {
     teko::assert::is_true(!snippet_tail_is_value("exit(42)"))
     teko::assert::is_true(!snippet_tail_is_value("panic(\"boom\")"))
@@ -44,13 +20,6 @@ fn snippet_tail_is_value_rejects_a_void_statement() {
 }
 
 #test
-/**
- * snippet_tail_is_assignment_ignores_a_comparison — the assignment probe must not mistake `==`/`!=`/
- * `<=`/`>=` or a match arrow `=>` for an assignment, and must not see an `=` nested inside brackets
- * (the whole reason it tracks depth).
- *
- * @return void
- */
 fn snippet_tail_is_assignment_ignores_a_comparison() {
     teko::assert::is_true(!snippet_tail_is_assignment("a == b"))
     teko::assert::is_true(!snippet_tail_is_assignment("a != b"))
@@ -60,13 +29,6 @@ fn snippet_tail_is_assignment_ignores_a_comparison() {
 }
 
 #test
-/**
- * snippet_stmts_have_return_is_a_word_scan — a top-level `return` bars the fold (in the virtual main
- * it sets the exit code; in the `void entry()` it would be a type error), but only as a WHOLE word
- * and only outside string literals — `returned` and `"return"` are not returns.
- *
- * @return void
- */
 fn snippet_stmts_have_return_is_a_word_scan() {
     teko::assert::is_true(snippet_stmts_have_return("if x.len != 3 { return 1 }\nexit(0)\n"))
     teko::assert::is_true(!snippet_stmts_have_return("let returned = 1\nexit(returned)\n"))
@@ -74,14 +36,6 @@ fn snippet_stmts_have_return_is_a_word_scan() {
 }
 
 #test
-/**
- * snippet_declared_names_claims_only_top_level — the packing constraint reads TOP-LEVEL declarations
- * only: a class's own `make` method is addressed through its type and collides with nothing, so
- * claiming it would split the corpus into dozens of pointless groups. The enclosing `type` IS
- * claimed, and so is a top-level `fn`/`const`.
- *
- * @return void
- */
 fn snippet_declared_names_claims_only_top_level() {
     var decls = "type Counter = class {\n    pub n: i64\n    pub fn make(v: i64): Counter { Counter { n = v } }\n}\n\nconst B: byte = 5\n\npub fn probe(): i64 { 1 }\n"
     var names = snippet_declared_names(decls)
@@ -93,13 +47,6 @@ fn snippet_declared_names_claims_only_top_level() {
 }
 
 #test
-/**
- * snippet_declared_names_skips_a_doc_comment_and_keeps_an_attribute — the walk mirrors the splitter:
- * a leading doc-comment block is skipped (it is not the declaration) and a bare attribute line
- * accumulates onto the declaration it decorates, so the name behind `#test` is still claimed.
- *
- * @return void
- */
 fn snippet_declared_names_skips_a_doc_comment_and_keeps_an_attribute() {
     var decls = "/**\n * A doc comment naming type Ghost, which is not a declaration.\n */\n#test\nfn probe(): i64 { 1 }\n"
     var names = snippet_declared_names(decls)
@@ -108,12 +55,6 @@ fn snippet_declared_names_skips_a_doc_comment_and_keeps_an_attribute() {
 }
 
 #test
-/**
- * str_list_contains_finds_and_misses — the membership helper the two claim tests above assert
- * through, pinned on its own so a failure there names the predicate and not the claim.
- *
- * @return void
- */
 fn str_list_contains_finds_and_misses() {
     var xs = teko::list::push(teko::list::push(teko::list::empty(), "a"), "b")
     teko::assert::is_true(str_list_contains(xs, "a"))
@@ -121,13 +62,6 @@ fn str_list_contains_finds_and_misses() {
     teko::assert::is_true(!str_list_contains(xs, "c"))
 }
 
-/**
- * str_list_contains — is `needle` in `xs`? The assertion helper the claim tests read with.
- *
- * @param xs      the list to search
- * @param needle  the value to find
- * @return        true when present
- */
 fn str_list_contains(xs: []str, needle: str): bool {
     var i: u64 = 0
     loop {
@@ -139,13 +73,6 @@ fn str_list_contains(xs: []str, needle: str): bool {
 }
 
 #test
-/**
- * regr_group_module_text_wraps_the_statements_in_an_entry — the generated module: the snippet's
- * declarations stay verbatim ahead of a `pub fn entry()` carrying its statements, and a VALUE tail
- * becomes an explicit `exit(…)` so the virtual-main rule survives the move into a function body.
- *
- * @return void
- */
 fn regr_group_module_text_wraps_the_statements_in_an_entry() {
     var text = regr_group_module_text("fn total(): i32 { 42 }\ntotal()\n")
     teko::assert::is_true(teko::str::contains(text, "fn total(): i32 { 42 }"))
@@ -154,13 +81,6 @@ fn regr_group_module_text_wraps_the_statements_in_an_entry() {
 }
 
 #test
-/**
- * regr_group_module_text_leaves_a_void_tail_alone — the same generator over a snippet that already
- * ends in `exit(…)`: the tail must NOT be wrapped a second time (`exit(exit(0))` does not typecheck,
- * and the group build would fail for a snippet that was perfectly foldable).
- *
- * @return void
- */
 fn regr_group_module_text_leaves_a_void_tail_alone() {
     var text = regr_group_module_text("let x = 21\nexit(x + x)\n")
     teko::assert::is_true(teko::str::contains(text, "exit(x + x)"))
@@ -168,13 +88,6 @@ fn regr_group_module_text_leaves_a_void_tail_alone() {
 }
 
 #test
-/**
- * regr_group_main_text_dispatches_and_ends_at_exit_zero — the generated dispatcher: it reads the
- * selector, routes to each member, and ENDS at `exit(0)` (a member whose own virtual main fell
- * through exits 0), with the unknown-selector arm taking the loud sentinel instead.
- *
- * @return void
- */
 fn regr_group_main_text_dispatches_and_ends_at_exit_zero() {
     var text = regr_group_main_text(regr_group_dispatch_line("m7"))
     teko::assert::is_true(teko::str::contains(text, REGR_GROUP_ENTRY_VAR))
@@ -184,14 +97,6 @@ fn regr_group_main_text_dispatches_and_ends_at_exit_zero() {
 }
 
 #test
-/**
- * regr_group_manifest_text_names_the_generated_project — the synthesized `.tkp` must root the
- * project at `src` (so every `src/m<k>/` directory becomes its own namespace, which is what keeps
- * two members' same-named declarations apart) and carry the fixed artifact name the runner resolves
- * the built binary through.
- *
- * @return void
- */
 fn regr_group_manifest_text_names_the_generated_project() {
     var text = regr_group_manifest_text()
     teko::assert::is_true(teko::str::contains(text, "name = \"" ~ REGR_GROUP_PROJECT_NAME ~ "\""))
@@ -200,13 +105,6 @@ fn regr_group_manifest_text_names_the_generated_project() {
 }
 
 #test
-/**
- * regr_group_key_separates_two_configurations — the key two rows must share to share a build: the
- * target plus every env token. Two rows differing in either must NOT key alike, or a differently
- * configured scenario would silently ride another one's build.
- *
- * @return void
- */
 fn regr_group_key_separates_two_configurations() {
     var plain = regr_group_key(regr_test_row("", teko::list::empty()))
     var backend = regr_group_key(regr_test_row("", teko::list::push(teko::list::empty(), "TEKO_FOO=1")))
@@ -217,16 +115,6 @@ fn regr_group_key_separates_two_configurations() {
 }
 
 #test
-/**
- * regr_row_groupable_refuses_what_the_fold_cannot_hold — the exclusion set, each arm for its own
- * measured reason: a compile-fail row (its build MUST fail), a project-based row (no inline source),
- * a leaf-tool row (the checked artifact would become the whole group's), and a `return`-bearing
- * snippet. NO row is excluded for its backend any more — every row is own-backend since the C
- * emitter was excised, so every group is SOLO (asserted here) and is emitted as its one source
- * verbatim, needing none of the dispatcher the backend cannot lower.
- *
- * @return void
- */
 fn regr_row_groupable_refuses_what_the_fold_cannot_hold() {
     teko::assert::is_true(regr_row_groupable(".", regr_test_row("", teko::list::empty())))
     teko::assert::is_true(!regr_row_groupable(".", regr_test_row_kind(TkrKind::CompileFail)))
@@ -237,15 +125,6 @@ fn regr_row_groupable_refuses_what_the_fold_cannot_hold() {
 }
 
 #test
-/**
- * regr_row_source_reads_a_given_source_file_and_a_missing_one — the two halves of the file-based
- * fold. A row spelling its snippet as `Given source = "<file>"` must contribute the FILE'S TEXT (the
- * only spelling left once inline code is banned in a `.tkr`), and a row naming a file that is not
- * there must contribute "" and be refused by `regr_row_groupable` — never crash the plan pass, which
- * is not the pass that reports a manifest error.
- *
- * @return void
- */
 fn regr_row_source_reads_a_given_source_file_and_a_missing_one() {
     var inline_row = regr_test_row_source("exit(1)\n")
     teko::assert::is_true(regr_row_source(".", inline_row) == "exit(1)\n")
@@ -258,14 +137,6 @@ fn regr_row_source_reads_a_given_source_file_and_a_missing_one() {
 }
 
 #test
-/**
- * regr_group_slot_misses_an_unplanned_row_and_an_unbuilt_group — the fallback, stated as a lookup
- * law: a row the plan never bound has no slot, and a row whose group FAILED to build has none
- * either. Both answers send the caller down the ordinary per-scenario build path, which is what
- * makes a grouped build a pure optimisation.
- *
- * @return void
- */
 fn regr_group_slot_misses_an_unplanned_row_and_an_unbuilt_group() {
     var member = RegrGroupMember { key = "k"; group = 0; module = "m0"; source = "exit(0)\n" }
     var members = teko::list::push(teko::list::empty(), member)
@@ -277,26 +148,11 @@ fn regr_group_slot_misses_an_unplanned_row_and_an_unbuilt_group() {
     teko::assert::is_true(regr_group_slot_is_null(regr_groups_empty(), "k"))
 }
 
-/**
- * regr_group_slot_is_null — did the slot lookup miss? The `RegrGroupSlot | null` result read as a
- * bool, so the lookup law above asserts on one shape instead of matching in four places.
- *
- * @param gs   the grouping
- * @param key  the row key to look up
- * @return     true when the lookup found no slot
- */
 fn regr_group_slot_is_null(gs: RegrGroups, key: str): bool {
     match regr_group_slot(gs, key) { RegrGroupSlot => false; null => true }
 }
 
 #test
-/**
- * regr_with_entry_env_appends_the_selector — the row's own env survives and the selector is ADDED to
- * it: a `Given env` token still has to reach the child, and the group binary still
- * has to be told which member to run.
- *
- * @return void
- */
 fn regr_with_entry_env_appends_the_selector() {
     var t = regr_with_entry_env(regr_test_row("", teko::list::push(teko::list::empty(), "K=V")), "m3")
     teko::assert::is_true(t.env.len == 2)
@@ -305,13 +161,6 @@ fn regr_with_entry_env_appends_the_selector() {
 }
 
 #test
-/**
- * regr_groups_total_sums_every_group_build — the phase accounting: the run's summary line must still
- * report every build the run paid for, and a grouped row reports none of its own, so the group
- * builds' cost is exactly what this sum contributes.
- *
- * @return void
- */
 fn regr_groups_total_sums_every_group_build() {
     var one = RegrGroupBuild { ok = true; binp = "a"; members = 2; times = PhaseTimes { harness_ns = 1; compile_ns = 2; run_ns = 0; builds = 1 } }
     var two = RegrGroupBuild { ok = true; binp = "b"; members = 3; times = PhaseTimes { harness_ns = 10; compile_ns = 20; run_ns = 0; builds = 1 } }
@@ -323,13 +172,6 @@ fn regr_groups_total_sums_every_group_build() {
 }
 
 #test
-/**
- * regr_group_config_text_names_the_host_and_the_env — the report line a reader tells two groups
- * apart by: an undeclared target reads as the host sentinel (never as an empty gap), and the env
- * tokens are spelled out.
- *
- * @return void
- */
 fn regr_group_config_text_names_the_host_and_the_env() {
     var bare = regr_group_config_text(RegrGroupSpec { env = teko::list::empty(); target = "" })
     teko::assert::is_true(teko::str::contains(bare, HOST_TARGET))
@@ -339,14 +181,6 @@ fn regr_group_config_text_names_the_host_and_the_env() {
     teko::assert::is_true(teko::str::contains(with_env, "TEKO_FOO=1"))
 }
 
-/**
- * regr_test_row — a groupable `Tkr` with the given `target` and `env`, everything else at the
- * neutral default. The shared fixture the grouping tests vary one axis of.
- *
- * @param target  the row's declared target
- * @param env     the row's child env
- * @return        the lowered row
- */
 fn regr_test_row(target: str, env: []str): Tkr {
     Tkr {
         args = teko::list::empty(); stdin = ""; kind = TkrKind::Exit; exit = 0
@@ -359,12 +193,6 @@ fn regr_test_row(target: str, env: []str): Tkr {
     }
 }
 
-/**
- * regr_test_row_kind — the shared fixture with a different `kind`.
- *
- * @param kind  the row's classification
- * @return      the lowered row
- */
 fn regr_test_row_kind(kind: TkrKind): Tkr {
     var b = regr_test_row("", teko::list::empty())
     Tkr {
@@ -376,13 +204,6 @@ fn regr_test_row_kind(kind: TkrKind): Tkr {
     }
 }
 
-/**
- * regr_test_row_source — the shared fixture with a different inline source ("" = a project-based
- * scenario, which the fold never takes).
- *
- * @param src  the row's inline snippet source
- * @return     the lowered row
- */
 fn regr_test_row_source(src: str): Tkr {
     var b = regr_test_row("", teko::list::empty())
     Tkr {
@@ -394,13 +215,6 @@ fn regr_test_row_source(src: str): Tkr {
     }
 }
 
-/**
- * regr_test_row_file — a row whose snippet is named by `Given source = "<file>"` rather than carried
- * inline. The shape the corpus uses everywhere since inline code was banned in a `.tkr`.
- *
- * @param path  the source file, relative to the row's `.tkr` directory
- * @return      a runnable row naming that file and carrying no inline body
- */
 fn regr_test_row_file(path: str): Tkr {
     var row = regr_test_row_source("")
     Tkr {
@@ -412,12 +226,6 @@ fn regr_test_row_file(path: str): Tkr {
     }
 }
 
-/**
- * regr_test_row_wellformed — the shared fixture carrying a `Then object well-formed` leaf check, the
- * exclusion whose reason is that the checked artifact would otherwise become the whole group's.
- *
- * @return the lowered row
- */
 fn regr_test_row_wellformed(): Tkr {
     var b = regr_test_row("", teko::list::empty())
     Tkr {

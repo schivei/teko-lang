@@ -1,15 +1,8 @@
-// src/emit/tkb_read.tks  (namespace 'teko::emit')
 
 use teko::checker
 use teko::lexer
 use teko::parser
 
-// (IO0, 2026-07-02) renamed from `Reader`: the checker's type table resolves type names by
-// BARE last segment across all namespaces (resolve.tks::type_table_find — flat, first match
-// wins), so this private codec cursor collided with the RATIFIED public `teko::io::Reader`
-// stream interface (TEKO_ROADMAP_STDLIB_CORE.md IO0). The public contract name wins; the
-// private internal name yields. Pure rename — no behavior change (the C twin's own struct
-// naming is independent and unchanged).
 type Reader = struct { data: []byte; pos: u64 }
 type RByte = struct { r: Reader; value: byte }
 type RU32 = struct { r: Reader; value: u32 }
@@ -19,17 +12,6 @@ type RType = struct { r: Reader; value: @Type() }
 type RTypes = struct { r: Reader; value: []@Type() }
 type RTable = struct { r: Reader; value: []str }
 
-/**
- * numint_of_hilo — reconstruct a `parser::NumInt` from the frozen `hi:lo` u64-pair wire
- * encoding (drop-128, 2026-07-24; see `tkb_write.tks::write_numint`) — the exact inverse of
- * the writer's derivation: `hi` all-ones marks a negative value (sign-extension), any other
- * `hi` (always 0 for a value this codec ever writes) marks non-negative; the magnitude is
- * `lo` directly when non-negative, else `lo`'s own two's-complement negation (`0 - lo`).
- *
- * @param hi  the high wire half
- * @param lo  the low wire half
- * @return    the reconstructed literal carrier
- */
 fn numint_of_hilo(hi: u64, lo: u64): parser::NumInt {
     if hi == 0xFFFFFFFFFFFFFFFF { return parser::NumInt { neg = true; mag = 0 - lo } }
     parser::numint_of_u64(lo)
@@ -54,14 +36,12 @@ fn read_u64(r: Reader): RU64 | error {
     RU64 { r = hi.r; value = lo.value | ((hi.value to u64) << 32) }
 }
 
-// a string reference = a u32 index into the (already-read) table.
 pub fn tkb_read_str(r: Reader, table: []str): RStr | error {
     var idx = match read_u32(r) { RU32 as x => x; error as e => return e }
     if idx.value >= table.len { return error { message = "bad string index in .tkb" } }
     RStr { r = idx.r; value = table[idx.value] }
 }
 
-// the string table: count, then each (len + bytes).
 fn read_strtable(r: Reader): RTable | error {
     var n = match read_u32(r) { RU32 as x => x; error as e => return e }
     var rr = n.r
@@ -80,30 +60,13 @@ fn read_strtable(r: Reader): RTable | error {
             br = by.r
             j++
         }
-        table = teko::list::push(table, str(bytes))   // []byte → str [wrap form TBD]
+        table = teko::list::push(table, str(bytes))
         rr = br
         i++
     }
     RTable { r = rr; value = table }
 }
 
-/**
- * prim_of — the inverse of `prim_byte` (`PrimKind` ↔ byte = the prim's ENUM ORDINAL). Ordinals
- * match `PrimKind` exactly (drop-128, 2026-07-24 — `u64`/`i64`/`f32` are gone, so the family
- * renumbers): `U8..U64` (0..3), `I8..I64` (4..7), `F32`/`F64` (8..9), `Bool` (10). New tags
- * APPEND within their family (old tags stable going forward, but this renumbering itself is a
- * one-time break from the pre-drop wire — see the drop-128 design doc §7 for the scope of the
- * `.tkb` compat proof, which covers `Number.value` only, not this ordinal).
- *
- * (0.3.1 §8) `Size` (11) / `Usize` (12) — the machine-word kinds — are APPENDED at the tail, so
- * every existing ordinal is stable. The reader accepts them ahead of the emitted corpus needing
- * them (`src/` still spells `u64`, so no artifact carries 11/12 yet — hence NO version bump): the
- * writer's `prim_byte` (`k to byte`) produces these ordinals automatically once a source position
- * is reballed to `size`/`usize`, and this inverse must round-trip them.
- *
- * @param b  the serialized ordinal byte
- * @return   the `PrimKind` it names
- */
 fn prim_of(b: byte): checker::PrimKind {
     if b == 0 { return checker::PrimKind::U8 }
     if b == 1 { return checker::PrimKind::U16 }
@@ -116,8 +79,8 @@ fn prim_of(b: byte): checker::PrimKind {
     if b == 8 { return checker::PrimKind::F32 }
     if b == 9 { return checker::PrimKind::F64 }
     if b == 10 { return checker::PrimKind::Bool }
-    if b == 11 { return checker::PrimKind::Size }   // (§8) signed machine word
-    checker::PrimKind::Usize   // b == 12 (§8) unsigned machine word
+    if b == 11 { return checker::PrimKind::Size }
+    checker::PrimKind::Usize
 }
 
 fn read_types(r: Reader, table: []str): RTypes | error {
@@ -135,16 +98,6 @@ fn read_types(r: Reader, table: []str): RTypes | error {
     RTypes { r = rr; value = xs }
 }
 
-/**
- * read_type — the inverse of `write_type`: tags 0=Prim 1=Byte 2=Str 3=error 4=void 5=Slice
- * 6=Named 7=Variant 8=Func 10=opaque ptr 11=uptr 12=typed ptr 13=Reference 14=char 15=Null.
- * Tag 9 (the legacy nullable former, B.37) is RETIRED — no branch reads it, so a stray tag 9
- * falls through to the trailing "bad type tag" error, exactly like any other unknown tag.
- *
- * @param r      the reader cursor
- * @param table  the interned string table
- * @return       the decoded type plus the advanced cursor, or a decode error
- */
 fn read_type(r: Reader, table: []str): RType | error {
     var tag = match read_u8(r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
@@ -154,7 +107,7 @@ fn read_type(r: Reader, table: []str): RType | error {
     if tag.value == 1 { return RType { r = tag.r; value = checker::Byte { } } }
     if tag.value == 2 { return RType { r = tag.r; value = checker::Str { } } }
     if tag.value == 3 { return RType { r = tag.r; value = checker::Error { } } }
-    if tag.value == 4 { return RType { r = tag.r; value = checker::Void { } } }   // tag 4 = void (was Unit — B.37)
+    if tag.value == 4 { return RType { r = tag.r; value = checker::Void { } } }
     if tag.value == 5 {
         var el = match read_type(tag.r, table) { RType as x => x; error as e => return e }
         return RType { r = el.r; value = checker::Slice { element = el.value } }
@@ -173,12 +126,12 @@ fn read_type(r: Reader, table: []str): RType | error {
         return RType { r = rt.r; value = checker::Func { params = ps.value; ret = rt.value; variadic = false; param_names = []; n_required = (ps.value).len; defaults = []; ret_extra = teko::list::empty() } }
     }
     if tag.value == 10 { return RType { r = tag.r; value = checker::Ptr { inner = null } } }
-    if tag.value == 11 { return RType { r = tag.r; value = checker::Uptr { } } }   // (C7.1a) tag 11 = uptr
-    if tag.value == 13 {   // (MEM-1b) tag 13 = Ref<T>
+    if tag.value == 11 { return RType { r = tag.r; value = checker::Uptr { } } }
+    if tag.value == 13 {
         var in = match read_type(tag.r, table) { RType as x => x; error as e => return e }
         return RType { r = in.r; value = checker::Reference { inner = in.value } }
     }
-    if tag.value == 14 { return RType { r = tag.r; value = checker::Char { } } }   // (UTF-8 increment 1) tag 14 = char
+    if tag.value == 14 { return RType { r = tag.r; value = checker::Char { } } }
     if tag.value == 15 { return RType { r = tag.r; value = checker::Null { } } }
     error { message = "bad type tag in .tkb" }
 }
@@ -188,16 +141,14 @@ type RTExpr = struct { r: Reader; value: checker::TExpr }
 type RTExprs = struct { r: Reader; value: []checker::TExpr }
 type RTerms = struct { r: Reader; value: []checker::TCmpTerm }
 type RPath = struct { r: Reader; value: parser::Path }
-type RTStmt = struct { r: Reader; value: @TStatement() }   /* (C7.16) */
-type RTStmts = struct { r: Reader; value: []@TStatement() }   /* (C7.16) */
-/** RBindTarget — a decoded bind target plus the reader advanced past it (C7.16). */
+type RTStmt = struct { r: Reader; value: @TStatement() }
+type RTStmts = struct { r: Reader; value: []@TStatement() }
 type RBindTarget = struct { r: Reader; value: @BindTarget() }
-type RTypeExpr = struct { r: Reader; value: @TypeExpr() }   /* (C7.16) program framing */
+type RTypeExpr = struct { r: Reader; value: @TypeExpr() }
 type RTypeExprs = struct { r: Reader; value: []@TypeExpr() }
 type RParams = struct { r: Reader; value: []parser::Param }
 type RFields = struct { r: Reader; value: []parser::Field }
 type RStrs = struct { r: Reader; value: []str }
-/** (#165 C2/C4) the cursor-threading result structs for the constraint + method-signature codecs. */
 type RConstraint = struct { r: Reader; value: @ConstraintExpr() }
 type RConstraints = struct { r: Reader; value: []@ConstraintExpr() }
 type RFunction = struct { r: Reader; value: parser::Function }
@@ -206,13 +157,12 @@ type RTypeBody = struct { r: Reader; value: @TypeBody() }
 type RTypeDecl = struct { r: Reader; value: parser::TypeDecl }
 type RUseDecl = struct { r: Reader; value: parser::UseDecl }
 type RTFunction = struct { r: Reader; value: checker::TFunction }
-/** (#594 crumb 8) the cursor-threading result structs for the const-decl codecs (member `ConstDecl`, its list, and module-level `checker::TConstDecl`). */
 type RConstDecl = struct { r: Reader; value: parser::ConstDecl }
 type RConstDecls = struct { r: Reader; value: []parser::ConstDecl }
 type RTConstDecl = struct { r: Reader; value: checker::TConstDecl }
 type RTItem = struct { r: Reader; value: @TItem() }
 type RProgram = struct { r: Reader; value: checker::TProgram }
-type RPExpr = struct { r: Reader; value: parser::Expr }   // (C7.16) match framing
+type RPExpr = struct { r: Reader; value: parser::Expr }
 type RPattern = struct { r: Reader; value: @Pattern() }
 type RPatterns = struct { r: Reader; value: []@Pattern() }
 type RTArm = struct { r: Reader; value: checker::TArm }
@@ -220,10 +170,9 @@ type RTArms = struct { r: Reader; value: []checker::TArm }
 
 fn read_i64(r: Reader): RI64 | error {
     var u = match read_u64(r) { RU64 as x => x; error as e => return e }
-    RI64 { r = u.r; value = u.value to i64 }   // codec i64s are non-negative (TNumber magnitudes), so the value conversion is exact
+    RI64 { r = u.r; value = u.value to i64 }
 }
 
-// inverse of kind_byte (operator TokenKind ↔ byte). The byte→enum ordinal is E7's cast.
 fn kind_of(b: byte): lexer::TokenKind { b to lexer::TokenKind }
 
 fn read_path(r: Reader, table: []str): RPath | error {
@@ -272,7 +221,6 @@ fn read_terms(r: Reader, table: []str): RTerms | error {
     RTerms { r = rr; value = ts }
 }
 
-// inverse of write_texpr: the type FIRST, then tag (0..7), then the payload.
 fn read_texpr(r: Reader, table: []str): RTExpr | error {
     var ty = match read_type(r, table) { RType as x => x; error as e => return e }
     var tag = match read_u8(ty.r) { RByte as x => x; error as e => return e }
@@ -290,8 +238,8 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
     }
     if tag.value == 1 {
         var nm = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
-        var isf = match read_u8(nm.r) { RByte as x => x; error as e => return e }   // (W10a) is_func
-        var fns = match tkb_read_str(isf.r, table) { RStr as x => x; error as e => return e }   // (W10a) func_ns
+        var isf = match read_u8(nm.r) { RByte as x => x; error as e => return e }
+        var fns = match tkb_read_str(isf.r, table) { RStr as x => x; error as e => return e }
         return RTExpr { r = fns.r; value = checker::TExpr { kind = checker::TVar { name = nm.value; is_func = isf.value != 0; func_ns = fns.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 2 {
@@ -323,11 +271,10 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         var ar = match read_texprs(cal.r, table) { RTExprs as x => x; error as e => return e }
         var callns = match tkb_read_str(ar.r, table) { RStr as x => x; error as e => return e }
         var closure = match read_u8(callns.r) { RByte as x => x; error as e => return e }
-        var tas = match read_types(closure.r, table) { RTypes as x => x; error as e => return e }   // explicit call-site type-args (empty for a bare/inferred call)
+        var tas = match read_types(closure.r, table) { RTypes as x => x; error as e => return e }
         return RTExpr { r = tas.r; value = checker::TExpr { kind = checker::TCall { overload_suffix = ""; callee = cal.value; args = ar.value; call_ns = callns.value; is_closure_call = closure.value != 0; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = tas.value; ret_extra = teko::list::empty() }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 8 {
-        // (C7.16) IF: inverse of write tag 8 — cond (texpr) + then_blk + has_else (u8) + else_blk.
         var cond = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
         var thenb = match read_tstatements(cond.r, table) { RTStmts as x => x; error as e => return e }
         var he = match read_u8(thenb.r) { RByte as x => x; error as e => return e }
@@ -335,34 +282,27 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         return RTExpr { r = elseb.r; value = checker::TExpr { kind = checker::TIfExpr { cond = cond.value; then_blk = thenb.value; has_else = he.value != 0; else_blk = elseb.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 9 {
-        // (C7.16) MATCH: inverse of write tag 9 — subject (texpr) + arms ([]TArm).
         var subj = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
         var arms = match read_tarms(subj.r, table) { RTArms as x => x; error as e => return e }
         return RTExpr { r = arms.r; value = checker::TExpr { kind = checker::TMatchExpr { subject = subj.value; arms = arms.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 10 {
-        // S1a — Cast: target type is ty.value (already read); read just the inner expr.
         var inner = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
         return RTExpr { r = inner.r; value = checker::TExpr { kind = checker::TCast { expr = inner.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 11 {
-        // S1b — FieldAccess: receiver THEN field (inverse of write order).
         var rc = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
         var fld = match tkb_read_str(rc.r, table) { RStr as x => x; error as e => return e }
         return RTExpr { r = fld.r; value = checker::TExpr { kind = checker::TFieldAccess { receiver = rc.value; field = fld.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 12 {
-        // W2 — BoolLit: the bool value as a u8 (1/0).
         var bv = match read_u8(tag.r) { RByte as x => x; error as e => return e }
         return RTExpr { r = bv.r; value = checker::TExpr { kind = checker::TBoolLit { value = bv.value != 0 }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 13 {
-        // W2 — NullLit: no payload.
         return RTExpr { r = tag.r; value = checker::TExpr { kind = checker::TNullLit { }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 16 {
-        // W4a — StructInit: Name { f = v, … }. Inverse of write tag 16: field count (u32),
-        // then for each field the interned field-name index (u32) + the field value texpr.
         var nf = match read_u32(tag.r) { RU32 as x => x; error as e => return e }
         var rr = nf.r
         var names: []str = teko::list::empty()
@@ -380,13 +320,11 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         return RTExpr { r = rr; value = checker::TExpr { kind = checker::TStructInit { field_names = names; field_vals = vals }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 17 {
-        // W5-idx — Index (recv[index]): inverse of write tag 17 — receiver texpr THEN index texpr.
         var rc = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
         var ix = match read_texpr(rc.r, table) { RTExpr as x => x; error as e => return e }
         return RTExpr { r = ix.r; value = checker::TExpr { kind = checker::TIndex { receiver = rc.value; index = ix.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 18 {
-        // $"…{expr}…" — Interp: inverse of write tag 18 — npieces (u32), each piece, nholes (u32), each hole.
         var np = match read_u32(tag.r) { RU32 as x => x; error as e => return e }
         var rr = np.r
         var pieces: []str = teko::list::empty()
@@ -421,7 +359,6 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         return RTExpr { r = vl.r; value = checker::TExpr { kind = checker::TPathExpr { enum_name = en.value; member = mb.value; ordinal = od.value; value = vl.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 20 {
-        // Phase 2 — InExpr (<expr> in [ … ]): inverse of write tag 20 — lhs texpr, nelems (u64), then each elem texpr.
         var lhs = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
         var ne = match read_u64(lhs.r) { RU64 as x => x; error as e => return e }
         var rr = ne.r
@@ -437,8 +374,6 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         return RTExpr { r = rr; value = checker::TExpr { kind = checker::TInExpr { lhs = lhs.value; elems = elems }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 21 {
-        // C6.7 — ArrayLit ([ e0, e1, … ]): inverse of write tag 21 — nelements (u64), then for
-        // each element: is_spread (u8: 0=plain 1=spread) followed by the element TExpr.
         var ne = match read_u64(tag.r) { RU64 as x => x; error as e => return e }
         var rr = ne.r
         var elems: []checker::TArrayElem = teko::list::empty()
@@ -453,11 +388,11 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
         }
         return RTExpr { r = rr; value = checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = ty.value; line = 0; col = 0 } }
     }
-    if tag.value == 23 {   // (UTF-8 increment 1) CharLit: interned UTF-8 bytes
+    if tag.value == 23 {
         var by = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
         return RTExpr { r = by.r; value = checker::TExpr { kind = checker::TCharLit { bytes = by.value }; type = ty.value; line = 0; col = 0 } }
     }
-    if tag.value == 24 {   // (W10b.D3) DYNAMIC contract-method call: path + method Func + vtable slot + args
+    if tag.value == 24 {
         var cal = match read_path(tag.r, table) { RPath as x => x; error as e => return e }
         var ct = match read_type(cal.r, table) { RType as x => x; error as e => return e }
         var slot = match read_u32(ct.r) { RU32 as x => x; error as e => return e }
@@ -473,14 +408,13 @@ fn read_texpr(r: Reader, table: []str): RTExpr | error {
     error { message = "bad texpr tag in .tkb" }
 }
 
-// (C7.16) BindTarget: inverse of write_bindtarget — tag 0 SimpleName | tag 1 DestructurePattern.
 fn read_bindtarget(r: Reader, table: []str): RBindTarget | error {
     var tag = match read_u8(r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
         var nm = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
         return RBindTarget { r = nm.r; value = parser::SimpleName { name = nm.value } }
     }
-    var n = match read_u32(tag.r) { RU32 as x => x; error as e => return e }   // tag 1 — DestructurePattern
+    var n = match read_u32(tag.r) { RU32 as x => x; error as e => return e }
     var rr = n.r
     var names: []str = teko::list::empty()
     var i = 0
@@ -494,7 +428,6 @@ fn read_bindtarget(r: Reader, table: []str): RBindTarget | error {
     RBindTarget { r = rr; value = parser::DestructurePattern { names = names } }
 }
 
-// (C7.16) a []TStatement: u64 count, then each. Inverse of write_tstatements.
 fn read_tstatements(r: Reader, table: []str): RTStmts | error {
     var n = match read_u64(r) { RU64 as x => x; error as e => return e }
     var rr = n.r
@@ -510,11 +443,9 @@ fn read_tstatements(r: Reader, table: []str): RTStmts | error {
     RTStmts { r = rr; value = xs }
 }
 
-// (C7.16) a TStatement: u8 tag + payload. Inverse of write_tstatement.
 fn read_tstatement(r: Reader, table: []str): RTStmt | error {
     var tag = match read_u8(r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
-        // TBinding: bindkind (u8) + target (BindTarget) + bound (Type) + value (TExpr).
         var bk = match read_u8(tag.r) { RByte as x => x; error as e => return e }
         var bt = match read_bindtarget(bk.r, table) { RBindTarget as x => x; error as e => return e }
         var bd = match read_type(bt.r, table) { RType as x => x; error as e => return e }
@@ -522,8 +453,6 @@ fn read_tstatement(r: Reader, table: []str): RTStmt | error {
         return RTStmt { r = v.r; value = checker::TBinding { kind = bk.value to parser::BindKind; target = bt.value; bound = bd.value; value = v.value } }
     }
     if tag.value == 1 {
-        // TAssign: kind (u8) + name (u32) + op (u8) + bound (Type) + value (TExpr) + deref (u8)
-        //   [+ target (TExpr) iff kind==Field]. (#88; MEM-1b-ii)
         var ak = match read_u8(tag.r) { RByte as x => x; error as e => return e }
         var nm = match tkb_read_str(ak.r, table) { RStr as x => x; error as e => return e }
         var op = match read_u8(nm.r) { RByte as x => x; error as e => return e }
@@ -561,7 +490,6 @@ fn read_tstatement(r: Reader, table: []str): RTStmt | error {
         return RTStmt { r = e.r; value = checker::TExprStmt { expr = e.value } }
     }
     if tag.value == 7 {
-        // TDeferStmt (C7.18): body ([]TStatement).
         var bd = match read_tstatements(tag.r, table) { RTStmts as x => x; error as e => return e }
         return RTStmt { r = bd.r; value = checker::TDeferStmt { body = bd.value } }
     }
@@ -581,9 +509,6 @@ fn read_tstatement(r: Reader, table: []str): RTStmt | error {
     error { message = "bad tstatement tag in .tkb" }
 }
 
-// ============================================================================
-// (C7.16) PROGRAM FRAMING readers — inverse of the write_* framing helpers.
-// ============================================================================
 fn read_typeexprs(r: Reader, table: []str): RTypeExprs | error {
     var n = match read_u64(r) { RU64 as x => x; error as e => return e }
     var rr = n.r
@@ -597,7 +522,7 @@ fn read_typeexpr(r: Reader, table: []str): RTypeExpr | error {
     if tag.value == 0 { var p = match read_path(tag.r, table) { RPath as x => x; error as e => return e }; return RTypeExpr { r = p.r; value = parser::NamedType { path = p.value; args = teko::list::empty() } } }
     if tag.value == 1 { var e = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeExpr { r = e.r; value = parser::SliceType { element = e.value } } }
     if tag.value == 2 { var xs = match read_typeexprs(tag.r, table) { RTypeExprs as x => x; error as e => return e }; return RTypeExpr { r = xs.r; value = parser::UnionType { members = xs.value } } }
-    if tag.value == 4 {   // (W10a) tag 4: params then ret
+    if tag.value == 4 {
         var ps = match read_typeexprs(tag.r, table) { RTypeExprs as x => x; error as e => return e }
         var rt = match read_typeexpr(ps.r, table) { RTypeExpr as x => x; error as e => return e }
         return RTypeExpr { r = rt.r; value = parser::FunctionType { params = ps.value; ret = rt.value } }
@@ -636,16 +561,6 @@ fn read_fields(r: Reader, table: []str): RFields | error {
     }
     RFields { r = rr; value = xs }
 }
-/**
- * Read one static type-member `ConstDecl` SIGNATURE: inverse of `write_constdecl` (#594 crumb 8) —
- * name + type_ann + vis + has_doc + doc + line + col. The initializer was not serialized (the body
- * codec carries signatures only; the value rides the hoisted module-level `TConstDecl` @TItem()), so it
- * reconstructs as `parser::no_expr()`, exactly as `read_params` stubs a dropped default.
- *
- * @param r      the reader cursor at the member const's first field
- * @param table  the interned string table
- * @return RConstDecl | error  the decoded member const plus the advanced cursor
- */
 fn read_constdecl(r: Reader, table: []str): RConstDecl | error {
     var nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     var ty = match read_typeexpr(nm.r, table) { RTypeExpr as x => x; error as e => return e }
@@ -656,7 +571,6 @@ fn read_constdecl(r: Reader, table: []str): RConstDecl | error {
     var cl = match read_u32(ln.r) { RU32 as x => x; error as e => return e }
     RConstDecl { r = cl.r; value = parser::ConstDecl { name = nm.value; ty = ty.value; init = parser::no_expr(); vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; line = ln.value; col = cl.value; is_global = false } }
 }
-/** a type body's `consts` list: inverse of `write_constdecls` (#594 crumb 8) — u64 count + each. */
 fn read_constdecls(r: Reader, table: []str): RConstDecls | error {
     var n = match read_u64(r) { RU64 as x => x; error as e => return e }
     var rr = n.r
@@ -673,7 +587,6 @@ fn read_strs(r: Reader, table: []str): RStrs | error {
     loop { if i >= n.value { break }; var s = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }; xs = teko::list::push(xs, s.value); rr = s.r; i++ }
     RStrs { r = rr; value = xs }
 }
-/** (#165 C2) a ConstraintExpr: inverse of write_constraint — tag 0 Atom | 1 And | 2 Or | 3 NoConstraint. */
 fn read_constraint(r: Reader, table: []str): RConstraint | error {
     var tag = match read_u8(r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
@@ -691,8 +604,8 @@ fn read_constraint(r: Reader, table: []str): RConstraint | error {
         return RConstraint { r = rt.r; value = parser::ConstraintOr { left = l.value; right = rt.value } }
     }
     if tag.value == 3 { return RConstraint { r = tag.r; value = parser::NoConstraint { } } }
-    if tag.value == 4 { return RConstraint { r = tag.r; value = parser::ConstraintNotNull { } } }   /* (§9.2b) */
-    if tag.value == 5 {   /* (§9.2b) Form: interned form word + has_lifetime u8 + lifetime u8 */
+    if tag.value == 4 { return RConstraint { r = tag.r; value = parser::ConstraintNotNull { } } }
+    if tag.value == 5 {
         var fm = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
         var hl = match read_u8(fm.r) { RByte as x => x; error as e => return e }
         var lt = match read_u8(hl.r) { RByte as x => x; error as e => return e }
@@ -700,7 +613,6 @@ fn read_constraint(r: Reader, table: []str): RConstraint | error {
     }
     error { message = "bad constraint tag in .tkb" }
 }
-/** (#165 C2) a []ConstraintExpr: inverse of write_constraints. */
 fn read_constraints(r: Reader, table: []str): RConstraints | error {
     var n = match read_u64(r) { RU64 as x => x; error as e => return e }
     var rr = n.r
@@ -709,15 +621,6 @@ fn read_constraints(r: Reader, table: []str): RConstraints | error {
     loop { if i >= n.value { break }; var c = match read_constraint(rr, table) { RConstraint as x => x; error as e => return e }; xs = teko::list::push(xs, c.value); rr = c.r; i++ }
     RConstraints { r = rr; value = xs }
 }
-/** (#165 C4) a parser::Function (type-body method): inverse of write_function. has_body is always 0
-    (the honest signature-only stub — R2); a nonzero has_body would need a parser-statement codec that
-    does not exist, so reject it loudly rather than mis-read.
-    `has_arena_size`/`arena_size` (#453) are NOT round-tripped — a method never carries the
-    directive in this crumb (`parse_decl_attributes` only runs at the top-level `fn` position), so
-    a `.tkb`-read method always reads back `has_arena_size = false` (an inert-field precedent). The
-    §9 accessor fields (`is_getter`/`is_setter`/`accessor_prop`) follow the SAME precedent: the `.tkb`
-    format is unchanged and they read back false/"", so a cross-library property is a future additive
-    extension exactly like `is_static`. */
 fn read_function(r: Reader, table: []str): RFunction | error {
     var nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     var tp = match read_strs(nm.r, table) { RStrs as x => x; error as e => return e }
@@ -748,14 +651,13 @@ fn read_function(r: Reader, table: []str): RFunction | error {
             line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0
             c_symbol = cs.value; from_lib = fr.value; os_guard = og.value
             is_intern = ii.value != 0; is_abstract = ia.value != 0; is_virtual = iv.value != 0; is_override = io.value != 0
-            is_static = false   // (§4 teach) not serialized in .tkb — the format is unchanged; the corpus has no `static fn` yet
+            is_static = false
             is_getter = false; is_setter = false; accessor_prop = ""
             has_arena_size = false; arena_size = 0 to u64
             ret_types = teko::list::empty()
             is_operator = false
    ; is_global = false } }
 }
-/** (#165 C4/C5) a []parser::Function: inverse of write_functions (declaration = vtable order). */
 fn read_functions(r: Reader, table: []str): RFunctions | error {
     var n = match read_u64(r) { RU64 as x => x; error as e => return e }
     var rr = n.r
@@ -764,9 +666,6 @@ fn read_functions(r: Reader, table: []str): RFunctions | error {
     loop { if i >= n.value { break }; var f = match read_function(rr, table) { RFunction as x => x; error as e => return e }; xs = teko::list::push(xs, f.value); rr = f.r; i++ }
     RFunctions { r = rr; value = xs }
 }
-/** a TypeBody: inverse of write_typebody. (#165 C5) StructBody(0) reads fields + methods +
-    implements; ClassBody(6) reads kind + base + binding + implements + fields + methods; Interface(7)
-    reads extends + method sigs; Trait(8) reads fields + method sigs — all methods in vtable order. */
 fn read_typebody(r: Reader, table: []str): RTypeBody | error {
     var tag = match read_u8(r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
@@ -846,13 +745,6 @@ fn read_typebody(r: Reader, table: []str): RTypeBody | error {
     }
     error { message = "bad typebody tag in .tkb" }
 }
-/**
- * Read a parser TypeDecl: inverse of write_typedecl.
- *
- * @param Reader r  the reader cursor, positioned at the TypeDecl's first field
- * @param []str table  the program's deduplicated string table (referenced by index)
- * @return RTypeDecl | error  the decoded TypeDecl plus the reader's advanced position
- */
 fn read_typedecl(r: Reader, table: []str): RTypeDecl | error {
     var nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     var tp = match read_strs(nm.r, table) { RStrs as x => x; error as e => return e }
@@ -865,14 +757,6 @@ fn read_typedecl(r: Reader, table: []str): RTypeDecl | error {
     var cl = match read_u32(ln.r) { RU32 as x => x; error as e => return e }
     RTypeDecl { r = cl.r; value = parser::TypeDecl { name = nm.value; type_params = tp.value; type_constraints = tc.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; line = ln.value; col = cl.value; is_global = false } }
 }
-/**
- * The inverse of `write_usedecl` — reads `path` + `has_alias` + `alias` + `names` (S1, the
- * 0.1.0.0-beta remodel §3.1).
- *
- * @param Reader r  the reader cursor
- * @param []str table  the interned string table
- * @return RUseDecl | error  the decoded `UseDecl` plus the resume cursor, or a decode error
- */
 fn read_usedecl(r: Reader, table: []str): RUseDecl | error {
     var p = match read_path(r, table) { RPath as x => x; error as e => return e }
     var ha = match read_u8(p.r) { RByte as x => x; error as e => return e }
@@ -880,17 +764,6 @@ fn read_usedecl(r: Reader, table: []str): RUseDecl | error {
     var nl = match read_strs(al.r, table) { RStrs as x => x; error as e => return e }
     RUseDecl { r = nl.r; value = parser::UseDecl { path = p.value; has_alias = ha.value != 0; alias = al.value; names = nl.value } }
 }
-/**
- * Read a typed `TFunction` item: inverse of `write_tfunction`.
- *
- * `has_arena_size`/`arena_size` (#453) are NOT round-tripped — following the same inert-field
- * precedent as `parser::Function`'s own method codec (`read_function` above): a `.tkb`-read
- * `TFunction` always carries `has_arena_size = false`, a pre-existing gap this pass does not close.
- *
- * @param Reader r  the reader cursor, positioned at the TFunction's first field
- * @param []str table  the program's deduplicated string table
- * @return RTFunction | error  the decoded TFunction plus the reader's advanced position
- */
 fn read_tfunction(r: Reader, table: []str): RTFunction | error {
     var nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     var tp = match read_strs(nm.r, table) { RStrs as x => x; error as e => return e }
@@ -911,15 +784,6 @@ fn read_tfunction(r: Reader, table: []str): RTFunction | error {
     var fr = match tkb_read_str(cs.r, table) { RStr as x => x; error as e => return e }
     RTFunction { r = fr.r; value = checker::TFunction { overload_suffix = ""; name = nm.value; type_params = tp.value; type_constraints = tc.value; params = ps.value; return_type = rt.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; namespace = ns.value; file = fl.value; line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0; c_symbol = cs.value; from_lib = fr.value; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() } }
 }
-/**
- * Read a module-level `TConstDecl` @TItem(): inverse of `write_tconstdecl` (#594 crumb 8) — name +
- * namespace + value type + typed initializer + vis + has_doc + doc + line + col. The initializer
- * rides in full (unlike a body member const), so a consuming module inlines the value identically.
- *
- * @param r      the reader cursor at the const's first field (past the @TItem() tag)
- * @param table  the interned string table
- * @return RTConstDecl | error  the decoded module const plus the advanced cursor
- */
 fn read_tconstdecl(r: Reader, table: []str): RTConstDecl | error {
     var nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     var ns = match tkb_read_str(nm.r, table) { RStr as x => x; error as e => return e }
@@ -950,9 +814,6 @@ fn read_program(r: Reader, table: []str): RProgram | error {
     RProgram { r = rr; value = checker::TProgram { items = xs } }
 }
 
-// ============================================================================
-// (C7.16) MATCH FRAMING readers — pattern-expr / Pattern / TArm.
-// ============================================================================
 fn read_pexpr(r: Reader, table: []str): RPExpr | error {
     var tag = match read_u8(r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
@@ -1032,12 +893,10 @@ fn read_tarm(r: Reader, table: []str): RTArm | error {
         return RTArm { r = bd.r; value = checker::TArm { pattern = p.value; has_when = true; guard = g.value; body = bd.value } }
     }
     var bd = match read_tstatements(hw.r, table) { RTStmts as x => x; error as e => return e }
-    // has_when=false → the guard is unused; a placeholder TExpr (the .tks TArm.guard is non-optional).
     var placeholder = checker::TExpr { kind = checker::TNullLit { }; type = checker::Void { }; line = 0; col = 0 }
     RTArm { r = bd.r; value = checker::TArm { pattern = p.value; has_when = false; guard = placeholder; body = bd.value } }
 }
 
-// THE ENTRY: verify the header + hash, then read the table and the typed tree.
 fn deserialize(data: []byte): checker::TExpr | error {
     var r0 = Reader { data = data; pos = 0 }
     var m0 = match read_u8(r0) { RByte as x => x; error as e => return e }
@@ -1061,8 +920,6 @@ fn deserialize(data: []byte): checker::TExpr | error {
     te.value
 }
 
-// (C7.16) THE PROGRAM ENTRY: verify the header + VERSION 2 + hash, then read the table and the
-// typed PROGRAM. Inverse of serialize_program.
 pub fn deserialize_program(data: []byte): checker::TProgram | error {
     var r0 = Reader { data = data; pos = 0 }
     var m0 = match read_u8(r0) { RByte as x => x; error as e => return e }

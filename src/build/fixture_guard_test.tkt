@@ -1,56 +1,15 @@
-/**
- * src/build/fixture_guard_test.tkt   (unit tier for `src/build/fixture_guard.tks`)
- *
- * TWO HALVES, AND BOTH ARE THE POINT. The first half pins the scanners against SYNTHETIC text,
- * including the exact splice shape two forward merges produced on 2026-07-30 — that is the proof by
- * inversion, because the input the guard must reject is reproduced here byte for byte. The second
- * half runs the guard over the REAL fixture tree, which is what turns it from a tested function into
- * a gate: a merge that splices `examples/regressions/**` again fails in the unit tier of every lane,
- * naming the file and the line, instead of surfacing as a 119-line cascade in one channel seven legs
- * later.
- */
 
-/**
- * REGRESSION_FIXTURE_ROOT — the fixture tree the structural guard walks, relative to the project root
- * the unit tier runs from.
- */
 const REGRESSION_FIXTURE_ROOT: str = "examples/regressions"
 
-/**
- * OWN_NATIVE_MAIN_PATH — the own-backend corpus channel's driver: the file that calls the whole `f_*`
- * family, and the file the 119-line cascade was reported against.
- */
 const OWN_NATIVE_MAIN_PATH: str = "examples/regressions/own_native/main.tks"
 
-/**
- * OWN_NATIVE_CORPUS_PATH — the module declaring that family, and the file the two forward merges of
- * 2026-07-30 spliced.
- */
 const OWN_NATIVE_CORPUS_PATH: str = "examples/regressions/own_native/src/corpus.tks"
 
-/**
- * OWN_NATIVE_MIN_CORPUS_FNS — the pinned FLOOR for the own-backend corpus's declaration count, under
- * the rule `count_declared_fns` applies (a `fn`/`pub fn` at COLUMN 0). Measured on the drained lane
- * top: 229, up from 196 while the file was spliced. A count that DROPS is the signature of a merge
- * that ate declarations, and nothing measured it; raise this floor when a degrau adds to the corpus,
- * never lower it to make a red go away.
- */
 const OWN_NATIVE_MIN_CORPUS_FNS: u64 = 229
 
-/**
- * COMPILER_SOURCE_ROOT — the compiler's own source root, the exact surface the bootstrap ladder hands
- * to the PUBLISHED seed (`teko . --no-verify --release`). The seed-compat guard walks this tree and
- * no other: a fixture may use any capability the tip has, a compiler source may not.
- */
 const COMPILER_SOURCE_ROOT: str = "src"
 
 #test
-/**
- * scan_source_structure_accepts_a_sound_source — a source that closes what it opens, holds a brace
- * inside a literal, and documents a struct field at depth 1 leaves depth 0 and no orphan.
- *
- * @return void
- */
 fn scan_source_structure_accepts_a_sound_source() {
     var text = "fn a(): i64 {\n    let brace = \"{\"\n    0\n}\n\ntype T = struct {\n    x: i64\n}\n"
     var st = scan_source_structure(text)
@@ -59,14 +18,6 @@ fn scan_source_structure_accepts_a_sound_source() {
 }
 
 #test
-/**
- * scan_source_structure_names_the_splice — THE MEASURED DEFECT, reproduced and inverted. The merge
- * dropped `    0` / `}` / blank / the fence between one function and the next declaration's
- * doc-comment, so the first body never closes. The same text WITH those four lines restored must come
- * back clean, which is what makes this a proof and not an assertion.
- *
- * @return void
- */
 fn scan_source_structure_names_the_splice() {
     var spliced = "fn a(): i64 {\n    let n = 1\n    if n != 1 { return 1 }\n * b — the doc-comment whose opening fence the merge ate.\nfn b(): i64 {\n    0\n}\n"
     teko::assert::is_true(scan_source_structure(spliced).depth != 0)
@@ -77,13 +28,6 @@ fn scan_source_structure_names_the_splice() {
 }
 
 #test
-/**
- * scan_source_structure_names_the_orphan_doc_line — the other half of the same splice: a column-0
- * doc-comment that opens inside a body. A field doc at depth 1 must not trip it, which is why the
- * check is keyed on indentation.
- *
- * @return void
- */
 fn scan_source_structure_names_the_orphan_doc_line() {
     var stranded = "fn a(): i64 {\n    let n = 1\n/**\n * b — stranded inside a's body.\n */\n    0\n}\n"
     teko::assert::is_true(scan_source_structure(stranded).orphan_doc_line == 3)
@@ -93,13 +37,6 @@ fn scan_source_structure_names_the_orphan_doc_line() {
 }
 
 #test
-/**
- * declared_fn_names_reads_only_top_level_declarations — a `fn` at column 0 (bare or `pub`) is a free
- * function a bare call can reach; an indented method inside a class body is not. This is the rule the
- * pinned floor is measured under, so it is pinned itself.
- *
- * @return void
- */
 fn declared_fn_names_reads_only_top_level_declarations() {
     var text = "fn f_one(): i64 { 0 }\npub fn f_two(a: i64): i64 { a }\ntype C = class {\n    fn method(): i64 { 0 }\n}\n"
     var names = declared_fn_names(text)
@@ -110,13 +47,6 @@ fn declared_fn_names_reads_only_top_level_declarations() {
 }
 
 #test
-/**
- * undeclared_helper_calls_finds_the_unresolved_family_member — the direct form of the question the
- * 119-line `unknown function` cascade answered indirectly, and its negative: a family whose every
- * call resolves reports nothing, and a declaration nobody calls is not a defect.
- *
- * @return void
- */
 fn undeclared_helper_calls_finds_the_unresolved_family_member() {
     var caller = "if f_one() != 0 { bad = 1 }\nif f_gone() != 0 { bad = 2 }\n"
     var decls = "fn f_one(): i64 { 0 }\nfn f_never_called(): i64 { 0 }\n"
@@ -127,12 +57,6 @@ fn undeclared_helper_calls_finds_the_unresolved_family_member() {
 }
 
 #test
-/**
- * called_names_with_prefix_needs_the_call_parenthesis — a name mentioned without being called is not
- * a call, and a name that merely CONTAINS the prefix mid-word is not a family member.
- *
- * @return void
- */
 fn called_names_with_prefix_needs_the_call_parenthesis() {
     var text = "let x = f_called()\nlet y = f_mentioned\nlet z = of_not_family()\n"
     var names = called_names_with_prefix(text, "f_")
@@ -141,13 +65,6 @@ fn called_names_with_prefix_needs_the_call_parenthesis() {
 }
 
 #test
-/**
- * own_native_corpus_declaration_count_never_drops — the count half of the drain guard on the REAL
- * tree. Braces can survive a splice that eats whole declarations, so the balance check alone is not
- * enough.
- *
- * @return void
- */
 fn own_native_corpus_declaration_count_never_drops() {
     var text = match teko::io::read_file(OWN_NATIVE_CORPUS_PATH) { str as s => s; error => "" }
     teko::assert::is_true(text.len > 0)
@@ -155,13 +72,6 @@ fn own_native_corpus_declaration_count_never_drops() {
 }
 
 #test
-/**
- * own_native_main_calls_only_declared_helpers — the guard on the real tree: every `f_*` the corpus
- * channel's `main.tks` calls resolves to a declaration in the corpus module. This is the assertion
- * whose absence let a spliced corpus reach CI and report 119 consequences instead of one cause.
- *
- * @return void
- */
 fn own_native_main_calls_only_declared_helpers() {
     var main_text = match teko::io::read_file(OWN_NATIVE_MAIN_PATH) { str as s => s; error => "" }
     var corpus_text = match teko::io::read_file(OWN_NATIVE_CORPUS_PATH) { str as s => s; error => "" }
@@ -178,15 +88,6 @@ fn own_native_main_calls_only_declared_helpers() {
 }
 
 #test
-/**
- * regression_fixture_tree_is_structurally_sound — the guard on the real tree for the splice half:
- * every hand-written `.tks`/`.tkt` under the fixture root closes what it opens and opens no top-level
- * doc-comment inside a body. Scoped to the fixture tree because that is the surface no other pass
- * reads until a channel runs — a spliced COMPILER source stops the self-host outright, loudly, at the
- * file that broke.
- *
- * @return void
- */
 fn regression_fixture_tree_is_structurally_sound() {
     var defects = structural_defects_under(REGRESSION_FIXTURE_ROOT)
     var i: u64 = 0
@@ -199,73 +100,31 @@ fn regression_fixture_tree_is_structurally_sound() {
 }
 
 #test
-/**
- * seed_hostile_match_body_names_the_mixed_join — THE MEASURED DEFECT, reproduced byte for byte.
- * `stage_rc_of_env`'s body (src/build/project.tks) mixed a `to i32` arm with the bare literal `0`,
- * and the published seed typed that join as `i32 | i64` and refused the function.
- *
- * @return void
- */
 fn seed_hostile_match_body_names_the_mixed_join() {
     teko::assert::is_true(seed_hostile_match_body(" str as v => bp_parse_uint(v) to i32; error => 0 "))
 }
 
 #test
-/**
- * seed_hostile_match_body_accepts_the_annotated_literal — the fix inverted: annotating the literal
- * makes both arms `i32`, and the same body is then seed-safe. Without this half the guard could be
- * satisfied by any rule that always says yes.
- *
- * @return void
- */
 fn seed_hostile_match_body_accepts_the_annotated_literal() {
     teko::assert::is_true(!seed_hostile_match_body(" str as v => bp_parse_uint(v) to i32; error => 0 to i32 "))
 }
 
 #test
-/**
- * seed_hostile_match_body_accepts_an_all_literal_match — a match whose EVERY arm is a bare literal
- * has no concrete anchor to disagree with, so the whole match stays a literal and adopts the
- * annotation at its use site. `compress.tks`'s `match m { Store => 0; Deflate => 8 }` is that shape
- * in a `-> u32` function, and the published seed builds it.
- *
- * @return void
- */
 fn seed_hostile_match_body_accepts_an_all_literal_match() {
     teko::assert::is_true(!seed_hostile_match_body(" Store => 0; Deflate => 8 "))
 }
 
 #test
-/**
- * seed_hostile_match_body_accepts_an_i64_anchor — a `to i64` arm agrees with a bare literal's own
- * default, so mixing the two splits nothing. `io/stream.tks`'s `let base: i64 = match whence` is that
- * shape and must not be flagged.
- *
- * @return void
- */
 fn seed_hostile_match_body_accepts_an_i64_anchor() {
     teko::assert::is_true(!seed_hostile_match_body("\n Start => 0\n Current => self.pos to i64\n End => self.buf.len() to i64\n"))
 }
 
 #test
-/**
- * seed_hostile_match_body_skips_a_diverging_arm — an arm that returns contributes no value to the
- * join, so a `return … to i32` beside a bare literal is not a split.
- *
- * @return void
- */
 fn seed_hostile_match_body_skips_a_diverging_arm() {
     teko::assert::is_true(!seed_hostile_match_body(" T as v => return v to i32; error => 0 "))
 }
 
 #test
-/**
- * seed_hostile_arm_lines_reads_across_lines_and_ignores_literals — the scanner half: a multi-line
- * match is joined and reported at the line its keyword sits on, and a brace inside a string literal
- * neither opens nor closes a body.
- *
- * @return void
- */
 fn seed_hostile_arm_lines_reads_across_lines_and_ignores_literals() {
     var text = "fn a(): i32 {\n    let s = \"{ => 1 }\"\n    match k {\n        A as v => v to i32\n        B => 0\n    }\n}\n"
     var lines = seed_hostile_arm_lines(text)
@@ -274,13 +133,6 @@ fn seed_hostile_arm_lines_reads_across_lines_and_ignores_literals() {
 }
 
 #test
-/**
- * is_bare_number_separates_a_literal_from_an_expression — the leaf predicate, both ways: a signed,
- * separated or fractional literal is bare, and anything carrying an operator, an identifier or a cast
- * is not.
- *
- * @return void
- */
 fn is_bare_number_separates_a_literal_from_an_expression() {
     teko::assert::is_true(is_bare_number("0"))
     teko::assert::is_true(is_bare_number("-1"))
@@ -292,14 +144,6 @@ fn is_bare_number_separates_a_literal_from_an_expression() {
 }
 
 #test
-/**
- * compiler_sources_carry_no_seed_hostile_match_arm — THE GATE. The whole `src/` tree is walked and no
- * `.tks` may mix a bare literal arm with a narrowing-cast anchor. This is the assertion whose absence
- * let `stage_rc_of_env` reach CI and take nine artifact legs down with it: the published seed refused
- * the tip, the fallback ladder engaged, and its pinned rungs were themselves obsolete.
- *
- * @return void
- */
 fn compiler_sources_carry_no_seed_hostile_match_arm() {
     var defects = seed_hostile_arms_under(COMPILER_SOURCE_ROOT)
     var i: u64 = 0

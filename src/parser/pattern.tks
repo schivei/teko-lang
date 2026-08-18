@@ -1,78 +1,28 @@
-// src/parser/pattern.tks  (namespace 'teko::parser') — the `match`-arm pattern AST (B.13/B.15).
-// The pattern axis a `match` arm matches on: scalar literal, inclusive range, alternation, a
-// named/binding/slice pattern, field destructure, or wildcard. Syntactic only — pattern TYPING
-// (against the subject) is the checker's job (match.tks). Aggregated into `teko::parser`.
 
-pub type LiteralPattern = struct { value: Expr }   // a scalar literal
-pub type RangePattern = struct { lo: Expr; hi: Expr }   // lo ..= hi (inclusive)
-pub type AltPattern = struct { options: []@Pattern() }   /* a | b | … (value axis) */
-/**
- * BindPattern — a named / binding / slice pattern: `Foo`, `Foo as x`, or `[]T as x`. A bare `Foo`
- * (no binder) has `has_binding = false` (P3b). A slice pattern (`is_slice`) leaves `type_name` unused
- * and carries its element type in `slice_type`.
- */
+pub type LiteralPattern = struct { value: Expr }
+pub type RangePattern = struct { lo: Expr; hi: Expr }
+pub type AltPattern = struct { options: []@Pattern() }
 pub type BindPattern = struct {
-    /** the matched nominal type's path (unused when `is_slice`). */
     type_name: Path
-    /** does the pattern bind a name (`Foo as x`)? bare `Foo` is false (P3b). */
     has_binding: bool
-    /** the bound name (valid iff `has_binding`). */
     binding: str
-    /** is this the slice pattern `[]T as x`? (then `type_name` is unused and `slice_type` holds `[]T`). */
     is_slice: bool
-    /** the slice pattern's element type `[]T`, or `null` when `!is_slice`. */
     slice_type: @TypeExpr() | null
-    /** (W9.4) explicit generic args of `Foo<i64> as x` (empty otherwise, never with `is_slice`). */
     type_args: []@TypeExpr()
 }
-pub type FieldPattern = struct { type_name: Path; fields: []str }   // Type { f; g } (variant axis)
-pub type WildcardPattern = struct { }   // _
-pub type NullPattern = struct { }   // null — matches the NONE of an optional `T?` (REBOOT_PLAN §202)
+pub type FieldPattern = struct { type_name: Path; fields: []str }
+pub type WildcardPattern = struct { }
+pub type NullPattern = struct { }
 
-/**
- * GroupBindPattern — a parenthesized anonymous-union case that BINDS the NESTED union member as a whole:
- * `(B | C | …) as v`. Its options identify the subject's NESTED `Variant` member `(B | C)` (kept nested,
- * never flattened — §9.D); it names no single nominal case. The bound `v` ALIASES the boxed nested
- * variant the subject already carries at that tag slot — byte-identical, no re-tag, no re-box. The
- * pattern-side twin of the type-side grouped union `(A | B)` (§9.D capability a): the only spelling that
- * matches AND binds a nested anonymous union member left behind when §9.D inlines a union-of-unions.
- * Distinct from `AltPattern` (value-axis alternatives that never bind): the parens plus the `as v` are
- * its discriminator, so a bare `b | c` alternative is untouched.
- *
- * @field options  the nested member's option patterns, source order (each a bare case name)
- * @field binding  the bound identifier `v`
- * @since §9.D capability (c)
- */
 pub type GroupBindPattern = struct { options: []@Pattern(); binding: str }
 
-/**
- * MacroPattern — a `@name(...)` type-macro call standing in a PATTERN-primary position (§9.D CR3): the
- * pattern-side twin of `MacroType`. It appears as an option of a grouped bind — `(@ns::Union()) as v` —
- * where the retired inline union `@ns::Union()` names the whole nested union member to bind. The Family-A
- * pre-pass (`walk_pattern`) expands it BEFORE type-check: the macro's `lowering { … }` fragment is
- * re-parsed as a union `A | B | …` and each member becomes a bare `BindPattern` option, so a `MacroPattern`
- * never reaches the checker/codegen (a survivor is an internal error, exactly like `MacroType`). This is
- * what lets a whole-union bind `X as v` survive the retirement of `type X = variant …` to `@X()`.
- *
- * @field macro_call  the `@name(...)` type-macro node (a `MacroType`) to expand to the group's options
- * @since §9.D CR3
- */
 pub type MacroPattern = struct { macro_call: @TypeExpr() }
 
-/**
- * Pattern — the `match`-arm pattern axis, retired from a nominal `variant` to the §9.D inline union
- * `@Pattern()`: a scalar literal, an inclusive range, an alternation, a grouped bind, a named/binding/
- * slice pattern, a field destructure, wildcard/null, or (§9.D CR3) a `MacroPattern` expanded away before
- * type-check. Recursive members (`AltPattern`/`GroupBindPattern` carry `[]@Pattern()`) box under CR1.
- *
- * @since §9.D (retired from `type Pattern = variant …`)
- */
 macro Pattern() { lowering { parser::LiteralPattern | parser::RangePattern | parser::AltPattern | parser::GroupBindPattern | parser::BindPattern | parser::FieldPattern | parser::WildcardPattern | parser::NullPattern | parser::MacroPattern } }
 
 pub type Arm = struct {
     pattern: @Pattern()
-    has_when: bool   // a `when` guard present? (does NOT count for exhaustiveness)
-    guard: Expr   // the guard condition (when has_when)
-    body: []@Statement()   /* the arm body is a STATEMENT BLOCK, exactly like an `if` branch (B.20): */
-    // `=> expr`, `=> return x`, `=> break`/`=> continue`, or `=> { stmts }`
+    has_when: bool
+    guard: Expr
+    body: []@Statement()
 }
