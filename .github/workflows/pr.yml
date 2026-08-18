@@ -780,58 +780,55 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # WINDOWS IS NOW 100% pwsh-NATIVE (owner ruling 2026-08-18: "a falha real é rodar em mingw,
+      # ao invés do powershell nativo usando as ferramentas corretas. Mingw é lento, obeso e fraco.")
+      # No `shell: bash` (= Git-Bash/MinGW), no `sh scripts/*.sh`: every Windows step runs pwsh and
+      # calls the pwsh mirrors under scripts/win/. The `.sh` scripts are untouched and keep serving
+      # linux/macos.
       - name: Report the host toolchain (diagnostic — never fails the job)
-        shell: bash
+        shell: pwsh
         run: |
-          for t in cc clang gcc file xz unzip tar curl python3 7z musl-gcc; do
-            printf '%-8s ' "$t"
-            command -v "$t" || echo '(absent)'
-          done
-          # THE TARGET TRIPLE, NOT JUST THE PATH. `command -v` says WHERE cc is; it does not say
-          # WHAT IT TARGETS, and on Windows that is the whole question: `cc` resolves to
-          # /c/mingw64/bin/cc on the runner, so the C route compiles and links through mingw while
-          # the native path's linker_is_mingw guard — which lives only in src/build/linker.tks —
-          # never fires. `-dumpmachine` is one line per tool and answers it outright
-          # (x86_64-w64-mingw32 vs x86_64-pc-windows-msvc vs x86_64-linux-gnu). Full `-v` output
-          # would be dozens of lines across every job for information we do not need standing.
-          for t in cc clang gcc; do
-            if command -v "$t" >/dev/null 2>&1; then
-              printf '%-8s target: ' "$t"
-              "$t" -dumpmachine 2>/dev/null || echo '(no -dumpmachine)'
-            fi
-          done
+          # THE TARGET TRIPLE, NOT JUST THE PATH. The toolchain that matters on Windows is clang
+          # (x86_64-pc-windows-msvc) + lld-link + llvm-lib — never MinGW cc. `-dumpmachine` answers
+          # WHAT clang targets in one line; a `cc` resolving to x86_64-w64-mingw32 would be the bug.
+          foreach ($t in @('clang','lld-link','llvm-lib','dumpbin','llvm-readobj','tar','python3')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            '{0,-14} {1}' -f $t, $(if ($c) { $c.Source } else { '(absent)' })
+          }
+          foreach ($t in @('clang','cc','gcc')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            if ($c) { '{0,-14} target: {1}' -f $t, (& $t -dumpmachine 2>$null) }
+          }
 
-      - name: Produce this leg's assets (seed → ladder → dry build → this runner IS the asset)
-        shell: bash
+      - name: Produce this leg's assets (degrau → dry build → this runner IS the asset)
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          # The rung -1 degrau compiler is C-linked directly by build_with_seed_fallback.sh, OUTSIDE
+          # The rung -1 degrau compiler is C-linked directly by build_gen1_from_c.ps1, OUTSIDE
           # teko's own run_cc (which already emits -Wl,/STACK via build_cc_argv). It therefore inherits
           # Windows' ~1 MiB default main-thread stack and faults with 0xC00000FD (STATUS_STACK_OVERFLOW)
-          # in consteval while building the tip, cascading into a stale-seed fallback. Widen the PE stack
-          # reserve to 64 MiB (0x4000000) via the script's link-flag passthrough — Windows leg only.
+          # in consteval while building the tip. Widen the PE stack reserve to 64 MiB (0x4000000) via
+          # the script's link-flag passthrough (clang forwards `/STACK:` to lld-link) — Windows leg only.
           TEKO_DEGRAU_LDFLAGS: "-Wl,/STACK:67108864"
-        run: sh scripts/produce_assets.sh native windows-x86_64 windows-x86_64
+        run: ./scripts/win/produce_assets.ps1 native windows-x86_64 windows-x86_64
 
       - name: Fixpoint — gen2 == gen3 over the same source, and no emitted C
-        shell: bash
+        shell: pwsh
         env:
           TEKO_FIXPOINT_BACKEND: ${{ needs.plan.outputs.fb_windows_x86_64 }}
-        run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+        run: ./scripts/win/fixpoint_gate.ps1 out/teko . .fixpoint
 
       - name: Harvest gen1's emitted C (only over a fixpoint that HELD)
         if: ${{ success() }}
-        shell: bash
+        shell: pwsh
         run: |
-          set -eu
-          mkdir -p harvest
-          if [ -f out/teko.c ]; then
-              cp out/teko.c harvest/teko.c
-              ls -la harvest/
-          else
-              echo "NOTE: no out/teko.c — this leg's gen1 emitted no C. Nothing to harvest; the"
-              echo "      fixpoint above still stands."
-          fi
+          New-Item -ItemType Directory -Force -Path harvest | Out-Null
+          if (Test-Path -LiteralPath out/teko.c -PathType Leaf) {
+            Copy-Item -LiteralPath out/teko.c -Destination harvest/teko.c
+            Get-ChildItem harvest | Format-Table -AutoSize
+          } else {
+            Write-Host "NOTE: no out/teko.c — this leg's gen1 emitted no C. Nothing to harvest; the fixpoint above still stands."
+          }
 
       - name: Upload the harvested C
         if: ${{ success() }}
@@ -1528,26 +1525,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # WINDOWS IS 100% pwsh-NATIVE (owner ruling 2026-08-18): no Git-Bash, no `sh scripts/*.sh`.
       - name: Report the host toolchain (diagnostic — never fails the job)
-        shell: bash
+        shell: pwsh
         run: |
-          for t in cc clang gcc file python3; do
-            printf '%-8s ' "$t"
-            command -v "$t" || echo '(absent)'
-          done
-          # THE TARGET TRIPLE, NOT JUST THE PATH. `command -v` says WHERE cc is; it does not say
-          # WHAT IT TARGETS, and on Windows that is the whole question: `cc` resolves to
-          # /c/mingw64/bin/cc on the runner, so the C route compiles and links through mingw while
-          # the native path's linker_is_mingw guard — which lives only in src/build/linker.tks —
-          # never fires. `-dumpmachine` is one line per tool and answers it outright
-          # (x86_64-w64-mingw32 vs x86_64-pc-windows-msvc vs x86_64-linux-gnu). Full `-v` output
-          # would be dozens of lines across every job for information we do not need standing.
-          for t in cc clang gcc; do
-            if command -v "$t" >/dev/null 2>&1; then
-              printf '%-8s target: ' "$t"
-              "$t" -dumpmachine 2>/dev/null || echo '(no -dumpmachine)'
-            fi
-          done
+          # `-dumpmachine` answers WHAT clang targets — x86_64-pc-windows-msvc, never a MinGW triple.
+          foreach ($t in @('clang','lld-link','llvm-lib','python3')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            '{0,-14} {1}' -f $t, $(if ($c) { $c.Source } else { '(absent)' })
+          }
+          foreach ($t in @('clang','cc','gcc')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            if ($c) { '{0,-14} target: {1}' -f $t, (& $t -dumpmachine 2>$null) }
+          }
 
       - name: Download this lane's published asset
         uses: actions/download-artifact@v4
@@ -1570,8 +1560,9 @@ jobs:
       # happen there and would take five green lanes down with it. A fixture cannot hold two
       # truths; a lane can hold the one that is true of its own ABI.
       #
-      # THE VERDICT IS DELEGATED to `scripts/known_stop_gate.sh` (owner ruling: an envelope may
-      # absorb ONLY the diagnostic it pins, never a family of them). Measured directly in run
+      # THE VERDICT IS DELEGATED to `scripts/win/known_stop_gate.ps1` — the pwsh mirror of
+      # `scripts/known_stop_gate.sh` (this Windows leg is bash-free; the `.sh` stays for reference).
+      # An envelope may absorb ONLY the diagnostic it pins, never a family of them. Measured in run
       # `30400712261` (job `90416003791`): the PREVIOUS inline check matched the bare SUBSTRING
       # `B1-args`, which THREE distinct honest-stops in `isel_x86_64.tks` all share (the parameter
       # stop, the variadic-call stop, and the call-argument stop this envelope actually pins) — so
@@ -1582,47 +1573,40 @@ jobs:
       # THE DAY .32 IMPLEMENTS THE STACK-ARG SLOT, THE GATE'S "LIFTED" BRANCH FIRES. Restore the
       # plain `dl/windows-x86_64/teko.exe test .` invocation and drop this step's gate call.
       # The plan is in docs/memory/b1-args-stack-slot.md.
-      # THE OBJECT-GATE FAIL-CLOSED FIXTURE, ON EVERY HOST. `scripts/check_{elf,macho,coff}.sh` and
-      # `scripts/check_ar_{elf,macho,coff}.sh` used to `exit 0` when the object was absent, the tool
-      # missing or the host wrong — and CI reads exit 0 as PASS, so a producer that never wrote its
-      # .o scored a green row, and check_elf.sh on aarch64 reported PASS having validated nothing
-      # (owner, 2026-07-29: "check_elf.sh é defeito de CI, precisa corrigir então"). They now fail
-      # closed; this fixture is what keeps them that way, proving both directions by inversion.
-      #
-      # RUNS ON ALL SIX HOSTS BY DESIGN. Two regressions in this lane came from a script verified on
-      # one host only — a gate wired to a single job, and a `sed -E` that Git-Bash killed at exit
-      # 127. The fixture needs no compiler and no binutils (it only ever hands a gate a path that
-      # does not exist), so there is no excuse for it to run anywhere but everywhere.
-      - name: Structural — the object/archive gates fail closed with nothing to check
-        shell: bash
-        run: bash scripts/objfile_gate_test.sh
-
+      # THE OBJECT-GATE FAIL-CLOSED FIXTURE — WINDOWS-SCOPED, pwsh-NATIVE. On the POSIX legs
+      # `scripts/objfile_gate_test.sh` proves all six gates (`check_{elf,macho,coff}.sh` and the
+      # `check_ar_*` siblings) fail closed with nothing to check — those five legs still run it,
+      # unchanged. The Windows leg no longer runs Git-Bash, so it runs the pwsh mirror
+      # `scripts/win/objfile_gate_test.ps1`, scoped to the COFF gates it actually uses
+      # (check_coff.ps1 / check_ar_coff.ps1). The `.sh`'s GNU-only-spelling lint existed SOLELY
+      # because Git-Bash on the Windows runner lacked `sed -E`/`grep -P`; with no Git-Bash on this
+      # path that concern is gone. The proof — a gate handed a non-existent path must exit nonzero,
+      # and must exit zero only with its documented opt-out armed — is intact for the COFF family.
+      - name: Structural — the COFF object/archive gates fail closed with nothing to check
+        shell: pwsh
+        run: ./scripts/win/objfile_gate_test.ps1
 
       - name: Asset self-test — Windows (the published asset runs its own gate)
-        shell: bash
+        shell: pwsh
         run: |
-          set -u
-          art="dl/windows-x86_64/teko.exe"
-          if [ ! -f "$art" ]; then
-            echo "ERROR: the producer's upload has no $art" >&2
-            ls -lR dl >&2
+          $art = 'dl/windows-x86_64/teko.exe'
+          if (-not (Test-Path -LiteralPath $art -PathType Leaf)) {
+            Write-Error "ERROR: the producer's upload has no $art"
+            Get-ChildItem -Recurse dl | ForEach-Object { $_.FullName }
             exit 1
-          fi
-          "$art" --version || exit $?
+          }
+          & $art --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          # `set +e` IS LOAD-BEARING, NOT DECORATION. GitHub runs every `shell: bash` step as
-          # `bash --noprofile --norc -e -o pipefail`, so WITHOUT it the failing `test .` aborts the
-          # step on the spot: `rc=$?`, the `cat`, and the gate below all become dead code, and the
-          # step exits with teko's RAW code while the diagnostic that would explain it is still
-          # sitting unread inside teko-test.log. That is exactly how this leg reported a bare
-          # `exit 127` with no output. The `ar_link_run` consumer steps in this same file already
-          # wrap their rc-capture in `set +e` / `set -e`; this twin had drifted without it.
-          set +e
-          "$art" test . > teko-test.log 2>&1
-          rc=$?
-          set -e
-          cat teko-test.log
-          sh scripts/known_stop_gate.sh "$rc" teko-test.log
+          # Capture rc + log WITHOUT letting a non-zero teko abort the step — the KNOWN-STOP gate
+          # below is the whole point, and it can only run if `test .` failing does not kill the step
+          # first. pwsh does not `set -e` a run block, but a native non-zero would set $LASTEXITCODE
+          # and GitHub's trailer would exit on it; capturing rc explicitly and calling the gate last
+          # is what makes the gate's verdict — not teko's raw code — the step's outcome.
+          & $art test . *> teko-test.log
+          $rc = $LASTEXITCODE
+          Get-Content teko-test.log
+          ./scripts/win/known_stop_gate.ps1 $rc teko-test.log
 
   # ══ cli-surface-linux-x86_64-glibc ═════════════════════════════════════════════════════════
   # TIER: both.
@@ -1903,46 +1887,44 @@ jobs:
           name: teko-assets-windows-x86_64
           path: dl
 
+      # WINDOWS IS 100% pwsh-NATIVE (owner ruling 2026-08-18): no Git-Bash, no `sh scripts/*.sh`.
+      # In native PowerShell there is no MSYS layer, so the cygpath/MSYS_NO_PATHCONV dance the `.sh`
+      # needed to keep `/switches` and paths intact simply does not exist here.
       - name: Build the static-lib fixture (own-native, host-default target)
-        shell: bash
+        shell: pwsh
         env:
           TEKO_BACKEND: native
         run: |
-          set -eu
-          teko="$PWD/dl/windows-x86_64/teko"
-          [ -f "$teko" ] || teko="$PWD/dl/windows-x86_64/teko.exe"
-          cd examples/toolchain/ar_link_run
-          "$teko" build . -o bin --no-verify --release
-          ls -la bin
+          $teko = "$PWD/dl/windows-x86_64/teko.exe"
+          if (-not (Test-Path -LiteralPath $teko)) { $teko = "$PWD/dl/windows-x86_64/teko" }
+          Push-Location examples/toolchain/ar_link_run
+          try {
+            & $teko build . -o bin --no-verify --release
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Get-ChildItem bin | Format-Table -AutoSize
+          } finally { Pop-Location }
 
       - name: Host-toolchain well-formedness gate (llvm-lib/lib.exe + dumpbin — COFF)
-        shell: bash
+        shell: pwsh
         env:
           AR_CHECK_REQUIRE_TOOLS: "1"
-        run: ./scripts/check_ar_coff.sh examples/toolchain/ar_link_run/bin/ar_link_run.lib ar_link_run__add
+        run: ./scripts/win/check_ar_coff.ps1 examples/toolchain/ar_link_run/bin/ar_link_run.lib ar_link_run__add
 
-      # lld-link (the same tool + MSYS path-conversion guard scripts/check_coff.sh already uses)
-      # links + RUNS the consumer natively.
+      # lld-link links + RUNS the consumer natively (no MSYS path conversion needed under pwsh).
       - name: Link + run the consumer against the COFF archive (expect exit 42)
-        shell: bash
+        shell: pwsh
         run: |
-          set -eu
-          clang -c scripts/ar_link_run_consumer.c -o ar_link_run_consumer.o
-          obj_arg=ar_link_run_consumer.o
-          lib_arg="examples/toolchain/ar_link_run/bin/ar_link_run.lib"
-          out_arg=ar_link_run_consumer.exe
-          if command -v cygpath >/dev/null 2>&1; then
-            obj_arg="$(cygpath -w ar_link_run_consumer.o)"
-            lib_arg="$(cygpath -w examples/toolchain/ar_link_run/bin/ar_link_run.lib)"
-            out_arg="$(cygpath -w ar_link_run_consumer.exe)"
-          fi
-          MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' lld-link /nologo "/out:$out_arg" /entry:main /subsystem:console "$obj_arg" "$lib_arg"
-          set +e
-          ./ar_link_run_consumer.exe
-          rc=$?
-          set -e
-          echo "consumer exit code: $rc"
-          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+          & clang -c scripts/ar_link_run_consumer.c -o ar_link_run_consumer.o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & lld-link /nologo /out:ar_link_run_consumer.exe /entry:main /subsystem:console ar_link_run_consumer.o examples/toolchain/ar_link_run/bin/ar_link_run.lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./ar_link_run_consumer.exe
+          $rc = $LASTEXITCODE
+          Write-Host "consumer exit code: $rc"
+          # Explicit exit: the consumer's own 42 is left in $LASTEXITCODE, and GitHub's pwsh trailer
+          # exits on it — so a bare success path would fail the step with 42. Normalise to 0/1 here.
+          if ($rc -ne 42) { Write-Host "FAIL — expected exit 42, got $rc"; exit 1 }
+          exit 0
 
   # ══ cross-arch-determinism ═════════════════════════════════════════════════════════════════
   # TIER: full only.
@@ -2153,8 +2135,15 @@ jobs:
       # THE HONEST-ABSENCE PROBE. It gates every step below, so while the blobs are out of the
       # tree this lane costs a checkout and reports why it did nothing — rather than failing on a
       # missing manifest and teaching everyone to ignore a red lane.
-      - name: Is there a committed seed to debut?
+      # THIS LANE IS A MULTI-OS MATRIX (linux x2, macOS, Windows). The POSIX legs keep their bash
+      # steps UNCHANGED; the Windows leg (owner ruling 2026-08-18) is bash-free — its steps are pwsh
+      # twins gated on `runner.os == 'Windows'`, and the POSIX steps carry `runner.os != 'Windows'`
+      # so nothing runs twice. linux/macos behaviour is identical: `runner.os != 'Windows'` is
+      # always true for them. The lane is INERT today (bootstrap/seeds/ is absent, so every probe
+      # reports present=false and the steps below skip on every host).
+      - name: Is there a committed seed to debut? (POSIX)
         id: probe
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -eu
@@ -2169,8 +2158,21 @@ jobs:
             echo "absence and passing: an absent transitional blob is not a failure."
           fi
 
+      - name: Is there a committed seed to debut? (Windows, pwsh)
+        id: probe_win
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath bootstrap/seeds/SEEDS.sha256 -PathType Leaf) {
+            "present=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "bootstrap/seeds/SEEDS.sha256 is present — the committed seed debuts on this host."
+          } else {
+            "present=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "bootstrap/seeds/ is ABSENT — there is no committed seed to debut (expected until the bump wagon extracts the blobs)."
+          }
+
       - name: Report the host toolchain (diagnostic — never fails the job)
-        if: steps.probe.outputs.present == 'true'
+        if: steps.probe.outputs.present == 'true' && runner.os != 'Windows'
         shell: bash
         run: |
           for t in cc clang gcc xz python3 7z; do
@@ -2178,18 +2180,27 @@ jobs:
             command -v "$t" || echo '(absent)'
           done
           # THE TARGET TRIPLE, NOT JUST THE PATH. `command -v` says WHERE cc is; it does not say
-          # WHAT IT TARGETS, and on Windows that is the whole question: `cc` resolves to
-          # /c/mingw64/bin/cc on the runner, so the C route compiles and links through mingw while
-          # the native path's linker_is_mingw guard — which lives only in src/build/linker.tks —
-          # never fires. `-dumpmachine` is one line per tool and answers it outright
-          # (x86_64-w64-mingw32 vs x86_64-pc-windows-msvc vs x86_64-linux-gnu). Full `-v` output
-          # would be dozens of lines across every job for information we do not need standing.
+          # WHAT IT TARGETS. `-dumpmachine` answers it outright (x86_64-w64-mingw32 vs
+          # x86_64-pc-windows-msvc vs x86_64-linux-gnu). Full `-v` output would be dozens of lines.
           for t in cc clang gcc; do
             if command -v "$t" >/dev/null 2>&1; then
               printf '%-8s target: ' "$t"
               "$t" -dumpmachine 2>/dev/null || echo '(no -dumpmachine)'
             fi
           done
+
+      - name: Report the host toolchain (Windows, pwsh — never fails the job)
+        if: steps.probe_win.outputs.present == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($t in @('clang','lld-link','llvm-lib','python3')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            '{0,-14} {1}' -f $t, $(if ($c) { $c.Source } else { '(absent)' })
+          }
+          foreach ($t in @('clang','cc','gcc')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            if ($c) { '{0,-14} target: {1}' -f $t, (& $t -dumpmachine 2>$null) }
+          }
 
       - name: Install cc (Linux only — macOS and the Windows images ship clang)
         if: steps.probe.outputs.present == 'true' && runner.os == 'Linux'
@@ -2198,27 +2209,41 @@ jobs:
           sudo apt-get install -y clang
 
       - name: Provision the COMMITTED seed (sha256-verified before decompression)
-        if: steps.probe.outputs.present == 'true'
+        if: steps.probe.outputs.present == 'true' && runner.os != 'Windows'
         shell: bash
         env:
           TEKO_SEED_PREFER_COMMITTED: "1"
           LABEL: ${{ matrix.label }}
         run: ./scripts/ci_provision_teko.sh "$LABEL"
 
+      # WINDOWS pwsh twin: native download/extract (Get-FileHash + python3 lzma), never MinGW xz/curl.
+      - name: Provision the COMMITTED seed (Windows, pwsh — sha256-verified before decompression)
+        if: steps.probe_win.outputs.present == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TEKO_SEED_PREFER_COMMITTED: "1"
+          LABEL: ${{ matrix.label }}
+        run: ./scripts/win/provision_seed.ps1 -Label $env:LABEL -PreferCommitted
+
       # The committed seed compiles THIS tip. No fallback ladder here on purpose: the ladder
       # exists to bridge a released seed to a newer tip, and this seed was cut FROM the tip — if
       # it cannot build it directly, the committed blob is wrong and that is exactly the finding.
-      # SAME BACKEND PIN AS THE LADDER, and for the same reason. This is a COMPILER self-build, and
-      # the only route that self-hosts today is C — `build_project` in
-      # `scripts/build_with_seed_fallback.sh` carries the full argument. Without the pin this step
-      # would stop at the aggregate-push degrau exactly as rung -1 did, except here there is no
-      # ladder to absorb it, so the leg would go red on a defect that is not the seed's.
+      # SAME BACKEND PIN AS THE LADDER: the only route that self-hosts today is C.
       - name: Build the tip with the committed seed
-        if: steps.probe.outputs.present == 'true'
+        if: steps.probe.outputs.present == 'true' && runner.os != 'Windows'
         shell: bash
         env:
           TEKO_BACKEND: ${{ env.TEKO_SELFHOST_BACKEND || 'c' }}
         run: teko . -o out --no-verify --release
+
+      - name: Build the tip with the committed seed (Windows, pwsh)
+        if: steps.probe_win.outputs.present == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TEKO_BACKEND: ${{ env.TEKO_SELFHOST_BACKEND || 'c' }}
+        run: |
+          & teko . -o out --no-verify --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # ══ mem-paranoid ═══════════════════════════════════════════════════════════════════════════
   # TIER: full only.
