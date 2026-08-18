@@ -37,6 +37,10 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   `pub`/privado — **não dá pra expor 100%**. A **maquinaria do compilador** (parser/checker/codegen/lir/
   backend/build/lexer/names) **NÃO é stdlib** → `pub`/privado. Promover `pub→exp` o que é superfície
   stdlib; SÓ DEPOIS aplica-se o doc. (Muda o `.tkh`/ABI → é mudança de superfície, exige reseed.)
+  **TESTE de `exp` = valor pro usuário (dono 2026-08-18), NÃO mecânico:** ponderar cada decl —
+  *faz sentido expor? em que cenário um usuário da lib se beneficiaria de chamá-la?* Sim → `exp`
+  (`sort`, `nth_i64`, `aes_gcm_seal`). Plumbing interno que nenhum usuário chamaria → `pub`/privado
+  (`merge_ord`/`msort_ord`, `quickselect`, `crypto_error` — o usuário RECEBE o erro, não o constrói).
 - **Doc comment SÓ onde há `exp`** (superfície exportada). **Qualquer outro acessor DESCARTA doc**
   (dono 2026-08-18): `pub`, `global`, `comptime`, privado, o que for — REMOVER. Doc de topo/introdução
   de arquivo: REMOVER.
