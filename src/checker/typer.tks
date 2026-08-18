@@ -3828,18 +3828,25 @@ fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt |
     TypedStmt { node = TAssign { kind = parser::AssignKind::Field; name = ""; op = a.op; bound = field_t; value = adopt_sentinel_slice_type(coerced, field_t); deref = false; target = lhs }; env = env }
 }
 
+fn index_assign_slice_element(recv: TExpr): @Type() | error {
+    match recv.type {
+        Slice as sl => match sl.element { Void => error { message = "cannot assign into an untyped empty slice — its element type is unknown" }; _ => sl.element }
+        _ => teko::error::err_typed(error { message = "index-assignment target is not a slice — only a slice `[]T` supports `ids[i] = v`" }, "[]T", type_render(recv.type))
+    }
+}
+
 fn type_index_assign(a: parser::Assign, env: Env, table: TypeTable): TypedStmt | error {
     var ix = match a.target.kind { parser::Index as x => x; _ => return error { message = "assignment target is not an index access (internal: parser guarantees an index LHS)" } }
-    var recv = match type_expr(ix.receiver, env, table) { TExpr as te => te; error as e => return e }
-    var elem = match recv.type {
-        Slice as sl => match sl.element { Void => return error { message = "cannot assign into an untyped empty slice — its element type is unknown" }; _ => sl.element }
-        _ => return teko::error::err_typed(error { message = "index-assignment target is not a slice — only a slice `[]T` supports `ids[i] = v`" }, "[]T", type_render(recv.type))
-    }
+    var recv0 = match type_expr(ix.receiver, env, table) { TExpr as te => te; error as e => return e }
+    var recv = deref_ref_value(recv0)
+    var elem = match index_assign_slice_element(recv) { (@Type()) as t => t; error as e => return e }
     var root = lvalue_root(ix.receiver)
     if !root.reachable { return error { message = "cannot assign into an element of a temporary value — the receiver is not a mutable variable" } }
     var rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
-    if !rb.is_mut { return error { message = $"cannot assign into an element of immutable `{root.name}`" } }
-    var lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
+    if !rb.is_mut { return error { message = $"cannot assign into an element of immutable `{root.name}` — pass it as `ref []T` to write positions" } }
+    var idxe = match type_expr(ix.index, env, table) { TExpr as te => te; error as e => return e }
+    if !is_integer(idxe.type) { return error { message = "a subscript index must be an integer" } }
+    var lhs = TExpr { kind = TIndex { receiver = recv; index = idxe }; type = elem; line = a.target.line; col = a.target.col }
     var v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(elem) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a slice element (parameter-only in this version)" } }
     v = match coerce_value_into(v, elem, table, "assigned value does not match the slice element type") { TExpr as x => x; error as e => return e }
