@@ -1,169 +1,45 @@
-/**
- * IEq — the equality CAPABILITY (§9.4): a type conforms by WRITING `operator __eq`, and its
- * mandated counter-part `operator __ne` is part of the contract (equality by negation). A conformer
- * writes `__ne` itself or composes the `NeByEq` mixin. A generic `<T: IEq>` dispatches `==`/`!=`
- * through T's contract (real monomorph/vtable dispatch — the retired structural `Eq` could not),
- * unlocking a `Map<K: IEq & IHash, V>`-style keyed container.
- *
- * @since 0.3.1 (§9.4)
- */
-pub type IEq = interface {
-    /**
-     * __eq — equality of two `self` operands (§9 ruling 3, comparison → `bool`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` equals `right`
-     */
+/** Equality capability: implement `operator __eq`; its counter-part `__ne` is part of the contract. */
+exp type IEq = interface {
+    /** True iff `left` equals `right`. */
     operator __eq(left: self, right: self): bool
-    /**
-     * __ne — inequality of two `self` operands, the mandated counter-part of `__eq` (§9 ruling 5).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` differs from `right`
-     */
+    /** True iff `left` differs from `right`. */
     operator __ne(left: self, right: self): bool
 }
 
-/**
- * IOrd — the total-ordering CAPABILITY (§9.4): a type conforms by providing all four comparators, and
- * each obliges its sealed §9 counter-part — `__lt`⟂`__ge`, `__gt`⟂`__le` — so the contract lists both
- * sides of every pair. A conformer typically WRITES `__lt` and composes the `GtByLt`/`LeByLt`/`GeByLt`
- * mixins for the reflections. A generic `<T: IOrd>` dispatches ordering through T, unlocking a generic
- * `sort<T: IOrd>` and ordered containers.
- *
- * @since 0.3.1 (§9.4)
- */
-pub type IOrd = interface {
-    /**
-     * __lt — is `left` strictly less than `right`? The primitive comparator the reflection mixins
-     * derive the other three from (§9 ruling 3, comparison → `bool`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` orders before `right`
-     */
+/** Total-ordering capability: implement all four comparators. */
+exp type IOrd = interface {
+    /** True iff `left` orders strictly before `right`. */
     operator __lt(left: self, right: self): bool
-    /**
-     * __gt — is `left` strictly greater than `right`? The reflection of `__lt` with the operands
-     * swapped (`GtByLt` derives it).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` orders after `right`
-     */
+    /** True iff `left` orders strictly after `right`. */
     operator __gt(left: self, right: self): bool
-    /**
-     * __le — is `left` less than or equal to `right`? The negation of `right < left` (`LeByLt` derives
-     * it).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order after `right`
-     */
+    /** True iff `left` does not order after `right`. */
     operator __le(left: self, right: self): bool
-    /**
-     * __ge — is `left` greater than or equal to `right`? The negation of `left < right` (`GeByLt`
-     * derives it).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order before `right`
-     */
+    /** True iff `left` does not order before `right`. */
     operator __ge(left: self, right: self): bool
 }
 
-/**
- * IHash — the hashing CAPABILITY, a METHOD interface (not an operator: there is no `operator hash`
- * token). A type conforms by writing `fn hash(): u64`, dispatched through the generic-method-on-`T`
- * path (#254, iface_methods_by_name/constraint_interfaces) — the half 9-ops's interface-operator
- * layer does NOT deliver. A hash-keyed collection constrains its key `K: IEq & IHash`: `IHash.hash()`
- * buckets a key (compared as a cheap `u64` before the full key), `IEq.__eq` disambiguates a collision.
- * CONTRACT: two keys that compare `__eq`-equal MUST return the same `hash()` (hash-eq consistency) —
- * violating it silently corrupts lookup, so a conformer's `hash` and `__eq` must read the same fields.
- *
- * @since 0.3.1 (§9.4)
- * @see IEq (the equality half a hash-keyed collection also requires)
- */
-pub type IHash = interface {
-    /**
-     * hash — a 64-bit hash of the receiver, stable within one process run. Two receivers that compare
-     * `__eq`-equal MUST return equal hashes (the hash-eq consistency law the keyed collections rely on).
-     *
-     * @return a 64-bit hash of the receiver
-     */
+/** Hashing capability: implement `hash(): u64`, consistent with `IEq`. */
+exp type IHash = interface {
+    /** 64-bit hash of the receiver; two `__eq`-equal receivers must hash equal. */
     fn hash(): u64
 }
 
-/**
- * NeByEq — the optional counter-part mixin for `IEq` (§9.4): flattens the obvious `__ne` body
- * `!(left == right)` into a composer that already writes `__eq`, so the type satisfies IEq's mandated
- * counter-part without hand-writing it. Self-contained: the body references only `==` on `self`, which
- * the composing host provides. A type wanting a non-trivial `__ne` (e.g. NaN semantics) writes its own
- * instead of composing this mixin.
- *
- * @since 0.3.1 (§9.4)
- */
-pub type NeByEq = trait {
-    /**
-     * __ne — inequality by negating equality, `!(left == right)` (the composing host provides `__eq`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` differs from `right`
-     */
+/** Derives `__ne` for an `IEq` composer as `!(left == right)`. */
+exp type NeByEq = trait {
     operator __ne(left: self, right: self): bool { !(left == right) }
 }
 
-/**
- * GtByLt — the reflection mixin deriving `__gt` from `__lt` for an `IOrd` composer (§9.4):
- * `left > right` is `right < left` with the operands swapped. Self-contained: the body references only
- * `<` on `self`, which the composing host writes.
- *
- * @since 0.3.1 (§9.4)
- */
-pub type GtByLt = trait {
-    /**
-     * __gt — greater-than by reflecting less-than, `right < left`.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` orders after `right`
-     */
+/** Derives `__gt` for an `IOrd` composer as `right < left`. */
+exp type GtByLt = trait {
     operator __gt(left: self, right: self): bool { right < left }
 }
 
-/**
- * LeByLt — the reflection mixin deriving `__le` from `__lt` for an `IOrd` composer (§9.4):
- * `left <= right` is `!(right < left)`. Self-contained: the body references only `<` on `self`.
- *
- * @since 0.3.1 (§9.4)
- */
-pub type LeByLt = trait {
-    /**
-     * __le — less-than-or-equal by negating the swapped less-than, `!(right < left)`.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order after `right`
-     */
+/** Derives `__le` for an `IOrd` composer as `!(right < left)`. */
+exp type LeByLt = trait {
     operator __le(left: self, right: self): bool { !(right < left) }
 }
 
-/**
- * GeByLt — the reflection mixin deriving `__ge` from `__lt` for an `IOrd` composer (§9.4):
- * `left >= right` is `!(left < right)`. Self-contained: the body references only `<` on `self`.
- *
- * @since 0.3.1 (§9.4)
- */
-pub type GeByLt = trait {
-    /**
-     * __ge — greater-than-or-equal by negating less-than, `!(left < right)`.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order before `right`
-     */
+/** Derives `__ge` for an `IOrd` composer as `!(left < right)`. */
+exp type GeByLt = trait {
     operator __ge(left: self, right: self): bool { !(left < right) }
 }
