@@ -1,69 +1,47 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on integ/s16-cross, forward-only): §16 CROSS-PLATFORM INTEGRATION —
-# the reseed that captures BOTH integrated fronts at once, now that they land together on this
-# branch with disjoint files and zero conflict. The prior seed (d0dd4535) reflected NEITHER the new
-# codegen NOR the sync FFI split; this harvest is the first bootstrap that carries both. What this
-# harvest carries — all LEAF `.tks` plus the front-end `#arch` cross-emit codegen, with ZERO
-# `teko_rt.c`/`.h`/`assert.c` edit (freeze law honored):
+# RESEED (hand-harvest, local on fix/retirement, forward-only): the FINAL reseed of the
+# tree-wide cleanup lane. The prior seed (502a5ea7) was the OLD compiler — its codegen predates
+# the current front-end, so the published release cannot parse this tree and falls back to this
+# bootstrap (expected). This harvest is the first bootstrap emitted by the NEW compiler: it carries
+# the tree-wide canonicalization AND the #os cross-emit at once.
 #
-#   SYNC (runtime, `teko::runtime` / `teko::sys`):
-#   - **`src/sys/sys.tks`**: the macOS/Windows ABI consts join the Linux syscall numbers, so the
-#     sync/arena/thread surfaces resolve under every target — no `unknown type: sys` under a macOS
-#     or Windows target (proven by the emit gates below).
-#   - **`src/runtime/sync.tks`**: `futex_wait`/`futex_wake` split by OS — the raw `SYS_FUTEX`
-#     syscall on Linux, the `os_sync_wait_on_address`/`os_sync_wake_by_address_*` libSystem FFI on
-#     macOS, and `WaitOnAddress`/`WakeByAddressSingle`/`WakeByAddressAll` (kernel32/synchronization)
-#     on Windows.
-#   - **`src/runtime/arena.tks`**: the real arena backing store — `mmap`/`munmap` (raw syscall on
-#     Linux, libSystem FFI on macOS) and `VirtualAlloc`/`VirtualFree`/`VirtualProtect` on Windows.
-#   - **`src/runtime/thread.tks`**: the real thread-stack allocator over the same per-OS mapping.
+# WHAT THIS HARVEST CARRIES (the delta the new codegen bakes into the emitted C):
+#   - tree-wide cleanup / W15 canonicalization across all leaf `.tks` (doc-comments-only,
+#     flatten/extract, unique tree-wide helper names) — the message/line shifts that force a reseed.
+#   - #os CROSS-EMIT: the ONE emitted `teko.c` carries every target at once via C `#if` — the
+#     macOS `__APPLE__` libSystem arm (os_sync_wait_on_address / mmap FFI), the Windows `_WIN32`
+#     arm (WaitOnAddress / VirtualAlloc), and the Linux raw-syscall arm, plus the arch ladder
+#     (`__x86_64__` / `__aarch64__`) — so the same bytes cross-compile to every (os, arch).
+#   - DocSpan: doc-comment span tracking in the front-end.
+#   - removal of the self-exercised tests (the self-build/fixpoint is that proof).
+#   - removal of `/* */` block comments (not doc comments — owner ruling).
 #
-#   ARM64 (compiler front-end, `teko::build`):
-#   - **`src/build/project.tks`**: `#arch` cross-emit — the prune axis is now TARGET-aware (os AND
-#     arch derived from the `[extern] target` triple), and `cc_validate_target` fail-fasts on any
-#     `(os, arch)` outside the closed whitelist (`windows-x86_64`, `linux-x86_64`, `linux-arm64`,
-#     `macos-arm64`) BEFORE prune/emit/cc.
-#   - The emitted `teko.c` now carries a TARGET-CONDITIONAL `#if` ladder for 11 `SYS_*` families,
-#     each defining BOTH the x86_64 and the aarch64 value with an `#else #error` floor — so the ONE
-#     `teko.c` cross-compiles to either Linux arch from the same bytes (SYS_MMAP 9 on x86_64, 222 on
-#     aarch64; SYS_MPROTECT 10 / 226; SYS_CLONE 56 / 220; etc.). This arch-ladder is the codegen
-#     change that requires a reseed at all: the prior seed emitted only the host arch's value.
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C.
+#   - C-route chain: gen0 = cc(prior 502a5ea7 seed) built gen1 = gen0(src) (gen1.c = OLD-algorithm
+#     re-emission, deliberately NOT the harvest); gen1's OWN (new) algorithm then emitted
+#     gen2 = gen1(src) and gen3 = gen2(src). Fixpoint verdict PASSED: gen2 == gen3 byte for byte
+#     AND gen2.c == gen3.c byte for byte (22 827 971 bytes). This harvested teko.c IS that stable
+#     emission (== gen2.c == gen3.c).
+#   - Cross-emit present in this file: `#if defined(__APPLE__)` / `#if defined(_WIN32)` arms with
+#     os_sync_wait_on_address + mmap (macOS), WaitOnAddress + VirtualAlloc (Windows), and the
+#     `__x86_64__` / `__aarch64__` SYS_* ladder for the Linux arm.
+#   - AUTO-REPRODUCTION: cc(this bootstrap) rebuilt to a compiler that re-emits this same
+#     bootstrap/teko.c byte-identical.
+#   - Guard: every build ran under `ulimit -v 6815744` (6.5 GiB) with TEKO_BACKEND=c; the
+#     self-build peak fit (VmPeak ~6.30 GB virtual, VmHWM ~5.95 GB resident).
 #
-# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3).
-#   - C-route chain: gen0 (cc of the prior d0dd4535 seed) built gen1 = gen0(src); gen1's OWN
-#     algorithm (this tree's) then emitted gen2 = gen1(src) and gen3 = gen2(src). The fixpoint gate's
-#     verdict holds: gen2 == gen3 byte for byte AND gen2.c == gen3.c byte for byte (22820364 bytes).
-#     gen1.c (emitted by the OLD gen0 algorithm) is deliberately NOT the harvest — it lacks the arch
-#     ladder; gen2.c onward carries it. This harvested teko.c IS that stable emission
-#     (== gen2.c == gen3.c).
-#   - The arch-ladder is present in this file: `#if …__x86_64__… #define …SYS_MMAP 9ULL /
-#     #elif …__aarch64__… #define …SYS_MMAP 222ULL / #else #error`, for all 11 SYS_* families.
-#   - GATE QEMU-ARM64: this `bootstrap/teko.c` cross-compiled with `aarch64-linux-gnu-gcc -static`
-#     and run under `qemu-aarch64-static` rebuilds the whole source to exit 0, with NO
-#     "FATAL signal — a generated program crashed (M.1)" — the arm64 arm of the ladder is live.
-#   - GATE EMIT macOS (`target = "aarch64-apple-darwin"`): checker clean (`unknown type: sys` = 0),
-#     the emitted C declares/calls `os_sync_wait_on_address` and `mmap` (libSystem FFI), and carries
-#     no `WaitOnAddress`. GATE EMIT Windows (`target = "x86_64-pc-windows-msvc"`): checker clean
-#     (`unknown type: sys` = 0), the emitted C declares/calls `WaitOnAddress` and `VirtualAlloc`, and
-#     carries no `os_sync_wait_on_address`. (The final host `cc` cannot cross to macOS/Windows on a
-#     Linux host, which is expected and irrelevant — the gate judges the EMITTED C.)
-#   - `TEKO_MEM_PARANOID=1` full compiler self-build on the Teko arena exits 0 — the poison path ran
-#     through a whole self-build with zero leak/use-after-free/live-count drift. Self-reported peak
-#     5901.4 MB under paranoid (~5781.8 MB plain).
-#
-# `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane, forward-only,
-# its correctness resting on the self-reproduction and the cross gates above. Mirrors the prior
-# harvests.
+# `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane,
+# forward-only, its correctness resting on the clean fixpoint and the cross-emit above.
 # `commit: pending drain` — the landing commit is written in this same change.
 #
-# Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (judges on a SWAP).
+# Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (DISABLED
+# per CLAUDE.md — the seed is accepted by force; these comments do not gate).
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  502a5ea7f7f5dc961858a933e96820001d3600afdca622b4dec8588f54e6745a
+sha256:  462178b3c01e16b55f93b3a80bd0042c8c844eb39e3cd9a007dcf8744c87fecd
 since:   0.3.1.0
-legacy:  none — this is an exact, self-reproducing hand harvest (the §16 cross-platform integration:
-         the macOS/Windows sync-FFI split + the #arch cross-emit arch ladder), byte-identical on
-         rebuild across the Teko-arena C-route generations (clean fixpoint gen2 == gen3, gen2.c ==
-         gen3.c); no unrecovered legacy artifact.
+legacy:  none — self-reproducible harvest: tree-wide cleanup + #os cross-emit + DocSpan + test
+         removal + block-comment removal; byte-identical on rebuild (clean fixpoint gen2 == gen3,
+         gen2.c == gen3.c, 22 827 971 bytes).
