@@ -14,6 +14,9 @@ Toda pergunta é em **prosa no chat**, PT-BR, curta. Quando ele estiver responde
 executar por cima.
 
 ## Ritmo de trabalho
+- **BASE DO COORDENADOR = `fix/retirement` (lei dura, dono 2026-08-18). NUNCA opero na branch `main`.**
+  Todo o trabalho parte de `fix/retirement`; agentes recebem branch própria a partir do que for
+  relevante (ex.: `origin/feat/expurgo-arrays`) e eu dreno de volta para `fix/retirement`.
 - Continuar o processo de forma autônoma, mas **fazer pausas para ler** o que o
   dono pode ter escrito no meio do caminho, antes de decisões que importam.
 - **Sem workarounds** (lei do dono): achar e resolver a **causa raiz**, nunca dar
