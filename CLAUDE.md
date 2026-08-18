@@ -232,6 +232,16 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   posição do array sem cópia** (`a[i]` como ref/escrita in-place). **NÃO** aceita crescer (push/grow) nem
   reatribuir o array inteiro (`a = […]` → arena do callee → segfault). Substituir o array = construir
   cópia local e **retornar ao caller** (DPS, arena do caller).
+- **EXPURGAR O ARRAY VELHO AO RECONSTRUIR (lei dura, dono 2026-08-18) — A PEÇA QUE FALTAVA.**
+  Sintoma medido: depois da limpeza, a memória **SUBIU** de patamar em vez de cair. Causa-raiz: o `push`
+  (copy-grow amortizado) LIBERAVA o buffer velho no realloc; trocá-lo por **rebuild-do-zero na arena
+  append-only** (que NUNCA libera) faz **cada reconstrução VAZAR a versão antiga** → memória sobe.
+  Regra: **ao reconstruir um array (gerar um novo — `a = [..a, ..f()]`, pré-aloca+índice, corte), o
+  array ANTIGO deve ser EXPURGADO da memória** (liberado eager no sítio da reconstrução). **UAF é
+  responsabilidade do DEV no DESIGN de uso, NÃO do backend** — o backend libera o velho de imediato; o
+  desenvolvedor garante NÃO usar a referência antiga depois de reconstruir (o compilador auto-compilando
+  conhece tudo → nunca dispara). É o passo que falta pra memória cair de ~2,5 GB (consumo do push) para
+  **≤1,5 GB** (medições anteriores). Disparar agente de continuação com esta rule assim que drenar.
 - **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
   `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
   **PODEM ser editados** para bug de memória/correção em C. **PORÉM (dono 2026-08-18): o expurgo de
