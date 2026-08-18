@@ -30,8 +30,9 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 É para **REMOVER e REDUZIR — não mover** para outro lugar. Documentação de verdade mora em
 `docs/design/`, escrita à parte; não é o dump dos doc comments do código.
 - **Comentários inline `//` em `.tks`/`.tkt`: PROIBIDOS (0%).** Remover todos.
-- **Doc comment só onde há `exp`** (superfície exportada). Em `pub` (interno) e privado: REMOVER.
-  Doc de topo/introdução de arquivo: REMOVER.
+- **Doc comment SÓ onde há `exp`** (superfície exportada). **Qualquer outro acessor DESCARTA doc**
+  (dono 2026-08-18): `pub`, `global`, `comptime`, privado, o que for — REMOVER. Doc de topo/introdução
+  de arquivo: REMOVER.
 - **Um doc comment não pode ser maior que o que documenta.** Curto; só o que a assinatura não diz.
   PROIBIDO: referências a docs (§/#/plano/crumb), história, "por que", explicação de arquitetura.
 - **Mensagens de erro/log = estilo compilador padrão:** `arquivo:linha:coluna: "causa curta"`
@@ -39,7 +40,9 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   **"Encurtar" = MELHORAR a frase, não truncar** (dono 2026-08-18): a causa tem que ser clara e
   rápida de identificar por quem NÃO conhece Teko e só quer bater o olho. Cortar palavra a ponto de
   virar críptico é errado; `aes_gcm: nonce must be exactly 12 bytes (96-bit)` já é boa. Tirar é
-  novela/ref/arquitetura, não a clareza.
+  novela/ref/arquitetura, não a clareza. **A melhoria do texto entra JUNTO no passe de limpeza**
+  (dono 2026-08-18) — mesmo agente, mesmo arquivo. (O prefixo `arquivo:linha:coluna:` em si é
+  mecanismo de codegen, à parte.)
 - Retroativo, tree-wide. Mudança que toca o `teko.c` (mensagens, ou deslocamento de linha) exige reseed.
 - **Testes: não se escreve teste para o que o compilador exercita ao se compilar** — o fixpoint (self-build)
   já é essa prova. A linguagem é MONÓLITO: a stdlib É o compilador — o self-build a compila E `gen1` a
