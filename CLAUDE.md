@@ -7,6 +7,12 @@ compactação de contexto** — se este arquivo existe, a regra está em vigor.
 (Código, mensagens de commit e nomes técnicos seguem a convenção do repo; a
 conversa com o dono é PT-BR.)
 
+## Como perguntar (REGRA DURA, persistente — dono 2026-08-18)
+**NUNCA usar quiz/menu de opções (ferramenta AskUserQuestion). O dono ODEIA.**
+Toda pergunta é em **prosa no chat**, PT-BR, curta. Quando ele estiver respondendo
+("ainda estou respondendo outras coisas"), **esperar** — não empilhar pergunta nem
+executar por cima.
+
 ## Ritmo de trabalho
 - Continuar o processo de forma autônoma, mas **fazer pausas para ler** o que o
   dono pode ter escrito no meio do caminho, antes de decisões que importam.
