@@ -35,8 +35,11 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   da stdlib (list/str/map/io/fs/crypto/numeric/collections/encoding/sort/cmp/math/iter/fmt/text/…) DEVE
   ser `exp`. Exceção: implementação que **realmente** não precisa ser exposta (helper interno) fica
   `pub`/privado — **não dá pra expor 100%**. A **maquinaria do compilador** (parser/checker/codegen/lir/
-  backend/build/lexer/names) **NÃO é stdlib** → `pub`/privado. Promover `pub→exp` o que é superfície
-  stdlib; SÓ DEPOIS aplica-se o doc. (Muda o `.tkh`/ABI → é mudança de superfície, exige reseed.)
+  backend/build/lexer/names) em geral é `pub`/privado. **MAS CUIDADO (dono 2026-08-18): macro e
+  comptime acessam a ABI em tempo de compilação** — tipos/helpers do compilador que código macro/comptime
+  alcança DEVEM ser `exp` também (o "usuário" inclui o autor de macro/comptime, e o que ele toca em
+  compile-time precisa estar no `.tkh`). Promover `pub→exp` o que é superfície stdlib OU superfície
+  macro/comptime; SÓ DEPOIS aplica-se o doc. (Muda o `.tkh`/ABI → é mudança de superfície, exige reseed.)
   **TESTE de `exp` = valor pro usuário (dono 2026-08-18), NÃO mecânico:** ponderar cada decl —
   *faz sentido expor? em que cenário um usuário da lib se beneficiaria de chamá-la?* Sim → `exp`
   (`sort`, `nth_i64`, `aes_gcm_seal`). Plumbing interno que nenhum usuário chamaria → `pub`/privado
