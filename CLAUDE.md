@@ -86,6 +86,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 
 ## Convenções da linguagem/codebase
 - **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
+- **NÃO DETECTAR/BARRAR O QUE NÃO EXISTE (lei do dono, recuperada 2026-08-18).** O compilador não
+  escreve detecção, validação, ramo NEM mensagem para construção que a superfície NÃO produz ou que o
+  parser já garante. `let`/`mut` não existem → o checker não deve ramificar em `BindKind::Mut`/`Let`
+  nem citá-los; a checagem de caso-impossível é **código morto a REMOVER**, não a manter/reescrever.
+  **Reword de mensagem que referencia o inexistente é BAND-AID — a causa-raiz é a detecção morta.**
+  Corolário de mensagem: mensagem de erro NUNCA referencia construção removida (o usuário não deve nem
+  saber que `let`/`mut` existiram); diz a causa real (ex.: "é imutável", "passe como `ref []T`").
 - **Tipagem forte explícita na codebase do Teko** (via flag `--explicit`,
   default off, o checker só barra COM a flag — inferência segue recurso válido
   para quem USA Teko). Sob `--explicit`: `var`, `const`, parâmetros, campos e
