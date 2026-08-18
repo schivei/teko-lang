@@ -243,8 +243,9 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   o desenvolvedor garante NÃO usar a referência antiga depois de reatribuir (o compilador auto-compilando
   conhece tudo → nunca dispara). Sintoma que a rule resolve: depois da limpeza a memória **SUBIU** em vez
   de cair, porque o `push` (copy-grow) LIBERAVA o buffer velho no realloc, e o rebuild-na-arena-append-only
-  (que nunca libera) passou a **VAZAR** cada versão antiga. Com o purge imediato, memória cai de ~2,5 GB
-  (consumo do push) para **≤1,5 GB** (medições anteriores). Disparar agente de continuação com esta rule
+  (que nunca libera) passou a **VAZAR** cada versão antiga. Com o purge imediato, memória cai de **+6 GB**
+  (patamar atual da build, pico medido ~6,2 GB) para **≤1,5 GB** — não é 2,5→1,5 (os 2,5 GB eram só o
+  consumo específico do push medido antes); o alvo real é **+6 GB → ≤1,5 GB**. Disparar agente de continuação com esta rule
   assim que drenar.
 - **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
   `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
