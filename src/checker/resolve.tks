@@ -478,7 +478,14 @@ fn surface_has(methods: []parser::Function, m: parser::Function): bool {
 }
 
 fn surface_union(a: []parser::Function, b: []parser::Function): []parser::Function {
-    var out = a
+    // (perf/push-free-old 2026-08-18) copy `a` into a fresh owned `out` instead of aliasing it:
+    // `a` is a shared surface array the caller keeps reading; now that a push copy-grow frees its
+    // input, aliasing it (`var out = a`) would free `a`'s backing array while it is still live —
+    // corrupting name resolution (paranoid poison → spurious "undefined name"). Copy-first is
+    // always correct and leaves `a` immutable-owned by its caller.
+    var out: []parser::Function = teko::list::empty()
+    var ai = 0
+    loop { if ai >= a.len { break }; out = teko::list::push(out, a[ai]); ai++ }
     var i = 0
     loop {
         if i >= b.len { break }
@@ -607,7 +614,11 @@ fn constraint_interfaces(c: @ConstraintExpr(), table: TypeTable): []str | error 
 }
 
 fn surface_union_names(a: []str, b: []str): []str {
-    var out = a
+    // (perf/push-free-old 2026-08-18) copy `a` first — see surface_union: `a` is a shared, still-live
+    // array, so aliasing it and growing would free its backing array under the caller.
+    var out: []str = teko::list::empty()
+    var ai = 0
+    loop { if ai >= a.len { break }; out = teko::list::push(out, a[ai]); ai++ }
     var i = 0
     loop {
         if i >= b.len { break }

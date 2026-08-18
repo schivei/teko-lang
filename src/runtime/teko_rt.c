@@ -5022,10 +5022,27 @@ void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t 
     tk_g_push_ra = NULL;
     // (#148) the OLD buffer's own witness (a true doubling: same ptr, cap exhausted) is superseded by
     // this grow — clear it so a dead multi-MB entry never squats its slot blocking future tenants.
-    if (ptr != NULL && tk_push_cache[h].ptr == ptr) tk_push_cache[h].ptr = NULL;
+    // (perf/push-free-old 2026-08-18) capture the superseded buffer's reusable extent from its
+    // live-tail witness BEFORE clearing the slot, so it can be PARKED for reuse below. When `ptr` is
+    // the live tail its full capacity is reclaimable; otherwise the conservative len*esz lower bound.
+    uint64_t old_bytes = len * esz;
+    if (ptr != NULL && tk_push_cache[h].ptr == ptr) {
+        if (tk_push_cache[h].esz == esz && tk_push_cache[h].cap > len)
+            old_bytes = tk_push_cache[h].cap * esz;
+        tk_push_cache[h].ptr = NULL;
+    }
     void *buf = (region == tk_g_root) ? tk_alloc(cap * esz) : tk_region_alloc(region, cap * esz);
     if (len && ptr != NULL) memcpy(buf, ptr, len * esz);
     memcpy((char *)buf + len * esz, elem, esz);
+    // (perf/push-free-old 2026-08-18 — the 93% / 4980 MB leak) FREE-OLD BY DECREE, UNCONDITIONAL:
+    // the superseded buffer is dead value-semantically the instant its bytes are copied into `buf`,
+    // so PARK it on the root free-list for immediate reuse (this is what made 20.3M copy-grows leave
+    // 4980 MB squatting in root, since a bump arena never shrinks). tk_free_block self-guards every
+    // way it must: NULL / a scoped child-region block (tk_cur_rsp != 0 → the region drop reclaims it)
+    // / a sub-freenode remnant are all no-ops; under TEKO_MEM_PARANOID it POISONS instead of parking,
+    // turning any aliased read-after-free into a loud 0xDD abort. Only the compiler calls push, so a
+    // surviving alias of `ptr` is a compiler design bug to fix at the aliasing site — not here.
+    if (ptr != NULL && ptr != buf) tk_free_block((void *)ptr, old_bytes);
     // (#148 — the 11.5 GB fix) SIZE-AWARE eviction. Blind overwrite let 150M tiny cache inserts clobber
     // the multi-MB output buffer's slot ~2300×; every clobber forced a FULL multi-MB copy-grow on its
     // next append (measured: ~7.5k spurious grows averaging ~1.5 MB = 11.5 GB of 13.5 GB total churn —
@@ -5163,46 +5180,15 @@ void tk_mem_copy(void *dst, const void *src, uint64_t n) {
 
 // (#148 S2 Level-2) tk_slice_push_fo — FREE-OLD-on-grow, for a self-append whose chain the checker
 // PROVED linear (born from list::empty(), self-append-only writes, no capture before the fn's final
-// statement — see escape.tks::assign_frees_old). On a copy-grow the OLD buffer is dead by that proof,
-// so it is PARKED on the free-list for reuse (realloc parity with the hand-written C twin, which
-// frees per grow). The true capacity comes from the push-cache when this buffer is the live tail
-// (usual case); otherwise the conservative len*esz lower bound. An in-place hit parks nothing.
+// statement — see escape.tks::assign_frees_old). On a copy-grow the OLD buffer is dead by that proof.
+// (perf/push-free-old 2026-08-18) The core tk_slice_push_r now PARKS the superseded buffer on EVERY
+// copy-grow, unconditionally — so this wrapper is behaviour-identical to tk_slice_push and no longer
+// parks a second time (a second tk_free_block on the same `ptr` would DOUBLE-PARK it). It is kept as
+// a distinct symbol only because codegen still emits `_fo` where the linearity proof holds. Park THIS
+// caller's RA (obs only) so the grow is attributed to the generated fn, then delegate to the core.
 void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len) {
     if (tk_obs_enabled() == 1) tk_g_push_ra = __builtin_return_address(0);
-    const void *old = ptr;
-    uint64_t old_bytes = len * esz;
-    if (ptr != NULL) {
-        unsigned h = tk_push_slot(ptr);
-        if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz && tk_push_cache[h].cap > len)
-            old_bytes = tk_push_cache[h].cap * esz;   // the live tail — its full capacity is reusable
-    }
-    // (0.3.1 move-on-return M2, Mechanism 1) FREE-OLD grows into the CURRENT region. Under the
-    // per-escaping-RHS bracket discipline the current region IS `_tkrr` (the caller's region) while an
-    // escaping cb/append_fo buffer is built, so it materializes there and MOVES with the return — while
-    // a non-escaping scratch buffer (current == `_tkfr`) is reclaimed at the frame drop. The old buffer
-    // is parked on the root-only free-list only at root scope (`tk_free_block` returns when
-    // `tk_cur_rsp != 0`), so a scoped grow never dangles it. Following the current region is the whole
-    // point of Mechanism 1: zero new runtime symbols, the bracket does the conveyance.
-    void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
-    if (buf != old && old != NULL) {
-        // (#148 Level-2 BISECT) TEKO_FO_MAX=N limits parking to the first N grows (binary-search
-        // the guilty park); TEKO_FO_TRACE at the boundary dumps the parking site's backtrace.
-        static long long fo_max = -2, fo_count = 0;
-        if (fo_max == -2) { const char *e = getenv("TEKO_FO_MAX"); fo_max = (e && *e) ? atoll(e) : -1; }
-        if (fo_max >= 0) {
-            if (fo_count >= fo_max) return buf;              // parking budget exhausted — plain push
-            fo_count += 1;
-#ifdef TK_HAVE_BACKTRACE
-            if (fo_count == fo_max && getenv("TEKO_FO_TRACE")) {
-                void *fr[8]; int nf = backtrace(fr, 8);
-                fprintf(stderr, "== FO park #%lld ==\n", fo_count);
-                backtrace_symbols_fd(fr, nf, 2);
-            }
-#endif
-        }
-        tk_free_block((void *)old, old_bytes);
-    }
-    return buf;
+    return tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
 }
 
 // (enabling primitive — staged off; no compiler source calls this yet) tk_slice_with_cap_r —

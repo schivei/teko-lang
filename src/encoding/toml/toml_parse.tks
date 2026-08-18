@@ -823,8 +823,21 @@ fn open_array_table_path(root: TomlValue, path: []str): TomlValue | error {
 }
 
 fn concat_path(a: []str, b: []str): []str {
-    var out = a
+    // (perf/push-free-old 2026-08-18) `out` MUST be a fresh owned buffer, NOT an alias of `a`:
+    // `a` is the caller's live `cursor` (= the current header's path), read again on the next line
+    // and every subsequent iteration. Aliasing it as `var out = a` and then pushing was safe only
+    // while push never freed its input; now that a copy-grow parks the old buffer, the first grow
+    // would free `a`'s backing array out from under the caller (a UAF the paranoid gate catches as
+    // a 0xDD poison read). Copy `a`'s elements into a fresh `out` first, then append `b`'s — `a`
+    // stays immutable and owned by its caller.
+    var out: []str = teko::list::empty()
     var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        out = teko::list::push(out, a[i])
+        i++
+    }
+    i = 0
     loop {
         if i >= b.len { break }
         out = teko::list::push(out, b[i])
