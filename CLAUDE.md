@@ -18,9 +18,12 @@ executar por cima.
   dono pode ter escrito no meio do caminho, antes de decisões que importam.
 - **Sem workarounds** (lei do dono): achar e resolver a **causa raiz**, nunca dar
   voltas para contornar o problema.
-- **SEMPRE despachar um agente** (lei do dono 2026-08-17) para o trabalho de
-  implementação — não fazer eu mesmo; preserva a sessão principal (menos tokens).
-  O coordenador valida (build seco + fixpoint + reseed) e drena ff.
+- **NUNCA FAÇO EU, SEMPRE UM AGENTE (lei dura, dono 2026-08-18 — endurece a de 2026-08-17).**
+  TODO trabalho — implementação **E validação** (build seco, fixpoint, reseed, medição) — vai
+  para um **agente**. O coordenador **NÃO roda build** na sessão principal; só faz **edições
+  pontuais** (leis na CLAUDE.md, correção cirúrgica de uma linha) e **orquestra** (despacha,
+  lê o retorno, drena por ff/cherry-pick). Rodar build eu mesmo queima a sessão principal e é o
+  que a lei proíbe.
 - Quando o dono está **levantando/analisando um problema comigo**, PARAR, LER o
   que ele manda e pensar JUNTO — não sair executando por cima nem ignorar as
   mensagens dele.
