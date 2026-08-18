@@ -1,0 +1,281 @@
+use teko::parser
+use teko::lexer
+use teko::checker
+
+// ---- fixture helpers (distinct "sw_" prefix — this namespace's other test files define their
+// own similarly-shaped helpers under their own prefixes, the corpus's own convention for
+// avoiding cross-file name collisions within one flat namespace; see checker_test.tkt vs
+// metrics_test.tkt vs reachability_test.tkt) ----
+
+fn sw_i64t() -> checker::Type { checker::Prim { kind = checker::PrimKind::I64 } }
+fn sw_boolt() -> checker::Type { checker::Prim { kind = checker::PrimKind::Bool } }
+
+fn sw_num(v: i64) -> checker::TExpr {
+    checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = sw_i64t(); line = 0; col = 0 }
+}
+
+fn sw_binding(name: str, value: checker::TExpr, line: u32, col: u32) -> checker::TStatement {
+    checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = sw_i64t(); value = checker::TExpr { kind = value.kind; type = value.type; line = line; col = col } }
+}
+
+fn sw_destructure_binding(names: []str, value: checker::TExpr) -> checker::TStatement {
+    checker::TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = names }; bound = sw_i64t(); value = value }
+}
+
+fn sw_expr_stmt(e: checker::TExpr) -> checker::TStatement { checker::TExprStmt { expr = e } }
+fn sw_one(s: checker::TStatement) -> []checker::TStatement { teko::list::push(teko::list::empty(), s) }
+
+fn sw_named_ann(name: str) -> parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() }
+}
+
+fn sw_no_expr() -> parser::Expr {
+    parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_i64(0); fval = 0.0 }; line = 0; col = 0 }
+}
+
+fn sw_param(name: str) -> parser::Param {
+    parser::Param { name = name; has_type = true; type_ann = sw_named_ann("i64"); is_params = false; has_default = false; default_expr = sw_no_expr() }
+}
+
+fn sw_fn(name: str, params: []parser::Param, body: []checker::TStatement, file: str) -> checker::TFunction {
+    checker::TFunction { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; return_type = checker::Void { }; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = file; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+fn sw_prog(f: checker::TFunction) -> checker::TProgram {
+    checker::TProgram { items = teko::list::push(teko::list::empty(), f) }
+}
+
+fn sw_count(ds: []checker::Diagnostic) -> u64 { ds.len }
+
+// ---- core shadowing detection ----
+
+#test
+/** `fn f(x) { let x = 1 }` — the local `x` shadows the parameter `x`. */
+fn shadowing_fires_when_local_shadows_param() {
+    let params = teko::list::push(teko::list::empty(), sw_param("x"))
+    let body = sw_one(sw_binding("x", sw_num(1), 3, 4))
+    let fs = find_shadowing(sw_prog(sw_fn("f", params, body, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 1)
+    teko::assert::is_true(fs[0].rule == "shadowed-binding")
+    teko::assert::is_true(fs[0].file == "a.tks")
+    teko::assert::is_true(fs[0].line == 3)
+    teko::assert::is_true(fs[0].col == 4)
+    teko::assert::str_contains(fs[0].message, "x")
+}
+
+#test
+/** A local with a DIFFERENT name than the parameter never shadows. */
+fn shadowing_absent_for_distinct_names() {
+    let params = teko::list::push(teko::list::empty(), sw_param("x"))
+    let body = sw_one(sw_binding("y", sw_num(1), 1, 1))
+    let fs = find_shadowing(sw_prog(sw_fn("f", params, body, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 0)
+}
+
+#test
+/** The explicit discard `_` is exempt both as the shadowed name and as a scope contributor —
+    binding `_` twice never fires and never grows the scope. */
+fn shadowing_absent_for_underscore_target() {
+    let body: []checker::TStatement = teko::list::empty()
+    mut stmts = teko::list::push(body, sw_binding("_", sw_num(1), 1, 1))
+    stmts = teko::list::push(stmts, sw_binding("_", sw_num(2), 2, 1))
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 0)
+}
+
+#test
+/** A `DestructurePattern` target is not tracked (mirrors `initanalysis.tks`'s own conservatism):
+    it neither fires as a shadow nor extends the scope for what follows. */
+fn shadowing_absent_for_destructure_target() {
+    let params = teko::list::push(teko::list::empty(), sw_param("x"))
+    let names = teko::list::push(teko::list::push(teko::list::empty(), "x"), "y")
+    let body = sw_one(sw_destructure_binding(names, sw_num(1)))
+    let fs = find_shadowing(sw_prog(sw_fn("f", params, body, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 0)
+}
+
+#test
+/** A binding's own VALUE is checked against the OUTER scope (before its own name is added) —
+    `let x = x_ref_here` where `x` is already bound does not fire twice; only the introduction
+    itself (against the PRE-existing scope) is judged, and the value here is a plain literal so
+    nothing inside it could shadow anything regardless. Also proves a SECOND outer-level binding
+    with the SAME name as a FIRST is flagged (sequential scope growth). */
+fn shadowing_fires_for_a_second_top_level_binding_with_the_same_name() {
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, sw_binding("x", sw_num(1), 1, 1))
+    stmts = teko::list::push(stmts, sw_binding("x", sw_num(2), 2, 1))
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 1)
+    teko::assert::is_true(fs[0].line == 2)
+}
+
+// ---- scope threading across nested blocks ----
+
+#test
+/** A nested `if`-branch binding shadows an OUTER binding (scope flows IN); once the `if` ends,
+    the OUTER scope is unchanged, so a THIRD top-level binding of the same name is judged against
+    the ORIGINAL outer binding, not against whatever the nested branch added (which never leaks). */
+fn shadowing_nested_if_sees_outer_scope_but_does_not_leak_back() {
+    let outer1 = sw_binding("x", sw_num(1), 1, 1)
+    let nested = sw_binding("x", sw_num(2), 5, 2)
+    let ifexpr = checker::TExpr { kind = checker::TIfExpr { cond = sw_num(0); then_blk = sw_one(nested); has_else = false; else_blk = teko::list::empty() }; type = checker::Void { }; line = 0; col = 0 }
+    let outer2 = sw_binding("x", sw_num(3), 9, 3)
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, outer1)
+    stmts = teko::list::push(stmts, sw_expr_stmt(ifexpr))
+    stmts = teko::list::push(stmts, outer2)
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 2)
+    teko::assert::is_true(fs[0].line == 5)
+    teko::assert::is_true(fs[1].line == 9)
+}
+
+#test
+/** `TLoopStmt`: `init`'s bindings ARE visible to `body` (rebinding there shadows), but neither
+    leaks past the loop — a binding AFTER the loop with the same name is judged against the outer
+    scope only, so it fires iff that name was ALREADY outer (here it was not: the loop's `i` never
+    reaches the sibling statement). */
+fn shadowing_loop_init_visible_in_body_but_not_after() {
+    let init = sw_one(sw_binding("i", sw_num(0), 1, 1))
+    let body = sw_one(sw_binding("i", sw_num(1), 3, 2))
+    let loop_stmt = checker::TLoopStmt { label = ""; init = init; body = body }
+    let after = sw_binding("i", sw_num(2), 7, 3)
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, loop_stmt)
+    stmts = teko::list::push(stmts, after)
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 1)
+    teko::assert::is_true(fs[0].line == 3)
+}
+
+#test
+/** `TDeferStmt`/`TAdoptStmt` bodies are checked against the outer scope (a rebind inside either
+    fires) but their own bindings do not leak to what follows. */
+fn shadowing_defer_and_adopt_bodies_checked_but_not_leaked() {
+    let outer = sw_binding("x", sw_num(1), 1, 1)
+    let defer_stmt = checker::TDeferStmt { body = sw_one(sw_binding("x", sw_num(2), 4, 2)) }
+    let adopt_stmt = checker::TAdoptStmt { name = ""; body = sw_one(sw_binding("x", sw_num(3), 6, 2)) }
+    let after = sw_binding("y", sw_num(4), 9, 1)
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, outer)
+    stmts = teko::list::push(stmts, defer_stmt)
+    stmts = teko::list::push(stmts, adopt_stmt)
+    stmts = teko::list::push(stmts, after)
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 2)
+    teko::assert::is_true(fs[0].line == 4)
+    teko::assert::is_true(fs[1].line == 6)
+}
+
+// ---- TMatchExpr / TLambda: each arm/lambda body is checked independently against the OUTER
+// scope, and none of their own bindings leak to a sibling arm or past the match/lambda ----
+
+#test
+/** Two match arms each independently rebind the outer name — BOTH fire (siblings do not see
+    each other's locals, each starts fresh from the outer scope), and nothing leaks past the
+    match. A `when` guard is walked too (exercised via `has_when = true`). */
+fn shadowing_each_match_arm_is_independent_and_does_not_leak() {
+    let outer = sw_binding("x", sw_num(1), 1, 1)
+    let guard = checker::TExpr { kind = checker::TBoolLit { value = true }; type = sw_boolt(); line = 0; col = 0 }
+    let arm1 = checker::TArm { pattern = parser::WildcardPattern { }; has_when = true; guard = guard; body = sw_one(sw_binding("x", sw_num(2), 4, 2)) }
+    let arm2 = checker::TArm { pattern = parser::NullPattern { }; has_when = false; guard = sw_num(0); body = sw_one(sw_binding("x", sw_num(3), 6, 2)) }
+    let arms = teko::list::push(teko::list::push(teko::list::empty(), arm1), arm2)
+    let m = checker::TExpr { kind = checker::TMatchExpr { subject = sw_num(0); arms = arms }; type = sw_i64t(); line = 0; col = 0 }
+    let after = sw_binding("y", sw_num(4), 9, 1)
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, outer)
+    stmts = teko::list::push(stmts, sw_expr_stmt(m))
+    stmts = teko::list::push(stmts, after)
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    teko::assert::is_true(sw_count(fs) == 2)
+    teko::assert::is_true(fs[0].line == 4)
+    teko::assert::is_true(fs[1].line == 6)
+}
+
+#test
+/** A `TLambda` body is walked (its own binding checked against the CAPTURED outer scope), and
+    nothing it binds leaks past the lambda literal. */
+fn shadowing_lambda_body_is_walked_but_does_not_leak() {
+    let outer = sw_binding("x", sw_num(1), 1, 1)
+    let lam = checker::TExpr { kind = checker::TLambda { params = teko::list::empty(); body = sw_one(sw_binding("x", sw_num(2), 4, 2)); captures = teko::list::empty(); ret = sw_i64t(); lift_id = 0 to u64 }; type = checker::Func { params = teko::list::empty(); ret = sw_i64t(); variadic = false; param_names = teko::list::empty(); n_required = 0 to u64; defaults = teko::list::empty() }; line = 0; col = 0 }
+    let after = sw_binding("x", sw_num(3), 9, 1)
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, outer)
+    stmts = teko::list::push(stmts, sw_expr_stmt(lam))
+    stmts = teko::list::push(stmts, after)
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    // the lambda's own `x` (line 4) shadows the outer one; the THIRD `x` (line 9) shadows the
+    // SAME original outer binding (the lambda's copy never leaked) — two findings, not three.
+    teko::assert::is_true(sw_count(fs) == 2)
+    teko::assert::is_true(fs[0].line == 4)
+    teko::assert::is_true(fs[1].line == 9)
+}
+
+// ---- recursion plumbing: the expr-walker reaches a nested block buried through plain operands ----
+
+fn sw_shadow_if(name: str, line: u32) -> checker::TExpr {
+    checker::TExpr { kind = checker::TIfExpr { cond = sw_num(0); then_blk = sw_one(sw_binding(name, sw_num(1), line, 1)); has_else = false; else_blk = teko::list::empty() }; type = checker::Void { }; line = 0; col = 0 }
+}
+
+#test
+/** A shadow trigger buried through TBinary/TUnary/TCompare/TCall/TCast/TFieldAccess/
+    TSafeFieldAccess/TCoalesce/TStructInit/TIndex/TInExpr/TArrayLit/TBorrow is still found — the
+    expr-walker's plain-operand recursion reaches every one of them. */
+fn shadowing_expr_walker_reaches_nested_blocks_through_every_operand_kind() {
+    let x_bound: checker::TStatement = sw_binding("x", sw_num(0), 1, 1)
+    let callee = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "f" }) }
+    let call = checker::TExpr { kind = checker::TCall { callee = callee; args = teko::list::push(teko::list::empty(), sw_shadow_if("x", 2)); call_ns = ""; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = sw_i64t(); line = 0; col = 0 }
+    let un = checker::TExpr { kind = checker::TUnary { op = lexer::TokenKind::Minus; operand = sw_shadow_if("x", 3) }; type = sw_i64t(); line = 0; col = 0 }
+    let bin = checker::TExpr { kind = checker::TBinary { op = lexer::TokenKind::Plus; left = sw_shadow_if("x", 4); right = sw_num(0) }; type = sw_i64t(); line = 0; col = 0 }
+    let cmp = checker::TExpr { kind = checker::TCompare { first = sw_shadow_if("x", 5); rest = teko::list::push(teko::list::empty(), checker::TCmpTerm { op = lexer::TokenKind::Lt; operand = sw_num(0) }) }; type = sw_boolt(); line = 0; col = 0 }
+    let cst = checker::TExpr { kind = checker::TCast { expr = sw_shadow_if("x", 6) }; type = sw_i64t(); line = 0; col = 0 }
+    let fa = checker::TExpr { kind = checker::TFieldAccess { receiver = sw_shadow_if("x", 7); field = "f" }; type = sw_i64t(); line = 0; col = 0 }
+    let sfa = checker::TExpr { kind = checker::TSafeFieldAccess { receiver = sw_shadow_if("x", 8); field = "f" }; type = checker::Optional { inner = sw_i64t() }; line = 0; col = 0 }
+    let co = checker::TExpr { kind = checker::TCoalesce { left = sw_shadow_if("x", 9); right = sw_num(0) }; type = sw_i64t(); line = 0; col = 0 }
+    let si = checker::TExpr { kind = checker::TStructInit { field_names = teko::list::empty(); field_vals = teko::list::push(teko::list::empty(), sw_shadow_if("x", 10)) }; type = checker::Named { name = "S" }; line = 0; col = 0 }
+    let ix = checker::TExpr { kind = checker::TIndex { receiver = sw_shadow_if("x", 11); index = sw_num(0) }; type = sw_i64t(); line = 0; col = 0 }
+    let ie = checker::TExpr { kind = checker::TInExpr { lhs = sw_shadow_if("x", 12); elems = teko::list::push(teko::list::empty(), sw_num(0)) }; type = sw_boolt(); line = 0; col = 0 }
+    let al = checker::TExpr { kind = checker::TArrayLit { elements = teko::list::push(teko::list::empty(), checker::TArrayElem { is_spread = false; expr = sw_shadow_if("x", 13) }) }; type = checker::Slice { element = sw_i64t() }; line = 0; col = 0 }
+    let bw = checker::TExpr { kind = checker::TBorrow { operand = sw_shadow_if("x", 14) }; type = checker::Reference { inner = sw_i64t() }; line = 0; col = 0 }
+    let it = checker::TExpr { kind = checker::TInterp { pieces = teko::list::push(teko::list::push(teko::list::empty(), ""), ""); holes = teko::list::push(teko::list::empty(), sw_shadow_if("x", 15)); specs = teko::list::push(teko::list::empty(), checker::TFSpec { kind = checker::TFSpecDynamic { args = teko::list::push(teko::list::empty(), sw_shadow_if("x", 16)) } }) }; type = checker::Str { }; line = 0; col = 0 }
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, x_bound)
+    stmts = teko::list::push(stmts, sw_expr_stmt(call))
+    stmts = teko::list::push(stmts, sw_expr_stmt(un))
+    stmts = teko::list::push(stmts, sw_expr_stmt(bin))
+    stmts = teko::list::push(stmts, sw_expr_stmt(cmp))
+    stmts = teko::list::push(stmts, sw_expr_stmt(cst))
+    stmts = teko::list::push(stmts, sw_expr_stmt(fa))
+    stmts = teko::list::push(stmts, sw_expr_stmt(sfa))
+    stmts = teko::list::push(stmts, sw_expr_stmt(co))
+    stmts = teko::list::push(stmts, sw_expr_stmt(si))
+    stmts = teko::list::push(stmts, sw_expr_stmt(ix))
+    stmts = teko::list::push(stmts, sw_expr_stmt(ie))
+    stmts = teko::list::push(stmts, sw_expr_stmt(al))
+    stmts = teko::list::push(stmts, sw_expr_stmt(bw))
+    stmts = teko::list::push(stmts, sw_expr_stmt(it))
+    let fs = find_shadowing(sw_prog(sw_fn("f", teko::list::empty(), stmts, "a.tks")))
+    // 13 single-trigger wrapper kinds (call/un/bin/cmp/cst/fa/sfa/co/si/ix/ie/al/bw) + TInterp's
+    // own 2 (its hole AND its TFSpecDynamic arg) = 15
+    teko::assert::is_true(sw_count(fs) == 15)
+}
+
+// ---- program-level item dispatch ----
+
+#test
+/** `find_shadowing` also walks a module-level `const`'s initializer (base scope empty — no
+    outer binding to shadow here, so this just proves no crash) and every LOOSE top-level
+    statement, gathered into ONE sequential block so a later loose binding can shadow an earlier
+    one. */
+fn find_shadowing_covers_const_decl_and_loose_statements() {
+    let cd = checker::TConstDecl { name = "K"; namespace = ""; ty = sw_i64t(); init = sw_num(1); vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    let loose1 = sw_binding("z", sw_num(1), 1, 1)
+    let loose2 = sw_binding("z", sw_num(2), 2, 1)
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, cd)
+    items = teko::list::push(items, loose1)
+    items = teko::list::push(items, loose2)
+    let fs = find_shadowing(checker::TProgram { items = items })
+    teko::assert::is_true(sw_count(fs) == 1)
+    teko::assert::is_true(fs[0].line == 2)
+}

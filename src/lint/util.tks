@@ -1,0 +1,89 @@
+// src/lint/util.tks   (namespace 'teko::lint') — small byte/string/list helpers shared by the
+// lint passes and the CLI glue.
+//
+// WHY THESE ARE HAND-ROLLED. The injected `teko::str` surface is deliberately small — `concat`,
+// `contains`, `ends_with`, `slice`, `slice_from`, `slice_to`, `last_index_of`, `len`, `one_byte`,
+// `str_from_utf8`, `u64_to_str` — with NO `starts_with`/`split`/`trim` (see
+// `src/build/project.tks`'s own `bp_prefix`: "there is no `teko::str::starts_with` builtin").
+// `has_prefix` mirrors that exact idiom (`s.len >= p.len && slice_to(s, p.len) == p`); `trim_left`
+// and `join_lines` are the small byte-scanners every other module in this corpus writes locally
+// rather than reaching across a namespace for (the same convention `bp_lines`/`bp_prefix` follow
+// in `teko::build`) — kept local so `src/lint` stays self-contained per the DT2 file-layout rule.
+
+/**
+ * has_prefix — does `s` begin with the byte sequence `p`? The corpus-standard local prefix test
+ * (no `teko::str::starts_with` builtin exists).
+ *
+ * @param s  the string to test
+ * @param p  the required prefix
+ * @return   true iff `s` starts with `p`
+ */
+fn has_prefix(s: str, p: str) -> bool {
+    s.len >= p.len && teko::str::slice_to(s, p.len) == p
+}
+
+/**
+ * is_ws — is `c` an ASCII space/tab/CR (the bytes `trim_left` strips)? LF is deliberately excluded
+ * — `trim_left` operates on ONE already-split line, which never carries an embedded `\n`.
+ *
+ * @param c  the byte to classify
+ * @return   whether `c` is horizontal whitespace or a carriage return
+ */
+fn is_ws(c: byte) -> bool { c == b' ' || c == b'\t' || c == b'\r' }
+
+/**
+ * trim_left — `s` with its leading run of `is_ws` bytes dropped. Used to recognize a `use …` line
+ * regardless of its indentation.
+ *
+ * @param s  the line to trim
+ * @return   `s` without its leading whitespace
+ */
+fn trim_left(s: str) -> str {
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        if !is_ws(s[i]) { break }
+        i++
+    }
+    teko::str::slice_from(s, i)
+}
+
+/**
+ * join_lines — the inverse of `teko::iter::split_lines`: `lines` re-joined with `\n` between
+ * consecutive entries (no trailing newline is added — `--fix` re-adds one only if the ORIGINAL
+ * file text had one, via the caller's own bookkeeping).
+ *
+ * @param lines  the lines to join, in order
+ * @return       the joined text
+ */
+fn join_lines(lines: []str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= lines.len { break }
+        if i > 0 { out = out ~ "\n" }
+        out = out ~ lines[i]
+        i++
+    }
+    out
+}
+
+/**
+ * str_list_contains — is `s` present (by exact match) anywhere in `xs`? A small linear-scan
+ * membership test — every list here is short (a file's own `use` lines, the distinct files a
+ * `--fix` run touches), so no index is worth building.
+ *
+ * @param xs  the list to search
+ * @param s   the value to find
+ * @return    whether `s` occurs in `xs`
+ */
+fn str_list_contains(xs: []str, s: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == s { return true }
+        i++
+    }
+    false
+}
+

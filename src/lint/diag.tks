@@ -1,0 +1,90 @@
+// src/lint/diag.tks   (namespace 'teko::lint') — DT2 (TEKO_ROADMAP_DEVTOOLS.md): the ONE output
+// shape every lint pass reports through.
+//
+// OWNER DIRECTION (2026-08-03): `teko lint`'s central value is that its findings are CONSUMABLE
+// BY THE LSP SERVER, not just a CLI report. So every pass here returns `checker::Diagnostic` —
+// the SAME structured, ranged, severity-known shape `src/checker/lsp_api.tks`'s
+// `collect_diagnostics_structured` already returns and `src/lsp/diagnostics.tks` already renders
+// to the wire (`to_lsp_diagnostic`/`LspDiagnostic`) — never a parallel `Finding`-style type of our
+// own. A lint pass that emits `checker::Diagnostic` is, by construction, one `concat` away from
+// riding the SAME `publishDiagnostics` path a type error or a `checker::warnings.tks` warning
+// already takes; see `lint.tks::collect_lint_diagnostics` for the merge point, and its module doc
+// for why the actual LSP-side wiring (`src/lsp/diagnostics.tks::diagnose_document`) is a small,
+// additive, SEPARATE edit rather than folded into this crumb.
+//
+// SEVERITY. Every one of THIS module's own lints (no-match-on-bool, unhandled-match-arm,
+// shadowed-binding, unused-import) is advisory style guidance, never a build-blocking defect —
+// so all four stamp `DiagLevel::Hint`, the LSP's own "lightest" severity (a dotted underline, not
+// a squiggle), distinct from the `DiagLevel::Warning` a build's own `checker::warnings.tks`
+// findings (unused-fn, redundant-cast) carry. `teko lint` reuses those AS-IS (§`lint.tks`) rather
+// than re-deriving them, so their existing `Warning` severity is untouched.
+//
+// MESSAGE SHAPE. `checker::Diagnostic` has no separate "rule id" field (by design — reusing the
+// EXISTING shape verbatim, not extending it), so each message embeds its rule as a short bracketed
+// tag: `"[rule-id] human text"`. This is the ONE place that convention is spelled, so a future
+// `--only <rule>` (unbuilt — M.3) has a single format to parse.
+
+use teko::checker
+
+/**
+ * mk_diag — assemble one lint `checker::Diagnostic`, tagging `message` with `[rule]` and stamping
+ * `DiagLevel::Hint` (every lint here is advisory).
+ *
+ * @param rule     the machine-stable rule id (e.g. `"no-match-on-bool"`)
+ * @param file     the source file ("" when unknown)
+ * @param line     the 1-based source line (0 when unknown)
+ * @param col      the 1-based source column (read only when `line` is known)
+ * @param message  the human-readable diagnostic text (the rule tag is prepended for you)
+ * @return         the assembled diagnostic
+ */
+fn mk_diag(rule: str, file: str, line: u32, col: u32, message: str) -> checker::Diagnostic {
+    let end_line = if line > 0 { line } else { 0 }
+    let end_col = if col > 0 { col + 1 } else { 0 }
+    checker::Diagnostic { file = file; line = line; col = col; end_line = end_line; end_col = end_col; severity = checker::DiagLevel::Hint; message = $"[{rule}] {message}" }
+}
+
+/**
+ * severity_word — the CLI's own rendering of a `DiagLevel`, lowercase (`error`/`warning`/`info`/
+ * `hint`) — the word every other diagnostic-printing surface in this corpus (build errors,
+ * `checker::warnings.tks`'s "warning: …" lines) already uses in this position.
+ *
+ * @param s  the severity to render
+ * @return   its lowercase word
+ */
+fn severity_word(s: checker::DiagLevel) -> str {
+    match s {
+        checker::DiagLevel::Error => "error"
+        checker::DiagLevel::Warning => "warning"
+        checker::DiagLevel::Info => "info"
+        checker::DiagLevel::Hint => "hint"
+    }
+}
+
+/**
+ * render_diagnostic — the one line `teko lint` prints per diagnostic: `file:line:col: lint
+ * <severity>: message`, via the SAME `checker::diag_at` W-loc-2 renderer every other checker
+ * diagnostic uses (read, not altered).
+ *
+ * @param d  the diagnostic to render
+ * @return   the located diagnostic line
+ */
+pub fn render_diagnostic(d: checker::Diagnostic) -> str {
+    checker::diag_at(d.file, d.line, d.col, $"lint {severity_word(d.severity)}: {d.message}")
+}
+
+/**
+ * append_diagnostics — `b`'s diagnostics appended after `a`'s, in order. The `checker::Diagnostic`
+ * twin of `checker::diagnostics.tks`'s own `concat_structured_diags` — duplicated rather than
+ * reused across the namespace boundary for the same reason that file's own doc gives for
+ * duplicating `join_checker_diags` (kept local, no generic-over-element-type list append exists).
+ *
+ * @param a  the diagnostics collected first
+ * @param b  the diagnostics to append
+ * @return   the concatenation, `a` before `b`
+ */
+fn append_diagnostics(a: []checker::Diagnostic, b: []checker::Diagnostic) -> []checker::Diagnostic {
+    mut out = a
+    mut i: u64 = 0
+    loop { if i >= b.len { break }; out = teko::list::push(out, b[i]); i++ }
+    out
+}

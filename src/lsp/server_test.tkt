@@ -42,6 +42,20 @@ const WARN_DOC: str = "fn dead() -> i64 { return 0 }"
 const UNUSED_FN_MISSING: str = "unused private function `dead`"
 
 /**
+ * LINT_DOC — a well-typed module whose ONLY defect is a `teko::lint` style hint (`match` on a bare
+ * `bool`), not a type error or a `checker::warnings.tks` finding — proves `diagnose_document`
+ * folds `teko::lint::collect_diagnostics_for_program`'s own diagnostics into the SAME list (DT2,
+ * 2026-08-03), through the SAME `to_lsp_diagnostic` conversion `checker::Diagnostic` already rides.
+ */
+const LINT_DOC: str = "pub fn f() -> i64 {\n    let flag = true\n    match flag {\n        true => 1\n        false => 0\n    }\n}"
+
+/**
+ * LINT_HINT_MISSING — the stable bracketed rule tag `teko::lint::diag.tks::mk_diag` stamps onto
+ * the no-match-on-bool hint.
+ */
+const LINT_HINT_MISSING: str = "[no-match-on-bool]"
+
+/**
  * didopen_request — a `textDocument/didOpen` notification DOM for document `uri` carrying `text`,
  * built with the server's own JSON constructors so the test drives the exact shape a client sends.
  *
@@ -74,6 +88,20 @@ fn diagnose_document_reports_type_error() {
 fn diagnose_document_clean_is_empty() {
     let diags = diagnose_document(DOC_PATH, CLEAN_DOC)
     teko::assert::eq_u64(diags.len, 0)
+}
+
+#test
+/**
+ * diagnose_document_reports_a_lint_hint — a well-typed buffer whose only defect is a `teko::lint`
+ * style hint still surfaces a diagnostic (DT2's own LSP wiring), carrying the rule tag.
+ */
+fn diagnose_document_reports_a_lint_hint() {
+    let diags = diagnose_document(DOC_PATH, LINT_DOC)
+    teko::assert::is_true(diags.len >= 1)
+    mut found = false
+    mut i: u64 = 0
+    loop { if i >= diags.len { break }; if teko::str::contains(diags[i].message, LINT_HINT_MISSING) { found = true }; i++ }
+    teko::assert::is_true(found)
 }
 
 #test

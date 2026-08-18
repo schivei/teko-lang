@@ -2,6 +2,7 @@ use teko::encoding::json
 use teko::parser
 use teko::lexer
 use teko::checker
+use teko::lint
 
 /**
  * DiagSeverity — the LSP severity of a diagnostic: Error, Warning, Info, or Hint. The protocol
@@ -358,28 +359,41 @@ fn document_program(path: str, text: str) -> parser::Program | error {
  * buffer and return every diagnostic as a structured, ranged `LspDiagnostic`. A lex/parse fault yields
  * the single located diagnostic that stopped the parse; a clean parse runs the checker's
  * `collect_diagnostics_structured` (crumb D: the whole-program, non-fail-fast, SEVERITY-KNOWN seam)
- * and maps each `checker::Diagnostic` to a range. A clean document yields an empty list — the client
- * then clears its squiggles.
+ * PLUS `teko::lint::collect_diagnostics_for_program` (DT2, 2026-08-03: `teko lint`'s own style/
+ * best-practice diagnostics — no-match-on-bool, unhandled-match-arm, shadowed-binding, unused-
+ * import, and the reused redundant-cast warning), and maps each `checker::Diagnostic` from EITHER
+ * source to a range through the SAME `to_lsp_diagnostic` conversion — the editor draws a `teko lint`
+ * hint exactly like a type error or a `checker::warnings.tks` warning, just at its own (lighter)
+ * severity. A clean document yields an empty list — the client then clears its squiggles.
  *
  * v1 checks the document in ISOLATION (no cross-file dependency resolution), so a reference to a
  * symbol defined in another project file surfaces as unresolved; whole-project checking with an
- * unsaved-buffer override is the design's crumb E.
+ * unsaved-buffer override is the design's crumb E. `teko::lint`'s own unused-import check inherits
+ * this same isolation (it only ever sees ONE file's `use` header, exactly what a single open
+ * document has).
  *
  * @param path  the document path (its diagnostics' `file`)
  * @param text  the document buffer
  * @return      every diagnostic of the buffer, ranged and severity-tagged (empty ⇒ clean)
- * @since 0.3.1.0 (LSP crumb A; re-wired onto the structured seam crumb D)
+ * @since 0.3.1.0 (LSP crumb A; re-wired onto the structured seam crumb D; `teko::lint` folded in DT2)
  */
 pub fn diagnose_document(path: str, text: str) -> []LspDiagnostic {
     match document_program(path, text) {
         parser::Program as prog => {
             let raw = checker::collect_diagnostics_structured(prog)
+            let lint_raw = lint::collect_diagnostics_for_program(prog)
             mut out: []LspDiagnostic = teko::list::empty()
             mut i: u64 = 0
             loop {
                 if i >= raw.len { break }
                 out = teko::list::push(out, to_lsp_diagnostic(text, raw[i]))
                 i = i + 1
+            }
+            mut j: u64 = 0
+            loop {
+                if j >= lint_raw.len { break }
+                out = teko::list::push(out, to_lsp_diagnostic(text, lint_raw[j]))
+                j = j + 1
             }
             out
         }

@@ -1,0 +1,105 @@
+use teko::checker
+
+/**
+ * mk_diag_tags_the_rule_and_stamps_hint — the rule id is bracketed onto the message, the position
+ * fields are copied verbatim, and every lint diagnostic is `DiagLevel::Hint`.
+ *
+ * @return void
+ */
+#test
+fn mk_diag_tags_the_rule_and_stamps_hint() {
+    let d = mk_diag("no-match-on-bool", "src/a.tks", 5, 2, "some message")
+    teko::assert::is_true(d.file == "src/a.tks")
+    teko::assert::is_true(d.line == 5)
+    teko::assert::is_true(d.col == 2)
+    teko::assert::is_true(d.end_line == 5)
+    teko::assert::is_true(d.end_col == 3)
+    teko::assert::is_true(d.severity == checker::DiagLevel::Hint)
+    teko::assert::is_true(d.message == "[no-match-on-bool] some message")
+}
+
+/**
+ * mk_diag_with_no_position_leaves_the_range_at_zero — a `line`/`col` of 0 (an unpositioned
+ * finding, e.g. `unused-import`) yields an all-zero range rather than a fabricated one.
+ *
+ * @return void
+ */
+#test
+fn mk_diag_with_no_position_leaves_the_range_at_zero() {
+    let d = mk_diag("unused-import", "src/a.tks", 0, 0, "unused import `teko::io`")
+    teko::assert::is_true(d.line == 0)
+    teko::assert::is_true(d.col == 0)
+    teko::assert::is_true(d.end_line == 0)
+    teko::assert::is_true(d.end_col == 0)
+}
+
+/**
+ * severity_word_covers_every_level — the four `DiagLevel` members each render their own lowercase
+ * word.
+ *
+ * @return void
+ */
+#test
+fn severity_word_covers_every_level() {
+    teko::assert::is_true(severity_word(checker::DiagLevel::Error) == "error")
+    teko::assert::is_true(severity_word(checker::DiagLevel::Warning) == "warning")
+    teko::assert::is_true(severity_word(checker::DiagLevel::Info) == "info")
+    teko::assert::is_true(severity_word(checker::DiagLevel::Hint) == "hint")
+}
+
+/**
+ * render_diagnostic_with_full_location — file+line+col known: the `file:line:col: lint
+ * <severity>: msg` shape (via `checker::diag_at`'s own W-loc-2 rendering).
+ *
+ * @return void
+ */
+#test
+fn render_diagnostic_with_full_location() {
+    let d = mk_diag("shadowed-binding", "src/a.tks", 3, 7, "`x` shadows an outer binding of the same name")
+    teko::assert::is_true(render_diagnostic(d) == "src/a.tks:3:7: lint hint: [shadowed-binding] `x` shadows an outer binding of the same name")
+}
+
+/**
+ * render_diagnostic_without_location — no file/line known: the message stands alone, no dangling
+ * `:`.
+ *
+ * @return void
+ */
+#test
+fn render_diagnostic_without_location() {
+    let d = mk_diag("unused-import", "", 0, 0, "unused import `teko::io`")
+    teko::assert::is_true(render_diagnostic(d) == "lint hint: [unused-import] unused import `teko::io`")
+}
+
+/**
+ * render_diagnostic_respects_a_warning_severity — a diagnostic NOT built via `mk_diag` (e.g. the
+ * reused redundant-cast warning) still renders its OWN severity word, not a hardcoded "hint".
+ *
+ * @return void
+ */
+#test
+fn render_diagnostic_respects_a_warning_severity() {
+    let d = checker::Diagnostic { file = "src/a.tks"; line = 1; col = 1; end_line = 1; end_col = 2; severity = checker::DiagLevel::Warning; message = "redundant cast: this `to u64` is a provable no-op" }
+    teko::assert::is_true(render_diagnostic(d) == "src/a.tks:1:1: lint warning: redundant cast: this `to u64` is a provable no-op")
+}
+
+/**
+ * append_diagnostics_concatenates_in_order — `a`'s diagnostics precede `b`'s; either side empty is
+ * a no-op copy of the other.
+ *
+ * @return void
+ */
+#test
+fn append_diagnostics_concatenates_in_order() {
+    let d1 = mk_diag("r1", "f", 1, 1, "one")
+    let d2 = mk_diag("r2", "f", 2, 1, "two")
+    let a = teko::list::push(teko::list::empty(), d1)
+    let b = teko::list::push(teko::list::empty(), d2)
+    let combined = append_diagnostics(a, b)
+    teko::assert::is_true(combined.len == 2)
+    teko::assert::is_true(combined[0].message == "[r1] one")
+    teko::assert::is_true(combined[1].message == "[r2] two")
+    let empty: []checker::Diagnostic = teko::list::empty()
+    teko::assert::is_true(append_diagnostics(empty, b).len == 1)
+    teko::assert::is_true(append_diagnostics(a, empty).len == 1)
+}

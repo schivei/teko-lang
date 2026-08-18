@@ -1,0 +1,196 @@
+use teko::parser
+use teko::lexer
+use teko::checker
+
+/**
+ * fix_flag_of tests — the one PURE piece of `run_cli`'s own CLI glue. `run_cli`/`lint_frontend`
+ * themselves are integration-only (a real project directory + real front-end pass), matching the
+ * same standing gap `teko::build::frontend_parse`/`frontend_check`/`project_frontend` leave open
+ * — none of those is exercised by a hand-built `.tkt` test either.
+ *
+ * `redundant_cast_diagnostics`/`collect_lint_diagnostics`, though, touch NO file I/O (they run
+ * over an already-typed `TProgram`/already-parsed `Program` the caller hands them) — hand-built
+ * fixtures below, the same `checker_test.tkt` precedent every other lint file uses.
+ */
+
+#test
+/** `--fix` recognized anywhere in argv. */
+fn fix_flag_of_true_when_present() {
+    let a = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "teko"), "lint"), "--fix")
+    teko::assert::is_true(fix_flag_of(a))
+    let b = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "teko"), "--fix"), "lint")
+    teko::assert::is_true(fix_flag_of(b))
+}
+
+#test
+/** Absent (including the empty argv) reads false. */
+fn fix_flag_of_false_when_absent() {
+    let a = teko::list::push(teko::list::push(teko::list::empty(), "teko"), "lint")
+    teko::assert::is_false(fix_flag_of(a))
+    let empty: []str = teko::list::empty()
+    teko::assert::is_false(fix_flag_of(empty))
+}
+
+// ---- fixtures (mirrors typed_lints_test.tkt's own shape, kept LOCAL under its own "lt2_"
+// prefix — this namespace's convention for avoiding cross-file name collisions) ----
+
+fn lt2_i64t() -> checker::Type { checker::Prim { kind = checker::PrimKind::I64 } }
+fn lt2_u32t() -> checker::Type { checker::Prim { kind = checker::PrimKind::U32 } }
+fn lt2_u64t() -> checker::Type { checker::Prim { kind = checker::PrimKind::U64 } }
+fn lt2_boolt() -> checker::Type { checker::Prim { kind = checker::PrimKind::Bool } }
+
+fn lt2_num(v: i64, t: checker::Type) -> checker::TExpr {
+    checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = t; line = 0; col = 0 }
+}
+
+fn lt2_var(name: str, t: checker::Type, line: u32, col: u32) -> checker::TExpr {
+    checker::TExpr { kind = checker::TVar { name = name; is_func = false; func_ns = "" }; type = t; line = line; col = col }
+}
+
+fn lt2_cast(inner: checker::TExpr, t: checker::Type, line: u32, col: u32) -> checker::TExpr {
+    checker::TExpr { kind = checker::TCast { expr = inner }; type = t; line = line; col = col }
+}
+
+fn lt2_bin(op: lexer::TokenKind, l: checker::TExpr, r: checker::TExpr) -> checker::TExpr {
+    checker::TExpr { kind = checker::TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+}
+
+fn lt2_expr_stmt(e: checker::TExpr) -> checker::TStatement { checker::TExprStmt { expr = e } }
+fn lt2_one_stmt(s: checker::TStatement) -> []checker::TStatement { teko::list::push(teko::list::empty(), s) }
+
+fn lt2_fn(name: str, body: []checker::TStatement, file: str) -> checker::TFunction {
+    checker::TFunction { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = checker::Void { }; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = file; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+fn lt2_prog(f: checker::TFunction) -> checker::TProgram {
+    checker::TProgram { items = teko::list::push(teko::list::empty(), f) }
+}
+
+fn lt2_empty_parsed() -> parser::Program { parser::Program { items = teko::list::empty() } }
+
+/**
+ * lt2_prog_from_module_src — lex + parse `src` as a MODULE and flatten its declarations into a
+ * `parser::Program`, every item stamped `path` — the SAME shape `src/lsp/diagnostics.tks::
+ * module_items` builds for an open document (mirrors `checker_test.tkt`'s own `prog_from_module_
+ * src`, reproduced here rather than reused across the namespace boundary — same "kept local"
+ * convention this file's sibling fixtures already follow). Drives `collect_diagnostics_for_program`
+ * through the REAL lex → parse → pre-mono-type seam, not a hand-built `TProgram`.
+ *
+ * @param src   the module source text
+ * @param path  the file path stamped onto every item
+ * @return      the flat program (empty items on a lex/parse fault — the caller expects clean text)
+ */
+fn lt2_prog_from_module_src(src: str, path: str) -> parser::Program {
+    let toks = match lexer::tokenize(src) { []lexer::Token as t => t; error => teko::list::empty() }
+    let m = match parser::parse_module(toks, 0) { parser::Parsed<parser::Module> as x => x.node; error => parser::Module { uses = teko::list::empty(); decls = teko::list::empty() } }
+    mut items: []parser::Item = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.decls.len { break }
+        items = match m.decls[i] {
+            parser::Function as f => teko::list::push(items, parser::Item { content = f; namespace = ""; file = path })
+            parser::TypeDecl as t => teko::list::push(items, parser::Item { content = t; namespace = ""; file = path })
+            parser::ConstDecl as c => teko::list::push(items, parser::Item { content = c; namespace = ""; file = path })
+        }
+        i = i + 1
+    }
+    parser::Program { items = items }
+}
+
+#test
+/** `redundant_cast_diagnostics` reuses `checker::warnings.tks::collect_redundant_cast_warnings`
+    (not a local reimplementation): a provable no-op widen cast structures into ONE `Warning`-
+    severity diagnostic naming "redundant cast". */
+fn redundant_cast_diagnostics_reuses_the_checker_warning() {
+    let inner = lt2_var("a", lt2_u32t(), 0, 0)
+    let cast = lt2_cast(inner, lt2_u64t(), 9, 4)
+    let other = lt2_var("b", lt2_u64t(), 0, 0)
+    let bin = lt2_bin(lexer::TokenKind::Plus, cast, other)
+    let prog = lt2_prog(lt2_fn("f", lt2_one_stmt(lt2_expr_stmt(bin)), "a.tks"))
+    let ds = redundant_cast_diagnostics(prog, lt2_empty_parsed())
+    teko::assert::is_true(ds.len == 1)
+    teko::assert::is_true(ds[0].severity == checker::DiagLevel::Warning)
+    teko::assert::str_contains(ds[0].message, "redundant cast")
+}
+
+#test
+/** No redundant cast anywhere — nothing to report. */
+fn redundant_cast_diagnostics_empty_without_a_redundant_cast() {
+    let bin = lt2_bin(lexer::TokenKind::Plus, lt2_num(1, lt2_i64t()), lt2_num(2, lt2_i64t()))
+    let prog = lt2_prog(lt2_fn("f", lt2_one_stmt(lt2_expr_stmt(bin)), "a.tks"))
+    teko::assert::is_true(redundant_cast_diagnostics(prog, lt2_empty_parsed()).len == 0)
+}
+
+/**
+ * lt2_mixed_fixture — a `TFunction` `f` combining a no-match-on-bool hit, a shadowing hit (its
+ * OWN param `x` re-bound in the body), and a redundant widen cast — the shared fixture both
+ * `collect_typed_lint_diagnostics_merges_the_disk-free_passes` and `collect_lint_diagnostics_
+ * merges_every_pass` build on.
+ */
+fn lt2_mixed_fixture() -> checker::TFunction {
+    let bool_subject = lt2_var("flag", lt2_boolt(), 1, 1)
+    let bool_match = checker::TExpr { kind = checker::TMatchExpr { subject = bool_subject; arms = teko::list::push(teko::list::empty(), checker::TArm { pattern = parser::WildcardPattern { }; has_when = false; guard = lt2_num(0, lt2_i64t()); body = lt2_one_stmt(lt2_expr_stmt(lt2_num(1, lt2_i64t()))) }) }; type = lt2_i64t(); line = 0; col = 0 }
+    let shadow_param = parser::Param { name = "x"; has_type = true; type_ann = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "i64" }) }; args = teko::list::empty() }; is_params = false; has_default = false; default_expr = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_i64(0); fval = 0.0 }; line = 0; col = 0 } }
+    let shadow_binding: checker::TStatement = checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "x" }; bound = lt2_i64t(); value = lt2_num(2, lt2_i64t()) }
+    let inner = lt2_var("a", lt2_u32t(), 0, 0)
+    let cast = lt2_cast(inner, lt2_u64t(), 0, 0)
+    let other = lt2_var("b", lt2_u64t(), 0, 0)
+    let bin = lt2_bin(lexer::TokenKind::Plus, cast, other)
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, lt2_expr_stmt(bool_match))
+    stmts = teko::list::push(stmts, shadow_binding)
+    stmts = teko::list::push(stmts, lt2_expr_stmt(bin))
+    let params = teko::list::push(teko::list::empty(), shadow_param)
+    checker::TFunction { name = "f"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; return_type = checker::Void { }; body = stmts; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = "a.tks"; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+#test
+/** `collect_typed_lint_diagnostics` (the disk-I/O-free subset both `run_cli` and the LSP's
+    `collect_diagnostics_for_program` can safely share) merges a no-match-on-bool hit, a shadowing
+    hit, and the reused redundant-cast warning — three diagnostics, in pass order. */
+fn collect_typed_lint_diagnostics_merges_the_disk_free_passes() {
+    let ds = collect_typed_lint_diagnostics(lt2_prog(lt2_mixed_fixture()), lt2_empty_parsed())
+    teko::assert::is_true(ds.len == 3)
+    teko::assert::str_contains(ds[0].message, "no-match-on-bool")
+    teko::assert::str_contains(ds[1].message, "shadowed-binding")
+    teko::assert::str_contains(ds[2].message, "redundant cast")
+}
+
+#test
+/** `collect_lint_diagnostics` (the CLI-facing entry) is `collect_typed_lint_diagnostics` PLUS
+    unused-import appended — with no `use` declarations in this fixture's (empty) parsed program,
+    the two agree exactly. */
+fn collect_lint_diagnostics_merges_every_pass() {
+    let prog = lt2_prog(lt2_mixed_fixture())
+    let ds = collect_lint_diagnostics(prog, lt2_empty_parsed())
+    teko::assert::is_true(ds.len == 3)
+    teko::assert::str_contains(ds[0].message, "no-match-on-bool")
+    teko::assert::str_contains(ds[1].message, "shadowed-binding")
+    teko::assert::str_contains(ds[2].message, "redundant cast")
+}
+
+#test
+/** `collect_diagnostics_for_program` — the LSP-facing single-document seam: real source text,
+    lexed + parsed + pre-mono-typed the SAME way `checker::lsp_api.tks::collect_diagnostics_
+    structured` types an open document, still finds the `no-match-on-bool` hint. This is the one
+    test proving the `type_program_with_deps_pre_mono` → `PreMono.prog` → `collect_lint_
+    diagnostics` wiring itself works, not just the pure pass functions it calls (already covered
+    individually above and in `typed_lints_test.tkt`). */
+fn collect_diagnostics_for_program_finds_a_real_bool_match() {
+    let src = "pub fn f() -> i64 {\n    let flag = true\n    match flag {\n        true => 1\n        false => 0\n    }\n}\n"
+    let program = lt2_prog_from_module_src(src, "a.tks")
+    let ds = collect_diagnostics_for_program(program)
+    mut found = false
+    mut i: u64 = 0
+    loop { if i >= ds.len { break }; if teko::str::contains(ds[i].message, "no-match-on-bool") { found = true }; i++ }
+    teko::assert::is_true(found)
+}
+
+#test
+/** A program that fails to type (an unknown type name) yields NO lint diagnostics — the error is
+    `collect_diagnostics_structured`'s job to report; this seam never duplicates it. */
+fn collect_diagnostics_for_program_empty_on_a_type_error() {
+    let src = "pub fn f(x: NoSuchType) -> i64 {\n    1\n}\n"
+    let program = lt2_prog_from_module_src(src, "a.tks")
+    teko::assert::is_true(collect_diagnostics_for_program(program).len == 0)
+}

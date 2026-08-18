@@ -1,0 +1,268 @@
+// src/lint/typed_lints.tks   (namespace 'teko::lint') — DT2: the two lints that need only the
+// TYPED program (`checker::TProgram`) and no extra threaded state — unlike shadowing (needs a
+// scope stack, `shadowing.tks`) or unused-import (needs the untyped, file-tagged program,
+// `unused_import.tks`). One shared recursive walk finds both in a single pass:
+//
+//   * no-match-on-bool     — a `match` whose subject types `bool` (Phase-11 style law: prefer
+//                            `if`/`else` over `match true/false`).
+//   * unhandled-match-arm  — a `match` over a nominal/union subject (`Named`/`Variant` — most
+//                            commonly an enum or a `variant` union) that carries a bare `_`
+//                            wildcard arm. `checker::match.tks`'s own `has_wildcard` walks the
+//                            UNTYPED `[]parser::Arm`; TAST's `TArm` is a distinct (typed) struct,
+//                            so it is reproduced here for `[]TArm` rather than reused wholesale —
+//                            same guard (an ungated `_`; `_ when g` does not count, B.15),
+//                            different carrier type.
+//
+// REDUNDANT-CAST IS NOT HERE (a DT2 direction change, 2026-08-03). `checker::warnings.tks`
+// ALREADY re-derives the D1 class-1/class-3 redundant-cast finding from the typed tree as a
+// STRUCTURED diagnostic (`collect_redundant_cast_warnings`, feeding `checker::
+// collect_diagnostics_structured` — the same seam the LSP's `publishDiagnostics` rides). DT2's own
+// mandate is to REUSE the checker's existing warning predicate, not maintain a second copy that
+// could drift from it — so `lint.tks::collect_lint_diagnostics` calls that function directly
+// instead of this file re-walking the tree for the same finding (see its own module doc).
+//
+// THE WALK ITSELF mirrors `checker::initanalysis.tks`'s `occurs_expr`/`occurs_stmt` shape (same
+// exhaustive per-`TExprKind` case list) — a hand-duplicated traversal per concern is this
+// corpus's own convention (see also `metrics.tks`'s `arith_cast_rate_walk`, and `checker::
+// warnings.tks`'s own `note_redundant_casts_expr`), not a shared generic combinator, so this file
+// stays independently readable and testable.
+
+use teko::parser
+use teko::checker
+
+// ---- rule 1: no-match-on-bool ----
+
+/**
+ * check_match_bool — is `subject`'s resolved type `bool`? If so, append the diagnostic at the
+ * subject's own source position (every `TExpr` carries one — C1-POS).
+ *
+ * @param subject  the match's typed subject expression
+ * @param file     the enclosing declaration's source file ("" for a loose top-level statement)
+ * @param acc      the diagnostics collected so far
+ * @return         `acc`, plus one diagnostic when the subject is `bool`
+ */
+fn check_match_bool(subject: checker::TExpr, file: str, acc: []checker::Diagnostic) -> []checker::Diagnostic {
+    match subject.type {
+        checker::Prim as p => {
+            if p.kind == checker::PrimKind::Bool {
+                return teko::list::push(acc, mk_diag("no-match-on-bool", file, subject.line, subject.col, "match on a `bool` subject — prefer `if`/`else` (style law: no `match` on bool)"))
+            }
+            acc
+        }
+        _ => acc
+    }
+}
+
+// ---- rule 4: unhandled-match-arm (a wildcard arm over a nominal/union subject) ----
+
+/**
+ * is_nominal_or_union — is `t` a `Named` (a user enum/flags/struct/class/…) or a `Variant`
+ * union? The two subject shapes where a bare `_` arm risks silently absorbing a case a future
+ * edit adds (a `bool`/prim match has no such "future case" to miss).
+ *
+ * @param t  the resolved subject type
+ * @return   whether `t` is nominal or a union
+ */
+fn is_nominal_or_union(t: checker::Type) -> bool {
+    match t { checker::Named => true; checker::Variant => true; _ => false }
+}
+
+/**
+ * has_wildcard_arm — does `arms` carry an UNGUARDED `_` arm? Mirrors `checker::match.tks`'s
+ * `has_wildcard` (same B.15 rule: a guarded `_ when g` does not count) reproduced for the typed
+ * `[]TArm` carrier (`checker::has_wildcard` takes the untyped `[]parser::Arm` — a distinct type,
+ * so it cannot be called on this program's arms directly).
+ *
+ * @param arms  the match's typed arms
+ * @return      whether any UNGUARDED arm's pattern is a bare `_`
+ */
+fn has_wildcard_arm(arms: []checker::TArm) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern { parser::WildcardPattern => return true; _ => { } }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * check_match_wildcard — the rule-4 hint: `subject` is nominal/union AND `arms` carries an
+ * unguarded `_`.
+ *
+ * @param subject  the match's typed subject expression
+ * @param arms     the match's typed arms
+ * @param file     the enclosing declaration's source file
+ * @param acc      the diagnostics collected so far
+ * @return         `acc`, plus one diagnostic when the hint fires
+ */
+fn check_match_wildcard(subject: checker::TExpr, arms: []checker::TArm, file: str, acc: []checker::Diagnostic) -> []checker::Diagnostic {
+    if is_nominal_or_union(subject.type) && has_wildcard_arm(arms) {
+        return teko::list::push(acc, mk_diag("unhandled-match-arm", file, subject.line, subject.col, "a catch-all `_` arm hides future cases — consider enumerating every variant explicitly so a new one is not silently absorbed"))
+    }
+    acc
+}
+
+// ---- the shared walk ----
+
+/**
+ * walk_expr_tl — recurse through every `TExprKind`, firing rule 1/4's checks at `TMatchExpr` sites
+ * and descending into every child expression and nested statement block (`TIfExpr`/`TMatchExpr`/
+ * `TLambda` bodies) so a construct buried arbitrarily deep is still found. Leaves (`TNumber`/
+ * `TVar`/`TStrLit`/`TByteLit`/`TCharLit`/`TBoolLit`/`TNullLit`/`TPathExpr`) contribute nothing and
+ * recurse into nothing.
+ *
+ * @param e     the typed expression to walk
+ * @param file  the enclosing declaration's source file
+ * @param acc   the diagnostics collected so far
+ * @return      `acc`, extended with every diagnostic this subtree contains
+ */
+fn walk_expr_tl(e: checker::TExpr, file: str, acc: []checker::Diagnostic) -> []checker::Diagnostic {
+    match e.kind {
+        checker::TBinary as b => walk_expr_tl(b.right, file, walk_expr_tl(b.left, file, acc))
+        checker::TUnary as u => walk_expr_tl(u.operand, file, acc)
+        checker::TCompare as c => {
+            mut out = walk_expr_tl(c.first, file, acc)
+            mut i: u64 = 0
+            loop { if i >= c.rest.len { break }; out = walk_expr_tl(c.rest[i].operand, file, out); i++ }
+            out
+        }
+        checker::TCall as call => {
+            mut out = acc
+            mut i: u64 = 0
+            loop { if i >= call.args.len { break }; out = walk_expr_tl(call.args[i], file, out); i++ }
+            out
+        }
+        checker::TIfExpr as f => {
+            mut out = walk_expr_tl(f.cond, file, acc)
+            out = walk_block_tl(f.then_blk, file, out)
+            if f.has_else { out = walk_block_tl(f.else_blk, file, out) }
+            out
+        }
+        checker::TMatchExpr as m => {
+            mut out = check_match_bool(m.subject, file, acc)
+            out = check_match_wildcard(m.subject, m.arms, file, out)
+            out = walk_expr_tl(m.subject, file, out)
+            mut i: u64 = 0
+            loop {
+                if i >= m.arms.len { break }
+                let arm = m.arms[i]
+                if arm.has_when { out = walk_expr_tl(arm.guard, file, out) }
+                out = walk_block_tl(arm.body, file, out)
+                i++
+            }
+            out
+        }
+        checker::TCast as cst => walk_expr_tl(cst.expr, file, acc)
+        checker::TFieldAccess as fa => walk_expr_tl(fa.receiver, file, acc)
+        checker::TSafeFieldAccess as sfa => walk_expr_tl(sfa.receiver, file, acc)
+        checker::TCoalesce as co => walk_expr_tl(co.right, file, walk_expr_tl(co.left, file, acc))
+        checker::TStructInit as si => {
+            mut out = acc
+            mut i: u64 = 0
+            loop { if i >= si.field_vals.len { break }; out = walk_expr_tl(si.field_vals[i], file, out); i++ }
+            out
+        }
+        checker::TIndex as ix => walk_expr_tl(ix.index, file, walk_expr_tl(ix.receiver, file, acc))
+        checker::TInterp as it => {
+            mut out = acc
+            mut i: u64 = 0
+            loop {
+                if i >= it.holes.len { break }
+                out = walk_expr_tl(it.holes[i], file, out)
+                if i < it.specs.len {
+                    match it.specs[i].kind {
+                        checker::TFSpecDynamic as fd => {
+                            mut k: u64 = 0
+                            loop { if k >= fd.args.len { break }; out = walk_expr_tl(fd.args[k], file, out); k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            out
+        }
+        checker::TInExpr as ie => {
+            mut out = walk_expr_tl(ie.lhs, file, acc)
+            mut i: u64 = 0
+            loop { if i >= ie.elems.len { break }; out = walk_expr_tl(ie.elems[i], file, out); i++ }
+            out
+        }
+        checker::TArrayLit as al => {
+            mut out = acc
+            mut i: u64 = 0
+            loop { if i >= al.elements.len { break }; out = walk_expr_tl(al.elements[i].expr, file, out); i++ }
+            out
+        }
+        checker::TLambda as lam => walk_block_tl(lam.body, file, acc)
+        checker::TBorrow as bw => walk_expr_tl(bw.operand, file, acc)
+        _ => acc
+    }
+}
+
+/**
+ * walk_stmt_tl — recurse through one typed statement, visiting every nested expression/block.
+ *
+ * @param s     the typed statement to walk
+ * @param file  the enclosing declaration's source file
+ * @param acc   the diagnostics collected so far
+ * @return      `acc`, extended with every diagnostic this statement contains
+ */
+fn walk_stmt_tl(s: checker::TStatement, file: str, acc: []checker::Diagnostic) -> []checker::Diagnostic {
+    match s {
+        checker::TBinding as b => walk_expr_tl(b.value, file, acc)
+        checker::TAssign as a => walk_expr_tl(a.value, file, walk_expr_tl(a.target, file, acc))
+        checker::TReturn as r => if r.has_value { walk_expr_tl(r.value, file, acc) } else { acc }
+        checker::TLoopStmt as l => walk_block_tl(l.body, file, walk_block_tl(l.init, file, acc))
+        checker::TExprStmt as es => walk_expr_tl(es.expr, file, acc)
+        checker::TDeferStmt as d => walk_block_tl(d.body, file, acc)
+        checker::TAdoptStmt as ad => walk_block_tl(ad.body, file, acc)
+        _ => acc
+    }
+}
+
+/**
+ * walk_block_tl — walk a statement block sequentially.
+ *
+ * @param stmts  the typed statement block
+ * @param file   the enclosing declaration's source file
+ * @param acc    the diagnostics collected so far
+ * @return       `acc`, extended with every diagnostic the block contains
+ */
+fn walk_block_tl(stmts: []checker::TStatement, file: str, acc: []checker::Diagnostic) -> []checker::Diagnostic {
+    mut out = acc
+    mut i: u64 = 0
+    loop { if i >= stmts.len { break }; out = walk_stmt_tl(stmts[i], file, out); i++ }
+    out
+}
+
+/**
+ * find_typed_lints — the pass entry: walk the whole typed program, firing rules 1/4 wherever they
+ * apply. Visits every `TFunction` body (this already covers every struct/class/trait method —
+ * those are flattened into ordinary `TFunction` items by monomorphization, so no separate
+ * `parser::TypeDecl` descent is needed here), every loose top-level statement (gathered into ONE
+ * sequential block first, `TypeDecl`/`UseDecl` pass through untouched), and every module-level
+ * `const`'s initializer.
+ *
+ * @param prog  the checked, typed program
+ * @return      every diagnostic the two rules produce, in program order
+ */
+pub fn find_typed_lints(prog: checker::TProgram) -> []checker::Diagnostic {
+    mut acc: []checker::Diagnostic = teko::list::empty()
+    mut loose: []checker::TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { acc = walk_block_tl(f.body, f.file, acc) }
+            checker::TStatement as s => { loose = teko::list::push(loose, s) }
+            checker::TConstDecl as cd => { acc = walk_expr_tl(cd.init, "", acc) }
+            _ => { }
+        }
+        i++
+    }
+    walk_block_tl(loose, "", acc)
+}

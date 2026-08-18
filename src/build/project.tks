@@ -489,6 +489,41 @@ fn frontend_body(include_tests: bool, quiet: bool, tty: bool) -> Frontend | erro
 }
 
 /**
+ * LintFrontend — the front-end result `teko lint` (DT2, TEKO_ROADMAP_DEVTOOLS.md) needs: BOTH
+ * halves of the pipeline `teko run`/`teko test` already assemble, kept side by side because each
+ * lint pass reads a different one. `parsed` is the UNTYPED, file-tagged merged program (`Item.file`
+ * survives here — the unused-import lint groups `use` declarations by source file); `prog` is the
+ * fully checked, TYPED program the type-aware lints (no-match-on-bool, redundant-cast reuse,
+ * shadowing, the wildcard-arm hint) walk. `ParsedFront`/`Frontend` themselves stay file-private
+ * (project.tks-internal plumbing); this is the one small `pub` seam `src/lint/*.tks` needs to
+ * reach them, so `teko lint`'s own logic can live entirely under `src/lint/` instead of growing a
+ * second front-end.
+ *
+ * @field parsed  the merged, untyped program (`frontend_parse`'s own `ParsedFront.parsed`)
+ * @field prog    the checked, typed program (`frontend_check`'s own `Frontend.prog`)
+ * @since DT2 (0.3.1)
+ */
+pub type LintFrontend = struct { parsed: parser::Program; prog: checker::TProgram }
+
+/**
+ * lint_frontend — parse + type-check `dir` for `teko lint`: chdir into the project root (so
+ * relative source paths resolve, exactly like every other project subcommand), assemble WITHOUT
+ * the `.tkt` tests (a lint run reports on the production surface, matching `teko build`'s own
+ * default view), and check it. A thin re-export of `frontend_parse` → `frontend_check` — no new
+ * pipeline, no divergence from the build/run/test front-end.
+ *
+ * @param dir  the project directory
+ * @return     both halves of the checked front-end, or the first parse/type error
+ * @since DT2 (0.3.1)
+ */
+pub fn lint_frontend(dir: str) -> LintFrontend | error {
+    match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => { } }
+    let pf = match frontend_parse(false, true, false) { ParsedFront as x => x; error as e => return e }
+    let fe = match frontend_check(pf, true, false) { Frontend as x => x; error as e => return e }
+    LintFrontend { parsed = pf.parsed; prog = fe.prog }
+}
+
+/**
  * The PRODUCTION view of a parsed program: every item whose provenance is a `.tkt`
  * test file is dropped, everything else passes through IN ORDER. Because
  * `assemble_sel` walks the same file list with and without tests — the only

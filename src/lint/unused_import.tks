@@ -1,0 +1,311 @@
+// src/lint/unused_import.tks   (namespace 'teko::lint') — DT2: the unused-import lint + its
+// `--fix` (the one MECHANICAL fix DT2 implements — deleting a `use` line changes nothing else,
+// unlike rewriting a `match true/false` into an `if` or renaming a shadowing binding).
+//
+// WHY THE UNTYPED PROGRAM. `checker::TProgram`'s `TItem` drops the per-item `file`/line for a
+// `use`/`type` declaration once typed (`parser::UseDecl` itself carries NO line/col at all — the
+// grammar's own gap). `parser::Program.items` (via `teko::build::lint_frontend`'s `parsed` half)
+// keeps `Item.file` per declaration, which is exactly what grouping "this file's own `use`
+// header" needs; typing buys nothing extra for this lint (a `use` either resolves or the front
+// end already failed), so it deliberately works on the untyped half only.
+//
+// "USED" IS OVER-APPROXIMATED BY TEXTUAL OCCURRENCE — the SAME conservative stance
+// `checker::initanalysis.tks` states for its own unused-local check ("'Used' is over-approximated
+// by a NAME occurrence anywhere in the relevant scope … a missed unused (a false NEGATIVE), never
+// a false positive"). Concretely: strip every `use …` line from the file's raw source, then ask
+// whether the bound name still occurs anywhere in what is left, via a plain substring test
+// (`teko::str::contains` — no identifier-boundary check). This can only ever UNDER-report (miss a
+// genuinely-unused import whose name happens to sit inside another word, e.g. `use teko::io` next
+// to a local named `ratio`) — it can never wrongly call a USED import unused, since any real
+// occurrence trivially contains itself as a substring. A `use … as alias` checks BOTH the alias
+// and the path's own last segment, since either spelling can appear at a call site.
+//
+// LOCATION HONESTY: `parser::UseDecl` has no line/col, so a finding here carries `line=0, col=0`
+// (the file name alone). `--fix` recovers a line WITHOUT needing one: the decl's rendered dotted
+// path is looked up directly against the file's OWN `use ` lines (`line_matches_unused`), assuming
+// (an honest, stated limitation) one `use` per source line — true of the whole corpus today.
+
+use teko::parser
+use teko::checker
+
+/**
+ * UnusedUse — one confirmed-unused `use` declaration: which file it lives in, and its dotted
+ * path text (`a::b`) — the string BOTH the reported message and `--fix`'s line match key on.
+ *
+ * @field file    the source file the declaration belongs to
+ * @field dotted  the declaration's namespace path, rendered `a::b::c`
+ */
+pub type UnusedUse = struct { file: str; dotted: str }
+
+/**
+ * last_segment — the final component of a namespace path (`a::b::c` → `"c"`), the bare name a
+ * bare/aliased `use` binds when no `as` is present.
+ *
+ * @param p  the path to read
+ * @return   its last segment's name, or "" for an empty path (never produced by the parser)
+ */
+fn last_segment(p: parser::Path) -> str {
+    if p.segments.len == 0 { return "" }
+    p.segments[p.segments.len - 1].name
+}
+
+/**
+ * render_dotted — a path rendered as `a::b::c`, the form both the report message and the
+ * `--fix` line-matcher use.
+ *
+ * @param p  the path to render
+ * @return   the dotted text
+ */
+fn render_dotted(p: parser::Path) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        if i > 0 { out = out ~ "::" }
+        out = out ~ p.segments[i].name
+        i++
+    }
+    out
+}
+
+/**
+ * bound_names — the identifier(s) `u` introduces into scope, EVERY spelling a use-site could
+ * name: bare `use a::b` → `["b"]`; aliased `use a::b as c` → `["c", "b"]` (a fully-qualified call
+ * can still spell the original last segment even under an alias); grouped `use a::b::[X, Y]` →
+ * `["X", "Y"]` (each independently — see `find_unused_uses`'s "any name used" gate, which treats
+ * the whole grouped decl as used if ANY of them is).
+ *
+ * @param u  the `use` declaration to classify
+ * @return   its candidate bound names
+ */
+fn bound_names(u: parser::UseDecl) -> []str {
+    if u.names.len > 0 { return u.names }
+    mut out: []str = teko::list::empty()
+    out = teko::list::push(out, last_segment(u.path))
+    if u.has_alias { out = teko::list::push(out, u.alias) }
+    out
+}
+
+/**
+ * is_use_line — does `line` (any indentation) begin with the `use` keyword? The line-stripping
+ * predicate `strip_use_lines` filters on.
+ *
+ * @param line  one source line
+ * @return      whether it is a `use` declaration line
+ */
+fn is_use_line(line: str) -> bool {
+    let t = trim_left(line)
+    has_prefix(t, "use ") || t == "use"
+}
+
+/**
+ * strip_use_lines — `text` with every `use` line removed, the "rest of the file" an import's
+ * bound name is checked against (so a `use`'s own line never counts as its own usage).
+ *
+ * @param text  a file's raw source
+ * @return      the same text minus every `use` line
+ */
+fn strip_use_lines(text: str) -> str {
+    let ls = teko::iter::split_lines(text)
+    mut kept: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= ls.len { break }
+        if !is_use_line(ls[i]) { kept = teko::list::push(kept, ls[i]) }
+        i++
+    }
+    join_lines(kept)
+}
+
+/**
+ * any_name_used — does at least one of `names` occur (substring) in `body`? Empty names are
+ * skipped (an empty segment never signals real usage).
+ *
+ * @param names  the candidate bound names
+ * @param body   the file's text with every `use` line already stripped
+ * @return       whether any candidate occurs
+ */
+fn any_name_used(names: []str, body: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        if names[i] != "" && teko::str::contains(body, names[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * find_cached_body — the already-computed `strip_use_lines` result for `file`, if this pass has
+ * already read it (files carry MULTIPLE `use` decls, and each file is read/stripped once).
+ *
+ * @param file   the file to look up
+ * @param files  the files read so far
+ * @param bodies parallel to `files` — each one's stripped body text
+ * @return       the cached body, or `null` on a cache miss
+ */
+fn find_cached_body(file: str, files: []str, bodies: []str) -> str | null {
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        if files[i] == file { return bodies[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * find_unused_uses — the shared core both `find_unused_imports` (reporting) and
+ * `fix_unused_imports` (deleting) build on: every `use` declaration in `parsed` whose EVERY
+ * candidate bound name is absent from the rest of its own file's text.
+ *
+ * @param parsed  the untyped, file-tagged merged program
+ * @return        every confirmed-unused `use`, in program order
+ */
+pub fn find_unused_uses(parsed: parser::Program) -> []UnusedUse {
+    mut acc: []UnusedUse = teko::list::empty()
+    mut files: []str = teko::list::empty()
+    mut bodies: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= parsed.items.len { break }
+        match parsed.items[i].content {
+            parser::UseDecl as u => {
+                let file = parsed.items[i].file
+                mut body = ""
+                match find_cached_body(file, files, bodies) {
+                    str as b => body = b
+                    null => {
+                        let text = match teko::io::read_file(file) { str as s => s; error => "" }
+                        body = strip_use_lines(text)
+                        files = teko::list::push(files, file)
+                        bodies = teko::list::push(bodies, body)
+                    }
+                }
+                if !any_name_used(bound_names(u), body) {
+                    acc = teko::list::push(acc, UnusedUse { file = file; dotted = render_dotted(u.path) })
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * find_unused_imports — the pass entry: render `find_unused_uses`'s result as `checker::
+ * Diagnostic`s (no line/col — `parser::UseDecl` carries none).
+ *
+ * @param parsed  the untyped, file-tagged merged program
+ * @return        one diagnostic per unused `use` declaration
+ */
+pub fn find_unused_imports(parsed: parser::Program) -> []checker::Diagnostic {
+    let uus = find_unused_uses(parsed)
+    mut acc: []checker::Diagnostic = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= uus.len { break }
+        acc = teko::list::push(acc, mk_diag("unused-import", uus[i].file, 0, 0, $"unused import `{uus[i].dotted}`"))
+        i++
+    }
+    acc
+}
+
+/**
+ * dotteds_for_file — the dotted paths of every unused `use` belonging to `file`, the key set
+ * `--fix` matches lines against.
+ *
+ * @param file  the file to filter to
+ * @param uus   every confirmed-unused `use` in the program
+ * @return      `file`'s own unused dotted paths
+ */
+fn dotteds_for_file(file: str, uus: []UnusedUse) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= uus.len { break }; if uus[i].file == file { out = teko::list::push(out, uus[i].dotted) }; i++ }
+    out
+}
+
+/**
+ * line_matches_any_unused — is `line` the declaration of one of `dotteds` (an unused import's own
+ * `use` line)? Matches iff the line, trimmed, begins EXACTLY with `"use " ~ dotted` — anchoring
+ * right after the keyword avoids an accidental substring match elsewhere on the line.
+ *
+ * @param line     one source line
+ * @param dotteds  the unused dotted paths belonging to this line's file
+ * @return         whether this line declares one of them
+ */
+fn line_matches_any_unused(line: str, dotteds: []str) -> bool {
+    let t = trim_left(line)
+    mut i: u64 = 0
+    loop {
+        if i >= dotteds.len { break }
+        if has_prefix(t, "use " ~ dotteds[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * distinct_files — the distinct file names `uus` mentions, in first-seen order — `--fix` rewrites
+ * each file once regardless of how many of its imports are unused.
+ *
+ * @param uus  every confirmed-unused `use`
+ * @return     the distinct files they belong to
+ */
+fn distinct_files(uus: []UnusedUse) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= uus.len { break }
+        if !str_list_contains(out, uus[i].file) { out = teko::list::push(out, uus[i].file) }
+        i++
+    }
+    out
+}
+
+/**
+ * fix_unused_imports — `--fix`'s mechanical rewrite: for every file with at least one confirmed-
+ * unused `use`, drop exactly those lines and write the file back. A file whose read fails (should
+ * not happen — `find_unused_uses` already read it successfully to compute `body`) is silently
+ * skipped rather than half-applied.
+ *
+ * @param parsed  the untyped, file-tagged merged program
+ * @return        the files actually rewritten, in first-seen order
+ */
+pub fn fix_unused_imports(parsed: parser::Program) -> []str {
+    let uus = find_unused_uses(parsed)
+    let files = distinct_files(uus)
+    mut rewritten: []str = teko::list::empty()
+    mut fi: u64 = 0
+    loop {
+        if fi >= files.len { break }
+        let file = files[fi]
+        let dotteds = dotteds_for_file(file, uus)
+        match teko::io::read_file(file) {
+            str as text => {
+                let ls = teko::iter::split_lines(text)
+                mut kept: []str = teko::list::empty()
+                mut li: u64 = 0
+                loop {
+                    if li >= ls.len { break }
+                    if !line_matches_any_unused(ls[li], dotteds) { kept = teko::list::push(kept, ls[li]) }
+                    li++
+                }
+                // preserve the original trailing newline (`split_lines` drops that information —
+                // it never yields a trailing empty line), so `--fix` does not silently strip the
+                // file's final `\n` on every rewrite.
+                mut new_text = join_lines(kept)
+                if teko::str::ends_with(text, "\n") { new_text = new_text ~ "\n" }
+                match teko::io::write_file(file, new_text) {
+                    null => { rewritten = teko::list::push(rewritten, file) }
+                    error => { }
+                }
+            }
+            error => { }
+        }
+        fi++
+    }
+    rewritten
+}

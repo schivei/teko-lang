@@ -1,0 +1,295 @@
+use teko::parser
+use teko::lexer
+use teko::checker
+
+// ---- fixture helpers (hand-built TAST, the checker_test.tkt/metrics_test.tkt precedent — no
+// front-end pass, no .tkp needed) ----
+
+fn tl_boolt() -> checker::Type { checker::Prim { kind = checker::PrimKind::Bool } }
+fn tl_i64t() -> checker::Type { checker::Prim { kind = checker::PrimKind::I64 } }
+fn tl_named(name: str) -> checker::Type { checker::Named { name = name } }
+
+fn tl_var(name: str, t: checker::Type, line: u32, col: u32) -> checker::TExpr {
+    checker::TExpr { kind = checker::TVar { name = name; is_func = false; func_ns = "" }; type = t; line = line; col = col }
+}
+
+fn tl_num(v: i64, t: checker::Type) -> checker::TExpr {
+    checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = t; line = 0; col = 0 }
+}
+
+fn tl_cast(inner: checker::TExpr, t: checker::Type, line: u32, col: u32) -> checker::TExpr {
+    checker::TExpr { kind = checker::TCast { expr = inner }; type = t; line = line; col = col }
+}
+
+fn tl_arm(pattern: parser::Pattern, has_when: bool, guard: checker::TExpr, body: []checker::TStatement) -> checker::TArm {
+    checker::TArm { pattern = pattern; has_when = has_when; guard = guard; body = body }
+}
+
+fn tl_wildcard_arm(body: []checker::TStatement) -> checker::TArm {
+    tl_arm(parser::WildcardPattern { }, false, tl_num(0, tl_i64t()), body)
+}
+
+fn tl_one_arm(a: checker::TArm) -> []checker::TArm { teko::list::push(teko::list::empty(), a) }
+
+fn tl_match(subject: checker::TExpr, arms: []checker::TArm) -> checker::TExpr {
+    checker::TExpr { kind = checker::TMatchExpr { subject = subject; arms = arms }; type = tl_i64t(); line = 0; col = 0 }
+}
+
+/** bool_trigger — a `match` on a bare `bool` var, located at `(line, 1)` — a single, precisely
+    countable "no-match-on-bool" finding, reused everywhere the recursion tests just need SOME
+    locatable trigger buried inside a wrapper. */
+fn bool_trigger(line: u32) -> checker::TExpr {
+    tl_match(tl_var("x", tl_boolt(), line, 1), tl_one_arm(tl_wildcard_arm(tl_one_stmt(tl_expr_stmt(tl_num(1, tl_i64t()))))))
+}
+
+fn tl_expr_stmt(e: checker::TExpr) -> checker::TStatement { checker::TExprStmt { expr = e } }
+fn tl_one_stmt(s: checker::TStatement) -> []checker::TStatement { teko::list::push(teko::list::empty(), s) }
+
+fn tl_fn(name: str, body: []checker::TStatement, file: str) -> checker::TFunction {
+    checker::TFunction { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = checker::Void { }; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = file; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+fn tl_prog(f: checker::TFunction) -> checker::TProgram {
+    checker::TProgram { items = teko::list::push(teko::list::empty(), f) }
+}
+
+/** count_rule — how many of `ds` carry `rule` (embedded as `[rule]` at the front of the
+    message — `diag.tks::mk_diag`'s own tagging convention). */
+fn count_rule(ds: []checker::Diagnostic, rule: str) -> u64 {
+    mut n: u64 = 0
+    mut i: u64 = 0
+    let tag = $"[{rule}]"
+    loop { if i >= ds.len { break }; if teko::str::contains(ds[i].message, tag) { n = n + 1 }; i++ }
+    n
+}
+
+// ---- rule 1: no-match-on-bool ----
+
+#test
+/** A `match` over a bare `bool` var fires exactly once, located at the subject. */
+fn no_match_on_bool_fires_for_bool_subject() {
+    let subject = tl_var("flag", tl_boolt(), 5, 2)
+    let m = tl_match(subject, tl_one_arm(tl_wildcard_arm(tl_one_stmt(tl_expr_stmt(tl_num(1, tl_i64t()))))))
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(m)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 1)
+    teko::assert::is_true(fs[0].file == "a.tks")
+    teko::assert::is_true(fs[0].line == 5)
+    teko::assert::is_true(fs[0].col == 2)
+}
+
+#test
+/** A `match` over a non-bool (i64) subject never fires rule 1 OR rule 4 (i64 is neither
+    nominal nor a union), even with a wildcard arm present. */
+fn no_match_on_bool_absent_for_non_bool_subject() {
+    let subject = tl_var("n", tl_i64t(), 1, 1)
+    let m = tl_match(subject, tl_one_arm(tl_wildcard_arm(tl_one_stmt(tl_expr_stmt(tl_num(1, tl_i64t()))))))
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(m)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 0)
+    teko::assert::is_true(count_rule(fs, "unhandled-match-arm") == 0)
+}
+
+// ---- rule 4: unhandled-match-arm ----
+
+#test
+/** A `match` over a `Named` subject with an unguarded `_` arm fires rule 4. */
+fn unhandled_match_arm_fires_for_named_subject_with_wildcard() {
+    let subject = tl_var("c", tl_named("Color"), 8, 3)
+    let m = tl_match(subject, tl_one_arm(tl_wildcard_arm(tl_one_stmt(tl_expr_stmt(tl_num(1, tl_i64t()))))))
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(m)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "unhandled-match-arm") == 1)
+    teko::assert::is_true(fs[0].line == 8)
+    teko::assert::is_true(fs[0].col == 3)
+}
+
+#test
+/** A `Named` subject with NO wildcard arm never fires rule 4. */
+fn unhandled_match_arm_absent_without_wildcard() {
+    let subject = tl_var("c", tl_named("Color"), 1, 1)
+    let arm = tl_arm(parser::NullPattern { }, false, tl_num(0, tl_i64t()), tl_one_stmt(tl_expr_stmt(tl_num(1, tl_i64t()))))
+    let m = tl_match(subject, tl_one_arm(arm))
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(m)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "unhandled-match-arm") == 0)
+}
+
+#test
+/** A GUARDED `_ when g` does not count as the catch-all (B.15) — no finding. Also exercises
+    the `arm.has_when` guard-recursion branch. */
+fn unhandled_match_arm_absent_for_guarded_wildcard() {
+    let subject = tl_var("c", tl_named("Color"), 1, 1)
+    let guard = tl_var("g", tl_boolt(), 0, 0)
+    let arm = tl_arm(parser::WildcardPattern { }, true, guard, tl_one_stmt(tl_expr_stmt(tl_num(1, tl_i64t()))))
+    let m = tl_match(subject, tl_one_arm(arm))
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(m)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "unhandled-match-arm") == 0)
+}
+
+#test
+/** A `match` over a `Variant` (union) subject with an unguarded `_` arm ALSO fires rule 4 — the
+    other nominal-or-union shape, distinct from `Named`. */
+fn unhandled_match_arm_fires_for_variant_subject_with_wildcard() {
+    let subject = tl_var("v", checker::Variant { members = teko::list::push(teko::list::push(teko::list::empty(), tl_i64t()), checker::Null { }) }, 4, 6)
+    let m = tl_match(subject, tl_one_arm(tl_wildcard_arm(tl_one_stmt(tl_expr_stmt(tl_num(1, tl_i64t()))))))
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(m)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "unhandled-match-arm") == 1)
+}
+
+// NOTE: redundant-cast is no longer walked here — it is REUSED from `checker::warnings.tks::
+// collect_redundant_cast_warnings` (`lint.tks::redundant_cast_diagnostics`), which already has its
+// own exhaustive `#test` coverage under `src/checker/`. Re-testing it here would duplicate, not
+// add, coverage of the SAME predicate this crumb was told to reuse rather than reimplement.
+
+// ---- recursion coverage: every TExprKind/TStatement case reaches nested triggers ----
+
+fn wrap_unary(e: checker::TExpr) -> checker::TExpr { checker::TExpr { kind = checker::TUnary { op = lexer::TokenKind::Bang; operand = e }; type = tl_boolt(); line = 0; col = 0 } }
+fn wrap_cast(e: checker::TExpr) -> checker::TExpr { tl_cast(e, tl_i64t(), 0, 0) }
+fn wrap_field(e: checker::TExpr) -> checker::TExpr { checker::TExpr { kind = checker::TFieldAccess { receiver = e; field = "f" }; type = tl_i64t(); line = 0; col = 0 } }
+fn wrap_safe_field(e: checker::TExpr) -> checker::TExpr { checker::TExpr { kind = checker::TSafeFieldAccess { receiver = e; field = "f" }; type = checker::Optional { inner = tl_i64t() }; line = 0; col = 0 } }
+fn wrap_coalesce(l: checker::TExpr, r: checker::TExpr) -> checker::TExpr { checker::TExpr { kind = checker::TCoalesce { left = l; right = r }; type = tl_i64t(); line = 0; col = 0 } }
+fn wrap_call(args: []checker::TExpr) -> checker::TExpr {
+    let callee = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "f" }) }
+    checker::TExpr { kind = checker::TCall { callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = tl_i64t(); line = 0; col = 0 }
+}
+
+#test
+/** The walker descends through TUnary → TCast → TFieldAccess → TSafeFieldAccess → TCoalesce. */
+fn walker_descends_through_unary_cast_field_safefield_coalesce() {
+    let chain = wrap_coalesce(wrap_safe_field(wrap_field(wrap_cast(wrap_unary(bool_trigger(3))))), tl_num(0, tl_i64t()))
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(chain)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 1)
+}
+
+#test
+/** The walker descends through TCall's args AND TIfExpr's cond/then/else (has_else = true). */
+fn walker_descends_through_call_args_and_if_branches() {
+    let call = wrap_call(teko::list::push(teko::list::empty(), bool_trigger(1)))
+    let ifexpr = checker::TExpr { kind = checker::TIfExpr { cond = call; then_blk = tl_one_stmt(tl_expr_stmt(bool_trigger(2))); has_else = true; else_blk = tl_one_stmt(tl_expr_stmt(bool_trigger(3))) }; type = tl_i64t(); line = 0; col = 0 }
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(ifexpr)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 3)
+}
+
+#test
+/** `has_else = false` skips the else side cleanly (no crash, no phantom finding). */
+fn if_expr_without_else_skips_the_else_side() {
+    let ifexpr = checker::TExpr { kind = checker::TIfExpr { cond = tl_num(1, tl_i64t()); then_blk = tl_one_stmt(tl_expr_stmt(bool_trigger(1))); has_else = false; else_blk = teko::list::empty() }; type = tl_i64t(); line = 0; col = 0 }
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(ifexpr)), "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 1)
+}
+
+#test
+/** The walker descends through TIndex (receiver + index), TStructInit (field_vals), TInExpr
+    (lhs + elems), and TArrayLit (element exprs). */
+fn walker_descends_through_index_structinit_inexpr_arraylit() {
+    let idx = checker::TExpr { kind = checker::TIndex { receiver = bool_trigger(1); index = bool_trigger(2) }; type = tl_i64t(); line = 0; col = 0 }
+    let si = checker::TExpr { kind = checker::TStructInit { field_names = teko::list::empty(); field_vals = teko::list::push(teko::list::empty(), bool_trigger(3)) }; type = tl_named("S"); line = 0; col = 0 }
+    let inex = checker::TExpr { kind = checker::TInExpr { lhs = bool_trigger(4); elems = teko::list::push(teko::list::empty(), bool_trigger(5)) }; type = tl_boolt(); line = 0; col = 0 }
+    let arr_elem = checker::TArrayElem { is_spread = false; expr = bool_trigger(6) }
+    let arr = checker::TExpr { kind = checker::TArrayLit { elements = teko::list::push(teko::list::empty(), arr_elem) }; type = checker::Slice { element = tl_i64t() }; line = 0; col = 0 }
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, tl_expr_stmt(idx))
+    stmts = teko::list::push(stmts, tl_expr_stmt(si))
+    stmts = teko::list::push(stmts, tl_expr_stmt(inex))
+    stmts = teko::list::push(stmts, tl_expr_stmt(arr))
+    let f = tl_fn("f", stmts, "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 6)
+}
+
+#test
+/** The walker descends through TInterp (holes, and a `TFSpecDynamic` spec's own args — both the
+    `i < specs.len` true AND false branches, and both `TFSpecDynamic`/other-spec cases), TBorrow,
+    and a TLambda's body. */
+fn walker_descends_through_interp_dynamic_spec_borrow_lambda() {
+    let spec_dynamic = checker::TFSpec { kind = checker::TFSpecDynamic { args = teko::list::push(teko::list::empty(), bool_trigger(2)) } }
+    let spec_none = checker::TFSpec { kind = checker::TFSpecNone { } }
+    let holes = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), bool_trigger(1)), bool_trigger(5)), bool_trigger(6))
+    let specs = teko::list::push(teko::list::push(teko::list::empty(), spec_dynamic), spec_none)
+    let pieces = teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), ""), ""), ""), "")
+    let interp = checker::TExpr { kind = checker::TInterp { pieces = pieces; holes = holes; specs = specs }; type = checker::Str { }; line = 0; col = 0 }
+    let borrow = checker::TExpr { kind = checker::TBorrow { operand = bool_trigger(3) }; type = checker::Reference { inner = tl_boolt() }; line = 0; col = 0 }
+    let lam_body = tl_one_stmt(tl_expr_stmt(bool_trigger(4)))
+    let lambda = checker::TExpr { kind = checker::TLambda { params = teko::list::empty(); body = lam_body; captures = teko::list::empty(); ret = tl_i64t(); lift_id = 0 to u64 }; type = checker::Func { params = teko::list::empty(); ret = tl_i64t(); variadic = false; param_names = teko::list::empty(); n_required = 0 to u64; defaults = teko::list::empty() }; line = 0; col = 0 }
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, tl_expr_stmt(interp))
+    stmts = teko::list::push(stmts, tl_expr_stmt(borrow))
+    stmts = teko::list::push(stmts, tl_expr_stmt(lambda))
+    let f = tl_fn("f", stmts, "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    // 3 holes + 1 dynamic-spec arg + borrow + lambda body = 6
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 6)
+}
+
+#test
+/** The walker descends through TLoopStmt (init + body), TDeferStmt, TAdoptStmt, a `Field`
+    TAssign (both `value` and `target`), and a value-carrying TReturn. */
+fn walker_descends_through_loop_defer_adopt_return_and_field_assign() {
+    let loop_stmt: checker::TStatement = checker::TLoopStmt { label = ""; init = tl_one_stmt(tl_expr_stmt(bool_trigger(1))); body = tl_one_stmt(tl_expr_stmt(bool_trigger(2))) }
+    let defer_stmt: checker::TStatement = checker::TDeferStmt { body = tl_one_stmt(tl_expr_stmt(bool_trigger(3))) }
+    let adopt_stmt: checker::TStatement = checker::TAdoptStmt { name = ""; body = tl_one_stmt(tl_expr_stmt(bool_trigger(4))) }
+    let field_target = checker::TExpr { kind = checker::TFieldAccess { receiver = bool_trigger(5); field = "f" }; type = tl_i64t(); line = 0; col = 0 }
+    let assign: checker::TStatement = checker::TAssign { kind = parser::AssignKind::Field; name = ""; op = lexer::TokenKind::Assign; bound = tl_i64t(); value = bool_trigger(6); deref = false; target = field_target }
+    let ret_stmt: checker::TStatement = checker::TReturn { has_value = true; value = bool_trigger(7) }
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, loop_stmt)
+    stmts = teko::list::push(stmts, defer_stmt)
+    stmts = teko::list::push(stmts, adopt_stmt)
+    stmts = teko::list::push(stmts, assign)
+    stmts = teko::list::push(stmts, ret_stmt)
+    let f = tl_fn("f", stmts, "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 7)
+}
+
+#test
+/** A value-less `return` and a `Simple` (non-field) assign are handled without crashing and
+    without spuriously descending into the assign's unused `no_texpr()` target sentinel. */
+fn return_without_value_and_simple_assign_are_handled() {
+    let ret_stmt: checker::TStatement = checker::TReturn { has_value = false; value = tl_num(0, tl_i64t()) }
+    let assign: checker::TStatement = checker::TAssign { kind = parser::AssignKind::Simple; name = "x"; op = lexer::TokenKind::Assign; bound = tl_i64t(); value = bool_trigger(1); deref = false; target = checker::no_texpr() }
+    mut stmts: []checker::TStatement = teko::list::empty()
+    stmts = teko::list::push(stmts, assign)
+    stmts = teko::list::push(stmts, ret_stmt)
+    let f = tl_fn("f", stmts, "a.tks")
+    let fs = find_typed_lints(tl_prog(f))
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 1)
+}
+
+// ---- program-level item dispatch ----
+
+#test
+/** `find_typed_lints` also walks a module-level `const`'s initializer and every LOOSE top-level
+    statement (gathered as one sequential block, mirroring `initanalysis.tks::loose_body`). */
+fn find_typed_lints_covers_const_decl_and_loose_statements() {
+    let cd = checker::TConstDecl { name = "K"; namespace = ""; ty = tl_i64t(); init = bool_trigger(1); vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, cd)
+    items = teko::list::push(items, tl_expr_stmt(bool_trigger(2)))
+    items = teko::list::push(items, tl_expr_stmt(bool_trigger(3)))
+    let prog = checker::TProgram { items = items }
+    let fs = find_typed_lints(prog)
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 3)
+}
+
+#test
+/** A passthrough `parser::TypeDecl`/`parser::UseDecl` item contributes nothing and does not
+    disturb the surrounding findings. */
+fn find_typed_lints_skips_typedecl_and_usedecl_items() {
+    let td = parser::TypeDecl { name = "Color"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::EnumBody { members = teko::list::push(teko::list::empty(), "Red") }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+    let ud = parser::UseDecl { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "io" }) }; has_alias = false; alias = ""; names = teko::list::empty() }
+    let f = tl_fn("f", tl_one_stmt(tl_expr_stmt(bool_trigger(1))), "a.tks")
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, td)
+    items = teko::list::push(items, ud)
+    items = teko::list::push(items, f)
+    let prog = checker::TProgram { items = items }
+    let fs = find_typed_lints(prog)
+    teko::assert::is_true(count_rule(fs, "no-match-on-bool") == 1)
+}

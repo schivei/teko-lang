@@ -1,0 +1,234 @@
+// src/lint/shadowing.tks   (namespace 'teko::lint') — DT2: the shadowing-hint lint.
+//
+// Fires when a `let`/`mut`/`const` LOCAL binding introduces a name already visible from an
+// ENCLOSING scope — a function parameter, or a `let`/`mut`/`const` bound earlier in an outer
+// block. Purely advisory (a HINT, never an error): Teko allows shadowing by design (nested `if`/
+// `match`/`loop` bodies routinely reuse a short name like `x`/`it`), this just flags it so an
+// author can double-check it was intentional.
+//
+// SCOPE MODEL. A flat `[]str` of "names visible here", threaded functionally (never mutated in
+// place — the same accumulator-by-return-value convention `checker::initanalysis.tks` uses for
+// its own occurrence walk): entering a nested block extends a COPY of the outer scope; leaving it
+// discards that copy, so a name bound inside an `if`/`match`/`loop` arm never leaks to a sibling
+// arm or the code after it (matching `TLoopStmt`'s own documented "loop-locals do not leak past
+// the loop"). `ShadowStep` bundles the growing finding list with the scope a block leaves behind,
+// since a `TLoopStmt`'s `body` must see `init`'s bindings even though neither leaks further out.
+//
+// KNOWN GAP (honest — M.3): a `match` arm's OWN pattern bindings (`Variant as x`) and a lambda's
+// OWN parameters are not added to the scope, so a pattern/param name shadowing an outer variable
+// is not flagged. Both are common, usually-intentional idioms (`Some as x` naming the very value
+// `x` used outside); extending the scope model to cover them is future work, not a correctness
+// bug — the omission only means a possible finding is MISSED, never a false one raised (the same
+// conservative-by-omission stance `initanalysis.tks` documents for its own unused-check).
+
+use teko::parser
+use teko::checker
+
+/**
+ * ShadowStep — one walk step's result: the findings collected so far, plus the scope this block
+ * leaves behind (read by `TLoopStmt`, which must thread `init`'s bindings into `body`).
+ *
+ * @field acc    the findings collected so far
+ * @field scope  the names visible at the END of this block/statement
+ */
+type ShadowStep = struct { acc: []checker::Diagnostic; scope: []str }
+
+/**
+ * param_names — a function's parameter names, the BASE scope its body is walked with.
+ *
+ * @param params  the function's parameters
+ * @return        their names, in declaration order
+ */
+fn param_names(params: []parser::Param) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= params.len { break }; out = teko::list::push(out, params[i].name); i++ }
+    out
+}
+
+/**
+ * walk_expr_shadow — descend into every nested statement block reachable from `e` (an `if`/
+ * `match` value's branches, a lambda's body), using `scope` UNCHANGED at every branch (sibling
+ * branches never see each other's locals) and discarding whatever a nested block's own walk
+ * would have extended it with. Also descends into every plain operand purely to reach blocks
+ * buried arbitrarily deep — mirrors `checker::initanalysis.tks::occurs_expr`'s exhaustive
+ * per-`TExprKind` case list.
+ *
+ * @param e     the typed expression to walk
+ * @param scope the names visible at this point
+ * @param file  the enclosing declaration's source file
+ * @param acc   the findings collected so far
+ * @return      `acc`, extended with every shadowing hint found in `e`
+ */
+fn walk_expr_shadow(e: checker::TExpr, scope: []str, file: str, acc: []checker::Diagnostic) -> []checker::Diagnostic {
+    match e.kind {
+        checker::TBinary as b => walk_expr_shadow(b.right, scope, file, walk_expr_shadow(b.left, scope, file, acc))
+        checker::TUnary as u => walk_expr_shadow(u.operand, scope, file, acc)
+        checker::TCompare as c => {
+            mut out = walk_expr_shadow(c.first, scope, file, acc)
+            mut i: u64 = 0
+            loop { if i >= c.rest.len { break }; out = walk_expr_shadow(c.rest[i].operand, scope, file, out); i++ }
+            out
+        }
+        checker::TCall as call => {
+            mut out = acc
+            mut i: u64 = 0
+            loop { if i >= call.args.len { break }; out = walk_expr_shadow(call.args[i], scope, file, out); i++ }
+            out
+        }
+        checker::TIfExpr as f => {
+            mut out = walk_expr_shadow(f.cond, scope, file, acc)
+            out = walk_block_shadow(f.then_blk, scope, file, out).acc
+            if f.has_else { out = walk_block_shadow(f.else_blk, scope, file, out).acc }
+            out
+        }
+        checker::TMatchExpr as m => {
+            mut out = walk_expr_shadow(m.subject, scope, file, acc)
+            mut i: u64 = 0
+            loop {
+                if i >= m.arms.len { break }
+                let arm = m.arms[i]
+                if arm.has_when { out = walk_expr_shadow(arm.guard, scope, file, out) }
+                out = walk_block_shadow(arm.body, scope, file, out).acc
+                i++
+            }
+            out
+        }
+        checker::TCast as cst => walk_expr_shadow(cst.expr, scope, file, acc)
+        checker::TFieldAccess as fa => walk_expr_shadow(fa.receiver, scope, file, acc)
+        checker::TSafeFieldAccess as sfa => walk_expr_shadow(sfa.receiver, scope, file, acc)
+        checker::TCoalesce as co => walk_expr_shadow(co.right, scope, file, walk_expr_shadow(co.left, scope, file, acc))
+        checker::TStructInit as si => {
+            mut out = acc
+            mut i: u64 = 0
+            loop { if i >= si.field_vals.len { break }; out = walk_expr_shadow(si.field_vals[i], scope, file, out); i++ }
+            out
+        }
+        checker::TIndex as ix => walk_expr_shadow(ix.index, scope, file, walk_expr_shadow(ix.receiver, scope, file, acc))
+        checker::TInterp as it => {
+            mut out = acc
+            mut i: u64 = 0
+            loop {
+                if i >= it.holes.len { break }
+                out = walk_expr_shadow(it.holes[i], scope, file, out)
+                if i < it.specs.len {
+                    match it.specs[i].kind {
+                        checker::TFSpecDynamic as fd => {
+                            mut k: u64 = 0
+                            loop { if k >= fd.args.len { break }; out = walk_expr_shadow(fd.args[k], scope, file, out); k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            out
+        }
+        checker::TInExpr as ie => {
+            mut out = walk_expr_shadow(ie.lhs, scope, file, acc)
+            mut i: u64 = 0
+            loop { if i >= ie.elems.len { break }; out = walk_expr_shadow(ie.elems[i], scope, file, out); i++ }
+            out
+        }
+        checker::TArrayLit as al => {
+            mut out = acc
+            mut i: u64 = 0
+            loop { if i >= al.elements.len { break }; out = walk_expr_shadow(al.elements[i].expr, scope, file, out); i++ }
+            out
+        }
+        checker::TLambda as lam => walk_block_shadow(lam.body, scope, file, acc).acc
+        checker::TBorrow as bw => walk_expr_shadow(bw.operand, scope, file, acc)
+        _ => acc
+    }
+}
+
+/**
+ * walk_stmt_shadow — walk one typed statement, extending `scope` when it is a `let`/`mut`/`const`
+ * binding a `SimpleName` (a `DestructurePattern` target is skipped — same conservatism
+ * `initanalysis.tks::check_local_stmt` documents: its bound names are not tracked here either).
+ * A binding's OWN value is walked against the scope BEFORE the binding's name is added (a value
+ * cannot shadow-check against its own not-yet-bound name).
+ *
+ * @param s     the typed statement to walk
+ * @param scope the names visible at this point
+ * @param file  the enclosing declaration's source file
+ * @param acc   the findings collected so far
+ * @return      the findings plus the scope visible after this statement
+ */
+fn walk_stmt_shadow(s: checker::TStatement, scope: []str, file: str, acc: []checker::Diagnostic) -> ShadowStep {
+    match s {
+        checker::TBinding as b => {
+            let after_value = walk_expr_shadow(b.value, scope, file, acc)
+            match b.target {
+                parser::SimpleName as sn => {
+                    if sn.name == "_" { return ShadowStep { acc = after_value; scope = scope } }
+                    mut acc2 = after_value
+                    if str_list_contains(scope, sn.name) {
+                        acc2 = teko::list::push(acc2, mk_diag("shadowed-binding", file, b.value.line, b.value.col, $"`{sn.name}` shadows an outer binding of the same name"))
+                    }
+                    ShadowStep { acc = acc2; scope = teko::list::push(scope, sn.name) }
+                }
+                parser::DestructurePattern => ShadowStep { acc = after_value; scope = scope }
+            }
+        }
+        checker::TAssign as a => ShadowStep { acc = walk_expr_shadow(a.value, scope, file, walk_expr_shadow(a.target, scope, file, acc)); scope = scope }
+        checker::TReturn as r => ShadowStep { acc = if r.has_value { walk_expr_shadow(r.value, scope, file, acc) } else { acc }; scope = scope }
+        checker::TLoopStmt as l => {
+            let after_init = walk_block_shadow(l.init, scope, file, acc)
+            let after_body = walk_block_shadow(l.body, after_init.scope, file, after_init.acc)
+            ShadowStep { acc = after_body.acc; scope = scope }
+        }
+        checker::TExprStmt as es => ShadowStep { acc = walk_expr_shadow(es.expr, scope, file, acc); scope = scope }
+        checker::TDeferStmt as d => ShadowStep { acc = walk_block_shadow(d.body, scope, file, acc).acc; scope = scope }
+        checker::TAdoptStmt as ad => ShadowStep { acc = walk_block_shadow(ad.body, scope, file, acc).acc; scope = scope }
+        _ => ShadowStep { acc = acc; scope = scope }
+    }
+}
+
+/**
+ * walk_block_shadow — walk a statement block sequentially, threading BOTH the growing findings
+ * and the growing scope from one statement to the next.
+ *
+ * @param stmts  the typed statement block
+ * @param scope  the names visible before the block starts
+ * @param file   the enclosing declaration's source file
+ * @param acc    the findings collected so far
+ * @return       the findings plus the scope visible after the whole block
+ */
+fn walk_block_shadow(stmts: []checker::TStatement, scope: []str, file: str, acc: []checker::Diagnostic) -> ShadowStep {
+    mut cur = ShadowStep { acc = acc; scope = scope }
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        cur = walk_stmt_shadow(stmts[i], cur.scope, file, cur.acc)
+        i++
+    }
+    cur
+}
+
+/**
+ * find_shadowing — the pass entry: walk every `TFunction` body (base scope = its parameters),
+ * every module-level `const`'s initializer (base scope empty), and every loose top-level
+ * statement (gathered into ONE sequential block first, base scope empty, exactly like
+ * `initanalysis.tks::loose_body` gathers the virtual-main's statements — a name bound by one
+ * loose `let` and shadowed by a later one is still caught).
+ *
+ * @param prog  the checked, typed program
+ * @return      every shadowing hint found, in program order
+ */
+pub fn find_shadowing(prog: checker::TProgram) -> []checker::Diagnostic {
+    mut acc: []checker::Diagnostic = teko::list::empty()
+    mut loose: []checker::TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { acc = walk_block_shadow(f.body, param_names(f.params), f.file, acc).acc }
+            checker::TStatement as s => { loose = teko::list::push(loose, s) }
+            checker::TConstDecl as cd => { acc = walk_expr_shadow(cd.init, teko::list::empty(), "", acc) }
+            _ => { }
+        }
+        i++
+    }
+    walk_block_shadow(loose, teko::list::empty(), "", acc).acc
+}

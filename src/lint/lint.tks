@@ -1,0 +1,206 @@
+// src/lint/lint.tks   (namespace 'teko::lint') — DT2 (TEKO_ROADMAP_DEVTOOLS.md §1): `teko lint`,
+// style/best-practice lints BEYOND type errors, reusing the checker's own structures/predicates
+// AND its structured-diagnostic seam (owner direction, 2026-08-03 — see `diag.tks`'s module doc).
+//
+// FOUR OWN LINTS, THREE FILES (plus this CLI glue and one reused checker seam):
+//   * typed_lints.tks   — no-match-on-bool, unhandled-match-arm (a `_` wildcard over a nominal/
+//                         union subject) — both walk the TYPED program, no extra state.
+//   * shadowing.tks     — a `let`/`mut`/`const` local shadowing an outer binding/parameter — the
+//                         typed program plus a threaded scope stack.
+//   * unused_import.tks — an unreferenced `use` — the UNTYPED, file-tagged program (the typed one
+//                         drops `UseDecl`'s file/line) — and its `--fix` (the one mechanical fix).
+//   * redundant-cast is NOT reimplemented here — `checker::warnings.tks::collect_redundant_cast_
+//     warnings` ALREADY re-derives it from the typed tree as the SAME finding `checker::
+//     collect_diagnostics_structured` (the LSP's own seam) reports; `collect_lint_diagnostics`
+//     below just structures that existing `[]str` output the SAME way `checker::diagnostics.tks`
+//     itself does (`structure_diags`), so `teko lint` never drifts from what a build/the LSP
+//     already say about a redundant cast.
+//
+// EVERY LINT HERE RETURNS `checker::Diagnostic` (`collect_lint_diagnostics`, below) — the SAME
+// structured, ranged, severity-known shape `checker::collect_diagnostics_structured` returns and
+// `src/lsp/diagnostics.tks` already renders to the wire. `run_cli` is ONE consumer (it renders each
+// diagnostic to a `file:line:col: lint <severity>: …` line); the LSP is designed to be another —
+// `src/lsp/diagnostics.tks::diagnose_document` can fold `collect_lint_diagnostics`'s output into
+// its own `[]LspDiagnostic` via the EXISTING `to_lsp_diagnostic` conversion (it already takes a
+// `checker::Diagnostic`), with no new wire shape and no change to this module. That LSP-side wire
+// is intentionally a SEPARATE, small edit (not bundled into this crumb): `checker::lsp_api.tks`
+// itself must not depend on `teko::lint` (`teko::checker` is the LOWER layer — `teko::lint`
+// already depends on IT, not the reverse, matching the SAME layering `warnings.tks`'s own module
+// doc states for the LSP/checker split), so the hook belongs in `teko::lsp` (which already depends
+// on `teko::checker` and may depend on `teko::lint` too — no cycle), and that file is under active
+// development on a sibling lane; landing it here risks a collision with work this crumb cannot see.
+//
+// `run_cli` mirrors `teko fmt`/`teko build`'s own CLI shape: resolve the project directory (`-o`
+// is meaningless here, so only `project_arg_of`/`project_dir_of` are reused, not `out_dir_of`),
+// front-end via `teko::build::lint_frontend` (parse + type-check — the SAME pipeline `teko build`/
+// `run`/`test` share, no second front-end), print every diagnostic in ONE format
+// (`diag.tks::render_diagnostic`, the same `file:line:col:` shape every other diagnostic uses),
+// then `--fix` the mechanical ones.
+//
+// EXIT STATUS is deliberately always 0 on a successful lint run, REGARDLESS of how many
+// diagnostics it printed — `teko lint` is advisory (DT2's own framing: "style/best-practice lints
+// BEYOND type errors"), not a gate. It exits non-zero only when the project itself fails to
+// parse/type-check (the same failure `teko build` would report) or the CLI usage is malformed. A
+// future `--strict` (CI-gate mode) is left to a later crumb — no half-built flag ships
+// un-exercised (M.3).
+
+use teko::checker
+use teko::build
+
+/**
+ * fix_flag_of — does `--fix` appear anywhere in `args`?
+ *
+ * @param args  the process argv
+ * @return      whether `--fix` is present
+ */
+fn fix_flag_of(args: []str) -> bool {
+    mut i: u64 = 0
+    loop { if i >= args.len { break }; if args[i] == "--fix" { return true }; i++ }
+    false
+}
+
+/**
+ * redundant_cast_diagnostics — the D1 redundant-cast finding, REUSED (not re-walked) from
+ * `checker::warnings.tks::collect_redundant_cast_warnings` and structured into `checker::
+ * Diagnostic` the SAME way `checker::lsp_api.tks::collect_diagnostics_structured` structures its
+ * own warning batch (`checker::structure_diags`, over the SAME candidate file set, `checker::
+ * program_files`). This is the one place DT2's "reuse the predicate the checker already has for
+ * warnings" mandate is spelled out in code: no local `redundant_widen_cast_of` walk exists in
+ * `src/lint` at all.
+ *
+ * @param prog    the checked, typed program (`collect_redundant_cast_warnings` reads it directly)
+ * @param parsed  the untyped, file-tagged merged program (`program_files`'s candidate file set)
+ * @return        one `Warning`-severity diagnostic per redundant cast found
+ */
+fn redundant_cast_diagnostics(prog: checker::TProgram, parsed: teko::parser::Program) -> []checker::Diagnostic {
+    let raw = checker::collect_redundant_cast_warnings(prog)
+    let files = checker::program_files(parsed)
+    checker::structure_diags(raw, files, checker::DiagLevel::Warning)
+}
+
+/**
+ * collect_typed_lint_diagnostics — the lints that read ONLY the already-typed/parsed program in
+ * memory, no disk I/O: the two typed-program lints, the shadowing lint, THEN the reused redundant-
+ * cast warning. Safe for EITHER caller (`run_cli`'s whole project or the LSP's single open
+ * document) — unlike `find_unused_imports` (see `collect_lint_diagnostics`'s own doc for why that
+ * one is CLI-only).
+ *
+ * @param prog    the checked, typed program
+ * @param parsed  the untyped, file-tagged merged program
+ * @return        every diagnostic these three passes produce, in pass order
+ */
+fn collect_typed_lint_diagnostics(prog: checker::TProgram, parsed: teko::parser::Program) -> []checker::Diagnostic {
+    mut out: []checker::Diagnostic = teko::list::empty()
+    out = append_diagnostics(out, find_typed_lints(prog))
+    out = append_diagnostics(out, find_shadowing(prog))
+    out = append_diagnostics(out, redundant_cast_diagnostics(prog, parsed))
+    out
+}
+
+/**
+ * collect_lint_diagnostics — every `teko lint` diagnostic for an already front-ended REAL PROJECT
+ * (`run_cli`'s own whole-project pipeline): `collect_typed_lint_diagnostics` PLUS the unused-import
+ * lint. Unused-import is deliberately NOT part of `collect_diagnostics_for_program` (the LSP's
+ * single-document seam, below): it re-reads each `use`-owning file straight off DISK (`teko::io::
+ * read_file`, `unused_import.tks`'s own doc) to check the REST of that file for a usage — correct
+ * for a saved project file `teko lint` walks, but WRONG for an open editor buffer that may hold
+ * unsaved edits (or, in a test, a path with no file on disk at all — every `use` in it would then
+ * misread as unused, since a failed read degrades to `""`). Keeping it out of the single-document
+ * seam is the honest choice; the CLI, which always operates on real saved files, keeps it.
+ *
+ * @param prog    the checked, typed program
+ * @param parsed  the untyped, file-tagged merged program
+ * @return        every lint diagnostic, in pass order (typed lints, shadowing, redundant-cast,
+ *                unused-import)
+ */
+pub fn collect_lint_diagnostics(prog: checker::TProgram, parsed: teko::parser::Program) -> []checker::Diagnostic {
+    append_diagnostics(collect_typed_lint_diagnostics(prog, parsed), find_unused_imports(parsed))
+}
+
+/**
+ * lint_no_progress — the no-op progress hook `collect_diagnostics_for_program` hands the pre-mono
+ * checker entry point, mirroring `checker::lsp_api.tks::lsp_no_progress` exactly (a single-document
+ * diagnostics pass wants every finding, not a live "N/M items" counter).
+ *
+ * @param done   how many top-level items have been typed so far (ignored)
+ * @param total  the total top-level item count for this program (ignored)
+ */
+fn lint_no_progress(done: u64, total: u64) -> void { }
+
+/**
+ * collect_diagnostics_for_program — `collect_typed_lint_diagnostics` for a caller that only has an
+ * UNTYPED `parser::Program` (the LSP's single-open-document view, `src/lsp/diagnostics.tks::
+ * diagnose_document`) rather than an already-checked project (`teko::build::lint_frontend`'s
+ * whole-project pipeline `run_cli` uses). Types `program` the EXACT SAME way `checker::lsp_api.tks
+ * ::collect_diagnostics_structured` does — an EMPTY dependency program, the same no-op progress
+ * hook, monomorphization skipped — so a single document's lint diagnostics are derived from the
+ * SAME typed view its type-error/warning diagnostics already are; the two lists can be merged and
+ * neither one silently disagrees with the other about what the document typed to.
+ *
+ * DELIBERATELY EXCLUDES unused-import (`collect_lint_diagnostics`'s own doc explains why: it reads
+ * files off disk, wrong for an unsaved editor buffer or a path with nothing on disk at all).
+ *
+ * A type error is NOT reported here (an empty list) — `collect_diagnostics_structured` already
+ * reports it, and duplicating it through this seam would double the same finding once the LSP
+ * merges both lists (this module's own doc explains where that merge belongs).
+ *
+ * @param program  a single document (or any other already-parsed, untyped program)
+ * @return         every `teko lint` diagnostic for that program's typed view (unused-import
+ *                 excluded), or empty when it does not type-check at all
+ */
+pub fn collect_diagnostics_for_program(program: teko::parser::Program) -> []checker::Diagnostic {
+    let empty_dep = checker::TProgram { items = teko::list::empty() }
+    match checker::type_program_with_deps_pre_mono(program, empty_dep, lint_no_progress) {
+        checker::PreMono as pre => collect_typed_lint_diagnostics(pre.prog, program)
+        error => teko::list::empty()
+    }
+}
+
+/**
+ * print_diagnostics — print one `render_diagnostic` line per diagnostic, in order.
+ *
+ * @param ds  the diagnostics to print
+ */
+fn print_diagnostics(ds: []checker::Diagnostic) {
+    mut i: u64 = 0
+    loop { if i >= ds.len { break }; teko::io::println(render_diagnostic(ds[i])); i++ }
+}
+
+/**
+ * print_fixed — announce every file `--fix` rewrote.
+ *
+ * @param files  the files `fix_unused_imports` rewrote
+ */
+fn print_fixed(files: []str) {
+    mut i: u64 = 0
+    loop { if i >= files.len { break }; teko::io::println(teko::str::concat("teko lint --fix: rewrote ", files[i])); i++ }
+}
+
+/**
+ * run_cli — the `teko lint <path> [--fix]` entry point: resolve the project directory (bare arg
+ * defaults to "."), front-end it, run every lint pass, print the merged diagnostics, and — when
+ * `--fix` was passed — mechanically delete every confirmed-unused `use` line.
+ *
+ * @param args  the process argv (`args[1] == "lint"`)
+ * @return      the process exit status (0 on a successful run; non-zero only on a front-end
+ *              failure or a bad project directory)
+ */
+pub fn run_cli(args: []str) -> i32 {
+    let fix = fix_flag_of(args)
+    mut arg = teko::build::project_arg_of(args, 2)
+    if arg == "" { arg = "." }
+    let dir = teko::build::project_dir_of(arg)
+    match teko::build::lint_frontend(dir) {
+        build::LintFrontend as lf => {
+            print_diagnostics(collect_lint_diagnostics(lf.prog, lf.parsed))
+            if fix {
+                print_fixed(fix_unused_imports(lf.parsed))
+            }
+            0
+        }
+        error as e => {
+            teko::io::eprintln(teko::str::concat("teko: ", e.message))
+            1
+        }
+    }
+}

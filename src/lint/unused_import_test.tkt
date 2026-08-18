@@ -1,0 +1,198 @@
+use teko::parser
+use teko::checker
+
+// Only the PURE helpers are exercised here — `find_unused_uses`/`fix_unused_imports` themselves
+// touch real file I/O (`teko::io::read_file`/`write_file`), and no existing `.tkt` test in this
+// corpus exercises that (a deliberate, precedented gap — `teko::build`'s own `frontend_parse`/
+// `frontend_check`/`project_frontend` are likewise proven only at the integration level, never by
+// a hand-built unit test). This file's own README note (`unused_import.tks`'s header) states the
+// same honestly for the two I/O entry points; every OTHER function here — everything the I/O
+// entry points are built from — is pure and fully covered.
+
+fn ui_path(segs: []str) -> parser::Path {
+    mut out: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= segs.len { break }; out = teko::list::push(out, parser::Segment { name = segs[i] }); i++ }
+    parser::Path { segments = out }
+}
+
+fn ui_segs2(a: str, b: str) -> []str {
+    teko::list::push(teko::list::push(teko::list::empty(), a), b)
+}
+
+fn ui_bare_use(segs: []str) -> parser::UseDecl {
+    parser::UseDecl { path = ui_path(segs); has_alias = false; alias = ""; names = teko::list::empty() }
+}
+
+fn ui_aliased_use(segs: []str, alias: str) -> parser::UseDecl {
+    parser::UseDecl { path = ui_path(segs); has_alias = true; alias = alias; names = teko::list::empty() }
+}
+
+fn ui_grouped_use(segs: []str, names: []str) -> parser::UseDecl {
+    parser::UseDecl { path = ui_path(segs); has_alias = false; alias = ""; names = names }
+}
+
+// ---- last_segment / render_dotted ----
+
+#test
+/** The last segment of a multi-part path, and of a single-part one. */
+fn last_segment_reads_the_final_component() {
+    teko::assert::is_true(last_segment(ui_path(ui_segs2("teko", "io"))) == "io")
+    teko::assert::is_true(last_segment(ui_path(teko::list::push(teko::list::empty(), "solo"))) == "solo")
+}
+
+#test
+/** An empty path (never produced by the real parser) reads as "" rather than crashing. */
+fn last_segment_of_empty_path_is_empty() {
+    let empty: []parser::Segment = teko::list::empty()
+    teko::assert::is_true(last_segment(parser::Path { segments = empty }) == "")
+}
+
+#test
+/** `render_dotted` joins every segment with `::`; a single segment has no separator. */
+fn render_dotted_joins_segments() {
+    teko::assert::is_true(render_dotted(ui_path(ui_segs2("teko", "io"))) == "teko::io")
+    teko::assert::is_true(render_dotted(ui_path(teko::list::push(teko::list::empty(), "io"))) == "io")
+}
+
+// ---- bound_names ----
+
+#test
+/** A bare `use a::b` binds only its last segment. */
+fn bound_names_bare_use_is_last_segment_only() {
+    let names = bound_names(ui_bare_use(ui_segs2("teko", "io")))
+    teko::assert::is_true(names.len == 1)
+    teko::assert::is_true(names[0] == "io")
+}
+
+#test
+/** An aliased `use a::b as c` binds BOTH the alias and the original last segment (either
+    spelling can appear at a call site). */
+fn bound_names_aliased_use_binds_alias_and_original() {
+    let names = bound_names(ui_aliased_use(ui_segs2("teko", "io"), "io2"))
+    teko::assert::is_true(names.len == 2)
+    teko::assert::is_true(names[0] == "io2")
+    teko::assert::is_true(names[1] == "io")
+}
+
+#test
+/** A grouped `use a::b::[X, Y]` binds exactly the grouped names, not the path's own segment. */
+fn bound_names_grouped_use_binds_each_name() {
+    let grouped = teko::list::push(teko::list::push(teko::list::empty(), "X"), "Y")
+    let names = bound_names(ui_grouped_use(ui_segs2("teko", "collections"), grouped))
+    teko::assert::is_true(names.len == 2)
+    teko::assert::is_true(names[0] == "X")
+    teko::assert::is_true(names[1] == "Y")
+}
+
+// ---- is_use_line / strip_use_lines ----
+
+#test
+/** `is_use_line` recognizes the keyword regardless of indentation, and rejects everything else
+    (including a bare "use" with no trailing space, and an unrelated line). */
+fn is_use_line_recognizes_the_keyword() {
+    teko::assert::is_true(is_use_line("use teko::io"))
+    teko::assert::is_true(is_use_line("    use teko::io"))
+    teko::assert::is_true(is_use_line("use"))
+    teko::assert::is_false(is_use_line("fn f() { }"))
+    teko::assert::is_false(is_use_line("username = \"use\""))
+}
+
+#test
+/** `strip_use_lines` drops every `use` line and keeps everything else, in order. */
+fn strip_use_lines_drops_only_use_lines() {
+    let text = "use teko::io\nfn f() {\n    use teko::str\n    io::println(\"x\")\n}"
+    let stripped = strip_use_lines(text)
+    teko::assert::is_false(teko::str::contains(stripped, "use teko::io"))
+    teko::assert::is_false(teko::str::contains(stripped, "use teko::str"))
+    teko::assert::is_true(teko::str::contains(stripped, "io::println"))
+}
+
+// ---- any_name_used ----
+
+#test
+/** Fires true as soon as ONE candidate name occurs (substring) in the body text; empty
+    candidates are skipped; no candidate occurring yields false. */
+fn any_name_used_matches_any_candidate() {
+    let body = "let x = io2::println(\"hi\")"
+    teko::assert::is_true(any_name_used(ui_segs2("io2", "io"), body))
+    teko::assert::is_true(any_name_used(teko::list::push(teko::list::push(teko::list::empty(), ""), "io2"), body))
+    teko::assert::is_false(any_name_used(teko::list::push(teko::list::empty(), "nope"), body))
+    let empty: []str = teko::list::empty()
+    teko::assert::is_false(any_name_used(empty, body))
+}
+
+// ---- find_cached_body ----
+
+#test
+/** A cache hit returns the stored body; a miss (including an empty cache) yields `null`. */
+fn find_cached_body_hit_and_miss() {
+    let files = teko::list::push(teko::list::push(teko::list::empty(), "a.tks"), "b.tks")
+    let bodies = teko::list::push(teko::list::push(teko::list::empty(), "BODY_A"), "BODY_B")
+    match find_cached_body("b.tks", files, bodies) {
+        str as b => teko::assert::is_true(b == "BODY_B")
+        null => teko::assert::is_true(false)
+    }
+    match find_cached_body("c.tks", files, bodies) {
+        str => teko::assert::is_true(false)
+        null => teko::assert::is_true(true)
+    }
+    let empty_files: []str = teko::list::empty()
+    let empty_bodies: []str = teko::list::empty()
+    match find_cached_body("a.tks", empty_files, empty_bodies) {
+        str => teko::assert::is_true(false)
+        null => teko::assert::is_true(true)
+    }
+}
+
+// ---- line_matches_any_unused / dotteds_for_file / distinct_files ----
+
+#test
+/** A line matches iff it begins (after trimming) with `"use " ~ <one of the dotted paths>` —
+    an unrelated `use` line, or one for a DIFFERENT path, does not match. */
+fn line_matches_any_unused_anchors_right_after_use() {
+    let dotteds = ui_segs2("teko::io", "teko::str")
+    teko::assert::is_true(line_matches_any_unused("use teko::io", dotteds))
+    teko::assert::is_true(line_matches_any_unused("    use teko::str", dotteds))
+    teko::assert::is_false(line_matches_any_unused("use teko::checker", dotteds))
+    teko::assert::is_false(line_matches_any_unused("io::println(\"teko::io\")", dotteds))
+}
+
+#test
+/** `dotteds_for_file` filters to one file's own unused paths, preserving order. */
+fn dotteds_for_file_filters_by_file() {
+    let uus = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), UnusedUse { file = "a.tks"; dotted = "teko::io" }), UnusedUse { file = "b.tks"; dotted = "teko::str" }), UnusedUse { file = "a.tks"; dotted = "teko::env" })
+    let a_only = dotteds_for_file("a.tks", uus)
+    teko::assert::is_true(a_only.len == 2)
+    teko::assert::is_true(a_only[0] == "teko::io")
+    teko::assert::is_true(a_only[1] == "teko::env")
+    teko::assert::is_true(dotteds_for_file("c.tks", uus).len == 0)
+}
+
+#test
+/** `distinct_files` de-duplicates while preserving first-seen order. */
+fn distinct_files_deduplicates_in_first_seen_order() {
+    let uus = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), UnusedUse { file = "a.tks"; dotted = "x" }), UnusedUse { file = "b.tks"; dotted = "y" }), UnusedUse { file = "a.tks"; dotted = "z" })
+    let files = distinct_files(uus)
+    teko::assert::is_true(files.len == 2)
+    teko::assert::is_true(files[0] == "a.tks")
+    teko::assert::is_true(files[1] == "b.tks")
+    let empty: []UnusedUse = teko::list::empty()
+    teko::assert::is_true(distinct_files(empty).len == 0)
+}
+
+// ---- find_unused_imports rendering (over the PURE core, `find_unused_uses`'s shape) ----
+
+#test
+/** `mk_diag`-style rendering for an unused-import: no line/col, the dotted path quoted. */
+fn find_unused_imports_message_shape() {
+    // Exercises the SAME rendering `find_unused_imports` performs, without going through the
+    // file-I/O half — a direct check of the message/severity/location shape it produces per
+    // `UnusedUse` (mirrors `find_unused_imports`'s own one-line body).
+    let uu = UnusedUse { file = "src/a.tks"; dotted = "teko::io" }
+    let d = mk_diag("unused-import", uu.file, 0, 0, $"unused import `{uu.dotted}`")
+    teko::assert::is_true(d.severity == checker::DiagLevel::Hint)
+    teko::assert::is_true(d.file == "src/a.tks")
+    teko::assert::is_true(d.line == 0)
+    teko::assert::is_true(render_diagnostic(d) == "src/a.tks: lint hint: [unused-import] unused import `teko::io`")
+}
