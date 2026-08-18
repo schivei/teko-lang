@@ -96,9 +96,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   **compilação** (`--no-verify --release`, `TEKO_BACKEND=c`, `ulimit -v 6291456`) +
   fixpoint (tc2==tc3) + cross-check offline.
 - **Forward-only, sem PR:** drenar para `fix/retirement` por ff/cherry-pick.
-- **Reseed** de `bootstrap/teko.c` quando uma mudança de **compilador** altera o C
-  emitido (exige fixpoint gen2==gen3 + PROVENANCE + provenance_gate PASS).
-  Módulos-folha não exigem reseed.
+- **PROVENANCE/reseed-via-CI = LEI REVOGADA (dono, revogada há tempo; reafirmado 2026-08-18).**
+  O `provenance_gate` está **DESABILITADO** — o que os comentários do PROVENANCE dizem NÃO importa.
+  O seed do `bootstrap/teko.c` é **aceito à força** (ignorar provenance). Se o seed **falhar**, o CI
+  **falha imediatamente** — **SEM** fallback pra versão publicada antiga. **NÃO** criar nada novo no
+  CI pra satisfazer provenance.
+- **Reseed** de `bootstrap/teko.c` quando mudança de **compilador** altera o C emitido: harvest local
+  (fixpoint gen2==gen3), sem gate de provenance. **NÃO reseedar no meio: LIMPEZA PRIMEIRO, reseed só no
+  fim, tudo junto** (dono 2026-08-18). Módulos-folha não exigem reseed.
 - **Teko é um monólito e precisa cross-compilar.** A perna C emite **UM** `teko.c`
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
