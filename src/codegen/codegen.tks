@@ -2208,8 +2208,28 @@ fn cg_cast_target_is_variant(prog: CgProg, t: @Type()): bool {
     }
 }
 
+fn cg_is_str_type(t: @Type()): bool { match t { checker::Str => true; _ => false } }
+
+fn cg_is_byte_slice_type(t: @Type()): bool {
+    match t { checker::Slice as sl => match sl.element { checker::Byte => true; _ => false }; _ => false }
+}
+
+fn emit_bytes_str_reinterpret(buf: []byte, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var to_bytes = cg_is_byte_slice_type(e.type)
+    var src_c = if to_bytes { "({ tk_str _tkbsr = (" } else { "({ tk_slice_byte _tkbsr = (" }
+    var tail = if to_bytes { "); (tk_slice_byte){ (tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" } else { "); (tk_str){ (const tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" }
+    var out = cb(buf, src_c)
+    out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, tail)
+}
+
+fn cg_is_bytes_str_reinterpret(dst: @Type(), src: @Type()): bool {
+    (cg_is_str_type(src) && cg_is_byte_slice_type(dst)) || (cg_is_byte_slice_type(src) && cg_is_str_type(dst))
+}
+
 fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var inner = c.expr
+    if cg_is_bytes_str_reinterpret(e.type, inner.type) { return emit_bytes_str_reinterpret(buf, prog, e, inner, escaping, regions, fn_body, dctx) }
     if cg_cast_target_is_variant(prog, e.type) { return emit_as(buf, prog, e.type, inner, escaping, regions, fn_body, dctx) }
     var dst_opt = match e.type { checker::Prim as p => p.kind; _ => checker::PrimKind::Bool }
     var src_opt = match inner.type { checker::Prim as p => p.kind; _ => checker::PrimKind::Bool }
@@ -4333,6 +4353,10 @@ fn emit_as_r(buf: []byte, prog: CgProg, ret_type: @Type(), expected: @Type(), va
 }
 
 fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: @Type(), expected: @Type(), value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    if cg_is_bytes_str_reinterpret(expected, value.type) {
+        var reint = checker::TExpr { kind = checker::TCast { expr = value }; type = expected; line = value.line; col = value.col }
+        return emit_bytes_str_reinterpret(buf, prog, reint, value, escaping, regions, fn_body, dctx)
+    }
     match expected {
         checker::Reference => {
             match value.type {

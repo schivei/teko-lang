@@ -4255,6 +4255,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr): LoweredFat | error {
     match e.kind {
         checker::TStrLit as s => lower_str_lit_fat(ctx, e, s)
         checker::TByteStrLit as bs => lower_bytestr_lit_fat(ctx, e, bs)
+        checker::TCast as c => lower_fat_cast(ctx, e, c)
         checker::TArrayLit as al => lower_array_lit_fat(ctx, e, al)
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
@@ -4855,6 +4856,21 @@ fn lower_str_lit(ctx: LowerCtx, e: checker::TExpr, s: checker::TStrLit): Lowered
 
 fn lower_bytestr_lit_fat(ctx: LowerCtx, e: checker::TExpr, s: checker::TByteStrLit): LoweredFat {
     lower_str_bytes_fat(ctx, s.text, e.line, e.col)
+}
+
+fn lower_is_str_or_byte_slice(t: @Type()): bool {
+    match t {
+        checker::Str => true
+        checker::Slice as sl => match sl.element { checker::Byte => true; _ => false }
+        _ => false
+    }
+}
+
+fn lower_fat_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast): LoweredFat | error {
+    if lower_is_str_or_byte_slice(e.type) && lower_is_str_or_byte_slice(c.expr.type) {
+        return lower_fat_expr(ctx, c.expr)
+    }
+    error { message = teko::str::concat("native backend N1: fat-pointer cast `", texpr_kind_name(e), "` not yet lowered (N2)") }
 }
 
 fn lower_bytestr_lit(ctx: LowerCtx, e: checker::TExpr, s: checker::TByteStrLit): Lowered {

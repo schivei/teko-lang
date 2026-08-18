@@ -3685,6 +3685,7 @@ fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable): TExpr | e
 fn bind_value_into_annotation(v: TExpr, raw: parser::Expr, ann: @Type(), table: TypeTable): TExpr | error {
     match struct_iface_named_stop(v.type, ann, table) { error as se => return se; null => { } }
     match widen_value_into(v, ann) { TExpr as w => return w; null => { } }
+    match bytes_str_reinterpret(v, ann) { TExpr as w => return w; null => { } }
     match annotated_literal_ok(raw, ann) {
         null => retype_literal(v, ann)
         error as e => teko::error::err_typed(e, type_render(ann), type_render(v.type))
@@ -4306,9 +4307,21 @@ fn adopt_sentinel_slice_type(v: TExpr, target: @Type()): TExpr {
     TExpr { kind = v.kind; type = target; line = v.line; col = v.col }
 }
 
+fn bytes_str_is_str(t: @Type()): bool { match t { Str => true; _ => false } }
+
+fn bytes_str_is_byte_slice(t: @Type()): bool {
+    match t { Slice as sl => match sl.element { Byte => true; _ => false }; _ => false }
+}
+
+fn bytes_str_reinterpret(v: TExpr, target: @Type()): TExpr | null {
+    if !bytes_str_convertible(v.type, target) { return null }
+    TExpr { kind = TCast { expr = v }; type = target; line = v.line; col = v.col }
+}
+
 fn coerce_value_into(v: TExpr, target: @Type(), table: TypeTable, what: str): TExpr | error {
     if assignable_to(v.type, target, table) { return v }
     match widen_value_into(v, target) { TExpr as w => return w; null => { } }
+    match bytes_str_reinterpret(v, target) { TExpr as w => return w; null => { } }
     if literal_adopts(v, target) { return retype_literal(v, target) }
     teko::error::err_typed(error { message = what }, type_render(target), type_render(v.type))
 }
@@ -4320,6 +4333,7 @@ fn coerce_argument_into(a: TExpr, pt: @Type(), table: TypeTable): TExpr | error 
     }
     match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
     match widen_value_into(a, pt) { TExpr as w => return w; null => { } }
+    match bytes_str_reinterpret(a, pt) { TExpr as w => return w; null => { } }
     if literal_adopts(a, pt) { return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col } }
     teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type))
 }
@@ -4604,8 +4618,12 @@ fn retype_returns_in_expr(e: TExpr, ret: @Type(), table: TypeTable): TExpr {
     }
 }
 
+fn bytes_str_convertible(from: @Type(), to: @Type()): bool {
+    (bytes_str_is_str(from) && bytes_str_is_byte_slice(to)) || (bytes_str_is_byte_slice(from) && bytes_str_is_str(to))
+}
+
 fn yields_declared_return(value: TExpr, ret: @Type(), table: TypeTable): bool {
-    assignable_to(value.type, ret, table) || numeric_widens_implicitly(value.type, ret) || literal_adopts(value, ret)
+    assignable_to(value.type, ret, table) || numeric_widens_implicitly(value.type, ret) || literal_adopts(value, ret) || bytes_str_convertible(value.type, ret)
 }
 
 fn check_return_stmt(s: @TStatement(), ret: @Type(), table: TypeTable): error | null {
