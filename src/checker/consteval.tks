@@ -90,6 +90,278 @@ fn collect_module_consts(items: []@TItem()): []TConstDecl {
 }
 
 /**
+ * ConstQName — a qualified const name `(namespace, name)`, the key identifying a
+ * target-conditional-const family across the consteval fold-exclusion and the codegen `#if` ladder
+ * (§16). Two `TConstDecl`s share a family iff they agree on BOTH fields.
+ *
+ * @field namespace  the declaring namespace
+ * @field name       the const identifier
+ * @since §16
+ */
+pub type ConstQName = struct {
+    /** the declaring namespace. */
+    namespace: str
+    /** the const identifier. */
+    name: str
+}
+
+/**
+ * tg_axis_os_vocab — the canonical OS spellings the target-guard satisfiability scan ranges over
+ * (`linux`, `macos`, `windows`), matching `target_os`'s output space. Used only to decide arm
+ * disjointness; the arch ladder itself is emitted from the surviving guards, not from this list.
+ *
+ * @return  the canonical OS names
+ * @since §16
+ */
+fn tg_axis_os_vocab(): []str {
+    teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "linux"), "macos"), "windows")
+}
+
+/**
+ * tg_axis_arch_vocab — the canonical arch spellings the target-guard satisfiability scan ranges over
+ * (`x86_64`, `arm64`), matching `target_arch`'s output space.
+ *
+ * @return  the canonical arch names
+ * @since §16
+ */
+fn tg_axis_arch_vocab(): []str {
+    teko::list::push(teko::list::push(teko::list::empty(), "x86_64"), "arm64")
+}
+
+/**
+ * tg_atoms_are_target — true iff EVERY atom of `p` is an os/arch `PEq` (no `PFlag`, no unknown axis),
+ * composed with `PAnd`/`POr`/`PNot`. A nested `PTrue` is admitted (it carries no flag); the top-level
+ * "not `PTrue`" requirement is enforced by `pred_is_target_guard`.
+ *
+ * @param p  the predicate to inspect
+ * @return   true iff `p`'s atoms are all os/arch equalities
+ * @since §16
+ */
+fn tg_atoms_are_target(p: parser::Pred): bool {
+    match p.kind {
+        parser::PTrue => true
+        parser::PEq as e => e.axis == "os" || e.axis == "arch"
+        parser::PFlag => false
+        parser::PNot as n => tg_atoms_are_target(n.inner)
+        parser::PAnd as a => tg_atoms_are_target(a.left) && tg_atoms_are_target(a.right)
+        parser::POr as o => tg_atoms_are_target(o.left) && tg_atoms_are_target(o.right)
+    }
+}
+
+/**
+ * pred_is_target_guard — true iff `p`'s atoms are all os/arch `PEq` (no build flag) AND `p` is not
+ * `PTrue`. A target guard is the shape a §16 target-conditional const's arm carries (`#os`/`#arch`);
+ * an unguarded const (`PTrue`) or one mentioning a build flag is not.
+ *
+ * @param p  the predicate to classify
+ * @return   true iff `p` is a non-trivial os/arch guard
+ * @since §16
+ */
+pub fn pred_is_target_guard(p: parser::Pred): bool {
+    match p.kind {
+        parser::PTrue => false
+        _ => tg_atoms_are_target(p)
+    }
+}
+
+/**
+ * tg_eval — evaluate a target guard against a concrete `(os, arch)` point, the satisfiability probe
+ * `preds_target_disjoint` folds over the finite grid. A build flag (which a target guard never
+ * carries) evaluates false.
+ *
+ * @param p     the predicate to evaluate
+ * @param os    the concrete OS coordinate
+ * @param arch  the concrete arch coordinate
+ * @return      true iff `p` holds at `(os, arch)`
+ * @since §16
+ */
+fn tg_eval(p: parser::Pred, os: str, arch: str): bool {
+    match p.kind {
+        parser::PTrue => true
+        parser::PEq as e => if e.axis == "os" { os == e.value } else if e.axis == "arch" { arch == e.value } else { false }
+        parser::PFlag => false
+        parser::PNot as n => !tg_eval(n.inner, os, arch)
+        parser::PAnd as a => tg_eval(a.left, os, arch) && tg_eval(a.right, os, arch)
+        parser::POr as o => tg_eval(o.left, os, arch) || tg_eval(o.right, os, arch)
+    }
+}
+
+/**
+ * preds_target_disjoint — true iff NO `(os, arch)` target satisfies both `a` and `b`, decided by an
+ * exhaustive scan over the finite `{os} × {arch}` grid (KISS — the vocabulary is tiny). Two arms of a
+ * target-conditional const must be pairwise disjoint; a non-disjoint pair is an authoring error the
+ * family classifier rejects (it falls back to ordinary const handling rather than a ladder).
+ *
+ * @param a  the first guard
+ * @param b  the second guard
+ * @return   true iff `a` and `b` share no satisfying target
+ * @since §16
+ */
+pub fn preds_target_disjoint(a: parser::Pred, b: parser::Pred): bool {
+    var oss = tg_axis_os_vocab()
+    var ars = tg_axis_arch_vocab()
+    var i: u64 = 0
+    loop {
+        if i >= oss.len { break }
+        var j: u64 = 0
+        loop {
+            if j >= ars.len { break }
+            if tg_eval(a, oss[i], ars[j]) && tg_eval(b, oss[i], ars[j]) { return false }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * cond_family_arms — every `TConstDecl` in `consts` sharing the `(ns, name)` family key, in
+ * declaration order. The unit `is_target_conditional_family` inspects for arm count and disjointness.
+ *
+ * @param consts  the module-level consts to scan
+ * @param ns      the family namespace
+ * @param name    the family name
+ * @return        the arms of the `(ns, name)` family
+ * @since §16
+ */
+fn cond_family_arms(consts: []TConstDecl, ns: str, name: str): []TConstDecl {
+    var out: []TConstDecl = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= consts.len { break }
+        if consts[i].namespace == ns && consts[i].name == name { out = teko::list::push(out, consts[i]) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * arms_all_target_guards — true iff every arm in `arms` carries a target guard (`pred_is_target_guard`).
+ *
+ * @param arms  the family's arms
+ * @return      true iff all arms are target-guarded
+ * @since §16
+ */
+fn arms_all_target_guards(arms: []TConstDecl): bool {
+    var i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        if !pred_is_target_guard(arms[i].guard) { return false }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * arms_pairwise_disjoint — true iff every unordered pair of arms in `arms` is target-disjoint
+ * (`preds_target_disjoint`), so at most one arm survives on any target.
+ *
+ * @param arms  the family's arms
+ * @return      true iff the arms partition the target grid without overlap
+ * @since §16
+ */
+fn arms_pairwise_disjoint(arms: []TConstDecl): bool {
+    var a: u64 = 0
+    loop {
+        if a >= arms.len { break }
+        var b = a + 1
+        loop {
+            if b >= arms.len { break }
+            if !preds_target_disjoint(arms[a].guard, arms[b].guard) { return false }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    true
+}
+
+/**
+ * is_target_conditional_family — true iff the `(ci.namespace, ci.name)` family has ≥2 arms, ALL
+ * target-guarded and PAIRWISE DISJOINT: the §16 definition of a target-conditional const. A single
+ * guarded arm (e.g. `PROT_READ` under one `#os("linux")`) is not conditional; a non-disjoint pair is
+ * an authoring error and is NOT treated as a ladder (it falls back to ordinary handling).
+ *
+ * @param consts  the module-level consts
+ * @param ci      the arm whose family is being classified
+ * @return        true iff `ci`'s family is target-conditional
+ * @since §16
+ */
+fn is_target_conditional_family(consts: []TConstDecl, ci: TConstDecl): bool {
+    var arms = cond_family_arms(consts, ci.namespace, ci.name)
+    if arms.len < 2 { return false }
+    if !arms_all_target_guards(arms) { return false }
+    arms_pairwise_disjoint(arms)
+}
+
+/**
+ * is_cond_const — membership of `(ns, name)` in a precomputed `cond_const_names` set.
+ *
+ * @param ns    the candidate namespace
+ * @param name  the candidate name
+ * @param set   the precomputed target-conditional-const family keys
+ * @return      true iff `(ns, name)` is a target-conditional const
+ * @since §16
+ */
+pub fn is_cond_const(ns: str, name: str, set: []ConstQName): bool {
+    var i: u64 = 0
+    loop {
+        if i >= set.len { break }
+        if set[i].namespace == ns && set[i].name == name { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * cond_const_names — the `(namespace, name)` keys of every target-conditional-const family among a
+ * program's items (§16): a `(ns, name)` with ≥2 pairwise-disjoint target-guard arms. Deduplicated, in
+ * first-declaration order — deterministic, so the codegen ladder and the consteval fold-exclusion
+ * agree and the self-emission fixpoint holds. A program with no such family yields the empty list (the
+ * dormant, byte-stable case).
+ *
+ * @param items  the typed program's top-level items
+ * @return       the target-conditional-const family keys
+ * @since §16
+ */
+pub fn cond_const_names(items: []@TItem()): []ConstQName {
+    var consts = collect_module_consts(items)
+    var out: []ConstQName = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= consts.len { break }
+        var ci = consts[i]
+        if is_target_conditional_family(consts, ci) && !is_cond_const(ci.namespace, ci.name, out) {
+            out = teko::list::push(out, ConstQName { namespace = ci.namespace; name = ci.name })
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * drop_cond_consts — the module consts of `consts` with every target-conditional-const arm REMOVED
+ * (its `(ns, name)` is in `cond`). Feeding this filtered set to `const_dep_order`/`build_scalar_map`
+ * keeps the duplicate `(ns, name)` arms out of the dependency graph and the scalar substitution table,
+ * so a target-conditional const's references are NOT inlined (they survive as `TVar` for codegen to
+ * lower to the `#if`-laddered symbol) and its decls are NOT dropped (§16).
+ *
+ * @param consts  the module-level consts
+ * @param cond    the target-conditional-const family keys (`cond_const_names`)
+ * @return        the consts with every target-conditional arm removed
+ * @since §16
+ */
+fn drop_cond_consts(consts: []TConstDecl, cond: []ConstQName): []TConstDecl {
+    var out: []TConstDecl = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= consts.len { break }
+        if !is_cond_const(consts[i].namespace, consts[i].name, cond) { out = teko::list::push(out, consts[i]) }
+        i = i + 1
+    }
+    out
+}
+
+/**
  * build_scalar_map — build the crumb-5 substitution table from the dependency-ordered consts (#594
  * crumb 5). Walked in dependency order so a scalar const's initializer is collapsed against the
  * ALREADY-collapsed initializers of the consts it references before it is itself added — nested
@@ -444,7 +716,7 @@ fn rewrite_function(f: TFunction, map: ScalarConstMap): TFunction {
  * @since #594
  */
 fn rewrite_const_init(cd: TConstDecl, map: ScalarConstMap): TConstDecl {
-    TConstDecl { name = cd.name; namespace = cd.namespace; ty = cd.ty; init = inline_rw_expr(cd.init, map); vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col }
+    TConstDecl { name = cd.name; namespace = cd.namespace; ty = cd.ty; init = inline_rw_expr(cd.init, map); vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col; guard = cd.guard }
 }
 
 /**
@@ -922,7 +1194,7 @@ pub fn canonicalize_const_ctors(e: TExpr, ctors: []TFunction): TExpr {
  * @since #comptime-fold
  */
 pub fn build_module_agg_map(prog: TProgram): AggConstMap | error {
-    var consts = collect_module_consts(prog.items)
+    var consts = drop_cond_consts(collect_module_consts(prog.items), cond_const_names(prog.items))
     if consts.len == 0 { return ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() } }
     var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
     build_aggregate_map(ordered)
@@ -941,7 +1213,7 @@ pub fn build_module_agg_map(prog: TProgram): AggConstMap | error {
  * @since #594
  */
 fn substitute_module_consts(prog: TProgram): TProgram | error {
-    var consts = collect_module_consts(prog.items)
+    var consts = drop_cond_consts(collect_module_consts(prog.items), cond_const_names(prog.items))
     if consts.len == 0 { return prog }
     var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
     var smap = build_scalar_map(ordered)
@@ -1004,7 +1276,7 @@ fn build_aggregate_map(ordered: []TConstDecl): ScalarConstMap {
  * @since #594 Tier-A follow-up
  */
 pub fn collapse_agg_const_decls(prog: TProgram): TProgram | error {
-    var consts = collect_module_consts(prog.items)
+    var consts = drop_cond_consts(collect_module_consts(prog.items), cond_const_names(prog.items))
     if consts.len == 0 { return prog }
     var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
     var amap = build_aggregate_map(ordered)
@@ -1050,7 +1322,7 @@ fn collapse_agg_const_decl(cd: TConstDecl, amap: ScalarConstMap): @TItem() {
     TConstDecl {
         name = cd.name; namespace = cd.namespace; ty = cd.ty
         init = inline_rw_expr(cd.init, amap)
-        vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col
+        vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col; guard = cd.guard
     }
 }
 
@@ -1105,7 +1377,7 @@ fn inline_place_item_agg(out: []@TItem(), it: @TItem(), map: ScalarConstMap): []
  * @since #594
  */
 pub fn inline_aggregate_consts(prog: TProgram): TProgram | error {
-    var consts = collect_module_consts(prog.items)
+    var consts = drop_cond_consts(collect_module_consts(prog.items), cond_const_names(prog.items))
     if consts.len == 0 { return prog }
     var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
     var amap = build_aggregate_map(ordered)

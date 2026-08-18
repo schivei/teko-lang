@@ -586,14 +586,23 @@ fn write_tfunction(buf: []byte, t: StrTable, f: checker::TFunction): []byte {
  * Serialize a module-level `TConstDecl` @TItem() (#594 crumb 8): name + namespace (interned) +
  * value type + typed initializer + vis (u8) + has_doc (u8) + doc + line + col — a
  * struct-of-existing-codecs mirroring `write_tfunction`. The typed initializer rides in full so a
- * consuming module inlines a `pub`/`exp` const identically, with no cross-module data symbol.
+ * consuming module inlines a `pub`/`exp` const identically, with no cross-module data symbol. A
+ * target-conditional const (a `guard` other than `PTrue`, §16) HONEST-STOPS here: no `Pred` bytes are
+ * serialized, and such a const may not cross a module boundary yet (the compiler build merges all
+ * `src/*.tks` into one program, so `teko::sys` and its consumers share a program — no `.tkb`
+ * boundary; a real dependency needing this is a future, REPORTED issue).
  *
  * @param buf  the output buffer to append to
  * @param t    the string table (all const strings interned by `collect_tconstdecl`)
  * @param c    the typed module const to serialize
  * @return     `buf` with the module const appended
+ * @throws     when `c.guard` is a non-`PTrue` target guard (a target-conditional const cannot yet be exported)
  */
-fn write_tconstdecl(buf: []byte, t: StrTable, c: checker::TConstDecl): []byte {
+fn write_tconstdecl(buf: []byte, t: StrTable, c: checker::TConstDecl): []byte | error {
+    match c.guard.kind {
+        parser::PTrue => { }
+        _ => return error { message = $"a target-conditional const ('{c.namespace}::{c.name}') cannot cross a module boundary yet (§16)" }
+    }
     var b = write_u32(write_u32(buf, st_find(t, c.name)), st_find(t, c.namespace))
     b = write_type(b, t, c.ty)
     b = write_texpr(b, t, c.init)
@@ -612,8 +621,9 @@ fn write_tconstdecl(buf: []byte, t: StrTable, c: checker::TConstDecl): []byte {
  * @param t    the string table (item strings already interned)
  * @param it   the typed item to serialize
  * @return     `buf` with the tag byte + the item's payload appended
+ * @throws     when a `TConstDecl` is a target-conditional const (`write_tconstdecl`)
  */
-fn write_titem(buf: []byte, t: StrTable, it: @TItem()): []byte {
+fn write_titem(buf: []byte, t: StrTable, it: @TItem()): []byte | error {
     match it {
         checker::TFunction as f => write_tfunction(write_u8(buf, 0), t, f)
         parser::TypeDecl as d => write_typedecl(write_u8(buf, 1), t, d)
@@ -623,11 +633,25 @@ fn write_titem(buf: []byte, t: StrTable, it: @TItem()): []byte {
     }
 }
 
-// a TProgram: u64 count + each item.
-fn write_program(buf: []byte, t: StrTable, prog: checker::TProgram): []byte {
+/**
+ * write_program — serialize a whole typed `TProgram`: a `u64` item count followed by each item
+ * (`write_titem`). Propagates the `write_tconstdecl` honest-stop when the program carries a
+ * target-conditional const bound for a `.tkb` it may not yet cross (§16).
+ *
+ * @param buf   the output buffer to append to
+ * @param t     the string table (all program strings already interned)
+ * @param prog  the typed program to serialize
+ * @return      `buf` with the item count and every item's payload appended
+ * @throws      when an item is a target-conditional const (`write_titem`)
+ */
+fn write_program(buf: []byte, t: StrTable, prog: checker::TProgram): []byte | error {
     var b = write_u64(buf, prog.items.len)
     var i = 0
-    loop { if i >= prog.items.len { break }; b = write_titem(b, t, prog.items[i]); i++ }
+    loop {
+        if i >= prog.items.len { break }
+        b = match write_titem(b, t, prog.items[i]) { []byte as o => o; error as e => return e }
+        i++
+    }
     b
 }
 

@@ -144,6 +144,51 @@ fn build_flags(m: Manifest): []str {
     teko::list::empty()
 }
 
+/**
+ * cc_supported_targets — the CLOSED whitelist of `(os, arch)` the toolchain builds for (owner ruling
+ * 2026-08-17): `windows-x86_64`, `linux-x86_64`, `linux-arm64`, `macos-arm64`, each as an
+ * `"<os>-<arch>"` key. The SINGLE point of truth — `cc_validate_target` reads it, so widening the
+ * matrix is a one-line edit here. Closed today ("futuramente talvez, mas não agora"); do NOT expand
+ * without an owner ruling.
+ *
+ * @return  the supported `(os, arch)` pairs, each as an `"<os>-<arch>"` key
+ * @since §16
+ */
+fn cc_supported_targets(): []str {
+    var out: []str = teko::list::empty()
+    out = teko::list::push(out, "windows-x86_64")
+    out = teko::list::push(out, "linux-x86_64")
+    out = teko::list::push(out, "linux-arm64")
+    out = teko::list::push(out, "macos-arm64")
+    out
+}
+
+/**
+ * cc_validate_target — FAIL-FAST rejection of an unsupported `(os, arch)` combination BEFORE the
+ * build does any work (prune/emit/`cc`), per the owner ruling: a non-whitelisted target "nem tenta
+ * fazer o build". Called at the top of `frontend_check`, before `prune_cc`. Returns the honest-stop
+ * naming the offending pair and the whole supported set; returns `null` for a whitelisted pair. This
+ * is layer (a) of the two-layer defense — layer (b) is the arch ladders' `#else #error` in the
+ * emitted C. It also subsumes the `"unknown"` os/arch leak: an `"unknown"`-bearing pair is not in the
+ * whitelist, so it is rejected here with a clear message rather than silently pruning to nothing.
+ *
+ * @param os    the resolved target OS (`target_os(manifest)`)
+ * @param arch  the resolved target arch (`target_arch(manifest)`)
+ * @return      null when `(os, arch)` is supported, else the honest-stop error
+ * @since §16
+ */
+fn cc_validate_target(os: str, arch: str): null | error {
+    var key = teko::str::concat(os, teko::str::concat("-", arch))
+    var supported = cc_supported_targets()
+    var i: u64 = 0
+    loop {
+        if i >= supported.len { break }
+        if supported[i] == key { return null }
+        i = i + 1
+    }
+    error { message = $"combinação SO-ARCH não suportada: {os}-{arch}; suportadas: windows-x86_64, linux-x86_64, linux-arm64, macos-arm64" }
+}
+
 // =========================================================================
 // C7.10 — DEP LOADING: load each dep's .tkl package, extract its .tkb, deserialize
 // the TProgram, and return all dep items concatenated. The dep items are prepended to
@@ -627,7 +672,8 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
  * @return       the checked program and manifest, or the first error
  */
 fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Frontend | error {
-    var selected = prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = build_flags(pf.manifest) })
+    match cc_validate_target(target_os(pf.manifest), target_arch(pf.manifest)) { error as e => return e; null => { } }
+    var selected = match prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = build_flags(pf.manifest) }, PruneMode { keep_target_arms = c_backend_selected() }) { parser::Program as p => p; error as e => return e }
 
     var expanded = match parser::expand_macros_syntactic(selected) { parser::Program as p => p; error as e => return e }
 
@@ -2664,7 +2710,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
             error as e => return fail(dir, e.message)
         }
         // .tkb — whole-program typed tree (C7.16 codec)
-        var tkb_bytes = emit::serialize_program(prog)
+        var tkb_bytes = match emit::serialize_program(prog) { []byte as b => b; error as e => return fail(dir, e.message) }
         // .tsym — symbol map (best-effort; always added when available)
         var tsym_str = codegen::tk_emit_tsym(prog)
         var tsym_bytes: []byte = teko::list::empty()

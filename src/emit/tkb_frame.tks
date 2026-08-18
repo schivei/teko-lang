@@ -449,12 +449,20 @@ fn serialize(te: checker::TExpr): []byte {
     append_bytes(out, body)
 }
 
-/** (C7.16) serialize a whole typed PROGRAM. Same frame, VERSION 3 (program tree) so the reader
-    can't confuse it with a version-1 single-expr `.tkb` nor an older v2 that lacked call_ns /
-    type_params / type_constraints / method fidelity (#165). The KEYSTONE for `.tkl` packaging. */
-fn serialize_program(prog: checker::TProgram): []byte {
+/**
+ * serialize_program — serialize a whole typed PROGRAM (C7.16). Same frame, VERSION 3 (program tree)
+ * so the reader can't confuse it with a version-1 single-expr `.tkb` nor an older v2 that lacked
+ * call_ns / type_params / type_constraints / method fidelity (#165). The KEYSTONE for `.tkl`
+ * packaging. Propagates the `write_program` honest-stop when the program carries a target-conditional
+ * const that may not yet cross a `.tkb` boundary (§16).
+ *
+ * @param prog  the typed program to serialize
+ * @return      the framed `.tkb` bytes (magic, version, FNV-1a hash, body)
+ * @throws      when the program carries a target-conditional const (`write_program`)
+ */
+fn serialize_program(prog: checker::TProgram): []byte | error {
     var table = collect_program(st_empty(), prog)
-    var body = write_program(write_strtable(teko::list::empty(), table), table, prog)
+    var body = match write_program(write_strtable(teko::list::empty(), table), table, prog) { []byte as o => o; error as e => return e }
     var h = fnv1a(body, 0)
     var out: []byte = teko::list::empty()
     out = write_u8(out, b'T')

@@ -187,7 +187,172 @@ fn parse_pred_axis_eq(tokens: []lexer::Token, pos: u64, axis: str): Parsed<Pred>
     if !is_kind_at(tokens, pos + 2, lexer::TokenKind::Str) {
         return err_at(tokens, pos + 2, "expected a quoted value after `==` in a `#if` axis comparison")
     }
+    match cc_axis_value_diag(axis, tokens[pos + 2].text, tokens[pos + 2].line, tokens[pos + 2].col) { error as e => return e; null => { } }
     Parsed<Pred> { node = Pred { kind = PEq { axis = axis; value = tokens[pos + 2].text } }; next = pos + 3 }
+}
+
+/**
+ * cc_axis_canon_values — the canonical spellings a §16 `#os`/`#arch`/`#if(axis==…)` value must match,
+ * per axis: `os` ∈ {linux, macos, windows}, `arch` ∈ {x86_64, arm64} — the exact vocabulary
+ * `target_os`/`target_arch` canonicalize to and `prune_cc` compares against. Any other axis has no
+ * vocabulary (the empty list), so `cc_axis_value_diag` never rejects a value declared on it.
+ *
+ * @param axis  the axis being validated — `"os"` | `"arch"`
+ * @return      the canonical values for `axis`, or the empty list for an unrecognized axis
+ * @since §16
+ */
+fn cc_axis_canon_values(axis: str): []str {
+    if axis == "os" { return teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "linux"), "macos"), "windows") }
+    if axis == "arch" { return teko::list::push(teko::list::push(teko::list::empty(), "x86_64"), "arm64") }
+    teko::list::empty()
+}
+
+/**
+ * cc_str_list_has — membership of `needle` in the string list `xs`, a total linear scan (the
+ * parser-local twin of `teko::build`'s `str_list_contains`, kept here so `cc_axis_value_diag` needs
+ * no cross-module dependency).
+ *
+ * @param xs      the string list to scan
+ * @param needle  the string sought
+ * @return        true iff some element of `xs` equals `needle`
+ * @since §16
+ */
+fn cc_str_list_has(xs: []str, needle: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == needle { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * cc_axis_alias_hint — the CANONICAL value a well-known misspelling/alias of an axis value maps to
+ * (`aarch64`→`arm64`, `amd64`/`x64`/`x86-64`→`x86_64`, `darwin`/`apple`/`osx`→`macos`,
+ * `win`/`win32`/`win64`/`mingw`/`w64`→`windows`), or "" when no explicit alias is known (the caller
+ * then falls back to the nearest canonical value by edit distance). Captures the exact aliases §16
+ * enumerates so the diagnostic that would have caught the original `#arch("aarch64")` silent prune
+ * names the intended spelling directly.
+ *
+ * @param axis   the axis being validated — `"os"` | `"arch"`
+ * @param value  the unrecognized value the source supplied
+ * @return       the canonical spelling this value aliases, or "" when none is known
+ * @since §16
+ */
+fn cc_axis_alias_hint(axis: str, value: str): str {
+    if axis == "arch" {
+        if value == "aarch64" { return "arm64" }
+        if value == "amd64" || value == "x64" || value == "x86-64" { return "x86_64" }
+    }
+    if axis == "os" {
+        if value == "darwin" || value == "apple" || value == "osx" || value == "macosx" { return "macos" }
+        if value == "win" || value == "win32" || value == "win64" || value == "mingw" || value == "w64" { return "windows" }
+    }
+    ""
+}
+
+/**
+ * cc_min3 — the least of three `u64`s, the relaxation step of the edit-distance recurrence.
+ *
+ * @param a  the deletion candidate
+ * @param b  the insertion candidate
+ * @param c  the substitution candidate
+ * @return   the minimum of `a`, `b`, `c`
+ * @since §16
+ */
+fn cc_min3(a: u64, b: u64, c: u64): u64 {
+    var m = if a < b { a } else { b }
+    if c < m { c } else { m }
+}
+
+/**
+ * cc_edit_distance — the Levenshtein edit distance between the byte strings `a` and `b`, a rolling
+ * two-row dynamic program (only reads index into the previous/current row; no index-assign, W15).
+ * Used to pick the nearest canonical axis value for a "did you mean" hint when no explicit alias
+ * matches, so a plain typo like `linex` still points at `linux`.
+ *
+ * @param a  the first string
+ * @param b  the second string
+ * @return   the minimum number of single-character insert/delete/substitute edits taking `a` to `b`
+ * @since §16
+ */
+fn cc_edit_distance(a: str, b: str): u64 {
+    var m = a.len
+    var n = b.len
+    var prev: []u64 = teko::list::empty()
+    var j: u64 = 0
+    loop {
+        if j > n { break }
+        prev = teko::list::push(prev, j)
+        j = j + 1
+    }
+    var i: u64 = 1
+    loop {
+        if i > m { break }
+        var curr: []u64 = teko::list::push(teko::list::empty(), i)
+        var k: u64 = 1
+        loop {
+            if k > n { break }
+            var cost = if a[i - 1] == b[k - 1] { 0 to u64 } else { 1 to u64 }
+            curr = teko::list::push(curr, cc_min3(prev[k] + 1, curr[k - 1] + 1, prev[k - 1] + cost))
+            k = k + 1
+        }
+        prev = curr
+        i = i + 1
+    }
+    prev[n]
+}
+
+/**
+ * cc_nearest_canon — the canonical axis value closest to `value` by `cc_edit_distance`, the fallback
+ * "did you mean" suggestion when `cc_axis_alias_hint` has no explicit entry. Returns "" only for an
+ * axis with no vocabulary (which `cc_axis_value_diag` never reaches).
+ *
+ * @param axis   the axis being validated — `"os"` | `"arch"`
+ * @param value  the unrecognized value the source supplied
+ * @return       the nearest canonical spelling, or "" for an axis with no vocabulary
+ * @since §16
+ */
+fn cc_nearest_canon(axis: str, value: str): str {
+    var cands = cc_axis_canon_values(axis)
+    var best = ""
+    var bestd: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= cands.len { break }
+        var d = cc_edit_distance(value, cands[i])
+        if best == "" || d < bestd {
+            best = cands[i]
+            bestd = d
+        }
+        i = i + 1
+    }
+    best
+}
+
+/**
+ * cc_axis_value_diag — validate a `#os`/`#arch`/`#if(axis==…)` VALUE against the canonical vocabulary
+ * (`cc_axis_canon_values`), returning a located "did you mean" error for a misspelling
+ * (`aarch64`→`arm64`, `darwin`→`macos`, or the nearest canonical value for a plain typo like
+ * `linex`→`linux`) and `null` for a recognized value. Prevents the SILENT prune-to-nothing that hid
+ * the §16 `#arch("aarch64")` bug from every x86_64-local validation. An unrecognized axis name has no
+ * vocabulary and is accepted here (the prune resolves it to false).
+ *
+ * @param axis   the axis being compared — `"os"` | `"arch"`
+ * @param value  the quoted value the source supplied
+ * @param line   the value token's 1-based line (for the located diagnostic)
+ * @param col    the value token's 1-based column
+ * @return       null when `value` is canonical, else a located parse error naming the nearest alias
+ * @since §16
+ */
+fn cc_axis_value_diag(axis: str, value: str, line: u32, col: u32): null | error {
+    var canon = cc_axis_canon_values(axis)
+    if canon.len == 0 { return null }
+    if cc_str_list_has(canon, value) { return null }
+    var hint = cc_axis_alias_hint(axis, value)
+    if hint == "" { hint = cc_nearest_canon(axis, value) }
+    error { message = $"{line}:{col}: unknown {axis} \"{value}\" (did you mean \"{hint}\"?)" }
 }
 
 /**

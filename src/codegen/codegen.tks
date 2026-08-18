@@ -863,6 +863,10 @@ type CgProg = struct {
     items: []@TItem()
     /** The derived name index over `items`; empty tables make every lookup fall back to a scan. */
     ix: CgIndex
+    /** The target-conditional-const family keys (§16): a bare `TVar` naming one lowers to its
+        `#if`-laddered `tk_const_<ns>__<name>` symbol rather than a folded literal. Empty for the
+        syscall-free corpus (the byte-stable case). */
+    cond_consts: []checker::ConstQName
 }
 
 /**
@@ -1095,7 +1099,7 @@ fn cg_fn_key(ns: str, name: str): str { teko::str::concat(ns, "::", name) }
  * @since cargo/20-codegen-perf
  */
 fn cg_prog_of(p: checker::TProgram): CgProg {
-    CgProg { items = p.items; ix = cg_index_of(p.items) }
+    CgProg { items = p.items; ix = cg_index_of(p.items); cond_consts = checker::cond_const_names(p.items) }
 }
 
 /**
@@ -1114,7 +1118,7 @@ fn cg_prog_bare(p: checker::TProgram): CgProg {
         slots = teko::list::empty()
     }
     var ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = teko::list::empty() }
-    CgProg { items = p.items; ix = ix }
+    CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items) }
 }
 
 /**
@@ -8948,6 +8952,11 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr
                (a write through the caller's materialization — the mutation sticks), while passing or
                returning `self` yields `(*self)`, a COPY, which is exactly value semantics. */
             cb(cb_ident(cb(buf, "(*"), v.name), ")")
+        } else if checker::is_cond_const(v.func_ns, v.name, prog.cond_consts) {
+            /* (§16) a bare reference to a target-conditional const survives consteval as a `TVar`
+               (its arms were excluded from the fold); lower it to the `#if`-laddered `#define` symbol
+               the preamble emits, wrapped by the same cast codegen already applies to any const use. */
+            cb(buf, cond_const_c_symbol(v.func_ns, v.name))
         } else {
             cb_ident(buf, v.name)
         }
@@ -13985,6 +13994,175 @@ fn cg_emit_syscall_helpers(buf: []byte, used: SyscallUse): []byte {
 }
 
 /**
+ * cond_const_c_symbol — the C `#define` symbol a §16 target-conditional const is emitted under:
+ * `tk_const_` + the namespace with every `:` rewritten to `_` + `__` + the (keyword-escaped) name
+ * (e.g. `tk_const_teko__sys__SYS_MMAP`). Mirrors `cb_fn_name`'s mangle over `(namespace, name)`, so
+ * the ladder's `#define` and every lowered reference agree by construction. Both the arch `#if` ladder
+ * and the `TVar` reference path spell the symbol through here.
+ *
+ * @param ns    the const's declaring namespace ("" for a root-less const)
+ * @param name  the const's bare name
+ * @return      the C preprocessor symbol
+ * @since §16
+ */
+fn cond_const_c_symbol(ns: str, name: str): str {
+    var b: []byte = cb(teko::list::empty(), "tk_const_")
+    if ns.len != 0 {
+        var i: u64 = 0
+        loop {
+            if i >= ns.len { break }
+            if ns[i] == b':' { b = cb_byte(b, b'_') } else { b = cb_byte(b, ns[i]) }
+            i = i + 1
+        }
+        b = cb(b, "__")
+    }
+    str(cb_ident(b, name))
+}
+
+/**
+ * cc_axis_atom_cond — render one os/arch `PEq` atom as a C-preprocessor condition, the macro spelling
+ * IDENTICAL to `cg_emit_syscall_helpers` (so the syscall NUMBER ladder and the INSTRUCTION ladder agree
+ * byte-for-byte): `os=="linux"`→`defined(__linux__)`, `macos`→`defined(__APPLE__)`, `windows`→
+ * `defined(_WIN32)`, `arch=="x86_64"`→`(defined(__x86_64__) || defined(__amd64__))`, `arm64`→
+ * `(defined(__aarch64__) || defined(__arm64__))`. Honest-stops on any other axis/value.
+ *
+ * @param e  the axis-equality atom
+ * @return   the `#if`/`#elif` condition text, or an error for a non-target atom
+ * @since §16
+ */
+fn cc_axis_atom_cond(e: parser::PEq): str | error {
+    if e.axis == "os" {
+        if e.value == "linux" { return "defined(__linux__)" }
+        if e.value == "macos" { return "defined(__APPLE__)" }
+        if e.value == "windows" { return "defined(_WIN32)" }
+    }
+    if e.axis == "arch" {
+        if e.value == "x86_64" { return "(defined(__x86_64__) || defined(__amd64__))" }
+        if e.value == "arm64" { return "(defined(__aarch64__) || defined(__arm64__))" }
+    }
+    error { message = teko::str::concat("codegen section 16: cannot render a C #if condition for axis '", teko::str::concat(e.axis, teko::str::concat("' value '", teko::str::concat(e.value, "'")))) }
+}
+
+/**
+ * guard_to_c_cond — render a target `Pred` as a C-preprocessor condition (§16 mapping), mirroring the
+ * per-arch macros `cg_emit_syscall_helpers` already emits. `PAnd`→`((L) && (R))`, `POr`→`((L) || (R))`,
+ * `PNot`→`(!(X))`, `PTrue`→`1` (folds true on the per-OS teko.c). Honest-stops on a `PFlag`/unknown
+ * atom (a target-conditional const may not depend on a build flag).
+ *
+ * @param p  the arm's target guard
+ * @return   the `#if`/`#elif` condition text, or an error for a non-target atom
+ * @since §16
+ */
+fn guard_to_c_cond(p: parser::Pred): str | error {
+    match p.kind {
+        parser::PTrue => "1"
+        parser::PEq as e => cc_axis_atom_cond(e)
+        parser::PFlag => error { message = "codegen section 16: a target-conditional const cannot depend on a build flag (`#if(<flag>)`) — only os/arch guards ladder" }
+        parser::PNot as n => {
+            var inner = match guard_to_c_cond(n.inner) { str as s => s; error as e => return e }
+            teko::str::concat("(!(", teko::str::concat(inner, "))"))
+        }
+        parser::PAnd as a => {
+            var l = match guard_to_c_cond(a.left) { str as s => s; error as e => return e }
+            var r = match guard_to_c_cond(a.right) { str as s => s; error as e => return e }
+            teko::str::concat("((", teko::str::concat(l, teko::str::concat(") && (", teko::str::concat(r, "))"))))
+        }
+        parser::POr as o => {
+            var l = match guard_to_c_cond(o.left) { str as s => s; error as e => return e }
+            var r = match guard_to_c_cond(o.right) { str as s => s; error as e => return e }
+            teko::str::concat("((", teko::str::concat(l, teko::str::concat(") || (", teko::str::concat(r, "))"))))
+        }
+    }
+}
+
+/**
+ * cg_cond_const_arm_value — the C integer literal the `#define` body of one target-conditional-const
+ * arm carries: the arm's initializer rendered through the SAME `cb_numint` path codegen uses for any
+ * integer literal (so a reference `((int64_t)<sym>)` expands byte-identically to the pre-§16 inlined
+ * `((int64_t)9ULL)`). Honest-stops on a non-integer-literal arm (no such const exists — §16 §5).
+ *
+ * @param init  the arm's typed initializer
+ * @return      the C literal digits, or an error for a non-integer-literal initializer
+ * @since §16
+ */
+fn cg_cond_const_arm_value(init: checker::TExpr): str | error {
+    match init.kind {
+        checker::TNumber as n => if n.is_float { error { message = "codegen section 16: a target-conditional const arm must be an integer literal, not a float" } } else { str(cb_numint(teko::list::empty(), n.value)) }
+        _ => error { message = "codegen section 16: a target-conditional const arm must be an integer literal" }
+    }
+}
+
+/**
+ * cg_emit_one_cond_ladder — emit ONE family's `#if <cond0> #define <sym> <v0> #elif … #else #error
+ * #endif` block. The arms are the `TConstDecl` items of `prog` sharing `fam`'s `(namespace, name)`, in
+ * SOURCE order (deterministic — the fixpoint depends on it). `#else` is `#error`, not a `0` stub: an
+ * off-whitelist arch is a rejected build (the fail-fast layer a), and the syscall INSTRUCTION helper
+ * already `#error`s the same way, so the NUMBER ladder matches — no silent wrong number (layer b).
+ *
+ * @param buf   the emission buffer
+ * @param prog  the codegen program (its `TConstDecl` items are the arm source)
+ * @param fam   the family key to emit the ladder for
+ * @return      `buf` with the family's ladder appended, or an error rendering an arm
+ * @since §16
+ */
+fn cg_emit_one_cond_ladder(buf: []byte, prog: CgProg, fam: checker::ConstQName): []byte | error {
+    var sym = cond_const_c_symbol(fam.namespace, fam.name)
+    var out = buf
+    var first = true
+    var i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TConstDecl as cd => {
+                if cd.namespace == fam.namespace && cd.name == fam.name {
+                    var cond = match guard_to_c_cond(cd.guard) { str as s => s; error as e => return e }
+                    var val = match cg_cond_const_arm_value(cd.init) { str as s => s; error as e => return e }
+                    out = cb(out, if first { "#if " } else { "#elif " })
+                    out = cb(out, cond)
+                    out = cb(out, "\n#define ")
+                    out = cb(out, sym)
+                    out = cb(out, " ")
+                    out = cb(out, val)
+                    out = cb(out, "\n")
+                    first = false
+                }
+            }
+            _ => { }
+        }
+        i = i + 1
+    }
+    out = cb(out, "#else\n#error \"teko section 16: unsupported (os,arch) — ")
+    out = cb(out, sym)
+    out = cb(out, " has no value for this arch (supported: linux-x86_64, linux-arm64; see docs/design/plano-s16-arch-cross-emit.md section 3.2)\"\n#endif\n")
+    out
+}
+
+/**
+ * cg_emit_cond_const_ladder — emit, ONCE per target-conditional-const family (`checker::cond_const_names`),
+ * the arch `#if` ladder of `#define`s the lowered references resolve through (§16). Deduplicated by
+ * `(ns, name)` and emitted in first-declaration order, so self-emission is byte-stable across
+ * generations (the fixpoint). Emits NOTHING when the program has no such family — the syscall-free
+ * corpus's own preamble is unchanged.
+ *
+ * @param buf   the emission buffer
+ * @param prog  the codegen program (its `TConstDecl` items are the arm source)
+ * @return      `buf` with every family's ladder appended, or an error
+ * @since §16
+ */
+fn cg_emit_cond_const_ladder(buf: []byte, prog: CgProg): []byte | error {
+    var fams = prog.cond_consts
+    if fams.len == 0 { return buf }
+    var out = buf
+    var f: u64 = 0
+    loop {
+        if f >= fams.len { break }
+        out = match cg_emit_one_cond_ladder(out, prog, fams[f]) { []byte as o => o; error as e => return e }
+        f = f + 1
+    }
+    cb(out, "\n")
+}
+
+/**
  * cg_emit_thread_clone_helper_text_x86_64 — the VERBATIM x86_64-Linux `static long tk_thread_clone(...)`
  * body: the §10 raw thread-spawn intrinsic (plano §3.3). `clone` is the one syscall that cannot ride the
  * generic `tk_syscallN` helper — its child returns from the `syscall` instruction on the freshly-supplied
@@ -14150,6 +14328,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
 
     var sc_used = cg_scan_syscall_arities(prog)
     b = cg_emit_syscall_helpers(b, sc_used)
+    b = match cg_emit_cond_const_ladder(b, prog) { []byte as o => o; error as err => return err }
     b = cg_emit_arena_provider_ladder(b)
     b = cg_emit_thread_clone_helper(b, sc_used.clone)
     b = cg_emit_atomic_helpers(b, sc_used.atomics)
