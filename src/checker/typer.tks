@@ -3672,9 +3672,23 @@ fn ref_bound_of(t: @Type()): @Type() {
     match t { Reference => t; _ => Reference { inner = t } }
 }
 
+fn value_is_empty_array_lit(e: parser::Expr): bool {
+    match e.kind { parser::ArrayLit as al => al.elements.len == 0; _ => false }
+}
+
+fn type_sized_array_binding(b: parser::Binding, sa: parser::SizedArrayType, env: Env, table: TypeTable): TExpr | error {
+    var elem = match resolve_type(sa.element, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
+    match elem { Reference => return error { message = "a reference cannot be a sized-array element" }; _ => { } }
+    if !value_is_empty_array_lit(b.value) { return error { message = "a `[n]T` binding initializes to `[]` — n zeroed slots; write positions with `x[i] = v`" } }
+    var sz = match type_expr(sa.size, env, table) { TExpr as te => te; error as e => return e }
+    if !is_integer(sz.type) { return error { message = "a sized-array length `[n]T` must be an integer" } }
+    TExpr { kind = TSliceOfLen { size = sz; element = elem }; type = Slice { element = elem }; line = b.value.line; col = b.value.col }
+}
+
 fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable): TExpr | error {
     if b.is_ref && !b.has_type { return type_inferred_ref_value(b.value, env, table) }
     if b.has_type {
+        match b.type_ann { parser::SizedArrayType as sa => return type_sized_array_binding(b, sa, env, table); _ => { } }
         var at = match resolve_type(b.type_ann, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
         match at { Reference as rf => return type_ref_binding_value(b.value, rf, env, table); _ => { } }
         return type_value_expected(b.value, at, env, table)

@@ -1231,6 +1231,14 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): @Type() | e
             match el { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
             Slice { element = el }
         }
+        parser::SizedArrayType as sa => {
+            var el = match resolve_type(sa.element, table, ref_ns) {
+                (@Type()) as t => t
+                error as e => return e
+            }
+            match el { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
+            Slice { element = el }
+        }
         parser::UnionType as ut => {
             var members: []@Type() = teko::list::empty()
             var i = 0
@@ -1606,6 +1614,7 @@ fn subst_texpr_names(te: @TypeExpr(), params: []str, args: []@TypeExpr()): @Type
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = subst_texpr_names(st.element, params, args) }
+        parser::SizedArrayType as sa => parser::SizedArrayType { size = sa.size; element = subst_texpr_names(sa.element, params, args) }
         parser::UnionType as ut => {
             var ms: []@TypeExpr() = teko::list::empty()
             var i = 0
@@ -1675,6 +1684,7 @@ fn collect_texpr_insts(te: @TypeExpr(), acc: []@TypeExpr()): []@TypeExpr() {
             if nt.args.len > 0 { out = teko::list::push(out, te) }
         }
         parser::SliceType as st => out = collect_texpr_insts(st.element, out)
+        parser::SizedArrayType as sa => out = collect_texpr_insts(sa.element, out)
         parser::UnionType as ut => { var i = 0; loop { if i >= ut.members.len { break }; out = collect_texpr_insts(ut.members[i], out); i++ } }
         parser::FunctionType as fnt => { var i = 0; loop { if i >= fnt.params.len { break }; out = collect_texpr_insts(fnt.params[i], out); i++ }; out = collect_texpr_insts(fnt.ret, out) }
         parser::MacroType => out
@@ -2015,6 +2025,7 @@ fn normalize_inst_texpr(te: @TypeExpr(), table: TypeTable): @TypeExpr() {
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = normalize_inst_texpr(st.element, table) }
+        parser::SizedArrayType as sa => parser::SizedArrayType { size = sa.size; element = normalize_inst_texpr(sa.element, table) }
         parser::UnionType as ut => {
             var ms: []@TypeExpr() = teko::list::empty()
             var i = 0

@@ -194,10 +194,19 @@ fn parse_type_args(tokens: []lexer::Token, pos: u64): ParsedTypeArgs | error {
 
 fn parse_slice(tokens: []lexer::Token, pos: u64): ParsedType | error {
     if !is_kind_at(tokens, pos + 1, lexer::TokenKind::RBracket) {
-        return err_at(tokens, pos + 1, "expected ']' to close '[' in a slice type '[]T'")
+        return parse_sized_array(tokens, pos)
     }
     var elem = match parse_type_primary(tokens, pos + 2) { ParsedType as x => x; error as e => return e }
     ParsedType { node = SliceType { element = elem.node }; next = elem.next; pending_gt = elem.pending_gt }
+}
+
+fn parse_sized_array(tokens: []lexer::Token, pos: u64): ParsedType | error {
+    var size = match parse_expr(tokens, pos + 1) { Parsed<Expr> as x => x; error as e => return e }
+    if !is_kind_at(tokens, size.next, lexer::TokenKind::RBracket) {
+        return err_at(tokens, size.next, "expected ']' to close the size in a sized-array type '[n]T'")
+    }
+    var elem = match parse_type_primary(tokens, size.next + 1) { ParsedType as x => x; error as e => return e }
+    ParsedType { node = SizedArrayType { size = size.node; element = elem.node }; next = elem.next; pending_gt = elem.pending_gt }
 }
 
 fn parse_type(tokens: []lexer::Token, pos: u64): ParsedType | error {

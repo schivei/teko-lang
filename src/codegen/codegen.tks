@@ -925,6 +925,7 @@ fn cg_te_reaches_byvalue(prog: CgProg, te: @TypeExpr(), to: str, seen: []str): b
             false
         }
         parser::SliceType => false
+        parser::SizedArrayType => false
         parser::FunctionType => false
         parser::MacroType => false
     }
@@ -1610,6 +1611,7 @@ fn cg_texpr_mangle(te: @TypeExpr()): str {
             if nt.args.len == 0 { last } else { cg_texpr_inst_name(last, nt.args) }
         }
         parser::SliceType as st => teko::str::concat("slice_", cg_texpr_mangle(st.element))
+        parser::SizedArrayType as sa => teko::str::concat("slice_", cg_texpr_mangle(sa.element))
         parser::UnionType as ut => cg_union_texpr_inst_mangle(ut)
         parser::FunctionType => "func"
         parser::MacroType => ""
@@ -1702,6 +1704,7 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: @TypeExpr(), ref_ns: str): []by
             mangle_type_name(buf, "", cdname)
         }
         parser::SliceType as st => cg_emit_slice_type_expr(buf, prog, st, ref_ns)
+        parser::SizedArrayType as sa => cg_emit_slice_type_expr(buf, prog, parser::SliceType { element = sa.element }, ref_ns)
         parser::UnionType as ut => {
             if !cg_texpr_union_has_null(ut) { return cg_variant_typename_texpr(buf, prog, ut, ref_ns) }
             match cg_te_to_type_ns(prog, ref_ns, te) {
@@ -3147,6 +3150,47 @@ fn emit_in(buf: []byte, prog: CgProg, ie: checker::TInExpr, escaping: []str, reg
         i++
     }
     cb(out, "; })")
+}
+
+fn emit_slice_of_len(buf: []byte, prog: CgProg, e: checker::TExpr, s: checker::TSliceOfLen, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var elem = s.element
+    var lenN = $"_oln{buf.len}"
+    var ptrN = $"_olp{buf.len + 1}"
+    var out = cb(buf, "({ uint64_t ")
+    out = cb(out, lenN)
+    out = cb(out, " = (uint64_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, s.size, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "); ")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " *")
+    out = cb(out, ptrN)
+    out = cb(out, " = (")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " *)")
+    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb(out, "(")
+    out = cb(out, cg_enclosing_region_expr(regions))
+    out = cb(out, ", ")
+    out = cb(out, lenN)
+    out = cb(out, " * sizeof(")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, ")); memset(")
+    out = cb(out, ptrN)
+    out = cb(out, ", 0, ")
+    out = cb(out, lenN)
+    out = cb(out, " * sizeof(")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, ")); (")
+    out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, "){ .ptr = ")
+    out = cb(out, ptrN)
+    out = cb(out, ", .len = ")
+    out = cb(out, lenN)
+    if cg_slice_rep_has_cap(elem) {
+        out = cb(out, ", .cap = ")
+        out = cb(out, lenN)
+    }
+    cb(out, " }; })")
 }
 
 fn emit_array_lit(buf: []byte, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
@@ -5350,6 +5394,7 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr
         checker::TInterp as in => emit_interp(buf, prog, in, "", escaping, regions, fn_body, dctx)
         checker::TInExpr as ie => emit_in(buf, prog, ie, escaping, regions, fn_body, dctx)
         checker::TArrayLit as a => emit_array_lit(buf, prog, e, a, escaping, regions, fn_body, dctx)
+        checker::TSliceOfLen as s => emit_slice_of_len(buf, prog, e, s, escaping, regions, fn_body, dctx)
         checker::TPathExpr as pe => {
             if cg_named_is_flags(prog, pe.enum_name) {
                 var out = mangle_type_name(buf, "", pe.enum_name)
@@ -7132,6 +7177,7 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: @TypeExpr()): @Type() {
             else { checker::Named { name = cg_te_canonical_name(prog, ref_ns, nt.path, last) } }
         }
         parser::SliceType as st => checker::Slice { element = cg_te_to_type_ns(prog, ref_ns, st.element) }
+        parser::SizedArrayType as sa => checker::Slice { element = cg_te_to_type_ns(prog, ref_ns, sa.element) }
         parser::UnionType as ut => {
             var mem: []@Type() = teko::list::empty()
             var i = 0
@@ -7347,6 +7393,7 @@ fn cg_texpr_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, te: @TypeExpr(), 
             cg_named_emitted_precise(prog, em, want)
         }
         parser::SliceType => true
+        parser::SizedArrayType => true
         parser::UnionType as ut => cg_texpr_union_ready(prog, em, set, ut, owner_ns)
         parser::FunctionType => true
         parser::MacroType => false
@@ -8529,7 +8576,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     b = cb(b, "#include <stdbool.h>\n")
     b = cb(b, "#include <stdlib.h>\n")
     b = cb(b, "#include <math.h>\n")
-    if spawn_sites.len > 0 { b = cb(b, "#include <string.h>\n") }
+    b = cb(b, "#include <string.h>\n")
     b = cb(b, "#include \"teko_rt.h\"\n")
     b = cb(b, "#include \"assert.h\"\n\n")
 

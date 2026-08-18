@@ -210,6 +210,7 @@ fn subst_typeexpr(te: @TypeExpr(), s: Subst): @TypeExpr() {
             parser::NamedType { path = nt.path; args = subst_typeexpr_args(nt.args, s) }
         }
         parser::SliceType as st => parser::SliceType { element = subst_typeexpr(st.element, s) }
+        parser::SizedArrayType as sa => parser::SizedArrayType { size = sa.size; element = subst_typeexpr(sa.element, s) }
         parser::UnionType as ut => {
             var ms: []@TypeExpr() = teko::list::empty()
             var i = 0
@@ -632,6 +633,11 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
                 i++
             }
             WExpr { expr = TExpr { kind = TArrayLit { elements = elems }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TSliceOfLen as sol => {
+            var wsz = match mono_texpr(sol.size, s, items, table) { WExpr as w => w; error as er => return er }
+            var el = match nt { Slice as sl => sl.element; _ => subst_type(sol.element, s) }
+            WExpr { expr = TExpr { kind = TSliceOfLen { size = wsz.expr; element = el }; type = nt; line = e.line; col = e.col }; insts = wsz.insts }
         }
         TLambda as lam => {
             var wb = match mono_block(lam.body, s, items, table) { WBlock as w => w; error as er => return er }
