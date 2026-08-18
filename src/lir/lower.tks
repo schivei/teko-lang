@@ -13948,24 +13948,18 @@ type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
  * - REGISTERED (a `u32` target, `native_scope_region_of` resolved a declaring `NativeRegionFrame`):
  *   bracket to it. The real N-level fix (`mem_loop_per_iter` — an accumulator declared in an outer
  *   arm, grown in an inner loop, must not die per-iteration).
- * - UNREGISTERED (`null`) AND `name` ESCAPES this function (`binding_conveys_escape`): bracket to
- *   ROOT — emit `rr = tk_region_root_u()` (the same on-demand fallback `region_current_vreg` uses on
- *   an empty stack) then `tk_region_enter_u(rr)`, `opened=true`. This is NOT redundant with
- *   `lower_assign_conveyed`'s own OUTER bracket (`emit_region_leaves` … `emit_region_enters`):
- *   `emit_region_leaves` only POPS every region THIS function has open off the runtime's
- *   current-region stack, it never PUSHES a replacement, so once those pops run, "current" is
- *   whatever sits BELOW this function's frame — the CALLER's own active region at the depth this
- *   call happened from. At root nesting that pop-exposed region IS root, which is why the earlier,
- *   bracket-less version of this arm went undetected; from a NESTED caller (`outer()` → `mid()` →
- *   this fn, `mid`'s own scope still open) it is a live NON-root ancestor arena that the grow's
- *   buffer would land in and that a LATER `tk_region_drop_u` up the chain frees out from under it —
- *   a confirmed use-after-free (`copy_relocs_to_current_region_x86`, `src/build/project.tks:3313`,
- *   reached via `copy_encoded_func_to_current_region_x86` from within `fold_encoded_funcs_x86`'s open
- *   scope; SIGSEGV in `tk_region_alloc`). An EXPLICIT push of the root anchor around the grow closes
- *   that gap at every nesting depth — the twin of the C route's `cg_self_append_escapes`
- *   (`codegen.tks:8020`), which wraps the SAME grow with an explicit
- *   `tk_region_enter(_tkrr); …; tk_region_leave();` (`codegen.tks:9375-9380`) rather than relying on
- *   any ambient pop-exposed region. This native route now mirrors that PUSH exactly.
+ * - UNREGISTERED (`null`) AND `name` ESCAPES this function (`binding_conveys_escape`): emit NO
+ *   bracket (`opened=false`). An escaping self-append's assignment already runs inside
+ *   `lower_assign_conveyed`'s own OUTER bracket (`emit_region_leaves`, detouring the runtime's
+ *   current region all the way down to the conveyance anchor `rr`, root through NP5) — that detour
+ *   is what makes the grown buffer survive the frame drop. A `stack[0]` (frame) fallback here would
+ *   OVERRIDE that detour with `tk_region_enter_u(fr)`, landing the buffer back in `fr` — which
+ *   `emit_region_drops` frees at the very return this self-append's value is escaping THROUGH: a
+ *   confirmed double-free/heap-corruption UAF (measured on `theory/heisenbug-fix`, CI run
+ *   30947982111, gen1 SIGSEGV in `emit_call`; the C route never makes this mistake —
+ *   `cg_self_append_escapes`, `codegen.tks:8020`, threads `dctx.rr` for exactly this case, reserving
+ *   its own `scope_region_of` selector for the non-escaping route only). This native twin now
+ *   mirrors that split.
  * - UNREGISTERED AND NOT escaping: bracket to the FRAME (`ctx.region_stack[0]`) — leak-safe (the
  *   frame outlives every use inside this function), never UAF; a non-escaping accumulator whose
  *   `decl_name` registration was overwritten by a LATER binding in the same scope (only the
@@ -13986,9 +13980,7 @@ fn enter_self_append_region(ctx: LowerCtx, name: str, line: u32, col: u32) -> Se
         u32 as target => SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(target), false, line, col)); opened = true }
         null => {
             if binding_conveys_escape(ctx.escaping, name) {
-                let rr = ctx_alloc(ctx)
-                let rooted = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", teko::list::empty(), false, line, col))
-                SelfAppendBracket { ctx = ctx_append(rooted, void_call_inst("tk_region_enter_u", one_region_arg(rr.vreg), false, line, col)); opened = true }
+                SelfAppendBracket { ctx = ctx; opened = false }
             } else {
                 if ctx.region_stack.len > 0 {
                     let fr_vreg = ctx.region_stack[0].region_vreg

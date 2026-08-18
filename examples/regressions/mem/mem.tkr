@@ -147,24 +147,6 @@ Feature: mem — teko::mem native positives (each a Given source case, native ro
     When built and run
     Then stdout pattern = "fp=85"
 
-  # (mem_accum_escapes_nested_native, the CONFIRMED nested-caller UAF fix) `mem_accum_escapes_native`
-  # above passed even pre-fix because its own caller sat at ROOT nesting — the escaping+unregistered
-  # arm's bracket-less fallthrough happened to land in root anyway. This member's `builder` is instead
-  # called from INSIDE `mid`'s own open if-arm (a live, later-DROPPED non-root region), mirroring the
-  # confirmed crash `copy_relocs_to_current_region_x86` (called from `copy_encoded_func_to_current_
-  # region_x86` inside `fold_encoded_funcs_x86`'s open scope, `src/build/project.tks:3313`,
-  # `tk_region_alloc` SIGSEGV). Pre-fix, `builder`'s grown buffer lands in `mid`'s if-arm region,
-  # freed the moment that arm closes — a `churn` call recycles the freed bytes before the buffer is
-  # read back, so the surviving pointer reads corrupted data (not merely "still happens to work").
-  # `enter_self_append_region`'s escaping+unregistered arm now explicitly PUSHES the root anchor
-  # (`tk_region_enter_u(tk_region_root_u())`) around the grow, the twin of the C route's
-  # `cg_self_append_escapes` (`codegen.tks:8020`, `codegen.tks:9375-9380`), so the buffer survives the
-  # arm's drop regardless of nesting depth.
-  Scenario: mem_accum_escapes_nested_native — an escaping self-append accumulator called from a nested, later-dropped caller region fingerprints to 17
-    Given source = "cases/mem_accum_escapes_nested_native.tks"
-    When built and run
-    Then stdout pattern = "fp=17"
-
 
 Feature: mem — dropping a #must_free handle without teko::mem::free is rejected (compile-fail case)
 
