@@ -167,10 +167,10 @@ fn cc_supported_targets(): []str {
  * cc_validate_target — FAIL-FAST rejection of an unsupported `(os, arch)` combination BEFORE the
  * build does any work (prune/emit/`cc`), per the owner ruling: a non-whitelisted target "nem tenta
  * fazer o build". Called at the top of `frontend_check`, before `prune_cc`. Returns the honest-stop
- * naming the offending pair and the whole supported set; returns `null` for a whitelisted pair. This
- * is layer (a) of the two-layer defense — layer (b) is the arch ladders' `#else #error` in the
- * emitted C. It also subsumes the `"unknown"` os/arch leak: an `"unknown"`-bearing pair is not in the
- * whitelist, so it is rejected here with a clear message rather than silently pruning to nothing.
+ * naming the offending pair; returns `null` for a whitelisted pair. This is layer (a) of the two-layer
+ * defense — layer (b) is the single global `#error "unsupported (os,arch)"` guard in the emitted C. It
+ * also subsumes the `"unknown"` os/arch leak: an `"unknown"`-bearing pair is not in the whitelist, so
+ * it is rejected here with a clear message rather than silently pruning to nothing.
  *
  * @param os    the resolved target OS (`target_os(manifest)`)
  * @param arch  the resolved target arch (`target_arch(manifest)`)
@@ -186,7 +186,7 @@ fn cc_validate_target(os: str, arch: str): null | error {
         if supported[i] == key { return null }
         i = i + 1
     }
-    error { message = $"combinação SO-ARCH não suportada: {os}-{arch}; suportadas: windows-x86_64, linux-x86_64, linux-arm64, macos-arm64" }
+    error { message = $"unsupported (os,arch): {os}-{arch}" }
 }
 
 // =========================================================================
@@ -673,7 +673,7 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
  */
 fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Frontend | error {
     match cc_validate_target(target_os(pf.manifest), target_arch(pf.manifest)) { error as e => return e; null => { } }
-    var selected = match prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = build_flags(pf.manifest) }, PruneMode { keep_target_arms = c_backend_selected() }) { parser::Program as p => p; error as e => return e }
+    var selected = prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = build_flags(pf.manifest) }, PruneMode { keep_target_arms = c_backend_selected() })
 
     var expanded = match parser::expand_macros_syntactic(selected) { parser::Program as p => p; error as e => return e }
 
@@ -6251,7 +6251,7 @@ fn append_items(a: []parser::Item, b: []parser::Item): []parser::Item {
  * @since 0.3.1.0 (tests-native-no-c)
  */
 fn unmark_test_function(f: checker::TFunction): checker::TFunction {
-    checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = false; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra }
+    checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = false; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
 }
 
 /**

@@ -95,124 +95,79 @@ pub type PruneMode = struct {
 }
 
 /**
- * cc_arch_vocab — the canonical arch spellings the C monolith cross-compiles across within one OS
- * (`target_arch`'s output space: `x86_64`, `arm64`). The arch-defer keep-test scans this finite set;
- * the emitted `#if` ladder carries one arm per member a family declares.
+ * cc_eval_at — evaluate `p` at one concrete `(os, arch)` point, `env.build_flags` carried through (a
+ * `#if(<flag>)` atom is NOT deferred — it resolves against the build's flags).
  *
- * @return  the canonical arch names
+ * @param p     the item's guard predicate
+ * @param env   the build-time constant environment (its `build_flags` are carried; os/arch replaced)
+ * @param os    the OS coordinate to test at
+ * @param arch  the arch coordinate to test at
+ * @return      true iff `p` holds at `(os, arch)`
  * @since §16
  */
-fn cc_arch_vocab(): []str {
-    teko::list::push(teko::list::push(teko::list::empty(), "x86_64"), "arm64")
+fn cc_eval_at(p: parser::Pred, env: CcEnv, os: str, arch: str): bool {
+    eval_pred(p, CcEnv { os = os; arch = arch; build_flags = env.build_flags })
 }
 
 /**
- * cc_arch_deferred_survives — the C-monolith keep-test for a target-guarded item: true iff SOME arch
- * in `cc_arch_vocab()` satisfies `p` once the OS axis is fixed to `env.os`. This resolves the `#os`
- * atoms against the emission host (a `teko.c` is emitted per-OS — a linux-host teko.c must not carry a
- * macos/windows arm) while DEFERRING every `#arch` atom to the emitted C `#if` ladder (the one teko.c
- * cross-compiles across every arch of its OS). The existential scan is correct under `PNot`/`POr`,
- * where substituting "arch atom = true" would not be.
+ * cc_target_survives — the C-monolith keep-test: true iff SOME supported `(os, arch)` satisfies `p`.
+ * DEFERS both the `#os` and the `#arch` axes to the emitted C `#if` (one `teko.c` cross-compiles across
+ * every supported OS AND arch — gcc(Linux)/clang(macOS)/MinGW(Windows) pick the arm), scanning the
+ * CLOSED matrix `linux-x86_64`, `linux-arm64`, `macos-arm64`, `windows-x86_64`. An item satisfiable by
+ * no supported target is pruned. The existential scan is correct under `PNot`/`POr`.
  *
  * @param p    the item's guard predicate
- * @param env  the build-time constant environment (its `os` fixes the OS axis; its `arch` is ignored)
- * @return     true iff some arch of `env.os` satisfies `p`
+ * @param env  the build-time constant environment (its `build_flags` gate a `#if(<flag>)` atom)
+ * @return     true iff some supported target satisfies `p`
  * @since §16
  */
-fn cc_arch_deferred_survives(p: parser::Pred, env: CcEnv): bool {
-    var arches = cc_arch_vocab()
-    var i: u64 = 0
-    loop {
-        if i >= arches.len { break }
-        if eval_pred(p, CcEnv { os = env.os; arch = arches[i]; build_flags = env.build_flags }) { return true }
-        i = i + 1
-    }
+fn cc_target_survives(p: parser::Pred, env: CcEnv): bool {
+    if cc_eval_at(p, env, "linux", "x86_64") { return true }
+    if cc_eval_at(p, env, "linux", "arm64") { return true }
+    if cc_eval_at(p, env, "macos", "arm64") { return true }
+    if cc_eval_at(p, env, "windows", "x86_64") { return true }
     false
-}
-
-/**
- * pred_mentions_arch — true iff any atom of `p` compares the `#arch` axis. Used to reject an
- * `#arch`-guarded NON-const item under the C-monolith prune (no `#if` emitter exists for a fn/type
- * body yet — §16 R-gen).
- *
- * @param p  the predicate to inspect
- * @return   true iff `p` contains an `arch ==` atom
- * @since §16
- */
-fn pred_mentions_arch(p: parser::Pred): bool {
-    match p.kind {
-        parser::PTrue => false
-        parser::PEq as e => e.axis == "arch"
-        parser::PFlag => false
-        parser::PNot as n => pred_mentions_arch(n.inner)
-        parser::PAnd as a => pred_mentions_arch(a.left) || pred_mentions_arch(a.right)
-        parser::POr as o => pred_mentions_arch(o.left) || pred_mentions_arch(o.right)
-    }
-}
-
-/**
- * item_is_const — true iff `it` is a `const` declaration (the only item kind the §16 C-monolith prune
- * keeps target arms for; every other kind is os/flag-resolved by `eval_pred`).
- *
- * @param it  the pre-check item
- * @return    true iff `it.content` is a `parser::ConstDecl`
- * @since §16
- */
-fn item_is_const(it: parser::Item): bool {
-    match it.content {
-        parser::ConstDecl => true
-        _ => false
-    }
 }
 
 /**
  * cc_keep_item — the per-item keep test the prune applies under each backend. NATIVE mode is
  * byte-identical to today: `eval_pred(it.guard, env)` (the single target's arm survives; folds and
- * cross-compiles by choosing the triple). C-MONOLITH mode defers the arch axis for a CONST via
- * `cc_arch_deferred_survives` (os resolved against `env`, arch deferred to the emitted `#if`) — so
- * BOTH linux arch arms of `SYS_MMAP` survive while a macos arm is dropped. Every non-const item is
- * still resolved by `eval_pred` (os/flag-pruned as before); an `#arch`-guarded NON-const item has no
- * `#if` emitter yet and HONEST-STOPS loudly rather than silently collapsing to the host arch.
+ * cross-compiles by choosing the triple). C-MONOLITH mode defers BOTH the os and arch axes via
+ * `cc_target_survives` — so every `#os`/`#arch` arm of a runtime const/fn/extern survives the prune and
+ * codegen wraps each in a `#if <guard>` block, the one `teko.c` carrying the Linux+macOS+Windows arms.
  *
  * @param it    the pre-check item
  * @param env   the build-time constant environment
  * @param mode  the backend's prune mode
- * @return      true iff `it` survives the prune on this backend, or an error for an unemittable
- *              arch-guarded non-const item
+ * @return      true iff `it` survives the prune on this backend
  * @since §16
  */
-fn cc_keep_item(it: parser::Item, env: CcEnv, mode: PruneMode): bool | error {
+fn cc_keep_item(it: parser::Item, env: CcEnv, mode: PruneMode): bool {
     if !mode.keep_target_arms { return eval_pred(it.guard, env) }
-    if item_is_const(it) { return cc_arch_deferred_survives(it.guard, env) }
-    if pred_mentions_arch(it.guard) {
-        return error { message = "§16: an `#arch`-guarded non-const item has no C `#if` emitter yet — only a target-conditional const ladders (docs/design/plano-s16-arch-cross-emit.md §5 R-gen)" }
-    }
-    eval_pred(it.guard, env)
+    cc_target_survives(it.guard, env)
 }
 
 /**
  * prune_cc — the §16/§17 conditional-compilation PRUNE: keep exactly the top-level items `cc_keep_item`
  * admits for the backend `mode`, dropping the rest BEFORE macro expansion / name-resolution /
  * type-check (so a pruned item referencing an unavailable per-platform symbol never reaches the
- * checker). Native mode resolves os AND arch against `env`; C-monolith mode resolves os and DEFERS
- * arch to the emitted C `#if` ladder, keeping both arch arms of a target-conditional const. The single
+ * checker). Native mode resolves os AND arch against `env`; C-monolith mode DEFERS both axes to the
+ * emitted C `#if`, keeping every `#os`/`#arch` arm satisfiable by a supported target. The single
  * uniform `item.guard` read covers `fn`, `type`, `const`, and extern items alike.
  *
  * @param program  the assembled, pre-check program
  * @param env      the build-time constant environment (`CcEnv`)
- * @param mode     the backend's prune mode (native single-target vs C-monolith arch-defer)
- * @return         a fresh `Program` of the surviving items, in source order, or the honest-stop for an
- *                 `#arch`-guarded non-const item under the C-monolith backend
+ * @param mode     the backend's prune mode (native single-target vs C-monolith target-defer)
+ * @return         a fresh `Program` of the surviving items, in source order
  * @since §17
  */
-pub fn prune_cc(program: parser::Program, env: CcEnv, mode: PruneMode): parser::Program | error {
+pub fn prune_cc(program: parser::Program, env: CcEnv, mode: PruneMode): parser::Program {
     var kept: []parser::Item = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= program.items.len { break }
         var it = program.items[i]
-        var keep = match cc_keep_item(it, env, mode) { bool as b => b; error as e => return e }
-        if keep { kept = teko::list::push(kept, it) }
+        if cc_keep_item(it, env, mode) { kept = teko::list::push(kept, it) }
         i = i + 1
     }
     parser::Program { items = kept }
