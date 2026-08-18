@@ -137,12 +137,30 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   4. **BUFFER DE SAÍDA** (o `cb`/emissão de texto do codegen, o de 93%) → **literais + interpolação**
      (`$"..."`) / array de bytes literal. ZERO buffer que cresce; nada de stream nem coleção nova.
   (`typer.tks` `type_index_assign`, slice `[]T`, `loop var i in 0..n { xs[i] = … }` já suportam.)
+- **FORMA DO ARRAY FIXO — ZERO-FILL, `count` UNIVERSAL, dev trata (dono 2026-08-18, design FINAL).**
+  Header `{ptr, len}` (SEM `cap`, SEM ctrl, SEM tag). **`of_len<T>(n): []T` = `memset`-zero** — uma
+  passada, ZERO inflação de memória. Presença/"qual slot foi preenchido" = **`count`/watermark**
+  (universal, funciona pra TODO `T`): preenche contíguo `[0..count)`, corta `slice[0..count]`; o `count`
+  cai natural no loop. **`isset`/`trim`/`ctrl`-array/tag-null: DESCARTADOS** — `isset` não funciona pra
+  tipo-valor (`0` setado == `0` não-setado; e o ctrl-array inflaria), então `count` é a resposta única.
+  - **Slot tipo-VALOR** (número/byte/char/bool/string/struct-de-valores): zero = default VÁLIDO, leitura
+    de slot não-preenchido é segura (struct zerado é o "zero-value" do Go).
+  - **Slot REFERÊNCIA não-null:** `of_len` zera o ponteiro (null = sentinela natural de não-preenchido,
+    custo memória ZERO); **o dev preenche**. Ler `x[i]` com ponteiro zero → **PÂNICO em runtime**
+    `arquivo:linha:coluna: "causa"` (não segfault cru). O compilador auto-compilando conhece tudo →
+    preenche certo → nunca dispara; o guard é backstop pro usuário.
+- **RESEED ITERATIVO, o AGENTE faz (dono 2026-08-18):** o expurgo NÃO tem um reseed único no fim. É
+  `ENSINAR → SEED → SWEEP → SEED`, quantas voltas precisar. Staging do bootstrap: pra varrer consumidores
+  usando a forma nova, o `gen0` já precisa entendê-la → ensina a capacidade no `src/`, reseeda (gen0
+  ganha), varre os consumidores, reseeda de novo, repete. Como o **layout do elemento NÃO muda**
+  (zero-fill puro, sem tag), a transição é **escalonada-verde**: o `push` velho passa a produzir o header
+  novo e coexiste durante a migração; fixpoint gen2==gen3 a cada harvest.
 - **FASE 1 e 2 UNIFICADAS — EXPURGO TOTAL JÁ (dono 2026-08-18).** Não há interim: expurgar array
   dinâmico de uma vez. Superfície medida (recon 2026-08-18): **2698 `push` + 2202 `empty` + 11
   `grow_inplace` + 6 `with_cap` = 4917 sítios**. Núcleos: checker 1615, lir 877, build 652, backend
   633, parser 293, codegen 163. Aliasing a redesenhar (posse): `Env` (scope.tks), `LEnv` (6 arrays
   paralelos, lower.tks), `LowerCtx`, coleções `Dictionary`/`Map`/`Hashset`. Encenar por módulo,
-  fixpoint como guarda (conversão é preservante), **reseed uma vez no fim**.
+  fixpoint como guarda (conversão é preservante), **reseed ITERATIVO** (ensinar→seed→sweep→seed, acima).
 - **NADA em `teko_rt.c` PRO EXPURGO; sem novo `from "teko_rt"` (dono 2026-08-18).** O free-old em C era
   erro — abandonado (`perf/push-free-old`/`fase1-nopushes` descartadas). Estamos reescrevendo 100% em
   Teko: se runtime precisar, **transcreve pra Teko**, não patch no C. A máquina de slice-grow do C
