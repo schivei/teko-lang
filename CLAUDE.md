@@ -32,10 +32,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   (ex: `unexpected type`, `expected ':' after ')'`, `unsupported (os,arch)`). Sem novelas nem refs.
 - Retroativo, tree-wide. Mudança que toca o `teko.c` (mensagens, ou deslocamento de linha) exige reseed.
 - **Testes: não se escreve teste para o que o compilador exercita ao se compilar** — o fixpoint (self-build)
-  já é essa prova. REMOVER `.tkt`/regressões redundantes com o self-build (parser/checker/consteval/
-  codegen-C/LIR/emit-C sobre construções que o próprio compilador já usa). MANTER: genéricos/monomorph
-  (self-build = 0 instâncias), backend native, stdlib/runtime (crypto/numeric/net/…), casos de erro/edge
-  que o self-build não cobre. Na dúvida, LISTAR para revisão — não remover.
+  já é essa prova. A linguagem é MONÓLITO: a stdlib É o compilador — o self-build a compila E `gen1` a
+  EXECUTA em larga escala (o compilador chama `list`/`str`/`map`/`io`/`fs`/`arena`/… ao compilar). A prova
+  de "o compilador usa" está no próprio `src/` (se o código chama a função, ela é exercitada).
+  REMOVER `.tkt`/regressões redundantes: compilação de qualquer parte do monólito, e comportamento de toda
+  função que o `src/` chama. MANTER só o que o self-build genuinamente NÃO exercita: genéricos/monomorph
+  (self-build = 0 instâncias), backend native, comportamento de função que o compilador NUNCA chama ao
+  rodar, casos de erro/diagnóstico. Na dúvida, LISTAR para revisão — não remover.
 
 ## Convenções da linguagem/codebase
 - **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
