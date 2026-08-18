@@ -38,8 +38,8 @@ fn compute_loc(source: str, pos: u64): Loc {
     Loc { line = line; col = col }
 }
 
-fn stamp_loc(tok: Token, line: u32, col: u32): Token {
-    Token { kind = tok.kind; text = tok.text; line = line; col = col }
+fn stamp_loc(tok: Token, line: u32, col: u32, byte_off: u64, file: str): Token {
+    Token { kind = tok.kind; text = tok.text; line = line; col = col; byte_off = byte_off; file = file }
 }
 
 fn scan_err_at(source: str, pos: u64, msg: str): error {
@@ -121,7 +121,7 @@ fn read_doc_comment(source: str, pos: u64): Scan | error {
         if p + 1 >= source.len { return error { message = "unterminated doc comment" } }
         if source[p] == b'*' && source[p + 1] == b'/' {
             var end = p + 2
-            return Scan { token = Token { kind = TokenKind::Doc; text = slice(source, pos, end); line = 0; col = 0 }; next = end }
+            return Scan { token = Token { kind = TokenKind::Doc; text = slice(source, pos, end); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = end }
         }
         p++
     }
@@ -129,7 +129,7 @@ fn read_doc_comment(source: str, pos: u64): Scan | error {
 
 
 fn sym(source: str, pos: u64, n: u64, kind: TokenKind): Scan {
-    Scan { token = Token { kind = kind; text = slice(source, pos, pos + n); line = 0; col = 0 }; next = pos + n }
+    Scan { token = Token { kind = kind; text = slice(source, pos, pos + n); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = pos + n }
 }
 
 
@@ -159,7 +159,7 @@ fn read_number(source: str, pos: u64): Scan {
             }
             break
         }
-        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, h); line = 0; col = 0 }; next = h }
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, h); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = h }
     }
     if at(source, pos) == b'0' && (at(source, pos + 1) == b'b' || at(source, pos + 1) == b'B') && is_bin_body_start(at(source, pos + 2)) {
         var bp = pos + 2
@@ -172,7 +172,7 @@ fn read_number(source: str, pos: u64): Scan {
             }
             break
         }
-        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, bp); line = 0; col = 0 }; next = bp }
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, bp); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = bp }
     }
     var p = scan_digits(source, pos)
 
@@ -189,13 +189,13 @@ fn read_number(source: str, pos: u64): Scan {
     }
 
     if at(source, p) == b'b' && at(source, p + 1) == b'i' && !is_ident_continue(at(source, p + 2)) {
-        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p + 2); line = 0; col = 0 }; next = p + 2 }
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p + 2); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 2 }
     }
     if at(source, p) == b'd' && !is_ident_continue(at(source, p + 1)) {
-        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p + 1); line = 0; col = 0 }; next = p + 1 }
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p + 1); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 1 }
     }
 
-    Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p); line = 0; col = 0 }; next = p }
+    Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p }
 }
 
 fn is_bin_body_start(c: byte): bool {
@@ -209,7 +209,7 @@ fn read_ident(source: str, pos: u64): Scan {
         if !is_ident_continue(source[p]) { break }
         p++
     }
-    Scan { token = Token { kind = TokenKind::Ident; text = slice(source, pos, p); line = 0; col = 0 }; next = p }
+    Scan { token = Token { kind = TokenKind::Ident; text = slice(source, pos, p); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p }
 }
 
 fn read_underscore(source: str, pos: u64): Scan | error {
@@ -278,7 +278,7 @@ fn keyword_kind(text: str): TokenKind {
 fn keyword_or_ident(source: str, pos: u64): Scan {
     var s = read_ident(source, pos)
     var k = keyword_kind(s.token.text)
-    Scan { token = Token { kind = k; text = s.token.text; line = 0; col = 0 }; next = s.next }
+    Scan { token = Token { kind = k; text = s.token.text; line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = s.next }
 }
 
 
@@ -346,7 +346,7 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
                 if c == b'{' { depth = depth + 1; p++; continue }
                 if c == b'}' { if depth > 0 { depth = depth - 1 }; p++; continue }
                 if depth == 0 && str_close_at(source, p, multiline) {
-                    return Scan { token = Token { kind = TokenKind::Interp; text = slice(source, inner, p); line = 0; col = 0 }; next = p + delim }
+                    return Scan { token = Token { kind = TokenKind::Interp; text = slice(source, inner, p); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + delim }
                 }
                 p++
             }
@@ -372,10 +372,10 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
                         p = p + 2
                         continue
                     }
-                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 1 }
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 1 }
                 }
                 if str_close_at(source, p, true) {
-                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 3 }
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 3 }
                 }
             }
             bytes = teko::list::push(bytes, c)
@@ -394,14 +394,14 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
                 continue
             }
             if str_close_at(source, p, multiline) {
-                return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + delim }
+                return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + delim }
             }
             bytes = teko::list::push(bytes, c)
             p++
             continue
         }
         if str_close_at(source, p, multiline) {
-            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + delim }
+            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + delim }
         }
         if c == b'\\' {
             var e = match escape_byte(source, p) {
@@ -453,7 +453,7 @@ fn read_byte_lit(source: str, pos: u64): Scan | error {
         error as err => return err
     }
     if at(source, v.next) != b'\'' { return error { message = "expected closing ' in byte literal" } }
-    Scan { token = Token { kind = TokenKind::Byte; text = one_byte(v.value); line = 0; col = 0 }; next = v.next + 1 }
+    Scan { token = Token { kind = TokenKind::Byte; text = one_byte(v.value); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = v.next + 1 }
 }
 
 fn utf8_codepoint_len(b: byte): u64 {
@@ -482,7 +482,7 @@ fn read_char_lit(source: str, pos: u64): Scan | error {
     if bytes.len == 0 { return error { message = "empty char literal — a char must be exactly one codepoint" } }
     if !teko::text::valid_utf8(bytes) { return error { message = "invalid UTF-8 in char literal" } }
     if utf8_codepoint_len(bytes[0]) != bytes.len { return error { message = "char literal must be exactly one codepoint" } }
-    Scan { token = Token { kind = TokenKind::Char; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 1 }
+    Scan { token = Token { kind = TokenKind::Char; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 1 }
 }
 
 
@@ -566,6 +566,10 @@ fn next_token(source: str, pos: u64): Scan | error {
 
 
 pub fn tokenize(source: str): []Token | error {
+    tokenize_file(source, "")
+}
+
+pub fn tokenize_file(source: str, file: str): []Token | error {
     var pos: u64 = 0
     var tokens: []Token = teko::list::empty()
     var cur_pos: u64 = 0
@@ -591,7 +595,7 @@ pub fn tokenize(source: str): []Token | error {
         if c == b'/' && at(source, pos + 1) == b'*' {
             if at(source, pos + 2) == b'*' && at(source, pos + 3) != b'/' {
                 var scan = match read_doc_comment(source, pos) { Scan as sc => sc; error as e => return e }
-                tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col))
+                tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col, pos, file))
                 pos = scan.next
                 continue
             }
@@ -599,7 +603,7 @@ pub fn tokenize(source: str): []Token | error {
             continue
         }
         if c == b'\n' {
-            tokens = teko::mem::push_fo(tokens, stamp_loc(sym(source, pos, 1, TokenKind::Newline).token, cur_line, cur_col))
+            tokens = teko::mem::push_fo(tokens, stamp_loc(sym(source, pos, 1, TokenKind::Newline).token, cur_line, cur_col, pos, file))
             pos = pos + 1
             continue
         }
@@ -608,7 +612,7 @@ pub fn tokenize(source: str): []Token | error {
             Scan as sc => sc
             error as e => return e
         }
-        tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col))
+        tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col, pos, file))
         pos = scan.next
     }
 
