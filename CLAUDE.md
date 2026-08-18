@@ -123,14 +123,11 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   posicional `x[i] = y`** (a linguagem JÁ suporta: `typer.tks` `type_index_assign`, slice `[]T`;
   `loop var i in 0..n { xs[i] = … }`). Tamanho desconhecido: pré-alocar+cortar (`slice[0..n]`) ou
   builder amortizado in-place — NUNCA o `push` copy-grow. Index-assign passa de proibido a PREFERIDO.
-- **§16 — C hand-written CONGELADO (lei do dono, 2026-08-17):** `src/runtime/teko_rt.c`,
-  `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h` NÃO podem mais ser
-  editados/estendidos/patcheados. Toda função de runtime vira **superfície Teko** (`src/*.tks`)
-  emitida no `teko.c`, feita **à mão em Teko** (raw syscall no Linux) ou via **FFI da ABI do SO**
-  (macOS libSystem / Windows kernel32-ntdll). O `teko.c` fica **auto-contido** — TUDO dentro dele,
-  zero C hand-written linkado. A única mudança que esses arquivos recebem é **deleção** conforme
-  cada pedaço migra. Se um bug/gap aparece num deles, **migra pra Teko**, não corrige em C.
-  Mapa completo: `docs/design/plano-s16-expurgo-libc-completo.md`.
+- **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
+  `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
+  **PODEM ser editados** — corrigir bug de memória/correção em C é permitido (ex.: o fix do leak do
+  `tk_slice_push_r`). A migração C→Teko do §16 segue como **meta** do Doc-2 (`docs/design/
+  plano-s16-expurgo-libc-completo.md`), mas o C **não está congelado** no interim.
 - **§16 — SEM ATALHOS (lei do dono, 2026-08-17):** nenhum workaround/degrade no expurgo do C. Toda
   função de libc vira implementação **real** em Teko (raw syscall / FFI-da-ABI-do-SO). **Se existe em C,
   existe em Teko.** Rulings ratificadas R1–R5 em `docs/design/plano-s16-expurgo-libc-completo.md` §5.
