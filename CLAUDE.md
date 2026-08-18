@@ -96,11 +96,18 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 
 ## Leis de desenvolvimento (resumo — detalhe em docs/design/mudancas-superficie-0.3.1.md §11.2)
 - **TESTES SÓ NO CI.** `teko test .` local dá OOM (ninguém roda). Validação local =
-  **compilação** (`--no-verify --release`, `TEKO_BACKEND=c`, `ulimit -v 6815744`) +
+  **compilação** (`--no-verify --release`, `TEKO_BACKEND=c`, `TEKO_CC=clang`, `ulimit -v 6815744`) +
   <!-- guard subiu 6→6,5 GiB (dono 2026-08-18): o codegen do #os empurrou o virtual; residente
        segue ~flat. A construção da AST é suspeita do pico — a otimizar. -->
   <!-- linha de validação original abaixo mantém a métrica -->
   fixpoint (tc2==tc3) + cross-check offline.
+- **COMPILADOR C LOCAL = CLANG (dono 2026-08-18).** Todo agente e toda medição local usam **`TEKO_CC=clang`**
+  (e `CC=clang` para o caminho cru `scripts/build_gen1_from_c.sh` que linka o `teko.c` direto). Motivo-raiz: o
+  `cc` default no Linux é gcc, **patologicamente lento** no TU único de 22 MB do `teko.c` (medição de gcc levou
+  +20 min; clang faz em segundos). O CI já usa clang (`ci_cc_wrap.sh` shima `cc`→clang, `CC_UNDERLYING=clang`) —
+  então clang local **espelha o CI**. NÃO trocar o default `cc` dos scripts (o `ci_cc_wrap` depende de `cc` ser o
+  wrapper; trocar fura os sanitizers) — o override é por env. `teko` honra `TEKO_CC` antes do host `cc`
+  (`project.tks` `resolve_cc_choice`); Windows já força clang por construção.
 - **Forward-only, sem PR:** drenar para `fix/retirement` por ff/cherry-pick.
 - **PROVENANCE/reseed-via-CI = LEI REVOGADA (dono, revogada há tempo; reafirmado 2026-08-18).**
   O `provenance_gate` está **DESABILITADO** — o que os comentários do PROVENANCE dizem NÃO importa.
