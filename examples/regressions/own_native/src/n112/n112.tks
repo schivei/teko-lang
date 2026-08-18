@@ -1,87 +1,31 @@
-/**
- * n112 — the N112 region-lifetime regression: a by-address aggregate whose variant payload holds a
- * FAT-element slice (`[]str`), self-appended into a `[]Item` accumulator inside a VIRTUAL-MAIN loop,
- * then read back. A virtual-main opens NO frame region (`lower_virtual_main`), so a top-level
- * accumulator's base region is the loop's own PER-ITERATION body region; boxing the pushed element
- * (`tk_slice_elem_box`) there landed it in a region `close_loop_body` reclaims each turn, dangling
- * `one`'s by-address elements and faulting the read-back (the self-hosted `assemble_sel` gen2==gen3
- * crash class; probe `examples/probes/n112_assemble_sel_crash`). The self-append fallback now routes
- * such a growth to the ROOT (`enter_self_append_fallback`). `main.tks` builds the accumulator at the
- * top level — where the bug lives — and asserts `n112::readback` folds to 108.
- */
-
-/**
- * Func — one variant case payload carrying a FAT-element slice (`[]str`, elements are fat
- * `{ptr,len}` values), the shape that reproduces the by-address-element region-lifetime crash.
- */
 pub type Func = struct {
-    /** the function's name, a `str`. */
     fname: str
-    /** a slice of `str` — a FAT-element slice (16-byte `{ptr,len}` element stride). */
     body: []str
 }
 
-/**
- * TypeDecl — a SECOND aggregate case, also carrying a fat-element `[]str`. Two DISTINCT aggregate
- * cases are load-bearing: a single aggregate case does NOT reproduce the crash.
- */
 pub type TypeDecl = struct {
-    /** the type's name, a `str`. */
     tname: str
-    /** a slice of `str` — a FAT-element slice. */
     tbody: []str
 }
 
-/**
- * Kind — the variant with TWO aggregate cases plus a scalar case, mirroring `parser::ItemKind`. The
- * multi-aggregate-case shape is what makes the pushed aggregate's element box land in a reclaimed
- * scoped region.
- */
 pub type Kind = variant Func | TypeDecl | i64
 
-/**
- * Item — the pushed aggregate: a variant `content` followed by two trailing `str` fields, mirroring
- * `parser::Item = { content: ItemKind; namespace: str; file: str }`. The trailing `str` fields are
- * the read-back victims of a dangling by-address element pointer.
- */
 pub type Item = struct {
-    /** the variant payload (a `Kind`). */
     content: Kind
-    /** a trailing `str` field (A3 provenance analog). */
     namespace: str
-    /** a trailing `str` field (W-loc analog). */
     file: str
 }
 
-/**
- * make_func — build an `Item` whose `content` is a `Func` case carrying a two-element `[]str` body.
- *
- * @return  a fresh `Item` in the `Func` case
- */
 pub fn make_func(): Item {
     var f = Func { fname = "fn"; body = ["a", "b"] }
     Item { content = f; namespace = "ns"; file = "f.tks" }
 }
 
-/**
- * make_type — build an `Item` whose `content` is a `TypeDecl` case carrying a one-element `[]str`.
- *
- * @return  a fresh `Item` in the `TypeDecl` case
- */
 pub fn make_type(): Item {
     var t = TypeDecl { tname = "T"; tbody = ["x"] }
     Item { content = t; namespace = "ns"; file = "t.tks" }
 }
 
-/**
- * readback — the read-back victim: copy every element of the virtual-main-built `one` into a fresh
- * `merged` (reading `one[k].content` through the by-address element), then fold the trailing `str`
- * fields and each variant case's own fields. On a region-lifetime bug `one`'s elements dangle and this
- * either faults or folds to the wrong total; on a correct build it folds to 108.
- *
- * @param one  the `[]Item` accumulator built at virtual-main top level
- * @return     108 when every element survived and its fields read back intact
- */
 pub fn readback(one: []Item): i64 {
     var merged: []Item = teko::list::empty()
     var k: u64 = 0

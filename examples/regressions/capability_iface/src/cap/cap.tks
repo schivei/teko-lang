@@ -1,180 +1,42 @@
-/**
- * IEq — the local equality capability contract (§9.4): the mandated `__eq`/`__ne` pair. Declared in
- * the fixture so the ACCEPT project is self-contained, exercising the interface-operator parse (G2),
- * the contract counter-part obligation (G5/D1), and the generic dispatch surface (G4).
- *
- * @since capability_iface (§6 fixture)
- */
 type IEq = interface {
-    /**
-     * __eq — equality of two operands (§9 ruling 3, comparison → bool).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff equal
-     */
     operator __eq(left: self, right: self): bool
-    /**
-     * __ne — the mandated counter-part of `__eq` (§9 ruling 5).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff unequal
-     */
     operator __ne(left: self, right: self): bool
 }
 
-/**
- * NeByEq — the `__ne` reflection mixin: `!(left == right)`. A composer that writes `__eq` satisfies
- * IEq's counter-part by flattening this trait, without hand-writing `__ne` (G5 joint).
- *
- * @since capability_iface (§6 fixture)
- */
 type NeByEq = trait {
-    /**
-     * __ne — inequality by negating equality (the host provides `__eq`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff unequal
-     */
     operator __ne(left: self, right: self): bool { !(left == right) }
 }
 
-/**
- * IOrd — the local ordering capability contract (§9.4): the four comparators, each with its sealed §9
- * counter-part (`__lt`⟂`__ge`, `__gt`⟂`__le`), so the contract lists both sides of every pair.
- *
- * @since capability_iface (§6 fixture)
- */
 type IOrd = interface {
-    /**
-     * __lt — strictly-less-than, the primitive comparator the reflections derive from.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` orders before `right`
-     */
     operator __lt(left: self, right: self): bool
-    /**
-     * __gt — strictly-greater-than (reflection of `__lt`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` orders after `right`
-     */
     operator __gt(left: self, right: self): bool
-    /**
-     * __le — less-than-or-equal (negated swapped `__lt`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order after `right`
-     */
     operator __le(left: self, right: self): bool
-    /**
-     * __ge — greater-than-or-equal (negated `__lt`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order before `right`
-     */
     operator __ge(left: self, right: self): bool
 }
 
-/**
- * GtByLt — derive `__gt` from `__lt` by swapping operands, for an IOrd composer.
- *
- * @since capability_iface (§6 fixture)
- */
 type GtByLt = trait {
-    /**
-     * __gt — greater-than by reflecting less-than, `right < left`.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` orders after `right`
-     */
     operator __gt(left: self, right: self): bool { right < left }
 }
 
-/**
- * LeByLt — derive `__le` from `__lt`, `!(right < left)`, for an IOrd composer.
- *
- * @since capability_iface (§6 fixture)
- */
 type LeByLt = trait {
-    /**
-     * __le — less-than-or-equal by negating the swapped less-than.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order after `right`
-     */
     operator __le(left: self, right: self): bool { !(right < left) }
 }
 
-/**
- * GeByLt — derive `__ge` from `__lt`, `!(left < right)`, for an IOrd composer.
- *
- * @since capability_iface (§6 fixture)
- */
 type GeByLt = trait {
-    /**
-     * __ge — greater-than-or-equal by negating less-than.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff `left` does not order before `right`
-     */
     operator __ge(left: self, right: self): bool { !(left < right) }
 }
 
-/**
- * Point — a STRUCT carrying `operator __eq` and conforming to `IEq` with its `__ne` counter-part
- * flattened from `NeByEq` (§6 G1/G3/G5). Its `==`/`!=` dispatch to the struct's own operator.
- */
 type Point = struct IEq & NeByEq {
-    /** x — the abscissa. */
     x: i32
-    /** y — the ordinate. */
     y: i32
-    /**
-     * __eq — componentwise equality over the two `i32` fields.
-     *
-     * @param left   the left point
-     * @param right  the right point
-     * @return       true iff both components are equal
-     */
     operator __eq(left: self, right: self): bool { left.x == right.x && left.y == right.y }
 }
 
-/**
- * Money — a STRUCT carrying `operator __lt` and conforming to `IOrd` with the three reflections
- * flattened from `GtByLt`/`LeByLt`/`GeByLt` (§6 G1/G3). Its ordering operators dispatch to the derived
- * reflections over the written `__lt`.
- */
 type Money = struct IOrd & GtByLt & LeByLt & GeByLt {
-    /** c — the amount in minor units (cents). */
     c: i64
-    /**
-     * __lt — order by the underlying cent count.
-     *
-     * @param left   the left amount
-     * @param right  the right amount
-     * @return       true iff `left` has fewer cents than `right`
-     */
     operator __lt(left: self, right: self): bool { left.c < right.c }
 }
 
-/**
- * index_of — the generic capability probe (§6 G4): a `<T: IEq>` linear search whose `==` dispatches
- * through T's contract, concretized by the monomorph to the argument type's own operator.
- *
- * @param xs      the haystack
- * @param needle  the value sought
- * @return        the first index whose element equals `needle`, or -1
- */
 pub fn index_of<T: IEq>(xs: []T, needle: T): i32 {
     var i: i32 = 0
     loop {
@@ -184,24 +46,10 @@ pub fn index_of<T: IEq>(xs: []T, needle: T): i32 {
     }
 }
 
-/**
- * min2 — the generic ordering probe (§6 G4): a `<T: IOrd>` minimum whose `<` dispatches through T's
- * contract.
- *
- * @param a  the first value
- * @param b  the second value
- * @return   the lesser of `a` and `b`
- */
 pub fn min2<T: IOrd>(a: T, b: T): T {
     if a < b { a } else { b }
 }
 
-/**
- * op_struct_eq — a struct's own `==`/`!=` dispatch to `operator __eq` and the `NeByEq` `__ne` (G1/G3):
- * `P{1,2} == P{1,2}` (1) plus `P{1,2} != P{9,9}` (1) is 2.
- *
- * @return  2
- */
 pub fn op_struct_eq(): i64 {
     var a = Point { x = 1; y = 2 }
     var b = Point { x = 1; y = 2 }
@@ -211,12 +59,6 @@ pub fn op_struct_eq(): i64 {
     eq + ne
 }
 
-/**
- * generic_index_of — `index_of<Point>` over three points finds the middle one at index 1 (G4): the
- * generic `==` dispatches to `Point::__eq`.
- *
- * @return  1
- */
 pub fn generic_index_of(): i64 {
     var xs: []Point = teko::list::empty()
     xs = teko::list::push(xs, Point { x = 0; y = 0 })
@@ -225,12 +67,6 @@ pub fn generic_index_of(): i64 {
     index_of<Point>(xs, Point { x = 1; y = 1 }) to i64
 }
 
-/**
- * ne_by_eq — the negation counter-part REALLY dispatches (G5): `P0 != P1` is 1 and `P0 != P0` is 0,
- * summing to 1 through the `NeByEq` `!(left == right)` body.
- *
- * @return  1
- */
 pub fn ne_by_eq(): i64 {
     var p0 = Point { x = 0; y = 0 }
     var p1 = Point { x = 1; y = 1 }
@@ -239,12 +75,6 @@ pub fn ne_by_eq(): i64 {
     a + b
 }
 
-/**
- * ord_min2 — `min2<Money>` picks the smaller amount (G4) and the `GtByLt` reflection answers `>`:
- * `min2(5c, 3c).c` is 3 plus `M5 > M3` (1) is 4.
- *
- * @return  4
- */
 pub fn ord_min2(): i64 {
     var m5 = Money { c = 5 }
     var m3 = Money { c = 3 }

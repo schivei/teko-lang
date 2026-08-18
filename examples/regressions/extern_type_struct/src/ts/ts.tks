@@ -1,42 +1,10 @@
-/**
- * Timespec — the C `struct timespec` as a §16 `extern type … = struct` C-ABI layout: two 64-bit
- * words, header-less, so `tk_t_…Timespec`'s layout is byte-identical to libc's `struct timespec`.
- * This is the exact shape that C-compile-errored before C1: a same-shaped Teko `struct` carried a
- * `tk_struct_hdr __hdr` word, making a value fresh off `clock_gettime` un-storable (a nominally
- * distinct 24-byte type). As an `extern type = struct` there is ONE canonical header-less typedef.
- *
- * @field sec   seconds since the clock's epoch
- * @field nsec  nanoseconds within the second (0..999_999_999)
- * @since §16 (FFI foundation)
- */
 extern type Timespec = struct {
-    /** seconds since the clock's epoch */
     sec: i64
-    /** nanoseconds within the second (0..999_999_999) */
     nsec: i64
 }
 
-/**
- * clock_gettime — the raw POSIX clock read (libc-direct). Fills `*ts` for clock id `clk`. The `ts`
- * out-pointer is a `ref Timespec`: it lowers to `tk_t_…Timespec *`, and the caller passes a plain
- * local whose address the ref→ptr crossing emits as `&ts` — the header-less extern struct is the
- * `&`-able source that makes this expressible without a C compile error (the C1 keystone).
- *
- * @param clk  the clock id (0 == CLOCK_REALTIME on Linux/macOS)
- * @param ts   an out-pointer to a caller-owned `Timespec` the call fills
- * @return     0 on success, -1 on error (errno set — unread here)
- * @since §16 (FFI foundation)
- */
 extern fn clock_gettime(clk: i32, ts: ref Timespec): i32 = "clock_gettime" from "c"
 
-/**
- * realtime_seconds — read the wall-clock seconds through the extern struct and PROVE the value is
- * storable and readable: it owns a `Timespec`, passes its address to libc, then reads `ts.sec` back
- * into a plain `i64` (a value that fresh off the extern call would not have compiled before C1).
- *
- * @return  seconds since the Unix epoch (CLOCK_REALTIME); positive on any live system
- * @since §16 (FFI foundation)
- */
 pub fn realtime_seconds(): i64 {
     var ts: Timespec = Timespec { sec = 0 to i64; nsec = 0 to i64 }
     _ = clock_gettime(0, ts)

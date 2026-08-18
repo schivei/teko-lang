@@ -1,175 +1,64 @@
-/**
- * Stamp — a self-contained concrete mixin (§9.4): its OWN field `_id` plus a method reading it. The
- * backing lives in the trait (self-containment), so `self._id` resolves within the trait's surface.
- */
 type Stamp = trait {
-    /** _id — the mixin's own backing field, flattened into the composer. */
     _id: i64
-    /**
-     * tag — a bodied method reading the mixin field; after the fold `self` is the composing host.
-     *
-     * @return the backing scaled by ten
-     */
     fn tag(): i64 { self._id * 10 }
 }
 
-/**
- * Post — a struct composing `Stamp`: the flattened `_id` field and `tag` method become Post's own.
- */
 type Post = struct Stamp { }
 
-/**
- * flatten_self_host — construct a `Post` and call the flattened trait method; `self._id` resolves to
- * the host's flattened field (§9.4 flatten + self=host).
- *
- * @return `Post { _id = 4 }.tag()`, i.e. 40
- */
 pub fn flatten_self_host(): i64 {
     var p = Post { _id = 4 }
     p.tag()
 }
 
-/**
- * Sealed — a mixin carrying a `static fn` that computes a constant. It flattens into the composer as
- * a static method callable through the host (`Host::seven()`). (This scenario proves static-fn
- * flattening on its own; a `static fn` returning `self` and constructing it via `.{ … }` is exercised
- * by the dedicated `dot_construction` regressor, §4.1.)
- */
 type Sealed = trait {
-    /**
-     * seven — a flattened static factory computing a constant.
-     *
-     * @return 7
-     */
     static fn seven(): i64 { 7 }
 }
 
-/**
- * SealedHost — a struct composing `Sealed`: it gains the `seven` static factory.
- */
 type SealedHost = struct Sealed { }
 
-/**
- * static_factory — call the flattened `static fn` through the composing host (§9.4 static factory).
- *
- * @return `SealedHost::seven()`, i.e. 7
- */
 pub fn static_factory(): i64 {
     SealedHost::seven()
 }
 
-/**
- * DiaBase — the shared base mixin of the diamond: a single bodied method.
- */
 type DiaBase = trait {
-    /**
-     * k — the shared method reached by two composition paths.
-     *
-     * @return 7
-     */
     fn k(): i64 { 7 }
 }
 
-/**
- * DiaLeft — a mixin composing `DiaBase` and adding nothing (one arm of the diamond).
- */
 type DiaLeft = trait & DiaBase { }
 
-/**
- * DiaRight — a mixin composing `DiaBase` and adding nothing (the other arm of the diamond).
- */
 type DiaRight = trait & DiaBase { }
 
-/**
- * Diamond — a struct composing BOTH arms: `DiaBase::k` reaches it by two paths with identical AST,
- * so the fold absorbs it once (§9.4 idempotent diamond) rather than reporting a conflict.
- */
 type Diamond = struct DiaLeft & DiaRight { }
 
-/**
- * diamond_absorb — call the once-absorbed diamond method (§9.4 idempotent diamond).
- *
- * @return `Diamond { }.k()`, i.e. 7
- */
 pub fn diamond_absorb(): i64 {
     var d = Diamond { }
     d.k()
 }
 
-/**
- * VBase — a mixin with a field and a reader method.
- */
 type VBase = trait {
-    /** _v — the mixin's own field. */
     _v: i64
-    /**
-     * v — read the mixin field.
-     *
-     * @return the backing `_v`
-     */
     fn v(): i64 { self._v }
 }
 
-/**
- * VExt — a mixin COMPOSING `VBase`, whose method calls `self.v()` of the composed trait
- * (self-containment extends to what a trait composes, §9.4).
- */
 type VExt = trait & VBase {
-    /**
-     * twice — call the composed trait's `v()` and double it.
-     *
-     * @return `self.v() * 2`
-     */
     fn twice(): i64 { self.v() * 2 }
 }
 
-/**
- * VHost — a struct composing `VExt`, which transitively brings `VBase`'s field and method.
- */
 type VHost = struct VExt { }
 
-/**
- * compose_trait — construct a `VHost` and call the transitively-composed method (§9.4
- * trait-composes-trait).
- *
- * @return `VHost { _v = 5 }.twice()`, i.e. 10
- */
 pub fn compose_trait(): i64 {
     var h = VHost { _v = 5 }
     h.twice()
 }
 
-/**
- * Greeter — a mixin with a single bodied method, composed into a `service` to prove a trait flattens
- * into a service host too (§9.4 flatten in service).
- */
 type Greeter = trait {
-    /**
-     * hello — the flattened method the service exposes.
-     *
-     * @return 42
-     */
     fn hello(): i64 { 42 }
 }
 
-/**
- * GreetSvc — a singleton service COMPOSING `Greeter`: the flattened `hello` becomes the service's
- * own method, resolvable through `svc<GreetSvc>()`.
- */
 type GreetSvc = service singleton & Greeter {
-    /**
-     * ctor — the IService factory.
-     *
-     * @return a fresh `GreetSvc`
-     */
     pub static fn ctor(): GreetSvc { return GreetSvc { } }
 }
 
-/**
- * service_compose — resolve the service and call its flattened trait method (§9.4 flatten in service).
- *
- * @return `svc<GreetSvc>().hello()`, i.e. 42
- */
 pub fn service_compose(): i64 {
     return svc<GreetSvc>().hello()
 }

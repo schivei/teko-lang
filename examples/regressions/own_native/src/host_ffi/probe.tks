@@ -1,28 +1,3 @@
-/**
- * host_ffi — the own-native probe for the aggregate-returning host FFI (0.3.1.0 degrau 34/35),
- * folded into the umbrella own-native project so it costs no extra build (owner ruling: reuse an
- * existing regression project, never a new `.tkp`).
- *
- * WHAT IT PINS. `teko::env::var`/`env::cwd`/`io::read_file`/`fs::list_dir` each return a struct
- * wider than one register (`tk_ffi_sres` is 40 bytes → SysV MEMORY class → SRET; `tk_ffi_slres`
- * likewise), and the native backend's `LCall` captures ONE result register — so the generic call
- * path handed the callee no SRET pointer and it wrote its result over garbage (measured: gen2
- * SIGSEGV'd in `tk_rt_getenv` at startup). The fix routes each to an own-register `tk_rt_*_ok` twin
- * (`teko_rt.{c,h}`) carrying the ok/err flag as a single-register `bool` and the active case's
- * `(ptr, len)` through two out-parameters. This standalone project reaches the surface through the
- * checker's host-surface builtins (`builtin_hostffi_variant_symbol`), the SAME twin lowering the
- * compiler's own `extern fn` declarations take.
- */
-
-/**
- * score — exercise every Variant-returning host FFI shape and return a disjoint weighted sum, so a
- * mis-marshalled `(ptr, len)` in any single arm moves the number instead of passing. `read_file`/
- * `env::var`/`list_dir` take their ERROR arm and each compares the runtime's exact failure message
- * (a wrong out-slot pointer or length fails the compare and drops the weight); `env::cwd` takes its
- * SUCCESS arm (the working directory's `str` value marshals back through the same out-slots).
- *
- * @return  60 (4 + 8 + 16 + 32) when every shape marshals correctly
- */
 pub fn score(): i64 {
     var s: i64 = 0
     match teko::io::read_file("definitely-absent-ffi-probe.xyz") {
@@ -44,23 +19,6 @@ pub fn score(): i64 {
     s
 }
 
-/**
- * error_union_score — exercise the `null | error` (0.3.1 `Variant{Null,Error}`) host FFI shapes
- * through the SAME no-`use`-import fallback path `score()` above exercises for the `str | error`
- * shapes: `teko::checker::host_error_optional` (`src/checker/scope.tks`), consulted only when no
- * local extern declaration for the callee is in scope (the compiler's own project always resolves
- * through its discovered externs first — `scope.tks` doc-comment). This is the O2 crumb of the
- * `checker::Optional` retirement (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md`
- * §3.1): `host_error_optional` used to return `Optional{Error}`, now `Variant{Null,Error}`. `mkdir`/
- * `write_file` each take BOTH arms — the SUCCESS (`null`) arm on a fresh path this probe owns, the
- * FAILURE (`error`) arm on a path whose parent directory does not exist, each comparing the
- * runtime's exact failure message — so a mis-migrated fallback return moves this number instead of
- * passing quietly. `remove_file` cleans up what this probe created (its own success arm), leaving
- * no debris.
- *
- * @return  63 (1 + 2 + 4 + 8 + 16 + 32) when every arm marshals and narrows correctly
- * @since 0.3.1 (retire-Optional O2)
- */
 pub fn error_union_score(): i64 {
     var s: i64 = 0
     match teko::fs::mkdir("host_ffi_error_union_probe_dir") {

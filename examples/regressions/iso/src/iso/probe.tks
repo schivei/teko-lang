@@ -1,68 +1,27 @@
-/**
- * MARK_ID — the coverage id the writer test marks and the reader test counts. A shared constant so
- * the two simulated tests name the SAME sink entry; the point is whether the reader sees the mark.
- */
 const MARK_ID: u64 = 7
 
-/**
- * test_writer — the simulated `#test` that DIRTIES the per-task coverage sink: it enters under the
- * same `task_reset()` the gate applies at every `#test` boundary (E1-C3), then marks an id. The reset
- * is what a real gate does in `tk_test_begin`; calling it here reproduces the boundary exactly.
- *
- * @return void
- * @since 0.3.1.0
- */
 fn test_writer() {
     task_reset()
     cov_mark(MARK_ID)
 }
 
-/**
- * test_reader — the simulated `#test` that reads the coverage sink WITHOUT marking it, and reports the
- * count of distinct marks. It too enters under `task_reset()`, so any residue a neighbouring writer
- * left is gone before it looks — the reader is hermetic by construction, not by ordering luck.
- *
- * @return the number of distinct marks the sink holds (0 for the correct, hermetic result)
- * @since 0.3.1.0
- */
 fn test_reader(): u64 {
     task_reset()
     cov_distinct()
 }
 
-/**
- * reader_after_writer — the writer test THEN the reader test (order A -> B). The reader must still
- * count 0: its own entry `task_reset()` clears the mark the writer just recorded.
- *
- * @return the reader's count in this order
- * @since 0.3.1.0
- */
 fn reader_after_writer(): u64 {
     test_writer()
     test_reader()
 }
 
-/**
- * reader_before_writer — the reader test THEN the writer test (order B -> A), the reshuffled order.
- * The reader runs first, so there is nothing to leak; the count must match the other order exactly.
- *
- * @return the reader's count in this order
- * @since 0.3.1.0
- */
 fn reader_before_writer(): u64 {
     var count = test_reader()
     test_writer()
     count
 }
 
-/**
- * probe — run the writer/reader pair in BOTH orders and fold the two counts into one stdout line. A
- * hermetic reader answers 0 both times, so the expected line is stable and order-independent; any
- * non-zero would name the leak the axis removes.
- *
- * @return the fixed token when both orders count 0, else a FAIL token naming the order that leaked
- * @since 0.3.1.0
- */
+/** Runs the writer/reader pair in both orders; returns a stable token when both counts are 0, else a FAIL token naming the leaking order. */
 exp fn probe(): str {
     var ab = reader_after_writer()
     var ba = reader_before_writer()

@@ -1,24 +1,10 @@
-/** WORKERS — the number of contending threads (plano §10 §8 T3: M=8). */
 pub const WORKERS: i64 = 8
-/** ITERS — locked increments each worker performs (plano §10 §8 T3: K=10000). */
 pub const ITERS: i64 = 10000
-/** POLL_LIMIT — bounded spins the main thread waits for all workers to finish before failing. */
 pub const POLL_LIMIT: i64 = 2000000000
-/** MUTEX_OFF — byte offset of the futex mutex word within the shared page. */
 pub const MUTEX_OFF: u64 = 0
-/** COUNTER_OFF — byte offset of the shared 64-bit counter within the shared page. */
 pub const COUNTER_OFF: u64 = 8
-/** DONE_OFF — byte offset of the 32-bit completed-worker counter within the shared page. */
 pub const DONE_OFF: u64 = 16
 
-/**
- * raw_mmap — map `length` bytes of anonymous private read/write memory via the raw `mmap` syscall,
- * the shared page every worker's mutex/counter lives in. Returns the page-aligned base, or 0 when
- * the kernel refuses (a result in the `[-4095, -1]` `-errno` band).
- *
- * @param length  the mapping size in bytes (rounded up to whole pages by the kernel)
- * @return        the base address, or 0 on failure
- */
 pub fn raw_mmap(length: u64): u64 {
     var r = teko::sys::syscall6(teko::sys::SYS_MMAP, 0, length to i64,
         teko::sys::PROT_READ | teko::sys::PROT_WRITE,
@@ -27,18 +13,6 @@ pub fn raw_mmap(length: u64): u64 {
     r to u64
 }
 
-/**
- * worker — one contending thread: increment the shared counter `iters` times, each increment held
- * under the CANONICAL `teko::runtime::mtx_lock`/`mtx_unlock` futex mutex, then bump the
- * completed-worker word so the main thread's poll observes this worker finished. `blk` reached this
- * thread BY COPY across the spawn boundary (a scalar address into the shared mmap page every thread
- * of the process sees), so the counter it fights over is the same physical word for every worker — a
- * correct final total is the mutex's mutual-exclusion proof.
- *
- * @param blk    the shared page's base address (spawn-copied scalar)
- * @param iters  how many locked increments this worker performs
- * @return       nothing
- */
 pub fn worker(blk: u64, iters: i64) {
     var mutex = blk + MUTEX_OFF
     var counter = blk + COUNTER_OFF
