@@ -126,24 +126,41 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 - **NO PUSHES (LEI DURA, dono 2026-08-18) — inverte o antigo W15 "no index-assign".** Array é
   IMUTÁVEL; `teko::list::push`/`empty()`-em-loop está **PROIBIDO** — é a RAIZ dos 93% de memória
   (profiler `tk_obs`: `tk_slice_push_r` = 4980 MB = 93%, 20,3M copy-grows que vazam na arena `root`
-  nunca-liberada). Construir array por **LITERAL** ou por **pré-alocação de `[]T` + atribuição
-  posicional `x[i] = y`** (a linguagem JÁ suporta: `typer.tks` `type_index_assign`, slice `[]T`;
-  `loop var i in 0..n { xs[i] = … }`). Tamanho desconhecido: **pré-alocar limite superior + cortar
-  (`slice[0..n]`)**, ou **duas passadas** (contar `n`, depois pré-alocar `[]T` de `n` e preencher por
-  índice). Index-assign passa de proibido a PREFERIDO.
+  nunca-liberada). Index-assign passa de proibido a PREFERIDO. **AS 4 NATUREZAS E COMO CONVERTER
+  (rulings dono 2026-08-18, sobre código real — NENHUM sítio é impossível, tudo é calculável):**
+  1. **MAP** (um item por elemento da fonte) → tamanho = `fonte.len`; pré-aloca `[]T` de `fonte.len` +
+     `loop i { xs[i] = f(fonte[i]) }`.
+  2. **PARSE/SCAN** (split, tokenizar — `n` sai de varrer) → **dois loops**: 1º só conta `n`, 2º
+     pré-aloca `[]T` de `n` e grava por índice.
+  3. **FILTRO** (subconjunto — `push` condicional) → **começa pelo maior (alargar)**: pré-aloca o
+     limite superior (`fonte.len`), grava os que encaixam num `count`, corta `slice[0..count]`.
+  4. **BUFFER DE SAÍDA** (o `cb`/emissão de texto do codegen, o de 93%) → **literais + interpolação**
+     (`$"..."`) / array de bytes literal. ZERO buffer que cresce; nada de stream nem coleção nova.
+  (`typer.tks` `type_index_assign`, slice `[]T`, `loop var i in 0..n { xs[i] = … }` já suportam.)
+- **FASE 1 e 2 UNIFICADAS — EXPURGO TOTAL JÁ (dono 2026-08-18).** Não há interim: expurgar array
+  dinâmico de uma vez. Superfície medida (recon 2026-08-18): **2698 `push` + 2202 `empty` + 11
+  `grow_inplace` + 6 `with_cap` = 4917 sítios**. Núcleos: checker 1615, lir 877, build 652, backend
+  633, parser 293, codegen 163. Aliasing a redesenhar (posse): `Env` (scope.tks), `LEnv` (6 arrays
+  paralelos, lower.tks), `LowerCtx`, coleções `Dictionary`/`Map`/`Hashset`. Encenar por módulo,
+  fixpoint como guarda (conversão é preservante), **reseed uma vez no fim**.
+- **NADA em `teko_rt.c` PRO EXPURGO; sem novo `from "teko_rt"` (dono 2026-08-18).** O free-old em C era
+  erro — abandonado (`perf/push-free-old`/`fase1-nopushes` descartadas). Estamos reescrevendo 100% em
+  Teko: se runtime precisar, **transcreve pra Teko**, não patch no C. A máquina de slice-grow do C
+  (`tk_slice_push_r`/`grow_inplace`/`with_cap`) vira **código morto a REMOVER** com o expurgo.
 - **`grow_inplace` É WORKAROUND — PROIBIDO (dono 2026-08-18).** Manutenção de array é **100% MANUAL**.
   `teko::list::grow_inplace(ref x, …)` é da MESMA classe do `push` (copy-grow amortizado escondido) —
   banido junto. Nada de primitivo de crescimento; só literal / pré-alocação + `x[i]=y` / limite+corte /
-  duas passadas. (`grow_inplace`/`with_cap`/`tk_slice_push_r` viram legacy a varrer na Fase 2.)
+  duas passadas. (`grow_inplace`/`with_cap`/`tk_slice_push_r` = código morto REMOVIDO no expurgo total.)
 - **`ref []T` = SÓ ponteiro-de-posição (dono 2026-08-18).** Serve para **operar o ponteiro de UMA
   posição do array sem cópia** (`a[i]` como ref/escrita in-place). **NÃO** aceita crescer (push/grow) nem
   reatribuir o array inteiro (`a = […]` → arena do callee → segfault). Substituir o array = construir
   cópia local e **retornar ao caller** (DPS, arena do caller).
 - **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
   `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
-  **PODEM ser editados** — corrigir bug de memória/correção em C é permitido (ex.: o fix do leak do
-  `tk_slice_push_r`). A migração C→Teko do §16 segue como **meta** do Doc-2 (`docs/design/
-  plano-s16-expurgo-libc-completo.md`), mas o C **não está congelado** no interim.
+  **PODEM ser editados** para bug de memória/correção em C. **PORÉM (dono 2026-08-18): o expurgo de
+  array dinâmico NÃO passa por `teko_rt.c`** — a máquina de slice-grow do C não é patchada, é REMOVIDA;
+  o que sobrar de runtime de array mora em Teko (o free-old em C foi abandonado). A migração C→Teko do
+  §16 segue como **meta** do Doc-2 (`docs/design/plano-s16-expurgo-libc-completo.md`).
 - **§16 — SEM ATALHOS (lei do dono, 2026-08-17):** nenhum workaround/degrade no expurgo do C. Toda
   função de libc vira implementação **real** em Teko (raw syscall / FFI-da-ABI-do-SO). **Se existe em C,
   existe em Teko.** Rulings ratificadas R1–R5 em `docs/design/plano-s16-expurgo-libc-completo.md` §5.
