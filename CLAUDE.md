@@ -19,6 +19,17 @@ conversa com o dono é PT-BR.)
   que ele manda e pensar JUNTO — não sair executando por cima nem ignorar as
   mensagens dele.
 
+## Estilo de código (LEI DURA, dono 2026-08-18) — CLAREZA, MENOS TEXTO
+Explicações moram em documentação canônica (`docs/design/`), NUNCA no código.
+- **Mensagens de erro/log = estilo compilador padrão:** `arquivo:linha:coluna: <causa curta>`
+  (ex: `unexpected type`, `expected ':' after ')'`). PROIBIDO: novelas, história,
+  referências a §/#/crumbs/planos, justificativa de "por que a arquitetura mudou".
+- **Comentários inline `//` em `.tks`/`.tkt`: PROIBIDOS.** Remover todos.
+- **Doc comments (`/** */`): curtos, claros, concisos.** Só o que a assinatura não diz.
+  PROIBIDO: referências a documentos (§/#/plano), explicações longas, história.
+- Vale retroativo: limpeza total tree-wide. Mudança que toca o `teko.c` (mensagens, ou
+  deslocamento de linha por comentário) exige reseed.
+
 ## Convenções da linguagem/codebase
 - **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
 - **Tipagem forte explícita na codebase do Teko** (via flag `--explicit`,
