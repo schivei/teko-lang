@@ -23,6 +23,17 @@
 # same file is this train's own harvested OUTPUT, presence means nothing and a versioned
 # declaration (`bootstrap/DEGRAU`, see scripts/degrau.sh) means everything.
 #
+# WHEN A DEGRAU IS DECLARED IT IS THE SEED — FORCED — AND ITS FAILURE IS FATAL. Owner ruling
+# 2026-08-18 (CLAUDE.md "PROVENANCE/reseed"): provenance is REVOKED. A declared `bootstrap/DEGRAU`
+# short-circuits the ENTIRE chain below — the released seed, the committed host seed and the pinned
+# SHA ladder are NEVER tried. `bootstrap/teko.c` is compiled straight into gen0 and `gen0_to_gen1`
+# doubles it to gen1. If that gen0 cannot build the tip, the script EXITS NON-ZERO on the spot: no
+# release probe, no ladder, no version-old seed. The release predates this tree's syntax (it dies on
+# the retired `T?`/`i128`/`Ref<T>`), so falling back to it only buries the real failure under the
+# wrong one and, worse, would publish gen0 from the release instead of from this tree's own compiler.
+# The degrau ends by DELETING `bootstrap/DEGRAU` the day the released seed reaches the tip again —
+# never by a silent fallback. Everything from the FAST PATH down is reached ONLY with no degrau.
+#
 # INVARIANT (owner ruling 2026-07-24, replacing the older "seed builds the tip" rule): the
 # released seed only has to build the PR's BASE lineage. A compiler built from an ancestor is
 # itself a valid seed for a newer commit, so when the RAW released seed cannot compile the tip
@@ -296,7 +307,7 @@ declared_degrau_rung() {
     MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm=""; deg_tgt="--target=x86_64-pc-windows-msvc"; deg_pthread="" ;;
   esac
   if ! command -v "$deg_cc" >/dev/null 2>&1; then
-    log "rung -1: a degrau is declared at $cc_src but no $deg_cc is on PATH — skipping"
+    log "rung -1: a degrau is declared at $cc_src but no $deg_cc is on PATH — the forced seed cannot be built"
     return 1
   fi
   cc_out="$PWD/.rung-c"
@@ -311,7 +322,7 @@ declared_degrau_rung() {
         -I src/runtime -I src/assert \
         "$cc_src" src/runtime/teko_rt.c src/assert/assert.c $deg_libm \
         -o "$cc_out/teko" >"$cc_log" 2>&1; then
-    log "rung -1: the declared C did not compile — skipping to the next rung. cc said:"
+    log "rung -1: the declared C did not compile — the forced seed cannot be built. cc said:"
     sed 's/^/teko-ci:   | /' "$cc_log" >&2
     rm -f "$cc_log"
     return 1
@@ -320,7 +331,7 @@ declared_degrau_rung() {
   log "rung -1: degrau compiler ready ($("$cc_out/teko" --version 2>&1 | head -n1))"
   cc_tip_log="$(mktemp)"
   if ! build_project "$cc_out/teko" "$PWD" "$OUT_DIR" "$cc_tip_log" "$PWD/src/runtime"; then
-    log "rung -1: the degrau's compiler could not build the tip — skipping to the next rung."
+    log "rung -1: the degrau's compiler could not build the tip — the forced seed does not reach it."
     log "----- tip build with the declared-C compiler (failure) -----"
     sed 's/^/teko-ci:   | /' "$cc_tip_log" >&2
     rm -f "$cc_tip_log"
@@ -333,17 +344,35 @@ declared_degrau_rung() {
   return 0
 }
 
-# THE DECLARED DEGRAU RUNS BEFORE THE SEED IS EVEN TRIED, and that ordering is the point rather
-# than an optimization. A degrau is only ever DECLARED because the released seed cannot build this
-# tip — that is what the declaration asserts — so trying the seed first is a failure we have
-# already paid for and already know the answer to. Measured, back when the file's presence was the
-# criterion: the seed's doomed attempt walks the checker to item 784 before dying on B.22, ~94s per
-# job, six jobs, every push. What ends the detour now is DELETING THE DECLARATION (owner:
-# *"podemos apagar o teko.c e voltar a construcao normal"*), not changing this ordering.
-if declared_degrau_rung; then
-  gen0_to_gen1 "rung -1 (the declared degrau)" || exit 1
-  exit 0
+# THE DECLARED DEGRAU IS THE SEED — FORCED — AND ITS FAILURE IS FATAL (owner ruling 2026-08-18,
+# CLAUDE.md "PROVENANCE/reseed"). Provenance is REVOKED: when `bootstrap/DEGRAU` is declared, the C
+# it names IS gen0's seed, used DIRECTLY, and the published release and the pinned SHA ladder are
+# NOT tried at all — not before it, not after it. A degrau is only ever DECLARED because the
+# released seed cannot build this tip, so "fall back to the release when the degrau fails" would
+# fall back to a seed we already know is broken, wear the fixpoint green by detour, and — worst —
+# publish gen0 from the 0.3.0.31 release instead of from this tree's own current-syntax compiler.
+# Measured on PR #110: the fall-through did exactly that, and the release died on `T?`/`i128`/`Ref<T>`
+# because it predates their removal. So when a degrau is declared and it cannot build the tip, CI
+# FAILS HERE, IMMEDIATELY, WITHOUT PROBING ANYTHING OLDER. What ends the degrau is DELETING THE
+# DECLARATION the day the released seed reaches the tip again — never a silent fallback.
+if [ "$DEGRAU_RC" = "0" ]; then
+  if declared_degrau_rung; then
+    gen0_to_gen1 "rung -1 (the DECLARED degrau — forced seed)" || exit 1
+    exit 0
+  fi
+  log "FATAL: a degrau is DECLARED ($DEGRAU_FILE) — it IS the forced seed — but it could not build"
+  log "the tip (the failure is above). Owner ruling 2026-08-18: with a declared degrau there is NO"
+  log "fallback to the published release and NO pinned ladder; the release predates this tree's"
+  log "syntax and probing it would only report the wrong failure while burying this one."
+  log "Fix bootstrap/teko.c so it compiles this tree, or DELETE bootstrap/DEGRAU to return to the"
+  log "normal released-seed chain."
+  exit 1
 fi
+
+# ── NO DEGRAU DECLARED: THE NORMAL RELEASED-SEED CHAIN, UNCHANGED, RUNS BELOW ──────────────────
+# Everything from here down (fast-path release, rung 0 committed seed, the pinned SHA ladder) is
+# reached ONLY when no degrau is declared. With a degrau declared, the block above has already
+# either produced gen1 or failed the run — it never reaches this point.
 
 # THE SEED MUST EXIST BEFORE IT CAN FAIL. With no degrau declared, the published release IS the
 # chain's first link — so a missing seed is not a slow path, it is a broken premise, and the
