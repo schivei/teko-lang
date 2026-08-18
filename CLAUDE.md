@@ -74,6 +74,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   compila código VÁLIDO, nunca dispara os caminhos de rejeição) e comportamento de função que o compilador
   NUNCA chama ao rodar. Na dúvida, LISTAR para revisão — não remover.
 
+## Triagem de CI (PR #110 = fix/retirement) — dono 2026-08-18
+- **Falha em `fixpoint (native)` → ESPERADA** (native para no DEGRAU), não é problema real.
+- **Falha em `produce this leg` (C ou native) → FALHA REAL.** Ler o step com `head=100` (as primeiras
+  ~100 linhas — a CAUSA está no topo; o tail é só limpeza de git).
+- Assinar o CI do PR #110 (`subscribe_pr_activity`) DEPOIS de drenar C + toda a limpeza + reseed, para
+  verificar/corrigir as pernas.
+
 ## Convenções da linguagem/codebase
 - **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
 - **Tipagem forte explícita na codebase do Teko** (via flag `--explicit`,
