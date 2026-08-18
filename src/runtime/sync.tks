@@ -5,34 +5,184 @@
 const INT_MAX: i64 = 2147483647
 
 /**
+ * os_sync_wait_on_address — libSystem `int os_sync_wait_on_address(void *addr, uint64_t value,
+ * size_t size, os_sync_wait_on_address_flags_t flags)`: block the calling thread while the `size`
+ * bytes at `addr` still equal `value`. With `size == 4` this is the exact semantics of the 32-bit
+ * futex wait. The public, documented macOS 14.4+ wait/wake-by-address API (NOT the private
+ * `__ulock_*`); `addr`/`value`/`size` pass in integer registers (arm64 ABI), hence `u64`, and
+ * `flags` is a 32-bit enum, hence `u32`.
+ *
+ * @param addr   the 32-bit futex word's address
+ * @param value  the value the word must still hold (compared over `size` bytes)
+ * @param size   the byte count to compare (4)
+ * @param mode   `OS_SYNC_WAIT_ON_ADDRESS_NONE` (0)
+ * @return       the count of remaining waiters, or -1 on error — discarded
+ */
+#os("macos")
+extern fn os_sync_wait_on_address(addr: u64, value: u64, size: u64, mode: u32): i32 = "os_sync_wait_on_address" from "System"
+
+/**
+ * os_sync_wake_by_address_any — libSystem `int os_sync_wake_by_address_any(void *addr, size_t size,
+ * os_sync_wake_by_address_flags_t flags)`: wake ONE thread blocked on the word at `addr`.
+ *
+ * @param addr   the 32-bit futex word's address
+ * @param size   the byte count (4)
+ * @param mode   `OS_SYNC_WAKE_BY_ADDRESS_NONE` (0)
+ * @return       0 on success, or -1 on error — discarded
+ */
+#os("macos")
+extern fn os_sync_wake_by_address_any(addr: u64, size: u64, mode: u32): i32 = "os_sync_wake_by_address_any" from "System"
+
+/**
+ * os_sync_wake_by_address_all — libSystem `int os_sync_wake_by_address_all(void *addr, size_t size,
+ * os_sync_wake_by_address_flags_t flags)`: wake EVERY thread blocked on the word at `addr`.
+ *
+ * @param addr   the 32-bit futex word's address
+ * @param size   the byte count (4)
+ * @param mode   `OS_SYNC_WAKE_BY_ADDRESS_NONE` (0)
+ * @return       0 on success, or -1 on error — discarded
+ */
+#os("macos")
+extern fn os_sync_wake_by_address_all(addr: u64, size: u64, mode: u32): i32 = "os_sync_wake_by_address_all" from "System"
+
+/**
+ * WaitOnAddress — kernel32 `BOOL WaitOnAddress(volatile VOID *Address, PVOID CompareAddress,
+ * SIZE_T AddressSize, DWORD dwMilliseconds)`: block while the `size` bytes at `addr` equal the
+ * bytes at `compare`. Pointers pass in integer registers (x86_64 ABI), hence `u64`; unlike the
+ * macOS API the expected value is passed BY ADDRESS, so the caller supplies a scratch word.
+ *
+ * @param addr     the futex word's address
+ * @param compare  the address of a word holding the expected value (scratch)
+ * @param size     the byte count to compare (4)
+ * @param ms       the timeout in milliseconds (`WIN_INFINITE` blocks forever)
+ * @return         non-zero on wake, 0 on timeout/error — discarded
+ */
+#os("windows")
+extern fn WaitOnAddress(addr: u64, compare: u64, size: u64, ms: u32): i32 = "WaitOnAddress" from "synchronization"
+
+/**
+ * WakeByAddressSingle — kernel32 `void WakeByAddressSingle(PVOID Address)`: wake ONE waiter parked
+ * in `WaitOnAddress` on the word at `addr`.
+ *
+ * @param addr  the futex word's address
+ * @return      nothing
+ */
+#os("windows")
+extern fn WakeByAddressSingle(addr: u64) = "WakeByAddressSingle" from "synchronization"
+
+/**
+ * WakeByAddressAll — kernel32 `void WakeByAddressAll(PVOID Address)`: wake EVERY waiter parked in
+ * `WaitOnAddress` on the word at `addr`.
+ *
+ * @param addr  the futex word's address
+ * @return      nothing
+ */
+#os("windows")
+extern fn WakeByAddressAll(addr: u64) = "WakeByAddressAll" from "synchronization"
+
+/**
  * futex_wait — block the calling thread while the 32-bit word at `addr` still equals `expected`, on
  * the process-private futex hash (`SYS_FUTEX` with `FUTEX_WAIT | FUTEX_PRIVATE_FLAG`). It returns
  * as soon as the word differs or a matching `futex_wake` arrives; a mismatch already present at
  * entry returns immediately because the kernel re-checks the word atomically under the futex bucket
  * lock, which is exactly what closes the lost-wakeup window between the caller's last read of the
- * word and its decision to wait.
+ * word and its decision to wait. This is the Linux arm; the macOS/Windows arms below implement the
+ * same contract over the platform wait-by-address ABI, so `mtx_*`/`cv_*` above stay cross-platform.
  *
  * @param addr      the 32-bit futex word's address
  * @param expected  the value the word must still hold for the wait to actually block
  * @return          nothing; the raw syscall result is discarded (EAGAIN/EINTR simply retry the caller)
  */
+#os("linux")
 fn futex_wait(addr: u64, expected: i64) {
     _ = teko::sys::syscall6(teko::sys::SYS_FUTEX, addr to i64,
         teko::sys::FUTEX_WAIT | teko::sys::FUTEX_PRIVATE_FLAG, expected, 0, 0, 0)
 }
 
 /**
+ * futex_wait — the macOS arm: block while the low 32 bits at `addr` still equal `expected`, through
+ * libSystem's public `os_sync_wait_on_address` with `size == 4`. `expected` is masked to 32 bits
+ * because the API compares exactly `size` bytes; the value passes BY VALUE, so no scratch word is
+ * needed (unlike the Windows arm).
+ *
+ * @param addr      the 32-bit futex word's address
+ * @param expected  the value the word must still hold for the wait to actually block
+ * @return          nothing; the API result is discarded
+ */
+#os("macos")
+fn futex_wait(addr: u64, expected: i64) {
+    _ = os_sync_wait_on_address(addr, (expected to u64) & 0xffffffff, 4, teko::sys::OS_SYNC_WAIT_ON_ADDRESS_NONE)
+}
+
+/**
+ * futex_wait — the Windows arm: block while the 32-bit word at `addr` still equals `expected`,
+ * through kernel32's `WaitOnAddress`. `WaitOnAddress` compares against a value passed BY ADDRESS, so
+ * `expected` is stored into an 8-byte scratch word carved from the per-task arena (`buf_ptr`, only
+ * ever touched on the contended slow path, never re-entering the awaited mutex) and its address is
+ * handed as the compare pointer. The wait is untimed (`WIN_INFINITE`).
+ *
+ * @param addr      the 32-bit futex word's address
+ * @param expected  the value the word must still hold for the wait to actually block
+ * @return          nothing; the API result is discarded
+ */
+#os("windows")
+fn futex_wait(addr: u64, expected: i64) {
+    var scratch = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    teko::mem::store_u64(scratch, expected to u64)
+    _ = WaitOnAddress(addr, scratch, 4, teko::sys::WIN_INFINITE)
+}
+
+/**
  * futex_wake — wake up to `n` threads blocked in `futex_wait` on the word at `addr`, on the
  * process-private hash (`SYS_FUTEX` with `FUTEX_WAKE | FUTEX_PRIVATE_FLAG`). Waking when no waiter
- * is parked is a cheap no-op.
+ * is parked is a cheap no-op. This is the Linux arm; the macOS/Windows arms below split the wake on
+ * `n == 1` (single) vs any larger `n` (all), which is exact because `futex_wake` is only ever called
+ * with `n == 1` (a mutex/condvar hand-off) or `INT_MAX` (a broadcast).
  *
  * @param addr  the 32-bit futex word's address
  * @param n     the maximum number of waiters to wake (1 for a mutex hand-off, `INT_MAX` for a broadcast)
  * @return      nothing; the count actually woken is discarded
  */
+#os("linux")
 fn futex_wake(addr: u64, n: i64) {
     _ = teko::sys::syscall6(teko::sys::SYS_FUTEX, addr to i64,
         teko::sys::FUTEX_WAKE | teko::sys::FUTEX_PRIVATE_FLAG, n, 0, 0, 0)
+}
+
+/**
+ * futex_wake — the macOS arm: wake one or every waiter on the word at `addr` through libSystem's
+ * `os_sync_wake_by_address_any` (for `n == 1`) or `os_sync_wake_by_address_all` (for a broadcast),
+ * the split that maps the futex count onto the two public wake entry points.
+ *
+ * @param addr  the 32-bit futex word's address
+ * @param n     the maximum number of waiters to wake (1 for a hand-off, `INT_MAX` for a broadcast)
+ * @return      nothing; the API result is discarded
+ */
+#os("macos")
+fn futex_wake(addr: u64, n: i64) {
+    if n == 1 {
+        _ = os_sync_wake_by_address_any(addr, 4, teko::sys::OS_SYNC_WAKE_BY_ADDRESS_NONE)
+        return
+    }
+    _ = os_sync_wake_by_address_all(addr, 4, teko::sys::OS_SYNC_WAKE_BY_ADDRESS_NONE)
+}
+
+/**
+ * futex_wake — the Windows arm: wake one or every waiter on the word at `addr` through kernel32's
+ * `WakeByAddressSingle` (for `n == 1`) or `WakeByAddressAll` (for a broadcast), the split that maps
+ * the futex count onto the two Win32 wake entry points.
+ *
+ * @param addr  the 32-bit futex word's address
+ * @param n     the maximum number of waiters to wake (1 for a hand-off, `INT_MAX` for a broadcast)
+ * @return      nothing
+ */
+#os("windows")
+fn futex_wake(addr: u64, n: i64) {
+    if n == 1 {
+        WakeByAddressSingle(addr)
+        return
+    }
+    WakeByAddressAll(addr)
 }
 
 /**
