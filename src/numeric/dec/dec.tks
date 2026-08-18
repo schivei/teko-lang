@@ -1,67 +1,26 @@
 use teko::numeric::bigint
 
-/**
- * src/numeric/dec/dec.tks (namespace 'teko::numeric::dec') — the arbitrary-precision base-10
- * fixed/decimal engine that backs the compiler-known `dec` surface type and its operator sugar.
- *
- * The `dec` surface (`1.5d` literals, `+ - * /` and comparisons) lowers to the functions in THIS
- * module — one runtime implementation, no doubling. A `Decimal` is an exact rational whose
- * denominator is a power of ten: two `BigInt`s, `num` and `den = 10^k`. Exact base-10 arithmetic
- * (money, no binary-float rounding). Reuses the pure-Teko `teko::numeric::bigint` engine, so `dec`
- * needs no C either and survives kill-c (numeric-completeness design §4).
- *
- * DIVISION is exact-or-panic: `a / b` panics unless the reduced result terminates in base 10 (its
- * denominator's only prime factors are 2 and 5). Modulo (`%`) is NOT defined on `dec` (the checker
- * rejects it).
- */
-
-/**
- * The base-10 radix used to normalize the power-of-ten denominator and to scale between decimals.
- */
 const RADIX: u64 = 10
 
-/**
- * The low prime factor of the decimal radix (`10 = 2 * 5`). A reduced fraction terminates in base 10
- * exactly when its denominator's only prime factors are `RADIX_PRIME_LO` and `RADIX_PRIME_HI`, so
- * `div` extracts these to test exactness and to rebuild the power-of-ten denominator.
- */
 const RADIX_PRIME_LO: u64 = 2
 
-/**
- * The high prime factor of the decimal radix (`10 = 2 * 5`); see `RADIX_PRIME_LO`.
- */
 const RADIX_PRIME_HI: u64 = 5
 
 /**
  * Arbitrary-precision base-10 decimal: the exact value `num / den`, where `den` is a non-negative
- * power of ten (`10^k`). Value-semantic and immutable — every operation returns a fresh, normalized
- * value. The compiler-known `dec` surface name resolves to this struct.
+ * power of ten. Value-semantic and immutable. The compiler-known `dec` surface name resolves to this
+ * struct.
  */
-pub type Decimal = struct {
-    /** The signed numerator (a `BigInt`); carries the value's sign. */
+exp type Decimal = struct {
     num: bigint::BigInt
-    /** The denominator, always a positive `BigInt` power of ten (`10^k`, `k >= 0`). */
     den: bigint::BigInt
 }
 
-/**
- * A factor-extraction result: how many times a small prime divided a value, and the reduced value
- * after removing them.
- */
 type FactorOut = struct {
-    /** The number of times the factor divided the input. */
     count: u64
-    /** The input with all copies of the factor removed. */
     reduced: bigint::BigInt
 }
 
-/**
- * `base ** e` as a `BigInt` (repeated multiplication; `e` small).
- *
- * @param base  the base value
- * @param e     the exponent
- * @return      `base` raised to `e`
- */
 fn pow_small(pow_base: u64, e: u64): bigint::BigInt {
     var b = bigint::of(pow_base to i64)
     var r = bigint::one()
@@ -74,23 +33,10 @@ fn pow_small(pow_base: u64, e: u64): bigint::BigInt {
     r
 }
 
-/**
- * `10^k` as a `BigInt` (a canonical power-of-ten denominator).
- *
- * @param k  the exponent
- * @return   `10^k`
- */
 fn pow10(k: u64): bigint::BigInt {
     pow_small(RADIX, k)
 }
 
-/**
- * The greatest common divisor of two `BigInt`s (Euclid over their magnitudes).
- *
- * @param a  the first value
- * @param b  the second value
- * @return   `gcd(|a|, |b|)`, non-negative
- */
 fn big_gcd(a: bigint::BigInt, b: bigint::BigInt): bigint::BigInt {
     var x = bigint::abs(a)
     var y = bigint::abs(b)
@@ -103,13 +49,6 @@ fn big_gcd(a: bigint::BigInt, b: bigint::BigInt): bigint::BigInt {
     x
 }
 
-/**
- * Remove every factor `f` from a non-negative `BigInt`, counting how many were removed.
- *
- * @param x  the value to reduce
- * @param f  the small prime factor to extract
- * @return   the removal count and the reduced value
- */
 fn extract_factor(x: bigint::BigInt, f: u64): FactorOut {
     var fb = bigint::of(f to i64)
     var cur = x
@@ -123,26 +62,13 @@ fn extract_factor(x: bigint::BigInt, f: u64): FactorOut {
     FactorOut { count = cnt; reduced = cur }
 }
 
-/**
- * The larger of two `u64`s.
- *
- * @param a  the first value
- * @param b  the second value
- * @return   `max(a, b)`
- */
 fn max_u64(a: u64, b: u64): u64 {
     if a > b { return a }
     b
 }
 
-/**
- * Normalize a decimal: trim shared factors of ten from `num`/`den` so the scale is minimal, and
- * canonicalize zero to `0 / 1`. The denominator stays a power of ten.
- *
- * @param d  the (possibly denormalized) decimal
- * @return   the normalized decimal
- */
-pub fn normalize(d: Decimal): Decimal {
+/** Normalize a decimal: trim shared factors of ten from `num`/`den`, canonicalize zero to `0 / 1`. */
+exp fn normalize(d: Decimal): Decimal {
     if bigint::is_zero(d.num) { return Decimal { num = bigint::zero(); den = bigint::one() } }
     var ten = bigint::of(RADIX to i64)
     var num = d.num
@@ -156,38 +82,21 @@ pub fn normalize(d: Decimal): Decimal {
     Decimal { num = num; den = den }
 }
 
-/**
- * The whole `Decimal` for a machine `i64` (denominator `1`).
- *
- * @param n  the machine integer
- * @return   `n` as a `Decimal`
- */
-pub fn of(n: i64): Decimal {
+/** The whole `Decimal` for a machine `i64` (denominator `1`). */
+exp fn of(n: i64): Decimal {
     Decimal { num = bigint::of(n); den = bigint::one() }
 }
 
-/**
- * The whole `Decimal` for a machine `u64` (denominator `1`). The unsigned twin of `of`, needed for
- * the same reason `bigint::of_u64` is: the implicit-widening rule admits every machine integer into
- * a `dec`, and the top half of the `u64` range has no `of` spelling.
- *
- * @param n  the unsigned machine integer
- * @return   `n` as a whole `Decimal`
- * @since    0.3.1
- */
-pub fn of_u64(n: u64): Decimal {
+/** The whole `Decimal` for a machine `u64` (denominator `1`). */
+exp fn of_u64(n: u64): Decimal {
     Decimal { num = bigint::of_u64(n); den = bigint::one() }
 }
 
 /**
  * Parse a decimal string into a `Decimal`. Accepts `[-]int[.frac][e[+-]exp]` with `_` group
  * separators. Returns an error for malformed input.
- *
- * @param s  the decimal text
- * @return   the parsed value, or an error describing the malformed input
- * @throws   when `s` is empty, has no digit, or contains an invalid character
  */
-pub fn from_str(s: str): Decimal | error {
+exp fn from_str(s: str): Decimal | error {
     if s.len == 0 { return error { message = "dec::from_str: empty string" } }
     var i: u64 = 0
     var neg = false
@@ -224,15 +133,6 @@ pub fn from_str(s: str): Decimal | error {
     normalize(Decimal { num = scaled; den = bigint::one() })
 }
 
-/**
- * Parse an optional `[eE][+-]?digits` exponent starting at `i`. When no exponent is present the
- * exponent is `0`.
- *
- * @param s  the full source text
- * @param i  the index at (or past) the mantissa
- * @return   the exponent value, or an error for a malformed exponent
- * @throws   when an `e`/`E` is not followed by at least one digit or carries an invalid character
- */
 fn parse_exponent(s: str, i: u64): i64 | error {
     if i >= s.len { return 0 }
     if s[i] != b'e' && s[i] != b'E' { return 0 }
@@ -255,40 +155,21 @@ fn parse_exponent(s: str, i: u64): i64 | error {
     eval
 }
 
-/**
- * Parse a literal decimal string (the numeric text a `d` literal desugars to) into a `Decimal`. The
- * lexer guarantees the text is a valid decimal literal, so this never fails in practice; a malformed
- * input panics rather than returning an error.
- *
- * @param s  the literal decimal text (no suffix)
- * @return   the parsed value
- */
-pub fn of_lit(s: str): Decimal {
+/** Parse a literal decimal string into a `Decimal`. Panics on malformed input (the lexer already validated it). */
+exp fn of_lit(s: str): Decimal {
     match from_str(s) {
         Decimal as d => d
         error as e => panic(e.message)
     }
 }
 
-/**
- * The power-of-ten exponent `k` of a canonical denominator `10^k` (its number of trailing zeros).
- *
- * @param den  a `BigInt` equal to `10^k`
- * @return     the exponent `k`
- */
 fn den_scale(den: bigint::BigInt): u64 {
     var s = bigint::to_str(den)
     s.len - 1
 }
 
-/**
- * Render a `Decimal` to its canonical decimal string (a leading `-` for a negative value, a `.` when
- * the scale is nonzero, no trailing zeros beyond the minimal scale).
- *
- * @param x  the value
- * @return   the decimal text
- */
-pub fn to_str(x: Decimal): str {
+/** Render a `Decimal` to its canonical decimal string. */
+exp fn to_str(x: Decimal): str {
     var nx = normalize(x)
     var k = den_scale(nx.den)
     var numabs = bigint::to_str(bigint::abs(nx.num))
@@ -304,65 +185,37 @@ pub fn to_str(x: Decimal): str {
     teko::str::concat(sign, intpart, ".", fracpart)
 }
 
-/**
- * Negate a `Decimal`.
- *
- * @param x  the value
- * @return   `-x`
- */
-pub fn neg(x: Decimal): Decimal {
+/** Negate a `Decimal`. */
+exp fn neg(x: Decimal): Decimal {
     Decimal { num = bigint::neg(x.num); den = x.den }
 }
 
-/**
- * Add two decimals exactly (common denominator via cross-multiplication, then normalize).
- *
- * @param a  the left addend
- * @param b  the right addend
- * @return   `a + b`
- */
-pub fn add(a: Decimal, b: Decimal): Decimal {
+/** Add two decimals exactly. */
+exp fn add(a: Decimal, b: Decimal): Decimal {
     var num = bigint::add(bigint::mul(a.num, b.den), bigint::mul(b.num, a.den))
     var den = bigint::mul(a.den, b.den)
     normalize(Decimal { num = num; den = den })
 }
 
-/**
- * Subtract `b` from `a` exactly.
- *
- * @param a  the minuend
- * @param b  the subtrahend
- * @return   `a - b`
- */
-pub fn sub(a: Decimal, b: Decimal): Decimal {
+/** Subtract `b` from `a` exactly. */
+exp fn sub(a: Decimal, b: Decimal): Decimal {
     var num = bigint::sub(bigint::mul(a.num, b.den), bigint::mul(b.num, a.den))
     var den = bigint::mul(a.den, b.den)
     normalize(Decimal { num = num; den = den })
 }
 
-/**
- * Multiply two decimals exactly.
- *
- * @param a  the left factor
- * @param b  the right factor
- * @return   `a * b`
- */
-pub fn mul(a: Decimal, b: Decimal): Decimal {
+/** Multiply two decimals exactly. */
+exp fn mul(a: Decimal, b: Decimal): Decimal {
     var num = bigint::mul(a.num, b.num)
     var den = bigint::mul(a.den, b.den)
     normalize(Decimal { num = num; den = den })
 }
 
 /**
- * Divide `a` by `b`, EXACT-OR-PANIC: the result must terminate in base 10 (its reduced denominator's
- * only prime factors are 2 and 5). A non-terminating quotient (e.g. `1 / 3`) panics rather than
- * silently rounding; a zero divisor panics.
- *
- * @param a  the dividend
- * @param b  the divisor
- * @return   the exact quotient
+ * Divide `a` by `b`, exact-or-panic: the result must terminate in base 10. A non-terminating
+ * quotient (e.g. `1 / 3`) panics rather than silently rounding; a zero divisor panics.
  */
-pub fn div(a: Decimal, b: Decimal): Decimal {
+exp fn div(a: Decimal, b: Decimal): Decimal {
     var p = bigint::mul(a.num, b.den)
     var q = bigint::mul(a.den, b.num)
     if bigint::is_zero(q) { panic("dec::div: division by zero") }
@@ -378,24 +231,12 @@ pub fn div(a: Decimal, b: Decimal): Decimal {
     normalize(Decimal { num = num; den = pow10(k) })
 }
 
-/**
- * Three-way compare of two decimals (cross-multiplication; both denominators are positive).
- *
- * @param a  the left value
- * @param b  the right value
- * @return   `1` if `a > b`, `-1` if `a < b`, `0` if equal
- */
-pub fn cmp(a: Decimal, b: Decimal): i64 {
+/** Three-way compare of two decimals. */
+exp fn cmp(a: Decimal, b: Decimal): i64 {
     bigint::cmp(bigint::mul(a.num, b.den), bigint::mul(b.num, a.den))
 }
 
-/**
- * Value equality of two decimals.
- *
- * @param a  the left value
- * @param b  the right value
- * @return   `true` iff `a == b`
- */
-pub fn eq(a: Decimal, b: Decimal): bool {
+/** Value equality of two decimals. */
+exp fn eq(a: Decimal, b: Decimal): bool {
     cmp(a, b) == 0
 }

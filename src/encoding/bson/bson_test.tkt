@@ -1,22 +1,3 @@
-/**
- * Tests for `teko::encoding::bson` — the BSON (bsonspec.org / MongoDB) encoder + decoder. Byte-exact
- * checks against the two canonical bsonspec.org reference vectors ({"hello": "world"} and
- * {"BSON": ["awesome", 5.05, 1986]}) pin the little-endian, length-prefixed, cstring-named layout to
- * a reference encoder; round-trip checks cover the remaining element types (double, embedded
- * document, binary with subtype, ObjectId, boolean, UTC datetime, null, int32, int64 including a
- * large negative value, timestamp, Decimal128, min/max key); and the malformed-input and
- * invalid-encode cases exercise the error model (M.1 fail-loud via `error`, never a panic): a length
- * that disagrees with the terminator, a deprecated element type, a field name with an interior NUL,
- * and a mis-sized ObjectId. This file lives under `teko::encoding::bson` (namespace = directory), so
- * the functions under test are called bare, mirroring `teko::encoding::base64::base64_test.tkt`.
- */
-
-/**
- * Builds a `[]byte` from a slice of integer literals (reference byte vectors read as ints).
- *
- * @param xs  the byte values as ints
- * @return    the values as a byte slice
- */
 fn bytes_lit(xs: []i64): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -28,13 +9,6 @@ fn bytes_lit(xs: []i64): []byte {
     out
 }
 
-/**
- * Compares two byte slices for exact equality.
- *
- * @param a  the first slice
- * @param b  the second slice
- * @return   true when both have the same length and identical bytes
- */
 fn slices_equal(a: []byte, b: []byte): bool {
     if a.len != b.len { return false }
     var i: u64 = 0
@@ -46,13 +20,6 @@ fn slices_equal(a: []byte, b: []byte): bool {
     true
 }
 
-/**
- * Unwraps an `[]byte | error` encode result — a failure in a "should succeed" test is itself a test
- * failure.
- *
- * @param result  the encode outcome under test
- * @return        the bytes on success, or an empty slice (after failing) on error
- */
 fn expect_bytes(result: []byte | error): []byte {
     match result {
         []byte as b => b
@@ -60,13 +27,6 @@ fn expect_bytes(result: []byte | error): []byte {
     }
 }
 
-/**
- * Unwraps a `BsonValue | error` decode result — a failure in a "should succeed" test is itself a
- * test failure.
- *
- * @param result  the decode outcome under test
- * @return        the value on success, or a null value (after failing) on error
- */
 fn expect_value(result: BsonValue | error): BsonValue {
     match result {
         BsonValue as v => v
@@ -74,11 +34,6 @@ fn expect_value(result: BsonValue | error): BsonValue {
     }
 }
 
-/**
- * Asserts a decode result is an `error` (a "should fail" case).
- *
- * @param result  the decode outcome under test
- */
 fn expect_decode_error(result: BsonValue | error) {
     match result {
         BsonValue => teko::assert::is_true(false)
@@ -86,11 +41,6 @@ fn expect_decode_error(result: BsonValue | error) {
     }
 }
 
-/**
- * Asserts an encode result is an `error` (a "should fail" case).
- *
- * @param result  the encode outcome under test
- */
 fn expect_encode_error(result: []byte | error) {
     match result {
         []byte => teko::assert::is_true(false)
@@ -98,13 +48,6 @@ fn expect_encode_error(result: []byte | error) {
     }
 }
 
-/**
- * Wraps a single field into a document.
- *
- * @param name  the field name
- * @param v     the field value
- * @return      the one-field document
- */
 fn one_field(name: str, v: BsonValue): BsonValue {
     var keys: []str = teko::list::empty()
     keys = teko::list::push(keys, name)
@@ -113,22 +56,12 @@ fn one_field(name: str, v: BsonValue): BsonValue {
     bson_document(keys, vals)
 }
 
-/**
- * Wraps a value as the "x" field of a document, encodes, decodes, and returns whether the tree
- * round-trips structurally.
- *
- * @param v  the value to round-trip
- * @return   true when encode then decode reproduces the value
- */
 fn round_trips(v: BsonValue): bool {
     var doc = one_field("x", v)
     var got = expect_bytes(encode(doc))
     bson_equal(doc, expect_value(decode(got)))
 }
 
-/**
- * The canonical bsonspec.org {"hello": "world"} vector encodes byte-for-byte and round-trips.
- */
 #test
 fn hello_world_matches_reference_bytes() {
     var doc = one_field("hello", bson_string("world"))
@@ -137,10 +70,6 @@ fn hello_world_matches_reference_bytes() {
     teko::assert::is_true(bson_equal(doc, expect_value(decode(want))))
 }
 
-/**
- * The canonical bsonspec.org {"BSON": ["awesome", 5.05, 1986]} vector encodes byte-for-byte and
- * round-trips, exercising array indexing, a double, and an int32 in one document.
- */
 #test
 fn bson_array_matches_reference_bytes() {
     var elems: []BsonValue = teko::list::empty()
@@ -153,10 +82,6 @@ fn bson_array_matches_reference_bytes() {
     teko::assert::is_true(bson_equal(doc, expect_value(decode(want))))
 }
 
-/**
- * Every supported element type round-trips through encode then decode, including a large negative
- * int64 (exercising the full two's-complement little-endian path) and a nested document.
- */
 #test
 fn all_element_types_round_trip() {
     teko::assert::is_true(round_trips(bson_bool(true)))
@@ -173,10 +98,6 @@ fn all_element_types_round_trip() {
     teko::assert::is_true(round_trips(one_field("n", bson_int32(7))))
 }
 
-/**
- * Malformed inputs decode to a checked error: a length below the minimum, a length that disagrees
- * with the terminator, and a deprecated (unsupported) element type.
- */
 #test
 fn malformed_documents_are_errors() {
     expect_decode_error(decode(bytes_lit([0x05, 0x00, 0x00, 0x00])))
@@ -184,9 +105,6 @@ fn malformed_documents_are_errors() {
     expect_decode_error(decode(bytes_lit([0x06, 0x00, 0x00, 0x00, 0x00, 0x00])))
 }
 
-/**
- * Invalid values are rejected on encode: a field name with an interior NUL and a mis-sized ObjectId.
- */
 #test
 fn invalid_values_are_encode_errors() {
     var nul_name = str_of_bytes(bytes_lit([0x61, 0x00, 0x62]))

@@ -1,19 +1,3 @@
-/**
- * Tests for `teko::crypto::kdf` (C3): HKDF (RFC 5869) and PBKDF2 (RFC 8018, vectors RFC 6070). Pure
- * Teko (no extern), so every case runs natively. This file lives under `teko::crypto` (namespace =
- * directory), so the functions under test are called bare, mirroring `hash_test.tkt`/`mac_test.tkt`.
- *
- * Every expected value is a published RFC known-answer vector, cross-checked against Python's
- * `hashlib.pbkdf2_hmac` / an HKDF reference. HKDF is exercised through both the split
- * extract/expand primitives (checking the intermediate PRK) and the combined one-shot.
- */
-
-/**
- * The numeric value of one lowercase hex digit (`'0'..'9'`, `'a'..'f'`).
- *
- * @param c  a hex-digit byte
- * @return   the digit's value 0..15 (0 for a non-hex byte, which the fixtures never pass)
- */
 fn hex_val(c: byte): u32 {
     var v = c to u32
     if v >= (b'0' to u32) && v <= (b'9' to u32) { return v - (b'0' to u32) }
@@ -21,13 +5,6 @@ fn hex_val(c: byte): u32 {
     0
 }
 
-/**
- * Decodes an even-length lowercase hex string into the bytes it denotes — how the fixtures spell
- * the RFC keys and expected values given in hex.
- *
- * @param s  an even-length lowercase hex string
- * @return   the decoded bytes, most-significant nibble first
- */
 fn hex_bytes(s: str): []byte {
     var chars = bytes_of_str(s)
     var out: []byte = teko::list::empty()
@@ -42,13 +19,6 @@ fn hex_bytes(s: str): []byte {
     out
 }
 
-/**
- * A slice of `n` bytes all equal to `value` — the repeated-byte input keying material of RFC 5869.
- *
- * @param value  the byte to repeat (only the low 8 bits are used)
- * @param n      the number of bytes
- * @return       `n` copies of `value`
- */
 fn repeat_byte(value: u32, n: u64): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -60,14 +30,6 @@ fn repeat_byte(value: u32, n: u64): []byte {
     out
 }
 
-/**
- * The ascending byte sequence `start, start+1, …` of length `count` (wrapping at 256) — RFC 5869
- * test case 2's `0x00..0x4f` IKM, `0x60..0xaf` salt, and `0xb0..0xff` info.
- *
- * @param start  the first byte value
- * @param count  the number of bytes
- * @return       the ascending byte run
- */
 fn byte_range(start: u32, count: u64): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -79,14 +41,6 @@ fn byte_range(start: u32, count: u64): []byte {
     out
 }
 
-/**
- * Renders a KDF result as a lowercase hex string, or its error message on failure — the fixtures
- * compare against the RFC's hex vectors, so a `CryptoError` surfaces as a non-matching string that
- * fails the assertion loudly.
- *
- * @param r  the `[]byte | CryptoError` a KDF returned
- * @return   the bytes as lowercase hex, or the error message
- */
 fn ok_hex(r: []byte | CryptoError): str {
     match r {
         []byte as b => to_hex(b)
@@ -94,10 +48,6 @@ fn ok_hex(r: []byte | CryptoError): str {
     }
 }
 
-/**
- * HKDF-SHA-256 against RFC 5869 test case 1: the basic case with salt and info. Checks both the
- * intermediate PRK (extract) and the 42-byte OKM (one-shot).
- */
 #test
 fn hkdf_sha256_rfc5869_case1() {
     var ikm = repeat_byte(0x0b, 22)
@@ -107,10 +57,6 @@ fn hkdf_sha256_rfc5869_case1() {
     teko::assert::is_true(ok_hex(hkdf_sha256(ikm, salt, info, 42)) == "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
 }
 
-/**
- * HKDF-SHA-256 against RFC 5869 test case 2: longer inputs (80-byte IKM/salt/info) and an 82-byte
- * OKM spanning multiple expand blocks.
- */
 #test
 fn hkdf_sha256_rfc5869_case2() {
     var ikm = byte_range(0x00, 80)
@@ -120,10 +66,6 @@ fn hkdf_sha256_rfc5869_case2() {
     teko::assert::is_true(ok_hex(hkdf_sha256(ikm, salt, info, 82)) == "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87")
 }
 
-/**
- * HKDF-SHA-256 against RFC 5869 test case 3: zero-length salt and info (the "salt not provided"
- * default resolves to `HashLen` zero bytes inside HMAC).
- */
 #test
 fn hkdf_sha256_rfc5869_case3() {
     var ikm = repeat_byte(0x0b, 22)
@@ -132,10 +74,6 @@ fn hkdf_sha256_rfc5869_case3() {
     teko::assert::is_true(ok_hex(hkdf_sha256(ikm, empty, empty, 42)) == "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8")
 }
 
-/**
- * HKDF-SHA-1 against RFC 5869 test case 7: SHA-1 with no salt and no info, exercising the
- * file-local HMAC-SHA-1 pseudorandom function.
- */
 #test
 fn hkdf_sha1_rfc5869_case7() {
     var ikm = repeat_byte(0x0c, 22)
@@ -144,10 +82,6 @@ fn hkdf_sha1_rfc5869_case7() {
     teko::assert::is_true(ok_hex(hkdf_sha1(ikm, empty, empty, 42)) == "2c91117204d745f3500d636a62f64f0ab3bae548aa53d423b0d1f27ebba6f5e5673a081d70cce7acfc48")
 }
 
-/**
- * HKDF requesting more than `255 * hash_len` bytes returns a `CryptoError` rather than silently
- * truncating — the RFC 5869 §2.3 upper bound on the expand output length.
- */
 #test
 fn hkdf_sha256_rejects_overlong_output() {
     var ikm = repeat_byte(0x0b, 22)
@@ -156,10 +90,6 @@ fn hkdf_sha256_rejects_overlong_output() {
     teko::assert::is_true(too_long == "hkdf: requested length exceeds 255 * hash_len")
 }
 
-/**
- * PBKDF2-HMAC-SHA-1 against RFC 6070 test vectors 1, 2, and 3 (`c` = 1, 2, 4096; `P` = "password",
- * `S` = "salt"; 20-byte derived keys).
- */
 #test
 fn pbkdf2_sha1_rfc6070_low_iterations() {
     var pw = bytes_of_str("password")
@@ -169,10 +99,6 @@ fn pbkdf2_sha1_rfc6070_low_iterations() {
     teko::assert::is_true(ok_hex(pbkdf2_sha1(pw, salt, 4096, 20)) == "4b007901b765489abead49d926f721d065a429c1")
 }
 
-/**
- * PBKDF2-HMAC-SHA-1 against RFC 6070 test vector 5: longer password/salt and a 25-byte derived key
- * spanning two output blocks (`ceil(25/20) = 2`), `c` = 4096.
- */
 #test
 fn pbkdf2_sha1_rfc6070_multi_block() {
     var pw = bytes_of_str("passwordPASSWORDpassword")
@@ -180,10 +106,6 @@ fn pbkdf2_sha1_rfc6070_multi_block() {
     teko::assert::is_true(ok_hex(pbkdf2_sha1(pw, salt, 4096, 25)) == "3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038")
 }
 
-/**
- * PBKDF2-HMAC-SHA-1 against RFC 6070's embedded-NUL vector: `P` = "pass\0word", `S` = "sa\0lt",
- * `c` = 4096, 16-byte derived key — verifying NUL bytes inside password and salt are honored.
- */
 #test
 fn pbkdf2_sha1_rfc6070_embedded_nul() {
     var pw = hex_bytes("7061737300776f7264")
@@ -191,10 +113,6 @@ fn pbkdf2_sha1_rfc6070_embedded_nul() {
     teko::assert::is_true(ok_hex(pbkdf2_sha1(pw, salt, 4096, 16)) == "56fa6aa75548099dcc37d7f03425e0c3")
 }
 
-/**
- * PBKDF2-HMAC-SHA-1 against RFC 6070 test vector 4: the high-iteration case (`c` = 16777216, `P` =
- * "password", `S` = "salt", 20-byte key). Deliberately heavy — it is the canonical stress vector.
- */
 #test
 fn pbkdf2_sha1_rfc6070_high_iteration() {
     var pw = bytes_of_str("password")
@@ -202,10 +120,6 @@ fn pbkdf2_sha1_rfc6070_high_iteration() {
     teko::assert::is_true(ok_hex(pbkdf2_sha1(pw, salt, 16777216, 20)) == "eefe3d61cd4da4e4e9945b3d6ba2158c2634e984")
 }
 
-/**
- * PBKDF2-HMAC-SHA-256: the widely-cited `P` = "password", `S` = "salt", `c` = 4096, 32-byte
- * derived-key vector (cross-checked against `hashlib.pbkdf2_hmac('sha256', …)`).
- */
 #test
 fn pbkdf2_sha256_vector() {
     var pw = bytes_of_str("password")
@@ -213,9 +127,6 @@ fn pbkdf2_sha256_vector() {
     teko::assert::is_true(ok_hex(pbkdf2_sha256(pw, salt, 4096, 32)) == "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a")
 }
 
-/**
- * PBKDF2 with a zero iteration count is rejected as an invalid parameter (RFC 8018 requires `c >= 1`).
- */
 #test
 fn pbkdf2_rejects_zero_iterations() {
     var pw = bytes_of_str("password")

@@ -1,46 +1,4 @@
 /**
- * `teko::encoding::cbor` — a pure-Teko CBOR (Concise Binary Object Representation, RFC 8949)
- * encoder + decoder over `[]byte` (catalog entry S-CBOR, §1.5). Pure Teko, no C twin: like
- * `teko::encoding::json` / `teko::encoding::xml`, a library with zero OS/FFI dependency ships
- * as `.tks` + `.tkt` only, and both engines pick it up automatically. This unit is the payload
- * codec the `teko::crypto::cose` lane rides on (COSE structures are CBOR arrays/maps).
- *
- * VALUE MODEL — a TAGGED STRUCT, not an inline union. `CborValue` carries a `CborKind`
- * discriminant plus the union of every kind's payload fields; `kind` selects which fields are
- * meaningful. This mirrors `teko::encoding::xml`'s `XmlNode` tag-struct choice (forward
- * compatible and directly validatable) rather than `teko::encoding::json`'s inherited inline
- * union. The self-referential children (`items`, `keys`, `vals`) are plain slices of
- * `CborValue`, the same "box the recursion behind a slice" discipline the sibling codecs use.
- *
- * SCOPE (this unit). The full RFC 8949 generic data model:
- *   - major type 0 unsigned integers and major type 1 negative integers (both up to 64 bits,
- *     the negative held as its `-1 - n` argument `n` so the whole `[-2^64, 2^64 - 1]` range is
- *     representable without a signed overflow);
- *   - major type 2 byte strings and major type 3 UTF-8 text strings, definite AND indefinite
- *     length (chunked, terminated by the break code);
- *   - major type 4 arrays and major type 5 maps, definite AND indefinite length;
- *   - major type 6 tagged values (the tag number plus one tagged item);
- *   - major type 7 simple values (`false`/`true`/`null`/`undefined` and other simples) and the
- *     three IEEE 754 float widths (half, single, double), each decoded to an `f64`.
- *
- * DETERMINISTIC ENCODING. `encode` already emits the preferred/shortest head for every integer
- * and length (RFC 8949 §4.2.1 rule 1) and never uses indefinite-length items. `encode_canonical`
- * additionally sorts map entries into bytewise lexicographic order of their encoded keys
- * (§4.2.1 rule 2), giving canonical output for signing.
- *
- * NAMED SEAM (honest — M.3). Floats always encode as the 64-bit form (major type 7, `0xFB`); the
- * "shortest float that round-trips" preferred-serialization refinement (§4.2.2) is a documented
- * follow-on, not implemented here. Decoding accepts all three float widths, so half/single inputs
- * round-trip by VALUE (`decode` -> `f64`), just not byte-for-byte back to their narrow form.
- *
- * ERROR MODEL (M.1 fail-loud / M.3 honest types). `decode(p: []byte): CborValue | error` — a
- * truncated item, a reserved additional-information value, a stray break, or trailing bytes after
- * the top-level item are checked failures, never a panic (the `teko::encoding::json::decode`
- * convention). `encode` / `encode_canonical` are total (a well-formed `CborValue` always has a
- * rendering) so they return `[]byte`, not `[]byte | error`.
- */
-
-/**
  * The kind discriminant of a `CborValue`: which CBOR data item shape it holds. `Uint` and `Nint`
  * are the two integer majors (`Nint` stores its `-1 - n` argument in `uint`); `Bytes` and `Text`
  * are the two string majors (both keep their raw bytes in `bytes`); `Array` and `Map` are the two
@@ -53,8 +11,8 @@ exp type CborKind = enum {
 }
 
 /**
- * One CBOR data item as a tagged struct spanning every `CborKind` (see the module doc's VALUE
- * MODEL note): `kind` selects which fields below carry meaning.
+ * One CBOR data item as a tagged struct spanning every `CborKind`: `kind` selects which fields
+ * below carry meaning.
  */
 exp type CborValue = struct {
     /**
@@ -94,110 +52,41 @@ exp type CborValue = struct {
     vals: []CborValue
 }
 
-/**
- * A decoded item paired with the offset just past it — the internal cursor result threaded
- * through the recursive decoder (the `teko::encoding::json` `PResult` discipline).
- */
 type CborRead = struct {
-    /**
-     * The item decoded at the requested offset.
-     */
     value: CborValue
-    /**
-     * The offset of the first byte AFTER the decoded item.
-     */
     pos: u64
 }
 
-/**
- * A decoded head argument paired with the offset past the head and whether the head signalled
- * indefinite length — the shared result of reading an item's initial byte(s).
- */
 type ArgRead = struct {
-    /**
-     * The head's numeric argument (length, integer magnitude, tag number, or simple value).
-     */
     arg: u64
-    /**
-     * The offset of the first byte after the head.
-     */
     pos: u64
-    /**
-     * Whether the additional-information nibble was 31 (indefinite length / break).
-     */
     indefinite: bool
 }
 
-/**
- * A byte range read out of the input paired with the offset past it.
- */
 type BytesRead = struct {
-    /**
-     * The bytes taken from the input.
-     */
     data: []byte
-    /**
-     * The offset of the first byte after the taken range.
-     */
     pos: u64
 }
 
-/**
- * A sorted-map scratch entry: an encoded key with the full encoded key/value pair, used to order
- * map entries for canonical encoding.
- */
 type CanonEntry = struct {
-    /**
-     * The encoded bytes of the key alone, the sort criterion.
-     */
     key: []byte
-    /**
-     * The encoded bytes of the key immediately followed by its value.
-     */
     body: []byte
 }
 
-/**
- * A fresh empty `[]byte`, the default for the byte-carrying fields of a `CborValue`.
- *
- * @return  an empty byte slice
- */
 fn no_bytes(): []byte {
     teko::list::empty()
 }
 
-/**
- * A fresh empty `[]CborValue`, the default for the child-carrying fields of a `CborValue`.
- *
- * @return  an empty value slice
- */
 fn no_values(): []CborValue {
     teko::list::empty()
 }
 
-/**
- * Builds a `CborValue` from every field explicitly — the single constructor the public builders
- * funnel through so each records only the fields its kind uses and leaves the rest at defaults.
- *
- * @param kind   the item's kind discriminant
- * @param uint   the unsigned magnitude / argument (see `CborValue.uint`)
- * @param real   the floating-point value (see `CborValue.real`)
- * @param flag   the boolean value (see `CborValue.flag`)
- * @param bytes  the raw / UTF-8 bytes (see `CborValue.bytes`)
- * @param items  the array elements or single tagged item (see `CborValue.items`)
- * @param keys   the map keys (see `CborValue.keys`)
- * @param vals   the map values (see `CborValue.vals`)
- * @return       the assembled value
- */
 fn mk_value(kind: CborKind, uint: u64, real: f64, flag: bool, bytes: []byte, items: []CborValue, keys: []CborValue, vals: []CborValue): CborValue {
     CborValue { kind = kind; uint = uint; real = real; flag = flag; bytes = bytes; items = items; keys = keys; vals = vals }
 }
 
 /**
  * Wraps an unsigned integer as a major-type-0 value.
- *
- * @param v  the unsigned value, `0 .. 2^64 - 1`
- * @return   the CBOR unsigned-integer item
  */
 exp fn cbor_uint(v: u64): CborValue {
     mk_value(CborKind::Uint, v, 0.0, false, no_bytes(), no_values(), no_values(), no_values())
@@ -207,9 +96,6 @@ exp fn cbor_uint(v: u64): CborValue {
  * Wraps a negative integer given as its CBOR argument `n`, which encodes the value `-1 - n`
  * (so `n = 0` is `-1` and `n = 9` is `-10`). This spelling reaches every negative down to
  * `-2^64` without a signed overflow.
- *
- * @param n  the argument, `0 .. 2^64 - 1`, denoting the value `-1 - n`
- * @return   the CBOR negative-integer item
  */
 exp fn cbor_nint(n: u64): CborValue {
     mk_value(CborKind::Nint, n, 0.0, false, no_bytes(), no_values(), no_values(), no_values())
@@ -219,9 +105,6 @@ exp fn cbor_nint(n: u64): CborValue {
  * Wraps a signed integer, choosing major type 0 for non-negative values and major type 1 for
  * negative ones. Values in `[-2^63, 2^63 - 1]` (the `i64` range) map cleanly; the wider CBOR
  * integer range is reachable through `cbor_uint` / `cbor_nint` directly.
- *
- * @param v  the signed value
- * @return   the CBOR integer item
  */
 exp fn cbor_int(v: i64): CborValue {
     if v >= 0 { return cbor_uint(v to u64) }
@@ -230,9 +113,6 @@ exp fn cbor_int(v: i64): CborValue {
 
 /**
  * Wraps a byte string as a major-type-2 value.
- *
- * @param b  the raw bytes
- * @return   the CBOR byte-string item
  */
 exp fn cbor_bytes(b: []byte): CborValue {
     mk_value(CborKind::Bytes, 0, 0.0, false, b, no_values(), no_values(), no_values())
@@ -240,9 +120,6 @@ exp fn cbor_bytes(b: []byte): CborValue {
 
 /**
  * Wraps a text string as a major-type-3 value, holding its UTF-8 bytes.
- *
- * @param s  the text
- * @return   the CBOR text-string item
  */
 exp fn cbor_text(s: str): CborValue {
     mk_value(CborKind::Text, 0, 0.0, false, bytes_of_str(s), no_values(), no_values(), no_values())
@@ -250,9 +127,6 @@ exp fn cbor_text(s: str): CborValue {
 
 /**
  * Wraps a sequence of items as a major-type-4 array.
- *
- * @param items  the elements
- * @return       the CBOR array item
  */
 exp fn cbor_array(items: []CborValue): CborValue {
     mk_value(CborKind::Array, 0, 0.0, false, no_bytes(), items, no_values(), no_values())
@@ -261,10 +135,6 @@ exp fn cbor_array(items: []CborValue): CborValue {
 /**
  * Wraps parallel key/value slices as a major-type-5 map. `keys[i]` maps to `vals[i]`; the two
  * slices must have the same length (the encoder reads `keys.len` pairs).
- *
- * @param keys  the map keys
- * @param vals  the map values, parallel to `keys`
- * @return      the CBOR map item
  */
 exp fn cbor_map(keys: []CborValue, vals: []CborValue): CborValue {
     mk_value(CborKind::Map, 0, 0.0, false, no_bytes(), no_values(), keys, vals)
@@ -272,10 +142,6 @@ exp fn cbor_map(keys: []CborValue, vals: []CborValue): CborValue {
 
 /**
  * Wraps a tagged item as a major-type-6 value: the tag number plus the single tagged content.
- *
- * @param tag      the tag number
- * @param content  the tagged item
- * @return         the CBOR tagged item
  */
 exp fn cbor_tag(tag: u64, content: CborValue): CborValue {
     var one: []CborValue = teko::list::push(no_values(), content)
@@ -284,9 +150,6 @@ exp fn cbor_tag(tag: u64, content: CborValue): CborValue {
 
 /**
  * Wraps a boolean as the major-type-7 `false` (20) / `true` (21) simple value.
- *
- * @param b  the boolean
- * @return   the CBOR boolean item
  */
 exp fn cbor_bool(b: bool): CborValue {
     mk_value(CborKind::Bool, 0, 0.0, b, no_bytes(), no_values(), no_values(), no_values())
@@ -294,8 +157,6 @@ exp fn cbor_bool(b: bool): CborValue {
 
 /**
  * The major-type-7 `null` (22) simple value.
- *
- * @return  the CBOR null item
  */
 exp fn cbor_null(): CborValue {
     mk_value(CborKind::Null, 0, 0.0, false, no_bytes(), no_values(), no_values(), no_values())
@@ -303,8 +164,6 @@ exp fn cbor_null(): CborValue {
 
 /**
  * The major-type-7 `undefined` (23) simple value.
- *
- * @return  the CBOR undefined item
  */
 exp fn cbor_undefined(): CborValue {
     mk_value(CborKind::Undefined, 0, 0.0, false, no_bytes(), no_values(), no_values(), no_values())
@@ -312,9 +171,6 @@ exp fn cbor_undefined(): CborValue {
 
 /**
  * Wraps a floating-point number as a major-type-7 float (encoded as the 64-bit form).
- *
- * @param x  the value
- * @return   the CBOR float item
  */
 exp fn cbor_float(x: f64): CborValue {
     mk_value(CborKind::Float, 0, x, false, no_bytes(), no_values(), no_values(), no_values())
@@ -323,22 +179,11 @@ exp fn cbor_float(x: f64): CborValue {
 /**
  * Wraps a bare simple value (major type 7, additional information other than the distinguished
  * float/bool/null/undefined encodings).
- *
- * @param v  the simple value, `0 .. 255`
- * @return   the CBOR simple item
  */
 exp fn cbor_simple(v: u64): CborValue {
     mk_value(CborKind::Simple, v, 0.0, false, no_bytes(), no_values(), no_values(), no_values())
 }
 
-/**
- * Appends every byte of `more` to `out`, returning the grown slice (functional accumulation, no
- * index-assignment).
- *
- * @param out   the accumulator
- * @param more  the bytes to append
- * @return      `out` followed by `more`
- */
 fn append_all(out: []byte, more: []byte): []byte {
     var acc = out
     var i: u64 = 0
@@ -350,14 +195,6 @@ fn append_all(out: []byte, more: []byte): []byte {
     acc
 }
 
-/**
- * Appends the low `count` bytes of `v` to `out` in big-endian (network) order.
- *
- * @param out    the accumulator
- * @param v      the value whose bytes are emitted
- * @param count  how many low-order bytes to emit (1, 2, 4, or 8)
- * @return       `out` followed by the big-endian bytes
- */
 fn append_be(out: []byte, v: u64, count: u64): []byte {
     var acc = out
     var i = count
@@ -369,15 +206,6 @@ fn append_be(out: []byte, v: u64, count: u64): []byte {
     acc
 }
 
-/**
- * Emits the preferred (shortest) head for a major type and its argument (RFC 8949 §4.2.1 rule 1):
- * the argument packed into the initial byte when `< 24`, else the smallest of a following 1-, 2-,
- * 4-, or 8-byte big-endian field.
- *
- * @param major  the major type, `0 .. 7`
- * @param arg    the head argument
- * @return       the encoded head bytes
- */
 fn encode_head(major: u64, arg: u64): []byte {
     var out: []byte = no_bytes()
     if arg < 24 {
@@ -399,14 +227,6 @@ fn encode_head(major: u64, arg: u64): []byte {
     append_be(out, arg, 8)
 }
 
-/**
- * Encodes a simple value (major type 7): packed into the initial byte when `< 24`, else the
- * one-byte extension form (`0xF8` then the value).
- *
- * @param out  the accumulator
- * @param v    the simple value
- * @return     `out` with the encoded simple value appended
- */
 fn encode_simple(out: []byte, v: u64): []byte {
     if v < 24 {
         return teko::list::push(out, (0xE0 | v) to byte)
@@ -415,14 +235,6 @@ fn encode_simple(out: []byte, v: u64): []byte {
     teko::list::push(o, v to byte)
 }
 
-/**
- * Encodes one `CborValue` onto the accumulator, recursing through arrays, maps, and tagged
- * content. Total: every well-formed value has a rendering.
- *
- * @param out  the accumulator
- * @param v    the value to encode
- * @return     `out` with `v`'s encoding appended
- */
 fn encode_value(out: []byte, v: CborValue): []byte {
     match v.kind {
         CborKind::Uint => append_all(out, encode_head(0, v.uint))
@@ -440,13 +252,6 @@ fn encode_value(out: []byte, v: CborValue): []byte {
     }
 }
 
-/**
- * Encodes a definite-length array head followed by each element.
- *
- * @param out    the accumulator
- * @param items  the array elements
- * @return       `out` with the encoded array appended
- */
 fn encode_array(out: []byte, items: []CborValue): []byte {
     var acc = append_all(out, encode_head(4, items.len))
     var i: u64 = 0
@@ -458,14 +263,6 @@ fn encode_array(out: []byte, items: []CborValue): []byte {
     acc
 }
 
-/**
- * Encodes a definite-length map head followed by each key/value pair in slice order.
- *
- * @param out   the accumulator
- * @param keys  the map keys
- * @param vals  the map values, parallel to `keys`
- * @return      `out` with the encoded map appended
- */
 fn encode_map(out: []byte, keys: []CborValue, vals: []CborValue): []byte {
     var acc = append_all(out, encode_head(5, keys.len))
     var i: u64 = 0
@@ -481,23 +278,11 @@ fn encode_map(out: []byte, keys: []CborValue, vals: []CborValue): []byte {
  * Encodes a complete `CborValue` to a fresh byte slice using preferred (shortest) head lengths
  * throughout. Map entries keep their given order — use `encode_canonical` when a signing-stable
  * key order is required.
- *
- * @param v  the value to encode
- * @return   the CBOR byte encoding
  */
 exp fn encode(v: CborValue): []byte {
     encode_value(no_bytes(), v)
 }
 
-/**
- * Reports whether encoded key `a` sorts strictly before encoded key `b` in bytewise lexicographic
- * order (RFC 8949 §4.2.1 rule 2): compared byte by byte, and a strict prefix sorts before its
- * extension.
- *
- * @param a  the first encoded key
- * @param b  the second encoded key
- * @return   true when `a` sorts strictly before `b`
- */
 fn bytes_less(a: []byte, b: []byte): bool {
     var i: u64 = 0
     loop {
@@ -508,14 +293,6 @@ fn bytes_less(a: []byte, b: []byte): bool {
     }
 }
 
-/**
- * Inserts a scratch entry into an already-sorted list, keeping it sorted by encoded key
- * (a functional insertion step, no index-assignment).
- *
- * @param sorted  the already-sorted entries
- * @param e       the entry to insert
- * @return        a new sorted list including `e`
- */
 fn insert_sorted(sorted: []CanonEntry, e: CanonEntry): []CanonEntry {
     var out: []CanonEntry = teko::list::empty()
     var placed = false
@@ -533,15 +310,6 @@ fn insert_sorted(sorted: []CanonEntry, e: CanonEntry): []CanonEntry {
     out
 }
 
-/**
- * Encodes a map with its entries sorted into canonical (bytewise-lexicographic-of-encoded-key)
- * order, recursing canonically into values.
- *
- * @param out   the accumulator
- * @param keys  the map keys
- * @param vals  the map values, parallel to `keys`
- * @return      `out` with the canonically-ordered map appended
- */
 fn encode_map_canonical(out: []byte, keys: []CborValue, vals: []CborValue): []byte {
     var sorted: []CanonEntry = teko::list::empty()
     var i: u64 = 0
@@ -566,9 +334,6 @@ fn encode_map_canonical(out: []byte, keys: []CborValue, vals: []CborValue): []by
  * Encodes a complete `CborValue` in canonical form (RFC 8949 §4.2.1): preferred head lengths
  * everywhere plus map keys sorted into bytewise lexicographic order of their encodings. Suitable
  * for producing a signing-stable byte string.
- *
- * @param v  the value to encode
- * @return   the canonical CBOR byte encoding
  */
 exp fn encode_canonical(v: CborValue): []byte {
     if v.kind == CborKind::Map { return encode_map_canonical(no_bytes(), v.keys, v.vals) }
@@ -586,15 +351,6 @@ exp fn encode_canonical(v: CborValue): []byte {
     encode(v)
 }
 
-/**
- * Reads `count` bytes big-endian from `p` at `pos` into a `u64`. The caller has already
- * bounds-checked `pos + count <= p.len`.
- *
- * @param p      the input
- * @param pos    the offset of the first byte
- * @param count  how many bytes to read (1, 2, 4, or 8)
- * @return       the assembled unsigned value
- */
 fn read_be(p: []byte, pos: u64, count: u64): u64 {
     var v: u64 = 0
     var i: u64 = 0
@@ -606,28 +362,10 @@ fn read_be(p: []byte, pos: u64, count: u64): u64 {
     v
 }
 
-/**
- * A `CborRead` failure with a message naming the offending offset.
- *
- * @param what  the failure description
- * @param pos   the offset at which the failure was detected
- * @return      the checked error
- */
 fn read_error(what: str, pos: u64): error {
     error { message = concat("cbor: ", what, " at offset ", i64_to_str(pos to i64)) }
 }
 
-/**
- * Reads a head argument from `p` at the additional-information nibble `ai`, having already
- * consumed the initial byte at `pos` (so `pos + 1` is the first argument byte). Resolves the
- * inline (`< 24`), 1-/2-/4-/8-byte, and indefinite (31) forms; the reserved 28/29/30 nibbles are
- * a checked error.
- *
- * @param p    the input
- * @param pos  the offset of the initial byte
- * @param ai   the additional-information nibble (`initial & 0x1F`)
- * @return     the argument, the offset past the head, and the indefinite flag, or `error`
- */
 fn read_arg(p: []byte, pos: u64, ai: u64): ArgRead | error {
     if ai < 24 { return ArgRead { arg = ai; pos = pos + 1; indefinite = false } }
     if ai == 31 { return ArgRead { arg = 0; pos = pos + 1; indefinite = true } }
@@ -641,13 +379,6 @@ fn read_arg(p: []byte, pos: u64, ai: u64): ArgRead | error {
     ArgRead { arg = read_be(p, pos + 1, count); pos = pos + 1 + count; indefinite = false }
 }
 
-/**
- * The number of trailing argument bytes for the multi-byte additional-information nibbles
- * (25 -> 2, 26 -> 4, 27 -> 8), or 0 for the reserved 28/29/30.
- *
- * @param ai  the additional-information nibble
- * @return    the trailing byte count, or 0 when reserved
- */
 fn arg_byte_count(ai: u64): u64 {
     if ai == 25 { return 2 }
     if ai == 26 { return 4 }
@@ -655,14 +386,6 @@ fn arg_byte_count(ai: u64): u64 {
     0
 }
 
-/**
- * Takes `n` bytes out of `p` starting at `pos`, bounds-checked.
- *
- * @param p    the input
- * @param pos  the offset of the first byte
- * @param n    how many bytes to take
- * @return     the taken bytes and the offset past them, or `error` when truncated
- */
 fn take_bytes(p: []byte, pos: u64, n: u64): BytesRead | error {
     if pos + n > p.len { return read_error("truncated string", pos) }
     var out: []byte = no_bytes()
@@ -675,28 +398,10 @@ fn take_bytes(p: []byte, pos: u64, n: u64): BytesRead | error {
     BytesRead { data = out; pos = pos + n }
 }
 
-/**
- * Reports whether the byte at `pos` is the break code (`0xFF`) that terminates an indefinite-length
- * item.
- *
- * @param p    the input
- * @param pos  the offset to test
- * @return     true when `pos` is in range and holds the break code
- */
 fn is_break(p: []byte, pos: u64): bool {
     pos < p.len && p[pos] == 0xFF
 }
 
-/**
- * Decodes a string major (byte string `maj = 2` or text string `maj = 3`), handling both the
- * definite-length and the indefinite-length chunked forms. Chunks of an indefinite string must
- * themselves be definite strings of the same major.
- *
- * @param p    the input
- * @param a    the already-read head argument
- * @param maj  the string major type (2 or 3)
- * @return     the assembled string item and the offset past it, or `error`
- */
 fn decode_string(p: []byte, a: ArgRead, maj: u64): CborRead | error {
     if !a.indefinite {
         var got = match take_bytes(p, a.pos, a.arg) { BytesRead as r => r; error as e => return e }
@@ -714,39 +419,16 @@ fn decode_string(p: []byte, a: ArgRead, maj: u64): CborRead | error {
     }
 }
 
-/**
- * Reports whether a decoded chunk is a definite string of the expected major (a byte string for
- * `maj = 2`, a text string for `maj = 3`).
- *
- * @param v    the decoded chunk
- * @param maj  the expected string major type
- * @return     true when the chunk's kind matches the major
- */
 fn chunk_matches(v: CborValue, maj: u64): bool {
     if maj == 2 { return v.kind == CborKind::Bytes }
     v.kind == CborKind::Text
 }
 
-/**
- * Wraps decoded string bytes as the appropriate item kind for the major type.
- *
- * @param maj   the string major type (2 or 3)
- * @param data  the raw bytes
- * @return      a byte-string item for `maj = 2`, else a text-string item
- */
 fn wrap_string(maj: u64, data: []byte): CborValue {
     if maj == 2 { return cbor_bytes(data) }
     mk_value(CborKind::Text, 0, 0.0, false, data, no_values(), no_values(), no_values())
 }
 
-/**
- * Decodes an array major (`maj = 4`), handling both the definite-length (`arg` elements) and the
- * indefinite-length (elements until break) forms.
- *
- * @param p  the input
- * @param a  the already-read head argument
- * @return   the assembled array item and the offset past it, or `error`
- */
 fn decode_array(p: []byte, a: ArgRead): CborRead | error {
     var items: []CborValue = no_values()
     var at = a.pos
@@ -770,14 +452,6 @@ fn decode_array(p: []byte, a: ArgRead): CborRead | error {
     CborRead { value = cbor_array(items); pos = at }
 }
 
-/**
- * Decodes a map major (`maj = 5`), handling both the definite-length (`arg` pairs) and the
- * indefinite-length (pairs until break) forms.
- *
- * @param p  the input
- * @param a  the already-read head argument
- * @return   the assembled map item and the offset past it, or `error`
- */
 fn decode_map(p: []byte, a: ArgRead): CborRead | error {
     var keys: []CborValue = no_values()
     var vals: []CborValue = no_values()
@@ -806,17 +480,6 @@ fn decode_map(p: []byte, a: ArgRead): CborRead | error {
     CborRead { value = cbor_map(keys, vals); pos = at }
 }
 
-/**
- * Decodes a major-type-7 item: the distinguished simple values (`false`/`true`/`null`/`undefined`),
- * any other simple value, or one of the three IEEE 754 float widths (each yielding an `f64`). A
- * bare break (`ai = 31`) outside an indefinite item is a checked error.
- *
- * @param p    the input
- * @param pos  the offset of the initial byte
- * @param a    the already-read head argument
- * @param ai   the additional-information nibble
- * @return     the decoded item and the offset past it, or `error`
- */
 fn decode_simple_or_float(p: []byte, pos: u64, a: ArgRead, ai: u64): CborRead | error {
     if ai == 31 { return read_error("unexpected break", pos) }
     if ai == 25 {
@@ -834,13 +497,6 @@ fn decode_simple_or_float(p: []byte, pos: u64, a: ArgRead, ai: u64): CborRead | 
     CborRead { value = simple_value(a.arg); pos = a.pos }
 }
 
-/**
- * Maps a simple-value argument to its item: 20 is `false`, 21 `true`, 22 `null`, 23 `undefined`;
- * every other value is a bare simple.
- *
- * @param arg  the simple value
- * @return     the corresponding item
- */
 fn simple_value(arg: u64): CborValue {
     if arg == 20 { return cbor_bool(false) }
     if arg == 21 { return cbor_bool(true) }
@@ -849,13 +505,6 @@ fn simple_value(arg: u64): CborValue {
     cbor_simple(arg)
 }
 
-/**
- * Converts a 16-bit IEEE 754 half-precision bit pattern to the `f64` it denotes, covering zeros,
- * subnormals, normals, infinities, and NaN.
- *
- * @param h  the 16-bit half pattern (in the low bits of the `u64`)
- * @return   the equivalent double-precision value
- */
 fn half_to_f64(h: u64): f64 {
     var sign = (h >> 15) & 0x1
     var ebits = (h >> 10) & 0x1F
@@ -866,27 +515,11 @@ fn half_to_f64(h: u64): f64 {
     apply_sign(sign, value)
 }
 
-/**
- * The infinity or NaN denoted by a half-precision maximum exponent: NaN when the mantissa is
- * non-zero, else a signed infinity built from the `f64` bit pattern.
- *
- * @param sign  the sign bit
- * @param mant  the 10-bit mantissa
- * @return      the signed infinity, or NaN
- */
 fn half_non_finite(sign: u64, mant: u64): f64 {
     if mant != 0 { return f64_from_bits(0x7FF8000000000000) }
     f64_from_bits((sign << 63) | 0x7FF0000000000000)
 }
 
-/**
- * Converts a 32-bit IEEE 754 single-precision bit pattern to the exact `f64` it denotes by
- * rebuilding the double's sign/exponent/mantissa fields (an exact widening: every single is a
- * double). Zeros, subnormals, normals, infinities, and NaN are all handled.
- *
- * @param s  the 32-bit single pattern (in the low bits of the `u64`)
- * @return   the equivalent double-precision value
- */
 fn single_to_f64(s: u64): f64 {
     var sign = (s >> 31) & 0x1
     var ebits = (s >> 23) & 0xFF
@@ -900,39 +533,15 @@ fn single_to_f64(s: u64): f64 {
     f64_from_bits((sign << 63) | (exp64 << 52) | (mant << 29))
 }
 
-/**
- * Applies a sign bit to a non-negative magnitude, negating when the bit is set (so `-0.0` is
- * produced for a set sign over a zero magnitude).
- *
- * @param sign  the sign bit (1 = negative)
- * @param mag   the non-negative magnitude
- * @return      `mag` or `-mag`
- */
 fn apply_sign(sign: u64, mag: f64): f64 {
     if sign == 1 { return -mag }
     mag
 }
 
-/**
- * Computes `2^e` for an integer exponent as an `f64` by building the IEEE 754 double whose
- * exponent field is `e + 1023` and whose mantissa is zero — exact for every `e` in the normal
- * range `[-1022, 1023]`, which covers the half- and single-precision exponents the float decoders
- * feed it.
- *
- * @param e  the integer exponent
- * @return   `2^e`
- */
 fn two_pow(e: i64): f64 {
     f64_from_bits((((e + 1023) to u64) & 0x7FF) << 52)
 }
 
-/**
- * Decodes exactly one CBOR item at `pos`, dispatching on the major type after reading the head.
- *
- * @param p    the input
- * @param pos  the offset of the item's initial byte
- * @return     the decoded item and the offset past it, or `error`
- */
 fn decode_at(p: []byte, pos: u64): CborRead | error {
     if pos >= p.len { return read_error("unexpected end of input", pos) }
     var ib = p[pos] to u64
@@ -958,14 +567,6 @@ fn decode_at(p: []byte, pos: u64): CborRead | error {
     decode_tag(p, a)
 }
 
-/**
- * Decodes a tag major (`maj = 6`): the tag number (already in the head argument) plus the single
- * tagged item that follows.
- *
- * @param p  the input
- * @param a  the already-read head argument (its `arg` is the tag number)
- * @return   the tagged item and the offset past it, or `error`
- */
 fn decode_tag(p: []byte, a: ArgRead): CborRead | error {
     if a.indefinite { return read_error("tag cannot be indefinite length", a.pos) }
     var content = match decode_at(p, a.pos) { CborRead as r => r; error as e => return e }
@@ -975,9 +576,6 @@ fn decode_tag(p: []byte, a: ArgRead): CborRead | error {
 /**
  * Decodes a complete CBOR document: exactly one top-level item, with any trailing bytes reported
  * as a checked error (a CBOR-encoded data item is a single item).
- *
- * @param p  the input bytes
- * @return   the decoded item, or `error` on malformed input or trailing bytes
  */
 exp fn decode(p: []byte): CborValue | error {
     var r = match decode_at(p, 0) { CborRead as x => x; error as e => return e }
@@ -989,10 +587,6 @@ exp fn decode(p: []byte): CborValue | error {
  * Structurally compares two `CborValue` trees for equality, recursing through arrays, maps (in
  * slice order), and tagged content. Floats compare by `f64` bit pattern, so `NaN` equals `NaN`
  * with the same payload and `-0.0` differs from `0.0` — the round-trip identity relation.
- *
- * @param a  the first value
- * @param b  the second value
- * @return   true when the two trees are structurally identical
  */
 exp fn cbor_equal(a: CborValue, b: CborValue): bool {
     if a.kind != b.kind { return false }
@@ -1012,13 +606,6 @@ exp fn cbor_equal(a: CborValue, b: CborValue): bool {
     }
 }
 
-/**
- * Compares two byte slices for exact equality.
- *
- * @param a  the first slice
- * @param b  the second slice
- * @return   true when both have the same length and identical bytes
- */
 fn bytes_equal(a: []byte, b: []byte): bool {
     if a.len != b.len { return false }
     var i: u64 = 0
@@ -1030,13 +617,6 @@ fn bytes_equal(a: []byte, b: []byte): bool {
     true
 }
 
-/**
- * Compares two `CborValue` slices elementwise with `cbor_equal`.
- *
- * @param a  the first slice
- * @param b  the second slice
- * @return   true when both have the same length and structurally equal elements
- */
 fn values_equal(a: []CborValue, b: []CborValue): bool {
     if a.len != b.len { return false }
     var i: u64 = 0

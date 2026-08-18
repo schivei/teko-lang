@@ -1,30 +1,3 @@
-/**
- * `teko::crypto::des` — the DES (FIPS 46-3) single-block cipher primitive: the initial/final
- * permutations, the 16-round Feistel network (expansion `E`, eight S-boxes, permutation `P`),
- * and the key schedule (`PC-1`/`PC-2` plus the per-round left rotations).
- *
- * **LEGACY / DEPRECATED — interop only.** DES has a 56-bit effective key (brute-forceable) and a
- * 64-bit block (subject to the "Sweet32" birthday-bound collision attack across ~2^32 blocks
- * under one key in a chaining mode). It MUST NOT be used for new work; it ships only so a caller
- * can read/write a legacy format that mandates it. `teko::crypto::tdes` builds 3DES (TDEA) on top
- * of this file's single-block primitive.
- *
- * FLAT SURFACE (the `teko::crypto` convention): every exported symbol lives directly under
- * `teko::crypto`, called bare — `des_encrypt_block`, not `teko::crypto::des::encrypt_block`.
- *
- * WORKS IN u64/u32 BIT ARITHMETIC throughout: DES is a bit-permutation-heavy cipher, and
- * bitwise operators on a bare `byte` are rejected by the checker, so every block/key/subkey is
- * packed into a `u64` (or a 32-bit half into a `u32`) for the whole computation and only
- * unpacked to `[]byte` at the very edges (`des_block_to_u64`/`des_u64_to_block`).
- *
- * NO INDEX-ASSIGNMENT: every output buffer is built via `teko::list::push`, matching
- * `teko::crypto::cipher`'s discipline. The S-boxes and permutation tables are module consts.
- */
-
-/**
- * DES_IP_TABLE — the Initial Permutation (FIPS 46-3 Table 1): `IP` reorders the 64 input bits
- * (1-indexed from the most significant bit) before the first Feistel round.
- */
 const DES_IP_TABLE: []u32 = [
     58, 50, 42, 34, 26, 18, 10, 2,
     60, 52, 44, 36, 28, 20, 12, 4,
@@ -36,10 +9,6 @@ const DES_IP_TABLE: []u32 = [
     63, 55, 47, 39, 31, 23, 15, 7
 ]
 
-/**
- * DES_FP_TABLE — the Final Permutation (FIPS 46-3 Table 1, `IP^-1`): applied to the pre-output
- * block (`R16 || L16`) after the 16 Feistel rounds to produce the cipher/plain text.
- */
 const DES_FP_TABLE: []u32 = [
     40, 8, 48, 16, 56, 24, 64, 32,
     39, 7, 47, 15, 55, 23, 63, 31,
@@ -51,10 +20,6 @@ const DES_FP_TABLE: []u32 = [
     33, 1, 41, 9, 49, 17, 57, 25
 ]
 
-/**
- * DES_E_TABLE — the round-function expansion permutation `E` (FIPS 46-3 Table 2): expands the
- * 32-bit right half to 48 bits by duplicating each block boundary bit, feeding the eight S-boxes.
- */
 const DES_E_TABLE: []u32 = [
     32, 1, 2, 3, 4, 5,
     4, 5, 6, 7, 8, 9,
@@ -66,10 +31,6 @@ const DES_E_TABLE: []u32 = [
     28, 29, 30, 31, 32, 1
 ]
 
-/**
- * DES_P_TABLE — the round-function output permutation `P` (FIPS 46-3 Table 3): scrambles the
- * concatenated 32-bit S-box output before it is XORed into the left half.
- */
 const DES_P_TABLE: []u32 = [
     16, 7, 20, 21, 29, 12, 28, 17,
     1, 15, 23, 26, 5, 18, 31, 10,
@@ -77,10 +38,6 @@ const DES_P_TABLE: []u32 = [
     19, 13, 30, 6, 22, 11, 4, 25
 ]
 
-/**
- * DES_PC1_TABLE — Permuted Choice 1 (FIPS 46-3 Table 4): drops the 8 parity bits from the 64-bit
- * key and permutes the remaining 56 into the initial `C0 || D0` key-schedule register.
- */
 const DES_PC1_TABLE: []u32 = [
     57, 49, 41, 33, 25, 17, 9,
     1, 58, 50, 42, 34, 26, 18,
@@ -92,10 +49,6 @@ const DES_PC1_TABLE: []u32 = [
     21, 13, 5, 28, 20, 12, 4
 ]
 
-/**
- * DES_PC2_TABLE — Permuted Choice 2 (FIPS 46-3 Table 5): selects and permutes 48 of the 56
- * `C_i || D_i` bits into each round's subkey `K_i`.
- */
 const DES_PC2_TABLE: []u32 = [
     14, 17, 11, 24, 1, 5,
     3, 28, 15, 6, 21, 10,
@@ -107,16 +60,8 @@ const DES_PC2_TABLE: []u32 = [
     46, 42, 50, 36, 29, 32
 ]
 
-/**
- * DES_SHIFTS — the per-round left-rotation counts applied to `C`/`D` before deriving each
- * subkey (FIPS 46-3 Table 6): 1 bit for rounds 1, 2, 9, and 16; 2 bits for every other round.
- */
 const DES_SHIFTS: []u64 = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 
-/**
- * DES_SBOX — the eight DES substitution boxes (FIPS 46-3 Table 7), flattened into one 512-entry
- * table: `DES_SBOX[box * 64 + row * 16 + col]` is `S_{box+1}(row, col)`.
- */
 const DES_SBOX: []u32 = [
     14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7,
     0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8,
@@ -152,12 +97,6 @@ const DES_SBOX: []u32 = [
     2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11
 ]
 
-/**
- * The four classic DES weak keys (FIPS 46-3 / SP 800-67 note): a weak key makes DES encryption
- * its own inverse (`E_K = D_K`), so `DES_WEAK_KEYS[i]` packed as a 64-bit value (including the
- * parity bits) is rejected wherever a caller asks for weak-key validation (`tdes_key_expand`
- * checks each TDEA component key against this table).
- */
 const DES_WEAK_KEYS: []u64 = [
     0x0101010101010101,
     0xFEFEFEFEFEFEFEFE,
@@ -174,24 +113,11 @@ exp type DesKey = struct {
     round_keys: []u64
 }
 
-/**
- * The left/right 32-bit halves of a DES Feistel round, each stored as the low 32 bits of a
- * `u64` — returned as a value because a round updates both halves from one input pair.
- */
 type DesFeistelHalves = struct {
-    /** the new left half (the previous round's right half, unchanged) */
     l: u64
-    /** the new right half (`l_prev XOR f(r_prev, subkey)`) */
     r: u64
 }
 
-/**
- * Packs an 8-byte block into a `u64`, most-significant byte first — DES's bit-1-is-MSB
- * convention, so `des_permute`'s 1-indexed-from-the-left tables apply directly.
- *
- * @param b  the 8-byte block
- * @return   the packed 64-bit value
- */
 fn des_block_to_u64(b: []byte): u64 {
     var out: u64 = 0
     var i: u64 = 0
@@ -203,13 +129,6 @@ fn des_block_to_u64(b: []byte): u64 {
     out
 }
 
-/**
- * Unpacks a 64-bit value into an 8-byte block, most-significant byte first — the inverse of
- * `des_block_to_u64`.
- *
- * @param x  the 64-bit value
- * @return   the 8-byte big-endian block
- */
 fn des_u64_to_block(x: u64): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -222,16 +141,6 @@ fn des_u64_to_block(x: u64): []byte {
     out
 }
 
-/**
- * Applies a DES bit-permutation table to a packed value: output bit `j` (1-indexed from the
- * left, `j` in `1..table.len`) is input bit `table[j-1]` (1-indexed from the left of a `width`-
- * bit source). The one primitive behind `IP`/`FP`/`E`/`P`/`PC-1`/`PC-2`.
- *
- * @param src    the source value, its meaningful bits in the low `width` bits
- * @param width  the source's bit width (64, 56, or 32 in this file)
- * @param table  the 1-indexed permutation table; its length is the output bit width
- * @return       the permuted value, packed into the low `table.len` bits
- */
 fn des_permute(src: u64, width: u64, table: []u32): u64 {
     var out: u64 = 0
     var i: u64 = 0
@@ -246,25 +155,10 @@ fn des_permute(src: u64, width: u64, table: []u32): u64 {
     out
 }
 
-/**
- * Rotates a 28-bit value (packed in the low bits of a `u64`) left by `count` bits, wrapping
- * within the 28-bit field — the `C_i`/`D_i` key-schedule rotation (FIPS 46-3 Table 6).
- *
- * @param x      the 28-bit value, in the low bits
- * @param count  the rotation count (1 or 2 in the DES schedule)
- * @return       `x` rotated left by `count` within a 28-bit field
- */
 fn des_rotl28(x: u64, count: u64): u64 {
     ((x << count) | (x >> (28 - count))) & 0xFFFFFFF
 }
 
-/**
- * Reverses the order of a round-key list — turns the encryption subkey order `K1..K16` into the
- * decryption order `K16..K1` (DES decryption is encryption with the schedule reversed).
- *
- * @param keys  the subkeys in some order
- * @return      a fresh list holding `keys` in reverse order
- */
 fn des_reverse_keys(keys: []u64): []u64 {
     var out: []u64 = teko::list::empty()
     var i: u64 = keys.len
@@ -276,14 +170,6 @@ fn des_reverse_keys(keys: []u64): []u64 {
     out
 }
 
-/**
- * Derives the 16 round subkeys from an 8-byte DES key (FIPS 46-3 §3.2): `PC-1` drops the parity
- * bits into the initial `C0 || D0`, then each round left-rotates both halves per `DES_SHIFTS` and
- * `PC-2` selects that round's 48-bit subkey.
- *
- * @param key8  the 8-byte DES key (including parity bits; the caller guarantees the length)
- * @return      the 16 round subkeys `K1..K16`, in round order
- */
 fn des_key_schedule(key8: []byte): []u64 {
     var pc1 = des_permute(des_block_to_u64(key8), 64, DES_PC1_TABLE)
     var c = (pc1 >> 28) & 0xFFFFFFF
@@ -300,15 +186,6 @@ fn des_key_schedule(key8: []byte): []u64 {
     keys
 }
 
-/**
- * The DES round function `f` (FIPS 46-3 §3.3): expands the 32-bit right half to 48 bits (`E`),
- * XORs in the round subkey, splits into eight 6-bit groups each substituted by its S-box, and
- * permutes the recombined 32 bits (`P`).
- *
- * @param r        the 32-bit right half, in the low bits of a `u64`
- * @param subkey   the 48-bit round subkey, in the low bits of a `u64`
- * @return         the 32-bit round output, in the low bits of a `u64`
- */
 fn des_f(r: u64, subkey: u64): u64 {
     var expanded = des_permute(r, 32, DES_E_TABLE) ^ subkey
     var combined: u64 = 0
@@ -325,27 +202,10 @@ fn des_f(r: u64, subkey: u64): u64 {
     des_permute(combined, 32, DES_P_TABLE)
 }
 
-/**
- * Runs one Feistel round: the new left half is the old right half; the new right half is the old
- * left half XORed with `f(right, subkey)` (FIPS 46-3 §3.3).
- *
- * @param halves  the current left/right halves
- * @param subkey  this round's 48-bit subkey
- * @return        the updated left/right halves after the round
- */
 fn des_round(halves: DesFeistelHalves, subkey: u64): DesFeistelHalves {
     DesFeistelHalves { l = halves.r; r = halves.l ^ des_f(halves.r, subkey) }
 }
 
-/**
- * The DES single-block core (FIPS 46-3 §3.1): `IP`, then 16 Feistel rounds under `round_keys` in
- * the order given, then the pre-output swap and `FP`. Encryption passes `K1..K16`; decryption
- * passes the same subkeys reversed (`des_reverse_keys`) — the two are the same core.
- *
- * @param round_keys  the 16 subkeys to apply, in the order this call should use them
- * @param block8      the 8-byte input block
- * @return            the 8-byte output block
- */
 fn des_crypt_core(round_keys: []u64, block8: []byte): []byte {
     var permuted = des_permute(des_block_to_u64(block8), 64, DES_IP_TABLE)
     var halves = DesFeistelHalves { l = permuted >> 32; r = permuted & 0xFFFFFFFF }
@@ -361,10 +221,6 @@ fn des_crypt_core(round_keys: []u64, block8: []byte): []byte {
 /**
  * Expands an 8-byte DES key into a reusable `DesKey` (FIPS 46-3 §3.2). Expand once, then reuse
  * across every block with `des_encrypt_block_ks`/`des_decrypt_block_ks`.
- *
- * @param key8  the DES key: exactly 8 bytes (56 effective bits plus 8 parity bits)
- * @return      the expanded round-key schedule, or a `CryptoError` on an invalid key length
- * @throws      `CryptoError` when `key8.len != 8`
  */
 exp fn des_key_expand(key8: []byte): DesKey | CryptoError {
     if key8.len != 8 { return crypto_error("des: key must be exactly 8 bytes") }
@@ -374,10 +230,6 @@ exp fn des_key_expand(key8: []byte): DesKey | CryptoError {
 /**
  * Encrypts one 8-byte block under a pre-expanded key (FIPS 46-3 §3.1) — the fast path for a
  * caller applying the same key to many blocks.
- *
- * @param ks      the expanded key (`des_key_expand`)
- * @param block8  the 8-byte plaintext block (the caller guarantees the length)
- * @return        the 8-byte ciphertext block
  */
 exp fn des_encrypt_block_ks(ks: DesKey, block8: []byte): []byte {
     des_crypt_core(ks.round_keys, block8)
@@ -386,10 +238,6 @@ exp fn des_encrypt_block_ks(ks: DesKey, block8: []byte): []byte {
 /**
  * Decrypts one 8-byte block under a pre-expanded key: the same Feistel core with the subkey
  * order reversed (FIPS 46-3 §3.1 decryption note).
- *
- * @param ks      the expanded key (`des_key_expand`)
- * @param block8  the 8-byte ciphertext block (the caller guarantees the length)
- * @return        the 8-byte plaintext block
  */
 exp fn des_decrypt_block_ks(ks: DesKey, block8: []byte): []byte {
     des_crypt_core(des_reverse_keys(ks.round_keys), block8)
@@ -399,11 +247,6 @@ exp fn des_decrypt_block_ks(ks: DesKey, block8: []byte): []byte {
  * Encrypts one 8-byte block under `key8`, expanding the key on the spot — the one-shot form. For
  * many blocks under the same key, expand once with `des_key_expand` and call
  * `des_encrypt_block_ks`.
- *
- * @param key8    the DES key (8 bytes)
- * @param block8  the 8-byte plaintext block
- * @return        the 8-byte ciphertext block, or a `CryptoError` on a bad key/block length
- * @throws        `CryptoError` when `key8.len != 8` or `block8.len != 8`
  */
 exp fn des_encrypt_block(key8: []byte, block8: []byte): []byte | CryptoError {
     if block8.len != 8 { return crypto_error("des: block must be exactly 8 bytes") }
@@ -413,11 +256,6 @@ exp fn des_encrypt_block(key8: []byte, block8: []byte): []byte | CryptoError {
 
 /**
  * Decrypts one 8-byte block under `key8`, expanding the key on the spot.
- *
- * @param key8    the DES key (8 bytes)
- * @param block8  the 8-byte ciphertext block
- * @return        the 8-byte plaintext block, or a `CryptoError` on a bad key/block length
- * @throws        `CryptoError` when `key8.len != 8` or `block8.len != 8`
  */
 exp fn des_decrypt_block(key8: []byte, block8: []byte): []byte | CryptoError {
     if block8.len != 8 { return crypto_error("des: block must be exactly 8 bytes") }
@@ -429,9 +267,6 @@ exp fn des_decrypt_block(key8: []byte, block8: []byte): []byte | CryptoError {
  * Reports whether an 8-byte DES key is one of the four classic weak keys (FIPS 46-3 / SP 800-67):
  * a weak key makes `E_K = D_K`, degenerating double/triple-DES protection. Used by
  * `teko::crypto::tdes` to reject weak TDEA component keys.
- *
- * @param key8  the 8-byte candidate key
- * @return      `true` iff `key8` packs to one of `DES_WEAK_KEYS`
  */
 exp fn des_is_weak_key(key8: []byte): bool {
     var packed = des_block_to_u64(key8)

@@ -4,28 +4,6 @@ use teko::encoding::json
 use teko::numeric::bigint
 
 /**
- * `teko::crypto::jose::jwk` — JSON Web Key import (RFC 7517 the envelope, RFC 7518 §6 /
- * RFC 8037 §2 the per-`kty` member encodings). Parses a JWK JSON document into the concrete
- * `teko::crypto` key type `jws_sign`/`jws_verify` need, for the four key families this unit's
- * algorithm coverage requires: `"oct"` (HMAC secret), `"RSA"`, `"EC"` (P-256 only — see this
- * project's `jose.tks` header for why `ES384`/`ES512` are gated), and `"OKP"` (Ed25519 only).
- *
- * NO KEY EXPORT / KEY GENERATION here — this is strictly the import direction a verifier/signer
- * needs to consume a JWK a counterparty published (a JWKS endpoint, a config file, ...). Every
- * numeric member (`k`, `n`, `e`, `d`, `x`, `y`) is base64url-WITHOUT-padding text per RFC 7518
- * §2, decoded via `teko::encoding::base64::decode_url_safe_no_pad`.
- *
- * `@JoseKey()` is the one inline union (`teko::encoding::json::JsonValue`'s §9.D precedent) every
- * key family lowers to, so `jws_sign`/`jws_verify` (`jws.tks`) take a single key parameter type
- * regardless of algorithm family. `jwk_to_verify_key` returns the PUBLIC-facing variant even when
- * the JWK also carries a private component (a private JWK's public members are still valid for
- * verification); `jwk_to_sign_key` requires the matching private component (`k`/`d`) and fails
- * closed with a `CryptoError` when it is absent.
- *
- * ERRORS ARE VALUES, reusing `teko::crypto::CryptoError` — no new error type.
- */
-
-/**
  * An imported `"oct"` JWK: the raw HMAC secret (`k`, RFC 7518 §6.4.1). The same value serves both
  * signing and verification — HMAC is symmetric.
  */
@@ -91,21 +69,8 @@ exp type JwkOkpPrivate = struct {
     secret_key: []byte
 }
 
-/**
- * JoseKey — the imported-key inline union every `teko::crypto::jose` key family lowers to
- * (mirrors `teko::encoding::json`'s `JsonValue` §9.D convention): an `"oct"` secret, an RSA
- * public/private key, a P-256 public/private key, or an Ed25519 public/private key.
- */
 macro JoseKey() { lowering { JwkOct | JwkRsaPublic | JwkRsaPrivate | JwkEcPublic | JwkEcPrivate | JwkOkpPublic | JwkOkpPrivate } }
 
-/**
- * Parses `jwk_json` into its top-level `JsonObject`, rejecting anything that is not a well-formed
- * JSON object (a JWK is always a JSON object, RFC 7517 §4).
- *
- * @param jwk_json  the candidate JWK JSON text
- * @return          the parsed object, or a `CryptoError` describing why it was rejected
- * @throws          `CryptoError` on malformed JSON or a non-object top-level value
- */
 fn jwk_parse_object(jwk_json: str): json::JsonObject | crypto::CryptoError {
     var v = match json::decode(jwk_json) {
         (@JsonValue()) as x => x
@@ -117,13 +82,6 @@ fn jwk_parse_object(jwk_json: str): json::JsonObject | crypto::CryptoError {
     }
 }
 
-/**
- * The string value of `field` in `obj`, or `null` when `field` is absent or is not a JSON string.
- *
- * @param obj    the JWK object
- * @param field  the member name
- * @return       the decoded string, or `null`
- */
 fn jwk_field_str(obj: json::JsonObject, field: str): str | null {
     match json::object_get(obj, field) {
         (@JsonValue()) as v => match v {
@@ -134,14 +92,6 @@ fn jwk_field_str(obj: json::JsonObject, field: str): str | null {
     }
 }
 
-/**
- * The string value of the REQUIRED member `field` in `obj`.
- *
- * @param obj    the JWK object
- * @param field  the member name
- * @return       the decoded string, or a `CryptoError` when absent / not a string
- * @throws       `CryptoError` when `field` is missing or not a JSON string
- */
 fn jwk_required_str(obj: json::JsonObject, field: str): str | crypto::CryptoError {
     match jwk_field_str(obj, field) {
         str as s => s
@@ -149,15 +99,6 @@ fn jwk_required_str(obj: json::JsonObject, field: str): str | crypto::CryptoErro
     }
 }
 
-/**
- * The decoded bytes of the REQUIRED base64url-no-pad member `field` in `obj` (RFC 7518 §2's
- * `Base64urlUInt`/octet-string encoding — every numeric JWK member: `k`, `n`, `e`, `d`, `x`, `y`).
- *
- * @param obj    the JWK object
- * @param field  the member name
- * @return       the decoded bytes, or a `CryptoError` when absent / not valid base64url
- * @throws       `CryptoError` when `field` is missing, not a string, or not valid base64url
- */
 fn jwk_required_bytes(obj: json::JsonObject, field: str): []byte | crypto::CryptoError {
     var text = match jwk_required_str(obj, field) {
         str as s => s
@@ -169,14 +110,6 @@ fn jwk_required_bytes(obj: json::JsonObject, field: str): []byte | crypto::Crypt
     }
 }
 
-/**
- * An imported `"oct"` JWK — `{"kty":"oct","k":...}`. The same secret serves both
- * `jwk_to_verify_key` and `jwk_to_sign_key`.
- *
- * @param obj  the parsed JWK object
- * @return     the imported secret, or a `CryptoError`
- * @throws     `CryptoError` when `k` is missing or not valid base64url
- */
 fn jwk_parse_oct(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     var secret = match jwk_required_bytes(obj, "k") {
         []byte as b => b
@@ -185,13 +118,6 @@ fn jwk_parse_oct(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     JwkOct { secret = secret }
 }
 
-/**
- * An imported `"RSA"` JWK's public component — `{"kty":"RSA","n":...,"e":...}`.
- *
- * @param obj  the parsed JWK object
- * @return     the imported public key, or a `CryptoError`
- * @throws     `CryptoError` when `n`/`e` is missing or not valid base64url
- */
 fn jwk_parse_rsa_public(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     var n = match jwk_required_bytes(obj, "n") {
         []byte as b => b
@@ -204,13 +130,6 @@ fn jwk_parse_rsa_public(obj: json::JsonObject): @JoseKey() | crypto::CryptoError
     JwkRsaPublic { key = crypto::rsa_public_key_from_bytes_be(n, e) }
 }
 
-/**
- * An imported `"RSA"` JWK's private component — `{"kty":"RSA","n":...,"e":...,"d":...}`.
- *
- * @param obj  the parsed JWK object
- * @return     the imported private key, or a `CryptoError`
- * @throws     `CryptoError` when `n`/`e`/`d` is missing or not valid base64url
- */
 fn jwk_parse_rsa_private(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     var n = match jwk_required_bytes(obj, "n") {
         []byte as b => b
@@ -227,15 +146,6 @@ fn jwk_parse_rsa_private(obj: json::JsonObject): @JoseKey() | crypto::CryptoErro
     JwkRsaPrivate { key = crypto::rsa_private_key_from_bytes_be(n, d, e) }
 }
 
-/**
- * The P-256 point `(x, y)` of an `"EC"` JWK, requiring `crv:"P-256"` and rejecting a point that
- * fails the curve equation (a forged/corrupted "public key" is never accepted).
- *
- * @param obj  the parsed JWK object
- * @return     the decoded point, or a `CryptoError`
- * @throws     `CryptoError` when `crv` is not `"P-256"`, `x`/`y` is missing/malformed, or the
- *             point is off-curve
- */
 fn jwk_ec_p256_point(obj: json::JsonObject): crypto::P256Point | crypto::CryptoError {
     var crv = match jwk_required_str(obj, "crv") {
         str as s => s
@@ -259,13 +169,6 @@ fn jwk_ec_p256_point(obj: json::JsonObject): crypto::P256Point | crypto::CryptoE
     point
 }
 
-/**
- * An imported `"EC"` JWK's public component — `{"kty":"EC","crv":"P-256","x":...,"y":...}`.
- *
- * @param obj  the parsed JWK object
- * @return     the imported public point, or a `CryptoError`
- * @throws     `CryptoError` per `jwk_ec_p256_point`
- */
 fn jwk_parse_ec_public(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     var point = match jwk_ec_p256_point(obj) {
         crypto::P256Point as p => p
@@ -274,13 +177,6 @@ fn jwk_parse_ec_public(obj: json::JsonObject): @JoseKey() | crypto::CryptoError 
     JwkEcPublic { point = point }
 }
 
-/**
- * An imported `"EC"` JWK's private component — adds `d` to the public component's `x`/`y`.
- *
- * @param obj  the parsed JWK object
- * @return     the imported private scalar and point, or a `CryptoError`
- * @throws     `CryptoError` per `jwk_ec_p256_point`, plus when `d` is missing/malformed
- */
 fn jwk_parse_ec_private(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     var point = match jwk_ec_p256_point(obj) {
         crypto::P256Point as p => p
@@ -293,13 +189,6 @@ fn jwk_parse_ec_private(obj: json::JsonObject): @JoseKey() | crypto::CryptoError
     JwkEcPrivate { scalar = bigint::from_bytes_be(d_bytes); point = point }
 }
 
-/**
- * An imported `"OKP"` JWK's public component — `{"kty":"OKP","crv":"Ed25519","x":...}`.
- *
- * @param obj  the parsed JWK object
- * @return     the imported public key, or a `CryptoError`
- * @throws     `CryptoError` when `crv` is missing/wrong or `x` is missing/not exactly 32 bytes
- */
 fn jwk_parse_okp_public(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     var crv = match jwk_required_str(obj, "crv") {
         str as s => s
@@ -318,13 +207,6 @@ fn jwk_parse_okp_public(obj: json::JsonObject): @JoseKey() | crypto::CryptoError
     JwkOkpPublic { public_key = pk }
 }
 
-/**
- * An imported `"OKP"` JWK's private component — adds `d` to the public component's `x`.
- *
- * @param obj  the parsed JWK object
- * @return     the imported secret key, or a `CryptoError`
- * @throws     `CryptoError` when `crv` is missing/wrong or `d` is missing/not exactly 32 bytes
- */
 fn jwk_parse_okp_private(obj: json::JsonObject): @JoseKey() | crypto::CryptoError {
     var crv = match jwk_required_str(obj, "crv") {
         str as s => s
@@ -347,11 +229,6 @@ fn jwk_parse_okp_private(obj: json::JsonObject): @JoseKey() | crypto::CryptoErro
  * Imports a JWK for VERIFICATION: the public-facing key material regardless of whether the JWK
  * also carries a private component (a private JWK's public members remain valid for
  * verification).
- *
- * @param jwk_json  the JWK JSON text
- * @return          the imported public key material, or a `CryptoError`
- * @throws          `CryptoError` on malformed JSON, an unsupported `kty`/`crv`, or a missing/
- *                  malformed required member
  */
 exp fn jwk_to_verify_key(jwk_json: str): @JoseKey() | crypto::CryptoError {
     var obj = match jwk_parse_object(jwk_json) {
@@ -372,11 +249,6 @@ exp fn jwk_to_verify_key(jwk_json: str): @JoseKey() | crypto::CryptoError {
 /**
  * Imports a JWK for SIGNING: the private key material, failing closed when the required private
  * component (`k` for `"oct"`, `d` otherwise) is absent.
- *
- * @param jwk_json  the JWK JSON text
- * @return          the imported private key material, or a `CryptoError`
- * @throws          `CryptoError` on malformed JSON, an unsupported `kty`/`crv`, or a missing/
- *                  malformed required member (including the private component)
  */
 exp fn jwk_to_sign_key(jwk_json: str): @JoseKey() | crypto::CryptoError {
     var obj = match jwk_parse_object(jwk_json) {

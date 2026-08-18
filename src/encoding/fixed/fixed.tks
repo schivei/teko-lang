@@ -1,38 +1,4 @@
 /**
- * `teko::encoding::fixed` — fixed-width column text (mainframe/EDI-style flat files): each line
- * is split into columns by a caller-given list of byte widths, with no delimiter between fields.
- * Pure Teko, no C twin (the `teko::regex` / `teko::encoding::csv` precedent: library code with
- * zero OS/FFI dependency ships as `.tks` + `.tkt` only, and both engines get it automatically).
- *
- * VALUE MODEL. A fixed-width document is `[]FixedRecord` where
- * `FixedRecord = struct { fields: []str }` — one record per line, each field already sliced out
- * by its column width, mirroring `teko::encoding::csv`'s `[]CsvRow` "ordered sequence of like
- * things" precedent.
- *
- * WIDTHS ARE BYTE WIDTHS, NOT CHARACTER COUNTS. A column boundary lands on a byte offset; for
- * ASCII data (the overwhelmingly common case for this format) bytes and characters coincide, but
- * a multi-byte UTF-8 field must size its width in bytes, not codepoints. This is a documented,
- * honest scope choice (M.3) rather than a silent assumption.
- *
- * TRAILING-SPACE TRIMMING IS OPT IN. `parse_fixed` keeps each sliced field exactly as written
- * (including any trailing pad spaces `write_fixed` — or another writer — added); `parse_fixed_trimmed`
- * additionally strips trailing ASCII spaces from every field, the common case when the padding
- * itself carries no meaning.
- *
- * LINE SPLITTING. Lines are separated by `\n`; a line may additionally end in `\r` (accepted and
- * dropped), so both `\n`- and `\r\n`-terminated input parse identically — the same liberal-read
- * convention `teko::encoding::csv::parse_csv` uses. A document ending exactly at a trailing `\n`
- * produces no extra empty final record. `write_fixed` emits `\n` between records (the writer's
- * canonical, unambiguous form; `\r` is a read-side convenience, not something the writer adds).
- *
- * ERROR MODEL (M.1 fail-loud / M.3 honest types). `parse_fixed`/`parse_fixed_trimmed` are
- * `str, []u64 -> []FixedRecord | error`: a line shorter than the sum of `widths` is a checked
- * failure (there is no sane guess for a missing column's content), never a panic. `write_fixed`
- * is total (any `[]FixedRecord` and `[]u64` have a valid rendering — a short field is
- * space-padded, a long one truncated, a missing field treated as empty) so it returns `str` bare.
- */
-
-/**
  * One fixed-width record: its fields, in column order, each already sliced to its declared width.
  */
 exp type FixedRecord = struct {
@@ -42,14 +8,6 @@ exp type FixedRecord = struct {
     fields: []str
 }
 
-/**
- * Copies out `bytes[from, to)` as a fresh `[]byte`.
- *
- * @param bytes  the source bytes
- * @param from   the inclusive start offset
- * @param to     the exclusive end offset
- * @return       the copied range
- */
 fn bytes_slice(bytes: []byte, from: u64, to: u64): []byte {
     var out: []byte = teko::list::empty()
     var i = from
@@ -61,26 +19,11 @@ fn bytes_slice(bytes: []byte, from: u64, to: u64): []byte {
     out
 }
 
-/**
- * Drops a single trailing `\r`, if present, from a byte range (the `\r\n` half of the liberal
- * line-ending read).
- *
- * @param bytes  a line's raw bytes (no `\n`)
- * @return       `bytes` with a single trailing `\r` removed, else `bytes` unchanged
- */
 fn strip_trailing_cr(bytes: []byte): []byte {
     if bytes.len > 0 && bytes[bytes.len - 1] == b'\r' { return bytes_slice(bytes, 0, bytes.len - 1) }
     bytes
 }
 
-/**
- * Splits `text` into lines on `\n`, dropping a trailing `\r` from each (see the module doc's LINE
- * SPLITTING note). A document ending exactly at a trailing `\n` produces no extra empty final
- * line.
- *
- * @param text  the document text
- * @return      the lines, in order
- */
 fn split_lines(text: str): []str {
     var bytes = bytes_of_str(text)
     var lines: []str = teko::list::empty()
@@ -98,12 +41,6 @@ fn split_lines(text: str): []str {
     lines
 }
 
-/**
- * The sum of every column width.
- *
- * @param widths  the column widths
- * @return        their total
- */
 fn widths_sum(widths: []u64): u64 {
     var total: u64 = 0
     var i: u64 = 0
@@ -115,12 +52,6 @@ fn widths_sum(widths: []u64): u64 {
     total
 }
 
-/**
- * Strips trailing ASCII spaces from a byte range, returning the shortened text.
- *
- * @param bytes  the field bytes
- * @return       `bytes` with trailing `' '` bytes removed, as a `str`
- */
 fn trim_trailing_spaces(bytes: []byte): str {
     var end = bytes.len
     loop {
@@ -131,16 +62,6 @@ fn trim_trailing_spaces(bytes: []byte): str {
     str(bytes_slice(bytes, 0, end))
 }
 
-/**
- * Slices one line into its column fields per `widths`, optionally trimming trailing spaces from
- * each.
- *
- * @param line    the line text (already stripped of its terminator)
- * @param widths  the column widths
- * @param trim    whether to strip trailing spaces from each sliced field
- * @return        the sliced fields, in column order, or `error`
- * @throws        when `line` has fewer bytes than the sum of `widths`
- */
 fn parse_line_fields(line: str, widths: []u64, trim: bool): []str | error {
     var bytes = bytes_of_str(line)
     var need = widths_sum(widths)
@@ -163,11 +84,6 @@ fn parse_line_fields(line: str, widths: []u64, trim: bool): []str | error {
 /**
  * Parses `text` as fixed-width columns, each field kept exactly as sliced (including any
  * trailing pad spaces).
- *
- * @param text    the document text
- * @param widths  the column widths, in order
- * @return        the parsed records, in line order, or `error`
- * @throws        when a line has fewer bytes than the sum of `widths`
  */
 exp fn parse_fixed(text: str, widths: []u64): []FixedRecord | error {
     parse_fixed_core(text, widths, false)
@@ -175,25 +91,11 @@ exp fn parse_fixed(text: str, widths: []u64): []FixedRecord | error {
 
 /**
  * Parses `text` as fixed-width columns, stripping trailing ASCII spaces from every sliced field.
- *
- * @param text    the document text
- * @param widths  the column widths, in order
- * @return        the parsed records, in line order, or `error`
- * @throws        when a line has fewer bytes than the sum of `widths`
  */
 exp fn parse_fixed_trimmed(text: str, widths: []u64): []FixedRecord | error {
     parse_fixed_core(text, widths, true)
 }
 
-/**
- * The shared engine behind `parse_fixed`/`parse_fixed_trimmed`.
- *
- * @param text    the document text
- * @param widths  the column widths, in order
- * @param trim    whether to strip trailing spaces from each sliced field
- * @return        the parsed records, in line order, or `error`
- * @throws        per `parse_line_fields`
- */
 fn parse_fixed_core(text: str, widths: []u64, trim: bool): []FixedRecord | error {
     var lines = split_lines(text)
     var out: []FixedRecord = teko::list::empty()
@@ -207,15 +109,6 @@ fn parse_fixed_core(text: str, widths: []u64, trim: bool): []FixedRecord | error
     out
 }
 
-/**
- * Appends a field's rendering to `out`: the field's bytes truncated to `width` when longer, else
- * the field's bytes followed by enough trailing spaces to reach `width`.
- *
- * @param out    the growing output byte accumulator
- * @param field  the field text
- * @param width  the column's declared width
- * @return       `out` with the padded/truncated field appended
- */
 fn append_padded_field(out: []byte, field: str, width: u64): []byte {
     var bytes = bytes_of_str(field)
     var acc = out
@@ -236,15 +129,6 @@ fn append_padded_field(out: []byte, field: str, width: u64): []byte {
     acc
 }
 
-/**
- * Appends one record's rendering: each column padded/truncated to its width, a missing field
- * (fewer fields than `widths`) treated as empty.
- *
- * @param out     the growing output byte accumulator
- * @param record  the record to render
- * @param widths  the column widths, in order
- * @return        `out` with the rendered record appended
- */
 fn append_record(out: []byte, record: FixedRecord, widths: []u64): []byte {
     var acc = out
     var i: u64 = 0
@@ -260,10 +144,6 @@ fn append_record(out: []byte, record: FixedRecord, widths: []u64): []byte {
 /**
  * Renders `records` as fixed-width text: each record's columns padded/truncated to `widths`,
  * `\n`-terminated. Total (M.3): any `[]FixedRecord` and `[]u64` have a valid rendering.
- *
- * @param records  the records to render, in order
- * @param widths   the column widths, in order
- * @return         the fixed-width document text
  */
 exp fn write_fixed(records: []FixedRecord, widths: []u64): str {
     var out: []byte = teko::list::empty()

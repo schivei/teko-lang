@@ -1,29 +1,3 @@
-/**
- * `teko::encoding::toml` — the ENCODER. Total (M.3): a well-formed `TomlValue` tree always has a
- * rendering, so `encode_toml` returns `str` bare, matching `teko::encoding::cbor::encode`'s
- * totality precedent.
- *
- * SCOPE (this file — a documented simplification, not a gap). `encode_toml` always renders a
- * table's entries as flat `key = value` lines (the root) or as an inline table `{ k = v, ... }`
- * (nested), and NEVER emits the `[table]` / `[[array-of-tables]]` HEADER form — a deliberate KISS
- * choice that keeps this encoder trivially total and correct for ANY `TomlValue` tree (arbitrary
- * depth, arbitrary array-of-tables shape) without needing the header form's bookkeeping (deciding
- * when a table is "worth" breaking out, tracking which ancestor path is already open, ordering
- * sibling tables after sibling scalars, ...). Every value this encoder emits parses back to a
- * `TomlValue` STRUCTURALLY EQUAL (`toml_equal`) to the input, even though the byte text differs
- * from typical hand-authored `[section]`-style TOML — round-tripping is guaranteed at the value
- * level, which is what any caller doing `parse_toml(encode_toml(v))` relies on. (This unit is
- * dogfooded by `teko::build::manifest`'s `.tkp` reader instead of a `.tkt` fixture of its own —
- * see that namespace's tests for end-to-end coverage of the decoder over real manifests.)
- */
-
-/**
- * Renders every entry of `t` (`kind == Table`) as one `key = value\n` line per entry, in source
- * order — the top-level document body.
- *
- * @param t  the root table
- * @return   the rendered document bytes
- */
 fn encode_root_table(t: TomlValue): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -42,22 +16,12 @@ fn encode_root_table(t: TomlValue): []byte {
  * Renders a complete document from its root table. When `v` is not itself a `Table` (unusual —
  * TOML documents are always a table at the root), its bare value text is rendered instead so the
  * function stays total; only a `Table` root produces text that re-parses as a TOML document.
- *
- * @param v  the value to render (normally the `parse_toml` result, or a `toml_table_empty`-built
- *           document)
- * @return   the rendered TOML text
  */
 exp fn encode_toml(v: TomlValue): str {
     if v.kind != TomlKind::Table { return str(encode_value(v)) }
     str(encode_root_table(v))
 }
 
-/**
- * Renders one value's TOML literal text, dispatching on its kind.
- *
- * @param v  the value to render
- * @return   the rendered bytes
- */
 fn encode_value(v: TomlValue): []byte {
     match v.kind {
         TomlKind::String => encode_string_value(v.text)
@@ -70,27 +34,12 @@ fn encode_value(v: TomlValue): []byte {
     }
 }
 
-/**
- * Renders `s` as a basic (double-quoted) string literal, escaping `"`, `\`, and every control
- * byte.
- *
- * @param s  the text to render
- * @return   the quoted, escaped literal bytes (including both delimiting `"`)
- */
 fn encode_string_value(s: str): []byte {
     var out: []byte = teko::list::push(teko::list::empty(), b'"')
     out = append_all(out, escape_basic_string_bytes(s))
     teko::list::push(out, b'"')
 }
 
-/**
- * Escapes `s`'s content for a basic string body (no surrounding quotes): `"` -> `\"`, `\` -> `\\`,
- * `\n`/`\r`/`\t` to their short escapes, every other control byte (`< 0x20`) to `\u00XX`, and
- * every other byte copied through verbatim (the source is already valid UTF-8).
- *
- * @param s  the text to escape
- * @return   the escaped content bytes
- */
 fn escape_basic_string_bytes(s: str): []byte {
     var b = bytes_of_str(s)
     var out: []byte = teko::list::empty()
@@ -110,12 +59,6 @@ fn escape_basic_string_bytes(s: str): []byte {
     out
 }
 
-/**
- * Renders a control byte `c` as its `\u00XX` short-Unicode-escape form.
- *
- * @param c  the control byte (`< 0x20`, excluding the ones with their own short escape)
- * @return   the six-byte `\u00XX` escape
- */
 fn escape_control_hex(c: byte): []byte {
     var hex_digits = bytes_of_str("0123456789abcdef")
     var hi = (c to u64) >> 4
@@ -125,15 +68,6 @@ fn escape_control_hex(c: byte): []byte {
     teko::list::push(out, hex_digits[lo])
 }
 
-/**
- * Renders `v.float_val` as TOML float literal text: `inf`/`-inf` for an infinity (signed),
- * `nan`/`-nan` for a NaN (by its sign bit), else `f64_g17`'s shortest round-tripping decimal text,
- * with a `.0` suffix appended when that text would otherwise look like an integer (TOML floats
- * must contain a `.` or an exponent).
- *
- * @param v  the float value to render
- * @return   the rendered bytes
- */
 fn format_float(v: f64): []byte {
     if teko::math::is_nan(v) {
         var neg = ((f64_bits(v) >> 63) & 1) == 1
@@ -145,14 +79,6 @@ fn format_float(v: f64): []byte {
     ensure_float_looking(f64_g17(v))
 }
 
-/**
- * Appends `.0` to `text` when it contains neither `.` nor `e`/`E` — TOML's float grammar always
- * requires a fraction or exponent part, so a bare-integer-looking rendering (e.g. `f64_g17`
- * rendering `5.0` as `"5"`) must gain one to re-parse as a `Float` rather than an `Integer`.
- *
- * @param text  the candidate float rendering
- * @return      `text`'s bytes, with `.0` appended when needed
- */
 fn ensure_float_looking(text: str): []byte {
     var b = bytes_of_str(text)
     var has_marker = false
@@ -166,12 +92,6 @@ fn ensure_float_looking(text: str): []byte {
     append_all(b, bytes_of_str(".0"))
 }
 
-/**
- * Renders `items` as a bracketed, comma-separated array literal (`[]` when empty).
- *
- * @param items  the array elements, in order
- * @return       the rendered bytes
- */
 fn encode_array_value(items: []TomlValue): []byte {
     if items.len == 0 { return bytes_of_str("[]") }
     var out: []byte = teko::list::push(teko::list::empty(), b'[')
@@ -187,12 +107,6 @@ fn encode_array_value(items: []TomlValue): []byte {
     teko::list::push(out, b']')
 }
 
-/**
- * Renders `t` as a braced, comma-separated inline table literal (`{}` when empty).
- *
- * @param t  the table to render
- * @return   the rendered bytes
- */
 fn encode_table_value(t: TomlValue): []byte {
     if t.keys.len == 0 { return bytes_of_str("{}") }
     var out: []byte = teko::list::push(teko::list::empty(), b'{')
@@ -210,13 +124,6 @@ fn encode_table_value(t: TomlValue): []byte {
     teko::list::push(out, b'}')
 }
 
-/**
- * Reports whether `k` may be rendered as a bare (unquoted) key: non-empty and every byte a
- * bare-key character.
- *
- * @param k  the key text
- * @return   true when `k` needs no quoting
- */
 fn is_valid_bare_key(k: str): bool {
     var b = bytes_of_str(k)
     if b.len == 0 { return false }
@@ -229,12 +136,6 @@ fn is_valid_bare_key(k: str): bool {
     true
 }
 
-/**
- * Renders `k` as a TOML key: bare when `is_valid_bare_key`, else as a quoted basic string.
- *
- * @param k  the key text
- * @return   the rendered bytes
- */
 fn format_key(k: str): []byte {
     if is_valid_bare_key(k) { return bytes_of_str(k) }
     encode_string_value(k)

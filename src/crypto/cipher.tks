@@ -1,46 +1,3 @@
-/**
- * `teko::crypto::cipher` (C4) — the symmetric block/stream cipher family: AES (FIPS 197) in the
- * confidentiality-only modes CBC / CTR / CFB / OFB (NIST SP 800-38A), plus the ChaCha20 stream
- * cipher (RFC 8439). Per the stdlib catalog §1.5 (`teko::crypto::cipher`: AES-128/192/256
- * {CBC,CTR,CFB,OFB} · ChaCha20 · legacy 3DES) this is pure Teko over `[]byte`, no OS dependency,
- * testable via `.tkt` against the published FIPS/NIST/RFC known-answer vectors.
- *
- * FLAT SURFACE (the convention shipped by `teko::crypto::hash`/`mac`/`kdf`): the functions live
- * directly under `teko::crypto` — `teko::crypto::aes_encrypt_block`, not
- * `teko::crypto::cipher::…` — so `teko::crypto::mac`'s `cmac_aes`/`gmac_aes` reuse the block
- * primitive by injecting `(b) => aes_encrypt_block_ks(ks, b)` into the cipher-agnostic seams
- * (`cmac_with_cipher`/`gmac_with_cipher`).
- *
- * FAMILIES SHIPPED:
- *   - AES (FIPS 197): the 128/192/256-bit key schedule (`aes_key_expand`), single-block
- *     encrypt/decrypt (`aes_encrypt_block`/`aes_decrypt_block`, and the pre-expanded
- *     `*_block_ks` fast paths the modes and the MAC seams reuse).
- *   - AES modes (NIST SP 800-38A): CBC, CTR, CFB (128-bit feedback), OFB — encrypt and decrypt,
- *     all parameterized on a caller-supplied IV / initial counter block.
- *   - ChaCha20 (RFC 8439 §2.3–2.4): the quarter-round permutation, the 64-byte block function,
- *     and the counter-mode stream over a 32-byte key, 12-byte nonce, and 32-bit initial counter.
- *
- * Legacy 3DES (`@deprecated` in §1.5) is NOT shipped here: DES's bit-permutation / S-box machinery
- * is a self-contained primitive that shares nothing with AES or ChaCha20, so it is a distinct
- * follow-up seam rather than a trivial addition to this file.
- *
- * PUBLIC SURFACE IS `exp` (catalog §0 framing); the S-boxes, key-schedule words, GF(2^8) and
- * round transforms are file-local private.
- *
- * NO INDEX-ASSIGNMENT. Every output buffer, round key, and cipher state is built via
- * `teko::list::push` (functional growth) — the same discipline `teko::crypto::hash`/`mac` use.
- *
- * CONSTANT-TIME POSTURE (hand-audited convention, per the catalog §B framing): the GF(2^8)
- * multiply and the mode plumbing avoid data-dependent branches; the AES S-box is a table lookup
- * (the standard software AES trade-off, not a claim of cache-timing resistance) and the mode
- * length checks branch only on public lengths, never on key/plaintext content.
- */
-
-/**
- * AES_SBOX — the AES substitution box (FIPS 197 §5.1.1): `S-box[b]` is the multiplicative inverse
- * of `b` in GF(2^8) followed by the fixed affine transform. A module const lowered to global data,
- * indexed directly by `SubBytes`/`SubWord`; never rebuilt per call.
- */
 const AES_SBOX: []u32 = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
     0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -76,11 +33,6 @@ const AES_SBOX: []u32 = [
     0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
 ]
 
-/**
- * AES_INV_SBOX — the AES inverse substitution box (FIPS 197 §5.3.2): `AES_INV_SBOX[AES_SBOX[b]] =
- * b`, applied by `InvSubBytes` in the equivalent inverse cipher. A module const lowered to global
- * data, indexed directly during decryption.
- */
 const AES_INV_SBOX: []u32 = [
     0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38,
     0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
@@ -116,11 +68,6 @@ const AES_INV_SBOX: []u32 = [
     0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
 ]
 
-/**
- * AES_RCON — the AES key-schedule round constants (FIPS 197 §5.2): `AES_RCON[j]` is `rc[j]`, the
- * GF(2^8) element `x^(j-1)`, XORed (shifted into the top byte) into the first word of each new key
- * group. Index 0 is unused; indices 1..10 cover every key size (AES-128 uses the most, up to 10).
- */
 const AES_RCON: []u32 = [
     0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36
 ]
@@ -136,15 +83,6 @@ exp type AesKey = struct {
     rounds: u64
 }
 
-/**
- * The sub-slice `data[from..to)` as a fresh `[]byte` — the block/segment splitter this file uses
- * (each crypto file carries its own file-local slicer per the namespace convention).
- *
- * @param data  the source slice
- * @param from  the inclusive start index
- * @param to    the exclusive end index
- * @return      a fresh slice holding `data[from..to)`
- */
 fn cipher_slice(data: []byte, from: u64, to: u64): []byte {
     var out: []byte = teko::list::empty()
     var i = from
@@ -156,13 +94,6 @@ fn cipher_slice(data: []byte, from: u64, to: u64): []byte {
     out
 }
 
-/**
- * Appends every byte of `src` to `dst` — how the block modes concatenate their per-block outputs.
- *
- * @param dst  the buffer to extend
- * @param src  the bytes to append
- * @return     `dst` followed by `src`
- */
 fn cipher_append(dst: []byte, src: []byte): []byte {
     var out = dst
     var i: u64 = 0
@@ -174,16 +105,6 @@ fn cipher_append(dst: []byte, src: []byte): []byte {
     out
 }
 
-/**
- * Multiplies two GF(2^8) elements under the AES reduction polynomial `x^8 + x^4 + x^3 + x + 1`
- * (`0x11b`) — the `MixColumns`/`InvMixColumns` and key-schedule primitive. Branch-free (the
- * per-bit accumulate and the modular reduction are mask-selected, never an `if` on the operand
- * bits), so its running time is independent of the byte values.
- *
- * @param a  the first field element (only the low 8 bits are used)
- * @param b  the second field element (only the low 8 bits are used)
- * @return   the product `a · b` in GF(2^8), in 0..255
- */
 fn gf_mul8(a: u32, b: u32): u32 {
     var p: u32 = 0
     var x = a & 0xFF
@@ -201,26 +122,10 @@ fn gf_mul8(a: u32, b: u32): u32 {
     p & 0xFF
 }
 
-/**
- * Reads a big-endian 32-bit word out of `b` at byte offset `off` — the word order FIPS 197 packs
- * key/state columns in.
- *
- * @param b    the byte slice being read
- * @param off  the starting byte offset (`off+3` must be in bounds)
- * @return     the big-endian 32-bit value at `b[off..off+4)`
- */
 fn aes_be_word(b: []byte, off: u64): u32 {
     ((b[off] to u32) << 24) | ((b[off + 1] to u32) << 16) | ((b[off + 2] to u32) << 8) | (b[off + 3] to u32)
 }
 
-/**
- * Appends a 32-bit word to `buf` in big-endian byte order — the inverse of `aes_be_word`, used to
- * flatten the key schedule to bytes.
- *
- * @param buf  the output buffer to extend
- * @param x    the word to emit, most-significant byte first
- * @return     `buf` with `x`'s four big-endian bytes appended
- */
 fn aes_push_be_word(buf: []byte, x: u32): []byte {
     var b = buf
     b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
@@ -230,12 +135,6 @@ fn aes_push_be_word(buf: []byte, x: u32): []byte {
     b
 }
 
-/**
- * Applies the AES S-box to each of the four bytes of a word (FIPS 197 `SubWord`).
- *
- * @param w  the word to substitute
- * @return   the word with `AES_SBOX` applied to every byte
- */
 fn aes_sub_word(w: u32): u32 {
     var b0 = AES_SBOX[((w >> 24) & 0xFF) to u64]
     var b1 = AES_SBOX[((w >> 16) & 0xFF) to u64]
@@ -244,24 +143,10 @@ fn aes_sub_word(w: u32): u32 {
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }
 
-/**
- * Rotates a word left by one byte (FIPS 197 `RotWord`): `[a0,a1,a2,a3]` becomes `[a1,a2,a3,a0]`.
- *
- * @param w  the word to rotate
- * @return   `w` cyclically rotated left by 8 bits
- */
 fn aes_rot_word(w: u32): u32 {
     ((w << 8) | (w >> 24)) & 0xFFFFFFFF
 }
 
-/**
- * Expands an AES cipher key into the schedule of `4 · (Nr+1)` 32-bit words (FIPS 197 §5.2).
- *
- * @param key  the cipher key (`4 · Nk` bytes; the caller guarantees a valid length)
- * @param nk   the key length in words (4, 6, or 8)
- * @param nr   the round count `Nr`
- * @return     the expanded key schedule as `4 · (Nr+1)` words
- */
 fn aes_expand_words(key: []byte, nk: u64, nr: u64): []u32 {
     var w: []u32 = teko::list::empty()
     var i: u64 = 0
@@ -290,10 +175,6 @@ fn aes_expand_words(key: []byte, nk: u64, nr: u64): []u32 {
  * Expands an AES key (16, 24, or 32 bytes) into a reusable `AesKey` (FIPS 197 §5.2). Expand once,
  * then feed the result to `aes_encrypt_block_ks`/`aes_decrypt_block_ks` (or the mode functions) for
  * every block under that key.
- *
- * @param key  the cipher key: exactly 16 (AES-128), 24 (AES-192), or 32 (AES-256) bytes
- * @return     the expanded key schedule, or a `CryptoError` on an invalid key length
- * @throws     `CryptoError` when `key.len` is not 16, 24, or 32
  */
 exp fn aes_key_expand(key: []byte): AesKey | CryptoError {
     if key.len != 16 && key.len != 24 && key.len != 32 {
@@ -312,13 +193,6 @@ exp fn aes_key_expand(key: []byte): AesKey | CryptoError {
     AesKey { round_keys = rk; rounds = nr }
 }
 
-/**
- * Applies the AES S-box (or its inverse) to all 16 state bytes — `SubBytes` / `InvSubBytes`.
- *
- * @param s    the 16-byte state
- * @param box  the substitution table (`AES_SBOX` for encrypt, `AES_INV_SBOX` for decrypt)
- * @return     the fresh 16-byte substituted state
- */
 fn aes_sub_bytes(s: []byte, box: []u32): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -330,13 +204,6 @@ fn aes_sub_bytes(s: []byte, box: []u32): []byte {
     out
 }
 
-/**
- * Cyclically shifts the rows of the AES state (FIPS 197 `ShiftRows`): row `r` moves left by `r`
- * bytes, over the column-major layout `state[r + 4c]`.
- *
- * @param s  the 16-byte state
- * @return   the fresh 16-byte state after `ShiftRows`
- */
 fn aes_shift_rows(s: []byte): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -351,12 +218,6 @@ fn aes_shift_rows(s: []byte): []byte {
     out
 }
 
-/**
- * Inverse of `aes_shift_rows` (FIPS 197 `InvShiftRows`): row `r` moves right by `r` bytes.
- *
- * @param s  the 16-byte state
- * @return   the fresh 16-byte state after `InvShiftRows`
- */
 fn aes_inv_shift_rows(s: []byte): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -371,17 +232,6 @@ fn aes_inv_shift_rows(s: []byte): []byte {
     out
 }
 
-/**
- * Mixes one AES column (FIPS 197 `MixColumns`), the fixed GF(2^8) matrix `[2 3 1 1; 1 2 3 1;
- * 1 1 2 3; 3 1 1 2]` applied to the four bytes `s0..s3`, appending the four result bytes to `out`.
- *
- * @param out  the output state being built
- * @param s0   the column's first byte
- * @param s1   the column's second byte
- * @param s2   the column's third byte
- * @param s3   the column's fourth byte
- * @return     `out` with the four mixed bytes appended
- */
 fn aes_mix_one_column(out: []byte, s0: u32, s1: u32, s2: u32, s3: u32): []byte {
     var o0 = gf_mul8(s0, 2) ^ gf_mul8(s1, 3) ^ s2 ^ s3
     var o1 = s0 ^ gf_mul8(s1, 2) ^ gf_mul8(s2, 3) ^ s3
@@ -395,17 +245,6 @@ fn aes_mix_one_column(out: []byte, s0: u32, s1: u32, s2: u32, s3: u32): []byte {
     b
 }
 
-/**
- * Mixes one AES column under the inverse matrix (FIPS 197 `InvMixColumns`) `[14 11 13 9; 9 14 11
- * 13; 13 9 14 11; 11 13 9 14]`, appending the four result bytes to `out`.
- *
- * @param out  the output state being built
- * @param s0   the column's first byte
- * @param s1   the column's second byte
- * @param s2   the column's third byte
- * @param s3   the column's fourth byte
- * @return     `out` with the four inverse-mixed bytes appended
- */
 fn aes_inv_mix_one_column(out: []byte, s0: u32, s1: u32, s2: u32, s3: u32): []byte {
     var o0 = gf_mul8(s0, 14) ^ gf_mul8(s1, 11) ^ gf_mul8(s2, 13) ^ gf_mul8(s3, 9)
     var o1 = gf_mul8(s0, 9) ^ gf_mul8(s1, 14) ^ gf_mul8(s2, 11) ^ gf_mul8(s3, 13)
@@ -419,12 +258,6 @@ fn aes_inv_mix_one_column(out: []byte, s0: u32, s1: u32, s2: u32, s3: u32): []by
     b
 }
 
-/**
- * Applies `MixColumns` to all four AES columns.
- *
- * @param s  the 16-byte state
- * @return   the fresh 16-byte mixed state
- */
 fn aes_mix_columns(s: []byte): []byte {
     var out: []byte = teko::list::empty()
     var c: u64 = 0
@@ -436,12 +269,6 @@ fn aes_mix_columns(s: []byte): []byte {
     out
 }
 
-/**
- * Applies `InvMixColumns` to all four AES columns.
- *
- * @param s  the 16-byte state
- * @return   the fresh 16-byte inverse-mixed state
- */
 fn aes_inv_mix_columns(s: []byte): []byte {
     var out: []byte = teko::list::empty()
     var c: u64 = 0
@@ -453,14 +280,6 @@ fn aes_inv_mix_columns(s: []byte): []byte {
     out
 }
 
-/**
- * XORs the round key of round `round` into the state (FIPS 197 `AddRoundKey`).
- *
- * @param s      the 16-byte state
- * @param rk     the flattened round-key schedule
- * @param round  the round index whose 16 key bytes start at `16 · round`
- * @return       the fresh 16-byte state after the key XOR
- */
 fn aes_add_round_key(s: []byte, rk: []byte, round: u64): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -475,10 +294,6 @@ fn aes_add_round_key(s: []byte, rk: []byte, round: u64): []byte {
 /**
  * Encrypts one 16-byte block under a pre-expanded key (FIPS 197 §5.1) — the fast path the modes
  * and the CMAC/GMAC seams reuse so the key schedule is computed once, not per block.
- *
- * @param ks     the expanded key (`aes_key_expand`)
- * @param block  the 16-byte plaintext block (the caller guarantees the length)
- * @return       the 16-byte ciphertext block
  */
 exp fn aes_encrypt_block_ks(ks: AesKey, block: []byte): []byte {
     var state = aes_add_round_key(block, ks.round_keys, 0)
@@ -494,10 +309,6 @@ exp fn aes_encrypt_block_ks(ks: AesKey, block: []byte): []byte {
 /**
  * Decrypts one 16-byte block under a pre-expanded key using the equivalent inverse cipher
  * (FIPS 197 §5.3).
- *
- * @param ks     the expanded key (`aes_key_expand`)
- * @param block  the 16-byte ciphertext block (the caller guarantees the length)
- * @return       the 16-byte plaintext block
  */
 exp fn aes_decrypt_block_ks(ks: AesKey, block: []byte): []byte {
     var state = aes_add_round_key(block, ks.round_keys, ks.rounds)
@@ -510,13 +321,6 @@ exp fn aes_decrypt_block_ks(ks: AesKey, block: []byte): []byte {
     aes_add_round_key(aes_inv_sub_bytes_state(state), ks.round_keys, 0)
 }
 
-/**
- * The decryption round prologue `InvSubBytes(InvShiftRows(state))` — the shared head of every
- * inverse-cipher round, extracted so the round loop and the final round read the same.
- *
- * @param s  the 16-byte state
- * @return   the fresh 16-byte state after `InvShiftRows` then `InvSubBytes`
- */
 fn aes_inv_sub_bytes_state(s: []byte): []byte {
     aes_sub_bytes(aes_inv_shift_rows(s), AES_INV_SBOX)
 }
@@ -525,11 +329,6 @@ fn aes_inv_sub_bytes_state(s: []byte): []byte {
  * Encrypts one 16-byte block under `key` (FIPS 197), expanding the key on the spot — the one-shot
  * form for a caller that encrypts a single block. For many blocks, expand once with
  * `aes_key_expand` and call `aes_encrypt_block_ks`.
- *
- * @param key    the cipher key (16, 24, or 32 bytes)
- * @param block  the 16-byte plaintext block
- * @return       the 16-byte ciphertext block, or a `CryptoError` on a bad key/block length
- * @throws       `CryptoError` when `key.len` is not 16/24/32 or `block.len != 16`
  */
 exp fn aes_encrypt_block(key: []byte, block: []byte): []byte | CryptoError {
     if block.len != 16 { return crypto_error("aes: block must be exactly 16 bytes") }
@@ -539,11 +338,6 @@ exp fn aes_encrypt_block(key: []byte, block: []byte): []byte | CryptoError {
 
 /**
  * Decrypts one 16-byte block under `key` (FIPS 197), expanding the key on the spot.
- *
- * @param key    the cipher key (16, 24, or 32 bytes)
- * @param block  the 16-byte ciphertext block
- * @return       the 16-byte plaintext block, or a `CryptoError` on a bad key/block length
- * @throws       `CryptoError` when `key.len` is not 16/24/32 or `block.len != 16`
  */
 exp fn aes_decrypt_block(key: []byte, block: []byte): []byte | CryptoError {
     if block.len != 16 { return crypto_error("aes: block must be exactly 16 bytes") }
@@ -551,13 +345,6 @@ exp fn aes_decrypt_block(key: []byte, block: []byte): []byte | CryptoError {
     aes_decrypt_block_ks(ks, block)
 }
 
-/**
- * XORs two equal-length 16-byte blocks — the CBC chaining primitive.
- *
- * @param a  the first 16-byte block
- * @param b  the second 16-byte block
- * @return   the fresh 16-byte block `a ⊕ b`
- */
 fn cipher_xor16(a: []byte, b: []byte): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -569,17 +356,6 @@ fn cipher_xor16(a: []byte, b: []byte): []byte {
     out
 }
 
-/**
- * Appends `data[off..off+n) ⊕ ks[0..n)` to `out` — the keystream-XOR step shared by CTR, CFB, and
- * OFB (and the segment builder for CFB feedback).
- *
- * @param out   the output buffer being built
- * @param data  the input (plaintext for encrypt, ciphertext for decrypt)
- * @param off   the offset of this segment in `data`
- * @param ks    the keystream/feedback block, at least `n` bytes
- * @param n     the segment length in bytes (1..16)
- * @return      `out` with the `n` XORed bytes appended
- */
 fn cipher_stream_xor(out: []byte, data: []byte, off: u64, ks: []byte, n: u64): []byte {
     var o = out
     var j: u64 = 0
@@ -591,13 +367,6 @@ fn cipher_stream_xor(out: []byte, data: []byte, off: u64, ks: []byte, n: u64): [
     o
 }
 
-/**
- * Increments a 16-byte counter block as a big-endian 128-bit integer, mod 2^128 (NIST SP 800-38A
- * §B.1, the standard full-block CTR increment).
- *
- * @param block  the 16-byte counter block
- * @return       the fresh 16-byte block `block + 1 (mod 2^128)`
- */
 fn ctr_increment(block: []byte): []byte {
     var rev: []byte = teko::list::empty()
     var carry: u32 = 1
@@ -619,13 +388,6 @@ fn ctr_increment(block: []byte): []byte {
     out
 }
 
-/**
- * Validates a 16-byte IV / initial counter block, returning it unchanged or a `CryptoError`.
- *
- * @param iv  the candidate IV
- * @return    `iv` when it is 16 bytes, else a `CryptoError`
- * @throws    `CryptoError` when `iv.len != 16`
- */
 fn require_iv16(iv: []byte): []byte | CryptoError {
     if iv.len != 16 { return crypto_error("aes: IV must be exactly 16 bytes") }
     iv
@@ -635,12 +397,6 @@ fn require_iv16(iv: []byte): []byte | CryptoError {
  * AES-CBC encryption (NIST SP 800-38A §6.2): `C_i = CIPH_K(P_i ⊕ C_{i-1})`, `C_0 = IV`. No
  * padding — the plaintext length must be a whole number of 16-byte blocks (a caller needing
  * partial data pads first, e.g. PKCS#7).
- *
- * @param key  the cipher key (16, 24, or 32 bytes)
- * @param iv   the 16-byte initialization vector
- * @param pt   the plaintext, a multiple of 16 bytes
- * @return     the ciphertext (same length as `pt`), or a `CryptoError` on a bad length
- * @throws     `CryptoError` when the key/IV length is invalid or `pt.len` is not a multiple of 16
  */
 exp fn aes_cbc_encrypt(key: []byte, iv: []byte, pt: []byte): []byte | CryptoError {
     var iv16 = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
@@ -661,12 +417,6 @@ exp fn aes_cbc_encrypt(key: []byte, iv: []byte, pt: []byte): []byte | CryptoErro
 
 /**
  * AES-CBC decryption (NIST SP 800-38A §6.2): `P_i = CIPH_K^{-1}(C_i) ⊕ C_{i-1}`, `C_0 = IV`.
- *
- * @param key  the cipher key (16, 24, or 32 bytes)
- * @param iv   the 16-byte initialization vector
- * @param ct   the ciphertext, a multiple of 16 bytes
- * @return     the plaintext (same length as `ct`), or a `CryptoError` on a bad length
- * @throws     `CryptoError` when the key/IV length is invalid or `ct.len` is not a multiple of 16
  */
 exp fn aes_cbc_decrypt(key: []byte, iv: []byte, ct: []byte): []byte | CryptoError {
     var iv16 = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
@@ -690,12 +440,6 @@ exp fn aes_cbc_decrypt(key: []byte, iv: []byte, ct: []byte): []byte | CryptoErro
  * counter block starts at `iv` and is incremented as a big-endian 128-bit integer per block.
  * Encryption and decryption are the same operation, so this one function serves both. The data may
  * be any length (the final partial block is truncated to fit).
- *
- * @param key   the cipher key (16, 24, or 32 bytes)
- * @param iv    the 16-byte initial counter block
- * @param data  the input, any length
- * @return      the transformed output (same length as `data`), or a `CryptoError` on a bad length
- * @throws      `CryptoError` when the key or IV length is invalid
  */
 exp fn aes_ctr(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
     var counter = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
@@ -717,12 +461,6 @@ exp fn aes_ctr(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
  * AES-OFB (NIST SP 800-38A §6.4): the keystream is the repeated re-encryption of the IV
  * (`O_i = CIPH_K(O_{i-1})`, `O_0 = IV`), XORed into the data. Encryption and decryption are the
  * same operation. The data may be any length.
- *
- * @param key   the cipher key (16, 24, or 32 bytes)
- * @param iv    the 16-byte initialization vector
- * @param data  the input, any length
- * @return      the transformed output (same length as `data`), or a `CryptoError` on a bad length
- * @throws      `CryptoError` when the key or IV length is invalid
  */
 exp fn aes_ofb(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
     var feedback = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
@@ -743,12 +481,6 @@ exp fn aes_ofb(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
  * AES-CFB encryption with full 128-bit feedback (NIST SP 800-38A §6.3, the CFB-128 variant):
  * `C_i = P_i ⊕ CIPH_K(C_{i-1})`, `C_0 = IV`. The data may be any length (the final partial block
  * is XORed with the leading bytes of the keystream).
- *
- * @param key  the cipher key (16, 24, or 32 bytes)
- * @param iv   the 16-byte initialization vector
- * @param pt   the plaintext, any length
- * @return     the ciphertext (same length as `pt`), or a `CryptoError` on a bad length
- * @throws     `CryptoError` when the key or IV length is invalid
  */
 exp fn aes_cfb_encrypt(key: []byte, iv: []byte, pt: []byte): []byte | CryptoError {
     var feedback = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
@@ -771,12 +503,6 @@ exp fn aes_cfb_encrypt(key: []byte, iv: []byte, pt: []byte): []byte | CryptoErro
  * AES-CFB decryption with full 128-bit feedback (NIST SP 800-38A §6.3): `P_i = C_i ⊕
  * CIPH_K(C_{i-1})`, `C_0 = IV` — the feedback is the ciphertext, so decryption still uses the
  * forward block cipher.
- *
- * @param key  the cipher key (16, 24, or 32 bytes)
- * @param iv   the 16-byte initialization vector
- * @param ct   the ciphertext, any length
- * @return     the plaintext (same length as `ct`), or a `CryptoError` on a bad length
- * @throws     `CryptoError` when the key or IV length is invalid
  */
 exp fn aes_cfb_decrypt(key: []byte, iv: []byte, ct: []byte): []byte | CryptoError {
     var feedback = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
@@ -794,37 +520,13 @@ exp fn aes_cfb_decrypt(key: []byte, iv: []byte, ct: []byte): []byte | CryptoErro
     out
 }
 
-/**
- * A ChaCha20 working quartet — the four 32-bit words a quarter round transforms, returned as a
- * value because the round updates all four at once.
- */
 type ChaChaQuad = struct {
-    /** the first word of the quartet */
     a: u32
-    /** the second word of the quartet */
     b: u32
-    /** the third word of the quartet */
     c: u32
-    /** the fourth word of the quartet */
     d: u32
 }
 
-/**
- * Rotates a 32-bit word left by `n` bits — the ChaCha20 diffusion primitive. Shares the
- * `teko::crypto` `rotl32` defined in `hash.tks` (the flat crypto namespace exposes one canonical
- * left-rotate); this comment documents where ChaCha20 reads it from.
- */
-
-/**
- * The ChaCha20 quarter round (RFC 8439 §2.1): the sequence of four add-XOR-rotate steps applied to
- * a quartet of state words. Every add is 32-bit-wrapping (`wrapping_add_u32`).
- *
- * @param a  the first input word
- * @param b  the second input word
- * @param c  the third input word
- * @param d  the fourth input word
- * @return   the transformed quartet
- */
 fn chacha_quarter_round(a: u32, b: u32, c: u32, d: u32): ChaChaQuad {
     var na = teko::math::wrapping_add_u32(a, b)
     var nd = rotl32(d ^ na, 16)
@@ -837,26 +539,10 @@ fn chacha_quarter_round(a: u32, b: u32, c: u32, d: u32): ChaChaQuad {
     ChaChaQuad { a = na; b = nb; c = nc; d = nd }
 }
 
-/**
- * Reads a little-endian 32-bit word out of `b` at byte offset `off` — the wire order ChaCha20
- * reads its key, nonce, and counter in.
- *
- * @param b    the byte slice being read
- * @param off  the starting byte offset (`off+3` must be in bounds)
- * @return     the little-endian 32-bit value at `b[off..off+4)`
- */
 fn cipher_le_word(b: []byte, off: u64): u32 {
     (b[off] to u32) | ((b[off + 1] to u32) << 8) | ((b[off + 2] to u32) << 16) | ((b[off + 3] to u32) << 24)
 }
 
-/**
- * Appends a 32-bit word to `buf` in little-endian byte order — how a ChaCha20 keystream word is
- * serialized.
- *
- * @param buf  the output buffer to extend
- * @param x    the word to emit, least-significant byte first
- * @return     `buf` with `x`'s four little-endian bytes appended
- */
 fn cipher_push_le_word(buf: []byte, x: u32): []byte {
     var b = buf
     b = teko::list::push(b, (x & 0xFF) to byte)
@@ -866,15 +552,6 @@ fn cipher_push_le_word(buf: []byte, x: u32): []byte {
     b
 }
 
-/**
- * Builds the initial ChaCha20 state (RFC 8439 §2.3): the four `"expa nd 3 2-by te k"` constants,
- * the eight key words, the block counter, and the three nonce words, in that order.
- *
- * @param key      the 32-byte key
- * @param nonce    the 12-byte nonce
- * @param counter  the 32-bit block counter
- * @return         the 16-word initial state
- */
 fn chacha20_init_state(key: []byte, nonce: []byte, counter: u32): []u32 {
     var s: []u32 = teko::list::empty()
     s = teko::list::push(s, 0x61707865)
@@ -897,14 +574,6 @@ fn chacha20_init_state(key: []byte, nonce: []byte, counter: u32): []u32 {
     s
 }
 
-/**
- * Runs the ten column/diagonal double rounds over the working state (RFC 8439 §2.3.1), returning
- * the 16 permuted words. The state is threaded through the two matching structs the two round
- * shapes produce, so no word is index-assigned.
- *
- * @param s  the 16-word initial state (read for the diagonal/column word selection)
- * @return   the 16-word working state after 20 rounds (before the feed-forward add)
- */
 fn chacha20_rounds(s: []u32): []u32 {
     var x0 = s[0]
     var x1 = s[1]
@@ -987,16 +656,6 @@ fn chacha20_rounds(s: []u32): []u32 {
     out
 }
 
-/**
- * The ChaCha20 block function (RFC 8439 §2.3): 20 rounds over the state derived from
- * `key`/`nonce`/`counter`, fed forward by adding the initial state, serialized little-endian into
- * a 64-byte keystream block.
- *
- * @param key      the 32-byte key
- * @param nonce    the 12-byte nonce
- * @param counter  the 32-bit block counter for this block
- * @return         the 64-byte keystream block
- */
 fn chacha20_block(key: []byte, nonce: []byte, counter: u32): []byte {
     var s = chacha20_init_state(key, nonce, counter)
     var w = chacha20_rounds(s)
@@ -1015,14 +674,6 @@ fn chacha20_block(key: []byte, nonce: []byte, counter: u32): []byte {
  * 32-byte `key`, 12-byte `nonce`, and 32-bit initial block `counter` (RFC 8439 uses counter 1 for
  * the first message block). Encryption and decryption are the same operation. The counter is
  * 32-bit-wrapping per block.
- *
- * @param key      the 32-byte key
- * @param nonce    the 12-byte nonce
- * @param counter  the initial 32-bit block counter (typically 1 per RFC 8439)
- * @param data     the input, any length
- * @return         the transformed output (same length as `data`), or a `CryptoError` on a bad
- *                 key/nonce length
- * @throws         `CryptoError` when `key.len != 32` or `nonce.len != 12`
  */
 exp fn chacha20(key: []byte, nonce: []byte, counter: u32, data: []byte): []byte | CryptoError {
     if key.len != 32 { return crypto_error("chacha20: key must be exactly 32 bytes") }

@@ -1,113 +1,23 @@
-/**
- * `teko::encoding::protobuf` — a pure-Teko codec for the Protocol Buffers WIRE FORMAT
- * (protobuf.dev/programming-guides/encoding), schema-less (catalog entry S-PB, §1.5). This unit
- * is the low-level byte codec a generated `.proto` message would sit on top of; compiling
- * `.proto` schemas into typed accessors ("`.proto` compiler is a later tool" per the catalog
- * entry) is a separate, future concern and is explicitly out of scope here.
- *
- * VALUE MODEL — a TAGGED STRUCT, not an inline union, the same discipline
- * `teko::encoding::cbor`'s `CborValue` and `teko::encoding::msgpack`'s `MsgValue` use.
- * `ProtoWireValue` carries a `ProtoWireKind` discriminant (one of the four wire types the format
- * defines) plus the union of every kind's payload field; `kind` selects which field is
- * meaningful. Since the wire format itself carries no schema, a decoded message
- * (`ProtoMessage`) is simply an ORDERED list of `(field number, ProtoWireValue)` pairs
- * (`ProtoField`), preserving every repeated occurrence of a field number as a separate entry in
- * encounter order — exactly the shape `decode_message` needs to hand back to a caller who knows
- * the schema out of band.
- *
- * SCOPE (this unit). The four WIRE TYPES: 0 (varint — the base-128 variable-length integer, with
- * zigzag helpers for `sint32`/`sint64`), 1 (`fixed64`/`sfixed64`/`double`, little-endian), 2
- * (length-delimited — bytes/UTF-8 strings/embedded messages/packed repeated scalars), and 5
- * (`fixed32`/`sfixed32`/`float`, little-endian). The tag key (`(field_number << 3) | wire_type`),
- * full message decode/encode preserving repeated fields, and read helpers for every common
- * scalar interpretation of each wire type.
- *
- * DEFERRALS (honest — M.3). Wire types 3/4 (`START_GROUP`/`END_GROUP`) are deprecated by the
- * protobuf spec itself; `wire_kind_of_code` rejects them with a named error rather than silently
- * skipping or miscoding them. `.proto` SCHEMA compilation (turning a `.proto` file into typed
- * message accessors) is a separate future lane, not this one. Encoding a `float` (`fixed32`)
- * value FROM an `f32` is not provided as a named builder: this compiler seed exposes no
- * `f32_bits` bit-extraction primitive (only `f64_bits`/`f64_from_bits`), so constructing such a
- * payload safely from an `f32` would require reimplementing IEEE 754 single-precision bit
- * extraction by hand — a correctness risk this unit declines for a helper the issue does not
- * require. `proto_fixed32` still lets a caller supply the raw bits directly (`teko::f64_bits`
- * plus a hand-derived narrowing, or a literal, both outside this unit). DECODING a `fixed32` as
- * an `f32` (`fixed32_as_f32`) IS fully supported and exact: it widens the 32-bit pattern to the
- * `f64` it exactly denotes (every single is a double) and narrows back to `f32`, a value-lossless
- * round trip.
- *
- * ERROR MODEL (M.1 fail-loud / M.3 honest types). `decode_varint`/`decode_tag`/`decode_message`
- * and every `*_as_*` scalar reader return their result unioned with `error` — a truncated
- * varint/fixed field, a length-delimited value whose declared length overruns the input, a
- * deprecated group wire type, a zero field number, or a scalar reader applied to a
- * `ProtoWireValue` of the wrong kind are all checked failures, never a panic. `encode_varint`,
- * `encode_tag`, and `encode_message` are total: every well-formed value has a rendering.
- */
-
-/**
- * The wire-type code for a base-128 varint field (protobuf spec wire type 0): `int32`, `int64`,
- * `uint32`, `uint64`, `sint32`, `sint64`, `bool`, and enum values.
- */
 const PROTO_WIRE_VARINT: u64 = 0
 
-/**
- * The wire-type code for a little-endian 8-byte fixed field (protobuf spec wire type 1):
- * `fixed64`, `sfixed64`, `double`.
- */
 const PROTO_WIRE_FIXED64: u64 = 1
 
-/**
- * The wire-type code for a length-delimited field (protobuf spec wire type 2): `string`,
- * `bytes`, embedded messages, and packed repeated scalar fields.
- */
 const PROTO_WIRE_LENGTH_DELIMITED: u64 = 2
 
-/**
- * The wire-type code for the deprecated `START_GROUP` marker (protobuf spec wire type 3),
- * rejected by `wire_kind_of_code` rather than decoded.
- */
 const PROTO_WIRE_START_GROUP: u64 = 3
 
-/**
- * The wire-type code for the deprecated `END_GROUP` marker (protobuf spec wire type 4),
- * rejected by `wire_kind_of_code` rather than decoded.
- */
 const PROTO_WIRE_END_GROUP: u64 = 4
 
-/**
- * The wire-type code for a little-endian 4-byte fixed field (protobuf spec wire type 5):
- * `fixed32`, `sfixed32`, `float`.
- */
 const PROTO_WIRE_FIXED32: u64 = 5
 
-/**
- * The low 7 value bits of one varint byte group.
- */
 const PROTO_VARINT_LOW7: u64 = 0x7F
 
-/**
- * The varint continuation bit: set on every non-final byte of a multi-byte varint.
- */
 const PROTO_VARINT_MORE: u64 = 0x80
 
-/**
- * The maximum number of 7-bit groups a well-formed varint may span (`ceil(64 / 7)`); a longer
- * run is a malformed input, never a valid encoding of a 64-bit value.
- */
 const PROTO_VARINT_MAX_GROUPS: u64 = 10
 
-/**
- * The `u64` bit pattern with only the sign bit (bit 63) set — the boundary between the `u64`
- * values that cast safely to `i64` directly and those that need the two's-complement
- * reconstruction in `u64_bits_as_i64`.
- */
 const PROTO_U64_SIGN_BIT: u64 = 0x8000000000000000
 
-/**
- * The all-ones `u64` bit pattern (`2^64 - 1`), used as the subtrahend when reconstructing a
- * negative `i64` from its two's-complement `u64` bit pattern without ever casting a value whose
- * high bit is set.
- */
 const PROTO_U64_ALL_ONES: u64 = 0xFFFFFFFFFFFFFFFF
 
 /**
@@ -175,8 +85,8 @@ exp type ProtoField = struct {
 
 /**
  * A decoded (or to-be-encoded) message: schema-less, so simply the ordered list of every field
- * entry seen on the wire (see the module doc's VALUE MODEL note). Field order and every repeated
- * occurrence are preserved exactly as encountered.
+ * entry seen on the wire. Field order and every repeated occurrence are preserved exactly as
+ * encountered.
  */
 exp type ProtoMessage = struct {
     /**
@@ -221,87 +131,32 @@ exp type ProtoTagRead = struct {
     pos: u64
 }
 
-/**
- * A byte range taken out of the input paired with the offset past it — the internal cursor
- * result `take_bytes` returns while decoding a length-delimited value.
- */
 type ProtoBytesRead = struct {
-    /**
-     * The bytes taken from the input.
-     */
     data: []byte
-    /**
-     * The offset of the first byte after the taken range.
-     */
     pos: u64
 }
 
-/**
- * A decoded field VALUE (without its field number) paired with the offset past it — the internal
- * cursor result the per-wire-type decoders return, before `decode_message` pairs it with the
- * tag's field number into a `ProtoField`.
- */
 type ProtoValueRead = struct {
-    /**
-     * The value decoded at the requested offset.
-     */
     value: ProtoWireValue
-    /**
-     * The offset of the first byte after the decoded value.
-     */
     pos: u64
 }
 
-/**
- * A fresh empty `[]byte`, the default for `ProtoWireValue.data` and the seed of every byte
- * accumulator in this module.
- *
- * @return  an empty byte slice
- */
 fn no_data(): []byte {
     teko::list::empty()
 }
 
-/**
- * A `ProtoBytesRead`/`ProtoValueRead`/decode failure with a message naming the offending offset.
- *
- * @param what  the failure description
- * @param pos   the offset at which the failure was detected
- * @return      the checked error
- */
 fn proto_error(what: str, pos: u64): error {
     error { message = concat("protobuf: ", what, " at offset ", i64_to_str(pos to i64)) }
 }
 
-/**
- * A scalar-reader failure: a `*_as_*` helper was applied to a `ProtoWireValue` whose `kind`
- * does not match the reader's expected wire type.
- *
- * @param want  a short description of the expected kind (e.g. `"a varint"`)
- * @return      the checked error
- */
 fn wrong_kind_error(want: str): error {
     error { message = concat("protobuf: value is not ", want) }
 }
 
-/**
- * A `first_field_value` failure: no field with the requested number is present in the message.
- *
- * @param number  the field number that was not found
- * @return        the checked error
- */
 fn missing_field_error(number: u64): error {
     error { message = concat("protobuf: field ", u64_to_str(number), " is not present") }
 }
 
-/**
- * Appends every byte of `more` to `out`, returning the grown slice (functional accumulation, no
- * index-assignment — the `teko::encoding::cbor` `append_all` discipline).
- *
- * @param out   the accumulator
- * @param more  the bytes to append
- * @return      `out` followed by `more`
- */
 fn append_bytes(out: []byte, more: []byte): []byte {
     var acc = out
     var i: u64 = 0
@@ -313,15 +168,6 @@ fn append_bytes(out: []byte, more: []byte): []byte {
     acc
 }
 
-/**
- * Appends the low `count` bytes of `v` to `out` in little-endian order (protobuf's `fixed32`/
- * `fixed64` byte order).
- *
- * @param out    the accumulator
- * @param v      the value whose low-order bytes are emitted
- * @param count  how many low-order bytes to emit (4 or 8)
- * @return       `out` followed by the little-endian bytes
- */
 fn append_le(out: []byte, v: u64, count: u64): []byte {
     var acc = out
     var i: u64 = 0
@@ -333,15 +179,6 @@ fn append_le(out: []byte, v: u64, count: u64): []byte {
     acc
 }
 
-/**
- * Reads `count` bytes little-endian from `p` at `pos` into a `u64`. The caller has already
- * bounds-checked `pos + count <= p.len`.
- *
- * @param p      the input
- * @param pos    the offset of the least-significant byte
- * @param count  how many bytes to read (4 or 8)
- * @return       the assembled unsigned value
- */
 fn read_le_u(p: []byte, pos: u64, count: u64): u64 {
     var v: u64 = 0
     var i = count
@@ -357,9 +194,6 @@ fn read_le_u(p: []byte, pos: u64, count: u64): u64 {
  * Appends the base-128 varint encoding of `v` to the empty accumulator and returns it: seven
  * value bits per byte, low group first, the continuation bit (`0x80`) set on every non-final
  * byte. Total — every `u64` has a rendering, `1` to `10` bytes long.
- *
- * @param v  the unsigned value to encode
- * @return   the varint's encoded bytes
  */
 exp fn encode_varint(v: u64): []byte {
     var out: []byte = no_data()
@@ -381,10 +215,6 @@ exp fn encode_varint(v: u64): []byte {
  * Decodes one base-128 varint from `p` starting at `pos`. Rejects a truncated input (the byte
  * stream ends before a final, non-continuation byte is seen) and a varint spanning more than
  * `PROTO_VARINT_MAX_GROUPS` groups (no valid 64-bit value needs more).
- *
- * @param p    the input
- * @param pos  the offset of the varint's first byte
- * @return     the decoded value and the offset past it, or `error`
  */
 exp fn decode_varint(p: []byte, pos: u64): ProtoVarintRead | error {
     var value: u64 = 0
@@ -409,9 +239,6 @@ exp fn decode_varint(p: []byte, pos: u64): ProtoVarintRead | error {
  * 1, 3, 5, ...`), so small-magnitude negatives stay small varints. The negative branch mirrors
  * `teko::numeric::bigint::of`'s `-(n+1)` identity so `i64::MIN` never overflows and no negative
  * `i64` is ever cast to `u64` directly (the seed's negative-cast trap).
- *
- * @param v  the signed value
- * @return   the zigzag-encoded unsigned magnitude
  */
 exp fn zigzag_encode(v: i64): u64 {
     if v >= 0 { return (v to u64) << 1 }
@@ -423,9 +250,6 @@ exp fn zigzag_encode(v: i64): u64 {
  * Inverts `zigzag_encode`: an even code decodes to its half (non-negative), an odd code decodes
  * to the negative of its half's successor. Never casts a `u64` value with the high bit set to
  * `i64` directly (`v >> 1` is always `< 2^63`, so the intermediate cast is always safe).
- *
- * @param v  the zigzag-encoded unsigned magnitude
- * @return   the decoded signed value
  */
 exp fn zigzag_decode(v: u64): i64 {
     if (v & 1) == 0 { return (v >> 1) to i64 }
@@ -433,16 +257,6 @@ exp fn zigzag_decode(v: u64): i64 {
     (0 - half) - 1
 }
 
-/**
- * Reinterprets a `u64` bit pattern as the `i64` two's-complement value it denotes (protobuf's
- * plain `int32`/`int64` field semantics — NOT zigzag). Values below `2^63` cast directly; values
- * at or above it are rebuilt via the same `-(m+1)` identity `zigzag_encode` uses in reverse, so
- * no `u64` value with the high bit set is ever cast to `i64` directly (the seed's high-bit-cast
- * trap).
- *
- * @param u  the bit pattern
- * @return   the two's-complement value it denotes
- */
 fn u64_bits_as_i64(u: u64): i64 {
     if u < PROTO_U64_SIGN_BIT { return u to i64 }
     var magnitude_minus_1: i64 = (PROTO_U64_ALL_ONES - u) to i64
@@ -451,9 +265,6 @@ fn u64_bits_as_i64(u: u64): i64 {
 
 /**
  * The protobuf wire-type code (0/1/2/5) a `ProtoWireKind` encodes as.
- *
- * @param k  the wire kind
- * @return   its wire-type code
  */
 exp fn wire_type_code(k: ProtoWireKind): u64 {
     match k {
@@ -468,10 +279,6 @@ exp fn wire_type_code(k: ProtoWireKind): u64 {
  * Resolves a wire-type code (the tag's low 3 bits) to a `ProtoWireKind`. Rejects the deprecated
  * group codes (3/4) and any other undefined code with a named error rather than silently
  * skipping or miscoding them.
- *
- * @param code  the wire-type code, `0 .. 7`
- * @param pos   the offset of the tag that carried this code (for the error message)
- * @return      the resolved wire kind, or `error`
  */
 exp fn wire_kind_of_code(code: u64, pos: u64): ProtoWireKind | error {
     if code == PROTO_WIRE_VARINT { return ProtoWireKind::Varint }
@@ -488,10 +295,6 @@ exp fn wire_kind_of_code(code: u64, pos: u64): ProtoWireKind | error {
  * Total — does not validate `field_number` (the wire format's own "field number 0 is invalid"
  * rule is enforced on the DECODE side, in `decode_tag`, where a malformed input is actually
  * possible).
- *
- * @param field_number  the field number
- * @param kind          the field's wire kind
- * @return              the encoded tag bytes
  */
 exp fn encode_tag(field_number: u64, kind: ProtoWireKind): []byte {
     encode_varint((field_number << 3) | wire_type_code(kind))
@@ -501,10 +304,6 @@ exp fn encode_tag(field_number: u64, kind: ProtoWireKind): []byte {
  * Decodes a field tag at `pos`: a varint whose low 3 bits are the wire-type code and whose
  * remaining bits are the field number. Rejects a zero field number (invalid in the wire format)
  * and a deprecated/unknown wire-type code (via `wire_kind_of_code`).
- *
- * @param p    the input
- * @param pos  the offset of the tag's first byte
- * @return     the decoded field number, wire kind, and offset past the tag, or `error`
  */
 exp fn decode_tag(p: []byte, pos: u64): ProtoTagRead | error {
     var t = match decode_varint(p, pos) { ProtoVarintRead as r => r; error as e => return e }
@@ -514,26 +313,12 @@ exp fn decode_tag(p: []byte, pos: u64): ProtoTagRead | error {
     ProtoTagRead { field_number = field_number; kind = kind; pos = t.pos }
 }
 
-/**
- * Builds a `ProtoWireValue` from every field explicitly — the single constructor every public
- * value builder funnels through.
- *
- * @param kind     the wire kind
- * @param varint   the varint magnitude (see `ProtoWireValue.varint`)
- * @param fixed64  the fixed64 bit pattern (see `ProtoWireValue.fixed64`)
- * @param fixed32  the fixed32 bit pattern (see `ProtoWireValue.fixed32`)
- * @param data     the length-delimited payload (see `ProtoWireValue.data`)
- * @return         the assembled value
- */
 fn mk_wire_value(kind: ProtoWireKind, varint: u64, fixed64: u64, fixed32: u32, data: []byte): ProtoWireValue {
     ProtoWireValue { kind = kind; varint = varint; fixed64 = fixed64; fixed32 = fixed32; data = data }
 }
 
 /**
  * Wraps an unsigned magnitude as a `Varint` value (protobuf `uint32`/`uint64`/enum semantics).
- *
- * @param v  the unsigned magnitude
- * @return   the wire value
  */
 exp fn proto_varint(v: u64): ProtoWireValue {
     mk_wire_value(ProtoWireKind::Varint, v, 0, 0, no_data())
@@ -541,9 +326,6 @@ exp fn proto_varint(v: u64): ProtoWireValue {
 
 /**
  * Wraps a signed value as a zigzag-encoded `Varint` value (protobuf `sint32`/`sint64` semantics).
- *
- * @param v  the signed value
- * @return   the wire value
  */
 exp fn proto_sint(v: i64): ProtoWireValue {
     proto_varint(zigzag_encode(v))
@@ -552,9 +334,6 @@ exp fn proto_sint(v: i64): ProtoWireValue {
 /**
  * Wraps a boolean as a `Varint` value (`0` for `false`, `1` for `true` — protobuf `bool`
  * semantics).
- *
- * @param v  the boolean
- * @return   the wire value
  */
 exp fn proto_bool_value(v: bool): ProtoWireValue {
     proto_varint(if v { 1 } else { 0 })
@@ -562,9 +341,6 @@ exp fn proto_bool_value(v: bool): ProtoWireValue {
 
 /**
  * Wraps a raw 8-byte bit pattern as a `Fixed64` value (protobuf `fixed64`/`sfixed64` semantics).
- *
- * @param v  the bit pattern
- * @return   the wire value
  */
 exp fn proto_fixed64(v: u64): ProtoWireValue {
     mk_wire_value(ProtoWireKind::Fixed64, 0, v, 0, no_data())
@@ -573,9 +349,6 @@ exp fn proto_fixed64(v: u64): ProtoWireValue {
 /**
  * Wraps a double-precision float as a `Fixed64` value (protobuf `double` semantics), via the
  * exact `f64_bits` builtin.
- *
- * @param v  the value
- * @return   the wire value
  */
 exp fn proto_double(v: f64): ProtoWireValue {
     proto_fixed64(f64_bits(v))
@@ -584,9 +357,6 @@ exp fn proto_double(v: f64): ProtoWireValue {
 /**
  * Wraps a raw 4-byte bit pattern as a `Fixed32` value (protobuf `fixed32`/`sfixed32` semantics —
  * and, when the caller already holds the correct IEEE 754 single bit pattern, `float`).
- *
- * @param v  the bit pattern
- * @return   the wire value
  */
 exp fn proto_fixed32(v: u32): ProtoWireValue {
     mk_wire_value(ProtoWireKind::Fixed32, 0, 0, v, no_data())
@@ -594,9 +364,6 @@ exp fn proto_fixed32(v: u32): ProtoWireValue {
 
 /**
  * Wraps raw bytes as a `LengthDelimited` value (protobuf `bytes` semantics).
- *
- * @param b  the raw bytes
- * @return   the wire value
  */
 exp fn proto_bytes(b: []byte): ProtoWireValue {
     mk_wire_value(ProtoWireKind::LengthDelimited, 0, 0, 0, b)
@@ -604,9 +371,6 @@ exp fn proto_bytes(b: []byte): ProtoWireValue {
 
 /**
  * Wraps a UTF-8 string as a `LengthDelimited` value (protobuf `string` semantics).
- *
- * @param s  the text
- * @return   the wire value
  */
 exp fn proto_string(s: str): ProtoWireValue {
     proto_bytes(bytes_of_str(s))
@@ -615,9 +379,6 @@ exp fn proto_string(s: str): ProtoWireValue {
 /**
  * Wraps a nested message as a `LengthDelimited` value (protobuf embedded-message semantics): the
  * message's own encoded bytes, length-prefixed like any other length-delimited payload.
- *
- * @param msg  the nested message
- * @return     the wire value
  */
 exp fn proto_embedded_message(msg: ProtoMessage): ProtoWireValue {
     proto_bytes(encode_message(msg))
@@ -627,9 +388,6 @@ exp fn proto_embedded_message(msg: ProtoMessage): ProtoWireValue {
  * Wraps a slice of unsigned magnitudes as a `LengthDelimited` PACKED varint value (protobuf
  * packed-repeated `uint32`/`uint64`/`bool`/enum semantics): every element varint-encoded back to
  * back with no per-element tag.
- *
- * @param vs  the magnitudes
- * @return    the wire value
  */
 exp fn proto_packed_varints(vs: []u64): ProtoWireValue {
     var out: []byte = no_data()
@@ -646,9 +404,6 @@ exp fn proto_packed_varints(vs: []u64): ProtoWireValue {
  * Wraps a slice of 4-byte bit patterns as a `LengthDelimited` PACKED fixed32 value (protobuf
  * packed-repeated `fixed32`/`sfixed32`/`float` semantics): every element little-endian, back to
  * back, no per-element tag.
- *
- * @param vs  the bit patterns
- * @return    the wire value
  */
 exp fn proto_packed_fixed32(vs: []u32): ProtoWireValue {
     var out: []byte = no_data()
@@ -665,9 +420,6 @@ exp fn proto_packed_fixed32(vs: []u32): ProtoWireValue {
  * Wraps a slice of 8-byte bit patterns as a `LengthDelimited` PACKED fixed64 value (protobuf
  * packed-repeated `fixed64`/`sfixed64`/`double` semantics): every element little-endian, back to
  * back, no per-element tag.
- *
- * @param vs  the bit patterns
- * @return    the wire value
  */
 exp fn proto_packed_fixed64(vs: []u64): ProtoWireValue {
     var out: []byte = no_data()
@@ -682,10 +434,6 @@ exp fn proto_packed_fixed64(vs: []u64): ProtoWireValue {
 
 /**
  * Pairs a field number with its wire value.
- *
- * @param number  the field number
- * @param value   the wire value
- * @return        the assembled field
  */
 exp fn proto_field(number: u64, value: ProtoWireValue): ProtoField {
     ProtoField { number = number; value = value }
@@ -693,8 +441,6 @@ exp fn proto_field(number: u64, value: ProtoWireValue): ProtoField {
 
 /**
  * The empty message: no fields.
- *
- * @return  a message with an empty field list
  */
 exp fn empty_message(): ProtoMessage {
     ProtoMessage { fields = teko::list::empty() }
@@ -703,23 +449,11 @@ exp fn empty_message(): ProtoMessage {
 /**
  * Appends one field to a message, returning the grown message (functional accumulation, no
  * index-assignment). Calling this repeatedly with the same `number` builds a repeated field.
- *
- * @param msg     the message to extend
- * @param number  the new field's number
- * @param value   the new field's value
- * @return        `msg` with the field appended
  */
 exp fn message_with_field(msg: ProtoMessage, number: u64, value: ProtoWireValue): ProtoMessage {
     ProtoMessage { fields = teko::list::push(msg.fields, proto_field(number, value)) }
 }
 
-/**
- * Encodes one field value onto the accumulator's tail (the tag itself is emitted by
- * `encode_message`, not here).
- *
- * @param v  the value to encode
- * @return   the value's encoded payload bytes (without a tag)
- */
 fn encode_field_value(v: ProtoWireValue): []byte {
     match v.kind {
         ProtoWireKind::Varint => encode_varint(v.varint)
@@ -732,9 +466,6 @@ fn encode_field_value(v: ProtoWireValue): []byte {
 /**
  * Encodes a full message: every field's tag followed by its payload, in field order. Total —
  * every well-formed `ProtoMessage` has a rendering.
- *
- * @param msg  the message to encode
- * @return     the encoded bytes
  */
 exp fn encode_message(msg: ProtoMessage): []byte {
     var out: []byte = no_data()
@@ -749,15 +480,6 @@ exp fn encode_message(msg: ProtoMessage): []byte {
     out
 }
 
-/**
- * Takes `n` bytes out of `p` starting at `pos`, bounds-checked against the declared length of a
- * length-delimited value overrunning the input.
- *
- * @param p    the input
- * @param pos  the offset of the first byte
- * @param n    how many bytes to take
- * @return     the taken bytes and the offset past them, or `error` when truncated
- */
 fn take_bytes(p: []byte, pos: u64, n: u64): ProtoBytesRead | error {
     if pos + n > p.len { return proto_error("length-delimited value overruns the input", pos) }
     var out: []byte = no_data()
@@ -770,66 +492,27 @@ fn take_bytes(p: []byte, pos: u64, n: u64): ProtoBytesRead | error {
     ProtoBytesRead { data = out; pos = pos + n }
 }
 
-/**
- * Decodes a `Varint` field value at `pos` (the tag has already been consumed).
- *
- * @param p    the input
- * @param pos  the offset of the varint
- * @return     the decoded value and the offset past it, or `error`
- */
 fn decode_varint_field(p: []byte, pos: u64): ProtoValueRead | error {
     var r = match decode_varint(p, pos) { ProtoVarintRead as r => r; error as e => return e }
     ProtoValueRead { value = proto_varint(r.value); pos = r.pos }
 }
 
-/**
- * Decodes a `Fixed64` field value at `pos` (the tag has already been consumed): 8 little-endian
- * bytes.
- *
- * @param p    the input
- * @param pos  the offset of the fixed64 field
- * @return     the decoded value and the offset past it, or `error` when truncated
- */
 fn decode_fixed64_field(p: []byte, pos: u64): ProtoValueRead | error {
     if pos + 8 > p.len { return proto_error("truncated fixed64 field", pos) }
     ProtoValueRead { value = proto_fixed64(read_le_u(p, pos, 8)); pos = pos + 8 }
 }
 
-/**
- * Decodes a `Fixed32` field value at `pos` (the tag has already been consumed): 4 little-endian
- * bytes.
- *
- * @param p    the input
- * @param pos  the offset of the fixed32 field
- * @return     the decoded value and the offset past it, or `error` when truncated
- */
 fn decode_fixed32_field(p: []byte, pos: u64): ProtoValueRead | error {
     if pos + 4 > p.len { return proto_error("truncated fixed32 field", pos) }
     ProtoValueRead { value = proto_fixed32(read_le_u(p, pos, 4) to u32); pos = pos + 4 }
 }
 
-/**
- * Decodes a `LengthDelimited` field value at `pos` (the tag has already been consumed): a varint
- * length followed by that many raw bytes.
- *
- * @param p    the input
- * @param pos  the offset of the length varint
- * @return     the decoded value and the offset past it, or `error` when truncated
- */
 fn decode_length_delimited_field(p: []byte, pos: u64): ProtoValueRead | error {
     var len_r = match decode_varint(p, pos) { ProtoVarintRead as r => r; error as e => return e }
     var taken = match take_bytes(p, len_r.pos, len_r.value) { ProtoBytesRead as r => r; error as e => return e }
     ProtoValueRead { value = proto_bytes(taken.data); pos = taken.pos }
 }
 
-/**
- * Decodes one field value at `pos`, dispatching on the already-resolved wire kind.
- *
- * @param p     the input
- * @param pos   the offset of the value (just past its tag)
- * @param kind  the value's wire kind (from the tag)
- * @return      the decoded value and the offset past it, or `error`
- */
 fn decode_field_value(p: []byte, pos: u64, kind: ProtoWireKind): ProtoValueRead | error {
     match kind {
         ProtoWireKind::Varint => decode_varint_field(p, pos)
@@ -842,9 +525,6 @@ fn decode_field_value(p: []byte, pos: u64, kind: ProtoWireKind): ProtoValueRead 
 /**
  * Decodes a full message: repeatedly reads a tag then its value until the input is exhausted,
  * preserving every field (including repeated occurrences of the same number) in encounter order.
- *
- * @param p  the input
- * @return   the decoded message, or `error` on the first malformed tag or value
  */
 exp fn decode_message(p: []byte): ProtoMessage | error {
     var fields: []ProtoField = teko::list::empty()
@@ -862,10 +542,6 @@ exp fn decode_message(p: []byte): ProtoMessage | error {
 /**
  * Collects every value of a given field number, in encounter order — the reader for a repeated
  * field (or for inspecting every occurrence of an accidentally-repeated singular field).
- *
- * @param msg     the message
- * @param number  the field number to collect
- * @return        every value seen for `number`, possibly empty
  */
 exp fn fields_by_number(msg: ProtoMessage, number: u64): []ProtoWireValue {
     var out: []ProtoWireValue = teko::list::empty()
@@ -882,10 +558,6 @@ exp fn fields_by_number(msg: ProtoMessage, number: u64): []ProtoWireValue {
 
 /**
  * The first value of a given field number — the reader for a singular (non-repeated) field.
- *
- * @param msg     the message
- * @param number  the field number to find
- * @return        its first value, or `error` when no field with that number is present
  */
 exp fn first_field_value(msg: ProtoMessage, number: u64): ProtoWireValue | error {
     var i: u64 = 0
@@ -900,9 +572,6 @@ exp fn first_field_value(msg: ProtoMessage, number: u64): ProtoWireValue | error
 /**
  * Reads a `Varint` value as its raw unsigned magnitude (protobuf `uint32`/`uint64`/enum
  * semantics).
- *
- * @param v  the value
- * @return   its magnitude, or `error` when `v` is not a `Varint`
  */
 exp fn varint_as_u64(v: ProtoWireValue): u64 | error {
     if v.kind != ProtoWireKind::Varint { return wrong_kind_error("a varint") }
@@ -912,9 +581,6 @@ exp fn varint_as_u64(v: ProtoWireValue): u64 | error {
 /**
  * Reads a `Varint` value as a plain two's-complement `i64` (protobuf `int32`/`int64` semantics —
  * NOT zigzag; see `varint_as_sint64` for `sint32`/`sint64`).
- *
- * @param v  the value
- * @return   the signed value, or `error` when `v` is not a `Varint`
  */
 exp fn varint_as_i64(v: ProtoWireValue): i64 | error {
     if v.kind != ProtoWireKind::Varint { return wrong_kind_error("a varint") }
@@ -923,9 +589,6 @@ exp fn varint_as_i64(v: ProtoWireValue): i64 | error {
 
 /**
  * Reads a `Varint` value as a zigzag-decoded `i64` (protobuf `sint32`/`sint64` semantics).
- *
- * @param v  the value
- * @return   the signed value, or `error` when `v` is not a `Varint`
  */
 exp fn varint_as_sint64(v: ProtoWireValue): i64 | error {
     if v.kind != ProtoWireKind::Varint { return wrong_kind_error("a varint") }
@@ -935,9 +598,6 @@ exp fn varint_as_sint64(v: ProtoWireValue): i64 | error {
 /**
  * Reads a `Varint` value as a boolean (protobuf `bool` semantics: any non-zero magnitude is
  * `true`).
- *
- * @param v  the value
- * @return   the boolean, or `error` when `v` is not a `Varint`
  */
 exp fn varint_as_bool(v: ProtoWireValue): bool | error {
     if v.kind != ProtoWireKind::Varint { return wrong_kind_error("a varint") }
@@ -947,9 +607,6 @@ exp fn varint_as_bool(v: ProtoWireValue): bool | error {
 /**
  * Reads a `Fixed64` value as its raw bit pattern (protobuf `fixed64`/`sfixed64` semantics — the
  * signed `sfixed64` reinterpretation is `u64_bits_as_i64` applied to this result).
- *
- * @param v  the value
- * @return   the bit pattern, or `error` when `v` is not a `Fixed64`
  */
 exp fn fixed64_as_u64(v: ProtoWireValue): u64 | error {
     if v.kind != ProtoWireKind::Fixed64 { return wrong_kind_error("a fixed64") }
@@ -959,9 +616,6 @@ exp fn fixed64_as_u64(v: ProtoWireValue): u64 | error {
 /**
  * Reads a `Fixed64` value as a double-precision float (protobuf `double` semantics), via the
  * exact `f64_from_bits` builtin.
- *
- * @param v  the value
- * @return   the value, or `error` when `v` is not a `Fixed64`
  */
 exp fn fixed64_as_f64(v: ProtoWireValue): f64 | error {
     if v.kind != ProtoWireKind::Fixed64 { return wrong_kind_error("a fixed64") }
@@ -972,25 +626,12 @@ exp fn fixed64_as_f64(v: ProtoWireValue): f64 | error {
  * Reads a `Fixed32` value as its raw bit pattern (protobuf `fixed32`/`sfixed32` semantics — the
  * signed `sfixed32` reinterpretation follows the same `u64_bits_as_i64` shape narrowed to 32
  * bits).
- *
- * @param v  the value
- * @return   the bit pattern, or `error` when `v` is not a `Fixed32`
  */
 exp fn fixed32_as_u32(v: ProtoWireValue): u32 | error {
     if v.kind != ProtoWireKind::Fixed32 { return wrong_kind_error("a fixed32") }
     v.fixed32
 }
 
-/**
- * Converts a 32-bit IEEE 754 single-precision bit pattern to the exact `f64` it denotes by
- * rebuilding the double's sign/exponent/mantissa fields (an exact widening: every single is a
- * double). Zeros, subnormals, normals, infinities, and NaN are all handled. Mirrors
- * `teko::encoding::cbor`/`teko::encoding::msgpack`'s own private `single_to_f64` (each unit
- * keeps its own copy; there is no shared low-level bit-math module to import from).
- *
- * @param s  the 32-bit single pattern (in the low bits of the `u64`)
- * @return   the equivalent double-precision value
- */
 fn single_to_f64(s: u64): f64 {
     var sign = (s >> 31) & 0x1
     var ebits = (s >> 23) & 0xFF
@@ -1004,26 +645,11 @@ fn single_to_f64(s: u64): f64 {
     f64_from_bits((sign << 63) | (exp64 << 52) | (mant << 29))
 }
 
-/**
- * Applies a sign bit to a non-negative magnitude, negating when the bit is set.
- *
- * @param sign  the sign bit (1 = negative)
- * @param mag   the non-negative magnitude
- * @return      `mag` or `-mag`
- */
 fn apply_sign(sign: u64, mag: f64): f64 {
     if sign == 1 { return -mag }
     mag
 }
 
-/**
- * Computes `2^e` for an integer exponent as an `f64` by building the IEEE 754 double whose
- * exponent field is `e + 1023` and whose mantissa is zero — exact for every `e` this module's
- * subnormal-single decoding needs.
- *
- * @param e  the integer exponent
- * @return   `2^e`
- */
 fn two_pow(e: i64): f64 {
     f64_from_bits((((e + 1023) to u64) & 0x7FF) << 52)
 }
@@ -1031,11 +657,7 @@ fn two_pow(e: i64): f64 {
 /**
  * Reads a `Fixed32` value as a single-precision float (protobuf `float` semantics). Exact: the
  * 32-bit pattern widens to the `f64` it precisely denotes (`single_to_f64`) and narrows back to
- * `f32`, a value-lossless round trip (see the module doc's DEFERRALS note on why there is no
- * `proto_float` builder for the reverse direction).
- *
- * @param v  the value
- * @return   the value, or `error` when `v` is not a `Fixed32`
+ * `f32`, a value-lossless round trip.
  */
 exp fn fixed32_as_f32(v: ProtoWireValue): f32 | error {
     if v.kind != ProtoWireKind::Fixed32 { return wrong_kind_error("a fixed32") }
@@ -1044,9 +666,6 @@ exp fn fixed32_as_f32(v: ProtoWireValue): f32 | error {
 
 /**
  * Reads a `LengthDelimited` value as its raw bytes (protobuf `bytes` semantics).
- *
- * @param v  the value
- * @return   the bytes, or `error` when `v` is not `LengthDelimited`
  */
 exp fn length_delimited_as_bytes(v: ProtoWireValue): []byte | error {
     if v.kind != ProtoWireKind::LengthDelimited { return wrong_kind_error("length-delimited") }
@@ -1056,9 +675,6 @@ exp fn length_delimited_as_bytes(v: ProtoWireValue): []byte | error {
 /**
  * Reads a `LengthDelimited` value as UTF-8 text (protobuf `string` semantics), validating the
  * encoding.
- *
- * @param v  the value
- * @return   the text, or `error` when `v` is not `LengthDelimited` or is not valid UTF-8
  */
 exp fn length_delimited_as_str(v: ProtoWireValue): str | error {
     if v.kind != ProtoWireKind::LengthDelimited { return wrong_kind_error("length-delimited") }
@@ -1068,23 +684,12 @@ exp fn length_delimited_as_str(v: ProtoWireValue): str | error {
 /**
  * Reads a `LengthDelimited` value as a nested message (protobuf embedded-message semantics),
  * recursively decoding its bytes.
- *
- * @param v  the value
- * @return   the nested message, or `error` when `v` is not `LengthDelimited` or its bytes are
- *           malformed
  */
 exp fn length_delimited_as_message(v: ProtoWireValue): ProtoMessage | error {
     if v.kind != ProtoWireKind::LengthDelimited { return wrong_kind_error("length-delimited") }
     decode_message(v.data)
 }
 
-/**
- * Decodes a packed varint payload: consecutive varints filling the whole byte range with no
- * per-element tag.
- *
- * @param data  the packed payload
- * @return      every decoded magnitude, in order, or `error` on a malformed trailing varint
- */
 fn decode_packed_varints(data: []byte): []u64 | error {
     var out: []u64 = teko::list::empty()
     var pos: u64 = 0
@@ -1100,24 +705,12 @@ fn decode_packed_varints(data: []byte): []u64 | error {
 /**
  * Reads a `LengthDelimited` value as a PACKED repeated varint field (protobuf packed-repeated
  * `uint32`/`uint64`/`bool`/enum semantics).
- *
- * @param v  the value
- * @return   every packed magnitude, in order, or `error` when `v` is not `LengthDelimited` or
- *           its payload is a malformed varint sequence
  */
 exp fn length_delimited_as_packed_varints(v: ProtoWireValue): []u64 | error {
     if v.kind != ProtoWireKind::LengthDelimited { return wrong_kind_error("length-delimited") }
     decode_packed_varints(v.data)
 }
 
-/**
- * Decodes a packed fixed32 payload: consecutive 4-byte little-endian groups filling the whole
- * byte range.
- *
- * @param data  the packed payload
- * @return      every decoded bit pattern, in order, or `error` when the payload length is not a
- *              multiple of 4
- */
 fn decode_packed_fixed32(data: []byte): []u32 | error {
     if (data.len % 4) != 0 { return proto_error("packed fixed32 payload length is not a multiple of 4", data.len) }
     var out: []u32 = teko::list::empty()
@@ -1133,24 +726,12 @@ fn decode_packed_fixed32(data: []byte): []u32 | error {
 /**
  * Reads a `LengthDelimited` value as a PACKED repeated fixed32 field (protobuf packed-repeated
  * `fixed32`/`sfixed32`/`float` semantics).
- *
- * @param v  the value
- * @return   every packed bit pattern, in order, or `error` when `v` is not `LengthDelimited` or
- *           its payload length is not a multiple of 4
  */
 exp fn length_delimited_as_packed_fixed32(v: ProtoWireValue): []u32 | error {
     if v.kind != ProtoWireKind::LengthDelimited { return wrong_kind_error("length-delimited") }
     decode_packed_fixed32(v.data)
 }
 
-/**
- * Decodes a packed fixed64 payload: consecutive 8-byte little-endian groups filling the whole
- * byte range.
- *
- * @param data  the packed payload
- * @return      every decoded bit pattern, in order, or `error` when the payload length is not a
- *              multiple of 8
- */
 fn decode_packed_fixed64(data: []byte): []u64 | error {
     if (data.len % 8) != 0 { return proto_error("packed fixed64 payload length is not a multiple of 8", data.len) }
     var out: []u64 = teko::list::empty()
@@ -1166,10 +747,6 @@ fn decode_packed_fixed64(data: []byte): []u64 | error {
 /**
  * Reads a `LengthDelimited` value as a PACKED repeated fixed64 field (protobuf packed-repeated
  * `fixed64`/`sfixed64`/`double` semantics).
- *
- * @param v  the value
- * @return   every packed bit pattern, in order, or `error` when `v` is not `LengthDelimited` or
- *           its payload length is not a multiple of 8
  */
 exp fn length_delimited_as_packed_fixed64(v: ProtoWireValue): []u64 | error {
     if v.kind != ProtoWireKind::LengthDelimited { return wrong_kind_error("length-delimited") }

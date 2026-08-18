@@ -1,74 +1,18 @@
-/**
- * `teko::crypto::scrypt` — the scrypt memory-hard password-based key-derivation function
- * (RFC 7914): Salsa20/8 Core, scryptBlockMix, scryptROMix, and the top-level `scrypt` entry
- * point, wired onto the existing `pbkdf2_sha256` (`kdf.tks`). Pure Teko over `[]byte`, no OS
- * dependency, testable via `.tkt` against the RFC 7914 known-answer vectors.
- *
- * scrypt's memory-hardness comes from `scryptROMix`: it fills an `N`-element vector `V` of
- * `128*r`-byte blocks by iterating `scryptBlockMix`, then makes `N` further passes reading
- * `V` at pseudo-random indices — an intentionally random-access structure. Teko's NO
- * INDEX-ASSIGNMENT discipline (`teko::list::push`/`teko::list::empty` only) means every READ
- * of `V[j]` is a cheap slice (`scrypt_bytes_slice`), but this module still builds the WHOLE
- * `V` vector once (sequentially, via push) rather than mutating single elements — there is no
- * random-access WRITE in scryptROMix (`V[i]` is only ever written once, in index order), so
- * this file carries none of the O(memory^2) rebuild cost `argon2.tks` documents for Argon2id's
- * genuinely random-access memory array.
- *
- * PUBLIC SURFACE IS `exp` (catalog §0 framing); every Salsa20/8/BlockMix/ROMix helper is
- * file-local, prefixed `scrypt_` (tree-wide unique helper names, avoiding the flat-namespace
- * union-tag collision class `docs/design/fix-union-tag-cross-namespace-codegen.md` documents
- * for same-bare-name TYPES — this file declares no new struct type used in a `T | error`
- * union other than the shared `CryptoError`, so that hazard does not apply here, but unique
- * function names are kept anyway per the stdlib lane's own convention).
- */
-
-/**
- * A working quartet of the Salsa20/8 core's 4x4 word matrix, returned by `scrypt_quarterround`
- * so the caller can rebuild its 16-word state without index-assignment.
- */
 type SalsaQuad = struct {
-    /** the first updated word */
     a: u32
-    /** the second updated word */
     b: u32
-    /** the third updated word */
     c: u32
-    /** the fourth updated word */
     d: u32
 }
 
-/**
- * Left-rotates a 32-bit word by `count` bits — the `R(a,b)` primitive RFC 7914 §3 defines for
- * the Salsa20/8 core.
- *
- * @param x      the word to rotate
- * @param count  the rotation amount in bits, 1..31
- * @return       `x` rotated left by `count` bits
- */
 fn scrypt_rotl32(x: u32, count: u32): u32 {
     (x << count) | (x >> (32 - count))
 }
 
-/**
- * Reads a little-endian 32-bit word out of `b` at byte offset `off` — the wire order Salsa20/8
- * reads its 16-word input in (RFC 7914 §3, "without endianness conversion" in the reference C
- * meaning the caller supplies little-endian words).
- *
- * @param b    the byte slice being read
- * @param off  the starting byte offset (`off+3` must be in bounds)
- * @return     the little-endian 32-bit value at `b[off..off+4)`
- */
 fn scrypt_le_u32_at(b: []byte, off: u64): u32 {
     (b[off] to u32) | ((b[off + 1] to u32) << 8) | ((b[off + 2] to u32) << 16) | ((b[off + 3] to u32) << 24)
 }
 
-/**
- * Appends a 32-bit word to `buf` in little-endian byte order.
- *
- * @param buf  the output buffer to extend
- * @param x    the word to emit, least-significant byte first
- * @return     `buf` with `x`'s four little-endian bytes appended
- */
 fn scrypt_push_le32(buf: []byte, x: u32): []byte {
     var b = buf
     b = teko::list::push(b, (x & 0xFF) to byte)
@@ -78,13 +22,6 @@ fn scrypt_push_le32(buf: []byte, x: u32): []byte {
     b
 }
 
-/**
- * Appends every byte of `src` onto a copy of `dst`, returning the concatenation.
- *
- * @param dst  the prefix bytes
- * @param src  the bytes to append after `dst`
- * @return     a fresh slice holding `dst` followed by `src`
- */
 fn scrypt_bytes_append(dst: []byte, src: []byte): []byte {
     var out = dst
     var i: u64 = 0
@@ -96,14 +33,6 @@ fn scrypt_bytes_append(dst: []byte, src: []byte): []byte {
     out
 }
 
-/**
- * The sub-slice `data[from..to)` as a fresh `[]byte`.
- *
- * @param data  the source slice
- * @param from  the inclusive start index
- * @param to    the exclusive end index
- * @return      a fresh slice holding `data[from..to)`
- */
 fn scrypt_bytes_slice(data: []byte, from: u64, to: u64): []byte {
     var out: []byte = teko::list::empty()
     var i = from
@@ -115,14 +44,6 @@ fn scrypt_bytes_slice(data: []byte, from: u64, to: u64): []byte {
     out
 }
 
-/**
- * The byte-wise XOR of two equal-length slices — the `T = X xor B[i]` step of scryptBlockMix
- * and the `T = X xor V[j]` step of scryptROMix.
- *
- * @param a  the first slice
- * @param b  the second slice (the caller guarantees `a.len == b.len`)
- * @return   a fresh slice with `a[i] ⊕ b[i]` at every index
- */
 fn scrypt_bytes_xor(a: []byte, b: []byte): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -134,28 +55,10 @@ fn scrypt_bytes_xor(a: []byte, b: []byte): []byte {
     out
 }
 
-/**
- * `true` iff `n` is a power of two strictly greater than 1 — the CPU/memory cost parameter `N`'s
- * required shape (RFC 7914 §2: "must be larger than 1, a power of 2").
- *
- * @param n  the candidate value
- * @return   whether `n` is a valid scrypt `N`
- */
 fn scrypt_is_pow2_gt1(n: u64): bool {
     n > 1 && (n & (n - 1)) == 0
 }
 
-/**
- * One Salsa20 quarterround (the reusable 4-word transform underlying both the Salsa20/8 core's
- * column round and row round): `b ^= R(a+d,7); c ^= R(b+a,9); d ^= R(c+b,13); a ^= R(d+c,18)`,
- * with every add 32-bit-wrapping.
- *
- * @param a  the first word
- * @param b  the second word
- * @param c  the third word
- * @param d  the fourth word
- * @return   the four words after the quarterround, in the same `a,b,c,d` order
- */
 fn scrypt_quarterround(a: u32, b: u32, c: u32, d: u32): SalsaQuad {
     var nb = b ^ scrypt_rotl32(teko::math::wrapping_add_u32(a, d), 7)
     var nc = c ^ scrypt_rotl32(teko::math::wrapping_add_u32(nb, a), 9)
@@ -164,16 +67,6 @@ fn scrypt_quarterround(a: u32, b: u32, c: u32, d: u32): SalsaQuad {
     SalsaQuad { a = na; b = nb; c = nc; d = nd }
 }
 
-/**
- * The Salsa20/8 core hash function (RFC 7914 §3): a fixed permutation from 64 octets to 64
- * octets, built from 4 double-rounds (8 quarterrounds each: a column round over
- * `(0,4,8,12)/(5,9,13,1)/(10,14,2,6)/(15,3,7,11)` then a row round over
- * `(0,1,2,3)/(5,6,7,4)/(10,11,8,9)/(15,12,13,14)`), followed by feed-forward addition of the
- * original 16 words.
- *
- * @param input  the 64-byte input block
- * @return       the 64-byte Salsa20/8 output block
- */
 fn scrypt_salsa_core(input: []byte): []byte {
     var in0 = scrypt_le_u32_at(input, 0)
     var in1 = scrypt_le_u32_at(input, 4)
@@ -272,15 +165,6 @@ fn scrypt_salsa_core(input: []byte): []byte {
     out
 }
 
-/**
- * scryptBlockMix (RFC 7914 §4): mixes `2*r` 64-byte blocks through the Salsa20/8 core in a
- * chain (each block XORed with the running state before hashing), then de-interleaves the
- * results into the even-indexed halves followed by the odd-indexed halves.
- *
- * @param input  `128*r` bytes, `2*r` 64-byte blocks `B[0]..B[2r-1]`
- * @param r      the block size parameter
- * @return       `128*r` bytes, the mixed and de-interleaved output blocks
- */
 fn scrypt_blockmix(input: []byte, r: u64): []byte {
     var blocks = 2 * r
     var x = scrypt_bytes_slice(input, (blocks - 1) * 64, blocks * 64)
@@ -309,16 +193,6 @@ fn scrypt_blockmix(input: []byte, r: u64): []byte {
     out
 }
 
-/**
- * The `Integerify` step of scryptROMix (RFC 7914 §5): interprets the last 64-byte sub-block of
- * a `128*r`-byte block as a little-endian integer, truncated to the low 64 bits (every
- * realistic `N` fits comfortably within 64 bits, so this truncation never changes the `mod N`
- * result the caller computes).
- *
- * @param block  a `128*r`-byte scryptBlockMix output
- * @param r      the block size parameter
- * @return       the low 64 bits of the last 64-byte sub-block, little-endian
- */
 fn scrypt_integerify(block: []byte, r: u64): u64 {
     var off = (2 * r - 1) * 64
     var lo = scrypt_le_u32_at(block, off) to u64
@@ -326,19 +200,6 @@ fn scrypt_integerify(block: []byte, r: u64): u64 {
     lo | (hi << 32)
 }
 
-/**
- * scryptROMix (RFC 7914 §5): fills an `N`-element vector `V` with the successive
- * scryptBlockMix states (the memory-hard fill pass), then makes `N` further scryptBlockMix
- * passes reading `V` at the pseudo-random index `Integerify(X) mod N` (the memory-hard mix
- * pass). `V` is built once via `teko::list::push` in strict index order — never
- * random-access WRITTEN — so the NO INDEX-ASSIGNMENT discipline costs nothing here; only the
- * second pass's reads are random-access, and reads are a cheap slice.
- *
- * @param input  `128*r` bytes, the block to mix
- * @param r      the block size parameter
- * @param n      the CPU/memory cost parameter (a power of two greater than 1)
- * @return       `128*r` bytes, the memory-hard-mixed output block
- */
 fn scrypt_romix(input: []byte, r: u64, n: u64): []byte {
     var block_bytes = 128 * r
     var x = input
@@ -366,16 +227,6 @@ fn scrypt_romix(input: []byte, r: u64, n: u64): []byte {
  * `PBKDF2-HMAC-SHA-256` (reusing `pbkdf2_sha256`, `kdf.tks`) bracketing `p` independent
  * `scryptROMix` memory-hard passes. Deliberately slow and memory-hungry — the caller tunes
  * `n`/`r`/`p` for the target hardware.
- *
- * @param password  the passphrase bytes
- * @param salt      the salt bytes
- * @param n         the CPU/memory cost parameter: must be a power of two greater than 1
- * @param r         the block size parameter: must be at least 1
- * @param p         the parallelization parameter: must be at least 1
- * @param dk_len    the derived-key length in bytes: must be at least 1
- * @return          the `dk_len`-byte derived key, or a `CryptoError` on an invalid parameter
- * @throws          `CryptoError` when `n`/`r`/`p`/`dk_len` fail their validity constraints, or
- *                   when the underlying `pbkdf2_sha256` calls reject their derived lengths
  */
 exp fn scrypt(password: []byte, salt: []byte, n: u64, r: u64, p: u64, dk_len: u64): []byte | CryptoError {
     if !scrypt_is_pow2_gt1(n) { return crypto_error("scrypt: n must be a power of two greater than 1") }
