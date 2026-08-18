@@ -23,7 +23,13 @@ executar por cima.
   para um **agente**. O coordenador **NÃO roda build** na sessão principal; só faz **edições
   pontuais** (leis na CLAUDE.md, correção cirúrgica de uma linha) e **orquestra** (despacha,
   lê o retorno, drena por ff/cherry-pick). Rodar build eu mesmo queima a sessão principal e é o
-  que a lei proíbe.
+  que a lei proíbe. **A ideia é preservar os tokens de memória da sessão principal e reduzir as
+  compactações** (é a compactação que causa perda de contexto e erros caros) — logo evito também
+  ler arquivos gigantes / rodar cadeias aqui.
+- **SAÍDA LONGA → ARTEFATO HTML (lei dura, dono 2026-08-18).** Quando o retorno de um agente for
+  **grande demais e puder comprometer minha memória**, ele NÃO passa pela sessão principal: **outro
+  agente gera um artefato HTML**, eu **publico** (ferramenta Artifact), o **dono revisa** e me devolve
+  **só o veredito** — a saída bruta nunca entra no meu contexto. O coordenador só recebe o resumo/decisão.
 - Quando o dono está **levantando/analisando um problema comigo**, PARAR, LER o
   que ele manda e pensar JUNTO — não sair executando por cima nem ignorar as
   mensagens dele.
