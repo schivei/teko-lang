@@ -1,32 +1,5 @@
-/**
- * teko::collections — the growable, heap-of-arena collection classes (issue #163, the flagship
- * payoff of the #254 generic-class keystone). This root unit holds the pure array combinators the
- * `List<T>` and `Map<V>` classes both fold over: Teko arrays are FIXED-SIZE value snapshots
- * (`teko::list::push` copy-appends, returning a NEW array), so every "in-place" mutation a growable
- * collection performs is a self-field REASSIGNMENT to a freshly built array. These free generic
- * helpers centralise the two rebuild shapes (replace-at, drop-at) that field reassignment needs,
- * monomorphized per element type at each instantiation.
- *
- * WHY free functions and not private instance methods: a generic instance method that calls a
- * SIBLING generic instance method on `self` can fail to link natively — the mono/codegen pass
- * does not stamp the sibling (`List__…`), so the C compiler fails with `use of undeclared
- * identifier`. Routing shared logic through a free generic function — which the mono pass DOES
- * stamp per instantiation — avoids the linking failure. Reported to the integrator as a
- * generic-stack follow-up (#163 report).
- */
-
-/**
- * Return a copy of `xs` with the element at index `at` replaced by `v` — the value-functional
- * shape a growable collection uses to overwrite one slot (Teko has no array index-assignment). An
- * `at` outside `[0, xs.len)` yields an unchanged copy, so the caller guards the bound before the
- * write it intends to be observable.
- *
- * @param xs  the source array
- * @param at  the index to overwrite
- * @param v   the replacement element
- * @return    a fresh array equal to `xs` except at `at`, which holds `v`
- */
-pub fn arr_replace_at<T>(xs: []T, at: u64, v: T): []T {
+/** Copy of `xs` with the element at `at` replaced by `v`; out-of-range `at` yields an unchanged copy. */
+exp fn arr_replace_at<T>(xs: []T, at: u64, v: T): []T {
     var out: []T = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -37,20 +10,8 @@ pub fn arr_replace_at<T>(xs: []T, at: u64, v: T): []T {
     out
 }
 
-/**
- * Return a copy of the concrete `[]u64` array `xs` with the element at index `at` removed (the
- * following elements shift down by one) — the NON-GENERIC twin of `arr_drop_at` for the cached-hash
- * side-array a keyed collection re-grows in step with its `K`/`V` arrays. A concrete `u64` helper
- * (rather than `arr_drop_at<u64>`) is used because a generic-class method that instantiates the SAME
- * free generic at BOTH the class type-param and a concrete `u64` mis-monomorphizes the concrete arm
- * (a re-key misfire, reported as an adjacent monomorph bug); a distinct concrete function sidesteps
- * it. An `at` at or beyond `xs.len` yields an unchanged copy.
- *
- * @param xs  the source hash array
- * @param at  the index to drop
- * @return    a fresh `[]u64` equal to `xs` with the `at`-th element removed
- */
-pub fn arr_drop_u64_at(xs: []u64, at: u64): []u64 {
+/** Copy of a `[]u64` array with the element at `at` removed; out-of-range `at` yields an unchanged copy. */
+exp fn arr_drop_u64_at(xs: []u64, at: u64): []u64 {
     var out: []u64 = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -61,16 +22,8 @@ pub fn arr_drop_u64_at(xs: []u64, at: u64): []u64 {
     out
 }
 
-/**
- * Return a copy of `xs` with the element at index `at` removed (the following elements shift down
- * by one), the value-functional shape `Map::remove` and `List::remove_at` use. An `at` at or beyond
- * `xs.len` yields an unchanged copy.
- *
- * @param xs  the source array
- * @param at  the index to drop
- * @return    a fresh array equal to `xs` with the `at`-th element removed
- */
-pub fn arr_drop_at<T>(xs: []T, at: u64): []T {
+/** Copy of `xs` with the element at `at` removed; out-of-range `at` yields an unchanged copy. */
+exp fn arr_drop_at<T>(xs: []T, at: u64): []T {
     var out: []T = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -81,30 +34,14 @@ pub fn arr_drop_at<T>(xs: []T, at: u64): []T {
     out
 }
 
-/**
- * Return a copy of `xs` with its last element removed — the backing shape of `List::pop`. An empty
- * `xs` yields an empty copy (the caller decides whether an empty pop is an error).
- *
- * @param xs  the source array
- * @return    a fresh array equal to `xs` without its final element
- */
-pub fn arr_drop_last<T>(xs: []T): []T {
+/** Copy of `xs` with its last element removed; an empty `xs` yields an empty copy. */
+exp fn arr_drop_last<T>(xs: []T): []T {
     if xs.len == 0 { return teko::list::empty() }
     arr_drop_at(xs, xs.len - 1)
 }
 
-/**
- * Return a copy of `xs` with `v` inserted BEFORE index `at` — the elements at `at…` shift up by one;
- * an `at` at or beyond `xs.len` appends `v` at the end. Value-functional (Teko arrays are snapshots);
- * a FREE generic function, not a method, per the sibling-link rule. The backing shape a front-insert
- * and a `SortedSet` ordered-insert both reassign a field to.
- *
- * @param xs  the source array
- * @param at  the index to insert before (clamped to `xs.len` for an append)
- * @param v   the element to insert
- * @return    a fresh array with `v` at position `min(at, xs.len)`
- */
-pub fn arr_insert_at<T>(xs: []T, at: u64, v: T): []T {
+/** Copy of `xs` with `v` inserted before index `at` (clamped to `xs.len` for an append). */
+exp fn arr_insert_at<T>(xs: []T, at: u64, v: T): []T {
     var out: []T = teko::list::empty()
     var inserted = false
     var i: u64 = 0
@@ -121,28 +58,15 @@ pub fn arr_insert_at<T>(xs: []T, at: u64, v: T): []T {
     out
 }
 
-/**
- * Return a copy of `xs` with the elements at positions `i` and `j` exchanged. If either index is out
- * of range (or `i == j`) the result is an unchanged copy. Value-functional; a FREE generic function.
- *
- * @param xs  the source array
- * @param i   the first position to exchange
- * @param j   the second position to exchange
- * @return    a fresh array equal to `xs` with `i` and `j` swapped
- */
-pub fn arr_swap<T>(xs: []T, i: u64, j: u64): []T {
+/** Copy of `xs` with the elements at `i` and `j` exchanged; out-of-range indices yield an unchanged copy. */
+exp fn arr_swap<T>(xs: []T, i: u64, j: u64): []T {
     if i >= xs.len || j >= xs.len { return arr_slice(xs, 0, xs.len) }
     var swapped_i = arr_replace_at(xs, i, xs[j])
     arr_replace_at(swapped_i, j, xs[i])
 }
 
-/**
- * Return a copy of `xs` in reverse order. Value-functional; a FREE generic function.
- *
- * @param xs  the source array
- * @return    a fresh array equal to `xs` with its elements reversed
- */
-pub fn arr_reverse<T>(xs: []T): []T {
+/** Copy of `xs` in reverse order. */
+exp fn arr_reverse<T>(xs: []T): []T {
     var out: []T = teko::list::empty()
     var i: u64 = xs.len
     loop {
@@ -153,16 +77,8 @@ pub fn arr_reverse<T>(xs: []T): []T {
     out
 }
 
-/**
- * Return a copy of the half-open range `[from, min(to, xs.len))` of `xs`. A `from` at or beyond the
- * clamped upper bound yields an empty array. Value-functional; a FREE generic function.
- *
- * @param xs    the source array
- * @param from  the inclusive lower bound
- * @param to    the exclusive upper bound (clamped to `xs.len`)
- * @return      a fresh array holding the selected range, empty when `from >= min(to, xs.len)`
- */
-pub fn arr_slice<T>(xs: []T, from: u64, to: u64): []T {
+/** Copy of the half-open range `[from, min(to, xs.len))` of `xs`. */
+exp fn arr_slice<T>(xs: []T, from: u64, to: u64): []T {
     var out: []T = teko::list::empty()
     var hi = to
     if hi > xs.len { hi = xs.len }
@@ -175,17 +91,6 @@ pub fn arr_slice<T>(xs: []T, from: u64, to: u64): []T {
     out
 }
 
-/**
- * Binary-search `x`'s sorted position in the ascending `items` (over `<`, dispatched through
- * `T: IOrd`) and insert it there if absent, mutating `items` in place through the `ref` slice and
- * returning whether the element was NEWLY inserted. An element already present (neither `x < e` nor
- * `e < x` at the found position) is a no-op returning `false`. A FREE generic function (ref-threaded),
- * the `SortedSet`/`SortedDictionary` ordered-insert backer.
- *
- * @param items  the ascending target slice, referenced mutably
- * @param x      the element to insert in sorted position
- * @return       `true` iff `x` was absent and has now been inserted
- */
 pub fn sorted_insert<T: IOrd>(ref items: []T, x: T): bool {
     var arr = items.value
     var lo: u64 = 0
@@ -200,15 +105,6 @@ pub fn sorted_insert<T: IOrd>(ref items: []T, x: T): bool {
     true
 }
 
-/**
- * Restore the min-heap property UPWARD after a push: the element just appended at the end of `heap`
- * bubbles up past any larger parent (comparison over `<`, dispatched through `T: IOrd`). Returns the
- * repaired heap; value-functional (works on a copy). A FREE generic function, the `PriorityQueue`
- * enqueue backer.
- *
- * @param heap  a binary min-heap array with a freshly appended last element to sift up
- * @return      the heap with the last element moved to its heap-ordered position
- */
 pub fn heap_sift_up<T: IOrd>(heap: []T): []T {
     var h = heap
     if h.len == 0 { return h }
@@ -223,20 +119,6 @@ pub fn heap_sift_up<T: IOrd>(heap: []T): []T {
     h
 }
 
-/**
- * Remove and return the MINIMUM element of the NON-EMPTY min-heap `heap` (its root), restoring the
- * heap property downward, mutating `heap` in place through the `ref` slice. The last element replaces
- * the root and sifts down past any smaller child (comparison over `<`, dispatched through `T: IOrd`).
- * A FREE generic function, the `PriorityQueue` dequeue backer.
- *
- * The heap MUST be non-empty — the root read `heap[0]` is a fail-loud bounds violation (M.1) on an
- * empty heap, so the caller guards with a length/`is_empty` check. This return is a bare `T` rather
- * than `T | null` because a type parameter constrained by an interface (`T: IOrd`) may not yet stand
- * as a union member (the interface-in-union honest stop), so the empty case is guarded, not unioned.
- *
- * @param heap  the non-empty binary min-heap, referenced mutably
- * @return      the removed minimum element
- */
 pub fn heap_pop_min<T: IOrd>(ref heap: []T): T {
     var h = heap.value
     var top = h[0]
