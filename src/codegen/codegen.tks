@@ -12904,7 +12904,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         match prog.items[i] {
             checker::TFunction as f => {
                 var nb = cg_lift_block(f.body, acc)
-                items = teko::list::push(items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra })
+                items = teko::list::push(items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard })
             }
             (@TStatement()) as ts => {
                 var ns = cg_lift_stmt(ts, acc)
@@ -12998,7 +12998,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
                 var ps: []parser::Param = teko::list::empty()
                 var pi = 0
                 loop { if pi >= lam.params.len { break }; ps = teko::list::push(ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }); pi++ }
-                newfns = teko::list::push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty() })
+                newfns = teko::list::push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() })
             } else {
                 newlams = teko::list::push(newlams, stamped)
             }
@@ -14093,11 +14093,11 @@ fn cg_cond_const_arm_value(init: checker::TExpr): str | error {
 }
 
 /**
- * cg_emit_one_cond_ladder — emit ONE family's `#if <cond0> #define <sym> <v0> #elif … #else #error
- * #endif` block. The arms are the `TConstDecl` items of `prog` sharing `fam`'s `(namespace, name)`, in
- * SOURCE order (deterministic — the fixpoint depends on it). `#else` is `#error`, not a `0` stub: an
- * off-whitelist arch is a rejected build (the fail-fast layer a), and the syscall INSTRUCTION helper
- * already `#error`s the same way, so the NUMBER ladder matches — no silent wrong number (layer b).
+ * cg_emit_one_cond_ladder — emit ONE family's `#if <cond0> #define <sym> <v0> #elif … #endif` block.
+ * The arms are the `TConstDecl` items of `prog` sharing `fam`'s `(namespace, name)`, in SOURCE order
+ * (deterministic — the fixpoint depends on it). Each arm's cond carries the FULL guard (os AND arch),
+ * so a linux-only family is undefined on macOS/Windows, referenced only inside its own `#if`-guarded
+ * code. No `#else`: an off-matrix target is rejected by the single global `unsupported (os,arch)` guard.
  *
  * @param buf   the emission buffer
  * @param prog  the codegen program (its `TConstDecl` items are the arm source)
@@ -14131,10 +14131,7 @@ fn cg_emit_one_cond_ladder(buf: []byte, prog: CgProg, fam: checker::ConstQName):
         }
         i = i + 1
     }
-    out = cb(out, "#else\n#error \"teko section 16: unsupported (os,arch) — ")
-    out = cb(out, sym)
-    out = cb(out, " has no value for this arch (supported: linux-x86_64, linux-arm64; see docs/design/plano-s16-arch-cross-emit.md section 3.2)\"\n#endif\n")
-    out
+    cb(out, "#endif\n")
 }
 
 /**
@@ -14160,6 +14157,79 @@ fn cg_emit_cond_const_ladder(buf: []byte, prog: CgProg): []byte | error {
         f = f + 1
     }
     cb(out, "\n")
+}
+
+/**
+ * cg_emit_global_target_guard — emit the single fail-fast `#error "unsupported (os,arch)"` guarding the
+ * whole translation unit against an off-matrix target. The one `teko.c` cross-compiles for the CLOSED
+ * matrix `linux-x86_64`, `linux-arm64`, `macos-arm64`, `windows-x86_64`; any other `(os, arch)` trips
+ * the guard at `cc` time (defense layer b, redundant with the build-time whitelist).
+ *
+ * @param buf  the emission buffer
+ * @return     `buf` with the guard appended
+ * @since §16
+ */
+fn cg_emit_global_target_guard(buf: []byte): []byte {
+    var b = cb(buf, "#if !( (defined(__linux__) && (defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__) || defined(__arm64__))) || (defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))) || (defined(_WIN32) && (defined(__x86_64__) || defined(__amd64__))) )\n")
+    b = cb(b, "#error \"unsupported (os,arch)\"\n")
+    cb(b, "#endif\n\n")
+}
+
+/**
+ * cg_fn_guard_cond — the C `#if` condition wrapping a `#os`/`#arch`-guarded runtime fn/extern, or `""`
+ * when the fn is unguarded (`pred_true`) and emitted verbatim. Under the C-monolith backend the prune
+ * keeps every target arm; codegen wraps each so only the matching-target arm compiles.
+ *
+ * @param guard  the function's conditional-compile guard
+ * @return       the `#if` condition text, `""` for an unguarded fn, or an error for a non-target atom
+ * @since §16
+ */
+fn cg_fn_guard_cond(guard: parser::Pred): str | error {
+    if !checker::pred_is_target_guard(guard) { return "" }
+    guard_to_c_cond(guard)
+}
+
+/**
+ * cg_emit_fn_proto_guarded — emit one function's forward-declaration prototype, wrapped in its
+ * `#os`/`#arch` `#if` guard when target-conditional. A `from "teko_rt"` extern is skipped (already
+ * declared in the runtime header).
+ *
+ * @param buf   the emission buffer
+ * @param prog  the codegen program
+ * @param f     the function whose prototype to emit
+ * @return      `buf` with the (guarded) prototype appended, or an error
+ * @since §16
+ */
+fn cg_emit_fn_proto_guarded(buf: []byte, prog: CgProg, f: checker::TFunction): []byte | error {
+    if f.is_extern && f.from_lib == "teko_rt" { return buf }
+    var gc = match cg_fn_guard_cond(f.guard) { str as s => s; error as e => return e }
+    var out = buf
+    if gc.len != 0 { out = cb(cb(cb(out, "#if "), gc), "\n") }
+    out = match emit_function_sig(out, prog, f) { []byte as o => o; error as err => return err }
+    out = cb(out, ";\n")
+    if gc.len != 0 { out = cb(out, "#endif\n") }
+    out
+}
+
+/**
+ * cg_emit_fn_def_guarded — emit one function's DEFINITION, wrapped in its `#os`/`#arch` `#if` guard
+ * when target-conditional. An extern (no body) emits nothing here.
+ *
+ * @param buf   the emission buffer
+ * @param prog  the codegen program
+ * @param f     the function whose body to emit
+ * @param mode  the emission mode
+ * @return      `buf` with the (guarded) definition appended, or an error
+ * @since §16
+ */
+fn cg_emit_fn_def_guarded(buf: []byte, prog: CgProg, f: checker::TFunction, mode: CgMode): []byte | error {
+    if f.is_extern { return buf }
+    var gc = match cg_fn_guard_cond(f.guard) { str as s => s; error as e => return e }
+    var out = buf
+    if gc.len != 0 { out = cb(cb(cb(out, "#if "), gc), "\n") }
+    out = match emit_function_mode(out, prog, f, mode) { []byte as o => o; error as err => return err }
+    if gc.len != 0 { out = cb(out, "#endif\n") }
+    out
 }
 
 /**
@@ -14326,6 +14396,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     b = cb(b, "#pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"\n")
     b = cb(b, "#pragma GCC diagnostic ignored \"-Wimplicit-int\"\n\n")
 
+    b = cg_emit_global_target_guard(b)
     var sc_used = cg_scan_syscall_arities(prog)
     b = cg_emit_syscall_helpers(b, sc_used)
     b = match cg_emit_cond_const_ladder(b, prog) { []byte as o => o; error as err => return err }
@@ -14422,12 +14493,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     loop {
         if pi >= prog.items.len { break }
         match prog.items[pi] {
-            checker::TFunction as f => {
-                if !(f.is_extern && f.from_lib == "teko_rt") {
-                    b = match emit_function_sig(b, prog, f) { []byte as o => o; error as err => return err }
-                    b = cb(b, ";\n")
-                }
-            }
+            checker::TFunction as f => { b = match cg_emit_fn_proto_guarded(b, prog, f) { []byte as o => o; error as err => return err } }
             _ => { }
         }
         pi++
@@ -14448,7 +14514,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
-            checker::TFunction as f => { if !f.is_extern { b = match emit_function_mode(b, prog, f, mode) { []byte as o => o; error as err => return err } } }
+            checker::TFunction as f => { b = match cg_emit_fn_def_guarded(b, prog, f, mode) { []byte as o => o; error as err => return err } }
             parser::TypeDecl => { }   // emitted in the type-decl passes above
             parser::UseDecl => { }   // imports are a no-op at the C level (M0)
             (@TStatement()) as _gb3 => { }   /* a loose Statement → virtual-main, second pass */
