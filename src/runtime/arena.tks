@@ -250,20 +250,99 @@ fn ar_store(address: u64, value: u64) {
     teko::mem::store_u64(address, value)
 }
 
-#if(os == "linux")
 /**
- * Maps `length` bytes of anonymous private read/write memory through the raw `mmap` syscall — the
- * arena's ONLY memory source, replacing `posix_memalign`/`malloc` wholesale. The kernel returns a
- * page-aligned address (so at least 16-aligned, subsuming `TK_ARENA_ALIGN`) or a value in the
- * `[-4095, -1]` `-errno` error band.
+ * os_mmap — libSystem `void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)`,
+ * the macOS memory source for the §16 arena backing store (the FFI-of-the-OS-ABI real
+ * implementation, NOT a raw Darwin syscall: Darwin does not guarantee stable syscall numbers, so
+ * the supported interface is libSystem's C ABI). Every pointer and `size_t` occupies one integer
+ * register, hence `u64`; `int` is `i32`, `off_t` is `i64`, the returned `void*` is `u64`. libSystem
+ * links implicitly (clang's default `-lSystem`).
  *
- * This is the Linux arm: the raw `mmap` syscall numbers (`SYS_MMAP`) and the `PROT_*`/`MAP_*` flag
+ * @param addr   the placement hint (0 lets the kernel choose)
+ * @param len    the mapping size in bytes
+ * @param prot   the page protection (`PROT_READ | PROT_WRITE`)
+ * @param mflags the mapping flags (`MAP_PRIVATE | MAP_ANON`)
+ * @param fd     the backing file descriptor (-1 for anonymous)
+ * @param off    the file offset (0 for anonymous)
+ * @return       the page-aligned base address, or `MAP_FAILED_WORD` (`(void*)-1`) on failure
+ */
+#os("macos")
+extern fn os_mmap(addr: u64, len: u64, prot: i32, mflags: i32, fd: i32, off: i64): u64 = "mmap" from "System"
+
+/**
+ * os_munmap — libSystem `int munmap(void *addr, size_t len)`, releasing a mapping `os_mmap`
+ * returned.
+ *
+ * @param addr  the mapping's base address (page-aligned, as `os_mmap` returned)
+ * @param len   the mapping's length in bytes
+ * @return      0 on success, or -1 on error — discarded by the caller
+ */
+#os("macos")
+extern fn os_munmap(addr: u64, len: u64): i32 = "munmap" from "System"
+
+/**
+ * os_exit — libSystem `void _exit(int status)`, terminating the process WITHOUT running atexit
+ * handlers or flushing stdio, the RAW out-of-memory exit for macOS (the libSystem analogue of
+ * Linux's `exit_group`).
+ *
+ * @param status  the process exit status
+ * @return        nothing (the process terminates)
+ */
+#os("macos")
+extern fn os_exit(status: i32) = "_exit" from "System"
+
+/**
+ * VirtualAlloc — kernel32 `LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot)`,
+ * the Windows memory source for the §16 arena backing store. Reserving and committing anonymous
+ * pages returns a zero-filled base (like `MAP_ANON`) or NULL. Pointers and `SIZE_T` are `u64`;
+ * `DWORD` is `u32`. kernel32 links implicitly on the MinGW toolchain.
+ *
+ * @param addr        the placement hint (0 lets the system choose)
+ * @param size        the region size in bytes
+ * @param alloc_type  the allocation-type flags (`MEM_COMMIT | MEM_RESERVE`)
+ * @param protect     the page protection (`PAGE_READWRITE`)
+ * @return            the zero-filled base address, or 0 (NULL) on failure
+ */
+#os("windows")
+extern fn VirtualAlloc(addr: u64, size: u64, alloc_type: u32, protect: u32): u64 = "VirtualAlloc" from "kernel32"
+
+/**
+ * VirtualFree — kernel32 `BOOL VirtualFree(LPVOID addr, SIZE_T size, DWORD freeType)`, releasing a
+ * whole region `VirtualAlloc` returned. With `MEM_RELEASE` the size MUST be 0 and `addr` MUST be the
+ * region base — which the arena always satisfies, since it frees whole chunks at their base.
+ *
+ * @param addr       the region base address `VirtualAlloc` returned
+ * @param size       the size (0 with `MEM_RELEASE`)
+ * @param free_type  the free-type flags (`MEM_RELEASE`)
+ * @return           non-zero on success, 0 on error — discarded by the caller
+ */
+#os("windows")
+extern fn VirtualFree(addr: u64, size: u64, free_type: u32): i32 = "VirtualFree" from "kernel32"
+
+/**
+ * ExitProcess — kernel32 `void ExitProcess(UINT code)`, terminating the process, the RAW
+ * out-of-memory exit for Windows (the kernel32 analogue of Linux's `exit_group`).
+ *
+ * @param code  the process exit code
+ * @return      nothing (the process terminates)
+ */
+#os("windows")
+extern fn ExitProcess(code: u32) = "ExitProcess" from "kernel32"
+
+/**
+ * Maps `length` bytes of anonymous private read/write memory — the arena's ONLY memory source,
+ * replacing `posix_memalign`/`malloc` wholesale. Returns a page-aligned base (so at least
+ * 16-aligned, subsuming `TK_ARENA_ALIGN`) or 0 when the kernel refuses.
+ *
+ * This is the Linux arm: the raw `mmap` syscall number (`SYS_MMAP`) and the `PROT_*`/`MAP_*` flag
  * values live in `teko::sys` behind `#os("linux")` guards, so the whole `mmap`/`munmap`/`exit_group`
- * trio is `#os`-split — the non-Linux arm below never references a Linux-only `teko::sys` constant.
+ * trio is `#os`-split — the macOS/Windows arms below reach the same memory through the platform
+ * ABI's `mmap`/`VirtualAlloc` instead, never referencing a Linux-only `teko::sys` constant.
  *
  * @param length  the mapping size in bytes; the kernel rounds it up to whole pages
  * @return        the page-aligned base address, or 0 when the kernel refuses
  */
+#os("linux")
 fn ar_mmap(length: u64): u64 {
     var result = teko::sys::syscall6(teko::sys::SYS_MMAP, 0, length to i64,
         teko::sys::PROT_READ | teko::sys::PROT_WRITE,
@@ -273,70 +352,109 @@ fn ar_mmap(length: u64): u64 {
 }
 
 /**
+ * The macOS arm of `ar_mmap`: maps `length` bytes of anonymous private read/write memory through
+ * libSystem's `mmap`. Darwin signals failure with `MAP_FAILED` (`(void*)-1`) rather than the Linux
+ * `-errno` band, so the sentinel comparison is against `MAP_FAILED_WORD`.
+ *
+ * @param length  the mapping size in bytes; the kernel rounds it up to whole pages
+ * @return        the page-aligned base address, or 0 when the kernel refuses
+ */
+#os("macos")
+fn ar_mmap(length: u64): u64 {
+    var r = os_mmap(0, length, teko::sys::PROT_READ | teko::sys::PROT_WRITE,
+        teko::sys::MAP_PRIVATE | teko::sys::MAP_ANON, -1 to i32, 0)
+    if r == teko::sys::MAP_FAILED_WORD { return 0 }
+    r
+}
+
+/**
+ * The Windows arm of `ar_mmap`: reserves and commits `length` bytes of zero-filled read/write
+ * memory through kernel32's `VirtualAlloc`. A NULL (0) return already IS the arena's "no mapping"
+ * contract, so it is returned unchanged.
+ *
+ * @param length  the mapping size in bytes; the system rounds it up to whole pages
+ * @return        the base address, or 0 when the system refuses
+ */
+#os("windows")
+fn ar_mmap(length: u64): u64 {
+    VirtualAlloc(0, length, teko::sys::MEM_COMMIT | teko::sys::MEM_RESERVE, teko::sys::PAGE_READWRITE)
+}
+
+/**
  * Releases a mapping obtained from `ar_mmap` through the raw `munmap` syscall. The kernel rounds the
  * length up to whole pages, so passing the unrounded request length unmaps exactly the pages the
- * matching `ar_mmap` obtained.
+ * matching `ar_mmap` obtained. This is the Linux arm.
  *
  * @param address  the mapping's base address (page-aligned, as `mmap` returned)
  * @param length   the mapping's request length
  * @return         nothing
  */
+#os("linux")
 fn ar_munmap(address: u64, length: u64) {
     _ = teko::sys::syscall2(teko::sys::SYS_MUNMAP, address to i64, length to i64)
 }
 
 /**
+ * The macOS arm of `ar_munmap`: releases a mapping through libSystem's `munmap`, which rounds the
+ * length up to whole pages exactly as the Linux arm does.
+ *
+ * @param address  the mapping's base address (page-aligned, as `os_mmap` returned)
+ * @param length   the mapping's request length
+ * @return         nothing
+ */
+#os("macos")
+fn ar_munmap(address: u64, length: u64) {
+    _ = os_munmap(address, length)
+}
+
+/**
+ * The Windows arm of `ar_munmap`: releases a whole region through kernel32's `VirtualFree` with
+ * `MEM_RELEASE`, which REQUIRES a size of 0 and the region base — the arena always frees whole
+ * chunks at their base, so `length` is ignored here.
+ *
+ * @param address  the region base address `VirtualAlloc` returned
+ * @param length   the mapping's request length (ignored under `MEM_RELEASE`)
+ * @return         nothing
+ */
+#os("windows")
+fn ar_munmap(address: u64, length: u64) {
+    _ = length
+    _ = VirtualFree(address, 0, teko::sys::MEM_RELEASE)
+}
+
+/**
  * Fails an unsatisfiable allocation the RAW way (§1.2): `exit_group` with a static code, never
- * `panic(msg)` — a computed panic string would re-enter the arena it is failing inside.
+ * `panic(msg)` — a computed panic string would re-enter the arena it is failing inside. This is the
+ * Linux arm.
  *
  * @return  nothing (the process terminates)
  */
+#os("linux")
 fn ar_oom() {
     _ = teko::sys::syscall1(teko::sys::SYS_EXIT_GROUP, AR_OOM_CODE)
 }
-#else
-/**
- * Non-Linux arm of `ar_mmap` — a compile-only STUB that always reports "no mapping" (returns 0).
- *
- * The §16 arena's memory source is the RAW `mmap` syscall, which needs the Darwin/Windows syscall
- * NUMBERS plus the target's own register/error convention wired into the codegen syscall intrinsic
- * (macOS: the BSD-class-tagged number and carry-flag error; Windows: the ntdll path) — none of which
- * exists yet, and `teko::sys`'s `SYS_MMAP`/`PROT_*`/`MAP_*` constants are `#os("linux")`-only. This
- * stub exists ONLY so `arena.tks` TYPE-CHECKS on a non-Linux target: the §16 arena is DORMANT (the L2
- * flip is not done), so this arm is never reached at run time. It introduces NO library dependency —
- * the real non-Linux memory source is a later §16 task that reuses the raw-syscall intrinsic.
- *
- * @param length  the requested mapping size in bytes (ignored — the stub maps nothing)
- * @return        0, always ("the kernel refuses" — every allocation degrades to OOM here)
- */
-fn ar_mmap(length: u64): u64 {
-    _ = length
-    0 to u64
-}
 
 /**
- * Non-Linux arm of `ar_munmap` — a compile-only STUB that releases nothing (see `ar_mmap`'s non-Linux
- * arm: the arena is dormant off Linux, so no mapping was ever obtained to release).
+ * The macOS arm of `ar_oom`: terminates the process the RAW way through libSystem's `_exit` with the
+ * static out-of-memory code.
  *
- * @param address  the (never-obtained) mapping base — ignored
- * @param length   the (never-obtained) mapping length — ignored
- * @return         nothing
+ * @return  nothing (the process terminates)
  */
-fn ar_munmap(address: u64, length: u64) {
-    _ = address
-    _ = length
-}
-
-/**
- * Non-Linux arm of `ar_oom` — a compile-only STUB. On Linux this raw-`exit_group`s; off Linux the
- * arena is dormant and never allocates, so this is unreachable. It stays a no-op rather than calling
- * `panic` (which would re-enter the arena) or a Linux-only `teko::sys` syscall constant.
- *
- * @return  nothing
- */
+#os("macos")
 fn ar_oom() {
+    os_exit(AR_OOM_CODE to i32)
 }
-#endif
+
+/**
+ * The Windows arm of `ar_oom`: terminates the process the RAW way through kernel32's `ExitProcess`
+ * with the static out-of-memory code.
+ *
+ * @return  nothing (the process terminates)
+ */
+#os("windows")
+fn ar_oom() {
+    ExitProcess(AR_OOM_CODE to u32)
+}
 
 /**
  * Reads a CONTROL-block field.
