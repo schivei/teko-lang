@@ -35,10 +35,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   já é essa prova. A linguagem é MONÓLITO: a stdlib É o compilador — o self-build a compila E `gen1` a
   EXECUTA em larga escala (o compilador chama `list`/`str`/`map`/`io`/`fs`/`arena`/… ao compilar). A prova
   de "o compilador usa" está no próprio `src/` (se o código chama a função, ela é exercitada).
-  REMOVER `.tkt`/regressões redundantes: compilação de qualquer parte do monólito, e comportamento de toda
-  função que o `src/` chama. MANTER só o que o self-build genuinamente NÃO exercita: genéricos/monomorph
-  (self-build = 0 instâncias), backend native, comportamento de função que o compilador NUNCA chama ao
-  rodar, casos de erro/diagnóstico. Na dúvida, LISTAR para revisão — não remover.
+  Compilar o projeto inteiro (incl. os próprios `.tkt`) já exercita a maior parte da implementação.
+  REMOVER: (a) **testes que validam a COMPILAÇÃO** (strings sintéticas p/ parser/codegen/ast) — são
+  TAUTOLÓGICOS: o compilador nem chegaria a rodá-los se o parser/codegen estivesse quebrado; retóricos,
+  incapazes de dizer nada; (b) comportamento de toda função que o `src/` chama (gen1 a executa). MANTER só
+  o que o self-build genuinamente NÃO exercita: genéricos/monomorph (self-build = 0 instâncias), backend
+  native, comportamento de função que o compilador NUNCA chama ao rodar, casos de erro/diagnóstico.
+  Na dúvida, LISTAR para revisão — não remover.
 
 ## Convenções da linguagem/codebase
 - **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
