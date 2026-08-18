@@ -1,26 +1,6 @@
-// src/checker/scope.tks  (namespace 'teko::checker')
 
 use teko::parser
 
-/**
- * ValBinding — one value binding in the checker environment: a name, its resolved type, whether it
- * is a `mut` local, its declaring namespace (top-level fns/consts only), and whether it names a
- * module-level `const`. The namespace drives namespace-aware CALL resolution (#41); `is_const`
- * distinguishes a `const` reference from an ordinary value so a forward reference resolves in pass-1
- * and the crumb-5 inliner can find it (#594).
- *
- * @param name      the bound identifier
- * @param type      the binding's resolved value type
- * @param is_mut    true iff writes THROUGH this binding are permitted: a `mut` local, or a binding
- *                  of `Reference` type in ANY binder position (a `ref` is mutable by definition —
- *                  owner ruling 2026-07-30). `let`/`const`/plain params/match-binders are false
- *                  (B.21). `define` computes it via `binding_is_writable`
- * @param ns        the declaring namespace of a top-level fn/const; "" for locals/params (#41)
- * @param is_const  true iff this names a module-level `const` (#594 crumb 2)
- * @param vis       the declaring visibility of a top-level `const` — gates a namespace-qualified
- *                  value reference `ns::NAME` across namespaces (`Pub` for locals/params/fns, which
- *                  this arm never visibility-gates) (#594 crumb 8c, issue #613)
- */
 type ValBinding = struct {
     name: str
     type: @Type()
@@ -28,104 +8,15 @@ type ValBinding = struct {
     ns: str
     is_const: bool
     vis: parser::Visibility
-    /**
-     * is_global — the binding was declared `global` (§15): resolvable BARE (unqualified) from ANY
-     * namespace, not only its own or the local scope, mirroring how a core name like `str` resolves.
-     * False for locals and for ordinary namespaced fns/consts (additive-inert), so pre-migration
-     * resolution is byte-identical: the unqualified branch only gains a disjunct that is constantly
-     * false across the current corpus.
-     */
     is_global: bool
 }
 
-// the environment: a FLAT list of bindings PLUS the namespace currently being type-checked, so an
-// UNQUALIFIED call resolves to a same-namespace function rather than a global bare-name collision
-// (#41). Later bindings shadow earlier (lexical); block scoping is implicit. (Mirror of C tk_env.)
-// `owner_type` (W10b.CLASS) — the DECLARING class of the method body CURRENTLY being typed ("" —
-// not inside any class method, e.g. a free function or top-level statement). Set ONLY by
-// type_method, to the class that ORIGINALLY WROTE this body (own method: itself; inherited,
-// not-overridden method: the ancestor that declared it) — NEVER the class it's being re-typed
-// FOR, which may differ (increment 2's per-owning-class re-stamping). Drives `intern`/private
-// member-access enforcement (a field/method is reachable only from its declaring class's own
-// code, or — if `is_intern` — from a subclass's own code too).
-// (#148) TWO-SEGMENT env: `base` holds the SEALED collected globals (every top-level fn/method
-// signature — hundreds of KB), `bindings` the per-scope locals. The checker extends one collected
-// env NON-LINEARLY (every function/arm forks from the same base), and a single flat list made each
-// fork COPY the whole global segment on its first define (measured 1.3 GB / 4.5k copies of ~287 KB
-// on a self-build). Sealing the globals once (seal(), called by the typer between collect and the
-// typing loop) makes a fork copy only its OWN locals — a few dozen entries. Lookups scan bindings
-// innermost-first, THEN base innermost-first (locals shadow globals; global order preserved).
-/** `file` — the source file of the item CURRENTLY being typed, set once per item by
- *  `type_item` (`with_file`), exactly like `cur_ns`/`owner_type` above and for
- *  the same reason: a per-item fact the deep expression typers need without threading a
- *  parameter through every one of them.
- *
- *  WHO NEEDS IT AND WHY IT DID NOT EXIST BEFORE: only a WARNING does. An ERROR is returned
- *  upward and `surface_at` stamps the file on it at item level, where the file is already in
- *  hand — so for the checker's entire error surface this field would be dead weight. A
- *  warning has no return path: `warn_redundant_cast` (D1) prints at the moment of detection
- *  and must name the file ITSELF or emit a bare `451:23:` that cannot distinguish
- *  `typer.tks` from `encode_x86_64.tks`. Any future checker warning inherits the same need.
- *
- *  `""` when unset (the unit tests' `env_empty`), which renders as a position with no file —
- *  degraded but never wrong.
- *
- *  `base_index` (CK1, design docs/design/ck1-scoped-hash-maps-0.3.1.md) — the LATERAL hash index over
- *  `base`. Built ONCE by `seal` over the sealed globals and carried read-only by handle through every
- *  `with_`/`define` fork (those push into `bindings`, never `base`, so the index never goes stale). It
- *  reorders nothing: `base`/`bindings` stay the sole source of every observable iteration; the index
- *  only turns `lookup_binding`'s global scan from a reverse O(n) linear scan into an O(log n + c)
- *  binary search that returns the SAME binding (design section 5). `nidx_empty()` before `seal`, where
- *  a lookup finds nothing and falls through as before. */
-/** `ret_expected` (§4.1) — the RETURN target type of the function/method body CURRENTLY being typed
- *  (`Void` outside any value-returning body, e.g. a `void` function or a top-level statement). Set once
- *  per body by `type_method`/`type_function` from the computed return type, and read at the two tail
- *  positions a `.{ … }` target-typed construction can occupy: a `return .{…}` value and a function's
- *  trailing `.{…}` expression. `.{ … }` never reads it in a non-tail slot (a bare `.{}` in expression
- *  position resolves against `Void` and honestly errors), so it is the same per-body fact as
- *  `owner_type`/`cur_ns`, carried without threading a parameter through every expression typer. */
-/** `explicit` (§11.2 EMISSÃO LIMPA) — the `--explicit` strong-typing gate. When true (the flag was
- *  passed on the build command), the checker REJECTS a `var`/`const` local that omits its type
- *  annotation (`type_binding`) and a provably-redundant widening cast (`explicit_cast_gate`), the two
- *  points where the compiler otherwise INFERS/COERCES silently. Default false — the untouched behaviour,
- *  so a build without the flag is byte-for-byte what it always was. Carried per-item like `cur_ns`, so
- *  no expression typer needs a new parameter; injected once at the program root by
- *  `type_program_with_deps_pre_mono` and cleared for a loop-head preamble (`type_loop`). */
 pub type Env = struct { base_slots: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; file: str; base_index: NameIndex; ret_expected: @Type(); explicit: bool }
 
-/**
- * env_empty — an empty environment: no bindings, no current namespace, not inside any class method,
- * and an empty `base_index` (a lookup finds nothing and falls through to the empty linear segments).
- *
- * @return a fresh empty Env
- */
 pub fn env_empty(): Env { Env { base_slots = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; file = ""; base_index = nidx_empty(); ret_expected = Void { }; explicit = false } }
 
-/**
- * with_explicit — set the `--explicit` strong-typing gate on `env` (§11.2). Called ONCE at the program
- * root by `type_program_with_deps_pre_mono` to inject the parsed flag, and by `type_loop` to CLEAR it
- * for a loop-head preamble (whose desugared bindings are compiler-generated, never a user declaration).
- * Carries every other field unchanged (only `explicit` moves).
- *
- * @param env  the environment to derive from
- * @param on   the gate value (true = reject untyped `var`/`const` locals and redundant widening casts)
- * @return     `env` with `explicit` set to `on`
- * @since §11.2
- */
 pub fn with_explicit(env: Env, on: bool): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = on } }
 
-/**
- * seal — move the accumulated bindings into the immutable `base` segment and build the lateral
- * `base_index` over it. Called ONCE per collected env, at the collect->type boundary (#148); later
- * defines land in the fresh `bindings`, never in `base`. Because `base` is set exactly here and never
- * mutated afterwards, its hash index is built exactly here too and copied read-only by handle through
- * every subsequent `with_*`/`define*` fork — the invariant the CK1 lookup relies on (design §10).
- *
- * @param env  the collected environment whose `bindings` become the sealed globals
- * @return     `env` with `bindings` moved into `base`, a fresh empty `bindings`, and `base_index`
- *             built over `base`
- * @since #148
- */
 pub fn seal(env: Env): Env {
     var b = env.base_slots
     var i: u64 = 0
@@ -133,139 +24,33 @@ pub fn seal(env: Env): Env {
     Env { base_slots = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = nidx_build(nidx_names_of(b)); ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
-/**
- * with_ns — set the namespace currently being type-checked; the typed pass sets it per item (#41).
- * Carries `base_index` unchanged (this fork touches only `cur_ns`, never `base`).
- *
- * @param env  the environment to derive from
- * @param ns   the namespace now being type-checked
- * @return     `env` with `cur_ns` set to `ns`
- * @since #41
- */
 pub fn with_ns(env: Env, ns: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit } }
 
-/**
- * with_file — set the source file of the item about to be typed. The twin of `with_ns`, set
- * from the same place (`type_item`) off the same `parser::Item`, and read only by the checker's
- * WARNING surface, which has no return path to be positioned on (see the `file` field's own
- * note).
- *
- * @param env   the environment to derive from
- * @param file  the item's source file path as the parser recorded it
- * @return      `env` with `file` set
- * @since       0.3.1
- */
 pub fn with_file(env: Env, file: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; file = file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit } }
 
-/**
- * with_owner — set the DECLARING class of the method body about to be typed; "" clears it (used when
- * entering a free function) (W10b.CLASS). Carries `base_index` unchanged (only `owner_type` moves).
- *
- * @param env    the environment to derive from
- * @param owner  the declaring class of the method body, or "" for a free function
- * @return       `env` with `owner_type` set to `owner`
- * @since W10b.CLASS
- */
 pub fn with_owner(env: Env, owner: str): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit } }
 
-/**
- * with_ret_expected — set the RETURN target type of the function/method body about to be typed (§4.1),
- * the twin of `with_owner`/`with_ns`. Read only at the tail positions a `.{ … }` target-typed
- * construction can occupy (a `return .{…}` value and a trailing `.{…}` expression); `Void` means the
- * body returns no value, so a `.{ … }` in it has no target and honestly errors. Carries `base_index`
- * unchanged (only `ret_expected` moves).
- *
- * @param env  the environment to derive from
- * @param t    the body's resolved return type, or `Void` for a value-less body
- * @return     `env` with `ret_expected` set to `t`
- * @since §4.1
- */
 pub fn with_ret_expected(env: Env, t: @Type()): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = t; explicit = env.explicit } }
 
-/**
- * binding_is_writable — the SINGLE decision point for "may this binding be written through?"
- * (owner ruling 2026-07-30). `let`/`mut` is the MUTABILITY axis; `ref` is the IDENTITY axis and is
- * born mutable — by definition a `ref` can only be mutable, so `ref mut` does not exist and every
- * reference binding grants write-through in EVERY binder position. A caller that knows only the
- * declared `mut`-ness therefore ORs in the reference axis HERE instead of at each of the fourteen
- * `define` call sites — which is exactly the defect this replaces: a `ref` PARAMETER was defined
- * with `is_mut = false` (params are immutable — B.21) and every write through it was refused B.21.
- *
- * @param t       the binding's resolved value type
- * @param is_mut  true iff the binder itself declared mutability (`mut`, or the `ref` desugar)
- * @return        true iff writes through this binding are permitted
- * @since         0.3.1
- */
 fn binding_is_writable(t: @Type(), is_mut: bool): bool {
     if is_mut { return true }
     match t { Reference => true; _ => false }
 }
 
-/**
- * define — bind a LOCAL name in `env` (appended; later bindings shadow earlier). Locals carry no
- * namespace (""). `is_mut` states only what the BINDER declared: a `mut` local (and the `ref`
- * desugar) passes true, `let`/`const`/params/match-binders pass false (B.21). The reference axis is
- * added by `binding_is_writable`, so a `ref`-typed binding is writable whichever binder defined it.
- *
- * @param env     the environment to extend
- * @param name    the bound identifier
- * @param t       the binding's resolved value type
- * @param is_mut  true iff the binder declared mutability
- * @return        `env` extended with the new local binding
- */
 pub fn define(env: Env, name: str, t: @Type(), is_mut: bool): Env {
     Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub; is_global = false }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
-/**
- * define_fn — define a TOP-LEVEL FUNCTION binding carrying its declaring namespace (#41). Pushes into
- * the mutable `bindings`; carries `base_index` unchanged (the index covers only the sealed `base`,
- * which `define*` never touches).
- *
- * @param env        the environment to extend
- * @param name       the function's bound identifier
- * @param t          the function's resolved type
- * @param ns         the namespace the function is declared in
- * @param is_global  whether the fn was declared `global` (§15) — bare-reachable from any namespace
- * @return           `env` extended with the function binding
- * @since #41
- */
 pub fn define_fn(env: Env, name: str, t: @Type(), ns: str, is_global: bool): Env {
     Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub; is_global = is_global }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
-/**
- * define_const — bind a module-level `const` name to its resolved type in the pass-1 environment so
- * a forward reference (another const, or a fn body naming a const declared later in the file)
- * resolves before pass-2 types the initializer (#594 crumb 2). Reuses the value-binding path with
- * `is_const = true`, carrying the const's declaring namespace, mirroring `define_fn`.
- *
- * @param env   the pass-1 environment being accumulated
- * @param name  the constant's identifier
- * @param t     the constant's resolved value type
- * @param ns    the namespace the const is declared in
- * @param vis       the const's declaring visibility — gates a cross-namespace `ns::NAME` reference to a
- *                  `private` const (#594 crumb 8c, issue #613)
- * @param is_global whether the const was declared `global` (§15) — bare-reachable from any namespace
- * @return          `env` extended with the const binding
- * @since #594
- */
 pub fn define_const(env: Env, name: str, t: @Type(), ns: str, vis: parser::Visibility, is_global: bool): Env {
     Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis; is_global = is_global }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
-// a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
 fn bind_is_mut(k: parser::BindKind): bool { k == parser::BindKind::Mut }
 
-/**
- * nidx_names_of — extract the ordered names `b[i].name` of a sealed base binding list, the input to
- * `nidx_build`. Position i of the result corresponds to position i of `b`, so a slot's `pos` indexes
- * straight back into `base`.
- *
- * @param b  the sealed base bindings, in their fixed order
- * @return   the names `b[i].name`, in the same order
- * @since 0.3.1
- */
 fn nidx_names_of(b: []ValBinding): []str {
     var names: []str = teko::list::empty()
     var i: u64 = 0
@@ -277,21 +62,6 @@ fn nidx_names_of(b: []ValBinding): []str {
     names
 }
 
-/**
- * lookup_binding — the WHOLE binding (type + mutability) for `name`, innermost-first: the mutable
- * `bindings` are scanned tail-first (locals shadow, small — unchanged), then the SEALED globals are
- * resolved through the hash index `env.base_index` by taking the base entry with the LARGEST position
- * whose name matches. This is byte-identical to the old reverse linear scan over `base` (design §5,
- * "largest position ≡ reverse scan's first match"), but O(log n + c) instead of O(n): binary-search
- * to the bucket of slots sharing the name's hash, walk it, re-test the exact name against real bytes
- * (`env.base[p].name == name`) so a hash collision never returns the wrong record, and keep the
- * maximum matching position.
- *
- * @param env   the type-checking environment
- * @param name  the sought bare name
- * @return      the matching binding, or an "undefined name" error
- * @throws      when no local or global binding is named `name`
- */
 fn lookup_binding(env: Env, name: str): ValBinding | error {
     var i = env.bindings.len
     loop {
@@ -313,24 +83,6 @@ fn lookup_binding(env: Env, name: str): ValBinding | error {
     error { message = $"undefined name: {name}" }
 }
 
-/**
- * lookup_value_in_ns — the value binding named `name` whose declaring namespace satisfies the
- * qualifier `ns`, or an error when none exists. Unlike `lookup_binding` (name-only, tail-first), this
- * filters by BOTH the name AND the namespace — the resolver for a namespace-qualified value spelling
- * `ns::name` (#594 crumb 8c, issue #613). The namespace test is `qualifier_selects_ns` (the SAME
- * ends-with rule `lookup_call` applies to a qualified callee), so the SHORT written qualifier `m1`
- * matches a binding declared in the project-rooted namespace `proj::m1`. The MATCHED binding's FULL
- * namespace (`b.ns`) is what the caller stamps onto `TVar.func_ns` — never the short qualifier — so
- * the c8b `(name, namespace)`-keyed scalar inliner (which keys on the const's OWN full namespace)
- * substitutes a qualified const identically to a bare one. Scans the mutable bindings innermost-first,
- * then the sealed globals (a dep's exported const/fn is a global).
- *
- * @param env   the type-checking environment
- * @param name  the value's bare name (the path's last segment)
- * @param ns    the written qualifier namespace (the path minus its last segment)
- * @return      the matching binding, or an "unknown value: ns::name" error
- * @since #594
- */
 fn lookup_value_in_ns(env: Env, name: str, ns: str): ValBinding | error {
     var i = env.bindings.len
     loop {
@@ -347,12 +99,10 @@ fn lookup_value_in_ns(env: Env, name: str, ns: str): ValBinding | error {
     error { message = $"unknown value: {ns}::{name}" }
 }
 
-// the type of a name — the common case; a thin wrapper so existing callers are unchanged.
 fn lookup(env: Env, name: str): @Type() | error {
     match lookup_binding(env, name) { ValBinding as b => b.type; error as e => e }
 }
 
-// (#41) the LAST `::`-segment of a namespace ("teko::lexer" -> "lexer").
 fn ns_last_seg(ns: str): str {
     var cut: u64 = 0
     var i: u64 = 0
@@ -364,64 +114,15 @@ fn ns_last_seg(ns: str): str {
     slice(ns, cut, ns.len)
 }
 
-/**
- * Does the binding namespace `b_ns` satisfy the QUALIFIER of a qualified call callee? The qualifier
- * is every segment of `callee` before the last (the called name), joined with `::`. A binding
- * matches when its namespace equals that FULL qualifier, or ends with `::<qualifier>` — the same
- * R0-R5 rule `qualifier_selects_ns` already applies to type references. Keying off the FULL
- * qualifier (not merely its last segment) disambiguates two same-bare classes across namespaces:
- * a class method's ns is `owner::…::Class` (collect's `method_ns` convention), and the method
- * dispatch callee carries `[..owner.., Class, method]` (#290, #109-family). A plain `ns::fn` call
- * is unaffected — its qualifier is the target namespace, matched exactly as before.
- *
- * @param b_ns    the candidate binding's declaring namespace (never empty at the call site)
- * @param callee  the qualified call callee (`callee.segments.len > 1`)
- * @return        true iff `b_ns` equals or ends-with the callee's full `::`-joined qualifier
- * @since onda-3 (#290)
- */
 fn ns_matches_call_qualifier(b_ns: str, callee: parser::Path): bool {
     qualifier_selects_ns(b_ns, path_qualifier(callee, callee.segments.len - 1))
 }
 
-/**
- * Does binding `b` resolve the call `callee` in env `env`? An UNQUALIFIED callee (`ns`-less) binds a
- * LOCAL (ns empty) or a function in the CURRENT namespace; a QUALIFIED callee binds a function whose
- * namespace satisfies the callee's full qualifier (`ns_matches_call_qualifier`). Shared by
- * `lookup_call` and `call_ns` so both scans apply one identical rule.
- *
- * A `global` binding (§15) is reachable BARE from any namespace, so the unqualified branch accepts it
- * in addition to a local (ns empty) and a same-namespace function. The qualified branch is unchanged —
- * a `global` fn stays reachable by its full path too (global is additive, not exclusive).
- *
- * @param b         a candidate value binding (already known to share the callee's last-segment name)
- * @param callee    the call callee path
- * @param cur_ns    the calling namespace (for the unqualified same-namespace case)
- * @param qualified whether the callee carries a qualifier (`callee.segments.len > 1`)
- * @return          true iff `b` is the call's resolved target under the namespace rules
- * @since onda-3 (#290)
- */
 fn call_binding_matches(b: ValBinding, callee: parser::Path, cur_ns: str, qualified: bool): bool {
     if !qualified { return b.ns.len == 0 || b.ns == cur_ns || b.is_global }
     b.ns.len != 0 && ns_matches_call_qualifier(b.ns, callee)
 }
 
-/**
- * call_base_pos — the position in the SEALED globals of the call `callee` names, resolved through the
- * hash index `env.base_index`: the LARGEST base position whose name matches the callee's last segment
- * AND that `call_binding_matches` accepts, or -1 when none. Byte-identical to a reverse linear scan of
- * `env.base` returning the first (highest-position) accepted match (design §5, "largest position ≡
- * reverse scan's first match"), but O(log n + c): binary-search to the bucket of slots sharing the
- * name's hash, walk it, re-test the exact name against real bytes so a hash collision never wins, and
- * apply the SAME `call_binding_matches` predicate the linear scan applied. Shared by `lookup_call`
- * (reads the winner's type) and `call_ns` (reads its namespace) so both resolve identically.
- *
- * @param env        the typing environment (sealed globals + current namespace)
- * @param callee     the call callee path
- * @param name       the callee's last segment (the called name)
- * @param qualified  whether the callee carries a qualifier (`callee.segments.len > 1`)
- * @return           the winning base position, or -1 when no global binding resolves the callee
- * @since 0.3.1
- */
 fn call_base_pos(env: Env, callee: parser::Path, name: str, qualified: bool): i64 {
     var h = teko::runtime::str_hash(name)
     var best: i64 = -1
@@ -437,18 +138,6 @@ fn call_base_pos(env: Env, callee: parser::Path, name: str, qualified: bool): i6
     best
 }
 
-/**
- * (#41) NAMESPACE-AWARE call resolution (mirror of C `tk_env_lookup_call`): the type of the function
- * or value the callee names. An UNQUALIFIED `name` binds a LOCAL (empty ns) or a function in the
- * CURRENT namespace; a QUALIFIED `q::…::name` binds a function whose namespace satisfies the callee's
- * full qualifier (`call_binding_matches`). Scans innermost bindings first (locals shadow), then the
- * sealed globals through the hash index (`call_base_pos`) under the same rule.
- *
- * @param env     the typing environment (local bindings + sealed globals + current namespace)
- * @param callee  the call callee path
- * @return        the resolved target's type
- * @throws        when no binding resolves the callee (`undefined name`)
- */
 fn lookup_call(env: Env, callee: parser::Path): @Type() | error {
     var name = callee.segments[callee.segments.len - 1].name
     var qualified = callee.segments.len > 1
@@ -464,16 +153,6 @@ fn lookup_call(env: Env, callee: parser::Path): @Type() | error {
     error { message = $"undefined name: {name}" }
 }
 
-/**
- * (#49) the resolved target's declaring NAMESPACE for a call — the same resolution as `lookup_call`
- * but returning the winning binding's namespace. Codegen mangles a user call by this namespace; an
- * empty string means a LOCAL (empty ns), an unresolved callee, or a builtin (use the call-map / bare
- * name).
- *
- * @param env     the typing environment
- * @param callee  the call callee path
- * @return        the resolved target's namespace, or "" for a local/builtin/unresolved callee
- */
 fn call_ns(env: Env, callee: parser::Path): str {
     var name = callee.segments[callee.segments.len - 1].name
     var qualified = callee.segments.len > 1
@@ -489,33 +168,10 @@ fn call_ns(env: Env, callee: parser::Path): str {
     ""
 }
 
-/**
- * binding_is_func — is `b` bound to a FUNCTION type? The overload machinery counts only function
- * bindings, never a value/const of some unrelated type that happens to share a name.
- *
- * @param b  the value binding to classify
- * @return   true iff `b.type` is the `Func` variant
- * @since §9 A
- */
 fn binding_is_func(b: ValBinding): bool {
     match b.type { Func => true; _ => false }
 }
 
-/**
- * lookup_call_candidates — EVERY value binding that resolves the callee `callee` under the same
- * namespace rules as `lookup_call` (`call_binding_matches`): the sealed globals first (ascending base
- * position, resolved through the hash index), then the per-scope locals (ascending declaration index).
- * `lookup_call` returns only the highest-position match — correct for a single declaration but hiding
- * an overload SET; this returns the whole set so `select_overload` can pick by argument types.
- *
- * A single-declaration name yields a one-element list, on which the caller never runs scoring — the
- * non-overloaded path stays byte-identical (ruling 6 / fixpoint).
- *
- * @param env     the typing environment (local bindings + sealed globals + current namespace)
- * @param callee  the call callee path
- * @return        every resolving binding, base-then-local order; empty when the callee is unbound
- * @since §9 A
- */
 pub fn lookup_call_candidates(env: Env, callee: parser::Path): []ValBinding {
     var name = callee.segments[callee.segments.len - 1].name
     var qualified = callee.segments.len > 1
@@ -540,18 +196,6 @@ pub fn lookup_call_candidates(env: Env, callee: parser::Path): []ValBinding {
     out
 }
 
-/**
- * call_has_global_overload — does the bare call `callee` have MORE THAN ONE resolving candidate, at
- * least one of which is a `global` binding (§15)? This is the gate that routes a cross-namespace global
- * overload through `select_overload`, which the per-namespace `env_is_overloaded` gate cannot see (two
- * `global` fns of the same bare name live in DIFFERENT namespaces, so neither namespace is an overload
- * set on its own). INERT on the current corpus: no binding is `global`, so the `is_global` conjunct is
- * constantly false and this returns false for every call — byte-identical.
- *
- * @param env     the typing environment
- * @param callee  the call callee path
- * @return        true iff the candidate set has 2+ members and at least one was declared `global`
- */
 pub fn call_has_global_overload(env: Env, callee: parser::Path): bool {
     var cands = lookup_call_candidates(env, callee)
     if cands.len < 2 { return false }
@@ -564,20 +208,6 @@ pub fn call_has_global_overload(env: Env, callee: parser::Path): bool {
     false
 }
 
-/**
- * overload_func_bindings — every SEALED-GLOBAL function binding sharing EXACTLY `(ns, name)`: the
- * declared members of a candidate overload set (§9 A). Resolved through the hash index like
- * `call_base_pos`, keeping only non-const `Func` bindings whose declaring namespace equals `ns`
- * EXACTLY — never a same-name function in a DIFFERENT namespace (`teko::numeric::dec::div` vs
- * `teko::numeric::bigint::div`), which already mangles to a distinct symbol and must stay untouched
- * (§5 fixpoint safety).
- *
- * @param env   the SEALED typing environment
- * @param ns    the exact declaring namespace to match
- * @param name  the exact bare name to match
- * @return      the matching global function bindings, in ascending base position
- * @since §9 A
- */
 pub fn overload_func_bindings(env: Env, ns: str, name: str): []ValBinding {
     var h = teko::runtime::str_hash(name)
     var out: []ValBinding = teko::list::empty()
@@ -593,55 +223,12 @@ pub fn overload_func_bindings(env: Env, ns: str, name: str): []ValBinding {
     out
 }
 
-/**
- * env_is_overloaded — is `(ns, name)` a declared FUNCTION OVERLOAD SET: two or more non-const `Func`
- * bindings sharing exactly this declaring namespace AND bare name in the sealed globals? The GATE for
- * symbol suffixing (§4): false ⇒ the sole declaration keeps its historic unsuffixed symbol (ruling 6,
- * fixpoint-safe); true ⇒ every member of the set carries a signature suffix.
- *
- * Keyed on `(ns, name)` — never the bare name alone: two same-named functions in DIFFERENT namespaces
- * are NOT an overload set, mangle to distinct symbols already, and must stay untouched (§5). For
- * methods the `ns` is `collect`'s method pseudo-namespace `<owner-ns>::<Class>`, so two overloads of
- * one class method form a set uniformly with free functions.
- *
- * @param env   the SEALED typing environment
- * @param ns    the function's declaring namespace
- * @param name  the function's bare name
- * @return      true iff two or more function declarations share this exact `(ns, name)`
- * @since §9 A
- */
 pub fn env_is_overloaded(env: Env, ns: str, name: str): bool {
     overload_func_bindings(env, ns, name).len >= 2
 }
 
-/**
- * NotBuiltinType — the marker `builtin_type` returns for a name that is simply not a built-in: a
- * STRUCTURED "keep looking" answer, distinct from the `error` arm, which is reserved for a name
- * that IS reserved and rejected (the removed `i64`/`u64`/`f32`).
- *
- * It replaces a sentinel `error { message = "not a built-in type" }` whose only reader compared the
- * MESSAGE TEXT, from another file (`resolve.resolve_named`). Message equality as identity breaks
- * the moment anyone rewords a diagnostic — a refactor that is supposed to be safe — and the failure
- * is silent: the resolver would start propagating "not a built-in type" as a user-facing error
- * instead of falling through to the user-type rules.
- */
 type NotBuiltinType = struct { }
 
-/**
- * builtin_type — resolve an INJECTED built-in type name to its `Type` (B.19). User types
- * (struct/enum/variant) resolve against the collected registry (Etapa 3), not here.
- *
- * `i64`/`u64`/`f32` are explicit HONEST-STOP arms (drop-128, 2026-07-24): the language's widest
- * integer is 64-bit and its floats are f32/f64, so these three names never resolve to a `Prim` —
- * they name the removed 128-bit family / half-precision float and point the caller at the
- * surviving escape hatch (`teko::numeric::bigint::BigInt` / `Decimal` / `f32`) instead of being
- * reported as merely unknown.
- *
- * @param name  the surface type name to resolve
- * @return      the resolved `Type`, or `NotBuiltinType` when the name is not a built-in at all
- * @throws      when `name` is `i64`/`u64`/`f32` — removed, and rejected by NAME so the message
- *              can point at the replacement
- */
 fn builtin_type(name: str): @Type() | NotBuiltinType | error {
     if name == "u8" { return Prim { kind = PrimKind::U8 } }
     if name == "u16" { return Prim { kind = PrimKind::U16 } }
@@ -651,42 +238,23 @@ fn builtin_type(name: str): @Type() | NotBuiltinType | error {
     if name == "i16" { return Prim { kind = PrimKind::I16 } }
     if name == "i32" { return Prim { kind = PrimKind::I32 } }
     if name == "i64" { return Prim { kind = PrimKind::I64 } }
-    if name == "f32" { return Prim { kind = PrimKind::F32 } }   // native floats (B.38)
-    if name == "f64" { return Prim { kind = PrimKind::F64 } }   // native floats (B.38)
+    if name == "f32" { return Prim { kind = PrimKind::F32 } }
+    if name == "f64" { return Prim { kind = PrimKind::F64 } }
     if name == "bool" { return Prim { kind = PrimKind::Bool } }
-    if name == "size" { return Prim { kind = PrimKind::Size } }   // (§8) signed machine word (`size` ≡ `i64` on 64-bit)
-    if name == "usize" { return Prim { kind = PrimKind::Usize } }   // (§8) unsigned machine word (`usize` ≡ `u64` on 64-bit); DISTINCT from `uptr`
+    if name == "size" { return Prim { kind = PrimKind::Size } }
+    if name == "usize" { return Prim { kind = PrimKind::Usize } }
     if name == "byte" { return Byte { } }
-    if name == "char" { return Char { } }   // a UTF-8 codepoint (1–4 bytes) — distinct from byte / []byte
+    if name == "char" { return Char { } }
     if name == "str" { return Str { } }
     if name == "bigint" { return Named { name = "teko::numeric::bigint::BigInt" } }
     if name == "dec" { return Named { name = "teko::numeric::dec::Decimal" } }
     if name == "error" { return Error { } }
-    if name == "()" { return Void { } }   // (0.3.1 §2) internal unit-return sentinel for `action`/no-return `func` delegate types — UNSPELLABLE from source; the surface `void` type name was retired (falls through to the ordinary unknown-type error)
-    if name == "ptr" { return Ptr { inner = null } }   // (C7.1a) opaque FFI pointer (transport-only)
-    if name == "uptr" { return Uptr { } }   // (C7.1a) opaque word-size unsigned (transport-only)
+    if name == "()" { return Void { } }
+    if name == "ptr" { return Ptr { inner = null } }
+    if name == "uptr" { return Uptr { } }
     NotBuiltinType { }
 }
 
-/**
- * C7.19 (#169 D0) — the ratified `Buf` transport's signature: `buf_ptr(len: u64): ptr`. Bump-
- * allocates `len` bytes from the currently open arena region (S1) and hands back the raw address as
- * the opaque atomic `ptr` (§5); a raw `extern` (libc/OS) writes through that pointer, and Teko
- * re-reads the written bytes by length via `bytes_from_ptr`. The region stays opaque to Teko until
- * that read-back, so no index-assignment is ever needed — the `[]byte`-param sugar is a future,
- * separate addition.
- */
-/**
- * tempty — an EMPTY `[]@Type()` whose element type is fixed to `@Type()` at the call, unlike the bare
- * sentinel `teko::list::empty()` (`[]Void`) which takes the FIRST pushed item's concrete type. Seeding a
- * signature's parameter list with this makes `teko::list::push(tempty(), Prim{…})` infer `[]@Type()` and
- * ADOPT (box) each concrete member into the union at the push — the boxing the C twin requires. Without
- * it, `push(empty(), Prim{…})` infers `[]Prim` and, used inline as a `Func.params` (a struct-literal
- * field or a call argument — neither re-boxes a widened slice, unlike an annotated `var` binding), reaches
- * codegen as a raw `[]Prim` assigned to a `[]@Type()` slot (§9.D Type retirement).
- *
- * @return  an empty parameter list typed `[]@Type()`
- */
 fn tempty(): []@Type() { teko::list::empty() }
 
 fn buf_ptr_signature(): @Type() {
@@ -694,47 +262,17 @@ fn buf_ptr_signature(): @Type() {
     Func { params = len_param; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = len_param.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * as_cstr_signature — `teko::mem::as_cstr(s: str): ptr` (c-types-and-marshalling-0.3.1.md §7.3/§9.5,
- * crumb C3+C7): a fresh NUL-terminated copy of `s`'s bytes, bump-allocated into the ENCLOSING region
- * and returned as the opaque atomic `ptr` (§5 — no `ptr<byte>` remains). Its storage is bulk-freed
- * with the enclosing region rather than leaked on the process heap.
- *
- * @param str_t  the resolved `str` type (the sole parameter)
- * @return       the fixed `(str): ptr` signature
- */
 fn as_cstr_signature(str_t: @Type()): @Type() {
     var p: []@Type() = teko::list::push(tempty(), str_t)
     Func { params = p; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = p.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * str_from_c_signature — `teko::mem::str_from_c(p: ptr, max: u64): str`
- * (c-types-and-marshalling-0.3.1.md §6, crumb C2): the BOUNDED inbound C-string scan replacing the
- * unbounded `str_from_cstr`. TOTAL — `p` null or `max == 0` yield the empty `str`; a NUL at octet
- * `i < max` yields the first `i` octets; no NUL in `[0, max)` yields exactly `max` octets (truncation,
- * not a panic). The pointer parameter is the opaque atomic `ptr` (§5).
- *
- * @param str_t  the resolved `str` type (the return type)
- * @return       the fixed `(ptr, u64): str` signature
- */
 fn str_from_c_signature(str_t: @Type()): @Type() {
     var sfc: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
     sfc = teko::list::push(sfc, Prim { kind = PrimKind::U64 })
     Func { params = sfc; ret = str_t; variadic = false; param_names = []; n_required = sfc.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * region_buf_signature — `teko::mem::region_buf(region: uptr, len: u64, init: str): ptr`
- * (c-types-and-marshalling-0.3.1.md §7.3, crumb C5): the NAMED-region twin of `buf_ptr`. Bump-
- * allocates `len` contiguous octets INTO the caller-chosen region, copies at most `len` octets of
- * `init` to the front, and writes a NUL terminator at the first octet `init` did not fill (or at the
- * final octet when `init` fills the whole span) — the tier-2 `c_string_in_arena` allocation `buf_ptr`'s
- * enclosing-region form cannot provide. Returns the opaque atomic `ptr` (§5).
- *
- * @param str_t  the resolved `str` type (the `init` parameter)
- * @return       the fixed `(uptr, u64, str): ptr` signature
- */
 fn region_buf_signature(str_t: @Type()): @Type() {
     var rb: []@Type() = teko::list::push(tempty(), Uptr { })
     rb = teko::list::push(rb, Prim { kind = PrimKind::U64 })
@@ -742,101 +280,39 @@ fn region_buf_signature(str_t: @Type()): @Type() {
     Func { params = rb; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = rb.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * load_u64_signature — `teko::mem::load_u64(addr: u64): u64`'s signature (P1,
- * `docs/design/arena-em-teko.md` §2): read ONE 64-bit word at a caller-computed address, with NO
- * allocation. The no-allocation property is the whole point — `bytes_from_ptr` also reads raw
- * memory but ALLOCATES its `[]byte` result, which is exactly the circularity that blocked
- * `src/runtime/teko_rt.tks`'s own arena bookkeeping. UNSAFE BY CONTRACT, in the same sense as
- * `bytes_from_ptr`/`as_cstr` (`capability_audit.md` §4): the checker cannot prove `addr` names
- * live, aligned, in-bounds memory.
- *
- * @return  the fixed `(u64): u64` signature
- */
 fn load_u64_signature(): @Type() {
     var addr_param: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::U64 })
     Func { params = addr_param; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = addr_param.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * store_u64_signature — `teko::mem::store_u64(addr: u64, v: u64)`'s signature: P1's raw
- * memory-WRITE twin of `load_u64_signature`, same no-allocation / UNSAFE-BY-CONTRACT contract.
- *
- * @return  the fixed `(u64, u64)` signature
- */
 fn store_u64_signature(): @Type() {
     var params: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::U64 })
     params = teko::list::push(params, Prim { kind = PrimKind::U64 })
     Func { params = params; ret = Void { }; variadic = false; param_names = []; n_required = params.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * Build a `str | error` result type (`tk_ffi_sres`-shaped), the union returned by the
- * value-or-error host primitives `teko::env::var` / `teko::env::cwd` / `teko::io::read_file`.
- *
- * @return  a two-member `Variant { str, error }`
- */
 fn host_str_or_error(): @Type() {
     var m: []@Type() = teko::list::push(tempty(), Str { })
     m = teko::list::push(m, Error { })
     Variant { members = m }
 }
 
-/**
- * Build the `[]str | error` result type (`tk_ffi_slres`-shaped) returned by `teko::fs::list_dir`.
- *
- * @return  a two-member `Variant { []str, error }`
- */
 fn host_strslice_or_error(): @Type() {
     var m: []@Type() = teko::list::push(tempty(), Slice { element = Str { } })
     m = teko::list::push(m, Error { })
     Variant { members = m }
 }
 
-/**
- * host_error_optional — the effect-or-error result type (`tk_ffi_ures`-shaped) returned by the
- * host primitives `teko::env::set_var` / `teko::env::chdir` / `teko::io::write_file` /
- * `teko::io::write_file_bytes` / `teko::fs::mkdir` / `teko::fs::remove_file`. Now the
- * canonical union `null | error` (`Variant{Null,Error}`), matching the discovered extern
- * declarations (`env.tks`, `fs.tks`, `io.tks`) EXACTLY, so the checked type of a
- * fallback-resolved host call is identical to the extern-resolved one.
- *
- * @return  a two-member `Variant { Null, error }` (null = success, error = failure)
- * @since 0.3.1
- */
 fn host_error_optional(): @Type() {
     var m: []@Type() = teko::list::push(tempty(), Null { })
     m = teko::list::push(m, Error { })
     Variant { members = m }
 }
 
-/**
- * Build a fixed `Func` type from an explicit parameter list and return type — the shared
- * constructor for every host-surface signature (all are non-generic, non-variadic, and require
- * exactly their listed parameters).
- *
- * @param params  the ordered parameter types
- * @param ret     the return type
- * @return        the corresponding `Func`
- */
 fn host_func(params: []@Type(), ret: @Type()): @Type() {
     Func { params = params; ret = ret; variadic = false; param_names = []; n_required = params.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * Resolve a teko HOST-STDLIB surface name (`teko::env` / `teko::io` / `teko::fs` /
- * `teko::process`) to its C-native `Func` type, mirroring the `extern fn` declarations in
- * src/env/env.tks, src/io/io.tks, src/fs/fs.tks and src/process/process.tks EXACTLY so the call's
- * checked type matches the fixed-ABI lift `emit_host_ffi` builds from it. This makes the host
- * surface resolvable for ANY standalone user project. The compiler's own project keeps binding
- * these through its discovered extern declarations (which win in `lookup_call` BEFORE this
- * fallback fires), so the path is consulted only for a user program with no local declaration —
- * additive, and byte-transparent for the compiler's own emission.
- *
- * @param name  the last path segment of the call (e.g. "args", "read_file", "list_dir", "run")
- * @return      the host primitive's `Func` type, or `error` when `name` is no host surface
- * @throws      "not a host surface function" when the name matches no host primitive
- */
 fn host_surface_fn(name: str): @Type() | error {
     var str_t: @Type() = Str { }
     var bytes_t = Slice { element = Byte { } }
@@ -858,70 +334,27 @@ fn host_surface_fn(name: str): @Type() | error {
     error { message = "not a host surface function" }
 }
 
-/**
- * assert_void_sig — the `Func` type of an assertion: `params` in, nothing out. EVERY `teko::assert`
- * entry has this shape, because an assertion's only outputs are "returned" and "panicked" (M.1), so
- * the shape is written once here instead of once per name.
- *
- * @param params  the assertion's parameter types, in signature order
- * @return        the `Func` type the typer injects for it
- */
 fn assert_void_sig(params: []@Type()): @Type() {
     Func { params = params; ret = Void { }; variadic = false; param_names = []; n_required = params.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * assert_one_sig — the `Func` type of a single-operand assertion (`is_true`, `scenario_begin`).
- *
- * @param t  the operand's type
- * @return   the `Func` type for `(t)`
- */
 fn assert_one_sig(t: @Type()): @Type() {
     var p: []@Type() = teko::list::push(tempty(), t)
     assert_void_sig(p)
 }
 
-/**
- * assert_pair_sig — the `Func` type of a two-operand assertion over ONE type (`eq_i64`, `eq_str`, …).
- *
- * @param t  the type both operands carry
- * @return   the `Func` type for `(t, t)`
- */
 fn assert_pair_sig(t: @Type()): @Type() {
     var p: []@Type() = teko::list::push(tempty(), t)
     p = teko::list::push(p, t)
     assert_void_sig(p)
 }
 
-/**
- * assert_named_flag_sig — the `Func` type of a `(str, bool)` assertion: a NAME plus the bool
- * the caller's own `match` produced.
- *
- * The shape exists because narrowing lives at the MATCH, not in a callee: a non-generic seed cannot
- * take a `T | null` and ask whether it is null, but the caller already knows — so the caller passes
- * the answer and the member's NAME, and the failure message can then say which union it was about.
- * That is what makes null-union presence and error-union outcome assertable with no generics.
- *
- * @return the `Func` type for `(str, bool)`
- */
 fn assert_named_flag_sig(): @Type() {
     var p: []@Type() = teko::list::push(tempty(), Str { })
     p = teko::list::push(p, Prim { kind = PrimKind::Bool })
     assert_void_sig(p)
 }
 
-/**
- * assert_builtin_fn — the injected signature of a `teko::assert::<name>` assertion, or `null` when
- * `name` is not one.
- *
- * THIS IS THE ONE PLACE THE FAMILY IS ENUMERATED. Before this, the same list of names was written
- * three times (here, `lir::lower`'s `assert_seed_symbol`, `codegen`'s `cg_assert_c_symbol`), so a new
- * assertion that reached only two of the three type-checked and then failed to link. The other two
- * now ask `assert_builtin_name`, which asks this, so adding an assertion touches ONE list.
- *
- * @param name  the last path segment of the call being resolved
- * @return      the assertion's `Func` type, or `null` when `name` names no assertion
- */
 fn assert_builtin_fn(name: str): @Type() | null {
     var str_t: @Type() = Str { }
     var bool_t = Prim { kind = PrimKind::Bool }
@@ -947,30 +380,10 @@ fn assert_builtin_fn(name: str): @Type() | null {
     null
 }
 
-/**
- * assert_builtin_name — whether `last` names a `teko::assert` assertion, i.e. whether a
- * `teko::assert::<last>` call lowers to the `teko__assert__<last>` seed symbol.
- *
- * Both backends' assert lowering (`lir::lower::assert_seed_symbol`, `codegen::cg_assert_c_symbol`)
- * ask THIS, so the name a caller may type and the symbol the backends emit can never drift apart.
- *
- * @param last  the last path segment of a `teko::…::assert::<last>` call
- * @return      true iff it names an injected assertion
- */
 pub fn assert_builtin_name(last: str): bool {
     match assert_builtin_fn(last) { (@Type()) as _gt4 => true; null => false }
 }
 
-/**
- * type_is_fat_by_value — does a parameter of type `t` cross the C boundary as a by-value 16-byte
- * `{ptr, len}` aggregate (`tk_str` in the seed headers)? True for `str` and for every `[]T` slice
- * (`src/assert/assert.h` spells `bytes_eq`'s two `[]byte` parameters `tk_str` for exactly that
- * reason — the two carry the SAME layout); false for every scalar, which travels in one register on
- * every ABI.
- *
- * @param Type t  the parameter's checked type
- * @return bool  true iff the parameter is a 16-byte by-value aggregate at the C boundary
- */
 fn type_is_fat_by_value(t: @Type()): bool {
     match t {
         Str => true
@@ -979,18 +392,6 @@ fn type_is_fat_by_value(t: @Type()): bool {
     }
 }
 
-/**
- * count_leading_fat_params — how many LEADING parameters of a `Func` signature are by-value 16-byte
- * aggregates, stopping at the first one that is not.
- *
- * LEADING, and not a total, because that is the shape the by-reference re-materialization can
- * express: an ABI that carries no 16-byte aggregate in a register passes each of those parameters as
- * an address in its own argument slot, and every argument AFTER them shifts down by one slot per
- * collapsed pair. No assertion in the family interleaves a fat parameter after a scalar one.
- *
- * @param Func f  the signature to measure
- * @return u64  the count of leading by-value fat parameters
- */
 fn count_leading_fat_params(f: Func): u64 {
     var n: u64 = 0
     loop {
@@ -1001,44 +402,12 @@ fn count_leading_fat_params(f: Func): u64 {
     n
 }
 
-/**
- * assert_fat_arg_arity — how many LEADING by-value `tk_str`-shaped parameters the `teko__assert__`
- * seed entry for `last` declares, DERIVED from the one signature table above rather than re-listed.
- *
- * WHY THE BACKENDS NEED IT. `src/assert/assert.c` is the SECOND hand-written C seed of this
- * repository (`src/runtime/teko_rt.c` is the first), and its entries take `tk_str` BY VALUE exactly
- * as the runtime's `tk_print` family does. On an ABI that carries a 16-byte aggregate in registers
- * (SysV/AAPCS64/LP64D) the flat `(ptr, len)` pair the target-neutral LIR emits IS the C ABI, so
- * nothing is needed. On Win64 it is not: a 16-byte aggregate travels BY REFERENCE, so a flat pair
- * makes the MSVC-built callee read the STRING'S OWN first sixteen bytes as `{ptr; len}`.
- *
- * MEASURED, 2026-07-30: `teko::assert::scenario_begin(name)` is the first thing
- * `examples/regressions/own_native`'s `scenario()` harness does, so the corpus faulted with
- * ACCESS_VIOLATION (0xC0000005) on its FIRST case, `own_arith_exit`, without writing a byte — with
- * RSI holding 0x746972615f6e776f, the bytes "own_arit" of the case's own name used as a pointer.
- * The earlier by-reference work swept `teko_rt.h` and stopped there; this seed has the same shape
- * and was not swept.
- *
- * @param str last  the assertion's bare name (the `teko__assert__` symbol's suffix)
- * @return u64  the count of leading by-value fat parameters (0 when `last` names no assertion)
- */
 pub fn assert_fat_arg_arity(last: str): u64 {
     var none: u64 = 0 to u64
     var t = match assert_builtin_fn(last) { (@Type()) as x => x; null => return none }
     match t { Func as f => count_leading_fat_params(f); _ => none }
 }
 
-/**
- * syscallN_signature — build the fixed `Func` signature for a `teko::sys::syscallN` raw-syscall
- * builtin (§16): `nr` plus `arity` register arguments, every parameter AND the return `i64` — the
- * machine word every syscall argument/result register is, agnostic to the caller's Teko type (§16
- * §1.1). Shared by the seven `syscall0..syscall6` `builtin_fn` arms so the fixed-arity family is
- * built from one place instead of seven hand-repeated literals.
- *
- * @param arity  the syscall's register-argument count (0..6, the Linux ceiling)
- * @return       `Func { params = i64 x (arity + 1); ret = i64; ... }`
- * @since §16
- */
 fn syscallN_signature(arity: u64): @Type() {
     var i64_t: @Type() = Prim { kind = PrimKind::I64 }
     var ps: []@Type() = teko::list::push(tempty(), i64_t)
@@ -1051,18 +420,6 @@ fn syscallN_signature(arity: u64): @Type() {
     Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * thread_clone_signature — the fixed `Func` type of the §10 raw thread-spawn intrinsic
- * `teko::sys::thread_clone(entry, stack_top, arg, ctid_addr, flags): i64` (plano §3.2). Five `i64`
- * words in, one `i64` out (the raw-syscall convention: the parent's return is the child tid, or
- * `-errno`). Registered here beside the `syscall0..6` family because, like them, it is a compiler
- * builtin lowered to a bespoke inline-asm helper (`tk_thread_clone`, plano §3.3) rather than a
- * declared `.tks` function — `clone`'s child branch returns on a fresh stack and cannot flow through
- * the generic `tk_syscallN` helper.
- *
- * @return  `Func { params = i64 x 5; ret = i64; ... }`
- * @since §10-native
- */
 fn thread_clone_signature(): @Type() {
     var i64_t: @Type() = Prim { kind = PrimKind::I64 }
     var ps: []@Type() = teko::list::push(tempty(), i64_t)
@@ -1075,21 +432,6 @@ fn thread_clone_signature(): @Type() {
     Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * atomic_rmw_signature — the fixed `Func` type of a §10 atomic read-modify-write intrinsic
- * (`teko::sys::atomic_cas_u32`/`atomic_xchg_u32`/`atomic_load_u32`/`atomic_add_u32`, plano §6.2 / R5):
- * `nargs` `i64` words in, one `i64` out (the machine-word raw convention the `syscallN` family also
- * uses — every argument is an address or a 32-bit value carried in an `i64`, and the result is the
- * word the operation observed). These are the atomic primitives the futex mutex and sequence condvar
- * are built on: without a real compare-and-swap the 0->1 lock transition would race a plain
- * load+store. Registered beside the `syscall*`/`thread_clone` family because, like them, each is a
- * compiler builtin lowered to a bespoke `__atomic_*` helper (`tk_atomic_*`) rather than a declared
- * `.tks` function.
- *
- * @param nargs  the intrinsic's argument count (1 for `load`, 2 for `xchg`/`add`, 3 for `cas`)
- * @return       `Func { params = i64 x nargs; ret = i64; ... }`
- * @since §10-native
- */
 fn atomic_rmw_signature(nargs: u64): @Type() {
     var i64_t: @Type() = Prim { kind = PrimKind::I64 }
     var ps: []@Type() = tempty()
@@ -1102,61 +444,32 @@ fn atomic_rmw_signature(nargs: u64): @Type() {
     Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * Resolve an INJECTED built-in FUNCTION name to its `Func` type (mirrors `scope.c`'s
- * `tk_builtin_fn`): `print`/`println` + `teko::assert`, the self-host str/byte stdlib surface,
- * the D3 coverage sinks, the arena checkpoint/rewind/commit primitives, the heap-backed
- * string interner, and (via `host_surface_fn`) the C-native `teko::env`/`io`/`fs`/`process` host
- * surface. Resolved by LAST path segment only (like `builtin_type`) — every name here is
- * assumed unique across the whole corpus, so a bare or `teko::`-rooted call resolves identically.
- * NON-generic, fixed signatures (M.5). The `div`/`rem`/`int_to_float` reserved arithmetic
- * builtins over the wide i64 carrier (previously paired with i64-specific lowering helpers)
- * are REMOVED (drop-128, 2026-07-24): native codegen never routed through them (it uses the
- * per-width `tk_div_<tag>`/`tk_mod_<tag>` helpers via `prim_div_tag`), and no corpus call site
- * was bare and unqualified, so they were dead weight once i64 left the type system. The two
- * BYTE-VIEW escape hatches (`bytes_of_str`/`str_from_utf8`) are canonically spelled
- * `teko::text::bytes_of_str`/`teko::text::str_from_utf8` (0.3.1.0 — moved off `teko::str::`,
- * which stays home to the character/codepoint surface): `teko::text` is where the compiler's own
- * bootstrap UTF-8 validator (`src/text/text.tks`) already lives, and this fallback's job is only
- * to give a STANDALONE project (one with no local `teko::text` module of its own) the SAME two
- * names to call. Any project that DOES declare `teko::text::str_from_utf8` (this compiler's own
- * source included) resolves to that REAL function first — `lookup_call` always wins over this
- * fallback — so the two never race; this entry is reached only when no real declaration answers.
- *
- * @param name  the last path segment of the call being resolved
- * @return      the built-in's `Func` type, or `error` if `name` names no built-in (the caller
- *              reports "unknown function")
- */
 fn builtin_fn(name: str): @Type() | error {
     var str_t: @Type() = Str { }
     var void_t = Void { }
     var bytes_t = Slice { element = Byte { } }
-    if name == "os" { return Func { params = teko::list::empty(); ret = str_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }   // teko::os(): str ("macos"/"linux"/"windows") — C7.1f
+    if name == "os" { return Func { params = teko::list::empty(); ret = str_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "arch" { return Func { params = teko::list::empty(); ret = str_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
-    if name == "version" { return Func { params = teko::list::empty(); ret = str_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }   // teko::env::version(): str — CLI --version
-    if name == "peak_rss" { return Func { params = teko::list::empty(); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }   // (#148) teko::mem::peak_rss(): u64 — the process peak RSS in bytes (0 = unavailable)
-    if name == "append_fo" {   // (#148 R2) teko::mem::append_fo([]byte, str): []byte — bulk append, free-old BY DECREE (linear builder chains only)
+    if name == "version" { return Func { params = teko::list::empty(); ret = str_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "peak_rss" { return Func { params = teko::list::empty(); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "append_fo" {
         var afp: []@Type() = teko::list::push(tempty(), bytes_t)
         afp = teko::list::push(afp, str_t)
         return Func { params = afp; ret = bytes_t; variadic = false; param_names = []; n_required = afp.len; defaults = []; ret_extra = teko::list::empty() }
     }
-    if name == "abort" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }   // teko::abort — host abort FFI bottom (())
+    if name == "abort" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "print" || name == "println" || name == "write" || name == "ewrite" || name == "eprint" || name == "eprintln" {
         var iop = teko::list::push(tempty(), str_t)
         return Func { params = iop; ret = void_t; variadic = false; param_names = []; n_required = iop.len; defaults = []; ret_extra = teko::list::empty() }
     }
-    // D3 — test-coverage sink (host side-channel): cov_reset()/cov_mark(u64) ; cov_distinct(): u64.
     if name == "cov_reset" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_mark" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_distinct" { return Func { params = teko::list::empty(); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_is_marked" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = teko::list::empty() } }
-    // D3-branch — branch-coverage sink: branches_on(bool)/branch_reset()/enter(u64)/leave()/branch(u32,u32,u64) ; branch_hit(u64,u32,u32,u64): bool.
     if name == "cov_branches_on" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::Bool }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::Bool })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_branch_reset" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_enter" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_leave" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
-    // (#109 test-gate memory) arena_push()/arena_pop() — checkpoint/rewind the root region's
-    // bump position around each #test (bounds the self-host test gate's memory). Host side-channel.
     if name == "arena_push" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "arena_pop" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "arena_commit" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
@@ -1181,7 +494,6 @@ fn builtin_fn(name: str): @Type() | error {
         hp = teko::list::push(teko::list::push(hp, Prim { kind = PrimKind::U32 }), Prim { kind = PrimKind::U64 })
         return Func { params = hp; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (hp).len; defaults = []; ret_extra = teko::list::empty() }
     }
-    // D3-line — line-coverage sink: lines_on(bool)/line_reset()/line(u32) ; line_hit(u64,u32): bool.
     if name == "cov_lines_on" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::Bool }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::Bool })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_line_reset" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_line" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U32 }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U32 })).len; defaults = []; ret_extra = teko::list::empty() } }
@@ -1226,31 +538,11 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "str_concat" { return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }   /* internal 2-arg primitive, unchanged */
     if name == "str_hash" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "str_compare" { return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }
-    // "str_concat3" REMOVED (2026-07-01) — superseded by the variadic "concat" below.
     if name == "i64_to_str" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::I64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::I64 })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "u64_to_str" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "ftoa" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "f64_g17" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = teko::list::empty() } }   /* host float renderer FFI bottom */
-    // teko::float::parse(str): f64 — no namespace file exists for teko::float; keep as seed.
     if name == "parse" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }
-    // NOTE: teko::io::*, teko::env::*, teko::fs::*, teko::process::* seeds have been REMOVED (C7.3).
-    // Those host surfaces are declared in src/io/io.tks, src/env/env.tks, src/fs/fs.tks,
-    // src/process/process.tks and are collected into the checker env via the normal discover/collect
-    // pass. The env lookup at type_call (typer.tks line 208) finds them BEFORE this fallback fires.
-    // teko::str::* — the self-host string stdlib the corpus calls namespaced (resolved by last
-    // segment, like the underscored twins; the C runtime twins are tk_str_concat/slice/…).
-    // "concat"/"concat3" are matched by BARE last-segment name (see lookup_call/call_ns above,
-    // and this fn's callers), so ANY namespace prefix ending in these names resolves identically
-    // — this is what makes `teko::string::concat(a, b)` (the LEGISLATED public API per
-    // TEKO_LEGISLATION.md's "`+` never concatenates" rule: string building is `string::concat` /
-    // interpolation `$"..."`, never `+`) and `teko::str::concat(a, b)` (the spelling the corpus
-    // already uses pervasively) two names for the same builtin dispatch. No separate
-    // registration is needed for the `string::` spelling — this comment documents the mechanism
-    // so the legislated name is discoverable here, not just inferable.
-    // "concat" (== the LEGISLATED string::concat) is the ONE public variadic form (2026-07-01,
-    // `concat3` removed): `concat(params pieces: []str): str` — ONE param, itself a []str, and
-    // `variadic = true` so the checker's params call-site desugar (typer.tks/expr.c) packs N
-    // trailing str args into a []str automatically, or passes an existing []str straight through.
     if name == "concat" { return Func { params = teko::list::push(tempty(), Slice { element = str_t }); ret = str_t; variadic = true; param_names = []; n_required = (teko::list::push(tempty(), Slice { element = str_t })).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "slice_to" || name == "slice_from" {
         var p: []@Type() = teko::list::push(tempty(), str_t)   /* []Type: (str, u64) */
@@ -1259,20 +551,19 @@ fn builtin_fn(name: str): @Type() | error {
     }
     if name == "len" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "bytes_of_str" { return Func { params = teko::list::push(tempty(), str_t); ret = bytes_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }   /* bytes_of_str(str): []byte */
-    if name == "str_from_utf8" {   // str_from_utf8([]byte): str | error (ROUND 0 / B.36)
+    if name == "str_from_utf8" {
         var m: []@Type() = teko::list::push(tempty(), str_t)
         m = teko::list::push(m, Error { })
         return Func { params = teko::list::push(tempty(), bytes_t); ret = Variant { members = m }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), bytes_t)).len; defaults = []; ret_extra = teko::list::empty() }
     }
     if name == "chars" { return Func { params = teko::list::push(tempty(), str_t); ret = Slice { element = Char { } }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }   /* str::chars(str): []char */
     if name == "len_chars" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }   /* str::len_chars(str): i64 */
-    // --- ROUND 0: UTF-8 codepoint operations ---
-    if name == "char_at" {   // char_at(str, i64): char
+    if name == "char_at" {
         var p: []@Type() = teko::list::push(tempty(), str_t)
         p = teko::list::push(p, Prim { kind = PrimKind::I64 })
         return Func { params = p; ret = Char { }; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = teko::list::empty() }
     }
-    if name == "str_slice_chars" {   // str_slice_chars(str, i64, i64): str
+    if name == "str_slice_chars" {
         var p: []@Type() = teko::list::push(tempty(), str_t)
         p = teko::list::push(p, Prim { kind = PrimKind::I64 })
         p = teko::list::push(p, Prim { kind = PrimKind::I64 })
@@ -1291,7 +582,6 @@ fn builtin_fn(name: str): @Type() | error {
         var u64_or_err = Variant { members = m }
         return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = u64_or_err; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = teko::list::empty() }
     }
-    // error diagnostic adornment builtins (E2): err_loc(error,u32,u32):error ; err_typed(error,str,str):error.
     if name == "err_loc" {
         var p: []@Type() = teko::list::push(tempty(), Error { })   /* []Type: (error, u32, u32) */
         p = teko::list::push(p, Prim { kind = PrimKind::U32 })
@@ -1304,8 +594,6 @@ fn builtin_fn(name: str): @Type() | error {
         p = teko::list::push(p, str_t)
         return Func { params = p; ret = Error { }; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = teko::list::empty() }
     }
-    // (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
-    // `as_ptr` is the raw byte pointer of a `str` (borrows; pairs with `.len`; NOT NUL-terminated).
     if name == "as_ptr" { return Func { params = teko::list::push(tempty(), str_t); ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "as_cstr" { return as_cstr_signature(str_t) }
     if name == "str_from_c" { return str_from_c_signature(str_t) }
@@ -1318,7 +606,6 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "store_u64" { return store_u64_signature() }
     if name == "buf_ptr" { return buf_ptr_signature() }
     if name == "region_buf" { return region_buf_signature(str_t) }
-    // ROUND 0 format helpers — native builtins (tk_fmt_*).
     if name == "fmt_f" || name == "fmt_e" || name == "fmt_g" || name == "fmt_n_f" || name == "fmt_p" {
         var p: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::F64 })
         p = teko::list::push(p, Prim { kind = PrimKind::I64 })

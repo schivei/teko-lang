@@ -1,8 +1,6 @@
-// src/checker/match.tks  (namespace 'teko::checker')
 
 use teko::parser
 
-// (C7b) is `name` a member of the enum body?
 fn enum_has_member(eb: parser::EnumBody, name: str): bool {
     var i = 0
     loop {
@@ -13,10 +11,6 @@ fn enum_has_member(eb: parser::EnumBody, name: str): bool {
     false
 }
 
-// (C7b) ENUM-subject pattern check: a bare/qualified path pattern names a MEMBER (enum members
-// carry NO data). `U8` and `PrimKind::U8` both name member "U8" (by the LAST path segment, like the
-// `Type::Member` enum-value form). `_` matches anything; an Alt checks each option; `as x` binds the
-// whole enum value. (Mirror of match.c check_enum_pattern.)
 fn check_enum_pattern(p: @Pattern(), subject: @Type(), eb: parser::EnumBody, env: Env, table: TypeTable): Env | error {
     match p {
         parser::WildcardPattern => env
@@ -24,8 +18,8 @@ fn check_enum_pattern(p: @Pattern(), subject: @Type(), eb: parser::EnumBody, env
             if bp.is_slice { return error { message = "a slice pattern cannot match an enum value" } }
             var name = bp.type_name.segments[bp.type_name.segments.len - 1].name
             if !enum_has_member(eb, name) { return error { message = $"not a member of the enum: {name}" } }
-            if bp.has_binding { define(env, bp.binding, subject, false) }   // `as x` — the enum value
-            else { env }   // bare member — binds nothing
+            if bp.has_binding { define(env, bp.binding, subject, false) }
+            else { env }
         }
         parser::AltPattern as ap => {
             var i = 0
@@ -44,25 +38,6 @@ fn check_enum_pattern(p: @Pattern(), subject: @Type(), eb: parser::EnumBody, env
     }
 }
 
-/**
- * is_direct_case_of — is `named` a legal left-of-arm DISCRIMINANT of the match subject? (SEALED
- * match model, match-universal phase 1.) A left-of-arm test is valid when `named` is: the WHOLE
- * subject itself (`raw_subject` — a bind-all `Type as t`); a DIRECT case of the subject's variant
- * view (`subject_variant`); a concrete SUBCLASS of a polymorphic base-class subject; or a concrete
- * IMPL of an interface subject. A case that is itself a NESTED variant must be double-matched
- * (`Outer as v => match v { Inner as i => … }`), never skip-matched directly. A struct/primitive/
- * sealed-class/service subject admits only the bind-all (its sole concrete type is itself), which
- * `type_eq(named, raw_subject)` already covers, so this stays permissive (true) for them and the
- * ordinary resolve/typecheck path validates the rest — keeping phase 1 inert on the existing corpus,
- * which holds ZERO match-over-class/interface sites.
- *
- * @param named            the arm's resolved discriminant type
- * @param subject_variant  the subject's one-level variant view (from `expand_variant`)
- * @param raw_subject      the subject's pre-expansion resolved type
- * @param table            the program's type table (subclass/impl relation oracles)
- * @return                 true iff `named` is a legal discriminant of the subject
- * @see                    subclass_reaches, type_conforms_to
- */
 fn is_direct_case_of(named: @Type(), subject_variant: @Type(), raw_subject: @Type(), table: TypeTable): bool {
     if type_eq(named, raw_subject) { return true }
     match subject_variant {
@@ -79,18 +54,6 @@ fn is_direct_case_of(named: @Type(), subject_variant: @Type(), raw_subject: @Typ
     }
 }
 
-/**
- * is_type_discriminant_of — for a NON-variant subject, is `named` a legal type-test discriminant of
- * `subject`? A polymorphic BASE-CLASS subject admits any concrete subclass reaching it; an INTERFACE
- * subject admits any concrete type conforming to it. Every other subject kind (struct, primitive,
- * sealed class, service) admits only itself — the bind-all — which the caller has already accepted
- * via `type_eq`, so this stays permissive (true) for them so the phase is inert on today's corpus.
- *
- * @param named    the arm's resolved discriminant type
- * @param subject  the subject's resolved type
- * @param table    the program's type table
- * @return         true iff `named` legally discriminates `subject`
- */
 fn is_type_discriminant_of(named: @Type(), subject: @Type(), table: TypeTable): bool {
     match subject {
         Named as sn => match named {
@@ -105,18 +68,6 @@ fn is_type_discriminant_of(named: @Type(), subject: @Type(), table: TypeTable): 
     }
 }
 
-/**
- * discriminant_mismatch_error — the diagnostic for an arm whose left-of-arm type is NOT a legal
- * discriminant of the subject. A polymorphic base-class subject names the "not a subclass" case; an
- * interface subject the "does not implement" case; every other subject falls to the variant
- * skip-level message (its historic shape).
- *
- * @param named            the rejected discriminant type
- * @param subject          the subject's resolved type
- * @param subject_variant  the subject's one-level variant view
- * @param table            the program's type table
- * @return                 the placed rejection error
- */
 fn discriminant_mismatch_error(named: @Type(), subject: @Type(), subject_variant: @Type(), table: TypeTable): error {
     match subject {
         Named as sn => {
@@ -127,14 +78,6 @@ fn discriminant_mismatch_error(named: @Type(), subject: @Type(), subject_variant
     }
     skip_level_error(named, subject_variant, table)
 }
-// (#109 W2, R5) CONTEXTUAL pattern resolution — a match-arm pattern name resolves against the
-// SUBJECT variant's own members FIRST, regardless of namespace. In `match shape { Circle as c => … }`
-// the bare `Circle` binds the Shape variant's `Circle` member even when the match site sits in a
-// different namespace than Shape — a valid reference that R3 (strict own-ns bare) would otherwise
-// reject. Matches by the pattern's LAST path segment against each member's nominal name; returns the
-// member Type when found (the arm binds exactly that case), else null (fall to resolve_named/R0-R4).
-// A non-variant subject (subject_variant is not a Variant) yields null — nothing contextual to bind.
-// Mirror of match.c::variant_member_by_name.
 fn variant_member_by_name(subject_variant: @Type(), last: str): @Type() | null {
     match subject_variant {
         Variant as v => {
@@ -142,7 +85,7 @@ fn variant_member_by_name(subject_variant: @Type(), last: str): @Type() | null {
             loop {
                 if i >= v.members.len { break }
                 match v.members[i] {
-                    Named as n => if name_last_segment(n.name) == last { return v.members[i] }   // (#109 W3) member name is canonical "ns::Name"; the pattern's last segment is bare
+                    Named as n => if name_last_segment(n.name) == last { return v.members[i] }
                     _ => { }
                 }
                 i++
@@ -152,11 +95,6 @@ fn variant_member_by_name(subject_variant: @Type(), last: str): @Type() | null {
         _ => null
     }
 }
-// (#110) find the DIRECT member of `subject` whose own (one-level) expansion contains `named` —
-// i.e. the outer case the caller should match FIRST before re-matching `named` inside it. Used
-// only to build a concrete, pasteable hint (`FooBar as v => match v { Foo as x => … }` rather than
-// the whole `FooBar | error` union, which is not a nameable bind pattern). Mirror of
-// match.c::find_containing_case (returns null when no direct member's expansion contains `named`).
 fn find_containing_case(named: @Type(), subject: @Type(), table: TypeTable): @Type() | null {
     match subject {
         Variant as v => {
@@ -182,11 +120,6 @@ fn find_containing_case(named: @Type(), subject: @Type(), table: TypeTable): @Ty
         _ => null
     }
 }
-// (#110) the skip-level-match diagnostic: "'Foo' is not a direct case of 'FooBar | error' —
-// match the outer case first (FooBar as v => match v { Foo as f => … })". When a direct member's
-// own expansion contains the arm's case (the common shape — a nested named variant), the hint
-// names THAT member (a real, pasteable bind pattern); otherwise it falls back to the whole subject.
-// Mirror of match.c::skip_level_error.
 fn skip_level_error(arm_type: @Type(), subject: @Type(), table: TypeTable): error {
     var arm_s = type_render(arm_type)
     var subj_s = type_render(subject)
@@ -194,13 +127,6 @@ fn skip_level_error(arm_type: @Type(), subject: @Type(), table: TypeTable): erro
     error { message = $"'{arm_s}' is not a direct case of '{subj_s}' — match the outer case first ({hint_s} as v => match v {{ {arm_s} as x => … }})" }
 }
 
-/**
- * Does `t` (an already one-level-expanded subject) carry a `null` member (null-as-union)? Used to
- * admit a `null` match pattern over a `T | null` subject, mirroring the `variant`-member machinery.
- *
- * @param t  the subject's variant view (from `expand_variant`)
- * @return   true iff `t` is a `Variant` one of whose members is `Null`
- */
 fn variant_has_null_member(t: @Type()): bool {
     match t {
         Variant as v => {
@@ -216,36 +142,13 @@ fn variant_has_null_member(t: @Type()): bool {
     }
 }
 
-/**
- * reject_trait_in_match — a trait has no discriminant (§9.4): a trait name in a match SUBJECT is a
- * NAMED error, never a silent no-match. A composed trait is flattened away and never reaches here as
- * a Named trait, so this fires only on a direct trait subject a user wrote.
- *
- * @param t      the resolved subject type
- * @param table  the type table
- * @param where  the position word placed into the diagnostic (e.g. "subject")
- * @return       null when `t` is not a trait, else the named error
- * @throws       when `t` names a trait
- * @since 0.3.1 (§9.4 revised)
- */
 fn reject_trait_in_match(t: @Type(), table: TypeTable, where: str): null | error {
     match t {
-        Named as n => if is_trait_name(n.name, table) { error { message = $"cannot match on trait `{n.name}` in {where} position — a trait has no discriminant (§9.4)" } } else { null }
+        Named as n => if is_trait_name(n.name, table) { error { message = $"cannot match on trait `{n.name}` in {where} position — a trait has no discriminant" } } else { null }
         _ => null
     }
 }
 
-/**
- * reject_trait_case — a trait name in a match CASE (left-of-arm) is a NAMED error (§9.4): a trait has
- * no discriminant to test. Checks the case pattern's nominal name before it would resolve (a trait is
- * not a type, so resolution would otherwise report the generic "not a type").
- *
- * @param p      the arm's pattern
- * @param table  the type table
- * @return       null when the case names no trait, else the named error
- * @throws       when the case names a trait
- * @since 0.3.1 (§9.4 revised)
- */
 fn reject_trait_case(p: @Pattern(), table: TypeTable): null | error {
     var name = match p {
         parser::BindPattern as bp => if bp.is_slice { "" } else { bp.type_name.segments[bp.type_name.segments.len - 1].name }
@@ -253,30 +156,17 @@ fn reject_trait_case(p: @Pattern(), table: TypeTable): null | error {
         _ => ""
     }
     if name != "" && is_trait_name(name, table) {
-        return error { message = $"cannot match on trait `{name}` in case position — a trait has no discriminant (§9.4)" }
+        return error { message = $"cannot match on trait `{name}` in case position — a trait has no discriminant" }
     }
     null
 }
 
-/**
- * check_pattern — validate a pattern against the subject; return the env extended with bindings.
- * A `T | null` union subject is handled by the generic `NullPattern` arm
- * (`variant_has_null_member`) below plus the present case's ordinary variant-member matching.
- *
- * @param p        the syntactic pattern
- * @param subject  the resolved subject type
- * @param env      the enclosing type environment
- * @param table    the type table
- * @return         the env extended with the pattern's bindings, or an error
- */
 fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): Env | error {
     match reject_trait_in_match(subject, table, "subject") { error as e => return e; null => { } }
     match reject_trait_case(p, table) { error as e => return e; null => { } }
-    // ENUM subject (C7b): member patterns, not type binds — detected before the generic match so a
-    // bare `U8` is not mis-resolved as a type name (resolve_named → "unknown type: U8").
     match subject {
         Named as n => {
-            match type_table_find(table, n.name, "") {   // (#109 W1) enum-subject probe on a resolved name — no referencing ns
+            match type_table_find(table, n.name, "") {
                 parser::TypeDecl as td => {
                     match td.body {
                         parser::EnumBody as eb => return check_enum_pattern(p, subject, eb, env, table)
@@ -288,11 +178,6 @@ fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): E
         }
         _ => { }
     }
-    // (#110) the subject's variant view — a NAMED alias of a `variant` decl expands to its Variant
-    // members (mirrors `exhaustive`); an already-inline `T | error` subject is unchanged. Used ONLY
-    // to reject SKIP-LEVEL arms below (a case of a NESTED/inner variant named directly against this
-    // outer subject) — native codegen only synthesizes tags for the subject's own direct union
-    // members, never for a member's own inner cases.
     var subject_variant = expand_variant(subject, table)
     match p {
         parser::NullPattern => {
@@ -301,9 +186,6 @@ fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): E
         }
         parser::WildcardPattern => env
         parser::BindPattern as bp => {
-            // `[]T as x` resolves the slice TYPE-expr; a path bind resolves the named/builtin case.
-            // (#109 W2, R5) a PLAIN named bind (not `[]T`, not `Foo<i64>`) first resolves CONTEXTUALLY
-            // against the subject variant's members — a bare cross-namespace case name still binds.
             var ct = if !bp.is_slice && bp.type_args.len == 0 {
                 match variant_member_by_name(subject_variant, bp.type_name.segments[bp.type_name.segments.len - 1].name) {
                     (@Type()) as m => m
@@ -312,25 +194,16 @@ fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): E
             } else {
                 match bind_pattern_type(bp, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
             }
-            // (#110) reject a SKIP-LEVEL arm: `ct` names a type that is not a direct case of the
-            // subject's own union (it may be a case of an INNER variant nested inside one of the
-            // subject's members). `is_direct_case_of` is a no-op (true) when the subject is not a
-            // variant at all, so ordinary struct/prim subjects are unaffected.
             if !is_direct_case_of(ct, subject_variant, subject, table) { return discriminant_mismatch_error(ct, subject, subject_variant, table) }
-            if !bp.has_binding { return env }   // bare case / `as _` discard — binds nothing
-            define(env, bp.binding, ct, false)   // `Type as name` → name : the case type (match-binding immutable — B.21)
+            if !bp.has_binding { return env }
+            define(env, bp.binding, ct, false)
         }
         parser::LiteralPattern as lp => {
-            // a numeric literal pattern adopts the subject's numeric type, so `match b { 0xE0 => … }`
-            // matches a `byte` subject (byte = u8) — parity with value-position literal adoption.
             var lt = match type_expr(lp.value, env, table) { TExpr as te => te; error as e => return e }
             if !type_eq(lt.type, subject) && !literal_adopts(lt, subject) { return error { message = "literal pattern does not match the subject type" } }
             env
         }
         parser::FieldPattern as fp => {
-            // C7a: variant axis `Type { f; g }` — resolve to a struct, bind each field IMMUTABLE (B.21).
-            // (#109 W2, R5) resolve the case name CONTEXTUALLY against the subject variant's members
-            // first (a bare cross-namespace case still binds), else fall to resolve_named/R0-R4.
             var nt = match variant_member_by_name(subject_variant, fp.type_name.segments[fp.type_name.segments.len - 1].name) {
                 (@Type()) as m => m
                 null => match resolve_named(fp.type_name, table, env.cur_ns, 0) { (@Type()) as t => t; error as e => return e }
@@ -339,15 +212,14 @@ fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): E
                 Named as n => n.name
                 _ => return error { message = "field pattern requires a struct type" }
             }
-            // (#110) same skip-level guard as the BIND arm above — `Type { f; g }` also names a case.
             if !is_direct_case_of(nt, subject_variant, subject, table) { return discriminant_mismatch_error(nt, subject, subject_variant, table) }
-            var decl = match type_table_find(table, name, "") {   // (#109 W1) follow-up lookup of a resolved name — no referencing ns
+            var decl = match type_table_find(table, name, "") {
                 parser::TypeDecl as td => td
                 error => return error { message = $"unknown type in field pattern: {name}" }
             }
             var sb_fields = match decl.body {
                 parser::StructBody as s => s.fields
-                parser::ClassBody as c => c.fields   // (W10b.CLASS increment 1)
+                parser::ClassBody as c => c.fields
                 _ => return error { message = $"type {name} is not a struct (no fields)" }
             }
             var e2 = env
@@ -355,26 +227,21 @@ fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): E
             loop {
                 if i >= fp.fields.len { break }
                 var ft = match field_type(sb_fields, fp.fields[i], table, type_ns_of(table, name)) { (@Type()) as t => t; error as e => return e }
-                e2 = define(e2, fp.fields[i], ft, false)   // B.21 — match-binding immutable
+                e2 = define(e2, fp.fields[i], ft, false)
                 i++
             }
             e2
         }
         parser::RangePattern as rp => {
-            // C7a: `lo ..= hi` — each bound type_eq's the subject OR is a fitting literal that adopts
-            // it (so `0x80 ..= 0xBF` over a `byte` subject is fine), AND the subject is an integer
-            // (M.1/M.2). Mirrors match.c's `!type_eq && !literal_adopts` bound check.
             var lo = match type_expr(rp.lo, env, table) { TExpr as te => te; error as e => return e }
             var hi = match type_expr(rp.hi, env, table) { TExpr as te => te; error as e => return e }
             if !type_eq(lo.type, subject) && !literal_adopts(lo, subject) { return error { message = "range lower bound does not match the subject type" } }
             if !type_eq(hi.type, subject) && !literal_adopts(hi, subject) { return error { message = "range upper bound does not match the subject type" } }
-            // an integer subject — an int prim OR `byte` (= u8); a float range is rejected (B.38).
             var int_subject = match subject { Byte => true; _ => is_integer(subject) }
-            if !int_subject { return error { message = "range pattern requires an integer subject (B.38 — not a float)" } }
-            env   // binds nothing
+            if !int_subject { return error { message = "range pattern requires an integer subject (not a float)" } }
+            env
         }
         parser::AltPattern as ap => {
-            // C7a: `a | b | …` — each option checked against the subject; NO option may bind (settled axis rule).
             var i = 0
             loop {
                 if i >= ap.options.len { break }
@@ -384,58 +251,28 @@ fn check_pattern(p: @Pattern(), subject: @Type(), env: Env, table: TypeTable): E
                     parser::FieldPattern => return error { message = "an alternative (`|`) cannot bind; use a separate arm" }
                     _ => { }
                 }
-                // recurse for validation (the subject must accept each option); discard the env — Alt binds nothing.
                 match check_pattern(opt, subject, env, table) { Env => { }; error as e => return e }
                 i++
             }
-            env   // binds nothing
+            env
         }
         parser::GroupBindPattern as gp => {
             var sub = match group_bind_subunion(gp, subject, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
             define(env, gp.binding, sub, false)
         }
-        parser::MacroPattern => error { message = "internal: an unexpanded @Type() macro reached pattern checking — it should be expanded by the Family-A pre-pass (§9.D CR3)" }
+        parser::MacroPattern => error { message = "internal: an unexpanded @Type() macro reached pattern checking — it should be expanded by the Family-A pre-pass" }
     }
 }
 
-/**
- * group_bind_subunion — resolve a `GroupBindPattern`'s bound TYPE: the NESTED `Variant` member of the
- * match subject whose members are exactly the group's options (in source order). The group is built into
- * a candidate anonymous union and matched by `type_eq` against the subject's DIRECT members; the found
- * member is returned UNCHANGED, so the bound `v` aliases the boxed nested variant the subject already
- * carries at that tag slot — no re-tag, no re-box (§9.D nested-group byte-identity). Errors when an
- * option is not a bare case name, or when no subject member is the union of exactly those options.
- *
- * @param gp       the grouped bind pattern
- * @param subject  the match subject's resolved type
- * @param table    the program type table
- * @param ref_ns   the match arm's referencing namespace
- * @return         the subject's nested `Variant` member the group binds, or a located error
- * @throws         when an option is not a bare case name, or the group is not a nested member of the subject
- * @since          §9.D capability (c)
- */
 fn group_bind_subunion(gp: parser::GroupBindPattern, subject: @Type(), table: TypeTable, ref_ns: str): @Type() | error {
     var subject_variant = expand_variant(subject, table)
     var candidate = match group_candidate(gp, table, ref_ns) { (@Type()) as t => t; error as e => return e }
     match group_member_of(subject_variant, candidate) {
         (@Type()) as m => m
-        null => error { message = "the grouped bind '(… | …) as v' does not match a nested union member of the subject — its options must be exactly the cases of one nested `(… | …)` member (§9.D)" }
+        null => error { message = "the grouped bind '(… | …) as v' does not match a nested union member of the subject — its options must be exactly the cases of one nested `(… | …)` member" }
     }
 }
 
-/**
- * group_candidate — the anonymous sub-union a `GroupBindPattern`'s options describe: each option resolved
- * to its case type, in source order, null-normalized (so it matches how the subject's nested `(… | …)`
- * member was itself resolved). Independent of the subject — used both to bind (`group_bind_subunion`) and
- * to test exhaustive coverage (`some_arm_covers_type`).
- *
- * @param gp      the grouped bind pattern
- * @param table   the program type table
- * @param ref_ns  the match arm's referencing namespace
- * @return        the group's anonymous `Variant`, or the first option-resolution error
- * @throws        when an option is not a bare case name or does not resolve
- * @since         §9.D capability (c)
- */
 fn group_candidate(gp: parser::GroupBindPattern, table: TypeTable, ref_ns: str): @Type() | error {
     var opts: []@Type() = teko::list::empty()
     var i = 0
@@ -448,17 +285,6 @@ fn group_candidate(gp: parser::GroupBindPattern, table: TypeTable, ref_ns: str):
     Variant { members = union_normalize_null(opts) }
 }
 
-/**
- * group_option_type — the resolved case TYPE of one `GroupBindPattern` option: a non-slice `BindPattern`'s
- * named case; a slice pattern or any other shape is a located error (an option must be a bare case name).
- *
- * @param p       the option pattern
- * @param table   the program type table
- * @param ref_ns  the match arm's referencing namespace
- * @return        the option's resolved type, or a located error
- * @throws        when the option is not a bare case name
- * @since         §9.D capability (c)
- */
 fn group_option_type(p: @Pattern(), table: TypeTable, ref_ns: str): @Type() | error {
     match p {
         parser::BindPattern as bp => if bp.is_slice { error { message = "a grouped bind option must be a bare case name, not a slice pattern" } } else { bind_pattern_type(bp, table, ref_ns) }
@@ -470,16 +296,6 @@ fn group_option_type(p: @Pattern(), table: TypeTable, ref_ns: str): @Type() | er
     }
 }
 
-/**
- * group_member_of — the DIRECT member of `subject_variant` that is `type_eq` to `candidate` (the group's
- * anonymous sub-union), or null when no member matches. The subject is kept nested, so a nested
- * `(B | C)` member is a `Variant` sitting at one tag slot; this finds THAT member so the bind aliases it.
- *
- * @param subject_variant  the subject's one-level variant view
- * @param candidate        the group's anonymous sub-union
- * @return                 the matching nested member, or null
- * @since                  §9.D capability (c)
- */
 fn group_member_of(subject_variant: @Type(), candidate: @Type()): @Type() | null {
     match subject_variant {
         Variant as v => {
@@ -495,9 +311,6 @@ fn group_member_of(subject_variant: @Type(), candidate: @Type()): @Type() | null
     }
 }
 
-// --- exhaustiveness (B.15) ---
-
-// an UNGUARDED `_` covers everything; a guarded `_ when g` does NOT (B.15 — `when` excluded).
 fn has_wildcard(arms: []parser::Arm): bool {
     var i = 0
     loop {
@@ -510,12 +323,6 @@ fn has_wildcard(arms: []parser::Arm): bool {
     false
 }
 
-// the case-name(s) a variant pattern selects: a single Bind/Field, or EACH bare option of an Alt.
-// A slice bind (`[]T as x`) names NO nominal case (its type_name is empty) — it is skipped here
-// (and the empty-path read avoided); it is covered by some_arm_covers_type instead.
-// (W9.4) the case-name a single bind names: the resolved INSTANCE name `Gen__g__i64` when it carries
-// explicit type-args, else the bare last path segment. Mirrors bind_pattern_type's instance resolution
-// so exhaustiveness over a `variant Gen<i64> | …` covers the `Gen<i64> as x` arm by the member's name.
 fn bind_case_name(bp: parser::BindPattern, table: TypeTable, ref_ns: str): str {
     if bp.type_args.len > 0 {
         var ct = match bind_pattern_type(bp, table, ref_ns) { (@Type()) as t => t; error => Void { } }   /* (#109 W2) generic-instance case name resolves in the match's namespace */
@@ -552,11 +359,6 @@ fn arm_case_names(p: @Pattern(), table: TypeTable, ref_ns: str): []str {
     }
 }
 
-// Resolve the type a BIND pattern denotes: `[]T as x` → the slice type, else the named/builtin path.
-// (W9.4) `Foo<i64> as x` carries explicit type-args → resolve the concrete instance `Foo__g__i64`
-// (validates arity / rejects non-generic-with-args), so exhaustiveness/binding use the stamped type.
-// (#109 W1) `ref_ns` = the namespace of the match arm (referencing ns for the pattern's type name);
-// threaded to resolve_type/resolve_named, unused until W2's R0-R5 rules.
 fn bind_pattern_type(bp: parser::BindPattern, table: TypeTable, ref_ns: str): @Type() | error {
     if bp.is_slice {
         match bp.slice_type {
@@ -570,9 +372,6 @@ fn bind_pattern_type(bp: parser::BindPattern, table: TypeTable, ref_ns: str): @T
     }
 }
 
-// Does some UNGUARDED arm cover variant member `mem` by resolved-TYPE equality? Covers the
-// non-nominal members of a `T | error` style variant (prim/byte/str/slice/error) — the arm is a
-// bind whose resolved type equals the member. NAMED (nominal) members use some_arm_names instead.
 fn some_arm_covers_type(arms: []parser::Arm, mem: @Type(), table: TypeTable, ref_ns: str): bool {
     var i = 0
     loop {
@@ -604,7 +403,6 @@ fn some_arm_covers_type(arms: []parser::Arm, mem: @Type(), table: TypeTable, ref
     false
 }
 
-// is `name` covered by some UNGUARDED arm (directly via Bind/Field, or via an Alt option)?
 fn some_arm_names(arms: []parser::Arm, name: str, table: TypeTable, ref_ns: str): bool {
     var i = 0
     loop {
@@ -623,14 +421,12 @@ fn some_arm_names(arms: []parser::Arm, name: str, table: TypeTable, ref_ns: str)
     false
 }
 
-// every member of the variant must be covered by some unguarded arm: NAMED (nominal) members by
-// name; non-nominal members (prim/byte/str/slice/error — the `T | error` idiom) by resolved-type.
 fn variant_covered(arms: []parser::Arm, members: []@Type(), table: TypeTable, ref_ns: str): bool {
     var i = 0
     loop {
         if i >= members.len { break }
         match members[i] {
-            Named as nm => { if !some_arm_names(arms, name_last_segment(nm.name), table, ref_ns) { return false } }   // (#109 W3) canonical member name → bare, to match the arms' bare case names
+            Named as nm => { if !some_arm_names(arms, name_last_segment(nm.name), table, ref_ns) { return false } }
             Null => { if !some_arm_is_null(arms) { return false } }
             _ => { if !some_arm_covers_type(arms, members[i], table, ref_ns) { return false } }
         }
@@ -639,7 +435,6 @@ fn variant_covered(arms: []parser::Arm, members: []@Type(), table: TypeTable, re
     true
 }
 
-// (C7b) every member of the enum must be covered by some unguarded arm (by name).
 fn enum_covered(arms: []parser::Arm, eb: parser::EnumBody, table: TypeTable, ref_ns: str): bool {
     var i = 0
     loop {
@@ -650,7 +445,6 @@ fn enum_covered(arms: []parser::Arm, eb: parser::EnumBody, table: TypeTable, ref
     true
 }
 
-// is the NONE case (a `null` pattern) covered by some UNGUARDED arm?
 fn some_arm_is_null(arms: []parser::Arm): bool {
     var i = 0
     loop {
@@ -663,19 +457,6 @@ fn some_arm_is_null(arms: []parser::Arm): bool {
     false
 }
 
-/**
- * subclasses_of — the CLOSED set of concrete (instantiable) subclasses of a polymorphic base class,
- * for the exhaustiveness of a `match` over a sealed class hierarchy (match-universal phase 1). Scans
- * the whole-program type table for every class whose base chain reaches `base` (the inverse of
- * `subclass_reaches`, which walks sub→base) and that is itself instantiable (not `abstract`), plus
- * `base` itself when `base` is directly instantiable (a `virtual` root). The set is closed over the
- * compiled program: whole-program visibility is what "sealed for exhaustiveness" means here.
- *
- * @param base_name  the polymorphic base class's (canonical or bare) name
- * @param table      the program's type table
- * @return           the concrete-subclass names, in declaration order
- * @see              subclass_reaches (the sub→base direction this inverts)
- */
 fn subclasses_of(base_name: str, table: TypeTable): []str {
     var out: []str = teko::list::empty()
     var i: u64 = 0
@@ -697,17 +478,6 @@ fn subclasses_of(base_name: str, table: TypeTable): []str {
     out
 }
 
-/**
- * class_covered — is every member of a sealed class's CLOSED subclass set named by some UNGUARDED
- * arm? The class-axis twin of `variant_covered`/`enum_covered`: a guarded arm (`when`) does NOT
- * count toward covering its subclass (B.15 — the guard may be false).
- *
- * @param arms    the match arms
- * @param subs    the concrete subclass names (from `subclasses_of`)
- * @param table   the program's type table
- * @param ref_ns  the match site's namespace (for the arms' name resolution)
- * @return        true iff every `subs[i]` is named by some unguarded arm
- */
 fn class_covered(arms: []parser::Arm, subs: []str, table: TypeTable, ref_ns: str): bool {
     if subs.len == 0 { return false }
     var i: u64 = 0
@@ -719,26 +489,11 @@ fn class_covered(arms: []parser::Arm, subs: []str, table: TypeTable, ref_ns: str
     true
 }
 
-/**
- * exhaustive — does the arm set cover the subject exhaustively (B.15)? An unguarded `_` covers all.
- * An ENUM subject is exhaustive iff every member is named; a VARIANT subject (a named alias expands
- * first, B.14/B.15) iff every case is covered. A polymorphic BASE-CLASS subject is a CLOSED set: it
- * is exhaustive iff an unguarded bind-all names the base OR every concrete subclass is covered
- * (match-universal phase 1). An INTERFACE subject is an OPEN set — exhaustive only via an unguarded
- * catch-all `_` or a bind-all naming the interface. Every other subject (struct/primitive/service)
- * is likewise open and requires that unguarded catch-all/bind-all.
- *
- * @param arms     the match arms
- * @param subject  the resolved subject type
- * @param table    the program's type table
- * @param ref_ns   the match site's namespace
- * @return         true iff the arms cover the subject exhaustively
- */
 fn exhaustive(arms: []parser::Arm, subject: @Type(), table: TypeTable, ref_ns: str): bool {
     if has_wildcard(arms) { return true }
-    match subject {   // an ENUM subject — exhaustive iff EVERY member is named (C7b)
+    match subject {
         Named as n => {
-            match type_table_find(table, n.name, "") {   // (#109) resolved-name probe — namespace-blind (type_table_find ignores ref_ns)
+            match type_table_find(table, n.name, "") {
                 parser::TypeDecl as td => {
                     match td.body {
                         parser::EnumBody as eb => return enum_covered(arms, eb, table, ref_ns)
@@ -750,25 +505,12 @@ fn exhaustive(arms: []parser::Arm, subject: @Type(), table: TypeTable, ref_ns: s
         }
         _ => { }
     }
-    match expand_variant(subject, table) {   // a NAMED variant → its Variant cases (B.14/B.15)
+    match expand_variant(subject, table) {
         Variant as v => variant_covered(arms, v.members, table, ref_ns)
         _ => exhaustive_type_subject(arms, subject, table, ref_ns)
     }
 }
 
-/**
- * exhaustive_type_subject — the class/interface axis of `exhaustive` (match-universal phase 1), for
- * a NON-variant, NON-enum subject. A polymorphic base-class subject is exhaustive iff an unguarded
- * bind-all names the base or the closed subclass set is fully covered. An interface subject is
- * exhaustive only via an unguarded bind-all naming it (its `_` case is handled by `has_wildcard`
- * upstream). Every other subject kind is open and requires the catch-all, so it answers false.
- *
- * @param arms     the match arms
- * @param subject  the resolved (non-variant, non-enum) subject type
- * @param table    the program's type table
- * @param ref_ns   the match site's namespace
- * @return         true iff the arms cover the class/interface subject exhaustively
- */
 fn exhaustive_type_subject(arms: []parser::Arm, subject: @Type(), table: TypeTable, ref_ns: str): bool {
     match subject {
         Named as n => {

@@ -1,58 +1,13 @@
 use teko::parser
 
-/**
- * CxBinds — the comptime call-frame substitution: two PARALLEL lists mapping a `comptime`'s parameter
- * NAMES to the caller's already-reconstructed argument LITERALS. When `expand_comptime` evaluates a
- * comptime body it types the body against the params, then walks it replacing each param `TVar` with its
- * bound literal (via this map) so the resulting tree is NAME-FREE and `eval_const` can fold it. Empty for
- * the top-level program walk (no substitution); populated once per comptime call frame.
- *
- * @field names  the bound parameter names, in declaration order
- * @field vals   PARALLEL to `names` — each parameter's argument value reconstructed as a literal `TExpr`
- * @since 0.4-macros (§14 Family-B B3)
- */
 type CxBinds = struct { names: []str; vals: []TExpr }
 
-/**
- * CxCtx — the `expand_comptime` walk context threaded through the whole-program rewrite: the folded type
- * table (carries the comptime registry + drives reflection), the current call-frame substitution
- * (`CxBinds`), and the comptime-call recursion depth (bounded so a self-referential comptime cannot
- * diverge the compiler).
- *
- * @field table  the folded type table (comptime registry + type resolution)
- * @field binds  the current comptime call-frame's parameter substitution (empty at top level)
- * @field depth  the comptime-call nesting depth (capped by `cx_max_depth`)
- * @since 0.4-macros (§14 Family-B B3)
- */
 type CxCtx = struct { table: TypeTable; binds: CxBinds; depth: u32 }
 
-/**
- * cx_empty_binds — the empty call-frame substitution (the top-level program walk substitutes nothing).
- *
- * @return  a `CxBinds` with empty parallel lists
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_empty_binds(): CxBinds { CxBinds { names = teko::list::empty(); vals = teko::list::empty() } }
 
-/**
- * cx_max_depth — the comptime-call nesting cap. A comptime whose body calls a comptime nests one frame;
- * a self-referential (or mutually recursive) comptime would nest without bound, so a fold past this
- * depth is a located error rather than a compiler stack overflow.
- *
- * @return  the maximum comptime-call nesting depth
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_max_depth(): u32 { 64 }
 
-/**
- * cx_binds_lookup — the literal bound to parameter `name` in `binds`, or null when `name` is not a bound
- * parameter (a free/local name that must survive to `eval_const`).
- *
- * @param binds  the call-frame substitution
- * @param name   the variable name to resolve
- * @return       the bound literal, or null when `name` is not a bound parameter
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_binds_lookup(binds: CxBinds, name: str): TExpr | null {
     var i: u64 = 0
     loop {
@@ -63,26 +18,6 @@ fn cx_binds_lookup(binds: CxBinds, name: str): TExpr | null {
     null
 }
 
-/**
- * expand_comptime — the Family-B pass (§14): fold every surviving `@name(...)` comptime call in the
- * type-checked, monomorphized program to a literal, at `project.tks` after `monomorph` and before
- * `inline_consts`. A comptime call is a `TCall` marked by the reserved `call_ns` sentinel
- * (`comptime_call_ns`); for each, every argument is evaluated to a `ConstValue` (a runtime-valued
- * argument is a call-site error — the comptime-KNOWN rule, §14.2), the comptime body is typed against
- * its parameters and evaluated with those argument values substituted, and the call is replaced by
- * `comptime_literal_of(result)`. Deterministic ⇒ byte-identical fixpoint. Downstream (`inline_consts`,
- * lowering) sees only ordinary literals.
- *
- * INERT: the comptime registry is empty on any program that writes no `comptime`, so the fast path
- * returns `prog` unchanged and the whole walker is dead on the current corpus (plan §7 inertness).
- *
- * @param prog   the type-checked, monomorphized program
- * @param table  the folded type table (carries the comptime registry + drives reflection)
- * @return       the program with every Family-B call inlined as a literal, or the first fold error
- * @throws       a call-site diagnostic when an argument's value is required but not comptime-constant,
- *               or when a comptime body is not a foldable value expression
- * @since 0.4-macros (§14 Family-B B3)
- */
 pub fn expand_comptime(prog: TProgram, table: TypeTable): TProgram | error {
     if table.comptimes.len == 0 { return prog }
     var ctx = CxCtx { table = table; binds = cx_empty_binds(); depth = 0 to u32 }
@@ -97,15 +32,6 @@ pub fn expand_comptime(prog: TProgram, table: TypeTable): TProgram | error {
     TProgram { items = out }
 }
 
-/**
- * cx_item — expand comptime calls in one program item: a function body, a const initializer or a loose
- * statement; every other item passes through unchanged (mirrors `fold_item`).
- *
- * @param it   the program item
- * @param ctx  the walk context
- * @return     the item with its comptime calls expanded, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_item(it: @TItem(), ctx: CxCtx): @TItem() | error {
     match it {
         TFunction as f => cx_function(f, ctx)
@@ -115,42 +41,16 @@ fn cx_item(it: @TItem(), ctx: CxCtx): @TItem() | error {
     }
 }
 
-/**
- * cx_function — expand comptime calls in a top-level function's body; its signature and metadata are
- * preserved (mirrors `fold_function`).
- *
- * @param f    the typed function
- * @param ctx  the walk context
- * @return     the function with an expanded body, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_function(f: TFunction, ctx: CxCtx): @TItem() | error {
     var body = match cx_block(f.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
 }
 
-/**
- * cx_const_decl — expand comptime calls in a const declaration's initializer; its metadata is preserved
- * (mirrors `fold_const_decl`).
- *
- * @param cd   the typed const declaration
- * @param ctx  the walk context
- * @return     the const declaration with an expanded initializer, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_const_decl(cd: TConstDecl, ctx: CxCtx): @TItem() | error {
     var init = match cx_expr(cd.init, ctx) { error as x => return x; TExpr as v => v }
     TConstDecl { name = cd.name; namespace = cd.namespace; ty = cd.ty; init = init; vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col; guard = cd.guard }
 }
 
-/**
- * cx_block — expand comptime calls in every statement of a block, in order (mirrors `fold_block`).
- *
- * @param stmts  the typed statement block
- * @param ctx    the walk context
- * @return       the block with each statement expanded, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_block(stmts: []@TStatement(), ctx: CxCtx): []@TStatement() | error {
     var out: []@TStatement() = teko::list::empty()
     var i: u64 = 0
@@ -163,15 +63,6 @@ fn cx_block(stmts: []@TStatement(), ctx: CxCtx): []@TStatement() | error {
     out
 }
 
-/**
- * cx_stmt — expand comptime calls in one statement, descending into every expression and nested block it
- * carries (mirrors `fold_stmt`). TOTAL over `TStatement`.
- *
- * @param st   the typed statement
- * @param ctx  the walk context
- * @return     the statement with comptime calls expanded, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_stmt(st: @TStatement(), ctx: CxCtx): @TStatement() | error {
     match st {
         TBinding as b => {
@@ -210,30 +101,12 @@ fn cx_stmt(st: @TStatement(), ctx: CxCtx): @TStatement() | error {
     }
 }
 
-/**
- * cx_return — expand comptime calls in a `return` statement's value (a value-less `return` is unchanged).
- *
- * @param r    the typed return statement
- * @param st   the original statement (returned unchanged when value-less)
- * @param ctx  the walk context
- * @return     the return with an expanded value, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_return(r: TReturn, st: @TStatement(), ctx: CxCtx): @TStatement() | error {
     if !r.has_value { return st }
     var v = match cx_expr(r.value, ctx) { error as x => return x; TExpr as f => f }
     TReturn { has_value = true; value = v; values = teko::list::empty() }
 }
 
-/**
- * cx_assign — expand comptime calls in an assignment's value and, for a field target, its typed LHS
- * expression (mirrors `fold_assign`).
- *
- * @param a    the typed assignment
- * @param ctx  the walk context
- * @return     the assignment with expanded children, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_assign(a: TAssign, ctx: CxCtx): @TStatement() | error {
     var value = match cx_expr(a.value, ctx) { error as x => return x; TExpr as f => f }
     if parser::assign_has_target(a.kind) {
@@ -243,17 +116,6 @@ fn cx_assign(a: TAssign, ctx: CxCtx): @TStatement() | error {
     TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = a.target }
 }
 
-/**
- * cx_expr — the expander's expression driver: substitute a bound comptime parameter, then rebuild the
- * node around its expanded children, then — when the rebuilt node is a comptime `TCall` — fold it to its
- * literal. Bottom-up, so a comptime call nested in another call's arguments is already a literal before
- * the outer call is evaluated. TOTAL over `@TExprKind()`.
- *
- * @param e    the typed expression
- * @param ctx  the walk context
- * @return     the expression with comptime calls expanded (and bound params substituted), or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_expr(e: TExpr, ctx: CxCtx): TExpr | error {
     match e.kind {
         TVar as v => match cx_binds_lookup(ctx.binds, v.name) {
@@ -269,14 +131,6 @@ fn cx_expr(e: TExpr, ctx: CxCtx): TExpr | error {
     }
 }
 
-/**
- * cx_exprs — expand comptime calls in each expression of a list, in order (mirrors `fold_exprs`).
- *
- * @param es   the typed expressions
- * @param ctx  the walk context
- * @return     the expanded expressions, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_exprs(es: []TExpr, ctx: CxCtx): []TExpr | error {
     var out: []TExpr = teko::list::empty()
     var i: u64 = 0
@@ -289,15 +143,6 @@ fn cx_exprs(es: []TExpr, ctx: CxCtx): []TExpr | error {
     out
 }
 
-/**
- * cx_children — rebuild `e` around its expanded children, one arm per `@TExprKind()` (mirrors
- * `fold_children`). A leaf carries no child expression and is returned unchanged.
- *
- * @param e    the typed expression
- * @param ctx  the walk context
- * @return     the expression rebuilt around its expanded children, or the first fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_children(e: TExpr, ctx: CxCtx): TExpr | error {
     match e.kind {
         TNumber => e
@@ -327,145 +172,54 @@ fn cx_children(e: TExpr, ctx: CxCtx): TExpr | error {
     }
 }
 
-/**
- * cx_binary — rebuild a binary node around its expanded operands.
- *
- * @param b    the typed binary expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the binary rebuilt with expanded operands, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_binary(b: TBinary, e: TExpr, ctx: CxCtx): TExpr | error {
     var l = match cx_expr(b.left, ctx) { error as x => return x; TExpr as v => v }
     var r = match cx_expr(b.right, ctx) { error as x => return x; TExpr as v => v }
     TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_unary — rebuild a unary node around its expanded operand.
- *
- * @param u    the typed unary expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the unary rebuilt with an expanded operand, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_unary(u: TUnary, e: TExpr, ctx: CxCtx): TExpr | error {
     var o = match cx_expr(u.operand, ctx) { error as x => return x; TExpr as v => v }
     TExpr { kind = TUnary { op = u.op; operand = o }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_cast — rebuild a cast node around its expanded operand.
- *
- * @param c    the typed cast expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the cast rebuilt with an expanded operand, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_cast(c: TCast, e: TExpr, ctx: CxCtx): TExpr | error {
     var o = match cx_expr(c.expr, ctx) { error as x => return x; TExpr as v => v }
     TExpr { kind = TCast { expr = o }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_field — rebuild a field access around its expanded receiver.
- *
- * @param fa   the typed field-access expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the field access rebuilt with an expanded receiver, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_field(fa: TFieldAccess, e: TExpr, ctx: CxCtx): TExpr | error {
     var r = match cx_expr(fa.receiver, ctx) { error as x => return x; TExpr as v => v }
     TExpr { kind = TFieldAccess { receiver = r; field = fa.field }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_index — rebuild an index around its expanded receiver and index.
- *
- * @param ix   the typed index expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the index rebuilt with expanded children, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_index(ix: TIndex, e: TExpr, ctx: CxCtx): TExpr | error {
     var r = match cx_expr(ix.receiver, ctx) { error as x => return x; TExpr as v => v }
     var n = match cx_expr(ix.index, ctx) { error as x => return x; TExpr as v => v }
     TExpr { kind = TIndex { receiver = r; index = n }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_borrow — rebuild a `&x` borrow node around its expanded operand.
- *
- * @param b    the typed borrow expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the borrow rebuilt with an expanded operand, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_borrow(b: TBorrow, e: TExpr, ctx: CxCtx): TExpr | error {
     var o = match cx_expr(b.operand, ctx) { error as x => return x; TExpr as v => v }
     TExpr { kind = TBorrow { operand = o }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_call — rebuild a call node around its expanded argument expressions (the callee path carries no
- * child expression). The rebuilt call is then classified by `cx_expr`'s post-rebuild step.
- *
- * @param cl   the typed call expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the call rebuilt with expanded arguments, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_call(cl: TCall, e: TExpr, ctx: CxCtx): TExpr | error {
     var args = match cx_exprs(cl.args, ctx) { error as x => return x; []TExpr as a => a }
     TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_struct — rebuild a struct-init node around its expanded field values.
- *
- * @param si   the typed struct-init expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the struct-init rebuilt with expanded field values, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_struct(si: TStructInit, e: TExpr, ctx: CxCtx): TExpr | error {
     var vals = match cx_exprs(si.field_vals, ctx) { error as x => return x; []TExpr as v => v }
     TExpr { kind = TStructInit { field_names = si.field_names; field_vals = vals }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_in — rebuild an `in` membership node around its expanded left-hand side and element list.
- *
- * @param n    the typed `in` expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the `in` expression rebuilt with expanded children, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_in(n: TInExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     var lhs = match cx_expr(n.lhs, ctx) { error as x => return x; TExpr as v => v }
     var elems = match cx_exprs(n.elems, ctx) { error as x => return x; []TExpr as v => v }
     TExpr { kind = TInExpr { lhs = lhs; elems = elems }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_if — rebuild an `if` expression around its expanded condition and branch blocks.
- *
- * @param f    the typed `if` expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the `if` expression rebuilt with expanded children, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_if(f: TIfExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     var cond = match cx_expr(f.cond, ctx) { error as x => return x; TExpr as v => v }
     var then_blk = match cx_block(f.then_blk, ctx) { error as x => return x; []@TStatement() as v => v }
@@ -473,15 +227,6 @@ fn cx_if(f: TIfExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     TExpr { kind = TIfExpr { cond = cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_compare — rebuild a comparison chain around its expanded first operand and every expanded term.
- *
- * @param c    the typed comparison expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the comparison rebuilt with expanded operands, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_compare(c: TCompare, e: TExpr, ctx: CxCtx): TExpr | error {
     var first = match cx_expr(c.first, ctx) { error as x => return x; TExpr as v => v }
     var terms: []TCmpTerm = teko::list::empty()
@@ -495,15 +240,6 @@ fn cx_compare(c: TCompare, e: TExpr, ctx: CxCtx): TExpr | error {
     TExpr { kind = TCompare { first = first; rest = terms }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_match — rebuild a match expression around its expanded subject and every expanded arm.
- *
- * @param m    the typed match expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the match rebuilt with expanded children, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_match(m: TMatchExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     var subject = match cx_expr(m.subject, ctx) { error as x => return x; TExpr as v => v }
     var arms: []TArm = teko::list::empty()
@@ -517,14 +253,6 @@ fn cx_match(m: TMatchExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     TExpr { kind = TMatchExpr { subject = subject; arms = arms }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_arm — expand comptime calls in one match arm: its guard (when present) and its body block.
- *
- * @param arm  the typed match arm
- * @param ctx  the walk context
- * @return     the arm with an expanded guard and body, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_arm(arm: TArm, ctx: CxCtx): TArm | error {
     var guard = if arm.has_when {
         match cx_expr(arm.guard, ctx) { error as x => return x; TExpr as v => v }
@@ -533,44 +261,16 @@ fn cx_arm(arm: TArm, ctx: CxCtx): TArm | error {
     TArm { pattern = arm.pattern; has_when = arm.has_when; guard = guard; body = body }
 }
 
-/**
- * cx_lambda — rebuild a closure literal around its expanded body block (signature and captures carry no
- * child expression).
- *
- * @param lam  the typed closure literal
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the closure rebuilt with an expanded body, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_lambda(lam: TLambda, e: TExpr, ctx: CxCtx): TExpr | error {
     var body = match cx_block(lam.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TLambda { params = lam.params; body = body; captures = lam.captures; ret = lam.ret; lift_id = lam.lift_id }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_block_expr — rebuild a Block-B (§9 E) around its expanded inline body.
- *
- * @param blk  the typed Block-B node
- * @param e    the enclosing block expression (its type/position)
- * @param ctx  the walk context
- * @return     the block expression with an expanded body, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_block_expr(blk: TBlockExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     var body = match cx_block(blk.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TExpr { kind = TBlockExpr { body = body }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_interp — rebuild an interpolation around its expanded holes and dynamic specs.
- *
- * @param in   the typed interpolation expression
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the interpolation rebuilt with expanded holes/specs, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_interp(in: TInterp, e: TExpr, ctx: CxCtx): TExpr | error {
     var holes: []TExpr = teko::list::empty()
     var specs: []TFSpec = teko::list::empty()
@@ -588,15 +288,6 @@ fn cx_interp(in: TInterp, e: TExpr, ctx: CxCtx): TExpr | error {
     TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_fspec — expand comptime calls in a format spec: a dynamic (`:[…]`) spec's argument expressions are
- * expanded; a none/static spec carries no expression and is returned unchanged.
- *
- * @param sp   the format spec
- * @param ctx  the walk context
- * @return     the spec with expanded dynamic arguments, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_fspec(sp: TFSpec, ctx: CxCtx): TFSpec | error {
     match sp.kind {
         TFSpecDynamic as fd => {
@@ -607,15 +298,6 @@ fn cx_fspec(sp: TFSpec, ctx: CxCtx): TFSpec | error {
     }
 }
 
-/**
- * cx_array — rebuild an array/slice literal around its expanded elements.
- *
- * @param a    the typed array literal
- * @param e    the enclosing expression (its type/position)
- * @param ctx  the walk context
- * @return     the array literal rebuilt with expanded elements, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_array(a: TArrayLit, e: TExpr, ctx: CxCtx): TExpr | error {
     var elems: []TArrayElem = teko::list::empty()
     var i: u64 = 0
@@ -628,64 +310,28 @@ fn cx_array(a: TArrayLit, e: TExpr, ctx: CxCtx): TExpr | error {
     TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
 }
 
-/**
- * cx_maybe_comptime — classify a rebuilt `TCall`: a comptime call (marked by the reserved `call_ns`
- * sentinel, `comptime_call_ns`) whose name resolves in the registry is folded to its literal; every
- * other call — the ordinary runtime call, including a runtime function that SHARES a comptime's name
- * (§14.2 no-shadow) — is left untouched.
- *
- * @param c    the rebuilt typed call
- * @param e    the enclosing call expression (its type/position drive the reconstructed literal)
- * @param ctx  the walk context
- * @return     the folded literal for a comptime call, or `e` for an ordinary call, or a fold error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_maybe_comptime(c: TCall, e: TExpr, ctx: CxCtx): TExpr | error {
     if c.call_ns != comptime_call_ns() { return e }
     var name = cx_call_name(c)
     match tt_find_comptime(ctx.table, name) {
-        null => error { message = $"internal: comptime call `@{name}` resolved to no `comptime` declaration at expansion (§14 Family-B B3)" }
+        null => error { message = $"internal: comptime call `@{name}` resolved to no `comptime` declaration at expansion" }
         ComptimeReg as reg => cx_eval_comptime(c, reg.decl, reg.namespace, e, ctx)
     }
 }
 
-/**
- * cx_call_name — the bare callee name of a comptime call (its path's last segment).
- *
- * @param c  the typed call
- * @return   the callee's last path segment, or "" for an empty path
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_call_name(c: TCall): str {
     if c.callee.segments.len == 0 { return "" }
     c.callee.segments[c.callee.segments.len - 1].name
 }
 
-/**
- * cx_eval_comptime — fold one comptime call to its literal: bind each type argument to its parameter and
- * resolve `T.size`/`T.name` reflection in the body (B4), bind each value argument to a `ConstValue` (a
- * runtime-valued argument is a call-site error, §14.2), type the reflection-resolved body against the
- * value parameters, substitute the bound arguments and expand any nested comptime calls, evaluate the
- * resulting name-free value with `eval_const`, and reconstruct the result as a literal at the call's
- * type. A body that is not a single value expression is a located error (B3 folds expression bodies; a
- * statement-body comptime is a later crumb, B3.1).
- *
- * @param c    the comptime call
- * @param cd   the resolved comptime declaration
- * @param ns   the comptime's declaring namespace (the body types under it)
- * @param e    the enclosing call expression (its type/position)
- * @param ctx  the walk context
- * @return     the folded literal, or a located error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_eval_comptime(c: TCall, cd: parser::ComptimeDecl, ns: str, e: TExpr, ctx: CxCtx): TExpr | error {
-    if ctx.depth >= cx_max_depth() { return error { message = $"comptime call `@{cd.name}` nests deeper than {cx_max_depth() to u64} frames — a recursive comptime cannot be folded (§14 Family-B B3)" } }
+    if ctx.depth >= cx_max_depth() { return error { message = $"comptime call `@{cd.name}` nests deeper than {cx_max_depth() to u64} frames — a recursive comptime cannot be folded" } }
     if cd.type_params.len != c.type_args.len { return error { message = $"comptime `@{cd.name}` expects {cd.type_params.len} type argument(s), got {c.type_args.len}" } }
     if c.args.len != cd.params.len { return error { message = $"comptime `@{cd.name}` expects {cd.params.len} argument(s), got {c.args.len}" } }
     var tb = CxTypeBinds { names = cd.type_params; types = c.type_args }
     var rc = CxRefl { tb = tb; table = ctx.table; fields_elem = cx_slice_elem_name(cd.ret) }
     var binds = match cx_bind_args(cd, c, ctx) { error as x => return x; CxBinds as b => b }
-    var bodyval0 = match cx_body_value(cd) { null => return error { message = $"comptime `@{cd.name}`'s body is not a single value expression — a statement-body comptime is not yet foldable (§14 Family-B B3.1)" }; parser::Expr as bv => bv }
+    var bodyval0 = match cx_body_value(cd) { null => return error { message = $"comptime `@{cd.name}`'s body is not a single value expression — a statement-body comptime is not yet foldable" }; parser::Expr as bv => bv }
     var bodyval = match cx_reflect_expr(bodyval0, rc) { error as x => return x; parser::Expr as bv => bv }
     var env = match cx_param_env(cd, ns, ctx) { error as x => return x; Env as v => v }
     var typed = match type_expr(bodyval, env, ctx.table) { error as x => return x; TExpr as v => v }
@@ -694,43 +340,14 @@ fn cx_eval_comptime(c: TCall, cd: parser::ComptimeDecl, ns: str, e: TExpr, ctx: 
     var value = match eval_const(substituted, ctx.table, env_empty(), cx_expand_agg()) { error as x => return x; ConstValue as v => v }
     match comptime_literal_of(value, e.type, ctx.table, e.line, e.col) {
         TExpr as lit => lit
-        null => error { message = $"comptime `@{cd.name}`'s result has no literal form for its declared return type (§14 Family-B B3)" }
+        null => error { message = $"comptime `@{cd.name}`'s result has no literal form for its declared return type" }
     }
 }
 
-/**
- * CxTypeBinds — a comptime call-frame's TYPE-parameter binding (§14 B4): two PARALLEL lists mapping a
- * comptime's type-parameter NAMES to the caller's resolved concrete `Type` arguments. `cx_reflect_expr`
- * reads it to fold `T.size` / `T.name` reflection over the bound type before the body is typed.
- *
- * @field names  the bound type-parameter names, in declaration order
- * @field types  PARALLEL to `names` — each type parameter's resolved concrete `Type` argument
- * @since 0.4-macros (§14 Family-B B4)
- */
 type CxTypeBinds = struct { names: []str; types: []@Type() }
 
-/**
- * CxRefl — the reflection walk context (§14 B4/B5): the type-parameter binding, the type table (for the
- * `T.fields` field-view projection, B5), and the element type name of the comptime's declared `[]Elem`
- * return (the struct each `T.fields` descriptor is built as). Threaded read-only through the untyped
- * reflection rewrite.
- *
- * @field tb           the type-parameter binding
- * @field table        the folded type table (resolves `T`'s field views for `T.fields`)
- * @field fields_elem  the element type name of a `[]Elem` return (empty when the return is not a slice)
- * @since 0.4-macros (§14 Family-B B5)
- */
 type CxRefl = struct { tb: CxTypeBinds; table: TypeTable; fields_elem: str }
 
-/**
- * cx_type_bind — the concrete `Type` bound to type-parameter `name` in `tb`, or null when `name` is not
- * a bound type parameter (an ordinary field access, not reflection).
- *
- * @param tb    the type-parameter binding
- * @param name  the receiver name to resolve
- * @return      the bound type, or null when `name` is not a bound type parameter
- * @since 0.4-macros (§14 Family-B B4)
- */
 fn cx_type_bind(tb: CxTypeBinds, name: str): @Type() | null {
     var i: u64 = 0
     loop {
@@ -741,19 +358,6 @@ fn cx_type_bind(tb: CxTypeBinds, name: str): @Type() | null {
     null
 }
 
-/**
- * cx_reflect_expr — resolve `T.size` / `T.name` / `T.fields` type reflection over the bound type
- * parameters in an UNTYPED comptime body value BEFORE it is typed (§14 B4/B5): a type parameter
- * reflected with `.size` becomes an integer literal, with `.name` a string literal, with `.fields` an
- * array literal of field descriptors. Recurses the const-expression grammar (binary/unary/cast/index/
- * call arguments); a leaf and any other shape pass through unchanged. A reflection field that is NOT
- * resolvable here is a located error rather than a silently-wrong fold.
- *
- * @param e   the untyped body value expression
- * @param rc  the reflection walk context
- * @return    the body value with reflection resolved to literals, or a located error
- * @since 0.4-macros (§14 Family-B B4)
- */
 fn cx_reflect_expr(e: parser::Expr, rc: CxRefl): parser::Expr | error {
     match e.kind {
         parser::FieldAccess as fa => cx_reflect_field(fa, e, rc)
@@ -783,14 +387,6 @@ fn cx_reflect_expr(e: parser::Expr, rc: CxRefl): parser::Expr | error {
     }
 }
 
-/**
- * cx_reflect_args — resolve reflection in each argument of a call within a comptime body, in order.
- *
- * @param args  the untyped argument expressions
- * @param rc    the reflection walk context
- * @return      the arguments with reflection resolved, or the first located error
- * @since 0.4-macros (§14 Family-B B4)
- */
 fn cx_reflect_args(args: []parser::Expr, rc: CxRefl): []parser::Expr | error {
     var out: []parser::Expr = teko::list::empty()
     var i: u64 = 0
@@ -803,18 +399,6 @@ fn cx_reflect_args(args: []parser::Expr, rc: CxRefl): []parser::Expr | error {
     out
 }
 
-/**
- * cx_reflect_field — resolve one field access as type reflection when its receiver names a bound type
- * parameter and its field is `size` / `name` / `fields` (§14 B4/B5). Any other receiver or field is an
- * ordinary field access whose receiver is reflection-resolved and rebuilt.
- *
- * @param fa  the untyped field access
- * @param e   the enclosing expression (its position)
- * @param rc  the reflection walk context
- * @return    the reflected literal, or the field access rebuilt with a reflection-resolved receiver, or
- *            a located error when the reflection is not resolvable
- * @since 0.4-macros (§14 Family-B B4)
- */
 fn cx_reflect_field(fa: parser::FieldAccess, e: parser::Expr, rc: CxRefl): parser::Expr | error {
     var recv_name = match fa.receiver.kind { parser::Var as v => v.name; _ => "" }
     if recv_name != "" {
@@ -827,51 +411,21 @@ fn cx_reflect_field(fa: parser::FieldAccess, e: parser::Expr, rc: CxRefl): parse
     parser::Expr { kind = parser::FieldAccess { receiver = r; field = fa.field }; line = e.line; col = e.col }
 }
 
-/**
- * cx_reflect_of — the reflection literal for a bound type `t` and reflection field `field`: `size` ->
- * the slot-size integer literal, `name` -> the rendered-name string literal, `fields` -> the field-view
- * array literal (B5); any other field on a bound type parameter is a located error (Extent-1/Extent-3).
- * A `.size` whose type the checker cannot slot-size (an aggregate needing LIR layout) is a located error.
- *
- * @param t      the bound concrete type
- * @param field  the reflection field name
- * @param e      the enclosing expression (its position for the produced literal)
- * @param tname  the type-parameter name (for diagnostics)
- * @param rc     the reflection walk context (for the `fields` projection)
- * @return       the reflection literal, or a located error
- * @since 0.4-macros (§14 Family-B B4)
- */
 fn cx_reflect_of(t: @Type(), field: str, e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
     if field == "name" { return parser::Expr { kind = parser::StrLit { text = type_render(t) }; line = e.line; col = e.col } }
     if field == "fields" { return cx_reflect_fields(t, e, tname, rc) }
     if field == "size" {
         match cx_type_size(t) {
             u32 as sz => return parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(sz to u64); fval = 0.0 }; line = e.line; col = e.col }
-            null => return error { message = $"comptime `{tname}.size` is not foldable for `{type_render(t)}` — an aggregate's slot size needs layout, not yet reachable at comptime (§14 B4)" }
+            null => return error { message = $"comptime `{tname}.size` is not foldable for `{type_render(t)}` — an aggregate's slot size needs layout, not yet reachable at comptime" }
         }
     }
-    error { message = $"comptime type reflection has only `.size`, `.name` and `.fields` — `{tname}.{field}` is not a reflection field (§14 B4/B5)" }
+    error { message = $"comptime type reflection has only `.size`, `.name` and `.fields` — `{tname}.{field}` is not a reflection field" }
 }
 
-/**
- * cx_reflect_fields — the `T.fields` reflection (§14 B5, Extent-3, GUARDED): the compile-time field view
- * of the bound type `t`, projected as an untyped array literal of field DESCRIPTORS — one struct literal
- * of the comptime's `[]Elem` return element type per field, in declaration order. Each descriptor is
- * populated by the well-known descriptor field names `name` (the field's declared name) and
- * `is_nullable` (true iff the field's resolved type is a `X | null` union, §9.D). DESCRIPTORS ONLY — it
- * NEVER reads a field's runtime value (Law M.0 / §14.2 guardrail). A non-field-shaped type, or a return
- * that is not a `[]Struct`, is a located error.
- *
- * @param t      the bound concrete type whose fields are reflected
- * @param e      the enclosing expression (its position)
- * @param tname  the type-parameter name (for diagnostics)
- * @param rc     the reflection walk context (the type table + the descriptor element type name)
- * @return       the untyped `[]Elem` array literal of field descriptors, or a located error
- * @since 0.4-macros (§14 Family-B B5)
- */
 fn cx_reflect_fields(t: @Type(), e: parser::Expr, tname: str, rc: CxRefl): parser::Expr | error {
-    if rc.fields_elem == "" { return error { message = $"comptime `{tname}.fields` requires the comptime to return a `[]Struct` descriptor slice (§14 B5)" } }
-    var type_name = match t { Named as n => n.name; _ => return error { message = $"comptime `{tname}.fields` needs a field-shaped type — `{type_render(t)}` has no fields (§14 B5)" } }
+    if rc.fields_elem == "" { return error { message = $"comptime `{tname}.fields` requires the comptime to return a `[]Struct` descriptor slice" } }
+    var type_name = match t { Named as n => n.name; _ => return error { message = $"comptime `{tname}.fields` needs a field-shaped type — `{type_render(t)}` has no fields" } }
     var fvs = match deriver_field_view(type_name, rc.table) { []FieldView as v => v; error as x => return x }
     var elems: []parser::ArrayElem = teko::list::empty()
     var i: u64 = 0
@@ -883,17 +437,6 @@ fn cx_reflect_fields(t: @Type(), e: parser::Expr, tname: str, rc: CxRefl): parse
     parser::Expr { kind = parser::ArrayLit { elements = elems }; line = e.line; col = e.col }
 }
 
-/**
- * cx_field_descriptor — one field descriptor struct literal for `T.fields` (§14 B5): a `<Elem> { name =
- * "<field>", is_nullable = <bool> }` untyped struct literal, where `is_nullable` is true iff the field's
- * resolved type is a `X | null` union. The typer validates it against the declared descriptor type.
- *
- * @param fv    the field view (declared name + resolved type)
- * @param elem  the descriptor element type name (the comptime's `[]Elem` element)
- * @param e     the enclosing expression (its position)
- * @return      the untyped field-descriptor struct literal
- * @since 0.4-macros (§14 Family-B B5)
- */
 fn cx_field_descriptor(fv: FieldView, elem: str, e: parser::Expr): parser::Expr {
     var names = teko::list::push(teko::list::push(teko::list::empty(), "name"), "is_nullable")
     var name_lit = parser::Expr { kind = parser::StrLit { text = fv.name }; line = e.line; col = e.col }
@@ -902,26 +445,10 @@ fn cx_field_descriptor(fv: FieldView, elem: str, e: parser::Expr): parser::Expr 
     parser::Expr { kind = parser::StructLit { type_path = cx_path1(elem); type_args = teko::list::empty(); field_names = names; field_vals = vals }; line = e.line; col = e.col }
 }
 
-/**
- * cx_path1 — a single-segment path naming `name` (the descriptor element type in a `T.fields` struct
- * literal).
- *
- * @param name  the bare type name
- * @return      the one-segment path
- * @since 0.4-macros (§14 Family-B B5)
- */
 fn cx_path1(name: str): parser::Path {
     parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
 }
 
-/**
- * cx_slice_elem_name — the element type NAME of a `[]Named` return type expression, or "" when the
- * return is not a slice of a named type. Drives the descriptor struct literal `T.fields` builds.
- *
- * @param te  the comptime's declared return type expression
- * @return    the slice element's named type, or "" when the return is not `[]Named`
- * @since 0.4-macros (§14 Family-B B5)
- */
 fn cx_slice_elem_name(te: @TypeExpr()): str {
     match te {
         parser::SliceType as sl => match sl.element {
@@ -932,16 +459,6 @@ fn cx_slice_elem_name(te: @TypeExpr()): str {
     }
 }
 
-/**
- * cx_type_size — the slot size in bytes of a type the comptime fold can compute WITHOUT LIR layout: a
- * primitive by its machine width, `byte` = 1, a pointer word = 8. An aggregate (struct/slice/str/…),
- * whose slot size depends on layout the checker does not compute, returns null (a located error at the
- * call site). Matches `lir::ltype_size` for the scalar classes.
- *
- * @param t  the type to size
- * @return   the slot size in bytes, or null when the size needs LIR layout
- * @since 0.4-macros (§14 Family-B B4)
- */
 fn cx_type_size(t: @Type()): u32 | null {
     match t {
         Prim as p => cx_prim_size(p.kind)
@@ -953,14 +470,6 @@ fn cx_type_size(t: @Type()): u32 | null {
     }
 }
 
-/**
- * cx_prim_size — the byte width of a primitive kind: 1 for 8-bit ints and `bool`, 2/4/8 by width, 8 for
- * the machine-word `size`/`usize` and the 64-bit floats. Exhaustive over `PrimKind`.
- *
- * @param k  the primitive kind
- * @return   its byte width
- * @since 0.4-macros (§14 Family-B B4)
- */
 fn cx_prim_size(k: PrimKind): u32 {
     match k {
         U8 => 1 to u32
@@ -979,27 +488,8 @@ fn cx_prim_size(k: PrimKind): u32 {
     }
 }
 
-/**
- * cx_expand_agg — the empty aggregate-const map for the comptime body evaluation: a comptime body's
- * name-free (post-substitution) value resolves no module aggregate, so an empty map suffices.
- *
- * @return  an empty aggregate-const map
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_expand_agg(): AggConstMap { ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() } }
 
-/**
- * cx_bind_args — evaluate each of a comptime call's arguments to a `ConstValue` and reconstruct it as a
- * literal at the corresponding parameter's type, building the call-frame substitution. A runtime-valued
- * argument (one `eval_const` cannot fold) is a located call-site error — the comptime-KNOWN rule
- * (§14.2). Every argument is already child-expanded, so a nested comptime call is already a literal here.
- *
- * @param cd   the resolved comptime declaration (its parameter names and types)
- * @param c    the comptime call (its argument expressions)
- * @param ctx  the walk context
- * @return     the parameter->argument-literal substitution, or the first argument error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_bind_args(cd: parser::ComptimeDecl, c: TCall, ctx: CxCtx): CxBinds | error {
     var names: []str = teko::list::empty()
     var vals: []TExpr = teko::list::empty()
@@ -1008,12 +498,12 @@ fn cx_bind_args(cd: parser::ComptimeDecl, c: TCall, ctx: CxCtx): CxBinds | error
         if i >= cd.params.len { break }
         var cv = match eval_const(c.args[i], ctx.table, env_empty(), cx_expand_agg()) {
             ConstValue as v => v
-            error => return error { message = $"comptime `@{cd.name}`'s argument `{cd.params[i].name}` must be a compile-time constant (§14.2 comptime-known)" }
+            error => return error { message = $"comptime `@{cd.name}`'s argument `{cd.params[i].name}` must be a compile-time constant" }
         }
         var pty = match resolve_type(cd.params[i].type_ann, ctx.table, "") { (@Type()) as t => t; error as x => return x }
         var lit = match comptime_literal_of(cv, pty, ctx.table, c.args[i].line, c.args[i].col) {
             TExpr as l => l
-            null => return error { message = $"comptime `@{cd.name}`'s argument `{cd.params[i].name}` has no literal form for its parameter type (§14 Family-B B3)" }
+            null => return error { message = $"comptime `@{cd.name}`'s argument `{cd.params[i].name}` has no literal form for its parameter type" }
         }
         names = teko::list::push(names, cd.params[i].name)
         vals = teko::list::push(vals, lit)
@@ -1022,17 +512,6 @@ fn cx_bind_args(cd: parser::ComptimeDecl, c: TCall, ctx: CxCtx): CxBinds | error
     CxBinds { names = names; vals = vals }
 }
 
-/**
- * cx_param_env — an environment, SCOPED to the comptime's declaring namespace `ns`, defining each of a
- * comptime's parameters at its resolved type, so the body types against them AND any type/const the body
- * references (its `[]FieldInfo` descriptor element, B5) resolves exactly as at the declaration site.
- *
- * @param cd   the resolved comptime declaration
- * @param ns   the comptime's declaring namespace
- * @param ctx  the walk context
- * @return     the parameter-bound, namespace-scoped environment, or a parameter-type resolution error
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_param_env(cd: parser::ComptimeDecl, ns: str, ctx: CxCtx): Env | error {
     var env = with_ns(env_empty(), ns)
     var i: u64 = 0
@@ -1045,15 +524,6 @@ fn cx_param_env(cd: parser::ComptimeDecl, ns: str, ctx: CxCtx): Env | error {
     env
 }
 
-/**
- * cx_body_value — the single value expression a foldable (B3) comptime body yields: the value of a lone
- * `return <expr>` or a lone tail `<expr>` statement, or null for an empty or multi-statement body (a
- * comptime with locals or control flow is a later crumb).
- *
- * @param cd  the resolved comptime declaration
- * @return    the body's single value expression, or null when the body is not a single value expression
- * @since 0.4-macros (§14 Family-B B3)
- */
 fn cx_body_value(cd: parser::ComptimeDecl): parser::Expr | null {
     if cd.body.len != 1 { return null }
     match cd.body[0] {

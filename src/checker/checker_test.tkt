@@ -1,30 +1,21 @@
-// src/checker/checker_test.tkt — tests for the typer (C1). #test functions the runner collects.
-// The typer is unit-tested on HAND-BUILT AST: each type_* must produce a fully typed node (happy)
-// or refuse an ill-typed one (barrier). Rewritten to current Teko (the `Expr` node-wrapper C1-POS,
-// all-fields struct literals, `Function`/`Arm`/`TypeDecl`/`Item` shapes) and module-qualified.
 
 use teko::parser
 
-// --- AST constructors (every expression is wrapped in a positioned `parser::Expr`) ---
 fn ek(k: @ExprKind()): parser::Expr { parser::Expr { kind = k; line = 0; col = 0 } }
 fn e_num(v: i64): parser::Expr { ek(parser::Number { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }) }
 fn e_var(name: str): parser::Expr { ek(parser::Var { name = name }) }
-// DEFARGS (2026-07-01) — an all-positional arg_names array of length n, for tests unrelated to named-call.
 fn pos_names(n: u64): []str {
     var out: []str = teko::list::empty()
     var i: u64 = 0
     loop { if i >= n { break }; out = teko::list::push(out, ""); i++ }
     out
 }
-/** st — an expr-statement wrapping `e`, widened to the `Statement` variant. */
 fn st(e: parser::Expr): @Statement() { parser::ExprStmt { expr = e } }
 fn one_stmt(e: parser::Expr): []@Statement() { teko::list::push(teko::list::empty(), st(e)) }
-/** loop_stmt — a `loop { body }` statement widened to the `Statement` variant (see ret_stmt). */
 fn loop_stmt(body: []@Statement()): @Statement() { parser::LoopStmt { label = ""; init = teko::list::empty(); body = body } }
 fn path1(name: str): parser::Path { parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) } }
 fn named_t(name: str): @TypeExpr() { parser::NamedType { path = path1(name); args = teko::list::empty() } }
 
-// --- Type/env constructors ---
 fn u32t(): @Type() { Prim { kind = PrimKind::U32 } }
 fn u8t(): @Type() { Prim { kind = PrimKind::U8 } }
 fn i64t(): @Type() { Prim { kind = PrimKind::I64 } }
@@ -33,11 +24,6 @@ fn empty_env(): Env { Env { base_slots = teko::list::empty(); bindings = teko::l
 fn empty_table(): TypeTable { tt_empty() }
 fn prim_is(t: @Type(), k: PrimKind): bool { match t { Prim as p => p.kind == k; _ => false } }
 
-// (2026-07-01) `~` and the FULL string-literal-kind matrix — plain/verbatim/multi-line all
-// decode to a plain StrLit by parse time (no flag leaks), so they fold identically; an
-// interpolated string with a REAL hole cannot fold (runtime-dependent); an interpolated string
-// with ZERO holes ($"…" / $@"…" with nothing to interpolate) is a rare but foldable edge case.
-
 #test
 fn types_compare_and_unary() {
     var env = define(empty_env(), "x", u32t(), false)
@@ -45,20 +31,17 @@ fn types_compare_and_unary() {
     var cmp = parser::Compare { first = e_var("x"); rest = crest }
     var tc = match type_compare(cmp, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
     teko::assert::is_true(prim_is(tc.type, PrimKind::Bool))
-    var un = parser::Unary { op = lexer::TokenKind::Bang; operand = ek(cmp) }   // !(x < x) — operand is bool
+    var un = parser::Unary { op = lexer::TokenKind::Bang; operand = ek(cmp) }
     var tu = match type_unary(un, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
     teko::assert::is_true(prim_is(tu.type, PrimKind::Bool))
 }
 
-// build a `fn NAME(x: u32): <ret> { body }` for the function/return tests.
 fn mk_fn(name: str, ret: @TypeExpr(), body: []@Statement()): parser::Function {
     var p = parser::Param { name = "x"; has_type = true; type_ann = named_t("u32"); is_params = false; has_default = false; default_expr = e_num(0) }
     var params = teko::list::push(teko::list::empty(), p)
     parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; has_return = true; return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = false; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false; is_global = false }
 }
 
-/** lam_collect_descends_loop_init — the closure free-variable collector walks a loop's `init` (and
-    body): a var read in the init is collected as a free reference (#517). */
 #test
 fn lam_collect_descends_loop_init() {
     var refs: []str = teko::list::empty()
@@ -80,8 +63,6 @@ fn lam_collect_descends_loop_init() {
     teko::assert::is_true(found)
 }
 
-/** chain_stats_descends_loop_init — the self-append-chain escape analysis walks a loop's `init` (and
-    body) for the named chain (#517). */
 #test
 fn chain_stats_descends_loop_init() {
     var init: []@TStatement() = teko::list::push(teko::list::empty(), t_let("_hi", tnum(3)))
@@ -92,19 +73,10 @@ fn chain_stats_descends_loop_init() {
     teko::assert::is_true(cs.self_appends == 0)
 }
 
-// --- C2 cast helpers ---
 fn i8t(): @Type() { Prim { kind = PrimKind::I8 } }
 fn i16t(): @Type() { Prim { kind = PrimKind::I16 } }
 fn i32t(): @Type() { Prim { kind = PrimKind::I32 } }
 fn strt(): @Type() { Str { } }
-/**
- * f32t — the `f32` primitive type, for the W-RULE tests below (`cast-width-hygiene-0.3.1.md`
- * C1). `u16t`/`u64t` (`comptime_fold_test.tkt`) and `f64t` (`consteval_test.tkt`) already
- * exist in this namespace (`teko::checker`) and are reused bare — every `.tkt` in a directory
- * shares its namespace, so only `f32t` is new here.
- *
- * @return the `f32` primitive type
- */
 fn f32t(): @Type() { Prim { kind = PrimKind::F32 } }
 fn cast_of(varname: str, target_name: str): parser::Cast {
     parser::Cast { expr = e_var(varname); target = named_t(target_name) }
@@ -127,21 +99,11 @@ fn casts_allowed() {
     teko::assert::is_true(cast_const_types_to(5, "i8", PrimKind::I8))
 }
 
-/**
- * same_type_cast_is_redundant_warning — `x to T` where `x` is already `T` is D1 class 1
- * (`cast-width-hygiene-0.3.1.md` §4/§9). The 2026-07-24 ruling made it a direct compile
- * ERROR; the 2026-07-27 ruling REVERSED that to a WARNING (*"o cast, nestes casos, não
- * deveria ser falha, deveria ser warning"*), so `type_cast` prints to stderr and TYPES the
- * expression anyway — `cast_types_to` sees the `TExpr` arm with the target type again, as it
- * did before D1 existed. The ≤2% ARITH-CAST-RATE gate (D4, `metrics.tks`) is what now bounds
- * the class, and it counts this cast precisely because the `TCast` node survives.
- */
 #test
 fn same_type_cast_is_redundant_warning() {
     teko::assert::is_true(cast_types_to("f", i32t(), "i32", PrimKind::I32))
 }
 
-// --- byte↔int cast helpers (byte casts AS u8 — B.36) ---
 fn bytet(): @Type() { Byte { } }
 fn cast_types_to_byte(varname: str, src: @Type()): bool {
     var env = define(empty_env(), varname, src, false)
@@ -162,7 +124,6 @@ fn byte_int_casts_allowed() {
     teko::assert::is_true(cast_const_types_to_byte(200))
 }
 
-// --- C3 field-access: a TypeTable with one struct `Foo { token: u8 }` ---
 fn foo_decl(): parser::TypeDecl {
     var fld = parser::Field { name = "token"; type_ann = named_t("u8"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false }
     var fields = teko::list::push(teko::list::empty(), fld)
@@ -171,7 +132,6 @@ fn foo_decl(): parser::TypeDecl {
 fn foo_table(): TypeTable {
     tt_freeze(tt_push(tt_empty(), TypeReg { name = "Foo"; namespace = ""; file = ""; vis = parser::Visibility::Private; decl = foo_decl() }))
 }
-// --- C7: pattern checking + exhaustiveness over a variant Color = RED | GREEN | BLUE ---
 fn color_subject(): @Type() {
     var members: []@Type() = teko::list::empty()
     members = teko::list::push(members, Named { name = "RED" })
@@ -209,9 +169,6 @@ fn exhaustive_barriers() {
     teko::assert::is_false(exhaustive(arms3, color_subject(), color_table(), ""))
 }
 
-// ---------------------------------------------------------------------------
-// Helpers for extended coverage tests
-// ---------------------------------------------------------------------------
 fn color_enum_decl(): parser::TypeDecl {
     var members = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "RED"), "GREEN"), "BLUE")
     parser::TypeDecl { name = "Color"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::EnumBody { members = members; methods = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_global = false }
@@ -220,83 +177,60 @@ fn color_enum_table(): TypeTable {
     tt_freeze(tt_push(tt_empty(), TypeReg { name = "Color"; namespace = ""; file = ""; vis = parser::Visibility::Private; decl = color_enum_decl() }))
 }
 
-// ---------------------------------------------------------------------------
-// Group A: numeric predicates + type utilities
-// ---------------------------------------------------------------------------
 #test
 fn checker_basic_predicates() {
     i16t()
-    // is_float
     teko::assert::is_true(is_float(Prim { kind = PrimKind::F64 }))
     teko::assert::is_true(is_float(Prim { kind = PrimKind::F32 }))
     teko::assert::is_false(is_float(Prim { kind = PrimKind::I64 }))
-    // op_is_arith_bitwise  (%, &, |, ^)
     teko::assert::is_true(op_is_arith_bitwise(lexer::TokenKind::Percent))
     teko::assert::is_true(op_is_arith_bitwise(lexer::TokenKind::Amp))
     teko::assert::is_false(op_is_arith_bitwise(lexer::TokenKind::Plus))
-    // prim_width
     teko::assert::is_true(prim_width(PrimKind::I32) == 32)
     teko::assert::is_true(prim_width(PrimKind::U64) == 64)
     teko::assert::is_true(prim_width(PrimKind::I8) == 8)
-    // types_eq
     var ts1: []@Type() = teko::list::push(teko::list::empty(), i64t())
     var ts2: []@Type() = teko::list::push(teko::list::empty(), i64t())
     var ts3: []@Type() = teko::list::push(teko::list::empty(), u32t())
     teko::assert::is_true(types_eq(teko::list::empty(), teko::list::empty()))
     teko::assert::is_true(types_eq(ts1, ts2))
     teko::assert::is_false(types_eq(ts1, ts3))
-    // float_fits
     teko::assert::is_true(float_fits(3.14, PrimKind::F64))
     teko::assert::is_true(float_fits(1.0, PrimKind::F32))
     teko::assert::is_false(float_fits(1.0, PrimKind::I64))
 }
 
-// ---------------------------------------------------------------------------
-// Group I: render_func, render_members, union_collect
-// ---------------------------------------------------------------------------
 #test
 fn checker_render_and_join() {
-    // render_members directly — two-member variant renders with " | "
     var m1: []@Type() = teko::list::push(teko::list::empty(), i64t())
     var m2: []@Type() = teko::list::push(m1, Str { })
     var rms = render_members(m2)
     teko::assert::is_true(teko::str::contains(rms, "|"))
-    // render_func directly — "(i64): str"
     var fparams: []@Type() = teko::list::push(teko::list::empty(), i64t())
     var rf = render_func(Func { params = fparams; ret = Str { }; variadic = false; param_names = []; n_required = (fparams).len; defaults = []; ret_extra = teko::list::empty() })
     teko::assert::is_true(teko::str::contains(rf, "->"))
-    // union_collect directly — accumulate two types
     var acc1 = union_collect(teko::list::empty(), i64t(), empty_table())
     teko::assert::is_true(acc1.len == 1)
     var acc2 = union_collect(acc1, Str { }, empty_table())
     teko::assert::is_true(acc2.len == 2)
-    // dedup: same type twice → still length 1
     var acc3 = union_collect(teko::list::empty(), i64t(), empty_table())
     var acc4 = union_collect(acc3, i64t(), empty_table())
     teko::assert::is_true(acc4.len == 1)
 }
 
-// ---------------------------------------------------------------------------
-// Group J: lbl_eq, lbl_enclosing, surface_at
-// ---------------------------------------------------------------------------
 #test
 fn checker_label_surface() {
-    // lbl_eq
     teko::assert::is_true(lbl_eq("outer", "outer"))
     teko::assert::is_false(lbl_eq("outer", "inner"))
-    // lbl_enclosing
     var scope: []str = teko::list::push(teko::list::push(teko::list::empty(), "outer"), "inner")
     teko::assert::is_true(lbl_enclosing(scope, "outer"))
     teko::assert::is_true(lbl_enclosing(scope, "inner"))
     teko::assert::is_false(lbl_enclosing(scope, "missing"))
-    // surface_at
     var e = error { message = "test error" }
     var surfaced = surface_at("test.tks", 3, 7, e)
     teko::assert::is_true(teko::str::contains(surfaced.message, "test.tks"))
 }
 
-/** loop_label_must_be_upper_snake — check_labels rejects a lowercase loop label with the
-    UPPER_SNAKE diagnostic and accepts an UPPER_SNAKE one (#517 checker-enforced format). */
 #test
 fn loop_label_must_be_upper_snake() {
     var empty_body: []@TStatement() = teko::list::empty()
@@ -309,7 +243,6 @@ fn loop_label_must_be_upper_snake() {
     teko::assert::is_false(rgood.failed)
 }
 
-// (S4) generics inference primitives — subst_type / unify / collect_sig_type_params.
 #test
 fn subst_unify_inference() {
     var tbl = tt_empty()
@@ -317,32 +250,25 @@ fn subst_unify_inference() {
     var s0 = Subst { params = params; names = teko::list::empty(); types = teko::list::empty() }
     var patT: @Type() = Named { name = "T" }
 
-    // unify Named{T} ~ i64 binds T=i64; subst_type then yields i64.
     var s1 = match unify(patT, i64t(), s0, tbl) { Subst as x => x; error => s0 }
     teko::assert::is_true(prim_is(subst_type(patT, s1), PrimKind::I64))
-    // a non-type-param Named passes through subst unchanged.
     teko::assert::is_true(match subst_type(Named { name = "Other" }, s1) { Named as n => n.name == "Other"; _ => false })
 
-    // unify []T ~ []str binds T=str; subst []T → []str (structural recursion).
     var patSlice: @Type() = Slice { element = Named { name = "T" } }
     var s2 = match unify(patSlice, Slice { element = Str { } }, s0, tbl) { Subst as x => x; error => s0 }
     teko::assert::is_true(match subst_type(patSlice, s2) { Slice as sl => match sl.element { Str => true; _ => false }; _ => false })
 
-    // a Void-sentinel arg (empty()/null) cannot pin a type-param → unify errors.
     teko::assert::is_true(match unify(patSlice, Slice { element = Void { } }, s0, tbl) { Subst => false; error => true })
 
-    // collect_sig_type_params over Func{(T): T} → ["T"] (deduped).
     var sig: @Type() = Func { params = teko::list::push(teko::list::empty(), Named { name = "T" }); ret = Named { name = "T" }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Named { name = "T" })).len; defaults = []; ret_extra = teko::list::empty() }
     var tps = collect_sig_type_params(sig, tbl, teko::list::empty())
     teko::assert::is_true(tps.len == 1)
     teko::assert::is_true(tps[0] == "T")
 }
 
-// (S4 type-generics) a single-segment NamedType type-expr with no args.
 fn ttype_named(name: str): @TypeExpr() {
     parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() }
 }
-// a table with one GENERIC struct decl: `type Box<T> = struct { value: T }`.
 fn box_generic_table(): TypeTable {
     var fld = parser::Field { name = "value"; type_ann = ttype_named("T"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false }
     var body = parser::StructBody { fields = teko::list::push(teko::list::empty(), fld); methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty(); is_readonly = false }
@@ -350,44 +276,26 @@ fn box_generic_table(): TypeTable {
     tt_freeze(tt_push(tt_empty(), TypeReg { name = "Box"; namespace = ""; file = ""; vis = parser::Visibility::Private; decl = decl }))
 }
 
-// (S4 type-generics) resolve_type on `Box<i64>` → Named{Box__g__i64}; arity is validated; the
-// mangle helpers produce the shared instance name.
 #test
 fn resolves_generic_type_instantiation() {
     var tbl = box_generic_table()
-    // Box<i64> → Named{"Box__g__i64"}
     var one = teko::list::push(teko::list::empty(), ttype_named("i64"))
     var inst = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Box" }) }; args = one }
-    // (#110) `resolve_type` returns `Type | error`; `Named` is a case of the INNER `Type` variant,
-    // not a direct case of the outer `Type | error` subject — double-match (Type as t => match t {…}).
     teko::assert::is_true(match resolve_type(inst, tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })
 
-    // wrong arity Box<i64, str> → error
     var two: []@TypeExpr() = teko::list::push(teko::list::empty(), ttype_named("i64"))
     two = teko::list::push(two, ttype_named("str"))
     var inst2 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Box" }) }; args = two }
     teko::assert::is_true(match resolve_type(inst2, tbl, "") { error => true; _ => false })
 
-    // a plain `Box` (no args) still resolves nominally — no regression. (#110: double-match, see above.)
     teko::assert::is_true(match resolve_type(ttype_named("Box"), tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })
 
-    // generic_inst_name / type_mangle directly: Box + [i64, str] → "Box__g__i64__str".
     var at: []@Type() = teko::list::push(teko::list::empty(), i64t())
     at = teko::list::push(at, Str { })
     teko::assert::is_true(generic_inst_name("Box", at) == "Box__g__i64__str")
 }
 
 #test
-/**
- * splits_and_recovers_a_generic_instance_names_base — `split_generic_instance_name` finds the
- * `__g__` stamp `generic_inst_name` writes and recovers the exact BASE it was built from, for one
- * type-argument (`Box__g__i64`) and for two (`Pair__g__i64__str`); an ordinary nominal name (no
- * stamp at all, and one that merely CONTAINS the marker's letters split across two segments) is
- * reported as not-generic. `named_case_name` then delegates to the base for a generic instance and
- * to the bare last `::`-segment otherwise — the read `variant_member_named`'s `Named` arm needs
- * (0.3.1.0 degrau 14, #382: a generic instance's canonical name carries no `::` at all, so
- * `name_last_segment` alone left it whole and unmatchable against a pattern's bare base).
- */
 fn splits_and_recovers_a_generic_instance_names_base() {
     var one = split_generic_instance_name("Box__g__i64")
     teko::assert::is_true(one.is_generic)
@@ -405,52 +313,23 @@ fn splits_and_recovers_a_generic_instance_names_base() {
     teko::assert::is_true(named_case_name("MainFile") == "MainFile")
 }
 
-// (S-mem) `ptr<T>` — typed pointer: resolves to Ptr{inner}, opaque ptr = Ptr{null}, equal-by-inner.
 #test
 fn resolves_ptr_generic() {
     var ptr_i64 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), ttype_named("i64")) }
     var pi = match resolve_type(ptr_i64, empty_table(), "") { (@Type()) as t => t; error => { teko::assert::is_true(false); return } }
-    // STRUCTURE (structure-only): ptr<i64> → Ptr{inner present = i64}; opaque ptr = Ptr{inner null}; distinct.
-    // (exact `ptr_i64`/`ptr<i64>` mangle/render is verified via real codegen, not here.)
     teko::assert::is_true(match pi { Ptr as p => match p.inner { null => false; (@Type()) as t => match t { Prim => true; _ => false } }; _ => false })
     teko::assert::is_true(type_eq(pi, pi))
     var bare = match resolve_type(ttype_named("ptr"), empty_table(), "") { (@Type()) as t => t; error => { teko::assert::is_true(false); return } }
     teko::assert::is_true(match bare { Ptr as p => match p.inner { null => true; (@Type()) as _gt2 => false }; _ => false })   /* opaque ptr = null inner */
-    teko::assert::is_true(!type_eq(bare, pi))   // opaque ptr ≠ ptr<i64>
+    teko::assert::is_true(!type_eq(bare, pi))
 }
 
-// ---------------------------------------------------------------------------
-// MEM Step 0 — the checker ESCAPE GATE. A `Ref<T>` is memory-safe BY CONSTRUCTION: the ONLY
-// permitted flow is PARAMETER PASS-DOWN. These tests drive the checker functions DIRECTLY,
-// asserting each forbidden position yields `error` and the allowed forms still succeed.
-// Structure/error-only assertions (structure-only; no message-string match; mirrors
-// resolves_ref_generic's discipline).
-// ---------------------------------------------------------------------------
-
-// a `Ref<INNER>` type-expr where INNER is itself a (hand-built) type-expr.
 fn ref_te_of(inner: @TypeExpr()): @TypeExpr() {
     parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Ref" }) }; args = teko::list::push(teko::list::empty(), inner) }
 }
-// a `Ref<NAME>` type-expr over a plain named type.
 fn ref_te(name: str): @TypeExpr() { ref_te_of(ttype_named(name)) }
 
 #test
-/**
- * (MEM Step 0, R4) NOT a STRUCT FIELD — a `struct { r: Ref<…> }` is rejected at collect
- * (validate_type_decls); a struct with a scalar field collects fine.
- *
- * NOTE (see R2): the rejected field uses a CONSTRUCTION-REJECTED inner type (`Ref<Ref<i64>>`,
- * built by `ref_te_of(ref_te("i64"))` below) so R1's reliable rejection drives the collect
- * error; the value-inner field (`Ref<i64>`) is instead rejected by the
- * `tag == TK_TYPE_REF` check in the bare-position field validation.
- *
- * NOTE (bootstrap ordering, issue #285): the doc sits AFTER `#test` here (the pre-existing
- * placement) rather than before it — the RELEASED seed compiler that builds this very source
- * tree does not yet contain this issue's parser fix, so a doc-before-`#test` fixture in the
- * compiler's OWN corpus would fail to bootstrap. The new before-the-attribute placement is
- * exercised in src/parser/parser_test.tkt instead, via a source STRING the compiler parses at
- * runtime (not through its own bootstrap corpus), which needs no such affordance.
- */
 fn mem_ref_not_struct_field() {
     var fld = parser::Field { name = "r"; type_ann = ref_te_of(ref_te("i64")); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false }
     var decl = parser::TypeDecl { name = "Holder"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = teko::list::push(teko::list::empty(), fld); methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty(); is_readonly = false }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_global = false }
@@ -463,49 +342,25 @@ fn mem_ref_not_struct_field() {
     teko::assert::is_true(ok.decl_diags.len == 0 && ok.sig_diags.len == 0)
 }
 
-// (MEM Step 0, R4) NOT a SLICE ELEMENT / VARIANT MEMBER — `[]Ref<…>` and `Ref<…> | T` reject.
-// NOTE (see R2): a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`) so R1's reliable rejection
-// drives the error out of the SliceType / UnionType arm; the value-inner element/member
-// (`[]Ref<i64>` / `Ref<i64> | T`) is rejected by the `el.tag == TK_TYPE_REF` /
-// `m.tag == TK_TYPE_REF` checks.
 #test
 fn mem_ref_not_collection_or_variant() {
-    // []Ref<Ref<i64>> → error.
     teko::assert::is_true(match resolve_type(parser::SliceType { element = ref_te_of(ref_te("i64")) }, empty_table(), "") { error => true; _ => false })
-    // Ref<Ref<i64>> | i64 → error (a reference may not be a variant member).
     var members: []@TypeExpr() = teko::list::push(teko::list::push(teko::list::empty(), ref_te_of(ref_te("i64"))), ttype_named("i64"))
     teko::assert::is_true(match resolve_type(parser::UnionType { members = members }, empty_table(), "") { error => true; _ => false })
 }
 
-// (W9.4) a bind pattern carrying explicit type-args `Box<i64> as x` resolves to the stamped instance
-// Box__g__i64 (so exhaustiveness / binding use the concrete case type).
 #test
 fn bind_pattern_explicit_type_args_resolves_instance() {
     var tbl = box_generic_table()
     var args = teko::list::push(teko::list::empty(), ttype_named("i64"))
     var bp = parser::BindPattern { type_name = path1("Box"); has_binding = true; binding = "x"; is_slice = false; slice_type = null; type_args = args }
-    // (#110) bind_pattern_type returns `Type | error`; Named is a case of the INNER `Type` variant —
-    // double-match the outer Type case first.
     teko::assert::is_true(match bind_pattern_type(bp, tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })   /* (#109 W1) ref_ns = "" in the test */
-    // a bare bind (no type-args) keeps the base name (no regression).
     var plain = parser::BindPattern { type_name = path1("Box"); has_binding = true; binding = "x"; is_slice = false; slice_type = null; type_args = teko::list::empty() }
     teko::assert::is_true(match bind_pattern_type(plain, tbl, "") { (@Type()) as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })   /* (#109 W1) ref_ns = "" in the test */
 }
 
-// ---------------------------------------------------------------------------
-// Group K: monomorphize (S4b crumb 2c) — direct coverage of the mono walk.
-// Build typed programs by hand (a generic TFunction template + non-generic callers /
-// virtual-main statements), call monomorphize, and assert the generic is DROPPED and a
-// stamped concrete copy (idg__g__<arg>) appears with the right return type. The generic
-// bodies + caller bodies span varied TExprKind / TStatement cases so the total walk and
-// both driver phases (seed collection + fixpoint stamping) execute natively (`teko test`).
-// ---------------------------------------------------------------------------
-
-// a typed VAR expr of a given type.
 fn tvar(name: str, t: @Type()): TExpr { TExpr { kind = TVar { name = name; is_func = false; func_ns = "" }; type = t; line = 0; col = 0 } }
-// a typed integer literal (i64).
 fn tnum(v: i64): TExpr { TExpr { kind = TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = i64t(); line = 0; col = 0 } }
-// a generic TFunction `fn NAME<T>(x: PARAMSPELL): RET { body }`.
 fn gfn(name: str, param_ann: @TypeExpr(), ret: @Type(), body: []@TStatement()): TFunction {
     var tps: []str = teko::list::push(teko::list::empty(), "T")
     var tcs: []@ConstraintExpr() = teko::list::push(teko::list::empty(), parser::NoConstraint { })
@@ -513,11 +368,9 @@ fn gfn(name: str, param_ann: @TypeExpr(), ret: @Type(), body: []@TStatement()): 
     var params = teko::list::push(teko::list::empty(), p)
     TFunction { overload_suffix = ""; name = name; type_params = tps; type_constraints = tcs; params = params; return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() }
 }
-// a non-generic TFunction with a hand-built body.
 fn plainfn(name: str, ret: @Type(), body: []@TStatement()): TFunction {
     TFunction { overload_suffix = ""; name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() }
 }
-// a typed call `NAME(arg)` with result type `rt`.
 fn tcall1(name: str, arg: TExpr, rt: @Type()): TExpr {
     var callee = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
     var args = teko::list::push(teko::list::empty(), arg)
@@ -525,7 +378,6 @@ fn tcall1(name: str, arg: TExpr, rt: @Type()): TExpr {
 }
 fn texpr_stmt(e: TExpr): @TStatement() { TExprStmt { expr = e } }
 fn treturn(e: TExpr): @TStatement() { TReturn { has_value = true; value = e; values = teko::list::empty() } }
-// find a stamped fn (mangled name) in a typed program's items.
 fn find_titem_fn(prog: TProgram, name: str): bool {
     var i = 0
     loop {
@@ -535,8 +387,6 @@ fn find_titem_fn(prog: TProgram, name: str): bool {
     }
     false
 }
-// is there a stamped instance of `bare` (a fn whose name contains "<bare>__g__")? robust:
-// it checks the synthetic `__g__` infix, not the full type-arg spelling.
 fn has_stamped_instance(prog: TProgram, bare: str): bool {
     var needle = teko::str::concat(bare, "__g__")
     var i = 0
@@ -560,11 +410,8 @@ fn count_generic_fns(prog: TProgram): u64 {
 
 #test
 fn mono_stamps_two_instances() {
-    // fn idg<T>(x: T): T { return x } + two callers (i64 + str). After mono: the generic is
-    // DROPPED and idg__g__i64 / idg__g__str are stamped; the callers' callees are rewritten.
     var gbody = teko::list::push(teko::list::empty(), treturn(tvar("x", Named { name = "T" })))
     var idg = gfn("idg", named_t("T"), Named { name = "T" }, gbody)
-    // a non-generic caller calling idg(7) [i64] and idg("hi") [str] as virtual-main statements.
     var call_i = texpr_stmt(tcall1("idg", tnum(7), i64t()))
     var call_s = texpr_stmt(tcall1("idg", TExpr { kind = TStrLit { text = "hi" }; type = strt(); line = 0; col = 0 }, strt()))
     var items: []@TItem() = teko::list::push(teko::list::empty(), idg)
@@ -572,11 +419,9 @@ fn mono_stamps_two_instances() {
     items = teko::list::push(items, call_s)
     var prog = TProgram { items = items }
     var mp = match monomorphize(prog, empty_table()) { TProgram as x => x; error => { teko::assert::is_true(false); return } }
-    // generic dropped; both instances stamped.
     teko::assert::is_true(count_generic_fns(mp) == 0)
     teko::assert::is_true(find_titem_fn(mp, "idg__g__i64"))
     teko::assert::is_true(find_titem_fn(mp, "idg__g__str"))
-    // a stamped fn's return type is concrete.
     var found_i64_ret = false
     var i = 0
     loop {
@@ -589,8 +434,6 @@ fn mono_stamps_two_instances() {
 
 #test
 fn mono_slice_and_optional_mangle() {
-    // fn firstg<T>(xs: []T): T { return xs[0] } called with []i64 → firstg__g__i64 (slice unify
-    // in the PARAM pattern: unify([]T, []i64) binds T=i64). The instance name has a plain i64 arg.
     var idx = TExpr { kind = TIndex { receiver = tvar("xs", Slice { element = Named { name = "T" } }); index = tnum(0) }; type = Named { name = "T" }; line = 0; col = 0 }
     var fbody = teko::list::push(teko::list::empty(), treturn(idx))
     var firstg = gfn("firstg", parser::SliceType { element = named_t("T") }, Named { name = "T" }, fbody)
@@ -601,10 +444,6 @@ fn mono_slice_and_optional_mangle() {
     var mp = match monomorphize(TProgram { items = items }, empty_table()) { TProgram as x => x; error => { teko::assert::is_true(false); return } }
     teko::assert::is_true(find_titem_fn(mp, "firstg__g__i64"))
 
-    // a Slice TYPE-ARG (T bound to []i64) drives the slice_<elem> mangle branch in mono_type_mangle:
-    // fn idh<T>(x: T): T called with arg of type []i64 → T = []i64 → instance idh__g__slice_i64.
-    // (The exact slice_ spelling depends on a recursive-match string compose; assert the stamped
-    // instance EXISTS via the synthetic `__g__` infix — robust, and still exercises the branch.)
     var hbody = teko::list::push(teko::list::empty(), treturn(tvar("x", Named { name = "T" })))
     var idh = gfn("idh", named_t("T"), Named { name = "T" }, hbody)
     var slice_arg = tvar("s", Slice { element = i64t() })
@@ -614,7 +453,6 @@ fn mono_slice_and_optional_mangle() {
     var mp2 = match monomorphize(TProgram { items = items2 }, empty_table()) { TProgram as x => x; error => { teko::assert::is_true(false); return } }
     teko::assert::is_true(count_generic_fns(mp2) == 0)
     teko::assert::is_true(has_stamped_instance(mp2, "idh"))
-    // directly exercise EVERY mono_type_mangle arm (branch coverage of the mangle + type_to_texpr).
     teko::assert::is_true(teko::str::len(mono_type_mangle(Slice { element = i64t() })) > 0)
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Variant { members = teko::list::empty() }), "variant"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Str { }), "str"))
@@ -623,20 +461,14 @@ fn mono_slice_and_optional_mangle() {
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Void { }), "void"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Ptr { inner = null }), "ptr"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Uptr { }), "uptr"))
-    teko::assert::is_true(teko::str::len(mono_type_mangle(Reference { inner = i64t() })) > 0)   // (MEM-1b) recursive mangle — len-only
+    teko::assert::is_true(teko::str::len(mono_type_mangle(Reference { inner = i64t() })) > 0)
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Named { name = "Foo" }), "Foo"))
 }
 
 #test
 fn mono_walk_covers_node_kinds() {
-    // a generic fn whose body + a non-generic caller body together exercise many TExprKind /
-    // TStatement walk cases (binary, compare, if, cast, field-access, struct-init, interp, in,
-    // array, unary, loop, assign, defer, break/continue), all under the
-    // total rewrite walk. The generic call inside drives stamping.
     var idg = gfn("idg", named_t("T"), Named { name = "T" }, teko::list::push(teko::list::empty(), treturn(tvar("x", Named { name = "T" }))))
 
-    // non-generic caller body with a grab-bag of typed nodes (well-typedness is not re-checked
-    // by mono — it only rewrites types + callees, so hand-built shapes are fine for the walk).
     var n = tvar("n", i64t())
     var bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = n; right = tnum(1) }; type = i64t(); line = 0; col = 0 }
     var cmpterm = TCmpTerm { op = lexer::TokenKind::Lt; operand = tnum(10) }
@@ -646,11 +478,9 @@ fn mono_walk_covers_node_kinds() {
     var arr = TExpr { kind = TArrayLit { elements = teko::list::push(teko::list::empty(), TArrayElem { is_spread = false; expr = tnum(1) }) }; type = Slice { element = i64t() }; line = 0; col = 0 }
     var interp = TExpr { kind = TInterp { pieces = teko::list::push(teko::list::push(teko::list::empty(), "v"), ""); holes = teko::list::push(teko::list::empty(), n); specs = teko::list::push(teko::list::empty(), TFSpec { kind = TFSpecNone { } }) }; type = strt(); line = 0; col = 0 }
     var inx = TExpr { kind = TInExpr { lhs = n; elems = teko::list::push(teko::list::empty(), tnum(2)) }; type = boolt(); line = 0; col = 0 }
-    // an if-expr value with both branches; a match with one wildcard-bodied arm.
     var ife = TExpr { kind = TIfExpr { cond = cmp; then_blk = teko::list::push(teko::list::empty(), texpr_stmt(tnum(1))); has_else = true; else_blk = teko::list::push(teko::list::empty(), texpr_stmt(tnum(2))) }; type = i64t(); line = 0; col = 0 }
-    var genstamp = tcall1("idg", tnum(5), i64t())   // drives stamping from within the walk
+    var genstamp = tcall1("idg", tnum(5), i64t())
 
-    // statements: binding, assign, expr, loop (with break/continue), defer, return.
     var body: []@TStatement() = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin })
     body = teko::list::push(body, TAssign { kind = parser::AssignKind::Simple; name = "a"; op = lexer::TokenKind::Assign; bound = i64t(); value = un; deref = false; target = no_texpr() })
     body = teko::list::push(body, texpr_stmt(cast))
@@ -673,24 +503,14 @@ fn mono_walk_covers_node_kinds() {
     teko::assert::is_true(find_titem_fn(mp, "caller"))
 }
 
-// =========================================================================
-// MEM Step 1 — THE ESCAPE CHECK (escape.tks). The classifier must (1) call a returned
-// allocation ESCAPING (never frame-local — a leak is safe, a UAF is a vulnerability) and
-// (2) call a purely-local allocation FRAME-LOCAL (read only through a scalar field copy).
-// =========================================================================
-
-// a typed `Node { val = <i64>; }` struct-init value (Node is the recursive value type).
 fn t_node_init(val: TExpr): TExpr {
     var fnames = teko::list::push(teko::list::empty(), "val")
     var fvals = teko::list::push(teko::list::empty(), val)
     TExpr { kind = TStructInit { field_names = fnames; field_vals = fvals }; type = Named { name = "Node" }; line = 0; col = 0 }
 }
-// a `let n = <value>` binding (not const, not discard) to a SimpleName — returned as the raw
-// TBinding (the codegen's emit_binding receives this same destructured node).
 fn t_let(name: str, value: TExpr): TBinding {
     TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value }
 }
-// `n.val` typed as i64 (a SCALAR field read — a pure copy, so the receiver does not escape).
 fn t_field_i64(recv_name: str, field: str): TExpr {
     var recv = tvar(recv_name, Named { name = "Node" })
     TExpr { kind = TFieldAccess { receiver = recv; field = field }; type = i64t(); line = 0; col = 0 }
@@ -698,8 +518,6 @@ fn t_field_i64(recv_name: str, field: str): TExpr {
 
 #test
 fn escape_call_argument_is_escaping() {
-    // fn f() { let n = Node { val = 5 }; use(n) }   — `n` is passed to a call ⇒ may be retained
-    // ⇒ conservatively ESCAPING (one-depth: a callee could store the argument).
     var binding = t_let("n", t_node_init(tnum(5)))
     var body: []@TStatement() = teko::list::push(teko::list::empty(), binding)
     body = teko::list::push(body, texpr_stmt(tcall1("use", tvar("n", Named { name = "Node" }), i64t())))
@@ -709,12 +527,6 @@ fn escape_call_argument_is_escaping() {
     teko::assert::is_true(!binding_is_frame_local(esc, binding))
 }
 
-// --- MEM Step 1 UAF FIX regression: a TAIL expr-statement is an IMPLICIT RETURN (escaping) ---
-// Codegen (emit_block_tail/emit_exprstmt_tail) drops the frame region BEFORE the implicit
-// trailing-value return, so a frame-local recursive-struct read in that tail value would be a
-// use-after-free. The escape check must AGREE with codegen and mark such a binding ESCAPING.
-
-// `Node { val = <i64>; next = <Node-typed> }` — the recursive back-edge carrying field.
 fn t_node_init2(val: TExpr, next: TExpr): TExpr {
     var fnames = teko::list::push(teko::list::empty(), "val")
     fnames = teko::list::push(fnames, "next")
@@ -722,7 +534,6 @@ fn t_node_init2(val: TExpr, next: TExpr): TExpr {
     fvals = teko::list::push(fvals, next)
     TExpr { kind = TStructInit { field_names = fnames; field_vals = fvals }; type = Named { name = "Node" }; line = 0; col = 0 }
 }
-// `n.next` typed as Node (a NON-scalar field read — surfaces an interior pointer).
 fn t_field_node(recv_name: str, field: str): TExpr {
     var recv = tvar(recv_name, Named { name = "Node" })
     TExpr { kind = TFieldAccess { receiver = recv; field = field }; type = Named { name = "Node" }; line = 0; col = 0 }
@@ -730,39 +541,21 @@ fn t_field_node(recv_name: str, field: str): TExpr {
 
 #test
 fn escape_tail_implicit_return_rebox_is_escaping() {
-    // fn f(): Node { let n = Node { val = 5; next = n }; Node { val = n.val; next = n.next } }
-    // The trailing struct-init is an IMPLICIT RETURN (no `return` keyword). It re-boxes `n.next`
-    // (a NON-scalar interior pointer) into the returned value — so `n` ESCAPES. Before the fix the
-    // tail expr-statement was DISCARDED (non-escaping) ⇒ `n` was wrongly frame-local ⇒ the frame
-    // region was dropped on the return edge, then the tail dereferenced the freed cell = UAF.
-    // The binding does NOT read `n` (no self-reference) — only the TAIL re-box does, so this test
-    // genuinely isolates the tail-position escape (not the binding RHS).
     var binding = t_let("n", t_node_init(tnum(5)))
     var tail = t_node_init2(t_field_i64("n", "val"), t_field_node("n", "next"))
     var body: []@TStatement() = teko::list::push(teko::list::empty(), binding)
-    body = teko::list::push(body, texpr_stmt(tail))   // implicit-return tail (no `return`)
+    body = teko::list::push(body, texpr_stmt(tail))
     var f = plainfn("f", Named { name = "Node" }, body)
     var esc = fn_escaping_vars(f)
-    teko::assert::is_true(str_set_has(esc, "n"))   // tail value escapes ⇒ `n` escapes
-    teko::assert::is_true(!binding_is_frame_local(esc, binding))   // ⇒ NOT frame-local (routes to root)
+    teko::assert::is_true(str_set_has(esc, "n"))
+    teko::assert::is_true(!binding_is_frame_local(esc, binding))
 }
-
-// =========================================================================
-// S2 — THE PER-BLOCK ESCAPE CHECK (escape.tks::binding_is_block_local). A binding declared in a
-// scope-introducing BLOCK may be freed at the block's exit edges ONLY when every read of it in the
-// whole function is a SAFE non-tail/non-assign read strictly inside that block. SECURITY-FIRST:
-// any read outside B, in B's tail value, or as an assignment RHS ⇒ NOT block-local (route to the
-// enclosing region — a leak is safe, a use-after-free is NEVER).
-// =========================================================================
 
 #test
 fn block_local_read_only_inside_block_is_block_local() {
-    // fn f(): i64 { mut t=0; loop { let n = Node{val=5}; let g = n.val; t = t+g; break }; t }
-    // `n` is declared in the LOOP body and read ONLY via a scalar field copy inside it (non-tail,
-    // non-assign) ⇒ block-local ⇒ the loop body region may free it per-iteration.
     var binding = t_let("n", t_node_init(tnum(5)))
     var loopbody: []@TStatement() = teko::list::push(teko::list::empty(), binding)
-    loopbody = teko::list::push(loopbody, t_let("g", t_field_i64("n", "val")))   // let g = n.val (scalar copy)
+    loopbody = teko::list::push(loopbody, t_let("g", t_field_i64("n", "val")))
     loopbody = teko::list::push(loopbody, TBreakStmt { label = "" })
     var loopstmt = TLoopStmt { label = ""; init = teko::list::empty(); body = loopbody }
     var body: []@TStatement() = teko::list::push(teko::list::empty(), t_let("t", t_node_init(tnum(0))))
@@ -770,7 +563,6 @@ fn block_local_read_only_inside_block_is_block_local() {
     body = teko::list::push(body, treturn(t_field_i64("t", "val")))
     var f = plainfn("f", i64t(), body)
     var esc = fn_escaping_vars(f)
-    // n is NOT function-escaping (only a scalar copy is read) AND only read inside the loop body.
     teko::assert::is_true(binding_is_block_local(esc, f.body, loopbody, false, binding))
 }
 
@@ -797,60 +589,38 @@ fn block_local_boxed_union_binding_is_block_local() {
     teko::assert::is_true(binding_is_block_local(esc, f.body, loopbody, false, binding))
 }
 
-// --- MEM Step 1 UAF FIX #2 regression: a SCALAR read through a BOXED HOP (`a.b.y`) escapes ---
-// The scalar non-escaping refinement is SOUND ONLY for a scalar field of a BARE local (a stack
-// member). `a.b.y` reads a scalar `.y` but THROUGH `a.b` — a boxed (recursive) field that is a
-// heap pointer into the frame region. The whole tail value is evaluated AFTER the region drop, so
-// dereferencing the freed `a.b` is a use-after-free. The refinement must route `a` to ESCAPING
-// because the field-access receiver (`a.b`) is NOT a bare TVar.
-
 #test
 fn escape_tail_scalar_through_boxed_hop_is_escaping() {
-    // fn f(): i64 { let n = Node { val = 5 }; n.next.val }
-    // `.val` is scalar (i64) but its receiver `n.next` is a NON-scalar (boxed) interior pointer —
-    // a frame-region heap hop. The bare-TVar refinement must NOT fire (receiver is a field access,
-    // not a TVar) ⇒ `n` ESCAPES ⇒ NOT frame-local (the only sound choice — avoids the UAF).
     var binding = t_let("n", t_node_init(tnum(5)))
-    var nnext = t_field_node("n", "next")   // n.next : Node (boxed heap hop)
-    var deep = TExpr { kind = TFieldAccess { receiver = nnext; field = "val" }; type = i64t(); line = 0; col = 0 }   // (n.next).val : i64 (scalar through a boxed hop)
+    var nnext = t_field_node("n", "next")
+    var deep = TExpr { kind = TFieldAccess { receiver = nnext; field = "val" }; type = i64t(); line = 0; col = 0 }
     var body: []@TStatement() = teko::list::push(teko::list::empty(), binding)
-    body = teko::list::push(body, texpr_stmt(deep))   // implicit-return tail (no `return`)
+    body = teko::list::push(body, texpr_stmt(deep))
     var f = plainfn("f", i64t(), body)
     var esc = fn_escaping_vars(f)
-    teko::assert::is_true(str_set_has(esc, "n"))   // scalar-through-boxed-hop ⇒ `n` escapes
-    teko::assert::is_true(!binding_is_frame_local(esc, binding))   // ⇒ NOT frame-local (UAF avoided)
+    teko::assert::is_true(str_set_has(esc, "n"))
+    teko::assert::is_true(!binding_is_frame_local(esc, binding))
 }
 
 #test
 fn escape_tail_index_receiver_is_escaping() {
-    // fn f(): i64 { let n = Node { val = 5 }; arr[n.val] }
-    // An index read derefs a heap-backed slice. The index sub-expression `n.val` is evaluated
-    // post-drop too; `n.val` is a bare-TVar scalar (frame-local), but the receiver `arr` (a TVar)
-    // is read in an escaping context. This pins down that the index path propagates escaping to its
-    // receiver while still allowing a bare-TVar scalar index (`n.val`) to stay frame-local.
     var binding = t_let("n", t_node_init(tnum(5)))
     var arr = tvar("arr", Slice { element = i64t() })
-    var idx = t_field_i64("n", "val")   // n.val : i64 (bare-TVar scalar)
+    var idx = t_field_i64("n", "val")
     var tail = TExpr { kind = TIndex { receiver = arr; index = idx }; type = i64t(); line = 0; col = 0 }
     var body: []@TStatement() = teko::list::push(teko::list::empty(), binding)
-    body = teko::list::push(body, texpr_stmt(tail))   // implicit-return tail (no `return`)
+    body = teko::list::push(body, texpr_stmt(tail))
     var f = plainfn("f", i64t(), body)
     var esc = fn_escaping_vars(f)
-    teko::assert::is_true(str_set_has(esc, "arr"))   // index receiver (heap slice) escapes
-    teko::assert::is_true(!str_set_has(esc, "n"))   // bare-TVar scalar index stays frame-local
+    teko::assert::is_true(str_set_has(esc, "arr"))
+    teko::assert::is_true(!str_set_has(esc, "n"))
     teko::assert::is_true(binding_is_frame_local(esc, binding))
 }
 
-// --- OOP A1 (2026-07-01): unified method model -- struct instance + static methods ---------
-// `type Pt = struct { x: i64; fn sum(self): i64 { self.x }; fn origin(): i64 { 0 } }` --
-// sum(self)=instance (1st param untyped, the receiver), origin()=static (no untyped 1st param).
 fn recv_param(name: str): parser::Param { parser::Param { name = name; has_type = false; type_ann = named_t("i64"); is_params = false; has_default = false; default_expr = e_num(0) } }
-// --- (W10b.IF, 2026-07-01) interface CONFORMANCE checking ------------------------------------
-// A bodyless instance-method signature `fn name(self): i64` (an interface member).
 fn iface_method(name: str): parser::Function {
     parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::push(teko::list::empty(), recv_param("self")); has_return = true; return_type = named_t("i64"); body = teko::list::empty(); vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = false; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false; is_global = false }
 }
-// A concrete instance method `[vis] fn name(self): i64 { 0 }`.
 fn impl_method(name: str, vis: parser::Visibility): parser::Function {
     parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::push(teko::list::empty(), recv_param("self")); has_return = true; return_type = named_t("i64"); body = one_stmt(e_num(0)); vis = vis; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = false; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false; is_global = false }
 }
@@ -863,20 +633,12 @@ fn impl_class_item(name: str, methods: []parser::Function, implements: []str): p
 fn list1(x: parser::Function): []parser::Function { teko::list::push(teko::list::empty(), x) }
 fn slist1(s: str): []str { teko::list::push(teko::list::empty(), s) }
 
-// --- flags methods (C8.3, self-host ported 2026-07-01) ---------------------------------------
 fn mk_perm_flags(): parser::TypeDecl {
     var members = teko::list::push(teko::list::push(teko::list::empty(), "Read"), "Write")
     parser::TypeDecl { name = "Perm"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::FlagsBody { members = members; values = teko::list::empty(); methods = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_global = false }
 }
 fn perm_item(): parser::Item { parser::Item { content = mk_perm_flags(); namespace = ""; file = "" ; guard = parser::pred_true()} ; guard = parser::pred_true()}
 fn perm_member(name: str): parser::Expr { ek(parser::PathExpr { path = parser::Path { segments = teko::list::push(teko::list::push(teko::list::empty(), parser::Segment { name = "Perm" }), parser::Segment { name = name }) } }) }
-/**
- * tr_field — one `i64` trait field named `name`, for the §9.4 trait-composition fold tests (a trait
- * is a self-contained concrete mixin whose members flatten into the composer).
- *
- * @param name  the field's name
- * @return      the `parser::Field`
- */
 fn tr_field(name: str): parser::Field { parser::Field { name = name; type_ann = named_t("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false } }
 fn tr_fields1(name: str): []parser::Field { teko::list::push(teko::list::empty(), tr_field(name)) }
 fn trait_item(name: str, fields: []parser::Field, methods: []parser::Function): parser::Item {
@@ -894,47 +656,20 @@ fn tr_program_ok(items: []parser::Item): bool {
     match type_program(parser::Program { items = items }) { TProgram => true; error => false }
 }
 
-/**
- * b1_comptime_item — a `comptime NAME(): <ret> { }` item (§14 Family-B B1). Its body is DROPPED before
- * the typed-item walk, so an empty body suffices for the call-site typing gate.
- *
- * @param name  the comptime declaration's name
- * @param ret   the comptime's declared return type
- * @return      the `ComptimeDecl` item
- */
 fn b1_comptime_item(name: str, ret: @TypeExpr()): parser::Item {
     parser::Item { content = parser::ComptimeDecl { name = name; type_params = teko::list::empty(); params = teko::list::empty(); ret = ret; body = teko::list::empty(); vis = parser::Visibility::Private; is_global = false }; namespace = ""; file = "" ; guard = parser::pred_true()}
 }
 
-/**
- * b1_call — a `@name()` comptime-call expression (§14 Family-B B1).
- *
- * @param name  the callee name (a `@name(...)` last path segment)
- * @return      the `MacroCall` expression
- */
 fn b1_call(name: str): parser::Expr {
     ek(parser::MacroCall { callee = path1(name); args = teko::list::empty(); callee_type_args = teko::list::empty() })
 }
 
-/**
- * b1_user_fn — a `fn NAME(x: u32): <ret> { return @callee() }` item that returns a comptime-call result,
- * so `type_program` types the `@callee()` at the function's return type.
- *
- * @param name    the wrapping function's name
- * @param ret     the function's declared return type (and the expected comptime result type)
- * @param callee  the comptime callee name the body returns
- * @return        the `Function` item
- */
 fn b1_user_fn(name: str, ret: @TypeExpr(), callee: str): parser::Item {
     var ret_stmt: @Statement() = parser::Return { has_value = true; value = b1_call(callee); values = teko::list::empty() }
     var body = teko::list::push(teko::list::empty(), ret_stmt)
     parser::Item { content = mk_fn(name, ret, body); namespace = ""; file = "" ; guard = parser::pred_true()}
 }
 
-/**
- * comptime_call_types_with_ret — B1: a `@answer()` call resolves to `comptime answer(): i64` and types
- * with its declared `ret`, so a `fn (): i64` returning it type-checks.
- */
 #test
 fn comptime_call_types_with_ret() {
     var cd = b1_comptime_item("answer", named_t("i64"))
@@ -942,10 +677,6 @@ fn comptime_call_types_with_ret() {
     teko::assert::is_true(tr_program_ok(items2(cd, user)))
 }
 
-/**
- * comptime_call_ret_type_flows — B1: the comptime's `ret` flows to the call site — a `comptime flag(): bool`
- * returned from a `fn (): i64` is a type error (the ret type is enforced), so the program is rejected.
- */
 #test
 fn comptime_call_ret_type_flows() {
     var cd = b1_comptime_item("flag", named_t("bool"))
@@ -953,10 +684,6 @@ fn comptime_call_ret_type_flows() {
     teko::assert::is_true(!tr_program_ok(items2(cd, user)))
 }
 
-/**
- * comptime_call_unknown_rejected — B1: a `@nope()` call that names no `comptime` is a located call-site
- * diagnostic, so the program is rejected.
- */
 #test
 fn comptime_call_unknown_rejected() {
     var user = b1_user_fn("use_nope", named_t("i64"), "nope")
@@ -965,8 +692,6 @@ fn comptime_call_unknown_rejected() {
 
 #test
 fn trait_fold_class_gains_members() {
-    // a CLASS deriving a trait: folded field participates in a factory's class literal, the
-    // folded method satisfies nothing but must type-check under the deriver.
     var tr = trait_item("Stamp", tr_fields1("at"), list1(impl_method("stamp", parser::Visibility::Private)))
     var dv = deriver_class_item("C", teko::list::empty(), teko::list::empty(), slist1("Stamp"))
     teko::assert::is_true(tr_program_ok(items2(tr, dv)))
@@ -974,7 +699,6 @@ fn trait_fold_class_gains_members() {
 
 #test
 fn trait_is_not_instantiable() {
-    // `Stamp { at = 1 }` — a trait literal is rejected (derive it instead).
     var tr = trait_item("Stamp", tr_fields1("at"), teko::list::empty())
     var lit = ek(parser::StructLit { type_path = path1("Stamp"); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), "at"); field_vals = teko::list::push(teko::list::empty(), e_num(1)) })
     var bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
@@ -983,15 +707,12 @@ fn trait_is_not_instantiable() {
 
 #test
 fn trait_method_with_dispatch_markers_is_error() {
-    // `virtual fn` inside a trait body — the class dispatch markers are meaningless in a trait.
     var m = impl_method("m", parser::Visibility::Private)
     var vm = parser::Function { name = m.name; type_params = m.type_params; type_constraints = m.type_constraints; params = m.params; has_return = m.has_return; return_type = m.return_type; body = m.body; vis = m.vis; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = true; is_override = false; is_static = false; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false; is_global = m.is_global }
     var tr = trait_item("Stamp", teko::list::empty(), list1(vm))
     teko::assert::is_true(!tr_program_ok(teko::list::push(teko::list::empty(), tr)))
 }
 
-/** A full program `fn both<T: Geo & Named2>(x: T): i64 { return x.area() }` type-checks: the
-    UNION surface authorizes `area` (owned by Geo), and `Sq2` conforms to both interfaces. */
 fn s6_and_program(body_method: str): parser::Program {
     var ifc_geo = iface_item("Geo", list1(iface_method("area")), teko::list::empty())
     var ifc_named2 = iface_item("Named2", list1(iface_method("label")), teko::list::empty())
@@ -1009,15 +730,11 @@ fn s6_and_program(body_method: str): parser::Program {
 }
 
 #test
-/** crumb-7 fixture 1: `A&B`, a method of EACH side (`x.area()`) — accepted. */
 fn s6_and_constraint_authorizes_either_sides_method() {
     teko::assert::is_true(tr_program_ok(s6_and_program("area").items))
 }
 
 #test
-/** crumb-7 fixture 4: nominal mono-rejection is UNTOUCHED — a concrete arg conforming to only ONE
-    side of `Geo & Named2` (missing `label`/`Named2`) still fails at `check_constraints`, the
-    existing per-instance safety net (S6 adds no new instance-time check). */
 fn s6_and_constraint_mono_rejects_non_conforming_concrete() {
     var ifc_geo = iface_item("Geo", list1(iface_method("area")), teko::list::empty())
     var ifc_named2 = iface_item("Named2", list1(iface_method("label")), teko::list::empty())
@@ -1036,12 +753,6 @@ fn s6_and_constraint_mono_rejects_non_conforming_concrete() {
     teko::assert::is_true(!tr_program_ok(items))
 }
 
-/**
- * (TR2, 2026-07-04) the compile-time FIELD VIEW — `deriver_field_view`. The compiler-internal,
- * deriver-agnostic enumeration of a struct/class's fields with each annotation resolved to a real
- * `Type` (name + type, no runtime value). See TEKO_ROADMAP_TRAITS.md TR2. TR3 (a later unit)
- * synthesizes structural-trait bodies (Eq/Ord/Hash/Clone/Default) from it.
- */
 fn fv_field(name: str, type_ann: @TypeExpr()): parser::Field { parser::Field { name = name; type_ann = type_ann; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = ""; is_readonly = false } }
 fn fv_struct_item_derives(name: str, fields: []parser::Field, derives: []str): parser::Item {
     parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = derives; consts = teko::list::empty(); is_readonly = false }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_global = false }; namespace = ""; file = "" ; guard = parser::pred_true()}
@@ -1049,26 +760,12 @@ fn fv_struct_item_derives(name: str, fields: []parser::Field, derives: []str): p
 fn fv_class_item(name: str, kind: parser::ClassKind, has_base: bool, base_name: str, fields: []parser::Field): parser::Item {
     parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::ClassBody { kind = kind; has_base = has_base; base_name = base_name; has_base_binding = false; base_binding_name = ""; implements = teko::list::empty(); fields = fields; methods = teko::list::empty(); consts = teko::list::empty(); is_service = false; service_lifetime = parser::ServiceLifetime::Singleton }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_global = false }; namespace = ""; file = "" ; guard = parser::pred_true()}
 }
-/**
- * The collected type table of a synthetic item list — the field-view tests' fixture builder.
- *
- * `collect` no longer stops at its first error: it returns the table it built plus the
- * diagnostics it collected, and the table is complete either way, so these tests read it
- * directly and assert on the field view rather than on the collection verdict.
- *
- * @param items  the synthetic top-level items
- * @return       the collected type table
- */
 fn fv_table(items: []parser::Item): TypeTable {
     var col = collect(parser::Program { items = items })
     col.collected.types
 }
 
 #test
-/**
- * `fold_traits` runs before the field view is ever consulted — a struct deriving a trait already
- * carries the trait's field in its OWN `fields` by the time `collect()` sees it.
- */
 fn field_view_struct_includes_trait_folded_fields() {
     var tr = trait_item("Stamp", tr_fields1("at"), teko::list::empty())
     var dv = fv_struct_item_derives("Post", teko::list::push(teko::list::empty(), fv_field("title", named_t("str"))), slist1("Stamp"))
@@ -1082,10 +779,6 @@ fn field_view_struct_includes_trait_folded_fields() {
 }
 
 #test
-/**
- * A class's view walks the FULL base chain (`effective_class_fields`) — base fields first, then
- * the derived class's own, exactly like construction/field-access already sees it.
- */
 fn field_view_class_includes_base_chain_fields() {
     var parent = fv_class_item("Animal", parser::ClassKind::Virtual, false, "", teko::list::push(teko::list::empty(), fv_field("name", named_t("str"))))
     var derived = fv_class_item("Dog", parser::ClassKind::Sealed, true, "Animal", teko::list::push(teko::list::empty(), fv_field("breed", named_t("str"))))
@@ -1096,10 +789,6 @@ fn field_view_class_includes_base_chain_fields() {
     teko::assert::is_true(view[1].name == "breed")
 }
 
-/**
- * `subst_method_sig_names` on a method with NO `-> ret` (`has_return = false`) leaves
- * `return_type` untouched (the substitution's `else` arm).
- */
 #test
 fn subst_method_sig_names_skips_return_type_when_has_return_is_false() {
     var g = parser::Function { name = "peek"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); has_return = false; return_type = named_t("i64"); body = teko::list::empty(); vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; is_static = false; is_getter = false; is_setter = false; accessor_prop = ""; has_arena_size = false; arena_size = 0 to u64; ret_types = teko::list::empty(); is_operator = false; is_global = false }
@@ -1107,11 +796,8 @@ fn subst_method_sig_names_skips_return_type_when_has_return_is_false() {
     teko::assert::is_false(stamped.has_return)
 }
 
-/** bigint_named — the `bigint` surface type (the runtime `BigInt` struct's canonical name). */
 fn bigint_named(): @Type() { Named { name = "teko::numeric::bigint::BigInt" } }
-/** dec_named — the `dec` surface type (the runtime `Decimal` struct's canonical name). */
 fn dec_named(): @Type() { Named { name = "teko::numeric::dec::Decimal" } }
-/** call_lowers_to — does a lowered operator `TExpr` call `<ns>::<fn>`? */
 fn call_lowers_to(te: TExpr, ns: str, fn_name: str): bool {
     match te.kind {
         TCall as call => call.call_ns == ns && call.callee.segments[call.callee.segments.len - 1].name == fn_name
@@ -1119,7 +805,6 @@ fn call_lowers_to(te: TExpr, ns: str, fn_name: str): bool {
     }
 }
 
-/** bignum_plus_lowers_to_add — `bigint + bigint` becomes a `teko::numeric::bigint::add` call. */
 #test
 fn bignum_plus_lowers_to_add() {
     var env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
@@ -1128,7 +813,6 @@ fn bignum_plus_lowers_to_add() {
     teko::assert::is_true(call_lowers_to(te, "teko::numeric::bigint", "add"))
 }
 
-/** bignum_percent_lowers_to_rem — `bigint % bigint` becomes a `teko::numeric::bigint::rem` call. */
 #test
 fn bignum_percent_lowers_to_rem() {
     var env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
@@ -1137,7 +821,6 @@ fn bignum_percent_lowers_to_rem() {
     teko::assert::is_true(call_lowers_to(te, "teko::numeric::bigint", "rem"))
 }
 
-/** bignum_literal_adopts — `bigint + <int literal>` adopts the literal via `bigint::of`. */
 #test
 fn bignum_literal_adopts() {
     var env = define(empty_env(), "a", bigint_named(), false)
@@ -1147,7 +830,6 @@ fn bignum_literal_adopts() {
     teko::assert::is_true(call_lowers_to(adopted, "teko::numeric::bigint", "of"))
 }
 
-/** dec_percent_is_rejected — `dec % dec` is a checker error (decimals have no remainder operator). */
 #test
 fn dec_percent_is_rejected() {
     var env = define(define(empty_env(), "a", dec_named(), false), "b", dec_named(), false)
@@ -1158,7 +840,6 @@ fn dec_percent_is_rejected() {
     }
 }
 
-/** bignum_no_implicit_promotion — `bigint + <i64 variable>` is refused, asking for an explicit `of`. */
 #test
 fn bignum_no_implicit_promotion() {
     var env = define(define(empty_env(), "a", bigint_named(), false), "n", i64t(), false)
@@ -1169,7 +850,6 @@ fn bignum_no_implicit_promotion() {
     }
 }
 
-/** bignum_mixing_is_rejected — mixing `bigint` and `dec` in one operation is refused. */
 #test
 fn bignum_mixing_is_rejected() {
     var env = define(define(empty_env(), "a", bigint_named(), false), "b", dec_named(), false)
@@ -1180,7 +860,6 @@ fn bignum_mixing_is_rejected() {
     }
 }
 
-/** bignum_compare_lowers_to_cmp — `bigint < bigint` lowers to a `cmp(...) < 0` bool comparison. */
 #test
 fn bignum_compare_lowers_to_cmp() {
     var env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
@@ -1192,13 +871,10 @@ fn bignum_compare_lowers_to_cmp() {
     teko::assert::is_true(call_lowers_to(inner, "teko::numeric::bigint", "cmp"))
 }
 
-/** arith_binop — build `a <op> b` from two already-bound variable names, for the W-RULE tests below. */
 fn arith_binop(op: lexer::TokenKind): parser::Binary {
     parser::Binary { op = op; left = e_var("a"); right = e_var("b") }
 }
 
-/** widen_same_sign_u8_u32_to_u32 — `u8 + u32` (same signedness) widens to the LARGER width `u32`,
-    no explicit `to` needed (W-RULE §2.1). */
 #test
 fn widen_same_sign_u8_u32_to_u32() {
     var env = define(define(empty_env(), "a", u8t(), false), "b", u32t(), false)
@@ -1206,8 +882,6 @@ fn widen_same_sign_u8_u32_to_u32() {
     teko::assert::is_true(prim_is(te.type, PrimKind::U32))
 }
 
-/** widen_same_sign_i16_i64_to_i64 — `i16 + i64` (same signedness) widens to the LARGER width
-    `i64`, no explicit `to` needed (W-RULE §2.1). */
 #test
 fn widen_same_sign_i16_i64_to_i64() {
     var env = define(define(empty_env(), "a", i16t(), false), "b", i64t(), false)
@@ -1215,9 +889,6 @@ fn widen_same_sign_i16_i64_to_i64() {
     teko::assert::is_true(prim_is(te.type, PrimKind::I64))
 }
 
-/** widen_mixed_sign_peer_u8_i32_to_i32 — `u8 + i32`: the signed side (`i32`, 32 bits) is
-    STRICTLY WIDER than the unsigned side (`u8`, 8 bits), so every `u8` value fits `i32` — the
-    peer-type widen accepts it, result `i32` (D3, W-RULE §2.2 lossless branch). */
 #test
 fn widen_mixed_sign_peer_u8_i32_to_i32() {
     var env = define(define(empty_env(), "a", u8t(), false), "b", i32t(), false)
@@ -1225,9 +896,6 @@ fn widen_mixed_sign_peer_u8_i32_to_i32() {
     teko::assert::is_true(prim_is(te.type, PrimKind::I32))
 }
 
-/** mixed_sign_equal_width_rejected_u64_i64 — `u64 + i64`: EQUAL width mixed sign has NO
-    lossless common fixed-width type (Teko has no wider backstop after i64/u64) — an honest
-    compile error demanding an explicit `to` (W-RULE §2.2 fallthrough, D3). */
 #test
 fn mixed_sign_equal_width_rejected_u64_i64() {
     var env = define(define(empty_env(), "a", u64t(), false), "b", i64t(), false)
@@ -1237,8 +905,6 @@ fn mixed_sign_equal_width_rejected_u64_i64() {
     }
 }
 
-/** int_float_still_rejected — `i32 + f64` stays a compile error: int×float is unchanged by the
-    W-RULE (B.38 — no implicit int↔float promotion, ever). */
 #test
 fn int_float_still_rejected() {
     var env = define(define(empty_env(), "a", i32t(), false), "b", f64t(), false)
@@ -1248,8 +914,6 @@ fn int_float_still_rejected() {
     }
 }
 
-/** float_widens_f32_f64_to_f64 — `f32 + f64` widens to the wider float (W-RULE §2.3), always
-    lossless — the float join is total, unlike the int join. */
 #test
 fn float_widens_f32_f64_to_f64() {
     var env = define(define(empty_env(), "a", f32t(), false), "b", f64t(), false)
@@ -1257,9 +921,6 @@ fn float_widens_f32_f64_to_f64() {
     teko::assert::is_true(prim_is(te.type, PrimKind::F64))
 }
 
-/** bitwise_widens_same_sign_u16_u64_to_u64 — `u16 & u64` (bitwise, integer-only — B.38) widens
-    under the SAME W-RULE join `type_arith_binop` uses (`widen_int_binop`), completing B.22 for
-    the bitwise/remainder operator class too. */
 #test
 fn bitwise_widens_same_sign_u16_u64_to_u64() {
     var env = define(define(empty_env(), "a", u16t(), false), "b", u64t(), false)
@@ -1267,8 +928,6 @@ fn bitwise_widens_same_sign_u16_u64_to_u64() {
     teko::assert::is_true(prim_is(te.type, PrimKind::U64))
 }
 
-/** bitwise_mixed_sign_equal_width_rejected_u32_i32 — `u32 | i32` (equal width, mixed sign) has
-    no lossless common type — the same honest-stop the arithmetic class gives, now for bitwise. */
 #test
 fn bitwise_mixed_sign_equal_width_rejected_u32_i32() {
     var env = define(define(empty_env(), "a", u32t(), false), "b", i32t(), false)
@@ -1278,22 +937,10 @@ fn bitwise_mixed_sign_equal_width_rejected_u32_i32() {
     }
 }
 
-/** cast_widen_binop — build `(a to <target>) <op> b`, the D1 class-3 shape: an explicit lossless
-    widen on the left, a NATURALLY-typed variable on the right (neither a literal nor a cast, so
-    `operand_may_flag_partner` does not veto the diagnostic). */
 fn cast_widen_binop(op: lexer::TokenKind, target_name: str): parser::Binary {
     parser::Binary { op = op; left = ek(cast_of("a", target_name)); right = e_var("b") }
 }
 
-/** d1_class3_noop_widen_warns_but_types_arith — `(a to i64) + b` with `a: i32`, `b: i64` is D1
-    class 3: the W-RULE would join to `i64` without the cast, so the cast changed nothing. It was a
-    hard compile ERROR; the 2026-07-27 owner ruling made it a WARNING, so the expression TYPES and
-    carries the joined `i64` type. This is the behavioural half of the reversal — the printed
-    warning itself goes to stderr and is not observable from a unit test.
-
-    It replaces the `c58_d1_class3_noop_widen_still_rejected` compile-fail fixture, which was
-    deleted with the rejection it pinned: a construct that no longer fails cannot live in a
-    compile-fail channel. */
 #test
 fn d1_class3_noop_widen_warns_but_types_arith() {
     var env = define(define(empty_env(), "a", i32t(), false), "b", i64t(), false)
@@ -1301,10 +948,6 @@ fn d1_class3_noop_widen_warns_but_types_arith() {
     teko::assert::is_true(prim_is(te.type, PrimKind::I64))
 }
 
-/** d1_class3_noop_widen_warns_but_types_compare — the SAME operand pair spelled as a comparison,
-    `(a to i64) < b`. `redundant_widen_cast_of` is shared by both sites precisely so the two can
-    never disagree, and the reversal has to hold at both: the comparison types to `bool` instead of
-    failing, exactly as the arithmetic spelling types to `i64`. */
 #test
 fn d1_class3_noop_widen_warns_but_types_compare() {
     var env = define(define(empty_env(), "a", i32t(), false), "b", i64t(), false)
@@ -1314,10 +957,6 @@ fn d1_class3_noop_widen_warns_but_types_compare() {
     teko::assert::is_true(prim_is(te.type, PrimKind::Bool))
 }
 
-/** d1_class1_same_type_cast_keeps_its_node — the warned same-type `x to T` must still be a `TCast`
-    in the typed tree, not folded to its operand. The D4 ≤2% ARITH-CAST-RATE gate counts `TCast`
-    nodes (`metrics.tks::expr_has_conversion`), so folding the node away would have silently
-    disabled the very ceiling the owner named as what the warning does NOT exempt us from. */
 #test
 fn d1_class1_same_type_cast_keeps_its_node() {
     var env = define(empty_env(), "f", i32t(), false)
@@ -1328,34 +967,14 @@ fn d1_class1_same_type_cast_keeps_its_node() {
     }
 }
 
-/**
- * shadow_exit_func — a user-declared `pub fn exit(code: i32): str` signature — the exact shape
- * D2's fixture shadows the injected `exit` builtin with (one required `i32` param, no defaults).
- *
- * @return  the `Func` type `type_call`'s in-scope lookup resolves for such a declaration
- */
 fn shadow_exit_func(): @Type() {
     Func { params = teko::list::push(teko::list::empty(), i32t()); ret = strt(); variadic = false; param_names = teko::list::push(teko::list::empty(), "code"); n_required = 1; defaults = teko::list::empty(); ret_extra = teko::list::empty() }
 }
 
-/**
- * exit_call_expr — the untyped call node for `exit(3)`: an unqualified, single-segment callee —
- * the exact shape the injected `panic`/`exit` builtins and a same-named user function share
- * syntactically, and the shape `tcall_is_diverging_builtin` must tell apart by RESOLUTION.
- *
- * @return  the untyped `Call`
- */
 fn exit_call_expr(): parser::Call {
     parser::Call { callee = path1("exit"); args = teko::list::push(teko::list::empty(), e_num(3)); arg_names = pos_names(1); owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }
 }
 
-/**
- * D2 fixture (nf-n16, part 1) — a same-named user function IN SCOPE resolves over the injected
- * `exit` builtin (`type_call`'s `in_scope` gate): the resulting call carries a real, non-empty
- * `call_ns` and the user's OWN declared return type (`str`), never the builtin's `Void`, and
- * `texpr_diverges`/`tcall_is_diverging_builtin` must recognize it as a NORMAL call — not a
- * diverging one — precisely because the RESOLUTION says so, not because of its bare name.
- */
 #test
 fn shadowed_exit_resolves_to_user_function_not_builtin() {
     var env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod", false), "mymod")
@@ -1371,15 +990,6 @@ fn shadowed_exit_resolves_to_user_function_not_builtin() {
     teko::assert::is_true(!texpr_diverges(te))
 }
 
-/**
- * D2 fixture (nf-n16, part 2) — THE defect this closes: before the fix, `check_trailing_value`
- * (the function-body trailing-expression check) skipped a shadowed `exit(...)` call entirely
- * because `texpr_diverges` recognized it by BARE NAME alone, so a function declaring `-> i32`
- * whose body trails a user `exit` that actually returns `str` type-checked — only `cc` caught the
- * mismatch downstream, and the own-native backend has no `cc` at all (silent miscompilation). With
- * the fix, `check_trailing_value` sees the call's TRUE type (`str`) and rejects it itself, exactly
- * as it would any other trailing-value type mismatch.
- */
 #test
 fn shadowed_exit_trailing_value_rejected_by_checker_not_cc() {
     var env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod", false), "mymod")
@@ -1391,12 +1001,6 @@ fn shadowed_exit_trailing_value_rejected_by_checker_not_cc() {
     }
 }
 
-/**
- * D2 regression guard — an UNSHADOWED `exit(...)` (no user declaration in scope) must still
- * resolve to the injected builtin and still diverge, so `check_trailing_value` still exempts it
- * from the trailing-value type check exactly as before the fix. The fix narrows recognition to
- * RESOLUTION, not name; it must never narrow which calls are STILL recognized as the true builtin.
- */
 #test
 fn unshadowed_exit_still_diverges_and_skips_trailing_check() {
     var te = match type_call(exit_call_expr(), empty_env(), empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
@@ -1408,12 +1012,6 @@ fn unshadowed_exit_still_diverges_and_skips_trailing_check() {
     }
 }
 
-/**
- * widen_implicit_admits_same_sign_narrower — the implicit-widening rule (owner 2026-07-29) admits a
- * narrower same-sign integer into a wider one, in BOTH signedness families. This is the direction the
- * owner's own program needs (`mut b: i64 = 1; b = a` over an `i32` `a`), and all three of his lines
- * were rejected before it existed.
- */
 #test
 fn widen_implicit_admits_same_sign_narrower() {
     teko::assert::is_true(numeric_widens_implicitly(i32t(), i64t()))
@@ -1421,22 +1019,11 @@ fn widen_implicit_admits_same_sign_narrower() {
     teko::assert::is_true(numeric_widens_implicitly(u8t(), u64t()))
 }
 
-/**
- * widen_implicit_admits_unsigned_into_strictly_wider_signed — the W-RULE's mixed-sign peer case
- * (§2.2): lossless because every `u32` value fits an `i64`. Admitted implicitly for the SAME reason
- * the arithmetic regime already admits it — the two regimes ask ONE predicate so they cannot drift.
- */
 #test
 fn widen_implicit_admits_unsigned_into_strictly_wider_signed() {
     teko::assert::is_true(numeric_widens_implicitly(u32t(), i64t()))
 }
 
-/**
- * widen_implicit_refuses_narrowing_and_equal_width_sign_change — the implicit direction is widening
- * ONLY. A narrowing has no implicit form at all: it must be written as a `to`, which then carries the
- * fail-loud runtime fit guard. An equal-width sign change is not a widen either — neither type holds
- * the whole of the other.
- */
 #test
 fn widen_implicit_refuses_narrowing_and_equal_width_sign_change() {
     teko::assert::is_true(!numeric_widens_implicitly(i64t(), i32t()))
@@ -1445,10 +1032,6 @@ fn widen_implicit_refuses_narrowing_and_equal_width_sign_change() {
     teko::assert::is_true(!numeric_widens_implicitly(u64t(), i64t()))
 }
 
-/**
- * widen_implicit_refuses_identity_and_crossing_the_float_boundary — an identity is not a conversion
- * (nothing to insert), and int↔float stays explicit in both directions (B.38, unchanged).
- */
 #test
 fn widen_implicit_refuses_identity_and_crossing_the_float_boundary() {
     teko::assert::is_true(!numeric_widens_implicitly(i64t(), i64t()))
@@ -1456,22 +1039,12 @@ fn widen_implicit_refuses_identity_and_crossing_the_float_boundary() {
     teko::assert::is_true(!numeric_widens_implicitly(f64t(), i64t()))
 }
 
-/**
- * widen_implicit_admits_f32_into_f64_only — the float half: `f32` → `f64` is exact for every value,
- * so it is implicit; `f64` → `f32` is not, so it stays an explicit `to`.
- */
 #test
 fn widen_implicit_admits_f32_into_f64_only() {
     teko::assert::is_true(numeric_widens_implicitly(f32t(), f64t()))
     teko::assert::is_true(!numeric_widens_implicitly(f64t(), f32t()))
 }
 
-/**
- * cast_lossless_widen_is_the_guard_decision — `cast_is_lossless_widen` is the ONE width table both
- * emission routes ask about whether a `to` needs the runtime fit guard, so these are the exact pairs
- * that decide it. The three that answer false are the three the native route used to get WRONG (300
- * `to` u8 answered 300; 2^40 `to` i32 answered 0; -1 `to` u32 answered 4294967295).
- */
 #test
 fn cast_lossless_widen_is_the_guard_decision() {
     teko::assert::is_true(cast_is_lossless_widen(PrimKind::U8, PrimKind::U64))
@@ -1483,17 +1056,6 @@ fn cast_lossless_widen_is_the_guard_decision() {
     teko::assert::is_true(!cast_is_lossless_widen(PrimKind::U64, PrimKind::I64))
 }
 
-/**
- * f32_value_widens_implicitly_into_f64 — the float half of the rule, END TO END rather than as a
- * predicate: an `f32` VALUE flows into an `f64` slot with no `to` written, and the value survives
- * exactly (every `f32` is representable in `f64`, so the widening is exact for every input, never
- * merely rounded).
- *
- * CORRECTING THE RECORD: the measurement that opened this lane reported `f32 to f64` as "rejected —
- * the conversion between floats does not exist". It was never rejected. `cast_check` admits any
- * numeric pair, and the observed rejection came from `print(y)` refusing a float ARGUMENT, one line
- * past the cast. What was missing was only the IMPLICIT direction, which this test now pins.
- */
 #test
 fn f32_value_widens_implicitly_into_f64() {
     var narrow: f32 = 1.5
@@ -1504,21 +1066,6 @@ fn f32_value_widens_implicitly_into_f64() {
     teko::assert::is_true(bound == 1.5)
 }
 
-/**
- * f64_to_f32_follows_ieee_and_never_panics — the DECIDED and DOCUMENTED policy for the narrowing
- * float conversion (`docs/design/cast-width-hygiene-0.3.1.md` §2.6): `f64 to f32` is IEEE-754
- * round-to-nearest — exact when the value is representable, correctly rounded when it is not, ±∞ on
- * overflow, ±0 on underflow — and it never panics.
- *
- * WHY IT IS NOT GUARDED LIKE AN INTEGER NARROW, since the owner's rule says a cast may not truncate
- * and must panic on overflow. An integer narrow that overflows answers with a finite number bearing
- * NO relation to its input (300 becoming 44), and that is the wrong answer the rule outlaws. A float
- * narrow never does: overflow yields ±∞, which IS an `f32` value and is loudly not a number anyone
- * mistakes for the input. Guarding only the overflow end would also be incoherent, because the SAME
- * range argument applies to ordinary precision loss and to underflow — `1.0e-300 to f32` is `0.0` —
- * and no language panics on those. This mirrors **C#**, whose `checked` context covers integral types
- * only and whose `(float)1e300` is `+∞`, not an exception.
- */
 #test
 fn f64_to_f32_follows_ieee_and_never_panics() {
     var exact: f64 = 1.5
@@ -1533,10 +1080,6 @@ fn f64_to_f32_follows_ieee_and_never_panics() {
 }
 
 #test
-/**
- * collect_unused_fn_warnings_flags_a_dead_private_function — a private function never called
- * anywhere in the program is reported, by name, exactly like `initanalysis.tks`'s stderr line.
- */
 fn collect_unused_fn_warnings_flags_a_dead_private_function() {
     var body: []@TStatement() = teko::list::push(teko::list::empty(), treturn(tnum(1)))
     var prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("dead_fn", i64t(), body)) }
@@ -1547,12 +1090,6 @@ fn collect_unused_fn_warnings_flags_a_dead_private_function() {
 }
 
 #test
-/**
- * collect_unused_fn_warnings_spares_a_called_function — a private function CALLED from another
- * function's body is not flagged (mirrors `used_in_program`'s own predicate): `main` calls
- * `caller`, `caller` calls `callee`, so all three are either exempt (`main`) or used, leaving zero
- * findings.
- */
 fn collect_unused_fn_warnings_spares_a_called_function() {
     var callee_body: []@TStatement() = teko::list::push(teko::list::empty(), treturn(tnum(1)))
     var caller_body: []@TStatement() = teko::list::push(teko::list::empty(), texpr_stmt(tcall1("callee", tnum(0), i64t())))
@@ -1566,10 +1103,6 @@ fn collect_unused_fn_warnings_spares_a_called_function() {
 }
 
 #test
-/**
- * collect_redundant_cast_warnings_flags_a_same_type_cast — the D1 class-1 finding: a cast whose
- * target equals its own operand's type, buried inside an expression statement.
- */
 fn collect_redundant_cast_warnings_flags_a_same_type_cast() {
     var cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u32t(); line = 5; col = 3 }
     var body: []@TStatement() = teko::list::push(teko::list::empty(), texpr_stmt(cast))
@@ -1581,11 +1114,6 @@ fn collect_redundant_cast_warnings_flags_a_same_type_cast() {
 }
 
 #test
-/**
- * collect_redundant_cast_warnings_flags_a_redundant_widen_in_a_binary — the D1 class-3 finding: an
- * arithmetic `+` whose left operand is a `to u32` cast on a `u8` value while the right operand is
- * already `u32` — the W-RULE joins to `u32` either way, so the cast is provably a no-op.
- */
 fn collect_redundant_cast_warnings_flags_a_redundant_widen_in_a_binary() {
     var cast = TExpr { kind = TCast { expr = tvar("x", u8t()) }; type = u32t(); line = 8; col = 4 }
     var bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = cast; right = tvar("y", u32t()) }; type = u32t(); line = 8; col = 1 }
@@ -1597,13 +1125,6 @@ fn collect_redundant_cast_warnings_flags_a_redundant_widen_in_a_binary() {
 }
 
 #test
-/**
- * collect_redundant_cast_warnings_renders_the_innermost_type_through_a_synthetic_wrap — the
- * `innermost_cast_type` regression: a `to u16` cast on a `u8` value, next to a `u32` sibling,
- * WIDENS a second time (the arithmetic join is `u32`, wider than the cast's own `u16` target), so
- * the typed tree carries a SYNTHETIC outer `to u32` wrap around the programmer's own `to u16`. The
- * reported message must still name `u16` (what the source spells), never the synthetic `u32`.
- */
 fn collect_redundant_cast_warnings_renders_the_innermost_type_through_a_synthetic_wrap() {
     var inner_cast = TExpr { kind = TCast { expr = tvar("x", u8t()) }; type = u16t(); line = 12; col = 4 }
     var outer_wrap = TExpr { kind = TCast { expr = inner_cast }; type = u32t(); line = 12; col = 4 }
@@ -1617,10 +1138,6 @@ fn collect_redundant_cast_warnings_renders_the_innermost_type_through_a_syntheti
 }
 
 #test
-/**
- * collect_redundant_cast_warnings_spares_a_genuine_narrowing_cast — a `to u8` cast on a `u32` value
- * is a NARROWING (checked) conversion, never a D1 finding regardless of the sibling operand.
- */
 fn collect_redundant_cast_warnings_spares_a_genuine_narrowing_cast() {
     var cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u8t(); line = 20; col = 4 }
     var bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = cast; right = tvar("y", u8t()) }; type = u8t(); line = 20; col = 1 }
@@ -1630,11 +1147,6 @@ fn collect_redundant_cast_warnings_spares_a_genuine_narrowing_cast() {
 }
 
 #test
-/**
- * collect_warnings_combines_both_finding_kinds — a function that is ITSELF unused AND carries a
- * redundant cast in its body reports BOTH findings, unused-fn first (`collect_warnings`'s own
- * ordering contract).
- */
 fn collect_warnings_combines_both_finding_kinds() {
     var cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u32t(); line = 1; col = 1 }
     var body: []@TStatement() = teko::list::push(teko::list::empty(), texpr_stmt(cast))
@@ -1645,17 +1157,6 @@ fn collect_warnings_combines_both_finding_kinds() {
     teko::assert::str_contains(warnings[1], "redundant cast")
 }
 
-/**
- * prog_from_module_src — lex + parse `src` as a MODULE (no loose statements) and flatten its
- * declarations into a `parser::Program`, every item stamped `path` — the same shape
- * `src/lsp/diagnostics.tks::module_items` builds for an open document, reused here so
- * `collect_diagnostics_appends_a_collected_warning_after_an_error` drives the REAL end-to-end
- * seam (lex → parse → `collect_diagnostics`) instead of a hand-built `TProgram`.
- *
- * @param src   the module source text
- * @param path  the file path stamped onto every item
- * @return      the flat program (empty items on a lex/parse fault — the caller expects clean text)
- */
 fn prog_from_module_src(src: str, path: str): parser::Program {
     var toks = match lexer::tokenize(src) { []lexer::Token as t => t; error => teko::list::empty() }
     var m = match parser::parse_module(toks, 0) { parser::Parsed<parser::Module> as x => x.node; error => parser::Module { uses = teko::list::empty(); decls = teko::list::empty() ; decl_guards = teko::list::empty()} }
@@ -1676,13 +1177,6 @@ fn prog_from_module_src(src: str, path: str): parser::Program {
 }
 
 #test
-/**
- * collect_diagnostics_appends_a_collected_warning_after_an_error — the crumb C regression named by
- * the design doc (`docs/design/lsp-teko.md` §9.1): a program with ONE type error (an unknown
- * parameter type) and ONE unused private function yields TWO diagnostics from `collect_diagnostics`
- * — the error, THEN the warning — proving the checker's real declaration-boundary walk (not just
- * the hand-built-tree unit tests above) actually wires `collect_warnings` in.
- */
 fn collect_diagnostics_appends_a_collected_warning_after_an_error() {
     var src = "pub fn bad(x: Bogus): i64 { return 0 }\nfn dead_leaf(): i64 { return 1 }\n"
     var diags = collect_diagnostics(prog_from_module_src(src, "warn.tks"))
@@ -1693,12 +1187,6 @@ fn collect_diagnostics_appends_a_collected_warning_after_an_error() {
 }
 
 #test
-/**
- * to_diagnostic_parses_file_line_col_with_caller_known_severity — the crumb D happy path: a
- * `file:line:col: msg` line, given its own file as the single candidate, resolves to a `Diagnostic`
- * whose `file`/`line`/`col`/`message` are pulled straight out of the string and whose `severity` is
- * EXACTLY the caller's `severity` argument, never re-derived from `message`'s own text.
- */
 fn to_diagnostic_parses_file_line_col_with_caller_known_severity() {
     var files = teko::list::push(teko::list::empty(), "foo.tks")
     var d = to_diagnostic("foo.tks:3:5: unknown type: Bogus", files, DiagLevel::Error)
@@ -1712,11 +1200,6 @@ fn to_diagnostic_parses_file_line_col_with_caller_known_severity() {
 }
 
 #test
-/**
- * to_diagnostic_handles_a_positionless_finding_for_a_known_file — `diag_at`'s OTHER positioned shape
- * (`file: msg`, no `line:col`, `diag_at`'s own `if line > 0` branch never taken) resolves the known
- * `file` with `line`/`col` both 0, never dropping the finding.
- */
 fn to_diagnostic_handles_a_positionless_finding_for_a_known_file() {
     var files = teko::list::push(teko::list::empty(), "foo.tks")
     var d = to_diagnostic("foo.tks: whole-file note", files, DiagLevel::Warning)
@@ -1728,11 +1211,6 @@ fn to_diagnostic_handles_a_positionless_finding_for_a_known_file() {
 }
 
 #test
-/**
- * to_diagnostic_falls_back_to_the_whole_line_for_an_unknown_file — a line naming none of the closed
- * candidate `files` (or an empty candidate set) never gets silently dropped: the WHOLE line becomes
- * the message at an unknown (`file = ""`, `line = 0`) position, `severity` still the caller's own.
- */
 fn to_diagnostic_falls_back_to_the_whole_line_for_an_unknown_file() {
     var d = to_diagnostic("some standalone diagnostic", teko::list::empty(), DiagLevel::Error)
     teko::assert::eq_str(d.file, "")
@@ -1742,11 +1220,6 @@ fn to_diagnostic_falls_back_to_the_whole_line_for_an_unknown_file() {
 }
 
 #test
-/**
- * program_files_collects_distinct_non_empty_files_in_first_seen_order — the closed candidate set
- * `to_diagnostic` matches against: every DISTINCT non-empty `item.file`, first occurrence wins,
- * duplicates dropped, an empty (single-file compile path) `file` never included.
- */
 fn program_files_collects_distinct_non_empty_files_in_first_seen_order() {
     var items: []parser::Item = teko::list::empty()
     items = teko::list::push(items, parser::Item { content = mk_fn("a", named_t("i64"), teko::list::empty()); namespace = ""; file = "a.tks" ; guard = parser::pred_true()})
@@ -1760,14 +1233,6 @@ fn program_files_collects_distinct_non_empty_files_in_first_seen_order() {
 }
 
 #test
-/**
- * collect_diagnostics_structured_stamps_real_severity_and_range — the crumb D end-to-end regression,
- * driving the REAL lex → parse → `collect_diagnostics_structured` seam (mirroring
- * `collect_diagnostics_appends_a_collected_warning_after_an_error`'s own harness): a program with ONE
- * type error and ONE unused private function yields TWO `Diagnostic` values — the error stamped
- * `DiagLevel::Error`, the warning stamped `DiagLevel::Warning` — proving severity is REAL, not a
- * `"warning:"` text sniff, all the way from the checker's own pre-mono walk.
- */
 fn collect_diagnostics_structured_stamps_real_severity_and_range() {
     var src = "pub fn bad(x: Bogus): i64 { return 0 }\nfn dead_leaf(): i64 { return 1 }\n"
     var diags = collect_diagnostics_structured(prog_from_module_src(src, "warn.tks"))
@@ -1781,50 +1246,21 @@ fn collect_diagnostics_structured_stamps_real_severity_and_range() {
     teko::assert::str_contains(diags[1].message, "dead_leaf")
 }
 
-/**
- * typechecks_src — lex + parse `src` as a module (via `prog_from_module_src`) and run the REAL
- * checker `type_program` on it. 0.3.1 mudancas-superficie-0.3.1.md §1's `var` end-to-end
- * regressions reuse `prog_from_module_src`'s real lex → parse seam rather than hand-built AST, so
- * the CONTEXTUAL `var`-head parse (`parse_stmt.tks`'s `is_var_binding_head`) is genuinely exercised.
- *
- * @param src  the module source text
- * @return     true iff the program type-checks with no diagnostics
- */
 fn typechecks_src(src: str): bool {
     match type_program(prog_from_module_src(src, "var_test.tks")) { TProgram => true; error => false }
 }
 
-/**
- * var_binding_type_checks_end_to_end — 0.3.1 mudancas-superficie-0.3.1.md §1: `var` parses onto the
- * always-mutable local (`BindKind::Mut`). A `var` local may be REASSIGNED (no "cannot assign to
- * immutable"), and may be the source of a `ref` binding (no "cannot take a reference to immutable")
- * — the two checker gates that used to require `mut`, now equally open to `var`.
- */
 #test
 fn var_binding_type_checks_end_to_end() {
     teko::assert::is_true(typechecks_src("pub fn f(): i32 { var x = 1; x = 2; return x }"))
     teko::assert::is_true(typechecks_src("pub fn f(): i32 { var x = 1; ref r = x; return r }"))
 }
 
-/**
- * one_param_func — a single-parameter `Func` type over `pt`, a synthetic overload-set member for the
- * `env_is_overloaded` gate test (the gate reads only that the binding IS a function, its namespace,
- * and its name — the parameter type is immaterial to it).
- *
- * @param pt  the sole parameter type
- * @return    `Func { (pt): i64 }`
- */
 fn one_param_func(pt: @Type()): @Type() {
     var ps: []@Type() = teko::list::push(teko::list::empty(), pt)
     Func { params = ps; ret = i64t(); variadic = false; param_names = []; n_required = 1 to u64; defaults = []; ret_extra = teko::list::empty() }
 }
 
-/**
- * overload_gate_keys_on_ns_and_name — the §9 A fixpoint-safety invariant: `env_is_overloaded` keys on
- * the EXACT `(namespace, name)` pair, so two same-named functions in DIFFERENT namespaces (the
- * cross-namespace `div` twins) are NOT an overload set, while two in the SAME namespace are. A bare-name
- * gate would falsely suffix ~40 corpus functions and break the fixpoint (design §5).
- */
 #test
 fn overload_gate_keys_on_ns_and_name() {
     var e0 = env_empty()

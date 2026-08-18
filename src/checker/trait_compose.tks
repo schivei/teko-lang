@@ -1,22 +1,5 @@
 use teko::parser
 
-/**
- * flatten_trait_composition — flatten every trait named in a trait's `implements` list into this
- * trait's effective member surface (§9.4 traits-compose-traits). `trait C & A & B` absorbs A's and
- * B's fields/methods/consts into C so C may reference them (self-containment extends to what C
- * composed). Interface names in `implements` are NOT flattened here (they are carried, not merged —
- * check_trait_carries_interface). Same-name members are reconciled by the SHARED merge routine
- * (fold_trait_fields/consts/methods): identical AST absorbs, any difference errors. The walk is
- * transitive (a composed trait may itself compose) and cycle-guarded by the composing-trait chain.
- *
- * @param trait_name  the composing trait
- * @param tb          its own members + its `implements` list
- * @param table       the type table
- * @param seen        the composing-trait chain (cycle guard)
- * @return            the flattened member surface (own ∪ composed, merged), or a merge/cycle error
- * @throws            when the composition is cyclic or a same-name member cannot absorb
- * @since 0.3.1 (§9.4 revised)
- */
 pub fn flatten_trait_composition(trait_name: str, tb: parser::TraitBody, table: TypeTable, seen: []str): FoldedMembers | error {
     var si: u64 = 0
     loop {
@@ -45,15 +28,6 @@ pub fn flatten_trait_composition(trait_name: str, tb: parser::TraitBody, table: 
     FoldedMembers { fields = fields; methods = methods; consts = consts }
 }
 
-/**
- * self_contained_surface_names — the flat set of member names a trait body may reference through
- * `self` (§9.4 self-containment): every field, method (and property accessor), and member const of
- * the trait's flattened surface.
- *
- * @param surface  the trait's flattened member surface (own ∪ composed)
- * @return         the declared member names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_contained_surface_names(surface: FoldedMembers): []str {
     var names: []str = teko::list::empty()
     var fi: u64 = 0
@@ -70,40 +44,16 @@ fn self_contained_surface_names(surface: FoldedMembers): []str {
     names
 }
 
-/**
- * name_in_list — is `name` present in `names`?
- *
- * @param names  the name list
- * @param name   the candidate name
- * @return       true iff present
- * @since 0.3.1 (§9.4 revised)
- */
 fn name_in_list(names: []str, name: str): bool {
     var i: u64 = 0
     loop { if i >= names.len { break }; if names[i] == name { return true }; i++ }
     false
 }
 
-/**
- * expr_is_self — is `e` exactly the receiver `self`?
- *
- * @param e  the expression
- * @return   true iff `e` is the `self` variable
- * @since 0.3.1 (§9.4 revised)
- */
 fn expr_is_self(e: parser::Expr): bool {
     match e.kind { parser::Var as v => v.name == "self"; _ => false }
 }
 
-/**
- * self_ref_stmts — collect every member name referenced through `self` across a statement list, for
- * the self-containment scan (§9.4).
- *
- * @param stmts  the statements to scan
- * @param acc    the names collected so far
- * @return       the accumulated `self.<member>` names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_ref_stmts(stmts: []@Statement(), acc: []str): []str {
     var out = acc
     var i: u64 = 0
@@ -111,15 +61,6 @@ fn self_ref_stmts(stmts: []@Statement(), acc: []str): []str {
     out
 }
 
-/**
- * self_ref_stmt — collect `self.<member>` names referenced by one statement (recursively through its
- * sub-expressions and sub-statements).
- *
- * @param s    the statement to scan
- * @param acc  the names collected so far
- * @return     the accumulated names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_ref_stmt(s: @Statement(), acc: []str): []str {
     match s {
         parser::Binding as b => self_ref_expr(b.value, acc)
@@ -138,14 +79,6 @@ fn self_ref_stmt(s: @Statement(), acc: []str): []str {
     }
 }
 
-/**
- * self_ref_exprs — collect `self.<member>` names across an expression list.
- *
- * @param es   the expressions to scan
- * @param acc  the names collected so far
- * @return     the accumulated names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_ref_exprs(es: []parser::Expr, acc: []str): []str {
     var out = acc
     var i: u64 = 0
@@ -153,16 +86,6 @@ fn self_ref_exprs(es: []parser::Expr, acc: []str): []str {
     out
 }
 
-/**
- * self_ref_expr — collect `self.<member>` names referenced by one expression (recursively). A
- * `FieldAccess`/`MethodCall` whose receiver is exactly `self` contributes its field/method name;
- * every sub-expression is scanned so a `self.X` nested anywhere is caught (§9.4 self-containment).
- *
- * @param e    the expression to scan
- * @param acc  the names collected so far
- * @return     the accumulated names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_ref_expr(e: parser::Expr, acc: []str): []str {
     match e.kind {
         parser::FieldAccess as fa => {
@@ -200,14 +123,6 @@ fn self_ref_expr(e: parser::Expr, acc: []str): []str {
     }
 }
 
-/**
- * self_ref_cmpterms — collect `self.<member>` names across a comparison chain's terms.
- *
- * @param ts   the comparison terms
- * @param acc  the names collected so far
- * @return     the accumulated names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_ref_cmpterms(ts: []parser::CmpTerm, acc: []str): []str {
     var out = acc
     var i: u64 = 0
@@ -215,14 +130,6 @@ fn self_ref_cmpterms(ts: []parser::CmpTerm, acc: []str): []str {
     out
 }
 
-/**
- * self_ref_arrayelems — collect `self.<member>` names across an array literal's elements.
- *
- * @param els  the array elements
- * @param acc  the names collected so far
- * @return     the accumulated names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_ref_arrayelems(els: []parser::ArrayElem, acc: []str): []str {
     var out = acc
     var i: u64 = 0
@@ -230,14 +137,6 @@ fn self_ref_arrayelems(els: []parser::ArrayElem, acc: []str): []str {
     out
 }
 
-/**
- * self_ref_arms — collect `self.<member>` names across a match expression's arms (guard + body).
- *
- * @param arms  the match arms
- * @param acc   the names collected so far
- * @return      the accumulated names
- * @since 0.3.1 (§9.4 revised)
- */
 fn self_ref_arms(arms: []parser::Arm, acc: []str): []str {
     var out = acc
     var i: u64 = 0
@@ -251,20 +150,6 @@ fn self_ref_arms(arms: []parser::Arm, acc: []str): []str {
     out
 }
 
-/**
- * check_trait_self_contained — every `self.X` a trait body references MUST be declared by the trait
- * itself or by a trait it composes (§9.4 self-containment). A trait pointing at a member it neither
- * declares nor composes is visibly wrong — the error is IN THE TRAIT, not at the composing host. For
- * each `self.<member>` reference in the trait's method bodies, `<member>` must resolve against the
- * trait's flattened surface (own ∪ composed).
- *
- * @param trait_name  the trait being checked (for the diagnostic)
- * @param trait_body  the trait's own members (its method bodies are scanned)
- * @param surface     the trait's flattened member surface (own ∪ composed) to resolve against
- * @return            null when every `self.X` is declared, else the first named error
- * @throws            when a `self.<member>` reference names no declared member of the trait
- * @since 0.3.1 (§9.4 revised)
- */
 fn check_trait_self_contained(trait_name: str, trait_body: parser::TraitBody, surface: FoldedMembers): null | error {
     var allowed = self_contained_surface_names(surface)
     var refs: []str = teko::list::empty()
@@ -274,48 +159,17 @@ fn check_trait_self_contained(trait_name: str, trait_body: parser::TraitBody, su
     loop {
         if ri >= refs.len { break }
         if !name_in_list(allowed, refs[ri]) {
-            return error { message = $"trait '{trait_name}' references `self.{refs[ri]}` but declares no member '{refs[ri]}' — a trait is self-contained: every `self.X` must be declared by the trait or a trait it composes (§9.4)" }
+            return error { message = $"trait '{trait_name}' references `self.{refs[ri]}` but declares no member '{refs[ri]}' — a trait is self-contained: every `self.X` must be declared by the trait or a trait it composes" }
         }
         ri++
     }
     null
 }
 
-/**
- * check_trait_carries_interface — a trait declaring `& IFoo` in its `implements` must FULLY implement
- * IFoo from its own flattened surface (§9.4 traits-carry-interface): every method IFoo requires
- * (transitively via extends) is provided, by name + matching signature, among the trait's flattened
- * members. This is the TRAIT-LEVEL full-impl check — it runs on the trait decl, so a `trait T & IFoo`
- * missing a method fails AT THE TRAIT. Reuses the interface-conformance machinery with the trait's
- * flattened methods as `own_methods` and `members_all_public = true` (a mixin's methods flatten as the
- * host's public surface).
- *
- * @param trait_name  the carrying trait
- * @param type_ns     the trait's declaring namespace
- * @param flattened   the trait's flattened member surface
- * @param iface_name  the carried interface (from the trait's `implements`)
- * @param table       the type table
- * @return            null when the trait fully implements the interface, else the conformance error
- * @throws            when a required interface method is missing or mismatched on the trait's surface
- * @since 0.3.1 (§9.4 revised)
- */
 fn check_trait_carries_interface(trait_name: str, type_ns: str, flattened: FoldedMembers, iface_name: str, table: TypeTable): error | null {
     check_one_interface(trait_name, type_ns, flattened.methods, iface_name, table, true)
 }
 
-/**
- * trait_carried_interface_diags — the carried-interface conformance diagnostics of ONE trait: for
- * every interface named in the trait's `implements`, the trait's flattened surface must fully
- * implement it (§9.4 traits-carry-interface). Trait names in `implements` are composed (flattened),
- * not carried, so they are excluded here.
- *
- * @param reg        the trait's registration (for the diagnostic position)
- * @param trb        the trait body
- * @param surface    the trait's flattened member surface
- * @param table      the whole collected type table
- * @return           one diagnostic per carried interface the trait does not fully implement
- * @since 0.3.1 (§9.4 revised)
- */
 fn trait_carried_interface_diags(reg: TypeReg, trb: parser::TraitBody, surface: FoldedMembers, table: TypeTable): []str {
     var type_ns = type_ns_of(table, reg.decl.name)
     var split = split_trait_derives(trb.implements, table, type_ns)
@@ -332,18 +186,6 @@ fn trait_carried_interface_diags(reg: TypeReg, trb: parser::TraitBody, surface: 
     diags
 }
 
-/**
- * trait_composition_diags — the composition diagnostics of ONE trait declaration (§9.4): flattens the
- * trait's composition to build its self-contained surface (a flatten error — cyclic composition or an
- * un-absorbable composed member — is reported), scans its method bodies for undeclared `self.X`, and
- * checks that every carried interface is fully implemented by the flattened surface.
- *
- * @param reg    the trait's registration (for the diagnostic position)
- * @param trb    the trait body
- * @param table  the whole collected type table
- * @return       the trait's composition diagnostics, in declaration order
- * @since 0.3.1 (§9.4 revised)
- */
 fn trait_composition_diags(reg: TypeReg, trb: parser::TraitBody, table: TypeTable): []str {
     var surface = match flatten_trait_composition(reg.decl.name, trb, table, teko::list::empty()) {
         FoldedMembers as f => f

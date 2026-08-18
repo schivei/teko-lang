@@ -1,138 +1,45 @@
 use teko::parser
 
-/**
- * A scalar `i64` type — a copy source (NOT an alias source; reading it carries no shared handle).
- *
- * The #331 L1 unit suite (`src/checker/spine_test.tkt`, namespace `teko::checker`) lives beside the
- * module so it reaches the PRIVATE lattice helpers (`pt_join` / `us_join` / the seeds) as
- * well as the PUBLIC query surface (`fn_spine` / `cell_of` / `ref_target_outlives` / `is_unique_at`).
- * It proves the fact is CORRECT on hand-built inputs: the finite cell universe, every lattice arm,
- * the three joins, the monotone alias-transfer, both gate queries (unique vs shared,
- * ref-outlives-yes / ref-outlives-no), the adopter-escape reject, and termination (a re-run reaches
- * the same fixpoint).
- *
- * @return Type { Prim { kind = PrimKind::I64 } }  the `i64` primitive type
- */
 fn sp_i64(): @Type() { Prim { kind = PrimKind::I64 } }
 
-/**
- * A non-scalar `str` type — an ALIAS source (`let y = x` on it joins both cells to shared). `str` is
- * a VIEW `{ptr,len}` that may alias (escape.tks's own `type_is_scalar` note: deliberately NOT
- * scalar), so it is the natural payload-free non-scalar for a hand-built alias input.
- *
- * @return Type { Str { } }  the `str` type
- */
 fn sp_nonscalar(): @Type() { Str { } }
 
-/**
- * A typed variable read (`TVar`) of the given name and type — the bare-local alias-source shape.
- *
- * @param str name  the variable name
- * @param Type t  the variable's resolved type
- * @return TExpr  a `TVar` typed expression
- */
 fn sp_var(name: str, t: @Type()): TExpr {
     TExpr { kind = TVar { name = name; is_func = false; func_ns = "" }; type = t; line = 0; col = 0 }
 }
 
-/**
- * A field-read expression `recv.field` off a bare local `recv`, typed `t` — the one-hop cell shape.
- *
- * @param str recv  the bare-local receiver name
- * @param str field  the field name
- * @param Type t  the field's resolved type
- * @return TExpr  a `TFieldAccess` typed expression
- */
 fn sp_field(recv: str, field: str, t: @Type()): TExpr {
     TExpr { kind = TFieldAccess { receiver = sp_var(recv, sp_nonscalar()); field = field }; type = t; line = 0; col = 0 }
 }
 
-/**
- * A `let name = value` binding to a simple name.
- *
- * @param str name  the bound name
- * @param TExpr value  the binding's typed RHS
- * @return TStatement  a `TBinding` statement
- */
 fn sp_let(name: str, value: TExpr): @TStatement() {
     TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value  }
 }
 
-/**
- * A discarded expression statement (contributes its sub-cells but no binding target).
- *
- * @param TExpr e  the typed expression
- * @return TStatement { TExprStmt { expr = e } }  a `TExprStmt` statement
- */
 fn sp_exprstmt(e: TExpr): @TStatement() { TExprStmt { expr = e } }
 
-/**
- * A `Reference` parameter written `Ref<i64>` — the outlives-proof referent anchor.
- *
- * @param str name  the parameter name
- * @return parser::Param  a parser `Param` typed `Ref<i64>`
- */
 fn sp_ref_param(name: str): parser::Param {
     parser::Param { name = name; has_type = true; type_ann = parser::NamedType { path = sp_path("Ref"); args = sp_one_arg("i64") }; is_params = false; has_default = false; default_expr = sp_no_expr() }
 }
 
-/**
- * A single-segment path of the given name.
- *
- * @param str name  the segment name
- * @return parser::Path  a parser `Path` with one segment
- */
 fn sp_path(name: str): parser::Path {
     parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
 }
 
-/**
- * A one-element type-argument list holding a named type (for `Ref<T>`'s single arg).
- *
- * @param str name  the argument type's name
- * @return []@TypeExpr()  a `[]@TypeExpr()` of length one
- */
 fn sp_one_arg(name: str): []@TypeExpr() {
     teko::list::push(teko::list::empty(), parser::NamedType { path = sp_path(name); args = teko::list::empty() })
 }
 
-/**
- * A placeholder syntactic expression for a param's unused default slot (never read here).
- *
- * @return parser::Expr  a parser `Number` 0 expression
- */
 fn sp_no_expr(): parser::Expr {
     parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; line = 0; col = 0 }
 }
 
-/**
- * A minimal `TFunction` with the given params and body (the fields `fn_spine` never reads carry inert
- * defaults).
- *
- * @param []parser::Param params  the function's parameters
- * @param []TStatement body  the function's typed statement block
- * @return TFunction  a `TFunction` ready for `fn_spine`
- */
 fn sp_fn(params: []parser::Param, body: []@TStatement()): TFunction {
     TFunction { overload_suffix = ""; name = "f"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; return_type = Void { }; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = "t"; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = teko::list::empty(); guard = parser::pred_true() }
 }
 
-/**
- * A bare non-scalar (`str`) local read of the given name — an alias-source RHS.
- *
- * @param str name  the variable name
- * @return TExpr { sp_var(name, sp_nonscalar()) }  a non-scalar-typed `TVar`
- */
 fn sp_nonscalar_var(name: str): TExpr { sp_var(name, sp_nonscalar()) }
 
-/**
- * Does the spine hold a one-hop cell keyed `name`.`field`?
- *
- * @param Spine s  the spine
- * @param str name  the receiver name
- * @param str field  the field name
- * @return bool  true iff the cell universe contains that one-hop cell
- */
 fn sp_has_field_cell(s: Spine, name: str, field: str): bool {
     var i = 0
     loop {
@@ -145,10 +52,6 @@ fn sp_has_field_cell(s: Spine, name: str, field: str): bool {
     false
 }
 
-/**
- * A `Reference` param seeds `pt = PtParam` and `bf = BfParam` on its slot, while a bare binding seeds
- * `PtFrame` / `BfNone` — the initial climb-floor.
- */
 #test fn spine_seeds_ref_param_to_param_axes_and_bindings_to_floor() {
     var params = teko::list::push(teko::list::empty(), sp_ref_param("r"))
     var body = teko::list::push(teko::list::empty(), sp_let("y", sp_var("k", sp_i64())))
@@ -163,43 +66,14 @@ fn sp_has_field_cell(s: Spine, name: str, field: str): bool {
     teko::assert::is_true(sp_bf_is_none(s.bf[yi to u32]))
 }
 
-/**
- * Is a points-to value `PtParam`?
- *
- * @param @PointsTo() p  the points-to value
- * @return bool { match p { PtParam => true; _ => false } }  true iff `PtParam`
- */
 fn sp_pt_is_param(p: @PointsTo()): bool { match p { PtParam => true; _ => false } }
 
-/**
- * Is a points-to value `PtFrame`?
- *
- * @param @PointsTo() p  the points-to value
- * @return bool { match p { PtFrame => true; _ => false } }  true iff `PtFrame`
- */
 fn sp_pt_is_frame(p: @PointsTo()): bool { match p { PtFrame => true; _ => false } }
 
-/**
- * Is a borrowed-from value `BfParam`?
- *
- * @param @BorrowedFrom() b  the borrowed-from value
- * @return bool { match b { BfParam => true; _ => false } }  true iff `BfParam`
- */
 fn sp_bf_is_param(b: @BorrowedFrom()): bool { match b { BfParam => true; _ => false } }
 
-/**
- * Is a borrowed-from value `BfNone`?
- *
- * @param @BorrowedFrom() b  the borrowed-from value
- * @return bool { match b { BfNone => true; _ => false } }  true iff `BfNone`
- */
 fn sp_bf_is_none(b: @BorrowedFrom()): bool { match b { BfNone => true; _ => false } }
 
-/**
- * `ref_target_outlives` ADMITS a borrow whose `bf` names a `BfParam` referent that is not adopter-
- * confined (a param outlives every frame local), and REJECTS an out-of-range borrow index (a `bf`
- * that never resolves ⇒ conservative FALSE).
- */
 #test fn spine_ref_target_outlives_admits_param_referent_rejects_unknown() {
     var params = teko::list::push(teko::list::empty(), sp_ref_param("r"))
     var s = fn_spine(sp_fn(params, teko::list::empty()))
@@ -208,10 +82,6 @@ fn sp_bf_is_none(b: @BorrowedFrom()): bool { match b { BfNone => true; _ => fals
     teko::assert::is_false(ref_target_outlives(s, 999, ri))
 }
 
-/**
- * `ref_target_outlives` REJECTS a `BfNone` borrow (a non-Reference cell borrows nothing — no referent
- * anchor, the conservative REJECT).
- */
 #test fn spine_ref_target_outlives_rejects_non_reference_cell() {
     var body = teko::list::push(teko::list::empty(), sp_let("y", sp_var("k", sp_i64())))
     var s = fn_spine(sp_fn(teko::list::empty(), body))
@@ -219,11 +89,6 @@ fn sp_bf_is_none(b: @BorrowedFrom()): bool { match b { BfNone => true; _ => fals
     teko::assert::is_false(ref_target_outlives(s, yi, yi))
 }
 
-/**
- * `ref_target_outlives` REJECTS a `BfTop` borrow (the referent is unknown / joined-over) — the
- * conservative unknown-referent arm, hand-installed since `fn_spine`'s L1 seeding never itself
- * produces `BfTop`.
- */
 #test fn spine_ref_target_outlives_rejects_bftop() {
     var body = teko::list::push(teko::list::empty(), sp_let("y", sp_var("k", sp_i64())))
     var spine = fn_spine(sp_fn(teko::list::empty(), body))
@@ -233,10 +98,6 @@ fn sp_bf_is_none(b: @BorrowedFrom()): bool { match b { BfNone => true; _ => fals
     teko::assert::is_false(ref_target_outlives(s, yi, yi))
 }
 
-/**
- * The points-to join is a monotone least-upper-bound: `PtFrame` is bottom, the same concrete site
- * joins to itself, two DIFFERENT concrete sites climb to `PtTop`, and any `PtTop` input is absorbing.
- */
 #test fn spine_pt_join_is_monotone_lub() {
     var frame = sp_pt_frame()
     var p0 = sp_pt_param(0)
@@ -249,21 +110,12 @@ fn sp_bf_is_none(b: @BorrowedFrom()): bool { match b { BfNone => true; _ => fals
     teko::assert::is_true(sp_pt_is_frame(pt_join(frame, frame)))
 }
 
-/**
- * The unique-vs-shared join climbs monotonically: `UsUnique < UsShared < UsTop`, and any `UsTop`
- * input is absorbing.
- */
 #test fn spine_us_join_climbs_monotonically() {
     teko::assert::is_true(sp_us_is_shared(us_join(sp_us_unique(), sp_us_shared())))
     teko::assert::is_true(sp_us_is_unique(us_join(sp_us_unique(), sp_us_unique())))
     teko::assert::is_true(sp_us_is_top(us_join(sp_us_shared(), sp_us_top())))
 }
 
-/**
- * A borrow whose referent is `pt = PtAdopter` (an `adopt { }`-confined allocation) is REJECTED by
- * `ref_target_outlives` even for a `BfParam` borrow (§5.1 — the ADOPT escape-UAF), while a `PtFrame`
- * / `PtRoot` / `PtParam` / `PtTop` referent is NOT rejected on that axis.
- */
 #test fn spine_ref_target_outlives_rejects_adopter_confined_referent() {
     var params = teko::list::push(teko::list::empty(), sp_ref_param("r"))
     var spine = fn_spine(sp_fn(params, teko::list::empty()))
@@ -276,112 +128,32 @@ fn sp_bf_is_none(b: @BorrowedFrom()): bool { match b { BfNone => true; _ => fals
     teko::assert::is_true(ref_target_outlives(sound, ri, ri))
 }
 
-/**
- * A `PtFrame` points-to value.
- *
- * @return PointsTo { PtFrame { } }  the frame allocation site
- */
 fn sp_pt_frame(): @PointsTo() { PtFrame { } }
 
-/**
- * A `PtRoot` points-to value.
- *
- * @return PointsTo { PtRoot { } }  the root allocation site
- */
 fn sp_pt_root(): @PointsTo() { PtRoot { } }
 
-/**
- * A `PtParam` points-to value for slot `i`.
- *
- * @param u32 i  the parameter slot
- * @return PointsTo { PtParam { id = PtParamId { index = i } } }  the param allocation site
- */
 fn sp_pt_param(i: u32): @PointsTo() { PtParam { id = PtParamId { index = i } } }
 
-/**
- * A `PtAdopter` points-to value for region `id` (concrete, not the `⊤` fallback).
- *
- * @param u32 id  the adopter region id
- * @return PointsTo { PtAdopter { id = PtAdopterId { region = id; top = false } } }  the adopter allocation site
- */
 fn sp_pt_adopter(id: u32): @PointsTo() { PtAdopter { id = PtAdopterId { region = id; top = false } } }
 
-/**
- * A `PtTop` points-to value.
- *
- * @return PointsTo { PtTop { } }  the joined-over allocation site
- */
 fn sp_pt_top(): @PointsTo() { PtTop { } }
 
-/**
- * Is a points-to value `PtTop`?
- *
- * @param @PointsTo() p  the points-to value
- * @return bool { match p { PtTop => true; _ => false } }  true iff `PtTop`
- */
 fn sp_pt_is_top(p: @PointsTo()): bool { match p { PtTop => true; _ => false } }
 
-/**
- * A `BfTop` borrowed-from value.
- *
- * @return BorrowedFrom { BfTop { } }  the joined-over borrowed-from value
- */
 fn sp_bf_top(): @BorrowedFrom() { BfTop { } }
 
-/**
- * A `UsUnique` unique-vs-shared value.
- *
- * @return Unique { UsUnique { } }  the unique value
- */
 fn sp_us_unique(): @Unique() { UsUnique { } }
 
-/**
- * A `UsShared` unique-vs-shared value.
- *
- * @return Unique { UsShared { } }  the shared value
- */
 fn sp_us_shared(): @Unique() { UsShared { } }
 
-/**
- * A `UsTop` unique-vs-shared value.
- *
- * @return Unique { UsTop { } }  the joined-over unique-vs-shared value
- */
 fn sp_us_top(): @Unique() { UsTop { } }
 
-/**
- * Is a unique-vs-shared value `UsUnique`?
- *
- * @param @Unique() u  the value
- * @return bool { match u { UsUnique => true; _ => false } }  true iff `UsUnique`
- */
 fn sp_us_is_unique(u: @Unique()): bool { match u { UsUnique => true; _ => false } }
 
-/**
- * Is a unique-vs-shared value `UsShared`?
- *
- * @param @Unique() u  the value
- * @return bool { match u { UsShared => true; _ => false } }  true iff `UsShared`
- */
 fn sp_us_is_shared(u: @Unique()): bool { match u { UsShared => true; _ => false } }
 
-/**
- * Is a unique-vs-shared value `UsTop`?
- *
- * @param @Unique() u  the value
- * @return bool { match u { UsTop => true; _ => false } }  true iff `UsTop`
- */
 fn sp_us_is_top(u: @Unique()): bool { match u { UsTop => true; _ => false } }
 
-/**
- * Return the points-to axis with index `i` replaced by `v` (a test-local rebuild-by-copy, mirroring
- * the module's `set_us`).
- *
- * @param []@PointsTo() pt  the points-to axis
- * @param u32 i  the cell index to replace
- * @param @PointsTo() v  the new points-to value
- * @return []@PointsTo()  the axis with element `i` set to `v`
- */
 fn sp_set_pt(pt: []@PointsTo(), i: u32, v: @PointsTo()): []@PointsTo() {
     var acc: []@PointsTo() = teko::list::empty()
     var k = 0
@@ -397,61 +169,26 @@ fn sp_set_pt(pt: []@PointsTo(), i: u32, v: @PointsTo()): []@PointsTo() {
     acc
 }
 
-/**
- * A `[]T` slice annotation (the parameter surface for a non-Reference collection param) is NOT a
- * `Ref<T>` — `type_ann_is_ref` returns false.
- *
- * @param str name  the element type's name
- * @return @TypeExpr()  a `[]name` slice type annotation
- */
 fn sp_slice_ann(name: str): @TypeExpr() {
     parser::SliceType { element = parser::NamedType { path = sp_path(name); args = teko::list::empty() } }
 }
 
-/**
- * A `T | U` union annotation is NOT a `Ref<T>` — `type_ann_is_ref` returns false.
- *
- * @return @TypeExpr()  a two-member union type annotation
- */
 fn sp_union_ann(): @TypeExpr() {
     parser::UnionType { members = teko::list::push(teko::list::push(teko::list::empty(), sp_named_ann("i64")), sp_named_ann("str")) }
 }
 
-/**
- * A `(A): R` function-type annotation is NOT a `Ref<T>` — `type_ann_is_ref` returns false.
- *
- * @return @TypeExpr()  a function-type annotation
- */
 fn sp_function_ann(): @TypeExpr() {
     parser::FunctionType { params = teko::list::push(teko::list::empty(), sp_named_ann("i64")); ret = sp_named_ann("i64") }
 }
 
-/**
- * A bare named-type annotation (e.g. `i64`).
- *
- * @param str name  the type's name
- * @return @TypeExpr()  a `NamedType` annotation
- */
 fn sp_named_ann(name: str): @TypeExpr() {
     parser::NamedType { path = sp_path(name); args = teko::list::empty() }
 }
 
-/**
- * A `NamedType` whose head is `Ref` but carries ZERO or TWO type arguments (not the legal
- * single-arg `Ref<T>` shape) is NOT recognized as a reference by `named_head_is_ref` — the arity
- * guard.
- *
- * @return @TypeExpr()  a `Ref` named-type annotation with no type arguments
- */
 fn sp_ref_head_no_args(): @TypeExpr() {
     parser::NamedType { path = sp_path("Ref"); args = teko::list::empty() }
 }
 
-/**
- * `type_ann_is_ref` recognizes `Ref<T>` (a single-arg `NamedType` headed `Ref`) and rejects every
- * other syntactic type-annotation shape: a plain name, a slice, a union, a function
- * type, and a `Ref`-headed name with the wrong arity.
- */
 #test fn spine_type_ann_is_ref_recognizes_only_ref_and_rejects_every_other_shape() {
     teko::assert::is_true(type_ann_is_ref(parser::NamedType { path = sp_path("Ref"); args = sp_one_arg("i64") }))
     teko::assert::is_false(type_ann_is_ref(sp_named_ann("i64")))
@@ -461,91 +198,38 @@ fn sp_ref_head_no_args(): @TypeExpr() {
     teko::assert::is_false(type_ann_is_ref(sp_ref_head_no_args()))
 }
 
-/**
- * An assignment `y = x` to a simple name (`AssignKind::Simple`).
- *
- * @param str name  the assigned name
- * @param TExpr value  the typed RHS
- * @return TStatement  a `TAssign` statement
- */
 fn sp_assign_simple(name: str, value: TExpr): @TStatement() {
     TAssign { kind = parser::AssignKind::Simple; name = name; op = lexer::TokenKind::Assign; bound = value.type; value = value; deref = false; target = sp_no_texpr() }
 }
 
-/**
- * A `Reference`-deref assignment `r.value = x` (`AssignKind::RefDeref`) — names no simple-alias
- * pair, so the alias-transfer must leave both cells untouched.
- *
- * @param str name  the dereferenced ref's name
- * @param TExpr value  the typed RHS
- * @return TStatement  a `TAssign` statement of kind `RefDeref`
- */
 fn sp_assign_refderef(name: str, value: TExpr): @TStatement() {
     TAssign { kind = parser::AssignKind::RefDeref; name = name; op = lexer::TokenKind::Assign; bound = value.type; value = value; deref = true; target = sp_no_texpr() }
 }
 
-/**
- * The inert placeholder typed expression a `TAssign.target` carries when `kind != Field` (never
- * read on that path — mirrors `tast.tks`'s own `no_texpr` sentinel convention).
- *
- * @return TExpr  a `TNullLit` sentinel `TExpr`
- */
 fn sp_no_texpr(): TExpr {
     TExpr { kind = TNullLit { }; type = Void { }; line = 0; col = 0 }
 }
 
-/**
- * A bare `return value` statement.
- *
- * @param TExpr value  the typed return value
- * @return TStatement  a `TReturn` statement with `has_value = true`
- */
 fn sp_return(value: TExpr): @TStatement() {
     TReturn { has_value = true; value = value; values = teko::list::empty() }
 }
 
-/**
- * A value-less `return` statement.
- *
- * @return TStatement  a `TReturn` statement with `has_value = false`
- */
 fn sp_return_void(): @TStatement() {
     TReturn { has_value = false; value = sp_no_texpr(); values = teko::list::empty() }
 }
 
-/**
- * An anonymous `adopt { body }` statement.
- *
- * @param []TStatement body  the typed adopter body
- * @return TStatement  a `TAdoptStmt` statement
- */
 fn sp_adopt(body: []@TStatement()): @TStatement() {
     TAdoptStmt { name = ""; body = body }
 }
 
-/**
- * An unlabeled `break` statement.
- *
- * @return TStatement  a `TBreakStmt` statement
- */
 fn sp_break(): @TStatement() {
     TBreakStmt { label = "" }
 }
 
-/**
- * An unlabeled `continue` statement.
- *
- * @return TStatement  a `TContinueStmt` statement
- */
 fn sp_continue(): @TStatement() {
     TContinueStmt { label = "" }
 }
 
-/**
- * `add_stmt_cells` reaches every statement shape: a `TAssign` contributes its RHS's one-hop cells,
- * a value-`TReturn` contributes its value's cells, a value-less `TReturn` contributes nothing, and
- * `TBreakStmt` / `TContinueStmt` contribute nothing (leaf statements with no cells).
- */
 #test fn spine_add_stmt_cells_covers_assign_return_break_continue() {
     var body = teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(),
                     sp_assign_simple("y", sp_field("x", "f", sp_i64()))),
@@ -557,20 +241,12 @@ fn sp_continue(): @TStatement() {
     teko::assert::is_true(sp_has_field_cell(s, "z", "g"))
 }
 
-/**
- * A `TReturn` with `has_value = false` contributes no cell (the `else` arm of `add_stmt_cells`'s
- * `TReturn` case).
- */
 #test fn spine_add_stmt_cells_return_without_value_contributes_nothing() {
     var body = teko::list::push(teko::list::empty(), sp_return_void())
     var s = fn_spine(sp_fn(teko::list::empty(), body))
     teko::assert::is_true(s.cells.len == 0)
 }
 
-/**
- * `add_expr_cells` recurses into a `TIfExpr`'s `then_blk` / `else_blk` and a `TMatchExpr`'s arm
- * bodies, so a one-hop field cell read inside any nested branch is still enumerated.
- */
 #test fn spine_add_expr_cells_recurses_into_if_and_match_branches() {
     var iff = TExpr { kind = TIfExpr { cond = sp_var("c", sp_bool_t()); then_blk = teko::list::push(teko::list::empty(), sp_exprstmt(sp_field("th", "p", sp_i64()))); has_else = true; else_blk = teko::list::push(teko::list::empty(), sp_exprstmt(sp_field("el", "q", sp_i64()))) }; type = sp_i64(); line = 0; col = 0 }
     var m = TExpr { kind = TMatchExpr { subject = sp_var("sub", sp_i64()); arms = teko::list::push(teko::list::empty(), sp_wild_arm(sp_field("ar", "r", sp_i64()))) }; type = sp_i64(); line = 0; col = 0 }
@@ -581,27 +257,12 @@ fn sp_continue(): @TStatement() {
     teko::assert::is_true(sp_has_field_cell(s, "ar", "r"))
 }
 
-/**
- * A `bool` type — the `TIfExpr.cond` / match-guard scalar shape.
- *
- * @return Type { Prim { kind = PrimKind::Bool } }  the `bool` primitive type
- */
 fn sp_bool_t(): @Type() { Prim { kind = PrimKind::Bool } }
 
-/**
- * A single wildcard match arm whose body is one discarded expression statement.
- *
- * @param TExpr bodyexpr  the arm body's one expression
- * @return TArm  a `TArm` matching everything
- */
 fn sp_wild_arm(bodyexpr: TExpr): TArm {
     TArm { pattern = parser::WildcardPattern { }; has_when = false; guard = sp_no_texpr(); body = teko::list::push(teko::list::empty(), sp_exprstmt(bodyexpr)) }
 }
 
-/**
- * `pt_same_site` agrees on two `PtRoot` values, and DISAGREES (false) across every other pairing
- * (different kinds, or a `PtFrame` / `PtTop` operand that names no concrete site).
- */
 #test fn spine_pt_same_site_covers_root_and_cross_kind_pairs() {
     teko::assert::is_true(pt_same_site(sp_pt_root(), sp_pt_root()))
     teko::assert::is_false(pt_same_site(sp_pt_param(0), sp_pt_root()))
@@ -610,10 +271,6 @@ fn sp_wild_arm(bodyexpr: TExpr): TArm {
     teko::assert::is_false(pt_same_site(sp_pt_top(), sp_pt_param(0)))
 }
 
-/**
- * `adopter_same` returns false whenever EITHER id is the `⊤` fallback (even when both are `⊤`,
- * conservatively never agreeing), and true only for two concrete ids sharing a region.
- */
 #test fn spine_adopter_same_rejects_any_top_fallback() {
     var concrete0 = PtAdopterId { region = 0; top = false }
     var concrete0b = PtAdopterId { region = 0; top = false }
@@ -626,31 +283,14 @@ fn sp_wild_arm(bodyexpr: TExpr): TArm {
     teko::assert::is_false(adopter_same(top, top))
 }
 
-/**
- * A `BfLocal` borrowed-from value naming local `name`.
- *
- * @param str name  the borrowed local's name
- * @return BorrowedFrom { BfLocal { id = BfLocalId { name = name } } }  the borrows-local value
- */
 fn sp_bf_local(name: str): @BorrowedFrom() { BfLocal { id = BfLocalId { name = name } } }
 
-/**
- * An assignment through `AssignKind::RefDeref` (`r.value = x`, a `Reference`-deref write) names no
- * simple-alias pair — `transfer_assign`'s non-`Simple` branch leaves both cells untouched even when
- * the RHS is itself a non-scalar bare-local read.
- */
 #test fn spine_transfer_assign_ignores_non_simple_kind() {
     var body = teko::list::push(teko::list::push(teko::list::empty(), sp_let("holder", sp_nonscalar_var("donor"))), sp_assign_refderef("holder", sp_nonscalar_var("donor")))
     var s = fn_spine(sp_fn(teko::list::empty(), body))
     teko::assert::is_false(is_unique_at(s, cell_of(s, "holder") to u32))
 }
 
-/**
- * `ref_target_outlives` ADMITS a `BfLocal` borrow whose referent is not adopter-confined (the
- * enclosing-block check is the caller's responsibility — this predicate only gates on referent
- * kind + adopter-escape). `BfLocal` is not reachable from `fn_spine`'s L1 seeding (only PR-2's
- * L2a relaxation ever writes it), so this hand-installs it on a built `Spine` to exercise the arm.
- */
 #test fn spine_ref_target_outlives_admits_bflocal_referent() {
     var body = teko::list::push(teko::list::push(teko::list::empty(), sp_let("owner", sp_i64_lit(1))), sp_let("holder", sp_i64_lit(2)))
     var spine = fn_spine(sp_fn(teko::list::empty(), body))
@@ -661,15 +301,6 @@ fn sp_bf_local(name: str): @BorrowedFrom() { BfLocal { id = BfLocalId { name = n
     teko::assert::is_true(ref_target_outlives(s, hi, oi))
 }
 
-/**
- * Return the borrowed-from axis with index `i` replaced by `v` (a test-local rebuild-by-copy,
- * mirroring the module's `set_us`).
- *
- * @param []@BorrowedFrom() bf  the borrowed-from axis
- * @param u32 i  the cell index to replace
- * @param @BorrowedFrom() v  the new borrowed-from value
- * @return []@BorrowedFrom()  the axis with element `i` set to `v`
- */
 fn sp_set_bf(bf: []@BorrowedFrom(), i: u32, v: @BorrowedFrom()): []@BorrowedFrom() {
     var acc: []@BorrowedFrom() = teko::list::empty()
     var k = 0
@@ -685,51 +316,28 @@ fn sp_set_bf(bf: []@BorrowedFrom(), i: u32, v: @BorrowedFrom()): []@BorrowedFrom
     acc
 }
 
-/**
- * A plain `i64` literal expression (a fresh, non-aliasing value).
- *
- * @param u64 v  the literal's integer value
- * @return TExpr  a typed `i64` number expression
- */
 fn sp_i64_lit(v: u64): TExpr {
     TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; type = sp_i64(); line = 0; col = 0 }
 }
 
-/**
- * `referent_not_escaping_adopter` treats an out-of-range referent index as ESCAPING (conservative
- * FALSE) — the guard branch never exercised by an in-universe cell.
- */
 #test fn spine_referent_not_escaping_adopter_rejects_out_of_range_index() {
     var body = teko::list::push(teko::list::empty(), sp_let("only", sp_i64_lit(1)))
     var s = fn_spine(sp_fn(teko::list::empty(), body))
     teko::assert::is_false(referent_not_escaping_adopter(s, 999))
 }
 
-/**
- * `is_unique_at` treats an out-of-range binding index as NOT unique (conservative FALSE) — the
- * bounds-guard branch never exercised by an in-universe cell.
- */
 #test fn spine_is_unique_at_rejects_out_of_range_index() {
     var body = teko::list::push(teko::list::empty(), sp_let("only", sp_i64_lit(1)))
     var s = fn_spine(sp_fn(teko::list::empty(), body))
     teko::assert::is_false(is_unique_at(s, 999))
 }
 
-/**
- * `add_cell` de-duplicates: adding the SAME `name` / `field` key twice leaves the universe with
- * exactly one matching cell (the early-return `cell_index >= 0` branch).
- */
 #test fn spine_add_cell_deduplicates_repeated_key() {
     var once = add_cell(teko::list::empty(), "x", "", false)
     var twice = add_cell(once, "x", "", false)
     teko::assert::is_true(twice.len == 1)
 }
 
-/**
- * `add_param_cells` covers a param with `has_type = false` (the OOP receiver-injected-type shape,
- * `parser::Param`'s own contract) — never a `Reference`, since `type_ann_is_ref` is never consulted
- * on that path.
- */
 #test fn spine_add_param_cells_covers_receiver_param_without_type_annotation() {
     var receiver = parser::Param { name = "self"; has_type = false; type_ann = sp_named_ann("i64"); is_params = false; has_default = false; default_expr = sp_no_expr() }
     var params = teko::list::push(teko::list::empty(), receiver)
@@ -739,11 +347,6 @@ fn sp_i64_lit(v: u64): TExpr {
     teko::assert::is_true(sp_pt_is_frame(s.pt[ri to u32]))
 }
 
-/**
- * `add_field_cell` contributes NO cell for the OUTER two-hop path itself (`a.b.c` is never a cell —
- * it collapses to `⊤`) when the receiver `a.b` is not a bare local; it still recurses into that
- * non-bare receiver (`add_expr_cells`), so the INNER one-hop `a.b` is enumerated on its own.
- */
 #test fn spine_add_field_cell_two_hop_path_yields_only_the_inner_one_hop_cell() {
     var inner = sp_field("a", "b", sp_nonscalar())
     var outer = TExpr { kind = TFieldAccess { receiver = inner; field = "c" }; type = sp_i64(); line = 0; col = 0 }
@@ -754,10 +357,6 @@ fn sp_i64_lit(v: u64): TExpr {
     teko::assert::is_true(cell_of(s, "a") < 0)
 }
 
-/**
- * `pt_rank` maps every `PointsTo` member to its lattice rank: `PtFrame` = 0; `PtParam` / `PtAdopter`
- * / `PtRoot` = 1; `PtTop` = 2.
- */
 #test fn spine_pt_rank_covers_every_member() {
     teko::assert::is_true(pt_rank(sp_pt_frame()) == 0)
     teko::assert::is_true(pt_rank(sp_pt_param(0)) == 1)
@@ -766,21 +365,11 @@ fn sp_i64_lit(v: u64): TExpr {
     teko::assert::is_true(pt_rank(sp_pt_top()) == 2)
 }
 
-/**
- * `pt_same_site` agrees on two `PtAdopter` values sharing a concrete region, and DISAGREES for a
- * `PtRoot` paired with any non-`PtRoot` (the remaining cross-kind arm `pt_same_site`'s prior test
- * did not reach).
- */
 #test fn spine_pt_same_site_covers_adopter_agreement_and_root_mismatch() {
     teko::assert::is_true(pt_same_site(sp_pt_adopter(3), sp_pt_adopter(3)))
     teko::assert::is_false(pt_same_site(sp_pt_root(), sp_pt_frame()))
 }
 
-/**
- * `transfer_binding`'s `DestructurePattern` arm names no single target cell even when the RHS IS an
- * alias source — a destructure binds MULTIPLE names, none of which this one-hop analysis can key,
- * so the axis passes through unchanged (no cell is joined to `UsShared`).
- */
 #test fn spine_transfer_binding_destructure_with_alias_source_rhs_is_a_no_op() {
     var destructure = TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), "a"), "b") }; bound = sp_nonscalar(); value = sp_nonscalar_var("donor") }
     var body = teko::list::push(teko::list::push(teko::list::empty(), sp_let("donor", sp_i64_lit(1))), destructure)
@@ -788,11 +377,6 @@ fn sp_i64_lit(v: u64): TExpr {
     teko::assert::is_true(is_unique_at(s, cell_of(s, "donor") to u32))
 }
 
-/**
- * `transfer_assign`'s `Simple`-kind arm joins BOTH cells to `UsShared` when the RHS IS an alias
- * source (`target = donor` where `donor` is a bare non-scalar local) — the `mark_alias_shared` call
- * reached FROM `transfer_assign` itself (distinct from `transfer_binding`'s own call site).
- */
 #test fn spine_transfer_assign_simple_kind_with_alias_source_marks_both_shared() {
     var body = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), sp_let("donor", sp_i64_lit(1))), sp_let("target", sp_i64_lit(2))), sp_assign_simple("target", sp_nonscalar_var("donor")))
     var s = fn_spine(sp_fn(teko::list::empty(), body))
@@ -800,10 +384,6 @@ fn sp_i64_lit(v: u64): TExpr {
     teko::assert::is_false(is_unique_at(s, cell_of(s, "donor") to u32))
 }
 
-/**
- * `referent_not_escaping_adopter` ADMITS a `PtRoot` referent (a safe leak, never adopter-confined)
- * and a `PtTop` referent (joined-over, treated as Root — never itself an adopter-escape reject).
- */
 #test fn spine_referent_not_escaping_adopter_admits_root_and_top() {
     var body = teko::list::push(teko::list::empty(), sp_let("only", sp_i64_lit(1)))
     var spine = fn_spine(sp_fn(teko::list::empty(), body))
@@ -814,10 +394,6 @@ fn sp_i64_lit(v: u64): TExpr {
     teko::assert::is_true(referent_not_escaping_adopter(top_s, oi))
 }
 
-/**
- * `is_unique_at` treats a `UsTop` cell (joined-over) as NOT unique — the safe (over-reject)
- * direction, exercised directly since `fn_spine`'s L1 transfer never itself produces `UsTop`.
- */
 #test fn spine_is_unique_at_rejects_top() {
     var body = teko::list::push(teko::list::empty(), sp_let("only", sp_i64_lit(1)))
     var spine = fn_spine(sp_fn(teko::list::empty(), body))
@@ -827,15 +403,6 @@ fn sp_i64_lit(v: u64): TExpr {
     teko::assert::is_false(is_unique_at(s, oi))
 }
 
-/**
- * Return the unique-vs-shared axis with index `i` replaced by `v` (a test-local rebuild-by-copy,
- * mirroring the module's `set_us`).
- *
- * @param []@Unique() us  the unique-vs-shared axis
- * @param u32 i  the cell index to replace
- * @param @Unique() v  the new unique-vs-shared value
- * @return []@Unique()  the axis with element `i` set to `v`
- */
 fn sp_set_us(us: []@Unique(), i: u32, v: @Unique()): []@Unique() {
     var acc: []@Unique() = teko::list::empty()
     var k = 0
@@ -851,11 +418,6 @@ fn sp_set_us(us: []@Unique(), i: u32, v: @Unique()): []@Unique() {
     acc
 }
 
-/**
- * `pt_transfer_binding`'s `DestructurePattern` arm names no single target cell inside an adopter
- * either (mirrors `add_binding_cell` / `transfer_binding`'s own destructure no-op) — the axis passes
- * through unchanged.
- */
 #test fn spine_pt_transfer_binding_destructure_inside_adopter_is_a_no_op() {
     var destructure = TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), "a"), "b") }; bound = sp_i64(); value = sp_i64_lit(1) }
     var body = teko::list::push(teko::list::empty(), sp_adopt(teko::list::push(teko::list::empty(), destructure)))
@@ -863,11 +425,6 @@ fn sp_set_us(us: []@Unique(), i: u32, v: @Unique()): []@Unique() {
     teko::assert::is_true(s.cells.len == 0)
 }
 
-/**
- * `join_pt_adopter_at` leaves the axis UNCHANGED when the named key is not in the cell universe (the
- * defensive `idx < 0` guard) — exercised directly since every binding `fn_spine` walks always has a
- * corresponding cell in normal use.
- */
 #test fn spine_join_pt_adopter_at_ignores_unknown_key() {
     var body = teko::list::push(teko::list::empty(), sp_let("only", sp_i64_lit(1)))
     var s = fn_spine(sp_fn(teko::list::empty(), body))
@@ -876,32 +433,14 @@ fn sp_set_us(us: []@Unique(), i: u32, v: @Unique()): []@Unique() {
     teko::assert::is_true(sp_pt_is_frame(unchanged[cell_of(s, "only") to u32]))
 }
 
-/**
- * A NON-`free` call over the given args (callee `push`, ns `teko::list`), typed non-scalar — the
- * capturing-call shape whose non-scalar bare-local args the capture sweep marks shared.
- *
- * @param []TExpr args  the call's typed arguments
- * @return TExpr  a `TCall` typed expression
- */
 fn sp_nonfree_call(args: []TExpr): TExpr {
     TExpr { kind = TCall { overload_suffix = ""; callee = sp_path("push"); args = args; call_ns = "teko::list"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = sp_nonscalar(); line = 0; col = 0 }
 }
 
-/**
- * A single-field struct-init `{ f = value }` — the field-STORE shape whose non-scalar bare-local
- * field value the capture sweep marks shared.
- *
- * @param TExpr value  the field's typed value expression
- * @return TExpr  a `TStructInit` typed expression
- */
 fn sp_struct_init(value: TExpr): TExpr {
     TExpr { kind = TStructInit { field_names = teko::list::push(teko::list::empty(), "f"); field_vals = teko::list::push(teko::list::empty(), value) }; type = sp_nonscalar(); line = 0; col = 0 }
 }
 
-/**
- * (#331 L2b, option b) A non-scalar bare local stored into a struct FIELD (`{ f = xs }`) escapes —
- * the capture sweep marks it shared.
- */
 #test fn spine_capture_struct_init_store_marks_shared() {
     var mk = sp_let("xs", sp_nonfree_call(teko::list::empty()))
     var store = sp_let("box", sp_struct_init(sp_nonscalar_var("xs")))
@@ -909,31 +448,12 @@ fn sp_struct_init(value: TExpr): TExpr {
     teko::assert::is_false(is_unique_at(s, cell_of(s, "xs") to u32))
 }
 
-/**
- * A `&referent` explicit safe-borrow expression (`TBorrow`) over a bare non-scalar local, typed
- * `Reference<str>` — the F1.3 stored-ref-bind RHS shape (`mut y = &x`).
- *
- * @param str referent  the borrowed local's name
- * @return TExpr  a `TBorrow` typed expression
- */
 fn sp_borrow(referent: str): TExpr {
     TExpr { kind = TBorrow { operand = sp_nonscalar_var(referent) }; type = Reference { inner = sp_nonscalar() }; line = 0; col = 0 }
 }
 
-/**
- * Is a borrowed-from value `BfLocal`?
- *
- * @param @BorrowedFrom() b  the borrowed-from value
- * @return bool { match b { BfLocal => true; _ => false } }  true iff `BfLocal`
- */
 fn sp_bf_is_local(b: @BorrowedFrom()): bool { match b { BfLocal => true; _ => false } }
 
-/**
- * (F1.3) A local ref-bind `mut y = &x` SEEDS `bf[y] := BfLocal(x)` at the single syntactic borrow
- * site, so `ref_target_outlives(y, x)` ADMITS — the borrowed local `x` (a `PtFrame` allocation) is
- * not adopter-confined, so the stored borrow provably does not dangle. This is the escape-gate
- * relaxation's spine proof (`ref_borrow_or_error` consumes it to admit the ref-to-local bind).
- */
 #test fn spine_borrow_bind_seeds_bflocal_and_ref_target_outlives() {
     var body = teko::list::push(teko::list::push(teko::list::empty(),
             sp_let("x", sp_field("obj", "data", sp_nonscalar()))),
@@ -947,18 +467,10 @@ fn sp_bf_is_local(b: @BorrowedFrom()): bool { match b { BfLocal => true; _ => fa
     teko::assert::is_true(ref_target_outlives(s, yi to u32, xi to u32))
 }
 
-/** A fresh capturing call `push(xs)` — its non-scalar bare-local arg `xs` is a capture operand. */
 fn sp_cap(): TExpr { sp_nonfree_call(teko::list::push(teko::list::empty(), sp_nonscalar_var("xs"))) }
 
-/** Wrap `e` in a `TExpr` of the given kind, typed non-scalar (the wrapper's own type is never read). */
 fn sp_wrap(k: @TExprKind()): TExpr { TExpr { kind = k; type = sp_nonscalar(); line = 0; col = 0 } }
 
-/**
- * (#331 L2b, option b) The capture sweep RECURSES through every compound-expression arm — a capturing
- * call nested inside a binary, unary, comparison, cast, index, interpolation, `in`, and
- * array literal each still reaches `xs` and joins it shared (monotone, so one shared handle suffices).
- * Covers `capture_expr`'s compound arms + `capture_cmp` + `capture_array`.
- */
 #test fn spine_capture_recurses_through_compound_exprs() {
     var body: []@TStatement() = teko::list::push(teko::list::empty(), sp_let("xs", sp_nonfree_call(teko::list::empty())))
     body = teko::list::push(body, sp_let("a", sp_wrap(TBinary { op = lexer::TokenKind::Assign; left = sp_cap(); right = sp_i64_lit(0) })))

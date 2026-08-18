@@ -1,35 +1,6 @@
-// src/checker/initanalysis.tks  (namespace 'teko::checker')
-//
-// Phase 5 — definite-assignment / init analysis.
-//
-// LAW-FIRST NOTE (why there is no use-before-init check here). Teko has NO uninitialized
-// binding form: `let`/`mut`/`const` ALWAYS carry a value (parser::Binding.value is
-// mandatory — ast.tks), and that value is typed in the PRE-binding env (typer.tks
-// type_binding — the name is defined AFTER its value types), so a self/forward reference
-// fails as an unknown name. Definite assignment is therefore STRUCTURAL: a use-before-init
-// cannot be written. This pass delivers the REMAINING Phase-5 diagnostics:
-//   * unused LOCAL  (`let`/`mut`/`const` simple-name never read in its function): ERROR
-//   * unused PRIVATE function (declared private, never called anywhere): WARNING
-// Both report with Phase-1-quality locations (the binding value's line:col / the fn's line).
-//
-// THE WARNINGS CHANNEL. Teko has no module-mutable state, so the pass cannot accumulate a
-// warning list into a global. Instead it PRINTS each warning to stderr (teko::io::eprintln)
-// as it is found and returns only the first hard ERROR via `error?`. A warning never fails
-// the build; an error does — consistent with the fail-fast checker (check.tks).
-//
-// CONSERVATISM (keeps the self-host gate green). "Used" is over-approximated by a NAME
-// occurrence anywhere in the relevant scope (a var read, a call's last segment, or a
-// COMPOUND-assign target). Shadowing therefore masks at worst → a missed unused (a false
-// NEGATIVE), never a false positive. The dominant real bug — a `let x = …` whose name never
-// appears again — is caught exactly.
 
 use teko::parser
 use teko::lexer
-
-// ---- occurrence predicates: does `name` appear as a READ in this expr/stmt/block? ----
-// A read = a TVar, a call's resolved last segment (calls resolve by last segment — #41), or a
-// COMPOUND-assign target (`x += …` reads x; a plain `x = …` does not). Used for BOTH the
-// per-function unused-local test and the program-wide unused-private-fn test.
 
 fn occurs_expr(e: TExpr, name: str): bool {
     match e.kind {
@@ -114,24 +85,18 @@ fn occurs_expr(e: TExpr, name: str): bool {
             }
             false
         }
-        // (W10) a closure literal READS `name` if it captures it — the capture analysis already found
-        // every free var the body reads from the enclosing scope, so checking captures is exact.
         TLambda as lam => {
             var i = 0
             loop { if i >= lam.captures.len { break }; if lam.captures[i].name == name { return true }; i++ }
             false
         }
-        // (2026-07-01) a fixed pre-existing gap: TArrayLit had no case here, so a name used ONLY
-        // as an array-literal element (explicit `[a, b]` or the params call-site desugar's
-        // synthetic packed slice — see typer.tks pack_variadic_args) was silently treated as
-        // unread, a false negative. Recurse into every element.
         TArrayLit as al => {
             var i = 0
             loop { if i >= al.elements.len { break }; if occurs_expr(al.elements[i].expr, name) { return true }; i++ }
             false
         }
         TBlockExpr as b => occurs_block(b.body, name)
-        _ => false   // TNumber / TStrLit / TByteLit / TBoolLit / TNullLit / TPathExpr — no reads
+        _ => false
     }
 }
 
@@ -139,22 +104,18 @@ fn occurs_stmt(s: @TStatement(), name: str): bool {
     match s {
         TBinding as b => occurs_expr(b.value, name)
         TAssign as a => {
-            // a COMPOUND assign (`x += …`) READS the target; a plain `=` does not. A deref-assign
-            // (`r.value = …`, MEM-1b-ii) always READS the ref handle `r` (to dereference it).
             if a.op != lexer::TokenKind::Assign { if a.name == name { return true } }
             if a.deref { if a.name == name { return true } }
-            // (#88) a FIELD target's RECEIVER reads its own free variables (the object; and a compound
-            // `recv.f += …` reads the field through it). Walk the receiver so those reads count as uses.
             if parser::assign_has_target(a.kind) { if occurs_expr(a.target, name) { return true } }
             occurs_expr(a.value, name)
         }
         TReturn as r => { if r.has_value { return occurs_expr(r.value, name) }; false }
         TLoopStmt as l => occurs_block(l.init, name) || occurs_block(l.body, name)
         TExprStmt as es => occurs_expr(es.expr, name)
-        TDeferStmt as d => occurs_block(d.body, name)   // (W9.3) a defer body READS its captured locals
+        TDeferStmt as d => occurs_block(d.body, name)
         TAdoptStmt as a => occurs_block(a.body, name)
         TBlockStmt as b => occurs_block(b.body, name)
-        _ => false   // TBreakStmt / TContinueStmt — no reads
+        _ => false
     }
 }
 
@@ -167,10 +128,6 @@ fn occurs_block(stmts: []@TStatement(), name: str): bool {
     }
     false
 }
-
-// ---- (C5.1) unused-local ERROR: every `let`/`mut`/`const` simple-name local in a function
-// must be read somewhere in that function's body. Walks the body (and value-form if/match
-// blocks, which can declare their own locals); returns the FIRST unused as a located error. ----
 
 fn check_locals(stmts: []@TStatement(), fbody: []@TStatement(), file: str): error | null {
     var i = 0
@@ -187,7 +144,6 @@ fn check_local_stmt(s: @TStatement(), fbody: []@TStatement(), file: str): error 
         TBinding as b => {
             match b.target {
                 parser::SimpleName as sn => {
-                    // `_` is the explicit DISCARD binding (`let _ = expr` evaluates and drops) — exempt it.
                     if sn.name != "_" {
                         if !occurs_block(fbody, sn.name) {
                             var msg = diag_at(file, b.value.line, b.value.col, $"unused local `{sn.name}` — it is declared but never read")
@@ -195,7 +151,7 @@ fn check_local_stmt(s: @TStatement(), fbody: []@TStatement(), file: str): error 
                         }
                     }
                 }
-                parser::DestructurePattern => { }   // destructure targets aren't tracked (type_binding doesn't define them)
+                parser::DestructurePattern => { }
             }
             check_locals_expr(b.value, fbody, file)
         }
@@ -203,8 +159,6 @@ fn check_local_stmt(s: @TStatement(), fbody: []@TStatement(), file: str): error 
         TExprStmt as es => check_locals_expr(es.expr, fbody, file)
         TReturn as r => { if r.has_value { return check_locals_expr(r.value, fbody, file) }; null }
         TAssign as a => check_locals_expr(a.value, fbody, file)
-        // (W9.3) a defer BODY is not descended for unused-local errors (cleanup scratch); occurs_stmt
-        // already counts a defer body's READS of OUTER locals as uses (the scope-defer requirement).
         TAdoptStmt as ad => check_locals(ad.body, fbody, file)
         TBlockStmt as b => check_locals(b.body, fbody, file)
         _ => null
@@ -227,12 +181,9 @@ fn check_locals_expr(e: TExpr, fbody: []@TStatement(), file: str): error | null 
             }
             null
         }
-        _ => null   // locals buried inside an operand are rare → a missed unused (safe)
+        _ => null
     }
 }
-
-// ---- (C5.2) unused-private-function WARNING: a private (file-local) function never called
-// anywhere in the merged program is dead. `main` (the entry, never source-called) is exempt. ----
 
 fn used_in_program(prog: TProgram, name: str): bool {
     var i = 0
@@ -252,8 +203,6 @@ fn warn_unused_fn(f: TFunction) {
     teko::io::eprintln($"{f.file}:{f.line}: warning: unused private function `{f.name}`")
 }
 
-// gather the program's LOOSE top-level statements (the virtual-main) into one scope, so an
-// unused loose `let` is checked against the other loose statements (not a function body).
 fn loose_body(prog: TProgram): []@TStatement() {
     var out: []@TStatement() = teko::list::empty()
     var i = 0
@@ -268,7 +217,6 @@ fn loose_body(prog: TProgram): []@TStatement() {
     out
 }
 
-// ---- the pass entry: run over the typed program; prints warnings, returns the first error. ----
 pub fn analyze_program(prog: TProgram): error | null {
     var i = 0
     loop {
@@ -277,8 +225,6 @@ pub fn analyze_program(prog: TProgram): error | null {
             TFunction as f => {
                 match check_locals(f.body, f.body, f.file) { null => { }; error as e => return e }
                 if f.vis == parser::Visibility::Private {
-                    // `main` (the entry) and `#test` functions (invoked by the test runner, not by
-                    // source) are never source-called by design — exempt both.
                     if f.name != "main" && !f.is_test {
                         if !used_in_program(prog, f.name) { warn_unused_fn(f) }
                     }
