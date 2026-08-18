@@ -1,26 +1,6 @@
 use teko::parser
 use teko::checker
 
-/**
- * name_in — membership in a name set (linear; the sets here are function-count sized).
- *
- * (C7.20, namespace 'teko::build') This module answers: which `[extern.libs]` names does a
- * program actually need to link? It reuses the CONSERVATIVE call-graph shape already proven
- * in teko::checker::initanalysis (the unused-private-fn pass): a call is recognized by its
- * callee's LAST segment name (calls resolve by last segment — #41), so a missed edge only
- * ever makes a lib look MORE reachable than it is (over-link, safe), never less (under-link, a
- * linker error) — the same one-directional safety margin initanalysis documents for its own
- * "used" predicate.
- *
- * THE WALK. Roots = every program entry point: the virtual-main's loose top-level statements,
- * and every `exp`-visibility function (a library's public surface — Static/Shared/Package
- * artifacts are honest-stops today, C7.1m, but this stays correct for when they land). From
- * the roots, a worklist closure over TFunction bodies collects every CALLED function name
- * (TCall.callee's last segment) and every function taken as a first-class VALUE
- * (TVar{is_func}), until no new name is added. A `from_lib`-carrying extern TFunction is
- * REACHABLE iff its name is in the closure; its library name joins the reachable-libs set
- * returned to the caller.
- */
 fn name_in(set: []str, name: str): bool {
     var i = 0
     loop {
@@ -31,14 +11,6 @@ fn name_in(set: []str, name: str): bool {
     false
 }
 
-/**
- * collect_expr — every function NAME called or taken as a value, anywhere inside `e`, added to
- * `out`. Mirrors initanalysis::occurs_expr's shape, generalized from "does `name` occur" to
- * "collect every callee name reachable from here" (same coverage, same conservatism). A leaf
- * with nothing to call (TNumber/TStrLit/TByteLit/TCharLit/TBoolLit/TNullLit/TPathExpr) falls
- * to the catch-all and returns `out` unchanged. A TLambda's body is walked like any other
- * statement block (W10 — a fn taken by reference through a closure still counts).
- */
 fn collect_expr(e: checker::TExpr, out: []str): []str {
     match e.kind {
         checker::TVar as v => if v.is_func { push_new(out, v.name) } else { out }
@@ -128,7 +100,6 @@ fn collect_expr(e: checker::TExpr, out: []str): []str {
     }
 }
 
-/** collect_fspec — an interpolation hole's DYNAMIC format-spec args (`{x:[fmt]}`) also call. */
 fn collect_fspec(kind: @TFSpecKind(), out: []str): []str {
     match kind {
         checker::TFSpecDynamic as fd => {
@@ -141,11 +112,6 @@ fn collect_fspec(kind: @TFSpecKind(), out: []str): []str {
     }
 }
 
-/**
- * collect_stmt — every function name called or taken as a value anywhere inside `s`. A
- * TAssign's FIELD-kind target (`recv.f = …`) is walked too (the receiver may itself hold a
- * call); TBreakStmt/TContinueStmt have nothing to call and fall to the catch-all.
- */
 fn collect_stmt(s: @TStatement(), out: []str): []str {
     match s {
         checker::TBinding as b => collect_expr(b.value, out)
@@ -163,7 +129,6 @@ fn collect_stmt(s: @TStatement(), out: []str): []str {
     }
 }
 
-/** collect_block — collect_stmt folded over a whole statement block, in order. */
 fn collect_block(stmts: []@TStatement(), out: []str): []str {
     var acc = out
     var i = 0
@@ -175,21 +140,11 @@ fn collect_block(stmts: []@TStatement(), out: []str): []str {
     acc
 }
 
-/**
- * push_new — append `name` iff it is not already in `out` (keeps the worklist frontier free of
- * duplicate re-scans of the same function).
- */
 fn push_new(out: []str, name: str): []str {
     if name_in(out, name) { return out }
     teko::list::push(out, name)
 }
 
-/**
- * entry_roots — the program's OWN entry points: every loose top-level statement (the virtual
- * main) plus every `exp`-visibility function's own name (a library's public surface — a plain
- * top-level `pub`/private function is NOT a root by itself; it only matters if something
- * reachable calls it, which close_reachable discovers).
- */
 fn entry_roots(prog: checker::TProgram): []str {
     var names: []str = teko::list::empty()
     var i = 0
@@ -205,13 +160,6 @@ fn entry_roots(prog: checker::TProgram): []str {
     names
 }
 
-/**
- * close_reachable — grow `names` to a FIXPOINT: repeatedly scan every TFunction whose name is
- * already in the set, add every name IT calls, until a pass adds nothing new. Bounded by the
- * program's function count (each pass either grows the set or halts it — the trailing `acc`
- * after the loop is unreachable, mirroring manifest.tks's mf_read_array convention for a loop
- * that only ever exits via `return`).
- */
 fn close_reachable(prog: checker::TProgram, names: []str): []str {
     var acc = names
     loop {
@@ -222,7 +170,6 @@ fn close_reachable(prog: checker::TProgram, names: []str): []str {
     acc
 }
 
-/** grow_reachable_pass — one close_reachable pass: every reachable TFunction's own callees. */
 fn grow_reachable_pass(prog: checker::TProgram, acc: []str): []str {
     var grown = acc
     var i = 0
@@ -237,12 +184,6 @@ fn grow_reachable_pass(prog: checker::TProgram, acc: []str): []str {
     grown
 }
 
-/**
- * reachable_libs — the C7.20 ENTRY: the set of `from_lib` values carried by every extern
- * TFunction whose name is in the program's transitive call closure from its entry points. An
- * extern fn with `from_lib == ""` (implicit libc) never contributes a name — libc is never a
- * declared `[extern.libs]` key, so it has nothing to filter.
- */
 fn reachable_libs(prog: checker::TProgram): []str {
     var closure = close_reachable(prog, entry_roots(prog))
     var libs: []str = teko::list::empty()

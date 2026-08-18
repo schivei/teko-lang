@@ -1,68 +1,19 @@
 use teko::lexer
 
-/**
- * ParsedRegion — the flattened result of a §17 `#if`/`#elseif`/`#else`/`#endif` region: the arms'
- * declarations plus their composed conditional-compile guards (PARALLEL — same length), and the
- * resume index just past `#endif`. `parse_module` splices these directly into its `decls`/
- * `decl_guards` accumulators, so a region is transparent to the rest of the parser.
- *
- * @field decls   the region's declarations, in source order across all arms
- * @field guards  the composed §17 guard for each decl, PARALLEL to `decls`
- * @field next    the index just past the region's `#endif`
- * @since §17
- */
 type ParsedRegion = struct { decls: []@Decl(); guards: []Pred; next: u64 }
 
-/**
- * is_cc_if_start — is the token at `pos` the head of a §17 `#if(...)` region — a `#` immediately
- * followed by the `if` keyword? Distinct from the `#os`/`#arch` attributes (`# Ident`), so the
- * decl-loop can route a region to `parse_cc_region` and everything else to `parse_decl`.
- *
- * @param tokens  the token stream
- * @param pos     the index to probe
- * @return        true iff `pos` begins a `#if` region
- * @since §17
- */
 fn is_cc_if_start(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Hash) && is_kind_at(tokens, pos + 1, lexer::TokenKind::If)
 }
 
-/**
- * is_cc_marker — is the token at `pos` a `#` followed by the region marker identifier `name`
- * (`elseif`/`endif`)? `#else` uses the `else` keyword and is probed separately.
- *
- * @param tokens  the token stream
- * @param pos     the index to probe
- * @param name    the marker identifier text (`"elseif"` | `"endif"`)
- * @return        true iff `pos` begins `# name`
- * @since §17
- */
 fn is_cc_marker(tokens: []lexer::Token, pos: u64, name: str): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Hash) && is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) && tokens[pos + 1].text == name
 }
 
-/**
- * is_cc_else — is the token at `pos` the `#else` marker (a `#` followed by the `else` keyword)?
- *
- * @param tokens  the token stream
- * @param pos     the index to probe
- * @return        true iff `pos` begins `#else`
- * @since §17
- */
 fn is_cc_else(tokens: []lexer::Token, pos: u64): bool {
     is_kind_at(tokens, pos, lexer::TokenKind::Hash) && is_kind_at(tokens, pos + 1, lexer::TokenKind::Else)
 }
 
-/**
- * parse_cc_paren_pred — parse a parenthesized §17 predicate `( <pred> )` at `pos` (the `(` after a
- * `#if`/`#elseif` marker), returning the predicate and the index past the closing `)`.
- *
- * @param tokens  the token stream
- * @param pos     the index of the opening `(`
- * @return        the parsed predicate + resume index, or a parse error
- * @throws        a missing `(`, an empty/ill-formed predicate, or a missing `)`
- * @since §17
- */
 fn parse_cc_paren_pred(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     if !is_kind_at(tokens, pos, lexer::TokenKind::LParen) { return err_at(tokens, pos, "expected '(' to open the `#if`/`#elseif` predicate") }
     var inner = match parse_pred(tokens, pos + 1) { Parsed<Pred> as x => x; error as e => return e }
@@ -70,30 +21,10 @@ fn parse_cc_paren_pred(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     Parsed<Pred> { node = inner.node; next = inner.next + 1 }
 }
 
-/**
- * parse_pred — parse a §17 composite predicate (the lowest-precedence entry: disjunction). Grammar
- * (low→high precedence): `or := and ("||" and)*`, `and := unary ("&&" unary)*`,
- * `unary := "!" unary | primary`, `primary := "(" pred ")" | ("os"|"arch") "==" STRING | IDENT`.
- *
- * @param tokens  the token stream
- * @param pos     the index of the predicate's first token
- * @return        the parsed predicate + resume index, or a parse error
- * @throws        an ill-formed predicate atom or operator
- * @since §17
- */
 fn parse_pred(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     parse_pred_or(tokens, pos)
 }
 
-/**
- * parse_pred_or — parse a `||`-separated disjunction of conjunctions, left-associative.
- *
- * @param tokens  the token stream
- * @param pos     the index of the disjunction's first token
- * @return        the parsed `POr` chain (or the bare conjunction) + resume index, or a parse error
- * @throws        an ill-formed operand
- * @since §17
- */
 fn parse_pred_or(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     var left = match parse_pred_and(tokens, pos) { Parsed<Pred> as x => x; error as e => return e }
     var acc = left.node
@@ -107,15 +38,6 @@ fn parse_pred_or(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     Parsed<Pred> { node = acc; next = p }
 }
 
-/**
- * parse_pred_and — parse a `&&`-separated conjunction of unaries, left-associative.
- *
- * @param tokens  the token stream
- * @param pos     the index of the conjunction's first token
- * @return        the parsed `PAnd` chain (or the bare unary) + resume index, or a parse error
- * @throws        an ill-formed operand
- * @since §17
- */
 fn parse_pred_and(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     var left = match parse_pred_unary(tokens, pos) { Parsed<Pred> as x => x; error as e => return e }
     var acc = left.node
@@ -129,15 +51,6 @@ fn parse_pred_and(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     Parsed<Pred> { node = acc; next = p }
 }
 
-/**
- * parse_pred_unary — parse a possibly-negated primary: `"!" unary` yields `PNot`, else a primary.
- *
- * @param tokens  the token stream
- * @param pos     the index of the unary's first token
- * @return        the parsed predicate + resume index, or a parse error
- * @throws        an ill-formed primary
- * @since §17
- */
 fn parse_pred_unary(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::Bang) {
         var operand = match parse_pred_unary(tokens, pos + 1) { Parsed<Pred> as x => x; error as e => return e }
@@ -146,16 +59,6 @@ fn parse_pred_unary(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     parse_pred_primary(tokens, pos)
 }
 
-/**
- * parse_pred_primary — parse a primary predicate: a `( <pred> )` group, an axis equality
- * `("os"|"arch") == STRING` (→ `PEq`), or a bare build-flag identifier (→ `PFlag`).
- *
- * @param tokens  the token stream
- * @param pos     the index of the primary's first token
- * @return        the parsed predicate + resume index, or a parse error
- * @throws        an empty group, an axis not followed by `== STRING`, or a non-primary token
- * @since §17
- */
 fn parse_pred_primary(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::LParen) {
         var inner = match parse_pred(tokens, pos + 1) { Parsed<Pred> as x => x; error as e => return e }
@@ -172,17 +75,6 @@ fn parse_pred_primary(tokens: []lexer::Token, pos: u64): Parsed<Pred> | error {
     Parsed<Pred> { node = Pred { kind = PFlag { name = name } }; next = pos + 1 }
 }
 
-/**
- * parse_pred_axis_eq — parse the `axis == STRING` tail of an axis-equality atom, `pos` at the axis
- * identifier (`os`/`arch`), `pos + 1` the confirmed `==`. Yields `PEq { axis; value }`.
- *
- * @param tokens  the token stream
- * @param pos     the index of the axis identifier
- * @param axis    the axis name already read (`"os"` | `"arch"`)
- * @return        the parsed `PEq` atom + resume index, or a parse error
- * @throws        a `==` not followed by a string literal
- * @since §17
- */
 fn parse_pred_axis_eq(tokens: []lexer::Token, pos: u64, axis: str): Parsed<Pred> | error {
     if !is_kind_at(tokens, pos + 2, lexer::TokenKind::Str) {
         return err_at(tokens, pos + 2, "expected a quoted value after `==` in a `#if` axis comparison")
@@ -191,32 +83,12 @@ fn parse_pred_axis_eq(tokens: []lexer::Token, pos: u64, axis: str): Parsed<Pred>
     Parsed<Pred> { node = Pred { kind = PEq { axis = axis; value = tokens[pos + 2].text } }; next = pos + 3 }
 }
 
-/**
- * cc_axis_canon_values — the canonical spellings a §16 `#os`/`#arch`/`#if(axis==…)` value must match,
- * per axis: `os` ∈ {linux, macos, windows}, `arch` ∈ {x86_64, arm64} — the exact vocabulary
- * `target_os`/`target_arch` canonicalize to and `prune_cc` compares against. Any other axis has no
- * vocabulary (the empty list), so `cc_axis_value_diag` never rejects a value declared on it.
- *
- * @param axis  the axis being validated — `"os"` | `"arch"`
- * @return      the canonical values for `axis`, or the empty list for an unrecognized axis
- * @since §16
- */
 fn cc_axis_canon_values(axis: str): []str {
     if axis == "os" { return teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "linux"), "macos"), "windows") }
     if axis == "arch" { return teko::list::push(teko::list::push(teko::list::empty(), "x86_64"), "arm64") }
     teko::list::empty()
 }
 
-/**
- * cc_str_list_has — membership of `needle` in the string list `xs`, a total linear scan (the
- * parser-local twin of `teko::build`'s `str_list_contains`, kept here so `cc_axis_value_diag` needs
- * no cross-module dependency).
- *
- * @param xs      the string list to scan
- * @param needle  the string sought
- * @return        true iff some element of `xs` equals `needle`
- * @since §16
- */
 fn cc_str_list_has(xs: []str, needle: str): bool {
     var i: u64 = 0
     loop {
@@ -227,19 +99,6 @@ fn cc_str_list_has(xs: []str, needle: str): bool {
     false
 }
 
-/**
- * cc_axis_alias_hint — the CANONICAL value a well-known misspelling/alias of an axis value maps to
- * (`aarch64`→`arm64`, `amd64`/`x64`/`x86-64`→`x86_64`, `darwin`/`apple`/`osx`→`macos`,
- * `win`/`win32`/`win64`/`mingw`/`w64`→`windows`), or "" when no explicit alias is known (the caller
- * then falls back to the nearest canonical value by edit distance). Captures the exact aliases §16
- * enumerates so the diagnostic that would have caught the original `#arch("aarch64")` silent prune
- * names the intended spelling directly.
- *
- * @param axis   the axis being validated — `"os"` | `"arch"`
- * @param value  the unrecognized value the source supplied
- * @return       the canonical spelling this value aliases, or "" when none is known
- * @since §16
- */
 fn cc_axis_alias_hint(axis: str, value: str): str {
     if axis == "arch" {
         if value == "aarch64" { return "arm64" }
@@ -252,31 +111,11 @@ fn cc_axis_alias_hint(axis: str, value: str): str {
     ""
 }
 
-/**
- * cc_min3 — the least of three `u64`s, the relaxation step of the edit-distance recurrence.
- *
- * @param a  the deletion candidate
- * @param b  the insertion candidate
- * @param c  the substitution candidate
- * @return   the minimum of `a`, `b`, `c`
- * @since §16
- */
 fn cc_min3(a: u64, b: u64, c: u64): u64 {
     var m = if a < b { a } else { b }
     if c < m { c } else { m }
 }
 
-/**
- * cc_edit_distance — the Levenshtein edit distance between the byte strings `a` and `b`, a rolling
- * two-row dynamic program (only reads index into the previous/current row; no index-assign, W15).
- * Used to pick the nearest canonical axis value for a "did you mean" hint when no explicit alias
- * matches, so a plain typo like `linex` still points at `linux`.
- *
- * @param a  the first string
- * @param b  the second string
- * @return   the minimum number of single-character insert/delete/substitute edits taking `a` to `b`
- * @since §16
- */
 fn cc_edit_distance(a: str, b: str): u64 {
     var m = a.len
     var n = b.len
@@ -304,16 +143,6 @@ fn cc_edit_distance(a: str, b: str): u64 {
     prev[n]
 }
 
-/**
- * cc_nearest_canon — the canonical axis value closest to `value` by `cc_edit_distance`, the fallback
- * "did you mean" suggestion when `cc_axis_alias_hint` has no explicit entry. Returns "" only for an
- * axis with no vocabulary (which `cc_axis_value_diag` never reaches).
- *
- * @param axis   the axis being validated — `"os"` | `"arch"`
- * @param value  the unrecognized value the source supplied
- * @return       the nearest canonical spelling, or "" for an axis with no vocabulary
- * @since §16
- */
 fn cc_nearest_canon(axis: str, value: str): str {
     var cands = cc_axis_canon_values(axis)
     var best = ""
@@ -331,21 +160,6 @@ fn cc_nearest_canon(axis: str, value: str): str {
     best
 }
 
-/**
- * cc_axis_value_diag — validate a `#os`/`#arch`/`#if(axis==…)` VALUE against the canonical vocabulary
- * (`cc_axis_canon_values`), returning a located "did you mean" error for a misspelling
- * (`aarch64`→`arm64`, `darwin`→`macos`, or the nearest canonical value for a plain typo like
- * `linex`→`linux`) and `null` for a recognized value. Prevents the SILENT prune-to-nothing that hid
- * the §16 `#arch("aarch64")` bug from every x86_64-local validation. An unrecognized axis name has no
- * vocabulary and is accepted here (the prune resolves it to false).
- *
- * @param axis   the axis being compared — `"os"` | `"arch"`
- * @param value  the quoted value the source supplied
- * @param line   the value token's 1-based line (for the located diagnostic)
- * @param col    the value token's 1-based column
- * @return       null when `value` is canonical, else a located parse error naming the nearest alias
- * @since §16
- */
 fn cc_axis_value_diag(axis: str, value: str, line: u32, col: u32): null | error {
     var canon = cc_axis_canon_values(axis)
     if canon.len == 0 { return null }
@@ -355,21 +169,6 @@ fn cc_axis_value_diag(axis: str, value: str, line: u32, col: u32): null | error 
     error { message = $"{line}:{col}: unknown {axis} \"{value}\" (did you mean \"{hint}\"?)" }
 }
 
-/**
- * parse_cc_region — parse a whole §17 `#if(P1) … #elseif(Pk) … #else … #endif` region at `pos`
- * (`#if` already recognized by `is_cc_if_start`), flattening every arm's declarations with their
- * composed guards. First-true-wins is encoded structurally as AND-of-NOTs: arm k's guard is
- * `Pk && !P1 && … && !P(k-1)`, the `#else` arm is `!P1 && … && !Pn`, each further ANDed with the
- * `outer` guard (a nesting region's arm predicate) and with each decl's own inner `#os`/`#arch`
- * guard. The prune then keeps at most one arm.
- *
- * @param tokens  the token stream
- * @param pos     the index of the region's `#if`
- * @param outer   the enclosing guard ANDed into every decl (`PTrue` at the top level)
- * @return        the flattened arms (decls + parallel guards) + resume index past `#endif`
- * @throws        a malformed region: missing `#endif`, `#elseif`/decl after `#else`, or a bad predicate
- * @since §17
- */
 fn parse_cc_region(tokens: []lexer::Token, pos: u64, outer: Pred): ParsedRegion | error {
     var head = match parse_cc_paren_pred(tokens, pos + 2) { Parsed<Pred> as x => x; error as e => return e }
     var arm_pred = head.node
@@ -412,32 +211,10 @@ fn parse_cc_region(tokens: []lexer::Token, pos: u64, outer: Pred): ParsedRegion 
     err_at(tokens, p, "unterminated `#if` region (expected `#endif`)")
 }
 
-/**
- * is_cc_region_boundary — is the token at `pos` a region-arm boundary marker (`#elseif`/`#else`/
- * `#endif`)? A decl immediately abutting a marker (no separator) is still well-formed, so the arm
- * loop accepts a boundary in the position it would otherwise require a separator.
- *
- * @param tokens  the token stream
- * @param pos     the index to probe
- * @return        true iff `pos` begins `#elseif`/`#else`/`#endif`
- * @since §17
- */
 fn is_cc_region_boundary(tokens: []lexer::Token, pos: u64): bool {
     is_cc_marker(tokens, pos, "endif") || is_cc_marker(tokens, pos, "elseif") || is_cc_else(tokens, pos)
 }
 
-/**
- * parse_cc_arm_item — parse ONE item inside a `#if` arm: a nested `#if` region (recursing with the
- * arm guard as `outer`) or an ordinary declaration whose own `#os`/`#arch` guard is ANDed with the
- * arm guard. Returned as a `ParsedRegion` so the caller splices it uniformly.
- *
- * @param tokens     the token stream
- * @param pos        the index of the arm item
- * @param arm_guard  the composed guard of the enclosing arm
- * @return           the item's decl(s) + guard(s) + resume index, or a parse error
- * @throws           a parse error from the nested region or the declaration
- * @since §17
- */
 fn parse_cc_arm_item(tokens: []lexer::Token, pos: u64, arm_guard: Pred): ParsedRegion | error {
     if is_cc_if_start(tokens, pos) {
         return parse_cc_region(tokens, pos, arm_guard)
@@ -448,14 +225,6 @@ fn parse_cc_arm_item(tokens: []lexer::Token, pos: u64, arm_guard: Pred): ParsedR
     ParsedRegion { decls = one_decl; guards = one_guard; next = d.next }
 }
 
-/**
- * append_decls — the concatenation `a ++ b` of two declaration lists, in order.
- *
- * @param a  the accumulated declarations
- * @param b  the declarations to append
- * @return   `a` followed by `b`
- * @since §17
- */
 fn append_decls(a: []@Decl(), b: []@Decl()): []@Decl() {
     var out = a
     var i: u64 = 0
@@ -467,15 +236,6 @@ fn append_decls(a: []@Decl(), b: []@Decl()): []@Decl() {
     out
 }
 
-/**
- * append_guards — the concatenation `a ++ b` of two guard lists, in order (PARALLEL to
- * `append_decls`).
- *
- * @param a  the accumulated guards
- * @param b  the guards to append
- * @return   `a` followed by `b`
- * @since §17
- */
 fn append_guards(a: []Pred, b: []Pred): []Pred {
     var out = a
     var i: u64 = 0

@@ -1,21 +1,7 @@
-/**
- * tkr_parses — did the `.tkr` (Gherkin) source parse into a `[]TkrFeature`?
- *
- * @param src  the `.tkr` text
- * @return     true when `parse_tkr` succeeds
- */
 fn tkr_parses(src: str): bool {
     match parse_tkr(src) { []TkrFeature => true; error => false }
 }
 
-/**
- * tkr_first_lowered — parse `src`, lower the FIRST feature's first scenario to a `Tkr`, or fail the
- * test on any error. A shared helper so each lowering test reads as one assertion block.
- *
- * @param src  the `.tkr` text (at least one feature with a scenario)
- * @return     the first scenario's lowered spec
- * @throws     when the source fails to parse / lower (the test asserts false first)
- */
 fn tkr_first_lowered(src: str): Tkr | error {
     var feats = match parse_tkr(src) { []TkrFeature as f => f; error as e => return e }
     if feats.len == 0 { return error { message = "no features" } }
@@ -24,12 +10,6 @@ fn tkr_first_lowered(src: str): Tkr | error {
 }
 
 #test
-/**
- * tkr_parse_multi_feature — a file with MULTIPLE `Feature:` blocks yields a `[]TkrFeature` of the
- * right length, each carrying its own scenarios (the free file-granularity, companion §1.1).
- *
- * @return void
- */
 fn tkr_parse_multi_feature() {
     var src = "Feature: a\n  Scenario: s1\n    When built and run\n    Then exit = 0\nFeature: b\n  Scenario: s2\n    When built and run\n    Then exit = 1\n  Scenario: s3\n    When built and run\n    Then exit = 2\n"
     match parse_tkr(src) {
@@ -45,12 +25,6 @@ fn tkr_parse_multi_feature() {
 }
 
 #test
-/**
- * tkr_implicit_feature — a file with no explicit `Feature:` is one implicit feature carrying its
- * scenarios (companion §1.1); an empty file yields the empty list.
- *
- * @return void
- */
 fn tkr_implicit_feature() {
     var src = "Scenario: s\n  When built and run\n  Then exit = 0\n"
     match parse_tkr(src) {
@@ -65,12 +39,6 @@ fn tkr_implicit_feature() {
 }
 
 #test
-/**
- * tkr_lower_scenario_fields — a plain scenario lowers to the expected `Tkr`: the fold-opaque args,
- * the run kind, the exit oracle, and the literal stdout expectation.
- *
- * @return void
- */
 fn tkr_lower_scenario_fields() {
     var src = "Feature: f\n  Scenario: s\n    Given args = [\"add\", \"2\", \"3\"]\n    When built and run\n    Then exit = 5\n    And stdout = \"5\"\n"
     match tkr_first_lowered(src) {
@@ -88,12 +56,6 @@ fn tkr_lower_scenario_fields() {
 }
 
 #test
-/**
- * tkr_background_prepend — a Background Given step is prepended to every scenario's steps, ahead of
- * the scenario's own steps.
- *
- * @return void
- */
 fn tkr_background_prepend() {
     var src = "Feature: f\n  Background:\n    Given targets = [\"host\"]\n  Scenario: s\n    Given args = [\"x\"]\n    When built and run\n    Then exit = 0\n"
     match tkr_first_lowered(src) {
@@ -108,12 +70,6 @@ fn tkr_background_prepend() {
 }
 
 #test
-/**
- * tkr_outline_expands — a `Scenario Outline` expands to one lowered `Tkr` per Examples row, each row
- * textually substituting its `<name>` placeholders (here into the args and the exit oracle).
- *
- * @return void
- */
 fn tkr_outline_expands() {
     var src = "Feature: f\n  Scenario Outline: op\n    Given args = [\"<op>\", \"<a>\"]\n    When built and run\n    Then exit = <r>\n    Examples:\n      | op  | a  | r |\n      | inc | 4  | 5 |\n      | dec | 9  | 8 |\n"
     match parse_tkr(src) {
@@ -135,24 +91,10 @@ fn tkr_outline_expands() {
     }
 }
 
-/**
- * multi_column_outline_src — the two-column `Scenario Outline` shape the F5 corpus uses: one
- * `Given` per dimension, four rows crossing an ordinary env flavour with the host sentinel and the
- * windows cross target.
- *
- * @return the `.tkr` source text
- */
 fn multi_column_outline_src(): str {
     "Feature: f\n  Scenario Outline: diff\n    Given env = \"TEKO_FOO=<flavour>\"\n    Given target = \"<target>\"\n    When built and run\n    Then exit = 0\n    Examples:\n      | flavour | target         |\n      | a       | host           |\n      | b       | host           |\n      | a       | x86_64-windows |\n      | b       | x86_64-windows |\n"
 }
 
-/**
- * env_has_token — does the lowered row's child env carry `token` verbatim?
- *
- * @param env    the row's env tokens
- * @param token  the `K=V` token to look for
- * @return       true iff `token` is present
- */
 fn env_has_token(env: []str, token: str): bool {
     var i: u64 = 0
     loop {
@@ -164,19 +106,6 @@ fn env_has_token(env: []str, token: str): bool {
 }
 
 #test
-/**
- * tkr_multi_column_outline_crosses_both_dimensions — the grammar supports an N-column `Examples`
- * table (`tkr_table_cells` + `tkr_subst_row` are column-count agnostic), so a corpus gains a second
- * dimension as extra ROWS, not a duplicated feature. Pins the cross: four rows, each carrying its
- * own env token, and `TEKO_TARGET` exported ONLY for the real cross target (the host sentinel means
- * "unset", the own backend's R1 default).
- *
- * The dimensions used to be backend x target. The BACKEND one died with the C emitter (owner ruling
- * 2026-07-26 — there is one backend now), so the cross is re-pinned over an ordinary `Given env`
- * column, which exercises the same column-agnostic machinery.
- *
- * @return void
- */
 fn tkr_multi_column_outline_crosses_both_dimensions() {
     match parse_tkr(multi_column_outline_src()) {
         []TkrFeature as fs => match tkr_expand_outline(fs[0].scenarios[0]) {
@@ -199,12 +128,6 @@ fn tkr_multi_column_outline_crosses_both_dimensions() {
 }
 
 #test
-/**
- * tkr_hex_docstring_control_bytes — a `"""<hex>"""` docstring decodes to raw bytes, ignoring the
- * whitespace between the nibble pairs and carrying control bytes (`\n`, `\0`) literally.
- *
- * @return void
- */
 fn tkr_hex_docstring_control_bytes() {
     match tkr_read_hex_docstring("\"\"\"0a 00 41\"\"\"", 0) {
         str as b => {
@@ -218,12 +141,6 @@ fn tkr_hex_docstring_control_bytes() {
 }
 
 #test
-/**
- * tkr_hex_docstring_rejects_odd — an odd hex-nibble count and a non-hex byte are honest errors
- * (M.3); a well-formed docstring still decodes.
- *
- * @return void
- */
 fn tkr_hex_docstring_rejects_odd() {
     match tkr_read_hex_docstring("\"\"\"0\"\"\"", 0) { str => teko::assert::is_true(false); error => teko::assert::is_true(true) }
     match tkr_read_hex_docstring("\"\"\"zz\"\"\"", 0) { str => teko::assert::is_true(false); error => teko::assert::is_true(true) }
@@ -231,12 +148,6 @@ fn tkr_hex_docstring_rejects_odd() {
 }
 
 #test
-/**
- * tkr_osarch_routing — a `Then on "<os-arch>"` step routes its exit into a per-os-arch override (via
- * the reused `tkr_expect_for`), leaving the top-level expectation intact.
- *
- * @return void
- */
 fn tkr_osarch_routing() {
     var src = "Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 6\n    Then on \"x86_64-windows\" exit = 7\n"
     match tkr_first_lowered(src) {
@@ -252,12 +163,6 @@ fn tkr_osarch_routing() {
 }
 
 #test
-/**
- * tkr_compile_fail_lowers — a `compilation fails` scenario lowers to the CompileFail kind pinning
- * the `diagnostic` substring, and its `Given source = "<file>"` lowers into `Tkr.source_file`.
- *
- * @return void
- */
 fn tkr_compile_fail_lowers() {
     var src = "Feature: f\n  Scenario: neg\n    Given source = \"cases/x.tks\"\n    When compilation fails\n    Then diagnostic = \"out of range\"\n"
     match tkr_first_lowered(src) {
@@ -271,14 +176,6 @@ fn tkr_compile_fail_lowers() {
 }
 
 #test
-/**
- * tkr_verdict_parity — a lowered scenario and the equivalent hand-built `Tkr` yield the SAME
- * `check_run` verdict on both a matching and a mismatching `CapResult` (identical `RegrOutcome.ok`),
- * proving the lowering IR is faithful AND that the runner REPORTS a failure on a mismatch (the
- * failure-reporting self-test the deleted `regression-fixture/` demo used to carry, companion §7).
- *
- * @return void
- */
 fn tkr_verdict_parity() {
     var src = "Feature: f\n  Scenario: s\n    Given args = [\"7\"]\n    When built and run\n    Then exit = 42\n    And stdout = \"ok\"\n"
     match tkr_first_lowered(src) {
@@ -302,12 +199,6 @@ fn tkr_verdict_parity() {
 }
 
 #test
-/**
- * tkr_rejects_malformed — an unknown noun-phrase, an unknown When verb, and a step before any
- * Scenario are honest errors (M.3); a well-formed feature still parses.
- *
- * @return void
- */
 fn tkr_rejects_malformed() {
     teko::assert::is_false(tkr_parses("Feature: f\n  Given args = [\"x\"]\n"))
     var bad_noun = "Feature: f\n  Scenario: s\n    When built and run\n    Then bogus = \"x\"\n"
@@ -318,13 +209,6 @@ fn tkr_rejects_malformed() {
 }
 
 #test
-/**
- * tkr_lowers_stream_pattern — the `pattern` suffix on a stream noun lowers to
- * `TkrMatchMode::Pattern` carrying the raw regex source, on stdout and stderr alike, and behind an
- * `on "<os-arch>"` route as well as at top level.
- *
- * @return void
- */
 fn tkr_lowers_stream_pattern() {
     var src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"^teko: deliberate panic: boom$\"\n    And stdout pattern = \"[0-9]+\"\n    And on \"x86_64-windows\" stderr pattern = \"unreachable\"\n"
     match tkr_first_lowered(src) {
@@ -342,28 +226,11 @@ fn tkr_lowers_stream_pattern() {
     }
 }
 
-/**
- * tkr_trap_run — a `CapResult` for the panic-scenario verdict tests: the exit code the host
- * happened to report, and the stderr the program actually wrote.
- *
- * @param exit    the exit code the run reported
- * @param stderr  the captured stderr bytes
- * @return        the captured outcome
- */
 fn tkr_trap_run(exit: i32, stderr: str): CapResult {
     CapResult { exit = exit; stdout = ""; stderr = stderr; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
 }
 
 #test
-/**
- * tkr_pattern_verdict_is_the_panic_proof — the migration this whole step exists for: `Then it
- * traps` plus a `stderr pattern` accepts a deliberate panic under EITHER host convention (a POSIX
- * shell's synthesised 128+SIGABRT, and the unrelated number Windows reports), because neither is
- * consulted; and it still refuses the three ways the old `exit = 134` oracle could be fooled —
- * the wrong guard firing, the binary never running at all, and a clean exit.
- *
- * @return void
- */
 fn tkr_pattern_verdict_is_the_panic_proof() {
     var src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"teko: deliberate panic: impossible conversion\"\n"
     match tkr_first_lowered(src) {
@@ -381,14 +248,6 @@ fn tkr_pattern_verdict_is_the_panic_proof() {
 }
 
 #test
-/**
- * tkr_uncompilable_pattern_fails_red — a `pattern` that is not a valid regex fails its scenario and
- * says so in those words. The dangerous alternative would be a pattern that quietly matched
- * everything: the runner judges every other scenario, so an oracle that cannot parse its own
- * expectation must go red, never green (M.3).
- *
- * @return void
- */
 fn tkr_uncompilable_pattern_fails_red() {
     var src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"teko: (\"\n"
     match tkr_first_lowered(src) {
@@ -402,20 +261,6 @@ fn tkr_uncompilable_pattern_fails_red() {
 }
 
 #test
-/**
- * tkr_row_capability_skip_reason_matches_the_host_default_rule — a HOST row is skipped exactly when
- * `host_cc_cannot_link_host_default_reason` says this host cannot link what the own backend would
- * emit, and carries that reason verbatim. Written as an EQUIVALENCE rather than as a fixed
- * expectation so it holds on every lane: on x86_64-linux, macos-arm64 and windows-x86_64 both sides
- * are empty and the row runs; on an aarch64-linux host both sides are the same non-empty reason and
- * the row honest-skips.
- *
- * This ALSO absorbs the R3 guard the retired `..._spares_the_c_backend_host_row` test carried: the
- * plainest row there is (no backend sugar, host target) is now an own-backend row like every other,
- * so the equivalence covers it instead of a second, separate expectation.
- *
- * @return void
- */
 fn tkr_row_capability_skip_reason_matches_the_host_default_rule() {
     var own_host = "Feature: f\n  Scenario: s\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
     var want = host_cc_cannot_link_host_default_reason(HOST_TARGET, true)
@@ -426,25 +271,6 @@ fn tkr_row_capability_skip_reason_matches_the_host_default_rule() {
 }
 
 #test
-/**
- * tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch — the `host-os-arch` token means "an
- * EXPLICITLY spelled target, and let it be the one this host natively builds" (owner ruling
- * 2026-07-27). On a host `host_default_target` names a real target for, three properties hold,
- * every one of which a hardcoded `x86_64-linux` fails off x86_64:
- *
- *   1. the lowered row's target IS this host's own os-arch name — never the token, never a fixed one;
- *   2. it is spelled EXPLICITLY, so the row exports `TEKO_TARGET=<that name>` where the plain `host`
- *      sentinel exports nothing at all — the two exercise different build paths on purpose;
- *   3. it is never CROSS on the host that resolved it, so the row runs instead of honest-skipping.
- *
- * On a host with NO own-backend target at all (`host_default_target`'s own R2 error — an aarch64
- * linux host, an x86_64 macOS host), there is no real name left to spell explicitly, so the row
- * degrades to the plain `host` sentinel's own shape instead (`HOST_TARGET`, no exported
- * `TEKO_TARGET`) — the capability probe then honestly skips it downstream, rather than exporting a
- * target this host cannot actually build.
- *
- * @return void
- */
 fn tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch() {
     var src = "Feature: f\n  Scenario: s\n    Given target = \"host-os-arch\"\n    When built and run\n    Then exit = 0\n"
     var t = match tkr_first_lowered(src) { Tkr as x => x; error => { teko::assert::is_true(false); return } }
@@ -464,14 +290,6 @@ fn tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch() {
 }
 
 #test
-/**
- * tkr_plain_host_sentinel_still_declares_no_target — the guard that keeps the two host spellings
- * apart. `host` must go on meaning "declare NOTHING": it exports no `TEKO_TARGET` token, so the row
- * exercises the unset-default path. Without this guard the new `host-os-arch` token could quietly be
- * implemented by widening `host`, which would delete a build path the corpus covers.
- *
- * @return void
- */
 fn tkr_plain_host_sentinel_still_declares_no_target() {
     var src = "Feature: f\n  Scenario: s\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
     match tkr_first_lowered(src) {

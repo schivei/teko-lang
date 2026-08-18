@@ -1,35 +1,11 @@
 use teko::parser
 
-/**
- * CcEnv — the conditional-compilation constant environment: the fixed build-time facts a §17
- * predicate is evaluated against. `os`/`arch` come from the resolved target (the `[extern] target`
- * triple, else the host); `flags` is the build's flag set (manifest/CLI — see crumb F). It is a pure
- * data snapshot: constructed once per build, read-only during the prune.
- *
- * @field os           the target OS — `target_os(m)` ("linux"|"macos"|"windows"|"unknown")
- * @field arch         the target arch — `target_arch(m)` ("x86_64"|"arm64"|"unknown")
- * @field build_flags  the set build flags (empty until crumb F lands the flag source); named
- *                     `build_flags` because bare `flags` is a reserved declaration keyword
- * @since §17
- */
 pub type CcEnv = struct {
-    /** the target OS — `target_os(m)` ("linux"|"macos"|"windows"|"unknown"). */
     os: str
-    /** the target arch — `target_arch(m)` ("x86_64"|"arm64"|"unknown"). */
     arch: str
-    /** the set build flags (empty until crumb F lands the flag source); bare `flags` is reserved. */
     build_flags: []str
 }
 
-/**
- * str_list_contains — membership of `needle` in the string list `xs`, a total linear scan. The §17
- * `PFlag` atom uses it to test whether a build flag is present in `CcEnv.flags`.
- *
- * @param xs      the string list to scan
- * @param needle  the string sought
- * @return        true iff some element of `xs` equals `needle`
- * @since §17
- */
 fn str_list_contains(xs: []str, needle: str): bool {
     var i: u64 = 0
     loop {
@@ -40,33 +16,12 @@ fn str_list_contains(xs: []str, needle: str): bool {
     false
 }
 
-/**
- * pred_axis_eq — resolve a `PEq` axis atom against the environment. `"os"` compares `env.os`,
- * `"arch"` compares `env.arch`; any other axis name is false (unknown axes never match).
- *
- * @param e    the axis-equality atom
- * @param env  the build-time constant environment
- * @return     true iff the named axis equals `e.value`
- * @since §17
- */
 fn pred_axis_eq(e: parser::PEq, env: CcEnv): bool {
     if e.axis == "os" { return env.os == e.value }
     if e.axis == "arch" { return env.arch == e.value }
     false
 }
 
-/**
- * eval_pred — evaluate a §17 conditional-compile predicate against the build's constant
- * environment, yielding whether the guarded item SURVIVES the prune. Pure, total, boolean-only: it
- * reads `env` and the predicate tree and returns a `bool`; it computes no value and touches no
- * checker/`comptime` state. `&&`/`||` short-circuit. An unknown axis or absent flag is simply false
- * (a predicate nobody's target satisfies prunes the item, never errors).
- *
- * @param p    the predicate (an item's `guard`, or a `#if`-arm's composed predicate)
- * @param env  the build-time constant environment (os/arch/flags)
- * @return     true iff the guarded item survives on this target
- * @since §17
- */
 pub fn eval_pred(p: parser::Pred, env: CcEnv): bool {
     match p.kind {
         parser::PTrue => true
@@ -78,49 +33,14 @@ pub fn eval_pred(p: parser::Pred, env: CcEnv): bool {
     }
 }
 
-/**
- * PruneMode — which backend the prune serves, deciding whether target-varying arms are kept. NATIVE
- * (`keep_target_arms=false`) prunes to the single selected target (byte-identical to the historical
- * behavior). C-MONOLITH (`keep_target_arms=true`) keeps BOTH arch arms of a target-conditional const
- * so codegen can emit a C `#if` ladder — the one `teko.c` cross-compiles across every arch of its OS
- * (`docs/design/plano-s16-arch-cross-emit.md`).
- *
- * @field keep_target_arms  true = C-monolith backend (defer the arch axis to `cc`'s preprocessor);
- *                          false = native single-target backend (collapse to the selected arm)
- * @since §16
- */
 pub type PruneMode = struct {
-    /** true = C-monolith backend (keep target-conditional const arch arms for a `#if` ladder); false = native single-target backend (collapse to the one selected arm). */
     keep_target_arms: bool
 }
 
-/**
- * cc_eval_at — evaluate `p` at one concrete `(os, arch)` point, `env.build_flags` carried through (a
- * `#if(<flag>)` atom is NOT deferred — it resolves against the build's flags).
- *
- * @param p     the item's guard predicate
- * @param env   the build-time constant environment (its `build_flags` are carried; os/arch replaced)
- * @param os    the OS coordinate to test at
- * @param arch  the arch coordinate to test at
- * @return      true iff `p` holds at `(os, arch)`
- * @since §16
- */
 fn cc_eval_at(p: parser::Pred, env: CcEnv, os: str, arch: str): bool {
     eval_pred(p, CcEnv { os = os; arch = arch; build_flags = env.build_flags })
 }
 
-/**
- * cc_target_survives — the C-monolith keep-test: true iff SOME supported `(os, arch)` satisfies `p`.
- * DEFERS both the `#os` and the `#arch` axes to the emitted C `#if` (one `teko.c` cross-compiles across
- * every supported OS AND arch — gcc(Linux)/clang(macOS)/MinGW(Windows) pick the arm), scanning the
- * CLOSED matrix `linux-x86_64`, `linux-arm64`, `macos-arm64`, `windows-x86_64`. An item satisfiable by
- * no supported target is pruned. The existential scan is correct under `PNot`/`POr`.
- *
- * @param p    the item's guard predicate
- * @param env  the build-time constant environment (its `build_flags` gate a `#if(<flag>)` atom)
- * @return     true iff some supported target satisfies `p`
- * @since §16
- */
 fn cc_target_survives(p: parser::Pred, env: CcEnv): bool {
     if cc_eval_at(p, env, "linux", "x86_64") { return true }
     if cc_eval_at(p, env, "linux", "arm64") { return true }
@@ -129,38 +49,11 @@ fn cc_target_survives(p: parser::Pred, env: CcEnv): bool {
     false
 }
 
-/**
- * cc_keep_item — the per-item keep test the prune applies under each backend. NATIVE mode is
- * byte-identical to today: `eval_pred(it.guard, env)` (the single target's arm survives; folds and
- * cross-compiles by choosing the triple). C-MONOLITH mode defers BOTH the os and arch axes via
- * `cc_target_survives` — so every `#os`/`#arch` arm of a runtime const/fn/extern survives the prune and
- * codegen wraps each in a `#if <guard>` block, the one `teko.c` carrying the Linux+macOS+Windows arms.
- *
- * @param it    the pre-check item
- * @param env   the build-time constant environment
- * @param mode  the backend's prune mode
- * @return      true iff `it` survives the prune on this backend
- * @since §16
- */
 fn cc_keep_item(it: parser::Item, env: CcEnv, mode: PruneMode): bool {
     if !mode.keep_target_arms { return eval_pred(it.guard, env) }
     cc_target_survives(it.guard, env)
 }
 
-/**
- * prune_cc — the §16/§17 conditional-compilation PRUNE: keep exactly the top-level items `cc_keep_item`
- * admits for the backend `mode`, dropping the rest BEFORE macro expansion / name-resolution /
- * type-check (so a pruned item referencing an unavailable per-platform symbol never reaches the
- * checker). Native mode resolves os AND arch against `env`; C-monolith mode DEFERS both axes to the
- * emitted C `#if`, keeping every `#os`/`#arch` arm satisfiable by a supported target. The single
- * uniform `item.guard` read covers `fn`, `type`, `const`, and extern items alike.
- *
- * @param program  the assembled, pre-check program
- * @param env      the build-time constant environment (`CcEnv`)
- * @param mode     the backend's prune mode (native single-target vs C-monolith target-defer)
- * @return         a fresh `Program` of the surviving items, in source order
- * @since §17
- */
 pub fn prune_cc(program: parser::Program, env: CcEnv, mode: PruneMode): parser::Program {
     var kept: []parser::Item = teko::list::empty()
     var i: u64 = 0

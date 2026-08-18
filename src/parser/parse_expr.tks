@@ -1,20 +1,6 @@
-// src/parser/parse_expr.tks   (namespace 'teko::parser')
 
 use teko::lexer
 
-/**
- * parse_num_suffix_lit — desugar a `bi`/`d` arbitrary-precision Number token into a call to the
- * numeric library's `of_lit` constructor (`123bi` → `teko::numeric::bigint::of_lit("123")`, `1.5d`
- * → `teko::numeric::dec::of_lit("1.5")`). This keeps arbitrary-precision literals out of the
- * fixed-width `Number` node — no new AST/typed-AST node is needed; the checker and both backends see
- * an ordinary Call. A `bi` literal must be a whole number (no `.`/exponent).
- *
- * @param tokens  the token stream
- * @param pos     the Number token's index
- * @param txt     the Number token text (carrying the `bi`/`d` suffix)
- * @return        the parsed `of_lit` call expression, or an error for a fractional `bi` literal
- * @throws        when a `bi` literal carries a fraction or exponent (bigint is a whole number)
- */
 fn parse_num_suffix_lit(tokens: []lexer::Token, pos: u64, txt: str): Parsed<Expr> | error {
     var is_big = lit_is_bigint(txt)
     var numeric = if is_big { lit_strip_suffix(txt, 2) } else { lit_strip_suffix(txt, 1) }
@@ -33,15 +19,11 @@ fn parse_num_suffix_lit(tokens: []lexer::Token, pos: u64, txt: str): Parsed<Expr
     Parsed<Expr> { node = Expr { kind = call; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
 }
 
-// `( e, e, … )` — `pos` is at `(`. Empty `()` allowed; comma-separated; no trailing
-// comma (strict — M.2). Returns the args and the position after `)`. Used by Call (here)
-// and by MethodCall (P2b). Args parse with struct literals ALLOWED (W4a): a comma/paren
-// delimiter makes a trailing `{` unambiguous again, so each arg uses parse_expr.
 fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
-    var p = skip_seps(tokens, pos + 1)   // consume `(`, skip leading newlines (multi-line args)
+    var p = skip_seps(tokens, pos + 1)
     var args: []Expr = teko::list::empty()
     var arg_names: []str = teko::list::empty()
-    var seen_named = false   // DEFARGS (2026-07-01) — named-LAST ordering (rule D): once true, every later arg must also be named
+    var seen_named = false
     if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
         return ParsedCallArgs { args = args; arg_names = arg_names; next = p + 1 }
     }
@@ -56,13 +38,13 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
         } else if seen_named {
             return err_at(tokens, p, "a named argument must be followed only by other named arguments (named args are trailing-only)")
         }
-        var a = match parse_expr(tokens, ap) { Parsed<Expr> as x => x; error as e => return e }   // inside `(` … `)` — struct literals allowed
+        var a = match parse_expr(tokens, ap) { Parsed<Expr> as x => x; error as e => return e }
         args = teko::list::push(args, a.node)
         arg_names = teko::list::push(arg_names, aname)
-        p = skip_seps(tokens, a.next)   // a `,` / `)` may sit on the next line (multi-line args)
+        p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
-        p = skip_seps(tokens, p + 1)   // consume `,` (+ optional newlines before the next arg)
-        if is_kind_at(tokens, p, lexer::TokenKind::RParen) { break }   // trailing comma before `)`
+        p = skip_seps(tokens, p + 1)
+        if is_kind_at(tokens, p, lexer::TokenKind::RParen) { break }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
         return err_at(tokens, p, "expected ')' to close the argument list")
@@ -70,31 +52,9 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
     ParsedCallArgs { args = args; arg_names = arg_names; next = p + 1 }
 }
 
-/**
- * Parse a generic STATIC/factory call `Cell<i64>::make(args)` (#254 L5). `at_colons` is at the `::`
- * that follows the already-closed construction-site `<…>`; `base` is the constructed base path
- * (`Cell`); `owner_type_args` are the parsed TYPE generic args (`[i64]`). Parses the factory tail after
- * the `::`, appends it to `base` (`Cell::make`), OPTIONALLY a second explicit `<…>` on the METHOD
- * (`Map<K,V>::fold<Acc>()` → callee_type_args), then the argument list. The owner args ride on the Call
- * so the checker retargets the callee owner to the mangled instance (`Cell__g__i64::make`); the method
- * args bind the factory method's own type-params. A missing `(` after the tail (and optional method
- * `<…>`) is a hard error — a generic static call is `Type<Args>::fn(...)`.
- *
- * @param tokens          the token stream
- * @param at_colons       the index of the `::` after the closed `<…>`
- * @param base            the constructed base path (`Cell`)
- * @param owner_type_args the TYPE generic args (`[i64]`)
- * @param origin          the leading token index (for the Call node's line/col)
- * @return                the parsed factory `Call` expression, or a parse error
- * @throws                when a name after `::` is missing, or a `(` does not follow the factory tail
- * @since onda-3 (#254 L5)
- */
 fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, owner_type_args: []@TypeExpr(), origin: u64): Parsed<Expr> | error {
     var tail = match parse_path(tokens, at_colons + 1) { Parsed<Path> as x => x; error as e => return e }
     var full = path_concat(head_path, tail.node)
-    // OPTIONAL explicit METHOD type-args on the factory: `Type<A>::func<B>(…)` — SPECULATIVE, commit
-    // only when the `<…>` closes AND a `(` follows (mirrors the other call-site sites). Otherwise the
-    // resume point stays at the tail and the `(` check below reports the missing paren.
     var callee_type_args: []@TypeExpr() = teko::list::empty()
     var after = tail.next
     if is_kind_at(tokens, tail.next, lexer::TokenKind::Lt) {
@@ -115,13 +75,9 @@ fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: 
     Parsed<Expr> { node = Expr { kind = Call { callee = full; args = ca.args; arg_names = ca.arg_names; owner_type_args = owner_type_args; callee_type_args = callee_type_args }; line = tokens[origin].line; col = tokens[origin].col }; next = ca.next }
 }
 
-// `Name { field = value (; | newline)* }` — a struct VALUE literal (W4a). `pos` is at `{`.
-// Field VALUES parse with struct allowed (they sit inside the literal's braces).
-// (W9.4) `type_args` are the explicit construction-site generic args (empty for the bare
-// `Name { … }` form). `pos` is at the `{`.
 fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args: []@TypeExpr()): Parsed<Expr> | error {
-    var p = skip_seps(tokens, pos + 1)   // consume `{`, skip leading separators
-    if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {   // empty literal `Name { }`
+    var p = skip_seps(tokens, pos + 1)
+    if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
         return Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = teko::list::empty(); field_vals = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
     }
     var names: []str = teko::list::empty()
@@ -141,36 +97,21 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
         if is_kind_at(tokens, p, lexer::TokenKind::Comma) {
             return err_at(tokens, p, "struct literal fields are separated by ';', not ','")
         } else if is_sep(tokens, p) {
-            p = skip_seps(tokens, p)   // `;` / newline
+            p = skip_seps(tokens, p)
         } else if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
             break
         } else {
             return err_at(tokens, p, "expected ';', a newline, or '}' after a struct-literal field")
         }
-        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }   // trailing separator
+        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
     }
     Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = names; field_vals = vals }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
 }
 
-/**
- * dot_sentinel_path — the SENTINEL `type_path` for a `.{ … }` target-typed construction (§4.1): a
- * ZERO-segment `Path`. A construction literal always carries a nominal type prefix (`Name { … }` — one
- * or more segments), so an EMPTY segment list is an unambiguous marker no nominal prefix can spell. The
- * checker (`is_dot_sentinel`) recognises it and resolves the construction against the CONTEXT's expected
- * type instead of a named prefix. Reusing the ordinary `StructLit` shape adds no AST field, so the
- * `.tkb` layout is unchanged. (The retired `self { … }` construct's one-segment `self` sentinel is
- * gone — `self` is now only a receiver / a type.)
- *
- * @return  a zero-segment path — the `.{ … }` sentinel
- * @since   §4.1
- */
 fn dot_sentinel_path(): Path {
     Path { segments = teko::list::empty() }
 }
 
-// ---- string interpolation `$"…{expr}…"` (self-host parity) ----
-// decode `\` + one byte (the same escape set lexer::read_str decodes), appending the decoded
-// byte to `bytes`; returns the bytes + the index AFTER the escape. A malformed escape errors.
 type EscPiece = struct { bytes: []byte; next: u64 }
 fn piece_escape(raw: str, i: u64, bytes: []byte): EscPiece | error {
     if i + 1 >= raw.len { return error { message = "unknown escape in interpolated string" } }
@@ -184,16 +125,9 @@ fn piece_escape(raw: str, i: u64, bytes: []byte): EscPiece | error {
         b'0' => 0x00
         _ => return error { message = "unknown escape in interpolated string" }
     }
-    EscPiece { bytes = teko::list::push(bytes, v to byte); next = i + 2 }   // the decoded escape value is a byte (all fit u8)
+    EscPiece { bytes = teko::list::push(bytes, v to byte); next = i + 2 }
 }
 
-// Parse a `$"…"` Interp token's RAW inner text into the Interp node: literal pieces (escapes
-// decoded) interleaved with hole expressions. Each `{…}` hole is RE-LEXED (lexer::tokenize on
-// the hole's source substring) and parsed as a FULL expression. pieces.len == holes.len + 1.
-// `verbatim` (InterpRaw): literal bytes are appended AS-IS (no escape decoding) — a `\` is a
-// literal byte; the lexer has already collapsed single-line `""`→`"`. Holes split identically.
-// find_fspec_colon — find the first `:` in `s` at depth 0 (not inside `()[]{}` pairs).
-// Returns the index, or s.len if not found.
 fn find_fspec_colon(s: str): u64 {
     var depth: i64 = 0
     var i: u64 = 0
@@ -208,12 +142,9 @@ fn find_fspec_colon(s: str): u64 {
     s.len
 }
 
-// parse_fspec — parse the spec source string (after the `:`).
-// `[arg1, arg2]` → FSpecDynamic; anything else → FSpecStatic.
 fn parse_fspec(spec_src: str, tok_pos: u64, tokens: []lexer::Token): FSpec | error {
     if spec_src.len == 0 { return FSpec { kind = FSpecNone { } } }
     if spec_src[0] == b'[' {
-        // dynamic spec: `[arg1, arg2, …]` — strip the brackets, parse comma-separated exprs
         if spec_src.len < 2 || spec_src[spec_src.len - 1] != b']' {
             return err_at(tokens, tok_pos, "dynamic format spec must be `[expr, …]`")
         }
@@ -226,7 +157,6 @@ fn parse_fspec(spec_src: str, tok_pos: u64, tokens: []lexer::Token): FSpec | err
             var ae = match parse_expr(itoks, p) { Parsed<Expr> as x => x; error as e => return e }
             args = teko::list::push(args, ae.node)
             p = ae.next
-            // skip comma separator
             if p < itoks.len && itoks[p].kind == lexer::TokenKind::Comma { p = p + 1 }
         }
         if args.len == 0 { return err_at(tokens, tok_pos, "dynamic format spec must have at least one argument") }
@@ -241,7 +171,7 @@ fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> 
     var pieces: []str = teko::list::empty()
     var holes: []Expr = teko::list::empty()
     var specs: []FSpec = teko::list::empty()
-    var cur: []byte = teko::list::empty()   // the current literal piece's bytes
+    var cur: []byte = teko::list::empty()
     var i: u64 = 0
     loop {
         if i >= raw.len { break }
@@ -252,13 +182,12 @@ fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> 
             i = ep.next
             continue
         }
-        // `{{` → one literal `{`, `}}` → one literal `}` (doubling at brace-depth 0 only).
         if c == b'{' && i + 1 < raw.len && raw[i + 1] == b'{' { cur = teko::list::push(cur, b'{'); i = i + 2; continue }
         if c == b'}' && i + 1 < raw.len && raw[i + 1] == b'}' { cur = teko::list::push(cur, b'}'); i = i + 2; continue }
         if c == b'{' {
-            pieces = teko::list::push(pieces, str(cur))   // close the piece BEFORE the hole
+            pieces = teko::list::push(pieces, str(cur))
             cur = teko::list::empty()
-            var hs = i + 1   // scan to the matching `}` (depth)
+            var hs = i + 1
             var depth: u64 = 1
             var j = hs
             loop {
@@ -270,7 +199,6 @@ fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> 
             }
             if j >= raw.len { return err_at(tokens, pos, "unterminated `{` in interpolated string") }
             var hole_src = slice(raw, hs, j)
-            // find format spec colon at depth-0
             var colon_pos = find_fspec_colon(hole_src)
             var expr_src = if colon_pos < hole_src.len { slice(hole_src, 0, colon_pos) } else { hole_src }
             var spec_src = if colon_pos < hole_src.len { slice(hole_src, colon_pos + 1, hole_src.len) } else { "" }
@@ -279,23 +207,17 @@ fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> 
             holes = teko::list::push(holes, he.node)
             var sp = match parse_fspec(spec_src, pos, tokens) { FSpec as s => s; error as e => return e }
             specs = teko::list::push(specs, sp)
-            i = j + 1   // past the `}`
+            i = j + 1
             continue
         }
         if c == b'}' { return err_at(tokens, pos, "unexpected `}` in interpolated string") }
         cur = teko::list::push(cur, c)
         i++
     }
-    pieces = teko::list::push(pieces, str(cur))   // the trailing literal piece
+    pieces = teko::list::push(pieces, str(cur))
     Parsed<Expr> { node = Expr { kind = Interp { pieces = pieces; holes = holes; specs = specs }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
 }
 
-// the LEAF: a literal, a name/path/call, `( expr )`, or an `if`/`match` expression (B.20/B.15).
-// `allow_struct` (W4a): when true, a `Name { … }` after a path is a struct literal; when false
-// (if/match scrutinee), the `{` opens the block instead. Threaded down from parse_expr.
-// (W10) lambda lookahead: with `pos` at `(`, scan to the MATCHING `)` (paren-balanced) and report
-// whether a `=>` follows. Distinguishes a closure literal `(x) => …` from a parenthesized expression
-// `(x)` or an arg list — pure parser lookahead (the lexer never needs to know).
 fn lambda_ahead(tokens: []lexer::Token, pos: u64): bool {
     var depth: u64 = 0
     var p = pos
@@ -311,39 +233,10 @@ fn lambda_ahead(tokens: []lexer::Token, pos: u64): bool {
     }
 }
 
-/**
- * lambda_expr_body — the one-statement body of a bare-expression closure `(params) => expr`: the
- * single expression `e` wrapped as a trailing `ExprStmt`, returned as a `[]@Statement()` so
- * `parse_lambda` assigns it exactly as it assigns a `{ … }` block body's `parse_block` result.
- *
- * Building the list THROUGH a function return (rather than inline in `parse_lambda`'s `else` arm) is
- * load-bearing on the native backend: the pushed `ExprStmt` element is held BY ADDRESS, and only a
- * return-value conveyance parks that per-execution box in an outliving (root) region. An inline
- * `push` inside the arm left the wrapper in a region reclaimed when `parse_lambda` returned, so the
- * escaped `Lambda.body` element dangled — the native self-build's `checker::type_statement` item
- * 1827 use-after-free (the `{ … }`-block path was immune precisely because `parse_block` RETURNS its
- * `[]@Statement()`).
- *
- * @param e  the closure's single body expression
- * @return   a one-element `[]@Statement()` holding `e` as an `ExprStmt`
- * @since    0.3.1
- */
 fn lambda_expr_body(e: Expr): []@Statement() {
     teko::list::push(teko::list::empty(), ExprStmt { expr = e })
 }
 
-/**
- * parse_lambda — a closure literal `(params) => expr` / `(params) => { … }`; `pos` is at `(`. Each
- * parameter is `name` or `name: type` (the type is OPTIONAL — inferred from the target when absent).
- * The body is a `{ … }` block or a single expression (stored as one trailing `ExprStmt` built by
- * `lambda_expr_body`). A closure declares NO `fn` and NO `-> R` (the return type is inferred).
- *
- * @param tokens  the token stream
- * @param pos     the index of the opening `(`
- * @return        the parsed closure expression + the index past its body, or an honest stop
- * @throws        on a malformed parameter list, a missing `=>`, or propagated from the body
- * @since         0.3.1 (W10)
- */
 fn parse_lambda(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
     var params: []LambdaParam = teko::list::empty()
     var p = pos + 1
@@ -384,19 +277,6 @@ fn parse_lambda(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
     Parsed<Expr> { node = Expr { kind = Lambda { params = params; body = body }; line = tokens[pos].line; col = tokens[pos].col }; next = p }
 }
 
-/**
- * parse_macro_call — parse an `@name(...)` / `@name<T…>(...)` compiler-executed call (§14) into a
- * `MacroCall` node. `pos` is at the `At` token. The resolver later routes the node to a `MacroDecl`
- * (Family A) or `ComptimeDecl` (Family B) by the resolved declaration's family; a BARE `name(...)` (no
- * `@`) never reaches here — it stays an ordinary `Call`. An `@name` MUST be followed by an argument
- * list (optionally after a `<T…>` type-argument list).
- *
- * @param tokens  the token stream
- * @param pos     the index of the `@` token
- * @return        the parsed MacroCall expression + the resume index, or a located parse error
- * @throws        a missing name, a `<…>` not followed by `(`, or a missing argument list
- * @since 0.4-macros (§14 A1)
- */
 fn parse_macro_call(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
     var p = pos + 1
     if !is_name_at(tokens, p) {
@@ -438,14 +318,13 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         return parse_struct_lit(tokens, pos + 1, dot_sentinel_path(), teko::list::empty())
     }
     if k == lexer::TokenKind::LParen && lambda_ahead(tokens, pos) {
-        return parse_lambda(tokens, pos)   // (W10) a closure literal beats the grouping branch below
+        return parse_lambda(tokens, pos)
     }
     if k == lexer::TokenKind::Number {
         var txt = tokens[pos].text
         if lit_is_bigint(txt) || lit_is_dec(txt) {
             return parse_num_suffix_lit(tokens, pos, txt)
         }
-        // a FLOAT token carries fval (via lit_float); an INT token carries value (via lit_int) — mirror parse_expr.c.
         var num = if lit_is_float(txt) { Number { is_float = true; value = numint_of_u64(0); fval = lit_float(txt) } }
         else {
             match lit_int(txt) {
@@ -459,10 +338,10 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         return Parsed<Expr> { node = Expr { kind = StrLit { text = tokens[pos].text }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::Interp {
-        return parse_interp(tokens, pos, false)   // $"…{expr}…" — split, escapes ON
+        return parse_interp(tokens, pos, false)
     }
     if k == lexer::TokenKind::InterpRaw {
-        return parse_interp(tokens, pos, true)   // $@"…{expr}…" — split, literal bytes VERBATIM
+        return parse_interp(tokens, pos, true)
     }
     if k == lexer::TokenKind::Byte {
         return Parsed<Expr> { node = Expr { kind = ByteLit { value = lit_byte(tokens[pos].text) }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
@@ -480,16 +359,13 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         return Parsed<Expr> { node = Expr { kind = NullLit { }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::LParen {
-        var inner = match parse_expr(tokens, pos + 1) { Parsed<Expr> as x => x; error as e => return e }   // inside `(` … `)` — struct literals allowed
+        var inner = match parse_expr(tokens, pos + 1) { Parsed<Expr> as x => x; error as e => return e }
         if !is_kind_at(tokens, inner.next, lexer::TokenKind::RParen) {
             return err_at(tokens, inner.next, "expected ')' to close a parenthesized expression")
         }
-        return Parsed<Expr> { node = inner.node; next = inner.next + 1 }   // grouping is transparent
+        return Parsed<Expr> { node = inner.node; next = inner.next + 1 }
     }
     if k == lexer::TokenKind::LBracket {
-        // `[ e0, ..e1, e2, … ]` — an array/slice literal (Increment B+, C6.7 spread). Each
-        // element may be prefixed with `..` to mark it as a spread (is_spread=true). The checker
-        // unifies non-spread element types and flattens spread operands.
         var aer = match parse_array_elems(tokens, pos) { ParsedList<ArrayElem> as x => x; error as e => return e }
         return Parsed<Expr> { node = Expr { kind = ArrayLit { elements = aer.items }; line = tokens[pos].line; col = tokens[pos].col }; next = aer.next }
     }
@@ -499,28 +375,18 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
     if k == lexer::TokenKind::Match {
         return parse_match(tokens, pos)
     }
-    // §4 (D2/D1): `self` and `base` are reserved keywords, so they no longer pass `is_name_at`
-    // (which powers path parsing). They are simple Var primaries — `self`/`base` resolve to the
-    // synthetic receiver / super receiver; postfix (`.field`, `.method(...)`) chains on top.
     if k == lexer::TokenKind::SelfKw {
         return Parsed<Expr> { node = Expr { kind = Var { name = "self" }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::Base {
         return Parsed<Expr> { node = Expr { kind = Var { name = "base" }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
-    if is_name_at(tokens, pos) {   // IDENT or a contextual keyword (`type`/`to`) used as a value/path
+    if is_name_at(tokens, pos) {
         var pp = match parse_path(tokens, pos) { Parsed<Path> as x => x; error as e => return e }
         if is_kind_at(tokens, pp.next, lexer::TokenKind::LParen) {
             var ca = match parse_call_args(tokens, pp.next) { ParsedCallArgs as x => x; error as e => return e }
             return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = ca.args; arg_names = ca.arg_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
         }
-        // (W9.4) explicit type-args after a path — SPECULATIVE: parse the `<…>` list, then commit by
-        // what follows the CLOSED list. A `(` → an explicit-generic FUNCTION call `foo<T>(args)` /
-        // `ns::foo<T>(args)`; this is UNAMBIGUOUS once the `(` is seen, so it is NOT struct-gated (it
-        // must work in an if/match scrutinee too). A `{` → a typed struct literal `Name<i64>{ … }`, and
-        // a `::` → a generic static call `Type<Args>::m(…)`; those two ARE struct-gated (a bare `{`
-        // opens a block in a scrutinee). Anything else (or a non-closing / pending `>>` list) backtracks
-        // to comparison, so `a < b` and `a < b > c` stay comparisons.
         if is_kind_at(tokens, pp.next, lexer::TokenKind::Lt) {
             match parse_type_args(tokens, pp.next) {
                 ParsedTypeArgs as ta => {
@@ -535,10 +401,9 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
                         return parse_generic_static_call(tokens, ta.next, pp.node, ta.args, pos)
                     }
                 }
-                error => { }   // backtrack: `a < b` or a pending mid-close → fall through to comparison
+                error => { }
             }
         }
-        // W4a — a struct literal `Name { … }` (only when allowed: not in an if/match scrutinee).
         if allow_struct && is_kind_at(tokens, pp.next, lexer::TokenKind::LBrace) {
             return parse_struct_lit(tokens, pp.next, pp.node, teko::list::empty())
         }
@@ -553,52 +418,27 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
     err_at(tokens, pos, "expected an expression")
 }
 
-/**
- * parse_block_expr — a LEADING `{` opens a Block-B in expression position (§9 E, ruling 7); `pos` is
- * at the `{`. Reuses `parse_block` — the very same body a closure `{ … }` parses — so no new parsing
- * logic: the block's statements are collected and its trailing statement's value becomes its result.
- * Gated by `allow_struct` at the call site so it does not steal the `{` that opens an `if`/`match`
- * scrutinee block; §9 B construction (which always carries a type prefix) has already been dispatched
- * above, so a `{` with no path before it is unambiguously a block.
- *
- * @param tokens  the token stream
- * @param pos     the index of the opening `{`
- * @return        the parsed Block-B expression + the index past its closing `}`, or an honest stop
- * @throws        propagated from `parse_block` on a malformed block body
- * @since         §9 E
- */
 fn parse_block_expr(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
     var blk = match parse_block(tokens, pos) { ParsedList<@Statement()> as x => x; error as e => return e }
     Parsed<Expr> { node = Expr { kind = Block { body = blk.items }; line = tokens[pos].line; col = tokens[pos].col }; next = blk.next }
 }
 
-// THE EXPRESSION ENTRY — descends the whole ladder (P2 complete: or → and →
-// comparison → additive → multiplicative → shift → cast → unary → postfix → atom). The whole
-// ladder threads `allow_struct` (W4a): the default entry allows struct literals.
 fn parse_expr(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
-    parse_or(tokens, pos, true)   // default: struct literals allowed
+    parse_or(tokens, pos, true)
 }
 
-// the scrutinee form (B.20/B.15): a trailing `{` opens the if/match block, NOT a struct
-// literal — so struct literals are suppressed at the top level of the condition/subject.
 fn parse_expr_no_struct(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
     parse_or(tokens, pos, false)
 }
 
 
-// postfix: a chain of `.field` and `.method(args)` after an atom (tightest after the
-// leaf). Left-assoc. `a.b`, `a.b().c`, `f(x).g`.
 fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var prim = match parse_atom(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = prim.node
     var p = prim.next
     loop {
-        // `[index]` subscript (W5-idx). The index is a FULL expression (struct literals
-        // allowed inside the brackets — a delimiter makes the `{` unambiguous). Wraps the
-        // current node as the receiver and continues the loop, so `a[i][j]`, `a[i].f`,
-        // `a.f[i]` all chain. str→byte / []T→T (typed in the checker).
         if is_kind_at(tokens, p, lexer::TokenKind::LBracket) {
-            var idx = match parse_expr(tokens, p + 1) { Parsed<Expr> as x => x; error as e => return e }   // inside `[` … `]` — struct literals allowed
+            var idx = match parse_expr(tokens, p + 1) { Parsed<Expr> as x => x; error as e => return e }
             if !is_kind_at(tokens, idx.next, lexer::TokenKind::RBracket) {
                 return err_at(tokens, idx.next, "expected ']' to close a subscript index")
             }
@@ -611,10 +451,6 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
             return err_at(tokens, p + 1, "expected a field or method name after '.'")
         }
         var name = tokens[p + 1].text
-        // explicit call-site type-args on a method: `recv.m<T>(args)` — SPECULATIVE. Parse the
-        // `<…>` list and commit to a generic method call ONLY when it closes (`pending_gt == 0`)
-        // AND a `(` follows; otherwise backtrack so `recv.m < b` stays a comparison. Mirrors the
-        // static-generic / typed-struct-literal disambiguation (parse_atom).
         if is_kind_at(tokens, p + 2, lexer::TokenKind::Lt) {
             match parse_type_args(tokens, p + 2) {
                 ParsedTypeArgs as ta => {
@@ -625,7 +461,7 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
                         continue
                     }
                 }
-                error => { }   // backtrack: `recv.m < b` comparison, or a pending mid-close
+                error => { }
             }
         }
         if is_kind_at(tokens, p + 2, lexer::TokenKind::LParen) {
@@ -640,21 +476,6 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
     Parsed<Expr> { node = node; next = p }
 }
 
-/**
- * The prefix-unary level: `- ~ !` (right-assoc: `!!a` is `!(!a)`), plus the prefix `&x` safe
- * borrow (AL wave F1). `&` in PREFIX position is a Borrow; `&` BETWEEN operands is the binary
- * bitwise-and, consumed at the binary level — so a leading `&` here is unambiguous. A bare `ref`
- * immediately before a name (owner ruling 2026-07-24) is named HONESTLY as a misuse: `ref` is a
- * BINDING keyword (`ref r: T = e`, `fn f(ref r: T)`), never an expression-position operator — the
- * pre-adoption `a(ref x)` call-site spelling is gone; a plain `a(x)` auto-refs into a `ref`
- * parameter. Below `to`.
- *
- * @param tokens        the token stream
- * @param pos           the index of the (possibly unary) expression's first token
- * @param allow_struct  whether a bare `{` here opens a struct literal (context-dependent)
- * @return              the parsed unary (or lower-precedence) expression
- * @throws              when `pos` opens a bare `ref` immediately before a name
- */
 fn parse_unary(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::Amp) {
         var operand = match parse_unary(tokens, pos + 1, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
@@ -671,8 +492,6 @@ fn parse_unary(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Exp
     parse_postfix(tokens, pos, allow_struct)
 }
 
-// cast `x to T` (F2) — below unary, above all binary. Left-assoc. The target is a
-// type-PRIMARY (parse_type_primary, P1): `x to u32`, `x to []u8`, `x to lexer::Token`.
 fn parse_cast(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var first = match parse_unary(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = first.node
@@ -686,7 +505,6 @@ fn parse_cast(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
     Parsed<Expr> { node = node; next = p }
 }
 
-// level 3 — shift `<< >>` (left-assoc; the tightest binary, just above cast).
 fn parse_shift(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var first = match parse_cast(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = first.node
@@ -694,14 +512,13 @@ fn parse_shift(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Exp
     loop {
         if !is_shift(tokens, p) { break }
         var op = kind_at(tokens, p)
-        var rhs = match parse_cast(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
+        var rhs = match parse_cast(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }
         node = Expr { kind = Binary { op = op; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
     Parsed<Expr> { node = node; next = p }
 }
 
-// level 4 — multiplicative `* / %` and bitwise `&` (left-assoc).
 fn parse_multiplicative(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var first = match parse_shift(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = first.node
@@ -709,14 +526,13 @@ fn parse_multiplicative(tokens: []lexer::Token, pos: u64, allow_struct: bool): P
     loop {
         if !is_multiplicative(tokens, p) { break }
         var op = kind_at(tokens, p)
-        var rhs = match parse_shift(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
+        var rhs = match parse_shift(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }
         node = Expr { kind = Binary { op = op; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
     Parsed<Expr> { node = node; next = p }
 }
 
-// level 5 — additive `+ -` and bitwise `| ^` (left-assoc).
 fn parse_additive(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var first = match parse_multiplicative(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = first.node
@@ -724,31 +540,25 @@ fn parse_additive(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<
     loop {
         if !is_additive(tokens, p) { break }
         var op = kind_at(tokens, p)
-        var rhs = match parse_multiplicative(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
+        var rhs = match parse_multiplicative(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }
         node = Expr { kind = Binary { op = op; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
     Parsed<Expr> { node = node; next = p }
 }
 
-// `[ e0, ..e1, e2, … ]` — array literal element collector (C6.7). `pos` is at `[`. Each element
-// may be prefixed with `..` (DotDot) to produce a spread element (is_spread=true). After consuming
-// `..` the operand is parsed at unary level to avoid swallowing the comma separator. Non-spread
-// elements are parsed at the full expression level with struct literals allowed. Newline-tolerant.
 fn parse_array_elems(tokens: []lexer::Token, pos: u64): ParsedList<ArrayElem> | error {
-    var p = skip_seps(tokens, pos + 1)   // consume `[`, skip leading newlines
+    var p = skip_seps(tokens, pos + 1)
     var elems: []ArrayElem = teko::list::empty()
-    if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {   // empty `[]`
+    if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return ParsedList<ArrayElem> { items = elems; next = p + 1 }
     }
     loop {
         var is_spread = false
-        if is_kind_at(tokens, p, lexer::TokenKind::DotDot) {   // `..expr` spread prefix (C6.7)
+        if is_kind_at(tokens, p, lexer::TokenKind::DotDot) {
             is_spread = true
-            p = skip_seps(tokens, p + 1)   // consume `..`, skip optional newlines
+            p = skip_seps(tokens, p + 1)
         }
-        // spread operand: parse at unary level (avoids consuming the comma separator);
-        // non-spread: parse at full expression level with struct literals allowed.
         var a = if is_spread {
             match parse_unary(tokens, p, false) { Parsed<Expr> as x => x; error as e => return e }
         } else {
@@ -757,8 +567,8 @@ fn parse_array_elems(tokens: []lexer::Token, pos: u64): ParsedList<ArrayElem> | 
         elems = teko::list::push(elems, ArrayElem { is_spread = is_spread; expr = a.node })
         p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
-        p = skip_seps(tokens, p + 1)   // consume `,`
-        if is_kind_at(tokens, p, lexer::TokenKind::RBracket) { break }   // trailing comma
+        p = skip_seps(tokens, p + 1)
+        if is_kind_at(tokens, p, lexer::TokenKind::RBracket) { break }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return err_at(tokens, p, "expected ']' to close the array literal")
@@ -766,23 +576,19 @@ fn parse_array_elems(tokens: []lexer::Token, pos: u64): ParsedList<ArrayElem> | 
     ParsedList<ArrayElem> { items = elems; next = p + 1 }
 }
 
-// `[ e0, e1, … ]` — the membership SET, the RHS of `in` (Phase 2). `pos` is at `[`. Empty `[]`
-// allowed → always false. Comma- and separator-tolerant (newlines, like multi-line call args).
-// Elements parse with struct literals ALLOWED (a `[`/`,` delimiter makes a trailing `{` unambiguous
-// again, like call args / `(` … `)`). Returns the elements + the position after `]`.
 fn parse_in_elems(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
-    var p = skip_seps(tokens, pos + 1)   // consume `[`, skip leading newlines (multi-line set)
+    var p = skip_seps(tokens, pos + 1)
     var elems: []Expr = teko::list::empty()
-    if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {   // empty set `[]` → always false
+    if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return ParsedList<Expr> { items = elems; next = p + 1 }
     }
     loop {
-        var a = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }   // inside `[` … `]` — struct literals allowed
+        var a = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
         elems = teko::list::push(elems, a.node)
-        p = skip_seps(tokens, a.next)   // a `,` / `]` may sit on the next line
+        p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
-        p = skip_seps(tokens, p + 1)   // consume `,` (+ optional newlines before the next element)
-        if is_kind_at(tokens, p, lexer::TokenKind::RBracket) { break }   // trailing comma before `]`
+        p = skip_seps(tokens, p + 1)
+        if is_kind_at(tokens, p, lexer::TokenKind::RBracket) { break }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return err_at(tokens, p, "expected ']' to close the `in` membership set")
@@ -790,17 +596,10 @@ fn parse_in_elems(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
     ParsedList<Expr> { items = elems; next = p + 1 }
 }
 
-// level 6 — comparison. A CHAIN `a < b < c` is kept as written (M.3): a first + a list
-// of (op, operand) terms; no term → the bare first. ALSO the home of `in` membership
-// (Phase 2): `<expr> in [ … ]` at comparison precedence, NON-chaining.
 fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var first = match parse_additive(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
-    // `<expr> in [ … ]` — membership test (Phase 2), at comparison precedence and NON-chaining.
-    // The LHS is the just-parsed operand; the RHS is the special bracketed set. The `[` is
-    // REQUIRED after `in` (there is no general array literal). The node is stamped at the LHS's
-    // first token (tokens[pos], this function's entry — C1-POS).
     if is_kind_at(tokens, first.next, lexer::TokenKind::In) {
-        var ip = first.next + 1   // past `in`
+        var ip = first.next + 1
         if !is_kind_at(tokens, ip, lexer::TokenKind::LBracket) {
             return err_at(tokens, ip, "expected '[' to begin the `in` membership set")
         }
@@ -812,7 +611,7 @@ fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parse
     loop {
         if !is_comparison(tokens, p) { break }
         var op = kind_at(tokens, p)
-        var rhs = match parse_additive(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
+        var rhs = match parse_additive(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }
         terms = teko::list::push(terms, CmpTerm { op = op; operand = rhs.node })
         p = rhs.next
     }
@@ -820,28 +619,26 @@ fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parse
     Parsed<Expr> { node = Expr { kind = Compare { first = first.node; rest = terms }; line = tokens[pos].line; col = tokens[pos].col }; next = p }
 }
 
-// level 7 — logical AND `&&` (left-assoc).
 fn parse_and(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var first = match parse_comparison(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = first.node
     var p = first.next
     loop {
         if !is_andand(tokens, p) { break }
-        var rhs = match parse_comparison(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
+        var rhs = match parse_comparison(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }
         node = Expr { kind = Binary { op = lexer::TokenKind::AndAnd; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
     Parsed<Expr> { node = node; next = p }
 }
 
-// level 8 — logical OR `||` (left-assoc, the loosest; the ladder's top).
 fn parse_or(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr> | error {
     var first = match parse_and(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     var node = first.node
     var p = first.next
     loop {
         if !is_oror(tokens, p) { break }
-        var rhs = match parse_and(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
+        var rhs = match parse_and(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }
         node = Expr { kind = Binary { op = lexer::TokenKind::OrOr; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }

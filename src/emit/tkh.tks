@@ -1,24 +1,9 @@
-// src/emit/tkh.tks  (namespace 'teko::emit')
-//
-// The `.tkh` is a project's EXPORTED INTERFACE — the `exp` function signatures and
-// `exp` type declarations, plus their docs. Together with the `.tkb` it forms a Teko
-// PACKAGE (emitted when the `.tkp` artifact is a `library`): the `.tkh` is the interface
-// a consumer TYPE-CHECKS against (signatures, KEEPS docs, no bodies), and the `.tkb` is
-// the full serialized TYPED TREE (Teko IL — NOT a native `.o`) that the compiler later
-// loads into memory and STATICALLY PRE-LINKS into the dev's program (Teko objects linked
-// statically at the typed-tree level — the alternative to dynamic/FFI; FFI is only for
-// FOREIGN code). The `.tkb` drops docs; the `.tkh` keeps them. The types are the RESOLVED
-// semantic `Type` (checker), so a consumer checks with no re-resolution. Reuses the .tkb
-// codec wholesale (write_type/read_type, string table, FNV-1a frame); adds no primitive.
 
 use teko::checker
 
-// --- the exported-interface model -------------------------------------------
 
-// a parameter in a signature: a name + its resolved type.
 type SigParam = struct { name: str; type: @Type() }
 
-// an exported FUNCTION's signature (no body — that is the .tkb's). Docs kept.
 type FnSig = struct {
     name: str
     params: []SigParam
@@ -27,31 +12,23 @@ type FnSig = struct {
     doc: str
 }
 
-// a field of an exported struct: a name + its resolved type.
 type SigField = struct { name: str; type: @Type() }
 
-// which shape an exported type has (B.14 — struct/enum/variant; flags is evolution).
 type TyShape = enum { Struct; Enum; Variant }
 
-// an exported TYPE declaration's interface (nominal — B.13; the consumer needs the
-// shape to check construction/membership against it). Per `shape`, exactly one of
-// fields/members/cases is meaningful; the other two are serialized empty.
 type TyExport = struct {
     name: str
     shape: TyShape
-    fields: []SigField   // Struct:  the fields  (empty otherwise)
-    members: []str   // Enum:    the members (empty otherwise)
-    cases: []@Type()   /* Variant: the cases   (empty otherwise) */
+    fields: []SigField
+    members: []str
+    cases: []@Type()
     has_doc: bool
     doc: str
 }
 
-// a whole project's exported surface: its types, then its functions.
 type Header = struct { types: []TyExport; fns: []FnSig }
 
-// --- the writers (reuse write_type / write_types; strings by u32 index) -----------
 
-// a doc: a presence byte, then (iff present) its string index.
 fn write_doc(buf: []byte, t: StrTable, has_doc: bool, doc: str): []byte {
     if !has_doc { return write_u8(buf, 0) }
     write_u32(write_u8(buf, 1), st_find(t, doc))
@@ -105,7 +82,6 @@ fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField): []byte {
     b
 }
 
-// a list of member NAMES (enum) → count + each name index.
 fn write_members(buf: []byte, t: StrTable, xs: []str): []byte {
     var b = write_u32(buf, xs.len to u32)
     var i = 0
@@ -117,15 +93,12 @@ fn write_members(buf: []byte, t: StrTable, xs: []str): []byte {
     b
 }
 
-// the TyShape ordinal byte — explicit (no enum→int cast needed). Struct=0 Enum=1 Variant=2.
 fn shape_byte(s: TyShape): byte {
     if s == TyShape::Struct { return 0 }
     if s == TyShape::Enum { return 1 }
     2
 }
 
-// uniform: all three lists are written; `shape` selects the meaningful one, the others
-// come out empty (count 0). Sequential, branch-free both ways (M.1 / M.5).
 fn write_tyexport(buf: []byte, t: StrTable, e: TyExport): []byte {
     var b = write_u32(buf, st_find(t, e.name))
     b = write_u8(b, shape_byte(e.shape))
@@ -150,7 +123,6 @@ fn write_header(buf: []byte, t: StrTable, h: Header): []byte {
     write_fnsigs(write_tyexports(buf, t, h.types), t, h.fns)
 }
 
-// --- collect every string (pre-pass; mirrors the writers; reuse collect_type_*) ----
 
 fn collect_doc(t: StrTable, has_doc: bool, doc: str): StrTable {
     if !has_doc { return t }
@@ -239,29 +211,9 @@ fn collect_header(t: StrTable, h: Header): StrTable {
     collect_fnsigs(collect_tyexports(t, h.types), h.fns)
 }
 
-// --- the frame: collect → table → body → FNV-1a → header ("TKH\0" + ver + hash) ----
 
-/**
- * TKH_VERSION — wire format version of a `.tkh` exported-interface artifact. Bumped 1 → 2 in
- * 0.3.1 for exactly the reason `TKB_EXPR_VERSION`/`TKB_PROGRAM_VERSION` were: this unit reuses
- * the `.tkb` codec WHOLESALE (`write_type`/`read_type`, the string table, the FNV-1a frame — see
- * this file's header), so the drop-128 `PrimKind` ordinal renumbering moved every primitive's
- * on-wire number here too. A pre-0.3.1 `.tkh` passes the `"TKH\0"` magic AND its own FNV-1a (its
- * bytes are internally consistent), so nothing but the version field can catch it — without the
- * bump each primitive would decode into the WRONG type, silently. Owner ruling 2026-07-24: an old
- * artifact FAILS LOUD (M.3); no retroactive support for pre-STS/LTS formats.
- *
- * @since 0.3.1 (drop-128 R2)
- */
 const TKH_VERSION: u32 = 2
 
-/**
- * emit_tkh — serialize a whole exported interface `h` into the `.tkh` frame: the `"TKH\0"` magic,
- * `TKH_VERSION`, the FNV-1a of the body, then the string table and the body itself.
- *
- * @param h  the exported interface (its types, then its functions)
- * @return   the complete `.tkh` bytes
- */
 fn emit_tkh(h: Header): []byte {
     var table = collect_header(st_empty(), h)
     var body = write_header(write_strtable(teko::list::empty(), table), table, h)
@@ -276,7 +228,6 @@ fn emit_tkh(h: Header): []byte {
     append_bytes(out, body)
 }
 
-// --- the readers (inverse; reuse the Reader, read_type, read_types, read_strtable) --
 
 type RDoc = struct { r: Reader; has_doc: bool; doc: str }
 type RSigParam = struct { r: Reader; value: SigParam }
@@ -380,7 +331,6 @@ fn read_members(r: Reader, table: []str): RMembers | error {
     RMembers { r = rr; value = xs }
 }
 
-// inverse of shape_byte (byte → TyShape).
 fn shape_of(b: byte): TyShape {
     if b == 0 { return TyShape::Struct }
     if b == 1 { return TyShape::Enum }
@@ -422,17 +372,6 @@ fn read_header(r: Reader, table: []str): RHeader | error {
     RHeader { r = fs.r; value = Header { types = ts.value; fns = fs.value } }
 }
 
-/**
- * read_tkh — THE ENTRY: verify the `"TKH\0"` magic and `TKH_VERSION`, recompute the FNV-1a over
- * the body, then read the string table and the exported interface. The version check is the ONLY
- * barrier a pre-0.3.1 artifact hits (its magic and its own hash both still verify), so its
- * rejection names the cause the way the `.tkb` reader does: the retired `PrimKind` ordinals.
- *
- * @param data  the whole `.tkh` bytes
- * @return      the decoded exported interface
- * @throws      on a bad magic, an unsupported version, a truncated header, a hash mismatch, or a
- *              malformed body
- */
 fn read_tkh(data: []byte): Header | error {
     var r0 = Reader { data = data; pos = 0 }
     var m0 = match read_u8(r0) { RByte as x => x; error as e => return e }

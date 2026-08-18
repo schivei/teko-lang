@@ -1,152 +1,40 @@
 use teko::encoding::toml
 
-/**
- * `src/build/manifest.tks` (namespace `teko::build`) — the `.tkp` manifest reader, the FIRST
- * step of project-based compilation: the manifest is read BEFORE any Teko is parsed
- * (LEGISLATION: "standalone simple parser"). TOML because it is explicit and *typed* (no
- * coercion lies — M.3), commentable (M.2), and minimal (M.5).
- *
- * `.tkp` IS FULL TOML v1.0.0 (dogfooding — no bespoke subset). `parse_manifest` parses the
- * whole manifest text with `teko::encoding::toml::parse_toml` (the real TOML v1.0.0 decoder,
- * `src/encoding/toml/`) and then MAPS the resulting root table into the `Manifest` struct below
- * — same fields, same defaults, same M.1/M.3 error behavior as the hand-rolled line scanner this
- * replaced. The hand-rolled TOML-VALUE-LEXER helpers below (`mf_read_quoted`/`mf_read_array`/
- * `mf_read_int`/`mf_read_str_list`/…) are KEPT, not dead code: `src/build/tkr.tks`'s `.tkr`
- * regressor-file reader reuses them verbatim for its own (non-TOML) line grammar.
- */
 
-/**
- * The code-generation backend a build lowers through. `C` emits C and links it with the
- * host `cc` (the trusted default, byte-identical across generations — FIXPOINT-preserving);
- * `Native` opts into Teko's own AOT backend + M-linker (`lir::lower` → isel → regalloc →
- * encode → objfile → link). Selected by the `TEKO_BACKEND=native` environment variable — the
- * earlier `--backend={c,native}` CLI flag was REMOVED as unused surface (owner ruling
- * 2026-07-24; D1/#390, own-backend-architecture §3.7 supersede this transitional env seam with
- * the real manifest surface). The default is `C`, so an env-free build stays on the trusted path.
- */
 type Backend = enum { C; Native }
 
-/**
- * The parsed manifest. `artifact` reuses the enum from tkp_rule.tks (same namespace, bare
- * reference). deps/aliases are simple string lists in the seed (M.5 — richer dependency
- * records are evolution).
- *
- * link_lib_name and os_lib_name (C7.20) are PARALLEL to link_flags and os_lib_os/os_lib_flag
- * respectively: each holds the originating `[extern.libs]`/`[extern.libs.<key>]` KEY for its
- * same-indexed resolved flag (one key can fan out to several flags, e.g. a `-framework Name`
- * pair — every one of those flags carries that same key). That key is the same name an
- * `extern fn … from "<key>"` binds to, so a reachability pass can filter a whole key's flags
- * together by whether any of its externs is actually called.
- *
- * A `[extern.libs.<key>]` SECTION key is either a bare OS (`linux` — any arch of that OS,
- * LEGISLATION:426) or a full os-arch name (`x86_64-linux` — that target only, the ratified §4.2
- * arch-key fill of teko-target-crosslink-0.3.1.md); both land in os_lib_os and are told apart at
- * link time by `os_lib_key_matches`. link_mode/os_lib_mode carry the declared `static:`/`shared:`
- * linkage so the R4 and R5 rules can be applied per entry (§4.3/§5).
- */
 pub type Manifest = struct {
-    name: str   // canonical root
-    artifact: Artifact   // Executable | Library  (from tkp_rule.tks)
-    /**
-     * `[artifact] abi = "c"` — the reverse-FFI (Teko→C) application binary interface; "" = the native
-     * Teko ABI (default). "c" arms the `exp`-function C-ABI export + `.h` generation (FFI-D).
-     */
+    name: str
+    artifact: Artifact
     abi: str
-    source: str   // the invisible source root
-    deps: []str   // [dependencies] keys
-    aliases: []str   // [aliases] keys
-    version: str   // `version = "x.y.z.b"` (info; empty if unset)
-    suffix: str   // `suffix = "bootstrap"` (pre-release stage; empty if unset)
-    description: str   // `description = "…"` — embedded in the binary's metadata (C7.1k; empty if unset)
-    platforms: []str   // [platforms] targets — OSes this project targets (CI matrix; informational for a single build)
-    cov_functions: u64   // [coverage] functions — the D4 FUNCTION-coverage floor % (default 80)
-    cov_lines: u64   // [coverage] lines     — the D4 LINE-coverage floor %     (default 80)
-    cov_branches: u64   // [coverage] branches  — the D4 BRANCH-coverage floor %   (default 80)
-    /**
-     * The GLOBAL `[extern.libs]` section's resolved cc link flags (C7.1e), in declaration order:
-     * `-l<name>` for a bare name, the path itself for a direct file, a `-flag` element verbatim.
-     * These link on EVERY target.
-     */
+    source: str
+    deps: []str
+    aliases: []str
+    version: str
+    suffix: str
+    description: str
+    platforms: []str
+    cov_functions: u64
+    cov_lines: u64
+    cov_branches: u64
     link_flags: []str
-    /**
-     * The originating `[extern.libs]` KEY of each same-indexed `link_flags` entry (C7.20) — the
-     * same name an `extern fn … from "<key>"` binds to, so extern-reachability can filter a whole
-     * key's flags together even when one key fanned out to several.
-     */
     link_lib_name: []str
-    /**
-     * The declared LINKAGE MODE of each global `[extern.libs]` flag — `"static"`, `"shared"`, or
-     * `""` when the element states none. PARALLEL to `link_flags`/`link_lib_name`. Recorded (no
-     * longer stripped) because the R4 static-locality rule and the R5 shared fail-or-`--allow-undef`
-     * rule are DIFFERENT rules, and only the mode tells them apart
-     * (teko-target-crosslink-0.3.1.md §4.3).
-     *
-     * @since 0.3.1
-     */
     link_mode: []str
-    /**
-     * The SECTION KEY each deferred `[extern.libs.<key>]` flag belongs to: either a bare OS
-     * (`"linux"` — any arch of that OS, LEGISLATION:426) or a full os-arch name
-     * (`"x86_64-linux"` — that target only, the §4.2 arch-key fill). Selected at LINK time by
-     * `os_lib_key_matches`, so parsing stays host-independent.
-     */
     os_lib_os: []str
-    /**
-     * The resolved cc link flag of each deferred entry, PARALLEL to `os_lib_os` — same vocabulary
-     * as `link_flags`, appended to the link line only when its section key matches the build's
-     * target.
-     */
     os_lib_flag: []str
-    /**
-     * The originating `[extern.libs.<key>]` KEY of each same-indexed `os_lib_flag` entry (C7.20),
-     * the per-section sibling of `link_lib_name`.
-     */
     os_lib_name: []str
-    /**
-     * The declared LINKAGE MODE of each deferred `[extern.libs.<os>]`/`[extern.libs.<os-arch>]`
-     * flag — `"static"`, `"shared"`, or `""`. PARALLEL to `os_lib_os`/`os_lib_flag`/`os_lib_name`,
-     * the per-section sibling of `link_mode`.
-     *
-     * @since 0.3.1
-     */
     os_lib_mode: []str
-    cc: str   // [extern] cc — the C driver to invoke ("" = the default `cc`) (C7.1f)
-    target: str   // [extern] target — a cross target triple for `-target` ("" = host)
-    sysroot: str   // [extern] sysroot — `--sysroot` for cross builds ("" = none)
-    freestanding: bool   // [extern] freestanding — drop the implicit libc (`-nostdlib`); default false
-    /**
-     * test_regression_files — `[tests] regression` — the EXPLICIT, ORDERED list of `.tkr`
-     * regressor FILE paths (relative to the project root) the `teko test` lane runs, in list
-     * order. There is NO directory discovery and NO glob: each entry names ONE `.tkr` file.
-     * `[]` when the `[tests]` section (or the key) is absent → the regression tier is OFF. A
-     * listed path that does not resolve to a readable file is a MANIFEST ERROR (M.3), never a
-     * silent skip.
-     *
-     * @since 0.3.1
-     */
+    cc: str
+    target: str
+    sysroot: str
+    freestanding: bool
     test_regression_files: []str
-    /**
-     * `[tests] gate` — true (the default): a failing regressive FAILS `teko test`; false: the
-     * regressive result is advisory. Absent → true. @since 0.3.0.29
-     */
     test_gate: bool
-    /**
-     * `[tests] targets` — the default variant set a `.tkr` inherits when it declares no `targets`.
-     * Absent → `["host"]` (the build host's native target). @since 0.3.0.29
-     */
     test_default_targets: []str
-    /**
-     * The resolved code-generation backend (`C` default, `Native` for the own AOT path).
-     * NOT a `.tkp` key: it is stamped from the `TEKO_BACKEND` env (the sole selection seam —
-     * the earlier `--backend` CLI flag was removed, owner ruling 2026-07-24) by `backend_of` +
-     * `with_backend` after the front-end parses the manifest (D1/#390).
-     */
     backend: Backend
 }
 
-// --- line/byte cursor helpers (zero-copy views into the source bytes) --------
 
-// the byte at p, or 0 past the end (a safe peek, like the lexer's `at`).
 fn mf_at(s: str, p: u64): byte {
     if p >= s.len { return 0 }
     s[p]
@@ -154,7 +42,6 @@ fn mf_at(s: str, p: u64): byte {
 
 fn mf_is_space(c: byte): bool { c == b' ' || c == b'\t' || c == b'\r' }
 
-// advance past spaces/tabs/CR (NOT newlines — a line is the unit of work).
 fn mf_skip_spaces(s: str, p: u64): u64 {
     var q = p
     loop {
@@ -165,13 +52,11 @@ fn mf_skip_spaces(s: str, p: u64): u64 {
     q
 }
 
-// a key byte: letters, digits, `_`, `-`, `.` (TOML bare-key set + `.` for dotted deps).
 fn mf_is_key_byte(c: byte): bool {
     (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (c >= b'0' && c <= b'9') ||
     c == b'_' || c == b'-' || c == b'.'
 }
 
-// the position just past the bare key at p (== p if none).
 fn mf_key_end(s: str, p: u64): u64 {
     var q = p
     loop {
@@ -182,8 +67,6 @@ fn mf_key_end(s: str, p: u64): u64 {
     q
 }
 
-// a `"…"` quoted scalar: the bytes between the quotes (escapes NOT interpreted — M.5)
-// plus the position just past the closing quote.
 type MfQuoted = struct { text: str; next: u64 }
 fn mf_read_quoted(s: str, p: u64): MfQuoted | error {
     if mf_at(s, p) != b'"' { return error { message = "expected a quoted string value" } }
@@ -198,7 +81,6 @@ fn mf_read_quoted(s: str, p: u64): MfQuoted | error {
     MfQuoted { text = teko::str::slice(s, start, q); next = q + 1 }
 }
 
-// an UNQUOTED non-negative integer value (TOML `key = 80`): the digit run at p (0 if none).
 fn mf_read_int(s: str, p: u64): u64 {
     var q = p
     var n: u64 = 0
@@ -212,14 +94,12 @@ fn mf_read_int(s: str, p: u64): u64 {
     n
 }
 
-// a `["a", "b"]` array of quoted strings (C7.1e): the elements + the pos past the closing `]`.
-// An empty `[]` yields an empty list. Elements are quoted scalars separated by commas.
 type MfArray = struct { items: []str; next: u64 }
 fn mf_read_array(s: str, p: u64): MfArray | error {
     if mf_at(s, p) != b'[' { return error { message = "expected '[' for an array value" } }
     var q = mf_skip_spaces(s, p + 1)
     var items: []str = teko::list::empty()
-    if mf_at(s, q) == b']' { return MfArray { items = items; next = q + 1 } }   // empty []
+    if mf_at(s, q) == b']' { return MfArray { items = items; next = q + 1 } }
     loop {
         var elem = match mf_read_quoted(s, q) { MfQuoted as x => x; error as e => return e }
         items = teko::list::push(items, elem.text)
@@ -229,10 +109,9 @@ fn mf_read_array(s: str, p: u64): MfArray | error {
         if c != b',' { return error { message = "expected ',' or ']' in an array value" } }
         q = mf_skip_spaces(s, q + 1)
     }
-    error { message = "unterminated array value" }   // unreachable (the loop returns on ']' / errors)
+    error { message = "unterminated array value" }
 }
 
-// strip a leading `lib` from a library name for the `-l` flag (`libc` -> `c`; `z` stays `z`). (C7.1e)
 fn mf_strip_lib(name: str): str {
     if name.len > 3 && name[0] == b'l' && name[1] == b'i' && name[2] == b'b' { teko::str::slice_from(name, 3) } else { name }
 }
@@ -242,86 +121,29 @@ fn mf_starts_with(s: str, p: str): bool {
     teko::str::slice_to(s, p.len) == p
 }
 
-// does `s` name a direct library FILE (a path or a known extension), vs a `-l` lib name?
 fn mf_has_path(s: str): bool {
     if teko::str::contains(s, "/") { return true }
     teko::str::ends_with(s, ".a") || teko::str::ends_with(s, ".so") || teko::str::ends_with(s, ".dylib") ||
     teko::str::ends_with(s, ".dll") || teko::str::ends_with(s, ".o") || teko::str::ends_with(s, ".lib")
 }
 
-/**
- * LINK_MODE_STATIC — the `os_lib_mode`/`link_mode` token for a FORCED-STATIC element
- * (`static:<name>`, or a `.a`/`.lib`/`.o` direct file whose extension decides it —
- * LEGISLATION:423). Named once so the parser, the R4 validator and their tests cannot drift.
- *
- * @since 0.3.1
- */
 const LINK_MODE_STATIC: str = "static"
 
-/**
- * LINK_MODE_SHARED — the `os_lib_mode`/`link_mode` token for a FORCED-DYNAMIC element
- * (`shared:<name>`, or a `.so`/`.dylib`/`.dll` direct file). The R5 fail-or-`--allow-undef` rule
- * keys on exactly this token.
- *
- * @since 0.3.1
- */
 const LINK_MODE_SHARED: str = "shared"
 
-/**
- * MODE_PREFIX_LEN — the byte length of both `static:` and `shared:`, the two mode prefixes
- * `mf_extern_spec` strips (they are deliberately the same width — D39: one constant, one strip).
- *
- * @since 0.3.1
- */
 const MODE_PREFIX_LEN: u64 = 7
 
-/**
- * ExternLibSpec — one resolved `[extern.libs…]` array element: the cc link flag it contributes and
- * the LINKAGE MODE it declared. The mode used to be stripped and thrown away; it is now carried so
- * the R4 static-locality rule (a cross static lib must be a local file) and the R5 shared rule (a
- * missing shared lib fails unless `--allow-undef`) can be told apart at all
- * (teko-target-crosslink-0.3.1.md §4.3/§5).
- *
- * @since 0.3.1
- */
 type ExternLibSpec = struct {
-    /** the cc link flag this element resolves to (`-l<name>`, a direct file path, or a verbatim `-flag`). */
     flag: str
-    /** the declared linkage mode: `LINK_MODE_STATIC`, `LINK_MODE_SHARED`, or `""` when unstated. */
     mode: str
 }
 
-/**
- * mf_mode_from_ext — the linkage mode a DIRECT FILE's extension decides, per LEGISLATION:423 ("a
- * path … → linked as a direct file (the extension decides static vs shared)"): `.a`/`.lib`/`.o` →
- * static, `.so`/`.dylib`/`.dll` → shared, anything else → `""` (unstated). Consulted only when the
- * element carried no explicit `static:`/`shared:` prefix, which always wins.
- *
- * @param s  the path form of the element (mode prefix already stripped)
- * @return   `LINK_MODE_STATIC`, `LINK_MODE_SHARED`, or `""` when the extension decides neither
- * @since 0.3.1
- */
 fn mf_mode_from_ext(s: str): str {
     if teko::str::ends_with(s, ".a") || teko::str::ends_with(s, ".lib") || teko::str::ends_with(s, ".o") { return LINK_MODE_STATIC }
     if teko::str::ends_with(s, ".so") || teko::str::ends_with(s, ".dylib") || teko::str::ends_with(s, ".dll") { return LINK_MODE_SHARED }
     ""
 }
 
-/**
- * mf_extern_spec — resolve ONE `[extern.libs]` array element (or, for an empty array, the lib key
- * itself) to its cc link flag PLUS its declared linkage mode (C7.1e + the §4.3 mode column):
- * a `-flag` element passes through verbatim with no mode (the M.5 escape); otherwise an explicit
- * `static:`/`shared:` prefix is stripped and REMEMBERED, and what remains is either a direct file
- * (a `/` or a known library extension — linked verbatim, the extension supplying the mode when the
- * prefix did not) or a bare name (`-l<name>`, a leading `lib` stripped). Stripping the prefix
- * BEFORE the path test is what makes the ratified `static:vendor/x86_64-linux/libfoo.a` spelling
- * (§4.2) resolve to the file `vendor/x86_64-linux/libfoo.a` instead of leaking the literal
- * `static:` prefix onto the link line.
- *
- * @param s  the raw array element (or the lib key, for an empty array)
- * @return   the resolved flag + declared mode
- * @since 0.3.1
- */
 fn mf_extern_spec(s: str): ExternLibSpec {
     if s.len > 0 && s[0] == b'-' { return ExternLibSpec { flag = s; mode = "" } }
     var mode = ""
@@ -335,49 +157,16 @@ fn mf_extern_spec(s: str): ExternLibSpec {
     ExternLibSpec { flag = teko::str::concat("-l", mf_strip_lib(rest)); mode = mode }
 }
 
-/**
- * (C7.20 + the §4.3 mode column) The parallel accumulators `parse_manifest` grows while it reads
- * `[extern.libs]` / `[extern.libs.<key>]` lines: `link_flags`/`link_lib_name`/`link_mode` for the
- * global section, `os_lib_os`/`os_lib_flag`/`os_lib_name`/`os_lib_mode` for a deferred per-section
- * one. Bundled into one struct so `parse_extern_libs_entry` can take and return them as a single
- * value.
- */
 type ExternLibsAccum = struct {
-    /** the global `[extern.libs]` flags so far. */
     link_flags: []str
-    /** the originating key of each global flag, parallel to `link_flags`. */
     link_lib_name: []str
-    /** the declared linkage mode of each global flag, parallel to `link_flags` (0.3.1). */
     link_mode: []str
-    /** the section key (bare OS or os-arch) of each deferred flag. */
     os_lib_os: []str
-    /** the deferred flags so far, parallel to `os_lib_os`. */
     os_lib_flag: []str
-    /** the originating key of each deferred flag, parallel to `os_lib_os`. */
     os_lib_name: []str
-    /** the declared linkage mode of each deferred flag, parallel to `os_lib_os` (0.3.1). */
     os_lib_mode: []str
 }
 
-/**
- * parse_extern_libs_entry — fold one `[extern.libs]`/`[extern.libs.<key>]` `key = [ <spec…> ]`
- * line into `accum`. An empty array resolves the KEY itself to one flag (`-l<key>`); a
- * non-empty array resolves every element via `mf_extern_spec` (bare → `-l`, path/`*.a` → file,
- * `-flag` → verbatim), each carrying its declared linkage mode. Every resolved flag is pushed
- * alongside `key` (C7.20 — the same name an `extern fn … from "<key>"` binds to, so a later
- * reachability pass can filter a whole key's flags together even when one key fanned out to
- * several, e.g. a `-framework Name` pair). A global `[extern.libs]` entry (`is_os = false`) links
- * on every target; a `[extern.libs.<key>]` entry is DEFERRED with its section key and selected at
- * link time by `os_lib_key_matches` (C7.1f + the §4.2 os-arch fill) — so parsing stays
- * host-independent.
- *
- * @param accum  the accumulators so far
- * @param key    the manifest key being folded (the `from "<key>"` handle)
- * @param elems  the declared array elements ([] → the key resolves itself)
- * @param is_os  true for a `[extern.libs.<key>]` section (deferred), false for the global one
- * @param os     the section key of a deferred entry (a bare OS or a full os-arch name)
- * @return       the updated accumulators
- */
 fn parse_extern_libs_entry(accum: ExternLibsAccum, key: str, elems: []str, is_os: bool, os: str): ExternLibsAccum {
     if elems.len == 0 { return push_extern_lib_spec(accum, key, mf_extern_spec(key), is_os, os) }
     var acc = accum
@@ -390,17 +179,6 @@ fn parse_extern_libs_entry(accum: ExternLibsAccum, key: str, elems: []str, is_os
     acc
 }
 
-/**
- * push_extern_lib_spec — append one resolved spec (flag + mode, with its originating key) to
- * `accum`, routing to the global columns or the deferred per-section ones per `is_os`.
- *
- * @param accum  the accumulators so far
- * @param key    the originating manifest key
- * @param spec   the resolved flag + declared linkage mode
- * @param is_os  true to route into the deferred per-section columns
- * @param os     the section key of a deferred entry (ignored when `is_os` is false)
- * @return       the updated accumulators
- */
 fn push_extern_lib_spec(accum: ExternLibsAccum, key: str, spec: ExternLibSpec, is_os: bool, os: str): ExternLibsAccum {
     if is_os {
         return ExternLibsAccum {
@@ -420,25 +198,8 @@ fn push_extern_lib_spec(accum: ExternLibsAccum, key: str, spec: ExternLibSpec, i
     }
 }
 
-/**
- * HOST_TARGET — the os-arch name of the build host's native lane: the sole variant `teko test`
- * executes in 0.3.0.29, the default a `.tkr` inherits when it declares no `targets`, and the key the
- * regression runner resolves `[expect.<os-arch>]` overrides against. Named once so the manifest
- * default and the runner's execution lane cannot drift apart.
- */
 const HOST_TARGET: str = "host"
 
-/**
- * mf_read_str_list — read a `[tests]`-style list value that accepts BOTH the array form
- * `["a", "b"]` AND a bare quoted string `"a"` (normalized to a 1-element list), for the ergonomic
- * `regression = "dir"` ≡ `regression = ["dir"]` shorthand. Any other value form is an honest
- * error (M.3 — no coercion).
- *
- * @param s  the manifest line being parsed
- * @param p  the cursor at the value (past `=` and leading spaces)
- * @return   the parsed element list, or an `error` on a malformed value
- * @since 0.3.0.29
- */
 fn mf_read_str_list(s: str, p: u64): []str | error {
     var c = mf_at(s, p)
     if c == b'[' {
@@ -452,55 +213,19 @@ fn mf_read_str_list(s: str, p: u64): []str | error {
     error { message = "expected a quoted string or an array value" }
 }
 
-/**
- * ARTIFACT_KIND_BINARY — the `[artifact] kind` spelling of `Artifact::Binary` (tkp_rule.tks): a
- * native executable, the artifact a project gets when it declares no `[artifact]` section at all.
- */
 const ARTIFACT_KIND_BINARY: str = "binary"
 
-/**
- * ARTIFACT_KIND_STATIC — the `[artifact] kind` spelling of `Artifact::Static` (tkp_rule.tks): a
- * native static library (`.a`/`.lib`).
- */
 const ARTIFACT_KIND_STATIC: str = "static"
 
-/**
- * ARTIFACT_KIND_SHARED — the `[artifact] kind` spelling of `Artifact::Shared` (tkp_rule.tks): a
- * native shared library (`.dylib`/`.so`/`.dll`).
- */
 const ARTIFACT_KIND_SHARED: str = "shared"
 
-/**
- * ARTIFACT_KIND_PACKAGE — the `[artifact] kind` spelling of `Artifact::Package` (tkp_rule.tks): a
- * Teko `.tkl` package, the dependency unit.
- */
 const ARTIFACT_KIND_PACKAGE: str = "package"
 
-/**
- * ArtifactKind — one row of the `[artifact] kind` table: a manifest spelling paired with the
- * `Artifact` member (tkp_rule.tks) that spelling selects.
- */
 type ArtifactKind = struct {
-    /**
-     * The literal `kind = "…"` text a `.tkp` writes, exactly as the reader compares it.
-     */
     spelling: str
-    /**
-     * The `Artifact` member that `spelling` names.
-     */
     artifact: Artifact
 }
 
-/**
- * artifact_kind_table — the SINGLE list of accepted `[artifact] kind` spellings and the `Artifact`
- * each one names, in the order the diagnostic enumerates them. Both the lookup
- * (`artifact_from_kind`) and the rejection message (`artifact_kinds_quoted`) read this one table, so
- * a new `Artifact` member is accepted and named by adding exactly one row here — a hand-written
- * list inside a message cannot rot out of step with the enum, because there is none.
- *
- * @return  one row per accepted `kind` spelling
- * @since   0.3.1
- */
 fn artifact_kind_table(): []ArtifactKind {
     var rows: []ArtifactKind = teko::list::push(teko::list::empty(), ArtifactKind { spelling = ARTIFACT_KIND_BINARY; artifact = Artifact::Binary })
     rows = teko::list::push(rows, ArtifactKind { spelling = ARTIFACT_KIND_STATIC; artifact = Artifact::Static })
@@ -509,16 +234,6 @@ fn artifact_kind_table(): []ArtifactKind {
     rows
 }
 
-/**
- * artifact_kinds_listed — the accepted `[artifact] kind` spellings, comma-separated, in
- * `artifact_kind_table` order (`binary, static, shared, package`). Derived from the table so the
- * rejection message names exactly what the reader accepts, and shaped like
- * `unsupported_target_error`'s supported-set tail: the OFFENDING value is quoted, the accepted set
- * is not.
- *
- * @return  the comma-separated accepted-spelling list
- * @since   0.3.1
- */
 fn artifact_kinds_listed(): str {
     var rows = artifact_kind_table()
     var out = ""
@@ -532,22 +247,6 @@ fn artifact_kinds_listed(): str {
     out
 }
 
-/**
- * artifact_from_kind — the `Artifact` a `[artifact] kind = "…"` spelling names. An unrecognized
- * spelling is a HARD error naming the offending text and enumerating the accepted set: it used to
- * fall back to `Artifact::Binary`, so a typo (`kind = "binari"`) built an executable in silence and
- * a kind nobody implemented built one too — a hidden error that never fired (M.3). An ABSENT
- * `[artifact]` section is a different thing and still defaults to `Artifact::Binary`: declaring
- * nothing is legitimate, declaring nonsense is not.
- *
- * The message carries NO `teko: ` prefix of its own — every path that surfaces it goes through the
- * driver's `fail`, which prefixes `teko: <dir>: `.
- *
- * @param spelling  the `kind` value read off the manifest line, unquoted
- * @return          the `Artifact` that spelling names
- * @throws          when `spelling` is not one of `artifact_kind_table`'s rows
- * @since           0.3.1
- */
 fn artifact_from_kind(spelling: str): Artifact | error {
     var rows = artifact_kind_table()
     var i: u64 = 0
@@ -559,16 +258,6 @@ fn artifact_from_kind(spelling: str): Artifact | error {
     error { message = "unknown [artifact] kind \"" ~ spelling ~ "\" — accepted kinds: " ~ artifact_kinds_listed() }
 }
 
-/**
- * Reads `t`'s `key` as a string, or `default` when the key is absent or not itself a string
- * (M.5 forward-compatible: an unexpected shape degrades to the default rather than erroring —
- * the fields this reads are all optional).
- *
- * @param t        the table to read
- * @param key      the key to read
- * @param default  the fallback
- * @return         the string value, or `default`
- */
 fn mf2_str(t: toml::TomlValue, key: str, default: str): str {
     match toml::toml_get(t, key) {
         toml::TomlValue as v => if v.kind == toml::TomlKind::String { v.text } else { default }
@@ -576,14 +265,6 @@ fn mf2_str(t: toml::TomlValue, key: str, default: str): str {
     }
 }
 
-/**
- * Reads `t`'s `key` as a boolean, or `default` when the key is absent or not itself a boolean.
- *
- * @param t        the table to read
- * @param key      the key to read
- * @param default  the fallback
- * @return         the boolean value, or `default`
- */
 fn mf2_bool(t: toml::TomlValue, key: str, default: bool): bool {
     match toml::toml_get(t, key) {
         toml::TomlValue as v => if v.kind == toml::TomlKind::Boolean { v.bool_val } else { default }
@@ -591,15 +272,6 @@ fn mf2_bool(t: toml::TomlValue, key: str, default: bool): bool {
     }
 }
 
-/**
- * Reads `t`'s `key` as a non-negative integer, or `default` when the key is absent, not itself
- * an integer, or negative (the `[coverage]` floors this feeds are percentages).
- *
- * @param t        the table to read
- * @param key      the key to read
- * @param default  the fallback
- * @return         the integer value, or `default`
- */
 fn mf2_u64(t: toml::TomlValue, key: str, default: u64): u64 {
     match toml::toml_get(t, key) {
         toml::TomlValue as v => if v.kind == toml::TomlKind::Integer && v.int_val >= 0 { v.int_val to u64 } else { default }
@@ -607,15 +279,6 @@ fn mf2_u64(t: toml::TomlValue, key: str, default: u64): u64 {
     }
 }
 
-/**
- * Reads `t`'s `key` as a nested table, or a fresh empty table when the key is absent or not
- * itself a table — so every section reader below can unconditionally recurse without a
- * presence check of its own.
- *
- * @param t    the table to read
- * @param key  the key to read
- * @return     the nested table, or an empty one
- */
 fn mf2_table(t: toml::TomlValue, key: str): toml::TomlValue {
     match toml::toml_get(t, key) {
         toml::TomlValue as v => if v.kind == toml::TomlKind::Table { v } else { toml::toml_table_empty() }
@@ -623,15 +286,6 @@ fn mf2_table(t: toml::TomlValue, key: str): toml::TomlValue {
     }
 }
 
-/**
- * Flattens `v` to a `[]str`: a single string becomes a one-element list (the `regression =
- * "solo.tkr"` ≡ `regression = ["solo.tkr"]` ergonomic shorthand `mf_read_str_list` used to
- * provide); a string array keeps its String elements (any non-string element is silently
- * dropped — M.5); anything else yields an empty list.
- *
- * @param v  the value to flatten
- * @return   the flattened string list
- */
 fn mf2_value_to_str_list(v: toml::TomlValue): []str {
     if v.kind == toml::TomlKind::String { return teko::list::push(teko::list::empty(), v.text) }
     if v.kind != toml::TomlKind::Array { return teko::list::empty() }
@@ -645,13 +299,6 @@ fn mf2_value_to_str_list(v: toml::TomlValue): []str {
     out
 }
 
-/**
- * Reads `t`'s `key` via `mf2_value_to_str_list`, or an empty list when the key is absent.
- *
- * @param t    the table to read
- * @param key  the key to read
- * @return     the flattened string list, or an empty one
- */
 fn mf2_str_list(t: toml::TomlValue, key: str): []str {
     match toml::toml_get(t, key) {
         toml::TomlValue as v => mf2_value_to_str_list(v)
@@ -659,21 +306,6 @@ fn mf2_str_list(t: toml::TomlValue, key: str): []str {
     }
 }
 
-/**
- * Folds every `key = value` entry of a resolved `[extern.libs…]` table into `accum` at ONE
- * nesting level: an `Array`-valued entry is a lib spec list (global when `!is_os`, deferred to
- * `os` when `is_os`); a `Table`-valued entry is a per-OS `[extern.libs.<key>]` deferred SECTION,
- * so it recurses with `is_os = true` and `key` as the new `os`. This one function replaces the
- * old parser's `sec == "extern.libs" || sec == "extern.libs.os"` branch pair: the TOML tree
- * already tells global and deferred entries apart by SHAPE (array vs. table), where the line
- * scanner had to track it by hand in `sec`/`sec_os`.
- *
- * @param accum  the accumulators so far
- * @param libs   the resolved `[extern.libs]` table (global entries and/or per-OS sub-tables)
- * @param is_os  true when `libs` is itself already a deferred per-OS section
- * @param os     the section key of a deferred entry (ignored when `!is_os`)
- * @return       the updated accumulators
- */
 fn mf2_fold_libs_table(accum: ExternLibsAccum, libs: toml::TomlValue, is_os: bool, os: str): ExternLibsAccum {
     var acc = accum
     var i: u64 = 0
@@ -691,20 +323,6 @@ fn mf2_fold_libs_table(accum: ExternLibsAccum, libs: toml::TomlValue, is_os: boo
     acc
 }
 
-/**
- * parse_manifest — read a `.tkp` source into a `Manifest`, or fail honestly (M.3 — no silent
- * coercion): parses `src` as a full TOML v1.0.0 document (`teko::encoding::toml::parse_toml`)
- * and maps its root table's `name`/`source`/`version`/`suffix`/`description`, `[artifact]
- * kind`/`abi`, every key of `[dependencies]`/`[aliases]`, `[platforms] targets`, the
- * `[coverage]` integer floors, `[tests] regression`/`targets`/`gate`, the `[extern]` scalars,
- * and the `[extern.libs]`/`[extern.libs.<key>]` link specs into a `Manifest`. A missing required
- * field (name/source), a malformed TOML document, or an unrecognized `[artifact] kind` is an
- * error. An absent `[artifact]` section is NOT: the artifact defaults to `Artifact::Binary`.
- *
- * @param src  the whole `.tkp` text
- * @return     the parsed manifest, with `backend` left at its `C` default
- * @throws     when a required field is missing, the TOML is malformed, or a value is unrecognized
- */
 fn parse_manifest(src: str): Manifest | error {
     var root = match toml::parse_toml(src) { toml::TomlValue as t => t; error as e => return e }
 
@@ -769,17 +387,6 @@ fn parse_manifest(src: str): Manifest | error {
     Manifest { name = name; artifact = artifact; abi = abi; source = source; deps = deps; aliases = aliases; version = version; suffix = suffix; description = description; platforms = platforms; cov_functions = cov_functions; cov_lines = cov_lines; cov_branches = cov_branches; link_flags = libs_accum.link_flags; link_lib_name = libs_accum.link_lib_name; link_mode = libs_accum.link_mode; os_lib_os = libs_accum.os_lib_os; os_lib_flag = libs_accum.os_lib_flag; os_lib_name = libs_accum.os_lib_name; os_lib_mode = libs_accum.os_lib_mode; cc = cc; target = target; sysroot = sysroot; freestanding = freestanding; test_regression_files = test_regression_files; test_gate = test_gate; test_default_targets = test_default_targets; backend = Backend::C }
 }
 
-/**
- * with_backend — a copy of `m` with its code-generation `backend` set to `b`, every other
- * field carried through unchanged. The `TEKO_BACKEND` resolver (`backend_of`, project.tks)
- * stamps the resolved selection onto the front-end's manifest with this before the artifact
- * dispatch reads `m.backend`; `parse_manifest` itself never sets a non-default backend, so the
- * manifest reader stays a pure `.tkp` → `Manifest` function (D1/#390).
- *
- * @param m  the manifest to copy
- * @param b  the resolved backend selection to stamp on the copy
- * @return   a new `Manifest` identical to `m` except for `backend = b`
- */
 fn with_backend(m: Manifest, b: Backend): Manifest {
     Manifest { name = m.name; artifact = m.artifact; abi = m.abi; source = m.source; deps = m.deps; aliases = m.aliases; version = m.version; suffix = m.suffix; description = m.description; platforms = m.platforms; cov_functions = m.cov_functions; cov_lines = m.cov_lines; cov_branches = m.cov_branches; link_flags = m.link_flags; link_lib_name = m.link_lib_name; link_mode = m.link_mode; os_lib_os = m.os_lib_os; os_lib_flag = m.os_lib_flag; os_lib_name = m.os_lib_name; os_lib_mode = m.os_lib_mode; cc = m.cc; target = m.target; sysroot = m.sysroot; freestanding = m.freestanding; test_regression_files = m.test_regression_files; test_gate = m.test_gate; test_default_targets = m.test_default_targets; backend = b }
 }
