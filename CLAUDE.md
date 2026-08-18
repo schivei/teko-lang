@@ -128,8 +128,17 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   (profiler `tk_obs`: `tk_slice_push_r` = 4980 MB = 93%, 20,3M copy-grows que vazam na arena `root`
   nunca-liberada). Construir array por **LITERAL** ou por **pré-alocação de `[]T` + atribuição
   posicional `x[i] = y`** (a linguagem JÁ suporta: `typer.tks` `type_index_assign`, slice `[]T`;
-  `loop var i in 0..n { xs[i] = … }`). Tamanho desconhecido: pré-alocar+cortar (`slice[0..n]`) ou
-  builder amortizado in-place — NUNCA o `push` copy-grow. Index-assign passa de proibido a PREFERIDO.
+  `loop var i in 0..n { xs[i] = … }`). Tamanho desconhecido: **pré-alocar limite superior + cortar
+  (`slice[0..n]`)**, ou **duas passadas** (contar `n`, depois pré-alocar `[]T` de `n` e preencher por
+  índice). Index-assign passa de proibido a PREFERIDO.
+- **`grow_inplace` É WORKAROUND — PROIBIDO (dono 2026-08-18).** Manutenção de array é **100% MANUAL**.
+  `teko::list::grow_inplace(ref x, …)` é da MESMA classe do `push` (copy-grow amortizado escondido) —
+  banido junto. Nada de primitivo de crescimento; só literal / pré-alocação + `x[i]=y` / limite+corte /
+  duas passadas. (`grow_inplace`/`with_cap`/`tk_slice_push_r` viram legacy a varrer na Fase 2.)
+- **`ref []T` = SÓ ponteiro-de-posição (dono 2026-08-18).** Serve para **operar o ponteiro de UMA
+  posição do array sem cópia** (`a[i]` como ref/escrita in-place). **NÃO** aceita crescer (push/grow) nem
+  reatribuir o array inteiro (`a = […]` → arena do callee → segfault). Substituir o array = construir
+  cópia local e **retornar ao caller** (DPS, arena do caller).
 - **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
   `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
   **PODEM ser editados** — corrigir bug de memória/correção em C é permitido (ex.: o fix do leak do
