@@ -24,14 +24,17 @@ dobra, o buffer anterior é abandonado na arena `root`, que nunca é liberada at
 processo. Um loop que empurra `n` elementos deixa para trás `O(n)` bytes de buffers
 mortos além do buffer final. Multiplicado por 20,3 M crescimentos → 4980 MB de lixo vivo.
 
-**Duas alavancas independentes, ambas construíveis 100% em Teko:**
+**Três alavancas independentes, todas construíveis 100% em Teko:**
 
-- **A — matar o crescimento** (as 4 naturezas): converter cada `push` para pré-alocação
+- **Eixo A — matar o crescimento** (as 4 naturezas): converter cada `push` para pré-alocação
   de tamanho exato + escrita por índice. Elimina a cópia-crescimento na origem. É o
-  golpe que derruba os 93%.
-- **B — reclamar o scratch** (arena-por-escopo, já pronta em `src/runtime/arena.tks`):
+  golpe que derruba os 93%. (Crumbs C3–C5.)
+- **Eixo B — reclamar o scratch** (arena-por-escopo, já pronta em `src/runtime/arena.tks`):
   o que ainda se aloca transitório é reclamado em massa na saída de escopo, em vez de
-  vazar em `root`. Derruba a cauda de 7% e o resíduo do que A não pega.
+  vazar em `root`. Ataca o residual. (Crumbs C6–C8.)
+- **Eixo C — pipeline em estágios com despejo** (§6bis): processar por unidade, linkar antes
+  do checker, despejar memória entre estágios (arena-drop ou artefato em disco). O pico vira
+  o MÁXIMO de um estágio, não a soma. Ataca SÓ o residual não-push. (Crumbs C10–C14.)
 
 ---
 
@@ -111,14 +114,19 @@ Baseline: **~6,2 GB**. `push` = 4980 MB; não-push ≈ 1,2 GB.
 | **C6 — arena-por-escopo** (enter/leave + push/pop nas fronteiras) | reclama scratch que caía em `root`; -0,2 a -0,4 GB | ~0,9–1,1 GB |
 | **C7 — literal de array via arena** (tirar `malloc` cru do `emit_array_lit`) | fecha vazamento de `malloc` nunca-liberado; -0,1 a -0,2 GB | ~0,9 GB |
 | **C8 — purge-na-reatribuição** (free targetado eager) | fecha o pico do acumulador reatribuído em loop longo; robustez | ≤1,0 GB |
+| **C10–C14 — pipeline em estágios com despejo** (Eixo C, §6bis) | ataca SÓ o residual não-push: pico = máx de um estágio, não a soma; -0,3 a -0,6 GB | ~0,5–0,7 GB |
 
-O golpe principal são **C3+C4/C5** (matar o `push`). C6–C8 consolidam e blindam contra
-regressão. Meta ≤1,5 GB é atingida já em C4/C5; C6–C8 dão margem confortável.
+**Dois orçamentos separados (não misturar):**
+- **PUSH (93% = 4980 MB):** derrubado por **Eixo A** (C3+C4/C5, matar o crescimento). Esta é
+  a maior parte da meta; sozinha leva o pico a ~1,2–1,3 GB.
+- **RESIDUAL (~1,2 GB, não-push):** o programa inteiro (AST+typed+LIR+buffer) vivo junto.
+  Derrubado por **C6** (arena-por-escopo, -0,2 a -0,4 GB) e **Eixo C** (pipeline em estágios,
+  -0,3 a -0,6 GB). O Eixo C NÃO toca os 93% — só o residual; não superestimar.
 
-Redução da AST: a AST é **viva** durante todo o compile (não vaza), então seu peso é o
-resident set — não some com free. O ganho vem de (a) rotear parse-scratch por uma região
-por-arquivo derrubada após o lowering daquele arquivo (C6), e (b) evitar array-de-array
-inflado no build (C4). Estimado dentro dos números acima.
+O golpe principal são **C3+C4/C5**. Meta ≤1,5 GB é atingida já em C4/C5; C6 + Eixo C dão a
+margem confortável (≤0,7 GB). Como o profiler mostra que a **AST crua não é dominante**, o
+Eixo C é ganho de residual bounded — vale pelo TETO garantido (pico = um estágio), mais do
+que pelo número absoluto.
 
 ---
 
@@ -261,11 +269,190 @@ Expor `exp fn region_free(p, bytes)` (5.1); generalizar `assign_frees_old` para
 reatribuição-que-possui-backing (5.2); adicionar `CgArenaSym::RegionFree` e emitir o
 free eager em `emit_assign`. Fixpoint.
 
-### C9 — Remover raízes C + transcrever o slot de controle
-Remover o código morto de 5.4 (o self-compile enumera qualquer resíduo). Transcrever os 3
+**— Eixo C (pipeline em estágios com despejo, §6bis): eixo próprio, ataca o RESIDUAL não-push, paralelo a C6–C8; C9 é o passo terminal de tudo —**
+
+### C10 — Determinizar gensym (pré-condição do Eixo C)
+Trocar todo nome temporário derivado de `buf.len` (`_oln{buf.len}`, `_arr{buf.len}`, e
+similares) por contador determinístico global ou (namespace, fn_idx, seq). Sem streaming
+ainda; só remove a dependência do tamanho de buffer. Fixpoint: `teko.c` deve sair idêntico
+(é rename mecânico de temporários — validar byte-a-byte). Bloqueia C11.
+
+### C11 — Parse-por-unidade → AST incompleta → LINK (o linker interno)
+Reestruturar `frontend` para parsear por namespace produzindo a **AST incompleta** (exports:
+tipos/assinaturas/`const` + referências pendentes cross-unit), sem reter corpos; e o LINK
+(barreira global) que monta a tabela linkada + ABI/`.tkh` resolvendo as pendências. Reusar a
+projeção de exports do `.tkb` (`emit/tkb_frame.tks`) para a AST incompleta; corpos vão a
+disco ou são re-parseáveis. Aditivo (convive com whole-program). Fixpoint.
+
+### C12 — Check+lower+emit FUNDIDOS por unidade (despejo em memória = C6)
+Reestruturar `backend`/`codegen_and_report` para iterar namespaces em ordem determinística:
+(re)carrega corpos da unidade, checa contra a tabela linkada (C11), lowera, emite o C, anexa
+à saída e **derruba a região da unidade** (C6) antes da próxima. Prólogo global sai da tabela
+linkada; corpos streamed. **Guarda dura: `teko.c` byte-idêntico ao whole-program.** Este é o
+despejo-em-memória do princípio unificador. Fixpoint a cada namespace migrado.
+
+### C13 — Dump typed `.tkb` por unidade (despejo em DISCO, onde o estágio não funde)
+Estender `serialize_program`/`deserialize_program` (`emit/tkb_frame.tks`,`tkb_read.tks`) para
+serializar/deserializar UM namespace. Onde o working set do estágio não cabe fundido (a
+barreira do LINK precede os corpos), o typed de cada unidade é despejado em disco e relido um
+por vez. Determinismo do frame obrigatório (R6). Fixpoint.
+
+### C14 — Build incremental (opcional, DESLIGADO no self-build)
+Cache do `.tkb` typed por-unidade em disco, chaveado por hash(unidade)+hash(tabela-linkada);
+recompila só o que mudou. Caso persistente do despejo-em-disco (C13). Desligado no caminho de
+fixpoint (build limpo = `teko.c` idêntico). Não reduz pico; reduz tempo de dev. Só depois de
+C12/C13 verdes.
+
+### C9 — (TERMINAL) Remover raízes C + transcrever o slot de controle
+Passo final, depois de TODAS as conversões (Eixo A e Eixo C). Remover o código morto de 5.4
+(o self-compile enumera qualquer resíduo). Transcrever os 3
 shims de controle da arena para Teko (slot `.bss`/`MAP_FIXED`), zerando `from "teko_rt"`
 no caminho de array. Passe de mensagens unificado + reseed ITERATIVO final. Fixpoint
 `gen2==gen3`.
+
+---
+
+## 6bis. Eixo C — pipeline em ESTÁGIOS com despejo (por unidade + linker interno + incremental)
+
+Nota do dono: em vez de CARREGAR TUDO na memória (whole-program AST → check → codegen),
+processar **por unidade**, linkando incrementalmente ANTES de emitir tudo, para segurar só
+UMA unidade por vez. Este é um eixo próprio (C10–C13) que soma com o Eixo A (matar push) e
+com C6 (arena-por-escopo) — todos liberam por fronteira.
+
+**Refinamento do dono (apoiado pelo profiler):** como `tk_slice_push_r` = 93% do pico, a
+**AST crua NÃO é o dominante** — então o alvo do Eixo C é o RESIDUAL não-push (~1,2 GB), e a
+tática é emitir **ASTs INCOMPLETAS por unidade e LINKAR ANTES do CHECKER**, em vez de montar
+a AST completa do programa inteiro antes de checar. O linker interno passa a sentar **entre o
+parse e o checker**, não só antes do codegen.
+
+### Estado atual (o modelo de pico)
+
+Hoje o build é whole-program: `frontend_parse` parseia TODOS os arquivos → `expand_macros`
+em tudo → `checked_program_of` checa tudo → `backend`/`codegen` itera `prog.items` (a lista
+plana da AST inteira) e emite UM `teko.c`. O `checker::TProgram { items }` inteiro + todos
+os corpos tipados + todo o LIR coexistem na memória. É esse "segurar tudo" que domina o
+residual não-push (~1,2 GB).
+
+### O pipeline novo: parse-unidade → AST incompleta → LINK → check/lower/emit-por-unidade
+
+A linguagem é monólito com recursão mútua entre namespaces (o checker resolve nomes/tipos
+cruzando namespaces) e cross-compila para UM `teko.c` (`#if` de todos os alvos). A fronteira
+de unidade é de **processamento**, não de linkagem — o `teko.c` final continua UM arquivo.
+Granularidade: **namespace** (arquivo é fino demais — corpos intra-namespace cruzam-se para
+inline/const-fold; whole-program é o pico atual). O pipeline vira:
+
+1. **Parse por unidade → AST INCOMPLETA.** Cada namespace é parseado para uma forma compacta
+   que carrega SÓ o necessário ao link: as **declarações exportadas** (tipos, assinaturas de
+   fn, valores de `const` = a forma `.tkh`/ABI) e uma lista de **referências pendentes**
+   (nomes cross-unit ainda não resolvidos). Os CORPOS (árvores de statement) NÃO ficam
+   residentes — são adiados (descartados após extrair exports+pendências; recarregados por
+   reparse da unidade quando ela chegar ao checker).
+2. **LINK (o linker interno).** Junta as ASTs incompletas: monta a tabela global de símbolos,
+   resolve as referências pendentes contra os exports das outras unidades, e materializa a
+   ABI/`.tkh`. Compacto — assinaturas, não corpos. É a única estrutura que vive o compile
+   todo.
+3. **Check + lower + emit POR UNIDADE (streaming).** Para cada namespace, em ordem
+   determinística: (re)carrega os corpos daquela unidade, checa CONTRA a tabela linkada,
+   lowera, emite o C, anexa à saída e **derruba a unidade** (região de arena, C6). Só os
+   corpos de UM namespace vivem por vez.
+
+### O checker precisa de duas passadas (coleta → checagem)
+
+Sim: o monólito tem recursão mútua, então o checker de qualquer unidade precisa da tabela
+linkada COMPLETA (exports de todas as outras) antes de checar corpo algum. Por isso o LINK
+(passo 2) é uma barreira: coleta exports de TODAS as unidades primeiro, resolve, e só então o
+passo 3 checa corpos em streaming. O que NUNCA fica residente são N conjuntos de corpos —
+apenas a tabela linkada (compacta) + os corpos da unidade corrente. A "AST incompleta"
+existe justamente para que o passo de coleta não segure corpos.
+
+### O que o "linker interno" RETÉM entre unidades × o que DESCARTA
+
+| Retém (compacto, vive o compile todo) | Descarta por unidade (libera na fronteira) |
+|---|---|
+| Tabela global de símbolos (tipos exportados, assinaturas de fn, `const`) | AST parseada dos corpos daquele namespace |
+| Forma `.tkh`/ABI | Árvores `TStatement` tipadas daquele namespace |
+| Pedidos de monomorfização que cruzam unidades | LIR baixado daquele namespace |
+| Acumulador de saída C — **idealmente streamed pro arquivo**, não retido | (o C daquele namespace, já escrito) |
+
+O descarte por unidade casa com C6: **uma região de arena por unidade**, derrubada após o
+emit daquela unidade (`region_drop_subtree`). Nenhum free bloco-a-bloco.
+
+### Princípio unificador: pipeline em ESTÁGIOS com DESPEJO entre eles
+
+Enquadramento do dono que amarra tudo: a cada ETAPA do compilador, **gerar um ARTEFATO para
+a próxima e despejar a memória** antes de seguir. O pico deixa de ser a SOMA
+(AST+typed+LIR+buffer vivos juntos) e passa a ser o **MÁXIMO de um único estágio**. Os três
+sub-modelos acima (por-unidade, AST-incompleta-linkada-antes-do-checker, incremental) são
+CASOS deste princípio — variam só a granularidade da unidade e o ponto de despejo.
+
+Pipeline: `parse → (artefato AST/exports por unidade) → despejo → link → (tabela linkada) →
+despejo → checker → (artefato typed) → despejo → lower → (LIR) → despejo → codegen → teko.c`.
+
+**O "despejo" tem duas formas, ambas bounded a um estágio:**
+
+- **Despejo em memória (arena-drop = C6):** quando dois estágios FUNDEM por unidade
+  (check→lower→emit da mesma unidade, back-to-back), o artefato passa direto em memória e a
+  região da unidade é derrubada na fronteira. O drop-em-massa da arena É o despejo. Sem custo
+  de IO.
+- **Despejo em disco (serialização):** quando um estágio NÃO funde (ex.: o LINK precisa dos
+  exports de TODAS as unidades antes de checar QUALQUER corpo — barreira global), o artefato
+  do estágio anterior vai para disco e o próximo relê UMA unidade por vez. O working set some
+  do heap; volta sob demanda.
+
+**Formato do artefato — REUSAR `.tkb`, não inventar.** `src/emit/tkb_frame.tks` já tem
+`serialize_program(prog: checker::TProgram): []byte` e `src/emit/tkb_read.tks`
+`deserialize_program(data): checker::TProgram` — a serialização binária do typed-AST, já em
+produção no path de pacote (`.tkl`). É EXATAMENTE o artefato do estágio typed (check→lower).
+Estendê-lo para **por-unidade** (serializar/deserializar um namespace, não só o programa
+inteiro) fecha o dump typed. Para o estágio parse→link basta a forma compacta de exports
+(a "AST incompleta"): uma projeção do `.tkb` só com declarações exportadas + pendências, ou
+um frame novo mínimo. LIR **não precisa de artefato de disco** se lower→emit fundem por
+unidade (despejo em memória); só ganharia `.tkb`-de-LIR se o incremental quisesse cachear
+lowered — adiar até medir.
+
+**Quais estágios valem o dump de DISCO** (onde o working set é grande E o próximo estágio
+não funde):
+
+| Fronteira | Vale disco? | Por quê |
+|---|---|---|
+| parse → link | exports em disco/compacto; corpos re-parseáveis | link é barreira global; corpos não cabem todos |
+| check → lower | típico: **fundir** por unidade (despejo em memória) | lower consome typed da MESMA unidade na hora |
+| lower → codegen | **fundir** por unidade (despejo em memória) | emit consome LIR da mesma unidade na hora |
+| typed `.tkb` p/ INCREMENTAL | disco, cache entre builds | reusar unidade não-alterada sem re-checar |
+
+Ou seja: um único dump de disco estrutural (parse→link, para não segurar N corpos), o resto
+é fusão por unidade com arena-drop. O `.tkb` em disco reaparece no incremental (cache).
+
+### Convivência com o fixpoint (byte-identidade gen2==gen3)
+
+O `teko.c` emitido DEVE continuar byte-idêntico. O prólogo global (type decls + forward fn
+decls) sai da tabela global (a tabela linkada a tem); os corpos são streamed em ordem determinística
+de namespace. A concatenação por-unidade tem que IGUALAR a emissão whole-program de hoje →
+exige a MESMA ordenação global de itens e o mesmo seccionamento.
+
+**Risco load-bearing (R4):** hoje nomes temporários gensym derivam do TAMANHO DO BUFFER
+corrente (`$"_oln{buf.len}"`, `$"_arr{buf.len}"` em `emit_slice_of_len`/`emit_array_lit`).
+Sob streaming, o buffer é por-unidade, não global → o mesmo corpo geraria nome DIFERENTE →
+`teko.c` diverge → fixpoint quebra. **Pré-condição de C10:** trocar todo gensym derivado de
+`buf.len` por um contador determinístico global (ou por (namespace, índice-de-fn, seq)),
+independente de streaming. Sem isso o Eixo C é impossível de manter verde.
+
+**Determinismo do artefato (R6):** serialize→deserialize tem que ser round-trip SEM perda e
+SEM não-determinismo — mesma entrada → mesmo `.tkb` byte-a-byte → mesmo `TProgram` → mesmo
+`teko.c`. Proibido no frame: timestamp, endereço de ponteiro, ordem de iteração de
+`map`/`hashset` (ordenar chaves), ou qualquer estado global implícito. O `.tkb` já roda no
+path de pacote (round-trip exercitado), mas o uso POR-UNIDADE tem que preservar a MESMA
+ordem de itens que o whole-program produz — a ordenação de unidades e de itens dentro da
+unidade é a âncora do fixpoint.
+
+### Build incremental (caso do princípio unificador, C14)
+
+Recompilar só a unidade que mudou, reusando o artefato `.tkb` typed em cache de disco
+(chaveado por hash do conteúdo da unidade + hash da tabela linkada de que ela depende). Se a
+assinatura exportada de uma unidade muda, os dependentes recompilam. É o **caso persistente**
+do despejo-em-disco: o mesmo `.tkb` que bounded o pico serve de cache entre builds. **Para o
+self-build / fixpoint, o incremental é DESLIGADO** (build limpo tem que produzir `teko.c`
+idêntico); é otimização de tempo de dev, não reduz pico. Atrás de C11–C13, opcional.
 
 ---
 
@@ -301,3 +488,20 @@ maior cuidado do plano.
 de memória, mas viola "TUDO em Teko" enquanto não transcrito (C9). Rota: slot `.bss` via
 `LGlobalAddr` (P2 honesto de `arena-em-teko.md`) ou `mmap MAP_FIXED` (plano B). Não bloqueia
 a meta de memória; registrado para fechar o expurgo do C.
+
+**R4 — Gensym derivado de `buf.len` quebra o streaming (load-bearing do Eixo C).** Nomes
+temporários como `$"_oln{buf.len}"`/`$"_arr{buf.len}"` derivam do tamanho do buffer global;
+sob emissão por-unidade o buffer é por-namespace → mesmo corpo, nome diferente → `teko.c`
+diverge → fixpoint quebra. C10 (determinizar gensym) é PRÉ-CONDIÇÃO obrigatória de C11/C12;
+sem ele o Eixo C é impossível de manter verde.
+
+**R5 — Byte-identidade do `teko.c` sob compilação por unidade.** O modelo streaming tem que
+produzir `teko.c` byte-idêntico ao whole-program: prólogo global da tabela de assinaturas +
+corpos em ordem determinística de namespace, com o MESMO seccionamento. Qualquer estado
+global implícito hoje acumulado durante a iteração whole-program (contadores, tabelas de
+monomorfização, ordem de forward-decls) tem que ser reproduzido a partir do LINK (C11). C12
+valida byte-a-byte por namespace migrado; na menor divergência, PARAR e reconciliar — não
+maquiar. Granularidade decidida law-first: **namespace** (arquivo quebra coesão intra-módulo;
+whole-program é o pico). Se surgir um namespace que sozinho ainda pique acima do guard, ele
+NÃO se subdivide por arquivo — subdivide-se por REGIÃO de escopo interno (C6) dentro da
+unidade, mantendo a fronteira de unidade em namespace.
