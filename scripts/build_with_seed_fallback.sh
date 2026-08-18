@@ -302,9 +302,13 @@ declared_degrau_rung() {
   # (`cannot execute 'cc1': CreateProcess`), and its MSVC-family linker has no `m.lib` so `-lm` is a
   # hard link error. clang (x86_64-pc-windows-msvc, already on the runner) is monolithic, fast, and
   # needs no libm — the same Windows rules build_cc_argv already applies for gen1 and beyond.
-  deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"; deg_tgt=""; deg_pthread="-pthread"
+  deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"; deg_tgt=""; deg_pthread="-pthread"; deg_syslibs=""
   case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm=""; deg_tgt="--target=x86_64-pc-windows-msvc"; deg_pthread="" ;;
+    # Windows: the §16 sync primitives call WaitOnAddress/WakeByAddressSingle/WakeByAddressAll, which
+    # live in Synchronization.lib (an API-set lib, NOT auto-linked like kernel32). teko's own run_cc
+    # adds it for gen1+ via [extern.libs.windows], but this rung -1 links the raw C directly, so it
+    # names the lib here or the link dies with LNK2019 unresolved externals.
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm=""; deg_tgt="--target=x86_64-pc-windows-msvc"; deg_pthread=""; deg_syslibs="-lSynchronization" ;;
   esac
   if ! command -v "$deg_cc" >/dev/null 2>&1; then
     log "rung -1: a degrau is declared at $cc_src but no $deg_cc is on PATH — the forced seed cannot be built"
@@ -320,7 +324,7 @@ declared_degrau_rung() {
   log "rung -1: building the degrau's compiler from $cc_src (cc=$deg_cc)"
   if ! "$deg_cc" "$deg_std" $deg_tgt -w -O2 $deg_pthread ${TEKO_DEGRAU_LDFLAGS:-} \
         -I src/runtime -I src/assert \
-        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c $deg_libm \
+        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c $deg_libm $deg_syslibs \
         -o "$cc_out/teko" >"$cc_log" 2>&1; then
     log "rung -1: the declared C did not compile — the forced seed cannot be built. cc said:"
     sed 's/^/teko-ci:   | /' "$cc_log" >&2
