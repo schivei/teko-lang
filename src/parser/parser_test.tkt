@@ -373,27 +373,20 @@ fn struct_literal_separator_is_semicolon() {
 // --- (#111) own-line `/** … */` doc comments — must parse and ATTACH to the NEXT declaration,
 // same as the pre-existing same-line placement (Javadoc/rustdoc/JSDoc-style is own-line). ---
 
-/** The `DiKind` carried by the first declaration of `source`, or `DiKind::None` if it is not a
- *  type decl — a parser-test accessor for the W10c lifetime-annotation cases below. */
-fn first_decl_di_kind(source: str): DiKind {
-    match module_of(source) {
-        Module as m => match m.decls[0] { TypeDecl as td => td.di_kind; _ => DiKind::None }
-        error => DiKind::None
-    }
-}
-
+/**
+ * §7 (DI service/svc): the old annotation DI is retired. `#singleton`/`#scoped`/`#transient` (the
+ * lifetime annotations) and `#inject(…)` (the fn overlay) no longer parse — each is rejected as an
+ * unknown declaration attribute. The service surface (`type N = service <lifetime> { … }` + `svc`)
+ * replaces them.
+ */
 #test
-fn parses_lifetime_annotations_on_a_type() {
-    teko::assert::is_true(first_decl_di_kind("#singleton\ntype Logger = class { }") == DiKind::Singleton)
-    teko::assert::is_true(first_decl_di_kind("#scoped\ntype Session = class { }") == DiKind::Scoped)
-    teko::assert::is_true(first_decl_di_kind("#transient\ntype Handler = class { }") == DiKind::Transient)
-    teko::assert::is_true(first_decl_di_kind("type Plain = class { }") == DiKind::None)
-}
-
-#test
-fn rejects_swapped_di_placement() {
+fn rejects_retired_di_annotations() {
+    teko::assert::is_true(module_errors("#singleton\ntype Logger = class { }"))
+    teko::assert::is_true(module_errors("#scoped\ntype Session = class { }"))
+    teko::assert::is_true(module_errors("#transient\ntype Handler = class { }"))
     teko::assert::is_true(module_errors("#singleton\nfn handle() { }"))
     teko::assert::is_true(module_errors("#inject(log: Logger)\ntype Logger = class { }"))
+    teko::assert::is_false(module_errors("type Plain = class { }"))
 }
 
 /**
@@ -612,22 +605,23 @@ fn var_reassignment_and_malformed_var_statements() {
 }
 
 /**
- * hash_inline_and_singleton_accept_var — `#inline`/`#singleton` attach to a `var` binding exactly as
- * they already do to `let`/`mut`/`const` (`is_binding_head` is the single predicate both attribute
- * parsers now share).
+ * hash_inline_accepts_var — `#inline` attaches to a `var` binding exactly as it already does to
+ * `let`/`mut`/`const` (`is_binding_head` is the predicate the attribute parser uses). `#singleton`
+ * is retired (§7 DI removal): it no longer attaches to a binding and is rejected as an unknown
+ * binding attribute.
  */
 #test
-fn hash_inline_and_singleton_accept_var() {
+fn hash_inline_accepts_var() {
     teko::assert::is_false(stmt_errors("#inline var x = 1"))
-    teko::assert::is_false(stmt_errors("#singleton var x = 1"))
+    teko::assert::is_true(stmt_errors("#singleton var x = 1"))
 }
 
-/** hash_inline_and_singleton_reject_non_binding — the attribute still refuses a non-binding
-    statement, `var` included when it is not itself a binding head. */
+/** hash_inline_rejects_non_binding — the attribute still refuses a non-binding statement, `var`
+    included when it is not itself a binding head. */
 #test
-fn hash_inline_and_singleton_reject_non_binding() {
+fn hash_inline_rejects_non_binding() {
     teko::assert::is_true(stmt_errors("#inline var = 1"))
-    teko::assert::is_true(stmt_errors("#singleton return"))
+    teko::assert::is_true(stmt_errors("#inline return"))
 }
 
 /**

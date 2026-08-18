@@ -53,7 +53,6 @@ fn type_nulllit(n: parser::NullLit): TExpr | error {
 }
 fn type_var(v: parser::Var, env: Env): TExpr | error {
     var b = match lookup_binding(env, v.name) { ValBinding as bb => bb; error as e => return e }
-    match lookup_inject(env, v.name) { DiInjectBind as ib => return di_lower_use(ib, b.type); error => { } }
     // (W10a) a bare reference to a top-level FUNCTION used as a VALUE: only `define_fn` sets a
     // non-empty `ns`, so `ns != "" && type is Func` uniquely identifies a fn reference (a local of
     // closure type has ns=""). It lowers to a `tk_closure` literal; a plain local emits its name.
@@ -4456,7 +4455,7 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable): TypedStmt | err
         Reference => if b.kind != parser::BindKind::Mut { return error { message = "`let`/`const` cannot bind a reference — a reference binding is spelled `ref r: T = x` (write-through, requires a mutable source)" } }
         _ => if type_contains_ref(bound) && !is_ref_null_variant(bound) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     }
-    var node = TBinding { kind = b.kind; target = b.target; bound = bound; value = v; di_kind = b.di_kind }
+    var node = TBinding { kind = b.kind; target = b.target; bound = bound; value = v }
     match b.target {
         parser::SimpleName as sn => TypedStmt { node = node; env = define(env, sn.name, bound, bind_is_mut(b.kind)) }
         parser::DestructurePattern => TypedStmt { node = node; env = env }   // [destructuring binding: refinement]
@@ -5988,7 +5987,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         var base_bound = Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }
         // (§4 G) the `base` super-binding: a self→base upcast bound to the fixed name `base`, the sole
         // super path. Prepended as the method body's FIRST statement.
-        var base_kw_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "base" }; bound = base_bound; value = cast_val; di_kind = parser::DiKind::None }
+        var base_kw_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "base" }; bound = base_bound; value = cast_val }
         var prefixed: []TStatement = teko::list::push(teko::list::empty(), base_kw_stmt)
         var si = 0
         loop { if si >= ret_stmts.len { break }; prefixed = teko::list::push(prefixed, ret_stmts[si]); si++ }
@@ -6231,9 +6230,6 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
         local = define(local, f.params[i].name, pt, false)   // params are immutable (B.21)
         i++
     }
-    if f.has_inject {
-        local = match seed_di_injects(f, local, tbl) { Env as e => e; error as e => return e }
-    }
     var ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
     if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {
@@ -6426,7 +6422,7 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable): TItem | error {
             // typedef (matching the canonical Named.name at every USE). A generic `__g__` instance keeps
             // its already-unique bare name. Resolution stays bare-keyed (this is the TYPED program only).
             var cd = if name_is_g_instance(td.name) { td } else {
-                parser::TypeDecl { name = qualify(item.namespace, td.name); type_params = td.type_params; type_constraints = td.type_constraints; body = td.body; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key}
+                parser::TypeDecl { name = qualify(item.namespace, td.name); type_params = td.type_params; type_constraints = td.type_constraints; body = td.body; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col }
             }
             normalize_inst_decl(cd, table)   // (W9.4) rewrite `Gen<i64>` member refs to the bare stamped `Gen__g__i64` (no-op when none); else passes through (collect resolved its fields)
         }
@@ -6665,10 +6661,10 @@ type PreWalk = struct {
  * Run the five pre-walk passes that follow collection and fold their diagnostics into ONE list, in
  * pass order — the all-diagnostics ruling applied to the checker's pre-walk (issue #68).
  *
- * SOFT passes (`check_modules`, the DI overlay check) produce nothing the item walk reads, so their
- * diagnostics travel WITH the item walk's and the build reports them together. HARD passes (the
- * signature walk inside `col`, the DI registry, the stamped-instance registration) produce state a
- * failure leaves incomplete, so each collects everything it can and then sets `cut`.
+ * SOFT passes (`check_modules`) produce nothing the item walk reads, so their diagnostics travel
+ * WITH the item walk's and the build reports them together. HARD passes (the signature walk inside
+ * `col`, the stamped-instance registration) produce state a failure leaves incomplete, so each
+ * collects everything it can and then sets `cut`.
  *
  * @param program  the trait-folded, base-canonicalized program
  * @param col      the collection pass's outcome (its two diagnostic classes come in with it)
@@ -6678,17 +6674,13 @@ type PreWalk = struct {
 fn pre_walk(program: parser::Program, col: CollectOutcome): PreWalk {
     var table = col.collected.types
     var module_diags = check_modules(program, table)
-    var di = build_di_registry(program, table)
-    var overlay_diags = di_overlay_diags(program, di, table)
     var types = tt_freeze(instantiate_types(program, table))
     var insts = register_instance_methods(col.collected.env, types)
     var diags = concat_diags(col.decl_diags, col.sig_diags)
     diags = concat_diags(diags, module_diags)
-    diags = concat_diags(diags, di.diags)
-    diags = concat_diags(diags, overlay_diags)
     diags = concat_diags(diags, insts.diags)
-    var cut = col.sig_diags.len > 0 || di.diags.len > 0 || insts.diags.len > 0
-    PreWalk { types = types; env = with_di(seal(insts.env), di.registry); diags = diags; cut = cut }
+    var cut = col.sig_diags.len > 0 || insts.diags.len > 0
+    PreWalk { types = types; env = seal(insts.env); diags = diags; cut = cut }
 }
 
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).

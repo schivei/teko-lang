@@ -214,60 +214,33 @@ fn parse_inline_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | e
     if !is_binding_head(tokens, after) {
         return err_at(tokens, after, "`#inline` attaches only to a `var`/`const` binding")
     }
-    parse_binding_di(tokens, after, DiKind::None)
+    parse_binding(tokens, after)
 }
 
 /**
- * parse_attributed_binding — dispatch a `#`-attributed statement to its binding parse (0.3.1
- * modelo-de-memoria §2a). `#inline` keeps its layout-attribute parse; `#singleton` opens the
- * residence-root lifetime for a LOCAL binding (the design's declarative root surface), threading
- * `DiKind::Singleton` onto the binding. `#scoped`/`#transient` are REJECTED on a binding — the
- * default local is already the scope-ephemeral case, so they carry no meaning there (they stay
- * exclusive to DI class declarations). Any other `#name` is a precise placement error.
+ * parse_attributed_binding — dispatch a `#`-attributed statement to its binding parse. `#inline` is
+ * the sole attribute that attaches to a LOCAL binding (its layout-attribute parse); any other
+ * `#name` is a precise placement error.
  *
  * @param tokens  the token stream
  * @param pos     the index of the leading `#` token
  * @return        the parsed binding statement, or a precise placement/rejection error
- * @throws        when `#` is not `#inline`/`#singleton`, or is not followed by a binding keyword
+ * @throws        when `#` is not `#inline`, or is not followed by a binding keyword
  * @since 0.3.1
  */
 fn parse_attributed_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
     if !is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) {
-        return err_at(tokens, pos + 1, "expected an attribute name after `#` (only `#inline` and `#singleton` attach to a local binding)")
+        return err_at(tokens, pos + 1, "expected an attribute name after `#` (only `#inline` attaches to a local binding)")
     }
     var attr = tokens[pos + 1].text
     if attr == "inline" { return parse_inline_binding(tokens, pos) }
-    if attr == "scoped" || attr == "transient" {
-        return err_at(tokens, pos + 1, "`#scoped`/`#transient` may not annotate a local binding — a local already dies with its scope (0.3.1 modelo-de-memoria §2a); only `#singleton` (root residence) is a binding lifetime")
-    }
-    if attr != "singleton" {
-        return err_at(tokens, pos + 1, "unknown binding attribute — only `#inline` (layout) and `#singleton` (root residence) attach to a local binding")
-    }
-    var after = skip_seps(tokens, pos + 2)
-    if !is_binding_head(tokens, after) {
-        return err_at(tokens, after, "`#singleton` attaches only to a `let`/`mut`/`var`/`const` binding")
-    }
-    parse_binding_di(tokens, after, DiKind::Singleton)
-}
-
-/**
- * parse_binding — parse a `let|mut|var|const TARGET [: T] = value` binding at `pos` (B.13, B.21).
- * TARGET is a name or a destructure `{ x; y }` (`parse_bind_target`). Delegates to
- * `parse_binding_di` with the ordinary (non-residence-rooted) `DiKind::None`.
- *
- * @param tokens  the token stream
- * @param pos     the index of the binding keyword (`let`/`mut`/`const`), or of the contextual `var`
- *                head (`is_var_binding_head`)
- * @return        the parsed binding statement, or a parse error
- */
-fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
-    parse_binding_di(tokens, pos, DiKind::None)
+    err_at(tokens, pos + 1, "unknown binding attribute — only `#inline` (layout) attaches to a local binding")
 }
 
 /**
  * bind_kind_at — the `BindKind` a binding head at `pos` declares: `Const` for the `const` keyword,
  * `Mut` for the contextual `var` head (0.3.1 mudancas-superficie-0.3.1.md §1 — every local is an
- * always-mutable `var`). `let`/`mut` are RETIRED and rejected earlier in `parse_binding_di`, so
+ * always-mutable `var`). `let`/`mut` are RETIRED and rejected earlier in `parse_binding`, so
  * they never reach here.
  *
  * @param tokens  the token stream
@@ -280,18 +253,15 @@ fn bind_kind_at(tokens: []lexer::Token, pos: u64): BindKind {
 }
 
 /**
- * parse_binding_di — parse a `let|mut|var|const TARGET [: T] = value` binding, stamping the
- * residence lifetime `di_kind` onto the resulting node (0.3.1 modelo-de-memoria §2a). `DiKind::None`
- * is the ordinary case; `DiKind::Singleton` arrives from a `#singleton`-attributed binding. The parse
- * body is otherwise identical to an un-attributed binding.
+ * parse_binding — parse a `let|mut|var|const TARGET [: T] = value` binding at `pos` (B.13, B.21).
+ * TARGET is a name or a destructure `{ x; y }` (`parse_bind_target`).
  *
  * @param tokens   the token stream
- * @param pos      the index of the binding keyword (`let`/`mut`/`var`/`const`)
- * @param di_kind  the residence lifetime to stamp onto the binding
+ * @param pos      the index of the binding keyword (`let`/`mut`/`var`/`const`), or of the contextual
+ *                 `var` head (`is_var_binding_head`)
  * @return         the parsed binding statement, or a parse error
- * @since 0.3.1
  */
-fn parse_binding_di(tokens: []lexer::Token, pos: u64, di_kind: DiKind): Parsed<Statement> | error {
+fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
     if is_ref_binding_head(tokens, pos + 1) {
         return err_at(tokens, pos + 1, "a reference binding is written `ref x: T` — the `ref` is itself the binding modifier; there is no `let ref`/`mut ref`/`var ref`/`const ref` (tripartite law: `let` protects a value, `mut`/`var` unlock a value, `ref` aliases — a reference is inherently mutable, so no immutable reference exists)")
     }
@@ -305,7 +275,7 @@ fn parse_binding_di(tokens: []lexer::Token, pos: u64, di_kind: DiKind): Parsed<S
         return err_at(tokens, ann.next, "expected '=' in a binding")
     }
     var v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; is_ref = false; value = v.node; di_kind = di_kind }; next = v.next }
+    Parsed<Statement> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; is_ref = false; value = v.node }; next = v.next }
 }
 
 /**
@@ -348,7 +318,7 @@ fn is_var_binding_head(tokens: []lexer::Token, pos: u64): bool {
 /**
  * is_binding_head — does `pos` open an ordinary (non-`ref`) local binding: the reserved `let`/`mut`/
  * `const` keyword, or the contextual `var` head (`is_var_binding_head`)? Shared by the statement
- * dispatcher and the `#inline`/`#singleton` attribute parsers, so the four spellings stay in sync at
+ * dispatcher and the `#inline` attribute parser, so the four spellings stay in sync at
  * every call site that needs to recognize one.
  *
  * @param tokens  the token stream
@@ -383,7 +353,7 @@ fn parse_ref_binding(tokens: []lexer::Token, pos: u64): Parsed<Statement> | erro
     }
     var v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
     var ann_ty = if ann.has_type { wrap_ref_type(ann.type_ann) } else { ann.type_ann }
-    Parsed<Statement> { node = Binding { kind = BindKind::Mut; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; is_ref = true; value = v.node; di_kind = DiKind::None }; next = v.next }
+    Parsed<Statement> { node = Binding { kind = BindKind::Mut; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; is_ref = true; value = v.node }; next = v.next }
 }
 
 // a binding target: a simple name or a destructure `{ x; y }` (B.13). `pos` after the kw.
@@ -416,7 +386,7 @@ fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<BindTarget> | err
  */
 fn parse_discard_assign(tokens: []lexer::Token, pos: u64): Parsed<Statement> | error {
     var dv = match parse_expr(tokens, pos + 2) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = Binding { kind = BindKind::Let; target = SimpleName { name = "_" }; has_type = false; type_ann = no_type(); is_ref = false; value = dv.node; di_kind = DiKind::None }; next = dv.next }
+    Parsed<Statement> { node = Binding { kind = BindKind::Let; target = SimpleName { name = "_" }; has_type = false; type_ann = no_type(); is_ref = false; value = dv.node }; next = dv.next }
 }
 
 // `name op= value` (B.4 — assignment is statement-only). Simple-name target; the op

@@ -13,8 +13,8 @@
 // FIXPOINT trivial.
 //
 // THE MODEL it realizes (design §0/§1): every value dies at the end of its LEXICAL scope; a return
-// MOVES the value to the caller's arena; ROOT residence has EXACTLY two legitimate origins — a
-// declared `#singleton` binding OR a structural cross-thread value (chan/wait_group). A join the
+// MOVES the value to the caller's arena; ROOT residence originates from a structural cross-thread
+// value (chan/wait_group), plus the preserved `is_singleton` seam (Doc 1 §8). A join the
 // analysis cannot tighten below the top is a MEASURED DEFECT (tier `Unresolved`), never a silent
 // leak-to-root.
 
@@ -75,10 +75,10 @@ pub type Frame = struct { }
 pub type Caller = struct { }
 
 /**
- * Root — the WIDE tier (`tk_region_root()` / program). It has EXACTLY two legitimate origins: a
- * declared `#singleton` binding (short-circuiting the oracle, reusing `DiKind::Singleton →
- * tk_region_root()`, codegen.tks:9564) OR a structural cross-thread value (chan/wait_group). Never
- * a fallback-for-uncertainty (that is `Unresolved`).
+ * Root — the WIDE tier (`tk_region_root()` / program). Its legitimate origin is a structural
+ * cross-thread value (chan/wait_group); the `residence_tier` `is_singleton` short-circuit is
+ * preserved as the mechanism a future `service singleton` roots through (Doc 1 §8), though no
+ * binding sources it today. Never a fallback-for-uncertainty (that is `Unresolved`).
  *
  * @since 0.3.1
  */
@@ -97,8 +97,8 @@ pub type Unresolved = struct { }
 /**
  * ResidenceTier — the tier of residence of a value, the lattice that replaces the binary
  * frame-local-vs-root of M.1/M.5. Ordered from tightest to widest: a value resides in the SMALLEST
- * tier that dominates all of its uses (the LUB of `pt_join`). `Root` is the wide tier with exactly
- * two legitimate origins (`#singleton` OR cross-thread); `Unresolved` is a measured defect, never a
+ * tier that dominates all of its uses (the LUB of `pt_join`). `Root` is the wide tier originating
+ * from a cross-thread value (plus the preserved `is_singleton` seam); `Unresolved` is a measured defect, never a
  * silent accepted leak-root. There is no `Scoped`/`Transient` variable tier — the default IS the
  * scope-ephemeral case and the move covers the climb.
  *
@@ -149,14 +149,15 @@ pub type ResidencePlan = struct {
 }
 
 /**
- * residence_tier — the PURE decision core of the oracle. Maps a binding's inputs to its tier: a
- * `#singleton` binding is forced to `Root` (short-circuit); otherwise the transitive points-to
+ * residence_tier — the PURE decision core of the oracle. Maps a binding's inputs to its tier: an
+ * `is_singleton` binding is forced to `Root` (short-circuit, the preserved seam for a future
+ * `service singleton`); otherwise the transitive points-to
  * value decides — `PtTop` is the measured defect `Unresolved`, `PtRoot` is `Root`, `PtParam` points
  * at caller storage so it moves to `Caller`, and a frame-born (`PtFrame`/`PtAdopter`) value refines
  * via the escape fast-path: it moves to `Caller` if it escapes the frame, resides in `Scope` if it
  * is block-local, else in the `Frame`.
  *
- * @param is_singleton   the binding carried `#singleton` (declared root residence)
+ * @param is_singleton   force root residence (the preserved seam; no binding sources it today)
  * @param pt             the binding's transitive points-to value (from `fn_spine`)
  * @param escapes_frame  the binding's name is in the function's frame-escape set
  * @param is_block_local the binding is provably freeable at its block's exit edges
@@ -251,8 +252,8 @@ fn binding_points_to(sp: Spine, name: str): PointsTo {
 }
 
 /**
- * plan_binding — the per-binding residence verdict: combine the `#singleton` declaration, the
- * spine's points-to, the frame-escape membership, and the block-local fast-path into a tier.
+ * plan_binding — the per-binding residence verdict: combine the (now always-false) singleton seam,
+ * the spine's points-to, the frame-escape membership, and the block-local fast-path into a tier.
  *
  * @param b          the typed binding
  * @param fn_body    the whole function body (the read-count denominator for block-locality)
@@ -265,7 +266,10 @@ fn binding_points_to(sp: Spine, name: str): PointsTo {
  */
 fn plan_binding(b: TBinding, fn_body: []TStatement, block_body: []TStatement, is_value: bool, sp: Spine, escaping: []str): BindingResidence {
     var name = binding_name(b)
-    var is_singleton = b.di_kind == parser::DiKind::Singleton
+    // (§7) the `#singleton` binding annotation was retired; a `service singleton` roots via the
+    // arena-lifetime seam (Doc 1 §8), not through the binding oracle. `residence_tier` keeps its
+    // `is_singleton` mechanism, but no binding sources it any longer.
+    var is_singleton = false
     var pt = binding_points_to(sp, name)
     var escapes = residence_name_in_set(escaping, name)
     var blk_local = binding_is_block_local(escaping, fn_body, block_body, is_value, b)
