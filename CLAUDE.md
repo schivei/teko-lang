@@ -158,13 +158,16 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   novo e coexiste durante a migração; fixpoint gen2==gen3 a cada harvest.
 - **METODOLOGIA DO EXPURGO — CONSTRUIR ANTES, COMPILADOR ENUMERA A LIMPEZA (dono 2026-08-18).** ORDEM
   (o agente estava invertendo — "limpando" ANTES de construir o backend novo, é ERRADO):
-  1. **CONSTRUIR a nova maquinária PRIMEIRO**, aditiva, convivendo com a velha: o cast `str`/`char` →
-     `[]byte` (`.to_bytes()`), o array fixo de tamanho-runtime **`var x: [n]T = []`** (zero-fill; é o
+  1. **CONSTRUIR a nova maquinária PRIMEIRO**, aditiva, convivendo com a velha: o **literal byte-string
+     `b"abc"` → `[]byte`** (estende o byte-char `b'A'` que já existe — NÃO é `.to_bytes()` de runtime; é
+     literal; `str` de runtime espalha direto `..somestr` pois já é bytes), o array fixo de
+     tamanho-runtime **`var x: [n]T = []`** (zero-fill; é o
      "of_len" como SINTAXE DE TIPO), o idioma de join por índice exato, o guard de null-deref, roteado
      pela arena-Teko existente. NÃO remover o velho, NÃO varrer ainda.
-  2. **SHADOW** = programa AVULSO, **não versionado** (scratch, fora do repo): compila+roda como um teste
-     com o comportamento esperado; 1ª versão com o compilador ATUAL extrai baseline (tamanho final,
-     memória); evolui-se a maquinária nova reduzindo memória/binário/operações contra esse baseline.
+  2. **SHADOW** = programa AVULSO **não versionado** (scratch, fora do repo) OU um `.tkr` regressivo
+     rodado ISOLADO (flag "rodar só este teste" — evita o OOM do `teko test .`): compila+roda com o
+     comportamento esperado; 1ª versão com o compilador ATUAL extrai baseline (tamanho final, memória);
+     evolui-se a maquinária nova reduzindo memória/binário/operações contra esse baseline.
   3. **SEED** (gen0 ganha a maquinária nova).
   4. **DESENSINAR + REMOVER AS RAÍZES do estado velho** (`tk_slice_push*`/`cb`/`append_fo`/`push_fo`,
      `list::push`/`empty`/`grow_inplace`/`with_cap`, deps do `teko_rt.c`). A remoção não falha "por não
@@ -172,8 +175,9 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   5. **SEED.** Com o seed novo, o compilador **tenta se auto-compilar e ERRA** — e **esses erros SÃO a
      lista de limpezas**: cada erro aponta um sítio a converter pro idioma novo. NÃO caçar 4917 à mão —
      remover a raiz e deixar o compilador ENUMERAR. Corrige → seed → repete até verde (fixpoint gen2==gen3).
-  **IDIOMA (sem `cb`/`append_fo` — múltiplo append PROIBIDO):** cada peça = UM spread-literal
-  (`outs[i] = [..a.to_bytes(), ..b.to_bytes(), b' ', ..c.to_bytes(), b'\n']`); acumula `total`; aloca
+  **IDIOMA (sem `cb`/`append_fo` — múltiplo append PROIBIDO):** cada peça = UM spread-literal com
+  `b"…"` nos literais e `..str` direto nos dinâmicos
+  (`outs[i] = [..b"#define TK_ARENA_", ..suffix, b' ', ..sym, b'\n']`); acumula `total`; aloca
   `var final: [total]byte = []` e copia por índice (`final[k]=o; k++`). O compilador pode const-foldar
   pra literal puro quando as partes são conhecidas.
 - **FASE 1 e 2 UNIFICADAS — EXPURGO TOTAL JÁ (dono 2026-08-18).** Não há interim: expurgar array
