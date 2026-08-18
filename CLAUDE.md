@@ -159,9 +159,10 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 - **METODOLOGIA DO EXPURGO — CONSTRUIR ANTES, COMPILADOR ENUMERA A LIMPEZA (dono 2026-08-18).** ORDEM
   (o agente estava invertendo — "limpando" ANTES de construir o backend novo, é ERRADO):
   1. **CONSTRUIR a nova maquinária PRIMEIRO**, aditiva, convivendo com a velha: o **literal byte-string
-     `b"abc"` → `[]byte`** (estende o byte-char `b'A'` que já existe — NÃO é `.to_bytes()` de runtime; é
-     literal; `str` de runtime espalha direto `..somestr` pois já é bytes), o array fixo de
-     tamanho-runtime **`var x: [n]T = []`** (zero-fill; é o
+     `b"abc"` → `[]byte`** (estende o byte-char `b'A'`; NÃO é `.to_bytes()`) + o **cast IMPLÍCITO
+     `str`↔`[]byte`** (mesma rep `{ptr,len}` de bytes → **reinterpret/identidade**, sem cópia; `str_from_bytes`
+     = `tk_str_of_bytes_len` e `tk_bytes_of_str_len` já existem, só o checker ACEITAR o implícito), o array
+     fixo de tamanho-runtime **`var x: [n]T = []`** (zero-fill; é o
      "of_len" como SINTAXE DE TIPO), o idioma de join por índice exato, o guard de null-deref, roteado
      pela arena-Teko existente. NÃO remover o velho, NÃO varrer ainda.
   2. **SHADOW** = programa AVULSO **não versionado** (scratch, fora do repo) OU um `.tkr` regressivo
