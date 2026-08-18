@@ -110,6 +110,12 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
        segue ~flat. A construção da AST é suspeita do pico — a otimizar. -->
   <!-- linha de validação original abaixo mantém a métrica -->
   fixpoint (tc2==tc3) + cross-check offline.
+- **GUARD DE MEMÓRIA `ulimit -v 6815744` (6,5 GiB) = INVIOLÁVEL (dono 2026-08-18).** Se um build
+  **estoura** o guard, o agente **encontra a causa-raiz do consumo e corrige** — NUNCA levanta o
+  teto. Levantar o `ulimit` mascara exatamente o problema que o expurgo existe pra resolver (o
+  `tk_slice_push_r`/inflação de arrays dinâmicos = 93% do pico), e passar de ~15 GiB de RAM física
+  da máquina causa OOM/thrash (100% de alocação). Estouro = diagnóstico + correção da inflação,
+  não `ulimit` maior. (Um agente subiu 6,5→16 GiB e travou a máquina em 100%; foi parado.)
 - **COMPILADOR C LOCAL = CLANG (dono 2026-08-18).** Todo agente e toda medição local usam **`TEKO_CC=clang`**
   (e `CC=clang` para o caminho cru `scripts/build_gen1_from_c.sh` que linka o `teko.c` direto). Motivo-raiz: o
   `cc` default no Linux é gcc, **patologicamente lento** no TU único de 22 MB do `teko.c` (medição de gcc levou
