@@ -48,10 +48,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   Compilar o projeto inteiro (incl. os próprios `.tkt`) já exercita a maior parte da implementação.
   REMOVER: (a) **testes que validam a COMPILAÇÃO** (strings sintéticas p/ parser/codegen/ast) — são
   TAUTOLÓGICOS: o compilador nem chegaria a rodá-los se o parser/codegen estivesse quebrado; retóricos,
-  incapazes de dizer nada; (b) comportamento de toda função que o `src/` chama (gen1 a executa). MANTER só
-  o que o self-build genuinamente NÃO exercita: genéricos/monomorph (self-build = 0 instâncias), backend
-  native, comportamento de função que o compilador NUNCA chama ao rodar, casos de erro/diagnóstico.
-  Na dúvida, LISTAR para revisão — não remover.
+  incapazes de dizer nada; (b) comportamento de toda função que o `src/` chama (gen1 a executa);
+  (c) **genéricos/monomorph — REMOVER** (dono 2026-08-18): o compilador USA genéricos em si e compila o
+  próprio código que os instancia, então o self-build exercita a monomorfização; (d) **backend native —
+  REMOVER** (dono 2026-08-18): o CI tem 6 pernas, 4 native, e as 2 em C viram native quando tudo fecha
+  verde — o native é exercitado pelo próprio CI.
+  MANTER só o que o self-build genuinamente NÃO exercita: **casos de erro/diagnóstico** (o compilador só
+  compila código VÁLIDO, nunca dispara os caminhos de rejeição) e comportamento de função que o compilador
+  NUNCA chama ao rodar. Na dúvida, LISTAR para revisão — não remover.
 
 ## Convenções da linguagem/codebase
 - **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
