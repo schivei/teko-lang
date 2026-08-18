@@ -1,105 +1,31 @@
 use teko::encoding::json
 
-/**
- * read_stdin_n — the syscall floor for the LSP transport: read EXACTLY `n` bytes from stdin
- * into an arena-owned `[]byte`, blocking until `n` bytes arrive or stdin hits EOF. The
- * returned slice's length is what was actually read (`n` on a full body, fewer on EOF
- * mid-body). It binds the maintained C runtime primitive `tk_rt_read_stdin_n`
- * (src/runtime/teko_rt.c) — the JSON-RPC / LSP base-protocol body is `Content-Length`-framed
- * with NO trailing newline, so the line reader cannot bound it; the caller reads exactly the
- * header's byte count. A `[]byte` return (the `tk_rt_secure_bytes` ABI shape) keeps this
- * brand-new primitive lowerable by the released bootstrap seed's frozen codegen.
- *
- * @param n  the exact number of body bytes to consume from stdin
- * @return   the bytes read; `.len == n` on a full body, `.len < n` on EOF mid-body
- * @since 0.3.1.0
- */
 extern fn read_stdin_n(n: u64): []byte = "tk_rt_read_stdin_n" from "teko_rt"
 
-/**
- * RpcMessage — one decoded JSON-RPC / LSP / DAP message: the raw `Content-Length`-framed body
- * already parsed into a `JsonValue` DOM (src/encoding/json/json.tks). LSP and DAP share this
- * one transport shape, so this type is the substrate both tracks read and write.
- *
- * @since 0.3.1.0
- * @see read_message
- */
 pub type RpcMessage = struct {
-    /** the message body: the framed JSON payload parsed into the JSON DOM. */
-    body: @JsonValue()
+        body: @JsonValue()
 }
 
-/**
- * CRLF — the ASCII carriage-return + line-feed pair the LSP base protocol terminates every
- * header line with (and, doubled, separates the header block from the body).
- *
- * @since 0.3.1.0
- */
 const CRLF: str = "\r\n"
 
-/**
- * encode_frame — frame `body` per the LSP/DAP base protocol: the `Content-Length` header (the
- * body's exact byte length), a blank CRLF line, then the encoded JSON body. Encoding a
- * `JsonValue` is total (src/encoding/json/json.tks), so this cannot fail. The byte length is
- * the encoded string's `.len` (JSON is UTF-8, so byte count is the wire count).
- *
- * @param body  the response / notification payload to frame
- * @return      the complete `Content-Length`-framed wire message
- * @since 0.3.1.0
- */
 pub fn encode_frame(body: @JsonValue()): str {
     var payload = json::encode(body)
     teko::str::concat("Content-Length: ", teko::u64_to_str(payload.len), CRLF, CRLF, payload)
 }
 
-/**
- * write_message — frame `body` and write it to stdout with a RAW byte write, never through
- * `println`. A newline-appending or unframed write would corrupt the JSON-RPC stream: the base
- * protocol demands a pure `Content-Length` frame with nothing between messages. Every log /
- * diagnostic goes to stderr (`log`), never stdout.
- *
- * @param body  the payload to frame and emit on stdout
- * @since 0.3.1.0
- */
 pub fn write_message(body: @JsonValue()) {
     teko::io::write(encode_frame(body))
 }
 
-/**
- * log — write a diagnostic line to STDERR, never stdout. The transport invariant: stdout carries
- * only framed JSON-RPC, so any log on stdout would corrupt the stream (proven in the design). A
- * trailing newline is added; stderr is free-form.
- *
- * @param msg  the diagnostic text
- * @since 0.3.1.0
- */
 pub fn log(msg: str) {
     teko::io::eprintln(teko::str::concat("teko-lsp: ", msg))
 }
 
-/**
- * ascii_lower — the lowercase of a single ASCII byte (`A`..`Z` mapped to `a`..`z`), every other
- * byte unchanged. Used for the case-insensitive header field-name comparison the LSP base
- * protocol mandates.
- *
- * @param b  the byte to fold
- * @return   the lowercased byte
- * @since 0.3.1.0
- */
 fn ascii_lower(b: byte): byte {
     if b >= b'A' && b <= b'Z' { return ((b to i64) + 32) to byte }
     b
 }
 
-/**
- * header_is_content_length — does the header line `line` name the `Content-Length` field,
- * compared case-insensitively up to the colon? A header line is `Field-Name: value`; this reads
- * the name (bytes before the first `:`) and folds both sides to lowercase.
- *
- * @param line  one header line, the trailing CRLF already stripped by the line reader
- * @return      true when the field name is `content-length`
- * @since 0.3.1.0
- */
 fn header_is_content_length(line: str): bool {
     var name = "content-length"
     if line.len < name.len { return false }
@@ -112,15 +38,6 @@ fn header_is_content_length(line: str): bool {
     line[name.len] == b':'
 }
 
-/**
- * parse_header_value_u64 — the unsigned integer value of a `Field: N` header line, skipping the
- * field name (up to and including the first `:`) and any leading spaces, then reading the digit
- * run. A line with no digits after the colon yields `null` (a malformed length).
- *
- * @param line  the header line (CRLF stripped)
- * @return      the parsed value, or `null` when no digits follow the colon
- * @since 0.3.1.0
- */
 fn parse_header_value_u64(line: str): u64 | null {
     var i: u64 = 0
     loop {
@@ -142,16 +59,6 @@ fn parse_header_value_u64(line: str): u64 | null {
     n
 }
 
-/**
- * body_to_message — validate the decoded body bytes and build the `RpcMessage`. The body must be
- * valid UTF-8 (the JSON door) and must parse as JSON; either failure is an honest transport
- * error, never a silent accept.
- *
- * @param body_bytes  the exact body bytes read for the frame
- * @return            the decoded message, or `error` on a UTF-8 / JSON fault
- * @throws            when the body is not valid UTF-8 or not valid JSON
- * @since 0.3.1.0
- */
 fn body_to_message(body_bytes: []byte): RpcMessage | error {
     var text = match teko::text::str_from_utf8(body_bytes) {
         str as s => s
@@ -164,18 +71,6 @@ fn body_to_message(body_bytes: []byte): RpcMessage | error {
     RpcMessage { body = value }
 }
 
-/**
- * read_message — read ONE `Content-Length`-framed message from stdin, blocking until the whole
- * body is available. Header lines are read with the line reader (each terminated by CRLF, which
- * the reader strips) until a blank line ends the header block; the `Content-Length` header sets
- * the exact body byte count, read with `read_stdin_n`. A body shorter than the declared length
- * (EOF mid-body) is a truncated frame — a hard error, never a silent accept.
- *
- * @return  the decoded message, or `error` on EOF before a frame / a malformed frame
- * @throws  `error { message = "eof" }` at a clean end of input; a `malformed frame: ...` error
- *          when the header is absent / the length is unparseable / the body is truncated
- * @since 0.3.1.0
- */
 pub fn read_message(): RpcMessage | error {
     var have_len = false
     var content_length: u64 = 0
@@ -200,15 +95,6 @@ pub fn read_message(): RpcMessage | error {
     body_to_message(body_bytes)
 }
 
-/**
- * find_crlf_crlf — the index of the first `CRLF CRLF` (header/body separator) in `bytes`, or
- * `null` when the four-byte sequence is absent. Pure scan, for `decode_frame_bytes` (the
- * stdin-free framing decoder the fixtures drive).
- *
- * @param bytes  the whole framed buffer
- * @return       the index of the first `\r` of the separator, or `null`
- * @since 0.3.1.0
- */
 fn find_crlf_crlf(bytes: []byte): u64 | null {
     if bytes.len < 4 { return null }
     var i: u64 = 0
@@ -220,17 +106,6 @@ fn find_crlf_crlf(bytes: []byte): u64 | null {
     null
 }
 
-/**
- * slice_bytes — a fresh `[]byte` holding `bytes[from..to]` (half-open). A small local copy since
- * there is no slice-of-slice builtin over `[]byte` here; the framing decoder needs the header and
- * body sub-ranges as independent buffers.
- *
- * @param bytes  the source buffer
- * @param from   the inclusive start index
- * @param to     the exclusive end index
- * @return       the copied sub-range
- * @since 0.3.1.0
- */
 fn slice_bytes(bytes: []byte, from: u64, to: u64): []byte {
     var out: []byte = teko::list::empty()
     var i = from
@@ -242,15 +117,6 @@ fn slice_bytes(bytes: []byte, from: u64, to: u64): []byte {
     out
 }
 
-/**
- * content_length_of_header_bytes — scan the header block bytes for the `Content-Length` value.
- * The header block is ASCII; it is decoded to a `str`, split on CRLF, and each line offered to
- * the same case-insensitive field matcher `read_message` uses, so the two paths agree.
- *
- * @param header  the header-block bytes (everything before the CRLF CRLF separator)
- * @return        the declared body length, or `null` when no valid `Content-Length` is present
- * @since 0.3.1.0
- */
 fn content_length_of_header_bytes(header: []byte): u64 | null {
     var text = match teko::text::str_from_utf8(header) { str as s => s; error => return null }
     var start: u64 = 0
@@ -273,18 +139,6 @@ fn content_length_of_header_bytes(header: []byte): u64 | null {
     null
 }
 
-/**
- * decode_frame_bytes — decode ONE complete `Content-Length`-framed message already sitting in a
- * `[]byte` buffer (the stdin-free twin of `read_message`, which the regression fixtures drive so
- * the framing is proven by matching printed STDOUT, not by an exit code). Finds the header/body
- * separator, reads the `Content-Length`, and requires the buffer to actually carry that many body
- * bytes — a short buffer is a truncated frame, the same hard error `read_message` raises.
- *
- * @param bytes  the whole framed buffer
- * @return       the decoded message, or `error` on a malformed / truncated frame
- * @throws       `malformed frame: ...` when the separator / length is absent or the body is short
- * @since 0.3.1.0
- */
 pub fn decode_frame_bytes(bytes: []byte): RpcMessage | error {
     var sep = match find_crlf_crlf(bytes) {
         u64 as s => s

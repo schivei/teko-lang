@@ -1,35 +1,7 @@
-/**
- * `teko::compress::gzip` — RFC 1952 gzip framing (a 10-byte header + CRC-32/ISIZE
- * trailer) around a raw DEFLATE stream. The default HTTP `Content-Encoding: gzip`
- * container.
- *
- * Public surface:
- *   pub fn gzip_compress(data: []byte): []byte
- *   pub fn gzip_decompress(data: []byte): []byte | error
- */
-
-/**
- * GZIP_MAGIC — the gzip magic header bytes (RFC 1952 §2.3.1): a two-element `[]byte`, `[0x1F, 0x8B]`.
- * A Tier-A aggregate const (#594 crumb 9b) — its bytes live once in rodata and every use site reads
- * through that single interned base.
- */
 pub const GZIP_MAGIC: []byte = [0x1F to byte, 0x8B to byte]
 
-/**
- * The gzip compression-method byte this module always emits.
- *
- * @return  `8` (DEFLATE — the only method RFC 1952 defines)
- */
 fn gzip_cm_deflate(): byte { 8 to byte }
 
-/**
- * The 10-byte gzip member header this module emits: magic, `CM = 8`, `FLG = 0` (no
- * optional fields — filename/comment/extra/header-CRC are all omitted), `MTIME = 0`
- * (deterministic output — no wall-clock timestamp), `XFL = 0`, `OS = 255` ("unknown",
- * the portable choice per RFC 1952 §2.3.1 when the host OS is not being recorded).
- *
- * @return  the fixed 10-byte header
- */
 fn gzip_header(): []byte {
     var out: []byte = teko::list::empty()
     var magic = GZIP_MAGIC
@@ -46,15 +18,8 @@ fn gzip_header(): []byte {
     out
 }
 
-/**
- * Compress `data` into a complete gzip member: the fixed 10-byte header, the raw
- * DEFLATE payload (`teko::compress::deflate`), and the little-endian CRC-32 + ISIZE
- * trailer of the ORIGINAL (uncompressed) bytes.
- *
- * @param data  the bytes to compress
- * @return      the framed gzip stream
- */
-pub fn gzip_compress(data: []byte): []byte {
+/** teko::compress::gzip_compress — compress `data` into a complete gzip member (RFC 1952). */
+exp fn gzip_compress(data: []byte): []byte {
     var out = gzip_header()
 
     var payload = teko::compress::deflate(data)
@@ -79,23 +44,11 @@ pub fn gzip_compress(data: []byte): []byte {
     out
 }
 
-/**
- * Decompress a complete gzip member (10-byte fixed header + DEFLATE payload + 8-byte
- * little-endian CRC-32/ISIZE trailer), verifying the magic, compression method, and
- * both trailer fields against the decompressed bytes. Optional gzip header fields
- * (`FLG` bits for filename/comment/extra/header-CRC) are rejected rather than skipped —
- * this module only reads members IT wrote (`FLG == 0`); a general-purpose reader
- * accepting arbitrary third-party gzip members is out of scope for this pass.
- *
- * @param data  the framed gzip stream
- * @return      the original (decompressed) bytes, or an `error` if the stream is too
- *              short, is not a gzip member, uses an unsupported compression method or
- *              optional header field, or its trailer does not match the decompressed
- *              data
- * @throws      when `data.len < 18`, the magic bytes mismatch, `CM != 8`, `FLG != 0`, or
- *              the trailing CRC-32/ISIZE mismatches
- */
-pub fn gzip_decompress(data: []byte): []byte | error {
+/** teko::compress::gzip_decompress — decompress a complete gzip member, verifying magic, method,
+ * and the CRC-32/ISIZE trailer; optional header fields are rejected (only members this module
+ * wrote are accepted).
+ * @throws when `data.len < 18`, the magic/method/flags are wrong, or the trailer mismatches. */
+exp fn gzip_decompress(data: []byte): []byte | error {
     if data.len < 18 { return error { message = "gzip: stream too short for header + trailer" } }
 
     var magic = GZIP_MAGIC

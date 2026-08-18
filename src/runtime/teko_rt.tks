@@ -1,135 +1,25 @@
-// ─── C7.14: concrete list type instantiations — SUPREME-RULE twin ─────────────
-// In C: teko_rt.h defines TK_RT_LIST(T, Name) and instantiates three concrete
-// growable-array types. Each generates a struct {T *ptr; size_t len; size_t cap}
-// plus three static-inline helpers (_empty / _push / _free). The instantiations:
-//
-//   TK_RT_LIST(tk_byte, tk_byte_list)  →  Teko surface: []byte
-//   TK_RT_LIST(tk_str,  tk_str_list)   →  Teko surface: []str
-//   TK_RT_LIST(int64_t, tk_i64_list)   →  Teko surface: []i64
-//
-// In Teko, the list type is `[]T`; `teko::list::empty()` creates an empty list
-// and `teko::list::push(xs, item)` appends one element (consume-and-return, value
-// semantics). These builtins are ALREADY used throughout teko_rt.tks (see
-// str_concat, u64_to_str, str_of_bytes, etc. below). No new Teko declarations
-// are needed — the language provides `[]T` natively. This block closes the
-// SUPREME-RULE gap: the C macro expansion in the header is twinned here with an
-// honest documentation of the Teko-surface equivalence. (C7.14)
-
-/**
- * teko::runtime — the EXECUTION runtime for GENERATED Teko programs (M.1 fail-loud). The metal
- * bottom: `print`/`println` write bytes to the host, the panics fail loud and abort, the F3
- * guards turn raw division and narrowing casts into checked ops that PANIC rather than corrupt.
- * This is the canonical Teko ORIGINAL of `src/runtime/teko_rt.{c,h}` — they must stay
- * SEMANTICALLY EQUIVALENT.
- *
- * THE METAL BOTTOM IS REAL, NOT DEFERRED. `extern fn` to a foreign symbol resolves and links
- * TODAY — proven elsewhere in this tree (`examples/probes/arena_bottom`, the bulk regression's
- * `q026`/`q170` bodies, `builtin_name_not_hijacked`'s `getpid`) — there is no missing compiler
- * primitive left to justify calling this bottom "deferred". `print`, `println`, `write`,
- * `ewrite`, `eprint`, `eprintln` below each DECLARE their OWN `extern fn` directly; none of them
- * delegates to a helper Teko function, and no new C is written by this file.
- *
- * WHY THE `str` PARAMETER STILL NAMES A `teko_rt` SYMBOL (an honest scope note). A general
- * `extern fn` parameter is restricted to a primitive/`byte`/`ptr`/`uptr`/`extern type` handle
- * (C7.1a) — `str` is a fat `{ptr, len}` pair, not one of those. The checker (C7.2) and the native
- * lowering (`lir/lower.tks::is_str_arg_builtin`) carry exactly ONE closed exception: a
- * `str`-taking `extern fn` declared `from "teko_rt"` whose bound symbol is one of seven names —
- * `tk_print`/`tk_println`/`tk_eprint`/`tk_eprintln`/`tk_write`/`tk_ewrite`/`tk_panic_str` — the
- * runtime's own io/panic group. That is the ONE door the compiler opens for a `str`-shaped host
- * call, and it is what every function below binds through. Widening that door to arbitrary
- * foreign symbols is a separate, larger compiler change — out of this file's scope.
- *
- * THE RESIDUAL THIS FILE DOES NOT CLOSE — B2, DEFERRED-NAMED (honest, not swept under the rug).
- * A bare `print(...)`/`write(...)`/`panic(...)` call anywhere in Teko source — including the
- * compiler's own — still lowers DIRECTLY to `tk_print`/`tk_write`/`tk_panic_str` via the native
- * backend's builtin dispatch (`lir/lower.tks::native_builtin_symbol`), never reaching the bodies
- * here; and the io declarations below themselves bind the `tk_*` symbols of `teko_rt.c`. That is
- * B2, the io->`tk_write` circularity of `docs/design/migracao-runtime-c-para-teko-0.3.1.md` §1.1.
- * It CANNOT be closed from this file alone with the current seed, and both candidate closures are
- * blocked OUTSIDE L0:
- *
- *   1. Reroute the bare-name dispatch to the bodies here. The io-symbol resolution lives ENTIRELY
- *      in `lir/lower.tks` (`native_builtin_symbol`/`call_symbol`/`builtin_io_symbol`, and
- *      `is_str_arg_builtin` keys the `str`-argument routing on the seven `tk_*` names) — a native
- *      call-lowering change that needs the full self-host gate to validate, NOT a `teko_rt.tks`
- *      edit.
- *   2. Bottom io at raw libc `write(fd, buf, n)` in Teko here. Blocked three ways: (a) `str` is
- *      barred as an `extern fn` parameter except the closed seven-symbol `from "teko_rt"`
- *      exception, which binds `tk_*` BY CONSTRUCTION (`checker/typer.tks::extern_type_ok` /
- *      `teko_rt_type_ok`), and the general str->(ptr,len) marshalling that would replace it
- *      (`teko::c_types`) is STAGED, not compiled (`staged/c_types/c_types.tks`); (b) the only
- *      in-seed way to take a `str`'s byte address is `teko::mem::as_ptr` -> `tk_as_ptr`, itself a
- *      `teko_rt` symbol, so it swaps one `tk_*` circularity for another; (c) `tk_write` carries the
- *      harness output-capture seam (`if (tk_chan_open) tk_chan_append(...)`, `teko_rt.c`), an L6
- *      concern a raw libc write would silently break.
- *
- * So B2 stays DEFERRED-NAMED: it opens the day the bare-name reroute lands in `lower.tks` behind
- * the native self-host gate (F3 in the migration roadmap). Until then a FULLY QUALIFIED
- * `teko::runtime::print(...)` (as `teko_rt_test.tkt` already does for e.g. `teko::runtime::str_eq`)
- * is the only spelling that reaches what is declared below.
- *
- * FAIL LOUD (M.1). Every panic prints "teko: deliberate panic: <msg>" to stderr and exits
- * non-zero. The word "deliberate" is the marker a regressor scenario asserts on instead of an
- * exit code — see TK_PANIC_MARKER in teko_rt.h for why the proof had to move to stderr.
- *
- * SINGLE-EVALUATION (F3). Each guard takes its operands BY VALUE — the caller computes each once
- * — so codegen never duplicates an operand subtree.
- *
- * @param s  the exact bytes to write to stdout, unchanged (no newline, no NUL added)
- */
+/** teko::runtime::print — write `s` to stdout verbatim (no newline, no NUL). */
 exp extern fn print(s: str) = "tk_print" from "teko_rt"
 
-/**
- * `print(s)` followed by a single `\n` (0x0A) on stdout.
- *
- * @param s  the bytes to write before the trailing newline
- */
+/** teko::runtime::println — `print(s)` followed by a newline. */
 exp extern fn println(s: str) = "tk_println" from "teko_rt"
 
-/**
- * Write exactly `s.len` bytes from `s` to stdout — no newline, no NUL. The same host bottom as
- * `print` (both bind the runtime's stdout-side twin); kept as a distinct name because
- * `teko::io` and the bare-name builtin surface both address it as `write`.
- *
- * @param s  the exact bytes to write, unchanged
- */
+/** teko::runtime::write — write `s` to stdout verbatim (no newline, no NUL). */
 exp extern fn write(s: str) = "tk_write" from "teko_rt"
 
-/**
- * Write exactly `s.len` bytes from `s` to stderr — no newline, no NUL.
- *
- * @param s  the exact bytes to write, unchanged
- */
+/** teko::runtime::ewrite — write `s` to stderr verbatim (no newline, no NUL). */
 exp extern fn ewrite(s: str) = "tk_ewrite" from "teko_rt"
 
-/**
- * Write exactly `s.len` bytes from `s` to stderr — no newline, no NUL. Behaviorally identical to
- * `ewrite`; kept as a distinct name because the bare-name builtin surface addresses a stderr
- * write as either `eprint` or `ewrite` depending on call site.
- *
- * @param s  the exact bytes to write, unchanged
- */
+/** teko::runtime::eprint — write `s` to stderr verbatim (no newline, no NUL). */
 exp extern fn eprint(s: str) = "tk_eprint" from "teko_rt"
 
-/**
- * `eprint(s)` followed by a single `\n` (0x0A) on stderr.
- *
- * @param s  the bytes to write before the trailing newline
- */
+/** teko::runtime::eprintln — `eprint(s)` followed by a newline. */
 exp extern fn eprintln(s: str) = "tk_eprintln" from "teko_rt"
 
-// float_parse — teko::float::parse(str): f64. strtod over a NUL-terminated copy of s
-// (s may contain no NUL and is not NUL-terminated); a non-numeric / empty string yields 0.0
-// (strtod's no-conversion result). The host strtod is the SAME deferred FFI bottom (C1) as the
-// other host edges; the C twin (teko_rt.c::tk_float_parse) carries the behavior. (C: tk_float_parse.)
 exp fn float_parse(s: str): f64 {
-    teko::float::parse(s)   // DEFERRED host strtod (FFI bottom — C1)
+    teko::float::parse(s)
 }
 
-// --- string interpolation `$"…{expr}…"` builders (self-host parity) ---
-// concat — a fresh str holding a's bytes then b's bytes; the result OWNS the buffer.
-// Leak-tolerant (M.5 — short-lived). Used by the lowering of `$"…"` (each piece/hole
-// concatenated). str(holes are stringified by int_to_str / passed through for str holes).
 exp fn str_concat(a: str, b: str): str {
     var xs: []byte = teko::list::empty()
     var i: u64 = 0
@@ -139,25 +29,16 @@ exp fn str_concat(a: str, b: str): str {
     str(xs)
 }
 
-/**
- * u64_to_str — the unsigned integer's DECIMAL text in a fresh `str`. The interp lowering widens
- * every unsigned int hole to u64 (and every signed one to i64, `i64_to_str`'s job): EVERY Teko
- * integer prim fits, since 64 bits is the language's widest integer. The checker scopes holes to
- * what the corpus needs.
- *
- * @param v  the value to render
- * @return   `v`'s decimal digits, most significant first ("0" when `v` is zero)
- */
+/** teko::runtime::u64_to_str — `v`'s decimal digits ("0" when `v` is zero). */
 exp fn u64_to_str(v: u64): str {
     if v == 0 { return "0" }
-    var digits: []byte = teko::list::empty()   // byte builder (indexed below — needs a concrete element)
+    var digits: []byte = teko::list::empty()
     var n = v
     loop {
         if n == 0 { break }
         digits = teko::list::push(digits, (b'0' to u64 + n % 10) to byte)
         n = n / 10
     }
-    // digits are least-significant first — reverse into the result.
     var xs: []byte = teko::list::empty()
     var k = digits.len
     loop { if k == 0 { break }; k = k - 1; xs = teko::list::push(xs, digits[k]) }
@@ -166,16 +47,10 @@ exp fn u64_to_str(v: u64): str {
 
 exp fn i64_to_str(v: i64): str {
     if v >= 0 { return u64_to_str(v to u64) }
-    var mag = ((-(v + 1)) to u64) + 1   // |i64::MIN| without overflow
+    var mag = ((-(v + 1)) to u64) + 1
     str_concat("-", u64_to_str(mag))
 }
 
-// --- Phase 3 str/byte stdlib (mirror of teko_rt.c's tk_str_of_bytes / tk_one_byte /
-// tk_str_concat3 / tk_ftoa). Same contract as str_concat — a fresh owned str, leak-tolerant
-// (M.5 — short-lived). These are the canonical originals of the four recognized builtins. ---
-
-// str_of_bytes — COPY a []byte slice into a fresh owned str (the `str` builtin aliases it).
-// A []byte slice indexes like a str view here; the C twin copies the {ptr,len} buffer.
 exp fn str_of_bytes(bytes: []byte): str {
     var xs: []byte = teko::list::empty()
     var i: u64 = 0
@@ -183,17 +58,12 @@ exp fn str_of_bytes(bytes: []byte): str {
     str(xs)
 }
 
-// one_byte — a fresh 1-byte str holding c.
 exp fn one_byte(c: byte): str {
     var xs: []byte = teko::list::empty()
     xs = teko::list::push(xs, c)
     str(xs)
 }
 
-// concat — the LEGISLATED public string-building API (`teko::string::concat` /
-// `teko::text::concat` — resolved by bare last segment like every other builtin, so any of
-// those spellings dispatch here): fold N pieces pairwise via str_concat. Removed `concat3`
-// (2026-07-01) — `params` (a variadic-parameter modifier) supersedes the fixed-arity form.
 exp fn concat(params pieces: []str): str {
     var acc = ""
     var i: u64 = 0
@@ -201,26 +71,10 @@ exp fn concat(params pieces: []str): str {
     acc
 }
 
-// ftoa — x rendered as %.17g float text (exact binary64 round-trip) in a fresh str. Teko has
-// no snprintf, so the true realization rides the host float renderer (the same DEFERRED FFI
-// bottom as print/panic — C1); the C twin (teko_rt.c::tk_ftoa) carries the behavior today.
 exp fn ftoa(x: f64): str {
-    teko::fmt::f64_g17(x)   // DEFERRED host float renderer (FFI bottom — C1)
+    teko::fmt::f64_g17(x)
 }
 
-/**
- * Left-pad `body` with `pad` bytes until its total length reaches `width`.
- *
- * Used by the zero-padded integer format (`$"{n:D5}"`). A `body` already at or beyond
- * `width` is returned unchanged; the padding is prepended, so a signed value's `-` is NOT
- * kept in front of the zeros (matching C's `%0*d`, whose padding placement is handled by the
- * caller when a sign is present — see `fmt_d`).
- *
- * @param body   the already-rendered digit text
- * @param width  the minimum total width to pad `body` up to
- * @param pad    the single byte used for each padding position
- * @return       `body` left-padded with `pad` to at least `width` bytes
- */
 fn pad_left(body: str, width: i64, pad: byte): str {
     var have = body.len to i64
     if have >= width { return body }
@@ -230,16 +84,6 @@ fn pad_left(body: str, width: i64, pad: byte): str {
     str_concat(str(xs), body)
 }
 
-/**
- * Insert a comma between every group of three decimal digits of `digits`, right-aligned.
- *
- * `digits` is the plain (sign-free) decimal text; the caller re-attaches any sign. Grouping
- * starts from the least-significant digit, so "1234567" becomes "1,234,567". A digit run of
- * three or fewer is returned unchanged.
- *
- * @param digits  the sign-free decimal digit text to group
- * @return        `digits` with a comma inserted after each group of three, from the right
- */
 fn group_thousands(digits: str): str {
     var n = digits.len to i64
     var xs: []byte = teko::list::empty()
@@ -254,18 +98,6 @@ fn group_thousands(digits: str): str {
     str(xs)
 }
 
-/**
- * Render the unsigned magnitude of `x` in base `radix` (2..=16) using `alphabet` for digits.
- *
- * The hex and binary format families lower to this: base 16 with an upper- or lower-case
- * digit alphabet, or base 2. Zero renders as a single "0". No sign is emitted (the families
- * that use this take an already-unsigned value).
- *
- * @param x         the unsigned magnitude to render
- * @param radix     the numeric base, 2 through 16
- * @param alphabet  the 16-byte digit table (index 0..radix-1 selects the digit byte)
- * @return          the base-`radix` text of `x`
- */
 fn to_radix(x: u64, radix: u64, alphabet: str): str {
     if x == 0 { return "0" }
     var digits: []byte = teko::list::empty()
@@ -281,17 +113,7 @@ fn to_radix(x: u64, radix: u64, alphabet: str): str {
     str(xs)
 }
 
-/**
- * fmt_d — `x` as decimal, zero-padded on the left to a minimum field `width` (`$"{n:D5}"`).
- *
- * Mirrors C's `%0*` `PRId64`: a negative value keeps its `-` in front of the zero padding, so
- * the sign occupies one of the `width` positions. A `width` at or below the natural digit
- * count leaves the value unpadded.
- *
- * @param x      the signed integer to render
- * @param width  the minimum total field width (including any sign)
- * @return       `x` in decimal, left-padded with zeros to at least `width` bytes
- */
+/** teko::runtime::fmt_d — `x` as decimal, zero-padded on the left to `width` (sign included). */
 exp fn fmt_d(x: i64, width: i64): str {
     if x >= 0 { return pad_left(i64_to_str(x), width, b'0') }
     var mag = ((-(x + 1)) to u64) + 1
@@ -299,117 +121,41 @@ exp fn fmt_d(x: i64, width: i64): str {
     str_concat("-", padded)
 }
 
-/**
- * fmt_x_upper — `x` as upper-case hexadecimal (`$"{n:X}"`), no `0x` prefix, no padding.
- *
- * @param x  the unsigned value to render
- * @return   the upper-case base-16 text of `x`
- */
+/** teko::runtime::fmt_x_upper — `x` as upper-case hexadecimal, no `0x` prefix, no padding. */
 exp fn fmt_x_upper(x: u64): str { to_radix(x, 16, "0123456789ABCDEF") }
 
-/**
- * fmt_x_lower — `x` as lower-case hexadecimal (`$"{n:x}"`), no `0x` prefix, no padding.
- *
- * @param x  the unsigned value to render
- * @return   the lower-case base-16 text of `x`
- */
+/** teko::runtime::fmt_x_lower — `x` as lower-case hexadecimal, no `0x` prefix, no padding. */
 exp fn fmt_x_lower(x: u64): str { to_radix(x, 16, "0123456789abcdef") }
 
-/**
- * fmt_b — `x` as binary (`$"{n:b}"`), no `0b` prefix, no padding, minimal width.
- *
- * @param x  the unsigned value to render
- * @return   the base-2 text of `x`
- */
+/** teko::runtime::fmt_b — `x` as binary, no `0b` prefix, no padding. */
 exp fn fmt_b(x: u64): str { to_radix(x, 2, "0123456789ABCDEF") }
 
-/**
- * fmt_n_i — `x` as decimal with a comma every three digits (`$"{n:N}"` on an integer hole).
- *
- * A negative value keeps its leading `-`; grouping applies only to the magnitude digits.
- *
- * @param x  the signed integer to render
- * @return   `x` in decimal with thousands separators
- */
+/** teko::runtime::fmt_n_i — `x` as decimal with a comma every three digits. */
 exp fn fmt_n_i(x: i64): str {
     if x >= 0 { return group_thousands(u64_to_str(x to u64)) }
     var mag = ((-(x + 1)) to u64) + 1
     str_concat("-", group_thousands(u64_to_str(mag)))
 }
 
-/**
- * fmt_f — `x` rounded to `prec` fractional digits, fixed-point (`$"{x:F2}"`).
- *
- * The float families bottom out at the host `%.*f`/`%.*e`/`%.*g` renderer — the SAME deferred
- * FFI edge (C1) `ftoa`/`f64_g17` bottom out at. Reproducing libc's binary64-to-decimal rounding
- * byte-for-byte in Teko needs a precision-aware host primitive the current seed does not yet
- * expose, so this body renders through the seed-known `ftoa` bottom; the C runtime
- * (teko_rt.c::tk_fmt_f) carries the precise `%.*f` behavior for native builds.
- *
- * @param x     the value to render
- * @param prec  the number of fractional digits (may be 0)
- * @return      `x` as fixed-point text with exactly `prec` fractional digits
- */
+/** teko::runtime::fmt_f — `x` rounded to `prec` fractional digits, fixed-point. */
 exp fn fmt_f(x: f64, prec: i64): str { ftoa(x) }
 
-/**
- * fmt_e — `x` in scientific notation with `prec` fractional mantissa digits (`$"{x:E3}"`).
- *
- * Deferred host bottom, like `fmt_f`; the C twin (teko_rt.c::tk_fmt_e) carries the `%.*e`
- * behavior for native builds.
- *
- * @param x     the value to render
- * @param prec  the number of fractional mantissa digits
- * @return      `x` in `d.dddde±dd` scientific text
- */
+/** teko::runtime::fmt_e — `x` in scientific notation with `prec` fractional mantissa digits. */
 exp fn fmt_e(x: f64, prec: i64): str { ftoa(x) }
 
-/**
- * fmt_g — `x` in the shorter of fixed/scientific with `prec` significant digits (`$"{x:G4}"`).
- *
- * Deferred host bottom, like `fmt_f`; the C twin (teko_rt.c::tk_fmt_g) carries the `%.*g`
- * behavior for native builds.
- *
- * @param x     the value to render
- * @param prec  the number of significant digits
- * @return      `x` in the shorter general representation
- */
+/** teko::runtime::fmt_g — `x` in the shorter of fixed/scientific with `prec` significant digits. */
 exp fn fmt_g(x: f64, prec: i64): str { ftoa(x) }
 
-/**
- * fmt_n_f — `x` as fixed-point with `prec` fractional digits AND thousands separators
- * (`$"{x:N2}"`).
- *
- * Deferred host bottom, like `fmt_f` (the `%.*f` render precedes the Teko grouping the C twin
- * teko_rt.c::tk_fmt_n_f performs for native builds).
- *
- * @param x     the value to render
- * @param prec  the number of fractional digits
- * @return      `x` as grouped fixed-point text (comma every three integer digits)
- */
+/** teko::runtime::fmt_n_f — `x` as fixed-point with `prec` fractional digits and thousands
+ * separators. */
 exp fn fmt_n_f(x: f64, prec: i64): str { ftoa(x) }
 
-/**
- * fmt_p — `x` scaled by 100 and rendered as a percentage with `prec` fractional digits and a
- * trailing `%` (`$"{x:P1}"`, so 0.25 → "25.0%").
- *
- * Deferred host bottom, like `fmt_f`; the C twin (teko_rt.c::tk_fmt_p) carries the `%.*f%%`
- * behavior for native builds.
- *
- * @param x     the fraction to render as a percent
- * @param prec  the number of fractional digits
- * @return      `x * 100` as fixed-point text followed by `%`
- */
+/** teko::runtime::fmt_p — `x * 100` as fixed-point text with `prec` fractional digits, followed
+ * by `%`. */
 exp fn fmt_p(x: f64, prec: i64): str { ftoa(x) }
 
-/**
- * fmt_dyn_f64 — dynamic-spec float formatting (`$"{x:[spec]}"`), dispatching on the first
- * spec byte (case-insensitive) with an optional trailing precision.
- *
- * @param x     the value to render
- * @param spec  the runtime spec string (e.g. "F2", "e3", "N", "p1")
- * @return      `x` formatted per `spec`; an empty/unknown spec falls back to `ftoa`
- */
+/** teko::runtime::fmt_dyn_f64 — dynamic-spec float formatting, dispatching on the spec's first
+ * byte (case-insensitive: `f`/`e`/`g`/`n`/`p`); an empty/unknown spec falls back to `ftoa`. */
 exp fn fmt_dyn_f64(x: f64, spec: str): str {
     if spec.len == 0 { return ftoa(x) }
     var prec = fmt_parse_prec(spec, 6)
@@ -422,13 +168,8 @@ exp fn fmt_dyn_f64(x: f64, spec: str): str {
     ftoa(x)
 }
 
-/**
- * fmt_dyn_i64 — dynamic-spec signed-integer formatting (`$"{n:[spec]}"`).
- *
- * @param x     the signed value to render
- * @param spec  the runtime spec string (e.g. "D5", "X", "b", "N")
- * @return      `x` formatted per `spec`; an empty/unknown spec falls back to decimal
- */
+/** teko::runtime::fmt_dyn_i64 — dynamic-spec signed-integer formatting (`d`/`x`/`X`/`b`/`n`); an
+ * empty/unknown spec falls back to decimal. */
 exp fn fmt_dyn_i64(x: i64, spec: str): str {
     if spec.len == 0 { return i64_to_str(x) }
     var prec = fmt_parse_prec(spec, 0)
@@ -443,13 +184,8 @@ exp fn fmt_dyn_i64(x: i64, spec: str): str {
     i64_to_str(x)
 }
 
-/**
- * fmt_dyn_u64 — dynamic-spec unsigned-integer formatting (`$"{u:[spec]}"`).
- *
- * @param x     the unsigned value to render
- * @param spec  the runtime spec string (e.g. "D5", "X", "b", "N")
- * @return      `x` formatted per `spec`; an empty/unknown spec falls back to decimal
- */
+/** teko::runtime::fmt_dyn_u64 — dynamic-spec unsigned-integer formatting (`d`/`x`/`X`/`b`/`n`);
+ * an empty/unknown spec falls back to decimal. */
 exp fn fmt_dyn_u64(x: u64, spec: str): str {
     if spec.len == 0 { return u64_to_str(x) }
     var prec = fmt_parse_prec(spec, 0)
@@ -464,30 +200,12 @@ exp fn fmt_dyn_u64(x: u64, spec: str): str {
     u64_to_str(x)
 }
 
-/**
- * Lower-case the leading byte of a dynamic format spec (ASCII A–Z → a–z), for the
- * case-insensitive family dispatch in the `fmt_dyn_*` helpers.
- *
- * @param spec  the runtime spec string (assumed non-empty by the callers)
- * @return      the spec's first byte, lower-cased if it was an upper-case ASCII letter
- */
 fn fmt_lead_lower(spec: str): byte {
     var c = spec[0]
     if c >= b'A' && c <= b'Z' { return (c to u64 + 32) to byte }
     c
 }
 
-/**
- * Parse the optional trailing decimal precision out of a dynamic format spec (e.g. "F2" → 2).
- *
- * Skips the leading non-digit family byte(s), then reads the digit run. A spec with no digits
- * yields `def`. The accumulator is clamped at 10000 (matching the C twin's FMT_PREC_MAX) so a
- * pathologically long digit run cannot overflow.
- *
- * @param spec  the runtime spec string
- * @param def   the precision to use when the spec carries no digits
- * @return      the parsed precision, or `def` when absent
- */
 fn fmt_parse_prec(spec: str, def: i64): i64 {
     var i = 0 to u64
     loop { if i >= spec.len { break }; var c = spec[i]; if c >= b'0' && c <= b'9' { break }; i++ }
@@ -504,13 +222,6 @@ fn fmt_parse_prec(spec: str, def: i64): i64 {
     p
 }
 
-// --- Phase 3 str query/slice builtins (mirror of teko_rt.c's tk_str_eq / tk_str_slice /
-// tk_str_slice_to / tk_str_slice_from / tk_str_len / tk_str_ends_with / tk_str_contains /
-// tk_f64_g17). The query helpers ALLOCATE NOTHING; the slice helpers return a fresh owned str
-// (str() copies the byte builder), and an out-of-range slice PANICS (M.1). ---
-
-// str_eq — same length AND same bytes. Compares byte-by-byte (the C twin uses memcmp; embedded
-// NUL tolerated). A zero-length pair is equal.
 exp fn str_eq(a: str, b: str): bool {
     if a.len != b.len { return false }
     var i: u64 = 0
@@ -518,14 +229,7 @@ exp fn str_eq(a: str, b: str): bool {
     true
 }
 
-/**
- * (TR3) FNV-1a over the str's bytes (offset basis 14695981039346656037, prime 1099511628211, u64
- * wraparound); an empty str hashes to the offset basis. The Teko twin of the C `tk_str_hash`; its
- * derivation matches `di_type_id` so a str-field structural `Hash` folds identically on both engines.
- *
- * @param s the string to hash
- * @return the FNV-1a hash of `s`'s bytes
- */
+/** teko::runtime::str_hash — the FNV-1a hash of `s`'s bytes. */
 exp fn str_hash(s: str): u64 {
     var h: u64 = 14695981039346656037
     var i: u64 = 0
@@ -533,15 +237,7 @@ exp fn str_hash(s: str): u64 {
     h
 }
 
-/**
- * (TR3) Lexicographic byte compare (unsigned): -1 (a < b) / 0 (equal) / 1 (a > b); when one str is a
- * prefix of the other the shorter one is the lesser. The Teko twin of the C `tk_str_cmp`; used by a
- * str-field structural `Ord`.
- *
- * @param a the left string
- * @param b the right string
- * @return -1, 0, or 1 as `a` orders before, equal to, or after `b`
- */
+/** teko::runtime::str_compare — lexicographic byte compare: -1 (a < b), 0 (equal), 1 (a > b). */
 exp fn str_compare(a: str, b: str): i64 {
     var n = if a.len < b.len { a.len } else { b.len }
     var i: u64 = 0
@@ -556,9 +252,6 @@ exp fn str_compare(a: str, b: str): i64 {
     0
 }
 
-// str_slice — the bytes [start, end) COPIED into a fresh owned str. An out-of-range slice
-// (start > end, or end past the byte length) PANICS (M.1, fail-loud). The empty slice
-// (start == end, in range) is a valid empty str.
 exp fn str_slice(s: str, start: u64, end: u64): str {
     if start > end || end > s.len { panic("string slice out of range") }
     var xs: []byte = teko::list::empty()
@@ -567,23 +260,18 @@ exp fn str_slice(s: str, start: u64, end: u64): str {
     str(xs)
 }
 
-// str_slice_to — slice from the start to `end`.
 exp fn str_slice_to(s: str, end: u64): str {
     str_slice(s, 0, end)
 }
 
-// str_slice_from — slice from `start` to the byte length.
 exp fn str_slice_from(s: str, start: u64): str {
     str_slice(s, start, s.len)
 }
 
-// str_len — the byte length (no allocation).
 exp fn str_len(s: str): u64 {
     s.len
 }
 
-// str_ends_with — the tail of s equals suffix. A suffix longer than s can't match; otherwise the
-// last suffix.len bytes are compared (the C twin uses memcmp). An empty suffix matches.
 exp fn str_ends_with(s: str, suffix: str): bool {
     if suffix.len > s.len { return false }
     var start = s.len - suffix.len
@@ -592,9 +280,6 @@ exp fn str_ends_with(s: str, suffix: str): bool {
     true
 }
 
-// str_contains — naive byte search: true iff needle occurs anywhere in s. An empty needle is
-// trivially contained; each candidate offset is compared against needle (the last offset is
-// s.len - needle.len, inclusive).
 exp fn str_contains(s: str, needle: str): bool {
     if needle.len == 0 { return true }
     if needle.len > s.len { return false }
@@ -611,162 +296,38 @@ exp fn str_contains(s: str, needle: str): bool {
     false
 }
 
-// f64_g17 — x as %.17g in a fresh owned str (the host float renderer; same behavior as ftoa,
-// riding the DEFERRED host edge — C1). The C twin (teko_rt.c::tk_f64_g17) carries it today.
 exp fn f64_g17(x: f64): str {
-    teko::fmt::f64_g17(x)   // DEFERRED host float renderer (FFI bottom — C1)
+    teko::fmt::f64_g17(x)
 }
 
-// --- ROUND 0 UTF-8 string / char builtins -----------------------------------------------
-// NOTE: len_chars(str):i64 and chars(str):[]char are injected BUILTINS (resolved by
-// tk_builtin_fn, NOT as user functions); codegen emits the C runtime twins directly
-// (tk_str_len_chars / tk_str_chars). No Teko function body is needed here —
-// attempting to write one would require `str to char` (undefined cast) for `chars`.
-// (This comment documents the design; both builtins are registered in scope.c + codegen.c/tks.)
-
-// NOTE: str_from_utf8(bytes: []byte): str | error is ALSO an injected BUILTIN (ROUND 0 /
-// B.36) — the user-facing validated bytes->str door, resolved by tk_builtin_fn/builtin_fn
-// like bytes_of_str. It is the SRES-shaped host-FFI bottom (same {ok,value,err} lift as
-// read_file/getenv, `sres_byteslice` kind — the []byte arg is split into ptr+len like
-// write_file_bytes's data arg): codegen lowers it to tk_rt_str_from_utf8 (emit_host_ffi).
-// No Teko function body is needed here — the RFC 3629 validation logic lives once, in teko_rt.c
-// (rt_valid_utf8), NOT duplicated in this .tks (the SUPREME RULE covers the runtime SEAM
-// signature/wiring, not a source-language reimplementation of a host-FFI bottom's guts —
-// same precedent as str_of_bytes/one_byte/read_file all bottoming out at deferred C1 edges).
-// (Distinct from teko::text::str_from_utf8 in src/text/text.tks — that is the COMPILER'S OWN
-// bootstrap door, used internally by the lexer/parser/driver to validate their own source
-// input; this builtin is the general-purpose surface any Teko PROGRAM can call.)
-
-// --- panics: fail loud (M.1) — message to stderr, then non-zero exit ---
-
-// (C1.9) NATIVE STACK TRACES — the C twin (teko_rt.c) prints a backtrace on panic and installs a
-// fatal-signal handler (SIGSEGV/BUS/ILL/FPE) so a generated program's crash shows the call stack.
-// Those use the host `signal`/`backtrace`/`backtrace_symbols_fd` — the SAME `extern` edge as
-// `teko::abort`, DEFERRED to the FFI work (C1/C2). Per-frame Teko file:line via `.tsym` is Eixo E3.
-// No Teko-surface mirror yet (host edge); the C twin carries the behavior. (See teko_rt.c.)
-
-// (S0) tk_alloc — the ALLOCATION SEAM the generated code uses (`malloc(n||1)`; tk_panic on OOM, M.1).
-// It hands back a RAW `void *` (a fresh, uniquely-addressable block — n→1 so a zero-size alloc still
-// yields a distinct pointer). Teko has NO raw-pointer surface (the type model is void/error/variant/
-// nullable — never an untyped address), so there is no faithful functional mirror: the host
-// malloc/OOM edge is the SAME deferred `extern`/syscall bottom as `teko::abort` / the host write.
-// The C twin (teko_rt.c::tk_alloc) carries the behavior; codegen emits `tk_alloc(...)` directly at
-// the boxing/copy-append seams. This note closes the SUPREME-RULE pairing HONESTLY rather than
-// inventing a pointer type Teko does not have. (C: tk_alloc.)
-
-// (S1) tk_region_new / tk_region_alloc / tk_region_drop / tk_region_root — the ARENA PRIMITIVE
-// (TEKO_EVOLUTION_DESIGN §5.2): a bump-allocator region (chunk-list, OOM-panics) plus the process
-// root region. Like tk_alloc above, these hand back RAW pointers (void * blocks and tk_region *
-// handles) into host memory — the SAME deferred extern/syscall host edge as tk_alloc / teko::abort.
-// Teko has NO raw-pointer surface (the type model is void/error/variant/nullable, never an untyped
-// address), so there is NO faithful functional mirror; inventing a pointer-typed signature would be
-// the lie the doctrine forbids. The C twin (teko_rt.c::tk_region_*) carries the behavior. This
-// closes the SUPREME-RULE pairing honestly.
-// (C: tk_region_new / tk_region_alloc / tk_region_drop / tk_region_root.)
-//
-// (S2, 2026-07-01) ARENA PARENT-PTR TREE + PER-ARENA REGISTRY — tk_region_new now takes the
-// enclosing region as its PARENT (NULL = no parent); codegen threads the correct C EXPRESSION at
-// each of its emission call sites (the function frame, the innermost open block region, or the
-// process root — see codegen.tks's cg_enclosing_region_expr / cg_enclosing_region_expr_framed,
-// which ARE faithfully mirrored in both engines since they operate on Teko-level region-name
-// STRINGS, not raw pointers). The runtime-side storage (tk_region_register/tk_region_lookup) stays
-// a RAW host-memory primitive with the same "no faithful functional mirror" honesty as the region
-// itself — a future DI `#scoped` feature is the first consumer that will make the checker/codegen
-// reason about WHICH type_id to register/look up (out of scope here — S2 only builds the tree +
-// registry primitive; nothing calls tk_region_register/tk_region_lookup yet).
-// (C: tk_region_new(parent) / tk_region_register / tk_region_lookup.)
-
-// (W9.3b) tk_regions_free_all — free EVERY still-live region (the root + every live scoped frame/block
-// region) and empty the registry, so an abnormal termination (panic/exit) does not leak the stack-local
-// scoped regions a diverging path skips dropping. The C twin (teko_rt.c) maintains an INTRUSIVE global
-// registry (tk_region_new prepends, tk_region_drop unlinks) and calls free_all at the termination choke
-// points: tk_panic*/tk_exit explicitly, plus an atexit hook for normal return. Like the region primitive
-// above, this operates on RAW host-memory handles (tk_region *) — there is NO faithful Teko-surface
-// mirror (the type model has no untyped address), so this note closes the SUPREME-RULE pairing honestly.
-// codegen emits nothing for it. (C: tk_regions_free_all.)
-
-/**
- * The libc process-abort primitive, reached DIRECTLY as a foreign symbol — `panic`'s termination
- * bottom. Zero parameters and a `void` return trivially satisfy the general `extern fn` typing
- * rule (C7.1a: a primitive, `byte`, `ptr`, `uptr`, an `extern type` handle, or absent — `void`
- * needs none of those), so this needs no `teko_rt` bypass: it is portable libc `abort()`, present
- * under the same name on every target this compiler ships for (POSIX and the Windows UCRT).
- *
- * @return  nothing (diverges — `abort()` never returns; it raises `SIGABRT` and the process ends)
- */
 exp extern fn rt_abort() = "abort" from "c"
 
-/**
- * panic — write the TK_PANIC_MARKER line (`"teko: deliberate panic: <msg>\n"`) to stderr, then a
- * stack trace (C1.9), then abort.
- *
- * The marker text is spelled here to mirror the C twin's `#define TK_PANIC_MARKER` (teko_rt.h),
- * which carries the contract and the rationale. In short: the abort's exit STATUS is manufactured
- * by whatever ran the child — a POSIX shell reports 128+SIGABRT, Windows reports something else
- * entirely — so the status can never be the proof that a guard fired. This line can, because
- * nothing but the program itself is able to write it.
- *
- * @param msg  the reason, rendered after the marker on the same line
- * @return     void (diverges — the host abort never returns)
- */
+/** teko::runtime::panic — write "teko: deliberate panic: <msg>" to stderr, then a stack trace,
+ * then abort. Diverges. */
 exp fn panic(msg: str) {
     ewrite(teko::str::concat("teko: deliberate panic: ", msg, "\n"))
     rt_abort()
 }
 
-/**
- * The division-by-zero panic (F3's checked `div`/`mod` guard).
- *
- * @return  nothing (diverges — see `panic`)
- */
+/** teko::runtime::panic_div0 — the division-by-zero panic. Diverges. */
 exp fn panic_div0() { panic("division by zero") }
 
-/**
- * The index-out-of-bounds panic (a slice/array access whose index is outside `[0, len)`).
- *
- * @return  nothing (diverges — see `panic`)
- */
+/** teko::runtime::panic_oob — the index-out-of-bounds panic. Diverges. */
 exp fn panic_oob() { panic("index out of bounds") }
 
-/**
- * The impossible-narrowing-conversion panic — the `x to T` guard (B.36 / M.1) fires this when
- * `x` does not fit `T`.
- *
- * @return  nothing (diverges — see `panic`)
- */
+/** teko::runtime::panic_cast — the impossible-narrowing-conversion panic. Diverges. */
 exp fn panic_cast() { panic("impossible conversion") }
 
-/**
- * The integer-overflow panic, reserved for the profile-dependent `+`/`-`/`*` overflow guard
- * (DEFERRED — not yet wired by codegen; this entry point exists for that future caller).
- *
- * @return  nothing (diverges — see `panic`)
- */
+/** teko::runtime::panic_overflow — the integer-overflow panic. Diverges. */
 exp fn panic_overflow() { panic("integer overflow") }
 
-/**
- * The POSITIONED out-of-bounds panic: prints `"line:col: "` then the canonical OOB panic, so the
- * The native backend locates index-out-of-bounds failures via `teko_rt.c::tk_panic_oob_at`. Globals
- * `_tk_cast_loc_line`/`_tk_cast_loc_col` (defined in `teko_rt.c`) carry the SAME position for the
- * cast guard: codegen wraps every `tk_to_*` call in a statement-expression that stores the cast
- * node's source position into those globals just before the call, and `tk_panic_cast()` reads them
- * to prefix `"line:col: "`.
- *
- * @param line  the 1-based source line of the failing index expression
- * @param col   the 1-based source column of the failing index expression
- * @return      nothing (diverges — see `panic`)
- */
+/** teko::runtime::panic_oob_at — the out-of-bounds panic, prefixed with `"line:col: "`.
+ * Diverges. */
 exp fn panic_oob_at(line: u32, col: u32) {
     ewrite(teko::str::concat(teko::u64_to_str(line to u64), ":", teko::u64_to_str(col to u64)))
     ewrite(": ")
     panic_oob()
 }
-
-// --- F3 checked division / modulo: panic on a zero divisor (no UB / SIGFPE) ---
-// One helper per signed/unsigned width in the seed; here the canonical form is the i64
-// shape — codegen selects the concrete width from the binary node's prim. (NOTE, out of
-// scope: overflow guarding for +,-,* is profile-dependent and DEFERRED; panic_overflow
-// above exists for that future wiring.)
 
 exp fn div(a: i64, b: i64): i64 {
     if b == 0 { panic_div0() }
@@ -777,11 +338,6 @@ exp fn mod(a: i64, b: i64): i64 {
     if b == 0 { panic_div0() }
     a % b
 }
-
-// --- F3 checked narrowing conversion: panic if the value can't fit the target ---
-// The source is widened to a carrier WITHOUT loss (codegen only emits these when the
-// SOURCE prim fits the carrier); the range check catches an out-of-range value and PANICS.
-// One helper per target width/signedness in the seed; the canonical shape is shown for u8.
 
 exp fn to_u8(v: i64): u8 {
     if v < 0 || v > 255 { panic_cast() }

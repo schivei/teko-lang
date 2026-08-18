@@ -1,17 +1,3 @@
-/**
- * src/io/stream_test.tkt — tests for STDLIB_CORE unit IO1 (teko::io byte-stream contract on
- * INTERFACE VALUES). Same namespace as src/io/stream.tks (tests live BESIDE the code — teko::io),
- * so type statics and free functions are called bare. Everything here is pure Teko: class stream
- * implementers up-cast into the `Reader`/`Writer` contracts and dispatch through their vtables, and
- * the combinators drive those dynamic values (docs/design/interface-value-type.md §3).
- */
-
-/**
- * buf_of — unwrap `Buf | error` where the error case is itself a test failure.
- *
- * @param result  the fallible Buf result
- * @return        the Buf, or an empty Buf after failing the test on the error case
- */
 fn buf_of(result: Buf | error): Buf {
     match result {
         Buf as b => b
@@ -19,12 +5,6 @@ fn buf_of(result: Buf | error): Buf {
     }
 }
 
-/**
- * count_of — unwrap `u64 | error` where the error case is itself a test failure.
- *
- * @param result  the fallible count result
- * @return        the count, or 0 after failing the test on the error case
- */
 fn count_of(result: u64 | error): u64 {
     match result {
         u64 as n => n
@@ -32,12 +12,6 @@ fn count_of(result: u64 | error): u64 {
     }
 }
 
-/**
- * text_of — unwrap `str | error` where the error case is itself a test failure.
- *
- * @param result  the fallible str result
- * @return        the string, or "" after failing the test on the error case
- */
 fn text_of(result: str | error): str {
     match result {
         str as s => s
@@ -45,12 +19,6 @@ fn text_of(result: str | error): str {
     }
 }
 
-/**
- * is_buf_error — is a `Buf | error` the error case?
- *
- * @param result  the fallible Buf result
- * @return        true iff `result` is the error case
- */
 fn is_buf_error(result: Buf | error): bool {
     match result {
         Buf => false
@@ -58,88 +26,29 @@ fn is_buf_error(result: Buf | error): bool {
     }
 }
 
-/**
- * FailReader — a `Reader` whose every read fails, for error-propagation tests.
- */
 type FailReader = class & Reader {
-    /**
-     * make — construct the always-failing reader.
-     *
-     * @return  the failing reader
-     */
     pub static fn make(): FailReader { FailReader { } }
 
-    /**
-     * read — always the error case.
-     *
-     * @param max  ignored
-     * @return     the read error
-     */
     pub fn read(max: u64): Buf | error { error { message = "boom" } }
 }
 
-/**
- * StuckWriter — a `Writer` that never takes a byte, for the no-progress guard.
- */
 type StuckWriter = class & Writer {
-    /**
-     * make — construct the stuck writer.
-     *
-     * @return  the stuck writer
-     */
     pub static fn make(): StuckWriter { StuckWriter { } }
 
-    /**
-     * write — accept nothing.
-     *
-     * @param from  ignored
-     * @return      0 (no progress)
-     */
     pub fn write(from: Buf): u64 | error { 0 to u64 }
 }
 
-/**
- * LiarWriter — a `Writer` that reports MORE bytes than offered, for the over-report guard.
- */
 type LiarWriter = class & Writer {
-    /**
-     * make — construct the over-reporting writer.
-     *
-     * @return  the liar writer
-     */
     pub static fn make(): LiarWriter { LiarWriter { } }
 
-    /**
-     * write — claim to have accepted more than offered.
-     *
-     * @param from  the offered region
-     * @return      an impossibly large count
-     */
     pub fn write(from: Buf): u64 | error { from.len() + 100 }
 }
 
-/**
- * HalfWriter — a `Writer` accepting at most HALF of each offered region (rounding up so a 1-byte
- * region still makes progress), appending the accepted prefix to an inner `MemWriter`. Drives the
- * rate-mismatched `write_all`/`TeeWriter` path.
- */
 type HalfWriter = class & Writer {
-    /** The backing accumulator the accepted prefixes land in. */
     pub inner: MemWriter
 
-    /**
-     * make — a half-taker over a fresh accumulator.
-     *
-     * @return  the half writer
-     */
     pub static fn make(): HalfWriter { HalfWriter { inner = MemWriter::empty() } }
 
-    /**
-     * write — accept the first `ceil(len/2)` bytes and append them.
-     *
-     * @param from  the offered region
-     * @return      the accepted count, or an error
-     */
     pub fn write(from: Buf): u64 | error {
         var total = from.len()
         if total == 0 { return 0 to u64 }
@@ -149,9 +58,6 @@ type HalfWriter = class & Writer {
     }
 }
 
-/**
- * buf_construction_and_len — the value-region constructors and length/byte accessors.
- */
 #test
 fn buf_construction_and_len() {
     teko::assert::is_true(Buf::empty().len() == 0)
@@ -164,9 +70,6 @@ fn buf_construction_and_len() {
     teko::assert::is_true(raw[2] == b'c')
 }
 
-/**
- * buf_is_a_value_growing_returns_new — a Buf is a value: every grow returns a NEW Buf.
- */
 #test
 fn buf_is_a_value_growing_returns_new() {
     var buf = Buf::from_str("ab")
@@ -180,10 +83,6 @@ fn buf_is_a_value_growing_returns_new() {
     teko::assert::is_true(grown.len() == 3)
 }
 
-/**
- * null_stream_reads_nothing_and_discards_everything — the discard sink / empty source, dispatched as
- * interface values.
- */
 #test
 fn null_stream_reads_nothing_and_discards_everything() {
     var sink = NullStream::make()
@@ -196,9 +95,6 @@ fn null_stream_reads_nothing_and_discards_everything() {
     teko::assert::is_true(closed)
 }
 
-/**
- * null_stream_seek_contract — the seek math on the always-empty stream.
- */
 #test
 fn null_stream_seek_contract() {
     var sink = NullStream::make()
@@ -212,10 +108,6 @@ fn null_stream_seek_contract() {
     teko::assert::is_true(rejected)
 }
 
-/**
- * mem_reader_seek_whence_math — Start/Current/End seek arithmetic, past-end allowed, negative
- * rejected.
- */
 #test
 fn mem_reader_seek_whence_math() {
     var reader = MemReader::of_str("abcdefgh")
@@ -234,9 +126,6 @@ fn mem_reader_seek_whence_math() {
     teko::assert::is_true(rejected)
 }
 
-/**
- * read_all_drains_the_stream — `read_all` runs a dynamic `Reader` to EOF.
- */
 #test
 fn read_all_drains_the_stream() {
     var reader = MemReader::of_str("hello, teko")
@@ -248,9 +137,6 @@ fn read_all_drains_the_stream() {
     teko::assert::is_true(buf_of(read_all(empty_reader)).len() == 0)
 }
 
-/**
- * read_exact_demands_the_count — exactly `count` bytes, EOF-before-count is an error.
- */
 #test
 fn read_exact_demands_the_count() {
     var reader = MemReader::of_str("hello, teko")
@@ -260,9 +146,6 @@ fn read_exact_demands_the_count() {
     teko::assert::is_true(is_buf_error(read_exact(reader, 7)))
 }
 
-/**
- * write_all_guards_against_no_progress — a stalled or over-reporting writer is an error.
- */
 #test
 fn write_all_guards_against_no_progress() {
     var stuck = StuckWriter::make()
@@ -279,10 +162,6 @@ fn write_all_guards_against_no_progress() {
     teko::assert::is_true(caught)
 }
 
-/**
- * buf_writer_holds_until_capacity — a `BufWriter` holds writes until capacity, then drains; `flush`
- * pushes the remainder.
- */
 #test
 fn buf_writer_holds_until_capacity() {
     var writer = MemWriter::empty()
@@ -298,10 +177,6 @@ fn buf_writer_holds_until_capacity() {
     teko::assert::is_true(count_of(buffered.flush()) == 0)
 }
 
-/**
- * tee_writer_mirrors_into_both_sinks — a `TeeWriter` fans each write into two sinks, even a
- * rate-mismatched one.
- */
 #test
 fn tee_writer_mirrors_into_both_sinks() {
     var primary = MemWriter::empty()
@@ -312,9 +187,6 @@ fn tee_writer_mirrors_into_both_sinks() {
     teko::assert::is_true(text_of(secondary.inner.content().to_str()) == "hello, teko")
 }
 
-/**
- * combinators_propagate_stream_errors — a genuine read/write error surfaces through every combinator.
- */
 #test
 fn combinators_propagate_stream_errors() {
     teko::assert::is_true(is_buf_error(read_all(FailReader::make())))

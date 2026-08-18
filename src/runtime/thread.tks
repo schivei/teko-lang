@@ -1,50 +1,13 @@
-/** STACK_BYTES — a spawned thread's fixed stack size: 2 MiB, the glibc default thread-stack size. */
 const STACK_BYTES: u64 = 2097152
 
-/** GUARD_BYTES — the `PROT_NONE` guard page laid at the LOW end of a thread stack (stacks grow down
- *  toward it) so an overflow faults on the guard instead of silently corrupting the mapping below it.
- *  One page. */
 const GUARD_BYTES: u64 = 4096
 
-/**
- * os_mprotect — libSystem `int mprotect(void *addr, size_t len, int prot)`, the macOS call that arms
- * a thread-stack guard page (the FFI-of-the-OS-ABI real implementation, not a raw Darwin syscall).
- * The `os_mmap`/`os_munmap` family it pairs with is declared once in `arena.tks` (same `teko::runtime`
- * namespace) and reused here; this thread-only member lives beside its sole caller `thr_guard`.
- *
- * @param addr  the base address of the pages to reprotect (the stack's low end)
- * @param len   the byte length to reprotect (`GUARD_BYTES`)
- * @param prot  the new page protection (`PROT_NONE`)
- * @return      0 on success, or -1 on error — discarded by the caller
- */
 #os("macos")
 extern fn os_mprotect(addr: u64, len: u64, prot: i32): i32 = "mprotect" from "System"
 
-/**
- * VirtualProtect — kernel32 `BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD newProt,
- * PDWORD oldProt)`, the Windows call that arms a thread-stack guard page. `oldProt` is an OUT
- * pointer to a `DWORD` receiving the previous protection, passed as a scratch-word address (`u64`).
- *
- * @param addr      the base address of the pages to reprotect (the stack's low end)
- * @param size      the byte length to reprotect (`GUARD_BYTES`)
- * @param new_prot  the new page protection (`PAGE_NOACCESS`)
- * @param old_prot  the address of a `DWORD` scratch word receiving the previous protection
- * @return          non-zero on success, 0 on error — discarded by the caller
- */
 #os("windows")
 extern fn VirtualProtect(addr: u64, size: u64, new_prot: u32, old_prot: u64): i32 = "VirtualProtect" from "kernel32"
 
-/**
- * thr_mmap — map `length` bytes of anonymous private read/write memory through the raw `mmap`
- * syscall, the backing store a spawned thread's stack is carved from. Returns the page-aligned base
- * address, or 0 when the kernel refuses (a result in the `[-4095, -1]` `-errno` error band). This is
- * the Linux arm: the `SYS_MMAP`/`PROT_*`/`MAP_*` numbers live in `teko::sys` behind `#os("linux")`
- * guards, so the whole trio is `#os`-split and the macOS/Windows arms below reach the same memory
- * through the platform ABI instead of a Linux-only constant.
- *
- * @param length  the mapping size in bytes; the kernel rounds it up to whole pages
- * @return        the page-aligned base address, or 0 when the kernel refuses
- */
 #os("linux")
 fn thr_mmap(length: u64): u64 {
     var result = teko::sys::syscall6(teko::sys::SYS_MMAP, 0, length to i64,
@@ -54,14 +17,6 @@ fn thr_mmap(length: u64): u64 {
     result to u64
 }
 
-/**
- * The macOS arm of `thr_mmap`: maps the stack's backing store through libSystem's `mmap` (declared
- * in `arena.tks`, reused across the shared `teko::runtime` namespace). Darwin signals failure with
- * `MAP_FAILED` (`(void*)-1`), so the sentinel comparison is against `MAP_FAILED_WORD`.
- *
- * @param length  the mapping size in bytes; the kernel rounds it up to whole pages
- * @return        the page-aligned base address, or 0 when the kernel refuses
- */
 #os("macos")
 fn thr_mmap(length: u64): u64 {
     var r = os_mmap(0, length, teko::sys::PROT_READ | teko::sys::PROT_WRITE,
@@ -70,107 +25,43 @@ fn thr_mmap(length: u64): u64 {
     r
 }
 
-/**
- * The Windows arm of `thr_mmap`: reserves and commits the stack's backing store through kernel32's
- * `VirtualAlloc` (declared in `arena.tks`, reused across the shared `teko::runtime` namespace). A
- * NULL (0) return already IS the "no mapping" contract, so it is returned unchanged.
- *
- * @param length  the mapping size in bytes; the system rounds it up to whole pages
- * @return        the base address, or 0 when the system refuses
- */
 #os("windows")
 fn thr_mmap(length: u64): u64 {
     VirtualAlloc(0, length, teko::sys::MEM_COMMIT | teko::sys::MEM_RESERVE, teko::sys::PAGE_READWRITE)
 }
 
-/**
- * thr_guard — turn the first `GUARD_BYTES` of a freshly mapped stack into a `PROT_NONE` guard page
- * through the raw `mprotect` syscall, so a stack overflow (stacks grow DOWN toward the low end)
- * faults on the guard rather than corrupting the mapping beneath it. The result is discarded: a
- * guard that fails to arm degrades to an unguarded — but still usable — stack. This is the Linux arm.
- *
- * @param low  the stack mapping's base (low) address, as `thr_mmap` returned
- * @return      nothing
- */
 #os("linux")
 fn thr_guard(low: u64) {
     _ = teko::sys::syscall3(teko::sys::SYS_MPROTECT, low to i64, GUARD_BYTES to i64,
         teko::sys::PROT_NONE)
 }
 
-/**
- * The macOS arm of `thr_guard`: arms the `PROT_NONE` guard page through libSystem's `mprotect`.
- *
- * @param low  the stack mapping's base (low) address, as `thr_mmap` returned
- * @return      nothing
- */
 #os("macos")
 fn thr_guard(low: u64) {
     _ = os_mprotect(low, GUARD_BYTES, teko::sys::PROT_NONE)
 }
 
-/**
- * The Windows arm of `thr_guard`: arms the `PAGE_NOACCESS` guard page through kernel32's
- * `VirtualProtect`. `VirtualProtect` writes the previous protection through an OUT pointer, so an
- * 8-byte scratch word is carved from the per-task arena (`buf_ptr`) to receive it.
- *
- * @param low  the stack mapping's base (low) address, as `thr_mmap` returned
- * @return      nothing
- */
 #os("windows")
 fn thr_guard(low: u64) {
     var old = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
     _ = VirtualProtect(low, GUARD_BYTES, teko::sys::PAGE_NOACCESS, old)
 }
 
-/**
- * thread_stack_free — release a stack obtained from `thread_stack_new` through the raw `munmap`
- * syscall (plano §10 §4.1). The stack top the allocator returned is `STACK_BYTES` above the mapping
- * low, so the whole region — guard page and all — is `munmap(top - STACK_BYTES, STACK_BYTES)`. This
- * is the Linux arm.
- *
- * @param stack_top  the stack top `thread_stack_new` returned
- * @return           nothing
- */
 #os("linux")
 pub fn thread_stack_free(stack_top: u64) {
     _ = teko::sys::syscall2(teko::sys::SYS_MUNMAP, (stack_top - STACK_BYTES) to i64, STACK_BYTES to i64)
 }
 
-/**
- * The macOS arm of `thread_stack_free`: releases the whole stack region through libSystem's `munmap`
- * (declared in `arena.tks`, reused across the shared `teko::runtime` namespace).
- *
- * @param stack_top  the stack top `thread_stack_new` returned
- * @return           nothing
- */
 #os("macos")
 pub fn thread_stack_free(stack_top: u64) {
     _ = os_munmap(stack_top - STACK_BYTES, STACK_BYTES)
 }
 
-/**
- * The Windows arm of `thread_stack_free`: releases the whole stack region through kernel32's
- * `VirtualFree` with `MEM_RELEASE` (declared in `arena.tks`, reused across the shared
- * `teko::runtime` namespace); the base is the mapping's low end, as `MEM_RELEASE` requires.
- *
- * @param stack_top  the stack top `thread_stack_new` returned
- * @return           nothing
- */
 #os("windows")
 pub fn thread_stack_free(stack_top: u64) {
     _ = VirtualFree(stack_top - STACK_BYTES, 0, teko::sys::MEM_RELEASE)
 }
 
-/**
- * thread_stack_new — allocate a spawned thread's stack (plano §10 §4.1): one `STACK_BYTES` anonymous
- * private mapping with a `GUARD_BYTES` `PROT_NONE` guard laid at its LOW end (stacks grow down, so
- * the guard is what a stack overflow hits first). Returns the STACK TOP — the highest usable
- * address, the `stack_top` the §10 `thread_clone` intrinsic (M3) hands the kernel — or 0 when the
- * mapping fails. The caller frees the whole region with `thread_stack_free(stack_top)`.
- *
- * @return  the stack's top (highest) address, or 0 when the mapping fails
- */
 pub fn thread_stack_new(): u64 {
     var low = thr_mmap(STACK_BYTES)
     if low == 0 { return 0 }

@@ -1,30 +1,5 @@
-/**
- * `teko::compress::zlib` — RFC 1950 zlib framing (a 2-byte header + Adler-32 trailer)
- * around a raw DEFLATE stream. Used by PNG, HTTP `Content-Encoding: deflate`, and many
- * wire formats.
- *
- * Public surface:
- *   pub fn zlib_compress(data: []byte): []byte
- *   pub fn zlib_decompress(data: []byte): []byte | error
- */
-
-/**
- * `ZLIB_CMF` — the zlib `CMF` byte this module always emits: `CM = 8` (DEFLATE),
- * `CINFO = 7` (a 32K window — the largest RFC 1950 allows, always valid
- * regardless of how small the actual back-reference window used happens to
- * be).
- */
 const ZLIB_CMF: u32 = 0x78
 
-/**
- * Choose the `FLG` byte completing a zlib header (RFC 1950 §2.2): `FDICT = 0` (no
- * preset dictionary — this module never uses one) and the `FCHECK` low 5 bits set so
- * that `(CMF * 256 + FLG) mod 31 == 0`. The `FLEVEL` bits (a compression-level hint,
- * bits 6-7) are left `0` — decoders must accept any value there.
- *
- * @param cmf  the header's `CMF` byte (see `ZLIB_CMF`)
- * @return     the `FLG` byte pairing with `cmf` to satisfy the header checksum
- */
 fn zlib_flg(cmf: u32): u32 {
     var header = cmf * 256
     var remainder = header % 31
@@ -32,15 +7,8 @@ fn zlib_flg(cmf: u32): u32 {
     31 - remainder
 }
 
-/**
- * Compress `data` into a complete zlib stream: the 2-byte header, the raw DEFLATE
- * payload (`teko::compress::deflate`), and the big-endian Adler-32 trailer of the
- * ORIGINAL (uncompressed) bytes.
- *
- * @param data  the bytes to compress
- * @return      the framed zlib stream
- */
-pub fn zlib_compress(data: []byte): []byte {
+/** teko::compress::zlib_compress — compress `data` into a complete zlib stream (RFC 1950). */
+exp fn zlib_compress(data: []byte): []byte {
     var cmf = ZLIB_CMF
     var flg = zlib_flg(cmf)
     var out: []byte = teko::list::empty()
@@ -63,20 +31,11 @@ pub fn zlib_compress(data: []byte): []byte {
     out
 }
 
-/**
- * Decompress a complete zlib stream (2-byte header + DEFLATE payload + 4-byte
- * big-endian Adler-32 trailer), verifying both the header checksum and the trailing
- * Adler-32 against the decompressed bytes.
- *
- * @param data  the framed zlib stream
- * @return      the original (decompressed) bytes, or an `error` if the stream is too
- *              short, uses an unsupported compression method, fails its header check,
- *              or its trailing Adler-32 does not match the decompressed data
- * @throws      when `data.len < 6`, `CM != 8`, `(CMF*256+FLG) mod 31 != 0`, `FDICT` is
- *              set (a preset dictionary — unsupported), or the trailing checksum
- *              mismatches
- */
-pub fn zlib_decompress(data: []byte): []byte | error {
+/** teko::compress::zlib_decompress — decompress a complete zlib stream, verifying the header
+ * checksum and the trailing Adler-32.
+ * @throws when `data.len < 6`, `CM != 8`, the header check fails, `FDICT` is set, or the
+ * trailing checksum mismatches. */
+exp fn zlib_decompress(data: []byte): []byte | error {
     if data.len < 6 { return error { message = "zlib: stream too short for header + trailer" } }
 
     var cmf = data[0] to u32

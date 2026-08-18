@@ -1,35 +1,16 @@
-/**
- * FileReader — expose a file's whole contents as a one-shot `Reader` VALUE: the first `read` slurps
- * `path` and yields the entire file as one Buf (or the read error), and every later `read` yields
- * EOF (an empty Buf). A CLASS, so the "already delivered" flag advances across dispatched reads (the
- * class arena-mutation rule); it up-casts into `Reader` and drives any combinator (`copy`, `read_all`).
- *
- * True streaming `read` needs the arena-backed mutable Buf half (the N-KEYSTONE, documented in
- * `stream.tks`); until then a file stream is the whole buffer lifted into the contract. `read` calls
- * the `read_file` extern, which requires native codegen (foreign calls, C7.1a).
- */
-pub type FileReader = class & Reader {
+/** FileReader — a one-shot `Reader` over a whole file: the first `read` slurps `path` and yields
+ * it as one Buf, every later `read` yields EOF. */
+exp type FileReader = class & Reader {
     /** The path read on the first pull. */
     pub path: str
     /** Whether the file's contents have already been handed out. */
     pub delivered: bool
 
-    /**
-     * of — a file reader over `path`, positioned before its (single) whole-buffer read.
-     *
-     * @param path  the file to read on the first pull
-     * @return      the constructed reader
-     */
+    /** of — a file reader over `path`. */
     pub static fn of(path: str): FileReader { FileReader { path = path; delivered = false } }
 
-    /**
-     * read — on the first call, slurp the whole file (the read error rides the `Buf | error`
-     * channel); on every later call, yield EOF.
-     *
-     * @param max  the requested chunk size (ignored — the whole file is one chunk)
-     * @return     the file bytes on the first call, then the empty chunk, or the read error
-     * @throws     the `read_file` error on a genuine read failure
-     */
+    /** read — on the first call, slurp the whole file; on every later call, yield EOF.
+     * @return the file bytes on the first call, then the empty chunk, or the read error. */
     pub fn read(max: u64): Buf | error {
         if self.delivered { return Buf::empty() }
         self.delivered = true
@@ -40,17 +21,8 @@ pub type FileReader = class & Reader {
     }
 }
 
-/**
- * file_flush — commit a `MemWriter`'s accumulated bytes to `path` via the `write_file_bytes` extern
- * (NATIVE-only). A `MemWriter` IS a `Writer`, so any combinator (`copy`, `write_all`) can drive it;
- * this seals the result to disk.
- *
- * @param path  the destination path
- * @param sink  the accumulator whose bytes are written out
- * @return      null on success, or the write error
- * @throws      the `write_file_bytes` error when the path could not be written
- * @since IO1
- */
-pub fn file_flush(path: str, sink: MemWriter): error | null {
+/** file_flush — commit a `MemWriter`'s accumulated bytes to `path`.
+ * @return null on success, or the write error. */
+exp fn file_flush(path: str, sink: MemWriter): error | null {
     write_file_bytes(path, sink.content().bytes())
 }

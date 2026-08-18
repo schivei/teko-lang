@@ -1,28 +1,9 @@
-/**
- * tdir — a hermetic scratch directory for one fixture, under THIS run's own root so parallel gate
- * shards (each in its own process, each minting its own `run_id`) never collide, and created eagerly
- * so a segment file can be opened inside it.
- *
- * @param tag  a per-fixture label kept distinct from every other fixture's
- * @return     the created directory
- * @since 0.3.1
- */
 fn tdir(tag: str): str {
     var dir = teko::str::concat(run_root(), "/jt_", tag)
     match mkdir_p(dir) { error => { }; null => { } }
     dir
 }
 
-/**
- * has_record — whether `recs` holds a record of exactly `kind` and `payload`, the shape every fold
- * fixture asserts on (it names the record it expects rather than a count).
- *
- * @param recs     the folded records
- * @param kind     the kind to find
- * @param payload  the payload to find
- * @return         true iff a matching record is present
- * @since 0.3.1
- */
 fn has_record(recs: []Record, kind: str, payload: str): bool {
     var i: u64 = 0
     loop {
@@ -33,35 +14,14 @@ fn has_record(recs: []Record, kind: str, payload: str): bool {
     false
 }
 
-/**
- * dir_absent — whether `path` names no listable directory, the way a fixture reads "this root was
- * reclaimed" (a removed directory no longer lists; a present one lists, if only as empty).
- *
- * @param path  a directory path
- * @return      true iff `path` cannot be listed
- * @since 0.3.1
- */
 fn dir_absent(path: str): bool {
     match teko::fs::list_dir(path) { []str => false; error => true }
 }
 
-/**
- * plant_segment — write `content` verbatim as the segment file `name` inside `dir`, the way the
- * hygiene fixtures forge a torn or foreign-run segment `fold` then has to clean.
- *
- * @param dir      the directory to write into
- * @param name     the segment file's basename
- * @param content  the exact bytes of the segment
- * @since 0.3.1
- */
 fn plant_segment(dir: str, name: str, content: str) {
     match teko::io::write_file(teko::str::concat(dir, "/", name), content) { error => { }; null => { } }
 }
 
-/**
- * j_append_then_fold_returns_the_record — the append→fold round trip through the writer seam: one
- * `ok probe` written, and `fold` reads it back.
- */
 #test
 fn j_append_then_fold_returns_the_record() {
     var dir = tdir("append")
@@ -73,11 +33,6 @@ fn j_append_then_fold_returns_the_record() {
     teko::assert::is_true(has_record(fold(dir, "r1"), "ok", "probe"))
 }
 
-/**
- * j_append_raw_writes_the_line_verbatim — the unstructured half `teko::process::verdict_emit`
- * reuses: no run stamp, no writer, no kind — exactly the bytes handed in, plus one newline. Two
- * calls prove it is genuinely APPEND (the second line does not replace the first).
- */
 #test
 fn j_append_raw_writes_the_line_verbatim() {
     var path = teko::str::concat(tdir("appendraw"), "/chan")
@@ -87,10 +42,6 @@ fn j_append_raw_writes_the_line_verbatim() {
     teko::assert::eq_str(content, "first line\nsecond line\n")
 }
 
-/**
- * j_append_raw_names_the_failure_when_the_path_cannot_be_opened — a directory that does not exist
- * (no parent created for it, unlike `scratch`) answers the named error rather than panicking.
- */
 #test
 fn j_append_raw_names_the_failure_when_the_path_cannot_be_opened() {
     match append_raw("/definitely/not/a/real/directory/chan", "x") {
@@ -99,10 +50,6 @@ fn j_append_raw_names_the_failure_when_the_path_cannot_be_opened() {
     }
 }
 
-/**
- * j_a_record_of_another_run_is_discarded — hygiene rule 1 (§4): a line stamped with another run is
- * dropped by `fold`, and only this run's record survives.
- */
 #test
 fn j_a_record_of_another_run_is_discarded() {
     var dir = tdir("otherrun")
@@ -114,10 +61,6 @@ fn j_a_record_of_another_run_is_discarded() {
     teko::assert::is_false(has_record(recs, "ok", "theirs"))
 }
 
-/**
- * j_a_torn_last_line_is_dropped — hygiene rule 2 (§4): a final line with no trailing newline is a
- * torn write, and `fold` keeps only the completed line before it.
- */
 #test
 fn j_a_torn_last_line_is_dropped() {
     var dir = tdir("torn")
@@ -129,10 +72,6 @@ fn j_a_torn_last_line_is_dropped() {
     teko::assert::is_false(has_record(recs, "ok", "torn"))
 }
 
-/**
- * j_a_segment_without_end_yields_incomplete — hygiene rule 3 (§4): a segment that opened a test but
- * wrote no terminal kind is folded with a synthetic `incomplete` naming the test it died in.
- */
 #test
 fn j_a_segment_without_end_yields_incomplete() {
     var dir = tdir("noend")
@@ -140,10 +79,6 @@ fn j_a_segment_without_end_yields_incomplete() {
     teko::assert::is_true(has_record(fold(dir, "r1"), KIND_INCOMPLETE, "test_x"))
 }
 
-/**
- * j_a_closed_segment_is_not_synthesised_incomplete — the inversion of rule 3: a segment that DID
- * write an `end` is left alone, so the synthetic `incomplete` is not a blind default.
- */
 #test
 fn j_a_closed_segment_is_not_synthesised_incomplete() {
     var dir = tdir("closed")
@@ -153,10 +88,6 @@ fn j_a_closed_segment_is_not_synthesised_incomplete() {
     teko::assert::is_false(has_record(fold(dir, "r1"), KIND_INCOMPLETE, "test_y"))
 }
 
-/**
- * j_open_append_fold_roundtrips_the_public_api — the whole §2.2 public surface in one path:
- * `open`/`run_id`/`run_root`/`append`/`fold` agree on a record written to this run's real root.
- */
 #test
 fn j_open_append_fold_roundtrips_the_public_api() {
     var j = match open("m") {
@@ -167,11 +98,6 @@ fn j_open_append_fold_roundtrips_the_public_api() {
     teko::assert::is_true(has_record(fold(run_root(), run_id()), "ok", "public_probe"))
 }
 
-/**
- * j_sweep_reclaims_a_dead_root_but_spares_keep_and_live — `sweep`'s two guards, both exercised on a
- * hermetic tree: a dead root (no live lock) is reclaimed WITH its children, while the kept root and a
- * root whose lock names THIS live process are both spared.
- */
 #test
 fn j_sweep_reclaims_a_dead_root_but_spares_keep_and_live() {
     var root = tdir("sweep")
@@ -190,11 +116,6 @@ fn j_sweep_reclaims_a_dead_root_but_spares_keep_and_live() {
     teko::assert::eq_u64(removed, 1)
 }
 
-/**
- * j2_claim_root_refuses_a_fresh_collision_with_a_live_root — the ferrolho of design §11.3: a FRESH
- * run id (never inherited via `TEKO_RUN`) landing on a root some OTHER live process already holds is
- * a NAMED refusal, never a silent share.
- */
 #test
 fn j2_claim_root_refuses_a_fresh_collision_with_a_live_root() {
     var dir = tdir("ferrolho-fresh")
@@ -205,11 +126,6 @@ fn j2_claim_root_refuses_a_fresh_collision_with_a_live_root() {
     }
 }
 
-/**
- * j2_claim_root_allows_an_inherited_run_to_share_a_live_root — the inversion: the SAME live root and
- * the SAME lock, but `fresh = false` (a `TEKO_RUN` this process inherited) is never refused — that is
- * the deliberate multi-writer sharing §1.1 describes, not a conflict.
- */
 #test
 fn j2_claim_root_allows_an_inherited_run_to_share_a_live_root() {
     var dir = tdir("ferrolho-inherited")
@@ -220,11 +136,6 @@ fn j2_claim_root_allows_an_inherited_run_to_share_a_live_root() {
     }
 }
 
-/**
- * j2_record_self_pid_never_erases_an_earlier_writers_pid — the multi-writer fix itself: a second
- * writer claiming an already-locked root APPENDS its pid instead of overwriting the first one's, so
- * the lock still names every sibling that ever claimed the root.
- */
 #test
 fn j2_record_self_pid_never_erases_an_earlier_writers_pid() {
     var dir = tdir("multi-pid")
@@ -236,12 +147,6 @@ fn j2_record_self_pid_never_erases_an_earlier_writers_pid() {
     teko::assert::eq_i64(pids[1], pid_rt())
 }
 
-/**
- * j2_root_is_live_when_any_recorded_pid_is_alive — `root_is_live`'s multi-writer reading: a root
- * whose lock names one dead-looking pid AND one truly live one (this process's own) still reads live,
- * because ANY sibling still running is enough (§1.1: a root outlives the FIRST writer to finish, not
- * only the last).
- */
 #test
 fn j2_root_is_live_when_any_recorded_pid_is_alive() {
     var dir = tdir("multi-live")
@@ -250,22 +155,11 @@ fn j2_root_is_live_when_any_recorded_pid_is_alive() {
     teko::assert::is_true(root_is_live(dir))
 }
 
-/**
- * j_scratch_ends_with_its_base — `scratch` keeps the caller's base as the tail of the composed path,
- * whether a test scope is active (a rooted path ending in `base`) or not (`base` unchanged).
- */
 #test
 fn j_scratch_ends_with_its_base() {
     teko::assert::str_ends_with(scratch("probe.txt"), "probe.txt")
 }
 
-/**
- * j3_regr_work_dir_scopes_like_every_other_family — journal J3, family #15 (journaling-de-corrida-0.3.1
- * §3.3): `teko::build::REGR_WORK_DIR` — the root `run_regression_sources` now scopes, and the base every
- * one of families #17-20 derives from through its `prefix` chain — composes through THIS file's own
- * `scratch`, exactly like every other caller: rooted under this run and this test's own identity, still
- * ending in the same base.
- */
 #test
 fn j3_regr_work_dir_scopes_like_every_other_family() {
     var scoped = scratch(teko::build::REGR_WORK_DIR)
@@ -274,18 +168,6 @@ fn j3_regr_work_dir_scopes_like_every_other_family() {
     teko::assert::ne_str(scoped, teko::build::REGR_WORK_DIR)
 }
 
-/**
- * j5_a_polite_signal_note_is_a_folded_stop_record — the polite-signal note of §6, proven through the
- * EXACT writer the handler runs (`tk_rt_stop_handler` does nothing but `tk_journal_note(sig)` then
- * restore-default-and-re-raise). `open` arms the `stop` head, the note writer appends the signal
- * number, and `fold` reads a terminal `stop` record carrying it — so a run that a signal ended reads
- * as stopped, never as passed.
- *
- * WHY NOT AN OS SIGNAL HERE. Delivering a real SIGTERM re-raises the default and terminates the
- * process — the handler's whole point — which would kill this test shard before it could read the
- * segment. The note WRITER is exercised directly; the signal that CALLS it is proven by the handler
- * body itself.
- */
 #test
 fn j5_a_polite_signal_note_is_a_folded_stop_record() {
     var dir = tdir("j5note")
@@ -298,28 +180,10 @@ fn j5_a_polite_signal_note_is_a_folded_stop_record() {
     teko::assert::is_true(has_record(fold(dir, "r1"), KIND_STOP, "15"))
 }
 
-/**
- * j4_rec — one synthetic `Record`, the literal §13.6 fixtures build from (`summarize` is pure, so no
- * segment file and no real run are needed to exercise it).
- *
- * @param run      the shared run stamp every fixture record carries
- * @param writer   the writer identity
- * @param kind     the record kind
- * @param payload  the record body
- * @return         the record
- * @since 0.3.1
- */
 fn j4_rec(run: str, writer: str, kind: str, payload: str): Record {
     Record { run = run; writer = writer; kind = kind; payload = payload }
 }
 
-/**
- * j4_planted_records — a fail, two named skips, and a dead writer, planted across one synthetic run
- * — the §13.6 fixture `js_the_summary_names_every_finding` folds.
- *
- * @return  the planted records
- * @since 0.3.1
- */
 fn j4_planted_records(): []Record {
     var recs: []Record = teko::list::empty()
     recs = teko::list::push(recs, j4_rec("jt4", "s1", KIND_FAIL, "js_planted_failure\tassertion failed: eq_u64(0, 1)"))
@@ -329,16 +193,6 @@ fn j4_planted_records(): []Record {
     recs
 }
 
-/**
- * j4_records_of_a_dead_shard — a single writer that declared `plan` tests, produced `verdicts` `ok`
- * records, and then died (a synthetic `incomplete`, since no real segment is read here) — the fixture
- * `js_a_dead_writer_cannot_read_as_passed` folds.
- *
- * @param plan      how many tests the writer declared it would run
- * @param verdicts  how many verdicts it actually produced before dying
- * @return          the synthetic records
- * @since 0.3.1
- */
 fn j4_records_of_a_dead_shard(plan: u64, verdicts: u64): []Record {
     var recs: []Record = teko::list::empty()
     recs = teko::list::push(recs, j4_rec("jt4dead", "s2", KIND_PLAN, $"{plan}"))
@@ -352,11 +206,6 @@ fn j4_records_of_a_dead_shard(plan: u64, verdicts: u64): []Record {
     recs
 }
 
-/**
- * j4_summarize_names_every_finding — the inversion of §13.6: fed a fail, two skips, and a dead
- * writer, `render_summary(summarize(...))` names all four. A summary that only COUNTED them would
- * pass a test that asserted numbers; this asserts NAMES.
- */
 #test
 fn j4_summarize_names_every_finding() {
     var block = render_summary(summarize(j4_planted_records()))
@@ -366,11 +215,6 @@ fn j4_summarize_names_every_finding() {
     teko::assert::str_contains(block, "never-ran")
 }
 
-/**
- * j4_an_empty_run_is_a_failure_not_a_green — the vivacity arm: zero records means the run produced
- * nothing, and a summary that rendered "0 failed" with the air of green over zero records is exactly
- * the blind guard that read ZERO three times on a tree that kept stopping.
- */
 #test
 fn j4_an_empty_run_is_a_failure_not_a_green() {
     var block = render_summary(summarize(teko::list::empty()))
@@ -378,10 +222,6 @@ fn j4_an_empty_run_is_a_failure_not_a_green() {
     teko::assert::str_absent(block, "run PASSED")
 }
 
-/**
- * j4_a_dead_writer_cannot_read_as_passed — a shard that dies mid-way cannot round up to green, and
- * `never_ran` has to be exactly the gap to the `plan` it declared.
- */
 #test
 fn j4_a_dead_writer_cannot_read_as_passed() {
     var s = summarize(j4_records_of_a_dead_shard(300, 9))
@@ -390,10 +230,6 @@ fn j4_a_dead_writer_cannot_read_as_passed() {
     teko::assert::str_absent(render_summary(s), "run PASSED")
 }
 
-/**
- * j4_summarize_tallies_pass_fail_skip_by_phase — a sanity pass over the tally itself: a unit `ok`
- * and a regression `fail` land in their own phase AND in `TOTAL`, never crossed.
- */
 #test
 fn j4_summarize_tallies_pass_fail_skip_by_phase() {
     var recs: []Record = teko::list::empty()
@@ -408,11 +244,6 @@ fn j4_summarize_tallies_pass_fail_skip_by_phase() {
     teko::assert::eq_u64(s.failed.total, 1)
 }
 
-/**
- * j4_with_coverage_replaces_only_the_coverage_fields — `with_coverage` completes a `summarize`d
- * verdict without disturbing anything it already carried (the seam a caller holding the merged
- * sinks uses; `summarize` itself never touches `cov`/`cov_missing` beyond zeroing them).
- */
 #test
 fn j4_with_coverage_replaces_only_the_coverage_fields() {
     var summary = summarize(j4_planted_records())
@@ -427,14 +258,6 @@ fn j4_with_coverage_replaces_only_the_coverage_fields() {
 }
 
 #test
-/**
- * j4_a_clean_run_reads_as_passed — the positive of vivacity: a run where every writer declared a
- * plan, reached every verdict, and closed with `end` is the ONLY shape that reads `run PASSED`.
- * Without it, nothing proves the green path renders green — only that the failing ones don't.
- *
- * @throws quando uma corrida limpa não fecha `run PASSED`, ou vaza um marcador `run FAILED`
- * @since 0.3.1
- */
 fn j4_a_clean_run_reads_as_passed() {
     var recs: []Record = teko::list::empty()
     recs = teko::list::push(recs, j4_rec("jt4green", "s0", KIND_PLAN, "2"))
@@ -453,16 +276,6 @@ fn j4_a_clean_run_reads_as_passed() {
 }
 
 #test
-/**
- * j4_a_planned_writer_that_never_ended_is_dead — the death route the canonical `incomplete`
- * detection alone missed: a writer that declared a plan, reached a few verdicts, and died with NO
- * terminal record and NO synthetic `incomplete` (a plain fixture, not one `fold` produced) is DEAD
- * all the same, and `never_ran` is the gap to its plan. Proves `is_dead`'s `has_plan && !has_end`
- * arm (ported from `journal-impl`, §3 of the reconciliation) is alive.
- *
- * @throws quando um escritor com plano e sem fecho não conta como morto nem enche o never-ran
- * @since 0.3.1
- */
 fn j4_a_planned_writer_that_never_ended_is_dead() {
     var recs: []Record = teko::list::empty()
     recs = teko::list::push(recs, j4_rec("jt4nofin", "s2", KIND_PLAN, "5"))
@@ -475,15 +288,6 @@ fn j4_a_planned_writer_that_never_ended_is_dead() {
 }
 
 #test
-/**
- * j4_a_cov_record_folds_into_the_triple — the measurement transported in the journal itself (spec
- * §3.8): a six-field `cov` record is decoded by `cov_of_payload` and summed into the triple, and a
- * writer with a plan but no `cov` bumps `cov_missing`. Proves the fold exists before any emitter
- * does.
- *
- * @throws quando o triplo não reflete o registro `cov`, ou o `cov_missing` não vê o dump ausente
- * @since 0.3.1
- */
 fn j4_a_cov_record_folds_into_the_triple() {
     var recs: []Record = teko::list::empty()
     recs = teko::list::push(recs, j4_rec("jt4cov", "s0", KIND_PLAN, "1"))
@@ -503,29 +307,6 @@ fn j4_a_cov_record_folds_into_the_triple() {
     teko::assert::eq_u64(s.cov_missing, 1)
 }
 
-/**
- * jn_shard_index_of_parses_the_leading_digits — the ordinary shape `TEKO_TEST_SHARD` is written in
- * (`emit_test_channel_open`'s pairing gate, `project.tks::gate_shard_spec`).
- *
- * ===== WIRING HOOKS START HERE (owner order) ===== `shard_index_of`/`test_writer`/payload
- * shapers/the shared open-append-close body, below.
- *
- * NOTE ON WHAT IS AND IS NOT CALLED THROUGH THE REAL WRITER HERE. `jn_open_append_close_*` calls
- * the shared private body directly with a writer id ("jt-hook-probe") that names neither `s<i>` nor
- * `r0` — `phase_of` (journal/summary.tks) maps any writer outside those two shapes to phase "",
- * EXCLUDED from every tally — so this exercises the real open/append/close mechanics without adding
- * a single count to this run's own unit/regression totals. `note_test_begin`/`note_test_ok` ARE
- * called directly below through their real public names (a few tests down); the other four
- * (`note_test_panicked`/`note_test_exited`/`note_row_fail`/`note_row_skip`) are proved instead via
- * the same pure shapers `note_open_append_close`'s callers already build their payloads with
- * (`fail_payload`, `exited_reason`) plus the harness id trick, so a FUTURE `--replay` of this run's
- * own journal is never handed a clearly-fake "FAILED"/"SKIPPED" finding to explain — the four
- * one-line dispatch bodies themselves are exercised for real the moment any compiled program's own
- * `#test` panics/exits or a regression row genuinely fails/is skipped, which the corpus's own
- * fail/skip-shaped regressions already do.
- *
- * @return void
- */
 #test
 fn jn_shard_index_of_parses_the_leading_digits() {
     teko::assert::eq_u64(shard_index_of("0/4"), 0)
@@ -533,11 +314,6 @@ fn jn_shard_index_of_parses_the_leading_digits() {
     teko::assert::eq_u64(shard_index_of("12/16"), 12)
 }
 
-/**
- * jn_shard_index_of_is_zero_when_malformed — unset, empty, non-numeric, or a bare non-numeric lead
- * all answer 0 — the same "no sharding" reading the runtime's own `tk_shard_parse` gives, so an
- * unsharded run and a malformed one both write to writer `s0`.
- */
 #test
 fn jn_shard_index_of_is_zero_when_malformed() {
     teko::assert::eq_u64(shard_index_of(""), 0)
@@ -545,32 +321,17 @@ fn jn_shard_index_of_is_zero_when_malformed() {
     teko::assert::eq_u64(shard_index_of("/4"), 0)
 }
 
-/**
- * jn_fail_payload_joins_label_and_reason — the shape `finding_of`/`payload_label`/`payload_reason`
- * (journal/summary.tks) split back apart: label, one tab, reason.
- */
 #test
 fn jn_fail_payload_joins_label_and_reason() {
     teko::assert::eq_str(fail_payload("ns::name", "panicked"), teko::str::concat("ns::name", FIELD_SEP, "panicked"))
 }
 
-/**
- * jn_exited_reason_names_the_code — the reason a `note_test_exited` payload carries, including the
- * boundary value 0 (a test CAN legitimately call `exit(0)`, and that is still not a pass — the
- * capture's own `HOW_EXITED` never collapses into `HOW_OK`).
- */
 #test
 fn jn_exited_reason_names_the_code() {
     teko::assert::eq_str(exited_reason(7), "exited 7")
     teko::assert::eq_str(exited_reason(0), "exited 0")
 }
 
-/**
- * jn_test_writer_reads_the_shard_env_and_restores_it — proves both branches of `test_writer`
- * (a parsed shard, and the "s0" fallback) while leaving `TEKO_TEST_SHARD` exactly as this process
- * found it, so no later test (in any order — the reshuffle axis, E1) reads a value this one left
- * behind.
- */
 #test
 fn jn_test_writer_reads_the_shard_env_and_restores_it() {
     var prior = teko::env::var(TEST_SHARD_ENV)
@@ -584,10 +345,6 @@ fn jn_test_writer_reads_the_shard_env_and_restores_it() {
     }
 }
 
-/**
- * jn_open_append_close_round_trips_through_fold — the shared body every hook calls: open a segment
- * under a harmless writer id, append one record, close the descriptor, and read it back via `fold`.
- */
 #test
 fn jn_open_append_close_round_trips_through_fold() {
     note_open_append_close("jt-hook-probe", KIND_OK, "jn_open_append_close_round_trips_through_fold")
@@ -595,12 +352,6 @@ fn jn_open_append_close_round_trips_through_fold() {
     teko::assert::is_true(has_record(recs, KIND_OK, "jn_open_append_close_round_trips_through_fold"))
 }
 
-/**
- * jn_open_append_close_shapes_a_fail_record_like_note_test_panicked_would — proves the FAIL/SKIP
- * shape (`fail_payload`) the way `note_test_panicked`/`note_test_exited`/`note_row_fail`/
- * `note_row_skip` build it, under the same harmless writer id, instead of calling those four through
- * their real `s<shard>`/`r0` writers (§the section header above).
- */
 #test
 fn jn_open_append_close_shapes_a_fail_record_like_note_test_panicked_would() {
     var label = "jn_open_append_close_shapes_a_fail_record_like_note_test_panicked_would"
@@ -613,13 +364,6 @@ fn jn_open_append_close_shapes_a_fail_record_like_note_test_panicked_would() {
     teko::assert::is_true(has_record(recs, KIND_SKIP, fail_payload(label, "no such tool")))
 }
 
-/**
- * jn_note_test_begin_then_ok_writes_through_the_real_writer — the two hooks whose real effect on
- * this run's own tally is harmless BY CONSTRUCTION (a `begin`+`ok` pair for one clearly-named fake
- * label adds exactly one already-balanced `passed` count, never a `failed`/`skipped`/`dead` one) are
- * called through their REAL public names and REAL `test_writer()`, so the dispatch line itself — not
- * only the shape it builds — is exercised.
- */
 #test
 fn jn_note_test_begin_then_ok_writes_through_the_real_writer() {
     var label = "jn_note_test_begin_then_ok_writes_through_the_real_writer (journal wiring probe)"
@@ -630,11 +374,6 @@ fn jn_note_test_begin_then_ok_writes_through_the_real_writer() {
     teko::assert::is_true(has_record(recs, KIND_OK, label))
 }
 
-/**
- * jn_note_row_begin_writes_through_the_real_row_writer — same reasoning as the pair above, for the
- * regression writer's `begin`: it is the one `note_row_*` hook that can never read as a failure or a
- * skip on a future `--replay`, so it alone is exercised through the real `ROW_WRITER`.
- */
 #test
 fn jn_note_row_begin_writes_through_the_real_row_writer() {
     var label = "jn_note_row_begin_writes_through_the_real_row_writer (journal wiring probe)"
@@ -643,13 +382,6 @@ fn jn_note_row_begin_writes_through_the_real_row_writer() {
     teko::assert::is_true(has_record(recs, KIND_BEGIN, label))
 }
 
-/**
- * jn_note_test_end_and_note_row_end_write_a_terminal_kind — `KIND_END` carries no tally weight
- * (`summarize`'s loop only ever inspects `ok`/`fail`/`skip`/`incomplete`), so an extra one here, on
- * top of whatever the real harness/driver later writes, changes no printed count — only whether
- * `fold_segment` ever has reason to synthesise `incomplete` for this segment, which this run's own
- * termination already answers for real once the wiring below runs it.
- */
 #test
 fn jn_note_test_end_and_note_row_end_write_a_terminal_kind() {
     note_test_end()

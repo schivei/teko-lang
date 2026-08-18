@@ -3,64 +3,23 @@ use teko::parser
 use teko::lexer
 use teko::checker
 
-/**
- * DiagSeverity — the LSP severity of a diagnostic: Error, Warning, Info, or Hint. The protocol
- * encodes these as the integers 1..4 (`severity_code`); the enum keeps the wire mapping in one place
- * so a producer names an intent rather than a magic number.
- *
- * @since 0.3.1.0 (LSP crumb A)
- */
 pub type DiagSeverity = enum { Error; Warning; Info; Hint }
 
-/**
- * LspDiagnostic — one positioned, structured diagnostic ready to encode as an LSP `Diagnostic`. It
- * carries a RANGE (start and end, both 0-based as the protocol demands) and a severity — the two
- * facts the checker's flat `file:line:col: msg` string loses. The range's start is the reported
- * position; its end extends over the identifier token under that position (`word_end_col`) so the
- * editor draws a visible squiggle instead of a zero-width caret.
- *
- * @since 0.3.1.0 (LSP crumb A)
- */
 pub type LspDiagnostic = struct {
-    /** the 0-based line of the range start. */
-    start_line: u32
-    /** the 0-based character (UTF-16-agnostic byte column) of the range start. */
-    start_col: u32
-    /** the 0-based line of the range end (same as `start_line` for a single-token range). */
-    end_line: u32
-    /** the 0-based character just past the range end. */
-    end_col: u32
-    /** Error / Warning / Info / Hint. */
-    severity: DiagSeverity
-    /** the diagnostic text, with the `file:line:col` prefix already stripped. */
-    message: str
+        start_line: u32
+        start_col: u32
+        end_line: u32
+        end_col: u32
+        severity: DiagSeverity
+        message: str
 }
 
-/**
- * ParsedNum — the result of reading a decimal `u32` run out of a string: the value, the index just
- * past the last digit, and whether any digit was actually consumed (`ok` false ⇒ the position held
- * no number).
- *
- * @since 0.3.1.0 (LSP crumb A)
- */
 type ParsedNum = struct {
-    /** the parsed value (0 when `ok` is false). */
-    value: u32
-    /** the index of the first byte after the digit run. */
-    next: u64
-    /** true when at least one digit was read. */
-    ok: bool
+        value: u32
+        next: u64
+        ok: bool
 }
 
-/**
- * severity_code — the protocol integer for `s`: Error 1, Warning 2, Info 3, Hint 4, as an `f64` (the
- * one JSON numeric grammar). A `match` rather than an enum-to-int cast so the mapping is explicit and
- * survives any reordering of the enum.
- *
- * @param s  the severity
- * @return   the LSP `DiagnosticSeverity` code as a JSON number
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn severity_code(s: DiagSeverity): f64 {
     match s {
         DiagSeverity::Error => 1.0
@@ -70,17 +29,6 @@ fn severity_code(s: DiagSeverity): f64 {
     }
 }
 
-/**
- * checker_severity — the LSP's own `DiagSeverity` for the checker's `checker::DiagLevel` (crumb D):
- * a structural re-tag between the two packages' nominally distinct twin enums (`teko::checker` must not
- * depend on `teko::lsp`, so they cannot share one type — `checker::Diagnostic`'s own doc). Severity is
- * now known at each finding's SOURCE (`checker::collect_diagnostics_structured`), never sniffed from the
- * rendered message text — the fragile v1 heuristic this function replaces.
- *
- * @param s  the checker's severity
- * @return   the equivalent LSP severity
- * @since 0.3.1.0 (LSP crumb D)
- */
 fn checker_severity(s: checker::DiagLevel): DiagSeverity {
     match s {
         checker::DiagLevel::Error => DiagSeverity::Error
@@ -90,14 +38,6 @@ fn checker_severity(s: checker::DiagLevel): DiagSeverity {
     }
 }
 
-/**
- * is_ident_byte — is `b` a byte an identifier token is made of (ASCII letter, digit, or `_`)? Used to
- * extend a diagnostic's range over the whole word under its start position.
- *
- * @param b  the byte to classify
- * @return   true for `A`..`Z` / `a`..`z` / `0`..`9` / `_`
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn is_ident_byte(b: byte): bool {
     if b >= b'a' && b <= b'z' { return true }
     if b >= b'A' && b <= b'Z' { return true }
@@ -105,15 +45,6 @@ fn is_ident_byte(b: byte): bool {
     b == b'_'
 }
 
-/**
- * line_start_offset — the byte offset in `text` where the 1-based `line1` begins (0 for line 1, the
- * byte after the `line1-1`-th newline otherwise). A line past the end of `text` yields `text.len`.
- *
- * @param text   the whole document
- * @param line1  the 1-based line number
- * @return       the byte offset of the line's first character
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn line_start_offset(text: str, line1: u32): u64 {
     if line1 <= 1 { return 0 }
     var cur: u32 = 1
@@ -128,17 +59,6 @@ fn line_start_offset(text: str, line1: u32): u64 {
     }
 }
 
-/**
- * word_end_col — the 1-based EXCLUSIVE column just past the identifier token that starts at
- * (`line1`, `col1`) in `text`. When that position does not hold an identifier byte (an operator, a
- * literal, end of line), the range is one column wide, so the squiggle is still visible.
- *
- * @param text   the whole document
- * @param line1  the 1-based line of the token start
- * @param col1   the 1-based column of the token start
- * @return       the 1-based column just past the token (at least `col1 + 1`)
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn word_end_col(text: str, line1: u32, col1: u32): u32 {
     if col1 == 0 { return 1 }
     var start = line_start_offset(text, line1)
@@ -156,21 +76,6 @@ fn word_end_col(text: str, line1: u32, col1: u32): u32 {
     c
 }
 
-/**
- * make_diag — build an `LspDiagnostic` from a 1-based (`line1`, `col1`) checker position, an EXPLICIT
- * severity, and a message, converting to the protocol's 0-based range and extending the end over the
- * token under the start. A `line1` of 0 (an unpositioned diagnostic) collapses to a zero range at the
- * document top. `severity` is always the CALLER's own — this function never sniffs it from `message`
- * (crumb D removed that heuristic; see `checker_severity`).
- *
- * @param text     the whole document (read to extend the range over the token)
- * @param line1    the 1-based line (0 when unknown)
- * @param col1     the 1-based column (0 when unknown)
- * @param sev      the diagnostic's severity
- * @param message  the diagnostic text
- * @return         the structured, ranged diagnostic
- * @since 0.3.1.0 (LSP crumb A; severity parameterized crumb D)
- */
 fn make_diag(text: str, line1: u32, col1: u32, sev: DiagSeverity, message: str): LspDiagnostic {
     if line1 == 0 {
         return LspDiagnostic { start_line = 0; start_col = 0; end_line = 0; end_col = 0; severity = sev; message = message }
@@ -183,30 +88,10 @@ fn make_diag(text: str, line1: u32, col1: u32, sev: DiagSeverity, message: str):
     LspDiagnostic { start_line = sl; start_col = sc; end_line = sl; end_col = ec; severity = sev; message = message }
 }
 
-/**
- * to_lsp_diagnostic — the LSP's `LspDiagnostic` for one checker `Diagnostic` (crumb D): the SAME
- * position-to-range widening `make_diag` always did (the checker has no source buffer to widen a range
- * over the flagged token — only the open document's `text`, which the LSP holds, can), but the
- * severity now flows straight from `d.severity` through `checker_severity` instead of being re-derived
- * from `d.message`'s own text.
- *
- * @param text  the document buffer (read to extend the range over the token)
- * @param d     the checker's structured diagnostic
- * @return      the ranged, severity-tagged `LspDiagnostic`
- * @since 0.3.1.0 (LSP crumb D)
- */
 fn to_lsp_diagnostic(text: str, d: checker::Diagnostic): LspDiagnostic {
     make_diag(text, d.line, d.col, checker_severity(d.severity), d.message)
 }
 
-/**
- * read_u32 — read a decimal `u32` out of `s` starting at `from`, stopping at the first non-digit.
- *
- * @param s     the string to read from
- * @param from  the start index
- * @return      the value, the index past the digits, and whether any digit was read
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn read_u32(s: str, from: u64): ParsedNum {
     var i = from
     var n: u64 = 0
@@ -221,15 +106,6 @@ fn read_u32(s: str, from: u64): ParsedNum {
     ParsedNum { value = n to u32; next = i; ok = any }
 }
 
-/**
- * has_prefix — does `s` begin with `prefix`? A local byte compare because the corpus lacks a
- * `teko::str::starts_with` builtin (only `ends_with`/`contains`).
- *
- * @param s       the string tested
- * @param prefix  the prefix to look for
- * @return        true when `s` starts with `prefix`
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn has_prefix(s: str, prefix: str): bool {
     if s.len < prefix.len { return false }
     var i: u64 = 0
@@ -241,15 +117,6 @@ fn has_prefix(s: str, prefix: str): bool {
     true
 }
 
-/**
- * strip_leading_location — drop a leading `line:col: ` from a lex/parse error message when present,
- * so the error's own structured `line`/`col` are the single source of position (the message would
- * otherwise repeat them). A message with no such prefix is returned unchanged.
- *
- * @param msg  the raw error message
- * @return     the message without a leading `line:col: `
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn strip_leading_location(msg: str): str {
     var p1 = read_u32(msg, 0)
     if !p1.ok || p1.next >= msg.len || msg[p1.next] != b':' { return msg }
@@ -260,31 +127,12 @@ fn strip_leading_location(msg: str): str {
     teko::str::slice_from(msg, j)
 }
 
-/**
- * doc_is_main — is the document at `path` the project ENTRY file (basename `main.tks`)? Mirrors
- * `teko::build`'s `asm_is_main` so the LSP parses a buffer with the SAME grammar a build would: the
- * entry-file grammar (loose statements) for `main.tks`, the module grammar otherwise.
- *
- * @param path  the document path
- * @return      true when the basename is `main.tks`
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn doc_is_main(path: str): bool {
     if !teko::str::ends_with(path, "main.tks") { return false }
     if path.len == 8 { return true }
     path[path.len - 9] == b'/'
 }
 
-/**
- * main_items — flatten a parsed entry file into stamped top-level items (uses, then loose body
- * statements), each tagged with the document `path` (empty namespace, the single-file compile path's
- * own stamp) so the checker's diagnostics name this file.
- *
- * @param mf    the parsed entry file
- * @param path  the document path stamped onto every item
- * @return      the flattened item list
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn main_items(mf: parser::MainFile, path: str): []parser::Item {
     var items: []parser::Item = teko::list::empty()
     var ui: u64 = 0
@@ -302,30 +150,11 @@ fn main_items(mf: parser::MainFile, path: str): []parser::Item {
     items
 }
 
-/**
- * module_items_guard — the §17 conditional-compile guard for `m.decls[di]`: `m.decl_guards[di]` when
- * the PARALLEL guard array covers the index, else `PTrue`. Mirrors `asm_decl_guard` for the LSP's
- * own module flatten.
- *
- * @param m   the parsed module (its `decls`/`decl_guards` parallel arrays)
- * @param di  the declaration index
- * @return    the guard for `decls[di]` (`PTrue` when out of range)
- * @since §17
- */
 fn module_items_guard(m: parser::Module, di: u64): parser::Pred {
     if di < m.decl_guards.len { return m.decl_guards[di] }
     parser::pred_true()
 }
 
-/**
- * module_items — flatten a parsed module into stamped top-level items (uses, then declarations),
- * each tagged with the document `path`, carrying its §17 conditional-compile guard.
- *
- * @param m     the parsed module
- * @param path  the document path stamped onto every item
- * @return      the flattened item list
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn module_items(m: parser::Module, path: str): []parser::Item {
     var items: []parser::Item = teko::list::empty()
     var ui: u64 = 0
@@ -350,17 +179,6 @@ fn module_items(m: parser::Module, path: str): []parser::Item {
     items
 }
 
-/**
- * document_program — lex and parse ONE open document buffer into the flat `parser::Program` the
- * checker consumes, choosing the entry-file or module grammar by the document's name. A lex or parse
- * fault surfaces as the (located) error, which `diagnose_document` turns into the sole diagnostic.
- *
- * @param path  the document path (selects the grammar and stamps the items)
- * @param text  the document buffer
- * @return      the single-file program, or the lex/parse error
- * @throws      the located lexer/parser error when the buffer does not tokenize/parse
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn document_program(path: str, text: str): parser::Program | error {
     var tokens = match lexer::tokenize(text) { []lexer::Token as t => t; error as e => return e }
     if doc_is_main(path) {
@@ -371,23 +189,6 @@ fn document_program(path: str, text: str): parser::Program | error {
     parser::Program { items = module_items(m, path) }
 }
 
-/**
- * diagnose_document — the LSP's front-end pass over ONE open document: lex + parse + type-check the
- * buffer and return every diagnostic as a structured, ranged `LspDiagnostic`. A lex/parse fault yields
- * the single located diagnostic that stopped the parse; a clean parse runs the checker's
- * `collect_diagnostics_structured` (crumb D: the whole-program, non-fail-fast, SEVERITY-KNOWN seam)
- * and maps each `checker::Diagnostic` to a range. A clean document yields an empty list — the client
- * then clears its squiggles.
- *
- * v1 checks the document in ISOLATION (no cross-file dependency resolution), so a reference to a
- * symbol defined in another project file surfaces as unresolved; whole-project checking with an
- * unsaved-buffer override is the design's crumb E.
- *
- * @param path  the document path (its diagnostics' `file`)
- * @param text  the document buffer
- * @return      every diagnostic of the buffer, ranged and severity-tagged (empty ⇒ clean)
- * @since 0.3.1.0 (LSP crumb A; re-wired onto the structured seam crumb D)
- */
 pub fn diagnose_document(path: str, text: str): []LspDiagnostic {
     match document_program(path, text) {
         parser::Program as prog => {
@@ -405,68 +206,25 @@ pub fn diagnose_document(path: str, text: str): []LspDiagnostic {
     }
 }
 
-/**
- * jarr — a JSON array value wrapping `items`. The array twin of server.tks's `jobj`, so the
- * diagnostics list encodes as data rather than boilerplate.
- *
- * @param items  the element values, in order
- * @return       the JSON array value
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn jarr(items: []@JsonValue()): @JsonValue() {
     json::JsonArray { items = items }
 }
 
-/**
- * encode_position — an LSP `Position` object `{ "line": L, "character": C }` (both 0-based).
- *
- * @param line  the 0-based line
- * @param col   the 0-based character
- * @return      the JSON `Position`
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn encode_position(line: u32, col: u32): @JsonValue() {
     jobj(["line", "character"], [jnum((line to u64) to f64), jnum((col to u64) to f64)])
 }
 
-/**
- * encode_diagnostic — one `LspDiagnostic` as the protocol's `Diagnostic` object: its `range`
- * (start/end positions), numeric `severity`, a `source` of `"teko"`, and the `message`.
- *
- * @param d  the structured diagnostic
- * @return   the JSON `Diagnostic`
- * @since 0.3.1.0 (LSP crumb A)
- */
 fn encode_diagnostic(d: LspDiagnostic): @JsonValue() {
     var range = jobj(["start", "end"], [encode_position(d.start_line, d.start_col), encode_position(d.end_line, d.end_col)])
     jobj(["range", "severity", "source", "message"], [range, jnum(severity_code(d.severity)), jstr("teko"), jstr(d.message)])
 }
 
-/**
- * uri_to_path — the filesystem path of a `file://` document URI (the LSP identifies documents by
- * URI; the front-end and the grammar choice want a path). A `file:///abs` URI yields `/abs`; a URI
- * with no `file://` scheme is returned unchanged (best effort — the checker only reads it as a label).
- *
- * @param uri  the document URI
- * @return     the filesystem path
- * @since 0.3.1.0 (LSP crumb A)
- */
 pub fn uri_to_path(uri: str): str {
     var scheme = "file://"
     if has_prefix(uri, scheme) { return teko::str::slice_from(uri, scheme.len) }
     uri
 }
 
-/**
- * publish_diagnostics — the `textDocument/publishDiagnostics` NOTIFICATION for `uri`: the server
- * push that carries a document's current diagnostics to the client. An empty `diags` clears the
- * document's squiggles (the protocol's contract for "now clean").
- *
- * @param uri    the document URI the diagnostics belong to
- * @param diags  the document's current diagnostics (empty ⇒ clear)
- * @return       the `publishDiagnostics` notification DOM
- * @since 0.3.1.0 (LSP crumb A)
- */
 pub fn publish_diagnostics(uri: str, diags: []LspDiagnostic): @JsonValue() {
     var items: []@JsonValue() = teko::list::empty()
     var i: u64 = 0
@@ -479,16 +237,6 @@ pub fn publish_diagnostics(uri: str, diags: []LspDiagnostic): @JsonValue() {
     jobj(["jsonrpc", "method", "params"], [jstr("2.0"), jstr("textDocument/publishDiagnostics"), params])
 }
 
-/**
- * diagnostics_notification — run the front-end over the document at `uri` (buffer `text`) and build
- * the `publishDiagnostics` notification the server writes back. The one call the dispatcher makes for
- * a `didOpen`/`didChange`.
- *
- * @param uri   the document URI
- * @param text  the document buffer
- * @return      the `publishDiagnostics` notification DOM
- * @since 0.3.1.0 (LSP crumb A)
- */
 pub fn diagnostics_notification(uri: str, text: str): @JsonValue() {
     publish_diagnostics(uri, diagnose_document(uri_to_path(uri), text))
 }
