@@ -156,6 +156,26 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   ganha), varre os consumidores, reseeda de novo, repete. Como o **layout do elemento NÃO muda**
   (zero-fill puro, sem tag), a transição é **escalonada-verde**: o `push` velho passa a produzir o header
   novo e coexiste durante a migração; fixpoint gen2==gen3 a cada harvest.
+- **METODOLOGIA DO EXPURGO — CONSTRUIR ANTES, COMPILADOR ENUMERA A LIMPEZA (dono 2026-08-18).** ORDEM
+  (o agente estava invertendo — "limpando" ANTES de construir o backend novo, é ERRADO):
+  1. **CONSTRUIR a nova maquinária PRIMEIRO**, aditiva, convivendo com a velha: o cast `str`/`char` →
+     `[]byte` (`.to_bytes()`), o array fixo de tamanho-runtime **`var x: [n]T = []`** (zero-fill; é o
+     "of_len" como SINTAXE DE TIPO), o idioma de join por índice exato, o guard de null-deref, roteado
+     pela arena-Teko existente. NÃO remover o velho, NÃO varrer ainda.
+  2. **SHADOW** = programa AVULSO, **não versionado** (scratch, fora do repo): compila+roda como um teste
+     com o comportamento esperado; 1ª versão com o compilador ATUAL extrai baseline (tamanho final,
+     memória); evolui-se a maquinária nova reduzindo memória/binário/operações contra esse baseline.
+  3. **SEED** (gen0 ganha a maquinária nova).
+  4. **DESENSINAR + REMOVER AS RAÍZES do estado velho** (`tk_slice_push*`/`cb`/`append_fo`/`push_fo`,
+     `list::push`/`empty`/`grow_inplace`/`with_cap`, deps do `teko_rt.c`). A remoção não falha "por não
+     existir mais" — mas o **próprio compilador passa a ERRAR cru** onde ainda referencia o velho.
+  5. **SEED.** Com o seed novo, o compilador **tenta se auto-compilar e ERRA** — e **esses erros SÃO a
+     lista de limpezas**: cada erro aponta um sítio a converter pro idioma novo. NÃO caçar 4917 à mão —
+     remover a raiz e deixar o compilador ENUMERAR. Corrige → seed → repete até verde (fixpoint gen2==gen3).
+  **IDIOMA (sem `cb`/`append_fo` — múltiplo append PROIBIDO):** cada peça = UM spread-literal
+  (`outs[i] = [..a.to_bytes(), ..b.to_bytes(), b' ', ..c.to_bytes(), b'\n']`); acumula `total`; aloca
+  `var final: [total]byte = []` e copia por índice (`final[k]=o; k++`). O compilador pode const-foldar
+  pra literal puro quando as partes são conhecidas.
 - **FASE 1 e 2 UNIFICADAS — EXPURGO TOTAL JÁ (dono 2026-08-18).** Não há interim: expurgar array
   dinâmico de uma vez. Superfície medida (recon 2026-08-18): **2698 `push` + 2202 `empty` + 11
   `grow_inplace` + 6 `with_cap` = 4917 sítios**. Núcleos: checker 1615, lir 877, build 652, backend
