@@ -456,6 +456,22 @@ fn read_byte_lit(source: str, pos: u64): Scan | error {
     Scan { token = Token { kind = TokenKind::Byte; text = one_byte(v.value); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = v.next + 1 }
 }
 
+fn read_byte_str(source: str, pos: u64): Scan | error {
+    var p = pos + 2
+    var bytes: []byte = teko::list::empty()
+    loop {
+        if p >= source.len { return error { message = "unterminated byte string literal" } }
+        if source[p] == b'"' { break }
+        var v = match byte_value(source, p) {
+            ByteVal as bv => bv
+            error as err => return err
+        }
+        bytes = teko::list::push(bytes, v.value)
+        p = v.next
+    }
+    Scan { token = Token { kind = TokenKind::ByteStr; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 1 }
+}
+
 fn utf8_codepoint_len(b: byte): u64 {
     if b <= 0x7F { return 1 }
     if b >= 0xC2 && b <= 0xDF { return 2 }
@@ -554,6 +570,7 @@ fn read_symbol(source: str, pos: u64): Scan | error {
 fn next_token(source: str, pos: u64): Scan | error {
     var c = source[pos]
     if c == b'b' && at(source, pos + 1) == b'\'' { return read_byte_lit(source, pos) }
+    if c == b'b' && at(source, pos + 1) == b'"' { return read_byte_str(source, pos) }
     if c == b'c' && at(source, pos + 1) == b'\'' { return read_char_lit(source, pos) }
     if (c == b'"' || c == b'$' || c == b'@') && is_string_start(source, pos) { return read_string(source, pos) }
     if c == b'@' { return sym(source, pos, 1, TokenKind::At) }

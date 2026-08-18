@@ -1,37 +1,39 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on fix/retirement, forward-only): loads the Windows link-directive
-# fix into the seed. The prior seed (462178b3) predated the codegen change that emits, inside the
-# `#if defined(_WIN32)` arm, a `#pragma comment(lib, "synchronization")` next to each externed
-# WaitOnAddress / WakeByAddress* declaration. The seed must carry that pragma so the CI Windows
-# gen0 links Synchronization.lib; this harvest is the first bootstrap emitted by the compiler that
-# carries it.
+# RESEED (hand-harvest, local on wip/arrays-reseed, forward-only): refreshes the seed for the
+# array-expurgo foundation. The prior seed (sha256 7be7755e…, 22 828 203 bytes) predated the five
+# foundation commits that changed the emitted C — byte-string literal `b"abc"`, implicit
+# str<->[]byte reinterpret, `ref []T` position-writes, runtime-sized fixed array `[n]T = []`, and
+# the null-reference deref guard. gen1 of this tree emits 23 154 060 bytes, so the old seed no
+# longer reproduces this tree's own output; this harvest is the first bootstrap emitted by the
+# compiler that carries the foundation.
 #
 # WHAT THIS HARVEST CARRIES (the delta the new codegen bakes into the emitted C):
-#   - WINDOWS LINK DIRECTIVE: the `#os(windows)` externs (WaitOnAddress, WakeByAddressSingle,
-#     WakeByAddressAll) now emit a `#pragma comment(lib, "synchronization")` inside their
-#     `#if defined(_WIN32)` arm, so the clang-msvc link pulls in Synchronization.lib. Inert on
-#     Linux/macOS (the pragma sits behind `_WIN32`); the linker-directive travels with the C.
+#   - BYTE-STRING LITERAL: `b"abc"` lowers to a `[]byte` value.
+#   - IMPLICIT str<->[]byte: same `{ptr,len}` representation, reinterpret with no copy.
+#   - REF []T POSITION-WRITE: `dst[i] = v` accepted through a `ref []T` parameter.
+#   - RUNTIME-SIZED FIXED ARRAY: `var x: [n]T = []` lowers to a zero-fill allocation.
+#   - NULL-REFERENCE DEREF GUARD: dereferencing a zeroed reference slot panics with
+#     `file:line:col` instead of segfaulting.
 #   - #os CROSS-EMIT: the ONE emitted `teko.c` still carries every target at once via C `#if` — the
-#     macOS `__APPLE__` libSystem arm (os_sync_wait_on_address / mmap FFI), the Windows `_WIN32`
-#     arm (WaitOnAddress / VirtualAlloc), and the Linux raw-syscall arm, plus the arch ladder
-#     (`__x86_64__` / `__aarch64__`) — so the same bytes cross-compile to every (os, arch).
+#     macOS `__APPLE__` libSystem arm, the Windows `_WIN32` arm (WaitOnAddress / VirtualAlloc, with
+#     the `#pragma comment(lib, "synchronization")` link directive), and the Linux raw-syscall arm,
+#     plus the arch ladder (`__x86_64__` / `__aarch64__`) — so the same bytes cross-compile to every
+#     (os, arch).
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, CC=clang.
-#   - C-route chain: gen0 = clang(prior 462178b3 seed) built gen1 = gen0(src) (gen1.c = OLD-codegen
-#     re-emission, deliberately NOT the harvest — no pragma yet); gen1's OWN (new) codegen then
-#     emitted gen2 = gen1(src) and gen3 = gen2(src). Fixpoint verdict PASSED: gen2 == gen3 byte for
-#     byte AND gen2.c == gen3.c byte for byte (22 828 203 bytes). This harvested teko.c IS that
-#     stable emission (== gen2.c == gen3.c).
-#   - Pragma present in this file: three `#pragma comment(lib, "synchronization")` lines, each
-#     inside a `#if defined(_WIN32)` arm beside WaitOnAddress / WakeByAddressSingle /
-#     WakeByAddressAll.
-#   - AUTO-REPRODUCTION: clang(this bootstrap) rebuilt to a compiler that re-emits this same
-#     bootstrap/teko.c byte-identical.
-#   - Guard: every build ran under `ulimit -v 6815744` (6.5 GiB) with TEKO_BACKEND=c.
+#   - C-route chain from the PRIOR seed: gen0 = clang(7be7755e seed) built gen1 = gen0(src); gen1's
+#     OWN codegen emitted gen2 = gen1(src) and gen3 = gen2(src). Fixpoint verdict PASSED: gen2 ==
+#     gen3 byte for byte AND gen2.c == gen3.c byte for byte (23 154 060 bytes). This harvested
+#     teko.c IS that stable emission (== gen1.c == gen2.c == gen3.c).
+#   - AUTO-REPRODUCTION verified from the NEW seed: clang(this bootstrap) = gen0'; gen0'(src) = gen1'
+#     re-emits this same bootstrap/teko.c byte-identical (sha256 below); gen2' = gen1'(src) and
+#     gen3' = gen2'(src) are byte-identical to each other and their emitted C equals this file.
+#   - Guard: every build ran under `ulimit -v 6815744` (6.5 GiB) with TEKO_BACKEND=c; per-process
+#     peak self-reported ~6169 MB.
 #
 # `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane,
-# forward-only, its correctness resting on the clean fixpoint and the pragma emission above.
+# forward-only, its correctness resting on the clean fixpoint above.
 # `commit: pending drain` — the landing commit is written in this same change.
 #
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (DISABLED
@@ -39,8 +41,9 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  7be7755e21b775904eab1c840231036367e52d4022ac8dbf877131cc5859de43
+sha256:  1b716bf933101f9364dad0896f9d17d6e9dbf5143c3e337c745ae0897448541c
 since:   0.3.1.0
-legacy:  none — self-reproducible harvest: adds the Windows `#pragma comment(lib, "synchronization")`
-         link directive to the WaitOnAddress/WakeByAddress* externs; byte-identical on rebuild
-         (clean fixpoint gen2 == gen3, gen2.c == gen3.c, 22 828 203 bytes).
+legacy:  none — self-reproducible harvest of the array-expurgo foundation (byte-string literal,
+         implicit str<->[]byte, ref []T position-write, runtime-sized fixed array, null-deref
+         guard); byte-identical on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c,
+         23 154 060 bytes).

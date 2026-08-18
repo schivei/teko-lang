@@ -757,6 +757,7 @@ fn cg_expr_refs_name(e: checker::TExpr, name: str): bool {
         checker::TVar as v => v.name == name
         checker::TNumber => false
         checker::TStrLit => false
+        checker::TByteStrLit => false
         checker::TByteLit => false
         checker::TCharLit => false
         checker::TBoolLit => false
@@ -924,6 +925,7 @@ fn cg_te_reaches_byvalue(prog: CgProg, te: @TypeExpr(), to: str, seen: []str): b
             false
         }
         parser::SliceType => false
+        parser::SizedArrayType => false
         parser::FunctionType => false
         parser::MacroType => false
     }
@@ -1609,6 +1611,7 @@ fn cg_texpr_mangle(te: @TypeExpr()): str {
             if nt.args.len == 0 { last } else { cg_texpr_inst_name(last, nt.args) }
         }
         parser::SliceType as st => teko::str::concat("slice_", cg_texpr_mangle(st.element))
+        parser::SizedArrayType as sa => teko::str::concat("slice_", cg_texpr_mangle(sa.element))
         parser::UnionType as ut => cg_union_texpr_inst_mangle(ut)
         parser::FunctionType => "func"
         parser::MacroType => ""
@@ -1701,6 +1704,7 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: @TypeExpr(), ref_ns: str): []by
             mangle_type_name(buf, "", cdname)
         }
         parser::SliceType as st => cg_emit_slice_type_expr(buf, prog, st, ref_ns)
+        parser::SizedArrayType as sa => cg_emit_slice_type_expr(buf, prog, parser::SliceType { element = sa.element }, ref_ns)
         parser::UnionType as ut => {
             if !cg_texpr_union_has_null(ut) { return cg_variant_typename_texpr(buf, prog, ut, ref_ns) }
             match cg_te_to_type_ns(prog, ref_ns, te) {
@@ -2207,8 +2211,28 @@ fn cg_cast_target_is_variant(prog: CgProg, t: @Type()): bool {
     }
 }
 
+fn cg_is_str_type(t: @Type()): bool { match t { checker::Str => true; _ => false } }
+
+fn cg_is_byte_slice_type(t: @Type()): bool {
+    match t { checker::Slice as sl => match sl.element { checker::Byte => true; _ => false }; _ => false }
+}
+
+fn emit_bytes_str_reinterpret(buf: []byte, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var to_bytes = cg_is_byte_slice_type(e.type)
+    var src_c = if to_bytes { "({ tk_str _tkbsr = (" } else { "({ tk_slice_byte _tkbsr = (" }
+    var tail = if to_bytes { "); (tk_slice_byte){ (tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" } else { "); (tk_str){ (const tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" }
+    var out = cb(buf, src_c)
+    out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, tail)
+}
+
+fn cg_is_bytes_str_reinterpret(dst: @Type(), src: @Type()): bool {
+    (cg_is_str_type(src) && cg_is_byte_slice_type(dst)) || (cg_is_byte_slice_type(src) && cg_is_str_type(dst))
+}
+
 fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var inner = c.expr
+    if cg_is_bytes_str_reinterpret(e.type, inner.type) { return emit_bytes_str_reinterpret(buf, prog, e, inner, escaping, regions, fn_body, dctx) }
     if cg_cast_target_is_variant(prog, e.type) { return emit_as(buf, prog, e.type, inner, escaping, regions, fn_body, dctx) }
     var dst_opt = match e.type { checker::Prim as p => p.kind; _ => checker::PrimKind::Bool }
     var src_opt = match inner.type { checker::Prim as p => p.kind; _ => checker::PrimKind::Bool }
@@ -2957,6 +2981,18 @@ fn emit_call_inner(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TEx
     cb(out, ")")
 }
 
+fn cg_emit_nn_guard(buf: []byte, prog: CgProg, recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var out = cb(buf, "(")
+    out = match emit_type(out, prog, recv.type) { []byte as o => o; error as err => return err }
+    out = cb(out, ")tk_nn((void *)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, recv, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "), ")
+    out = cb(out, teko::u64_to_str(recv.line to u64))
+    out = cb(out, ", ")
+    out = cb(out, teko::u64_to_str(recv.col to u64))
+    cb(out, ")")
+}
+
 fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
     var is_slice = match fa.receiver.type { checker::Slice => true; _ => false }
     if is_slice && fa.field == "len" {
@@ -2997,9 +3033,9 @@ fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escap
             ob = cb_str(ob, fa.field)
             return cb(ob, ")")
         }
-        var oc = cb(buf, "((*(")
-        oc = match emit_expr_ctx(oc, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-        oc = cb(oc, ")).")
+        var oc = cb(buf, "((*")
+        oc = match cg_emit_nn_guard(oc, prog, fa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        oc = cb(oc, ").")
         oc = cb_str(oc, fa.field)
         return cb(oc, ")")
     }
@@ -3126,6 +3162,47 @@ fn emit_in(buf: []byte, prog: CgProg, ie: checker::TInExpr, escaping: []str, reg
         i++
     }
     cb(out, "; })")
+}
+
+fn emit_slice_of_len(buf: []byte, prog: CgProg, e: checker::TExpr, s: checker::TSliceOfLen, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    var elem = s.element
+    var lenN = $"_oln{buf.len}"
+    var ptrN = $"_olp{buf.len + 1}"
+    var out = cb(buf, "({ uint64_t ")
+    out = cb(out, lenN)
+    out = cb(out, " = (uint64_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, s.size, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "); ")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " *")
+    out = cb(out, ptrN)
+    out = cb(out, " = (")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " *)")
+    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb(out, "(")
+    out = cb(out, cg_enclosing_region_expr(regions))
+    out = cb(out, ", ")
+    out = cb(out, lenN)
+    out = cb(out, " * sizeof(")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, ")); memset(")
+    out = cb(out, ptrN)
+    out = cb(out, ", 0, ")
+    out = cb(out, lenN)
+    out = cb(out, " * sizeof(")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, ")); (")
+    out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, "){ .ptr = ")
+    out = cb(out, ptrN)
+    out = cb(out, ", .len = ")
+    out = cb(out, lenN)
+    if cg_slice_rep_has_cap(elem) {
+        out = cb(out, ", .cap = ")
+        out = cb(out, lenN)
+    }
+    cb(out, " }; })")
 }
 
 fn emit_array_lit(buf: []byte, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
@@ -3562,6 +3639,14 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
 
 fn emit_strlit(buf: []byte, s: checker::TStrLit): []byte | error {
     var out = cb(buf, "(tk_str){ (const tk_byte *)\"")
+    out = cb_cstr_escaped(out, s.text)
+    out = cb(out, "\", ")
+    out = cb_i64(out, s.text.len to i64)
+    cb(out, " }")
+}
+
+fn emit_bytestrlit(buf: []byte, s: checker::TByteStrLit): []byte | error {
+    var out = cb(buf, "(tk_slice_byte){ (tk_byte *)\"")
     out = cb_cstr_escaped(out, s.text)
     out = cb(out, "\", ")
     out = cb_i64(out, s.text.len to i64)
@@ -4324,6 +4409,10 @@ fn emit_as_r(buf: []byte, prog: CgProg, ret_type: @Type(), expected: @Type(), va
 }
 
 fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: @Type(), expected: @Type(), value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): []byte | error {
+    if cg_is_bytes_str_reinterpret(expected, value.type) {
+        var reint = checker::TExpr { kind = checker::TCast { expr = value }; type = expected; line = value.line; col = value.col }
+        return emit_bytes_str_reinterpret(buf, prog, reint, value, escaping, regions, fn_body, dctx)
+    }
     match expected {
         checker::Reference => {
             match value.type {
@@ -5303,6 +5392,7 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr
         checker::TFieldAccess as fa => emit_field_access(buf, prog, fa, escaping, regions, fn_body, dctx)
         checker::TStructInit as si => emit_struct_init(buf, prog, e, si, escaping, regions, fn_body, dctx)
         checker::TStrLit as s => emit_strlit(buf, s)
+        checker::TByteStrLit as bs => emit_bytestrlit(buf, bs)
         checker::TByteLit as by => cb_i64(buf, by.value to i64)
         checker::TCharLit as ch => emit_charlit(buf, ch)
         checker::TBoolLit as bl => cb(buf, if bl.value { "true" } else { "false" })
@@ -5316,6 +5406,7 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: @Type(), e: checker::TExpr
         checker::TInterp as in => emit_interp(buf, prog, in, "", escaping, regions, fn_body, dctx)
         checker::TInExpr as ie => emit_in(buf, prog, ie, escaping, regions, fn_body, dctx)
         checker::TArrayLit as a => emit_array_lit(buf, prog, e, a, escaping, regions, fn_body, dctx)
+        checker::TSliceOfLen as s => emit_slice_of_len(buf, prog, e, s, escaping, regions, fn_body, dctx)
         checker::TPathExpr as pe => {
             if cg_named_is_flags(prog, pe.enum_name) {
                 var out = mangle_type_name(buf, "", pe.enum_name)
@@ -7098,6 +7189,7 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: @TypeExpr()): @Type() {
             else { checker::Named { name = cg_te_canonical_name(prog, ref_ns, nt.path, last) } }
         }
         parser::SliceType as st => checker::Slice { element = cg_te_to_type_ns(prog, ref_ns, st.element) }
+        parser::SizedArrayType as sa => checker::Slice { element = cg_te_to_type_ns(prog, ref_ns, sa.element) }
         parser::UnionType as ut => {
             var mem: []@Type() = teko::list::empty()
             var i = 0
@@ -7313,6 +7405,7 @@ fn cg_texpr_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, te: @TypeExpr(), 
             cg_named_emitted_precise(prog, em, want)
         }
         parser::SliceType => true
+        parser::SizedArrayType => true
         parser::UnionType as ut => cg_texpr_union_ready(prog, em, set, ut, owner_ns)
         parser::FunctionType => true
         parser::MacroType => false
@@ -8495,7 +8588,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     b = cb(b, "#include <stdbool.h>\n")
     b = cb(b, "#include <stdlib.h>\n")
     b = cb(b, "#include <math.h>\n")
-    if spawn_sites.len > 0 { b = cb(b, "#include <string.h>\n") }
+    b = cb(b, "#include <string.h>\n")
     b = cb(b, "#include \"teko_rt.h\"\n")
     b = cb(b, "#include \"assert.h\"\n\n")
 

@@ -1544,6 +1544,13 @@ _Noreturn void tk_panic_overflow(void);   // "integer overflow"
 // (C1.7) positioned OOB panic — prefix "line:col: " then the canonical OOB panic. codegen passes
 // the offending index node's position (C1-POS) so a NATIVE index-out-of-bounds locates precisely.
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col);
+// positioned null-reference deref — same shape as tk_panic_oob_at. A zero-filled reference slot
+// (of_len leaves a class/reference slot null) deref'd via `x[i].field`/`.method()` traps here
+// instead of segfaulting.
+_Noreturn void tk_panic_null_deref_at(uint32_t line, uint32_t col);
+// tk_nn — return `p` if non-null, else trap via tk_panic_null_deref_at. codegen wraps a
+// class/reference-pointer deref in it so a null slot panics precisely rather than segfaulting.
+void *tk_nn(void *p, uint32_t line, uint32_t col);
 // (C1.7-CAST) positioned cast panic — same shape as tk_panic_oob_at. codegen wraps every
 // tk_to_* call in a statement-expression that sets these globals first; tk_panic_cast reads them.
 // When line==0 the plain "impossible conversion" message is emitted (position unknown).
