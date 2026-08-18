@@ -20,15 +20,17 @@ conversa com o dono é PT-BR.)
   mensagens dele.
 
 ## Estilo de código (LEI DURA, dono 2026-08-18) — CLAREZA, MENOS TEXTO
-Explicações moram em documentação canônica (`docs/design/`), NUNCA no código.
-- **Mensagens de erro/log = estilo compilador padrão:** `arquivo:linha:coluna: <causa curta>`
-  (ex: `unexpected type`, `expected ':' after ')'`). PROIBIDO: novelas, história,
-  referências a §/#/crumbs/planos, justificativa de "por que a arquitetura mudou".
-- **Comentários inline `//` em `.tks`/`.tkt`: PROIBIDOS.** Remover todos.
-- **Doc comments (`/** */`): curtos, claros, concisos.** Só o que a assinatura não diz.
-  PROIBIDO: referências a documentos (§/#/plano), explicações longas, história.
-- Vale retroativo: limpeza total tree-wide. Mudança que toca o `teko.c` (mensagens, ou
-  deslocamento de linha por comentário) exige reseed.
+Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: doc 46,6%, // 2,1%).
+É para **REMOVER e REDUZIR — não mover** para outro lugar. Documentação de verdade mora em
+`docs/design/`, escrita à parte; não é o dump dos doc comments do código.
+- **Comentários inline `//` em `.tks`/`.tkt`: PROIBIDOS (0%).** Remover todos.
+- **Doc comment só onde há `exp`** (superfície exportada). Em `pub` (interno) e privado: REMOVER.
+  Doc de topo/introdução de arquivo: REMOVER.
+- **Um doc comment não pode ser maior que o que documenta.** Curto; só o que a assinatura não diz.
+  PROIBIDO: referências a docs (§/#/plano/crumb), história, "por que", explicação de arquitetura.
+- **Mensagens de erro/log = estilo compilador padrão:** `arquivo:linha:coluna: "causa curta"`
+  (ex: `unexpected type`, `expected ':' after ')'`, `unsupported (os,arch)`). Sem novelas nem refs.
+- Retroativo, tree-wide. Mudança que toca o `teko.c` (mensagens, ou deslocamento de linha) exige reseed.
 
 ## Convenções da linguagem/codebase
 - **Não existe `let`/`mut` na superfície — só `var`** (e `const`).
