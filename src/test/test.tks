@@ -1,109 +1,20 @@
-/**
- * teko::test — the surface a test uses to name things that belong to IT and to nobody else.
- *
- * WHY IT EXISTS (owner, 2026-07-30, reading the parallelism landed in this same change: "implementou-se
- * o paralelismo mas faltou o controle de concorrência, aí o arquivo acaba sofrendo sobrescrita"). The
- * first shared resource to be caught was the coverage dump, and it was fixed by ISOLATION — one file
- * per shard, then merged. That is the right answer and it was applied to exactly one resource. Every
- * other fixed scratch path a test writes has the same shape.
- *
- * AND THE SHARD SPLIT MAKES IT WORSE, by the same property that makes it a good split: it is
- * round-robin by ordinal, because per-test cost is uneven, so NEIGHBOURING tests land in DIFFERENT
- * processes — and neighbouring tests are precisely the ones sharing a scratch path, because they live
- * in the same file and the same family.
- *
- * SO THE DISCIPLINE IS UNIFORM, NOT PER-RESOURCE: a scratch path derives from the IDENTITY of the test
- * that writes it. Not a lock — isolation. A lock would serialise the very thing that was parallelised
- * and would still leave the last writer's bytes in the file for the next run to read.
- */
 
-/**
- * scope_rt — the runtime's token for the test running right now.
- *
- * An FFI bottom because the identity lives where the per-test channel lives (src/runtime/teko_rt.c):
- * the channel already records the label, and the shard index is already parsed there.
- *
- * @return  `.s<shard>-<sanitised label>`, or "" when no test is running
- */
 pub extern fn scope_rt(): str = "tk_test_scope" from "teko_rt"
 
-/**
- * scope — the token identifying the test running right now, or "" outside a test.
- *
- * EMPTY OUTSIDE A TEST IS THE POINT, not a fallback. The same path-composing code runs in PRODUCTION
- * (the regression runner asks the host toolchain the same questions the unit tests ask it), and there
- * the path must stay byte-for-byte what it was. Scoping applies exactly where the concurrency it
- * guards against exists.
- *
- * @return  a filesystem-safe token unique to the running test, or "" when none is running
- */
 pub fn scope(): str { scope_rt() }
 
-/**
- * scoped — `base` rooted in THIS run and in the running test's own identity, so two tests can never
- * derive the same path even when they spell the same base, AND two runs can never derive the same path
- * even when two tests in them spell the same base.
- *
- * This is the ONE composer every scratch path in the corpus goes through, so "which paths are
- * isolated" is answerable by reading its call sites instead of by grepping for literals — which is how
- * the fixed paths got missed in the first place.
- *
- * DELEGATES TO `teko::journal::scratch`, which is the true composer (journaling-de-corrida-0.3.1 §2.2
- * / journal J2): `scratch` reads the SAME `teko::test::scope()` this function used to append raw, but
- * roots the result under this run's own `run_root()` instead of merely suffixing `base`. A caller that
- * only ever read this function's RETURN VALUE (never its exact shape) sees no change in behaviour: a
- * path unique to the running test, still ending in `base`, still "" outside a test.
- *
- * @param base  the path a test would otherwise have hard-coded
- * @return      `base` outside a test, a path unique to this run and this test inside one
- */
 pub fn scoped(stem: str): str { teko::journal::scratch(stem) }
 
-/** HOW_OK — the body returned normally. */
 pub const HOW_OK: i32 = 0
-/** HOW_PANICKED — the body panicked: an explicit `panic`, a failed assertion, or an implicit panic. */
 pub const HOW_PANICKED: i32 = 1
-/** HOW_EXITED — the body called `exit(n)`; `capture_probe_code` carries the n. */
 pub const HOW_EXITED: i32 = 2
 
-/** PROBE_RETURNS — the guard's body that returns normally. */
 pub const PROBE_RETURNS: i32 = 0
-/** PROBE_PANICS — the guard's body that panics explicitly. */
 pub const PROBE_PANICS: i32 = 1
-/** PROBE_EXITS — the guard's body that calls `exit(PROBE_EXIT_CODE)`. */
 pub const PROBE_EXITS: i32 = 2
-/** PROBE_DIV0 — the guard's body that divides by zero (the IMPLICIT panic). */
 pub const PROBE_DIV0: i32 = 3
-/** PROBE_EXIT_CODE — the value `PROBE_EXITS` tries to leave with, and which the capture hands back. */
 pub const PROBE_EXIT_CODE: i32 = 7
 
-/**
- * capture_probe — run one body of known ending under the runtime's capture and report how it ended.
- *
- * WHY THE BODIES LIVE IN THE RUNTIME AND NOT HERE, measured on this tree rather than assumed: the
- * design's surface for this is `run_capturing(body: cabi fn())`, and `cabi` is not a token this lexer
- * mints while `fn(): T` in parameter position does not parse. Handing a Teko function's address to
- * an extern is a language feature that does not exist yet (crumb C1 of concorrencia-adiantada-s8).
- * The capture itself needs nothing from it — the `#test` harness is emitted C, where `&<symbol>` asks
- * the language for nothing — but the GUARD needs a way in, and a guard that cannot fail is
- * decoration. When `cabi fn` lands, this is replaced by `run_capturing` and the bodies move here.
- *
- * IT ANSWERS A SCALAR AND NOT A PAIR, and that too is measured: a `from "teko_rt"` extern cannot
- * return a user struct by value on this tree. The typer accepts a `Named` return for a teko_rt
- * extern, but codegen emits no prototype for one — it relies on `teko_rt.h` — and the header's C
- * struct type is not the mangled Teko one, so the generated call site is an `invalid initializer`.
- * The exit CODE is therefore a second read, `capture_probe_code`.
- *
- * @param which  one of the `PROBE_*` selectors
- * @return       one of the `HOW_*` values, or a value distinct from all of them for an unknown probe
- * @since 0.3.1
- */
 pub extern fn capture_probe(which: i32): i32 = "tk_test_capture_probe" from "teko_rt"
 
-/**
- * capture_probe_code — the exit value recorded by the most recent `capture_probe`.
- *
- * @return  the `exit(n)` value when the last probe ended by exiting; 0 otherwise
- * @since 0.3.1
- */
 pub extern fn capture_probe_code(): i32 = "tk_test_capture_last_code" from "teko_rt"

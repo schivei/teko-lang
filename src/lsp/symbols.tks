@@ -1,65 +1,18 @@
 use teko::parser
 
-/**
- * SymKind — which kind of declaration a `Symbol` names, for the editor's icon/label and for a
- * future navigation filter (hover/definition/completion all read this). Mirrors the AST shapes
- * `build_symbol_index` walks: top-level `fn` (Function), `type`/`flags` (Type), module-level
- * `const` (Const), and the two struct/class/trait member shapes (Field, Method).
- *
- * @since 0.3.1.0 (LSP crumb E)
- */
 pub type SymKind = enum { Function; Type; Const; Field; Method }
 
-/**
- * Symbol — one navigable declaration of the project: its defining position, its doc-comment (the
- * hover source), and a rendered signature, all read straight off the parsed AST — no typing is
- * involved (`docs/design/lsp-teko.md` §5.4). This is the sole source hover/go-to-def/completion
- * (crumbs F/G) consume; `build_symbol_index` is the only producer.
- *
- * `line`/`col` name the DEFINITION site. For a `Function`/`TypeDecl`/`ConstDecl` this is the
- * name's own recorded position (W-loc-2). A struct/class/trait `Field` carries NO position of its
- * own in the AST (`parser::Field` has no `line`/`col` — only `Function`, `TypeDecl`, and
- * `ConstDecl` do) — a `Field` symbol's `line`/`col` fall back to its OWNING type's position, an
- * honest v1 approximation (go-to-def on a field lands on its type, not the exact field line) named
- * here rather than hidden; a real per-field span is a parser change out of this crumb's scope.
- *
- * @field name       the symbol's name as written
- * @field namespace  the declaring namespace (provenance, `parser::Item.namespace`)
- * @field file       the source file the declaration lives in
- * @field line       the 1-based definition line (the owning type's line for a `Field`)
- * @field col        the 1-based definition column (the owning type's column for a `Field`)
- * @field kind       Function / Type / Const / Field / Method
- * @field doc        the raw doc-comment span (`""` when the declaration carries none)
- * @field signature  the rendered signature for hover (e.g. `fn f(x: i64): str`)
- * @since 0.3.1.0 (LSP crumb E)
- */
 pub type Symbol = struct {
-    /** the symbol's name as written. */
-    name: str
-    /** the declaring namespace (provenance, `parser::Item.namespace`). */
-    namespace: str
-    /** the source file the declaration lives in. */
-    file: str
-    /** the 1-based definition line (the owning type's line for a `Field`). */
-    line: u32
-    /** the 1-based definition column (the owning type's column for a `Field`). */
-    col: u32
-    /** Function / Type / Const / Field / Method. */
-    kind: SymKind
-    /** the raw doc-comment span (`""` when the declaration carries none). */
-    doc: str
-    /** the rendered signature for hover (e.g. `fn f(x: i64): str`). */
-    signature: str
+        name: str
+        namespace: str
+        file: str
+        line: u32
+        col: u32
+        kind: SymKind
+        doc: str
+        signature: str
 }
 
-/**
- * render_path — a `Path`'s segments joined back into the `::`-separated reference the source
- * wrote (`[a, b, C]` → `"a::b::C"`).
- *
- * @param path  the path to render
- * @return      the joined reference text
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_path(path: parser::Path): str {
     var out = ""
     var i: u64 = 0
@@ -72,14 +25,6 @@ fn render_path(path: parser::Path): str {
     out
 }
 
-/**
- * render_type_args — a generic-argument list rendered as `<A, B>` (empty string when `args` is
- * empty — a plain, non-generic name).
- *
- * @param args  the type arguments, in source order
- * @return      the rendered argument list, or `""` for no arguments
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_type_args(args: []@TypeExpr()): str {
     if args.len == 0 { return "" }
     var inner = ""
@@ -93,13 +38,6 @@ fn render_type_args(args: []@TypeExpr()): str {
     teko::str::concat("<", inner, ">")
 }
 
-/**
- * render_union_members — a union type's members rendered as `A | B | …`.
- *
- * @param members  the union's members, in source order
- * @return         the rendered member list
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_union_members(members: []@TypeExpr()): str {
     var out = ""
     var i: u64 = 0
@@ -112,13 +50,6 @@ fn render_union_members(members: []@TypeExpr()): str {
     out
 }
 
-/**
- * render_function_type — a closure/function VALUE type rendered as `(A, B): R`.
- *
- * @param ft  the function type
- * @return    the rendered type
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_function_type(ft: parser::FunctionType): str {
     var params = ""
     var i: u64 = 0
@@ -131,15 +62,6 @@ fn render_function_type(ft: parser::FunctionType): str {
     teko::str::concat("(", params, "): ", render_type_expr(ft.ret))
 }
 
-/**
- * render_type_expr — a `@TypeExpr()` rendered back to the surface syntax a signature shows: a plain
- * or generic name, `[]T`, `A | B`, or `(A, B): R`. Purely syntactic — no resolution, so it
- * renders exactly what the source wrote, including an unresolved/unknown name.
- *
- * @param te  the type expression to render
- * @return    the rendered type text
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_type_expr(te: @TypeExpr()): str {
     match te {
         parser::NamedType as nt => teko::str::concat(render_path(nt.path), render_type_args(nt.args))
@@ -150,27 +72,11 @@ fn render_type_expr(te: @TypeExpr()): str {
     }
 }
 
-/**
- * render_param — one parameter rendered as `name: Type`, or bare `name` for the untyped receiver
- * parameter of an instance method (OOP A1 — a struct method's 1st param carries no type
- * annotation; it is the injected receiver).
- *
- * @param p  the parameter to render
- * @return   the rendered parameter text
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_param(p: parser::Param): str {
     if !p.has_type { return p.name }
     teko::str::concat(p.name, ": ", render_type_expr(p.type_ann))
 }
 
-/**
- * render_params — a parameter list rendered as `a: A, b: B`.
- *
- * @param params  the parameters, in source order
- * @return        the rendered parameter list
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_params(params: []parser::Param): str {
     var out = ""
     var i: u64 = 0
@@ -183,29 +89,12 @@ fn render_params(params: []parser::Param): str {
     out
 }
 
-/**
- * render_function_signature — a `Function` rendered for hover as `fn name(params): ret`, or
- * `fn name(params)` when the declaration has no `-> ret` clause (P5a — an absent return type is
- * `void`, and a signature with nothing to show for it stays terse rather than printing `-> void`).
- *
- * @param f  the function (top-level or a struct/class/trait method)
- * @return   the rendered signature
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_function_signature(f: parser::Function): str {
     var params = render_params(f.params)
     if !f.has_return { return teko::str::concat("fn ", f.name, "(", params, ")") }
     teko::str::concat("fn ", f.name, "(", params, "): ", render_type_expr(f.return_type))
 }
 
-/**
- * render_type_params — a type's generic-parameter list rendered as `<T, U>` (empty string for a
- * non-generic declaration).
- *
- * @param params  the generic type-parameter names, in source order
- * @return        the rendered parameter list, or `""` for none
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_type_params(params: []str): str {
     if params.len == 0 { return "" }
     var inner = ""
@@ -219,67 +108,23 @@ fn render_type_params(params: []str): str {
     teko::str::concat("<", inner, ">")
 }
 
-/**
- * render_type_signature — a `TypeDecl` rendered for hover as `type Name` (plus `<T, U>` when
- * generic). The body's own shape (struct/class/enum/…) is not spelled out here — its members
- * surface as their own `Symbol` entries (`append_type_members`).
- *
- * @param t  the type declaration
- * @return   the rendered signature
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_type_signature(t: parser::TypeDecl): str {
     teko::str::concat("type ", t.name, render_type_params(t.type_params))
 }
 
-/**
- * render_const_signature — a `ConstDecl` rendered for hover as `const NAME: Type`.
- *
- * @param c  the constant declaration
- * @return   the rendered signature
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_const_signature(c: parser::ConstDecl): str {
     teko::str::concat("const ", c.name, ": ", render_type_expr(c.ty))
 }
 
-/**
- * render_field_signature — a `Field` rendered for hover as `name: Type`.
- *
- * @param f  the field declaration
- * @return   the rendered signature
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn render_field_signature(f: parser::Field): str {
     teko::str::concat(f.name, ": ", render_type_expr(f.type_ann))
 }
 
-/**
- * doc_of — the raw doc-comment span attached to a declaration, or `""` when it carries none. The
- * one place that turns the `has_doc`/`doc` pair every declaration shape repeats into a single
- * always-valid string.
- *
- * @param has_doc  does the declaration carry a doc-comment?
- * @param doc      the doc-comment span (meaningful iff `has_doc`)
- * @return         `doc` when `has_doc`, else `""`
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn doc_of(has_doc: bool, doc: str): str {
     if has_doc { return doc }
     ""
 }
 
-/**
- * symbol_of_function — the `Symbol` for a top-level `fn` or a struct/class/trait method, stamped
- * `kind` by the caller (top-level callers pass `Function`, member callers pass `Method`).
- *
- * @param f     the function declaration
- * @param ns    the declaring namespace
- * @param file  the declaring file
- * @param kind  `Function` for a top-level fn, `Method` for a struct/class/trait member
- * @return      the function's symbol entry
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn symbol_of_function(f: parser::Function, ns: str, file: str, kind: SymKind): Symbol {
     Symbol {
         name = f.name; namespace = ns; file = file; line = f.line; col = f.col
@@ -287,16 +132,6 @@ fn symbol_of_function(f: parser::Function, ns: str, file: str, kind: SymKind): S
     }
 }
 
-/**
- * symbol_of_type — the `Symbol` for a top-level `type`/`flags` declaration itself (its members, if
- * any, are separate `Symbol` entries appended by `append_type_members`).
- *
- * @param t     the type declaration
- * @param ns    the declaring namespace
- * @param file  the declaring file
- * @return      the type's symbol entry
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn symbol_of_type(t: parser::TypeDecl, ns: str, file: str): Symbol {
     Symbol {
         name = t.name; namespace = ns; file = file; line = t.line; col = t.col
@@ -304,15 +139,6 @@ fn symbol_of_type(t: parser::TypeDecl, ns: str, file: str): Symbol {
     }
 }
 
-/**
- * symbol_of_const — the `Symbol` for a module-level `const` declaration.
- *
- * @param c     the constant declaration
- * @param ns    the declaring namespace
- * @param file  the declaring file
- * @return      the constant's symbol entry
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn symbol_of_const(c: parser::ConstDecl, ns: str, file: str): Symbol {
     Symbol {
         name = c.name; namespace = ns; file = file; line = c.line; col = c.col
@@ -320,18 +146,6 @@ fn symbol_of_const(c: parser::ConstDecl, ns: str, file: str): Symbol {
     }
 }
 
-/**
- * symbol_of_field — the `Symbol` for one struct/class/trait field. The AST carries no position of
- * its own for a field (`parser::Field` has no `line`/`col`), so the position falls back to the
- * OWNING type's — see `Symbol`'s own doc for why this is an honest v1 approximation, not a bug.
- *
- * @param field  the field declaration
- * @param owner  the enclosing type declaration (its position stands in for the field's)
- * @param ns     the declaring namespace
- * @param file   the declaring file
- * @return       the field's symbol entry
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn symbol_of_field(field: parser::Field, owner: parser::TypeDecl, ns: str, file: str): Symbol {
     Symbol {
         name = field.name; namespace = ns; file = file; line = owner.line; col = owner.col
@@ -339,18 +153,6 @@ fn symbol_of_field(field: parser::Field, owner: parser::TypeDecl, ns: str, file:
     }
 }
 
-/**
- * append_fields — `out` with one `Field` symbol appended per entry of `fields`, each positioned at
- * `owner`'s own definition site (`symbol_of_field`'s own doc).
- *
- * @param out    the symbol list built so far
- * @param owner  the enclosing type declaration
- * @param fields the fields to append, in source order
- * @param ns     the declaring namespace
- * @param file   the declaring file
- * @return       `out` with the field symbols appended
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn append_fields(out: []Symbol, owner: parser::TypeDecl, fields: []parser::Field, ns: str, file: str): []Symbol {
     var acc = out
     var i: u64 = 0
@@ -362,17 +164,6 @@ fn append_fields(out: []Symbol, owner: parser::TypeDecl, fields: []parser::Field
     acc
 }
 
-/**
- * append_methods — `out` with one `Method` symbol appended per entry of `methods`, each carrying
- * its own recorded name position (a `Function`, unlike a `Field`, has one).
- *
- * @param out      the symbol list built so far
- * @param methods  the methods to append, in source order
- * @param ns       the declaring namespace
- * @param file     the declaring file
- * @return         `out` with the method symbols appended
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn append_methods(out: []Symbol, methods: []parser::Function, ns: str, file: str): []Symbol {
     var acc = out
     var i: u64 = 0
@@ -384,19 +175,6 @@ fn append_methods(out: []Symbol, methods: []parser::Function, ns: str, file: str
     acc
 }
 
-/**
- * append_type_members — `out` with every member symbol (`Field`/`Method`) of `owner`'s body
- * appended, by body shape: a struct/class/trait contributes its fields THEN its methods; an
- * interface contributes only its (bodyless) method signatures; every other body (enum, flags,
- * variant, alias, extern) has no members and leaves `out` unchanged.
- *
- * @param out    the symbol list built so far
- * @param owner  the type declaration whose body is walked
- * @param ns     the declaring namespace
- * @param file   the declaring file
- * @return       `out` with `owner`'s member symbols appended
- * @since 0.3.1.0 (LSP crumb E)
- */
 fn append_type_members(out: []Symbol, owner: parser::TypeDecl, ns: str, file: str): []Symbol {
     match owner.body {
         parser::StructBody as sb => append_methods(append_fields(out, owner, sb.fields, ns, file), sb.methods, ns, file)
@@ -407,18 +185,6 @@ fn append_type_members(out: []Symbol, owner: parser::TypeDecl, ns: str, file: st
     }
 }
 
-/**
- * build_symbol_index — every navigable `Symbol` of `program`: one per top-level `fn`/`type`/
- * `const`, PLUS one per struct/class/trait/interface member (`Field`/`Method`), read straight off
- * the parsed AST — no typing (`docs/design/lsp-teko.md` §5.4). This is the sole engine hover,
- * go-to-definition, and completion (crumbs F/G) consume; it never touches the checker, so it works
- * even over a program that does not yet type-check.
- *
- * @param program  the merged program (from `assemble`/`assemble_with_overrides`, or a single
- *                 open document via `document_program`)
- * @return         every symbol, in file/declaration order
- * @since 0.3.1.0 (LSP crumb E)
- */
 pub fn build_symbol_index(program: parser::Program): []Symbol {
     var out: []Symbol = teko::list::empty()
     var i: u64 = 0

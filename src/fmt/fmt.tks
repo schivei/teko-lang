@@ -1,76 +1,24 @@
-// src/fmt/fmt.tks   (namespace 'teko::fmt') — DT0: `teko fmt`, the canonical formatter.
-//
-// A module-level header stays a `//` block (not a `/** */` doc-comment): Teko's Doc token
-// only attaches to a following fn/type/flags declaration (parse_decl.tks), never to a
-// `use` statement — there is no grammar slot for a floating module doc here.
-//
-// CONTRACT (TEKO_ROADMAP_DEVTOOLS.md §1 DT0). A CANONICAL pretty-printer (gofmt model:
-// zero options, no debate — open decision #1's recommendation, taken): parse -> format
-// the token stream -> emit. Comment preservation follows open decision #2's
-// recommendation: comments are re-attached from a SEPARATE token-stream pass (this
-// module's raw scanner keeps them as tokens), never from AST surgery — the parser and
-// AST stay untouched.
-//
-// PURE-TEKO, NO C TWIN (the teko::regex / teko::fs / teko::io precedent): this module is
-// corpus source, so every self-hosted binary compiles it natively automatically. The C seed (main.c) only
-// RECOGNIZES the subcommand and stops honestly (M.3) — the seed exists to bootstrap, not
-// to format.
-//
-// WHAT "CANONICAL" MEANS HERE (gofmt-style — gofmt likewise preserves the author's line
-// breaks and does not enforce a line length):
-//   * line STRUCTURE is the author's: newlines are significant statement separators
-//     (B.26), so fmt NEVER joins or splits lines — it re-indents and re-spaces them;
-//   * indentation is 4 spaces per unclosed `(`/`[`/`{` depth (leading closers dedent);
-//   * inter-token spacing is normalized (one space around binary operators, none inside
-//     parens, `, ` / `; ` / `: `, ` { ` braces, tight `.`/`::`/`..`);
-//   * `<`/`>`/`<<`/`>>` are AMBIGUOUS at token level (generics vs comparison vs shift):
-//     their spacing preserves the source's tight/spaced choice — tight stays tight,
-//     spaced becomes exactly one space (idempotent both ways);
-//   * runs of blank lines collapse to ONE; blanks directly after an opener line or
-//     before a closer line are dropped; trailing whitespace is stripped; the file ends
-//     with exactly one newline;
-//   * a trailing `//` comment sits exactly THREE spaces after the code (the corpus's
-//     dominant convention); comment/string BYTES are never altered (multi-line doc
-//     comments and multi-line strings are emitted verbatim).
-//
-// SAFETY (M.1 — semantic preservation is CHECKED, not hoped): the input must pass the
-// REAL front end (teko::lexer + teko::parser — only a valid program is formatted, the
-// gofmt precedent), and after rendering the output is re-scanned and its token stream
-// (kinds + texts, newlines aside) must be BYTE-IDENTICAL to the input's; any mismatch
-// is an internal-error refusal, never a silent rewrite. Idempotence (fmt(fmt(x)) ==
-// fmt(x)) follows by construction: every emission decision depends only on the token
-// stream, the line structure, and per-side adjacency — all of which formatting fixes.
-
 use teko::lexer
 use teko::parser
 
-// ---------------------------------------------------------------------------
-// The raw token: unlike lexer::Token, `text` is the RAW SOURCE SLICE (a string
-// literal keeps its quotes/escapes/prefixes verbatim), and comments/newlines are
-// tokens too — everything needed to re-print the file byte-consciously.
-// ---------------------------------------------------------------------------
-
 type FTokKind = enum {
-    Word   // identifier or keyword (incl `_`, `true`/`false`/`null`)
-    Num   // number literal (raw: `1_000`, `0xFF`, `1.5e3`)
-    Strish   // any string/byte/char literal, raw incl quotes: "…" $"…" @"…" """…""" b'…' c'…'
-    Comment   // `// …` (trailing ws trimmed) or `/* … */` / `/** … */` verbatim
-    Punct   // operator/delimiter, maximal-munch (mirrors lexer::read_symbol)
-    Break   // a newline
+    Word
+    Num
+    Strish
+    Comment
+    Punct
+    Break
 }
 
 type FTok = struct {
     kind: FTokKind
     text: str
-    glued: bool   // true when this token starts EXACTLY where the previous one ended (no gap)
+    glued: bool
 }
 
-// a scan step: the token's END position (the token itself is sliced by the caller).
 type Span = struct {
     end: u64
 }
-
-// --- byte helpers (mirror lexer.tks) ---
 
 fn f_at(source: str, p: u64): byte {
     if p >= source.len { return 0 }
@@ -93,14 +41,10 @@ fn f_is_ident(c: byte): bool {
     f_is_alpha(c) || f_is_digit(c) || c == b'_'
 }
 
-// a located scan error (fmt refuses the file; the real lexer would refuse it too).
 fn f_err(msg: str): error {
     error { message = msg }
 }
 
-// --- spans: each mirrors the corresponding lexer.tks reader, but only finds the END ---
-
-// number span — mirrors lexer::read_number (hex/bin, `_` separators, fraction, exponent).
 fn span_number(source: str, pos: u64): u64 {
     if f_at(source, pos) == b'0' && (f_at(source, pos + 1) == b'x' || f_at(source, pos + 1) == b'X') {
         var h = pos + 2
@@ -148,7 +92,6 @@ fn span_digits(source: str, pos: u64): u64 {
     p
 }
 
-// identifier span (also consumes a leading `_` run — mirrors read_underscore/read_ident).
 fn span_word(source: str, pos: u64): u64 {
     var p = pos
     loop {
@@ -159,15 +102,12 @@ fn span_word(source: str, pos: u64): u64 {
     p
 }
 
-// the closing delimiter matches at `p`? (mirrors lexer::str_close_at.)
 fn f_close_at(source: str, p: u64, multiline: bool): bool {
     if f_at(source, p) != b'"' { return false }
     if !multiline { return true }
     f_at(source, p + 1) == b'"' && f_at(source, p + 2) == b'"'
 }
 
-// string span — mirrors lexer::read_string/read_string_body EXACTLY (same escape,
-// `""`-doubling, `{{`/`}}`, hole-depth, and `"""` rules), but only walks to the END.
 fn span_string(source: str, pos: u64): Span | error {
     var has_interp = false
     var has_verbatim = false
@@ -220,7 +160,6 @@ fn span_string(source: str, pos: u64): Span | error {
     }
 }
 
-// byte-literal span `b'…'` — one raw or escaped byte then `'` (mirrors read_byte_lit).
 fn span_byte_lit(source: str, pos: u64): Span | error {
     var p = pos + 2
     if p >= source.len { return f_err("unterminated byte literal") }
@@ -229,7 +168,6 @@ fn span_byte_lit(source: str, pos: u64): Span | error {
     Span { end = p + 1 }
 }
 
-// char-literal span `c'…'` — bytes/escapes up to `'` (mirrors read_char_lit).
 fn span_char_lit(source: str, pos: u64): Span | error {
     var p = pos + 2
     loop {
@@ -239,7 +177,6 @@ fn span_char_lit(source: str, pos: u64): Span | error {
     }
 }
 
-// is there a string START at pos? (mirrors lexer::is_string_start.)
 fn f_string_start(source: str, pos: u64): bool {
     var has_interp = false
     var has_verbatim = false
@@ -253,7 +190,6 @@ fn f_string_start(source: str, pos: u64): bool {
     f_at(source, p) == b'"'
 }
 
-// punct length at pos — maximal munch, EXACTLY lexer::read_symbol's table. 0 = unknown.
 fn punct_len(source: str, pos: u64): u64 {
     var c = source[pos]
     var c1 = f_at(source, pos + 1)
@@ -284,7 +220,6 @@ fn punct_len(source: str, pos: u64): u64 {
     0
 }
 
-// trim trailing spaces/tabs/CR from a `//` comment's end position.
 fn rtrim_end(source: str, start: u64, end: u64): u64 {
     var e = end
     loop {
@@ -296,17 +231,11 @@ fn rtrim_end(source: str, start: u64, end: u64): u64 {
     e
 }
 
-// ---------------------------------------------------------------------------
-// scan_tokens — the raw-token pass: the lexer's exact lexical grammar, but with
-// comments and newlines AS TOKENS and every text a raw source slice.
-// ---------------------------------------------------------------------------
-
 fn scan_tokens(source: str): []FTok | error {
     var toks: []FTok = teko::list::empty()
     var pos: u64 = 0
-    var last_end: u64 = source.len + 1   // sentinel: nothing is glued to "before the file"
+    var last_end: u64 = source.len + 1
     loop {
-        // skip spaces/tabs/CR (newlines are tokens)
         loop {
             if pos >= source.len { break }
             var w = source[pos]
@@ -319,7 +248,7 @@ fn scan_tokens(source: str): []FTok | error {
         if c == b'\n' {
             toks = teko::list::push(toks, FTok { kind = FTokKind::Break; text = "\n"; glued = false })
             pos = pos + 1
-            last_end = source.len + 1   // nothing after a line break is "glued"
+            last_end = source.len + 1
             continue
         }
         if c == b'/' && f_at(source, pos + 1) == b'/' {
@@ -377,7 +306,7 @@ fn scan_tokens(source: str): []FTok | error {
         }
         if f_is_alpha(c) || c == b'_' {
             var e = span_word(source, pos)
-            if e == pos { e = pos + 1 }   // a lone `_` wildcard
+            if e == pos { e = pos + 1 }
             toks = teko::list::push(toks, FTok { kind = FTokKind::Word; text = slice(source, pos, e); glued = glued })
             last_end = e
             pos = e
@@ -392,13 +321,6 @@ fn scan_tokens(source: str): []FTok | error {
     toks
 }
 
-// ---------------------------------------------------------------------------
-// spacing rules
-// ---------------------------------------------------------------------------
-
-// reserved words (lexer::keyword_kind's table) — for spacing, `keyword (` keeps its
-// space (`return (x)`) while `ident (` is a call (`f(x)`). Contextual words
-// (`from`/`params`/`self`/`base`) are identifiers here, exactly as in the lexer.
 fn is_kw(t: str): bool {
     if t == "fn" || t == "type" || t == "struct" || t == "enum" || t == "flags" { return true }
     if t == "variant" || t == "let" || t == "mut" || t == "const" || t == "if" { return true }
@@ -410,7 +332,6 @@ fn is_kw(t: str): bool {
     false
 }
 
-// can this token END an operand? (drives unary-vs-binary for `+`/`-`/`~`.)
 fn ends_operand(t: FTok): bool {
     if t.kind == FTokKind::Num || t.kind == FTokKind::Strish { return true }
     if t.kind == FTokKind::Word {
@@ -431,18 +352,14 @@ fn is_closer(t: str): bool {
     t == ")" || t == "]" || t == "}"
 }
 
-// `<`/`>`/`<<`/`>>` are ambiguous (generics vs comparison vs shift) at token level:
-// their spacing PRESERVES the source's adjacency (tight stays tight; spaced → one space).
 fn is_angle(t: FTok): bool {
     if t.kind != FTokKind::Punct { return false }
     t.text == "<" || t.text == ">" || t.text == "<<" || t.text == ">>"
 }
 
-// the canonical gap (in spaces) between `prev` and `cur` on one line.
-// `prev_unary` = prev is a prefix operator (`!`, or `+`/`-`/`~` in unary position).
 fn gap(prev: FTok, cur: FTok, prev_unary: bool): u64 {
-    if cur.kind == FTokKind::Comment { return 3 }   // trailing comment — 3 spaces
-    if prev.kind == FTokKind::Comment { return 1 }   // code after a block comment
+    if cur.kind == FTokKind::Comment { return 3 }
+    if prev.kind == FTokKind::Comment { return 1 }
     var pp = prev.kind == FTokKind::Punct
     var cp = cur.kind == FTokKind::Punct
     if cp && (cur.text == "," || cur.text == ";") { return 0 }
@@ -451,8 +368,8 @@ fn gap(prev: FTok, cur: FTok, prev_unary: bool): u64 {
     if (cp && cur.text == ".") || (pp && prev.text == ".") { return 0 }
     if cp && (cur.text == ".." || cur.text == "..=") { return 0 }
     if pp && (prev.text == ".." || prev.text == "..=") { return 0 }
-    if cp && (cur.text == "++" || cur.text == "--") { return 0 }   // postfix
-    if prev_unary { return 0 }   // `!x`, `-x`, `~x`, `-(…)`
+    if cp && (cur.text == "++" || cur.text == "--") { return 0 }
+    if prev_unary { return 0 }
     if is_angle(cur) || is_angle(prev) {
         if cur.glued { return 0 }
         return 1
@@ -461,7 +378,7 @@ fn gap(prev: FTok, cur: FTok, prev_unary: bool): u64 {
         if pp && (prev.text == "(" || prev.text == "[") { return 0 }
         if prev.kind == FTokKind::Word {
             if is_kw(prev.text) { return 1 }
-            return 0   // a call / an index
+            return 0
         }
         if pp && (prev.text == ")" || prev.text == "]" || prev.text == "?" || prev.text == "++" || prev.text == "--") { return 0 }
         return 1
@@ -472,21 +389,13 @@ fn gap(prev: FTok, cur: FTok, prev_unary: bool): u64 {
     if pp && prev.text == "{" { return 1 }
     if cp && cur.text == "}" { return 1 }
     if pp && prev.text == "}" { return 1 }
-    if pp && prev.text == "]" && cur.kind == FTokKind::Word && !is_kw(cur.text) { return 0 }   // `[]str`
-    if pp && prev.text == "#" { return 0 }   // `#test`
+    if pp && prev.text == "]" && cur.kind == FTokKind::Word && !is_kw(cur.text) { return 0 }
+    if pp && prev.text == "#" { return 0 }
     if cp && cur.text == ":" { return 0 }
     if pp && prev.text == ":" { return 1 }
     1
 }
 
-// ---------------------------------------------------------------------------
-// render — emit the canonical text from the raw token stream.
-// ---------------------------------------------------------------------------
-
-// append a str's bytes onto the output buffer. The output is a []byte built with the
-// AMORTIZED push (O(1) each) and turned into a str ONCE at the end — building via
-// teko::str::concat over a piece list would be a chained 2-arg concat, O(n²) in the
-// file size (measured: 30KB source → ~190MB of concat garbage before this shape).
 fn emit_str(out: []byte, s: str): []byte {
     var o = out
     var i: u64 = 0
@@ -514,11 +423,10 @@ fn render(toks: []FTok): str {
     var depth: u64 = 0
     var pending_blank = false
     var emitted_any = false
-    var prev_ends_open = false   // previous emitted line ended with `(`/`[`/`{`
+    var prev_ends_open = false
     var i: u64 = 0
     loop {
         if i >= toks.len { break }
-        // collect one logical line [i, j)
         var j = i
         loop {
             if j >= toks.len { break }
@@ -526,12 +434,10 @@ fn render(toks: []FTok): str {
             j = j + 1
         }
         if j == i {
-            // a blank line (or the newline ending the previous line was consumed below)
             if emitted_any { pending_blank = true }
             i = j + 1
             continue
         }
-        // the pending blank line: dropped after an opener line and before a closer line
         var first = toks[i]
         var first_closes = first.kind == FTokKind::Punct && is_closer(first.text)
         if pending_blank {
@@ -540,7 +446,6 @@ fn render(toks: []FTok): str {
             }
             pending_blank = false
         }
-        // indentation: leading closers dedent
         var lvl = depth
         var k = i
         loop {
@@ -554,7 +459,6 @@ fn render(toks: []FTok): str {
             break
         }
         out = emit_indent(out, lvl)
-        // emit the line's tokens with canonical gaps
         var prev = first
         var prev_unary = false
         var m = i
@@ -571,13 +475,10 @@ fn render(toks: []FTok): str {
                 }
             }
             out = emit_str(out, t.text)
-            // unary classification for the NEXT pair
             var unary = false
             if t.kind == FTokKind::Punct {
                 if t.text == "!" { unary = true }
                 if t.text == "+" || t.text == "-" || t.text == "~" {
-                    // unary when nothing operand-like precedes it (line start, after an
-                    // operator/keyword/opener, or after another prefix operator).
                     if m == i || !ends_operand(prev) { unary = true }
                 }
                 if t.text == "(" || t.text == "[" || t.text == "{" { depth = depth + 1 }
@@ -596,10 +497,6 @@ fn render(toks: []FTok): str {
     }
     str(out)
 }
-
-// ---------------------------------------------------------------------------
-// safety: the formatted output must carry EXACTLY the input's token stream.
-// ---------------------------------------------------------------------------
 
 fn same_stream(a: []FTok, b: []FTok): bool {
     var ia: u64 = 0
@@ -624,8 +521,6 @@ fn same_stream(a: []FTok, b: []FTok): bool {
     ia >= a.len && ib >= b.len
 }
 
-// the input must be a VALID Teko file (gofmt precedent — only valid programs are
-// formatted): a module, or (the main.tks shape) a main file. Reports the module error.
 fn front_end_accepts(source: str): error | null {
     var tokens = match lexer::tokenize(source) {
         []lexer::Token as t => t
@@ -642,7 +537,6 @@ fn front_end_accepts(source: str): error | null {
     null
 }
 
-// format_source — the pure formatter: str in, canonical str out (or a refusal).
 pub fn format_source(source: str): str | error {
     match front_end_accepts(source) {
         error as e => return e
@@ -660,60 +554,20 @@ pub fn format_source(source: str): str | error {
     out
 }
 
-/**
- * FLAG_CHECK — the REPORT-ONLY mode flag: `teko fmt --check <path>…` lists every path that is
- * not already canonical and writes nothing at all. Named once here so the argument parser and
- * the usage page cannot drift apart.
- *
- * @since 0.3.1
- */
 const FLAG_CHECK: str = "--check"
 
-/**
- * FLAG_APPLY — the REWRITE mode flag: `teko fmt --apply <path>…` rewrites every unformatted
- * file in place, which is what a bare `teko fmt <path>…` used to do. Explicit since the owner
- * ruling of 2026-07-30 (*"Sim: fmt --apply explícito"*): in a dev-mode tool the destructive
- * path must never be the shortest one to type, so rewriting is now asked for by name.
- *
- * @since 0.3.1
- */
 const FLAG_APPLY: str = "--apply"
 
-/**
- * STDIN_PATH — the operand that selects the stdin-to-stdout form, the one form that needs no
- * mode: it writes to stdout and can touch no file, so there is nothing to guard.
- *
- * @since 0.3.1
- */
 const STDIN_PATH: str = "-"
 
-/**
- * FMT_HELP_CMD — the subcommand key `teko::build::print_help` prints the fmt usage page for.
- *
- * @since 0.3.1
- */
 const FMT_HELP_CMD: str = "fmt"
 
-/**
- * FmtMode — which of the two mutually exclusive fmt modes the arguments selected: `Check`
- * (report, write nothing), `Apply` (rewrite in place), or `Unset` (no mode flag was given).
- *
- * @since 0.3.1
- */
 type FmtMode = enum { Unset; Check; Apply }
 
-/**
- * Is `name` a Teko source file this formatter owns (by extension)?
- *
- * @param name  a file name or path
- * @return      true for `.tks` and `.tkt`, false for anything else
- */
 fn is_teko_file(name: str): bool {
     teko::str::ends_with(name, ".tks") || teko::str::ends_with(name, ".tkt")
 }
 
-// collect .tks/.tkt files under `path` (a file, or a directory walked recursively;
-// dot-entries are skipped — mirrors discover's list_dir-to-classify walk).
 fn collect_files(path: str, acc: []str): []str | error {
     if is_teko_file(path) {
         return teko::list::push(acc, path)
@@ -736,7 +590,7 @@ fn collect_files(path: str, acc: []str): []str | error {
                     []str as _sub => {
                         out = match collect_files(child, out) { []str as o => o; error as e => return e }
                     }
-                    error => { }   // a non-Teko regular file — skip
+                    error => { }
                 }
             }
         }
@@ -745,12 +599,6 @@ fn collect_files(path: str, acc: []str): []str | error {
     out
 }
 
-/**
- * run_stdin — the `teko fmt -` mode (issue #229): read the whole of stdin, format it, and
- * write the canonical result to stdout — no file is touched, in place or otherwise. Under
- * `--check`, nothing is printed to stdout; the placeholder path "<stdin>" is reported (the
- * gofmt `-l -` convention) when the input would change, and the exit code carries the verdict.
- */
 fn run_stdin(check: bool): i32 {
     var src = teko::io::read_stdin()
     var out = match format_source(src) {
@@ -768,52 +616,17 @@ fn run_stdin(check: bool): i32 {
     0
 }
 
-/**
- * The mode a command-line argument selects.
- *
- * @param arg  one argument from the fmt command line
- * @return     `Check` for `--check`, `Apply` for `--apply`, `Unset` for anything else (which
- *             the caller reads as a path)
- */
 fn mode_of_flag(arg: str): FmtMode {
     if arg == FLAG_CHECK { return FmtMode::Check }
     if arg == FLAG_APPLY { return FmtMode::Apply }
     FmtMode::Unset
 }
 
-/**
- * THE GUARD: print the fmt usage page and yield the exit code of a run that named no mode.
- *
- * A command line with paths but no mode is answered with the help rather than with a guess.
- * Guessing `--apply` is the behaviour this change removes: a whole tree rewritten with no flag
- * and no confirmation. Guessing `--check` would be just as bad in the other direction — whoever
- * relied on the old bare rewrite would stop rewriting and never be told.
- *
- * @return  2, the exit code of a run that produced no verdict
- */
 fn print_help_without_a_mode(): i32 {
     teko::build::print_help(FMT_HELP_CMD)
     2
 }
 
-/**
- * run_cli — argv is the FULL args (args[0]=program, args[1]="fmt"). THE CONTRACT (owner ruling
- * 2026-07-30, `--apply` explicit):
- *
- *   teko fmt --check <path>…   lists every unformatted path, writes nothing, exits 1 if any
- *   teko fmt --apply <path>…   rewrites every unformatted file in place, listing each one
- *   teko fmt <path>…           prints this usage page — a bare run NEVER rewrites
- *   teko fmt -                 formats stdin to stdout, touching no file
- *   teko fmt --check -         lists `<stdin>` and exits 1 when stdin would change
- *
- * A single `-` path switches to run_stdin (issue #229); mixing `-` with other paths is
- * rejected by collect_files (it is neither a directory nor a .tks/.tkt file), which is an
- * honest refusal rather than a silently ambiguous mode.
- *
- * @param args  the FULL argv (args[0] the program, args[1] "fmt")
- * @return      0 ok; 1 = --check found unformatted files (or a `-` stdin input that would
- *              change); 2 = usage (no mode, no path) / IO / parse error
- */
 pub fn run_cli(args: []str): i32 {
     var mode = FmtMode::Unset
     var paths: []str = teko::list::empty()

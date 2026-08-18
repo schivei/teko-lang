@@ -1,79 +1,18 @@
 #test
-/**
- * verdict_channel_path_reads_the_env_var — `verdict_channel_path` is exactly what
- * `VERDICT_CHANNEL_ENV` names.
- *
- * The named path is a RELATIVE one, like its writer sibling's: nothing here opens it, but a
- * POSIX-absolute literal in a channel test is an invitation to make the next one do I/O against a
- * directory only one of the three host families has.
- *
- * @return void
- */
 fn verdict_channel_path_reads_the_env_var() {
     match teko::env::set_var(VERDICT_CHANNEL_ENV, verdict_path_test_channel()) { error => { }; null => { } }
     teko::assert::is_true(verdict_channel_path() == verdict_path_test_channel())
 }
 
-/**
- * verdict_path_test_channel — the channel name `verdict_channel_path_reads_the_env_var` round-trips
- * through the environment. Never opened, and deliberately NOT the emit test's name so the two cannot
- * interfere whichever order (or worker) runs them.
- *
- * A FUNCTION AND NOT A CONST, because the name is DERIVED: `teko::test::scoped` appends the running
- * test's identity, which a `const` cannot do and which is what makes "whichever worker runs them"
- * true by construction rather than by the two names happening to differ.
- *
- * @return this test's own channel name, relative to the working directory
- */
 fn verdict_path_test_channel(): str { teko::test::scoped(".teko-verdict-path-test.chan") }
 
-/**
- * verdict_emit_test_channel — the channel file `verdict_emit_appends_to_the_named_channel` writes,
- * reads back and removes.
- *
- * SCOPED, for the reason its sibling above is: the name carries the running test's identity, so a
- * second test that ever spelled the same base could not collide with this one in another shard.
- *
- * RELATIVE, AND THAT IS THE FIX: this test used to name `/tmp/.regr-verdict-emit-test.chan`, which
- * is a claim about the HOST's directory layout and not about `verdict_emit`. Windows has no `/tmp`,
- * so `fopen(path, "wb")` returned NULL there, the swallowed write error left the read-back empty,
- * and the content assertion aborted the entire Windows unit phase at test 1112 of 1167 — a red leg
- * that said `assertion failed: is_true` about the runner's filesystem. A name in the working
- * directory is writable on every host that runs this suite, and it is the same convention the
- * regression harness already uses for its own scratch files (`build/regression.tks`'s
- * `bin/.regr-work/…`), rather than a second one invented here.
- *
- * @return this test's own channel file, relative to the working directory
- */
 fn verdict_emit_test_channel(): str { teko::test::scoped(".teko-verdict-emit-test.chan") }
 
-/**
- * verdict_emit_ok — did `verdict_emit(line)` report success?
- *
- * Exists so the test can ASSERT the write instead of swallowing its error: the whole cost of the
- * `/tmp` defect was a failed append reaching the content comparison as an empty string, which
- * named the symptom (`content != "first\nsecond\n"`) and not the cause (the file never opened).
- *
- * @param line  the record to append, WITHOUT a trailing newline
- * @return      true iff `verdict_emit` returned `null` (the append landed)
- */
 fn verdict_emit_ok(line: str): bool {
     match verdict_emit(line) { null => true; error => false }
 }
 
 #test
-/**
- * verdict_emit_appends_to_the_named_channel — with `VERDICT_CHANNEL_ENV` set, `verdict_emit`
- * appends each record (one per line) to that file — the writer half of migalha 10, proven
- * end to end: two calls land as two lines, in call order.
- *
- * The two `verdict_emit_ok` assertions pin the SAME rule as before plus the step that was silently
- * failing (the append itself succeeds), and the channel is a working-directory-relative name
- * (`verdict_emit_test_channel`) so the assertion speaks about `verdict_emit` on every host instead
- * of about the runner's `/tmp`.
- *
- * @return void
- */
 fn verdict_emit_appends_to_the_named_channel() {
     var path = verdict_emit_test_channel()
     match teko::fs::remove_file(path) { error => { }; null => { } }
@@ -85,57 +24,16 @@ fn verdict_emit_appends_to_the_named_channel() {
     match teko::fs::remove_file(path) { error => { }; null => { } }
 }
 
-/**
- * PIPE_DEADLINE_MS — the budget every pipe read in this file runs under.
- *
- * A DEADLINE IS WHAT KEEPS THESE TESTS FROM HANGING INSTEAD OF FAILING. Two of them deliberately
- * arrange a pipe that will never reach end-of-file; without a budget the runner would block there
- * forever, and a suite that never reports is strictly worse than a red one. Two seconds is wide
- * enough that a loaded CI box never trips it by accident and short enough that a genuine hang is
- * reported in seconds.
- */
 const PIPE_DEADLINE_MS: i64 = 2000
 
-/**
- * PIPE_NO_EOF_DEADLINE_MS — the budget the WITHHELD-end-of-file test runs under.
- *
- * Deliberately shorter than `PIPE_DEADLINE_MS`, because this one is expected to EXPIRE: it is the
- * measurement of the classic pipe defect, and paying two seconds for a result that is known in
- * advance would only slow the suite.
- */
 const PIPE_NO_EOF_DEADLINE_MS: i64 = 400
 
-/**
- * shell_argv — `sh -c <script>`, the child every test here launches.
- *
- * `sh` UNQUALIFIED AND NOT `/bin/sh`, because the absolute path is a claim about the host's
- * directory layout that Windows does not honour; the bare name goes through the host's own
- * executable lookup, which is exactly what `build/regression.tks`'s `tool_on_path` already relies
- * on for its cross-host probes.
- *
- * @param script  the shell script the child runs
- * @return        the child's argument vector
- */
 fn shell_argv(script: str): []str {
     var v: []str = teko::list::push(teko::list::empty(), "sh")
     v = teko::list::push(v, "-c")
     teko::list::push(v, script)
 }
 
-/**
- * drained — everything a child sent to `p`'s write end, with the parent's own copy of that end
- * closed first.
- *
- * THE CLOSE IS THE WHOLE POINT AND IT IS NOT A DETAIL. While this process still holds a copy of the
- * write end, the pipe has a writer, and the read end never reaches end-of-file no matter what the
- * child does. Every test that expects a drain to TERMINATE goes through here so the close cannot be
- * forgotten in one of them; the one test that expects a drain NOT to terminate does not.
- *
- * @param p            the pipe whose read end to drain
- * @param deadline_ms  the total budget for the drain
- * @return             what the writer sent, or the drain's failure
- * @throws             when the deadline expired before end-of-file, or a read failed
- */
 fn drained(p: Pipe, deadline_ms: i64): str | error {
     match close_fd(p.write_fd) { error as e => return e; null => { } }
     var got = read_to_eof(p.read_fd, deadline_ms)
@@ -143,22 +41,10 @@ fn drained(p: Pipe, deadline_ms: i64): str | error {
     got
 }
 
-/**
- * drain_text — `drained`, with the failure arm collapsed to "" so a test can assert on ONE value.
- *
- * @param p            the pipe whose read end to drain
- * @param deadline_ms  the total budget for the drain
- * @return             what the writer sent, or "" when the drain failed
- */
 fn drain_text(p: Pipe, deadline_ms: i64): str {
     match drained(p, deadline_ms) { str as s => s; error => "" }
 }
 
-/**
- * opened_pipe — one pipe, or a failure loud enough to name itself.
- *
- * @return the pipe, with both ends open
- */
 fn opened_pipe(): Pipe {
     match pipe() {
         Pipe as p => p
@@ -167,15 +53,6 @@ fn opened_pipe(): Pipe {
 }
 
 #test
-/**
- * pipe_returns_two_open_distinct_descriptors — `pipe()` hands back two real, different descriptors.
- *
- * DISTINCT IS PART OF THE CONTRACT, not a coincidence of the packing: the read end and the write
- * end are two separate objects, and a packing bug that folded them onto one value would still pass
- * a "both are non-negative" check while making every later test meaningless.
- *
- * @return void
- */
 fn pipe_returns_two_open_distinct_descriptors() {
     var p = opened_pipe()
     teko::assert::ge_i64(p.read_fd, 0)
@@ -186,15 +63,6 @@ fn pipe_returns_two_open_distinct_descriptors() {
 }
 
 #test
-/**
- * closing_the_same_descriptor_twice_is_reported — `close_fd` answers honestly the second time.
- *
- * The ownership rule these primitives run on says the CALLER closes; a close that silently
- * succeeded on an already-closed descriptor would hide a double-close, which on a busy process is
- * how one caller ends up closing a descriptor another has since been given.
- *
- * @return void
- */
 fn closing_the_same_descriptor_twice_is_reported() {
     var p = opened_pipe()
     match close_fd(p.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
@@ -203,15 +71,6 @@ fn closing_the_same_descriptor_twice_is_reported() {
 }
 
 #test
-/**
- * a_child_stdout_arrives_through_the_pipe — THE FIRST INVERSION, positive half: what the child
- * writes into the pipe reaches the parent.
- *
- * No scratch file is created, named, read back or removed anywhere in this test — the bytes go from
- * the child's stdout to this process's memory. That absence is the deliverable.
- *
- * @return void
- */
 fn a_child_stdout_arrives_through_the_pipe() {
     var p = opened_pipe()
     var h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
@@ -221,22 +80,6 @@ fn a_child_stdout_arrives_through_the_pipe() {
 }
 
 #test
-/**
- * an_unconnected_pipe_delivers_nothing — THE FIRST INVERSION, negative half: with the pipe NOT
- * given to the child, the very same child's output does not arrive.
- *
- * WITHOUT THIS HALF THE POSITIVE HALF PROVES NOTHING. A test that only ever sees the expected bytes
- * cannot tell a working pipe from a reader that happens to observe the child's inherited stdout by
- * some other route; the two halves differ in exactly one thing — where the child's stdout went —
- * and the byte count differs with it.
- *
- * THE CHILD IS SENT TO A FILE RATHER THAN LEFT TO INHERIT, and that is not incidental: an inheriting
- * child writes onto the RUNNER's own stdout, and its `pipe-mark` then lands in the middle of the
- * suite's report. Naming a destination keeps the inversion exact — the same child, the same bytes,
- * everywhere except the pipe — without corrupting the output the runner is judged by.
- *
- * @return void
- */
 fn an_unconnected_pipe_delivers_nothing() {
     var elsewhere = teko::test::scoped(".teko-pipe-elsewhere.out")
     var p = opened_pipe()
@@ -248,16 +91,6 @@ fn an_unconnected_pipe_delivers_nothing() {
 }
 
 #test
-/**
- * the_read_end_sees_eof_once_the_child_is_gone — THE SECOND INVERSION, positive half: after the
- * child exits and the parent has closed its own copy of the write end, the read end reaches
- * end-of-file and the drain TERMINATES.
- *
- * Termination is the assertion. `read_to_eof` returning at all — with a budget still unspent — is
- * what says end-of-file arrived; the content merely confirms nothing was lost on the way.
- *
- * @return void
- */
 fn the_read_end_sees_eof_once_the_child_is_gone() {
     var p = opened_pipe()
     var h = spawn_redirected_fds(shell_argv("printf a; printf b"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
@@ -270,18 +103,6 @@ fn the_read_end_sees_eof_once_the_child_is_gone() {
 }
 
 #test
-/**
- * a_write_end_left_open_in_the_parent_withholds_eof — THE SECOND INVERSION, negative half, and the
- * classic defect of pipes: a parent that forgets to close its own copy of the write end reads
- * forever, because it is itself the writer keeping the pipe open.
- *
- * THE DEADLINE IS WHAT MAKES THIS A TEST AT ALL. Without it this case does not go red, it HANGS —
- * and a hung suite reports nothing, which is worse than a failure. Here the missing end-of-file
- * comes back as an ERROR from `read_to_eof`, a value that can be asserted on, and the closing
- * `close_fd` pair then proves the pipe was healthy all along: the only thing wrong was the open end.
- *
- * @return void
- */
 fn a_write_end_left_open_in_the_parent_withholds_eof() {
     var p = opened_pipe()
     var h = spawn_redirected_fds(shell_argv("printf half"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
@@ -300,17 +121,6 @@ fn a_write_end_left_open_in_the_parent_withholds_eof() {
 }
 
 #test
-/**
- * one_write_end_can_back_both_child_streams — the same write end bound to the child's stdout AND to
- * its stderr merges the two into one ordered stream.
- *
- * NOT A CURIOSITY — this is the ordinary way to capture a child whose diagnostics interleave with
- * its output, and it is the case that fails when the child arm closes a source descriptor after the
- * first `dup2` instead of after the last: the second bind would then be operating on a descriptor
- * that no longer exists, and the child's stderr would vanish silently.
- *
- * @return void
- */
 fn one_write_end_can_back_both_child_streams() {
     var p = opened_pipe()
     var h = spawn_redirected_fds(shell_argv("printf O; printf E 1>&2"), "", teko::list::empty(), NO_FD, p.write_fd, p.write_fd)
@@ -320,15 +130,6 @@ fn one_write_end_can_back_both_child_streams() {
 }
 
 #test
-/**
- * a_pipe_can_feed_the_child_stdin — the read end of one pipe drives a child's standard input, so
- * the parent's write end is the child's input without a `.in` file anywhere.
- *
- * The symmetric half of the capture story: the input redirection accepts a descriptor by the same
- * rule the two output ones do, which is what will let a caller stop staging `.in` files.
- *
- * @return void
- */
 fn a_pipe_can_feed_the_child_stdin() {
     var feed = opened_pipe()
     var cap = opened_pipe()
@@ -341,17 +142,6 @@ fn a_pipe_can_feed_the_child_stdin() {
 }
 
 #test
-/**
- * the_path_route_is_unchanged — a caller that names a PATH still gets a file, byte for byte as
- * before the descriptor slots existed.
- *
- * THE CORPUS DEPENDS ON THIS. Every capture in `build/regression.tks` and `build/project.tks` goes
- * through the path route today; the descriptor slots were APPENDED to the payload precisely so this
- * assertion could not change, and this test is what says the appending achieved that rather than
- * merely intending it.
- *
- * @return void
- */
 fn the_path_route_is_unchanged() {
     var outp = teko::test::scoped(".teko-pipe-path-route.out")
     match teko::fs::remove_file(outp) { error => { }; null => { } }
@@ -364,16 +154,6 @@ fn the_path_route_is_unchanged() {
 }
 
 #test
-/**
- * a_fill_on_a_broken_descriptor_is_an_error_not_an_end_of_file — a zero from `fd_fill` means
- * end-of-file and ONLY end-of-file; a broken descriptor comes back on the error arm.
- *
- * The distinction is what lets `read_to_eof` loop until zero and still be correct: were a failed
- * fill to look like end-of-file, a drain interrupted by a descriptor problem would return a
- * TRUNCATED capture and call it complete.
- *
- * @return void
- */
 fn a_fill_on_a_broken_descriptor_is_an_error_not_an_end_of_file() {
     var p = opened_pipe()
     match close_fd(p.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
@@ -388,38 +168,12 @@ fn a_fill_on_a_broken_descriptor_is_an_error_not_an_end_of_file() {
     }
 }
 
-/**
- * APPEND_RECORDS — how many records the append tests emit.
- *
- * BIG ENOUGH THAT THE CURVE IS NOT NOISE. The old read-modify-write allocated the SUM of 1..N file
- * sizes, so its cost grows with N squared while the append's grows with N; at 800 records of about
- * 64 bytes that is roughly 41 MB against 51 KB, a separation no page-granularity reading can blur.
- * A hundred records would leave both inside one allocator chunk and prove nothing.
- */
 const APPEND_RECORDS: u64 = 800
 
-/**
- * append_record_text — the record emitted at index `k`, padded so every record is the same width
- * and the arithmetic above is a size and not an estimate.
- *
- * THE INDEX IS IN THE TEXT ON PURPOSE: it is what lets the liveness assertion check ORDER, not just
- * a line count. An append that silently dropped or reordered records would satisfy "the file has N
- * lines" and fail here.
- *
- * @param k  the record's index
- * @return   the record, WITHOUT a trailing newline
- */
 fn append_record_text(k: u64): str {
     "record-" ~ teko::str::u64_to_str(k) ~ "-0123456789012345678901234567890123456789"
 }
 
-/**
- * append_all — emit `n` records to `path` with the CURRENT (append) implementation.
- *
- * @param path  the channel file
- * @param n     how many records
- * @return      true iff every append reported success
- */
 fn append_all(path: str, n: u64): bool {
     var ok = true
     var k: u64 = 0
@@ -431,25 +185,6 @@ fn append_all(path: str, n: u64): bool {
     ok
 }
 
-/**
- * rewrite_all — emit `n` records to `path` the way `verdict_emit` USED to: read the whole file back,
- * concatenate, rewrite.
- *
- * KEPT ALIVE DELIBERATELY, and only here. It is the CONTROL ARM: it proves the two shapes produce
- * the same file, which is what makes the cost comparison beside them meaningful — a cheaper arm that
- * wrote less would be measuring output, not cost.
- *
- * THE COST COMPARISON ITSELF LIVES IN `examples/probes/append_cost_probe`, NOT HERE, and that is a
- * property of the METER rather than a dodge. `teko::mem::peak_rss` is a HIGH-WATER MARK: by the time
- * this file's tests run, the shared test process has already peaked far above anything either arm
- * allocates, so both deltas read zero and the comparison cannot be taken at all — measured, as a
- * FAILED assertion in one shard before the measurement was moved. A process that does nothing else
- * is the only place that meter says anything, so that is where the two numbers are taken.
- *
- * @param path  the channel file
- * @param n     how many records
- * @return      true iff every rewrite reported success
- */
 fn rewrite_all(path: str, n: u64): bool {
     var ok = true
     var k: u64 = 0
@@ -462,40 +197,15 @@ fn rewrite_all(path: str, n: u64): bool {
     ok
 }
 
-/**
- * nth_line — line `k` of `text`, counting from zero, without its newline.
- *
- * @param text  the whole file
- * @param k     the line index
- * @return      that line, or "" when there are fewer
- */
 fn nth_line(text: str, k: u64): str {
     var lines = teko::iter::split_lines(text)
     if k >= lines.len { return "" }
     lines[k]
 }
 
-/**
- * lines_in — how many lines `text` holds; a trailing newline does not add an empty one
- * (`teko::iter::split_lines`).
- *
- * @param text  the whole file
- * @return      the count of lines
- */
 fn lines_in(text: str): u64 { teko::iter::split_lines(text).len }
 
 #test
-/**
- * append_file_keeps_every_record_in_order — LIVENESS BEFORE COST: `teko::io::append_file` writes
- * every record, in call order, losing none.
- *
- * A TEST THAT ONLY COUNTED LINES WOULD PASS ON A BROKEN APPEND. An implementation that dropped a
- * record in the middle and duplicated another, or that reordered under buffering, keeps the count
- * exactly right; only checking each record AT ITS INDEX catches it. So the first, the last and a
- * middle one are all asserted by position, and only then is the count.
- *
- * @return void
- */
 fn append_file_keeps_every_record_in_order() {
     var path = teko::test::scoped(".teko-append-order.log")
     match teko::fs::remove_file(path) { error => { }; null => { } }
@@ -509,15 +219,6 @@ fn append_file_keeps_every_record_in_order() {
 }
 
 #test
-/**
- * append_file_and_the_old_rewrite_agree_byte_for_byte — the two shapes produce the SAME file.
- *
- * THE COST MEASUREMENT IS ONLY MEANINGFUL IF THE TWO ARMS DO THE SAME WORK. Were the append to
- * write less — a dropped record, a missing newline — it would also allocate less, and the numbers
- * beside it would be measuring the difference in output rather than the difference in cost.
- *
- * @return void
- */
 fn append_file_and_the_old_rewrite_agree_byte_for_byte() {
     var by_append = teko::test::scoped(".teko-append-agree-a.log")
     var by_rewrite = teko::test::scoped(".teko-append-agree-b.log")
