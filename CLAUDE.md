@@ -26,6 +26,12 @@ executar por cima.
   que a lei proíbe. **A ideia é preservar os tokens de memória da sessão principal e reduzir as
   compactações** (é a compactação que causa perda de contexto e erros caros) — logo evito também
   ler arquivos gigantes / rodar cadeias aqui.
+- **CADA AGENTE COM SUA BRANCH/WORKTREE (lei dura, dono 2026-08-18).** Ao despachar, SEMPRE dar ao
+  agente uma **branch própria** e **worktree isolado** (`isolation: "worktree"`) — nunca deixá-lo
+  compartilhar o working tree principal comigo. Compartilhar causa colisão de git (o `checkout`/`reset`
+  de um puxa a árvore de baixo do outro; scratch do agente polui o main). O agente pusha a branch dele
+  no origin (sobrevive a revert de FS), eu dreno por ff/cherry-pick. Coordenador edita em worktree
+  isolado; nunca encosta no git do main enquanto um agente roda nele.
 - **SAÍDA LONGA → ARTEFATO HTML (lei dura, dono 2026-08-18).** Quando o retorno de um agente for
   **grande demais e puder comprometer minha memória**, ele NÃO passa pela sessão principal: **outro
   agente gera um artefato HTML**, eu **publico** (ferramenta Artifact), o **dono revisa** e me devolve
