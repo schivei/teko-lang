@@ -30,6 +30,11 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 É para **REMOVER e REDUZIR — não mover** para outro lugar. Documentação de verdade mora em
 `docs/design/`, escrita à parte; não é o dump dos doc comments do código.
 - **Comentários inline `//` em `.tks`/`.tkt`: PROIBIDOS (0%).** Remover todos.
+- **PASSO ANTERIOR ao doc — visibilidade (dono 2026-08-18):** se a decl é **API EXPOSTA** (superfície
+  consumível), ela **OBRIGATORIAMENTE deve ser `exp`**, não `pub`. `pub` é só interno — NÃO vai pro
+  `.tkh` (`tast.tks` M.4: só `exp` alcança o header). O que está `pub` mas é exposto → **promover a
+  `exp`** (e aí mantém doc curto); o genuinamente interno (usado só entre namespaces do compilador, ex.
+  `teko::sort`/`teko::cmp`) fica `pub`/privado. SÓ DEPOIS aplica-se o doc.
 - **Doc comment SÓ onde há `exp`** (superfície exportada). **Qualquer outro acessor DESCARTA doc**
   (dono 2026-08-18): `pub`, `global`, `comptime`, privado, o que for — REMOVER. Doc de topo/introdução
   de arquivo: REMOVER.
