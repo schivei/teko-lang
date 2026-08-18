@@ -4,64 +4,8 @@ use teko::encoding::xml
 use teko::numeric::bigint
 
 /**
- * `teko::crypto::xmldsig` — XML Digital Signature (W3C XML-DSig Core, REC 2002-02-12,
- * https://www.w3.org/TR/xmldsig-core/), the XML document-signing counterpart of
- * `teko::crypto::jose` (which covers JSON). Composes the already-shipped
- * `teko::encoding::xml`/`xml_c14n` DOM + Canonical XML 1.0 engine with the already-shipped
- * `teko::crypto` primitive layer (`rsa`, `ec_p256`, `mac`, `hash`) and `teko::encoding::base64`.
- *
- * ALGORITHM COVERAGE (deliberately the common interoperable subset, not the full XML-DSig
- * algorithm registry — YAGNI):
- *   - Digest: SHA-256 (`http://www.w3.org/2001/04/xmlenc#sha256`) and, for legacy interop only,
- *     SHA-1 (`http://www.w3.org/2000/09/xmldsig#sha1` — cryptographically broken; read-only
- *     interop, never the default for new signing).
- *   - Signature: RSA PKCS#1 v1.5 + SHA-256 (`...xmldsig-more#rsa-sha256`), ECDSA P-256 + SHA-256
- *     (`...xmldsig-more#ecdsa-sha256`, raw fixed-width `r || s`, matching JOSE ES256 and the
- *     scheme every XML-DSig ECDSA interop implementation emits), and HMAC-SHA-256
- *     (`...xmldsig-more#hmac-sha256`).
- *   - Canonicalization: Canonical XML 1.0, INCLUSIVE (`http://www.w3.org/TR/2001/REC-xml-c14n-
- *     20010315`) only — the form `teko::encoding::xml::xml_c14n` implements. Exclusive C14N
- *     (`xml-exc-c14n#`) is a named seam already reported by that module and not attempted here.
- *
- * SIGNATURE SHAPES: enveloped (`xmldsig_sign_enveloped`/`xmldsig_verify` — the `Signature`
- * embedded in the signed document itself, referencing it via `URI=""` and the
- * `...#enveloped-signature` transform), enveloping (`xmldsig_sign_enveloping` — the `Signature`
- * wraps the signed data in its own `Object`), and detached (`xmldsig_sign_detached`/
- * `xmldsig_verify_detached` — the `Signature` travels apart from a caller-supplied node).
- *
- * NAMESPACE-PREFIX AGNOSTIC. A real-world XML-DSig producer (this module's own signer included)
- * may bind the `http://www.w3.org/2000/09/xmldsig#` namespace to the default namespace OR to an
- * explicit prefix (`ds:Signature`, the common convention). Every lookup in this module matches
- * elements by LOCAL name (`XmlNode.local`), never the raw qualified name, so verification accepts
- * either convention transparently.
- *
- * INCLUSIVE-C14N SUBTREE SCOPE (composing `xml_c14n`'s documented SCOPE NOTE). `xml_c14n`'s
- * `canonicalize` treats its argument as a COMPLETE subtree: only namespaces declared on it and
- * its descendants are in scope. A `SignedInfo` extracted from inside a `Signature` element (which
- * usually carries the one namespace declaration, inherited by `SignedInfo`) is therefore NOT
- * self-contained as parsed. This module's `inline_namespaces`/`find_element_with_inlined_
- * namespaces` reproduce, by hand, the namespace-inheritance step inclusive C14N performs
- * implicitly for a non-root subtree: every ancestor's still-in-scope binding is copied onto the
- * extracted element as an explicit `xmlns`/`xmlns:prefix` attribute before canonicalizing it
- * standalone, so the result matches what canonicalizing the whole document down to that point
- * would have produced.
- *
- * KEYS ARE RAW COMPONENTS, NOT ASN.1/X.509 (matching `teko::crypto::rsa`/`ec_p256`'s own scope
- * cut). `SigningKey`/`VerificationKey` wrap the existing `teko::crypto` key types directly; a
- * `KeyInfo` element, when supplied, is embedded VERBATIM (caller-built) — this module neither
- * parses nor generates X.509 certificates or `RSAKeyValue`/`ECKeyValue` structures.
- *
- * ERRORS ARE VALUES (`teko::crypto::CryptoError`, this project's shared crypto error type —
- * never a second error type). Verification never panics: every structural or cryptographic
- * failure (a malformed `Signature`, an unsupported algorithm, a digest or signature mismatch) is
- * a `CryptoError`.
- */
-
-/**
  * The XML-DSig namespace URI (`http://www.w3.org/2000/09/xmldsig#`) this module's own `Signature`
  * elements declare.
- *
- * @return  the XML-DSig namespace URI
  */
 exp fn xmldsig_namespace_uri(): str {
     "http://www.w3.org/2000/09/xmldsig#"
@@ -70,8 +14,6 @@ exp fn xmldsig_namespace_uri(): str {
 /**
  * The Canonical XML 1.0 (inclusive) algorithm URI — the only `CanonicalizationMethod`/
  * `DigestMethod`-adjacent C14N this module produces or accepts, matching `xml_c14n`'s coverage.
- *
- * @return  the Canonical XML 1.0 algorithm URI
  */
 exp fn c14n_algorithm_uri(): str {
     "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
@@ -80,54 +22,27 @@ exp fn c14n_algorithm_uri(): str {
 /**
  * The enveloped-signature transform URI: the transform an enveloped `Reference` (`URI=""`) names
  * to say "digest the host document with its own `Signature` element removed."
- *
- * @return  the enveloped-signature transform algorithm URI
  */
 exp fn enveloped_signature_transform_uri(): str {
     "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
 }
 
-/**
- * The `DigestMethod` algorithm URI for SHA-256.
- *
- * @return  the SHA-256 digest algorithm URI
- */
 fn digest_sha256_uri(): str {
     "http://www.w3.org/2001/04/xmlenc#sha256"
 }
 
-/**
- * The `DigestMethod` algorithm URI for SHA-1 (legacy interop only).
- *
- * @return  the SHA-1 digest algorithm URI
- */
 fn digest_sha1_uri(): str {
     "http://www.w3.org/2000/09/xmldsig#sha1"
 }
 
-/**
- * The `SignatureMethod` algorithm URI for RSA PKCS#1 v1.5 with SHA-256.
- *
- * @return  the rsa-sha256 signature algorithm URI
- */
 fn signature_rsa_sha256_uri(): str {
     "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
 }
 
-/**
- * The `SignatureMethod` algorithm URI for ECDSA P-256 with SHA-256.
- *
- * @return  the ecdsa-sha256 signature algorithm URI
- */
 fn signature_ecdsa_sha256_uri(): str {
     "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256"
 }
 
-/**
- * The `SignatureMethod` algorithm URI for HMAC-SHA-256.
- *
- * @return  the hmac-sha256 signature algorithm URI
- */
 fn signature_hmac_sha256_uri(): str {
     "http://www.w3.org/2001/04/xmldsig-more#hmac-sha256"
 }
@@ -146,12 +61,6 @@ exp type DigestAlg = enum { Sha256; Sha1 }
  */
 exp type SignatureAlg = enum { RsaSha256; EcdsaSha256; HmacSha256 }
 
-/**
- * The `DigestMethod` `Algorithm` URI for `alg`.
- *
- * @param alg  the digest algorithm
- * @return     `alg`'s algorithm URI
- */
 fn digest_alg_uri(alg: DigestAlg): str {
     match alg {
         Sha256 => digest_sha256_uri()
@@ -159,12 +68,6 @@ fn digest_alg_uri(alg: DigestAlg): str {
     }
 }
 
-/**
- * The `SignatureMethod` `Algorithm` URI for `alg`.
- *
- * @param alg  the signature algorithm
- * @return     `alg`'s algorithm URI
- */
 fn signature_alg_uri(alg: SignatureAlg): str {
     match alg {
         RsaSha256 => signature_rsa_sha256_uri()
@@ -173,26 +76,12 @@ fn signature_alg_uri(alg: SignatureAlg): str {
     }
 }
 
-/**
- * Maps a `DigestMethod` `Algorithm` URI back to a `DigestAlg`.
- *
- * @param uri  the `Algorithm` attribute value
- * @return     the matching digest algorithm, or a `CryptoError` naming the unsupported URI
- * @throws     `CryptoError` when `uri` is not one of this module's supported digest algorithms
- */
 fn digest_alg_from_uri(uri: str): DigestAlg | crypto::CryptoError {
     if xmldsig_str_eq(uri, digest_sha256_uri()) { return DigestAlg::Sha256 }
     if xmldsig_str_eq(uri, digest_sha1_uri()) { return DigestAlg::Sha1 }
     crypto::crypto_error(concat("xmldsig: unsupported DigestMethod Algorithm: ", uri))
 }
 
-/**
- * Maps a `SignatureMethod` `Algorithm` URI back to a `SignatureAlg`.
- *
- * @param uri  the `Algorithm` attribute value
- * @return     the matching signature algorithm, or a `CryptoError` naming the unsupported URI
- * @throws     `CryptoError` when `uri` is not one of this module's supported signature algorithms
- */
 fn signature_alg_from_uri(uri: str): SignatureAlg | crypto::CryptoError {
     if xmldsig_str_eq(uri, signature_rsa_sha256_uri()) { return SignatureAlg::RsaSha256 }
     if xmldsig_str_eq(uri, signature_ecdsa_sha256_uri()) { return SignatureAlg::EcdsaSha256 }
@@ -200,13 +89,6 @@ fn signature_alg_from_uri(uri: str): SignatureAlg | crypto::CryptoError {
     crypto::crypto_error(concat("xmldsig: unsupported SignatureMethod Algorithm: ", uri))
 }
 
-/**
- * Digests `data` under `alg`, dispatching to the matching `teko::crypto::hash` one-shot function.
- *
- * @param alg   the digest algorithm
- * @param data  the bytes to digest
- * @return      the digest (32 bytes for SHA-256, 20 for SHA-1)
- */
 fn digest_bytes(alg: DigestAlg, data: []byte): []byte {
     match alg {
         Sha256 => crypto::sha256_of(data)
@@ -214,15 +96,6 @@ fn digest_bytes(alg: DigestAlg, data: []byte): []byte {
     }
 }
 
-/**
- * The Canonical XML 1.0 digest of `node` under `alg` — canonicalize then hash, the core
- * `DigestValue`/`Reference`-target computation both signing and verifying share.
- *
- * @param alg   the digest algorithm
- * @param node  the subtree to canonicalize and digest (see this module's INCLUSIVE-C14N SUBTREE
- *              SCOPE note: `node` must already be a self-contained subtree)
- * @return      the digest bytes
- */
 fn digest_node(alg: DigestAlg, node: xml::XmlNode): []byte {
     digest_bytes(alg, bytes_of_str(xml::canonicalize(node)))
 }
@@ -270,41 +143,20 @@ exp type VerificationKey = struct {
     hmac_secret: []byte
 }
 
-/**
- * The all-zero `RsaPrivateKey` placeholder `SigningKey`'s non-RSA constructors carry in the
- * (unused) `rsa_key` field.
- *
- * @return  an `RsaPrivateKey` of `n = d = e = 0`
- */
 fn zero_rsa_private_key(): crypto::RsaPrivateKey {
     crypto::RsaPrivateKey { n = bigint::zero(); d = bigint::zero(); e = bigint::zero() }
 }
 
-/**
- * The all-zero `RsaPublicKey` placeholder `VerificationKey`'s non-RSA constructors carry in the
- * (unused) `rsa_key` field.
- *
- * @return  an `RsaPublicKey` of `n = e = 0`
- */
 fn zero_rsa_public_key(): crypto::RsaPublicKey {
     crypto::RsaPublicKey { n = bigint::zero(); e = bigint::zero() }
 }
 
-/**
- * The point-at-infinity `P256Point` placeholder `VerificationKey`'s non-EC constructors carry in
- * the (unused) `ec_point` field.
- *
- * @return  the P-256 point at infinity
- */
 fn zero_p256_point(): crypto::P256Point {
     crypto::P256Point { infinity = true; x = bigint::zero(); y = bigint::zero() }
 }
 
 /**
  * Builds a `SigningKey` for `rsa-sha256` from an RSA private key.
- *
- * @param key  the signer's RSA private key
- * @return     a `SigningKey` of kind `RsaPrivate`
  */
 exp fn signing_key_rsa(key: crypto::RsaPrivateKey): SigningKey {
     SigningKey { kind = SigningKeyKind::RsaPrivate; rsa_key = key; ec_scalar = bigint::zero(); hmac_secret = teko::list::empty() }
@@ -312,9 +164,6 @@ exp fn signing_key_rsa(key: crypto::RsaPrivateKey): SigningKey {
 
 /**
  * Builds a `SigningKey` for `ecdsa-sha256` from an EC P-256 private scalar.
- *
- * @param scalar  the signer's private scalar `d`
- * @return        a `SigningKey` of kind `EcdsaPrivate`
  */
 exp fn signing_key_ecdsa(scalar: bigint::BigInt): SigningKey {
     SigningKey { kind = SigningKeyKind::EcdsaPrivate; rsa_key = zero_rsa_private_key(); ec_scalar = scalar; hmac_secret = teko::list::empty() }
@@ -322,9 +171,6 @@ exp fn signing_key_ecdsa(scalar: bigint::BigInt): SigningKey {
 
 /**
  * Builds a `SigningKey` for `hmac-sha256` from a shared secret.
- *
- * @param secret  the shared HMAC secret
- * @return        a `SigningKey` of kind `HmacSecret`
  */
 exp fn signing_key_hmac(secret: []byte): SigningKey {
     SigningKey { kind = SigningKeyKind::HmacSecret; rsa_key = zero_rsa_private_key(); ec_scalar = bigint::zero(); hmac_secret = secret }
@@ -332,9 +178,6 @@ exp fn signing_key_hmac(secret: []byte): SigningKey {
 
 /**
  * Builds a `VerificationKey` for `rsa-sha256` from an RSA public key.
- *
- * @param key  the signer's RSA public key
- * @return     a `VerificationKey` of kind `RsaPublic`
  */
 exp fn verification_key_rsa(key: crypto::RsaPublicKey): VerificationKey {
     VerificationKey { kind = VerificationKeyKind::RsaPublic; rsa_key = key; ec_point = zero_p256_point(); hmac_secret = teko::list::empty() }
@@ -342,9 +185,6 @@ exp fn verification_key_rsa(key: crypto::RsaPublicKey): VerificationKey {
 
 /**
  * Builds a `VerificationKey` for `ecdsa-sha256` from an EC P-256 public point.
- *
- * @param point  the signer's public point `Q`
- * @return       a `VerificationKey` of kind `EcdsaPublic`
  */
 exp fn verification_key_ecdsa(point: crypto::P256Point): VerificationKey {
     VerificationKey { kind = VerificationKeyKind::EcdsaPublic; rsa_key = zero_rsa_public_key(); ec_point = point; hmac_secret = teko::list::empty() }
@@ -352,23 +192,11 @@ exp fn verification_key_ecdsa(point: crypto::P256Point): VerificationKey {
 
 /**
  * Builds a `VerificationKey` for `hmac-sha256` from a shared secret.
- *
- * @param secret  the shared HMAC secret
- * @return        a `VerificationKey` of kind `HmacSecret`
  */
 exp fn verification_key_hmac(secret: []byte): VerificationKey {
     VerificationKey { kind = VerificationKeyKind::HmacSecret; rsa_key = zero_rsa_public_key(); ec_point = zero_p256_point(); hmac_secret = secret }
 }
 
-/**
- * Compares two strings for byte-exact equality (Teko has no builtin `str` equality operator;
- * this module's own copy of the convention `teko::encoding::xml`/`teko::encoding::json` each
- * carry privately).
- *
- * @param a  the first string
- * @param b  the second string
- * @return   true when both have the same length and identical bytes
- */
 fn xmldsig_str_eq(a: str, b: str): bool {
     if a.len != b.len { return false }
     var i: u64 = 0
@@ -380,14 +208,6 @@ fn xmldsig_str_eq(a: str, b: str): bool {
     true
 }
 
-/**
- * Concatenates `a` then `b` into a fresh `[]byte` — this module's own copy of the block-join
- * helper every crypto file in this project carries privately.
- *
- * @param a  the first slice
- * @param b  the second slice
- * @return   a fresh slice holding `a`'s bytes followed by `b`'s bytes
- */
 fn xmldsig_bytes_concat(a: []byte, b: []byte): []byte {
     var out = a
     var i: u64 = 0
@@ -399,15 +219,6 @@ fn xmldsig_bytes_concat(a: []byte, b: []byte): []byte {
     out
 }
 
-/**
- * The sub-slice `data[from..to)` as a fresh `[]byte` — this module's own copy of the
- * sub-slicing helper every crypto file in this project carries privately.
- *
- * @param data  the source slice
- * @param from  the inclusive start index
- * @param to    the exclusive end index
- * @return      a fresh slice holding `data[from..to)`
- */
 fn xmldsig_bytes_slice(data: []byte, from: u64, to: u64): []byte {
     var out: []byte = teko::list::empty()
     var i = from
@@ -419,13 +230,6 @@ fn xmldsig_bytes_slice(data: []byte, from: u64, to: u64): []byte {
     out
 }
 
-/**
- * The substring of `s` starting at byte offset `from` through its end.
- *
- * @param s     the source string
- * @param from  the inclusive start byte offset
- * @return      `s[from..]`
- */
 fn xmldsig_slice_from(s: str, from: u64): str {
     var out: str = ""
     var i = from
@@ -437,58 +241,22 @@ fn xmldsig_slice_from(s: str, from: u64): str {
     out
 }
 
-/**
- * Builds a single-element `[]xml::XmlNode`.
- *
- * @param node  the sole element
- * @return      a fresh one-element slice holding `node`
- */
 fn xmldsig_one_node(node: xml::XmlNode): []xml::XmlNode {
     teko::list::push(teko::list::empty(), node)
 }
 
-/**
- * Builds a single-element `[]xml::XmlAttr`.
- *
- * @param a  the sole attribute
- * @return   a fresh one-element slice holding `a`
- */
 fn xmldsig_one_attr(a: xml::XmlAttr): []xml::XmlAttr {
     teko::list::push(teko::list::empty(), a)
 }
 
-/**
- * Builds an unprefixed element node with the given attributes and children — every `Signature`/
- * `SignedInfo`/`Reference`/… node this module constructs is unprefixed, relying on the default
- * namespace declared once on the outermost `Signature` (see this module's header).
- *
- * @param name      the element's (unprefixed) name
- * @param attrs     the element's attributes, in the order they should serialize
- * @param children  the element's children, in document order
- * @return          the assembled element node
- */
 fn xmldsig_element(name: str, attrs: []xml::XmlAttr, children: []xml::XmlNode): xml::XmlNode {
     xml::XmlNode { kind = xml::NodeKind::Element; name = name; prefix = ""; local = name; namespace_uri = ""; text = ""; attributes = attrs; children = children }
 }
 
-/**
- * Builds an unprefixed, unqualified attribute (`name="value"`).
- *
- * @param name   the attribute's name
- * @param value  the attribute's value
- * @return       the assembled attribute
- */
 fn xmldsig_attr(name: str, value: str): xml::XmlAttr {
     xml::XmlAttr { name = name; prefix = ""; local = name; namespace_uri = ""; value = value }
 }
 
-/**
- * Builds an `xmlns`/`xmlns:prefix` namespace-declaration attribute.
- *
- * @param prefix  the prefix being declared (`""` for the default namespace)
- * @param uri     the namespace URI bound to `prefix`
- * @return        the assembled namespace-declaration attribute
- */
 fn xmldsig_xmlns_attr(prefix: str, uri: str): xml::XmlAttr {
     if prefix.len == 0 {
         return xml::XmlAttr { name = "xmlns"; prefix = ""; local = "xmlns"; namespace_uri = xml::xmlns_namespace_uri(); value = uri }
@@ -496,59 +264,23 @@ fn xmldsig_xmlns_attr(prefix: str, uri: str): xml::XmlAttr {
     xml::XmlAttr { name = concat("xmlns:", prefix); prefix = "xmlns"; local = prefix; namespace_uri = xml::xmlns_namespace_uri(); value = uri }
 }
 
-/**
- * A copy of `node` with one additional child appended.
- *
- * @param node   the node to extend
- * @param child  the child to append
- * @return       a fresh node identical to `node` but with `child` appended to its children
- */
 fn xmldsig_append_child(node: xml::XmlNode, child: xml::XmlNode): xml::XmlNode {
     xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = node.attributes; children = teko::list::push(node.children, child) }
 }
 
-/**
- * A namespace scope threaded while descending a tree: parallel prefix/URI lists, innermost
- * binding last. This module's own copy of the scope-threading idiom `xml_c14n.tks` uses
- * internally (that engine's own `NsScope`/helpers are namespace-private to `teko::encoding::xml`
- * — plain, unmarked declarations, per this project's `pub`/`exp` visibility rule — so this module
- * reimplements the same small shape rather than depending on them).
- */
 type NsScope = struct {
-    /** the declared prefixes (`""` for the default namespace), innermost binding last */
     prefixes: []str
-    /** the namespace URIs, parallel to `prefixes` */
     uris: []str
 }
 
-/**
- * The empty namespace scope (no bindings).
- *
- * @return  a scope with no bindings
- */
 fn ns_scope_root(): NsScope {
     NsScope { prefixes = teko::list::empty(); uris = teko::list::empty() }
 }
 
-/**
- * Extends a scope with one additional `prefix -> uri` binding, returning a fresh scope.
- *
- * @param scope   the scope to extend
- * @param prefix  the prefix being bound (`""` for the default namespace)
- * @param uri     the namespace URI bound to `prefix`
- * @return        a new scope with the binding appended
- */
 fn ns_scope_extend(scope: NsScope, prefix: str, uri: str): NsScope {
     NsScope { prefixes = teko::list::push(scope.prefixes, prefix); uris = teko::list::push(scope.uris, uri) }
 }
 
-/**
- * Extends a scope with every `xmlns`/`xmlns:prefix` declaration found on `node`'s own attributes.
- *
- * @param scope  the scope in effect above `node`
- * @param node   the element whose own declarations extend the scope
- * @return       the scope in effect for `node` and its descendants
- */
 fn ns_scope_with_decls(scope: NsScope, node: xml::XmlNode): NsScope {
     var result = scope
     var i: u64 = 0
@@ -565,13 +297,6 @@ fn ns_scope_with_decls(scope: NsScope, node: xml::XmlNode): NsScope {
     result
 }
 
-/**
- * Reports whether `node` itself (not an ancestor) already declares a binding for `prefix`.
- *
- * @param node    the element to inspect
- * @param prefix  the prefix to look for (`""` for the default namespace)
- * @return        true when `node`'s own attributes include that declaration
- */
 fn ns_scope_has_prefix(node: xml::XmlNode, prefix: str): bool {
     var i: u64 = 0
     loop {
@@ -584,13 +309,6 @@ fn ns_scope_has_prefix(node: xml::XmlNode, prefix: str): bool {
     false
 }
 
-/**
- * Reports whether `list` already contains `value`.
- *
- * @param list   the strings collected so far
- * @param value  the string to test
- * @return       true when `value` is present
- */
 fn ns_list_contains(list: []str, value: str): bool {
     var i: u64 = 0
     loop {
@@ -601,13 +319,6 @@ fn ns_list_contains(list: []str, value: str): bool {
     false
 }
 
-/**
- * The distinct prefixes bound in `scope` (each mapped to its most recent URI), dropping the
- * reserved `xml` prefix (which C14N never renders).
- *
- * @param scope  the scope to distill
- * @return       one entry per distinct prefix, latest binding wins
- */
 fn ns_scope_distinct(scope: NsScope): NsScope {
     var prefixes: []str = teko::list::empty()
     var uris: []str = teko::list::empty()
@@ -625,16 +336,6 @@ fn ns_scope_distinct(scope: NsScope): NsScope {
     NsScope { prefixes = prefixes; uris = uris }
 }
 
-/**
- * Adds an explicit `xmlns`/`xmlns:prefix` attribute for every binding in `scope` not already
- * declared on `node` itself, so `node` becomes a self-contained C14N subtree root carrying every
- * namespace it inherited from its former ancestors (this module's header, INCLUSIVE-C14N SUBTREE
- * SCOPE).
- *
- * @param node   the element to make self-contained
- * @param scope  the full in-scope bindings at `node` (its own plus every ancestor's)
- * @return       a copy of `node` with the missing inherited declarations added
- */
 fn inline_namespaces(node: xml::XmlNode, scope: NsScope): xml::XmlNode {
     var distinct = ns_scope_distinct(scope)
     var attrs = node.attributes
@@ -650,17 +351,6 @@ fn inline_namespaces(node: xml::XmlNode, scope: NsScope): xml::XmlNode {
     xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = attrs; children = node.children }
 }
 
-/**
- * Finds the first Element in `node`'s subtree (including `node` itself) whose LOCAL name (see
- * this module's header, NAMESPACE-PREFIX AGNOSTIC) equals `target_local`, inlining every
- * namespace binding inherited from its ancestors (`inline_namespaces`) into the match so it
- * canonicalizes correctly standalone.
- *
- * @param node          the subtree to search
- * @param target_local  the local element name to find
- * @param scope         the namespace scope in effect above `node`
- * @return              the first matching element (namespace-inlined), or `null` if none exists
- */
 fn find_element_with_inlined_namespaces(node: xml::XmlNode, target_local: str, scope: NsScope): xml::XmlNode | null {
     if node.kind != xml::NodeKind::Element {
         return null
@@ -682,15 +372,6 @@ fn find_element_with_inlined_namespaces(node: xml::XmlNode, target_local: str, s
     null
 }
 
-/**
- * The first direct child element of `parent` whose LOCAL name equals `target_local` (the
- * namespace-prefix-agnostic counterpart of `xml::first_child`, which matches the full qualified
- * name — see this module's header, NAMESPACE-PREFIX AGNOSTIC).
- *
- * @param parent        the element to search
- * @param target_local  the local element name to find
- * @return              the first matching direct child, or `null` if none exists
- */
 fn first_child_local(parent: xml::XmlNode, target_local: str): xml::XmlNode | null {
     var i: u64 = 0
     loop {
@@ -704,16 +385,6 @@ fn first_child_local(parent: xml::XmlNode, target_local: str): xml::XmlNode | nu
     null
 }
 
-/**
- * A copy of `node` with every direct child Element whose local name is `"Signature"` removed —
- * the enveloped-signature transform (`...#enveloped-signature`): a `Reference`'s digest is
- * computed over the host document WITHOUT the `Signature` element itself, so a verifier deletes
- * it before re-canonicalizing. Only strips DIRECT children (the one legal position for the
- * signing document's own `Signature`).
- *
- * @param node  the node to strip
- * @return      a copy of `node` with its direct `Signature` children removed
- */
 fn strip_signature_children(node: xml::XmlNode): xml::XmlNode {
     var kept: []xml::XmlNode = teko::list::empty()
     var i: u64 = 0

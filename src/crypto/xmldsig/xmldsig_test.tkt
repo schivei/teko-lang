@@ -2,39 +2,6 @@ use teko::crypto
 use teko::encoding::xml
 use teko::numeric::bigint
 
-/**
- * Tests for `teko::crypto::xmldsig`. Cross-checked against Python:
- *
- *   - HMAC-SHA256 and RSA-SHA256 (both deterministic) enveloped signatures produced by
- *     `xmldsig_sign_enveloped` are asserted BYTE-IDENTICAL to independently computed
- *     `DigestValue`/`SignatureValue` text: the digest via `lxml.etree.tostring(method="c14n")`
- *     (the same inclusive REC-xml-c14n-20010315 this module's `teko::encoding::xml::xml_c14n`
- *     implements) piped through `hashlib.sha256`, and the signature via `cryptography`'s
- *     `RSAPrivateKey.sign(..., padding.PKCS1v15(), hashes.SHA256())` / `hmac.new(..., sha256)`
- *     over those exact canonical bytes.
- *   - `xmldsig_verify` is asserted to ACCEPT real enveloped documents produced by `signxml`
- *     5.1.0 (`XMLSigner(method=enveloped, c14n_algorithm=CANONICAL_XML_1_0)`, backed by
- *     `cryptography` 50.0.0 for RSA/ECDSA), for all three signature algorithms — the documents
- *     use the `ds:` namespace PREFIX convention (not this module's own default-namespace
- *     convention), exercising the local-name matching this module's header describes.
- *   - ECDSA (non-deterministic — a fresh random nonce per signature) is cross-checked by
- *     verify-accept against the `signxml` vector above, plus a Teko sign/verify round trip over
- *     a KNOWN (scalar, point) pair from `cryptography.hazmat`'s `ec.generate_private_key`
- *     (`teko::crypto::ec_p256` exposes no "derive the public point from a private scalar"
- *     primitive, so the round trip needs a pre-paired key rather than a freshly drawn scalar).
- *   - A SHA-1 `DigestValue` (legacy interop) is cross-checked against Python `hashlib.sha1`.
- *
- * This file lives under `teko::crypto::xmldsig` (namespace = directory), so this module's own
- * functions (including its namespace-private helpers, e.g. `find_element_with_inlined_
- * namespaces`) are called bare, mirroring `teko::crypto::jose`'s `jws_test.tkt`.
- */
-
-/**
- * Parses `text`, failing the test (rather than panicking) on a parse error.
- *
- * @param text  the XML document text
- * @return      the parsed root node, or a placeholder text node (after failing) on error
- */
 fn xt_parse(text: str): xml::XmlNode {
     match xml::parse(text) {
         xml::XmlNode as n => n
@@ -42,21 +9,10 @@ fn xt_parse(text: str): xml::XmlNode {
     }
 }
 
-/**
- * The shared test document: `<Document xmlns="urn:example:doc"><Data>hello world</Data></Document>`.
- *
- * @return  the parsed test document
- */
 fn xt_doc(): xml::XmlNode {
     xt_parse("<Document xmlns=\"urn:example:doc\"><Data>hello world</Data></Document>")
 }
 
-/**
- * Unwraps an `xml::XmlNode | crypto::CryptoError` a vector expects to succeed.
- *
- * @param r  the union to unwrap
- * @return   the contained node, or a placeholder text node (after failing) on error
- */
 fn xt_unwrap_node(r: xml::XmlNode | crypto::CryptoError): xml::XmlNode {
     match r {
         xml::XmlNode as n => n
@@ -64,11 +20,6 @@ fn xt_unwrap_node(r: xml::XmlNode | crypto::CryptoError): xml::XmlNode {
     }
 }
 
-/**
- * Asserts that `r` is a `bool` equal to `true` (a "should verify" vector).
- *
- * @param r  the verification outcome under test
- */
 fn xt_expect_ok(r: bool | crypto::CryptoError) {
     match r {
         bool as v => teko::assert::is_true(v)
@@ -76,13 +27,6 @@ fn xt_expect_ok(r: bool | crypto::CryptoError) {
     }
 }
 
-/**
- * Asserts that `r` is a `crypto::CryptoError` (a "should reject" vector — this module returns
- * `CryptoError` for every verification failure, never a bare `false`; see `xmldsig_verify.tks`'s
- * header).
- *
- * @param r  the verification outcome under test
- */
 fn xt_expect_reject(r: bool | crypto::CryptoError) {
     match r {
         bool => teko::assert::is_true(false)
@@ -90,12 +34,6 @@ fn xt_expect_reject(r: bool | crypto::CryptoError) {
     }
 }
 
-/**
- * The `SignatureValue` text embedded in a signed document (or standalone `Signature`).
- *
- * @param doc  the signed document (or standalone `Signature` element)
- * @return     the `SignatureValue` text, or `""` (after failing) if not found
- */
 fn xt_signature_value(doc: xml::XmlNode): str {
     var sig = match find_element_with_inlined_namespaces(doc, "Signature", ns_scope_root()) {
         xml::XmlNode as n => n
@@ -107,12 +45,6 @@ fn xt_signature_value(doc: xml::XmlNode): str {
     }
 }
 
-/**
- * The `DigestValue` text of a signed document's first `Reference`.
- *
- * @param doc  the signed document (or standalone `Signature` element)
- * @return     the `DigestValue` text, or `""` (after failing) if not found
- */
 fn xt_digest_value(doc: xml::XmlNode): str {
     var sig = match find_element_with_inlined_namespaces(doc, "Signature", ns_scope_root()) {
         xml::XmlNode as n => n
@@ -132,15 +64,6 @@ fn xt_digest_value(doc: xml::XmlNode): str {
     }
 }
 
-/**
- * Replaces the byte at `index` in `s` with `replacement` — used to build a tampered copy of a
- * vector's base64 text for the rejection tests.
- *
- * @param s            the source string
- * @param index        the byte offset to replace
- * @param replacement  the replacement byte
- * @return             a fresh string identical to `s` except at `index`
- */
 fn xt_tamper_byte(s: str, index: u64, replacement: byte): str {
     var out: str = ""
     var i: u64 = 0
@@ -152,12 +75,6 @@ fn xt_tamper_byte(s: str, index: u64, replacement: byte): str {
     out
 }
 
-/**
- * Parses a hexadecimal `BigInt`, failing the test (rather than panicking) on malformed input.
- *
- * @param s  the hexadecimal text
- * @return   the parsed value, or `bigint::zero()` (after failing) on error
- */
 fn xt_hex(s: str): bigint::BigInt {
     match bigint::from_hex(s) {
         bigint::BigInt as b => b
@@ -165,12 +82,6 @@ fn xt_hex(s: str): bigint::BigInt {
     }
 }
 
-/**
- * The RSA private test key (2048-bit, generated by `cryptography.hazmat`'s
- * `rsa.generate_private_key`), shared by the RSA vectors below.
- *
- * @return  the RSA test private key, or a placeholder (after failing) on error
- */
 fn xt_rsa_priv(): crypto::RsaPrivateKey {
     var n_hex = "b145aa768d44558d6fcfb34de63ac264ad07deb6a92d3d8366200e93a8f33b08725ade76969299a23cdfea1dffe6e39600549f8ba2486af38eb61177a444c90d1319c352811927e0df01673809ea2ff66e8868408a4213e200c9f737bffe7fa30aa0a0853590002d420ecff2da6849432305f95e386898cabd343dd0c914ca4f633522b47985eb705fe1e725521298328b9e636f068222f0fa859432b4d57ee0592cb04a64e976bb02ae7b0e35a535c94621c5b3c1ec8fcc6c578e9ff61fb21ac332a25756e8316d9b767bedf1ac05ebccf5f99e472a2b5e22b9bd3964f8c734d7598d0472c40cc24d203947689a7953bc31c849002c243c396233a727a29997"
     var d_hex = "23075715b1f86cc753eec0c985d2da92b63635e5f62c0059b496650afc798392b9b606fb7be95ffe54f511f7f797122593cf24ef9c939ebe9dd6904109eea5a3b5c0837e0c108276c6da2a2142a449f1f20976403a91b0081a8bce13f01643f65da53bd2d6b0abb845b35397f35c640da6200a147a2500fc1ec2f1ec0dafd401e2f893810101764eafa7c51957e7c956f04e61815fd0015b30cd1ca929fdd9d5cb19e5bab0b993718d0942810014cf7ac70569ac04202f79d9dd76cabe909b566adf0ab23e5aeaff5a7c59457c047f18ba4a72b431d3a2142b97a486cc854e53565d92b5bc8db75757a8138dff32f6b1a393b13195447765063f414b94ef0a41"
@@ -181,23 +92,11 @@ fn xt_rsa_priv(): crypto::RsaPrivateKey {
     }
 }
 
-/**
- * The RSA public counterpart of `xt_rsa_priv`.
- *
- * @return  the RSA test public key, or a placeholder (after failing) on error
- */
 fn xt_rsa_pub(): crypto::RsaPublicKey {
     var priv = xt_rsa_priv()
     crypto::RsaPublicKey { n = priv.n; e = priv.e }
 }
 
-/**
- * The RSA public test key `signxml` used to produce the `xt_rsa_signxml_doc` vector (a
- * DIFFERENT, independently generated key from `xt_rsa_priv` — this module never sees that
- * signer's private key, only verifies against its public one).
- *
- * @return  the `signxml` RSA vector's public key
- */
 fn xt_rsa_signxml_pub(): crypto::RsaPublicKey {
     var n_hex = "a3db0b28c0a577ec005ff8a310b9b891370995d87cc2dfb329828afc31eaef82a9aa4bc287579de45ce39c10cb4b0743ef34f86b0be845dc680f1c66bc42270703e982653213957113b2f26fa7acfbd7625a69a743c30be23be6bdb0aa0e37f3b03526e6a2a1940171bce4811b75f64107ec60b9cbe07b52522bde4842d9fc17d00b18ba1d8ff642f8785f1e4cdff14bd43eba038397b30229edda3bac8bf1db80766e95dfd632446e7c5c3d28ca1ddde32b3a08808896340b5aa686f55b0261a2bd9cba705312c454ce2f3b38a9604fa1d757501c7ef28d57f54a2f1802d0b3aa08023d02616671f1f68a5f2f44b410af00989406b4b371057a361ba0b93851"
     var e_hex = "010001"
@@ -207,83 +106,38 @@ fn xt_rsa_signxml_pub(): crypto::RsaPublicKey {
     }
 }
 
-/**
- * The EC P-256 test private scalar for the Teko-internal sign/verify round trip (a KNOWN,
- * independently generated `cryptography.hazmat` key pair — see this file's header for why a
- * pre-paired key is used rather than a freshly drawn scalar).
- *
- * @return  the round-trip test's private scalar
- */
 fn xt_ec_scalar(): bigint::BigInt {
     xt_hex("265dde4ae678817e7374d33783a6a0f36a18d7d2862bcfb049ce0137c213155e")
 }
 
-/**
- * The public counterpart of `xt_ec_scalar`.
- *
- * @return  the round-trip test's public point
- */
 fn xt_ec_point(): crypto::P256Point {
     var qx_hex = "47c9dd102a147130a9246e601b46e00d30bd06ce47a10391fe0946ff4f1df87a"
     var qy_hex = "1650cd8e1c26ba088179f87aa57aa408917acf019f2af72c54bbc307749da9f0"
     crypto::P256Point { infinity = false; x = xt_hex(qx_hex); y = xt_hex(qy_hex) }
 }
 
-/**
- * The EC P-256 test public point `signxml` used to produce the `xt_ecdsa_signxml_doc` vector.
- *
- * @return  the `signxml` ECDSA vector's public point
- */
 fn xt_ecdsa_signxml_pub(): crypto::P256Point {
     var qx_hex = "66b4b755669d437463b8dbec75e29fe070caa99a0b8afb24d2a1d491827835b8"
     var qy_hex = "e3679e71254e264f4dd4c6c1b954bc4ea9faa5b8b29c8329b02e86aec1a98faf"
     crypto::P256Point { infinity = false; x = xt_hex(qx_hex); y = xt_hex(qy_hex) }
 }
 
-/**
- * The shared HMAC test secret (`"my-shared-hmac-secret-0123456789"`, ASCII).
- *
- * @return  the HMAC test secret bytes
- */
 fn xt_hmac_secret(): []byte {
     bytes_of_str("my-shared-hmac-secret-0123456789")
 }
 
-/**
- * The enveloped RSA-SHA256 document `signxml` produced (namespace prefix `ds:`, two `Transform`s,
- * an embedded `KeyInfo`/`RSAKeyValue` this module ignores).
- *
- * @return  the `signxml` RSA vector document text
- */
 fn xt_rsa_signxml_doc(): str {
     "<Document xmlns=\"urn:example:doc\"><Data>hello world</Data><ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/><ds:SignatureMethod Algorithm=\"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256\"/><ds:Reference URI=\"\"><ds:Transforms><ds:Transform Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/><ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/></ds:Transforms><ds:DigestMethod Algorithm=\"http://www.w3.org/2001/04/xmlenc#sha256\"/><ds:DigestValue>NWHakKrcp2xtp1f9hNjytN3AqAOzLgPMLo8mkvwm45Q=</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>KhRUzKWXTHjiick+reOL6QaFNFW/pj1OzAWHCNHezWIyh3HgXqvxM9DzEH0UpyyTIn5bnwBG13KrAd5AgPsTftc1dJRXHO17/N62Va3ervLQA87yrPjhYkiNQXwt8XzGg3hyp0GFPR+WbuFgUM8q9Grxdvxv+v1XujE//eQx/1h0xx6mnFvJc+wG5lgwNngiGlSoCYp63ZdbqaFUJm8VI5EhroBrAPN2sCDR5pm+PqUmJvn81yIvoLnv7GCJusPZplrq/mcz6rHd+zHRUijeTVWSQiM4F3pcvLWT++Nc/ytbUFarlmNlTupVtkxKylMBJSr1jP+c9XU5pqlDYYKLng==</ds:SignatureValue><ds:KeyInfo><ds:KeyValue><ds:RSAKeyValue><ds:Modulus>o9sLKMCld+wAX/ijELm4kTcJldh8wt+zKYKK/DHq74KpqkvCh1ed5FzjnBDLSwdD7zT4awvoRdxoDxxmvEInBwPpgmUyE5VxE7Lyb6es+9diWmmnQ8ML4jvmvbCqDjfzsDUm5qKhlAFxvOSBG3X2QQfsYLnL4HtSUiveSELZ/BfQCxi6HY/2Qvh4Xx5M3/FL1D66A4OXswIp7do7rIvx24B2bpXf1jJEbnxcPSjKHd3jKzoIgIiWNAtapob1WwJhor2cunBTEsRUzi87OKlgT6HXV1AcfvKNV/VKLxgC0LOqCAI9AmFmcfH2il8vRLQQrwCYlAa0s3EFejYboLk4UQ==</ds:Modulus><ds:Exponent>AQAB</ds:Exponent></ds:RSAKeyValue></ds:KeyValue></ds:KeyInfo></ds:Signature></Document>"
 }
 
-/**
- * The enveloped HMAC-SHA256 document `signxml` produced (namespace prefix `ds:`, no `KeyInfo` —
- * HMAC never publishes key material).
- *
- * @return  the `signxml` HMAC vector document text
- */
 fn xt_hmac_signxml_doc(): str {
     "<Document xmlns=\"urn:example:doc\"><Data>hello world</Data><ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/><ds:SignatureMethod Algorithm=\"http://www.w3.org/2001/04/xmldsig-more#hmac-sha256\"/><ds:Reference URI=\"\"><ds:Transforms><ds:Transform Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/><ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/></ds:Transforms><ds:DigestMethod Algorithm=\"http://www.w3.org/2001/04/xmlenc#sha256\"/><ds:DigestValue>NWHakKrcp2xtp1f9hNjytN3AqAOzLgPMLo8mkvwm45Q=</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>DDjy1waC0UXyIdDwcRW7oYEuHoTCcArd57kD1YqUNRQ=</ds:SignatureValue></ds:Signature></Document>"
 }
 
-/**
- * The enveloped ECDSA-SHA256 document `signxml` produced (namespace prefix `ds:`, an embedded
- * `KeyInfo`/`ECKeyValue` this module ignores).
- *
- * @return  the `signxml` ECDSA vector document text
- */
 fn xt_ecdsa_signxml_doc(): str {
     "<Document xmlns=\"urn:example:doc\"><Data>hello world</Data><ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/><ds:SignatureMethod Algorithm=\"http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256\"/><ds:Reference URI=\"\"><ds:Transforms><ds:Transform Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/><ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/></ds:Transforms><ds:DigestMethod Algorithm=\"http://www.w3.org/2001/04/xmlenc#sha256\"/><ds:DigestValue>NWHakKrcp2xtp1f9hNjytN3AqAOzLgPMLo8mkvwm45Q=</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>jJkK3QvOkecOVVG6Gr32vWoq/9bZEEh6k+oKTp9RlT3noqeJdcOXyajHJZfIRAidIWfdOTNqIhEFFNgNZu1IMA==</ds:SignatureValue><ds:KeyInfo><ds:KeyValue><dsig11:ECKeyValue xmlns:dsig11=\"http://www.w3.org/2009/xmldsig11#\"><dsig11:NamedCurve URI=\"urn:oid:1.2.840.10045.3.1.7\"/><dsig11:PublicKey>BGa0t1VmnUN0Y7jb7HXin+BwyqmaC4r7JNKh1JGCeDW442eecSVOJk9N1MbBuVS8Tqn6pbiynIMpsC6GrsGpj68=</dsig11:PublicKey></dsig11:ECKeyValue></ds:KeyValue></ds:KeyInfo></ds:Signature></Document>"
 }
 
-/**
- * `xmldsig_sign_enveloped` with `hmac-sha256` produces a `DigestValue`/`SignatureValue` byte-
- * identical to the independently computed Python vector (see this file's header), and the
- * result round-trips through `xmldsig_verify`.
- */
 #test
 fn hmac_enveloped_sign_matches_python_vector() {
     var signed = xt_unwrap_node(xmldsig_sign_enveloped(xt_doc(), SignatureAlg::HmacSha256, DigestAlg::Sha256, signing_key_hmac(xt_hmac_secret()), null))
@@ -292,11 +146,6 @@ fn hmac_enveloped_sign_matches_python_vector() {
     xt_expect_ok(xmldsig_verify(signed, verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * `xmldsig_sign_enveloped` with `rsa-sha256` produces a `DigestValue`/`SignatureValue` byte-
- * identical to the independently computed Python vector (see this file's header), and the
- * result round-trips through `xmldsig_verify`.
- */
 #test
 fn rsa_enveloped_sign_matches_python_vector() {
     var signed = xt_unwrap_node(xmldsig_sign_enveloped(xt_doc(), SignatureAlg::RsaSha256, DigestAlg::Sha256, signing_key_rsa(xt_rsa_priv()), null))
@@ -305,11 +154,6 @@ fn rsa_enveloped_sign_matches_python_vector() {
     xt_expect_ok(xmldsig_verify(signed, verification_key_rsa(xt_rsa_pub())))
 }
 
-/**
- * `xmldsig_sign_enveloped` with `ecdsa-sha256` (a fresh random nonce, so its output is not
- * byte-comparable across implementations) round-trips through `xmldsig_verify` under the KNOWN
- * matching public point, and is rejected under a different one.
- */
 #test
 fn ecdsa_enveloped_sign_verify_round_trip() {
     var signed = xt_unwrap_node(xmldsig_sign_enveloped(xt_doc(), SignatureAlg::EcdsaSha256, DigestAlg::Sha256, signing_key_ecdsa(xt_ec_scalar()), null))
@@ -317,34 +161,21 @@ fn ecdsa_enveloped_sign_verify_round_trip() {
     xt_expect_reject(xmldsig_verify(signed, verification_key_ecdsa(xt_ecdsa_signxml_pub())))
 }
 
-/**
- * `xmldsig_verify` accepts the real `ds:`-prefixed HMAC-SHA256 document `signxml` produced.
- */
 #test
 fn hmac_verify_accepts_signxml_document() {
     xt_expect_ok(xmldsig_verify(xt_parse(xt_hmac_signxml_doc()), verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * `xmldsig_verify` accepts the real `ds:`-prefixed RSA-SHA256 document `signxml` produced.
- */
 #test
 fn rsa_verify_accepts_signxml_document() {
     xt_expect_ok(xmldsig_verify(xt_parse(xt_rsa_signxml_doc()), verification_key_rsa(xt_rsa_signxml_pub())))
 }
 
-/**
- * `xmldsig_verify` accepts the real `ds:`-prefixed ECDSA-SHA256 document `signxml` produced.
- */
 #test
 fn ecdsa_verify_accepts_signxml_document() {
     xt_expect_ok(xmldsig_verify(xt_parse(xt_ecdsa_signxml_doc()), verification_key_ecdsa(xt_ecdsa_signxml_pub())))
 }
 
-/**
- * A tampered `DigestValue` (one base64 character flipped) is rejected — the `Reference` digest
- * no longer matches the (unchanged) document content.
- */
 #test
 fn verify_rejects_tampered_digest() {
     var doc_text = xt_hmac_signxml_doc()
@@ -353,9 +184,6 @@ fn verify_rejects_tampered_digest() {
     xt_expect_reject(xmldsig_verify(xt_parse(tampered), verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * A tampered `SignatureValue` (one base64 character flipped) is rejected.
- */
 #test
 fn verify_rejects_tampered_signature() {
     var doc_text = xt_hmac_signxml_doc()
@@ -364,26 +192,16 @@ fn verify_rejects_tampered_signature() {
     xt_expect_reject(xmldsig_verify(xt_parse(tampered), verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * The wrong HMAC secret is rejected.
- */
 #test
 fn verify_rejects_wrong_hmac_secret() {
     xt_expect_reject(xmldsig_verify(xt_parse(xt_hmac_signxml_doc()), verification_key_hmac(bytes_of_str("not-the-right-secret"))))
 }
 
-/**
- * A document with no `Signature` element at all is rejected with a `CryptoError` (never a panic).
- */
 #test
 fn verify_rejects_document_with_no_signature() {
     xt_expect_reject(xmldsig_verify(xt_doc(), verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * Signing under a key whose family does not match the requested `SignatureAlg` (an HMAC secret
- * for `rsa-sha256`) is a `CryptoError`, never a panic or a silently-wrong signature.
- */
 #test
 fn sign_rejects_key_algorithm_family_mismatch() {
     match xmldsig_sign_enveloped(xt_doc(), SignatureAlg::RsaSha256, DigestAlg::Sha256, signing_key_hmac(xt_hmac_secret()), null) {
@@ -392,11 +210,6 @@ fn sign_rejects_key_algorithm_family_mismatch() {
     }
 }
 
-/**
- * `xmldsig_sign_detached` produces a standalone `Signature` (never embedded into the signed
- * node) that `xmldsig_verify_detached` accepts against the SAME node, and rejects against a
- * different one.
- */
 #test
 fn detached_sign_verify_round_trip() {
     var node = xt_parse("<Payload>detached content</Payload>")
@@ -407,10 +220,6 @@ fn detached_sign_verify_round_trip() {
     xt_expect_reject(xmldsig_verify_detached(signature, other, verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * `xmldsig_sign_enveloping` wraps the signed data in the `Signature`'s own `Object`, and
- * `xmldsig_verify` (searching the `Signature` itself for the `#id` `Object`) accepts it.
- */
 #test
 fn enveloping_sign_verify_round_trip() {
     var data = xt_parse("<Payload>enveloped-in-signature content</Payload>")
@@ -419,10 +228,6 @@ fn enveloping_sign_verify_round_trip() {
     xt_expect_ok(xmldsig_verify(signature, verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * A `DigestAlg::Sha1` `Reference` (legacy interop) produces the SHA-1 digest independently
- * computed via Python `hashlib.sha1`, and round-trips through `xmldsig_verify_detached`.
- */
 #test
 fn sha1_digest_matches_python_and_round_trips() {
     var node = xt_parse("<Data>hello world</Data>")
@@ -431,16 +236,6 @@ fn sha1_digest_matches_python_and_round_trips() {
     xt_expect_ok(xmldsig_verify_detached(signature, node, verification_key_hmac(xt_hmac_secret())))
 }
 
-/**
- * The byte offset of the first occurrence of `needle` in `haystack` — a small helper for locating
- * a base64 vector inside a hardcoded document to tamper it (Teko has no builtin substring search;
- * mirrors `teko::encoding::xml`'s own hand-rolled `index_of`).
- *
- * @param haystack  the string to search
- * @param needle    the substring to find (assumed present — the tests only call this with
- *                  literals known to occur in their fixture)
- * @return          the offset of the first match, or `haystack.len` (failing the test) if absent
- */
 fn index_of_first(haystack: str, needle: str): u64 {
     var at: u64 = 0
     loop {
@@ -452,14 +247,6 @@ fn index_of_first(haystack: str, needle: str): u64 {
     haystack.len
 }
 
-/**
- * Reports whether `haystack` at offset `at` begins with the bytes of `needle`.
- *
- * @param haystack  the string to inspect
- * @param at        the offset to test at
- * @param needle    the substring to match
- * @return          true when `needle` occurs exactly at `at`
- */
 fn xt_matches_at(haystack: str, at: u64, needle: str): bool {
     var i: u64 = 0
     loop {

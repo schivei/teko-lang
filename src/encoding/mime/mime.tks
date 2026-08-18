@@ -1,41 +1,6 @@
 /**
- * `teko::encoding::mime` — the web `encoding` group's MIME layer: `application/x-www-
- * form-urlencoded` pair encode/decode plus `multipart/form-data` (RFC 7578) part encode/decode.
- * Pure Teko, no C twin (the `teko::regex` / `teko::encoding::json` precedent: library code with
- * zero OS/FFI dependency ships as `.tks` + `.tkt` only, and both engines get it automatically).
- *
- * ONE SOURCE OF TRUTH FOR FORM-URLENCODED (M.5). The percent/`+` escape engine and the
- * `key=value&...` pair grammar already live in `teko::encoding::url` (`FormField`, `parse_form`,
- * `encode_form`) — `pub`, so visible project-wide per the `pub`/`exp` visibility law. Rather than
- * a second copy of that engine under this namespace, `parse_form_urlencoded`/
- * `encode_form_urlencoded` below are thin `exp` re-entry points that delegate straight to it: the
- * MIME media type `application/x-www-form-urlencoded` is exactly `teko::encoding::url`'s pair
- * grammar, so the delegation is the correct API shape here, not indirection for its own sake.
- *
- * MULTIPART/FORM-DATA (RFC 7578, itself layered on RFC 2046 multipart). A body is a sequence of
- * `--boundary`-delimited parts, each with a small header block (`Content-Disposition: form-data;
- * name="..."` plus an optional `; filename="..."` and an optional `Content-Type:` header) and a
- * raw byte payload, terminated by a final `--boundary--` delimiter. `build_multipart` is total
- * over well-formed `MultipartPart`s (M.3); `parse_multipart` walks the delimiter-and-header
- * grammar by hand over `[]byte` (mirrors `teko::encoding::csv`'s hand-rolled RFC 4180 scanner —
- * no substring-search builtin exists, so `bytes_index_of` below is this module's version of
- * that same "no library, write the 20-line scanner" shape) and reports malformed input as a
- * checked `error`, never a panic (M.1 fail-loud).
- *
- * BOUNDARY IS CALLER-SUPPLIED. Generating a cryptographically unpredictable boundary needs a
- * CSPRNG, which is `teko::crypto::rand` territory (`[FFI]` — getrandom, per the stdlib expansion
- * catalog) and out of this pure-Teko module's scope. `default_boundary` offers a fixed,
- * deterministic fallback string for tests and low-stakes uses; a caller building untrusted-input
- * forms should supply their own boundary (e.g. `teko::crypto::rand`-seeded, once that FFI unit
- * exists) that cannot collide with the multipart body's own content.
- */
-
-/**
  * Delegates to `teko::encoding::url::parse_form` — parses an `application/x-www-form-urlencoded`
  * body (or a URL query string, `?`-prefix already stripped) into its decoded `key=value` fields.
- *
- * @param body  the raw form body or query string
- * @return      the decoded fields in source order, or `error` when any segment is malformed
  */
 exp fn parse_form_urlencoded(body: str): []teko::encoding::url::FormField | error {
     teko::encoding::url::parse_form(body)
@@ -44,9 +9,6 @@ exp fn parse_form_urlencoded(body: str): []teko::encoding::url::FormField | erro
 /**
  * Delegates to `teko::encoding::url::encode_form` — renders decoded fields back into one
  * `application/x-www-form-urlencoded` body string.
- *
- * @param fields  the fields to render, in the order they should appear
- * @return        the encoded form body
  */
 exp fn encode_form_urlencoded(fields: []teko::encoding::url::FormField): str {
     teko::encoding::url::encode_form(fields)
@@ -54,11 +16,9 @@ exp fn encode_form_urlencoded(fields: []teko::encoding::url::FormField): str {
 
 /**
  * A fixed, deterministic `multipart/form-data` boundary string — a convenience default for
- * tests and low-stakes uses. It carries no unpredictability guarantee (see the module doc's
- * "BOUNDARY IS CALLER-SUPPLIED" note): a caller whose part payloads might contain this exact
- * literal, or who needs collision-resistance against untrusted input, must supply its own.
- *
- * @return  a fixed boundary token, without its `--` delimiter prefix
+ * tests and low-stakes uses. It carries no unpredictability guarantee: a caller whose part
+ * payloads might contain this exact literal, or who needs collision-resistance against
+ * untrusted input, must supply its own.
  */
 exp fn default_boundary(): str {
     "----TekoFormBoundary7c2f9ab4d1"
@@ -90,13 +50,6 @@ exp type MultipartPart = struct {
     data: []byte
 }
 
-/**
- * Appends every byte of `extra` to `out`.
- *
- * @param out    the growing output byte accumulator
- * @param extra  the bytes to append
- * @return       `out` with `extra`'s bytes appended
- */
 fn append_bytes(out: []byte, extra: []byte): []byte {
     var o = out
     var i: u64 = 0
@@ -108,37 +61,15 @@ fn append_bytes(out: []byte, extra: []byte): []byte {
     o
 }
 
-/**
- * Appends `text`'s UTF-8 bytes to `out`.
- *
- * @param out   the growing output byte accumulator
- * @param text  the text to append
- * @return      `out` with `text`'s bytes appended
- */
 fn append_str(out: []byte, text: str): []byte {
     append_bytes(out, bytes_of_str(text))
 }
 
-/**
- * Appends one CRLF (`\r\n`) line ending to `out`.
- *
- * @param out  the growing output byte accumulator
- * @return     `out` with `\r\n` appended
- */
 fn append_crlf(out: []byte): []byte {
     var o = teko::list::push(out, b'\r')
     teko::list::push(o, b'\n')
 }
 
-/**
- * Appends a double-quoted, backslash-escaped rendering of `text` to `out` (RFC 2388's
- * `quoted-string` convention for `name="..."`/`filename="..."`: a literal `"` or `\` inside the
- * value is escaped as `\"`/`\\`).
- *
- * @param out   the growing output byte accumulator
- * @param text  the value to quote and escape
- * @return      `out` with the quoted, escaped value appended
- */
 fn append_quoted(out: []byte, text: str): []byte {
     var input = bytes_of_str(text)
     var o = teko::list::push(out, b'"')
@@ -153,14 +84,6 @@ fn append_quoted(out: []byte, text: str): []byte {
     teko::list::push(o, b'"')
 }
 
-/**
- * Appends one part's `Content-Disposition`/`Content-Type` header block (each header line
- * terminated by CRLF) to `out`.
- *
- * @param out   the growing output byte accumulator
- * @param part  the part whose headers are being rendered
- * @return      `out` with the part's header lines appended
- */
 fn append_part_headers(out: []byte, part: MultipartPart): []byte {
     var o = append_str(out, "Content-Disposition: form-data; name=")
     o = append_quoted(o, part.name)
@@ -176,15 +99,6 @@ fn append_part_headers(out: []byte, part: MultipartPart): []byte {
     o
 }
 
-/**
- * Appends one complete part (delimiter line, header block, blank line, payload, trailing CRLF)
- * to `out`.
- *
- * @param out       the growing output byte accumulator
- * @param part      the part to render
- * @param boundary  the multipart boundary token (without its `--` prefix)
- * @return          `out` with the rendered part appended
- */
 fn append_part(out: []byte, part: MultipartPart, boundary: str): []byte {
     var o = append_str(out, concat("--", boundary))
     o = append_crlf(o)
@@ -194,13 +108,6 @@ fn append_part(out: []byte, part: MultipartPart, boundary: str): []byte {
     append_crlf(o)
 }
 
-/**
- * Appends the final `--boundary--` delimiter (plus trailing CRLF) to `out`.
- *
- * @param out       the growing output byte accumulator
- * @param boundary  the multipart boundary token (without its `--` prefix)
- * @return          `out` with the final delimiter appended
- */
 fn append_final_boundary(out: []byte, boundary: str): []byte {
     var o = append_str(out, concat("--", boundary, "--"))
     append_crlf(o)
@@ -208,13 +115,9 @@ fn append_final_boundary(out: []byte, boundary: str): []byte {
 
 /**
  * Renders `parts` as one `multipart/form-data` body under `boundary`: each part as a
- * `--boundary`-delimited section, followed by the final `--boundary--` delimiter. Total (M.3):
- * always succeeds for any `parts`/`boundary` (a boundary that collides with content inside
- * `parts` is a caller responsibility — see the module doc's "BOUNDARY IS CALLER-SUPPLIED" note).
- *
- * @param parts     the parts to render, in the order they should appear
- * @param boundary  the multipart boundary token (without its `--` prefix)
- * @return          the encoded multipart body bytes
+ * `--boundary`-delimited section, followed by the final `--boundary--` delimiter. Total: always
+ * succeeds for any `parts`/`boundary` (a boundary that collides with content inside `parts` is a
+ * caller responsibility).
  */
 exp fn build_multipart(parts: []MultipartPart, boundary: str): []byte {
     var out: []byte = teko::list::empty()
@@ -227,16 +130,6 @@ exp fn build_multipart(parts: []MultipartPart, boundary: str): []byte {
     append_final_boundary(out, boundary)
 }
 
-/**
- * A copying sub-slice view of `data[from, to)` as a fresh `[]byte` (mirrors
- * `teko::encoding::base64`'s `bytes_slice_view` helper — Teko slices have no native sub-slice
- * operator over `[]byte`, so this copies the range).
- *
- * @param data  the source byte slice
- * @param from  the inclusive start offset
- * @param to    the exclusive end offset
- * @return      a fresh `[]byte` holding `data[from, to)`
- */
 fn bytes_slice(data: []byte, from: u64, to: u64): []byte {
     var out: []byte = teko::list::empty()
     var i = from
@@ -248,14 +141,6 @@ fn bytes_slice(data: []byte, from: u64, to: u64): []byte {
     out
 }
 
-/**
- * Does `needle` occur in `haystack` starting exactly at `pos`?
- *
- * @param haystack  the bytes to search within
- * @param needle    the bytes sought
- * @param pos       the candidate start offset
- * @return          true when `haystack[pos, pos + needle.len)` equals `needle`
- */
 fn bytes_match_at(haystack: []byte, needle: []byte, pos: u64): bool {
     if pos + needle.len > haystack.len { return false }
     var i: u64 = 0
@@ -267,16 +152,6 @@ fn bytes_match_at(haystack: []byte, needle: []byte, pos: u64): bool {
     true
 }
 
-/**
- * Finds the first occurrence of `needle` in `haystack` at or after `from` (a naive scan — the
- * boundary/header searches this module needs are all over short, bounded inputs, so quadratic
- * worst case is not a concern here).
- *
- * @param haystack  the bytes to search within
- * @param needle    the bytes sought
- * @param from      the offset to start searching from
- * @return          the first matching offset, or `null` when `needle` does not occur
- */
 fn bytes_index_of(haystack: []byte, needle: []byte, from: u64): u64 | null {
     var pos = from
     loop {
@@ -287,14 +162,6 @@ fn bytes_index_of(haystack: []byte, needle: []byte, from: u64): u64 | null {
     null
 }
 
-/**
- * ASCII-lowercases `b` (leaves non-`A-Z` bytes untouched) — the case-insensitive header-name
- * comparison this module's header parsing needs (`Content-Type`/`content-type`/`CONTENT-TYPE`
- * are all the same header per RFC 7231 §5.4 / RFC 2045 §5.1).
- *
- * @param b  the byte to lowercase
- * @return   `b`'s ASCII-lowercase form
- */
 fn ascii_lower(b: byte): byte {
     if b >= b'A' && b <= b'Z' {
         return ((b to u32) + ((b'a' to u32) - (b'A' to u32))) to byte
@@ -302,15 +169,6 @@ fn ascii_lower(b: byte): byte {
     b
 }
 
-/**
- * Case-insensitive `bytes_match_at`: does `needle` occur in `haystack` starting exactly at
- * `pos`, comparing ASCII letters without regard to case?
- *
- * @param haystack  the bytes to search within
- * @param needle    the (already-lowercase, by convention) bytes sought
- * @param pos       the candidate start offset
- * @return          true when `haystack[pos, pos + needle.len)` case-insensitively equals `needle`
- */
 fn bytes_ieq_at(haystack: []byte, needle: []byte, pos: u64): bool {
     if pos + needle.len > haystack.len { return false }
     var i: u64 = 0
@@ -322,12 +180,6 @@ fn bytes_ieq_at(haystack: []byte, needle: []byte, pos: u64): bool {
     true
 }
 
-/**
- * Skips leading ASCII space bytes at the start of `data`.
- *
- * @param data  the bytes to trim
- * @return      `data` with any leading `0x20` bytes removed
- */
 fn trim_leading_spaces(data: []byte): []byte {
     var i: u64 = 0
     loop {
@@ -338,13 +190,6 @@ fn trim_leading_spaces(data: []byte): []byte {
     bytes_slice(data, i, data.len)
 }
 
-/**
- * Decodes one RFC 2388 `quoted-string` payload (the bytes strictly between the opening and
- * closing `"`, backslash escapes not yet resolved) into its literal text.
- *
- * @param raw  the bytes between the quotes
- * @return     the unescaped text, or `error` for a dangling trailing backslash or invalid UTF-8
- */
 fn unescape_quoted(raw: []byte): str | error {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -363,14 +208,6 @@ fn unescape_quoted(raw: []byte): str | error {
     str_from_utf8(out)
 }
 
-/**
- * Finds the closing `"` of a quoted-string that started at `line[from - 1]`, skipping over
- * backslash-escaped bytes (`\"` does not end the string).
- *
- * @param line  the bytes to scan
- * @param from  the offset just past the opening `"`
- * @return      the offset of the closing `"`, or `error` when the string is never terminated
- */
 fn find_unescaped_quote(line: []byte, from: u64): u64 | error {
     var i = from
     loop {
@@ -382,30 +219,11 @@ fn find_unescaped_quote(line: []byte, from: u64): u64 | error {
     error { message = "mime: unreachable" }
 }
 
-/**
- * The result of looking up one `name="..."`-shaped parameter within a header line: whether it
- * was present, and its unescaped value when it was.
- */
 type ParamLookup = struct {
-    /**
-     * Whether the `param="..."` parameter occurred in the line.
-     */
     found: bool
-    /**
-     * The parameter's unescaped value (meaningless when `found` is false).
-     */
     value: str
 }
 
-/**
- * Finds a `param="..."` quoted parameter within one header line's value (e.g. `name` or
- * `filename` inside a `Content-Disposition` line), unescaping it if present.
- *
- * @param line   the header line's bytes
- * @param param  the parameter name to look for (compared case-sensitively, matching common
- *               practice for `Content-Disposition` parameter names)
- * @return       the lookup result, or `error` when the parameter's quoted value is malformed
- */
 fn find_param_value(line: []byte, param: str): ParamLookup | error {
     var marker = bytes_of_str(concat(param, "=\""))
     var pos = match bytes_index_of(line, marker, 0) {
@@ -418,37 +236,13 @@ fn find_param_value(line: []byte, param: str): ParamLookup | error {
     ParamLookup { found = true; value = text }
 }
 
-/**
- * The header fields this module extracts from a part's header block, accumulated one header
- * line at a time by `parse_headers`.
- */
 type HeaderInfo = struct {
-    /**
-     * The `Content-Disposition` field name (meaningless until `has_name` is true).
-     */
     name: str
-    /**
-     * The `Content-Disposition` filename parameter, or `""` when absent.
-     */
     filename: str
-    /**
-     * The `Content-Type` header value, or `""` when absent.
-     */
     content_type: str
-    /**
-     * Whether a `Content-Disposition` header (and therefore `name`) was found.
-     */
     has_name: bool
 }
 
-/**
- * Folds one `Content-Disposition` header line's `name`/`filename` parameters into `info`.
- *
- * @param info  the header info accumulated so far
- * @param line  the `Content-Disposition` header line's bytes
- * @return      `info` updated with the parsed name/filename, or `error` when `name` is missing
- *              or either parameter's quoted value is malformed
- */
 fn apply_content_disposition(info: HeaderInfo, line: []byte): HeaderInfo | error {
     var name_lookup = match find_param_value(line, "name") { ParamLookup as p => p; error as e => return e }
     if !name_lookup.found {
@@ -460,29 +254,12 @@ fn apply_content_disposition(info: HeaderInfo, line: []byte): HeaderInfo | error
     HeaderInfo { name = name_lookup.value; filename = filename; content_type = info.content_type; has_name = true }
 }
 
-/**
- * Folds one `Content-Type` header line's value into `info`.
- *
- * @param info  the header info accumulated so far
- * @param line  the `Content-Type` header line's bytes
- * @param prefix_len  the byte length of the `Content-Type:` prefix already matched
- * @return      `info` updated with the parsed content type, or `error` for invalid UTF-8
- */
 fn apply_content_type(info: HeaderInfo, line: []byte, prefix_len: u64): HeaderInfo | error {
     var value = trim_leading_spaces(bytes_slice(line, prefix_len, line.len))
     var text = match str_from_utf8(value) { str as s => s; error as e => return e }
     HeaderInfo { name = info.name; filename = info.filename; content_type = text; has_name = info.has_name }
 }
 
-/**
- * Folds one header line into `info`, recognizing `Content-Disposition`/`Content-Type`
- * case-insensitively and leaving `info` unchanged for any other header (this module only needs
- * those two).
- *
- * @param info  the header info accumulated so far
- * @param line  one header line's bytes (no trailing CRLF)
- * @return      `info` updated by this line, or `error` when a recognized header is malformed
- */
 fn apply_header_line(info: HeaderInfo, line: []byte): HeaderInfo | error {
     var disposition_prefix = bytes_of_str("content-disposition:")
     if bytes_ieq_at(line, disposition_prefix, 0) {
@@ -495,13 +272,6 @@ fn apply_header_line(info: HeaderInfo, line: []byte): HeaderInfo | error {
     info
 }
 
-/**
- * Parses a part's full header block (CRLF-terminated lines, no leading/trailing blank line) into
- * its `Content-Disposition`/`Content-Type` fields.
- *
- * @param headers  the header block's bytes
- * @return         the parsed header info, or `error` when a recognized header is malformed
- */
 fn parse_headers(headers: []byte): HeaderInfo | error {
     var info = HeaderInfo { name = ""; filename = ""; content_type = ""; has_name = false }
     if headers.len == 0 { return info }
@@ -517,30 +287,11 @@ fn parse_headers(headers: []byte): HeaderInfo | error {
     info
 }
 
-/**
- * A part's raw region split into its header block and its payload, at the blank-line (`\r\n\r\n`)
- * separator RFC 2046 §5.1 requires between them.
- */
 type PartSlice = struct {
-    /**
-     * The header block's bytes (CRLF-terminated lines, blank-line separator excluded).
-     */
     headers: []byte
-    /**
-     * The part's payload bytes (blank-line separator excluded).
-     */
     content: []byte
 }
 
-/**
- * Splits `body[start, end)` (one part's full raw region, delimiter lines excluded) into its
- * header block and payload at the first blank-line separator.
- *
- * @param body   the full multipart body
- * @param start  the part region's start offset (just past its opening delimiter's CRLF)
- * @param end    the part region's end offset (just before its closing delimiter's CRLF)
- * @return       the split header/content slices, or `error` when no blank line separates them
- */
 fn split_headers_and_body(body: []byte, start: u64, end: u64): PartSlice | error {
     var region = bytes_slice(body, start, end)
     var separator = bytes_of_str("\r\n\r\n")
@@ -551,14 +302,6 @@ fn split_headers_and_body(body: []byte, start: u64, end: u64): PartSlice | error
     PartSlice { headers = bytes_slice(region, 0, blank); content = bytes_slice(region, blank + 4, region.len) }
 }
 
-/**
- * Parses one part's full raw region (as isolated by `parse_multipart`) into a `MultipartPart`.
- *
- * @param body   the full multipart body
- * @param start  the part region's start offset (just past its opening delimiter's CRLF)
- * @param end    the part region's end offset (just before its closing delimiter's CRLF)
- * @return       the parsed part, or `error` when its headers or required `name` are malformed/absent
- */
 fn parse_one_part(body: []byte, start: u64, end: u64): MultipartPart | error {
     var slices = match split_headers_and_body(body, start, end) { PartSlice as s => s; error as e => return e }
     var info = match parse_headers(slices.headers) { HeaderInfo as h => h; error as e => return e }
@@ -568,39 +311,15 @@ fn parse_one_part(body: []byte, start: u64, end: u64): MultipartPart | error {
     MultipartPart { name = info.name; filename = info.filename; content_type = info.content_type; data = slices.content }
 }
 
-/**
- * Is `body[pos, pos + 2)` the `--` that marks the FINAL multipart delimiter (`--boundary--`
- * rather than an ordinary `--boundary` part delimiter)?
- *
- * @param body  the full multipart body
- * @param pos   the offset just past a `--boundary` occurrence
- * @return      true when the final-delimiter `--` follows at `pos`
- */
 fn is_final_boundary(body: []byte, pos: u64): bool {
     bytes_match_at(body, bytes_of_str("--"), pos)
 }
 
-/**
- * Skips the CRLF that must follow an ordinary (non-final) boundary delimiter line, before a
- * part's header block begins.
- *
- * @param body  the full multipart body
- * @param pos   the offset just past a `--boundary` occurrence
- * @return      the offset just past the CRLF, or `error` when no CRLF follows
- */
 fn skip_boundary_crlf(body: []byte, pos: u64): u64 | error {
     if bytes_match_at(body, bytes_of_str("\r\n"), pos) { return pos + 2 }
     error { message = "mime: malformed multipart boundary delimiter line" }
 }
 
-/**
- * Trims the trailing CRLF that belongs to a boundary delimiter line (rather than to the
- * preceding part's payload) off `body[.., end)`, when present.
- *
- * @param body  the full multipart body
- * @param end   the offset of the next boundary delimiter's `--`
- * @return      `end` minus 2 when preceded by CRLF, otherwise `end` unchanged
- */
 fn trim_trailing_crlf(body: []byte, end: u64): u64 {
     if end >= 2 && body[end - 2] == b'\r' && body[end - 1] == b'\n' { return end - 2 }
     end
@@ -611,10 +330,6 @@ fn trim_trailing_crlf(body: []byte, end: u64): u64 {
  * request/response's `Content-Type` header via `extract_boundary`) into its parts, in source
  * order. Malformed input — a missing boundary, a truncated part, a header block with no name, or
  * a dangling quoted-value escape — is a checked `error`, never a panic (M.1 fail-loud).
- *
- * @param body      the raw multipart body bytes
- * @param boundary  the multipart boundary token (without its `--` prefix)
- * @return          the parsed parts in source order, or `error` for malformed input
  */
 exp fn parse_multipart(body: []byte, boundary: str): []MultipartPart | error {
     var delim = bytes_of_str(concat("--", boundary))
@@ -639,14 +354,6 @@ exp fn parse_multipart(body: []byte, boundary: str): []MultipartPart | error {
     parts
 }
 
-/**
- * Finds the end of an unquoted token starting at `from` — the first `;` or space, or the end of
- * `input`.
- *
- * @param input  the bytes to scan
- * @param from   the token's start offset
- * @return       the token's end offset (exclusive)
- */
 fn find_token_end(input: []byte, from: u64): u64 {
     var i = from
     loop {
@@ -657,25 +364,11 @@ fn find_token_end(input: []byte, from: u64): u64 {
     i
 }
 
-/**
- * Extracts an unquoted `boundary=...` token value starting at `start`.
- *
- * @param input  the `Content-Type` header value's bytes
- * @param start  the offset just past `boundary=`
- * @return       the unquoted boundary token, or `error` for invalid UTF-8
- */
 fn extract_unquoted_boundary(input: []byte, start: u64): str | error {
     var end = find_token_end(input, start)
     str_from_utf8(bytes_slice(input, start, end))
 }
 
-/**
- * Extracts a quoted `boundary="..."` token value; `start` is positioned AT the opening `"`.
- *
- * @param input  the `Content-Type` header value's bytes
- * @param start  the offset of the opening `"`
- * @return       the unescaped boundary token, or `error` when the quoted value is malformed
- */
 fn extract_quoted_boundary(input: []byte, start: u64): str | error {
     var end = match find_unescaped_quote(input, start + 1) { u64 as p => p; error as e => return e }
     unescape_quoted(bytes_slice(input, start + 1, end))
@@ -685,10 +378,6 @@ fn extract_quoted_boundary(input: []byte, start: u64): str | error {
  * Extracts the `boundary` parameter from a `multipart/form-data; boundary=...` `Content-Type`
  * header value, accepting both the quoted (`boundary="..."`) and unquoted (`boundary=...`)
  * forms RFC 2046 §5.1 allows.
- *
- * @param content_type  the full `Content-Type` header value
- * @return              the boundary token (without its `--` delimiter prefix), or `error` when no
- *                      `boundary` parameter is present or its quoted value is malformed
  */
 exp fn extract_boundary(content_type: str): str | error {
     var input = bytes_of_str(content_type)

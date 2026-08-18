@@ -1,27 +1,6 @@
 use teko::crypto
 use teko::encoding::cbor
 
-/**
- * `teko::crypto::cose` `COSE_Mac0` (RFC 9052 §6.2, CBOR tag 17): single-recipient MAC over
- * `HMAC 256/256` (`teko::crypto::mac::hmac_sha256_of`). Builds the `MAC_structure` (§6.3)
- * `["MAC0", protected, external_aad, payload]`, canonical-CBOR-encodes it, computes the HMAC
- * tag, and assembles `[protected, unprotected, payload, tag]` tagged 17 via `encode_canonical`.
- *
- * NEVER PANICS. `cose_mac0_verify` compares the recomputed tag against the wire tag with
- * `teko::crypto::ct_eq` (constant-time — the same discipline every MAC-verification code path in
- * this project uses) and returns a `CryptoError` on any structural or cryptographic failure.
- */
-
-/**
- * Builds the RFC 9052 §6.3 `MAC_structure` for `COSE_Mac0` and canonical-CBOR-encodes it — the
- * exact bytes the HMAC tag is computed/checked over.
- *
- * @param protected_bytes  the protected header bucket's raw bytes
- * @param external_aad     caller-supplied external additional authenticated data (an empty slice
- *                         when unused)
- * @param payload          the payload bytes
- * @return                 the canonical `MAC_structure` encoding
- */
 fn cose_mac0_structure_bytes(protected_bytes: []byte, external_aad: []byte, payload: []byte): []byte {
     var arr = cose_four(cbor::cbor_text("MAC0"), cbor::cbor_bytes(protected_bytes), cbor::cbor_bytes(external_aad), cbor::cbor_bytes(payload))
     cbor::encode_canonical(cbor::cbor_array(arr))
@@ -33,13 +12,6 @@ fn cose_mac0_structure_bytes(protected_bytes: []byte, external_aad: []byte, payl
  * unprotected header (`kid` when non-empty), computes the `MAC_structure`, HMAC-SHA-256s it
  * under `secret`, and canonical-CBOR-encodes `[protected, unprotected, payload, tag]` under
  * tag 17. HMAC never fails, so this is total (no `CryptoError` case).
- *
- * @param secret        the shared HMAC secret
- * @param kid           the key identifier to carry in the unprotected header, or an empty slice
- *                      to omit it
- * @param external_aad  external additional authenticated data, or an empty slice when unused
- * @param payload       the payload bytes to authenticate (embedded, never detached)
- * @return              the encoded `COSE_Mac0` document
  */
 exp fn cose_mac0_create(secret: []byte, kid: []byte, external_aad: []byte, payload: []byte): []byte {
     var protected_bytes = cose_protected_header_bytes(CoseAlg::Hmac256)
@@ -55,14 +27,6 @@ exp fn cose_mac0_create(secret: []byte, kid: []byte, external_aad: []byte, paylo
  * payload on success: extracts the four fields, requires the protected header's `alg` to be
  * `Hmac256`, recomputes the `MAC_structure` from the EXACT protected/payload bytes on the wire,
  * and checks the tag against a fresh HMAC-SHA-256 under `secret` with `teko::crypto::ct_eq`.
- *
- * @param secret        the shared HMAC secret
- * @param external_aad  the same external additional authenticated data the creator used, or an
- *                      empty slice when unused
- * @param cose_bytes    the candidate encoded `COSE_Mac0` document
- * @return              the payload bytes, or a `CryptoError`
- * @throws              `CryptoError` on malformed CBOR, a wrong tag/shape, a non-`Hmac256` `alg`,
- *                      or a tag that fails to verify
  */
 exp fn cose_mac0_verify(secret: []byte, external_aad: []byte, cose_bytes: []byte): []byte | crypto::CryptoError {
     var four = match cose_decode_four_tuple(17, cose_bytes) {

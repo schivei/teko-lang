@@ -1,31 +1,7 @@
-/**
- * src/numeric/bigint/bigint_ops_test.tkt (namespace 'teko::numeric::bigint') — LIVE #test coverage
- * for the crypto-facing operation surface in `bigint_ops.tks`: error-returning division, Euclidean
- * modulo, gcd, shifts, magnitude bitwise logic, modular exponentiation and inverse, and big-endian
- * byte / hex / decimal serialization. Vectors are cross-checked against Python's arbitrary-precision
- * `int` (including a textbook RSA encrypt/decrypt round-trip and multi-limb magnitudes).
- *
- * Values are constructed with `of_u64` / `of_lit` / `neg` rather than `of(i64)`: the engine's signed
- * `of` walks a signedness cast the native backend miscompiles for positive inputs (an adjacent seed
- * defect, reported to the coordinator), and this unit under test never depends on that path.
- */
-
-/**
- * assert_eq_str — assert two strings are byte-equal, the workhorse of the render/round-trip checks.
- *
- * @param got   the produced string
- * @param want  the expected string
- */
 fn assert_eq_str(got: str, want: str) {
     teko::assert::is_true(got == want)
 }
 
-/**
- * unwrap_bi — the value of a `BigInt | error` a vector expects to succeed (fails the test on error).
- *
- * @param r  the union to unwrap
- * @return   the contained value
- */
 fn unwrap_bi(r: BigInt | error): BigInt {
     match r {
         BigInt as b => b
@@ -33,12 +9,6 @@ fn unwrap_bi(r: BigInt | error): BigInt {
     }
 }
 
-/**
- * unwrap_bytes — the value of a `[]byte | error` a vector expects to succeed (fails on error).
- *
- * @param r  the union to unwrap
- * @return   the contained bytes
- */
 fn unwrap_bytes(r: []byte | error): []byte {
     match r {
         []byte as b => b
@@ -46,33 +16,15 @@ fn unwrap_bytes(r: []byte | error): []byte {
     }
 }
 
-/**
- * neg_u64 — the negative `BigInt` of magnitude `v`, sidestepping the signed `of` constructor.
- *
- * @param v  the magnitude
- * @return   `-(v)` as a `BigInt`
- */
 fn neg_u64(v: u64): BigInt {
     neg(of_u64(v))
 }
 
-/**
- * hex_nibble — a lowercase-hex ASCII byte for a nibble in `[0, 16)`.
- *
- * @param n  the nibble
- * @return   the hex digit byte
- */
 fn hex_nibble(n: u64): byte {
     if n < 10 { return ((b'0' to u64) + n) to byte }
     ((b'a' to u64) + n - 10) to byte
 }
 
-/**
- * bytes_to_hex — lowercase-hex render of a byte vector, for comparing serialization vectors.
- *
- * @param b  the bytes
- * @return   the hex text
- */
 fn bytes_to_hex(b: []byte): str {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -88,9 +40,6 @@ fn bytes_to_hex(b: []byte): str {
     }
 }
 
-/**
- * divmod_multi_limb — truncating divmod recovers quotient and remainder across multi-limb operands.
- */
 #test
 fn divmod_multi_limb() {
     match divmod(of_lit("987654321098765432109876543210"), of_lit("123456789012345678901234567890")) {
@@ -102,9 +51,6 @@ fn divmod_multi_limb() {
     }
 }
 
-/**
- * divmod_zero_divisor_errors — a zero divisor is a returned error, not a panic.
- */
 #test
 fn divmod_zero_divisor_errors() {
     match divmod(of_u64(5), zero()) {
@@ -113,9 +59,6 @@ fn divmod_zero_divisor_errors() {
     }
 }
 
-/**
- * modulo_is_euclidean — `modulo` returns the non-negative residue even for a negative dividend.
- */
 #test
 fn modulo_is_euclidean() {
     assert_eq_str(to_str(unwrap_bi(modulo(neg_u64(7), of_u64(3)))), "2")
@@ -126,9 +69,6 @@ fn modulo_is_euclidean() {
     }
 }
 
-/**
- * gcd_multi_limb — Euclid's gcd over multi-limb magnitudes, sign-insensitive.
- */
 #test
 fn gcd_multi_limb() {
     assert_eq_str(to_str(gcd(of_lit("123456789012345678901234567890"), of_lit("987654321098765432109876543210"))), "9000000000900000000090")
@@ -136,10 +76,6 @@ fn gcd_multi_limb() {
     assert_eq_str(to_str(gcd(zero(), zero())), "0")
 }
 
-/**
- * mod_pow_known_and_rsa — `mod_pow` matches the classic `4^13 mod 497 = 445`, a textbook RSA
- * encrypt/decrypt round-trip, and a multi-limb exponentiation.
- */
 #test
 fn mod_pow_known_and_rsa() {
     assert_eq_str(to_str(unwrap_bi(mod_pow(of_u64(4), of_u64(13), of_u64(497)))), "445")
@@ -148,9 +84,6 @@ fn mod_pow_known_and_rsa() {
     assert_eq_str(to_str(unwrap_bi(mod_pow(of_lit("16045690984503098046"), of_lit("19088743"), of_lit("1203552815971897489555164")))), "1192139554478360475135192")
 }
 
-/**
- * mod_pow_bad_modulus_errors — a non-positive modulus and a negative exponent are returned errors.
- */
 #test
 fn mod_pow_bad_modulus_errors() {
     match mod_pow(of_u64(2), of_u64(3), zero()) {
@@ -163,18 +96,12 @@ fn mod_pow_bad_modulus_errors() {
     }
 }
 
-/**
- * mod_inverse_small_and_big — the modular inverse for a small and a multi-limb coprime pair.
- */
 #test
 fn mod_inverse_small_and_big() {
     assert_eq_str(to_str(unwrap_bi(mod_inverse(of_u64(17), of_u64(3120)))), "2753")
     assert_eq_str(to_str(unwrap_bi(mod_inverse(of_lit("16045690984833335023"), of_lit("18446744073709551557")))), "11199586035192070431")
 }
 
-/**
- * mod_inverse_non_coprime_errors — a non-invertible element yields an error, not a wrong value.
- */
 #test
 fn mod_inverse_non_coprime_errors() {
     match mod_inverse(of_u64(4), of_u64(8)) {
@@ -183,9 +110,6 @@ fn mod_inverse_non_coprime_errors() {
     }
 }
 
-/**
- * shifts_scale_by_powers_of_two — `shl`/`shr` scale by `2^n` and are inverse for exact shifts.
- */
 #test
 fn shifts_scale_by_powers_of_two() {
     assert_eq_str(to_str(shl(of_u64(1), 64)), "18446744073709551616")
@@ -196,9 +120,6 @@ fn shifts_scale_by_powers_of_two() {
     teko::assert::is_true(!is_even(of_u64(7)))
 }
 
-/**
- * bitwise_over_magnitudes — AND/OR/XOR over non-negative magnitudes; negatives are rejected.
- */
 #test
 fn bitwise_over_magnitudes() {
     assert_eq_str(to_str(unwrap_bi(bit_and(of_u64(61680), of_u64(4080)))), "240")
@@ -210,11 +131,6 @@ fn bitwise_over_magnitudes() {
     }
 }
 
-/**
- * bytes_be_round_trip — `to_bytes_be`/`from_bytes_be` are inverse; zero is a single `0x00`; a
- * negative value is rejected; and the fixed-length padded form left-pads or rejects an over-wide
- * value.
- */
 #test
 fn bytes_be_round_trip() {
     var v = of_lit("5233100606242806050955395731361295")
@@ -232,10 +148,6 @@ fn bytes_be_round_trip() {
     }
 }
 
-/**
- * hex_and_dec_round_trip — hex render/parse and the decimal spellings round-trip, including a sign
- * and a `0x` prefix.
- */
 #test
 fn hex_and_dec_round_trip() {
     assert_eq_str(to_hex(of_lit("5233100606242806050955395731361295")), "102030405060708090a0b0c0d0e0f")

@@ -3,26 +3,6 @@ use teko::encoding::base64
 use teko::encoding::xml
 use teko::numeric::bigint
 
-/**
- * `teko::crypto::xmldsig` signing: builds `SignedInfo`/`Reference`/`Signature` and produces the
- * three signature shapes this module supports — enveloped (`xmldsig_sign_enveloped`),
- * enveloping (`xmldsig_sign_enveloping`), and detached (`xmldsig_sign_detached`). All three share
- * the same core: build a placeholder `Signature` around the real `SignedInfo`, extract that
- * `SignedInfo` with its inherited namespaces inlined (`find_element_with_inlined_namespaces`,
- * `xmldsig.tks`), canonicalize it, sign the canonical bytes, then rebuild the `Signature` with
- * the real `SignatureValue`. Signing an EMPTY placeholder `SignatureValue` first and a real one
- * second guarantees the canonical `SignedInfo` bytes are identical to what a verifier will later
- * re-derive from the finished document (`xmldsig_verify.tks`) — `SignatureValue` is a sibling of
- * `SignedInfo`, never inside it, so its content never affects `SignedInfo`'s own canonical form.
- */
-
-/**
- * Checks that `kind` is the `SigningKeyKind` `alg` requires.
- *
- * @param alg   the signature algorithm
- * @param kind  the candidate signing key's kind
- * @return      `null` when they match, a `CryptoError` naming the mismatch otherwise
- */
 fn require_key_matches_alg(alg: SignatureAlg, kind: SigningKeyKind): crypto::CryptoError | null {
     match alg {
         RsaSha256 => if kind == SigningKeyKind::RsaPrivate { null } else { crypto::crypto_error("xmldsig: rsa-sha256 requires an RSA private key") }
@@ -31,18 +11,6 @@ fn require_key_matches_alg(alg: SignatureAlg, kind: SigningKeyKind): crypto::Cry
     }
 }
 
-/**
- * ECDSA P-256 signing over `message` with a fresh random nonce per attempt (RFC 6979's threat
- * model — a reused or predictable nonce leaks the private scalar), retrying on the
- * astronomically rare invalid draw `teko::crypto::ec_p256::ecdsa_p256_sign` reports as a
- * `CryptoError` (mirrors `teko::crypto::jose::jws`'s `jose_es256_sign`). A bounded 16-attempt cap
- * turns a hypothetical broken CSPRNG into a `CryptoError` rather than an infinite loop.
- *
- * @param scalar   the signer's private scalar `d`
- * @param message  the message to sign (the canonical `SignedInfo` bytes)
- * @return         the raw `(r, s)` signature, or a `CryptoError` on repeated invalid nonce draws
- * @throws         `CryptoError` after 16 failed nonce draws
- */
 fn sign_ecdsa(scalar: bigint::BigInt, message: []byte): crypto::P256Signature | crypto::CryptoError {
     var attempt: u64 = 0
     loop {
@@ -58,14 +26,6 @@ fn sign_ecdsa(scalar: bigint::BigInt, message: []byte): crypto::P256Signature | 
     crypto::crypto_error("xmldsig: ECDSA signing unreachable")
 }
 
-/**
- * Encodes a P-256 `(r, s)` pair as the XML-DSig fixed 64-byte `r || s` concatenation (matching
- * JOSE ES256, RFC 7518 §3.4), each component zero-padded to exactly 32 bytes.
- *
- * @param sig  the raw ECDSA signature
- * @return     the 64-byte signature, or a `CryptoError` if a component does not fit 32 bytes
- * @throws     `CryptoError` when `r` or `s` is out of the representable 32-byte range
- */
 fn p256_sig_to_bytes(sig: crypto::P256Signature): []byte | crypto::CryptoError {
     var r_bytes = match bigint::to_bytes_be_padded(sig.r, 32) {
         []byte as b => b
@@ -78,17 +38,6 @@ fn p256_sig_to_bytes(sig: crypto::P256Signature): []byte | crypto::CryptoError {
     xmldsig_bytes_concat(r_bytes, s_bytes)
 }
 
-/**
- * Computes the raw signature bytes for `alg` over `message` under `key` — the one flat exhaustive
- * dispatch every `SignatureAlg` member routes through (mirrors `teko::crypto::jose::jws`'s
- * `jws_sign_raw`).
- *
- * @param alg      the signature algorithm
- * @param key      the signer's key (must match `alg`'s family — see `require_key_matches_alg`)
- * @param message  the canonical `SignedInfo` bytes to sign
- * @return         the raw (not-yet-base64) signature bytes, or a `CryptoError`
- * @throws         `CryptoError` on an underlying primitive failure
- */
 fn sign_raw(alg: SignatureAlg, key: SigningKey, message: []byte): []byte | crypto::CryptoError {
     match alg {
         RsaSha256 => crypto::rsa_sign_pkcs1v15(key.rsa_key, crypto::RsaHashAlg::Sha256, message)
@@ -103,16 +52,6 @@ fn sign_raw(alg: SignatureAlg, key: SigningKey, message: []byte): []byte | crypt
     }
 }
 
-/**
- * Builds a `<Reference URI="uri">` with the given `Transforms` (may be empty), `DigestMethod`,
- * and `DigestValue`.
- *
- * @param uri            the `Reference`'s `URI` attribute
- * @param transforms     the `Transform` elements to list, in order (empty for none)
- * @param digest_alg     the digest algorithm
- * @param digest_value   the base64-encoded digest value
- * @return               the assembled `Reference` element
- */
 fn build_reference(uri: str, transforms: []xml::XmlNode, digest_alg: DigestAlg, digest_value: str): xml::XmlNode {
     var children: []xml::XmlNode = teko::list::empty()
     if transforms.len > 0 {
@@ -123,27 +62,11 @@ fn build_reference(uri: str, transforms: []xml::XmlNode, digest_alg: DigestAlg, 
     xmldsig_element("Reference", xmldsig_one_attr(xmldsig_attr("URI", uri)), children)
 }
 
-/**
- * Builds the enveloped `<Reference URI="">` — the whole host document, digested with its
- * `Signature` element removed (the `...#enveloped-signature` transform).
- *
- * @param digest_alg    the digest algorithm
- * @param digest_value  the base64-encoded digest of the document (Signature already stripped)
- * @return              the assembled enveloped `Reference` element
- */
 fn build_reference_enveloped(digest_alg: DigestAlg, digest_value: str): xml::XmlNode {
     var transform = xmldsig_element("Transform", xmldsig_one_attr(xmldsig_attr("Algorithm", enveloped_signature_transform_uri())), teko::list::empty())
     build_reference("", xmldsig_one_node(transform), digest_alg, digest_value)
 }
 
-/**
- * Assembles `<SignedInfo>`: `CanonicalizationMethod`, `SignatureMethod`, and one or more
- * `Reference` elements, in that order (XML-DSig Core §4.3).
- *
- * @param sig_alg     the signature algorithm
- * @param references  the `Reference` elements, in order
- * @return            the assembled `SignedInfo` element
- */
 fn build_signed_info(sig_alg: SignatureAlg, references: []xml::XmlNode): xml::XmlNode {
     var children: []xml::XmlNode = teko::list::empty()
     children = teko::list::push(children, xmldsig_element("CanonicalizationMethod", xmldsig_one_attr(xmldsig_attr("Algorithm", c14n_algorithm_uri())), teko::list::empty()))
@@ -157,18 +80,6 @@ fn build_signed_info(sig_alg: SignatureAlg, references: []xml::XmlNode): xml::Xm
     xmldsig_element("SignedInfo", teko::list::empty(), children)
 }
 
-/**
- * Assembles `<Signature>`: the XML-DSig namespace declaration, `SignedInfo`, `SignatureValue`,
- * an optional caller-built `KeyInfo`, and an optional caller-built `Object` (for the enveloping
- * shape) — XML-DSig Core §4.
- *
- * @param signed_info          the `SignedInfo` element to embed
- * @param signature_value_b64  the base64-encoded `SignatureValue` text (`""` for a placeholder
- *                             built only to derive `SignedInfo`'s canonical form)
- * @param key_info             an optional caller-built `KeyInfo` element
- * @param object_node          an optional caller-built `Object` element (enveloping shape)
- * @return                     the assembled `Signature` element
- */
 fn build_signature(signed_info: xml::XmlNode, signature_value_b64: str, key_info: xml::XmlNode | null, object_node: xml::XmlNode | null): xml::XmlNode {
     var attrs = xmldsig_one_attr(xmldsig_xmlns_attr("", xmldsig_namespace_uri()))
     var children: []xml::XmlNode = teko::list::empty()
@@ -185,19 +96,6 @@ fn build_signature(signed_info: xml::XmlNode, signature_value_b64: str, key_info
     xmldsig_element("Signature", attrs, children)
 }
 
-/**
- * The canonical (namespace-inlined) `SignedInfo` bytes to sign, extracted from a placeholder
- * `Signature` built around `signed_info` (see this file's header for why a placeholder
- * `SignatureValue` does not affect the result).
- *
- * @param signed_info  the `SignedInfo` element to canonicalize
- * @param key_info     the `KeyInfo` the final `Signature` will carry (irrelevant to `SignedInfo`,
- *                     passed through only so the placeholder has the same shape as the final one)
- * @param object_node  the `Object` the final `Signature` will carry (enveloping shape), or `null`
- * @return             the canonical `SignedInfo` bytes, or a `CryptoError` if extraction fails
- * @throws             `CryptoError` when the placeholder `Signature` unexpectedly has no
- *                      `SignedInfo` child (an authoring-bug guard, never reachable in practice)
- */
 fn canonical_signed_info_bytes(signed_info: xml::XmlNode, key_info: xml::XmlNode | null, object_node: xml::XmlNode | null): []byte | crypto::CryptoError {
     var placeholder = build_signature(signed_info, "", key_info, object_node)
     var canonical = match find_element_with_inlined_namespaces(placeholder, "SignedInfo", ns_scope_root()) {
@@ -211,17 +109,6 @@ fn canonical_signed_info_bytes(signed_info: xml::XmlNode, key_info: xml::XmlNode
  * Signs `document` with an ENVELOPED signature (XML-DSig Core §4.4, `URI=""` with the
  * `...#enveloped-signature` transform): digests the whole document, builds and signs `SignedInfo`
  * over it, and appends the finished `Signature` as the document's last child.
- *
- * @param document    the document to sign (must not already contain a top-level `Signature`
- *                    child — signing a second time over an existing signature is not supported)
- * @param sig_alg     the signature algorithm
- * @param digest_alg  the digest algorithm
- * @param key         the signer's key (must match `sig_alg`'s family)
- * @param key_info    an optional caller-built `KeyInfo` element to embed
- * @return            the signed document (a copy of `document` with `Signature` appended), or a
- *                    `CryptoError`
- * @throws            `CryptoError` on a key/algorithm family mismatch or an underlying signing
- *                     primitive failure
  */
 exp fn xmldsig_sign_enveloped(document: xml::XmlNode, sig_alg: SignatureAlg, digest_alg: DigestAlg, key: SigningKey, key_info: xml::XmlNode | null): xml::XmlNode | crypto::CryptoError {
     match require_key_matches_alg(sig_alg, key.kind) {
@@ -248,16 +135,6 @@ exp fn xmldsig_sign_enveloped(document: xml::XmlNode, sig_alg: SignatureAlg, dig
  * from `node`, referencing it via a caller-chosen `reference_uri` (an external URI, or `""` when
  * the caller's own convention identifies the target another way) with no transform. Returns the
  * standalone `<Signature>` element only — never embeds it into `node`.
- *
- * @param node            the node to sign
- * @param reference_uri   the `Reference`'s `URI` attribute (caller-owned convention)
- * @param sig_alg         the signature algorithm
- * @param digest_alg      the digest algorithm
- * @param key             the signer's key (must match `sig_alg`'s family)
- * @param key_info        an optional caller-built `KeyInfo` element to embed
- * @return                the standalone `Signature` element, or a `CryptoError`
- * @throws                `CryptoError` on a key/algorithm family mismatch or an underlying
- *                         signing primitive failure
  */
 exp fn xmldsig_sign_detached(node: xml::XmlNode, reference_uri: str, sig_alg: SignatureAlg, digest_alg: DigestAlg, key: SigningKey, key_info: xml::XmlNode | null): xml::XmlNode | crypto::CryptoError {
     match require_key_matches_alg(sig_alg, key.kind) {
@@ -282,17 +159,6 @@ exp fn xmldsig_sign_detached(node: xml::XmlNode, reference_uri: str, sig_alg: Si
  * Signs `data` with an ENVELOPING signature (XML-DSig Core §4.4): wraps `data` in
  * `<Object Id="object_id">`, embeds that `Object` as a child of `Signature`, and references it
  * via `URI="#object_id"` with no transform.
- *
- * @param object_id   the `Id` the `Object` (and the `Reference`'s `URI` fragment) uses
- * @param data        the node to wrap and sign
- * @param sig_alg     the signature algorithm
- * @param digest_alg  the digest algorithm
- * @param key         the signer's key (must match `sig_alg`'s family)
- * @param key_info    an optional caller-built `KeyInfo` element to embed
- * @return            the `Signature` element (carrying the `Object` as its own child), or a
- *                    `CryptoError`
- * @throws            `CryptoError` on a key/algorithm family mismatch or an underlying signing
- *                     primitive failure
  */
 exp fn xmldsig_sign_enveloping(object_id: str, data: xml::XmlNode, sig_alg: SignatureAlg, digest_alg: DigestAlg, key: SigningKey, key_info: xml::XmlNode | null): xml::XmlNode | crypto::CryptoError {
     match require_key_matches_alg(sig_alg, key.kind) {

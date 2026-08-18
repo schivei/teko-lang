@@ -1,27 +1,3 @@
-/**
- * `teko::encoding::yaml` — the ENCODER. Total (M.3): a well-formed `YamlValue` tree always has a
- * rendering, so `encode_yaml` returns `str` bare, matching `teko::encoding::toml::encode_toml`'s
- * totality precedent.
- *
- * SCOPE (this file). A straightforward BLOCK-style emitter: a mapping/sequence renders as
- * indentation-nested `key: value` / `- value` lines (2 spaces per nesting level), an empty
- * mapping/sequence renders as `{}`/`[]`, and a scalar renders as its core-schema plain form UNLESS
- * that plain form would not round-trip back to the same value (an ambiguous or unsafe string is
- * double-quoted instead — `needs_quoting` reuses `yaml_parse.tks`'s own `resolve_scalar` to decide
- * this exactly, so "does this need quoting" can never drift out of sync with "how does the parser
- * resolve a plain scalar"). This unit targets VALUE round-tripping (`parse_yaml(encode_yaml(v))`
- * structurally equal to `v` via `yaml_equal`), not byte-identical or pretty-printed output — no
- * attempt is made to preserve comments, anchors/aliases, flow-style choice, or block-scalar style
- * from a parsed document (a `YamlValue` tree carries none of that; only the value survives a
- * parse/encode round trip, matching every codec in this catalog).
- */
-
-/**
- * Renders `n` spaces (indentation padding).
- *
- * @param n  how many spaces
- * @return   a string of `n` spaces
- */
 fn spaces(n: u64): str {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -33,53 +9,22 @@ fn spaces(n: u64): str {
     str(out)
 }
 
-/**
- * Reports whether `k` is one of the scalar kinds (never a `Seq`/`Map`) — used to decide whether a
- * mapping entry's/sequence item's value renders INLINE (on the same line as its `key:`/`-`) or on
- * its own indented block below.
- *
- * @param k  the kind to classify
- * @return   true for `Null`/`Bool`/`Int`/`Float`/`Str`
- */
 fn is_scalar_kind(k: YamlKind): bool {
     k == YamlKind::Null || k == YamlKind::Bool || k == YamlKind::Int || k == YamlKind::Float || k == YamlKind::Str
 }
 
-/**
- * Reports whether `v` renders as a single inline token: every scalar, plus an EMPTY sequence/mapping
- * (which renders as `[]`/`{}`, itself a single token).
- *
- * @param v  the value to classify
- * @return   true when `v` belongs on the same line as its `key:`/`-` prefix
- */
 fn renders_inline(v: YamlValue): bool {
     if is_scalar_kind(v.kind) { return true }
     if v.kind == YamlKind::Seq { return v.items.len == 0 }
     v.keys.len == 0
 }
 
-/**
- * Renders `v.float_val` as YAML core-schema float literal text: `.inf`/`-.inf` for an infinity
- * (signed), `.nan` for a NaN, else `f64_g17`'s shortest round-tripping decimal text, with a `.0`
- * suffix appended when that text would otherwise look like an integer (mirrors
- * `teko::encoding::toml::format_float`'s shape, with YAML's own special-float spellings).
- *
- * @param v  the float value to render
- * @return   the rendered text
- */
 fn format_yaml_float(v: f64): str {
     if teko::math::is_nan(v) { return ".nan" }
     if teko::math::is_inf(v) { return if v < 0.0 { "-.inf" } else { ".inf" } }
     ensure_float_looking(f64_g17(v))
 }
 
-/**
- * Appends `.0` to `text` when it contains neither `.` nor `e`/`E` — a bare-integer-looking float
- * rendering must gain one to re-parse as a `Float` rather than an `Int`.
- *
- * @param text  the candidate float rendering
- * @return      `text`, with `.0` appended when needed
- */
 fn ensure_float_looking(text: str): str {
     var b = bytes_of_str(text)
     var i: u64 = 0
@@ -91,16 +36,6 @@ fn ensure_float_looking(text: str): str {
     concat(text, ".0")
 }
 
-/**
- * Reports whether `s`'s content makes it unsafe to render as a plain (unquoted) scalar: leading or
- * trailing whitespace, an embedded newline/tab, any flow indicator (`, [ ] { }`), an embedded `: `
- * (would look like a mapping key), an embedded ` #` (would look like a comment), a leading indicator
- * character reserved by the block/flow grammars, or a value that (trimmed) is exactly `-` or starts
- * with `- ` (would look like a sequence entry).
- *
- * @param s  the text to inspect
- * @return   true when `s` cannot render as a safe plain scalar
- */
 fn has_unsafe_plain_chars(s: str): bool {
     var b = bytes_of_str(s)
     if is_blank_byte(b[0]) || is_blank_byte(b[b.len - 1]) { return true }
@@ -109,23 +44,10 @@ fn has_unsafe_plain_chars(s: str): bool {
     scan_for_unsafe_run(b)
 }
 
-/**
- * Reports whether `c` is a byte that may never START a safe plain scalar (a YAML indicator
- * character reserved for block/flow/anchor/alias/tag/quote/comment/directive syntax).
- *
- * @param c  the byte to classify
- * @return   true when `c` is a reserved leading indicator
- */
 fn is_unsafe_leading_byte(c: byte): bool {
     c == b'?' || c == b':' || c == b',' || c == b'[' || c == b']' || c == b'{' || c == b'}' || c == b'#' || c == b'&' || c == b'*' || c == b'!' || c == b'|' || c == b'>' || c == b'\'' || c == b'"' || c == b'%' || c == b'@' || c == b'`' || c == b'~'
 }
 
-/**
- * Scans `b` for an embedded newline/tab, a flow indicator, an embedded `: `, or an embedded ` #`.
- *
- * @param b  the bytes to scan
- * @return   true when any unsafe run is found
- */
 fn scan_for_unsafe_run(b: []byte): bool {
     var i: u64 = 0
     loop {
@@ -139,26 +61,12 @@ fn scan_for_unsafe_run(b: []byte): bool {
     false
 }
 
-/**
- * Reports whether `s` must be quoted to render safely: empty, ambiguous with another core-schema
- * kind (checked by reusing `yaml_parse.tks`'s own `resolve_scalar`, so this can never drift out of
- * sync with what the parser actually does), or containing an unsafe character run.
- *
- * @param s  the text to inspect
- * @return   true when `s` needs quoting
- */
 fn needs_quoting(s: str): bool {
     if s.len == 0 { return true }
     if resolve_scalar(s).kind != YamlKind::Str { return true }
     has_unsafe_plain_chars(s)
 }
 
-/**
- * Renders `s` as a double-quoted string literal, escaping `"`, `\`, and every control byte.
- *
- * @param s  the text to render
- * @return   the quoted, escaped literal text (including both delimiting `"`)
- */
 fn encode_double_quoted_str(s: str): str {
     var out: []byte = teko::list::push(teko::list::empty(), b'"')
     var b = bytes_of_str(s)
@@ -179,12 +87,6 @@ fn encode_double_quoted_str(s: str): str {
     str(out)
 }
 
-/**
- * Renders a control byte `c` as its `\u00XX` short-Unicode-escape form.
- *
- * @param c  the control byte (`< 0x20`, excluding the ones with their own short escape)
- * @return   the six-byte `\u00XX` escape
- */
 fn escape_control_hex(c: byte): []byte {
     var hex_digits = bytes_of_str("0123456789abcdef")
     var hi = (c to u64) >> 4
@@ -194,26 +96,11 @@ fn escape_control_hex(c: byte): []byte {
     teko::list::push(out, hex_digits[lo])
 }
 
-/**
- * Renders `s` as a safe scalar token: unquoted when `!needs_quoting(s)`, else double-quoted. Used
- * for both plain string VALUES and mapping KEYS (this unit's `YamlValue.keys` are always plain
- * `str`).
- *
- * @param s  the text to render
- * @return   the rendered token
- */
 fn encode_scalar_str(s: str): str {
     if needs_quoting(s) { return encode_double_quoted_str(s) }
     s
 }
 
-/**
- * Renders one value's inline scalar token: dispatches on `kind` (a `Seq`/`Map` here is always
- * empty, per `renders_inline`'s contract, so it renders as `[]`/`{}`).
- *
- * @param v  the value to render (must satisfy `renders_inline`)
- * @return   the rendered token
- */
 fn encode_inline(v: YamlValue): str {
     match v.kind {
         YamlKind::Null => "null"
@@ -226,14 +113,6 @@ fn encode_inline(v: YamlValue): str {
     }
 }
 
-/**
- * Renders a non-empty sequence's entries as `- value` lines at column `indent`, recursing into
- * `render_block` for any non-inline (nested `Seq`/`Map`) item.
- *
- * @param items   the sequence's elements (non-empty)
- * @param indent  the column to render each entry's `-` at
- * @return        the rendered block, one line per scalar entry, more for a nested block entry
- */
 fn encode_seq_block(items: []YamlValue, indent: u64): str {
     var out: []byte = teko::list::empty()
     var pad = bytes_of_str(spaces(indent))
@@ -255,15 +134,6 @@ fn encode_seq_block(items: []YamlValue, indent: u64): str {
     str(out)
 }
 
-/**
- * Renders a non-empty mapping's entries as `key: value` lines at column `indent`, recursing into
- * `render_block` for any non-inline (nested `Seq`/`Map`) value.
- *
- * @param keys    the mapping's keys (non-empty), in order
- * @param vals    the mapping's values, parallel to `keys`
- * @param indent  the column to render each entry's key at
- * @return        the rendered block, one line per scalar-valued entry, more for a nested block value
- */
 fn encode_map_block(keys: []str, vals: []YamlValue, indent: u64): str {
     var out: []byte = teko::list::empty()
     var pad = bytes_of_str(spaces(indent))
@@ -286,30 +156,15 @@ fn encode_map_block(keys: []str, vals: []YamlValue, indent: u64): str {
     str(out)
 }
 
-/**
- * Renders `v` as a full multi-line block starting at column `indent` (every one of its own lines,
- * including its first, carries that indentation) — the shape a mapping/sequence value takes when it
- * does NOT satisfy `renders_inline` and so is placed on its own following lines rather than beside
- * its `key:`/`-`.
- *
- * @param v       the value to render (a non-empty `Seq` or `Map`, per every caller's `renders_inline`
- *                check)
- * @param indent  the column to render at
- * @return        the rendered block text (one or more `\n`-terminated lines)
- */
 fn render_block(v: YamlValue, indent: u64): str {
     if v.kind == YamlKind::Seq { return encode_seq_block(v.items, indent) }
     encode_map_block(v.keys, v.vals, indent)
 }
 
 /**
- * Renders `v` as a complete YAML document (see the module doc's SCOPE note for the round-trip
- * contract). A non-empty root `Seq`/`Map` renders as a full block starting at column `0`; an empty
- * root `Seq`/`Map` renders as `[]`/`{}`; any other root renders as its inline scalar token, each
- * followed by a trailing newline.
- *
- * @param v  the value to render
- * @return   the rendered YAML document text
+ * Renders `v` as a complete YAML document. A non-empty root `Seq`/`Map` renders as a full block
+ * starting at column `0`; an empty root `Seq`/`Map` renders as `[]`/`{}`; any other root renders
+ * as its inline scalar token, each followed by a trailing newline.
  */
 exp fn encode_yaml(v: YamlValue): str {
     if renders_inline(v) { return concat(encode_inline(v), "\n") }

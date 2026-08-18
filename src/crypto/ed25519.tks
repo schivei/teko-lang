@@ -1,37 +1,6 @@
 use teko::numeric::bigint
 
 /**
- * `teko::crypto::ed25519` — Ed25519 (RFC 8032), the third and final lane of the pk primitive
- * layer: it unblocks JOSE/COSE EdDSA and any protocol pairing Ed25519 with the raw 32-byte
- * secret/public key and 64-byte signature encodings RFC 8032 specifies.
- *
- * BUILT ON `teko::numeric::bigint`. Every field/scalar operation (Edwards point add/scalar-mul,
- * the `x`-coordinate recovery square root) is `bigint::add`/`sub`/`mul`/`modulo`/`mod_inverse`/
- * `mod_pow` from the existing arbitrary-precision engine and `sha512` from `teko::crypto::hash` —
- * this file adds no new bignum arithmetic, only the twisted Edwards curve constants, affine point
- * arithmetic, and the RFC 8032 PureEdDSA sign/verify algorithm layered on top.
- *
- * NO HARD-CODED CURVE CONSTANTS BEYOND `p` (and the tiny integers RFC 8032 itself names, `-1`,
- * `121665`, `121666`, `4`, `5`, `8`). The Edwards curve constant `d = -121665/121666 mod p`, the
- * base point `B`, and `sqrt(-1) mod p` are all COMPUTED from those, not transcribed as magic hex
- * literals — one fewer place a copy/paste digit error could hide (every one of these values is
- * cross-checked against the standard RFC 8032 constants in this file's test suite).
- *
- * AFFINE, UNIFIED ADDITION LAW. Points are plain affine `(x, y)` pairs on the twisted Edwards
- * curve `-x^2 + y^2 = 1 + d*x^2*y^2`; because Ed25519's curve is COMPLETE (`d` is a non-square
- * mod `p`), the single unified addition formula (RFC 8032 §5.1.4) is correct for adding any two
- * points, including a point to itself (doubling) — no separate doubling formula, no
- * point-at-infinity special case (the identity `(0, 1)` is an ordinary affine point here).
- *
- * ERRORS ARE VALUES. `ed25519_sign`/`ed25519_public_key_from_secret` reject a wrong-length secret
- * key as `CryptoError`; `ed25519_verify` never panics — a malformed public key, signature, or
- * point encoding simply yields `false`.
- *
- * NO INDEX-ASSIGNMENT. Every byte buffer here is built by `teko::list::push` (functional growth),
- * the same discipline `teko::crypto::hash`/`rsa`/`ec_p256` already use.
- */
-
-/**
  * A point on the Ed25519 twisted Edwards curve, in affine coordinates. Unlike the short
  * Weierstrass curves, this curve is complete — its group identity `(0, 1)` is an ordinary point,
  * so no separate "point at infinity" flag is needed.
@@ -43,14 +12,6 @@ exp type Ed25519Point = struct {
     y: bigint::BigInt
 }
 
-/**
- * Parse a hard-coded hexadecimal/decimal constant into a `BigInt`. Every caller passes a literal
- * this file owns and has verified against RFC 8032, so a parse failure is an authoring bug, not a
- * caller-facing error — it panics rather than threading an error through every constant accessor.
- *
- * @param dec  the constant's decimal text
- * @return     the parsed value
- */
 fn ed25519_const_of_dec(dec: str): bigint::BigInt {
     match bigint::from_dec_str(dec) {
         bigint::BigInt as b => b
@@ -58,33 +19,14 @@ fn ed25519_const_of_dec(dec: str): bigint::BigInt {
     }
 }
 
-/**
- * The Ed25519 field prime, `p = 2^255 - 19` (RFC 8032 §5.1).
- *
- * @return  the field prime `p`
- */
 fn ed25519_prime(): bigint::BigInt {
     bigint::sub(bigint::shl(bigint::one(), 255), bigint::of(19))
 }
 
-/**
- * The order of the Ed25519 base point's prime-order subgroup, `L = 2^252 +
- * 27742317777372353535851937790883648493` (RFC 8032 §5.1).
- *
- * @return  the base point subgroup order `L`
- */
 fn ed25519_order(): bigint::BigInt {
     bigint::add(bigint::shl(bigint::one(), 252), ed25519_const_of_dec("27742317777372353535851937790883648493"))
 }
 
-/**
- * Reduce `x` into the canonical field representative `[0, p)`. `p` is always positive, so a
- * failure here is an authoring bug and panics rather than threading an error through every field
- * operation.
- *
- * @param x  the value to reduce
- * @return   `x mod p`, in `[0, p)`
- */
 fn ed25519_reduce_p(x: bigint::BigInt): bigint::BigInt {
     match bigint::modulo(x, ed25519_prime()) {
         bigint::BigInt as b => b
@@ -92,13 +34,6 @@ fn ed25519_reduce_p(x: bigint::BigInt): bigint::BigInt {
     }
 }
 
-/**
- * Reduce `x` into the canonical scalar representative `[0, L)`, the step every RFC 8032 hash
- * output goes through before use as a scalar (`H(...) mod L`).
- *
- * @param x  the value to reduce
- * @return   `x mod L`, in `[0, L)`
- */
 fn ed25519_reduce_l(x: bigint::BigInt): bigint::BigInt {
     match bigint::modulo(x, ed25519_order()) {
         bigint::BigInt as b => b
@@ -106,47 +41,18 @@ fn ed25519_reduce_l(x: bigint::BigInt): bigint::BigInt {
     }
 }
 
-/**
- * Field addition modulo `p`.
- *
- * @param x  the left operand, in `[0, p)`
- * @param y  the right operand, in `[0, p)`
- * @return   `(x + y) mod p`
- */
 fn ed25519_fadd(x: bigint::BigInt, y: bigint::BigInt): bigint::BigInt {
     ed25519_reduce_p(bigint::add(x, y))
 }
 
-/**
- * Field subtraction modulo `p`.
- *
- * @param x  the left operand, in `[0, p)`
- * @param y  the right operand, in `[0, p)`
- * @return   `(x - y) mod p`
- */
 fn ed25519_fsub(x: bigint::BigInt, y: bigint::BigInt): bigint::BigInt {
     ed25519_reduce_p(bigint::sub(x, y))
 }
 
-/**
- * Field multiplication modulo `p`.
- *
- * @param x  the left operand, in `[0, p)`
- * @param y  the right operand, in `[0, p)`
- * @return   `(x * y) mod p`
- */
 fn ed25519_fmul(x: bigint::BigInt, y: bigint::BigInt): bigint::BigInt {
     ed25519_reduce_p(bigint::mul(x, y))
 }
 
-/**
- * Field inversion modulo `p`. Every call site in this file inverts a denominator the curve's
- * completeness guarantees is nonzero, so a failure here is an authoring bug and panics rather
- * than returning an error.
- *
- * @param x  the value to invert, nonzero in `[0, p)`
- * @return   `x^-1 mod p`
- */
 fn ed25519_finv(x: bigint::BigInt): bigint::BigInt {
     match bigint::mod_inverse(x, ed25519_prime()) {
         bigint::BigInt as b => b
@@ -154,15 +60,6 @@ fn ed25519_finv(x: bigint::BigInt): bigint::BigInt {
     }
 }
 
-/**
- * Field exponentiation modulo `p` (`bigint::mod_pow` specialized to this file's fixed modulus).
- * `p` is always positive and `exponent` is always non-negative at every call site, so a failure
- * here is an authoring bug and panics.
- *
- * @param ground    the base, in `[0, p)`
- * @param exponent  the exponent, non-negative
- * @return          `ground^exponent mod p`
- */
 fn ed25519_fpow(ground: bigint::BigInt, exponent: bigint::BigInt): bigint::BigInt {
     match bigint::mod_pow(ground, exponent, ed25519_prime()) {
         bigint::BigInt as b => b
@@ -170,43 +67,16 @@ fn ed25519_fpow(ground: bigint::BigInt, exponent: bigint::BigInt): bigint::BigIn
     }
 }
 
-/**
- * The twisted Edwards curve constant `d = -121665/121666 mod p` (RFC 8032 §5.1), computed from
- * the two small integers RFC 8032 names rather than transcribed as a 255-bit literal.
- *
- * @return  the curve constant `d`
- */
 fn ed25519_d(): bigint::BigInt {
     var numerator = ed25519_reduce_p(bigint::neg(bigint::of(121665)))
     ed25519_fmul(numerator, ed25519_finv(bigint::of(121666)))
 }
 
-/**
- * `sqrt(-1) mod p`, one of the two square roots of `-1` modulo the Ed25519 prime (it exists
- * because `p ≡ 1 (mod 4)`). Used by `ed25519_recover_x` when a candidate square root needs
- * adjusting by this factor (RFC 8032 §5.1.3). Computed as `2^((p-1)/4) mod p` rather than
- * transcribed as a literal.
- *
- * @return  a square root of `-1` modulo `p`
- */
 fn ed25519_sqrt_m1(): bigint::BigInt {
     var exponent = bigint::shr(bigint::sub(ed25519_prime(), bigint::one()), 2)
     ed25519_fpow(bigint::of(2), exponent)
 }
 
-/**
- * Recovers the `x` coordinate of the curve point with Y coordinate `y` and the given sign bit
- * (RFC 8032 §5.1.3): computes a candidate square root of `u/v = (y^2-1)/(d*y^2+1)` via the
- * `p ≡ 5 (mod 8)` exponentiation formula, corrects it by `sqrt(-1)` if the first candidate does
- * not satisfy `v*x^2 = u`, and rejects the encoding entirely if neither candidate does (no square
- * root exists — a corrupted/forged point) or if the recovered `x` is zero but the sign bit
- * demands the negative (odd) root.
- *
- * @param y     the Y coordinate
- * @param sign  the desired low bit of `x` (`0` or `1`)
- * @return      the recovered X coordinate, or a `CryptoError` when `y` has no matching square root
- * @throws      `CryptoError` when no valid `x` exists for `(y, sign)`
- */
 fn ed25519_recover_x(y: bigint::BigInt, sign: u64): bigint::BigInt | CryptoError {
     var y2 = ed25519_fmul(y, y)
     var u = ed25519_fsub(y2, bigint::one())
@@ -233,13 +103,6 @@ fn ed25519_recover_x(y: bigint::BigInt, sign: u64): bigint::BigInt | CryptoError
     candidate
 }
 
-/**
- * The Ed25519 base point `B`: its `Y` coordinate is the well-known `4/5 mod p` (RFC 8032 §5.1),
- * and its `X` coordinate (the positive/even root) is recovered from that `Y` by the same
- * `ed25519_recover_x` machinery point decompression uses — computed, not transcribed.
- *
- * @return  the base point `B`
- */
 fn ed25519_base_point(): Ed25519Point {
     var by = ed25519_fmul(bigint::of(4), ed25519_finv(bigint::of(5)))
     var bx = match ed25519_recover_x(by, 0) {
@@ -249,24 +112,10 @@ fn ed25519_base_point(): Ed25519Point {
     Ed25519Point { x = bx; y = by }
 }
 
-/**
- * The curve group identity, `(0, 1)` — an ordinary affine point on this complete curve (RFC 8032
- * §5.1), unlike the short-Weierstrass "point at infinity".
- *
- * @return  the identity point
- */
 fn ed25519_identity(): Ed25519Point {
     Ed25519Point { x = bigint::zero(); y = bigint::one() }
 }
 
-/**
- * The unified twisted Edwards addition law (RFC 8032 §5.1.4): correct for adding any two points
- * on this complete curve, including a point to itself (doubling needs no separate formula).
- *
- * @param p  the left addend
- * @param q  the right addend
- * @return   `p + q`
- */
 fn ed25519_point_add(p: Ed25519Point, q: Ed25519Point): Ed25519Point {
     var d = ed25519_d()
     var cross = ed25519_fmul(ed25519_fmul(d, p.x), ed25519_fmul(p.y, ed25519_fmul(q.x, q.y)))
@@ -277,16 +126,6 @@ fn ed25519_point_add(p: Ed25519Point, q: Ed25519Point): Ed25519Point {
     Ed25519Point { x = x3; y = y3 }
 }
 
-/**
- * Scalar multiplication `k*p` via right-to-left double-and-add (the unified addition law makes
- * "doubling" just `ed25519_point_add(addend, addend)`). Requires `k` non-negative (every call
- * site reduces its scalar into `[0, L)` first). NOT constant-time, matching this namespace's
- * `bigint::mod_pow` and `ec_p256_scalar_mul`.
- *
- * @param k  the scalar, non-negative
- * @param p  the point to multiply
- * @return   `k*p`
- */
 fn ed25519_scalar_mul(k: bigint::BigInt, p: Ed25519Point): Ed25519Point {
     var result = ed25519_identity()
     var addend = p
@@ -300,14 +139,6 @@ fn ed25519_scalar_mul(k: bigint::BigInt, p: Ed25519Point): Ed25519Point {
     result
 }
 
-/**
- * Concatenates `a` then `b` into a fresh `[]byte` — this file's own copy of the block-join helper
- * every crypto file in this namespace carries privately (mirroring `rsa.tks`'s `rsa_bytes_concat`).
- *
- * @param a  the first slice
- * @param b  the second slice
- * @return   a fresh slice holding `a`'s bytes followed by `b`'s bytes
- */
 fn ed25519_bytes_concat(a: []byte, b: []byte): []byte {
     var out = a
     var i: u64 = 0
@@ -319,15 +150,6 @@ fn ed25519_bytes_concat(a: []byte, b: []byte): []byte {
     out
 }
 
-/**
- * The sub-slice `data[from..to)` as a fresh `[]byte` — this file's own copy of the sub-slicing
- * helper every crypto file in this namespace carries privately.
- *
- * @param data  the source slice
- * @param from  the inclusive start index
- * @param to    the exclusive end index
- * @return      a fresh slice holding `data[from..to)`
- */
 fn ed25519_bytes_slice(data: []byte, from: u64, to: u64): []byte {
     var out: []byte = teko::list::empty()
     var i = from
@@ -339,14 +161,6 @@ fn ed25519_bytes_slice(data: []byte, from: u64, to: u64): []byte {
     out
 }
 
-/**
- * Reverses a byte slice — the shared core of the little-endian encode/decode helpers below.
- * RFC 8032 encodes every field/scalar element little-endian, while `teko::numeric::bigint` only
- * speaks big-endian (`from_bytes_be`/`to_bytes_be_padded`); reversing bridges the two.
- *
- * @param data  the slice to reverse
- * @return      a fresh slice with `data`'s bytes in reverse order
- */
 fn ed25519_bytes_reverse(data: []byte): []byte {
     var out: []byte = teko::list::empty()
     var i = data.len
@@ -358,26 +172,10 @@ fn ed25519_bytes_reverse(data: []byte): []byte {
     out
 }
 
-/**
- * Decodes a little-endian byte slice into a non-negative `BigInt` (RFC 8032's implicit
- * little-endian `OS2IP`), by reversing to big-endian and delegating to `bigint::from_bytes_be`.
- *
- * @param data  the little-endian bytes
- * @return      the value they encode
- */
 fn ed25519_from_bytes_le(data: []byte): bigint::BigInt {
     bigint::from_bytes_be(ed25519_bytes_reverse(data))
 }
 
-/**
- * Encodes a non-negative `x` as a fixed 32-byte little-endian field (RFC 8032's implicit
- * little-endian `I2OSP`), by delegating to `bigint::to_bytes_be_padded` and reversing. Every call
- * site's `x` is already reduced into `[0, p)` or `[0, L)`, both of which fit in 32 bytes, so a
- * failure here is an authoring bug and panics.
- *
- * @param x  the value to encode, non-negative and fitting in 32 bytes
- * @return   the 32-byte little-endian encoding
- */
 fn ed25519_to_bytes_le_32(x: bigint::BigInt): []byte {
     var be = match bigint::to_bytes_be_padded(x, 32) {
         []byte as b => b
@@ -386,13 +184,6 @@ fn ed25519_to_bytes_le_32(x: bigint::BigInt): []byte {
     ed25519_bytes_reverse(be)
 }
 
-/**
- * Compresses a point to its 32-byte RFC 8032 §5.1.2 encoding: the Y coordinate little-endian,
- * with the sign (low bit) of X packed into the top bit of the last byte.
- *
- * @param p  the point to compress
- * @return   the 32-byte compressed encoding
- */
 fn ed25519_compress(p: Ed25519Point): []byte {
     var y_bytes = ed25519_to_bytes_le_32(p.y)
     var sign_bit: u32 = if bigint::is_even(p.x) { 0 } else { 1 }
@@ -407,14 +198,6 @@ fn ed25519_compress(p: Ed25519Point): []byte {
     teko::list::push(out, last to byte)
 }
 
-/**
- * Decompresses a 32-byte RFC 8032 §5.1.3 point encoding: splits off the sign bit, decodes the Y
- * coordinate from the remaining 255 bits, and recovers X via `ed25519_recover_x`.
- *
- * @param bytes  the candidate 32-byte compressed encoding
- * @return       the decoded point, or a `CryptoError` describing why it was rejected
- * @throws       `CryptoError` on a wrong length or a Y coordinate with no valid X
- */
 fn ed25519_decompress(bytes: []byte): Ed25519Point | CryptoError {
     if bytes.len != 32 {
         return crypto_error("ed25519_decompress: expected a 32-byte compressed point")
@@ -429,15 +212,6 @@ fn ed25519_decompress(bytes: []byte): Ed25519Point | CryptoError {
     Ed25519Point { x = x; y = y }
 }
 
-/**
- * Clamps a 32-byte scalar seed per RFC 8032 §5.1.5: clears the low 3 bits of byte 0 (forcing the
- * scalar onto the prime-order subgroup, cofactor 8), clears the top bit of byte 31, and sets the
- * second-highest bit of byte 31 (fixing the scalar's bit length so every implementation's
- * variable-time scalar multiplication runs in the same number of iterations).
- *
- * @param seed_bytes  the 32-byte unclamped scalar seed
- * @return            the clamped 32-byte scalar
- */
 fn ed25519_clamp(seed_bytes: []byte): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -455,11 +229,6 @@ fn ed25519_clamp(seed_bytes: []byte): []byte {
 /**
  * Derives the Ed25519 public key from a 32-byte secret key seed (RFC 8032 §5.1.5): hashes the
  * seed with SHA-512, clamps the low half into the private scalar `a`, and compresses `a*B`.
- *
- * @param secret_key_32  the 32-byte secret key seed
- * @return                the 32-byte compressed public key, or a `CryptoError` on a wrong-length
- *                        secret key
- * @throws                `CryptoError` when `secret_key_32` is not exactly 32 bytes
  */
 exp fn ed25519_public_key_from_secret(secret_key_32: []byte): []byte | CryptoError {
     if secret_key_32.len != 32 {
@@ -476,12 +245,6 @@ exp fn ed25519_public_key_from_secret(secret_key_32: []byte): []byte | CryptoErr
  * scalar `a` and public key `A` from the secret key seed, derives the deterministic nonce
  * `r = SHA-512(prefix || message) mod L`, and assembles `R || S` where `R = compress(r*B)` and
  * `S = (r + SHA-512(R||A||message)*a) mod L`.
- *
- * @param secret_key_32  the 32-byte secret key seed
- * @param message        the message to sign
- * @return               the 64-byte signature `R || S`, or a `CryptoError` on a wrong-length
- *                        secret key
- * @throws               `CryptoError` when `secret_key_32` is not exactly 32 bytes
  */
 exp fn ed25519_sign(secret_key_32: []byte, message: []byte): []byte | CryptoError {
     if secret_key_32.len != 32 {
@@ -504,12 +267,6 @@ exp fn ed25519_sign(secret_key_32: []byte, message: []byte): []byte | CryptoErro
  * `R` component (rejecting either if it fails point decompression), rejects `S` outside
  * `[0, L)`, recomputes `k = SHA-512(R||A||message) mod L`, and checks `S*B == R + k*A`. Never
  * panics — every structural failure simply yields `false`.
- *
- * @param public_key_32  the 32-byte compressed public key
- * @param message        the message whose signature is being checked
- * @param sig_64         the candidate 64-byte signature
- * @return               `true` iff `sig_64` is a genuine Ed25519 signature of `message` under
- *                        `public_key_32`
  */
 exp fn ed25519_verify(public_key_32: []byte, message: []byte, sig_64: []byte): bool {
     if public_key_32.len != 32 || sig_64.len != 64 { return false }

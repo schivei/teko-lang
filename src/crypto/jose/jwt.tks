@@ -2,33 +2,8 @@ use teko::crypto
 use teko::encoding::json
 
 /**
- * `teko::crypto::jose::jwt` — JSON Web Token claims (RFC 7519), composed as a thin layer over
- * `teko::crypto::jose::jws`: a JWT is a JWS whose payload is the claims JSON text and whose
- * protected header carries `"typ":"JWT"` (RFC 7519 §5.1).
- *
- * THE PAYLOAD IS THE CALLER'S RAW CLAIMS JSON TEXT, never a struct this unit derives/serializes —
- * `jwt_sign` signs `bytes_of_str(claims_json)` verbatim and `jwt_verify` returns the verified
- * payload decoded back to `str`. This keeps the claim SHAPE entirely the caller's choice (RFC
- * 7519 §4 defines a handful of named claims but never closes the set), matching this unit's
- * YAGNI scope cut: no `exp`/`nbf`/`iat` date validator is built here (that needs the CURRENT TIME,
- * which this pure-value unit deliberately never sources itself — see `jwt_claim_number` for how a
- * caller reads a numeric claim like `exp` to validate against a time it supplies).
- *
- * `jwt_claim_str`/`jwt_claim_number` are minimal read accessors over the claims JSON — enough to
- * pull `sub`/`name`/`exp`/... out of a verified token without asking every caller to hand-roll
- * `teko::encoding::json::decode` + `object_get` again.
- */
-
-/**
  * Signs `claims_json` under `alg`/`key` as a JWT: a JWS whose protected header adds
  * `"typ":"JWT"` (RFC 7519 §5.1) and whose payload is `claims_json`'s raw UTF-8 bytes.
- *
- * @param alg          the signature algorithm
- * @param key          the signer's key (matching `alg`'s family — see `jws_sign`)
- * @param claims_json  the claims, as already-serialized JSON text (the caller owns the exact
- *                     claim set/shape)
- * @return             the compact JWT, or a `CryptoError`
- * @throws             `CryptoError` per `jws_sign`
  */
 exp fn jwt_sign(alg: JwsAlg, key: @JoseKey(), claims_json: str): str | crypto::CryptoError {
     var keys: []str = teko::list::empty()
@@ -43,11 +18,6 @@ exp fn jwt_sign(alg: JwsAlg, key: @JoseKey(), claims_json: str): str | crypto::C
  * `"typ"` header is not itself re-checked — RFC 7519 §5.1 marks it as merely RECOMMENDED, and
  * every failure mode `jws_verify` already reports as a `CryptoError` covers the security-relevant
  * checks).
- *
- * @param key    the verifier's key (matching the header's `alg` family — see `jws_verify`)
- * @param token  the compact JWT to verify
- * @return       the claims JSON text, or a `CryptoError`
- * @throws       `CryptoError` per `jws_verify`, or when the verified payload is not valid UTF-8
  */
 exp fn jwt_verify(key: @JoseKey(), token: str): str | crypto::CryptoError {
     var payload = match jws_verify(key, token) {
@@ -60,14 +30,6 @@ exp fn jwt_verify(key: @JoseKey(), token: str): str | crypto::CryptoError {
     }
 }
 
-/**
- * Parses `claims_json` into its top-level `JsonObject` — the shared entry point
- * `jwt_claim_str`/`jwt_claim_number` both use.
- *
- * @param claims_json  the claims JSON text
- * @return             the parsed object, or a `CryptoError`
- * @throws             `CryptoError` on malformed JSON or a non-object top-level value
- */
 fn jwt_parse_claims(claims_json: str): json::JsonObject | crypto::CryptoError {
     var v = match json::decode(claims_json) {
         (@JsonValue()) as x => x
@@ -81,12 +43,6 @@ fn jwt_parse_claims(claims_json: str): json::JsonObject | crypto::CryptoError {
 
 /**
  * The string value of claim `name` (e.g. `"sub"`, `"iss"`) in `claims_json`.
- *
- * @param claims_json  the claims JSON text (typically `jwt_verify`'s return value)
- * @param name         the claim name
- * @return             the claim's string value, or a `CryptoError`
- * @throws             `CryptoError` when `claims_json` is malformed, or `name` is missing/not a
- *                      string
  */
 exp fn jwt_claim_str(claims_json: str, name: str): str | crypto::CryptoError {
     var obj = match jwt_parse_claims(claims_json) {
@@ -105,14 +61,7 @@ exp fn jwt_claim_str(claims_json: str, name: str): str | crypto::CryptoError {
 /**
  * The numeric value of claim `name` (e.g. `"exp"`, `"iat"`, both RFC 7519 `NumericDate` — seconds
  * since the Unix epoch, RFC 7519 §2) in `claims_json`. This unit never reads the current time
- * itself (YAGNI/purity — see this file's header); a caller validating `exp`/`nbf` compares this
- * value against a time it supplies.
- *
- * @param claims_json  the claims JSON text (typically `jwt_verify`'s return value)
- * @param name         the claim name
- * @return             the claim's numeric value, or a `CryptoError`
- * @throws             `CryptoError` when `claims_json` is malformed, or `name` is missing/not a
- *                      number
+ * itself; a caller validating `exp`/`nbf` compares this value against a time it supplies.
  */
 exp fn jwt_claim_number(claims_json: str, name: str): f64 | crypto::CryptoError {
     var obj = match jwt_parse_claims(claims_json) {

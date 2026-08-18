@@ -1,19 +1,3 @@
-/**
- * Tests for `teko::crypto::cipher` (C4): AES (FIPS 197) single-block encrypt/decrypt and the
- * confidentiality modes CBC/CTR/CFB/OFB (NIST SP 800-38A), plus ChaCha20 (RFC 8439). Pure Teko
- * (no extern), so every case runs natively. This file lives under `teko::crypto` (namespace =
- * directory), so the functions under test are called bare, mirroring `mac_test.tkt`.
- *
- * Every expected value is a published known-answer vector (FIPS 197 Appendix B/C, NIST SP 800-38A
- * Appendix F, RFC 8439 §2.3.2/§2.4.2), cross-checked against a reference implementation.
- */
-
-/**
- * The numeric value of one lowercase hex digit (`'0'..'9'`, `'a'..'f'`).
- *
- * @param c  a hex-digit byte
- * @return   the digit's value 0..15 (0 for a non-hex byte, which the fixtures never pass)
- */
 fn hex_val(c: byte): u32 {
     var v = c to u32
     if v >= (b'0' to u32) && v <= (b'9' to u32) { return v - (b'0' to u32) }
@@ -21,13 +5,6 @@ fn hex_val(c: byte): u32 {
     0
 }
 
-/**
- * Decodes an even-length lowercase hex string into the bytes it denotes — how the fixtures spell
- * the FIPS/NIST/RFC keys, IVs, plaintexts, and expected outputs given in hex.
- *
- * @param s  an even-length lowercase hex string
- * @return   the decoded bytes, most-significant nibble first
- */
 fn hex_bytes(s: str): []byte {
     var chars = bytes_of_str(s)
     var out: []byte = teko::list::empty()
@@ -42,13 +19,6 @@ fn hex_bytes(s: str): []byte {
     out
 }
 
-/**
- * Renders a cipher result as lowercase hex, or the sentinel `"ERR"` when it is a `CryptoError` —
- * the compact form the assertions compare against the published vectors.
- *
- * @param r  a cipher output or a `CryptoError`
- * @return   the bytes as lowercase hex, or `"ERR"` on failure
- */
 fn hexed(r: []byte | CryptoError): str {
     match r {
         []byte as x => to_hex(x)
@@ -56,12 +26,6 @@ fn hexed(r: []byte | CryptoError): str {
     }
 }
 
-/**
- * A slice of `n` zero bytes — the all-zero plaintext used to read the raw ChaCha20 keystream.
- *
- * @param n  the number of bytes
- * @return   `n` zero bytes
- */
 fn zeros(n: u64): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -73,10 +37,6 @@ fn zeros(n: u64): []byte {
     out
 }
 
-/**
- * AES single-block encryption against the FIPS 197 known-answer vectors: Appendix B (AES-128) and
- * the Appendix C example that runs the same 16-byte plaintext under 128/192/256-bit keys.
- */
 #test
 fn aes_fips197_single_block() {
     teko::assert::is_true(hexed(aes_encrypt_block(hex_bytes("2b7e151628aed2a6abf7158809cf4f3c"), hex_bytes("3243f6a8885a308d313198a2e0370734"))) == "3925841d02dc09fbdc118597196a0b32")
@@ -85,10 +45,6 @@ fn aes_fips197_single_block() {
     teko::assert::is_true(hexed(aes_encrypt_block(hex_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), hex_bytes("00112233445566778899aabbccddeeff"))) == "8ea2b7ca516745bfeafc49904b496089")
 }
 
-/**
- * AES single-block decryption is the exact inverse: decrypting the FIPS 197 Appendix C ciphertexts
- * recovers the shared plaintext for all three key sizes.
- */
 #test
 fn aes_fips197_decrypt_inverts() {
     teko::assert::is_true(hexed(aes_decrypt_block(hex_bytes("000102030405060708090a0b0c0d0e0f"), hex_bytes("69c4e0d86a7b0430d8cdb78070b4c55a"))) == "00112233445566778899aabbccddeeff")
@@ -96,18 +52,11 @@ fn aes_fips197_decrypt_inverts() {
     teko::assert::is_true(hexed(aes_decrypt_block(hex_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), hex_bytes("8ea2b7ca516745bfeafc49904b496089"))) == "00112233445566778899aabbccddeeff")
 }
 
-/**
- * A bad key length is a `CryptoError`, never a panic (M.1): a 15-byte key is rejected at the seam.
- */
 #test
 fn aes_rejects_bad_key_length() {
     teko::assert::is_true(hexed(aes_encrypt_block(hex_bytes("000102030405060708090a0b0c0d0e"), hex_bytes("00112233445566778899aabbccddeeff"))) == "ERR")
 }
 
-/**
- * AES-128-CBC against NIST SP 800-38A §F.2.1/F.2.2: the four-block plaintext under key
- * `2b7e…4f3c` and IV `0001…0e0f`, encrypt then decrypt.
- */
 #test
 fn aes128_cbc_sp800_38a() {
     var key = hex_bytes("2b7e151628aed2a6abf7158809cf4f3c")
@@ -118,9 +67,6 @@ fn aes128_cbc_sp800_38a() {
     teko::assert::is_true(hexed(aes_cbc_decrypt(key, iv, hex_bytes(ct))) == to_hex(pt))
 }
 
-/**
- * AES-256-CBC against NIST SP 800-38A §F.2.5/F.2.6.
- */
 #test
 fn aes256_cbc_sp800_38a() {
     var key = hex_bytes("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4")
@@ -131,10 +77,6 @@ fn aes256_cbc_sp800_38a() {
     teko::assert::is_true(hexed(aes_cbc_decrypt(key, iv, hex_bytes(ct))) == to_hex(pt))
 }
 
-/**
- * AES-128/256-CTR against NIST SP 800-38A §F.5.1/F.5.5: the initial counter `f0f1…feff`. CTR is
- * its own inverse, so decrypt is the same call on the ciphertext.
- */
 #test
 fn aes_ctr_sp800_38a() {
     var iv = hex_bytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
@@ -148,9 +90,6 @@ fn aes_ctr_sp800_38a() {
     teko::assert::is_true(hexed(aes_ctr(k256, iv, pt)) == ct256)
 }
 
-/**
- * AES-128/256-CFB-128 against NIST SP 800-38A §F.3.13/F.3.17, encrypt and decrypt.
- */
 #test
 fn aes_cfb_sp800_38a() {
     var iv = hex_bytes("000102030405060708090a0b0c0d0e0f")
@@ -165,9 +104,6 @@ fn aes_cfb_sp800_38a() {
     teko::assert::is_true(hexed(aes_cfb_decrypt(k256, iv, hex_bytes(ct256))) == to_hex(pt))
 }
 
-/**
- * AES-128/256-OFB against NIST SP 800-38A §F.4.1/F.4.5. OFB is its own inverse.
- */
 #test
 fn aes_ofb_sp800_38a() {
     var iv = hex_bytes("000102030405060708090a0b0c0d0e0f")
@@ -181,10 +117,6 @@ fn aes_ofb_sp800_38a() {
     teko::assert::is_true(hexed(aes_ofb(k256, iv, pt)) == ct256)
 }
 
-/**
- * AES-192 exercises the `Nk = 6` key-schedule branch, against NIST SP 800-38A §F.2.3 (CBC) and
- * §F.5.3 (CTR).
- */
 #test
 fn aes192_modes() {
     var key = hex_bytes("8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b")
@@ -195,10 +127,6 @@ fn aes192_modes() {
     teko::assert::is_true(hexed(aes_ctr(key, ctr, pt)) == "1abc932417521ca24f2b0459fe7e6e0b090339ec0aa6faefd5ccc2c6f4ce8e941e36b26bd1ebc670d1bd1d665620abf74f78a7f6d29809585a97daec58c6b050")
 }
 
-/**
- * ChaCha20 raw keystream against RFC 8439 §2.3.2: XORing the 64-byte all-zero plaintext under the
- * test key, nonce `00:00:00:09:…4a:0*`, and counter 1 yields the documented keystream block.
- */
 #test
 fn chacha20_rfc8439_keystream() {
     var key = hex_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
@@ -207,10 +135,6 @@ fn chacha20_rfc8439_keystream() {
     teko::assert::is_true(ks == "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e")
 }
 
-/**
- * ChaCha20 encryption against RFC 8439 §2.4.2: the 114-byte sunscreen plaintext under the test key,
- * nonce `…4a:0*`, and initial counter 1. Decryption (a second XOR) recovers the plaintext.
- */
 #test
 fn chacha20_rfc8439_encrypt() {
     var key = hex_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
@@ -221,20 +145,12 @@ fn chacha20_rfc8439_encrypt() {
     teko::assert::is_true(hexed(chacha20(key, nonce, 1, hex_bytes(ct))) == to_hex(pt))
 }
 
-/**
- * ChaCha20 rejects a bad key/nonce length with a `CryptoError`, never a panic.
- */
 #test
 fn chacha20_rejects_bad_lengths() {
     teko::assert::is_true(hexed(chacha20(zeros(16), zeros(12), 1, zeros(8))) == "ERR")
     teko::assert::is_true(hexed(chacha20(zeros(32), zeros(8), 1, zeros(8))) == "ERR")
 }
 
-/**
- * CMAC-AES-128 against the NIST SP 800-38B worked examples (empty message, one full block, and a
- * 2.5-block message needing `10*` padding), now that the AES block cipher backs the `cmac_aes`
- * one-liner.
- */
 #test
 fn cmac_aes128_nist() {
     var key = hex_bytes("2b7e151628aed2a6abf7158809cf4f3c")
@@ -243,10 +159,6 @@ fn cmac_aes128_nist() {
     teko::assert::is_true(hexed(cmac_aes(key, hex_bytes("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411"))) == "dfa66747de9ae63030ca32611497c827")
 }
 
-/**
- * GMAC-AES-128 against the GCM authentication tag over AAD-only (no ciphertext), cross-checked
- * against the reference AES-GCM: empty AAD and a one-block AAD under a 96-bit IV.
- */
 #test
 fn gmac_aes128() {
     var key = hex_bytes("2b7e151628aed2a6abf7158809cf4f3c")

@@ -1,60 +1,7 @@
-/**
- * `teko::encoding::xml` — a pure-Teko XML 1.0 DOM parser + serializer with namespace
- * resolution (catalog entry S-XML, §1.5). Pure Teko, no C twin (the `teko::regex` /
- * `teko::encoding::json` precedent: library code with zero OS/FFI dependency ships as
- * `.tks` + `.tkt` only, and both engines get it automatically).
- *
- * NODE MODEL — a TAGGED STRUCT, not an inline-union `@Node()`. `teko::encoding::json`
- * models its value tree with a `macro JsonValue() { lowering { ... } }` inline union; XML
- * instead uses one `XmlNode` struct carrying a `NodeKind` discriminant plus the union of
- * every kind's fields. The tag-struct shape is the KISS choice here for two reasons: an
- * XML node's kinds share most of their payload (a name, character data, attributes,
- * children) rather than being disjoint like JSON's six value kinds, so a single struct
- * has little dead surface; and it keeps the self-referential `children: []XmlNode` on a
- * plain slice field (a struct that contains a slice of itself), the same "box the recursion
- * behind a slice" discipline `teko::encoding::json` uses for `JsonArray.items`.
- *
- * SCOPE (this unit). Well-formed XML 1.0:
- *   - the five node kinds an application tree needs: element, text (character data),
- *     comment, CDATA section, processing instruction; attributes hang off elements;
- *   - namespace resolution (`xmlns` / `xmlns:prefix` declarations) — every element and
- *     prefixed attribute gets its declared prefix, local name, and resolved namespace URI;
- *   - the five predefined entities (`&lt; &gt; &amp; &quot; &apos;`) and numeric character
- *     references (`&#DD;`, `&#xHH;`), decoded on the way in and re-escaped on the way out;
- *   - a prolog (`<?xml ...?>` declaration, leading comments / processing instructions,
- *     and a `<!DOCTYPE ...>` marker) is SKIPPED to reach the root element.
- *
- * NOT in scope (documented, reported as a named seam): DTD / XSD / RELAX-NG VALIDATION —
- * `<!DOCTYPE>` is skipped, never parsed for entity definitions or content models. Custom
- * (DTD-defined) entities therefore resolve only for the five predefined names above; an
- * unknown entity is a checked `error`, never a silent passthrough (M.1 fail-loud).
- *
- * CANONICALIZATION (C14N) — the `teko::crypto::xmldsig` prerequisite — lives in the sibling
- * file `xml_c14n.tks` (same namespace), built on this unit's DOM.
- *
- * ERROR MODEL (M.1 fail-loud / M.3 honest types). `parse(str): XmlNode | error` — malformed
- * input (an unclosed tag, an unquoted attribute, an invalid entity, a mismatched end tag,
- * an unbound namespace prefix) is a checked failure, never a panic, following the
- * `teko::encoding::json::decode` convention. `serialize` is total (a well-formed `XmlNode`
- * tree always has a valid XML rendering) so it returns `str`, not `str | error`.
- */
-
-/**
- * The predefined XML namespace URI bound to the reserved `xml` prefix (XML Namespaces §3):
- * `xml` is always in scope and always maps here, without an explicit declaration.
- *
- * @return  the `xml` prefix's fixed namespace URI
- */
 fn xml_namespace_uri(): str {
     "http://www.w3.org/XML/1998/namespace"
 }
 
-/**
- * The reserved namespace URI for `xmlns` declarations (XML Namespaces §3) — the namespace a
- * namespace-declaring attribute (`xmlns` or `xmlns:prefix`) itself belongs to.
- *
- * @return  the `xmlns` reserved namespace URI
- */
 fn xmlns_namespace_uri(): str {
     "http://www.w3.org/2000/xmlns/"
 }
@@ -101,8 +48,8 @@ exp type XmlAttr = struct {
 }
 
 /**
- * A node in the parsed XML tree. A single tagged struct spanning all five `NodeKind`s (see
- * the module doc's NODE MODEL note): `kind` selects which fields are meaningful.
+ * A node in the parsed XML tree. A single tagged struct spanning all five `NodeKind`s: `kind`
+ * selects which fields are meaningful.
  */
 exp type XmlNode = struct {
     /**
@@ -145,9 +92,6 @@ exp type XmlNode = struct {
 
 /**
  * Builds a text node carrying the given decoded character data.
- *
- * @param value  the decoded text content
- * @return       a `Text` node wrapping `value`
  */
 exp fn text_node(value: str): XmlNode {
     XmlNode { kind = NodeKind::Text; name = ""; prefix = ""; local = ""; namespace_uri = ""; text = value; attributes = teko::list::empty(); children = teko::list::empty() }
@@ -155,9 +99,6 @@ exp fn text_node(value: str): XmlNode {
 
 /**
  * Builds a comment node.
- *
- * @param body  the comment body (the text between `<!--` and `-->`)
- * @return      a `Comment` node wrapping `body`
  */
 exp fn comment_node(body: str): XmlNode {
     XmlNode { kind = NodeKind::Comment; name = ""; prefix = ""; local = ""; namespace_uri = ""; text = body; attributes = teko::list::empty(); children = teko::list::empty() }
@@ -165,9 +106,6 @@ exp fn comment_node(body: str): XmlNode {
 
 /**
  * Builds a CDATA-section node.
- *
- * @param contents  the verbatim section contents (the text between `<![CDATA[` and `]]>`)
- * @return          a `CData` node wrapping `contents`
  */
 exp fn cdata_node(contents: str): XmlNode {
     XmlNode { kind = NodeKind::CData; name = ""; prefix = ""; local = ""; namespace_uri = ""; text = contents; attributes = teko::list::empty(); children = teko::list::empty() }
@@ -175,10 +113,6 @@ exp fn cdata_node(contents: str): XmlNode {
 
 /**
  * Builds a processing-instruction node.
- *
- * @param target  the PI target (the name after `<?`)
- * @param data    the instruction data after the target, or `""`
- * @return        a `ProcessingInstruction` node
  */
 exp fn pi_node(target: str, data: str): XmlNode {
     XmlNode { kind = NodeKind::ProcessingInstruction; name = target; prefix = ""; local = ""; namespace_uri = ""; text = data; attributes = teko::list::empty(); children = teko::list::empty() }
@@ -186,9 +120,6 @@ exp fn pi_node(target: str, data: str): XmlNode {
 
 /**
  * Reports whether a node is an element.
- *
- * @param node  the node to test
- * @return      true when `node.kind` is `Element`
  */
 exp fn is_element(node: XmlNode): bool {
     node.kind == NodeKind::Element
@@ -196,22 +127,11 @@ exp fn is_element(node: XmlNode): bool {
 
 /**
  * Reports whether a node is character-data text.
- *
- * @param node  the node to test
- * @return      true when `node.kind` is `Text`
  */
 exp fn is_text(node: XmlNode): bool {
     node.kind == NodeKind::Text
 }
 
-/**
- * Compares two strings for byte-exact equality (Teko has no builtin `str` equality operator;
- * mirrors `teko::encoding::json`'s local `str_eq`).
- *
- * @param a  the first string
- * @param b  the second string
- * @return   true when both have the same length and identical bytes
- */
 fn str_eq(a: str, b: str): bool {
     if a.len != b.len { return false }
     var i: u64 = 0
@@ -223,56 +143,22 @@ fn str_eq(a: str, b: str): bool {
     true
 }
 
-/**
- * Reports whether the byte is XML whitespace (space, tab, carriage return, or line feed;
- * the S production of XML 1.0 §2.3).
- *
- * @param b  the byte to classify
- * @return   true for space / `\t` / `\r` / `\n`
- */
 fn is_xml_ws(b: byte): bool {
     b == b' ' || b == b'\t' || b == b'\r' || b == b'\n'
 }
 
-/**
- * Reports whether the byte may start an XML name. Deliberately permissive: ASCII letters,
- * `_`, and `:` plus every byte `>= 0x80` (any UTF-8 lead/continuation byte), so
- * non-ASCII element and attribute names pass through without a codepoint decode.
- *
- * @param b  the byte to classify
- * @return   true when `b` may begin a name
- */
 fn is_name_start(b: byte): bool {
     (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z') || b == b'_' || b == b':' || b >= 0x80 to byte
 }
 
-/**
- * Reports whether the byte may appear (after the first character) in an XML name: a
- * name-start byte, a digit, `-`, or `.`.
- *
- * @param b  the byte to classify
- * @return   true when `b` may continue a name
- */
 fn is_name_char(b: byte): bool {
     is_name_start(b) || (b >= b'0' && b <= b'9') || b == b'-' || b == b'.'
 }
 
-/**
- * Reports whether the byte is an ASCII decimal digit.
- *
- * @param b  the byte to classify
- * @return   true for `0`..`9`
- */
 fn is_digit_byte(b: byte): bool {
     b >= b'0' && b <= b'9'
 }
 
-/**
- * The value of a hexadecimal digit byte, or `-1` when it is not a hex digit.
- *
- * @param b  the byte to classify
- * @return   `0`..`15` for a hex digit, `-1` otherwise
- */
 fn hex_digit_value(b: byte): i64 {
     if b >= b'0' && b <= b'9' { return (b to i64) - (b'0' to i64) }
     if b >= b'a' && b <= b'f' { return (b to i64) - (b'a' to i64) + 10 }
@@ -280,14 +166,6 @@ fn hex_digit_value(b: byte): i64 {
     -1
 }
 
-/**
- * Encodes a single Unicode codepoint as a UTF-8 `str` (no builtin "codepoint -> str" exists;
- * mirrors `teko::encoding::json::codepoint_to_str`). The caller guarantees `cp` is a legal
- * scalar value in `0..0x10FFFF`.
- *
- * @param cp  the codepoint to encode
- * @return    the codepoint's UTF-8 encoding as a `str`
- */
 fn codepoint_to_str(cp: i64): str {
     if cp <= 0x7F {
         one_byte(cp to byte)
@@ -309,27 +187,11 @@ fn codepoint_to_str(cp: i64): str {
     }
 }
 
-/**
- * A qualified name split into its prefix and local part.
- */
 pub type QName = struct {
-    /**
-     * The part before the first `:`, or `""` when the name is unprefixed.
-     */
     prefix: str
-    /**
-     * The part after the first `:`, or the whole name when unprefixed.
-     */
     local: str
 }
 
-/**
- * Splits a qualified name at its first `:` into prefix + local (XML Namespaces §4). A name
- * with no colon has an empty prefix and is its own local part.
- *
- * @param name  the qualified name to split
- * @return      the prefix (possibly `""`) and the local part
- */
 fn split_qname(name: str): QName {
     var i: u64 = 0
     loop {
@@ -342,16 +204,6 @@ fn split_qname(name: str): QName {
     QName { prefix = ""; local = name }
 }
 
-/**
- * Copies the byte range `[from, to)` of a `str` into a fresh `str` (no builtin substring by
- * byte offset; the parser slices raw UTF-8 by byte index, always on codepoint boundaries
- * because it only ever cuts at ASCII delimiters).
- *
- * @param s     the source string
- * @param from  the inclusive start byte offset
- * @param to    the exclusive end byte offset
- * @return      the sliced substring
- */
 fn slice_str(s: str, from: u64, to: u64): str {
     var out: str = ""
     var i = from
@@ -363,29 +215,11 @@ fn slice_str(s: str, from: u64, to: u64): str {
     out
 }
 
-/**
- * A namespace scope: a flat stack of `prefix -> uri` bindings, innermost last. Threaded by
- * value through the recursive parse; extending it produces a fresh copy (the same immutable
- * threading `teko::encoding::json` uses for its cursor), so a child element's declarations
- * never leak back to its siblings or parent.
- */
 pub type NsScope = struct {
-    /**
-     * The declared prefixes (`""` for the default namespace), innermost binding last.
-     */
     prefixes: []str
-    /**
-     * The namespace URIs, parallel to `prefixes`.
-     */
     uris: []str
 }
 
-/**
- * Builds the root namespace scope, pre-seeded with the reserved `xml` prefix binding that is
- * always in scope (XML Namespaces §3).
- *
- * @return  a scope containing only the fixed `xml` binding
- */
 fn root_scope(): NsScope {
     var prefixes: []str = teko::list::empty()
     var uris: []str = teko::list::empty()
@@ -394,28 +228,10 @@ fn root_scope(): NsScope {
     NsScope { prefixes = prefixes; uris = uris }
 }
 
-/**
- * Extends a scope with one additional `prefix -> uri` binding, returning a fresh scope (the
- * original is unchanged, so sibling elements are unaffected).
- *
- * @param scope   the scope to extend
- * @param prefix  the prefix being bound (`""` for the default namespace)
- * @param uri     the namespace URI bound to `prefix`
- * @return        a new scope with the binding appended
- */
 fn scope_extend(scope: NsScope, prefix: str, uri: str): NsScope {
     NsScope { prefixes = teko::list::push(scope.prefixes, prefix); uris = teko::list::push(scope.uris, uri) }
 }
 
-/**
- * Resolves a prefix to its namespace URI in the given scope, searching innermost binding
- * first. Returns `""` when the prefix has no binding (an unbound non-empty prefix is a
- * namespace error, diagnosed by the caller).
- *
- * @param scope   the scope to search
- * @param prefix  the prefix to resolve (`""` for the default namespace)
- * @return        the bound URI, or `""` when unbound
- */
 fn scope_lookup(scope: NsScope, prefix: str): str {
     var i = scope.prefixes.len
     loop {
@@ -426,57 +242,21 @@ fn scope_lookup(scope: NsScope, prefix: str): str {
     ""
 }
 
-/**
- * The result of consuming a run of input: the position just past what was consumed plus the
- * node built. Threaded by return value (no mutable out-parameter), the `teko::encoding::json`
- * cursor idiom.
- */
 pub type XmlCursor = struct {
-    /**
-     * The byte offset immediately after the consumed span.
-     */
     pos: u64
-    /**
-     * The node produced from the consumed span.
-     */
     node: XmlNode
 }
 
-/**
- * The result of scanning a name: the end position and the name text.
- */
 pub type NameScan = struct {
-    /**
-     * The byte offset immediately after the name.
-     */
     pos: u64
-    /**
-     * The scanned name.
-     */
     text: str
 }
 
-/**
- * The result of scanning (and entity-decoding) a text or attribute-value run.
- */
 pub type TextScan = struct {
-    /**
-     * The byte offset immediately after the consumed span.
-     */
     pos: u64
-    /**
-     * The decoded text.
-     */
     text: str
 }
 
-/**
- * Advances past a run of XML whitespace.
- *
- * @param p    the input bytes
- * @param pos  the starting offset
- * @return     the offset of the first non-whitespace byte at or after `pos`
- */
 fn skip_ws(p: []byte, pos: u64): u64 {
     var at = pos
     loop {
@@ -486,14 +266,6 @@ fn skip_ws(p: []byte, pos: u64): u64 {
     at
 }
 
-/**
- * Reports whether the input at `pos` begins with the ASCII bytes of `token`.
- *
- * @param p      the input bytes
- * @param pos    the offset to test at
- * @param token  the ASCII token to match
- * @return       true when `token` occurs exactly at `pos`
- */
 fn matches_at(p: []byte, pos: u64, token: str): bool {
     if pos + token.len > p.len { return false }
     var i: u64 = 0
@@ -505,16 +277,6 @@ fn matches_at(p: []byte, pos: u64, token: str): bool {
     true
 }
 
-/**
- * Finds the offset of the first occurrence of `token` at or after `pos`, or `p.len` when it
- * does not occur (a small hand-rolled substring search — no builtin exists; the same
- * "write the 20-line scanner" shape `teko::encoding::mime` uses).
- *
- * @param p      the input bytes
- * @param pos    the offset to search from
- * @param token  the ASCII token to find
- * @return       the offset of the match, or `p.len` when absent
- */
 fn index_of(p: []byte, pos: u64, token: str): u64 {
     var at = pos
     loop {
@@ -525,13 +287,6 @@ fn index_of(p: []byte, pos: u64, token: str): u64 {
     p.len
 }
 
-/**
- * Scans an XML name starting at `pos`.
- *
- * @param p    the input bytes
- * @param pos  the offset of the name's first byte
- * @return     the name and its end offset, or `error` when no name-start byte is present
- */
 fn scan_name(p: []byte, pos: u64): NameScan | error {
     if pos >= p.len || !is_name_start(p[pos]) {
         return error { message = concat("xml: expected a name at offset ", i64_to_str(pos to i64)) }
@@ -544,14 +299,6 @@ fn scan_name(p: []byte, pos: u64): NameScan | error {
     NameScan { pos = at; text = slice_str_bytes(p, pos, at) }
 }
 
-/**
- * Copies the byte range `[from, to)` of a `[]byte` into a `str`.
- *
- * @param p     the source bytes
- * @param from  the inclusive start offset
- * @param to    the exclusive end offset
- * @return      the sliced bytes as a `str`
- */
 fn slice_str_bytes(p: []byte, from: u64, to: u64): str {
     var out: str = ""
     var i = from
@@ -563,15 +310,6 @@ fn slice_str_bytes(p: []byte, from: u64, to: u64): str {
     out
 }
 
-/**
- * Decodes one entity or character reference starting at the `&` at `pos`: the five
- * predefined entities (`&lt; &gt; &amp; &quot; &apos;`) or a numeric reference (`&#DD;`,
- * `&#xHH;`). An unknown name, a missing `;`, or a malformed number is a checked `error`.
- *
- * @param p    the input bytes
- * @param pos  the offset of the `&`
- * @return     the decoded text and the offset past the `;`, or `error` when malformed
- */
 fn decode_reference(p: []byte, pos: u64): TextScan | error {
     var semi = index_of(p, pos, ";")
     if semi >= p.len {
@@ -589,15 +327,6 @@ fn decode_reference(p: []byte, pos: u64): TextScan | error {
     error { message = concat("xml: unknown entity reference &", concat(name, ";")) }
 }
 
-/**
- * Decodes a numeric character reference (`&#DD;` decimal or `&#xHH;` hexadecimal) whose `&`
- * is at `pos` and whose `;` is at `semi`.
- *
- * @param p     the input bytes
- * @param pos   the offset of the `&`
- * @param semi  the offset of the terminating `;`
- * @return      the referenced codepoint's UTF-8 text, or `error` when malformed / out of range
- */
 fn decode_char_reference(p: []byte, pos: u64, semi: u64): TextScan | error {
     var hex = p[pos + 2] == b'x' || p[pos + 2] == b'X'
     var digits_start = if hex { pos + 3 } else { pos + 2 }
@@ -621,26 +350,11 @@ fn decode_char_reference(p: []byte, pos: u64, semi: u64): TextScan | error {
     TextScan { pos = semi + 1; text = codepoint_to_str(value) }
 }
 
-/**
- * The value of a decimal digit byte, or `-1` when it is not a decimal digit.
- *
- * @param b  the byte to classify
- * @return   `0`..`9` for a digit, `-1` otherwise
- */
 fn digit_or_neg(b: byte): i64 {
     if is_digit_byte(b) { return (b to i64) - (b'0' to i64) }
     -1
 }
 
-/**
- * Scans character data (a text run) starting at `pos`, decoding entity and character
- * references, stopping at the next `<`. The end of input without a `<` is a checked error
- * (character data always precedes markup in a well-formed element).
- *
- * @param p    the input bytes
- * @param pos  the offset of the text run's first byte
- * @return     the decoded text and its end offset, or `error` on a bad reference / EOF
- */
 fn scan_char_data(p: []byte, pos: u64): TextScan | error {
     var out: str = ""
     var at = pos
@@ -662,16 +376,6 @@ fn scan_char_data(p: []byte, pos: u64): TextScan | error {
     error { message = "xml: unreachable" }
 }
 
-/**
- * Scans an attribute value starting just after the opening `quote` byte, decoding entity and
- * character references, stopping at the matching closing quote. A raw `<` inside the value
- * (XML 1.0 §3.1) or end of input before the closing quote is a checked error.
- *
- * @param p      the input bytes
- * @param pos    the offset just past the opening quote
- * @param quote  the quote byte (`'` or `"`) that terminates the value
- * @return       the decoded value and the offset past the closing quote, or `error`
- */
 fn scan_attr_value(p: []byte, pos: u64, quote: byte): TextScan | error {
     var out: str = ""
     var at = pos
@@ -696,34 +400,12 @@ fn scan_attr_value(p: []byte, pos: u64, quote: byte): TextScan | error {
     error { message = "xml: unreachable" }
 }
 
-/**
- * The raw (pre-namespace-resolution) attributes of an element's start tag, plus whether the
- * tag self-closed and the offset just past `>` / `/>`.
- */
 pub type TagHead = struct {
-    /**
-     * The byte offset immediately after the start tag's closing `>` or `/>`.
-     */
     pos: u64
-    /**
-     * The attributes as written, with values decoded but namespaces not yet resolved.
-     */
     attrs: []XmlAttr
-    /**
-     * True when the tag was empty (`/>`), so it has no content and no end tag.
-     */
     self_closing: bool
 }
 
-/**
- * Parses the attribute list of a start tag beginning at `pos` (positioned just after the
- * element name), through the closing `>` or `/>`. Attribute values may be single- or
- * double-quoted; an unquoted value, a duplicate name, or a missing `=` is a checked error.
- *
- * @param p    the input bytes
- * @param pos  the offset just after the element name
- * @return     the decoded attributes, self-closing flag, and end offset, or `error`
- */
 fn parse_attributes(p: []byte, pos: u64): TagHead | error {
     var attrs: []XmlAttr = teko::list::empty()
     var at = pos
@@ -749,14 +431,6 @@ fn parse_attributes(p: []byte, pos: u64): TagHead | error {
     error { message = "xml: unreachable" }
 }
 
-/**
- * Reports whether an attribute with the given qualified name is already present (well-formed
- * XML forbids duplicate attribute names on one element).
- *
- * @param attrs  the attributes accumulated so far
- * @param name   the qualified name to test
- * @return       true when `name` already appears in `attrs`
- */
 fn attribute_name_taken(attrs: []XmlAttr, name: str): bool {
     var i: u64 = 0
     loop {
@@ -767,29 +441,11 @@ fn attribute_name_taken(attrs: []XmlAttr, name: str): bool {
     false
 }
 
-/**
- * The result of parsing one attribute: the attribute and the offset just past its value.
- */
 pub type AttrScan = struct {
-    /**
-     * The byte offset immediately after the attribute's closing quote.
-     */
     pos: u64
-    /**
-     * The parsed attribute (namespace not yet resolved).
-     */
     attr: XmlAttr
 }
 
-/**
- * Parses one `name = "value"` attribute starting at `pos`, splitting the qualified name but
- * leaving namespace resolution to the element pass. Enforces quoting: the value must be in
- * single or double quotes, else a checked error (M.1 fail-loud).
- *
- * @param p    the input bytes
- * @param pos  the offset of the attribute name's first byte
- * @return     the attribute and its end offset, or `error`
- */
 fn parse_one_attribute(p: []byte, pos: u64): AttrScan | error {
     var name = match scan_name(p, pos) { NameScan as n => n; error as e => return e }
     var at = skip_ws(p, name.pos)
@@ -806,14 +462,6 @@ fn parse_one_attribute(p: []byte, pos: u64): AttrScan | error {
     AttrScan { pos = value.pos; attr = attr }
 }
 
-/**
- * Builds the child namespace scope for an element by layering its `xmlns` / `xmlns:prefix`
- * declarations onto the parent scope.
- *
- * @param scope  the parent element's scope
- * @param attrs  the element's raw attributes
- * @return       the scope in effect for the element and its descendants
- */
 fn scope_with_declarations(scope: NsScope, attrs: []XmlAttr): NsScope {
     var result = scope
     var i: u64 = 0
@@ -830,16 +478,6 @@ fn scope_with_declarations(scope: NsScope, attrs: []XmlAttr): NsScope {
     result
 }
 
-/**
- * Resolves each attribute's namespace URI against the element's scope: a namespace
- * declaration gets the reserved `xmlns` URI, an unprefixed attribute gets `""` (never the
- * default namespace, per §6.2), and a prefixed attribute gets its bound URI — an unbound
- * prefix is a checked error.
- *
- * @param scope  the element's scope
- * @param attrs  the raw attributes
- * @return       the attributes with `namespace_uri` filled in, or `error` on an unbound prefix
- */
 fn resolve_attribute_namespaces(scope: NsScope, attrs: []XmlAttr): []XmlAttr | error {
     var out: []XmlAttr = teko::list::empty()
     var i: u64 = 0
@@ -853,13 +491,6 @@ fn resolve_attribute_namespaces(scope: NsScope, attrs: []XmlAttr): []XmlAttr | e
     out
 }
 
-/**
- * Resolves one attribute's namespace URI (see `resolve_attribute_namespaces`).
- *
- * @param scope  the element's scope
- * @param a      the attribute to resolve
- * @return       the resolved URI, or `error` when a non-`xmlns` prefix is unbound
- */
 fn resolve_one_attribute_uri(scope: NsScope, a: XmlAttr): str | error {
     if str_eq(a.name, "xmlns") || str_eq(a.prefix, "xmlns") { return xmlns_namespace_uri() }
     if a.prefix.len == 0 { return "" }
@@ -870,16 +501,6 @@ fn resolve_one_attribute_uri(scope: NsScope, a: XmlAttr): str | error {
     uri
 }
 
-/**
- * Parses one element starting at the `<` at `pos`, within the given namespace scope,
- * recursively parsing its content. Resolves the element's and attributes' namespaces and
- * verifies the end tag matches the start tag.
- *
- * @param p      the input bytes
- * @param pos    the offset of the element's opening `<`
- * @param scope  the namespace scope in effect at this element
- * @return       the element node and the offset past its end tag, or `error`
- */
 fn parse_element(p: []byte, pos: u64, scope: NsScope): XmlCursor | error {
     var name = match scan_name(p, pos + 1) { NameScan as n => n; error as e => return e }
     var head = match parse_attributes(p, name.pos) { TagHead as h => h; error as e => return e }
@@ -894,15 +515,6 @@ fn parse_element(p: []byte, pos: u64, scope: NsScope): XmlCursor | error {
     parse_element_content(p, head.pos, child_scope, node, name.text)
 }
 
-/**
- * Resolves an element's namespace URI: an unprefixed name takes the in-scope default
- * namespace (or `""` when none), a prefixed name takes its bound URI — an unbound prefix is
- * a checked error.
- *
- * @param scope  the element's scope
- * @param qn     the element's split qualified name
- * @return       the resolved URI, or `error` when a prefix is unbound
- */
 fn resolve_element_uri(scope: NsScope, qn: QName): str | error {
     if qn.prefix.len == 0 { return scope_lookup(scope, "") }
     var uri = scope_lookup(scope, qn.prefix)
@@ -912,17 +524,6 @@ fn resolve_element_uri(scope: NsScope, qn: QName): str | error {
     uri
 }
 
-/**
- * Parses an element's content (starting just after its start tag's `>`) until the matching
- * end tag, appending each child node. A mismatched or missing end tag is a checked error.
- *
- * @param p          the input bytes
- * @param pos        the offset just after the start tag
- * @param scope      the element's scope (in effect for children)
- * @param open_node  the element node built from the start tag
- * @param open_name  the start tag's qualified name (must equal the end tag's)
- * @return           the completed element node and the offset past its end tag, or `error`
- */
 fn parse_element_content(p: []byte, pos: u64, scope: NsScope, open_node: XmlNode, open_name: str): XmlCursor | error {
     var children: []XmlNode = teko::list::empty()
     var at = pos
@@ -946,17 +547,6 @@ fn parse_element_content(p: []byte, pos: u64, scope: NsScope, open_node: XmlNode
     error { message = "xml: unreachable" }
 }
 
-/**
- * Consumes an end tag at `pos`, verifies it names `open_name`, and returns the element with
- * its accumulated children.
- *
- * @param p          the input bytes
- * @param pos        the offset of the end tag's `<`
- * @param open_node  the element node from the start tag
- * @param open_name  the expected end-tag name
- * @param children   the element's parsed children
- * @return           the completed element and the offset past `>`, or `error` on mismatch
- */
 fn finish_element(p: []byte, pos: u64, open_node: XmlNode, open_name: str, children: []XmlNode): XmlCursor | error {
     var name = match scan_name(p, pos + 2) { NameScan as n => n; error as e => return e }
     if !str_eq(name.text, open_name) {
@@ -970,16 +560,6 @@ fn finish_element(p: []byte, pos: u64, open_node: XmlNode, open_name: str, child
     XmlCursor { pos = at + 1; node = complete }
 }
 
-/**
- * Parses one markup construct starting at the `<` at `pos`: a comment, a CDATA section, a
- * processing instruction, or a child element. A `<!` that is neither a comment nor CDATA
- * (e.g. an inline DTD declaration) is a checked error.
- *
- * @param p      the input bytes
- * @param pos    the offset of the `<`
- * @param scope  the namespace scope for a child element
- * @return       the node and the offset past it, or `error`
- */
 fn parse_markup(p: []byte, pos: u64, scope: NsScope): XmlCursor | error {
     if matches_at(p, pos, "<!--") { return parse_comment(p, pos) }
     if matches_at(p, pos, "<![CDATA[") { return parse_cdata(p, pos) }
@@ -990,14 +570,6 @@ fn parse_markup(p: []byte, pos: u64, scope: NsScope): XmlCursor | error {
     parse_element(p, pos, scope)
 }
 
-/**
- * Parses a comment `<!-- ... -->` starting at `pos`. An unterminated comment is a checked
- * error.
- *
- * @param p    the input bytes
- * @param pos  the offset of the opening `<!--`
- * @return     the comment node and the offset past `-->`, or `error`
- */
 fn parse_comment(p: []byte, pos: u64): XmlCursor | error {
     var start = pos + 4
     var end = index_of(p, start, "-->")
@@ -1007,14 +579,6 @@ fn parse_comment(p: []byte, pos: u64): XmlCursor | error {
     XmlCursor { pos = end + 3; node = comment_node(slice_str_bytes(p, start, end)) }
 }
 
-/**
- * Parses a CDATA section `<![CDATA[ ... ]]>` starting at `pos`. An unterminated section is a
- * checked error.
- *
- * @param p    the input bytes
- * @param pos  the offset of the opening `<![CDATA[`
- * @return     the CDATA node and the offset past `]]>`, or `error`
- */
 fn parse_cdata(p: []byte, pos: u64): XmlCursor | error {
     var start = pos + 9
     var end = index_of(p, start, "]]>")
@@ -1024,14 +588,6 @@ fn parse_cdata(p: []byte, pos: u64): XmlCursor | error {
     XmlCursor { pos = end + 3; node = cdata_node(slice_str_bytes(p, start, end)) }
 }
 
-/**
- * Parses a processing instruction `<?target data?>` starting at `pos`, splitting the target
- * from the (optional) data. An unterminated PI is a checked error.
- *
- * @param p    the input bytes
- * @param pos  the offset of the opening `<?`
- * @return     the PI node and the offset past `?>`, or `error`
- */
 fn parse_pi(p: []byte, pos: u64): XmlCursor | error {
     var target = match scan_name(p, pos + 2) { NameScan as n => n; error as e => return e }
     var end = index_of(p, target.pos, "?>")
@@ -1042,16 +598,6 @@ fn parse_pi(p: []byte, pos: u64): XmlCursor | error {
     XmlCursor { pos = end + 2; node = pi_node(target.text, data) }
 }
 
-/**
- * Skips XML prolog content preceding the root element: whitespace, comments, processing
- * instructions (including the `<?xml ...?>` declaration), and a single `<!DOCTYPE ...>`
- * marker (skipped, not parsed — DTD processing is out of scope). Stops at the root element's
- * `<`.
- *
- * @param p    the input bytes
- * @param pos  the starting offset (0 for a whole document)
- * @return     the offset of the root element's `<`, or `error` on an unterminated construct
- */
 fn skip_prolog(p: []byte, pos: u64): u64 | error {
     var at = skip_ws(p, pos)
     loop {
@@ -1078,14 +624,6 @@ fn skip_prolog(p: []byte, pos: u64): u64 | error {
     at
 }
 
-/**
- * Skips a `<!DOCTYPE ...>` marker at `pos`, tolerating a bracketed internal subset `[ ... ]`
- * (its contents are not interpreted). An unterminated DOCTYPE is a checked error.
- *
- * @param p    the input bytes
- * @param pos  the offset of `<!DOCTYPE`
- * @return     the offset just past the DOCTYPE's closing `>`, or `error`
- */
 fn skip_doctype(p: []byte, pos: u64): u64 | error {
     var at = pos + 9
     loop {
@@ -1102,14 +640,6 @@ fn skip_doctype(p: []byte, pos: u64): u64 | error {
     error { message = "xml: unreachable" }
 }
 
-/**
- * Skips trailing prolog-style content (whitespace, comments, processing instructions) after
- * the root element, so a document may legally end with them.
- *
- * @param p    the input bytes
- * @param pos  the offset just after the root element
- * @return     the offset of the first byte that is neither whitespace nor a comment/PI
- */
 fn skip_trailing(p: []byte, pos: u64): u64 {
     var at = skip_ws(p, pos)
     loop {
@@ -1135,12 +665,6 @@ fn skip_trailing(p: []byte, pos: u64): u64 {
  * Parses a complete, well-formed XML 1.0 document and returns its root element node. The
  * prolog (declaration, comments, PIs, DOCTYPE) is skipped; exactly one root element must be
  * present, and only whitespace / comments / PIs may follow it.
- *
- * @param text  the XML document text
- * @return      the root element node, or `error` on any well-formedness violation
- * @throws      when the input has no root element, has trailing content, or contains any
- *              malformed construct (unclosed tag, unquoted attribute, bad entity, mismatched
- *              end tag, unbound namespace prefix)
  */
 exp fn parse(text: str): XmlNode | error {
     var p = bytes_of_str(text)
@@ -1159,13 +683,6 @@ exp fn parse(text: str): XmlNode | error {
     root.node
 }
 
-/**
- * Escapes character data for serialization: `&` -> `&amp;`, `<` -> `&lt;`, `>` -> `&gt;`
- * (XML 1.0 §2.4). Other bytes pass through verbatim (the source is valid UTF-8).
- *
- * @param s  the decoded text
- * @return   the text with markup-significant characters escaped
- */
 fn escape_text(s: str): str {
     var out: str = ""
     var i: u64 = 0
@@ -1178,13 +695,6 @@ fn escape_text(s: str): str {
     out
 }
 
-/**
- * Escapes an attribute value for serialization inside double quotes: `&` -> `&amp;`,
- * `<` -> `&lt;`, `"` -> `&quot;`. Other bytes pass through verbatim.
- *
- * @param s  the decoded attribute value
- * @return   the value with the double-quote-context significant characters escaped
- */
 fn escape_attr(s: str): str {
     var out: str = ""
     var i: u64 = 0
@@ -1201,9 +711,6 @@ fn escape_attr(s: str): str {
  * Serializes an `XmlNode` tree back into XML 1.0 text with correct text and attribute
  * escaping. Total: a well-formed node always has a valid rendering (M.3). An element with no
  * children is written in the empty-element form `<name .../>`.
- *
- * @param node  the node to serialize
- * @return      the node's XML text
  */
 exp fn serialize(node: XmlNode): str {
     match node.kind {
@@ -1215,13 +722,6 @@ exp fn serialize(node: XmlNode): str {
     }
 }
 
-/**
- * Serializes an element: its start tag with attributes, then either the empty-element `/>`
- * form (no children) or its children followed by an end tag.
- *
- * @param node  the element node
- * @return      the element's XML text
- */
 fn serialize_element(node: XmlNode): str {
     var out = concat("<", concat(node.name, serialize_attributes(node.attributes)))
     if node.children.len == 0 {
@@ -1237,12 +737,6 @@ fn serialize_element(node: XmlNode): str {
     out ~ concat("</", concat(node.name, ">"))
 }
 
-/**
- * Serializes an element's attribute list, each as ` name="value"` with the value escaped.
- *
- * @param attrs  the attributes to serialize
- * @return       the concatenated ` name="value"` fragments (leading space per attribute)
- */
 fn serialize_attributes(attrs: []XmlAttr): str {
     var out: str = ""
     var i: u64 = 0
@@ -1254,13 +748,6 @@ fn serialize_attributes(attrs: []XmlAttr): str {
     out
 }
 
-/**
- * Serializes a processing instruction as `<?target data?>`, omitting the space when the data
- * is empty.
- *
- * @param node  the PI node
- * @return      the PI's XML text
- */
 fn serialize_pi(node: XmlNode): str {
     if node.text.len == 0 {
         return concat("<?", concat(node.name, "?>"))
@@ -1270,10 +757,6 @@ fn serialize_pi(node: XmlNode): str {
 
 /**
  * Returns the value of an element's attribute by qualified name, or `null` when absent.
- *
- * @param node  the element to query
- * @param name  the attribute's qualified name
- * @return      the decoded value, or `null` when the element has no such attribute
  */
 exp fn get_attribute(node: XmlNode, name: str): str | null {
     var i: u64 = 0
@@ -1288,9 +771,6 @@ exp fn get_attribute(node: XmlNode, name: str): str | null {
 /**
  * Returns an element's child nodes that are themselves elements (skipping text, comments,
  * CDATA, and PIs), in document order.
- *
- * @param node  the element whose children to filter
- * @return      the element children, in order
  */
 exp fn element_children(node: XmlNode): []XmlNode {
     var out: []XmlNode = teko::list::empty()
@@ -1305,10 +785,6 @@ exp fn element_children(node: XmlNode): []XmlNode {
 
 /**
  * Returns the first child element with the given qualified name, or `null` when none exists.
- *
- * @param node  the element to search under
- * @param name  the qualified name to match
- * @return      the first matching child element, or `null`
  */
 exp fn first_child(node: XmlNode, name: str): XmlNode | null {
     var i: u64 = 0
@@ -1323,9 +799,6 @@ exp fn first_child(node: XmlNode, name: str): XmlNode | null {
 /**
  * Concatenates the decoded character data of an element's direct text and CDATA children
  * (not descendants), the common "the text of this element" accessor.
- *
- * @param node  the element whose text to gather
- * @return      the concatenated direct text/CDATA content
  */
 exp fn text_content(node: XmlNode): str {
     var out: str = ""
