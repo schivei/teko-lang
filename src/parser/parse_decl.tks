@@ -527,16 +527,16 @@ fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedList<Functi
         } else {
             var k = value_member_prefix_end(tokens, p)
             if is_kind_at(tokens, k, lexer::TokenKind::Static) {
-                return err_at(tokens, k, "a value-type body may not declare a `static` method — the value IS the primitive; write a separate free function for a factory (§9 ruling 10)")
+                return err_at(tokens, k, "a value-type body may not declare a `static` method — write a separate free function instead")
             }
             if is_kind_at(tokens, k, lexer::TokenKind::Const) {
-                return err_at(tokens, k, "a value-type body may not declare a `const` member (§9 ruling 10)")
+                return err_at(tokens, k, "a value-type body may not declare a `const` member")
             }
             if is_name_at(tokens, k) && is_kind_at(tokens, k + 1, lexer::TokenKind::Colon) {
-                return err_at(tokens, k, "a value-type body may not declare fields — the value IS the primitive, so it carries no fields (§9 ruling 10)")
+                return err_at(tokens, k, "a value-type body may not declare fields")
             }
             if !is_kind_at(tokens, k, lexer::TokenKind::Fn) {
-                return err_at(tokens, k, "a value-type body may contain only readonly methods (`fn …`) and `operator …` declarations (§9 ruling 10)")
+                return err_at(tokens, k, "a value-type body may contain only readonly methods (`fn …`) and `operator …` declarations")
             }
             var m = match parse_function(tokens, p, false, "", true, false, false, 0 to u64) { Parsed<@Decl()> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a value-type method must parse to a Function") }
@@ -858,7 +858,7 @@ fn parse_trait_members(tokens: []lexer::Token, pos: u64): ParsedStructBody | err
             var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<@Decl()> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a trait method must parse to a Function") }
             if mf.body.len == 0 {
-                return err_at(tokens, p, "a trait method must have a body — a trait is a concrete mixin, not a contract of signatures; a bodyless member belongs on an interface (§9.4)")
+                return err_at(tokens, p, "a trait method must have a body — a bodyless member belongs on an interface")
             }
             methods = teko::list::push(methods, mf)
             p = m.next
@@ -1193,7 +1193,7 @@ fn parse_macro_params(tokens: []lexer::Token, pos: u64): ParsedList<Param> | err
         var is_pack = is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "params" && is_name_at(tokens, p + 1)
         if is_pack { p = p + 1 }
         if !is_name_at(tokens, p) {
-            return err_at(tokens, p, "expected a macro parameter name (§14.1)")
+            return err_at(tokens, p, "expected a macro parameter name")
         }
         var name = tokens[p].text
         p = p + 1
@@ -1239,7 +1239,7 @@ fn parse_macro_decl(tokens: []lexer::Token, pos: u64, vis: Visibility): Parsed<@
     var params = match parse_macro_params(tokens, p) { ParsedList<Param> as x => x; error as e => return e }
     p = params.next
     if is_return_type_intro_at(tokens, p) {
-        return err_at(tokens, p, "a `macro` has no return type — a macro emits code, it does not yield a value; use `comptime` for a value (§14.1)")
+        return err_at(tokens, p, "a `macro` has no return type — use `comptime` for a value")
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the macro body")
@@ -1263,7 +1263,7 @@ fn parse_comptime_decl(tokens: []lexer::Token, pos: u64, vis: Visibility, is_glo
     var params = match parse_params(tokens, p) { ParsedList<Param> as x => x; error as e => return e }
     p = params.next
     if !is_return_type_intro_at(tokens, p) {
-        return err_at(tokens, p, "a `comptime` must declare a return type — the inlined literal's type (§14.1)")
+        return err_at(tokens, p, "a `comptime` must declare a return type")
     }
     var ret = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
     p = ret.next
@@ -1359,7 +1359,7 @@ fn parse_decl(tokens: []lexer::Token, pos: u64): ParsedDecl | error {
     var is_global = global_peek.node
     k = global_peek.next
     if is_global && is_variable_binding_head(tokens, k) {
-        return err_at(tokens, k, "`global` is not allowed on a variable — only on a namespace-level fn, type, or const (§15)")
+        return err_at(tokens, k, "`global` is not allowed on a variable — only on a namespace-level fn, type, or const")
     }
     var saw_extern = false
     if is_kind_at(tokens, k, lexer::TokenKind::Extern) {
@@ -1386,13 +1386,13 @@ fn parse_decl(tokens: []lexer::Token, pos: u64): ParsedDecl | error {
         return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Macro) {
-        if saw_extern { return err_at(tokens, k, "there is no `extern macro` — a macro is native-only (§14)") }
-        if is_global { return err_at(tokens, k, "`global` is not allowed on a macro (§15) — global reach applies to a fn, type, const, or comptime; a macro is resolved by name at expansion time") }
+        if saw_extern { return err_at(tokens, k, "there is no `extern macro` — a macro is native-only") }
+        if is_global { return err_at(tokens, k, "`global` is not allowed on a macro — only on a fn, type, const, or comptime") }
         var d = match parse_macro_decl(tokens, k, vis) { Parsed<@Decl()> as x => x; error as e => return e }
         return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Comptime) {
-        if saw_extern { return err_at(tokens, k, "there is no `extern comptime` — a comptime is native-only (§14)") }
+        if saw_extern { return err_at(tokens, k, "there is no `extern comptime` — a comptime is native-only") }
         var d = match parse_comptime_decl(tokens, k, vis, is_global) { Parsed<@Decl()> as x => x; error as e => return e }
         return ParsedDecl { node = with_outer_doc(d.node, outer_doc.has_doc, outer_doc.doc); guard = attrs.guard; next = d.next }
     }

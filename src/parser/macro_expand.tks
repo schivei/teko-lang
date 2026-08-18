@@ -176,7 +176,7 @@ fn macro_decl_by_name(prog: Program, name: str): MacroDecl | null {
 
 fn expand_macro_call(mc: MacroCall, prog: Program, depth: u64): Expr | error {
     if depth >= max_macro_depth() {
-        return err_expand(mc, "macro expansion exceeded the maximum depth (a macro that expands to itself?) — §14")
+        return err_expand(mc, "macro expansion exceeded the maximum depth")
     }
     var name = macro_call_name(mc)
     var md = match macro_decl_by_name(prog, name) { MacroDecl as m => m; null => return Expr { kind = mc; line = 0; col = 0 } }
@@ -188,11 +188,11 @@ fn expand_macro_call(mc: MacroCall, prog: Program, depth: u64): Expr | error {
 
 fn single_lowering_frag(md: MacroDecl): LoweringFrag | error {
     if md.body.len != 1 {
-        return error { message = teko::str::concat("macro `", teko::str::concat(md.name, "`: §14 A3 supports a body of exactly one `lowering { … }` fragment (comptime logic / multiple fragments arrive in a later crumb)")) }
+        return error { message = teko::str::concat("macro `", teko::str::concat(md.name, "`: body must be exactly one `lowering { … }` fragment")) }
     }
     match md.body[0] {
         LoweringFrag as lf => lf
-        _ => error { message = teko::str::concat("macro `", teko::str::concat(md.name, "`: its body must be a single `lowering { … }` fragment (§14 A3)")) }
+        _ => error { message = teko::str::concat("macro `", teko::str::concat(md.name, "`: its body must be a single `lowering { … }` fragment")) }
     }
 }
 
@@ -213,14 +213,14 @@ fn macro_cond_bool(cond: Expr, binds: MacroParamBinds): bool | error {
         BoolLit as b => b.value
         Var as v => match macro_bind_of(binds, v.name) {
             bool as x => x
-            null => error { message = teko::str::concat("a type-macro `if` condition must be a bool parameter or its negation — `", teko::str::concat(v.name, "` is not a bound bool parameter (§14 Form 2)")) }
+            null => error { message = teko::str::concat("a type-macro `if` condition must be a bool parameter or its negation — `", teko::str::concat(v.name, "` is not a bound bool parameter")) }
         }
         Unary as u => if u.op == lexer::TokenKind::Bang {
             match macro_cond_bool(u.operand, binds) { bool as x => !x; error as e => return e }
         } else {
-            error { message = "a type-macro `if` condition supports only the `!` unary operator (§14 Form 2)" }
+            error { message = "a type-macro `if` condition supports only the `!` unary operator" }
         }
-        _ => error { message = "a type-macro `if` condition must be a bool literal, a bool parameter, or `!` of one (§14 Form 2)" }
+        _ => error { message = "a type-macro `if` condition must be a bool literal, a bool parameter, or `!` of one" }
     }
 }
 
@@ -230,9 +230,9 @@ fn macro_arg_bool(e: Expr, pname: str): bool | error {
         Unary as u => if u.op == lexer::TokenKind::Bang {
             match macro_arg_bool(u.operand, pname) { bool as x => !x; error as er => return er }
         } else {
-            error { message = teko::str::concat("type-macro argument `", teko::str::concat(pname, "` must be a bool literal `true`/`false` (§14 Form 2)")) }
+            error { message = teko::str::concat("type-macro argument `", teko::str::concat(pname, "` must be a bool literal `true`/`false`")) }
         }
-        _ => error { message = teko::str::concat("type-macro argument `", teko::str::concat(pname, "` must be a bool literal `true`/`false` (§14 Form 2)")) }
+        _ => error { message = teko::str::concat("type-macro argument `", teko::str::concat(pname, "` must be a bool literal `true`/`false`")) }
     }
 }
 
@@ -248,7 +248,7 @@ fn macro_bind_params(md: MacroDecl, mt: MacroType): MacroParamBinds | error {
         } else if md.params[i].has_default {
             argexpr = md.params[i].default_expr
         } else {
-            return error { message = teko::str::concat("type-macro `", teko::str::concat(md.name, teko::str::concat("`: parameter `", teko::str::concat(md.params[i].name, "` needs an argument or a default (§14 Form 2)")))) }
+            return error { message = teko::str::concat("type-macro `", teko::str::concat(md.name, teko::str::concat("`: parameter `", teko::str::concat(md.params[i].name, "` needs an argument or a default")))) }
         }
         var b = match macro_arg_bool(argexpr, md.params[i].name) { bool as x => x; error as e => return e }
         names = teko::list::push(names, md.params[i].name)
@@ -264,21 +264,21 @@ fn select_lowering_frag(md: MacroDecl, binds: MacroParamBinds): LoweringFrag | e
 
 fn select_lowering_from(stmts: []@Statement(), mname: str, binds: MacroParamBinds): LoweringFrag | error {
     if stmts.len != 1 {
-        return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: its body must be a single `lowering { … }` or a single comptime `if/else` selecting one (§14 Form 2)")) }
+        return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: its body must be a single `lowering { … }` or a single comptime `if/else` selecting one")) }
     }
     match stmts[0] {
         LoweringFrag as lf => lf
         ExprStmt as es => match es.expr.kind {
             IfExpr as iff => {
                 if !iff.has_else {
-                    return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a comptime `if` selecting a lowering must have an `else` — both branches must lower (§14 Form 2)")) }
+                    return error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a comptime `if` selecting a lowering must have an `else` — both branches must lower")) }
                 }
                 var c = match macro_cond_bool(iff.cond, binds) { bool as x => x; error as e => return e }
                 if c { select_lowering_from(iff.then_blk, mname, binds) } else { select_lowering_from(iff.else_blk, mname, binds) }
             }
-            _ => error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a type-macro body must be a `lowering { … }` or a comptime `if/else` (§14 Form 2)")) }
+            _ => error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a type-macro body must be a `lowering { … }` or a comptime `if/else`")) }
         }
-        _ => error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a type-macro body must be a `lowering { … }` or a comptime `if/else` (§14 Form 2)")) }
+        _ => error { message = teko::str::concat("macro `", teko::str::concat(mname, "`: a type-macro body must be a `lowering { … }` or a comptime `if/else`")) }
     }
 }
 
@@ -289,12 +289,12 @@ fn splice_hole_tokens(toks: []lexer::Token, md: MacroDecl, mc: MacroCall): []lex
         if i >= toks.len { break }
         if toks[i].kind == lexer::TokenKind::Dollar {
             if i + 3 >= toks.len || toks[i + 1].kind != lexer::TokenKind::LBrace || toks[i + 2].kind != lexer::TokenKind::Ident || toks[i + 3].kind != lexer::TokenKind::RBrace {
-                return err_expand(mc, "a `${…}` injection hole must be `${param}` — a single macro-parameter name in braces (§14.2)")
+                return err_expand(mc, "a `${…}` injection hole must be `${param}` — a single macro-parameter name in braces")
             }
             var hole_name = toks[i + 2].text
             var idx = param_index(md, hole_name)
             if idx < 0 {
-                return err_expand(mc, teko::str::concat("`${", teko::str::concat(hole_name, "}` names no parameter of this macro (§14.2)")))
+                return err_expand(mc, teko::str::concat("`${", teko::str::concat(hole_name, "}` names no parameter of this macro")))
             }
             out = teko::list::push(out, lexer::Token { kind = lexer::TokenKind::Ident; text = teko::str::concat(hole_placeholder_prefix(), teko::u64_to_str(idx to u64)); line = toks[i].line; col = toks[i].col; byte_off = toks[i].byte_off; file = toks[i].file })
             i = i + 4
@@ -459,7 +459,7 @@ fn macro_pattern_options(mp: MacroPattern, prog: Program, depth: u64): []@Patter
             var opt = match union_member_option(te) { (@Pattern()) as p => p; error as e => return e }
             teko::list::push(teko::list::empty(), opt)
         }
-        _ => error { message = "a `@Type()` macro in a pattern position must expand to a union of named cases (§9.D CR3)" }
+        _ => error { message = "a `@Type()` macro in a pattern position must expand to a union of named cases" }
     }
 }
 
@@ -477,7 +477,7 @@ fn union_member_option(te: @TypeExpr()): @Pattern() | error {
             }
             GroupBindPattern { options = opts; binding = "" }
         }
-        _ => error { message = "a `@Type()` macro in a pattern position must expand to a union of named cases (§9.D CR3)" }
+        _ => error { message = "a `@Type()` macro in a pattern position must expand to a union of named cases" }
     }
 }
 
@@ -506,7 +506,7 @@ fn walk_expr(e: Expr, prog: Program, holes: MacroHoles, depth: u64): Expr | erro
             if holes.active {
                 var hi = hole_index_of(v.name)
                 if hi >= 0 to i64 {
-                    if (hi to u64) >= holes.args.len { return error { message = "internal: macro hole index out of range (§14 A3)" } }
+                    if (hi to u64) >= holes.args.len { return error { message = "internal: macro hole index out of range" } }
                     return walk_expr(holes.args[hi to u64], prog, holes, depth)
                 }
             }
@@ -691,14 +691,14 @@ fn frag_has_hole(toks: []lexer::Token): bool {
 
 fn expand_macro_type(mt: MacroType, prog: Program, depth: u64): @TypeExpr() | error {
     if depth >= max_macro_depth() {
-        return error { message = "macro expansion exceeded the maximum depth in a type position (a macro that expands to itself?) — §14 A4" }
+        return error { message = "macro expansion exceeded the maximum depth in a type position" }
     }
     var name = macro_type_name(mt)
     var md = match macro_decl_by_name(prog, name) { MacroDecl as m => m; null => return mt }
     var binds = match macro_bind_params(md, mt) { MacroParamBinds as b => b; error as e => return e }
     var frag = match select_lowering_frag(md, binds) { LoweringFrag as lf => lf; error as e => return e }
     if frag_has_hole(frag.tokens) {
-        return error { message = teko::str::concat("macro `", teko::str::concat(name, "`: a `${}` hole in a TYPE-position `lowering` fragment is not yet supported (§14 A4 handles the parameterless `@Type()` abbreviation)")) }
+        return error { message = teko::str::concat("macro `", teko::str::concat(name, "`: a `${}` hole in a TYPE-position `lowering` fragment is not yet supported")) }
     }
     var parsed = match parse_type(frag.tokens, 0 to u64) { ParsedType as pt => pt.node; error as e => return error { message = teko::str::concat("the `lowering` fragment does not parse as a type: ", e.message) } }
     walk_type(parsed, prog, depth + 1 to u64)
