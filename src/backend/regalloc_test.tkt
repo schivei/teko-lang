@@ -1,20 +1,7 @@
-/**
- * rat_gpr — a physical GPR register operand with the given ISA id (a
- * descriptor-test shorthand).
- *
- * @param u32 id  the physical register id
- * @return MReg  the physical GPR register
- */
 fn rat_gpr(id: u32): MReg {
     preg(id, MRegClass::GPR)
 }
 
-/**
- * rat_fpr — a physical FPR register operand with the given ISA id.
- *
- * @param u32 id  the physical register id
- * @return MReg  the physical FPR register
- */
 fn rat_fpr(id: u32): MReg {
     preg(id, MRegClass::FPR)
 }
@@ -32,92 +19,35 @@ fn rat_caller_and_callee_saved_partition() {
     teko::assert::is_true(is_callee_saved(abi, rat_fpr(8)))
 }
 
-/**
- * rgt_v — a virtual GPR register operand (an A3-2 interval-test shorthand).
- *
- * @param u32 id  the virtual register id
- * @return MReg  the virtual GPR register
- */
 fn rgt_v(id: u32): MReg {
     vreg(id, MRegClass::GPR)
 }
 
-/**
- * rgt_vf — a virtual FPR register operand.
- *
- * @param u32 id  the virtual register id
- * @return MReg  the virtual FPR register
- */
 fn rgt_vf(id: u32): MReg {
     vreg(id, MRegClass::FPR)
 }
 
-/**
- * rgt_p — a physical GPR register operand (a pin).
- *
- * @param u32 id  the physical register id
- * @return MReg  the physical GPR register
- */
 fn rgt_p(id: u32): MReg {
     preg(id, MRegClass::GPR)
 }
 
-/**
- * rgt_func — a single-block `MFunc` named "main" with the given instruction
- * stream (an interval-test fixture shorthand).
- *
- * @param []@MInst() insts  the block's instructions
- * @return MFunc  the built function
- */
 fn rgt_func(insts: []@MInst()): MFunc {
     var b = MBlock { id = 0; params = teko::list::empty(); insts = insts }
     MFunc { symbol = "main"; blocks = teko::list::push(teko::list::empty(), b); frame = teko::list::empty() }
 }
 
-/**
- * ai_iv — a virtual GPR live interval (an A3-3 scan-test shorthand).
- *
- * @param u32 reg_id  the virtual register id
- * @param u32 start  the start point
- * @param u32 end  the end point
- * @param bool crosses  whether it crosses a call
- * @return LiveInterval  the interval
- */
 fn ai_iv(reg_id: u32, start: u32, end: u32, crosses: bool): LiveInterval {
     LiveInterval { reg_id = reg_id; reg_class = MRegClass::GPR; start = start; end = end; is_fixed = false; crosses_call = crosses }
 }
 
-/**
- * ai_fixed — a fixed GPR pin interval on physreg `reg_id`.
- *
- * @param u32 reg_id  the physical register id
- * @param u32 start  the start point
- * @param u32 end  the end point
- * @return LiveInterval  the fixed pin interval
- */
 fn ai_fixed(reg_id: u32, start: u32, end: u32): LiveInterval {
     LiveInterval { reg_id = reg_id; reg_class = MRegClass::GPR; start = start; end = end; is_fixed = true; crosses_call = false }
 }
 
-/**
- * ai_set — an `IntervalSet` from virtual + fixed intervals (no call points).
- *
- * @param []LiveInterval virt  the virtual intervals
- * @param []LiveInterval fixed  the fixed pin intervals
- * @return IntervalSet  the interval set
- */
 fn ai_set(virt: []LiveInterval, fixed: []LiveInterval): IntervalSet {
     IntervalSet { virt = virt; fixed = fixed; call_points = teko::list::empty() }
 }
 
-/**
- * ai_phys — the physreg `vreg_id` was assigned, or the sentinel 100000 if it
- * was spilled or absent.
- *
- * @param ScanResult scan  the scan result
- * @param u32 vreg_id  the virtual register
- * @return u32  its physreg, or 100000
- */
 fn ai_phys(scan: ScanResult, vreg_id: u32): u32 {
     var i: u64 = 0
     loop {
@@ -132,13 +62,6 @@ fn ai_phys(scan: ScanResult, vreg_id: u32): u32 {
     100000 to u32
 }
 
-/**
- * ai_spilled — whether `vreg_id` was spilled.
- *
- * @param ScanResult scan  the scan result
- * @param u32 vreg_id  the virtual register
- * @return bool  true iff spilled
- */
 fn ai_spilled(scan: ScanResult, vreg_id: u32): bool {
     var i: u64 = 0
     loop {
@@ -153,12 +76,6 @@ fn ai_spilled(scan: ScanResult, vreg_id: u32): bool {
     false
 }
 
-/**
- * ai_tiny_abi — a two-register GPR descriptor (x0, x1) for the spill test; no
- * caller-saved so `crosses_call` filtering does not interfere.
- *
- * @return AbiDescriptor  the tiny register file
- */
 fn ai_tiny_abi(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = push_range(teko::list::empty(), 0, 1)
@@ -196,15 +113,6 @@ fn ai_pressure_spills_furthest_next_use() {
     teko::assert::is_true(ai_phys(scan, 2) != 100000 to u32)
 }
 
-/**
- * ai_call_unsafe_abi — a two-register GPR descriptor (x0, x1) with x0 marked CALLER-saved and
- * x1 left callee-saved (absent from `gpr_caller_saved`): the minimal shape that can expose a
- * spill-displacement pick handing a call-crossing interval the WRONG (caller-saved) register —
- * §3.3's own invariant `furthest_active` must honor, not just `candidate_pool`'s first-choice
- * free-register search.
- *
- * @return AbiDescriptor  the two-register descriptor, x0 caller-saved, x1 callee-saved
- */
 fn ai_call_unsafe_abi(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = push_range(teko::list::empty(), 0, 1)
@@ -223,14 +131,6 @@ fn ai_call_unsafe_abi(): AbiDescriptor {
     }
 }
 
-/**
- * ai_call_unsafe_only_abi — a ONE-register GPR descriptor (x0 only), and that one register is
- * CALLER-saved: the shape where a call-crossing interval under register pressure has NO
- * call-safe displacement victim at all, so the correct outcome is spilling the call-crossing
- * interval ITSELF rather than handing it the sole (unsafe) register.
- *
- * @return AbiDescriptor  the one-register descriptor, its only register caller-saved
- */
 fn ai_call_unsafe_only_abi(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = teko::list::push(teko::list::empty(), 0 to u32)
@@ -249,13 +149,6 @@ fn ai_call_unsafe_only_abi(): AbiDescriptor {
     }
 }
 
-/**
- * ai_call_crossing_displacement_avoids_caller_saved_victim — regression for the native-region-
- * crash root cause (`furthest_active` ignoring call-safety): under `ai_call_unsafe_abi` register
- * pressure, a call-crossing interval (id 2) must displace the CALLEE-saved active entry (id 1,
- * x1) rather than the furthest-end but CALLER-saved one (id 0, x0), and must land on x1 itself —
- * never on x0, which an intervening call would clobber before id 2's own last use.
- */
 #test
 fn ai_call_crossing_displacement_avoids_caller_saved_victim() {
     var virt = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(),
@@ -265,12 +158,6 @@ fn ai_call_crossing_displacement_avoids_caller_saved_victim() {
     teko::assert::is_true(ai_phys(scan, 2) == (1 to u32))
 }
 
-/**
- * ai_call_crossing_spills_itself_when_every_active_is_caller_saved — regression for the same
- * root cause, the total-exhaustion case: under `ai_call_unsafe_only_abi` (its ONE register
- * caller-saved), a call-crossing interval under pressure has no call-safe displacement victim
- * at all, so it must be spilled itself rather than colored into the sole, unsafe register.
- */
 #test
 fn ai_call_crossing_spills_itself_when_every_active_is_caller_saved() {
     var virt = teko::list::push(teko::list::push(teko::list::empty(),
@@ -279,34 +166,15 @@ fn ai_call_crossing_spills_itself_when_every_active_is_caller_saved() {
     teko::assert::is_true(ai_spilled(scan, 1))
 }
 
-/**
- * rgt_module_of — a single-function module (empty rodata/globals/layouts).
- *
- * @param MFunc f  the function
- * @return MModule  the wrapping module
- */
 fn rgt_module_of(f: MFunc): MModule {
     MModule { funcs = teko::list::push(teko::list::empty(), f); rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() }
 }
 
-/**
- * rgt_named_func — a single-block function with the given symbol.
- *
- * @param str sym  the function symbol
- * @param []@MInst() insts  the block's instruction stream
- * @return MFunc  the function
- */
 fn rgt_named_func(sym: str, insts: []@MInst()): MFunc {
     var b = MBlock { id = 0; params = teko::list::empty(); insts = insts }
     MFunc { symbol = sym; blocks = teko::list::push(teko::list::empty(), b); frame = teko::list::empty() }
 }
 
-/**
- * rgt_inst_all_phys — whether every operand of one instruction is physical.
- *
- * @param @MInst() inst  the instruction
- * @return bool  true iff fully physical
- */
 fn rgt_inst_all_phys(inst: @MInst()): bool {
     var ir = inst_regs(inst)
     if ir.has_def {
@@ -321,13 +189,6 @@ fn rgt_inst_all_phys(inst: @MInst()): bool {
     true
 }
 
-/**
- * rgt_full_subst — a table mapping virtual ids `0..n-1` to a physical GPR (for
- * the map-all-cases coverage test; every operand becomes physical).
- *
- * @param u32 n  the id count
- * @return []SubstEntry  the substitution table
- */
 fn rgt_full_subst(n: u32): []SubstEntry {
     var t: []SubstEntry = teko::list::empty()
     var k: u32 = 0
@@ -339,12 +200,6 @@ fn rgt_full_subst(n: u32): []SubstEntry {
     t
 }
 
-/**
- * rgt_all_kinds — one instruction of every `MInst` case (unique virtual ids
- * `0..50`), for the `map_minst_regs` coverage test.
- *
- * @return []@MInst()  the 30-instruction stream
- */
 fn rgt_all_kinds(): []@MInst() {
     var xs: []@MInst() = teko::list::empty()
     xs = teko::list::push(xs, alu_inst(MAluOp::Add, true, rgt_v(0), rgt_v(1), rgt_v(2)))
@@ -394,12 +249,6 @@ fn rgt_map_minst_covers_every_case() {
     }
 }
 
-/**
- * rgt_add_fixture — `movz v0=3; movz v1=5; add v2=v0+v1; mov x0=v2; ret`
- * (returns 8), the base oracle-equivalence fixture.
- *
- * @return []@MInst()  the fixture stream
- */
 fn rgt_add_fixture(): []@MInst() {
     var insts: []@MInst() = teko::list::empty()
     insts = teko::list::push(insts, movz_inst(true, rgt_v(0), 3, 0))
@@ -410,13 +259,6 @@ fn rgt_add_fixture(): []@MInst() {
     insts
 }
 
-/**
- * rgt_spill_abi — a tiny GPR register file (allocatable x9,x10; spill scratch
- * x11-x13) that forces a spill under three-value pressure, for the GPR spill
- * oracle-equivalence test.
- *
- * @return AbiDescriptor  the tiny descriptor
- */
 fn rgt_spill_abi(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = push_range(teko::list::empty(), 0, 0)
@@ -435,13 +277,6 @@ fn rgt_spill_abi(): AbiDescriptor {
     }
 }
 
-/**
- * rgt_spill_fixture — `movz v0=3; v1=5; v2=7; add v3=v0+v1; add v4=v3+v2;
- * mov x0=v4; ret` (returns 15); three overlapping values force a spill under
- * `rgt_spill_abi`.
- *
- * @return []@MInst()  the fixture stream
- */
 fn rgt_spill_fixture(): []@MInst() {
     var insts: []@MInst() = teko::list::empty()
     insts = teko::list::push(insts, movz_inst(true, rgt_v(0), 3, 0))
@@ -454,12 +289,6 @@ fn rgt_spill_fixture(): []@MInst() {
     insts
 }
 
-/**
- * rgt_regalloc_gpr_spill_allocates — the GPR-spill fixture allocates to all-physical
- * and actually grows the frame (a spill slot reserved). The pre/post
- * semantic-equivalence check this test used to make is no longer made here — A4's
- * C-vs-own byte differential is the equivalence oracle.
- */
 #test
 fn rgt_regalloc_gpr_spill_allocates() {
     var f = rgt_named_func("main", rgt_spill_fixture())
@@ -471,15 +300,6 @@ fn rgt_regalloc_gpr_spill_allocates() {
     teko::assert::is_true(cf.frame.len > (0 to u64))
 }
 
-/**
- * rgt_fpr_spill_abi — a register file with a single ALLOCATABLE FPR (v0) so any
- * function with FPR pressure spills an FPR value; ample GPRs so only the FPRs spill.
- * Two FPRs (v1, v2) are reserved as spill scratch, which is what an FPR spill needs
- * now that it LOWERS (0.3.1.0 degrau 29) instead of raising an honest-stop: one reload
- * scratch per simultaneously spilled FPR use, and `MFAlu`'s two uses are the maximum.
- *
- * @return AbiDescriptor  the descriptor
- */
 fn rgt_fpr_spill_abi(): AbiDescriptor {
     AbiDescriptor {
         gpr_arg = push_range(teko::list::empty(), 0, 0)
@@ -498,12 +318,6 @@ fn rgt_fpr_spill_abi(): AbiDescriptor {
     }
 }
 
-/**
- * rgt_fpr_spill_fixture — three FPR values live at once (materialized via
- * `MFMov` from GPRs), forcing an FPR spill under `rgt_fpr_spill_abi`.
- *
- * @return []@MInst()  the fixture stream
- */
 fn rgt_fpr_spill_fixture(): []@MInst() {
     var insts: []@MInst() = teko::list::empty()
     insts = teko::list::push(insts, movz_inst(true, rgt_v(0), 1, 0))
@@ -542,15 +356,6 @@ fn rgt_regalloc_module_carries_tables_and_propagates() {
     teko::assert::is_true(rgt_has_fspill(spilled.funcs[0]))
 }
 
-/**
- * rgt_has_fspill — whether `f` contains at least one `MFSpill`, the ONE instruction an
- * FPR spill lowers to. Asserting its PRESENCE is what separates "the allocation
- * succeeded" from "the allocation actually spilled a float": a fixture that stopped
- * spilling would otherwise pass the all-physical and frame-grew checks unchanged.
- *
- * @param MFunc f  the colored function to scan
- * @return bool  true iff any block holds an `MFSpill`
- */
 fn rgt_has_fspill(f: MFunc): bool {
     var bi: u64 = 0
     loop {
@@ -568,13 +373,6 @@ fn rgt_has_fspill(f: MFunc): bool {
     false
 }
 
-/**
- * rgt_movk_fixture — `movz v0=3; movk v0=5<<16; mov x0=v0; ret` → 0x50003
- * (327683); drives the RMW MMovK (def==use) through regalloc + oracle so the
- * def-dedup path is proven end-to-end, not just structurally.
- *
- * @return []@MInst()  the fixture stream
- */
 fn rgt_movk_fixture(): []@MInst() {
     var insts: []@MInst() = teko::list::empty()
     insts = teko::list::push(insts, movz_inst(true, rgt_v(0), 3 to u32, 0 to u32))
@@ -584,12 +382,6 @@ fn rgt_movk_fixture(): []@MInst() {
     insts
 }
 
-/**
- * rgt_regalloc_movk_rmw_allocates — the RMW `MMovK` (def==use) fixture allocates to
- * all-physical through regalloc. The pre/post semantic-equivalence
- * check this test used to make is no longer made here — A4's C-vs-own byte differential is the
- * equivalence oracle.
- */
 #test
 fn rgt_regalloc_movk_rmw_allocates() {
     var f = rgt_named_func("main", rgt_movk_fixture())
@@ -633,16 +425,6 @@ fn rgt_rpo_defensive_paths() {
     teko::assert::is_true(u32_in(ord2, 9 to u32))
 }
 
-/**
- * sbs_reference — the RETIRED insertion sort, kept verbatim as the oracle the
- * O(V log V) `sort_by_start` must agree with element for element. Its presence
- * is the regression: if a future rewrite of `sort_by_start` ever permutes
- * differently, `sbs_agrees_with_reference` fails instead of the machine code
- * changing silently.
- *
- * @param []LiveInterval virt  the virtual intervals
- * @return []LiveInterval  the start-sorted intervals, insertion order
- */
 fn sbs_reference(virt: []LiveInterval): []LiveInterval {
     var out: []LiveInterval = teko::list::empty()
     var i: u64 = 0
@@ -669,15 +451,6 @@ fn sbs_reference(virt: []LiveInterval): []LiveInterval {
     out
 }
 
-/**
- * sbs_iv_eq — whether two live intervals agree in every field, so that a
- * sequence comparison catches a permutation difference AND a payload
- * difference.
- *
- * @param LiveInterval a  the first interval
- * @param LiveInterval b  the second interval
- * @return bool  true iff every field matches
- */
 fn sbs_iv_eq(a: LiveInterval, b: LiveInterval): bool {
     if a.reg_id != b.reg_id { return false }
     if a.reg_class != b.reg_class { return false }
@@ -687,13 +460,6 @@ fn sbs_iv_eq(a: LiveInterval, b: LiveInterval): bool {
     a.crosses_call == b.crosses_call
 }
 
-/**
- * sbs_seq_eq — whether two interval sequences are equal element for element.
- *
- * @param []LiveInterval a  the first sequence
- * @param []LiveInterval b  the second sequence
- * @return bool  true iff same length and every position agrees
- */
 fn sbs_seq_eq(a: []LiveInterval, b: []LiveInterval): bool {
     if a.len != b.len { return false }
     var i: u64 = 0
@@ -705,29 +471,10 @@ fn sbs_seq_eq(a: []LiveInterval, b: []LiveInterval): bool {
     true
 }
 
-/**
- * sbs_next_rand — one step of a deterministic 31-bit linear congruential
- * generator, so the shuffled corpora below are reproducible on every host
- * without a random source.
- *
- * @param u64 state  the current generator state
- * @return u64  the next state, in `[0, 2^31)`
- */
 fn sbs_next_rand(state: u64): u64 {
     (state * 1103515245 + 12345) % 2147483648
 }
 
-/**
- * sbs_pseudo_corpus — `n` intervals whose `start` points are drawn from
- * `sbs_next_rand` modulo `spread` and whose `reg_id`s are the input positions,
- * so a small `spread` forces many equal starts and exercises the `reg_id`
- * tie-break at every merge level.
- *
- * @param u64 n  how many intervals to build
- * @param u64 seed  the generator seed
- * @param u32 spread  the modulus applied to each start point
- * @return []LiveInterval  the generated intervals, in generation order
- */
 fn sbs_pseudo_corpus(n: u64, seed: u64, spread: u32): []LiveInterval {
     var out: []LiveInterval = teko::list::empty()
     var state: u64 = seed
@@ -742,13 +489,6 @@ fn sbs_pseudo_corpus(n: u64, seed: u64, spread: u32): []LiveInterval {
     out
 }
 
-/**
- * sbs_is_sorted — whether no element of `xs` sorts strictly before its
- * predecessor, i.e. the sequence respects `interval_before`.
- *
- * @param []LiveInterval xs  the sequence to check
- * @return bool  true iff sorted
- */
 fn sbs_is_sorted(xs: []LiveInterval): bool {
     var i: u64 = 1
     loop {
@@ -820,13 +560,6 @@ fn sbs_stable_on_a_key_the_comparator_cannot_separate() {
     teko::assert::is_true(got[3].end == (20 to u32))
 }
 
-/**
- * sbs_assigned_vreg — the virtual register an assignment speaks about,
- * whichever arm of `RegAssignment` it is.
- *
- * @param @RegAssignment() a  the assignment
- * @return u32  its `vreg_id`
- */
 fn sbs_assigned_vreg(a: @RegAssignment()): u32 {
     match a {
         InReg as r => r.vreg_id
