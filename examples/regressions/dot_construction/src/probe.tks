@@ -1,141 +1,57 @@
-/**
- * Counter — a namespaced value-struct whose factories construct the enclosing type via `.{ … }`
- * (§4.1). Namespaced ON PURPOSE: the retired `self { … }` construct produced the owner's BARE name,
- * which never widened into the CANONICAL `-> self` return of a namespaced type; `.{ … }` is born at
- * the canonical target, so this exercises the exact case the gap bit.
- */
 pub type Counter = struct {
-    /** _n — the backing count, private, writable only at construction. */
     _n: i64
 
-    /**
-     * zero — a static factory whose TRAILING `.{ … }` builds the `self` return target.
-     *
-     * @return a Counter holding 0
-     */
     pub static fn zero(): self { .{ _n = 0 } }
 
-    /**
-     * one — a static factory whose `return .{ … }` builds the `self` return target.
-     *
-     * @return a Counter holding 1
-     */
     pub static fn one(): self { return .{ _n = 1 } }
 
-    /**
-     * n — read the count.
-     *
-     * @return the backing field
-     */
     pub fn n(): i64 { self._n }
 }
 
-/**
- * Outer — nests a Counter so a field value can be a `.{ … }` construction targeting the field type.
- */
 pub type Outer = struct {
-    /** inner — the nested counter, its own value built via `.{ … }`. */
     inner: Counter
 }
 
-/**
- * Cell<T> — a generic value box whose `static fn of(): self` builds the generic self-return through
- * `.{ … }`, phantom-stamped per concrete width exactly as the retired `self { … }` was.
- */
 pub type Cell<T> = struct {
-    /** _v — the boxed value. */
     _v: T
 
-    /**
-     * of — a generic static factory constructing the enclosing `Cell<T>` via `.{ … }`.
-     *
-     * @param v  the value to box
-     * @return   a fresh Cell holding v
-     */
     pub static fn of(v: T): self { .{ _v = v } }
 
-    /**
-     * v — read the boxed value.
-     *
-     * @return the boxed value
-     */
     pub fn v(): T { self._v }
 }
 
-/**
- * take — consume a Counter, so a call site can pass a `.{ … }` argument targeting the parameter type.
- *
- * @param c  the counter argument
- * @return   its count
- */
 pub fn take(c: Counter): i64 { c.n() }
 
-/**
- * dot_static_self_probe — a trailing `.{ … }` in a `static fn … : self` builds the return target.
- *
- * @return true iff the factory produced a Counter reading 0
- */
 pub fn dot_static_self_probe(): bool {
     var c = Counter::zero()
     c.n() == 0
 }
 
-/**
- * dot_return_stmt_probe — `return .{ … }` in a `static fn … : self` builds the return target.
- *
- * @return true iff the factory produced a Counter reading 1
- */
 pub fn dot_return_stmt_probe(): bool {
     var c = Counter::one()
     c.n() == 1
 }
 
-/**
- * dot_binding_annotated_probe — an annotated binding `var x: Counter = .{ … }` builds the annotation.
- *
- * @return true iff the binding read back 7
- */
 pub fn dot_binding_annotated_probe(): bool {
     var b: Counter = .{ _n = 7 }
     b.n() == 7
 }
 
-/**
- * dot_arg_probe — a `.{ … }` ARGUMENT builds the parameter type.
- *
- * @return true iff the argument constructed a Counter reading 5
- */
 pub fn dot_arg_probe(): bool {
     take(.{ _n = 5 }) == 5
 }
 
-/**
- * dot_field_nested_probe — a nested field value `.{ … }` builds the field type.
- *
- * @return true iff the nested counter reads 3
- */
 pub fn dot_field_nested_probe(): bool {
     var o = Outer { inner = .{ _n = 3 } }
     o.inner.n() == 3
 }
 
-/**
- * dot_generic_self_probe — a generic self-return `.{ … }` phantom-stamps per width.
- *
- * @return true iff both widths round-trip their boxed value
- */
 pub fn dot_generic_self_probe(): bool {
     var gi = Cell<i64>::of(9)
     var gs = Cell<str>::of("hi")
     gi.v() == 9 && gs.v().len == 2
 }
 
-/**
- * nominal_still_ok_probe — the NOMINAL `Name { … }` form (with and without type-args) coexists with
- * `.{ … }` and still constructs (§4.1: the two forms are complementary).
- *
- * @return true iff the nominal constructions read back their fields
- */
 pub fn nominal_still_ok_probe(): bool {
     var c = Counter { _n = 4 }
     var g = Cell<i64> { _v = 2 }

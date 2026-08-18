@@ -1,205 +1,57 @@
-/**
- * sh — the §9.2b shape-constraint-solver ACCEPT probes. Each `pub fn *_probe()` instantiates one
- * generic whose bound exercises a constraint TERM KIND (or the disjunction-of-conjunctions that
- * combines them) with a type-argument that SATISFIES it, and returns a value `main.tks` asserts.
- *
- * A constraint is a disjunction of conjunctions — `<T: Alt1 | Alt2 | …>`, each `Alt` a
- * `Term & Term & …` — over four term kinds: form words (`class`/`service [lifetime]`/`struct`),
- * interfaces (conformance), concrete types (identity), and the `&`-only `notnull` modifier.
- */
-
-/**
- * Ifce — the contract the `class & Ifce` alternative requires its class alternative to conform to.
- */
 pub type Ifce = interface {
-    /** @return i64  the class alternative's announced value. */
     fn f(): i64
 }
 
-/**
- * OutraIfce — the contract the `struct & OutraIfce` alternative requires its struct to conform to.
- */
 pub type OutraIfce = interface {
-    /** @return i64  the struct alternative's announced value. */
     fn g(): i64
 }
 
-/**
- * K — a CLASS conforming to `Ifce`: the type-argument satisfying the `class & Ifce` alternative.
- */
 pub type K = class & Ifce {
-    /**
-     * make — the factory (a class literal is legal only inside the class's own methods).
-     *
-     * @return K  a fresh instance
-     */
     pub static fn make(): K { return K { } }
-    /**
-     * f — the `Ifce` contract method.
-     *
-     * @return i64  the announced value 1
-     */
     pub fn f(): i64 { return 1 }
 }
 
-/**
- * V — a STRUCT conforming to `OutraIfce`: the type-argument satisfying the `struct & OutraIfce`
- * alternative.
- *
- * @field x  the announced value the probe reads back
- */
 pub type V = struct OutraIfce {
     x: i64
-    /**
-     * g — the `OutraIfce` contract method.
-     *
-     * @return i64  this value's `x`
-     */
     pub fn g(): i64 { return self.x }
 }
 
-/**
- * Chan — a `service singleton`: the transport shape `<K: service singleton>` demands (§9.2b/§10.2).
- */
 pub type Chan = service singleton {
-    /**
-     * ctor — the IService factory.
-     *
-     * @return Chan  a fresh instance
-     */
     pub static fn ctor(): self { return Chan { } }
 }
 
-/**
- * Fast — a `service transient`. Accepted by a BARE `service` form (which names no lifetime); the
- * reject channel pins that it is refused where `service singleton` is demanded.
- */
 pub type Fast = service transient {
-    /**
-     * ctor — the IService factory.
-     *
-     * @return Fast  a fresh instance
-     */
     pub static fn ctor(): self { return Fast { } }
 }
 
-/**
- * notnull_ok — `<T: notnull>` (the modifier used alone) with a non-nullable type-argument.
- *
- * @param t  the value whose type must admit no null
- * @return i64  the announced value 1
- */
 fn notnull_ok<T: notnull>(t: T): i64 { return 1 }
 
-/**
- * class_notnull_ok — `<T: class & notnull>`: the modifier CONJOINED with a form word.
- *
- * @param t  the value whose type must be a non-nullable class
- * @return i64  the announced value 2
- */
 fn class_notnull_ok<T: class & notnull>(t: T): i64 { return 2 }
 
-/**
- * struct_form_ok — `<T: struct>`: a bare form word forcing the value-type shape.
- *
- * @param t  the value whose type must be a struct
- * @return i64  the announced value 3
- */
 fn struct_form_ok<T: struct>(t: T): i64 { return 3 }
 
-/**
- * svc_singleton_ok — `<T: service singleton>`: the form word WITH a lifetime, the §10.2 transport bound.
- *
- * @param t  the value whose type must be a singleton service
- * @return i64  the announced value 4
- */
 fn svc_singleton_ok<T: service singleton>(t: T): i64 { return 4 }
 
-/**
- * svc_bare_ok — `<T: service>`: the form word with NO lifetime, so any lifetime satisfies it.
- *
- * @param t  the value whose type must be some service
- * @return i64  the announced value 5
- */
 fn svc_bare_ok<T: service>(t: T): i64 { return 5 }
 
-/**
- * concrete_ok — `<T: str>`: a CONCRETE type term, which forces identity rather than conformance.
- *
- * @param t  the value whose type must be exactly `str`
- * @return i64  the announced value 6
- */
 fn concrete_ok<T: str>(t: T): i64 { return 6 }
 
-/**
- * poly — the sealed spec's own example (§9.2b l.427): a disjunction of conjunctions mixing form
- * words, interfaces and a concrete type. Satisfied by a class conforming to `Ifce`, by a struct
- * conforming to `OutraIfce`, or by `str` itself.
- *
- * @param t  the value whose type must match one alternative
- * @return i64  the announced value 7
- */
 fn poly<T: class & Ifce | struct & OutraIfce | str>(t: T): i64 { return 7 }
 
-/**
- * notnull_probe — `notnull` alone admits a plain non-nullable `i64`.
- *
- * @return i64  1
- */
 pub fn notnull_probe(): i64 { return notnull_ok<i64>(0) }
 
-/**
- * class_notnull_probe — `class & notnull` admits a non-nullable class.
- *
- * @return i64  2
- */
 pub fn class_notnull_probe(): i64 { return class_notnull_ok<K>(K::make()) }
 
-/**
- * struct_form_probe — the `struct` form word admits a struct.
- *
- * @return i64  3
- */
 pub fn struct_form_probe(): i64 { return struct_form_ok<V>(V { x = 1 }) }
 
-/**
- * svc_singleton_probe — `service singleton` admits a service DECLARED singleton.
- *
- * @return i64  4
- */
 pub fn svc_singleton_probe(): i64 { return svc_singleton_ok<Chan>(Chan::ctor()) }
 
-/**
- * svc_bare_probe — a lifetime-less `service` admits a TRANSIENT service (no lifetime demanded).
- *
- * @return i64  5
- */
 pub fn svc_bare_probe(): i64 { return svc_bare_ok<Fast>(Fast::ctor()) }
 
-/**
- * concrete_probe — the concrete term `str` admits exactly `str`.
- *
- * @return i64  6
- */
 pub fn concrete_probe(): i64 { return concrete_ok<str>("x") }
 
-/**
- * disj_class_probe — the FIRST alternative (`class & Ifce`) of the spec's disjunction.
- *
- * @return i64  7
- */
 pub fn disj_class_probe(): i64 { return poly<K>(K::make()) }
 
-/**
- * disj_struct_probe — the SECOND alternative (`struct & OutraIfce`) of the same disjunction.
- *
- * @return i64  7
- */
 pub fn disj_struct_probe(): i64 { return poly<V>(V { x = 1 }) }
 
-/**
- * disj_concrete_probe — the THIRD alternative (`str`) of the same disjunction.
- *
- * @return i64  7
- */
 pub fn disj_concrete_probe(): i64 { return poly<str>("x") }

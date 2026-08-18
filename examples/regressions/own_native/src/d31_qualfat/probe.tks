@@ -4,45 +4,6 @@ use own_native::d31_decoy_fat
 use own_native::d31_decoy_thin
 use teko::list
 
-/**
- * QUALIFIED-ALIAS FAT POINTERS — 0.3.1.0 degrau 31, and every claim below is an ASSERTION about what
- * the program must DO, never a number it exits with (owner ruling, 2026-07-30).
- *
- * The defect these fixtures pin: `teko::lir::typeexpr_is_fat_named` resolved a fat-pointer annotation
- * through its alias chain, but reached the chain only for a SINGLE-SEGMENT name — it asked
- * `single_segment_name(nt.path)` and answered `false` for every qualified path, a give-up its
- * sibling's doc-comment even spelled out ("multi-segment path ... is never fat"). A parameter or
- * field annotated with a QUALIFIED alias of `str`/`[]T` — `vt_table: checker::TypeTable`, the
- * self-host's own shape — was therefore classified SCALAR by the syntactic predicate while every
- * caller, store and read asked the SEMANTIC `is_fat_type` and treated it as the two-word
- * `{ptr, len}` image.
- *
- * The two halves of that split failed DIFFERENTLY, and only one was loud, which is why these
- * fixtures cover both placements and not just the one the self-host stopped on:
- *
- *   · a fat PARAMETER honest-stopped — `native backend N1: \`vt_table\` is not a fat-pointer local
- *     (internal) [in \`teko::codegen::cg_pair_is_iface_vtable\`]`, the stop the native dry gate and
- *     both native fixpoint legs measured on the base;
- *   · a fat FIELD said nothing at all: `field_layout_size` reserved 8 bytes for a 16-byte store, so
- *     the field that FOLLOWED the alias-typed one was read back as a length. Measured on the base
- *     compiler, a `str`-aliased field returned its neighbour's `43` where the C route returned `5`.
- *
- * The C route accepts both spellings — every one of its own type-path predicates keys on the path's
- * LAST segment — so by the oracle rule the divergence was the native route's to fix.
- *
- * ASSERTION VOCABULARY. `teko::assert` currently exposes `is_true`/`is_false`/`str_contains` only;
- * an `equals` needs generics and is honestly deferred there. Every equality claim below is therefore
- * written `is_true(actual == expected)`. That is a limitation of the available vocabulary, not a
- * choice to assert something weaker.
- */
-
-/**
- * qf_reg_pair — the shared two-element `[]d31_reg::Reg` every slice-shaped probe below reads. Built
- * by `push` rather than as a literal so the elements are stored through the same runtime path the
- * self-host's own tables use.
- *
- * @return a two-element table whose entries are ("ab", 7) and ("cde", 9)
- */
 fn qf_reg_pair(): []d31_reg::Reg {
     var t: []d31_reg::Reg = teko::list::empty()
     t = teko::list::push(t, d31_reg::Reg { name = "ab"; tag = 7 })
@@ -50,161 +11,53 @@ fn qf_reg_pair(): []d31_reg::Reg {
     t
 }
 
-/**
- * qf_len_of_qual_slice_param — the exact shape of the self-host's own stop: a parameter whose
- * annotation is a QUALIFIED alias of a slice, read for its length. A scalar binding reserves one
- * incoming register where the caller passed two, and the `.len` read then finds no fat local.
- *
- * @param vt_table  a table reached through the qualified alias `d31_reg::Tbl`
- * @return the table's element count
- */
 fn qf_len_of_qual_slice_param(vt_table: d31_reg::Tbl): i64 { vt_table.len to i64 }
 
-/**
- * qf_len_of_qual_str_param — the `str` twin: a parameter annotated with a QUALIFIED alias of `str`.
- *
- * @param s  a string reached through the qualified alias `d31_reg::Text`
- * @return the string's byte length
- */
 fn qf_len_of_qual_str_param(s: d31_reg::Text): i64 { s.len to i64 }
 
-/**
- * qf_elem_of_qual_slice_param — the PTR half of the same parameter. `.len` alone would pass on a
- * binding that happened to receive the length register first, so this reads through the pointer and
- * indexes an element, which only the correct (ptr, len) order can answer.
- *
- * @param vt_table  a table reached through the qualified alias `d31_reg::Tbl`
- * @return the second entry's `tag`
- */
 fn qf_elem_of_qual_slice_param(vt_table: d31_reg::Tbl): i64 { vt_table[1].tag }
 
-/**
- * qf_qual_slice_return — a qualified alias in RETURN position, passed straight through. The return
- * path asks the SEMANTIC predicate, so this half already answered on the base; it is kept because a
- * fix that widened only the parameter binder and not the shared walk would break it.
- *
- * @param t  the table to return unchanged
- * @return the same table
- */
 fn qf_qual_slice_return(t: d31_reg::Tbl): d31_reg::Tbl { t }
 
-/**
- * qf_len_of_hop_slice_param — a parameter whose annotation is an alias of an alias, with BOTH links
- * qualified and crossing two namespaces (`d31_hop::HopTbl` -> `d31_reg::Tbl` -> `[]Reg`).
- *
- * @param t  a table reached through the two-hop qualified chain
- * @return the table's element count
- */
 fn qf_len_of_hop_slice_param(t: d31_hop::HopTbl): i64 { t.len to i64 }
 
-/**
- * qf_len_of_hop_str_param — the `str` twin of the two-hop chain.
- *
- * @param s  a string reached through the two-hop qualified chain
- * @return the string's byte length
- */
 fn qf_len_of_hop_str_param(s: d31_hop::HopText): i64 { s.len to i64 }
 
-/**
- * qf_takes_bare_slice — a callee annotated with the SPELLED-OUT slice type, called with a value
- * whose own local annotation is the qualified alias. Pins the CALLER's side of the two-register
- * contract: caller and callee must agree even when they spell the same type differently.
- *
- * @param t  the table, annotated without any alias
- * @return the table's element count
- */
 fn qf_takes_bare_slice(t: []d31_reg::Reg): i64 { t.len to i64 }
 
-/**
- * qf_takes_decoy_fat — the fat half of the same-bare-name inversion: `d31_decoy_fat::Same` is a
- * slice alias and must bind fat.
- *
- * @param v  a slice reached through the qualified alias `d31_decoy_fat::Same`
- * @return the slice's element count
- */
 fn qf_takes_decoy_fat(v: d31_decoy_fat::Same): i64 { v.len to i64 }
 
-/**
- * qf_takes_decoy_thin — the thin half of the same-bare-name inversion: `d31_decoy_thin::Same` bears
- * the SAME bare name as the slice alias above and must NOT bind fat. A walk that read only the last
- * path segment would misclassify whichever of the pair it happened to find first, so this is the
- * negative half that proves the qualifier is read rather than skipped.
- *
- * @param v  a struct reached through the qualified alias `d31_decoy_thin::Same`
- * @return the sum of its two scalar members
- */
 fn qf_takes_decoy_thin(v: d31_decoy_thin::Same): i64 { v.x + v.y }
 
-/** BareTbl — a SINGLE-SEGMENT alias of a slice, spelled bare because it is declared right here. The
-    control for `d31_bare_alias_still_fat`. */
 type BareTbl = []d31_reg::Reg
 
-/** BareText — the single-segment `str` alias control. */
 type BareText = str
 
-/**
- * qf_bare_alias_slice — a parameter annotated with a single-segment slice alias.
- *
- * @param t  the table, reached through a bare alias
- * @return the table's element count
- */
 fn qf_bare_alias_slice(t: BareTbl): i64 { t.len to i64 }
 
-/**
- * qf_bare_alias_str — a parameter annotated with a single-segment `str` alias.
- *
- * @param s  the string, reached through a bare alias
- * @return the string's byte length
- */
 fn qf_bare_alias_str(s: BareText): i64 { s.len to i64 }
 
-/**
- * QFSliceField — a struct whose FIRST field is annotated with a qualified alias of a slice, followed
- * by a scalar. The silent half of the degrau: a fat field sized 8 instead of 16 shifts `n`'s offset
- * on top of the length word, so reading `n` and `t.len` back are two DIFFERENT claims and both are
- * asserted below.
- */
 type QFSliceField = struct {
-    /** the fat member, annotated through a qualified alias */
     t: d31_reg::Tbl
-    /** the scalar that FOLLOWS it — its offset is what a wrong fat width corrupts */
     n: i64
 }
 
-/** QFStrField — the `str` twin of `QFSliceField`, and the shape measured returning its neighbour's
-    value on the base compiler. */
 type QFStrField = struct {
-    /** the fat member, annotated through a qualified alias of `str` */
     s: d31_reg::Text
-    /** the scalar that FOLLOWS it */
     n: i64
 }
 
-/** QFBothFields — both fat kinds in ONE struct, ahead of a trailing scalar, so two consecutive wrong
-    widths compound instead of cancelling. */
 type QFBothFields = struct {
-    /** the slice-aliased fat member */
     t: d31_reg::Tbl
-    /** the str-aliased fat member */
     s: d31_reg::Text
-    /** the trailing scalar */
     n: i64
 }
 
-/** QFBareField — the bare-alias twin of `QFSliceField`, so the field placement has a control too. */
 type QFBareField = struct {
-    /** the fat member, annotated through a BARE alias */
     t: BareTbl
-    /** the scalar that follows it */
     n: i64
 }
 
-/**
- * d31_qual_alias_slice_param — a QUALIFIED alias of `[]T` in PARAMETER position must arrive as a fat
- * pointer: its length reads back, and an element behind its POINTER reads back too.
- *
- * @return true once every claim held (a failed claim panics inside `teko::assert`)
- */
 pub fn d31_qual_alias_slice_param(): bool {
     var t = qf_reg_pair()
     teko::assert::is_true(qf_len_of_qual_slice_param(t) == 2)
@@ -212,25 +65,12 @@ pub fn d31_qual_alias_slice_param(): bool {
     true
 }
 
-/**
- * d31_qual_alias_str_param — a QUALIFIED alias of `str` in PARAMETER position must arrive as a fat
- * pointer, for a non-empty and for an empty string.
- *
- * @return true once every claim held
- */
 pub fn d31_qual_alias_str_param(): bool {
     teko::assert::is_true(qf_len_of_qual_str_param("hello") == 5)
     teko::assert::is_true(qf_len_of_qual_str_param("") == 0)
     true
 }
 
-/**
- * d31_qual_alias_slice_field — a QUALIFIED alias of `[]T` in FIELD position must occupy the full
- * 16-byte image: the scalar that FOLLOWS it keeps its own value (the silent half), and the field
- * itself reads back through both halves.
- *
- * @return true once every claim held
- */
 pub fn d31_qual_alias_slice_field(): bool {
     var h = QFSliceField { t = qf_reg_pair(); n = 41 }
     teko::assert::is_true(h.n == 41)
@@ -239,12 +79,6 @@ pub fn d31_qual_alias_slice_field(): bool {
     true
 }
 
-/**
- * d31_qual_alias_str_field — a QUALIFIED alias of `str` in FIELD position: the shape measured
- * returning `43` (its neighbour's value) on the native route against `5` on the C route.
- *
- * @return true once every claim held
- */
 pub fn d31_qual_alias_str_field(): bool {
     var h = QFStrField { s = "hello"; n = 43 }
     teko::assert::is_true(h.n == 43)
@@ -252,12 +86,6 @@ pub fn d31_qual_alias_str_field(): bool {
     true
 }
 
-/**
- * d31_qual_alias_both_fields — both fat kinds ahead of a trailing scalar in one struct, so two
- * consecutive wrong widths cannot cancel each other out.
- *
- * @return true once every claim held
- */
 pub fn d31_qual_alias_both_fields(): bool {
     var o = QFBothFields { t = qf_reg_pair(); s = "hello"; n = 46 }
     teko::assert::is_true(o.n == 46)
@@ -267,13 +95,6 @@ pub fn d31_qual_alias_both_fields(): bool {
     true
 }
 
-/**
- * d31_qual_alias_local_and_return — a QUALIFIED alias in LOCAL and in RETURN position. Both ask the
- * SEMANTIC predicate and therefore already answered on the base; they are asserted so a fix confined
- * to the parameter binder, leaving the shared walk untouched, is caught here.
- *
- * @return true once every claim held
- */
 pub fn d31_qual_alias_local_and_return(): bool {
     var x: d31_reg::Tbl = qf_reg_pair()
     teko::assert::is_true(x.len == 2)
@@ -283,13 +104,6 @@ pub fn d31_qual_alias_local_and_return(): bool {
     true
 }
 
-/**
- * d31_qual_alias_as_argument — the CALLER's half: a local annotated with the qualified alias passed
- * to a callee annotated with the spelled-out slice type, and a call whose argument is a direct call
- * result. Caller and callee must place the same two registers even spelling the type differently.
- *
- * @return true once every claim held
- */
 pub fn d31_qual_alias_as_argument(): bool {
     var x: d31_reg::Tbl = qf_reg_pair()
     teko::assert::is_true(qf_takes_bare_slice(x) == 2)
@@ -297,25 +111,12 @@ pub fn d31_qual_alias_as_argument(): bool {
     true
 }
 
-/**
- * d31_alias_of_alias_two_hops — an alias of an alias where BOTH links are qualified and the chain
- * crosses two namespaces, for each fat builtin.
- *
- * @return true once every claim held
- */
 pub fn d31_alias_of_alias_two_hops(): bool {
     teko::assert::is_true(qf_len_of_hop_slice_param(qf_reg_pair()) == 2)
     teko::assert::is_true(qf_len_of_hop_str_param("hello") == 5)
     true
 }
 
-/**
- * d31_same_bare_name_decoy — the INVERSION. Two namespaces declare `Same`; one is a slice alias, the
- * other a scalar struct. Both are passed as parameters in the SAME program, so a walk that ignored
- * the qualifier and keyed on the bare name alone must misclassify one of them.
- *
- * @return true once every claim held
- */
 pub fn d31_same_bare_name_decoy(): bool {
     var xs: []i64 = teko::list::empty()
     xs = teko::list::push(xs, 5)
@@ -326,13 +127,6 @@ pub fn d31_same_bare_name_decoy(): bool {
     true
 }
 
-/**
- * d31_bare_alias_still_fat — the REGRESSION guard for the half that already worked. A single-segment
- * alias of each fat builtin must keep binding fat: the fix adds a qualified-path lookup BESIDE
- * `single_segment_name` rather than replacing it, and this pins that the bare answer did not move.
- *
- * @return true once every claim held
- */
 pub fn d31_bare_alias_still_fat(): bool {
     teko::assert::is_true(qf_bare_alias_slice(qf_reg_pair()) == 2)
     teko::assert::is_true(qf_bare_alias_str("hello") == 5)

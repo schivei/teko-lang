@@ -1,66 +1,29 @@
-/** A subtree drop must take the whole subtree; exit code when a descendant survives. */
 pub const E_SUBTREE_KEEPS: i32 = 60
 
-/** A subtree drop must take ONLY the subtree; exit code when a sibling disappears. */
 pub const E_SUBTREE_TAKES_SIBLING: i32 = 61
 
-/** A registration must be readable back; exit code when a lookup misses it. */
 pub const E_REGISTER_MISS: i32 = 62
 
-/** Re-registering an identifier must overwrite, not append; exit code otherwise. */
 pub const E_REGISTER_OVERWRITE: i32 = 63
 
-/** A lookup must climb the parent chain and a nearer binding must shadow; exit code otherwise. */
 pub const E_LOOKUP_CHAIN: i32 = 64
 
-/** A rewind must release exactly what was allocated after the checkpoint; exit code otherwise. */
 pub const E_REWIND_EXTENT: i32 = 65
 
-/** A commit must keep everything the matching push covered; exit code when it rewinds. */
 pub const E_COMMIT_KEEPS: i32 = 66
 
-/** Push and pop must stay balanced past the stack's depth; exit code when they do not. */
 pub const E_MARK_DEPTH: i32 = 67
 
-/** With the oracle off, a freed block must be reused; exit code when it is not. */
 pub const E_REUSE_OFF: i32 = 68
 
-/** With the oracle on, a freed block must be poisoned; exit code when it is not. */
 pub const E_POISON_MISSING: i32 = 69
 
-/** With the oracle on, a freed block must NEVER be reused; exit code when it is. */
 pub const E_POISON_REUSED: i32 = 70
 
-/**
- * The C environment writer, reached DIRECTLY as a C symbol, so one binary can prove both halves of
- * the memory oracle: the normal mode where a freed block is reused, and the paranoid mode where it
- * is poisoned and never reused. Two separate runs would prove the same thing, but only if the
- * harness remembers to make both — an oracle whose proof depends on the harness is weaker.
- *
- * @param name       the address of a NUL-terminated variable name
- * @param value      the address of a NUL-terminated value
- * @param overwrite  non-zero to replace an existing binding
- * @return           0 on success
- */
 pub extern fn c_setenv(name: u64, value: u64, overwrite: i32): i32 = "setenv"
 
-/**
- * The C environment remover, the counterpart of `c_setenv`.
- *
- * @param name  the address of a NUL-terminated variable name
- * @return      0 on success
- */
 pub extern fn c_unsetenv(name: u64): i32 = "unsetenv"
 
-/**
- * Counts the regions the subtree of `root` still holds on the live registry — the observable a
- * subtree drop is judged by, since "did the sweep take exactly the right regions" is invisible
- * otherwise.
- *
- * @param control  the control block's base address
- * @param root     the subtree's root
- * @return         how many live regions reach `root`
- */
 pub fn subtree_live_count(control: u64, root: u64): u64 {
     var region = ctrl_get(control, CTRL_REGS)
     var count: u64 = 0
@@ -72,15 +35,6 @@ pub fn subtree_live_count(control: u64, root: u64): u64 {
     count
 }
 
-/**
- * Demands a subtree drop takes the WHOLE subtree and NOTHING else. A three-level subtree is built
- * beside an independent sibling tree; dropping the subtree's root must leave the sibling tree
- * untouched and remove every descendant, including the grandchild that is only reachable through
- * two parent hops.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_subtree_drop_is_exact(control: u64) {
     var root = region_root(control)
     var branch = region_new(control, root)
@@ -106,14 +60,6 @@ pub fn demand_subtree_drop_is_exact(control: u64) {
     region_drop_subtree(control, 0)
 }
 
-/**
- * Demands the per-region registry stores, overwrites and resolves. Overwriting must not grow the
- * table — an append-instead-of-overwrite would still resolve correctly on a linear scan and would
- * leak an entry per rebinding, which no lookup test catches.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_registry_stores_and_overwrites(control: u64) {
     var region = region_new(control, 0)
     region_register(control, region, 7, 1000)
@@ -129,13 +75,6 @@ pub fn demand_registry_stores_and_overwrites(control: u64) {
     region_drop(control, region)
 }
 
-/**
- * Demands the entry table survives its growth steps: more registrations than the first capacity
- * must all still resolve, which is what proves the doubling carried the old contents over.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_registry_survives_growth(control: u64) {
     var region = region_new(control, 0)
     var i: u64 = 1
@@ -154,13 +93,6 @@ pub fn demand_registry_survives_growth(control: u64) {
     region_drop(control, region)
 }
 
-/**
- * Demands a lookup climbs the parent chain and that a nearer binding shadows a farther one, and
- * that a lookup on a zero region resolves to nothing rather than reading through it.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_lookup_climbs_and_shadows(control: u64) {
     var root = region_root(control)
     var middle = region_new(control, root)
@@ -176,14 +108,6 @@ pub fn demand_lookup_climbs_and_shadows(control: u64) {
     region_drop_subtree(control, middle)
 }
 
-/**
- * Demands a rewind releases exactly what was allocated after its checkpoint: the chunk count and
- * the bump cursor must both return to what they were, and the very next allocation must land back
- * on the address the checkpoint left free.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_rewind_extent(control: u64) {
     var root = region_root(control)
     var kept = region_alloc(control, root, 64)
@@ -205,14 +129,6 @@ pub fn demand_rewind_extent(control: u64) {
     demand_writable(control, kept, 64)
 }
 
-/**
- * Demands a commit keeps everything its matching push covered, and that push and pop stay balanced
- * past the stack's depth: a push deeper than the stack records nothing, so its pop must not rewind
- * to a checkpoint that belongs to a shallower scope.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_commit_and_depth(control: u64) {
     var root = region_root(control)
     checkpoint_push(control)
@@ -243,14 +159,6 @@ pub fn demand_commit_and_depth(control: u64) {
     demand(ctrl_get(control, CTRL_MSP) == 0, E_MARK_DEPTH)
 }
 
-/**
- * Sets or clears `TEKO_MEM_PARANOID` in this process and forces the next probe to read it again,
- * so both halves of the oracle can be proven without depending on how the harness was invoked.
- *
- * @param control  the control block's base address
- * @param wanted   true to set the variable, false to clear it
- * @return         nothing
- */
 pub fn set_paranoid_env(control: u64, wanted: bool) {
     var block = raw_alloc(PARANOID_PROBE_BYTES)
     spell_paranoid_var(block)
@@ -265,13 +173,6 @@ pub fn set_paranoid_env(control: u64, wanted: bool) {
     ctrl_set(control, CTRL_PARANOID, PARANOID_UNPROBED)
 }
 
-/**
- * Demands that with the oracle OFF a freed root block is parked and handed back to the next
- * request of its class — the reuse that stops a never-dropped region's footprint from growing.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_reuse_when_oracle_off(control: u64) {
     set_paranoid_env(control, false)
     demand(!paranoid_enabled(control), E_REUSE_OFF)
@@ -284,14 +185,6 @@ pub fn demand_reuse_when_oracle_off(control: u64) {
     demand(region_alloc(control, root, FREE_BIN_MAX_BYTES * 2) == large, E_REUSE_OFF)
 }
 
-/**
- * Demands that with the oracle ON a freed root block is POISONED and NEVER handed back. This is
- * the memory oracle that guards the free-old decree: arena reuse is invisible to a sanitizer, so
- * without the poison a wrong linearity proof corrupts in silence instead of failing loudly.
- *
- * @param control  the control block's base address
- * @return         nothing
- */
 pub fn demand_poison_when_oracle_on(control: u64) {
     set_paranoid_env(control, true)
     demand(paranoid_enabled(control), E_POISON_MISSING)
@@ -309,14 +202,6 @@ pub fn demand_poison_when_oracle_on(control: u64) {
     set_paranoid_env(control, false)
 }
 
-/**
- * Runs the complete arena gate: the core, then the subtree sweep, the per-region registry, the
- * checkpoint stack, and both halves of the memory oracle. Every check asserts an observable — an
- * address, a chunk count, a registry membership, a poisoned byte — never the mere absence of a
- * crash.
- *
- * @return  `GATE_OK` when the whole arena holds; any other exit names the invariant that broke
- */
 pub fn run_full_gate(): i32 {
     var core = run_arena_gate()
     if core != GATE_OK { return core }

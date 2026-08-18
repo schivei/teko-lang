@@ -1,45 +1,13 @@
-/**
- * SPAWN_DIR — the directory each spawned worker writes its per-tag observable file into. A relative
- * path so the regression runner's working directory contains it.
- */
 const SPAWN_DIR: str = "spawn_basic_run"
 
-/**
- * worker_path — the observable file path for a given tag: `spawn_basic_run/<tag>.txt`. The tag rides
- * as an argument BY COPY across the spawn boundary, so a correct filename here proves the scalar
- * survived the deep-copy.
- *
- * @param tag  the worker's tag (its spawn-copied scalar argument)
- * @return     the per-tag observable file path
- * @since 0.3.1 §10 (concurrency batch 1)
- */
 fn worker_path(tag: i64): str {
     $"{SPAWN_DIR}/{tag}.txt"
 }
 
-/**
- * expected_msg — the exact content worker `tag` must write: `worker-<tag>-hello`. The main thread
- * builds the SAME string to compare against, so a match proves the `str` argument was deep-copied
- * intact across the spawn boundary (a dangling spawning-arena pointer would read back as garbage).
- *
- * @param tag  the worker's tag
- * @return     the per-tag expected file content
- * @since 0.3.1 §10 (concurrency batch 1)
- */
 pub fn expected_msg(tag: i64): str {
     $"worker-{tag}-hello"
 }
 
-/**
- * worker — the spawned task: write `msg` to this tag's observable file. Runs on its OWN detached
- * thread and sub-root arena; `tag` and `msg` reached it BY COPY (the deep-copied ctx blob), so both
- * the filename (from `tag`) and the content (`msg`) are read entirely off this thread's own memory.
- *
- * @param tag  the worker's tag (spawn-copied scalar)
- * @param msg  the content to write (spawn-copied str)
- * @return void
- * @since 0.3.1 §10 (concurrency batch 1)
- */
 pub fn worker(tag: i64, msg: str) {
     match teko::io::write_file(worker_path(tag), msg) {
         error => { }
@@ -47,14 +15,6 @@ pub fn worker(tag: i64, msg: str) {
     }
 }
 
-/**
- * clear_file — remove any stale observable file for `tag` before its worker is spawned, so the poll
- * can only succeed on a file the spawned thread actually wrote THIS run (never a leftover).
- *
- * @param tag  the worker's tag
- * @return void
- * @since 0.3.1 §10 (concurrency batch 1)
- */
 pub fn clear_file(tag: i64) {
     match teko::fs::remove_file(worker_path(tag)) {
         error => { }
@@ -62,24 +22,8 @@ pub fn clear_file(tag: i64) {
     }
 }
 
-/**
- * POLL_LIMIT — the bounded number of read attempts the main thread makes waiting for a worker's file
- * to appear with the exact expected content. Fire-and-forget spawn gives the test no finish edge, so
- * it polls; the exact-content match makes a partial/empty read retry rather than false-pass. Large
- * enough that a scheduled worker always wins well before it is reached.
- */
 const POLL_LIMIT: i64 = 500000000
 
-/**
- * poll_file — wait (by bounded polling) for worker `tag`'s file to hold exactly `want`. Returns true
- * as soon as the content matches (the spawned thread ran and its copied args were intact), false if
- * the attempt limit is exhausted (the thread never produced the observable effect).
- *
- * @param tag   the worker's tag
- * @param want  the exact content the worker must have written
- * @return      true iff the worker's observable file reached the expected content in time
- * @since 0.3.1 §10 (concurrency batch 1)
- */
 pub fn poll_file(tag: i64, want: str): bool {
     var tries: i64 = 0
     loop {

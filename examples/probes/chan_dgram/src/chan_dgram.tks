@@ -1,366 +1,81 @@
-/**
- * The `AF_UNIX SOCK_DGRAM` fan-in TRANSPORT probe (CH0 of the native-channels effort). Proves, on
- * the OWN native x86-64 backend, the exact shape `docs/medicoes/canais-nativos-3-plataformas.md`
- * §2 measured: N writer sockets, each opened independently, `sendto`-ing datagrams AT ONE reader
- * socket's bound name — one reader `fd`, no `accept`, no per-writer handler — and a full receive
- * queue REFUSING with `EAGAIN` rather than silently dropping a datagram.
- *
- * Every `extern fn` below binds a raw libc/Linux symbol DIRECTLY (the same idiom
- * `examples/probes/arena_bottom` proved for the allocator), never through a Teko stdlib namespace:
- * an external standalone project has no visibility into another module's plain wrapper functions,
- * and this probe exists to prove the SYSCALLS lower, not a future `chan<T>` library. Every socket
- * binding carries `#os("linux")` (C7.1f) because the numeric constants below (address family,
- * socket type, `SOL_SOCKET` option names, `MSG_DONTWAIT`) are Linux's own ABI values and do not
- * necessarily hold on macOS/Windows — CH0 is Linux-only by design; later crumbs port the transport.
- *
- * NATIVE ONLY, for the same reason `arena_bottom` is: `aligned_alloc`/`free`/`memset`/`memcmp`
- * bound as raw `u64`-address libc calls collide with the C backend's own `<stdlib.h>`/`<string.h>`
- * prototypes ("conflicting types"). The native backend emits a bare call to the symbol, so only it
- * can host this probe.
- *
- * NO `teko::mem::buf_ptr` / `bytes_from_ptr`. Both allocate their own arena region under the hood
- * (`docs/design/arena-em-teko.md` §2) and neither is wired into the native backend's `call_symbol`
- * table today (`docs/design/concorrencia-adiantada-s8.md`, C0(b)) — that IS a CH1 crumb, not this
- * one. Every raw buffer here is a plain `c_aligned_alloc` block; every multi-byte field a raw
- * memory address reads/writes through `teko::mem::load_u64`/`store_u64` (proven native by
- * `arena_bottom::prove_word_round_trip`) or, for the ONE genuinely narrow read this probe needs
- * (glibc's per-thread `errno` cell, whose neighbouring bytes are NOT this probe's to touch), the
- * single-byte `memcmp`-verified `load_byte` `examples/probes/arena_teko/src/word.tks` already
- * proved safe. A socket path is written into a raw `sockaddr_un`/C-string buffer one byte at a time
- * through `path[i]` — a `str` index lowers natively too (`lower_index_str`, `lir/lower.tks`).
- *
- * PROOF BY CONTENT, NOT BY COUNT (the measurement doc's own warning): every record carries the
- * writer's id, a sequence number, and a pattern DERIVED from the two, and every read verifies all
- * three — two torn records would still count two, so counting proves nothing a corruption could not
- * also produce.
- */
-
-/**
- * The POSIX socket address family for `AF_UNIX` (`sys/socket.h`), identical on every architecture.
- *
- * @return 1
- */
 fn af_unix(): i32 { 1 }
 
-/**
- * The POSIX socket type for a boundary-preserving datagram socket (`sys/socket.h`).
- *
- * @return 2
- */
 fn sock_dgram(): i32 { 2 }
 
-/**
- * The Linux `SOL_SOCKET` option level, the argument `setsockopt`/`getsockopt` take to reach a
- * socket-layer (rather than protocol-layer) option (`asm-generic/socket.h`).
- *
- * @return 1
- */
 fn sol_socket(): i32 { 1 }
 
-/**
- * The Linux `SO_RCVBUF` option name: the reader's receive-queue byte budget, the bound that makes
- * a channel's capacity concrete (`asm-generic/socket.h`).
- *
- * @return 8
- */
 fn so_rcvbuf(): i32 { 8 }
 
-/**
- * The Linux `MSG_DONTWAIT` `sendto`/`recvfrom` flag: fail with `EAGAIN` instead of blocking when
- * the call cannot complete immediately — what turns "the queue is full" into an observable refusal
- * rather than a hang (`bits/socket.h`).
- *
- * @return 64
- */
 fn msg_dontwait(): i32 { 64 }
 
-/**
- * The Linux `errno` value a non-blocking `sendto` reports when the destination's receive queue has
- * no room for the datagram — the refusal this probe demands, never a silent drop.
- *
- * @return 11
- */
 fn eagain(): u64 { 11 }
 
-/**
- * The byte layout of every record this probe moves: three little-endian machine words — writer id,
- * sequence number, and a pattern derived from the two — the fixed frame `sendto`/`recvfrom` carry
- * whole, boundary-preserved, per datagram.
- *
- * @return 24
- */
 fn record_bytes(): u64 { 24 }
 
-/**
- * The byte size of a POSIX `struct sockaddr_un` on Linux: a 2-byte `sa_family_t` followed by the
- * 108-byte `sun_path` array (`bits/sockaddr.h`, `bits/struct_stat.h`'s neighbour header
- * `linux/un.h`), with no trailing padding since the largest member aligns at 2 bytes.
- *
- * @return 110
- */
 fn sockaddr_un_bytes(): u64 { 110 }
 
-/**
- * The byte offset of `sockaddr_un.sun_path` from the struct's base — past the 2-byte
- * `sa_family_t` — where this probe writes a socket's filesystem path.
- *
- * @return 2
- */
 fn sun_path_offset(): u64 { 2 }
 
-/**
- * How many independent writer sockets fan into the one reader socket in the main proof — the same
- * shard size (4 × 500) `docs/medicoes/canais-nativos-3-plataformas.md` §2 measured.
- *
- * @return 4
- */
 fn writer_count(): u64 { 4 }
 
-/**
- * How many records each writer sends in the main proof.
- *
- * @return 500
- */
 fn records_per_writer(): u64 { 500 }
 
-/**
- * The writer id the full-queue/`EAGAIN` proof uses — outside `1..writer_count()` so a record from
- * this phase could never be mistaken for one the fan-in phase produced.
- *
- * @return 99
- */
 fn flood_id(): u64 { 99 }
 
-/**
- * The requested `SO_RCVBUF` for the full-queue proof's reader — deliberately small, so the queue
- * fills after a handful of records instead of the ~2000 the default buffer swallows whole. Linux
- * grants at least double whatever is requested (measured, §2), so the GRANTED size is re-read with
- * `getsockopt` below rather than assumed to still be this number.
- *
- * @return 1024
- */
 fn small_rcvbuf_request(): u64 { 1024 }
 
-/**
- * A safety ceiling on the flood loop: the number of non-blocking sends this probe will attempt
- * before giving up on ever seeing a refusal. Any sane `SO_RCVBUF` fills within a few hundred
- * 24-byte records, so reaching this cap without an `EAGAIN` is itself a failure this probe reports
- * (exit 50), not a hang.
- *
- * @return 20000
- */
 fn flood_cap(): u64 { 20000 }
 
-/**
- * The number of distinct values a 32-bit register half holds — the modulus `read_granted_rcvbuf`
- * uses to recover a C `int` from a word this probe wrote and a syscall wrote back into, the same
- * idiom `arena_bottom::int32_radix` documents.
- *
- * @return 2^32
- */
 fn int32_radix(): u64 { 4294967296 }
 
-/**
- * `AF_UNIX` `socket(2)`, reached DIRECTLY as the Linux symbol.
- *
- * @param domain    the address family (`af_unix()`)
- * @param sock_type the socket type (`sock_dgram()`)
- * @param protocol  the protocol (0 = the family's default)
- * @return          a non-negative file descriptor, or a negative value on failure
- */
 #os("linux")
 pub extern fn c_socket(domain: i32, sock_type: i32, protocol: i32): i32 = "socket"
 
-/**
- * `bind(2)`, reached DIRECTLY: binds a socket to a `struct sockaddr_un`'s filesystem-path name.
- *
- * @param fd      the socket descriptor
- * @param addr    the base address of a populated `struct sockaddr_un`
- * @param addrlen the address structure's true length (`sun_path_offset()` + path length + 1)
- * @return        0 on success, a negative value on failure
- */
 #os("linux")
 pub extern fn c_bind(fd: i32, addr: u64, addrlen: i32): i32 = "bind"
 
-/**
- * `sendto(2)`, reached DIRECTLY: the whole write half of the fan-in transport — one syscall carries
- * one whole, boundary-preserved datagram, which is what makes `push` atomic for free (no new token
- * needed, `docs/design/concorrencia-adiantada-s8.md` §2).
- *
- * @param fd      the sending socket descriptor
- * @param buf     the base address of the record to send
- * @param len     the record's byte length (`record_bytes()`)
- * @param sock_flags 0 for a normal blocking send, `msg_dontwait()` to refuse rather than block
- * @param addr    the destination's populated `struct sockaddr_un`
- * @param addrlen the destination address structure's true length
- * @return        the number of bytes accepted (== `len` on success), or -1 on failure (`errno` set)
- */
 #os("linux")
 pub extern fn c_sendto(fd: i32, buf: u64, len: u64, sock_flags: i32, addr: u64, addrlen: i32): i64 = "sendto"
 
-/**
- * `recvfrom(2)`, reached DIRECTLY: the whole read half — one syscall drains one whole datagram, so
- * `pop`'s atomicity is free the same way `push`'s is.
- *
- * @param fd          the receiving socket descriptor
- * @param buf         the base address of the buffer to receive into
- * @param len         the buffer's capacity in bytes
- * @param sock_flags  0 to block until a datagram arrives, `msg_dontwait()` to refuse instead
- * @param addr        the sender's address is written here, or 0 (`NULL`) when not wanted
- * @param addrlen_ptr the in/out address-buffer length, or 0 (`NULL`) alongside a null `addr`
- * @return            the datagram's byte length on success, or -1 on failure (`errno` set)
- */
 #os("linux")
 pub extern fn c_recvfrom(fd: i32, buf: u64, len: u64, sock_flags: i32, addr: u64, addrlen_ptr: u64): i64 = "recvfrom"
 
-/**
- * `setsockopt(2)`, reached DIRECTLY: this probe's one write path to a socket option, used to
- * request a small `SO_RCVBUF` before the full-queue/`EAGAIN` proof.
- *
- * @param fd      the socket descriptor
- * @param level   the option level (`sol_socket()`)
- * @param optname the option name (`so_rcvbuf()`)
- * @param optval  the base address of the option's value buffer
- * @param optlen  the value buffer's byte length
- * @return        0 on success, a negative value on failure
- */
 #os("linux")
 pub extern fn c_setsockopt(fd: i32, level: i32, optname: i32, optval: u64, optlen: i32): i32 = "setsockopt"
 
-/**
- * `getsockopt(2)`, reached DIRECTLY: re-reads what the kernel actually GRANTED after
- * `c_setsockopt` — never assumed, since Linux is measured to double the requested `SO_RCVBUF`
- * (`docs/medicoes/canais-nativos-3-plataformas.md` §2).
- *
- * @param fd          the socket descriptor
- * @param level       the option level (`sol_socket()`)
- * @param optname     the option name (`so_rcvbuf()`)
- * @param optval      the base address the value is written into
- * @param optlen_ptr  in: the value buffer's capacity; out: the kernel's actual write length
- * @return            0 on success, a negative value on failure
- */
 #os("linux")
 pub extern fn c_getsockopt(fd: i32, level: i32, optname: i32, optval: u64, optlen_ptr: u64): i32 = "getsockopt"
 
-/**
- * `close(2)`, reached DIRECTLY: releases a socket descriptor.
- *
- * @param fd  the descriptor to close
- * @return    0 on success, a negative value on failure
- */
 #os("linux")
 pub extern fn c_close(fd: i32): i32 = "close"
 
-/**
- * `unlink(2)`, reached DIRECTLY: removes the filesystem artifact a bound `AF_UNIX` socket leaves
- * behind — called both before bind (clearing a stale artifact from a previous run) and after close
- * (leaving no artifact for the next one).
- *
- * @param path  the base address of a NUL-terminated C string naming the socket path
- * @return      0 on success, a negative value on failure
- */
 #os("linux")
 pub extern fn c_unlink(path: u64): i32 = "unlink"
 
-/**
- * The per-thread `errno` cell's address, reached DIRECTLY as glibc's own accessor — the ONLY
- * standards-defined way to read the failure code a raw `extern` syscall wrapper leaves behind, since
- * `errno` is neither a return value nor a fixed symbol (it is thread-local storage).
- *
- * @return the address of the calling thread's `int errno`
- */
 #os("linux")
 pub extern fn c_errno_location(): u64 = "__errno_location"
 
-/**
- * The C11 aligned allocator, reached DIRECTLY — this probe's ONE source of raw memory, proven native
- * by `examples/probes/arena_bottom`. Portable POSIX/C11, so unguarded by `#os`.
- *
- * @param alignment  the required base alignment in bytes; must be a power of two
- * @param size       the block size in bytes
- * @return           the block's base address, or 0 on failure
- */
 pub extern fn c_aligned_alloc(alignment: u64, size: u64): u64 = "aligned_alloc"
 
-/**
- * The C deallocator, reached DIRECTLY — the counterpart of `c_aligned_alloc`.
- *
- * @param block  the base address to release; 0 is a documented no-op
- * @return       nothing
- */
 pub extern fn c_free(block: u64) = "free"
 
-/**
- * The C byte-fill primitive, reached DIRECTLY — how this probe zeroes a raw buffer before writing
- * into it, and the one-byte store `store_byte` below builds on.
- *
- * @param block  the base address to fill
- * @param value  the fill byte, passed in an `i32` as C's signature requires
- * @param count  how many bytes to fill
- * @return       `block`, as C's `memset` returns its destination
- */
 pub extern fn c_memset(block: u64, value: i32, count: u64): u64 = "memset"
 
-/**
- * The C block-compare primitive, reached DIRECTLY — the raw READ bottom `load_byte` below uses to
- * pin one byte's value by binary search, without ever reading a byte this probe does not own (the
- * property that makes it safe to use on the `errno` cell).
- *
- * @param left   the first block's base address
- * @param right  the second block's base address
- * @param count  how many bytes to compare
- * @return       the return register in full; only its low 32 bits are the C result (see
- *               `arena_bottom::c_memcmp_raw`'s doc for why the FULL register is read)
- */
 pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64): u64 = "memcmp"
 
-/**
- * Fails loudly when an invariant does not hold, exiting with the invariant's own code so a failure
- * names itself — the native backend refuses a `str` local threaded into `panic`
- * (`native backend N1: not a fat-pointer local`), and this probe must run there.
- *
- * @param held  the invariant's truth value
- * @param code  the exit code identifying this invariant, used only on failure
- * @return      nothing
- */
 fn demand(held: bool, code: i32) {
     if held { return }
     exit(code)
 }
 
-/**
- * Writes one byte at an address — the raw store bottom every multi-byte write in this probe (the
- * `sockaddr_un`/C-string path bytes) is built from.
- *
- * @param address  where to write
- * @param value    the byte value, 0..255
- * @return         nothing
- */
 fn store_byte(address: u64, value: u64) {
     _ = c_memset(address, value to i32, 1)
 }
 
-/**
- * Tests whether the single byte at `address` equals `scratch`'s current content, reading C
- * `memcmp`'s low 32 bits only — the sign-unspecified upper half `c_memcmp_raw`'s doc names.
- *
- * @param address  the address under test
- * @param scratch  a caller-owned byte to compare against
- * @return         true iff the byte at `address` equals the byte at `scratch`
- */
 fn byte_equals(address: u64, scratch: u64): bool {
     c_memcmp_raw(address, scratch, 1) % int32_radix() == 0
 }
 
-/**
- * Reads one byte at an address by binary-searching its value against a caller-owned scratch byte —
- * `examples/probes/arena_teko/src/word.tks::load_byte`'s idiom, reused here so `read_errno` never
- * reads a single byte past the `int` glibc's `__errno_location` actually owns.
- *
- * @param address  where to read
- * @param scratch  a caller-owned raw byte the search may overwrite
- * @return         the byte value at `address`, 0..255
- */
 fn load_byte(address: u64, scratch: u64): u64 {
     var low: u64 = 0
     var high: u64 = 255
@@ -375,13 +90,6 @@ fn load_byte(address: u64, scratch: u64): u64 {
     low
 }
 
-/**
- * Reads the calling thread's current `errno` value, one byte at a time (`load_byte`) so the read
- * never reaches past the `int` glibc actually allocated for it — every value this probe checks
- * against (`eagain()`) fits in a single byte, so the low byte alone is `errno`.
- *
- * @return the current `errno` value
- */
 fn read_errno(): u64 {
     var scratch = c_aligned_alloc(1, 1)
     demand(scratch != 0, 60)
@@ -390,15 +98,6 @@ fn read_errno(): u64 {
     value
 }
 
-/**
- * Writes `path`'s bytes at `base`, one `str` index at a time — `str[i]` lowers natively
- * (`lower_index_str`, `lir/lower.tks`) as a bounds-checked byte load, which is what lets this probe
- * build a raw C buffer from a Teko string without `bytes_from_ptr`.
- *
- * @param base  the address to start writing at
- * @param path  the string whose bytes are copied
- * @return      nothing
- */
 fn write_path_bytes(base_addr: u64, path: str) {
     var i: u64 = 0
     loop {
@@ -408,12 +107,6 @@ fn write_path_bytes(base_addr: u64, path: str) {
     }
 }
 
-/**
- * Allocates a NUL-terminated C string holding `path`'s bytes — the shape `c_unlink` requires.
- *
- * @param path  the string to copy
- * @return      the base address of a `path.len + 1`-byte buffer: `path`'s bytes, then one 0 byte
- */
 fn build_cstr(path: str): u64 {
     var block = c_aligned_alloc(8, path.len + 1)
     demand(block != 0, 61)
@@ -422,26 +115,12 @@ fn build_cstr(path: str): u64 {
     block
 }
 
-/**
- * Removes the filesystem artifact at `path`, ignoring the result: called both to clear a stale
- * artifact from a previous run (which may not exist) and to clean up after this one.
- *
- * @param path  the socket path to remove
- * @return      nothing
- */
 fn unlink_path(path: str) {
     var cstr = build_cstr(path)
     _ = c_unlink(cstr)
     c_free(cstr)
 }
 
-/**
- * Builds a populated `struct sockaddr_un` naming `path` in a fresh raw block: zeroed, `AF_UNIX` in
- * the family field, `path`'s bytes at `sun_path_offset()`.
- *
- * @param path  the filesystem path the address names
- * @return      the base address of a `sockaddr_un_bytes()`-byte block
- */
 fn build_sockaddr_un(path: str): u64 {
     var block = c_aligned_alloc(8, sockaddr_un_bytes())
     demand(block != 0, 62)
@@ -451,38 +130,14 @@ fn build_sockaddr_un(path: str): u64 {
     block
 }
 
-/**
- * The true `addrlen` for a `sockaddr_un` built by `build_sockaddr_un(path)`: the family field, the
- * path bytes, and the path's NUL terminator (already zero from the block's own zero-fill).
- *
- * @param path  the path the address names
- * @return      `sun_path_offset() + path.len + 1`, as an `i32`
- */
 fn sockaddr_len(path: str): i32 {
     (sun_path_offset() + path.len + 1) to i32
 }
 
-/**
- * The content pattern a record's third word must hold — a function of the writer id and the
- * sequence number alone, chosen so two records that differ in EITHER field produce different
- * patterns: this is the whole content-verification proof (never count records, verify them).
- *
- * @param id   the writer's id
- * @param seq  the record's sequence number within that writer's stream
- * @return     the pattern this (id, seq) pair must carry
- */
 fn derive_pattern(id: u64, seq: u64): u64 {
     id * 1000003 + seq * 7919 + 12648430
 }
 
-/**
- * Builds one 24-byte record — id, sequence number, derived pattern, each one little-endian machine
- * word — in a fresh raw block, ready for `c_sendto`.
- *
- * @param id   the writer's id
- * @param seq  the record's sequence number
- * @return     the base address of a `record_bytes()`-byte block
- */
 fn build_record(id: u64, seq: u64): u64 {
     var block = c_aligned_alloc(8, record_bytes())
     demand(block != 0, 63)
@@ -492,18 +147,6 @@ fn build_record(id: u64, seq: u64): u64 {
     block
 }
 
-/**
- * Sends one record to `addr`, freeing the record buffer whether or not the send succeeded — the
- * caller reads acceptance from the return value, not from the buffer's survival.
- *
- * @param fd      the sending socket descriptor
- * @param addr    the destination's populated `sockaddr_un`
- * @param addrlen the destination address's true length
- * @param id      the writer's id
- * @param seq     the record's sequence number
- * @param sock_flags `sendto`'s flags (0 to block, `msg_dontwait()` to refuse instead)
- * @return        the byte count `c_sendto` accepted (== `record_bytes()` on success), or -1
- */
 fn send_record(fd: i32, addr: u64, addrlen: i32, id: u64, seq: u64, sock_flags: i32): i64 {
     var buf = build_record(id, seq)
     var sent = c_sendto(fd, buf, record_bytes(), sock_flags, addr, addrlen)
@@ -511,32 +154,16 @@ fn send_record(fd: i32, addr: u64, addrlen: i32, id: u64, seq: u64, sock_flags: 
     sent
 }
 
-/**
- * RecvOutcome — one `recv_record` result: the raw `recvfrom` return alongside the three fields a
- * successful read decoded (all zero when the read failed, so a caller must check `ret` first).
- */
 type RecvOutcome = struct {
-    /** ret — `c_recvfrom`'s own return: the datagram's byte length, or a negative failure. */
     ret: i64
 
-    /** id — the received record's writer id (valid only when `ret == record_bytes()`). */
     id: u64
 
-    /** seq — the received record's sequence number (valid only when `ret == record_bytes()`). */
     seq: u64
 
-    /** pattern — the received record's third word (valid only when `ret == record_bytes()`). */
     pattern: u64
 }
 
-/**
- * Receives one record from `fd` and decodes it — the whole read half of the content-verification
- * proof: every field a caller checks came from THIS datagram's own bytes, never from a count.
- *
- * @param fd     the receiving socket descriptor
- * @param sock_flags `recvfrom`'s flags (0 to block, `msg_dontwait()` to refuse instead of blocking)
- * @return       the outcome; `ret != record_bytes()` means no record was decoded
- */
 fn recv_record(fd: i32, sock_flags: i32): RecvOutcome {
     var buf = c_aligned_alloc(8, record_bytes())
     demand(buf != 0, 64)
@@ -553,46 +180,20 @@ fn recv_record(fd: i32, sock_flags: i32): RecvOutcome {
     RecvOutcome { ret = ret; id = id; seq = seq; pattern = pattern }
 }
 
-/**
- * The reader socket's bound name for the main fan-in proof.
- *
- * @return "/tmp/teko_chan_dgram_ch0_reader.sock"
- */
 fn reader_path(): str { "/tmp/teko_chan_dgram_ch0_reader.sock" }
 
-/**
- * The reader socket's bound name for the full-queue/`EAGAIN` proof — a DIFFERENT path than
- * `reader_path`, so the two phases' sockets never collide.
- *
- * @return "/tmp/teko_chan_dgram_ch0_full.sock"
- */
 fn full_path(): str { "/tmp/teko_chan_dgram_ch0_full.sock" }
 
-/**
- * WriterSockets — the four writers' OWN sockets for the main fan-in proof, one field per writer id.
- * Kept as four named fields rather than a `[]i32` so a native-backend probe never needs a growable
- * container for something whose size (`writer_count()`) is fixed at compile time.
- */
 type WriterSockets = struct {
-    /** fd1 — writer 1's own socket, never shared with another writer. */
     fd1: i32
 
-    /** fd2 — writer 2's own socket. */
     fd2: i32
 
-    /** fd3 — writer 3's own socket. */
     fd3: i32
 
-    /** fd4 — writer 4's own socket. */
     fd4: i32
 }
 
-/**
- * Opens the four writers' sockets — each independently, each unbound (a sender never needs its own
- * name to `sendto` a destination). Exits 32 when any socket cannot be opened.
- *
- * @return the four writers' sockets
- */
 fn open_writer_sockets(): WriterSockets {
     var a = c_socket(af_unix(), sock_dgram(), 0)
     demand(a >= 0, 32)
@@ -605,12 +206,6 @@ fn open_writer_sockets(): WriterSockets {
     WriterSockets { fd1 = a; fd2 = b; fd3 = c; fd4 = d }
 }
 
-/**
- * Closes every socket `open_writer_sockets` opened. Exits 34 when any close fails.
- *
- * @param w  the writers' sockets
- * @return   nothing
- */
 fn close_writer_sockets(w: WriterSockets) {
     demand(c_close(w.fd1) == 0, 34)
     demand(c_close(w.fd2) == 0, 34)
@@ -618,13 +213,6 @@ fn close_writer_sockets(w: WriterSockets) {
     demand(c_close(w.fd4) == 0, 34)
 }
 
-/**
- * The socket belonging to writer `id`, from `open_writer_sockets`'s result.
- *
- * @param id  a writer id, `1..writer_count()`
- * @param w   the writers' sockets
- * @return    that writer's own socket descriptor
- */
 fn writer_fd_of(id: u64, w: WriterSockets): i32 {
     if id == 1 { return w.fd1 }
     if id == 2 { return w.fd2 }
@@ -633,20 +221,6 @@ fn writer_fd_of(id: u64, w: WriterSockets): i32 {
     w.fd4
 }
 
-/**
- * Folds one received record into its writer's running verification: the pattern must match
- * `derive_pattern(r.id, r.seq)` (content, not count) and the sequence number must be exactly the
- * next one that writer's stream owes — `AF_UNIX SOCK_DGRAM` preserves per-sender order, so any gap
- * or repeat here is a real defect, not a benign reordering. Exits 36 on a pattern mismatch, 37 on an
- * out-of-order sequence number, 38 on an id outside `1..writer_count()`.
- *
- * @param r          the decoded record
- * @param expected1  writer 1's next expected sequence number
- * @param expected2  writer 2's next expected sequence number
- * @param expected3  writer 3's next expected sequence number
- * @param expected4  writer 4's next expected sequence number
- * @return           the four writers' updated expectations, packed as `Expectations`
- */
 fn fold_fanin_record(r: RecvOutcome, expected1: u64, expected2: u64, expected3: u64, expected4: u64): Expectations {
     demand(r.pattern == derive_pattern(r.id, r.seq), 36)
     if r.id == 1 { demand(r.seq == expected1, 37); return Expectations { e1 = expected1 + 1; e2 = expected2; e3 = expected3; e4 = expected4 } }
@@ -657,59 +231,24 @@ fn fold_fanin_record(r: RecvOutcome, expected1: u64, expected2: u64, expected3: 
     Expectations { e1 = expected1; e2 = expected2; e3 = expected3; e4 = expected4 + 1 }
 }
 
-/**
- * Expectations — the four writers' next-expected-sequence-number counters, threaded through the
- * fan-in verification loop as one value (no mutable array needed for exactly four writers).
- */
 type Expectations = struct {
-    /** e1 — writer 1's next expected sequence number. */
     e1: u64
 
-    /** e2 — writer 2's next expected sequence number. */
     e2: u64
 
-    /** e3 — writer 3's next expected sequence number. */
     e3: u64
 
-    /** e4 — writer 4's next expected sequence number. */
     e4: u64
 }
 
-/**
- * The writer id whose turn it is at round-robin position `total_sent` — a plain modulus over
- * `writer_count()`, so the four writers interleave one record at a time (`1, 2, 3, 4, 1, 2, …`).
- *
- * @param total_sent  how many records have been accepted so far, across every writer
- * @return            the writer id, `1..writer_count()`, whose turn this is
- */
 fn round_robin_writer(total_sent: u64): u64 {
     total_sent % writer_count() + 1
 }
 
-/**
- * The sequence number writer `id` is on at round-robin position `total_sent` — every `writer_count()`
- * accepted records advance EACH writer's own sequence by exactly one, since the round-robin visits
- * every writer once per cycle.
- *
- * @param total_sent  how many records have been accepted so far, across every writer
- * @return            the next sequence number the round-robin's current writer owes
- */
 fn round_robin_seq(total_sent: u64): u64 {
     total_sent / writer_count()
 }
 
-/**
- * Attempts one non-blocking send for the writer whose turn `total_sent` names, at the reader's
- * address. A refusal here means the reader's queue is momentarily full — expected under a bounded
- * queue with no dedicated draining thread — and is NOT a failure of this probe: the caller is
- * expected to drain before retrying. Exits 33 on any failure OTHER than `EAGAIN`.
- *
- * @param w           the writers' sockets
- * @param total_sent  how many records have been accepted so far (selects writer + sequence number)
- * @param addr        the reader's populated `sockaddr_un`
- * @param addrlen     the reader address's true length
- * @return            true iff this send was accepted (the caller should advance `total_sent`)
- */
 fn try_send_next(w: WriterSockets, total_sent: u64, addr: u64, addrlen: i32): bool {
     var id = round_robin_writer(total_sent)
     var seq = round_robin_seq(total_sent)
@@ -721,38 +260,12 @@ fn try_send_next(w: WriterSockets, total_sent: u64, addr: u64, addrlen: i32): bo
     false
 }
 
-/**
- * Attempts one non-blocking drain from the reader, folding a decoded record into `tally` when one
- * is available. Finding nothing pending is NOT a failure — it means the queue is momentarily empty,
- * expected while `run_fanin_phase`'s interleaved loop is still catching up on sends.
- *
- * @param reader_fd  the bound reader socket
- * @param tally      the four writers' current expectations
- * @return           `tally`, folded with the drained record when one was available; unchanged
- *                    otherwise
- */
 fn try_drain_next(reader_fd: i32, tally: Expectations): Expectations {
     var r = recv_record(reader_fd, msg_dontwait())
     if r.ret != record_bytes() to i64 { return tally }
     fold_fanin_record(r, tally.e1, tally.e2, tally.e3, tally.e4)
 }
 
-/**
- * The main fan-in proof's core: interleaves non-blocking sends (round-robin across the four
- * writers) with non-blocking drains, one of each per iteration, until every record has been both
- * accepted and verified. INTERLEAVING IS LOAD-BEARING, not an optimization: `net.unix.max_dgram_qlen`
- * bounds this reader's queue at a small constant (measured 10 on this host) regardless of
- * `SO_RCVBUF`, so a batch of all `writer_count() * records_per_writer()` sends before any read would
- * deadlock a single-threaded process — the writer blocks on a full queue that only THIS SAME thread
- * could ever drain. One send-attempt-then-drain-attempt per loop iteration guarantees progress: when
- * the queue is full the send's `EAGAIN` still leaves the drain free to run that same iteration.
- *
- * @param w          the writers' sockets
- * @param reader_fd  the bound reader socket
- * @param addr       the reader's populated `sockaddr_un`
- * @param addrlen    the reader address's true length
- * @return           the four writers' final expectations
- */
 fn run_fanin_loop(w: WriterSockets, reader_fd: i32, addr: u64, addrlen: i32): Expectations {
     var target = writer_count() * records_per_writer()
     var tally = Expectations { e1 = 0; e2 = 0; e3 = 0; e4 = 0 }
@@ -772,15 +285,6 @@ fn run_fanin_loop(w: WriterSockets, reader_fd: i32, addr: u64, addrlen: i32): Ex
     tally
 }
 
-/**
- * The main fan-in proof: one reader socket bound once, four writer sockets (`open_writer_sockets`)
- * interleaved through `run_fanin_loop`, then a demand that every writer's final count landed exactly
- * on `records_per_writer()` — the proof that fan-in-by-name lost nothing and corrupted nothing across
- * all `writer_count() * records_per_writer()` records. Exits 30/31 when the reader cannot be
- * opened/bound, 39 when it cannot be closed or a writer's final count disagrees.
- *
- * @return nothing
- */
 fn run_fanin_phase() {
     unlink_path(reader_path())
     var reader_fd = c_socket(af_unix(), sock_dgram(), 0)
@@ -803,15 +307,6 @@ fn run_fanin_phase() {
     unlink_path(reader_path())
 }
 
-/**
- * Requests a small `SO_RCVBUF` on `fd` and immediately re-reads what the kernel actually granted
- * via `getsockopt` — never assumed, since Linux is measured to double the request (§2). Exits 41 on
- * an allocation failure, 42 when the request is refused, 44/45 on the re-read, 46 when the granted
- * size reads back as zero (a re-read that could not possibly be right).
- *
- * @param fd  the socket to size
- * @return    the GRANTED `SO_RCVBUF`, as actually reported by `getsockopt`
- */
 fn shrink_and_read_rcvbuf(fd: i32): u64 {
     var optblock = c_aligned_alloc(8, 8)
     demand(optblock != 0, 41)
@@ -832,19 +327,6 @@ fn shrink_and_read_rcvbuf(fd: i32): u64 {
     granted
 }
 
-/**
- * Floods `full_addr` with non-blocking sends of increasing sequence numbers until one is refused,
- * demanding the refusal is `EAGAIN` (never a silent drop, never any other failure) and that at
- * least one record WAS accepted first (an immediately-full queue would prove nothing about
- * acceptance). Exits 48 on a partial/garbled send, 49 when the failure is not `EAGAIN`, 50 when
- * `flood_cap()` sends all succeed (no refusal ever observed), 51 when the very first send is
- * refused.
- *
- * @param flood_fd       the flooding writer's own socket
- * @param full_addr      the target reader's populated `sockaddr_un`
- * @param full_addrlen   the target address's true length
- * @return               how many records were accepted before the refusal
- */
 fn flood_until_refused(flood_fd: i32, full_addr: u64, full_addrlen: i32): u64 {
     var accepted: u64 = 0
     loop {
@@ -862,18 +344,6 @@ fn flood_until_refused(flood_fd: i32, full_addr: u64, full_addrlen: i32): u64 {
     accepted
 }
 
-/**
- * Drains exactly `accepted` records from `fd` and verifies each by content against the flood
- * writer's own id and its send order — "what was accepted was delivered", the property that makes
- * `push -> error | null` enforceable rather than a promise. Then demands a further non-blocking read
- * finds NOTHING (accepted == delivered EXACTLY, no phantom extra record). Exits 55 on a short/failed
- * read, 56 on the wrong writer id, 57 on the wrong sequence number, 58 on a pattern mismatch, 52 when
- * an extra record is somehow still pending.
- *
- * @param fd        the full-queue reader socket
- * @param accepted  how many records `flood_until_refused` reported as accepted
- * @return          nothing
- */
 fn verify_full_delivery(fd: i32, accepted: u64) {
     var i: u64 = 0
     loop {
@@ -889,15 +359,6 @@ fn verify_full_delivery(fd: i32, accepted: u64) {
     demand(leftover.ret < 0, 52)
 }
 
-/**
- * The full-queue/`EAGAIN` proof: a reader bound with a deliberately small, freshly re-read
- * `SO_RCVBUF` (`shrink_and_read_rcvbuf`), a flood writer sending until refused
- * (`flood_until_refused`), then a by-content drain proving every accepted record was delivered
- * (`verify_full_delivery`). Exits 40 when the reader cannot be opened, 43 when it cannot be bound,
- * 47 when the flood writer cannot be opened, 53/54 when a socket cannot be closed.
- *
- * @return nothing
- */
 fn run_full_phase() {
     unlink_path(full_path())
     var full_fd = c_socket(af_unix(), sock_dgram(), 0)
@@ -922,14 +383,6 @@ fn run_full_phase() {
     unlink_path(full_path())
 }
 
-/**
- * Runs the whole CH0 proof: the main fan-in phase (four writers, one reader, 2000 records verified
- * by content) followed by the full-queue/`EAGAIN` refusal phase (a shrunk, re-read `SO_RCVBUF`,
- * flooded until refused, every accepted record verified delivered). Every `demand` call site exits
- * with its own code on failure, so reaching the return value at all is the proof.
- *
- * @return 42 when the whole transport proof holds
- */
 pub fn probe_chan_dgram(): i32 {
     run_fanin_phase()
     run_full_phase()

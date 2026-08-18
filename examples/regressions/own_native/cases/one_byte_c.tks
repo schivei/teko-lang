@@ -1,33 +1,13 @@
-/**
- * opaque_zero — zero with no literal form, produced by a mutable variable, so `teko::one_byte`'s
- * argument reaches lowering as a COMPUTED value rather than being comptime-folded away.
- *
- * @return 0, with no literal form
- */
 fn opaque_zero(): u64 {
     var n: u64 = 1
     n = n - 1
     n
 }
 
-/**
- * shift — the byte `b` shifted by `off` positions, through `u64`, so the result is born of a sum and
- * not a literal.
- *
- * @param b    the starting byte
- * @param off  the offset to add (always `opaque_zero()` here)
- * @return     the shifted byte
- */
 fn shift(b: byte, off: u64): byte {
     ((b to u64) + off) to byte
 }
 
-/**
- * single_byte_weight — the minimal case: ONE `teko::one_byte` call read back by length and content.
- *
- * @param off  the fold-opaque offset
- * @return     3 when the one-byte `str` has length 1 and content `A`, else 0
- */
 fn single_byte_weight(off: u64): i64 {
     var s = teko::one_byte(shift(b'A', off))
     if s.len != 1 { return 0 }
@@ -35,13 +15,6 @@ fn single_byte_weight(off: u64): i64 {
     3
 }
 
-/**
- * escape_accum_weight — the exact shape of `teko::encoding::json::parse_string`: a `str` accumulated
- * one `teko::one_byte` at a time.
- *
- * @param off  the fold-opaque offset
- * @return     12 when the three escape bytes come out in order and value, else 0
- */
 fn escape_accum_weight(off: u64): i64 {
     var out = ""
     out = out ~ teko::one_byte(shift(b'"', off))
@@ -54,13 +27,6 @@ fn escape_accum_weight(off: u64): i64 {
     12
 }
 
-/**
- * utf8_pair_weight — two `teko::one_byte` results joined in the SAME expression, the two-byte pair of
- * a UTF-8 code point (U+00E9).
- *
- * @param off  the fold-opaque offset
- * @return     16 when the pair has length 2 and the two right bytes, else 0
- */
 fn utf8_pair_weight(off: u64): i64 {
     var two = teko::one_byte(shift(0xC3 to byte, off)) ~ teko::one_byte(shift(0xA9 to byte, off))
     if two.len != 2 { return 0 }
@@ -69,13 +35,6 @@ fn utf8_pair_weight(off: u64): i64 {
     16
 }
 
-/**
- * from_slice_weight — `teko::one_byte`'s argument comes from a slice INDEX inside a loop, so the byte
- * arrives in a register loaded from memory.
- *
- * @param off  the fold-opaque offset
- * @return     32 when the two slice bytes reconstruct in the accumulated `str`, else 0
- */
 fn from_slice_weight(off: u64): i64 {
     var src: []byte = teko::list::empty()
     src = teko::list::push(src, shift(b'n', off))
@@ -93,13 +52,6 @@ fn from_slice_weight(off: u64): i64 {
     32
 }
 
-/**
- * two_live_weight — TWO one-byte `str`s live at once, each read after the other was produced, so a
- * shared length slot or result register would let the first read the second's value.
- *
- * @param off  the fold-opaque offset
- * @return     64 when both values keep their own byte and length, else 0
- */
 fn two_live_weight(off: u64): i64 {
     var a = teko::one_byte(shift(b'a', off))
     var b = teko::one_byte(shift(b'z', off))
@@ -110,13 +62,6 @@ fn two_live_weight(off: u64): i64 {
     64
 }
 
-/**
- * nul_byte_weight — `teko::one_byte(0)`: the one-byte NUL `str`, whose length is the 1 the runtime
- * returns through the out-slot, not the 0 a NUL-terminated read would give.
- *
- * @param off  the fold-opaque offset
- * @return     128 when the `str` has length 1 and byte 0, else 0
- */
 fn nul_byte_weight(off: u64): i64 {
     var s = teko::one_byte(shift(0 to byte, off))
     if s.len != 1 { return 0 }
@@ -124,11 +69,6 @@ fn nul_byte_weight(off: u64): i64 {
     128
 }
 
-/**
- * score — the sum of the six disjoint weights, 255 when all pass; no partial sum reaches 255.
- *
- * @return 255 when `one_byte`'s lowering is correct in all six shapes
- */
 fn score(): i64 {
     var off = opaque_zero()
     single_byte_weight(off) + escape_accum_weight(off) + utf8_pair_weight(off) + from_slice_weight(off) + two_live_weight(off) + nul_byte_weight(off)

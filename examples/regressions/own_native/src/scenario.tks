@@ -1,66 +1,14 @@
-/**
- * scenario — run ONE case of the own-backend corpus: name it, assert its value, announce it.
- *
- * WHAT THIS REPLACES, and why the owner ruled the old shape out (2026-07-30). Every case in
- * `main.tks` used to be `if f_x() != V { if bad == 0 { bad = N } }` over 129 distinct `N`, closed by
- * `exit(bad)`. That addresses a scenario by the NUMBER it exits with, and the number is not
- * addressable: the space holds 255 values, this corpus had already reused ten of them (`bad = 260..269`
- * are OBSERVED as 4..13, the codes cases 4..13 already owned), and the aliasing is SILENT —
- * `exit(256)` is observed as 0, a failing corpus reporting success. Widening the range would not fix
- * it; the MECHANISM is the defect.
- *
- * WHAT IT IS NOW. `teko::assert::eq_i64` reports the expected AND the got value, so a failure needs no
- * lookup table to read; `teko::assert::scenario_ok` announces `scenario <name>: ok`, which is the line
- * the companion `.tkr` demands BY NAME, row by row. The program exits 0 because nothing went wrong,
- * not because 42 was the agreed code for "all 129 passed".
- *
- * THE TWO FILES MOVE TOGETHER. Every `scenario(...)` call in `main.tks` has exactly one
- * `Then stdout pattern = "scenario <name>: ok"` row in `own_native.tkr`, and vice versa; a name living
- * on only one side would trade one silent defect for another.
- *
- * @param name  the case's name, spelled identically in `own_native.tkr`'s `Scenario:` line
- * @param got   what the case's probe returned
- * @param want  what it must return
- * @throws      when they differ — the panic names the case, the expected value and the got value
- */
 fn scenario(name: str, got: i64, want: i64) {
     teko::assert::scenario_begin(name)
     teko::assert::eq_i64(got, want)
     teko::assert::scenario_ok()
 }
 
-/**
- * scenario_named_ok — announce a case whose claim is NOT a returned value but something the program
- * already did on another channel (today: `own_print_exit`, whose `.tkr` row asserts the interpolated
- * `answer=42!` line on stdout). The announcement still exists so that row is addressable by name like
- * every other, instead of being the one case identified by an exit code.
- *
- * @param name  the case's name, spelled identically in `own_native.tkr`'s `Scenario:` line
- */
 fn scenario_named_ok(name: str) {
     teko::assert::scenario_begin(name)
     teko::assert::scenario_ok()
 }
 
-/**
- * scenario_true — run a case whose probe answers a BOOL rather than a value, naming it the same way
- * `scenario` names a value case.
- *
- * WHY A SECOND HELPER AND NOT A CAST. The degrau-31 family (`d31_qualfat::*`) already returns `bool`,
- * and a `bool -> numeric` cast is the only cast direction Teko allows, so `scenario(name, p() to i64,
- * 1)` would compile — and would report "expected 1, got 0", which says LESS than the name does. A
- * bool has nothing to report beyond the case it belongs to, so this asserts the bool and lets the
- * scenario NAME carry the whole diagnosis: `<name>: assertion failed: is_true`.
- *
- * WHAT IT FIXES. Those ten cases had already left the exit code on the ASSERTION side (the degrau-31
- * work replaced their `if bad == 0 { bad = N }` with `teko::assert::is_true`), but their `.tkr` rows
- * still read `Then exit = 42` — so they were addressed by the channel's shared success sentinel, which
- * distinguishes none of them. Now each demands its own `scenario <name>: ok`.
- *
- * @param name  the case's name, spelled identically in `own_native.tkr`'s `Scenario:` line
- * @param got   what the case's probe answered
- * @throws      when it answered false — the panic names the case
- */
 fn scenario_true(name: str, got: bool) {
     teko::assert::scenario_begin(name)
     teko::assert::is_true(got)

@@ -1,63 +1,16 @@
-/**
- * vs — the item-14 (§13) value-struct-mutability ACCEPT probes. Each `pub fn *_probe()` exercises one
- * behaviour the fat header (§13.2) plus the `self`-as-ref receiver ABI buy, and returns a value
- * `main.tks` asserts by name.
- *
- * The whole point of the item is that a `struct` mutates IN PLACE like a class WITHOUT becoming an
- * object: it stays a VALUE (copied on assignment/pass, no identity, no arena). The four probes pin both
- * halves of that — the mutation must stick (A1/A3), and it must NOT leak across a copy (A2).
- */
-
-/**
- * Counter — the minimal mutable value struct: one field and one mutating method. `bump` writes
- * `self.n`, which the checker infers as a MUTATING method and the backend lowers through the receiver's
- * header pointer.
- *
- * @field n  the counter's value
- */
 pub type Counter = struct {
     n: i64
-    /** bump — increment the counter IN PLACE (the mutation sticks on the receiver's materialization). */
     pub fn bump() { self.n = self.n + 1 }
 }
 
-/**
- * Slot — the `pub set` shape that motivates item 14 (§13.2, the Intent case): a PRIVATE backing field
- * reachable only through the type's own methods, so encapsulation holds while the write still lands.
- *
- * @field _v  the private backing value; only `set_v` writes it
- */
 pub type Slot = struct {
     _v: i64
-    /**
-     * v — read the encapsulated value.
-     *
-     * @return i64  the current value
-     */
     pub fn v(): i64 { return self._v }
-    /**
-     * set_v — write the encapsulated value through `self` (the unblocked `pub set self._x`).
-     *
-     * @param n  the new value
-     */
     pub fn set_v(n: i64) { self._v = n }
 }
 
-/**
- * reset — the `ref` bridge (§13.1 ruling 5): a `ref` parameter aliases the CALLER's slot, so assigning
- * a whole new struct through it replaces the caller's value — not just one field.
- *
- * @param c  the caller's counter slot, aliased
- */
 fn reset(ref c: Counter) { c = Counter { n = 0 } }
 
-/**
- * a1_probe — A1, the heart of the item: an in-place mutation STICKS. Two `bump`s on the same
- * materialization must both land. Before the fat-header/receiver-ref work this returned 0, because the
- * receiver was a by-value copy and every write died with it.
- *
- * @return i64  2
- */
 pub fn a1_probe(): i64 {
     var c = Counter { n = 0 }
     c.bump()
@@ -65,13 +18,6 @@ pub fn a1_probe(): i64 {
     return c.n
 }
 
-/**
- * a2_probe — A2, value semantics: a COPY is an independent materialization, so mutating the copy must
- * not touch the original. Encodes both sides in one number (original * 10 + copy) so a leak in either
- * direction shows up as a different value rather than a silent pass.
- *
- * @return i64  56 — the original stays 5, the copy becomes 6
- */
 pub fn a2_probe(): i64 {
     var a = Counter { n = 5 }
     var b = a
@@ -79,25 +25,12 @@ pub fn a2_probe(): i64 {
     return a.n * 10 + b.n
 }
 
-/**
- * a3_probe — A3, the encapsulated setter (the Intent case): a private `_v` written only through the
- * type's own `set_v`, then read back through `v`.
- *
- * @return i64  7
- */
 pub fn a3_probe(): i64 {
     var s = Slot { _v = 0 }
     s.set_v(7)
     return s.v()
 }
 
-/**
- * a4_probe — A4, the `ref` bridge: `reset` reassigns the caller's WHOLE slot through a `ref`. Encodes
- * before and after (before * 10 + after) so a `ref` that silently copied would read 90 instead of 90's
- * counterpart — the after half is what proves the caller's slot really moved.
- *
- * @return i64  90 — 9 before the reset, 0 after it
- */
 pub fn a4_probe(): i64 {
     var c = Counter { n = 9 }
     var before = c.n

@@ -1,31 +1,3 @@
-/**
- * teko::collections — the growable, heap-of-arena collection classes (issue #163, the flagship
- * payoff of the #254 generic-class keystone). This root unit holds the pure array combinators the
- * `List<T>` and `Map<V>` classes both fold over: Teko arrays are FIXED-SIZE value snapshots
- * (`teko::list::push` copy-appends, returning a NEW array), so every "in-place" mutation a growable
- * collection performs is a self-field REASSIGNMENT to a freshly built array. These free generic
- * helpers centralise the two rebuild shapes (replace-at, drop-at) that field reassignment needs,
- * monomorphized per element type at each instantiation.
- *
- * WHY free functions and not private instance methods: a generic instance method that calls a
- * SIBLING generic instance method on `self` can fail to link natively — the mono/codegen pass
- * does not stamp the sibling (`List__…`), so the C compiler fails with `use of undeclared
- * identifier`. Routing shared logic through a free generic function — which the mono pass DOES
- * stamp per instantiation — avoids the linking failure. Reported to the integrator as a
- * generic-stack follow-up (#163 report).
- */
-
-/**
- * Return a copy of `xs` with the element at index `at` replaced by `v` — the value-functional
- * shape a growable collection uses to overwrite one slot (Teko has no array index-assignment). An
- * `at` outside `[0, xs.len)` yields an unchanged copy, so the caller guards the bound before the
- * write it intends to be observable.
- *
- * @param xs  the source array
- * @param at  the index to overwrite
- * @param v   the replacement element
- * @return    a fresh array equal to `xs` except at `at`, which holds `v`
- */
 pub fn arr_replace_at<T>(xs: []T, at: u64, v: T): []T {
     var out: []T = teko::list::empty()
     var i: u64 = 0
@@ -37,19 +9,6 @@ pub fn arr_replace_at<T>(xs: []T, at: u64, v: T): []T {
     out
 }
 
-/**
- * Return a copy of the concrete `[]u64` array `xs` with the element at index `at` removed (the
- * following elements shift down by one) — the NON-GENERIC twin of `arr_drop_at` for the cached-hash
- * side-array a keyed collection re-grows in step with its `K`/`V` arrays. A concrete `u64` helper
- * (rather than `arr_drop_at<u64>`) is used because a generic-class method that instantiates the SAME
- * free generic at BOTH the class type-param and a concrete `u64` mis-monomorphizes the concrete arm
- * (a re-key misfire, reported as an adjacent monomorph bug); a distinct concrete function sidesteps
- * it. An `at` at or beyond `xs.len` yields an unchanged copy.
- *
- * @param xs  the source hash array
- * @param at  the index to drop
- * @return    a fresh `[]u64` equal to `xs` with the `at`-th element removed
- */
 pub fn arr_drop_u64_at(xs: []u64, at: u64): []u64 {
     var out: []u64 = teko::list::empty()
     var i: u64 = 0
@@ -61,15 +20,6 @@ pub fn arr_drop_u64_at(xs: []u64, at: u64): []u64 {
     out
 }
 
-/**
- * Return a copy of `xs` with the element at index `at` removed (the following elements shift down
- * by one), the value-functional shape `Map::remove` and `List::remove_at` use. An `at` at or beyond
- * `xs.len` yields an unchanged copy.
- *
- * @param xs  the source array
- * @param at  the index to drop
- * @return    a fresh array equal to `xs` with the `at`-th element removed
- */
 pub fn arr_drop_at<T>(xs: []T, at: u64): []T {
     var out: []T = teko::list::empty()
     var i: u64 = 0
@@ -81,29 +31,11 @@ pub fn arr_drop_at<T>(xs: []T, at: u64): []T {
     out
 }
 
-/**
- * Return a copy of `xs` with its last element removed — the backing shape of `List::pop`. An empty
- * `xs` yields an empty copy (the caller decides whether an empty pop is an error).
- *
- * @param xs  the source array
- * @return    a fresh array equal to `xs` without its final element
- */
 pub fn arr_drop_last<T>(xs: []T): []T {
     if xs.len == 0 { return teko::list::empty() }
     arr_drop_at(xs, xs.len - 1)
 }
 
-/**
- * Return a copy of `xs` with `v` inserted BEFORE index `at` — the elements at `at…` shift up by one;
- * an `at` at or beyond `xs.len` appends `v` at the end. Value-functional (Teko arrays are snapshots);
- * a FREE generic function, not a method, per the sibling-link rule. The backing shape a front-insert
- * and a `SortedSet` ordered-insert both reassign a field to.
- *
- * @param xs  the source array
- * @param at  the index to insert before (clamped to `xs.len` for an append)
- * @param v   the element to insert
- * @return    a fresh array with `v` at position `min(at, xs.len)`
- */
 pub fn arr_insert_at<T>(xs: []T, at: u64, v: T): []T {
     var out: []T = teko::list::empty()
     var inserted = false
@@ -121,27 +53,12 @@ pub fn arr_insert_at<T>(xs: []T, at: u64, v: T): []T {
     out
 }
 
-/**
- * Return a copy of `xs` with the elements at positions `i` and `j` exchanged. If either index is out
- * of range (or `i == j`) the result is an unchanged copy. Value-functional; a FREE generic function.
- *
- * @param xs  the source array
- * @param i   the first position to exchange
- * @param j   the second position to exchange
- * @return    a fresh array equal to `xs` with `i` and `j` swapped
- */
 pub fn arr_swap<T>(xs: []T, i: u64, j: u64): []T {
     if i >= xs.len || j >= xs.len { return arr_slice(xs, 0, xs.len) }
     var swapped_i = arr_replace_at(xs, i, xs[j])
     arr_replace_at(swapped_i, j, xs[i])
 }
 
-/**
- * Return a copy of `xs` in reverse order. Value-functional; a FREE generic function.
- *
- * @param xs  the source array
- * @return    a fresh array equal to `xs` with its elements reversed
- */
 pub fn arr_reverse<T>(xs: []T): []T {
     var out: []T = teko::list::empty()
     var i: u64 = xs.len
@@ -153,15 +70,6 @@ pub fn arr_reverse<T>(xs: []T): []T {
     out
 }
 
-/**
- * Return a copy of the half-open range `[from, min(to, xs.len))` of `xs`. A `from` at or beyond the
- * clamped upper bound yields an empty array. Value-functional; a FREE generic function.
- *
- * @param xs    the source array
- * @param from  the inclusive lower bound
- * @param to    the exclusive upper bound (clamped to `xs.len`)
- * @return      a fresh array holding the selected range, empty when `from >= min(to, xs.len)`
- */
 pub fn arr_slice<T>(xs: []T, from: u64, to: u64): []T {
     var out: []T = teko::list::empty()
     var hi = to
@@ -175,17 +83,6 @@ pub fn arr_slice<T>(xs: []T, from: u64, to: u64): []T {
     out
 }
 
-/**
- * Binary-search `x`'s sorted position in the ascending `items` (over `<`, dispatched through
- * `T: IOrd`) and insert it there if absent, mutating `items` in place through the `ref` slice and
- * returning whether the element was NEWLY inserted. An element already present (neither `x < e` nor
- * `e < x` at the found position) is a no-op returning `false`. A FREE generic function (ref-threaded),
- * the `SortedSet`/`SortedDictionary` ordered-insert backer.
- *
- * @param items  the ascending target slice, referenced mutably
- * @param x      the element to insert in sorted position
- * @return       `true` iff `x` was absent and has now been inserted
- */
 pub fn sorted_insert<T: IOrd>(ref items: []T, x: T): bool {
     var arr = items.value
     var lo: u64 = 0
@@ -200,15 +97,6 @@ pub fn sorted_insert<T: IOrd>(ref items: []T, x: T): bool {
     true
 }
 
-/**
- * Restore the min-heap property UPWARD after a push: the element just appended at the end of `heap`
- * bubbles up past any larger parent (comparison over `<`, dispatched through `T: IOrd`). Returns the
- * repaired heap; value-functional (works on a copy). A FREE generic function, the `PriorityQueue`
- * enqueue backer.
- *
- * @param heap  a binary min-heap array with a freshly appended last element to sift up
- * @return      the heap with the last element moved to its heap-ordered position
- */
 pub fn heap_sift_up<T: IOrd>(heap: []T): []T {
     var h = heap
     if h.len == 0 { return h }
@@ -223,20 +111,6 @@ pub fn heap_sift_up<T: IOrd>(heap: []T): []T {
     h
 }
 
-/**
- * Remove and return the MINIMUM element of the NON-EMPTY min-heap `heap` (its root), restoring the
- * heap property downward, mutating `heap` in place through the `ref` slice. The last element replaces
- * the root and sifts down past any smaller child (comparison over `<`, dispatched through `T: IOrd`).
- * A FREE generic function, the `PriorityQueue` dequeue backer.
- *
- * The heap MUST be non-empty — the root read `heap[0]` is a fail-loud bounds violation (M.1) on an
- * empty heap, so the caller guards with a length/`is_empty` check. This return is a bare `T` rather
- * than `T | null` because a type parameter constrained by an interface (`T: IOrd`) may not yet stand
- * as a union member (the interface-in-union honest stop), so the empty case is guarded, not unioned.
- *
- * @param heap  the non-empty binary min-heap, referenced mutably
- * @return      the removed minimum element
- */
 pub fn heap_pop_min<T: IOrd>(ref heap: []T): T {
     var h = heap.value
     var top = h[0]
@@ -262,72 +136,23 @@ pub fn heap_pop_min<T: IOrd>(ref heap: []T): T {
     top
 }
 
-/**
- * Dictionary<K: IEq & IHash, V> — a growable, reference-semantic hash map from an
- * ARBITRARY key type `K` (constrained to be equatable AND hashable) to `V` values — the generic
- * successor to the str-keyed `Map<V>`. The representation is the SAME three parallel owned arrays
- * (`keys`/`hashes`/`vals`) `Map<V>` proves, re-grown on each mutation: a single `[]Entry<K,V>` would
- * need a nested generic construct parameterized by the owner's type-params (still ill-resolved on the
- * generic stack), so parallel arrays of `K`/`u64`/`V` sidestep that and are a standard hash-map shape.
- *
- * `IHash.hash()` buckets a key (its cached `u64` compared before the full key for cheap collision
- * rejection); `IEq.__eq` disambiguates a hash tie. Both dispatch through the key's interface contract
- * (`hash` via the #254 method-over-`T` path, `==` via the 9-ops generic-operator path), monomorphized
- * per concrete `K` — the real dispatch the retired structural traits never had. `Map<V>` is NOT
- * removed (`teko::env` depends on it); `Dictionary` is the additive generalization.
- *
- * @since 0.3.1
- * @see lib::IHash, lib::IEq, Map
- */
 pub type Dictionary<K: IEq & IHash, V> = class {
-    /** The keys, in insertion order — parallel to `hashes` and `vals`. */
     intern keys: []K
-    /** Each key's cached hash, compared before the full key for cheap collision rejection. */
     intern hashes: []u64
-    /** The values, parallel to `keys` (the value for `keys[i]` is `vals[i]`). */
     intern vals: []V
 
-    /**
-     * Build an empty `Dictionary<K, V>` — the generic static factory.
-     *
-     * @return a fresh, empty `Dictionary<K, V>` at the caller's concrete key/value types
-     */
     pub static fn make(): Dictionary<K, V> {
         .{ keys = teko::list::empty(); hashes = teko::list::empty(); vals = teko::list::empty() }
     }
 
-    /**
-     * The number of distinct keys currently held.
-     *
-     * @return the entry count
-     */
     pub fn len(): u64 { self.keys.len }
 
-    /**
-     * Whether the dictionary holds no entries.
-     *
-     * @return `true` iff `len() == 0`
-     */
     pub fn is_empty(): bool { self.keys.len == 0 }
 
-    /**
-     * Whether `k` is a key in the dictionary.
-     *
-     * @param k  the key to test
-     * @return   `true` iff `k` is present
-     */
     pub fn contains(k: K): bool {
         dict_find_index(self.keys, self.hashes, k.hash(), k) < self.keys.len
     }
 
-    /**
-     * Insert or update the value for `k`. A present key's value is overwritten in place (the entry
-     * count is unchanged); otherwise a new entry is appended. Every alias observes the change
-     * (reference semantics).
-     *
-     * @param k  the key to insert or update
-     * @param v  the value to associate with `k`
-     */
     pub fn insert(k: K, v: V) {
         var h = k.hash()
         var at = dict_find_index(self.keys, self.hashes, h, k)
@@ -340,26 +165,12 @@ pub type Dictionary<K: IEq & IHash, V> = class {
         self.vals = teko::list::push(self.vals, v)
     }
 
-    /**
-     * The value associated with `k`, or `null` when `k` is absent — the null-propagating lookup
-     * (`V?`, the disjoint-domain null path, never an `error` union).
-     *
-     * @param k  the key to look up
-     * @return   the associated value, or `null` if `k` is not present
-     */
     pub fn get(k: K): V | null {
         var at = dict_find_index(self.keys, self.hashes, k.hash(), k)
         if at >= self.keys.len { return null }
         self.vals[at]
     }
 
-    /**
-     * Remove the entry for `k` if present, in place. Removing an absent key is a no-op. Returns
-     * whether an entry was actually removed.
-     *
-     * @param k  the key to remove
-     * @return   `true` iff an entry for `k` existed and was removed
-     */
     pub fn remove(k: K): bool {
         var at = dict_find_index(self.keys, self.hashes, k.hash(), k)
         if at >= self.keys.len { return false }
@@ -369,29 +180,9 @@ pub type Dictionary<K: IEq & IHash, V> = class {
         true
     }
 
-    /**
-     * A fixed-size `[]K` snapshot of the dictionary's current keys, in insertion order — the door to
-     * iterate its entries (loop over the keys, `get` each). The returned array is an independent
-     * value; later mutations do not change it.
-     *
-     * @return the current keys as a `[]K` value snapshot
-     */
     pub fn keys(): []K { self.keys }
 }
 
-/**
- * Find the index of key `k` (whose precomputed hash is `h`) in the parallel `keys`/`hashes` arrays,
- * or `keys.len` when absent — the generalization of `Map`'s `map_find_index` from `str` to any
- * `K: IEq & IHash`. The cheap `u64` hash is compared first, rejecting a non-matching key without an
- * `__eq` call; an equal hash falls through to `keys[i] == k` (the generic `==` dispatch over `K: IEq`),
- * keeping collisions correct. A FREE generic function (not a private method) per the sibling-link rule.
- *
- * @param keys    the key array
- * @param hashes  the parallel cached-hash array (`hashes[i]` is `hash()` of `keys[i]`)
- * @param h       the precomputed hash of the sought key
- * @param k       the sought key
- * @return        the index of `k` in `keys`, or `keys.len` if `k` is absent
- */
 pub fn dict_find_index<K: IEq & IHash>(keys: []K, hashes: []u64, h: u64, k: K): u64 {
     var i: u64 = 0
     loop {
@@ -402,51 +193,18 @@ pub fn dict_find_index<K: IEq & IHash>(keys: []K, hashes: []u64, h: u64, k: K): 
     keys.len
 }
 
-/**
- * HashSet<T: IEq & IHash> — a growable, reference-semantic hash set with O(1)
- * amortized membership. Parallel owned `hashes`/`items` arrays re-grown per mutation (the `Dictionary`
- * representation minus the value array); `IHash.hash()` buckets, `IEq.__eq` disambiguates a collision.
- * `add` is idempotent — a present element is a no-op. Reuses the same `dict_find_index<K>` scan the
- * `Dictionary` does, keyed on `IEq & IHash`.
- *
- * @since 0.3.1
- * @see lib::IHash, lib::IEq, Dictionary
- */
 pub type HashSet<T: IEq & IHash> = class {
-    /** Each element's cached `hash()`, parallel to `items` — compared before the full element. */
     intern hashes: []u64
-    /** The elements, in insertion order, parallel to `hashes`. */
     intern items: []T
 
-    /**
-     * Build an empty `HashSet<T>` — the generic static factory.
-     *
-     * @return a fresh, empty set at the caller's concrete `T`
-     */
     pub static fn make(): HashSet<T> {
         .{ hashes = teko::list::empty(); items = teko::list::empty() }
     }
 
-    /**
-     * The number of elements currently held.
-     *
-     * @return the element count
-     */
     pub fn len(): u64 { self.items.len }
 
-    /**
-     * Whether the set holds no elements.
-     *
-     * @return `true` iff `len() == 0`
-     */
     pub fn is_empty(): bool { self.items.len == 0 }
 
-    /**
-     * Add `x` if absent (idempotent); reference semantics.
-     *
-     * @param x  the element to add
-     * @return   `true` iff `x` was newly inserted (was absent)
-     */
     pub fn add(x: T): bool {
         var h = x.hash()
         if dict_find_index(self.items, self.hashes, h, x) < self.items.len { return false }
@@ -455,23 +213,10 @@ pub type HashSet<T: IEq & IHash> = class {
         true
     }
 
-    /**
-     * Whether `x` is a member of the set.
-     *
-     * @param x  the element to test
-     * @return   `true` iff `x` is present
-     */
     pub fn contains(x: T): bool {
         dict_find_index(self.items, self.hashes, x.hash(), x) < self.items.len
     }
 
-    /**
-     * Remove `x` if present, in place. Removing an absent element is a no-op. Returns whether an
-     * element was actually removed.
-     *
-     * @param x  the element to remove
-     * @return   `true` iff `x` was present and was removed
-     */
     pub fn remove(x: T): bool {
         var at = dict_find_index(self.items, self.hashes, x.hash(), x)
         if at >= self.items.len { return false }
@@ -480,56 +225,18 @@ pub type HashSet<T: IEq & IHash> = class {
         true
     }
 
-    /**
-     * A fixed-size `[]T` snapshot of the set's current elements, in insertion order — the door to
-     * iterate the set. The returned array is an independent value; later mutations do not change it.
-     *
-     * @return the current elements as a `[]T` value snapshot
-     */
     pub fn to_array(): []T { self.items }
 }
 
-/**
- * SortedSet<T: IOrd> — a growable, reference-semantic set kept in ascending order
- * by `<` (dispatched through `T: IOrd`), so iteration is sorted and membership is an O(log n) binary
- * search — the ordered dual of `HashSet` (which needs `IEq & IHash`). The single owned `items` array
- * stays strictly ascending; `add` binary-search-inserts through the free `sorted_insert` helper and is
- * idempotent (a present element is a no-op).
- *
- * @since 0.3.1
- * @see lib::IOrd, HashSet
- */
 pub type SortedSet<T: IOrd> = class {
-    /** The elements, strictly ascending by `<` — binary-searchable. */
     intern items: []T
 
-    /**
-     * Build an empty `SortedSet<T>` — the generic static factory.
-     *
-     * @return a fresh, empty ordered set at the caller's concrete `T`
-     */
     pub static fn make(): SortedSet<T> { .{ items = teko::list::empty() } }
 
-    /**
-     * The number of elements currently held.
-     *
-     * @return the element count
-     */
     pub fn len(): u64 { self.items.len }
 
-    /**
-     * Whether the set holds no elements.
-     *
-     * @return `true` iff `len() == 0`
-     */
     pub fn is_empty(): bool { self.items.len == 0 }
 
-    /**
-     * Add `x` at its sorted position if absent (idempotent); reference semantics.
-     *
-     * @param x  the element to add
-     * @return   `true` iff `x` was newly inserted (was absent)
-     */
     pub fn add(x: T): bool {
         var arr = self.items
         var inserted = sorted_insert(&arr, x)
@@ -537,12 +244,6 @@ pub type SortedSet<T: IOrd> = class {
         inserted
     }
 
-    /**
-     * Whether `x` is a member (binary search over `<`).
-     *
-     * @param x  the element to test
-     * @return   `true` iff `x` is present
-     */
     pub fn contains(x: T): bool {
         var arr = self.items
         var lo: u64 = 0
@@ -555,78 +256,25 @@ pub type SortedSet<T: IOrd> = class {
         lo < arr.len && !(x < arr[lo]) && !(arr[lo] < x)
     }
 
-    /**
-     * A fixed-size `[]T` snapshot of the set's current elements, in ascending order. The returned
-     * array is an independent value; later mutations do not change it.
-     *
-     * @return the current elements as an ascending `[]T` value snapshot
-     */
     pub fn to_array(): []T { self.items }
 }
 
-/**
- * PriorityQueue<T: IOrd> — a growable, reference-semantic MIN-priority queue: a
- * binary min-heap over `<` (dispatched through `T: IOrd`), so `enqueue` is O(log n) and `dequeue`
- * removes and returns the SMALLEST element in O(log n). The single owned `heap` array holds the heap
- * in the standard implicit layout (children of `i` at `2i+1`/`2i+2`); `enqueue` appends then sifts up
- * (`heap_sift_up`), `dequeue` pops the root and sifts down (`heap_pop_min`).
- *
- * @since 0.3.1
- * @see lib::IOrd, SortedSet
- */
 pub type PriorityQueue<T: IOrd> = class {
-    /** The binary min-heap array (implicit layout: children of `i` at `2i+1`/`2i+2`). */
     intern heap: []T
 
-    /**
-     * Build an empty `PriorityQueue<T>` — the generic static factory.
-     *
-     * @return a fresh, empty priority queue at the caller's concrete `T`
-     */
     pub static fn make(): PriorityQueue<T> { .{ heap = teko::list::empty() } }
 
-    /**
-     * The number of elements currently queued.
-     *
-     * @return the element count
-     */
     pub fn len(): u64 { self.heap.len }
 
-    /**
-     * Whether the queue holds no elements.
-     *
-     * @return `true` iff `len() == 0`
-     */
     pub fn is_empty(): bool { self.heap.len == 0 }
 
-    /**
-     * Enqueue `x`, restoring the heap property upward; reference semantics. Duplicates are allowed
-     * (a priority queue is a multiset, unlike `SortedSet`).
-     *
-     * @param x  the element to enqueue
-     */
     pub fn enqueue(x: T) {
         var h = teko::list::push(self.heap, x)
         self.heap = heap_sift_up(h)
     }
 
-    /**
-     * The minimum element WITHOUT removing it; reference semantics. The queue MUST be non-empty — an
-     * empty `peek` is a fail-loud bounds violation (M.1), so the caller guards with `is_empty()`.
-     *
-     * @return the current minimum element
-     */
     pub fn peek(): T { self.heap[0] }
 
-    /**
-     * Remove and return the minimum element, restoring the heap property downward; reference
-     * semantics. The queue MUST be non-empty — an empty `dequeue` is a fail-loud bounds violation
-     * (M.1), so the caller guards with `is_empty()`. The result is a bare `T` rather than `T | null`
-     * because a type parameter constrained by an interface (`T: IOrd`) may not yet stand as a union
-     * member (the interface-in-union honest stop); the empty case is guarded, not unioned.
-     *
-     * @return the removed minimum element
-     */
     pub fn dequeue(): T {
         var h = self.heap
         var m = heap_pop_min(&h)
@@ -635,64 +283,23 @@ pub type PriorityQueue<T: IOrd> = class {
     }
 }
 
-/**
- * SortedDictionary<K: IOrd, V> — a growable, reference-semantic map kept in
- * ascending `K` order (parallel owned `keys`/`vals`), so iteration is sorted and lookup is an
- * O(log n) binary search over `<` (dispatched through `K: IOrd`) — the ordered dual of `Dictionary`
- * (which needs `IEq & IHash`; no hashing here). `insert` binary-search-updates a present key in place
- * or inserts a new `(k, v)` pair at its sorted position.
- *
- * @since 0.3.1
- * @see lib::IOrd, Dictionary
- */
 pub type SortedDictionary<K: IOrd, V> = class {
-    /** The keys, strictly ascending by `<` — binary-searchable; parallel to `vals`. */
     intern keys: []K
-    /** The values, parallel to `keys` (the value for `keys[i]` is `vals[i]`). */
     intern vals: []V
 
-    /**
-     * Build an empty `SortedDictionary<K, V>` — the generic static factory.
-     *
-     * @return a fresh, empty ordered map at the caller's concrete key/value types
-     */
     pub static fn make(): SortedDictionary<K, V> {
         .{ keys = teko::list::empty(); vals = teko::list::empty() }
     }
 
-    /**
-     * The number of distinct keys currently held.
-     *
-     * @return the entry count
-     */
     pub fn len(): u64 { self.keys.len }
 
-    /**
-     * Whether the ordered map holds no entries.
-     *
-     * @return `true` iff `len() == 0`
-     */
     pub fn is_empty(): bool { self.keys.len == 0 }
 
-    /**
-     * Whether `k` is a key in the ordered map (binary search over `<`).
-     *
-     * @param k  the key to test
-     * @return   `true` iff `k` is present
-     */
     pub fn contains(k: K): bool {
         var at = sorted_key_lower_bound(self.keys, k)
         at < self.keys.len && !(k < self.keys[at]) && !(self.keys[at] < k)
     }
 
-    /**
-     * Insert or update `v` at `k`'s sorted position. A present key's value is overwritten in place
-     * (the entry count is unchanged); otherwise a new `(k, v)` pair is inserted at its sorted
-     * position (both parallel arrays shift up). Reference semantics.
-     *
-     * @param k  the key to insert or update
-     * @param v  the value to associate with `k`
-     */
     pub fn insert(k: K, v: V) {
         var at = sorted_key_lower_bound(self.keys, k)
         if at < self.keys.len && !(k < self.keys[at]) && !(self.keys[at] < k) {
@@ -703,38 +310,15 @@ pub type SortedDictionary<K: IOrd, V> = class {
         self.vals = arr_insert_at(self.vals, at, v)
     }
 
-    /**
-     * The value associated with `k`, or `null` when `k` is absent — the null-propagating lookup
-     * (`V?`, the disjoint-domain null path).
-     *
-     * @param k  the key to look up
-     * @return   the associated value, or `null` if `k` is not present
-     */
     pub fn get(k: K): V | null {
         var at = sorted_key_lower_bound(self.keys, k)
         if at >= self.keys.len || k < self.keys[at] || self.keys[at] < k { return null }
         self.vals[at]
     }
 
-    /**
-     * A fixed-size `[]K` snapshot of the ordered map's current keys, in ascending order. The returned
-     * array is an independent value; later mutations do not change it.
-     *
-     * @return the current keys as an ascending `[]K` value snapshot
-     */
     pub fn keys(): []K { self.keys }
 }
 
-/**
- * The lower-bound index of `k` in the ascending `keys` (over `<`, dispatched through `K: IOrd`): the
- * first index `i` with `!(keys[i] < k)`, or `keys.len` when `k` is greater than every key. A FREE
- * generic function (not a private method) per the sibling-link rule; the shared binary search the
- * `SortedDictionary` `contains`/`insert`/`get` all pivot on.
- *
- * @param keys  the ascending key array
- * @param k     the sought key
- * @return      the lower-bound index of `k` in `keys`
- */
 pub fn sorted_key_lower_bound<K: IOrd>(keys: []K, k: K): u64 {
     var lo: u64 = 0
     var hi: u64 = keys.len

@@ -1,57 +1,20 @@
-/**
- * A minimal stand-in for `lir::LBlock`: an id plus a self-appended `[]i64` instruction
- * stream (the fat member whose header the native backend corrupts under the by-address
- * self-append shape this probe pins).
- */
 type Blk = struct {
-    /** The block's identity, matched by `append_inst` to select the growth target. */
     id: u32
-    /** The instruction stream, grown one element per `push_inst_block` call. */
     insts: []i64
 }
 
-/**
- * A minimal stand-in for `lir::LFunc`: the block list whose buffer `append_inst` mutates
- * in place via an index-assign that aliases the same underlying array.
- */
 type Fn = struct {
-    /** The function's blocks; `blocks[i]` is rewritten in place as its stream grows. */
     blocks: []Blk
 }
 
-/**
- * Build a fresh, empty block with the given id.
- *
- * @param id  the block's identity
- * @return    an empty `Blk`
- */
 fn new_blk(id: u32): Blk {
     Blk { id = id; insts = teko::list::empty() }
 }
 
-/**
- * Return a fresh block with `inst` appended to its stream — the exact shape of
- * `lir::push_inst_block` (lir.tks:530): a self-append of the fat `insts` member rewrapped
- * into a new aggregate.
- *
- * @param b     the block to grow
- * @param inst  the instruction value to append
- * @return      `b` with `inst` appended to `insts`
- */
 fn push_inst_block(b: Blk, inst: i64): Blk {
     Blk { id = b.id; insts = teko::list::push(b.insts, inst) }
 }
 
-/**
- * Return `f` with `inst` appended to the block whose id is `block_id` — the exact shape of
- * `lir::append_inst` (lir.tks:552): an in-place index-assign `blocks[i] = ...` onto a slice
- * that aliases `f.blocks`' buffer.
- *
- * @param f         the function to grow
- * @param block_id  the target block's id
- * @param inst      the instruction value to append
- * @return          `f` with `inst` appended to the matching block
- */
 fn append_inst(f: Fn, block_id: u32, inst: i64): Fn {
     var blocks = f.blocks
     var i: u64 = 0
@@ -66,12 +29,6 @@ fn append_inst(f: Fn, block_id: u32, inst: i64): Fn {
     Fn { blocks = blocks }
 }
 
-/**
- * Build a three-block function and hammer `append_inst` in a loop, exactly as `lower_match_value`
- * hammers the LIR self-append path.
- *
- * @return the fully-grown function
- */
 fn build(): Fn {
     var blocks: []Blk = teko::list::empty()
     blocks = teko::list::push(blocks, new_blk(0))
@@ -89,13 +46,6 @@ fn build(): Fn {
     return f
 }
 
-/**
- * Sum every instruction of every block — the read-back that faults or reds when the inner
- * `insts` slice header was corrupted by the self-append conveyance.
- *
- * @param f  the function whose instruction streams are summed
- * @return   the total of all instruction values across all blocks
- */
 fn total(f: Fn): i64 {
     var sum: i64 = 0
     var i: u64 = 0
@@ -113,12 +63,6 @@ fn total(f: Fn): i64 {
     return sum
 }
 
-/**
- * The probe's exit code: 42 when the read-back sum matches the correct total (12096), 1 when a
- * corrupt slice header yielded a wrong sum.
- *
- * @return 42 on success, 1 on corruption
- */
 fn probe_code(): i32 {
     var f = build()
     if total(f) == 12096 { return 42 }

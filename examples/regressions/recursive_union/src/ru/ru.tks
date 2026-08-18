@@ -1,36 +1,9 @@
-/**
- * TInt — a LEAF member of the recursive type union: an integer type of a given bit width.
- *
- * @field bits  the integer width the leaf carries
- */
 type TInt = struct { bits: i64 }
 
-/**
- * TArr — the RECURSIVE member: an array-of-type node whose `elem` field is the whole `@Ty()` union
- * BY VALUE. This is the by-value back-edge a §9.D inline union must box (`tk_u_<keys> *`), exactly as
- * the named variant it replaces already boxed a self-referential struct field.
- *
- * @field elem  the element type (recurses into the union; boxed to keep the C struct finite)
- */
 type TArr = struct { elem: @Ty() }
 
-/**
- * Ty — the retired type union `TInt | TArr | null`: a MULTI-member inline-tag union that also lists a
- * `null` case. It is NOT the two-member `{ null, X }` niche/box optional, so it stays an inline-tag
- * `{ tag; union }` embedded by value — and its recursion through `TArr.elem` must therefore be boxed.
- * The `null` member proves a `Type`-shaped union (one that carries a null case among many) still boxes.
- *
- * @return  the inline union `TInt | TArr | null`
- */
 macro Ty() { lowering { TInt | TArr | null } }
 
-/**
- * arr_depth — the array-nesting depth of a type value: 0 for a `TInt` or the `null` case, and
- * `1 + arr_depth(inner)` for a `TArr` (the recursion reads the boxed `elem` back through its pointer).
- *
- * @param t  the type value
- * @return   the number of nested `TArr` layers
- */
 fn arr_depth(t: @Ty()): i64 {
     match t {
         TInt as i => 0
@@ -39,23 +12,10 @@ fn arr_depth(t: @Ty()): i64 {
     }
 }
 
-/**
- * arr_depth_probe — build a three-deep `TArr(TArr(TArr(TInt)))` and read its nesting depth back through
- * the boxed `elem` chain: 3 (the construction mallocs+copies each recursive child, the read derefs it).
- *
- * @return  3
- */
 pub fn arr_depth_probe(): i64 {
     arr_depth(TArr { elem = TArr { elem = TArr { elem = TInt { bits = 8 } } } })
 }
 
-/**
- * inner_is_null — 7 when a `TArr`'s boxed `elem` is the `null` case, else 0. Exercises the `null`
- * member of a MULTI-member inline-tag union read through a boxed recursive field.
- *
- * @param a  the array node whose element is inspected
- * @return   7 when `a.elem` is `null`, else 0
- */
 fn inner_is_null(a: TArr): i64 {
     match a.elem {
         null => 7
@@ -64,23 +24,10 @@ fn inner_is_null(a: TArr): i64 {
     }
 }
 
-/**
- * null_member_probe — a `TArr { elem = null }` reads its boxed element back as the `null` case: 7. Proves
- * a null case seated in a multi-member inline-tag union round-trips through the box (§9.D `Type`-shape).
- *
- * @return  7
- */
 pub fn null_member_probe(): i64 {
     inner_is_null(TArr { elem = null })
 }
 
-/**
- * leaf_bits — the `bits` of the innermost `TInt` leaf, recursing through every `TArr.elem` box; -1 if
- * the chain bottoms out at `null`.
- *
- * @param t  the type value to descend
- * @return   the leaf `TInt.bits`, or -1 for a `null` bottom
- */
 fn leaf_bits(t: @Ty()): i64 {
     match t {
         TInt as i => i.bits
@@ -89,12 +36,6 @@ fn leaf_bits(t: @Ty()): i64 {
     }
 }
 
-/**
- * payload_probe — descend `TArr(TArr(TInt { bits = 42 }))` to its leaf and read the payload back through
- * two boxed `elem` hops: 42. Proves the boxed recursive field carries the leaf value intact.
- *
- * @return  42
- */
 pub fn payload_probe(): i64 {
     leaf_bits(TArr { elem = TArr { elem = TInt { bits = 42 } } })
 }

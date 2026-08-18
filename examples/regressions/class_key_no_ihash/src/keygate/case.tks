@@ -1,92 +1,21 @@
-/**
- * IEq — the local equality capability (a self-contained copy of teko::cmp::IEq, since the stdlib's
- * cmp module is compiler-internal and not visible to a fixture project). A conformer writes
- * `operator __eq`; `__ne` is its mandated counter-part.
- *
- * @since class_key_no_ihash (F4 reject fixture)
- */
 type IEq = interface {
-    /**
-     * __eq — equality of two operands.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff equal
-     */
     operator __eq(left: self, right: self): bool
-    /**
-     * __ne — the mandated counter-part of `__eq`.
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff unequal
-     */
     operator __ne(left: self, right: self): bool
 }
 
-/**
- * NeByEq — the `__ne` reflection mixin, `!(left == right)`, so a conformer that writes `__eq`
- * satisfies IEq's counter-part without hand-writing `__ne`.
- *
- * @since class_key_no_ihash (F4 reject fixture)
- */
 type NeByEq = trait {
-    /**
-     * __ne — inequality by negating equality (the composing host provides `__eq`).
-     *
-     * @param left   the left operand
-     * @param right  the right operand
-     * @return       true iff unequal
-     */
     operator __ne(left: self, right: self): bool { !(left == right) }
 }
 
-/**
- * IHash — the local hashing capability (a copy of teko::cmp::IHash). A conformer writes `fn hash()`;
- * the hash-keyed collections require it ALONGSIDE IEq. `Plain` below deliberately omits it.
- *
- * @since class_key_no_ihash (F4 reject fixture)
- */
 type IHash = interface {
-    /**
-     * hash — a 64-bit hash of the receiver.
-     *
-     * @return the receiver's hash
-     */
     fn hash(): u64
 }
 
-/**
- * Plain — a key type that conforms `IEq` (with the `NeByEq` counter-part) but NOT `IHash`: it writes
- * no `fn hash()`. It is therefore INELIGIBLE as a hash-collection key — the negative subject of this
- * fixture.
- *
- * @since class_key_no_ihash (F4 reject fixture)
- */
 type Plain = struct IEq & NeByEq {
-    /** n — the compared datum. */
     n: i64
-    /**
-     * __eq — componentwise equality over the single field.
-     *
-     * @param left   the left key
-     * @param right  the right key
-     * @return       true iff the fields are equal
-     */
     operator __eq(left: self, right: self): bool { left.n == right.n }
 }
 
-/**
- * find_index — the hash-scan the generic `Dict` pivots on: a `<K: IEq & IHash>` linear scan over the
- * parallel key/hash arrays. A FREE function (not a private instance method) so a stamped instance
- * method does not call a sibling instance method on `self`.
- *
- * @param keys    the key array
- * @param hashes  the parallel cached-hash array
- * @param h       the precomputed hash of the sought key
- * @param k       the sought key
- * @return        the index of `k`, or `keys.len` if absent
- */
 pub fn find_index<K: IEq & IHash>(keys: []K, hashes: []u64, h: u64, k: K): u64 {
     var i: u64 = 0
     loop {
@@ -97,39 +26,15 @@ pub fn find_index<K: IEq & IHash>(keys: []K, hashes: []u64, h: u64, k: K): u64 {
     keys.len
 }
 
-/**
- * Dict<K: IEq & IHash, V> — a self-contained generic hash-map CLASS mirroring the real
- * `teko::collections::Dictionary` shape (parallel owned `keys`/`hashes`/`vals` arrays). Its
- * `K: IEq & IHash` constraint is the compile-time gate the F4 fix enforces on a CLASS instantiation:
- * a `Dict<Plain, i64>` (where `Plain` lacks `IHash`) must be REJECTED at monomorphization, not
- * escape to a link error on the missing `Plain__hash`.
- *
- * @since class_key_no_ihash (F4 reject fixture)
- */
 pub type Dict<K: IEq & IHash, V> = class {
-    /** The keys, in insertion order — parallel to `hashes` and `vals`. */
     intern keys: []K
-    /** Each key's cached hash, compared before the full key. */
     intern hashes: []u64
-    /** The values, parallel to `keys`. */
     intern vals: []V
 
-    /**
-     * Build an empty `Dict<K, V>` — the generic static factory.
-     *
-     * @return a fresh, empty `Dict<K, V>` at the caller's concrete key/value types
-     */
     pub static fn make(): Dict<K, V> {
         .{ keys = teko::list::empty(); hashes = teko::list::empty(); vals = teko::list::empty() }
     }
 
-    /**
-     * Insert or append the value for `k`, dispatching `k.hash()` through the key's `IHash` contract —
-     * the method whose lowering needs `K__hash` to exist, hence the constraint gate.
-     *
-     * @param k  the key to insert
-     * @param v  the value to associate with `k`
-     */
     pub fn insert(k: K, v: V) {
         var h = k.hash()
         var at = find_index(self.keys, self.hashes, h, k)
@@ -140,11 +45,6 @@ pub type Dict<K: IEq & IHash, V> = class {
     }
 }
 
-/**
- * trip_key_gate — instantiate the `K: IEq & IHash` gate as a CLASS at `Plain`, which conforms `IEq`
- * but not `IHash`. The `Dict<Plain, i64>` class instantiation MUST be rejected by the constraint gate
- * — the whole point of this negative fixture (was a link error on `Plain__hash` before F4).
- */
 pub fn trip_key_gate() {
     var d = Dict<keygate::Plain, i64>::make()
     d.insert(Plain { n = 1 }, 7)

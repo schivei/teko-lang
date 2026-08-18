@@ -1,35 +1,17 @@
-/** tooling/shared/src/extract.tks (namespace 'grammar_extractor' — same root as main.tks
- *  and every other file directly under tooling/shared/src/; no `use` needed between them) —
- *  the A1 extractor core. Reads the TEXT of the compiler's own canonical lexer sources
- *  (src/lexer/token.tks + src/lexer/lexer.tks) and mines the keyword table, the operator/
- *  punctuation table, the literal forms, the comment delimiters, and the string escape
- *  table straight out of the lexer's OWN scanning code — never a second hand-typed copy.
- *
- *  Every extraction rule below targets one SPECIFIC, mechanical shape already present in
- *  the lexer source (a quoted keyword match, a `b'x'` byte-literal comparison chain feeding
- *  `sym(...)`, a `b'x' => TokenKind::Y` one-byte dispatch arm, an escape-table match arm).
- *  When the lexer changes, these shapes change with it, and the extractor mines the new
- *  shape on the next run — this is what "single lexical source" means in practice.
- *
- *  one multi-byte operator: its exact spelling + the originating TokenKind name (for traceability).
- */
 pub type OperatorEntry = struct {
     text: str
     kind: str
 }
 
-/** one keyword: its exact spelling. */
 pub type KeywordEntry = struct {
     text: str
 }
 
-/** one decoded escape: the source letter after `\` + the literal byte it produces. */
 pub type EscapeEntry = struct {
     letter: str
     byte_value: u32
 }
 
-/** the full mined spec — the in-memory shape mirrored 1:1 into grammar-spec.json (A1). */
 pub type GrammarSpec = struct {
     keywords: []KeywordEntry
     operators: []OperatorEntry
@@ -51,7 +33,6 @@ pub type GrammarSpec = struct {
     string_escapes: []EscapeEntry
 }
 
-/** mine every `if text == "word"` keyword line inside `keyword_kind` (lexer.tks). */
 pub fn mine_keywords(lexer_source: str): []KeywordEntry {
     var out: []KeywordEntry = teko::list::empty()
     var lines = split_lines(lexer_source)
@@ -65,7 +46,6 @@ pub fn mine_keywords(lexer_source: str): []KeywordEntry {
     out
 }
 
-/** the keyword spelling on one `if text == "…"` line, or "" when the line does not match. */
 fn keyword_on_line(line: str): str {
     var marker = "if text == \""
     var start = index_of_from(line, marker, 0)
@@ -76,10 +56,6 @@ fn keyword_on_line(line: str): str {
     teko::str::slice(line, word_start, word_end)
 }
 
-/** mine every multi-byte operator produced by a `sym(source, pos, N, TokenKind::X)` line
- *  guarded by a `b'a' && c1 == b'b' [&& c2 == b'c']` comparison chain, plus every 1-byte
- *  operator from the `match c { b'x' => TokenKind::Y … }` dispatch block (lexer.tks::read_symbol).
- */
 pub fn mine_operators(lexer_source: str): []OperatorEntry {
     var out: []OperatorEntry = teko::list::empty()
     var lines = split_lines(lexer_source)
@@ -96,9 +72,6 @@ pub fn mine_operators(lexer_source: str): []OperatorEntry {
     out
 }
 
-/** every `b'X'` occurrence in `line`, in left-to-right order (the byte literals driving a
- *  maximal-munch comparison chain always appear in match order — see read_symbol).
- */
 fn byte_literals_on_line(line: str): []byte {
     var out: []byte = teko::list::empty()
     var i: u64 = 0
@@ -117,9 +90,6 @@ fn byte_literals_on_line(line: str): []byte {
     out
 }
 
-/** the `TokenKind::Name` on `line` right after a `return sym(source, pos, N, ` call, or ""
- *  together with N == 0 when the line is not a `sym(...)` return.
- */
 type SymCall = struct {
     kind: str
     width: u64
@@ -155,7 +125,6 @@ fn parse_u64(digits: str): u64 {
     v
 }
 
-/** a 2- or 3-byte operator entry mined from one `read_symbol` comparison-chain line. */
 fn multi_byte_operator_on_line(line: str): OperatorEntry {
     var call = sym_call_on_line(line)
     if call.width < 2 { return OperatorEntry { text = ""; kind = "" } }
@@ -171,7 +140,6 @@ fn multi_byte_operator_on_line(line: str): OperatorEntry {
     OperatorEntry { text = spelling; kind = call.kind }
 }
 
-/** a 1-byte operator/punctuation entry mined from a `b'x' => TokenKind::Y` dispatch arm. */
 fn single_byte_operator_on_line(line: str): OperatorEntry {
     var trimmed = trim(line)
     if trimmed.len < 3 { return OperatorEntry { text = ""; kind = "" } }
@@ -191,7 +159,6 @@ fn single_byte_operator_on_line(line: str): OperatorEntry {
     OperatorEntry { text = one_char(trimmed[2]); kind = teko::str::slice(trimmed, name_start, name_end) }
 }
 
-/** mine the escape table from `escape_byte`'s match arms (`b'x' => 0xNN` / `b'\\'' => …`). */
 pub fn mine_escapes(lexer_source: str): []EscapeEntry {
     var out: []EscapeEntry = teko::list::empty()
     var lines = split_lines(lexer_source)
@@ -205,10 +172,6 @@ pub fn mine_escapes(lexer_source: str): []EscapeEntry {
     out
 }
 
-/** an escape arm has the shape `b'x' => 0xNN` — the same `b'x' => …` shape as a 1-byte
- *  operator dispatch arm (`b'x' => TokenKind::Y`), so the two are disambiguated by the
- *  RHS: an escape arm's value is a HEX LITERAL, never a `TokenKind::` name.
- */
 fn escape_arm_on_line(line: str): EscapeEntry {
     var trimmed = trim(line)
     if trimmed.len < 2 || trimmed[0] != b'b' || trimmed[1] != b'\'' { return EscapeEntry { letter = ""; byte_value = 0 } }
@@ -244,9 +207,6 @@ fn hex_digit_value(c: byte): u32 {
     255
 }
 
-/** mine every variant name declared inside `pub type TokenKind = enum { … }` (token.tks) —
- *  the canonical list an operator's `kind` (mined from lexer.tks) must belong to.
- */
 pub fn mine_token_kind_names(token_source: str): []str {
     var out: []str = teko::list::empty()
     var lines = split_lines(token_source)
@@ -273,7 +233,6 @@ fn contains_token_kind_enum_open(line: str): bool {
     index_of_from(line, "TokenKind = enum {", 0) < line.len
 }
 
-/** the leading identifier on an enum-body line, or "" for a blank/comment-only line. */
 fn enum_variant_name(trimmed: str): str {
     if trimmed.len == 0 { return "" }
     if starts_with_at(trimmed, 0, "//") { return "" }
@@ -288,9 +247,6 @@ fn enum_variant_name(trimmed: str): str {
     teko::str::slice(trimmed, 0, end)
 }
 
-/** does every operator's mined `kind` name exist among `token_kinds`? Catches drift between
- *  lexer.tks's dispatch and token.tks's enum (a typo or a renamed variant one file forgot).
- */
 fn validate_operator_kinds(operators: []OperatorEntry, token_kinds: []str): error | null {
     var i: u64 = 0
     loop {
@@ -313,14 +269,6 @@ fn contains_name(names: []str, needle: str): bool {
     false
 }
 
-/** assemble the full GrammarSpec from the two lexer source texts (token.tks + lexer.tks),
- *  cross-validating every mined operator's TokenKind against token.tks's own enum (M.1 —
- *  fail loud on drift rather than silently emitting a spec that outruns the lexer). The
- *  comment/string/byte/char/number delimiters are STRUCTURAL literals of the scanner (its
- *  `//`, `/*`, `"`, `b'`, `c'` lead bytes) rather than something to mine textually — they
- *  are the fixed shape `next_token`/`skip_line`/`skip_block_comment` dispatch on, so they
- *  are named here once, at the same trust level as the mined tables above.
- */
 pub fn build_spec(token_source: str, lexer_source: str): GrammarSpec | error {
     var operators = mine_operators(lexer_source)
     var token_kinds = mine_token_kind_names(token_source)
