@@ -505,3 +505,18 @@ maquiar. Granularidade decidida law-first: **namespace** (arquivo quebra coesão
 whole-program é o pico). Se surgir um namespace que sozinho ainda pique acima do guard, ele
 NÃO se subdivide por arquivo — subdivide-se por REGIÃO de escopo interno (C6) dentro da
 unidade, mantendo a fronteira de unidade em namespace.
+
+**R6 — Determinismo do artefato serializado (`.tkb` inter-estágio).** O dump para disco tem
+que ser round-trip sem perda e sem não-determinismo: proibido timestamp, endereço de
+ponteiro, ou ordem de iteração de `map`/`hashset` no frame (ordenar chaves). Mesma entrada →
+mesmo `.tkb` → mesmo `teko.c`. O `.tkb` já roda no path de pacote, mas o uso por-unidade
+(C13) precisa preservar a MESMA ordem de itens do whole-program. Custo de serializar/reler é
+o trade contra memória — só se paga onde o estágio não funde (a barreira do LINK); onde funde
+(check→lower→emit por unidade), o despejo é arena-drop em memória, sem IO.
+
+**Decisão em aberto (não-HALT) — ordem de execução dos eixos.** Eixo A (C3–C5) é pré-requisito
+factual: matar o push primeiro derruba 93% e simplifica a conversão dos mesmos módulos que o
+Eixo C reestrutura. Eixo C (C10–C14) é grande e arquitetural; recomendo entregá-lo DEPOIS de
+A+B verdes e SÓ SE o residual pós-C6 ainda exceder a folga desejada. Se A+B já entregam
+≤1,0 GB (provável), o Eixo C vira otimização de teto/robustez, não obrigação da meta. Sem
+tensão de Lei aqui — é sequenciamento; registrado para o dono decidir a prioridade.
