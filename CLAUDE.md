@@ -56,7 +56,10 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   virar críptico é errado; `aes_gcm: nonce must be exactly 12 bytes (96-bit)` já é boa. Tirar é
   novela/ref/arquitetura, não a clareza. **A melhoria do texto entra JUNTO no passe de limpeza**
   (dono 2026-08-18) — mesmo agente, mesmo arquivo. (O prefixo `arquivo:linha:coluna:` em si é
-  mecanismo de codegen, à parte.)
+  mecanismo de codegen, à parte.) **ETAPA DEDICADA OBRIGATÓRIA (dono 2026-08-18):** em módulos
+  exercitados pelo self-build (compiler-core), mudar string de mensagem diverge `src`↔`teko.c` — por
+  isso os lotes de doc podem adiar; MAS **um passe de mensagens unificado sobre a árvore integrada,
+  ANTES do reseed único, É PRA SER FEITO** (não pular). O compiler-core é o alvo principal da lei.
 - Retroativo, tree-wide. Mudança que toca o `teko.c` (mensagens, ou deslocamento de linha) exige reseed.
 - **Testes: não se escreve teste para o que o compilador exercita ao se compilar** — o fixpoint (self-build)
   já é essa prova. A linguagem é MONÓLITO: a stdlib É o compilador — o self-build a compila E `gen1` a
