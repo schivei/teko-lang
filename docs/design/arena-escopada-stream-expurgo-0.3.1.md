@@ -6,6 +6,18 @@ status: DESIGN — no product line. The three-part 0.3.1 SCOPED-MEMORY correctio
         points with buffers reclaimed by the scope arena, (#3) total purge of
         ::push/::empty/grow_inplace/with_cap. Extends the canonical arena spec; supersedes it only
         where the owner's new fine-scope + purge decree diverges (§1).
+        REMOUNT 2026-08-19b: §9's five open forks (F1–F5) are RULED by the owner and propagated
+        through the body. F1 — arrays are FIXED-SIZE; growth = allocate a NEW fixed array and DROP
+        the old (the standing NO-PUSHES law + the four conversion natures); NO push/grow_inplace/
+        with_cap AND no growable method survives; Tier B surface removal HAPPENS this round. F2 —
+        the object arena is a DEDICATED per-object region (not the shared enclosing arena). F3 —
+        the push re-point stays native-first (C1 after A3). F4 — KILL both #arena_depth (#476) and
+        #arena_size (the profiler presize); the compiler measures the slot size STATICALLY (the
+        AST floor) as a minimum materialization support floor. F5 — the `.h`→`.tks` FFI migration
+        is IN SCOPE (link §16). Arena-model invariant reaffirmed (owner 2026-08-10, restated): the
+        arena is DYNAMIC with a static FLOOR (lower bound), NO ceiling — it grows past the floor by
+        chunk-list (never copying bytes); F1 (fixed arrays) is the SLICE layer, the arena is the
+        REGION layer, and killing the sizing pragmas does NOT make the arena static (§2.5).
 source: owner spec 2026-08-19 (scoped-memory correction) reconciled with
         docs/design/arena-especificacao-unica-0.3.1.md (source of truth), io-streaming-0.3.1.md
         (io decree 2026-08-19), modelo-de-memoria-por-escopo-0.3.1.md, arena-por-escopo-0.3.1.md,
@@ -17,9 +29,11 @@ frozen: bootstrap/teko.c + the C checker/codegen/build twins are OUTPUT/FROZEN; 
 
 # Scoped arena, native stream, and the growable-primitive purge (0.3.1)
 
-Architect, 2026-08-19. Base: `origin/fix/retirement` @ `78be487d`. DESIGN document — no product
-line. This is the owner's three-part SCOPED-MEMORY correction, sequenced #1 (foundation) → #2 (stream
-buffers hang off #1) → #3 (purge, because the arena replaces the growable primitives).
+Architect, 2026-08-19. Base: `origin/fix/retirement` @ `9eba3d75` (the commit that created this doc;
+REMOUNT after the owner ruled §9's five forks). DESIGN document — no product line. This is the owner's
+three-part SCOPED-MEMORY correction, sequenced #1 (foundation) → #2 (stream buffers hang off #1) → #3
+(purge, because the arena reclaims the transient of the removed growable primitives). §9's F1–F5 are now
+RULED and propagated through the body (see §9 for the verbatim rulings; §0 for the reconciliation).
 
 ---
 
@@ -30,21 +44,46 @@ two points the owner's new decree moves. Cited, with the divergence made explici
 
 | existing doc | what it owns | this doc's relation |
 |---|---|---|
-| `docs/design/arena-especificacao-unica-0.3.1.md` (owner ruling 2026-08-10) | THE source of truth: region mechanics (§1), the region tree lifecycle (§2), the AST **floor/piso** (§3), **elision** `need==0` (§4), **DPS** move-on-return (§5), the **four escape boundaries** (§6), concurrency/F1/F2 (§7), DI-as-arena (§8) | **EXTENDS.** #1 here is the *fine-scope* refinement of its §2/§4/§6 the owner now decrees; #3 here removes the growable primitives its §1.2 named (`grow_inplace`/`with_cap`). Where the two disagree on `grow_inplace`, **THIS wins** (§1, §5). |
+| `docs/design/arena-especificacao-unica-0.3.1.md` (owner ruling 2026-08-10) | THE source of truth: region mechanics (§1), the region tree lifecycle (§2), the AST **floor/piso** (§3), **elision** `need==0` (§4), **DPS** move-on-return (§5), the **four escape boundaries** (§6), concurrency/F1/F2 (§7), DI-as-arena (§8) | **EXTENDS.** #1 here is the *fine-scope* refinement of its §2/§4/§6 the owner now decrees; #3 here removes the growable primitives its §1.2 named (`grow_inplace`/`with_cap`) AND `push`/`empty` AND any growable method (owner F1). Its §3 **couples** the static floor to the profiler's `#arena_size` for the dynamic-need case (`arena-especificacao-unica-0.3.1.md:147-149`) — owner F4 **SEVERS** that coupling: the floor stays static, the region stays DYNAMIC by chunk-list, the profiler refinement is killed (§2.5). Its §7.8 F2 per-entry free-list stays (for the immortal-F2 chan/journal case) and COEXISTS with F2's dedicated per-object regions (§2.4). Where the two disagree on `grow_inplace`/the sizing pragmas, **THIS wins** (§1, §2.5, §5). |
 | `docs/design/modelo-de-memoria-por-escopo-0.3.1.md` (2026-08-02) | the per-scope LANGUAGE model: the 5 lexical scopes, `ResidencePlan`, the `residence_plan` oracle, `region_enter`/`region_leave` | **REUSES verbatim.** The `ResidencePlan`/`residence_plan` oracle and `region_enter`/`leave` primitive are the plumbing #1 lowers onto. #1 adds a 6th scope (the OBJECT arena) and tightens the reclaim rule to the depth check (§3 here). |
 | `docs/design/io-streaming-0.3.1.md` (owner decree 2026-08-19) | the native-stream io SURFACE (`FileStream`, `open_*`, `stream_read/write/seek/close`, `write_stream`/`read_stream`, `byte_ptr`), the syscall-per-OS map, the io-site migration census | **REUSES verbatim and BINDS to #1.** #2 here is NOT a second io surface — it is that surface with its 1024 B scratch buffer bound to the enclosing scope arena of #1 (§7 here). It also names its own §9 co-dependency ("closes together with the arena") — this doc is that arena. |
 | `docs/design/arena-por-escopo-0.3.1.md` (2026-08-07, M0–M3) | the compiler CROSS-PHASE retention axis (`clone_tprogram`, front-region drop, `tk_str_concat_len_r`) | **ORTHOGONAL, complementary.** That axis frees the frontend overhang BETWEEN phases; #1 here frees dead scratch WITHIN each fine scope. Both compose; neither touches the other's hot file at its core. `tk_str_concat_len_r` (M2 there) is reused by #2 here for stream-adjacent str. |
 | `docs/design/backend-memoria-por-funcao-0.3.1.md` | the compiler-scratch per-function region + the shared `tk_region_enter`/`leave` primitive | **SHARES the primitive.** One runtime `enter`/`leave`, two consumers (compiler scratch there; program-generated scope arenas here). Coordinate, do not duplicate. |
 | `docs/design/lang-evolution-0.3.1-memory-and-surface.md` §5 (S0/S1/S2) | the allocation-seam evolution vocabulary | **THE seam this ties into** (§2 here). |
 
-**The single divergence to state loudly:** `arena-especificacao-unica` §1.2/§6 keeps `tk_slice_grow_inplace`
-(AL3/Model A) as the cure for the self-append boundary ("append without abandoning when there is cap").
-The owner's 2026-08-19 correction **retires `grow_inplace` entirely** (#3), because #1 makes abandoning
-FREE: the abandoned copy-grow halves die at arm exit in the scope arena, so the in-place mutation
-primitive — which needs an F1 exclusive-borrow proof and a 3-word `{ptr,len,cap}` header the native
-backend cannot yet represent (`lower.tks:4339`, `typer.tks:844`) — has no reason to exist. Where §6 of
-the canonical spec assigns the self-append boundary to AL3, **this doc reassigns it to the scope arena
-(#1)**. Everything else in the canonical spec stands.
+**The divergences to state loudly (all now RULED, §9):**
+
+1. **`grow_inplace` retired (was the canonical §1.2/§6 AL3 cure).** `arena-especificacao-unica` §1.2/§6
+   kept `tk_slice_grow_inplace` (AL3/Model A) as the self-append cure. The owner retires it entirely (#3,
+   owner F1): #1 makes abandoning FREE — the abandoned copy-grow halves die at arm exit in the scope
+   arena — so the in-place mutation primitive (3-word `{ptr,len,cap}` header the native backend cannot
+   represent, `lower.tks:4339`, `typer.tks:835`) has no reason to exist. The self-append boundary
+   canonical §6 assigned to AL3 is reassigned to the scope arena (#1).
+
+2. **`push`/`empty`/`with_cap` and every growable METHOD retired (owner F1, this round).** Arrays are
+   FIXED-SIZE. There is no in-place append and no growable method; to "grow" you allocate a NEW fixed
+   array (sized exactly at its own allocation) and DROP the old — the standing NO-PUSHES law and its four
+   conversion natures (map = presize-to-source + index-assign; parse/scan = two-pass count-then-fill;
+   filter = widen-to-upper-bound + cut; output-buffer = literals + interpolation). Tier B surface removal
+   HAPPENS this round (§5.3), not as a fast-follow. `of_len<T>(n): []T` (zero-fill) + index-assign + the
+   `count`/watermark idiom is the replacement, NOT a re-sized slice primitive.
+
+3. **The arena stays DYNAMIC; only the sizing pragmas die (owner F4).** `arena-especificacao-unica` §3
+   couples the static floor to the profiler's `#arena_size` presize for dynamic need
+   (`arena-especificacao-unica-0.3.1.md:147-149`). The owner KILLS `#arena_size` (`codegen.tks` presize,
+   `cg_emit_arena_presize` at `codegen.tks:6934`; canonical §3 cites the drifted `:9832`) and `#arena_depth`
+   (#476). The floor remains the static AST lower bound; dynamic need is served by the region growing past
+   the floor via chunk-list (`arena-especificacao-unica-0.3.1.md:64-72`, never copying bytes) — the arena
+   is NOT made static (§2.5).
+
+4. **The object arena is DEDICATED per-object (owner F2).** A shared/enclosing arena is rejected as
+   breaking object visibility+security; every object gets its own region (§2.3/§2.4).
+
+5. **The `.h`→`.tks` FFI migration is IN SCOPE (owner F5).** Every C `.h` include becomes `.tks` over the
+   native ABI or syscall, without gcc — tied into §16 (`plano-s16-expurgo-libc-completo.md`) and the
+   runtime migration (`migracao-runtime-c-para-teko-0.3.1.md`), §5A.
+
+Everything else in the canonical spec stands.
 
 ---
 
@@ -109,7 +148,7 @@ Uniform across 1–6 (the loop arm's "exit edge" is per-iteration; everything el
 // on the arm's ENTER edge, when need>0:
 child = region_new_sized(region_current(), floor(scope) + header)   // sized by the AST floor
 region_enter(child)                                                 // tk_alloc now bumps into `child`
-// ... arm body: every default alloc, every push copy-grow half, every str concat lands in `child` ...
+// ... arm body: every default alloc, every dropped-old fixed array (new+drop growth), every str concat lands in `child` ...
 // on the arm's EXIT edge:
 region_leave()                                                      // current returns to the parent arena
 region_drop(child)                                                  // bulk-free ALL of the arm's dead scratch — O(1)
@@ -119,50 +158,130 @@ region_drop(child)                                                  // bulk-free
   (`teko_rt.h:362-375`, `arena-especificacao-unica §2.1`, `modelo §14`). #1 adds NO runtime primitive;
   it emits the enter/leave/drop pair at each fine-scope boundary in the two lowerings.
 - **What lands in the arm arena (reclaimed):** every local born-and-dead within the arm — the scratch
-  of §0's dominant term: the abandoned copy-grow halves (`tk_slice_push_r(child)`), the concatenated
-  `str` (`tk_str_concat_len_r(child)`), the boxed aggregate elements, the interpolation buffers, the
-  io scratch buffer (#2). ALL of it dies at the arm's exit edge instead of leaking to root.
+  of §0's dominant term: the dropped-old fixed arrays of new+drop growth (the transient previous version
+  a variable held before reassignment), the concatenated `str` (`tk_str_concat_len_r(child)`), the boxed
+  aggregate elements, the interpolation buffers, the io scratch buffer (#2). ALL of it dies at the arm's
+  exit edge instead of leaking to root.
 - **What does NOT land here (escapes → stays):** anything the escape check (§3) proves is referenced
   from a SHALLOWER scope. It is routed to that shallower region at birth (the LUB), never reclaimed
   here. The return value goes up by DPS (canonical §5), untouched by the arm drop.
 
-### 2.3 The object arena (scope #7) — the non-lexical fine scope
+### 2.3 The object arena (scope #7) — a DEDICATED per-object region (owner F2, RULED)
 
 The owner's list adds "PLUS an object arena." An object (struct/class instance) that owns interior
-allocations — grown members, boxed fields, its `[]T`/`str` payloads — needs those interiors to live
-exactly as long as the object, no longer. The object arena is that lifetime:
+allocations — its `[]T`/`str` payloads, boxed fields — needs those interiors to live exactly as long as
+the object, no longer. **Owner F2 ruling:** *"pq compartilhada? Isso quebra a visibilidade e segurança
+de um objeto por definição."* The object arena is therefore a **DEDICATED per-object region** — NOT the
+shared enclosing fine-scope arena. Sharing an arm's arena would commingle the object's interiors with
+unrelated arm scratch, breaking the object's visibility and security boundary by definition. Each object
+gets its OWN region, even a stack/scope-local one:
 
-- **Birth:** when the instance is constructed, an object arena is (conceptually) the child region into
-  which the instance's owned interior allocations bump. For a stack/scope-local instance this arena is
-  the SAME as the enclosing fine-scope arena (no separate region — the instance dies with the scope,
-  so its interiors do too). A distinct object arena materializes only when the instance's lifetime is
-  DECOUPLED from a single lexical arm — i.e. it is moved/returned (DPS) or stored into a longer-lived
-  container.
-- **Death:** the object arena drops when the object dies — transitively, the exit edge of whatever
-  scope the object's residence resolves to (the LUB of the object's uses, §3). Reclaiming the object
-  reclaims its interiors in one O(1) drop.
+- **Birth:** when the instance is constructed, a dedicated child region is opened (nested in the region
+  current at construction) into which the instance's owned interior allocations bump. It is the object's
+  private span — no other binding's scratch lands in it. It is born sized to the object's own AST floor
+  (§2.5), so a dedicated region is NOT a 64 KiB tax: it is exactly the object's proven interior need +
+  header, growing past it by chunk-list only if the object's interiors do (dynamic, no ceiling).
+- **Death:** the dedicated region drops when the object dies — the exit edge of whatever scope the
+  object's residence resolves to (the LUB of the object's uses, §3). Reclaiming the object reclaims its
+  interiors in one O(1) bulk drop; the object's private region is the unit of reclaim.
 - **Why it is a fine scope, not a special case:** it obeys the exact same birth/floor/escape/drop
-  discipline as 1–6; its "arm exit edge" is the object's death instead of a lexical `}`. It is the
-  arena spec's §5 DPS destination made explicit: the caller's storage for a returned aggregate IS the
-  object arena, sized by the object's floor.
+  discipline as 1–6 (§2.5); its "arm exit edge" is the object's death instead of a lexical `}`. The one
+  difference from 1–6 is that it is DEDICATED (one region per object instance) rather than one region per
+  lexical arm — that is precisely what preserves the object's isolation.
 
-**Boundary with DPS (canonical §5):** DPS decides WHERE a returned aggregate is BORN (the caller's
-current arena). The object arena is the same region viewed as "the instance's own reclaimable span."
-No conflict: DPS places, the object arena reclaims, both name the caller's current region.
+**Boundary with DPS (canonical §5):** DPS decides WHERE a returned aggregate is BORN. Under F2 the
+returned object is born in ITS OWN dedicated region, allocated by the caller (the DPS destination is the
+object's region handle, sized by the object's floor), nested in the caller's current region. DPS places
+the object's region; the object arena reclaims it at the object's death. No conflict: the returned
+aggregate is the object, and the object owns its region.
 
-### 2.4 Object-arena vs the free-list forks
+### 2.4 Dedicated per-object regions COEXIST with the §7.8 free-list (no conflict)
 
-Two sub-questions the owner will rule on (forks §9): whether the object arena is (a) always the
-enclosing scope arena (zero extra regions; the object simply dies with its scope) or (b) a dedicated
-per-object region when the object outlives its birth arm (needed for objects stored into F2/root
-containers with per-entry reclaim — the same "F2 per-entry free-list" `arena-especificacao-unica §7.8`
-already requires for `chan`/journal). Recommendation: (a) by default (fine-scope arena IS the object
-arena), (b) only for the F2/container case that already needs per-entry reclaim. This keeps #1 to
-zero new region kinds for the common case.
+F2 makes the object arena dedicated. This must be reconciled with the canonical **§7.8 per-entry
+free-list** (`arena-especificacao-unica-0.3.1.md:542-548`), which gives the immortal F2 program region a
+free-list/slab so `chan`/journal service entries can be reclaimed INDIVIDUALLY. The two are orthogonal
+mechanisms for two different lifetime classes, and neither subsumes the other:
 
----
+- **A dedicated per-object region** is a bulk-droppable unit: the object dies as a whole, so its region
+  is reclaimed with one O(1) `region_drop`. No free-list is needed — the object IS the reclaim granule.
+  This is the RULE for ordinary objects (owner F2).
+- **The §7.8 free-list** exists precisely for entries that CANNOT be bulk-dropped: a `chan`/journal
+  service lives in the immortal F2 program region (shared across tasks, never bulk-dropped), so its entry
+  must be freed individually when the `ctx` drops (a directed free, not `mem::free`). This is the ONLY
+  new arena capability §7.8 requires, and it is untouched by F2.
 
-## 3. The escape / safety analysis — the single region-depth check
+So: an object's interiors → its dedicated region (bulk drop); an F2-resident chan/journal entry → the
+§7.8 free-list (per-entry free). A dedicated per-object region NEVER needs the free-list, because it is
+never wedged inside the immortal region — it is its own droppable child. The `is_unique_at`
+cross-thread gate (canonical §7) still governs an object that escapes to another task by copy.
+
+### 2.5 The arena floor is STATIC; the arena is DYNAMIC (owner F4, RULED — kill both pragmas)
+
+Owner F4: *"vamos matar #arena_depth e #arena_size, já tem ruling para isso, o compilador agora deve
+medir estaticamente o tamanho do slot para quando a arena ser materializada ter um piso de apoio
+mínimo."* Both `#arena_depth` (#476) and `#arena_size` (the profiler presize) DIE. The compiler measures
+the slot size STATICALLY (the AST floor, `arena-especificacao-unica §3`) so that when a region
+materializes it has a **minimum support floor**. State the model precisely, because it is easy to
+misread:
+
+**The arena is DYNAMIC with a static FLOOR (a lower bound), and NO ceiling.** (owner 2026-08-10,
+restated). A region is a chunk LIST (`arena-especificacao-unica-0.3.1.md:62-72`): it bumps within the
+head chunk and, when a request does not fit, PREPENDS another chunk — **growing a region never copies its
+bytes**, and a chunk never overflows (overflow at the region level is structurally impossible). The
+static floor only sets how big the FIRST chunk is born (`tk_region_new_sized_u(parent, need + header)`,
+not the 64 KiB default); the region grows past it, O(1) amortized, whenever the arm allocates more than
+the proven floor. **Killing `#arena_size` does NOT make the arena static or fixed-size — the arena stays
+dynamic; only the profiler-driven presize refinement leaves.**
+
+**The two layers must not be conflated (this is the F1↔F4 boundary):**
+
+| layer | what F-ruling governs it | growth model |
+|---|---|---|
+| **SLICE / array** (`[]T`, the value) | **F1** — FIXED size; grow = allocate a NEW fixed array + drop old | each array is EXACT-sized at its own allocation (`of_len<T>(n)`); no in-place growth exists |
+| **REGION / arena** (the chunk list) | **F4** — static floor (lower bound), dynamic growth by chunk-list | grows past the floor by prepending chunks, never copying bytes, no ceiling |
+
+The static floor targets the REGION's first-chunk demand; the 1.8 GB peak lives at the SLICE layer, not
+the region (`arena-especificacao-unica-0.3.1.md:74-86`). F1 kills the slice-layer copy-grow (the halves
+are reclaimed at arm exit; §5.1); F4 keeps the region dynamic and only removes the pragma refinement.
+
+**How dynamic need is served WITHOUT the profiler (the coupling §3 canonical severed).** Canonical §3
+(`arena-especificacao-unica-0.3.1.md:147-149`) routed the dynamic-need case — "the arm allocates, but the
+size is a runtime fact" — through the profiler's `#arena_size` `Confidence::Thin` seed + p99.9 refinement.
+F4 removes that path. Dynamic need is served instead by the region simply growing past its static floor
+by chunk-list (`:64-72`): the floor is a MINIMUM support, and when the arm allocates more, the region
+prepends another chunk. **The profiler was only presize REFINEMENT — a way to reduce the number of chunk
+prepends — never a correctness requirement:** region reallocation is O(1) with NO byte copy either way, so
+the worst case of dropping `#arena_size` is a few more chained chunks, not a slower or wrong build.
+- **No UAF, no correctness regression from killing `#arena_size`.** The floor is a lower bound
+  (`arena-especificacao-unica-0.3.1.md:153`): a region can never run out of space — it links another
+  chunk — so an under-sized floor never strands or corrupts a write. Over-floor is leak-safe
+  (reserved-not-used). A wrong presize could only ever waste a little space or add a prepend; it can never
+  cause a use-after-free. FIXPOINT gen2==gen3 is unaffected because chunk sizing does not change emitted
+  bytes (`ast-computed-arena-assessment-0.3.1.md:159-166`).
+
+**The ast-computed-arena-assessment warning DISSOLVES (and where a residual sliver remains).**
+`ast-computed-arena-assessment-0.3.1.md:23,133-142` warned that the AST floor is *only a PARTIAL lower
+bound for DYNAMIC collections* — the AST proves final capacity only for literal-count collections, never
+for a dynamic accumulation loop, so it argued the dynamic `#arena_size`/p99.9 path "sizes better." Under
+F1+F4 that warning dissolves, for two independent reasons:
+1. **A partial lower bound is EXACTLY what a materialization floor is meant to be.** The floor was never
+   supposed to predict the final REGION size; it is a minimum support the region grows past by chunk-list.
+   "Partial" is not a defect here — it is the definition. The thing the profiler's p99.9 tried to
+   pre-buy (fewer chunk prepends) is worthless once we accept that a prepend is O(1) no-copy.
+2. **F1 removes the dynamic-collection object the warning was about.** The warning's "dynamic accumulation
+   loop" was a slice doubling to an unknown final size. Under F1 there is no such object: a collection
+   grows by allocating a NEW fixed array of an EXACT size known at THAT allocation (`old_len + k`, or the
+   two-pass counted `n`) and dropping the old. Each individual array is exact-at-alloc; the region merely
+   absorbs the transient old copies and reclaims them at the arm exit. There is no slice whose final size
+   the floor must guess.
+
+**The residual sliver (stated honestly):** the region's static floor still cannot statically know the
+NUMBER of new+drop iterations a runtime-bounded loop performs, so it cannot pre-size the region to hold
+all transient old arrays at once. This is a non-issue: (a) it is exactly the "partial lower bound" the
+floor is designed to be, absorbed by chunk-list growth; and (b) the transient old arrays are reclaimed at
+the arm exit edge (§2.2), so they never accumulate past the arm anyway. The only place an EXACT region
+floor is provable is a literal-count or pre-computed-count arm; everywhere else the floor is a seed and
+the chunk-list is the truth. That is the intended, sound design — not a gap.
 
 ### 3.1 The rule (what is reclaimable vs escaping, per scope)
 
@@ -203,12 +322,13 @@ Mapped onto the canonical four boundaries (`arena-especificacao-unica §6`), spe
 |---|---|---|---|
 | **arm-local scratch** | `var t = concat(a, b)` used only inside the arm | reclaimable | born in `child`, dropped at arm exit |
 | **returned up** (DPS) | `return Point{…}` in a tail arm | escapes to caller | born in caller's current arena (DPS, canonical §5); arm drop skips it |
-| **stored into a shallower binding** | `outer = push(outer, x)` where `outer` is at depth `<d` | escapes to `outer`'s depth | born in `outer`'s region (the depth-`<d` arena); arm drop skips it |
+| **stored into a shallower binding** | `outer = <new fixed array of outer + x>` where `outer` is at depth `<d` | escapes to `outer`'s depth | the NEW array is born in `outer`'s region (the depth-`<d` arena); arm drop skips it; the dropped-old is arm-local |
 | **sent cross-thread** | `chan.send(x)` | escapes to program (F2) | born in `tk_region_program()`; `is_unique_at` gate (canonical §7) |
 
-The dominant win (§0's ~1.8 GB copy-grow) is the FIRST row: the abandoned halves of a `push` chain
-whose result never leaves the arm are pure arm-local scratch, reclaimed at arm exit. That is why #3's
-purge is safe — the peak-inflation the growable primitives create is exactly this reclaimable scratch.
+The dominant win (§0's ~1.8 GB copy-grow) is the FIRST row: the dropped-old fixed arrays of a new+drop
+growth whose result never leaves the arm are pure arm-local scratch, reclaimed at arm exit. That is why
+#3's purge is safe — the peak-inflation the removed growable primitives created is exactly this
+reclaimable transient scratch, now reclaimed at the arm exit edge.
 
 ### 3.4 What the checker produces (reuse the oracle)
 
@@ -332,18 +452,23 @@ The owner: *"these primitives are the source of the peak-inflation (transient ov
 arena is meant to reclaim, so once #1+#2 land they have no reason to exist."* The mechanism, made
 precise:
 
-- `with_cap` existed to PRE-SIZE and skip the 1→2→4→8 doubling ladder. #1's **AST floor** (`§3` canonical)
-  births the scope arena at the proven need — pre-sizing is now the arena's job, so `with_cap` is
-  redundant.
+- `with_cap` existed to PRE-SIZE a fresh slice and skip the 1→2→4→8 doubling ladder. Under owner F1 the
+  slice IS fixed-size and sized EXACTLY at its own allocation (`of_len<T>(n)` / `[n]T` zero-fill +
+  index-assign) — slice pre-sizing is the fixed-array idiom, so `with_cap` is redundant. (Note the layer:
+  this is the SLICE layer, NOT the arena floor — the arena floor sizes the REGION's chunk, §2.5; do not
+  conflate them.)
 - `grow_inplace` existed to append WITHOUT abandoning (dodge the O(n²) abandoned halves). #1 makes
-  abandoning FREE — the halves die at arm exit — so the in-place primitive (which needs an F1
-  exclusive-borrow proof and a 3-word header the native backend cannot represent, `lower.tks:4339`)
-  is unnecessary.
-- `push` (the root-leaking value form `tk_slice_push`) leaked every grown buffer to root. #1 re-points
-  growth at `tk_region_current()` = the arm arena, so every push half is reclaimed at arm exit. The
-  root-leaking primitive has no reason to remain.
-- `empty` seeded a zero-cap slice that forced the doubling from empty. #1's floor + `need==0` elision
-  replaces it: an empty that never grows opens no arena; one that grows is pre-sized by the floor.
+  abandoning FREE — the halves die at arm exit in the scope arena — so the in-place primitive (which needs
+  an F1 exclusive-borrow proof and a 3-word header the native backend cannot represent, `lower.tks:4339`)
+  is unnecessary. It is also a banned workaround under standing law (arrays are immutable; growth is
+  new+drop only).
+- `push` (the root-leaking value form `tk_slice_push`) leaked every grown buffer to root. Under owner F1
+  there is no `push` at all: growth is "allocate a new fixed array of exact size, drop the old." The
+  transient old array is born in `tk_region_current()` = the arm arena and reclaimed at arm exit; the
+  root-leaking primitive is removed, not re-pointed.
+- `empty` seeded a zero-cap slice that forced the doubling from empty. Under owner F1 an array is created
+  at its known size (`of_len<T>(n)`; the `count`/watermark idiom covers "not yet filled"); `need==0`
+  elision (§3) covers an arm that allocates nothing. There is no zero-cap seed to grow from.
 
 ### 5.2 The purge table
 
@@ -351,45 +476,104 @@ precise:
 |---|---|---|---|
 | **`teko::list::with_cap`** (`typer.tks:824`, `codegen.tks:2531`/`emit_list_with_cap`, `lower.tks:4340`; runtime `tk_slice_with_cap`/`_r` `teko_rt.h:1439-1449`) | pre-size a fresh len-0 buffer | **AST floor** — the scope arena is born at `need+header`; a presized `[]T` written by index needs no explicit cap. Remove the surface fn + the runtime twins. | staged-off; **no real user call sites** (only typer/codegen/lower plumbing) — cheap, mechanical |
 | **`teko::list::grow_inplace`** (`typer.tks:835`, `codegen.tks:2562`/`emit_list_grow_inplace`, `lower.tks:4339`; runtime `tk_slice_grow_inplace` `teko_rt.h:1450-1456`) | in-place append under exclusive `ref` | **scope-arena reclaim** — abandon freely; the arm arena reclaims the halves at exit. Remove the surface fn + `tk_slice_grow_inplace` + the F1-borrow requirement it carried. | staged-off; **no real user call sites** (native has no lowering at all) — cheap, mechanical |
-| **`teko::list::push`** (surface + `tk_slice_push` root form `teko_rt.h:1420`, `tk_slice_push_fo`, `tk_slice_push_r`) | copy-grow, root-leaking value form | **region-current growth** — growth lands in `tk_region_current()` (the arm arena) and dies at arm exit. Collapse `tk_slice_push`/`_fo` into the single `tk_slice_push_r(current)`. | **pervasive: ~2674 sites / 152 files.** Two-tier migration (§5.3) |
-| **`teko::list::empty`** (surface) | zero-cap seed | **floor-presized / elided empty** — an empty that never grows opens no arena; one that grows is floor-sized. | **pervasive: ~2166 sites.** Two-tier migration (§5.3) |
-| adjacent: `tk_append_bytes_fo` (`teko_rt.h:1457`), `tk_free_block` (`teko_rt.h:1460`) | the linear-`cb` byte accumulator + explicit park | subsumed by #2 stream-write (no accumulator) + arm-arena drop | codegen `cb` chain; migrates with the codegen-emit-direct of #2/§4.3 |
+| **`teko::list::push`** (checker builtin `typer.tks:808`; runtime `tk_slice_push`/`_push_fo`/`_push_r`) | copy-grow, root-leaking value form | **new-fixed-array + drop-old** (owner F1) — the four conversion natures: map = presize-to-source + index-assign; parse/scan = two-pass count-then-fill; filter = widen-to-upper-bound + cut; output = literals + interpolation. The transient old array dies in the arm arena. Surface REMOVED this round; the C slice-grow machinery is REMOVED (not patched), the compiler ENUMERATES survivors on removal. | **pervasive: ~2698 sites.** Removed this round (§5.3) |
+| **`teko::list::empty`** (checker builtin `typer.tks:805`) | zero-cap seed | **`of_len<T>(n)` fixed create** — arrays are created at a known size; the `count`/watermark idiom covers "not yet filled"; `need==0` elision covers alloc-free arms. No zero-cap seed. Surface REMOVED this round. | **pervasive: ~2202 sites.** Removed this round (§5.3) |
+| **growable METHOD** — `teko::list::grow<T>(ref x: []T, v)` (`src/list/list.tks:1`, the `ref`-mutable wrapper over `push`) and any `List<T>::push` collection method | in-place-ish append via `ref []T` reassign | **REMOVED entirely** (owner F1: *"não é pra manter o método"*). `ref []T` is a position-pointer only (no grow, no whole-array reassign); a collection grows by building a new fixed backing and returning it (DPS). | leaf choke point + the collections re-spec (§5.3, R9) |
+| adjacent: `tk_append_bytes_fo`, `tk_free_block` | the linear-`cb` byte accumulator + explicit park | subsumed by #2 stream-write (no accumulator) + arm-arena drop | codegen `cb` chain; REMOVED with the codegen-emit-direct of #2/§4.3 |
 
-### 5.3 The migration order — two tiers (the honest split)
+### 5.3 The migration order — total removal this round (owner F1 RULED)
 
-`grow_inplace` and `with_cap` are staged-off with no real user call sites; `push`/`empty` are pervasive
-(~4840 combined sites). One hand-edit-per-site is neither safe nor a crumb. The migration is therefore
-two tiers:
+**Owner F1 rules the replacement idiom AND that Tier B happens this round.** There is no fork-gated
+deferral: *"nossos arrays DEVEM SER DE TAMANHO FIXO E SEM POSSIBILIDADE DE PUSH / GROW / ou qualquer
+artifício de expandir um array. Quer expandir? Cria um novo e dropa o antigo."* The replacement idiom is
+the standing NO-PUSHES law's four conversion natures (already ruled surface, not new design):
+- **map** (one output per source element) → presize `of_len<T>(source.len)` + `loop i { xs[i] = f(src[i]) }`.
+- **parse/scan** (`n` emerges from scanning) → two passes: count `n`, then presize `of_len<T>(n)` + fill by index.
+- **filter** (conditional subset) → widen to the upper bound (`source.len`), write the fits into a `count`, cut `slice[0..count]`.
+- **output buffer** (the codegen `cb`, the 93 % term) → literals + interpolation (`$"…"`) / literal byte arrays, ZERO growing buffer.
 
-**Tier A — mechanical, lands WITH #1 (kills the peak-inflation, the owner's actual goal):**
-1. Re-point the `push`/`empty` LOWERING at the region-current (arm) arena in both motors: `codegen.tks`
-   emits `tk_slice_push_r(current)` (not `tk_slice_push` root); `lower.tks` targets `tk_region_current()`
-   for the grown buffer. The user SURFACE is untouched (no 2674 edits); its transient buffers now die at
-   arm exit. This is where the ~1.8 GB copy-grow term is reclaimed.
-2. Remove `grow_inplace` + `with_cap`: the typer arms (`typer.tks:824,835`), the codegen emitters
-   (`codegen.tks:2531,2562`, the `with_cap`/`grow_inplace` dispatch at `:2887,:2890,:6061`,
-   the allow-list `:5706`), the native honest-stops (`lower.tks:4339,4340`), and the runtime twins
-   (`tk_slice_with_cap`/`_r`/`tk_slice_grow_inplace`). No real caller breaks (staged-off).
-3. Collapse `tk_slice_push`/`tk_slice_push_fo` into `tk_slice_push_r`: `tk_slice_push` becomes the
-   `region==root` wrapper (already its contract, `teko_rt.h:1431`); `_fo` (free-old) is subsumed by
-   arm-drop and removed. Runtime-only, additive-then-subtractive.
+`grow_inplace`/`with_cap` are staged-off (no real user call sites); `push`/`empty`/`grow` are pervasive
+(~4900 combined sites). This is NOT a hand-edit-per-site campaign — it is the EXPURGO methodology
+(standing law): BUILD the fixed-array machinery first, seed, then remove the roots and let the
+self-compiling compiler ENUMERATE the surviving references as raw errors (each error is one site to
+convert). Iterate ENSINA → SEED → SWEEP → SEED to a green fixpoint (gen2==gen3).
 
-**Tier B — surface REMOVAL of `push`/`empty` as named primitives (a LANGUAGE-SURFACE ruling, fork §9):**
-Genuinely removing `teko::list::push`/`empty` from the surface requires a replacement IDIOM for "build
-a sequence" — a comprehension/collect form or a presized-index builder. That is a surface decision the
-owner must define (fork F1). Until he does, Tier A already delivers the memory win (the primitives no
-longer inflate the peak; they route through the arena). Tier B is the cosmetic/semantic completion.
+**Step 1 — build the fixed-array machinery (additive, coexists with the old).** `of_len<T>(n)` zero-fill,
+the `[n]T` runtime-sized type syntax, index-assign (`typer.tks type_index_assign`), the `count`/watermark
+idiom, the null-deref guard, routed through the arm arena (§2). Seed so gen0 understands the new form.
+This is where the peak-inflation is actually cut: growth is now new-fixed-array + drop-old, and the
+transient old array dies in `tk_region_current()` = the arm arena at the arm exit edge.
 
-**Migration sequencing within Tier B (once the idiom is ruled):** migrate leaf modules first
-(`src/collections/*`, `src/list/list.tks` — the `List<T>::push` method at `list.tks:15` is the single
-choke point that fans out to the 2674 sites), then the hot compiler files (`codegen.tks` 142,
-`lower.tks` 234, `regression.tks` 57), each behind its own fixpoint gate. The self-compiling compiler
-ENUMERATES every surviving reference when the primitive's root is removed (the expurgo methodology,
-`expurgo-fixpoint-historico`) — that is the migration's own checklist.
+**Step 2 — remove `grow_inplace` + `with_cap` roots.** The typer arms (`typer.tks:824,835`), the codegen
+emitters + dispatch, the native honest-stops (`lower.tks:4339,4340`), and the C slice-grow machinery
+(`tk_slice_with_cap`/`_r`/`tk_slice_grow_inplace`) — **REMOVED, not patched** (standing law: the expurgo
+does NOT go through `teko_rt.c`; the slice-grow machine is dead code deleted). No real caller breaks.
+
+**Step 3 — remove `push`/`empty`/`grow` roots (the surface).** Delete the `push`/`empty` checker builtins
+(`typer.tks:808,805`), `teko::list::grow` (`src/list/list.tks:1`, the single leaf choke point — the doc's
+earlier `list.tks:15` `List<T>::push` cite is stale; the real wrapper is `grow<T>` at `list.tks:1`), and
+the C forms `tk_slice_push`/`_push_fo`/`_push_r`. Seed; the compiler tries to self-compile and ERRS at
+every surviving reference — that error list IS the sweep checklist. Convert each to the natures above,
+re-seed, repeat.
+
+**Step 4 — re-spec the growable collections (R9, cross-doc).** `plano-collections-genericas-e-concorrentes-0.3.1.md`
+and `collections-generics-fase1b-crumbs.md` define growable methods (`List<T>::push`, `Dictionary::insert`'s
+internal `teko::list::push` at `:233-235`, `SortedSet`, `PriorityQueue::enqueue` `:333`, `ConcurrentStack::push`
+`:616`) built on the now-removed primitives. Under F1 those growable methods must be re-expressed as
+new-fixed-backing + return (DPS), not in-place grow. This is a REPORTED cross-doc consequence (R9): the
+collections plan needs a follow-up re-spec pass. It does NOT block the compiler-core expurgo (the core
+does not depend on the growable-collection surface), and it is not a new issue I open — it is flagged up
+for the owner/coordinator to schedule.
+
+Sequence the sweep leaf-first (`src/collections/*`, `src/list/`) then the hot compiler cores (checker
+~1615, lir ~877, build ~652, backend ~633, parser ~293, codegen ~163), each behind its own fixpoint gate,
+with iterative reseed (the layout of the element does not change — zero-fill, no tag — so the transition
+is staged-green: fixpoint gen2==gen3 at each harvest).
 
 ---
 
-## 6. The ordered CRUMB SEQUENCE (#1 → #2 → #3)
+## 5A. The `.h` → `.tks` FFI migration is IN SCOPE (owner F5, RULED)
+
+Owner F5 overrules the earlier "leave frozen / out-of-scope" recommendation: *"Não é fora de escopo, todo
+'.h' feito include no C deve virar código em tks para usar FFI para a ABI nativa ou syscall sem depender
+do gcc (já cobre o native)."* Every C `.h` include becomes `.tks` code using FFI for the native ABI or a
+raw syscall, WITHOUT depending on gcc. This binds this correction to the §16 libc-expurgo axis; it is NOT
+a new axis I invent, it is the tie-in the owner rules.
+
+**The scope this pulls in (and where it lives).** The `.h` includes are two populations
+(`plano-s16-expurgo-libc-completo.md:34-48`):
+1. **The C EMITTED** (`bootstrap/teko.c` + every generated program): codegen emits `#include <stdint.h>`,
+   `<stdbool.h>`, `<stdlib.h>`, `<math.h>`, `<string.h>`, `"assert.h"`
+   (`plano-s16-expurgo-libc-completo.md:37-42`). Each becomes: native types of its own / a self-emitted
+   fixed-width `typedef` / a Teko intrinsic or raw syscall — never a C header dependency.
+2. **The hand-written RUNTIME** (`teko_rt.c` + `teko_rt.h` + `win32_compat.h` + `assert.c`): 28 POSIX/C
+   headers plus `win32_compat.h` (`plano-s16-expurgo-libc-completo.md:47-48`). These migrate per the
+   camada-2 roadmap (`migracao-runtime-c-para-teko-0.3.1.md`), leg-by-platform: Linux raw-syscall / macOS
+   libSystem FFI / Windows kernel32-ntdll FFI (`plano-s16-expurgo-libc-completo.md:54-58`).
+
+**The S0 `core.h` list migration — now IN SCOPE (was §1's "frozen floor").** §1 of this doc called the S0
+compiler-internal seam (`tk_alloc`/`tk_realloc0`/`tk_free0`/`tk_alloc_copy`) out-of-scope, "the frozen
+floor," pending the list-header old-size threading. Owner F5 pulls it IN: the S0 header allocations become
+`.tks` over the syscall/FFI allocation path (the S16 `plano-s16-arena-mmap.md` mmap-backed region, the
+`plano-s16-syscall-intrinsic.md` raw-syscall intrinsic, the `plano-s16-fundacao-crumbs.md` FFI
+foundation). The S0 seam is the arena's own bottom, so bringing it into `.tks` is the natural completion
+of "the arena in Teko."
+
+**The law tension to state (frozen-C vs migrate-C), and its resolution.** The standing frozen-runtime law
+names `src/runtime/teko_rt.{c,h}` + the assert seed as MAINTAINED C (the runtime exception). Bringing
+`.h`→`.tks` into scope appears to collide with that. It does not, law-first: the migration doc resolves it
+explicitly — *"essa exceção é a PONTE, não o destino… a camada-2 é exatamente o trabalho de RETIRAR a
+exceção"* (`migracao-runtime-c-para-teko-0.3.1.md:22-28`). The exception covers the bridge while it
+exists; F5 is the work that removes the bridge. There is no tension: maintain-C-now and migrate-C-to-Teko
+are the same law at two times.
+
+**What is BLOCKED (design-ahead honesty).** The migration doc's hard precondition: NO camada-2 phase can
+LAND until the native fixpoint closes (the own backend self-compiles the compiler —
+`migracao-runtime-c-para-teko-0.3.1.md:3-8`; today gen1 native stops at ~53 honest-stops, the float family
+inside). So F5's LANDING is gated on the native fixpoint + the §16 foundation crumbs (mmap region, syscall
+intrinsic, FFI foundation). What is UNBLOCKED now is the DESIGN tie-in (this section) and the contract
+already carried by §16. This correction does NOT re-derive §16; it points at it and states the S0/core.h
+inclusion the owner just ruled in.
 
 Each crumb is the smallest independently gate-able step. Gate legend: **[dry]** = compiles + `teko test`
 scoped-run green + trivial fixpoint (no emit consumers yet); **[RITUAL]** = full gate: build gen2
@@ -439,13 +623,17 @@ default `tk_alloc` target `tk_region_current()` instead of the fixed `tk_region_
 set re-run under native (same `.tkr`, native backend). **Gate: [RITUAL]** — FIXPOINT gen2==gen3
 byte-identical; `TEKO_ARENA_OBS` scoped>0. Ritual: YES.
 
-**A4 — the object arena (scope #7).** Thread the object's residence depth (A1) so an instance's owned
-interiors bump into the instance's residence arena; for the common case this IS the enclosing fine-scope
-arena (no new region), so A4 is mostly the plan wiring + the decoupled-object case (F2/container) behind
-the fork F2 ruling. **Fixtures:** `arena_object_interiors_die` (an object's `[]T` member reclaimed with
-the object), `arena_object_moved` (an object returned by DPS carries its interiors to the caller arena —
-used after return; if the interiors stayed in the callee arm it would be UAF/corruption). **Gate:
-[RITUAL].** Ritual: YES.
+**A4 — the object arena (scope #7), DEDICATED per-object (owner F2 RULED).** Thread the object's
+residence depth (A1) so an instance's owned interiors bump into the instance's OWN dedicated region — one
+region per object instance, born at construction (sized by the object's AST floor, §2.5), dropped at the
+object's death (LUB of uses). NOT the shared enclosing arm arena (owner F2: sharing breaks the object's
+visibility+security). The §7.8 free-list is NOT needed for a dedicated per-object region (it is
+bulk-droppable); it stays reserved for the immortal-F2 chan/journal case only (§2.4). **Fixtures:**
+`arena_object_interiors_die` (an object's `[]T` member reclaimed with the object, in its own region),
+`arena_object_dedicated_isolation` (two same-arm objects do NOT share a region — one's drop leaves the
+other's interiors intact), `arena_object_moved` (an object returned by DPS carries its dedicated region to
+the caller — used after return; if the interiors stayed in the callee arm it would be UAF/corruption).
+**Gate: [RITUAL].** Ritual: YES.
 
 **A5 — `TEKO_ARENA_OBS` fine-scope attribution (measurement).** Extend the existing obs counters
 (`teko_rt.c` obs) to break `scoped`/`reclaim` down per fine-scope depth, so A2–A4 are gate-able by
@@ -476,52 +664,69 @@ path. Ritual: YES.
 §4.3: the 22 MB `teko.c` writer emits direct (no `csrc` copy-grow), the accumulator being a #3 target.
 **Gate: [RITUAL]** — `teko.c` gen2==gen3 byte-identical. Ritual: YES.
 
-### Part #3 — the purge (crumbs C1–C4, Tier A) + C5 (Tier B, fork-gated)
+### Part #3 — the total purge (crumbs C1–C6; all RULED, none fork-gated)
 
-**C1 — re-point push/empty lowering at the arm arena (Tier A step 1).** Both motors emit
-`tk_slice_push_r(current)` for `push`; the surface is untouched. This is where the copy-grow peak is
-reclaimed. **Fixture:** `purge_push_reclaimed` (a push-chain inside an arm whose result stays local:
-obs shows the abandoned halves reclaimed at arm exit, peak flat). **Gate: [RITUAL]** — FIXPOINT
-gen2==gen3 (bytes identical; only the buffer's REGION changed, not its contents — the `al4a` structural
-dedup proof, `arena-por-escopo §4.4`); obs `reclaim>0` on push chains. Ritual: YES.
+Owner F1 rules total removal this round. The expurgo methodology (build-first, compiler-enumerates,
+iterative reseed) governs the ordering; C1 builds the fixed-array machinery, C2–C4 remove roots, C5 sweeps
+the surface, C6 kills the sizing pragmas.
 
-**C2 — remove `grow_inplace` (Tier A step 2a).** Delete the typer arm (`typer.tks:835`), codegen
-emitter (`codegen.tks:2562`, dispatch `:2890`), native honest-stop (`lower.tks:4339`), runtime
-`tk_slice_grow_inplace` (`teko_rt.h:1450`, `teko_rt.c`). No real caller breaks (staged-off). **Fixture:**
-`purge_grow_inplace_gone` (a program using the old surface fails to compile with a clear diagnostic —
-REJECT fixture, native exit code of the checker error). **Gate: [RITUAL]** — FIXPOINT (nothing emitted
-used it). Ritual: YES.
+**C1 — build the fixed-array machinery + arm-arena routing (expurgo step 1).** `of_len<T>(n)` zero-fill,
+`[n]T` runtime-sized type, index-assign, `count`/watermark, null-deref guard, growth = new-fixed-array +
+drop-old with the transient old born in `tk_region_current()` = the arm arena (§2). Additive, coexists
+with the old surface; seed so gen0 understands it. This is where the ~1.8 GB copy-grow peak is reclaimed
+(the old array dies at arm exit). **Fixture:** `purge_grow_newdrop_reclaimed` (a grow loop whose result
+stays local: obs shows each old fixed array reclaimed at arm exit, peak flat). **Gate: [RITUAL]** — FIXPOINT
+gen2==gen3 (bytes identical; only the buffer's REGION changed, the `al4a` structural dedup proof,
+`arena-por-escopo §4.4`); obs `reclaim>0`. Ritual: YES.
 
-**C3 — remove `with_cap` (Tier A step 2b).** Delete the typer arm (`typer.tks:824`), codegen emitter
-(`codegen.tks:2531`, dispatch `:2887,:6061`, allow-list `:5706`), native honest-stop (`lower.tks:4340`),
-runtime `tk_slice_with_cap`/`_r` (`teko_rt.h:1439-1449`). **Fixture:** `purge_with_cap_gone` (REJECT).
-**Gate: [RITUAL]** — FIXPOINT. Ritual: YES.
+**C2 — remove `grow_inplace` (expurgo step 2a).** Delete the typer arm (`typer.tks:835`), codegen emitter
++ dispatch, native honest-stop (`lower.tks:4339`), and REMOVE (not patch) the C `tk_slice_grow_inplace`
+(standing law: the slice-grow machine is dead code deleted, the expurgo does not go through `teko_rt.c`).
+No real caller breaks (staged-off). **Fixture:** `purge_grow_inplace_gone` (REJECT — the old surface fails
+to compile with a clear diagnostic; the message NEVER names the removed construct, standing law). **Gate:
+[RITUAL]** — FIXPOINT. Ritual: YES.
 
-**C4 — collapse `tk_slice_push`/`_fo` into `_r` (Tier A step 3).** `tk_slice_push` becomes the
-`region==root` wrapper over `tk_slice_push_r`; `tk_slice_push_fo` (free-old) removed (arm-drop subsumes
-it); `tk_append_bytes_fo`/`tk_free_block` retire once codegen-emit-direct (B4) lands. Runtime-only,
-additive-then-subtractive. **Gate: [RITUAL]** — FIXPOINT; obs shows no root-form push remaining.
-Ritual: YES.
+**C3 — remove `with_cap` (expurgo step 2b).** Delete the typer arm (`typer.tks:824`), codegen emitter +
+dispatch + allow-list, native honest-stop (`lower.tks:4340`), and REMOVE the C `tk_slice_with_cap`/`_r`.
+**Fixture:** `purge_with_cap_gone` (REJECT). **Gate: [RITUAL]** — FIXPOINT. Ritual: YES.
 
-**C5 — [FORK-GATED] surface removal of push/empty (Tier B).** BLOCKED on fork F1 (the replacement idiom
-ruling). When ruled: migrate `List<T>::push` (`list.tks:15`, the single choke point) + the collections,
-then the hot compiler files, each behind its own fixpoint gate. Design-ahead deliverable NOW: the
-migration census (§5.3), the choke-point identification, the honest-stop scaffolding. **Gate: [RITUAL]**
-per module. Ritual: YES (when unblocked).
+**C4 — remove the C slice-grow machinery (expurgo step 2c).** REMOVE `tk_slice_push`/`_push_fo`/`_push_r`,
+`tk_append_bytes_fo`, `tk_free_block` — dead code once C1's fixed-array path is the emit and B4's
+codegen-emit-direct lands. NOT a collapse-into-`_r` (the old plan); a deletion. **Gate: [RITUAL]** —
+FIXPOINT; obs shows no slice-grow form remaining. Ritual: YES.
+
+**C5 — remove `push`/`empty`/`grow` surface roots + sweep (expurgo step 3, RULED — was fork-gated).**
+Delete the `push`/`empty` checker builtins (`typer.tks:808,805`) and `teko::list::grow` (`list.tks:1`, the
+leaf choke point). Seed; the self-compiling compiler ERRS at every survivor — that list IS the sweep
+checklist. Convert each site to the four natures (§5.3), leaf-first then hot cores, iterative reseed to
+green fixpoint. **Fixture:** `purge_push_form_rejected` (REJECT — `teko::list::push` no longer resolves).
+**Gate: [RITUAL]** per module. Ritual: YES. (No longer blocked — F1 ruled the idiom.)
+
+**C6 — kill `#arena_size` and `#arena_depth` (owner F4).** Remove the `#arena_size` presize path
+(`cg_emit_arena_presize` `codegen.tks:6934`, the `has_arena_size`/`arena_size` fields on `TFunction`
+`tast.tks:89-90`, the `merge.tks:326-327` equality, the `monomorph.tks` threading) and the `#arena_depth`
+(#476) override. The static AST floor (§2.5) is the ONLY sizing input; the region stays dynamic by
+chunk-list. **Fixtures:** `arena_no_presize_pragma` (the pragma no longer parses/has effect — REJECT/no-op),
+`arena_dynamic_grows_past_floor` (an arm allocating past its static floor still succeeds — the region
+prepends chunks, exit code 0). **Gate: [RITUAL]** — FIXPOINT gen2==gen3 (sizing does not change emitted
+bytes). Ritual: YES.
 
 ### Dependency order (the mandatory spine)
 
 ```
-#1: A1 (oracle) → A2 (C route) → A3 (native route) → A4 (object arena) → A5 (obs)
+#1: A1 (oracle) → A2 (C route) → A3 (native route) → A4 (object arena, DEDICATED) → A5 (obs)
                                         │
 #2: (io-streaming surface crumbs 1-5) ─┴─> B1 → B2 → B3 → B4        [needs A3: current==arm arena]
                                         │
-#3: A3 landed ─> C1 (re-point push) → C2 (grow_inplace) → C3 (with_cap) → C4 (collapse runtime)
-                                        └─> C5 (Tier B surface removal) [BLOCKED on fork F1]
+#3: A3 landed ─> C1 (fixed-array machinery) → C2 (grow_inplace) → C3 (with_cap) → C4 (C slice-grow) →
+                                              C5 (surface removal + sweep) → C6 (kill #arena_size/#depth)
+
+F5: [BLOCKED on native fixpoint + §16 foundation] .h→.tks FFI migration (design tie-in §5A)
 ```
 
-A1 before everything (no plan, no gate). A2/A3 before any #3 crumb (the arm arena must exist to reclaim
-push). #2 needs A3. C1 before C2/C3/C4 (re-point before remove). C5 is fork-gated.
+A1 before everything (no plan, no gate). A2/A3 before any #3 crumb (the arm arena must exist). #2 needs
+A3. C1 (build) before C2–C5 (remove roots) — expurgo build-first law. C6 can land any time after A2/A3
+(independent of the slice expurgo). F5 lands only when the native fixpoint closes.
 
 ---
 
@@ -531,66 +736,88 @@ push). #2 needs A3. C1 before C2/C3/C4 (re-point before remove). C5 is fork-gate
 |---|---|---|
 | **R1 — a fine-scope drop with a live alias = UAF** (the arena-por-escopo class the canonical §2.2 warns of) | dropping an arm arena while a shallower binding still references into it | the depth check (§3) is the guard: born-at-`d` is dropped-at-`d` ONLY when no use is at depth `<d`; doubt → escape to the shallower arena. Never drop with a live shallower alias. FIXPOINT gen2==gen3 is the detector: a wrong reclaim corrupts a value → bytes diverge → fails BEFORE any UAF ships. |
 | **R2 — bytes move region, leak into emitted output** | if codegen dedup depended on pointer identity | measured NOT to: dedup/mangle is STRUCTURAL (`cg_opt_key ==`, `al4a:39,110`; ids node-carried "would not survive copies", `al4a:50`). Region changes address, not the emitted value. Detector: fixpoint. |
-| **R3 — loop-arm flattening accumulates** (the peak the owner fears) | `#arena_depth(N>1)` flattening across a back-edge | HARD carve-out (`modelo §7`): a loop arm is ALWAYS a materialization boundary; N>1 flattening coalesces only straight-line nested scopes, never a back-edge. Fixture `arena_loop_per_iter` is the detector. |
+| **R3 — loop-arm flattening accumulates** (the peak the owner fears) | previously the `#arena_depth(N>1)` flattening override | MOOT under owner F4: `#arena_depth` is KILLED (C6), so depth is always 1 — each fine scope is ALWAYS its own materialization boundary, and a loop arm is reclaimed every iteration (`modelo §7` carve-out). No flattening exists to accumulate. Fixture `arena_loop_per_iter` is the detector. |
 | **R4 — removing grow_inplace/with_cap breaks a caller** | a hidden real user of the staged-off primitives | measured: no real call sites (only typer/codegen/lower plumbing + runtime). The self-compile ENUMERATES any survivor on removal (expurgo). REJECT fixtures pin the new diagnostic. |
-| **R5 — Tier B (remove push/empty) is a surface change without an idiom** | 4840 sites need a replacement form | do NOT force it: Tier A delivers the memory win with the surface intact; Tier B is fork-gated on F1. No HALT — the win lands without the surface ruling. |
-| **R6 — collision in hot files** | `codegen.tks`/`lower.tks`/`typer.tks` | oracle in a NEW file; A2 (C) and A3 (native) separated; coordinate with `backend-memoria`, `arena-escopo-local`, the native-map agents. #3's runtime edits are additive-then-subtractive. |
-| **R7 — teko_rt.{c,h} touched** | `tk_slice_push_r` collapse, obs extension | explicit runtime exception; all additive/behavior-identical (root wrapper delegates; obs only reads). No C emitted by the compiler. |
-| **R8 — object arena adds a region kind** | scope #7 as a dedicated region | default is (a): the object arena IS the enclosing fine-scope arena (zero new kind); (b) dedicated only for the F2/container case that ALREADY needs per-entry reclaim (canonical §7.8). Fork F2. |
+| **R5 — total push/empty removal (F1) with no idiom** | ~4900 sites need a replacement form | RESOLVED by owner F1: the idiom is the standing NO-PUSHES four natures (§5.3); the expurgo (build-first, compiler-enumerates, iterative reseed) executes it safely, not a hand-edit campaign. No HALT — the idiom is ruled. |
+| **R6 — collision in hot files** | `codegen.tks`/`lower.tks`/`typer.tks` | oracle in a NEW file; A2 (C) and A3 (native) separated; coordinate with `backend-memoria`, `arena-escopo-local`, the native-map agents. #3's runtime edits are REMOVALS staged behind the additive C1 build. |
+| **R7 — teko_rt.{c,h} touched** | removing the C slice-grow machinery (C2–C4), obs extension | standing law: the expurgo REMOVES the slice-grow machine (dead code), it does NOT patch `teko_rt.c`; the obs extension is read-only. The runtime exception is a bridge being retired (F5), not a permanent patch. |
+| **R8 — dedicated per-object region cost/kind (owner F2)** | scope #7 as a DEDICATED region per object | ruled dedicated (F2). Cost is bounded: each object region is born at the object's static floor (§2.5), not 64 KiB, and bulk-dropped O(1) at object death. It does NOT need the §7.8 free-list (that is only for immortal-F2 chan/journal entries). Risk of many small regions is mitigated by static-floor sizing + O(1) bulk drop + `need==0` elision for interior-free objects. |
+| **R9 — F1 collides with the growable-collection API** (cross-doc) | `plano-collections-genericas-e-concorrentes-0.3.1.md` / `collections-generics-fase1b-crumbs.md` define growable methods (`List::push`, `Dictionary::insert` push `:233-235`, `SortedSet`, `PriorityQueue::enqueue` `:333`, `ConcurrentStack::push` `:616`) on the removed primitives | FLAGGED, not silently overridden. Owner F1 rules arrays fixed + no growable method, so those collections must be re-expressed as new-fixed-backing + return (DPS). This is a cross-doc re-spec REPORTED up (§5.3 step 4); it does NOT block the compiler-core expurgo (the core does not use the growable-collection surface). Not a new issue I open — a scheduling flag for the owner/coordinator. |
+| **R10 — F5 (.h→.tks) vs the frozen-runtime law** | bringing `teko_rt.{c,h}` / core.h into `.tks` scope | RESOLVED law-first: the runtime-C exception is "a PONTE, não o destino" (`migracao-runtime-c-para-teko-0.3.1.md:22-28`); F5 is the camada-2 work that retires the bridge. Maintain-now and migrate-later are the same law at two times. Landing is gated on the native fixpoint + §16 foundation (§5A, §8). |
 
-**Residual law tension forcing a HALT: NONE.** Teko-only honored (product in `.tks`; the runtime twins
-are the named exception). W15 full-Javadoc on every snippet. Issue-100%: #1+#2+Tier-A deliver the whole
-memory correction; Tier B is fork-gated but non-blocking for the win. FIXPOINT byte-identical is the
-inviolable gate and the detector of every risk. Adjacent finding (the S0 core.h list migration threading
-old-size through the header, `teko_rt.h:185-187`) is REPORTED, not turned into an issue by me.
+**Residual law tension forcing a HALT: NONE.** Every fork is now RULED; the consequences are propagated,
+not deferred. Teko-only honored (product in `.tks`; the C slice-grow machine is REMOVED not patched; the
+runtime exception is a retiring bridge). W15 full-Javadoc on every snippet. Issue-100%: #1+#2+#3
+(including the F1 total removal and the F4 pragma kill) deliver the whole correction this round. FIXPOINT
+gen2==gen3 byte-identical is the inviolable gate and the detector of every reclaim risk. The one cross-doc
+consequence (R9, the growable-collection re-spec) is REPORTED up, not turned into an issue by me.
 
 ---
 
 ## 8. What remains BLOCKED (design-ahead honesty)
 
-- **#3 Tier B (C5)** is blocked on fork F1 (the replacement idiom for push/empty). Everything up to and
-  including Tier A (C1–C4) — the actual peak-inflation kill — is UNBLOCKED and lands with #1.
+- **F5 (the `.h`→`.tks` FFI migration, §5A)** is blocked on the native fixpoint closing + the §16
+  foundation crumbs (mmap region, syscall intrinsic, FFI foundation) — the camada-2 hard precondition
+  (`migracao-runtime-c-para-teko-0.3.1.md:3-8`). Its DESIGN tie-in (§5A) and the §16 contract are ready
+  now; only the landing waits.
 - **#2 B1–B4** depend on the io-streaming surface crumbs 1–5 landing; those are themselves unblocked
   (`io-streaming §10` — leaf-new, compiles today). The buffer↔arena binding (B1) needs #1 A3.
-- **The F2 per-entry free-list** for decoupled object arenas (fork F2 option b) shares the capability
-  `arena-especificacao-unica §7.8` already requires for `chan`/journal — coordinate, do not duplicate.
+- **R9 — the growable-collection re-spec** (`plano-collections-genericas-…`) is a cross-doc follow-up the
+  owner/coordinator schedules; it does not block the compiler-core expurgo.
 
-Everything else — the oracle (A1), the C and native fine-scope lowering (A2/A3), the object-arena wiring
-(A4), the obs (A5), the push re-point and the grow_inplace/with_cap removal (C1–C4) — compiles against
-today's tree and needs no blocked API.
+Everything else — the oracle (A1), the C and native fine-scope lowering (A2/A3), the DEDICATED object
+arena (A4), the obs (A5), the fixed-array machinery + total push/empty/grow_inplace/with_cap removal
+(C1–C5), and the `#arena_size`/`#arena_depth` kill (C6) — compiles against today's tree and needs no
+blocked API. C5's idiom is ruled (F1), so it is no longer fork-gated.
 
 ---
 
-## 9. Open forks for the owner to rule on
+## 9. The five forks — RULED by the owner (closed) and propagated
 
-**F1 — the replacement idiom for `push`/`empty` (gates #3 Tier B).** Tier A keeps the surface and routes
-its growth through the arena (memory win landed). Tier B removes `teko::list::push`/`empty` as named
-primitives — but that needs a replacement "build a sequence" idiom. Options: (a) a comprehension/collect
-form (`[f(x) for x in xs]`), (b) a presized-index builder (`var ys = [_; n]; ys[i] = …`), (c) keep the
-`List<T>::push` METHOD (arena-routed) and remove only the free-function `teko::list::push`/`empty`.
-Recommendation: (c) — the method is the single choke point (`list.tks:15`), arena-routed it costs
-nothing, and (a) can follow as sugar. **Rule: which idiom, and does Tier B happen this round or as a
-fast-follow?**
+All five §9 forks are RULED. Each entry: the owner's verbatim ruling, the recommendation it overruled (or
+confirmed), and where the consequence is propagated in the body.
 
-**F2 — object arena: shared or dedicated region.** Is the object arena (scope #7) always the enclosing
-fine-scope arena (option a, zero new region kind, object dies with its scope), or a dedicated per-object
-region when the object outlives its birth arm (option b, needs the F2 per-entry free-list)?
-Recommendation: (a) default, (b) only for the F2/container decoupled case. **Rule: (a)-only this round,
-or (a)+(b)?**
+**F1 — replacement idiom for `push`/`empty` (was: gates #3 Tier B). RULED.**
+Overruled recommendation: (c) keep the `List<T>::push` METHOD arena-routed. Owner REJECTS (c):
+*"não é pra manter o método, nossos arrays DEVEM SER DE TAMANHO FIXO E SEM POSSIBILIDADE DE PUSH / GROW /
+ou qualquer artifício de expandir um array. Quer expandir? Cria um novo e dropa o antigo."*
+Ruling: arrays are FIXED-SIZE. There is NO `push`/`grow_inplace`/`with_cap`/in-place append AND no
+growable method. The idiom to grow is: allocate a NEW fixed array (exact-sized at its own allocation) and
+DROP the old — closest to option (b) presized-index builder, but strictly no growth primitive survives.
+Tier B (surface removal of `push`/`empty` AND the `grow`/method) HAPPENS this round; the §5 purge is
+total. Idiom = the standing NO-PUSHES four natures. **Propagated:** §0 divergence #2, §5.1, §5.2 table,
+§5.3, crumbs C1/C5, R5, R9.
 
-**F3 — Tier A push re-point: does it wait for A3, or ship on the C route first?** C1 re-points BOTH
-motors. If native (A3) slips, may C1 land on the C route alone (memory win on the C build) ahead of
-native? Recommendation: keep C1 after A3 (native-first — the wall is native); C route alone buys nothing
-under the native cap. **Rule: confirm native-first, or allow a C-route-first partial?**
+**F2 — object arena: shared vs dedicated. RULED.**
+Overruled recommendation: (a) always the enclosing fine-scope arena (shared). Owner REJECTS shared:
+*"pq compartilhada? Isso quebra a visibilidade e segurança de um objeto por definição."*
+Ruling: the object arena is a DEDICATED per-object region (option b) as the RULE, not just the decoupled
+case. A shared/enclosing arena breaks the object's visibility+security by definition. **Propagated:**
+§2.3 (reworked to dedicated-per-object), §2.4 (coexistence with the §7.8 free-list), crumb A4, R8.
 
-**F4 — the `#arena_depth(N>1)` flattening override: this round or fast-follow?** `modelo §7` sets the
-default to depth=1 (each fine scope its own arena — exactly #1). The N>1 flattening override (#476) is an
-opt-in optimization with the loop back-edge carve-out (R3). Recommendation: fast-follow — #1's depth=1 is
-already correct and fine; flattening only pays once a profile shows sub-arena overhead. **Rule: defer
-#476 to fast-follow (confirm), or pull it now?**
+**F3 — Tier A push re-point: native-first or C-route-first. RULED (confirmed).**
+Owner: "ok" → confirm native-first: C1 stays after A3; NO C-route-first partial. **Propagated:** §6
+dependency order (unchanged — C-series after A3), R-none (already the plan's spine).
 
-**F5 — the S0 core.h list migration (adjacent, reported).** The compiler-internal seam (`core.h`
-`tk_realloc0`/`tk_free0`) stays on libc until old-size is threaded through the list header
-(`teko_rt.h:185-187`). It is NOT in this issue's scope (that is compiler-scratch, not program memory).
-Recommendation: leave frozen; report as the next adjacent axis. **Rule: confirm out-of-scope for this
-correction.**
+**F4 — arena sizing pragmas. RULED (further than recommended).**
+Overruled recommendation: fast-follow deferral of `#arena_depth(N>1)`. Owner goes further:
+*"vamos matar #arena_depth e #arena_size, já tem ruling para isso, o compilador agora deve medir
+estaticamente o tamanho do slot para quando a arena ser materializada ter um piso de apoio mínimo."*
+Ruling: KILL BOTH `#arena_depth` (#476) AND `#arena_size` (the profiler presize, `cg_emit_arena_presize`
+`codegen.tks:6934`; canonical §3 cites the drifted `:9832`). The compiler measures the slot size
+STATICALLY (the AST floor) so the arena has a minimum support floor at materialization. No profiler-driven
+dynamic sizing, no depth-override pragma. **Crucial:** this does NOT make the arena static — the arena
+stays DYNAMIC with a static FLOOR (lower bound), no ceiling, growing by chunk-list (§2.5). This severs the
+canonical §3 floor↔`#arena_size` coupling (`arena-especificacao-unica-0.3.1.md:147-149`); dynamic need is
+served by chunk-list growth, and killing `#arena_size` introduces no UAF and no correctness regression
+(at worst a few more chained chunks). **Propagated:** §0 divergence #3, §2.5 (the full model + proof),
+crumb C6, R3.
+
+**F5 — `.h` migration. RULED (overruled the out-of-scope recommendation).**
+Overruled recommendation: leave frozen / out-of-scope. Owner OVERRULES:
+*"Não é fora de escopo, todo '.h' feito include no C deve virar código em tks para usar FFI para a ABI
+nativa ou syscall sem depender do gcc (já cobre o native)."*
+Ruling: IN SCOPE. Every C `.h` include becomes `.tks` using FFI for the native ABI or a syscall, without
+gcc. The S0 `core.h` list migration is in scope; tie into §16 (`plano-s16-expurgo-libc-completo.md`) and
+the runtime migration (`migracao-runtime-c-para-teko-0.3.1.md`). **Propagated:** §0 divergence #5, the new
+§5A (scope + law-tension resolution + what is blocked), §6 dependency graph (F5 leg), R10, §8.
