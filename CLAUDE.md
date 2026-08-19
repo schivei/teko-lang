@@ -28,6 +28,18 @@ Isto mata os **HALTs falsos** (agente parando por algo já decidido — foi o ca
 RT-L6/cov_dump, parcialmente resolvidos). **Todo dispatch carrega esta regra**; o
 TEMPLATE de crumb a referencia.
 
+## Execução de crumb — DUAS PASSADAS (scout → implementer, dono 2026-08-19)
+Cada crumb roda em DUAS passadas, não uma:
+1. **SCOUT** (teko-scout, barato) — lê o crumb e VERIFICA contra o `src/` atual: as citações do
+   "Where" estão certas? A superfície já está landada (então é **verify-only**)? As deps estão
+   satisfeitas? Há drift do que o crumb assume? Os artefatos que ele mandaria criar já existem
+   (ex.: probes)? Veredito: **{JÁ-FEITO/verify-only | PRECISA-IMPLEMENTAR (+correções) | INCERTO}**.
+2. **IMPLEMENTER** (teko-implementer) — SÓ se o scout disser **PRECISA** ou **INCERTO**, e despachado
+   COM os achados/correções do scout. Se **JÁ-FEITO** → marca verify-only (confirma byte-idêntico, sem
+   implementer). Se **INCERTO de forma que precisa do dono** → sobe pelo protocolo de fork.
+Motivo: pega drift / já-feito / artefato-já-existe ANTES de gastar um implementer caro (foi o que
+faltou no 0001, que recriou probe já existente).
+
 ## Ritmo de trabalho
 - **BASE DO COORDENADOR = `fix/retirement` (lei dura, dono 2026-08-18). NUNCA opero na branch `main`.**
   Todo o trabalho parte de `fix/retirement`; agentes recebem branch própria a partir do que for
