@@ -51,19 +51,25 @@ NEW: no product `.tks`; this crumb is the reseed operation itself.
    additive grammar (SM-G1..G12, 9D-T1) is accepted by the current seed (written in OLD spelling); the
    collection/IO/§16 surfaces are registered and inert. The set is dependency-closed (master-plan §2.313):
    the current seed parses every row, none uses another row's not-yet-seeded surface.
-2. **Dispatch `reseed-bootstrap.yml` on the lane ref.** It harvests gen1's own emitted C, cc-compiles it to
+
+2. **MANDATORY PRE-FLIGHT RE-EVALUATION (reavaliação no momento do crumb).** At the MOMENT this crumb
+   executes, audit the actual state of each budgeted teaching item. If ANY surface is already landed
+   (S1/S2/S3 sweeps, intrinsic definitions, semantic layers), mark it DONE and teach ONLY the residual.
+   If teaching is still genuinely needed, it MUST be done in this round ("se precisa ensinar, tem que ser
+   feito"); do not defer to a later reseed.
+3. **Dispatch `reseed-bootstrap.yml` on the lane ref.** It harvests gen1's own emitted C, cc-compiles it to
    a compiler, rebuilds the tip, and checks the tip's re-emitted `teko.c` is byte-identical to the harvested
    C (a C-route FIXPOINT of the seed). A seed that does not self-reproduce is REFUSED, red, never proposed.
-3. **The green criterion is the C-route fixpoint** (the harvested C reproduces itself down the C route). DPS
+4. **The green criterion is the C-route fixpoint** (the harvested C reproduces itself down the C route). DPS
    is byte-preserving for the C route, so the harvest passes; the DEEPER native `gen2==gen3` is proven by
    the drained lane's own full matrix — which is correct, because the reseed EXISTS to unblock that native
    fixpoint (§9.2).
-4. **Drain by CHERRY-PICK, no PR/merge.** Branch protection admits no bypass; the workflow leaves a
+5. **Drain by CHERRY-PICK, no PR/merge.** Branch protection admits no bypass; the workflow leaves a
    `reseed/teko-c-<run>` branch (ONE commit: `bootstrap/teko.c` + `PROVENANCE`) + an artifact. The
    integrator collects that run-id-backed commit and cherry-picks it into the lane — the lane's own
    100%-green promotion is the gate. `provenance_gate.sh` PASSES because the record names a REAL run id
    matching the file sha.
-5. **After the reseed, the seed knows all of M1.** The M2 source sweeps (SM-S1/S2/S3/S6, `0031`–`0034`) can
+6. **After the reseed, the seed knows all of M1.** The M2 source sweeps (SM-S1/S2/S3/S6, `0031`–`0034`) can
    now rewrite `src/` to the new spelling against a seed that ALREADY accepts it; the fixpoint-rebuild swaps
    (RM-C3+, IO-6+, S16-*) core-consume it. This is the single teaching harvest for the entire M1 surface —
    COL-F0a..d fold in here too (NOT a separate collection reseed; the whole program's surface teaches once).
