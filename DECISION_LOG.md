@@ -474,3 +474,18 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Ratificação:** a regra export-gate foi registrada em `docs/design/estado-doc2-campanha-limpeza-0.3.1.md:24`; o size-bound é novo (owner 2026-08-19). Ambas ratificadas aqui. REGRA law-first: W15 skill + canonicalizer agent documentam; crumbs herdam via TEMPLATE.md standing-law line.
 - **Reversibilidade:** extremamente alta — é remoção de comentários (sem mudança de comportamento) + enfoque de reviewer.
 - **Timing:** a canonicalization roda como W15 retrofit em lane-close (antes de bump); sem impacto no CI (documento-only, convention-enforcement). Reseed quando o canonicalizer processar o batch (`fix/retirement` ou lane posterior).
+
+### D47 · cov_dump_s(str) ratificado — R6 CLOSED, cobertura reescrita em str-typed (owner 2026-08-19) ✅
+- **Contexto:** o crumb 0063 (RT-L5) rascunhava uma decisão sobre `cov_dump_s(str)` — a superfície de cobertura que fecha o último hole de C no ABI (`tk_cov_dump(char*)` recebe `char*`, violando M.2 100%-Teko). A alternativa rascunhada era um fallback que deixava o C em pé ("owner decision pending") se ratificação não chegasse a tempo.
+- **Ratificação do dono (2026-08-19):** `cov_dump_s(str)` É a lei-primeira. Zero C residual; a cobertura migra 100% para a superfície `str`-tipada. R6 (ruling da issue de migração runtime C→Teko) fecha neste log. Implicação: o crumb 0063 remove o hedge; a assinatura `cov_dump_s(path: str)` passa de DRAFT para RATIFICADO.
+- **Base constitucional:** M.2 (100% Teko, 0% C). Lei-primeira (nenhuma lei violada; 0% C é not negotiable). M.1 fail-loud (se ratificação falha, é um HALT-honesto do crumb, não um "fica a metade em C").
+- **Reversibilidade:** baixa — é a escolha de uma assinatura; alterá-la reduz fixpoint e força reseed.
+
+### D48 · TWO-TRACK comment canonicalization method (owner 2026-08-19) ✅
+- **Ruling do dono (refinamento de D46):** a execução da limpeza W15 nos comentários SEGUE A REGRA TWO-TRACK:
+  1. **Track 1 (mechanical):** `/* */` block comments E `//` inline são deletados num passe único — byte-neutral (comentários são lexer trivia; código emitido idêntico).
+  2. **Track 2 (analyzed):** `/** */` doc-comments NÃO são deletados mecanicamente — CADA um é analisado e CORRECTED (ajustado em site `exp` pra cumprir length-bound) ou EXPURGED (em site não-`exp`, ou onde não consegue cumprir) — "corrigir ou expurgar mediante a rule".
+- **Escopo:** W15 retrofit no lane-close + crumbs-followup (`fix/retirement`) e subsequentes; `SKILL.md` + `teko-canonicalizer.md` documentam o método. CONVENTION (não compiled): o lexer/parser/checker NÃO muda.
+- **Base constitucional:** M.2 (exported surface only) + rigor analítico (doc-comments são narrativa assinada, não lixo; cada um recebe decision point). Eficiência operacional: passe 1 = remoção mecânica (fast); passe 2 = curadoria + conformidade (care).
+- **Reversibilidade:** alta — é docstring policy e canonicalizer discipline (sem mudança de comportamento).
+- **Timing:** documentado em W15 skill + agent antes de qualquer crumb canonicalization pass; operacional já nesta sessão (crumbs-followup).
