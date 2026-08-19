@@ -55,6 +55,7 @@ line or a CLAUDE.md law. Always include the applicable safety rules:
 
 - **Teko-only:** new work is `.tks` only; C twins frozen (runtime exception noted where relevant).
 - **Comment convention (W15, owner 2026-08-19):** `/** */` only on `exp`; no `//` or `/* */`; a doc-comment never larger than the code it documents — enforced by the W15 canonicalizer/reviewer, NOT the compiler.
+- **Fork protocol (owner 2026-08-19):** at a fork, FIRST check if already deliberated (`DECISION_LOG.md`, `docs/design/**`, `.crumbs/**`, Doc-2/Doc-1/umbrella); if multiple, the MOST RECENT wins; HALT + notify ONLY for a genuinely undecided fork.
 - **W15 full Javadoc** on every declaration (pub + private); flatten/extract; no inline `//`.
 - **Removals = clean expurgo** of lexer/parser/checker, **NO tombstone diagnostic** (only where this crumb removes surface).
 - **Safety:** NEVER `teko test .`; build in a subshell with `ulimit -v 6815744` (6.5 GiB) cap — a blown guard is a root-cause fix, never a raised ceiling; commit each green step; reseed ONLY at a [RITUAL]; fixpoint `gen2==gen3` byte-identical; sweep `.tkt`/`.tkr` after any AST/signature change.

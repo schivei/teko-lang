@@ -13,6 +13,20 @@ Toda pergunta é em **prosa no chat**, PT-BR, curta. Quando ele estiver responde
 ("ainda estou respondendo outras coisas"), **esperar** — não empilhar pergunta nem
 executar por cima.
 
+## Protocolo de fork (bifurcação) — REGRA DURA, dono 2026-08-19
+Quando um agente, **operando**, encontra um **fork** (decisão de design, owner-gate,
+ambiguidade "qual caminho", tensão de lei), a **reza ANTES de parar**:
+1. **Checar se já está deliberado** — buscar em `DECISION_LOG.md`, `docs/design/**`,
+   `.crumbs/**` (Rulings) e nas docs-guarda (Doc-2 / Doc-1 / umbrella) uma deliberação
+   sobre aquele ponto.
+2. **Mais recente vence** — havendo mais de uma deliberação sobre o mesmo ponto, aplicar
+   a **mais recente** (por data / id do DECISION_LOG); a nova supersede a velha.
+3. **Só HALT em fork real** — parar e notificar o dono **apenas** quando NÃO existe
+   deliberação (fork genuinamente aberto), enunciando o fork curto e claro.
+Isto mata os **HALTs falsos** (agente parando por algo já decidido — foi o caso de
+RT-L6/cov_dump, parcialmente resolvidos). **Todo dispatch carrega esta reza**; o
+TEMPLATE de crumb a referencia.
+
 ## Ritmo de trabalho
 - **BASE DO COORDENADOR = `fix/retirement` (lei dura, dono 2026-08-18). NUNCA opero na branch `main`.**
   Todo o trabalho parte de `fix/retirement`; agentes recebem branch própria a partir do que for
