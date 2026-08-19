@@ -277,19 +277,22 @@ similares) por contador determinístico global ou (namespace, fn_idx, seq). Sem 
 ainda; só remove a dependência do tamanho de buffer. Fixpoint: `teko.c` deve sair idêntico
 (é rename mecânico de temporários — validar byte-a-byte). Bloqueia C11.
 
-### C11 — Parse-por-unidade → AST incompleta → LINK (o linker interno)
-Reestruturar `frontend` para parsear por namespace produzindo a **AST incompleta** (exports:
-tipos/assinaturas/`const` + referências pendentes cross-unit), sem reter corpos; e o LINK
-(barreira global) que monta a tabela linkada + ABI/`.tkh` resolvendo as pendências. Reusar a
-projeção de exports do `.tkb` (`emit/tkb_frame.tks`) para a AST incompleta; corpos vão a
-disco ou são re-parseáveis. Aditivo (convive com whole-program). Fixpoint.
+### C11 — Parse-por-unidade → AST incompleta → LINK (a FFI interna)
+Reestruturar `frontend` para parsear por namespace produzindo a **AST incompleta** (decls
+`exp`+`pub`: tipos/assinaturas/`const` + referências pendentes cross-unit), sem reter corpos;
+e o LINK (barreira global) que monta a **FFI interna** — a tabela de link RICA (assinatura
+Teko + símbolo + ABI, por decl `exp`+`pub`) que resolve as pendências e **alimenta o checker
+de cada unidade**, descartada após o link. NÃO desenhar tabela só-ABI (o checker roda depois
+do link e precisa dos tipos Teko). O `.tkh` (só `exp`) é emitido à parte, ortogonal. Reusar a
+projeção de decls do `.tkb` (`emit/tkb_frame.tks`), estendida para incluir `pub`. Aditivo
+(convive com whole-program). Fixpoint.
 
 ### C12 — Check+lower+emit FUNDIDOS por unidade (despejo em memória = C6)
 Reestruturar `backend`/`codegen_and_report` para iterar namespaces em ordem determinística:
-(re)carrega corpos da unidade, checa contra a tabela linkada (C11), lowera, emite a
+(re)carrega corpos da unidade, checa contra a FFI interna (C11), lowera, emite a
 **saída-de-unidade** (abstrata: na rota C = pedaço de texto concatenado; na rota native =
 `.o`), anexa/escreve e **derruba a região da unidade** (C6) antes da próxima. Prólogo global
-sai da tabela linkada; corpos streamed. **Guarda dura: `teko.c` byte-idêntico ao
+sai da FFI interna; corpos streamed. **Guarda dura: `teko.c` byte-idêntico ao
 whole-program.** Este é o despejo-em-memória do princípio unificador. Fixpoint a cada
 namespace migrado.
 
@@ -309,7 +312,10 @@ C12/C13 verdes.
 Escrever o back-end de emissão por-unidade da rota native: cada namespace lowered
 (`lower_program`/`lower_item`) → isel (`select_module*`) → `regalloc_module` →
 `encode_module` → `emit_elf`/`emit_macho`/`emit_coff` produz um `.o` no disco; a região da
-unidade é derrubada (o `.o` É o despejo). O "linker próprio" (a tabela linkada de C11)
+unidade é derrubada (o `.o` É o despejo). **Visibilidade → tabela de símbolos do `.o`:**
+`exp`+`pub` = símbolo GLOBAL (visível ao `ld`/link cross-unit); privado = `static`/local
+(nem entra na tabela). A tabela de símbolos do `.o` É a FFI interna no plano de linkagem —
+`pub` alcança o `ld` sem vazar para o `.tkh`. O "linker próprio" (a FFI interna de C11)
 resolve símbolos entre unidades; `ld` do SO (ou `objfile_ar`) junta no binário final. Saída
 abstrata de C12 = `.o` aqui. Só depois de C12 verde na rota C.
 
@@ -359,19 +365,59 @@ Granularidade: **namespace** (arquivo é fino demais — corpos intra-namespace 
 inline/const-fold; whole-program é o pico atual). O pipeline vira:
 
 1. **Parse por unidade → AST INCOMPLETA.** Cada namespace é parseado para uma forma compacta
-   que carrega SÓ o necessário ao link: as **declarações exportadas** (tipos, assinaturas de
-   fn, valores de `const` = a forma `.tkh`/ABI) e uma lista de **referências pendentes**
-   (nomes cross-unit ainda não resolvidos). Os CORPOS (árvores de statement) NÃO ficam
-   residentes — são adiados (descartados após extrair exports+pendências; recarregados por
-   reparse da unidade quando ela chegar ao checker).
-2. **LINK (o linker interno).** Junta as ASTs incompletas: monta a tabela global de símbolos,
-   resolve as referências pendentes contra os exports das outras unidades, e materializa a
-   ABI/`.tkh`. Compacto — assinaturas, não corpos. É a única estrutura que vive o compile
-   todo.
+   que carrega SÓ o necessário ao link: as **declarações de linkagem** (tipos, assinaturas de
+   fn, valores de `const`) de TODA decl `exp` **e** `pub` (não só `exp` — ver a FFI interna
+   abaixo) e uma lista de **referências pendentes** (nomes cross-unit ainda não resolvidos).
+   Os CORPOS (árvores de statement) NÃO ficam residentes — são adiados (descartados após
+   extrair decls+pendências; recarregados por reparse da unidade quando ela chegar ao checker).
+2. **LINK (o linker interno).** Junta as ASTs incompletas: monta a **tabela de link interno
+   (a "FFI interna")**, resolve as referências pendentes contra as decls `exp`+`pub` das
+   outras unidades. Compacto — assinaturas, não corpos. É a estrutura que vive o link e
+   alimenta o checker; **some após o link** (não é embarcada; ver abaixo).
 3. **Check + lower + emit POR UNIDADE (streaming).** Para cada namespace, em ordem
-   determinística: (re)carrega os corpos daquela unidade, checa CONTRA a tabela linkada,
-   lowera, emite o C, anexa à saída e **derruba a unidade** (região de arena, C6). Só os
-   corpos de UM namespace vivem por vez.
+   determinística: (re)carrega os corpos daquela unidade, checa CONTRA a tabela de link
+   interno, lowera, emite o C, anexa à saída e **derruba a unidade** (região de arena, C6).
+   Só os corpos de UM namespace vivem por vez.
+
+### O furo do `.tkh`-só-`exp` e a resolução: uma FFI INTERNA (ruling do dono)
+
+Furo real: linkar cross-namespace SÓ pela interface exportada NÃO funciona no Teko, porque
+**só `exp` alcança o `.tkh`** (lei de visibilidade, `tast.tks` M.4) e o compilador chama
+MUITO símbolo `pub` (interno, cross-namespace) entre módulos. Se o link só visse o
+`.tkh`/`exp`, seria preciso ou marcar quase tudo `exp` (fura a visibilidade + incha a
+superfície) ou exportar tudo no `.tkh` (incha o header). Nenhum serve.
+
+Resolução (ruling do dono): **separar duas tabelas ortogonais.**
+
+- **`.tkh` = interface do USUÁRIO = só `exp`.** Enxuto, intocado, EMBARCADO no pacote.
+- **Tabela de link interno = a "FFI interna" = `exp` + `pub`.** Artefato TRANSITÓRIO do
+  pipeline (parte do `.tkb`/link), **descartado após o link, NUNCA embarcado no `.tkh`**. É
+  como um `.tkh` completo que INCLUI `pub`, mas interno ao build.
+
+**Mapeamento visibilidade → linkagem (registrar):**
+
+| Visibilidade | Símbolo no `.o` | No `.tkh`? | Na FFI interna? |
+|---|---|---|---|
+| **`exp`** | global (visível ao `ld`) | **sim** (API pública) | sim |
+| **`pub`** | global (visível ao `ld`/link cross-unit) | **não** | **sim** |
+| **privado** | `static`/local | não | não (nem entra na tabela de símbolos) |
+
+**CUIDADO CRÍTICO — a FFI interna é RICA, não só-ABI.** Como no pipeline o **CHECKER roda
+DEPOIS do LINK**, a tabela de link interno tem que carregar, por símbolo `exp`+`pub`, o
+suficiente para DUAS necessidades:
+
+1. **Assinatura Teko** (tipos de param/retorno no nível da linguagem) — para o CHECKER tipar
+   a chamada cross-namespace.
+2. **Símbolo de linkagem + ABI** — para o codegen emitir a chamada e o `ld`/link interno
+   resolver.
+
+Ou seja, a barreira de LINK (C11) monta uma tabela com **tipos Teko + ABI** (não uma tabela
+só-ABI), ela alimenta o checker de cada unidade, e **some após o link**. Desenhar a tabela
+só-ABI seria um furo: o checker não teria como tipar a chamada `pub` cross-namespace.
+
+Isto reforça o terminal native: a **tabela de símbolos do `.o` É a tabela de link interno**
+no plano de linkagem (globais = `exp`+`pub`; privado = `static`). O `.tkh` (só `exp`) é
+ortogonal — o `.o` expõe `pub` ao `ld` sem que `pub` vaze para o header.
 
 ### O checker precisa de duas passadas (coleta → checagem)
 
@@ -379,15 +425,15 @@ Sim: o monólito tem recursão mútua, então o checker de qualquer unidade prec
 linkada COMPLETA (exports de todas as outras) antes de checar corpo algum. Por isso o LINK
 (passo 2) é uma barreira: coleta exports de TODAS as unidades primeiro, resolve, e só então o
 passo 3 checa corpos em streaming. O que NUNCA fica residente são N conjuntos de corpos —
-apenas a tabela linkada (compacta) + os corpos da unidade corrente. A "AST incompleta"
+apenas a FFI interna (compacta) + os corpos da unidade corrente. A "AST incompleta"
 existe justamente para que o passo de coleta não segure corpos.
 
 ### O que o "linker interno" RETÉM entre unidades × o que DESCARTA
 
-| Retém (compacto, vive o compile todo) | Descarta por unidade (libera na fronteira) |
+| Retém durante o LINK+streaming (compacto) | Descarta por unidade (libera na fronteira) |
 |---|---|
-| Tabela global de símbolos (tipos exportados, assinaturas de fn, `const`) | AST parseada dos corpos daquele namespace |
-| Forma `.tkh`/ABI | Árvores `TStatement` tipadas daquele namespace |
+| **FFI interna** (`exp`+`pub`: tipos Teko + símbolo + ABI) — TRANSITÓRIA, some após o link | AST parseada dos corpos daquele namespace |
+| `.tkh` (só `exp`) — este SIM embarcado no pacote, ortogonal | Árvores `TStatement` tipadas daquele namespace |
 | Pedidos de monomorfização que cruzam unidades | LIR baixado daquele namespace |
 | Acumulador de saída C — **idealmente streamed pro arquivo**, não retido | (o C daquele namespace, já escrito) |
 
@@ -402,8 +448,10 @@ a próxima e despejar a memória** antes de seguir. O pico deixa de ser a SOMA
 sub-modelos acima (por-unidade, AST-incompleta-linkada-antes-do-checker, incremental) são
 CASOS deste princípio — variam só a granularidade da unidade e o ponto de despejo.
 
-Pipeline: `parse → (artefato AST/exports por unidade) → despejo → link → (tabela linkada) →
-despejo → checker → (artefato typed) → despejo → lower → (LIR) → despejo → codegen → teko.c`.
+Pipeline: `parse → (AST incompleta: decls exp+pub por unidade) → despejo → link → (FFI
+interna, transitória) → checker por unidade → (artefato typed) → despejo → lower → (LIR) →
+despejo → codegen → saída-de-unidade`. A FFI interna é descartada ao fim do streaming; o
+`.tkh` (só exp) é emitido à parte e embarcado.
 
 **O "despejo" tem duas formas, ambas bounded a um estágio:**
 
@@ -443,7 +491,7 @@ Ou seja: um único dump de disco estrutural (parse→link, para não segurar N c
 ### Convivência com o fixpoint (byte-identidade gen2==gen3)
 
 O `teko.c` emitido DEVE continuar byte-idêntico. O prólogo global (type decls + forward fn
-decls) sai da tabela global (a tabela linkada a tem); os corpos são streamed em ordem determinística
+decls) sai da FFI interna (o link a tem); os corpos são streamed em ordem determinística
 de namespace. A concatenação por-unidade tem que IGUALAR a emissão whole-program de hoje →
 exige a MESMA ordenação global de itens e o mesmo seccionamento.
 
@@ -465,7 +513,7 @@ unidade é a âncora do fixpoint.
 ### Build incremental (caso do princípio unificador, C14)
 
 Recompilar só a unidade que mudou, reusando o artefato `.tkb` typed em cache de disco
-(chaveado por hash do conteúdo da unidade + hash da tabela linkada de que ela depende). Se a
+(chaveado por hash do conteúdo da unidade + hash da FFI interna de que ela depende). Se a
 assinatura exportada de uma unidade muda, os dependentes recompilam. É o **caso persistente**
 do despejo-em-disco: o mesmo `.tkb` que bounded o pico serve de cache entre builds. **Para o
 self-build / fixpoint, o incremental é DESLIGADO** (build limpo tem que produzir `teko.c`
@@ -494,7 +542,7 @@ depender de compilador C. O backend native já existe e é o caminho real:
 LIR, encodada para `.o`, escrita no disco, e a memória da unidade é **derrubada** — o
 objeto no disco É o despejo natural (não precisa nem de `.tkb` intermediário para o terminal;
 o `.o` é o artefato). O "linker próprio" que o dono citou é exatamente isto: a peça que
-resolve símbolos ENTRE unidades (a tabela linkada de C11) e produz objetos que `ld` costura.
+resolve símbolos ENTRE unidades (a FFI interna de C11) e produz objetos que `ld` costura.
 Na rota C, o terminal ainda concatena tudo num `teko.c` (uma "unidade só" degenerada); na
 rota native, o terminal é naturalmente por-unidade → o per-unit-object cai de graça do
 desenho do Eixo C.
@@ -599,3 +647,13 @@ encoder. A muleta C só sai quando as 4 pernas native do CI fecham verde E o obj
 O terminal native (C15–C16) NÃO bloqueia a meta de memória (Eixos A/B a entregam nas duas
 rotas) — é o endgame arquitetural: a linguagem emitindo seu próprio binário linkável por
 `ld`, sem depender de compilador C.
+
+**R8 — A FFI interna NÃO pode vazar `pub` para o `.tkh` (ortogonalidade das duas tabelas).**
+O erro a evitar: reusar a projeção do `.tkb` estendida com `pub` e, por descuido, embarcá-la
+no `.tkh`. As duas tabelas são ortogonais: `.tkh` = só `exp`, embarcado; FFI interna =
+`exp`+`pub`, TRANSITÓRIA, descartada ao fim do link, jamais embarcada. O checker roda DEPOIS
+do link, então a FFI interna tem que ser RICA (tipos Teko + símbolo + ABI por decl); uma
+tabela só-ABI não deixaria o checker tipar a chamada `pub` cross-namespace. Guardas: (a) o
+emissor de `.tkh` (`emit/tkh.tks`) continua filtrando só `exp`; (b) a FFI interna vive só na
+região do link e é derrubada antes do emit final; (c) nenhum `pub` aparece no `.tkl`
+empacotado. Mudar isto é mudança de superfície/ABI → exige reseed.
