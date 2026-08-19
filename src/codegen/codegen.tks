@@ -1054,7 +1054,17 @@ fn cg_is_prim_name(name: str): bool { cg_is_builtin_scalar(name) }
 
 fn cg_nameset_seen(seen: []str, n: str): bool { cg_str_in(seen, n) }
 
-fn cg_te_reaches_byvalue(prog: CgProg, te: @TypeExpr(), to: str, seen: []str): bool {
+fn cg_visited_upto(visited: []str, depth: u64, n: str): bool {
+    var i: u64 = 0
+    loop {
+        if i >= depth { break }
+        if visited[i] == n { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn cg_te_reaches_byvalue(prog: CgProg, te: @TypeExpr(), to: str, ref visited: []str, depth: u64): bool {
     match te {
         parser::NamedType as nt => {
             var stem = nt.path.segments[nt.path.segments.len - 1].name
@@ -1062,13 +1072,13 @@ fn cg_te_reaches_byvalue(prog: CgProg, te: @TypeExpr(), to: str, seen: []str): b
             if cg_is_class_named(prog, stem) { return false }
             var y = if nt.args.len == 0 { stem } else { cg_texpr_inst_name(stem, nt.args) }
             if checker::name_last_segment(y) == checker::name_last_segment(to) { return true }
-            cg_name_reaches_byvalue(prog, y, to, seen)
+            cg_name_reaches_byvalue(prog, y, to, visited, depth)
         }
         parser::UnionType as ut => {
             var i = 0
             loop {
                 if i >= ut.members.len { break }
-                if cg_te_reaches_byvalue(prog, ut.members[i], to, seen) { return true }
+                if cg_te_reaches_byvalue(prog, ut.members[i], to, visited, depth) { return true }
                 i++
             }
             false
@@ -1079,16 +1089,17 @@ fn cg_te_reaches_byvalue(prog: CgProg, te: @TypeExpr(), to: str, seen: []str): b
         parser::MacroType => false
     }
 }
-fn cg_name_reaches_byvalue(prog: CgProg, from: str, to: str, seen: []str): bool {
-    if cg_nameset_seen(seen, from) { return false }
-    var seen2 = teko::list::push(seen, from)
+fn cg_name_reaches_byvalue(prog: CgProg, from: str, to: str, ref visited: []str, depth: u64): bool {
+    if cg_visited_upto(visited.value, depth, from) { return false }
+    if depth >= visited.value.len { return true }
+    visited[depth] = from
     var d = match cg_find_decl(prog, from) { parser::TypeDecl as dd => dd; error => return false }
     match d.body {
         parser::StructBody as sb => {
             var i = 0
             loop {
                 if i >= sb.fields.len { break }
-                if cg_te_reaches_byvalue(prog, sb.fields[i].type_ann, to, seen2) { return true }
+                if cg_te_reaches_byvalue(prog, sb.fields[i].type_ann, to, visited, depth + 1) { return true }
                 i++
             }
             false
@@ -1098,7 +1109,7 @@ fn cg_name_reaches_byvalue(prog: CgProg, from: str, to: str, seen: []str): bool 
                 var i = 0
                 loop {
                     if i >= u.members.len { break }
-                    if cg_te_reaches_byvalue(prog, u.members[i], to, seen2) { return true }
+                    if cg_te_reaches_byvalue(prog, u.members[i], to, visited, depth + 1) { return true }
                     i++
                 }
                 false
@@ -1115,7 +1126,9 @@ fn cg_field_boxed(prog: CgProg, sname: str, fte: @TypeExpr()): bool {
         _ => false
     }
     if !is_box_candidate { return false }
-    cg_te_reaches_byvalue(prog, fte, sname, teko::list::empty())
+    var cap: u64 = 512
+    var visited: [cap]str = []
+    cg_te_reaches_byvalue(prog, fte, sname, visited, 0)
 }
 
 fn cg_union_field_inline_tag(prog: CgProg, sname: str, ut: parser::UnionType): bool {

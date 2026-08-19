@@ -1,19 +1,23 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
 # RESEED (hand-harvest, local on feat/arrays-reclaim-first, forward-only): refreshes the seed for
-# marco 3 of the io-streaming / array-reclaim campaign — the TOTAL forms now ride the stream layer:
-# src/io/io.tks read_file/write_file/write_file_bytes/append_file drop `extern ... from "teko_rt"`
-# and call read_stream/write_stream/append_stream (raw syscalls). Signatures are unchanged, so
-# every caller is untouched; because they are now real Teko functions (not extern) the codegen's
-# host-FFI shortcut no longer fires for them.
+# marco 4 of the io-streaming / array-reclaim campaign — the FIRST memory-reduction marco.
+#
+# The arena lifetime map (TEKO_ARENA_OBS) showed the 6.44 GiB peak is 100% push copy-grow leaked
+# into the never-freed root region; the single biggest site was codegen::cg_name_reaches_byvalue
+# (1215 MB, 8.6M allocs): a recursive by-value reachability DFS that rebuilt its `seen` visited-set
+# with teko::list::push on every recursive call, leaking the geometric doublings. This marco
+# converts that DFS to a preallocated path-stack: cg_field_boxed allocates one `[512]str` buffer,
+# passed by `ref []str` with a depth counter; each level writes visited[depth] by index and reads
+# visited[0..depth] for the cycle check — exactly the per-branch `seen` semantics with zero copy.
+# The depth guard boxes conservatively (returns true) past the cap; real by-value nesting is shallow
+# so the cap is never reached in the self-build (identical boxing decisions).
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, CC=clang.
-#   - Write exactness: the teko.c a stream-based compiler WRITES is byte-identical to the one the
-#     prior extern-write compiler wrote (proven cmp of the two).
-#   - Fixpoint: gen2 builds gen3, gen2.c == gen3.c byte-identical; this file is that stable output.
-#   - Guard: builds ran under `ulimit -v 10485760` (10 GiB dev allowance for the in-progress
-#     campaign) with TEKO_BACKEND=c; gen2 peak VmHWM ~6.44 GiB (reduction lands once the codegen
-#     emits straight into a FileStream and the push expurgo + arena reclaim land).
+#   - gen2 builds gen3; gen2.c == gen3.c byte-identical; this file is that stable output.
+#   - MEMORY: gen2 peak VmHWM dropped 6.46 -> 5.48 GiB (VmRSS 6.44 -> 5.22 GiB), now UNDER the
+#     6 GiB hard target. Guard: builds ran under `ulimit -v 10485760` (10 GiB dev allowance) with
+#     TEKO_BACKEND=c.
 #
 # `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane,
 # forward-only, its correctness resting on the clean fixpoint above.
@@ -24,8 +28,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  c78d791906d4f74723ab652484955dc5f1e8438297b0d7fcc87ed33254343590
+sha256:  ba9df3c142f06e43012b7f99581fb293ec448feeea6574ea3a15e099075f4c00
 since:   0.3.1.0
-legacy:  none — self-reproducible harvest of marco 3 (TOTAL read/write forms over the stream layer,
-         plus dead-const cleanup in file_stream.tks); byte-identical on rebuild (clean fixpoint
-         gen2 == gen3, gen2.c == gen3.c, 23 246 159 bytes).
+legacy:  none — self-reproducible harvest of marco 4 (push->path-stack in cg_name_reaches_byvalue,
+         gen2 peak 6.46 -> 5.48 GiB); byte-identical on rebuild (clean fixpoint gen2 == gen3,
+         gen2.c == gen3.c, 23 247 397 bytes).
