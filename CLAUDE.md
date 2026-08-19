@@ -154,6 +154,15 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   que compila em toda arquitetura/SO via `#if` do C — tem que **emitir tudo**
   (todos os alvos), não podar para o host que emite. Só o backend **native** emite
   um executável por (arch, SO), e ainda assim cross-compila.
+- **`teko.c` É MULETA — ENDGAME É BINÁRIO LINKÁVEL POR `ld` SEM COMPILADOR C (dono 2026-08-19).**
+  O terminal do pipeline NÃO é `teko.c`; é a linguagem emitir seu **próprio objeto/binário linkável por
+  `ld`** (backend native: `objfile_elf/macho/coff`, `objfile_ar`), sem depender de compilador C. `teko.c`
+  (UM TU cross-compilado por `#if`) é a rota transitória enquanto o native não fecha. No pipeline por
+  unidade (namespace), **cada namespace emite um OBJETO** → `ld`/link interno junta = compilação separada
+  clássica (o despejo de memória por unidade fica natural: unidade→objeto no disco→libera). O fixpoint
+  migra de "gen2.c==gen3.c byte-idêntico" para "**objeto native se reproduz**" (determinismo do objeto:
+  sem timestamp, ordem estável de símbolos/seções, sem paths absolutos); a muleta C sai quando as pernas
+  native do CI fecham verde.
 - Teko-only (.tks), W15 (doc-comments-only, flatten/extract, helpers com nome único
   tree-wide), sem VM/GC, arena.
 - **NO PUSHES (LEI DURA, dono 2026-08-18) — inverte o antigo W15 "no index-assign".** Array é
