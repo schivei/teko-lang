@@ -341,12 +341,6 @@ exp fn stream_close(s: FileStream): error | null {
     null
 }
 
-/** scratch_buffer — a fresh CHUNK-byte scratch region in the arena, reused each read step.
- * @return the reusable byte buffer */
-fn scratch_buffer(): []byte {
-    teko::mem::bytes_from_ptr(teko::mem::buf_ptr(CHUNK), CHUNK)
-}
-
 /** write_stream — the recommended write path: open `path` truncating, write `data` chunked, and
  * close (even on error).
  * @param path  the destination file
@@ -378,15 +372,19 @@ exp fn append_stream(path: str, data: []byte): error | null {
 exp fn read_stream(path: str): []byte | error {
     var s = match open_read(path) { FileStream as fs => fs; error as e => return e }
     var total = match stream_size(s) { u64 as t => t; error as e => { _ = stream_close(s); return e } }
-    var out: []byte = teko::mem::bytes_from_ptr(teko::mem::buf_ptr(total), total)
+    var scratch: []byte = teko::mem::bytes_from_ptr(teko::mem::buf_ptr(CHUNK), CHUNK)
+    var out: [total]byte = []
     var got: u64 = 0
     loop {
         if got >= total { break }
-        var want = total - got
-        if want > CHUNK { want = CHUNK }
-        var view: []byte = teko::mem::bytes_from_ptr(teko::mem::byte_ptr(out, got), want)
-        var n = match stream_read(s, view) { u64 as c => c; error as e => { _ = stream_close(s); return e } }
+        var n = match stream_read(s, scratch) { u64 as c => c; error as e => { _ = stream_close(s); return e } }
         if n == 0 { break }
+        var j: u64 = 0
+        loop {
+            if j >= n { break }
+            out[got + j] = scratch[j]
+            j = j + 1
+        }
         got = got + n
     }
     _ = stream_close(s)

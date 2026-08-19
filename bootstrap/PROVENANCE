@@ -1,23 +1,19 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
 # RESEED (hand-harvest, local on feat/arrays-reclaim-first, forward-only): refreshes the seed for
-# marco 2 of the io-streaming / array-reclaim campaign — the leaf FileStream layer:
-#   - src/io/file_stream.tks rewritten as the streaming primitives over raw syscalls (Linux) and
-#     extern OS ABI (macOS System / Windows kernel32), with NO `from "teko_rt"`: FileStream,
-#     open_read/open_write/open_append, stream_read/stream_write/stream_seek/stream_size/
-#     stream_close, the write_stream/append_stream/read_stream helpers, and CHUNK=1024. The dead
-#     FileReader/file_flush accumulators are removed.
-#   - src/fs/fs.tks gains FileInfo, file_size and stat (is_dir by probing list_dir, no struct-stat
-#     parsing; size by seek-to-end over the stream).
-# The layer is a leaf: no compiler site consumes it yet, so the emitted C for every program is
-# unchanged except for the compiler's own new functions.
+# marco 3 of the io-streaming / array-reclaim campaign — the TOTAL forms now ride the stream layer:
+# src/io/io.tks read_file/write_file/write_file_bytes/append_file drop `extern ... from "teko_rt"`
+# and call read_stream/write_stream/append_stream (raw syscalls). Signatures are unchanged, so
+# every caller is untouched; because they are now real Teko functions (not extern) the codegen's
+# host-FFI shortcut no longer fires for them.
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, CC=clang.
-#   - gen1 (linked from this bootstrap via clang) builds gen2; gen2 builds gen3; gen2.c == gen3.c
-#     byte-identical, and this file is that stable output.
+#   - Write exactness: the teko.c a stream-based compiler WRITES is byte-identical to the one the
+#     prior extern-write compiler wrote (proven cmp of the two).
+#   - Fixpoint: gen2 builds gen3, gen2.c == gen3.c byte-identical; this file is that stable output.
 #   - Guard: builds ran under `ulimit -v 10485760` (10 GiB dev allowance for the in-progress
-#     campaign) with TEKO_BACKEND=c; gen2 peak VmHWM ~6.46 GiB (the memory reduction lands with the
-#     codegen -> FileStream + push expurgo + arena reclaim crumbs still ahead).
+#     campaign) with TEKO_BACKEND=c; gen2 peak VmHWM ~6.44 GiB (reduction lands once the codegen
+#     emits straight into a FileStream and the push expurgo + arena reclaim land).
 #
 # `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane,
 # forward-only, its correctness resting on the clean fixpoint above.
@@ -28,7 +24,7 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  38a77a08525b58da941d8187655e85871cb76200861faa33eca17996caea5bce
+sha256:  c2ca090033c7b858aad801fa933253e9efcf703317c8915ec9f791d118ee6750
 since:   0.3.1.0
-legacy:  none — self-reproducible harvest of marco 2 (leaf FileStream layer + fs.stat/file_size);
-         byte-identical on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c, 23 263 156 bytes).
+legacy:  none — self-reproducible harvest of marco 3 (TOTAL read/write forms over the stream layer);
+         byte-identical on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c, 23 246 159 bytes).
