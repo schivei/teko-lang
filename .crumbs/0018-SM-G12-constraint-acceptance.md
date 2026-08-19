@@ -71,7 +71,10 @@ fn parse_constraint_term(tokens: []lexer::Token, pos: u64): ParsedConstraintTerm
 ## Rulings & laws
 
 - **Teko-only:** parser/checker `.tks`; no C twin.
-- **W15 full Javadoc** on `parse_constraint_term` and helpers; no `//`.
+- **Comment convention (W15, owner 2026-08-19):** `parse_constraint_term` and its helpers are internal
+  (non-`exp`) parser fns → they carry NO `/** */` doc-comment; no `//` or `/* */` either. A `/** */` is
+  allowed ONLY on an `exp` decl and never larger than the code it documents — canonicalizer/reviewer, not
+  the compiler.
 - **Owner 2026-08-19 (CI 965) + Doc-2 §9.2b:** a constraint accepts ANY type + markers + interfaces +
   service lifetimes; rejects ONLY traits. Forcing the service lifetime in a constraint is HONEST (a
   non-singleton transport fails at the `make`, not silently redirected).
