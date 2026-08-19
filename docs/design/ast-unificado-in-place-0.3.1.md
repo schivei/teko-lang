@@ -1,12 +1,113 @@
-# AST único enriquecido in-place — a alavanca contra o muro de memória (0.3.1)
+# AST único enriquecido in-place — avaliação e desenho (0.3.1)
 
 Base de leitura: `origin/fix/retirement` @ `c824e9d7`. Autor: arquiteto (DESIGN-ONLY; não
 toca código de produto — este doc é o único artefato). Proposta a versionar, argumentar e
 ratificar pelo dono; **os forks do §8 NÃO estão decididos** — são fork+recomendação.
 
+**Leia o VEREDITO primeiro.** Resumo do julgamento do arquiteto: **como alavanca de MEMÓRIA, NÃO
+vale unificar** — o ganho é ~0,4–0,6 GB do residual (os 7%), a um custo de refactor comparável ao
+expurgo de `push`; a meta ≤1,5 GB já sai do Eixo A sozinho. Há caminhos mais baratos (§V.4). O
+desenho completo (§§1–10) fica registrado para o caso de o dono decidir unificar mesmo assim, ou
+para reaproveitar peças (o `delete<T>` e o short-circuit dos passes valem independentemente).
+
 Complementa (não substitui) `docs/design/reducao-memoria-arrays-0.3.1.md` (Eixos A/B/C) e
 `docs/design/io-streaming-0.3.1.md`. O Eixo C (pipeline por-namespace) é **ortogonal** a este
 doc — a composição está no §5.
+
+---
+
+## VEREDITO (resposta direta às 4 perguntas do dono — sem tomar hipótese alguma como dada)
+
+O dono pediu julgamento, não um "como fazer". Aqui está, cético inclusive com a hipótese de
+NÃO-fazer, e cético com as próprias premissas do dono (objeto-vs-struct, `delete<T>`,
+monomorph-via-List). **As §§1–10 abaixo desenham o COMO caso ele escolha a unificação; este
+veredito é o SE/QUANTO/VALE e a alternativa recomendada.**
+
+### V.1 — Faz sentido trocar para o AST-unificado in-place ("objeto")? **NÃO — não agora, não como alavanca de memória.**
+
+Recomendação clara, não "depende". E antes de tudo, uma premissa do dono que **não se sustenta**:
+**não existe "trocar para objeto".** O item 14 (fat value-struct) já dá **mutação in-place por
+`ref`/`self`** sobre os `struct` que já temos — não é preciso virar `class`/`service` (objeto de
+identidade/heap). A pergunta "struct vs objeto" **dissolve**: o que a unificação exigiria é
+**ref-disciplina** (percorrer e mutar por `ref`) sobre os structs atuais, nenhum construto novo.
+Então a decisão real não é "objeto sim/não" — é "**fundir os tipos de nó e reescrever os passes
+para mutação in-place, sim/não**". E a resposta é **não**, pelos números de V.2 e o custo de V.3.
+
+### V.2 — Existe ganho REAL e QUANTIFICADO? **Sim, real, mas MODESTO e no lugar errado (~0,4–0,6 GB do residual, não os 93%).**
+
+O que EU VERIFIQUEI no código (não aceitei de premissa) — e aqui o dono está **mais certo do que
+eu supus na primeira volta**: as ~6 espinhas são **reais**. `mono_tstmt`/`mono_block`
+(`monomorph.tks:688,740`) **reconstroem TODO nó incondicionalmente, mesmo com substituição vazia**
+(função não-genérica) — não há short-circuit; monomorph emite uma espinha nova quase completa.
+`expand_comptime` (`comptime_expand.tks:44`) e `inline_consts` idem: uma vez que exista QUALQUER
+genérico/comptime/const (e o self-build tem os três), **cada passe reconstrói todos os corpos**. E
+cada reconstrução ainda **embute** pedaços da espinha anterior (`target = b.target`,
+`params = f.params`) → o padrão subárvore-compartilhada/UAF **se repete em CADA fronteira de
+passe**, não só parser→TAST. Logo, no pico (lower), coexistem: parser AST + ~4 versões de TAST +
+LIR, **nenhuma liberável**.
+
+**Decomposição honesta do ~1,24 GB** (residual não-push; faixas estruturais, sem profiler — o dono
+deve exigir a medição real do `tk_obs` antes de decidir, isto é estimativa):
+
+| Parcela | Faixa | Some com a unificação? |
+|---|---|---|
+| (a) ~4–5 espinhas de wrapper redundantes (structs de nó) | ~0,4–0,6 GB | **SIM** — colapsam em 1 |
+| (b) folhas (strings/nomes/descritores de tipo) — já compartilhadas | ~0,3 GB | **NÃO** — contadas 1× hoje |
+| (c) instâncias vivas do monomorph (dado real) | ~0,15–0,25 GB | **NÃO** — dado vivo |
+| (d) LIR (forma distinta, 1 cópia) | ~0,2 GB | **NÃO** — não é TAST |
+
+**Ganho da unificação ≈ parcela (a) ≈ 0,4–0,6 GB** — ou seja, derruba o residual de ~1,24 para
+~0,7–0,8 GB. Real, mas: (i) é ~35–50% de um resíduo que **já é os 7%**, não os 93% do push;
+(ii) a meta ≤1,5 GB **já é entregue pelo Eixo A sozinho** (o próprio `reducao-memoria-arrays`
+projeta ~1,2–1,3 GB só com C4/C5). **A unificação NÃO é necessária para a meta.**
+
+### V.3 — Vale o esforço/risco? **NÃO. Custo alto (refactor de front-end inteiro), benefício modesto e não-crítico.**
+
+Custo real: fundir duas famílias de nó (`Expr`+`TExpr`, `Statement`+`TStatement`, `Item`+`TItem`)
+atravessando **~1220 usos de `parser::` no checker + ~27 arquivos de match + lir/codegen/emit/build**;
+converter **cada passe** de "constrói espinha" para "muta por `ref` in-place"; introduzir
+`delete<T>` + drop-glue + prova-de-posse; e manter **fixpoint byte-idêntico** o tempo todo, com
+reseed iterativo. É comparável em churn ao expurgo de `push` (4917 sítios) — para ganhar **0,5 GB
+de um resíduo que já cabe** sob a aceitação `<6 GB`. **Custo × benefício não fecha** como jogada
+de memória. (Como refactor de *manutenibilidade* — uma família de nó em vez de duas — pode ter
+mérito próprio, mas o dono perguntou de MEMÓRIA, e nesse eixo é over-engineering.)
+
+### V.4 — Se não vale, como liberar os ~1,24 GB? (comparação + recomendação)
+
+| Caminho | Libera | Custo/Risco | Já planejado? |
+|---|---|---|---|
+| **1. Terminar o Eixo A (expurgo push)** | leva 6,2→~1,2–1,3 GB (os 93%) | em curso | **sim, em curso** |
+| **2. Short-circuit de compartilhamento nos passes (SURGICAL — recomendado)** | ~1–2 espinhas redundantes (~0,2–0,4 GB) | **BAIXO** — cirúrgico | não (achado deste doc) |
+| **3. `delete<T>` + arena-escopo nos órfãos de fold/inline/lift** | os órfãos de reescrita (~0,1–0,2 GB) | baixo | `delete<T>` é do dono; útil aqui |
+| **4. Eixo C (drop de arena por-unidade)** | limita a LARGURA: pico = maior unidade, não o programa | médio-alto (linker interno, fixpoint sob streaming) | **sim** (C10–C16) |
+| **5. Aceitar ~1,24 GB** | zero | zero | está sob `<6 GB` |
+| **6. Unificação in-place (este doc)** | parcela (a) ~0,4–0,6 GB | **ALTO** (V.3) | não |
+
+**O achado cirúrgico (caminho 2) é a joia — "adiantar o que der":** como `mono_block`/`cx_block`/
+`inline_consts` reconstroem corpos **mesmo sem substituição/expansão a aplicar**, fazê-los
+**COMPARTILHAR o nó de entrada quando a transformação é identidade** (subst vazia / sem comptime /
+sem const naquele corpo) elimina uma espinha quase-inteira por passe, **byte-idêntico** (nó
+idêntico → mesmo codegen), com uma mudança **local e de baixo risco** — sem fundir tipo de nó
+nenhum. Isto captura boa parte do ganho (a) que a unificação buscaria, por uma fração do custo.
+
+**Recomendação: NÃO unificar. Fazer, nesta ordem: (1) terminar o Eixo A → já entrega a meta; (2)
+o short-circuit cirúrgico dos passes; (3) `delete<T>`+arena-escopo nos órfãos; (4) Eixo C para
+limitar a largura.** Os quatro juntos derrubam o residual **abaixo** do que a unificação daria,
+com risco muito menor e reusando trabalho já planejado. A unificação fica **arquivada como refactor
+de manutenibilidade** (não de memória), a reavaliar por mérito próprio se algum dia a duplicação
+das duas famílias de nó doer na evolução — não antes, e não por causa de memória.
+
+**Ceticismo com as sub-hipóteses do dono (como pedido):** (i) "objeto-vs-struct" — falso dilema,
+item 14 já basta (V.1); (ii) `delete<T>` — **se sustenta e é útil**, mas como ferramenta targetada
+(caminho 3), independente da unificação; (iii) "monomorph expande via List<T>" — verdadeiro, mas o
+problema MAIOR que achei não é a expansão (dado vivo) e sim a **reconstrução incondicional de
+corpos não-genéricos** — e essa se resolve pelo short-circuit (caminho 2), não pela unificação.
+
+**A honestidade que o dono cobrou:** a unificação in-place é uma bela peça de engenharia e o
+desenho abaixo fecha — mas para MEMÓRIA ela é a alavanca **errada** (mira os 7%, custa como os 93%).
+O dinheiro está no push (já em curso), no compartilhamento-por-identidade dos passes (barato) e no
+drop por-unidade do Eixo C (já planejado). **Antes de qualquer decisão, medir com `tk_obs` a
+parcela (a) real** — se ela vier < 0,3 GB, o veredito NÃO só se mantém como endurece.
 
 ---
 
