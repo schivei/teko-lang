@@ -1,20 +1,19 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on feat/arrays-reclaim-first, forward-only): marco 5 of the
-# io-streaming / array-reclaim campaign — the second memory-reduction batch, driven by the arena
-# lifetime map (TEKO_ARENA_OBS). Converts the next tier of push copy-grow leak sites from
-# teko::list::push accumulation to preallocated [n]T index-assign (the MAP / merge natures):
-#   - checker::resolve_type: UnionType members and FunctionType params.
-#   - checker/nidx.tks: nidx_merge (merge, size = left+right), nidx_msort base case, nidx_build.
-#   - checker::subst_type: Variant members and Func params.
-#   - checker::type_param_table + concat_tps/concat_tcs + tt_last_names (tt_push loop replaced by a
-#     single preallocated regs array of the known final size).
-#   - codegen::cg_te_to_type_ns: UnionType members.
+# RESEED (hand-harvest, local on feat/arrays-reclaim-first, forward-only): marco 6 of the
+# io-streaming / array-reclaim campaign — third memory-reduction batch. addr2line on a -g build of
+# the harvested C, run under TEKO_ARENA_OBS, pinned the dominant remaining leak (1102 MB, 991k
+# allocs) to checker::variant_siblings — the "all members except j" list rebuilt with push once per
+# union member (M^2 per union, ~1M unions). Converted to the FILTER nature (preallocate the exact
+# count, index-assign):
+#   - checker::variant_siblings (count = xs.len minus the skipped index).
+#   - checker::union_dedup (two-pass: count distinct, then fill; helper union_member_is_first).
+#   - checker::union_normalize_null (count = 1 + non-null, via union_count_non_null).
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, CC=clang.
 #   - gen2 builds gen3; gen2.c == gen3.c byte-identical; this file is that stable output.
-#   - MEMORY: gen2 peak VmHWM 5.48 -> 4.47 GiB (VmRSS 5.22 -> 4.26 GiB); cumulative from the
-#     campaign start 6.46 -> 4.47 GiB. Guard: builds ran under `ulimit -v 10485760` (10 GiB dev
+#   - MEMORY: gen2 peak VmHWM 4.47 -> 3.38 GiB (VmRSS 4.26 -> 3.22 GiB); cumulative from the
+#     campaign start 6.46 -> 3.38 GiB. Guard: builds ran under `ulimit -v 10485760` (10 GiB dev
 #     allowance) with TEKO_BACKEND=c.
 #
 # `run: hand-harvest` — LOCAL on this lane, forward-only, resting on the clean fixpoint above.
@@ -25,8 +24,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  4e024d11bb3282ed0672d36399addc7af51fd5148a61a1cc60afbc31c76c8971
+sha256:  654fa5a380c35bf07c44c00b16c433ccfa43daeb65fcc382e69fb70fe45d7c7e
 since:   0.3.1.0
-legacy:  none — self-reproducible harvest of marco 5 (push->preallocate batch in resolve_type/nidx/
-         subst_type/type_param_table/cg_te_to_type_ns, gen2 peak 5.48 -> 4.47 GiB); byte-identical
-         on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c, 23 249 632 bytes).
+legacy:  none — self-reproducible harvest of marco 6 (FILTER conversion of variant_siblings/
+         union_dedup/union_normalize_null, gen2 peak 4.47 -> 3.38 GiB); byte-identical on rebuild
+         (clean fixpoint gen2 == gen3, gen2.c == gen3.c, 23 251 667 bytes).
