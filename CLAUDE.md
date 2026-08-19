@@ -113,6 +113,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   MANTER só o que o self-build genuinamente NÃO exercita: **casos de erro/diagnóstico** (o compilador só
   compila código VÁLIDO, nunca dispara os caminhos de rejeição) e comportamento de função que o compilador
   NUNCA chama ao rodar. Na dúvida, LISTAR para revisão — não remover.
+- **ENFORCEMENT desta lei (dono 2026-08-19, AVISO DURO).** Um agente já a furou (criou teste pro que o
+  self-build exercita). **Reincidência → o dono PROÍBE testes (unitários E regressivos) de vez.** Duas
+  camadas obrigatórias no meu processo: (1) **todo dispatch de implementador reproduz esta lei ALTO** —
+  "NÃO escreva teste pro que o self-build/fixpoint exercita; só oráculo `.tkr` isolado para path que o
+  fixpoint NÃO alcança, e SÓ os nomeados na seção Fixtures do crumb"; (2) **ao drenar, conferir o delta**
+  e RECUSAR qualquer `.tkt`/`.tkr` novo que não seja um oráculo nomeado no crumb para path não-exercitado
+  — kill + refaz, não drena.
 
 ## Triagem de CI (PR #110 = fix/retirement) — dono 2026-08-18
 - **Falha em `fixpoint (native)` → ESPERADA** (native para no DEGRAU), não é problema real.
