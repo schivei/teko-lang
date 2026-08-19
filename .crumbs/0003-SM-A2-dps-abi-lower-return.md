@@ -138,6 +138,15 @@ the pin confirmed) `type_match`+`frame_sweep_inst` native crashes turn to exit `
 
 `SM-A1` (the measured baseline SM-A2 must beat). Precondition: SM-P1 pin decides fixpoint-fix vs memory-only.
 
+**SM-P1 verdict (resolved `0001` @ `4f775e8d`, `docs/memory/0.3.1-native-p1-pin-type-match-frame-sweep.md`): DECOUPLE / memory-only.**
+`type_match` = RETURN/TAIL-MERGE facet → SM-A2 CLOSES it by construction (build the tail-merge-into-`ret_dest`
+path). `frame_sweep_inst` = PAYLOAD-BIND facet and `push_inst_block` = self-append → NOT closed by DPS; SM-A2/A3
+are memory + return-correctness only, and the native fixpoint DECOUPLES to the point-fix family (SM-A5 +
+root-map grind). SM-A2 is NOT the sole native-fixpoint fix. NOTE: at `4f775e8d` the native route cannot build
+gen2 at all (broad regression: `serialize_const` `_ =>` `src/lir/lower_const.tks:350`; `syscall6`/`ar_mmap`), so
+the `gen2==gen3` ritual gate here is unreachable until that frontier is cleared — do not commit the R1 reseed
+while native gen2 cannot be produced.
+
 ## Done when
 
 Aggregate returns lower into a caller-passed `ret_dest` (with `ret_dest == null` reproducing today
