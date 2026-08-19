@@ -31,6 +31,9 @@ const WIN_INVALID_HANDLE: i64 = -1
 extern fn os_open_raw(path: u64, oflags: i32, mode: i32): i32 = "open" from "System"
 
 #os("macos")
+extern fn os_creat_raw(path: u64, mode: i32): i32 = "creat" from "System"
+
+#os("macos")
 extern fn os_read_raw(fd: i32, buf: u64, count: u64): i64 = "read" from "System"
 
 #os("macos")
@@ -136,16 +139,18 @@ fn win_open(path: str, access: u32, disp: u32): i64 {
 
 #os("windows")
 fn os_read(fd: i64, addr: i64, count: i64): i64 {
-    var got = teko::mem::buf_ptr(8)
-    if ReadFile(fd to u64, addr to u64, count to u32, teko::sys::ptr_word(got) to u64, 0) == 0 { return -1 }
-    teko::mem::load_u64(teko::sys::ptr_word(got) to u64) to i64
+    var got = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    teko::mem::store_u64(got, 0 to u64)
+    if ReadFile(fd to u64, addr to u64, count to u32, got, 0) == 0 { return -1 }
+    teko::mem::load_u64(got) to i64
 }
 
 #os("windows")
 fn os_write(fd: i64, addr: i64, count: i64): i64 {
-    var put = teko::mem::buf_ptr(8)
-    if WriteFile(fd to u64, addr to u64, count to u32, teko::sys::ptr_word(put) to u64, 0) == 0 { return -1 }
-    teko::mem::load_u64(teko::sys::ptr_word(put) to u64) to i64
+    var put = teko::sys::ptr_word(teko::mem::buf_ptr(8)) to u64
+    teko::mem::store_u64(put, 0 to u64)
+    if WriteFile(fd to u64, addr to u64, count to u32, put, 0) == 0 { return -1 }
+    teko::mem::load_u64(put) to i64
 }
 
 #os("windows")
@@ -218,7 +223,7 @@ fn os_open_write(path: str): i64 {
 
 #os("macos")
 fn os_open_write(path: str): i64 {
-    os_open(path, teko::sys::O_WRONLY | teko::sys::O_CREAT | teko::sys::O_TRUNC, teko::sys::OPEN_MODE_644)
+    os_creat_raw(cstr_addr(path) to u64, teko::sys::OPEN_MODE_644 to i32) to i64
 }
 
 #os("windows")
@@ -246,7 +251,12 @@ fn os_open_append(path: str): i64 {
 
 #os("macos")
 fn os_open_append(path: str): i64 {
-    os_open(path, teko::sys::O_WRONLY | teko::sys::O_CREAT | teko::sys::O_APPEND, teko::sys::OPEN_MODE_644)
+    var h = os_open(path, teko::sys::O_WRONLY | teko::sys::O_APPEND, 0)
+    if !is_os_error(h) { return h }
+    var c = os_creat_raw(cstr_addr(path) to u64, teko::sys::OPEN_MODE_644 to i32) to i64
+    if is_os_error(c) { return -1 }
+    _ = os_close(c)
+    os_open(path, teko::sys::O_WRONLY | teko::sys::O_APPEND, 0)
 }
 
 #os("windows")
