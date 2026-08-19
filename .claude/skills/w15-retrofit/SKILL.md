@@ -25,7 +25,13 @@ Anything that would move emitted bytes, a test outcome, or the fixpoint is out o
 ## Procedure
 
 1. **Scope the delta.** `git diff --stat <lane-base>...<lane-head>` → the touched files. That set (plus any file you must split to canonicalize them) is your surface. Nothing outside it.
-2. **Comments → doc-comments only (W15, owner 2026-08-19).** A `/** */` doc-comment is allowed ONLY on a declaration marked `exp` (export); every other accessor (`pub` method, private/unmarked) carries NO doc-comment — any doc-comment on a non-`exp` site is deleted (demoted by the canonicalizer). Block comments `/* */` and inline `//` (mid-body/trailing) are also deleted; a line that "needs" a comment → extract a named function instead. A `/** */` must never be larger than the code it documents (reviewer judgment, no formula). See `estado-doc2-campanha-limpeza-0.3.1.md:24` (export-gate) + "owner 2026-08-19 (length-bound)".
+2. **Comments → doc-comments only (W15, owner 2026-08-19).** Apply the TWO-TRACK method:
+   - **Track 1 (mechanical):** Block comments `/* */` and inline `//` comments are expurged in a single
+     mechanical pass — byte-neutral (comments are lexer trivia; emitted code identical).
+   - **Track 2 (analyzed):** `/** */` doc-comments are NOT blanket-deleted — EACH is analyzed and either
+     CORRECTED to comply (on an `exp` decl, trimmed so it is never larger than the code it documents) or
+     EXPURGED (on a non-`exp` site, or where it cannot be made to comply) — "corrigir ou expurgar mediante a rule".
+   A `/** */` must never be larger than the code it documents (reviewer judgment, no formula). See `estado-doc2-campanha-limpeza-0.3.1.md:24` (export-gate) + "owner 2026-08-19 (length-bound)".
 3. **Flatten.** Replace `if{if{if}}` / nested-`match` pyramids with early returns / guards / `continue`. Where flattening alone won't cut it, **extract** a function/method (cyclomatic down, functions short + single-purpose).
 4. **Apply the principles.** SOLID (single responsibility, small units), KISS (remove cleverness), YAGNI (drop speculative generality), 12-Factor at config/env seams. Rename for clarity.
 5. **Split large files.** Break an unbounded file into cohesive modules in the same namespace along responsibility lines — desirable. Keep the public surface (exported symbols) identical so callers don't change.
