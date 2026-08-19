@@ -53,8 +53,8 @@ new issue).
   the Win32 import-lib linker; when it lands, `win32_compat.h` (both halves now gone) is DELETED (the file's
   death commit, `migracao…` §3.3).
 - `src/runtime/teko_rt.tks` — home of the migrated process wrappers.
-- NO new user-facing surface: `teko::process` names pre-exist; migration re-homes the body. Reuses
-  `TargetSymbol` (from RT-L3) for per-target symbol selection.
+- NO new user-facing surface: `teko::process` names pre-exist; migration re-homes the body. Reuses the
+  same target-guarded `extern fn` mechanism (RT-L3) for per-target symbol selection.
 
 ## How
 
@@ -65,8 +65,8 @@ new issue).
    `PROCESS_INFORMATION`, both passed/returned BY VALUE — the heaviest struct-by-value case (`migracao…` §4.3).
    The Teko wrapper declares these as `extern type=struct` and passes them by value once the resolved ABI
    (`star-ref…` §4) + reverse-FFI are available; `CreateProcessA`/`DuplicateHandle`/`WaitForSingleObject`
-   resolve through the own linker's Win32 import library (Fase E). Per-target symbol selection via
-   `TargetSymbol` (RT-L3).
+   resolve through the own linker's Win32 import library (Fase E). Per-target symbol selection via the same
+   target-guarded `extern fn` mechanism (RT-L3).
 3. **The process half of `win32_compat.h` dies — and with it the file** (`migracao…` §3.3 Etapa B): it was the
    file's last consumer (fs half orphaned at RT-L3). The `#include "win32_compat.h"` stops and the file is
    deleted in the commit the Win32 half lands (a clean expurgo, coordinated with the M3 sweep `0096` if the
@@ -76,8 +76,8 @@ new issue).
 5. **Fixpoint byte-identity + per-target.** `gen2==gen3` byte-identical on POSIX proves subprocess callers did
    not shift; the Win32 half compiles once its deps land (`migracao…` §5 F5: POSIX own==C, Win32 compiled).
 
-Reused (do NOT redeclare): `TargetSymbol` (RT-L3), the resolved struct-by-value FFI ABI (`star-ref…` §4), the
-`{ok,value,err}` result carriers, `region_alloc` (L1) for boxed output.
+Reused (do NOT redeclare): the target-guarded `extern fn` mechanism (RT-L3), the resolved struct-by-value
+FFI ABI (`star-ref…` §4), the `{ok,value,err}` result carriers, `region_alloc` (L1) for boxed output.
 
 ## Rulings & laws
 
@@ -121,7 +121,7 @@ byte-identical to before the swap. This is the **§16-FASE6 gate**. **Reseed-cla
 
 ## Deps
 
-`RT-L3` (`0061` — the fs/env layer + the `TargetSymbol` per-target selection the process half also uses).
+`RT-L3` (`0061` — the fs/env layer + the target-guarded `extern fn` mechanism the process half also uses).
 
 ## Done when
 
