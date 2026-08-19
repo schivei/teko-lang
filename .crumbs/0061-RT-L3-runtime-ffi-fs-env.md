@@ -34,12 +34,14 @@ results across the FFI boundary as struct-by-value (`migracao…` §4.3). This *
 _chdir` shims are orphaned. Byte-preserving for existing programs (fixpoint guards existing-case residence;
 `migracao…` R8); a `fixpoint-rebuild` swap, no teaching reseed.
 
-**BLOCKED (design-ahead, honest).** Behind the **native fixpoint closing** (`migracao…` banner), its dep
-**S16-FS**, AND the **per-target `extern`-symbol-selection** surface (`TargetSymbol`), which today has no form
-in the declaration and awaits ratification (`migracao…` §8, §3.3 Etapa A — the ONLY compiler blocker of the fs
-half). The struct-by-value FFI ABI it consumes was recently resolved (`star-ref…` §4), so it is available. This
-doc designs the wrappers, the `TargetSymbol` contract, and the fixtures; what stays blocked is the
-`TargetSymbol` ratification.
+**RESOLVED / RATIFIED (owner 2026-08-19, D-TS1).** The per-target `extern`-symbol-selection surface is
+**NOT a new `TargetSymbol` struct** (withdrawn, D-TS1) — it IS the **existing target-guarded `extern fn`**
+mechanism (`#os("linux"|"macos"|"windows")` / `#arch(…)` guards, pruned by `prune_cc` before the checker,
+using NAT-XL native target) that `src/io/file_stream.tks` already ships. The `TargetSymbol` struct proposal
+is a **phantom** — zero real-code consumers in `src/**` — and is WITHDRAWN from 0061, 0062, and the source
+docs (see `docs/design/target-symbol-extern-selection-0.3.1.md` for the full ratification). This doc designs
+the wrappers using the existing guard-on-extern surface; the fs half is now **UNBLOCKED with zero compiler
+change** (only the S16-FS dep and native-fixpoint remain).
 
 ## Where
 
@@ -53,7 +55,7 @@ doc designs the wrappers, the `TargetSymbol` contract, and the fixtures; what st
   per-target `extern`; the file is NOT deleted here (it dies with its LAST consumer, the process half, at
   `0062` RT-L4 / M3).
 - `src/runtime/teko_rt.tks` — home of the migrated fs/env/time wrappers.
-- NEW decl: the `TargetSymbol` surface (per-target foreign-symbol selection) — see How §2.
+- Per-target symbol selection via target-guarded `extern fn` (existing mechanism, no new declarative surface).
 - NO new user-facing fs/env/time surface: `teko::fs`/`teko::env`/`teko::time` names pre-exist; migration
   re-homes the body.
 
@@ -63,30 +65,11 @@ doc designs the wrappers, the `TargetSymbol` contract, and the fixtures; what st
    `mkdir`/`list_dir` call the grounded `open`/`stat`/`getdents`/`getenv` syscalls; results lift as struct-by-
    value `{ok,value,err}` honoring the resolved sret/register-pair classification (`migracao…` §4.3,
    `c-types-and-marshalling…` §5) — the runtime does not invent ABI, it consumes the backend's.
-2. **Per-target symbol selection — the `TargetSymbol` surface** (`migracao…` §6). An `extern fn` annotated with
-   `TargetSymbol` resolves the POSIX symbol on POSIX targets and the Win32 symbol on Windows, chosen at
-   lowering by the build target. This is the ONLY compiler blocker of the fs half; the W15 contract the
-   implementer copies verbatim:
-
-```teko
-/**
- * TargetSymbol — the per-target foreign-symbol selection the fs/process halves of the runtime need to kill
- * `win32_compat.h` without a C shim. A `TargetSymbol`-annotated `extern fn` resolves `posix` on POSIX targets
- * and `win32` on Windows, chosen at lowering by the build target — the form the declaration lacks today
- * (`arena-em-teko.md` §6, the Windows risk). Closes Etapa A of `migracao…` §3.3.
- *
- * @param posix  the libc symbol on a POSIX target (e.g. "chdir")
- * @param win32  the CRT/kernel32 symbol on Windows (e.g. "_chdir")
- * @return       the symbol binding the backend resolves per target
- * @since 0.3.1
- */
-pub type TargetSymbol = struct {
-    /** the symbol resolved on POSIX targets (Linux/macOS). */
-    posix: str
-    /** the symbol resolved on the Windows target. */
-    win32: str
-}
-```
+2. **Per-target symbol selection — target-guarded `extern fn`** (not `TargetSymbol` struct, D-TS1).
+   An `extern fn` guarded by `#os("linux"|"macos"|"windows")` / `#arch(…)` resolves the target-specific
+   symbol at lowering by the build target (e.g., `chdir` on POSIX, `_chdir` on Windows). Precedent: `src/io/file_stream.tks` already uses this mechanism for `os_open`/`os_read`/`os_write`/`os_close`. No new
+   declarative surface needed — the existing guards + `prune_cc` pruning (before the checker) closes the
+   selection. This removes the dependency on a new `TargetSymbol` struct.
 
 3. **Migrate time/date.** `monotonic_ns`/`wall_now_ns` over `clock_gettime` (S16-FS); `civil_from_days`/
    `jdn_to_ymd` as pure-Teko calendar arithmetic (leap-year correct — the S11 `localtime_civil` fixture);
@@ -107,18 +90,18 @@ struct-by-value), the S16-FS syscall grounding, `region_alloc` (L1) for boxed re
 
 - **Teko-only:** L3 wrappers land in `src/runtime/teko_rt.tks`; the maintained-C exception is the BRIDGE the
   campaign retires (`migracao…` §1.4/R1). The `teko_rt.c` fs/env/time C goes DEAD; deletion is `0095` RM-C9 (M3).
-- **W15 full Javadoc** on every touched declaration (including `TargetSymbol` + each member); flatten/extract;
+- **W15 full Javadoc** on every touched declaration (guarded `extern fn` / each member); flatten/extract;
   no inline `//`.
 - **Removals = clean expurgo, NO tombstone:** the fs half of `win32_compat.h` is ORPHANED here, not deleted;
   the file dies with its last consumer (process half, L4/M3). Clean, tombstone-free.
 - **No ABI invention (`migracao…` §4.3):** the runtime consumes the backend's resolved struct-by-value ABI for
   `{ok,value,err}`; it does not classify sret itself.
 - **Honest per-target (`migracao…` §5 F4):** the fs half must compile on Win32; a POSIX-only migration that
-  leaves Win32 uncompilable is not done — the `TargetSymbol` selection is the mechanism.
+  leaves Win32 uncompilable is not done — the target-guarded `extern fn` mechanism is the solution.
 - **Safety:** NEVER `teko test .`; build in a subshell with `ulimit -v 6815744` cap — a blown guard is a
   root-cause fix, never a raised ceiling; commit each green step; **reseed ONLY at a [RITUAL]** — this is
   `fixpoint-rebuild`, no teaching seed harvested; fixpoint `gen2==gen3` byte-identical; sweep `.tkt`/`.tkr`
-  after the `TargetSymbol` / wrapper signatures land.
+  after the wrapper signatures land.
 
 ## Fixtures
 
