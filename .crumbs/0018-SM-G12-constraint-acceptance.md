@@ -48,19 +48,6 @@ nothing previously compiling changes); its seed folds into SM-R1.
    bare NAME. So `<T: []A | A | error>` and `<T: (A | B) & Ifce>` parse.
 
 ```teko
-/**
- * parse_constraint_term — one term of a generic constraint conjunction (`Term & Term & …`): a FULL type,
- * not just a name. Accepts a named type, a slice `[]A`, `error`, a concrete type (`str`), a parenthesized
- * inner union `(A | B)`, an interface, a form word (`class`/`struct`/`service`, `service` taking a
- * lifetime `singleton`/`scoped`/`transient`), or the modifier `notnull` (which enters ONLY via `&`, never
- * `|`). REJECTS a trait — the sole disallowed term. Closes the §9.2b gap where a term was a bare name.
- *
- * @param tokens  the token stream
- * @param pos     the index at the term's first token
- * @return        the parsed constraint term, or a parse error
- * @throws        when the term is a trait, or an ill-formed type
- * @since 0.3.1
- */
 fn parse_constraint_term(tokens: []lexer::Token, pos: u64): ParsedConstraintTerm | error
 ```
 
