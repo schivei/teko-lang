@@ -18,14 +18,15 @@ sources:
 
 ## Goal
 
-Complete the `let`/`mut` → `var` merge: mechanically rewrite every `let`/`mut` local declaration in `src/`
-and `.tkt` to `var` (everything mutable; one keyword for all locals; type optional, inference stays;
-`const` retained), THEN remove the soft-deprecated `let`/`mut` acceptance from the parser (they were kept
-accepting through the additive G2 crumb, `0008`, so the SM-R1 seed parses old source; now that the source is
-swept, the acceptance is dead and removed). Byte-preserving: `let`/`mut`/`var` all lower to the SAME
-`Binding` AST (`BindKind` is intent, not safety — §1.4), so the rewritten source emits identical bytes; the
-fixpoint proves it. Because CF3 (the const-fold single-assignment analysis) was re-based on
-flow-single-assignment in G2, it survives the merge. It core-consumes the SM-R1 seed → `fixpoint-rebuild`.
+AUDIT/VERIFY-ONLY (already applied in src): confirm that the `let`/`mut` → `var` merge is complete — every
+`let`/`mut` local declaration in `src/` and `.tkt` has been rewritten to `var` (everything mutable; one
+keyword for all locals; type optional, inference stays; `const` retained), and that the soft-deprecated
+`let`/`mut` acceptance has been removed from the parser (they were kept accepting through the additive G2
+crumb, `0008`, but now that the source is swept, the acceptance is dead). Byte-preserving: `let`/`mut`/`var`
+all lower to the SAME `Binding` AST (`BindKind` is intent, not safety — §1.4), so the rewritten source emits
+identical bytes; the fixpoint proves it. CF3 (const-fold single-assignment analysis) was re-based on
+flow-single-assignment in G2 and survives the merge. This crumb is a verify-only audit; the work is DONE in
+src.
 
 ## Where
 
@@ -45,22 +46,23 @@ NEW: no new surface; a source rewrite + a clean removal of the dead `let`/`mut` 
 
 ## How
 
-1. **Rewrite the locals.** `let x`/`mut x` → `var x` at every declaration site in `src/` + `.tkt`. `const`
-   is UNTOUCHED (a distinct binding kind, retained). Inference is unchanged — a `var x = expr` with no type
-   annotation still infers.
-2. **Fold the `BindKind` construct-sites.** The four residual `BindKind::Let`/`BindKind::Mut` constructions
-   in `loop_head.tks` (loop-variable desugaring) collapse to the unified mutable binding; `BindKind` keeps
-   only `{ Var; Const }` (or equivalent), per §2's "everything mutable, `const` retained".
-3. **Remove the dead acceptance (clean expurgo).** After the sweep leaves ZERO `let`/`mut` in `src/`, delete
-   the `Let`/`Mut` tokens (`token.tks:15-16`), the `Let`-accept branch (`parse_decl.tks:168`), and the
-   `BindKind::Let`/`Mut` arms (`ast.tks:92`) — a clean expurgo of lexer + parser + AST, NO tombstone
-   diagnostic (nothing left points at the old keywords).
-4. **CF3 survives (G2 pre-work).** The const-fold single-assignment analysis was re-based on
-   flow-single-assignment in G2 (`cf3_fold_survives_let_merge`), so collapsing `Let`/`Mut` does not regress
-   it — verify the CF3 fold still holds on the swept source.
-5. **Byte-identity is the gate.** `let`/`mut`/`var` lower to the same `Binding`, so the emitted C is
-   byte-identical. Build gen2 on the SM-R1 seed, run the scoped regression, prove `gen2==gen3`. Commit per
-   green batch; sweep `.tkt`/`.tkr` in lockstep.
+**VERIFY-ONLY audit (work already done):** No fresh sweep is needed — the source is already swept and the
+acceptance is already removed.
+
+1. **Confirm zero residual `let`/`mut` locals.** Audit `src/` and `.tkt` to confirm there are ZERO remaining
+   `let x` or `mut x` declarations (the sweep is complete). A search for `\blet\s+\w+\s*=` or `\bmut\s+\w+\s*=`
+   (outside comments/docstrings) should yield ZERO matches. Exception: the four residual `BindKind::Let`/
+   `BindKind::Mut` construct-sites in `loop_head.tks` (desugaring helpers) are collapsed/updated to the
+   unified `BindKind` (Var-only).
+2. **Confirm `const` is untouched.** Verify that `const` declarations still compile and are a distinct
+   binding kind retained.
+3. **Verify the dead acceptance is removed.** Confirm that `Let`/`Mut` tokens are gone (`token.tks`),
+   the `Let`-accept branch is gone (`parse_decl.tks`), and the `BindKind::Let`/`Mut` arms are gone (`ast.tks`)
+   — a clean expurgo with NO tombstone diagnostic.
+4. **CF3 survives (G2 pre-work).** Verify that the const-fold single-assignment analysis (`cf3_fold_survives_let_merge`)
+   still holds on the swept source — a G2 artifact that must survive the merge.
+5. **Byte-identity is the proof.** Build gen2 on the SM-R1 seed, run the scoped regression, prove
+   `gen2==gen3` byte-identical — the proof that the sweep introduced no semantic changes.
 
 ## Rulings & laws
 
@@ -84,9 +86,9 @@ covered by G2's own `cf3_fold_survives_let_merge` fixture already in the seed.)
 ## Gate
 
 `[fixpoint]` — build gen2 on the SM-R1 seed + scoped regression + `gen2==gen3` byte-identity. "Green" =
-every `let`/`mut` local in `src/` + `.tkt` is now `var`, the `Let`/`Mut` tokens + accept branch + AST arms
-are cleanly removed (no tombstone), CF3 survives, the build is byte-identical (`gen2==gen3`). Reseed-class:
-`fixpoint-rebuild`.
+audit confirms ZERO residual `let`/`mut` locals in `src/` + `.tkt` (sweep complete + byte-identical),
+the `Let`/`Mut` tokens + accept branch + AST arms are cleanly removed (no tombstone), CF3 survives,
+the build is byte-identical (`gen2==gen3`). Reseed-class: `fixpoint-rebuild` (this crumb is verify-only).
 
 ## Deps
 
@@ -94,6 +96,6 @@ are cleanly removed (no tombstone), CF3 survives, the build is byte-identical (`
 
 ## Done when
 
-Every local in `src/` + `.tkt` is `var`, the `let`/`mut` keywords + acceptance + `BindKind` arms are cleanly
-expurgated (no tombstone), `const` and CF3 are intact, and gen2 on the SM-R1 seed is byte-identical
-(`gen2==gen3`).
+Audit confirms every local in `src/` + `.tkt` is `var` (zero residual `let`/`mut` keywords), the `let`/`mut`
+tokens + acceptance + `BindKind` arms are cleanly expurgated (no tombstone), `const` and CF3 are intact, and
+gen2 on the SM-R1 seed is byte-identical (`gen2==gen3`). The sweep is DONE-verified.
