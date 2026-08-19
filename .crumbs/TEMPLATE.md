@@ -58,7 +58,7 @@ line or a CLAUDE.md law. Always include the applicable safety rules:
 - **Fork protocol (owner 2026-08-19):** at a fork, FIRST check if already deliberated (`DECISION_LOG.md`, `docs/design/**`, `.crumbs/**`, Doc-2/Doc-1/umbrella); if multiple, the MOST RECENT wins; HALT + notify ONLY for a genuinely undecided fork.
 - **W15 full Javadoc** on every declaration (pub + private); flatten/extract; no inline `//`.
 - **Removals = clean expurgo** of lexer/parser/checker, **NO tombstone diagnostic** (only where this crumb removes surface).
-- **Safety:** NEVER `teko test .`; build in a subshell with `ulimit -v 6815744` (6.5 GiB) cap — a blown guard is a root-cause fix, never a raised ceiling; commit each green step; reseed ONLY at a [RITUAL]; fixpoint `gen2==gen3` byte-identical; sweep `.tkt`/`.tkr` after any AST/signature change.
+- **Safety:** NEVER `teko test .`; build in a subshell with `ulimit -v 6815744` (6.5 GiB) cap — a blown guard is a root-cause fix, never a raised ceiling; commit each green step; reseed ONLY at a [RITUAL]; fixpoint `gen2==gen3` byte-identical; sweep `.tkt`/`.tkr` after any AST/signature change. **Conditional (owner 2026-08-19):** once a DRY build peaks ≤ 1.5 GB (1572864 KB), full `teko build .` (loads tests) is UNLOCKED and the `teko test .` ban lifts — the trigger is the measured dry-build milestone, not a date; measure and report peak when crossing it.
 - The specific Doc-2 / owner ruling this crumb rests on: `<cite>`.
 
 ## Fixtures

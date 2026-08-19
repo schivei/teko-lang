@@ -147,6 +147,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
        segue ~flat. A construção da AST é suspeita do pico — a otimizar. -->
   <!-- linha de validação original abaixo mantém a métrica -->
   fixpoint (tc2==tc3) + cross-check offline.
+  - **LIBERAÇÃO CONDICIONAL — full `teko build .` (com testes) ao bater o marco de memória (dono
+    2026-08-19):** enquanto o **build seco** NÃO picar **≤ 1,5 GB**, mantém-se o regime acima (só
+    compilação/build seco, subshell `ulimit -v 6815744`, NUNCA `teko test .`). QUANDO um build seco
+    medir **pico ≤ 1,5 GB** (1572864 KB) — o marco que a campanha de redução de memória (RM-C /
+    Eixo A/C) persegue —, as **execuções full `teko build .` que carregam testes ficam LIBERADAS** e a
+    proibição de `teko test .` cai. O gatilho é o marco MEDIDO no build seco, não uma data. Agente que
+    for validar mede o pico do build seco e reporta ao cruzar o marco.
 - **GUARD DE MEMÓRIA `ulimit -v 6815744` (6,5 GiB) = INVIOLÁVEL (dono 2026-08-18).** Se um build
   **estoura** o guard, o agente **encontra a causa-raiz do consumo e corrige** — NUNCA levanta o
   teto. Levantar o `ulimit` mascara exatamente o problema que o expurgo existe pra resolver (o

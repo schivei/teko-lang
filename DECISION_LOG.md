@@ -509,3 +509,9 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Base constitucional:** lei-primeira (nenhuma lei violada; reusar guards existentes é simples + transparente). M.2 (100% Teko, 0% C — o mecanismo já existe em Teko, é puro). Precedente shipping (`file_stream.tks` já compila per-target).
 - **Reversibilidade:** alta — nenhuma mudança de compilador; só anotação doc + refêrencias em crumbs. Se rejected, reverte-se anotações + tira-se `target-symbol-extern-selection-0.3.1.md`.
 - **Timing / onda-relativa:** D-TS1 desbloqueia RT-L3 (F4) para M2 final; RT-L4 (F6) segue bloqueado em struct-by-value-FFI reverse + linker import-lib Win32 (Fase E).
+
+### D51 · Liberação condicional de `teko build .` full (com testes) ao marco ≤1,5 GB no build seco (owner 2026-08-19) ✅
+- **Ruling do dono:** enquanto o **build seco** não picar **≤ 1,5 GB** (1572864 KB), mantém-se o regime atual (só build seco, subshell `ulimit -v 6815744` = 6,5 GiB, NUNCA `teko test .`). QUANDO um build seco medir **pico ≤ 1,5 GB** — o marco que a campanha de redução de memória (RM-C / Eixo A/C) persegue —, as **execuções full `teko build .` que carregam testes ficam LIBERADAS** e a proibição de `teko test .` cai.
+- **Gatilho:** o marco MEDIDO no build seco (≤1,5 GB), não uma data. Todo agente que valida mede o pico do build seco e reporta ao cruzar o marco.
+- **Base:** desdobra a lei "TESTES SÓ NO CI / `teko test .` dá OOM" — a proibição existe porque o full build estoura memória; reduzida a memória ao ponto de o build seco caber em 1,5 GB, o full build com testes passa a caber e vira validação legítima local.
+- **Escopo:** codificado em `CLAUDE.md` (§ Leis de desenvolvimento) + `.crumbs/TEMPLATE.md` (Safety). Convenção/processo — sem mudança de compilador.
