@@ -18,14 +18,14 @@ sources:
 
 ## Goal
 
-Mechanically rewrite EVERY return-type annotation in `src/` and the `.tkt` corpus from the old `-> T` form
-to the unified `: T` form (`fn f(params): T { }`), now that SM-R1 (`0030`) has captured a seed that ACCEPTS
-both `Arrow` and `Colon` (the additive G1 crumb, `0007`). This is a byte-preserving source sweep: `:` and
-`->` lex to distinct tokens but parse to the IDENTICAL return-type AST node, so the rewritten source emits
-the same bytes — the fixpoint `gen2==gen3` byte-identity is the proof. The `Arrow`/`->` acceptance STAYS in
-the lexer/parser through this crumb (its removal from the lexer + `token.tks`, plus the FFI migration to
-opaque `ptr`, is the SEPARATE M3 expurgo crumb SM-S4, `0091`). It core-consumes the SM-R1 seed (rebuilds
-the compiler on it) and teaches nothing new → `fixpoint-rebuild`, not a teaching reseed.
+AUDIT/VERIFY-ONLY (already applied in src): confirm that EVERY return-type annotation in `src/` and the
+`.tkt` corpus has been rewritten from the old `-> T` form to the unified `: T` form (`fn f(params): T { }`).
+The sweep was done after SM-R1 (`0030`) captured a seed accepting both `Arrow` and `Colon` (the additive G1
+crumb, `0007`). The source is byte-identical after the sweep: `:` and `->` lex to distinct tokens but parse
+to the IDENTICAL return-type AST node, so the rewritten source emits the same bytes — the fixpoint
+`gen2==gen3` byte-identity is the proof. The `Arrow`/`->` acceptance STAYS in the lexer/parser through this
+crumb (its removal from the lexer + `token.tks`, plus the FFI migration to opaque `ptr`, is the SEPARATE M3
+expurgo crumb SM-S4, `0091`). This crumb is a verify-only audit; the work is DONE in src.
 
 ## Where
 
@@ -41,22 +41,19 @@ NEW: no new surface; this is a pure mechanical source rewrite gated by byte-iden
 
 ## How
 
-1. **Rewrite return annotations only.** Replace `) -> T` with `): T` at every function/method/closure return
-   site in `src/` and `.tkt`. Do NOT touch `=>` (`FatArrow`, match arms / lambdas) — it is a distinct token
-   and unaffected. The `:` in param/field/var positions is already `:` (this crumb is the RETURN position).
-2. **Leave the acceptance in place.** The parser still accepts `Arrow` OR `Colon` (`parse_decl.tks:359`,
-   from G1); the lexer still emits `Arrow`. This crumb does NOT delete the old branch — that is SM-S4
-   (`0091`, M3), after every `->` occurrence is gone from `src/` and the FFI is migrated to opaque `ptr`.
-   Keeping acceptance means a stray un-swept `->` still compiles, so the sweep can land incrementally,
-   fixpoint-gated per batch.
-3. **Sweep the `.tkt`/`.tkr` corpus too.** Every return `->` in the test-expectation `.tkt` files and any
-   `.tkr` fixture is rewritten to `:`, so the corpus matches the swept source (a `.tkt` sweep is mandatory
-   after a syntax-surface change per the safety law).
-4. **Byte-identity is the gate.** Because `:` and `->` parse to the same return-type AST node, the emitted C
-   is byte-identical to pre-sweep. Build gen2 on the SM-R1 seed, run the scoped regression, and prove
-   `gen2==gen3` byte-identical — the load-bearing proof that the rewrite changed no semantics.
-5. **Commit per green batch.** Sweep in reviewable batches (by directory), each fixpoint-green and committed,
-   so an infra hiccup loses at most one batch.
+**VERIFY-ONLY audit (work already done):** No fresh sweep is needed — the source is already swept.
+
+1. **Confirm zero residual `->` return operators.** Audit `src/` and `.tkt` to confirm there are ZERO remaining
+   `-> T` return annotations (the sweep is complete). A search for `)\s*->` should yield ZERO matches in
+   real source (comments/docstrings excepted).
+2. **Confirm `=>` (`FatArrow`) is untouched.** Verify that match arms and lambda expressions still use `=>`,
+   confirming the old token was swept only in return position.
+3. **Verify parser acceptance.** Confirm that the parser still accepts `Arrow` OR `Colon` (`parse_decl.tks:359`,
+   from G1); a stray un-swept `->` should still compile without error. (This acceptance is deleted in SM-S4,
+   `0091`, M3, after all `->` is gone and FFI is migrated.)
+4. **Byte-identity is the proof.** Build gen2 on the SM-R1 seed, run the scoped regression, and prove
+   `gen2==gen3` byte-identical — the proof that the sweep introduced no semantic changes.
+5. **Mark clean.** Once audit confirms zero residual `->`, the sweep is DONE-verified.
 
 ## Rulings & laws
 
@@ -79,9 +76,10 @@ be redundant (any parse regression fails the build directly).
 ## Gate
 
 `[fixpoint]` — build gen2 on the SM-R1 seed + scoped regression + `gen2==gen3` byte-identity. "Green" =
-every `-> T` return in `src/` + `.tkt` is now `: T`, the parser still accepts both (removal is SM-S4), the
-build is byte-identical to pre-sweep (`gen2==gen3`). Reseed-class: `fixpoint-rebuild` (core-consumes the
-SM-R1 seed; teaches nothing).
+audit confirms ZERO residual `->` return operators in `src/` + `.tkt` (sweep complete + byte-identical),
+the parser still accepts both `Arrow` and `Colon` (removal is SM-S4), the build is byte-identical
+to pre-sweep (`gen2==gen3`). Reseed-class: `fixpoint-rebuild` (core-consumes the SM-R1 seed; teaches nothing;
+this crumb is verify-only).
 
 ## Deps
 
@@ -89,5 +87,6 @@ SM-R1 seed; teaches nothing).
 
 ## Done when
 
-Every return annotation in `src/` and the `.tkt` corpus is `: T`, `=>` is untouched, the `Arrow` acceptance
-remains (its removal is SM-S4), and gen2 built on the SM-R1 seed is byte-identical (`gen2==gen3`).
+Audit confirms every return annotation in `src/` and the `.tkt` corpus is `: T` (zero residual `->` return
+operators), `=>` is untouched, the `Arrow` acceptance remains (its removal is SM-S4), and gen2 built on the
+SM-R1 seed is byte-identical (`gen2==gen3`). The sweep is DONE-verified.
