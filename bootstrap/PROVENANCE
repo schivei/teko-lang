@@ -1,26 +1,23 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on feat/arrays-reclaim-first, forward-only): refreshes the seed for
-# marco 4 of the io-streaming / array-reclaim campaign — the FIRST memory-reduction marco.
-#
-# The arena lifetime map (TEKO_ARENA_OBS) showed the 6.44 GiB peak is 100% push copy-grow leaked
-# into the never-freed root region; the single biggest site was codegen::cg_name_reaches_byvalue
-# (1215 MB, 8.6M allocs): a recursive by-value reachability DFS that rebuilt its `seen` visited-set
-# with teko::list::push on every recursive call, leaking the geometric doublings. This marco
-# converts that DFS to a preallocated path-stack: cg_field_boxed allocates one `[512]str` buffer,
-# passed by `ref []str` with a depth counter; each level writes visited[depth] by index and reads
-# visited[0..depth] for the cycle check — exactly the per-branch `seen` semantics with zero copy.
-# The depth guard boxes conservatively (returns true) past the cap; real by-value nesting is shallow
-# so the cap is never reached in the self-build (identical boxing decisions).
+# RESEED (hand-harvest, local on feat/arrays-reclaim-first, forward-only): marco 5 of the
+# io-streaming / array-reclaim campaign — the second memory-reduction batch, driven by the arena
+# lifetime map (TEKO_ARENA_OBS). Converts the next tier of push copy-grow leak sites from
+# teko::list::push accumulation to preallocated [n]T index-assign (the MAP / merge natures):
+#   - checker::resolve_type: UnionType members and FunctionType params.
+#   - checker/nidx.tks: nidx_merge (merge, size = left+right), nidx_msort base case, nidx_build.
+#   - checker::subst_type: Variant members and Func params.
+#   - checker::type_param_table + concat_tps/concat_tcs + tt_last_names (tt_push loop replaced by a
+#     single preallocated regs array of the known final size).
+#   - codegen::cg_te_to_type_ns: UnionType members.
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, CC=clang.
 #   - gen2 builds gen3; gen2.c == gen3.c byte-identical; this file is that stable output.
-#   - MEMORY: gen2 peak VmHWM dropped 6.46 -> 5.48 GiB (VmRSS 6.44 -> 5.22 GiB), now UNDER the
-#     6 GiB hard target. Guard: builds ran under `ulimit -v 10485760` (10 GiB dev allowance) with
-#     TEKO_BACKEND=c.
+#   - MEMORY: gen2 peak VmHWM 5.48 -> 4.47 GiB (VmRSS 5.22 -> 4.26 GiB); cumulative from the
+#     campaign start 6.46 -> 4.47 GiB. Guard: builds ran under `ulimit -v 10485760` (10 GiB dev
+#     allowance) with TEKO_BACKEND=c.
 #
-# `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane,
-# forward-only, its correctness resting on the clean fixpoint above.
+# `run: hand-harvest` — LOCAL on this lane, forward-only, resting on the clean fixpoint above.
 # `commit: pending drain` — the landing commit is written in this same change.
 #
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (DISABLED
@@ -28,8 +25,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  ba9df3c142f06e43012b7f99581fb293ec448feeea6574ea3a15e099075f4c00
+sha256:  4e024d11bb3282ed0672d36399addc7af51fd5148a61a1cc60afbc31c76c8971
 since:   0.3.1.0
-legacy:  none — self-reproducible harvest of marco 4 (push->path-stack in cg_name_reaches_byvalue,
-         gen2 peak 6.46 -> 5.48 GiB); byte-identical on rebuild (clean fixpoint gen2 == gen3,
-         gen2.c == gen3.c, 23 247 397 bytes).
+legacy:  none — self-reproducible harvest of marco 5 (push->preallocate batch in resolve_type/nidx/
+         subst_type/type_param_table/cg_te_to_type_ns, gen2 peak 5.48 -> 4.47 GiB); byte-identical
+         on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c, 23 249 632 bytes).
