@@ -2,6 +2,16 @@
 section: design
 created: 2026-08-19
 updated: 2026-08-19
+alignment: ALIGNED to the unified model (`colecoes-e-memoria-modelo-unificado-0.3.1.md`, session 2026-08-19).
+        Its §7 corrections are APPLIED here (see §0.0 below): (a) refcount is scoped to the **wrapped** kind
+        ONLY — a plain **class** element is freed by **region-drop / escape-analysis**, NOT refcount; (b) the
+        growable + thread-safe substrate is the **CHUNK-CHAIN** (unrolled linked list of fixed chunks), NOT the
+        single growable pointer-index array (which is not TS — a whole-index swap is an RMW race); the
+        pointer-index array survives ONLY as the intra-chunk layout / the non-TS `[]T` escape; (c) TS is the
+        **default**, there is NO Concurrent family (it is DISSOLVED into TS-by-default; non-TS = the raw `[]T`).
+        The bucket law, `deep_copy<T>(o): T | error`, and the §0.5 leak reasoning are KEPT (the leak reasoning
+        as history). The implementation QUEUE derived from this alignment lives in
+        `colecoes-memoria-fila-implementacao-0.3.1.md`.
 status: DESIGN — no product line. R9 (arena remount, origin/fix/retirement @ f380e593): remodel EVERY
         growable collection onto FIXED-ARRAY backing. **REWORK (owner 2026-08-19):** the earlier
         VALUE-COPY design (grow = copy values into a new fixed backing + drop the old) LEAKS — the dead
@@ -44,6 +54,66 @@ SELADA `mudancas-superficie-0.3.1.md:1742` (item C) + `:1757`:** VALOR = reatrib
 ("bucket na arena"), sem reclaim mid-região (crumb-D intacto); OBJETO = region-per-object + referência
 C#-like + wrap-refcount; deep-copy explícito `deep_copy<T>(o): T | error` (cap 255 → `error`). E a
 alt-3 (§9) é **FUNDACIONAL**: o chunk-list dinâmico da própria arena É uma coleção node-linked.
+
+---
+
+## 0.0 CORREÇÕES DO MODELO UNIFICADO (aplica `colecoes-e-memoria-modelo-unificado-0.3.1.md` §7 — LEIA PRIMEIRO)
+
+O RECORD de 2026-08-19 (`colecoes-e-memoria-modelo-unificado-0.3.1.md`) consolidou o modelo e forçou TRÊS
+correções sobre este doc. Elas **rescopeiam os termos globalmente** — valem em TODAS as seções abaixo, que
+foram escritas antes da consolidação. Onde o texto legado diverge, ESTA seção prevalece (as demais ficam como
+histórico do raciocínio, incl. o §0.5 do vazamento).
+
+**Correção A — refcount é só do WRAPPED; `class` é region-drop / escape-analysis (NÃO refcount).**
+O modelo de memória é de **TRÊS categorias** por-tipo (Doc-2, `mudancas-superficie-0.3.1.md:1614-1637`), não
+duas:
+- **value** (escalar / value-struct) → **deep-copy** na fronteira + o **bucket** (reatribuir/remover = SÓ
+  MARCAÇÃO; físico sai no bulk-free do drop da região). Inalterado neste doc.
+- **class** (objeto comum) → **arena-per-object** (caixa própria, semântica de ponteiro) freed por
+  **region-drop via escape-analysis** (`src/checker/escape.tks`, a residência/LUB). **NÃO é refcount.**
+- **wrapped** (serviço / ref-opaca / FFI, opt-in) → **refcount** (dict addr→count na arena RAIZ; `wrap`++/
+  `drop`−−; zero → free).
+
+Onde este doc diz "**OBJETO = wrap-refcount**" (§2.2b, §2.4b, §2.5, §5, §2.7, §9.1 e as fixtures
+`list_obj_refcount_*`), leia: para a categoria **class** (o caso comum de um elemento-objeto) a coleção
+**guarda um ponteiro** e a vida é por **region-drop / escape-analysis** — a coleção é um *holder* que estende
+a residência (o LUB sobe até a região da coleção), e o objeto é bulk-freed no drop dessa região; o
+`retain`/`release` **inc/dec de refcount aplica-se APENAS quando `T` é da categoria `wrapped`**. O
+`deep_copy<T>(o): T | error` (cap 255 → `error`) permanece a cópia-profunda explícita opt-in. A cópia de
+ponteiro C#-like de `get`/`pop` (partilha a referência, não deep) permanece igual para AMBOS `class` e
+`wrapped`; a diferença é só o mecanismo de reclamação (region-drop vs dec-refcount).
+
+> **Portão aberto do dono (§8 do record):** um elemento `class` guardado numa coleção de **vida longa** e
+> removido cedo — region-drop-via-escape (a residência já subiu à região da coleção, some no drop dela) ou
+> **promover a `wrapped`** para liberar na hora? Doc-2 deixa implícito. **Os itens da fila que dependem disto:
+> qualquer remoção antecipada de `class` em List/Map/Sorted*/PQ e nas compostas Stack/Queue/Deque/LinkedList**
+> (o caminho `class` do `remove`/`pop`/`set`). Enquanto aberto, o caminho `class` usa region-drop-via-escape
+> (conservador, leak-safe, nunca UAF); a promoção-a-wrapped é aditiva quando o dono confirmar.
+
+**Correção B — o substrato growable + TS é a CHUNK-CHAIN, não o índice-de-ponteiros único.**
+O record §2 **bane o array growable único como substrato de coleção**: a troca do backing inteiro é um
+read-modify-write (dois `push` concorrentes leem o mesmo backing velho → uma escrita perde-se) e uma store de
+ponteiro nu nem é atômica. O substrato TS é a **CHUNK-CHAIN (unrolled linked list)**: uma cadeia de **chunks
+FIXOS** (cada nó = um array fixo de N + `next`), que **cresce ligando um chunk novo** (CAS na cauda ou uma
+região minúscula sob lock) — **nunca uma troca de backing inteiro**, então o crescimento é fino e não
+invalida a estrutura; itera cache-friendly (arrays dentro dos chunks); um RowId/índice é um **`u64` estável**
+(o crescimento nunca move um elemento). Isto reconcilia com §9.0: a chunk-list dinâmica da própria arena JÁ É
+essa estrutura (`src/runtime/arena.tks` `CHUNK_NEXT/CHUNK_CAP/CHUNK_USED`, região por `region_alloc`/
+`region_drop`). **O `grow_index`/índice-de-ponteiros único do §2.3–§2.6 sobrevive APENAS como (i) o layout
+INTRA-chunk de um chunk fixo, e (ii) o caminho não-TS `[]T` cru** — não como o substrato growable padrão.
+Toda coleção padrão assenta na chunk-chain; o watermark `count`, o `place`/`read` de VALOR, o ponteiro-para-
+objeto de `class`, e o bucket permanecem — só o *mecanismo de crescimento* passa de "novo índice + free do
+velho" para "linkar um chunk fixo novo" (o chunk velho **nunca** é dropado num grow → zero grow-leak E TS).
+
+**Correção C — TS é o DEFAULT; não há família Concurrent (DISSOLVIDA); o não-TS é o `[]T` cru.**
+Toda coleção é **thread-safe por padrão**, estrutural e de graça, via chunk-chain + **mutex fino**
+(`src/runtime/sync.tks` `mtx_lock`/`mtx_unlock`) OU **CAS-append** na cauda. NÃO existe família "Concurrent"
+separada (era o split do C# que rejeitamos, `mudancas-superficie-0.3.1.md:1621`). O **§4 deste doc**
+(`ConcurrentStack`/`ConcurrentDictionary`/`ConcurrentQueue`/`ConcurrentBag`/`BlockingCollection`) fica como
+**histórico**: essas variantes DISSOLVEM-se — a TS-por-default da chunk-chain É o que elas ofereciam; o
+Treiber/MS-queue vira o caminho CAS-append interno da base, não um tipo separado. A **única forma NÃO-TS é o
+array `[]T` cru** (o escape-hatch de quem já garante isolamento). O single-growable-array-swap continua
+**BANIDO** como substrato (Correção B).
 
 ---
 
@@ -157,6 +227,13 @@ sorted_set. A enumeração está completa.
 ---
 
 ## 2. ALTERNATIVA 1 — O MODELO PONTEIRO-ÍNDICE (a correção do dono; SUBSTITUI o §2 de cópia-de-valor)
+
+> **⚠ ALINHAMENTO (§0.0 Correção B):** o índice-de-ponteiros único descrito aqui **NÃO é o substrato growable
+> padrão** — foi superado pela **chunk-chain** (record §2), que é a única forma TS. Leia todo o §2 como (i) o
+> layout INTRA-chunk de um chunk fixo e (ii) o caminho não-TS `[]T`. O `grow_index` (troca de índice inteiro +
+> free do velho) é substituído por "linkar um chunk fixo novo" no substrato padrão; o watermark `count`, o
+> `place`/`read`, o ponteiro-para-`class` e o bucket permanecem válidos. E (§0.0 Correção A) onde se lê
+> "OBJETO = wrap-refcount", vale só para `wrapped`; `class` é region-drop / escape-analysis.
 
 O backing deixa de guardar VALORES inline e passa a guardar **PONTEIROS** — um **índice** de largura
 uniforme (uma palavra por slot). Os valores vivem na **arena dedicada do objeto** (F2, §2.3), escritos UMA
@@ -315,6 +392,13 @@ chamador). OBJETO — o refcount garante que a região vive enquanto QUALQUER re
 nunca pendura as outras.
 
 ### 2.5 O modelo de OBJETO — LEI SELADA (`mudancas-superficie-0.3.1.md:1742` C + `:1757`): region-per-object + deep-copy default + bulk-free + WRAP-REFCOUNT
+
+> **⚠ ALINHAMENTO (§0.0 Correção A):** o record §1 esclarece que o wrap-refcount é da categoria **wrapped
+> APENAS**. Um elemento **`class`** (o objeto comum) é **region-per-object freed por region-drop /
+> escape-analysis** — a coleção estende a residência (holder), sem inc/dec de refcount. O `retain`/`release`
+> abaixo aplica-se só quando `T` é `wrapped`. Para `class`, `push`/`get`/`pop` ainda copiam o PONTEIRO
+> (C#-like, shallow), e a reclamação é o region-drop da região da coleção-holder (ou promoção-a-wrapped se o
+> dono fechar o portão §0.0). O `deep_copy` explícito e a cópia-de-referência default permanecem idênticos.
 
 Fonte selada (`:1757`): *a arena-Teko é **region-per-object + deep-copy default + bulk-free + wrap-refcount
 escape-hatch***. Isto FECHA a antiga dúvida "escape vs borrow" (não existe mais Q3) e SUPERSEDE o "LUB-only"
@@ -579,6 +663,13 @@ plano só é O(1) numa ponta (append/pop na cauda). Para O(1) nas DUAS pontas SE
 ---
 
 ## 4. As coleções CONCORRENTES — reconciliação T-2 (valores estáveis + índice sob concorrência)
+
+> **⚠ ALINHAMENTO (§0.0 Correção C):** a família "Concurrent*" está **DISSOLVIDA** — TS é o **default** de
+> TODA coleção via chunk-chain + mutex fino / CAS-append; não há tipos `Concurrent*` separados. Leia esta
+> seção como o **mecanismo interno TS da base** (o Treiber/MS-queue vira o caminho CAS-append da chunk-chain,
+> não um tipo público). O não-TS é o `[]T` cru. O single-growable-array-swap continua BANIDO (RMW race). O
+> restante do raciocínio (índice imortal-F2, free-list §7.8, valores estáveis) permanece como o detalhe de
+> implementação da cauda concorrente da chunk-chain.
 
 As concorrentes são DESIGN no plano (`plano-…:488-625`), BLOQUEADAS em F1(thread)+F2. O modelo
 ponteiro-índice **melhora** a história de concorrência, mas não a resolve toda — declarar o split:
