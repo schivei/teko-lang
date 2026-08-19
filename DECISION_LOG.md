@@ -447,3 +447,15 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Higiene de diagnóstico:** `unsupported_target_error` (C1) trazia um `teko: ` próprio e toda saída passa por `fail`, que já prefixa `teko: <dir>: ` — a mensagem lia com prefixo duplo. Removido; as mensagens novas (R4/R5) nascem sem prefixo por essa razão.
 - **Ritual:** gen1 pelo seed, `teko test .` (suíte + os 10 regressivos), fixpoint gen1→gen2→gen3 byte-idêntico (binário E `teko.c`), `TEKO_MEM_PARANOID=1` exit 0, auditoria W15 (`git diff … | grep '^+.*//'` vazio).
 - **Reversibilidade:** média — C4/C5/C6 são aditivos e cobertos por `#test` + cenários; o C2 é uma adição de runtime que entra em TODO binário gerado (fixpoint reverificado byte-a-byte).
+
+---
+
+## 2026-08-19 — RT-L6 R3 ratificação: `capture_panic` backend intrinsic como lei-primeira da mitigação
+
+### D45 · RT-L6 R3 CLOSED: `capture_panic(body: func<null>): str | null` ratificado como intrinsic de backend ✅
+- **Contexto:** a migração C→Teko da camada L6 (harness de testes + assert + crash-handler, `migracao-runtime-c-para-teko-0.3.1.md`) tinha uma tensão genuína: `setjmp`/`longjmp` no harness não tem superfície Teko (R3). A recomendação lei-primeira era um intrinsic de backend (o próprio backend já pilota a stack no crash-handler; deixa zero resíduos C; inventa zero superfícies harness-only). A alternativa fallback era um mini-shim C de `setjmp` como último resíduo mensurável (aposentado quando o intrinsic ratificasse). **Sem ratificação, R3 era um HALT-parcial para o dono.**
+- **Ratificação do dono (2026-08-19):** o intrinsic `capture_panic(body: func<null>): str | null` É a lei-primeira. O shim `setjmp` fallback NÃO é tomado. Implicações: (1) o backend ganha UMA invasão de intrinsic = `capture_panic` (stack unwind + PC restore) como primitivo do próprio compilador; (2) L6 migra 100% para Teko; (3) zero C novo (a manutenção C vai ao lixo em M3 via clean expurgo); (4) nenhuma superfície `:` rota em linguagem por harness.
+- **Crumb 0064 (RT-L6) ratificado:** a assinatura e javadoc `capture_panic` mudaram de DRAFT para RATIFICADO; o título do crumb não carrega mais "owner gate"; a framing descarta o fallback setjmp; R3 marca CLOSED neste log.
+- **Base constitucional:** lei-primeira (nenhuma lei violada; nenhuma alternativa sobrevive todas as 5 leis M.1–M.5); transparência (o backend já é autoridade de stack); S16-SYNC já entrou em produção, L6 é o last-measured-residue de C in-tree (RM-C9, M3); M.1 fail-loud (a captura de panic no harness é MANDATÓRIA pra não matar a suite; o intrinsic garante).
+- **Reversibilidade:** baixa — uma invasão de backend é concreto. Se rejeitado, o crumb volta pra draft + fallback setjmp é tomado (diferença de magnitude de risco neste gate, não de tempo).
+- **Timing / onda-relativa:** o crumb 0064 (RT-L6) bloqueia atrás de RT-L5 (task/names/coverage); a ratificação neste log desbloqueia M2 final para integração L6 (que chega com fixpoint-rebuild, não-ensinante).
