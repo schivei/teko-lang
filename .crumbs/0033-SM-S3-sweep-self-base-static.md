@@ -18,17 +18,16 @@ sources:
 
 ## Goal
 
-Complete the method-receiver migration: rewrite every method in `src/` to the new form — a synthetic `self`
-receiver (no source-named receiver param), `base` for the superclass upcast, and the `static` modifier for
-receiver-less methods — then DELETE the old loose-receiver parse path and the `allow_untyped_first`
-acceptance that the additive G3 crumb (`0009`) kept accepting so the SM-R1 seed could parse old source. The
-synthetic-`self` machinery is already in place (`inject_synthetic_receiver`, `consume_static_modifier`,
-`parse_decl.tks:157,173`); this crumb sweeps the ~89 receiver sites + `synth.tks` to depend on it and
-removes the loose-receiver fallback. Byte-preserving: `params[0]` is still the untyped receiver with its
-`type_ann` rewritten to the struct name before codegen (§5.4), so the emitted C is byte-identical — the
-fixpoint proves it. It core-consumes the SM-R1 seed → `fixpoint-rebuild`. This is the LOAD-BEARING sweep of
-Phase S (the biggest mechanical rewrite; the byte-identity gate is what proves a corpus-wide method rewrite
-survives the fixpoint).
+AUDIT/VERIFY-ONLY (already applied in src): confirm that the method-receiver migration is complete — every
+method in `src/` has been rewritten to the new form with a synthetic `self` receiver (no source-named receiver
+param), `base` for the superclass upcast, and the `static` modifier for receiver-less methods. Confirm that
+the old loose-receiver parse path and the `allow_untyped_first` acceptance have been DELETE'd (they were kept
+accepting through the additive G3 crumb, `0009`). The synthetic-`self` machinery is already in place
+(`inject_synthetic_receiver`, `consume_static_modifier`, `parse_decl.tks` ~196-221, 398, 430, 585). Byte-
+preserving: `params[0]` is still the untyped receiver with its `type_ann` rewritten to the struct name before
+codegen (§5.4), so the emitted C is byte-identical — the fixpoint proves it. This is the LOAD-BEARING sweep
+of Phase S (the biggest mechanical rewrite; the byte-identity gate is what proves a corpus-wide method rewrite
+survives). This crumb is a verify-only audit; the work is DONE in src.
 
 ## Where
 
@@ -51,25 +50,24 @@ NEW: no new surface; a source rewrite + a clean removal of the loose-receiver ac
 
 ## How
 
-1. **Rewrite the receiver sites.** For each instance method, drop the explicit loose receiver param and rely
-   on the synthetic `self` (`inject_synthetic_receiver`); mark receiver-less methods `static`; use `base`
-   for the superclass upcast (the rename G3 landed). `self` is CONTEXTUAL (plain `Ident`, meaning only
-   inside a method body); `base` STAYS a plain identifier too (it is a live production local name elsewhere,
-   §14 R2 — do NOT reserve it).
-2. **Remove `allow_untyped_first` (clean expurgo).** After the sweep leaves no loose receiver in `src/`,
-   delete the `allow_untyped_first` acceptance (`parse_decl.tks:34`) and the loose-receiver parse fallback —
-   a clean expurgo of the parser path, NO tombstone diagnostic (nothing points at the old form). The
-   synthetic-`self` path is now the only way to declare a method.
-3. **Keep the emit byte-neutral.** `params[0]` remains the untyped receiver whose `type_ann` is rewritten to
-   `Named{struct_name}` before codegen (§5.4); the method emitters (`synth.tks:199…475`) emit `name="self"`
-   + `is_static` directly. The invariants `is_instance` (`typer.tks:745`), `method_sig_matches`
-   (`collect.tks:721`), `is_static_method` (`di.tks:147`) are preserved.
-4. **Byte-identity is the gate.** Build gen2 on the SM-R1 seed, run the scoped regression, prove
-   `gen2==gen3` byte-identical — the proof the corpus-wide method rewrite changed no semantics. Commit per
-   green batch (by directory); sweep `.tkt`/`.tkr` in lockstep.
-5. **This is the load-bearing sweep.** Because it is the largest mechanical rewrite (~89 sites + `synth.tks`),
-   the fixpoint byte-identity is the gate that matters most — a single mis-rewritten receiver would break
-   `gen2==gen3` and be caught immediately.
+**VERIFY-ONLY audit (work already done):** No fresh sweep is needed — the receivers are already rewritten and
+the acceptance is already removed.
+
+1. **Confirm ~89 receiver sites are rewritten.** Audit `src/` to confirm every method uses the synthetic `self`
+   form (no explicit loose receiver param), receiver-less methods are marked `static`, and superclass upcasts
+   use `base`. `self` and `base` remain contextual identifiers (not reserved keywords, except `static` which IS
+   reserved).
+2. **Confirm `allow_untyped_first` is removed (clean expurgo).** Verify that `allow_untyped_first` acceptance
+   (`parse_decl.tks:34`) and the loose-receiver parse fallback are gone — a clean expurgo with NO tombstone
+   diagnostic. The synthetic-`self` path is the only declaration method.
+3. **Verify the emit is byte-neutral.** Confirm that `params[0]` remains the untyped receiver whose `type_ann`
+   is rewritten to `Named{struct_name}` before codegen (§5.4); the method emitters (`synth.tks:199…475`)
+   emit `name="self"` + `is_static` directly. Verify that the invariants `is_instance`, `method_sig_matches`,
+   `is_static_method` are preserved.
+4. **Byte-identity is the proof.** Build gen2 on the SM-R1 seed, run the scoped regression, prove
+   `gen2==gen3` byte-identical — the proof the corpus-wide method rewrite changed no semantics.
+5. **This is the load-bearing sweep.** The largest mechanical rewrite (~89 sites + `synth.tks`); the fixpoint
+   byte-identity is the gate that matters most — a single mis-rewritten receiver would break `gen2==gen3`.
 
 ## Rulings & laws
 
@@ -94,9 +92,10 @@ catches.
 ## Gate
 
 `[fixpoint]` — build gen2 on the SM-R1 seed + scoped regression + `gen2==gen3` byte-identity. "Green" =
-every method in `src/` + `.tkt` uses the synthetic `self` / `base` / `static` form, `allow_untyped_first` +
-the loose-receiver parse are cleanly removed (no tombstone), the build is byte-identical (`gen2==gen3`).
-Reseed-class: `fixpoint-rebuild`.
+audit confirms every method in `src/` + `.tkt` uses the synthetic `self` / `base` / `static` form (sweep
+complete + byte-identical), `allow_untyped_first` + the loose-receiver parse are cleanly removed (no
+tombstone), the emit is byte-neutral, the build is byte-identical (`gen2==gen3`). Reseed-class:
+`fixpoint-rebuild` (this crumb is verify-only).
 
 ## Deps
 
@@ -104,6 +103,7 @@ Reseed-class: `fixpoint-rebuild`.
 
 ## Done when
 
-Every method in `src/` + `.tkt` uses synthetic `self` / `base` / `static`, `allow_untyped_first` and the
-loose-receiver parse are cleanly expurgated (no tombstone), the emit invariants hold, and gen2 on the SM-R1
-seed is byte-identical (`gen2==gen3`).
+Audit confirms every method in `src/` + `.tkt` uses synthetic `self` / `base` / `static` (sweep complete +
+byte-identical), `allow_untyped_first` and the loose-receiver parse are cleanly expurgated (no tombstone),
+the emit invariants hold, and gen2 on the SM-R1 seed is byte-identical (`gen2==gen3`). The sweep is
+DONE-verified.
