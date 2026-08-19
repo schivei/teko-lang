@@ -12,9 +12,11 @@ type FnSig = struct {
     doc: str
 }
 
+type ConstSig = struct { name: str; type: @Type(); has_doc: bool; doc: str }
+
 type SigField = struct { name: str; type: @Type() }
 
-type TyShape = enum { Struct; Enum; Variant }
+type TyShape = enum { Struct; Enum; Variant; Alias; Newtype; Interface; Trait; Flags; Extern; ExternStruct }
 
 type TyExport = struct {
     name: str
@@ -22,11 +24,13 @@ type TyExport = struct {
     fields: []SigField
     members: []str
     cases: []@Type()
+    methods: []FnSig
+    extends: []str
     has_doc: bool
     doc: str
 }
 
-type Header = struct { types: []TyExport; fns: []FnSig }
+type Header = struct { types: []TyExport; fns: []FnSig; consts: []ConstSig }
 
 
 fn write_doc(buf: []byte, t: StrTable, has_doc: bool, doc: str): []byte {
@@ -96,7 +100,14 @@ fn write_members(buf: []byte, t: StrTable, xs: []str): []byte {
 fn shape_byte(s: TyShape): byte {
     if s == TyShape::Struct { return 0 }
     if s == TyShape::Enum { return 1 }
-    2
+    if s == TyShape::Variant { return 2 }
+    if s == TyShape::Alias { return 3 }
+    if s == TyShape::Newtype { return 4 }
+    if s == TyShape::Interface { return 5 }
+    if s == TyShape::Trait { return 6 }
+    if s == TyShape::Flags { return 7 }
+    if s == TyShape::Extern { return 8 }
+    9
 }
 
 fn write_tyexport(buf: []byte, t: StrTable, e: TyExport): []byte {
@@ -105,6 +116,8 @@ fn write_tyexport(buf: []byte, t: StrTable, e: TyExport): []byte {
     b = write_sigfields(b, t, e.fields)
     b = write_members(b, t, e.members)
     b = write_types(b, t, e.cases)
+    b = write_fnsigs(b, t, e.methods)
+    b = write_members(b, t, e.extends)
     write_doc(b, t, e.has_doc, e.doc)
 }
 
@@ -119,8 +132,26 @@ fn write_tyexports(buf: []byte, t: StrTable, xs: []TyExport): []byte {
     b
 }
 
+fn write_constsig(buf: []byte, t: StrTable, c: ConstSig): []byte {
+    var b = write_u32(buf, st_find(t, c.name))
+    b = write_type(b, t, c.type)
+    write_doc(b, t, c.has_doc, c.doc)
+}
+
+fn write_constsigs(buf: []byte, t: StrTable, xs: []ConstSig): []byte {
+    var b = write_u32(buf, xs.len to u32)
+    var i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_constsig(b, t, xs[i])
+        i++
+    }
+    b
+}
+
 fn write_header(buf: []byte, t: StrTable, h: Header): []byte {
-    write_fnsigs(write_tyexports(buf, t, h.types), t, h.fns)
+    var b = write_fnsigs(write_tyexports(buf, t, h.types), t, h.fns)
+    write_constsigs(b, t, h.consts)
 }
 
 
@@ -193,7 +224,9 @@ fn collect_tyexport(t: StrTable, e: TyExport): StrTable {
     var t2 = collect_sigfields(t1, e.fields)
     var t3 = collect_members(t2, e.members)
     var t4 = collect_type_list(t3, e.cases)
-    collect_doc(t4, e.has_doc, e.doc)
+    var t5 = collect_fnsigs(t4, e.methods)
+    var t6 = collect_members(t5, e.extends)
+    collect_doc(t6, e.has_doc, e.doc)
 }
 
 fn collect_tyexports(t: StrTable, xs: []TyExport): StrTable {
@@ -207,12 +240,29 @@ fn collect_tyexports(t: StrTable, xs: []TyExport): StrTable {
     tab
 }
 
+fn collect_constsig(t: StrTable, c: ConstSig): StrTable {
+    var t1 = st_intern(t, c.name).table
+    var t2 = collect_type_strings(t1, c.type)
+    collect_doc(t2, c.has_doc, c.doc)
+}
+
+fn collect_constsigs(t: StrTable, xs: []ConstSig): StrTable {
+    var tab = t
+    var i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_constsig(tab, xs[i])
+        i++
+    }
+    tab
+}
+
 fn collect_header(t: StrTable, h: Header): StrTable {
-    collect_fnsigs(collect_tyexports(t, h.types), h.fns)
+    collect_constsigs(collect_fnsigs(collect_tyexports(t, h.types), h.fns), h.consts)
 }
 
 
-const TKH_VERSION: u32 = 2
+const TKH_VERSION: u32 = 3
 
 fn emit_tkh(h: Header): []byte {
     var table = collect_header(st_empty(), h)
@@ -239,6 +289,8 @@ type RSigFields = struct { r: Reader; value: []SigField }
 type RMembers = struct { r: Reader; value: []str }
 type RTyExport = struct { r: Reader; value: TyExport }
 type RTyExports = struct { r: Reader; value: []TyExport }
+type RConstSig = struct { r: Reader; value: ConstSig }
+type RConstSigs = struct { r: Reader; value: []ConstSig }
 type RHeader = struct { r: Reader; value: Header }
 
 fn read_doc(r: Reader, table: []str): RDoc | error {
@@ -334,7 +386,14 @@ fn read_members(r: Reader, table: []str): RMembers | error {
 fn shape_of(b: byte): TyShape {
     if b == 0 { return TyShape::Struct }
     if b == 1 { return TyShape::Enum }
-    TyShape::Variant
+    if b == 2 { return TyShape::Variant }
+    if b == 3 { return TyShape::Alias }
+    if b == 4 { return TyShape::Newtype }
+    if b == 5 { return TyShape::Interface }
+    if b == 6 { return TyShape::Trait }
+    if b == 7 { return TyShape::Flags }
+    if b == 8 { return TyShape::Extern }
+    TyShape::ExternStruct
 }
 
 fn read_tyexport(r: Reader, table: []str): RTyExport | error {
@@ -343,10 +402,13 @@ fn read_tyexport(r: Reader, table: []str): RTyExport | error {
     var fs = match read_sigfields(sh.r, table) { RSigFields as x => x; error as e => return e }
     var ms = match read_members(fs.r, table) { RMembers as x => x; error as e => return e }
     var cs = match read_types(ms.r, table) { RTypes as x => x; error as e => return e }
-    var dc = match read_doc(cs.r, table) { RDoc as x => x; error as e => return e }
+    var md = match read_fnsigs(cs.r, table) { RFnSigs as x => x; error as e => return e }
+    var ex = match read_members(md.r, table) { RMembers as x => x; error as e => return e }
+    var dc = match read_doc(ex.r, table) { RDoc as x => x; error as e => return e }
     RTyExport { r = dc.r; value = TyExport {
             name = nm.value; shape = shape_of(sh.value)
             fields = fs.value; members = ms.value; cases = cs.value
+            methods = md.value; extends = ex.value
             has_doc = dc.has_doc; doc = dc.doc
     } }
 }
@@ -366,10 +428,35 @@ fn read_tyexports(r: Reader, table: []str): RTyExports | error {
     RTyExports { r = rr; value = xs }
 }
 
+fn read_constsig(r: Reader, table: []str): RConstSig | error {
+    var nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
+    var ty = match read_type(nm.r, table) { RType as x => x; error as e => return e }
+    var dc = match read_doc(ty.r, table) { RDoc as x => x; error as e => return e }
+    RConstSig { r = dc.r; value = ConstSig {
+            name = nm.value; type = ty.value; has_doc = dc.has_doc; doc = dc.doc
+    } }
+}
+
+fn read_constsigs(r: Reader, table: []str): RConstSigs | error {
+    var n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    var rr = n.r
+    var xs: []ConstSig = teko::list::empty()
+    var i = 0
+    loop {
+        if i >= n.value { break }
+        var c = match read_constsig(rr, table) { RConstSig as x => x; error as e => return e }
+        xs = teko::list::push(xs, c.value)
+        rr = c.r
+        i++
+    }
+    RConstSigs { r = rr; value = xs }
+}
+
 fn read_header(r: Reader, table: []str): RHeader | error {
     var ts = match read_tyexports(r, table) { RTyExports as x => x; error as e => return e }
     var fs = match read_fnsigs(ts.r, table) { RFnSigs as x => x; error as e => return e }
-    RHeader { r = fs.r; value = Header { types = ts.value; fns = fs.value } }
+    var cs = match read_constsigs(fs.r, table) { RConstSigs as x => x; error as e => return e }
+    RHeader { r = cs.r; value = Header { types = ts.value; fns = fs.value; consts = cs.value } }
 }
 
 fn read_tkh(data: []byte): Header | error {
@@ -383,7 +470,7 @@ fn read_tkh(data: []byte): Header | error {
     }
     var ver = match read_u32(m3.r) { RU32 as x => x; error as e => return e }
     if ver.value != TKH_VERSION {
-        return error { message = "unsupported .tkh version (this compiler reads version 2; pre-0.3.1 artifacts use retired PrimKind ordinals and must be rebuilt with the current compiler)" }
+        return error { message = "unsupported .tkh version (this compiler reads version 3; older artifacts predate the full exp-surface header and must be rebuilt with the current compiler)" }
     }
     var stored = match read_u64(ver.r) { RU64 as x => x; error as e => return e }
     if data.len < 16 { return error { message = "truncated .tkh header" } }

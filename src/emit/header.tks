@@ -17,12 +17,58 @@ fn build_fnsig(f: checker::TFunction, table: checker::TypeTable): FnSig | error 
     FnSig { name = f.name; params = params; ret = f.return_type; has_doc = f.has_doc; doc = f.doc.read() }
 }
 
-fn build_sigfields(fields: []parser::Field, table: checker::TypeTable): []SigField | error {
+fn fnsig_from_func(name: str, ft: checker::Func, has_doc: bool, doc: str): FnSig {
+    var params: [ft.params.len]SigParam = []
+    var i = 0
+    loop {
+        if i >= ft.params.len { break }
+        params[i] = SigParam { name = ft.param_names[i]; type = ft.params[i] }
+        i++
+    }
+    FnSig { name = name; params = params; ret = ft.ret; has_doc = has_doc; doc = doc }
+}
+
+fn build_method_sig(f: parser::Function, owner: str, ns: str, table: checker::TypeTable): FnSig | error {
+    var ft = match checker::method_func_type(f, owner, table, ns) {
+        (@Type()) as t => t
+        error as e => return e
+    }
+    match ft {
+        checker::Func as fn_t => fnsig_from_func(f.name, fn_t, f.has_doc, f.doc.read())
+        _ => error { message = "an exported method did not resolve to a function type" }
+    }
+}
+
+fn build_methods(ms: []parser::Function, owner: str, ns: str, table: checker::TypeTable): []FnSig | error {
+    var out: [ms.len]FnSig = []
+    var i = 0
+    loop {
+        if i >= ms.len { break }
+        out[i] = match build_method_sig(ms[i], owner, ns, table) {
+            FnSig as x => x
+            error as e => return e
+        }
+        i++
+    }
+    out
+}
+
+fn build_target_case(te: @TypeExpr(), ns: str, table: checker::TypeTable): []@Type() | error {
+    var t = match checker::resolve_type(te, table, ns) {
+        (@Type()) as x => x
+        error as e => return e
+    }
+    var cs: [1]@Type() = []
+    cs[0] = t
+    cs
+}
+
+fn build_sigfields(fields: []parser::Field, ns: str, table: checker::TypeTable): []SigField | error {
     var out: []SigField = teko::list::empty()
     var i = 0
     loop {
         if i >= fields.len { break }
-        var ft = match checker::resolve_type(fields[i].type_ann, table, "") {
+        var ft = match checker::resolve_type(fields[i].type_ann, table, ns) {
             (@Type()) as t => t
             error as e => return e
         }
@@ -33,15 +79,17 @@ fn build_sigfields(fields: []parser::Field, table: checker::TypeTable): []SigFie
 }
 
 fn build_tyexport(d: parser::TypeDecl, table: checker::TypeTable): TyExport | error {
+    var ns = checker::name_qualifier(d.name)
     match d.body {
         parser::StructBody as sb => {
-            var fields = match build_sigfields(sb.fields, table) {
+            var fields = match build_sigfields(sb.fields, ns, table) {
                 []SigField as fs => fs
                 error as e => return e
             }
             TyExport {
                 name = d.name; shape = TyShape::Struct
                 fields = fields; members = teko::list::empty(); cases = teko::list::empty()
+                methods = teko::list::empty(); extends = teko::list::empty()
                 has_doc = d.has_doc; doc = d.doc.read()
             }
         }
@@ -49,11 +97,12 @@ fn build_tyexport(d: parser::TypeDecl, table: checker::TypeTable): TyExport | er
             TyExport {
                 name = d.name; shape = TyShape::Enum
                 fields = teko::list::empty(); members = eb.members; cases = teko::list::empty()
+                methods = teko::list::empty(); extends = teko::list::empty()
                 has_doc = d.has_doc; doc = d.doc.read()
             }
         }
         parser::VariantBody as vb => {
-            var rt = match checker::resolve_type(vb.type_expr, table, "") {
+            var rt = match checker::resolve_type(vb.type_expr, table, ns) {
                 (@Type()) as t => t
                 error as e => return e
             }
@@ -64,47 +113,117 @@ fn build_tyexport(d: parser::TypeDecl, table: checker::TypeTable): TyExport | er
             TyExport {
                 name = d.name; shape = TyShape::Variant
                 fields = teko::list::empty(); members = teko::list::empty(); cases = cases
+                methods = teko::list::empty(); extends = teko::list::empty()
                 has_doc = d.has_doc; doc = d.doc.read()
             }
         }
-        parser::AliasBody => {
-            error { message = "exporting a type alias in the header is not yet supported" }
+        parser::AliasBody as ab => {
+            var cases = match build_target_case(ab.alias, ns, table) {
+                []@Type() as cs => cs
+                error as e => return e
+            }
+            TyExport {
+                name = d.name; shape = TyShape::Alias
+                fields = teko::list::empty(); members = teko::list::empty(); cases = cases
+                methods = teko::list::empty(); extends = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc.read()
+            }
         }
-        parser::NewtypeBody => {
-            error { message = "exporting a value-type newtype in the header is not yet supported" }
+        parser::NewtypeBody as nb => {
+            var cases = match build_target_case(nb.backing, ns, table) {
+                []@Type() as cs => cs
+                error as e => return e
+            }
+            var methods = match build_methods(nb.methods, d.name, ns, table) {
+                []FnSig as ms => ms
+                error as e => return e
+            }
+            TyExport {
+                name = d.name; shape = TyShape::Newtype
+                fields = teko::list::empty(); members = teko::list::empty(); cases = cases
+                methods = methods; extends = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc.read()
+            }
         }
         parser::ExternBody => {
-            error { message = "exporting an extern type in the header is not yet supported" }
+            TyExport {
+                name = d.name; shape = TyShape::Extern
+                fields = teko::list::empty(); members = teko::list::empty(); cases = teko::list::empty()
+                methods = teko::list::empty(); extends = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc.read()
+            }
         }
-        parser::ExternStructBody => {
-            error { message = "exporting an extern struct type in the header is not yet supported" }
+        parser::ExternStructBody as esb => {
+            var fields = match build_sigfields(esb.fields, ns, table) {
+                []SigField as fs => fs
+                error as e => return e
+            }
+            TyExport {
+                name = d.name; shape = TyShape::ExternStruct
+                fields = fields; members = teko::list::empty(); cases = teko::list::empty()
+                methods = teko::list::empty(); extends = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc.read()
+            }
         }
-        parser::FlagsBody => {
-            error { message = "exporting a flags type in the header is not yet supported" }
+        parser::FlagsBody as fb => {
+            TyExport {
+                name = d.name; shape = TyShape::Flags
+                fields = teko::list::empty(); members = fb.members; cases = teko::list::empty()
+                methods = teko::list::empty(); extends = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc.read()
+            }
         }
         parser::ClassBody as cb => {
-            var fields = match build_sigfields(cb.fields, table) {
+            var fields = match build_sigfields(cb.fields, ns, table) {
                 []SigField as fs => fs
                 error as e => return e
             }
             TyExport {
                 name = d.name; shape = TyShape::Struct
                 fields = fields; members = teko::list::empty(); cases = teko::list::empty()
+                methods = teko::list::empty(); extends = teko::list::empty()
                 has_doc = d.has_doc; doc = d.doc.read()
             }
         }
-        parser::InterfaceBody => {
-            error { message = "exporting an interface in the header is not yet supported" }
+        parser::InterfaceBody as ib => {
+            var methods = match build_methods(ib.methods, d.name, ns, table) {
+                []FnSig as ms => ms
+                error as e => return e
+            }
+            TyExport {
+                name = d.name; shape = TyShape::Interface
+                fields = teko::list::empty(); members = teko::list::empty(); cases = teko::list::empty()
+                methods = methods; extends = ib.extends
+                has_doc = d.has_doc; doc = d.doc.read()
+            }
         }
-        parser::TraitBody => {
-            error { message = "exporting a trait in the header is not yet supported" }
+        parser::TraitBody as tb => {
+            var fields = match build_sigfields(tb.fields, ns, table) {
+                []SigField as fs => fs
+                error as e => return e
+            }
+            var methods = match build_methods(tb.methods, d.name, ns, table) {
+                []FnSig as ms => ms
+                error as e => return e
+            }
+            TyExport {
+                name = d.name; shape = TyShape::Trait
+                fields = fields; members = teko::list::empty(); cases = teko::list::empty()
+                methods = methods; extends = tb.implements
+                has_doc = d.has_doc; doc = d.doc.read()
+            }
         }
     }
+}
+
+fn build_constsig(c: checker::TConstDecl): ConstSig {
+    ConstSig { name = c.name; type = c.ty; has_doc = c.has_doc; doc = c.doc.read() }
 }
 
 fn build_header(prog: checker::TProgram, table: checker::TypeTable): Header | error {
     var types: []TyExport = teko::list::empty()
     var fns: []FnSig = teko::list::empty()
+    var consts: []ConstSig = teko::list::empty()
     var i = 0
     loop {
         if i >= prog.items.len { break }
@@ -129,11 +248,15 @@ fn build_header(prog: checker::TProgram, table: checker::TypeTable): Header | er
             }
             parser::UseDecl => { }
             (@TStatement()) as _gb2 => { }
-            checker::TConstDecl => { }
+            checker::TConstDecl as c => {
+                if c.vis == parser::Visibility::Exp {
+                    consts = teko::list::push(consts, build_constsig(c))
+                }
+            }
         }
         i++
     }
-    Header { types = types; fns = fns }
+    Header { types = types; fns = fns; consts = consts }
 }
 
 fn emit_program(prog: checker::TProgram, table: checker::TypeTable): []byte | error {

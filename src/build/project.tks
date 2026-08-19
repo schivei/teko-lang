@@ -1173,7 +1173,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
     if m.artifact == Artifact::Package {
         var od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
         match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-        var table = checker::type_table_of(prog)
+        var table = checker::resolvable_type_table_of(prog)
         var tkh_bytes = match emit::emit_program(prog, table) {
             []byte as b => b
             error as e => return fail(dir, e.message)
@@ -1239,6 +1239,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
     }
     phase_end_ok(cc_phase, binp)
     match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
+    write_tkh_sidecar(binp, prog)
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, "")))
     0
 }
@@ -2159,6 +2160,14 @@ fn report_object_only(dir: str, objp: str, t: NativeTarget): i32 {
     0
 }
 
+fn write_tkh_sidecar(binp: str, prog: checker::TProgram) {
+    var table = checker::resolvable_type_table_of(prog)
+    match emit::emit_program(prog, table) {
+        []byte as tkh => { match teko::io::write_file(teko::str::concat(binp, ".tkh"), tkh) { error => { }; null => { } } }
+        error as e => { teko::io::eprintln(teko::str::concat("teko: .tkh sidecar skipped: ", e.message)) }
+    }
+}
+
 fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest): i32 {
     var objp = object_output_path(od, stem)
     var target = resolved_target()
@@ -2169,6 +2178,7 @@ fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker
         return fail(dir, "cc failed to link the own-backend object")
     }
     match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
+    write_tkh_sidecar(binp, prog)
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, " (own backend)")))
     0
 }
