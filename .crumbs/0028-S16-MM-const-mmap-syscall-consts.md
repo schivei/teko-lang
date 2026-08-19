@@ -29,16 +29,17 @@ switch-over (S16-MM-L1, `0053`, M2), so a `[dry]` build is byte-identical. Its s
 
 ## Where
 
-- `src/sys/sys.tks:2-36` — the `#os("linux")` / `#arch`-split `const` block — the mmap family: `SYS_MMAP`
-  (9 / 222), `SYS_MUNMAP` (11 / 215), `SYS_MPROTECT` (10 / 226), and the `#os("linux")` flag consts
-  `PROT_NONE/READ/WRITE` (0/1/2), `MAP_PRIVATE` (2), `MAP_ANONYMOUS` (0x20), `MAP_FIXED` (0x10).
-- The existing `SYS_*` neighbours (`SYS_EXIT_GROUP`/`SYS_WRITE`/`SYS_CLOCK_GETTIME`/`SYS_GETRANDOM`,
-  `sys.tks:13-35`) — the pattern this crumb follows verbatim (`#os`/`#arch` guards, W15 doc-comment per
-  const).
-- `src/sys/sys.tks` `#arch`/`#os` guard threading (the §17 pragma machinery, banked) — prunes the non-target
-  block before the checker, so `SYS_MMAP` resolves to the host arch's number.
+- **NO CURRENT LANDING.** `src/sys/sys.tks` does NOT exist in the tree yet (grep-confirmed empty). This crumb
+  will CREATE `src/sys/sys.tks` as a new module with the `#os("linux")` / `#arch`-split `const` block —
+  the mmap family: `SYS_MMAP` (9 / 222), `SYS_MUNMAP` (11 / 215), `SYS_MPROTECT` (10 / 226), and the
+  `#os("linux")` flag consts `PROT_NONE/READ/WRITE` (0/1/2), `MAP_PRIVATE` (2), `MAP_ANONYMOUS` (0x20),
+  `MAP_FIXED` (0x10).
+- The existing Linux `SYS_*` constants (not yet in `sys.tks`) are the pattern this crumb will follow verbatim
+  (`#os`/`#arch` guards, W15 doc-comment per const, when it establishes the module).
+- `#arch`/`#os` guard threading (the §17 pragma machinery, banked) — will prune the non-target block before
+  the checker, so `SYS_MMAP` resolves to the host arch's number.
 
-NEW: no new module; `const`-only additions to `src/sys/sys.tks`.
+NEW: creates `src/sys/sys.tks` module with `const`-only definitions.
 
 ## How
 
