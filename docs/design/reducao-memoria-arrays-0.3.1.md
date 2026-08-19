@@ -34,7 +34,7 @@ mortos além do buffer final. Multiplicado por 20,3 M crescimentos → 4980 MB d
   vazar em `root`. Ataca o residual. (Crumbs C6–C8.)
 - **Eixo C — pipeline em estágios com despejo** (§6bis): processar por unidade, linkar antes
   do checker, despejar memória entre estágios (arena-drop ou artefato em disco). O pico vira
-  o MÁXIMO de um estágio, não a soma. Ataca SÓ o residual não-push. (Crumbs C10–C14.)
+  o MÁXIMO de um estágio, não a soma. Ataca SÓ o residual não-push. Crumbs C10–C16 (terminal native = endgame).
 
 ---
 
@@ -114,7 +114,7 @@ Baseline: **~6,2 GB**. `push` = 4980 MB; não-push ≈ 1,2 GB.
 | **C6 — arena-por-escopo** (enter/leave + push/pop nas fronteiras) | reclama scratch que caía em `root`; -0,2 a -0,4 GB | ~0,9–1,1 GB |
 | **C7 — literal de array via arena** (tirar `malloc` cru do `emit_array_lit`) | fecha vazamento de `malloc` nunca-liberado; -0,1 a -0,2 GB | ~0,9 GB |
 | **C8 — purge-na-reatribuição** (free targetado eager) | fecha o pico do acumulador reatribuído em loop longo; robustez | ≤1,0 GB |
-| **C10–C14 — pipeline em estágios com despejo** (Eixo C, §6bis) | ataca SÓ o residual não-push: pico = máx de um estágio, não a soma; -0,3 a -0,6 GB | ~0,5–0,7 GB |
+| **C10–C16 — pipeline em estágios + terminal native** (Eixo C, §6bis) | residual não-push: pico = máx de um estágio; e terminal native (endgame, sem C); -0,3 a -0,6 GB | ~0,5–0,7 GB |
 
 **Dois orçamentos separados (não misturar):**
 - **PUSH (93% = 4980 MB):** derrubado por **Eixo A** (C3+C4/C5, matar o crescimento). Esta é
@@ -286,10 +286,12 @@ disco ou são re-parseáveis. Aditivo (convive com whole-program). Fixpoint.
 
 ### C12 — Check+lower+emit FUNDIDOS por unidade (despejo em memória = C6)
 Reestruturar `backend`/`codegen_and_report` para iterar namespaces em ordem determinística:
-(re)carrega corpos da unidade, checa contra a tabela linkada (C11), lowera, emite o C, anexa
-à saída e **derruba a região da unidade** (C6) antes da próxima. Prólogo global sai da tabela
-linkada; corpos streamed. **Guarda dura: `teko.c` byte-idêntico ao whole-program.** Este é o
-despejo-em-memória do princípio unificador. Fixpoint a cada namespace migrado.
+(re)carrega corpos da unidade, checa contra a tabela linkada (C11), lowera, emite a
+**saída-de-unidade** (abstrata: na rota C = pedaço de texto concatenado; na rota native =
+`.o`), anexa/escreve e **derruba a região da unidade** (C6) antes da próxima. Prólogo global
+sai da tabela linkada; corpos streamed. **Guarda dura: `teko.c` byte-idêntico ao
+whole-program.** Este é o despejo-em-memória do princípio unificador. Fixpoint a cada
+namespace migrado.
 
 ### C13 — Dump typed `.tkb` por unidade (despejo em DISCO, onde o estágio não funde)
 Estender `serialize_program`/`deserialize_program` (`emit/tkb_frame.tks`,`tkb_read.tks`) para
@@ -302,6 +304,21 @@ Cache do `.tkb` typed por-unidade em disco, chaveado por hash(unidade)+hash(tabe
 recompila só o que mudou. Caso persistente do despejo-em-disco (C13). Desligado no caminho de
 fixpoint (build limpo = `teko.c` idêntico). Não reduz pico; reduz tempo de dev. Só depois de
 C12/C13 verdes.
+
+### C15 — Terminal native: objeto linkável POR UNIDADE (endgame)
+Escrever o back-end de emissão por-unidade da rota native: cada namespace lowered
+(`lower_program`/`lower_item`) → isel (`select_module*`) → `regalloc_module` →
+`encode_module` → `emit_elf`/`emit_macho`/`emit_coff` produz um `.o` no disco; a região da
+unidade é derrubada (o `.o` É o despejo). O "linker próprio" (a tabela linkada de C11)
+resolve símbolos entre unidades; `ld` do SO (ou `objfile_ar`) junta no binário final. Saída
+abstrata de C12 = `.o` aqui. Só depois de C12 verde na rota C.
+
+### C16 — Fixpoint de objeto native + retirar a muleta C
+Migrar o critério de fixpoint de `gen2.c==gen3.c` para **objeto native reproduzível**
+(determinismo do `.o`: sem timestamp, ordem estável de símbolos/seções, sem path absoluto,
+relocations canônicas — auditar `objfile_*`/`objfile_ar*`). Quando as 4 pernas native do CI
+fecham verde + o objeto reproduz, **remover a rota C** (`teko.c` e o `cc`); as 2 pernas em C
+viram native (triagem do CI). Reseed do bootstrap passa a ser o objeto/binário native.
 
 ### C9 — (TERMINAL) Remover raízes C + transcrever o slot de controle
 Passo final, depois de TODAS as conversões (Eixo A e Eixo C). Remover o código morto de 5.4
@@ -316,7 +333,7 @@ no caminho de array. Passe de mensagens unificado + reseed ITERATIVO final. Fixp
 
 Nota do dono: em vez de CARREGAR TUDO na memória (whole-program AST → check → codegen),
 processar **por unidade**, linkando incrementalmente ANTES de emitir tudo, para segurar só
-UMA unidade por vez. Este é um eixo próprio (C10–C13) que soma com o Eixo A (matar push) e
+UMA unidade por vez. Este é um eixo próprio (C10–C16) que soma com o Eixo A (matar push) e
 com C6 (arena-por-escopo) — todos liberam por fronteira.
 
 **Refinamento do dono (apoiado pelo profiler):** como `tk_slice_push_r` = 93% do pico, a
@@ -454,6 +471,57 @@ do despejo-em-disco: o mesmo `.tkb` que bounded o pico serve de cache entre buil
 self-build / fixpoint, o incremental é DESLIGADO** (build limpo tem que produzir `teko.c`
 idêntico); é otimização de tempo de dev, não reduz pico. Atrás de C11–C13, opcional.
 
+### O terminal do pipeline: `teko.c` é MULETA; native/`ld` é o endgame
+
+Correção do dono: o estágio TERMINAL do Eixo C **não pode ser `teko.c`**. O `teko.c` é
+muleta — existe só enquanto a linguagem ainda não emite o binário final que ela própria
+produz. O endgame é a linguagem emitir seu **PRÓPRIO objeto linkável por `ld`**, sem
+depender de compilador C. O backend native já existe e é o caminho real:
+`teko::lir::lower_program` → `select_module`/`select_module_x86` (isel) →
+`regalloc_module` → `encode_module` → `emit_elf`/`emit_macho`/`emit_coff`
+(`src/backend/objfile_*.tks`), com `objfile_ar*` arquivando `.o` em `.a`. As ABIs por SO
+(`abi_sysv64`/`abi_aapcs64`/`abi_win64`) já estão lá.
+
+**O estágio terminal tem DOIS alvos; o native é o definitivo:**
+
+- **Rota C (muleta, transitória):** emite UM `teko.c` que cross-compila via `#if` de todos
+  os alvos, passado a `cc`. É o que existe hoje.
+- **Rota native (endgame):** emite **objeto linkável por unidade** (ELF/Mach-O/COFF) e o
+  **`ld` do SO** (ou o link interno / `objfile_ar`) junta no binário final. Sem C.
+
+**Encaixe com o Eixo C — o ganho é MAIOR na rota native.** Compilação por namespace onde
+**cada namespace emite UM objeto** é compilação separada clássica: a unidade é lowered para
+LIR, encodada para `.o`, escrita no disco, e a memória da unidade é **derrubada** — o
+objeto no disco É o despejo natural (não precisa nem de `.tkb` intermediário para o terminal;
+o `.o` é o artefato). O "linker próprio" que o dono citou é exatamente isto: a peça que
+resolve símbolos ENTRE unidades (a tabela linkada de C11) e produz objetos que `ld` costura.
+Na rota C, o terminal ainda concatena tudo num `teko.c` (uma "unidade só" degenerada); na
+rota native, o terminal é naturalmente por-unidade → o per-unit-object cai de graça do
+desenho do Eixo C.
+
+**Portanto o Eixo C deve MIRAR o objeto native como saída de unidade**, com o `teko.c`
+como caso degenerado (uma unidade só) durante a transição. C12 (o passo de emit por unidade)
+é escrito com a saída-de-unidade abstrata: na rota C ela é um pedaço de texto concatenado; na
+rota native ela é um `.o` no disco. Mesmo laço de streaming, dois back-ends de emissão.
+
+**Fixpoint migra de "`teko.c` idêntico" para "objeto native idêntico".** Hoje o critério é
+`gen2.c == gen3.c` (o C emitido byte-idêntico). No endgame o critério vira o **objeto/binário
+native se reproduzir** — determinismo do `.o`: sem timestamp, ordem estável de símbolos e de
+seções, sem paths absolutos embutidos, relocations em ordem canônica. Os `objfile_*` e
+`objfile_ar*` já ordenam símbolos (`coff_lib_sorted_symbols`, `bsd_sorted_symbols`); o
+crumb do terminal native audita que NADA no `.o` depende de tempo/ambiente. **A muleta C sai
+quando o native fecha verde** — as 4 pernas native do CI passando + fixpoint de objeto
+reprodutível; aí a rota C é removida (as 2 pernas em C viram native, como a triagem do CI já
+prevê).
+
+**Sequência (o que depende de quê):**
+- **Eixos A e B (memória) NÃO dependem do native** — matar push e arena-por-escopo valem
+  IDÊNTICOS nas duas rotas (o LIR e a arena são compartilhados; só o back-end de emissão
+  difere). Entregam a meta ≤1,5 GB independentemente do terminal.
+- **Eixo C (pipeline por unidade) é o que HABILITA o per-unit-object → `ld`.** Seu desenho já
+  mira o objeto native como saída de unidade; o `teko.c` é o degenerado transitório. O
+  terminal native é um sub-eixo de C (crumbs C15–C16), depois de C12 verde na rota C.
+
 ---
 
 ## 7. Disciplina de fixpoint e guard (a cada crumb)
@@ -516,7 +584,18 @@ o trade contra memória — só se paga onde o estágio não funde (a barreira d
 
 **Decisão em aberto (não-HALT) — ordem de execução dos eixos.** Eixo A (C3–C5) é pré-requisito
 factual: matar o push primeiro derruba 93% e simplifica a conversão dos mesmos módulos que o
-Eixo C reestrutura. Eixo C (C10–C14) é grande e arquitetural; recomendo entregá-lo DEPOIS de
+Eixo C reestrutura. Eixo C (C10–C16) é grande e arquitetural; recomendo entregá-lo DEPOIS de
 A+B verdes e SÓ SE o residual pós-C6 ainda exceder a folga desejada. Se A+B já entregam
 ≤1,0 GB (provável), o Eixo C vira otimização de teto/robustez, não obrigação da meta. Sem
 tensão de Lei aqui — é sequenciamento; registrado para o dono decidir a prioridade.
+
+**R7 — Determinismo do objeto native (o fixpoint do endgame).** Ao migrar o critério de
+`gen2.c==gen3.c` para "objeto native reproduzível" (C16), o `.o`/binário tem que ser
+byte-idêntico entre gerações: sem timestamp, ordem estável de símbolos e seções, sem path
+absoluto embutido, relocations em ordem canônica, padding zerado determinístico. Os
+`objfile_*`/`objfile_ar*` já ordenam símbolos (`coff_lib_sorted_symbols`,
+`bsd_sorted_symbols`), mas o audit de C16 tem que cobrir TODA fonte de não-determinismo do
+encoder. A muleta C só sai quando as 4 pernas native do CI fecham verde E o objeto reproduz.
+O terminal native (C15–C16) NÃO bloqueia a meta de memória (Eixos A/B a entregam nas duas
+rotas) — é o endgame arquitetural: a linguagem emitindo seu próprio binário linkável por
+`ld`, sem depender de compilador C.
