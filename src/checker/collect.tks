@@ -268,21 +268,35 @@ fn instance_methods_of(decl: parser::TypeDecl): []parser::Function {
     }
 }
 
+fn count_type_decls(prog: TProgram): u64 {
+    var n: u64 = 0
+    var i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] { parser::TypeDecl => n = n + 1; _ => { } }
+        i++
+    }
+    n
+}
+
 pub fn type_table_of(prog: TProgram): TypeTable {
-    var table = tt_empty()
-    table = tt_push(table, TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() })
+    var total = count_type_decls(prog) + 1
+    var regs: [total]TypeReg = []
+    regs[0] = TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() }
+    var k: u64 = 1
     var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
             parser::TypeDecl as td => {
-                table = tt_push(table, TypeReg { name = td.name; namespace = ""; file = ""; vis = td.vis; decl = td })
+                regs[k] = TypeReg { name = td.name; namespace = ""; file = ""; vis = td.vis; decl = td }
+                k = k + 1
             }
             _ => { }
         }
         i++
     }
-    tt_freeze(table)
+    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = teko::list::empty() })
 }
 
 fn canon_ref_name(name: str, table: TypeTable, ref_ns: str): str {
@@ -292,9 +306,10 @@ fn canon_ref_name(name: str, table: TypeTable, ref_ns: str): str {
     }
 }
 fn canon_ref_list(names: []str, table: TypeTable, ref_ns: str): []str {
-    var out: []str = teko::list::empty()
+    var n = names.len
+    var out: [n]str = []
     var i: u64 = 0
-    loop { if i >= names.len { break }; out = teko::list::push(out, canon_ref_name(names[i], table, ref_ns)); i++ }
+    loop { if i >= names.len { break }; out[i] = canon_ref_name(names[i], table, ref_ns); i++ }
     out
 }
 const MRET_PREFIX: str = "__mret"
