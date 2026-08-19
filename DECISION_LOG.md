@@ -459,3 +459,18 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Base constitucional:** lei-primeira (nenhuma lei violada; nenhuma alternativa sobrevive todas as 5 leis M.1–M.5); transparência (o backend já é autoridade de stack); S16-SYNC já entrou em produção, L6 é o last-measured-residue de C in-tree (RM-C9, M3); M.1 fail-loud (a captura de panic no harness é MANDATÓRIA pra não matar a suite; o intrinsic garante).
 - **Reversibilidade:** baixa — uma invasão de backend é concreto. Se rejeitado, o crumb volta pra draft + fallback setjmp é tomado (diferença de magnitude de risco neste gate, não de tempo).
 - **Timing / onda-relativa:** o crumb 0064 (RT-L6) bloqueia atrás de RT-L5 (task/names/coverage); a ratificação neste log desbloqueia M2 final para integração L6 (que chega com fixpoint-rebuild, não-ensinante).
+
+---
+
+## 2026-08-19 — Refined comment convention: export-gate + doc-comment size bound
+
+### D46 · Comment convention refined: `/** */` only on `exp`, no `//`/`/* */`, size bound (owner 2026-08-19) ✅
+- **Ruling:** o dono refinou a convenção de comentários a ser aplicada na próxima limpeza W15. A regra é uma CONVENÇÃO (W15 canonicalizer + reviewer executam; NÃO é lexer/parser/checker) com dois meio:
+  1. **Export-gate:** `/** */` doc-comments são permitidos APENAS em declarações marcadas `exp` (export). Qualquer outro acessor (`pub` method, private/unmarked) NÃO carrega doc-comment — o canonicalizer DEMOTE (delete) qualquer `/** */` em site não-`exp`.
+  2. **Sem `//` nem `/* */`:** inline `//` (mid-body/trailing) e block `/* */` são ambos deletados (proibidos 0%); se uma linha "precisa" comentário, extrair função bem-nomeada.
+  3. **Size bound (novo):** um `/** */` nunca pode ser MAIOR que o código que documenta (judgment de reviewer, nenhuma fórmula line/char; the deciding factor is readability + ratio documento:assinatura).
+- **Escopo da limpeza:** ~24 inline/block comments + ~881 doc-comments em sites não-`exp` demarcados para deletar em `src/`.
+- **Base constitucional:** M.2 (PURO-TEKO) — a superfície exportada é exatamente `exp`; apenas ela leva narrativa assinada. CONVENTION (W15, reviewer+canonicalizer, não compiled):  o lexer/parser/checker NÃO muda; nenhum diagnóstico novo.
+- **Ratificação:** a regra export-gate foi registrada em `docs/design/estado-doc2-campanha-limpeza-0.3.1.md:24`; o size-bound é novo (owner 2026-08-19). Ambas ratificadas aqui. REGRA law-first: W15 skill + canonicalizer agent documentam; crumbs herdam via TEMPLATE.md standing-law line.
+- **Reversibilidade:** extremamente alta — é remoção de comentários (sem mudança de comportamento) + enfoque de reviewer.
+- **Timing:** a canonicalization roda como W15 retrofit em lane-close (antes de bump); sem impacto no CI (documento-only, convention-enforcement). Reseed quando o canonicalizer processar o batch (`fix/retirement` ou lane posterior).
