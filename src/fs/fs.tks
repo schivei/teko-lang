@@ -8,3 +8,38 @@ exp extern fn mkdir(path: str): error | null = "tk_rt_mkdir" from "teko_rt"
 
 /** teko::fs::remove_file — delete the file at `path`; succeeds when it is already absent. */
 exp extern fn remove_file(path: str): error | null = "tk_rt_remove_file" from "teko_rt"
+
+/** FileInfo — the essentials of a path for planning reads without overrun: the exact byte size and
+ * whether it is a directory. */
+exp type FileInfo = struct {
+    /** The total file size in bytes (0 for a directory). */
+    size: u64
+    /** True when the path is a directory. */
+    is_dir: bool
+}
+
+/** path_is_dir — whether `path` names a directory, by probing it as one.
+ * @param path  the path to test
+ * @return true when the path is a directory */
+fn path_is_dir(path: str): bool {
+    match list_dir(path) { []str => true; error => false }
+}
+
+/** file_size — the exact byte length of `path`, for sizing a reader.
+ * @param path  the file to measure
+ * @return the total in bytes, or an error when the path cannot be opened */
+exp fn file_size(path: str): u64 | error {
+    var s = match teko::io::open_read(path) { teko::io::FileStream as fs => fs; error as e => return e }
+    var total = teko::io::stream_size(s)
+    _ = teko::io::stream_close(s)
+    total
+}
+
+/** stat — the info of `path` without opening a data stream.
+ * @param path  the path to inspect
+ * @return the info, or an error when the path cannot be consulted */
+exp fn stat(path: str): FileInfo | error {
+    if path_is_dir(path) { return FileInfo { size = 0; is_dir = true } }
+    var sz = match file_size(path) { u64 as n => n; error as e => return e }
+    FileInfo { size = sz; is_dir = false }
+}
