@@ -31,18 +31,21 @@ the externs — so a `[dry]` build is byte-identical. Its seed folds into SM-R1.
 
 ## Where
 
-- `src/sys/sys.tks:140-152` — the `#os("macos")` `const` block — `OS_SYNC_WAIT_ON_ADDRESS_NONE: u32 = 0`,
-  `OS_SYNC_WAKE_BY_ADDRESS_NONE: u32 = 0`, `PROT_NONE/READ/WRITE: i32 = 0/1/2`, `MAP_PRIVATE: i32 =
-  0x0002`, `MAP_ANON: i32 = 0x1000`, `MAP_FAILED_WORD: u64 = 18446744073709551615` (`(void*)-1`).
-- `src/sys/sys.tks` — the `#os("windows")` `const` block — `MEM_COMMIT: u32 = 0x1000`, `MEM_RESERVE: u32 =
-  0x2000`, `MEM_RELEASE: u32 = 0x8000`, `PAGE_READWRITE: u32 = 0x04`, `PAGE_NOACCESS: u32 = 0x01`,
-  `WIN_INFINITE: u32 = 0xFFFFFFFF` (`dwMilliseconds` = infinite block).
-- The existing Linux consts (`SYS_FUTEX`/`FUTEX_*`, `CLOCK_*`, the mmap family) — UNTOUCHED (each `#os`
-  block is independent).
-- `src/sys/sys.tks` `#os` guard threading (§17 pragma machinery, banked) — prunes the non-host blocks before
-  the checker.
+- **NO CURRENT LANDING.** `src/sys/sys.tks` does NOT exist in the tree yet (grep-confirmed empty). This crumb
+  will add (to the module created or will-be-created by 0028) the `#os("macos")` `const` block —
+  `OS_SYNC_WAIT_ON_ADDRESS_NONE: u32 = 0`, `OS_SYNC_WAKE_BY_ADDRESS_NONE: u32 = 0`,
+  `PROT_NONE/READ/WRITE: i32 = 0/1/2`, `MAP_PRIVATE: i32 = 0x0002`, `MAP_ANON: i32 = 0x1000`,
+  `MAP_FAILED_WORD: u64 = 18446744073709551615` (`(void*)-1`).
+- **NO CURRENT LANDING.** This crumb will also add the `#os("windows")` `const` block —
+  `MEM_COMMIT: u32 = 0x1000`, `MEM_RESERVE: u32 = 0x2000`, `MEM_RELEASE: u32 = 0x8000`,
+  `PAGE_READWRITE: u32 = 0x04`, `PAGE_NOACCESS: u32 = 0x01`, `WIN_INFINITE: u32 = 0xFFFFFFFF`
+  (`dwMilliseconds` = infinite block).
+- The existing/future Linux consts (`SYS_FUTEX`/`FUTEX_*`, `CLOCK_*`, the mmap family from 0028) — UNTOUCHED
+  (each `#os` block is independent).
+- `#os` guard threading (§17 pragma machinery, banked) — will prune the non-host blocks before the checker.
 
-NEW: no new module; `const`-only additions to `src/sys/sys.tks` in `#os("macos")` / `#os("windows")` blocks.
+NEW: adds `#os("macos")` / `#os("windows")` `const` blocks to `src/sys/sys.tks`; the module itself is created
+by 0028 or will be expanded by 0028.
 
 ## How
 
