@@ -173,6 +173,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     Eixo A/C) persegue —, as **execuções full `teko build .` que carregam testes ficam LIBERADAS** e a
     proibição de `teko test .` cai. O gatilho é o marco MEDIDO no build seco, não uma data. Agente que
     for validar mede o pico do build seco e reporta ao cruzar o marco.
+- **NATIVE É A ÚLTIMA ETAPA — gated em MEMÓRIA ESTÁVEL (dono 2026-08-19).** NÃO se toca no backend
+  native (lowering, syscall, `.o`, endgame no-C, os stops de fronteira do gen2) enquanto a memória não
+  estabilizar. O gatilho tríplice, TODO ele: **(1) build seco ≤ 1,5 GB · (2) fixpoint gen2==gen3
+  byte-idêntico · (3) testes verdes.** Só então o native começa (M4). A campanha de memória (RM-C /
+  Eixo A/C) vem ANTES; o native é o fim. **Corolário:** a onda de superfície (M1 G/S) e a reseed SM-R1
+  seguem pela **rota C** — a buildabilidade do native NÃO é pré-requisito da reseed (isto SUPERSEDE a
+  ressalva do pin SM-P1 de "não reseedar enquanto o gen2 native não builda": o native está deferido, não
+  na fila da reseed). Eu (coordenador) não puxo native pra frente — foi o erro de 2026-08-19, corrigido.
 - **GUARD DE MEMÓRIA `ulimit -v 6815744` (6,5 GiB) = INVIOLÁVEL (dono 2026-08-18).** Se um build
   **estoura** o guard, o agente **encontra a causa-raiz do consumo e corrige** — NUNCA levanta o
   teto. Levantar o `ulimit` mascara exatamente o problema que o expurgo existe pra resolver (o

@@ -515,3 +515,9 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Gatilho:** o marco MEDIDO no build seco (≤1,5 GB), não uma data. Todo agente que valida mede o pico do build seco e reporta ao cruzar o marco.
 - **Base:** desdobra a lei "TESTES SÓ NO CI / `teko test .` dá OOM" — a proibição existe porque o full build estoura memória; reduzida a memória ao ponto de o build seco caber em 1,5 GB, o full build com testes passa a caber e vira validação legítima local.
 - **Escopo:** codificado em `CLAUDE.md` (§ Leis de desenvolvimento) + `.crumbs/TEMPLATE.md` (Safety). Convenção/processo — sem mudança de compilador.
+
+### D52 · Native gated em memória estável — native é a ÚLTIMA etapa (owner 2026-08-19) ✅
+- **Ruling do dono:** NÃO se toca no backend native (lowering, syscall, `.o`, endgame no-C, os stops de fronteira do gen2) até a memória estabilizar. Gatilho tríplice, todo ele: (1) **build seco ≤ 1,5 GB** + (2) **fixpoint gen2==gen3** byte-idêntico + (3) **testes verdes**. Só então o native começa (M4).
+- **Ordem:** campanha de memória (RM-C / Eixo A/C) ANTES; native é o fim.
+- **Corolário:** a onda de superfície (M1 G/S) e a reseed **SM-R1 seguem pela rota C** — buildabilidade do native NÃO é pré-requisito da reseed. Isto **SUPERSEDE** a ressalva do pin SM-P1 ("não reseedar enquanto gen2 native não builda"): o native está deferido, não na fila da reseed.
+- **Correção de processo:** o coordenador puxou o conserto native pra frente (2 stops: `lower_const.tks:350` const-agregado + `syscall6`/`ar_mmap`) — start errado, morto na hora (`errou → para e refaz`). Os 2 stops ficam documentados como trabalho de M4, a executar SÓ após o gatilho tríplice.
