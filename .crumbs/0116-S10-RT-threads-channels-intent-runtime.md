@@ -17,22 +17,27 @@ sources:
 
 # 0116 · S10-RT — §10 runtime: threads + channel transports + Intent + region-per-thread
 
-> Deliver the RUNTIME half of §10: the `tk_thread_spawn` primitive, the `MemChan`/`OsChan` transports,
-> the `teko::threads` stdlib (`IChannelKind`/`Rx`/`Tx`/`Ctx`/WaitGroup bodies), the spawn codegen
-> trampoline, and `await` lowering — over the `S16-SYNC` sync FFI and the region-per-thread arena.
+> Deliver the RUNTIME half of §10: the `tk_thread_spawn` primitive (landado), the `MemChan`/`OsChan`
+> transports (in-process + OS), the `teko::threads` stdlib (`IChannelKind`/`Rx`/`Tx`/`Ctx`/WaitGroup
+> bodies), the spawn codegen trampoline, and the **`await` model-independent surface** (Intent<T> type +
+> parser/checker acceptance) — over the `S16-SYNC` sync FFI and the region-per-thread arena. `await`
+> lowering specifics (OPTION c substrato coroutine + SCH1 scheduler) deferred post-§16 — see
+> `plano-s10-await-opcao-c-crumbs.md`.
 
 ## Goal
 
 `S10-SURF` (`0115`) taught the compiler to ACCEPT §10; this crumb makes it RUN. It fills the skeleton
-`teko::threads` (today all-stub, `src/threads/threads.tks`) and adds the maintained-C runtime siblings
-`tk_thread_spawn` + `tk_memchan_*` + `tk_oschan_*` (s10 C0a/C0b/C0c) — the arena discipline forces the
-`tk_task_begin()`/`tk_task_end()` bracket into a C trampoline (s10 D1, a CONSTRAINT-forced maintained-C
-seam, later migrated to Teko/FFI by `§16`/`RT-L5`). It lands the spawn codegen (s10 S3, the ctx-blob +
-`cabi` trampoline), the channel stdlib leaves (C1-C5), the `Intent<T>` runtime (A1), and `await`
-lowering (A4). The arena runs **region-per-thread / per-lane** (Doc-1 §7.2-7.3) with the F2 immortal
-program region for names that cross a task (Doc-1 §7.6-7.7). §10 stays a **LEAF** (s10:84-88): the
-compiler never instantiates it, so the compiler-facing reseeds (S3/A4) are mechanical byte-identity;
-the stdlib leaves are `[dry]`.
+`teko::threads` (today all-stub, `src/threads/threads.tks`) and completes the maintained-C runtime
+siblings `tk_thread_spawn` (joinable twin for `await` to call — *already landed in `src/runtime/teko_rt.c`*)
++ `tk_memchan_*` (F2 FIFO + futex, s10 C0b, **the transport `await` uses**) + `tk_oschan_*` (AF_UNIX
+SOCK_DGRAM, s10 C0c, user-extensible); the arena discipline forces the `tk_task_begin()`/`tk_task_end()`
+bracket into a C trampoline (s10 D1, a CONSTRAINT-forced maintained-C seam, later migrated to Teko/FFI
+by `§16`/`RT-L5`). It lands the spawn codegen (s10 S3, the ctx-blob + `cabi` trampoline), the channel
+stdlib leaves (C1-C5), the `Intent<T>` surface (A1), and the **model-independent `await` surface**
+(parser/checker; **lowering deferred post-§16**, per `plano-s10-await-opcao-c-crumbs.md`). The arena
+runs **region-per-thread / per-lane** (Doc-1 §7.2-7.3) with the F2 immortal program region for names
+that cross a task (Doc-1 §7.6-7.7). §10 stays a **LEAF** (s10:84-88): the compiler never instantiates
+it, so the compiler-facing reseed (S3) is mechanical byte-identity; the stdlib leaves are `[dry]`.
 
 ## Where
 
@@ -45,20 +50,21 @@ the stdlib leaves are `[dry]`.
 - `src/threads/threads.tks:1-68` — fill `MemChan<T>` (C2) + `OsChan<T>` (C3) implementing
   `IChannelKind<T>`; the `Rx<T>::pop`/`Tx<T>::send`/`close` bodies; `chan<T>::make<K>` (C4);
   `Ctx`/WaitGroup `add`/`wait`/`done` (C5, over `tk_futex`/`S16-SYNC`).
-- `src/threads/intent.tks` (new leaf) — `Intent<T>`/`Intent` protected structs (A1) + `await` lowering
-  (A4) per the D2 ruling.
-- `src/lir/lower.tks` — `await` lowering arm (A4); `cancel()` (CN1). BLOCKED on D2 (see rulings).
+- `src/threads/intent.tks` (new leaf) — `Intent<T>`/`Intent` protected structs (A1, model-independent
+  surface) + placeholder stubs for `await` (parser/checker acceptance). **Lowering specifics (A4,
+  substrato OPTION c) deferred post-§16.**
 
 ## How
 
 Follow the s10 spine bottom-up (runtime → codegen → stdlib → await):
 
-1. **`tk_thread_spawn` (C0a) — FIRST.** Maintained-C, zero deps, unblocks the spine. Detached + a
-   joinable twin (for the thread-per-await A4). Its body brackets the new thread with
+1. **`tk_thread_spawn` (C0a) — FIRST; ALREADY LANDED.** Maintained-C, zero deps. *Already present in
+   `src/runtime/teko_rt.c` (detached + joinable variant)*. Its body brackets the new thread with
    `tk_task_begin()`/`tk_task_end()` (Doc-1 §7.2 region-per-lane).
-2. **Transports (C0b/C0c).** `tk_memchan_*` (pure F2 FIFO + futex, no syscall) and `tk_oschan_*`
-   (AF_UNIX DGRAM). Both on the CURRENT runtime — NOT `§16` (s10:67-71); only user-pluggable transports
-   (Kafka/WS via dynamic-FFI) are `§16`/`§17`-gated and out of this crumb.
+2. **Transports (C0b/C0c).** `tk_memchan_*` (pure F2 FIFO + futex, no syscall, **used by `await`**) and
+   `tk_oschan_*` (AF_UNIX DGRAM, user-extensible via `chan<T>::make<K>(transport_key)`). Both on the
+   CURRENT runtime — NOT `§16` (s10:67-71); only user-pluggable transports (Kafka/WS via dynamic-FFI)
+   are `§16`/`§17`-gated and out of this crumb.
 3. **Spawn codegen (S3).** Ctx-blob of the copied args + `cabi` trampoline + `tk_thread_spawn` call.
    Compiler-touching → mechanical reseed (the compiler never spawns, s10:84-88).
 4. **Channel stdlib (C1-C5).** Fill the `teko::threads` bodies; `chan<T>::make<K>` binds the transport
@@ -78,11 +84,15 @@ Follow the s10 spine bottom-up (runtime → codegen → stdlib → await):
 exp fn region_per_thread(lane: LaneId): RegionHandle
 ```
 
-5. **`Intent<T>` (A1) + `await` surface.** `Intent<T>` protected struct with `_value: T | null`
-   (verify `Intent__g__i32` stamps, s10:77-78). **The `await` surface (parser/checker/Intent<T> type) is
-   model-independent** and lands in this crumb. The lowering (A4) is OPTION (c)-specific (stackful
-   coroutines via ucontext/Fibers) and deferred post-§16 (ratified `4d6170dd`). `cancel()` (CN1):
-   panic-outside unblocked in this crumb; under-await specifics deferred with A4.
+5. **`Intent<T>` (A1) + `await` surface (A1-surface, model-independent).** `Intent<T>` protected struct
+   with `_value: T | null` (verify `Intent__g__i32` stamps, s10:77-78). **`await` is a DEPENDENCY-DOWN
+   construct: it runs on top of `spawn` (✓ already landed) + `memchan` (✓ landed via C0b, s10:77).**
+   The **surface** (parser/checker acceptance, syntax `await`, Intent type) is **model-independent**
+   and completes here. The **execution substrate** (OPTION c stackful coroutines via ucontext/Fibers
+   + mini-scheduler SCH1) and the **lowering (A4)** are deferred post-§16 per
+   `plano-s10-await-opcao-c-crumbs.md` (ratified `4d6170dd`). Stubs for lowering land here; the real
+   machinery enters post-§16. `cancel()` (CN1): panic-outside unblocked in this crumb; under-await
+   specifics deferred with A4 post-§16.
 6. **`teko::journal` (J1).** Already substantially present (`src/journal/`, ~876 lines) — VERIFY it
    mirrors the chan DI-by-key/F2 model and wire it to the finished channel layer; do NOT rewrite.
 
@@ -93,10 +103,12 @@ exp fn region_per_thread(lane: LaneId): RegionHandle
   Teko-over-FFI by `§16`/`RT-L5` — flagged, not a Teko-only breach.
 - **Comment convention (W15, owner 2026-08-19):** `/** */` only on `exp` decls; no `//` or `/* */`.
 - **Await model (owner 2026-08-16, ratified commit 4d6170dd):** **OPTION (c): stackful coroutines over
-  ucontext (POSIX) / Fibers (Windows).** The `await` surface (`Intent<T>`, parser/checker) is
-  model-independent and completes in this crumb. The suspension-model-specific lowering (A4) and
-  `cancel` under-await (CN1) are deferred post-§16, when the OS-FFI infra (`ucontext_wrap`, Fibers
-  bindings) lands.
+  ucontext (POSIX) / Fibers (Windows).** Ratified design in `plano-s10-await-opcao-c-crumbs.md`.
+  `await` **DEPENDS DOWN** on `spawn` (✓ landed `src/runtime/teko_rt.c`) and `memchan` (✓ landed
+  via this crumb). The `await` **surface** (parser/checker, syntax, Intent<T> type) is **model-independent**
+  and ships in this crumb. The **execution substrate** (ucontext/Fibers wrappers + mini-scheduler SCH1)
+  is **OPTION-c-specific and deferred post-§16** with the OS-FFI infra. Lowering arm (A4) and
+  `cancel` under-await (CN1) specifics also post-§16.
 - **Concurrent collections PHASE-2 gated in M2 via §10 F1+F2:** `S10-RT` gates the deferred PHASE-2
   concurrent collections (ConcurrentDictionary, BlockingCollection, ConcurrentQueue/Stack, etc.) to
   align with surface teaching and runtime wire-up; they ship in M2 alongside §10.
