@@ -491,9 +491,9 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Timing:** documentado em W15 skill + agent antes de qualquer crumb canonicalization pass; operacional já nesta sessão (crumbs-followup).
 
 ### D49 · Protocolo de fork: agentes checam deliberação antes de HALT (owner 2026-08-19) ✅
-- **Ruling do dono:** ao operar e encontrar um **fork** (decisão de design / owner-gate / ambiguidade "qual caminho" / tensão de lei), o agente NÃO para de imediato — a reza é: (1) **checar se já está deliberado** em `DECISION_LOG.md`, `docs/design/**`, `.crumbs/**` (Rulings) e docs-guarda (Doc-2/Doc-1/umbrella); (2) havendo mais de uma deliberação sobre o mesmo ponto, a **MAIS RECENTE vence** (supersede a velha); (3) **HALT + notifica APENAS** para fork genuinamente aberto.
+- **Ruling do dono:** ao operar e encontrar um **fork** (decisão de design / owner-gate / ambiguidade "qual caminho" / tensão de lei), o agente NÃO para de imediato — precisa **TER CERTEZA** de que não está já deliberado: (1) **checar se já está deliberado** em `DECISION_LOG.md`, `docs/design/**`, `.crumbs/**` (Rulings) e docs-guarda (Doc-2/Doc-1/umbrella); (2) havendo mais de uma deliberação sobre o mesmo ponto, a **MAIS RECENTE vence** (supersede a velha); (3) **HALT + notifica APENAS** para fork genuinamente aberto.
 - **Motivo:** matar **HALTs falsos** — agente parando por algo já decidido (ex.: RT-L6 / cov_dump, parcialmente resolvidos, que viraram "gate" sem necessidade).
-- **Escopo:** todo dispatch carrega a reza; codificado em `CLAUDE.md` (§ Protocolo de fork) + referenciado no `.crumbs/TEMPLATE.md` (Rulings & laws). CONVENTION / processo — sem mudança de lexer/parser/checker.
+- **Escopo:** todo dispatch carrega a regra; codificado em `CLAUDE.md` (§ Protocolo de fork) + referenciado no `.crumbs/TEMPLATE.md` (Rulings & laws). CONVENTION / processo — sem mudança de lexer/parser/checker.
 - **Reversibilidade:** alta — disciplina de orquestração/processo, sem mudança de comportamento de código.
 
 ---
