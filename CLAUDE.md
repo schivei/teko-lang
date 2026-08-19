@@ -138,6 +138,18 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   `tk_slice_push_r`/inflação de arrays dinâmicos = 93% do pico), e passar de ~15 GiB de RAM física
   da máquina causa OOM/thrash (100% de alocação). Estouro = diagnóstico + correção da inflação,
   não `ulimit` maior. (Um agente subiu 6,5→16 GiB e travou a máquina em 100%; foi parado.)
+  - **EXCEÇÃO ÚNICA — agente da campanha de memória combinada (io/fs + arena + expurgo) roda com 10 GB
+    (dono 2026-08-19):** enquanto o expurgo/streaming está EM CURSO, a build intermediária pode picar
+    acima de 6,5 GB antes da reclamação fechar; SÓ esse agente recebe `ulimit -v` ~10 GB (10485760) como
+    exceção temporária de desenvolvimento. **MAS o critério de aceitação é DURO: a conversão pra gen2 tem
+    que usar < 6 GB** — senão não faz sentido. O 10 GB é folga de dev, não a meta; a meta é gen2 < 6 GB
+    (rumo a ≤1,5 GB). Fora desse agente-exceção, o guard 6,5 GiB segue inviolável. A máquina tem ~15 GiB
+    física — 10 GB de um processo ainda cabe; NÃO passar disso.
+- **TAREFA LONGA → BRANCH REAL + PUSH FREQUENTE (dono 2026-08-19).** Trabalho longo (a campanha io/fs+
+  arena+expurgo é lenta até pra agente mecânico) tem que **commitar e PUSHAR regularmente** (a cada crumb/
+  passo) numa **branch real no origin** — não confiar no worktree local, que **some no restart de container/
+  sessão** (perdemos o trabalho do agente de reclamação exatamente assim). Push frequente = trabalho vive no
+  origin e sobrevive a restart; se o agente morrer, re-despacho continua da branch pushada.
 - **COMPILADOR C LOCAL = CLANG (dono 2026-08-18).** Todo agente e toda medição local usam **`TEKO_CC=clang`**
   (e `CC=clang` para o caminho cru `scripts/build_gen1_from_c.sh` que linka o `teko.c` direto). Motivo-raiz: o
   `cc` default no Linux é gcc, **patologicamente lento** no TU único de 22 MB do `teko.c` (medição de gcc levou
