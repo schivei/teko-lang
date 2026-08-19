@@ -86,14 +86,18 @@ implementer copies verbatim); **fixtures** (only the non-self-build-exercised pa
 - **`[RITUAL]`** = the full gate + a genuine **teaching/expurgo reseed** (a new seed that understands new/less
   surface). ONLY FASE 0 and FASE 2. The 6.5 GiB build guard (`ulimit -v 6815744`) is INVIOLABLE at every gate.
 
+**⚑ OWNER RULING (2026-08-19): the queue is APPROVED. GATE-2 = LINQ (owner: "vamos de LINQ, melhor").
+GATE-1 ships on the conservative default (region-drop-via-escape); promote-to-wrapped stays an additive
+follow-up.** Dispatch is serial, one item at a time, FASE 0 → FASE 1 → FASE 2.
+
 **Two owner-open GATES block specific items (record §8) — flagged inline:**
 - **GATE-1 (class lifetime in a long-lived collection):** a `class` element removed early — region-drop via
   escape-analysis (the collection is a holder that raised the residence LUB) vs promote-to-wrapped (refcount,
   freed on the spot). **Resolution baked in: FASE 0 teaches the conservative region-drop-via-escape holder
   semantics NOW (leak-safe, never UAF); promote-to-wrapped is an additive follow-up that unblocks when GATE-1
   closes.** No item is BLOCKED by GATE-1 — only the class-early-remove *eager-free optimization* is gated.
-- **GATE-2 (query surface: LINQ-typed vs SQL-string):** blocks ONLY the Table query item (Q-Query). Table core
-  and FileTable are NOT blocked.
+- **GATE-2 (query surface) — RESOLVED: LINQ-typed (owner 2026-08-19).** The SQL-string front-end is dropped
+  (may return later as sugar desugaring to the LINQ core). Q-Query is UNBLOCKED and builds the LINQ surface.
 
 ---
 
