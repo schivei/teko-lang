@@ -19,6 +19,10 @@ executar por cima.
   relevante (ex.: `origin/feat/expurgo-arrays`) e eu dreno de volta para `fix/retirement`.
 - Continuar o processo de forma autônoma, mas **fazer pausas para ler** o que o
   dono pode ter escrito no meio do caminho, antes de decisões que importam.
+- **ERROU → PARA E REFAZ CERTO, NÃO INSISTE NO ERRO (lei dura, dono 2026-08-19).** Se um dispatch/base/
+  escopo saiu errado, a resposta é **interromper e reiniciar certo** — NÃO remendar um agente em voo com
+  mensagem de correção pra salvar um começo torto, NÃO contornar. Kill + re-dispatch limpo. Insistir no
+  erro (patch em cima do errado) é o oposto de "sem workarounds".
 - **Sem workarounds** (lei do dono): achar e resolver a **causa raiz**, nunca dar
   voltas para contornar o problema.
 - **NUNCA FAÇO EU, SEMPRE UM AGENTE (lei dura, dono 2026-08-18 — endurece a de 2026-08-17).**
