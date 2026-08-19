@@ -559,3 +559,8 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Base constitucional:** M.0 (a ordem é lei-primeira) + lei "no renumber" (2026-08-19 owner, evitar confusão mid-flight) + EXECUTION-ORDER.md protocol.
 - **Reversibilidade:** D1-DI revert (restore s7-di-removal) + STD-ENC re-impl + STD-FFI regate + SM-V1 re-impl — reversível em processo mas custosa (reseed-cheia). Await ratificação é final (ratificada, não há fork). GATED(D52) não é reversível (é owner gate, não código). Crumbs 0121/0122 são recoveries (reversível é só não-recover).
 - **Timing:** consolidação aplicada nesta sessão (2026-08-19 doc/plan branch `plan-consolidate`); EXECUTION-ORDER.md guia scheduling futuro.
+
+### D54 · Ensino AGORA, uso depois — separar superfície de runtime (owner 2026-08-19) ✅
+- **Ruling do dono (refina "ensinar tudo na 1ª rodada"):** ao deferir, SEPARE ensino de uso. **ENSINO** (superfície: lexer/parser/checker aceitar o construto) — se o trabalho já iniciou e só falta ensinar mais um pouco, **ensina AGORA** (dobra no SM-R1); ensino NÃO se defere. **USO/runtime** (o lowering/consumo pesado — "o peso") pode ficar para mais tarde, MAS sempre no **mesmo plano (0.3.1)**, nunca empurrado pra 0.3.2.
+- **Aplicação imediata:** superfície de `await`/`Intent<T>` (0115 S10-SURF) + a superfície/checker do DI-scoped (parte de 0117) → **SM-R1 agora**. Só o lowering `await` A4/CN1 (opção c, 0116) e o binding de arena scoped (runtime de 0117) → uso deferido-in-plan (pós-§16/F1).
+- **Correção:** o coordenador havia deferido o ENSINO junto com o uso (await/DI) — errado. Ledger EXECUTION-ORDER + crumbs 0115/0116/0117 a refletir o split teach-now/use-later.

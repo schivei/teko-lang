@@ -40,6 +40,16 @@ Cada crumb roda em DUAS passadas, não uma:
 Motivo: pega drift / já-feito / artefato-já-existe ANTES de gastar um implementer caro (foi o que
 faltou no 0001, que recriou probe já existente).
 
+## Ensino AGORA, uso depois (dono 2026-08-19 — refina "ensinar tudo na 1ª rodada")
+Ao decidir deferir algo, SEPARE **ensino** de **uso**:
+- **ENSINO** (a superfície: lexer/parser/checker ACEITAR o construto) — se o trabalho já está iniciado e
+  só falta ensinar mais um pouco, **ensina AGORA** (dobra no SM-R1). **NÃO se defere ensino.** É a lei do
+  "tudo que puder ser ensinado ao compilador, já na 1ª rodada".
+- **USO / runtime** (o lowering/consumo PESADO da superfície ensinada — "o peso") — ESTE sim pode ficar
+  **para mais tarde**, mas **SEMPRE no mesmo plano (0.3.1)** — nunca empurrado pra 0.3.2.
+Ex.: superfície de `await`/`Intent<T>` e DI-scoped → ensina já (SM-R1); o lowering A4/CN1 (opção c) e o
+binding de arena scoped → uso deferido-mas-in-plan. Errado (o que eu fiz): deferir o ENSINO junto com o uso.
+
 ## Ritmo de trabalho
 - **BASE DO COORDENADOR = `fix/retirement` (lei dura, dono 2026-08-18). NUNCA opero na branch `main`.**
   Todo o trabalho parte de `fix/retirement`; agentes recebem branch própria a partir do que for
