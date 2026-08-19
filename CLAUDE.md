@@ -15,7 +15,8 @@ executar por cima.
 
 ## Protocolo de fork (bifurcação) — REGRA DURA, dono 2026-08-19
 Quando um agente, **operando**, encontra um **fork** (decisão de design, owner-gate,
-ambiguidade "qual caminho", tensão de lei), a **reza ANTES de parar**:
+ambiguidade "qual caminho", tensão de lei), antes de parar ele precisa **TER CERTEZA**
+de que aquilo NÃO está já deliberado:
 1. **Checar se já está deliberado** — buscar em `DECISION_LOG.md`, `docs/design/**`,
    `.crumbs/**` (Rulings) e nas docs-guarda (Doc-2 / Doc-1 / umbrella) uma deliberação
    sobre aquele ponto.
@@ -24,7 +25,7 @@ ambiguidade "qual caminho", tensão de lei), a **reza ANTES de parar**:
 3. **Só HALT em fork real** — parar e notificar o dono **apenas** quando NÃO existe
    deliberação (fork genuinamente aberto), enunciando o fork curto e claro.
 Isto mata os **HALTs falsos** (agente parando por algo já decidido — foi o caso de
-RT-L6/cov_dump, parcialmente resolvidos). **Todo dispatch carrega esta reza**; o
+RT-L6/cov_dump, parcialmente resolvidos). **Todo dispatch carrega esta regra**; o
 TEMPLATE de crumb a referencia.
 
 ## Ritmo de trabalho
