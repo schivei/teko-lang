@@ -31,20 +31,21 @@ a `[dry]` build is byte-identical. Its seed folds into SM-R1.
 
 ## Where
 
-- `src/checker/scope.tks:531` — `builtin_fn` `word_ptr` arm (`params = <[i64]>`, `ret = Ptr { inner = null
-  }`), beside `ptr_word` (`:528`).
-- `src/codegen/codegen.tks:2692` — `emit_word_ptr` — emits `((void *)(uintptr_t)(<w>))`, dispatched by bare
-  last segment `word_ptr` (`codegen.tks:2977`); a special emitter (needs the cast), mirroring `emit_ptr_word`
-  (`codegen.tks:4575`).
-- `src/codegen/codegen.tks:2698,2704` — `emit_load_u64` / `emit_store_u64` — the C-leg load/store emitters
-  (`((uint64_t)*(volatile uint64_t *)(uintptr_t)(<addr>))` / `(*(volatile uint64_t *)(uintptr_t)(<addr>) =
-  (uint64_t)(<v>))`), dispatched at `codegen.tks:2978,2979`.
-- `src/lir/lower.tks` — `is_load_u64_call`/`is_store_u64_call` → `LLoad`/`LStore` (native leg, P1) —
-  UNCHANGED; the native leg of `word_ptr` HONEST-STOPS in `lower_call`'s terminal `_ =>`, like `ptr_word`.
-- `src/runtime/arena.tks:688,693,705,709,722,726,746` — the arena's `word_ptr(… to i64)` call-sites (the
-  region-handle bridge the intrinsic exists for).
+- `src/checker/scope.tks` — NO CURRENT LANDING for `word_ptr` arm (to be added) beside `ptr_word`.
+- `src/codegen/codegen.tks` — NO CURRENT LANDING for `emit_word_ptr` (to be added as a special emitter).
+- **EXISTING (already landed, native leg only):**
+  - `src/checker/scope.tks:664` — `load_u64_signature` registration
+  - `src/checker/scope.tks:675` — `store_u64_signature` registration
+  - `src/checker/scope.tks:1131-1132` — `load_u64` + `store_u64` intrinsics registered
+  - `src/lir/lower.tks:3162-3163` — `is_load_u64_call`/`is_store_u64_call` (native leg, P1)
+  - `src/lir/lower.tks:4387-4409` — `lower_load_u64_call` (native lowering)
+  - **MISSING (C-leg gap to be filled by this crumb):** C-leg `emit_load_u64`/`emit_store_u64` emitters
+    (`volatile` casts for arena-backed load/store); these map to the already-registered native intrinsics.
+- `src/runtime/arena.tks:688,693,705,709,722,726,746` — the arena's `word_ptr(… to i64)` call-sites and
+  word-load/store sites (the intrinsics' primary consumers once this crumb lands).
 
-NEW: no new module; two intrinsics + a load/store emitter pair in the existing checker + codegen tables.
+NEW: no new module; `word_ptr` intrinsic + `load_u64`/`store_u64` C-leg emitters in the existing checker +
+codegen tables. The native signatures and lowering for `load_u64`/`store_u64` already exist.
 
 ## How
 
@@ -67,12 +68,14 @@ NEW: no new module; two intrinsics + a load/store emitter pair in the existing c
 fn word_ptr(w: i64): ptr
 ```
 
-2. **Fix the C-leg load/store gap** (`emit_load_u64`/`emit_store_u64`, `codegen.tks:2698,2704`). The arena
-   core reads back words a syscall (mmap) or a sibling store just wrote, over a raw address the optimiser
-   cannot alias-analyze — so the emitters use `volatile` (the same reason the syscall helpers clobber
-   `"memory"`). `store_u64` emits as a void-expr statement. Register as special emitters in the `teko::mem`
-   block, dispatched by bare last segment `load_u64`/`store_u64` (`codegen.tks:2978,2979`). This is the HARD
-   PREREQUISITE — the `arena_teko` reference impl ran native-only, which is why the C-leg gap was invisible.
+2. **Add C-leg emitters for `load_u64`/`store_u64`** (the gap that blocks C-compilation of arena core).
+   The `load_u64`/`store_u64` intrinsics ARE registered (scope.tks:664,675,1131-1132) and lowered natively
+   (lower.tks:3162-3163, 4387-4409), BUT the C-leg has no emitters yet. The arena core reads back words a
+   syscall (mmap) or a sibling store just wrote, over a raw address the optimiser cannot alias-analyze — so
+   the emitters use `volatile` (the same reason the syscall helpers clobber `"memory"`). `store_u64` emits as
+   a void-expr statement. Add `emit_load_u64`/`emit_store_u64` as special emitters in the `teko::mem` block,
+   dispatched by bare last segment. This is the HARD PREREQUISITE — the `arena_teko` reference impl ran
+   native-only, which is why the C-leg gap was invisible.
 3. **Native leg = honest-stop.** `word_ptr`'s native lowering falls into `lower_call`'s terminal `_ =>` "not
    yet lowered (N2)", exactly as `ptr_word`/`ref_word`; the load/store native lowerings (`LLoad`/`LStore`,
    P1) already exist. The native leg is Doc-2 terminal (NAT-*, M4).
