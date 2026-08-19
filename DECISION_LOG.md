@@ -521,3 +521,41 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Ordem:** campanha de memória (RM-C / Eixo A/C) ANTES; native é o fim.
 - **Corolário:** a onda de superfície (M1 G/S) e a reseed **SM-R1 seguem pela rota C** — buildabilidade do native NÃO é pré-requisito da reseed. Isto **SUPERSEDE** a ressalva do pin SM-P1 ("não reseedar enquanto gen2 native não builda"): o native está deferido, não na fila da reseed.
 - **Correção de processo:** o coordenador puxou o conserto native pra frente (2 stops: `lower_const.tks:350` const-agregado + `syscall6`/`ar_mmap`) — start errado, morto na hora (`errou → para e refaz`). Os 2 stops ficam documentados como trabalho de M4, a executar SÓ após o gatilho tríplice.
+
+### D53 · Owner decisions on gap-crumb scope + exec-control (2026-08-19) ✅
+- **Contexto:** após os scouts verificarem os 8 crumbs gap-appended (0113–0120) e 2 branches de work undrained (0121–0122), o dono refinamentos sobre escopo, gate, ativa/deferida postura, e uma decisão sobre o modelo do `await`.
+- **1. DI Part B — ATIVA, não deferida (s7-di-removal archived):**
+  - 0117 D1-DI: DI Part B **é para ser completada AGORA** (não deferida a Doc-2 futuro). A branch `s7-di-removal` (que propunha REMOVER DI) é **ARCHIVED pela decisão do dono** — DI fica, Part B executa.
+  - **Implicação:** 0117 passa de "uncertain" para "active, M5".
+- **2. NAT-N1 / NAT-N2 — GATED (D52), sem trabalho native até stable memory:**
+  - 0113 NAT-N1 + 0114 NAT-N2 marcados **GATED(D52)** — não há implementação até (1) dry build ≤1,5GB + (2) fixpoint gen2==gen3 + (3) testes verdes.
+  - **Implicação:** crumbs 0113/0114 M4 entram no gate de D52 (memory stabilization); são últimas e bloqueadas.
+- **3. STD-ENC — VERIFY-ONLY, não implementation:**
+  - 0118 STD-ENC: encoding é **JÁ COMPLETO** em `src/encoding/` (15 módulos: asn1, base64, bson, cbor, csv, fixed, ini, json, mime, msgpack, protobuf, toml, url, xml, yaml).
+  - **Reframe:** de "implementar tail" → "verificar e selar catálogo": confirmar presença dos 15, validar visibilidade `exp`, passar fixpoints.
+  - **Implicação:** 0118 M2 passa de `needs-impl` para `verify-only`.
+- **4. STD-FFI — REAL WORK, não deferida:**
+  - 0119 STD-FFI: keep as real work. Only `crypto` exists; `rand`/`openssl`/`net`/`db`/`odbc`/`rpc` faltando.
+  - **Implicação:** 0119 M2 é `needs-impl`, não gate-deferred.
+- **5. SM-V1 — ACTIVATION, não implementation:**
+  - 0120 SM-V1: visibility mechanism é **JÁ LANDED** em `src/checker/check_modules.tks:83-107` (inert). Reframe de "implementar enforcement" → "**ATIVAR o gate** + triagem stdlib".
+  - **Implicação:** 0120 M2 passa de `needs-impl` para `verify-only` (ativar + confirmar, não codificar).
+- **6. S10-SURF / S10-RT — VERIFY-AND-WIRE, verify-only:**
+  - 0115 S10-SURF + 0116 S10-RT: ~70-85% já landed (spawn/chan/journal/threads/ref-guard/sync). Reframe para `verify-and-wire` — confirmar o que está, diagnosticar os genuinamente-novos (`await` lowering A4 é o único honesto §10 open; fork D2 já deliberado).
+  - **Await suspension-model deliberação já ON-FILE:** `docs/design/plano-s10-await-opcao-c-crumbs.md` ratifica **OPTION (c) — stackful coroutines over OS primitives via FFI** (supersedes D2 "thread-per-await" recommendation). Cite e aplique; não há fork aberto.
+  - **Implicação:** 0115/0116 M2 verificação apenas; await lowering entra em A4 (crumb futuro após D1 landing, ratificado); nada abre fork aqui.
+- **7. ERR-FACTORY (0121) + S16-SYSCALL-PORTABLE (0122) — IN-SCOPE, recovery branches:**
+  - 0121 ERR-FACTORY: `error::new(msg)` / `error::join(a,b)` builtins. Undrained em `origin/cargo/0.3.1.0-error-factory`. Milestone M2, recovery.
+  - 0122 S16-SYSCALL-PORTABLE: gate raw-syscall C helpers a `__linux__`, portable `-ENOSYS` stub em `#else`. C-route host portability, **NÃO native backend** (native deferred). Undrained em `origin/feat/s16-syscall-portable`. Milestone M2, recovery.
+  - **Implicação:** 0121/0122 M2 appended, `on-branch` recovery status.
+- **8. DEVTOOLS DEFERRED — doc + lint post-native-fixpoint-green:**
+  - `teko doc` (`origin/cargo/0.3.1.0-devtools-doc`) — DEFERRED.
+  - `teko lint` (`origin/cargo/0.3.1.0-devtools-lint`) — DEFERRED.
+  - Até native bater fixpoint gen2==gen3 + testes verdes, doc/lint não executam. Registradas em "DEFERRED / post-native" list (não crumbs ativas).
+- **9. NO RENUMBER, EXECUTION-ORDER.md control:**
+  - 0113–0122 **NÃO renumeradas** (sequência frozen, 0001–0112 + gap 0113–0120 + new 0121–0122).
+  - **Novo artefato de control:** `.crumbs/EXECUTION-ORDER.md` — ledger único listando TODOS os 122 crumbs em TRUE execution order (topologia de deps, milestones M0–M5). Fonte de verdade pra ordem + status.
+  - Colunas: `exec-# · filename-seq · crumb-id · milestone · deps · gate · STATUS`.
+- **Base constitucional:** M.0 (a ordem é lei-primeira) + lei "no renumber" (2026-08-19 owner, evitar confusão mid-flight) + EXECUTION-ORDER.md protocol.
+- **Reversibilidade:** D1-DI revert (restore s7-di-removal) + STD-ENC re-impl + STD-FFI regate + SM-V1 re-impl — reversível em processo mas custosa (reseed-cheia). Await ratificação é final (ratificada, não há fork). GATED(D52) não é reversível (é owner gate, não código). Crumbs 0121/0122 são recoveries (reversível é só não-recover).
+- **Timing:** consolidação aplicada nesta sessão (2026-08-19 doc/plan branch `plan-consolidate`); EXECUTION-ORDER.md guia scheduling futuro.
