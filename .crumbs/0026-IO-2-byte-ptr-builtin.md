@@ -31,19 +31,19 @@ single M1 teaching reseed (SM-R1, `0030`) — it mints no reseed of its own (`(f
 
 ## Where
 
-- `src/checker/scope.tks:265` — `byte_ptr_signature` (`params = <[]byte, u64>`, `ret = Ptr { inner = null }`)
-  — the intrinsic type, beside `buf_ptr_signature`; dispatched by name in `builtin_fn` (`scope.tks:614`,
-  the `if name == "byte_ptr"` arm).
-- `src/lir/lower.tks:1376` — `lower_addr_of_place` — the address-of-index machinery `byte_ptr` REUSES; add
-  the `byte_ptr` call arm that lowers `byte_ptr(xs, i)` as `&xs[i]` through it (the native leg; the C leg is
+- `src/checker/scope.tks` — NO CURRENT LANDING for `byte_ptr_signature` or a `builtin_fn` arm (to be added)
+  — the intrinsic type, beside `buf_ptr_signature`; will be dispatched by name in `builtin_fn` once the
+  signature is registered.
+- `src/lir/lower.tks:1376` — `lower_addr_of_place` — the address-of-index machinery `byte_ptr` REUSES; the
+  `byte_ptr` call arm will lower `byte_ptr(xs, i)` as `&xs[i]` through it (the native leg; the C leg is
   the emitter below).
-- `src/codegen/codegen.tks:2589` — `emit_byte_ptr` (the C-leg special emitter, `&((uint8_t*)…)[i]`),
-  dispatched at `codegen.tks:2972` by bare last segment `byte_ptr`.
-- The result is an opaque `ptr` that widens to any `ptr<T>` at the use-site via the existing
+- `src/codegen/codegen.tks` — NO CURRENT LANDING for `emit_byte_ptr` (to be added as a C-leg special emitter,
+  `&((uint8_t*)…)[i]`), dispatched by bare last segment `byte_ptr`.
+- The result will be an opaque `ptr` that widens to any `ptr<T>` at the use-site via the existing
   `ptr_widens_to_opaque` path (exactly as `buf_ptr`'s result does).
 
-NEW: no new module; one builtin registered in the existing checker + emitted on the C leg (native leg reuses
-`lower_addr_of_place`).
+NEW: no new module; one builtin to be registered in the existing checker + emitted on the C leg (native leg
+reuses `lower_addr_of_place`).
 
 ## How
 
