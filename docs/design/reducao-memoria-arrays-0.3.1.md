@@ -326,6 +326,12 @@ relocations canônicas — auditar `objfile_*`/`objfile_ar*`). Quando as 4 perna
 fecham verde + o objeto reproduz, **remover a rota C** (`teko.c` e o `cc`); as 2 pernas em C
 viram native (triagem do CI). Reseed do bootstrap passa a ser o objeto/binário native.
 
+### C17 — Emitir + empacotar o `.tkh` do próprio compilador
+A build do executável final (rota C OU native) TAMBÉM emite o `.tkh` do compilador (a
+superfície `exp` agregada, via `emit/tkh.tks`) e o **pacote entrega binário + `.tkh`**.
+Backend-independente. Só `exp` embarca — a FFI interna (`exp`+`pub`) é transitória e NÃO vai
+pro `.tkh` (R8). Sem impacto de memória; habilita features da próxima versão. Fixpoint.
+
 ### C9 — (TERMINAL) Remover raízes C + transcrever o slot de controle
 Passo final, depois de TODAS as conversões (Eixo A e Eixo C). Remover o código morto de 5.4
 (o self-compile enumera qualquer resíduo). Transcrever os 3
@@ -569,6 +575,16 @@ prevê).
 - **Eixo C (pipeline por unidade) é o que HABILITA o per-unit-object → `ld`.** Seu desenho já
   mira o objeto native como saída de unidade; o `teko.c` é o degenerado transitório. O
   terminal native é um sub-eixo de C (crumbs C15–C16), depois de C12 verde na rota C.
+
+### A build do compilador entrega binário + `.tkh`
+
+A emissão do executável final (rota C OU native) deve TAMBÉM emitir o `.tkh` do próprio
+compilador — a superfície `exp` agregada (`emit/tkh.tks`) — e o **pacote entrega binário +
+`.tkh`**. Backend-independente: é interface de tipos, idêntica nas duas rotas. Serve às
+features da próxima versão: o dev usa o `.tkh` do compilador para **intellisense na IDE** e
+para **linkar/estender o compilador**. **Só `exp` embarca**; a FFI interna (`exp`+`pub`) é
+transitória e NÃO vai pro `.tkh` — coerente com R8 (as duas tabelas são ortogonais). Sem
+impacto de memória; é entrega de artefato. Crumb C17.
 
 ---
 
