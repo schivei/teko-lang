@@ -25,7 +25,7 @@ If a canonicalization would change emitted output, a test result, or the fixpoin
 
 ## What you canonicalize
 
-1. **Comments → doc-comments only.** Every comment on a fn/type/member is a `/** … */` on the declaration. Kill inline (`//` mid-body / trailing). If a line "needed" a comment, that is the signal to **extract a well-named function** instead.
+1. **Comments → doc-comments only (W15, owner 2026-08-19).** A `/** */` doc-comment is allowed ONLY on a declaration marked `exp` (export); every other accessor (`pub` method, private/unmarked) carries NO doc-comment — any doc-comment on a non-`exp` site is deleted (demoted by the canonicalizer). Block comments `/* */` and inline `//` (mid-body / trailing) are also deleted; if a line "needed" a comment, that is the signal to **extract a well-named function** instead. A `/** */` must never be larger than the code it documents (reviewer judgment, no formula). See `estado-doc2-campanha-limpeza-0.3.1.md:24` (export-gate) + "owner 2026-08-19 (length-bound)".
 2. **Flatten the Hadouken.** No `if{if{if}}` / nested-`match` pyramids. Early returns, guard clauses, `continue`. Where flattening alone won't do, **extract a function/method** to cut cyclomatic complexity.
 3. **Best practices, applied for real.** SOLID (single-responsibility, small focused units), KISS (delete cleverness), YAGNI (drop speculative generality), 12-Factor where it touches config/env seams. Name things well.
 4. **Split large files.** A file grown unbounded is split into cohesive modules (same namespace) along responsibility lines — desirable, not merely allowed. Keep the public surface identical.
