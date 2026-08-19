@@ -9,15 +9,25 @@ status: DESIGN — no product line. R9 (arena remount, origin/fix/retirement @ f
         accumulates on EVERY grow. Owner (verbatim): *"esse design do arquiteto sem levar em conta que
         temos ponteiros faz a memória vazar."* This revision SUPERSEDES it with the POINTER-INDEX model
         (owner's fix) and adds a THIRD, array-free (node-linked) alternative + a side-by-side comparison
-        with a per-collection recommendation. F1 is NOT up for relaxation. This doc IS the deliverable —
-        no product `.tks` edited, no build, no reseed, no `teko test`.
-source: arena-escopada-stream-expurgo-0.3.1.md (§5, §5.3, R9 — the removed primitives + the four
-        conversion natures; §2.3/§2.4 dedicated per-object region F2, `:169-213`),
-        arena-especificacao-unica-0.3.1.md (§7 concurrency, is_unique_at, §7.8 per-entry free-list
-        `:542-548`; §2.3/§2.4 dedicated per-object region; §6 escape rule "dúvida → escapa"),
-        plano-collections-genericas-e-concorrentes-0.3.1.md (the growable-collection census + the
-        concurrent model B), CLAUDE.md (NO PUSHES, ZERO CRESCIMENTO + purge-imediato, the fixed-array
-        ZERO-FILL/`count` form).
+        with a per-collection recommendation. **CONSOLIDAÇÃO FINAL (owner 2026-08-19, SEALED law
+        `mudancas-superficie-0.3.1.md:1742` item C + `:1757`):** the life model is (a) VALUE =
+        reassign/remove/discard is ONLY-MARKING (a "bucket" in the arena), freed at the region bulk-drop —
+        NO mid-region reclaim, arena core (crumb D) intact; the sole exception is `pop`, whose RETURN
+        travels to the caller by normal DPS while the slot becomes a bucket; (b) OBJECT = region-per-object
+        (F2) + reference (C#-like, pointer copy) + WRAP-REFCOUNT (inc on retain, dec on release,
+        region_drop at zero), with the static LUB as the conservative default; deep-copy default governs
+        VALUE types only, and an explicit opt-in `deep_copy<T>(o): T | error` (hard depth cap u8::MAX=255 →
+        `error`) is a stdlib surface. This SUPERSEDES the earlier reparent/LUB pass. **FINDING 2:** the
+        array-free node-linked alt-3 is FOUNDATIONAL — the arena's own dynamic chunk-list IS a node-linked
+        collection (raw-alloc nodes), so alt-3 is the structural substrate, not a mere option. F1 is NOT up
+        for relaxation. This doc IS the deliverable — no product `.tks`, no build, no reseed, no `teko test`.
+source: mudancas-superficie-0.3.1.md (SEALED life model: `:1742` item C = reassign-is-marking/bucket,
+        no mid-region reclaim; `:1757` = region-per-object + deep-copy default + bulk-free + wrap-refcount),
+        arena-escopada-stream-expurgo-0.3.1.md (§5, §5.3, R9 — removed primitives + four conversion natures;
+        §2.3/§2.4 dedicated per-object region F2, `:169-213`), arena-especificacao-unica-0.3.1.md (§7
+        concurrency, is_unique_at, §7.8 per-entry free-list `:542-548`), plano-collections-genericas-e-
+        concorrentes-0.3.1.md (census + concurrent model B), CLAUDE.md (NO PUSHES, ZERO CRESCIMENTO +
+        purge-imediato, the fixed-array ZERO-FILL/`count` form).
 frozen: bootstrap/teko.c + the C twins are OUTPUT/FROZEN; the slice-grow machine is REMOVED, not patched.
         New product work is `.tks` only. Drains DIRECT into fix/retirement (no PR).
 ---
@@ -29,7 +39,11 @@ linha de produto. Responde à ordem do dono: olhar CADA coleção e PROPOR a rem
 **Nenhuma proposta relaxa F1** (arrays continuam de tamanho fixo). Esta é a REVISÃO que o dono mandou
 fazer: o desenho de cópia-de-valor da primeira versão VAZA (§0.5), e é substituído pelo **modelo
 ponteiro-índice** (§2), acompanhado de uma **terceira alternativa sem arrays** (§9, coleções ligadas por
-nós) e uma **comparação lado a lado com recomendação por coleção** (§10).
+nós) e uma **comparação lado a lado com recomendação por coleção** (§10). **O modelo de VIDA é a lei
+SELADA `mudancas-superficie-0.3.1.md:1742` (item C) + `:1757`:** VALOR = reatribuição/remove é só-marcação
+("bucket na arena"), sem reclaim mid-região (crumb-D intacto); OBJETO = region-per-object + referência
+C#-like + wrap-refcount; deep-copy explícito `deep_copy<T>(o): T | error` (cap 255 → `error`). E a
+alt-3 (§9) é **FUNDACIONAL**: o chunk-list dinâmico da própria arena É uma coleção node-linked.
 
 ---
 
@@ -148,31 +162,40 @@ O backing deixa de guardar VALORES inline e passa a guardar **PONTEIROS** — um
 uniforme (uma palavra por slot). Os valores vivem na **arena dedicada do objeto** (F2, §2.3), escritos UMA
 vez e **nunca recopiados**; o índice aponta para eles. Enquanto a coleção viver, o dado vive.
 
-### 2.1 Os DOIS regimes de memória (o ponto que fecha o vazamento — declarar explícito)
+### 2.1 Os DOIS regimes de memória (o ponto que fecha o vazamento — sob o modelo SELADO)
 
-O modelo tem DOIS regimes distintos, e é a separação deles que elimina o leak:
+**Lei selada — `mudancas-superficie-0.3.1.md:1742` (item C) + `:1757`.** A regra de vida NÃO é
+reclaim-mid-região: (C) *reatribuição/remoção/descarte = SÓ MARCAÇÃO (logicamente morto); "seria como ter
+um bucket na arena"; o consumo persiste enquanto a arena viver e é liberado no BULK-FREE do drop da região;
+a bump-arena NÃO ganha reclaim mid-região → o core da arena (crumb D) fica INTACTO.* E (`:1757`) *a arena é
+region-per-object + deep-copy default + bulk-free + wrap-refcount escape-hatch.* **Isto SUPERSEDE o
+reparent-por-elemento / LUB-only do passe anterior.** A distinção operacional que reconcilia tudo: **drop de
+uma REGIÃO INTEIRA é permitido a qualquer hora (é a primitiva da arena); free de UMA ENTRADA no meio de um
+bump NÃO é** (vira MARCAÇÃO/bucket) — exceto o free-list §7.8 sancionado na F2 imortal (§4).
 
-- **(a) VALORES = sub-regiões reparentáveis aninhadas na arena dedicada da coleção (§2.3), escritas UMA
-  vez.** Um valor entra na coleção → é colocado por `arena_place` (§2.6) na SUA PRÓPRIA sub-região
-  reparentável, aninhada na arena da coleção, e ganha um ponteiro estável; NUNCA é movido nem recopiado por
-  um grow. A arena da coleção segura APENAS os elementos VIVOS: um elemento removido **MIGRA para fora** por
-  reparent (§2.4a), então não há acúmulo nem high-water; os elementos que nunca saem caem no bulk-drop da
-  morte da coleção. É arena-nativo (regiões + reparent/drop), correto, sem vazamento — porque nada aloca um
-  "novo array de valores" a cada grow, e removidos não ficam presos.
-- **(b) O ÍNDICE = alocado/liberado INDIVIDUALMENTE por grow.** O índice É um array fixo de ponteiros;
-  crescer aloca um novo índice e **libera o velho na hora**. Para o velho ser liberável eager, o índice
-  **NÃO pode morar na bump-arena do objeto** (que só faz bulk-drop) — tem de ser um **alloc/free direto,
-  ou o seu próprio slot droppable / sub-região** (§2.6). **Se o índice morar em bump, é o ÍNDICE que
-  vaza** (o mesmo erro da v1, transposto para o índice). Esta é a exigência dura do modelo.
+O modelo tem DOIS regimes, e a separação deles fecha o leak:
 
-A v1 tinha só o regime (a) mal-usado: alocava um array de VALORES novo a cada grow e o velho ficava no
-bump sem free → leak. A revisão põe os VALORES em (a) escritos-uma-vez (nunca realoca array de valor) e o
-ÍNDICE em (b) individualmente liberável → **zero grow-leak por construção**.
+- **(a) VALORES = bump na arena dedicada da coleção (§2.3), escritos UMA vez, MARCADOS mortos ao sair.** Um
+  valor entra por `place` (§2.7) e é escrito UMA vez no bump da coleção; NUNCA é movido nem recopiado por um
+  grow. Reatribuição/remoção/descarte do slot = **SÓ MARCAÇÃO** (bucket) — o físico só sai no **bulk-free do
+  drop da região da coleção**. NÃO há reclaim mid-região do bump (crumb-D intacto). O leak da v1 (que
+  recopiava o array de valores a cada grow) SOME porque o valor é escrito uma vez e nunca recopiado; o que
+  cresce é só o índice (b). Os slots vacados acumulam como bucket até a morte da coleção — é o modelo SELADO
+  aceito (a redução de consumo vem da região ser curta + pré-dimensionamento Doc-1, NÃO de reclaim imediato).
+- **(b) O ÍNDICE = uma REGIÃO PRÓPRIA droppable, trocada por grow.** O índice é um array fixo de ponteiros;
+  crescer aloca um novo índice e **dropa a REGIÃO do índice velho na hora** (region_drop O(1)). Isto NÃO
+  viola "bump sem reclaim mid-região": o índice **não mora no bump da coleção** — vive na SUA PRÓPRIA
+  sub-região droppable (ou alloc/free direto do raw-alloc, §2.7). Dropar a região inteira do índice velho é
+  a primitiva normal da arena, não um free-de-entrada. **Se o índice morasse no bump, ele viraria bucket e
+  VAZARIA a cada grow** (o erro da v1 transposto) — por isso é região própria.
 
-**Elemento OBJETO NÃO usa o regime (a):** um objeto NÃO reside na arena da coleção — vive na sua própria
-arena por-objeto (F2), e só o seu PONTEIRO ocupa um slot do índice (§2.2b). Logo o regime (a) só governa
-elementos VALOR (escalar-inline e value-struct grande); objetos são referência pura, geridos por
-residência/LUB, fora da arena da coleção.
+A v1 recopiava VALORES a cada grow e deixava o array velho preso no bump → leak. A revisão escreve o VALOR
+uma vez (a, bump + bucket) e cresce só o ÍNDICE de ponteiros (b, região própria droppada eager) →
+**zero grow-leak** (nenhum valor recopiado; nenhum índice velho retido).
+
+**Elemento OBJETO não usa o regime (a):** um objeto NÃO reside na arena da coleção — vive na sua própria
+região por-objeto (F2); só o seu PONTEIRO ocupa um slot do índice (§2.2b). A vida do objeto é gerida por
+**wrap-refcount** (§2.5), não pelo bucket do bump.
 
 ### 2.2 Política de armazenamento do elemento (default aprovado pelo dono)
 
@@ -181,32 +204,26 @@ ARMAZENAMENTO de `T`, decidida na **monomorfização** (o compilador conhece `si
 instanciação):
 
 - **(a) escalar / valor que CABE numa palavra** (número, byte, char, bool, ponteiro) → **INLINE no slot do
-  índice**. Não há armazenamento separado nem indireção; o índice É o armazenamento. Remover = baixar o
-  watermark (pop é só uma cópia-pra-fora; nada a reclamar). Grow copia as palavras (que são os próprios
-  valores) e libera o índice velho. **Sem vazamento, sem indireção, sem sub-região** — e note que aqui não
-  existe "array de valores à parte" para ficar preso, logo o leak da v1 nem se forma neste caso. É a
-  degeneração eficiente do modelo.
-- **(b) elemento OBJETO → REFERÊNCIA C#-like (ruling do dono; NÃO é possuído pela coleção, NÃO escapa
-  para a arena da coleção).** O objeto vive na **SUA PRÓPRIA arena dedicada por-objeto (F2, §2.3)** — a mesma
-  onde nasceu. A coleção guarda SÓ um **PONTEIRO (referência)** para essa região no slot do índice — como em
-  C#. Dono, verbatim: *"como os objetos têm arena própria o que se copia é o ponteiro desta região (um novo
-  ponteiro para a mesma região)… a cópia é do ponteiro e não dos valores; se quer deep copy, aí a estratégia
-  é outra."* Portanto: **`push` = copia o PONTEIRO** (novo ponteiro para a mesma região, zero cópia de
-  valor); grow copia os ponteiros, libera o índice velho — o objeto nunca se move e nunca é colocado na arena
-  da coleção. **`get`/`pop` = copiam o PONTEIRO** (nova referência à mesma região). **`remove` = SOLTA o
-  ponteiro** (baixa o watermark / desloca ponteiros). **NUNCA há transferência-de-região do objeto, NUNCA a
-  arena do executor recebe o storage do objeto.** A **vida do objeto = RESIDÊNCIA = o LUB de TODAS as
-  referências vivas** (a coleção, o binding original, qualquer resultado de `get`) — o `pt_join`/escape-check
-  já existente: a arena do objeto só cai quando a ÚLTIMA referência sai de escopo → **zero UAF**, e múltiplas
-  referências ao mesmo objeto é comportamento CORRETO (mutar via uma reflete nas outras — é o mesmo objeto),
-  não bug. **Deep copy é operação EXPLÍCITA e separada (um clone), jamais o default de `get`/`pop`.**
+  índice**. Sem armazenamento separado nem indireção; o índice É o armazenamento. Reatribuir/remover = **SÓ
+  MARCAÇÃO** (baixa o watermark; o slot vira bucket, freed no drop da região). `pop` devolve uma cópia ao
+  chamador (por DPS normal, §2.4a). Grow copia as palavras (que são os próprios valores) e dropa a região do
+  índice velho. **Sem array-de-valores à parte para ficar preso → o leak da v1 nem se forma.**
+- **(b) elemento OBJETO → REFERÊNCIA C#-like + WRAP-REFCOUNT (lei selada `:1757`; NÃO é possuído pela
+  coleção, NÃO escapa para a arena dela).** O objeto vive na **SUA PRÓPRIA região por-objeto (F2, §2.3)** —
+  onde nasceu. A coleção guarda SÓ um **PONTEIRO (referência)** no slot do índice, como em C#. Dono, verbatim:
+  *"como os objetos têm arena própria o que se copia é o ponteiro desta região (um novo ponteiro para a mesma
+  região)… a cópia é do ponteiro e não dos valores; se quer deep copy, aí a estratégia é outra."* Portanto:
+  **`push`/`get`/`pop` = copiam o PONTEIRO** (nova referência à mesma região; **incrementa o refcount** do
+  header do objeto — §2.5); **`remove`/saída-de-escopo = SOLTA o ponteiro** (**decrementa o refcount**;
+  **no ZERO → `region_drop` da região do objeto**, F2, O(1)). O objeto nunca se move nem entra na arena da
+  coleção. Múltiplas referências ao mesmo objeto = comportamento CORRETO (mutar via uma reflete nas outras).
+  **Deep copy é operação EXPLÍCITA e separada (clone), jamais o default de `get`/`pop`.**
 - **(c) value-struct GRANDE** (não cabe numa palavra, guardado por VALOR — não é objeto) → o slot guarda um
-  ponteiro para a cópia do value-struct colocada UMA vez na **sua própria sub-região reparentável** na arena
-  da coleção por `arena_place`. Grow copia os ponteiros, libera o índice velho; o value-struct não se move.
-  Por ser VALOR (não referência): **remover = REPARENT** dessa sub-região para o executor (ou region_drop se
-  descartado); **set-overwrite = region_drop** da antiga. É o padrão arena-nativo de VALOR — NÃO há free-list
-  por-entrada nem high-water no remove/pop comum. (O §7.8 fica reservado ao caso imortal-F2 concorrente, §4 —
-  nunca ao remove/pop ordinário.)
+  ponteiro para a cópia do value-struct escrita UMA vez no **bump da coleção** por `place`. Grow copia os
+  ponteiros, dropa a região do índice velho; o value-struct não se move. Por ser VALOR: reatribuir/remover =
+  **SÓ MARCAÇÃO** (bucket, freed no drop da região da coleção); `pop` devolve por DPS ao chamador e MARCA o
+  slot. **NÃO há reparent-por-entrada nem region_drop mid-bump** (crumb-D intacto); o §7.8 fica reservado ao
+  caso imortal-F2 concorrente (§4).
 
 ### 2.3 O GROW — novo índice, copia PONTEIROS, zero-fill do velho, FREE do velho (os valores não se movem)
 
@@ -264,66 +281,102 @@ hora**, então nem esse pico persiste. **Zero valor copiado; zero array-morto re
 "Cópia" tem DOIS sentidos, decididos pela classe de `T` (monomorfização): **VALOR** = cópia do valor;
 **OBJETO** = cópia do PONTEIRO (referência C#-like, §2.2b) — nunca deep copy no default.
 
-- **`get(i)`**: **VALOR** → deref de `index[i]` e copia o valor para fora (`copy_out<T>`); **OBJETO** →
-  copia o PONTEIRO `index[i]` (nova referência à mesma região). Em ambos, nada do storage interno da
-  coleção escapa como alias mutável de VALOR.
-- **`set(i, x)`**: **VALOR** → escalar-inline `index[i] = x`; value-struct → `region_drop` do antigo +
-  `arena_place` do novo. **OBJETO** → **sobrescreve o slot com o novo PONTEIRO** (solta a referência antiga;
-  a região do objeto antigo cai quando a sua última referência sair — residência/LUB). Sem acúmulo.
-- **`push(x)`**: **VALOR** → `arena_place` de `x` (uma vez, na sua sub-região na arena da coleção). **OBJETO**
-  → grava o PONTEIRO de `x` em `index[count]` (copia o ponteiro, zero cópia de valor; o objeto fica na sua
-  arena). `count++`; cresce o índice antes se cheio. O índice nunca copia valor de novo.
+- **`get(i)`**: **VALOR** → deref de `index[i]` e copia o valor para fora (`read<T>`); **OBJETO** → copia o
+  PONTEIRO `index[i]` (nova referência; **inc refcount**). Nada do storage interno escapa como alias de VALOR.
+- **`set(i, x)`**: **VALOR** → escalar-inline `index[i] = x`; value-struct → `place` do novo no bump + o slot
+  antigo vira bucket (MARCADO morto, freed no drop da região). **OBJETO** → sobrescreve o slot com o novo
+  PONTEIRO (**inc** do novo, **dec** do antigo; se o antigo chegar a zero → `region_drop` da sua região).
+- **`push(x)`**: **VALOR** → `place` de `x` (uma vez, no bump da coleção). **OBJETO** → grava o PONTEIRO de
+  `x` em `index[count]` (**inc refcount**; zero cópia de valor). `count++`; cresce o índice antes se cheio.
 
-**A REGRA DE DESLOCAMENTO — PARTIDA LIMPA por classe (ruling do dono).** pop/remove/set têm DUAS semânticas
-completamente distintas, escolhidas pela classe de `T`:
+**A REGRA DE DESLOCAMENTO — PARTIDA LIMPA por classe (lei selada `:1742`/`:1757`; SUPERSEDE o reparent do
+passe anterior).** pop/remove/set têm DUAS semânticas, escolhidas pela classe de `T`:
 
-- **(a) Elemento VALOR (mora NA arena da coleção) = TRANSFERÊNCIA DE REGIÃO** (o move-on-return / DPS,
-  §5 canonical de `arena-especificacao-unica-0.3.1.md`):
-  - **`x[0] = 5` num array de ESCALARES** → OVERWRITE LIMPO de memória, sem transferência, nada a reclamar.
-  - **`pop()`/`remove(i)`/`replace` de VALUE-STRUCT** → a sub-região do elemento deslocado é TRANSFERIDA
-    (reparent) para a arena de QUEM EXECUTOU; o executor passa a cuidar do tempo de vida (morre na saída do
-    escopo do executor). Resultado NÃO ligado (ex. `remove(0)` sem receber) → morre de IMEDIATO, um
-    `region_drop` deliberado. É a lei do purge-na-reatribuição: o purgado vai para a arena do executor.
-- **(b) Elemento OBJETO (mora na SUA PRÓPRIA arena) = CÓPIA/SOLTURA DE PONTEIRO — NADA de transferência de
-  região, NADA de arena do executor recebendo o storage do objeto:**
-  - **`get`/`pop`** → copiam o PONTEIRO (nova referência à mesma região do objeto).
-  - **`remove`** → SOLTA o ponteiro (baixa o watermark / desloca ponteiros); a região do objeto NÃO se move.
-  - **Vida por RESIDÊNCIA/LUB** (`pt_join`/escape-check): a arena do objeto cai só quando a ÚLTIMA
-    referência viva (coleção, binding original, resultado de `get`) sair de escopo → zero UAF. Múltiplas
-    referências ao mesmo objeto = comportamento correto.
+- **(a) Elemento VALOR (mora no BUMP da coleção) = SÓ MARCAÇÃO (bucket), NÃO transferência-de-região.** O
+  item C selado: *"reatribuição = só marcação… seria como ter um bucket na arena; o físico sai no bulk-free
+  do drop da região; a bump-arena NÃO ganha reclaim mid-região."*
+  - **`x[0] = 5` num array de ESCALARES** → OVERWRITE LIMPO de memória, nada a reclamar.
+  - **reatribuir / `remove(i)` / descarte `_`** → o slot vacado é **MARCADO morto (bucket)**; o físico só sai
+    no **bulk-free do drop da região da coleção**. NADA de reparent, NADA de region_drop mid-bump.
+  - **EXCEÇÃO só no `pop()`** (pop RETORNA um valor): o **retorno vai para a região do chamador por
+    move-on-return / DPS NORMAL (§5), como qualquer `return`**; o slot que ficou na coleção é **MARCADO morto
+    (bucket)**, não reclamado individualmente. Ou seja: **return→DPS (normal); slot→bucket.**
+- **(b) Elemento OBJETO (mora na SUA PRÓPRIA região) = CÓPIA/SOLTURA DE PONTEIRO com WRAP-REFCOUNT — NADA de
+  transferência de região nem arena do executor:**
+  - **`get`/`pop`** → copiam o PONTEIRO (nova referência; **inc refcount**).
+  - **`remove` / saída-de-escopo** → SOLTAM o ponteiro (**dec refcount**); **no ZERO → `region_drop` da
+    região do objeto** (F2, O(1)). A região do objeto NÃO se move.
+  - Múltiplas referências ao mesmo objeto = correto; o objeto vive enquanto o refcount > 0.
 
-Consequência: a arena da coleção segura APENAS os VALORES vivos (objetos nem estão nela); o churn/high-water
-de valor é NULO (reparent/drop), e o objeto é referência normal (sem churn de arena). **Por que é sempre
-seguro:** VALOR — ler/gravar por cópia ⇒ nenhum alias vivo do valor fora da coleção ⇒ dono único ⇒
-transferir a região não dá dangling; OBJETO — a residência/LUB garante que a região vive enquanto QUALQUER
-referência viver ⇒ soltar uma referência nunca pendura as outras.
+Consequência: o bump da coleção NUNCA faz reclaim mid-região (crumb-D intacto) — slots vacados são bucket,
+freed no drop da região curta; objetos morrem por refcount→0 (region_drop O(1)). **Por que é seguro:**
+VALOR — o slot é bucket até a região morrer, nunca dangling; o `pop` devolve por DPS normal (a cópia vai pro
+chamador). OBJETO — o refcount garante que a região vive enquanto QUALQUER referência viver; soltar uma
+nunca pendura as outras.
 
-### 2.5 O modelo de OBJETO — RULED pelo dono (Q3 fechado): arena-própria + referência + LUB
+### 2.5 O modelo de OBJETO — LEI SELADA (`mudancas-superficie-0.3.1.md:1742` C + `:1757`): region-per-object + deep-copy default + bulk-free + WRAP-REFCOUNT
 
-O dono cravou (não é mais martelo em aberto): um elemento **OBJETO não é possuído pela coleção e não escapa
-para a arena dela**. Fica registrado o modelo e por que ele DISPENSA a antiga dúvida "escape vs borrow".
+Fonte selada (`:1757`): *a arena-Teko é **region-per-object + deep-copy default + bulk-free + wrap-refcount
+escape-hatch***. Isto FECHA a antiga dúvida "escape vs borrow" (não existe mais Q3) e SUPERSEDE o "LUB-only"
+do passe anterior. A reconciliação coerente:
 
-**O modelo RULED (C#-like), verbatim do dono:** *"como os objetos têm arena própria o que se copia é o
-ponteiro desta região (um novo ponteiro para a mesma região), como em C#… a cópia é do ponteiro e não dos
-valores; se quer deep copy, aí a estratégia é outra."*
+**(1) Posse + cópia-de-referência (C#-like), verbatim do dono:** *"como os objetos têm arena própria o que
+se copia é o ponteiro desta região (um novo ponteiro para a mesma região), como em C#… a cópia é do ponteiro
+e não dos valores; se quer deep copy, aí a estratégia é outra."*
+- O objeto NÃO é possuído pela coleção; vive na SUA PRÓPRIA região por-objeto (F2, onde nasceu). A coleção
+  guarda só um PONTEIRO no slot do índice. `push`/`get`/`pop` copiam o PONTEIRO (zero cópia de valor);
+  `remove` solta o ponteiro. O objeto NUNCA se move nem entra na arena da coleção.
 
-- **Posse:** o objeto NÃO é possuído pela coleção; vive na SUA PRÓPRIA arena por-objeto (F2, onde nasceu).
-  A coleção guarda só um PONTEIRO (referência) no slot do índice.
-- **`push`/`get`/`pop`:** copiam o PONTEIRO (nova referência à mesma região) — zero cópia de valor, zero
-  `arena_place` na arena da coleção. `remove` solta o ponteiro. O objeto NUNCA se move.
-- **Vida = RESIDÊNCIA = LUB de todas as referências vivas** (coleção + binding original + resultados de
-  `get`), via o `pt_join`/escape-check já existente. A arena do objeto cai só quando a ÚLTIMA referência sai
-  de escopo. **Zero UAF por construção**, e múltiplas referências ao mesmo objeto é o comportamento CORRETO
-  (mutar por uma reflete nas outras — mesmo objeto), não bug.
-- **Deep copy** (clone independente) é operação EXPLÍCITA e separada — jamais o default de `get`/`pop`.
+**(2) `deep-copy default` vale SÓ para NÃO-objetos (value-type = nova materialização, item 14).** Copiar um
+VALOR = nova materialização independente (deep, por definição de value-type). Copiar um OBJETO
+(tipo-referência) = cópia do PONTEIRO (shallow, mesmo objeto) — permanece REFERÊNCIA por padrão. **O default
+NÃO é deep para objeto.**
 
-**Por que isto DISPENSA a antiga dúvida "escape vs borrow" (que estava ERRADA):** não há escape do objeto
-para a coleção (a coleção nunca vira dona) NEM borrow-com-outlives-a-provar (não é empréstimo temporário; é
-referência de 1ª classe cuja região vive pelo LUB). É exatamente a semântica de referência de `class` que a
-linguagem já tem — a coleção é só mais um detentor de referência, como qualquer variável. Nada de
-transferência-de-região, nada de cópia de valor, nada de escape-analysis nova no caminho quente do `push`.
-**O único caso que ainda transfere região é o elemento VALOR** (§2.4a-a: escalar-inline overwrite,
-value-struct reparent/drop) — porque VALOR mora na arena da coleção; OBJETO não.
+**(3) Vida = WRAP-REFCOUNT (o escape-hatch selado `:1757`), com o LUB estático como limite conservador
+default.** Contador no HEADER do objeto: nova referência (`push`/`get`/copiar o ponteiro) **incrementa**;
+soltar referência (saída de escopo / `remove` / `pop`-descartado) **decrementa**; **no ZERO → `region_drop`
+da região do objeto** (F2, O(1)). **Atômico** quando o objeto é compartilhado cross-thread. O
+LUB/escape-check estático continua como o limite conservador default (a colocação por construção); o
+wrap-refcount é o mecanismo PRECISO para o objeto que sobrevive ao escopo de nascimento por compartilhamento
+— ex.: guardado numa coleção de vida longa e removido cedo, o refcount libera NA HORA (o LUB puro, que só
+cai no fim do escopo mais externo, não conseguia). Múltiplas referências ao mesmo objeto = correto.
+
+**(4) DEEP-COPY EXPLÍCITA (opt-in) — superfície de stdlib obrigatória.** Para uma cópia EXATA e independente
+de um objeto, a stdlib DEVE oferecer um `deep_copy`/`clone` explícito (distinto da cópia-de-referência
+default). É superfície de OBJETO em geral (não só coleção). Contrato:
+
+```teko
+/**
+ * deep_copy — produce an independent exact copy of an object graph, or fail. Reference-typed fields are
+ * cloned recursively (a new materialization), NOT shared. Depth is hard-capped at `u8::MAX` (255): on
+ * reaching depth 255 — a graph too deep or a cycle — the function returns the `error` variant carrying
+ * "profundidade máxima (255) excedida / possível ciclo"; it NEVER truncates or silently shares a
+ * reference at the frontier. The copy is therefore EXACT or an explicit failure, never a silent partial
+ * copy. The cap bounds both stack overflow and cyclic graphs with a cheap `u8` depth counter — NOT a
+ * visited-set cycle detector. Distinct from the default reference copy (`get`/`pop` share the pointer);
+ * use this only when an independent clone is required.
+ *
+ * @param o   the object (graph) to clone
+ * @return    an independent copy, or `error` when depth 255 is exceeded
+ * @since 0.3.1
+ */
+exp fn deep_copy<T>(o: T): T | error
+```
+
+- **CAP DE PROFUNDIDADE = `u8::MAX` (255), HARD, em QUALQUER caso** — guarda contra overflow de pilha E
+  ciclicidade. Não é cycle-detection com visited-set; é um cap DURO e barato (um contador `u8`).
+- **AO ATINGIR 255 (spec explícito):** RETORNA a variante **`error`** (motivo: "profundidade máxima (255)
+  excedida / possível ciclo"). **NÃO trunca, NÃO compartilha referência em silêncio.** A cópia é EXATA OU
+  falha explícita — nunca uma cópia parcial silenciosa. O chamador trata `T | error` por `match` (o modelo de
+  erro padrão de Teko).
+- **Consequência pra coleção:** `deep_copy` de uma coleção de objetos deep-copia CADA elemento, cada um
+  bounded pelo cap de 255 (a coleção conta como um nível; os elementos descem a partir daí); se qualquer
+  elemento estourar o cap, o resultado é `error`.
+
+**Por que isto FECHA a antiga dúvida "escape vs borrow" (que estava ERRADA):** o objeto é referência de 1ª
+classe cuja região vive pelo wrap-refcount — não há escape-para-a-coleção (a coleção nunca vira dona) nem
+borrow-com-outlives-a-provar. **O único caso que MARCA slot no bump é o VALOR** (§2.4a-a: overwrite/bucket);
+OBJETO é refcount. Nenhuma escape-analysis nova no caminho quente do `push`.
 
 ### 2.6 Doubling+watermark vs exact-grow NO ÍNDICE (fork agora BAIXO-RISCO)
 
@@ -347,37 +400,41 @@ ponteiros importar mais que a contagem de grows.
 O modelo ponteiro-índice precisa de três capacidades além do `of_len` já declarado. Contrato aqui;
 implementação resume quando semearem:
 
-*VALOR (regime a):*
-- **`arena_place<T>(v: T): *T`** — escreve o VALOR `v` UMA vez na SUA PRÓPRIA sub-região reparentável,
-  aninhada na arena da coleção (§2.3), e devolve um ponteiro estável. **Só para elemento VALOR** (value-struct
-  grande); escalar-inline não a usa; OBJETO **NUNCA** a usa (o objeto não entra na arena da coleção).
-- **`copy_out<T>(p: *T): T`** — deref + cópia do VALOR para fora (o read-por-cópia de §2.4).
-- **`write_in<T>(p: *T, x: T)`** — o `set(i,x)` de VALOR: inline escreve o slot; value-struct faz
-  `region_drop` do alvo antigo e `arena_place` do novo, reapontando (§2.4).
-- **`region_reparent(elem_region, dest_region)`** — TRANSFERE a sub-região de um VALOR removido para a arena
-  do executor (o reparent O(1) do pop/remove de VALOR, §2.4a-a). Arena-nativo (move-on-return, §5 canonical),
-  NÃO um free-list. **Não se aplica a objeto.**
-- **`region_drop(elem_region)`** — descarta a sub-região de um VALOR (O(1) deliberado) no set-overwrite ou
-  no remove-descartado.
+*VALOR (regime a — bump + bucket, SEM reparent):*
+- **`place<T>(v: T): *T`** — escreve o VALOR `v` UMA vez no BUMP da coleção (§2.3) e devolve um ponteiro
+  estável. Só para VALUE-struct grande; escalar-inline não a usa; OBJETO NUNCA a usa.
+- **`read<T>(p: *T): T`** — deref + cópia do VALOR para fora (o read-por-cópia de §2.4).
+- **`write<T>(p: *T, x: T)`** — o `set(i,x)` de VALOR: inline escreve o slot; value-struct escreve a nova
+  cópia por `place` e MARCA o slot antigo morto (bucket) — sem region_drop mid-bump.
+- **MARCAÇÃO (bucket)** — reatribuir/`remove`/descarte de um slot de VALOR = só MARCA o slot logicamente
+  morto (baixa o watermark / desloca ponteiros). NÃO há primitiva de free por-entrada; o físico sai no
+  **bulk-free do drop da região da coleção** (item C selado). NADA de `region_reparent` (removido — era o erro
+  do passe anterior).
+- **`pop`** — devolve o valor por **DPS / move-on-return NORMAL (§5)** para a região do chamador; o slot que
+  ficou vira bucket. É a única exceção (return→DPS; slot→bucket).
 
-*OBJETO (referência C#-like — nenhuma primitiva de arena da coleção; usa a maquinaria de referência que já
-existe):*
-- **cópia de ponteiro** — `push`/`get`/`pop` copiam o ponteiro do slot (nova referência à mesma região). É a
-  cópia de referência de `class` que a monomorfização JÁ produz — nada novo a semear.
-- **soltura de ponteiro** — `remove`/`set` sobrescreve/limpa o slot; a vida do objeto segue por
-  **RESIDÊNCIA/LUB** (`pt_join`/escape-check já existente). Nenhum `arena_place`/`reparent`/`drop` da coleção.
+*OBJETO (referência C#-like + WRAP-REFCOUNT):*
+- **`retain(obj)`** — `push`/`get`/`pop` copiam o ponteiro e **incrementam** o refcount no header do objeto
+  (atômico se cross-thread). É a cópia de referência de `class` + o inc — a monomorfização já produz a cópia.
+- **`release(obj)`** — `remove`/`set`/saída-de-escopo **decrementam**; **no ZERO → `region_drop` da região do
+  objeto** (F2, O(1)). Nenhum `place`/`bucket` na arena da coleção (o objeto nunca entra nela).
+- **`deep_copy<T>(o): T | error`** (§2.5-4) — clone explícito opt-in; cap de profundidade `u8::MAX`=255
+  HARD; no cap RETORNA `error` (não trunca). Superfície de stdlib.
 
-*ÍNDICE (regime b):*
-- **`of_len_ptr<T>(n): []*T`** (índice fixo de ponteiros zero-fill), **`free_index<T>(index)`** (free eager
-  do índice velho), **`zero_fill_ptr`**. Duas realizações: (i) alloc/free direto (fora do bump do objeto) ou
-  (ii) sub-região droppable própria com `region_drop`. NÃO pode ser bump do objeto (senão o índice vaza).
+*ÍNDICE (regime b — região própria droppada por grow):*
+- **`of_len_ptr<T>(n): []*T`** (índice fixo de ponteiros zero-fill), **`free_index<T>(index)`** (=
+  `region_drop` da região do índice velho, O(1), no grow), **`zero_fill_ptr`**. O índice mora na SUA PRÓPRIA
+  sub-região droppable (ou alloc/free direto do raw-alloc). NÃO pode morar no bump da coleção (senão viraria
+  bucket e vazaria a cada grow). Dropar a região INTEIRA do índice velho NÃO é reclaim-mid-bump — é a
+  primitiva normal da arena (crumb-D intacto).
 
 Nenhuma é o free-list §7.8 (reservado ao imortal-F2 concorrente, §4). Nenhuma toca `teko_rt.c` (arena 100%
 Teko). Onde a árvore ainda não expõe `*T` cru, o implementer usa o `[]T`-de-referência que a monomorfização
 já produz para OBJETO (uma `class` já é referência — este caso NEM PRECISA de primitiva nova) e o `of_len`
-para o índice; escalar-inline e value-struct-grande (VALOR) são as extensões que `arena_place`/`copy_out`/
-`write_in`/`region_*` nomeiam. **Bloqueado até `of_len`+índice-assign+`arena_place` (para VALOR) semearem; o
-caminho OBJETO compila hoje (é referência pura).**
+para o índice; escalar-inline e value-struct-grande (VALOR) são as extensões que `place`/`read`/`write` +
+bucket nomeiam; o OBJETO usa `retain`/`release` do wrap-refcount selado. **Bloqueado até `of_len`+
+índice-assign+`place` (VALOR) + `retain`/`release` (OBJETO) semearem; o caminho OBJETO de cópia-de-ponteiro
+já compila hoje (é referência pura), faltando só o inc/dec do refcount.**
 
 ---
 
@@ -387,23 +444,24 @@ caminho OBJETO compila hoje (é referência pura).**
 
 - **Atual.** `intern items: []T` (`list.tks:3`); `push` = `self.items = teko::list::push(...)` (`:15`,
   value copy-grow — o leak).
-- **Remodelado (ponteiro-índice).** Campos `{ index: []*T, count: u32 }`. `push(x)`: **VALOR** `arena_place(x)`
-  / **OBJETO** copia o ponteiro de `x` (referência à sua arena, §2.5); `self.index =
+- **Remodelado (ponteiro-índice).** Campos `{ index: []*T, count: u32 }`. `push(x)`: **VALOR** `place(x)`
+  no bump / **OBJETO** copia o ponteiro de `x` + `retain` (inc refcount, §2.5); `self.index =
   grow_index(self.index, self.count, self.count+1)` (só se cheio), `self.index[self.count] = <ptr>`,
-  `count++`. `get(i)` = **VALOR** `copy_out(self.index[i])` / **OBJETO** copia o ponteiro. `set(i,x)` =
-  **VALOR** region_drop do alvo antigo + `arena_place` do novo (inline: `index[i]=x`) / **OBJETO** sobrescreve
-  o slot com o novo ponteiro (solta a referência antiga). `pop()`/`remove_at(i)`: **VALOR** reparenta/dropa a
-  sub-região do elemento para o executor (inline: cópia-pra-fora) / **OBJETO** SOLTA o ponteiro (a região do
-  objeto segue por residência/LUB — nunca transfere); `count--`. **`push`/`pop` no FIM = O(1)** (só o
-  watermark). `remove_at(i)` também faz **shift-left compactando os PONTEIROS `[i+1..count)`**. **CUSTO EXPLÍCITO
+  `count++`. `get(i)` = **VALOR** `read(self.index[i])` / **OBJETO** copia o ponteiro + `retain`. `set(i,x)` =
+  **VALOR** `place` do novo + MARCA o slot antigo (bucket), inline `index[i]=x` / **OBJETO** troca o ponteiro
+  (`retain` novo, `release` antigo). `pop()`/`remove_at(i)`: **VALOR** o slot vira BUCKET (marcação; `pop`
+  devolve por DPS normal ao chamador, §2.4a) / **OBJETO** `release` o ponteiro (dec refcount; no zero →
+  region_drop do objeto); `count--`. **`push`/`pop` no FIM = O(1)** (só o watermark). `remove_at(i)` também faz
+  **shift-left compactando os PONTEIROS `[i+1..count)`**. **CUSTO EXPLÍCITO
   (eixo de 1ª classe, §10): o shift preservando ordem é O(n) por remove/insert no MEIO ou na FRENTE → O(n²)
   sob churn frontal/meio.** Move ponteiros, não valores, mas é O(n) mesmo assim. Um índice-array NUNCA é
   O(1) no meio arbitrário — só nas pontas (e O(1) nas DUAS pontas exige um ring/deque com wrap, §3.7). Para
   workload de remove/insert frontal/meio pesado, o vencedor é alt-3 node-linked (O(1) dado o nó, zero shift).
-  `to_array()` = snapshot: `of_len(count)` + `copy_out` de cada slot (cópia independente — nunca partilha o
-  índice; senão a view penduraria quando a lista crescesse). Escalar-inline (§2.2a) degenera para
-  `index: []T` inline sem `arena_place`.
-- **Grow/drop:** §2.3 — índice geométrico; índice velho liberado eager; valores intactos na arena.
+  `to_array()` = snapshot: `of_len(count)` + `read` de cada slot (VALOR copia; OBJETO copia a referência +
+  retain — nunca partilha o índice; senão a view penduraria quando a lista crescesse). Escalar-inline (§2.2a)
+  degenera para `index: []T` inline sem `place`.
+- **Grow/drop:** §2.3 — índice geométrico; região do índice velho droppada eager; valores intactos no bump
+  (marcados bucket ao sair, freed no drop da região da coleção).
 
 ### 3.2 `Map<V>` / `Dictionary<K,V>` / `HashSet<T>` — as tabelas por hash
 
@@ -433,15 +491,15 @@ caminho OBJETO compila hoje (é referência pura).**
   fn dict_grow_index<K, V>(keys: []*K, hashes: []u64, vals: []*V, count: u64): (keys: []*K, hashes: []u64, vals: []*V)
   ```
 
-  `insert(k,v)`: acha `at`; se presente, atualiza o valor em `at` (VALOR: sobrescreve por cópia; OBJETO:
-  troca o ponteiro, solta a referência antiga — count intacto); senão cresce se cheio, grava chave/valor em
-  `[count]` (VALOR `arena_place`; OBJETO copia ponteiro), `count++`. `remove`: reclama `keys[at]`/`vals[at]`
-  conforme a classe — **VALOR reparenta/dropa a sub-região; OBJETO SOLTA o ponteiro** (a região do objeto
-  segue por residência/LUB) — + **swap-remove** dos ponteiros (troca com o último, `count--`) — **O(1), sem
-  shift, sem realocar, MAS QUEBRA A ORDEM** → válido só porque uma tabela por hash é NÃO-ordenada (bag/set).
-  Se `keys()` for contratualmente "insertion order" (`dictionary.tks:53`), o swap-remove NÃO serve: cai no
-  **shift-left dos ponteiros, O(n)** (→ O(n²) sob churn) — o preço de preservar ordem num índice-array.
-  `hashes` é `u64` inline (não precisa de `arena_place`).
+  `insert(k,v)`: acha `at`; se presente, atualiza o valor em `at` (VALOR: `place` novo + bucket no antigo;
+  OBJETO: troca o ponteiro, `retain` novo / `release` antigo — count intacto); senão cresce se cheio, grava
+  chave/valor em `[count]` (VALOR `place`; OBJETO copia ponteiro + `retain`), `count++`. `remove`: reclama
+  `keys[at]`/`vals[at]` por classe — **VALOR: MARCA o slot (bucket); OBJETO: `release` o ponteiro** (dec
+  refcount; no zero → region_drop do objeto) — + **swap-remove** dos ponteiros (troca com o último,
+  `count--`) — **O(1), sem shift, sem realocar, MAS QUEBRA A ORDEM** → válido só porque uma tabela por hash é
+  NÃO-ordenada (bag/set). Se `keys()` for contratualmente "insertion order" (`dictionary.tks:53`), o
+  swap-remove NÃO serve: cai no **shift-left dos ponteiros, O(n)** (→ O(n²) sob churn) — o preço de preservar
+  ordem num índice-array. `hashes` é `u64` inline (não precisa de `place`).
 - **A forma bucket open-addressing** (a "rehash com load-factor" do escopo R9): é a evolução recomendada e
   casa perfeitamente com o modelo — o backing de buckets é um índice fixo `[]*Slot` (ou `[]Slot` inline se
   `Slot` couber numa palavra); quando `count/cap > 0.75`, `bucket_rehash` aloca um NOVO índice de buckets,
@@ -454,12 +512,12 @@ caminho OBJETO compila hoje (é referência pura).**
   `collections.tks:94-106`, busca binária + `arr_insert_at`). `SortedDictionary` idem em `keys`/`vals`
   (`sorted_dictionary.tks:30-31`).
 - **Remodelado.** `{ index de ponteiros, count }`. `add(x)`: `at = lower_bound` sobre os alvos (deref para
-  comparar); se presente, no-op; senão cresce se cheio, `arena_place(x)`, **shift-right dos PONTEIROS**
-  `[at..count)` (abre o slot, movendo só ponteiros), `index[at] = &x_placed`, `count++`. O shift é trabalho
-  de PONTEIRO in-bounds sobre o índice fixo — sem mover valor, sem mudar `len`. `SortedDictionary` shifta os
-  dois índices no mesmo `at`. `remove` = reclama o elemento por classe (VALOR reparenta/dropa a sub-região;
-  OBJETO solta o ponteiro, região por residência/LUB) + shift-left dos ponteiros + `count--`. `contains`/`get`
-  = busca binária deref-comparando `index[0..count]`.
+  comparar); se presente, no-op; senão cresce se cheio, `place(x)` (OBJETO: copia ponteiro + `retain`),
+  **shift-right dos PONTEIROS** `[at..count)` (abre o slot, movendo só ponteiros), `index[at] = <ptr>`,
+  `count++`. O shift é trabalho de PONTEIRO in-bounds sobre o índice fixo — sem mover valor, sem mudar `len`.
+  `SortedDictionary` shifta os dois índices no mesmo `at`. `remove` = reclama por classe (**VALOR: MARCA o
+  slot bucket; OBJETO: `release` o ponteiro**, no zero → region_drop) + shift-left dos ponteiros + `count--`.
+  `contains`/`get` = busca binária deref-comparando `index[0..count]`.
 - **Nota honesta:** o shift ainda é O(n) em ponteiros por inserção. Aqui a alternativa 3 (BST/skip-list,
   §9) é estritamente melhor (O(log n) sem shift) — ver a recomendação de §10.
 
@@ -467,14 +525,13 @@ caminho OBJETO compila hoje (é referência pura).**
 
 - **Atual.** `heap: []T` (`priority_queue.tks:3`); `enqueue` = `heap_sift_up(teko::list::push(...))`
   (`:16-17`); `dequeue` = `heap_pop_min(&h)` (`:24-28` → `collections.tks:122-145`).
-- **Remodelado.** `{ heap: []*T índice, count }`. `enqueue(x)`: cresce se cheio, `arena_place(x)`,
-  `heap[count] = &x_placed; count++`, **sift-up trocando PONTEIROS** `heap[i]`↔`heap[parent]` (duas
-  escritas de ponteiro, sem mover valor). `dequeue()`: reclama `heap[0]` por classe (**VALOR** reparenta a
-  sub-região para o executor / inline copia-pra-fora; **OBJETO** copia o ponteiro e solta o slot — região por
-  residência/LUB); `heap[0] = heap[count-1]; count--`; **sift-down de ponteiros**; devolve o mínimo. `peek()`
-  = `copy_out(heap[0])` (VALOR) / copia o ponteiro (OBJETO). Todo o sift vira
-  `heap_sift_*_at` operando sobre `(index, count)` por ponteiro — os `arr_swap`/`arr_drop_last` que copiavam
-  array somem.
+- **Remodelado.** `{ heap: []*T índice, count }`. `enqueue(x)`: cresce se cheio, `place(x)` (OBJETO: copia
+  ponteiro + `retain`), `heap[count] = <ptr>; count++`, **sift-up trocando PONTEIROS** `heap[i]`↔`heap[parent]`
+  (duas escritas de ponteiro, sem mover valor). `dequeue()`: **VALOR** devolve o mínimo por DPS normal ao
+  chamador e o slot vira bucket; **OBJETO** copia o ponteiro (`retain` do retorno) e `release` do slot (no
+  zero → region_drop); `heap[0] = heap[count-1]; count--`; **sift-down de ponteiros**. `peek()` =
+  `read(heap[0])` (VALOR) / copia o ponteiro + retain (OBJETO). Todo o sift vira `heap_sift_*_at` sobre
+  `(index, count)` por ponteiro — os `arr_swap`/`arr_drop_last` que copiavam array somem.
 
 ### 3.5 Os combinadores `arr_*` e helpers heap/sorted — presize exato, zero push
 
@@ -512,7 +569,8 @@ plano só é O(1) numa ponta (append/pop na cauda). Para O(1) nas DUAS pontas SE
   `push_back`/`push_front`/`pop_back`/`pop_front` = escrever/ler o slot em `head`/`tail` (mod `index.len`) e
   mover o cursor — **O(1) nas DUAS pontas, ZERO shift**. Crescer (quando `count == index.len`) = `grow_index`
   para um novo ring maior, RE-LINEARIZANDO os ponteiros a partir de `head` (copia só ponteiros, valores
-  intactos, índice velho liberado). Remove/pop de PONTA reparenta a sub-região para o executor (§2.4a).
+  intactos, região do índice velho droppada). Remove/pop de PONTA: **VALOR** devolve por DPS normal e o slot
+  vira bucket; **OBJETO** `release` (§2.4a) — nada de reparent.
 - **Remove no MEIO de um ring** volta a ser O(n) (compactar) — se o workload exige remove/insert no meio, a
   recomendação é alt-3 node-linked (§9), não o ring.
 - **BOUNDED** (tamanho de bound conhecido) = ring fixo do tamanho do bound, NÃO cresce nunca — encaixe
@@ -579,20 +637,21 @@ primitivas C `tk_atomic_*`/`tk_mutex_*` aterrarem.
 ## 5. As formas de tipo dos wrappers (W15 doc-comment, o implementer copia)
 
 O corpo usa três wrappers **despachados por classe de `T` na monomorfização** — `place`/`read`/`write` — que
-resolvem para: **VALOR value-struct** → `arena_place`/`copy_out`/`write_in` (§2.7); **escalar** → `[]T` inline
-(`index[i]=x` direto, §2.2a); **OBJETO** → cópia/soltura de PONTEIRO (referência à arena própria do objeto,
-zero cópia de valor, vida por residência/LUB — §2.2b/§2.5), sem tocar a arena da coleção. O `pop` de VALOR
-reparenta a região ao executor; o de OBJETO só solta o ponteiro.
+resolvem para: **VALOR value-struct** → `place`/`read`/`write` no bump + MARCAÇÃO bucket ao sair (§2.7);
+**escalar** → `[]T` inline (`index[i]=x` direto, §2.2a); **OBJETO** → cópia de PONTEIRO + `retain`/`release`
+do WRAP-REFCOUNT (referência à região própria do objeto, zero cópia de valor — §2.2b/§2.5), sem tocar a arena
+da coleção. O `pop` de VALOR devolve por DPS normal e MARCA o slot (bucket); o de OBJETO faz `release`.
 
 ```teko
 /**
  * List<T> — a growable sequence over a FIXED POINTER INDEX (R9 pointer-index model). `index` is a fixed
  * `[]*T` whose `len` is the CAPACITY; `count` is the live watermark. For a VALUE element the value is
- * placed once in the collection's arena and never moved; for an OBJECT element the slot holds a REFERENCE
- * to the object's own arena (C#-like: push/get copy the pointer, not the value; remove releases it;
- * lifetime is the LUB of live references). To append past capacity, `grow_index` builds a NEW fixed
- * pointer index and frees the old one immediately (it holds no data). No value array is ever recopied on
- * grow, so no dead value-array can strand — the v1 grow-leak is closed by construction.
+ * placed once in the collection's bump arena and never moved (a vacated slot is marked dead — a bucket —
+ * freed at the collection's region drop); for an OBJECT element the slot holds a REFERENCE to the object's
+ * own region (C#-like: push/get copy the pointer + retain; remove releases + region_drop at refcount 0).
+ * To append past capacity, `grow_index` builds a NEW fixed pointer index and drops the old index's region
+ * immediately. No value array is ever recopied on grow, so no dead value-array can strand — the v1
+ * grow-leak is closed by construction.
  *
  * @since 0.3.1
  */
@@ -616,12 +675,12 @@ exp type List<T> = class {
     pub fn is_empty(): bool { self.count == 0 }
 
     /**
-     * Append `x`. For a VALUE element `place` writes it once into the collection's arena; for an OBJECT
-     * element `place` copies the reference (pointer to the object's own arena, no value copy). Grows the
-     * fixed pointer index geometrically (a NEW fixed index, old freed) only when full, then writes the
-     * pointer. Amortized O(1); no value is ever recopied on grow.
+     * Append `x`. VALUE: `place` writes it once into the collection's bump arena. OBJECT: `place` copies the
+     * reference and retains it (increments the object's wrap-refcount), no value copy. Grows the fixed
+     * pointer index geometrically (a NEW fixed index, old index's region dropped) only when full, then
+     * writes the pointer. Amortized O(1); no value is ever recopied on grow.
      *
-     * @param x  the element to append (value copied once, or object referenced)
+     * @param x  the element to append (value copied once, or object referenced + retained)
      */
     pub fn push(x: T) {
         var p: *T = place<T>(x)
@@ -641,8 +700,9 @@ exp type List<T> = class {
     pub fn get(i: u64): T { read<T>(self.index[i]) }
 
     /**
-     * Overwrite the element at `i` (O(1)); a no-op if `i >= len()`. VALUE: drop the old value's region and
-     * place the new one. OBJECT: overwrite the slot with the new reference (release the old reference).
+     * Overwrite the element at `i` (O(1)); a no-op if `i >= len()`. VALUE: place the new value and mark the
+     * old slot dead (a bucket, freed at the collection's region drop). OBJECT: swap the reference — retain
+     * the new, release the old (region_drop of the old object at refcount 0).
      *
      * @param i  the index to overwrite
      * @param x  the new value (copied) or object (referenced)
@@ -650,9 +710,10 @@ exp type List<T> = class {
     pub fn set(i: u64, x: T) { if i < self.count { write<T>(self.index[i], x) } }
 
     /**
-     * Remove the last element by lowering the watermark; a no-op on an empty list. O(1), no realloc. VALUE:
-     * the element's region reparents to the caller (or drops if unbound). OBJECT: the pointer is released;
-     * the object's arena lives on by the LUB of its remaining references.
+     * Remove the last element by lowering the watermark; a no-op on an empty list. O(1), no realloc, no
+     * mid-region reclaim. VALUE: the vacated slot is marked dead (a bucket), freed at the collection's
+     * region drop (a bound `pop` return travels to the caller by normal DPS). OBJECT: the pointer is
+     * released (decrement the wrap-refcount; region_drop of the object at zero).
      */
     pub fn pop() { if self.count > 0 { self.count = self.count - 1 } }
 
@@ -686,17 +747,20 @@ codifica QUAL ramo correu.
 | fixture | prova | exit esperado |
 |---|---|---|
 | `list_grow_amortized` | `List<i64>`: push N=100000; `len()==N`; checksum `Σi` bate | 0 |
-| `list_no_value_recopy` | (o leak-guard) push N cruzando muitos grows; um contador de `arena_place` == N (valores colocados UMA vez, nunca recopiados); token = N | 0 |
-| `list_index_freed_on_grow` | força K grows; o índice velho é liberado eager (o valor de `free_index` chamado == K); sem acúmulo | 0 |
+| `list_no_value_recopy` | (o leak-guard) push N cruzando muitos grows; um contador de `place` == N (valores escritos UMA vez, nunca recopiados); token = N | 0 |
+| `list_index_region_dropped_on_grow` | força K grows; a região do índice velho é droppada eager (`free_index`/region_drop == K); sem acúmulo de índices | 0 |
 | `list_reassign_purge` | grow força `grow_index`; a view antiga do índice não é lida após reatribuir; roda M ciclos | 0 |
-| `list_to_array_snapshot` | `to_array()` guardado; a lista cresce e libera o índice velho; a cópia intacta | 0 |
+| `list_value_slot_bucket` | (VALOR: bucket, lei selada) `List<BigStruct>` reatribui/remove M slots; ZERO reclaim mid-região (nenhum region_drop por-slot); a memória do bump só cai no drop da região da lista; token = M | 0 |
+| `list_to_array_snapshot` | `to_array()` guardado; a lista cresce e dropa a região do índice velho; a cópia intacta | 0 |
 | `list_read_write_copy` | (VALOR) `get` devolve cópia; mutar a cópia não altera a coleção; `set` grava por cópia | 0 |
 | `list_obj_get_is_reference` | (OBJETO) `get` devolve a REFERÊNCIA (mesmo objeto): mutar via o retorno reflete no elemento da lista; NÃO é deep copy | 0 |
 | `list_pop_watermark` | push 8, pop 3, `len()==5`, `get(4)` correto; slots acima do watermark invisíveis | 0 |
-| `list_value_pop_reparent` | (VALOR: region-transfer) `List<BigStruct>` pop de N; a região do valor reparenta pro executor; `region_reparent`==N; valor retornado vivo no escopo do executor | 0 |
-| `list_obj_pop_release` | (OBJETO: referência, NÃO reparenta) `List<Obj>` pop; `get`/`pop` copiam o PONTEIRO; ZERO `region_reparent`/`arena_place` na arena da coleção; o objeto segue vivo pelo binding original após o pop (LUB); mutar via a referência retornada reflete no objeto | 0 |
-| `list_obj_lub_lifetime` | objeto ainda referenciado pelo binding original sobrevive ao `remove` da lista; objeto SÓ referenciado pela lista cai quando a lista morre; sem UAF | 0 |
-| `list_set_drop_old` | (VALOR) `set(i, y)`: a sub-região antiga é region_dropped (contador == nº de sets); (OBJETO) `set` troca o ponteiro, solta a referência antiga; sem acúmulo | 0 |
+| `list_value_pop_dps` | (VALOR) `List<BigStruct>` `var v = list.pop()`; o retorno chega ao chamador por DPS normal (vivo no escopo do chamador); o slot na lista vira bucket (não region_drop por-slot) | 0 |
+| `list_obj_refcount_release` | (OBJETO) `List<Obj>` remove: `release` decrementa; objeto SÓ referenciado pela lista → refcount 0 → region_drop NA HORA (não espera o fim do escopo); token = objetos liberados | 0 |
+| `list_obj_refcount_shared` | objeto referenciado pela lista E por um binding externo: `remove` da lista decrementa mas NÃO libera (refcount > 0); o binding externo continua válido; sem UAF | 0 |
+| `deep_copy_depth_cap` | `deep_copy` de um grafo com profundidade > 255 (ou cíclico) RETORNA a variante `error`; `match` pega o erro; nenhuma cópia parcial silenciosa | 0 |
+| `deep_copy_exact` | `deep_copy` de um grafo raso: cópia independente; mutar o clone não altera o original; refcounts corretos | 0 |
+| `list_set_swap_ref` | (VALOR) `set(i, y)`: novo `place`, slot antigo vira bucket (não region_drop); (OBJETO) `set` troca o ponteiro, `retain` novo / `release` antigo; sem acúmulo | 0 |
 | `dict_grow_lockstep` | `Dictionary<StrKey,i64>`: insert N chaves distintas; todos `get` batem após vários grows | 0 |
 | `dict_update_not_grow` | insert repetido da mesma chave: `len()` constante, valor atualizado (count intacto) | 0 |
 | `hashset_add_dup` | `HashSet<i64>`: add duplicado = no-op; `len()` correto após grows | 0 |
@@ -706,13 +770,14 @@ codifica QUAL ramo correu.
 | `arr_combinators_exact` | `arr_insert_at`/`arr_drop_at`/`arr_reverse`/`arr_slice`: tamanho e conteúdo exatos, zero push | 0 |
 | (ALT-3) `linked_list_no_backing` | `LinkedList<i64>`: push/remove-anywhere; nenhum array de backing alocado; `len` e ordem batem | 0 |
 | (ALT-3) `skiplist_sorted_order` | `SortedSet` node-linked: insert fora de ordem; iteração ascendente; O(log n) sem shift | 0 |
-| (ALT-3) `linked_remove_reparent` | `LinkedList<i64>`: remove de nó reparenta a região do nó pro chamador; a coleção encolhe; sem free-list §7.8 | 0 |
+| (ALT-3) `linked_remove_node` | `LinkedList<i64>`: remove de nó VALOR marca o nó bucket (freed no drop da coleção); nó OBJETO faz `release`; sem free-list §7.8 no caminho comum | 0 |
 | (FASE-2) `concurrent_stack_cas` | `ConcurrentStack<i64>` sob N tarefas: soma/contagem finais batem (Treiber) | 0 |
 | (FASE-2) `concurrent_dict_striped` | `ConcurrentDictionary<StrKey,i64>`: insert em buckets disjuntos + join + soma dos `get` | 0 |
 
-Os dois primeiros novos (`list_no_value_recopy`, `list_index_freed_on_grow`) são os **leak-guards** da
-rework: provam que valor não é recopiado e que o índice velho é liberado — exatamente a patologia que o dono
-achou.
+Os **leak-guards** da rework: `list_no_value_recopy` (valor escrito uma vez, nunca recopiado),
+`list_index_region_dropped_on_grow` (região do índice velho droppada eager), `list_value_slot_bucket` (VALOR
+= bucket, zero reclaim mid-região — a lei selada), e `list_obj_refcount_release` (OBJETO = refcount→0 →
+region_drop na hora). Cobrem exatamente a patologia que o dono achou + o modelo selado que a substitui.
 
 ---
 
@@ -722,8 +787,10 @@ Menor passo independentemente gate-able. **[dry]** = compila + fixpoint trivial;
 (build gen2 `TEKO_BACKEND=native`, regressão isolada verde, FIXPOINT gen2==gen3 byte-idêntico). Reseed só
 num [RITUAL]. Nenhum crumb ensina idioma que o seed não tenha.
 
-**R9.0 — (dependência) `of_len`+índice-assign+`count`+`arena_place`/`copy_out`/`free_index` semeados**
-(passo-1 do expurgo + as primitivas §2.7). PRÉ-REQUISITO; não é crumb desta carga.
+**R9.0 — (dependência) `of_len`+índice-assign+`count`+`place`/`read`/`free_index`(region_drop) + o
+wrap-refcount de objeto (`retain`/`release`) + `deep_copy` semeados** (passo-1 do expurgo + as primitivas
+§2.7 + a lei selada `:1742`/`:1757`). PRÉ-REQUISITO; não é crumb desta carga. O caminho OBJETO (refcount) e
+o de VALOR (bucket) apoiam-se no modelo de arena selado — não inventam máquina nova de reclaim.
 
 **R9.1 — combinadores `arr_*` presize exato** (§3.5). Reescreve `collections.tks:2-92`; remove
 `sorted_insert`/`heap_sift_up`/`heap_pop_min` do caminho. **[dry]**. Ritual: NÃO.
@@ -750,7 +817,7 @@ consumido pelo core. R9.1/R9.2/R9.5/R9.6 são [dry].
 
 ---
 
-## 8. Riscos + tensões de lei (law-first) — SEM HALT (Q3 agora RULED pelo dono)
+## 8. Riscos + tensões de lei (law-first) — SEM HALT (modelo de vida SELADO: `:1742`/`:1757`)
 
 - **T-1 — "rehash bucket com load-factor" (escopo R9) vs. impl LINEAR embarcada.** RESOLVIDO (§3.2). As
   Dict/Map/HashSet são varredura linear sobre arrays paralelos → não há rehash a fazer; a remodelagem fiel é
@@ -762,61 +829,86 @@ consumido pelo core. R9.1/R9.2/R9.5/R9.6 são [dry].
   RETIDO, não liberado, sob concorrência; liberado eager só no caso sequencial/sob-lock). Arrays continuam
   fixos → F1 intacto. Risco sinalizado: slab de ÍNDICE retida (só ponteiros, muito menor que a v1). **Não
   é HALT.**
-- **T-3 — o índice individualmente liberável vs. a bump-arena do objeto.** RESOLVIDO (§2.1/§2.7). O índice
-  NÃO pode morar no bump do objeto (senão o ÍNDICE vaza — o mesmo erro da v1 transposto). Vai para
-  alloc/free direto OU sub-região droppable própria (region_drop O(1)). Os VALORES moram em sub-regiões
-  reparentáveis (escritas uma vez): removidos MIGRAM para o chamador por reparent (§2.4a), os que ficam caem
-  no bulk-drop da morte — a arena da coleção segura só os vivos, sem high-water. **Não é HALT.**
-- **T-3b — DESLOCAMENTO, partida limpa por CLASSE (ruling do dono).** RESOLVIDO (§2.4a). **VALOR** (mora na
-  arena da coleção): pop/remove = TRANSFERÊNCIA DE REGIÃO (reparent ao executor, move-on-return/§5), O(1);
-  set-overwrite/remove-descartado = region_drop O(1); escalar-inline = cópia-pra-fora / overwrite limpo.
-  **OBJETO** (mora na sua arena própria): get/pop = copia o PONTEIRO; remove = SOLTA o ponteiro; vida por
-  residência/LUB; NADA de transferência de região, NADA de arena do executor recebendo o storage do objeto.
-  NENHUM churn/high-water, NENHUM free-list por-entrada no caminho comum (o §7.8 fica só para o slab
-  imortal-F2 concorrente, §4). Vale igual no índice-de-ponteiros e na alt-3 (nós). **Não é HALT.**
+- **T-3 — a região do índice droppável vs. o bump (crumb-D intacto).** RESOLVIDO (§2.1/§2.7). O índice NÃO
+  mora no bump da coleção (senão viraria bucket e VAZARIA a cada grow) — vive na SUA PRÓPRIA sub-região
+  droppable (ou alloc/free direto do raw-alloc). Dropar a REGIÃO INTEIRA do índice velho no grow é a
+  primitiva normal da arena (region_drop O(1)), **não** um reclaim-mid-bump — logo NÃO fere o item C selado
+  ("bump não ganha reclaim mid-região"). **Não é HALT.**
+- **T-3b — VIDA por CLASSE, modelo SELADO (`:1742` C + `:1757`) — SUPERSEDE o reparent/LUB do passe
+  anterior.** RESOLVIDO (§2.4a). **VALOR** (mora no BUMP): reatribuir/remove/descarte = **SÓ MARCAÇÃO
+  (bucket)**; o físico sai no bulk-free do drop da região da coleção; ZERO reclaim mid-bump. Exceção só no
+  `pop`: o retorno vai ao chamador por **DPS normal (§5)**; o slot vira bucket. **OBJETO** (região própria):
+  get/pop copiam o ponteiro + **`retain`**; remove/saída-de-escopo **`release`**; **no ZERO → region_drop**
+  (O(1), preciso — libera na hora o objeto guardado e removido cedo). O free-list §7.8 fica só para o slab
+  imortal-F2 concorrente (§4). Vale no índice-de-ponteiros e na alt-3 (nós). **Não é HALT.**
 - **T-4 — `to_array()` / `get` partilhavam o backing.** RESOLVIDO (§2.4, §5). VALOR → `get`/`to_array`
-  copiam o valor para fora; OBJETO → devolvem a REFERÊNCIA (novo ponteiro à mesma região, C#-like), nunca um
-  ponteiro para dentro do ÍNDICE da coleção (que dangling ao grow). Fecha o UAF de view. **Não é HALT.**
+  copiam o valor; OBJETO → devolvem a REFERÊNCIA (+`retain`), nunca um ponteiro para dentro do ÍNDICE da
+  coleção (que dangling ao grow). Fecha o UAF de view. **Não é HALT.**
 - **T-5 — `remove` swap-vs-shift (ordem de inserção).** As tabelas por hash fazem swap-remove O(1) de
-  ponteiros (perde ordem) ou shift-left O(n) de ponteiros (preserva). `keys()` documenta "insertion order"
+  ponteiros (perde ordem) ou shift-left O(n) (preserva). `keys()` documenta "insertion order"
   (`dictionary.tks:53`) → recomendo shift para preservar o contrato. **Não é HALT.**
-- **T-6 — modelo de OBJETO: self-owned + referência + LUB (RULED pelo dono, CORRIGE a v-anterior).** A versão
-  anterior deste doc recomendava ERRADO "ESCAPE, a coleção é dona" (Q3-A). O dono cravou o modelo C#-like
-  (§2.5): o objeto NÃO é possuído pela coleção e NÃO escapa para a arena dela — vive na sua arena própria
-  por-objeto (F2), a coleção guarda só um PONTEIRO; get/pop copiam o ponteiro, remove solta; a vida é o LUB
-  de todas as referências vivas (`pt_join`/escape-check). **O objeto NÃO tem o problema de transfer/UAF que o
-  enquadramento anterior sugeria — é referência de 1ª classe normal.** Zero cópia de valor no push, zero
-  escape-analysis nova no caminho quente, múltiplas referências ao mesmo objeto = correto. Deep copy é
-  operação explícita à parte. **A antiga dúvida "escape vs borrow" está FECHADA (nenhuma das duas: é
-  referência, não posse-da-coleção nem empréstimo-com-outlives). Não é HALT, não é martelo pendente.**
+- **T-6 — modelo de OBJETO: region-per-object + REFERÊNCIA C#-like + WRAP-REFCOUNT (LEI SELADA `:1742` C +
+  `:1757`; corrige DUAS versões anteriores).** A v-1 deste doc dizia "ESCAPE, a coleção é dona"; a v-2 dizia
+  "LUB-only". Ambas SUPERSEDED pela lei selada: o objeto vive na sua região própria (F2), a coleção guarda um
+  PONTEIRO; a vida é o **wrap-refcount** (inc no retain, dec no release, region_drop no zero), com o
+  LUB/escape-check estático só como limite conservador default. `deep-copy default` governa VALUE-types
+  (nova materialização); OBJETO fica referência. **Deep-copy explícito** (`deep_copy<T>(o): T | error`,
+  §2.5-4) é superfície de stdlib opt-in, cap de profundidade `u8::MAX`=255 HARD → no cap RETORNA `error`
+  (não trunca, não compartilha em silêncio). Zero cópia de valor no push, múltiplas referências corretas.
+  **A antiga dúvida "escape vs borrow" está FECHADA. Não é HALT, não é martelo pendente.**
+- **T-7 — o VALOR-bucket acumula até a morte da região (não é reclaim mid-vida).** SINALIZADO, ACEITO pela
+  lei selada (item C): slots de VALOR reatribuídos/removidos permanecem consumindo até o drop da região da
+  coleção; a redução vem da **região ser curta + pré-dimensionamento Doc-1**, NÃO de reclaim imediato. É
+  consciente e crumb-D-safe. Coleção de vida longa com muito churn de VALOR → preferir alt-3 (nó como região
+  própria) ou objeto (refcount). **Não é HALT** (é o custo selado do modelo).
 
-**Nenhuma barreira, nenhum item pendente do dono: o modelo de objeto foi RULED (T-6) e propagado por todas
-as coleções; cada uma — inclusive a concorrente — tem proposta concreta sob todas as alternativas.**
+**Nenhuma barreira, nenhum item pendente do dono: o modelo de vida está SELADO (`:1742`/`:1757`) — VALOR =
+bucket, OBJETO = wrap-refcount, deep-copy explícito com cap 255→`error` — e propagado por todas as coleções;
+cada uma tem proposta concreta sob todas as alternativas.**
 
 ---
 
-## 9. ALTERNATIVA 3 — coleções ligadas por NÓS (SEM arrays) — o pedido do dono
+## 9. ALTERNATIVA 3 — coleções ligadas por NÓS (SEM arrays) — FUNDACIONAL: a própria arena é composta dela
 
-Owner: *"quero uma terceira alternativa que não trabalha com arrays."* Aqui NÃO há backing contíguo nenhum
-(nem de valores, nem de ponteiros-índice). Cada elemento é um **NÓ** alocado individualmente na arena do
-objeto, ligado por ponteiros. **O problema de grow-copy/leak DESAPARECE POR CONSTRUÇÃO:** não existe "array
-velho" para ficar preso, porque não existe array.
+Owner: *"quero uma terceira alternativa que não trabalha com arrays."* Aqui NÃO há backing contíguo (nem de
+valores, nem de ponteiros-índice). Cada elemento é um **NÓ** alocado individualmente, ligado por ponteiros.
+**O grow-copy/leak DESAPARECE POR CONSTRUÇÃO:** não existe "array velho" para ficar preso, porque não existe
+array.
+
+### 9.0 Por que alt-3 é o SUBSTRATO ESTRUTURAL da arena (não uma opção de luxo)
+
+A arena é DINÂMICA: cresce além do floor por **chunk-list**. Esse chunk-list É **uma coleção node-linked**
+(lista encadeada de chunks), NÃO um array. Usar coleção-de-nós em vez de array na composição da arena
+**quebra a circularidade** "o array precisaria da arena pra crescer": cada chunk é um NÓ, ligado, alocado
+pelo **ALOCADOR CRU** (mmap/syscall, S0/§16) — a arena não depende de NADA acima dela. As **camadas
+explícitas**:
+
+```
+raw-alloc (mmap/syscall S0/§16)                       ← nós vêm daqui, sem depender de nada acima
+  └─ chunk-list da arena (NODE-LINKED; cada chunk = um nó de raw-alloc)   ← ISTO é alt-3
+       └─ arenas (bump sobre os chunks)
+            └─ coleções-de-valor (índice-de-ponteiros §2, OU nós §9, DENTRO de arenas)
+```
+
+**A coleção node-linked (§9) e o chunk-list da arena são O MESMO PADRÃO** — o design de alt-3 serve aos
+DOIS. Por isso o array-free não é luxo: é **o que a própria arena usa** para existir. (Consequência: o
+`Node`/link/unlink de §9.1 é a fundação; a arena o instancia com `T = chunk`, os usuários com `T = elemento`.)
 
 ### 9.1 O mecanismo universal
 
-- **Nó** = `Node<T> = { val: T, next: *Node<T>, prev: *Node<T> }` (prev só onde a estrutura pede). Cada nó
-  mora na **sua própria sub-região reparentável** na arena da coleção. **VALOR**: `val` guarda o valor
-  (escrito uma vez). **OBJETO**: `val` guarda a REFERÊNCIA (ponteiro à arena própria do objeto — o objeto
-  NÃO está no nó nem na arena da coleção, §2.2b).
-- **GROW** = `arena_place` de UM nó e liga-o (ajusta 1–2 ponteiros). **Sem backing, sem grow-copy, sem
-  realocação, sem "array velho".** É O(1) estrutural.
-- **RECLAIM por classe.** `pop`/`remove` de um nó: **VALOR** → REPARENTA a sub-região do nó para a arena do
-  executor (§2.4a, O(1), move-on-return) — o valor morre no escopo do executor; ou region_drop deliberado
-  se descartado. **OBJETO** → SOLTA a referência em `val` (a arena do objeto segue por residência/LUB) e
-  region_drop do NÓ (que só segurava um ponteiro — barato). Os nós que nunca saem caem no bulk-drop da morte
-  da coleção. Sem free-list §7.8 no caminho comum (§7.8 só para o slab imortal concorrente, §4).
-- **Read/write por cópia/referência** (mesma regra do dono): `get` copia `node.val` para fora (VALOR) ou
-  copia o ponteiro (OBJETO); `set` grava o valor (VALOR) ou troca a referência (OBJETO).
+- **Nó** = `Node<T> = { val: T, next: *Node<T>, prev: *Node<T> }` (prev só onde a estrutura pede). O nó é a
+  **unidade de região**: na arena da coleção (elementos) ou vindo do raw-alloc (chunks da arena). **VALOR**:
+  `val` guarda o valor (escrito uma vez). **OBJETO**: `val` guarda a REFERÊNCIA (o objeto vive na sua região
+  própria, §2.2b).
+- **GROW** = alocar UM nó e ligá-lo (1–2 ponteiros). **Sem backing, sem grow-copy, sem realocação.** O(1).
+- **RECLAIM por classe (modelo SELADO).** `pop`/`remove` de um nó: **VALOR** → o `pop` devolve o valor por
+  **DPS normal (§5)** ao chamador; o nó vira **bucket** (marcado morto, freed no bulk-drop da região da
+  coleção) — nada de reparent-por-nó nem region_drop mid-região. **OBJETO** → **`release`** a referência em
+  `val` (dec refcount; no zero → region_drop do objeto); o NÓ vira bucket. Opção crumb-D-safe quando se quer
+  reclaim eager de um nó específico: o nó ser a SUA PRÓPRIA região → region_drop O(1) (é drop-de-região
+  inteira, permitido). O free-list §7.8 fica só para o slab imortal concorrente (§4).
+- **Read/write** (regra do dono): `get` copia `node.val` (VALOR) ou copia o ponteiro + `retain` (OBJETO);
+  `set` grava o valor (VALOR) ou troca a referência (`retain`/`release`, OBJETO).
 
 ```teko
 /**
@@ -842,11 +934,14 @@ type Node<T> = class {
  * collection.
  *
  * @param at    the node to insert after (null to insert at head)
- * @param fresh the newly arena-placed node to splice in
+ * @param fresh the newly allocated node to splice in
  * @since 0.3.1
  */
 fn link_after<T>(at: *Node<T>, fresh: *Node<T>)
 ```
+
+Este mesmo `Node`/`link_after` é o que a **chunk-list da arena** usa (§9.0), com `T = chunk` e o nó vindo do
+raw-alloc — a fundação e o uso partilham o código.
 
 ### 9.2 Mapeamento por coleção
 
@@ -863,23 +958,24 @@ fn link_after<T>(at: *Node<T>, fresh: *Node<T>)
   extract-min O(log n) amortizado, merge O(1) — sem grow-copy, sem heapify de array.
 - **`Deque`/`Queue`/`Stack`** → ligados. O(1) nas duas pontas (deque duplamente ligada), sem grow-copy.
 - **Concorrentes** → **JÁ eram node-based** (Treiber/MS-queue sobre o slab de segments, §4). Alt-3
-  **unifica** com elas: a família sequencial ligada e a concorrente ligada partilham o `Node`/free-list. É o
-  encaixe natural.
+  **unifica** com elas: a família sequencial ligada, a concorrente ligada E a chunk-list da arena (§9.0)
+  partilham o `Node`/link. É o encaixe natural — três clientes de um padrão.
 
 ### 9.3 Tradeoffs HONESTOS vs. as abordagens de array
 
 - **PERDE:** índice aleatório O(1) (List-by-index vira O(n) traversal); overhead de ponteiro por elemento
   (1–2 palavras `next`/`prev`); cache-unfriendly (nós espalhados na arena, não contíguos) → mais cache-miss
   em varredura sequencial.
-- **GANHA:** insert/remove em QUALQUER posição O(1) dado o nó (sem shift); **zero grow-copy; zero desperdício
-  de capacidade; SEM VAZAMENTO POR CONSTRUÇÃO** (não há array velho a estrangular); casa 1-para-1 com as
-  concorrentes; a reclamação por-nó é o reparent/drop arena-nativo (§2.4a), fino e exato.
+- **GANHA:** insert/remove em QUALQUER posição O(1) dado o nó (sem shift); **zero grow-copy; SEM VAZAMENTO
+  POR CONSTRUÇÃO** (não há array velho a estrangular); casa 1-para-1 com as concorrentes E com a chunk-list
+  da arena (§9.0 — é FUNDACIONAL); a reclamação segue o modelo selado (VALOR bucket / OBJETO refcount), com
+  a opção de nó-como-região-própria para region_drop eager (crumb-D-safe).
 - **Neutro:** total de memória — o overhead de ponteiro por nó (16 B doubly) compete com o desperdício de
-  capacidade do array doubling (≤ `count` ponteiros); para elementos grandes o array (índice de ponteiros)
-  e o nó são comparáveis; para escalares o array-inline vence em bytes/cache.
+  capacidade do array doubling (≤ `count` ponteiros); nós de VALOR removidos viram bucket (como slots de
+  array) até a morte da região; para escalares o array-inline vence em bytes/cache.
 
-Alt-3 tem design CONCRETO para toda coleção (nenhuma fica "blocked"); exige as MESMAS primitivas §2.7
-(`arena_place`, ponteiros, `region_reparent`/`region_drop`) — nada além.
+Alt-3 tem design CONCRETO para toda coleção (nenhuma fica "blocked") E é o substrato da arena; exige as
+MESMAS primitivas §2.7 (`place`/`read`, ponteiros/`Node`, `retain`/`release`, `region_drop`) — nada além.
 
 ---
 
@@ -891,8 +987,8 @@ sem array. **O eixo do SHIFT (O(n)/O(n²)) é de PRIMEIRA CLASSE** — está sep
 
 | dimensão | (1) índice doubling | (1r) índice RING | (2) índice exact | (3) node-linked |
 |---|---|---|---|---|
-| memória (leak) | ✔ zero | ✔ zero | ✔ zero | ✔ zero POR CONSTRUÇÃO |
-| memória (waste/high-water) | ~ ≤`count` ptrs | ~ ≤`count` ptrs | ✔ zero waste | ~ 1–2 palavras/nó |
+| memória (grow-leak) | ✔ zero | ✔ zero | ✔ zero | ✔ zero POR CONSTRUÇÃO |
+| memória (waste + bucket até drop) | ~ ≤`count` ptrs + slots-bucket | ~ idem | ~ slots-bucket | ~ 1–2 palavras/nó + nós-bucket |
 | append/pop nas PONTAS | ✔ O(1) 1 ponta | ✔ **O(1) nas DUAS** | ✘ O(n) | ✔ O(1) nas duas |
 | **remove/insert no MEIO/FRENTE (SHIFT)** | ✘ **O(n) → O(n²)** | ✘ **O(n) no meio** | ✘ O(n) | ✔ **O(1) dado o nó, ZERO shift** |
 | índice aleatório `get(i)` | ✔ O(1) | ✔ O(1) (mod) | ✔ O(1) | ✘ O(n) traversal |
