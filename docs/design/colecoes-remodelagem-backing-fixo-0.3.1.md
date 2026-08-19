@@ -256,18 +256,24 @@ hora**, então nem esse pico persiste. **Zero valor copiado; zero array-morto re
   `index[count]`, `count++`; cresce o índice antes se cheio. **A cópia acontece na entrada** e o índice
   nunca copia valor de novo.
 
-**(a) REMOVE/POP = TRANSFERÊNCIA DE REGIÃO, não free (o move-on-return / DPS da arena, §5 canonical de
-`arena-especificacao-unica-0.3.1.md`).** `pop()`/`remove_at(i)`/`dequeue()` NÃO liberam o elemento na arena
-da coleção: **REPARENTAM** a sub-região do elemento removido para a arena de QUEM CHAMOU (o escopo corrente
-/ o destino do retorno do pop) — um reparent O(1). O elemento então morre no escopo do chamador (reclaim
-normal), NÃO fica na coleção. Casos: **escalar inline** → pop é só cópia-pra-fora, nada a reparentar;
-**objeto / value-struct grande** → reparenta a sub-região do elemento (O(1)); se o resultado for descartado
-(remove sem ligar a variável), um **region_drop deliberado** em vez do reparent. Consequência: a arena da
-coleção segura APENAS os vivos; o churn/high-water é NULO, sem free-list por-entrada no caminho comum.
+**(a) REMOVE/POP = TRANSFERÊNCIA DE REGIÃO, não free — semântica GERAL (variável/array/coleção; ruling do
+dono, o move-on-return / DPS da arena, §5 canonical de `arena-especificacao-unica-0.3.1.md`).** Encode
+assim:
+- **`x[0] = 5` num array de ESCALARES** → OVERWRITE LIMPO de memória, sem transferência, nada a reclamar.
+- **`replace(v,i)`/`pop()`/`remove(i)` de elemento PONTEIRO** → o elemento deslocado é TRANSFERIDO (reparent
+  da sua sub-região) para a arena de QUEM EXECUTOU a operação; a arena do executor passa a cuidar do tempo
+  de vida (o elemento morre na saída do escopo do executor). Se o resultado NÃO é ligado (ex. `remove(0)` sem
+  receber), morre no escopo do executor de IMEDIATO — um `region_drop` deliberado. É a lei do
+  purge-na-reatribuição: o purgado vai para a arena do executor.
 
-Ler/gravar por cópia + reparent-no-pop garante que o ponteiro no índice **nunca escapa como alias vivo**
-para o chamador (o `get` copia; o `pop` transfere a posse da região inteira) — fecha qualquer UAF de valor
-por construção.
+Casos por classe de armazenamento: **escalar inline** → pop é só cópia-pra-fora, nada a reparentar;
+**objeto / value-struct grande** → reparent O(1) da sub-região (ou region_drop se descartado). Consequência:
+a arena da coleção segura APENAS os vivos; o churn/high-water é NULO, sem free-list por-entrada no caminho
+comum.
+
+**Por que a transferência é SEMPRE segura:** ler/gravar é por CÓPIA ⇒ nenhum alias vivo do elemento existe
+fora da coleção (`get` copia; o índice nunca vaza ponteiro) ⇒ **dono único** ⇒ transferir a posse da região
+inteira para o executor não pode criar dangling. É o casamento exato read-por-cópia + reparent-no-pop.
 
 ### 2.5 Q3 (PENDENTE do dono) — inserir um OBJETO: ESCAPA para a arena da coleção, ou a coleção BORROWS?
 
@@ -361,8 +367,12 @@ as primitivas acima nomeiam. **Bloqueado até `of_len`+índice-assign+`arena_pla
   &x_placed`, `count++`. `get(i)` = `copy_out(self.index[i])`. `set(i,x)` = region_drop do alvo antigo +
   `arena_place` do novo, reapontando (inline: `index[i]=x`). `pop()` = **reparenta** a sub-região do último
   elemento para o chamador (o move-on-return; inline: cópia-pra-fora) + `count--`; não realoca o índice.
-  `remove_at(i)` = **reparenta/dropa** a sub-região do elemento `i` + shift-left dos PONTEIROS `[i+1..count)`
-  + `count--` (move ponteiros, não valores; O(n) em ponteiros).
+  **`push`/`pop` no FIM = O(1)** (só o watermark). `remove_at(i)` = **reparenta/dropa** a sub-região do
+  elemento `i` + **shift-left compactando os PONTEIROS `[i+1..count)`** + `count--`. **CUSTO EXPLÍCITO
+  (eixo de 1ª classe, §10): o shift preservando ordem é O(n) por remove/insert no MEIO ou na FRENTE → O(n²)
+  sob churn frontal/meio.** Move ponteiros, não valores, mas é O(n) mesmo assim. Um índice-array NUNCA é
+  O(1) no meio arbitrário — só nas pontas (e O(1) nas DUAS pontas exige um ring/deque com wrap, §3.7). Para
+  workload de remove/insert frontal/meio pesado, o vencedor é alt-3 node-linked (O(1) dado o nó, zero shift).
   `to_array()` = snapshot: `of_len(count)` + `copy_out` de cada slot (cópia independente — nunca partilha o
   índice; senão a view penduraria quando a lista crescesse). Escalar-inline (§2.2a) degenera para
   `index: []T` inline sem `arena_place`.
@@ -398,10 +408,12 @@ as primitivas acima nomeiam. **Bloqueado até `of_len`+índice-assign+`arena_pla
 
   `insert(k,v)`: acha `at`; se presente, sobrescreve o valor apontado por `vals[at]` por cópia (count
   intacto); senão cresce se cheio, `arena_place(k)`/`arena_place(v)`, grava os ponteiros em `[count]`,
-  `count++`. `remove`: **reparenta/dropa** as sub-regiões de `keys[at]`/`vals[at]` + swap-remove dos
-  ponteiros (move o último para `at`, `count--`) — O(1), sem shift, sem realocar; se `keys()` for
-  contratualmente "insertion order" (`dictionary.tks:53`), usa shift-left dos ponteiros. `hashes` é `u64`
-  inline (não precisa de `arena_place`).
+  `count++`. `remove`: **reparenta/dropa** as sub-regiões de `keys[at]`/`vals[at]` + **swap-remove** dos
+  ponteiros (troca com o último, `count--`) — **O(1), sem shift, sem realocar, MAS QUEBRA A ORDEM** → válido
+  só porque uma tabela por hash é NÃO-ordenada (bag/set). Se `keys()` for contratualmente "insertion order"
+  (`dictionary.tks:53`), o swap-remove NÃO serve: cai no **shift-left dos ponteiros, O(n)** (→ O(n²) sob
+  churn) — o preço de preservar ordem num índice-array. `hashes` é `u64` inline (não precisa de
+  `arena_place`).
 - **A forma bucket open-addressing** (a "rehash com load-factor" do escopo R9): é a evolução recomendada e
   casa perfeitamente com o modelo — o backing de buckets é um índice fixo `[]*Slot` (ou `[]Slot` inline se
   `Slot` couber numa palavra); quando `count/cap > 0.75`, `bucket_rehash` aloca um NOVO índice de buckets,
@@ -458,6 +470,23 @@ MAP pura. (Estes operam sobre `[]T` cru, não índices — são utilitários de 
 `src/list/list.tks:1-3` = `x.value = teko::list::push(x.value, v)` — choke-point folha do push por `ref`.
 Owner F1 (`arena-escopada-…:481,514`): *"não é pra manter o método."* REMOVIDO inteiro — `ref []T` é só
 ponteiro-de-posição. Chamadores usam `List<T>::push` (§3.1) ou uma das quatro naturezas in-line.
+
+### 3.7 `Deque<T>` / `Queue<T>` / `Stack<T>` — o RING de índice (O(1) nas DUAS pontas, sem shift)
+
+Estas são de DESIGN (plano FASE-1a; `plano-…:176-178`). O ponto-chave é evitar o shift O(n): um índice-array
+plano só é O(1) numa ponta (append/pop na cauda). Para O(1) nas DUAS pontas SEM shift, o índice é um **RING**
+(head/tail com wrap-around) sobre um índice fixo de ponteiros:
+
+- **`Stack<T>`** = índice-array simples; push/pop na cauda O(1) (só watermark). Não precisa de ring.
+- **`Queue<T>` / `Deque<T>`** = **ring de índice**: `{ index: []*T, head: u64, tail: u64, count: u64 }`.
+  `push_back`/`push_front`/`pop_back`/`pop_front` = escrever/ler o slot em `head`/`tail` (mod `index.len`) e
+  mover o cursor — **O(1) nas DUAS pontas, ZERO shift**. Crescer (quando `count == index.len`) = `grow_index`
+  para um novo ring maior, RE-LINEARIZANDO os ponteiros a partir de `head` (copia só ponteiros, valores
+  intactos, índice velho liberado). Remove/pop de PONTA reparenta a sub-região para o executor (§2.4a).
+- **Remove no MEIO de um ring** volta a ser O(n) (compactar) — se o workload exige remove/insert no meio, a
+  recomendação é alt-3 node-linked (§9), não o ring.
+- **BOUNDED** (tamanho de bound conhecido) = ring fixo do tamanho do bound, NÃO cresce nunca — encaixe
+  perfeito de backing fixo.
 
 ---
 
@@ -808,45 +837,55 @@ Alt-3 tem design CONCRETO para toda coleção (nenhuma fica "blocked"); exige as
 
 ## 10. Comparação lado a lado + recomendação POR coleção
 
-Legenda de score: ✔ bom / ~ médio / ✘ ruim. As três alternativas: **(1)** ponteiro-índice,
-doubling+watermark; **(2)** ponteiro-índice, exact-grow; **(3)** node-linked, sem array.
+Legenda de score: ✔ bom / ~ médio / ✘ ruim. As alternativas: **(1)** ponteiro-índice doubling+watermark;
+**(1r)** ponteiro-índice em RING (head/tail, §3.7); **(2)** ponteiro-índice exact-grow; **(3)** node-linked
+sem array. **O eixo do SHIFT (O(n)/O(n²)) é de PRIMEIRA CLASSE** — está separado em "pontas" vs "meio".
 
-| dimensão | (1) índice doubling | (2) índice exact | (3) node-linked |
-|---|---|---|---|
-| memória (leak) | ✔ zero (índice liberado eager) | ✔ zero | ✔ zero POR CONSTRUÇÃO |
-| memória (waste/high-water) | ~ ≤`count` ponteiros sobressalentes | ✔ zero waste | ~ 1–2 palavras/nó |
-| append (amortizado) | ✔ O(1) | ✘ O(n) (realoca sempre) | ✔ O(1) |
-| índice aleatório `get(i)` | ✔ O(1) | ✔ O(1) | ✘ O(n) traversal |
-| insert/remove-anywhere | ~ O(n) shift de ponteiros | ~ O(n) | ✔ O(1) dado o nó |
-| cache | ✔ índice contíguo | ✔ contíguo | ✘ nós espalhados |
-| fit concorrência | ~ precisa retain/segment do índice | ~ idem | ✔ nativo (Treiber/MS) |
-| complexidade | ✔ simples | ✔ simples | ~ mais ponteiros/casos |
+| dimensão | (1) índice doubling | (1r) índice RING | (2) índice exact | (3) node-linked |
+|---|---|---|---|---|
+| memória (leak) | ✔ zero | ✔ zero | ✔ zero | ✔ zero POR CONSTRUÇÃO |
+| memória (waste/high-water) | ~ ≤`count` ptrs | ~ ≤`count` ptrs | ✔ zero waste | ~ 1–2 palavras/nó |
+| append/pop nas PONTAS | ✔ O(1) 1 ponta | ✔ **O(1) nas DUAS** | ✘ O(n) | ✔ O(1) nas duas |
+| **remove/insert no MEIO/FRENTE (SHIFT)** | ✘ **O(n) → O(n²)** | ✘ **O(n) no meio** | ✘ O(n) | ✔ **O(1) dado o nó, ZERO shift** |
+| índice aleatório `get(i)` | ✔ O(1) | ✔ O(1) (mod) | ✔ O(1) | ✘ O(n) traversal |
+| swap-remove (perde ordem) | ✔ O(1) | ✔ O(1) | ✔ O(1) | — |
+| cache | ✔ contíguo | ✔ contíguo | ✔ contíguo | ✘ nós espalhados |
+| fit concorrência | ~ retain/segment do índice | ~ idem | ~ idem | ✔ nativo (Treiber/MS) |
+| complexidade | ✔ simples | ~ wrap-around | ✔ simples | ~ mais ponteiros/casos |
 
-**Recomendação por coleção** (podem divergir — e divergem):
+**O trade-off do SHIFT, explícito (o eixo que o dono cobrou):** num índice-array, `remove(i)`/`insert(i)`
+na FRENTE ou no MEIO PRESERVANDO ORDEM exige compactar `[i+1..count)` deslizando um slot → **O(n) por
+operação → O(n²) sob churn frontal/meio**. `push`/`pop` no FIM = O(1). `swap-remove` = O(1) mas QUEBRA a
+ordem (só Set/bag não-ordenado). O(1) nas DUAS pontas só via **ring/deque** (1r), e ainda assim NUNCA O(1)
+no meio arbitrário. Só **alt-3 (3)** dá remove/insert O(1) no meio, zero shift.
 
-- **`List<T>` → (1) índice doubling+watermark.** Precisa de `get(i)` O(1) e append O(1); o índice contíguo
-  é cache-friendly. Node-linked perde o random-index (o uso dominante de List). **Default: (1).** (Se o uso
-  for insert/remove-no-meio-pesado e sem index, oferecer `LinkedList<T>` alt-3 à parte.)
-- **`Map`/`Dictionary`/`HashSet` → (1) índice paralelo doubling+watermark** para a forma linear embarcada;
-  **evolução recomendada = bucket open-addressing** (índice de buckets, rehash por load-factor — a
-  remodelagem R9 exata). Random-index não importa; o que importa é lookup por chave. Node-linked (BST) só se
-  ordenação total for requisito. **Default: (1) linear agora, (1) bucket como follow-up.**
-- **`SortedSet`/`SortedDictionary` → (3) node-linked (skip-list ou BST balanceada).** Aqui alt-3 VENCE: o
-  array shifta O(n) por inserção; a skip-list dá O(log n) insert/remove/lookup + iteração ordenada sem
-  shift e sem grow-copy. Se a coleção for build-once-then-read (raramente muda), (1) com busca binária é
-  aceitável e mais cache-friendly. **Default: (3) para uso insert-heavy; (1) para build-once.**
-- **`PriorityQueue<T>` → (1) índice heap doubling+watermark** como default (heap binário de ponteiros,
-  cache-friendly, O(log n), simples). **Alternativa (3) pairing heap** quando insert-heavy ou merge de filas
-  for necessário (insert O(1), merge O(1)). **Default: (1); (3) para merge/insert-heavy.**
-- **`Deque`/`Queue`/`Stack` → depende do bound.** `Stack` → (1) índice doubling (append/pop O(1) na cauda,
-  cache-friendly). `Queue`/`Deque` UNBOUNDED → (3) node-linked (O(1) nas duas pontas, sem grow-copy). BOUNDED
-  → ring fixo (nem cresce). **Default: Stack (1); Deque/Queue unbounded (3); bounded ring fixo.**
-- **Concorrentes → (3) node-linked** (Treiber/MS-queue), já era o caminho; o slab de segments imortais é o
+**Recomendação por coleção** (divergem — e o shift é visível em cada uma):
+
+- **`List<T>` append + `get(i)` aleatório, remove-meio RARO → (1) índice doubling.** O(1) index e append,
+  cache-friendly; **assumindo O(n) no remove/insert-meio (O(n²) sob churn) — trade-off explícito.**
+- **`List<T>` com remove/insert FRONTAL/MEIO pesado → (3) node-linked** (O(1) dado o nó, zero shift) — o
+  vencedor decisivo quando o workload é churn no meio/frente. Se o churn é só nas PONTAS → **(1r) ring**.
+- **`Map`/`Dictionary`/`HashSet` (NÃO-ordenado) → (1) índice paralelo com SWAP-REMOVE O(1)** (a ordem não é
+  contratual numa tabela por hash); **evolução = bucket open-addressing** (rehash por load-factor). Se
+  `keys()` exigir insertion-order, o remove vira shift O(n) — pesar. **Default: (1) linear+swap-remove agora,
+  (1) bucket como follow-up.**
+- **`SortedSet`/`SortedDictionary` → (3) node-linked (skip-list ou BST).** Aqui alt-3 VENCE claro: o índice-
+  array shifta O(n)→O(n²) por inserção ordenada; a skip-list dá O(log n) insert/remove/lookup + iteração
+  ordenada, ZERO shift. Só se build-once-then-read, (1) com busca binária serve. **Default: (3) insert-heavy;
+  (1) build-once.**
+- **`PriorityQueue<T>` → (1) índice heap doubling** (sift O(log n) por swap de ponteiros — NÃO é o shift
+  linear; o heap não compacta). **Alt (3) pairing heap** para insert-heavy/merge. **Default: (1); (3) para
+  merge.**
+- **`Stack<T>` → (1) índice doubling** (push/pop O(1) numa ponta; sem shift, sem ring). **Qualquer serve.**
+- **`Queue`/`Deque` → (1r) ring de índice** (O(1) nas DUAS pontas, sem shift, cache-friendly) como default;
+  **(3) node-linked** se também houver remove no MEIO. BOUNDED → ring fixo (nem cresce).
+- **Concorrentes → (3) node-linked** (Treiber/MS-queue), já era o caminho; o slab de segments imortais é a
   "arena" dos nós. **Default: (3).**
 
-**Síntese.** O modelo **ponteiro-índice (1)** é o default para acesso-por-índice e hash (List, Map,
-PriorityQueue, Stack); o **node-linked (3)** é o default para ordenado-mutável e filas/deques unbounded e as
-concorrentes. O **exact-grow (2)** só para coleções build-once. **As TRÊS fecham o vazamento da v1:** (1) e
-(2) porque o que cresce é um índice de ponteiros liberado individualmente (valores escritos uma vez, nunca
+**Síntese.** **ponteiro-índice (1)** para append + index aleatório + hash (List-append, Map, PQ, Stack),
+**assumido o O(n²)-shift no remove-meio**; **ring (1r)** para filas/deques (O(1) nas duas pontas);
+**node-linked (3)** para ordenado-mutável, remove/insert-no-meio pesado, e as concorrentes (O(1) no meio,
+zero shift); **exact-grow (2)** só build-once. **As alternativas fecham o vazamento da v1:** (1)/(1r)/(2)
+porque o que cresce é um índice de ponteiros liberado individualmente (valores escritos uma vez, nunca
 recopiados); (3) porque não existe array nenhum a estrangular. F1 permanece inviolável em todas — todo array
 usado (o índice, os buckets, o ring) é fixo, crescido por novo-array-fixo+free-old, nunca resize in-place.
