@@ -162,12 +162,12 @@ Doc-2 terminal, `syscall-intrinsic` §3). Endereços cruzam por `ptr_word`/`ref_
 
 | # | header | símbolos REAIS | classe | mecanismo | doc |
 |---|---|---|---|---|---|
-| 35 | `<windows.h>` | `CreateProcessA`,`FindFirstFileA`,`FindNextFileA`,`FindClose`,`CreateFileA`,`DuplicateHandle`,`GetStdHandle`,`WaitForSingleObject`,`GetExitCodeProcess`,`GetEnvironmentStringsA` | **X/S** | `extern fn … from "kernel32"` per-target (precisa **TargetSymbol** + import-lib linker) | **NOVO/BLOQUEADO** (migração doc §3.3 etapa B; Fase E) |
-| 36 | `<direct.h>` | `_chdir`,`_mkdir`,`_getcwd` | **S** | idem, resolvidos por-alvo (a metade fs) | **NOVO** (migração doc §3.3 etapa A) |
+| 35 | `<windows.h>` | `CreateProcessA`,`FindFirstFileA`,`FindNextFileA`,`FindClose`,`CreateFileA`,`DuplicateHandle`,`GetStdHandle`,`WaitForSingleObject`,`GetExitCodeProcess`,`GetEnvironmentStringsA` | **X/S** | `extern fn … from "kernel32"` per-target (target-guarded + import-lib linker) | **NOVO/BLOQUEADO** (migração doc §3.3 etapa B; Fase E) |
+| 36 | `<direct.h>` | `_chdir`,`_mkdir`,`_getcwd` | **S** | idem, resolvidos por-alvo via target-guarded `extern fn` (a metade fs) | **NOVO** (migração doc §3.3 etapa A) |
 | 37 | `<process.h>` | `_spawnvp`,`_P_WAIT` | **X** | substituído por CreateProcessA (#35) | **NOVO/BLOQUEADO** |
 
 **`win32_compat.h` não tem vida própria** — some quando #15/#17/#18/#23/#26 migrarem (2 etapas:
-metade-fs precisa só de `TargetSymbol`; metade-processo precisa de struct-by-value-FFI + linker de
+metade-fs precisa só de target-guarded `extern fn` (ratified D-TS1, 2026-08-19); metade-processo precisa de struct-by-value-FFI + linker de
 import-lib Win32, encostando na Fase E). `migracao-runtime-c-para-teko-0.3.1.md` §3.3.
 
 **Contagem:** 37 linhas de dep (headers/subsistemas). **Cobertas por desenho §16 existente:** 1,2,3,5,7,
@@ -330,9 +330,9 @@ O §16 fecha com threads via raw syscall/FFI direto do kernel — sem trampolim 
 **DECIDED:** **CONFIRMED** — `stat`/`dirent`/`sockaddr` etc. get dedicated struct layouts **per `#os` (and possibly per `#arch`)** in the monolith mechanism. 
 Cada struct-de-SO (Darwin `stat` ≠ Linux `stat`) é um `extern type` guarded por `#os`, materializado no monolith cc-emit via `#if`. Windows sem AF_UNIX → transporte alternativo (Named Pipes) reportado a §10, não inventado aqui. Fixture pinada em cada layout (S9 via stat real).
 
-**R4 — per-target symbol binding: use pragmas + `.tkp` — RATIFIED (owner, 2026-08-17)**
+**R4 — per-target symbol binding: use pragmas + `.tkp` — RATIFIED (owner, 2026-08-17; REAFFIRMED D-TS1, owner 2026-08-19)**
 **DECIDED:** use the **existing pragmas + the `.tkp`** (which already carry FFI-instrumentation helpers) — do **NOT invent a new declaration form**. 
-`TargetSymbol` como forma sintática **não** ratificado; em vez disso, cada `extern fn` que diverge por target (ex: FS Windows vs POSIX) redeclara-se sob `#os` guarding. Pragma-FFI existente resolve a ligação de símbolo nativo. Metade-fs (F4) sai com essa regra; metade-processo (F6) atrasa até struct-by-value-FFI + linker import-lib (Fase E).
+O `TargetSymbol` como forma sintática é **WITHDRAWN** (D-TS1, 2026-08-19); em vez disso, cada `extern fn` que diverge por target (ex: FS Windows vs POSIX) redeclara-se sob `#os` guarding (precedente: `src/io/file_stream.tks`). Pragma-FFI existente + `prune_cc` resolve a ligação de símbolo nativo. Metade-fs (F4) sai com essa regra; metade-processo (F6) atrasa até struct-by-value-FFI + linker import-lib (Fase E).
 
 **R5 — Backtrace/dladdr: BUILD in Teko — RATIFIED (owner, 2026-08-17)**
 **DECIDED:** **BUILD it in Teko** — no degrade-to-no-op. 
@@ -347,8 +347,8 @@ Cada struct-de-SO (Darwin `stat` ≠ Linux `stat`) é um `extern type` guarded p
   (Fase E). Sem isso, o bloco Win32 não vira Teko.
 - **F7 (threads/channels):** ruling §17+ (clone/CreateThread); canais dependem de threads; Windows sem
   AF_UNIX precisa de transporte alternativo (REPORTAR a §10).
-- **`TargetSymbol`** (seleção-`extern`-por-alvo): sem forma na declaração hoje — bloqueia o Windows da
-  metade-fs (F4) e de tudo o mais per-alvo. Superfície-nova aguardando ratificação (migração doc §6).
+- **Per-target symbol selection (RESOLVED D-TS1, 2026-08-19):** metade-fs (F4) agora desbloqueada via
+  target-guarded `extern fn` (não há nova forma sintática `TargetSymbol`; usa `#os` guarding + `prune_cc`).
 - **3 rulings do owner:** (R1) shared-lib-nativa-pthread conta como sweep-limpo? (R2) intrínseco de
   captura vs harness out-of-process p/ setjmp? (R5) degradar backtrace/dladdr é aceitável?
 
@@ -401,7 +401,7 @@ header C). S9/S11 são os NOVOS de maior risco (layout per-SO / algoritmo de cal
    MEM_PARANOID exit 0 + árvore completa. O RITUAL mais perigoso (uma arena sutilmente errada corrompe
    todo emit — arena-em-teko §6).
 3. **Após F4** (fs/env/tempo) — mata a metade-fs do `win32_compat.h`; S7-S14. Per-target: POSIX verde,
-   Win32 compila (se `TargetSymbol` ratificado).
+   Win32 compila (via target-guarded `extern fn`, D-TS1 ratified 2026-08-19).
 4. **Após CADA crumb de DELEÇÃO de símbolo C** (a regra das duas-pernas): a perna C (`cc
    bootstrap/teko.c`) E a perna native (emit linka com o `teko_rt.c` encolhido) ambas buildam.
 5. **F9 — o SWEEP — RITUAL TERMINAL do §16.** Parar de emitir os `#include` (reseed), deletar os 4,

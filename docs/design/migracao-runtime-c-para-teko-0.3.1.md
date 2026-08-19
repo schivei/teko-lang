@@ -352,6 +352,13 @@ pub type TargetSymbol = struct {
     win32: str
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   WITHDRAWN (owner 2026-08-19, D-TS1) — per-target symbol selection IS the
+   existing target-guarded `extern fn` mechanism (`#os` / `#arch` guards +
+   `prune_cc`), not this struct. See `target-symbol-extern-selection-0.3.1.md`
+   and precedent `src/io/file_stream.tks` for os_open/os_read/os_write/os_close.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
 /**
  * store_u64 — grava a palavra `v` no endereço cru `addr` (P1). NÃO ALOCA — é a propriedade que
  * quebra a circularidade do arena (`arena-em-teko.md` §2 P1): a bookkeeping do arena cabe na memória
