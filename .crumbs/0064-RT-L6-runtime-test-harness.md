@@ -11,9 +11,10 @@ sources:
   - "docs/design/migracao-runtime-c-para-teko-0.3.1.md:320"        # §5 F6 — harness + assert + backtrace, owner decision on setjmp
   - "docs/design/migracao-runtime-c-para-teko-0.3.1.md:398,406-413"# R3 (setjmp tension) + law-first recommendation
   - "docs/design/plano-s16-expurgo-libc-completo.md:246,327"       # FASE8 test/crash — setjmp TENSION, backend intrinsic
+  - "owner ruling 2026-08-19"                                       # capture_panic backend intrinsic ratified (R3 close)
 ---
 
-# 0064 · RT-L6 — runtime C→Teko L6: test harness + assert + backtrace (setjmp/longjmp + signal) — owner gate
+# 0064 · RT-L6 — runtime C→Teko L6: test harness + assert + backtrace (setjmp/longjmp + signal)
 
 > Close the L6 layer: the test harness, the assert integration, and the crash/backtrace handler run in Teko —
 > resolving the one irreducible tension (non-local capture) with a backend intrinsic, not a C shim.
@@ -32,14 +33,11 @@ without killing the suite, and Teko has NO non-local-control surface (`migracao�
 for existing programs (fixpoint guards existing-case residence; `migracao…` R8); a `fixpoint-rebuild` swap, no
 teaching reseed.
 
-**BLOCKED (design-ahead, honest) + one law tension.** Behind the **native fixpoint closing** (`migracao…`
+**RESOLVED (owner ratified 2026-08-19).** Behind the **native fixpoint closing** (`migracao…`
 banner), its deps **RT-L5** (task/names/coverage the harness drives) and **S16-PANIC** (the migrated assert).
-This is the **owner-gate** layer: R3 (setjmp/longjmp) is a GENUINE tension — M.1 (fail-loud) requires the
-panic-capture guard, but no Teko surface exists for non-local control. This doc DRAFTS the law-first resolution
-(a backend capture intrinsic — the backend already owns the stack at the crash handler; it leaves NO C residue
-and invents no language surface only the harness uses) and states the bridge (a minimal C setjmp shim survives
-FASE8 as the last residue ONLY if no intrinsic is ratified). **HALT-parcial for the owner if, at F6, no
-non-local-capture surface is ratified** (`migracao…` R3 / §8) — relayed as plain text, not decided here.
+R3 (setjmp/longjmp) is CLOSED by owner ruling (2026-08-19): the backend `capture_panic` intrinsic is the
+law-first resolution — the backend already owns the stack at the crash handler; it leaves NO C residue and
+invents no language surface only the harness uses. The minimal C setjmp shim fallback is NOT taken.
 
 ## Where
 
@@ -71,8 +69,8 @@ non-local-capture surface is ratified** (`migracao…` R3 / §8) — relayed as 
  * capture_panic — run `body` and, if it panics, catch the panic and return its message instead of unwinding
  * past this frame (the harness guard that keeps one failing case from killing the suite). Realised by a
  * BACKEND intrinsic (stack unwind + PC restore), not a language-level control surface and not a C setjmp shim
- * (`migracao…` R3 — the law-first close: no C residue, no harness-only language feature). Owner-gated: this
- * signature is DRAFT until the non-local-capture surface is ratified (§16-FASE8 / `migracao…` §8).
+ * (`migracao…` R3 — the law-first close: no C residue, no harness-only language feature). RATIFIED
+ * (owner ruling 2026-08-19).
  *
  * @param body  the scenario body to run under capture
  * @return      null if `body` completed, or the panic message if it panicked
@@ -106,22 +104,19 @@ Reused (do NOT redeclare): the migrated assert family (S16-PANIC), the L5 task/c
 - **M.1 fail-loud (`migracao…` R3):** the panic-capture guard is REQUIRED — a suite that cannot catch a
   scenario panic without aborting is not fail-loud-correct. The guard is the backend intrinsic (recommended)
   or the bridge shim (fallback).
-- **Law-first close (`migracao…` R3, §8):** the backend capture intrinsic is the resolution that obeys all
-  laws (Teko-only via a backend intrinsic, no harness-only language surface, no C residue). Carry it to the
-  owner ALONGSIDE `cov_dump_s` (RT-L5 R6) — the two surfaces the runtime migration needs ratified.
+- **Law-first close (`migracao…` R3, §8):** R3 is CLOSED by owner ruling 2026-08-19. The backend capture
+  intrinsic is the ratified resolution that obeys all laws (Teko-only via a backend intrinsic, no
+  harness-only language surface, no C residue). The minimal C setjmp shim fallback is NOT taken.
 - **Safety:** NEVER `teko test .`; build in a subshell with `ulimit -v 6815744` cap — a blown guard is a
   root-cause fix, never a raised ceiling; commit each green step; **reseed ONLY at a [RITUAL]** — this is
   `fixpoint-rebuild`, no teaching seed harvested; fixpoint `gen2==gen3` byte-identical; sweep `.tkt`/`.tkr`
   after the `capture_panic` signature lands.
 
-## HALT (relayed to the owner — plain text, not decided here)
+## RESOLVED (R3 — non-local panic capture)
 
-**R3 — non-local panic capture.** The harness's setjmp/longjmp has no Teko surface. Law-first recommendation:
-a **backend non-local-capture intrinsic** (`capture_panic`, drafted above) — it obeys every law and leaves no
-C residue. If, at F6, no such surface is ratified, a minimal C setjmp shim bridges as the last measured residue
-(retired on ratification). This is a genuine tension: it HALTs for the owner ONLY if neither the intrinsic nor
-the bridge is accepted. Carry it with `cov_dump_s` (RT-L5) as the two runtime-migration surfaces awaiting a
-ruling.
+**R3 CLOSED.** Owner ruling 2026-08-19 ratified the backend `capture_panic` intrinsic as the law-first
+resolution — it obeys every law and leaves no C residue. The minimal C setjmp shim fallback is NOT taken.
+The tension is resolved; no HALT remains.
 
 ## Fixtures
 
@@ -137,10 +132,10 @@ the harness/crash path is not self-build-exercised (the gate never runs `teko te
 ## Gate
 
 `[fixpoint]` — build gen2 + the scoped fixtures + `gen2==gen3` byte-identity. "Green" = the harness + assert
-integration + crash handler run in Teko, panic capture preserves the suite (via the ratified intrinsic or the
-bridge shim), coverage is non-zero on the native path, and the emitted `teko.c` is byte-identical to before the
-swap. This is the **owner-gate** layer (R3 must be ruled). **Reseed-class:** `fixpoint-rebuild` (core-consumes;
-teaches nothing; no reseed harvested).
+integration + crash handler run in Teko, panic capture preserves the suite (via the ratified backend intrinsic),
+coverage is non-zero on the native path, and the emitted `teko.c` is byte-identical to before the swap. R3 is
+CLOSED by owner ruling 2026-08-19. **Reseed-class:** `fixpoint-rebuild` (core-consumes; teaches nothing; no
+reseed harvested).
 
 ## Deps
 
