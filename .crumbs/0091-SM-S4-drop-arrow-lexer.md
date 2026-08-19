@@ -20,15 +20,16 @@ sources:
 
 ## Goal
 
-The M2→M3 boundary opens here. After SM-S1 swept every `src/` + `.tkt` return to the unified `:` operator, the
-`Arrow` (`->`) token and its parser branch are DEAD — nothing produces or consumes them. This crumb REMOVES
-them cleanly: the lexer no longer tokenises `->`, `token.tks` drops the `Arrow` variant, and `parse_function`
-drops the `Arrow`-accepting return branch (keeping only `Colon`). Concurrently it migrates `src/` FFI to the
+ALREADY EXPURGATED (re-measured 2026-08-19): The `Arrow` (`->`) token is RETIRED — `src/lexer/token.tks:85`
+documents "`Arrow` (`->`) is RETIRED", and only `FatArrow` remains. The lexer does NOT scan `->`, the token
+is NOT in `token.tks`, and the parser has NO `Arrow`-accepting return branch. This crumb is VERIFY-ONLY:
+audit confirms the expurgo is clean (no `Arrow` token, no residual `->`), then migrate `src/` FFI to the
 opaque `ptr` boundary (a foreign `ptr` is crossed with `.__wrap<T>()`, §5 — already seeded), completing the
-"no raw pointer arithmetic on the surface" posture. This is a byte-MOVER (the lexer/parser change moves emitted
-bytes) driven by the E1 expurgo reseed `{SM-S4, SM-S5}`. Removal is CLEAN — an old `->` program gets the SAME
-generic unexpected-token error a never-existent symbol would get; **NO tombstone / "`->` was removed"
-diagnostic**. `=>` (`FatArrow`, `token.tks:78`) is NEVER touched.
+"no raw pointer arithmetic on the surface" posture. The state-divergence flags that SM-S1's precondition
+(sweep all `->` returns to `:`) ran to completion ahead of this manifest slot, so the token expurgo already
+landed. This is a byte-MOVER (the lexer/parser change moved emitted bytes) from the E1 expurgo reseed
+`{SM-S4, SM-S5}`. Removal was CLEAN — no tombstone, no bespoke diagnostic. `=>` (`FatArrow`, `token.tks:78`)
+is NEVER touched.
 
 ## Where
 
@@ -44,21 +45,27 @@ diagnostic**. `=>` (`FatArrow`, `token.tks:78`) is NEVER touched.
 
 ## How
 
-1. **Confirm the sweep is complete (build-first).** Before removing anything, verify `src/` + `.tkt` contain
-   ZERO `->` return operators (SM-S1's postcondition) and zero `-> ref T` return arms (SM-G4 removed the arm).
-   The self-compile enumerating any surviving `->` is the signal a sweep was incomplete — fix it BEFORE this
-   reseed.
-2. **Remove the lexer scan + token.** Delete the `->`→`Arrow` scan arm in `lexer.tks` and the `Arrow` variant in
-   `token.tks`. `=>` (`FatArrow`) stays.
-3. **Remove the dead parser branch.** In `parse_function`, delete the `is_kind_at(..., TokenKind::Arrow)` return
-   branch, leaving `Colon`-only. No other `:`-after-`)` position exists, so `:` return stays unambiguous.
-4. **Migrate `src/` FFI to opaque `ptr`.** Any `extern fn` still returning a raw/`ref` pointer on the surface
-   returns the opaque `ptr`; the call-site crosses it with `.__wrap<T>()` (§5). This severs the last raw-pointer
-   surface residue so SM-S5 (the `unsafe` deletion) has nothing left to contain.
-5. **Clean expurgo — NO tombstone.** Do NOT add a "`->` was removed" rule, a deprecation shim, or a migration
-   hint anywhere. An old-form program simply fails to lex/parse `->` as the generic unexpected-token error.
-6. **Reseed at the [RITUAL].** Build gen2 native (the corpus is `:`-only), FIXPOINT `gen2==gen3` (the lexer/parse
-   change is proven byte-stable across the fixpoint), reseed — the new seed no longer understands `->`.
+**VERIFY-ONLY audit (Arrow already expurgated):** The lexer, token, and parser are already updated. The task
+is to (a) confirm clean state, (b) migrate FFI, and (c) verify the expurgo/reseed boundary.
+
+1. **Confirm the Arrow token is gone (build-first).** Verify `src/lexer/token.tks` does NOT contain an `Arrow`
+   variant — only `FatArrow` (`=>`) is present. Verify the self-compile + lint enumerates ZERO `Arrow`
+   references in the codebase.
+2. **Confirm the lexer scan is gone.** Verify `src/lexer/lexer.tks` does NOT contain the `->`→`Arrow` scan arm.
+   `=>` (`FatArrow`) scan remains.
+3. **Confirm the parser branch is gone.** In `parse_function`, verify there is NO `is_kind_at(..., TokenKind::Arrow)`
+   return branch — only `Colon`-accepting remains. No other `:`-after-`)` position exists, so `:` return is
+   unambiguous.
+4. **Verify the sweep is complete (src state).** Confirm `src/` + `.tkt` contain ZERO `->` return operators
+   (SM-S1's postcondition) and zero `-> ref T` return arms (SM-G4 removed the arm). A search for `)\s*->` should
+   yield ZERO matches (comments/docstrings excepted).
+5. **Migrate `src/` FFI to opaque `ptr`.** Any `extern fn` still returning a raw/`ref` pointer on the surface
+   returns the opaque `ptr`; the call-site crosses it with `.__wrap<T>()` (§5). This completes the "no
+   raw-pointer surface" posture for SM-S5 (the `unsafe` deletion).
+6. **Confirm clean expurgo.** Verify NO tombstone: no "`->` was removed" rule, no deprecation shim, no migration
+   hint anywhere. An old-form program simply fails with the generic unexpected-token error.
+7. **Verify reseed state.** Confirm the new seed (E1 expurgo reseed capturing this boundary) no longer understands
+   `->`. Build gen2 native (the corpus is `:`-only), FIXPOINT `gen2==gen3` (the lexer/parse change is byte-stable).
 
 ## Rulings & laws
 
@@ -89,10 +96,12 @@ non-self-build path (the no-tombstone guard):
 
 ## Gate
 
-`[RITUAL]` — full native ladder + a genuine expurgo reseed. Build gen2 native (the `:`-only corpus), the two
-fixtures green, FIXPOINT `gen2==gen3` byte-identical, reseed (the new seed no longer understands `->`). "Green"
-= `->` no longer lexes/parses (generic error, no tombstone), `:` returns still compile, `src/` FFI is
-opaque-`ptr`, gen2==gen3. **Reseed-class: expurgo.**
+`[RITUAL]` — full native ladder + a genuine expurgo reseed (state-divergence: Arrow already expurgated, FFI
+migrate + fixtures + verify only). Build gen2 native (the `:`-only corpus), the two fixtures green, FIXPOINT
+`gen2==gen3` byte-identical, reseed (the seed captured at this boundary no longer understands `->`). "Green"
+= audit confirms `Arrow` token gone, zero `->` residual in src/+.tkt (sweep complete), `src/` FFI is
+opaque-`ptr`, `arrow_token_removed` + `ffi_opaque_ptr_wrap` fixtures pass, gen2==gen3. **Reseed-class:
+expurgo** (E1 boundary with SM-S5; captures the state where `->` is gone and FFI is opaque).
 
 ## Deps
 
@@ -100,18 +109,21 @@ opaque-`ptr`, gen2==gen3. **Reseed-class: expurgo.**
 
 ## Done when
 
-`Arrow`/`->` is gone from the lexer + `token.tks` + `parse_function` (clean, no tombstone), `src/` FFI is
-opaque-`ptr`, `arrow_token_removed` + `ffi_opaque_ptr_wrap` pass, the fixpoint `gen2==gen3` holds, and the
-expurgo reseed is captured.
+Audit confirms `Arrow`/`->` is gone from the lexer + `token.tks` + `parse_function` (clean, no tombstone,
+already expurgated), zero `->` residual in src/+.tkt (SM-S1 sweep complete), `src/` FFI is opaque-`ptr`,
+`arrow_token_removed` + `ffi_opaque_ptr_wrap` fixtures pass, the fixpoint `gen2==gen3` holds, and the expurgo
+reseed (E1 boundary, SM-S4+SM-S5) is captured. State-divergence handled: Arrow already gone, only FFI
+migration + verify remains.
 
-## Judgment calls (flagged for the implementer)
+## State-divergence note (re-measured 2026-08-19)
 
-- **Arrow may already be absent on the base branch.** Measured on `origin/fix/retirement` @ `d89ff6b1`:
-  `token.tks` has only `FatArrow` (`:78`), NOT `Arrow`; `lexer.tks` scans only `=>` (`:515` `FatArrow`), NOT
-  `->`; `parse_decl.tks` has NO `Arrow` reference. This suggests an earlier wave (SM-G1 additive `:` + the SM-S1
-  sweep) already landed the `Arrow`-token expurgo AHEAD of this manifest slot. **The implementer MUST re-measure
-  at dispatch:** if `Arrow`/`->` is already gone, SM-S4's residual reduces to (a) confirming the token/branch
-  are absent (a clean-state assertion, no edit), (b) the `src/` FFI→opaque-`ptr` migration, and (c) authoring
-  `arrow_token_removed` as the guard. The reseed still fires as the E1 expurgo (it also carries SM-S5). This is
-  a state-divergence flag, not a plan change — the crumb's INTENT (no `->` on the surface, clean, no tombstone)
-  is delivered either way.
+- **Arrow is ALREADY EXPURGATED.** Confirmed on `origin/fix/retirement` @ `5790a012`:
+  `src/lexer/token.tks:85` documents "`Arrow` (`->`) is RETIRED"; only `FatArrow` (`:78`) remains.
+  `src/lexer/lexer.tks` scans ONLY `=>` (no `->` scan arm). `src/parser/parse_decl.tks` has NO `Arrow`
+  reference. The earlier wave (SM-G1 additive `:` + the SM-S1 sweep) already landed the `Arrow`-token expurgo
+  AHEAD of this manifest slot. **Residual work:** SM-S4's intent is DELIVERED via a reduced scope:
+  (a) audit confirms the token/branch are absent (clean-state assertion, no edit),
+  (b) the `src/` FFI→opaque-`ptr` migration (the only delta), and
+  (c) authoring the `arrow_token_removed` fixture (no-tombstone guard).
+  The reseed still fires as the E1 expurgo boundary (it also carries SM-S5). This is NOT a plan change — the
+  crumb's INTENT (no `->` on the surface, clean, no tombstone) is delivered via the reduced path.
