@@ -130,6 +130,7 @@ bottom captures a single seed that DPS-lowers AND parses/knows every added const
 | SM-G9 | add `size`/`usize` to `PrimKind` + prim predicates + prim→machine-type table (inert) | type/lir | umbrella G9 | [dry] | (folds R1) | — |
 | SM-G10 | method overloading (relax same-name reject to param-signature distinctness) | checker/AL4a | umbrella G10 | [dry] | (folds R1) | — |
 | SM-G11 | operator overloading (dunder map + derived `!=`/`>`/`<=`/`>=`) | checker/lir | umbrella G11 | [dry] | (folds R1) | — |
+| SM-G12 | generic-constraint acceptance: a constraint accepts ANY type (named, `[]A`, `error`, and disjunctions like `[]A \| A \| error`) + the special markers (`class`/`struct`/`service`/`notnull`) + interfaces + service lifetimes (`transient`/`scoped`/`singleton`); rejects ONLY traits. Closes the gap the delivered §9.2b solver (`cf0c70b5`) left — `<T: []A \| A \| error>` currently fails. | parser/checker | Doc-2:423-441 §9.2b + owner 2026-08-19 | [dry] | (folds R1) | — |
 | 9D-T1 | inline-union: accept `A | B` structural union in field position (additive; `variant` still lives) | parser/checker | 9D §5.1(1) | [dry] | (folds R1) | — |
 
 *Fixed-arrays + memory-model + string-u32 (absorbed collections FASE 0 + RM/io/arena new intrinsics):*
