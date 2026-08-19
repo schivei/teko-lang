@@ -495,3 +495,17 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Motivo:** matar **HALTs falsos** — agente parando por algo já decidido (ex.: RT-L6 / cov_dump, parcialmente resolvidos, que viraram "gate" sem necessidade).
 - **Escopo:** todo dispatch carrega a reza; codificado em `CLAUDE.md` (§ Protocolo de fork) + referenciado no `.crumbs/TEMPLATE.md` (Rulings & laws). CONVENTION / processo — sem mudança de lexer/parser/checker.
 - **Reversibilidade:** alta — disciplina de orquestração/processo, sem mudança de comportamento de código.
+
+---
+
+## 2026-08-19 — D-TS1: per-target symbol selection = target-guarded extern fn; TargetSymbol struct withdrawn
+
+### D50 · Per-target symbol selection ratified as target-guarded `extern fn`; `TargetSymbol` struct WITHDRAWN (owner 2026-08-19) ✅
+- **Contexto:** os crumbs 0061 (RT-L3) e 0062 (RT-L4) propunham uma nova forma sintática `TargetSymbol` (struct genérica `{posix: str, win32: str}`) para codificar a seleção de símbolo foreign POR ALVO (POSIX `chdir` vs Windows `_chdir`). A alternativa ratificada era reusar o **mecanismo existente** de `#os`/`#arch` guards + `prune_cc` (o que `src/io/file_stream.tks` já usa para `os_open`/`os_read`/`os_write`/`os_close`).
+- **Ratificação do dono (2026-08-19):** per-target symbol selection **É o target-guarded `extern fn` mechanism** (guards `#os("linux"|"macos"|"windows")` / `#arch(…)` + pruning `prune_cc` antes do checker, usando NAT-XL native target). Zero nova declaração. A struct `TargetSymbol` é **WITHDRAWN** — é um fantasma (zero consumidores reais em `src/**`, verificado; precedente de shipping `src/io/file_stream.tks`).
+- **Implicações:** (1) crumbs 0061/0062 descartam a proposta `TargetSymbol` (texto histórico anotado, não deletado); (2) a metade-fs (RT-L3, F4) **desbloqueia com ZERO mudança de compilador** (só deps S16-FS + fixpoint-nativo permanecem); (3) a metade-processo (RT-L4, F6) reusa o MESMO mecanismo de guards que L3 (não há `Cross` namespace; withdrawal não quebra nada).
+- **Docs atualizadas:** `.crumbs/0061` (RESOLVED/RATIFIED); `.crumbs/0062` (drop TargetSymbol refs, use target-guarded extern); `docs/design/migracao-runtime-c-para-teko-0.3.1.md` §6 (TargetSymbol sketch anotado WITHDRAWN); `docs/design/plano-s16-expurgo-libc-completo.md` (R4 reafirmado, referências TargetSymbol → target-guarded, §16-FASE6 gate unblocked); `docs/design/target-symbol-extern-selection-0.3.1.md` (nova doc: arquiteto ratificado, mecanismo delineado).
+- **Verificação da condição:** "não quebra cross-namespace" — ZERO namespace `Cross` existe; zero consumidores reais de `TargetSymbol` struct em produção (`grep -r "TargetSymbol" src/ ⇒ nada`); withdrawal é limpo.
+- **Base constitucional:** lei-primeira (nenhuma lei violada; reusar guards existentes é simples + transparente). M.2 (100% Teko, 0% C — o mecanismo já existe em Teko, é puro). Precedente shipping (`file_stream.tks` já compila per-target).
+- **Reversibilidade:** alta — nenhuma mudança de compilador; só anotação doc + refêrencias em crumbs. Se rejected, reverte-se anotações + tira-se `target-symbol-extern-selection-0.3.1.md`.
+- **Timing / onda-relativa:** D-TS1 desbloqueia RT-L3 (F4) para M2 final; RT-L4 (F6) segue bloqueado em struct-by-value-FFI reverse + linker import-lib Win32 (Fase E).
