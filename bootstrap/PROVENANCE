@@ -1,39 +1,22 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on wip/arrays-reseed, forward-only): refreshes the seed for the
-# array-expurgo foundation. The prior seed (sha256 7be7755e…, 22 828 203 bytes) predated the five
-# foundation commits that changed the emitted C — byte-string literal `b"abc"`, implicit
-# str<->[]byte reinterpret, `ref []T` position-writes, runtime-sized fixed array `[n]T = []`, and
-# the null-reference deref guard. gen1 of this tree emits 23 154 060 bytes, so the old seed no
-# longer reproduces this tree's own output; this harvest is the first bootstrap emitted by the
-# compiler that carries the foundation.
-#
-# WHAT THIS HARVEST CARRIES (the delta the new codegen bakes into the emitted C):
-#   - BYTE-STRING LITERAL: `b"abc"` lowers to a `[]byte` value.
-#   - IMPLICIT str<->[]byte: same `{ptr,len}` representation, reinterpret with no copy.
-#   - REF []T POSITION-WRITE: `dst[i] = v` accepted through a `ref []T` parameter.
-#   - RUNTIME-SIZED FIXED ARRAY: `var x: [n]T = []` lowers to a zero-fill allocation.
-#   - NULL-REFERENCE DEREF GUARD: dereferencing a zeroed reference slot panics with
-#     `file:line:col` instead of segfaulting.
-#   - #os CROSS-EMIT: the ONE emitted `teko.c` still carries every target at once via C `#if` — the
-#     macOS `__APPLE__` libSystem arm, the Windows `_WIN32` arm (WaitOnAddress / VirtualAlloc, with
-#     the `#pragma comment(lib, "synchronization")` link directive), and the Linux raw-syscall arm,
-#     plus the arch ladder (`__x86_64__` / `__aarch64__`) — so the same bytes cross-compile to every
-#     (os, arch).
+# RESEED (hand-harvest, local on feat/arrays-reclaim-first, forward-only): marco 7 of the
+# io-streaming / array-reclaim campaign — fourth memory-reduction batch (diminishing returns; the
+# remaining root bytes are increasingly LIVE AST/type data held through compilation, reachable only
+# by arena-per-scope reclaim, not by push conversion). Converts the last easy plain-push->root MAP
+# / FILTER sites the arena map still blamed:
+#   - checker::type_table_of (FILTER: count TypeDecls, one preallocated regs array; the tt_push loop
+#     was plain root push) + count_type_decls helper.
+#   - checker::canon_ref_list (MAP).
+#   - checker::inline_rw_exprs (MAP []TExpr -> []TExpr).
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, CC=clang.
-#   - C-route chain from the PRIOR seed: gen0 = clang(7be7755e seed) built gen1 = gen0(src); gen1's
-#     OWN codegen emitted gen2 = gen1(src) and gen3 = gen2(src). Fixpoint verdict PASSED: gen2 ==
-#     gen3 byte for byte AND gen2.c == gen3.c byte for byte (23 154 060 bytes). This harvested
-#     teko.c IS that stable emission (== gen1.c == gen2.c == gen3.c).
-#   - AUTO-REPRODUCTION verified from the NEW seed: clang(this bootstrap) = gen0'; gen0'(src) = gen1'
-#     re-emits this same bootstrap/teko.c byte-identical (sha256 below); gen2' = gen1'(src) and
-#     gen3' = gen2'(src) are byte-identical to each other and their emitted C equals this file.
-#   - Guard: every build ran under `ulimit -v 6815744` (6.5 GiB) with TEKO_BACKEND=c; per-process
-#     peak self-reported ~6169 MB.
+#   - gen2 builds gen3; gen2.c == gen3.c byte-identical; this file is that stable output.
+#   - MEMORY: gen2 peak VmHWM 3.38 -> 3.32 GiB (VmRSS 3.22 -> 3.16 GiB); cumulative from the
+#     campaign start 6.46 -> 3.32 GiB (VmRSS 6.44 -> 3.16). Guard: builds ran under
+#     `ulimit -v 10485760` (10 GiB dev allowance) with TEKO_BACKEND=c.
 #
-# `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane,
-# forward-only, its correctness resting on the clean fixpoint above.
+# `run: hand-harvest` — LOCAL on this lane, forward-only, resting on the clean fixpoint above.
 # `commit: pending drain` — the landing commit is written in this same change.
 #
 # Format and parser: scripts/degrau.sh's kv_field; enforced by scripts/provenance_gate.sh (DISABLED
@@ -41,9 +24,8 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  1b716bf933101f9364dad0896f9d17d6e9dbf5143c3e337c745ae0897448541c
+sha256:  8b1c6996b140ed0e8f2063db6bf19bed89b15f3a4a731dcbb4c0d351ee38a728
 since:   0.3.1.0
-legacy:  none — self-reproducible harvest of the array-expurgo foundation (byte-string literal,
-         implicit str<->[]byte, ref []T position-write, runtime-sized fixed array, null-deref
-         guard); byte-identical on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c,
-         23 154 060 bytes).
+legacy:  none — self-reproducible harvest of marco 7 (type_table_of/canon_ref_list/inline_rw_exprs
+         push->preallocate, gen2 peak 3.38 -> 3.32 GiB); byte-identical on rebuild (clean fixpoint
+         gen2 == gen3, gen2.c == gen3.c, 23 256 062 bytes).

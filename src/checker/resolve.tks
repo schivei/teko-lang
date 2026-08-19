@@ -35,11 +35,12 @@ pub fn tt_indexed(t: TypeTable): bool {
 }
 
 fn tt_last_names(regs: []TypeReg): []str {
-    var names: []str = teko::list::empty()
+    var n = regs.len
+    var names: [n]str = []
     var i: u64 = 0
     loop {
         if i >= regs.len { break }
-        names = teko::list::push(names, name_last_segment(regs[i].name))
+        names[i] = name_last_segment(regs[i].name)
         i++
     }
     names
@@ -659,38 +660,46 @@ pub fn max_generic_arity(): u64 { 16 }
 
 pub fn type_param_table(type_params: []str, type_constraints: []@ConstraintExpr(), ns: str, table: TypeTable): TypeTable {
     if type_params.len == 0 { return table }
-    var tbl = tt_empty()
+    var total = type_params.len + tt_len(table)
+    var regs: [total]TypeReg = []
+    var k: u64 = 0
     var i = 0
     loop {
         if i >= type_params.len { break }
         var own_constraint = constraint_at(type_constraints, i to u64)
-        tbl = tt_push(tbl, type_param_reg(type_params[i], own_constraint, ns, table))
+        regs[k] = type_param_reg(type_params[i], own_constraint, ns, table)
+        k++
         i++
     }
     var j: u64 = 0
     loop {
         if j >= tt_len(table) { break }
-        tbl = tt_push(tbl, tt_at(table, j))
+        regs[k] = tt_at(table, j)
+        k++
         j++
     }
-    tt_freeze(tbl)
+    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = teko::list::empty() })
 }
 
 fn concat_tps(a: []str, b: []str): []str {
-    var out: []str = teko::list::empty()
+    var total = a.len + b.len
+    var out: [total]str = []
+    var k: u64 = 0
     var i = 0
-    loop { if i >= a.len { break }; out = teko::list::push(out, a[i]); i++ }
+    loop { if i >= a.len { break }; out[k] = a[i]; k++; i++ }
     var j = 0
-    loop { if j >= b.len { break }; out = teko::list::push(out, b[j]); j++ }
+    loop { if j >= b.len { break }; out[k] = b[j]; k++; j++ }
     out
 }
 
 fn concat_tcs(a: []@ConstraintExpr(), b: []@ConstraintExpr()): []@ConstraintExpr() {
-    var out: []@ConstraintExpr() = teko::list::empty()
+    var total = a.len + b.len
+    var out: [total]@ConstraintExpr() = []
+    var k: u64 = 0
     var i = 0
-    loop { if i >= a.len { break }; out = teko::list::push(out, a[i]); i++ }
+    loop { if i >= a.len { break }; out[k] = a[i]; k++; i++ }
     var j = 0
-    loop { if j >= b.len { break }; out = teko::list::push(out, b[j]); j++ }
+    loop { if j >= b.len { break }; out[k] = b[j]; k++; j++ }
     out
 }
 
@@ -1074,15 +1083,17 @@ pub fn subst_type(t: @Type(), s: Subst): @Type() {
         Slice as sl => Slice { element = subst_type(sl.element, s) }
         Reference as r => Reference { inner = subst_type(r.inner, s) }
         Variant as v => {
-            var ms: []@Type() = teko::list::empty()
+            var vn = v.members.len
+            var ms: [vn]@Type() = []
             var i = 0
-            loop { if i >= v.members.len { break }; ms = teko::list::push(ms, subst_type(v.members[i], s)); i++ }
+            loop { if i >= v.members.len { break }; ms[i] = subst_type(v.members[i], s); i++ }
             Variant { members = union_normalize_null(ms) }
         }
         Func as f => {
-            var ps: []@Type() = teko::list::empty()
+            var pn = f.params.len
+            var ps: [pn]@Type() = []
             var i = 0
-            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, subst_type(f.params[i], s)); i++ }
+            loop { if i >= f.params.len { break }; ps[i] = subst_type(f.params[i], s); i++ }
             Func { params = ps; ret = subst_type(f.ret, s); variadic = false; param_names = []; n_required = (ps).len; defaults = []; ret_extra = teko::list::empty() }
         }
         _ => t
@@ -1142,22 +1153,44 @@ fn named_type_is_null(nt: parser::NamedType): bool {
     nt.path.segments[0].name == "null"
 }
 
+fn union_member_is_first(members: []@Type(), at: u64): bool {
+    var j: u64 = 0
+    loop {
+        if j >= at { break }
+        if type_eq(members[j], members[at]) { return false }
+        j++
+    }
+    true
+}
+
 fn union_dedup(members: []@Type()): []@Type() {
-    var out: []@Type() = teko::list::empty()
-    var i = 0
+    var count: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= members.len { break }
-        var dup = false
-        var j = 0
-        loop {
-            if j >= out.len { break }
-            if type_eq(out[j], members[i]) { dup = true; break }
-            j++
-        }
-        if !dup { out = teko::list::push(out, members[i]) }
+        if union_member_is_first(members, i) { count = count + 1 }
+        i++
+    }
+    var out: [count]@Type() = []
+    var k: u64 = 0
+    i = 0
+    loop {
+        if i >= members.len { break }
+        if union_member_is_first(members, i) { out[k] = members[i]; k = k + 1 }
         i++
     }
     out
+}
+
+fn union_count_non_null(members: []@Type()): u64 {
+    var nn: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if !from_is_bare_null(members[i]) { nn = nn + 1 }
+        i++
+    }
+    nn
 }
 
 fn union_normalize_null(members: []@Type()): []@Type() {
@@ -1169,22 +1202,28 @@ fn union_normalize_null(members: []@Type()): []@Type() {
         i++
     }
     if !has_null { return members }
-    var out: []@Type() = teko::list::push(teko::list::empty(), Null { })
+    var count = union_count_non_null(members) + 1
+    var out: [count]@Type() = []
+    out[0] = Null { }
+    var k: u64 = 1
     var j = 0
     loop {
         if j >= members.len { break }
-        if !from_is_bare_null(members[j]) { out = teko::list::push(out, members[j]) }
+        if !from_is_bare_null(members[j]) { out[k] = members[j]; k = k + 1 }
         j++
     }
     out
 }
 
 fn variant_siblings(xs: []@Type(), skip: i64): []@Type() {
-    var out: []@Type() = teko::list::empty()
+    var count = xs.len
+    if skip >= 0 && (skip to u64) < xs.len { count = xs.len - 1 }
+    var out: [count]@Type() = []
+    var k: u64 = 0
     var i = 0
     loop {
         if i >= xs.len { break }
-        if i != skip { out = teko::list::push(out, xs[i]) }
+        if i != skip { out[k] = xs[i]; k++ }
         i++
     }
     out
@@ -1240,7 +1279,8 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): @Type() | e
             Slice { element = el }
         }
         parser::UnionType as ut => {
-            var members: []@Type() = teko::list::empty()
+            var mn = ut.members.len
+            var members: [mn]@Type() = []
             var i = 0
             loop {
                 if i >= ut.members.len { break }
@@ -1248,7 +1288,7 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): @Type() | e
                     (@Type()) as t => t
                     error as e => return e
                 }
-                members = teko::list::push(members, m)
+                members[i] = m
                 i++
             }
             var j = 0
@@ -1263,7 +1303,8 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): @Type() | e
             Variant { members = union_normalize_null(union_dedup(members)) }
         }
         parser::FunctionType as fnt => {
-            var ps: []@Type() = teko::list::empty()
+            var pn = fnt.params.len
+            var ps: [pn]@Type() = []
             var i = 0
             loop {
                 if i >= fnt.params.len { break }
@@ -1273,7 +1314,7 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): @Type() | e
                     Reference => return error { message = "a reference cannot be a function-type parameter (a ref cannot escape, R4)" }
                     _ => { }
                 }
-                ps = teko::list::push(ps, pt)
+                ps[i] = pt
                 i++
             }
             var rt = match resolve_type(fnt.ret, table, ref_ns) { (@Type()) as t => t; error as e => return e }
