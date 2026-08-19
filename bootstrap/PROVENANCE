@@ -1,36 +1,27 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
-# RESEED (hand-harvest, local on wip/arrays-reseed, forward-only): refreshes the seed for the
-# array-expurgo foundation. The prior seed (sha256 7be7755e…, 22 828 203 bytes) predated the five
-# foundation commits that changed the emitted C — byte-string literal `b"abc"`, implicit
-# str<->[]byte reinterpret, `ref []T` position-writes, runtime-sized fixed array `[n]T = []`, and
-# the null-reference deref guard. gen1 of this tree emits 23 154 060 bytes, so the old seed no
+# RESEED (hand-harvest, local on feat/arrays-c3-codegen-buffer, forward-only): refreshes the seed
+# for crumb C3 of the array-expurgo — the codegen emission buffer is converted from the
+# append_fo/push_fo copy-grow primitives to a chunked builder (Cb) that appends by index and
+# concatenates once into a single [total]byte, with zero dynamic array growth on the append path.
+# The prior seed (sha256 1b716bf9…, 23 154 060 bytes) predated this codegen change, so it no
 # longer reproduces this tree's own output; this harvest is the first bootstrap emitted by the
-# compiler that carries the foundation.
+# compiler that carries the C3 builder.
 #
-# WHAT THIS HARVEST CARRIES (the delta the new codegen bakes into the emitted C):
-#   - BYTE-STRING LITERAL: `b"abc"` lowers to a `[]byte` value.
-#   - IMPLICIT str<->[]byte: same `{ptr,len}` representation, reinterpret with no copy.
-#   - REF []T POSITION-WRITE: `dst[i] = v` accepted through a `ref []T` parameter.
-#   - RUNTIME-SIZED FIXED ARRAY: `var x: [n]T = []` lowers to a zero-fill allocation.
-#   - NULL-REFERENCE DEREF GUARD: dereferencing a zeroed reference slot panics with
-#     `file:line:col` instead of segfaulting.
-#   - #os CROSS-EMIT: the ONE emitted `teko.c` still carries every target at once via C `#if` — the
-#     macOS `__APPLE__` libSystem arm, the Windows `_WIN32` arm (WaitOnAddress / VirtualAlloc, with
-#     the `#pragma comment(lib, "synchronization")` link directive), and the Linux raw-syscall arm,
-#     plus the arch ladder (`__x86_64__` / `__aarch64__`) — so the same bytes cross-compile to every
-#     (os, arch).
+# WHAT THIS HARVEST CARRIES (the delta the new codegen bakes):
+#   - EMISSION BUFFER: cb/cb_str/cb_byte and cg_format_c/ffi_export build into a Cb chunked
+#     builder (inline c0/c1 sealed slots + lazily-grown prev array + current chunk) instead of
+#     tk_slice_push_fo/tk_slice_push_r. The builder tracks a running .len equal to the old flat
+#     buffer's byte count, so every gensym derived from buf.len is unchanged.
+#   - OUTPUT INVARIANT: the emitted C is byte-identical to the previous codegen for every program
+#     (the prior seed's gen1 and this seed both emit the same bytes), so the change is a pure
+#     runtime-representation swap of the emitter, not an output change.
 #
 # GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, CC=clang.
-#   - C-route chain from the PRIOR seed: gen0 = clang(7be7755e seed) built gen1 = gen0(src); gen1's
-#     OWN codegen emitted gen2 = gen1(src) and gen3 = gen2(src). Fixpoint verdict PASSED: gen2 ==
-#     gen3 byte for byte AND gen2.c == gen3.c byte for byte (23 154 060 bytes). This harvested
-#     teko.c IS that stable emission (== gen1.c == gen2.c == gen3.c).
-#   - AUTO-REPRODUCTION verified from the NEW seed: clang(this bootstrap) = gen0'; gen0'(src) = gen1'
-#     re-emits this same bootstrap/teko.c byte-identical (sha256 below); gen2' = gen1'(src) and
-#     gen3' = gen2'(src) are byte-identical to each other and their emitted C equals this file.
-#   - Guard: every build ran under `ulimit -v 6815744` (6.5 GiB) with TEKO_BACKEND=c; per-process
-#     peak self-reported ~6169 MB.
+#   - AUTO-REPRODUCTION: clang(this bootstrap) = gen0'; gen0'(src) = gen1' re-emits this same
+#     bootstrap/teko.c byte-identical (sha256 below); gen2' = gen1'(src) and gen3' = gen2'(src) are
+#     byte-identical to each other and their emitted C equals this file.
+#   - Guard: every build ran under `ulimit -v 6815744` (6.5 GiB) with TEKO_BACKEND=c.
 #
 # `run: hand-harvest` — no CI run produced this file: the harvest is LOCAL on this lane,
 # forward-only, its correctness resting on the clean fixpoint above.
@@ -41,9 +32,7 @@
 c:       bootstrap/teko.c
 run:     hand-harvest
 commit:  pending drain
-sha256:  1b716bf933101f9364dad0896f9d17d6e9dbf5143c3e337c745ae0897448541c
+sha256:  edebe8d9d1a0b0e31c35e33844e35b4118c274afa4f30c3404617dd49c5e0c43
 since:   0.3.1.0
-legacy:  none — self-reproducible harvest of the array-expurgo foundation (byte-string literal,
-         implicit str<->[]byte, ref []T position-write, runtime-sized fixed array, null-deref
-         guard); byte-identical on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c,
-         23 154 060 bytes).
+legacy:  none — self-reproducible harvest of C3 (codegen emission buffer -> chunked builder);
+         byte-identical on rebuild (clean fixpoint gen2 == gen3, gen2.c == gen3.c, 23 211 269 bytes).
