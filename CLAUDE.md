@@ -163,6 +163,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   migra de "gen2.c==gen3.c byte-idêntico" para "**objeto native se reproduz**" (determinismo do objeto:
   sem timestamp, ordem estável de símbolos/seções, sem paths absolutos); a muleta C sai quando as pernas
   native do CI fecham verde.
+- **A BUILD DO COMPILADOR EMITE O `.tkh` JUNTO COM O BINÁRIO (dono 2026-08-19) — pode começar já,
+  independente do eixo de memória.** A emissão do executável final (rota C OU native) deve **também
+  emitir o `.tkh` do próprio compilador** (a superfície `exp` agregada dele), e o **pacote entrega
+  binário + `.tkh`**. O `.tkh` é backend-independente (interface de tipos) → sai igual nas duas rotas.
+  Serve às features da próxima versão: o dev usa o `.tkh` do compilador para **intellisense na IDE**
+  que quiser e para **linkar/estender o compilador** como quiser. (Só `exp` entra — a FFI interna
+  `exp`+`pub` é transitória e NÃO embarca; ver R8.)
 - Teko-only (.tks), W15 (doc-comments-only, flatten/extract, helpers com nome único
   tree-wide), sem VM/GC, arena.
 - **NO PUSHES (LEI DURA, dono 2026-08-18) — inverte o antigo W15 "no index-assign".** Array é
