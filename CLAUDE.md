@@ -267,6 +267,22 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   (patamar atual da build, pico medido ~6,2 GB) para **≤1,5 GB** — não é 2,5→1,5 (os 2,5 GB eram só o
   consumo específico do push medido antes); o alvo real é **+6 GB → ≤1,5 GB**. Disparar agente de continuação com esta rule
   assim que drenar.
+- **I/O STREAMING EM TEKO — DUAS FORMAS, BUFFER ≤1024 B, SEM `teko_rt` (dono 2026-08-19).** Causa-raiz
+  achada: o I/O lê e grava TUDO de uma vez, materializado — `read_file`→`str` inteira, `write_file`/
+  `write_file_bytes` gravam o conteúdo todo; o `teko.c` de 22 MB é montado inteiro na RAM antes do único
+  write; e o `src/io/stream.tks` (`Buf`) é acumulador `list::push` (copy-grow), não stream real. Além de
+  ser FFI `from "teko_rt"`. Desenho obrigatório, **tudo em Teko sobre syscalls (sem `from "teko_rt"`):**
+  1. **DUAS formas de read/write:** **TOTAL** (tudo de uma vez — uma opção mantida) e **STREAM** (por chunk).
+  2. **A forma STREAM tem variações com offset/seek** (acesso posicionado) e **opção append-only** (apenda no
+     arquivo) e **modo read-only**.
+  3. **Buffering de no máximo 1024 bytes por vez** (buffer pequeno reusável — sem acumulador que cresce).
+  4. **O COMPILADOR usa ESTRITAMENTE a forma STREAM.** Todo local que gera SAÍDA usa o stream (de
+     preferência append-only); todo local que LÊ usa o stream em read-only. (Migrar `teko.c`, `.tkh`, e
+     todas as leituras/escritas do compilador.)
+  - **CO-DEPENDENTE com a arena (dono 2026-08-19):** a arena sozinha NÃO faz mágica — os buffers
+    materializados (22 MB do `teko.c`, arquivos lidos inteiros) continuam vazando; o streaming com buffer
+    ≤1024 B é o que corta isso. Arena-por-escopo + I/O-streaming são co-dependentes: precisam vir juntos
+    pra a memória cair.
 - **NÃO EXISTE C CONGELADO (dono 2026-08-18, REVOGA a lei "§16 C congelado" de 2026-08-17).**
   `src/runtime/teko_rt.c`, `teko_rt.h`, `src/win32_compat.h`, `src/assert/assert.c`, `assert.h`
   **PODEM ser editados** para bug de memória/correção em C. **PORÉM (dono 2026-08-18): o expurgo de
