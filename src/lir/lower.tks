@@ -703,6 +703,7 @@ pub fn lower_expr(ctx: LowerCtx, e: checker::TExpr): Lowered | error {
         checker::TFieldAccess as fa => lower_field_access(ctx, e, fa)
         checker::TIndex as ix => lower_index(ctx, e, ix)
         checker::TArrayLit as al => lower_array_lit(ctx, e, al)
+        checker::TSliceOfLen as sol => lower_slice_of_len(ctx, e, sol)
         checker::TByteLit as b => lower_byte_lit(ctx, e, b)
         checker::TCharLit as c => lower_char_lit(ctx, e, c)
         checker::TBoolLit as b => lower_bool_lit(ctx, e, b)
@@ -4346,6 +4347,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr): LoweredFat | error {
         checker::TByteStrLit as bs => lower_bytestr_lit_fat(ctx, e, bs)
         checker::TCast as c => lower_fat_cast(ctx, e, c)
         checker::TArrayLit as al => lower_array_lit_fat(ctx, e, al)
+        checker::TSliceOfLen as sol => lower_slice_of_len_fat(ctx, e, sol)
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
         checker::TIfExpr as f => lower_if_fat(ctx, e, f)
@@ -5547,6 +5549,49 @@ fn lower_array_lit_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit)
     var lenr = ctx_alloc(slot.ctx)
     var with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, al.elements.len to i64, e.line, e.col))
     LoweredFat { ctx = with_len; ptr = slot.vreg; len = lenr.vreg }
+}
+
+fn zero_fill_bytes(ctx: LowerCtx, ptr_vreg: u32, count_vreg: u32, line: u32, col: u32): LowerCtx {
+    var headb = alloc_block(ctx.func)
+    var bodyb = alloc_block(headb.func)
+    var exitb = alloc_block(bodyb.func)
+    var ip = add_block_param(exitb.func, headb.block_id)
+    var i0 = alloc_vreg(ip.func)
+    var with_i0 = append_inst(i0.func, ctx.block_id, const_int_inst(i0.vreg, 0, line, col))
+    var entered = append_inst(with_i0, ctx.block_id, jump_inst(headb.block_id, single_arg(i0.vreg), line, col))
+    var cmp = alloc_vreg(entered)
+    var with_cmp = append_inst(cmp.func, headb.block_id, bin_inst(cmp.vreg, LBinOp::ICmpLtU, ip.vreg, count_vreg, line, col))
+    var with_branch = append_inst(with_cmp, headb.block_id, branch_inst(cmp.vreg, bodyb.block_id, teko::list::empty(), exitb.block_id, teko::list::empty(), line, col))
+    var addr = alloc_vreg(with_branch)
+    var with_addr = append_inst(addr.func, bodyb.block_id, bin_inst(addr.vreg, LBinOp::IAdd, ptr_vreg, ip.vreg, line, col))
+    var zero_byte = alloc_vreg(with_addr)
+    var with_zero = append_inst(zero_byte.func, bodyb.block_id, const_int_inst(zero_byte.vreg, 0, line, col))
+    var with_store = append_inst(with_zero, bodyb.block_id, store_inst(addr.vreg, zero_byte.vreg, LType::I8, line, col))
+    var one = alloc_vreg(with_store)
+    var with_one = append_inst(one.func, bodyb.block_id, const_int_inst(one.vreg, 1, line, col))
+    var nexti = alloc_vreg(with_one)
+    var with_next = append_inst(nexti.func, bodyb.block_id, bin_inst(nexti.vreg, LBinOp::IAdd, ip.vreg, one.vreg, line, col))
+    var with_loop = append_inst(with_next, bodyb.block_id, jump_inst(headb.block_id, single_arg(nexti.vreg), line, col))
+    ctx_with(ctx, with_loop, exitb.block_id, ctx.env)
+}
+
+fn lower_slice_of_len_fat(ctx: LowerCtx, e: checker::TExpr, s: checker::TSliceOfLen): LoweredFat | error {
+    var szo = match lower_expr(ctx, s.size) { Lowered as x => x; error as err => return err }
+    var stride = elem_byte_stride(s.element, szo.ctx.enums)
+    var stride_r = ctx_alloc(szo.ctx)
+    var with_stride = ctx_append(stride_r.ctx, const_int_inst(stride_r.vreg, stride to i64, e.line, e.col))
+    var total_r = ctx_alloc(with_stride)
+    var with_total = ctx_append(total_r.ctx, bin_inst(total_r.vreg, LBinOp::IMul, szo.vreg, stride_r.vreg, e.line, e.col))
+    var region = region_current_vreg(with_total)
+    var ptr_r = ctx_alloc(region.ctx)
+    var with_alloc = ctx_append(ptr_r.ctx, call_inst(ptr_r.vreg, "tk_region_alloc", two_args(region.vreg, total_r.vreg), false, e.line, e.col))
+    var zeroed = zero_fill_bytes(with_alloc, ptr_r.vreg, total_r.vreg, e.line, e.col)
+    LoweredFat { ctx = zeroed; ptr = ptr_r.vreg; len = szo.vreg }
+}
+
+fn lower_slice_of_len(ctx: LowerCtx, e: checker::TExpr, s: checker::TSliceOfLen): Lowered | error {
+    var f = match lower_slice_of_len_fat(ctx, e, s) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = f.ctx; vreg = f.ptr }
 }
 
 fn bool_lit_value(v: bool): i64 { if v { 1 } else { 0 } }
