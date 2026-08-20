@@ -142,7 +142,7 @@ fn lam_reject_copy_capture_write(writes: []str, bound: []str, env: Env): null | 
 }
 
 fn type_lambda(lam: parser::Lambda, expected: @Type(), env: Env, table: TypeTable): TExpr | error {
-    var exp_params: []@Type() = teko::list::empty()
+    var exp_params: []@Type() = []
     match expected { Func as ef => exp_params = ef.params; _ => { } }
     var tparams: []TLambdaParam = teko::list::empty()
     var cenv = env
@@ -157,9 +157,9 @@ fn type_lambda(lam: parser::Lambda, expected: @Type(), env: Env, table: TypeTabl
     }
     var tb = match type_block(lam.body, cenv, table) { TypedBlock as bk => bk; error as e => return e }
     var ret = match expected { Func as ef => ef.ret; _ => tblock_type(tb.stmts) }
-    var refs: []str = teko::list::empty()
-    var bnd: []str = teko::list::empty()
-    var writes: []str = teko::list::empty()
+    var refs: []str = []
+    var bnd: []str = []
+    var writes: []str = []
     var j = 0
     loop { if j >= lam.params.len { break }; bnd = str_set_add(bnd, lam.params[j].name); j++ }
     lam_collect_block(lam.body, refs, bnd, writes)
@@ -182,7 +182,7 @@ fn type_lambda(lam: parser::Lambda, expected: @Type(), env: Env, table: TypeTabl
         }
         k++
     }
-    TExpr { kind = TLambda { params = tparams; body = tb.stmts; captures = captures; ret = ret; lift_id = 0 }; type = Func { params = lam_param_types(tparams); ret = ret; variadic = false; param_names = []; n_required = (lam_param_types(tparams)).len; defaults = []; ret_extra = teko::list::empty() }; line = 0; col = 0 }
+    TExpr { kind = TLambda { params = tparams; body = tb.stmts; captures = captures; ret = ret; lift_id = 0 }; type = Func { params = lam_param_types(tparams); ret = ret; variadic = false; param_names = []; n_required = (lam_param_types(tparams)).len; defaults = []; ret_extra = [] }; line = 0; col = 0 }
 }
 fn lam_param_types(ps: []TLambdaParam): []@Type() {
     var out: []@Type() = teko::list::empty()
@@ -238,19 +238,19 @@ fn fold_tilde_pieces(pieces: []parser::Expr): []parser::Expr {
 }
 
 fn type_tilde_chain(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
-    var raw = flatten_tilde_chain(parser::Expr { kind = b; line = 0; col = 0 }, teko::list::empty())
+    var raw = flatten_tilde_chain(parser::Expr { kind = b; line = 0; col = 0 }, [])
     var folded = fold_tilde_pieces(raw)
     if folded.len == 1 { return type_expr(folded[0], env, table) }
     var seg_teko = parser::Segment { name = "teko" }
     var seg_string = parser::Segment { name = "string" }
     var seg_concat = parser::Segment { name = "concat" }
-    var segs: []parser::Segment = teko::list::push(teko::list::empty(), seg_teko)
+    var segs: []parser::Segment = [seg_teko]
     segs = teko::list::push(segs, seg_string)
     segs = teko::list::push(segs, seg_concat)
     var pos_names: []str = teko::list::empty()
     var ni: u64 = 0
     loop { if ni >= folded.len { break }; pos_names = teko::list::push(pos_names, ""); ni++ }
-    var call = parser::Call { callee = parser::Path { segments = segs }; args = folded; arg_names = pos_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }
+    var call = parser::Call { callee = parser::Path { segments = segs }; args = folded; arg_names = pos_names; owner_type_args = []; callee_type_args = [] }
     type_call(call, env, table)
 }
 fn deref_ref_value(te: TExpr): TExpr {
@@ -282,12 +282,12 @@ fn bignum_ns(kind: str): str {
 }
 
 fn bignum_call(kind: str, fn_name: str, args: []TExpr, ret: @Type()): TExpr {
-    var segs: []parser::Segment = teko::list::push(teko::list::empty(), parser::Segment { name = "teko" })
+    var segs: []parser::Segment = [parser::Segment { name = "teko" }]
     segs = teko::list::push(segs, parser::Segment { name = "numeric" })
     segs = teko::list::push(segs, parser::Segment { name = kind })
     segs = teko::list::push(segs, parser::Segment { name = fn_name })
     var callee = parser::Path { segments = segs }
-    TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = bignum_ns(kind); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = bignum_ns(kind); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = ret; line = 0; col = 0 }
 }
 
 fn bignum_adopt_operand(e: TExpr, kind: str): TExpr | error {
@@ -298,7 +298,7 @@ fn bignum_adopt_operand(e: TExpr, kind: str): TExpr | error {
             if n.is_float { return error { message = $"a floating-point literal cannot adopt `{kind}` — write it with a `bi`/`d` suffix or convert explicitly with `{kind}::of(...)`" } }
             if !numint_fits(n.value, PrimKind::I64) { return error { message = $"integer literal is too large to adopt into `{kind}` — write it with a `bi`/`d` suffix" } }
             var lit = TExpr { kind = e.kind; type = Prim { kind = PrimKind::I64 }; line = e.line; col = e.col }
-            bignum_call(kind, "of", teko::list::push(teko::list::empty(), lit), bignum_named(kind))
+            bignum_call(kind, "of", [lit], bignum_named(kind))
         }
         _ => error { message = $"no implicit conversion to `{kind}` — wrap the operand with `{kind}::of(x)` (no implicit promotion — B.22)" }
     }
@@ -322,7 +322,7 @@ fn type_bignum_binop(op: lexer::TokenKind, l: TExpr, r: TExpr, lk: str, rk: str)
     var fn_name = match bignum_op_fn(op, kind) { str as s => s; error as e => return e }
     var la = match bignum_adopt_operand(l, kind) { TExpr as te => te; error as e => return e }
     var ra = match bignum_adopt_operand(r, kind) { TExpr as te => te; error as e => return e }
-    var cargs: []TExpr = teko::list::push(teko::list::empty(), la)
+    var cargs: []TExpr = [la]
     cargs = teko::list::push(cargs, ra)
     bignum_call(kind, fn_name, cargs, bignum_named(kind))
 }
@@ -342,12 +342,12 @@ fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: T
         if i >= rest.len { break }
         var cur_raw = deref_ref_value(match type_expr(rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
         var cur = match bignum_adopt_operand(cur_raw, kind) { TExpr as te => te; error as e => return e }
-        var cmp_args: []TExpr = teko::list::push(teko::list::empty(), prev)
+        var cmp_args: []TExpr = [prev]
         cmp_args = teko::list::push(cmp_args, cur)
         var cmp_call = bignum_call(kind, "cmp", cmp_args, Prim { kind = PrimKind::I64 })
         var zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
         var term = TCmpTerm { op = rest[i].op; operand = zero }
-        var one_cmp = TExpr { kind = TCompare { first = cmp_call; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+        var one_cmp = TExpr { kind = TCompare { first = cmp_call; rest = [term] }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
         acc = combine_and(acc, one_cmp)
         prev = cur
         i = i + 1
@@ -438,7 +438,7 @@ fn value_type_body_methods(body: @TypeBody()): []parser::Function {
         parser::NewtypeBody as nb => nb.methods
         parser::EnumBody as eb => eb.methods
         parser::FlagsBody as fb => fb.methods
-        _ => teko::list::empty()
+        _ => []
     }
 }
 
@@ -450,7 +450,7 @@ fn type_body_operators(body: @TypeBody()): []parser::Function {
         parser::StructBody as sb => operator_members(sb.methods)
         parser::ClassBody as cb => operator_members(cb.methods)
         parser::InterfaceBody as ib => operator_members(ib.methods)
-        _ => teko::list::empty()
+        _ => []
     }
 }
 
@@ -517,7 +517,7 @@ fn operator_operand_type(te: @TypeExpr(), owner_canonical: str, table: TypeTable
 fn owner_has_matching_operator(owner_canonical: str, dn: str, l: TExpr, r: TExpr, table: TypeTable): bool {
     var methods = match type_table_find(table, owner_canonical, "") {
         parser::TypeDecl as td => type_body_operators(td.body)
-        error => teko::list::empty()
+        error => []
     }
     var i = 0
     loop {
@@ -542,9 +542,9 @@ fn operator_operand_accepts(arg: TExpr, param: @Type(), table: TypeTable): bool 
 
 fn build_operator_call(owner_canonical: str, dn: str, left: parser::Expr, right: parser::Expr, env: Env, table: TypeTable): TExpr | error {
     var callee = method_dispatch_callee(owner_canonical, dn)
-    var args: []parser::Expr = teko::list::push(teko::list::push(teko::list::empty(), left), right)
-    var names: []str = teko::list::push(teko::list::push(teko::list::empty(), ""), "")
-    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }, env, table)
+    var args: []parser::Expr = [left, right]
+    var names: []str = ["", ""]
+    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = []; callee_type_args = [] }, env, table)
 }
 
 fn dispatch_binop_operator(dn: str, left: parser::Expr, right: parser::Expr, l: TExpr, r: TExpr, env: Env, table: TypeTable): TExpr | NoOperator | error {
@@ -594,7 +594,7 @@ fn constraint_op_owner(t: @Type(), dn: str, table: TypeTable): ConstraintOp | No
 }
 
 fn build_constraint_operator_call(dn: str, left: parser::Expr, right: parser::Expr, env: Env, table: TypeTable): TExpr | error {
-    var mc = parser::MethodCall { receiver = left; method = dn; args = teko::list::push(teko::list::empty(), right); arg_names = teko::list::push(teko::list::empty(), ""); type_args = teko::list::empty() }
+    var mc = parser::MethodCall { receiver = left; method = dn; args = [right]; arg_names = [""]; type_args = [] }
     type_method_call(mc, env, table)
 }
 
@@ -614,7 +614,7 @@ fn dispatch_constraint_binop(dn: str, left: parser::Expr, right: parser::Expr, l
 fn owner_has_unary_operator(owner_canonical: str, dn: str, o: TExpr, table: TypeTable): bool {
     var methods = match type_table_find(table, owner_canonical, "") {
         parser::TypeDecl as td => type_body_operators(td.body)
-        error => teko::list::empty()
+        error => []
     }
     var i = 0
     loop {
@@ -630,9 +630,9 @@ fn owner_has_unary_operator(owner_canonical: str, dn: str, o: TExpr, table: Type
 
 fn build_unary_operator_call(owner_canonical: str, dn: str, operand: parser::Expr, env: Env, table: TypeTable): TExpr | error {
     var callee = method_dispatch_callee(owner_canonical, dn)
-    var args: []parser::Expr = teko::list::push(teko::list::empty(), operand)
-    var names: []str = teko::list::push(teko::list::empty(), "")
-    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }, env, table)
+    var args: []parser::Expr = [operand]
+    var names: []str = [""]
+    type_call(parser::Call { callee = callee; args = args; arg_names = names; owner_type_args = []; callee_type_args = [] }, env, table)
 }
 
 fn type_binary(b: parser::Binary, env: Env, table: TypeTable): TExpr | error {
@@ -676,7 +676,7 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable): TExpr | error {
     if is_ptr_or_uptr(o.type) { return ptr_opaque_error() }
     var uk = bignum_kind(o.type)
     if uk != "" {
-        if u.op == lexer::TokenKind::Minus { return bignum_call(uk, "neg", teko::list::push(teko::list::empty(), o), bignum_named(uk)) }
+        if u.op == lexer::TokenKind::Minus { return bignum_call(uk, "neg", [o], bignum_named(uk)) }
         return error { message = $"unary `!`/`~` is not defined on `{uk}`" }
     }
     if u.op == lexer::TokenKind::Minus {
@@ -720,7 +720,7 @@ fn single_primitive_compare(op: lexer::TokenKind, l: TExpr, r: TExpr): TExpr | e
     var adopted = adopt_binop_operands(l, r)
     if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
     var term = TCmpTerm { op = op; operand = adopted.r }
-    TExpr { kind = TCompare { first = adopted.l; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+    TExpr { kind = TCompare { first = adopted.l; rest = [term] }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
 fn compare_value_term(op: lexer::TokenKind, le: parser::Expr, l: TExpr, re: parser::Expr, r: TExpr, env: Env, table: TypeTable): TExpr | error {
@@ -818,7 +818,7 @@ fn mem_ptr_element(t: @Type()): @Type() | error {
 }
 
 fn mem_value_call(callee: parser::Path, args: []TExpr, ret: @Type()): TExpr {
-    TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = ret; line = 0; col = 0 }
 }
 
 fn type_is_region_handle(t: @Type()): bool {
@@ -831,7 +831,7 @@ fn type_mem_place(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
     if !type_is_region_handle(region.type) { return error { message = "teko::mem::place target region must be a `ptr` region handle" } }
     var v = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(v.type) { return error { message = "teko::mem::place cannot place a `void` expression" } }
-    var pargs = teko::list::push(teko::list::push(teko::list::empty(), region), v)
+    var pargs = [region, v]
     mem_value_call(c.callee, pargs, Ptr { inner = v.type })
 }
 
@@ -839,7 +839,7 @@ fn type_mem_read(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
     if c.args.len != 1 { return error { message = "teko::mem::read expects one argument (a `*T` pointer)" } }
     var p = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
     var inner = match mem_ptr_element(p.type) { (@Type()) as t => t; error as e => return error { message = teko::str::concat("teko::mem::read: ", e.message) } }
-    var rargs = teko::list::push(teko::list::empty(), p)
+    var rargs = [p]
     mem_value_call(c.callee, rargs, inner)
 }
 
@@ -851,7 +851,7 @@ fn type_mem_write(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
     if type_is_void(x.type) { return error { message = "teko::mem::write value cannot be a `void` expression" } }
     if !widens_into(x.type, inner, table) && !literal_adopts(x, inner) { return error { message = "teko::mem::write value type does not match the pointer's element type" } }
     var x_typed = TExpr { kind = x.kind; type = inner; line = x.line; col = x.col }
-    var wargs = teko::list::push(teko::list::push(teko::list::empty(), p), x_typed)
+    var wargs = [p, x_typed]
     mem_value_call(c.callee, wargs, Void { })
 }
 
@@ -879,7 +879,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
     }
     if last == "empty" {
         if c.args.len != 0 { return error { message = "teko::list::empty expects no arguments" } }
-        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = []; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Slice { element = Void { } }; line = 0; col = 0 }
     } else if last == "push" || is_pushfo {
         if c.args.len != 2 { return error { message = "teko::list::push expects two arguments (slice, item)" } }
         var s = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -894,8 +894,8 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
             }
         }
         var arr_expr = match elem { Void => TExpr { kind = s.kind; type = Slice { element = result_elem }; line = s.line; col = s.col }; _ => s }
-        var args = teko::list::push(teko::list::push(teko::list::empty(), arr_expr), x)
-        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Slice { element = result_elem }; line = 0; col = 0 }
+        var args = [arr_expr, x]
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Slice { element = result_elem }; line = 0; col = 0 }
     } else if last == "with_cap" {
         if c.args.len != 1 { return error { message = "teko::list::with_cap expects one argument (the initial capacity, a `u64`)" } }
         var n = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -905,8 +905,8 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
             if !literal_adopts(n, cap_t) { return error { message = $"teko::list::with_cap's argument must be a `u64` — got `{type_render(n.type)}`" } }
             n_typed = TExpr { kind = n.kind; type = cap_t; line = n.line; col = n.col }
         }
-        var wargs = teko::list::push(teko::list::empty(), n_typed)
-        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
+        var wargs = [n_typed]
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Slice { element = Void { } }; line = 0; col = 0 }
     } else if last == "grow_inplace" {
         if c.args.len != 2 { return error { message = "teko::list::grow_inplace expects two arguments (a `ref []T`, item)" } }
         var r = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -928,8 +928,8 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotLi
                 TExpr { kind = x.kind; type = elem; line = x.line; col = x.col }
             }
         }
-        var gargs = teko::list::push(teko::list::push(teko::list::empty(), r), item)
-        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = gargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+        var gargs = [r, item]
+        TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = gargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
     } else {
         NotListBuiltin { }
     }
@@ -961,11 +961,11 @@ fn type_ptr_unwrap(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrO
     }
     if !is_mut_lvalue { return error { message = $"`{owner}::__unwrap<T>` requires an addressable `var` variable (a `ref T`) — its address is what the opaque word wraps" } }
     if !type_eq(a.type, rt) { return error { message = $"`{owner}::__unwrap<{type_render(rt)}>` argument must be a `{type_render(rt)}` (got `{type_render(a.type)}`)" } }
-    var uargs = teko::list::push(teko::list::empty(), a)
-    var xtypes = teko::list::push(teko::list::empty(), rt)
+    var uargs = [a]
+    var xtypes = [rt]
     var restype: @Type() = Ptr { inner = null }
     if owner == "uptr" { restype = Uptr { } }
-    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = uargs; call_ns = "teko::__ptr_unwrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = teko::list::empty() }; type = restype; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = uargs; call_ns = "teko::__ptr_unwrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = restype; line = 0; col = 0 }
 }
 
 fn type_ref_word(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrOp | error {
@@ -981,8 +981,8 @@ fn type_ref_word(c: parser::Call, env: Env, table: TypeTable): TExpr | NotPtrOp 
         _ => false
     }
     if !is_mut_lvalue { return error { message = "`ref_word` requires an addressable `var` variable — its address is what the opaque word wraps" } }
-    var rargs = teko::list::push(teko::list::empty(), a)
-    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = rargs; call_ns = "teko::__ref_word"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
+    var rargs = [a]
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = rargs; call_ns = "teko::__ref_word"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
 }
 
 fn type_ptr_wrap(mc: parser::MethodCall, recv_t: @Type(), env: Env, table: TypeTable): TExpr | NotPtrOp | error {
@@ -998,13 +998,13 @@ fn type_ptr_wrap(mc: parser::MethodCall, recv_t: @Type(), env: Env, table: TypeT
         _ => { }
     }
     var recv = match type_expr(mc.receiver, env, table) { TExpr as te => te; error as e => return e }
-    var members = teko::list::push(teko::list::empty(), rt)
+    var members = [rt]
     members = teko::list::push(members, Error { })
     members = teko::list::push(members, Null { })
-    var wargs = teko::list::push(teko::list::empty(), recv)
-    var xtypes = teko::list::push(teko::list::empty(), rt)
-    var wseg = teko::list::push(teko::list::empty(), parser::Segment { name = "__wrap" })
-    TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = wseg }; args = wargs; call_ns = "teko::__ptr_wrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = teko::list::empty() }; type = Variant { members = union_normalize_null(members) }; line = 0; col = 0 }
+    var wargs = [recv]
+    var xtypes = [rt]
+    var wseg = [parser::Segment { name = "__wrap" }]
+    TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = wseg }; args = wargs; call_ns = "teko::__ptr_wrap"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = Variant { members = union_normalize_null(members) }; line = 0; col = 0 }
 }
 
 type NotSvcOp = struct { }
@@ -1084,7 +1084,7 @@ fn svc_service_implements(cb: parser::ClassBody, want: str): bool {
 fn svc_ctor_texpr(canon: str, env: Env, table: TypeTable): TExpr | error {
     var bpath = name_to_path(canon)
     var segs = teko::list::push(bpath.segments, parser::Segment { name = "ctor" })
-    type_call(parser::Call { callee = parser::Path { segments = segs }; args = teko::list::empty(); arg_names = teko::list::empty(); owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }, env, table)
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = []; arg_names = []; owner_type_args = []; callee_type_args = [] }, env, table)
 }
 
 fn svc_str_lit(s: str): TExpr {
@@ -1097,17 +1097,17 @@ fn svc_bool_lit(b: bool): TExpr {
 
 fn svc_key_eq(key: TExpr, lit: str): TExpr {
     var term = TCmpTerm { op = lexer::TokenKind::EqEq; operand = svc_str_lit(lit) }
-    TExpr { kind = TCompare { first = key; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+    TExpr { kind = TCompare { first = key; rest = [term] }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
 fn svc_tail_block(e: TExpr): []@TStatement() {
-    teko::list::push(teko::list::empty(), TExprStmt { expr = e })
+    [TExprStmt { expr = e }]
 }
 
 fn svc_panic_block(tname: str): []@TStatement() {
     var msg = svc_str_lit($"svc<{name_last_segment(tname)}>: no provider registered for the runtime key")
-    var pseg = teko::list::push(teko::list::empty(), parser::Segment { name = "panic" })
-    var pcall = TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = pseg }; args = teko::list::push(teko::list::empty(), msg); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+    var pseg = [parser::Segment { name = "panic" }]
+    var pcall = TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = pseg }; args = [msg]; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
     svc_tail_block(pcall)
 }
 
@@ -1397,12 +1397,12 @@ fn type_flags_method(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr 
     var andexpr = TExpr { kind = TBinary { op = lexer::TokenKind::Amp; left = recv; right = mask }; type = rt; line = 0; col = 0 }
     if is_has || is_all {
         var term = TCmpTerm { op = lexer::TokenKind::EqEq; operand = mask }
-        return TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+        return TExpr { kind = TCompare { first = andexpr; rest = [term] }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
     }
     var zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = rt; line = 0; col = 0 }
     var cmp_op = if is_none { lexer::TokenKind::EqEq } else { lexer::TokenKind::Ne }
     var term = TCmpTerm { op = cmp_op; operand = zero }
-    TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+    TExpr { kind = TCompare { first = andexpr; rest = [term] }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
 type IfaceDispatch = struct { iface: str; method: parser::Function; slot: u32 }
@@ -1441,7 +1441,7 @@ fn type_param_surface_message(extends: []str, table: TypeTable): str {
     var i = 0
     loop {
         if i >= extends.len { break }
-        var ms = match iface_methods_by_name(extends[i], table) { []parser::Function as f => f; error => teko::list::empty() }
+        var ms = match iface_methods_by_name(extends[i], table) { []parser::Function as f => f; error => [] }
         var j = 0
         loop {
             if j >= ms.len { break }
@@ -1485,13 +1485,13 @@ fn type_param_call_error(decl: parser::TypeDecl, table: TypeTable): error | null
 }
 
 fn method_dispatch_callee(struct_name: str, method: str): parser::Path {
-    var segs: []parser::Segment = teko::list::push(teko::list::empty(), parser::Segment { name = struct_name })
+    var segs: []parser::Segment = [parser::Segment { name = struct_name }]
     segs = teko::list::push(segs, parser::Segment { name = method })
     parser::Path { segments = segs }
 }
 
 fn method_call_arg_names(mc: parser::MethodCall): []str {
-    var names: []str = teko::list::push(teko::list::empty(), "")
+    var names: []str = [""]
     var i: u64 = 0
     loop { if i >= mc.arg_names.len { break }; names = teko::list::push(names, mc.arg_names[i]); i++ }
     names
@@ -1545,7 +1545,7 @@ fn method_name_visited(visited: []str, nm: str): bool {
 }
 
 fn method_mutates_self(sname: str, m: parser::Function, table: TypeTable): bool {
-    method_mutates_self_guarded(sname, m, table, teko::list::empty())
+    method_mutates_self_guarded(sname, m, table, [])
 }
 
 fn method_mutates_self_guarded(sname: str, m: parser::Function, table: TypeTable, visited: []str): bool {
@@ -1680,10 +1680,10 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         Named as rn => {
             if name_is_phantom_instance(rn.name, table) {
                 var psegs = method_dispatch_callee(rn.name, mc.method).segments
-                var pcargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+                var pcargs: []parser::Expr = [mc.receiver]
                 var pai: u64 = 0
                 loop { if pai >= mc.args.len { break }; pcargs = teko::list::push(pcargs, mc.args[pai]); pai++ }
-                return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = teko::list::empty(); callee_type_args = mc.type_args }, env, table)
+                return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = []; callee_type_args = mc.type_args }, env, table)
             }
         }
         _ => { }
@@ -1693,7 +1693,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
     match type_param_call_error(decl, table) { error as e => return e; null => { } }
     match decl.body {
         parser::InterfaceBody as ib => return type_contract_dispatch(ib, struct_name, mc, env, table)
-        parser::TraitBody as tb => return type_contract_dispatch(parser::InterfaceBody { extends = teko::list::empty(); methods = tb.methods }, struct_name, mc, env, table)
+        parser::TraitBody as tb => return type_contract_dispatch(parser::InterfaceBody { extends = []; methods = tb.methods }, struct_name, mc, env, table)
         _ => { }
     }
     var methods = match decl.body {
@@ -1741,7 +1741,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                     u32 as bslot => {
                         var bft = match method_func_type(mfn, struct_name, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
                         var bf = match bft { Func as ff => ff; _ => return error { message = "internal: base method signature is not a function type" } }
-                        var bcargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+                        var bcargs: []parser::Expr = [mc.receiver]
                         var bai: u64 = 0
                         loop { if bai >= mc.args.len { break }; bcargs = teko::list::push(bcargs, mc.args[bai]); bai++ }
                         var bcnames: []str = method_call_arg_names(mc)
@@ -1760,9 +1760,9 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                         }
                         var bseg_base = parser::Segment { name = struct_name }
                         var bseg_m = parser::Segment { name = mc.method }
-                        var bsegs: []parser::Segment = teko::list::push(teko::list::empty(), bseg_base)
+                        var bsegs: []parser::Segment = [bseg_base]
                         bsegs = teko::list::push(bsegs, bseg_m)
-                        return TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = bf.ret; line = 0; col = 0 }
+                        return TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot; type_args = []; ret_extra = [] }; type = bf.ret; line = 0; col = 0 }
                     }
                     error => { }
                 }
@@ -1771,11 +1771,11 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         _ => { }
     }
     var segs = method_dispatch_callee(struct_name, mc.method).segments
-    var cargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+    var cargs: []parser::Expr = [mc.receiver]
     var ai: u64 = 0
     loop { if ai >= mc.args.len { break }; cargs = teko::list::push(cargs, mc.args[ai]); ai++ }
     var cnames: []str = method_call_arg_names(mc)
-    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = teko::list::empty(); callee_type_args = mc.type_args }, env, table)
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = []; callee_type_args = mc.type_args }, env, table)
 }
 
 fn struct_iface_named_stop(from: @Type(), to: @Type(), table: TypeTable): error | null {
@@ -1790,7 +1790,7 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
     var slot = dispatch.slot
     var ift = match method_func_type(imfn, struct_name, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
     var f = match ift { Func as ff => ff; _ => return error { message = "internal: interface method signature is not a function type" } }
-    var icargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+    var icargs: []parser::Expr = [mc.receiver]
     var ica: u64 = 0
     loop { if ica >= mc.args.len { break }; icargs = teko::list::push(icargs, mc.args[ica]); ica++ }
     var icnames: []str = method_call_arg_names(mc)
@@ -1809,13 +1809,13 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
     }
     var seg_iface = parser::Segment { name = iface_canon }
     var seg_m = parser::Segment { name = mc.method }
-    var isegs: []parser::Segment = teko::list::push(teko::list::empty(), seg_iface)
+    var isegs: []parser::Segment = [seg_iface]
     isegs = teko::list::push(isegs, seg_m)
-    TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot; type_args = []; ret_extra = [] }; type = f.ret; line = 0; col = 0 }
 }
 
 fn single_seg_path(name: str): parser::Path {
-    parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
+    parser::Path { segments = [parser::Segment { name = name }] }
 }
 
 fn rewrite_segment_at(p: parser::Path, idx: u64, name: str): parser::Path {
@@ -1879,7 +1879,7 @@ fn phantom_owner_subst(phantom: str, template: parser::TypeDecl, table: TypeTabl
 }
 
 fn resolve_phantom_arg_token(tok: str, table: TypeTable, ref_ns: str): @Type() | error {
-    match resolve_type(parser::NamedType { path = single_seg_path(tok); args = teko::list::empty() }, table, ref_ns) {
+    match resolve_type(parser::NamedType { path = single_seg_path(tok); args = [] }, table, ref_ns) {
         (@Type()) as t => return t
         error => { }
     }
@@ -1934,7 +1934,7 @@ fn type_phantom_instance_call(c: parser::Call, env: Env, table: TypeTable): TExp
         targs = teko::list::push(targs, a)
         ai++
     }
-    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = targs; call_ns = phantom; is_closure_call = false; callee_type = fsub; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = fsub.ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = targs; call_ns = phantom; is_closure_call = false; callee_type = fsub; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = fsub.ret; line = 0; col = 0 }
 }
 
 fn builtin_qualifier_ok(callee: parser::Path): bool {
@@ -1978,7 +1978,7 @@ fn build_overload_sig(tf: TFunction, ns: str, table: TypeTable): Func | error {
         if tf.params[i].is_params { variadic = true }
         i++
     }
-    Func { params = ptypes; ret = tf.return_type; variadic = variadic; param_names = pnames; n_required = 0; defaults = teko::list::empty(); ret_extra = teko::list::empty() }
+    Func { params = ptypes; ret = tf.return_type; variadic = variadic; param_names = pnames; n_required = 0; defaults = []; ret_extra = [] }
 }
 
 fn overload_suffix_for_decl(env: Env, ns: str, name: str, tf: TFunction, table: TypeTable): str {
@@ -2011,8 +2011,8 @@ fn bindings_same_signature(bs: []ValBinding): bool {
 
 fn select_overload(cands: []ValBinding, c: parser::Call, env: Env, table: TypeTable): ValBinding | error {
     var name = c.callee.segments[c.callee.segments.len - 1].name
-    var exacts: []ValBinding = teko::list::empty()
-    var widens: []ValBinding = teko::list::empty()
+    var exacts: []ValBinding = []
+    var widens: []ValBinding = []
     var ci: u64 = 0
     loop {
         if ci >= cands.len { break }
@@ -2122,16 +2122,16 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
             var a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
             var ok = match a.type { Str => true; Error => true; _ => false }
             if !ok { return error { message = "panic's argument must be an `error` or a `str`" } }
-            var pargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+            var pargs = [a]
+            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
         }
         if name == "exit" {
             if c.args.len != 1 { return error { message = "exit expects one argument (an integer status code)" } }
             var a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
             var ok = match a.type { Prim as p => prim_is_int(p.kind); _ => false }
             if !ok { return error { message = "exit's argument must be an integer status code" } }
-            var eargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Void { }; line = 0; col = 0 }
+            var eargs = [a]
+            return TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = Void { }; line = 0; col = 0 }
         }
     }
     var resolved_ns = match lookup_call(env, c.callee) { (@Type()) as _gt7 => call_ns(env, c.callee); error => "" }
@@ -2185,19 +2185,19 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                 targs = teko::list::push(targs, a)
                 ti++
             }
-            var all_tps = collect_sig_type_params(ft, table, teko::list::empty())
+            var all_tps = collect_sig_type_params(ft, table, [])
             if explicit_fn_args.len > 0 && all_tps.len == 0 {
                 return error { message = $"'{name}' is not generic — it takes no explicit type arguments" }
             }
             if all_tps.len > 0 {
-                var param_tps: []str = teko::list::empty()
+                var param_tps: []str = []
                 var pp = 0
                 loop { if pp >= f.params.len { break }; param_tps = collect_sig_type_params(f.params[pp], table, param_tps); pp++ }
                 if explicit_fn_args.len > 0 {
                     if explicit_fn_args.len != all_tps.len {
                         return error { message = $"'{name}' takes {all_tps.len} type argument(s), but {explicit_fn_args.len} were given" }
                     }
-                    var s = Subst { params = all_tps; names = teko::list::empty(); types = teko::list::empty() }
+                    var s = Subst { params = all_tps; names = []; types = [] }
                     var xtypes: []@Type() = teko::list::empty()
                     var xi = 0
                     loop {
@@ -2217,7 +2217,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                         }
                         vi++
                     }
-                    return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = teko::list::empty() }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                    return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = xtypes; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
                 }
                 var rk = 0
                 loop {
@@ -2225,16 +2225,16 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                     if !is_type_param(all_tps[rk], param_tps) { return error { message = $"cannot infer type parameter {all_tps[rk]} — it appears only in the return type; annotate the call" } }
                     rk++
                 }
-                var s = Subst { params = param_tps; names = teko::list::empty(); types = teko::list::empty() }
+                var s = Subst { params = param_tps; names = []; types = [] }
                 var gi = 0
                 loop {
                     if gi >= targs.len { break }
                     s = match unify(f.params[gi], targs[gi].type, s, table) { Subst as x => x; error as e => return e }
                     gi++
                 }
-                return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = subst_type(f.ret, s); line = 0; col = 0 }
+                return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
             }
-            var args: []TExpr = teko::list::empty()
+            var args: []TExpr = []
             var i = 0
             loop {
                 if i >= targs.len { break }
@@ -2265,7 +2265,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                 i++
             }
             var is_closure = in_scope && resolved_ns.len == 0
-            TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = args; call_ns = resolved_ns; is_closure_call = is_closure; callee_type = ft; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = f.ret; line = 0; col = 0 }
+            TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = args; call_ns = resolved_ns; is_closure_call = is_closure; callee_type = ft; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = f.ret; line = 0; col = 0 }
         }
         _ => error { message = $"not a function: {name}" }
     }
@@ -2554,7 +2554,7 @@ fn class_field_visible_to(owner: MemberOwner, env: Env, table: TypeTable): bool 
 }
 
 fn desugar_getter(recv: parser::Expr, prop: str, env: Env, table: TypeTable): TExpr | error {
-    var mc = parser::MethodCall { receiver = recv; method = "__get_" ~ prop; args = teko::list::empty(); arg_names = teko::list::empty(); type_args = teko::list::empty() }
+    var mc = parser::MethodCall { receiver = recv; method = "__get_" ~ prop; args = []; arg_names = []; type_args = [] }
     type_method_call(mc, env, table)
 }
 
@@ -2682,8 +2682,8 @@ fn resolve_foreach_arm(a: parser::Arm, subject: @Type()): parser::Arm | error {
     var bp = match a.pattern { parser::BindPattern as b => b; _ => return a }
     var inner = strip_null_member_or_self(subject)
     var tn = match elem_type_name(inner) { str as s => s; error as e => return e }
-    var segs = teko::list::push(teko::list::empty(), parser::Segment { name = tn })
-    var real = parser::BindPattern { type_name = parser::Path { segments = segs }; has_binding = bp.has_binding; binding = bp.binding; is_slice = false; slice_type = null; type_args = teko::list::empty() }
+    var segs = [parser::Segment { name = tn }]
+    var real = parser::BindPattern { type_name = parser::Path { segments = segs }; has_binding = bp.has_binding; binding = bp.binding; is_slice = false; slice_type = null; type_args = [] }
     parser::Arm { pattern = real; has_when = a.has_when; guard = a.guard; body = a.body }
 }
 
@@ -2711,8 +2711,8 @@ fn type_foreach_elem_arm(a: parser::Arm, subject: @Type(), env: Env, table: Type
         if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
         guard = g
     }
-    var segs = teko::list::push(teko::list::empty(), parser::Segment { name = tn })
-    var real = parser::BindPattern { type_name = parser::Path { segments = segs }; has_binding = bp.has_binding; binding = bp.binding; is_slice = false; slice_type = null; type_args = teko::list::empty() }
+    var segs = [parser::Segment { name = tn }]
+    var real = parser::BindPattern { type_name = parser::Path { segments = segs }; has_binding = bp.has_binding; binding = bp.binding; is_slice = false; slice_type = null; type_args = [] }
     TArm { pattern = real; has_when = a.has_when; guard = guard; body = body.stmts }
 }
 
@@ -2778,8 +2778,8 @@ fn type_error_literal(sl: parser::StructLit, env: Env, table: TypeTable): TExpr 
     }
     var v = match type_expr(sl.field_vals[0], env, table) { TExpr as te => te; error as e => return e }
     match v.type { Str => { }; _ => return error { message = "`error`'s `message` must be a `str`" } }
-    var enames = teko::list::push(teko::list::empty(), "message")
-    var evals = teko::list::push(teko::list::empty(), v)
+    var enames = ["message"]
+    var evals = [v]
     TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { }; line = 0; col = 0 }
 }
 
@@ -2841,8 +2841,8 @@ fn type_struct_lit(sl: parser::StructLit, expected: @Type(), env: Env, table: Ty
     }
     if sl.field_names.len != sb_fields.len { return error { message = "a struct literal must set exactly the declared fields (count mismatch)" } }
 
-    var names: []str = teko::list::empty()
-    var vals: []TExpr = teko::list::empty()
+    var names: []str = []
+    var vals: []TExpr = []
     var d = 0
     loop {
         if d >= sb_fields.len { break }
@@ -2965,11 +2965,11 @@ fn desugar_datetime_hole(raw_hole: parser::Expr, hole_ns: str, fn_name: str, pat
     }
     segs = teko::list::push(segs, parser::Segment { name = fn_name })
     var pat_expr = parser::Expr { kind = parser::StrLit { text = pattern }; line = 0; col = 0 }
-    var args: []parser::Expr = teko::list::push(teko::list::empty(), raw_hole)
+    var args: []parser::Expr = [raw_hole]
     args = teko::list::push(args, pat_expr)
-    var arg_names: []str = teko::list::push(teko::list::empty(), "")
+    var arg_names: []str = [""]
     arg_names = teko::list::push(arg_names, "")
-    var call = parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }
+    var call = parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = []; callee_type_args = [] }
     type_call(call, env, table)
 }
 
@@ -3334,7 +3334,7 @@ fn type_comptime_call(mc: parser::MacroCall, cd: parser::ComptimeDecl, env: Env,
     var args = match type_comptime_args(mc.args, env, table) { []TExpr as a => a; error as e => return e }
     var targs = match resolve_type_args(mc.callee_type_args, table, env.cur_ns) { []@Type() as t => t; error as e => return e }
     var ret = match resolve_type(cd.ret, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
-    TExpr { kind = TCall { overload_suffix = ""; callee = mc.callee; args = args; call_ns = comptime_call_ns(); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = targs; ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
+    TExpr { kind = TCall { overload_suffix = ""; callee = mc.callee; args = args; call_ns = comptime_call_ns(); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = targs; ret_extra = [] }; type = ret; line = 0; col = 0 }
 }
 
 pub fn comptime_call_ns(): str { "@comptime" }
@@ -3442,7 +3442,7 @@ fn tblock_diverges(stmts: []@TStatement()): bool {
 
 fn type_block(stmts: []@Statement(), env: Env, table: TypeTable): TypedBlock | error {
     var cur = env
-    var out: []@TStatement() = teko::list::empty()
+    var out: []@TStatement() = []
     var i = 0
     loop {
         if i >= stmts.len { break }
@@ -3686,7 +3686,7 @@ fn is_iface_slice(t: @Type(), table: TypeTable): bool {
 
 fn type_array_lit_expected(a: parser::ArrayLit, expected: @Type(), env: Env, table: TypeTable): TExpr | error {
     var elem = match expected { Slice as s => s.element; _ => return error { message = "internal: type_array_lit_expected needs a slice expected type" } }
-    var elems: []TArrayElem = teko::list::empty()
+    var elems: []TArrayElem = []
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
@@ -3849,7 +3849,7 @@ fn property_write_dispatch(fa: parser::FieldAccess, a: parser::Assign, pinfo: Pr
     if a.op != lexer::TokenKind::Assign {
         return error { message = $"a compound assignment on property '{fa.field}' is not supported yet — write `x.{fa.field} = x.{fa.field} <op> v` explicitly" }
     }
-    var mc = parser::MethodCall { receiver = fa.receiver; method = "__set_" ~ fa.field; args = teko::list::push(teko::list::empty(), a.value); arg_names = teko::list::push(teko::list::empty(), ""); type_args = teko::list::empty() }
+    var mc = parser::MethodCall { receiver = fa.receiver; method = "__set_" ~ fa.field; args = [a.value]; arg_names = [""]; type_args = [] }
     var call = match type_method_call(mc, env, table) { TExpr as te => te; error as e => return e }
     TypedStmt { node = TExprStmt { expr = call }; env = env }
 }
@@ -4005,7 +4005,7 @@ fn type_return(r: parser::Return, env: Env, table: TypeTable): TypedStmt | error
     } else {
         match type_expr(r.value, env, table) { TExpr as te => te; error as e => return e }
     }
-    TypedStmt { node = TReturn { has_value = r.has_value; value = v; values = teko::list::empty() }; env = env }
+    TypedStmt { node = TReturn { has_value = r.has_value; value = v; values = [] }; env = env }
 }
 
 fn type_loop(l: parser::LoopStmt, env: Env, table: TypeTable): TypedStmt | error {
@@ -4068,13 +4068,13 @@ fn mb_binding_stmt(kind: parser::BindKind, name: str, has_type: bool, ann: @Type
 
 fn mb_guard_stmt(temp: str, op: lexer::TokenKind, bound: u64, msg: str): @Statement() {
     var term = parser::CmpTerm { op = op; operand = mb_u64_lit(bound) }
-    var cond = mb_expr(parser::Compare { first = mb_len(mb_var(temp)); rest = teko::list::push(teko::list::empty(), term) })
-    var pseg = teko::list::push(teko::list::empty(), parser::Segment { name = "panic" })
-    var pargs = teko::list::push(teko::list::empty(), mb_expr(parser::StrLit { text = msg }))
-    var pnames = teko::list::push(teko::list::empty(), "")
-    var pcall = mb_expr(parser::Call { callee = parser::Path { segments = pseg }; args = pargs; arg_names = pnames; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() })
-    var then_blk: []@Statement() = teko::list::push(teko::list::empty(), parser::ExprStmt { expr = pcall })
-    parser::ExprStmt { expr = mb_expr(parser::IfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = teko::list::empty() }) }
+    var cond = mb_expr(parser::Compare { first = mb_len(mb_var(temp)); rest = [term] })
+    var pseg = [parser::Segment { name = "panic" }]
+    var pargs = [mb_expr(parser::StrLit { text = msg })]
+    var pnames = [""]
+    var pcall = mb_expr(parser::Call { callee = parser::Path { segments = pseg }; args = pargs; arg_names = pnames; owner_type_args = []; callee_type_args = [] })
+    var then_blk: []@Statement() = [parser::ExprStmt { expr = pcall }]
+    parser::ExprStmt { expr = mb_expr(parser::IfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = [] }) }
 }
 
 fn mb_temp_name(mb: parser::MultiBind, slot: u64): str {
@@ -4112,7 +4112,7 @@ fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmt
     }
     var tname = mb_temp_name(mb, 0)
     var cur = define(env, tname, call.type, true)
-    var body: []@TStatement() = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = tname }; bound = call.type; value = call })
+    var body: []@TStatement() = [TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = tname }; bound = call.type; value = call }]
     var i: u64 = 0
     loop {
         if i >= mb.targets.len { break }
@@ -4244,7 +4244,7 @@ fn top_level_stmt_nodes(s: @Statement(), env: Env, table: TypeTable): TStmtSeq |
         parser::MultiBind as mb => type_multibind(mb, env, table)
         _ => {
             var ts = match type_statement(s, env, table) { TypedStmt as x => x; error as e => return e }
-            TStmtSeq { stmts = teko::list::push(teko::list::empty(), ts.node); env = ts.env }
+            TStmtSeq { stmts = [ts.node]; env = ts.env }
         }
     }
 }
@@ -4378,7 +4378,7 @@ fn widen_int_into_bignum(v: TExpr, target: @Type()): TExpr | null {
     if !is_integer(v.type) { return null }
     var ctor = bignum_ctor_of(v.type)
     var arg = bignum_ctor_argument(v, ctor)
-    bignum_call(kind, ctor, teko::list::push(teko::list::empty(), arg), bignum_named(kind))
+    bignum_call(kind, ctor, [arg], bignum_named(kind))
 }
 
 fn bignum_ctor_argument(v: TExpr, ctor: str): TExpr {
@@ -4675,7 +4675,7 @@ fn retype_return_stmt(s: @TStatement(), ret: @Type(), table: TypeTable, is_trail
         TReturn as r => {
             if !r.has_value { return s }
             if !literal_adopts(r.value, ret) { return s }
-            TReturn { has_value = true; value = retype_literal(r.value, ret); values = teko::list::empty() }
+            TReturn { has_value = true; value = retype_literal(r.value, ret); values = [] }
         }
         TLoopStmt as l => TLoopStmt { label = l.label; init = l.init; body = retype_return_positions(l.body, ret, table, false) }
         TAdoptStmt as a => TAdoptStmt { name = a.name; body = retype_return_positions(a.body, ret, table, false) }
@@ -4964,9 +4964,9 @@ fn type_implements_list(name: str, ref_ns: str, table: TypeTable): []str {
         parser::TypeDecl as td => match td.body {
             parser::ClassBody as cb => cb.implements
             parser::StructBody as sb => sb.implements
-            _ => teko::list::empty()
+            _ => []
         }
-        error => teko::list::empty()
+        error => []
     }
 }
 
@@ -4976,7 +4976,7 @@ fn find_interface_method(impls: []str, name: str, table: TypeTable, ref_ns: str)
         if i >= impls.len { break }
         match find_interface_decl(impls[i], table, ref_ns) {
             IfaceHit as h => match h.decl.body {
-                parser::InterfaceBody as ib => match effective_interface_methods(ib, h.ns, table, teko::list::push(teko::list::empty(), qualify(h.ns, name_last_segment(h.decl.name)))) {
+                parser::InterfaceBody as ib => match effective_interface_methods(ib, h.ns, table, [qualify(h.ns, name_last_segment(h.decl.name))]) {
                     []parser::Function as ms => match method_named(ms, name) { parser::Function as m => return m; null => { } }
                     error => { }
                 }
@@ -5090,15 +5090,15 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         if !ret_ok {
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent" }
         }
-        var no_body: []@TStatement() = teko::list::empty()
-        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
+        var no_body: []@TStatement() = []
+        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = []; guard = parser::pred_true() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
     var tb = match type_block(f.body, with_ret_expected(local, ret), tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }
     match reject_ref_return(ret) { null => { }; error as e => return e }
-    var lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())
+    var lc = check_labels(tb.stmts, [], false, [])
     if lc.failed { return error { message = lc.message } }
     var ret_stmts = retype_union_returns(tb.stmts, ret, table)
     var body = if inject_base {
@@ -5110,14 +5110,14 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         }
         var base_bound = Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }
         var base_kw_stmt = TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = "base" }; bound = base_bound; value = cast_val }
-        var prefixed: []@TStatement() = teko::list::push(teko::list::empty(), base_kw_stmt)
+        var prefixed: []@TStatement() = [base_kw_stmt]
         var si = 0
         loop { if si >= ret_stmts.len { break }; prefixed = teko::list::push(prefixed, ret_stmts[si]); si++ }
         prefixed
     } else {
         ret_stmts
     }
-    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
+    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = []; guard = parser::pred_true() }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -5276,18 +5276,18 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
         if !ret_ok {
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent" }
         }
-        var no_body: []@TStatement() = teko::list::empty()
-        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
+        var no_body: []@TStatement() = []
+        return TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = []; guard = parser::pred_true() }
     }
     match check_param_defaults(f, local, tbl) { null => { }; error as e => return e }
     var tb = match type_block(f.body, with_ret_expected(local, ret), tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
     match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }
     match reject_ref_return(ret) { null => { }; error as e => return e }
-    var lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())
+    var lc = check_labels(tb.stmts, [], false, [])
     if lc.failed { return error { message = lc.message } }
     var ret_stmts = retype_union_returns(tb.stmts, ret, table)
-    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = teko::list::empty(); guard = parser::pred_true() }
+    var tf = TFunction { overload_suffix = ""; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = []; guard = parser::pred_true() }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -5438,7 +5438,7 @@ fn check_value_type_self_readonly(td: parser::TypeDecl, methods: []parser::Funct
 
 fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []@TItem() | error {
     match check_operator_invariants(td, item_ns, table) { error as e => return e; null => { } }
-    var methods: []parser::Function = teko::list::empty()
+    var methods: []parser::Function = []
     var base_name = ""
     var is_class = false
     var own_names: []str = teko::list::empty()
@@ -5485,7 +5485,7 @@ fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: E
         parser::ClassBody as cb => match effective_class_consts(cb, table) { []parser::ConstDecl as c => c; error as e => return e }
         parser::StructBody as sb => sb.consts
         parser::TraitBody as tb => tb.consts
-        _ => teko::list::empty()
+        _ => []
     }
     var type_canonical = qualify(item_ns, td.name)
     var out: []@TItem() = teko::list::empty()
@@ -5575,7 +5575,7 @@ pub fn type_program_with_deps(raw_program: parser::Program, dep_prog: TProgram):
 
 pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: TProgram, on_item: ProgressFn, explicit: bool): PreMono | error {
     var folded = fold_traits_collected(raw_program)
-    if folded.diags.len > 0 { return PreMono { prog = TProgram { items = teko::list::empty() }; table = tt_empty(); diags = folded.diags } }
+    if folded.diags.len > 0 { return PreMono { prog = TProgram { items = [] }; table = tt_empty(); diags = folded.diags } }
     var program = synthesize_mret_structs(canon_class_bases(folded.program))
     var seed_empty = Collected { types = tt_empty(); env = with_explicit(env_empty(), explicit) }
     var seed = match seed_from_dep(dep_prog, seed_empty.types, seed_empty.env) {
@@ -5583,12 +5583,12 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
         error as e => return e
     }
     var pre = pre_walk(program, collect_with_seed(program, seed))
-    if pre.cut { return PreMono { prog = TProgram { items = teko::list::empty() }; table = pre.types; diags = pre.diags } }
+    if pre.cut { return PreMono { prog = TProgram { items = [] }; table = pre.types; diags = pre.diags } }
     var types = pre.types
     var cenv = pre.env
     program = drop_comptime_items(program)
-    var items: []@TItem() = teko::list::empty()
-    var mainbody: []@TStatement() = teko::list::empty()
+    var items: []@TItem() = []
+    var mainbody: []@TStatement() = []
     var diags: []str = pre.diags
     var cur = cenv
     var i = 0
@@ -5650,7 +5650,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
         i++
         on_item(i to u64, program.items.len)
     }
-    var lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())
+    var lc = check_labels(mainbody, [], false, [])
     if lc.failed { diags = teko::list::push(diags, lc.message) }
     var all_items: []@TItem() = teko::list::empty()
     var di: u64 = 0
@@ -5726,8 +5726,8 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
     var types = pre.types
     var cenv = pre.env
     program = drop_comptime_items(program)
-    var items: []@TItem() = teko::list::empty()
-    var mainbody: []@TStatement() = teko::list::empty()
+    var items: []@TItem() = []
+    var mainbody: []@TStatement() = []
     var cur = cenv
     var i = 0
     loop {
@@ -5779,7 +5779,7 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
         }
         i++
     }
-    var lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())
+    var lc = check_labels(mainbody, [], false, [])
     if lc.failed { return error { message = lc.message } }
     var tp = TProgram { items = items }
     var mono = match monomorphize(tp, types) { TProgram as mp => mp; error as e => return e }
