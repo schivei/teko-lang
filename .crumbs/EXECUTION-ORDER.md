@@ -44,15 +44,15 @@
 | 0018 | 0018-SM-G12-constraint-acceptance.md | SM-G12 | M1 | — | [dry] | needs-impl |
 | 0019 | 0019-9D-T1-inline-union-accept.md | 9D-T1 | M1 | — | [dry] | needs-impl |
 | 0020 | 0020-RM-C2-mem-copy-index-join.md | RM-C2 | M1 | — | [dry] | needs-impl |
-| 0021 | 0021-COL-F0a-of-len-fixed-backing.md | COL-F0a | M1 | RM-C2 | [dry] | in-progress |
-| 0022 | 0022-COL-F0b-class-holder-escape.md | COL-F0b | M1 | COL-F0a | [dry] | needs-impl |
-| 0023 | 0023-COL-F0c-wrapped-retain-release.md | COL-F0c | M1 | COL-F0a | [dry] | needs-impl |
-| 0024 | 0024-COL-F0d-weak-deepcopy-cas.md | COL-F0d | M1 | COL-F0a | [dry] | needs-impl |
-| 0025 | 0025-SM-STRU32-string-u32-codecs.md | SM-STRU32 | M1 | RM-C2 | [dry] | needs-impl |
-| 0026 | 0026-IO-2-byte-ptr-builtin.md | IO-2 | M1 | SM-P1 | [dry] | needs-impl |
-| 0027 | 0027-S16-MM-wp-word-ptr-intrinsic.md | S16-MM-wp | M1 | — | [dry] | needs-impl |
-| 0028 | 0028-S16-MM-const-mmap-syscall-consts.md | S16-MM-const | M1 | — | [dry] | needs-impl |
-| 0029 | 0029-S16-SYNC-const-sync-abi-consts.md | S16-SYNC-const | M1 | — | [dry] | needs-impl |
+| 0021 | 0021-COL-F0a-of-len-fixed-backing.md | COL-F0a | M1 | RM-C2 | [dry] | landed |
+| 0022 | 0022-COL-F0b-class-holder-escape.md | COL-F0b | M1 | COL-F0a | [dry] | landed |
+| 0023 | 0023-COL-F0c-wrapped-retain-release.md | COL-F0c | M1 | COL-F0a | [dry] | landed |
+| 0024 | 0024-COL-F0d-weak-deepcopy-cas.md | COL-F0d | M1 | COL-F0a | [dry] | in-progress |
+| 0025 | 0025-SM-STRU32-string-u32-codecs.md | SM-STRU32 | M1 | RM-C2 | [dry] | landed |
+| 0026 | 0026-IO-2-byte-ptr-builtin.md | IO-2 | M1 | SM-P1 | [dry] | verify-only |
+| 0027 | 0027-S16-MM-wp-word-ptr-intrinsic.md | S16-MM-wp | M1 | — | [dry] | verify-only |
+| 0028 | 0028-S16-MM-const-mmap-syscall-consts.md | S16-MM-const | M1 | — | [dry] | verify-only |
+| 0029 | 0029-S16-SYNC-const-sync-abi-consts.md | S16-SYNC-const | M1 | — | [dry] | verify-only |
 | 0030 | 0030-SM-R1-teaching-reseed.md | SM-R1 | M1 | ALL M1 rows | [RITUAL] | needs-impl |
 | 0031 | 0031-SM-S1-sweep-colon-returns.md | SM-S1 | M2 | SM-R1 | [fixpoint] | verify-only |
 | 0032 | 0032-SM-S2-sweep-var.md | SM-S2 | M2 | SM-R1 | [fixpoint] | verify-only |
@@ -146,6 +146,7 @@
 | 0120 | 0120-SM-V1-visibility-enforcement-activation.md | SM-V1 | M2 | RM-C17 | [fixpoint] | verify-only |
 | 0121 | 0121-ERR-FACTORY-error-factory-builtins.md | ERR-FACTORY | M2 | SM-G4 | [fixpoint] | on-branch:origin/cargo/0.3.1.0-error-factory |
 | 0122 | 0122-S16-SYSCALL-PORTABLE-host-portability.md | S16-SYSCALL-PORTABLE | M2 | RM-C17 | [fixpoint] | on-branch:origin/feat/s16-syscall-portable |
+| 0123 | 0123-COL-F0c2-wrap-table-redesign.md | COL-F0c2 | M1 | COL-F0c,COL-F0d | [dry] | gated:FORK-ABERTO-1 |
 
 ## Gap Crumbs Status Summary (0113–0120)
 
@@ -174,14 +175,15 @@
 | status | count |
 |---|---|
 | done | 1 (0001) |
-| landed/verify-only | 1 (0007) |
-| verify-only | 6 (0031–0033, 0091, 0118, 0120) |
+| landed | 5 (0007, 0021–0023, 0025) |
+| verify-only | 10 (0026–0029, 0031–0033, 0091, 0118, 0120) |
 | verify-and-wire | 2 (0115, 0116) |
 | partial | 1 (0009) |
-| in-progress | 1 (0021) |
+| in-progress | 1 (0024) |
 | on-branch | 3 (0006, 0121, 0122) |
-| needs-impl | 32 (0002–0005, 0008, 0010–0018, 0019–0020, 0022–0029, 0030, 0108–0112, 0117, 0119) |
+| needs-impl | 24 (0002–0005, 0008, 0010–0018, 0019–0020, 0030, 0108–0112, 0117, 0119) |
 | planned:verify-at-exec | 73 (0034–0090, 0092–0107) |
 | gated:D52 | 2 (0113, 0114) |
+| gated:FORK-ABERTO-1 | 1 (0123) |
 | deferred | 0 (doc/lint tracked separately) |
-| **TOTAL** | **122** |
+| **TOTAL** | **123** |
