@@ -623,3 +623,11 @@ Ruling do dono, fecha o protocolo de execução (o recon marcou como "lacuna" �
 2. O **"drift run_pool processos vs designed=thread" do D58 estava ERRADO.** `run_pool` (`src/build/regression.tks`) é o runner de **regressões = tkr**, e tkr **É** process-based POR DESENHO — não é stopgap a substituir por thread. Threads (spawn/memchan) são pro **tkt** (runner distinto). Eu havia conflado os dois runners.
 
 **Deps:** tkt usa memchan+spawn; tkr usa oschan. Ambos os canais dependem de DI (D58.1) → tkt e tkr ficam a jusante do DI. Tudo gated no marco de memória (lei condicional `teko test .` ≤1,5GB). Independe do elefante (COL-F0 não usa canais/DI).
+
+### D60 · Hierarquia de regressão + BUILD-POR-REGRESSOR (owner 2026-08-20 — CORREÇÃO DURA: todos os agentes anteriores erraram)
+- **Regressões** definidas em `.tkr`, referenciadas no `.tkp` do projeto que quer executar a regressão. **Vários `.tkr` residem no MESMO `.tkp`** (o projeto de regressão = "regressor").
+- **Hierarquia (visão produto/projeto):** `1 tkp (produto) → N tkp (regressores) → M tkr (fixtures)`.
+- **BUILD-POR-REGRESSOR (a regra que todos erraram):** NÃO se faz build para cada `.tkr` NEM para cada fixture — **UM build por REGRESSOR** (por `.tkp` regressor). As M fixtures sob um regressor **compartilham o ÚNICO binário** do regressor; cada fixture executa esse MESMO binário em **processo ISOLADO** (oschan). Contagem: **N builds** (um por regressor) + **M execuções** (uma por fixture, processo isolado) — **nunca N×M builds**.
+- **Corrige/precisa o D59 (parte tkr):** "cada tkp tem binário próprio" = por **regressor tkp**; explicitamente **NÃO por-tkr, NÃO por-fixture**. Mais-recente vence.
+- **Erro recorrente que isto mata:** agentes assumiam build por-tkr ou por-fixture (caríssimo e errado). O modelo correto é build-por-regressor + execução-por-fixture-em-processo-isolado.
+- **Vincula:** RT-L6 harness (crumb 0064) e runner #472 DEVEM seguir esta contagem; o `tkr-regression-format.md` (ratificado) é a fonte a alinhar quando a concorrência reabrir (pós-marco).
