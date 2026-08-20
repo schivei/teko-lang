@@ -31,13 +31,26 @@ fn scalar_const_init(map: ScalarConstMap, name: str, ns: str): TExpr | null {
     null
 }
 
+fn count_const_decls(items: []@TItem()): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] { TConstDecl => n = n + 1; _ => { } }
+        i++
+    }
+    n
+}
+
 fn collect_module_consts(items: []@TItem()): []TConstDecl {
-    var out: []TConstDecl = teko::list::empty()
+    var n = count_const_decls(items)
+    var out: [n]TConstDecl = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= items.len { break }
         match items[i] {
-            TConstDecl as cd => out = teko::list::push(out, cd)
+            TConstDecl as cd => { out[k] = cd; k = k + 1 }
             _ => { }
         }
         i++
@@ -51,11 +64,11 @@ pub type ConstQName = struct {
 }
 
 fn tg_axis_os_vocab(): []str {
-    teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "linux"), "macos"), "windows")
+    ["linux", "macos", "windows"]
 }
 
 fn tg_axis_arch_vocab(): []str {
-    teko::list::push(teko::list::push(teko::list::empty(), "x86_64"), "arm64")
+    ["x86_64", "arm64"]
 }
 
 fn tg_atoms_are_target(p: parser::Pred): bool {
@@ -104,12 +117,25 @@ pub fn preds_target_disjoint(a: parser::Pred, b: parser::Pred): bool {
     true
 }
 
-fn cond_family_arms(consts: []TConstDecl, ns: str, name: str): []TConstDecl {
-    var out: []TConstDecl = teko::list::empty()
+fn count_family_arms(consts: []TConstDecl, ns: str, name: str): u64 {
+    var n: u64 = 0
     var i: u64 = 0
     loop {
         if i >= consts.len { break }
-        if consts[i].namespace == ns && consts[i].name == name { out = teko::list::push(out, consts[i]) }
+        if consts[i].namespace == ns && consts[i].name == name { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+fn cond_family_arms(consts: []TConstDecl, ns: str, name: str): []TConstDecl {
+    var n = count_family_arms(consts, ns, name)
+    var out: [n]TConstDecl = []
+    var k: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= consts.len { break }
+        if consts[i].namespace == ns && consts[i].name == name { out[k] = consts[i]; k = k + 1 }
         i = i + 1
     }
     out
@@ -157,59 +183,94 @@ pub fn is_cond_const(ns: str, name: str, set: []ConstQName): bool {
     false
 }
 
+fn cond_const_names_prefix(scratch: []ConstQName, k: u64): []ConstQName {
+    var out: [k]ConstQName = []
+    var i: u64 = 0
+    loop {
+        if i >= k { break }
+        out[i] = scratch[i]
+        i++
+    }
+    out
+}
+
 pub fn cond_const_names(items: []@TItem()): []ConstQName {
     var consts = collect_module_consts(items)
-    var out: []ConstQName = teko::list::empty()
+    var scratch: [consts.len]ConstQName = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= consts.len { break }
         var ci = consts[i]
-        if is_target_conditional_family(consts, ci) && !is_cond_const(ci.namespace, ci.name, out) {
-            out = teko::list::push(out, ConstQName { namespace = ci.namespace; name = ci.name })
+        if is_target_conditional_family(consts, ci) && !is_cond_const(ci.namespace, ci.name, scratch) {
+            scratch[k] = ConstQName { namespace = ci.namespace; name = ci.name }
+            k = k + 1
         }
         i = i + 1
     }
-    out
+    cond_const_names_prefix(scratch, k)
 }
 
-fn drop_cond_consts(consts: []TConstDecl, cond: []ConstQName): []TConstDecl {
-    var out: []TConstDecl = teko::list::empty()
+fn count_kept_consts(consts: []TConstDecl, cond: []ConstQName): u64 {
+    var n: u64 = 0
     var i: u64 = 0
     loop {
         if i >= consts.len { break }
-        if !is_cond_const(consts[i].namespace, consts[i].name, cond) { out = teko::list::push(out, consts[i]) }
+        if !is_cond_const(consts[i].namespace, consts[i].name, cond) { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+fn drop_cond_consts(consts: []TConstDecl, cond: []ConstQName): []TConstDecl {
+    var n = count_kept_consts(consts, cond)
+    var out: [n]TConstDecl = []
+    var k: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= consts.len { break }
+        if !is_cond_const(consts[i].namespace, consts[i].name, cond) { out[k] = consts[i]; k = k + 1 }
         i = i + 1
     }
     out
 }
 
+fn count_scalar_consts(ordered: []TConstDecl): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= ordered.len { break }
+        if is_scalar_const_type(ordered[i].ty) { n = n + 1 }
+        i++
+    }
+    n
+}
+
 fn build_scalar_map(ordered: []TConstDecl): ScalarConstMap {
-    var smap = ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() }
+    var m = count_scalar_consts(ordered)
+    var names: [m]str = []
+    var nss: [m]str = []
+    var inits: [m]TExpr = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= ordered.len { break }
         var cd = ordered[i]
         if is_scalar_const_type(cd.ty) {
-            var collapsed = inline_rw_expr(cd.init, smap)
-            smap = ScalarConstMap { names = teko::list::push(smap.names, cd.name); nss = teko::list::push(smap.nss, cd.namespace); inits = teko::list::push(smap.inits, collapsed) }
+            var collapsed = inline_rw_expr(cd.init, ScalarConstMap { names = names; nss = nss; inits = inits })
+            names[k] = cd.name
+            nss[k] = cd.namespace
+            inits[k] = collapsed
+            k = k + 1
         }
         i++
     }
-    smap
+    ScalarConstMap { names = names; nss = nss; inits = inits }
 }
 
 fn inline_rw_fspec(sp: TFSpec, map: ScalarConstMap): TFSpec {
     match sp.kind {
-        TFSpecDynamic as fd => {
-            var args: []TExpr = teko::list::empty()
-            var k: u64 = 0
-            loop {
-                if k >= fd.args.len { break }
-                args = teko::list::push(args, inline_rw_expr(fd.args[k], map))
-                k++
-            }
-            TFSpec { kind = TFSpecDynamic { args = args } }
-        }
+        TFSpecDynamic as fd => TFSpec { kind = TFSpecDynamic { args = inline_rw_exprs(fd.args, map) } }
         _ => sp
     }
 }
@@ -271,22 +332,24 @@ fn widen_inlined_const(e: TExpr, sub: TExpr): TExpr {
 }
 
 fn inline_rw_compare(c: TCompare, e: TExpr, map: ScalarConstMap): TExpr {
-    var terms: []TCmpTerm = teko::list::empty()
+    var n = c.rest.len
+    var terms: [n]TCmpTerm = []
     var i: u64 = 0
     loop {
-        if i >= c.rest.len { break }
-        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = inline_rw_expr(c.rest[i].operand, map) })
+        if i >= n { break }
+        terms[i] = TCmpTerm { op = c.rest[i].op; operand = inline_rw_expr(c.rest[i].operand, map) }
         i++
     }
     TExpr { kind = TCompare { first = inline_rw_expr(c.first, map); rest = terms }; type = e.type; line = e.line; col = e.col }
 }
 
 fn inline_rw_match(m: TMatchExpr, e: TExpr, map: ScalarConstMap): TExpr {
-    var arms: []TArm = teko::list::empty()
+    var n = m.arms.len
+    var arms: [n]TArm = []
     var i: u64 = 0
     loop {
-        if i >= m.arms.len { break }
-        arms = teko::list::push(arms, inline_rw_arm(m.arms[i], map))
+        if i >= n { break }
+        arms[i] = inline_rw_arm(m.arms[i], map)
         i++
     }
     TExpr { kind = TMatchExpr { subject = inline_rw_expr(m.subject, map); arms = arms }; type = e.type; line = e.line; col = e.col }
@@ -297,36 +360,41 @@ fn inline_rw_arm(arm: TArm, map: ScalarConstMap): TArm {
     TArm { pattern = arm.pattern; has_when = arm.has_when; guard = guard; body = inline_rw_block(arm.body, map) }
 }
 
-fn inline_rw_interp(in: TInterp, e: TExpr, map: ScalarConstMap): TExpr {
-    var holes: []TExpr = teko::list::empty()
-    var specs: []TFSpec = teko::list::empty()
+fn inline_rw_fspecs(xs: []TFSpec, map: ScalarConstMap): []TFSpec {
+    var n = xs.len
+    var out: [n]TFSpec = []
     var i: u64 = 0
     loop {
-        if i >= in.holes.len { break }
-        holes = teko::list::push(holes, inline_rw_expr(in.holes[i], map))
-        if i < in.specs.len { specs = teko::list::push(specs, inline_rw_fspec(in.specs[i], map)) }
+        if i >= n { break }
+        out[i] = inline_rw_fspec(xs[i], map)
         i++
     }
-    TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = e.type; line = e.line; col = e.col }
+    out
+}
+
+fn inline_rw_interp(in: TInterp, e: TExpr, map: ScalarConstMap): TExpr {
+    TExpr { kind = TInterp { pieces = in.pieces; holes = inline_rw_exprs(in.holes, map); specs = inline_rw_fspecs(in.specs, map) }; type = e.type; line = e.line; col = e.col }
 }
 
 fn inline_rw_array(a: TArrayLit, e: TExpr, map: ScalarConstMap): TExpr {
-    var elems: []TArrayElem = teko::list::empty()
+    var n = a.elements.len
+    var elems: [n]TArrayElem = []
     var i: u64 = 0
     loop {
-        if i >= a.elements.len { break }
-        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = inline_rw_expr(a.elements[i].expr, map) })
+        if i >= n { break }
+        elems[i] = TArrayElem { is_spread = a.elements[i].is_spread; expr = inline_rw_expr(a.elements[i].expr, map) }
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
 }
 
 fn inline_rw_block(stmts: []@TStatement(), map: ScalarConstMap): []@TStatement() {
-    var out: []@TStatement() = teko::list::empty()
+    var n = stmts.len
+    var out: [n]@TStatement() = []
     var i: u64 = 0
     loop {
-        if i >= stmts.len { break }
-        out = teko::list::push(out, inline_rw_stmt(stmts[i], map))
+        if i >= n { break }
+        out[i] = inline_rw_stmt(stmts[i], map)
         i++
     }
     out
@@ -372,18 +440,36 @@ fn const_is_exported(cd: TConstDecl): bool {
     }
 }
 
-fn inline_scalar_const_item(out: []@TItem(), cd: TConstDecl, map: ScalarConstMap): []@TItem() {
-    if const_is_exported(cd) { return teko::list::push(out, rewrite_const_init(cd, map)) }
-    out
+fn inline_scalar_const_value(cd: TConstDecl, map: ScalarConstMap): @TItem() | null {
+    if const_is_exported(cd) { return rewrite_const_init(cd, map) }
+    null
 }
 
-fn inline_place_item(out: []@TItem(), it: @TItem(), map: ScalarConstMap): []@TItem() {
+fn inline_place_item_value(it: @TItem(), map: ScalarConstMap): @TItem() | null {
     match it {
-        TFunction as f => teko::list::push(out, rewrite_function(f, map))
-        TConstDecl as cd => if is_scalar_const_type(cd.ty) { inline_scalar_const_item(out, cd, map) } else { teko::list::push(out, rewrite_const_init(cd, map)) }
-        (@TStatement()) as s => teko::list::push(out, inline_rw_stmt(s, map))
-        _ => teko::list::push(out, it)
+        TFunction as f => rewrite_function(f, map)
+        TConstDecl as cd => if is_scalar_const_type(cd.ty) { inline_scalar_const_value(cd, map) } else { rewrite_const_init(cd, map) }
+        (@TStatement()) as s => inline_rw_stmt(s, map)
+        _ => it
     }
+}
+
+fn substituted_item_kept(it: @TItem()): bool {
+    match it {
+        TConstDecl as cd => if is_scalar_const_type(cd.ty) { const_is_exported(cd) } else { true }
+        _ => true
+    }
+}
+
+fn count_substituted_items(items: []@TItem()): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        if substituted_item_kept(items[i]) { n = n + 1 }
+        i++
+    }
+    n
 }
 
 pub fn inline_consts(prog: TProgram): TProgram | error {
@@ -421,26 +507,35 @@ fn const_ctor_literal(f: TFunction): TExpr | null {
     }
 }
 
-fn push_when_const_ctor(acc: []TFunction, f: TFunction): []TFunction {
-    match const_ctor_literal(f) {
-        TExpr => teko::list::push(acc, f)
-        null => acc
-    }
+fn function_is_const_ctor(f: TFunction): bool {
+    match const_ctor_literal(f) { TExpr => true; null => false }
 }
 
-fn collect_const_ctor_item(acc: []TFunction, it: @TItem()): []TFunction {
-    match it {
-        TFunction as f => push_when_const_ctor(acc, f)
-        _ => acc
-    }
-}
-
-pub fn collect_const_ctors(items: []@TItem()): []TFunction {
-    var out: []TFunction = teko::list::empty()
+fn count_const_ctors(items: []@TItem()): u64 {
+    var n: u64 = 0
     var i: u64 = 0
     loop {
         if i >= items.len { break }
-        out = collect_const_ctor_item(out, items[i])
+        match items[i] {
+            TFunction as f => if function_is_const_ctor(f) { n = n + 1 }
+            _ => { }
+        }
+        i++
+    }
+    n
+}
+
+pub fn collect_const_ctors(items: []@TItem()): []TFunction {
+    var n = count_const_ctors(items)
+    var out: [n]TFunction = []
+    var k: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            TFunction as f => if function_is_const_ctor(f) { out[k] = f; k = k + 1 }
+            _ => { }
+        }
         i++
     }
     out
@@ -460,15 +555,16 @@ fn const_ctor_matches(f: TFunction, bare: str, call_ns: str): bool {
 fn find_const_ctor(ctors: []TFunction, callee: parser::Path, call_ns: str): TFunction | null {
     var bare = callee_bare_name(callee)
     if bare == "" { return null }
-    var found: []TFunction = teko::list::empty()
+    var match_count: u64 = 0
+    var sole: TFunction | null = null
     var i: u64 = 0
     loop {
         if i >= ctors.len { break }
-        if const_ctor_matches(ctors[i], bare, call_ns) { found = teko::list::push(found, ctors[i]) }
+        if const_ctor_matches(ctors[i], bare, call_ns) { match_count = match_count + 1; sole = ctors[i] }
         i++
     }
-    if found.len != 1 { return null }
-    found[0]
+    if match_count != 1 { return null }
+    sole
 }
 
 fn const_ctor_arg_for_param(params: []parser::Param, args: []TExpr, name: str): TExpr | null {
@@ -500,12 +596,12 @@ fn const_ctor_field_value(v: TExpr, params: []parser::Param, args: []TExpr): TEx
 }
 
 fn const_ctor_substituted(call: TExpr, si: TStructInit, params: []parser::Param, args: []TExpr): TExpr | null {
-    var vals: []TExpr = teko::list::empty()
+    var n = si.field_vals.len
+    var vals: [n]TExpr = []
     var i: u64 = 0
     loop {
-        if i >= si.field_vals.len { break }
-        var fv = match const_ctor_field_value(si.field_vals[i], params, args) { TExpr as x => x; null => return null }
-        vals = teko::list::push(vals, fv)
+        if i >= n { break }
+        vals[i] = match const_ctor_field_value(si.field_vals[i], params, args) { TExpr as x => x; null => return null }
         i++
     }
     TExpr { kind = TStructInit { field_names = si.field_names; field_vals = vals }; type = call.type; line = call.line; col = call.col }
@@ -526,22 +622,24 @@ fn canon_call(cl: TCall, e: TExpr, ctors: []TFunction): TExpr {
 }
 
 fn canon_exprs(xs: []TExpr, ctors: []TFunction): []TExpr {
-    var out: []TExpr = teko::list::empty()
+    var n = xs.len
+    var out: [n]TExpr = []
     var i: u64 = 0
     loop {
-        if i >= xs.len { break }
-        out = teko::list::push(out, canonicalize_const_ctors(xs[i], ctors))
+        if i >= n { break }
+        out[i] = canonicalize_const_ctors(xs[i], ctors)
         i++
     }
     out
 }
 
 fn canon_array(a: TArrayLit, e: TExpr, ctors: []TFunction): TExpr {
-    var elems: []TArrayElem = teko::list::empty()
+    var n = a.elements.len
+    var elems: [n]TArrayElem = []
     var i: u64 = 0
     loop {
-        if i >= a.elements.len { break }
-        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = canonicalize_const_ctors(a.elements[i].expr, ctors) })
+        if i >= n { break }
+        elems[i] = TArrayElem { is_spread = a.elements[i].is_spread; expr = canonicalize_const_ctors(a.elements[i].expr, ctors) }
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
@@ -571,29 +669,52 @@ fn substitute_module_consts(prog: TProgram): TProgram | error {
     if consts.len == 0 { return prog }
     var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
     var smap = build_scalar_map(ordered)
-    var out: []@TItem() = teko::list::empty()
+    var n = count_substituted_items(prog.items)
+    var out: [n]@TItem() = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        out = inline_place_item(out, prog.items[i], smap)
+        match inline_place_item_value(prog.items[i], smap) {
+            (@TItem()) as v => { out[k] = v; k = k + 1 }
+            null => { }
+        }
         i++
     }
     TProgram { items = out }
 }
 
+fn count_aggregate_consts(ordered: []TConstDecl): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= ordered.len { break }
+        if !is_scalar_const_type(ordered[i].ty) { n = n + 1 }
+        i++
+    }
+    n
+}
+
 fn build_aggregate_map(ordered: []TConstDecl): ScalarConstMap {
-    var amap = ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() }
+    var m = count_aggregate_consts(ordered)
+    var names: [m]str = []
+    var nss: [m]str = []
+    var inits: [m]TExpr = []
+    var k: u64 = 0
     var i: u64 = 0
     loop {
         if i >= ordered.len { break }
         var cd = ordered[i]
         if !is_scalar_const_type(cd.ty) {
-            var collapsed = inline_rw_expr(cd.init, amap)
-            amap = ScalarConstMap { names = teko::list::push(amap.names, cd.name); nss = teko::list::push(amap.nss, cd.namespace); inits = teko::list::push(amap.inits, collapsed) }
+            var collapsed = inline_rw_expr(cd.init, ScalarConstMap { names = names; nss = nss; inits = inits })
+            names[k] = cd.name
+            nss[k] = cd.namespace
+            inits[k] = collapsed
+            k = k + 1
         }
         i++
     }
-    amap
+    ScalarConstMap { names = names; nss = nss; inits = inits }
 }
 
 pub fn collapse_agg_const_decls(prog: TProgram): TProgram | error {
@@ -601,11 +722,12 @@ pub fn collapse_agg_const_decls(prog: TProgram): TProgram | error {
     if consts.len == 0 { return prog }
     var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
     var amap = build_aggregate_map(ordered)
-    var out: []@TItem() = teko::list::empty()
+    var n = prog.items.len
+    var out: [n]@TItem() = []
     var i: u64 = 0
     loop {
-        if i >= prog.items.len { break }
-        out = teko::list::push(out, collapse_agg_const_decl_item(prog.items[i], amap))
+        if i >= n { break }
+        out[i] = collapse_agg_const_decl_item(prog.items[i], amap)
         i++
     }
     TProgram { items = out }
@@ -627,11 +749,11 @@ fn collapse_agg_const_decl(cd: TConstDecl, amap: ScalarConstMap): @TItem() {
     }
 }
 
-fn inline_place_item_agg(out: []@TItem(), it: @TItem(), map: ScalarConstMap): []@TItem() {
+fn inline_place_item_agg(it: @TItem(), map: ScalarConstMap): @TItem() {
     match it {
-        TFunction as f => teko::list::push(out, rewrite_function(f, map))
-        (@TStatement()) as s => teko::list::push(out, inline_rw_stmt(s, map))
-        _ => teko::list::push(out, it)
+        TFunction as f => rewrite_function(f, map)
+        (@TStatement()) as s => inline_rw_stmt(s, map)
+        _ => it
     }
 }
 
@@ -641,11 +763,12 @@ pub fn inline_aggregate_consts(prog: TProgram): TProgram | error {
     var ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
     var amap = build_aggregate_map(ordered)
     if amap.names.len == 0 { return prog }
-    var out: []@TItem() = teko::list::empty()
+    var n = prog.items.len
+    var out: [n]@TItem() = []
     var i: u64 = 0
     loop {
-        if i >= prog.items.len { break }
-        out = inline_place_item_agg(out, prog.items[i], amap)
+        if i >= n { break }
+        out[i] = inline_place_item_agg(prog.items[i], amap)
         i++
     }
     TProgram { items = out }
