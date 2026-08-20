@@ -158,7 +158,7 @@ fn slice_bytes_str(input: []byte, from: u64, to: u64): str {
 }
 
 fn one_byte_slice(b: byte): []byte {
-    teko::list::push(teko::list::empty(), b)
+    [b]
 }
 
 fn push_codepoint_utf8(out: []byte, cp: u32): []byte {
@@ -214,7 +214,7 @@ fn parse_key(input: []byte, pos: u64): KeyStep | error {
 
 fn parse_key_path(input: []byte, pos: u64): KeyPathStep | error {
     var k1 = match parse_key(input, pos) { KeyStep as k => k; error as e => return e }
-    var keys: []str = teko::list::push(teko::list::empty(), k1.key)
+    var keys: []str = [k1.key]
     var at = skip_ws(input, k1.next)
     loop {
         if at < input.len && input[at] == b'.' {
@@ -242,12 +242,12 @@ fn decode_basic_escape(input: []byte, at: u64): EscStep | error {
     if esc == b'u' {
         var cp = match read_hex_n(input, at + 2, 4) { u32 as c => c; error as e => return e }
         if cp >= 0xD800 && cp <= 0xDFFF { return toml_error("invalid unicode scalar value in \\u escape", at) }
-        return EscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp); next = at + 6 }
+        return EscStep { bytes = push_codepoint_utf8([], cp); next = at + 6 }
     }
     if esc == b'U' {
         var cp2 = match read_hex_n(input, at + 2, 8) { u32 as c => c; error as e => return e }
         if cp2 > 0x10FFFF || (cp2 >= 0xD800 && cp2 <= 0xDFFF) { return toml_error("invalid unicode scalar value in \\U escape", at) }
-        return EscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp2); next = at + 10 }
+        return EscStep { bytes = push_codepoint_utf8([], cp2); next = at + 10 }
     }
     toml_error("invalid escape sequence", at)
 }
@@ -329,7 +329,7 @@ fn try_line_continuation(input: []byte, at: u64): ContStep {
 
 fn parse_multiline_basic(input: []byte, pos: u64): PStrStep | error {
     var at = trim_leading_newline(input, pos)
-    var out: []byte = teko::list::empty()
+    var out: []byte = []
     loop {
         if at >= input.len { return toml_error("unterminated multi-line string", at) }
         var b = input[at]
@@ -404,7 +404,7 @@ fn parse_toml_string(input: []byte, pos: u64): ValStep | error {
 
 fn scan_uint_digits(input: []byte, pos: u64, restrict_leading_zero: bool): DigitRunResult | error {
     if pos >= input.len || !is_digit_byte(input[pos]) { return toml_error("expected digit", pos) }
-    var out: []byte = teko::list::push(teko::list::empty(), input[pos])
+    var out: []byte = [input[pos]]
     var first = input[pos]
     var at = pos + 1
     if restrict_leading_zero && first == b'0' {
@@ -427,7 +427,7 @@ fn scan_uint_digits(input: []byte, pos: u64, restrict_leading_zero: bool): Digit
 
 fn scan_radix_digits(input: []byte, pos: u64, radix: u64): DigitRunResult | error {
     if pos >= input.len || !digit_valid_for_radix(input[pos], radix) { return toml_error("expected digit", pos) }
-    var out: []byte = teko::list::push(teko::list::empty(), input[pos])
+    var out: []byte = [input[pos]]
     var at = pos + 1
     loop {
         if at < input.len && digit_valid_for_radix(input[at], radix) {
@@ -504,7 +504,7 @@ fn parse_decimal_or_float(input: []byte, pos: u64, has_sign: bool, sign_neg: boo
     var at = ip.next
     var is_float = false
     var has_frac = false
-    var frac_digits: []byte = teko::list::empty()
+    var frac_digits: []byte = []
     if at < input.len && input[at] == b'.' {
         is_float = true
         has_frac = true
@@ -515,7 +515,7 @@ fn parse_decimal_or_float(input: []byte, pos: u64, has_sign: bool, sign_neg: boo
     var has_exp = false
     var exp_has_sign = false
     var exp_sign_neg = false
-    var exp_digits: []byte = teko::list::empty()
+    var exp_digits: []byte = []
     if at < input.len && (input[at] == b'e' || input[at] == b'E') {
         is_float = true
         has_exp = true
@@ -800,7 +800,7 @@ fn open_table_path(root: TomlValue, path: []str): TomlValue | error {
 fn open_final_array_table(table: TomlValue, key: str): TomlValue | error {
     var idx = find_key_index(table, key)
     if idx < 0 {
-        var one: []TomlValue = teko::list::push(teko::list::empty(), toml_table_empty())
+        var one: []TomlValue = [toml_table_empty()]
         var arr = mk_value(TomlKind::Array, "", 0, 0.0, false, one, no_keys(), no_items(), false, false, true)
         return toml_table_set(table, key, arr)
     }
@@ -865,7 +865,7 @@ fn parse_keyval(input: []byte, pos: u64): KeyValStep | error {
 exp fn parse_toml(text: str): TomlValue | error {
     var input = bytes_of_str(text)
     var root = toml_table_empty()
-    var cursor: []str = teko::list::empty()
+    var cursor: []str = []
     var pos = skip_ws_nl_comments(input, 0)
     loop {
         if pos >= input.len { break }

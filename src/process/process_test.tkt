@@ -29,7 +29,7 @@ const PIPE_DEADLINE_MS: i64 = 2000
 const PIPE_NO_EOF_DEADLINE_MS: i64 = 400
 
 fn shell_argv(script: str): []str {
-    var v: []str = teko::list::push(teko::list::empty(), "sh")
+    var v: []str = ["sh"]
     v = teko::list::push(v, "-c")
     teko::list::push(v, script)
 }
@@ -73,7 +73,7 @@ fn closing_the_same_descriptor_twice_is_reported() {
 #test
 fn a_child_stdout_arrives_through_the_pipe() {
     var p = opened_pipe()
-    var h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    var h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", [], NO_FD, p.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "pipe-mark")
     teko::assert::is_true(wait_one(h) == 0)
@@ -83,7 +83,7 @@ fn a_child_stdout_arrives_through_the_pipe() {
 fn an_unconnected_pipe_delivers_nothing() {
     var elsewhere = teko::test::scoped(".teko-pipe-elsewhere.out")
     var p = opened_pipe()
-    var h = spawn_redirected(shell_argv("printf pipe-mark"), "", teko::list::empty(), "", elsewhere, "")
+    var h = spawn_redirected(shell_argv("printf pipe-mark"), "", [], "", elsewhere, "")
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::is_true(wait_one(h) == 0)
     teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "")
@@ -93,7 +93,7 @@ fn an_unconnected_pipe_delivers_nothing() {
 #test
 fn the_read_end_sees_eof_once_the_child_is_gone() {
     var p = opened_pipe()
-    var h = spawn_redirected_fds(shell_argv("printf a; printf b"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    var h = spawn_redirected_fds(shell_argv("printf a; printf b"), "", [], NO_FD, p.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     match drained(p, PIPE_DEADLINE_MS) {
         str as s => teko::assert::eq_str(s, "ab")
@@ -105,7 +105,7 @@ fn the_read_end_sees_eof_once_the_child_is_gone() {
 #test
 fn a_write_end_left_open_in_the_parent_withholds_eof() {
     var p = opened_pipe()
-    var h = spawn_redirected_fds(shell_argv("printf half"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    var h = spawn_redirected_fds(shell_argv("printf half"), "", [], NO_FD, p.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::is_true(wait_one(h) == 0)
     match read_to_eof(p.read_fd, PIPE_NO_EOF_DEADLINE_MS) {
@@ -123,7 +123,7 @@ fn a_write_end_left_open_in_the_parent_withholds_eof() {
 #test
 fn one_write_end_can_back_both_child_streams() {
     var p = opened_pipe()
-    var h = spawn_redirected_fds(shell_argv("printf O; printf E 1>&2"), "", teko::list::empty(), NO_FD, p.write_fd, p.write_fd)
+    var h = spawn_redirected_fds(shell_argv("printf O; printf E 1>&2"), "", [], NO_FD, p.write_fd, p.write_fd)
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "OE")
     teko::assert::is_true(wait_one(h) == 0)
@@ -134,7 +134,7 @@ fn a_pipe_can_feed_the_child_stdin() {
     var feed = opened_pipe()
     var cap = opened_pipe()
     match close_fd(feed.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
-    var h = spawn_redirected_fds(shell_argv("cat; printf .done"), "", teko::list::empty(), feed.read_fd, cap.write_fd, NO_FD)
+    var h = spawn_redirected_fds(shell_argv("cat; printf .done"), "", [], feed.read_fd, cap.write_fd, NO_FD)
     teko::assert::ge_i64(h.raw, 0)
     match close_fd(feed.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
     teko::assert::eq_str(drain_text(cap, PIPE_DEADLINE_MS), ".done")
@@ -145,7 +145,7 @@ fn a_pipe_can_feed_the_child_stdin() {
 fn the_path_route_is_unchanged() {
     var outp = teko::test::scoped(".teko-pipe-path-route.out")
     match teko::fs::remove_file(outp) { error => { }; null => { } }
-    var h = spawn_redirected(shell_argv("printf path-mark"), "", teko::list::empty(), "", outp, "")
+    var h = spawn_redirected(shell_argv("printf path-mark"), "", [], "", outp, "")
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::is_true(wait_one(h) == 0)
     var got = match teko::io::read_file(outp) { str as s => s; error => "" }

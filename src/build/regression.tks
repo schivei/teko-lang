@@ -224,11 +224,11 @@ fn run_captured_in_dir(argv: []str, stdin_data: str, env: []str, dir: str, prefi
 }
 
 fn run_captured(argv: []str, stdin_data: str, prefix: str): CapResult {
-    run_captured_env(argv, stdin_data, teko::list::empty(), prefix)
+    run_captured_env(argv, stdin_data, [], prefix)
 }
 
 fn tool_on_path(name: str): bool {
-    var shv: []str = teko::list::push(teko::list::empty(), "sh")
+    var shv: []str = ["sh"]
     shv = teko::list::push(shv, "-c")
     shv = teko::list::push(shv, teko::str::concat("command -v ", name) ~ " >/dev/null 2>&1")
     teko::process::run_quiet(shv) == 0
@@ -268,7 +268,7 @@ fn regressive_name(regr_dir: str): str | error {
 }
 
 fn argv_with_args(binp: str, args: []str): []str {
-    var out: []str = teko::list::push(teko::list::empty(), binp)
+    var out: []str = [binp]
     var k: u64 = 0
     loop {
         if k >= args.len { break }
@@ -310,7 +310,7 @@ fn arch_token_canonical(tok: str): str {
 }
 
 fn host_cc_arch(): str {
-    var argv: []str = teko::list::push(teko::list::empty(), HOST_CC_NAME)
+    var argv: []str = [HOST_CC_NAME]
     argv = teko::list::push(argv, HOST_CC_MACHINE_FLAG)
     var triple = tool_query_line(argv)
     var k: u64 = 0
@@ -374,7 +374,7 @@ fn wellformed_script_for(target: str): str {
 fn check_object_wellformed(objp: str, target: str): RegrOutcome {
     var script = wellformed_script_for(target)
     if script.len == 0 { return regr_skip(teko::str::concat("no object well-formedness checker for target ", target)) }
-    var argv: []str = teko::list::push(teko::list::empty(), script)
+    var argv: []str = [script]
     argv = teko::list::push(argv, objp)
     argv = teko::list::push(argv, target)
     var cap = run_captured(argv, "", objp ~ ".wellformed")
@@ -389,7 +389,7 @@ fn compile_regressive(exe: str, regr_dir: str, env: []str, prefix: str): CapResu
 }
 
 fn compile_regressive_argv(exe: str, regr_dir: str): []str {
-    var argv: []str = teko::list::push(teko::list::empty(), exe)
+    var argv: []str = [exe]
     argv = teko::list::push(argv, regr_dir)
     argv = teko::list::push(argv, "-o")
     argv = teko::list::push(argv, "bin")
@@ -402,7 +402,7 @@ fn compile_regressive_spec(exe: str, regr_dir: str, env: []str, prefix: str): Pr
 }
 
 fn compile_in_place(exe: str, regr_dir: str, env: []str, prefix: str): CapResult {
-    var argv: []str = teko::list::push(teko::list::empty(), exe)
+    var argv: []str = [exe]
     argv = teko::list::push(argv, ".")
     argv = teko::list::push(argv, "-o")
     argv = teko::list::push(argv, "bin")
@@ -559,7 +559,7 @@ fn split_snippet_decls_and_stmts(src: str): SnippetSplit {
 }
 
 fn rm_rf(path: str): null | error {
-    var argv: []str = teko::list::push(teko::list::empty(), "rm")
+    var argv: []str = ["rm"]
     argv = teko::list::push(argv, "-rf")
     argv = teko::list::push(argv, path)
     if teko::process::run(argv) != 0 { return error { message = teko::str::concat("failed to remove ", path) } }
@@ -608,7 +608,7 @@ fn compile_inline_source(exe: str, src_text: str, env: []str, prefix: str): CapR
 fn copy_dir(src: str, dst: str): null | error {
     match rm_rf(dst) { error as e => return e; null => { } }
     match mkdir_p(teko::str::concat(dirname_of(dst), "/")) { error as e => return e; null => { } }
-    var argv: []str = teko::list::push(teko::list::empty(), "cp")
+    var argv: []str = ["cp"]
     argv = teko::list::push(argv, "-R")
     argv = teko::list::push(argv, src)
     argv = teko::list::push(argv, dst)
@@ -620,12 +620,12 @@ fn provision_dependency(exe: str, dep_dir: str, scratch_packages: str, prefix: s
     match mkdir_p(teko::str::concat(scratch_packages, "/")) { error => { }; null => { } }
     var cwd = match teko::env::cwd() { str as c => c; error => "" }
     var dep_out = abs_path_of(prefix ~ ".depout", cwd)
-    var argv: []str = teko::list::push(teko::list::empty(), exe)
+    var argv: []str = [exe]
     argv = teko::list::push(argv, dep_dir)
     argv = teko::list::push(argv, "-o")
     argv = teko::list::push(argv, dep_out)
     argv = teko::list::push(argv, "--no-verify")
-    var comp = run_captured_env(argv, "", with_regr_cov_env(teko::list::empty(), prefix ~ ".dep_compile"), prefix ~ ".dep_compile")
+    var comp = run_captured_env(argv, "", with_regr_cov_env([], prefix ~ ".dep_compile"), prefix ~ ".dep_compile")
     if comp.exit != 0 { return error { message = teko::str::concat("dependency build failed: ", compile_failure_message(comp)) } }
     var entries = match teko::fs::list_dir(dep_out) { []str as e => e; error as e => return e }
     var tkl = ""
@@ -1115,7 +1115,7 @@ fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built
 }
 
 fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt): FeatureRunResult {
-    var rows: []RowTiming = teko::list::empty()
+    var rows: []RowTiming = []
     var cur = built
     var si: u64 = 0
     loop {
@@ -1156,11 +1156,11 @@ fn tkr_feature_is_compile_fail(feat: TkrFeature): bool {
 }
 
 fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str, groups: RegrGroups): TkrFileRun {
-    var src = match teko::io::read_file(regr_dir ~ "/" ~ tkr_name) { str as s => s; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
-    var feats = match parse_tkr(src) { []TkrFeature as xs => xs; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
-    var built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = ""; srcs = teko::list::empty() }
+    var src = match teko::io::read_file(regr_dir ~ "/" ~ tkr_name) { str as s => s; error as e => return file_run_of(regr_fail(e.message), []) }
+    var feats = match parse_tkr(src) { []TkrFeature as xs => xs; error as e => return file_run_of(regr_fail(e.message), []) }
+    var built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = ""; srcs = [] }
     var skips: u64 = 0
-    var rows: []RowTiming = teko::list::empty()
+    var rows: []RowTiming = []
     var fi: u64 = 0
     loop {
         if fi >= feats.len { break }

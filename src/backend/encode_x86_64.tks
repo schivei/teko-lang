@@ -163,7 +163,7 @@ fn push_mem_operand_x86(buf: []byte, reg3: u32, mem: MMem): []byte {
 }
 
 fn emit_mem_op_x86(form: X86MemOp, regop: MReg, mem: MMem): EncInstX86 {
-    var b: []byte = teko::list::empty()
+    var b: []byte = []
     if form.mandatory_prefix != X86_NO_PREFIX { b = push_byte_x86(b, form.mandatory_prefix) }
     if form.op66 { b = push_byte_x86(b, X86_OPERAND_SIZE_PREFIX) }
     var force = form.byte_reg && (regop.id >= X86_BYTE_REG_MIN_ID)
@@ -229,37 +229,37 @@ fn shift_ext_x86(op: MShiftOpX86): u32 {
 
 fn encode_movimm_x86(i: MMovImmX86): EncInstX86 {
     if !i.wide {
-        var b = push_rex_x86(teko::list::empty(), false, false, false, reg_ext_x86(i.dst))
+        var b = push_rex_x86([], false, false, false, reg_ext_x86(i.dst))
         b = push_byte_x86(b, X86_OP_MOV_R_IMM + reg_low3_x86(i.dst))
         return plain_inst_x86(push_imm32_x86(b, i.imm64))
     }
     if fits_i32_x86(i.imm64) {
-        var b = push_rex_x86(teko::list::empty(), true, false, false, reg_ext_x86(i.dst))
+        var b = push_rex_x86([], true, false, false, reg_ext_x86(i.dst))
         b = push_byte_x86(b, X86_OP_MOV_RM_IMM32)
         b = push_byte_x86(b, modrm_x86(MODRM_MOD_REGISTER, 0 to u32, reg_low3_x86(i.dst)))
         return plain_inst_x86(push_imm32_x86(b, i.imm64))
     }
-    var b = push_rex_x86(teko::list::empty(), true, false, false, reg_ext_x86(i.dst))
+    var b = push_rex_x86([], true, false, false, reg_ext_x86(i.dst))
     b = push_byte_x86(b, X86_OP_MOV_R_IMM + reg_low3_x86(i.dst))
     plain_inst_x86(push_imm64_x86(b, i.imm64))
 }
 
 fn encode_mov_x86(i: MMovX86): EncInstX86 {
-    plain_inst_x86(emit_rr_x86(teko::list::empty(), i.wide, false, X86_OP_MOV_RM_R, i.src, i.dst))
+    plain_inst_x86(emit_rr_x86([], i.wide, false, X86_OP_MOV_RM_R, i.src, i.dst))
 }
 
 fn encode_alu_rm_x86(i: MAluRmX86): EncInstX86 {
-    plain_inst_x86(emit_rr_x86(teko::list::empty(), i.wide, false, alu_opcode_x86(i.op), i.src, i.dst))
+    plain_inst_x86(emit_rr_x86([], i.wide, false, alu_opcode_x86(i.op), i.src, i.dst))
 }
 
 fn encode_imul_x86(i: MImulX86): EncInstX86 {
-    plain_inst_x86(emit_rr_x86(teko::list::empty(), i.wide, true, X86_OP_IMUL_R_RM, i.dst, i.src))
+    plain_inst_x86(emit_rr_x86([], i.wide, true, X86_OP_IMUL_R_RM, i.dst, i.src))
 }
 
 fn encode_divseq_x86(i: MDivSeqX86): EncInstX86 {
     var rax = preg(X86_REG_RAX_ID, MRegClass::GPR)
     var rdx = preg(X86_REG_RDX_ID, MRegClass::GPR)
-    var b = emit_rr_x86(teko::list::empty(), i.wide, false, X86_OP_MOV_RM_R, i.a, rax)
+    var b = emit_rr_x86([], i.wide, false, X86_OP_MOV_RM_R, i.a, rax)
     if i.is_signed {
         if i.wide { b = push_byte_x86(b, REX_W_PREFIX) }
         b = push_byte_x86(b, X86_OP_CQO)
@@ -274,18 +274,18 @@ fn encode_divseq_x86(i: MDivSeqX86): EncInstX86 {
 }
 
 fn encode_shift_x86(i: MShiftX86): EncInstX86 {
-    plain_inst_x86(emit_rm_ext_x86(teko::list::empty(), i.wide, X86_OP_SHIFT_CL, shift_ext_x86(i.op), i.dst))
+    plain_inst_x86(emit_rm_ext_x86([], i.wide, X86_OP_SHIFT_CL, shift_ext_x86(i.op), i.dst))
 }
 
 fn encode_cmp_x86(i: MCmpX86): EncInstX86 {
-    plain_inst_x86(emit_rr_x86(teko::list::empty(), i.wide, false, X86_OP_CMP_RM_R, i.b, i.a))
+    plain_inst_x86(emit_rr_x86([], i.wide, false, X86_OP_CMP_RM_R, i.b, i.a))
 }
 
 fn encode_setcc_raw_x86(dst: MReg, cc: u32): EncInstX86 {
     var force = dst.id >= X86_BYTE_REG_MIN_ID
     var dst_ext = reg_ext_x86(dst)
     var dst_low3 = reg_low3_x86(dst)
-    var b = if force { push_rex_forced_x86(teko::list::empty(), false, false, false, dst_ext) } else { teko::list::empty() }
+    var b = if force { push_rex_forced_x86([], false, false, false, dst_ext) } else { [] }
     b = push_byte_x86(b, X86_OP_TWO_BYTE_ESCAPE)
     b = push_byte_x86(b, X86_OP_SETCC_BASE + cc)
     b = push_byte_x86(b, modrm_x86(MODRM_MOD_REGISTER, 0 to u32, dst_low3))
@@ -306,7 +306,7 @@ fn encode_setp_x86(i: MSetPX86): EncInstX86 {
 fn encode_falu_x86(i: MFAluX86): EncInstX86 {
     var prefix = if i.dbl { X86_PREFIX_F2 } else { X86_PREFIX_F3 }
     var opcode = match i.op { FAdd => X86_OP_SSE_ADD; FSub => X86_OP_SSE_SUB; FMul => X86_OP_SSE_MUL; FDiv => X86_OP_SSE_DIV }
-    plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, opcode, i.dst, i.src))
+    plain_inst_x86(emit_sse_rr_x86([], prefix, false, opcode, i.dst, i.src))
 }
 
 fn encode_fmov_x86(i: MFMovX86): EncInstX86 {
@@ -314,38 +314,38 @@ fn encode_fmov_x86(i: MFMovX86): EncInstX86 {
     var src_fpr = i.src.reg_class == MRegClass::FPR
     if dst_fpr && src_fpr {
         var prefix = if i.dbl { X86_PREFIX_F2 } else { X86_PREFIX_F3 }
-        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, X86_OP_SSE_MOV_LOAD, i.dst, i.src))
+        return plain_inst_x86(emit_sse_rr_x86([], prefix, false, X86_OP_SSE_MOV_LOAD, i.dst, i.src))
     }
     if dst_fpr && !src_fpr {
-        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_66, i.dbl, X86_OP_MOVQD_LOAD, i.dst, i.src))
+        return plain_inst_x86(emit_sse_rr_x86([], X86_PREFIX_66, i.dbl, X86_OP_MOVQD_LOAD, i.dst, i.src))
     }
     if !dst_fpr && src_fpr {
-        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_66, i.dbl, X86_OP_MOVQD_STORE, i.src, i.dst))
+        return plain_inst_x86(emit_sse_rr_x86([], X86_PREFIX_66, i.dbl, X86_OP_MOVQD_STORE, i.src, i.dst))
     }
-    plain_inst_x86(emit_rr_x86(teko::list::empty(), i.dbl, false, X86_OP_MOV_RM_R, i.src, i.dst))
+    plain_inst_x86(emit_rr_x86([], i.dbl, false, X86_OP_MOV_RM_R, i.src, i.dst))
 }
 
 fn encode_fcmp_x86(i: MFCmpX86): EncInstX86 {
     var prefix = if i.dbl { X86_PREFIX_66 } else { X86_NO_PREFIX }
-    plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, X86_OP_UCOMIS, i.a, i.b))
+    plain_inst_x86(emit_sse_rr_x86([], prefix, false, X86_OP_UCOMIS, i.a, i.b))
 }
 
 fn encode_cvt_x86(i: MCvtX86): EncInstX86 {
     match i.op {
-        Cvtsi2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTSI2S, i.dst, i.src))
-        Cvttsd2si => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTTS2SI, i.dst, i.src))
-        Cvttss2si => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F3, true, X86_OP_CVTTS2SI, i.dst, i.src))
-        Cvtsd2ss => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, false, X86_OP_CVTS2S, i.dst, i.src))
-        Cvtss2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F3, false, X86_OP_CVTS2S, i.dst, i.src))
+        Cvtsi2sd => plain_inst_x86(emit_sse_rr_x86([], X86_PREFIX_F2, true, X86_OP_CVTSI2S, i.dst, i.src))
+        Cvttsd2si => plain_inst_x86(emit_sse_rr_x86([], X86_PREFIX_F2, true, X86_OP_CVTTS2SI, i.dst, i.src))
+        Cvttss2si => plain_inst_x86(emit_sse_rr_x86([], X86_PREFIX_F3, true, X86_OP_CVTTS2SI, i.dst, i.src))
+        Cvtsd2ss => plain_inst_x86(emit_sse_rr_x86([], X86_PREFIX_F2, false, X86_OP_CVTS2S, i.dst, i.src))
+        Cvtss2sd => plain_inst_x86(emit_sse_rr_x86([], X86_PREFIX_F3, false, X86_OP_CVTS2S, i.dst, i.src))
     }
 }
 
 fn encode_neg_x86(i: MNegX86): EncInstX86 {
-    plain_inst_x86(emit_rm_ext_x86(teko::list::empty(), i.wide, X86_OP_GRP3_F7, X86_EXT_NEG, i.dst))
+    plain_inst_x86(emit_rm_ext_x86([], i.wide, X86_OP_GRP3_F7, X86_EXT_NEG, i.dst))
 }
 
 fn encode_not_x86(i: MNotX86): EncInstX86 {
-    plain_inst_x86(emit_rm_ext_x86(teko::list::empty(), i.wide, X86_OP_GRP3_F7, X86_EXT_NOT, i.dst))
+    plain_inst_x86(emit_rm_ext_x86([], i.wide, X86_OP_GRP3_F7, X86_EXT_NOT, i.dst))
 }
 
 fn encode_load_x86(i: MLoadX86): EncInstX86 {
@@ -383,13 +383,13 @@ fn encode_in_arg_x86(layout: FrameLayoutX86, i: MInArgX86): EncInstX86 {
 fn encode_frame_addr_x86(layout: FrameLayoutX86, i: MFrameAddrX86): EncInstX86 {
     var off = layout.slot_offsets[i.slot]
     var mem = MMem { base_reg = RSP_BASE_X86; offset = off to i32 }
-    var b = push_rex_x86(teko::list::empty(), true, reg_ext_x86(i.dst), false, reg_ext_x86(mem.base_reg))
+    var b = push_rex_x86([], true, reg_ext_x86(i.dst), false, reg_ext_x86(mem.base_reg))
     b = push_byte_x86(b, X86_OP_LEA)
     plain_inst_x86(push_mem_operand_x86(b, reg_low3_x86(i.dst), mem))
 }
 
 fn encode_lea_rip_x86(i: MLeaRipX86): EncInstX86 {
-    var b = push_rex_forced_x86(teko::list::empty(), true, reg_ext_x86(i.dst), false, false)
+    var b = push_rex_forced_x86([], true, reg_ext_x86(i.dst), false, false)
     b = push_byte_x86(b, X86_OP_LEA)
     b = push_byte_x86(b, modrm_x86(MODRM_MOD_INDIRECT, reg_low3_x86(i.dst), MODRM_RM_RIP_RELATIVE))
     var field_off = b.len to u32
@@ -397,32 +397,32 @@ fn encode_lea_rip_x86(i: MLeaRipX86): EncInstX86 {
 }
 
 fn encode_jmp_x86(i: MJmpX86): EncInstX86 {
-    var b = push_byte_x86(teko::list::empty(), X86_OP_JMP_REL32)
+    var b = push_byte_x86([], X86_OP_JMP_REL32)
     var field_off = b.len to u32
     branch_inst_x86(emit_u32_le(b, 0 to u32), field_off, i.target)
 }
 
 fn encode_jcc_x86(i: MJccX86): EncInstX86 {
-    var b = push_byte_x86(teko::list::empty(), X86_OP_TWO_BYTE_ESCAPE)
+    var b = push_byte_x86([], X86_OP_TWO_BYTE_ESCAPE)
     b = push_byte_x86(b, X86_OP_JCC_BASE + cond_cc_x86(i.cond))
     var field_off = b.len to u32
     branch_inst_x86(emit_u32_le(b, 0 to u32), field_off, i.target)
 }
 
 fn encode_call_x86(i: MCallX86): EncInstX86 {
-    var b = push_byte_x86(teko::list::empty(), X86_OP_CALL_REL32)
+    var b = push_byte_x86([], X86_OP_CALL_REL32)
     var field_off = b.len to u32
     reloc_inst_x86(emit_u32_le(b, 0 to u32), field_off, i.sym, RelocKindX86::Plt32)
 }
 
 fn encode_call_ind_x86(i: MCallIndX86): EncInstX86 {
-    var b = push_rex_x86(teko::list::empty(), false, false, false, reg_ext_x86(i.target))
+    var b = push_rex_x86([], false, false, false, reg_ext_x86(i.target))
     b = push_byte_x86(b, X86_OP_GRP5_FF)
     plain_inst_x86(push_byte_x86(b, modrm_x86(MODRM_MOD_REGISTER, X86_EXT_CALL_IND, reg_low3_x86(i.target))))
 }
 
 fn encode_ret_x86(): EncInstX86 {
-    plain_inst_x86(push_byte_x86(teko::list::empty(), X86_OP_RET))
+    plain_inst_x86(push_byte_x86([], X86_OP_RET))
 }
 
 pub fn encode_inst_x86(layout: FrameLayoutX86, inst: @MInstX86()): EncInstX86 | error {
@@ -484,7 +484,7 @@ fn scan_block_saved_x86(abi: AbiDescriptor, acc0: Saved, b: MBlockX86): Saved {
 }
 
 fn collect_callee_saved_x86(abi: AbiDescriptor, f: MFuncX86): Saved {
-    var acc = Saved { gpr = teko::list::empty(); fpr = teko::list::empty() }
+    var acc = Saved { gpr = []; fpr = [] }
     var i: u64 = 0
     loop {
         if i >= f.blocks.len { break }
@@ -700,10 +700,10 @@ fn emit_saved_pushes_x86(buf: []byte, layout: FrameLayoutX86): []byte {
 
 pub fn emit_prologue_x86(layout: FrameLayoutX86): []byte | error {
     if !frame_is_framed_x86(layout) {
-        var none: []byte = teko::list::empty()
+        var none: []byte = []
         return none
     }
-    var after_rbp = emit_mov_rbp_rsp_x86(emit_push_reg_x86(teko::list::empty(), X86_REG_RBP_ID))
+    var after_rbp = emit_mov_rbp_rsp_x86(emit_push_reg_x86([], X86_REG_RBP_ID))
     var after_pushes = emit_saved_pushes_x86(after_rbp, layout)
     var after_sub = match emit_sub_rsp_x86(after_pushes, layout.size) { []byte as w => w; error as e => return e }
     emit_saved_fpr_stores_x86(after_sub, layout, false)
@@ -711,10 +711,10 @@ pub fn emit_prologue_x86(layout: FrameLayoutX86): []byte | error {
 
 fn emit_epilogue_x86(layout: FrameLayoutX86): []byte {
     if !frame_is_framed_x86(layout) {
-        var none: []byte = teko::list::empty()
+        var none: []byte = []
         return none
     }
-    var after_fpr = emit_saved_fpr_stores_x86(teko::list::empty(), layout, true)
+    var after_fpr = emit_saved_fpr_stores_x86([], layout, true)
     var b = if layout.saved_gpr.len > (0 to u64) { emit_add_rsp_x86(after_fpr, layout.size) } else { after_fpr }
     var i: u64 = layout.saved_gpr.len
     loop {
@@ -881,7 +881,7 @@ fn record_block_offset_x86(acc: FuncEmitX86, id: u32): FuncEmitX86 {
 pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86): EncodedFuncX86 | error {
     var layout = compute_frame_layout_x86(abi, f)
     var pro = match emit_prologue_x86(layout) { []byte as w => w; error as e => return e }
-    var acc = FuncEmitX86 { bytes = pro; block_offsets = teko::list::empty(); branch_fixups = teko::list::empty(); relocs = teko::list::empty() }
+    var acc = FuncEmitX86 { bytes = pro; block_offsets = []; branch_fixups = []; relocs = [] }
     var bi: u64 = 0
     loop {
         if bi >= f.blocks.len { break }
@@ -903,7 +903,7 @@ pub type ModuleTextX86 = struct {
 }
 
 pub fn empty_module_text_x86(): ModuleTextX86 {
-    ModuleTextX86 { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); text_off = 0 to u32 }
+    ModuleTextX86 { text = []; relocs = []; syms = []; text_off = 0 to u32 }
 }
 
 fn rebase_relocs_x86(acc: []RelocX86, relocs: []RelocX86, base_off: u32): []RelocX86 {

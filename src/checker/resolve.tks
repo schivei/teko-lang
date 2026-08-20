@@ -15,7 +15,7 @@ pub type TypeTable = struct {
 }
 
 pub fn tt_empty(): TypeTable {
-    TypeTable { regs = teko::list::empty(); by_last = nidx_empty(); comptimes = teko::list::empty() }
+    TypeTable { regs = []; by_last = nidx_empty(); comptimes = [] }
 }
 
 pub fn tt_len(t: TypeTable): u64 {
@@ -467,7 +467,7 @@ fn atom_surface(name: str, table: TypeTable): []parser::Function | error {
     if is_trait_name(name, table) { return error { message = $"trait '{name}' is not a type and cannot appear in a constraint — use an interface" } }
     if is_interface_name(name, table) { return iface_methods_by_name(name, table) }
     match type_table_find(table, name, "") {
-        parser::TypeDecl => { var empty_surface: []parser::Function = teko::list::empty(); empty_surface }
+        parser::TypeDecl => { var empty_surface: []parser::Function = []; empty_surface }
         error => error { message = $"unknown constraint atom '{name}' — names no declared type" }
     }
 }
@@ -518,10 +518,10 @@ pub fn constraint_surface(c: @ConstraintExpr(), table: TypeTable): []parser::Fun
             surface_intersect(l, r, table)
         }
         parser::ConstraintAtom as a => atom_surface(a.name, table)
-        parser::ConstraintType => { var compound_surface: []parser::Function = teko::list::empty(); compound_surface }
-        parser::ConstraintForm => { var form_surface: []parser::Function = teko::list::empty(); form_surface }
-        parser::ConstraintNotNull => { var notnull_surface: []parser::Function = teko::list::empty(); notnull_surface }
-        parser::NoConstraint => { var empty_surface: []parser::Function = teko::list::empty(); empty_surface }
+        parser::ConstraintType => { var compound_surface: []parser::Function = []; compound_surface }
+        parser::ConstraintForm => { var form_surface: []parser::Function = []; form_surface }
+        parser::ConstraintNotNull => { var notnull_surface: []parser::Function = []; notnull_surface }
+        parser::NoConstraint => { var empty_surface: []parser::Function = []; empty_surface }
     }
 }
 
@@ -598,14 +598,14 @@ fn constraint_interfaces(c: @ConstraintExpr(), table: TypeTable): []str | error 
         }
         parser::ConstraintAtom as a => {
             if is_trait_name(a.name, table) { return error { message = $"trait '{a.name}' is not a type and cannot appear in a constraint — use an interface" } }
-            if is_interface_name(a.name, table) { return teko::list::push(teko::list::empty(), a.name) }
-            var no_interfaces: []str = teko::list::empty()
+            if is_interface_name(a.name, table) { return [a.name] }
+            var no_interfaces: []str = []
             no_interfaces
         }
-        parser::ConstraintType => { var compound_ifaces: []str = teko::list::empty(); compound_ifaces }
-        parser::ConstraintForm => { var form_ifaces: []str = teko::list::empty(); form_ifaces }
-        parser::ConstraintNotNull => { var notnull_ifaces: []str = teko::list::empty(); notnull_ifaces }
-        parser::NoConstraint => { var no_interfaces: []str = teko::list::empty(); no_interfaces }
+        parser::ConstraintType => { var compound_ifaces: []str = []; compound_ifaces }
+        parser::ConstraintForm => { var form_ifaces: []str = []; form_ifaces }
+        parser::ConstraintNotNull => { var notnull_ifaces: []str = []; notnull_ifaces }
+        parser::NoConstraint => { var no_interfaces: []str = []; no_interfaces }
     }
 }
 
@@ -627,7 +627,7 @@ pub fn method_owner_interface(ifaces: []str, method: str, table: TypeTable): str
     var i = 0
     loop {
         if i >= ifaces.len { break }
-        var no_methods: []parser::Function = teko::list::empty()
+        var no_methods: []parser::Function = []
         var ms = match iface_methods_by_name(ifaces[i], table) { []parser::Function as f => f; error => no_methods }
         var j = 0
         loop { if j >= ms.len { break }; if ms[j].name == method { return ifaces[i] }; j++ }
@@ -637,7 +637,7 @@ pub fn method_owner_interface(ifaces: []str, method: str, table: TypeTable): str
 }
 
 fn type_param_extends(c: @ConstraintExpr(), table: TypeTable): []str {
-    var no_interfaces: []str = teko::list::empty()
+    var no_interfaces: []str = []
     match constraint_interfaces(c, table) {
         []str as ifaces => ifaces
         error => no_interfaces
@@ -652,9 +652,9 @@ fn constraint_at(type_constraints: []@ConstraintExpr(), i: u64): @ConstraintExpr
 fn type_param_reg(name: str, own_constraint: @ConstraintExpr(), ns: str, table: TypeTable): TypeReg {
     var ifaces: []str = type_param_extends(own_constraint, table)
     var body: @TypeBody() = parser::ExternBody { }
-    if ifaces.len > 0 { body = parser::InterfaceBody { extends = ifaces; methods = teko::list::empty() } }
-    var carried_constraints = teko::list::push(teko::list::empty(), own_constraint)
-    var d = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = carried_constraints; body = body; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); line = 0; col = 0; is_global = false }
+    if ifaces.len > 0 { body = parser::InterfaceBody { extends = ifaces; methods = [] } }
+    var carried_constraints = [own_constraint]
+    var d = parser::TypeDecl { name = name; type_params = []; type_constraints = carried_constraints; body = body; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); line = 0; col = 0; is_global = false }
     TypeReg { name = name; namespace = ns; file = ""; vis = parser::Visibility::Private; decl = d }
 }
 
@@ -680,7 +680,7 @@ pub fn type_param_table(type_params: []str, type_constraints: []@ConstraintExpr(
         k++
         j++
     }
-    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = teko::list::empty() })
+    tt_freeze(TypeTable { regs = regs; by_last = nidx_empty(); comptimes = [] })
 }
 
 fn concat_tps(a: []str, b: []str): []str {
@@ -956,7 +956,7 @@ pub fn type_conforms_to(name: str, iface: str, table: TypeTable): bool {
     loop {
         if hops >= 64 { break }
         var td = match type_table_find(table, cur, "") { parser::TypeDecl as d => d; error => return false }
-        var impls: []str = teko::list::empty()
+        var impls: []str = []
         var has_base = false
         var base_class = ""
         match td.body {
@@ -1025,7 +1025,7 @@ fn type_join(a: @Type(), b: @Type(), table: TypeTable): @Type() {
     }
     if widens_into(a, b, table) { return b }
     if widens_into(b, a, table) { return a }
-    var m1 = union_collect(teko::list::empty(), a, table)
+    var m1 = union_collect([], a, table)
     var m2 = union_collect(m1, b, table)
     Variant { members = union_normalize_null(m2) }
 }
@@ -1096,7 +1096,7 @@ pub fn subst_type(t: @Type(), s: Subst): @Type() {
             var ps: [pn]@Type() = []
             var i = 0
             loop { if i >= f.params.len { break }; ps[i] = subst_type(f.params[i], s); i++ }
-            Func { params = ps; ret = subst_type(f.ret, s); variadic = false; param_names = []; n_required = (ps).len; defaults = []; ret_extra = teko::list::empty() }
+            Func { params = ps; ret = subst_type(f.ret, s); variadic = false; param_names = []; n_required = (ps).len; defaults = []; ret_extra = [] }
         }
         _ => t
     }
@@ -1320,7 +1320,7 @@ pub fn resolve_type(te: @TypeExpr(), table: TypeTable, ref_ns: str): @Type() | e
                 i++
             }
             var rt = match resolve_type(fnt.ret, table, ref_ns) { (@Type()) as t => t; error as e => return e }
-            return Func { params = ps; ret = rt; variadic = false; param_names = []; n_required = (ps).len; defaults = []; ret_extra = teko::list::empty() }
+            return Func { params = ps; ret = rt; variadic = false; param_names = []; n_required = (ps).len; defaults = []; ret_extra = [] }
         }
         parser::MacroType => error { message = "internal: an unexpanded @Type() macro reached type resolution — it should be expanded by the Family-A pre-pass" }
     }
@@ -1786,7 +1786,7 @@ fn collect_call_site_args(call: parser::Call, acc: []@TypeExpr()): []@TypeExpr()
     if call.owner_type_args.len == 0 { return acc }
     if call.callee.segments.len < 2 { return acc }
     var owner_name = call.callee.segments[call.callee.segments.len - 2].name
-    collect_site_args(parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = owner_name }) }, call.owner_type_args, acc)
+    collect_site_args(parser::Path { segments = [parser::Segment { name = owner_name }] }, call.owner_type_args, acc)
 }
 
 fn collect_expr_insts(e: parser::Expr, acc: []@TypeExpr()): []@TypeExpr() {
@@ -1901,11 +1901,11 @@ fn tag_inst_sites(sites: []@TypeExpr(), ref_ns: str, acc: []InstSite): []InstSit
 }
 
 fn seed_inst_sites(program: parser::Program): []InstSite {
-    var work: []InstSite = teko::list::empty()
+    var work: []InstSite = []
     var i = 0
     loop {
         if i >= program.items.len { break }
-        var raw = collect_item_insts(program.items[i], teko::list::empty())
+        var raw = collect_item_insts(program.items[i], [])
         work = tag_inst_sites(raw, program.items[i].namespace, work)
         i++
     }
@@ -1954,7 +1954,7 @@ fn resolve_inst_arg(arg: @TypeExpr(), table: TypeTable, ref_ns: str, template_ns
 fn stamped_instance_decl(template: TypeReg, mangled: str, nt: parser::NamedType, argtypes: []@Type(), table: TypeTable): parser::TypeDecl {
     var gen = template.decl
     var nbody = subst_body_names(gen.body, gen.type_params, nt.args)
-    parser::TypeDecl { name = mangled; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = nbody; vis = gen.vis; has_doc = false; doc = parser::docspan_none(); line = gen.line; col = gen.col; is_global = false }
+    parser::TypeDecl { name = mangled; type_params = []; type_constraints = []; body = nbody; vis = gen.vis; has_doc = false; doc = parser::docspan_none(); line = gen.line; col = gen.col; is_global = false }
 }
 
 pub fn instantiate_types(program: parser::Program, table: TypeTable): TypeTable {
@@ -1982,7 +1982,7 @@ fn stamp_inst_site(entry: InstSite, state: StampState): StampState {
     match type_table_find(tbl, mangled, "") { parser::TypeDecl => return state; error => { } }
     var stamped = stamped_instance_decl(template, mangled, nt, argtypes, tbl)
     var grown = tt_push(tbl, TypeReg { name = mangled; namespace = template.namespace; file = template.file; vis = template.decl.vis; decl = stamped })
-    var queued = tag_inst_sites(collect_body_insts(stamped.body, teko::list::empty()), template.namespace, state.work)
+    var queued = tag_inst_sites(collect_body_insts(stamped.body, []), template.namespace, state.work)
     StampState { table = grown; work = queued }
 }
 
@@ -2053,7 +2053,7 @@ fn normalize_inst_texpr(te: @TypeExpr(), table: TypeTable): @TypeExpr() {
                             Named as rn => {
                                 if name_is_g_instance(rn.name) {
                                     var seg = parser::Segment { name = rn.name }
-                                    return parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), seg) }; args = teko::list::empty() }
+                                    return parser::NamedType { path = parser::Path { segments = [seg] }; args = [] }
                                 }
                             }
                             _ => { }

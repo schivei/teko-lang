@@ -7,9 +7,9 @@ fn p(id: u32): MReg {
 fn frameless_layout(): FrameLayout {
     FrameLayout {
         size = 0 to u32
-        saved_gpr = teko::list::empty()
-        saved_fpr = teko::list::empty()
-        slot_offsets = teko::list::empty()
+        saved_gpr = []
+        saved_fpr = []
+        slot_offsets = []
         out_arg_base = 0
     }
 }
@@ -23,12 +23,12 @@ fn alloca_slot(bytes: u32, align: u32): lir::LAlloca {
 }
 
 fn func_of(frame: []lir::LAlloca, insts: []@MInst()): MFunc {
-    var block = MBlock { id = 0 to u32; params = teko::list::empty(); insts = insts }
-    MFunc { symbol = "t"; blocks = teko::list::push(teko::list::empty(), block); frame = frame }
+    var block = MBlock { id = 0 to u32; params = []; insts = insts }
+    MFunc { symbol = "t"; blocks = [block]; frame = frame }
 }
 
 fn l0(): []u32 {
-    teko::list::empty()
+    []
 }
 
 fn l1(a: u32): []u32 {
@@ -44,11 +44,11 @@ fn l3(a: u32, b: u32, c: u32): []u32 {
 }
 
 fn l_frame(): []lir::LAlloca {
-    teko::list::empty()
+    []
 }
 
 fn l_insts(): []@MInst() {
-    teko::list::empty()
+    []
 }
 
 fn pro(layout: FrameLayout): []u32 {
@@ -224,7 +224,7 @@ fn encodes_stores() {
 
 #test
 fn encodes_indirect_call_and_ret() {
-    var no_uses: []MReg = teko::list::empty()
+    var no_uses: []MReg = []
     assert_word(call_indirect_inst(p(8), no_uses, p(0), false), 0xD63F0100)
     assert_word(RET_INST, 0xD65F03C0)
 }
@@ -467,11 +467,11 @@ fn i4(a: @MInst(), b: @MInst(), c: @MInst(), d: @MInst()): []@MInst() {
 }
 
 fn mblock(id: u32, insts: []@MInst()): MBlock {
-    MBlock { id = id; params = teko::list::empty(); insts = insts }
+    MBlock { id = id; params = []; insts = insts }
 }
 
 fn l_blocks(): []MBlock {
-    teko::list::empty()
+    []
 }
 
 fn bl1(a: MBlock): []MBlock {
@@ -495,7 +495,7 @@ fn func_blocks(blocks: []MBlock): MFunc {
 }
 
 fn l_relocs(): []Reloc {
-    teko::list::empty()
+    []
 }
 
 fn bad_func(): EncodedFunc {
@@ -563,7 +563,7 @@ fn diamond_forward_branches_patch_correctly() {
 
 #test
 fn reloc_records_carry_exact_offsets_kinds_syms() {
-    var no_uses: []MReg = teko::list::empty()
+    var no_uses: []MReg = []
     var insts = i4(adrp_inst(p(1), "g", MRelocKind::PageHi), add_lo_inst(p(1), p(1), "g", MRelocKind::PageLo), movz_inst(true, p(0), 0, 0), call_inst("tk_exit", no_uses, p(0), false, false))
     var e = ef(func_blocks(bl1(mblock(0 to u32, insts))))
     teko::assert::is_true(e.words.len == 4)
@@ -592,7 +592,7 @@ fn a_non_relocating_word_owes_no_relocation_kind() {
 
 #test
 fn a_relocating_word_owes_exactly_its_own_kind() {
-    var no_uses: []MReg = teko::list::empty()
+    var no_uses: []MReg = []
     teko::assert::is_true(reloc_shape(enc(adrp_inst(p(1), "g", MRelocKind::PageHi))) == "g/PageHi")
     teko::assert::is_true(reloc_shape(enc(add_lo_inst(p(1), p(1), "g", MRelocKind::PageLo))) == "g/PageLo")
     teko::assert::is_true(reloc_shape(enc(call_inst("tk_exit", no_uses, p(0), false, false))) == "tk_exit/Call")
@@ -642,11 +642,11 @@ fn one_block_func(sym: str, insts: []@MInst()): MFunc {
 }
 
 fn l_bytes(): []byte {
-    teko::list::empty()
+    []
 }
 
 fn l_syms(): []Symbol {
-    teko::list::empty()
+    []
 }
 
 fn bad_module(): EncodedModule {
@@ -668,11 +668,11 @@ fn em_stop(m: MModule): str {
 }
 
 fn rodata_of(sym: str, bs: []byte): []lir::LRodata {
-    teko::list::push(teko::list::empty(), lir::LRodata { symbol = sym; bytes = bs; relocs = teko::list::empty() })
+    [lir::LRodata { symbol = sym; bytes = bs; relocs = [] }]
 }
 
 fn module_with_rodata(funcs: []MFunc, rodata: []lir::LRodata): MModule {
-    MModule { funcs = funcs; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
+    MModule { funcs = funcs; rodata = rodata; globals = []; layouts = [] }
 }
 
 #test
@@ -681,7 +681,7 @@ fn module_interns_rodata_into_const() {
     var r1 = teko::list::push(teko::list::push(l_bytes(), 0x41 to byte), 0 to byte)
     var rodata = teko::list::push(rodata_of("s0", r0), lir::LRodata { symbol = "s1"; bytes = r1; relocs = teko::list::empty() })
     var f = one_block_func("main", i1(RET_INST))
-    var funcs = teko::list::push(teko::list::empty(), f)
+    var funcs = [f]
     var e = em(module_with_rodata(funcs, rodata))
     teko::assert::is_true(e.rodata.len == (10 to u64))
     teko::assert::is_true(e.rodata[0] == (0x68 to byte))
@@ -713,13 +713,13 @@ fn n_zero_bytes(n: u64): []byte {
 
 #test
 fn enc_rodata_reloc_offset_survives_odd_length_neighbors() {
-    var r0 = lir::LRodata { symbol = "s0"; bytes = n_zero_bytes(3 to u64); relocs = teko::list::empty() }
-    var r1 = lir::LRodata { symbol = "s1"; bytes = n_zero_bytes(6 to u64); relocs = teko::list::empty() }
-    var r2_relocs = teko::list::push(teko::list::empty(), lir::data_reloc(0 to u32, "s0"))
+    var r0 = lir::LRodata { symbol = "s0"; bytes = n_zero_bytes(3 to u64); relocs = [] }
+    var r1 = lir::LRodata { symbol = "s1"; bytes = n_zero_bytes(6 to u64); relocs = [] }
+    var r2_relocs = [lir::data_reloc(0 to u32, "s0")]
     var r2 = lir::LRodata { symbol = "s2"; bytes = n_zero_bytes(16 to u64); relocs = r2_relocs }
-    var rodata = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), r0), r1), r2)
+    var rodata = [r0, r1, r2]
     var f = one_block_func("main", i1(RET_INST))
-    var funcs = teko::list::push(teko::list::empty(), f)
+    var funcs = [f]
     var e = em(module_with_rodata(funcs, rodata))
     teko::assert::is_true(e.symbols[2].name == "s2")
     teko::assert::is_true(e.symbols[2].offset == (16 to u32))
@@ -731,15 +731,15 @@ fn enc_rodata_reloc_offset_survives_odd_length_neighbors() {
 
 #test
 fn find_rodata_align_violations_is_empty_for_aligned_relocs() {
-    var syms = teko::list::push(teko::list::push(teko::list::empty(), Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }), Symbol { name = "s1"; defined = true; sect = 2 to u8; offset = 16 to u32; local = true })
-    var relocs = teko::list::push(teko::list::empty(), lir::data_reloc(16 to u32, "s0"))
+    var syms = [Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }, Symbol { name = "s1"; defined = true; sect = 2 to u8; offset = 16 to u32; local = true }]
+    var relocs = [lir::data_reloc(16 to u32, "s0")]
     teko::assert::is_true(find_rodata_align_violations(syms, relocs).len == 0)
 }
 
 #test
 fn find_rodata_align_violations_names_the_owning_symbol() {
-    var syms = teko::list::push(teko::list::empty(), Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true })
-    var relocs = teko::list::push(teko::list::empty(), lir::data_reloc(9 to u32, "leaf"))
+    var syms = [Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }]
+    var relocs = [lir::data_reloc(9 to u32, "leaf")]
     var violations = find_rodata_align_violations(syms, relocs)
     teko::assert::is_true(violations.len == 1)
     teko::assert::is_true(violations[0].owner == "s0")
@@ -751,9 +751,9 @@ fn find_rodata_align_violations_names_the_owning_symbol() {
 #test
 fn module_globals_honest_stops() {
     var f = one_block_func("main", i1(RET_INST))
-    var funcs = teko::list::push(teko::list::empty(), f)
-    var globals = teko::list::push(teko::list::empty(), lir::LGlobal { symbol = "gv"; ty = lir::LType::I32; bytes = l_bytes() })
-    var m = MModule { funcs = funcs; rodata = teko::list::empty(); globals = globals; layouts = teko::list::empty() }
+    var funcs = [f]
+    var globals = [lir::LGlobal { symbol = "gv"; ty = lir::LType::I32; bytes = l_bytes() }]
+    var m = MModule { funcs = funcs; rodata = []; globals = globals; layouts = [] }
     teko::assert::str_contains(em_stop(m), "A4-globals")
 }
 
@@ -764,7 +764,7 @@ fn module_propagates_function_honest_stop() {
 }
 
 fn l0_ew(): []EncWord {
-    teko::list::empty()
+    []
 }
 
 fn faw(layout: FrameLayout, fa: MFrameAddr): []EncWord {
@@ -833,7 +833,7 @@ fn big_frame_fits_boundary() {
 fn div_zero_guard_encodes_compare_branch_call_and_selfloop() {
     var b0 = mblock(0 to u32, i4(movz_inst(true, p(2), 0, 0), cmp_inst(true, p(1), p(2)), branch_cond_inst(MCond::NE, 1 to u32), branch_inst(2 to u32)))
     var b1 = mblock(1 to u32, i2(alu_inst(MAluOp::Sdiv, true, p(3), p(0), p(1)), RET_INST))
-    var no_uses: []MReg = teko::list::empty()
+    var no_uses: []MReg = []
     var b2 = mblock(2 to u32, i2(call_inst("tk_panic_div0", no_uses, p(0), false, false), branch_inst(2 to u32)))
     var e = ef(func_blocks(bl3(b0, b1, b2)))
     teko::assert::is_true(e.words.len == 13)

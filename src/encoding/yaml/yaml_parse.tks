@@ -40,7 +40,7 @@ type YamlAnchors = class {
     intern values: []YamlValue
 
     pub static fn make(): YamlAnchors {
-        YamlAnchors { names = teko::list::empty(); values = teko::list::empty() }
+        YamlAnchors { names = []; values = [] }
     }
 
     pub fn define(name: str, value: YamlValue) {
@@ -120,7 +120,7 @@ fn byte_subslice(bytes: []byte, from: u64, to: u64): []byte {
 }
 
 fn one_byte_slice(b: byte): []byte {
-    teko::list::push(teko::list::empty(), b)
+    [b]
 }
 
 fn push_codepoint_utf8(out: []byte, cp: u32): []byte {
@@ -347,7 +347,7 @@ fn parse_block_header(input: []byte, pos: u64, line_end: u64): YamlBlockHeader |
 
 fn collect_block_lines(input: []byte, start: u64, indent: u64, explicit_indent: u64): YamlLinesStep {
     var block_indent_signed = if explicit_indent > 0 { (indent + explicit_indent) to i64 } else { first_content_indent(input, start, indent) }
-    if block_indent_signed < 0 { return YamlLinesStep { lines = teko::list::empty(); next = start } }
+    if block_indent_signed < 0 { return YamlLinesStep { lines = []; next = start } }
     var block_indent = block_indent_signed to u64
     var lines: []str = teko::list::empty()
     var pos = start
@@ -489,17 +489,17 @@ fn decode_double_escape(input: []byte, at: u64): YamlEscStep | error {
     if esc == b'e' { return YamlEscStep { bytes = one_byte_slice(0x1B to byte); next = at + 2 } }
     if esc == b'x' {
         var cp = match read_hex_n(input, at + 2, 2) { u32 as c => c; error as e => return e }
-        return YamlEscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp); next = at + 4 }
+        return YamlEscStep { bytes = push_codepoint_utf8([], cp); next = at + 4 }
     }
     if esc == b'u' {
         var cp2 = match read_hex_n(input, at + 2, 4) { u32 as c => c; error as e => return e }
         if cp2 >= 0xD800 && cp2 <= 0xDFFF { return yaml_error("invalid unicode scalar value in \\u escape", at) }
-        return YamlEscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp2); next = at + 6 }
+        return YamlEscStep { bytes = push_codepoint_utf8([], cp2); next = at + 6 }
     }
     if esc == b'U' {
         var cp3 = match read_hex_n(input, at + 2, 8) { u32 as c => c; error as e => return e }
         if cp3 > 0x10FFFF || (cp3 >= 0xD800 && cp3 <= 0xDFFF) { return yaml_error("invalid unicode scalar value in \\U escape", at) }
-        return YamlEscStep { bytes = push_codepoint_utf8(teko::list::empty(), cp3); next = at + 10 }
+        return YamlEscStep { bytes = push_codepoint_utf8([], cp3); next = at + 10 }
     }
     yaml_error("invalid escape sequence", at)
 }
@@ -521,7 +521,7 @@ fn read_hex_n(input: []byte, pos: u64, n: u64): u32 | error {
 fn parse_double_quoted(input: []byte, pos: u64): YamlTextStep | error {
     var at = pos + 1
     var raw_lines: []str = teko::list::empty()
-    var cur: []byte = teko::list::empty()
+    var cur: []byte = []
     loop {
         if at >= input.len { return yaml_error("unterminated double-quoted string", at) }
         var b = input[at]
@@ -531,7 +531,7 @@ fn parse_double_quoted(input: []byte, pos: u64): YamlTextStep | error {
         }
         if b == b'\n' {
             raw_lines = teko::list::push(raw_lines, str(cur))
-            cur = teko::list::empty()
+            cur = []
             at = skip_inline_ws(input, at + 1)
             continue
         }
@@ -569,7 +569,7 @@ fn parse_single_quoted(input: []byte, pos: u64): YamlTextStep | error {
         }
         if b == b'\n' {
             raw_lines = teko::list::push(raw_lines, str(cur))
-            cur = teko::list::empty()
+            cur = []
             at = skip_inline_ws(input, at + 1)
             continue
         }
@@ -591,7 +591,7 @@ fn scan_plain_line_content(input: []byte, start: u64, line_end: u64): str {
 }
 
 fn plain_continuation_scan(input: []byte, cursor: u64, indent: u64): YamlLinesStep {
-    var lines: []str = teko::list::empty()
+    var lines: []str = []
     var pos = cursor
     var resume = cursor
     var pending_blanks: u64 = 0
@@ -631,7 +631,7 @@ fn parse_plain_scalar(input: []byte, pos: u64, indent: u64): YamlTextStep {
     var cursor = advance_past_newline(input, first_line_end)
     var continuation = plain_continuation_scan(input, cursor, indent)
     if continuation.lines.len == 0 { return YamlTextStep { text = first_text; next = cursor } }
-    var all_lines = teko::list::push(teko::list::empty(), first_text)
+    var all_lines = [first_text]
     var i: u64 = 0
     loop {
         if i >= continuation.lines.len { break }

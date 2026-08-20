@@ -8,14 +8,14 @@ fn parse_num_suffix_lit(tokens: []lexer::Token, pos: u64, txt: str): Parsed<Expr
         return err_at(tokens, pos, "a `bi` bigint literal must be a whole number (no fraction or exponent)")
     }
     var module = if is_big { "bigint" } else { "dec" }
-    var segs: []Segment = teko::list::push(teko::list::empty(), Segment { name = "teko" })
+    var segs: []Segment = [Segment { name = "teko" }]
     segs = teko::list::push(segs, Segment { name = "numeric" })
     segs = teko::list::push(segs, Segment { name = module })
     segs = teko::list::push(segs, Segment { name = "of_lit" })
     var arg = Expr { kind = StrLit { text = numeric }; line = tokens[pos].line; col = tokens[pos].col }
-    var args = teko::list::push(teko::list::empty(), arg)
-    var arg_names = teko::list::push(teko::list::empty(), "")
-    var call = Call { callee = Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }
+    var args = [arg]
+    var arg_names = [""]
+    var call = Call { callee = Path { segments = segs }; args = args; arg_names = arg_names; owner_type_args = []; callee_type_args = [] }
     Parsed<Expr> { node = Expr { kind = call; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
 }
 
@@ -55,7 +55,7 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
 fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: Path, owner_type_args: []@TypeExpr(), origin: u64): Parsed<Expr> | error {
     var tail = match parse_path(tokens, at_colons + 1) { Parsed<Path> as x => x; error as e => return e }
     var full = path_concat(head_path, tail.node)
-    var callee_type_args: []@TypeExpr() = teko::list::empty()
+    var callee_type_args: []@TypeExpr() = []
     var after = tail.next
     if is_kind_at(tokens, tail.next, lexer::TokenKind::Lt) {
         match parse_type_args(tokens, tail.next) {
@@ -78,7 +78,7 @@ fn parse_generic_static_call(tokens: []lexer::Token, at_colons: u64, head_path: 
 fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args: []@TypeExpr()): Parsed<Expr> | error {
     var p = skip_seps(tokens, pos + 1)
     if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
-        return Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = teko::list::empty(); field_vals = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
+        return Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = []; field_vals = [] }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
     }
     var names: []str = teko::list::empty()
     var vals: []Expr = teko::list::empty()
@@ -109,7 +109,7 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
 }
 
 fn dot_sentinel_path(): Path {
-    Path { segments = teko::list::empty() }
+    Path { segments = [] }
 }
 
 type EscPiece = struct { bytes: []byte; next: u64 }
@@ -169,8 +169,8 @@ fn parse_fspec(spec_src: str, tok_pos: u64, tokens: []lexer::Token): FSpec | err
 fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> | error {
     var raw = tokens[pos].text
     var pieces: []str = teko::list::empty()
-    var holes: []Expr = teko::list::empty()
-    var specs: []FSpec = teko::list::empty()
+    var holes: []Expr = []
+    var specs: []FSpec = []
     var cur: []byte = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -186,7 +186,7 @@ fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> 
         if c == b'}' && i + 1 < raw.len && raw[i + 1] == b'}' { cur = teko::list::push(cur, b'}'); i = i + 2; continue }
         if c == b'{' {
             pieces = teko::list::push(pieces, str(cur))
-            cur = teko::list::empty()
+            cur = []
             var hs = i + 1
             var depth: u64 = 1
             var j = hs
@@ -234,7 +234,7 @@ fn lambda_ahead(tokens: []lexer::Token, pos: u64): bool {
 }
 
 fn lambda_expr_body(e: Expr): []@Statement() {
-    teko::list::push(teko::list::empty(), ExprStmt { expr = e })
+    [ExprStmt { expr = e }]
 }
 
 fn parse_lambda(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
@@ -264,7 +264,7 @@ fn parse_lambda(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
         return err_at(tokens, p, "expected '=>' after a closure parameter list '(params) => …'")
     }
     p = p + 1
-    var body: []@Statement() = teko::list::empty()
+    var body: []@Statement() = []
     if is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         var blk = match parse_block(tokens, p) { ParsedList<@Statement()> as x => x; error as e => return e }
         body = blk.items
@@ -283,7 +283,7 @@ fn parse_macro_call(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
         return err_at(tokens, p, "expected a macro/comptime name after `@`")
     }
     var pp = match parse_path(tokens, p) { Parsed<Path> as x => x; error as e => return e }
-    var type_args: []@TypeExpr() = teko::list::empty()
+    var type_args: []@TypeExpr() = []
     var after = pp.next
     if is_kind_at(tokens, after, lexer::TokenKind::Lt) {
         match parse_type_args(tokens, after) {
@@ -315,7 +315,7 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         return parse_macro_call(tokens, pos)
     }
     if k == lexer::TokenKind::Dot && is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
-        return parse_struct_lit(tokens, pos + 1, dot_sentinel_path(), teko::list::empty())
+        return parse_struct_lit(tokens, pos + 1, dot_sentinel_path(), [])
     }
     if k == lexer::TokenKind::LParen && lambda_ahead(tokens, pos) {
         return parse_lambda(tokens, pos)
@@ -388,14 +388,14 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
         var pp = match parse_path(tokens, pos) { Parsed<Path> as x => x; error as e => return e }
         if is_kind_at(tokens, pp.next, lexer::TokenKind::LParen) {
             var ca = match parse_call_args(tokens, pp.next) { ParsedCallArgs as x => x; error as e => return e }
-            return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = ca.args; arg_names = ca.arg_names; owner_type_args = teko::list::empty(); callee_type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
+            return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = ca.args; arg_names = ca.arg_names; owner_type_args = []; callee_type_args = [] }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
         }
         if is_kind_at(tokens, pp.next, lexer::TokenKind::Lt) {
             match parse_type_args(tokens, pp.next) {
                 ParsedTypeArgs as ta => {
                     if ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LParen) {
                         var gca = match parse_call_args(tokens, ta.next) { ParsedCallArgs as x => x; error as e => return e }
-                        return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = gca.args; arg_names = gca.arg_names; owner_type_args = teko::list::empty(); callee_type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }; next = gca.next }
+                        return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = gca.args; arg_names = gca.arg_names; owner_type_args = []; callee_type_args = ta.args }; line = tokens[pos].line; col = tokens[pos].col }; next = gca.next }
                     }
                     if allow_struct && ta.pending_gt == 0 && is_kind_at(tokens, ta.next, lexer::TokenKind::LBrace) {
                         return parse_struct_lit(tokens, ta.next, pp.node, ta.args)
@@ -408,7 +408,7 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<Expr
             }
         }
         if allow_struct && is_kind_at(tokens, pp.next, lexer::TokenKind::LBrace) {
-            return parse_struct_lit(tokens, pp.next, pp.node, teko::list::empty())
+            return parse_struct_lit(tokens, pp.next, pp.node, [])
         }
         if pp.node.segments.len == 1 {
             return Parsed<Expr> { node = Expr { kind = Var { name = pp.node.segments[0].name }; line = tokens[pos].line; col = tokens[pos].col }; next = pp.next }
@@ -469,7 +469,7 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parsed<E
         }
         if is_kind_at(tokens, p + 2, lexer::TokenKind::LParen) {
             var ca = match parse_call_args(tokens, p + 2) { ParsedCallArgs as x => x; error as e => return e }
-            node = Expr { kind = MethodCall { receiver = node; method = name; args = ca.args; arg_names = ca.arg_names; type_args = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }
+            node = Expr { kind = MethodCall { receiver = node; method = name; args = ca.args; arg_names = ca.arg_names; type_args = [] }; line = tokens[pos].line; col = tokens[pos].col }
             p = ca.next
         } else {
             node = Expr { kind = FieldAccess { receiver = node; field = name }; line = tokens[pos].line; col = tokens[pos].col }
