@@ -3545,6 +3545,63 @@ fn variant_member_named(member: @Type(), case_name: str): bool {
     }
 }
 
+fn variant_case_key(member: @Type()): str | error {
+    match member {
+        checker::Named as n => checker::named_case_name(n.name)
+        checker::Error => error_struct_name()
+        checker::Variant as v => variant_case_key_list(v.members)
+        _ => {
+            var spelling = checker::builtin_case_name(member)
+            if spelling == "" { return error { message = "native backend N1: grouped bind match pattern over a variant member with no case spelling (internal)" } }
+            spelling
+        }
+    }
+}
+
+fn variant_case_key_list(members: []@Type()): str | error {
+    var out = "u"
+    var i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        var k = match variant_case_key(members[i]) { str as s => s; error as e => return e }
+        out = teko::str::concat(out, teko::str::concat("_", k))
+        i++
+    }
+    out
+}
+
+fn group_option_key(p: @Pattern()): str | error {
+    match p {
+        parser::BindPattern as bp => if bp.is_slice { error { message = "native backend N1: a grouped bind option cannot be a slice pattern (internal)" } } else { bind_pattern_case_name(bp) }
+        parser::GroupBindPattern as gp => group_bind_key(gp)
+        _ => error { message = "native backend N1: a grouped bind option must be a bare case name (internal)" }
+    }
+}
+
+fn group_bind_key(gp: parser::GroupBindPattern): str | error {
+    var out = "u"
+    var i: u64 = 0
+    loop {
+        if i >= gp.options.len { break }
+        var k = match group_option_key(gp.options[i]) { str as s => s; error as e => return e }
+        out = teko::str::concat(out, teko::str::concat("_", k))
+        i++
+    }
+    out
+}
+
+fn find_variant_group_member(members: []@Type(), gp: parser::GroupBindPattern): VariantMember | error {
+    var want = match group_bind_key(gp) { str as s => s; error as e => return e }
+    var i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        var mk = match variant_case_key(members[i]) { str as s => s; error => "" }
+        if mk == want { return VariantMember { index = i to u32; ty = members[i] } }
+        i++
+    }
+    error { message = "native backend N1: grouped bind (`(A | B) as v`) match pattern does not match a nested union member of the subject (internal)" }
+}
+
 fn variant_member_index_of(members: []@Type(), value_ty: @Type(), variants: []LVariantDef): u32 | error {
     var i: u64 = 0
     loop {
@@ -3928,7 +3985,7 @@ fn lower_pattern_test(ctx: LowerCtx, subj: MatchSubj, pat: @Pattern(), line: u32
         parser::FieldPattern as fp => lower_field_pattern_test(ctx, subj, fp, line, col)
         parser::RangePattern => error { message = "native backend N1: range match pattern not yet lowered (N2)" }
         parser::AltPattern => error { message = "native backend N1: alternation (`|`) match pattern not yet lowered (N2)" }
-        parser::GroupBindPattern => error { message = "native backend N1: grouped bind (`(A | B) as v`) match pattern not yet lowered (N2)" }
+        parser::GroupBindPattern as gp => lower_group_bind_pattern_test(ctx, subj, gp, line, col)
         parser::NullPattern => lower_null_pattern_test(ctx, subj, line, col)
         parser::MacroPattern => error { message = "internal: an unexpanded @Type() macro reached native lowering — it should be expanded by the Family-A pre-pass" }
     }
@@ -4037,10 +4094,21 @@ fn lower_field_pattern_test(ctx: LowerCtx, subj: MatchSubj, fp: parser::FieldPat
     }
 }
 
+fn lower_group_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, gp: parser::GroupBindPattern, line: u32, col: u32): PatternTest | error {
+    match subj.ty {
+        checker::Variant as v => {
+            var vm = match find_variant_group_member(v.members, gp) { VariantMember as x => x; error as err => return err }
+            lower_variant_tag_eq_test(ctx, subj, vm.index to i64, line, col)
+        }
+        _ => error { message = "native backend N1: grouped bind match pattern over a non-variant subject not yet lowered (N2)" }
+    }
+}
+
 fn lower_pattern_binds(ctx: LowerCtx, subj: MatchSubj, pat: @Pattern()): LowerCtx | error {
     match pat {
         parser::BindPattern as bp => lower_bind_pattern_binds(ctx, subj, bp)
         parser::FieldPattern as fp => lower_field_pattern_binds(ctx, subj, fp)
+        parser::GroupBindPattern as gp => lower_group_bind_pattern_binds(ctx, subj, gp)
         _ => ctx
     }
 }
@@ -4090,6 +4158,16 @@ fn lower_field_pattern_binds(ctx: LowerCtx, subj: MatchSubj, fp: parser::FieldPa
     match subj.ty {
         checker::Variant as v => lower_variant_field_binds(ctx, subj, v.members, fp)
         _ => error { message = "native backend N1: field match pattern over a non-variant subject not yet lowered (N2)" }
+    }
+}
+
+fn lower_group_bind_pattern_binds(ctx: LowerCtx, subj: MatchSubj, gp: parser::GroupBindPattern): LowerCtx | error {
+    match subj.ty {
+        checker::Variant as v => {
+            var vm = match find_variant_group_member(v.members, gp) { VariantMember as x => x; error as err => return err }
+            bind_case_payload(ctx, subj.vreg, vm.ty, gp.binding)
+        }
+        _ => error { message = "native backend N1: grouped bind match pattern over a non-variant subject not yet lowered (N2)" }
     }
 }
 
