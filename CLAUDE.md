@@ -188,8 +188,10 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   - **LIBERAÇÃO CONDICIONAL — full `teko build .` (com testes) ao bater o marco de memória (dono
     2026-08-19):** enquanto o **build seco** NÃO picar **≤ 1,5 GB**, mantém-se o regime acima (só
     compilação/build seco, subshell `ulimit -v 4194304`, NUNCA `teko test .`). QUANDO um build seco
-    medir **pico ≤ 1,5 GB** (1572864 KB) — o marco que a campanha de redução de memória (RM-C /
-    Eixo A/C) persegue —, as **execuções full `teko build .` que carregam testes ficam LIBERADAS** e a
+    medir **pico ≤ 1,5 GB** (1572864 KB) — este ≤ 1,5 GB é APENAS o gate que LIBERA `teko test .`
+    local aos agentes, **NÃO** o alvo da campanha; o **alvo/marco REAL da campanha de redução de memória
+    (RM-C / Eixo A/C) é `< 1 GB` de RSS no build seco** (dono 2026-08-20) —, as **execuções full `teko
+    build .` que carregam testes ficam LIBERADAS** e a
     proibição de `teko test .` cai. O gatilho é o marco MEDIDO no build seco, não uma data. Agente que
     for validar mede o pico do build seco e reporta ao cruzar o marco.
 - **GEN0 SAI DO SEED, NÃO DO `fetch_teko.sh` (dono 2026-08-20).** Todo agente que precise buildar linka o
