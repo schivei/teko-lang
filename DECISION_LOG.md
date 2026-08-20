@@ -646,3 +646,15 @@ Reviewer (a31e3bcf) achou 2 defeitos latentes reais no F0c (drenado `e9cf7b48`),
 - **Autorização de paralelizar (owner):** com o teto em 4 GiB, PODE paralelizar o que for independente — **desde que (1) não esqueça o DRENO e (2) mantenha LINEARIDADE no histórico de commits** (cherry-pick, nunca merge; drenar em ordem limpa). Inviolabilidade do guard mantida: estouro = causa-raiz, nunca levantar o teto.
 - **Exceção preservada:** o agente da campanha de memória combinada (io/fs+arena+expurgo) segue com `ulimit -v` ~10 GB (10485760) como folga de dev temporária; meta gen2 < 6 GB rumo a ≤1,5 GB.
 - **Aplicado em:** CLAUDE.md (lei do guard, liberação condicional, exceção), `.crumbs/TEMPLATE.md` (Safety). Dispatches passam a usar `ulimit -v 4194304`.
+
+### D63 · Wrap-refcount table — redesenho de raiz 1+2+5 (owner 2026-08-20, SUPERSEDE deferral do D61)
+- **Ruling do dono:** o Finding 5 do review F0c (lock global + busca O(n) → O(n²)) **NÃO é "aceitável agora"** — precisa **causa-raiz, para QUAISQUER casos**. Supersede o D61 (que deferia Finding 1 e aceitava Finding 5).
+- **Escopo unificado:** o fix de raiz é uma tabela nova, e a MESMA estrutura toca Findings **1** (`_Thread_local` → não cross-thread-shared), **2** (saturação silenciosa 4096), **5** (O(n²)). Resolver os três JUNTOS (patch isolado = workaround). Requisitos do redesenho:
+  - **O(1):** hash aberto keyed por `addr` (não array linear `ar_wrap_find`).
+  - **Cross-thread-SHARED:** tabela+contadores saem do control `_Thread_local` (`teko_rt.c:2320`) para um root **process-global**; **CAS real** (`atomic_cas_u32`) no inc/dec (lock-free), lock só em mudança estrutural (insert/remove-addr).
+  - **Saturação de raiz:** crescer por **chunk-chain** (reusa `chunk_node_link` do F0d) — NO-PUSHES, sem array dinâmico — ou fail-loud `arquivo:linha:coluna` se limitado por design.
+  - **Finding 3** (contrato obj-ptr==region-ptr) resolvido no mesmo desenho.
+  - **Pure-Teko:** sem novo `teko_rt.c`; o `_Thread_local` é o obstáculo a desenhar em volta.
+- **Finding 4** (guard de aridade morto em `emit_retain`/`emit_release`): cleanup trivial SEPARADO (codegen), segue enfileirado pós-drain-F0d.
+- **Roteamento:** teko-architect desenha o crumb (design-ahead — `chunk_node_link` do F0d chega junto). Implementação sequencia após F0d + o cleanup do Finding 4 drenarem (colisão em arena.tks). Mecanismo INERTE (sem `wrapped` até FASE-2) → gate `[dry]` byte-idêntico, sem reseed.
+- **Possível fork p/ o arquiteto:** o placement process-global (sair do `_Thread_local`) pode tocar o modelo de arena — se exigir decisão do dono, o arquiteto enuncia o fork; senão resolve law-first.
