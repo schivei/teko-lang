@@ -77,48 +77,63 @@ fn is_service_lifetime_at(tokens: []lexer::Token, pos: u64): bool {
     var w = tokens[pos].text
     w == "singleton" || w == "scoped" || w == "transient"
 }
-fn parse_constraint_atom(tokens: []lexer::Token, pos: u64): Parsed<@ConstraintExpr()> | error {
+fn is_bare_constraint_name_at(tokens: []lexer::Token, pos: u64): bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Ident) &&
+    !is_kind_at(tokens, pos + 1, lexer::TokenKind::Lt) &&
+    !is_kind_at(tokens, pos + 1, lexer::TokenKind::ColonColon)
+}
+fn can_start_constraint_type_at(tokens: []lexer::Token, pos: u64): bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Ident) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::LBracket) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::LParen)
+}
+fn parse_constraint_atom(tokens: []lexer::Token, pos: u64): ParsedConstraintTerm | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::Class) {
-        return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "class"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1 }
+        return ParsedConstraintTerm { node = ConstraintForm { form = "class"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1; pending_gt = 0 }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Struct) {
-        return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "struct"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1 }
+        return ParsedConstraintTerm { node = ConstraintForm { form = "struct"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1; pending_gt = 0 }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Service) {
         if is_service_lifetime_at(tokens, pos + 1) {
             var lt = match parse_service_lifetime(tokens, pos + 1) { Parsed<ServiceLifetime> as x => x; error as e => return e }
-            return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "service"; has_lifetime = true; lifetime = lt.node }; next = lt.next }
+            return ParsedConstraintTerm { node = ConstraintForm { form = "service"; has_lifetime = true; lifetime = lt.node }; next = lt.next; pending_gt = 0 }
         }
-        return Parsed<@ConstraintExpr()> { node = ConstraintForm { form = "service"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1 }
+        return ParsedConstraintTerm { node = ConstraintForm { form = "service"; has_lifetime = false; lifetime = ServiceLifetime::Singleton }; next = pos + 1; pending_gt = 0 }
     }
-    if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) {
-        return err_at(tokens, pos, "expected a constraint term (a form word `class`/`service`/`struct`, an interface/type name, or `notnull`) in a type-parameter constraint")
+    if is_bare_constraint_name_at(tokens, pos) {
+        var name = tokens[pos].text
+        if name == "notnull" { return ParsedConstraintTerm { node = ConstraintNotNull { }; next = pos + 1; pending_gt = 0 } }
+        return ParsedConstraintTerm { node = ConstraintAtom { name = name }; next = pos + 1; pending_gt = 0 }
     }
-    var name = tokens[pos].text
-    var p = pos + 1
-    if name == "notnull" { return Parsed<@ConstraintExpr()> { node = ConstraintNotNull { }; next = p } }
-    Parsed<@ConstraintExpr()> { node = ConstraintAtom { name = name }; next = p }
+    if !can_start_constraint_type_at(tokens, pos) {
+        return err_at(tokens, pos, "expected a constraint term (a form word, a service lifetime, an interface/type/slice/`error`, a disjunction, or `notnull`) in a type-parameter constraint")
+    }
+    var t = match parse_type_primary(tokens, pos) { ParsedType as x => x; error as e => return e }
+    ParsedConstraintTerm { node = ConstraintType { ty = t.node }; next = t.next; pending_gt = t.pending_gt }
 }
 fn is_notnull_constraint(c: @ConstraintExpr()): bool {
     match c { parser::ConstraintNotNull => true; _ => false }
 }
-fn parse_constraint_and(tokens: []lexer::Token, pos: u64): Parsed<@ConstraintExpr()> | error {
-    var left = match parse_constraint_atom(tokens, pos) { Parsed<@ConstraintExpr()> as x => x; error as e => return e }
+fn parse_constraint_and(tokens: []lexer::Token, pos: u64): ParsedConstraintTerm | error {
+    var left = match parse_constraint_atom(tokens, pos) { ParsedConstraintTerm as x => x; error as e => return e }
     loop {
+        if left.pending_gt > 0 { break }
         if !is_kind_at(tokens, left.next, lexer::TokenKind::Amp) { break }
-        var right = match parse_constraint_atom(tokens, left.next + 1) { Parsed<@ConstraintExpr()> as x => x; error as e => return e }
-        left = Parsed<@ConstraintExpr()> { node = ConstraintAnd { left = left.node; right = right.node }; next = right.next }
+        var right = match parse_constraint_atom(tokens, left.next + 1) { ParsedConstraintTerm as x => x; error as e => return e }
+        left = ParsedConstraintTerm { node = ConstraintAnd { left = left.node; right = right.node }; next = right.next; pending_gt = right.pending_gt }
     }
     left
 }
-fn parse_constraint_expr(tokens: []lexer::Token, pos: u64): Parsed<@ConstraintExpr()> | error {
-    var left = match parse_constraint_and(tokens, pos) { Parsed<@ConstraintExpr()> as x => x; error as e => return e }
+fn parse_constraint_expr(tokens: []lexer::Token, pos: u64): ParsedConstraintTerm | error {
+    var left = match parse_constraint_and(tokens, pos) { ParsedConstraintTerm as x => x; error as e => return e }
     loop {
+        if left.pending_gt > 0 { break }
         if !is_kind_at(tokens, left.next, lexer::TokenKind::Pipe) { break }
         if is_notnull_constraint(left.node) { return err_at(tokens, pos, "`notnull` may not be a `|` alternative — it is a non-null modifier, use it with `&` (e.g. `class & notnull`) (§9.2b)") }
-        var right = match parse_constraint_and(tokens, left.next + 1) { Parsed<@ConstraintExpr()> as x => x; error as e => return e }
+        var right = match parse_constraint_and(tokens, left.next + 1) { ParsedConstraintTerm as x => x; error as e => return e }
         if is_notnull_constraint(right.node) { return err_at(tokens, left.next + 1, "`notnull` may not be a `|` alternative — it is a non-null modifier, use it with `&` (e.g. `class & notnull`) (§9.2b)") }
-        left = Parsed<@ConstraintExpr()> { node = ConstraintOr { left = left.node; right = right.node }; next = right.next }
+        left = ParsedConstraintTerm { node = ConstraintOr { left = left.node; right = right.node }; next = right.next; pending_gt = right.pending_gt }
     }
     left
 }
@@ -136,13 +151,16 @@ fn parse_type_params(tokens: []lexer::Token, pos: u64): ParsedTypeParams | error
         }
         names = teko::list::push(names, tokens[p].text)
         p = p + 1
+        var closed_by_pending = false
         if is_kind_at(tokens, p, lexer::TokenKind::Colon) {
-            var c = match parse_constraint_expr(tokens, p + 1) { Parsed<@ConstraintExpr()> as x => x; error as e => return e }
+            var c = match parse_constraint_expr(tokens, p + 1) { ParsedConstraintTerm as x => x; error as e => return e }
             constraints = teko::list::push(constraints, c.node)
             p = c.next
+            closed_by_pending = c.pending_gt > 0
         } else {
             constraints = teko::list::push(constraints, NoConstraint { })
         }
+        if closed_by_pending { break }
         if is_kind_at(tokens, p, lexer::TokenKind::Comma) { p = p + 1 }
         else if is_kind_at(tokens, p, lexer::TokenKind::Gt) { p = p + 1; break }
         else { return err_at(tokens, p, "expected ',' or '>' in a type-parameter list") }
