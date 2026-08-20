@@ -140,7 +140,10 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   exceção acima permitiria. Motivo: (1) é **relocação pura** de código já-funcionando (behavior-preserving,
   não é código novo); (2) **sai do escopo de validação do compilador** — vira superfície exportada, e quem
   consome o pacote valida o próprio uso. O projeto-compilador não testa o que não usa. Dispatch da Fase A =
-  move mecânico, zero `.tkt`/`.tkr`.
+  move mecânico, **zero teste AFIRMATIVO** (`.tkt`/`.tkr` que asseguram saída correta). **Exceção estreita
+  (dono 2026-08-20):** UMA ou OUTRA **check de FALHA** (assegura que algo *falhe* — reject /
+  `EXPECT_COMPILE_FAIL` / guard de pânico) pode ficar, pois o path de falha é o que o self-build NUNCA
+  dirige (bate com o carve-out "casos de erro/diagnóstico"). Afirmativo NÃO; rejeição rara SIM.
 - **ENFORCEMENT desta lei (dono 2026-08-19, AVISO DURO).** Um agente já a furou (criou teste pro que o
   self-build exercita). **Reincidência → o dono PROÍBE testes (unitários E regressivos) de vez.** Duas
   camadas obrigatórias no meu processo: (1) **todo dispatch de implementador reproduz esta lei ALTO** —
