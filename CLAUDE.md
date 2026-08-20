@@ -180,14 +180,14 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
 
 ## Leis de desenvolvimento (resumo — detalhe em docs/design/mudancas-superficie-0.3.1.md §11.2)
 - **TESTES SÓ NO CI.** `teko test .` local dá OOM (ninguém roda). Validação local =
-  **compilação** (`--no-verify --release`, `TEKO_BACKEND=c`, `TEKO_CC=clang`, `ulimit -v 6815744`) +
+  **compilação** (`--no-verify --release`, `TEKO_BACKEND=c`, `TEKO_CC=clang`, `ulimit -v 4194304`) +
   <!-- guard subiu 6→6,5 GiB (dono 2026-08-18): o codegen do #os empurrou o virtual; residente
        segue ~flat. A construção da AST é suspeita do pico — a otimizar. -->
   <!-- linha de validação original abaixo mantém a métrica -->
   fixpoint (tc2==tc3) + cross-check offline.
   - **LIBERAÇÃO CONDICIONAL — full `teko build .` (com testes) ao bater o marco de memória (dono
     2026-08-19):** enquanto o **build seco** NÃO picar **≤ 1,5 GB**, mantém-se o regime acima (só
-    compilação/build seco, subshell `ulimit -v 6815744`, NUNCA `teko test .`). QUANDO um build seco
+    compilação/build seco, subshell `ulimit -v 4194304`, NUNCA `teko test .`). QUANDO um build seco
     medir **pico ≤ 1,5 GB** (1572864 KB) — o marco que a campanha de redução de memória (RM-C /
     Eixo A/C) persegue —, as **execuções full `teko build .` que carregam testes ficam LIBERADAS** e a
     proibição de `teko test .` cai. O gatilho é o marco MEDIDO no build seco, não uma data. Agente que
@@ -200,18 +200,20 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   seguem pela **rota C** — a buildabilidade do native NÃO é pré-requisito da reseed (isto SUPERSEDE a
   ressalva do pin SM-P1 de "não reseedar enquanto o gen2 native não builda": o native está deferido, não
   na fila da reseed). Eu (coordenador) não puxo native pra frente — foi o erro de 2026-08-19, corrigido.
-- **GUARD DE MEMÓRIA `ulimit -v 6815744` (6,5 GiB) = INVIOLÁVEL (dono 2026-08-18).** Se um build
-  **estoura** o guard, o agente **encontra a causa-raiz do consumo e corrige** — NUNCA levanta o
-  teto. Levantar o `ulimit` mascara exatamente o problema que o expurgo existe pra resolver (o
-  `tk_slice_push_r`/inflação de arrays dinâmicos = 93% do pico), e passar de ~15 GiB de RAM física
-  da máquina causa OOM/thrash (100% de alocação). Estouro = diagnóstico + correção da inflação,
-  não `ulimit` maior. (Um agente subiu 6,5→16 GiB e travou a máquina em 100%; foi parado.)
+- **GUARD DE MEMÓRIA `ulimit -v 4194304` (4 GiB) = INVIOLÁVEL (dono 2026-08-20, baixado de 6,5→4 GiB).**
+  Os builds de ensino/aditivos agora picam ~3,3 GB → o teto cai pra 4 GiB: (a) pega regressão de memória
+  (estouro acima de 4 GiB = sinal), (b) cabe **mais build simultâneo** nos ~15 GiB físicos (4 GiB×3 vs
+  6,5 GiB×2) → habilita mais paralelismo. Se um build **estoura** o guard, o agente **encontra a causa-raiz
+  do consumo e corrige** — NUNCA levanta o teto. Levantar o `ulimit` mascara exatamente o problema que o
+  expurgo existe pra resolver (o `tk_slice_push_r`/inflação de arrays dinâmicos = 93% do pico), e saturar
+  os ~15 GiB físicos causa OOM/thrash. Estouro = diagnóstico + correção da inflação, não `ulimit` maior.
+  (Um agente subiu o teto e travou a máquina em 100%; foi parado.)
   - **EXCEÇÃO ÚNICA — agente da campanha de memória combinada (io/fs + arena + expurgo) roda com 10 GB
     (dono 2026-08-19):** enquanto o expurgo/streaming está EM CURSO, a build intermediária pode picar
-    acima de 6,5 GB antes da reclamação fechar; SÓ esse agente recebe `ulimit -v` ~10 GB (10485760) como
+    acima de 4 GB antes da reclamação fechar; SÓ esse agente recebe `ulimit -v` ~10 GB (10485760) como
     exceção temporária de desenvolvimento. **MAS o critério de aceitação é DURO: a conversão pra gen2 tem
     que usar < 6 GB** — senão não faz sentido. O 10 GB é folga de dev, não a meta; a meta é gen2 < 6 GB
-    (rumo a ≤1,5 GB). Fora desse agente-exceção, o guard 6,5 GiB segue inviolável. A máquina tem ~15 GiB
+    (rumo a ≤1,5 GB). Fora desse agente-exceção, o guard 4 GiB segue inviolável. A máquina tem ~15 GiB
     física — 10 GB de um processo ainda cabe; NÃO passar disso.
 - **TAREFA LONGA → BRANCH REAL + PUSH FREQUENTE (dono 2026-08-19).** Trabalho longo (a campanha io/fs+
   arena+expurgo é lenta até pra agente mecânico) tem que **commitar e PUSHAR regularmente** (a cada crumb/

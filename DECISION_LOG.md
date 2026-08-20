@@ -639,3 +639,10 @@ Reviewer (a31e3bcf) achou 2 defeitos latentes reais no F0c (drenado `e9cf7b48`),
 - **Finding 4 — guard de aridade morto em `emit_retain`/`emit_release`:** FIX (lei "não barrar o que não existe"; a assinatura do checker já garante aridade 1). Remover p/ casar com os irmãos (`emit_load_u64` etc.). **Enfileirado com o Finding 2** (mesmo lote, colide com F0d em `codegen.tks`).
 - **Findings 3 e 5** (region_drop fora do lock / obj-ptr==region-ptr; O(n²) do lock global): NOTAS FASE-2 (aceitos por-design agora; honrar o contrato "ptr é região" na maquinaria wrapped futura; O(n²) é gargalo do GATE-1 class→wrapped).
 - **Lote de fix enfileirado (F0c-fix):** Findings 2+4, um crumb-fix pós-drain-F0d (evita colisão em arena.tks/codegen.tks). `[dry]` byte-idêntico-preservante (inerte), sem reseed (folds R1).
+
+### D62 · Teto de memória 6,5 GiB → 4 GiB (owner 2026-08-20) — habilita mais paralelismo
+- **Ruling:** como os builds de ensino/aditivos agora picam ~3,3 GB (place-fix 3277 MB, F0c gen2 3286/gen3 3251 MB), o guard `ulimit -v` **baixa de 6815744 (6,5 GiB) para 4194304 (4 GiB)**.
+- **Ganho duplo:** (a) teto mais apertado pega **regressão de memória** (estouro acima de 4 GiB = sinal); (b) **cabe mais build simultâneo** nos ~15 GiB físicos (4 GiB×3 ≈ vs 6,5 GiB×2) → **habilita mais paralelismo**.
+- **Autorização de paralelizar (owner):** com o teto em 4 GiB, PODE paralelizar o que for independente — **desde que (1) não esqueça o DRENO e (2) mantenha LINEARIDADE no histórico de commits** (cherry-pick, nunca merge; drenar em ordem limpa). Inviolabilidade do guard mantida: estouro = causa-raiz, nunca levantar o teto.
+- **Exceção preservada:** o agente da campanha de memória combinada (io/fs+arena+expurgo) segue com `ulimit -v` ~10 GB (10485760) como folga de dev temporária; meta gen2 < 6 GB rumo a ≤1,5 GB.
+- **Aplicado em:** CLAUDE.md (lei do guard, liberação condicional, exceção), `.crumbs/TEMPLATE.md` (Safety). Dispatches passam a usar `ulimit -v 4194304`.
