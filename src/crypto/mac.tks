@@ -1,20 +1,21 @@
 fn mac_bytes_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
+    var n = to - from
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
 }
 
 fn xor_with_byte(buf: []byte, pad: u32): []byte {
-    var out: []byte = []
+    var out: [buf.len]byte = []
     var i: u64 = 0
     loop {
         if i >= buf.len { break }
-        out = teko::list::push(out, ((buf[i] to u32) ^ pad) to byte)
+        out[i] = ((buf[i] to u32) ^ pad) to byte
         i++
     }
     out
@@ -22,10 +23,12 @@ fn xor_with_byte(buf: []byte, pad: u32): []byte {
 
 fn hmac_key0(key: []byte, block_size: u64, hash: func<[]byte, []byte>): []byte {
     var k = if key.len > block_size { hash(key) } else { key }
-    var out = mac_bytes_slice(k, 0, k.len)
+    var out: [block_size]byte = []
+    var i: u64 = 0
     loop {
-        if out.len >= block_size { break }
-        out = teko::list::push(out, 0 to byte)
+        if i >= k.len { break }
+        out[i] = k[i]
+        i++
     }
     out
 }
@@ -235,13 +238,13 @@ fn le_u32_at_u64(b: []byte, off: u64): u64 {
     (b[off] to u64) | ((b[off + 1] to u64) << 8) | ((b[off + 2] to u64) << 16) | ((b[off + 3] to u64) << 24)
 }
 
-fn push_le_u32_u64(buf: []byte, x: u64): []byte {
-    var b = buf
-    b = teko::list::push(b, (x & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
-    b
+fn mac_le_u32_bytes(x: u64): []byte {
+    [
+        (x & 0xFF) to byte,
+        ((x >> 8) & 0xFF) to byte,
+        ((x >> 16) & 0xFF) to byte,
+        ((x >> 24) & 0xFF) to byte,
+    ]
 }
 
 fn poly1305_ctx(key: []byte): Poly1305Ctx {
@@ -250,22 +253,14 @@ fn poly1305_ctx(key: []byte): Poly1305Ctx {
     var r2 = (le_u32_at_u64(key, 6) >> 4) & 0x3ffc0ff
     var r3 = (le_u32_at_u64(key, 9) >> 6) & 0x3f03fff
     var r4 = (le_u32_at_u64(key, 12) >> 8) & 0x00fffff
-    var r: []u64 = []
-    r = teko::list::push(r, r0)
-    r = teko::list::push(r, r1)
-    r = teko::list::push(r, r2)
-    r = teko::list::push(r, r3)
-    r = teko::list::push(r, r4)
-    var s: []u64 = []
-    s = teko::list::push(s, r1 * 5)
-    s = teko::list::push(s, r2 * 5)
-    s = teko::list::push(s, r3 * 5)
-    s = teko::list::push(s, r4 * 5)
-    var pad: []u64 = []
-    pad = teko::list::push(pad, le_u32_at_u64(key, 16))
-    pad = teko::list::push(pad, le_u32_at_u64(key, 20))
-    pad = teko::list::push(pad, le_u32_at_u64(key, 24))
-    pad = teko::list::push(pad, le_u32_at_u64(key, 28))
+    var r: []u64 = [r0, r1, r2, r3, r4]
+    var s: []u64 = [r1 * 5, r2 * 5, r3 * 5, r4 * 5]
+    var pad: []u64 = [
+        le_u32_at_u64(key, 16),
+        le_u32_at_u64(key, 20),
+        le_u32_at_u64(key, 24),
+        le_u32_at_u64(key, 28),
+    ]
     Poly1305Ctx { r = r; s = s; pad = pad }
 }
 
@@ -307,29 +302,20 @@ fn poly1305_block(h: []u64, block: []byte, hibit: u64, ctx: Poly1305Ctx): []u64 
     c = n0 >> 26
     n0 = n0 & 0x3ffffff
     n1 = n1 + c
-    var out: []u64 = []
-    out = teko::list::push(out, n0)
-    out = teko::list::push(out, n1)
-    out = teko::list::push(out, n2)
-    out = teko::list::push(out, n3)
-    out = teko::list::push(out, n4)
-    out
+    [n0, n1, n2, n3, n4]
 }
 
 fn poly1305_pad_final(msg: []byte, off: u64): []byte {
-    var buf: []byte = []
-    var i = off
+    var remaining = msg.len - off
+    var out: [16]byte = []
+    var i: u64 = 0
     loop {
-        if i >= msg.len { break }
-        buf = teko::list::push(buf, msg[i])
+        if i >= remaining { break }
+        out[i] = msg[off + i]
         i++
     }
-    buf = teko::list::push(buf, 0x01 to byte)
-    loop {
-        if buf.len >= 16 { break }
-        buf = teko::list::push(buf, 0 to byte)
-    }
-    buf
+    out[remaining] = 0x01 to byte
+    out
 }
 
 fn poly1305_emit(h: []u64, ctx: Poly1305Ctx): []byte {
@@ -387,11 +373,18 @@ fn poly1305_emit(h: []u64, ctx: Poly1305Ctx): []byte {
     var o2 = f & 0xffffffff
     f = t3 + ctx.pad[3] + (f >> 32)
     var o3 = f & 0xffffffff
-    var out: []byte = []
-    out = push_le_u32_u64(out, o0)
-    out = push_le_u32_u64(out, o1)
-    out = push_le_u32_u64(out, o2)
-    out = push_le_u32_u64(out, o3)
+    var words: []u64 = [o0, o1, o2, o3]
+    var out: [16]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= 4 { break }
+        var lw = mac_le_u32_bytes(words[i])
+        out[i * 4] = lw[0]
+        out[i * 4 + 1] = lw[1]
+        out[i * 4 + 2] = lw[2]
+        out[i * 4 + 3] = lw[3]
+        i++
+    }
     out
 }
 
@@ -403,12 +396,7 @@ fn poly1305_emit(h: []u64, ctx: Poly1305Ctx): []byte {
 exp fn poly1305(key: []byte, msg: []byte): []byte | CryptoError {
     if key.len != 32 { return crypto_error("poly1305: key must be exactly 32 bytes") }
     var ctx = poly1305_ctx(key)
-    var h: []u64 = []
-    h = teko::list::push(h, 0)
-    h = teko::list::push(h, 0)
-    h = teko::list::push(h, 0)
-    h = teko::list::push(h, 0)
-    h = teko::list::push(h, 0)
+    var h: []u64 = [0, 0, 0, 0, 0]
     var off: u64 = 0
     loop {
         if msg.len - off < 16 { break }
@@ -444,22 +432,16 @@ type CmacSubkeys = struct {
 }
 
 fn zero_block16(): []byte {
-    var out: []byte = []
-    var i: u64 = 0
-    loop {
-        if i >= 16 { break }
-        out = teko::list::push(out, 0 to byte)
-        i++
-    }
+    var out: [16]byte = []
     out
 }
 
 fn xor_block(a: []byte, b: []byte): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
-        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        out[i] = ((a[i] to u32) ^ (b[i] to u32)) to byte
         i++
     }
     out
@@ -467,7 +449,7 @@ fn xor_block(a: []byte, b: []byte): []byte {
 
 fn cmac_double(b: []byte): []byte {
     var msb = (b[0] to u32) >> 7
-    var out: []byte = []
+    var out: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
@@ -475,7 +457,7 @@ fn cmac_double(b: []byte): []byte {
         var nxt = if i + 1 < 16 { (b[i + 1] to u32) >> 7 } else { 0 to u32 }
         var v = (cur | nxt) & 0xFF
         if i == 15 { v = v ^ (msb * 0x87) }
-        out = teko::list::push(out, v to byte)
+        out[i] = v to byte
         i++
     }
     out
@@ -497,12 +479,14 @@ fn cmac_prefix_block_count(msg: []byte): u64 {
 }
 
 fn cmac_pad10(chunk: []byte): []byte {
-    var out = mac_bytes_slice(chunk, 0, chunk.len)
-    out = teko::list::push(out, 0x80 to byte)
+    var out: [16]byte = []
+    var i: u64 = 0
     loop {
-        if out.len >= 16 { break }
-        out = teko::list::push(out, 0 to byte)
+        if i >= chunk.len { break }
+        out[i] = chunk[i]
+        i++
     }
+    out[chunk.len] = 0x80 to byte
     out
 }
 
@@ -561,15 +545,15 @@ fn mac_be_u64_at(b: []byte, off: u64): u64 {
     acc
 }
 
-fn push_be_u64_mac(buf: []byte, x: u64): []byte {
-    var b = buf
+fn mac_be_u64_bytes(x: u64): []byte {
+    var out: [8]byte = []
     var i: u64 = 0
     loop {
         if i >= 8 { break }
-        b = teko::list::push(b, ((x >> ((7 - i) * 8)) & 0xFF) to byte)
+        out[i] = ((x >> ((7 - i) * 8)) & 0xFF) to byte
         i++
     }
-    b
+    out
 }
 
 fn gf_mul(x: GfBlock, y: GfBlock): GfBlock {
@@ -597,12 +581,11 @@ fn gf_mul(x: GfBlock, y: GfBlock): GfBlock {
 }
 
 fn ghash_block_at(data: []byte, off: u64): GfBlock {
-    var padded: []byte = []
+    var padded: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
-        var v = if off + i < data.len { data[off + i] } else { 0 to byte }
-        padded = teko::list::push(padded, v)
+        if off + i < data.len { padded[i] = data[off + i] }
         i++
     }
     GfBlock { hi = mac_be_u64_at(padded, 0); lo = mac_be_u64_at(padded, 8) }
@@ -625,26 +608,46 @@ exp fn ghash(h: []byte, data: []byte): []byte | CryptoError {
         y = gf_mul(GfBlock { hi = y.hi ^ blk.hi; lo = y.lo ^ blk.lo }, hb)
         off = off + 16
     }
-    push_be_u64_mac(push_be_u64_mac([], y.hi), y.lo)
+    [..mac_be_u64_bytes(y.hi), ..mac_be_u64_bytes(y.lo)]
+}
+
+fn gmac_round_up16(n: u64): u64 {
+    var r = n
+    loop {
+        if r % 16 == 0 { break }
+        r++
+    }
+    r
 }
 
 fn gmac_build_input(aad: []byte): []byte {
-    var out = mac_bytes_slice(aad, 0, aad.len)
+    var padded_len = gmac_round_up16(aad.len)
+    var out: [padded_len + 16]byte = []
+    var i: u64 = 0
     loop {
-        if out.len % 16 == 0 { break }
-        out = teko::list::push(out, 0 to byte)
+        if i >= aad.len { break }
+        out[i] = aad[i]
+        i++
     }
-    out = push_be_u64_mac(out, aad.len * 8)
-    out = push_be_u64_mac(out, 0)
+    var lenbytes = mac_be_u64_bytes(aad.len * 8)
+    var j: u64 = 0
+    loop {
+        if j >= 8 { break }
+        out[padded_len + j] = lenbytes[j]
+        j++
+    }
     out
 }
 
 fn gmac_j0(iv: []byte): []byte {
-    var out = mac_bytes_slice(iv, 0, iv.len)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 1 to byte)
+    var out: [iv.len + 4]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= iv.len { break }
+        out[i] = iv[i]
+        i++
+    }
+    out[iv.len + 3] = 1 to byte
     out
 }
 
