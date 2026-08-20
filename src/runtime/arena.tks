@@ -715,6 +715,13 @@ pub fn region_drop_subtree(r: ptr) {
     ar_region_drop_subtree_w(ar_control(), teko::sys::ptr_word(r) to u64)
 }
 
+pub fn chunk_node_link(r: ptr, tail: ptr, cap: u64): ptr {
+    var chunk = ar_chunk_try(cap)
+    if chunk == 0 { ar_oom() }
+    ar_chunk_set(chunk, CHUNK_NEXT, teko::sys::ptr_word(tail) to u64)
+    teko::sys::word_ptr(chunk to i64)
+}
+
 pub fn region_root(): ptr {
     teko::sys::word_ptr(ar_region_root_w(ar_control()) to i64)
 }
@@ -842,4 +849,20 @@ pub fn wrap_release(obj: ptr) {
     var at_zero = ar_wrap_dec(control, addr)
     mtx_unlock(control + CTRL_WRAP_LOCK)
     if at_zero { region_drop(obj) }
+}
+
+fn ar_wrap_alive(control: u64, addr: u64): bool {
+    var table = ar_wrap_table(control)
+    var n = ar_ctrl_get(control, CTRL_WRAP_COUNT)
+    ar_wrap_find(control, table, addr) < n
+}
+
+pub fn wrap_weak_get(obj: ptr): ptr {
+    var addr = teko::sys::ptr_word(obj) to u64
+    if addr == 0 { return teko::sys::word_ptr(0) }
+    var control = ar_control()
+    mtx_lock(control + CTRL_WRAP_LOCK)
+    var alive = ar_wrap_alive(control, addr)
+    mtx_unlock(control + CTRL_WRAP_LOCK)
+    if alive { obj } else { teko::sys::word_ptr(0) }
 }
