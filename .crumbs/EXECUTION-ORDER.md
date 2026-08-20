@@ -29,21 +29,21 @@
 | 0003 | 0003-SM-A2-dps-abi-lower-return.md | SM-A2 | M1 | SM-A1 | [RITUAL] | needs-impl |
 | 0004 | 0004-SM-A3-retire-own-returned.md | SM-A3 | M1 | SM-A2 | [RITUAL] | needs-impl |
 | 0005 | 0005-SM-A4-arena-elision-guard.md | SM-A4 | M1 | SM-A1 | [RITUAL] | needs-impl |
-| 0006 | 0006-SM-A5-push-inst-block-fix.md | SM-A5 | M1 | SM-P1 | [RITUAL] | on-branch:origin/native/push-inst-block-fix |
+| 0006 | 0006-SM-A5-push-inst-block-fix.md | SM-A5 | M1 | SM-P1 | [RITUAL] | gated:D52 |
 | 0007 | 0007-SM-G1-colon-return-operator.md | SM-G1 | M1 | — | [dry] | landed/verify-only |
 | 0008 | 0008-SM-G2-var-let-mut-merge.md | SM-G2 | M1 | — | [dry] | needs-impl |
-| 0009 | 0009-SM-G3-static-self-base.md | SM-G3 | M1 | — | [dry] | partial |
-| 0010 | 0010-SM-G4-remove-ref-return-arm.md | SM-G4 | M1 | SM-G1 | [dry] | needs-impl |
-| 0011 | 0011-SM-G5-marshall-opaque-ptr.md | SM-G5 | M1 | — | [dry] | needs-impl |
-| 0012 | 0012-SM-G6-di-service-taint.md | SM-G6 | M1 | — | [dry] | needs-impl |
+| 0009 | 0009-SM-G3-static-self-base.md | SM-G3 | M1 | — | [dry] | verify-only |
+| 0010 | 0010-SM-G4-remove-ref-return-arm.md | SM-G4 | M1 | SM-G1 | [dry] | verify-only |
+| 0011 | 0011-SM-G5-marshall-opaque-ptr.md | SM-G5 | M1 | — | [dry] | gated:owner |
+| 0012 | 0012-SM-G6-di-service-taint.md | SM-G6 | M1 | — | [dry] | gated:owner |
 | 0013 | 0013-SM-G7-mem-region-safe-intrinsics.md | SM-G7 | M1 | SM-G5 | [dry] | needs-impl |
 | 0014 | 0014-SM-G8-retire-manual-memory.md | SM-G8 | M1 | SM-G7 | [dry] | needs-impl |
 | 0015 | 0015-SM-G9-size-usize-primkind.md | SM-G9 | M1 | — | [dry] | needs-impl |
 | 0016 | 0016-SM-G10-method-overloading.md | SM-G10 | M1 | — | [dry] | needs-impl |
 | 0017 | 0017-SM-G11-operator-overloading.md | SM-G11 | M1 | — | [dry] | needs-impl |
-| 0018 | 0018-SM-G12-constraint-acceptance.md | SM-G12 | M1 | — | [dry] | needs-impl |
-| 0019 | 0019-9D-T1-inline-union-accept.md | 9D-T1 | M1 | — | [dry] | needs-impl |
-| 0020 | 0020-RM-C2-mem-copy-index-join.md | RM-C2 | M1 | — | [dry] | needs-impl |
+| 0018 | 0018-SM-G12-constraint-acceptance.md | SM-G12 | M1 | — | [dry] | landed |
+| 0019 | 0019-9D-T1-inline-union-accept.md | 9D-T1 | M1 | — | [dry] | verify-only |
+| 0020 | 0020-RM-C2-mem-copy-index-join.md | RM-C2 | M1 | — | [dry] | landed |
 | 0021 | 0021-COL-F0a-of-len-fixed-backing.md | COL-F0a | M1 | RM-C2 | [dry] | landed |
 | 0022 | 0022-COL-F0b-class-holder-escape.md | COL-F0b | M1 | COL-F0a | [dry] | landed |
 | 0023 | 0023-COL-F0c-wrapped-retain-release.md | COL-F0c | M1 | COL-F0a | [dry] | landed |
@@ -175,15 +175,16 @@
 | status | count |
 |---|---|
 | done | 1 (0001) |
-| landed | 5 (0007, 0021–0023, 0025) |
-| verify-only | 10 (0026–0029, 0031–0033, 0091, 0118, 0120) |
+| landed | 7 (0007, 0018, 0020, 0021–0023, 0025) |
+| verify-only | 13 (0009–0010, 0019, 0026–0029, 0031–0033, 0091, 0118, 0120) |
 | verify-and-wire | 2 (0115, 0116) |
-| partial | 1 (0009) |
+| partial | 0 |
 | in-progress | 1 (0024) |
-| on-branch | 3 (0006, 0121, 0122) |
-| needs-impl | 24 (0002–0005, 0008, 0010–0018, 0019–0020, 0030, 0108–0112, 0117, 0119) |
+| on-branch | 2 (0121, 0122) |
+| needs-impl | 18 (0002–0005, 0008, 0030, 0108–0112, 0117, 0119) |
 | planned:verify-at-exec | 73 (0034–0090, 0092–0107) |
-| gated:D52 | 2 (0113, 0114) |
+| gated:D52 | 3 (0006, 0113, 0114) |
+| gated:owner | 2 (0011, 0012) |
 | gated:FORK-ABERTO-1 | 1 (0123) |
 | deferred | 0 (doc/lint tracked separately) |
 | **TOTAL** | **123** |
