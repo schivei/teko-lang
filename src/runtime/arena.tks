@@ -84,9 +84,23 @@ const CTRL_CUR_STACK: u64 = 33928
 
 const CUR_STACK_SLOTS: u64 = 64
 
-const CTRL_BYTES: u64 = 34448
+const CTRL_WRAP_LOCK: u64 = 34448
+
+const CTRL_WRAP_TABLE: u64 = 34456
+
+const CTRL_WRAP_COUNT: u64 = 34464
+
+const CTRL_BYTES: u64 = 34472
 
 const CTRL_MAGIC_VALUE: u64 = 2596069104
+
+const WRAP_TABLE_CAP: u64 = 4096
+
+const WRAP_ENTRY_BYTES: u64 = 16
+
+const WRAP_ENTRY_ADDR: u64 = 0
+
+const WRAP_ENTRY_COUNT: u64 = 8
 
 const FREENODE_NEXT: u64 = 0
 
@@ -744,4 +758,88 @@ pub fn region_register(r: ptr, tid: u64, inst: ptr) {
 
 pub fn region_lookup(r: ptr, tid: u64): ptr {
     teko::sys::word_ptr(ar_region_lookup_w(teko::sys::ptr_word(r) to u64, tid) to i64)
+}
+
+fn ar_wrap_table(control: u64): u64 {
+    var existing = ar_ctrl_get(control, CTRL_WRAP_TABLE)
+    if existing != 0 { return existing }
+    var table = ar_meta_alloc(control, WRAP_TABLE_CAP * WRAP_ENTRY_BYTES)
+    ar_ctrl_set(control, CTRL_WRAP_TABLE, table)
+    table
+}
+
+fn ar_wrap_entry(table: u64, i: u64): u64 {
+    table + i * WRAP_ENTRY_BYTES
+}
+
+fn ar_wrap_find(control: u64, table: u64, addr: u64): u64 {
+    var n = ar_ctrl_get(control, CTRL_WRAP_COUNT)
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        if ar_load(ar_wrap_entry(table, i) + WRAP_ENTRY_ADDR) == addr { return i }
+        i++
+    }
+    n
+}
+
+fn ar_wrap_inc(control: u64, addr: u64) {
+    var table = ar_wrap_table(control)
+    var n = ar_ctrl_get(control, CTRL_WRAP_COUNT)
+    var i = ar_wrap_find(control, table, addr)
+    if i < n {
+        var e = ar_wrap_entry(table, i)
+        ar_store(e + WRAP_ENTRY_COUNT, ar_load(e + WRAP_ENTRY_COUNT) + 1)
+        return
+    }
+    if n >= WRAP_TABLE_CAP { return }
+    var e = ar_wrap_entry(table, n)
+    ar_store(e + WRAP_ENTRY_ADDR, addr)
+    ar_store(e + WRAP_ENTRY_COUNT, 1)
+    ar_ctrl_set(control, CTRL_WRAP_COUNT, n + 1)
+}
+
+fn ar_wrap_remove(control: u64, table: u64, i: u64, n: u64) {
+    var last = n - 1
+    if i != last {
+        var src = ar_wrap_entry(table, last)
+        var dst = ar_wrap_entry(table, i)
+        ar_store(dst + WRAP_ENTRY_ADDR, ar_load(src + WRAP_ENTRY_ADDR))
+        ar_store(dst + WRAP_ENTRY_COUNT, ar_load(src + WRAP_ENTRY_COUNT))
+    }
+    ar_ctrl_set(control, CTRL_WRAP_COUNT, last)
+}
+
+fn ar_wrap_dec(control: u64, addr: u64): bool {
+    var table = ar_wrap_table(control)
+    var n = ar_ctrl_get(control, CTRL_WRAP_COUNT)
+    var i = ar_wrap_find(control, table, addr)
+    if i >= n { return false }
+    var e = ar_wrap_entry(table, i)
+    var c = ar_load(e + WRAP_ENTRY_COUNT)
+    if c > 1 {
+        ar_store(e + WRAP_ENTRY_COUNT, c - 1)
+        return false
+    }
+    ar_wrap_remove(control, table, i, n)
+    true
+}
+
+pub fn wrap_retain(obj: ptr) {
+    var addr = teko::sys::ptr_word(obj) to u64
+    if addr == 0 { return }
+    var control = ar_control()
+    mtx_lock(control + CTRL_WRAP_LOCK)
+    ar_wrap_inc(control, addr)
+    mtx_unlock(control + CTRL_WRAP_LOCK)
+}
+
+pub fn wrap_release(obj: ptr) {
+    var addr = teko::sys::ptr_word(obj) to u64
+    if addr == 0 { return }
+    var control = ar_control()
+    mtx_lock(control + CTRL_WRAP_LOCK)
+    var at_zero = ar_wrap_dec(control, addr)
+    mtx_unlock(control + CTRL_WRAP_LOCK)
+    if at_zero { region_drop(obj) }
 }
