@@ -597,3 +597,11 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Motivo:** (1) o dividendo de memória da Fase A é ~1-5% (pequeno); (2) o recheck mostrou o fecho de dependência ainda incerto (`collections` RETER confirmado — arena+checker/codegen/lir/backend usam List/Map que moram em `collections`, 2995 refs; `cmp` RETER por dep de `collections`; `sort`/`iter` pendentes de fecho vs `collections`); (3) mover em cima de fecho mal-resolvido é o erro que quase aconteceu com `collections`. Melhor esperar a memória fechar e fazer UM movimento seguro e completo.
 - **Consequência:** foco ÚNICO = a onda de memória (COL-F0 elefante + RM-C). O elefante é o caminho crítico; tklib não compete por atenção. Quando o marco de memória bater (build seco ≤1,5GB / fixpoint / testes verdes — D52 triad), reabre-se a extração com o fecho de dependência resolvido de uma vez.
 - **Partição on-file:** `docs/design/tklib-partition-plan-recheck.md` (6c8e8e21) guarda o achado (RETER: collections, cmp; SEGURO pós-memória: threads; PENDENTE-fecho: sort, iter) pra quando reabrir.
+
+### D58 · Runner paralelo / canais — owner-designed, NÃO é lacuna; spawn=thread-only (owner 2026-08-20)
+- **Retrata a "lacuna" do recon `parallel-test-channels-recon.md` (719a1473):** o runner de testes paralelo, o `oschan` e o `spawn` são **desenho do dono** — não desleixo do arquiteto. O #472 está desenhado por ele.
+- **Fato duro — `spawn` = THREAD-ONLY** (não processo). Consequências:
+  - O runner paralelo é **thread-based** (espaço de endereço compartilhado).
+  - **Paralelismo de teste = VELOCIDADE, não isolamento de memória** — threads compartilham o processo, não dão teto por-worker. A memória fecha **exclusivamente pelo elefante** (pico do build); o runner paralelo NÃO entra na conta do marco ≤1,5GB.
+- **Drift anotado pro #472 (implementer futuro):** o `run_pool` atual (`src/build/regression.tks:187`) roda por **processos** (stopgap). O modelo desenhado é **thread** (spawn). A implementação do #472 parte do modelo thread-based — não perpetua o stopgap de processo.
+- **Status:** desenhado + gated no marco de memória (junto com o resto). NÃO dispara arquiteto; registrado e deferido. Peças on-file: memchan/oschan/spawn landados ~70-85% (S10 0115/0116); `Queue<T>` planejada (COL-Q14, 0082).
