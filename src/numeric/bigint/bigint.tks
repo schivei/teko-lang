@@ -26,13 +26,7 @@ type SmallDivMod = struct {
 }
 
 fn zeros(n: u64): []u64 {
-    var out: []u64 = []
-    var i: u64 = 0
-    loop {
-        if i >= n { break }
-        out = teko::list::push(out, 0)
-        i = i + 1
-    }
+    var out: [n]u64 = []
     out
 }
 
@@ -49,14 +43,7 @@ fn mag_norm(limbs: []u64): []u64 {
         n = n - 1
     }
     if n == limbs.len { return limbs }
-    var out: []u64 = []
-    var i: u64 = 0
-    loop {
-        if i >= n { break }
-        out = teko::list::push(out, limbs[i])
-        i = i + 1
-    }
-    out
+    limbs[0..n]
 }
 
 fn mag_is_zero(a: []u64): bool {
@@ -88,7 +75,8 @@ fn mag_cmp(a: []u64, b: []u64): i64 {
 
 fn mag_add(a: []u64, b: []u64): []u64 {
     var n = if a.len > b.len { a.len } else { b.len }
-    var out: []u64 = []
+    var out: [n + 1]u64 = []
+    var count: u64 = 0
     var carry: u64 = 0
     var i: u64 = 0
     loop {
@@ -96,16 +84,20 @@ fn mag_add(a: []u64, b: []u64): []u64 {
         var s = carry
         if i < a.len { s = s + a[i] }
         if i < b.len { s = s + b[i] }
-        out = teko::list::push(out, s & LIMB_MASK)
+        out[count] = s & LIMB_MASK
+        count++
         carry = s >> LIMB_BITS
         i = i + 1
     }
-    if carry != 0 { out = teko::list::push(out, carry) }
-    mag_norm(out)
+    if carry != 0 {
+        out[count] = carry
+        count++
+    }
+    mag_norm(out[0..count])
 }
 
 fn mag_sub(a: []u64, b: []u64): []u64 {
-    var out: []u64 = []
+    var out: [a.len]u64 = []
     var borrow: u64 = 0
     var i: u64 = 0
     loop {
@@ -114,10 +106,10 @@ fn mag_sub(a: []u64, b: []u64): []u64 {
         var sub = borrow
         if i < b.len { sub = sub + b[i] }
         if ai >= sub {
-            out = teko::list::push(out, ai - sub)
+            out[i] = ai - sub
             borrow = 0
         } else {
-            out = teko::list::push(out, ai + LIMB_BASE - sub)
+            out[i] = ai + LIMB_BASE - sub
             borrow = 1
         }
         i = i + 1
@@ -176,18 +168,23 @@ fn mag_bit(a: []u64, i: u64): u64 {
 }
 
 fn mag_shl1(a: []u64): []u64 {
-    var out: []u64 = []
+    var out: [a.len + 1]u64 = []
+    var count: u64 = 0
     var carry: u64 = 0
     var i: u64 = 0
     loop {
         if i >= a.len { break }
         var v = ((a[i] << 1) & LIMB_MASK) | carry
-        out = teko::list::push(out, v)
+        out[count] = v
+        count++
         carry = (a[i] >> (LIMB_BITS - 1)) & 1
         i = i + 1
     }
-    if carry != 0 { out = teko::list::push(out, carry) }
-    mag_norm(out)
+    if carry != 0 {
+        out[count] = carry
+        count++
+    }
+    mag_norm(out[0..count])
 }
 
 fn mag_setbit(a: []u64, i: u64): []u64 {
@@ -242,9 +239,8 @@ fn one_limb(v: u64): []u64 {
     if v == 0 { return [] }
     var lo = v & LIMB_MASK
     var hi = v >> LIMB_BITS
-    var out = [lo]
-    if hi != 0 { out = teko::list::push(out, hi) }
-    out
+    if hi != 0 { return [lo, hi] }
+    [lo]
 }
 
 fn mk(neg: bool, limbs: []u64): BigInt {
@@ -319,21 +315,29 @@ exp fn of_lit(s: str): BigInt {
 /** Render a `BigInt` to its canonical decimal string. */
 exp fn to_str(x: BigInt): str {
     if is_zero(x) { return "0" }
-    var digs: []byte = []
+    var digs: [x.limbs.len * 20]byte = []
+    var ndigs: u64 = 0
     var m = x.limbs
     loop {
         if mag_is_zero(m) { break }
         var dm = mag_divmod_small(m, DEC_RADIX)
-        digs = teko::list::push(digs, ((b'0' to u64) + dm.r) to byte)
+        digs[ndigs] = ((b'0' to u64) + dm.r) to byte
+        ndigs++
         m = dm.q
     }
-    var out: []byte = []
-    if x.neg { out = teko::list::push(out, b'-') }
-    var i = digs.len
+    var neg_len = if x.neg { 1 to u64 } else { 0 to u64 }
+    var out: [ndigs + neg_len]byte = []
+    var pos: u64 = 0
+    if x.neg {
+        out[pos] = b'-'
+        pos++
+    }
+    var i = ndigs
     loop {
         if i == 0 { break }
         i = i - 1
-        out = teko::list::push(out, digs[i])
+        out[pos] = digs[i]
+        pos++
     }
     match teko::text::str_from_utf8(out) {
         str as s => s

@@ -85,11 +85,11 @@ exp fn is_even(x: BigInt): bool {
 exp fn bit_and(a: BigInt, b: BigInt): BigInt | error {
     if a.neg || b.neg { return error { message = "bigint::bit_and: negative operand" } }
     var n = if a.limbs.len < b.limbs.len { a.limbs.len } else { b.limbs.len }
-    var out: []u64 = []
+    var out: [n]u64 = []
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, a.limbs[i] & b.limbs[i])
+        out[i] = a.limbs[i] & b.limbs[i]
         i = i + 1
     }
     mk(false, out)
@@ -99,11 +99,11 @@ exp fn bit_and(a: BigInt, b: BigInt): BigInt | error {
 exp fn bit_or(a: BigInt, b: BigInt): BigInt | error {
     if a.neg || b.neg { return error { message = "bigint::bit_or: negative operand" } }
     var n = if a.limbs.len > b.limbs.len { a.limbs.len } else { b.limbs.len }
-    var out: []u64 = []
+    var out: [n]u64 = []
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, limb_at(a.limbs, i) | limb_at(b.limbs, i))
+        out[i] = limb_at(a.limbs, i) | limb_at(b.limbs, i)
         i = i + 1
     }
     mk(false, out)
@@ -113,11 +113,11 @@ exp fn bit_or(a: BigInt, b: BigInt): BigInt | error {
 exp fn bit_xor(a: BigInt, b: BigInt): BigInt | error {
     if a.neg || b.neg { return error { message = "bigint::bit_xor: negative operand" } }
     var n = if a.limbs.len > b.limbs.len { a.limbs.len } else { b.limbs.len }
-    var out: []u64 = []
+    var out: [n]u64 = []
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, limb_at(a.limbs, i) ^ limb_at(b.limbs, i))
+        out[i] = limb_at(a.limbs, i) ^ limb_at(b.limbs, i)
         i = i + 1
     }
     mk(false, out)
@@ -171,38 +171,34 @@ exp fn mod_inverse(a: BigInt, modulus: BigInt): BigInt | error {
 }
 
 fn mag_bytes_be(x: BigInt): []byte {
-    var digs: []byte = []
+    var digs: [x.limbs.len * 8]byte = []
+    var ndigs: u64 = 0
     var m = x.limbs
     loop {
         if mag_is_zero(m) { break }
         var dm = mag_divmod_small(m, 256)
-        digs = teko::list::push(digs, dm.r to byte)
+        digs[ndigs] = dm.r to byte
+        ndigs++
         m = dm.q
     }
-    var out: []byte = []
-    var i = digs.len
+    var out: [ndigs]byte = []
+    var i: u64 = 0
     loop {
-        if i == 0 { break }
-        i = i - 1
-        out = teko::list::push(out, digs[i])
+        if i >= ndigs { break }
+        out[i] = digs[ndigs - 1 - i]
+        i++
     }
     out
 }
 
 fn pad_be(raw: []byte, length: u64): []byte | error {
     if raw.len > length { return error { message = "bigint::to_bytes_be_padded: value wider than field" } }
-    var out: []byte = []
     var pad = length - raw.len
-    var i: u64 = 0
-    loop {
-        if i >= pad { break }
-        out = teko::list::push(out, 0 to byte)
-        i = i + 1
-    }
+    var out: [length]byte = []
     var j: u64 = 0
     loop {
         if j >= raw.len { break }
-        out = teko::list::push(out, raw[j])
+        out[pad + j] = raw[j]
         j = j + 1
     }
     out
@@ -252,21 +248,29 @@ fn hex_value(c: byte): u64 | error {
 /** Render `x` as a lowercase hexadecimal string (leading `-` for negative, no `0x` prefix). */
 exp fn to_hex(x: BigInt): str {
     if is_zero(x) { return "0" }
-    var digs: []byte = []
+    var digs: [x.limbs.len * 16]byte = []
+    var ndigs: u64 = 0
     var m = x.limbs
     loop {
         if mag_is_zero(m) { break }
         var dm = mag_divmod_small(m, 16)
-        digs = teko::list::push(digs, hex_digit(dm.r))
+        digs[ndigs] = hex_digit(dm.r)
+        ndigs++
         m = dm.q
     }
-    var out: []byte = []
-    if x.neg { out = teko::list::push(out, b'-') }
-    var i = digs.len
+    var neg_len = if x.neg { 1 to u64 } else { 0 to u64 }
+    var out: [ndigs + neg_len]byte = []
+    var pos: u64 = 0
+    if x.neg {
+        out[pos] = b'-'
+        pos++
+    }
+    var i = ndigs
     loop {
         if i == 0 { break }
         i = i - 1
-        out = teko::list::push(out, digs[i])
+        out[pos] = digs[i]
+        pos++
     }
     match teko::text::str_from_utf8(out) {
         str as s => s
