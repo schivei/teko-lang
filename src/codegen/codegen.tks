@@ -2642,7 +2642,6 @@ fn emit_byte_ptr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regi
 }
 
 fn emit_retain(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    if c.args.len != 1 { return error { message = "codegen: retain expects one argument (internal)" } }
     var out = cb_fn_name(buf, "teko::runtime", "wrap_retain")
     out = cb(out, "(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
@@ -2650,7 +2649,6 @@ fn emit_retain(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, region
 }
 
 fn emit_release(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    if c.args.len != 1 { return error { message = "codegen: release expects one argument (internal)" } }
     var out = cb_fn_name(buf, "teko::runtime", "wrap_release")
     out = cb(out, "(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
@@ -2712,82 +2710,115 @@ fn cg_dc_is_call(cl: checker::TCall): bool {
     cl.callee.segments[cl.callee.segments.len - 1].name == "deep_copy"
 }
 
-fn cg_dc_scan_expr(s: DcScan, e: checker::TExpr): DcScan {
+fn cg_dc_scan_expr(s: DcScan, e: checker::TExpr): DcScan | error {
     var s2 = s
     match e.kind {
-        checker::TBinary as b => { s2 = cg_dc_scan_expr(s2, b.left); s2 = cg_dc_scan_expr(s2, b.right) }
-        checker::TUnary as u => { s2 = cg_dc_scan_expr(s2, u.operand) }
+        checker::TNumber => { }
+        checker::TVar => { }
+        checker::TStrLit => { }
+        checker::TByteStrLit => { }
+        checker::TByteLit => { }
+        checker::TCharLit => { }
+        checker::TBoolLit => { }
+        checker::TNullLit => { }
+        checker::TPathExpr => { }
+        checker::TBinary as b => {
+            s2 = match cg_dc_scan_expr(s2, b.left) { DcScan as x => x; error as err => return err }
+            s2 = match cg_dc_scan_expr(s2, b.right) { DcScan as x => x; error as err => return err }
+        }
+        checker::TUnary as u => { s2 = match cg_dc_scan_expr(s2, u.operand) { DcScan as x => x; error as err => return err } }
         checker::TCompare as cm => {
-            s2 = cg_dc_scan_expr(s2, cm.first)
+            s2 = match cg_dc_scan_expr(s2, cm.first) { DcScan as x => x; error as err => return err }
             var i = 0
-            loop { if i >= cm.rest.len { break }; s2 = cg_dc_scan_expr(s2, cm.rest[i].operand); i++ }
+            loop { if i >= cm.rest.len { break }; s2 = match cg_dc_scan_expr(s2, cm.rest[i].operand) { DcScan as x => x; error as err => return err }; i++ }
         }
         checker::TCall as cl => {
             var i = 0
-            loop { if i >= cl.args.len { break }; s2 = cg_dc_scan_expr(s2, cl.args[i]); i++ }
+            loop { if i >= cl.args.len { break }; s2 = match cg_dc_scan_expr(s2, cl.args[i]) { DcScan as x => x; error as err => return err }; i++ }
             if cg_dc_is_call(cl) {
                 match cl.args[0].type { checker::Named as n => s2 = dc_scan_add(s2, n.name); _ => { } }
             }
         }
         checker::TIfExpr as f => {
-            s2 = cg_dc_scan_expr(s2, f.cond)
-            s2 = cg_dc_scan_block(s2, f.then_blk)
-            s2 = cg_dc_scan_block(s2, f.else_blk)
+            s2 = match cg_dc_scan_expr(s2, f.cond) { DcScan as x => x; error as err => return err }
+            s2 = match cg_dc_scan_block(s2, f.then_blk) { DcScan as x => x; error as err => return err }
+            s2 = match cg_dc_scan_block(s2, f.else_blk) { DcScan as x => x; error as err => return err }
         }
         checker::TMatchExpr as m => {
-            s2 = cg_dc_scan_expr(s2, m.subject)
+            s2 = match cg_dc_scan_expr(s2, m.subject) { DcScan as x => x; error as err => return err }
             var i = 0
             loop {
                 if i >= m.arms.len { break }
-                if m.arms[i].has_when { s2 = cg_dc_scan_expr(s2, m.arms[i].guard) }
-                s2 = cg_dc_scan_block(s2, m.arms[i].body)
+                if m.arms[i].has_when { s2 = match cg_dc_scan_expr(s2, m.arms[i].guard) { DcScan as x => x; error as err => return err } }
+                s2 = match cg_dc_scan_block(s2, m.arms[i].body) { DcScan as x => x; error as err => return err }
                 i++
             }
         }
-        checker::TCast as ct => { s2 = cg_dc_scan_expr(s2, ct.expr) }
-        checker::TFieldAccess as fa => { s2 = cg_dc_scan_expr(s2, fa.receiver) }
-        checker::TStructInit as si => { var i = 0; loop { if i >= si.field_vals.len { break }; s2 = cg_dc_scan_expr(s2, si.field_vals[i]); i++ } }
-        checker::TIndex as ix => { s2 = cg_dc_scan_expr(s2, ix.receiver); s2 = cg_dc_scan_expr(s2, ix.index) }
-        checker::TInExpr as ie => { s2 = cg_dc_scan_expr(s2, ie.lhs); var i = 0; loop { if i >= ie.elems.len { break }; s2 = cg_dc_scan_expr(s2, ie.elems[i]); i++ } }
-        checker::TLambda as lam => { s2 = cg_dc_scan_block(s2, lam.body) }
-        checker::TBlockExpr as blk => { s2 = cg_dc_scan_block(s2, blk.body) }
-        _ => { }
+        checker::TCast as ct => { s2 = match cg_dc_scan_expr(s2, ct.expr) { DcScan as x => x; error as err => return err } }
+        checker::TFieldAccess as fa => { s2 = match cg_dc_scan_expr(s2, fa.receiver) { DcScan as x => x; error as err => return err } }
+        checker::TStructInit as si => { var i = 0; loop { if i >= si.field_vals.len { break }; s2 = match cg_dc_scan_expr(s2, si.field_vals[i]) { DcScan as x => x; error as err => return err }; i++ } }
+        checker::TIndex as ix => {
+            s2 = match cg_dc_scan_expr(s2, ix.receiver) { DcScan as x => x; error as err => return err }
+            s2 = match cg_dc_scan_expr(s2, ix.index) { DcScan as x => x; error as err => return err }
+        }
+        checker::TInterp as it => { var i = 0; loop { if i >= it.holes.len { break }; s2 = match cg_dc_scan_expr(s2, it.holes[i]) { DcScan as x => x; error as err => return err }; i++ } }
+        checker::TInExpr as ie => {
+            s2 = match cg_dc_scan_expr(s2, ie.lhs) { DcScan as x => x; error as err => return err }
+            var i = 0
+            loop { if i >= ie.elems.len { break }; s2 = match cg_dc_scan_expr(s2, ie.elems[i]) { DcScan as x => x; error as err => return err }; i++ }
+        }
+        checker::TArrayLit as al => { var i = 0; loop { if i >= al.elements.len { break }; s2 = match cg_dc_scan_expr(s2, al.elements[i].expr) { DcScan as x => x; error as err => return err }; i++ } }
+        checker::TSliceOfLen as sol => { s2 = match cg_dc_scan_expr(s2, sol.size) { DcScan as x => x; error as err => return err } }
+        checker::TLambda as lam => { s2 = match cg_dc_scan_block(s2, lam.body) { DcScan as x => x; error as err => return err } }
+        checker::TBorrow as bw => { s2 = match cg_dc_scan_expr(s2, bw.operand) { DcScan as x => x; error as err => return err } }
+        checker::TBlockExpr as blk => { s2 = match cg_dc_scan_block(s2, blk.body) { DcScan as x => x; error as err => return err } }
+        _ => return error { message = "codegen: deep_copy pre-scan does not handle this expression kind (internal)" }
     }
     s2
 }
 
-fn cg_dc_scan_block(s: DcScan, stmts: []@TStatement()): DcScan {
+fn cg_dc_scan_block(s: DcScan, stmts: []@TStatement()): DcScan | error {
     var s2 = s
     var i = 0
     loop {
         if i >= stmts.len { break }
         match stmts[i] {
-            checker::TBinding as b => { s2 = cg_dc_scan_expr(s2, b.value) }
+            checker::TBreakStmt => { }
+            checker::TContinueStmt => { }
+            checker::TBinding as b => { s2 = match cg_dc_scan_expr(s2, b.value) { DcScan as x => x; error as err => return err } }
             checker::TAssign as a => {
-                s2 = cg_dc_scan_expr(s2, a.value)
-                if parser::assign_has_target(a.kind) { s2 = cg_dc_scan_expr(s2, a.target) }
+                s2 = match cg_dc_scan_expr(s2, a.value) { DcScan as x => x; error as err => return err }
+                if parser::assign_has_target(a.kind) { s2 = match cg_dc_scan_expr(s2, a.target) { DcScan as x => x; error as err => return err } }
             }
-            checker::TReturn as r => { if r.has_value { s2 = cg_dc_scan_expr(s2, r.value) } }
-            checker::TLoopStmt as l => { s2 = cg_dc_scan_block(s2, l.init); s2 = cg_dc_scan_block(s2, l.body) }
-            checker::TExprStmt as es => { s2 = cg_dc_scan_expr(s2, es.expr) }
-            checker::TDeferStmt as d => { s2 = cg_dc_scan_block(s2, d.body) }
-            checker::TAdoptStmt as a2 => { s2 = cg_dc_scan_block(s2, a2.body) }
-            checker::TBlockStmt as b2 => { s2 = cg_dc_scan_block(s2, b2.body) }
-            _ => { }
+            checker::TReturn as r => {
+                if r.has_value { s2 = match cg_dc_scan_expr(s2, r.value) { DcScan as x => x; error as err => return err } }
+                var vi = 0
+                loop { if vi >= r.values.len { break }; s2 = match cg_dc_scan_expr(s2, r.values[vi]) { DcScan as x => x; error as err => return err }; vi++ }
+            }
+            checker::TLoopStmt as l => {
+                s2 = match cg_dc_scan_block(s2, l.init) { DcScan as x => x; error as err => return err }
+                s2 = match cg_dc_scan_block(s2, l.body) { DcScan as x => x; error as err => return err }
+            }
+            checker::TExprStmt as es => { s2 = match cg_dc_scan_expr(s2, es.expr) { DcScan as x => x; error as err => return err } }
+            checker::TDeferStmt as d => { s2 = match cg_dc_scan_block(s2, d.body) { DcScan as x => x; error as err => return err } }
+            checker::TAdoptStmt as a2 => { s2 = match cg_dc_scan_block(s2, a2.body) { DcScan as x => x; error as err => return err } }
+            checker::TBlockStmt as b2 => { s2 = match cg_dc_scan_block(s2, b2.body) { DcScan as x => x; error as err => return err } }
+            checker::TSpawn as sp => { s2 = match cg_dc_scan_expr(s2, sp.call) { DcScan as x => x; error as err => return err } }
+            _ => return error { message = "codegen: deep_copy pre-scan does not handle this statement kind (internal)" }
         }
         i++
     }
     s2
 }
 
-fn cg_dc_scan_program(prog: CgProg): []str {
+fn cg_dc_scan_program(prog: CgProg): []str | error {
     var s = DcScan { classes = teko::list::empty() }
     var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
-            checker::TFunction as f => { s = cg_dc_scan_block(s, f.body) }
-            (@TStatement()) as st => { s = cg_dc_scan_block(s, teko::list::push(teko::list::empty(), st)) }
+            checker::TFunction as f => { s = match cg_dc_scan_block(s, f.body) { DcScan as x => x; error as err => return err } }
+            (@TStatement()) as st => { s = match cg_dc_scan_block(s, teko::list::push(teko::list::empty(), st)) { DcScan as x => x; error as err => return err } }
             _ => { }
         }
         i++
@@ -2948,7 +2979,7 @@ fn cg_dc_emit_body(buf: Cb, prog: CgProg, cls: str): Cb | error {
 }
 
 fn cg_emit_deep_copy_helpers(buf: Cb, prog: CgProg): Cb | error {
-    var seeds = cg_dc_scan_program(prog)
+    var seeds = match cg_dc_scan_program(prog) { []str as ss => ss; error as e => return e }
     if seeds.len == 0 { return buf }
     var classes = match cg_dc_close(prog, teko::list::empty(), seeds) { []str as cs => cs; error as e => return e }
     var out = buf
