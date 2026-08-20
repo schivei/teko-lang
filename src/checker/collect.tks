@@ -899,6 +899,7 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
     var istart: u64 = 0
     if impl_m.params.len > 0 && !impl_m.params[0].has_type { istart = 1 }
     if rstart != istart { return false }
+    if req.is_static != impl_m.is_static { return false }
     if req.params.len - rstart != impl_m.params.len - istart { return false }
     var k: u64 = 0
     loop {
@@ -1341,7 +1342,7 @@ fn duplicates_of_reg(table: TypeTable, at: u64): []str {
 }
 
 fn validate_type_decls(table: TypeTable): []str {
-    var diags = check_no_duplicate_types(table)
+    var diags = concat_diags(check_no_duplicate_types(table), service_conflict_diags(table))
     var i: u64 = 0
     loop {
         if i >= tt_len(table) { break }
@@ -1577,6 +1578,50 @@ fn interface_conflict_diags(reg: TypeReg, eff: []parser::Function, table: TypeTa
             b++
         }
         a++
+    }
+    diags
+}
+
+fn service_conflict_diags_pair(table: TypeTable, i: u64, reg: TypeReg, target: str, key: str): []str {
+    var diags: []str = teko::list::empty()
+    var j: u64 = i + 1
+    loop {
+        if j >= tt_len(table) { break }
+        var other = tt_at(table, j)
+        match other.decl.body {
+            parser::ClassBody as ocb => {
+                if ocb.is_service && name_last_segment(other.name) == key && svc_service_implements(ocb, target) {
+                    diags = teko::list::push(diags, decl_diag(reg, $"duplicate service registration for '{target}' under key '{key}': same-type-same-key collides at compile time (distinct keys coexist)"))
+                }
+            }
+            _ => { }
+        }
+        j++
+    }
+    diags
+}
+
+fn service_conflict_diags_from(table: TypeTable, i: u64, reg: TypeReg): []str {
+    var cb = match reg.decl.body { parser::ClassBody as c => c; _ => return teko::list::empty() }
+    if !cb.is_service { return teko::list::empty() }
+    var diags: []str = teko::list::empty()
+    var key = name_last_segment(reg.name)
+    var t: u64 = 0
+    loop {
+        if t >= cb.implements.len { break }
+        diags = concat_diags(diags, service_conflict_diags_pair(table, i, reg, name_last_segment(cb.implements[t]), key))
+        t++
+    }
+    diags
+}
+
+fn service_conflict_diags(table: TypeTable): []str {
+    var diags: []str = teko::list::empty()
+    var i: u64 = 0
+    loop {
+        if i >= tt_len(table) { break }
+        diags = concat_diags(diags, service_conflict_diags_from(table, i, tt_at(table, i)))
+        i++
     }
     diags
 }
