@@ -13,43 +13,37 @@ fn scrypt_le_u32_at(b: []byte, off: u64): u32 {
     (b[off] to u32) | ((b[off + 1] to u32) << 8) | ((b[off + 2] to u32) << 16) | ((b[off + 3] to u32) << 24)
 }
 
-fn scrypt_push_le32(buf: []byte, x: u32): []byte {
-    var b = buf
-    b = teko::list::push(b, (x & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
-    b
+fn scrypt_le32_bytes(x: u32): []byte {
+    [
+        (x & 0xFF) to byte,
+        ((x >> 8) & 0xFF) to byte,
+        ((x >> 16) & 0xFF) to byte,
+        ((x >> 24) & 0xFF) to byte,
+    ]
 }
 
 fn scrypt_bytes_append(dst: []byte, src: []byte): []byte {
-    var out = dst
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        out = teko::list::push(out, src[i])
-        i++
-    }
-    out
+    [..dst, ..src]
 }
 
 fn scrypt_bytes_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
+    var n = to - from
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
 }
 
 fn scrypt_bytes_xor(a: []byte, b: []byte): []byte {
-    var out: []byte = []
+    var out: [a.len]byte = []
     var i: u64 = 0
     loop {
         if i >= a.len { break }
-        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        out[i] = ((a[i] to u32) ^ (b[i] to u32)) to byte
         i++
     }
     out
@@ -145,23 +139,35 @@ fn scrypt_salsa_core(input: []byte): []byte {
         x14 = r3.d
         round++
     }
-    var out: []byte = []
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x0, in0))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x1, in1))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x2, in2))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x3, in3))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x4, in4))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x5, in5))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x6, in6))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x7, in7))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x8, in8))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x9, in9))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x10, in10))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x11, in11))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x12, in12))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x13, in13))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x14, in14))
-    out = scrypt_push_le32(out, teko::math::wrapping_add_u32(x15, in15))
+    var words: []u32 = [
+        teko::math::wrapping_add_u32(x0, in0),
+        teko::math::wrapping_add_u32(x1, in1),
+        teko::math::wrapping_add_u32(x2, in2),
+        teko::math::wrapping_add_u32(x3, in3),
+        teko::math::wrapping_add_u32(x4, in4),
+        teko::math::wrapping_add_u32(x5, in5),
+        teko::math::wrapping_add_u32(x6, in6),
+        teko::math::wrapping_add_u32(x7, in7),
+        teko::math::wrapping_add_u32(x8, in8),
+        teko::math::wrapping_add_u32(x9, in9),
+        teko::math::wrapping_add_u32(x10, in10),
+        teko::math::wrapping_add_u32(x11, in11),
+        teko::math::wrapping_add_u32(x12, in12),
+        teko::math::wrapping_add_u32(x13, in13),
+        teko::math::wrapping_add_u32(x14, in14),
+        teko::math::wrapping_add_u32(x15, in15),
+    ]
+    var out: [64]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= 16 { break }
+        var lw = scrypt_le32_bytes(words[i])
+        out[i * 4] = lw[0]
+        out[i * 4 + 1] = lw[1]
+        out[i * 4 + 2] = lw[2]
+        out[i * 4 + 3] = lw[3]
+        i++
+    }
     out
 }
 

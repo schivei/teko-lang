@@ -209,22 +209,16 @@ fn xmldsig_str_eq(a: str, b: str): bool {
 }
 
 fn xmldsig_bytes_concat(a: []byte, b: []byte): []byte {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i++
-    }
-    out
+    [..a, ..b]
 }
 
 fn xmldsig_bytes_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
+    var n = to - from
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
@@ -265,7 +259,7 @@ fn xmldsig_xmlns_attr(prefix: str, uri: str): xml::XmlAttr {
 }
 
 fn xmldsig_append_child(node: xml::XmlNode, child: xml::XmlNode): xml::XmlNode {
-    xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = node.attributes; children = teko::list::push(node.children, child) }
+    xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = node.attributes; children = [..node.children, child] }
 }
 
 type NsScope = struct {
@@ -278,7 +272,7 @@ fn ns_scope_root(): NsScope {
 }
 
 fn ns_scope_extend(scope: NsScope, prefix: str, uri: str): NsScope {
-    NsScope { prefixes = teko::list::push(scope.prefixes, prefix); uris = teko::list::push(scope.uris, uri) }
+    NsScope { prefixes = [..scope.prefixes, prefix]; uris = [..scope.uris, uri] }
 }
 
 fn ns_scope_with_decls(scope: NsScope, node: xml::XmlNode): NsScope {
@@ -320,35 +314,46 @@ fn ns_list_contains(list: []str, value: str): bool {
 }
 
 fn ns_scope_distinct(scope: NsScope): NsScope {
-    var prefixes: []str = []
-    var uris: []str = []
+    var prefixes: [scope.prefixes.len]str = []
+    var uris: [scope.prefixes.len]str = []
+    var count: u64 = 0
     var i = scope.prefixes.len
     loop {
         if i == 0 { break }
         i--
         var prefix = scope.prefixes[i]
         if xmldsig_str_eq(prefix, "xml") { continue }
-        if !ns_list_contains(prefixes, prefix) {
-            prefixes = teko::list::push(prefixes, prefix)
-            uris = teko::list::push(uris, scope.uris[i])
+        if !ns_list_contains(prefixes[0..count], prefix) {
+            prefixes[count] = prefix
+            uris[count] = scope.uris[i]
+            count++
         }
     }
-    NsScope { prefixes = prefixes; uris = uris }
+    NsScope { prefixes = prefixes[0..count]; uris = uris[0..count] }
 }
 
 fn inline_namespaces(node: xml::XmlNode, scope: NsScope): xml::XmlNode {
     var distinct = ns_scope_distinct(scope)
-    var attrs = node.attributes
+    var attrs: [node.attributes.len + distinct.prefixes.len]xml::XmlAttr = []
+    var count: u64 = 0
+    var a: u64 = 0
+    loop {
+        if a >= node.attributes.len { break }
+        attrs[count] = node.attributes[a]
+        count++
+        a++
+    }
     var i: u64 = 0
     loop {
         if i >= distinct.prefixes.len { break }
         var prefix = distinct.prefixes[i]
         if !ns_scope_has_prefix(node, prefix) {
-            attrs = teko::list::push(attrs, xmldsig_xmlns_attr(prefix, distinct.uris[i]))
+            attrs[count] = xmldsig_xmlns_attr(prefix, distinct.uris[i])
+            count++
         }
         i++
     }
-    xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = attrs; children = node.children }
+    xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = attrs[0..count]; children = node.children }
 }
 
 fn find_element_with_inlined_namespaces(node: xml::XmlNode, target_local: str, scope: NsScope): xml::XmlNode | null {
@@ -386,15 +391,17 @@ fn first_child_local(parent: xml::XmlNode, target_local: str): xml::XmlNode | nu
 }
 
 fn strip_signature_children(node: xml::XmlNode): xml::XmlNode {
-    var kept: []xml::XmlNode = []
+    var kept: [node.children.len]xml::XmlNode = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= node.children.len { break }
         var c = node.children[i]
         if !(c.kind == xml::NodeKind::Element && xmldsig_str_eq(c.local, "Signature")) {
-            kept = teko::list::push(kept, c)
+            kept[count] = c
+            count++
         }
         i++
     }
-    xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = node.attributes; children = kept }
+    xml::XmlNode { kind = node.kind; name = node.name; prefix = node.prefix; local = node.local; namespace_uri = node.namespace_uri; text = node.text; attributes = node.attributes; children = kept[0..count] }
 }

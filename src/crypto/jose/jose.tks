@@ -75,14 +75,7 @@ fn jose_find_byte(s: str, target: byte, from: u64): u64 {
  * `rsa_bytes_concat`).
  */
 exp fn jose_bytes_concat(a: []byte, b: []byte): []byte {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i++
-    }
-    out
+    [..a, ..b]
 }
 
 type JoseHeaderEntry = struct {
@@ -91,11 +84,11 @@ type JoseHeaderEntry = struct {
 }
 
 fn jose_header_entries_of(obj: json::JsonObject): []JoseHeaderEntry {
-    var out: []JoseHeaderEntry = []
+    var out: [obj.keys.len]JoseHeaderEntry = []
     var i: u64 = 0
     loop {
         if i >= obj.keys.len { break }
-        out = teko::list::push(out, JoseHeaderEntry { key = obj.keys[i]; value = obj.values[i] })
+        out[i] = JoseHeaderEntry { key = obj.keys[i]; value = obj.values[i] }
         i++
     }
     out
@@ -103,7 +96,8 @@ fn jose_header_entries_of(obj: json::JsonObject): []JoseHeaderEntry {
 
 fn jose_sort_header_entries(entries: []JoseHeaderEntry): []JoseHeaderEntry {
     var remaining = entries
-    var out: []JoseHeaderEntry = []
+    var out: [entries.len]JoseHeaderEntry = []
+    var k: u64 = 0
     loop {
         if remaining.len == 0 { break }
         var best: u64 = 0
@@ -113,12 +107,17 @@ fn jose_sort_header_entries(entries: []JoseHeaderEntry): []JoseHeaderEntry {
             if jose_str_less(remaining[i].key, remaining[best].key) { best = i }
             i++
         }
-        out = teko::list::push(out, remaining[best])
-        var rest: []JoseHeaderEntry = []
+        out[k] = remaining[best]
+        k++
+        var rest: [remaining.len - 1]JoseHeaderEntry = []
+        var r: u64 = 0
         var j: u64 = 0
         loop {
             if j >= remaining.len { break }
-            if j != best { rest = teko::list::push(rest, remaining[j]) }
+            if j != best {
+                rest[r] = remaining[j]
+                r++
+            }
             j++
         }
         remaining = rest
@@ -135,15 +134,15 @@ fn jose_sort_header_entries(entries: []JoseHeaderEntry): []JoseHeaderEntry {
  */
 exp fn jose_build_header_json(alg: JwsAlg, extra: json::JsonObject): str {
     var entries = jose_header_entries_of(extra)
-    entries = teko::list::push(entries, JoseHeaderEntry { key = "alg"; value = json::JsonString { value = jws_alg_name(alg) } })
+    entries = [..entries, JoseHeaderEntry { key = "alg"; value = json::JsonString { value = jws_alg_name(alg) } }]
     var sorted = jose_sort_header_entries(entries)
-    var keys: []str = []
-    var values: []@JsonValue() = []
+    var keys: [sorted.len]str = []
+    var values: [sorted.len]@JsonValue() = []
     var i: u64 = 0
     loop {
         if i >= sorted.len { break }
-        keys = teko::list::push(keys, sorted[i].key)
-        values = teko::list::push(values, sorted[i].value)
+        keys[i] = sorted[i].key
+        values[i] = sorted[i].value
         i++
     }
     json::encode(json::JsonObject { keys = keys; values = values })
