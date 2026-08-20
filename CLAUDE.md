@@ -192,6 +192,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     Eixo A/C) persegue —, as **execuções full `teko build .` que carregam testes ficam LIBERADAS** e a
     proibição de `teko test .` cai. O gatilho é o marco MEDIDO no build seco, não uma data. Agente que
     for validar mede o pico do build seco e reporta ao cruzar o marco.
+- **GEN0 SAI DO SEED, NÃO DO `fetch_teko.sh` (dono 2026-08-20).** Todo agente que precise buildar linka o
+  `gen0` a partir do `bootstrap/teko.c` commitado — **exatamente como o CI** (`CC=clang
+  scripts/build_gen1_from_c.sh`) — e daí gen0→gen1→gen2→gen3. **NUNCA chama `scripts/fetch_teko.sh`**: o
+  `gh` das sandboxes de agente não tem acesso ao repo (403), então `fetch_teko.sh` falha
+  estruturalmente e sempre falhará aqui. O seed do `bootstrap/teko.c` é a **alavancagem do self-host** —
+  sozinho basta pra reconstruir o compilador inteiro, sem binário externo. É caminho **PRIMÁRIO, não
+  fallback**: não se gasta uma tentativa no `fetch_teko.sh` antes.
 - **NATIVE É A ÚLTIMA ETAPA — gated em MEMÓRIA ESTÁVEL (dono 2026-08-19).** NÃO se toca no backend
   native (lowering, syscall, `.o`, endgame no-C, os stops de fronteira do gen2) enquanto a memória não
   estabilizar. O gatilho tríplice, TODO ele: **(1) build seco ≤ 1,5 GB · (2) fixpoint gen2==gen3
