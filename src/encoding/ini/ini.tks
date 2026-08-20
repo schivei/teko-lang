@@ -68,20 +68,19 @@ fn find_entry_index(section: IniSection, key: str): i64 {
 fn ensure_section(doc: IniDocument, name: str): IniDocument {
     if find_section_index(doc, name) >= 0 { return doc }
     var section = IniSection { name = name; entries = [] }
-    IniDocument { sections = teko::list::push(doc.sections, section) }
+    IniDocument { sections = [..doc.sections, section] }
 }
 
 fn set_entry(section: IniSection, key: str, value: str): IniSection {
     var idx = find_entry_index(section, key)
     if idx < 0 {
-        var grown = teko::list::push(section.entries, IniEntry { key = key; value = value })
-        return IniSection { name = section.name; entries = grown }
+        return IniSection { name = section.name; entries = [..section.entries, IniEntry { key = key; value = value }] }
     }
-    var entries: []IniEntry = []
+    var entries: [section.entries.len]IniEntry = []
     var i: u64 = 0
     loop {
         if i >= section.entries.len { break }
-        if (i to i64) == idx { entries = teko::list::push(entries, IniEntry { key = key; value = value }) } else { entries = teko::list::push(entries, section.entries[i]) }
+        if (i to i64) == idx { entries[i] = IniEntry { key = key; value = value } } else { entries[i] = section.entries[i] }
         i++
     }
     IniSection { name = section.name; entries = entries }
@@ -94,11 +93,11 @@ fn set_entry(section: IniSection, key: str, value: str): IniSection {
 exp fn ini_set(doc: IniDocument, section: str, key: str, value: str): IniDocument {
     var with_section = ensure_section(doc, section)
     var idx = find_section_index(with_section, section)
-    var sections: []IniSection = []
+    var sections: [with_section.sections.len]IniSection = []
     var i: u64 = 0
     loop {
         if i >= with_section.sections.len { break }
-        if (i to i64) == idx { sections = teko::list::push(sections, set_entry(with_section.sections[i], key, value)) } else { sections = teko::list::push(sections, with_section.sections[i]) }
+        if (i to i64) == idx { sections[i] = set_entry(with_section.sections[i], key, value) } else { sections[i] = with_section.sections[i] }
         i++
     }
     IniDocument { sections = sections }
@@ -167,14 +166,7 @@ fn skip_blank_lines(input: []byte, pos: u64): u64 {
 }
 
 fn bytes_range_str(input: []byte, from: u64, to: u64): str {
-    var out: []byte = []
-    var i = from
-    loop {
-        if i >= to { break }
-        out = teko::list::push(out, input[i])
-        i++
-    }
-    str(out)
+    str(input[from..to])
 }
 
 fn trim_str(s: str): str {
@@ -272,36 +264,49 @@ exp fn parse_ini(text: str): IniDocument | error {
     doc
 }
 
-fn bytes_append_str(out: []byte, s: str): []byte {
-    var b = bytes_of_str(s)
-    var o = out
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        o = teko::list::push(o, b[i])
-        i++
-    }
-    o
-}
-
-fn append_section(out: []byte, section: IniSection): []byte {
-    var o = out
+fn section_to_bytes(section: IniSection): []byte {
+    var header: []byte = []
     if section.name.len > 0 {
-        o = teko::list::push(o, b'[')
-        o = bytes_append_str(o, section.name)
-        o = teko::list::push(o, b']')
-        o = teko::list::push(o, b'\n')
+        header = [b'[', ..bytes_of_str(section.name), b']', b'\n']
     }
+    var parts: [section.entries.len][]byte = []
+    var total = header.len
     var i: u64 = 0
     loop {
         if i >= section.entries.len { break }
-        o = bytes_append_str(o, section.entries[i].key)
-        o = bytes_append_str(o, " = ")
-        o = bytes_append_str(o, section.entries[i].value)
-        o = teko::list::push(o, b'\n')
+        var eb: []byte = [
+            ..bytes_of_str(section.entries[i].key),
+            ..bytes_of_str(" = "),
+            ..bytes_of_str(section.entries[i].value),
+            b'\n',
+        ]
+        parts[i] = eb
+        total = total + eb.len
         i++
     }
-    o
+    var out: [total]byte = []
+    var pos: u64 = 0
+    var h: u64 = 0
+    loop {
+        if h >= header.len { break }
+        out[pos] = header[h]
+        pos++
+        h++
+    }
+    i = 0
+    loop {
+        if i >= section.entries.len { break }
+        var eb = parts[i]
+        var j: u64 = 0
+        loop {
+            if j >= eb.len { break }
+            out[pos] = eb[j]
+            pos++
+            j++
+        }
+        i++
+    }
+    out
 }
 
 /**
@@ -310,11 +315,29 @@ fn append_section(out: []byte, section: IniSection): []byte {
  * `IniDocument` has a valid INI rendering.
  */
 exp fn write_ini(doc: IniDocument): str {
-    var out: []byte = []
+    var parts: [doc.sections.len][]byte = []
+    var total: u64 = 0
     var i: u64 = 0
     loop {
         if i >= doc.sections.len { break }
-        out = append_section(out, doc.sections[i])
+        var sb = section_to_bytes(doc.sections[i])
+        parts[i] = sb
+        total = total + sb.len
+        i++
+    }
+    var out: [total]byte = []
+    var pos: u64 = 0
+    i = 0
+    loop {
+        if i >= doc.sections.len { break }
+        var sb = parts[i]
+        var j: u64 = 0
+        loop {
+            if j >= sb.len { break }
+            out[pos] = sb[j]
+            pos++
+            j++
+        }
         i++
     }
     str(out)
