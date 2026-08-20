@@ -84,22 +84,12 @@ exp type AesKey = struct {
 }
 
 fn cipher_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
-    loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
-        i++
-    }
-    out
-}
-
-fn cipher_append(dst: []byte, src: []byte): []byte {
-    var out = dst
+    var n = to - from
+    var out: [n]byte = []
     var i: u64 = 0
     loop {
-        if i >= src.len { break }
-        out = teko::list::push(out, src[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
@@ -126,13 +116,13 @@ fn aes_be_word(b: []byte, off: u64): u32 {
     ((b[off] to u32) << 24) | ((b[off + 1] to u32) << 16) | ((b[off + 2] to u32) << 8) | (b[off + 3] to u32)
 }
 
-fn aes_push_be_word(buf: []byte, x: u32): []byte {
-    var b = buf
-    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
-    b = teko::list::push(b, (x & 0xFF) to byte)
-    b
+fn aes_be_word_bytes(x: u32): []byte {
+    [
+        ((x >> 24) & 0xFF) to byte,
+        ((x >> 16) & 0xFF) to byte,
+        ((x >> 8) & 0xFF) to byte,
+        (x & 0xFF) to byte,
+    ]
 }
 
 fn aes_sub_word(w: u32): u32 {
@@ -148,14 +138,14 @@ fn aes_rot_word(w: u32): u32 {
 }
 
 fn aes_expand_words(key: []byte, nk: u64, nr: u64): []u32 {
-    var w: []u32 = []
+    var total = 4 * (nr + 1)
+    var w: [total]u32 = []
     var i: u64 = 0
     loop {
         if i >= nk { break }
-        w = teko::list::push(w, aes_be_word(key, i * 4))
+        w[i] = aes_be_word(key, i * 4)
         i++
     }
-    var total = 4 * (nr + 1)
     loop {
         if i >= total { break }
         var temp = w[i - 1]
@@ -165,7 +155,7 @@ fn aes_expand_words(key: []byte, nk: u64, nr: u64): []u32 {
         } else if nk > 6 && m == 4 {
             temp = aes_sub_word(temp)
         }
-        w = teko::list::push(w, w[i - nk] ^ temp)
+        w[i] = w[i - nk] ^ temp
         i++
     }
     w
@@ -183,109 +173,121 @@ exp fn aes_key_expand(key: []byte): AesKey | CryptoError {
     var nk = key.len / 4
     var nr = nk + 6
     var words = aes_expand_words(key, nk, nr)
-    var rk: []byte = []
+    var rk: [words.len * 4]byte = []
     var i: u64 = 0
     loop {
         if i >= words.len { break }
-        rk = aes_push_be_word(rk, words[i])
+        var bw = aes_be_word_bytes(words[i])
+        rk[i * 4] = bw[0]
+        rk[i * 4 + 1] = bw[1]
+        rk[i * 4 + 2] = bw[2]
+        rk[i * 4 + 3] = bw[3]
         i++
     }
     AesKey { round_keys = rk; rounds = nr }
 }
 
 fn aes_sub_bytes(s: []byte, box: []u32): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
-        out = teko::list::push(out, box[s[i] to u64] to byte)
+        out[i] = box[s[i] to u64] to byte
         i++
     }
     out
 }
 
 fn aes_shift_rows(s: []byte): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
         var r = i % 4
         var c = i / 4
         var src = r + 4 * ((c + r) % 4)
-        out = teko::list::push(out, s[src])
+        out[i] = s[src]
         i++
     }
     out
 }
 
 fn aes_inv_shift_rows(s: []byte): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
         var r = i % 4
         var c = i / 4
         var src = r + 4 * ((c + 4 - r) % 4)
-        out = teko::list::push(out, s[src])
+        out[i] = s[src]
         i++
     }
     out
 }
 
-fn aes_mix_one_column(out: []byte, s0: u32, s1: u32, s2: u32, s3: u32): []byte {
+fn aes_mix_one_column(s0: u32, s1: u32, s2: u32, s3: u32): []byte {
     var o0 = gf_mul8(s0, 2) ^ gf_mul8(s1, 3) ^ s2 ^ s3
     var o1 = s0 ^ gf_mul8(s1, 2) ^ gf_mul8(s2, 3) ^ s3
     var o2 = s0 ^ s1 ^ gf_mul8(s2, 2) ^ gf_mul8(s3, 3)
     var o3 = gf_mul8(s0, 3) ^ s1 ^ s2 ^ gf_mul8(s3, 2)
-    var b = out
-    b = teko::list::push(b, (o0 & 0xFF) to byte)
-    b = teko::list::push(b, (o1 & 0xFF) to byte)
-    b = teko::list::push(b, (o2 & 0xFF) to byte)
-    b = teko::list::push(b, (o3 & 0xFF) to byte)
-    b
+    [
+        (o0 & 0xFF) to byte,
+        (o1 & 0xFF) to byte,
+        (o2 & 0xFF) to byte,
+        (o3 & 0xFF) to byte,
+    ]
 }
 
-fn aes_inv_mix_one_column(out: []byte, s0: u32, s1: u32, s2: u32, s3: u32): []byte {
+fn aes_inv_mix_one_column(s0: u32, s1: u32, s2: u32, s3: u32): []byte {
     var o0 = gf_mul8(s0, 14) ^ gf_mul8(s1, 11) ^ gf_mul8(s2, 13) ^ gf_mul8(s3, 9)
     var o1 = gf_mul8(s0, 9) ^ gf_mul8(s1, 14) ^ gf_mul8(s2, 11) ^ gf_mul8(s3, 13)
     var o2 = gf_mul8(s0, 13) ^ gf_mul8(s1, 9) ^ gf_mul8(s2, 14) ^ gf_mul8(s3, 11)
     var o3 = gf_mul8(s0, 11) ^ gf_mul8(s1, 13) ^ gf_mul8(s2, 9) ^ gf_mul8(s3, 14)
-    var b = out
-    b = teko::list::push(b, (o0 & 0xFF) to byte)
-    b = teko::list::push(b, (o1 & 0xFF) to byte)
-    b = teko::list::push(b, (o2 & 0xFF) to byte)
-    b = teko::list::push(b, (o3 & 0xFF) to byte)
-    b
+    [
+        (o0 & 0xFF) to byte,
+        (o1 & 0xFF) to byte,
+        (o2 & 0xFF) to byte,
+        (o3 & 0xFF) to byte,
+    ]
 }
 
 fn aes_mix_columns(s: []byte): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var c: u64 = 0
     loop {
         if c >= 4 { break }
-        out = aes_mix_one_column(out, s[4 * c] to u32, s[4 * c + 1] to u32, s[4 * c + 2] to u32, s[4 * c + 3] to u32)
+        var col = aes_mix_one_column(s[4 * c] to u32, s[4 * c + 1] to u32, s[4 * c + 2] to u32, s[4 * c + 3] to u32)
+        out[4 * c] = col[0]
+        out[4 * c + 1] = col[1]
+        out[4 * c + 2] = col[2]
+        out[4 * c + 3] = col[3]
         c++
     }
     out
 }
 
 fn aes_inv_mix_columns(s: []byte): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var c: u64 = 0
     loop {
         if c >= 4 { break }
-        out = aes_inv_mix_one_column(out, s[4 * c] to u32, s[4 * c + 1] to u32, s[4 * c + 2] to u32, s[4 * c + 3] to u32)
+        var col = aes_inv_mix_one_column(s[4 * c] to u32, s[4 * c + 1] to u32, s[4 * c + 2] to u32, s[4 * c + 3] to u32)
+        out[4 * c] = col[0]
+        out[4 * c + 1] = col[1]
+        out[4 * c + 2] = col[2]
+        out[4 * c + 3] = col[3]
         c++
     }
     out
 }
 
 fn aes_add_round_key(s: []byte, rk: []byte, round: u64): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
-        out = teko::list::push(out, ((s[i] to u32) ^ (rk[16 * round + i] to u32)) to byte)
+        out[i] = ((s[i] to u32) ^ (rk[16 * round + i] to u32)) to byte
         i++
     }
     out
@@ -346,44 +348,26 @@ exp fn aes_decrypt_block(key: []byte, block: []byte): []byte | CryptoError {
 }
 
 fn cipher_xor16(a: []byte, b: []byte): []byte {
-    var out: []byte = []
+    var out: [16]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
-        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        out[i] = ((a[i] to u32) ^ (b[i] to u32)) to byte
         i++
     }
     out
 }
 
-fn cipher_stream_xor(out: []byte, data: []byte, off: u64, ks: []byte, n: u64): []byte {
-    var o = out
-    var j: u64 = 0
-    loop {
-        if j >= n { break }
-        o = teko::list::push(o, ((data[off + j] to u32) ^ (ks[j] to u32)) to byte)
-        j++
-    }
-    o
-}
-
 fn ctr_increment(block: []byte): []byte {
-    var rev: []byte = []
+    var out: [16]byte = []
     var carry: u32 = 1
     var i: u64 = 16
     loop {
         if i == 0 { break }
         i--
         var v = (block[i] to u32) + carry
-        rev = teko::list::push(rev, (v & 0xFF) to byte)
+        out[i] = (v & 0xFF) to byte
         carry = v >> 8
-    }
-    var out: []byte = []
-    var j: u64 = 16
-    loop {
-        if j == 0 { break }
-        j--
-        out = teko::list::push(out, rev[j])
     }
     out
 }
@@ -402,13 +386,18 @@ exp fn aes_cbc_encrypt(key: []byte, iv: []byte, pt: []byte): []byte | CryptoErro
     var iv16 = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
     if pt.len % 16 != 0 { return crypto_error("aes_cbc: plaintext length must be a multiple of 16") }
     var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
-    var out: []byte = []
+    var out: [pt.len]byte = []
     var prev = iv16
     var off: u64 = 0
     loop {
         if off >= pt.len { break }
         var c = aes_encrypt_block_ks(ks, cipher_xor16(cipher_slice(pt, off, off + 16), prev))
-        out = cipher_append(out, c)
+        var j: u64 = 0
+        loop {
+            if j >= 16 { break }
+            out[off + j] = c[j]
+            j++
+        }
         prev = c
         off = off + 16
     }
@@ -422,13 +411,19 @@ exp fn aes_cbc_decrypt(key: []byte, iv: []byte, ct: []byte): []byte | CryptoErro
     var iv16 = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
     if ct.len % 16 != 0 { return crypto_error("aes_cbc: ciphertext length must be a multiple of 16") }
     var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
-    var out: []byte = []
+    var out: [ct.len]byte = []
     var prev = iv16
     var off: u64 = 0
     loop {
         if off >= ct.len { break }
         var cblock = cipher_slice(ct, off, off + 16)
-        out = cipher_append(out, cipher_xor16(aes_decrypt_block_ks(ks, cblock), prev))
+        var pblock = cipher_xor16(aes_decrypt_block_ks(ks, cblock), prev)
+        var j: u64 = 0
+        loop {
+            if j >= 16 { break }
+            out[off + j] = pblock[j]
+            j++
+        }
         prev = cblock
         off = off + 16
     }
@@ -444,13 +439,18 @@ exp fn aes_cbc_decrypt(key: []byte, iv: []byte, ct: []byte): []byte | CryptoErro
 exp fn aes_ctr(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
     var counter = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
     var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
-    var out: []byte = []
+    var out: [data.len]byte = []
     var off: u64 = 0
     loop {
         if off >= data.len { break }
         var block = aes_encrypt_block_ks(ks, counter)
         var n = if data.len - off < 16 { data.len - off } else { 16 }
-        out = cipher_stream_xor(out, data, off, block, n)
+        var j: u64 = 0
+        loop {
+            if j >= n { break }
+            out[off + j] = ((data[off + j] to u32) ^ (block[j] to u32)) to byte
+            j++
+        }
         counter = ctr_increment(counter)
         off = off + 16
     }
@@ -465,13 +465,18 @@ exp fn aes_ctr(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
 exp fn aes_ofb(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
     var feedback = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
     var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
-    var out: []byte = []
+    var out: [data.len]byte = []
     var off: u64 = 0
     loop {
         if off >= data.len { break }
         feedback = aes_encrypt_block_ks(ks, feedback)
         var n = if data.len - off < 16 { data.len - off } else { 16 }
-        out = cipher_stream_xor(out, data, off, feedback, n)
+        var j: u64 = 0
+        loop {
+            if j >= n { break }
+            out[off + j] = ((data[off + j] to u32) ^ (feedback[j] to u32)) to byte
+            j++
+        }
         off = off + 16
     }
     out
@@ -485,14 +490,25 @@ exp fn aes_ofb(key: []byte, iv: []byte, data: []byte): []byte | CryptoError {
 exp fn aes_cfb_encrypt(key: []byte, iv: []byte, pt: []byte): []byte | CryptoError {
     var feedback = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
     var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
-    var out: []byte = []
+    var out: [pt.len]byte = []
     var off: u64 = 0
     loop {
         if off >= pt.len { break }
         var ksblock = aes_encrypt_block_ks(ks, feedback)
         var n = if pt.len - off < 16 { pt.len - off } else { 16 }
-        var cblock = cipher_stream_xor([], pt, off, ksblock, n)
-        out = cipher_append(out, cblock)
+        var cblock: [n]byte = []
+        var j: u64 = 0
+        loop {
+            if j >= n { break }
+            cblock[j] = ((pt[off + j] to u32) ^ (ksblock[j] to u32)) to byte
+            j++
+        }
+        var k: u64 = 0
+        loop {
+            if k >= n { break }
+            out[off + k] = cblock[k]
+            k++
+        }
         feedback = cblock
         off = off + 16
     }
@@ -507,13 +523,18 @@ exp fn aes_cfb_encrypt(key: []byte, iv: []byte, pt: []byte): []byte | CryptoErro
 exp fn aes_cfb_decrypt(key: []byte, iv: []byte, ct: []byte): []byte | CryptoError {
     var feedback = match require_iv16(iv) { []byte as v => v; CryptoError as e => return e }
     var ks = match aes_key_expand(key) { AesKey as k => k; CryptoError as e => return e }
-    var out: []byte = []
+    var out: [ct.len]byte = []
     var off: u64 = 0
     loop {
         if off >= ct.len { break }
         var ksblock = aes_encrypt_block_ks(ks, feedback)
         var n = if ct.len - off < 16 { ct.len - off } else { 16 }
-        out = cipher_stream_xor(out, ct, off, ksblock, n)
+        var j: u64 = 0
+        loop {
+            if j >= n { break }
+            out[off + j] = ((ct[off + j] to u32) ^ (ksblock[j] to u32)) to byte
+            j++
+        }
         feedback = cipher_slice(ct, off, off + n)
         off = off + 16
     }
@@ -543,35 +564,31 @@ fn cipher_le_word(b: []byte, off: u64): u32 {
     (b[off] to u32) | ((b[off + 1] to u32) << 8) | ((b[off + 2] to u32) << 16) | ((b[off + 3] to u32) << 24)
 }
 
-fn cipher_push_le_word(buf: []byte, x: u32): []byte {
-    var b = buf
-    b = teko::list::push(b, (x & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
-    b
+fn cipher_le_word_bytes(x: u32): []byte {
+    [
+        (x & 0xFF) to byte,
+        ((x >> 8) & 0xFF) to byte,
+        ((x >> 16) & 0xFF) to byte,
+        ((x >> 24) & 0xFF) to byte,
+    ]
 }
 
 fn chacha20_init_state(key: []byte, nonce: []byte, counter: u32): []u32 {
-    var s: []u32 = []
-    s = teko::list::push(s, 0x61707865)
-    s = teko::list::push(s, 0x3320646e)
-    s = teko::list::push(s, 0x79622d32)
-    s = teko::list::push(s, 0x6b206574)
-    var i: u64 = 0
-    loop {
-        if i >= 8 { break }
-        s = teko::list::push(s, cipher_le_word(key, i * 4))
-        i++
-    }
-    s = teko::list::push(s, counter)
-    var j: u64 = 0
-    loop {
-        if j >= 3 { break }
-        s = teko::list::push(s, cipher_le_word(nonce, j * 4))
-        j++
-    }
-    s
+    [
+        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
+        cipher_le_word(key, 0),
+        cipher_le_word(key, 4),
+        cipher_le_word(key, 8),
+        cipher_le_word(key, 12),
+        cipher_le_word(key, 16),
+        cipher_le_word(key, 20),
+        cipher_le_word(key, 24),
+        cipher_le_word(key, 28),
+        counter,
+        cipher_le_word(nonce, 0),
+        cipher_le_word(nonce, 4),
+        cipher_le_word(nonce, 8),
+    ]
 }
 
 fn chacha20_rounds(s: []u32): []u32 {
@@ -636,34 +653,21 @@ fn chacha20_rounds(s: []u32): []u32 {
         x14 = q7.d
         round++
     }
-    var out: []u32 = []
-    out = teko::list::push(out, x0)
-    out = teko::list::push(out, x1)
-    out = teko::list::push(out, x2)
-    out = teko::list::push(out, x3)
-    out = teko::list::push(out, x4)
-    out = teko::list::push(out, x5)
-    out = teko::list::push(out, x6)
-    out = teko::list::push(out, x7)
-    out = teko::list::push(out, x8)
-    out = teko::list::push(out, x9)
-    out = teko::list::push(out, x10)
-    out = teko::list::push(out, x11)
-    out = teko::list::push(out, x12)
-    out = teko::list::push(out, x13)
-    out = teko::list::push(out, x14)
-    out = teko::list::push(out, x15)
-    out
+    [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15]
 }
 
 fn chacha20_block(key: []byte, nonce: []byte, counter: u32): []byte {
     var s = chacha20_init_state(key, nonce, counter)
     var w = chacha20_rounds(s)
-    var out: []byte = []
+    var out: [64]byte = []
     var i: u64 = 0
     loop {
         if i >= 16 { break }
-        out = cipher_push_le_word(out, teko::math::wrapping_add_u32(w[i], s[i]))
+        var lw = cipher_le_word_bytes(teko::math::wrapping_add_u32(w[i], s[i]))
+        out[i * 4] = lw[0]
+        out[i * 4 + 1] = lw[1]
+        out[i * 4 + 2] = lw[2]
+        out[i * 4 + 3] = lw[3]
         i++
     }
     out
@@ -678,14 +682,19 @@ fn chacha20_block(key: []byte, nonce: []byte, counter: u32): []byte {
 exp fn chacha20(key: []byte, nonce: []byte, counter: u32, data: []byte): []byte | CryptoError {
     if key.len != 32 { return crypto_error("chacha20: key must be exactly 32 bytes") }
     if nonce.len != 12 { return crypto_error("chacha20: nonce must be exactly 12 bytes (96-bit)") }
-    var out: []byte = []
+    var out: [data.len]byte = []
     var off: u64 = 0
     var block_counter = counter
     loop {
         if off >= data.len { break }
         var ks = chacha20_block(key, nonce, block_counter)
         var n = if data.len - off < 64 { data.len - off } else { 64 }
-        out = cipher_stream_xor(out, data, off, ks, n)
+        var j: u64 = 0
+        loop {
+            if j >= n { break }
+            out[off + j] = ((data[off + j] to u32) ^ (ks[j] to u32)) to byte
+            j++
+        }
         block_counter = teko::math::wrapping_add_u32(block_counter, 1)
         off = off + 64
     }
