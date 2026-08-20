@@ -28,55 +28,81 @@ fn base64_char_of(alphabet: Base64Alphabet, sextet: u32): byte {
     alphabet.char63
 }
 
-fn encode_full_group(out: []byte, alphabet: Base64Alphabet, b0: byte, b1: byte, b2: byte): []byte {
+fn encode_full_group(alphabet: Base64Alphabet, b0: byte, b1: byte, b2: byte): []byte {
     var n0 = b0 to u32
     var n1 = b1 to u32
     var n2 = b2 to u32
-    var o = out
-    o = teko::list::push(o, base64_char_of(alphabet, n0 >> 2))
-    o = teko::list::push(o, base64_char_of(alphabet, ((n0 & 0x3) << 4) | (n1 >> 4)))
-    o = teko::list::push(o, base64_char_of(alphabet, ((n1 & 0xF) << 2) | (n2 >> 6)))
-    o = teko::list::push(o, base64_char_of(alphabet, n2 & 0x3F))
-    o
+    [
+        base64_char_of(alphabet, n0 >> 2),
+        base64_char_of(alphabet, ((n0 & 0x3) << 4) | (n1 >> 4)),
+        base64_char_of(alphabet, ((n1 & 0xF) << 2) | (n2 >> 6)),
+        base64_char_of(alphabet, n2 & 0x3F),
+    ]
 }
 
-fn encode_tail_group(out: []byte, alphabet: Base64Alphabet, b0: byte, has_b1: bool, b1: byte): []byte {
+fn encode_tail_group(alphabet: Base64Alphabet, b0: byte, has_b1: bool, b1: byte): []byte {
     var n0 = b0 to u32
-    var o = out
-    o = teko::list::push(o, base64_char_of(alphabet, n0 >> 2))
+    var out: [4]byte = []
+    var count: u64 = 0
+    out[count] = base64_char_of(alphabet, n0 >> 2)
+    count++
     if has_b1 {
         var n1 = b1 to u32
-        o = teko::list::push(o, base64_char_of(alphabet, ((n0 & 0x3) << 4) | (n1 >> 4)))
-        o = teko::list::push(o, base64_char_of(alphabet, (n1 & 0xF) << 2))
-        if alphabet.padded { o = teko::list::push(o, b'=') }
-        return o
+        out[count] = base64_char_of(alphabet, ((n0 & 0x3) << 4) | (n1 >> 4))
+        count++
+        out[count] = base64_char_of(alphabet, (n1 & 0xF) << 2)
+        count++
+        if alphabet.padded {
+            out[count] = b'='
+            count++
+        }
+        return out[0..count]
     }
-    o = teko::list::push(o, base64_char_of(alphabet, (n0 & 0x3) << 4))
+    out[count] = base64_char_of(alphabet, (n0 & 0x3) << 4)
+    count++
     if alphabet.padded {
-        o = teko::list::push(o, b'=')
-        o = teko::list::push(o, b'=')
+        out[count] = b'='
+        count++
+        out[count] = b'='
+        count++
     }
-    o
+    out[0..count]
 }
 
 /** Encodes `data` as Base64 text under `alphabet`. Total — always succeeds. */
 exp fn encode(data: []byte, alphabet: Base64Alphabet): str {
-    var out: []byte = []
-    var i: u64 = 0
     var full_groups = data.len / 3
+    var out: [full_groups * 4 + 4]byte = []
+    var count: u64 = 0
+    var i: u64 = 0
     loop {
         if i >= full_groups { break }
         var grp_off = i * 3
-        out = encode_full_group(out, alphabet, data[grp_off], data[grp_off + 1], data[grp_off + 2])
+        var g = encode_full_group(alphabet, data[grp_off], data[grp_off + 1], data[grp_off + 2])
+        var j: u64 = 0
+        loop {
+            if j >= g.len { break }
+            out[count] = g[j]
+            count++
+            j++
+        }
         i++
     }
     var remainder = data.len - (full_groups * 3)
+    var tail: []byte = []
     if remainder == 1 {
-        out = encode_tail_group(out, alphabet, data[full_groups * 3], false, 0 to byte)
+        tail = encode_tail_group(alphabet, data[full_groups * 3], false, 0 to byte)
     } else if remainder == 2 {
-        out = encode_tail_group(out, alphabet, data[full_groups * 3], true, data[(full_groups * 3) + 1])
+        tail = encode_tail_group(alphabet, data[full_groups * 3], true, data[(full_groups * 3) + 1])
     }
-    str(out)
+    var t: u64 = 0
+    loop {
+        if t >= tail.len { break }
+        out[count] = tail[t]
+        count++
+        t++
+    }
+    str(out[0..count])
 }
 
 /** `encode` under the standard, padded alphabet. */
@@ -125,49 +151,41 @@ fn trim_base64_padding(input: []byte, alphabet: Base64Alphabet): Base64Trimmed |
 }
 
 fn bytes_slice_view(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
-    loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
-        i++
-    }
-    out
+    data[from..to]
 }
 
-fn decode_full_quantum(out: []byte, alphabet: Base64Alphabet, c0: byte, c1: byte, c2: byte, c3: byte): []byte | error {
+fn decode_full_quantum(alphabet: Base64Alphabet, c0: byte, c1: byte, c2: byte, c3: byte): []byte | error {
     var v0 = match base64_value_of(alphabet, c0) { u32 as v => v; error as e => return e }
     var v1 = match base64_value_of(alphabet, c1) { u32 as v => v; error as e => return e }
     var v2 = match base64_value_of(alphabet, c2) { u32 as v => v; error as e => return e }
     var v3 = match base64_value_of(alphabet, c3) { u32 as v => v; error as e => return e }
-    var o = out
-    o = teko::list::push(o, ((v0 << 2) | (v1 >> 4)) to byte)
-    o = teko::list::push(o, (((v1 << 4) | (v2 >> 2)) & 0xFF) to byte)
-    o = teko::list::push(o, (((v2 << 6) | v3) & 0xFF) to byte)
-    o
+    [
+        ((v0 << 2) | (v1 >> 4)) to byte,
+        (((v1 << 4) | (v2 >> 2)) & 0xFF) to byte,
+        (((v2 << 6) | v3) & 0xFF) to byte,
+    ]
 }
 
-fn decode_tail_quantum(out: []byte, alphabet: Base64Alphabet, c0: byte, c1: byte, has_c2: bool, c2: byte): []byte | error {
+fn decode_tail_quantum(alphabet: Base64Alphabet, c0: byte, c1: byte, has_c2: bool, c2: byte): []byte | error {
     var v0 = match base64_value_of(alphabet, c0) { u32 as v => v; error as e => return e }
     var v1 = match base64_value_of(alphabet, c1) { u32 as v => v; error as e => return e }
-    var o = out
-    o = teko::list::push(o, ((v0 << 2) | (v1 >> 4)) to byte)
-    if has_c2 {
-        var v2 = match base64_value_of(alphabet, c2) { u32 as v => v; error as e => return e }
-        o = teko::list::push(o, (((v1 << 4) | (v2 >> 2)) & 0xFF) to byte)
+    var first = ((v0 << 2) | (v1 >> 4)) to byte
+    if !has_c2 {
+        return [first]
     }
-    o
+    var v2 = match base64_value_of(alphabet, c2) { u32 as v => v; error as e => return e }
+    [first, (((v1 << 4) | (v2 >> 2)) & 0xFF) to byte]
 }
 
-fn decode_trailing_quantum(out: []byte, alphabet: Base64Alphabet, trimmed: Base64Trimmed, start: u64): []byte | error {
+fn decode_trailing_quantum(alphabet: Base64Alphabet, trimmed: Base64Trimmed, start: u64): []byte | error {
     var body = trimmed.body
     if trimmed.pad_count == 0 {
-        return decode_full_quantum(out, alphabet, body[start], body[start + 1], body[start + 2], body[start + 3])
+        return decode_full_quantum(alphabet, body[start], body[start + 1], body[start + 2], body[start + 3])
     }
     if trimmed.pad_count == 1 {
-        return decode_tail_quantum(out, alphabet, body[start], body[start + 1], true, body[start + 2])
+        return decode_tail_quantum(alphabet, body[start], body[start + 1], true, body[start + 2])
     }
-    decode_tail_quantum(out, alphabet, body[start], body[start + 1], false, 0 to byte)
+    decode_tail_quantum(alphabet, body[start], body[start + 1], false, 0 to byte)
 }
 
 fn validate_unpadded_length(body_len: u64): error | null {
@@ -175,25 +193,12 @@ fn validate_unpadded_length(body_len: u64): error | null {
     null
 }
 
-fn decode_unpadded_tail(out: []byte, alphabet: Base64Alphabet, body: []byte, full_quantums: u64): []byte | error {
+fn decode_unpadded_tail(alphabet: Base64Alphabet, body: []byte, full_quantums: u64): []byte | error {
     var start = full_quantums * 4
     var remainder = body.len - start
-    if remainder == 0 { return out }
-    if remainder == 2 { return decode_tail_quantum(out, alphabet, body[start], body[start + 1], false, 0 to byte) }
-    decode_tail_quantum(out, alphabet, body[start], body[start + 1], true, body[start + 2])
-}
-
-fn decode_full_quantums(out: []byte, alphabet: Base64Alphabet, body: []byte, full_quantums: u64): []byte | error {
-    var o = out
-    var i: u64 = 0
-    loop {
-        if i >= full_quantums { break }
-        var grp_off = i * 4
-        var next = match decode_full_quantum(o, alphabet, body[grp_off], body[grp_off + 1], body[grp_off + 2], body[grp_off + 3]) { []byte as b => b; error as e => return e }
-        o = next
-        i++
-    }
-    o
+    if remainder == 0 { return [] }
+    if remainder == 2 { return decode_tail_quantum(alphabet, body[start], body[start + 1], false, 0 to byte) }
+    decode_tail_quantum(alphabet, body[start], body[start + 1], true, body[start + 2])
 }
 
 /** Decodes Base64 `text` under `alphabet` back to raw bytes. Malformed input is a checked error. */
@@ -206,11 +211,38 @@ exp fn decode(text: str, alphabet: Base64Alphabet): []byte | error {
     var body = trimmed.body
     var has_trailing = alphabet.padded && trimmed.pad_count > 0
     var full_quantums = body.len / 4
-    var out = match decode_full_quantums([], alphabet, body, full_quantums) { []byte as b => b; error as e => return e }
-    if has_trailing {
-        return decode_trailing_quantum(out, alphabet, trimmed, full_quantums * 4)
+    var tail = match decode_tail_bytes(alphabet, trimmed, body, full_quantums, has_trailing) { []byte as t => t; error as e => return e }
+    var out: [full_quantums * 3 + tail.len]byte = []
+    var count: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= full_quantums { break }
+        var grp_off = i * 4
+        var q = match decode_full_quantum(alphabet, body[grp_off], body[grp_off + 1], body[grp_off + 2], body[grp_off + 3]) { []byte as b => b; error as e => return e }
+        var j: u64 = 0
+        loop {
+            if j >= q.len { break }
+            out[count] = q[j]
+            count++
+            j++
+        }
+        i++
     }
-    decode_unpadded_tail(out, alphabet, body, full_quantums)
+    var t: u64 = 0
+    loop {
+        if t >= tail.len { break }
+        out[count] = tail[t]
+        count++
+        t++
+    }
+    out
+}
+
+fn decode_tail_bytes(alphabet: Base64Alphabet, trimmed: Base64Trimmed, body: []byte, full_quantums: u64, has_trailing: bool): []byte | error {
+    if has_trailing {
+        return decode_trailing_quantum(alphabet, trimmed, full_quantums * 4)
+    }
+    decode_unpadded_tail(alphabet, body, full_quantums)
 }
 
 /** `decode` under the standard, padded alphabet. */
