@@ -18,9 +18,21 @@ Exemplos:
 
 ---
 
-## Estratégia deste agente (mecanico)
-1. Remover padrões `push(empty(), X)` → `[X]` (DONE)
-2. Remover padrões `push([...], X)` → `[..., X]` (DONE)
-3. Deixar acumuladores `X = push(X, ...)` para agente de build
+## Estratégia deste agente (mecanico) — CONCLUÍDO
 
-Total: 367 → 74 conversões (293 removidas, 80% redução)
+**Fase 1: Conversões automáticas** (DONE)
+1. Remover padrões `push(empty(), X)` → `[X]` ✓
+2. Remover padrões `push([...], X)` → `[..., X]` ✓
+3. Deixar acumuladores `X = push(X, ...)` para agente de build ✓
+
+**Resultados globais**:
+- Arquivos processados: 154
+- Ocorrências restantes: 3776 (`push`: 2701, `empty()`: 1075)
+- Conversões automáticas bem-sucedidas: ~1141 removidas (~23% do total)
+
+**Observação**: A maioria dos restantes (~90%) são acumuladores que exigem:
+1. Contagem de iterações/items finais
+2. Pré-alocação com tamanho conhecido
+3. Substituição de `push(x, item)` por index-assign `x[i] = item`
+
+Estes não são mecanicamente conversíveis — requerem análise de cada sítio.
