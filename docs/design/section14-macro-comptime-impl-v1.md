@@ -80,6 +80,12 @@ post-monomorph slot, a thin driver over Family B (§4 recon below).
   The `${string}`/concat/prefix authoring (the parametric-type-macro "Form 1") belongs HERE, not in
   `macro`; it is a NEW family, FUTURE work, not this wave.
 
+**Owner ruling 2026-08-20 (recovered post-reset — DECISION_LOG D66).** Refinements to the three-family model above:
+- **Composition matrix (what each form's body may contain).** `generator` is **atomic** — no meta inside and none in its emitted string. `macro` may nest only `macro`; `comptime` may nest only `comptime`. Every cross-family nesting is **forbidden** (macro✗comptime, comptime✗macro, and none may contain a `generator`). Self-nesting rides the existing recursion (expansion/fold are already recursive). No dedicated checker guard is needed — a cross-family nesting **fails naturally** in the pipeline.
+- **`generator` (C) was BUILT and LOST, not never-written** — it was dropped in the working-tree reset. Since the corpus does not use it, it stays **parked as future work**; if ever needed, **rebuild from this design, do not "recover" code.** Why it alone needs a pre-compilation: it runs at LEX time and must return a **string**, but the lexer cannot execute an AST. So a pre-compilation scans the source, classifies the three families into an in-memory dispatch table, and compiles **only the generators** into an in-memory intermediate binary; at lex time the lexer just calls the generator's pointer. `macro` (template token-splice) and `comptime` (interpreted fold) need no such ahead-of-time compile.
+- **Dispatch is implicit (lookup-based) and that IS the canon.** The explicit GENERATOR/MACRO/COMPTIME tagged cascade once considered was a means to remove a blocker that no longer exists — **dropped.**
+- **Inertness preserved:** the Family-A/Family-B passes are no-ops when the corpus uses no `@`/`macro`/`comptime`, so generation stays byte-identical.
+
 ### 1.4 Serialization substrate — `@fields<T>()` projects over `FieldView`
 
 - `pub type FieldView = struct { name: str; type: Type }` — `src/checker/collect.tks:1618`.
