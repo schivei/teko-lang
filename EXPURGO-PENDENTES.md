@@ -25,3 +25,13 @@ para o dono/integrador decidir (não é follow-up deferido, é in-wave).
 - `str_iter::split_lines` é sobre entrada DIMENSIONADA (`bytes`), logo tratável
   (linhas ≤ bytes.len); mas o arquivo não fica limpo enquanto `collect_strs` estiver
   no mesmo módulo — segue junto do ruling de collect.
+
+## src/compress/inflate.tks — buffer de SAÍDA da descompressão
+- O `out`/`state.output` do inflate cresce à medida que os símbolos são decodificados;
+  o tamanho descomprimido NÃO é conhecido a priori (é o próprio propósito do inflate).
+  Mesma classe do `collect`: crescimento intrínseco, uma passada, sem limite superior
+  barato. Precisa de ruling (ex.: buffer com dobra controlada / API com tamanho
+  descomprimido conhecido do gzip ISIZE). As tabelas de Huffman internas são tratáveis,
+  mas não limpam o arquivo sozinhas.
+- (deflate/zlib/gzip — a COMPRESSÃO — foram convertidos: saída = cabeçalho + payload +
+  checksum, tamanho calculável.)

@@ -3,45 +3,38 @@ pub const GZIP_MAGIC: []byte = [0x1F to byte, 0x8B to byte]
 fn gzip_cm_deflate(): byte { 8 to byte }
 
 fn gzip_header(): []byte {
-    var out: []byte = []
     var magic = GZIP_MAGIC
-    out = teko::list::push(out, magic[0])
-    out = teko::list::push(out, magic[1])
-    out = teko::list::push(out, gzip_cm_deflate())
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 255 to byte)
-    out
+    [
+        magic[0],
+        magic[1],
+        gzip_cm_deflate(),
+        0 to byte,
+        0 to byte,
+        0 to byte,
+        0 to byte,
+        0 to byte,
+        0 to byte,
+        255 to byte,
+    ]
 }
 
 /** teko::compress::gzip_compress — compress `data` into a complete gzip member (RFC 1952). */
 exp fn gzip_compress(data: []byte): []byte {
-    var out = gzip_header()
-
     var payload = teko::compress::deflate(data)
-    var i: u64 = 0
-    loop {
-        if i >= payload.len { break }
-        out = teko::list::push(out, payload[i])
-        i++
-    }
-
     var crc = teko::compress::crc32_of(data)
-    out = teko::list::push(out, (crc & 0xFF) to byte)
-    out = teko::list::push(out, ((crc >> 8) & 0xFF) to byte)
-    out = teko::list::push(out, ((crc >> 16) & 0xFF) to byte)
-    out = teko::list::push(out, ((crc >> 24) & 0xFF) to byte)
-
     var isize = (data.len % 4294967296) to u32
-    out = teko::list::push(out, (isize & 0xFF) to byte)
-    out = teko::list::push(out, ((isize >> 8) & 0xFF) to byte)
-    out = teko::list::push(out, ((isize >> 16) & 0xFF) to byte)
-    out = teko::list::push(out, ((isize >> 24) & 0xFF) to byte)
-    out
+    [
+        ..gzip_header(),
+        ..payload,
+        (crc & 0xFF) to byte,
+        ((crc >> 8) & 0xFF) to byte,
+        ((crc >> 16) & 0xFF) to byte,
+        ((crc >> 24) & 0xFF) to byte,
+        (isize & 0xFF) to byte,
+        ((isize >> 8) & 0xFF) to byte,
+        ((isize >> 16) & 0xFF) to byte,
+        ((isize >> 24) & 0xFF) to byte,
+    ]
 }
 
 /** teko::compress::gzip_decompress — decompress a complete gzip member, verifying magic, method,
