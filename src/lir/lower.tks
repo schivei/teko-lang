@@ -6,9 +6,9 @@ pub type LEnv = struct { names: []str; vregs: []u32; len_vregs: []u32; has_len: 
 
 pub fn empty_lenv(): LEnv {
     LEnv {
-        names = teko::list::empty(); vregs = teko::list::empty(); len_vregs = teko::list::empty()
-        has_len = teko::list::empty(); is_slot = teko::list::empty()
-        is_scalar_slot = teko::list::empty(); slot_ltype = teko::list::empty()
+        names = []; vregs = []; len_vregs = []
+        has_len = []; is_slot = []
+        is_scalar_slot = []; slot_ltype = []
     }
 }
 
@@ -269,17 +269,17 @@ fn lower_div_zero_guard(ctx: LowerCtx, divisor: u32, line: u32, col: u32): Lower
 }
 
 fn lower_trap_unless(ctx: LowerCtx, cond: u32, panic_symbol: str, line: u32, col: u32): LowerCtx {
-    lower_trap_unless_with(ctx, cond, panic_symbol, teko::list::empty(), line, col)
+    lower_trap_unless_with(ctx, cond, panic_symbol, [], line, col)
 }
 
 fn lower_trap_unless_with(ctx: LowerCtx, cond: u32, panic_symbol: str, args: []u32, line: u32, col: u32): LowerCtx {
     var okb = alloc_block(ctx.func)
     var trapb = alloc_block(okb.func)
-    var br = branch_inst(cond, okb.block_id, teko::list::empty(), trapb.block_id, teko::list::empty(), line, col)
+    var br = branch_inst(cond, okb.block_id, [], trapb.block_id, [], line, col)
     var branched = ctx_append(ctx_with(ctx, trapb.func, ctx.block_id, ctx.env), br)
     var trap_ctx = ctx_goto(branched, trapb.block_id)
     var called = ctx_append(trap_ctx, void_call_inst(panic_symbol, args, false, line, col))
-    var trap_closed = ctx_append(called, jump_inst(trapb.block_id, teko::list::empty(), line, col))
+    var trap_closed = ctx_append(called, jump_inst(trapb.block_id, [], line, col))
     ctx_with(trap_closed, trap_closed.func, okb.block_id, branched.env)
 }
 
@@ -572,12 +572,12 @@ fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32): LowerCtx {
 }
 
 fn one_region_arg(vreg: u32): []u32 {
-    teko::list::push(teko::list::empty(), vreg)
+    [vreg]
 }
 
 fn open_frame_region(ctx: LowerCtx, line: u32, col: u32): LowerCtx {
     var rr = ctx_alloc(ctx)
-    var with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", teko::list::empty(), false, line, col))
+    var with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", [], false, line, col))
     var fr = ctx_alloc(with_rr)
     var with_fr = ctx_append(fr.ctx, call_inst(fr.vreg, "tk_region_new_u", one_region_arg(rr.vreg), false, line, col))
     var entered = ctx_append(with_fr, void_call_inst("tk_region_enter_u", one_region_arg(fr.vreg), false, line, col))
@@ -590,7 +590,7 @@ fn emit_region_leaves(ctx: LowerCtx, line: u32, col: u32): LowerCtx {
     loop {
         if i == 0 { break }
         i = i - 1
-        cur = ctx_append(cur, void_call_inst("tk_region_leave", teko::list::empty(), false, line, col))
+        cur = ctx_append(cur, void_call_inst("tk_region_leave", [], false, line, col))
     }
     cur
 }
@@ -647,7 +647,7 @@ fn register_scope_decl_name(ctx: LowerCtx, name: str): LowerCtx {
 fn region_current_vreg(ctx: LowerCtx): Lowered {
     if ctx.region_stack.len > 0 { return Lowered { ctx = ctx; vreg = ctx.region_stack[ctx.region_stack.len - 1].region_vreg } }
     var r = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(r.ctx, call_inst(r.vreg, "tk_region_root_u", teko::list::empty(), false, 0, 0)); vreg = r.vreg }
+    Lowered { ctx = ctx_append(r.ctx, call_inst(r.vreg, "tk_region_root_u", [], false, 0, 0)); vreg = r.vreg }
 }
 
 fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, col: u32): LowerCtx | error {
@@ -665,7 +665,7 @@ fn close_native_region(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error {
         return error { message = "native backend N1: close_native_region with no open region (internal invariant break)" }
     }
     var top = ctx.region_stack[ctx.region_stack.len - 1]
-    var left = ctx_append(ctx, void_call_inst("tk_region_leave", teko::list::empty(), false, line, col))
+    var left = ctx_append(ctx, void_call_inst("tk_region_leave", [], false, line, col))
     var dropped = ctx_append(left, void_call_inst("tk_region_drop_u", one_region_arg(top.region_vreg), false, line, col))
     ctx_with_regions(dropped, pop_region_stack(ctx.region_stack))
 }
@@ -800,15 +800,15 @@ fn lower_logical(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary): Lowered
     var is_and = b.op == lexer::TokenKind::AndAnd
     var t_target = if is_and { rhsb.block_id } else { shortb.block_id }
     var f_target = if is_and { shortb.block_id } else { rhsb.block_id }
-    var br = branch_inst(lo.vreg, t_target, teko::list::empty(), f_target, teko::list::empty(), e.line, e.col)
+    var br = branch_inst(lo.vreg, t_target, [], f_target, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(lo.ctx, mp.func, lo.ctx.block_id, lo.ctx.env), br)
     var shortr = ctx_alloc(ctx_goto(ctx1, shortb.block_id))
     var with_const = ctx_append(shortr.ctx, const_int_inst(shortr.vreg, short_circuit_value(b.op), e.line, e.col))
-    var short_args = teko::list::push(teko::list::empty(), shortr.vreg)
+    var short_args = [shortr.vreg]
     var short_func = close_arm_to(with_const, mergeb.block_id, short_args, e.line, e.col)
     var rhs_ctx = ctx_with(with_const, short_func, rhsb.block_id, ctx1.env)
     var ro = match lower_expr(rhs_ctx, b.right) { Lowered as x => x; error as err => return err }
-    var rhs_args = teko::list::push(teko::list::empty(), ro.vreg)
+    var rhs_args = [ro.vreg]
     var rhs_func = close_arm_to(ro.ctx, mergeb.block_id, rhs_args, e.line, e.col)
     Lowered { ctx = ctx_with(ro.ctx, rhs_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
 }
@@ -993,13 +993,13 @@ fn lower_bool_and(ctx: LowerCtx, a_vreg: u32, b_vreg: u32, line: u32, col: u32):
     var elseb = alloc_block(thenb.func)
     var mergeb = alloc_block(elseb.func)
     var mp = add_block_param(mergeb.func, mergeb.block_id)
-    var br = branch_inst(a_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), line, col)
+    var br = branch_inst(a_vreg, thenb.block_id, [], elseb.block_id, [], line, col)
     var after_br = append_inst(mp.func, ctx.block_id, br)
-    var then_args = teko::list::push(teko::list::empty(), b_vreg)
+    var then_args = [b_vreg]
     var after_then = append_inst(after_br, thenb.block_id, jump_inst(mergeb.block_id, then_args, line, col))
     var zc = alloc_vreg(after_then)
     var with_zero = append_inst(zc.func, elseb.block_id, const_int_inst(zc.vreg, 0, line, col))
-    var else_args = teko::list::push(teko::list::empty(), zc.vreg)
+    var else_args = [zc.vreg]
     var after_else = append_inst(with_zero, elseb.block_id, jump_inst(mergeb.block_id, else_args, line, col))
     Lowered { ctx = ctx_with(ctx, after_else, mergeb.block_id, ctx.env); vreg = mp.vreg }
 }
@@ -1330,8 +1330,8 @@ fn lower_call_args(ctx: LowerCtx, c: checker::TCall): LoweredArgs | error {
 
 fn callee_param_types(c: checker::TCall): []@Type() {
     match c.callee_type {
-        checker::Func as f => if f.variadic { teko::list::empty() } else { f.params }
-        _ => teko::list::empty()
+        checker::Func as f => if f.variadic { [] } else { f.params }
+        _ => []
     }
 }
 
@@ -1362,7 +1362,7 @@ fn lower_fat_arg_into_param(ctx: LowerCtx, decl: @Type() | null, arg: checker::T
 }
 
 fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, params: []@Type(), i: u64): LoweredArgs | error {
-    if i >= args.len { return LoweredArgs { ctx = ctx; vregs = teko::list::empty() } }
+    if i >= args.len { return LoweredArgs { ctx = ctx; vregs = [] } }
     var is_ref_pos = i < rf.len && rf[i] && arg_needs_auto_ref(args[i])
     var one = match if is_ref_pos { lower_addr_of_arg(ctx, args[i]) } else { lower_arg_into_param(ctx, param_type_at(params, i), args[i]) } { LoweredArgs as x => x; error as err => return err }
     var rest = match lower_args_ref_aware(one.ctx, args, rf, params, i + 1) { LoweredArgs as x => x; error as err => return err }
@@ -1449,7 +1449,7 @@ fn lower_last_index_of_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall)
     var elseb = alloc_block(thenb.func)
     var mergeb = alloc_block(elseb.func)
     var mp = add_block_param(mergeb.func, mergeb.block_id)
-    var br = branch_inst(ok.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    var br = branch_inst(ok.vreg, thenb.block_id, [], elseb.block_id, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(ok.ctx, mp.func, ok.ctx.block_id, ok.ctx.env), br)
     var then_ctx = ctx_goto(ctx1, thenb.block_id)
     var loaded = ctx_alloc(then_ctx)
@@ -1457,12 +1457,12 @@ fn lower_last_index_of_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall)
     var then_base = ctx_alloc(with_load)
     var then_alloca = ctx_append(then_base.ctx, alloca_inst(then_base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
     var then_built = lower_last_index_of_ok_arm(then_alloca, then_base.vreg, ok_index to i64, loaded.vreg, e.line, e.col)
-    var then_func = close_arm_to(then_built, mergeb.block_id, teko::list::push(teko::list::empty(), then_base.vreg), e.line, e.col)
+    var then_func = close_arm_to(then_built, mergeb.block_id, [then_base.vreg], e.line, e.col)
     var else_ctx = ctx_with(ctx1, then_func, elseb.block_id, ctx1.env)
     var err_base = ctx_alloc(else_ctx)
     var err_alloca = ctx_append(err_base.ctx, alloca_inst(err_base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
     var else_built = match lower_last_index_of_error_arm(err_alloca, err_base.vreg, err_index to i64, e) { LowerCtx as x => x; error as err2 => return err2 }
-    var else_func = close_arm_to(else_built, mergeb.block_id, teko::list::push(teko::list::empty(), err_base.vreg), e.line, e.col)
+    var else_func = close_arm_to(else_built, mergeb.block_id, [err_base.vreg], e.line, e.col)
     Lowered { ctx = ctx_with(ctx1, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
 }
 
@@ -1585,7 +1585,7 @@ fn lower_ffi_open_branch(ok: Lowered, line: u32, col: u32): FfiBranch {
     var elseb = alloc_block(thenb.func)
     var mergeb = alloc_block(elseb.func)
     var mp = add_block_param(mergeb.func, mergeb.block_id)
-    var br = branch_inst(ok.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), line, col)
+    var br = branch_inst(ok.vreg, thenb.block_id, [], elseb.block_id, [], line, col)
     var ctx1 = ctx_append(ctx_with(ok.ctx, mp.func, ok.ctx.block_id, ok.ctx.env), br)
     FfiBranch { ctx1 = ctx1; thenb = thenb.block_id; elseb = elseb.block_id; mergeb = mergeb.block_id; merge_param = mp.vreg }
 }
@@ -1596,7 +1596,7 @@ fn lower_ffi_error_else_arm(br: FfiBranch, out_ptr: u32, out_len: u32, err_index
     var slot = ctx_alloc(loaded.ctx)
     var alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
     var built = match lower_ffi_error_arm(alloca, slot.vreg, err_index to i64, loaded.ptr, loaded.len, e) { LowerCtx as x => x; error as err => return err }
-    close_arm_to(built, br.mergeb, teko::list::push(teko::list::empty(), slot.vreg), e.line, e.col)
+    close_arm_to(built, br.mergeb, [slot.vreg], e.line, e.col)
 }
 
 fn lower_ffi_fat_or_error_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall, ok_symbol: str, ok_member: @Type()): Lowered | error {
@@ -1610,7 +1610,7 @@ fn lower_ffi_fat_or_error_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCa
     var then_base = ctx_alloc(then_loaded.ctx)
     var then_alloca = ctx_append(then_base.ctx, alloca_inst(then_base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
     var then_built = lower_ffi_fat_ok_arm(then_alloca, then_base.vreg, ok_index to i64, then_loaded.ptr, then_loaded.len, e.line, e.col)
-    var then_func = close_arm_to(then_built, br.mergeb, teko::list::push(teko::list::empty(), then_base.vreg), e.line, e.col)
+    var then_func = close_arm_to(then_built, br.mergeb, [then_base.vreg], e.line, e.col)
     var after_then = ctx_with(br.ctx1, then_func, br.ctx1.block_id, br.ctx1.env)
     var br_then = FfiBranch { ctx1 = after_then; thenb = br.thenb; elseb = br.elseb; mergeb = br.mergeb; merge_param = br.merge_param }
     var else_func = match lower_ffi_error_else_arm(br_then, slots.out_ptr, slots.out_len, err_index, e) { LFunc as x => x; error as err => return err }
@@ -1625,7 +1625,7 @@ fn lower_ffi_ures_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall, ok_s
     var br = lower_ffi_open_branch(slots.ok, e.line, e.col)
     var then_ctx = ctx_goto(br.ctx1, br.thenb)
     var then_absent = lower_variant_absent(then_ctx, null_index to i64, e)
-    var then_func = close_arm_to(then_absent.ctx, br.mergeb, teko::list::push(teko::list::empty(), then_absent.vreg), e.line, e.col)
+    var then_func = close_arm_to(then_absent.ctx, br.mergeb, [then_absent.vreg], e.line, e.col)
     var after_then = ctx_with(br.ctx1, then_func, br.ctx1.block_id, br.ctx1.env)
     var br_then = FfiBranch { ctx1 = after_then; thenb = br.thenb; elseb = br.elseb; mergeb = br.mergeb; merge_param = br.merge_param }
     var else_func = match lower_ffi_error_else_arm(br_then, slots.out_ptr, slots.out_len, err_index, e) { LFunc as x => x; error as err => return err }
@@ -1745,7 +1745,7 @@ fn lower_buf_ptr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall): Lowe
     var len_lowered = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
 
     var region_vreg = ctx_alloc(len_lowered.ctx)
-    var with_region_call = ctx_append(region_vreg.ctx, call_inst(region_vreg.vreg, "tk_region_root_u", teko::list::empty(), false, e.line, e.col))
+    var with_region_call = ctx_append(region_vreg.ctx, call_inst(region_vreg.vreg, "tk_region_root_u", [], false, e.line, e.col))
 
     var result_vreg = ctx_alloc(with_region_call)
     var alloc_args = two_args(region_vreg.vreg, len_lowered.vreg)
@@ -1853,7 +1853,7 @@ fn lower_args(ctx: LowerCtx, args: []checker::TExpr, params: []@Type()): Lowered
 
 fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, params: []@Type(), start: u64): LoweredArgs | error {
     var cur = ctx
-    var vregs: []u32 = teko::list::empty()
+    var vregs: []u32 = []
     var i: u64 = start
     loop {
         if i >= args.len { break }
@@ -2162,7 +2162,7 @@ fn lower_iface_slot(ctx: LowerCtx, vtable: u32, slot: u32, line: u32, col: u32):
 }
 
 fn iface_call_args(data: u32, rest: []u32): []u32 {
-    var out: []u32 = teko::list::push(teko::list::empty(), data)
+    var out: []u32 = [data]
     var i: u64 = 0
     loop {
         if i >= rest.len { break }
@@ -2224,7 +2224,7 @@ fn ltype_is_void(t: LType): bool {
 }
 
 fn env_first_param_types(rest: []LType): []LType {
-    var out: []LType = teko::list::push(teko::list::empty(), LType::Ptr)
+    var out: []LType = [LType::Ptr]
     var i: u64 = 0
     loop {
         if i >= rest.len { break }
@@ -2320,7 +2320,7 @@ fn lower_closure_fatptr(ctx: LowerCtx, base_vreg: u32, line: u32, col: u32): Clo
 }
 
 fn closure_call_args(env: u32, rest: []u32): []u32 {
-    var out: []u32 = teko::list::push(teko::list::empty(), env)
+    var out: []u32 = [env]
     var i: u64 = 0
     loop {
         if i >= rest.len { break }
@@ -2498,11 +2498,11 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         func = seeded.func; block_id = 0; env = seeded.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
-        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
+        defers = []; loop_targets = []; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums); table = ctx.table
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+        region_stack = []; escaping = []; frees_old_names = []; bracket_depth = 0
     }
     var with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     var done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -3026,7 +3026,7 @@ fn collect_reassigned_match(m: checker::TMatchExpr, acc: []str): []str {
 }
 
 fn collect_addr_taken_locals(body: []@TStatement(), ref_fns: []LRefFnInfo, enums: []LEnumInfo): []str {
-    addr_taken_stmts(body, ref_fns, enums, teko::list::empty())
+    addr_taken_stmts(body, ref_fns, enums, [])
 }
 
 fn arg_needs_addr_slot(arg: checker::TExpr, enums: []LEnumInfo): bool {
@@ -3194,7 +3194,7 @@ fn append_all_u32(acc: []u32, xs: []u32): []u32 {
 }
 
 fn reassigned_scalars(arms: []@TStatement(), env: LEnv): []str {
-    var raw = collect_reassigned_stmts(arms, teko::list::empty())
+    var raw = collect_reassigned_stmts(arms, [])
     var out: []str = teko::list::empty()
     var i: u64 = 0
     loop {
@@ -3252,7 +3252,7 @@ fn add_merge_scalar_params(f: LFunc, block_id: u32, env: LEnv, names: []str): Pr
 }
 
 fn merge_value_args(value: u32, scalars: []u32): []u32 {
-    var out = teko::list::push(teko::list::empty(), value)
+    var out = [value]
     var i: u64 = 0
     loop {
         if i >= scalars.len { break }
@@ -3458,15 +3458,15 @@ fn lower_if_stmt(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vre
     var elseb = alloc_block(thenb.func)
     var mergeblk = alloc_block(elseb.func)
     var merged = add_merge_scalar_params(mergeblk.func, mergeblk.block_id, ctx.env, names)
-    var br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    var br = branch_inst(cond_vreg, thenb.block_id, [], elseb.block_id, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
     var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var then_done = match lower_block(then_opened, f.then_blk) { LowerCtx as c => c; error as err => return err }
-    var then_closed = match close_arm_replaying_defers(then_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    var then_closed = match close_arm_replaying_defers(then_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     var else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
     var else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var else_done = if f.has_else { match lower_block(else_opened, f.else_blk) { LowerCtx as c => c; error as err => return err } } else { else_opened }
-    var else_closed = match close_arm_replaying_defers(else_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    var else_closed = match close_arm_replaying_defers(else_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = 0 }
 }
 
@@ -3479,16 +3479,16 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     var mergeblk = alloc_block(elseb.func)
     var mp = add_block_param(mergeblk.func, mergeblk.block_id)
     var merged = add_merge_scalar_params(mp.func, mergeblk.block_id, ctx.env, names)
-    var br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    var br = branch_inst(cond_vreg, thenb.block_id, [], elseb.block_id, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
     var result_ty = ltype_of(e.type, ctx.enums)
     var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var then_val = match lower_block_value(then_opened, f.then_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
-    var then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    var then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [then_val.vreg], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     var else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
     var else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var else_val = match lower_block_value(else_opened, f.else_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
-    var else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    var else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, [else_val.vreg], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
 }
 
@@ -4203,8 +4203,8 @@ fn bind_variant_fields(ctx: LowerCtx, base_vreg: u32, layout: LStructLayout, fie
 type MatchArmEntry = struct { ctx: LowerCtx; next_block: u32 }
 
 fn close_test_to(ctx: LowerCtx, test: PatternTest, arm_block: u32, next_block: u32, line: u32, col: u32): LowerCtx {
-    if test.always { return ctx_append(ctx, jump_inst(arm_block, teko::list::empty(), line, col)) }
-    ctx_append(ctx, branch_inst(test.vreg, arm_block, teko::list::empty(), next_block, teko::list::empty(), line, col))
+    if test.always { return ctx_append(ctx, jump_inst(arm_block, [], line, col)) }
+    ctx_append(ctx, branch_inst(test.vreg, arm_block, [], next_block, [], line, col))
 }
 
 fn lower_match_arm_entry(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj): MatchArmEntry | error {
@@ -4220,7 +4220,7 @@ fn lower_match_arm_entry(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, s
 fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32): MatchArmEntry | error {
     var guardo = match lower_expr(ctx, arm.guard) { Lowered as x => x; error as err => return err }
     var guardb = alloc_block(guardo.ctx.func)
-    var guarded = append_inst(guardb.func, guardo.ctx.block_id, branch_inst(guardo.vreg, guardb.block_id, teko::list::empty(), next_block, teko::list::empty(), arm.guard.line, arm.guard.col))
+    var guarded = append_inst(guardb.func, guardo.ctx.block_id, branch_inst(guardo.vreg, guardb.block_id, [], next_block, [], arm.guard.line, arm.guard.col))
     MatchArmEntry { ctx = ctx_with(guardo.ctx, guarded, guardb.block_id, guardo.ctx.env); next_block = next_block }
 }
 
@@ -4229,7 +4229,7 @@ fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, s
     var step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
     var opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var bv = match lower_block_value(opened, arm.body, ltype_of(e.type, ctx.enums), e.type) { LowerBlockValue as x => x; error as err => return err }
-    var closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    var closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, [bv.vreg], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
@@ -4271,7 +4271,7 @@ fn lower_match_arm_stmt(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, su
     var step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
     var opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var done = match lower_block(opened, arm.body) { LowerCtx as c => c; error as err => return err }
-    var closed = match close_arm_replaying_defers(done, ctx.defers, step.ctx.region_stack, merge_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    var closed = match close_arm_replaying_defers(done, ctx.defers, step.ctx.region_stack, merge_id, [], indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
@@ -4523,7 +4523,7 @@ fn box_aggregate_value_at(v: Lowered, box_bytes: u32, line: u32, col: u32): Lowe
 fn emit_elem_box(v: Lowered, bytes: u32, line: u32, col: u32): Lowered {
     var size = ctx_alloc(v.ctx)
     var with_size = ctx_append(size.ctx, const_int_inst(size.vreg, bytes to i64, line, col))
-    var args: []u32 = teko::list::push(teko::list::empty(), v.vreg)
+    var args: []u32 = [v.vreg]
     args = teko::list::push(args, size.vreg)
     var boxed = ctx_alloc(with_size)
     Lowered { ctx = ctx_append(boxed.ctx, call_inst(boxed.vreg, "tk_slice_elem_box", args, false, line, col)); vreg = boxed.vreg }
@@ -4646,7 +4646,7 @@ fn push_head_args(dst_fat: LoweredFat, item_slot: u32, esz: u32): []u32 {
 }
 
 fn merge_fat_value_args(ptr: u32, len: u32): []u32 {
-    teko::list::push(teko::list::push(teko::list::empty(), ptr), len)
+    [ptr, len]
 }
 
 pub type LowerBlockValueFat = struct { ctx: LowerCtx; terminated: bool; ptr: u32; len: u32 }
@@ -4730,7 +4730,7 @@ fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr): LoweredF
     var mpp = add_block_param(mergeb.func, mergeb.block_id)
     var mpl = add_block_param(mpp.func, mergeb.block_id)
     var merged = add_merge_scalar_params(mpl.func, mergeb.block_id, co.ctx.env, names)
-    var br = branch_inst(co.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    var br = branch_inst(co.vreg, thenb.block_id, [], elseb.block_id, [], e.line, e.col)
     var ctx1 = ctx_append(ctx_with(co.ctx, merged.func, co.ctx.block_id, co.ctx.env), br)
     var then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     var then_fat = match lower_block_value_fat(then_opened, f.then_blk) { LowerBlockValueFat as x => x; error as err => return err }
@@ -4923,7 +4923,7 @@ pub type InternedRodata = struct { ctx: LowerCtx; symbol: str }
 
 fn intern_rodata(ctx: LowerCtx, text: str): InternedRodata {
     var sym = rodata_symbol(ctx.rodata.len)
-    var entry = LRodata { symbol = sym; bytes = str_to_bytes(text); relocs = teko::list::empty() }
+    var entry = LRodata { symbol = sym; bytes = str_to_bytes(text); relocs = [] }
     InternedRodata { ctx = ctx_with_rodata(ctx, teko::list::push(ctx.rodata, entry)); symbol = sym }
 }
 
@@ -4970,11 +4970,11 @@ fn lower_bytestr_lit(ctx: LowerCtx, e: checker::TExpr, s: checker::TByteStrLit):
 }
 
 fn two_args(a: u32, b: u32): []u32 {
-    teko::list::push(teko::list::push(teko::list::empty(), a), b)
+    [a, b]
 }
 
 fn single_arg(a: u32): []u32 {
-    teko::list::push(teko::list::empty(), a)
+    [a]
 }
 
 fn four_args(a_ptr: u32, a_len: u32, b_ptr: u32, b_len: u32): []u32 {
@@ -5187,7 +5187,7 @@ fn error_struct_name(): str { "error" }
 const ERROR_FIELD_NAMES: []str = ["message", "file", "line", "col", "expected", "actual"]
 
 fn error_field_types(): []LType {
-    var types: []LType = teko::list::push(teko::list::empty(), LType::Ptr)
+    var types: []LType = [LType::Ptr]
     types = teko::list::push(types, LType::Ptr)
     types = teko::list::push(types, LType::I32)
     types = teko::list::push(types, LType::I32)
@@ -5561,7 +5561,7 @@ fn zero_fill_bytes(ctx: LowerCtx, ptr_vreg: u32, count_vreg: u32, line: u32, col
     var entered = append_inst(with_i0, ctx.block_id, jump_inst(headb.block_id, single_arg(i0.vreg), line, col))
     var cmp = alloc_vreg(entered)
     var with_cmp = append_inst(cmp.func, headb.block_id, bin_inst(cmp.vreg, LBinOp::ICmpLtU, ip.vreg, count_vreg, line, col))
-    var with_branch = append_inst(with_cmp, headb.block_id, branch_inst(cmp.vreg, bodyb.block_id, teko::list::empty(), exitb.block_id, teko::list::empty(), line, col))
+    var with_branch = append_inst(with_cmp, headb.block_id, branch_inst(cmp.vreg, bodyb.block_id, [], exitb.block_id, [], line, col))
     var addr = alloc_vreg(with_branch)
     var with_addr = append_inst(addr.func, bodyb.block_id, bin_inst(addr.vreg, LBinOp::IAdd, ptr_vreg, ip.vreg, line, col))
     var zero_byte = alloc_vreg(with_addr)
@@ -5792,7 +5792,7 @@ fn bracket_to_region(ctx: LowerCtx, region_vreg: u32, line: u32, col: u32): Self
 
 fn bracket_to_root(ctx: LowerCtx, line: u32, col: u32): SelfAppendBracket {
     var rr = ctx_alloc(ctx)
-    var with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", teko::list::empty(), false, line, col))
+    var with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", [], false, line, col))
     bracket_to_region(with_rr, rr.vreg, line, col)
 }
 
@@ -5805,7 +5805,7 @@ fn enter_self_append_fallback(ctx: LowerCtx, name: str, line: u32, col: u32): Se
 
 fn leave_self_append_region(ctx: LowerCtx, opened: bool, line: u32, col: u32): LowerCtx {
     if !opened { return ctx }
-    ctx_append(ctx, void_call_inst("tk_region_leave", teko::list::empty(), false, line, col))
+    ctx_append(ctx, void_call_inst("tk_region_leave", [], false, line, col))
 }
 
 fn lower_assign_plain_self_append(ctx: LowerCtx, slot: u32, a: checker::TAssign): LowerStmtOut | error {
@@ -6050,11 +6050,11 @@ pub fn lower_function(f: checker::TFunction, table: checker::TypeTable, layouts:
         func = with_slot.func; block_id = 0; env = with_slot.env
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         variants = variants
-        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
+        defers = []; loop_targets = []; externs = externs
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = checker::fn_escaping_vars(f); frees_old_names = checker::fn_frees_old_vars(f); bracket_depth = 0
+        region_stack = []; escaping = checker::fn_escaping_vars(f); frees_old_names = checker::fn_frees_old_vars(f); bracket_depth = 0
     }
     var framed = open_frame_region(ctx0, f.line, f.col)
     var done = match lower_fn_body(framed, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -6148,8 +6148,8 @@ pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool): LowerPrelude 
 pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false): LModule | error {
     var prelude = match lower_prelude(prog, flat_symbols) { LowerPrelude as x => x; error as e => return e }
     var m = prelude.module
-    var loose: []@TStatement() = teko::list::empty()
-    var lifted: []LFunc = teko::list::empty()
+    var loose: []@TStatement() = []
+    var lifted: []LFunc = []
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -6174,7 +6174,7 @@ fn fat_divergence_guard(prog: checker::TProgram, table: checker::TypeTable, rtab
 }
 
 fn fat_divergences(prog: checker::TProgram, table: checker::TypeTable, rtable: checker::TypeTable): []str {
-    var out: []str = teko::list::empty()
+    var out: []str = []
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -6267,7 +6267,7 @@ fn register_layouts(m: LModule, layouts: []LStructLayout): LModule {
 }
 
 fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable): []LStructLayout | error {
-    var out: []LStructLayout = teko::list::push(teko::list::empty(), error_struct_layout())
+    var out: []LStructLayout = [error_struct_layout()]
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -6463,7 +6463,7 @@ fn typeexpr_is_fat_walk(te: @TypeExpr(), table: checker::TypeTable, visited: []s
 }
 
 fn typeexpr_is_fat(te: @TypeExpr(), table: checker::TypeTable): bool {
-    typeexpr_is_fat_walk(te, table, teko::list::empty())
+    typeexpr_is_fat_walk(te, table, [])
 }
 
 fn field_layout_size(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: @Type()): u32 {
@@ -6486,7 +6486,7 @@ fn field_layout_align(te: @TypeExpr(), ft: LType, nested: LStructLayout | null, 
 }
 
 fn collect_enums(prog: checker::TProgram): []LEnumInfo {
-    var out: []LEnumInfo = teko::list::empty()
+    var out: []LEnumInfo = []
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -6513,7 +6513,7 @@ fn collect_enum_decl(acc: []LEnumInfo, td: parser::TypeDecl): []LEnumInfo {
 
 fn newtype_carrier_entry(name: str, nb: parser::NewtypeBody, acc: []LEnumInfo): LEnumInfo {
     var carrier = ltype_of_typeexpr(nb.backing, acc)
-    LEnumInfo { name = name; members = teko::list::empty(); carrier = carrier; is_register = ltype_is_scalar(carrier); is_newtype = true }
+    LEnumInfo { name = name; members = []; carrier = carrier; is_register = ltype_is_scalar(carrier); is_newtype = true }
 }
 
 fn ltype_is_scalar(t: LType): bool {
@@ -6523,7 +6523,7 @@ fn ltype_is_scalar(t: LType): bool {
 }
 
 fn collect_externs(prog: checker::TProgram): []LExternFn {
-    var out: []LExternFn = teko::list::empty()
+    var out: []LExternFn = []
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -6587,16 +6587,16 @@ fn lower_item_function(m: LModule, loose: []@TStatement(), f: checker::TFunction
 }
 
 pub fn lower_virtual_main(loose: []@TStatement(), layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, table: checker::TypeTable): LoweredFunction | error {
-    var fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
+    var fn0 = new_func("main", 0, [], LType::I32)
     var ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         variants = variants
-        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
+        defers = []; loop_targets = []; externs = externs
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+        region_stack = []; escaping = []; frees_old_names = []; bracket_depth = 0
     }
     var tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     var closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
@@ -6685,7 +6685,7 @@ fn append_exit_status_mask(f: LFunc, code: u32): FreshVReg {
 }
 
 fn native_entry_stub(): LFunc {
-    var ptypes = teko::list::push(teko::list::push(teko::list::empty(), LType::I32), LType::Ptr)
+    var ptypes = [LType::I32, LType::Ptr]
     var fn0 = new_func("main", 2, ptypes, LType::I32)
     var with_argc = append_inst(fn0, 0, param_inst(0, 0, 0, 0))
     var with_argv = append_inst(with_argc, 0, param_inst(1, 1, 0, 0))
@@ -6694,7 +6694,7 @@ fn native_entry_stub(): LFunc {
     set_args_args = teko::list::push(set_args_args, 1)
     var with_set = append_inst(with_argv, 0, void_call_inst("tk_set_args", set_args_args, false, 0, 0))
     var called = alloc_vreg(with_set)
-    var with_call = append_inst(called.func, 0, call_inst(called.vreg, NATIVE_ENTRY_VMAIN_SYMBOL, teko::list::empty(), false, 0, 0))
+    var with_call = append_inst(called.func, 0, call_inst(called.vreg, NATIVE_ENTRY_VMAIN_SYMBOL, [], false, 0, 0))
     var status = append_exit_status_mask(with_call, called.vreg)
     append_inst(status.func, 0, ret_inst(status.vreg, 0, 0))
 }
