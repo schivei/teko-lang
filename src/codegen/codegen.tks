@@ -2589,7 +2589,7 @@ fn cg_is_mem_value_call(p: parser::Path, user_declared: bool): bool {
 }
 
 fn emit_place(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    if c.args.len != 1 { return error { message = "codegen: place expects one argument (internal)" } }
+    if c.args.len != 2 { return error { message = "codegen: place expects two arguments (internal)" } }
     var inner = match e.type {
         checker::Ptr as pt => match pt.inner { (@Type()) as t => t; null => return error { message = "codegen: place result is not a typed pointer (internal)" } }
         _ => return error { message = "codegen: place result is not a pointer (internal)" }
@@ -2599,12 +2599,12 @@ fn emit_place(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escap
     out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
     out = cb(out, " *"); out = cb(out, v); out = cb(out, " = (")
     out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
-    out = cb(out, " *)"); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "(")
-    out = cb(out, cg_enclosing_region_expr(regions))
-    out = cb(out, ", (size_t)sizeof(")
+    out = cb(out, " *)"); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "((tk_region *)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+    out = cb(out, "), (size_t)sizeof(")
     out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
     out = cb(out, ")); *"); out = cb(out, v); out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, inner, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, inner, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, "); "); out = cb(out, v); cb(out, "; })")
 }
 

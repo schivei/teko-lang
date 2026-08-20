@@ -821,11 +821,17 @@ fn mem_value_call(callee: parser::Path, args: []TExpr, ret: @Type()): TExpr {
     TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
 }
 
+fn type_is_region_handle(t: @Type()): bool {
+    match t { Ptr => true; _ => false }
+}
+
 fn type_mem_place(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
-    if c.args.len != 1 { return error { message = "teko::mem::place expects one argument (the value to place)" } }
-    var v = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    if c.args.len != 2 { return error { message = "teko::mem::place expects two arguments (the target region and the value to place)" } }
+    var region = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    if !type_is_region_handle(region.type) { return error { message = "teko::mem::place target region must be a `ptr` region handle" } }
+    var v = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(v.type) { return error { message = "teko::mem::place cannot place a `void` expression" } }
-    var pargs = teko::list::push(teko::list::empty(), v)
+    var pargs = teko::list::push(teko::list::push(teko::list::empty(), region), v)
     mem_value_call(c.callee, pargs, Ptr { inner = v.type })
 }
 
