@@ -3,27 +3,28 @@ use teko::parser
 
 type MonoInst = struct { fn_name: str; mangled: str; s: Subst; owner_ns: str }
 
+fn type_matches_resolved(concrete: @Type(), resolved: @Type() | error): bool {
+    match resolved {
+        (@Type()) as t => match t {
+            Variant as v => {
+                var i = 0
+                loop {
+                    if i >= v.members.len { break }
+                    if type_eq(concrete, v.members[i]) { return true }
+                    i++
+                }
+                false
+            }
+            _ => type_eq(concrete, t)
+        }
+        error => false
+    }
+}
 fn constraint_atom_satisfied(atom_name: str, concrete: @Type(), table: TypeTable): bool {
     match type_table_find(table, atom_name, "") {
         parser::TypeDecl as td => {
             match td.body {
-                parser::VariantBody as vb => {
-                    match resolve_type(vb.type_expr, table, "") {
-                        (@Type()) as t => match t {
-                            Variant as v => {
-                                var i = 0
-                                loop {
-                                    if i >= v.members.len { break }
-                                    if type_eq(concrete, v.members[i]) { return true }
-                                    i++
-                                }
-                                false
-                            }
-                            _ => type_eq(concrete, t)
-                        }
-                        error => false
-                    }
-                }
+                parser::VariantBody as vb => type_matches_resolved(concrete, resolve_type(vb.type_expr, table, ""))
                 parser::InterfaceBody => match concrete { Named as n => n.name == atom_name || type_conforms_to(n.name, atom_name, table); _ => false }
                 parser::TraitBody => match concrete { Named as n => n.name == atom_name || type_conforms_to(n.name, atom_name, table); _ => false }
                 _ => match concrete { Named as n => n.name == atom_name; _ => false }
@@ -36,11 +37,29 @@ fn constraint_atom_satisfied(atom_name: str, concrete: @Type(), table: TypeTable
         }
     }
 }
+fn constraint_type_interface_base(te: @TypeExpr(), table: TypeTable): str {
+    match te {
+        parser::NamedType as nt => {
+            var nm = nt.path.segments[nt.path.segments.len - 1].name
+            if is_interface_name(nm, table) { return nm }
+            ""
+        }
+        _ => ""
+    }
+}
+fn constraint_type_satisfied(te: @TypeExpr(), concrete: @Type(), table: TypeTable): bool {
+    var iface_base = constraint_type_interface_base(te, table)
+    if iface_base != "" {
+        return match concrete { Named as n => n.name == iface_base || type_conforms_to(n.name, iface_base, table); _ => false }
+    }
+    type_matches_resolved(concrete, resolve_type(te, table, ""))
+}
 fn constraint_satisfied(c: @ConstraintExpr(), concrete: @Type(), table: TypeTable): bool {
     match c {
         parser::ConstraintAnd as a => constraint_satisfied(a.left, concrete, table) && constraint_satisfied(a.right, concrete, table)
         parser::ConstraintOr as o => constraint_satisfied(o.left, concrete, table) || constraint_satisfied(o.right, concrete, table)
         parser::ConstraintAtom as a => constraint_atom_satisfied(a.name, concrete, table)
+        parser::ConstraintType as ct => constraint_type_satisfied(ct.ty, concrete, table)
         parser::ConstraintForm as f => constraint_form_satisfied(f, concrete, table)
         parser::ConstraintNotNull => constraint_notnull_satisfied(concrete, table)
         parser::NoConstraint => true
