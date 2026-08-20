@@ -133,10 +133,16 @@ fn stmt_errors(source: str): bool {
 
 #test
 fn rejects_malformed_bindings() {
-    teko::assert::is_true(stmt_errors("let = 1"))
-    teko::assert::is_true(stmt_errors("let x 1"))
-    teko::assert::is_true(stmt_errors("let x ="))
-    teko::assert::is_true(stmt_errors("let x: = 1"))
+    teko::assert::is_true(stmt_errors("var x ="))
+    teko::assert::is_true(stmt_errors("var x: = 1"))
+    teko::assert::is_true(stmt_errors("const x ="))
+    teko::assert::is_true(stmt_errors("const x: = 1"))
+}
+
+#test
+fn let_and_mut_parse_as_ordinary_identifiers_not_keywords() {
+    teko::assert::is_false(stmt_errors("let = 1"))
+    teko::assert::is_false(stmt_errors("mut = 1"))
 }
 
 
@@ -193,11 +199,10 @@ fn rejects_underscore_as_name() {
 
 #test
 fn rejects_underscore_declarations() {
-    teko::assert::is_true(stmt_errors("let _ = 1"))
-    teko::assert::is_true(stmt_errors("mut _ = 1"))
+    teko::assert::is_true(stmt_errors("var _ = 1"))
     teko::assert::is_true(stmt_errors("const _ = 1"))
-    teko::assert::is_true(stmt_errors("let _: i32 = 1"))
-    teko::assert::is_true(stmt_errors("loop mut _ in xs { }"))
+    teko::assert::is_true(stmt_errors("var _: i32 = 1"))
+    teko::assert::is_true(stmt_errors("loop var _ in xs { }"))
 }
 
 #test
@@ -418,10 +423,8 @@ fn is_var_binding_head_recognizes_the_head_shape() {
 }
 
 #test
-fn bind_kind_at_maps_var_to_mut() {
-    teko::assert::is_true(bind_kind_at(toks_of("var x = 1"), 0) == BindKind::Mut)
-    teko::assert::is_true(bind_kind_at(toks_of("mut x = 1"), 0) == BindKind::Mut)
-    teko::assert::is_true(bind_kind_at(toks_of("let x = 1"), 0) == BindKind::Let)
+fn bind_kind_at_maps_var_to_var() {
+    teko::assert::is_true(bind_kind_at(toks_of("var x = 1"), 0) == BindKind::Var)
     teko::assert::is_true(bind_kind_at(toks_of("const x = 1"), 0) == BindKind::Const)
 }
 
@@ -438,8 +441,14 @@ fn stmt_of(source: str): @Statement() | error {
 
 #test
 fn var_statement_parses_as_mutable_binding() {
-    teko::assert::is_true(match stmt_of("var x = 1") { (@Statement()) as s => match s { Binding as b => b.kind == BindKind::Mut; _ => false }; error => false })
-    teko::assert::is_true(match stmt_of("var x: i64 = 1") { (@Statement()) as s => match s { Binding as b => b.kind == BindKind::Mut && b.has_type; _ => false }; error => false })
+    teko::assert::is_true(match stmt_of("var x = 1") { (@Statement()) as s => match s { Binding as b => b.kind == BindKind::Var; _ => false }; error => false })
+    teko::assert::is_true(match stmt_of("var x: i64 = 1") { (@Statement()) as s => match s { Binding as b => b.kind == BindKind::Var && b.has_type; _ => false }; error => false })
+}
+
+#test
+fn let_and_mut_parse_as_plain_assignment_targets() {
+    teko::assert::is_true(match stmt_of("let = 1") { (@Statement()) as s => match s { Assign as a => a.name == "let"; _ => false }; error => false })
+    teko::assert::is_true(match stmt_of("mut = 1") { (@Statement()) as s => match s { Assign as a => a.name == "mut"; _ => false }; error => false })
 }
 
 #test
@@ -449,7 +458,6 @@ fn var_reassignment_and_malformed_var_statements() {
     teko::assert::is_false(stmt_errors("var { a; b } = p"))
     teko::assert::is_true(stmt_errors("var { x = p"))
     teko::assert::is_true(stmt_errors("var x: ref i64 = 1"))
-    teko::assert::is_true(stmt_errors("let ref x = 1"))
 }
 
 #test

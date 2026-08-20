@@ -3815,7 +3815,7 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable): TypedStmt | err
         return error { message = "an empty list needs a known element type; annotate the binding (e.g. `var xs: []i32 = …`)" }
     }
     match bound {
-        Reference => if b.kind != parser::BindKind::Mut { return error { message = "a reference binding is spelled `ref r: T = x` (write-through, requires a mutable source)" } }
+        Reference => if b.kind != parser::BindKind::Var { return error { message = "a reference binding is spelled `ref r: T = x` (write-through, requires a mutable source)" } }
         _ => if type_contains_ref(bound) && !is_ref_null_variant(bound) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     }
     var node = TBinding { kind = b.kind; target = b.target; bound = bound; value = v }
@@ -4112,7 +4112,7 @@ fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmt
     }
     var tname = mb_temp_name(mb, 0)
     var cur = define(env, tname, call.type, true)
-    var body: []@TStatement() = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = tname }; bound = call.type; value = call })
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = tname }; bound = call.type; value = call })
     var i: u64 = 0
     loop {
         if i >= mb.targets.len { break }
@@ -4161,7 +4161,7 @@ fn type_multibind_parallel(mb: parser::MultiBind, env: Env, table: TypeTable): T
     var i: u64 = 0
     loop {
         if i >= mb.values.len { break }
-        var tstmt = mb_binding_stmt(parser::BindKind::Mut, mb_temp_name(mb, i), mb.has_type, mb.type_ann, mb.values[i])
+        var tstmt = mb_binding_stmt(parser::BindKind::Var, mb_temp_name(mb, i), mb.has_type, mb.type_ann, mb.values[i])
         var ts = match type_statement(tstmt, cur, table) { TypedStmt as t => t; error as e => return e }
         body = teko::list::push(body, ts.node)
         cur = ts.env
@@ -4193,7 +4193,7 @@ fn type_multibind_array(mb: parser::MultiBind, env: Env, table: TypeTable): TStm
     var cur = env
     var body: []@TStatement() = teko::list::empty()
     var aname = mb_temp_name(mb, 0)
-    var astmt = mb_binding_stmt(parser::BindKind::Mut, aname, false, mb.type_ann, mb.values[0])
+    var astmt = mb_binding_stmt(parser::BindKind::Var, aname, false, mb.type_ann, mb.values[0])
     var ats = match type_statement(astmt, cur, table) { TypedStmt as t => t; error as e => return e }
     body = teko::list::push(body, ats.node)
     cur = ats.env
@@ -5109,7 +5109,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             line = 0; col = 0
         }
         var base_bound = Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }
-        var base_kw_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "base" }; bound = base_bound; value = cast_val }
+        var base_kw_stmt = TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = "base" }; bound = base_bound; value = cast_val }
         var prefixed: []@TStatement() = teko::list::push(teko::list::empty(), base_kw_stmt)
         var si = 0
         loop { if si >= ret_stmts.len { break }; prefixed = teko::list::push(prefixed, ret_stmts[si]); si++ }
