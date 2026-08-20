@@ -15,53 +15,97 @@ fn needs_quoting(field: str): bool {
     false
 }
 
-fn append_quoted_field(out: []byte, field: str): []byte {
+fn quoted_field_bytes(field: str): []byte {
     var bytes = bytes_of_str(field)
-    var o = teko::list::push(out, b'"')
+    var out: [bytes.len * 2 + 2]byte = []
+    var count: u64 = 0
+    out[count] = b'"'
+    count++
     var i: u64 = 0
     loop {
         if i >= bytes.len { break }
         var b = bytes[i]
-        o = teko::list::push(o, b)
-        if b == b'"' { o = teko::list::push(o, b'"') }
+        out[count] = b
+        count++
+        if b == b'"' {
+            out[count] = b'"'
+            count++
+        }
         i++
     }
-    teko::list::push(o, b'"')
+    out[count] = b'"'
+    count++
+    out[0..count]
 }
 
-fn append_field(out: []byte, field: str): []byte {
-    if needs_quoting(field) { return append_quoted_field(out, field) }
-    var o = out
-    var bytes = bytes_of_str(field)
-    var i: u64 = 0
-    loop {
-        if i >= bytes.len { break }
-        o = teko::list::push(o, bytes[i])
-        i++
-    }
-    o
+fn field_bytes(field: str): []byte {
+    if needs_quoting(field) { return quoted_field_bytes(field) }
+    bytes_of_str(field)
 }
 
-fn append_row(out: []byte, row: CsvRow): []byte {
-    var o = out
+fn row_to_bytes(row: CsvRow): []byte {
+    var parts: [row.fields.len][]byte = []
+    var total: u64 = 0
     var i: u64 = 0
     loop {
         if i >= row.fields.len { break }
-        if i > 0 { o = teko::list::push(o, b',') }
-        o = append_field(o, row.fields[i])
+        var fb = field_bytes(row.fields[i])
+        parts[i] = fb
+        total = total + fb.len
         i++
     }
-    o = teko::list::push(o, b'\r')
-    teko::list::push(o, b'\n')
+    var separators = if row.fields.len > 0 { row.fields.len - 1 } else { 0 }
+    var out: [total + separators + 2]byte = []
+    var pos: u64 = 0
+    i = 0
+    loop {
+        if i >= row.fields.len { break }
+        if i > 0 {
+            out[pos] = b','
+            pos++
+        }
+        var fb = parts[i]
+        var j: u64 = 0
+        loop {
+            if j >= fb.len { break }
+            out[pos] = fb[j]
+            pos++
+            j++
+        }
+        i++
+    }
+    out[pos] = b'\r'
+    pos++
+    out[pos] = b'\n'
+    pos++
+    out
 }
 
 /** Renders `rows` as RFC 4180 CSV text (fields quoted only when required, `\r\n`-terminated). */
 exp fn write_csv(rows: []CsvRow): str {
-    var out: []byte = []
+    var row_bytes: [rows.len][]byte = []
+    var total: u64 = 0
     var i: u64 = 0
     loop {
         if i >= rows.len { break }
-        out = append_row(out, rows[i])
+        var rb = row_to_bytes(rows[i])
+        row_bytes[i] = rb
+        total = total + rb.len
+        i++
+    }
+    var out: [total]byte = []
+    var pos: u64 = 0
+    i = 0
+    loop {
+        if i >= rows.len { break }
+        var rb = row_bytes[i]
+        var j: u64 = 0
+        loop {
+            if j >= rb.len { break }
+            out[pos] = rb[j]
+            pos++
+            j++
+        }
         i++
     }
     str(out)
@@ -74,22 +118,25 @@ type FieldStep = struct {
 
 fn parse_quoted_field(input: []byte, pos: u64): FieldStep | error {
     var i = pos + 1
-    var out: []byte = []
+    var out: [input.len]byte = []
+    var count: u64 = 0
     loop {
         if i >= input.len { return error { message = "csv: unterminated quoted field" } }
         var b = input[i]
         if b != b'"' {
-            out = teko::list::push(out, b)
+            out[count] = b
+            count++
             i++
             continue
         }
         var is_escaped_quote = i + 1 < input.len && input[i + 1] == b'"'
         if is_escaped_quote {
-            out = teko::list::push(out, b'"')
+            out[count] = b'"'
+            count++
             i = i + 2
             continue
         }
-        return FieldStep { text = str(out); next = i + 1 }
+        return FieldStep { text = str(out[0..count]); next = i + 1 }
     }
     error { message = "csv: unreachable" }
 }
@@ -110,14 +157,7 @@ fn parse_unquoted_field(input: []byte, pos: u64): FieldStep {
 }
 
 fn str_slice_bytes_view(data: []byte, from: u64, to: u64): str {
-    var out: []byte = []
-    var i = from
-    loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
-        i++
-    }
-    str(out)
+    str(data[from..to])
 }
 
 fn parse_field(input: []byte, pos: u64): FieldStep | error {
@@ -132,17 +172,19 @@ fn consume_record_terminator(input: []byte, pos: u64): u64 {
 }
 
 fn parse_row(input: []byte, pos: u64): RowStep | error {
-    var fields: []str = []
+    var fields: [input.len + 1]str = []
+    var nfields: u64 = 0
     var i = pos
     loop {
         var step = match parse_field(input, i) { FieldStep as s => s; error as e => return e }
-        fields = teko::list::push(fields, step.text)
+        fields[nfields] = step.text
+        nfields++
         i = step.next
         if i >= input.len || input[i] == b'\r' || input[i] == b'\n' { break }
         i = i + 1
     }
     var after = consume_record_terminator(input, i)
-    RowStep { row = CsvRow { fields = fields }; next = after }
+    RowStep { row = CsvRow { fields = fields[0..nfields] }; next = after }
 }
 
 type RowStep = struct {
@@ -157,13 +199,15 @@ exp fn parse_csv(text: str): []CsvRow | error {
         var no_rows: []CsvRow = []
         return no_rows
     }
-    var rows: []CsvRow = []
+    var rows: [input.len]CsvRow = []
+    var nrows: u64 = 0
     var pos: u64 = 0
     loop {
         if pos >= input.len { break }
         var step = match parse_row(input, pos) { RowStep as s => s; error as e => return e }
-        rows = teko::list::push(rows, step.row)
+        rows[nrows] = step.row
+        nrows++
         pos = step.next
     }
-    rows
+    rows[0..nrows]
 }
