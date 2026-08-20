@@ -15,3 +15,13 @@ para o dono/integrador decidir (não é follow-up deferido, é in-wave).
   `source.len` / lista de arquivos), MAS deixá-los prontos com o `format()` ainda
   sujo não limpa o arquivo — aguardando a decisão do desenho do buffer de saída
   (mesmo desenho central do codegen `cb`).
+
+## src/iter/{byte_iter,int_terminals,str_iter}.tks — collect de iterador lazy
+- `collect_bytes`/`collect`/`collect_strs` acumulam de um ITERADOR (`src()`) de
+  tamanho DESCONHECIDO e sem limite superior barato (o iterador é lazy/one-shot,
+  então duas-passadas não é possível — consumir uma vez esgota). É o único caso em
+  que crescimento dinâmico parece intrínseco; precisa de RULING do dono (ex.: um
+  builder/segment-list interno, ou API de collect com capacidade dada pelo chamador).
+- `str_iter::split_lines` é sobre entrada DIMENSIONADA (`bytes`), logo tratável
+  (linhas ≤ bytes.len); mas o arquivo não fica limpo enquanto `collect_strs` estiver
+  no mesmo módulo — segue junto do ruling de collect.
