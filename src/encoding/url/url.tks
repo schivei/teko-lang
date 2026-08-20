@@ -26,32 +26,35 @@ fn hex_upper_nibble(nibble: u32): byte {
     (b'A' to u32 + (nibble - 10)) to byte
 }
 
-fn append_percent_escape(out: []byte, b: byte): []byte {
+fn percent_escape(b: byte): []byte {
     var v = b to u32
-    var o = out
-    o = teko::list::push(o, b'%')
-    o = teko::list::push(o, hex_upper_nibble(v >> 4))
-    o = teko::list::push(o, hex_upper_nibble(v & 0xF))
-    o
+    [b'%', hex_upper_nibble(v >> 4), hex_upper_nibble(v & 0xF)]
 }
 
 fn encode_with(text: str, space_as_plus: bool, path_mode: bool): str {
     var input = bytes_of_str(text)
-    var out: []byte = []
+    var out: [input.len * 3]byte = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= input.len { break }
         var b = input[i]
         if space_as_plus && b == b' ' {
-            out = teko::list::push(out, b'+')
+            out[count] = b'+'
+            count++
         } else if is_safe_byte(b, path_mode) {
-            out = teko::list::push(out, b)
+            out[count] = b
+            count++
         } else {
-            out = append_percent_escape(out, b)
+            var esc = percent_escape(b)
+            out[count] = esc[0]
+            out[count + 1] = esc[1]
+            out[count + 2] = esc[2]
+            count = count + 3
         }
         i++
     }
-    str(out)
+    str(out[0..count])
 }
 
 /** Percent-encodes `text` per RFC 3986 §2.1 (a space becomes `%20`). Total — always succeeds. */
@@ -90,25 +93,28 @@ fn decode_percent_escape(input: []byte, pos: u64): PercentEscapeStep | error {
 
 fn decode_with(text: str, plus_as_space: bool): str | error {
     var input = bytes_of_str(text)
-    var out: []byte = []
+    var out: [input.len]byte = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= input.len { break }
         var b = input[i]
         if b == b'%' {
             var step = match decode_percent_escape(input, i) { PercentEscapeStep as s => s; error as e => return e }
-            out = teko::list::push(out, step.value)
+            out[count] = step.value
+            count++
             i = step.next
             continue
         }
         if plus_as_space && b == b'+' {
-            out = teko::list::push(out, b' ')
+            out[count] = b' '
         } else {
-            out = teko::list::push(out, b)
+            out[count] = b
         }
+        count++
         i++
     }
-    str_from_utf8(out)
+    str_from_utf8(out[0..count])
 }
 
 /** Decodes a percent-encoded `text` per RFC 3986 (`+` stays a literal `+`). */
@@ -134,19 +140,22 @@ exp type FormField = struct {
 
 fn split_form_segments(body: str): []str {
     var input = bytes_of_str(body)
-    var segments: []str = []
+    var segments: [input.len + 1]str = []
+    var nseg: u64 = 0
     var start: u64 = 0
     var i: u64 = 0
     loop {
         if i >= input.len { break }
         if input[i] == b'&' || input[i] == b';' {
-            segments = teko::list::push(segments, str_slice_chars(body, start to i64, i to i64))
+            segments[nseg] = str_slice_chars(body, start to i64, i to i64)
+            nseg++
             start = i + 1
         }
         i++
     }
-    segments = teko::list::push(segments, str_slice_chars(body, start to i64, input.len to i64))
-    segments
+    segments[nseg] = str_slice_chars(body, start to i64, input.len to i64)
+    nseg++
+    segments[0..nseg]
 }
 
 fn split_key_value(segment: str): FormField {
@@ -176,12 +185,12 @@ exp fn parse_form(body: str): []FormField | error {
         return no_fields
     }
     var segments = split_form_segments(body)
-    var fields: []FormField = []
+    var fields: [segments.len]FormField = []
     var i: u64 = 0
     loop {
         if i >= segments.len { break }
         var field = match decode_form_segment(segments[i]) { FormField as f => f; error as e => return e }
-        fields = teko::list::push(fields, field)
+        fields[i] = field
         i++
     }
     fields
