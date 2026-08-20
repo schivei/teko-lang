@@ -612,3 +612,14 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Reconciliação a marcar:** o recon `parallel-test-channels-recon.md` reportou memchan/oschan **landados ~70-85%**. Com a dependência de DI, os **15-30% faltantes = provavelmente a parte DI-dependente** (lifetime/escopo de canal via DI-scoped), não a superfície bruta send/recv. Confirmar ao reabrir a cadeia pós-marco.
 - **Impacto no elefante: NENHUM.** COL-F0 (substrato de memória) não usa canais nem DI. F0c/F0d/COL-Q/RM-C seguem independentes. Esta aresta é roadmap de concorrência (gated no marco de memória, junto com runner/await).
 - **Ação:** refletir a aresta `canais→DI` nas deps do EXECUTION-ORDER.md quando a cadeia de concorrência for reagendada (pós-marco). Sem dispatch agora.
+
+### D59 · Arquitetura de execução de testes — DOIS modelos (owner 2026-08-20)
+Ruling do dono, fecha o protocolo de execução (o recon marcou como "lacuna" — NÃO era, é desenho do dono):
+- **tkt (unit):** binário PRÓPRIO (um por `.tkt`). Cada função `#test` roda em **PARALELO via threads (NÃO processos) com `spawn`**, usando **canal de memória (memchan)** — exatamente como um `await` faria. In-process, memória compartilhada.
+- **tkr (regression):** cada `.tkp` de um conjunto de `.tkr` tem binário PRÓPRIO. Cada fixture nos `.tkr` executa o MESMO binário em **processos ISOLADOS**, exigindo **canal de OS (oschan)**. Isolamento por-fixture.
+
+**Corrige o D58 (supersede as partes erradas — mais-recente vence):**
+1. **"paralelismo = velocidade, não isolamento de memória"** vale SÓ pra **tkt** (threads compartilham o espaço). O **tkr DÁ isolamento de memória** — processos isolados, teto por-fixture. (Nenhum dos dois abaixa o pico do BUILD, que é o elefante; a correção é só sobre a execução dos testes.)
+2. O **"drift run_pool processos vs designed=thread" do D58 estava ERRADO.** `run_pool` (`src/build/regression.tks`) é o runner de **regressões = tkr**, e tkr **É** process-based POR DESENHO — não é stopgap a substituir por thread. Threads (spawn/memchan) são pro **tkt** (runner distinto). Eu havia conflado os dois runners.
+
+**Deps:** tkt usa memchan+spawn; tkr usa oschan. Ambos os canais dependem de DI (D58.1) → tkt e tkr ficam a jusante do DI. Tudo gated no marco de memória (lei condicional `teko test .` ≤1,5GB). Independe do elefante (COL-F0 não usa canais/DI).
