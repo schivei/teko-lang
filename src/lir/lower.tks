@@ -2085,6 +2085,7 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false): str
     var last = segs[segs.len - 1].name
     if c.call_ns.len == 0 {
         match assert_seed_symbol(c.callee) { str as s => return s; null => { } }
+        if is_mem_value_call(c.callee) { return unresolved_builtin_stop(last) }
         match native_builtin_symbol(last) { str as s => return s; null => { } }
         if is_list_builtin_call(c.callee) {
             return error { message = "native backend N1: the generic `teko::list::*`/`teko::mem::push_fo` growth builtin has no native runtime backing yet (N2)" }
@@ -2114,6 +2115,16 @@ fn is_list_builtin_call(callee: parser::Path): bool {
     var is_pushfo = prev == "mem" && last == "push_fo"
     if prev != "list" && !is_pushfo { return false }
     segs.len == 2 || segs[0].name == "teko"
+}
+
+fn is_mem_value_call(callee: parser::Path): bool {
+    var segs = callee.segments
+    if segs.len < 2 { return false }
+    var last = segs[segs.len - 1].name
+    var prev = segs[segs.len - 2].name
+    if prev != "mem" { return false }
+    var rooted = segs.len == 2 || segs[0].name == "teko"
+    rooted && (last == "place" || last == "read" || last == "write")
 }
 
 fn find_extern_symbol(externs: []LExternFn, ns: str, name: str): str | null {

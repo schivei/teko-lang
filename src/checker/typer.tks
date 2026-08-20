@@ -793,15 +793,84 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable): TExpr | error {
 
 type NotListBuiltin = struct { }
 
+fn type_of_len_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
+    if c.callee_type_args.len != 1 { return error { message = "teko::list::of_len<T> takes one explicit type argument (the element type)" } }
+    if c.args.len != 1 { return error { message = "teko::list::of_len<T> expects one argument (the length, a `u64`)" } }
+    var elem = match resolve_type(c.callee_type_args[0], table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
+    match elem {
+        Reference => return error { message = "a reference cannot be an of_len element" }
+        Void => return error { message = "of_len<void> is invalid — void is not a storable element" }
+        _ => { }
+    }
+    var n = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    if !is_integer(n.type) { return error { message = "teko::list::of_len<T> length must be an integer" } }
+    TExpr { kind = TSliceOfLen { size = n; element = elem }; type = Slice { element = elem }; line = 0; col = 0 }
+}
+
+fn mem_ptr_element(t: @Type()): @Type() | error {
+    match t {
+        Ptr as pt => match pt.inner {
+            (@Type()) as inner => inner
+            null => error { message = "a typed `*T` pointer is required — an opaque `ptr` has no element type" }
+        }
+        _ => error { message = "a `*T` pointer is required" }
+    }
+}
+
+fn mem_value_call(callee: parser::Path, args: []TExpr, ret: @Type()): TExpr {
+    TExpr { kind = TCall { overload_suffix = ""; callee = callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = ret; line = 0; col = 0 }
+}
+
+fn type_mem_place(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
+    if c.args.len != 1 { return error { message = "teko::mem::place expects one argument (the value to place)" } }
+    var v = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(v.type) { return error { message = "teko::mem::place cannot place a `void` expression" } }
+    var pargs = teko::list::push(teko::list::empty(), v)
+    mem_value_call(c.callee, pargs, Ptr { inner = v.type })
+}
+
+fn type_mem_read(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
+    if c.args.len != 1 { return error { message = "teko::mem::read expects one argument (a `*T` pointer)" } }
+    var p = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    var inner = match mem_ptr_element(p.type) { (@Type()) as t => t; error as e => return error { message = teko::str::concat("teko::mem::read: ", e.message) } }
+    var rargs = teko::list::push(teko::list::empty(), p)
+    mem_value_call(c.callee, rargs, inner)
+}
+
+fn type_mem_write(c: parser::Call, env: Env, table: TypeTable): TExpr | error {
+    if c.args.len != 2 { return error { message = "teko::mem::write expects two arguments (a `*T` pointer and the new value)" } }
+    var p = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    var inner = match mem_ptr_element(p.type) { (@Type()) as t => t; error as e => return error { message = teko::str::concat("teko::mem::write: ", e.message) } }
+    var x = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(x.type) { return error { message = "teko::mem::write value cannot be a `void` expression" } }
+    if !widens_into(x.type, inner, table) && !literal_adopts(x, inner) { return error { message = "teko::mem::write value type does not match the pointer's element type" } }
+    var x_typed = TExpr { kind = x.kind; type = inner; line = x.line; col = x.col }
+    var wargs = teko::list::push(teko::list::push(teko::list::empty(), p), x_typed)
+    mem_value_call(c.callee, wargs, Void { })
+}
+
 fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable): TExpr | NotListBuiltin | error {
     if c.callee.segments.len < 2 { return NotListBuiltin { } }
     var last = c.callee.segments[c.callee.segments.len - 1].name
     var prev = c.callee.segments[c.callee.segments.len - 2].name
     var is_pushfo = prev == "mem" && last == "push_fo"
-    if prev != "list" && !is_pushfo { return NotListBuiltin { } }
+    var is_mem_value = prev == "mem" && (last == "place" || last == "read" || last == "write")
+    if prev != "list" && !is_pushfo && !is_mem_value { return NotListBuiltin { } }
     var rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
     if !rooted { return NotListBuiltin { } }
 
+    if last == "of_len" && prev == "list" {
+        match type_of_len_builtin(c, env, table) { TExpr as te => return te; error as e => return e }
+    }
+    if is_mem_value && last == "place" {
+        match type_mem_place(c, env, table) { TExpr as te => return te; error as e => return e }
+    }
+    if is_mem_value && last == "read" {
+        match type_mem_read(c, env, table) { TExpr as te => return te; error as e => return e }
+    }
+    if is_mem_value && last == "write" {
+        match type_mem_write(c, env, table) { TExpr as te => return te; error as e => return e }
+    }
     if last == "empty" {
         if c.args.len != 0 { return error { message = "teko::list::empty expects no arguments" } }
         TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = teko::list::empty(); ret_extra = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
