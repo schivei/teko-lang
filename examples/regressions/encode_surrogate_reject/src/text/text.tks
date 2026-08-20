@@ -1,0 +1,53 @@
+fn utf8_cp_reject(cp: u32): error | null {
+    if cp >= 0xD800 && cp <= 0xDFFF { return error { message = "surrogate not a scalar value" } }
+    if cp > 0x10FFFF { return error { message = "codepoint exceeds U+10FFFF" } }
+    null
+}
+
+fn utf8_cp_len(cp: u32): u64 {
+    if cp <= 0x7F { return 1 }
+    if cp <= 0x7FF { return 2 }
+    if cp <= 0xFFFF { return 3 }
+    4
+}
+
+fn utf8_lead_byte(cp: u32, elen: u64): byte {
+    if elen == 1 { return cp to byte }
+    if elen == 2 { return (0xC0 | (cp >> 6)) to byte }
+    if elen == 3 { return (0xE0 | (cp >> 12)) to byte }
+    (0xF0 | (cp >> 18)) to byte
+}
+
+fn utf8_cont_byte(cp: u32, elen: u64, j: u64): byte {
+    var shift = (elen - 1 - j) * 6
+    (0x80 | ((cp >> shift) & 0x3F)) to byte
+}
+
+pub fn encode_u32_utf8(cps: []u32): []byte | error {
+    var total: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= cps.len { break }
+        match utf8_cp_reject(cps[i]) { null => { }; error as e => return e }
+        total = total + utf8_cp_len(cps[i])
+        i++
+    }
+    var out: [total]byte = []
+    var k: u64 = 0
+    i = 0
+    loop {
+        if i >= cps.len { break }
+        var cp = cps[i]
+        var elen = utf8_cp_len(cp)
+        out[k] = utf8_lead_byte(cp, elen)
+        var j: u64 = 1
+        loop {
+            if j >= elen { break }
+            out[k + j] = utf8_cont_byte(cp, elen, j)
+            j++
+        }
+        k = k + elen
+        i++
+    }
+    out
+}

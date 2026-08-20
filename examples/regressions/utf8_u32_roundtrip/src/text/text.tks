@@ -4,9 +4,7 @@ type Lead = struct {
     hi: byte
 }
 
-/** teko::text::valid_utf8 — whether `s` is well-formed UTF-8 (RFC 3629): rejects overlong
- * encodings, UTF-16 surrogates, and codepoints past U+10FFFF. */
-exp fn valid_utf8(s: []byte): bool {
+pub fn valid_utf8(s: []byte): bool {
     var i: u64 = 0
     loop {
         if i >= s.len { break }
@@ -83,13 +81,6 @@ exp fn valid_utf8(s: []byte): bool {
     true
 }
 
-/** teko::text::str_from_utf8 — the only door from raw bytes to a `str`; validates UTF-8
- * (zero-copy on success). */
-exp fn str_from_utf8(b: []byte): str | error {
-    if !valid_utf8(b) { return error { message = "invalid UTF-8" } }
-    str(b)
-}
-
 fn utf8_codepoint_count(b: []byte): u64 {
     var n: u64 = 0
     var i: u64 = 0
@@ -126,16 +117,7 @@ fn utf8_decode_one(b: []byte, i: u64, extra: u64): u32 {
     cp
 }
 
-/**
- * decode_utf8_u32 — decode well-formed UTF-8 bytes into a fixed `[]u32` of Unicode codepoints.
- * Two passes: count the codepoints, allocate the exact-sized array, then fill by index.
- *
- * @param b  the UTF-8 bytes to decode
- * @return   the codepoints as a fixed `[]u32`, or `error` on invalid UTF-8
- * @throws   when `b` is not well-formed UTF-8 (RFC 3629)
- * @since 0.3.1
- */
-exp fn decode_utf8_u32(b: []byte): []u32 | error {
+pub fn decode_utf8_u32(b: []byte): []u32 | error {
     if !valid_utf8(b) { return error { message = "invalid utf-8 sequence" } }
     var n = utf8_codepoint_count(b)
     var cps: [n]u32 = []
@@ -176,17 +158,7 @@ fn utf8_cont_byte(cp: u32, elen: u64, j: u64): byte {
     (0x80 | ((cp >> shift) & 0x3F)) to byte
 }
 
-/**
- * encode_u32_utf8 — encode a `[]u32` of Unicode codepoints to UTF-8 bytes. Two passes: sum the
- * UTF-8 byte length of each codepoint, allocate the exact-sized array, then write each
- * codepoint's 1-4 bytes by index.
- *
- * @param cps  the codepoints to encode
- * @return     the UTF-8 bytes, or `error` on a non-scalar codepoint
- * @throws     when a codepoint is a surrogate or exceeds U+10FFFF
- * @since 0.3.1
- */
-exp fn encode_u32_utf8(cps: []u32): []byte | error {
+pub fn encode_u32_utf8(cps: []u32): []byte | error {
     var total: u64 = 0
     var i: u64 = 0
     loop {
@@ -213,54 +185,4 @@ exp fn encode_u32_utf8(cps: []u32): []byte | error {
         i++
     }
     out
-}
-
-/**
- * char_to_u32 — the codepoint value of a `char` (formalizes the `char to u32` cast).
- *
- * @param c  the char to read
- * @return   its Unicode scalar value
- * @since 0.3.1
- */
-exp fn char_to_u32(c: char): u32 { c to u32 }
-
-/**
- * u32_to_char — build a `char` from a Unicode codepoint (the reverse of `char_to_u32`).
- *
- * @param cp  the codepoint
- * @return    the `char`, or `error` when `cp` is not an encodable scalar value
- * @throws    when `cp` is a surrogate or exceeds U+10FFFF
- * @since 0.3.1
- */
-exp fn u32_to_char(cp: u32): char | error {
-    var one: [1]u32 = []
-    one[0] = cp
-    var bytes = match encode_u32_utf8(one) { []byte as bs => bs; error as e => return e }
-    var s = match str_from_utf8(bytes) { str as s2 => s2; error as e => return e }
-    char_at(s, 0)
-}
-
-/**
- * str_to_u32 — the codepoint view of a `str`, one `u32` per Unicode scalar value.
- *
- * @param s  the string to view
- * @return   its codepoints as a fixed `[]u32`, or `error` when `s`'s bytes are not valid UTF-8
- * @throws   when `s`'s underlying bytes are not well-formed UTF-8
- * @since 0.3.1
- */
-exp fn str_to_u32(s: str): []u32 | error {
-    decode_utf8_u32(bytes_of_str(s))
-}
-
-/**
- * u32_to_str — build a `str` from a `[]u32` of Unicode codepoints (the reverse of `str_to_u32`).
- *
- * @param cps  the codepoints to encode
- * @return     the resulting `str`, or `error` on a non-scalar codepoint
- * @throws     when a codepoint is a surrogate or exceeds U+10FFFF
- * @since 0.3.1
- */
-exp fn u32_to_str(cps: []u32): str | error {
-    var b = match encode_u32_utf8(cps) { []byte as bs => bs; error as e => return e }
-    str_from_utf8(b)
 }
