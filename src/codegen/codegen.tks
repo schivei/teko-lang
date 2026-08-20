@@ -643,11 +643,11 @@ fn cg_prog_of(p: checker::TProgram): CgProg {
 fn cg_prog_bare(p: checker::TProgram): CgProg {
     var empty: CgNameTable = CgNameTable {
         mask = 0 to u64
-        hashes = teko::list::empty()
-        keys = teko::list::empty()
-        slots = teko::list::empty()
+        hashes = []
+        keys = []
+        slots = []
     }
-    var ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = teko::list::empty() }
+    var ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = [] }
     CgProg { items = p.items; ix = ix; cond_consts = checker::cond_const_names(p.items) }
 }
 
@@ -1442,7 +1442,7 @@ fn cg_union_normalize_null(members: []@Type()): []@Type() {
         i++
     }
     if !has_null { return members }
-    var out: []@Type() = teko::list::push(teko::list::empty(), checker::Null { })
+    var out: []@Type() = [checker::Null { }]
     var j = 0
     loop {
         if j >= members.len { break }
@@ -1612,7 +1612,7 @@ fn union_repr_class(prog: CgProg, v: checker::Variant, forced_inline: bool): Uni
 }
 
 fn cg_union_inline_recursive(prog: CgProg, union_t: @Type(), x: @Type()): bool {
-    cg_union_inline_recursive_seen(prog, union_t, x, teko::list::empty())
+    cg_union_inline_recursive_seen(prog, union_t, x, [])
 }
 
 fn cg_union_inline_recursive_seen(prog: CgProg, union_t: @Type(), x: @Type(), seen: []str): bool {
@@ -2469,14 +2469,14 @@ fn emit_cast(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCast, escapi
 fn emit_list_empty(buf: Cb, e: checker::TExpr): Cb | error {
     match e.type {
         checker::Slice as sl => match sl.element {
-            checker::Void => error { message = "codegen: teko::list::empty() needs a known slice type from context (annotate the binding)" }
+            checker::Void => error { message = "codegen: [] needs a known slice type from context (annotate the binding)" }
             _ => {
                 var o = cb(buf, "(")
                 o = match cg_slice_typename(o, sl.element) { Cb as r => r; error as err => return err }
                 cb(o, "){ .ptr = 0, .len = 0 }")
             }
         }
-        _ => error { message = "codegen: teko::list::empty() needs a known slice type from context (annotate the binding)" }
+        _ => error { message = "codegen: [] needs a known slice type from context (annotate the binding)" }
     }
 }
 
@@ -2812,13 +2812,13 @@ fn cg_dc_scan_block(s: DcScan, stmts: []@TStatement()): DcScan | error {
 }
 
 fn cg_dc_scan_program(prog: CgProg): []str | error {
-    var s = DcScan { classes = teko::list::empty() }
+    var s = DcScan { classes = [] }
     var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
             checker::TFunction as f => { s = match cg_dc_scan_block(s, f.body) { DcScan as x => x; error as err => return err } }
-            (@TStatement()) as st => { s = match cg_dc_scan_block(s, teko::list::push(teko::list::empty(), st)) { DcScan as x => x; error as err => return err } }
+            (@TStatement()) as st => { s = match cg_dc_scan_block(s, [st]) { DcScan as x => x; error as err => return err } }
             _ => { }
         }
         i++
@@ -2981,7 +2981,7 @@ fn cg_dc_emit_body(buf: Cb, prog: CgProg, cls: str): Cb | error {
 fn cg_emit_deep_copy_helpers(buf: Cb, prog: CgProg): Cb | error {
     var seeds = match cg_dc_scan_program(prog) { []str as ss => ss; error as e => return e }
     if seeds.len == 0 { return buf }
-    var classes = match cg_dc_close(prog, teko::list::empty(), seeds) { []str as cs => cs; error as e => return e }
+    var classes = match cg_dc_close(prog, [], seeds) { []str as cs => cs; error as e => return e }
     var out = buf
     var pi = 0
     loop { if pi >= classes.len { break }; out = cg_dc_emit_proto(out, classes[pi]); pi++ }
@@ -4291,7 +4291,7 @@ fn emit_stmt_value(buf: Cb, prog: CgProg, ret_type: @Type(), s: @TStatement(), s
             if is_void_type(es.expr.type) {
                 return emit_stmt(buf, s, false, prog, ret_type, indent, "", escaping, regions, fn_body, dctx, cur_block, true)
             }
-            var out = emit_cov_lines(buf, dctx.cov, cov_collect_expr(es.expr, teko::list::empty()), indent)
+            var out = emit_cov_lines(buf, dctx.cov, cov_collect_expr(es.expr, []), indent)
             out = cb(out, indent)
             out = cb(out, sink)
             out = cb(out, " = ")
@@ -4313,12 +4313,12 @@ fn emit_branch_value(buf: Cb, prog: CgProg, ret_type: @Type(), body: []@TStateme
             if i + 1 >= body.len { break }
             match body[i] {
                 checker::TDeferStmt => { cur = dctx_register(cur, body[i]) }
-                _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, indent, "", escaping, regions, fn_body, cur, teko::list::empty(), false) { Cb as o => o; error as err => return err } }
+                _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, indent, "", escaping, regions, fn_body, cur, [], false) { Cb as o => o; error as err => return err } }
             }
             i++
         }
         if body.len > 0 {
-            out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regions, fn_body, cur, teko::list::empty()) { Cb as o => o; error as err => return err }
+            out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regions, fn_body, cur, []) { Cb as o => o; error as err => return err }
         }
         if cur.defers.len > defer_floor {
             out = match emit_defers(out, cur.defers, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
@@ -5707,7 +5707,7 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
             if i + 1 >= body.len { break }
             match body[i] {
                 checker::TDeferStmt => { cur = dctx_register(cur, body[i]) }
-                _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, teko::list::empty(), false) { Cb as o => o; error as err => return err } }
+                _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false) { Cb as o => o; error as err => return err } }
             }
             i++
         }
@@ -5716,16 +5716,16 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
             checker::TExprStmt as es => match es.expr.kind {
                 checker::TIfExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", escaping, fn_body, cur)
                 checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", escaping, fn_body, cur)
-                _ => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, teko::list::empty(), false)
+                _ => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false)
             }
-            _ => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, teko::list::empty(), false)
+            _ => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false)
         }
     }
     var defer_floor = dctx.defers.len
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     var region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
     var regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }) } else { regions }
-    var cur_blk = if want_block { body } else { teko::list::empty() }
+    var cur_blk = if want_block { body } else { [] }
     var out = buf
     if want_block {
         out = cb(out, ci); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
@@ -5745,7 +5745,7 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
     var last = body[body.len - 1]
     match last {
         checker::TExprStmt as es => {
-            out = emit_cov_lines(out, dctx.cov, cov_collect_expr(es.expr, teko::list::empty()), ci)
+            out = emit_cov_lines(out, dctx.cov, cov_collect_expr(es.expr, []), ci)
             out = cb(out, ci)
             out = cb(out, sink)
             out = cb(out, " = (")
@@ -5834,7 +5834,7 @@ fn emit_match_tail(buf: Cb, prog: CgProg, e: checker::TExpr, m: checker::TMatchE
     out = cb(out, " ")
     out = cb(out, subj)
     out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, teko::list::empty(), fn_body, dctx) { Cb as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, ");\n")
     var i = 0
     loop {
@@ -5849,7 +5849,7 @@ fn emit_match_tail(buf: Cb, prog: CgProg, e: checker::TExpr, m: checker::TMatchE
         if arm.has_when {
             out = cb(out, inner2)
             out = cb(out, "if (")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, teko::list::empty(), fn_body, dctx) { Cb as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
             out = cb(out, ") {\n")
             ci = cb_indent_deeper(inner2)
         }
@@ -5978,10 +5978,10 @@ fn emit_number(buf: Cb, prog: CgProg, e: checker::TExpr, n: checker::TNumber): C
 }
 
 fn emit_expr(buf: Cb, prog: CgProg, e: checker::TExpr): Cb | error {
-    emit_expr_ctx(buf, prog, checker::Void { }, e, teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty())
+    emit_expr_ctx(buf, prog, checker::Void { }, e, [], [], [], dctx_empty())
 }
 fn emit_expr_ret(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr): Cb | error {
-    emit_expr_ctx(buf, prog, ret_type, e, teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty())
+    emit_expr_ctx(buf, prog, ret_type, e, [], [], [], dctx_empty())
 }
 fn emit_expr_ctx(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
     match e.kind {
@@ -6209,7 +6209,7 @@ type DeferCtx = struct {
 }
 
 fn dctx_empty(): DeferCtx {
-    DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov_off(); rr = ""; bracket_depth = 0 }
+    DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0 }
 }
 
 fn emit_defers(buf: Cb, defers: []@TStatement(), defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []@TStatement()): Cb | error {
@@ -6223,7 +6223,7 @@ fn emit_defers(buf: Cb, defers: []@TStatement(), defer_floor: u64, prog: CgProg,
                 var j: u64 = 0
                 loop {
                     if j >= d.body.len { break }
-                    out = match emit_stmt(out, d.body[j], false, prog, checker::Void { }, indent, "", escaping, teko::list::empty(), fn_body, dctx_empty(), teko::list::empty(), false) { Cb as o => o; error as err => return err }
+                    out = match emit_stmt(out, d.body[j], false, prog, checker::Void { }, indent, "", escaping, [], fn_body, dctx_empty(), [], false) { Cb as o => o; error as err => return err }
                     j++
                 }
             }
@@ -6362,7 +6362,7 @@ fn emit_block_region(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg
     var fall = cg_append_direct_defers(dctx.defers, body)
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, false) && regions.len < 64
     if !want_block {
-        var out = match emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, dctx, teko::list::empty(), false) { Cb as o => o; error as err => return err }
+        var out = match emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, dctx, [], false) { Cb as o => o; error as err => return err }
         return emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body)
     }
     var region = fresh_named("_tkbr", buf.len to i64)
@@ -6377,11 +6377,11 @@ fn emit_block_region(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg
 fn emit_exprstmt_tail(buf: Cb, x: checker::TExpr, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
     match x.kind {
         checker::TIfExpr as f => {
-            var bh = emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, teko::list::empty()), indent)
-            if !f.has_else { return emit_if_stmt(bh, f, x.line, x.col, in_main, prog, ret_type, indent, frame, escaping, teko::list::empty(), fn_body, dctx, teko::list::empty(), false) }
+            var bh = emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent)
+            if !f.has_else { return emit_if_stmt(bh, f, x.line, x.col, in_main, prog, ret_type, indent, frame, escaping, [], fn_body, dctx, [], false) }
             var out = cb(bh, indent)
             out = cb(out, "if (")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, teko::list::empty(), fn_body, dctx) { Cb as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
             out = cb(out, ") {\n")
             var inner = cb_indent_deeper(indent)
             out = emit_cov_branch(out, dctx.cov, x.line, x.col, 0, inner)
@@ -6399,12 +6399,12 @@ fn emit_exprstmt_tail(buf: Cb, x: checker::TExpr, in_main: bool, prog: CgProg, r
             out = cb(out, indent)
             cb(out, "}\n")
         }
-        checker::TMatchExpr as m => emit_match_tail(emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, teko::list::empty()), indent), prog, x, m, in_main, ret_type, indent, escaping, fn_body, dctx)
+        checker::TMatchExpr as m => emit_match_tail(emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent), prog, x, m, in_main, ret_type, indent, escaping, fn_body, dctx)
         _ => {
-            var bl = emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, teko::list::empty()), indent)
+            var bl = emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent)
             if is_void_type(x.type) {
                 var out = cb(bl, indent)
-                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, teko::list::empty(), fn_body, dctx) { Cb as o => o; error as err => return err }
+                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
                 out = cb(out, ";\n")
                 return emit_defers(out, dctx.defers, 0, prog, indent, escaping, fn_body)
             }
@@ -6420,11 +6420,11 @@ fn emit_exprstmt_tail(buf: Cb, x: checker::TExpr, in_main: bool, prog: CgProg, r
             out = cb(out, indent)
             if in_main {
                 out = cb(out, CG_MAIN_RETURN_OPEN)
-                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, teko::list::empty(), fn_body, dctx) { Cb as o => o; error as err => return err }
+                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
                 return cb(out, CG_MAIN_RETURN_CLOSE)
             }
             out = cb(out, "return ")
-            out = match emit_as_r(out, prog, ret_type, ret_type, x, escaping, teko::list::empty(), fn_body, dctx) { Cb as o => o; error as err => return err }
+            out = match emit_as_r(out, prog, ret_type, ret_type, x, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
             cb(out, ";\n")
         }
     }
@@ -6440,7 +6440,7 @@ fn emit_block_tail(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, 
         match s {
             checker::TDeferStmt => { cur = dctx_register(cur, s) }
             _ => {
-                out = match emit_stmt(out, s, in_main, prog, ret_type, indent, frame, escaping, teko::list::empty(), fn_body, cur, teko::list::empty(), false) { Cb as o => o; error as err => return err }
+                out = match emit_stmt(out, s, in_main, prog, ret_type, indent, frame, escaping, [], fn_body, cur, [], false) { Cb as o => o; error as err => return err }
             }
         }
         i++
@@ -6450,7 +6450,7 @@ fn emit_block_tail(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, 
     match last {
         checker::TDeferStmt => out
         checker::TExprStmt as es => emit_exprstmt_tail(out, es.expr, in_main, prog, ret_type, indent, frame, escaping, fn_body, cur)
-        _ => emit_stmt(out, last, in_main, prog, ret_type, indent, frame, escaping, teko::list::empty(), fn_body, cur, teko::list::empty(), false)
+        _ => emit_stmt(out, last, in_main, prog, ret_type, indent, frame, escaping, [], fn_body, cur, [], false)
     }
 }
 
@@ -6722,7 +6722,7 @@ fn emit_return(buf: Cb, prog: CgProg, r: checker::TReturn, in_main: bool, ret_ty
         if in_main { return cb(out, "return 0;\n") }
         return cb(out, "return;\n")
     }
-    var ret_regions: []RegionFrame = teko::list::empty()
+    var ret_regions: []RegionFrame = []
     if in_main {
         out = cb(out, CG_MAIN_RETURN_OPEN)
         out = match emit_expr_ctx(out, prog, checker::Void { }, r.value, escaping, ret_regions, fn_body, dctx) { Cb as o => o; error as err => return err }
@@ -6738,7 +6738,7 @@ fn emit_loop(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_ty
     var out = cb(buf, indent)
     out = cb(out, "{\n")
     var inner = cb_indent_deeper(indent)
-    out = match emit_block(out, l.init, in_main, prog, ret_type, inner, escaping, regions, fn_body, dctx, teko::list::empty(), false) { Cb as o => o; error as err => return err }
+    out = match emit_block(out, l.init, in_main, prog, ret_type, inner, escaping, regions, fn_body, dctx, [], false) { Cb as o => o; error as err => return err }
     out = match emit_loop_while(out, l, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, indent)
     out = cb(out, "}\n")
@@ -6761,7 +6761,7 @@ fn emit_loop_while(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, 
         out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
         regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) })
     }
-    var cur_blk = if want_block { l.body } else { teko::list::empty() }
+    var cur_blk = if want_block { l.body } else { [] }
     out = match emit_block(out, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, inner, escaping, fn_body) { Cb as o => o; error as err => return err }
     if want_block { out = cb(out, inner); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
@@ -6862,7 +6862,7 @@ fn cov_collect_expr(e: checker::TExpr, acc: []u32): []u32 {
 }
 
 fn stmt_cov_lines(s: @TStatement()): []u32 {
-    var acc: []u32 = teko::list::empty()
+    var acc: []u32 = []
     match s {
         checker::TBinding as b => cov_collect_expr(b.value, acc)
         checker::TAssign as a => {
@@ -7389,7 +7389,7 @@ fn emit_function_cov(buf: Cb, prog: CgProg, f: checker::TFunction, cov_idx: i64)
     var frame: str = if want_frame { "_tkfr" } else { "" }
     var use_rr = want_frame && !f.has_arena_size
     var rr: str = if use_rr { "_tkrr" } else { "" }
-    var dctx = DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov; rr = rr; bracket_depth = 0 }
+    var dctx = DeferCtx { defers = []; loops = []; cov = cov; rr = rr; bracket_depth = 0 }
     if use_rr { out = cb(out, "    tk_region *_tkrr = "); out = cb(out, cg_rr_init_expr()); out = cb(out, ";\n") }
     if want_frame {
         out = cb(out, "    tk_region *_tkfr = "); out = cb(out, cg_tkfr_init_expr(f, use_rr)); out = cb(out, ";\n")
@@ -7812,7 +7812,7 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: @TypeExpr()): @Type() {
             }
             checker::Variant { members = cg_union_normalize_null(mem) }
         }
-        parser::FunctionType => checker::Func { params = teko::list::empty(); ret = checker::Void { }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = teko::list::empty() }
+        parser::FunctionType => checker::Func { params = []; ret = checker::Void { }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] }
         parser::MacroType => checker::Void { }
     }
 }
@@ -8079,7 +8079,7 @@ fn cg_named_decls(prog: CgProg): []parser::TypeDecl {
 }
 
 fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
-    var set = CgTypeSet { inners = teko::list::empty(); opt_keys = teko::list::empty(); slices = teko::list::empty(); slice_keys = teko::list::empty(); variants = teko::list::empty(); variant_keys = teko::list::empty() }
+    var set = CgTypeSet { inners = []; opt_keys = []; slices = []; slice_keys = []; variants = []; variant_keys = [] }
     var i = 0
     loop {
         if i >= prog.items.len { break }
@@ -8088,7 +8088,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
                 set = cg_collect_type_opts(set, f.return_type)
                 set = cg_collect_block_opts(set, f.body)
             }
-            (@TStatement()) as st => { set = cg_collect_block_opts(set, teko::list::push(teko::list::empty(), st)) }
+            (@TStatement()) as st => { set = cg_collect_block_opts(set, [st]) }
             _ => { }
         }
         i++
@@ -8105,7 +8105,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
     var named = cg_named_decls(prog)
 
     var out = buf
-    var em0 = CgEmitted { names = teko::list::empty(); opt_keys = teko::list::empty(); uvar_keys = teko::list::empty() }
+    var em0 = CgEmitted { names = []; opt_keys = []; uvar_keys = [] }
     var enum_count: u64 = 0
     var ei = 0
     loop {
@@ -8330,7 +8330,7 @@ type StampAcc = struct { next: u64; next_spawn: u64; fns: []checker::TFunction; 
 type LiftResult = struct { prog: checker::TProgram; lams: []checker::TLambda; spawns: []checker::TSpawn }
 
 fn cg_lift_lambdas(prog: CgProg): LiftResult {
-    var acc = StampAcc { next = 0; next_spawn = 0; fns = teko::list::empty(); lams = teko::list::empty(); spawns = teko::list::empty() }
+    var acc = StampAcc { next = 0; next_spawn = 0; fns = []; lams = []; spawns = [] }
     var items: []@TItem() = teko::list::empty()
     var i = 0
     loop {
@@ -8353,7 +8353,7 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
     LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams; spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
-    var out: []@TStatement() = teko::list::empty()
+    var out: []@TStatement() = []
     var i = 0
     loop { if i >= stmts.len { break }; out = teko::mem::push_fo(out, cg_lift_stmt(stmts[i], acc)); i++ }
     out
@@ -8362,7 +8362,7 @@ fn cg_lift_stmt(s: @TStatement(), ref acc: StampAcc): @TStatement() {
     match s {
         checker::TBinding as b => checker::TBinding { kind = b.kind; target = b.target; bound = b.bound; value = cg_lift_expr(b.value, acc) }
         checker::TAssign as a => checker::TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = cg_lift_expr(a.value, acc); deref = a.deref; target = if parser::assign_has_target(a.kind) { cg_lift_expr(a.target, acc) } else { a.target } }
-        checker::TReturn as r => checker::TReturn { has_value = r.has_value; value = if r.has_value { cg_lift_expr(r.value, acc) } else { r.value }; values = teko::list::empty() }
+        checker::TReturn as r => checker::TReturn { has_value = r.has_value; value = if r.has_value { cg_lift_expr(r.value, acc) } else { r.value }; values = [] }
         checker::TLoopStmt as l => checker::TLoopStmt { label = l.label; init = cg_lift_block(l.init, acc); body = cg_lift_block(l.body, acc) }
         checker::TExprStmt as es => checker::TExprStmt { expr = cg_lift_expr(es.expr, acc) }
         checker::TDeferStmt as d => checker::TDeferStmt { body = cg_lift_block(d.body, acc) }
@@ -8521,7 +8521,7 @@ fn cg_emit_lambda_decls(buf: Cb, prog: CgProg, lams: []checker::TLambda, protos_
                 out = cb(out, ";\n")
                 ui++
             }
-            out = match emit_block_tail(out, lam.body, false, prog, lam.ret, "    ", "", teko::list::empty(), lam.body, dctx_empty()) { Cb as o => o; error as e => return e }
+            out = match emit_block_tail(out, lam.body, false, prog, lam.ret, "    ", "", [], lam.body, dctx_empty()) { Cb as o => o; error as e => return e }
             out = cb(out, "}\n")
         }
         li++
@@ -8691,7 +8691,7 @@ fn cg_emit_vtable_protos(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): C
 
 fn cg_emit_all_vtthunks(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): Cb | error {
     var b = buf
-    var emitted: []str = teko::list::empty()
+    var emitted: []str = []
     var ci = 0
     loop {
         if ci >= prog.items.len { break }
@@ -9352,10 +9352,10 @@ fn emit_program_main_body(buf: Cb, prog: CgProg, cov: bool): Cb | error {
             checker::TConstDecl => { }
             (@TStatement()) as s => {
                 if j == last_stmt {
-                    var tail = teko::list::push(teko::list::empty(), s)
-                    b = match emit_block_tail(b, tail, true, prog, checker::Void { }, "    ", "", teko::list::empty(), teko::list::empty(), dctx_empty()) { Cb as o => o; error as err => return err }
+                    var tail = [s]
+                    b = match emit_block_tail(b, tail, true, prog, checker::Void { }, "    ", "", [], [], dctx_empty()) { Cb as o => o; error as err => return err }
                 } else {
-                    b = match emit_stmt(b, s, true, prog, checker::Void { }, "    ", "", teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty(), teko::list::empty(), false) { Cb as o => o; error as err => return err }
+                    b = match emit_stmt(b, s, true, prog, checker::Void { }, "    ", "", [], [], [], dctx_empty(), [], false) { Cb as o => o; error as err => return err }
                 }
             }
         }
