@@ -321,12 +321,35 @@ fn find_variant_def(variants: []LVariantDef, name: str): LVariantDef | null {
     null
 }
 
+/**
+ * Serializes a const whose value constructs one empty-payload case of a nominal union.
+ *
+ * @param info  the union's variant definition, resolved through the variant-def registry by name
+ * @param init  the const's initializer, a member construction of one of the union's cases
+ * @return      the little-endian tag bytes for the constructed case, wrapper-padded
+ * @throws      when the initializer is not a member construction, or the case carries a payload
+ */
 fn const_variant_bytes(info: LVariantDef, init: checker::TExpr): []byte | error {
+    const_variant_from_members(info.ty.members, init)
+}
+
+/**
+ * Serializes a const whose value constructs one empty-payload case of a union, given the union's
+ * member types directly. Shared by the nominal path (`const_variant_bytes`, whose members come from
+ * the variant-def registry) and the inlined `@Type()`-union path (`serialize_const`'s `Variant`
+ * arm, whose members come straight off the resolved `checker::Variant`), so both compute the same
+ * tag index over the same member ordering.
+ *
+ * @param members  the union's member types, in declaration order — the tag axis
+ * @param init     the const's initializer, a member construction of one of `members`
+ * @return         the little-endian tag bytes for the constructed case, wrapper-padded
+ * @throws         when the initializer is not a member construction, or the case carries a payload
+ */
+fn const_variant_from_members(members: []@Type(), init: checker::TExpr): []byte | error {
     var case_name = match named_type_name(init.type) { str as s => s; error as e => return e }
-    var vm = match find_variant_member(info.ty.members, checker::name_last_segment(case_name)) { VariantMember as x => x; error as e => return e }
-    var index = vm.index
+    var vm = match find_variant_member(members, checker::name_last_segment(case_name)) { VariantMember as x => x; error as e => return e }
     match init.kind {
-        checker::TStructInit as si => const_variant_tag_bytes(si, index)
+        checker::TStructInit as si => const_variant_tag_bytes(si, vm.index)
         _ => error { message = "const variant: initializer is not a member construction" }
     }
 }
@@ -342,11 +365,26 @@ fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: 
     }
 }
 
+/**
+ * Materializes a const declaration into its rodata image, dispatching on the const's resolved type.
+ * A `Named` union routes its cases through the variant-def registry; an inlined `@Type()` union (a
+ * §9.D macro union such as `@MInst()`) resolves to a structural `checker::Variant`, so its arm
+ * serializes the constructed case straight from the type's member list. Both spellings of the same
+ * union produce the identical tag over the identical member ordering.
+ *
+ * @param cd        the const declaration, with its resolved type and typed initializer
+ * @param layouts   struct layouts, for aggregate const bodies
+ * @param variants  variant definitions, for nominal-union cases
+ * @param enums     enum infos, for enum-valued fields
+ * @return          the const's rodata image (bytes, relocations, and leaf blobs)
+ * @throws          when the const's value is a shape the native backend cannot yet materialize
+ */
 fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo): ConstImage | error {
     match cd.ty {
         checker::Str => match const_str_bytes(cd.init) { []byte as b => const_image_flat(b); error as e => return e }
         checker::Slice as s => const_slice_image(cd.name, s.element, cd.init, enums)
         checker::Named as n => const_named_bytes(cd.name, n.name, cd.init, layouts, variants, enums)
+        checker::Variant as v => match const_variant_from_members(v.members, cd.init) { []byte as b => const_image_flat(b); error as e => return e }
         _ => error { message = "const aggregate: pointer/slice-bearing value is not yet supported" }
     }
 }
