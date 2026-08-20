@@ -80,22 +80,16 @@ fn rsa_digest_info_prefix(alg: RsaHashAlg): []byte {
 }
 
 fn rsa_bytes_concat(a: []byte, b: []byte): []byte {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i++
-    }
-    out
+    [..a, ..b]
 }
 
 fn rsa_bytes_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
+    var n = to - from
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
@@ -177,17 +171,14 @@ fn rsa_emsa_pkcs1_v15_encode(alg: RsaHashAlg, message: []byte, em_len: u64): []b
         return crypto_error("rsa_emsa_pkcs1_v15_encode: intended encoded message length too short")
     }
     var ps_len = em_len - t.len - 3
-    var out: []byte = []
-    out = teko::list::push(out, 0x00 to byte)
-    out = teko::list::push(out, 0x01 to byte)
+    var ps: [ps_len]byte = []
     var i: u64 = 0
     loop {
         if i >= ps_len { break }
-        out = teko::list::push(out, 0xFF to byte)
+        ps[i] = 0xFF to byte
         i++
     }
-    out = teko::list::push(out, 0x00 to byte)
-    rsa_bytes_concat(out, t)
+    [0x00 to byte, 0x01 to byte, ..ps, 0x00 to byte, ..t]
 }
 
 /**
@@ -239,42 +230,46 @@ exp fn rsa_verify_pkcs1v15(pubkey: RsaPublicKey, hash_alg: RsaHashAlg, message: 
 }
 
 fn rsa_i2osp_counter(counter: u64): []byte {
-    var out: []byte = []
-    out = teko::list::push(out, ((counter >> 24) & 0xFF) to byte)
-    out = teko::list::push(out, ((counter >> 16) & 0xFF) to byte)
-    out = teko::list::push(out, ((counter >> 8) & 0xFF) to byte)
-    out = teko::list::push(out, (counter & 0xFF) to byte)
-    out
+    [
+        ((counter >> 24) & 0xFF) to byte,
+        ((counter >> 16) & 0xFF) to byte,
+        ((counter >> 8) & 0xFF) to byte,
+        (counter & 0xFF) to byte,
+    ]
 }
 
 fn rsa_mgf1(alg: RsaHashAlg, seed: []byte, mask_len: u64): []byte {
-    var out: []byte = []
+    var h_len = rsa_hash_len(alg)
+    var n_blocks = (mask_len + h_len - 1) / h_len
+    var out: [n_blocks * h_len]byte = []
+    var pos: u64 = 0
     var counter: u64 = 0
     loop {
-        if out.len >= mask_len { break }
-        out = rsa_bytes_concat(out, rsa_hash(alg, rsa_bytes_concat(seed, rsa_i2osp_counter(counter))))
+        if counter >= n_blocks { break }
+        var block = rsa_hash(alg, [..seed, ..rsa_i2osp_counter(counter)])
+        var j: u64 = 0
+        loop {
+            if j >= block.len { break }
+            out[pos] = block[j]
+            pos++
+            j++
+        }
         counter++
     }
     rsa_bytes_slice(out, 0, mask_len)
 }
 
 fn rsa_pss_zero8(): []byte {
-    var out: []byte = []
-    var i: u64 = 0
-    loop {
-        if i >= 8 { break }
-        out = teko::list::push(out, 0 to byte)
-        i++
-    }
+    var out: [8]byte = []
     out
 }
 
 fn rsa_pss_xor(a: []byte, b: []byte): []byte {
-    var out: []byte = []
+    var out: [a.len]byte = []
     var i: u64 = 0
     loop {
         if i >= a.len { break }
-        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        out[i] = ((a[i] to u32) ^ (b[i] to u32)) to byte
         i++
     }
     out
@@ -288,12 +283,12 @@ fn rsa_pss_clear_top_bits(buf: []byte, n_bits: u32): []byte {
     if n_bits == 0 || buf.len == 0 {
         return buf
     }
-    var out: []byte = []
-    out = teko::list::push(out, ((buf[0] to u32) & rsa_pss_keep_mask(n_bits)) to byte)
+    var out: [buf.len]byte = []
+    out[0] = ((buf[0] to u32) & rsa_pss_keep_mask(n_bits)) to byte
     var i: u64 = 1
     loop {
         if i >= buf.len { break }
-        out = teko::list::push(out, buf[i])
+        out[i] = buf[i]
         i++
     }
     out
@@ -333,19 +328,12 @@ fn rsa_emsa_pss_encode(alg: RsaHashAlg, message: []byte, salt: []byte, em_bits: 
     var m_prime = rsa_bytes_concat(rsa_bytes_concat(rsa_pss_zero8(), rsa_hash(alg, message)), salt)
     var h = rsa_hash(alg, m_prime)
     var ps_len = em_len - salt.len - h_len - 2
-    var db: []byte = []
-    var i: u64 = 0
-    loop {
-        if i >= ps_len { break }
-        db = teko::list::push(db, 0 to byte)
-        i++
-    }
-    db = teko::list::push(db, 0x01 to byte)
-    db = rsa_bytes_concat(db, salt)
+    var ps: [ps_len]byte = []
+    var db: []byte = [..ps, 0x01 to byte, ..salt]
     var masked_db = rsa_pss_xor(db, rsa_mgf1(alg, h, em_len - h_len - 1))
     var clear_bits = (8 * em_len - em_bits) to u32
     var em = rsa_bytes_concat(rsa_pss_clear_top_bits(masked_db, clear_bits), h)
-    teko::list::push(em, 0xbc to byte)
+    [..em, 0xbc to byte]
 }
 
 fn rsa_emsa_pss_verify(alg: RsaHashAlg, message: []byte, em: []byte, em_bits: u64): bool {

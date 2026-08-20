@@ -6,18 +6,17 @@ fn argon2_rotr64(x: u64, count: u32): u64 {
     (x >> (count to u64)) | (x << ((64 - count) to u64))
 }
 
-fn argon2_push_le32(buf: []byte, x: u32): []byte {
-    var b = buf
-    b = teko::list::push(b, (x & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
-    b
+fn argon2_le32_bytes(x: u32): []byte {
+    [
+        (x & 0xFF) to byte,
+        ((x >> 8) & 0xFF) to byte,
+        ((x >> 16) & 0xFF) to byte,
+        ((x >> 24) & 0xFF) to byte,
+    ]
 }
 
-fn argon2_push_le64(buf: []byte, x: u64): []byte {
-    var b = argon2_push_le32(buf, (x & 0xFFFFFFFF) to u32)
-    argon2_push_le32(b, ((x >> 32) & 0xFFFFFFFF) to u32)
+fn argon2_le64_bytes(x: u64): []byte {
+    [..argon2_le32_bytes((x & 0xFFFFFFFF) to u32), ..argon2_le32_bytes(((x >> 32) & 0xFFFFFFFF) to u32)]
 }
 
 fn argon2_le_u64_at(b: []byte, off: u64): u64 {
@@ -27,101 +26,118 @@ fn argon2_le_u64_at(b: []byte, off: u64): u64 {
 }
 
 fn argon2_bytes_append(dst: []byte, src: []byte): []byte {
-    var out = dst
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        out = teko::list::push(out, src[i])
-        i++
-    }
-    out
+    [..dst, ..src]
 }
 
 fn argon2_bytes_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
+    var n = to - from
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
 }
 
 fn argon2_h_t(a: []byte, t: u64): []byte {
-    var msg = argon2_push_le32([], t to u32)
-    blake2b_of(argon2_bytes_append(msg, a), t)
+    blake2b_of([..argon2_le32_bytes(t to u32), ..a], t)
 }
 
 fn argon2_hprime(x: []byte, out_len: u64): []byte {
     if out_len <= 64 { return argon2_h_t(x, out_len) }
-    var prefix = argon2_push_le32([], out_len to u32)
-    var v = blake2b_of(argon2_bytes_append(prefix, x), 64)
-    var out = argon2_bytes_slice(v, 0, 32)
+    var prefix = argon2_le32_bytes(out_len to u32)
+    var v = blake2b_of([..prefix, ..x], 64)
+    var out: [out_len]byte = []
+    var pos: u64 = 0
+    var j: u64 = 0
+    loop {
+        if j >= 32 { break }
+        out[pos] = v[j]
+        pos++
+        j++
+    }
     var produced: u64 = 32
     loop {
         if out_len - produced <= 64 { break }
         v = blake2b_of(v, 64)
-        out = argon2_bytes_append(out, argon2_bytes_slice(v, 0, 32))
+        var k: u64 = 0
+        loop {
+            if k >= 32 { break }
+            out[pos] = v[k]
+            pos++
+            k++
+        }
         produced = produced + 32
     }
-    argon2_bytes_append(out, blake2b_of(v, out_len - produced))
+    var last = blake2b_of(v, out_len - produced)
+    var m: u64 = 0
+    loop {
+        if m >= last.len { break }
+        out[pos] = last[m]
+        pos++
+        m++
+    }
+    out
 }
 
 fn argon2_h0(password: []byte, salt: []byte, secret: []byte, ad: []byte, parallelism: u64, tag_len: u64, m_cost_kib: u64, t_cost: u64): []byte {
-    var msg: []byte = []
-    msg = argon2_push_le32(msg, parallelism to u32)
-    msg = argon2_push_le32(msg, tag_len to u32)
-    msg = argon2_push_le32(msg, m_cost_kib to u32)
-    msg = argon2_push_le32(msg, t_cost to u32)
-    msg = argon2_push_le32(msg, ARGON2_VERSION to u32)
-    msg = argon2_push_le32(msg, ARGON2_TYPE_ID to u32)
-    msg = argon2_push_le32(msg, password.len to u32)
-    msg = argon2_bytes_append(msg, password)
-    msg = argon2_push_le32(msg, salt.len to u32)
-    msg = argon2_bytes_append(msg, salt)
-    msg = argon2_push_le32(msg, secret.len to u32)
-    msg = argon2_bytes_append(msg, secret)
-    msg = argon2_push_le32(msg, ad.len to u32)
-    msg = argon2_bytes_append(msg, ad)
+    var msg: []byte = [
+        ..argon2_le32_bytes(parallelism to u32),
+        ..argon2_le32_bytes(tag_len to u32),
+        ..argon2_le32_bytes(m_cost_kib to u32),
+        ..argon2_le32_bytes(t_cost to u32),
+        ..argon2_le32_bytes(ARGON2_VERSION to u32),
+        ..argon2_le32_bytes(ARGON2_TYPE_ID to u32),
+        ..argon2_le32_bytes(password.len to u32),
+        ..password,
+        ..argon2_le32_bytes(salt.len to u32),
+        ..salt,
+        ..argon2_le32_bytes(secret.len to u32),
+        ..secret,
+        ..argon2_le32_bytes(ad.len to u32),
+        ..ad,
+    ]
     blake2b_of(msg, 64)
 }
 
 fn argon2_bytes_to_words(b: []byte): []u64 {
-    var out: []u64 = []
+    var out: [128]u64 = []
     var i: u64 = 0
     loop {
         if i >= 128 { break }
-        out = teko::list::push(out, argon2_le_u64_at(b, i * 8))
+        out[i] = argon2_le_u64_at(b, i * 8)
         i++
     }
     out
 }
 
 fn argon2_words_to_bytes(w: []u64): []byte {
-    var out: []byte = []
+    var out: [1024]byte = []
     var i: u64 = 0
     loop {
         if i >= 128 { break }
-        out = argon2_push_le64(out, w[i])
+        var le = argon2_le64_bytes(w[i])
+        var base = i * 8
+        var j: u64 = 0
+        loop {
+            if j >= 8 { break }
+            out[base + j] = le[j]
+            j++
+        }
         i++
     }
     out
 }
 
 fn argon2_zero_block(): []u64 {
-    var out: []u64 = []
-    var i: u64 = 0
-    loop {
-        if i >= 128 { break }
-        out = teko::list::push(out, 0)
-        i++
-    }
+    var out: [128]u64 = []
     out
 }
 
 fn argon2_set4(v: []u64, ia: u64, na: u64, ib: u64, nb: u64, ic: u64, nc: u64, id: u64, nd: u64): []u64 {
-    var out: []u64 = []
+    var out: [v.len]u64 = []
     var i: u64 = 0
     loop {
         if i >= v.len { break }
@@ -130,7 +146,7 @@ fn argon2_set4(v: []u64, ia: u64, na: u64, ib: u64, nb: u64, ic: u64, nc: u64, i
         if i == ib { val = nb }
         if i == ic { val = nc }
         if i == id { val = nd }
-        out = teko::list::push(out, val)
+        out[i] = val
         i++
     }
     out
@@ -174,53 +190,53 @@ fn argon2_p16(v: []u64): []u64 {
 }
 
 fn argon2_words_range(w: []u64, from: u64, to: u64): []u64 {
-    var out: []u64 = []
-    var i = from
+    var n = to - from
+    var out: [n]u64 = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, w[i])
+        if i >= n { break }
+        out[i] = w[from + i]
         i++
     }
     out
 }
 
 fn argon2_words_append(dst: []u64, src: []u64): []u64 {
-    var out = dst
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        out = teko::list::push(out, src[i])
-        i++
-    }
-    out
+    [..dst, ..src]
 }
 
 fn argon2_p_rows(r: []u64): []u64 {
-    var out: []u64 = []
+    var out: [128]u64 = []
     var row: u64 = 0
     loop {
         if row >= 8 { break }
         var row_off = row * 16
-        out = argon2_words_append(out, argon2_p16(argon2_words_range(r, row_off, row_off + 16)))
+        var mixed = argon2_p16(argon2_words_range(r, row_off, row_off + 16))
+        var j: u64 = 0
+        loop {
+            if j >= 16 { break }
+            out[row_off + j] = mixed[j]
+            j++
+        }
         row++
     }
     out
 }
 
 fn argon2_extract_column(z: []u64, col: u64): []u64 {
-    var out: []u64 = []
+    var out: [16]u64 = []
     var row: u64 = 0
     loop {
         if row >= 8 { break }
-        out = teko::list::push(out, z[16 * row + 2 * col])
-        out = teko::list::push(out, z[16 * row + 2 * col + 1])
+        out[2 * row] = z[16 * row + 2 * col]
+        out[2 * row + 1] = z[16 * row + 2 * col + 1]
         row++
     }
     out
 }
 
 fn argon2_assemble_from_columns(colvals: []u64): []u64 {
-    var out: []u64 = []
+    var out: [128]u64 = []
     var p: u64 = 0
     loop {
         if p >= 128 { break }
@@ -228,29 +244,35 @@ fn argon2_assemble_from_columns(colvals: []u64): []u64 {
         var k = p % 16
         var i = k / 2
         var s = k % 2
-        out = teko::list::push(out, colvals[16 * i + 2 * j + s])
+        out[p] = colvals[16 * i + 2 * j + s]
         p++
     }
     out
 }
 
 fn argon2_p_cols(z: []u64): []u64 {
-    var col_results: []u64 = []
+    var col_results: [128]u64 = []
     var col: u64 = 0
     loop {
         if col >= 8 { break }
-        col_results = argon2_words_append(col_results, argon2_p16(argon2_extract_column(z, col)))
+        var mixed = argon2_p16(argon2_extract_column(z, col))
+        var j: u64 = 0
+        loop {
+            if j >= 16 { break }
+            col_results[col * 16 + j] = mixed[j]
+            j++
+        }
         col++
     }
     argon2_assemble_from_columns(col_results)
 }
 
 fn argon2_xor_block(a: []u64, b: []u64): []u64 {
-    var out: []u64 = []
+    var out: [128]u64 = []
     var i: u64 = 0
     loop {
         if i >= 128 { break }
-        out = teko::list::push(out, a[i] ^ b[i])
+        out[i] = a[i] ^ b[i]
         i++
     }
     out
@@ -267,14 +289,14 @@ fn argon2_mem_read_block(mem: []u64, block_index: u64): []u64 {
 
 fn argon2_mem_write_block(mem: []u64, block_index: u64, block: []u64): []u64 {
     var blk_off = block_index * 128
-    var out: []u64 = []
+    var out: [mem.len]u64 = []
     var i: u64 = 0
     loop {
         if i >= mem.len { break }
         if i >= blk_off && i < blk_off + 128 {
-            out = teko::list::push(out, block[i - blk_off])
+            out[i] = block[i - blk_off]
         } else {
-            out = teko::list::push(out, mem[i])
+            out[i] = mem[i]
         }
         i++
     }
@@ -282,31 +304,19 @@ fn argon2_mem_write_block(mem: []u64, block_index: u64, block: []u64): []u64 {
 }
 
 fn argon2_mem_zero(total_words: u64): []u64 {
-    var out: []u64 = []
-    var i: u64 = 0
-    loop {
-        if i >= total_words { break }
-        out = teko::list::push(out, 0)
-        i++
-    }
+    var out: [total_words]u64 = []
     out
 }
 
 fn argon2_build_input_block(pass: u64, lane: u64, slice: u64, m_prime: u64, t_cost: u64, counter: u64): []u64 {
-    var out: []u64 = []
-    out = teko::list::push(out, pass)
-    out = teko::list::push(out, lane)
-    out = teko::list::push(out, slice)
-    out = teko::list::push(out, m_prime)
-    out = teko::list::push(out, t_cost)
-    out = teko::list::push(out, ARGON2_TYPE_ID)
-    out = teko::list::push(out, counter)
-    var i: u64 = 7
-    loop {
-        if i >= 128 { break }
-        out = teko::list::push(out, 0)
-        i++
-    }
+    var out: [128]u64 = []
+    out[0] = pass
+    out[1] = lane
+    out[2] = slice
+    out[3] = m_prime
+    out[4] = t_cost
+    out[5] = ARGON2_TYPE_ID
+    out[6] = counter
     out
 }
 
@@ -406,8 +416,7 @@ fn argon2_run_passes(mem: []u64, t_cost: u64, lanes: u64, lane_length: u64, segm
 }
 
 fn argon2_initial_block(h0: []byte, block_num: u64, lane: u64): []byte {
-    var msg = argon2_push_le32(h0, block_num to u32)
-    argon2_hprime(argon2_push_le32(msg, lane to u32), 1024)
+    argon2_hprime([..h0, ..argon2_le32_bytes(block_num to u32), ..argon2_le32_bytes(lane to u32)], 1024)
 }
 
 fn argon2_init_memory(h0: []byte, m_prime: u64, lanes: u64, lane_length: u64): []u64 {
