@@ -1,104 +1,106 @@
 fn aead_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
+    var n = to - from
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
 }
 
 fn aead_append(dst: []byte, src: []byte): []byte {
-    var out = dst
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        out = teko::list::push(out, src[i])
-        i++
-    }
-    out
+    [..dst, ..src]
 }
 
 fn aead_zero16(): []byte {
-    var out: []byte = []
-    var i: u64 = 0
-    loop {
-        if i >= 16 { break }
-        out = teko::list::push(out, 0 to byte)
-        i++
-    }
+    var out: [16]byte = []
     out
 }
 
 fn aead_pad16(buf: []byte): []byte {
-    var out = buf
+    var n = buf.len
     loop {
-        if out.len % 16 == 0 { break }
-        out = teko::list::push(out, 0 to byte)
+        if n % 16 == 0 { break }
+        n++
+    }
+    var out: [n]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= buf.len { break }
+        out[i] = buf[i]
+        i++
     }
     out
 }
 
 fn aead_xor_n(a: []byte, b: []byte, n: u64): []byte {
-    var out: []byte = []
+    var out: [n]byte = []
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        out[i] = ((a[i] to u32) ^ (b[i] to u32)) to byte
         i++
     }
     out
 }
 
-fn aead_push_be(buf: []byte, x: u64, n: u64): []byte {
-    var out = buf
-    var i = n
+fn aead_be_bytes(x: u64, n: u64): []byte {
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i == 0 { break }
-        i--
-        out = teko::list::push(out, ((x >> (i * 8)) & 0xFF) to byte)
+        if i >= n { break }
+        out[i] = ((x >> ((n - 1 - i) * 8)) & 0xFF) to byte
+        i++
     }
     out
 }
 
-fn aead_push_le64(buf: []byte, x: u64): []byte {
-    var out = buf
+fn aead_le64_bytes(x: u64): []byte {
+    var out: [8]byte = []
     var i: u64 = 0
     loop {
         if i >= 8 { break }
-        out = teko::list::push(out, ((x >> (i * 8)) & 0xFF) to byte)
+        out[i] = ((x >> (i * 8)) & 0xFF) to byte
         i++
     }
     out
 }
 
 fn gcm_j0(nonce: []byte): []byte {
-    var out = aead_slice(nonce, 0, nonce.len)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 0 to byte)
-    out = teko::list::push(out, 1 to byte)
+    var out: [nonce.len + 4]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= nonce.len { break }
+        out[i] = nonce[i]
+        i++
+    }
+    out[nonce.len + 3] = 1 to byte
     out
 }
 
 fn gcm_inc32(block: []byte): []byte {
     var c = ((block[12] to u32) << 24) | ((block[13] to u32) << 16) | ((block[14] to u32) << 8) | (block[15] to u32)
     c = teko::math::wrapping_add_u32(c, 1)
-    var out = aead_slice(block, 0, 12)
-    out = teko::list::push(out, ((c >> 24) & 0xFF) to byte)
-    out = teko::list::push(out, ((c >> 16) & 0xFF) to byte)
-    out = teko::list::push(out, ((c >> 8) & 0xFF) to byte)
-    out = teko::list::push(out, (c & 0xFF) to byte)
+    var out: [16]byte = []
+    var i: u64 = 0
+    loop {
+        if i >= 12 { break }
+        out[i] = block[i]
+        i++
+    }
+    out[12] = ((c >> 24) & 0xFF) to byte
+    out[13] = ((c >> 16) & 0xFF) to byte
+    out[14] = ((c >> 8) & 0xFF) to byte
+    out[15] = (c & 0xFF) to byte
     out
 }
 
 fn gcm_ghash_input(aad: []byte, ct: []byte): []byte {
     var out = aead_pad16(aead_slice(aad, 0, aad.len))
     out = aead_pad16(aead_append(out, ct))
-    out = aead_push_be(out, aad.len * 8, 8)
-    out = aead_push_be(out, ct.len * 8, 8)
-    out
+    [..out, ..aead_be_bytes(aad.len * 8, 8), ..aead_be_bytes(ct.len * 8, 8)]
 }
 
 fn gcm_tag(ks: AesKey, nonce: []byte, aad: []byte, ct: []byte): []byte | CryptoError {
@@ -146,9 +148,7 @@ fn chacha_poly_key(key: []byte, nonce: []byte): []byte | CryptoError {
 fn chacha_mac_input(aad: []byte, ct: []byte): []byte {
     var out = aead_pad16(aead_slice(aad, 0, aad.len))
     out = aead_pad16(aead_append(out, ct))
-    out = aead_push_le64(out, aad.len)
-    out = aead_push_le64(out, ct.len)
-    out
+    [..out, ..aead_le64_bytes(aad.len), ..aead_le64_bytes(ct.len)]
 }
 
 /**
@@ -188,29 +188,20 @@ fn ccm_params(nonce: []byte, tag_len: u64): u64 | CryptoError {
 fn ccm_b0(nonce: []byte, q: u64, aad_len: u64, pt_len: u64, tag_len: u64): []byte {
     var adata = if aad_len > 0 { 1 to u64 } else { 0 to u64 }
     var flag_byte = 64 * adata + 8 * ((tag_len - 2) / 2) + (q - 1)
-    var out: []byte = []
-    out = teko::list::push(out, (flag_byte & 0xFF) to byte)
-    out = aead_append(out, nonce)
-    out = aead_push_be(out, pt_len, q)
-    out
+    [(flag_byte & 0xFF) to byte, ..nonce, ..aead_be_bytes(pt_len, q)]
 }
 
 fn ccm_format_aad(aad: []byte): []byte {
     if aad.len == 0 { return [] }
-    var out: []byte = []
+    var prefix: []byte = []
     if aad.len < 65280 {
-        out = aead_push_be(out, aad.len, 2)
+        prefix = aead_be_bytes(aad.len, 2)
     } else if aad.len < 4294967296 {
-        out = teko::list::push(out, 0xff to byte)
-        out = teko::list::push(out, 0xfe to byte)
-        out = aead_push_be(out, aad.len, 4)
+        prefix = [0xff to byte, 0xfe to byte, ..aead_be_bytes(aad.len, 4)]
     } else {
-        out = teko::list::push(out, 0xff to byte)
-        out = teko::list::push(out, 0xff to byte)
-        out = aead_push_be(out, aad.len, 8)
+        prefix = [0xff to byte, 0xff to byte, ..aead_be_bytes(aad.len, 8)]
     }
-    out = aead_append(out, aad)
-    aead_pad16(out)
+    aead_pad16([..prefix, ..aad])
 }
 
 fn ccm_mac_input(nonce: []byte, q: u64, aad: []byte, pt: []byte, tag_len: u64): []byte {
@@ -231,10 +222,7 @@ fn ccm_cbc_mac(ks: AesKey, blocks: []byte): []byte {
 }
 
 fn ccm_ctr_block(nonce: []byte, q: u64, i: u64): []byte {
-    var out: []byte = []
-    out = teko::list::push(out, ((q - 1) & 0xFF) to byte)
-    out = aead_append(out, nonce)
-    aead_push_be(out, i, q)
+    [((q - 1) & 0xFF) to byte, ..nonce, ..aead_be_bytes(i, q)]
 }
 
 /**
