@@ -213,10 +213,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     comportamento do compilador C hospedeiro** (ex.: `sret` para retorno de agregado): o `codegen` tem
     que **emitir explícito** a semântica (arena, dest-passing, escape) controlada pelo compilador — o
     `sret` dá o slot, não a semântica de arena. O backend **native** (`src/lir/lower.tks` → object-file
-    `.o`) é a **MESMA lógica, só muda a direção da emissão** (emite `.o` em vez de C) e **só entra DEPOIS
-    do marco**. **Corolário operacional:** trabalho corrente mora no `codegen.tks`, NÃO no `lower.tks`
-    (direção nativa deferida); feature "sumida"/keystone costuma estar no `codegen`, não no `lower` — não
-    apontar crumb de M1 pro `lower.tks`.
+    `.o`) é a **MESMA lógica, só muda a direção da emissão** (emite `.o` em vez de C) e o `lower.tks` **TAMBÉM se
+    escreve agora** — o que é deferido é **RODAR o build native** (emitir `.o`, validar em runtime), **NÃO
+    a escritura do código**. Cada feature escreve as DUAS direções: emissão C em `codegen.tks` (exercitada
+    já) **e** emissão native em `lower.tks` (escrita já). A **rota C VALIDA** (compila, self-hospeda,
+    reseeda — é a que RODA agora); a validação de **runtime do native espera o marco**. NÃO pular o
+    `lower.tks`: ele entra no self-build (compila + reseeda), só não é EXECUTADO ainda. (Uma feature "sumida"
+    pode estar em qualquer um dos dois — verificar contra o código, não presumir.)
 - **GUARD DE MEMÓRIA `ulimit -v 4194304` (4 GiB) = INVIOLÁVEL (dono 2026-08-20, baixado de 6,5→4 GiB).**
   Os builds de ensino/aditivos agora picam ~3,3 GB → o teto cai pra 4 GiB: (a) pega regressão de memória
   (estouro acima de 4 GiB = sinal), (b) cabe **mais build simultâneo** nos ~15 GiB físicos (4 GiB×3 vs
