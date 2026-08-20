@@ -1,61 +1,57 @@
 fn kdf_append(dst: []byte, src: []byte): []byte {
-    var out = dst
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        out = teko::list::push(out, src[i])
-        i++
-    }
-    out
+    [..dst, ..src]
 }
 
 fn kdf_slice(data: []byte, from: u64, to: u64): []byte {
-    var out: []byte = []
-    var i = from
+    var n = to - from
+    var out: [n]byte = []
+    var i: u64 = 0
     loop {
-        if i >= to { break }
-        out = teko::list::push(out, data[i])
+        if i >= n { break }
+        out[i] = data[from + i]
         i++
     }
     out
 }
 
 fn kdf_xor(a: []byte, b: []byte): []byte {
-    var out: []byte = []
+    var out: [a.len]byte = []
     var i: u64 = 0
     loop {
         if i >= a.len { break }
-        out = teko::list::push(out, ((a[i] to u32) ^ (b[i] to u32)) to byte)
+        out[i] = ((a[i] to u32) ^ (b[i] to u32)) to byte
         i++
     }
     out
 }
 
-fn kdf_push_be_u32(buf: []byte, x: u64): []byte {
-    var b = buf
-    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
-    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
-    b = teko::list::push(b, (x & 0xFF) to byte)
-    b
+fn kdf_be_u32_bytes(x: u64): []byte {
+    [
+        ((x >> 24) & 0xFF) to byte,
+        ((x >> 16) & 0xFF) to byte,
+        ((x >> 8) & 0xFF) to byte,
+        (x & 0xFF) to byte,
+    ]
 }
 
 fn kdf_sha1_key0(key: []byte): []byte {
     var k = if key.len > 64 { sha1_of(key) } else { key }
-    var out = kdf_slice(k, 0, k.len)
+    var out: [64]byte = []
+    var i: u64 = 0
     loop {
-        if out.len >= 64 { break }
-        out = teko::list::push(out, 0 to byte)
+        if i >= k.len { break }
+        out[i] = k[i]
+        i++
     }
     out
 }
 
 fn kdf_sha1_xor(buf: []byte, pad: u32): []byte {
-    var out: []byte = []
+    var out: [buf.len]byte = []
     var i: u64 = 0
     loop {
         if i >= buf.len { break }
-        out = teko::list::push(out, ((buf[i] to u32) ^ pad) to byte)
+        out[i] = ((buf[i] to u32) ^ pad) to byte
         i++
     }
     out
@@ -69,25 +65,32 @@ fn kdf_hmac_sha1_of(key: []byte, msg: []byte): []byte {
 
 fn kdf_hkdf_expand(prf: func<[]byte, []byte, []byte>, hash_len: u64, prk: []byte, info: []byte, length: u64): []byte | CryptoError {
     if length > 255 * hash_len { return crypto_error("hkdf: requested length exceeds 255 * hash_len") }
-    var okm: []byte = []
+    var n_blocks = (length + hash_len - 1) / hash_len
+    var okm: [n_blocks * hash_len]byte = []
     var t: []byte = []
+    var pos: u64 = 0
     var i: u64 = 1
     loop {
-        if okm.len >= length { break }
-        t = prf(prk, kdf_append(kdf_append(t, info), single_byte(i)))
-        okm = kdf_append(okm, t)
+        if i > n_blocks { break }
+        t = prf(prk, [..t, ..info, ..single_byte(i)])
+        var j: u64 = 0
+        loop {
+            if j >= t.len { break }
+            okm[pos] = t[j]
+            pos++
+            j++
+        }
         i++
     }
     kdf_slice(okm, 0, length)
 }
 
 fn single_byte(value: u64): []byte {
-    var out: []byte = []
-    teko::list::push(out, (value & 0xFF) to byte)
+    [(value & 0xFF) to byte]
 }
 
 fn kdf_pbkdf2_f(prf: func<[]byte, []byte, []byte>, password: []byte, salt: []byte, iterations: u64, block_index: u64): []byte {
-    var u = prf(password, kdf_push_be_u32(kdf_slice(salt, 0, salt.len), block_index))
+    var u = prf(password, [..kdf_slice(salt, 0, salt.len), ..kdf_be_u32_bytes(block_index)])
     var acc = u
     var j: u64 = 1
     loop {
@@ -102,11 +105,20 @@ fn kdf_pbkdf2_f(prf: func<[]byte, []byte, []byte>, password: []byte, salt: []byt
 fn kdf_pbkdf2(prf: func<[]byte, []byte, []byte>, hash_len: u64, password: []byte, salt: []byte, iterations: u64, dk_len: u64): []byte | CryptoError {
     if iterations == 0 { return crypto_error("pbkdf2: iterations must be at least 1") }
     if dk_len > 0xffffffff * hash_len { return crypto_error("pbkdf2: derived key too long") }
-    var dk: []byte = []
+    var n_blocks = (dk_len + hash_len - 1) / hash_len
+    var dk: [n_blocks * hash_len]byte = []
+    var pos: u64 = 0
     var i: u64 = 1
     loop {
-        if dk.len >= dk_len { break }
-        dk = kdf_append(dk, kdf_pbkdf2_f(prf, password, salt, iterations, i))
+        if i > n_blocks { break }
+        var block = kdf_pbkdf2_f(prf, password, salt, iterations, i)
+        var j: u64 = 0
+        loop {
+            if j >= block.len { break }
+            dk[pos] = block[j]
+            pos++
+            j++
+        }
         i++
     }
     kdf_slice(dk, 0, dk_len)
