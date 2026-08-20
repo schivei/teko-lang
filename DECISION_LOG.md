@@ -576,3 +576,12 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Compõe com COL-F0b:** `place` = põe o valor na região da coleção; F0b = mantém vivo lá (marca escaping). Duas metades do mesmo mecanismo, complementares.
 - **Consistência:** o compilador já faz alocação deliberada (regiões de arena, DPS dest-passing) — não é exceção nova, é a intrínseca ficando honesta sobre onde aloca.
 - **Escopo:** pequeno — só `place` muda; callers = os ~10-20 inserts das coleções de FASE-1 (zero hoje → não é retrofit, byte-idêntico). + fortalecer o oráculo `value_place_once` (deref o placed após grow). Desbloqueia COL-F0c.
+
+### D57 · tklib — faseamento CONSERVADOR: move-o-não-usado primeiro, link-mecanismo por último (owner 2026-08-20)
+- **Refina o estudo `distributed-monolith-tklib-extraction` (f6e4dac6) — supersede o "teach-now link em 0.3.1".** O dono adota ordem mais conservadora: o mecanismo de risco de fixpoint (`.tkh`-trust + link-time-monomorph) NÃO vem antes do native verde; vem por último.
+- **Fase A — move seguro (agora, zero risco de fixpoint):** extrair para `./tklib` **só o que o compilador NÃO usa**. Código que o self-build nunca toca não tem interação com o fixpoint (não está no self-build) → vira pacote standalone que o *usuário* linka; o compilador simplesmente **para de compilá-lo**. **Não precisa de link-back** (o compilador não linka o que não usa). Encolhe a árvore compilada → ajuda memória de graça. Pré-requisito: scout de partição (classifica namespaces stdlib usado-vs-não-usado pelo compilador) — liga com D55.
+- **Fase B — memória + verde na perna C:** COL-F0/RM-C com a **stdlib reduzida** (menos superfície pra compilar); perna C verde.
+- **Fase C — native compila:** ainda com pouca memória, fixpoint gen2==gen3, testes verdes (o marco tríplice D52).
+- **Fase D — mover o resto (pós-marco):** SÓ ENTÃO mover a stdlib que o compilador USA + faseamento pesado (`.tkh`-trust + link-time-monomorph, porque aí precisa linkar de volta) + reseed.
+- **Naming preservado:** `name="teko"` (sem rename `tklib::`) segue como no estudo — nomes totalmente-qualificados byte-idênticos, zero edição das milhares de refs `teko::`.
+- **Consequência de scheduling:** NÃO abrir a trilha de package-hardening/link-mecanismo agora. O elefante (COL-F0) segue caminho crítico único pra ≤1,5GB. Fase A (move-não-usado) é paralela/independente e de-risca; começa por um scout de partição read-only.
