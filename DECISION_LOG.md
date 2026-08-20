@@ -569,3 +569,10 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Ruling do dono:** (1) o monólito mantém APENAS as estruturas/módulos que o PRÓPRIO compilador consome em `src/` (List/Map/etc.); **todo o resto vai para pacotes** (`tk_data`, …). (2) **Quase toda a stdlib é EXPOSTA (`exp`)** a usuários externos — o monólito é superfície pública consumível. (3) **Table core → `tk_data`** (o compilador não a usa).
 - **Consequência:** extração mais agressiva que o estudo `tk_data` supôs — coleções que o compilador NÃO usa (RingBuffer, PriorityQueue, SortedSet, Counter, MultiMap, Table…) também saem para pacote, enxugando o monólito → ajuda o marco ≤1,5GB. Determinar EXATAMENTE o que o compilador usa = scout futuro (roadmap, pós-memória).
 - **Liga com:** SM-V1 (0120, ativação de visibilidade) — a stdlib recebe `exp` amplo, conforme §11.1.
+
+### D56 · place() ganha handle de região-alvo — alocação deliberada, sem default (owner 2026-08-20)
+- **Problema (Finding-1 do revisor, COL-F0a):** `place<T>(v)` alocava na região LÉXICA incidental (`regions[len-1]`); num fill-loop com temporário struct essa é a região por-iteração (dropada a cada volta) → o ponteiro "estável" dangla. UAF latente (inerte hoje: F0a sem caller).
+- **Ruling do dono:** conserto aprovado — `place<T>(region, v): *T` com **handle de região-alvo EXPLÍCITO e OBRIGATÓRIO (sem default)**; a coleção passa a **própria** região. `read`/`write` **inalterados** (operam no ponteiro que `place` devolve; o dado já está na região da coleção). Fail-loud: sem default, a captura léxica acidental é **estruturalmente impossível**.
+- **Compõe com COL-F0b:** `place` = põe o valor na região da coleção; F0b = mantém vivo lá (marca escaping). Duas metades do mesmo mecanismo, complementares.
+- **Consistência:** o compilador já faz alocação deliberada (regiões de arena, DPS dest-passing) — não é exceção nova, é a intrínseca ficando honesta sobre onde aloca.
+- **Escopo:** pequeno — só `place` muda; callers = os ~10-20 inserts das coleções de FASE-1 (zero hoje → não é retrofit, byte-idêntico). + fortalecer o oráculo `value_place_once` (deref o placed após grow). Desbloqueia COL-F0c.
