@@ -10,66 +10,67 @@ const SLEB_LOW7: i64 = 0x7F
 
 const SLEB_MORE: i64 = 0x80
 
-fn emit_byte(buf: []byte, v: u64): []byte {
-    teko::list::push(buf, (v & BYTE_MASK) to byte)
+fn emit_byte(v: u64): byte {
+    (v & BYTE_MASK) to byte
 }
 
-fn emit_u16_le(buf: []byte, v: u64): []byte {
-    var b0 = emit_byte(buf, v)
-    emit_byte(b0, v >> 8)
+fn emit_u16_le(v: u64): []byte {
+    var b0 = emit_byte(v)
+    var b1 = emit_byte(v >> 8)
+    [b0, b1]
 }
 
-fn emit_u32_le_dw(buf: []byte, v: u64): []byte {
-    var b = emit_byte(buf, v)
-    b = emit_byte(b, v >> 8)
-    b = emit_byte(b, v >> 16)
-    emit_byte(b, v >> 24)
+fn emit_u32_le_dw(v: u64): []byte {
+    var b0 = emit_byte(v)
+    var b1 = emit_byte(v >> 8)
+    var b2 = emit_byte(v >> 16)
+    var b3 = emit_byte(v >> 24)
+    [b0, b1, b2, b3]
 }
 
-fn emit_u64_le_dw(buf: []byte, v: u64): []byte {
-    var b = buf
-    var shift: u64 = 0
-    loop {
-        if shift >= 64 { break }
-        b = emit_byte(b, v >> shift)
-        shift = shift + 8
+fn emit_u64_le_dw(v: u64): []byte {
+    var b0 = emit_byte(v)
+    var b1 = emit_byte(v >> 8)
+    var b2 = emit_byte(v >> 16)
+    var b3 = emit_byte(v >> 24)
+    var b4 = emit_byte(v >> 32)
+    var b5 = emit_byte(v >> 40)
+    var b6 = emit_byte(v >> 48)
+    var b7 = emit_byte(v >> 56)
+    [b0, b1, b2, b3, b4, b5, b6, b7]
+}
+
+fn emit_addr_slot(): []byte {
+    emit_u64_le_dw(0 to u64)
+}
+
+fn emit_cstr(s: str): []byte {
+    if s[s.len - 1] == 0 {
+        return s
     }
-    b
+
+    [..s, 0 to byte]
 }
 
-fn emit_addr_slot(buf: []byte): []byte {
-    emit_u64_le_dw(buf, 0 to u64)
-}
-
-fn emit_cstr(buf: []byte, s: str): []byte {
-    var b = buf
-    var i: u64 = 0
-    loop {
-        if i >= s.len { break }
-        b = teko::list::push(b, s[i])
-        i = i + 1
-    }
-    teko::list::push(b, 0 to byte)
-}
-
-pub fn uleb128(buf: []byte, v: u64): []byte {
-    var b = buf
+pub fn uleb128(v: u64): []byte {
+    var b: []byte = []
     var val = v
+
     loop {
         var group = val & LEB_LOW7
         val = val >> 7
         if val != 0 {
-            b = teko::list::push(b, (group | LEB_MORE) to byte)
+            b = [..b, (group | LEB_MORE) to byte]
         } else {
-            b = teko::list::push(b, group to byte)
+            b = [..b, group to byte]
             break
         }
     }
     b
 }
 
-pub fn sleb128(buf: []byte, v: i64): []byte {
-    var b = buf
+pub fn sleb128(v: i64): []byte {
+    var b: []byte = []
     var val = v
     loop {
         var group = val & SLEB_LOW7
@@ -77,10 +78,10 @@ pub fn sleb128(buf: []byte, v: i64): []byte {
         var sign_set = (group & SLEB_SIGN) != 0
         var done = (val == 0 && !sign_set) || (val == -1 && sign_set)
         if done {
-            b = teko::list::push(b, group to byte)
+            b = [..b, group to byte]
             break
         }
-        b = teko::list::push(b, (group | SLEB_MORE) to byte)
+        b = [..b, (group | SLEB_MORE) to byte]
     }
     b
 }
@@ -148,134 +149,119 @@ pub const DW_ATE_FLOAT: u64 = 0x04
 pub const DW_OP_REG6_RBP_PLACEHOLDER: u64 = 0x56
 
 pub fn debug_abbrev(): []byte {
-    var b: []byte = teko::list::empty()
-    b = uleb128(b, 1 to u64)
-    b = uleb128(b, DW_TAG_COMPILE_UNIT)
-    b = teko::list::push(b, 0x01 to byte)
-    b = emit_pair(b, 0x25, 0x08)
-    b = emit_pair(b, 0x13, 0x05)
-    b = emit_pair(b, 0x03, 0x08)
-    b = emit_pair(b, 0x1b, 0x08)
-    b = emit_pair(b, 0x11, 0x01)
-    b = emit_pair(b, 0x12, 0x07)
-    b = emit_pair(b, 0x10, 0x17)
-    b = emit_pair(b, 0x00, 0x00)
-    b = uleb128(b, 2 to u64)
-    b = uleb128(b, DW_TAG_SUBPROGRAM)
-    b = teko::list::push(b, 0x00 to byte)
-    b = emit_pair(b, 0x03, 0x08)
-    b = emit_pair(b, 0x3a, 0x0d)
-    b = emit_pair(b, 0x3b, 0x05)
-    b = emit_pair(b, 0x11, 0x01)
-    b = emit_pair(b, 0x12, 0x07)
-    b = emit_pair(b, 0x3f, 0x19)
-    b = emit_pair(b, 0x00, 0x00)
-    teko::list::push(b, 0x00 to byte)
-}
-
-fn emit_pair(buf: []byte, attr: u64, form: u64): []byte {
-    var b0 = teko::list::push(buf, attr to byte)
-    teko::list::push(b0, form to byte)
+    [
+        ..uleb128(1 to u64),
+        ..uleb128(DW_TAG_COMPILE_UNIT),
+        0x01,
+        0x25, 0x08,
+        0x13, 0x05,
+        0x03, 0x08,
+        0x1b, 0x08,
+        0x11, 0x01,
+        0x12, 0x07,
+        0x10, 0x17,
+        0x00, 0x00,
+        ..uleb128(2 to u64),
+        ..uleb128(DW_TAG_SUBPROGRAM),
+        0x00,
+        0x03, 0x08,
+        0x3a, 0x0d,
+        0x3b, 0x05,
+        0x11, 0x01,
+        0x12, 0x07,
+        0x3f, 0x19,
+        0x00, 0x00,
+        0x00,
+    ]
 }
 
 fn emit_subprogram_die(body: []byte, relocs: []DwReloc, base_off: u64, sub: DwSubprogram): DwSection {
-    var b = teko::list::push(body, 0x02 to byte)
-    b = emit_cstr(b, sub.name)
-    b = sleb128(b, sub.decl_file)
-    b = emit_u16_le(b, sub.decl_line to u64)
+    var b: []byte = [
+        ..body,
+        0x02 to byte,
+        ..emit_cstr(sub.name),
+        ..sleb128(sub.decl_file),
+        ..emit_u16_le(sub.decl_line to u64),
+        ..emit_addr_slot(),
+        ..emit_u64_le_dw(sub.code_size),
+    ]
     var low_pc_off = base_off + b.len
-    b = emit_addr_slot(b)
-    var r = teko::list::push(relocs, DwReloc { offset = low_pc_off; symbol = sub.symbol })
-    b = emit_u64_le_dw(b, sub.code_size)
-    DwSection { bytes = b; relocs = r }
+    var r = DwReloc { offset = low_pc_off; symbol = sub.symbol }
+    DwSection { bytes = b; relocs = [..relocs, r] }
 }
 
 pub fn debug_info(cu: DwCompileUnit): DwSection {
-    var relocs: []DwReloc = teko::list::empty()
-    var body: []byte = teko::list::empty()
-    body = teko::list::push(body, 0x01 to byte)
-    body = emit_cstr(body, cu.producer)
-    body = emit_u16_le(body, cu.language to u64)
-    body = emit_cstr(body, cu.name)
-    body = emit_cstr(body, cu.comp_dir)
-    var cu_low_pc_off = header_len_prefix() + body.len
-    body = emit_addr_slot(body)
-    relocs = teko::list::push(relocs, DwReloc { offset = cu_low_pc_off; symbol = cu.text_symbol })
-    body = emit_u64_le_dw(body, cu.text_size)
-    body = emit_u32_le_dw(body, 0 to u64)
+    var body: []byte = [
+        0x01,
+        ..emit_cstr(cu.producer),
+        ..emit_u16_le(cu.language to u64),
+        ..emit_cstr(cu.name),
+        ..emit_cstr(cu.comp_dir),
+    ]
+    var cu_low_pc_off = HEADER_LEN_PREFIX + body.len
+    var relocs: []DwReloc = [DwReloc { offset = cu_low_pc_off; symbol = cu.text_symbol }]
+    body = [
+        ..body,
+        ..emit_addr_slot(),
+        ..emit_u64_le_dw(cu.text_size),
+        ..emit_u32_le_dw(0 to u64)
+    ]
     var i: u64 = 0
     loop {
         if i >= cu.subprograms.len { break }
-        var child = emit_subprogram_die(body, relocs, header_len_prefix(), cu.subprograms[i])
+        var child = emit_subprogram_die(body, relocs, HEADER_LEN_PREFIX, cu.subprograms[i])
         body = child.bytes
         relocs = child.relocs
         i = i + 1
     }
-    body = teko::list::push(body, 0x00 to byte)
+    body = [..body, 0x00]
     var unit_length = body.len + 2 + 4 + 1
-    var out: []byte = teko::list::empty()
-    out = emit_u32_le_dw(out, unit_length)
-    out = emit_u16_le(out, 4 to u64)
-    out = emit_u32_le_dw(out, 0 to u64)
-    out = teko::list::push(out, 0x08 to byte)
-    out = append_bytes_dw(out, body)
+    var out: []byte = [
+        ..emit_u32_le_dw(unit_length),
+        ..emit_u16_le(4 to u64),
+        ..emit_u32_le_dw(0 to u64),
+        0x08,
+        ..body
+    ]
+    
     DwSection { bytes = out; relocs = relocs }
 }
 
-fn header_len_prefix(): u64 {
-    11 to u64
-}
-
-fn append_bytes_dw(dst: []byte, src: []byte): []byte {
-    var b = dst
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        b = teko::list::push(b, src[i])
-        i = i + 1
-    }
-    b
-}
+const HEADER_LEN_PREFIX: u64 = 11
 
 fn line_header_body(files: []str): []byte {
-    var b: []byte = teko::list::empty()
-    b = teko::list::push(b, 0x01 to byte)
-    b = teko::list::push(b, 0x01 to byte)
-    b = teko::list::push(b, 0x01 to byte)
-    b = teko::list::push(b, 0xfb to byte)
-    b = teko::list::push(b, 0x0e to byte)
-    b = teko::list::push(b, 0x0d to byte)
-    b = append_std_opcode_lengths(b)
-    b = teko::list::push(b, 0x00 to byte)
-    b = append_file_entries(b, files)
-    teko::list::push(b, 0x00 to byte)
+    [
+        0x01,
+        0x01,
+        0x01,
+        0xfb,
+        0x0e,
+        0x0d,
+        ..APPEND_STD_OPCODE_LENGTHS,
+        0x00,
+        ..append_file_entries(files),
+        0x00
+    ]
 }
 
-fn append_file_entries(buf: []byte, files: []str): []byte {
-    var b = buf
+fn append_file_entries(files: []str): []byte {
+    var b: []byte = []
     var i: u64 = 0
     loop {
         if i >= files.len { break }
-        b = emit_cstr(b, files[i])
-        b = uleb128(b, 0 to u64)
-        b = uleb128(b, 0 to u64)
-        b = uleb128(b, 0 to u64)
+        b = [
+            ..b,
+            ..emit_cstr(files[i]),
+            ..uleb128(0 to u64),
+            ..uleb128(0 to u64),
+            ..uleb128(0 to u64),
+        ]
         i = i + 1
     }
     b
 }
 
-fn append_std_opcode_lengths(buf: []byte): []byte {
-    var lens: []u64 = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]
-    var b = buf
-    var i: u64 = 0
-    loop {
-        if i >= lens.len { break }
-        b = teko::list::push(b, lens[i] to byte)
-        i = i + 1
-    }
-    b
-}
+const APPEND_STD_OPCODE_LENGTHS: []u64 = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]
 
 const DW_LNS_COPY: u64 = 0x01
 
@@ -289,63 +275,57 @@ const DW_LNS_SET_COLUMN: u64 = 0x05
 
 const LINE_FIRST_FILE: i64 = 1
 
-fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, cur_file: i64, first: bool): []byte {
-    var b = prog
+fn emit_line_row(row: DwLineRow, prev: u32, cur_file: i64, first: bool): []byte {
+    var b: []byte = []
     if !first {
-        b = teko::list::push(b, DW_LNS_ADVANCE_PC to byte)
-        b = uleb128(b, row.pc_advance)
+        b = [..b, DW_LNS_ADVANCE_PC to byte, ..uleb128(row.pc_advance)]
     }
     if row.file != cur_file {
-        b = teko::list::push(b, DW_LNS_SET_FILE to byte)
-        b = uleb128(b, row.file to u64)
+        b = [..b, DW_LNS_SET_FILE to byte, ..uleb128(row.file to u64)]
     }
-    b = teko::list::push(b, DW_LNS_ADVANCE_LINE to byte)
-    b = sleb128(b, (row.line to i64) - (prev to i64))
+    b = [..b, DW_LNS_ADVANCE_LINE to byte, ..sleb128((row.line to i64) - (prev to i64))]
     if first {
-        b = teko::list::push(b, DW_LNS_SET_COLUMN to byte)
-        b = uleb128(b, 1 to u64)
+        b = [..b, DW_LNS_SET_COLUMN to byte, ..uleb128(1 to u64)]
     }
-    teko::list::push(b, DW_LNS_COPY to byte)
+    [..b, DW_LNS_COPY to byte]
 }
 
 pub fn debug_line(files: []str, start_symbol: str, rows: []DwLineRow, final_pc_advance: u64): DwSection {
     var header = line_header_body(files)
-    var prog: []byte = teko::list::empty()
-    prog = teko::list::push(prog, 0x00 to byte)
-    prog = teko::list::push(prog, 0x09 to byte)
-    prog = teko::list::push(prog, 0x02 to byte)
-    var set_addr_slot = line_prefix_len() + header.len + prog.len
-    prog = emit_addr_slot(prog)
+    var set_addr_slot = LINE_PREFIX_LEN + header.len + 3
+    var prog: []byte = [0x00, 0x09, 0x02, ..emit_addr_slot()]
     var prev: u32 = 1
     var cur_file: i64 = LINE_FIRST_FILE
     var i: u64 = 0
     loop {
         if i >= rows.len { break }
-        prog = emit_line_row(prog, rows[i], prev, cur_file, i == 0)
+        prog = [..prog, ..emit_line_row(rows[i], prev, cur_file, i == 0)]
         prev = rows[i].line
         cur_file = rows[i].file
         i = i + 1
     }
-    prog = teko::list::push(prog, DW_LNS_ADVANCE_PC to byte)
-    prog = uleb128(prog, final_pc_advance)
-    prog = teko::list::push(prog, 0x00 to byte)
-    prog = teko::list::push(prog, 0x01 to byte)
-    prog = teko::list::push(prog, 0x01 to byte)
+    prog = [
+        ..prog,
+        DW_LNS_ADVANCE_PC to byte,
+        ..uleb128(final_pc_advance),
+        0x00,
+        0x01,
+        0x01
+    ]
     var header_length = header.len
     var unit_length = header.len + prog.len + 2 + 4
-    var out: []byte = []
-    out = emit_u32_le_dw(out, unit_length)
-    out = emit_u16_le(out, 4 to u64)
-    out = emit_u32_le_dw(out, header_length)
-    out = append_bytes_dw(out, header)
-    out = append_bytes_dw(out, prog)
+    var out: []byte = [
+        ..emit_u32_le_dw(unit_length),
+        ..emit_u16_le(4 to u64),
+        ..emit_u32_le_dw(header_length),
+        ..header,
+        ..prog
+    ]
     var relocs = [DwReloc { offset = set_addr_slot; symbol = start_symbol }]
     DwSection { bytes = out; relocs = relocs }
 }
 
-fn line_prefix_len(): u64 {
-    10 to u64
-}
+const LINE_PREFIX_LEN: u64 = 10
 
 pub type DwarfSink = struct {
     present: bool
@@ -513,22 +493,22 @@ fn emit_abbrev_lexical_block(buf: []byte): []byte {
 }
 
 pub fn debug_info_locals(cu: DwLocalsUnit): DwLocalsInfo {
-    var relocs: []DwReloc = teko::list::empty()
+    var relocs: []DwReloc = []()
     var body: []byte = [0x01 to byte]
-    body = emit_cstr(body, cu.producer)
+    body = emit_cstr(cu.producer)
     body = emit_u16_le(body, cu.language to u64)
-    body = emit_cstr(body, cu.name)
-    body = emit_cstr(body, cu.comp_dir)
-    var cu_low_pc_off = header_len_prefix() + body.len
+    body = emit_cstr(cu.name)
+    body = emit_cstr(cu.comp_dir)
+    var cu_low_pc_off = HEADER_LEN_PREFIX + body.len
     body = emit_addr_slot(body)
     relocs = teko::list::push(relocs, DwReloc { offset = cu_low_pc_off; symbol = cu.text_symbol })
     body = emit_u64_le_dw(body, cu.text_size)
     body = emit_u32_le_dw(body, 0 to u64)
-    var base_type_offsets: []u64 = teko::list::empty()
+    var base_type_offsets: []u64 = []()
     var i: u64 = 0
     loop {
         if i >= cu.base_types.len { break }
-        base_type_offsets = teko::list::push(base_type_offsets, header_len_prefix() + body.len)
+        base_type_offsets = teko::list::push(base_type_offsets, HEADER_LEN_PREFIX + body.len)
         body = emit_base_type_die(body, cu.base_types[i])
         i = i + 1
     }
@@ -552,17 +532,17 @@ pub fn debug_info_locals(cu: DwLocalsUnit): DwLocalsInfo {
 
 fn emit_base_type_die(body: []byte, bt: DwBaseType): []byte {
     var b = teko::list::push(body, 0x02 to byte)
-    b = emit_cstr(b, bt.name)
+    b = emit_cstr(bt.name)
     b = teko::list::push(b, bt.encoding to byte)
     teko::list::push(b, bt.byte_size to byte)
 }
 
 fn emit_locals_subprogram(body: []byte, relocs: []DwReloc, sub: DwSubprogramLocals, base_type_offsets: []u64): DwSection {
     var b = teko::list::push(body, 0x03 to byte)
-    b = emit_cstr(b, sub.name)
+    b = emit_cstr(sub.name)
     b = sleb128(b, sub.decl_file)
     b = emit_u16_le(b, sub.decl_line to u64)
-    var low_pc_off = header_len_prefix() + b.len
+    var low_pc_off = HEADER_LEN_PREFIX + b.len
     b = emit_addr_slot(b)
     var r = teko::list::push(relocs, DwReloc { offset = low_pc_off; symbol = sub.symbol })
     b = emit_u64_le_dw(b, sub.code_size)
@@ -592,7 +572,7 @@ fn emit_local_list(buf: []byte, locals: []DwLocal, base_type_offsets: []u64): []
 
 fn emit_local_die(buf: []byte, local: DwLocal, base_type_offsets: []u64): []byte {
     var b = teko::list::push(buf, local_abbrev_code(local.is_param) to byte)
-    b = emit_cstr(b, local.name)
+    b = emit_cstr(local.name)
     b = emit_u32_le_dw(b, base_type_offsets[local.type_index])
     emit_fbreg_location(b, local.fbreg_offset)
 }
