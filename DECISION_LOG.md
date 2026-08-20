@@ -605,3 +605,10 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
   - **Paralelismo de teste = VELOCIDADE, não isolamento de memória** — threads compartilham o processo, não dão teto por-worker. A memória fecha **exclusivamente pelo elefante** (pico do build); o runner paralelo NÃO entra na conta do marco ≤1,5GB.
 - **Drift anotado pro #472 (implementer futuro):** o `run_pool` atual (`src/build/regression.tks:187`) roda por **processos** (stopgap). O modelo desenhado é **thread** (spawn). A implementação do #472 parte do modelo thread-based — não perpetua o stopgap de processo.
 - **Status:** desenhado + gated no marco de memória (junto com o resto). NÃO dispara arquiteto; registrado e deferido. Peças on-file: memchan/oschan/spawn landados ~70-85% (S10 0115/0116); `Queue<T>` planejada (COL-Q14, 0082).
+
+### D58.1 · Canais dependem de DI — aresta de dependência (owner 2026-08-20)
+- **Fato (dono):** os canais (memchan/oschan) têm **dependência com DI**. Isso põe o DI a MONTANTE da cadeia de concorrência.
+- **Cadeia resultante:** `DI (0117 D1-DI)` → `canais (memchan/oschan, 0115/0116)` → `{await (opção-c), runner de testes paralelo (#472)}`. O DI-scoped precisa fechar antes da parte DI-dependente dos canais.
+- **Reconciliação a marcar:** o recon `parallel-test-channels-recon.md` reportou memchan/oschan **landados ~70-85%**. Com a dependência de DI, os **15-30% faltantes = provavelmente a parte DI-dependente** (lifetime/escopo de canal via DI-scoped), não a superfície bruta send/recv. Confirmar ao reabrir a cadeia pós-marco.
+- **Impacto no elefante: NENHUM.** COL-F0 (substrato de memória) não usa canais nem DI. F0c/F0d/COL-Q/RM-C seguem independentes. Esta aresta é roadmap de concorrência (gated no marco de memória, junto com runner/await).
+- **Ação:** refletir a aresta `canais→DI` nas deps do EXECUTION-ORDER.md quando a cadeia de concorrência for reagendada (pós-marco). Sem dispatch agora.
