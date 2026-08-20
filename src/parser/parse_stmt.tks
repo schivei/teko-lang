@@ -207,9 +207,6 @@ fn parse_attributed_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement
 }
 
 fn parse_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
-    if is_ref_binding_head(tokens, pos + 1) {
-        return err_at(tokens, pos + 1, "a reference binding is written `ref x: T` — the `ref` is itself the binding modifier; there is no `let ref`/`mut ref`/`var ref`/`const ref` (tripartite law: `let` protects a value, `mut`/`var` unlock a value, `ref` aliases — a reference is inherently mutable, so no immutable reference exists)")
-    }
     var kind = bind_kind_at(tokens, pos)
     if is_multibind_shape(tokens, pos + 1) {
         return parse_multibind(tokens, pos + 1, kind)
@@ -350,7 +347,7 @@ fn parse_multibind_values(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | 
 
 fn bind_kind_at(tokens: []lexer::Token, pos: u64): BindKind {
     if kind_at(tokens, pos) == lexer::TokenKind::Const { return BindKind::Const }
-    BindKind::Mut
+    BindKind::Var
 }
 
 fn is_ref_binding_head(tokens: []lexer::Token, pos: u64): bool {
@@ -384,7 +381,7 @@ fn parse_ref_binding(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | e
     }
     var v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
     var ann_ty = if ann.has_type { wrap_ref_type(ann.type_ann) } else { ann.type_ann }
-    Parsed<@Statement()> { node = Binding { kind = BindKind::Mut; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; is_ref = true; value = v.node }; next = v.next }
+    Parsed<@Statement()> { node = Binding { kind = BindKind::Var; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; is_ref = true; value = v.node }; next = v.next }
 }
 
 fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<@BindTarget()> | error {
@@ -403,7 +400,7 @@ fn parse_bind_target(tokens: []lexer::Token, pos: u64): Parsed<@BindTarget()> | 
 
 fn parse_discard_assign(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     var dv = match parse_expr(tokens, pos + 2) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<@Statement()> { node = Binding { kind = BindKind::Let; target = SimpleName { name = "_" }; has_type = false; type_ann = no_type(); is_ref = false; value = dv.node }; next = dv.next }
+    Parsed<@Statement()> { node = Binding { kind = BindKind::Var; target = SimpleName { name = "_" }; has_type = false; type_ann = no_type(); is_ref = false; value = dv.node }; next = dv.next }
 }
 
 fn parse_assign(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {

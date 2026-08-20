@@ -49,7 +49,7 @@ fn lam_collect_descends_loop_init() {
     var refs: []str = teko::list::empty()
     var bound: []str = teko::list::empty()
     var writes: []str = teko::list::empty()
-    var ib: @Statement() = parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); is_ref = false; value = e_var("n") }
+    var ib: @Statement() = parser::Binding { kind = parser::BindKind::Var; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); is_ref = false; value = e_var("n") }
     var init: []@Statement() = teko::list::push(teko::list::empty(), ib)
     var brk: []@Statement() = teko::list::push(teko::list::empty(), parser::BreakStmt { label = "" })
     var loopnode: @Statement() = parser::LoopStmt { label = ""; init = init; body = brk }
@@ -484,7 +484,7 @@ fn mono_walk_covers_node_kinds() {
     var ife = TExpr { kind = TIfExpr { cond = cmp; then_blk = teko::list::push(teko::list::empty(), texpr_stmt(tnum(1))); has_else = true; else_blk = teko::list::push(teko::list::empty(), texpr_stmt(tnum(2))) }; type = i64t(); line = 0; col = 0 }
     var genstamp = tcall1("idg", tnum(5), i64t())
 
-    var body: []@TStatement() = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin })
+    var body: []@TStatement() = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin })
     body = teko::list::push(body, TAssign { kind = parser::AssignKind::Simple; name = "a"; op = lexer::TokenKind::Assign; bound = i64t(); value = un; deref = false; target = no_texpr() })
     body = teko::list::push(body, texpr_stmt(cast))
     body = teko::list::push(body, texpr_stmt(arr))
@@ -512,7 +512,7 @@ fn t_node_init(val: TExpr): TExpr {
     TExpr { kind = TStructInit { field_names = fnames; field_vals = fvals }; type = Named { name = "Node" }; line = 0; col = 0 }
 }
 fn t_let(name: str, value: TExpr): TBinding {
-    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value }
+    TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = name }; bound = value.type; value = value }
 }
 fn t_field_i64(recv_name: str, field: str): TExpr {
     var recv = tvar(recv_name, Named { name = "Node" })
@@ -575,7 +575,7 @@ fn block_local_boxed_union_binding_is_block_local() {
     members = teko::list::push(members, Named { name = "Node" })
     var union_t: @Type() = Variant { members = members }
     var binding = TBinding {
-        kind = parser::BindKind::Let
+        kind = parser::BindKind::Var
         target = parser::SimpleName { name = "n" }
         bound = union_t
         value = t_node_init(tnum(5))
@@ -704,7 +704,7 @@ fn trait_fold_class_gains_members() {
 fn trait_is_not_instantiable() {
     var tr = trait_item("Stamp", tr_fields1("at"), teko::list::empty())
     var lit = ek(parser::StructLit { type_path = path1("Stamp"); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), "at"); field_vals = teko::list::push(teko::list::empty(), e_num(1)) })
-    var bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
+    var bind_v = parser::Binding { kind = parser::BindKind::Var; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
     teko::assert::is_true(!tr_program_ok(items2(tr, parser::Item { content = bind_v; namespace = ""; file = "" ; guard = parser::pred_true()})))
 }
 
@@ -1187,6 +1187,14 @@ fn collect_diagnostics_appends_a_collected_warning_after_an_error() {
     teko::assert::str_contains(diags[0], "Bogus")
     teko::assert::str_contains(diags[1], "unused private function")
     teko::assert::str_contains(diags[1], "dead_leaf")
+}
+
+#test
+fn let_and_mut_are_rejected_as_ordinary_undefined_names() {
+    var src = "pub fn f(): i64 { let = 1\n0 }\n"
+    var diags = collect_diagnostics(prog_from_module_src(src, "letmut.tks"))
+    teko::assert::eq_u64(diags.len, 1)
+    teko::assert::str_contains(diags[0], "undefined name: let")
 }
 
 #test
