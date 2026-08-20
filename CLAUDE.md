@@ -207,6 +207,16 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   seguem pela **rota C** — a buildabilidade do native NÃO é pré-requisito da reseed (isto SUPERSEDE a
   ressalva do pin SM-P1 de "não reseedar enquanto o gen2 native não builda": o native está deferido, não
   na fila da reseed). Eu (coordenador) não puxo native pra frente — foi o erro de 2026-08-19, corrigido.
+  - **ATÉ O MARCO (C 100% verde + build seco ≤ 1,5 GB): ESCREVE EM TEKO, EMITE EM C — TUDO, não só DPS
+    (dono 2026-08-20).** Enquanto o marco não bate, TODA feature é ensinada em Teko e **emitida pela
+    rota C** (`src/codegen/codegen.tks`) — inclusive otimizações de arena como o DPS. **NÃO se apoia no
+    comportamento do compilador C hospedeiro** (ex.: `sret` para retorno de agregado): o `codegen` tem
+    que **emitir explícito** a semântica (arena, dest-passing, escape) controlada pelo compilador — o
+    `sret` dá o slot, não a semântica de arena. O backend **native** (`src/lir/lower.tks` → object-file
+    `.o`) é a **MESMA lógica, só muda a direção da emissão** (emite `.o` em vez de C) e **só entra DEPOIS
+    do marco**. **Corolário operacional:** trabalho corrente mora no `codegen.tks`, NÃO no `lower.tks`
+    (direção nativa deferida); feature "sumida"/keystone costuma estar no `codegen`, não no `lower` — não
+    apontar crumb de M1 pro `lower.tks`.
 - **GUARD DE MEMÓRIA `ulimit -v 4194304` (4 GiB) = INVIOLÁVEL (dono 2026-08-20, baixado de 6,5→4 GiB).**
   Os builds de ensino/aditivos agora picam ~3,3 GB → o teto cai pra 4 GiB: (a) pega regressão de memória
   (estouro acima de 4 GiB = sinal), (b) cabe **mais build simultâneo** nos ~15 GiB físicos (4 GiB×3 vs
