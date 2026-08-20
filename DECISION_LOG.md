@@ -585,3 +585,8 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Fase D — mover o resto (pós-marco):** SÓ ENTÃO mover a stdlib que o compilador USA + faseamento pesado (`.tkh`-trust + link-time-monomorph, porque aí precisa linkar de volta) + reseed.
 - **Naming preservado:** `name="teko"` (sem rename `tklib::`) segue como no estudo — nomes totalmente-qualificados byte-idênticos, zero edição das milhares de refs `teko::`.
 - **Consequência de scheduling:** NÃO abrir a trilha de package-hardening/link-mecanismo agora. O elefante (COL-F0) segue caminho crítico único pra ≤1,5GB. Fase A (move-não-usado) é paralela/independente e de-risca; começa por um scout de partição read-only.
+
+### D57.1 · Mover-o-não-usado = zero teste (owner 2026-08-20, corolário do D57)
+- **Ruling:** o código compilador-NÃO-usado, ao ser movido para `./tklib`/pacote (Fase A), NÃO ganha teste — nem os oráculos `.tkr` que a exceção da lei-de-testes permitiria para path não-exercitado. Aperta a lei, não afrouxa.
+- **Motivo:** (1) **relocação pura** de código já-funcionando — behavior-preserving, não é código novo, o próprio move não muda comportamento; (2) **sai do escopo de validação do compilador** — vira superfície exportada; quem consome o pacote valida o próprio uso; o projeto-compilador não testa o que não usa.
+- **Aplicação:** dispatch da Fase A = move mecânico puro, **zero `.tkt`/`.tkr`**. Ao drenar, RECUSAR qualquer teste novo no delta da extração (kill + refaz). Registrado também em CLAUDE.md (seção lei-de-testes).

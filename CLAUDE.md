@@ -135,6 +135,12 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   MANTER só o que o self-build genuinamente NÃO exercita: **casos de erro/diagnóstico** (o compilador só
   compila código VÁLIDO, nunca dispara os caminhos de rejeição) e comportamento de função que o compilador
   NUNCA chama ao rodar. Na dúvida, LISTAR para revisão — não remover.
+- **MOVER-O-NÃO-USADO = ZERO TESTE (dono 2026-08-20, aperta a lei).** O que o compilador NÃO usa, ao ser
+  **movido** para `./tklib`/pacote (D57 Fase A), NÃO ganha teste algum — nem os oráculos `.tkr` que a
+  exceção acima permitiria. Motivo: (1) é **relocação pura** de código já-funcionando (behavior-preserving,
+  não é código novo); (2) **sai do escopo de validação do compilador** — vira superfície exportada, e quem
+  consome o pacote valida o próprio uso. O projeto-compilador não testa o que não usa. Dispatch da Fase A =
+  move mecânico, zero `.tkt`/`.tkr`.
 - **ENFORCEMENT desta lei (dono 2026-08-19, AVISO DURO).** Um agente já a furou (criou teste pro que o
   self-build exercita). **Reincidência → o dono PROÍBE testes (unitários E regressivos) de vez.** Duas
   camadas obrigatórias no meu processo: (1) **todo dispatch de implementador reproduz esta lei ALTO** —
