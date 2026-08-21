@@ -9,7 +9,7 @@ fn const_decl_key(cd: TConstDecl): ConstKey {
     ConstKey { name = cd.name; ns = cd.namespace }
 }
 
-type ConstDepState = struct { ordered: []TConstDecl; done: []ConstKey; onpath: []ConstKey }
+type ConstDepState = struct { ordered: []u64; done: []ConstKey; onpath: []ConstKey }
 
 fn const_key_in(xs: []ConstKey, k: ConstKey): bool {
     var i: u64 = 0
@@ -37,6 +37,16 @@ fn find_const_by_key(consts: []TConstDecl, k: ConstKey): TConstDecl | null {
     loop {
         if i >= consts.len { break }
         if const_key_eq(const_decl_key(consts[i]), k) { return consts[i] }
+        i++
+    }
+    null
+}
+
+fn find_const_index_by_key(consts: []TConstDecl, k: ConstKey): u64 | null {
+    var i: u64 = 0
+    loop {
+        if i >= consts.len { break }
+        if const_key_eq(const_decl_key(consts[i]), k) { return i }
         i++
     }
     null
@@ -105,7 +115,8 @@ fn const_cycle_error(key: ConstKey, onpath: []ConstKey, consts: []TConstDecl): e
 fn const_dep_visit(key: ConstKey, consts: []TConstDecl, keys: []ConstKey, st: ConstDepState): ConstDepState | error {
     if const_key_in(st.done, key) { return st }
     if const_key_in(st.onpath, key) { return const_cycle_error(key, st.onpath, consts) }
-    var cd = match find_const_by_key(consts, key) { TConstDecl as x => x; null => return st }
+    var idx = match find_const_index_by_key(consts, key) { u64 as x => x; null => return st }
+    var cd = consts[idx]
     var cur = ConstDepState { ordered = st.ordered; done = st.done; onpath = [..st.onpath, key] }
     var refs = const_dep_refs(cd.init, keys, [])
     var i: u64 = 0
@@ -114,7 +125,7 @@ fn const_dep_visit(key: ConstKey, consts: []TConstDecl, keys: []ConstKey, st: Co
         cur = match const_dep_visit(refs[i], consts, keys, cur) { ConstDepState as x => x; error as e => return e }
         i++
     }
-    ConstDepState { ordered = [..cur.ordered, cd]; done = [..cur.done, key]; onpath = st.onpath }
+    ConstDepState { ordered = [..cur.ordered, idx]; done = [..cur.done, key]; onpath = st.onpath }
 }
 
 fn const_dep_order(consts: []TConstDecl): []TConstDecl | error {
@@ -126,5 +137,12 @@ fn const_dep_order(consts: []TConstDecl): []TConstDecl | error {
         st = match const_dep_visit(const_decl_key(consts[i]), consts, keys, st) { ConstDepState as x => x; error as e => return e }
         i++
     }
-    st.ordered
+    var out: [st.ordered.len]TConstDecl = []
+    var j: u64 = 0
+    loop {
+        if j >= st.ordered.len { break }
+        out[j] = consts[st.ordered[j]]
+        j++
+    }
+    out
 }
