@@ -1457,11 +1457,11 @@ pub fn named_case_name(name: str): str {
 }
 
 pub fn self_inst_spelling(base_name: str, owner_tparams: []str): str {
-    var args: []@Type() = []
+    var args: [owner_tparams.len]@Type() = []
     var i = 0
     loop {
         if i >= owner_tparams.len { break }
-        args = [..args, Named { name = owner_tparams[i] }]
+        args[i] = Named { name = owner_tparams[i] }
         i++
     }
     generic_inst_name(base_name, args)
@@ -1488,13 +1488,13 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str): @
         match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value" }; _ => { } }
         return ref_target_type(argt)
     }
-    var argtypes: []@Type() = []
+    var argtypes: [nt.args.len]@Type() = []
     var i = 0
     loop {
         if i >= nt.args.len { break }
         var a = match resolve_type(nt.args[i], table, ref_ns) { (@Type()) as t => t; error as e => return e }
         match a { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => { } }
-        argtypes = [..argtypes, a]
+        argtypes[i] = a
         i++
     }
     match resolve_type_ref(nt.path, table, ref_ns, nt.args.len) {
@@ -1632,11 +1632,11 @@ fn render_members(members: []@Type()): str {
 
 fn null_member_last(members: []@Type()): []@Type() {
     if !from_is_bare_null(members[0]) { return members }
-    var out: []@Type() = []
+    var out: [members.len - 1]@Type() = []
     var i = 1
     loop {
         if i >= members.len { break }
-        out = [..out, members[i]]
+        out[i - 1] = members[i]
         i++
     }
     [..out, Null { }]
@@ -1654,23 +1654,23 @@ fn subst_texpr_names(te: @TypeExpr(), params: []str, args: []@TypeExpr()): @Type
                     k++
                 }
             }
-            var nargs: []@TypeExpr() = []
+            var nargs: [nt.args.len]@TypeExpr() = []
             var j = 0
-            loop { if j >= nt.args.len { break }; nargs = [..nargs, subst_texpr_names(nt.args[j], params, args)]; j++ }
+            loop { if j >= nt.args.len { break }; nargs[j] = subst_texpr_names(nt.args[j], params, args); j++ }
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = subst_texpr_names(st.element, params, args) }
         parser::SizedArrayType as sa => parser::SizedArrayType { size = sa.size; element = subst_texpr_names(sa.element, params, args) }
         parser::UnionType as ut => {
-            var ms: []@TypeExpr() = []
+            var ms: [ut.members.len]@TypeExpr() = []
             var i = 0
-            loop { if i >= ut.members.len { break }; ms = [..ms, subst_texpr_names(ut.members[i], params, args)]; i++ }
+            loop { if i >= ut.members.len { break }; ms[i] = subst_texpr_names(ut.members[i], params, args); i++ }
             parser::UnionType { members = ms }
         }
         parser::FunctionType as fnt => {
-            var nps: []@TypeExpr() = []
+            var nps: [fnt.params.len]@TypeExpr() = []
             var i = 0
-            loop { if i >= fnt.params.len { break }; nps = [..nps, subst_texpr_names(fnt.params[i], params, args)]; i++ }
+            loop { if i >= fnt.params.len { break }; nps[i] = subst_texpr_names(fnt.params[i], params, args); i++ }
             parser::FunctionType { params = nps; ret = subst_texpr_names(fnt.ret, params, args) }
         }
         parser::MacroType => te
@@ -1678,7 +1678,7 @@ fn subst_texpr_names(te: @TypeExpr(), params: []str, args: []@TypeExpr()): @Type
 }
 
 fn subst_method_sig_names(f: parser::Function, params: []str, args: []@TypeExpr()): parser::Function {
-    var nps: []parser::Param = []
+    var nps: [f.params.len]parser::Param = []
     var i = 0
     loop {
         if i >= f.params.len { break }
@@ -1687,7 +1687,7 @@ fn subst_method_sig_names(f: parser::Function, params: []str, args: []@TypeExpr(
         } else {
             f.params[i]
         }
-        nps = [..nps, np]
+        nps[i] = np
         i++
     }
     var nret = if f.has_return { subst_texpr_names(f.return_type, params, args) } else { f.return_type }
@@ -1695,24 +1695,24 @@ fn subst_method_sig_names(f: parser::Function, params: []str, args: []@TypeExpr(
 }
 
 fn subst_methods_names(methods: []parser::Function, params: []str, args: []@TypeExpr()): []parser::Function {
-    var out: []parser::Function = []
+    var out: [methods.len]parser::Function = []
     var i = 0
-    loop { if i >= methods.len { break }; out = [..out, subst_method_sig_names(methods[i], params, args)]; i++ }
+    loop { if i >= methods.len { break }; out[i] = subst_method_sig_names(methods[i], params, args); i++ }
     out
 }
 
 fn subst_body_names(body: @TypeBody(), params: []str, args: []@TypeExpr()): @TypeBody() {
     match body {
         parser::StructBody as sb => {
-            var nf: []parser::Field = []
+            var nf: [sb.fields.len]parser::Field = []
             var i = 0
-            loop { if i >= sb.fields.len { break }; nf = [..nf, parser::Field { name = sb.fields[i].name; type_ann = subst_texpr_names(sb.fields[i].type_ann, params, args); vis = parser::Visibility::Pub; is_intern = false; has_doc = sb.fields[i].has_doc; doc = sb.fields[i].doc; is_readonly = sb.fields[i].is_readonly }]; i++ }
+            loop { if i >= sb.fields.len { break }; nf[i] = parser::Field { name = sb.fields[i].name; type_ann = subst_texpr_names(sb.fields[i].type_ann, params, args); vis = parser::Visibility::Pub; is_intern = false; has_doc = sb.fields[i].has_doc; doc = sb.fields[i].doc; is_readonly = sb.fields[i].is_readonly }; i++ }
             parser::StructBody { fields = nf; methods = subst_methods_names(sb.methods, params, args); implements = sb.implements; consts = sb.consts; is_readonly = sb.is_readonly }
         }
         parser::ClassBody as cb => {
-            var nf: []parser::Field = []
+            var nf: [cb.fields.len]parser::Field = []
             var i = 0
-            loop { if i >= cb.fields.len { break }; nf = [..nf, parser::Field { name = cb.fields[i].name; type_ann = subst_texpr_names(cb.fields[i].type_ann, params, args); vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern; has_doc = cb.fields[i].has_doc; doc = cb.fields[i].doc; is_readonly = cb.fields[i].is_readonly }]; i++ }
+            loop { if i >= cb.fields.len { break }; nf[i] = parser::Field { name = cb.fields[i].name; type_ann = subst_texpr_names(cb.fields[i].type_ann, params, args); vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern; has_doc = cb.fields[i].has_doc; doc = cb.fields[i].doc; is_readonly = cb.fields[i].is_readonly }; i++ }
             parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = nf; methods = subst_methods_names(cb.methods, params, args); consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }
         }
         parser::VariantBody as vb => parser::VariantBody { type_expr = subst_texpr_names(vb.type_expr, params, args) }
@@ -1949,12 +1949,12 @@ fn generic_template_reg(nt: parser::NamedType, table: TypeTable, ref_ns: str): T
 }
 
 fn resolve_inst_args(nt: parser::NamedType, table: TypeTable, ref_ns: str, template: TypeReg): []@Type() | null {
-    var argtypes: []@Type() = []
+    var argtypes: [nt.args.len]@Type() = []
     var a = 0
     loop {
         if a >= nt.args.len { break }
         match resolve_inst_arg(nt.args[a], table, ref_ns, template.namespace) {
-            (@Type()) as t => argtypes = [..argtypes, t]
+            (@Type()) as t => argtypes[a] = t
             null => return null
         }
         a++
@@ -2079,23 +2079,23 @@ fn normalize_inst_texpr(te: @TypeExpr(), table: TypeTable): @TypeExpr() {
                     error => { }
                 }
             }
-            var nargs: []@TypeExpr() = []
+            var nargs: [nt.args.len]@TypeExpr() = []
             var j = 0
-            loop { if j >= nt.args.len { break }; nargs = [..nargs, normalize_inst_texpr(nt.args[j], table)]; j++ }
+            loop { if j >= nt.args.len { break }; nargs[j] = normalize_inst_texpr(nt.args[j], table); j++ }
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = normalize_inst_texpr(st.element, table) }
         parser::SizedArrayType as sa => parser::SizedArrayType { size = sa.size; element = normalize_inst_texpr(sa.element, table) }
         parser::UnionType as ut => {
-            var ms: []@TypeExpr() = []
+            var ms: [ut.members.len]@TypeExpr() = []
             var i = 0
-            loop { if i >= ut.members.len { break }; ms = [..ms, normalize_inst_texpr(ut.members[i], table)]; i++ }
+            loop { if i >= ut.members.len { break }; ms[i] = normalize_inst_texpr(ut.members[i], table); i++ }
             parser::UnionType { members = ms }
         }
         parser::FunctionType as fnt => {
-            var nps: []@TypeExpr() = []
+            var nps: [fnt.params.len]@TypeExpr() = []
             var i = 0
-            loop { if i >= fnt.params.len { break }; nps = [..nps, normalize_inst_texpr(fnt.params[i], table)]; i++ }
+            loop { if i >= fnt.params.len { break }; nps[i] = normalize_inst_texpr(fnt.params[i], table); i++ }
             parser::FunctionType { params = nps; ret = normalize_inst_texpr(fnt.ret, table) }
         }
         parser::MacroType => te
@@ -2103,7 +2103,7 @@ fn normalize_inst_texpr(te: @TypeExpr(), table: TypeTable): @TypeExpr() {
 }
 
 fn normalize_inst_method(f: parser::Function, table: TypeTable): parser::Function {
-    var nps: []parser::Param = []
+    var nps: [f.params.len]parser::Param = []
     var i = 0
     loop {
         if i >= f.params.len { break }
@@ -2112,7 +2112,7 @@ fn normalize_inst_method(f: parser::Function, table: TypeTable): parser::Functio
         } else {
             f.params[i]
         }
-        nps = [..nps, np]
+        nps[i] = np
         i++
     }
     var nret = if f.has_return { normalize_inst_texpr(f.return_type, table) } else { f.return_type }
@@ -2120,24 +2120,24 @@ fn normalize_inst_method(f: parser::Function, table: TypeTable): parser::Functio
 }
 
 fn normalize_inst_methods(methods: []parser::Function, table: TypeTable): []parser::Function {
-    var out: []parser::Function = []
+    var out: [methods.len]parser::Function = []
     var i = 0
-    loop { if i >= methods.len { break }; out = [..out, normalize_inst_method(methods[i], table)]; i++ }
+    loop { if i >= methods.len { break }; out[i] = normalize_inst_method(methods[i], table); i++ }
     out
 }
 
 fn normalize_inst_body(body: @TypeBody(), table: TypeTable): @TypeBody() {
     match body {
         parser::StructBody as sb => {
-            var nf: []parser::Field = []
+            var nf: [sb.fields.len]parser::Field = []
             var i = 0
-            loop { if i >= sb.fields.len { break }; nf = [..nf, parser::Field { name = sb.fields[i].name; type_ann = normalize_inst_texpr(sb.fields[i].type_ann, table); vis = parser::Visibility::Pub; is_intern = false; has_doc = sb.fields[i].has_doc; doc = sb.fields[i].doc; is_readonly = sb.fields[i].is_readonly }]; i++ }
+            loop { if i >= sb.fields.len { break }; nf[i] = parser::Field { name = sb.fields[i].name; type_ann = normalize_inst_texpr(sb.fields[i].type_ann, table); vis = parser::Visibility::Pub; is_intern = false; has_doc = sb.fields[i].has_doc; doc = sb.fields[i].doc; is_readonly = sb.fields[i].is_readonly }; i++ }
             parser::StructBody { fields = nf; methods = normalize_inst_methods(sb.methods, table); implements = sb.implements; consts = sb.consts; is_readonly = sb.is_readonly }
         }
         parser::ClassBody as cb => {
-            var nf: []parser::Field = []
+            var nf: [cb.fields.len]parser::Field = []
             var i = 0
-            loop { if i >= cb.fields.len { break }; nf = [..nf, parser::Field { name = cb.fields[i].name; type_ann = normalize_inst_texpr(cb.fields[i].type_ann, table); vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern; has_doc = cb.fields[i].has_doc; doc = cb.fields[i].doc; is_readonly = cb.fields[i].is_readonly }]; i++ }
+            loop { if i >= cb.fields.len { break }; nf[i] = parser::Field { name = cb.fields[i].name; type_ann = normalize_inst_texpr(cb.fields[i].type_ann, table); vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern; has_doc = cb.fields[i].has_doc; doc = cb.fields[i].doc; is_readonly = cb.fields[i].is_readonly }; i++ }
             parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = nf; methods = normalize_inst_methods(cb.methods, table); consts = cb.consts; is_service = cb.is_service; service_lifetime = cb.service_lifetime }
         }
         parser::VariantBody as vb => parser::VariantBody { type_expr = normalize_inst_texpr(vb.type_expr, table) }

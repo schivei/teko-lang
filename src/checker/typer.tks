@@ -144,14 +144,14 @@ fn lam_reject_copy_capture_write(writes: []str, bound: []str, env: Env): null | 
 fn type_lambda(lam: parser::Lambda, expected: @Type(), env: Env, table: TypeTable): TExpr | error {
     var exp_params: []@Type() = []
     match expected { Func as ef => exp_params = ef.params; _ => { } }
-    var tparams: []TLambdaParam = []
+    var tparams: [lam.params.len]TLambdaParam = []
     var cenv = env
     var i: u64 = 0
     loop {
         if i >= lam.params.len { break }
         var p = lam.params[i]
         var pt = match lam_param_type(p, i, exp_params, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
-        tparams = [..tparams, TLambdaParam { name = p.name; type = pt }]
+        tparams[i] = TLambdaParam { name = p.name; type = pt }
         cenv = define(cenv, p.name, pt, false)
         i++
     }
@@ -185,9 +185,9 @@ fn type_lambda(lam: parser::Lambda, expected: @Type(), env: Env, table: TypeTabl
     TExpr { kind = TLambda { params = tparams; body = tb.stmts; captures = captures; ret = ret; lift_id = 0 }; type = Func { params = lam_param_types(tparams); ret = ret; variadic = false; param_names = []; n_required = (lam_param_types(tparams)).len; defaults = []; ret_extra = [] }; line = 0; col = 0 }
 }
 fn lam_param_types(ps: []TLambdaParam): []@Type() {
-    var out: []@Type() = []
+    var out: [ps.len]@Type() = []
     var i = 0
-    loop { if i >= ps.len { break }; out = [..out, ps[i].type]; i++ }
+    loop { if i >= ps.len { break }; out[i] = ps[i].type; i++ }
     out
 }
 
@@ -322,9 +322,7 @@ fn type_bignum_binop(op: lexer::TokenKind, l: TExpr, r: TExpr, lk: str, rk: str)
     var fn_name = match bignum_op_fn(op, kind) { str as s => s; error as e => return e }
     var la = match bignum_adopt_operand(l, kind) { TExpr as te => te; error as e => return e }
     var ra = match bignum_adopt_operand(r, kind) { TExpr as te => te; error as e => return e }
-    var cargs: []TExpr = [la]
-    cargs = [..cargs, ra]
-    bignum_call(kind, fn_name, cargs, bignum_named(kind))
+    bignum_call(kind, fn_name, [la, ra], bignum_named(kind))
 }
 
 fn combine_and(acc: TExpr | null, next: TExpr): TExpr {
@@ -342,9 +340,7 @@ fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: T
         if i >= rest.len { break }
         var cur_raw = deref_ref_value(match type_expr(rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
         var cur = match bignum_adopt_operand(cur_raw, kind) { TExpr as te => te; error as e => return e }
-        var cmp_args: []TExpr = [prev]
-        cmp_args = [..cmp_args, cur]
-        var cmp_call = bignum_call(kind, "cmp", cmp_args, Prim { kind = PrimKind::I64 })
+        var cmp_call = bignum_call(kind, "cmp", [prev, cur], Prim { kind = PrimKind::I64 })
         var zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
         var term = TCmpTerm { op = rest[i].op; operand = zero }
         var one_cmp = TExpr { kind = TCompare { first = cmp_call; rest = [term] }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
@@ -770,7 +766,7 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable): TExpr | error {
     if fk != "" { return type_bignum_compare(first, c.rest, env, table, fk) }
     if compare_has_value_type(c, env, table) { return type_compare_value_chain(c, env, table) }
     var prev = first
-    var terms: []TCmpTerm = []
+    var terms: [c.rest.len]TCmpTerm = []
     var i = 0
     loop {
         if i >= c.rest.len { break }
@@ -784,7 +780,7 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable): TExpr | error {
         if is_variant_member_pair && !op_is_eq_ne(c.rest[i].op) {
             return error { message = "a union compares to one of its own members only with `==`/`!=` (ordering needs an explicit `to`)" }
         }
-        terms = [..terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r }]
+        terms[i] = TCmpTerm { op = c.rest[i].op; operand = adopted.r }
         prev = adopted.r
         i++
     }
@@ -1211,18 +1207,18 @@ fn pack_variadic_args(f: Func, args: []parser::Expr, arg_names: []str, env: Env,
     if any_named && npos > nfixed { return error { message = "wrong number of arguments" } }
     match validate_variadic_named(f, args, arg_names, npos, nfixed) { error as e => return e; null => { } }
     var fixed_pos = if npos < nfixed { npos } else { nfixed }
-    var out: []parser::Expr = []
+    var out: [nfixed]parser::Expr = []
     var idx: u64 = 0
     loop {
         if idx >= nfixed { break }
         if idx < fixed_pos {
-            out = [..out, args[idx]]
+            out[idx] = args[idx]
         } else {
             match named_arg_expr(f.param_names[idx], args, arg_names, npos) {
-                parser::Expr as e => out = [..out, e]
+                parser::Expr as e => out[idx] = e
                 null => {
                     if idx < f.n_required { return error { message = $"missing required argument '{f.param_names[idx]}'" } }
-                    out = [..out, f.defaults[idx - f.n_required]]
+                    out[idx] = f.defaults[idx - f.n_required]
                 }
             }
         }
@@ -1262,12 +1258,12 @@ fn resolve_defargs(f: Func, args: []parser::Expr, arg_names: []str): []parser::E
         if fidx < npos { return error { message = $"named argument '{nm}' was already provided positionally" } }
         vk++
     }
-    var resolved: []parser::Expr = []
+    var resolved: [f.params.len]parser::Expr = []
     var idx: u64 = 0
     loop {
         if idx >= f.params.len { break }
         if idx < npos {
-            resolved = [..resolved, args[idx]]
+            resolved[idx] = args[idx]
         } else {
             var found = false
             var found_expr = parser::no_expr()
@@ -1278,11 +1274,11 @@ fn resolve_defargs(f: Func, args: []parser::Expr, arg_names: []str): []parser::E
                 k++
             }
             if found {
-                resolved = [..resolved, found_expr]
+                resolved[idx] = found_expr
             } else if idx < f.n_required {
                 return error { message = $"missing required argument '{f.param_names[idx]}'" }
             } else {
-                resolved = [..resolved, f.defaults[idx - f.n_required]]
+                resolved[idx] = f.defaults[idx - f.n_required]
             }
         }
         idx++
@@ -1429,16 +1425,11 @@ fn type_param_call_error(decl: parser::TypeDecl, table: TypeTable): error | null
 }
 
 fn method_dispatch_callee(struct_name: str, method: str): parser::Path {
-    var segs: []parser::Segment = [parser::Segment { name = struct_name }]
-    segs = [..segs, parser::Segment { name = method }]
-    parser::Path { segments = segs }
+    parser::Path { segments = [parser::Segment { name = struct_name }, parser::Segment { name = method }] }
 }
 
 fn method_call_arg_names(mc: parser::MethodCall): []str {
-    var names: []str = [""]
-    var i: u64 = 0
-    loop { if i >= mc.arg_names.len { break }; names = [..names, mc.arg_names[i]]; i++ }
-    names
+    ["", ..mc.arg_names]
 }
 
 fn expr_roots_at_name(e: parser::Expr, nm: str): bool {
@@ -1624,9 +1615,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         Named as rn => {
             if name_is_phantom_instance(rn.name, table) {
                 var psegs = method_dispatch_callee(rn.name, mc.method).segments
-                var pcargs: []parser::Expr = [mc.receiver]
-                var pai: u64 = 0
-                loop { if pai >= mc.args.len { break }; pcargs = [..pcargs, mc.args[pai]]; pai++ }
+                var pcargs: []parser::Expr = [mc.receiver, ..mc.args]
                 return type_call(parser::Call { callee = parser::Path { segments = psegs }; args = pcargs; arg_names = method_call_arg_names(mc); owner_type_args = []; callee_type_args = mc.type_args }, env, table)
             }
         }
@@ -1685,13 +1674,11 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                     u32 as bslot => {
                         var bft = match method_func_type(mfn, struct_name, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
                         var bf = match bft { Func as ff => ff; _ => return error { message = "internal: base method signature is not a function type" } }
-                        var bcargs: []parser::Expr = [mc.receiver]
-                        var bai: u64 = 0
-                        loop { if bai >= mc.args.len { break }; bcargs = [..bcargs, mc.args[bai]]; bai++ }
+                        var bcargs: []parser::Expr = [mc.receiver, ..mc.args]
                         var bcnames: []str = method_call_arg_names(mc)
                         var bdargs = match resolve_call_args(bf, bcargs, bcnames, env, table) { []parser::Expr as x => x; error as e => return e }
                         if bdargs.len != bf.params.len { return error { message = "wrong number of arguments" } }
-                        var biargs: []TExpr = []
+                        var biargs: [bdargs.len]TExpr = []
                         var bii: u64 = 0
                         loop {
                             if bii >= bdargs.len { break }
@@ -1699,13 +1686,10 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
                             if type_is_void(ba.type) { return error { message = "a `void` expression cannot be passed as an argument" } }
                             var bpt = bf.params[bii]
                             ba = match coerce_argument_into(ba, bpt, table) { TExpr as x => x; error as e => return e }
-                            biargs = [..biargs, ba]
+                            biargs[bii] = ba
                             bii++
                         }
-                        var bseg_base = parser::Segment { name = struct_name }
-                        var bseg_m = parser::Segment { name = mc.method }
-                        var bsegs: []parser::Segment = [bseg_base]
-                        bsegs = [..bsegs, bseg_m]
+                        var bsegs: []parser::Segment = [parser::Segment { name = struct_name }, parser::Segment { name = mc.method }]
                         return TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot; type_args = []; ret_extra = [] }; type = bf.ret; line = 0; col = 0 }
                     }
                     error => { }
@@ -1715,9 +1699,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable): TExpr |
         _ => { }
     }
     var segs = method_dispatch_callee(struct_name, mc.method).segments
-    var cargs: []parser::Expr = [mc.receiver]
-    var ai: u64 = 0
-    loop { if ai >= mc.args.len { break }; cargs = [..cargs, mc.args[ai]]; ai++ }
+    var cargs: []parser::Expr = [mc.receiver, ..mc.args]
     var cnames: []str = method_call_arg_names(mc)
     type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; owner_type_args = []; callee_type_args = mc.type_args }, env, table)
 }
@@ -1734,13 +1716,11 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
     var slot = dispatch.slot
     var ift = match method_func_type(imfn, struct_name, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
     var f = match ift { Func as ff => ff; _ => return error { message = "internal: interface method signature is not a function type" } }
-    var icargs: []parser::Expr = [mc.receiver]
-    var ica: u64 = 0
-    loop { if ica >= mc.args.len { break }; icargs = [..icargs, mc.args[ica]]; ica++ }
+    var icargs: []parser::Expr = [mc.receiver, ..mc.args]
     var icnames: []str = method_call_arg_names(mc)
     var dargs = match resolve_call_args(f, icargs, icnames, env, table) { []parser::Expr as x => x; error as e => return e }
     if dargs.len != f.params.len { return error { message = "wrong number of arguments" } }
-    var iargs: []TExpr = []
+    var iargs: [dargs.len]TExpr = []
     var ii: u64 = 0
     loop {
         if ii >= dargs.len { break }
@@ -1748,13 +1728,10 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
         if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument" } }
         var pt = f.params[ii]
         a = match coerce_argument_into(a, pt, table) { TExpr as x => x; error as e => return e }
-        iargs = [..iargs, a]
+        iargs[ii] = a
         ii++
     }
-    var seg_iface = parser::Segment { name = iface_canon }
-    var seg_m = parser::Segment { name = mc.method }
-    var isegs: []parser::Segment = [seg_iface]
-    isegs = [..isegs, seg_m]
+    var isegs: []parser::Segment = [parser::Segment { name = iface_canon }, parser::Segment { name = mc.method }]
     TExpr { kind = TCall { overload_suffix = ""; callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot; type_args = []; ret_extra = [] }; type = f.ret; line = 0; col = 0 }
 }
 
@@ -1763,12 +1740,12 @@ fn single_seg_path(name: str): parser::Path {
 }
 
 fn rewrite_segment_at(p: parser::Path, idx: u64, name: str): parser::Path {
-    var segs: []parser::Segment = []
+    var segs: [p.segments.len]parser::Segment = []
     var i: u64 = 0
     loop {
         if i >= p.segments.len { break }
-        if i == idx { segs = [..segs, parser::Segment { name = name }] }
-        else { segs = [..segs, p.segments[i]] }
+        if i == idx { segs[i] = parser::Segment { name = name } }
+        else { segs[i] = p.segments[i] }
         i++
     }
     parser::Path { segments = segs }
@@ -1859,23 +1836,23 @@ fn type_phantom_instance_call(c: parser::Call, env: Env, table: TypeTable): TExp
     var f0 = match raw { Func as ff => ff; _ => return error { message = "internal: phantom factory signature is not a function type" } }
     var fsub = match subst_type(raw, s) { Func as ff => ff; _ => return error { message = "internal: phantom factory signature is not a function type" } }
     var is_instance = mfn.params.len > 0 && !mfn.params[0].has_type
-    var want: []@Type() = []
+    var want: [fsub.params.len]@Type() = []
     var wi: u64 = 0
     loop {
         if wi >= fsub.params.len { break }
-        if wi == 0 && is_instance { want = [..want, Named { name = phantom }] } else { want = [..want, fsub.params[wi]] }
+        if wi == 0 && is_instance { want[wi] = Named { name = phantom } } else { want[wi] = fsub.params[wi] }
         wi++
     }
     var dargs = match resolve_call_args(f0, c.args, c.arg_names, env, table) { []parser::Expr as x => x; error as e => return e }
     if dargs.len != want.len { return error { message = $"'{mname}' expects {want.len} argument(s), but {dargs.len} were given" } }
-    var targs: []TExpr = []
+    var targs: [dargs.len]TExpr = []
     var ai: u64 = 0
     loop {
         if ai >= dargs.len { break }
         var a = match type_expr(dargs[ai], env, table) { TExpr as te => te; error as e => return e }
         if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument" } }
         a = match coerce_argument_into(a, want[ai], table) { TExpr as x => x; error as e => return e }
-        targs = [..targs, a]
+        targs[ai] = a
         ai++
     }
     TExpr { kind = TCall { overload_suffix = ""; callee = c.callee; args = targs; call_ns = phantom; is_closure_call = false; callee_type = fsub; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = fsub.ret; line = 0; col = 0 }
@@ -1898,15 +1875,15 @@ fn overload_suffix_for_binding(env: Env, b: ValBinding): str {
 }
 
 fn build_overload_sig(tf: TFunction, ns: str, table: TypeTable): Func | error {
-    var ptypes: []@Type() = []
-    var pnames: []str = []
+    var ptypes: [tf.params.len]@Type() = []
+    var pnames: [tf.params.len]str = []
     var variadic = false
     var i: u64 = 0
     loop {
         if i >= tf.params.len { break }
         var pt = match resolve_type(tf.params[i].type_ann, table, ns) { (@Type()) as t => t; error as e => return e }
-        ptypes = [..ptypes, pt]
-        pnames = [..pnames, tf.params[i].name]
+        ptypes[i] = pt
+        pnames[i] = tf.params[i].name
         if tf.params[i].is_params { variadic = true }
         i++
     }
@@ -2130,14 +2107,14 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                         return error { message = $"'{name}' takes {all_tps.len} type argument(s), but {explicit_fn_args.len} were given" }
                     }
                     var s = Subst { params = all_tps; names = []; types = [] }
-                    var xtypes: []@Type() = []
+                    var xtypes: [all_tps.len]@Type() = []
                     var xi = 0
                     loop {
                         if xi >= all_tps.len { break }
                         var rt = match resolve_type(explicit_fn_args[xi], table, env.cur_ns) { (@Type()) as tt => tt; error as e => return e }
                         match rt { Reference => return error { message = "a reference cannot be an explicit generic type argument (it would be stored / escape)" }; _ => { } }
                         s = Subst { params = all_tps; names = [..s.names, all_tps[xi]]; types = [..s.types, rt] }
-                        xtypes = [..xtypes, rt]
+                        xtypes[xi] = rt
                         xi++
                     }
                     var vi = 0
@@ -2166,7 +2143,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                 }
                 return TExpr { kind = TCall { overload_suffix = ov_suffix; callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0; type_args = []; ret_extra = [] }; type = subst_type(f.ret, s); line = 0; col = 0 }
             }
-            var args: []TExpr = []
+            var args: [targs.len]TExpr = []
             var i = 0
             loop {
                 if i >= targs.len { break }
@@ -2193,7 +2170,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                 if !auto_reffed {
                     a = match coerce_argument_into(a, f.params[i], table) { TExpr as x => x; error as e => return e }
                 }
-                args = [..args, a]
+                args[i] = a
                 i++
             }
             var is_closure = in_scope && resolved_ns.len == 0
