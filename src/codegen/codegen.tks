@@ -8109,11 +8109,284 @@ fn cg_format_c(src: str): []byte {
     cb_flat(cb(out, "\n"))
 }
 
-type StampAcc = struct { next: u64; next_spawn: u64; fns: []checker::TFunction; lams: []checker::TLambda; spawns: []checker::TSpawn }
+/**
+ * TFnChunk — one sealed, always-full segment of a `TFnVec` chunk-chain: a `[]checker::TFunction`
+ * whose length IS its element count (a segment is sealed only when completely filled).
+ */
+type TFnChunk = struct {
+    /** the fully-filled run of lifted functions this segment holds. */
+    data: []checker::TFunction
+}
+
+/**
+ * TFnVec — a growable sequence of lifted `checker::TFunction` values that grows WITHOUT recopying
+ * the elements it already holds (the `Cb`/`NameSet` substrate, specialized to `TFunction`). A
+ * `[..arr, x]` accumulator reallocates and re-copies the whole run on every append, leaking each
+ * intermediate copy into the never-freed arena (O(n^2) bytes); this seals each full `cur` segment
+ * into `chunks` and allocates a fresh, geometrically larger `cur`, so the total bytes reserved is
+ * O(n) and no already-stored element is ever moved. Threaded LINEARLY through the lambda-lift
+ * accumulator (`StampAcc`), exactly like the emit buffer — no alias of an intermediate value
+ * survives an append.
+ */
+type TFnVec = struct {
+    /** the sealed, always-full segments, in insertion order. */
+    chunks: []TFnChunk
+    /** the number of live entries in `chunks` (its backing may be over-allocated). */
+    nch: u64
+    /** the active segment currently being filled (elements `[0, fill)` are live). */
+    cur: []checker::TFunction
+    /** the number of live entries in `cur`. */
+    fill: u64
+    /** the total element count across every sealed segment plus `cur`. */
+    len: u64
+}
+
+/**
+ * tfnvec_new — the empty `TFnVec` (no segments, no active buffer). The first `tfnvec_push`
+ * allocates the initial `cur`.
+ *
+ * @return an empty chunk-chain of `checker::TFunction`.
+ */
+fn tfnvec_new(): TFnVec {
+    var ec: []TFnChunk = []
+    var z: []checker::TFunction = []
+    TFnVec { chunks = ec; nch = 0; cur = z; fill = 0; len = 0 }
+}
+
+/**
+ * tfnvec_chunk_room — ensure `chunks` has room for one more sealed segment, growing that (short,
+ * O(log n)-length) backing geometrically when it is full. Only the segment INDEX array is ever
+ * copy-grown here; the segment payloads themselves are never moved.
+ *
+ * @param v  the vector whose segment index may need to grow
+ * @return   `v` with `chunks` guaranteed to have a free slot at `nch`
+ */
+fn tfnvec_chunk_room(v: TFnVec): TFnVec {
+    var nv = v
+    if nv.chunks.len == 0 {
+        var p: [8]TFnChunk = []
+        nv.chunks = p
+        return nv
+    }
+    if nv.nch < nv.chunks.len { return nv }
+    var cap = nv.chunks.len * 2
+    var np: [cap]TFnChunk = []
+    var i: u64 = 0
+    loop {
+        if i >= nv.nch { break }
+        np[i] = nv.chunks[i]
+        i = i + 1
+    }
+    nv.chunks = np
+    nv
+}
+
+/**
+ * tfnvec_push — append `x`, sealing the active segment and opening a geometrically larger one when
+ * it fills. No previously stored element is copied (the whole point): the just-filled `cur` is
+ * moved into `chunks` by header only, then a fresh `cur` is allocated.
+ *
+ * @param v  the vector to append to
+ * @param x  the lifted function to store
+ * @return   `v` grown by one element
+ */
+fn tfnvec_push(v: TFnVec, x: checker::TFunction): TFnVec {
+    var nv = v
+    if nv.fill >= nv.cur.len {
+        if nv.cur.len > 0 {
+            nv = tfnvec_chunk_room(nv)
+            nv.chunks[nv.nch] = TFnChunk { data = nv.cur }
+            nv.nch = nv.nch + 1
+        }
+        var next: u64 = 16
+        if nv.cur.len > 0 {
+            next = nv.cur.len * 2
+            if next > 4096 { next = 4096 }
+        }
+        var nc: [next]checker::TFunction = []
+        nv.cur = nc
+        nv.fill = 0
+    }
+    nv.cur[nv.fill] = x
+    nv.fill = nv.fill + 1
+    nv.len = nv.len + 1
+    nv
+}
+
+/**
+ * tfnvec_flat — materialize the chunk-chain as one contiguous `[]checker::TFunction` in insertion
+ * order (sealed segments first, then the partial `cur`). Allocated ONCE, at the point the lifted
+ * functions are folded back into the program's item list.
+ *
+ * @param v  the vector to flatten
+ * @return   every stored function, in insertion order
+ */
+fn tfnvec_flat(v: TFnVec): []checker::TFunction {
+    var out: [v.len]checker::TFunction = []
+    var k: u64 = 0
+    var ci: u64 = 0
+    loop {
+        if ci >= v.nch { break }
+        var ch = v.chunks[ci].data
+        var j: u64 = 0
+        loop {
+            if j >= ch.len { break }
+            out[k] = ch[j]
+            k = k + 1
+            j = j + 1
+        }
+        ci = ci + 1
+    }
+    var j2: u64 = 0
+    loop {
+        if j2 >= v.fill { break }
+        out[k] = v.cur[j2]
+        k = k + 1
+        j2 = j2 + 1
+    }
+    out
+}
+
+/**
+ * TLamChunk — one sealed, always-full segment of a `TLamVec` chunk-chain (the `TFnChunk` analogue
+ * for captured lambdas).
+ */
+type TLamChunk = struct {
+    /** the fully-filled run of stamped lambdas this segment holds. */
+    data: []checker::TLambda
+}
+
+/**
+ * TLamVec — the `TFnVec` chunk-chain substrate specialized to `checker::TLambda`, for the
+ * capture-carrying lambdas accumulated during the lift. Same O(n) no-recopy growth contract.
+ */
+type TLamVec = struct {
+    /** the sealed, always-full segments, in insertion order. */
+    chunks: []TLamChunk
+    /** the number of live entries in `chunks`. */
+    nch: u64
+    /** the active segment currently being filled. */
+    cur: []checker::TLambda
+    /** the number of live entries in `cur`. */
+    fill: u64
+    /** the total element count across every sealed segment plus `cur`. */
+    len: u64
+}
+
+/**
+ * tlamvec_new — the empty `TLamVec`.
+ *
+ * @return an empty chunk-chain of `checker::TLambda`.
+ */
+fn tlamvec_new(): TLamVec {
+    var ec: []TLamChunk = []
+    var z: []checker::TLambda = []
+    TLamVec { chunks = ec; nch = 0; cur = z; fill = 0; len = 0 }
+}
+
+/**
+ * tlamvec_chunk_room — ensure `chunks` has a free slot at `nch`, growing the segment index
+ * geometrically when full (payloads never move).
+ *
+ * @param v  the vector whose segment index may need to grow
+ * @return   `v` with room for one more sealed segment
+ */
+fn tlamvec_chunk_room(v: TLamVec): TLamVec {
+    var nv = v
+    if nv.chunks.len == 0 {
+        var p: [8]TLamChunk = []
+        nv.chunks = p
+        return nv
+    }
+    if nv.nch < nv.chunks.len { return nv }
+    var cap = nv.chunks.len * 2
+    var np: [cap]TLamChunk = []
+    var i: u64 = 0
+    loop {
+        if i >= nv.nch { break }
+        np[i] = nv.chunks[i]
+        i = i + 1
+    }
+    nv.chunks = np
+    nv
+}
+
+/**
+ * tlamvec_push — append `x`, sealing and re-growing the active segment on fill; no stored element
+ * is copied.
+ *
+ * @param v  the vector to append to
+ * @param x  the stamped lambda to store
+ * @return   `v` grown by one element
+ */
+fn tlamvec_push(v: TLamVec, x: checker::TLambda): TLamVec {
+    var nv = v
+    if nv.fill >= nv.cur.len {
+        if nv.cur.len > 0 {
+            nv = tlamvec_chunk_room(nv)
+            nv.chunks[nv.nch] = TLamChunk { data = nv.cur }
+            nv.nch = nv.nch + 1
+        }
+        var next: u64 = 16
+        if nv.cur.len > 0 {
+            next = nv.cur.len * 2
+            if next > 4096 { next = 4096 }
+        }
+        var nc: [next]checker::TLambda = []
+        nv.cur = nc
+        nv.fill = 0
+    }
+    nv.cur[nv.fill] = x
+    nv.fill = nv.fill + 1
+    nv.len = nv.len + 1
+    nv
+}
+
+/**
+ * tlamvec_flat — materialize the chunk-chain as one contiguous `[]checker::TLambda` in insertion
+ * order, allocated once when the captured lambdas are handed to `LiftResult`.
+ *
+ * @param v  the vector to flatten
+ * @return   every stored lambda, in insertion order
+ */
+fn tlamvec_flat(v: TLamVec): []checker::TLambda {
+    var out: [v.len]checker::TLambda = []
+    var k: u64 = 0
+    var ci: u64 = 0
+    loop {
+        if ci >= v.nch { break }
+        var ch = v.chunks[ci].data
+        var j: u64 = 0
+        loop {
+            if j >= ch.len { break }
+            out[k] = ch[j]
+            k = k + 1
+            j = j + 1
+        }
+        ci = ci + 1
+    }
+    var j2: u64 = 0
+    loop {
+        if j2 >= v.fill { break }
+        out[k] = v.cur[j2]
+        k = k + 1
+        j2 = j2 + 1
+    }
+    out
+}
+
+/**
+ * StampAcc — the lambda-lift accumulator threaded (by `ref`) through the lift walk: the id
+ * counters plus the growing sets of lifted top-level functions (`fns`) and captured lambdas
+ * (`lams`), both carried as no-recopy chunk-chains so a large program's lift does not leak an
+ * O(n^2) trail of accumulator copies into the arena. `spawns` stays a plain array (its count is
+ * small — one entry per `spawn` site).
+ */
+type StampAcc = struct { next: u64; next_spawn: u64; fns: TFnVec; lams: TLamVec; spawns: []checker::TSpawn }
 type LiftResult = struct { prog: checker::TProgram; lams: []checker::TLambda; spawns: []checker::TSpawn }
 
 fn cg_lift_lambdas(prog: CgProg): LiftResult {
-    var acc = StampAcc { next = 0; next_spawn = 0; fns = []; lams = []; spawns = [] }
+    var acc = StampAcc { next = 0; next_spawn = 0; fns = tfnvec_new(); lams = tlamvec_new(); spawns = [] }
     var mapped: [prog.items.len]@TItem() = []
     var i = 0
     loop {
@@ -8131,7 +8404,8 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         }
         i++
     }
-    var items: [prog.items.len + acc.fns.len]@TItem() = []
+    var lifted_fns = tfnvec_flat(acc.fns)
+    var items: [prog.items.len + lifted_fns.len]@TItem() = []
     var m: u64 = 0
     loop {
         if m >= prog.items.len { break }
@@ -8140,11 +8414,11 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
     }
     var j: u64 = 0
     loop {
-        if j >= acc.fns.len { break }
-        items[prog.items.len + j] = acc.fns[j]
+        if j >= lifted_fns.len { break }
+        items[prog.items.len + j] = lifted_fns[j]
         j++
     }
-    LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams; spawns = acc.spawns }
+    LiftResult { prog = checker::TProgram { items = items }; lams = tlamvec_flat(acc.lams); spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
     var out: [stmts.len]@TStatement() = []
@@ -8186,9 +8460,9 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
                 var ps: []parser::Param = []
                 var pi = 0
                 loop { if pi >= lam.params.len { break }; ps = [..ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }]; pi++ }
-                newfns = [..newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = []; guard = parser::pred_true() }]
+                newfns = tfnvec_push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = []; guard = parser::pred_true() })
             } else {
-                newlams = [..newlams, stamped]
+                newlams = tlamvec_push(newlams, stamped)
             }
             acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = newfns; lams = newlams; spawns = acc.spawns }
             checker::TExpr { kind = stamped; type = e.type; line = e.line; col = e.col }
