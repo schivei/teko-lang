@@ -9423,12 +9423,52 @@ pub fn tk_emit_c_test_analyze(prog0: checker::TProgram): str | error {
     tk_emit_c_mode(prog0, CgMode::TestAnalyze)
 }
 
+extern fn cg_cur_rss(): u64 = "tk_cur_rss" from "teko_rt"
+
+/**
+ * cg_phase_rss_enabled — whether the per-phase memory trace inside the codegen is armed, gated by
+ * the `TEKO_PHASE_RSS=1` environment variable so a normal build prints nothing.
+ *
+ * @return `true` when `TEKO_PHASE_RSS` is exactly `"1"`, `false` otherwise
+ */
+fn cg_phase_rss_enabled(): bool {
+    match teko::env::var("TEKO_PHASE_RSS") { str as v => v == "1"; error => false }
+}
+
+/**
+ * cg_mb_tenths — a byte count rendered as whole-and-tenths megabytes (`1258.4`), for the memory
+ * trace lines. Integer-only, so it never depends on float formatting.
+ *
+ * @param bytes  the raw byte count to render
+ * @return       the `"<whole>.<tenths>"` megabyte spelling
+ */
+fn cg_mb_tenths(bytes: u64): str {
+    var mb10 = bytes * 10 / 1048576
+    $"{mb10 / 10}.{mb10 % 10}"
+}
+
+/**
+ * cg_report_phase_rss — emit one codegen memory-trace line (current + peak RSS) for `label` when
+ * the trace is armed, so the whole-program emit's retained working set is attributable phase by
+ * phase. Writes to stderr only, leaving the emitted C untouched.
+ *
+ * @param label  the emit sub-phase the line is tagged with
+ */
+fn cg_report_phase_rss(label: str) {
+    if !cg_phase_rss_enabled() { return }
+    var cur = cg_cur_rss()
+    if cur == 0 { return }
+    teko::io::eprintln($"teko: memory: codegen {label}: cur {cg_mb_tenths(cur)} MB / peak {cg_mb_tenths(teko::mem::peak_rss())} MB")
+}
+
 fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
+    cg_report_phase_rss("emit-start")
     var prog_ag = match checker::inline_aggregate_consts(prog0) { checker::TProgram as p => p; error as e => return e }
     var _lr = cg_lift_lambdas(cg_prog_of(prog_ag))
     var prog = cg_prog_of(_lr.prog)
     var cap_lams = _lr.lams
     var spawn_sites = _lr.spawns
+    cg_report_phase_rss("after-lift")
     var _rawtmp = tk_emit_raw_tmp_path()
     var _rawfs = match teko::io::open_write(_rawtmp) { teko::io::FileStream as f => f; error as e => return e }
     var b: Cb = cb_new_stream(_rawfs.handle)
@@ -9524,6 +9564,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     b = cb(b, "\n")
     b = match emit_spawn_thunks(b, prog, spawn_sites) { Cb as o => o; error as err => return err }
     b = cb(b, "\n")
+    cg_report_phase_rss("after-decls")
 
     var i = 0
     loop {
@@ -9542,8 +9583,12 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     b = match emit_mode_main(b, prog, mode) { Cb as o => o; error as err => return err }
     b = cb_stream_flush(b)
     match teko::io::stream_close(_rawfs) { error as e => return e; null => { } }
+    cg_report_phase_rss("after-bodies")
     var _raw = match teko::io::read_stream(_rawtmp) { []byte as rb => rb; error as e => return e }
-    str(cg_format_c(str(_raw)))
+    cg_report_phase_rss("after-readback")
+    var _formatted = str(cg_format_c(str(_raw)))
+    cg_report_phase_rss("after-format")
+    _formatted
 }
 
 fn tk_emit_raw_tmp_path(): str { ".tk_emit.raw" }
