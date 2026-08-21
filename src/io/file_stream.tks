@@ -302,6 +302,27 @@ exp fn stream_write(s: FileStream, data: []byte): u64 | error {
     off
 }
 
+/** stream_write_prefix — write the first `n` bytes of `data` (the caller's fixed pending buffer,
+ * only partly filled), slicing into CHUNK writes. Zero-copy: the base pointer of `data` is used
+ * directly, so a reusable buffer never allocates on flush.
+ * @param s     the stream to write
+ * @param data  the buffer whose leading `n` bytes are written
+ * @param n     the count of leading bytes to write (must be `<= data.len`)
+ * @return the total bytes written, or a write error */
+exp fn stream_write_prefix(s: FileStream, data: []byte, n: u64): u64 | error {
+    var off: u64 = 0
+    loop {
+        if off >= n { break }
+        var take = n - off
+        if take > CHUNK { take = CHUNK }
+        var w = os_write(s.handle, buf_base(data, off), take to i64)
+        if is_os_error(w) { return error { message = "teko::io::stream_write_prefix: write failed" } }
+        if w == 0 { return error { message = "teko::io::stream_write_prefix: no progress" } }
+        off = off + (w to u64)
+    }
+    off
+}
+
 /** whence_code — the OS seek origin code for a `Whence`.
  * @param whence  the seek origin
  * @return the SEEK_SET/CUR/END code */
