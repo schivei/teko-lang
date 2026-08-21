@@ -1721,198 +1721,212 @@ fn subst_body_names(body: @TypeBody(), params: []str, args: []@TypeExpr()): @Typ
     }
 }
 
-fn collect_texpr_insts(te: @TypeExpr(), acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_texpr_insts(te: @TypeExpr(), ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     match te {
         parser::NamedType as nt => {
             var i = 0
-            loop { if i >= nt.args.len { break }; out = collect_texpr_insts(nt.args[i], out); i++ }
-            if nt.args.len > 0 { out = [..out, te] }
+            loop { if i >= nt.args.len { break }; j = scan_texpr_insts(nt.args[i], ref_ns, out, j); i++ }
+            if nt.args.len > 0 {
+                if j < out.value.len { out[j] = InstSite { site = te; ref_ns = ref_ns } }
+                j = j + 1
+            }
         }
-        parser::SliceType as st => out = collect_texpr_insts(st.element, out)
-        parser::SizedArrayType as sa => out = collect_texpr_insts(sa.element, out)
-        parser::UnionType as ut => { var i = 0; loop { if i >= ut.members.len { break }; out = collect_texpr_insts(ut.members[i], out); i++ } }
-        parser::FunctionType as fnt => { var i = 0; loop { if i >= fnt.params.len { break }; out = collect_texpr_insts(fnt.params[i], out); i++ }; out = collect_texpr_insts(fnt.ret, out) }
-        parser::MacroType => out
+        parser::SliceType as st => j = scan_texpr_insts(st.element, ref_ns, out, j)
+        parser::SizedArrayType as sa => j = scan_texpr_insts(sa.element, ref_ns, out, j)
+        parser::UnionType as ut => { var i = 0; loop { if i >= ut.members.len { break }; j = scan_texpr_insts(ut.members[i], ref_ns, out, j); i++ } }
+        parser::FunctionType as fnt => { var i = 0; loop { if i >= fnt.params.len { break }; j = scan_texpr_insts(fnt.params[i], ref_ns, out, j); i++ }; j = scan_texpr_insts(fnt.ret, ref_ns, out, j) }
+        parser::MacroType => { }
     }
-    out
+    j
 }
 
-fn collect_method_insts(f: parser::Function, acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_method_insts(f: parser::Function, ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     var i = 0
-    loop { if i >= f.params.len { break }; if f.params[i].has_type { out = collect_texpr_insts(f.params[i].type_ann, out) }; i++ }
-    if f.has_return { out = collect_texpr_insts(f.return_type, out) }
-    collect_stmts_insts(f.body, out)
+    loop { if i >= f.params.len { break }; if f.params[i].has_type { j = scan_texpr_insts(f.params[i].type_ann, ref_ns, out, j) }; i++ }
+    if f.has_return { j = scan_texpr_insts(f.return_type, ref_ns, out, j) }
+    scan_stmts_insts(f.body, ref_ns, out, j)
 }
 
-fn collect_methods_insts(methods: []parser::Function, acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_methods_insts(methods: []parser::Function, ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     var i = 0
-    loop { if i >= methods.len { break }; out = collect_method_insts(methods[i], out); i++ }
-    out
+    loop { if i >= methods.len { break }; j = scan_method_insts(methods[i], ref_ns, out, j); i++ }
+    j
 }
 
-fn collect_body_insts(body: @TypeBody(), acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_body_insts(body: @TypeBody(), ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     match body {
         parser::StructBody as sb => {
             var i = 0
-            loop { if i >= sb.fields.len { break }; out = collect_texpr_insts(sb.fields[i].type_ann, out); i++ }
-            out = collect_methods_insts(sb.methods, out)
+            loop { if i >= sb.fields.len { break }; j = scan_texpr_insts(sb.fields[i].type_ann, ref_ns, out, j); i++ }
+            j = scan_methods_insts(sb.methods, ref_ns, out, j)
         }
         parser::ClassBody as cb => {
             var i = 0
-            loop { if i >= cb.fields.len { break }; out = collect_texpr_insts(cb.fields[i].type_ann, out); i++ }
-            out = collect_methods_insts(cb.methods, out)
+            loop { if i >= cb.fields.len { break }; j = scan_texpr_insts(cb.fields[i].type_ann, ref_ns, out, j); i++ }
+            j = scan_methods_insts(cb.methods, ref_ns, out, j)
         }
-        parser::VariantBody as vb => out = collect_texpr_insts(vb.type_expr, out)
-        parser::AliasBody as ab => out = collect_texpr_insts(ab.alias, out)
+        parser::VariantBody as vb => j = scan_texpr_insts(vb.type_expr, ref_ns, out, j)
+        parser::AliasBody as ab => j = scan_texpr_insts(ab.alias, ref_ns, out, j)
         _ => { }
     }
-    out
+    j
 }
 
-fn collect_stmts_insts(stmts: []@Statement(), acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_stmts_insts(stmts: []@Statement(), ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     var i = 0
-    loop { if i >= stmts.len { break }; out = collect_stmt_insts(stmts[i], out); i++ }
-    out
+    loop { if i >= stmts.len { break }; j = scan_stmt_insts(stmts[i], ref_ns, out, j); i++ }
+    j
 }
 
-fn collect_site_args(path: parser::Path, args: []@TypeExpr(), acc: []@TypeExpr()): []@TypeExpr() {
-    if args.len == 0 { return acc }
-    collect_texpr_insts(parser::NamedType { path = path; args = args }, acc)
+fn scan_site_args(path: parser::Path, args: []@TypeExpr(), ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    if args.len == 0 { return idx }
+    scan_texpr_insts(parser::NamedType { path = path; args = args }, ref_ns, out, idx)
 }
 
-fn collect_call_site_args(call: parser::Call, acc: []@TypeExpr()): []@TypeExpr() {
-    if call.owner_type_args.len == 0 { return acc }
-    if call.callee.segments.len < 2 { return acc }
+fn scan_call_site_args(call: parser::Call, ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    if call.owner_type_args.len == 0 { return idx }
+    if call.callee.segments.len < 2 { return idx }
     var owner_name = call.callee.segments[call.callee.segments.len - 2].name
-    collect_site_args(parser::Path { segments = [parser::Segment { name = owner_name }] }, call.owner_type_args, acc)
+    scan_site_args(parser::Path { segments = [parser::Segment { name = owner_name }] }, call.owner_type_args, ref_ns, out, idx)
 }
 
-fn collect_expr_insts(e: parser::Expr, acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_expr_insts(e: parser::Expr, ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     match e.kind {
         parser::StructLit as sl => {
-            out = collect_site_args(sl.type_path, sl.type_args, out)
+            j = scan_site_args(sl.type_path, sl.type_args, ref_ns, out, j)
             var i = 0
-            loop { if i >= sl.field_vals.len { break }; out = collect_expr_insts(sl.field_vals[i], out); i++ }
+            loop { if i >= sl.field_vals.len { break }; j = scan_expr_insts(sl.field_vals[i], ref_ns, out, j); i++ }
         }
-        parser::Binary as b => { out = collect_expr_insts(b.left, out); out = collect_expr_insts(b.right, out) }
-        parser::Unary as u => out = collect_expr_insts(u.operand, out)
+        parser::Binary as b => { j = scan_expr_insts(b.left, ref_ns, out, j); j = scan_expr_insts(b.right, ref_ns, out, j) }
+        parser::Unary as u => j = scan_expr_insts(u.operand, ref_ns, out, j)
         parser::Compare as c => {
-            out = collect_expr_insts(c.first, out)
+            j = scan_expr_insts(c.first, ref_ns, out, j)
             var i = 0
-            loop { if i >= c.rest.len { break }; out = collect_expr_insts(c.rest[i].operand, out); i++ }
+            loop { if i >= c.rest.len { break }; j = scan_expr_insts(c.rest[i].operand, ref_ns, out, j); i++ }
         }
         parser::Call as call => {
-            out = collect_call_site_args(call, out)
+            j = scan_call_site_args(call, ref_ns, out, j)
             var i = 0
-            loop { if i >= call.args.len { break }; out = collect_expr_insts(call.args[i], out); i++ }
+            loop { if i >= call.args.len { break }; j = scan_expr_insts(call.args[i], ref_ns, out, j); i++ }
         }
         parser::IfExpr as f => {
-            out = collect_expr_insts(f.cond, out)
-            out = collect_stmts_insts(f.then_blk, out)
-            if f.has_else { out = collect_stmts_insts(f.else_blk, out) }
+            j = scan_expr_insts(f.cond, ref_ns, out, j)
+            j = scan_stmts_insts(f.then_blk, ref_ns, out, j)
+            if f.has_else { j = scan_stmts_insts(f.else_blk, ref_ns, out, j) }
         }
         parser::MatchExpr as m => {
-            out = collect_expr_insts(m.subject, out)
+            j = scan_expr_insts(m.subject, ref_ns, out, j)
             var i = 0
             loop {
                 if i >= m.arms.len { break }
-                out = collect_pattern_insts(m.arms[i].pattern, out)
-                if m.arms[i].has_when { out = collect_expr_insts(m.arms[i].guard, out) }
-                out = collect_stmts_insts(m.arms[i].body, out)
+                j = scan_pattern_insts(m.arms[i].pattern, ref_ns, out, j)
+                if m.arms[i].has_when { j = scan_expr_insts(m.arms[i].guard, ref_ns, out, j) }
+                j = scan_stmts_insts(m.arms[i].body, ref_ns, out, j)
                 i++
             }
         }
-        parser::FieldAccess as fa => out = collect_expr_insts(fa.receiver, out)
+        parser::FieldAccess as fa => j = scan_expr_insts(fa.receiver, ref_ns, out, j)
         parser::MethodCall as mc => {
-            out = collect_expr_insts(mc.receiver, out)
+            j = scan_expr_insts(mc.receiver, ref_ns, out, j)
             var i = 0
-            loop { if i >= mc.args.len { break }; out = collect_expr_insts(mc.args[i], out); i++ }
+            loop { if i >= mc.args.len { break }; j = scan_expr_insts(mc.args[i], ref_ns, out, j); i++ }
         }
-        parser::Cast as ct => out = collect_expr_insts(ct.expr, out)
-        parser::Index as ix => { out = collect_expr_insts(ix.receiver, out); out = collect_expr_insts(ix.index, out) }
-        parser::Interp as ip => { var i = 0; loop { if i >= ip.holes.len { break }; out = collect_expr_insts(ip.holes[i], out); i++ } }
+        parser::Cast as ct => j = scan_expr_insts(ct.expr, ref_ns, out, j)
+        parser::Index as ix => { j = scan_expr_insts(ix.receiver, ref_ns, out, j); j = scan_expr_insts(ix.index, ref_ns, out, j) }
+        parser::Interp as ip => { var i = 0; loop { if i >= ip.holes.len { break }; j = scan_expr_insts(ip.holes[i], ref_ns, out, j); i++ } }
         parser::InExpr as ie => {
-            out = collect_expr_insts(ie.lhs, out)
+            j = scan_expr_insts(ie.lhs, ref_ns, out, j)
             var i = 0
-            loop { if i >= ie.elems.len { break }; out = collect_expr_insts(ie.elems[i], out); i++ }
+            loop { if i >= ie.elems.len { break }; j = scan_expr_insts(ie.elems[i], ref_ns, out, j); i++ }
         }
-        parser::ArrayLit as al => { var i = 0; loop { if i >= al.elements.len { break }; out = collect_expr_insts(al.elements[i].expr, out); i++ } }
+        parser::ArrayLit as al => { var i = 0; loop { if i >= al.elements.len { break }; j = scan_expr_insts(al.elements[i].expr, ref_ns, out, j); i++ } }
         _ => { }
     }
-    out
+    j
 }
 
-fn collect_pattern_insts(p: @Pattern(), acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_pattern_insts(p: @Pattern(), ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     match p {
-        parser::BindPattern as bp => { if !bp.is_slice { out = collect_site_args(bp.type_name, bp.type_args, out) } }
-        parser::AltPattern as ap => { var i = 0; loop { if i >= ap.options.len { break }; out = collect_pattern_insts(ap.options[i], out); i++ } }
+        parser::BindPattern as bp => { if !bp.is_slice { j = scan_site_args(bp.type_name, bp.type_args, ref_ns, out, j) } }
+        parser::AltPattern as ap => { var i = 0; loop { if i >= ap.options.len { break }; j = scan_pattern_insts(ap.options[i], ref_ns, out, j); i++ } }
         _ => { }
     }
-    out
+    j
 }
 
-fn collect_stmt_insts(s: @Statement(), acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_stmt_insts(s: @Statement(), ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     match s {
-        parser::Binding as b => { if b.has_type { out = collect_texpr_insts(b.type_ann, out) }; out = collect_expr_insts(b.value, out) }
-        parser::Assign as a => { out = collect_expr_insts(a.value, out); if parser::assign_has_target(a.kind) { out = collect_expr_insts(a.target, out) } }
-        parser::Return as r => { if r.has_value { out = collect_expr_insts(r.value, out) } }
-        parser::ExprStmt as es => out = collect_expr_insts(es.expr, out)
-        parser::LoopStmt as l => out = collect_stmts_insts(l.body, out)
-        parser::DeferStmt as d => out = collect_stmts_insts(d.body, out)
-        parser::AdoptStmt as a => out = collect_stmts_insts(a.body, out)
-        parser::BlockStmt as b => out = collect_stmts_insts(b.body, out)
+        parser::Binding as b => { if b.has_type { j = scan_texpr_insts(b.type_ann, ref_ns, out, j) }; j = scan_expr_insts(b.value, ref_ns, out, j) }
+        parser::Assign as a => { j = scan_expr_insts(a.value, ref_ns, out, j); if parser::assign_has_target(a.kind) { j = scan_expr_insts(a.target, ref_ns, out, j) } }
+        parser::Return as r => { if r.has_value { j = scan_expr_insts(r.value, ref_ns, out, j) } }
+        parser::ExprStmt as es => j = scan_expr_insts(es.expr, ref_ns, out, j)
+        parser::LoopStmt as l => j = scan_stmts_insts(l.body, ref_ns, out, j)
+        parser::DeferStmt as d => j = scan_stmts_insts(d.body, ref_ns, out, j)
+        parser::AdoptStmt as a => j = scan_stmts_insts(a.body, ref_ns, out, j)
+        parser::BlockStmt as b => j = scan_stmts_insts(b.body, ref_ns, out, j)
         _ => { }
     }
-    out
+    j
 }
 
-fn collect_item_insts(it: parser::Item, acc: []@TypeExpr()): []@TypeExpr() {
-    var out = acc
+fn scan_item_insts(it: parser::Item, ref_ns: str, out: ref []InstSite, idx: u64): u64 {
+    var j = idx
     match it.content {
         parser::Function as f => {
             var i = 0
-            loop { if i >= f.params.len { break }; out = collect_texpr_insts(f.params[i].type_ann, out); i++ }
-            if f.has_return { out = collect_texpr_insts(f.return_type, out) }
-            out = collect_stmts_insts(f.body, out)
+            loop { if i >= f.params.len { break }; j = scan_texpr_insts(f.params[i].type_ann, ref_ns, out, j); i++ }
+            if f.has_return { j = scan_texpr_insts(f.return_type, ref_ns, out, j) }
+            j = scan_stmts_insts(f.body, ref_ns, out, j)
         }
-        parser::TypeDecl as td => out = collect_body_insts(td.body, out)
-        (@Statement()) as s => out = collect_stmt_insts(s, out)
+        parser::TypeDecl as td => j = scan_body_insts(td.body, ref_ns, out, j)
+        (@Statement()) as s => j = scan_stmt_insts(s, ref_ns, out, j)
         _ => { }
     }
-    out
+    j
 }
 
 type InstSite = struct { site: @TypeExpr(); ref_ns: str }
 
-fn tag_inst_sites(sites: []@TypeExpr(), ref_ns: str, acc: []InstSite): []InstSite {
-    var out = acc
-    var i = 0
-    loop {
-        if i >= sites.len { break }
-        out = [..out, InstSite { site = sites[i]; ref_ns = ref_ns }]
-        i++
-    }
-    out
-}
-
 fn seed_inst_sites(program: parser::Program): []InstSite {
-    var work: []InstSite = []
+    var probe: []InstSite = []
+    var total: u64 = 0
     var i = 0
     loop {
         if i >= program.items.len { break }
-        var raw = collect_item_insts(program.items[i], [])
-        work = tag_inst_sites(raw, program.items[i].namespace, work)
+        total = scan_item_insts(program.items[i], program.items[i].namespace, probe, total)
         i++
     }
+    var work: [total]InstSite = []
+    var w: u64 = 0
+    var k = 0
+    loop {
+        if k >= program.items.len { break }
+        w = scan_item_insts(program.items[k], program.items[k].namespace, work, w)
+        k++
+    }
     work
+}
+
+fn append_body_insts(body: @TypeBody(), ref_ns: str, work: []InstSite): []InstSite {
+    var probe: []InstSite = []
+    var n = scan_body_insts(body, ref_ns, probe, 0)
+    var out: [work.len + n]InstSite = []
+    var i: u64 = 0
+    loop {
+        if i >= work.len { break }
+        out[i] = work[i]
+        i++
+    }
+    var j = scan_body_insts(body, ref_ns, out, work.len)
+    out
 }
 
 fn generic_template_reg(nt: parser::NamedType, table: TypeTable, ref_ns: str): TypeReg | null {
@@ -1985,7 +1999,7 @@ fn stamp_inst_site(entry: InstSite, state: StampState): StampState {
     match type_table_find(tbl, mangled, "") { parser::TypeDecl => return state; error => { } }
     var stamped = stamped_instance_decl(template, mangled, nt, argtypes, tbl)
     var grown = tt_push(tbl, TypeReg { name = mangled; namespace = template.namespace; file = template.file; vis = template.decl.vis; decl = stamped })
-    var queued = tag_inst_sites(collect_body_insts(stamped.body, []), template.namespace, state.work)
+    var queued = append_body_insts(stamped.body, template.namespace, state.work)
     StampState { table = grown; work = queued }
 }
 
