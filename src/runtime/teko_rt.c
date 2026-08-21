@@ -2280,6 +2280,23 @@ void tk_region_leave(void) {
     tk_cur_rsp -= 1;
 }
 
+// (0.3.1 DPS/arena reclamation) the destination-passing channel — the region a callee builds its
+// returned aggregate INTO. The caller stores it right before the call; the callee snapshots it at
+// its prologue and constructs `return` there. A NULL slot means "unset" ⇒ fall back to the root
+// region, so a callee compiled before any caller sets a destination is behaviour-identical. This is
+// the non-Linux arm's twin of teko::runtime::set_ret_dest/ret_dest (the Linux build routes through
+// the Teko arena over mmap). Per-thread, mirroring tk_cur_rsp.
+static _Thread_local tk_region *tk_ret_dest_slot = NULL;
+
+void tk_set_ret_dest(tk_region *r) {
+    tk_ret_dest_slot = r;
+}
+
+tk_region *tk_ret_dest(void) {
+    if (tk_ret_dest_slot == NULL) return tk_region_root();
+    return tk_ret_dest_slot;
+}
+
 // (C1) the u64-handle ABI twins the Teko `extern fn` region surface binds to — see teko_rt.h. A
 // tk_region* rides through Teko as a uintptr_t-wide u64; these cast at the boundary so the extern
 // prototypes match without an int↔pointer conversion.
