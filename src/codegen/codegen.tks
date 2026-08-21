@@ -318,6 +318,21 @@ fn cg_arena_sym(kind: CgArenaSym): str {
     teko::str::concat("TK_ARENA_", cg_arena_kind_suffix(kind))
 }
 
+/**
+ * cb_arena_sym — stream the `TK_ARENA_<suffix>` provider symbol straight into the output buffer.
+ *
+ * The no-copy-grow counterpart of `cg_arena_sym`: it appends the fixed prefix and the kind suffix
+ * as two streamed pieces, allocating nothing, for the emit sites that hand the symbol directly to
+ * a buffer instead of materializing it as a `str`.
+ *
+ * @param buf   the output buffer to append the symbol to
+ * @param kind  which arena provider symbol to emit
+ * @return      the buffer with `TK_ARENA_<suffix>` appended
+ */
+fn cb_arena_sym(buf: Cb, kind: CgArenaSym): Cb {
+    cb(cb(buf, "TK_ARENA_"), cg_arena_kind_suffix(kind))
+}
+
 fn cg_arena_kind_suffix(kind: CgArenaSym): str {
     match kind {
         CgArenaSym::RegionAlloc => "region_alloc"
@@ -1077,7 +1092,7 @@ fn cg_class_cleanup_text(prog: CgProg, escaping: []str, fn_body: []@TStatement()
                             }
                             null => { }
                         }
-                        out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "(")
+                        out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "(")
                         out = cb_ident(out, name)
                         out = cb(out, "->__region); ")
                     }
@@ -1294,7 +1309,7 @@ fn emit_closure_call(buf: Cb, prog: CgProg, ret_type: @Type(), c: checker::TCall
         if j >= c.args.len { break }
         out = match emit_type(out, prog, c.args[j].type) { Cb as o => o; error as e => return e }
         out = cb(out, " ")
-        out = cb(out, teko::str::concat("_tca", teko::u64_to_str(j to u64)))
+        out = cb_u64_digits(cb(out, "_tca"), j to u64)
         out = cb(out, " = ")
         out = match emit_expr_ctx(out, prog, ret_type, c.args[j], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
         out = cb(out, "; ")
@@ -1306,12 +1321,12 @@ fn emit_closure_call(buf: Cb, prog: CgProg, ret_type: @Type(), c: checker::TCall
     out = match cg_emit_fnptr_sig_ex(out, prog, c.callee_type, true) { Cb as o => o; error as e => return e }
     out = cb(out, ")_tcf.fn)(_tcf.env")
     var k = 0
-    loop { if k >= c.args.len { break }; out = cb(out, ", "); out = cb(out, teko::str::concat("_tca", teko::u64_to_str(k to u64))); k++ }
+    loop { if k >= c.args.len { break }; out = cb(out, ", "); out = cb_u64_digits(cb(out, "_tca"), k to u64); k++ }
     out = cb(out, ") : ((")
     out = match cg_emit_fnptr_sig_ex(out, prog, c.callee_type, false) { Cb as o => o; error as e => return e }
     out = cb(out, ")_tcf.fn)(")
     var m = 0
-    loop { if m >= c.args.len { break }; if m > 0 { out = cb(out, ", ") }; out = cb(out, teko::str::concat("_tca", teko::u64_to_str(m to u64))); m++ }
+    loop { if m >= c.args.len { break }; if m > 0 { out = cb(out, ", ") }; out = cb_u64_digits(cb(out, "_tca"), m to u64); m++ }
     cb(out, "); })")
 }
 
@@ -1365,7 +1380,7 @@ fn cg_opt_mangle(buf: Cb, inner: @Type()): Cb | error {
         checker::Reference as r => cg_opt_mangle(cb(buf, "ref_"), r.inner)
         checker::Func as f => {
             var out = cb(buf, "fn")
-            out = cb(out, teko::u64_to_str(f.params.len))
+            out = cb_u64_digits(out, f.params.len)
             cg_opt_mangle(out, f.ret)
         }
     }
@@ -2507,9 +2522,9 @@ fn emit_cast(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCast, escapi
         var fsrc = match prim_float_tag(src) { str as t => t; error as err => return err }
         if e.line != 0 {
             var out = cb(buf, "({ _tk_cast_loc_line = ")
-            out = cb(out, teko::u64_to_str(e.line to u64))
+            out = cb_u64_digits(out, e.line to u64)
             out = cb(out, "; _tk_cast_loc_col = ")
-            out = cb(out, teko::u64_to_str(e.col to u64))
+            out = cb_u64_digits(out, e.col to u64)
             out = cb(out, "; tk_to_")
             out = cb(out, dtag)
             out = cb(out, "_from_")
@@ -2530,9 +2545,9 @@ fn emit_cast(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCast, escapi
         var dtag = match prim_int_tag(dst) { str as t => t; error as err => return err }
         if e.line != 0 {
             var out = cb(buf, "({ _tk_cast_loc_line = ")
-            out = cb(out, teko::u64_to_str(e.line to u64))
+            out = cb_u64_digits(out, e.line to u64)
             out = cb(out, "; _tk_cast_loc_col = ")
-            out = cb(out, teko::u64_to_str(e.col to u64))
+            out = cb_u64_digits(out, e.col to u64)
             out = cb(out, "; tk_to_")
             out = cb(out, dtag)
             if cg_prim_is_signed_int(src) { out = cb(out, "_s(") } else { out = cb(out, "_u(") }
@@ -2573,7 +2588,7 @@ fn emit_place(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escap
     out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
     out = cb(out, " *"); out = cb(out, v); out = cb(out, " = (")
     out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
-    out = cb(out, " *)"); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "((tk_region *)(")
+    out = cb(out, " *)"); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "((tk_region *)(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, "), (size_t)sizeof(")
     out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
@@ -2599,7 +2614,7 @@ fn emit_write(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions
 }
 
 fn emit_buf_ptr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "(uint8_t *)"); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "(")
+    var out = cb(buf, "(uint8_t *)"); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "(")
     out = cb(out, cg_enclosing_region_expr(regions))
     out = cb(out, ", (size_t)(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
@@ -2931,13 +2946,13 @@ fn cg_dc_emit_body(buf: Cb, prog: CgProg, cls: str): Cb | error {
     out = cb(out, "if (_s == NULL) { return NULL; }\n")
     out = cb(out, "if (*_e || _d >= 255) { *_e = 1; return NULL; }\n")
     out = cb(out, "tk_region *_nr = ")
-    out = cb(out, cg_arena_sym(CgArenaSym::RegionNew))
+    out = cb_arena_sym(out, CgArenaSym::RegionNew)
     out = cb(out, "(_r);\n")
     out = mangle_type_name(out, "", cls)
     out = cb(out, " *_o = (")
     out = mangle_type_name(out, "", cls)
     out = cb(out, " *)")
-    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
     out = cb(out, "(_nr, (size_t)sizeof(")
     out = mangle_type_name(out, "", cls)
     out = cb(out, "));\n")
@@ -3060,7 +3075,7 @@ fn emit_as_cstr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regio
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     var region = cg_enclosing_region_expr(regions)
     out = cb(out, $"); uint8_t *{v} = (uint8_t *)")
-    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
     cb(out, $"({region}, (size_t)({v}_s.len + 1)); for (uint64_t {v}_i = 0; {v}_i < {v}_s.len; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} {v}[{v}_s.len] = 0; {v}; }})")
 }
 
@@ -3082,7 +3097,7 @@ fn emit_region_buf(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, re
     out = cb(out, $"); tk_str {v}_s = (")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, $"); uint8_t *{v} = (uint8_t *)")
-    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
     cb(out, $"({v}_r, (size_t){v}_len); uint64_t {v}_cn = ({v}_s.len < {v}_len) ? {v}_s.len : {v}_len; for (uint64_t {v}_i = 0; {v}_i < {v}_cn; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} if ({v}_cn < {v}_len) {{ {v}[{v}_cn] = 0; }} else if ({v}_len > 0) {{ {v}[{v}_len - 1] = 0; }} {v}; }})")
 }
 
@@ -3141,7 +3156,7 @@ fn emit_iface_call(buf: Cb, prog: CgProg, ret_type: @Type(), c: checker::TCall, 
     out = cb(out, "))")
     out = cb(out, t)
     out = cb(out, ".vtable[")
-    out = cb(out, teko::u64_to_str(c.iface_slot to u64))
+    out = cb_u64_digits(out, c.iface_slot to u64)
     out = cb(out, "])(")
     out = cb(out, t)
     out = cb(out, ".data")
@@ -3206,10 +3221,10 @@ fn emit_svc_slot_call(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExp
     out = cb(out, scope)
     out = cb(out, "; void *")
     out = cb(out, hN)
-    out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionLookup)); out = cb(out, "(")
+    out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionLookup); out = cb(out, "(")
     out = cb(out, rN)
     out = cb(out, ", ")
-    out = cb_str(out, teko::u64_to_str(id))
+    out = cb_u64_digits(out, id)
     out = cb(out, "ULL); ")
     out = cb(out, hN)
     out = cb(out, " ? (")
@@ -3223,10 +3238,10 @@ fn emit_svc_slot_call(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExp
     out = cb(out, vN)
     out = cb(out, " = ")
     out = match emit_call_inner(out, prog, ret_type, e, c, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; "); out = cb(out, cg_arena_sym(CgArenaSym::RegionRegister)); out = cb(out, "(")
+    out = cb(out, "; "); out = cb_arena_sym(out, CgArenaSym::RegionRegister); out = cb(out, "(")
     out = cb(out, rN)
     out = cb(out, ", ")
-    out = cb_str(out, teko::u64_to_str(id))
+    out = cb_u64_digits(out, id)
     out = cb(out, "ULL, (void *)")
     out = cb(out, vN)
     out = cb(out, "); ")
@@ -3554,9 +3569,9 @@ fn cg_emit_nn_guard(buf: Cb, prog: CgProg, recv: checker::TExpr, escaping: []str
     out = cb(out, ")tk_nn((void *)(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, recv, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, "), ")
-    out = cb(out, teko::u64_to_str(recv.line to u64))
+    out = cb_u64_digits(out, recv.line to u64)
     out = cb(out, ", ")
-    out = cb(out, teko::u64_to_str(recv.col to u64))
+    out = cb_u64_digits(out, recv.col to u64)
     cb(out, ")")
 }
 
@@ -3658,9 +3673,9 @@ fn emit_index(buf: Cb, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, esc
             so = cb(so, litmp)
             so = cb(so, "]")
             so = cb(so, " : (tk_panic_oob_at(")
-            so = cb(so, teko::u64_to_str(e.line to u64))
+            so = cb_u64_digits(so, e.line to u64)
             so = cb(so, ", ")
-            so = cb(so, teko::u64_to_str(e.col to u64))
+            so = cb_u64_digits(so, e.col to u64)
             so = cb(so, "), (")
             so = match emit_type(so, prog, elem) { Cb as o => o; error as err => return err }
             return cb(so, "){0}); })")
@@ -3688,9 +3703,9 @@ fn emit_index(buf: Cb, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, esc
     out = cb(out, itmp)
     out = cb(out, "]")
     var z = cb(out, " : (tk_panic_oob_at(")
-    z = cb(z, teko::u64_to_str(e.line to u64))
+    z = cb_u64_digits(z, e.line to u64)
     z = cb(z, ", ")
-    z = cb(z, teko::u64_to_str(e.col to u64))
+    z = cb_u64_digits(z, e.col to u64)
     cb(z, "), (tk_byte)0); })")
 }
 
@@ -3746,7 +3761,7 @@ fn emit_slice_of_len(buf: Cb, prog: CgProg, e: checker::TExpr, s: checker::TSlic
     out = cb(out, " = (")
     out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
     out = cb(out, " *)")
-    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
     out = cb(out, "(")
     out = cb(out, cg_enclosing_region_expr(regions))
     out = cb(out, ", ")
@@ -4086,13 +4101,13 @@ fn emit_struct_init_framed(buf: Cb, prog: CgProg, e: checker::TExpr, si: checker
         var pN = fresh_named("_clsp", id)
         var out = cb(buf, "({ tk_region *")
         out = cb(out, rN)
-        out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "(")
+        out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "(")
         out = cb(out, cg_enclosing_region_expr_framed(regions, frame))
         out = cb(out, "); ")
         out = match e.type { checker::Named as nm => mangle_type_name(out, "", nm.name); _ => out }
         out = cb(out, " *")
         out = cb(out, pN)
-        out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "(")
+        out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "(")
         out = cb(out, rN)
         out = cb(out, ", sizeof(*")
         out = cb(out, pN)
@@ -4145,9 +4160,9 @@ fn emit_struct_init_literal(buf: Cb, prog: CgProg, e: checker::TExpr, si: checke
             match fte_opt { (@TypeExpr()) as fte => { out = match emit_type_expr(out, prog, fte, checker::name_qualifier(name)) { Cb as o => o; error as err => return err } }; null => { } }
             out = cb(out, " *"); out = cb(out, bxN)
             if frame.len > 0 {
-                out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "("); out = cb(out, frame); out = cb(out, ", sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+                out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "("); out = cb(out, frame); out = cb(out, ", sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
             } else {
-                out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::Alloc)); out = cb(out, "(sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+                out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::Alloc); out = cb(out, "(sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
             }
         }
         var emitted: bool = match fv.kind {
@@ -4284,7 +4299,7 @@ fn emit_branch_value(buf: Cb, prog: CgProg, ret_type: @Type(), body: []@TStateme
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, body)
     var region = fresh_named("_tkbr", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
+    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }]
     var cur = dctx
     var i = 0
@@ -4300,7 +4315,7 @@ fn emit_branch_value(buf: Cb, prog: CgProg, ret_type: @Type(), body: []@TStateme
         out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regs2, fn_body, cur, body) { Cb as o => o; error as err => return err }
     }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
 
@@ -4958,8 +4973,8 @@ fn cg_emit_box_construct(buf: Cb, prog: CgProg, ret_type: @Type(), inner: @Type(
     out = match emit_type(out, prog, inner) { Cb as o => o; error as e => return e }
     out = cb(out, " *")
     out = cb(out, bxN)
-    out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "(")
-    out = cb(out, if box_region.len > 0 { box_region } else { teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()") })
+    out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "(")
+    if box_region.len > 0 { out = cb(out, box_region) } else { out = cb(cb_arena_sym(out, CgArenaSym::RegionRoot), "()") }
     out = cb(out, ", sizeof(")
     out = match emit_type(out, prog, inner) { Cb as o => o; error as e => return e }
     out = cb(out, ")); *")
@@ -5684,7 +5699,7 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
     var cur_blk = if want_block { body } else { [] }
     var out = buf
     if want_block {
-        out = cb(out, ci); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
+        out = cb(out, ci); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
     }
     var cur = dctx
     var i = 0
@@ -5718,9 +5733,9 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
                 if fall.len > defer_floor {
                     out = cb(out, "\n")
                     out = match emit_defers(out, fall, defer_floor, prog, ci, escaping, fn_body) { Cb as o => o; error as err => return err }
-                    out = cb(out, ci); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
+                    out = cb(out, ci); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
                 } else {
-                    out = cb(out, " "); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
+                    out = cb(out, " "); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
                 }
                 cb(out, " break;\n")
             } else if fall.len > defer_floor {
@@ -6019,9 +6034,9 @@ fn emit_lambda(buf: Cb, prog: CgProg, e: checker::TExpr, lam: checker::TLambda, 
         return cb(out, ", (void*)0 }")
     }
     var out = cb(buf, "({ __tkenv_")
-    out = cb(out, teko::u64_to_str(lam.lift_id))
-    out = cb(out, " *_tke = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc)); out = cb(out, "("); out = cb(out, cg_closure_env_region(dctx)); out = cb(out, ", sizeof(__tkenv_")
-    out = cb(out, teko::u64_to_str(lam.lift_id))
+    out = cb_u64_digits(out, lam.lift_id)
+    out = cb(out, " *_tke = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "("); out = cb(out, cg_closure_env_region(dctx)); out = cb(out, ", sizeof(__tkenv_")
+    out = cb_u64_digits(out, lam.lift_id)
     out = cb(out, ")); ")
     var i = 0
     loop {
@@ -6182,7 +6197,7 @@ fn cg_drop_regions_from(buf: Cb, indent: str, regions: []RegionFrame, defer_floo
     loop {
         if k <= defer_floor { break }
         var r = regions[k - 1]
-        out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
+        out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
         k = k - 1
     }
     out
@@ -6194,7 +6209,7 @@ fn cg_drop_all_regions(buf: Cb, indent: str, regions: []RegionFrame): Cb {
     loop {
         if k == 0 { break }
         var r = regions[k - 1]
-        out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
+        out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
         k = k - 1
     }
     out
@@ -6267,11 +6282,11 @@ fn emit_block_region(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg
         return emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body)
     }
     var region = fresh_named("_tkbr", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) }]
     out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
 
@@ -6477,9 +6492,9 @@ fn emit_index_assign(buf: Cb, prog: CgProg, ret_type: @Type(), a: checker::TAssi
     out = cb(out, ".len) { ")
     out = match emit_index_store_body(out, prog, ret_type, a, wstmp, witmp, elem, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, " } else { tk_panic_oob_at(")
-    out = cb(out, teko::u64_to_str(a.target.line to u64))
+    out = cb_u64_digits(out, a.target.line to u64)
     out = cb(out, ", ")
-    out = cb(out, teko::u64_to_str(a.target.col to u64))
+    out = cb_u64_digits(out, a.target.col to u64)
     cb(out, "); }\n }\n")
 }
 
@@ -6608,13 +6623,13 @@ fn emit_loop_while(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, 
     var region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     var regs2 = regions
     if want_block {
-        out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+        out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
         regs2 = [..regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) }]
     }
     var cur_blk = if want_block { l.body } else { [] }
     out = match emit_block(out, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, inner, escaping, fn_body) { Cb as o => o; error as err => return err }
-    if want_block { out = cb(out, inner); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
+    if want_block { out = cb(out, inner); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
     out = cb(out, indent)
     out = cb(out, "}\n")
     if labeled { out = cb(out, indent); out = cb(out, "tk_lbl_"); out = cb_str(out, l.label); out = cb(out, "_break: ;\n") }
@@ -6736,10 +6751,10 @@ fn emit_cov_lines(buf: Cb, ctx: CovCtx, lines: []u32, indent: str): Cb {
 fn emit_stmt(buf: Cb, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
     var b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
-        var ob = cb(b0, indent); ob = cb(ob, cg_arena_sym(CgArenaSym::RegionEnter)); ob = cb(ob, "("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
+        var ob = cb(b0, indent); ob = cb_arena_sym(ob, CgArenaSym::RegionEnter); ob = cb(ob, "("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
         var d2 = cg_dctx_bracket(dctx)
         var ob2 = match emit_stmt_dispatch(ob, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value) { Cb as o => o; error as err => return err }
-        ob2 = cb(ob2, indent); ob2 = cb(ob2, cg_arena_sym(CgArenaSym::RegionLeave)); ob2 = cb(ob2, "();\n")
+        ob2 = cb(ob2, indent); ob2 = cb_arena_sym(ob2, CgArenaSym::RegionLeave); ob2 = cb(ob2, "();\n")
         return ob2
     }
     emit_stmt_dispatch(b0, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
@@ -6922,11 +6937,11 @@ fn emit_adopt(buf: Cb, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, a.body)
     var region = fresh_named("_tkad", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = [] }]
     out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDropSubtree)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDropSubtree); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
 
@@ -7196,7 +7211,7 @@ fn cg_emit_bracket_unwind(buf: Cb, indent: str, n: u64): Cb {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionLeave)); out = cb(out, "();\n")
+        out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionLeave); out = cb(out, "();\n")
         i = i + 1
     }
     out
@@ -7204,8 +7219,8 @@ fn cg_emit_bracket_unwind(buf: Cb, indent: str, n: u64): Cb {
 
 fn cg_frame_exit(buf: Cb, indent: str, frame: str, entered: bool): Cb {
     var out = buf
-    if entered { out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionLeave)); out = cb(out, "();\n") }
-    if cg_tkfr_drop_active(entered) { out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, frame); out = cb(out, ");\n") }
+    if entered { out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionLeave); out = cb(out, "();\n") }
+    if cg_tkfr_drop_active(entered) { out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, frame); out = cb(out, ");\n") }
     out
 }
 
@@ -7222,7 +7237,7 @@ fn cg_closure_env_region(dctx: DeferCtx): str {
 
 fn cg_emit_arena_presize(buf: Cb, n: u64): Cb {
     var out = cb(buf, "    (void)")
-    out = cb(out, cg_arena_sym(CgArenaSym::RegionAlloc))
+    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
     out = cb(out, "(_tkfr, ")
     var sized = cb_u64_digits(out, n)
     cb(sized, ");\n")
@@ -7243,7 +7258,7 @@ fn emit_function_cov(buf: Cb, prog: CgProg, f: checker::TFunction, cov_idx: i64)
     if use_rr { out = cb(out, "    tk_region *_tkrr = "); out = cb(out, cg_rr_init_expr()); out = cb(out, ";\n") }
     if want_frame {
         out = cb(out, "    tk_region *_tkfr = "); out = cb(out, cg_tkfr_init_expr(f, use_rr)); out = cb(out, ";\n")
-        if use_rr { out = cb(out, "    "); out = cb(out, cg_arena_sym(CgArenaSym::RegionEnter)); out = cb(out, "(_tkfr);\n") }
+        if use_rr { out = cb(out, "    "); out = cb_arena_sym(out, CgArenaSym::RegionEnter); out = cb(out, "(_tkfr);\n") }
         if f.has_arena_size { out = cg_emit_arena_presize(out, f.arena_size) }
     }
     out = match emit_block_tail(out, fbody, false, prog, f.return_type, "    ", frame, escaping, fbody, dctx) { Cb as o => o; error as err => return err }
@@ -7777,11 +7792,29 @@ fn cg_emit_inline_variant_typedef(buf: Cb, prog: CgProg, v: checker::Variant): C
     cb(out, ";\n")
 }
 
-type CgEmitted = struct { names: []str; opt_keys: []str; uvar_keys: []str }
+type CgEmitted = struct { names: []str; names_n: u64; opt_keys: []str; uvar_keys: []str; uvar_n: u64 }
 
 fn cg_str_in(xs: []str, s: str): bool {
     var i = 0
     loop { if i >= xs.len { break }; if xs[i] == s { return true }; i++ }
+    false
+}
+
+/**
+ * cg_str_in_n — membership test over the first `n` entries of a pre-sized string buffer.
+ *
+ * The count-bounded counterpart of `cg_str_in` for the no-copy-grow accumulators of
+ * `CgEmitted`: the buffer is allocated once at its maximum capacity and filled by index, so a
+ * scan must stop at the live watermark `n` rather than the buffer's full `.len`.
+ *
+ * @param xs  the pre-sized backing buffer
+ * @param n   the live element count (watermark)
+ * @param s   the string to look for
+ * @return    `true` when `s` equals one of `xs[0..n)`
+ */
+fn cg_str_in_n(xs: []str, n: u64, s: str): bool {
+    var i: u64 = 0
+    loop { if i >= n { break }; if xs[i] == s { return true }; i++ }
     false
 }
 fn cg_find_decl_exact(prog: CgProg, name: str): parser::TypeDecl | error {
@@ -7802,7 +7835,7 @@ fn cg_named_emitted_precise(prog: CgProg, em: CgEmitted, name: str): bool {
         match cg_find_decl_exact(prog, name) {
             parser::TypeDecl as dd => {
                 var gate = match dd.body { parser::StructBody => true; parser::VariantBody => true; _ => false }
-                if gate { return cg_str_in(em.names, name) }
+                if gate { return cg_str_in_n(em.names, em.names_n, name) }
             }
             error => { }
         }
@@ -7811,9 +7844,9 @@ fn cg_named_emitted_precise(prog: CgProg, em: CgEmitted, name: str): bool {
 }
 fn cg_named_emitted(em: CgEmitted, name: str): bool {
     var want = checker::name_last_segment(name)
-    var i = 0
+    var i: u64 = 0
     loop {
-        if i >= em.names.len { break }
+        if i >= em.names_n { break }
         if checker::name_last_segment(em.names[i]) == want { return true }
         i++
     }
@@ -7828,7 +7861,7 @@ fn cg_uvar_emitted_key(em: CgEmitted, set: CgTypeSet, key: str): bool {
         i++
     }
     if !present { return true }
-    cg_str_in(em.uvar_keys, key)
+    cg_str_in_n(em.uvar_keys, em.uvar_n, key)
 }
 fn cg_type_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, t: @Type()): bool {
     match t {
@@ -7955,7 +7988,11 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
     var named = cg_named_decls(prog)
 
     var out = buf
-    var em0 = CgEmitted { names = []; opt_keys = []; uvar_keys = [] }
+    var names_cap = named.len
+    var uvar_cap = set.variants.len
+    var names_buf: [names_cap]str = []
+    var uvar_buf: [uvar_cap]str = []
+    var em0 = CgEmitted { names = names_buf; names_n = 0; opt_keys = []; uvar_keys = uvar_buf; uvar_n = 0 }
     var enum_count: u64 = 0
     var ei = 0
     loop {
@@ -7967,7 +8004,8 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
         }
         if is_enum_or_flags {
             out = match emit_type_decl(out, prog, named[ei]) { Cb as o => o; error as err => return err }
-            em0 = CgEmitted { names = [..em0.names, named[ei].name]; opt_keys = em0.opt_keys; uvar_keys = em0.uvar_keys }
+            em0.names[em0.names_n] = named[ei].name
+            em0.names_n = em0.names_n + 1
             enum_count = enum_count + 1
         }
         ei++
@@ -8015,10 +8053,11 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
         loop {
             if ni >= named.len { break }
             var d = named[ni]
-            if cg_str_in(em.names, d.name) { ni++ } else {
+            if cg_str_in_n(em.names, em.names_n, d.name) { ni++ } else {
                 if !cg_named_ready(prog, em, set, d) { ni++ } else {
                     out = match emit_type_decl(out, prog, d) { Cb as o => o; error as err => return err }
-                    em = CgEmitted { names = [..em.names, d.name]; opt_keys = em.opt_keys; uvar_keys = em.uvar_keys }
+                    em.names[em.names_n] = d.name
+                    em.names_n = em.names_n + 1
                     remaining = remaining - 1
                     progress = true
                     ni++
@@ -8030,7 +8069,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
             if vi >= set.variants.len { break }
             var vt = set.variants[vi]
             var vkey = set.variant_keys[vi]
-            if cg_str_in(em.uvar_keys, vkey) { vi++ } else {
+            if cg_str_in_n(em.uvar_keys, em.uvar_n, vkey) { vi++ } else {
                 var ready = true
                 match vt {
                     checker::Variant as va => {
@@ -8048,7 +8087,8 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
                         checker::Variant as va => { out = match cg_emit_inline_variant_typedef(out, prog, va) { Cb as o => o; error as err => return err } }
                         _ => { }
                     }
-                    em = CgEmitted { names = em.names; opt_keys = em.opt_keys; uvar_keys = [..em.uvar_keys, vkey] }
+                    em.uvar_keys[em.uvar_n] = vkey
+                    em.uvar_n = em.uvar_n + 1
                     remaining = remaining - 1
                     progress = true
                     vi++
@@ -8711,7 +8751,6 @@ fn cg_emit_lambda_decls(buf: Cb, prog: CgProg, lams: []checker::TLambda, protos_
     loop {
         if li >= lams.len { break }
         var lam = lams[li]
-        var ids = teko::u64_to_str(lam.lift_id)
         if protos_only {
             out = cb(out, "typedef struct { ")
             var ci = 0
@@ -8723,7 +8762,7 @@ fn cg_emit_lambda_decls(buf: Cb, prog: CgProg, lams: []checker::TLambda, protos_
                 out = cb(out, "; ")
                 ci++
             }
-            out = cb(out, teko::str::concat("} __tkenv_", ids, ";\n"))
+            out = cb(cb_u64_digits(cb(out, "} __tkenv_"), lam.lift_id), ";\n")
         }
         out = match emit_type(out, prog, lam.ret) { Cb as o => o; error as e => return e }
         out = cb(out, " ")
@@ -8743,7 +8782,7 @@ fn cg_emit_lambda_decls(buf: Cb, prog: CgProg, lams: []checker::TLambda, protos_
             out = cb(out, ";\n")
         } else {
             out = cb(out, " {\n")
-            out = cb(out, teko::str::concat("    __tkenv_", ids, " *_e = envp;\n"))
+            out = cb(cb_u64_digits(cb(out, "    __tkenv_"), lam.lift_id), " *_e = envp;\n")
             var ui = 0
             loop {
                 if ui >= lam.captures.len { break }
@@ -9727,17 +9766,17 @@ fn cb_journal_call1(buf: Cb, name: str, label: str): Cb {
 
 fn cb_journal_call_exited(buf: Cb, label: str, code_expr: str): Cb {
     var b = cb_journal_tkstr_lit(cb(cb_fn_name(buf, "teko::journal", "note_test_exited"), "("), label)
-    cb(b, teko::str::concat(" }, ", code_expr, ");\n"))
+    cb(cb(cb(b, " }, "), code_expr), ");\n")
 }
 
 fn emit_test_call(buf: Cb, f: checker::TFunction, idx: u64, cov: bool): Cb {
     var b = cb(buf, "    if (tk_test_shard_take()) {\n")
-    b = cb(b, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPush)); b = cb(b, "();\n")
+    b = cb(b, "    "); b = cb_arena_sym(b, CgArenaSym::ArenaPush); b = cb(b, "();\n")
     b = emit_test_channel_open(b, f)
     if cov { b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n") }
     b = emit_test_captured_call(b, f)
     if cov { b = cb(b, "    tk_cov_leave();\n") }
-    b = cb(b, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPop)); b = cb(b, "();\n")
+    b = cb(b, "    "); b = cb_arena_sym(b, CgArenaSym::ArenaPop); b = cb(b, "();\n")
     b = cb(b, "    }\n")
     b
 }
@@ -9771,7 +9810,7 @@ fn test_label_of(f: checker::TFunction): str {
 }
 
 fn emit_test_call_analyze(buf: Cb, f: checker::TFunction, idx: u64): Cb {
-    var b = cb(buf, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPush)); b = cb(b, "();\n")
+    var b = cb(buf, "    "); b = cb_arena_sym(b, CgArenaSym::ArenaPush); b = cb(b, "();\n")
     b = emit_test_channel_open(b, f)
     b = cb(b, "    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_line_reset();\n")
     b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n")
@@ -9780,7 +9819,7 @@ fn emit_test_call_analyze(buf: Cb, f: checker::TFunction, idx: u64): Cb {
     b = cb(b, "    { const char *d = getenv(\"TEKO_ANALYZE_DIR\"); if (d) { char p[1024]; snprintf(p, sizeof p, \"%s/")
     b = cb_u64_digits(b, idx)
     b = cb(b, ".tkcov\", d); tk_cov_dump(p); } }\n")
-    b = cb(b, "    "); b = cb(b, cg_arena_sym(CgArenaSym::ArenaPop)); b = cb(b, "();\n")
+    b = cb(b, "    "); b = cb_arena_sym(b, CgArenaSym::ArenaPop); b = cb(b, "();\n")
     b
 }
 
