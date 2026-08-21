@@ -103,8 +103,13 @@ pub fn join_diags(diags: []str): str {
     out
 }
 
+type AsmFileItems = struct {
+    items: []parser::Item
+    namespace: str
+    path: str
+}
+
 fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: bool): Assembled | error {
-    var merged: []parser::Item = []
     var diags: []str = []
     var total = eligible_file_count(files, include_tests)
     var mode = report_mode(!report, tty)
@@ -112,6 +117,9 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
     var parse_phase = phase_begin("parser", count_unit_text(0, total, "files"), mode)
     var lexed: u64 = 0
     var parsed: u64 = 0
+    var per_file: [files.len]AsmFileItems = []
+    var nfiles: u64 = 0
+    var total_items: u64 = 0
     var i: u64 = 0
     loop {
         if i >= files.len { break }
@@ -138,13 +146,25 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
         parsed = parsed + 1
         phase_tick(lex_phase, count_unit_text(lexed, total, "files"))
         phase_tick(parse_phase, count_unit_text(parsed, total, "files"))
+        per_file[nfiles] = AsmFileItems { items = one; namespace = sf.namespace; path = sf.path }
+        nfiles++
+        total_items = total_items + one.len
+        i = i + 1
+    }
+    var merged: [total_items]parser::Item = []
+    var mi: u64 = 0
+    var fi: u64 = 0
+    loop {
+        if fi >= nfiles { break }
+        var pf = per_file[fi]
         var k: u64 = 0
         loop {
-            if k >= one.len { break }
-            merged = [..merged, parser::Item { content = one[k].content; namespace = sf.namespace; file = sf.path; guard = one[k].guard }]
-            k = k + 1
+            if k >= pf.items.len { break }
+            merged[mi] = parser::Item { content = pf.items[k].content; namespace = pf.namespace; file = pf.path; guard = pf.items[k].guard }
+            mi++
+            k++
         }
-        i = i + 1
+        fi++
     }
     if diags.len > 0 {
         phase_end_fail(lex_phase, count_unit_text(lexed, total, "files"), diags[0])
