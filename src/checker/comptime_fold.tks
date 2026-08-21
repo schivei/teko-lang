@@ -173,11 +173,11 @@ fn cast_to_non_int(v: ConstValue, target: @Type(), e: TExpr): ConstValue | error
 }
 
 fn bytes_to_cv_elems(data: []byte): []ConstValue {
-    var out: []ConstValue = []
+    var out: [data.len]ConstValue = []
     var i: u64 = 0
     loop {
         if i >= data.len { break }
-        out = [..out, cv_int(data[i] to u64, Byte { })]
+        out[i] = cv_int(data[i] to u64, Byte { })
         i++
     }
     out
@@ -320,25 +320,25 @@ fn eval_agg_ref(v: TVar, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap)
 }
 
 fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap): ConstValue | error {
-    var elems: []ConstValue = []
+    var elems: [a.elements.len]ConstValue = []
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         if a.elements[i].is_spread { return error { message = "comptime fold: a spread element is not a const aggregate" } }
         var v = match eval_const(a.elements[i].expr, table, env, agg) { error as x => return x; ConstValue as cv => cv }
-        elems = [..elems, v]
+        elems[i] = v
         i++
     }
     cv_agg(elems)
 }
 
 fn eval_struct_agg(si: TStructInit, table: TypeTable, env: Env, agg: AggConstMap): ConstValue | error {
-    var elems: []ConstValue = []
+    var elems: [si.field_vals.len]ConstValue = []
     var i: u64 = 0
     loop {
         if i >= si.field_vals.len { break }
         var v = match eval_const(si.field_vals[i], table, env, agg) { error as x => return x; ConstValue as cv => cv }
-        elems = [..elems, v]
+        elems[i] = v
         i++
     }
     cv_agg(elems)
@@ -792,12 +792,12 @@ fn bytes_literal_of(cb: CVBytes, ty: @Type(), line: u32, col: u32): TExpr | null
 
 fn byte_array_literal_of(cb: CVBytes, sl: Slice, ty: @Type(), line: u32, col: u32): TExpr | null {
     if !is_byte_type(sl.element) { return null }
-    var elems: []TArrayElem = []
+    var elems: [cb.data.len]TArrayElem = []
     var i: u64 = 0
     loop {
         if i >= cb.data.len { break }
         var lit = TExpr { kind = TByteLit { value = cb.data[i] }; type = sl.element; line = line; col = col }
-        elems = [..elems, TArrayElem { is_spread = false; expr = lit }]
+        elems[i] = TArrayElem { is_spread = false; expr = lit }
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = ty; line = line; col = col }
@@ -812,7 +812,7 @@ fn agg_literal_of(ag: CVAgg, ty: @Type(), table: TypeTable, line: u32, col: u32)
 }
 
 fn array_literal_of(ag: CVAgg, elem_ty: @Type(), ty: @Type(), table: TypeTable, line: u32, col: u32): TExpr | null {
-    var elems: []TArrayElem = []
+    var elems: [ag.elems.len]TArrayElem = []
     var i: u64 = 0
     loop {
         if i >= ag.elems.len { break }
@@ -820,7 +820,7 @@ fn array_literal_of(ag: CVAgg, elem_ty: @Type(), ty: @Type(), table: TypeTable, 
             TExpr as lit => lit
             null => return null
         }
-        elems = [..elems, TArrayElem { is_spread = false; expr = child }]
+        elems[i] = TArrayElem { is_spread = false; expr = child }
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = ty; line = line; col = col }
@@ -832,8 +832,8 @@ fn struct_literal_of(ag: CVAgg, nm: Named, ty: @Type(), table: TypeTable, line: 
         error => return null
     }
     if fvs.len != ag.elems.len { return null }
-    var names: []str = []
-    var vals: []TExpr = []
+    var names: [fvs.len]str = []
+    var vals: [fvs.len]TExpr = []
     var i: u64 = 0
     loop {
         if i >= fvs.len { break }
@@ -841,8 +841,8 @@ fn struct_literal_of(ag: CVAgg, nm: Named, ty: @Type(), table: TypeTable, line: 
             TExpr as lit => lit
             null => return null
         }
-        names = [..names, fvs[i].name]
-        vals = [..vals, child]
+        names[i] = fvs[i].name
+        vals[i] = child
         i++
     }
     TExpr { kind = TStructInit { field_names = names; field_vals = vals }; type = ty; line = line; col = col }
@@ -1000,12 +1000,12 @@ fn fold_if(f: TIfExpr, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): 
 
 fn fold_compare(c: TCompare, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
     var first = match fold_expr(c.first, table, env, agg) { error as x => return x; TExpr as v => v }
-    var terms: []TCmpTerm = []
+    var terms: [c.rest.len]TCmpTerm = []
     var i: u64 = 0
     loop {
         if i >= c.rest.len { break }
         var operand = match fold_expr(c.rest[i].operand, table, env, agg) { error as x => return x; TExpr as v => v }
-        terms = [..terms, TCmpTerm { op = c.rest[i].op; operand = operand }]
+        terms[i] = TCmpTerm { op = c.rest[i].op; operand = operand }
         i++
     }
     TExpr { kind = TCompare { first = first; rest = terms }; type = e.type; line = e.line; col = e.col }
@@ -1013,12 +1013,12 @@ fn fold_compare(c: TCompare, e: TExpr, table: TypeTable, env: Env, agg: AggConst
 
 fn fold_match(m: TMatchExpr, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
     var subject = match fold_expr(m.subject, table, env, agg) { error as x => return x; TExpr as v => v }
-    var arms: []TArm = []
+    var arms: [m.arms.len]TArm = []
     var i: u64 = 0
     loop {
         if i >= m.arms.len { break }
         var arm = match fold_arm(m.arms[i], table, env, agg) { error as x => return x; TArm as a => a }
-        arms = [..arms, arm]
+        arms[i] = arm
         i++
     }
     TExpr { kind = TMatchExpr { subject = subject; arms = arms }; type = e.type; line = e.line; col = e.col }
@@ -1038,16 +1038,17 @@ fn fold_lambda(lam: TLambda, e: TExpr, table: TypeTable, env: Env, agg: AggConst
 }
 
 fn fold_rw_interp(in: TInterp, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap): TExpr | error {
-    var holes: []TExpr = []
-    var specs: []TFSpec = []
+    var holes: [in.holes.len]TExpr = []
+    var spec_n = if in.holes.len < in.specs.len { in.holes.len } else { in.specs.len }
+    var specs: [spec_n]TFSpec = []
     var i: u64 = 0
     loop {
         if i >= in.holes.len { break }
         var hole = match fold_expr(in.holes[i], table, env, agg) { error as x => return x; TExpr as v => v }
-        holes = [..holes, hole]
+        holes[i] = hole
         if i < in.specs.len {
             var sp = match fold_fspec(in.specs[i], table, env, agg) { error as x => return x; TFSpec as s => s }
-            specs = [..specs, sp]
+            specs[i] = sp
         }
         i++
     }
@@ -1320,11 +1321,11 @@ fn lp_expr(e: TExpr, m: LocalConstMap): TExpr {
 }
 
 fn lp_compare(c: TCompare, e: TExpr, m: LocalConstMap): TExpr {
-    var terms: []TCmpTerm = []
+    var terms: [c.rest.len]TCmpTerm = []
     var i: u64 = 0
     loop {
         if i >= c.rest.len { break }
-        terms = [..terms, TCmpTerm { op = c.rest[i].op; operand = lp_expr(c.rest[i].operand, m) }]
+        terms[i] = TCmpTerm { op = c.rest[i].op; operand = lp_expr(c.rest[i].operand, m) }
         i++
     }
     TExpr { kind = TCompare { first = lp_expr(c.first, m); rest = terms }; type = e.type; line = e.line; col = e.col }
@@ -1339,11 +1340,11 @@ fn lp_if(f: TIfExpr, e: TExpr, m: LocalConstMap): TExpr {
 
 fn lp_match(mm: TMatchExpr, e: TExpr, m: LocalConstMap): TExpr {
     var subject = lp_expr(mm.subject, m)
-    var arms: []TArm = []
+    var arms: [mm.arms.len]TArm = []
     var i: u64 = 0
     loop {
         if i >= mm.arms.len { break }
-        arms = [..arms, lp_arm(mm.arms[i], m)]
+        arms[i] = lp_arm(mm.arms[i], m)
         i++
     }
     TExpr { kind = TMatchExpr { subject = subject; arms = arms }; type = e.type; line = e.line; col = e.col }
@@ -1357,13 +1358,14 @@ fn lp_arm(arm: TArm, m: LocalConstMap): TArm {
 }
 
 fn lp_interp(in: TInterp, e: TExpr, m: LocalConstMap): TExpr {
-    var holes: []TExpr = []
-    var specs: []TFSpec = []
+    var holes: [in.holes.len]TExpr = []
+    var spec_n = if in.holes.len < in.specs.len { in.holes.len } else { in.specs.len }
+    var specs: [spec_n]TFSpec = []
     var i: u64 = 0
     loop {
         if i >= in.holes.len { break }
-        holes = [..holes, lp_expr(in.holes[i], m)]
-        if i < in.specs.len { specs = [..specs, lp_fspec(in.specs[i], m)] }
+        holes[i] = lp_expr(in.holes[i], m)
+        if i < in.specs.len { specs[i] = lp_fspec(in.specs[i], m) }
         i++
     }
     TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = e.type; line = e.line; col = e.col }
@@ -1377,11 +1379,11 @@ fn lp_fspec(sp: TFSpec, m: LocalConstMap): TFSpec {
 }
 
 fn lp_array(a: TArrayLit, e: TExpr, m: LocalConstMap): TExpr {
-    var elems: []TArrayElem = []
+    var elems: [a.elements.len]TArrayElem = []
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
-        elems = [..elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = lp_expr(a.elements[i].expr, m) }]
+        elems[i] = TArrayElem { is_spread = a.elements[i].is_spread; expr = lp_expr(a.elements[i].expr, m) }
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }

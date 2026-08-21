@@ -2750,8 +2750,8 @@ fn type_struct_lit(sl: parser::StructLit, expected: @Type(), env: Env, table: Ty
     }
     if sl.field_names.len != sb_fields.len { return error { message = "a struct literal must set exactly the declared fields (count mismatch)" } }
 
-    var names: []str = []
-    var vals: []TExpr = []
+    var names: [sb_fields.len]str = []
+    var vals: [sb_fields.len]TExpr = []
     var d = 0
     loop {
         if d >= sb_fields.len { break }
@@ -2795,8 +2795,8 @@ fn type_struct_lit(sl: parser::StructLit, expected: @Type(), env: Env, table: Ty
                 return error { message = "a struct-literal field value does not match the field's declared type" }
             }
         }
-        names = [..names, fname]
-        vals = [..vals, val]
+        names[d] = fname
+        vals[d] = val
         d++
     }
     TExpr { kind = TStructInit { field_names = names; field_vals = vals }; type = Named { name = name }; line = 0; col = 0 }
@@ -2946,7 +2946,7 @@ fn type_in(n: parser::InExpr, env: Env, table: TypeTable): TExpr | error {
     var lhs = match type_expr(n.lhs, env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(lhs.type) { return error { message = "a `void` expression cannot be an operand" } }
     if type_contains_ref(lhs.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
-    var elems: []TExpr = []
+    var elems: [n.elems.len]TExpr = []
     var i = 0
     loop {
         if i >= n.elems.len { break }
@@ -2954,7 +2954,7 @@ fn type_in(n: parser::InExpr, env: Env, table: TypeTable): TExpr | error {
         if type_is_void(el.type) { return error { message = "a `void` expression cannot be an operand" } }
         if type_contains_ref(el.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
         if !is_comparable(lhs.type, el.type) { return error { message = "`in` element is not comparable to the left-hand operand" } }
-        elems = [..elems, el]
+        elems[i] = el
         i++
     }
     TExpr { kind = TInExpr { lhs = lhs; elems = elems }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
@@ -3501,7 +3501,7 @@ fn match_join_anchor(arms: []TArm): @Type() | null {
 }
 
 fn adopt_match_arm_literals(arms: []TArm, anchor: @Type()): []TArm {
-    var out: []TArm = []
+    var out: [arms.len]TArm = []
     var i = 0
     loop {
         if i >= arms.len { break }
@@ -3510,7 +3510,7 @@ fn adopt_match_arm_literals(arms: []TArm, anchor: @Type()): []TArm {
             TExpr as t => if literal_adopts(t, anchor) { TArm { pattern = a.pattern; has_when = a.has_when; guard = a.guard; body = retype_block_trailing(a.body, anchor) } } else { a }
             null => a
         }
-        out = [..out, next]
+        out[i] = next
         i++
     }
     out
@@ -3519,12 +3519,12 @@ fn adopt_match_arm_literals(arms: []TArm, anchor: @Type()): []TArm {
 fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable): TExpr | error {
     var s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
     if m.arms.len == 0 { return error { message = "a `match` needs at least one arm" } }
-    var typed: []TArm = []
+    var typed: [m.arms.len]TArm = []
     var i = 0
     loop {
         if i >= m.arms.len { break }
         var ai = match type_match_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
-        typed = [..typed, ai]
+        typed[i] = ai
         i++
     }
     var arms = match match_join_anchor(typed) { (@Type()) as anchor => adopt_match_arm_literals(typed, anchor); null => typed }
@@ -3548,12 +3548,12 @@ fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable): TExpr | error {
 
 fn type_match_stmt(m: parser::MatchExpr, env: Env, table: TypeTable): TExpr | error {
     var s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
-    var arms: []TArm = []
+    var arms: [m.arms.len]TArm = []
     var i = 0
     loop {
         if i >= m.arms.len { break }
         var ai = match type_match_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
-        arms = [..arms, ai]
+        arms[i] = ai
         i++
     }
     var rarms = match resolve_foreach_placeholders(m.arms, s.type) { []parser::Arm as a => a; error as e => return e }
@@ -3616,7 +3616,7 @@ fn is_iface_slice(t: @Type(), table: TypeTable): bool {
 
 fn type_array_lit_expected(a: parser::ArrayLit, expected: @Type(), env: Env, table: TypeTable): TExpr | error {
     var elem = match expected { Slice as s => s.element; _ => return error { message = "internal: type_array_lit_expected needs a slice expected type" } }
-    var elems: []TArrayElem = []
+    var elems: [a.elements.len]TArrayElem = []
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
@@ -3637,7 +3637,7 @@ fn type_array_lit_expected(a: parser::ArrayLit, expected: @Type(), env: Env, tab
                 return teko::error::err_typed(error { message = "array element type mismatch" }, type_render(elem), type_render(e.type))
             }
         }
-        elems = [..elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = e }]
+        elems[i] = TArrayElem { is_spread = a.elements[i].is_spread; expr = e }
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = expected; line = 0; col = 0 }

@@ -353,66 +353,68 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
         }
         var p = inner
         var depth: u64 = 0
-        var bytes: []byte = []
+        var bytes: [source.len - inner]byte = []
+        var n: u64 = 0
         loop {
             if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
             var c = source[p]
             if depth == 0 && c == b'{' && at(source, p + 1) == b'{' {
-                bytes = [..bytes, b'{']; bytes = [..bytes, b'{']; p = p + 2; continue
+                bytes[n] = b'{'; n++; bytes[n] = b'{'; n++; p = p + 2; continue
             }
             if depth == 0 && c == b'}' && at(source, p + 1) == b'}' {
-                bytes = [..bytes, b'}']; bytes = [..bytes, b'}']; p = p + 2; continue
+                bytes[n] = b'}'; n++; bytes[n] = b'}'; n++; p = p + 2; continue
             }
-            if c == b'{' { depth = depth + 1; bytes = [..bytes, c]; p++; continue }
-            if c == b'}' { if depth > 0 { depth = depth - 1 }; bytes = [..bytes, c]; p++; continue }
+            if c == b'{' { depth = depth + 1; bytes[n] = c; n++; p++; continue }
+            if c == b'}' { if depth > 0 { depth = depth - 1 }; bytes[n] = c; n++; p++; continue }
             if c == b'"' && depth == 0 {
                 if !multiline {
                     if at(source, p + 1) == b'"' {
-                        bytes = [..bytes, b'"']
+                        bytes[n] = b'"'; n++
                         p = p + 2
                         continue
                     }
-                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 1 }
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(teko::collections::arr_slice(bytes, 0, n)); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 1 }
                 }
                 if str_close_at(source, p, true) {
-                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 3 }
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(teko::collections::arr_slice(bytes, 0, n)); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + 3 }
                 }
             }
-            bytes = [..bytes, c]
+            bytes[n] = c; n++
             p++
         }
     }
     var p = inner
-    var bytes: []byte = []
+    var bytes: [source.len - inner]byte = []
+    var n: u64 = 0
     loop {
         if p >= source.len { return scan_err_at(source, pos, "unterminated string literal") }
         var c = source[p]
         if has_verbatim {
             if !multiline && c == b'"' && at(source, p + 1) == b'"' {
-                bytes = [..bytes, b'"']
+                bytes[n] = b'"'; n++
                 p = p + 2
                 continue
             }
             if str_close_at(source, p, multiline) {
-                return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + delim }
+                return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(teko::collections::arr_slice(bytes, 0, n)); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + delim }
             }
-            bytes = [..bytes, c]
+            bytes[n] = c; n++
             p++
             continue
         }
         if str_close_at(source, p, multiline) {
-            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + delim }
+            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(teko::collections::arr_slice(bytes, 0, n)); line = 0; col = 0; byte_off = 0 to u64; file = "" }; next = p + delim }
         }
         if c == b'\\' {
             var e = match escape_byte(source, p) {
                 EscByte as eb => eb
                 error as err => return err
             }
-            bytes = [..bytes, e.value]
+            bytes[n] = e.value; n++
             p = e.next
             continue
         }
-        bytes = [..bytes, c]
+        bytes[n] = c; n++
         p++
     }
 }
