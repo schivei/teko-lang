@@ -5526,6 +5526,54 @@ pub fn type_program_with_deps(raw_program: parser::Program, dep_prog: TProgram):
     inline_consts(mono)
 }
 
+/**
+ * The typed contribution of one source item to the program-level item/mainbody
+ * lists (0..N `@TItem()`s, 0..N `@TStatement()`s) — kept per-item so
+ * `type_program_with_deps_pre_mono` can pre-size its output arrays instead of
+ * growing them in a loop.
+ */
+type PreMonoItemOut = struct {
+    /** The `@TItem()`s this source item types to (a function/type/const, its
+     * struct methods/member consts, or the statements of a top-level `@Statement()`). */
+    contrib: []@TItem()
+    /** The same statements as `contrib`, when this item is a top-level `@Statement()`;
+     * empty otherwise — feeds the flattened `mainbody` used by `check_labels`. */
+    body_stmts: []@TStatement()
+}
+
+/** The struct methods and member consts a `TypeDecl` types to, plus any diagnostics. */
+type TypeDeclExtra = struct {
+    method_items: []@TItem()
+    const_items: []@TItem()
+    diags: []str
+}
+
+fn pre_mono_type_decl_extra(td: parser::TypeDecl, ns: str, file: str, line: u32, col: u32, ienv: Env, types: TypeTable): TypeDeclExtra {
+    var method_items: []@TItem() = []
+    var const_items: []@TItem() = []
+    var diags: []str = []
+    match type_struct_methods(td, ns, file, ienv, types) {
+        []@TItem() as mitems => { method_items = mitems }
+        error as e => { diags = [..diags, located_diag(file, line, col, e)] }
+    }
+    match type_type_member_consts(td, ns, file, ienv, types) {
+        []@TItem() as citems => { const_items = citems }
+        error as e => { diags = [..diags, located_diag(file, line, col, e)] }
+    }
+    TypeDeclExtra { method_items = method_items; const_items = const_items; diags = diags }
+}
+
+fn pre_mono_type_decl_items(ti: @TItem(), extra: TypeDeclExtra): []@TItem() {
+    var combined: [1 + extra.method_items.len + extra.const_items.len]@TItem() = []
+    combined[0] = ti
+    var ci: u64 = 1
+    var mi2: u64 = 0
+    loop { if mi2 >= extra.method_items.len { break }; combined[ci] = extra.method_items[mi2]; ci++; mi2++ }
+    var ci2: u64 = 0
+    loop { if ci2 >= extra.const_items.len { break }; combined[ci] = extra.const_items[ci2]; ci++; ci2++ }
+    combined
+}
+
 pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: TProgram, on_item: ProgressFn, explicit: bool): PreMono | error {
     var folded = fold_traits_collected(raw_program)
     if folded.diags.len > 0 { return PreMono { prog = TProgram { items = [] }; table = tt_empty(); diags = folded.diags } }
@@ -5540,8 +5588,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     var types = pre.types
     var cenv = pre.env
     program = drop_comptime_items(program)
-    var items: []@TItem() = []
-    var mainbody: []@TStatement() = []
+    var per_item: [program.items.len]PreMonoItemOut = []
     var diags: []str = pre.diags
     var cur = cenv
     var i = 0
@@ -5558,16 +5605,16 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
             parser::ConstDecl as cd => { line = cd.line; col = cd.col }
             _ => { }
         }
+        var contrib: []@TItem() = []
+        var body_stmts: []@TStatement() = []
         match it.content {
             (@Statement()) as s => match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
                 TStmtSeq as seq => {
-                    var si: u64 = 0
-                    loop {
-                        if si >= seq.stmts.len { break }
-                        items = [..items, seq.stmts[si]]
-                        mainbody = [..mainbody, seq.stmts[si]]
-                        si = si + 1
-                    }
+                    var conv: [seq.stmts.len]@TItem() = []
+                    var sci: u64 = 0
+                    loop { if sci >= seq.stmts.len { break }; conv[sci] = seq.stmts[sci]; sci++ }
+                    contrib = conv
+                    body_stmts = seq.stmts
                     cur = seq.env
                 }
                 error as e => { diags = [..diags, located_diag(it.file, line, col, e)] }
@@ -5575,47 +5622,62 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
             _ => {
                 match type_item(it, ienv, types) {
                     (@TItem()) as ti => {
-                        items = [..items, ti]
                         match it.content {
                             parser::TypeDecl as td => {
-                                match type_struct_methods(td, it.namespace, it.file, ienv, types) {
-                                    []@TItem() as mitems => {
-                                        var mi2 = 0
-                                        loop { if mi2 >= mitems.len { break }; items = [..items, mitems[mi2]]; mi2++ }
-                                    }
-                                    error as e => { diags = [..diags, located_diag(it.file, line, col, e)] }
-                                }
-                                match type_type_member_consts(td, it.namespace, it.file, ienv, types) {
-                                    []@TItem() as citems => {
-                                        var ci2 = 0
-                                        loop { if ci2 >= citems.len { break }; items = [..items, citems[ci2]]; ci2++ }
-                                    }
-                                    error as e => { diags = [..diags, located_diag(it.file, line, col, e)] }
-                                }
+                                var extra = pre_mono_type_decl_extra(td, it.namespace, it.file, line, col, ienv, types)
+                                diags = [..diags, ..extra.diags]
+                                contrib = pre_mono_type_decl_items(ti, extra)
                             }
-                            _ => { }
+                            _ => { contrib = [ti] }
                         }
                     }
                     error as e => { diags = [..diags, located_diag(it.file, line, col, e)] }
                 }
             }
         }
+        per_item[i] = PreMonoItemOut { contrib = contrib; body_stmts = body_stmts }
         i++
         on_item(i to u64, program.items.len)
     }
+    var items_total: u64 = 0
+    var mainbody_total: u64 = 0
+    var si2: u64 = 0
+    loop {
+        if si2 >= per_item.len { break }
+        items_total = items_total + per_item[si2].contrib.len
+        mainbody_total = mainbody_total + per_item[si2].body_stmts.len
+        si2++
+    }
+    var items: [items_total]@TItem() = []
+    var mainbody: [mainbody_total]@TStatement() = []
+    var ik: u64 = 0
+    var bk: u64 = 0
+    var si3: u64 = 0
+    loop {
+        if si3 >= per_item.len { break }
+        var po = per_item[si3]
+        var cj: u64 = 0
+        loop { if cj >= po.contrib.len { break }; items[ik] = po.contrib[cj]; ik++; cj++ }
+        var bj: u64 = 0
+        loop { if bj >= po.body_stmts.len { break }; mainbody[bk] = po.body_stmts[bj]; bk++; bj++ }
+        si3++
+    }
     var lc = check_labels(mainbody, [], false, [])
     if lc.failed { diags = [..diags, lc.message] }
-    var all_items: []@TItem() = []
+    var all_items: [dep_prog.items.len + items.len]@TItem() = []
+    var ak: u64 = 0
     var di: u64 = 0
     loop {
         if di >= dep_prog.items.len { break }
-        all_items = [..all_items, dep_prog.items[di]]
+        all_items[ak] = dep_prog.items[di]
+        ak++
         di++
     }
     var pi: u64 = 0
     loop {
         if pi >= items.len { break }
-        all_items = [..all_items, items[pi]]
+        all_items[ak] = items[pi]
+        ak++
         pi++
     }
     var tp = TProgram { items = all_items }
