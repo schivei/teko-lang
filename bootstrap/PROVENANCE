@@ -1,5 +1,40 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — MEMORY-CAMPAIGN CHECKPOINT (expurgo de
+# arrays dinamicos, perf/expurgo-total-mecanico). The self-compile accumulators that grew via
+# `[..l,x]`-em-loop (copy-grow O(n^2), vazando cada copia na arena append-only) foram convertidos:
+#   * pre-alocacao + indice para os MAP/FILTER de tamanho conhecido (checker: collect_types,
+#     table_with_project_types, collect_signatures em duas passadas eliminando o Env define_fn
+#     copy-grow, drop_comptime_items, type_array_lit, retype_*, normalize_table_instances;
+#     consteval: fold_program/propagate_locals/fold_block/lp_block/lp_exprs/fold_exprs/collect_const_keys;
+#     monomorph: kept/nparams; parser: parse_module; codegen: cg_zeros/cg_blanks -> of_len,
+#     cg_index_of, cg_lift_lambdas);
+#   * backing FIXO pre-alocado com escrita por indice (shared-backing, mesmo mecanismo ja provado do
+#     Cb de emissao) para o set de reachability (NameSet), cuja cota e segura (nomes coletados sao
+#     sempre simbolos declarados => <= prog.items.len + builtins);
+#   * correcao de bug latente do expurgo: scope.tks syscallN_signature perdera o parametro do numero
+#     da syscall na conversao para `[arity]` (era arity+1) — restaurado.
+# O self-compile passou de OOM ainda no checker sob 4 GiB para FIXPOINT COMPLETO. Pico ainda acima
+# de 4 GiB: os SETs de tamanho a priori desconhecido do codegen (CgTypeSet/cg_emit_types_ordered,
+# lambda-lift acc.fns/lams em cg_lift_expr) e os parsers recursivos (walk_stmts/parse_type/walk_types/
+# parse_block) permanecem em copy-grow e sao o piso remanescente (~classe A/B, alvo do backing
+# mremap/chunk-chain da onda seguinte). Este reseed e o CHECKPOINT VERDE no ESCAPE de 10 GB (lei do
+# dono para o agente da campanha de memoria combinada), critério gen2 < 6 GB SATISFEITO.
+#
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3), backend C, sob `ulimit -v 10485760` (10 GB,
+# ESCAPE da campanha; NAO sob 4 GiB — o piso classe A/B remanescente ainda estoura 4 GiB).
+#   - gen0 linkado do bootstrap/teko.c ANTERIOR (sha256
+#     ca80407d7dbbdb1d75d99fbe5cd9dacef756dbf89878e485f517a787fb262141, 23 604 884 bytes, o DEGRAU
+#     pre-expurgo) constroi gen1 contra a source pos-expurgo; gen1 constroi gen2, gen2 constroi gen3;
+#     gen1.c == gen2.c == gen3.c byte-identico (24 976 589 bytes, os bytes deste arquivo). Picos
+#     C-route: gen1 5751.6 MB, gen2 5746.6 MB, gen3 5747.2 MB (TEKO_BACKEND=c, TEKO_CC=clang).
+#   - RESEED: bootstrap/teko.c substituido pelo gen2.c colhido acima.
+#   - O DEGRAU (bootstrap/DEGRAU) permanece declarado — o release publicado ainda nao reconhece esta
+#     arvore; e o seed forcado, agora = este compilador. A onda mremap/chunk-chain reseedara sob 4 GiB.
+#
+# ----------------------------------------------------------------------------------------------------
+# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
+#
 # RESEED (hand-harvest, isolated worktree, forward-only): the native lowering of the grouped-bind
 # match pattern `(A | B) as v` (src/lir/lower.tks — lower_pattern_test/lower_pattern_binds gain a
 # GroupBindPattern arm, replacing the honest-stop), reflecting the C codegen reference
