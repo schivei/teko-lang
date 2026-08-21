@@ -30,18 +30,22 @@ fn iservice_decl(): parser::TypeDecl {
 }
 
 fn collect_types(items: []parser::Item): TypeTable {
-    var table = tt_empty()
-    table = tt_push(table, TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() })
+    var regs: [items.len + 1]TypeReg = []
+    regs[0] = TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() }
+    var count: u64 = 1
     var i = 0
     loop {
         if i >= items.len { break }
         match items[i].content {
-            parser::TypeDecl as td => { table = tt_push(table, TypeReg { name = td.name; namespace = items[i].namespace; file = items[i].file; vis = td.vis; decl = td }) }
+            parser::TypeDecl as td => {
+                regs[count] = TypeReg { name = td.name; namespace = items[i].namespace; file = items[i].file; vis = td.vis; decl = td }
+                count++
+            }
             _ => { }
         }
         i++
     }
-    tt_freeze(table)
+    tt_freeze(TypeTable { regs = teko::collections::arr_slice(regs, 0, count); by_last = nidx_empty(); comptimes = [] })
 }
 
 fn const_type_located(e: error, cd: parser::ConstDecl): error {
@@ -150,67 +154,91 @@ type SigOutcome = struct {
     diags: []str
 }
 
-fn sig_unchanged(env: Env): SigOutcome {
-    SigOutcome { env = env; diags = [] }
+type ItemSig = struct {
+    binds: []ValBinding
+    diags: []str
 }
 
 fn collect_signatures(items: []parser::Item, table: TypeTable, env0: Env): SigOutcome {
-    var env = env0
-    var diags: []str = []
+    var per_item: [items.len]ItemSig = []
+    var total: u64 = 0
     var i = 0
     loop {
         if i >= items.len { break }
-        var step = collect_item_signature(items[i], table, env)
-        env = step.env
-        diags = concat_diags(diags, step.diags)
+        var s = item_signature(items[i], table)
+        per_item[i] = s
+        total = total + s.binds.len
         i++
     }
-    SigOutcome { env = env; diags = diags }
+    var binds: [env0.bindings.len + total]ValBinding = []
+    var count: u64 = 0
+    loop {
+        if count >= env0.bindings.len { break }
+        binds[count] = env0.bindings[count]
+        count++
+    }
+    var diags: []str = []
+    var j: u64 = 0
+    loop {
+        if j >= items.len { break }
+        var s = per_item[j]
+        var k: u64 = 0
+        loop {
+            if k >= s.binds.len { break }
+            binds[count] = s.binds[k]
+            count++
+            k++
+        }
+        diags = concat_diags(diags, s.diags)
+        j++
+    }
+    SigOutcome { env = env_with_bindings(env0, binds); diags = diags }
 }
 
-fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env): SigOutcome {
+fn item_signature(item: parser::Item, table: TypeTable): ItemSig {
     match item.content {
-        parser::Function as f => collect_fn_signature(item, f, table, env)
-        parser::ConstDecl as cd => collect_const_signature(item, cd, table, env)
-        parser::TypeDecl as td => collect_type_member_signatures(item, td, table, env)
-        _ => sig_unchanged(env)
+        parser::Function as f => fn_item_sig(item, f, table)
+        parser::ConstDecl as cd => const_item_sig(item, cd, table)
+        parser::TypeDecl as td => type_member_sig(item, td, table)
+        _ => ItemSig { binds = []; diags = [] }
     }
 }
 
-fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTable, env: Env): SigOutcome {
+fn fn_item_sig(item: parser::Item, f: parser::Function, table: TypeTable): ItemSig {
     match func_type(f, table, item.namespace) {
-        (@Type()) as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace, f.is_global); diags = [] }
-        error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, f.line, f.col, e)) }
+        (@Type()) as t => ItemSig { binds = [fn_binding(f.name, t, item.namespace, f.is_global)]; diags = [] }
+        error as e => ItemSig { binds = []; diags = one_diag(located_diag(item.file, f.line, f.col, e)) }
     }
 }
 
-fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: TypeTable, env: Env): SigOutcome {
+fn const_item_sig(item: parser::Item, cd: parser::ConstDecl, table: TypeTable): ItemSig {
     match collect_const_sig(cd, table, item.namespace) {
-        (@Type()) as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis, cd.is_global); diags = [] }
-        error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, cd.line, cd.col, e)) }
+        (@Type()) as t => ItemSig { binds = [const_binding(cd.name, t, item.namespace, cd.vis, cd.is_global)]; diags = [] }
+        error as e => ItemSig { binds = []; diags = one_diag(located_diag(item.file, cd.line, cd.col, e)) }
     }
 }
 
-fn collect_type_member_signatures(item: parser::Item, td: parser::TypeDecl, table: TypeTable, env: Env): SigOutcome {
+fn type_member_sig(item: parser::Item, td: parser::TypeDecl, table: TypeTable): ItemSig {
     var method_ns = if item.namespace == "" { td.name } else { item.namespace ~ "::" ~ td.name }
     match td.body {
-        parser::StructBody as sb => collect_method_signatures(item, td, sb.methods, method_ns, table, env)
+        parser::StructBody as sb => method_bindings(item, td, sb.methods, method_ns, table)
         parser::ClassBody as cb => {
             var eff = match effective_class_methods(cb, table) {
                 []parser::Function as m => m
-                error as e => return SigOutcome { env = env; diags = one_diag(located_diag(item.file, td.line, td.col, e)) }
+                error as e => return ItemSig { binds = []; diags = one_diag(located_diag(item.file, td.line, td.col, e)) }
             }
-            collect_method_signatures(item, td, eff, method_ns, table, env)
+            method_bindings(item, td, eff, method_ns, table)
         }
-        parser::NewtypeBody as nb => collect_method_signatures(item, td, nb.methods, method_ns, table, env)
-        parser::EnumBody as eb => collect_method_signatures(item, td, eb.methods, method_ns, table, env)
-        parser::FlagsBody as fb => collect_method_signatures(item, td, fb.methods, method_ns, table, env)
-        _ => sig_unchanged(env)
+        parser::NewtypeBody as nb => method_bindings(item, td, nb.methods, method_ns, table)
+        parser::EnumBody as eb => method_bindings(item, td, eb.methods, method_ns, table)
+        parser::FlagsBody as fb => method_bindings(item, td, fb.methods, method_ns, table)
+        _ => ItemSig { binds = []; diags = [] }
     }
 }
 
-fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: []parser::Function, method_ns: str, table: TypeTable, env: Env): SigOutcome {
-    var out = env
+fn method_bindings(item: parser::Item, td: parser::TypeDecl, methods: []parser::Function, method_ns: str, table: TypeTable): ItemSig {
+    var binds: [methods.len]ValBinding = []
+    var count: u64 = 0
     var diags: []str = []
     var i = 0
     loop {
@@ -221,12 +249,12 @@ fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: 
             continue
         }
         match method_func_type(methods[i], td.name, table, item.namespace) {
-            (@Type()) as t => { out = define_fn(out, methods[i].name, t, method_ns, false) }
+            (@Type()) as t => { binds[count] = fn_binding(methods[i].name, t, method_ns, false); count++ }
             error as e => { diags = [..diags, located_diag(item.file, methods[i].line, methods[i].col, e)] }
         }
         i++
     }
-    SigOutcome { env = out; diags = diags }
+    ItemSig { binds = teko::collections::arr_slice(binds, 0, count); diags = diags }
 }
 
 pub fn register_instance_methods(env: Env, table: TypeTable): SigOutcome {
@@ -1641,19 +1669,29 @@ fn collect_with_seed(program: parser::Program, seed: Collected): CollectOutcome 
 }
 
 fn table_with_project_types(program: parser::Program, seeded: TypeTable): TypeTable {
-    var table = tt_push(seeded, TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() })
+    var nbase: u64 = seeded.regs.len
+    var regs: [nbase + 1 + program.items.len]TypeReg = []
+    var s: u64 = 0
+    loop {
+        if s >= nbase { break }
+        regs[s] = seeded.regs[s]
+        s++
+    }
+    regs[nbase] = TypeReg { name = "IService"; namespace = ""; file = ""; vis = parser::Visibility::Exp; decl = iservice_decl() }
+    var count: u64 = nbase + 1
     var i = 0
     loop {
         if i >= program.items.len { break }
         match program.items[i].content {
             parser::TypeDecl as td => {
-                table = tt_push(table, TypeReg { name = td.name; namespace = program.items[i].namespace; file = program.items[i].file; vis = td.vis; decl = td })
+                regs[count] = TypeReg { name = td.name; namespace = program.items[i].namespace; file = program.items[i].file; vis = td.vis; decl = td }
+                count++
             }
             _ => { }
         }
         i++
     }
-    table
+    TypeTable { regs = teko::collections::arr_slice(regs, 0, count); by_last = nidx_empty(); comptimes = seeded.comptimes }
 }
 
 fn collect_over(program: parser::Program, table: TypeTable, env0: Env): CollectOutcome {

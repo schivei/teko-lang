@@ -926,13 +926,6 @@ fn stamp_all_instance_methods(items: []@TItem(), table: TypeTable): WFnList | er
     WFnList { fns = fns; insts = mono_insts }
 }
 
-fn append_instance_methods(kept: []@TItem(), fns: []TFunction): []@TItem() {
-    var out = kept
-    var i = 0
-    loop { if i >= fns.len { break }; out = [..out, fns[i]]; i++ }
-    out
-}
-
 fn check_instance_constraints(table: TypeTable): error | null {
     var insts = table_generic_instances(table)
     var i = 0
@@ -972,7 +965,11 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
 
     var empty_s = Subst { params = []; names = []; types = [] }
 
-    var kept: []@TItem() = []
+    var minsts = match stamp_all_instance_methods(prog.items, table) { WFnList as wl => wl; error as e => return e }
+    var insts2 = table_generic_instances(table)
+    var ceiling = 5000
+    var kept: [prog.items.len + minsts.fns.len + (ceiling to u64) + insts2.len]@TItem() = []
+    var kn: u64 = 0
     var queue: []MonoInst = []
     var i = 0
     loop {
@@ -983,28 +980,34 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
                 if !is_droppable {
                     var wb = match mono_block(f.body, empty_s, prog.items, table) { WBlock as w => w; error as e => return e }
                     var nf = TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
-                    kept = [..kept, nf]
+                    kept[kn] = nf
+                    kn++
                     queue = mono_inst_concat(queue, wb.insts)
                 }
             }
             (@TStatement()) as ts => {
                 var w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
-                kept = [..kept, w.stmt]
+                kept[kn] = w.stmt
+                kn++
                 queue = mono_inst_concat(queue, w.insts)
             }
             parser::TypeDecl as d => {
-                if d.type_params.len == 0 { kept = [..kept, prog.items[i]] }
+                if d.type_params.len == 0 { kept[kn] = prog.items[i]; kn++ }
             }
-            _ => kept = [..kept, prog.items[i]]
+            _ => { kept[kn] = prog.items[i]; kn++ }
         }
         i++
     }
 
-    var minsts = match stamp_all_instance_methods(prog.items, table) { WFnList as wl => wl; error as e => return e }
-    kept = append_instance_methods(kept, minsts.fns)
+    var mfi: u64 = 0
+    loop {
+        if mfi >= minsts.fns.len { break }
+        kept[kn] = minsts.fns[mfi]
+        kn++
+        mfi++
+    }
     queue = mono_inst_concat(queue, minsts.insts)
 
-    var ceiling = 5000
     var stamped: []MonoInst = []
     var qi = 0
     loop {
@@ -1021,11 +1024,11 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
             null => return error { message = teko::str::concat("internal: monomorph could not find generic fn ", inst.fn_name) }
         }
         match check_constraints(gf.type_params, gf.type_constraints, inst.s, table) { error as e => return e; null => { } }
-        var nparams: []parser::Param = []
+        var nparams: [gf.params.len]parser::Param = []
         var pi = 0
         loop {
             if pi >= gf.params.len { break }
-            nparams = [..nparams, parser::Param { name = gf.params[pi].name; has_type = true; type_ann = subst_typeexpr(gf.params[pi].type_ann, inst.s); is_params = gf.params[pi].is_params; has_default = gf.params[pi].has_default; default_expr = gf.params[pi].default_expr }]
+            nparams[pi] = parser::Param { name = gf.params[pi].name; has_type = true; type_ann = subst_typeexpr(gf.params[pi].type_ann, inst.s); is_params = gf.params[pi].is_params; has_default = gf.params[pi].has_default; default_expr = gf.params[pi].default_expr }
             pi++
         }
         var wb = match mono_block(gf.body, inst.s, prog.items, table) { WBlock as w => w; error as e => return e }
@@ -1034,20 +1037,28 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         var no_tcs: []@ConstraintExpr() = []
         var stamp_ns = if inst.owner_ns.len > 0 { inst.owner_ns } else { gf.namespace }
         var sf = TFunction { overload_suffix = ""; name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = stamp_ns; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size; ret_extra = gf.ret_extra; guard = gf.guard }
-        kept = [..kept, sf]
+        kept[kn] = sf
+        kn++
     }
 
-    var insts2 = table_generic_instances(table)
     var ii = 0
     loop {
         if ii >= insts2.len { break }
         var d = insts2[ii]
         ii++
-        if mono_kept_has_type(kept, d.name) { continue }
-        kept = [..kept, d]
+        if mono_kept_has_type(kept, kn, d.name) { continue }
+        kept[kn] = d
+        kn++
     }
 
-    TProgram { items = kept }
+    var out_items: [kn]@TItem() = []
+    var oi: u64 = 0
+    loop {
+        if oi >= kn { break }
+        out_items[oi] = kept[oi]
+        oi++
+    }
+    TProgram { items = out_items }
 }
 
 fn is_generic_template_method(f: TFunction, table: TypeTable): bool {
@@ -1055,10 +1066,10 @@ fn is_generic_template_method(f: TFunction, table: TypeTable): bool {
     match find_generic_template(table, name_last_segment(f.namespace)) { TemplateReg => true; null => false }
 }
 
-fn mono_kept_has_type(kept: []@TItem(), name: str): bool {
-    var i = 0
+fn mono_kept_has_type(kept: []@TItem(), n: u64, name: str): bool {
+    var i: u64 = 0
     loop {
-        if i >= kept.len { break }
+        if i >= n { break }
         match kept[i] { parser::TypeDecl as d => { if teko::runtime::str_eq(d.name, name) { return true } }; _ => { } }
         i++
     }

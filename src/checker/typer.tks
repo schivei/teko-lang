@@ -3026,7 +3026,7 @@ fn adopt_array_elem_literals(elems: []TArrayElem, anchor: @Type()): []TArrayElem
 }
 
 fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable): TExpr | error {
-    var typed: []TArrayElem = []
+    var typed: [a.elements.len]TArrayElem = []
     var i = 0
     loop {
         if i >= a.elements.len { break }
@@ -3041,7 +3041,7 @@ fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable): TExpr | erro
         } else {
             if type_is_void(el.type) { return error { message = "a `void` expression cannot be an array element" } }
         }
-        typed = [..typed, TArrayElem { is_spread = ae.is_spread; expr = el }]
+        typed[i] = TArrayElem { is_spread = ae.is_spread; expr = el }
         i++
     }
     var elems = match array_join_anchor(typed) { (@Type()) as anchor => adopt_array_elem_literals(typed, anchor); null => typed }
@@ -3055,17 +3055,17 @@ fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable): TExpr | erro
     }
     if type_contains_ref(et) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
     var final_elems = if a.elements.len != 0 && !type_has_sentinel(et) {
-        var out: []TArrayElem = []
+        var out: [elems.len]TArrayElem = []
         var j = 0
         loop {
             if j >= elems.len { break }
             var ael = elems[j]
             var retyped = !ael.is_spread && type_has_sentinel(ael.expr.type) && type_eq(ael.expr.type, et)
-            out = [..out, if retyped {
+            out[j] = if retyped {
                     TArrayElem { is_spread = ael.is_spread; expr = TExpr { kind = ael.expr.kind; type = et; line = ael.expr.line; col = ael.expr.col } }
                 } else {
                     ael
-            }]
+            }
             j++
         }
         out
@@ -4547,15 +4547,15 @@ fn retype_literal(e: TExpr, to: @Type()): TExpr {
         }
         TArrayLit as a => match to {
             Slice as s => {
-                var elems: []TArrayElem = []
+                var elems: [a.elements.len]TArrayElem = []
                 var i = 0
                 loop {
                     if i >= a.elements.len { break }
                     var el = a.elements[i]
                     if el.is_spread {
-                        elems = [..elems, el]
+                        elems[i] = el
                     } else {
-                        elems = [..elems, TArrayElem { is_spread = false; expr = retype_literal(el.expr, s.element) }]
+                        elems[i] = TArrayElem { is_spread = false; expr = retype_literal(el.expr, s.element) }
                     }
                     i++
                 }
@@ -4569,12 +4569,12 @@ fn retype_literal(e: TExpr, to: @Type()): TExpr {
             TExpr { kind = TIfExpr { cond = f.cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = to; line = e.line; col = e.col }
         }
         TMatchExpr as m => {
-            var arms: []TArm = []
+            var arms: [m.arms.len]TArm = []
             var i = 0
             loop {
                 if i >= m.arms.len { break }
                 var ar = m.arms[i]
-                arms = [..arms, TArm { pattern = ar.pattern; has_when = ar.has_when; guard = ar.guard; body = retype_block_trailing(ar.body, to) }]
+                arms[i] = TArm { pattern = ar.pattern; has_when = ar.has_when; guard = ar.guard; body = retype_block_trailing(ar.body, to) }
                 i++
             }
             TExpr { kind = TMatchExpr { subject = m.subject; arms = arms }; type = to; line = e.line; col = e.col }
@@ -4589,15 +4589,15 @@ fn retype_block_trailing(stmts: []@TStatement(), to: @Type()): []@TStatement() {
     match stmts[stmts.len - 1] {
         TExprStmt as es => {
             var last_index = stmts.len - 1
-            var out: []@TStatement() = []
+            var out: [stmts.len]@TStatement() = []
             var i = 0
             loop {
                 if i >= last_index { break }
-                out = [..out, stmts[i]]
+                out[i] = stmts[i]
                 i++
             }
-            var last: @TStatement() = TExprStmt { expr = retype_literal(es.expr, to) }
-            [..out, last]
+            out[last_index] = TExprStmt { expr = retype_literal(es.expr, to) }
+            out
         }
         _ => stmts
     }
@@ -4613,11 +4613,11 @@ fn retype_union_returns(stmts: []@TStatement(), ret: @Type(), table: TypeTable):
 fn retype_return_positions(stmts: []@TStatement(), ret: @Type(), table: TypeTable, retype_trailing: bool): []@TStatement() {
     if stmts.len == 0 { return stmts }
     var last = stmts.len - 1
-    var out: []@TStatement() = []
+    var out: [stmts.len]@TStatement() = []
     var i = 0
     loop {
         if i >= stmts.len { break }
-        out = [..out, retype_return_stmt(stmts[i], ret, table, retype_trailing && i == last)]
+        out[i] = retype_return_stmt(stmts[i], ret, table, retype_trailing && i == last)
         i++
     }
     out
@@ -5722,14 +5722,18 @@ fn item_is_comptime_decl(it: parser::Item): bool {
 }
 
 fn drop_comptime_items(program: parser::Program): parser::Program {
-    var out: []parser::Item = []
+    var out: [program.items.len]parser::Item = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= program.items.len { break }
-        if !item_is_comptime_decl(program.items[i]) { out = [..out, program.items[i]] }
+        if !item_is_comptime_decl(program.items[i]) {
+            out[count] = program.items[i]
+            count++
+        }
         i++
     }
-    parser::Program { items = out }
+    parser::Program { items = teko::collections::arr_slice(out, 0, count) }
 }
 
 pub fn type_program(raw_program: parser::Program): TProgram | error {

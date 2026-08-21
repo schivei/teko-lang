@@ -1478,14 +1478,21 @@ fn skip_trivia(tokens: []lexer::Token, pos: u64): u64 {
 pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
     var hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
     var p = skip_trivia(tokens, hdr.next)
-    var decls: []@Decl() = []
-    var decl_guards: []Pred = []
+    var decls: [tokens.len]@Decl() = []
+    var decl_guards: [tokens.len]Pred = []
+    var count: u64 = 0
     loop {
         if !has_token(tokens, p) { break }
         if is_cc_if_start(tokens, p) {
             var region = match parse_cc_region(tokens, p, pred_true()) { ParsedRegion as x => x; error as e => return e }
-            decls = append_decls(decls, region.decls)
-            decl_guards = append_guards(decl_guards, region.guards)
+            var r: u64 = 0
+            loop {
+                if r >= region.decls.len { break }
+                decls[count] = region.decls[r]
+                decl_guards[count] = region.guards[r]
+                count++
+                r++
+            }
             p = region.next
             if !has_token(tokens, p) { break }
             if !is_sep(tokens, p) {
@@ -1495,8 +1502,9 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
             continue
         }
         var d = match parse_decl(tokens, p) { ParsedDecl as x => x; error as e => return e }
-        decls = [..decls, d.node]
-        decl_guards = [..decl_guards, d.guard]
+        decls[count] = d.node
+        decl_guards[count] = d.guard
+        count++
         p = d.next
         if !has_token(tokens, p) { break }
         if !is_sep(tokens, p) {
@@ -1504,5 +1512,14 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
         }
         p = skip_trivia(tokens, p)
     }
-    Parsed<Module> { node = Module { uses = hdr.items; decls = decls; decl_guards = decl_guards }; next = p }
+    var out_decls: [count]@Decl() = []
+    var out_guards: [count]Pred = []
+    var t: u64 = 0
+    loop {
+        if t >= count { break }
+        out_decls[t] = decls[t]
+        out_guards[t] = decl_guards[t]
+        t++
+    }
+    Parsed<Module> { node = Module { uses = hdr.items; decls = out_decls; decl_guards = out_guards }; next = p }
 }
