@@ -246,7 +246,7 @@ fn scan_tokens(source: str): []FTok | error {
         var c = source[pos]
         var glued = pos == last_end
         if c == b'\n' {
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Break; text = "\n"; glued = false })
+            toks = [..toks, FTok { kind = FTokKind::Break; text = "\n"; glued = false }]
             pos = pos + 1
             last_end = source.len + 1
             continue
@@ -259,7 +259,7 @@ fn scan_tokens(source: str): []FTok | error {
                 e++
             }
             var te = rtrim_end(source, pos, e)
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Comment; text = slice(source, pos, te); glued = glued })
+            toks = [..toks, FTok { kind = FTokKind::Comment; text = slice(source, pos, te); glued = glued }]
             pos = e
             last_end = source.len + 1
             continue
@@ -271,35 +271,35 @@ fn scan_tokens(source: str): []FTok | error {
                 if source[e] == b'*' && source[e + 1] == b'/' { e = e + 2; break }
                 e++
             }
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Comment; text = slice(source, pos, e); glued = glued })
+            toks = [..toks, FTok { kind = FTokKind::Comment; text = slice(source, pos, e); glued = glued }]
             last_end = e
             pos = e
             continue
         }
         if c == b'b' && f_at(source, pos + 1) == b'\'' {
             var s = match span_byte_lit(source, pos) { Span as sp => sp; error as err => return err }
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued })
+            toks = [..toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued }]
             last_end = s.end
             pos = s.end
             continue
         }
         if c == b'c' && f_at(source, pos + 1) == b'\'' {
             var s = match span_char_lit(source, pos) { Span as sp => sp; error as err => return err }
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued })
+            toks = [..toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued }]
             last_end = s.end
             pos = s.end
             continue
         }
         if (c == b'"' || c == b'$' || c == b'@') && f_string_start(source, pos) {
             var s = match span_string(source, pos) { Span as sp => sp; error as err => return err }
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued })
+            toks = [..toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued }]
             last_end = s.end
             pos = s.end
             continue
         }
         if f_is_digit(c) {
             var e = span_number(source, pos)
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Num; text = slice(source, pos, e); glued = glued })
+            toks = [..toks, FTok { kind = FTokKind::Num; text = slice(source, pos, e); glued = glued }]
             last_end = e
             pos = e
             continue
@@ -307,14 +307,14 @@ fn scan_tokens(source: str): []FTok | error {
         if f_is_alpha(c) || c == b'_' {
             var e = span_word(source, pos)
             if e == pos { e = pos + 1 }
-            toks = teko::list::push(toks, FTok { kind = FTokKind::Word; text = slice(source, pos, e); glued = glued })
+            toks = [..toks, FTok { kind = FTokKind::Word; text = slice(source, pos, e); glued = glued }]
             last_end = e
             pos = e
             continue
         }
         var n = punct_len(source, pos)
         if n == 0 { return f_err("unexpected character") }
-        toks = teko::list::push(toks, FTok { kind = FTokKind::Punct; text = slice(source, pos, pos + n); glued = glued })
+        toks = [..toks, FTok { kind = FTokKind::Punct; text = slice(source, pos, pos + n); glued = glued }]
         last_end = pos + n
         pos = pos + n
     }
@@ -397,25 +397,25 @@ fn gap(prev: FTok, cur: FTok, prev_unary: bool): u64 {
 }
 
 fn emit_str(out: []byte, s: str): []byte {
-    var o = out
+    var o: [s.len]byte = []
     var i: u64 = 0
     loop {
         if i >= s.len { break }
-        o = teko::list::push(o, s[i])
+        o[i] = s[i]
         i = i + 1
     }
-    o
+    [..out, ..o]
 }
 
 fn emit_indent(out: []byte, level: u64): []byte {
-    var o = out
+    var o: [level * 4]byte = []
     var i: u64 = 0
     loop {
         if i >= level * 4 { break }
-        o = teko::list::push(o, b' ')
+        o[i] = b' '
         i = i + 1
     }
-    o
+    [..out, ..o]
 }
 
 fn render(toks: []FTok): str {
@@ -442,7 +442,7 @@ fn render(toks: []FTok): str {
         var first_closes = first.kind == FTokKind::Punct && is_closer(first.text)
         if pending_blank {
             if !prev_ends_open && !first_closes {
-                out = teko::list::push(out, b'\n')
+                out = [..out, b'\n']
             }
             pending_blank = false
         }
@@ -470,7 +470,7 @@ fn render(toks: []FTok): str {
                 var gi: u64 = 0
                 loop {
                     if gi >= g { break }
-                    out = teko::list::push(out, b' ')
+                    out = [..out, b' ']
                     gi = gi + 1
                 }
             }
@@ -490,7 +490,7 @@ fn render(toks: []FTok): str {
             prev = t
             m = m + 1
         }
-        out = teko::list::push(out, b'\n')
+        out = [..out, b'\n']
         emitted_any = true
         prev_ends_open = prev.kind == FTokKind::Punct && is_opener(prev.text)
         i = j + 1
@@ -570,7 +570,7 @@ fn is_teko_file(name: str): bool {
 
 fn collect_files(path: str, acc: []str): []str | error {
     if is_teko_file(path) {
-        return teko::list::push(acc, path)
+        return [..acc, path]
     }
     var entries = match teko::fs::list_dir(path) {
         []str as e => e
@@ -584,7 +584,7 @@ fn collect_files(path: str, acc: []str): []str | error {
         if nm.len > 0 && nm[0] != b'.' {
             var child = teko::str::concat(path, "/", nm)
             if is_teko_file(nm) {
-                out = teko::list::push(out, child)
+                out = [..out, child]
             } else {
                 match teko::fs::list_dir(child) {
                     []str as _sub => {
@@ -637,7 +637,7 @@ pub fn run_cli(args: []str): i32 {
         i = i + 1
         var selected = mode_of_flag(arg)
         if selected == FmtMode::Unset {
-            paths = teko::list::push(paths, arg)
+            paths = [..paths, arg]
             continue
         }
         mode = selected

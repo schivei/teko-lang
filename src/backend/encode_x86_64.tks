@@ -33,7 +33,7 @@ type X86MemOp = struct {
 }
 
 fn push_byte_x86(buf: []byte, v: u32): []byte {
-    teko::list::push(buf, (v & X86_BYTE_MASK) to byte)
+    [..buf, (v & X86_BYTE_MASK) to byte]
 }
 
 fn push_imm32_x86(buf: []byte, x: i64): []byte {
@@ -495,11 +495,11 @@ fn collect_callee_saved_x86(abi: AbiDescriptor, f: MFuncX86): Saved {
 }
 
 fn shift_slot_offsets_x86(offsets: []u32, delta: u32): []u32 {
-    var out: []u32 = []
+    var out: [offsets.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= offsets.len { break }
-        out = teko::list::push(out, offsets[i] + delta)
+        out[i] = offsets[i] + delta
         i++
     }
     out
@@ -811,7 +811,7 @@ fn lookup_block_offset_x86(offsets: []BlockOffsetX86, id: u32): u32 | error {
 fn collect_inst_reloc_x86(acc: []RelocX86, reloc: EncRelocX86 | null, start: u32): []RelocX86 {
     match reloc {
         null => acc
-        EncRelocX86 as r => teko::list::push(acc, RelocX86 { offset = start + r.field_off; sym = r.sym; kind = r.kind; addend = reloc_addend_x86(r.kind); sect = RelocSect::Text })
+        EncRelocX86 as r => [..acc, RelocX86 { offset = start + r.field_off; sym = r.sym; kind = r.kind; addend = reloc_addend_x86(r.kind); sect = RelocSect::Text }]
     }
 }
 
@@ -819,7 +819,7 @@ fn append_enc_inst_x86(acc: FuncEmitX86, ei: EncInstX86): FuncEmitX86 {
     var start = acc.bytes.len to u32
     var bytes2 = append_bytes(acc.bytes, ei.bytes)
     var fixups2 = if ei.has_branch {
-        teko::list::push(acc.branch_fixups, BranchFixupX86 { field_off = start + ei.branch_field_off; target = ei.target })
+        [..acc.branch_fixups, BranchFixupX86 { field_off = start + ei.branch_field_off; target = ei.target }]
     } else {
         acc.branch_fixups
     }
@@ -874,7 +874,7 @@ fn patch_branches_x86(raw: []byte, fixups: []BranchFixupX86, offsets: []BlockOff
 
 fn record_block_offset_x86(acc: FuncEmitX86, id: u32): FuncEmitX86 {
     var off = acc.bytes.len to u32
-    var block_offsets = teko::list::push(acc.block_offsets, BlockOffsetX86 { id = id; byte = off })
+    var block_offsets = [..acc.block_offsets, BlockOffsetX86 { id = id; byte = off }]
     FuncEmitX86 { bytes = acc.bytes; block_offsets = block_offsets; branch_fixups = acc.branch_fixups; relocs = acc.relocs }
 }
 
@@ -912,7 +912,7 @@ fn rebase_relocs_x86(acc: []RelocX86, relocs: []RelocX86, base_off: u32): []Relo
     loop {
         if i >= relocs.len { break }
         var r = relocs[i]
-        out = teko::list::push(out, RelocX86 { offset = r.offset + base_off; sym = r.sym; kind = r.kind; addend = r.addend; sect = r.sect })
+        out = [..out, RelocX86 { offset = r.offset + base_off; sym = r.sym; kind = r.kind; addend = r.addend; sect = r.sect }]
         i++
     }
     out
@@ -927,7 +927,7 @@ pub fn fold_encoded_func_x86(acc: ModuleTextX86, ef: EncodedFuncX86): ModuleText
     var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.text_off; local = false }
     var text = append_bytes(acc.text, ef.bytes)
     var relocs = rebase_relocs_x86(acc.relocs, ef.relocs, acc.text_off)
-    var syms = teko::list::push(acc.syms, sym)
+    var syms = [..acc.syms, sym]
     var text_off = acc.text_off + (ef.bytes.len to u32)
     ModuleTextX86 { text = text; relocs = relocs; syms = syms; text_off = text_off }
 }
@@ -952,7 +952,7 @@ fn collect_undefined_x86(defined: []Symbol, relocs: []RelocX86): []Symbol {
         var name = relocs[i].sym
         var known = name_in_symbols(defined, name) || name_in_symbols(undef, name)
         if !known {
-            undef = teko::list::push(undef, Symbol { name = name; defined = false; sect = 0 to u8; offset = 0 to u32; local = false })
+            undef = [..undef, Symbol { name = name; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }]
         }
         i++
     }
@@ -964,7 +964,7 @@ fn rodata_relocs_x86(rs: []lir::LDataReloc): []RelocX86 {
     var i: u64 = 0
     loop {
         if i >= rs.len { break }
-        out = teko::list::push(out, RelocX86 { offset = rs[i].offset; sym = rs[i].target; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata })
+        out = [..out, RelocX86 { offset = rs[i].offset; sym = rs[i].target; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata }]
         i++
     }
     out
@@ -975,7 +975,7 @@ fn append_relocs_x86(a: []RelocX86, b: []RelocX86): []RelocX86 {
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        out = teko::list::push(out, b[i])
+        out = [..out, b[i]]
         i++
     }
     out

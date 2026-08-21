@@ -38,20 +38,11 @@ fn bsd_write_member(buf: []byte, layout: BsdNameLayout, content: []byte, mode: s
     var declared_size = layout.name_with_padding + content.len + outer
     var b = ar_header(buf, layout.name_field, declared_size, mode)
     b = append_bytes(b, layout.raw_name)
-    var i: u32 = 0
-    loop {
-        if i >= layout.inner_pad { break }
-        b = teko::list::push(b, 0 to byte)
-        i++
-    }
+    var pad: [layout.inner_pad]byte = []
+    b = [..b, ..pad]
     b = append_bytes(b, content)
-    i = 0
-    loop {
-        if i >= outer { break }
-        b = teko::list::push(b, 0 to byte)
-        i++
-    }
-    b
+    var outs: [outer]byte = []
+    [..b, ..outs]
 }
 
 type BsdLayoutResult = struct {
@@ -60,15 +51,15 @@ type BsdLayoutResult = struct {
 }
 
 fn bsd_layout_members(first_offset: u32, members: []ArMember): BsdLayoutResult {
-    var layouts: []BsdNameLayout = []
-    var offsets: []u32 = []
+    var layouts: [members.len]BsdNameLayout = []
+    var offsets: [members.len]u32 = []
     var off = first_offset
     var i: u64 = 0
     loop {
         if i >= members.len { break }
         var layout = bsd_name_layout(members[i].name, off)
-        layouts = teko::list::push(layouts, layout)
-        offsets = teko::list::push(offsets, off)
+        layouts[i] = layout
+        offsets[i] = off
         off = off + bsd_member_span(layout.name_with_padding, members[i].data.len to u32)
         i++
     }
@@ -82,22 +73,18 @@ type BsdSymStrTab = struct {
 
 fn build_bsd_symstrtab(symbols: []ArSymbol): BsdSymStrTab {
     var bytes: []byte = []
-    var strx: []u32 = []
+    var strx: [symbols.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= symbols.len { break }
-        strx = teko::list::push(strx, bytes.len to u32)
+        strx[i] = bytes.len to u32
         bytes = emit_str_bytes(bytes, symbols[i].name)
-        bytes = teko::list::push(bytes, 0 to byte)
+        bytes = [..bytes, 0 to byte]
         i++
     }
     var pad = bsd_align_pad(bytes.len to u32)
-    var j: u32 = 0
-    loop {
-        if j >= pad { break }
-        bytes = teko::list::push(bytes, 0 to byte)
-        j++
-    }
+    var pad_bytes: [pad]byte = []
+    bytes = [..bytes, ..pad_bytes]
     BsdSymStrTab { bytes = bytes; strx = strx }
 }
 
@@ -151,13 +138,13 @@ fn bsd_sorted_symbols(symbols: []ArSymbol): []ArSymbol {
             if j >= out.len { break }
             var o = out[j]
             if !placed && bsd_symbol_before(v, o) {
-                ins = teko::list::push(ins, v)
+                ins = [..ins, v]
                 placed = true
             }
-            ins = teko::list::push(ins, o)
+            ins = [..ins, o]
             j++
         }
-        if !placed { ins = teko::list::push(ins, v) }
+        if !placed { ins = [..ins, v] }
         out = ins
         i++
     }
@@ -186,11 +173,11 @@ pub fn emit_bsd_ar_archive(members: []ArMember, symbols: []ArSymbol): []byte {
 
 fn macho_ar_symbols(symbols: []Symbol): []ArSymbol {
     var names = global_symbol_names(symbols)
-    var out: []ArSymbol = []
+    var out: [names.len]ArSymbol = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
-        out = teko::list::push(out, ArSymbol { name = teko::str::concat("_", names[i]); member = 0 to u64 })
+        out[i] = ArSymbol { name = teko::str::concat("_", names[i]); member = 0 to u64 }
         i++
     }
     out

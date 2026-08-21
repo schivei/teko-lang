@@ -60,14 +60,13 @@ fn ar_header(buf: []byte, name_field: str, size: u64, mode: str): []byte {
     b = emit_str_bytes(b, ar_pad_right("0", AR_GID_WIDTH))
     b = emit_str_bytes(b, ar_pad_right(mode, AR_MODE_WIDTH))
     b = emit_str_bytes(b, ar_pad_right($"{size}", AR_SIZE_WIDTH))
-    b = teko::list::push(b, 0x60 to byte)
-    teko::list::push(b, 0x0A to byte)
+    [..b, 0x60, 0x0A]
 }
 
 fn emit_ar_member(buf: []byte, name_field: str, data: []byte, mode: str): []byte {
     var b = ar_header(buf, name_field, data.len, mode)
     b = append_bytes(b, data)
-    if ar_even_pad_len(data.len to u32) > (0 to u32) { b = teko::list::push(b, 0x0A to byte) }
+    if ar_even_pad_len(data.len to u32) > (0 to u32) { return [..b, 0x0A] }
     b
 }
 
@@ -77,12 +76,12 @@ fn ar_member_total_len(m: ArMember): u32 {
 }
 
 fn ar_member_offsets(first_offset: u32, members: []ArMember): []u32 {
-    var out: []u32 = []
+    var out: [members.len]u32 = []
     var off = first_offset
     var i: u64 = 0
     loop {
         if i >= members.len { break }
-        out = teko::list::push(out, off)
+        out[i] = off
         off = off + ar_member_total_len(members[i])
         i++
     }
@@ -90,10 +89,13 @@ fn ar_member_offsets(first_offset: u32, members: []ArMember): []u32 {
 }
 
 fn emit_u32_be(buf: []byte, v: u32): []byte {
-    var b = teko::list::push(buf, ((v >> (24 to u32)) & AR_BYTE_MASK) to byte)
-    b = teko::list::push(b, ((v >> (16 to u32)) & AR_BYTE_MASK) to byte)
-    b = teko::list::push(b, ((v >> (8 to u32)) & AR_BYTE_MASK) to byte)
-    teko::list::push(b, (v & AR_BYTE_MASK) to byte)
+    [
+        ..buf,
+        ((v >> (24 to u32)) & AR_BYTE_MASK) to byte,
+        ((v >> (16 to u32)) & AR_BYTE_MASK) to byte,
+        ((v >> (8 to u32)) & AR_BYTE_MASK) to byte,
+        (v & AR_BYTE_MASK) to byte,
+    ]
 }
 
 fn ar_symtab_data_size(symbols: []ArSymbol): u32 {
@@ -119,7 +121,7 @@ fn build_ar_symtab_data(symbols: []ArSymbol, member_offsets: []u32): []byte {
     loop {
         if i >= symbols.len { break }
         b = emit_str_bytes(b, symbols[i].name)
-        b = teko::list::push(b, 0 to byte)
+        b = [..b, 0 to byte]
         i++
     }
     b
@@ -150,7 +152,7 @@ fn global_symbol_names(symbols: []Symbol): []str {
     loop {
         if i >= symbols.len { break }
         var s = symbols[i]
-        if s.defined && !s.local { out = teko::list::push(out, s.name) }
+        if s.defined && !s.local { out = [..out, s.name] }
         i++
     }
     out
@@ -159,11 +161,11 @@ fn global_symbol_names(symbols: []Symbol): []str {
 pub fn emit_static_archive(obj_name: str, obj_bytes: []byte, symbols: []Symbol): []byte | error {
     var member = ArMember { name = obj_name; data = obj_bytes }
     var names = global_symbol_names(symbols)
-    var ar_symbols: []ArSymbol = []
+    var ar_symbols: [names.len]ArSymbol = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
-        ar_symbols = teko::list::push(ar_symbols, ArSymbol { name = names[i]; member = 0 to u64 })
+        ar_symbols[i] = ArSymbol { name = names[i]; member = 0 to u64 }
         i++
     }
     emit_ar_archive([member], ar_symbols)

@@ -1,6 +1,9 @@
 fn emit_u16_le_elf(buf: []byte, v: u32): []byte {
-    var b = teko::list::push(buf, (v & ELF_BYTE_MASK) to byte)
-    teko::list::push(b, ((v >> (8 to u32)) & ELF_BYTE_MASK) to byte)
+    [
+        ..buf,
+        (v & ELF_BYTE_MASK) to byte,
+        ((v >> (8 to u32)) & ELF_BYTE_MASK) to byte
+    ]
 }
 
 type ElfStrtab = struct {
@@ -15,11 +18,11 @@ fn build_elf_strtab(names: []str): ElfStrtab {
     loop {
         if i >= names.len { break }
         if names[i].len == (0 to u64) {
-            strx = teko::list::push(strx, 0 to u32)
+            strx = [..strx, 0 to u32]
         } else {
-            strx = teko::list::push(strx, bytes.len to u32)
+            strx = [..strx, bytes.len to u32]
             bytes = emit_str_bytes(bytes, names[i])
-            bytes = teko::list::push(bytes, 0 to byte)
+            bytes = [..bytes, 0 to byte]
         }
         i++
     }
@@ -77,7 +80,7 @@ fn elf_append_text_locals(out: []ElfSym, symbols: []Symbol): []ElfSym {
         if i >= symbols.len { break }
         var s = symbols[i]
         if s.defined && s.local && s.sect == (1 to u8) {
-            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_LOCAL, STT_NOTYPE) to u32; shndx = 1 to u32; value = s.offset })
+            acc = [..acc, ElfSym { name = s.name; info = st_info(STB_LOCAL, STT_NOTYPE) to u32; shndx = 1 to u32; value = s.offset }]
         }
         i++
     }
@@ -91,7 +94,7 @@ fn elf_append_globals(out: []ElfSym, symbols: []Symbol): []ElfSym {
         if i >= symbols.len { break }
         var s = symbols[i]
         if s.defined && !s.local {
-            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_FUNC) to u32; shndx = 1 to u32; value = s.offset })
+            acc = [..acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_FUNC) to u32; shndx = 1 to u32; value = s.offset }]
         }
         i++
     }
@@ -105,7 +108,7 @@ fn elf_append_undefined(out: []ElfSym, symbols: []Symbol): []ElfSym {
         if i >= symbols.len { break }
         var s = symbols[i]
         if !s.defined {
-            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_NOTYPE) to u32; shndx = 0 to u32; value = 0 to u32 })
+            acc = [..acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_NOTYPE) to u32; shndx = 0 to u32; value = 0 to u32 }]
         }
         i++
     }
@@ -115,10 +118,10 @@ fn elf_append_undefined(out: []ElfSym, symbols: []Symbol): []ElfSym {
 fn elf_build_symbols(symbols: []Symbol): []ElfSym {
     var out: []ElfSym = [ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 }]
     if elf_has_rodata_section(symbols) {
-        out = teko::list::push(out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_RODATA; value = 0 to u32 })
+        out = [..out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_RODATA; value = 0 to u32 }]
     }
     if elf_has_data_rel_ro_section(symbols) {
-        out = teko::list::push(out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_DATA_REL_RO; value = 0 to u32 })
+        out = [..out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_DATA_REL_RO; value = 0 to u32 }]
     }
     out = elf_append_text_locals(out, symbols)
     out = elf_append_globals(out, symbols)
@@ -137,11 +140,11 @@ fn elf_has_data_rel_ro_section(symbols: []Symbol): bool {
 }
 
 fn elf_sym_names(syms: []ElfSym): []str {
-    var out: []str = []
+    var out: [syms.len]str = []
     var i: u64 = 0
     loop {
         if i >= syms.len { break }
-        out = teko::list::push(out, syms[i].name)
+        out[i] = syms[i].name
         i++
     }
     out
@@ -233,11 +236,11 @@ fn elf_build_relas(relocs: []ElfRelocReq, symbols: []Symbol, syms: []ElfSym): []
 fn elf_resolve_relas(reqs: []ElfRelocReq, symbols: []Symbol, syms: []ElfSym): []ElfRela {
     var rodata_secidx = elf_rodata_secsym_index(syms)
     var drr_secidx = elf_drr_secsym_index(syms)
-    var out: []ElfRela = []
+    var out: [reqs.len]ElfRela = []
     var i: u64 = 0
     loop {
         if i >= reqs.len { break }
-        out = teko::list::push(out, elf_resolve_rela(reqs[i], symbols, syms, rodata_secidx, drr_secidx))
+        out[i] = elf_resolve_rela(reqs[i], symbols, syms, rodata_secidx, drr_secidx)
         i++
     }
     out
@@ -261,10 +264,12 @@ fn elf_rela_info(symidx: u32, rtype: u32): u64 {
 
 fn elf_section_names(has_drr: bool, has_dwarf: bool): []str {
     var sect_names = ["", ".text", ".rodata", ".symtab", ".strtab", ".shstrtab", ".rela.text"]
-    var with_drr = if has_drr { teko::list::push(teko::list::push(sect_names, ".data.rel.ro"), ".rela.data.rel.ro") } else { sect_names }
+    var with_drr = if has_drr { [..sect_names, ".data.rel.ro", ".rela.data.rel.ro"] } else { sect_names }
     if !has_dwarf { return with_drr }
-    var with_dwarf_secs = teko::list::push(teko::list::push(teko::list::push(with_drr, ".debug_abbrev"), ".debug_info"), ".debug_line")
-    teko::list::push(teko::list::push(with_dwarf_secs, ".rela.debug_info"), ".rela.debug_line")
+    [
+        ..with_drr, ".debug_abbrev", ".debug_info", ".debug_line",
+        ".rela.debug_info", ".rela.debug_line"
+    ]
 }
 
 const ELF64_SYM_SIZE: u32 = 24 to u32
@@ -367,20 +372,14 @@ const ELF_MAGIC: []byte = [0x7F to byte, 0x45 to byte, 0x4C to byte, 0x46 to byt
 
 fn emit_elf_header(buf: []byte, lay: ElfLayout, e_machine: u32, e_flags: u32, nsects: u32): []byte {
     var magic = ELF_MAGIC
-    var b = teko::list::push(buf, magic[0])
-    b = teko::list::push(b, magic[1])
-    b = teko::list::push(b, magic[2])
-    b = teko::list::push(b, magic[3])
-    b = teko::list::push(b, 2 to byte)
-    b = teko::list::push(b, 1 to byte)
-    b = teko::list::push(b, 1 to byte)
-    b = teko::list::push(b, 0 to byte)
-    var k: u32 = 0
-    loop {
-        if k >= (8 to u32) { break }
-        b = teko::list::push(b, 0 to byte)
-        k++
-    }
+    var b = [
+        ..buf,
+        magic[0], magic[1], magic[2], magic[3],
+        2, 1, 1, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0
+    ]
+    
     b = emit_u16_le_elf(b, 1 to u32)
     b = emit_u16_le_elf(b, e_machine)
     b = emit_u32_le(b, 1 to u32)
@@ -517,12 +516,12 @@ fn no_elf_dwarf(): ElfDwarfSections {
 }
 
 fn elf_dwreloc_reqs(relocs: []DwReloc, rtype: u32): []ElfRelocReq {
-    var out: []ElfRelocReq = []
+    var out: [relocs.len]ElfRelocReq = []
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
         var r = relocs[i]
-        out = teko::list::push(out, ElfRelocReq { offset = r.offset to u32; sym = r.symbol; rtype = rtype; addend = 0 })
+        out[i] = ElfRelocReq { offset = r.offset to u32; sym = r.symbol; rtype = rtype; addend = 0 }
         i++
     }
     out
@@ -563,17 +562,17 @@ fn elf_collect_const_entries(symbols: []Symbol, rodata_len: u32): []ElfConstEntr
         if i >= symbols.len { break }
         var s = symbols[i]
         if s.defined && s.local && s.sect == ELF_SECT_RODATA {
-            starts = teko::list::push(starts, ElfConstEntry { name = s.name; start = s.offset; end = 0 to u32; to_drr = false; new_offset = 0 to u32 })
+            starts = [..starts, ElfConstEntry { name = s.name; start = s.offset; end = 0 to u32; to_drr = false; new_offset = 0 to u32 }]
         }
         i++
     }
-    var out: []ElfConstEntry = []
+    var out: [starts.len]ElfConstEntry = []
     var j: u64 = 0
     loop {
         if j >= starts.len { break }
         var e = starts[j]
         var end = if j + 1 < starts.len { starts[j + 1].start } else { rodata_len }
-        out = teko::list::push(out, ElfConstEntry { name = e.name; start = e.start; end = end; to_drr = false; new_offset = 0 to u32 })
+        out[j] = ElfConstEntry { name = e.name; start = e.start; end = end; to_drr = false; new_offset = 0 to u32 }
         j++
     }
     out
@@ -591,7 +590,7 @@ fn elf_reloc_in_span(relocs: []ElfRelocReq, start: u32, end: u32): bool {
 }
 
 fn elf_assign_partition_offsets(entries: []ElfConstEntry, rodata_relocs: []ElfRelocReq): []ElfConstEntry {
-    var out: []ElfConstEntry = []
+    var out: [entries.len]ElfConstEntry = []
     var rodata_run: u32 = 0 to u32
     var drr_run: u32 = 0 to u32
     var i: u64 = 0
@@ -602,30 +601,28 @@ fn elf_assign_partition_offsets(entries: []ElfConstEntry, rodata_relocs: []ElfRe
         var span = e.end - e.start
         var new_off = if moves { align_up(drr_run, 8 to u32) } else { align_up(rodata_run, 8 to u32) }
         if moves { drr_run = new_off + span } else { rodata_run = new_off + span }
-        out = teko::list::push(out, ElfConstEntry { name = e.name; start = e.start; end = e.end; to_drr = moves; new_offset = new_off })
+        out[i] = ElfConstEntry { name = e.name; start = e.start; end = e.end; to_drr = moves; new_offset = new_off }
         i++
     }
     out
 }
 
 fn elf_pad_blob_to(buf: []byte, target: u32): []byte {
-    var b = buf
-    loop {
-        if (b.len to u32) >= target { break }
-        b = teko::list::push(b, 0 to byte)
-    }
-    b
+    var pad: [target - (buf.len to u32)]byte = []
+    [..buf, ..pad]
 }
 
 fn elf_append_byte_range(buf: []byte, src: []byte, start: u32, end: u32): []byte {
-    var b = buf
+    var b: [end - start]byte = []
     var i: u64 = start to u64
+    var j: u64 = 0
     loop {
         if i >= end { break }
-        b = teko::list::push(b, src[i])
+        b[j] = src[i]
         i++
+        j++
     }
-    b
+    [..buf, ..b]
 }
 
 fn elf_build_partition_blob(entries: []ElfConstEntry, rodata: []byte, want_drr: bool): []byte {
@@ -644,7 +641,7 @@ fn elf_build_partition_blob(entries: []ElfConstEntry, rodata: []byte, want_drr: 
 }
 
 fn elf_remap_partition_symbols(symbols: []Symbol, entries: []ElfConstEntry): []Symbol {
-    var out: []Symbol = []
+    var out: [symbols.len]Symbol = []
     var k: u64 = 0
     var i: u64 = 0
     loop {
@@ -653,10 +650,10 @@ fn elf_remap_partition_symbols(symbols: []Symbol, entries: []ElfConstEntry): []S
         if s.defined && s.local && s.sect == ELF_SECT_RODATA {
             var e = entries[k]
             var sect = if e.to_drr { ELF_SECT_DATA_REL_RO } else { ELF_SECT_RODATA }
-            out = teko::list::push(out, Symbol { name = s.name; defined = s.defined; sect = sect; offset = e.new_offset; local = s.local })
+            out[i] = Symbol { name = s.name; defined = s.defined; sect = sect; offset = e.new_offset; local = s.local }
             k++
         } else {
-            out = teko::list::push(out, s)
+            out[i] = s
         }
         i++
     }
@@ -675,12 +672,12 @@ fn elf_rebased_site(entries: []ElfConstEntry, off: u32): u32 {
 }
 
 fn elf_remap_drr_relocs(rodata_relocs: []ElfRelocReq, entries: []ElfConstEntry): []ElfRelocReq {
-    var out: []ElfRelocReq = []
+    var out: [rodata_relocs.len]ElfRelocReq = []
     var i: u64 = 0
     loop {
         if i >= rodata_relocs.len { break }
         var r = rodata_relocs[i]
-        out = teko::list::push(out, ElfRelocReq { offset = elf_rebased_site(entries, r.offset); sym = r.sym; rtype = r.rtype; addend = r.addend })
+        out[i] = ElfRelocReq { offset = elf_rebased_site(entries, r.offset); sym = r.sym; rtype = r.rtype; addend = r.addend }
         i++
     }
     out
@@ -755,7 +752,7 @@ fn x86_reloc_reqs(enc: EncodedModuleX86): []ElfRelocReq {
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Text { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }) }
+        if r.sect == RelocSect::Text { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }] }
         i++
     }
     out
@@ -767,7 +764,7 @@ fn x86_rodata_reloc_reqs(enc: EncodedModuleX86): []ElfRelocReq {
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Rodata { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }) }
+        if r.sect == RelocSect::Rodata { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }] }
         i++
     }
     out
@@ -811,7 +808,7 @@ fn arm64_reloc_reqs(enc: EncodedModule): []ElfRelocReq {
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Text { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }) }
+        if r.sect == RelocSect::Text { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }] }
         i++
     }
     out
@@ -823,7 +820,7 @@ fn arm64_rodata_reloc_reqs(enc: EncodedModule): []ElfRelocReq {
     loop {
         if i >= enc.relocs.len { break }
         var r = enc.relocs[i]
-        if r.sect == RelocSect::Rodata { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }) }
+        if r.sect == RelocSect::Rodata { out = [..out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }] }
         i++
     }
     out

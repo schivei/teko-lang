@@ -1,6 +1,9 @@
 fn emit_u16_le_coff(buf: []byte, v: u32): []byte {
-    var b = teko::list::push(buf, (v & COFF_BYTE_MASK) to byte)
-    teko::list::push(b, ((v >> (8 to u32)) & COFF_BYTE_MASK) to byte)
+    [
+        ..buf,
+        (v & COFF_BYTE_MASK) to byte,
+        ((v >> (8 to u32)) & COFF_BYTE_MASK) to byte
+    ]
 }
 
 const COFF_BYTE_MASK: u32 = 0xFF to u32
@@ -22,14 +25,11 @@ const COFF_RDATA_CHARACTERISTICS: u32 = 0x40400040 to u32
 const COFF_RELOC_ENTRY_SIZE: u32 = 10 to u32
 
 fn emit_zeros_coff(buf: []byte, n: u64): []byte {
-    var b = buf
-    var i: u64 = 0
-    loop {
-        if i >= n { break }
-        b = teko::list::push(b, 0 to byte)
-        i++
-    }
-    b
+    var zeros: [n]byte = []
+    [
+        ..buf,
+        ..zeros
+    ]
 }
 
 fn emit_coff_name8_str(buf: []byte, s: str): []byte {
@@ -63,7 +63,7 @@ fn coff_append_globals(out: []CoffSymbol, symbols: []Symbol): []CoffSymbol {
         if i >= symbols.len { break }
         var s = symbols[i]
         if s.defined && !s.local {
-            acc = teko::list::push(acc, CoffSymbol { name = s.name; value = s.offset; section_number = 1 to u32; sym_type = COFF_SYM_TYPE_FUNCTION; storage_class = IMAGE_SYM_CLASS_EXTERNAL })
+            acc = [..acc, CoffSymbol { name = s.name; value = s.offset; section_number = 1 to u32; sym_type = COFF_SYM_TYPE_FUNCTION; storage_class = IMAGE_SYM_CLASS_EXTERNAL }]
         }
         i++
     }
@@ -77,7 +77,7 @@ fn coff_append_undefined(out: []CoffSymbol, symbols: []Symbol): []CoffSymbol {
         if i >= symbols.len { break }
         var s = symbols[i]
         if !s.defined {
-            acc = teko::list::push(acc, CoffSymbol { name = s.name; value = 0 to u32; section_number = 0 to u32; sym_type = 0 to u32; storage_class = 2 to u32 })
+            acc = [..acc, CoffSymbol { name = s.name; value = 0 to u32; section_number = 0 to u32; sym_type = 0 to u32; storage_class = 2 to u32 }]
         }
         i++
     }
@@ -87,7 +87,7 @@ fn coff_append_undefined(out: []CoffSymbol, symbols: []Symbol): []CoffSymbol {
 fn coff_build_symbols(symbols: []Symbol): []CoffSymbol {
     var out: []CoffSymbol = []
     if coff_has_rodata_section(symbols) {
-        out = teko::list::push(out, CoffSymbol { name = ".rdata"; value = 0 to u32; section_number = 2 to u32; sym_type = 0 to u32; storage_class = 3 to u32 })
+        out = [..out, CoffSymbol { name = ".rdata"; value = 0 to u32; section_number = 2 to u32; sym_type = 0 to u32; storage_class = 3 to u32 }]
     }
     out = coff_append_globals(out, symbols)
     coff_append_undefined(out, symbols)
@@ -106,11 +106,11 @@ fn build_coff_strtab(symbols: []CoffSymbol): CoffStrtab {
         if i >= symbols.len { break }
         var nm = symbols[i].name
         if nm.len <= (8 to u64) {
-            long_offset = teko::list::push(long_offset, 0 to u32)
+            long_offset = [..long_offset, 0]
         } else {
-            long_offset = teko::list::push(long_offset, bytes.len to u32)
+            long_offset = [..long_offset, bytes.len to u32]
             bytes = emit_str_bytes(bytes, nm)
-            bytes = teko::list::push(bytes, 0 to byte)
+            bytes = [..bytes, 0 to byte]
         }
         i++
     }
@@ -183,8 +183,8 @@ fn coff_partition_relocs(relocs: []RelocX86): CoffRelocParts {
         if i >= relocs.len { break }
         var r = relocs[i]
         match r.sect {
-            Text => { text = teko::list::push(text, r) }
-            Rodata => { rdata = teko::list::push(rdata, r) }
+            Text => { text = [..text, r] }
+            Rodata => { rdata = [..rdata, r] }
         }
         i++
     }
@@ -206,14 +206,14 @@ fn coff_apply_data_reloc_addends(rodata: []byte, symbols: []Symbol, relocs: []Re
 
 fn coff_build_relocs(symbols: []Symbol, coffsyms: []CoffSymbol, relocs: []RelocX86): []CoffReloc {
     var secidx = coff_rodata_secsym_index(coffsyms)
-    var out: []CoffReloc = []
+    var out: [relocs.len]CoffReloc = []
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
         var r = relocs[i]
         var hit = coff_rodata_hit(symbols, r.sym)
         var symidx = if hit.found { secidx } else { coff_symbol_index(coffsyms, r.sym) }
-        out = teko::list::push(out, CoffReloc { virtual_address = r.offset; symbol_index = symidx; rtype = coff_reloc_type(r.kind) })
+        out[i] = CoffReloc { virtual_address = r.offset; symbol_index = symidx; rtype = coff_reloc_type(r.kind) }
         i++
     }
     out

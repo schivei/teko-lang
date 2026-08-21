@@ -18,9 +18,7 @@ pub fn env_empty(): Env { Env { base_slots = []; bindings = []; cur_ns = ""; own
 pub fn with_explicit(env: Env, on: bool): Env { Env { base_slots = env.base_slots; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = on } }
 
 pub fn seal(env: Env): Env {
-    var b = env.base_slots
-    var i: u64 = 0
-    loop { if i >= env.bindings.len { break }; b = teko::list::push(b, env.bindings[i]); i++ }
+    var b = [..env.base_slots, ..env.bindings];
     Env { base_slots = b; bindings = []; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = nidx_build(nidx_names_of(b)); ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
@@ -38,25 +36,25 @@ fn binding_is_writable(t: @Type(), is_mut: bool): bool {
 }
 
 pub fn define(env: Env, name: str, t: @Type(), is_mut: bool): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub; is_global = false }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
+    Env { base_slots = env.base_slots; bindings = [..env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub; is_global = false }]; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
 pub fn define_fn(env: Env, name: str, t: @Type(), ns: str, is_global: bool): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub; is_global = is_global }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
+    Env { base_slots = env.base_slots; bindings = [..env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub; is_global = is_global }]; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
 pub fn define_const(env: Env, name: str, t: @Type(), ns: str, vis: parser::Visibility, is_global: bool): Env {
-    Env { base_slots = env.base_slots; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis; is_global = is_global }); cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
+    Env { base_slots = env.base_slots; bindings = [..env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis; is_global = is_global }]; cur_ns = env.cur_ns; owner_type = env.owner_type; file = env.file; base_index = env.base_index; ret_expected = env.ret_expected; explicit = env.explicit }
 }
 
 fn bind_is_mut(k: parser::BindKind): bool { k == parser::BindKind::Var }
 
 fn nidx_names_of(b: []ValBinding): []str {
-    var names: []str = []
+    var names: [b.len]str = []
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        names = teko::list::push(names, b[i].name)
+        names[i] = b[i].name
         i++
     }
     names
@@ -175,7 +173,7 @@ fn binding_is_func(b: ValBinding): bool {
 pub fn lookup_call_candidates(env: Env, callee: parser::Path): []ValBinding {
     var name = callee.segments[callee.segments.len - 1].name
     var qualified = callee.segments.len > 1
-    var out: []ValBinding = []
+    var out: []ValBinding = teko::list::empty()
     var h = teko::runtime::str_hash(name)
     var k = nidx_lower_bound(env.base_index, h)
     loop {
@@ -183,14 +181,14 @@ pub fn lookup_call_candidates(env: Env, callee: parser::Path): []ValBinding {
         if env.base_index.slots[k].hash != h { break }
         var p = env.base_index.slots[k].pos
         var b = env.base_slots[p]
-        if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { out = teko::list::push(out, b) }
+        if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { out = [..out, b] }
         k++
     }
     var i: u64 = 0
     loop {
         if i >= env.bindings.len { break }
         var lb = env.bindings[i]
-        if lb.name == name && call_binding_matches(lb, callee, env.cur_ns, qualified) { out = teko::list::push(out, lb) }
+        if lb.name == name && call_binding_matches(lb, callee, env.cur_ns, qualified) { out = [..out, lb] }
         i++
     }
     out
@@ -210,14 +208,14 @@ pub fn call_has_global_overload(env: Env, callee: parser::Path): bool {
 
 pub fn overload_func_bindings(env: Env, ns: str, name: str): []ValBinding {
     var h = teko::runtime::str_hash(name)
-    var out: []ValBinding = []
+    var out: []ValBinding = teko::list::empty()
     var k = nidx_lower_bound(env.base_index, h)
     loop {
         if k >= env.base_index.slots.len { break }
         if env.base_index.slots[k].hash != h { break }
         var p = env.base_index.slots[k].pos
         var b = env.base_slots[p]
-        if b.name == name && b.ns == ns && !b.is_const && binding_is_func(b) { out = teko::list::push(out, b) }
+        if b.name == name && b.ns == ns && !b.is_const && binding_is_func(b) { out = [..out, b] }
         k++
     }
     out
@@ -258,60 +256,52 @@ fn builtin_type(name: str): @Type() | NotBuiltinType | error {
 fn tempty(): []@Type() { [] }
 
 fn buf_ptr_signature(): @Type() {
-    var len_param: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::U64 })
+    var len_param: []@Type() = [..tempty(), Prim { kind = PrimKind::U64 }]
     Func { params = len_param; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = len_param.len; defaults = []; ret_extra = [] }
 }
 
 fn byte_ptr_signature(): @Type() {
-    var bp: []@Type() = teko::list::push(tempty(), Slice { element = Byte { } })
-    bp = teko::list::push(bp, Prim { kind = PrimKind::U64 })
+    var bp: []@Type() = [..tempty(), Slice { element = Byte { } }, Prim { kind = PrimKind::U64 }]
     Func { params = bp; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = bp.len; defaults = []; ret_extra = [] }
 }
 
 fn as_cstr_signature(str_t: @Type()): @Type() {
-    var p: []@Type() = teko::list::push(tempty(), str_t)
+    var p: []@Type() = [..tempty(), str_t]
     Func { params = p; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = p.len; defaults = []; ret_extra = [] }
 }
 
 fn str_from_c_signature(str_t: @Type()): @Type() {
-    var sfc: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
-    sfc = teko::list::push(sfc, Prim { kind = PrimKind::U64 })
+    var sfc: []@Type() = [..tempty(), Ptr { inner = null }, Prim { kind = PrimKind::U64 }]
     Func { params = sfc; ret = str_t; variadic = false; param_names = []; n_required = sfc.len; defaults = []; ret_extra = [] }
 }
 
 fn region_buf_signature(str_t: @Type()): @Type() {
-    var rb: []@Type() = teko::list::push(tempty(), Uptr { })
-    rb = teko::list::push(rb, Prim { kind = PrimKind::U64 })
-    rb = teko::list::push(rb, str_t)
+    var rb: []@Type() = [..tempty(), Uptr { }, Prim { kind = PrimKind::U64 }, str_t]
     Func { params = rb; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = rb.len; defaults = []; ret_extra = [] }
 }
 
 fn load_u64_signature(): @Type() {
-    var addr_param: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::U64 })
+    var addr_param: []@Type() = [..tempty(), Prim { kind = PrimKind::U64 }]
     Func { params = addr_param; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = addr_param.len; defaults = []; ret_extra = [] }
 }
 
 fn store_u64_signature(): @Type() {
-    var params: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::U64 })
-    params = teko::list::push(params, Prim { kind = PrimKind::U64 })
+    var params: []@Type() = [..tempty(), Prim { kind = PrimKind::U64 }, Prim { kind = PrimKind::U64 }]
     Func { params = params; ret = Void { }; variadic = false; param_names = []; n_required = params.len; defaults = []; ret_extra = [] }
 }
 
 fn host_str_or_error(): @Type() {
-    var m: []@Type() = teko::list::push(tempty(), Str { })
-    m = teko::list::push(m, Error { })
+    var m: []@Type() = [..tempty(), Str { }, Error { }]
     Variant { members = m }
 }
 
 fn host_strslice_or_error(): @Type() {
-    var m: []@Type() = teko::list::push(tempty(), Slice { element = Str { } })
-    m = teko::list::push(m, Error { })
+    var m: []@Type() = [..tempty(), Slice { element = Str { } }, Error { }]
     Variant { members = m }
 }
 
 fn host_error_optional(): @Type() {
-    var m: []@Type() = teko::list::push(tempty(), Null { })
-    m = teko::list::push(m, Error { })
+    var m: []@Type() = [..tempty(), Null { }, Error { }]
     Variant { members = m }
 }
 
@@ -327,16 +317,15 @@ fn host_surface_fn(name: str): @Type() | error {
     if name == "read_line" || name == "read_stdin" { return host_func([], str_t) }
     if name == "stdin_eof" { return host_func([], Prim { kind = PrimKind::Bool }) }
     if name == "cwd" { return host_func([], host_str_or_error()) }
-    if name == "var" || name == "read_file" { return host_func(teko::list::push(tempty(), str_t), host_str_or_error()) }
-    if name == "chdir" || name == "mkdir" || name == "remove_file" { return host_func(teko::list::push(tempty(), str_t), host_error_optional()) }
-    if name == "set_var" || name == "write_file" { return host_func(teko::list::push(teko::list::push(tempty(), str_t), str_t), host_error_optional()) }
+    if name == "var" || name == "read_file" { return host_func([..tempty(), str_t], host_str_or_error()) }
+    if name == "chdir" || name == "mkdir" || name == "remove_file" { return host_func([..tempty(), str_t], host_error_optional()) }
+    if name == "set_var" || name == "write_file" { return host_func([..tempty(), str_t, str_t], host_error_optional()) }
     if name == "write_file_bytes" {
-        var p: []@Type() = teko::list::push(tempty(), str_t)
-        p = teko::list::push(p, bytes_t)
+        var p: []@Type() = [..tempty(), str_t, bytes_t]
         return host_func(p, host_error_optional())
     }
-    if name == "list_dir" { return host_func(teko::list::push(tempty(), str_t), host_strslice_or_error()) }
-    if name == "run" || name == "run_quiet" { return host_func(teko::list::push(tempty(), str_slice_t), Prim { kind = PrimKind::I32 }) }
+    if name == "list_dir" { return host_func([..tempty(), str_t], host_strslice_or_error()) }
+    if name == "run" || name == "run_quiet" { return host_func([..tempty(), str_slice_t], Prim { kind = PrimKind::I32 }) }
     error { message = "not a host surface function" }
 }
 
@@ -345,19 +334,17 @@ fn assert_void_sig(params: []@Type()): @Type() {
 }
 
 fn assert_one_sig(t: @Type()): @Type() {
-    var p: []@Type() = teko::list::push(tempty(), t)
+    var p: []@Type() = [..tempty(), t]
     assert_void_sig(p)
 }
 
 fn assert_pair_sig(t: @Type()): @Type() {
-    var p: []@Type() = teko::list::push(tempty(), t)
-    p = teko::list::push(p, t)
+    var p: []@Type() = [..tempty(), t, t]
     assert_void_sig(p)
 }
 
 fn assert_named_flag_sig(): @Type() {
-    var p: []@Type() = teko::list::push(tempty(), Str { })
-    p = teko::list::push(p, Prim { kind = PrimKind::Bool })
+    var p: []@Type() = [..tempty(), Str { }, Prim { kind = PrimKind::Bool }]
     assert_void_sig(p)
 }
 
@@ -373,9 +360,7 @@ fn assert_builtin_fn(name: str): @Type() | null {
     if name == "eq_u64" || name == "len_eq" { return assert_pair_sig(Prim { kind = PrimKind::U64 }) }
     if name == "eq_f64" {
         var f64_t = Prim { kind = PrimKind::F64 }
-        var fp: []@Type() = teko::list::push(tempty(), f64_t)
-        fp = teko::list::push(fp, f64_t)
-        fp = teko::list::push(fp, f64_t)
+        var fp: []@Type() = [..tempty(), f64_t, f64_t, f64_t]
         return assert_void_sig(fp)
     }
     if name == "eq_str" || name == "ne_str" || name == "str_contains" || name == "str_absent" || name == "str_starts_with" || name == "str_ends_with" {
@@ -416,11 +401,11 @@ pub fn assert_fat_arg_arity(last: str): u64 {
 
 fn syscallN_signature(arity: u64): @Type() {
     var i64_t: @Type() = Prim { kind = PrimKind::I64 }
-    var ps: []@Type() = teko::list::push(tempty(), i64_t)
+    var ps: [arity]@Type() = [..tempty(), i64_t]
     var i: u64 = 0 to u64
     loop {
         if i >= arity { break }
-        ps = teko::list::push(ps, i64_t)
+        ps[i] = i64_t
         i = i + (1 to u64)
     }
     Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = [] }
@@ -428,23 +413,17 @@ fn syscallN_signature(arity: u64): @Type() {
 
 fn thread_clone_signature(): @Type() {
     var i64_t: @Type() = Prim { kind = PrimKind::I64 }
-    var ps: []@Type() = teko::list::push(tempty(), i64_t)
-    var i: u64 = 0 to u64
-    loop {
-        if i >= (4 to u64) { break }
-        ps = teko::list::push(ps, i64_t)
-        i = i + (1 to u64)
-    }
+    var ps: []@Type() = [..tempty(), i64_t, i64_t, i64_t, i64_t, i64_t]
     Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = [] }
 }
 
 fn atomic_rmw_signature(nargs: u64): @Type() {
     var i64_t: @Type() = Prim { kind = PrimKind::I64 }
-    var ps: []@Type() = tempty()
+    var ps: [nargs]@Type() = [..tempty(), i64_t]
     var i: u64 = 0 to u64
     loop {
         if i >= nargs { break }
-        ps = teko::list::push(ps, i64_t)
+        ps[i] = i64_t
         i = i + (1 to u64)
     }
     Func { params = ps; ret = i64_t; variadic = false; param_names = []; n_required = ps.len; defaults = []; ret_extra = [] }
@@ -452,17 +431,15 @@ fn atomic_rmw_signature(nargs: u64): @Type() {
 
 fn weak_get_signature(): @Type() {
     var t_param: @Type() = Named { name = "T" }
-    var p: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
-    var m: []@Type() = teko::list::push(tempty(), t_param)
-    m = teko::list::push(m, Null { })
+    var p: []@Type() = [..tempty(), Ptr { inner = null }]
+    var m: []@Type() = [..tempty(), t_param, Null { }]
     Func { params = p; ret = Variant { members = m }; variadic = false; param_names = []; n_required = p.len; defaults = []; ret_extra = [] }
 }
 
 fn deep_copy_signature(): @Type() {
     var t_param: @Type() = Named { name = "T" }
-    var p: []@Type() = teko::list::push(tempty(), t_param)
-    var m: []@Type() = teko::list::push(tempty(), t_param)
-    m = teko::list::push(m, Error { })
+    var p: []@Type() = [..tempty(), t_param]
+    var m: []@Type() = [..tempty(), t_param, Error { }]
     Func { params = p; ret = Variant { members = m }; variadic = false; param_names = []; n_required = p.len; defaults = []; ret_extra = [] }
 }
 
@@ -475,59 +452,55 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "version" { return Func { params = []; ret = str_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "peak_rss" { return Func { params = []; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "append_fo" {
-        var afp: []@Type() = teko::list::push(tempty(), bytes_t)
-        afp = teko::list::push(afp, str_t)
+        var afp: []@Type() = [..tempty(), bytes_t, str_t]
         return Func { params = afp; ret = bytes_t; variadic = false; param_names = []; n_required = afp.len; defaults = []; ret_extra = [] }
     }
     if name == "abort" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "print" || name == "println" || name == "write" || name == "ewrite" || name == "eprint" || name == "eprintln" {
-        var iop = teko::list::push(tempty(), str_t)
+        var iop = [..tempty(), str_t]
         return Func { params = iop; ret = void_t; variadic = false; param_names = []; n_required = iop.len; defaults = []; ret_extra = [] }
     }
     if name == "cov_reset" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
-    if name == "cov_mark" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = [] } }
+    if name == "cov_mark" { return Func { params = [..tempty(), Prim { kind = PrimKind::U64 }]; ret = void_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::U64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_distinct" { return Func { params = []; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
-    if name == "cov_is_marked" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = [] } }
-    if name == "cov_branches_on" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::Bool }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::Bool })).len; defaults = []; ret_extra = [] } }
+    if name == "cov_is_marked" { return Func { params = [..tempty(), Prim { kind = PrimKind::U64 }]; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::U64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "cov_branches_on" { return Func { params = [..tempty(), Prim { kind = PrimKind::Bool }]; ret = void_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::Bool }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_branch_reset" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
-    if name == "cov_enter" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = [] } }
+    if name == "cov_enter" { return Func { params = [..tempty(), Prim { kind = PrimKind::U64 }]; ret = void_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::U64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_leave" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "arena_push" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "arena_pop" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "arena_commit" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "task_reset" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "intern_get" {
-        var igp: []@Type() = teko::list::push(tempty(), str_t)
+        var igp: []@Type() = [..tempty(), str_t]
         return Func { params = igp; ret = str_t; variadic = false; param_names = []; n_required = igp.len; defaults = []; ret_extra = [] }
     }
     if name == "intern_put" {
-        var ipp: []@Type() = teko::list::push(tempty(), str_t)
-        ipp = teko::list::push(ipp, str_t)
+        var ipp: []@Type() = [..tempty(), str_t, str_t]
         return Func { params = ipp; ret = str_t; variadic = false; param_names = []; n_required = ipp.len; defaults = []; ret_extra = [] }
     }
     if name == "intern_reset" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
     if name == "cov_branch" {
-        var bp: []@Type() = teko::list::push(teko::list::push(tempty(), Prim { kind = PrimKind::U32 }), Prim { kind = PrimKind::U32 })
-        bp = teko::list::push(bp, Prim { kind = PrimKind::U64 })
+        var bp: []@Type() = [..tempty(), Prim { kind = PrimKind::U32 }, Prim { kind = PrimKind::U32 }, Prim { kind = PrimKind::U64 }]
         return Func { params = bp; ret = void_t; variadic = false; param_names = []; n_required = (bp).len; defaults = []; ret_extra = [] }
     }
     if name == "cov_branch_hit" {
-        var hp: []@Type() = teko::list::push(teko::list::push(tempty(), Prim { kind = PrimKind::U64 }), Prim { kind = PrimKind::U32 })
-        hp = teko::list::push(teko::list::push(hp, Prim { kind = PrimKind::U32 }), Prim { kind = PrimKind::U64 })
+        var hp: []@Type() = [..tempty(), Prim { kind = PrimKind::U64 }, Prim { kind = PrimKind::U32 }, Prim { kind = PrimKind::U32 }, Prim { kind = PrimKind::U64 }]
         return Func { params = hp; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (hp).len; defaults = []; ret_extra = [] }
     }
-    if name == "cov_lines_on" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::Bool }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::Bool })).len; defaults = []; ret_extra = [] } }
+    if name == "cov_lines_on" { return Func { params = [..tempty(), Prim { kind = PrimKind::Bool }]; ret = void_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::Bool }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_line_reset" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
-    if name == "cov_line" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U32 }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U32 })).len; defaults = []; ret_extra = [] } }
+    if name == "cov_line" { return Func { params = [..tempty(), Prim { kind = PrimKind::U32 }]; ret = void_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::U32 }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "cov_line_hit" {
-        var lp: []@Type() = teko::list::push(teko::list::push(tempty(), Prim { kind = PrimKind::U64 }), Prim { kind = PrimKind::U32 })
+        var lp: []@Type() = [..tempty(), Prim { kind = PrimKind::U64 }, Prim { kind = PrimKind::U32 }]
         return Func { params = lp; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (lp).len; defaults = []; ret_extra = [] }
     }
-    if name == "fdiv" { return Func { params = teko::list::push(teko::list::push(tempty(), Prim { kind = PrimKind::F64 }), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), Prim { kind = PrimKind::F64 }), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = [] } }
+    if name == "fdiv" { return Func { params = [..tempty(), Prim { kind = PrimKind::F64 }, Prim { kind = PrimKind::F64 }]; ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::F64 }, Prim { kind = PrimKind::F64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "panic_div0" || name == "panic_oob" || name == "panic_cast" || name == "panic_overflow" { return Func { params = []; ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = []; ret_extra = [] } }
-    if name == "floor" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = [] } }
-    if name == "f64_from_bits" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = [] } }
-    if name == "f64_bits" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = [] } }
+    if name == "floor" { return Func { params = [..tempty(), Prim { kind = PrimKind::F64 }]; ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::F64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "f64_from_bits" { return Func { params = [..tempty(), Prim { kind = PrimKind::U64 }]; ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::U64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "f64_bits" { return Func { params = [..tempty(), Prim { kind = PrimKind::F64 }]; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::F64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "syscall0" { return syscallN_signature(0 to u64) }
     if name == "syscall1" { return syscallN_signature(1 to u64) }
     if name == "syscall2" { return syscallN_signature(2 to u64) }
@@ -541,93 +514,80 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "atomic_add_u32" { return atomic_rmw_signature(2 to u64) }
     if name == "atomic_load_u32" { return atomic_rmw_signature(1 to u64) }
     if name == "ptr_word" {
-        var pwp: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
+        var pwp: []@Type() = [..tempty(), Ptr { inner = null }]
         return Func { params = pwp; ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = pwp.len; defaults = []; ret_extra = [] }
     }
     if name == "word_ptr" {
-        var wpp: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::I64 })
+        var wpp: []@Type() = [..tempty(), Prim { kind = PrimKind::I64 }]
         return Func { params = wpp; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = wpp.len; defaults = []; ret_extra = [] }
     }
     if name == "retain" || name == "release" {
-        var rrp: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
+        var rrp: []@Type() = [..tempty(), Ptr { inner = null }]
         return Func { params = rrp; ret = void_t; variadic = false; param_names = []; n_required = rrp.len; defaults = []; ret_extra = [] }
     }
     if name == "weak_get" { return weak_get_signature() }
     if name == "deep_copy" { return deep_copy_signature() }
     match assert_builtin_fn(name) { (@Type()) as at => return at; null => { } }
     if name == "slice" {
-        var p: []@Type() = teko::list::push(tempty(), str_t)
-        p = teko::list::push(p, Prim { kind = PrimKind::U64 })
-        p = teko::list::push(p, Prim { kind = PrimKind::U64 })
+        var p: []@Type() = [..tempty(), str_t, Prim { kind = PrimKind::U64 }, Prim { kind = PrimKind::U64 }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
-    if name == "str" || name == "str_of_bytes" { return Func { params = teko::list::push(tempty(), bytes_t); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), bytes_t)).len; defaults = []; ret_extra = [] } }
-    if name == "one_byte" { return Func { params = teko::list::push(tempty(), Byte { }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Byte { })).len; defaults = []; ret_extra = [] } }
-    if name == "str_concat" { return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = [] } }
-    if name == "str_hash" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = [] } }
-    if name == "str_compare" { return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = [] } }
-    if name == "i64_to_str" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::I64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::I64 })).len; defaults = []; ret_extra = [] } }
-    if name == "u64_to_str" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = [] } }
-    if name == "ftoa" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = [] } }
-    if name == "f64_g17" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::F64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::F64 })).len; defaults = []; ret_extra = [] } }
-    if name == "parse" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = [] } }
-    if name == "concat" { return Func { params = teko::list::push(tempty(), Slice { element = str_t }); ret = str_t; variadic = true; param_names = []; n_required = (teko::list::push(tempty(), Slice { element = str_t })).len; defaults = []; ret_extra = [] } }
+    if name == "str" || name == "str_of_bytes" { return Func { params = [..tempty(), bytes_t]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), bytes_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "one_byte" { return Func { params = [..tempty(), Byte { }]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), Byte { }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "str_concat" { return Func { params = [..tempty(), str_t, str_t]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), str_t, str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "str_hash" { return Func { params = [..tempty(), str_t]; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = ([..tempty(), str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "str_compare" { return Func { params = [..tempty(), str_t, str_t]; ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = ([..tempty(), str_t, str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "i64_to_str" { return Func { params = [..tempty(), Prim { kind = PrimKind::I64 }]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::I64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "u64_to_str" { return Func { params = [..tempty(), Prim { kind = PrimKind::U64 }]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::U64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "ftoa" { return Func { params = [..tempty(), Prim { kind = PrimKind::F64 }]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::F64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "f64_g17" { return Func { params = [..tempty(), Prim { kind = PrimKind::F64 }]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::F64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "parse" { return Func { params = [..tempty(), str_t]; ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = ([..tempty(), str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "concat" { return Func { params = [..tempty(), Slice { element = str_t }]; ret = str_t; variadic = true; param_names = []; n_required = ([..tempty(), Slice { element = str_t }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "slice_to" || name == "slice_from" {
-        var p: []@Type() = teko::list::push(tempty(), str_t)
-        p = teko::list::push(p, Prim { kind = PrimKind::U64 })
+        var p: []@Type() = [..tempty(), str_t, Prim { kind = PrimKind::U64 }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
-    if name == "len" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = [] } }
-    if name == "bytes_of_str" { return Func { params = teko::list::push(tempty(), str_t); ret = bytes_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = [] } }
+    if name == "len" { return Func { params = [..tempty(), str_t]; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = ([..tempty(), str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "bytes_of_str" { return Func { params = [..tempty(), str_t]; ret = bytes_t; variadic = false; param_names = []; n_required = ([..tempty(), str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "str_from_utf8" {
-        var m: []@Type() = teko::list::push(tempty(), str_t)
-        m = teko::list::push(m, Error { })
-        return Func { params = teko::list::push(tempty(), bytes_t); ret = Variant { members = m }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), bytes_t)).len; defaults = []; ret_extra = [] }
+        var m: []@Type() = [..tempty(), str_t, Error { }]
+        return Func { params = [..tempty(), bytes_t]; ret = Variant { members = m }; variadic = false; param_names = []; n_required = ([..tempty(), bytes_t]).len; defaults = []; ret_extra = teko::list::empty() }
     }
-    if name == "chars" { return Func { params = teko::list::push(tempty(), str_t); ret = Slice { element = Char { } }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = [] } }
-    if name == "len_chars" { return Func { params = teko::list::push(tempty(), str_t); ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = [] } }
+    if name == "chars" { return Func { params = [..tempty(), str_t]; ret = Slice { element = Char { } }; variadic = false; param_names = []; n_required = ([..tempty(), str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "len_chars" { return Func { params = [..tempty(), str_t]; ret = Prim { kind = PrimKind::I64 }; variadic = false; param_names = []; n_required = ([..tempty(), str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "char_at" {
-        var p: []@Type() = teko::list::push(tempty(), str_t)
-        p = teko::list::push(p, Prim { kind = PrimKind::I64 })
+        var p: []@Type() = [..tempty(), str_t, Prim { kind = PrimKind::I64 }]
         return Func { params = p; ret = Char { }; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
     if name == "str_slice_chars" {
-        var p: []@Type() = teko::list::push(tempty(), str_t)
-        p = teko::list::push(p, Prim { kind = PrimKind::I64 })
-        p = teko::list::push(p, Prim { kind = PrimKind::I64 })
+        var p: []@Type() = [..tempty(), str_t, Prim { kind = PrimKind::I64 }, Prim { kind = PrimKind::I64 }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
-    if name == "is_alpha" { return Func { params = teko::list::push(tempty(), Char { }); ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Char { })).len; defaults = []; ret_extra = [] } }
-    if name == "is_digit" { return Func { params = teko::list::push(tempty(), Char { }); ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Char { })).len; defaults = []; ret_extra = [] } }
-    if name == "is_space" { return Func { params = teko::list::push(tempty(), Char { }); ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Char { })).len; defaults = []; ret_extra = [] } }
-    if name == "to_lower" { return Func { params = teko::list::push(tempty(), Char { }); ret = Char { }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Char { })).len; defaults = []; ret_extra = [] } }
-    if name == "to_upper" { return Func { params = teko::list::push(tempty(), Char { }); ret = Char { }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Char { })).len; defaults = []; ret_extra = [] } }
-    if name == "ends_with" { return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = [] } }
-    if name == "contains" { return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = [] } }
+    if name == "is_alpha" { return Func { params = [..tempty(), Char { }]; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = ([..tempty(), Char { }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "is_digit" { return Func { params = [..tempty(), Char { }]; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = ([..tempty(), Char { }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "is_space" { return Func { params = [..tempty(), Char { }]; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = ([..tempty(), Char { }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "to_lower" { return Func { params = [..tempty(), Char { }]; ret = Char { }; variadic = false; param_names = []; n_required = ([..tempty(), Char { }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "to_upper" { return Func { params = [..tempty(), Char { }]; ret = Char { }; variadic = false; param_names = []; n_required = ([..tempty(), Char { }]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "ends_with" { return Func { params = [..tempty(), str_t, str_t]; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = ([..tempty(), str_t, str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
+    if name == "contains" { return Func { params = [..tempty(), str_t, str_t]; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = ([..tempty(), str_t, str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "last_index_of" {
-        var m: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::U64 })
-        m = teko::list::push(m, Error { })
+        var m: []@Type() = [..tempty(), Prim { kind = PrimKind::U64 }, Error { }]
         var u64_or_err = Variant { members = m }
-        return Func { params = teko::list::push(teko::list::push(tempty(), str_t), str_t); ret = u64_or_err; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(tempty(), str_t), str_t)).len; defaults = []; ret_extra = [] }
+        return Func { params = [..tempty(), str_t, str_t]; ret = u64_or_err; variadic = false; param_names = []; n_required = ([..tempty(), str_t, str_t]).len; defaults = []; ret_extra = teko::list::empty() }
     }
     if name == "err_loc" {
-        var p: []@Type() = teko::list::push(tempty(), Error { })
-        p = teko::list::push(p, Prim { kind = PrimKind::U32 })
-        p = teko::list::push(p, Prim { kind = PrimKind::U32 })
+        var p: []@Type() = [..tempty(), Error { }, Prim { kind = PrimKind::U32 }, Prim { kind = PrimKind::U32 }]
         return Func { params = p; ret = Error { }; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
     if name == "err_typed" {
-        var p: []@Type() = teko::list::push(tempty(), Error { })
-        p = teko::list::push(p, str_t)
-        p = teko::list::push(p, str_t)
+        var p: []@Type() = [..tempty(), Error { }, str_t, str_t]
         return Func { params = p; ret = Error { }; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
-    if name == "as_ptr" { return Func { params = teko::list::push(tempty(), str_t); ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), str_t)).len; defaults = []; ret_extra = [] } }
+    if name == "as_ptr" { return Func { params = [..tempty(), str_t]; ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = ([..tempty(), str_t]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "as_cstr" { return as_cstr_signature(str_t) }
     if name == "str_from_c" { return str_from_c_signature(str_t) }
     if name == "bytes_from_ptr" {
-        var bp: []@Type() = teko::list::push(tempty(), Ptr { inner = null })
-        bp = teko::list::push(bp, Prim { kind = PrimKind::U64 })
+        var bp: []@Type() = [..tempty(), Ptr { inner = null }, Prim { kind = PrimKind::U64 }]
         return Func { params = bp; ret = bytes_t; variadic = false; param_names = []; n_required = (bp).len; defaults = []; ret_extra = [] }
     }
     if name == "load_u64" { return load_u64_signature() }
@@ -636,32 +596,27 @@ fn builtin_fn(name: str): @Type() | error {
     if name == "byte_ptr" { return byte_ptr_signature() }
     if name == "region_buf" { return region_buf_signature(str_t) }
     if name == "fmt_f" || name == "fmt_e" || name == "fmt_g" || name == "fmt_n_f" || name == "fmt_p" {
-        var p: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::F64 })
-        p = teko::list::push(p, Prim { kind = PrimKind::I64 })
+        var p: []@Type() = [..tempty(), Prim { kind = PrimKind::F64 }, Prim { kind = PrimKind::I64 }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
     if name == "fmt_d" {
-        var p: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::I64 })
-        p = teko::list::push(p, Prim { kind = PrimKind::I64 })
+        var p: []@Type() = [..tempty(), Prim { kind = PrimKind::I64 }, Prim { kind = PrimKind::I64 }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
     if name == "fmt_x_upper" || name == "fmt_x_lower" || name == "fmt_b" {
-        return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::U64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::U64 })).len; defaults = []; ret_extra = [] }
+        return Func { params = [..tempty(), Prim { kind = PrimKind::U64 }]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::U64 }]).len; defaults = []; ret_extra = teko::list::empty() }
     }
-    if name == "fmt_n_i" { return Func { params = teko::list::push(tempty(), Prim { kind = PrimKind::I64 }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(tempty(), Prim { kind = PrimKind::I64 })).len; defaults = []; ret_extra = [] } }
+    if name == "fmt_n_i" { return Func { params = [..tempty(), Prim { kind = PrimKind::I64 }]; ret = str_t; variadic = false; param_names = []; n_required = ([..tempty(), Prim { kind = PrimKind::I64 }]).len; defaults = []; ret_extra = teko::list::empty() } }
     if name == "fmt_dyn_f64" {
-        var p: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::F64 })
-        p = teko::list::push(p, Str { })
+        var p: []@Type() = [..tempty(), Prim { kind = PrimKind::F64 }, Str { }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
     if name == "fmt_dyn_i64" {
-        var p: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::I64 })
-        p = teko::list::push(p, Str { })
+        var p: []@Type() = [..tempty(), Prim { kind = PrimKind::I64 }, Str { }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
     if name == "fmt_dyn_u64" {
-        var p: []@Type() = teko::list::push(tempty(), Prim { kind = PrimKind::U64 })
-        p = teko::list::push(p, Str { })
+        var p: []@Type() = [..tempty(), Prim { kind = PrimKind::U64 }, Str { }]
         return Func { params = p; ret = str_t; variadic = false; param_names = []; n_required = (p).len; defaults = []; ret_extra = [] }
     }
     match host_surface_fn(name) { (@Type()) as t => return t; error => { } }

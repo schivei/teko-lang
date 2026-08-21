@@ -44,42 +44,27 @@ fn gnu_emulation_for(arch: LinkArch, fmt: LinkFormat): str {
 }
 
 fn linker_candidates(arch: LinkArch, fmt: LinkFormat): []str {
-    var out: []str = []
     match fmt {
         LinkFormat::Macho => {
-            out = teko::list::push(out, "ld")
-            out = teko::list::push(out, "ld64.lld")
-            return out
+            ["ld", "ld64.lld"]
         }
         LinkFormat::Pe => {
-            out = teko::list::push(out, "lld-link")
-            return out
+            ["lld-link"]
         }
         LinkFormat::Elf => {
-            out = teko::list::push(out, "ld.lld")
-            out = teko::list::push(out, "ld")
-            out = teko::list::push(out, "ld.gold")
-            return out
+            ["ld.lld", "ld", "ld.gold"]
         }
     }
 }
 
 fn no_linker_error(arch: LinkArch, fmt: LinkFormat): error {
-    error { message = teko::str::concat(
-        "no linker on this host targets ", arch_name(arch), "/", format_name(fmt),
-        ". Tried: ", join_candidates(linker_candidates(arch, fmt)),
-        ". A linker is NOT resolved from the PATH by default;",
-        " install a linker native to the target",
-        " or name one explicitly.") }
+    error { message = $"no linker on this host targets {arch_name(arch)}/{format_name(fmt)}. Tried: {join_candidates(linker_candidates(arch, fmt))}. A linker is NOT resolved from the PATH by default; install a linker native to the target or name one explicitly." }
 }
 
 const MINGW_BAN_REASON: str = "MinGW is forbidden (proibido) on every Windows host: the linker must be native to the target, not an EMULATED one resolved from the PATH."
 
 fn mingw_rejected_error(cmd: str, arch: LinkArch): error {
-    error { message = teko::str::concat(
-        "refusing the MinGW linker '", cmd, "' for a ", arch_name(arch), " target. ",
-        MINGW_BAN_REASON,
-        " Use a linker native to the target (lld-link ships with LLVM).") }
+    error { message = $"refusing the MinGW linker '{cmd}' for a {arch_name(arch)} target. {MINGW_BAN_REASON} Use a linker native to the target (lld-link ships with LLVM)." }
 }
 
 fn join_candidates(cands: []str): str {
@@ -88,7 +73,7 @@ fn join_candidates(cands: []str): str {
     var i: u64 = 1
     loop {
         if i >= cands.len { break }
-        out = teko::str::concat(out, ", ", cands[i])
+        out = $"{out}, {cands[i]}"
         i = i + 1
     }
     out
@@ -97,11 +82,9 @@ fn join_candidates(cands: []str): str {
 fn linker_targets_arch(cmd: str, arch: LinkArch, fmt: LinkFormat): bool {
     var emu = gnu_emulation_for(arch, fmt)
     if emu.len == 0 { return false }
-    var argv: []str = []
-    argv = teko::list::push(argv, cmd)
-    argv = teko::list::push(argv, "-m")
-    argv = teko::list::push(argv, emu)
-    argv = teko::list::push(argv, "--version")
+    var argv: []str = [
+        cmd, "-m", emu, "--version"
+    ]
     teko::process::run_quiet(argv) == 0
 }
 
@@ -111,19 +94,16 @@ fn pe_linker_targets_arch(cmd: str, arch: LinkArch): bool {
         LinkArch::Arm64 => ""
     }
     if machine.len == 0 { return false }
-    var argv: []str = []
-    argv = teko::list::push(argv, cmd)
-    argv = teko::list::push(argv, machine)
-    argv = teko::list::push(argv, "/?")
+    var argv: []str = [
+        cmd, machine, "/?"
+    ]
     teko::process::run_quiet(argv) == 0
 }
 
 fn macho_linker_targets_arch(cmd: str, arch: LinkArch): bool {
-    var argv: []str = []
-    argv = teko::list::push(argv, cmd)
-    argv = teko::list::push(argv, "-arch")
-    argv = teko::list::push(argv, arch_name(arch))
-    argv = teko::list::push(argv, "-v")
+    var argv: []str = [
+        cmd, "-arch", arch_name(arch), "-v"
+    ]
     teko::process::run_quiet(argv) == 0
 }
 

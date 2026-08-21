@@ -579,7 +579,7 @@ fn pin_reg_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32): PinnedArg
             var is_fpr = info.reg_class == MRegClass::FPR
             var mv = if is_fpr { fmov_x86(slot.reg, vreg(args[i], MRegClass::FPR), info.wide) } else { mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide) }
             ctx = selctx_x86_emit(ctx, mv)
-            uses = teko::list::push(uses, slot.reg)
+            uses = [..uses, slot.reg]
         }
         i++
     }
@@ -615,13 +615,13 @@ fn materialize_one_fat_pair_x86(ctx0: SelCtxX86, ptr: u32, len: u32): FreshScrat
 
 fn materialize_fat_pairs_x86(ctx0: SelCtxX86, args: []u32, pairs: u64): FatSlotsX86 {
     var ctx = ctx0
-    var addrs: []MReg = []
+    var addrs: [pairs]MReg = []
     var k: u64 = 0
     loop {
         if k >= pairs { break }
         var one = materialize_one_fat_pair_x86(ctx, args[k * 2], args[k * 2 + 1])
         ctx = one.ctx
-        addrs = teko::list::push(addrs, one.reg)
+        addrs[k] = one.reg
         k++
     }
     FatSlotsX86 { ctx = ctx; addrs = addrs }
@@ -629,7 +629,7 @@ fn materialize_fat_pairs_x86(ctx0: SelCtxX86, args: []u32, pairs: u64): FatSlots
 
 fn pin_fat_slot_addrs_x86(abi: AbiDescriptor, ctx0: SelCtxX86, addrs: []MReg): PinnedArgsX86 | error {
     var ctx = ctx0
-    var uses: []MReg = []
+    var uses: [addrs.len]MReg = []
     var k: u64 = 0
     loop {
         if k >= addrs.len { break }
@@ -638,7 +638,7 @@ fn pin_fat_slot_addrs_x86(abi: AbiDescriptor, ctx0: SelCtxX86, addrs: []MReg): P
             return error { message = "isel x86-64: an ABI with no integer argument register cannot pass a by-reference aggregate (internal)" }
         }
         ctx = selctx_x86_emit(ctx, mov_x86(slot.reg, addrs[k], true))
-        uses = teko::list::push(uses, slot.reg)
+        uses[k] = slot.reg
         k++
     }
     PinnedArgsX86 { ctx = ctx; uses = uses }
@@ -646,7 +646,7 @@ fn pin_fat_slot_addrs_x86(abi: AbiDescriptor, ctx0: SelCtxX86, addrs: []MReg): P
 
 fn pin_trailing_scalar_args_x86(abi: AbiDescriptor, pinned: PinnedArgsX86, args: []u32, pairs: u64): PinnedArgsX86 | error {
     var ctx = pinned.ctx
-    var uses = pinned.uses
+    var uses: [args.len]MReg = []
     var i: u64 = pairs * 2
     loop {
         if i >= args.len { break }
@@ -658,10 +658,10 @@ fn pin_trailing_scalar_args_x86(abi: AbiDescriptor, pinned: PinnedArgsX86, args:
         }
         var mv = if is_fpr { fmov_x86(slot.reg, vreg(args[i], MRegClass::FPR), info.wide) } else { mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide) }
         ctx = selctx_x86_emit(ctx, mv)
-        uses = teko::list::push(uses, slot.reg)
+        uses[i] = slot.reg
         i++
     }
-    PinnedArgsX86 { ctx = ctx; uses = uses }
+    PinnedArgsX86 { ctx = ctx; uses = [..pinned.uses, ..uses] }
 }
 
 fn pin_fat_pairs_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, pairs: u64): PinnedArgsX86 | error {
@@ -747,23 +747,23 @@ fn select_insts_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, insts: [
 }
 
 fn provisional_params_x86(pids: []u32): []MReg {
-    var out: []MReg = []
+    var out: [pids.len]MReg = []
     var i: u64 = 0
     loop {
         if i >= pids.len { break }
-        out = teko::list::push(out, vreg(pids[i], MRegClass::GPR))
+        out[i] = vreg(pids[i], MRegClass::GPR)
         i++
     }
     out
 }
 
 fn build_mirror_blocks_x86(f: lir::LFunc): MFuncX86 {
-    var blocks: []MBlockX86 = []
+    var blocks: [f.blocks.len]MBlockX86 = []
     var i: u64 = 0
     loop {
         if i >= f.blocks.len { break }
         var lb = f.blocks[i]
-        blocks = teko::list::push(blocks, MBlockX86 { id = lb.id; params = provisional_params_x86(lb.params); insts = [] })
+        blocks[i] = MBlockX86 { id = lb.id; params = provisional_params_x86(lb.params); insts = [] }
         i++
     }
     MFuncX86 { symbol = f.symbol; blocks = blocks; frame = [] }

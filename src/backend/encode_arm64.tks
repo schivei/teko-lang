@@ -55,10 +55,13 @@ fn reloc_word(w: u32, sym: str, kind: MRelocKind): EncWord {
 }
 
 pub fn emit_u32_le(buf: []byte, w: u32): []byte {
-    var b = teko::list::push(buf, (w & ARM64_BYTE_MASK) to byte)
-    b = teko::list::push(b, ((w >> ((1 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte)
-    b = teko::list::push(b, ((w >> ((2 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte)
-    teko::list::push(b, ((w >> ((3 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte)
+    [
+        ..buf,
+        (w & ARM64_BYTE_MASK) to byte,
+        ((w >> ((1 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte,
+        ((w >> ((2 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte,
+        ((w >> ((3 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte
+    ]
 }
 
 fn enc_reg(r: MReg): u32 {
@@ -397,14 +400,14 @@ fn insert_sorted_unique(xs: []u32, v: u32): []u32 {
         if cur == v { return xs }
         if !inserted {
             if v < cur {
-                out = teko::list::push(out, v)
+                out = [..out, v]
                 inserted = true
             }
         }
-        out = teko::list::push(out, cur)
+        out = [..out, cur]
         i++
     }
-    if !inserted { out = teko::list::push(out, v) }
+    if !inserted { out = [..out, v] }
     out
 }
 
@@ -454,14 +457,14 @@ fn collect_callee_saved(abi: AbiDescriptor, f: MFunc): Saved {
 }
 
 fn compute_slot_offsets(frame: []lir::LAlloca): SlotLayout {
-    var offsets: []u32 = []
+    var offsets: [frame.len]u32 = []
     var running: u32 = 0
     var i: u64 = 0
     loop {
         if i >= frame.len { break }
         var la = frame[i]
         var at = align_up(running, la.align)
-        offsets = teko::list::push(offsets, at)
+        offsets[i] = at
         running = at + la.bytes
         i++
     }
@@ -569,11 +572,11 @@ fn out_arg_bytes(f: MFunc): u32 {
 
 fn shift_slot_offsets(offsets: []u32, delta: u32): []u32 {
     if delta == (0 to u32) { return offsets }
-    var result: []u32 = []
+    var result: [offsets.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= offsets.len { break }
-        result = teko::list::push(result, offsets[i] + delta)
+        result[i] = offsets[i] + delta
         i++
     }
     result
@@ -627,16 +630,18 @@ fn big_offset_words(rn_id: u32, rd_id: u32, off: u32, is_sub: bool): []u32 | err
     if off > ARM64_IMM24_FIELD_MAX { return honest_bigframe() }
     var hi = off >> ARM64_IMM12_SPLIT_SHIFT
     var lo = off & ARM64_IMM12_MASK
-    var words: []u32 = []
+    var is_hi = hi > 0
+    var is_lo = (lo > 0) || !is_hi
     var cur_rn = rn_id
-    if hi > (0 to u32) {
+    var words: []u32 = []
+    if is_hi {
         var w = if is_sub { sub_reg_imm_shifted_word(rn_id, rd_id, hi) } else { add_reg_imm_shifted_word(rn_id, rd_id, hi) }
-        words = teko::list::push(words, w)
+        words = [w]
         cur_rn = rd_id
     }
-    if (lo > (0 to u32)) || (hi == (0 to u32)) {
+    if is_lo {
         var w = if is_sub { sub_reg_imm_word(cur_rn, rd_id, lo) } else { add_reg_imm_word(cur_rn, rd_id, lo) }
-        words = teko::list::push(words, w)
+        words = [..words, w]
     }
     words
 }
@@ -692,21 +697,23 @@ fn single_frame_word(ra: u32, imm12: u32, is_fpr: bool, is_store: bool): u32 {
 }
 
 fn emit_frame_mem(words0: []u32, ids: []u32, frame_off: u32, is_fpr: bool, is_store: bool): []u32 {
-    var words = words0
+    var words: [ids.len]u32 = []
     var i: u64 = 0
+    var k: u64 = 0
     loop {
         if i >= ids.len { break }
         var off = frame_off + ((i to u32) * ARM64_REG_BYTES)
         var has_pair = (i + 1) < ids.len
         if has_pair {
-            words = teko::list::push(words, pair_frame_word(ids[i], ids[i + 1], off / ARM64_REG_BYTES, is_fpr, is_store))
+            words[k] = pair_frame_word(ids[i], ids[i + 1], off / ARM64_REG_BYTES, is_fpr, is_store)
             i = i + 2
         } else {
-            words = teko::list::push(words, single_frame_word(ids[i], off / ARM64_REG_BYTES, is_fpr, is_store))
+            words[k] = single_frame_word(ids[i], off / ARM64_REG_BYTES, is_fpr, is_store)
             i = i + 1
         }
+        k++
     }
-    words
+    [..words0, ..words]
 }
 
 fn callee_base_offset(layout: FrameLayout): u32 {
@@ -722,15 +729,15 @@ fn emit_callee_area(words0: []u32, layout: FrameLayout, is_store: bool): []u32 {
 }
 
 fn emit_frame_mem_single(words0: []u32, ids: []u32, frame_off: u32, is_fpr: bool, is_store: bool): []u32 {
-    var words = words0
+    var words: [ids.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= ids.len { break }
         var off = frame_off + ((i to u32) * ARM64_REG_BYTES)
-        words = teko::list::push(words, single_frame_word(ids[i], off / ARM64_REG_BYTES, is_fpr, is_store))
+        words[i] = single_frame_word(ids[i], off / ARM64_REG_BYTES, is_fpr, is_store)
         i++
     }
-    words
+    [..words0, ..words]
 }
 
 fn emit_callee_area_single(words0: []u32, layout: FrameLayout, is_store: bool): []u32 {
@@ -738,17 +745,6 @@ fn emit_callee_area_single(words0: []u32, layout: FrameLayout, is_store: bool): 
     var after_gpr = emit_frame_mem_single(words0, layout.saved_gpr, frame_off, false, is_store)
     var fpr_base = frame_off + ((layout.saved_gpr.len to u32) * ARM64_REG_BYTES)
     emit_frame_mem_single(after_gpr, layout.saved_fpr, fpr_base, true, is_store)
-}
-
-fn append_u32_words(buf: []u32, xs: []u32): []u32 {
-    var b = buf
-    var i: u64 = 0
-    loop {
-        if i >= xs.len { break }
-        b = teko::list::push(b, xs[i])
-        i++
-    }
-    b
 }
 
 fn frame_fits(layout: FrameLayout): bool {
@@ -761,19 +757,21 @@ fn big_frame_fits(layout: FrameLayout): bool {
 
 fn emit_prologue_small(layout: FrameLayout): []u32 {
     var top = layout.size - ARM64_FP_LR_BYTES
-    var words: []u32 = []
-    words = teko::list::push(words, sub_sp_imm_word(layout.size))
-    words = teko::list::push(words, stp_gpr(ARM64_FP_ID, ARM64_LR_ID, top / ARM64_REG_BYTES))
-    words = teko::list::push(words, add_sp_imm_word(ARM64_FP_ID, top))
+    var words: []u32 = [
+        sub_sp_imm_word(layout.size),
+        stp_gpr(ARM64_FP_ID, ARM64_LR_ID, top / ARM64_REG_BYTES),
+        add_sp_imm_word(ARM64_FP_ID, top)
+    ]
     emit_callee_area(words, layout, true)
 }
 
 fn emit_epilogue_small(layout: FrameLayout): []u32 {
     var top = layout.size - ARM64_FP_LR_BYTES
-    var words: []u32 = emit_callee_area([], layout, false)
-    words = teko::list::push(words, ldp_gpr(ARM64_FP_ID, ARM64_LR_ID, top / ARM64_REG_BYTES))
-    words = teko::list::push(words, add_sp_imm_word(ARM64_SP_ID, layout.size))
-    words
+    [
+        ..emit_callee_area([], layout, false),
+        ldp_gpr(ARM64_FP_ID, ARM64_LR_ID, top / ARM64_REG_BYTES),
+        add_sp_imm_word(ARM64_SP_ID, layout.size)
+    ]
 }
 
 fn emit_prologue_big(layout: FrameLayout): []u32 | error {
@@ -781,23 +779,27 @@ fn emit_prologue_big(layout: FrameLayout): []u32 | error {
     var size = layout.size
     var top = size - ARM64_FP_LR_BYTES
     var sub_words = match big_offset_words(ARM64_SP_ID, ARM64_SP_ID, size, true) { []u32 as w => w; error as e => return e }
-    var words: []u32 = sub_words
-    words = teko::list::push(words, str_gpr_sp(ARM64_FP_ID, top / ARM64_REG_BYTES))
-    words = teko::list::push(words, str_gpr_sp(ARM64_LR_ID, (top + ARM64_REG_BYTES) / ARM64_REG_BYTES))
     var fp_words = match big_offset_words(ARM64_SP_ID, ARM64_FP_ID, top, false) { []u32 as w => w; error as e => return e }
-    words = append_u32_words(words, fp_words)
+    var words = [
+        ..sub_words,
+        str_gpr_sp(ARM64_FP_ID, top / ARM64_REG_BYTES),
+        str_gpr_sp(ARM64_LR_ID, (top + ARM64_REG_BYTES) / ARM64_REG_BYTES),
+        ..fp_words
+    ]
     emit_callee_area_single(words, layout, true)
 }
 
 fn emit_epilogue_big(layout: FrameLayout): []u32 | error {
     if !big_frame_fits(layout) { return honest_bigframe() }
     var size = layout.size
-    var top = size - ARM64_FP_LR_BYTES
-    var words: []u32 = emit_callee_area_single([], layout, false)
-    words = teko::list::push(words, ldr_gpr_sp(ARM64_FP_ID, top / ARM64_REG_BYTES))
-    words = teko::list::push(words, ldr_gpr_sp(ARM64_LR_ID, (top + ARM64_REG_BYTES) / ARM64_REG_BYTES))
     var add_words = match big_offset_words(ARM64_SP_ID, ARM64_SP_ID, size, false) { []u32 as w => w; error as e => return e }
-    append_u32_words(words, add_words)
+    var top = size - ARM64_FP_LR_BYTES
+    var words = [
+        ..emit_callee_area_single([], layout, false),
+        ldr_gpr_sp(ARM64_FP_ID, top / ARM64_REG_BYTES),
+        ldr_gpr_sp(ARM64_LR_ID, (top + ARM64_REG_BYTES) / ARM64_REG_BYTES),
+        ..add_words
+    ]
 }
 
 pub fn emit_prologue(layout: FrameLayout): []u32 | error {
@@ -942,25 +944,14 @@ fn lookup_block_offset(offsets: []BlockOffset, id: u32): u32 | error {
 }
 
 fn wrap_plain_words(acc0: []EncWord, ws: []u32): []EncWord {
-    var acc = acc0
+    var acc: [ws.length] = []
     var i: u64 = 0
     loop {
         if i >= ws.len { break }
-        acc = teko::list::push(acc, plain_word(ws[i]))
+        acc[i] = plain_word(ws[i])
         i++
     }
-    acc
-}
-
-fn append_encwords(acc: []EncWord, xs: []EncWord): []EncWord {
-    var out = acc
-    var i: u64 = 0
-    loop {
-        if i >= xs.len { break }
-        out = teko::list::push(out, xs[i])
-        i++
-    }
-    out
+    [..acc0, ..acc]
 }
 
 fn inst_is_frame_addr(inst: @MInst()): bool {
@@ -992,7 +983,7 @@ fn encode_one(layout: FrameLayout, words0: []EncWord, inst: @MInst()): []EncWord
         match emit_epilogue(layout) {
             []u32 as epi => {
                 var after = wrap_plain_words(words0, epi)
-                return teko::list::push(after, encode_ret())
+                return [..after, encode_ret()]
             }
             error as e => return e
         }
@@ -1000,10 +991,10 @@ fn encode_one(layout: FrameLayout, words0: []EncWord, inst: @MInst()): []EncWord
     if inst_is_frame_addr(inst) {
         var fa = as_frame_addr(inst)
         var ews = match encode_frame_addr_words(layout, fa) { []EncWord as w => w; error as e => return e }
-        return append_encwords(words0, ews)
+        return [..words0, ..ews]
     }
     var ew = match encode_inst_word(layout, inst) { EncWord as x => x; error as e => return e }
-    teko::list::push(words0, ew)
+    [..words0, ew]
 }
 
 fn encode_block_words(layout: FrameLayout, words0: []EncWord, blk: MBlock): []EncWord | error {
@@ -1029,19 +1020,19 @@ fn resolve_word(ew: EncWord, here: u32, offsets: []BlockOffset): u32 | error {
 fn collect_word_reloc(acc: []Reloc, ew: EncWord, word_index: u64): []Reloc {
     match ew.reloc {
         null => acc
-        EncReloc as r => teko::list::push(acc, Reloc { offset = (word_index to u32) * ARM64_WORD_BYTES; sym = r.sym; kind = r.kind; sect = RelocSect::Text })
+        EncReloc as r => [.. acc, Reloc { offset = (word_index to u32) * ARM64_WORD_BYTES; sym = r.sym; kind = r.kind; sect = RelocSect::Text }]
     }
 }
 
 fn finalize_func(symbol: str, words: []EncWord, offsets: []BlockOffset): EncodedFunc | error {
-    var out_words: []u32 = []
+    var out_words: [words.len]u32 = []
     var relocs: []Reloc = []
     var i: u64 = 0
     loop {
         if i >= words.len { break }
         var ew = words[i]
         var w = match resolve_word(ew, i to u32, offsets) { u32 as v => v; error as e => return e }
-        out_words = teko::list::push(out_words, w)
+        out_words[i] = w
         relocs = collect_word_reloc(relocs, ew, i)
         i++
     }
@@ -1052,13 +1043,13 @@ pub fn encode_func(abi: AbiDescriptor, f: MFunc): EncodedFunc | error {
     var layout = compute_frame_layout(abi, f)
     var pro_words = match emit_prologue(layout) { []u32 as w => w; error as e => return e }
     var words: []EncWord = wrap_plain_words([], pro_words)
-    var offsets: []BlockOffset = []
+    var offsets: [f.blocks.len]BlockOffset = []
     var bi: u64 = 0
     loop {
         if bi >= f.blocks.len { break }
         var blk = f.blocks[bi]
         var off = words.len to u32
-        offsets = teko::list::push(offsets, BlockOffset { id = blk.id; word = off })
+        offsets[bi] = BlockOffset { id = blk.id; word = off }
         var next = match encode_block_words(layout, words, blk) { []EncWord as w => w; error as e => return e }
         words = next
         bi++
@@ -1097,15 +1088,15 @@ fn append_words_le(buf: []byte, ws: []u32): []byte {
 }
 
 fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base_off: u32): []Reloc {
-    var out = acc
+    var out: [relocs.len]Reloc = []
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
         var r = relocs[i]
-        out = teko::list::push(out, Reloc { offset = r.offset + base_off; sym = r.sym; kind = r.kind; sect = r.sect })
+        out[i] = Reloc { offset = r.offset + base_off; sym = r.sym; kind = r.kind; sect = r.sect }
         i++
     }
-    out
+    [..acc, ..out]
 }
 
 pub type ModuleText = struct {
@@ -1128,7 +1119,7 @@ pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc): ModuleText {
     var sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.text_off; local = false }
     var text = append_words_le(acc.text, ef.words)
     var relocs = rebase_relocs(acc.relocs, ef.relocs, acc.text_off)
-    var syms = teko::list::push(acc.syms, sym)
+    var syms = [..acc.syms, sym]
     var text_off = acc.text_off + ((ef.words.len to u32) * ARM64_WORD_BYTES)
     ModuleText { text = text; relocs = relocs; syms = syms; text_off = text_off }
 }
@@ -1151,28 +1142,17 @@ type ModuleRodata = struct {
     relocs: []lir::LDataReloc
 }
 
-fn append_bytes(buf: []byte, src: []byte): []byte {
-    var b = buf
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        b = teko::list::push(b, src[i])
-        i++
-    }
-    b
-}
-
 const RODATA_ENTRY_ALIGN: u32 = 8
 
 fn fold_rodata_entry_relocs(relocs: []lir::LDataReloc, entry: lir::LRodata, off: u32): []lir::LDataReloc {
-    var out = relocs
+    var out: [entry.relocs.len]lir::LDataReloc = []
     var j: u64 = 0
     loop {
         if j >= entry.relocs.len { break }
-        out = teko::list::push(out, lir::data_reloc(off + entry.relocs[j].offset, entry.relocs[j].target))
+        out[j] = lir::data_reloc(off + entry.relocs[j].offset, entry.relocs[j].target)
         j++
     }
-    out
+    [..relocs, ..out]
 }
 
 type PaddedRodata = struct {
@@ -1181,28 +1161,24 @@ type PaddedRodata = struct {
 }
 
 fn pad_rodata_entry_boundary(bytes: []byte, off: u32, entry: lir::LRodata, is_last: bool): PaddedRodata {
-    var placed = append_bytes(bytes, entry.bytes)
+    var placed = [..bytes, ..entry.bytes]
     var placed_off = off + (entry.bytes.len to u32)
     if is_last { return PaddedRodata { bytes = placed; off = placed_off } }
     var aligned_off = align_up(placed_off, RODATA_ENTRY_ALIGN)
-    var padded = placed
-    loop {
-        if padded.len >= (aligned_off to u64) { break }
-        padded = teko::list::push(padded, 0)
-    }
-    PaddedRodata { bytes = padded; off = aligned_off }
+    var padded: [placed.len]byte = []
+    PaddedRodata { bytes = [..placed, ..padded]; off = aligned_off }
 }
 
 fn encode_rodata(rodata: []lir::LRodata): ModuleRodata | error {
     var bytes: []byte = []
-    var syms: []Symbol = []
+    var syms: [rodata.len]Symbol = []
     var relocs: []lir::LDataReloc = []
     var off: u32 = 0
     var i: u64 = 0
     loop {
         if i >= rodata.len { break }
         var rd = rodata[i]
-        syms = teko::list::push(syms, Symbol { name = rd.symbol; defined = true; sect = 2 to u8; offset = off; local = true })
+        syms[i] = Symbol { name = rd.symbol; defined = true; sect = 2 to u8; offset = off; local = true }
         relocs = fold_rodata_entry_relocs(relocs, rd, off)
         var placed = pad_rodata_entry_boundary(bytes, off, rd, i + 1 >= rodata.len)
         bytes = placed.bytes
@@ -1244,12 +1220,15 @@ fn find_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc): []Ro
 
 fn push_rodata_align_violation(out: []RodataAlignViolation, syms: []Symbol, r: lir::LDataReloc): []RodataAlignViolation {
     if r.offset % RODATA_ENTRY_ALIGN == 0 { return out }
-    teko::list::push(out, RodataAlignViolation {
-        owner = rodata_owning_symbol_name(syms, r.offset)
-        target = r.target
-        offset = r.offset
-        expected = align_up(r.offset, RODATA_ENTRY_ALIGN)
-    })
+    [
+        ..out,
+        RodataAlignViolation {
+            owner = rodata_owning_symbol_name(syms, r.offset)
+            target = r.target
+            offset = r.offset
+            expected = align_up(r.offset, RODATA_ENTRY_ALIGN)
+        }
+    ]
 }
 
 fn rodata_align_check_enabled(): bool {
@@ -1288,48 +1267,28 @@ fn name_in_symbols(syms: []Symbol, name: str): bool {
 }
 
 fn collect_undefined(defined: []Symbol, relocs: []Reloc): []Symbol {
-    var undef: []Symbol = []
+    var undef: [relocs.len]Symbol = []
     var i: u64 = 0
+    var j: u64 = 0
     loop {
         if i >= relocs.len { break }
         var name = relocs[i].sym
         var known = name_in_symbols(defined, name) || name_in_symbols(undef, name)
         if !known {
-            undef = teko::list::push(undef, Symbol { name = name; defined = false; sect = 0 to u8; offset = 0 to u32; local = false })
+            undef[j] = Symbol { name = name; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }
+            j++
         }
         i++
     }
-    undef
-}
-
-fn concat_symbols(a: []Symbol, b: []Symbol): []Symbol {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i++
-    }
-    out
+    undef[0..j]
 }
 
 fn rodata_relocs_arm64(rs: []lir::LDataReloc): []Reloc {
-    var out: []Reloc = []
+    var out: [rs.len]Reloc = []
     var i: u64 = 0
     loop {
         if i >= rs.len { break }
-        out = teko::list::push(out, Reloc { offset = rs[i].offset; sym = rs[i].target; kind = MRelocKind::Abs64; sect = RelocSect::Rodata })
-        i++
-    }
-    out
-}
-
-fn append_relocs_arm64(a: []Reloc, b: []Reloc): []Reloc {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
+        out[i] = Reloc { offset = rs[i].offset; sym = rs[i].target; kind = MRelocKind::Abs64; sect = RelocSect::Rodata }
         i++
     }
     out
@@ -1344,8 +1303,8 @@ pub fn encode_module(abi: AbiDescriptor, m: MModule): EncodedModule | error {
 pub fn finish_encoded_module(mt: ModuleText, rodata: []lir::LRodata, globals: []lir::LGlobal): EncodedModule | error {
     if globals.len > (0 to u64) { return honest_globals() }
     var rod = match encode_rodata(rodata) { ModuleRodata as x => x; error as e => return e }
-    var defined = concat_symbols(rod.syms, mt.syms)
+    var defined = [..rod.syms, ..mt.syms]
     var undef = collect_undefined(defined, mt.relocs)
-    var symbols = concat_symbols(defined, undef)
-    EncodedModule { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = append_relocs_arm64(mt.relocs, rodata_relocs_arm64(rod.relocs)) }
+    var symbols = [..defined, ..undef]
+    EncodedModule { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = [..mt.relocs, ..rodata_relocs_arm64(rod.relocs)] }
 }

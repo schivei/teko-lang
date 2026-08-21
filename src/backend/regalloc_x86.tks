@@ -81,14 +81,14 @@ fn block_successors_x86(f: MFuncX86, id: u32): []u32 {
 fn rpo_visit_x86(f: MFuncX86, id: u32, st: RpoState): RpoState {
     if u32_in(st.visited, id) { return st }
     var succs = block_successors_x86(f, id)
-    var cur = RpoState { visited = teko::list::push(st.visited, id); post = st.post }
+    var cur = RpoState { visited = [..st.visited, id]; post = st.post }
     var i: u64 = 0
     loop {
         if i >= succs.len { break }
         cur = rpo_visit_x86(f, succs[i], cur)
         i++
     }
-    RpoState { visited = cur.visited; post = teko::list::push(cur.post, id) }
+    RpoState { visited = cur.visited; post = [..cur.post, id] }
 }
 
 fn append_unvisited_x86(f: MFuncX86, order: []u32): []u32 {
@@ -97,7 +97,7 @@ fn append_unvisited_x86(f: MFuncX86, order: []u32): []u32 {
     loop {
         if i >= f.blocks.len { break }
         var bid = f.blocks[i].id
-        if !u32_in(out, bid) { out = teko::list::push(out, bid) }
+        if !u32_in(out, bid) { out = [..out, bid] }
         i++
     }
     out
@@ -127,7 +127,7 @@ fn number_insts_x86(f: MFuncX86, order: []u32): []NumberedInstX86 {
         var ii: u64 = 0
         loop {
             if ii >= insts.len { break }
-            out = teko::list::push(out, NumberedInstX86 { point = p; block_id = bid; inst = insts[ii] })
+            out = [..out, NumberedInstX86 { point = p; block_id = bid; inst = insts[ii] }]
             p = p + 1
             ii++
         }
@@ -144,12 +144,12 @@ fn collect_events_x86(stream: []NumberedInstX86): []RegEvent {
         var ni = stream[i]
         var ir = inst_regs_x86(ni.inst)
         if ir.has_def {
-            out = teko::list::push(out, RegEvent { reg = ir.def_reg; point = ni.point; is_def = true })
+            out = [..out, RegEvent { reg = ir.def_reg; point = ni.point; is_def = true }]
         }
         var u: u64 = 0
         loop {
             if u >= ir.uses.len { break }
-            out = teko::list::push(out, RegEvent { reg = ir.uses[u]; point = ni.point; is_def = false })
+            out = [..out, RegEvent { reg = ir.uses[u]; point = ni.point; is_def = false }]
             u++
         }
         i++
@@ -162,7 +162,7 @@ fn call_points_of_x86(stream: []NumberedInstX86): []u32 {
     var i: u64 = 0
     loop {
         if i >= stream.len { break }
-        if inst_regs_x86(stream[i].inst).is_call { out = teko::list::push(out, stream[i].point) }
+        if inst_regs_x86(stream[i].inst).is_call { out = [..out, stream[i].point] }
         i++
     }
     out
@@ -201,7 +201,7 @@ fn phys_intervals_x86(events: []RegEvent, r: MReg, stream: []NumberedInstX86, ca
         var e = events[i]
         if reg_eq(e.reg, r) {
             if e.is_def {
-                if have_open { out = teko::list::push(out, finalize_pin_x86(r, cur_start, cur_end, def_started, stream, call_points)) }
+                if have_open { out = [..out, finalize_pin_x86(r, cur_start, cur_end, def_started, stream, call_points)] }
                 cur_start = e.point
                 cur_end = e.point
                 have_open = true
@@ -219,7 +219,7 @@ fn phys_intervals_x86(events: []RegEvent, r: MReg, stream: []NumberedInstX86, ca
         }
         i++
     }
-    if have_open { out = teko::list::push(out, finalize_pin_x86(r, cur_start, cur_end, def_started, stream, call_points)) }
+    if have_open { out = [..out, finalize_pin_x86(r, cur_start, cur_end, def_started, stream, call_points)] }
     out
 }
 
@@ -247,7 +247,7 @@ fn natural_loops_x86(stream: []NumberedInstX86, order: []u32, reachable: []u32):
         var t = terminator_target_x86(ni.inst)
         if t.has && u32_in(reachable, ni.block_id) {
             if block_pos(order, t.target) <= block_pos(order, ni.block_id) {
-                out = teko::list::push(out, NaturalLoop { header_pt = block_first_point_x86(stream, t.target); latch_pt = ni.point })
+                out = [..out, NaturalLoop { header_pt = block_first_point_x86(stream, t.target); latch_pt = ni.point }]
             }
         }
         i++
@@ -270,11 +270,11 @@ fn compute_intervals_x86(stream: []NumberedInstX86, order: []u32, reachable: []u
             var j: u64 = 0
             loop {
                 if j >= pins.len { break }
-                fixed = teko::list::push(fixed, pins[j])
+                fixed = [..fixed, pins[j]]
                 j++
             }
         } else {
-            virt = teko::list::push(virt, virt_interval(events, r, cps))
+            virt = [..virt, virt_interval(events, r, cps)]
         }
         i++
     }
@@ -319,20 +319,13 @@ fn minst_x86_single(x: @MInstX86()): []@MInstX86() {
 }
 
 fn minst_x86_cat(a: []@MInstX86(), b: []@MInstX86()): []@MInstX86() {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i++
-    }
-    out
+    [..a, ..b]
 }
 
 fn emit_gpr_reload_x86(sv: MReg, slot: u64): []@MInstX86() {
     var fa = frame_addr_x86(sv, slot)
     var ld = load_x86(MMemSizeX86::Q, false, sv, MMem { base_reg = sv; offset = 0 to i32 })
-    teko::list::push(minst_x86_single(fa), ld)
+    [..minst_x86_single(fa), ld]
 }
 
 fn emit_spill_reload_x86(sv: MReg, slot: u64): []@MInstX86() {
@@ -348,7 +341,7 @@ fn emit_spill_store_x86(dsv: MReg, asv: MReg, slot: u64): []@MInstX86() {
 fn emit_gpr_store_x86(dsv: MReg, asv: MReg, slot: u64): []@MInstX86() {
     var fa = frame_addr_x86(asv, slot)
     var st = store_x86(MMemSizeX86::Q, dsv, MMem { base_reg = asv; offset = 0 to i32 })
-    teko::list::push(minst_x86_single(fa), st)
+    [..minst_x86_single(fa), st]
 }
 
 type UseAccX86 = struct {
@@ -365,10 +358,10 @@ fn add_use_subst_x86(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u6
     if la.is_spill {
         var sv = spill_scratch(abi, u.reg_class, acc.nth)
         var reloads2 = minst_x86_cat(acc.reloads, emit_spill_reload_x86(sv, frame_base + la.slot))
-        var table2 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = sv })
+        var table2 = [..acc.table, SubstEntry { vid = u.id; to = sv }]
         return UseAccX86 { table = table2; reloads = reloads2; nth = acc.nth + 1 }
     }
-    var table3 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = preg(la.phys, u.reg_class) })
+    var table3 = [..acc.table, SubstEntry { vid = u.id; to = preg(la.phys, u.reg_class) }]
     UseAccX86 { table = table3; reloads = acc.reloads; nth = acc.nth }
 }
 
@@ -392,12 +385,12 @@ fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: @MInstX86(), frame
                     var dsv = spill_scratch(abi, d.reg_class, 0 to u32)
                     var asv = spill_scratch(abi, MRegClass::GPR, 1 to u32)
                     if !subst_has(table, d.id) {
-                        table = teko::list::push(table, SubstEntry { vid = d.id; to = dsv })
+                        table = [..table, SubstEntry { vid = d.id; to = dsv }]
                     }
                     stores = emit_spill_store_x86(dsv, asv, frame_base + la.slot)
                 } else {
                     if !subst_has(table, d.id) {
-                        table = teko::list::push(table, SubstEntry { vid = d.id; to = preg(la.phys, d.reg_class) })
+                        table = [..table, SubstEntry { vid = d.id; to = preg(la.phys, d.reg_class) }]
                     }
                 }
             }
@@ -421,11 +414,11 @@ fn rewrite_block_x86(abi: AbiDescriptor, sr: ScanResult, b: MBlockX86, frame_bas
 fn rewrite_func_x86(abi: AbiDescriptor, f: MFuncX86, sr: ScanResult): MFuncX86 {
     var frame_base = f.frame.len
     var frame = append_spill_slots(abi, f.frame, count_spills(sr))
-    var blocks: []MBlockX86 = []
+    var blocks: [f.blocks.len]MBlockX86 = []
     var bi: u64 = 0
     loop {
         if bi >= f.blocks.len { break }
-        blocks = teko::list::push(blocks, rewrite_block_x86(abi, sr, f.blocks[bi], frame_base))
+        blocks[bi] = rewrite_block_x86(abi, sr, f.blocks[bi], frame_base)
         bi++
     }
     MFuncX86 { symbol = f.symbol; blocks = blocks; frame = frame }
@@ -469,7 +462,7 @@ pub fn regalloc_func_x86(abi: AbiDescriptor, f: MFuncX86): MFuncX86 | error {
 }
 
 pub fn regalloc_module_x86(abi: AbiDescriptor, m: MModuleX86): MModuleX86 | error {
-    var funcs: []MFuncX86 = []
+    var funcs: [m.funcs.len]MFuncX86 = []
     var i: u64 = 0
     loop {
         if i >= m.funcs.len { break }
@@ -477,7 +470,7 @@ pub fn regalloc_module_x86(abi: AbiDescriptor, m: MModuleX86): MModuleX86 | erro
             MFuncX86 as g => g
             error as e => return e
         }
-        funcs = teko::list::push(funcs, rf)
+        funcs[i] = rf
         i++
     }
     MModuleX86 { funcs = funcs; rodata = m.rodata; globals = m.globals; layouts = m.layouts }

@@ -1,7 +1,7 @@
-
 fn emit_u16_le_lib(buf: []byte, v: u32): []byte {
-    var b = teko::list::push(buf, (v & AR_BYTE_MASK) to byte)
-    teko::list::push(b, ((v >> (8 to u32)) & AR_BYTE_MASK) to byte)
+    [
+        ..buf, (v & AR_BYTE_MASK) to byte, ((v >> (8 to u32)) & AR_BYTE_MASK) to byte
+    ]
 }
 
 const COFF_LIB_LONGNAME_TERMINATOR: byte = 0 to byte
@@ -22,18 +22,18 @@ fn coff_inline_name_field(nm: str): str {
 
 fn coff_lib_longnames(names: []str): CoffLibLongnames {
     var bytes: []byte = []
-    var fields: []str = []
+    var fields: [names.len]str = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
         var nm = names[i]
         if nm.len <= AR_INLINE_NAME_MAX {
-            fields = teko::list::push(fields, coff_inline_name_field(nm))
+            fields[i] = coff_inline_name_field(nm)
         } else {
             var off = bytes.len
-            fields = teko::list::push(fields, ar_pad_right(teko::str::concat("/", $"{off}"), AR_NAME_WIDTH))
+            fields[i] = ar_pad_right(teko::str::concat("/", $"{off}"), AR_NAME_WIDTH)
             bytes = emit_str_bytes(bytes, nm)
-            bytes = teko::list::push(bytes, COFF_LIB_LONGNAME_TERMINATOR)
+            bytes = [..bytes, COFF_LIB_LONGNAME_TERMINATOR]
         }
         i++
     }
@@ -57,13 +57,13 @@ fn coff_lib_sorted_symbols(symbols: []ArSymbol): []ArSymbol {
             if j >= out.len { break }
             var o = out[j]
             if !placed && coff_lib_symbol_before(v, o) {
-                ins = teko::list::push(ins, v)
+                ins = [..ins, v]
                 placed = true
             }
-            ins = teko::list::push(ins, o)
+            ins = [..ins, o]
             j++
         }
-        if !placed { ins = teko::list::push(ins, v) }
+        if !placed { ins = [..ins, v] }
         out = ins
         i++
     }
@@ -100,7 +100,7 @@ fn coff_lib_second_payload(member_offsets: []u32, sorted: []ArSymbol): []byte {
     loop {
         if i >= sorted.len { break }
         b = emit_str_bytes(b, sorted[i].name)
-        b = teko::list::push(b, 0 to byte)
+        b = [..b, 0 to byte]
         i++
     }
     b
@@ -111,11 +111,11 @@ fn coff_lib_member_total_len(payload_size: u32): u32 {
 }
 
 pub fn emit_coff_lib_archive(members: []ArMember, symbols: []ArSymbol): []byte {
-    var names: []str = []
+    var names: [members.len]str = []
     var i: u64 = 0
     loop {
         if i >= members.len { break }
-        names = teko::list::push(names, members[i].name)
+        names[i] = members[i].name
         i++
     }
     var longnames = coff_lib_longnames(names)
@@ -148,11 +148,11 @@ pub fn emit_coff_lib_archive(members: []ArMember, symbols: []ArSymbol): []byte {
 pub fn emit_static_archive_coff(obj_name: str, obj_bytes: []byte, symbols: []Symbol): []byte {
     var member = ArMember { name = obj_name; data = obj_bytes }
     var names = global_symbol_names(symbols)
-    var ar_symbols: []ArSymbol = []
+    var ar_symbols: [names.len]ArSymbol = []
     var i: u64 = 0
     loop {
         if i >= names.len { break }
-        ar_symbols = teko::list::push(ar_symbols, ArSymbol { name = names[i]; member = 0 to u64 })
+        ar_symbols[i] = ArSymbol { name = names[i]; member = 0 to u64 }
         i++
     }
     emit_coff_lib_archive([member], ar_symbols)

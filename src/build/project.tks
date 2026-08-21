@@ -75,26 +75,19 @@ fn target_arch(m: Manifest): str {
     teko::arch()
 }
 
-fn build_flags(m: Manifest): []str {
-    []
-}
-
-fn cc_supported_targets(): []str {
-    var out: []str = []
-    out = teko::list::push(out, "windows-x86_64")
-    out = teko::list::push(out, "linux-x86_64")
-    out = teko::list::push(out, "linux-arm64")
-    out = teko::list::push(out, "macos-arm64")
-    out
-}
+const CC_SUPPORTED_TARGETS: []str = [
+    "windows-x86_64",
+    "linux-x86_64",
+    "linux-arm64",
+    "macos-arm64"
+]
 
 fn cc_validate_target(os: str, arch: str): null | error {
-    var key = teko::str::concat(os, teko::str::concat("-", arch))
-    var supported = cc_supported_targets()
+    var key = $"{os}-{arch}"
     var i: u64 = 0
     loop {
-        if i >= supported.len { break }
-        if supported[i] == key { return null }
+        if i >= CC_SUPPORTED_TARGETS.len { break }
+        if CC_SUPPORTED_TARGETS[i] == key { return null }
         i = i + 1
     }
     error { message = $"unsupported (os,arch): {os}-{arch}" }
@@ -104,7 +97,7 @@ fn cc_validate_target(os: str, arch: str): null | error {
 fn load_dep_program(dep: str): checker::TProgram | error {
     var entries = match teko::fs::list_dir("packages") {
         []str as e => e
-        error => return error { message = teko::str::concat("teko: dep '", dep, "': packages/ directory not found — place .tkl packages in packages/") }
+        error => return error { message = $"teko: dep '{dep}': packages/ directory not found — place .tkl packages in packages/" }
     }
     var tkl_path = ""
     var ei: u64 = 0
@@ -120,26 +113,26 @@ fn load_dep_program(dep: str): checker::TProgram | error {
         ei++
     }
     if tkl_path == "" {
-        return error { message = teko::str::concat("teko: dep '", dep, "': package not found (looked in packages/)") }
+        return error { message = $"teko: dep '{dep}': package not found (looked in packages/)" }
     }
 
     var raw_str = match teko::io::read_file(tkl_path) {
         str as s => s
-        error => return error { message = teko::str::concat("teko: dep '", dep, "': cannot read .tkl file") }
+        error => return error { message = $"teko: dep '{dep}': cannot read .tkl file" }
     }
-    var raw: []byte = []
+    var raw: [raw_str.len]byte = []
     var ri: u64 = 0
     loop {
         if ri >= raw_str.len { break }
-        raw = teko::list::push(raw, raw_str[ri])
+        raw[ri] = raw_str[ri]
         ri++
     }
 
     var zip_entries = match compress::read_zip(raw) {
         []compress::ZipEntry as es => es
-        error as e => return error { message = teko::str::concat("teko: dep '", dep, teko::str::concat("': bad .tkl (ZIP parse error): ", e.message)) }
+        error as e => return error { message = $"teko: dep '{dep}': bad .tkl (ZIP parse error): {e.message}" }
     }
-    var tkb_name = teko::str::concat(dep, ".tkb")
+    var tkb_name = dep ~ ".tkb"
     var tkb_data: []byte = []
     var found_tkb = false
     var zi: u64 = 0
@@ -153,12 +146,12 @@ fn load_dep_program(dep: str): checker::TProgram | error {
         zi++
     }
     if !found_tkb {
-        return error { message = teko::str::concat("teko: dep '", dep, teko::str::concat("': .tkl does not contain ", teko::str::concat(tkb_name, ""))) }
+        return error { message = $"teko: dep '{dep}': .tkl does not contain {tkb_name}" }
     }
 
     match emit::deserialize_program(tkb_data) {
         checker::TProgram as p => p
-        error as e => return error { message = teko::str::concat("teko: dep '", dep, teko::str::concat("': .tkb deserialization failed: ", e.message)) }
+        error as e => return error { message = $"teko: dep '{dep}': .tkb deserialization failed: {e.message}" }
     }
 }
 
@@ -174,7 +167,7 @@ fn load_deps_program(m: Manifest): checker::TProgram | error {
         var ii: u64 = 0
         loop {
             if ii >= dep_prog.items.len { break }
-            all_items = teko::list::push(all_items, dep_prog.items[ii])
+            all_items = [..all_items, dep_prog.items[ii]]
             ii++
         }
         di++
@@ -205,14 +198,7 @@ fn module_const_count(prog: checker::TProgram): u64 {
 }
 
 fn append_diags(a: []str, b: []str): []str {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i = i + 1
-    }
-    out
+    [..a, ..b]
 }
 
 fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, report: bool, tty: bool, parse_diags: []str, explicit: bool): checker::TProgram | error {
@@ -276,29 +262,21 @@ type ParsedFront = struct {
 }
 
 fn rt_inject_namespaces(): []str {
-    var ns: []str = []
-    ns = teko::list::push(ns, "teko::runtime")
-    ns = teko::list::push(ns, "teko::sys")
-    ns
+    ["teko::runtime", "teko::sys"]
 }
 
 fn rt_prelude_paths_for(ns: str, rt: str): []str {
-    var out: []str = []
     if ns == "teko::runtime" {
-        out = teko::list::push(out, teko::str::concat(rt, "/arena.tks"))
-        out = teko::list::push(out, teko::str::concat(rt, "/sync.tks"))
-        out = teko::list::push(out, teko::str::concat(rt, "/thread.tks"))
-        return out
+        return [..rt, "/arena.tks", "/sync.tks", "/thread.tks"]
     }
     if ns == "teko::sys" {
         var parent = match teko::str::last_index_of(rt, "/") {
             u64 as i => teko::str::slice_to(rt, i)
             error => "."
         }
-        out = teko::list::push(out, teko::str::concat(parent, "/sys/sys.tks"))
-        return out
+        return [..rt, "/sys/sys.tks"]
     }
-    out
+    []
 }
 
 fn rt_already_present(files: []SourceFile, ns: str): bool {
@@ -339,9 +317,9 @@ fn inject_runtime_prelude(files: []SourceFile): []SourceFile | error {
             var path = paths[j]
             match teko::io::read_file(path) {
                 str => { }
-                error => return error { message = teko::str::concat("runtime prelude: cannot read shipped source '", path, "' for namespace ", ns) }
+                error => return error { message = $"runtime prelude: cannot read shipped source '{path}' for namespace {ns}" }
             }
-            prelude = teko::list::push(prelude, SourceFile { path = path; namespace = ns })
+            prelude = [..prelude, SourceFile { path = path; namespace = ns }]
             j = j + 1
         }
         i = i + 1
@@ -357,7 +335,7 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
     var files = match discover(m.name, m.source) { []SourceFile as f => f; error as e => return e }
 
     match teko::io::read_file("main.tks") {
-        str => files = teko::list::push(files, SourceFile { path = "main.tks"; namespace = m.name })
+        str => files = [..files, SourceFile { path = "main.tks"; namespace = m.name }]
         error => { }
     }
 
@@ -386,7 +364,7 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | er
 
 fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Frontend | error {
     match cc_validate_target(target_os(pf.manifest), target_arch(pf.manifest)) { error as e => return e; null => { } }
-    var selected = prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = build_flags(pf.manifest) }, PruneMode { keep_target_arms = c_backend_selected() })
+    var selected = prune_cc(pf.parsed, CcEnv { os = target_os(pf.manifest); arch = target_arch(pf.manifest); build_flags = [] }, PruneMode { keep_target_arms = c_backend_selected() })
 
     var expanded = match parser::expand_macros_syntactic(selected) { parser::Program as p => p; error as e => return e }
 
@@ -407,7 +385,7 @@ fn filter_tkt(p: parser::Program): parser::Program {
     var i: u64 = 0
     loop {
         if i >= p.items.len { break }
-        if !teko::str::ends_with(p.items[i].file, ".tkt") { kept = teko::list::push(kept, p.items[i]) }
+        if !teko::str::ends_with(p.items[i].file, ".tkt") { kept = [..kept, p.items[i]] }
         i = i + 1
     }
     parser::Program { items = kept }
@@ -438,12 +416,13 @@ fn cc_family_is_clang(cc: str, binary: str): bool {
         error => return true
         null => { }
     }
-    var argv: []str = []
-    argv = teko::list::push(argv, cc)
-    argv = teko::list::push(argv, "-std=c23")
-    argv = teko::list::push(argv, "-ferror-limit=0")
-    argv = teko::list::push(argv, "-fsyntax-only")
-    argv = teko::list::push(argv, probe)
+    var argv: []str = [
+        cc,
+        "-std=c23",
+        "-ferror-limit=0",
+        "-fsyntax-only",
+        probe
+    ]
     var is_clang = teko::process::run_quiet(argv) == 0
     match teko::fs::remove_file(probe) { error => { }; null => { } }
     is_clang
@@ -455,7 +434,7 @@ fn append_reachable_link_flags(argv: []str, m: Manifest, reachable: []str): []st
     loop {
         if li >= m.link_flags.len { break }
         if name_in(reachable, m.link_lib_name[li]) && !omit_flag_for_blind_link(m.link_flags[li], m.link_mode[li]) {
-            out = teko::list::push(out, m.link_flags[li])
+            out = [..out, m.link_flags[li]]
         }
         li = li + 1
     }
@@ -476,7 +455,7 @@ fn append_reachable_os_lib_flags(argv: []str, m: Manifest, keys: LinkTargetKeys,
     loop {
         if oi >= m.os_lib_os.len { break }
         if os_lib_key_matches(m.os_lib_os[oi], keys) && name_in(reachable, m.os_lib_name[oi]) && !omit_flag_for_blind_link(m.os_lib_flag[oi], m.os_lib_mode[oi]) {
-            out = teko::list::push(out, m.os_lib_flag[oi])
+            out = [..out, m.os_lib_flag[oi]]
         }
         oi = oi + 1
     }
@@ -626,28 +605,35 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     var asrt = assert_dir(rt)
     var choice = resolve_cc_choice(m)
     var is_clang = cc_family_is_clang(choice.cmd, binary)
-    var argv: []str = []
-    argv = teko::list::push(argv, choice.cmd)
-    if choice.target_flag.len > 0 { argv = teko::list::push(argv, choice.target_flag) }
-    argv = teko::list::push(argv, if is_clang { "-std=c23" } else { "-std=c2x" })
-    argv = teko::list::push(argv, "-w")
-    argv = teko::list::push(argv, if is_clang { "-ferror-limit=0" } else { "-fmax-errors=0" })
-    if debug { argv = teko::list::push(argv, "-g") }
+    var argv: []str = [
+        choice.cmd
+    ]
+    if choice.target_flag.len > 0 { argv = [..argv, choice.target_flag] }
+    argv = [
+        ..argv,
+        if is_clang { "-std=c23" } else { "-std=c2x" },
+        "-w",
+        if is_clang { "-ferror-limit=0" } else { "-fmax-errors=0" },
+    ]
+    if debug { argv = [..argv, "-g"] }
     var oflag = opt_cc_flag(opt)
-    if oflag.len > 0 { argv = teko::list::push(argv, oflag) }
+    if oflag.len > 0 { argv = [..argv, oflag] }
     var verval = if m.suffix.len > 0 { teko::str::concat(teko::str::concat(m.version, "-"), m.suffix) } else { m.version }
-    argv = teko::list::push(argv, teko::str::concat("-DTEKO_VERSION_STRING=", verval))
-    if !program_declares_assert_seed(prog) { argv = teko::list::push(argv, ASSERT_SEED_STRONG_FLAG) }
-    if m.target.len > 0 { argv = teko::list::push(teko::list::push(argv, "-target"), m.target) }
-    if m.sysroot.len > 0 { argv = teko::list::push(teko::list::push(argv, "--sysroot"), m.sysroot) }
-    if m.freestanding { argv = teko::list::push(argv, "-nostdlib") }
-    argv = teko::list::push(argv, "-I")
-    argv = teko::list::push(argv, rt)
-    argv = teko::list::push(argv, "-I")
-    argv = teko::list::push(argv, asrt)
-    argv = teko::list::push(argv, input)
-    argv = teko::list::push(argv, teko::str::concat(rt, "/teko_rt.c"))
-    argv = teko::list::push(argv, teko::str::concat(asrt, "/assert.c"))
+    argv = [..argv, teko::str::concat("-DTEKO_VERSION_STRING=", verval)]
+    if !program_declares_assert_seed(prog) { argv = [..argv, ASSERT_SEED_STRONG_FLAG] }
+    if m.target.len > 0 { argv = [..argv, "-target", m.target] }
+    if m.sysroot.len > 0 { argv = [..argv, "--sysroot", m.sysroot] }
+    if m.freestanding { argv = [..argv, "-nostdlib"] }
+    argv = [
+        ..argv,
+        "-I",
+        rt,
+        "-I",
+        asrt,
+        input,
+        teko::str::concat(rt, "/teko_rt.c"),
+        teko::str::concat(asrt, "/assert.c"),
+    ]
     var keys = link_target_keys(m)
     argv = append_libm_flag(argv, m, keys.emit_os)
     argv = append_pthread_flag(argv, m, keys.emit_os)
@@ -658,8 +644,7 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     argv = append_macos_plist_flag(argv, binary, m, keys.emit_os)
     argv = append_windows_reproducible_flag(argv, keys.emit_os)
     argv = append_windows_stack_reserve_flag(argv, keys.emit_os)
-    argv = teko::list::push(argv, "-o")
-    teko::list::push(argv, binary)
+    [..argv, "-o", binary]
 }
 
 const LIBM_FLAG: str = "-lm"
@@ -669,27 +654,27 @@ const PTHREAD_FLAG: str = "-pthread"
 fn append_libm_flag(argv: []str, m: Manifest, emit_os: str): []str {
     if m.freestanding { return argv }
     if emit_os == WINDOWS_OS_NAME { return argv }
-    teko::list::push(argv, LIBM_FLAG)
+    [..argv, LIBM_FLAG]
 }
 
 fn append_pthread_flag(argv: []str, m: Manifest, emit_os: str): []str {
     if m.freestanding { return argv }
     if emit_os == WINDOWS_OS_NAME { return argv }
-    teko::list::push(argv, PTHREAD_FLAG)
+    [..argv, PTHREAD_FLAG]
 }
 
 const WINDOWS_NO_TIMESTAMP_FLAG: str = "-Wl,/Brepro"
 
 fn append_windows_reproducible_flag(argv: []str, emit_os: str): []str {
     if emit_os != "windows" { return argv }
-    teko::list::push(argv, WINDOWS_NO_TIMESTAMP_FLAG)
+    [..argv, WINDOWS_NO_TIMESTAMP_FLAG]
 }
 
 const WINDOWS_STACK_RESERVE_FLAG: str = "-Wl,/STACK:16777216"
 
 fn append_windows_stack_reserve_flag(argv: []str, emit_os: str): []str {
     if emit_os != WINDOWS_OS_NAME { return argv }
-    teko::list::push(argv, WINDOWS_STACK_RESERVE_FLAG)
+    [..argv, WINDOWS_STACK_RESERVE_FLAG]
 }
 
 const ALLOW_UNDEF_FLAG: str = "--allow-undef"
@@ -716,7 +701,7 @@ fn append_allow_undef_flag(argv: []str): []str {
     if !allow_undef_selected() { return argv }
     var flag = allow_undef_cc_flag(target_objfmt(resolved_target()))
     if flag.len == 0 { return argv }
-    teko::list::push(argv, flag)
+    [..argv, flag]
 }
 
 type ExternLibEntry = struct {
@@ -727,11 +712,11 @@ type ExternLibEntry = struct {
 }
 
 fn applicable_extern_libs(m: Manifest, target: NativeTarget): []ExternLibEntry {
-    var out: []ExternLibEntry = []
+    var out: [m.link_flags.len]ExternLibEntry = []
     var i: u64 = 0
     loop {
         if i >= m.link_flags.len { break }
-        out = teko::list::push(out, ExternLibEntry { key = m.link_lib_name[i]; flag = m.link_flags[i]; mode = m.link_mode[i]; section = "" })
+        out[i] = ExternLibEntry { key = m.link_lib_name[i]; flag = m.link_flags[i]; mode = m.link_mode[i]; section = "" }
         i = i + 1
     }
     var keys = target_link_keys(target)
@@ -739,7 +724,7 @@ fn applicable_extern_libs(m: Manifest, target: NativeTarget): []ExternLibEntry {
     loop {
         if j >= m.os_lib_os.len { break }
         if os_lib_key_matches(m.os_lib_os[j], keys) {
-            out = teko::list::push(out, ExternLibEntry { key = m.os_lib_name[j]; flag = m.os_lib_flag[j]; mode = m.os_lib_mode[j]; section = m.os_lib_os[j] })
+            out =[..out, ExternLibEntry { key = m.os_lib_name[j]; flag = m.os_lib_flag[j]; mode = m.os_lib_mode[j]; section = m.os_lib_os[j] }]
         }
         j = j + 1
     }
@@ -819,7 +804,7 @@ fn append_macos_plist_flag(argv: []str, binary: str, m: Manifest, tos: str): []s
     if tos != "macos" { return argv }
     var plist = teko::str::concat(binary, ".Info.plist")
     match teko::io::write_file(plist, plist_xml(m)) {
-        null => teko::list::push(argv, teko::str::concat("-Wl,-sectcreate,__TEXT,__info_plist,", plist))
+        null => [..argv, teko::str::concat("-Wl,-sectcreate,__TEXT,__info_plist,", plist)]
         error => argv
     }
 }
@@ -828,8 +813,7 @@ const CC_TRIPLE_PROBE_SUFFIX: str = ".ccmachine"
 
 fn cc_target_triple(cc: str, binary: str): str {
     var outp = binary ~ CC_TRIPLE_PROBE_SUFFIX
-    var argv: []str = [cc]
-    argv = teko::list::push(argv, HOST_CC_MACHINE_FLAG)
+    var argv: []str = [cc, HOST_CC_MACHINE_FLAG]
     var h = teko::process::spawn_redirected(argv, "", [], "", outp, outp ~ ".err")
     var rc = teko::process::wait_one(h)
     var out = match teko::io::read_file(outp) { str as s => s; error => "" }
@@ -877,12 +861,11 @@ fn mingw_cc_rejected_error(cc: str, evidence: str): error {
 const CC_VERBOSE_FLAG: str = "-v"
 
 fn cc_verbose_argv(argv: []str): []str {
-    var out: []str = [argv[0]]
-    out = teko::list::push(out, CC_VERBOSE_FLAG)
+    var out: []str = [argv[0], CC_VERBOSE_FLAG]
     var i: u64 = 1
     loop {
         if i >= argv.len { break }
-        out = teko::list::push(out, argv[i])
+        out = [..out, argv[i]]
         i = i + 1
     }
     out
@@ -940,20 +923,28 @@ type ElfLinkSpec = struct {
 fn elf_link_spec(arch: LinkArch): ElfLinkSpec {
     match arch {
         LinkArch::X8664 => {
-            var cands: []str = []
-            cands = teko::list::push(cands, "/usr/lib/x86_64-linux-gnu")
-            cands = teko::list::push(cands, "/lib/x86_64-linux-gnu")
-            cands = teko::list::push(cands, "/usr/lib64")
-            cands = teko::list::push(cands, "/usr/lib")
-            ElfLinkSpec { arch = LinkArch::X8664; dynamic_linker = ELF_DYNLINKER_X8664; crt_dirs = cands }
+            ElfLinkSpec {
+                arch = LinkArch::X8664
+                dynamic_linker = ELF_DYNLINKER_X8664
+                crt_dirs = [
+                    "/usr/lib/x86_64-linux-gnu",
+                    "/lib/x86_64-linux-gnu",
+                    "/usr/lib64",
+                    "/usr/lib"
+                ]
+            }
         }
         LinkArch::Arm64 => {
-            var cands: []str = []
-            cands = teko::list::push(cands, "/usr/lib/aarch64-linux-gnu")
-            cands = teko::list::push(cands, "/lib/aarch64-linux-gnu")
-            cands = teko::list::push(cands, "/usr/lib64")
-            cands = teko::list::push(cands, "/usr/lib")
-            ElfLinkSpec { arch = LinkArch::Arm64; dynamic_linker = ELF_DYNLINKER_ARM64; crt_dirs = cands }
+            ElfLinkSpec {
+                arch = LinkArch::Arm64
+                dynamic_linker = ELF_DYNLINKER_ARM64
+                crt_dirs = [
+                    "/usr/lib/aarch64-linux-gnu",
+                    "/lib/aarch64-linux-gnu",
+                    "/usr/lib64",
+                    "/usr/lib"
+                ]
+            }
         }
     }
 }
@@ -972,23 +963,17 @@ fn elf_crt_dir(spec: ElfLinkSpec): str | error {
 }
 
 fn compile_c_object_argv(cc: str, is_clang: bool, csrc: str, obj: str, rt: str, asrt: str, m: Manifest, prog: checker::TProgram, strong_seed: bool): []str {
-    var argv: []str = []
-    argv = teko::list::push(argv, cc)
-    argv = teko::list::push(argv, if is_clang { "-std=c23" } else { "-std=c2x" })
-    argv = teko::list::push(argv, "-w")
-    argv = teko::list::push(argv, if is_clang { "-ferror-limit=0" } else { "-fmax-errors=0" })
-    if !m.freestanding { argv = teko::list::push(argv, PTHREAD_FLAG) }
+    var argv: []str = [
+        cc,
+        if is_clang { "-std=c23" } else { "-std=c2x" },
+        "-w",
+        if is_clang { "-ferror-limit=0" } else { "-fmax-errors=0" },
+    ]
+    if !m.freestanding { argv = [..argv, PTHREAD_FLAG] }
     var verval = if m.suffix.len > 0 { teko::str::concat(teko::str::concat(m.version, "-"), m.suffix) } else { m.version }
-    argv = teko::list::push(argv, teko::str::concat("-DTEKO_VERSION_STRING=", verval))
-    if strong_seed && !program_declares_assert_seed(prog) { argv = teko::list::push(argv, ASSERT_SEED_STRONG_FLAG) }
-    argv = teko::list::push(argv, "-I")
-    argv = teko::list::push(argv, rt)
-    argv = teko::list::push(argv, "-I")
-    argv = teko::list::push(argv, asrt)
-    argv = teko::list::push(argv, "-c")
-    argv = teko::list::push(argv, csrc)
-    argv = teko::list::push(argv, "-o")
-    teko::list::push(argv, obj)
+    argv = [..argv, teko::str::concat("-DTEKO_VERSION_STRING=", verval)]
+    if strong_seed && !program_declares_assert_seed(prog) { argv = [..argv, ASSERT_SEED_STRONG_FLAG] }
+    [..argv, "-I", rt, "-I", asrt, "-c", csrc, "-o", obj]
 }
 
 type RuntimeObjects = struct {
@@ -1022,33 +1007,20 @@ fn link_object_elf_direct(objfile: str, binary: str, m: Manifest, prog: checker:
     var objs = match compile_runtime_objects(binary, m, prog) { RuntimeObjects as o => o; error as e => return fail("", e.message) }
     var ld = match resolve_linker(spec.arch, LinkFormat::Elf) { str as s => s; error as e => return fail("", e.message) }
     var crt = match elf_crt_dir(spec) { str as d => d; error as e => return fail("", e.message) }
-    var argv: []str = []
-    argv = teko::list::push(argv, ld)
-    argv = teko::list::push(argv, "-pie")
-    argv = teko::list::push(argv, "-z")
-    argv = teko::list::push(argv, "noexecstack")
-    argv = teko::list::push(argv, "--eh-frame-hdr")
-    argv = teko::list::push(argv, "-m")
-    argv = teko::list::push(argv, gnu_emulation_for(spec.arch, LinkFormat::Elf))
-    argv = teko::list::push(argv, "-dynamic-linker")
-    argv = teko::list::push(argv, spec.dynamic_linker)
-    argv = teko::list::push(argv, teko::str::concat(crt, "/Scrt1.o"))
-    argv = teko::list::push(argv, teko::str::concat(crt, "/crti.o"))
-    argv = teko::list::push(argv, objfile)
-    argv = teko::list::push(argv, objs.rt_obj)
-    argv = teko::list::push(argv, objs.assert_obj)
-    argv = teko::list::push(argv, "-L")
-    argv = teko::list::push(argv, crt)
-    argv = teko::list::push(argv, "-lc")
+    var argv: []str = [
+        ld, "-pie", "-z", "noexecstack", "--eh-frame-hdr", "-m",
+        gnu_emulation_for(spec.arch, LinkFormat::Elf), "-dynamic-linker",
+        spec.dynamic_linker, teko::str::concat(crt, "/Scrt1.o"), teko::str::concat(crt, "/crti.o"),
+        objfile, objs.rt_obj, objs.assert_obj, "-L", crt, "-lc"
+    ]
     var keys = link_target_keys(m)
     argv = append_libm_flag(argv, m, keys.emit_os)
     var reachable = reachable_libs(prog)
     argv = append_reachable_link_flags(argv, m, reachable)
     argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
-    argv = teko::list::push(argv, teko::str::concat(crt, "/crtn.o"))
-    argv = teko::list::push(argv, "-o")
-    argv = teko::list::push(argv, binary)
-    run_direct_link(argv)
+    run_direct_link([
+        ..argv, teko::str::concat(crt, "/crtn.o"), "-o", binary
+    ])
 }
 
 const MACHO_MIN_OS_VERSION: str = "11.0.0"
@@ -1067,9 +1039,7 @@ fn capture_tool_line(argv: []str, binary: str, suffix: str): str {
 }
 
 fn xcrun_show(what: str, binary: str): str {
-    var argv: []str = []
-    argv = teko::list::push(argv, "xcrun")
-    argv = teko::list::push(argv, teko::str::concat("--show-", what))
+    var argv: []str = [ "xcrun", teko::str::concat("--show-", what) ]
     capture_tool_line(argv, binary, teko::str::concat(".xcrun-", what))
 }
 
@@ -1079,11 +1049,7 @@ fn append_macho_plist_section(argv: []str, binary: str, m: Manifest): []str {
         error => return argv
         null => { }
     }
-    var out = argv
-    out = teko::list::push(out, "-sectcreate")
-    out = teko::list::push(out, "__TEXT")
-    out = teko::list::push(out, "__info_plist")
-    teko::list::push(out, plist)
+    [..argv, "-sectcreate", "__TEXT", "__info_plist", plist]
 }
 
 fn link_object_macho_direct(objfile: str, binary: str, m: Manifest, prog: checker::TProgram): i32 {
@@ -1091,30 +1057,20 @@ fn link_object_macho_direct(objfile: str, binary: str, m: Manifest, prog: checke
     var ld = match resolve_linker(LinkArch::Arm64, LinkFormat::Macho) { str as s => s; error as e => return fail("", e.message) }
     var sdk = xcrun_show("sdk-path", binary)
     var sdkver = xcrun_show("sdk-version", binary)
-    var argv: []str = []
-    argv = teko::list::push(argv, ld)
-    argv = teko::list::push(argv, "-arch")
-    argv = teko::list::push(argv, arch_name(LinkArch::Arm64))
-    argv = teko::list::push(argv, "-platform_version")
-    argv = teko::list::push(argv, "macos")
-    argv = teko::list::push(argv, MACHO_MIN_OS_VERSION)
-    argv = teko::list::push(argv, if sdkver.len > 0 { sdkver } else { MACHO_SDK_VERSION_FALLBACK })
+    var argv: []str = [
+        ld, "-arch", arch_name(LinkArch::Arm64), "-macosx_version_min", MACHO_MIN_OS_VERSION,
+        if sdkver.len > 0 { sdkver } else { MACHO_SDK_VERSION_FALLBACK }
+    ]
     if sdk.len > 0 {
-        argv = teko::list::push(argv, "-syslibroot")
-        argv = teko::list::push(argv, sdk)
+        argv = [..argv, "-syslibroot", sdk]
     }
-    argv = teko::list::push(argv, objfile)
-    argv = teko::list::push(argv, objs.rt_obj)
-    argv = teko::list::push(argv, objs.assert_obj)
-    argv = teko::list::push(argv, "-lSystem")
+    argv = [..argv, objfile, objs.rt_obj, objs.assert_obj, "-lSystem"]
     var keys = link_target_keys(m)
     var reachable = reachable_libs(prog)
     argv = append_reachable_link_flags(argv, m, reachable)
     argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
     argv = append_macho_plist_section(argv, binary, m)
-    argv = teko::list::push(argv, "-o")
-    argv = teko::list::push(argv, binary)
-    run_direct_link(argv)
+    run_direct_link([..argv, "-o", binary])
 }
 
 const PE_UCRT_DEFAULTLIB: str = "/defaultlib:libcmt"
@@ -1128,22 +1084,15 @@ const PE_STACK_RESERVE_FLAG: str = "/stack:16777216"
 fn link_object_pe_direct(objfile: str, binary: str, m: Manifest, prog: checker::TProgram): i32 {
     var objs = match compile_runtime_objects(binary, m, prog) { RuntimeObjects as o => o; error as e => return fail("", e.message) }
     var ld = match resolve_linker(LinkArch::X8664, LinkFormat::Pe) { str as s => s; error as e => return fail("", e.message) }
-    var argv: []str = []
-    argv = teko::list::push(argv, ld)
-    argv = teko::list::push(argv, "/nologo")
-    argv = teko::list::push(argv, PE_SUBSYSTEM_CONSOLE)
-    argv = teko::list::push(argv, PE_REPRODUCIBLE_FLAG)
-    argv = teko::list::push(argv, PE_STACK_RESERVE_FLAG)
-    argv = teko::list::push(argv, PE_UCRT_DEFAULTLIB)
-    argv = teko::list::push(argv, objfile)
-    argv = teko::list::push(argv, objs.rt_obj)
-    argv = teko::list::push(argv, objs.assert_obj)
+    var argv: []str = [
+        ld, "/nologo", PE_SUBSYSTEM_CONSOLE, PE_REPRODUCIBLE_FLAG, PE_STACK_RESERVE_FLAG, PE_UCRT_DEFAULTLIB,
+        objfile, objs.rt_obj, objs.assert_obj
+    ]
     var keys = link_target_keys(m)
     var reachable = reachable_libs(prog)
     argv = append_reachable_link_flags(argv, m, reachable)
     argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
-    argv = teko::list::push(argv, teko::str::concat("/out:", binary))
-    run_direct_link(argv)
+    run_direct_link([..argv, teko::str::concat("/out:", binary)])
 }
 
 fn plist_xml(m: Manifest): str {
@@ -1180,17 +1129,18 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
         }
         var tkb_bytes = match emit::serialize_program(prog) { []byte as b => b; error as e => return fail(dir, e.message) }
         var tsym_str = codegen::tk_emit_tsym(prog)
-        var tsym_bytes: []byte = []
+        var tsym_bytes: [tsym_str.len]byte = []
         var k = 0
         loop {
             if k >= tsym_str.len { break }
-            tsym_bytes = teko::list::push(tsym_bytes, tsym_str[k])
+            tsym_bytes[k] = tsym_str[k]
             k++
         }
-        var entries: []compress::ZipEntry = []
-        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tkh"); data = tkh_bytes })
-        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tkb"); data = tkb_bytes })
-        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tsym"); data = tsym_bytes })
+        var entries: []compress::ZipEntry = [
+            compress::ZipEntry { name = teko::str::concat(m.name, ".tkh"); data = tkh_bytes },
+            compress::ZipEntry { name = teko::str::concat(m.name, ".tkb"); data = tkb_bytes },
+            compress::ZipEntry { name = teko::str::concat(m.name, ".tsym"); data = tsym_bytes }
+        ]
         var zip_bytes = compress::write_zip(entries)
         var ver = if m.version == "" { "0.0.0" } else { m.version }
         var tkl_name = teko::str::concat(m.name, "-", teko::str::concat(ver, ".tkl"))
@@ -1480,7 +1430,7 @@ fn dwarf_collect_facts(prog: checker::TProgram, symbols: []teko::backend::Symbol
         match prog.items[i] {
             checker::TFunction as f => {
                 match dwarf_func_fact_of(f, symbols) {
-                    DwarfFuncFact as fact => out = teko::list::push(out, fact)
+                    DwarfFuncFact as fact => out = [..out, fact]
                     null => { }
                 }
             }
@@ -1498,13 +1448,13 @@ fn dwarf_insert_by_offset(sorted: []DwarfFuncFact, item: DwarfFuncFact): []Dwarf
     loop {
         if i >= sorted.len { break }
         if !inserted && item.offset < sorted[i].offset {
-            out = teko::list::push(out, item)
+            out = [..out, item]
             inserted = true
         }
-        out = teko::list::push(out, sorted[i])
+        out = [..out, sorted[i]]
         i = i + 1
     }
-    if !inserted { out = teko::list::push(out, item) }
+    if !inserted { out = [..out, item] }
     out
 }
 
@@ -1534,7 +1484,7 @@ fn dwarf_files_of(facts: []DwarfFuncFact): []str {
     var i: u64 = 0
     loop {
         if i >= facts.len { break }
-        if dwarf_file_index_of(out, facts[i].file) == 0 { out = teko::list::push(out, facts[i].file) }
+        if dwarf_file_index_of(out, facts[i].file) == 0 { out = [..out, facts[i].file] }
         i = i + 1
     }
     out
@@ -1551,13 +1501,13 @@ fn dwarf_subprograms_of(facts: []DwarfFuncFact, files: []str, text_len: u64): []
     loop {
         if i >= facts.len { break }
         var f = facts[i]
-        out = teko::list::push(out, teko::backend::DwSubprogram {
+        out = [..out, teko::backend::DwSubprogram {
             name = f.teko_name
             decl_file = dwarf_file_index_of(files, f.file)
             decl_line = f.line
             symbol = f.symbol
             code_size = dwarf_code_size_of(facts, i, text_len)
-        })
+        }]
         i = i + 1
     }
     out
@@ -1570,7 +1520,7 @@ fn dwarf_rows_of(facts: []DwarfFuncFact, files: []str): []teko::backend::DwLineR
         if i >= facts.len { break }
         var f = facts[i]
         var advance: u64 = if i == 0 { 0 to u64 } else { (f.offset - facts[i - 1].offset) to u64 }
-        out = teko::list::push(out, teko::backend::DwLineRow { pc_advance = advance; line = f.line; file = dwarf_file_index_of(files, f.file) })
+        out = [..out, teko::backend::DwLineRow { pc_advance = advance; line = f.line; file = dwarf_file_index_of(files, f.file) }]
         i = i + 1
     }
     out
@@ -1669,7 +1619,7 @@ fn copy_bytes_to_current_region(src: []byte): []byte {
     var i: u64 = 0
     loop {
         if i >= src.len { break }
-        out = teko::list::push(out, src[i])
+        out = [..out, src[i]]
         i++
     }
     out
@@ -1685,7 +1635,7 @@ fn copy_relocs_to_current_region_x86(relocs: []teko::backend::RelocX86): []teko:
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
-        out = teko::list::push(out, copy_reloc_to_current_region_x86(relocs[i]))
+        out = [..out, copy_reloc_to_current_region_x86(relocs[i])]
         i++
     }
     out
@@ -1703,7 +1653,7 @@ pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc): []teko::backend::Enc
     loop {
         if i >= fs.len { break }
         var ef = match encode_lfunc_in_region_x86(fs[i]) { teko::backend::EncodedFuncX86 as x => x; error as e => return e }
-        out = teko::list::push(out, ef)
+        out = [..out, ef]
         i++
     }
     out
@@ -1730,7 +1680,7 @@ fn copy_ldata_relocs_to_current_region(relocs: []teko::lir::LDataReloc): []teko:
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
-        out = teko::list::push(out, copy_ldata_reloc_to_current_region(relocs[i]))
+        out = [..out, copy_ldata_reloc_to_current_region(relocs[i])]
         i++
     }
     out
@@ -1748,7 +1698,7 @@ fn commit_rodata_delta(robase: []teko::lir::LRodata, grown: []teko::lir::LRodata
     var i: u64 = robase.len
     loop {
         if i >= grown.len { break }
-        out = teko::list::push(out, copy_lrodata_to_current_region(grown[i]))
+        out = [..out, copy_lrodata_to_current_region(grown[i])]
         i++
     }
     out
@@ -1759,7 +1709,7 @@ fn commit_loose(acc: []@TStatement(), delta: []@TStatement()): []@TStatement() {
     var i: u64 = acc.len
     loop {
         if i >= delta.len { break }
-        out = teko::list::push(out, delta[i])
+        out = [..out, delta[i]]
         i++
     }
     out
@@ -1777,7 +1727,7 @@ fn lifted_suffix(all: []teko::lir::LFunc, from: u64): []teko::lir::LFunc {
     var i: u64 = from
     loop {
         if i >= all.len { break }
-        out = teko::list::push(out, all[i])
+        out = [..out, all[i]]
         i++
     }
     out
@@ -1788,7 +1738,7 @@ fn concat_lfuncs(a: []teko::lir::LFunc, b: []teko::lir::LFunc): []teko::lir::LFu
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        out = teko::list::push(out, b[i])
+        out = [..out, b[i]]
         i++
     }
     out
@@ -1803,7 +1753,7 @@ fn extend_lifted_placeholders(ph: []teko::lir::LFunc, count: u64): []teko::lir::
     var i: u64 = 0
     loop {
         if i >= count { break }
-        out = teko::list::push(out, teko::lir::new_func("", 0, [], teko::lir::LType::Void))
+        out = [..out, teko::lir::new_func("", 0, [], teko::lir::LType::Void)]
         i++
     }
     out
@@ -1943,7 +1893,7 @@ fn copy_relocs_to_current_region_arm64(relocs: []teko::backend::Reloc): []teko::
     var i: u64 = 0
     loop {
         if i >= relocs.len { break }
-        out = teko::list::push(out, copy_reloc_to_current_region_arm64(relocs[i]))
+        out = [..out, copy_reloc_to_current_region_arm64(relocs[i])]
         i++
     }
     out
@@ -1967,7 +1917,7 @@ pub fn encode_lfuncs_in_region_arm64(fs: []teko::lir::LFunc): []teko::backend::E
     loop {
         if i >= fs.len { break }
         var ef = match encode_lfunc_in_region_arm64(fs[i]) { teko::backend::EncodedFunc as x => x; error as e => return e }
-        out = teko::list::push(out, ef)
+        out = [..out, ef]
         i++
     }
     out
@@ -2078,7 +2028,7 @@ pub fn encode_lfuncs_in_region_win(fs: []teko::lir::LFunc): []teko::backend::Enc
     loop {
         if i >= fs.len { break }
         var ef = match encode_lfunc_in_region_win(fs[i]) { teko::backend::EncodedFuncX86 as x => x; error as e => return e }
-        out = teko::list::push(out, ef)
+        out = [..out, ef]
         i++
     }
     out
@@ -2195,7 +2145,7 @@ fn strip_virtual_main(lmod: teko::lir::LModule): teko::lir::LModule {
     var i: u64 = 0
     loop {
         if i >= lmod.funcs.len { break }
-        if lmod.funcs[i].symbol != "main" { kept = teko::list::push(kept, lmod.funcs[i]) }
+        if lmod.funcs[i].symbol != "main" { kept = [..kept, lmod.funcs[i]] }
         i++
     }
     teko::lir::LModule { funcs = kept; rodata = lmod.rodata; globals = lmod.globals; layouts = lmod.layouts }
@@ -2314,9 +2264,8 @@ fn home_dir(): str {
 fn share_rt_bases(): []str {
     var bases: []str = []
     var home = home_dir()
-    if home.len > 0 { bases = teko::list::push(bases, teko::str::concat(home, "/.local/share/teko")) }
-    bases = teko::list::push(bases, "/usr/local/share/teko")
-    bases
+    if home.len > 0 { bases = [teko::str::concat(home, "/.local/share/teko")] }
+    [..bases, "/usr/local/share/teko"]
 }
 
 fn probe_share_rt_dir(): bool {
@@ -2390,7 +2339,7 @@ fn strip_tests(prog: checker::TProgram): checker::TProgram {
             checker::TFunction as f => { if f.is_test { drop = true } }
             _ => { }
         }
-        if !drop { kept = teko::list::push(kept, prog.items[i]) }
+        if !drop { kept = [..kept, prog.items[i]] }
         i++
     }
     checker::TProgram { items = kept }
@@ -2447,13 +2396,13 @@ fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backen
 fn unmet_coverage_floors(fcov: u64, lcov: u64, bcov: u64, floor_f: u64, floor_l: u64, floor_b: u64): []str {
     var msgs: []str = []
     if fcov < floor_f {
-        msgs = teko::list::push(msgs, $"function coverage {fcov}% is below the {floor_f}% floor ([coverage] functions) — add tests")
+        msgs = [$"function coverage {fcov}% is below the {floor_f}% floor ([coverage] functions) — add tests"]
     }
     if lcov < floor_l {
-        msgs = teko::list::push(msgs, $"line coverage {lcov}% is below the {floor_l}% floor ([coverage] lines) — add tests")
+        msgs = [..msgs, $"line coverage {lcov}% is below the {floor_l}% floor ([coverage] lines) — add tests"]
     }
     if bcov < floor_b {
-        msgs = teko::list::push(msgs, $"branch coverage {bcov}% is below the {floor_b}% floor ([coverage] branches) — add tests")
+        msgs = [..msgs, $"branch coverage {bcov}% is below the {floor_b}% floor ([coverage] branches) — add tests"]
     }
     msgs
 }
@@ -2550,7 +2499,7 @@ fn native_gate_test_refs(items: []parser::Item): []TestRef {
     loop {
         if i >= items.len { break }
         match items[i].content {
-            parser::Function as f => { if f.is_test { out = teko::list::push(out, TestRef { namespace = items[i].namespace; name = f.name }) } }
+            parser::Function as f => { if f.is_test { out = [..out, TestRef { namespace = items[i].namespace; name = f.name }] } }
             _ => { }
         }
         i = i + 1
@@ -2565,7 +2514,7 @@ fn native_gate_drop_statements(items: []parser::Item): []parser::Item {
         if i >= items.len { break }
         match items[i].content {
             (@Statement()) as _dropped => { }
-            _ => { out = teko::list::push(out, items[i]) }
+            _ => { out = [..out, items[i]] }
         }
         i = i + 1
     }
@@ -2591,11 +2540,11 @@ fn native_gate_harness_items(proj_ns: str, src: str): []parser::Item | error {
     var tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return e }
     var mf = match parser::parse_main_file(tokens, 0) { parser::Parsed<parser::MainFile> as x => x.node; error as e => return e }
     var raw = asm_main_items(mf)
-    var out: []parser::Item = []
+    var out: [raw.len]parser::Item = []
     var i: u64 = 0
     loop {
         if i >= raw.len { break }
-        out = teko::list::push(out, parser::Item { content = raw[i].content; namespace = proj_ns; file = "<native-test-gate>"; guard = raw[i].guard })
+        out[i] = parser::Item { content = raw[i].content; namespace = proj_ns; file = "<native-test-gate>"; guard = raw[i].guard }
         i = i + 1
     }
     out
@@ -2606,7 +2555,7 @@ fn append_items(a: []parser::Item, b: []parser::Item): []parser::Item {
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        out = teko::list::push(out, b[i])
+        out = [..out, b[i]]
         i = i + 1
     }
     out
@@ -2622,8 +2571,8 @@ fn native_gate_unmark_tests(prog: checker::TProgram): checker::TProgram {
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
-            checker::TFunction as f => out = teko::list::push(out, if f.is_test { unmark_test_function(f) } else { f })
-            _ => out = teko::list::push(out, prog.items[i])
+            checker::TFunction as f => out = [..out, if f.is_test { unmark_test_function(f) } else { f }]
+            _ => out = [..out, prog.items[i]]
         }
         i = i + 1
     }
@@ -2684,18 +2633,17 @@ fn test_jobs(): u64 {
 
 fn gate_shard_spec(binp: str, shard_prefix: str, i: u64, jobs: u64): ProcSpec {
     var prefix = teko::str::concat(shard_prefix, $"{i}")
-    var env: []str = [$"TEKO_TEST_SHARD={i}/{jobs}"]
-    env = teko::list::push(env, teko::str::concat("TEKO_TKCOV=", prefix, ".tkcov"))
+    var env: []str = [$"TEKO_TEST_SHARD={i}/{jobs}", teko::str::concat("TEKO_TKCOV=", prefix, ".tkcov")]
     ProcSpec { argv = [binp]; dir = ""; env = env; stdin_data = ""; prefix = prefix }
 }
 
 fn run_gate_sharded(od: str, stem: str, binp: str, jobs: u64): i32 {
     var shard_prefix = gate_shard_base(od, stem)
-    var specs: []ProcSpec = []
+    var specs: [jobs]ProcSpec = []
     var i: u64 = 0
     loop {
         if i >= jobs { break }
-        specs = teko::list::push(specs, gate_shard_spec(binp, shard_prefix, i, jobs))
+        specs[i] = gate_shard_spec(binp, shard_prefix, i, jobs)
         i = i + 1
     }
     teko::io::println($"teko: test gate sharded {jobs} ways (TEKO_TEST_JOBS)")
@@ -3056,7 +3004,7 @@ fn dedup_ids(ids: []u64): []u64 {
     var i: u64 = 0
     loop {
         if i >= ids.len { break }
-        if !ids_contains(out, ids[i]) { out = teko::list::push(out, ids[i]) }
+        if !ids_contains(out, ids[i]) { out = [..out, ids[i]] }
         i++
     }
     out
@@ -3076,7 +3024,7 @@ fn tkcov_ids(data: str): []u64 {
         loop {
             if k >= n { break }
             if off + TKCOV_MAGIC_LEN > data.len { break }
-            acc = teko::list::push(acc, read_u64_le(data, off))
+            acc = [..acc, read_u64_le(data, off)]
             off = off + TKCOV_MAGIC_LEN
             k++
         }
@@ -3090,7 +3038,7 @@ fn concat_ids(a: []u64, b: []u64): []u64 {
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        out = teko::list::push(out, b[i])
+        out = [..out, b[i]]
         i++
     }
     out
@@ -3193,7 +3141,7 @@ fn analyze_records_of(prog: checker::TProgram, adir: str): []TestRecord {
                     var path = $"{adir}/{i}.tkcov"
                     var data = match teko::io::read_file(path) { str as s => s; error => "" }
                     var stats = checker::test_assert_stats(f)
-                    recs = teko::list::push(recs, TestRecord { label = test_label(f); ids = tkcov_ids(data); asserts_total = stats.total; asserts_folded = stats.folded })
+                    recs = [..recs, TestRecord { label = test_label(f); ids = tkcov_ids(data); asserts_total = stats.total; asserts_folded = stats.folded }]
                 }
             }
             _ => { }
@@ -3281,7 +3229,7 @@ fn keep_single_test(prog: checker::TProgram, keep_idx: u64): checker::TProgram {
             checker::TFunction as f => { if f.is_test && i != keep_idx { drop = true } }
             _ => { }
         }
-        if !drop { kept = teko::list::push(kept, prog.items[i]) }
+        if !drop { kept = [..kept, prog.items[i]] }
         i = i + 1
     }
     checker::TProgram { items = kept }
@@ -3319,7 +3267,7 @@ fn run_per_test_cov(dir: str, fe: Frontend): i32 {
                     var filtered = keep_single_test(fe.prog, i)
                     var rc = run_one_test_cov(dir, "bin", filtered, fe.manifest, teko::str::concat(fe.manifest.name, "-pertest"))
                     if rc != 0 { return rc }
-                    rows = teko::list::push(rows, PerTestCoverage { label = test_label(f); functions = coverage::coverage_pct(filtered); lines = coverage::line_coverage_pct(filtered); branches = coverage::branch_coverage_pct(filtered) })
+                    rows = [..rows, PerTestCoverage { label = test_label(f); functions = coverage::coverage_pct(filtered); lines = coverage::line_coverage_pct(filtered); branches = coverage::branch_coverage_pct(filtered) }]
                 }
             }
             _ => { }
@@ -3381,12 +3329,12 @@ fn bp_lines(text: str): []str {
     loop {
         if i >= text.len { break }
         if text[i] == b'\n' {
-            out = teko::list::push(out, teko::str::slice(text, start, i))
+            out = [..out, teko::str::slice(text, start, i)]
             start = i + 1
         }
         i = i + 1
     }
-    if start < text.len { out = teko::list::push(out, teko::str::slice_from(text, start)) }
+    if start < text.len { out = [..out, teko::str::slice_from(text, start)] }
     out
 }
 
@@ -3436,7 +3384,7 @@ fn bp_plusfile(line: str): str {
 fn cl_flush(files: []ChangedFile, path: str, lines: []u32): []ChangedFile {
     if lines.len == 0 { return files }
     if !teko::str::ends_with(path, ".tks") { return files }
-    teko::list::push(files, ChangedFile { path = path; lines = lines })
+    [..files, ChangedFile { path = path; lines = lines }]
 }
 
 fn changed_line_set(diff: str): ChangedLines {
@@ -3456,7 +3404,7 @@ fn changed_line_set(diff: str): ChangedLines {
         } else if bp_prefix(ln, "@@ ") {
             newno = bp_hunk_newstart(ln)
         } else if bp_prefix(ln, "+") && !bp_prefix(ln, "+++") {
-            cur_lines = teko::list::push(cur_lines, newno)
+            cur_lines = [..cur_lines, newno]
             newno = newno + 1
         } else if bp_prefix(ln, " ") {
             newno = newno + 1
@@ -3517,7 +3465,7 @@ fn cov_lines_from_cobertura(xml: str): []CovLine {
         } else if teko::str::contains(ln, "<line number='") && !teko::str::contains(ln, "<methods>") {
             var num = bp_parse_uint(xml_attr(ln, "number='")) to u32
             var hits = bp_parse_uint(xml_attr(ln, "hits='"))
-            out = teko::list::push(out, CovLine { file = cur_file; line = num; hit = hits > 0 })
+            out = [..out, CovLine { file = cur_file; line = num; hit = hits > 0 }]
         }
         i = i + 1
     }
@@ -3551,9 +3499,7 @@ fn per_commit_report_str(base_rev: str, d: DeltaCoverage): str {
 
 fn run_git_diff(base_rev: str, out_path: str): i32 {
     var cmd = teko::str::concat("git diff ", base_rev, "...HEAD -- '*.tks' > ", out_path, " 2>/dev/null")
-    var argv: []str = ["sh"]
-    argv = teko::list::push(argv, "-c")
-    argv = teko::list::push(argv, cmd)
+    var argv: []str = ["sh", "-c", cmd]
     teko::process::run(argv)
 }
 
@@ -3845,14 +3791,7 @@ fn stage_rc_of_env(key: str): i32 {
 
 fn self_stage_argv(exe: str): []str {
     var args = teko::env::args()
-    var out: []str = [exe]
-    var i: u64 = 1
-    loop {
-        if i >= args.len { break }
-        out = teko::list::push(out, args[i])
-        i = i + 1
-    }
-    out
+    [exe, ..args]
 }
 
 fn test_gate_precedence(trc: i32, floor_rc: i32, per_commit_rc: i32, has_regr: bool, regr_rc: i32): i32 {

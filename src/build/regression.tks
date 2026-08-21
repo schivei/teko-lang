@@ -46,7 +46,7 @@ fn spec_argv_display(argv: []str): str {
 }
 
 fn spec_env_with_channel(spec: ProcSpec): []str {
-    teko::list::push(spec.env, teko::str::concat(teko::process::VERDICT_CHANNEL_ENV, teko::str::concat("=", spec.prefix ~ ".chan")))
+    [..spec.env, teko::str::concat(teko::process::VERDICT_CHANNEL_ENV, teko::str::concat("=", spec.prefix ~ ".chan"))]
 }
 
 fn spawn_spec(spec: ProcSpec): teko::process::ProcHandle {
@@ -175,27 +175,27 @@ fn pool_window(n: u64, jobs: u64): u64 {
 
 pub fn run_pool(specs: []ProcSpec, jobs: u64): []CapResult {
     var n = specs.len
-    var caps: []CapResult = []
-    if n == 0 { return caps }
+    if n == 0 { return [] }
+    var caps: [n]CapResult = []
     var window = pool_window(n, jobs)
     var t_pool0 = regr_now_ns()
-    var handles: []teko::process::ProcHandle = []
-    var spawned_at: []i64 = []
+    var handles: [window]teko::process::ProcHandle = []
+    var spawned_at: [window]i64 = []
     var launched: u64 = 0
     loop {
         if launched >= window { break }
-        handles = teko::list::push(handles, spawn_spec(specs[launched]))
-        spawned_at = teko::list::push(spawned_at, regr_now_ns())
+        handles[launched] = spawn_spec(specs[launched])
+        spawned_at[launched] = regr_now_ns()
         launched = launched + 1
     }
     var harvested: u64 = 0
     loop {
         if harvested >= n { break }
-        caps = teko::list::push(caps, harvest_spec(specs[harvested], handles[harvested], spawned_at[harvested], t_pool0))
+        caps[harvested] = harvest_spec(specs[harvested], handles[harvested], spawned_at[harvested], t_pool0)
         harvested = harvested + 1
         if launched < n {
-            handles = teko::list::push(handles, spawn_spec(specs[launched]))
-            spawned_at = teko::list::push(spawned_at, regr_now_ns())
+            handles = [..handles, spawn_spec(specs[launched])]
+            spawned_at = [..spawned_at, regr_now_ns()]
             launched = launched + 1
         }
     }
@@ -228,9 +228,7 @@ fn run_captured(argv: []str, stdin_data: str, prefix: str): CapResult {
 }
 
 fn tool_on_path(name: str): bool {
-    var shv: []str = ["sh"]
-    shv = teko::list::push(shv, "-c")
-    shv = teko::list::push(shv, teko::str::concat("command -v ", name) ~ " >/dev/null 2>&1")
+    var shv: []str = ["sh", "-c", teko::str::concat("command -v ", name) ~ " >/dev/null 2>&1"]
     teko::process::run_quiet(shv) == 0
 }
 
@@ -268,14 +266,7 @@ fn regressive_name(regr_dir: str): str | error {
 }
 
 fn argv_with_args(binp: str, args: []str): []str {
-    var out: []str = [binp]
-    var k: u64 = 0
-    loop {
-        if k >= args.len { break }
-        out = teko::list::push(out, args[k])
-        k = k + 1
-    }
-    out
+    [binp, ..args]
 }
 
 fn tkr_effective_target(target: str): str {
@@ -310,8 +301,7 @@ fn arch_token_canonical(tok: str): str {
 }
 
 fn host_cc_arch(): str {
-    var argv: []str = [HOST_CC_NAME]
-    argv = teko::list::push(argv, HOST_CC_MACHINE_FLAG)
+    var argv: []str = [HOST_CC_NAME, HOST_CC_MACHINE_FLAG]
     var triple = tool_query_line(argv)
     var k: u64 = 0
     loop {
@@ -374,9 +364,7 @@ fn wellformed_script_for(target: str): str {
 fn check_object_wellformed(objp: str, target: str): RegrOutcome {
     var script = wellformed_script_for(target)
     if script.len == 0 { return regr_skip(teko::str::concat("no object well-formedness checker for target ", target)) }
-    var argv: []str = [script]
-    argv = teko::list::push(argv, objp)
-    argv = teko::list::push(argv, target)
+    var argv: []str = [script, objp, target]
     var cap = run_captured(argv, "", objp ~ ".wellformed")
     if cap.exit != 0 {
         return regr_fail($"object well-formedness check failed{captured_output_block(cap)}")
@@ -389,12 +377,7 @@ fn compile_regressive(exe: str, regr_dir: str, env: []str, prefix: str): CapResu
 }
 
 fn compile_regressive_argv(exe: str, regr_dir: str): []str {
-    var argv: []str = [exe]
-    argv = teko::list::push(argv, regr_dir)
-    argv = teko::list::push(argv, "-o")
-    argv = teko::list::push(argv, "bin")
-    argv = teko::list::push(argv, "--no-verify")
-    argv
+    [exe, regr_dir, "-o", "bin", "--no-verify"]
 }
 
 fn compile_regressive_spec(exe: str, regr_dir: str, env: []str, prefix: str): ProcSpec {
@@ -402,11 +385,7 @@ fn compile_regressive_spec(exe: str, regr_dir: str, env: []str, prefix: str): Pr
 }
 
 fn compile_in_place(exe: str, regr_dir: str, env: []str, prefix: str): CapResult {
-    var argv: []str = [exe]
-    argv = teko::list::push(argv, ".")
-    argv = teko::list::push(argv, "-o")
-    argv = teko::list::push(argv, "bin")
-    argv = teko::list::push(argv, "--no-verify")
+    var argv: []str = [exe, ".", "-o", "bin", "--no-verify"]
     run_captured_in_dir(argv, "", env, regr_dir, prefix)
 }
 
@@ -559,9 +538,7 @@ fn split_snippet_decls_and_stmts(src: str): SnippetSplit {
 }
 
 fn rm_rf(path: str): null | error {
-    var argv: []str = ["rm"]
-    argv = teko::list::push(argv, "-rf")
-    argv = teko::list::push(argv, path)
+    var argv: []str = ["rm", "-rf", path]
     if teko::process::run(argv) != 0 { return error { message = teko::str::concat("failed to remove ", path) } }
     null
 }
@@ -608,10 +585,7 @@ fn compile_inline_source(exe: str, src_text: str, env: []str, prefix: str): CapR
 fn copy_dir(src: str, dst: str): null | error {
     match rm_rf(dst) { error as e => return e; null => { } }
     match mkdir_p(teko::str::concat(dirname_of(dst), "/")) { error as e => return e; null => { } }
-    var argv: []str = ["cp"]
-    argv = teko::list::push(argv, "-R")
-    argv = teko::list::push(argv, src)
-    argv = teko::list::push(argv, dst)
+    var argv: []str = ["cp", "-R", src, dst]
     if teko::process::run(argv) != 0 { return error { message = teko::str::concat("failed to copy directory ", src) } }
     null
 }
@@ -620,11 +594,7 @@ fn provision_dependency(exe: str, dep_dir: str, scratch_packages: str, prefix: s
     match mkdir_p(teko::str::concat(scratch_packages, "/")) { error => { }; null => { } }
     var cwd = match teko::env::cwd() { str as c => c; error => "" }
     var dep_out = abs_path_of(prefix ~ ".depout", cwd)
-    var argv: []str = [exe]
-    argv = teko::list::push(argv, dep_dir)
-    argv = teko::list::push(argv, "-o")
-    argv = teko::list::push(argv, dep_out)
-    argv = teko::list::push(argv, "--no-verify")
+    var argv: []str = [exe, dep_dir, "-o", dep_out, "--no-verify"]
     var comp = run_captured_env(argv, "", with_regr_cov_env([], prefix ~ ".dep_compile"), prefix ~ ".dep_compile")
     if comp.exit != 0 { return error { message = teko::str::concat("dependency build failed: ", compile_failure_message(comp)) } }
     var entries = match teko::fs::list_dir(dep_out) { []str as e => e; error as e => return e }
@@ -823,7 +793,7 @@ pub const REGR_WORK_DIR: str = "bin/.regr-work"
 
 fn with_regr_cov_env(env: []str, prefix: str): []str {
     var cwd = match teko::env::cwd() { str as c => c; error => "" }
-    teko::list::push(env, $"TEKO_TKCOV={abs_path_of(prefix, cwd)}.tkcov")
+    [..env, $"TEKO_TKCOV={abs_path_of(prefix, cwd)}.tkcov"]
 }
 
 fn collect_tkcov_files(dir: str): []str {
@@ -837,9 +807,9 @@ fn collect_tkcov_files(dir: str): []str {
             []str => {
                 var sub = collect_tkcov_files(full)
                 var si: u64 = 0
-                loop { if si >= sub.len { break }; out = teko::list::push(out, sub[si]); si = si + 1 }
+                loop { if si >= sub.len { break }; out = [..out, sub[si]]; si = si + 1 }
             }
-            error => { if teko::str::ends_with(full, ".tkcov") { out = teko::list::push(out, full) } }
+            error => { if teko::str::ends_with(full, ".tkcov") { out = [..out, full] } }
         }
         i = i + 1
     }
@@ -887,7 +857,7 @@ fn regr_src_lookup(built: RegrBuilt, key: str): RegrSrcBuild | null {
 }
 
 fn regr_src_remember(built: RegrBuilt, entry: RegrSrcBuild): RegrBuilt {
-    RegrBuilt { done = built.done; kind = built.kind; comp = built.comp; binp = built.binp; srcs = teko::list::push(built.srcs, entry) }
+    RegrBuilt { done = built.done; kind = built.kind; comp = built.comp; binp = built.binp; srcs = [..built.srcs, entry] }
 }
 
 fn tkr_standalone_artifact(exe: str, srcp: str, t: Tkr, prefix: str, built: RegrBuilt): TkrArtifact {
@@ -1069,7 +1039,7 @@ fn tkr_run_scenarios(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, bui
             if ri >= specs.len { break }
             var rr = tkr_run_row(exe, regr_dir, specs[ri], $"{prefix}.{si}.{ri}", cur, groups)
             cur = rr.built
-            rows = teko::list::push(rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = rr.outcome.skipped; times = rr.times })
+            rows = [..rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = rr.outcome.skipped; times = rr.times }]
             if !rr.outcome.ok && !rr.outcome.skipped {
                 return FeatureRunResult { outcome = regr_fail($"{sc.name}[{ri}]: {rr.outcome.message}"); built = cur; rows = rows }
             }
@@ -1137,7 +1107,7 @@ fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, 
             } else {
                 phase_zero()
             }
-            rows = teko::list::push(rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = false; times = times })
+            rows = [..rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = false; times = times }]
             if !oc.ok { return compile_fail_result_at(regr_fail($"{sc.name}[{ri}]: {oc.message}"), rows, cur) }
             ri = ri + 1
         }
@@ -1192,14 +1162,7 @@ fn run_one_feature(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built
 }
 
 fn concat_row_timings(a: []RowTiming, b: []RowTiming): []RowTiming {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i++
-    }
-    out
+    [..a, ..b]
 }
 
 fn report_regressive(rd: str, oc: RegrOutcome, rows: []RowTiming) {

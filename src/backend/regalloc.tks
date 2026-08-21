@@ -15,12 +15,14 @@ fn u32_in(list: []u32, x: u32): bool {
 }
 
 fn reverse_u32(list: []u32): []u32 {
-    var out: []u32 = []
+    var out: [list.len]u32 = []
     var i: u64 = list.len
+    var j: u64 = 0
     loop {
         if i == 0 { break }
         i = i - 1
-        out = teko::list::push(out, list[i])
+        out[j] = list[i]
+        j++
     }
     out
 }
@@ -56,14 +58,14 @@ type RpoState = struct {
 fn rpo_visit(f: MFunc, id: u32, st: RpoState): RpoState {
     if u32_in(st.visited, id) { return st }
     var succs = block_successors(f, id)
-    var cur = RpoState { visited = teko::list::push(st.visited, id); post = st.post }
+    var cur = RpoState { visited = [..st.visited, id]; post = st.post }
     var i: u64 = 0
     loop {
         if i >= succs.len { break }
         cur = rpo_visit(f, succs[i], cur)
         i++
     }
-    RpoState { visited = cur.visited; post = teko::list::push(cur.post, id) }
+    RpoState { visited = cur.visited; post = [..cur.post, id] }
 }
 
 fn append_unvisited(f: MFunc, order: []u32): []u32 {
@@ -72,7 +74,7 @@ fn append_unvisited(f: MFunc, order: []u32): []u32 {
     loop {
         if i >= f.blocks.len { break }
         var bid = f.blocks[i].id
-        if !u32_in(out, bid) { out = teko::list::push(out, bid) }
+        if !u32_in(out, bid) { out = [..out, bid] }
         i++
     }
     out
@@ -112,7 +114,7 @@ fn number_insts(f: MFunc, order: []u32): []NumberedInst {
         var ii: u64 = 0
         loop {
             if ii >= insts.len { break }
-            out = teko::list::push(out, NumberedInst { point = p; block_id = bid; inst = insts[ii] })
+            out = [..out, NumberedInst { point = p; block_id = bid; inst = insts[ii] }]
             p = p + 1
             ii++
         }
@@ -135,11 +137,11 @@ fn one_reg(a: MReg): []MReg {
 }
 
 fn two_regs(a: MReg, b: MReg): []MReg {
-    teko::list::push(one_reg(a), b)
+    [..one_reg(a), b]
 }
 
 fn three_regs(a: MReg, b: MReg, c: MReg): []MReg {
-    teko::list::push(two_regs(a, b), c)
+    [..two_regs(a, b), c]
 }
 
 fn cons_reg(a: MReg, rest: []MReg): []MReg {
@@ -147,7 +149,7 @@ fn cons_reg(a: MReg, rest: []MReg): []MReg {
     var i: u64 = 0
     loop {
         if i >= rest.len { break }
-        out = teko::list::push(out, rest[i])
+        out = [..out, rest[i]]
         i++
     }
     out
@@ -298,7 +300,7 @@ fn natural_loops(stream: []NumberedInst, order: []u32, reachable: []u32): []Natu
         var t = terminator_target(ni.inst)
         if t.has && u32_in(reachable, ni.block_id) {
             if block_pos(order, t.target) <= block_pos(order, ni.block_id) {
-                out = teko::list::push(out, NaturalLoop { header_pt = block_first_point(stream, t.target); latch_pt = ni.point })
+                out = [..out, NaturalLoop { header_pt = block_first_point(stream, t.target); latch_pt = ni.point }]
             }
         }
         i++
@@ -325,12 +327,12 @@ fn collect_events(stream: []NumberedInst): []RegEvent {
         var ni = stream[i]
         var ir = inst_regs(ni.inst)
         if ir.has_def {
-            out = teko::list::push(out, RegEvent { reg = ir.def_reg; point = ni.point; is_def = true })
+            out = [..out, RegEvent { reg = ir.def_reg; point = ni.point; is_def = true }]
         }
         var u: u64 = 0
         loop {
             if u >= ir.uses.len { break }
-            out = teko::list::push(out, RegEvent { reg = ir.uses[u]; point = ni.point; is_def = false })
+            out = [..out, RegEvent { reg = ir.uses[u]; point = ni.point; is_def = false }]
             u++
         }
         i++
@@ -344,7 +346,7 @@ fn distinct_regs(events: []RegEvent): []MReg {
     loop {
         if i >= events.len { break }
         var r = events[i].reg
-        if !reg_in(out, r) { out = teko::list::push(out, r) }
+        if !reg_in(out, r) { out = [..out, r] }
         i++
     }
     out
@@ -355,7 +357,7 @@ fn call_points_of(stream: []NumberedInst): []u32 {
     var i: u64 = 0
     loop {
         if i >= stream.len { break }
-        if inst_regs(stream[i].inst).is_call { out = teko::list::push(out, stream[i].point) }
+        if inst_regs(stream[i].inst).is_call { out = [..out, stream[i].point] }
         i++
     }
     out
@@ -426,7 +428,7 @@ fn phys_intervals(events: []RegEvent, r: MReg, stream: []NumberedInst, call_poin
         var e = events[i]
         if reg_eq(e.reg, r) {
             if e.is_def {
-                if have_open { out = teko::list::push(out, finalize_pin(r, cur_start, cur_end, def_started, stream, call_points)) }
+                if have_open { out = [..out, finalize_pin(r, cur_start, cur_end, def_started, stream, call_points)] }
                 cur_start = e.point
                 cur_end = e.point
                 have_open = true
@@ -444,7 +446,7 @@ fn phys_intervals(events: []RegEvent, r: MReg, stream: []NumberedInst, call_poin
         }
         i++
     }
-    if have_open { out = teko::list::push(out, finalize_pin(r, cur_start, cur_end, def_started, stream, call_points)) }
+    if have_open { out = [..out, finalize_pin(r, cur_start, cur_end, def_started, stream, call_points)] }
     out
 }
 
@@ -471,11 +473,11 @@ fn extend_interval_over_loops(iv: LiveInterval, loops: []NaturalLoop, call_point
 }
 
 fn extend_over_loops(virt: []LiveInterval, loops: []NaturalLoop, call_points: []u32): []LiveInterval {
-    var out: []LiveInterval = []
+    var out: [virt.len]LiveInterval = []
     var i: u64 = 0
     loop {
         if i >= virt.len { break }
-        out = teko::list::push(out, extend_interval_over_loops(virt[i], loops, call_points))
+        out[i] = extend_interval_over_loops(virt[i], loops, call_points)
         i++
     }
     out
@@ -496,11 +498,11 @@ fn compute_intervals(stream: []NumberedInst, order: []u32, reachable: []u32): In
             var j: u64 = 0
             loop {
                 if j >= pins.len { break }
-                fixed = teko::list::push(fixed, pins[j])
+                fixed = [..fixed, pins[j]]
                 j++
             }
         } else {
-            virt = teko::list::push(virt, virt_interval(events, r, cps))
+            virt = [..virt, virt_interval(events, r, cps)]
         }
         i++
     }
@@ -550,15 +552,15 @@ fn merge_runs(src: []LiveInterval, lo: u64, mid: u64, hi: u64, out0: []LiveInter
         if i >= mid { break }
         if j >= hi { break }
         if interval_before(src[j], src[i]) {
-            out = teko::list::push(out, src[j])
+            out = [..out, src[j]]
             j++
             continue
         }
-        out = teko::list::push(out, src[i])
+        out = [..out, src[i]]
         i++
     }
-    loop { if i >= mid { break }; out = teko::list::push(out, src[i]); i++ }
-    loop { if j >= hi { break }; out = teko::list::push(out, src[j]); j++ }
+    loop { if i >= mid { break }; out = [..out, src[i]]; i++ }
+    loop { if j >= hi { break }; out = [..out, src[j]]; j++ }
     out
 }
 
@@ -591,7 +593,7 @@ fn expire_active(active: []ActiveEntry, point: u32): []ActiveEntry {
     var i: u64 = 0
     loop {
         if i >= active.len { break }
-        if active[i].end >= point { out = teko::list::push(out, active[i]) }
+        if active[i].end >= point { out = [..out, active[i]] }
         i++
     }
     out
@@ -631,7 +633,7 @@ fn candidate_pool(abi: AbiDescriptor, v: LiveInterval, active: []ActiveEntry, fi
         var p = pool[i]
         var free = !phys_held(active, p, v.reg_class) && !phys_fixed_overlap(fixed, p, v.reg_class, v.start, v.end)
         var call_ok = !v.crosses_call || !is_caller_saved(abi, preg(p, v.reg_class))
-        if free && call_ok { out = teko::list::push(out, p) }
+        if free && call_ok { out = [..out, p] }
         i++
     }
     out
@@ -669,14 +671,14 @@ fn remove_active(active: []ActiveEntry, vreg_id: u32): []ActiveEntry {
     var i: u64 = 0
     loop {
         if i >= active.len { break }
-        if active[i].vreg_id != vreg_id { out = teko::list::push(out, active[i]) }
+        if active[i].vreg_id != vreg_id { out = [..out, active[i]] }
         i++
     }
     out
 }
 
 fn mark_spilled(assignments: []@RegAssignment(), vreg_id: u32, slot: u64): []@RegAssignment() {
-    var out: []@RegAssignment() = []
+    var out: [assignments.len]@RegAssignment() = []
     var i: u64 = 0
     loop {
         if i >= assignments.len { break }
@@ -685,7 +687,7 @@ fn mark_spilled(assignments: []@RegAssignment(), vreg_id: u32, slot: u64): []@Re
             InReg as r => if r.vreg_id == vreg_id { Spilled { vreg_id = vreg_id; slot = slot } } else { a }
             Spilled => a
         }
-        out = teko::list::push(out, repl)
+        out[i] = repl
         i++
     }
     out
@@ -698,7 +700,7 @@ fn add_unique_u32(list: []u32, x: u32): []u32 {
         if list[i] == x { return list }
         i++
     }
-    teko::list::push(list, x)
+    [..list, x]
 }
 
 fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet): ScanResult {
@@ -715,8 +717,8 @@ fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet): ScanResult {
         var cand = candidate_pool(abi, v, active, ivals.fixed)
         if cand.len > 0 {
             var phys = cand[0]
-            active = teko::list::push(active, ActiveEntry { vreg_id = v.reg_id; phys = phys; end = v.end; reg_class = v.reg_class })
-            assignments = teko::list::push(assignments, InReg { vreg_id = v.reg_id; phys = phys })
+            active = [..active, ActiveEntry { vreg_id = v.reg_id; phys = phys; end = v.end; reg_class = v.reg_class }]
+            assignments = [..assignments, InReg { vreg_id = v.reg_id; phys = phys }]
             if is_callee_saved(abi, preg(phys, v.reg_class)) { used_callee = add_unique_u32(used_callee, phys) }
         } else {
             var far = furthest_active(active, v.reg_class, abi, v.crosses_call)
@@ -725,13 +727,13 @@ fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet): ScanResult {
                 next_slot = next_slot + 1
                 assignments = mark_spilled(assignments, far.vreg_id, slot)
                 active = remove_active(active, far.vreg_id)
-                active = teko::list::push(active, ActiveEntry { vreg_id = v.reg_id; phys = far.phys; end = v.end; reg_class = v.reg_class })
-                assignments = teko::list::push(assignments, InReg { vreg_id = v.reg_id; phys = far.phys })
+                active = [..active, ActiveEntry { vreg_id = v.reg_id; phys = far.phys; end = v.end; reg_class = v.reg_class }]
+                assignments = [..assignments, InReg { vreg_id = v.reg_id; phys = far.phys }]
                 if is_callee_saved(abi, preg(far.phys, v.reg_class)) { used_callee = add_unique_u32(used_callee, far.phys) }
             } else {
                 var slot = next_slot
                 next_slot = next_slot + 1
-                assignments = teko::list::push(assignments, Spilled { vreg_id = v.reg_id; slot = slot })
+                assignments = [..assignments, Spilled { vreg_id = v.reg_id; slot = slot }]
             }
         }
         i++
@@ -767,7 +769,7 @@ fn push_call_unsafe_assignment(out: []CallUnsafeAssignment, abi: AbiDescriptor, 
             var lookup = lookup_call_safety(virt, r.vreg_id)
             if !lookup.found || !lookup.crosses_call { return out }
             if !is_caller_saved(abi, preg(r.phys, lookup.reg_class)) { return out }
-            teko::list::push(out, CallUnsafeAssignment { vreg_id = r.vreg_id; phys = r.phys; reg_class = lookup.reg_class })
+            [..out, CallUnsafeAssignment { vreg_id = r.vreg_id; phys = r.phys; reg_class = lookup.reg_class }]
         }
         Spilled => out
     }
@@ -878,11 +880,11 @@ fn subst_find(table: []SubstEntry, r: MReg): MReg {
 }
 
 fn map_regs_list(list: []MReg, table: []SubstEntry): []MReg {
-    var out: []MReg = []
+    var out: [list.len]MReg = []
     var i: u64 = 0
     loop {
         if i >= list.len { break }
-        out = teko::list::push(out, subst_find(table, list[i]))
+        out[i] = subst_find(table, list[i])
         i++
     }
     out
@@ -930,26 +932,19 @@ fn minst_single(x: @MInst()): []@MInst() {
 }
 
 fn minst_cat(a: []@MInst(), b: []@MInst()): []@MInst() {
-    var out = a
-    var i: u64 = 0
-    loop {
-        if i >= b.len { break }
-        out = teko::list::push(out, b[i])
-        i++
-    }
-    out
+    [..a, ..b]
 }
 
 fn emit_gpr_reload(sv: MReg, slot: u64): []@MInst() {
     var fa = frame_addr_inst(sv, slot)
     var ld = load_inst(MMemSize::X, false, sv, MMem { base_reg = sv; offset = 0 to i32 })
-    teko::list::push(minst_single(fa), ld)
+    [..minst_single(fa), ld]
 }
 
 fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u64): []@MInst() {
     var fa = frame_addr_inst(asv, slot)
     var st = store_inst(MMemSize::X, dsv, MMem { base_reg = asv; offset = 0 to i32 })
-    teko::list::push(minst_single(fa), st)
+    [..minst_single(fa), st]
 }
 
 fn emit_spill_reload(sv: MReg, slot: u64): []@MInst() {
@@ -970,10 +965,10 @@ fn add_use_subst(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u64, a
     if la.is_spill {
         var sv = spill_scratch(abi, u.reg_class, acc.nth)
         var reloads2 = minst_cat(acc.reloads, emit_spill_reload(sv, frame_base + la.slot))
-        var table2 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = sv })
+        var table2 = [..acc.table, SubstEntry { vid = u.id; to = sv }]
         return UseAcc { table = table2; reloads = reloads2; nth = acc.nth + 1 }
     }
-    var table3 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = preg(la.phys, u.reg_class) })
+    var table3 = [..acc.table, SubstEntry { vid = u.id; to = preg(la.phys, u.reg_class) }]
     UseAcc { table = table3; reloads = acc.reloads; nth = acc.nth }
 }
 
@@ -1003,12 +998,12 @@ pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: @MInst(), frame_ba
                     var dsv = spill_scratch(abi, d.reg_class, 0 to u32)
                     var asv = spill_scratch(abi, MRegClass::GPR, 1 to u32)
                     if !subst_has(table, d.id) {
-                        table = teko::list::push(table, SubstEntry { vid = d.id; to = dsv })
+                        table = [..table, SubstEntry { vid = d.id; to = dsv }]
                     }
                     stores = emit_spill_store(dsv, asv, frame_base + la.slot)
                 } else {
                     if !subst_has(table, d.id) {
-                        table = teko::list::push(table, SubstEntry { vid = d.id; to = preg(la.phys, d.reg_class) })
+                        table = [..table, SubstEntry { vid = d.id; to = preg(la.phys, d.reg_class) }]
                     }
                 }
             }
@@ -1035,7 +1030,7 @@ fn append_spill_slots(abi: AbiDescriptor, frame: []lir::LAlloca, spills: u64): [
     var i: u64 = 0
     loop {
         if i >= spills { break }
-        out = teko::list::push(out, lir::LAlloca { bytes = abi.spill_slot_bytes; align = abi.spill_slot_align })
+        out = [..out, lir::LAlloca { bytes = abi.spill_slot_bytes; align = abi.spill_slot_align }]
         i = i + 1
     }
     out
@@ -1059,7 +1054,7 @@ fn rewrite_func(abi: AbiDescriptor, f: MFunc, sr: ScanResult): MFunc {
     var bi: u64 = 0
     loop {
         if bi >= f.blocks.len { break }
-        blocks = teko::list::push(blocks, rewrite_block(abi, sr, f.blocks[bi], frame_base))
+        blocks = [..blocks, rewrite_block(abi, sr, f.blocks[bi], frame_base)]
         bi++
     }
     MFunc { symbol = f.symbol; blocks = blocks; frame = frame }
@@ -1103,7 +1098,7 @@ pub fn regalloc_func(abi: AbiDescriptor, f: MFunc): MFunc | error {
 }
 
 pub fn regalloc_module(abi: AbiDescriptor, m: MModule): MModule | error {
-    var funcs: []MFunc = []
+    var funcs: [m.funcs.len]MFunc = []
     var i: u64 = 0
     loop {
         if i >= m.funcs.len { break }
@@ -1111,7 +1106,7 @@ pub fn regalloc_module(abi: AbiDescriptor, m: MModule): MModule | error {
             MFunc as g => g
             error as e => return e
         }
-        funcs = teko::list::push(funcs, rf)
+        funcs[i] = rf
         i++
     }
     MModule { funcs = funcs; rodata = m.rodata; globals = m.globals; layouts = m.layouts }

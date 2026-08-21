@@ -240,7 +240,7 @@ fn snippet_declared_names(decls: str): []str {
         if !in_chunk && mf_starts_with(trimmed, "/**") { cur = snippet_skip_doc_comment(decls, cur); continue }
         if !in_chunk && !mf_starts_with(trimmed, "#") {
             var name = snippet_line_declared_name(trimmed)
-            if name.len > 0 { out = teko::list::push(out, name) }
+            if name.len > 0 { out = [..out, name] }
             in_chunk = true
         }
         var scan = snippet_brace_delta(line, in_str, in_comment)
@@ -281,7 +281,7 @@ fn regr_claims_add(claims: []RegrNameClaim, g: u64, names: []str): []RegrNameCla
     var i: u64 = 0
     loop {
         if i >= names.len { break }
-        out = teko::list::push(out, RegrNameClaim { group = g; name = names[i] })
+        out = [..out, RegrNameClaim { group = g; name = names[i] }]
         i = i + 1
     }
     out
@@ -321,13 +321,13 @@ fn regr_plan_add_row(acc: RegrPlanAcc, t: Tkr, key: str, src: str): RegrPlanAcc 
     var names = snippet_declared_names(split_snippet_decls_and_stmts(src).decls)
     var idx = regr_group_for_row(acc, gkey, names)
     var fresh = idx == acc.keys.len
-    var keys = if fresh { teko::list::push(acc.keys, gkey) } else { acc.keys }
-    var specs = if fresh { teko::list::push(acc.specs, RegrGroupSpec { env = t.env; target = t.target }) } else { acc.specs }
+    var keys = if fresh { [..acc.keys, gkey] } else { acc.keys }
+    var specs = if fresh { [..acc.specs, RegrGroupSpec { env = t.env; target = t.target }] } else { acc.specs }
     var member = RegrGroupMember { key = key; group = idx; module = $"m{acc.next_module}"; source = src }
     RegrPlanAcc {
         keys = keys; specs = specs
         claims = regr_claims_add(acc.claims, idx, names)
-        members = teko::list::push(acc.members, member)
+        members = [..acc.members, member]
         next_module = acc.next_module + 1
     }
 }
@@ -347,7 +347,7 @@ fn regr_plan_reuse(acc: RegrPlanAcc, twin: RegrGroupMember, key: str): RegrPlanA
     var member = RegrGroupMember { key = key; group = twin.group; module = twin.module; source = "" }
     RegrPlanAcc {
         keys = acc.keys; specs = acc.specs; claims = acc.claims
-        members = teko::list::push(acc.members, member)
+        members = [..acc.members, member]
         next_module = acc.next_module
     }
 }
@@ -525,12 +525,12 @@ fn regr_groups_prepare(exe: str, plan: RegrGroupPlan, work: str): RegrBatchPrep 
     var g: u64 = 0
     loop {
         if g >= plan.specs.len { break }
-        if !regr_group_buildable(plan, g) { gen_ns = teko::list::push(gen_ns, 0); g = g + 1; continue }
-        gen_ns = teko::list::push(gen_ns, regr_group_generate(plan, g, work))
+        if !regr_group_buildable(plan, g) { gen_ns = [..gen_ns, 0]; g = g + 1; continue }
+        gen_ns = [..gen_ns, regr_group_generate(plan, g, work)]
         var dir = regr_group_dir(work, g)
         var prefix = dir ~ ".compile"
-        prefixes = teko::list::push(prefixes, prefix)
-        specs = teko::list::push(specs, compile_regressive_spec(exe, dir, with_regr_cov_env(plan.specs[g].env, prefix), prefix))
+        prefixes = [..prefixes, prefix]
+        specs = [..specs, compile_regressive_spec(exe, dir, with_regr_cov_env(plan.specs[g].env, prefix), prefix)]
         g = g + 1
     }
     RegrBatchPrep { specs = specs; prefixes = prefixes; gen_ns = gen_ns }
@@ -543,11 +543,11 @@ fn regr_groups_fold(plan: RegrGroupPlan, work: str, prep: RegrBatchPrep, caps: [
     loop {
         if g >= plan.specs.len { break }
         if !regr_group_buildable(plan, g) {
-            builds = teko::list::push(builds, regr_group_skipped(regr_group_member_count(plan.members, g), phase_zero()))
+            builds = [..builds, regr_group_skipped(regr_group_member_count(plan.members, g), phase_zero())]
             g = g + 1
             continue
         }
-        builds = teko::list::push(builds, regr_group_verdict(plan, g, work, plan.specs.len, caps[at], prep.gen_ns[g]))
+        builds = [..builds, regr_group_verdict(plan, g, work, plan.specs.len, caps[at], prep.gen_ns[g])]
         at = at + 1
         g = g + 1
     }
@@ -585,7 +585,7 @@ pub fn regr_with_entry_env(t: Tkr, module: str): Tkr {
         args = t.args; stdin = t.stdin; kind = t.kind; exit = t.exit; stdout = t.stdout; stderr = t.stderr
         targets = t.targets; expect = t.expect; golden = t.golden; diagnostic = t.diagnostic
         source_inline = t.source_inline; source_file = t.source_file
-        env = teko::list::push(t.env, $"{REGR_GROUP_ENTRY_VAR}={module}")
+        env = [..t.env, $"{REGR_GROUP_ENTRY_VAR}={module}"]
         target = t.target; in_place = t.in_place; dep_dir = t.dep_dir
         check_wellformed = t.check_wellformed
     }

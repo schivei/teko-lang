@@ -1,56 +1,46 @@
 fn emit_u64_le(buf: []byte, v: u64): []byte {
-    var b = teko::list::push(buf, (v & MACHO_BYTE_MASK_64) to byte)
-    b = teko::list::push(b, ((v >> 8) & MACHO_BYTE_MASK_64) to byte)
-    b = teko::list::push(b, ((v >> 16) & MACHO_BYTE_MASK_64) to byte)
-    b = teko::list::push(b, ((v >> 24) & MACHO_BYTE_MASK_64) to byte)
-    b = teko::list::push(b, ((v >> 32) & MACHO_BYTE_MASK_64) to byte)
-    b = teko::list::push(b, ((v >> 40) & MACHO_BYTE_MASK_64) to byte)
-    b = teko::list::push(b, ((v >> 48) & MACHO_BYTE_MASK_64) to byte)
-    teko::list::push(b, ((v >> 56) & MACHO_BYTE_MASK_64) to byte)
+    [
+        ..buf,
+        (v & MACHO_BYTE_MASK_64) to byte,
+        ((v >> 8) & MACHO_BYTE_MASK_64) to byte,
+        ((v >> 16) & MACHO_BYTE_MASK_64) to byte,
+        ((v >> 24) & MACHO_BYTE_MASK_64) to byte,
+        ((v >> 32) & MACHO_BYTE_MASK_64) to byte,
+        ((v >> 40) & MACHO_BYTE_MASK_64) to byte,
+        ((v >> 48) & MACHO_BYTE_MASK_64) to byte,
+        ((v >> 56) & MACHO_BYTE_MASK_64) to byte
+    ]
 }
 
 fn emit_str_bytes(buf: []byte, s: str): []byte {
-    var b = buf
+    var b: [s.len]byte = []
     var i: u64 = 0
     loop {
         if i >= s.len { break }
-        b = teko::list::push(b, s[i])
+        b[i] = s[i]
         i++
     }
-    b
+    [..buf, ..b]
 }
 
 fn emit_fixed16(buf: []byte, s: str): []byte {
+    var fixed: [16]byte = []
     var b = emit_str_bytes(buf, s)
-    var n: u64 = s.len
-    loop {
-        if n >= 16 { break }
-        b = teko::list::push(b, 0)
-        n++
-    }
-    b
+    [..b, ..fixed]
 }
 
 fn emit_u8_field(buf: []byte, v: u32): []byte {
-    teko::list::push(buf, (v & MACHO_BYTE_MASK) to byte)
+    [..buf, (v & MACHO_BYTE_MASK) to byte]
 }
 
 fn pad_to_mult(buf: []byte, k: u32): []byte {
-    var b = buf
-    loop {
-        if b.len % k == 0 { break }
-        b = teko::list::push(b, 0)
-    }
-    b
+    var padding: [(k - (buf.len % k)) % k]byte = []
+    [..buf, ..padding]
 }
 
 fn pad_to_offset(buf: []byte, target: u32): []byte {
-    var b = buf
-    loop {
-        if b.len >= (target to u64) { break }
-        b = teko::list::push(b, 0)
-    }
-    b
+    var padding: [target - buf.len]byte = []
+    [..buf, ..padding]
 }
 
 type StrTab = struct {
@@ -60,14 +50,14 @@ type StrTab = struct {
 
 fn build_strtab(symbols: []Symbol): StrTab {
     var bytes: []byte = [0 to byte]
-    var strx: []u32 = []
+    var strx: [symbols.len]u32 = []
     var i: u64 = 0
     loop {
         if i >= symbols.len { break }
-        strx = teko::list::push(strx, bytes.len to u32)
-        bytes = teko::list::push(bytes, MACHO_SYM_UNDERSCORE)
+        strx[i] = bytes.len to u32
+        bytes = [..bytes, MACHO_SYM_UNDERSCORE to byte]
         bytes = emit_str_bytes(bytes, symbols[i].name)
-        bytes = teko::list::push(bytes, 0 to byte)
+        bytes = [..bytes, 0 to byte]
         i++
     }
     StrTab { bytes = bytes; strx = strx }
@@ -153,8 +143,8 @@ fn macho_partition_relocs(relocs: []Reloc): MachoRelocParts {
         if i >= relocs.len { break }
         var r = relocs[i]
         match r.sect {
-            Text => { text = teko::list::push(text, r) }
-            Rodata => { rodata = teko::list::push(rodata, r) }
+            Text => { text = [..text, r] }
+            Rodata => { rodata = [..rodata, r] }
         }
         i++
     }
@@ -475,8 +465,7 @@ fn emit_one_symbol(buf: []byte, s: Symbol, strx: u32, const_addr: u32): []byte {
     } else {
         b = emit_u8_field(b, 0)
     }
-    b = teko::list::push(b, 0)
-    b = teko::list::push(b, 0)
+    b = [ ..b, 0, 0 ]
     var value = if s.defined { section_addr(s.sect, const_addr) + s.offset } else { 0 }
     emit_u64_le(b, value to u64)
 }

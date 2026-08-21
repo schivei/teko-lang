@@ -58,8 +58,8 @@ fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str): @Typ
 
 fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): @Type() | error {
     var tbl = type_param_table(f.type_params, f.type_constraints, "", table)
-    var params: []@Type() = []
-    var param_names: []str = []
+    var params: [f.params.len]@Type() = []
+    var param_names: [f.params.len]str = []
     var defaults: []parser::Expr = []
     var n_required: u64 = f.params.len
     var i = 0
@@ -72,11 +72,11 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): @Type() | erro
             (@Type()) as t => t
             error as e => return e
         }
-        params = teko::list::push(params, pt)
-        param_names = teko::list::push(param_names, f.params[i].name)
+        params[i] = pt
+        param_names[i] = f.params[i].name
         if f.params[i].has_default {
             if n_required == f.params.len { n_required = i to u64 }
-            defaults = teko::list::push(defaults, f.params[i].default_expr)
+            defaults = [..defaults, f.params[i].default_expr]
         }
         i++
     }
@@ -107,8 +107,8 @@ fn return_type_is_self(te: @TypeExpr()): bool {
 
 fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref_ns: str): @Type() | error {
     var tbl = method_type_param_table(receiver_canonical_name(struct_name, ref_ns, table), f.type_params, f.type_constraints, "", table)
-    var params: []@Type() = []
-    var param_names: []str = []
+    var params: [f.params.len]@Type() = []
+    var param_names: [f.params.len]str = []
     var defaults: []parser::Expr = []
     var n_required: u64 = f.params.len
     var disc_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, ref_ns, table) } else { null }
@@ -124,11 +124,11 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
         } else {
             match resolve_type(f.params[i].type_ann, tbl, ref_ns) { (@Type()) as t => t; error as e => return e }
         }
-        params = teko::list::push(params, pt)
-        param_names = teko::list::push(param_names, f.params[i].name)
+        params[i] = pt
+        param_names[i] = f.params[i].name
         if f.params[i].has_default {
             if n_required == f.params.len { n_required = i to u64 }
-            defaults = teko::list::push(defaults, f.params[i].default_expr)
+            defaults = [..defaults, f.params[i].default_expr]
         }
         i++
     }
@@ -216,13 +216,13 @@ fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: 
     loop {
         if i >= methods.len { break }
         if methods[i].is_global {
-            diags = teko::list::push(diags, located_diag(item.file, methods[i].line, methods[i].col, error { message = "`global` is not allowed on a type member — only on a namespace-level fn, type, or const" }))
+            diags = [..diags, located_diag(item.file, methods[i].line, methods[i].col, error { message = "`global` is not allowed on a type member — only on a namespace-level fn, type, or const" })]
             i++
             continue
         }
         match method_func_type(methods[i], td.name, table, item.namespace) {
             (@Type()) as t => { out = define_fn(out, methods[i].name, t, method_ns, false) }
-            error as e => { diags = teko::list::push(diags, located_diag(item.file, methods[i].line, methods[i].col, e)) }
+            error as e => { diags = [..diags, located_diag(item.file, methods[i].line, methods[i].col, e)] }
         }
         i++
     }
@@ -253,7 +253,7 @@ fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env): Sig
         if mi >= methods.len { break }
         match method_func_type(methods[mi], inst.name, table, "") {
             (@Type()) as t => { out = define_fn(out, methods[mi].name, t, inst.name, false) }
-            error as e => { diags = teko::list::push(diags, located_diag(inst.file, methods[mi].line, methods[mi].col, e)) }
+            error as e => { diags = [..diags, located_diag(inst.file, methods[mi].line, methods[mi].col, e)] }
         }
         mi++
     }
@@ -381,11 +381,11 @@ fn mret_field_name(slot: u64): str {
 }
 
 fn mret_struct_item(ns: str, file: str, mangle: str, types: []@TypeExpr()): parser::Item {
-    var fields: []parser::Field = []
+    var fields: [types.len]parser::Field = []
     var i: u64 = 0
     loop {
         if i >= types.len { break }
-        fields = teko::list::push(fields, parser::Field { name = mret_field_name(i); type_ann = types[i]; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = parser::docspan_none(); is_readonly = false })
+        fields[i] = parser::Field { name = mret_field_name(i); type_ann = types[i]; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = parser::docspan_none(); is_readonly = false }
         i = i + 1
     }
     var body = parser::StructBody { fields = fields; methods = []; implements = []; consts = []; is_readonly = false }
@@ -398,11 +398,11 @@ fn mret_named_type(mangle: str): @TypeExpr() {
 }
 
 fn mret_return_struct_lit(mangle: str, values: []parser::Expr, line: u32, col: u32): @Statement() {
-    var names: []str = []
+    var names: [values.len]str = []
     var i: u64 = 0
     loop {
         if i >= values.len { break }
-        names = teko::list::push(names, mret_field_name(i))
+        names[i] = mret_field_name(i)
         i = i + 1
     }
     var lit = parser::StructLit { type_path = parser::Path { segments = [parser::Segment { name = mangle }] }; type_args = []; field_names = names; field_vals = values }
@@ -410,11 +410,11 @@ fn mret_return_struct_lit(mangle: str, values: []parser::Expr, line: u32, col: u
 }
 
 fn mret_rewrite_returns(stmts: []@Statement(), mangle: str): []@Statement() {
-    var out: []@Statement() = []
+    var out: [stmts.len]@Statement() = []
     var i: u64 = 0
     loop {
         if i >= stmts.len { break }
-        out = teko::list::push(out, mret_rewrite_stmt(stmts[i], mangle))
+        out[i] = mret_rewrite_stmt(stmts[i], mangle)
         i = i + 1
     }
     out
@@ -441,12 +441,12 @@ fn mret_rewrite_expr_stmt(e: parser::Expr, mangle: str): parser::Expr {
 }
 
 fn mret_rewrite_arms(arms: []parser::Arm, mangle: str): []parser::Arm {
-    var out: []parser::Arm = []
+    var out: [arms.len]parser::Arm = []
     var i: u64 = 0
     loop {
         if i >= arms.len { break }
         var a = arms[i]
-        out = teko::list::push(out, parser::Arm { pattern = a.pattern; has_when = a.has_when; guard = a.guard; body = mret_rewrite_returns(a.body, mangle) })
+        out[i] = parser::Arm { pattern = a.pattern; has_when = a.has_when; guard = a.guard; body = mret_rewrite_returns(a.body, mangle) }
         i = i + 1
     }
     out
@@ -481,22 +481,22 @@ pub fn synthesize_mret_structs(program: parser::Program): parser::Program {
                     var mangle = mret_mangle(f.ret_types)
                     var key = it.namespace ~ "#" ~ mangle
                     if !mret_key_seen(made_keys, key) {
-                        made_keys = teko::list::push(made_keys, key)
-                        new_structs = teko::list::push(new_structs, mret_struct_item(it.namespace, it.file, mangle, f.ret_types))
+                        made_keys = [..made_keys, key]
+                        new_structs = [..new_structs, mret_struct_item(it.namespace, it.file, mangle, f.ret_types)]
                     }
-                    out = teko::list::push(out, parser::Item { content = mret_rewrite_fn(f, mangle); namespace = it.namespace; file = it.file; guard = it.guard })
+                    out = [..out, parser::Item { content = mret_rewrite_fn(f, mangle); namespace = it.namespace; file = it.file; guard = it.guard }]
                 } else {
-                    out = teko::list::push(out, it)
+                    out = [..out, it]
                 }
             }
-            _ => { out = teko::list::push(out, it) }
+            _ => { out = [..out, it] }
         }
         i = i + 1
     }
     var k: u64 = 0
     loop {
         if k >= new_structs.len { break }
-        out = teko::list::push(out, new_structs[k])
+        out = [..out, new_structs[k]]
         k = k + 1
     }
     parser::Program { items = out }
@@ -530,7 +530,7 @@ pub fn canon_class_bases(program: parser::Program): parser::Program {
         t++
     }
     if !any { return program }
-    var items: []parser::Item = []
+    var items: [program.items.len]parser::Item = []
     var i = 0
     loop {
         if i >= program.items.len { break }
@@ -560,7 +560,7 @@ pub fn canon_class_bases(program: parser::Program): parser::Program {
             }
             _ => { }
         }
-        items = teko::list::push(items, parser::Item { content = content; namespace = it.namespace; file = it.file; guard = it.guard })
+        items[i] = parser::Item { content = content; namespace = it.namespace; file = it.file; guard = it.guard }
         i++
     }
     parser::Program { items = items }
@@ -590,7 +590,7 @@ fn class_inheritance_acyclic(name: str, table: TypeTable): error | null {
             if seen[i] == b { return error { message = $"cyclic class inheritance: '{b}' inherits from itself (directly or transitively)" } }
             i++
         }
-        seen = teko::list::push(seen, b)
+        seen = [..seen, b]
         cur = b
     }
     null
@@ -604,7 +604,7 @@ pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable): []parser
     }
     var out: []parser::Field = inherited
     var i = 0
-    loop { if i >= cb.fields.len { break }; out = teko::list::push(out, cb.fields[i]); i++ }
+    loop { if i >= cb.fields.len { break }; out = [..out, cb.fields[i]]; i++ }
     out
 }
 
@@ -625,7 +625,7 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parse
             if cb.methods[j].name == m.name { m = cb.methods[j] }
             j++
         }
-        out = teko::list::push(out, m)
+        out = [..out, m]
         i++
     }
     var k = 0
@@ -634,7 +634,7 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parse
         var is_new = true
         var bi = 0
         loop { if bi >= inherited.len { break }; if inherited[bi].name == cb.methods[k].name { is_new = false; break }; bi++ }
-        if is_new { out = teko::list::push(out, cb.methods[k]) }
+        if is_new { out = [..out, cb.methods[k]] }
         k++
     }
     out
@@ -648,7 +648,7 @@ pub fn effective_class_consts(cb: parser::ClassBody, table: TypeTable): []parser
         var i: u64 = 0
         loop {
             if i >= base_consts.len { break }
-            if !consts_have_name(out, base_consts[i].name) { out = teko::list::push(out, base_consts[i]) }
+            if !consts_have_name(out, base_consts[i].name) { out = [..out, base_consts[i]] }
             i++
         }
     }
@@ -845,7 +845,7 @@ pub fn effective_interface_methods(ib: parser::InterfaceBody, iface_ns: str, tab
             si++
         }
         var base_ib = match hit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{ename} is not an interface" } }
-        var bm = match effective_interface_methods(base_ib, hit.ns, table, teko::list::push(seen, key)) { []parser::Function as f => f; error as e => return e }
+        var bm = match effective_interface_methods(base_ib, hit.ns, table, [..seen, key]) { []parser::Function as f => f; error as e => return e }
         var bi = 0
         loop { if bi >= bm.len { break }; out = merge_iface_method(out, bm[bi]); bi++ }
         ei++
@@ -862,7 +862,7 @@ fn merge_iface_method(out: []parser::Function, m: parser::Function): []parser::F
         if out[i].name == m.name && functions_ast_equal(out[i], m) { return out }
         i++
     }
-    teko::list::push(out, m)
+    [..out, m]
 }
 
 pub fn iface_methods_by_name(iface: str, table: TypeTable): []parser::Function | error {
@@ -1003,7 +1003,7 @@ fn resolve_field_views(fields: []parser::Field, table: TypeTable, owner_ns: str)
     loop {
         if i >= fields.len { break }
         var fv = match resolve_field_view(fields[i], table, owner_ns) { FieldView as v => v; error as e => return e }
-        out = teko::list::push(out, fv)
+        out = [..out, fv]
         i++
     }
     out
@@ -1046,8 +1046,8 @@ fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str): SplitI
             parser::TypeDecl as td => match td.body { parser::TraitBody => true; _ => false }
             error => false
         }
-        if is_trait { traits = teko::list::push(traits, implements[i]) }
-        else { ifaces = teko::list::push(ifaces, implements[i]) }
+        if is_trait { traits = [..traits, implements[i]] }
+        else { ifaces = [..ifaces, implements[i]] }
         i++
     }
     SplitImpls { traits = traits; ifaces = ifaces }
@@ -1129,7 +1129,7 @@ fn fold_trait_fields(type_name: str, tname: str, fields: []parser::Field, trait_
         var fvis = if into_class { parser::Visibility::Private } else { parser::Visibility::Pub }
         var member = parser::Field { name = tf.name; type_ann = tf.type_ann; vis = fvis; is_intern = false; has_doc = tf.has_doc; doc = tf.doc; is_readonly = tf.is_readonly }
         var idx = field_index_by_name(out, tf.name)
-        if idx < 0 { out = teko::list::push(out, member); fi++; continue }
+        if idx < 0 { out = [..out, member]; fi++; continue }
         if !fields_ast_equal(out[idx to u64], member) {
             return error { message = $"trait '{tname}' field '{tf.name}' collides with a different field on '{type_name}' — a field absorbs only when identical; rename it or reconcile its type" }
         }
@@ -1145,7 +1145,7 @@ fn fold_trait_consts(type_name: str, tname: str, consts: []parser::ConstDecl, tr
         if ci >= trait_consts.len { break }
         var tc = trait_consts[ci]
         var idx = const_index_by_name(out, tc.name)
-        if idx < 0 { out = teko::list::push(out, tc); ci++; continue }
+        if idx < 0 { out = [..out, tc]; ci++; continue }
         if !consts_ast_equal(out[idx to u64], tc) {
             return error { message = $"trait '{tname}' const '{tc.name}' collides with a different member const on '{type_name}' — a const absorbs only when identical; rename it or reconcile its value" }
         }
@@ -1162,7 +1162,7 @@ fn fold_trait_methods(type_name: str, tname: str, own_methods: []parser::Functio
         var tm = trait_methods[mi]
         if tm.body.len == 0 { mi++; continue }
         var idx = method_index_by_name(out, tm.name)
-        if idx < 0 { out = teko::list::push(out, trait_method_as_member(tm)); mi++; continue }
+        if idx < 0 { out = [..out, trait_method_as_member(tm)]; mi++; continue }
         match reconcile_composed_method(type_name, tname, own_methods, out, tm, table) {
             []parser::Function as m => out = m
             error as e => return e
@@ -1185,7 +1185,7 @@ fn reconcile_composed_method(type_name: str, tname: str, own_methods: []parser::
         }
         i++
     }
-    teko::list::push(out, trait_method_as_member(tm))
+    [..out, trait_method_as_member(tm)]
 }
 
 fn method_merge_error(type_name: str, tname: str, method_name: str, own_methods: []parser::Function): error {
@@ -1216,13 +1216,13 @@ type FoldedItem = struct {
 }
 
 fn fold_user_traits(program: parser::Program, table: TypeTable): UserFoldResult {
-    var items: []parser::Item = []
+    var items: [program.items.len]parser::Item = []
     var diags: []str = []
     var i: u64 = 0
     loop {
         if i >= program.items.len { break }
         var folded = fold_one_item(program.items[i], table)
-        items = teko::list::push(items, folded.item)
+        items[i] = folded.item
         diags = concat_diags(diags, folded.diags)
         i++
     }
@@ -1334,7 +1334,7 @@ fn duplicates_of_reg(table: TypeTable, at: u64): []str {
         if j >= tt_len(table) { break }
         var other = tt_at(table, j)
         if !w0_is_stamped_generic_reg(other, table) && other.name == reg.name && other.namespace == reg.namespace && other.decl.type_params.len == arity {
-            diags = teko::list::push(diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' (arity {arity}) in namespace '{ns_label}'"))
+            diags = [..diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' (arity {arity}) in namespace '{ns_label}'")]
         }
         j++
     }
@@ -1489,7 +1489,7 @@ fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function): []str
         if i >= methods.len { break }
         var m = methods[i]
         if m.is_abstract || m.is_virtual || m.is_override || m.is_intern {
-            diags = teko::list::push(diags, decl_diag(reg, $"trait method '{m.name}' may not be `abstract`/`virtual`/`override`/`intern` — a trait is a concrete mixin, not a dispatch contract"))
+            diags = [..diags, decl_diag(reg, $"trait method '{m.name}' may not be `abstract`/`virtual`/`override`/`intern` — a trait is a concrete mixin, not a dispatch contract"))
         }
         i++
     }
@@ -1515,7 +1515,7 @@ fn interface_operator_wellformed_diags(reg: TypeReg, methods: []parser::Function
         if i >= methods.len { break }
         if methods[i].is_operator {
             match check_one_operator(reg.decl, methods[i], reg.namespace, table) {
-                error as e => diags = teko::list::push(diags, decl_error_diag(reg, e))
+                error as e => diags = [..diags, decl_error_diag(reg, e)]
                 null => { }
             }
         }
@@ -1532,7 +1532,7 @@ fn interface_operator_counterpart_diags(reg: TypeReg, eff: []parser::Function): 
         if eff[i].is_operator {
             var want = comparator_counterpart(eff[i].name)
             if want != "" && !effective_lists_operator(eff, want) {
-                diags = teko::list::push(diags, decl_diag(reg, $"interface `operator {eff[i].name}` requires its counter-part `operator {want}` in the same contract — the contract must list both signatures"))
+                diags = [..diags, decl_diag(reg, $"interface `operator {eff[i].name}` requires its counter-part `operator {want}` in the same contract — the contract must list both signatures")]
             }
         }
         i++
@@ -1556,7 +1556,7 @@ fn interface_bodyless_diags(reg: TypeReg, methods: []parser::Function): []str {
     loop {
         if i >= methods.len { break }
         if methods[i].body.len > 0 {
-            diags = teko::list::push(diags, decl_diag(reg, $"interface method '{methods[i].name}' must be a bodyless signature (an interface is a pure contract — no default bodies)"))
+            diags = [..diags, decl_diag(reg, $"interface method '{methods[i].name}' must be a bodyless signature (an interface is a pure contract — no default bodies)")]
         }
         i++
     }
@@ -1573,7 +1573,7 @@ fn interface_conflict_diags(reg: TypeReg, eff: []parser::Function, table: TypeTa
         loop {
             if b >= eff.len { break }
             if eff[a].name == eff[b].name && !method_sig_matches(eff[a], eff[b], table, owner_ns, reg.decl.name) {
-                diags = teko::list::push(diags, decl_diag(reg, $"interface '{reg.decl.name}' has conflicting signatures for method '{eff[a].name}' (an extended interface declares it differently)"))
+                diags = [..diags, decl_diag(reg, $"interface '{reg.decl.name}' has conflicting signatures for method '{eff[a].name}' (an extended interface declares it differently)")]
             }
             b++
         }
@@ -1591,7 +1591,7 @@ fn service_conflict_diags_pair(table: TypeTable, i: u64, reg: TypeReg, target: s
         match other.decl.body {
             parser::ClassBody as ocb => {
                 if ocb.is_service && name_last_segment(other.name) == key && svc_service_implements(ocb, target) {
-                    diags = teko::list::push(diags, decl_diag(reg, $"duplicate service registration for '{target}' under key '{key}': same-type-same-key collides at compile time (distinct keys coexist)"))
+                    diags = [..diags, decl_diag(reg, $"duplicate service registration for '{target}' under key '{key}': same-type-same-key collides at compile time (distinct keys coexist)")]
                 }
             }
             _ => { }
@@ -1685,19 +1685,19 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
         match dep.items[j] {
             TFunction as f => {
                 var dtbl = type_param_table(f.type_params, f.type_constraints, "", t)
-                var params: []@Type() = []
-                var param_names: []str = []
+                var params: [f.params.len]@Type() = []
+                var param_names: [f.params.len]str = []
                 var defaults: []parser::Expr = []
                 var n_required: u64 = f.params.len
                 var pi: u64 = 0
                 loop {
                     if pi >= f.params.len { break }
                     var pt = match resolve_type(f.params[pi].type_ann, dtbl, f.namespace) { (@Type()) as ty => ty; error as err => return err }
-                    params = teko::list::push(params, pt)
-                    param_names = teko::list::push(param_names, f.params[pi].name)
+                    params[pi] = pt
+                    param_names[pi] = f.params[pi].name
                     if f.params[pi].has_default {
                         if n_required == f.params.len { n_required = pi }
-                        defaults = teko::list::push(defaults, f.params[pi].default_expr)
+                        defaults = [..defaults, f.params[pi].default_expr]
                     }
                     pi++
                 }

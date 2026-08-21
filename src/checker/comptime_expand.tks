@@ -21,12 +21,12 @@ fn cx_binds_lookup(binds: CxBinds, name: str): TExpr | null {
 pub fn expand_comptime(prog: TProgram, table: TypeTable): TProgram | error {
     if table.comptimes.len == 0 { return prog }
     var ctx = CxCtx { table = table; binds = cx_empty_binds(); depth = 0 to u32 }
-    var out: []@TItem() = []
+    var out: [prog.items.len]@TItem() = []
     var i: u64 = 0
     loop {
         if i >= prog.items.len { break }
         var it = match cx_item(prog.items[i], ctx) { error as x => return x; (@TItem()) as v => v }
-        out = teko::list::push(out, it)
+        out[i] = it
         i++
     }
     TProgram { items = out }
@@ -52,12 +52,12 @@ fn cx_const_decl(cd: TConstDecl, ctx: CxCtx): @TItem() | error {
 }
 
 fn cx_block(stmts: []@TStatement(), ctx: CxCtx): []@TStatement() | error {
-    var out: []@TStatement() = []
+    var out: [stmts.len]@TStatement() = []
     var i: u64 = 0
     loop {
         if i >= stmts.len { break }
         var s = match cx_stmt(stmts[i], ctx) { error as x => return x; (@TStatement()) as v => v }
-        out = teko::list::push(out, s)
+        out[i] = s
         i++
     }
     out
@@ -132,12 +132,12 @@ fn cx_expr(e: TExpr, ctx: CxCtx): TExpr | error {
 }
 
 fn cx_exprs(es: []TExpr, ctx: CxCtx): []TExpr | error {
-    var out: []TExpr = []
+    var out: [es.len]TExpr = []
     var i: u64 = 0
     loop {
         if i >= es.len { break }
         var x = match cx_expr(es[i], ctx) { error as e2 => return e2; TExpr as v => v }
-        out = teko::list::push(out, x)
+        out[i] = x
         i++
     }
     out
@@ -231,12 +231,12 @@ fn cx_if(f: TIfExpr, e: TExpr, ctx: CxCtx): TExpr | error {
 
 fn cx_compare(c: TCompare, e: TExpr, ctx: CxCtx): TExpr | error {
     var first = match cx_expr(c.first, ctx) { error as x => return x; TExpr as v => v }
-    var terms: []TCmpTerm = []
+    var terms: [c.rest.len]TCmpTerm = []
     var i: u64 = 0
     loop {
         if i >= c.rest.len { break }
         var operand = match cx_expr(c.rest[i].operand, ctx) { error as x => return x; TExpr as v => v }
-        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = operand })
+        terms[i] = TCmpTerm { op = c.rest[i].op; operand = operand }
         i++
     }
     TExpr { kind = TCompare { first = first; rest = terms }; type = e.type; line = e.line; col = e.col }
@@ -244,12 +244,12 @@ fn cx_compare(c: TCompare, e: TExpr, ctx: CxCtx): TExpr | error {
 
 fn cx_match(m: TMatchExpr, e: TExpr, ctx: CxCtx): TExpr | error {
     var subject = match cx_expr(m.subject, ctx) { error as x => return x; TExpr as v => v }
-    var arms: []TArm = []
+    var arms: [m.arms.len]TArm = []
     var i: u64 = 0
     loop {
         if i >= m.arms.len { break }
         var arm = match cx_arm(m.arms[i], ctx) { error as x => return x; TArm as a => a }
-        arms = teko::list::push(arms, arm)
+        arms[i] = arm
         i++
     }
     TExpr { kind = TMatchExpr { subject = subject; arms = arms }; type = e.type; line = e.line; col = e.col }
@@ -274,16 +274,16 @@ fn cx_block_expr(blk: TBlockExpr, e: TExpr, ctx: CxCtx): TExpr | error {
 }
 
 fn cx_interp(in: TInterp, e: TExpr, ctx: CxCtx): TExpr | error {
-    var holes: []TExpr = []
+    var holes: [in.holes.len]TExpr = []
     var specs: []TFSpec = []
     var i: u64 = 0
     loop {
         if i >= in.holes.len { break }
         var hole = match cx_expr(in.holes[i], ctx) { error as x => return x; TExpr as v => v }
-        holes = teko::list::push(holes, hole)
+        holes[i] = hole
         if i < in.specs.len {
             var sp = match cx_fspec(in.specs[i], ctx) { error as x => return x; TFSpec as s => s }
-            specs = teko::list::push(specs, sp)
+            specs = [..specs, sp]
         }
         i++
     }
@@ -306,12 +306,12 @@ fn cx_slice_of_len(s: TSliceOfLen, e: TExpr, ctx: CxCtx): TExpr | error {
 }
 
 fn cx_array(a: TArrayLit, e: TExpr, ctx: CxCtx): TExpr | error {
-    var elems: []TArrayElem = []
+    var elems: [a.elements.len]TArrayElem = []
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         var ex = match cx_expr(a.elements[i].expr, ctx) { error as x => return x; TExpr as v => v }
-        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = ex })
+        elems[i] = TArrayElem { is_spread = a.elements[i].is_spread; expr = ex }
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
@@ -395,12 +395,12 @@ fn cx_reflect_expr(e: parser::Expr, rc: CxRefl): parser::Expr | error {
 }
 
 fn cx_reflect_args(args: []parser::Expr, rc: CxRefl): []parser::Expr | error {
-    var out: []parser::Expr = []
+    var out: [args.len]parser::Expr = []
     var i: u64 = 0
     loop {
         if i >= args.len { break }
         var a = match cx_reflect_expr(args[i], rc) { error as x => return x; parser::Expr as v => v }
-        out = teko::list::push(out, a)
+        out[i] = a
         i++
     }
     out
@@ -434,11 +434,11 @@ fn cx_reflect_fields(t: @Type(), e: parser::Expr, tname: str, rc: CxRefl): parse
     if rc.fields_elem == "" { return error { message = $"comptime `{tname}.fields` requires the comptime to return a `[]Struct` descriptor slice" } }
     var type_name = match t { Named as n => n.name; _ => return error { message = $"comptime `{tname}.fields` needs a field-shaped type — `{type_render(t)}` has no fields" } }
     var fvs = match deriver_field_view(type_name, rc.table) { []FieldView as v => v; error as x => return x }
-    var elems: []parser::ArrayElem = []
+    var elems: [fvs.len]parser::ArrayElem = []
     var i: u64 = 0
     loop {
         if i >= fvs.len { break }
-        elems = teko::list::push(elems, parser::ArrayElem { is_spread = false; expr = cx_field_descriptor(fvs[i], rc.fields_elem, e) })
+        elems[i] = parser::ArrayElem { is_spread = false; expr = cx_field_descriptor(fvs[i], rc.fields_elem, e) }
         i++
     }
     parser::Expr { kind = parser::ArrayLit { elements = elems }; line = e.line; col = e.col }
@@ -498,8 +498,8 @@ fn cx_prim_size(k: PrimKind): u32 {
 fn cx_expand_agg(): AggConstMap { ScalarConstMap { names = []; nss = []; inits = [] } }
 
 fn cx_bind_args(cd: parser::ComptimeDecl, c: TCall, ctx: CxCtx): CxBinds | error {
-    var names: []str = []
-    var vals: []TExpr = []
+    var names: [cd.params.len]str = []
+    var vals: [cd.params.len]TExpr = []
     var i: u64 = 0
     loop {
         if i >= cd.params.len { break }
@@ -512,8 +512,8 @@ fn cx_bind_args(cd: parser::ComptimeDecl, c: TCall, ctx: CxCtx): CxBinds | error
             TExpr as l => l
             null => return error { message = $"comptime `@{cd.name}`'s argument `{cd.params[i].name}` has no literal form for its parameter type" }
         }
-        names = teko::list::push(names, cd.params[i].name)
-        vals = teko::list::push(vals, lit)
+        names[i] = cd.params[i].name
+        vals[i] = lit
         i++
     }
     CxBinds { names = names; vals = vals }
