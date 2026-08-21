@@ -199,7 +199,7 @@ fn append_all(out: []byte, more: []byte): []byte {
     var i: u64 = 0
     loop {
         if i >= more.len { break }
-        acc = teko::list::push(acc, more[i])
+        acc = [..acc, more[i]]
         i++
     }
     acc
@@ -210,7 +210,7 @@ fn append_le(out: []byte, v: u64, count: u64): []byte {
     var i: u64 = 0
     loop {
         if i >= count { break }
-        acc = teko::list::push(acc, ((v >> (i * 8)) & 0xFF) to byte)
+        acc = [..acc, ((v >> (i * 8)) & 0xFF) to byte]
         i++
     }
     acc
@@ -221,7 +221,7 @@ fn append_le_i64(out: []byte, v: i64, count: u64): []byte {
     var i: u64 = 0
     loop {
         if i >= count { break }
-        acc = teko::list::push(acc, ((v >> (i * 8)) & 0xFF) to byte)
+        acc = [..acc, ((v >> (i * 8)) & 0xFF) to byte]
         i++
     }
     acc
@@ -235,13 +235,13 @@ fn encode_cstring(name: str): []byte | error {
         if raw[i] == 0x00 { return error { message = "bson: field name contains an interior NUL" } }
         i++
     }
-    teko::list::push(raw, 0x00 to byte)
+    [..raw, 0x00 to byte]
 }
 
 fn encode_string_value(s: str): []byte {
     var raw = bytes_of_str(s)
     var out = append_le(no_bytes(), (raw.len + 1) to u64, 4)
-    append_all(out, teko::list::push(raw, 0x00 to byte))
+    append_all(out, [..raw, 0x00 to byte])
 }
 
 fn encode_value(v: BsonValue): []byte | error {
@@ -252,7 +252,7 @@ fn encode_value(v: BsonValue): []byte | error {
         BsonKind::Array => encode_array_value(v.vals)
         BsonKind::Binary => encode_binary_value(v)
         BsonKind::ObjectId => encode_fixed(v.bytes, 12, "ObjectId")
-        BsonKind::Bool => teko::list::push(no_bytes(), (if v.flag { 0x01 } else { 0x00 }) to byte)
+        BsonKind::Bool => [..no_bytes(), (if v.flag { 0x01 } else { 0x00 }) to byte]
         BsonKind::DateTime => append_le_i64(no_bytes(), v.int_val, 8)
         BsonKind::Null => no_bytes()
         BsonKind::Int32 => append_le_i64(no_bytes(), v.int_val, 4)
@@ -271,7 +271,7 @@ fn encode_fixed(data: []byte, want: u64, what: str): []byte | error {
 
 fn encode_binary_value(v: BsonValue): []byte {
     var out = append_le(no_bytes(), v.bytes.len, 4)
-    out = teko::list::push(out, v.subtype)
+    out = [..out, v.subtype]
     append_all(out, v.bytes)
 }
 
@@ -280,7 +280,7 @@ fn encode_array_value(vals: []BsonValue): []byte | error {
     var i: u64 = 0
     loop {
         if i >= vals.len { break }
-        keys = teko::list::push(keys, u64_to_str(i))
+        keys = [..keys, u64_to_str(i)]
         i++
     }
     encode_document(bson_document(keys, vals))
@@ -291,7 +291,7 @@ fn encode_elements(keys: []str, vals: []BsonValue): []byte | error {
     var i: u64 = 0
     loop {
         if i >= keys.len { break }
-        out = teko::list::push(out, type_byte(vals[i].kind))
+        out = [..out, type_byte(vals[i].kind)]
         var name = match encode_cstring(keys[i]) { []byte as b => b; error as e => return e }
         out = append_all(out, name)
         var body = match encode_value(vals[i]) { []byte as b => b; error as e => return e }
@@ -329,7 +329,7 @@ fn encode_document(doc: BsonValue): []byte | error {
     var total = 4 + body.len + 1
     var out = append_le(no_bytes(), total, 4)
     out = append_all(out, body)
-    teko::list::push(out, 0x00 to byte)
+    [..out, 0x00 to byte]
 }
 
 /**
@@ -374,7 +374,7 @@ fn read_cstring(p: []byte, pos: u64): NameRead | error {
     loop {
         if at >= p.len { return read_error("unterminated field name", pos) }
         if p[at] == 0x00 { return NameRead { name = str_of_bytes(out); pos = at + 1 } }
-        out = teko::list::push(out, p[at])
+        out = [..out, p[at]]
         at++
     }
 }
@@ -385,7 +385,7 @@ fn take_bytes(p: []byte, pos: u64, n: u64): []byte | error {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, p[pos + i])
+        out = [..out, p[pos + i]]
         i++
     }
     out
@@ -499,8 +499,8 @@ fn decode_doc_at(p: []byte, pos: u64): DocRead | error {
         var t = p[at]
         var name = match read_cstring(p, at + 1) { NameRead as n => n; error as e => return e }
         var val = match decode_value(p, t, name.pos) { BsonRead as r => r; error as e => return e }
-        keys = teko::list::push(keys, name.name)
-        vals = teko::list::push(vals, val.value)
+        keys = [..keys, name.name]
+        vals = [..vals, val.value]
         at = val.pos
     }
 }

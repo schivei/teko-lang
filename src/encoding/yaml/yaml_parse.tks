@@ -44,8 +44,8 @@ type YamlAnchors = class {
     }
 
     pub fn define(name: str, value: YamlValue) {
-        self.names = teko::list::push(self.names, name)
-        self.values = teko::list::push(self.values, value)
+        self.names = [..self.names, name]
+        self.values = [..self.values, value]
     }
 
     pub fn resolve(name: str): YamlValue | error {
@@ -91,7 +91,7 @@ fn strip_cr_bytes(input: []byte): []byte {
     var i: u64 = 0
     loop {
         if i >= input.len { break }
-        if input[i] != b'\r' { out = teko::list::push(out, input[i]) }
+        if input[i] != b'\r' { out = [..out, input[i]] }
         i = i + 1
     }
     out
@@ -102,7 +102,7 @@ fn slice_bytes_str(input: []byte, from: u64, to: u64): str {
     var i = from
     loop {
         if i >= to { break }
-        out = teko::list::push(out, input[i])
+        out = [..out, input[i]]
         i = i + 1
     }
     str(out)
@@ -113,7 +113,7 @@ fn byte_subslice(bytes: []byte, from: u64, to: u64): []byte {
     var i = from
     loop {
         if i >= to { break }
-        out = teko::list::push(out, bytes[i])
+        out = [..out, bytes[i]]
         i = i + 1
     }
     out
@@ -124,20 +124,20 @@ fn one_byte_slice(b: byte): []byte {
 }
 
 fn push_codepoint_utf8(out: []byte, cp: u32): []byte {
-    if cp <= 0x7F { return teko::list::push(out, cp to byte) }
+    if cp <= 0x7F { return [..out, cp to byte] }
     if cp <= 0x7FF {
-        var o = teko::list::push(out, (0xC0 | (cp >> 6)) to byte)
-        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+        var o = [..out, (0xC0 | (cp >> 6)) to byte]
+        return [..o, (0x80 | (cp & 0x3F)) to byte]
     }
     if cp <= 0xFFFF {
-        var o = teko::list::push(out, (0xE0 | (cp >> 12)) to byte)
-        o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
-        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+        var o = [..out, (0xE0 | (cp >> 12)) to byte]
+        o = [..o, (0x80 | ((cp >> 6) & 0x3F)) to byte]
+        return [..o, (0x80 | (cp & 0x3F)) to byte]
     }
-    var o = teko::list::push(out, (0xF0 | (cp >> 18)) to byte)
-    o = teko::list::push(o, (0x80 | ((cp >> 12) & 0x3F)) to byte)
-    o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
-    teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+    var o = [..out, (0xF0 | (cp >> 18)) to byte]
+    o = [..o, (0x80 | ((cp >> 12) & 0x3F)) to byte]
+    o = [..o, (0x80 | ((cp >> 6) & 0x3F)) to byte]
+    [..o, (0x80 | (cp & 0x3F)) to byte]
 }
 
 fn skip_inline_ws(input: []byte, pos: u64): u64 {
@@ -358,13 +358,13 @@ fn collect_block_lines(input: []byte, start: u64, indent: u64, explicit_indent: 
         var lc = leading_space_count(input, pos, line_end)
         var blank = pos + lc == line_end
         if blank {
-            lines = teko::list::push(lines, "")
+            lines = [..lines, ""]
             pos = advance_past_newline(input, line_end)
             resume = pos
             continue
         }
         if lc < block_indent { break }
-        lines = teko::list::push(lines, slice_bytes_str(input, pos + block_indent, line_end))
+        lines = [..lines, slice_bytes_str(input, pos + block_indent, line_end)]
         pos = advance_past_newline(input, line_end)
         resume = pos
     }
@@ -393,13 +393,13 @@ fn join_literal_lines(lines: []str, chomp: byte): str {
     loop {
         if i >= lines.len { break }
         out = append_all(out, bytes_of_str(lines[i]))
-        out = teko::list::push(out, b'\n')
+        out = [..out, b'\n']
         i = i + 1
     }
     if chomp == b'+' { return str(out) }
     var trimmed = strip_trailing_newlines(out)
     if chomp == b'-' { return str(trimmed) }
-    str(teko::list::push(trimmed, b'\n'))
+    str([..trimmed, b'\n'])
 }
 
 fn join_folded_lines(lines: []str, chomp: byte): str {
@@ -416,20 +416,20 @@ fn join_folded_lines(lines: []str, chomp: byte): str {
         if i == 0 {
             body = append_all(body, lb)
         } else if is_blank_l || prev_blank || is_more || prev_more_indented {
-            body = teko::list::push(body, b'\n')
+            body = [..body, b'\n']
             body = append_all(body, lb)
         } else {
-            body = teko::list::push(body, b' ')
+            body = [..body, b' ']
             body = append_all(body, lb)
         }
         prev_blank = is_blank_l
         prev_more_indented = is_more
         i = i + 1
     }
-    if chomp == b'+' { return str(teko::list::push(body, b'\n')) }
+    if chomp == b'+' { return str([..body, b'\n']) }
     var trimmed = strip_trailing_newlines(body)
     if chomp == b'-' { return str(trimmed) }
-    str(teko::list::push(trimmed, b'\n'))
+    str([..trimmed, b'\n'])
 }
 
 fn parse_block_scalar(input: []byte, pos: u64, cur: YamlLineInfo, indent: u64): YamlTextStep | error {
@@ -449,13 +449,13 @@ fn fold_quoted_lines(lines: []str): str {
         if lines[i].len == 0 {
             blank_run = blank_run + 1
         } else if blank_run == 0 {
-            out = teko::list::push(out, b' ')
+            out = [..out, b' ']
             out = append_all(out, bytes_of_str(lines[i]))
         } else {
             var k: u64 = 0
             loop {
                 if k >= blank_run { break }
-                out = teko::list::push(out, b'\n')
+                out = [..out, b'\n']
                 k = k + 1
             }
             out = append_all(out, bytes_of_str(lines[i]))
@@ -466,7 +466,7 @@ fn fold_quoted_lines(lines: []str): str {
     var k2: u64 = 0
     loop {
         if k2 >= blank_run { break }
-        out = teko::list::push(out, b'\n')
+        out = [..out, b'\n']
         k2 = k2 + 1
     }
     str(out)
@@ -526,11 +526,11 @@ fn parse_double_quoted(input: []byte, pos: u64): YamlTextStep | error {
         if at >= input.len { return yaml_error("unterminated double-quoted string", at) }
         var b = input[at]
         if b == b'"' {
-            raw_lines = teko::list::push(raw_lines, str(cur))
+            raw_lines = [..raw_lines, str(cur)]
             return YamlTextStep { text = fold_quoted_lines(raw_lines); next = at + 1 }
         }
         if b == b'\n' {
-            raw_lines = teko::list::push(raw_lines, str(cur))
+            raw_lines = [..raw_lines, str(cur)]
             cur = []
             at = skip_inline_ws(input, at + 1)
             continue
@@ -545,7 +545,7 @@ fn parse_double_quoted(input: []byte, pos: u64): YamlTextStep | error {
             at = step.next
             continue
         }
-        cur = teko::list::push(cur, b)
+        cur = [..cur, b]
         at = at + 1
     }
     yaml_error("unreachable", at)
@@ -560,20 +560,20 @@ fn parse_single_quoted(input: []byte, pos: u64): YamlTextStep | error {
         var b = input[at]
         if b == b'\'' {
             if at + 1 < input.len && input[at + 1] == b'\'' {
-                cur = teko::list::push(cur, b'\'')
+                cur = [..cur, b'\'']
                 at = at + 2
                 continue
             }
-            raw_lines = teko::list::push(raw_lines, str(cur))
+            raw_lines = [..raw_lines, str(cur)]
             return YamlTextStep { text = fold_quoted_lines(raw_lines); next = at + 1 }
         }
         if b == b'\n' {
-            raw_lines = teko::list::push(raw_lines, str(cur))
+            raw_lines = [..raw_lines, str(cur)]
             cur = []
             at = skip_inline_ws(input, at + 1)
             continue
         }
-        cur = teko::list::push(cur, b)
+        cur = [..cur, b]
         at = at + 1
     }
     yaml_error("unreachable", at)
@@ -614,11 +614,11 @@ fn plain_continuation_scan(input: []byte, cursor: u64, indent: u64): YamlLinesSt
         var k: u64 = 0
         loop {
             if k >= pending_blanks { break }
-            lines = teko::list::push(lines, "")
+            lines = [..lines, ""]
             k = k + 1
         }
         pending_blanks = 0
-        lines = teko::list::push(lines, scan_plain_line_content(input, content_start, line_end))
+        lines = [..lines, scan_plain_line_content(input, content_start, line_end)]
         pos = advance_past_newline(input, line_end)
         resume = pos
     }
@@ -635,7 +635,7 @@ fn parse_plain_scalar(input: []byte, pos: u64, indent: u64): YamlTextStep {
     var i: u64 = 0
     loop {
         if i >= continuation.lines.len { break }
-        all_lines = teko::list::push(all_lines, continuation.lines[i])
+        all_lines = [..all_lines, continuation.lines[i]]
         i = i + 1
     }
     YamlTextStep { text = fold_quoted_lines(all_lines); next = continuation.next }
@@ -716,7 +716,7 @@ fn parse_flow_seq(input: []byte, pos: u64, anchors: YamlAnchors): YamlNodeStep |
     if at < input.len && input[at] == b']' { return YamlNodeStep { value = yaml_seq(items); next = at + 1 } }
     loop {
         var el = match parse_flow_element(input, at, anchors) { YamlNodeStep as s => s; error as e => return e }
-        items = teko::list::push(items, el.value)
+        items = [..items, el.value]
         at = skip_flow_ws(input, el.next)
         if at < input.len && input[at] == b',' {
             at = skip_flow_ws(input, at + 1)
@@ -836,7 +836,7 @@ fn parse_block_seq(input: []byte, li: YamlLineInfo, anchors: YamlAnchors): YamlN
     var cur = li
     loop {
         var step = match parse_seq_entry(input, cur, indent, anchors) { YamlNodeStep as s => s; error as e => return e }
-        items = teko::list::push(items, step.value)
+        items = [..items, step.value]
         var next_li2 = next_content_line(input, step.next)
         if next_li2.eof || is_marker_line(next_li2) || next_li2.indent != indent { return YamlNodeStep { value = yaml_seq(items); next = step.next } }
         if !is_dash_line(input, next_li2) { return yaml_error("expected '-' in sequence", next_li2.content_start) }
@@ -1023,25 +1023,25 @@ exp fn parse_yaml_all(text: str): []YamlValue | error {
             if inline_start < li.line_end && input[inline_start] != b'#' {
                 var inline_li = compact_line(li, inline_start)
                 var step = match parse_doc_node(input, inline_li) { YamlNodeStep as s => s; error as e => return e }
-                docs = teko::list::push(docs, step.value)
+                docs = [..docs, step.value]
                 pos = step.next
                 continue
             }
             var after_marker = line_start_after(input, li)
             var next_li = next_content_line(input, after_marker)
             if next_li.eof || is_marker_line(next_li) {
-                docs = teko::list::push(docs, yaml_null())
+                docs = [..docs, yaml_null()]
                 pos = after_marker
                 continue
             }
             var step2 = match parse_doc_node(input, next_li) { YamlNodeStep as s => s; error as e => return e }
-            docs = teko::list::push(docs, step2.value)
+            docs = [..docs, step2.value]
             pos = step2.next
             continue
         }
         if docs.len > 0 { return yaml_error("expected '---' before a new document, or end of input", li.line_start) }
         var step3 = match parse_doc_node(input, li) { YamlNodeStep as s => s; error as e => return e }
-        docs = teko::list::push(docs, step3.value)
+        docs = [..docs, step3.value]
         pos = step3.next
     }
     docs

@@ -517,7 +517,7 @@ fn cg_zeros(n: u64): []u64 {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, 0 to u64)
+        out = [..out, 0 to u64]
         i++
     }
     out
@@ -528,7 +528,7 @@ fn cg_blanks(n: u64): []str {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, "")
+        out = [..out, ""]
         i++
     }
     out
@@ -598,14 +598,14 @@ fn cg_index_of(items: []@TItem()): CgIndex {
         if i >= items.len { break }
         match items[i] {
             parser::TypeDecl as d => {
-                exact_k = teko::list::push(exact_k, d.name)
-                exact_v = teko::list::push(exact_v, i + 1)
-                last_k = teko::list::push(last_k, checker::name_last_segment(d.name))
-                last_v = teko::list::push(last_v, i + 1)
+                exact_k = [..exact_k, d.name]
+                exact_v = [..exact_v, i + 1]
+                last_k = [..last_k, checker::name_last_segment(d.name)]
+                last_v = [..last_v, i + 1]
             }
             checker::TFunction as f => {
-                fn_k = teko::list::push(fn_k, cg_fn_key(f.namespace, f.name))
-                fn_v = teko::list::push(fn_v, i + 1)
+                fn_k = [..fn_k, cg_fn_key(f.namespace, f.name)]
+                fn_v = [..fn_v, i + 1]
             }
             _ => { }
         }
@@ -1446,7 +1446,7 @@ fn cg_union_normalize_null(members: []@Type()): []@Type() {
     var j = 0
     loop {
         if j >= members.len { break }
-        match members[j] { checker::Null => { }; _ => out = teko::list::push(out, members[j]) }
+        match members[j] { checker::Null => { }; _ => out = [..out, members[j]] }
         j++
     }
     out
@@ -1620,7 +1620,7 @@ fn cg_union_inline_recursive_seen(prog: CgProg, union_t: @Type(), x: @Type(), se
     var nm = match x { checker::Named as n => n; _ => return false }
     if cg_is_class_named(prog, nm.name) { return false }
     if cg_nameset_seen(seen, nm.name) { return false }
-    var seen2 = teko::list::push(seen, nm.name)
+    var seen2 = [..seen, nm.name]
     var d = match cg_find_decl(prog, nm.name) { parser::TypeDecl as dd => dd; error => return false }
     var ns = checker::name_qualifier(nm.name)
     match d.body {
@@ -2700,7 +2700,7 @@ type DcScan = struct { classes: []str }
 
 fn dc_scan_add(s: DcScan, name: str): DcScan {
     if cg_str_in(s.classes, name) { return s }
-    DcScan { classes = teko::list::push(s.classes, name) }
+    DcScan { classes = [..s.classes, name] }
 }
 
 fn cg_dc_is_call(cl: checker::TCall): bool {
@@ -2882,18 +2882,18 @@ fn cg_dc_close(prog: CgProg, seen: []str, work: []str): []str | error {
     var cls = work[0]
     var rest: []str = []
     var wi = 1
-    loop { if wi >= work.len { break }; rest = teko::list::push(rest, work[wi]); wi++ }
+    loop { if wi >= work.len { break }; rest = [..rest, work[wi]]; wi++ }
     if cg_str_in(seen, cls) { return cg_dc_close(prog, seen, rest) }
     var fields = match cg_dc_class_fields(prog, cls) { []parser::Field as fs => fs; error as e => return e }
     var ref_ns = checker::name_qualifier(cls)
-    var seen2 = teko::list::push(seen, cls)
+    var seen2 = [..seen, cls]
     var work2 = rest
     var fi = 0
     loop {
         if fi >= fields.len { break }
         var plan = match cg_dc_plan_field(prog, ref_ns, fields[fi].type_ann) { DcFieldPlan as p => p; error as e => return e }
         if plan.is_class && !cg_str_in(seen2, plan.class_name) && !cg_str_in(work2, plan.class_name) {
-            work2 = teko::list::push(work2, plan.class_name)
+            work2 = [..work2, plan.class_name]
         }
         fi++
     }
@@ -4329,7 +4329,7 @@ fn emit_branch_value(buf: Cb, prog: CgProg, ret_type: @Type(), body: []@TStateme
     var fall = cg_append_direct_defers(dctx.defers, body)
     var region = fresh_named("_tkbr", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
-    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) })
+    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }]
     var cur = dctx
     var i = 0
     loop {
@@ -5724,7 +5724,7 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
     var defer_floor = dctx.defers.len
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     var region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
-    var regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }) } else { regions }
+    var regs2 = if want_block { [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }] } else { regions }
     var cur_blk = if want_block { body } else { [] }
     var out = buf
     if want_block {
@@ -6164,7 +6164,7 @@ fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []@TStatement()
             checker::TBinding as b => {
                 if cg_binding_is_block_local_slice(escaping, fn_body, body, is_value, b) {
                     match b.target {
-                        parser::SimpleName as sn => { acc = teko::list::push(acc, sn.name) }
+                        parser::SimpleName as sn => { acc = [..acc, sn.name] }
                         parser::DestructurePattern => { }
                     }
                 }
@@ -6234,7 +6234,7 @@ fn emit_defers(buf: Cb, defers: []@TStatement(), defer_floor: u64, prog: CgProg,
 }
 
 fn dctx_register(dctx: DeferCtx, s: @TStatement()): DeferCtx {
-    DeferCtx { defers = teko::list::push(dctx.defers, s); loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
+    DeferCtx { defers = [..dctx.defers, s]; loops = dctx.loops; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
 }
 
 fn cg_append_direct_defers(defers: []@TStatement(), body: []@TStatement()): []@TStatement() {
@@ -6243,7 +6243,7 @@ fn cg_append_direct_defers(defers: []@TStatement(), body: []@TStatement()): []@T
     loop {
         if i >= body.len { break }
         match body[i] {
-            checker::TDeferStmt => { out = teko::list::push(out, body[i]) }
+            checker::TDeferStmt => { out = [..out, body[i]] }
             _ => { }
         }
         i++
@@ -6367,7 +6367,7 @@ fn emit_block_region(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg
     }
     var region = fresh_named("_tkbr", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) })
+    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) }]
     out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
     out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDrop)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
@@ -6753,13 +6753,13 @@ fn emit_loop_while(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, 
     if labeled { out = cb(out, inner); out = cb(out, "tk_lbl_"); out = cb_str(out, l.label); out = cb(out, "_cont: ;\n") }
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, l.body)
-    var dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }); cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
+    var dctx2 = DeferCtx { defers = dctx.defers; loops = [..dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }]; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, l.body, false) && regions.len < 64
     var region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     var regs2 = regions
     if want_block {
         out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) })
+        regs2 = [..regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) }]
     }
     var cur_blk = if want_block { l.body } else { [] }
     out = match emit_block(out, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false) { Cb as o => o; error as err => return err }
@@ -6776,13 +6776,13 @@ fn cb_indent_deeper(indent: str): str {
     var i = 0
     loop {
         if i >= indent.len { break }
-        xs = teko::list::push(xs, indent[i])
+        xs = [..xs, indent[i]]
         i++
     }
-    xs = teko::list::push(xs, b' ')
-    xs = teko::list::push(xs, b' ')
-    xs = teko::list::push(xs, b' ')
-    xs = teko::list::push(xs, b' ')
+    xs = [..xs, b' ']
+    xs = [..xs, b' ']
+    xs = [..xs, b' ']
+    xs = [..xs, b' ']
     str(xs)
 }
 
@@ -6790,7 +6790,7 @@ fn cov_push_line(acc: []u32, line: u32): []u32 {
     if line == 0 { return acc }
     var i: u64 = 0
     loop { if i >= acc.len { break }; if acc[i] == line { return acc }; i = i + 1 }
-    teko::list::push(acc, line)
+    [..acc, line]
 }
 
 fn cov_collect_expr(e: checker::TExpr, acc: []u32): []u32 {
@@ -7073,7 +7073,7 @@ fn emit_adopt(buf: Cb, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_
     var fall = cg_append_direct_defers(dctx.defers, a.body)
     var region = fresh_named("_tkad", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb(out, cg_arena_sym(CgArenaSym::RegionNew)); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    var regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = [] })
+    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = [] }]
     out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
     out = cb(out, indent); out = cb(out, cg_arena_sym(CgArenaSym::RegionDropSubtree)); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
@@ -7654,7 +7654,7 @@ fn cg_slice_add(set: CgTypeSet, elem: @Type()): CgTypeSet {
         if set.slice_keys[i] == key { return set }
         i++
     }
-    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = teko::list::push(set.slices, elem); slice_keys = teko::list::push(set.slice_keys, key); variants = set.variants; variant_keys = set.variant_keys }
+    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = [..set.slices, elem]; slice_keys = [..set.slice_keys, key]; variants = set.variants; variant_keys = set.variant_keys }
 }
 fn cg_variant_key(t: @Type()): str {
     match t {
@@ -7671,7 +7671,7 @@ fn cg_variant_add(set: CgTypeSet, t: @Type()): CgTypeSet {
         if set.variant_keys[i] == key { return set }
         i++
     }
-    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = set.slices; slice_keys = set.slice_keys; variants = teko::list::push(set.variants, t); variant_keys = teko::list::push(set.variant_keys, key) }
+    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = set.slices; slice_keys = set.slice_keys; variants = [..set.variants, t]; variant_keys = [..set.variant_keys, key] }
 }
 fn cg_collect_type_opts(set: CgTypeSet, t: @Type()): CgTypeSet {
     match t {
@@ -8070,7 +8070,7 @@ fn cg_named_decls(prog: CgProg): []parser::TypeDecl {
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
-            parser::TypeDecl as d => { named = teko::list::push(named, d) }
+            parser::TypeDecl as d => { named = [..named, d] }
             _ => { }
         }
         i++
@@ -8117,7 +8117,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
         }
         if is_enum_or_flags {
             out = match emit_type_decl(out, prog, named[ei]) { Cb as o => o; error as err => return err }
-            em0 = CgEmitted { names = teko::list::push(em0.names, named[ei].name); opt_keys = em0.opt_keys; uvar_keys = em0.uvar_keys }
+            em0 = CgEmitted { names = [..em0.names, named[ei].name]; opt_keys = em0.opt_keys; uvar_keys = em0.uvar_keys }
             enum_count = enum_count + 1
         }
         ei++
@@ -8168,7 +8168,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
             if cg_str_in(em.names, d.name) { ni++ } else {
                 if !cg_named_ready(prog, em, set, d) { ni++ } else {
                     out = match emit_type_decl(out, prog, d) { Cb as o => o; error as err => return err }
-                    em = CgEmitted { names = teko::list::push(em.names, d.name); opt_keys = em.opt_keys; uvar_keys = em.uvar_keys }
+                    em = CgEmitted { names = [..em.names, d.name]; opt_keys = em.opt_keys; uvar_keys = em.uvar_keys }
                     remaining = remaining - 1
                     progress = true
                     ni++
@@ -8198,7 +8198,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
                         checker::Variant as va => { out = match cg_emit_inline_variant_typedef(out, prog, va) { Cb as o => o; error as err => return err } }
                         _ => { }
                     }
-                    em = CgEmitted { names = em.names; opt_keys = em.opt_keys; uvar_keys = teko::list::push(em.uvar_keys, vkey) }
+                    em = CgEmitted { names = em.names; opt_keys = em.opt_keys; uvar_keys = [..em.uvar_keys, vkey] }
                     remaining = remaining - 1
                     progress = true
                     vi++
@@ -8338,18 +8338,18 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         match prog.items[i] {
             checker::TFunction as f => {
                 var nb = cg_lift_block(f.body, acc)
-                items = teko::list::push(items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard })
+                items = [..items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }]
             }
             (@TStatement()) as ts => {
                 var ns = cg_lift_stmt(ts, acc)
-                items = teko::list::push(items, ns)
+                items = [..items, ns]
             }
-            _ => items = teko::list::push(items, prog.items[i])
+            _ => items = [..items, prog.items[i]]
         }
         i++
     }
     var j = 0
-    loop { if j >= acc.fns.len { break }; items = teko::list::push(items, acc.fns[j]); j++ }
+    loop { if j >= acc.fns.len { break }; items = [..items, acc.fns[j]]; j++ }
     LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams; spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
@@ -8374,7 +8374,7 @@ fn cg_lift_stmt(s: @TStatement(), ref acc: StampAcc): @TStatement() {
             var k = acc.next_spawn
             acc = StampAcc { next = acc.next; next_spawn = k + 1; fns = acc.fns; lams = acc.lams; spawns = acc.spawns }
             var stamped = checker::TSpawn { call = cg_lift_expr(sp.call, acc); id = k }
-            acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = acc.fns; lams = acc.lams; spawns = teko::list::push(acc.spawns, stamped) }
+            acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = acc.fns; lams = acc.lams; spawns = [..acc.spawns, stamped] }
             stamped
         }
     }
@@ -8391,10 +8391,10 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
             if lam.captures.len == 0 {
                 var ps: []parser::Param = []
                 var pi = 0
-                loop { if pi >= lam.params.len { break }; ps = teko::list::push(ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }); pi++ }
-                newfns = teko::list::push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = []; guard = parser::pred_true() })
+                loop { if pi >= lam.params.len { break }; ps = [..ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }]; pi++ }
+                newfns = [..newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = []; guard = parser::pred_true() }]
             } else {
-                newlams = teko::list::push(newlams, stamped)
+                newlams = [..newlams, stamped]
             }
             acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = newfns; lams = newlams; spawns = acc.spawns }
             checker::TExpr { kind = stamped; type = e.type; line = e.line; col = e.col }
@@ -8404,20 +8404,20 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
         checker::TCompare as c => {
             var terms: []checker::TCmpTerm = []
             var i = 0
-            loop { if i >= c.rest.len { break }; terms = teko::list::push(terms, checker::TCmpTerm { op = c.rest[i].op; operand = cg_lift_expr(c.rest[i].operand, acc) }); i++ }
+            loop { if i >= c.rest.len { break }; terms = [..terms, checker::TCmpTerm { op = c.rest[i].op; operand = cg_lift_expr(c.rest[i].operand, acc) }]; i++ }
             checker::TExpr { kind = checker::TCompare { first = cg_lift_expr(c.first, acc); rest = terms }; type = e.type; line = e.line; col = e.col }
         }
         checker::TCall as cl => {
             var args: []checker::TExpr = []
             var i = 0
-            loop { if i >= cl.args.len { break }; args = teko::list::push(args, cg_lift_expr(cl.args[i], acc)); i++ }
+            loop { if i >= cl.args.len { break }; args = [..args, cg_lift_expr(cl.args[i], acc)]; i++ }
             checker::TExpr { kind = checker::TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = e.type; line = e.line; col = e.col }
         }
         checker::TIfExpr as f => checker::TExpr { kind = checker::TIfExpr { cond = cg_lift_expr(f.cond, acc); then_blk = cg_lift_block(f.then_blk, acc); has_else = f.has_else; else_blk = cg_lift_block(f.else_blk, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TMatchExpr as m => {
             var arms: []checker::TArm = []
             var i = 0
-            loop { if i >= m.arms.len { break }; var a = m.arms[i]; arms = teko::list::push(arms, checker::TArm { pattern = a.pattern; has_when = a.has_when; guard = if a.has_when { cg_lift_expr(a.guard, acc) } else { a.guard }; body = cg_lift_block(a.body, acc) }); i++ }
+            loop { if i >= m.arms.len { break }; var a = m.arms[i]; arms = [..arms, checker::TArm { pattern = a.pattern; has_when = a.has_when; guard = if a.has_when { cg_lift_expr(a.guard, acc) } else { a.guard }; body = cg_lift_block(a.body, acc) }]; i++ }
             checker::TExpr { kind = checker::TMatchExpr { subject = cg_lift_expr(m.subject, acc); arms = arms }; type = e.type; line = e.line; col = e.col }
         }
         checker::TCast as ct => checker::TExpr { kind = checker::TCast { expr = cg_lift_expr(ct.expr, acc) }; type = e.type; line = e.line; col = e.col }
@@ -8425,7 +8425,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
         checker::TStructInit as si => {
             var vals: []checker::TExpr = []
             var i = 0
-            loop { if i >= si.field_vals.len { break }; vals = teko::list::push(vals, cg_lift_expr(si.field_vals[i], acc)); i++ }
+            loop { if i >= si.field_vals.len { break }; vals = [..vals, cg_lift_expr(si.field_vals[i], acc)]; i++ }
             checker::TExpr { kind = checker::TStructInit { field_names = si.field_names; field_vals = vals }; type = e.type; line = e.line; col = e.col }
         }
         checker::TIndex as ix => checker::TExpr { kind = checker::TIndex { receiver = cg_lift_expr(ix.receiver, acc); index = cg_lift_expr(ix.index, acc) }; type = e.type; line = e.line; col = e.col }
@@ -8435,19 +8435,19 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
             var i = 0
             loop {
                 if i >= in.holes.len { break }
-                holes = teko::list::push(holes, cg_lift_expr(in.holes[i], acc))
+                holes = [..holes, cg_lift_expr(in.holes[i], acc)]
                 if i < in.specs.len {
                     var sp = in.specs[i]
                     var lifted_sp = match sp.kind {
                         checker::TFSpecDynamic as fd => {
                             var args: []checker::TExpr = []
                             var k = 0
-                            loop { if k >= fd.args.len { break }; args = teko::list::push(args, cg_lift_expr(fd.args[k], acc)); k++ }
+                            loop { if k >= fd.args.len { break }; args = [..args, cg_lift_expr(fd.args[k], acc)]; k++ }
                             checker::TFSpec { kind = checker::TFSpecDynamic { args = args } }
                         }
                         _ => sp
                     }
-                    specs = teko::list::push(specs, lifted_sp)
+                    specs = [..specs, lifted_sp]
                 }
                 i++
             }
@@ -8456,13 +8456,13 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
         checker::TInExpr as ie => {
             var elems: []checker::TExpr = []
             var i = 0
-            loop { if i >= ie.elems.len { break }; elems = teko::list::push(elems, cg_lift_expr(ie.elems[i], acc)); i++ }
+            loop { if i >= ie.elems.len { break }; elems = [..elems, cg_lift_expr(ie.elems[i], acc)]; i++ }
             checker::TExpr { kind = checker::TInExpr { lhs = cg_lift_expr(ie.lhs, acc); elems = elems }; type = e.type; line = e.line; col = e.col }
         }
         checker::TArrayLit as a => {
             var elems: []checker::TArrayElem = []
             var i = 0
-            loop { if i >= a.elements.len { break }; elems = teko::list::push(elems, checker::TArrayElem { is_spread = a.elements[i].is_spread; expr = cg_lift_expr(a.elements[i].expr, acc) }); i++ }
+            loop { if i >= a.elements.len { break }; elems = [..elems, checker::TArrayElem { is_spread = a.elements[i].is_spread; expr = cg_lift_expr(a.elements[i].expr, acc) }]; i++ }
             checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
         }
         checker::TBlockExpr as blk => checker::TExpr { kind = checker::TBlockExpr { body = cg_lift_block(blk.body, acc) }; type = e.type; line = e.line; col = e.col }
@@ -8648,7 +8648,7 @@ fn cg_emit_vtable_thunks(buf: Cb, prog: CgProg, cd_name: str, idd_name: str, met
             null => return error { message = "codegen: conforming class is missing a vtable method's stamped function (internal)" }
         }
         b = match cg_emit_vtthunk_def(b, prog, cd_name, idd_name, mns, m.name) { Cb as o => o; error as err => return err }
-        seen = teko::list::push(seen, key)
+        seen = [..seen, key]
     }
     TThunkEmit { buf = b; emitted = seen }
 }

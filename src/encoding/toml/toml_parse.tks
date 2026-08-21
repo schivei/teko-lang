@@ -151,7 +151,7 @@ fn slice_bytes_str(input: []byte, from: u64, to: u64): str {
     var i = from
     loop {
         if i >= to { break }
-        out = teko::list::push(out, input[i])
+        out = [..out, input[i]]
         i++
     }
     str(out)
@@ -162,20 +162,20 @@ fn one_byte_slice(b: byte): []byte {
 }
 
 fn push_codepoint_utf8(out: []byte, cp: u32): []byte {
-    if cp <= 0x7F { return teko::list::push(out, cp to byte) }
+    if cp <= 0x7F { return [..out, cp to byte] }
     if cp <= 0x7FF {
-        var o = teko::list::push(out, (0xC0 | (cp >> 6)) to byte)
-        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+        var o = [..out, (0xC0 | (cp >> 6)) to byte]
+        return [..o, (0x80 | (cp & 0x3F)) to byte]
     }
     if cp <= 0xFFFF {
-        var o = teko::list::push(out, (0xE0 | (cp >> 12)) to byte)
-        o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
-        return teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+        var o = [..out, (0xE0 | (cp >> 12)) to byte]
+        o = [..o, (0x80 | ((cp >> 6) & 0x3F)) to byte]
+        return [..o, (0x80 | (cp & 0x3F)) to byte]
     }
-    var o = teko::list::push(out, (0xF0 | (cp >> 18)) to byte)
-    o = teko::list::push(o, (0x80 | ((cp >> 12) & 0x3F)) to byte)
-    o = teko::list::push(o, (0x80 | ((cp >> 6) & 0x3F)) to byte)
-    teko::list::push(o, (0x80 | (cp & 0x3F)) to byte)
+    var o = [..out, (0xF0 | (cp >> 18)) to byte]
+    o = [..o, (0x80 | ((cp >> 12) & 0x3F)) to byte]
+    o = [..o, (0x80 | ((cp >> 6) & 0x3F)) to byte]
+    [..o, (0x80 | (cp & 0x3F)) to byte]
 }
 
 fn read_hex_n(input: []byte, pos: u64, n: u64): u32 | error {
@@ -220,7 +220,7 @@ fn parse_key_path(input: []byte, pos: u64): KeyPathStep | error {
         if at < input.len && input[at] == b'.' {
             at = skip_ws(input, at + 1)
             var kn = match parse_key(input, at) { KeyStep as k => k; error as e => return e }
-            keys = teko::list::push(keys, kn.key)
+            keys = [..keys, kn.key]
             at = skip_ws(input, kn.next)
             continue
         }
@@ -266,7 +266,7 @@ fn parse_basic_single(input: []byte, pos: u64): PStrStep | error {
             at = step.next
             continue
         }
-        out = teko::list::push(out, b)
+        out = [..out, b]
         at = at + 1
     }
     toml_error("unreachable", at)
@@ -304,7 +304,7 @@ fn append_quote_run(out: []byte, q: byte, n: u64): []byte {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        acc = teko::list::push(acc, q)
+        acc = [..acc, q]
         i++
     }
     acc
@@ -355,7 +355,7 @@ fn parse_multiline_basic(input: []byte, pos: u64): PStrStep | error {
             at = step.next
             continue
         }
-        out = teko::list::push(out, b)
+        out = [..out, b]
         at = at + 1
     }
     toml_error("unreachable", at)
@@ -378,7 +378,7 @@ fn parse_multiline_literal(input: []byte, pos: u64): PStrStep | error {
             at = at + n
             continue
         }
-        out = teko::list::push(out, b)
+        out = [..out, b]
         at = at + 1
     }
     toml_error("unreachable", at)
@@ -414,7 +414,7 @@ fn scan_uint_digits(input: []byte, pos: u64, restrict_leading_zero: bool): Digit
         return DigitRunResult { out = out; next = at }
     }
     loop {
-        if at < input.len && is_digit_byte(input[at]) { out = teko::list::push(out, input[at]); at = at + 1; continue }
+        if at < input.len && is_digit_byte(input[at]) { out = [..out, input[at]]; at = at + 1; continue }
         if at < input.len && input[at] == b'_' {
             if at + 1 >= input.len || !is_digit_byte(input[at + 1]) { return toml_error("invalid underscore placement", at) }
             at = at + 1
@@ -431,7 +431,7 @@ fn scan_radix_digits(input: []byte, pos: u64, radix: u64): DigitRunResult | erro
     var at = pos + 1
     loop {
         if at < input.len && digit_valid_for_radix(input[at], radix) {
-            out = teko::list::push(out, input[at])
+            out = [..out, input[at]]
             at = at + 1
             continue
         }
@@ -485,15 +485,15 @@ fn parse_radix_integer(input: []byte, pos: u64): ValStep | error {
 
 fn build_float_text(has_sign: bool, sign_neg: bool, int_digits: []byte, has_frac: bool, frac_digits: []byte, has_exp: bool, exp_has_sign: bool, exp_sign_neg: bool, exp_digits: []byte): str {
     var out: []byte = []
-    if has_sign { out = teko::list::push(out, if sign_neg { b'-' } else { b'+' }) }
+    if has_sign { out = [..out, if sign_neg { b'-' } else { b'+' }] }
     out = append_all(out, int_digits)
     if has_frac {
-        out = teko::list::push(out, b'.')
+        out = [..out, b'.']
         out = append_all(out, frac_digits)
     }
     if has_exp {
-        out = teko::list::push(out, b'e')
-        if exp_has_sign { out = teko::list::push(out, if exp_sign_neg { b'-' } else { b'+' }) }
+        out = [..out, b'e']
+        if exp_has_sign { out = [..out, if exp_sign_neg { b'-' } else { b'+' }] }
         out = append_all(out, exp_digits)
     }
     str(out)
@@ -676,7 +676,7 @@ fn parse_array(input: []byte, pos: u64): ValStep | error {
     if at < input.len && input[at] == b']' { return ValStep { value = toml_array(items); next = at + 1 } }
     loop {
         var v = match parse_value(input, at) { ValStep as s => s; error as e => return e }
-        items = teko::list::push(items, v.value)
+        items = [..items, v.value]
         at = skip_ws_nl_comments(input, v.next)
         if at < input.len && input[at] == b',' {
             at = skip_ws_nl_comments(input, at + 1)
@@ -745,7 +745,7 @@ fn replace_last_item(arr: TomlValue, new_last: TomlValue): TomlValue {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        if i == n - 1 { out = teko::list::push(out, new_last) } else { out = teko::list::push(out, arr.items[i]) }
+        if i == n - 1 { out = [..out, new_last] } else { out = [..out, arr.items[i]] }
         i++
     }
     mk_value(arr.kind, arr.text, arr.int_val, arr.float_val, arr.bool_val, out, arr.keys, arr.vals, arr.t_sealed, arr.t_opened, arr.a_of_tables)
@@ -806,7 +806,7 @@ fn open_final_array_table(table: TomlValue, key: str): TomlValue | error {
     }
     var val = table.vals[idx to u64]
     if val.kind != TomlKind::Array || !val.a_of_tables { return semantic_error(concat("key '", key, "' is not an array of tables")) }
-    var grown = mk_value(val.kind, val.text, val.int_val, val.float_val, val.bool_val, teko::list::push(val.items, toml_table_empty()), val.keys, val.vals, val.t_sealed, val.t_opened, val.a_of_tables)
+    var grown = mk_value(val.kind, val.text, val.int_val, val.float_val, val.bool_val, [..val.items, toml_table_empty()], val.keys, val.vals, val.t_sealed, val.t_opened, val.a_of_tables)
     toml_table_set(table, key, grown)
 }
 
@@ -827,7 +827,7 @@ fn concat_path(a: []str, b: []str): []str {
     var i: u64 = 0
     loop {
         if i >= b.len { break }
-        out = teko::list::push(out, b[i])
+        out = [..out, b[i]]
         i++
     }
     out

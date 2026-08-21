@@ -183,7 +183,7 @@ fn mono_inst_concat(a: []MonoInst, b: []MonoInst): []MonoInst {
     var i = 0
     loop {
         if i >= b.len { break }
-        out = teko::list::push(out, b[i])
+        out = [..out, b[i]]
         i++
     }
     out
@@ -207,7 +207,7 @@ pub fn type_to_texpr(t: @Type()): @TypeExpr() {
         Func as f => {
             var ps: []@TypeExpr() = []
             var i = 0
-            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, type_to_texpr(f.params[i])); i++ }
+            loop { if i >= f.params.len { break }; ps = [..ps, type_to_texpr(f.params[i])]; i++ }
             parser::FunctionType { params = ps; ret = type_to_texpr(f.ret) }
         }
     }
@@ -236,13 +236,13 @@ fn subst_typeexpr(te: @TypeExpr(), s: Subst): @TypeExpr() {
         parser::UnionType as ut => {
             var ms: []@TypeExpr() = []
             var i = 0
-            loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_typeexpr(ut.members[i], s)); i++ }
+            loop { if i >= ut.members.len { break }; ms = [..ms, subst_typeexpr(ut.members[i], s)]; i++ }
             parser::UnionType { members = ms }
         }
         parser::FunctionType as fnt => {
             var nps: []@TypeExpr() = []
             var i = 0
-            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_typeexpr(fnt.params[i], s)); i++ }
+            loop { if i >= fnt.params.len { break }; nps = [..nps, subst_typeexpr(fnt.params[i], s)]; i++ }
             parser::FunctionType { params = nps; ret = subst_typeexpr(fnt.ret, s) }
         }
         parser::MacroType => te
@@ -254,7 +254,7 @@ fn subst_typeexpr_args(args: []@TypeExpr(), s: Subst): []@TypeExpr() {
     var i: u64 = 0
     loop {
         if i >= args.len { break }
-        out = teko::list::push(out, subst_typeexpr(args[i], s))
+        out = [..out, subst_typeexpr(args[i], s)]
         i++
     }
     out
@@ -345,8 +345,8 @@ fn rewrite_iface_segment(p: parser::Path, iface: str): parser::Path {
     var key_idx = p.segments.len - 2
     loop {
         if i >= p.segments.len { break }
-        if i == key_idx { segs = teko::list::push(segs, parser::Segment { name = iface }) }
-        else { segs = teko::list::push(segs, p.segments[i]) }
+        if i == key_idx { segs = [..segs, parser::Segment { name = iface }] }
+        else { segs = [..segs, p.segments[i]] }
         i++
     }
     parser::Path { segments = segs }
@@ -361,7 +361,7 @@ fn is_struct_named(table: TypeTable, name: str): bool {
 
 fn struct_dispatch_callee(struct_name: str, method: str): parser::Path {
     var segs: []parser::Segment = [parser::Segment { name = struct_name }]
-    segs = teko::list::push(segs, parser::Segment { name = method })
+    segs = [..segs, parser::Segment { name = method }]
     parser::Path { segments = segs }
 }
 
@@ -417,7 +417,7 @@ fn mono_call_subst(gf: TFunction, cl: TCall, args: []TExpr, s: Subst, owner_tps:
         loop {
             if xi >= inst_tps.len { break }
             if xi >= cl.type_args.len { break }
-            xs = Subst { params = gf.type_params; names = teko::list::push(xs.names, inst_tps[xi]); types = teko::list::push(xs.types, subst_type(cl.type_args[xi], s)) }
+            xs = Subst { params = gf.type_params; names = [..xs.names, inst_tps[xi]]; types = [..xs.types, subst_type(cl.type_args[xi], s)] }
             xi++
         }
         return xs
@@ -426,7 +426,7 @@ fn mono_call_subst(gf: TFunction, cl: TCall, args: []TExpr, s: Subst, owner_tps:
     var all_tps = gf.type_params
     var all_tcs = gf.type_constraints
     var oi = 0
-    loop { if oi >= owner_tps.len { break }; all_tps = teko::list::push(all_tps, owner_tps[oi]); all_tcs = teko::list::push(all_tcs, parser::NoConstraint { }); oi++ }
+    loop { if oi >= owner_tps.len { break }; all_tps = [..all_tps, owner_tps[oi]]; all_tcs = [..all_tcs, parser::NoConstraint { }]; oi++ }
     var ptable = type_param_table(all_tps, all_tcs, "", table)
     var infs = Subst { params = gf.type_params; names = []; types = [] }
     var gi = 0
@@ -464,7 +464,7 @@ fn compose_method_subst(inst_subst: Subst, msub: Subst): Subst {
     var i = 0
     loop {
         if i >= msub.names.len { break }
-        out = Subst { params = teko::list::push(out.params, msub.names[i]); names = teko::list::push(out.names, msub.names[i]); types = teko::list::push(out.types, msub.types[i]) }
+        out = Subst { params = [..out.params, msub.names[i]]; names = [..out.names, msub.names[i]]; types = [..out.types, msub.types[i]] }
         i++
     }
     out
@@ -499,7 +499,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             loop {
                 if i >= c.rest.len { break }
                 var wt = match mono_texpr(c.rest[i].operand, s, items, table) { WExpr as w => w; error as er => return er }
-                terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = wt.expr })
+                terms = [..terms, TCmpTerm { op = c.rest[i].op; operand = wt.expr }]
                 acc = mono_inst_concat(acc, wt.insts)
                 i++
             }
@@ -512,7 +512,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             loop {
                 if i >= cl.args.len { break }
                 var wa = match mono_texpr(cl.args[i], s, items, table) { WExpr as w => w; error as er => return er }
-                args = teko::list::push(args, wa.expr)
+                args = [..args, wa.expr]
                 acc = mono_inst_concat(acc, wa.insts)
                 i++
             }
@@ -529,13 +529,13 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
                         var composed = compose_method_subst(isub, msub)
                         var newcalleeM = rewrite_last_segment(cl.callee, mmangled)
                         var recM = MonoInst { fn_name = bare; mangled = mmangled; s = composed; owner_ns = cl.call_ns }
-                        return WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcalleeM; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, recM) }
+                        return WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcalleeM; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = nt; line = e.line; col = e.col }; insts = [..acc, recM] }
                     }
                     var sub = match mono_call_subst(gf, cl, args, s, [], table) { Subst as x => x; error as er => return er }
                     var mangled = mono_mangle_name(bare, gf.type_params, sub)
                     var newcallee = mono_rekey_callee_qualifier(rewrite_last_segment(cl.callee, mangled), s)
                     var rec = MonoInst { fn_name = bare; mangled = mangled; s = sub; owner_ns = "" }
-                    WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcallee; args = args; call_ns = mono_rekey_call_ns(cl.call_ns, s); is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
+                    WExpr { expr = TExpr { kind = TCall { overload_suffix = cl.overload_suffix; callee = newcallee; args = args; call_ns = mono_rekey_call_ns(cl.call_ns, s); is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = nt; line = e.line; col = e.col }; insts = [..acc, rec] }
                 }
                 null => {
                     var passthrough = TCall { overload_suffix = cl.overload_suffix; callee = mono_rekey_callee_qualifier(cl.callee, s); args = args; call_ns = mono_rekey_call_ns(cl.call_ns, s); is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }
@@ -564,7 +564,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             loop {
                 if i >= m.arms.len { break }
                 var wa = match mono_arm(m.arms[i], s, items, table) { WArm as w => w; error as er => return er }
-                arms = teko::list::push(arms, wa.arm)
+                arms = [..arms, wa.arm]
                 acc = mono_inst_concat(acc, wa.insts)
                 i++
             }
@@ -585,7 +585,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             loop {
                 if i >= si.field_vals.len { break }
                 var wv = match mono_texpr(si.field_vals[i], s, items, table) { WExpr as w => w; error as er => return er }
-                vals = teko::list::push(vals, wv.expr)
+                vals = [..vals, wv.expr]
                 acc = mono_inst_concat(acc, wv.insts)
                 i++
             }
@@ -604,7 +604,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             loop {
                 if i >= in.holes.len { break }
                 var wh = match mono_texpr(in.holes[i], s, items, table) { WExpr as w => w; error as er => return er }
-                holes = teko::list::push(holes, wh.expr)
+                holes = [..holes, wh.expr]
                 acc = mono_inst_concat(acc, wh.insts)
                 if i < in.specs.len {
                     var sp = in.specs[i]
@@ -615,7 +615,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
                             loop {
                                 if k >= fd.args.len { break }
                                 var wa = match mono_texpr(fd.args[k], s, items, table) { WExpr as w => w; error as er => return er }
-                                dyn_args = teko::list::push(dyn_args, wa.expr)
+                                dyn_args = [..dyn_args, wa.expr]
                                 acc = mono_inst_concat(acc, wa.insts)
                                 k++
                             }
@@ -623,7 +623,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
                         }
                         _ => sp
                     }
-                    specs = teko::list::push(specs, lifted_sp)
+                    specs = [..specs, lifted_sp]
                 }
                 i++
             }
@@ -637,7 +637,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             loop {
                 if i >= n.elems.len { break }
                 var we = match mono_texpr(n.elems[i], s, items, table) { WExpr as w => w; error as er => return er }
-                elems = teko::list::push(elems, we.expr)
+                elems = [..elems, we.expr]
                 acc = mono_inst_concat(acc, we.insts)
                 i++
             }
@@ -650,7 +650,7 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             loop {
                 if i >= a.elements.len { break }
                 var we = match mono_texpr(a.elements[i].expr, s, items, table) { WExpr as w => w; error as er => return er }
-                elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = we.expr })
+                elems = [..elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = we.expr }]
                 acc = mono_inst_concat(acc, we.insts)
                 i++
             }
@@ -665,10 +665,10 @@ fn mono_texpr(e: TExpr, s: Subst, items: []@TItem(), table: TypeTable): WExpr | 
             var wb = match mono_block(lam.body, s, items, table) { WBlock as w => w; error as er => return er }
             var nps: []TLambdaParam = []
             var pi = 0
-            loop { if pi >= lam.params.len { break }; nps = teko::list::push(nps, TLambdaParam { name = lam.params[pi].name; type = subst_type(lam.params[pi].type, s) }); pi++ }
+            loop { if pi >= lam.params.len { break }; nps = [..nps, TLambdaParam { name = lam.params[pi].name; type = subst_type(lam.params[pi].type, s) }]; pi++ }
             var ncaps: []TCapture = []
             var ci = 0
-            loop { if ci >= lam.captures.len { break }; ncaps = teko::list::push(ncaps, TCapture { name = lam.captures[ci].name; type = subst_type(lam.captures[ci].type, s); by_ref = lam.captures[ci].by_ref }); ci++ }
+            loop { if ci >= lam.captures.len { break }; ncaps = [..ncaps, TCapture { name = lam.captures[ci].name; type = subst_type(lam.captures[ci].type, s); by_ref = lam.captures[ci].by_ref }]; ci++ }
             WExpr { expr = TExpr { kind = TLambda { params = nps; body = wb.stmts; captures = ncaps; ret = subst_type(lam.ret, s); lift_id = lam.lift_id }; type = nt; line = e.line; col = e.col }; insts = wb.insts }
         }
         TBorrow as b => {
@@ -687,8 +687,8 @@ fn rewrite_last_segment(p: parser::Path, name: str): parser::Path {
     var i = 0
     loop {
         if i >= p.segments.len { break }
-        if i == p.segments.len - 1 { segs = teko::list::push(segs, parser::Segment { name = name }) }
-        else { segs = teko::list::push(segs, p.segments[i]) }
+        if i == p.segments.len - 1 { segs = [..segs, parser::Segment { name = name }] }
+        else { segs = [..segs, p.segments[i]] }
         i++
     }
     parser::Path { segments = segs }
@@ -852,7 +852,7 @@ fn stamp_one_instance_method(inst_name: str, tmpl: TFunction, s: Subst, items: [
     var pi = 0
     loop {
         if pi >= tmpl.params.len { break }
-        nparams = teko::list::push(nparams, parser::Param { name = tmpl.params[pi].name; has_type = true; type_ann = subst_typeexpr(tmpl.params[pi].type_ann, s); is_params = tmpl.params[pi].is_params; has_default = tmpl.params[pi].has_default; default_expr = tmpl.params[pi].default_expr })
+        nparams = [..nparams, parser::Param { name = tmpl.params[pi].name; has_type = true; type_ann = subst_typeexpr(tmpl.params[pi].type_ann, s); is_params = tmpl.params[pi].is_params; has_default = tmpl.params[pi].has_default; default_expr = tmpl.params[pi].default_expr }]
         pi++
     }
     var wb = match mono_block(tmpl.body, s, items, table) { WBlock as w => w; error as e => return e }
@@ -873,7 +873,7 @@ fn instance_method_subst(template: parser::TypeDecl, template_ns: str, inst: par
 }
 
 fn subst_add_type_remap(s: Subst, from_name: str, to_type: @Type()): Subst {
-    Subst { params = teko::list::push(s.params, from_name); names = teko::list::push(s.names, from_name); types = teko::list::push(s.types, to_type) }
+    Subst { params = [..s.params, from_name]; names = [..s.names, from_name]; types = [..s.types, to_type] }
 }
 
 fn instance_method_subst_l5(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable): Subst {
@@ -899,7 +899,7 @@ fn stamp_instance_methods(inst: parser::TypeDecl, items: []@TItem(), table: Type
             TFunction as tmpl => {
                 if tmpl.type_params.len == 0 {
                     var wf = match stamp_one_instance_method(inst.name, tmpl, s, items, table) { WFn as w => w; error as e => return e }
-                    fns = teko::list::push(fns, wf.func)
+                    fns = [..fns, wf.func]
                     insts = mono_inst_concat(insts, wf.insts)
                 }
             }
@@ -919,7 +919,7 @@ fn stamp_all_instance_methods(items: []@TItem(), table: TypeTable): WFnList | er
         if i >= insts2.len { break }
         var wl = match stamp_instance_methods(insts2[i], items, table) { WFnList as w => w; error as e => return e }
         var j = 0
-        loop { if j >= wl.fns.len { break }; fns = teko::list::push(fns, wl.fns[j]); j++ }
+        loop { if j >= wl.fns.len { break }; fns = [..fns, wl.fns[j]]; j++ }
         mono_insts = mono_inst_concat(mono_insts, wl.insts)
         i++
     }
@@ -929,7 +929,7 @@ fn stamp_all_instance_methods(items: []@TItem(), table: TypeTable): WFnList | er
 fn append_instance_methods(kept: []@TItem(), fns: []TFunction): []@TItem() {
     var out = kept
     var i = 0
-    loop { if i >= fns.len { break }; out = teko::list::push(out, fns[i]); i++ }
+    loop { if i >= fns.len { break }; out = [..out, fns[i]]; i++ }
     out
 }
 
@@ -983,19 +983,19 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
                 if !is_droppable {
                     var wb = match mono_block(f.body, empty_s, prog.items, table) { WBlock as w => w; error as e => return e }
                     var nf = TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
-                    kept = teko::list::push(kept, nf)
+                    kept = [..kept, nf]
                     queue = mono_inst_concat(queue, wb.insts)
                 }
             }
             (@TStatement()) as ts => {
                 var w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
-                kept = teko::list::push(kept, w.stmt)
+                kept = [..kept, w.stmt]
                 queue = mono_inst_concat(queue, w.insts)
             }
             parser::TypeDecl as d => {
-                if d.type_params.len == 0 { kept = teko::list::push(kept, prog.items[i]) }
+                if d.type_params.len == 0 { kept = [..kept, prog.items[i]] }
             }
-            _ => kept = teko::list::push(kept, prog.items[i])
+            _ => kept = [..kept, prog.items[i]]
         }
         i++
     }
@@ -1015,7 +1015,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         if stamped.len >= ceiling {
             return error { message = "monomorphization exceeded the instantiation ceiling (5000) — likely unbounded polymorphic recursion" }
         }
-        stamped = teko::list::push(stamped, inst)
+        stamped = [..stamped, inst]
         var gf = match find_generic_fn(prog.items, inst.fn_name) {
             TFunction as f => f
             null => return error { message = teko::str::concat("internal: monomorph could not find generic fn ", inst.fn_name) }
@@ -1025,7 +1025,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         var pi = 0
         loop {
             if pi >= gf.params.len { break }
-            nparams = teko::list::push(nparams, parser::Param { name = gf.params[pi].name; has_type = true; type_ann = subst_typeexpr(gf.params[pi].type_ann, inst.s); is_params = gf.params[pi].is_params; has_default = gf.params[pi].has_default; default_expr = gf.params[pi].default_expr })
+            nparams = [..nparams, parser::Param { name = gf.params[pi].name; has_type = true; type_ann = subst_typeexpr(gf.params[pi].type_ann, inst.s); is_params = gf.params[pi].is_params; has_default = gf.params[pi].has_default; default_expr = gf.params[pi].default_expr }]
             pi++
         }
         var wb = match mono_block(gf.body, inst.s, prog.items, table) { WBlock as w => w; error as e => return e }
@@ -1034,7 +1034,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         var no_tcs: []@ConstraintExpr() = []
         var stamp_ns = if inst.owner_ns.len > 0 { inst.owner_ns } else { gf.namespace }
         var sf = TFunction { overload_suffix = ""; name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = stamp_ns; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size; ret_extra = gf.ret_extra; guard = gf.guard }
-        kept = teko::list::push(kept, sf)
+        kept = [..kept, sf]
     }
 
     var insts2 = table_generic_instances(table)
@@ -1044,7 +1044,7 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
         var d = insts2[ii]
         ii++
         if mono_kept_has_type(kept, d.name) { continue }
-        kept = teko::list::push(kept, d)
+        kept = [..kept, d]
     }
 
     TProgram { items = kept }

@@ -5,7 +5,7 @@ fn parse_discard_param(tokens: []lexer::Token, pos: u64, params: []Param): Parse
     if is_kind_at(tokens, pos + 1, lexer::TokenKind::Colon) {
         return err_at(tokens, pos + 1, "a `_` discard parameter takes no type annotation — its type is fixed by position from the interface/base signature being implemented or overridden")
     }
-    var out = teko::list::push(params, Param { name = "_"; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() })
+    var out = [..params, Param { name = "_"; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() }]
     ParsedList<Param> { items = out; next = pos + 1 }
 }
 
@@ -58,7 +58,7 @@ fn parse_params(tokens: []lexer::Token, pos: u64): ParsedList<Param> | error {
             return err_at(tokens, ppos, "a default-valued parameter must be followed only by other defaulted parameters (defaults are trailing-only)")
         }
         if has_default { seen_default = true }
-        params = teko::list::push(params, Param { name = name; has_type = true; type_ann = param_ty; is_params = has_params_kw; has_default = has_default; default_expr = default_expr })
+        params = [..params, Param { name = name; has_type = true; type_ann = param_ty; is_params = has_params_kw; has_default = has_default; default_expr = default_expr }]
         p = ppos
         if has_params_kw && is_kind_at(tokens, p, lexer::TokenKind::Comma) {
             return err_at(tokens, p, "'params' must be the last parameter")
@@ -149,16 +149,16 @@ fn parse_type_params(tokens: []lexer::Token, pos: u64): ParsedTypeParams | error
         if !is_kind_at(tokens, p, lexer::TokenKind::Ident) {
             return err_at(tokens, p, "expected a type-parameter name in '<…>'")
         }
-        names = teko::list::push(names, tokens[p].text)
+        names = [..names, tokens[p].text]
         p = p + 1
         var closed_by_pending = false
         if is_kind_at(tokens, p, lexer::TokenKind::Colon) {
             var c = match parse_constraint_expr(tokens, p + 1) { ParsedConstraintTerm as x => x; error as e => return e }
-            constraints = teko::list::push(constraints, c.node)
+            constraints = [..constraints, c.node]
             p = c.next
             closed_by_pending = c.pending_gt > 0
         } else {
-            constraints = teko::list::push(constraints, NoConstraint { })
+            constraints = [..constraints, NoConstraint { }]
         }
         if closed_by_pending { break }
         if is_kind_at(tokens, p, lexer::TokenKind::Comma) { p = p + 1 }
@@ -188,11 +188,11 @@ fn is_variable_binding_head(tokens: []lexer::Token, pos: u64): bool {
 
 fn inject_synthetic_receiver(params: []Param): []Param {
     var out: []Param = []
-    out = teko::list::push(out, Param { name = "self"; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() })
+    out = [..out, Param { name = "self"; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() }]
     var i = 0 to u64
     loop {
         if i >= params.len { break }
-        out = teko::list::push(out, params[i])
+        out = [..out, params[i]]
         i = i + 1
     }
     out
@@ -232,7 +232,7 @@ fn parse_multi_return_types(tokens: []lexer::Token, pos: u64): ParsedList<@TypeE
     var types: []@TypeExpr() = []
     loop {
         var t = match parse_type(tokens, p) { ParsedType as x => x; error as e => return e }
-        types = teko::list::push(types, t.node)
+        types = [..types, t.node]
         p = skip_seps(tokens, t.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
         p = skip_seps(tokens, p + 1)
@@ -538,7 +538,7 @@ fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedList<Functi
     loop {
         if value_member_is_operator(tokens, p) {
             var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
-            methods = teko::list::push(methods, op.node)
+            methods = [..methods, op.node]
             p = op.next
         } else {
             var k = value_member_prefix_end(tokens, p)
@@ -556,7 +556,7 @@ fn parse_value_type_members(tokens: []lexer::Token, pos: u64): ParsedList<Functi
             }
             var m = match parse_function(tokens, p, false, "", true, false, false, 0 to u64) { Parsed<@Decl()> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a value-type method must parse to a Function") }
-            methods = teko::list::push(methods, mf)
+            methods = [..methods, mf]
             p = m.next
         }
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
@@ -605,12 +605,12 @@ fn parse_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
     loop {
         if value_member_is_operator(tokens, p) {
             var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
-            methods = teko::list::push(methods, op.node)
+            methods = [..methods, op.node]
             p = op.next
         } else if struct_item_is_method(tokens, p) {
             var m = match parse_member_fn_or_accessor(tokens, p, false) { Parsed<@Decl()> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a struct method must parse to a Function") }
-            methods = teko::list::push(methods, mf)
+            methods = [..methods, mf]
             p = m.next
         } else {
             var fdoc = peel_leading_doc(tokens, p)
@@ -630,7 +630,7 @@ fn parse_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | error {
                     return err_at(tokens, fstart + 1, "expected ':' after a field name")
                 }
                 var ty = match parse_type(tokens, fstart + 2) { ParsedType as x => x; error as e => return e }
-                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = ro.present })
+                fields = [..fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = ro.present }]
                 p = ty.next
             }
         }
@@ -670,12 +670,12 @@ fn parse_class_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
     loop {
         if value_member_is_operator(tokens, p) {
             var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
-            methods = teko::list::push(methods, op.node)
+            methods = [..methods, op.node]
             p = op.next
         } else if class_item_is_method(tokens, p) {
             var m = match parse_member_fn_or_accessor(tokens, p, false) { Parsed<@Decl()> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a class method must parse to a Function") }
-            methods = teko::list::push(methods, mf)
+            methods = [..methods, mf]
             p = m.next
         } else {
             var fdoc = peel_leading_doc(tokens, p)
@@ -698,7 +698,7 @@ fn parse_class_fields(tokens: []lexer::Token, pos: u64): ParsedStructBody | erro
                     return err_at(tokens, fp + 1, "expected ':' after a field name")
                 }
                 var ty = match parse_type(tokens, fp + 2) { ParsedType as x => x; error as e => return e }
-                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = fvis; is_intern = fintern; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = false })
+                fields = [..fields, Field { name = name; type_ann = ty.node; vis = fvis; is_intern = fintern; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = false }]
                 p = ty.next
             }
         }
@@ -742,7 +742,7 @@ fn parse_class_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | err
         if !is_name_at(tokens, p + 1) {
             return err_at(tokens, p + 1, "expected an interface name after '&'")
         }
-        implements = teko::list::push(implements, tokens[p + 1].text)
+        implements = [..implements, tokens[p + 1].text]
         p = p + 2
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
@@ -779,7 +779,7 @@ fn parse_service_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> | e
         if !is_name_at(tokens, p + 1) {
             return err_at(tokens, p + 1, "expected an interface name after '&'")
         }
-        implements = teko::list::push(implements, tokens[p + 1].text)
+        implements = [..implements, tokens[p + 1].text]
         p = p + 2
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
@@ -798,12 +798,12 @@ fn parse_amp_name_list(tokens: []lexer::Token, pos: u64): ParsedList<str> | erro
     var p = pos
     var names: []str = []
     if is_name_at(tokens, p) {
-        names = teko::list::push(names, tokens[p].text)
+        names = [..names, tokens[p].text]
         p = p + 1
         loop {
             if !is_kind_at(tokens, p, lexer::TokenKind::Amp) { break }
             if !is_name_at(tokens, p + 1) { return err_at(tokens, p + 1, "expected an interface name after '&'") }
-            names = teko::list::push(names, tokens[p + 1].text)
+            names = [..names, tokens[p + 1].text]
             p = p + 2
         }
     }
@@ -826,7 +826,7 @@ fn parse_interface_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> |
     loop {
         if value_member_is_operator(tokens, p) {
             var op = match parse_operator_member(tokens, p, true) { Parsed<Function> as x => x; error as e => return e }
-            methods = teko::list::push(methods, op.node)
+            methods = [..methods, op.node]
             p = op.next
         } else {
             var idoc = peel_leading_doc(tokens, p)
@@ -834,7 +834,7 @@ fn parse_interface_body(tokens: []lexer::Token, pos: u64): Parsed<@TypeBody()> |
             if imc.is_const || imc.bad_override { return reject_const_member(tokens, imc.kw_pos) }
             var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<@Decl()> as x => x; error as e => return e }
             var mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "an interface member must be a method signature (`fn …`)") }
-            methods = teko::list::push(methods, mf)
+            methods = [..methods, mf]
             p = m.next
         }
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
@@ -851,7 +851,7 @@ fn parse_trait_composition(tokens: []lexer::Token, pos: u64): ParsedList<str> | 
     loop {
         if !is_kind_at(tokens, p, lexer::TokenKind::Amp) { break }
         if !is_name_at(tokens, p + 1) { return err_at(tokens, p + 1, "expected a trait or interface name after '&'") }
-        names = teko::list::push(names, tokens[p + 1].text)
+        names = [..names, tokens[p + 1].text]
         p = p + 2
     }
     ParsedList<str> { items = names; next = p }
@@ -868,7 +868,7 @@ fn parse_trait_members(tokens: []lexer::Token, pos: u64): ParsedStructBody | err
     loop {
         if value_member_is_operator(tokens, p) {
             var op = match parse_operator_member(tokens, p, false) { Parsed<Function> as x => x; error as e => return e }
-            methods = teko::list::push(methods, op.node)
+            methods = [..methods, op.node]
             p = op.next
         } else if struct_item_is_method(tokens, p) {
             var m = match parse_member_fn_or_accessor(tokens, p, true) { Parsed<@Decl()> as x => x; error as e => return e }
@@ -876,7 +876,7 @@ fn parse_trait_members(tokens: []lexer::Token, pos: u64): ParsedStructBody | err
             if mf.body.len == 0 {
                 return err_at(tokens, p, "a trait method must have a body — a bodyless member belongs on an interface")
             }
-            methods = teko::list::push(methods, mf)
+            methods = [..methods, mf]
             p = m.next
         } else {
             var fdoc = peel_leading_doc(tokens, p)
@@ -893,7 +893,7 @@ fn parse_trait_members(tokens: []lexer::Token, pos: u64): ParsedStructBody | err
                     return err_at(tokens, fdoc.next + 1, "expected ':' after a field name")
                 }
                 var ty = match parse_type(tokens, fdoc.next + 2) { ParsedType as x => x; error as e => return e }
-                fields = teko::list::push(fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = false })
+                fields = [..fields, Field { name = name; type_ann = ty.node; vis = Visibility::Pub; is_intern = false; has_doc = fdoc.has_doc; doc = fdoc.doc; is_readonly = false }]
                 p = ty.next
             }
         }
@@ -913,7 +913,7 @@ fn freeze_all_fields(fields: []Field): []Field {
     loop {
         if i >= fields.len { break }
         var f = fields[i]
-        out = teko::list::push(out, Field { name = f.name; type_ann = f.type_ann; vis = f.vis; is_intern = f.is_intern; has_doc = f.has_doc; doc = f.doc; is_readonly = true })
+        out = [..out, Field { name = f.name; type_ann = f.type_ann; vis = f.vis; is_intern = f.is_intern; has_doc = f.has_doc; doc = f.doc; is_readonly = true }]
         i++
     }
     out
@@ -1229,7 +1229,7 @@ fn parse_macro_params(tokens: []lexer::Token, pos: u64): ParsedList<Param> | err
             default_expr = de.node
             p = de.next
         }
-        params = teko::list::push(params, Param { name = name; has_type = has_type; type_ann = type_ann; is_params = is_pack; has_default = has_default; default_expr = default_expr })
+        params = [..params, Param { name = name; has_type = has_type; type_ann = type_ann; is_params = is_pack; has_default = has_default; default_expr = default_expr }]
         if is_pack && is_kind_at(tokens, p, lexer::TokenKind::Comma) {
             return err_at(tokens, p, "a `params` pack must be the last macro parameter")
         }
@@ -1335,7 +1335,7 @@ fn try_parse_member_const(tokens: []lexer::Token, pos: u64, has_doc: bool, doc: 
     if mc.bad_override { return err_at(tokens, mc.kw_pos, "a `const` member may not carry `override` — `override` is method-only") }
     if mc.is_const {
         var cd = match parse_type_member_const(tokens, mc.kw_pos, mc.vis, has_doc, doc) { Parsed<ConstDecl> as x => x; error as e => return e }
-        return MemberConstStep { handled = true; consts = teko::list::push(consts, cd.node); next = cd.next }
+        return MemberConstStep { handled = true; consts = [..consts, cd.node]; next = cd.next }
     }
     MemberConstStep { handled = false; consts = consts; next = pos }
 }
@@ -1495,8 +1495,8 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64): Parsed<Module> | error {
             continue
         }
         var d = match parse_decl(tokens, p) { ParsedDecl as x => x; error as e => return e }
-        decls = teko::list::push(decls, d.node)
-        decl_guards = teko::list::push(decl_guards, d.guard)
+        decls = [..decls, d.node]
+        decl_guards = [..decl_guards, d.guard]
         p = d.next
         if !has_token(tokens, p) { break }
         if !is_sep(tokens, p) {

@@ -144,7 +144,7 @@ exp fn cbor_map(keys: []CborValue, vals: []CborValue): CborValue {
  * Wraps a tagged item as a major-type-6 value: the tag number plus the single tagged content.
  */
 exp fn cbor_tag(tag: u64, content: CborValue): CborValue {
-    var one: []CborValue = teko::list::push(no_values(), content)
+    var one: []CborValue = [..no_values(), content]
     mk_value(CborKind::Tag, tag, 0.0, false, no_bytes(), one, no_values(), no_values())
 }
 
@@ -189,7 +189,7 @@ fn append_all(out: []byte, more: []byte): []byte {
     var i: u64 = 0
     loop {
         if i >= more.len { break }
-        acc = teko::list::push(acc, more[i])
+        acc = [..acc, more[i]]
         i++
     }
     acc
@@ -201,7 +201,7 @@ fn append_be(out: []byte, v: u64, count: u64): []byte {
     loop {
         if i == 0 { break }
         i = i - 1
-        acc = teko::list::push(acc, ((v >> (i * 8)) & 0xFF) to byte)
+        acc = [..acc, ((v >> (i * 8)) & 0xFF) to byte]
     }
     acc
 }
@@ -209,30 +209,30 @@ fn append_be(out: []byte, v: u64, count: u64): []byte {
 fn encode_head(major: u64, arg: u64): []byte {
     var out: []byte = no_bytes()
     if arg < 24 {
-        return teko::list::push(out, ((major << 5) | arg) to byte)
+        return [..out, ((major << 5) | arg) to byte]
     }
     if arg <= 0xFF {
-        out = teko::list::push(out, ((major << 5) | 24) to byte)
-        return teko::list::push(out, arg to byte)
+        out = [..out, ((major << 5) | 24) to byte]
+        return [..out, arg to byte]
     }
     if arg <= 0xFFFF {
-        out = teko::list::push(out, ((major << 5) | 25) to byte)
+        out = [..out, ((major << 5) | 25) to byte]
         return append_be(out, arg, 2)
     }
     if arg <= 0xFFFFFFFF {
-        out = teko::list::push(out, ((major << 5) | 26) to byte)
+        out = [..out, ((major << 5) | 26) to byte]
         return append_be(out, arg, 4)
     }
-    out = teko::list::push(out, ((major << 5) | 27) to byte)
+    out = [..out, ((major << 5) | 27) to byte]
     append_be(out, arg, 8)
 }
 
 fn encode_simple(out: []byte, v: u64): []byte {
     if v < 24 {
-        return teko::list::push(out, (0xE0 | v) to byte)
+        return [..out, (0xE0 | v) to byte]
     }
-    var o = teko::list::push(out, 0xF8 to byte)
-    teko::list::push(o, v to byte)
+    var o = [..out, 0xF8 to byte]
+    [..o, v to byte]
 }
 
 fn encode_value(out: []byte, v: CborValue): []byte {
@@ -245,10 +245,10 @@ fn encode_value(out: []byte, v: CborValue): []byte {
         CborKind::Map => encode_map(out, v.keys, v.vals)
         CborKind::Tag => encode_value(append_all(out, encode_head(6, v.uint)), v.items[0])
         CborKind::Simple => encode_simple(out, v.uint)
-        CborKind::Float => append_be(teko::list::push(out, 0xFB to byte), f64_bits(v.real), 8)
-        CborKind::Bool => teko::list::push(out, (if v.flag { 0xF5 } else { 0xF4 }) to byte)
-        CborKind::Null => teko::list::push(out, 0xF6 to byte)
-        CborKind::Undefined => teko::list::push(out, 0xF7 to byte)
+        CborKind::Float => append_be([..out, 0xFB to byte], f64_bits(v.real), 8)
+        CborKind::Bool => [..out, (if v.flag { 0xF5 } else { 0xF4 }) to byte]
+        CborKind::Null => [..out, 0xF6 to byte]
+        CborKind::Undefined => [..out, 0xF7 to byte]
     }
 }
 
@@ -300,13 +300,13 @@ fn insert_sorted(sorted: []CanonEntry, e: CanonEntry): []CanonEntry {
     loop {
         if i >= sorted.len { break }
         if !placed && bytes_less(e.key, sorted[i].key) {
-            out = teko::list::push(out, e)
+            out = [..out, e]
             placed = true
         }
-        out = teko::list::push(out, sorted[i])
+        out = [..out, sorted[i]]
         i++
     }
-    if !placed { out = teko::list::push(out, e) }
+    if !placed { out = [..out, e] }
     out
 }
 
@@ -392,7 +392,7 @@ fn take_bytes(p: []byte, pos: u64, n: u64): BytesRead | error {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, p[pos + i])
+        out = [..out, p[pos + i]]
         i++
     }
     BytesRead { data = out; pos = pos + n }
@@ -437,7 +437,7 @@ fn decode_array(p: []byte, a: ArgRead): CborRead | error {
             if at >= p.len { return read_error("unterminated indefinite array", at) }
             if is_break(p, at) { return CborRead { value = cbor_array(items); pos = at + 1 } }
             var el = match decode_at(p, at) { CborRead as r => r; error as e => return e }
-            items = teko::list::push(items, el.value)
+            items = [..items, el.value]
             at = el.pos
         }
     }
@@ -445,7 +445,7 @@ fn decode_array(p: []byte, a: ArgRead): CborRead | error {
     loop {
         if i >= a.arg { break }
         var el = match decode_at(p, at) { CborRead as r => r; error as e => return e }
-        items = teko::list::push(items, el.value)
+        items = [..items, el.value]
         at = el.pos
         i++
     }
@@ -462,8 +462,8 @@ fn decode_map(p: []byte, a: ArgRead): CborRead | error {
             if is_break(p, at) { return CborRead { value = cbor_map(keys, vals); pos = at + 1 } }
             var k = match decode_at(p, at) { CborRead as r => r; error as e => return e }
             var v = match decode_at(p, k.pos) { CborRead as r => r; error as e => return e }
-            keys = teko::list::push(keys, k.value)
-            vals = teko::list::push(vals, v.value)
+            keys = [..keys, k.value]
+            vals = [..vals, v.value]
             at = v.pos
         }
     }
@@ -472,8 +472,8 @@ fn decode_map(p: []byte, a: ArgRead): CborRead | error {
         if i >= a.arg { break }
         var k = match decode_at(p, at) { CborRead as r => r; error as e => return e }
         var v = match decode_at(p, k.pos) { CborRead as r => r; error as e => return e }
-        keys = teko::list::push(keys, k.value)
-        vals = teko::list::push(vals, v.value)
+        keys = [..keys, k.value]
+        vals = [..vals, v.value]
         at = v.pos
         i++
     }

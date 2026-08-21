@@ -9,9 +9,9 @@ fn parse_num_suffix_lit(tokens: []lexer::Token, pos: u64, txt: str): Parsed<Expr
     }
     var module = if is_big { "bigint" } else { "dec" }
     var segs: []Segment = [Segment { name = "teko" }]
-    segs = teko::list::push(segs, Segment { name = "numeric" })
-    segs = teko::list::push(segs, Segment { name = module })
-    segs = teko::list::push(segs, Segment { name = "of_lit" })
+    segs = [..segs, Segment { name = "numeric" }]
+    segs = [..segs, Segment { name = module }]
+    segs = [..segs, Segment { name = "of_lit" }]
     var arg = Expr { kind = StrLit { text = numeric }; line = tokens[pos].line; col = tokens[pos].col }
     var args = [arg]
     var arg_names = [""]
@@ -39,8 +39,8 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64): ParsedCallArgs | error {
             return err_at(tokens, p, "a named argument must be followed only by other named arguments (named args are trailing-only)")
         }
         var a = match parse_expr(tokens, ap) { Parsed<Expr> as x => x; error as e => return e }
-        args = teko::list::push(args, a.node)
-        arg_names = teko::list::push(arg_names, aname)
+        args = [..args, a.node]
+        arg_names = [..arg_names, aname]
         p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
         p = skip_seps(tokens, p + 1)
@@ -91,8 +91,8 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
             return err_at(tokens, p + 1, "expected '=' after a field name in a struct literal")
         }
         var v = match parse_expr(tokens, p + 2) { Parsed<Expr> as x => x; error as e => return e }
-        names = teko::list::push(names, fname)
-        vals = teko::list::push(vals, v.node)
+        names = [..names, fname]
+        vals = [..vals, v.node]
         p = v.next
         if is_kind_at(tokens, p, lexer::TokenKind::Comma) {
             return err_at(tokens, p, "struct literal fields are separated by ';', not ','")
@@ -125,7 +125,7 @@ fn piece_escape(raw: str, i: u64, bytes: []byte): EscPiece | error {
         b'0' => 0x00
         _ => return error { message = "unknown escape in interpolated string" }
     }
-    EscPiece { bytes = teko::list::push(bytes, v to byte); next = i + 2 }
+    EscPiece { bytes = [..bytes, v to byte]; next = i + 2 }
 }
 
 fn find_fspec_colon(s: str): u64 {
@@ -155,7 +155,7 @@ fn parse_fspec(spec_src: str, tok_pos: u64, tokens: []lexer::Token): FSpec | err
         loop {
             if p >= itoks.len { break }
             var ae = match parse_expr(itoks, p) { Parsed<Expr> as x => x; error as e => return e }
-            args = teko::list::push(args, ae.node)
+            args = [..args, ae.node]
             p = ae.next
             if p < itoks.len && itoks[p].kind == lexer::TokenKind::Comma { p = p + 1 }
         }
@@ -182,10 +182,10 @@ fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> 
             i = ep.next
             continue
         }
-        if c == b'{' && i + 1 < raw.len && raw[i + 1] == b'{' { cur = teko::list::push(cur, b'{'); i = i + 2; continue }
-        if c == b'}' && i + 1 < raw.len && raw[i + 1] == b'}' { cur = teko::list::push(cur, b'}'); i = i + 2; continue }
+        if c == b'{' && i + 1 < raw.len && raw[i + 1] == b'{' { cur = [..cur, b'{']; i = i + 2; continue }
+        if c == b'}' && i + 1 < raw.len && raw[i + 1] == b'}' { cur = [..cur, b'}']; i = i + 2; continue }
         if c == b'{' {
-            pieces = teko::list::push(pieces, str(cur))
+            pieces = [..pieces, str(cur)]
             cur = []
             var hs = i + 1
             var depth: u64 = 1
@@ -204,17 +204,17 @@ fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool): Parsed<Expr> 
             var spec_src = if colon_pos < hole_src.len { slice(hole_src, colon_pos + 1, hole_src.len) } else { "" }
             var toks = match lexer::tokenize(expr_src) { []lexer::Token as ts => ts; error as e => return e }
             var he = match parse_expr(toks, 0) { Parsed<Expr> as x => x; error as e => return e }
-            holes = teko::list::push(holes, he.node)
+            holes = [..holes, he.node]
             var sp = match parse_fspec(spec_src, pos, tokens) { FSpec as s => s; error as e => return e }
-            specs = teko::list::push(specs, sp)
+            specs = [..specs, sp]
             i = j + 1
             continue
         }
         if c == b'}' { return err_at(tokens, pos, "unexpected `}` in interpolated string") }
-        cur = teko::list::push(cur, c)
+        cur = [..cur, c]
         i++
     }
-    pieces = teko::list::push(pieces, str(cur))
+    pieces = [..pieces, str(cur)]
     Parsed<Expr> { node = Expr { kind = Interp { pieces = pieces; holes = holes; specs = specs }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
 }
 
@@ -253,7 +253,7 @@ fn parse_lambda(tokens: []lexer::Token, pos: u64): Parsed<Expr> | error {
                 var t = match parse_type(tokens, q + 1) { ParsedType as x => x; error as e => return e }
                 hasty = true; ty = t.node; q = t.next
             }
-            params = teko::list::push(params, LambdaParam { name = nm; has_type = hasty; type_ann = ty })
+            params = [..params, LambdaParam { name = nm; has_type = hasty; type_ann = ty }]
             p = q
             if is_kind_at(tokens, p, lexer::TokenKind::Comma) { p = p + 1 }
             else if is_kind_at(tokens, p, lexer::TokenKind::RParen) { p = p + 1; break }
@@ -567,7 +567,7 @@ fn parse_array_elems(tokens: []lexer::Token, pos: u64): ParsedList<ArrayElem> | 
         } else {
             match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
         }
-        elems = teko::list::push(elems, ArrayElem { is_spread = is_spread; expr = a.node })
+        elems = [..elems, ArrayElem { is_spread = is_spread; expr = a.node }]
         p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
         p = skip_seps(tokens, p + 1)
@@ -587,7 +587,7 @@ fn parse_in_elems(tokens: []lexer::Token, pos: u64): ParsedList<Expr> | error {
     }
     loop {
         var a = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }
-        elems = teko::list::push(elems, a.node)
+        elems = [..elems, a.node]
         p = skip_seps(tokens, a.next)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
         p = skip_seps(tokens, p + 1)
@@ -615,7 +615,7 @@ fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool): Parse
         if !is_comparison(tokens, p) { break }
         var op = kind_at(tokens, p)
         var rhs = match parse_additive(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }
-        terms = teko::list::push(terms, CmpTerm { op = op; operand = rhs.node })
+        terms = [..terms, CmpTerm { op = op; operand = rhs.node }]
         p = rhs.next
     }
     if terms.len == 0 { return Parsed<Expr> { node = first.node; next = p } }
