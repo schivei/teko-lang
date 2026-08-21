@@ -7501,27 +7501,33 @@ fn emit_extern_struct_typedef(buf: Cb, prog: CgProg, d: parser::TypeDecl, esb: p
 }
 
 type CgTypeSet = struct {
-    inners: []@Type()
-    opt_keys: []str
     slices: []@Type()
     slice_keys: []str
+    slices_n: u64
     variants: []@Type()
     variant_keys: []str
+    variants_n: u64
+    counting: bool
 }
 
 fn cg_opt_key(t: @Type()): str {
     match cg_opt_mangle(cb_new(), t) { Cb as o => str(cb_flat(o)); error => "" }
 }
 fn cg_slice_add(set: CgTypeSet, elem: @Type()): CgTypeSet {
+    var s = set
+    if s.counting { s.slices_n = s.slices_n + 1; return s }
     var key = cg_opt_key(elem)
-    if key == "" { return set }
-    var i = 0
+    if key == "" { return s }
+    var i: u64 = 0
     loop {
-        if i >= set.slice_keys.len { break }
-        if set.slice_keys[i] == key { return set }
-        i++
+        if i >= s.slices_n { break }
+        if s.slice_keys[i] == key { return s }
+        i = i + 1
     }
-    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = [..set.slices, elem]; slice_keys = [..set.slice_keys, key]; variants = set.variants; variant_keys = set.variant_keys }
+    s.slices[s.slices_n] = elem
+    s.slice_keys[s.slices_n] = key
+    s.slices_n = s.slices_n + 1
+    s
 }
 fn cg_variant_key(t: @Type()): str {
     match t {
@@ -7530,15 +7536,20 @@ fn cg_variant_key(t: @Type()): str {
     }
 }
 fn cg_variant_add(set: CgTypeSet, t: @Type()): CgTypeSet {
+    var s = set
+    if s.counting { s.variants_n = s.variants_n + 1; return s }
     var key = cg_variant_key(t)
-    if key == "" { return set }
-    var i = 0
+    if key == "" { return s }
+    var i: u64 = 0
     loop {
-        if i >= set.variant_keys.len { break }
-        if set.variant_keys[i] == key { return set }
-        i++
+        if i >= s.variants_n { break }
+        if s.variant_keys[i] == key { return s }
+        i = i + 1
     }
-    CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = set.slices; slice_keys = set.slice_keys; variants = [..set.variants, t]; variant_keys = [..set.variant_keys, key] }
+    s.variants[s.variants_n] = t
+    s.variant_keys[s.variants_n] = key
+    s.variants_n = s.variants_n + 1
+    s
 }
 fn cg_collect_type_opts(set: CgTypeSet, t: @Type()): CgTypeSet {
     match t {
@@ -7855,12 +7866,12 @@ fn cg_named_emitted(em: CgEmitted, name: str): bool {
     false
 }
 fn cg_uvar_emitted_key(em: CgEmitted, set: CgTypeSet, key: str): bool {
-    var i = 0
+    var i: u64 = 0
     var present = false
     loop {
-        if i >= set.variant_keys.len { break }
+        if i >= set.variants_n { break }
         if set.variant_keys[i] == key { present = true; break }
-        i++
+        i = i + 1
     }
     if !present { return true }
     cg_str_in_n(em.uvar_keys, em.uvar_n, key)
@@ -7971,17 +7982,17 @@ fn cg_named_decls(prog: CgProg): []parser::TypeDecl {
     named
 }
 
-fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
-    var set = CgTypeSet { inners = []; opt_keys = []; slices = []; slice_keys = []; variants = []; variant_keys = [] }
+fn cg_collect_all(set: CgTypeSet, prog: CgProg): CgTypeSet {
+    var s = set
     var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
             checker::TFunction as f => {
-                set = cg_collect_type_opts(set, f.return_type)
-                set = cg_collect_block_opts(set, f.body)
+                s = cg_collect_type_opts(s, f.return_type)
+                s = cg_collect_block_opts(s, f.body)
             }
-            (@TStatement()) as st => { set = cg_collect_block_opts(set, [st]) }
+            (@TStatement()) as st => { s = cg_collect_block_opts(s, [st]) }
             _ => { }
         }
         i++
@@ -7990,16 +8001,32 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
     loop {
         if td >= prog.items.len { break }
         match prog.items[td] {
-            parser::TypeDecl as d => { set = cg_register_decl_field_types(set, prog, d) }
+            parser::TypeDecl as d => { s = cg_register_decl_field_types(s, prog, d) }
             _ => { }
         }
         td++
     }
+    s
+}
+
+fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
+    var empty_t: []@Type() = []
+    var empty_s: []str = []
+    var cset = CgTypeSet { slices = empty_t; slice_keys = empty_s; slices_n = 0; variants = empty_t; variant_keys = empty_s; variants_n = 0; counting = true }
+    cset = cg_collect_all(cset, prog)
+    var scap = cset.slices_n
+    var vcap = cset.variants_n
+    var sbuf: [scap]@Type() = []
+    var skbuf: [scap]str = []
+    var vbuf: [vcap]@Type() = []
+    var vkbuf: [vcap]str = []
+    var set = CgTypeSet { slices = sbuf; slice_keys = skbuf; slices_n = 0; variants = vbuf; variant_keys = vkbuf; variants_n = 0; counting = false }
+    set = cg_collect_all(set, prog)
     var named = cg_named_decls(prog)
 
     var out = buf
     var names_cap = named.len
-    var uvar_cap = set.variants.len
+    var uvar_cap = set.variants_n
     var names_buf: [names_cap]str = []
     var uvar_buf: [uvar_cap]str = []
     var em0 = CgEmitted { names = names_buf; names_n = 0; opt_keys = []; uvar_keys = uvar_buf; uvar_n = 0 }
@@ -8023,7 +8050,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
     if enum_count > 0 { out = cb(out, "\n") }
     var fv = 0
     loop {
-        if fv >= set.variants.len { break }
+        if fv >= set.variants_n { break }
         match set.variants[fv] {
             checker::Variant as va => {
                 out = cb(out, "typedef struct ")
@@ -8036,11 +8063,11 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
         }
         fv++
     }
-    if set.variants.len > 0 { out = cb(out, "\n") }
+    if set.variants_n > 0 { out = cb(out, "\n") }
 
     var k = 0
     loop {
-        if k >= set.slices.len { break }
+        if k >= set.slices_n { break }
         match set.slices[k] { Char => { k++; continue }; _ => { } }
         match set.slices[k] { Byte => { k++; continue }; _ => { } }
         out = cb(out, "typedef struct { ")
@@ -8050,10 +8077,10 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
         out = cb(out, ";\n")
         k++
     }
-    if set.slices.len > 0 { out = cb(out, "\n") }
+    if set.slices_n > 0 { out = cb(out, "\n") }
 
     var em = em0
-    var remaining = named.len + set.variants.len - enum_count
+    var remaining = named.len + set.variants_n - enum_count
     var progress = true
     loop {
         if remaining == 0 { break }
@@ -8076,7 +8103,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
         }
         var vi = 0
         loop {
-            if vi >= set.variants.len { break }
+            if vi >= set.variants_n { break }
             var vt = set.variants[vi]
             var vkey = set.variant_keys[vi]
             if cg_str_in_n(em.uvar_keys, em.uvar_n, vkey) { vi++ } else {
