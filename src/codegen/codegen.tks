@@ -1275,6 +1275,7 @@ fn cg_opt_mangle(buf: Cb, inner: @Type()): Cb | error {
         checker::Str => cb(buf, "str")
         checker::Error => cb(buf, "error")
         checker::Null => cb(buf, "null")
+        checker::Void => cb(buf, "void")
         checker::Named as nm => cb_tysym(buf, nm.name)
         checker::Slice as sl => match sl.element {
             checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
@@ -1291,7 +1292,17 @@ fn cg_opt_mangle(buf: Cb, inner: @Type()): Cb | error {
             }
             out
         }
-        _ => error { message = "codegen: optional/slice inner type not yet supported" }
+        checker::Ptr as p => match p.inner {
+            (@Type()) as t => cg_opt_mangle(cb(buf, "ptr_"), t)
+            null => cb(buf, "ptr_void")
+        }
+        checker::Uptr => cb(buf, "uptr")
+        checker::Reference as r => cg_opt_mangle(cb(buf, "ref_"), r.inner)
+        checker::Func as f => {
+            var out = cb(buf, "fn")
+            out = cb(out, teko::u64_to_str(f.params.len))
+            cg_opt_mangle(out, f.ret)
+        }
     }
 }
 
@@ -1311,13 +1322,23 @@ fn cg_opt_mangle_str(inner: @Type()): str | error {
         checker::Str => "str"
         checker::Error => "error"
         checker::Null => "null"
+        checker::Void => "void"
         checker::Named as nm => cg_ns_c_key(nm.name)
         checker::Slice as sl => match sl.element {
             checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
             _ => { var elem_s = match cg_opt_mangle_str(sl.element) { str as s => s; error as e => return e }; teko::str::concat("slice_", elem_s) }
         }
         checker::Variant as va => cg_union_mangle_str(va)
-        _ => error { message = "codegen: optional/slice inner type not yet supported" }
+        checker::Ptr as p => match p.inner {
+            (@Type()) as t => { var s = match cg_opt_mangle_str(t) { str as x => x; error as e => return e }; teko::str::concat("ptr_", s) }
+            null => "ptr_void"
+        }
+        checker::Uptr => "uptr"
+        checker::Reference as r => { var s = match cg_opt_mangle_str(r.inner) { str as x => x; error as e => return e }; teko::str::concat("ref_", s) }
+        checker::Func as f => {
+            var rs = match cg_opt_mangle_str(f.ret) { str as x => x; error as e => return e }
+            teko::str::concat(teko::str::concat("fn", teko::u64_to_str(f.params.len)), rs)
+        }
     }
 }
 
@@ -2466,118 +2487,6 @@ fn emit_cast(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCast, escapi
     cb(out, "))")
 }
 
-fn emit_list_empty(buf: Cb, e: checker::TExpr): Cb | error {
-    match e.type {
-        checker::Slice as sl => match sl.element {
-            checker::Void => error { message = "codegen: [] needs a known slice type from context (annotate the binding)" }
-            _ => {
-                var o = cb(buf, "(")
-                o = match cg_slice_typename(o, sl.element) { Cb as r => r; error as err => return err }
-                cb(o, "){ .ptr = 0, .len = 0 }")
-            }
-        }
-        _ => error { message = "codegen: [] needs a known slice type from context (annotate the binding)" }
-    }
-}
-
-fn get_push_elem(e: checker::TExpr, c: checker::TCall): @Type() | error {
-    match e.type {
-        checker::Slice as sl => {
-            match sl.element { checker::Void => { }; _ => return sl.element }
-        }
-        _ => return error { message = "codegen: teko::list::push result is not a slice (internal)" }
-    }
-    if c.args.len != 2 { return error { message = "codegen: teko::list::push result is not a concrete slice (internal)" } }
-    match c.args[0].type {
-        checker::Slice as base_sl => match base_sl.element { checker::Void => { }; _ => return base_sl.element }
-        _ => { }
-    }
-    var it = c.args[1].type
-    match it {
-        checker::Slice as is_sl => match is_sl.element { checker::Void => return error { message = "codegen: teko::list::push result is not a concrete slice (internal)" }; _ => { } }
-        _ => { }
-    }
-    it
-}
-
-fn emit_list_push(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, frame: str): Cb | error {
-    var elem = match get_push_elem(e, c) { (@Type()) as t => t; error as err => return err }
-    var bN = $"_sb{buf.len}"
-    var iN = $"_si{buf.len + 1}"
-    var pN = $"_sp{buf.len + 2}"
-    var lN = $"_sl{buf.len + 3}"
-    var out = cb(buf, "({ ")
-    out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " "); out = cb(out, bN); out = cb(out, " = ")
-    out = match emit_as(out, prog, checker::Slice { element = elem }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; ")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " "); out = cb(out, iN); out = cb(out, " = ")
-    out = match emit_as(out, prog, elem, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; uint64_t "); out = cb(out, lN); out = cb(out, "; ")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " *"); out = cb(out, pN); out = cb(out, " = (")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    var is_fo = frame == "@fo"
-    out = cb(out, if is_fo { " *)tk_slice_push_fo(" } else if frame.len > 0 { " *)tk_slice_push_r(" } else { " *)tk_slice_push(" }); out = cb(out, bN); out = cb(out, ".ptr, "); out = cb(out, bN); out = cb(out, ".len, &"); out = cb(out, iN)
-    out = cb(out, ", sizeof(")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, "), &"); out = cb(out, lN); if frame.len > 0 && !is_fo { out = cb(out, ", "); out = cb(out, frame) }; out = cb(out, "); (")
-    out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, "){ .ptr = "); out = cb(out, pN); out = cb(out, ", .len = "); out = cb(out, lN); out = cb(out, " }; })")
-    out
-}
-
-fn emit_list_with_cap(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, frame: str): Cb | error {
-    var elem = match e.type {
-        checker::Slice as sl => match sl.element {
-            checker::Void => return error { message = "codegen: teko::list::with_cap() needs a known slice type from context (annotate the binding)" }
-            _ => sl.element
-        }
-        _ => return error { message = "codegen: teko::list::with_cap() needs a known slice type from context (annotate the binding)" }
-    }
-    if c.args.len != 1 { return error { message = "codegen: teko::list::with_cap result has the wrong arity (internal)" } }
-    var is_r = frame.len > 0
-    var wN = $"_wp{buf.len}"
-    var capN = $"_wc{buf.len}"
-    var out = cb(buf, "({ uint64_t ")
-    out = cb(out, capN); out = cb(out, " = (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); ")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " *"); out = cb(out, wN); out = cb(out, " = (")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, if is_r { " *)tk_slice_with_cap_r(sizeof(" } else { " *)tk_slice_with_cap(sizeof(" })
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, "), "); out = cb(out, capN)
-    if is_r { out = cb(out, ", "); out = cb(out, frame) }
-    out = cb(out, "); (")
-    out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, "){ .ptr = "); out = cb(out, wN); out = cb(out, ", .len = 0")
-    if cg_slice_rep_has_cap(elem) { out = cb(out, ", .cap = "); out = cb(out, capN) }
-    out = cb(out, " }; })")
-    out
-}
-
-fn emit_list_grow_inplace(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    if c.args.len != 2 { return error { message = "codegen: teko::list::grow_inplace has the wrong arity (internal)" } }
-    var elem = match c.args[0].type {
-        checker::Reference as r => match r.inner { checker::Slice as sl => sl.element; _ => return error { message = "codegen: teko::list::grow_inplace receiver is not a `ref []T` (internal)" } }
-        _ => return error { message = "codegen: teko::list::grow_inplace receiver is not a reference (internal)" }
-    }
-    var iN = $"_gi{buf.len}"
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " "); out = cb(out, iN); out = cb(out, " = ")
-    out = match emit_as(out, prog, elem, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; tk_slice_grow_inplace((void *)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "), &"); out = cb(out, iN); out = cb(out, ", sizeof(")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, "), "); out = cb(out, cg_arena_sym(CgArenaSym::RegionCurrent)); out = cb(out, "()); })")
-    out
-}
-
 fn cg_is_mem_value_call(p: parser::Path, user_declared: bool): bool {
     if user_declared { return false }
     if p.segments.len < 2 { return false }
@@ -3302,24 +3211,6 @@ fn emit_call_inner(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, 
     if c.call_ns == "teko::__ref_word" { return emit_ref_word(buf, prog, c, escaping, regions, fn_body, dctx) }
     var p = c.callee
     var user_declared = cg_call_is_user_declared(prog, c)
-    var is_pushfo = !user_declared && p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem" &&
-    p.segments[p.segments.len - 1].name == "push_fo"
-    if is_pushfo || (!user_declared && p.segments.len >= 2 && p.segments[0].name == "teko" &&
-        p.segments[p.segments.len - 2].name == "list") {
-        var llast = p.segments[p.segments.len - 1].name
-        if llast == "empty" {
-            return emit_list_empty(buf, e)
-        }
-        if llast == "push" || is_pushfo {
-            return emit_list_push(buf, prog, e, c, escaping, regions, fn_body, dctx, if is_pushfo { "@fo" } else { "" })
-        }
-        if llast == "with_cap" {
-            return emit_list_with_cap(buf, prog, e, c, escaping, regions, fn_body, dctx, "")
-        }
-        if llast == "grow_inplace" {
-            return emit_list_grow_inplace(buf, prog, c, escaping, regions, fn_body, dctx)
-        }
-    }
     if cg_is_mem_value_call(p, user_declared) {
         var vlast = p.segments[p.segments.len - 1].name
         if vlast == "place" { return emit_place(buf, prog, e, c, escaping, regions, fn_body, dctx) }
@@ -6090,61 +5981,6 @@ type RegionFrame = struct {
     decls: []str
 }
 
-fn scope_region_of(regions: []RegionFrame, name: str): str {
-    var k = regions.len
-    loop {
-        if k == 0 { break }
-        var r = regions[k - 1]
-        if str_list_has(r.decls, name) { return r.name }
-        k = k - 1
-    }
-    ""
-}
-
-fn cg_bound_is_slice(t: @Type()): bool {
-    match t { checker::Slice => true; _ => false }
-}
-
-fn cg_self_append_escapes(escaping: []str, dctx: DeferCtx, a: checker::TAssign): bool {
-    if dctx.rr.len == 0 { return false }
-    if !checker::assign_is_self_append(a) { return false }
-    if !str_list_has(escaping, a.name) { return false }
-    cg_bound_is_slice(a.bound)
-}
-
-fn cg_slice_grow_elem_matches(bound: @Type(), vtype: @Type()): bool {
-    match bound {
-        checker::Slice as bs => match vtype {
-            checker::Slice as vs => cg_mangle_eq(bs.element, vs.element)
-            _ => false
-        }
-        _ => false
-    }
-}
-
-fn cg_binding_grows_escaping_slice(escaping: []str, dctx: DeferCtx, b: checker::TBinding): bool {
-    if dctx.rr.len == 0 { return false }
-    var name = match b.target {
-        parser::SimpleName as sn => sn.name
-        parser::DestructurePattern => return false
-    }
-    if !str_list_has(escaping, name) { return false }
-    if !cg_bound_is_slice(b.bound) { return false }
-    if !cg_slice_grow_elem_matches(b.bound, b.value.type) { return false }
-    match b.value.kind {
-        checker::TCall as c => cg_call_is_slice_grow(c)
-        _ => false
-    }
-}
-
-fn cg_call_is_slice_grow(c: checker::TCall): bool {
-    var segs = c.callee.segments
-    if segs.len < 2 { return false }
-    var last = segs[segs.len - 1].name
-    var prev = segs[segs.len - 2].name
-    (prev == "list" && (last == "push" || last == "with_cap")) || (prev == "mem" && last == "push_fo")
-}
-
 fn str_list_has(xs: []str, name: str): bool {
     var i: u64 = 0
     loop {
@@ -6493,20 +6329,6 @@ fn emit_binding(buf: Cb, prog: CgProg, ret_type: @Type(), b: checker::TBinding, 
     out = cb(out, " ")
     out = cb_ident(out, name)
     out = cb(out, " = ")
-    if cg_binding_grows_escaping_slice(escaping, dctx, b) {
-        match b.value.kind {
-            checker::TCall as c => {
-                var last = c.callee.segments[c.callee.segments.len - 1].name
-                if last == "with_cap" {
-                    out = match emit_list_with_cap(out, prog, b.value, c, escaping, regions, fn_body, dctx, dctx.rr) { Cb as o => o; error as err => return err }
-                } else {
-                    out = match emit_list_push(out, prog, b.value, c, escaping, regions, fn_body, dctx, dctx.rr) { Cb as o => o; error as err => return err }
-                }
-                return cb(out, ";\n")
-            }
-            _ => { }
-        }
-    }
     if regions.len > 0 && cur_block.len > 0 && cg_same_named_struct(b.bound, b.value.type) && checker::binding_is_block_local(escaping, fn_body, cur_block, cur_block_is_value, b) {
         match b.value.kind {
             checker::TStructInit as si => {
@@ -6633,43 +6455,6 @@ fn emit_assign(buf: Cb, prog: CgProg, ret_type: @Type(), a: checker::TAssign, in
     if is_index { return emit_index_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body, dctx) }
     var op = match assignop_c(a.op) { str as s => s; error as err => return err }
     var out = cb(buf, indent)
-    if checker::assign_frees_old(fn_body, a) {
-        match a.value.kind {
-            checker::TCall as c => {
-                out = match emit_assign_lvalue(out, prog, a) { Cb as o => o; error as err => return err }
-                out = cb(out, " = ")
-                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, "@fo") { Cb as o => o; error as err => return err }
-                return cb(out, ";\n")
-            }
-            _ => { }
-        }
-    }
-    if checker::assign_routes_to_frame(escaping, a) {
-        var accum_region = scope_region_of(regions, a.name)
-        var target = if accum_region.len > 0 { accum_region } else { frame }
-        if target.len > 0 {
-            match a.value.kind {
-                checker::TCall as c => {
-                    out = match emit_assign_lvalue(out, prog, a) { Cb as o => o; error as err => return err }
-                    out = cb(out, " = ")
-                    out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, target) { Cb as o => o; error as err => return err }
-                    return cb(out, ";\n")
-                }
-                _ => { }
-            }
-        }
-    }
-    if cg_self_append_escapes(escaping, dctx, a) {
-        match a.value.kind {
-            checker::TCall as c => {
-                out = match emit_assign_lvalue(out, prog, a) { Cb as o => o; error as err => return err }
-                out = cb(out, " = ")
-                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, dctx.rr) { Cb as o => o; error as err => return err }
-                return cb(out, ";\n")
-            }
-            _ => { }
-        }
-    }
     if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {
         var prim = match a.bound {
             checker::Prim as p => p
@@ -8353,9 +8138,9 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
     LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams; spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
-    var out: []@TStatement() = []
+    var out: [stmts.len]@TStatement() = []
     var i = 0
-    loop { if i >= stmts.len { break }; out = teko::mem::push_fo(out, cg_lift_stmt(stmts[i], acc)); i++ }
+    loop { if i >= stmts.len { break }; out[i] = cg_lift_stmt(stmts[i], acc); i++ }
     out
 }
 fn cg_lift_stmt(s: @TStatement(), ref acc: StampAcc): @TStatement() {
