@@ -8114,25 +8114,36 @@ type LiftResult = struct { prog: checker::TProgram; lams: []checker::TLambda; sp
 
 fn cg_lift_lambdas(prog: CgProg): LiftResult {
     var acc = StampAcc { next = 0; next_spawn = 0; fns = []; lams = []; spawns = [] }
-    var items: []@TItem() = []
+    var mapped: [prog.items.len]@TItem() = []
     var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
             checker::TFunction as f => {
                 var nb = cg_lift_block(f.body, acc)
-                items = [..items, checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }]
+                mapped[i] = checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
             }
             (@TStatement()) as ts => {
                 var ns = cg_lift_stmt(ts, acc)
-                items = [..items, ns]
+                mapped[i] = ns
             }
-            _ => items = [..items, prog.items[i]]
+            _ => mapped[i] = prog.items[i]
         }
         i++
     }
-    var j = 0
-    loop { if j >= acc.fns.len { break }; items = [..items, acc.fns[j]]; j++ }
+    var items: [prog.items.len + acc.fns.len]@TItem() = []
+    var m: u64 = 0
+    loop {
+        if m >= prog.items.len { break }
+        items[m] = mapped[m]
+        m++
+    }
+    var j: u64 = 0
+    loop {
+        if j >= acc.fns.len { break }
+        items[prog.items.len + j] = acc.fns[j]
+        j++
+    }
     LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams; spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
