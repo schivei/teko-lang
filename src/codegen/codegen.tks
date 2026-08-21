@@ -8452,6 +8452,99 @@ fn tlamvec_flat(v: TLamVec): []checker::TLambda {
 type StampAcc = struct { next: u64; next_spawn: u64; fns: TFnVec; lams: TLamVec; spawns: []checker::TSpawn }
 type LiftResult = struct { prog: checker::TProgram; lams: []checker::TLambda; spawns: []checker::TSpawn }
 
+fn cg_expr_has_lift(e: checker::TExpr): bool {
+    match e.kind {
+        checker::TLambda => true
+        checker::TBinary as b => cg_expr_has_lift(b.left) || cg_expr_has_lift(b.right)
+        checker::TUnary as u => cg_expr_has_lift(u.operand)
+        checker::TCompare as c => {
+            if cg_expr_has_lift(c.first) { return true }
+            var i = 0
+            loop { if i >= c.rest.len { break }; if cg_expr_has_lift(c.rest[i].operand) { return true }; i++ }
+            false
+        }
+        checker::TCall as cl => {
+            var i = 0
+            loop { if i >= cl.args.len { break }; if cg_expr_has_lift(cl.args[i]) { return true }; i++ }
+            false
+        }
+        checker::TIfExpr as f => cg_expr_has_lift(f.cond) || cg_block_has_lift(f.then_blk) || (f.has_else && cg_block_has_lift(f.else_blk))
+        checker::TMatchExpr as m => {
+            if cg_expr_has_lift(m.subject) { return true }
+            var i = 0
+            loop {
+                if i >= m.arms.len { break }
+                var a = m.arms[i]
+                if a.has_when && cg_expr_has_lift(a.guard) { return true }
+                if cg_block_has_lift(a.body) { return true }
+                i++
+            }
+            false
+        }
+        checker::TCast as ct => cg_expr_has_lift(ct.expr)
+        checker::TFieldAccess as fa => cg_expr_has_lift(fa.receiver)
+        checker::TStructInit as si => {
+            var i = 0
+            loop { if i >= si.field_vals.len { break }; if cg_expr_has_lift(si.field_vals[i]) { return true }; i++ }
+            false
+        }
+        checker::TIndex as ix => cg_expr_has_lift(ix.receiver) || cg_expr_has_lift(ix.index)
+        checker::TInterp as in => {
+            var i = 0
+            loop {
+                if i >= in.holes.len { break }
+                if cg_expr_has_lift(in.holes[i]) { return true }
+                if i < in.specs.len {
+                    match in.specs[i].kind {
+                        checker::TFSpecDynamic as fd => {
+                            var k = 0
+                            loop { if k >= fd.args.len { break }; if cg_expr_has_lift(fd.args[k]) { return true }; k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            false
+        }
+        checker::TInExpr as ie => {
+            if cg_expr_has_lift(ie.lhs) { return true }
+            var i = 0
+            loop { if i >= ie.elems.len { break }; if cg_expr_has_lift(ie.elems[i]) { return true }; i++ }
+            false
+        }
+        checker::TArrayLit as a => {
+            var i = 0
+            loop { if i >= a.elements.len { break }; if cg_expr_has_lift(a.elements[i].expr) { return true }; i++ }
+            false
+        }
+        checker::TBlockExpr as blk => cg_block_has_lift(blk.body)
+        _ => false
+    }
+}
+
+fn cg_stmt_has_lift(s: @TStatement()): bool {
+    match s {
+        checker::TBinding as b => cg_expr_has_lift(b.value)
+        checker::TAssign as a => cg_expr_has_lift(a.value) || (parser::assign_has_target(a.kind) && cg_expr_has_lift(a.target))
+        checker::TReturn as r => r.has_value && cg_expr_has_lift(r.value)
+        checker::TLoopStmt as l => cg_block_has_lift(l.init) || cg_block_has_lift(l.body)
+        checker::TExprStmt as es => cg_expr_has_lift(es.expr)
+        checker::TDeferStmt as d => cg_block_has_lift(d.body)
+        checker::TAdoptStmt as a => cg_block_has_lift(a.body)
+        checker::TBlockStmt as b => cg_block_has_lift(b.body)
+        checker::TBreakStmt => false
+        checker::TContinueStmt => false
+        checker::TSpawn => true
+    }
+}
+
+fn cg_block_has_lift(stmts: []@TStatement()): bool {
+    var i = 0
+    loop { if i >= stmts.len { break }; if cg_stmt_has_lift(stmts[i]) { return true }; i++ }
+    false
+}
+
 fn cg_lift_lambdas(prog: CgProg): LiftResult {
     var acc = StampAcc { next = 0; next_spawn = 0; fns = tfnvec_new(); lams = tlamvec_new(); spawns = [] }
     var mapped: [prog.items.len]@TItem() = []
@@ -8460,12 +8553,19 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
         if i >= prog.items.len { break }
         match prog.items[i] {
             checker::TFunction as f => {
-                var nb = cg_lift_block(f.body, acc)
-                mapped[i] = checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
+                if cg_block_has_lift(f.body) {
+                    var nb = cg_lift_block(f.body, acc)
+                    mapped[i] = checker::TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
+                } else {
+                    mapped[i] = prog.items[i]
+                }
             }
             (@TStatement()) as ts => {
-                var ns = cg_lift_stmt(ts, acc)
-                mapped[i] = ns
+                if cg_stmt_has_lift(ts) {
+                    mapped[i] = cg_lift_stmt(ts, acc)
+                } else {
+                    mapped[i] = prog.items[i]
+                }
             }
             _ => mapped[i] = prog.items[i]
         }
