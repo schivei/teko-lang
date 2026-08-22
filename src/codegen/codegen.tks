@@ -2580,128 +2580,93 @@ fn cg_dc_close(prog: CgProg, seen: []str, work: []str): []str | error {
     cg_dc_close(prog, seen2, work2)
 }
 
-fn cg_dc_helper_name(buf: Cb, cls: str): Cb {
-    cb_tysym(cb(buf, "tk_dc_"), cls)
+fn cg_dc_helper_name(cls: str): str {
+    teko::str::concat("tk_dc_", cb_tysym(cls))
 }
 
-fn cg_dc_emit_proto(buf: Cb, cls: str): Cb {
-    var out = cb(buf, "static ")
-    out = mangle_type_name(out, "", cls)
-    out = cb(out, " *")
-    out = cg_dc_helper_name(out, cls)
-    out = cb(out, "(tk_region *, ")
-    out = mangle_type_name(out, "", cls)
-    cb(out, " *, uint8_t, uint8_t *);\n")
+fn cg_dc_emit_proto(cls: str): str {
+    var mtn = mangle_type_name("", cls)
+    teko::str::concat("static ", mtn, " *", cg_dc_helper_name(cls), "(tk_region *, ", mtn, " *, uint8_t, uint8_t *);\n")
 }
 
-fn cg_dc_emit_field_copy(buf: Cb, prog: CgProg, ref_ns: str, f: parser::Field): Cb | error {
+fn cg_dc_emit_field_copy(prog: CgProg, ref_ns: str, f: parser::Field): str | error {
     var plan = match cg_dc_plan_field(prog, ref_ns, f.type_ann) { DcFieldPlan as p => p; error as e => return e }
     if !plan.is_class {
-        var out = cb(buf, "_o->")
-        out = cb(out, f.name)
-        out = cb(out, " = _s->")
-        out = cb(out, f.name)
-        return cb(out, ";\n")
+        return teko::str::concat("_o->", f.name, " = _s->", f.name, ";\n")
     }
     if !plan.nullable {
-        var out = cb(buf, "_o->")
-        out = cb(out, f.name)
-        out = cb(out, " = ")
-        out = cg_dc_helper_name(out, plan.class_name)
-        out = cb(out, "(_r, _s->")
-        out = cb(out, f.name)
-        return cb(out, ", _d + 1, _e);\n")
+        return teko::str::concat("_o->", f.name, " = ", cg_dc_helper_name(plan.class_name), "(_r, _s->", f.name, ", _d + 1, _e);\n")
     }
-    var out = cb(buf, "_o->")
-    out = cb(out, f.name)
-    out = cb(out, " = (_s->")
-    out = cb(out, f.name)
-    out = cb(out, " == NULL) ? NULL : ")
-    out = cg_dc_helper_name(out, plan.class_name)
-    out = cb(out, "(_r, _s->")
-    out = cb(out, f.name)
-    out = cb(out, ", _d + 1, _e);\n")
-    out
+    teko::str::concat("_o->", f.name, " = (_s->", f.name, " == NULL) ? NULL : ", cg_dc_helper_name(plan.class_name), "(_r, _s->", f.name, ", _d + 1, _e);\n")
 }
 
-fn cg_dc_emit_body(buf: Cb, prog: CgProg, cls: str): Cb | error {
+fn cg_dc_emit_body(prog: CgProg, cls: str): str | error {
     var fields = match cg_dc_class_fields(prog, cls) { []parser::Field as fs => fs; error as e => return e }
     var ref_ns = checker::name_qualifier(cls)
-    var out = cb(buf, "static ")
-    out = mangle_type_name(out, "", cls)
-    out = cb(out, " *")
-    out = cg_dc_helper_name(out, cls)
-    out = cb(out, "(tk_region *_r, ")
-    out = mangle_type_name(out, "", cls)
-    out = cb(out, " *_s, uint8_t _d, uint8_t *_e) {\n")
-    out = cb(out, "if (_s == NULL) { return NULL; }\n")
-    out = cb(out, "if (*_e || _d >= 255) { *_e = 1; return NULL; }\n")
-    out = cb(out, "tk_region *_nr = ")
-    out = cb_arena_sym(out, CgArenaSym::RegionNew)
-    out = cb(out, "(_r);\n")
-    out = mangle_type_name(out, "", cls)
-    out = cb(out, " *_o = (")
-    out = mangle_type_name(out, "", cls)
-    out = cb(out, " *)")
-    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
-    out = cb(out, "(_nr, (size_t)sizeof(")
-    out = mangle_type_name(out, "", cls)
-    out = cb(out, "));\n")
+    var mtn = mangle_type_name("", cls)
+    var out = teko::str::concat(
+        "static ", mtn, " *", cg_dc_helper_name(cls), "(tk_region *_r, ", mtn, " *_s, uint8_t _d, uint8_t *_e) {\n",
+        "if (_s == NULL) { return NULL; }\n",
+        "if (*_e || _d >= 255) { *_e = 1; return NULL; }\n",
+        "tk_region *_nr = ", cg_arena_sym(CgArenaSym::RegionNew), "(_r);\n",
+        mtn, " *_o = (", mtn, " *)", cg_arena_sym(CgArenaSym::RegionAlloc), "(_nr, (size_t)sizeof(", mtn, "));\n"
+    )
     var fi = 0
     loop {
         if fi >= fields.len { break }
-        out = match cg_dc_emit_field_copy(out, prog, ref_ns, fields[fi]) { Cb as o => o; error as err => return err }
+        var fc = match cg_dc_emit_field_copy(prog, ref_ns, fields[fi]) { str as s => s; error as err => return err }
+        out = teko::str::concat(out, fc)
         fi++
     }
-    out = cb(out, "_o->__region = _nr;\n")
-    out = cb(out, "if (*_e) { return NULL; }\n")
-    cb(out, "return _o;\n}\n")
+    teko::str::concat(out, "_o->__region = _nr;\n", "if (*_e) { return NULL; }\n", "return _o;\n}\n")
 }
 
-fn cg_emit_deep_copy_helpers(buf: Cb, prog: CgProg): Cb | error {
+fn cg_emit_deep_copy_helpers(prog: CgProg): str | error {
     var seeds = match cg_dc_scan_program(prog) { []str as ss => ss; error as e => return e }
-    if seeds.len == 0 { return buf }
+    if seeds.len == 0 { return "" }
     var classes = match cg_dc_close(prog, [], seeds) { []str as cs => cs; error as e => return e }
-    var out = buf
+    var out = ""
     var pi = 0
-    loop { if pi >= classes.len { break }; out = cg_dc_emit_proto(out, classes[pi]); pi++ }
+    loop { if pi >= classes.len { break }; out = teko::str::concat(out, cg_dc_emit_proto(classes[pi])); pi++ }
     var bi = 0
     loop {
         if bi >= classes.len { break }
-        out = match cg_dc_emit_body(out, prog, classes[bi]) { Cb as o => o; error as err => return err }
+        var b = match cg_dc_emit_body(prog, classes[bi]) { str as s => s; error as err => return err }
+        out = teko::str::concat(out, b)
         bi++
     }
     out
 }
 
-fn emit_deep_copy(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_deep_copy(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 1 { return error { message = "codegen: deep_copy expects one argument (internal)" } }
     var cls = match c.args[0].type { checker::Named as n => n.name; _ => return error { message = "codegen: deep_copy only supports a class argument (internal)" } }
     if !cg_is_class_named(prog, cls) { return error { message = $"codegen: deep_copy only supports a class argument (got '{cls}') (internal)" } }
     if cg_is_polymorphic_base(prog, cls) { return error { message = $"codegen: deep_copy does not support polymorphic class '{cls}' yet (internal)" } }
-    var v = fresh_named("_dc", buf.len to i64)
-    var ev = fresh_named("_dce", buf.len to i64)
-    var out = cb(buf, "({ uint8_t ")
-    out = cb(out, ev)
-    out = cb(out, " = 0; ")
-    out = mangle_type_name(out, "", cls)
-    out = cb(out, " *")
-    out = cb(out, v)
-    out = cb(out, " = ")
-    out = cg_dc_helper_name(out, cls)
-    out = cb(out, "(")
-    out = cb(out, cg_scratch_region_expr(regions))
-    out = cb(out, ", ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ", 0, &")
-    out = cb(out, ev)
-    out = cb(out, "); ")
-    out = cb(out, ev)
-    out = cb(out, " ? ")
-    out = match emit_variant_wrap_str(out, prog, e.type, checker::Error { }, "(tk_error){0}") { Cb as o => o; error as err => return err }
-    out = cb(out, " : ")
-    out = match emit_variant_wrap_str(out, prog, e.type, checker::Named { name = cls }, v) { Cb as o => o; error as err => return err }
-    cb(out, "; })")
+    var v = fresh_named("_dc", id)
+    var ev = fresh_named("_dce", id)
+    cb(fd, "({ uint8_t ")
+    cb(fd, ev)
+    cb(fd, " = 0; ")
+    cb(fd, mangle_type_name("", cls))
+    cb(fd, " *")
+    cb(fd, v)
+    cb(fd, " = ")
+    cb(fd, cg_dc_helper_name(cls))
+    cb(fd, "(")
+    cb(fd, cg_scratch_region_expr(regions))
+    cb(fd, ", ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ", 0, &")
+    cb(fd, ev)
+    cb(fd, "); ")
+    cb(fd, ev)
+    cb(fd, " ? ")
+    match emit_variant_wrap_str(fd, id, prog, e.type, checker::Error { }, "(tk_error){0}") { error as err => return err; null => { } }
+    cb(fd, " : ")
+    match emit_variant_wrap_str(fd, id, prog, e.type, checker::Named { name = cls }, v) { error as err => return err; null => { } }
+    cb(fd, "; })")
+    return null
 }
 
 fn emit_ptr_unwrap_seam(buf: Cb, addr_c: str, tag_c: str): Cb {
