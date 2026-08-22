@@ -2258,71 +2258,81 @@ fn cg_is_mem_value_call(p: parser::Path, user_declared: bool): bool {
     rooted && (last == "place" || last == "read" || last == "write")
 }
 
-fn emit_place(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_place(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 2 { return error { message = "codegen: place expects two arguments (internal)" } }
     var inner = match e.type {
         checker::Ptr as pt => match pt.inner { (@Type()) as t => t; null => return error { message = "codegen: place result is not a typed pointer (internal)" } }
         _ => return error { message = "codegen: place result is not a pointer (internal)" }
     }
-    var v = fresh_named("_pl", buf.len to i64)
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
-    out = cb(out, " *"); out = cb(out, v); out = cb(out, " = (")
-    out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
-    out = cb(out, " *)"); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "((tk_region *)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "), (size_t)sizeof(")
-    out = match emit_type(out, prog, inner) { Cb as o => o; error as err => return err }
-    out = cb(out, ")); *"); out = cb(out, v); out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, inner, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); "); out = cb(out, v); cb(out, "; })")
+    var v = fresh_named("_pl", id)
+    cb(fd, "({ ")
+    var ts1 = match emit_type(prog, inner) { str as o => o; error as err => return err }
+    cb(fd, ts1)
+    cb(fd, " *"); cb(fd, v); cb(fd, " = (")
+    var ts2 = match emit_type(prog, inner) { str as o => o; error as err => return err }
+    cb(fd, ts2)
+    cb(fd, " *)"); cb_arena_sym(fd, CgArenaSym::RegionAlloc); cb(fd, "((tk_region *)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "), (size_t)sizeof(")
+    var ts3 = match emit_type(prog, inner) { str as o => o; error as err => return err }
+    cb(fd, ts3)
+    cb(fd, ")); *"); cb(fd, v); cb(fd, " = (")
+    match emit_expr_ctx(fd, id, prog, inner, c.args[1], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "); "); cb(fd, v); cb(fd, "; })")
+    return null
 }
 
-fn emit_read(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_read(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 1 { return error { message = "codegen: read expects one argument (internal)" } }
-    var out = cb(buf, "(*(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+    cb(fd, "(*(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
-fn emit_write(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_write(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 2 { return error { message = "codegen: write expects two arguments (internal)" } }
-    var out = cb(buf, "(*(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ") = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+    cb(fd, "(*(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ") = (")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
-fn emit_buf_ptr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "(uint8_t *)"); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "(")
-    out = cb(out, cg_scratch_region_expr(regions))
-    out = cb(out, ", (size_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+fn emit_buf_ptr(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, "(uint8_t *)"); cb_arena_sym(fd, CgArenaSym::RegionAlloc); cb(fd, "(")
+    cb(fd, cg_scratch_region_expr(regions))
+    cb(fd, ", (size_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
-fn emit_byte_ptr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_byte_ptr(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 2 { return error { message = "codegen: byte_ptr expects a `[]byte` and an index (internal)" } }
-    var out = cb(buf, "((void *)((")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ").ptr + (size_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")))")
+    cb(fd, "((void *)((")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ").ptr + (size_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")))")
+    return null
 }
 
-fn emit_retain(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb_fn_name(buf, "teko::runtime", "wrap_retain")
-    out = cb(out, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")")
+fn emit_retain(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, cb_fn_name("teko::runtime", "wrap_retain"))
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    return null
 }
 
-fn emit_release(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb_fn_name(buf, "teko::runtime", "wrap_release")
-    out = cb(out, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")")
+fn emit_release(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, cb_fn_name("teko::runtime", "wrap_release"))
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    return null
 }
 
 fn weak_get_non_null_member(members: []@Type()): @Type() | error {
@@ -2342,26 +2352,26 @@ fn weak_get_target_type(expected: @Type()): @Type() | error {
     }
 }
 
-fn emit_weak_get(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_weak_get(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 1 { return error { message = "codegen: weak_get expects one argument (internal)" } }
     var ttype = match weak_get_target_type(e.type) { (@Type()) as t => t; error as err => return err }
-    var v = fresh_named("_wg", buf.len to i64)
-    var out = cb(buf, "({ void *")
-    out = cb(out, v)
-    out = cb(out, " = (void *)")
-    out = cb_fn_name(out, "teko::runtime", "wrap_weak_get")
-    out = cb(out, "((void *)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ")); ")
-    out = cb(out, v)
-    out = cb(out, " == 0 ? ")
-    out = match emit_variant_wrap_str(out, prog, e.type, checker::Null { }, "0") { Cb as o => o; error as err => return err }
-    out = cb(out, " : ")
-    var tcbuf = match emit_type(cb_new(), prog, ttype) { Cb as o => o; error as err => return err }
-    var tc = str(cb_flat(tcbuf))
+    var v = fresh_named("_wg", id)
+    cb(fd, "({ void *")
+    cb(fd, v)
+    cb(fd, " = (void *)")
+    cb(fd, cb_fn_name("teko::runtime", "wrap_weak_get"))
+    cb(fd, "((void *)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")); ")
+    cb(fd, v)
+    cb(fd, " == 0 ? ")
+    match emit_variant_wrap_str(fd, id, prog, e.type, checker::Null { }, "0") { error as err => return err; null => { } }
+    cb(fd, " : ")
+    var tc = match emit_type(prog, ttype) { str as o => o; error as err => return err }
     var tarm = $"*({tc} *){v}"
-    out = match emit_variant_wrap_str(out, prog, e.type, ttype, tarm) { Cb as o => o; error as err => return err }
-    cb(out, "; })")
+    match emit_variant_wrap_str(fd, id, prog, e.type, ttype, tarm) { error as err => return err; null => { } }
+    cb(fd, "; })")
+    return null
 }
 
 type DcFieldPlan = struct { is_class: bool; nullable: bool; class_name: str }
