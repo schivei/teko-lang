@@ -479,14 +479,30 @@ fn surface_has(methods: []parser::Function, m: parser::Function): bool {
 }
 
 fn surface_union(a: []parser::Function, b: []parser::Function): []parser::Function {
-    var out = a
+    var out: [a.len + b.len]parser::Function = []
+    var count: u64 = 0
+    loop { if count >= a.len { break }; out[count] = a[count]; count++ }
     var i = 0
     loop {
         if i >= b.len { break }
-        if !surface_has(out, b[i]) { out = [..out, b[i]] }
+        if !surface_prefix_has(out, count, b[i]) { out[count] = b[i]; count++ }
         i++
     }
-    out
+    teko::collections::arr_slice(out, 0, count)
+}
+
+/**
+ * Whether the first `upto` methods of `surface` share a name with `m`.
+ *
+ * @param surface  the method surface accumulated so far
+ * @param upto     number of leading entries to consider (a fill watermark)
+ * @param m        the method whose name is sought
+ * @return         true when a method named `m.name` appears in `surface[0..upto)`
+ */
+fn surface_prefix_has(surface: []parser::Function, upto: u64, m: parser::Function): bool {
+    var i: u64 = 0
+    loop { if i >= upto { break }; if surface[i].name == m.name { return true }; i++ }
+    false
 }
 
 fn surface_intersect(a: []parser::Function, b: []parser::Function, table: TypeTable): []parser::Function {
@@ -569,7 +585,8 @@ fn merge_interfaces_and(l: []str, r: []str, table: TypeTable): []str | error {
 }
 
 fn interfaces_surviving(names: []str, surface: []parser::Function, table: TypeTable): []str | error {
-    var out: []str = []
+    var out: [names.len]str = []
+    var count: u64 = 0
     var i = 0
     loop {
         if i >= names.len { break }
@@ -577,10 +594,10 @@ fn interfaces_surviving(names: []str, surface: []parser::Function, table: TypeTa
         var keep = false
         var mi = 0
         loop { if mi >= ms.len { break }; if surface_has(surface, ms[mi]) { keep = true; break }; mi++ }
-        if keep { out = [..out, names[i]] }
+        if keep { out[count] = names[i]; count++ }
         i++
     }
-    out
+    teko::collections::arr_slice(out, 0, count)
 }
 
 fn constraint_interfaces(c: @ConstraintExpr(), table: TypeTable): []str | error {
@@ -610,17 +627,19 @@ fn constraint_interfaces(c: @ConstraintExpr(), table: TypeTable): []str | error 
 }
 
 fn surface_union_names(a: []str, b: []str): []str {
-    var out = a
+    var out: [a.len + b.len]str = []
+    var count: u64 = 0
+    loop { if count >= a.len { break }; out[count] = a[count]; count++ }
     var i = 0
     loop {
         if i >= b.len { break }
         var already = false
         var j = 0
-        loop { if j >= out.len { break }; if out[j] == b[i] { already = true; break }; j++ }
-        if !already { out = [..out, b[i]] }
+        loop { if j >= count { break }; if out[j] == b[i] { already = true; break }; j++ }
+        if !already { out[count] = b[i]; count++ }
         i++
     }
-    out
+    teko::collections::arr_slice(out, 0, count)
 }
 
 pub fn method_owner_interface(ifaces: []str, method: str, table: TypeTable): str | null {
@@ -2047,17 +2066,18 @@ pub fn table_generic_instance_regs(table: TypeTable): TypeTable {
 }
 
 pub fn table_generic_instances(table: TypeTable): []parser::TypeDecl {
-    var out: []parser::TypeDecl = []
+    var out: [tt_len(table)]parser::TypeDecl = []
+    var count: u64 = 0
     var i: u64 = 0
     loop {
         if i >= tt_len(table) { break }
         var r = tt_at(table, i)
         if name_is_g_instance(r.name) {
-            if r.decl.type_params.len == 0 { out = [..out, r.decl] }
+            if r.decl.type_params.len == 0 { out[count] = r.decl; count++ }
         }
         i++
     }
-    out
+    teko::collections::arr_slice(out, 0, count)
 }
 
 fn normalize_inst_texpr(te: @TypeExpr(), table: TypeTable): @TypeExpr() {

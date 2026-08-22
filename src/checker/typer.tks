@@ -4042,7 +4042,9 @@ fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmt
     }
     var tname = mb_temp_name(mb, 0)
     var cur = define(env, tname, call.type, true)
-    var body: []@TStatement() = [TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = tname }; bound = call.type; value = call }]
+    var body: [1 + mb.targets.len]@TStatement() = []
+    body[0] = TBinding { kind = parser::BindKind::Var; target = parser::SimpleName { name = tname }; bound = call.type; value = call }
+    var nbody: u64 = 1
     var i: u64 = 0
     loop {
         if i >= mb.targets.len { break }
@@ -4050,7 +4052,8 @@ fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmt
             parser::BindName as bn => {
                 var vstmt = mb_binding_stmt(mb.kind, bn.name, false, mb.type_ann, mb_field(mb_var(tname), mret_field_name(i)))
                 var ts = match type_statement(vstmt, cur, table) { TypedStmt as t => t; error as e => return e }
-                body = [..body, ts.node]
+                body[nbody] = ts.node
+                nbody++
                 cur = ts.env
             }
             parser::BindSkip => { }
@@ -4058,7 +4061,7 @@ fn type_multibind_mret(mb: parser::MultiBind, env: Env, table: TypeTable): TStmt
         }
         i = i + 1
     }
-    TStmtSeq { stmts = body; env = cur }
+    TStmtSeq { stmts = tstmt_prefix(body, nbody); env = cur }
 }
 
 fn str_has_prefix(s: str, p: str): bool {
@@ -4087,13 +4090,15 @@ fn type_multibind_parallel(mb: parser::MultiBind, env: Env, table: TypeTable): T
         return error { message = "multiple assignment: the number of targets and values must match (got " ~ teko::u64_to_str(mb.targets.len) ~ " targets, " ~ teko::u64_to_str(mb.values.len) ~ " values)" }
     }
     var cur = env
-    var body: []@TStatement() = []
+    var body: [mb.values.len + mb.targets.len]@TStatement() = []
+    var nbody: u64 = 0
     var i: u64 = 0
     loop {
         if i >= mb.values.len { break }
         var tstmt = mb_binding_stmt(parser::BindKind::Var, mb_temp_name(mb, i), mb.has_type, mb.type_ann, mb.values[i])
         var ts = match type_statement(tstmt, cur, table) { TypedStmt as t => t; error as e => return e }
-        body = [..body, ts.node]
+        body[nbody] = ts.node
+        nbody++
         cur = ts.env
         i = i + 1
     }
@@ -4104,7 +4109,8 @@ fn type_multibind_parallel(mb: parser::MultiBind, env: Env, table: TypeTable): T
             parser::BindName as bn => {
                 var vstmt = mb_binding_stmt(mb.kind, bn.name, false, mb.type_ann, mb_var(mb_temp_name(mb, i)))
                 var ts = match type_statement(vstmt, cur, table) { TypedStmt as t => t; error as e => return e }
-                body = [..body, ts.node]
+                body[nbody] = ts.node
+                nbody++
                 cur = ts.env
             }
             parser::BindSkip => { }
@@ -4112,7 +4118,7 @@ fn type_multibind_parallel(mb: parser::MultiBind, env: Env, table: TypeTable): T
         }
         i = i + 1
     }
-    TStmtSeq { stmts = body; env = cur }
+    TStmtSeq { stmts = tstmt_prefix(body, nbody); env = cur }
 }
 
 fn type_multibind_array(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq | error {
@@ -4121,11 +4127,13 @@ fn type_multibind_array(mb: parser::MultiBind, env: Env, table: TypeTable): TStm
     }
     var shape = mb_array_shape(mb.targets)
     var cur = env
-    var body: []@TStatement() = []
+    var body: [2 + mb.targets.len]@TStatement() = []
+    var nbody: u64 = 0
     var aname = mb_temp_name(mb, 0)
     var astmt = mb_binding_stmt(parser::BindKind::Var, aname, false, mb.type_ann, mb.values[0])
     var ats = match type_statement(astmt, cur, table) { TypedStmt as t => t; error as e => return e }
-    body = [..body, ats.node]
+    body[nbody] = ats.node
+    nbody++
     cur = ats.env
     var guard = if shape.has_rest {
         mb_guard_stmt(aname, lexer::TokenKind::Lt, shape.head_n + shape.tail_n, "array decomposition: expected at least " ~ teko::u64_to_str(shape.head_n + shape.tail_n) ~ " elements")
@@ -4133,7 +4141,8 @@ fn type_multibind_array(mb: parser::MultiBind, env: Env, table: TypeTable): TStm
         mb_guard_stmt(aname, lexer::TokenKind::Ne, shape.head_n, "array decomposition: expected exactly " ~ teko::u64_to_str(shape.head_n) ~ " elements")
     }
     var gts = match type_statement(guard, cur, table) { TypedStmt as t => t; error as e => return e }
-    body = [..body, gts.node]
+    body[nbody] = gts.node
+    nbody++
     cur = gts.env
     var slot: u64 = 0
     var j: u64 = 0
@@ -4152,14 +4161,15 @@ fn type_multibind_array(mb: parser::MultiBind, env: Env, table: TypeTable): TStm
                 }
                 var vstmt = mb_binding_stmt(mb.kind, bn.name, mb.has_type, mb.type_ann, idx_expr)
                 var ts = match type_statement(vstmt, cur, table) { TypedStmt as t => t; error as e => return e }
-                body = [..body, ts.node]
+                body[nbody] = ts.node
+                nbody++
                 cur = ts.env
                 if in_tail { j = j + 1 } else { slot = slot + 1 }
             }
         }
         i = i + 1
     }
-    TStmtSeq { stmts = body; env = cur }
+    TStmtSeq { stmts = tstmt_prefix(body, nbody); env = cur }
 }
 
 fn type_multibind(mb: parser::MultiBind, env: Env, table: TypeTable): TStmtSeq | error {
@@ -4630,12 +4640,12 @@ fn retype_returns_in_expr(e: TExpr, ret: @Type(), table: TypeTable): TExpr {
             TExpr { kind = TIfExpr { cond = f.cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = e.type; line = e.line; col = e.col }
         }
         TMatchExpr as m => {
-            var arms: []TArm = []
+            var arms: [m.arms.len]TArm = []
             var i = 0
             loop {
                 if i >= m.arms.len { break }
                 var ar = m.arms[i]
-                arms = [..arms, TArm { pattern = ar.pattern; has_when = ar.has_when; guard = ar.guard; body = retype_return_positions(ar.body, ret, table, false) }]
+                arms[i] = TArm { pattern = ar.pattern; has_when = ar.has_when; guard = ar.guard; body = retype_return_positions(ar.body, ret, table, false) }
                 i++
             }
             TExpr { kind = TMatchExpr { subject = m.subject; arms = arms }; type = e.type; line = e.line; col = e.col }
@@ -5325,15 +5335,47 @@ fn check_comparator_counterparts(methods: []parser::Function): null | error {
     null
 }
 
+/**
+ * Copy the first `n` entries of a typed-item array into an exact-sized array.
+ * Used instead of the generic `arr_slice` for `@TItem()`, whose type-function
+ * element the bootstrap seed's codegen cannot monomorphize a slice helper for.
+ *
+ * @param xs  the source items
+ * @param n   the fill watermark to keep
+ * @return    an exact-sized copy of `xs[0..n)`
+ */
+fn titem_prefix(xs: []@TItem(), n: u64): []@TItem() {
+    var out: [n]@TItem() = []
+    var i: u64 = 0
+    loop { if i >= n { break }; out[i] = xs[i]; i++ }
+    out
+}
+
+/**
+ * Copy the first `n` entries of a typed-statement array into an exact-sized
+ * array. Manual twin of `titem_prefix` for `@TStatement()`.
+ *
+ * @param xs  the source statements
+ * @param n   the fill watermark to keep
+ * @return    an exact-sized copy of `xs[0..n)`
+ */
+fn tstmt_prefix(xs: []@TStatement(), n: u64): []@TStatement() {
+    var out: [n]@TStatement() = []
+    var i: u64 = 0
+    loop { if i >= n { break }; out[i] = xs[i]; i++ }
+    out
+}
+
 fn operator_members(methods: []parser::Function): []parser::Function {
-    var out: []parser::Function = []
+    var out: [methods.len]parser::Function = []
+    var count: u64 = 0
     var i = 0
     loop {
         if i >= methods.len { break }
-        if methods[i].is_operator { out = [..out, methods[i]] }
+        if methods[i].is_operator { out[count] = methods[i]; count++ }
         i++
     }
-    out
+    teko::collections::arr_slice(out, 0, count)
 }
 
 fn check_operator_invariants(td: parser::TypeDecl, ref_ns: str, table: TypeTable): null | error {
@@ -5378,15 +5420,18 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
             methods = match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
             base_name = cb.base_name
             is_class = true
+            var names_buf: [cb.methods.len]str = []
             var oi = 0
-            loop { if oi >= cb.methods.len { break }; own_names = [..own_names, cb.methods[oi].name]; oi++ }
+            loop { if oi >= cb.methods.len { break }; names_buf[oi] = cb.methods[oi].name; oi++ }
+            own_names = names_buf
         }
         parser::NewtypeBody as nb => { methods = nb.methods }
         parser::EnumBody as eb => { methods = eb.methods }
         parser::FlagsBody as fb => { methods = fb.methods }
         _ => { }
     }
-    var out: []@TItem() = []
+    var out: [methods.len]@TItem() = []
+    var nout: u64 = 0
     var method_ns = if item_ns == "" { td.name } else { item_ns ~ "::" ~ td.name }
     var mi = 0
     loop {
@@ -5404,10 +5449,11 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
         }
         var mov = overload_suffix_for_method(env, method_ns, methods[mi], td.name, item_ns, table)
         var stamped = TFunction { overload_suffix = mov; name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size; ret_extra = mf.ret_extra; guard = parser::pred_true() }
-        out = [..out, stamped]
+        out[nout] = stamped
+        nout++
         mi++
     }
-    out
+    titem_prefix(out, nout)
 }
 
 fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable): []@TItem() | error {
@@ -5418,13 +5464,13 @@ fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: E
         _ => []
     }
     var type_canonical = qualify(item_ns, td.name)
-    var out: []@TItem() = []
+    var out: [eff.len]@TItem() = []
     var i: u64 = 0
     loop {
         if i >= eff.len { break }
         var cd = eff[i]
         var ti = match type_const_decl(cd, with_file(env, file), table) { TConstDecl as x => x; error as e => return surface_at(file, cd.line, cd.col, e) }
-        out = [..out, TConstDecl { name = member_const_symbol(type_canonical, cd.name); namespace = item_ns; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col; guard = parser::pred_true() }]
+        out[i] = TConstDecl { name = member_const_symbol(type_canonical, cd.name); namespace = item_ns; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col; guard = parser::pred_true() }
         i++
     }
     out
