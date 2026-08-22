@@ -3877,18 +3877,17 @@ fn fmt_family_takes_prec(fc_low: byte, is_flt: bool): bool {
     if fc_low == 110 && !is_flt { return false }
     true
 }
-fn emit_interp(buf: Cb, prog: CgProg, in: checker::TInterp, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var nsegs = in.pieces.len + in.holes.len
-    var out = buf
     var concat_open = if str_region.len > 0 { teko::str::concat("tk_str_concat_r(", str_region, ", ") } else { "tk_str_concat(" }
     var s = 1
-    loop { if s >= nsegs { break }; out = cb(out, concat_open); s++ }
+    loop { if s >= nsegs { break }; buf.write(concat_open); s++ }
     var k = 0
     loop {
         if k >= nsegs { break }
-        if k >= 1 { out = cb(out, ", ") }
+        if k >= 1 { buf.write(", ") }
         if k % 2 == 0 {
-            out = emit_piece_lit(out, in.pieces[k / 2])
+            emit_piece_lit(buf, in.pieces[k / 2])
         } else {
             var hi = k / 2
             var h = in.holes[hi]
@@ -3911,69 +3910,69 @@ fn emit_interp(buf: Cb, prog: CgProg, in: checker::TInterp, str_region: str, esc
                         if !has_prec { prec = if fc_low == 100 { 1 } else { 6 } }
                         var is_flt = match h.type { checker::Prim as p => p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64; _ => false }
                         var prec_str = teko::i64_to_str(prec)
-                        if fc_low == 102 { out = cb(out, "tk_fmt_f((double)(") }
-                        else if fc_low == 101 { out = cb(out, "tk_fmt_e((double)(") }
-                        else if fc_low == 103 { out = cb(out, "tk_fmt_g((double)(") }
-                        else if fc_low == 112 { out = cb(out, "tk_fmt_p((double)(") }
-                        else if fc_low == 100 { out = cb(out, "tk_fmt_d((int64_t)(") }
-                        else if fc_low == 120 && spec.len > 0 && spec[0] == 88 { out = cb(out, "tk_fmt_x_upper((uint64_t)(") }
-                        else if fc_low == 120 { out = cb(out, "tk_fmt_x_lower((uint64_t)(") }
-                        else if fc_low == 98 { out = cb(out, "tk_fmt_b((uint64_t)(") }
-                        else if fc_low == 110 && is_flt { out = cb(out, "tk_fmt_n_f((double)(") }
-                        else if fc_low == 110 { out = cb(out, "tk_fmt_n_i((int64_t)(") }
+                        if fc_low == 102 { buf.write("tk_fmt_f((double)(") }
+                        else if fc_low == 101 { buf.write("tk_fmt_e((double)(") }
+                        else if fc_low == 103 { buf.write("tk_fmt_g((double)(") }
+                        else if fc_low == 112 { buf.write("tk_fmt_p((double)(") }
+                        else if fc_low == 100 { buf.write("tk_fmt_d((int64_t)(") }
+                        else if fc_low == 120 && spec.len > 0 && spec[0] == 88 { buf.write("tk_fmt_x_upper((uint64_t)(") }
+                        else if fc_low == 120 { buf.write("tk_fmt_x_lower((uint64_t)(") }
+                        else if fc_low == 98 { buf.write("tk_fmt_b((uint64_t)(") }
+                        else if fc_low == 110 && is_flt { buf.write("tk_fmt_n_f((double)(") }
+                        else if fc_low == 110 { buf.write("tk_fmt_n_i((int64_t)(") }
                         else { return error { message = "codegen: unrecognized format spec" } }
-                        out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+                        match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
                         if fmt_family_takes_prec(fc_low, is_flt) {
-                            out = cb(out, "), ")
-                            out = cb(out, prec_str)
-                            out = cb(out, ")")
+                            buf.write("), ")
+                            buf.write(prec_str)
+                            buf.write(")")
                         } else {
-                            out = cb(out, "))")
+                            buf.write("))")
                         }
                     }
                     checker::TFSpecDynamic as fd => {
                         var is_flt = match h.type { checker::Prim as p => p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64; _ => false }
                         var is_sint = match h.type { checker::Prim as p => cg_prim_is_signed_int(p.kind); _ => false }
-                        if is_flt { out = cb(out, "tk_fmt_dyn_f64((double)(") }
-                        else if is_sint { out = cb(out, "tk_fmt_dyn_i64((int64_t)(") }
-                        else { out = cb(out, "tk_fmt_dyn_u64((uint64_t)(") }
-                        out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                        out = cb(out, "), ")
-                        out = match emit_expr_ctx(out, prog, checker::Void { }, fd.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                        out = cb(out, ")")
+                        if is_flt { buf.write("tk_fmt_dyn_f64((double)(") }
+                        else if is_sint { buf.write("tk_fmt_dyn_i64((int64_t)(") }
+                        else { buf.write("tk_fmt_dyn_u64((uint64_t)(") }
+                        match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                        buf.write("), ")
+                        match emit_expr_ctx(buf, prog, checker::Void { }, fd.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                        buf.write(")")
                     }
                     _ => {
                         match h.type {
-                            checker::Str => { out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err } }
-                            checker::Char => { out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err } }
+                            checker::Str => { match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } } }
+                            checker::Char => { match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } } }
                             checker::Prim as p => {
                                 if p.kind == checker::PrimKind::Bool {
-                                    out = cb(out, "(")
-                                    out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                                    out = cb(out, " ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
+                                    buf.write("(")
+                                    match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                                    buf.write(" ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
                                 } else if p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64 {
-                                    out = cb(out, "tk_ftoa((double)(")
-                                    out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                                    out = cb(out, "))")
+                                    buf.write("tk_ftoa((double)(")
+                                    match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                                    buf.write("))")
                                 } else if cg_prim_is_signed_int(p.kind) {
-                                    out = cb(out, "tk_i64_to_str((int64_t)(")
-                                    out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                                    out = cb(out, "))")
+                                    buf.write("tk_i64_to_str((int64_t)(")
+                                    match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                                    buf.write("))")
                                 } else {
-                                    out = cb(out, "tk_u64_to_str((uint64_t)(")
-                                    out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                                    out = cb(out, "))")
+                                    buf.write("tk_u64_to_str((uint64_t)(")
+                                    match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                                    buf.write("))")
                                 }
                             }
                             checker::Byte => {
-                                out = cb(out, "tk_u64_to_str((uint64_t)(")
-                                out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                                out = cb(out, "))")
+                                buf.write("tk_u64_to_str((uint64_t)(")
+                                match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                                buf.write("))")
                             }
                             checker::Error => {
-                                out = cb(out, "(")
-                                out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                                out = cb(out, ").message")
+                                buf.write("(")
+                                match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                                buf.write(").message")
                             }
                             _ => return error { message = "codegen: interpolation hole type not supported" }
                         }
@@ -3981,45 +3980,45 @@ fn emit_interp(buf: Cb, prog: CgProg, in: checker::TInterp, str_region: str, esc
                 }
             } else {
                 match h.type {
-                    checker::Str => { out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err } }
-                    checker::Char => { out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err } }
+                    checker::Str => { match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } } }
+                    checker::Char => { match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } } }
                     checker::Prim as p => {
                         if p.kind == checker::PrimKind::Bool {
-                            out = cb(out, "(")
-                            out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                            out = cb(out, " ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
+                            buf.write("(")
+                            match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                            buf.write(" ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
                         } else if p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64 {
-                            out = cb(out, "tk_ftoa((double)(")
-                            out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                            out = cb(out, "))")
+                            buf.write("tk_ftoa((double)(")
+                            match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                            buf.write("))")
                         } else if cg_prim_is_signed_int(p.kind) {
-                            out = cb(out, "tk_i64_to_str((int64_t)(")
-                            out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                            out = cb(out, "))")
+                            buf.write("tk_i64_to_str((int64_t)(")
+                            match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                            buf.write("))")
                         } else {
-                            out = cb(out, "tk_u64_to_str((uint64_t)(")
-                            out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                            out = cb(out, "))")
+                            buf.write("tk_u64_to_str((uint64_t)(")
+                            match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                            buf.write("))")
                         }
                     }
                     checker::Byte => {
-                        out = cb(out, "tk_u64_to_str((uint64_t)(")
-                        out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                        out = cb(out, "))")
+                        buf.write("tk_u64_to_str((uint64_t)(")
+                        match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                        buf.write("))")
                     }
                     checker::Error => {
-                        out = cb(out, "(")
-                        out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                        out = cb(out, ").message")
+                        buf.write("(")
+                        match emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+                        buf.write(").message")
                     }
                     _ => return error { message = "codegen: interpolation hole type not supported" }
                 }
             }
         }
-        if k >= 1 { out = cb(out, ")") }
+        if k >= 1 { buf.write(")") }
         k++
     }
-    out
+    null
 }
 
 fn cg_find_struct_field_type(prog: CgProg, sname: str, fname: str): @TypeExpr() | null {
