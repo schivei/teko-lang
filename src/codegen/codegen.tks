@@ -95,7 +95,6 @@ fn cb_numint(buf: teko::io::FileStream, v: parser::NumInt) {
     cb_u64_c_expr(buf, v.mag)
 }
 
-/** cb_numint_str — the C literal spelling of `v`, standalone (not streamed). */
 fn cb_numint_str(v: parser::NumInt): str {
     var mag = teko::str::concat(teko::u64_to_str(v.mag), "ULL")
     if v.neg { teko::str::concat(teko::str::concat("-(", mag), ")") } else { mag }
@@ -111,16 +110,6 @@ fn cg_arena_sym(kind: CgArenaSym): str {
     teko::str::concat("TK_ARENA_", cg_arena_kind_suffix(kind))
 }
 
-/**
- * cb_arena_sym — stream the `TK_ARENA_<suffix>` provider symbol straight into the output stream.
- *
- * The no-copy-grow counterpart of `cg_arena_sym`: it writes the fixed prefix and the kind suffix
- * as two pieces, for the emit sites that hand the symbol directly to the stream instead of
- * materializing it as a `str`.
- *
- * @param buf   the output stream to write the symbol to
- * @param kind  which arena provider symbol to emit
- */
 fn cb_arena_sym(buf: teko::io::FileStream, kind: CgArenaSym) {
     buf.write("TK_ARENA_")
     buf.write(cg_arena_kind_suffix(kind))
@@ -270,15 +259,12 @@ fn cb_cstr_escaped(buf: teko::io::FileStream, s: str) {
     }
 }
 
-/** cb_cstr_escaped_len — the C-escaped byte length of one source byte `c`. */
 fn cb_cstr_escaped_len(c: byte): u64 {
     if c == b'\\' || c == b'"' || c == b'\n' || c == b'\t' || c == b'\r' { return 2 }
     if c < 0x20 || c >= 0x7F { return 4 }
     1
 }
 
-/** cb_cstr_escaped_fill — write the C-escaped spelling of `c` into `out` starting at `k`.
- * @return the next free index in `out` */
 fn cb_cstr_escaped_fill(ref out: []byte, k: u64, c: byte): u64 {
     if c == b'\\' { out[k] = b'\\'; out[k + 1] = b'\\'; return k + 2 }
     if c == b'"' { out[k] = b'\\'; out[k + 1] = b'"'; return k + 2 }
@@ -296,7 +282,6 @@ fn cb_cstr_escaped_fill(ref out: []byte, k: u64, c: byte): u64 {
     k + 1
 }
 
-/** cb_cstr_escaped_str — the C-escaped spelling of `s`, standalone (not streamed). */
 fn cb_cstr_escaped_str(s: str): str {
     var outlen: u64 = 0
     var i: u64 = 0
@@ -345,7 +330,6 @@ fn emit_prim(buf: teko::io::FileStream, k: checker::PrimKind) {
     }
 }
 
-/** emit_prim_str — the C spelling of a primitive kind, standalone (not streamed). */
 fn emit_prim_str(k: checker::PrimKind): str {
     match k {
         checker::PrimKind::U8 => "uint8_t"
@@ -378,7 +362,6 @@ fn cb_tysym(buf: teko::io::FileStream, name: str) {
     }
 }
 
-/** cb_tysym_str — the `::`-mangled spelling of `name`, standalone (not streamed). */
 fn cb_tysym_str(name: str): str {
     var outlen: u64 = 0
     var i: u64 = 0
@@ -417,7 +400,6 @@ fn mangle_type_name(buf: teko::io::FileStream, namespace: str, name: str) {
     cb_tysym(buf, name)
 }
 
-/** mangle_type_name_str — the mangled C type name for (`namespace`, `name`), standalone. */
 fn mangle_type_name_str(namespace: str, name: str): str {
     var out = "tk_t_"
     if namespace.len > 0 { out = teko::str::concat(out, teko::str::concat(cb_tysym_str(namespace), "__")) }
@@ -439,7 +421,6 @@ fn cb_fn_name(buf: teko::io::FileStream, ns: str, name: str, suffix: str = "") {
     if suffix.len != 0 { buf.write(suffix) }
 }
 
-/** cb_fn_name_str — the mangled C function name for (`ns`, `name`, `suffix`), standalone. */
 fn cb_fn_name_str(ns: str, name: str, suffix: str = ""): str {
     var out = TEKO_USER_PREFIX
     if ns.len != 0 {
@@ -1178,7 +1159,6 @@ fn emit_type(buf: teko::io::FileStream, prog: CgProg, t: @Type()) {
     }
 }
 
-/** emit_type_str — the C type spelling of `t`, standalone (not streamed). */
 fn emit_type_str(prog: CgProg, t: @Type()): str {
     match t {
         checker::Prim as p => emit_prim_str(p.kind)
@@ -1340,7 +1320,6 @@ fn cb_ident(buf: teko::io::FileStream, name: str) {
     if cg_is_c_keyword(name) { buf.write("_") }
 }
 
-/** cb_ident_str — the C-safe spelling of `name` (keyword-suffixed if needed), standalone. */
 fn cb_ident_str(name: str): str {
     if cg_is_c_keyword(name) { teko::str::concat(name, "_") } else { name }
 }
@@ -1420,7 +1399,6 @@ fn cg_variant_typename(buf: teko::io::FileStream, v: checker::Variant) {
     }
 }
 
-/** cg_variant_typename_str — the mangled C type name for variant `v`, standalone. */
 fn cg_variant_typename_str(v: checker::Variant): str | error {
     var out = "tk_u"
     var i = 0
@@ -1765,7 +1743,6 @@ fn cg_variant_typename_texpr(buf: teko::io::FileStream, prog: CgProg, te: parser
     buf.write(cg_variant_typename_texpr_str(prog, te, ref_ns))
 }
 
-/** cg_variant_typename_texpr_str — the mangled C type name for union type-expr `te`, standalone. */
 fn cg_variant_typename_texpr_str(prog: CgProg, te: parser::UnionType, ref_ns: str): str {
     var out = "tk_u"
     var i = 0
@@ -7862,18 +7839,6 @@ fn cg_str_in(xs: []str, s: str): bool {
     false
 }
 
-/**
- * cg_str_in_n — membership test over the first `n` entries of a pre-sized string buffer.
- *
- * The count-bounded counterpart of `cg_str_in` for the no-copy-grow accumulators of
- * `CgEmitted`: the buffer is allocated once at its maximum capacity and filled by index, so a
- * scan must stop at the live watermark `n` rather than the buffer's full `.len`.
- *
- * @param xs  the pre-sized backing buffer
- * @param n   the live element count (watermark)
- * @param s   the string to look for
- * @return    `true` when `s` equals one of `xs[0..n)`
- */
 fn cg_str_in_n(xs: []str, n: u64, s: str): bool {
     var i: u64 = 0
     loop { if i >= n { break }; if xs[i] == s { return true }; i++ }
@@ -8184,59 +8149,24 @@ fn cg_emit_types_ordered(buf: teko::io::FileStream, prog: CgProg) {
     if remaining > 0 { panic("codegen: cyclic value-type dependency (a recursive type must pass through a slice or a boxed reference)") }
 }
 
-/**
- * TFnChunk — one sealed, always-full segment of a `TFnVec` chunk-chain: a `[]checker::TFunction`
- * whose length IS its element count (a segment is sealed only when completely filled).
- */
 type TFnChunk = struct {
-    /** the fully-filled run of lifted functions this segment holds. */
     data: []checker::TFunction
 }
 
-/**
- * TFnVec — a growable sequence of lifted `checker::TFunction` values that grows WITHOUT recopying
- * the elements it already holds (the same sealed-chunk-chain substrate as `NameSet`, specialized to
- * `TFunction`). A
- * `[..arr, x]` accumulator reallocates and re-copies the whole run on every append, leaking each
- * intermediate copy into the never-freed arena (O(n^2) bytes); this seals each full `cur` segment
- * into `chunks` and allocates a fresh, geometrically larger `cur`, so the total bytes reserved is
- * O(n) and no already-stored element is ever moved. Threaded LINEARLY through the lambda-lift
- * accumulator (`StampAcc`), exactly like the emit buffer — no alias of an intermediate value
- * survives an append.
- */
 type TFnVec = struct {
-    /** the sealed, always-full segments, in insertion order. */
     chunks: []TFnChunk
-    /** the number of live entries in `chunks` (its backing may be over-allocated). */
     nch: u64
-    /** the active segment currently being filled (elements `[0, fill)` are live). */
     cur: []checker::TFunction
-    /** the number of live entries in `cur`. */
     fill: u64
-    /** the total element count across every sealed segment plus `cur`. */
     len: u64
 }
 
-/**
- * tfnvec_new — the empty `TFnVec` (no segments, no active buffer). The first `tfnvec_push`
- * allocates the initial `cur`.
- *
- * @return an empty chunk-chain of `checker::TFunction`.
- */
 fn tfnvec_new(): TFnVec {
     var ec: []TFnChunk = []
     var z: []checker::TFunction = []
     TFnVec { chunks = ec; nch = 0; cur = z; fill = 0; len = 0 }
 }
 
-/**
- * tfnvec_chunk_room — ensure `chunks` has room for one more sealed segment, growing that (short,
- * O(log n)-length) backing geometrically when it is full. Only the segment INDEX array is ever
- * copy-grown here; the segment payloads themselves are never moved.
- *
- * @param v  the vector whose segment index may need to grow
- * @return   `v` with `chunks` guaranteed to have a free slot at `nch`
- */
 fn tfnvec_chunk_room(v: TFnVec): TFnVec {
     var nv = v
     if nv.chunks.len == 0 {
@@ -8257,15 +8187,6 @@ fn tfnvec_chunk_room(v: TFnVec): TFnVec {
     nv
 }
 
-/**
- * tfnvec_push — append `x`, sealing the active segment and opening a geometrically larger one when
- * it fills. No previously stored element is copied (the whole point): the just-filled `cur` is
- * moved into `chunks` by header only, then a fresh `cur` is allocated.
- *
- * @param v  the vector to append to
- * @param x  the lifted function to store
- * @return   `v` grown by one element
- */
 fn tfnvec_push(v: TFnVec, x: checker::TFunction): TFnVec {
     var nv = v
     if nv.fill >= nv.cur.len {
@@ -8289,14 +8210,6 @@ fn tfnvec_push(v: TFnVec, x: checker::TFunction): TFnVec {
     nv
 }
 
-/**
- * tfnvec_flat — materialize the chunk-chain as one contiguous `[]checker::TFunction` in insertion
- * order (sealed segments first, then the partial `cur`). Allocated ONCE, at the point the lifted
- * functions are folded back into the program's item list.
- *
- * @param v  the vector to flatten
- * @return   every stored function, in insertion order
- */
 fn tfnvec_flat(v: TFnVec): []checker::TFunction {
     var out: [v.len]checker::TFunction = []
     var k: u64 = 0
@@ -8323,50 +8236,24 @@ fn tfnvec_flat(v: TFnVec): []checker::TFunction {
     out
 }
 
-/**
- * TLamChunk — one sealed, always-full segment of a `TLamVec` chunk-chain (the `TFnChunk` analogue
- * for captured lambdas).
- */
 type TLamChunk = struct {
-    /** the fully-filled run of stamped lambdas this segment holds. */
     data: []checker::TLambda
 }
 
-/**
- * TLamVec — the `TFnVec` chunk-chain substrate specialized to `checker::TLambda`, for the
- * capture-carrying lambdas accumulated during the lift. Same O(n) no-recopy growth contract.
- */
 type TLamVec = struct {
-    /** the sealed, always-full segments, in insertion order. */
     chunks: []TLamChunk
-    /** the number of live entries in `chunks`. */
     nch: u64
-    /** the active segment currently being filled. */
     cur: []checker::TLambda
-    /** the number of live entries in `cur`. */
     fill: u64
-    /** the total element count across every sealed segment plus `cur`. */
     len: u64
 }
 
-/**
- * tlamvec_new — the empty `TLamVec`.
- *
- * @return an empty chunk-chain of `checker::TLambda`.
- */
 fn tlamvec_new(): TLamVec {
     var ec: []TLamChunk = []
     var z: []checker::TLambda = []
     TLamVec { chunks = ec; nch = 0; cur = z; fill = 0; len = 0 }
 }
 
-/**
- * tlamvec_chunk_room — ensure `chunks` has a free slot at `nch`, growing the segment index
- * geometrically when full (payloads never move).
- *
- * @param v  the vector whose segment index may need to grow
- * @return   `v` with room for one more sealed segment
- */
 fn tlamvec_chunk_room(v: TLamVec): TLamVec {
     var nv = v
     if nv.chunks.len == 0 {
@@ -8387,14 +8274,6 @@ fn tlamvec_chunk_room(v: TLamVec): TLamVec {
     nv
 }
 
-/**
- * tlamvec_push — append `x`, sealing and re-growing the active segment on fill; no stored element
- * is copied.
- *
- * @param v  the vector to append to
- * @param x  the stamped lambda to store
- * @return   `v` grown by one element
- */
 fn tlamvec_push(v: TLamVec, x: checker::TLambda): TLamVec {
     var nv = v
     if nv.fill >= nv.cur.len {
@@ -8418,13 +8297,6 @@ fn tlamvec_push(v: TLamVec, x: checker::TLambda): TLamVec {
     nv
 }
 
-/**
- * tlamvec_flat — materialize the chunk-chain as one contiguous `[]checker::TLambda` in insertion
- * order, allocated once when the captured lambdas are handed to `LiftResult`.
- *
- * @param v  the vector to flatten
- * @return   every stored lambda, in insertion order
- */
 fn tlamvec_flat(v: TLamVec): []checker::TLambda {
     var out: [v.len]checker::TLambda = []
     var k: u64 = 0
@@ -8451,13 +8323,6 @@ fn tlamvec_flat(v: TLamVec): []checker::TLambda {
     out
 }
 
-/**
- * StampAcc — the lambda-lift accumulator threaded (by `ref`) through the lift walk: the id
- * counters plus the growing sets of lifted top-level functions (`fns`) and captured lambdas
- * (`lams`), both carried as no-recopy chunk-chains so a large program's lift does not leak an
- * O(n^2) trail of accumulator copies into the arena. `spawns` stays a plain array (its count is
- * small — one entry per `spawn` site).
- */
 type StampAcc = struct { next: u64; next_spawn: u64; fns: TFnVec; lams: TLamVec; spawns: []checker::TSpawn }
 type LiftResult = struct { prog: checker::TProgram; lams: []checker::TLambda; spawns: []checker::TSpawn }
 
@@ -8890,7 +8755,6 @@ fn cg_emit_vtable_def(buf: teko::io::FileStream, prog: CgProg, cd_name: str, idd
     buf.write(" };\n")
 }
 
-/** cg_vtthunk_name_str — the mangled C symbol for a class/interface vtable thunk, standalone. */
 fn cg_vtthunk_name_str(cd_name: str, idd_name: str, method: str): str {
     teko::str::concat("tk_vtthunk_", teko::str::concat(cb_tysym_str(cd_name), teko::str::concat("__", teko::str::concat(cb_tysym_str(idd_name), teko::str::concat("__", cb_ident_str(method))))))
 }
@@ -8949,7 +8813,6 @@ fn cg_emit_vtable_protos(buf: teko::io::FileStream, prog: CgProg, vt_table: chec
     }
 }
 
-/** cg_emit_vtable_proto_line — the extern-array forward declaration for a class/interface vtable. */
 fn cg_emit_vtable_proto_line(buf: teko::io::FileStream, cd_name: str, idd_name: str) {
     buf.write("static void *const tk_vt_")
     cb_tysym(buf, cd_name)
@@ -9471,35 +9334,15 @@ pub fn tk_emit_c_test_analyze_file(prog0: checker::TProgram, out_path: str, meta
 
 extern fn cg_cur_rss(): u64 = "tk_cur_rss" from "teko_rt"
 
-/**
- * cg_phase_rss_enabled — whether the per-phase memory trace inside the codegen is armed, gated by
- * the `TEKO_PHASE_RSS=1` environment variable so a normal build prints nothing.
- *
- * @return `true` when `TEKO_PHASE_RSS` is exactly `"1"`, `false` otherwise
- */
 fn cg_phase_rss_enabled(): bool {
     match teko::env::var("TEKO_PHASE_RSS") { str as v => v == "1"; error => false }
 }
 
-/**
- * cg_mb_tenths — a byte count rendered as whole-and-tenths megabytes (`1258.4`), for the memory
- * trace lines. Integer-only, so it never depends on float formatting.
- *
- * @param bytes  the raw byte count to render
- * @return       the `"<whole>.<tenths>"` megabyte spelling
- */
 fn cg_mb_tenths(bytes: u64): str {
     var mb10 = bytes * 10 / 1048576
     $"{mb10 / 10}.{mb10 % 10}"
 }
 
-/**
- * cg_report_phase_rss — emit one codegen memory-trace line (current + peak RSS) for `label` when
- * the trace is armed, so the whole-program emit's retained working set is attributable phase by
- * phase. Writes to stderr only, leaving the emitted C untouched.
- *
- * @param label  the emit sub-phase the line is tagged with
- */
 fn cg_report_phase_rss(label: str) {
     if !cg_phase_rss_enabled() { return }
     var cur = cg_cur_rss()
@@ -9589,8 +9432,6 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     null
 }
 
-/** cg_emit_forward_typedef — the forward `typedef struct` (plus polymorphic-base typedef for a
- * non-sealed class) for one top-level type declaration, ahead of the ordered type-body pass. */
 fn cg_emit_forward_typedef(buf: teko::io::FileStream, d: parser::TypeDecl) {
     match d.body {
         parser::StructBody => cg_emit_forward_struct_typedef(buf, d.name)
@@ -9616,8 +9457,6 @@ fn cg_emit_forward_typedef(buf: teko::io::FileStream, d: parser::TypeDecl) {
     }
 }
 
-/** cg_emit_forward_struct_typedef — `typedef struct <mangled> <mangled>;` for a struct-shaped
- * type declaration named `name`. */
 fn cg_emit_forward_struct_typedef(buf: teko::io::FileStream, name: str) {
     buf.write("typedef struct ")
     mangle_type_name(buf, "", name)
@@ -9843,13 +9682,6 @@ fn fn_items_index(prog: CgProg, f: checker::TFunction): u64 {
     0
 }
 
-/**
- * The `.tsym` symbol map is debug-only (native-backend stack traces); emitting it is disabled
- * to avoid the O(n²) whole-program string concatenation. Returns only the format header.
- *
- * @param prog  the checked program (unused while emission stays disabled)
- * @return      the `.tsym` header line, with no per-function records
- */
 fn tk_emit_tsym(prog: checker::TProgram): str {
     "# teko symbol map (.tsym v1): disabled (debug-only, native backend)\n"
 }
