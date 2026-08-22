@@ -5821,64 +5821,72 @@ fn emit_match_stmt(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, m
     buf.write("}\n")
 }
 
-fn emit_number(buf: Cb, prog: CgProg, e: checker::TExpr, n: checker::TNumber): Cb | error {
+fn emit_number(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, n: checker::TNumber) {
     match e.type {
         checker::Byte => {
-            var o = cb(buf, "((uint8_t)")
-            o = cb_numint(o, n.value)
-            return cb(o, ")")
+            buf.write("((uint8_t)")
+            cb_numint(buf, n.value)
+            buf.write(")")
+            return
         }
         _ => { }
     }
     match e.type {
         checker::Named as nm => {
             if cg_named_is_flags(prog, nm.name) {
-                var o = cb(buf, "((")
-                o = mangle_type_name(o, "", nm.name)
-                o = cb(o, ")")
-                o = cb_numint(o, n.value)
-                return cb(o, ")")
+                buf.write("((")
+                mangle_type_name(buf, "", nm.name)
+                buf.write(")")
+                cb_numint(buf, n.value)
+                buf.write(")")
+                return
             }
         }
         _ => { }
     }
     var k = match e.type {
         checker::Prim as p => p.kind
-        _ => return error { message = "codegen: numeric literal with a non-primitive type not yet supported" }
+        _ => panic("codegen: numeric literal with a non-primitive type not yet supported")
     }
     if n.is_float {
         match k {
-            checker::PrimKind::F64 => return cb_f64_literal(buf, n.fval)
+            checker::PrimKind::F64 => { cb_f64_literal(buf, n.fval); return }
             checker::PrimKind::F32 => {
-                var o = cb(buf, "(float)(")
-                o = cb_f64_literal(o, n.fval)
-                return cb(o, ")")
+                buf.write("(float)(")
+                cb_f64_literal(buf, n.fval)
+                buf.write(")")
+                return
             }
-            _ => return error { message = "codegen: float literal with a non-float type not yet supported" }
+            _ => panic("codegen: float literal with a non-float type not yet supported")
         }
+        return
     }
-    var out = cb(buf, "((")
-    out = match emit_prim(out, k) { Cb as o => o; error as err => return err }
-    out = cb(out, ")")
-    out = cb_numint(out, n.value)
-    cb(out, ")")
+    buf.write("((")
+    emit_prim(buf, k)
+    buf.write(")")
+    cb_numint(buf, n.value)
+    buf.write(")")
 }
 
-fn emit_expr(buf: Cb, prog: CgProg, e: checker::TExpr): Cb | error {
+fn emit_expr(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr) {
     emit_expr_ctx(buf, prog, checker::Void { }, e, [], [], [], dctx_empty())
 }
-fn emit_expr_ret(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr): Cb | error {
+fn emit_expr_ret(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: checker::TExpr) {
     emit_expr_ctx(buf, prog, ret_type, e, [], [], [], dctx_empty())
 }
-fn emit_expr_ctx(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_expr_ctx(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     match e.kind {
         checker::TNumber as n => emit_number(buf, prog, e, n)
         checker::TVar as v => if v.is_func {
-            cb(cb_fn_name(cb(buf, "(tk_closure){ (void*)&"), v.func_ns, v.name), ", (void*)0 }")
+            buf.write("(tk_closure){ (void*)&")
+            cb_fn_name(buf, v.func_ns, v.name)
+            buf.write(", (void*)0 }")
         } else if cg_var_is_struct_self(prog, e, v) {
-            cb(cb_ident(cb(buf, "(*"), v.name), ")")
+            buf.write("(*")
+            cb_ident(buf, v.name)
+            buf.write(")")
         } else if checker::is_cond_const(v.func_ns, v.name, prog.cond_consts) {
-            cb(buf, cond_const_c_symbol(v.func_ns, v.name))
+            buf.write(cond_const_c_symbol(v.func_ns, v.name))
         } else {
             cb_ident(buf, v.name)
         }
@@ -5893,12 +5901,12 @@ fn emit_expr_ctx(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, es
         checker::TByteStrLit as bs => emit_bytestrlit(buf, bs)
         checker::TByteLit as by => cb_i64(buf, by.value to i64)
         checker::TCharLit as ch => emit_charlit(buf, ch)
-        checker::TBoolLit as bl => cb(buf, if bl.value { "true" } else { "false" })
+        checker::TBoolLit as bl => buf.write(if bl.value { "true" } else { "false" })
         checker::TIfExpr as f => emit_if_value(buf, prog, ret_type, e, f, escaping, regions, fn_body, dctx)
         checker::TMatchExpr as m => emit_match_value(buf, prog, ret_type, e, m, escaping, regions, fn_body, dctx)
         checker::TNullLit => match e.type {
-            checker::Null => cb(buf, "0")
-            _ => error { message = "codegen: a bare `null` needs a known optional type from context (use it where a `T?` is expected)" }
+            checker::Null => buf.write("0")
+            _ => panic("codegen: a bare `null` needs a known optional type from context (use it where a `T?` is expected)")
         }
         checker::TIndex as ix => emit_index(buf, prog, e, ix, escaping, regions, fn_body, dctx)
         checker::TInterp as in => emit_interp(buf, prog, in, "", escaping, regions, fn_body, dctx)
@@ -5907,14 +5915,14 @@ fn emit_expr_ctx(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, es
         checker::TSliceOfLen as s => emit_slice_of_len(buf, prog, e, s, escaping, regions, fn_body, dctx)
         checker::TPathExpr as pe => {
             if cg_named_is_flags(prog, pe.enum_name) {
-                var out = mangle_type_name(buf, "", pe.enum_name)
-                out = cb(out, "_")
-                cb_upper(out, pe.member)
+                mangle_type_name(buf, "", pe.enum_name)
+                buf.write("_")
+                cb_upper(buf, pe.member)
             } else {
-                var out = cb(buf, "TK_E_")
-                out = cb_upper(out, checker::name_last_segment(pe.enum_name))
-                out = cb(out, "_")
-                cb_upper(out, pe.member)
+                buf.write("TK_E_")
+                cb_upper(buf, checker::name_last_segment(pe.enum_name))
+                buf.write("_")
+                cb_upper(buf, pe.member)
             }
         }
         checker::TLambda as lam => emit_lambda(buf, prog, e, lam, escaping, regions, fn_body, dctx)
@@ -5923,22 +5931,22 @@ fn emit_expr_ctx(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, es
     }
 }
 
-fn emit_block_expr(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, blk: checker::TBlockExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var tmp = fresh_tmp_name(buf.len to i64)
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, tmp)
-    out = cb(out, ";\n")
-    out = match emit_branch_value(out, prog, ret_type, blk.body, e.type, tmp, "    ", escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, tmp)
-    cb(out, "; })")
+fn emit_block_expr(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: checker::TExpr, blk: checker::TBlockExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var tmp = fresh_tmp_name(buf.gensym() to i64)
+    buf.write("({ ")
+    emit_type(buf, prog, e.type)
+    buf.write(" ")
+    buf.write(tmp)
+    buf.write(";\n")
+    emit_branch_value(buf, prog, ret_type, blk.body, e.type, tmp, "    ", escaping, regions, fn_body, dctx)
+    buf.write(" ")
+    buf.write(tmp)
+    buf.write("; })")
 }
 
-fn emit_borrow(buf: Cb, prog: CgProg, ret_type: @Type(), b: checker::TBorrow, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "&")
-    emit_expr_ctx(out, prog, ret_type, b.operand, escaping, regions, fn_body, dctx)
+fn emit_borrow(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), b: checker::TBorrow, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    buf.write("&")
+    emit_expr_ctx(buf, prog, ret_type, b.operand, escaping, regions, fn_body, dctx)
 }
 
 fn lam_fn_name(id: u64): str { teko::str::concat("__tkclo_", teko::u64_to_str(id)) }
