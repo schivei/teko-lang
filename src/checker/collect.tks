@@ -64,7 +64,8 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): @Type() | erro
     var tbl = type_param_table(f.type_params, f.type_constraints, "", table)
     var params: [f.params.len]@Type() = []
     var param_names: [f.params.len]str = []
-    var defaults: []parser::Expr = []
+    var defaults: [f.params.len]parser::Expr = []
+    var ndefaults: u64 = 0
     var n_required: u64 = f.params.len
     var i = 0
     loop {
@@ -80,7 +81,8 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): @Type() | erro
         param_names[i] = f.params[i].name
         if f.params[i].has_default {
             if n_required == f.params.len { n_required = i to u64 }
-            defaults = [..defaults, f.params[i].default_expr]
+            defaults[ndefaults] = f.params[i].default_expr
+            ndefaults++
         }
         i++
     }
@@ -90,7 +92,7 @@ fn func_type(f: parser::Function, table: TypeTable, ref_ns: str): @Type() | erro
         Void { }
     }
     var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
-    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults; ret_extra = [] }
+    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = teko::collections::arr_slice(defaults, 0, ndefaults); ret_extra = [] }
 }
 
 pub fn receiver_canonical_name(struct_name: str, ref_ns: str, table: TypeTable): str {
@@ -113,7 +115,8 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
     var tbl = method_type_param_table(receiver_canonical_name(struct_name, ref_ns, table), f.type_params, f.type_constraints, "", table)
     var params: [f.params.len]@Type() = []
     var param_names: [f.params.len]str = []
-    var defaults: []parser::Expr = []
+    var defaults: [f.params.len]parser::Expr = []
+    var ndefaults: u64 = 0
     var n_required: u64 = f.params.len
     var disc_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, ref_ns, table) } else { null }
     var i = 0
@@ -132,7 +135,8 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
         param_names[i] = f.params[i].name
         if f.params[i].has_default {
             if n_required == f.params.len { n_required = i to u64 }
-            defaults = [..defaults, f.params[i].default_expr]
+            defaults[ndefaults] = f.params[i].default_expr
+            ndefaults++
         }
         i++
     }
@@ -146,7 +150,7 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
         Void { }
     }
     var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
-    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults; ret_extra = [] }
+    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = teko::collections::arr_slice(defaults, 0, ndefaults); ret_extra = [] }
 }
 
 type SigOutcome = struct {
@@ -496,9 +500,11 @@ pub fn synthesize_mret_structs(program: parser::Program): parser::Program {
         t = t + 1
     }
     if !has_any { return program }
-    var out: []parser::Item = []
-    var made_keys: []str = []
-    var new_structs: []parser::Item = []
+    var out: [program.items.len]parser::Item = []
+    var made_keys: [program.items.len]str = []
+    var nkeys: u64 = 0
+    var new_structs: [program.items.len]parser::Item = []
+    var nstructs: u64 = 0
     var i: u64 = 0
     loop {
         if i >= program.items.len { break }
@@ -508,32 +514,36 @@ pub fn synthesize_mret_structs(program: parser::Program): parser::Program {
                 if f.ret_types.len >= 2 {
                     var mangle = mret_mangle(f.ret_types)
                     var key = it.namespace ~ "#" ~ mangle
-                    if !mret_key_seen(made_keys, key) {
-                        made_keys = [..made_keys, key]
-                        new_structs = [..new_structs, mret_struct_item(it.namespace, it.file, mangle, f.ret_types)]
+                    if !mret_key_seen_prefix(made_keys, nkeys, key) {
+                        made_keys[nkeys] = key
+                        nkeys++
+                        new_structs[nstructs] = mret_struct_item(it.namespace, it.file, mangle, f.ret_types)
+                        nstructs++
                     }
-                    out = [..out, parser::Item { content = mret_rewrite_fn(f, mangle); namespace = it.namespace; file = it.file; guard = it.guard }]
+                    out[i] = parser::Item { content = mret_rewrite_fn(f, mangle); namespace = it.namespace; file = it.file; guard = it.guard }
                 } else {
-                    out = [..out, it]
+                    out[i] = it
                 }
             }
-            _ => { out = [..out, it] }
+            _ => { out[i] = it }
         }
         i = i + 1
     }
-    var k: u64 = 0
-    loop {
-        if k >= new_structs.len { break }
-        out = [..out, new_structs[k]]
-        k = k + 1
-    }
-    parser::Program { items = out }
+    parser::Program { items = [..out, ..teko::collections::arr_slice(new_structs, 0, nstructs)] }
 }
 
-fn mret_key_seen(keys: []str, key: str): bool {
+/**
+ * Whether the first `upto` entries of `keys` contain `key`.
+ *
+ * @param keys  the mangle keys accumulated so far
+ * @param upto  number of leading entries to consider (a fill watermark)
+ * @param key   the key to look for
+ * @return      true when `key` is present in `keys[0..upto)`
+ */
+fn mret_key_seen_prefix(keys: []str, upto: u64, key: str): bool {
     var i: u64 = 0
     loop {
-        if i >= keys.len { break }
+        if i >= upto { break }
         if keys[i] == key { return true }
         i = i + 1
     }
@@ -630,10 +640,7 @@ pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable): []parser
         var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
         inherited = match effective_class_fields(base_cb, table) { []parser::Field as f => f; error as e => return e }
     }
-    var out: []parser::Field = inherited
-    var i = 0
-    loop { if i >= cb.fields.len { break }; out = [..out, cb.fields[i]]; i++ }
-    out
+    [..inherited, ..cb.fields]
 }
 
 pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parser::Function | error {
@@ -642,7 +649,8 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parse
         var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
         inherited = match effective_class_methods(base_cb, table) { []parser::Function as f => f; error as e => return e }
     }
-    var out: []parser::Function = []
+    var out: [inherited.len + cb.methods.len]parser::Function = []
+    var count: u64 = 0
     var i = 0
     loop {
         if i >= inherited.len { break }
@@ -653,7 +661,8 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parse
             if cb.methods[j].name == m.name { m = cb.methods[j] }
             j++
         }
-        out = [..out, m]
+        out[count] = m
+        count++
         i++
     }
     var k = 0
@@ -662,25 +671,30 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable): []parse
         var is_new = true
         var bi = 0
         loop { if bi >= inherited.len { break }; if inherited[bi].name == cb.methods[k].name { is_new = false; break }; bi++ }
-        if is_new { out = [..out, cb.methods[k]] }
+        if is_new { out[count] = cb.methods[k]; count++ }
         k++
     }
-    out
+    teko::collections::arr_slice(out, 0, count)
 }
 
 pub fn effective_class_consts(cb: parser::ClassBody, table: TypeTable): []parser::ConstDecl | error {
-    var out = cb.consts
-    if cb.has_base {
-        var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
-        var base_consts = match effective_class_consts(base_cb, table) { []parser::ConstDecl as c => c; error as e => return e }
-        var i: u64 = 0
-        loop {
-            if i >= base_consts.len { break }
-            if !consts_have_name(out, base_consts[i].name) { out = [..out, base_consts[i]] }
-            i++
-        }
+    if !cb.has_base { return cb.consts }
+    var base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
+    var base_consts = match effective_class_consts(base_cb, table) { []parser::ConstDecl as c => c; error as e => return e }
+    var out: [cb.consts.len + base_consts.len]parser::ConstDecl = []
+    var count: u64 = 0
+    loop {
+        if count >= cb.consts.len { break }
+        out[count] = cb.consts[count]
+        count++
     }
-    out
+    var i: u64 = 0
+    loop {
+        if i >= base_consts.len { break }
+        if !consts_prefix_has_name(out, count, base_consts[i].name) { out[count] = base_consts[i]; count++ }
+        i++
+    }
+    teko::collections::arr_slice(out, 0, count)
 }
 
 pub fn body_consts(body: @TypeBody()): []parser::ConstDecl {
@@ -1026,12 +1040,11 @@ fn resolve_field_view(f: parser::Field, table: TypeTable, owner_ns: str): FieldV
 }
 
 fn resolve_field_views(fields: []parser::Field, table: TypeTable, owner_ns: str): []FieldView | error {
-    var out: []FieldView = []
+    var out: [fields.len]FieldView = []
     var i: u64 = 0
     loop {
         if i >= fields.len { break }
-        var fv = match resolve_field_view(fields[i], table, owner_ns) { FieldView as v => v; error as e => return e }
-        out = [..out, fv]
+        out[i] = match resolve_field_view(fields[i], table, owner_ns) { FieldView as v => v; error as e => return e }
         i++
     }
     out
@@ -1065,8 +1078,10 @@ type SplitImpls = struct { traits: []str; ifaces: []str }
 type FoldedMembers = struct { fields: []parser::Field; methods: []parser::Function; consts: []parser::ConstDecl }
 
 fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str): SplitImpls {
-    var traits: []str = []
-    var ifaces: []str = []
+    var traits: [implements.len]str = []
+    var ntraits: u64 = 0
+    var ifaces: [implements.len]str = []
+    var nifaces: u64 = 0
     var i: u64 = 0
     loop {
         if i >= implements.len { break }
@@ -1074,11 +1089,11 @@ fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str): SplitI
             parser::TypeDecl as td => match td.body { parser::TraitBody => true; _ => false }
             error => false
         }
-        if is_trait { traits = [..traits, implements[i]] }
-        else { ifaces = [..ifaces, implements[i]] }
+        if is_trait { traits[ntraits] = implements[i]; ntraits++ }
+        else { ifaces[nifaces] = implements[i]; nifaces++ }
         i++
     }
-    SplitImpls { traits = traits; ifaces = ifaces }
+    SplitImpls { traits = teko::collections::arr_slice(traits, 0, ntraits); ifaces = teko::collections::arr_slice(ifaces, 0, nifaces) }
 }
 
 fn fields_have_name(fields: []parser::Field, name: str): bool {
@@ -1115,8 +1130,20 @@ fn trait_method_as_member(tm: parser::Function): parser::Function {
 }
 
 fn consts_have_name(consts: []parser::ConstDecl, name: str): bool {
+    consts_prefix_has_name(consts, consts.len, name)
+}
+
+/**
+ * Whether the first `upto` entries of `consts` contain a declaration named `name`.
+ *
+ * @param consts  the constant declarations to scan
+ * @param upto    number of leading entries to consider (a fill watermark)
+ * @param name    the constant name to look for
+ * @return        true when a matching name is found in `consts[0..upto)`
+ */
+fn consts_prefix_has_name(consts: []parser::ConstDecl, upto: u64, name: str): bool {
     var i: u64 = 0
-    loop { if i >= consts.len { break }; if consts[i].name == name { return true }; i++ }
+    loop { if i >= upto { break }; if consts[i].name == name { return true }; i++ }
     false
 }
 
@@ -1725,7 +1752,8 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
                 var dtbl = type_param_table(f.type_params, f.type_constraints, "", t)
                 var params: [f.params.len]@Type() = []
                 var param_names: [f.params.len]str = []
-                var defaults: []parser::Expr = []
+                var defaults: [f.params.len]parser::Expr = []
+                var ndefaults: u64 = 0
                 var n_required: u64 = f.params.len
                 var pi: u64 = 0
                 loop {
@@ -1735,12 +1763,13 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env): Collected | error {
                     param_names[pi] = f.params[pi].name
                     if f.params[pi].has_default {
                         if n_required == f.params.len { n_required = pi }
-                        defaults = [..defaults, f.params[pi].default_expr]
+                        defaults[ndefaults] = f.params[pi].default_expr
+                        ndefaults++
                     }
                     pi++
                 }
                 var is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
-                var ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults; ret_extra = [] }
+                var ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = teko::collections::arr_slice(defaults, 0, ndefaults); ret_extra = [] }
                 e = define_fn(e, f.name, ft, f.namespace, false)
             }
             _ => { }
