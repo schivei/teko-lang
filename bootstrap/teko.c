@@ -39410,7 +39410,7 @@ tk_slice_str teko_teko__build__rt_prelude_paths_for(tk_str ns, tk_str rt) {
         _r4415 = ((tk_str){ (const tk_byte *)".", 1 }); break;
     }
     } while (0); _r4415; });
-        return ({ tk_str *_arr4417 = malloc(1 * sizeof(tk_str)); if (!_arr4417) abort(); _arr4417[0] = ({ tk_slice_str _cs4418 = ({ tk_str *_arr4421 = malloc(2 * sizeof(tk_str)); if (!_arr4421) abort(); _arr4421[0] = rt; _arr4421[1] = (tk_str){ (const tk_byte *)"/sys/sys.tks", 12 }; (tk_slice_str){ .ptr = _arr4421, .len = 2, .cap = 2 }; }); tk_str _ca4420 = (tk_str){0,0}; for (uint64_t _ci4419 = 0; _ci4419 < _cs4418.len; _ci4419++) { _ca4420 = tk_str_concat(_ca4420, _cs4418.ptr[_ci4419]); } _ca4420; }); (tk_slice_str){ .ptr = _arr4417, .len = 1, .cap = 1 }; });
+        return ({ tk_str *_arr4417 = malloc(1 * sizeof(tk_str)); if (!_arr4417) abort(); _arr4417[0] = ({ tk_slice_str _cs4418 = ({ tk_str *_arr4421 = malloc(2 * sizeof(tk_str)); if (!_arr4421) abort(); _arr4421[0] = parent; _arr4421[1] = (tk_str){ (const tk_byte *)"/sys/sys.tks", 12 }; (tk_slice_str){ .ptr = _arr4421, .len = 2, .cap = 2 }; }); tk_str _ca4420 = (tk_str){0,0}; for (uint64_t _ci4419 = 0; _ci4419 < _cs4418.len; _ci4419++) { _ca4420 = tk_str_concat(_ca4420, _cs4418.ptr[_ci4419]); } _ca4420; }); (tk_slice_str){ .ptr = _arr4417, .len = 1, .cap = 1 }; });
     }
     return (tk_slice_str){ .ptr = 0, .len = 0 };
 }
