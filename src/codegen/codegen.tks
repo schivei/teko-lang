@@ -3685,53 +3685,55 @@ fn emit_in(buf: teko::io::FileStream, prog: CgProg, ie: checker::TInExpr, escapi
     null
 }
 
-fn emit_slice_of_len(buf: Cb, prog: CgProg, e: checker::TExpr, s: checker::TSliceOfLen, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_slice_of_len(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, s: checker::TSliceOfLen, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var elem = s.element
-    var lenN = $"_oln{buf.len}"
-    var ptrN = $"_olp{buf.len + 1}"
-    var out = cb(buf, "({ uint64_t ")
-    out = cb(out, lenN)
-    out = cb(out, " = (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, s.size, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); ")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " *")
-    out = cb(out, ptrN)
-    out = cb(out, " = (")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " *)")
-    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
-    out = cb(out, "(")
-    out = cb(out, cg_scratch_region_expr(regions))
-    out = cb(out, ", ")
-    out = cb(out, lenN)
-    out = cb(out, " * sizeof(")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, ")); memset(")
-    out = cb(out, ptrN)
-    out = cb(out, ", 0, ")
-    out = cb(out, lenN)
-    out = cb(out, " * sizeof(")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, ")); (")
-    out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, "){ .ptr = ")
-    out = cb(out, ptrN)
-    out = cb(out, ", .len = ")
-    out = cb(out, lenN)
+    var lenN = $"_oln{buf.gensym()}"
+    var ptrN = $"_olp{buf.gensym()}"
+    buf.write("({ uint64_t ")
+    buf.write(lenN)
+    buf.write(" = (uint64_t)(")
+    match emit_expr_ctx(buf, prog, checker::Void { }, s.size, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write("); ")
+    match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+    buf.write(" *")
+    buf.write(ptrN)
+    buf.write(" = (")
+    match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+    buf.write(" *)")
+    cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+    buf.write("(")
+    buf.write(cg_scratch_region_expr(regions))
+    buf.write(", ")
+    buf.write(lenN)
+    buf.write(" * sizeof(")
+    match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+    buf.write(")); memset(")
+    buf.write(ptrN)
+    buf.write(", 0, ")
+    buf.write(lenN)
+    buf.write(" * sizeof(")
+    match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+    buf.write(")); (")
+    match cg_slice_typename(buf, elem) { error as err => return err; null => { } }
+    buf.write("){ .ptr = ")
+    buf.write(ptrN)
+    buf.write(", .len = ")
+    buf.write(lenN)
     if cg_slice_rep_has_cap(elem) {
-        out = cb(out, ", .cap = ")
-        out = cb(out, lenN)
+        buf.write(", .cap = ")
+        buf.write(lenN)
     }
-    cb(out, " }; })")
+    buf.write(" }; })")
+    null
 }
 
-fn emit_array_lit(buf: Cb, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_array_lit(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var elem = match e.type { checker::Slice as s => s.element; _ => return error { message = "codegen: array literal is not a slice type (internal)" } }
     if a.elements.len == 0 {
-        var z = cb(buf, "(")
-        z = match cg_slice_typename(z, elem) { Cb as o => o; error as err => return err }
-        return cb(z, "){ .ptr = 0, .len = 0 }")
+        buf.write("(")
+        match cg_slice_typename(buf, elem) { error as err => return err; null => { } }
+        buf.write("){ .ptr = 0, .len = 0 }")
+        return null
     }
     var has_spread = false
     var si: u64 = 0
@@ -3741,46 +3743,48 @@ fn emit_array_lit(buf: Cb, prog: CgProg, e: checker::TExpr, a: checker::TArrayLi
         si++
     }
     if !has_spread {
-        var pN = $"_arr{buf.len}"
-        var out = cb(buf, "({ ")
-        out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-        out = cb(out, " *"); out = cb(out, pN); out = cb(out, " = malloc(")
-        out = cb_u64_digits(out, a.elements.len)
-        out = cb(out, " * sizeof(")
-        out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-        out = cb(out, ")); if (!"); out = cb(out, pN); out = cb(out, ") abort(); ")
+        var pN = $"_arr{buf.gensym()}"
+        buf.write("({ ")
+        match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+        buf.write(" *"); buf.write(pN); buf.write(" = malloc(")
+        cb_u64_digits(buf, a.elements.len)
+        buf.write(" * sizeof(")
+        match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+        buf.write(")); if (!"); buf.write(pN); buf.write(") abort(); ")
         var i: u64 = 0
         loop {
             if i >= a.elements.len { break }
-            out = cb(out, pN); out = cb(out, "["); out = cb_u64_digits(out, i); out = cb(out, "] = ")
-            out = match emit_as(out, prog, elem, a.elements[i].expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, "; ")
+            buf.write(pN); buf.write("["); cb_u64_digits(buf, i); buf.write("] = ")
+            match emit_as(buf, prog, elem, a.elements[i].expr, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write("; ")
             i++
         }
-        out = cb(out, "(")
-        out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-        out = cb(out, "){ .ptr = "); out = cb(out, pN); out = cb(out, ", .len = ")
-        out = cb_u64_digits(out, a.elements.len)
+        buf.write("(")
+        match cg_slice_typename(buf, elem) { error as err => return err; null => { } }
+        buf.write("){ .ptr = "); buf.write(pN); buf.write(", .len = ")
+        cb_u64_digits(buf, a.elements.len)
         if cg_slice_rep_has_cap(elem) {
-            out = cb(out, ", .cap = ")
-            out = cb_u64_digits(out, a.elements.len)
+            buf.write(", .cap = ")
+            cb_u64_digits(buf, a.elements.len)
         }
-        return cb(out, " }; })")
+        buf.write(" }; })")
+        return null
     }
-    var tag = buf.len
+    var tag = buf.gensym()
     var accN = $"_sacc{tag}"
     var totN = $"_stot{tag}"
     var posN = $"_spos{tag}"
-    var out = cb(buf, "({ ")
-    out = match cg_array_lit_bind_operands(out, prog, e, a, elem, tag, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = match cg_array_lit_total(out, a, totN, tag) { Cb as o => o; error as err => return err }
-    out = match cg_array_lit_alloc(out, prog, elem, accN, totN, posN) { Cb as o => o; error as err => return err }
-    out = cg_array_lit_fill(out, a, accN, posN, tag)
-    out = cb(out, "(")
-    out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, "){ .ptr = "); out = cb(out, accN); out = cb(out, ", .len = "); out = cb(out, totN)
-    if cg_slice_rep_has_cap(elem) { out = cb(out, ", .cap = "); out = cb(out, totN) }
-    cb(out, " }; })")
+    buf.write("({ ")
+    match cg_array_lit_bind_operands(buf, prog, e, a, elem, tag, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    match cg_array_lit_total(buf, a, totN, tag) { error as err => return err; null => { } }
+    match cg_array_lit_alloc(buf, prog, elem, accN, totN, posN) { error as err => return err; null => { } }
+    cg_array_lit_fill(buf, a, accN, posN, tag)
+    buf.write("(")
+    match cg_slice_typename(buf, elem) { error as err => return err; null => { } }
+    buf.write("){ .ptr = "); buf.write(accN); buf.write(", .len = "); buf.write(totN)
+    if cg_slice_rep_has_cap(elem) { buf.write(", .cap = "); buf.write(totN) }
+    buf.write(" }; })")
+    null
 }
 
 fn cg_array_plain_count(a: checker::TArrayLit): u64 {
@@ -3794,78 +3798,77 @@ fn cg_array_plain_count(a: checker::TArrayLit): u64 {
     n
 }
 
-fn cg_array_lit_bind_operands(buf: Cb, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, elem: @Type(), tag: u64, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = buf
+fn cg_array_lit_bind_operands(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, elem: @Type(), tag: u64, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         var ae = a.elements[i]
         if ae.is_spread {
-            out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, " "); out = cb(out, $"_ssub{tag}_{i}"); out = cb(out, " = ")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, ae.expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, "; ")
+            match cg_slice_typename(buf, elem) { error as err => return err; null => { } }
+            buf.write(" "); buf.write($"_ssub{tag}_{i}"); buf.write(" = ")
+            match emit_expr_ctx(buf, prog, checker::Void { }, ae.expr, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write("; ")
         } else {
-            out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, " "); out = cb(out, $"_sitm{tag}_{i}"); out = cb(out, " = ")
-            out = match emit_as(out, prog, elem, ae.expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, "; ")
+            match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+            buf.write(" "); buf.write($"_sitm{tag}_{i}"); buf.write(" = ")
+            match emit_as(buf, prog, elem, ae.expr, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write("; ")
         }
         i++
     }
-    out
+    null
 }
 
-fn cg_array_lit_total(buf: Cb, a: checker::TArrayLit, totN: str, tag: u64): Cb | error {
-    var out = cb(buf, "uint64_t "); out = cb(out, totN); out = cb(out, " = ")
-    out = cb_u64_digits(out, cg_array_plain_count(a))
+fn cg_array_lit_total(buf: teko::io::FileStream, a: checker::TArrayLit, totN: str, tag: u64): error | null {
+    buf.write("uint64_t "); buf.write(totN); buf.write(" = ")
+    cb_u64_digits(buf, cg_array_plain_count(a))
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         if a.elements[i].is_spread {
-            out = cb(out, " + "); out = cb(out, $"_ssub{tag}_{i}"); out = cb(out, ".len")
+            buf.write(" + "); buf.write($"_ssub{tag}_{i}"); buf.write(".len")
         }
         i++
     }
-    cb(out, "; ")
+    buf.write("; ")
+    null
 }
 
-fn cg_array_lit_alloc(buf: Cb, prog: CgProg, elem: @Type(), accN: str, totN: str, posN: str): Cb | error {
-    var out = match emit_type(buf, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " *"); out = cb(out, accN); out = cb(out, " = (")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " *)tk_region_alloc(tk_region_current(), "); out = cb(out, totN); out = cb(out, " * sizeof(")
-    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, ")); uint64_t "); out = cb(out, posN); cb(out, " = 0; ")
+fn cg_array_lit_alloc(buf: teko::io::FileStream, prog: CgProg, elem: @Type(), accN: str, totN: str, posN: str): error | null {
+    match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+    buf.write(" *"); buf.write(accN); buf.write(" = (")
+    match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+    buf.write(" *)tk_region_alloc(tk_region_current(), "); buf.write(totN); buf.write(" * sizeof(")
+    match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+    buf.write(")); uint64_t "); buf.write(posN); buf.write(" = 0; ")
+    null
 }
 
-fn cg_array_lit_fill(buf: Cb, a: checker::TArrayLit, accN: str, posN: str, tag: u64): Cb {
-    var out = buf
+fn cg_array_lit_fill(buf: teko::io::FileStream, a: checker::TArrayLit, accN: str, posN: str, tag: u64) {
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         if a.elements[i].is_spread {
             var subN = $"_ssub{tag}_{i}"
             var jN = $"_sj{tag}_{i}"
-            out = cb(out, "for (uint64_t "); out = cb(out, jN); out = cb(out, " = 0; "); out = cb(out, jN)
-            out = cb(out, " < "); out = cb(out, subN); out = cb(out, ".len; "); out = cb(out, jN); out = cb(out, "++) { ")
-            out = cb(out, accN); out = cb(out, "["); out = cb(out, posN); out = cb(out, "++] = ")
-            out = cb(out, subN); out = cb(out, ".ptr["); out = cb(out, jN); out = cb(out, "]; } ")
+            buf.write("for (uint64_t "); buf.write(jN); buf.write(" = 0; "); buf.write(jN)
+            buf.write(" < "); buf.write(subN); buf.write(".len; "); buf.write(jN); buf.write("++) { ")
+            buf.write(accN); buf.write("["); buf.write(posN); buf.write("++] = ")
+            buf.write(subN); buf.write(".ptr["); buf.write(jN); buf.write("]; } ")
         } else {
-            out = cb(out, accN); out = cb(out, "["); out = cb(out, posN); out = cb(out, "++] = ")
-            out = cb(out, $"_sitm{tag}_{i}"); out = cb(out, "; ")
+            buf.write(accN); buf.write("["); buf.write(posN); buf.write("++] = ")
+            buf.write($"_sitm{tag}_{i}"); buf.write("; ")
         }
         i++
     }
-    out
 }
 
-fn emit_piece_lit(buf: Cb, piece: str): Cb {
-    var out = cb(buf, "(tk_str){ (const tk_byte *)\"")
-    out = cb_cstr_escaped(out, piece)
-    out = cb(out, "\", ")
-    out = cb_i64(out, piece.len to i64)
-    cb(out, " }")
+fn emit_piece_lit(buf: teko::io::FileStream, piece: str) {
+    buf.write("(tk_str){ (const tk_byte *)\"")
+    cb_cstr_escaped(buf, piece)
+    buf.write("\", ")
+    cb_i64(buf, piece.len to i64)
+    buf.write(" }")
 }
 
 fn fmt_family_takes_prec(fc_low: byte, is_flt: bool): bool {
