@@ -8142,122 +8142,6 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
     out
 }
 
-fn fmt_indent(buf: Cb, depth: u64): Cb {
-    var b = buf
-    var k: u64 = 0
-    loop {
-        if k >= depth { break }
-        b = cb(b, "    ")
-        k = k + 1
-    }
-    b
-}
-
-fn cg_format_c(src: str): []byte {
-    var out: Cb = cb_new()
-    var depth: u64 = 0
-    var stk = ""
-    var line_start = true
-    var i: u64 = 0
-    loop {
-        if i >= src.len { break }
-        var c = src[i]
-        if c == b'#' && line_start {
-            loop {
-                if i >= src.len { break }
-                if src[i] == b'\n' { break }
-                out = cb_byte(out, src[i])
-                i = i + 1
-            }
-            out = cb(out, "\n")
-            if i < src.len { i = i + 1 }
-            line_start = true
-        } else if c == b'/' && i + 1 < src.len && src[i + 1] == b'/' {
-            if line_start { out = fmt_indent(out, depth); line_start = false }
-            loop {
-                if i >= src.len { break }
-                if src[i] == b'\n' { break }
-                out = cb_byte(out, src[i])
-                i = i + 1
-            }
-            out = cb(out, "\n")
-            if i < src.len { i = i + 1 }
-            line_start = true
-        } else if c == b'"' || c == b'\'' {
-            if line_start { out = fmt_indent(out, depth); line_start = false }
-            var q = c
-            out = cb_byte(out, c)
-            i = i + 1
-            loop {
-                if i >= src.len { break }
-                if src[i] == q { break }
-                if src[i] == b'\\' && i + 1 < src.len {
-                    out = cb_byte(out, src[i])
-                    out = cb_byte(out, src[i + 1])
-                    i = i + 2
-                } else {
-                    out = cb_byte(out, src[i])
-                    i = i + 1
-                }
-            }
-            if i < src.len && src[i] == q {
-                out = cb_byte(out, q)
-                i = i + 1
-            }
-        } else if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
-            loop {
-                if i >= src.len { break }
-                var w = src[i]
-                if w != b' ' && w != b'\t' && w != b'\n' && w != b'\r' { break }
-                i = i + 1
-            }
-            var suppress = i < src.len && (src[i] == b'}' || src[i] == b'{' || src[i] == b';')
-            if !line_start && !suppress && out.len > 0 && cb_last(out) != b' ' { out = cb(out, " ") }
-        } else if c == b'{' {
-            var is_block = out.len > 0 && cb_last(out) == b')'
-            if line_start { out = fmt_indent(out, depth) } else { out = cb(out, " ") }
-            out = cb(out, "{\n")
-            stk = teko::str::concat(stk, if is_block { "B" } else { "b" })
-            depth = depth + 1
-            line_start = true
-            i = i + 1
-        } else if c == b'}' {
-            var was_block = stk.len > 0 && stk[stk.len - 1] == b'B'
-            if depth > 0 { depth = depth - 1 }
-            if stk.len > 0 { stk = teko::str::slice_to(stk, stk.len - 1) }
-            if !line_start { out = cb(out, "\n") }
-            out = fmt_indent(out, depth)
-            out = cb(out, "}")
-            if depth == 0 && was_block { out = cb(out, "\n\n"); line_start = true }
-            else { line_start = false }
-            i = i + 1
-        } else if c == b';' {
-            out = cb(out, ";")
-            var brace_top = stk.len == 0 || stk[stk.len - 1] == b'B' || stk[stk.len - 1] == b'b'
-            if brace_top { out = cb(out, "\n"); line_start = true }
-            else {
-                if out.len > 0 && cb_last(out) != b' ' { out = cb(out, " ") }
-                line_start = false
-            }
-            i = i + 1
-        } else if c == b'(' || c == b'[' {
-            if line_start { out = fmt_indent(out, depth); line_start = false }
-            stk = teko::str::concat(stk, if c == b'(' { "(" } else { "[" })
-            out = cb_byte(out, c)
-            i = i + 1
-        } else if c == b')' || c == b']' {
-            if stk.len > 0 { stk = teko::str::slice_to(stk, stk.len - 1) }
-            out = cb_byte(out, c)
-            i = i + 1
-        } else {
-            if line_start { out = fmt_indent(out, depth); line_start = false }
-            out = cb_byte(out, c)
-            i = i + 1
-        }
-    }
-    cb_flat(cb(out, "\n"))
-}
-
 /**
  * TFnChunk — one sealed, always-full segment of a `TFnVec` chunk-chain: a `[]checker::TFunction`
  * whose length IS its element count (a segment is sealed only when completely filled).
@@ -9667,9 +9551,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     cg_report_phase_rss("after-bodies")
     var _raw = match teko::io::read_stream(_rawtmp) { []byte as rb => rb; error as e => return e }
     cg_report_phase_rss("after-readback")
-    var _formatted = str(cg_format_c(str(_raw)))
-    cg_report_phase_rss("after-format")
-    _formatted
+    str(_raw)
 }
 
 fn tk_emit_raw_tmp_path(): str { ".tk_emit.raw" }
