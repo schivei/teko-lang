@@ -1762,14 +1762,20 @@ fn cg_texpr_union_has_null(ut: parser::UnionType): bool {
 }
 
 fn cg_variant_typename_texpr(buf: teko::io::FileStream, prog: CgProg, te: parser::UnionType, ref_ns: str) {
-    buf.write("tk_u")
+    buf.write(cg_variant_typename_texpr_str(prog, te, ref_ns))
+}
+
+/** cg_variant_typename_texpr_str — the mangled C type name for union type-expr `te`, standalone. */
+fn cg_variant_typename_texpr_str(prog: CgProg, te: parser::UnionType, ref_ns: str): str {
+    var out = "tk_u"
     var i = 0
     loop {
         if i >= te.members.len { break }
-        buf.write("_")
-        buf.write(match cg_member_key_texpr_str(prog, te.members[i], ref_ns) { str as s => s; error as e => return e })
+        var k = match cg_member_key_texpr_str(prog, te.members[i], ref_ns) { str as s => s; error as e => panic(e.message) }
+        out = teko::str::concat(out, teko::str::concat("_", k))
         i++
     }
+    out
 }
 
 fn cg_texpr_mangle(te: @TypeExpr()): str {
@@ -6965,41 +6971,39 @@ fn emit_spawn_pack_field(buf: teko::io::FileStream, prog: CgProg, t: @Type(), i:
     }
 }
 
-fn emit_spawn(buf: Cb, sp: checker::TSpawn, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, indent: str): Cb | error {
-    var c = match sp.call.kind { checker::TCall as tc => tc; _ => return error { message = "internal: spawn target is not a call at codegen" } }
+fn emit_spawn(buf: teko::io::FileStream, sp: checker::TSpawn, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, indent: str) {
+    var c = match sp.call.kind { checker::TCall as tc => tc; _ => panic("internal: spawn target is not a call at codegen") }
     var k = sp.id
-    var out = cb(buf, indent)
-    out = cb(out, $"{{ tk_spawn_ctx_{k} *_sc = tk_spawn_pack_{k}(")
+    buf.write(indent)
+    buf.write($"{{ tk_spawn_ctx_{k} *_sc = tk_spawn_pack_{k}(")
     var i: u64 = 0
     loop {
         if i >= c.args.len { break }
-        if i > 0 { out = cb(out, ", ") }
-        out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[i], escaping, regions, fn_body, dctx) { Cb as o => o; error as e => return e }
+        if i > 0 { buf.write(", ") }
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[i], escaping, regions, fn_body, dctx)
         i = i + 1
     }
-    out = cb(out, $"); tk_thread_spawn(tk_spawn_tramp_{k}, _sc); }}\n")
-    out
+    buf.write($"); tk_thread_spawn(tk_spawn_tramp_{k}, _sc); }}\n")
 }
 
-fn emit_expr_stmt_default(buf: Cb, expr: checker::TExpr, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, indent: str): Cb | error {
-    var b1 = if checker::texpr_diverges(expr) {
-        match emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    } else { buf }
-    var out = cb(b1, indent)
-    out = match emit_expr_ctx(out, prog, checker::Void { }, expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ";\n")
+fn emit_expr_stmt_default(buf: teko::io::FileStream, expr: checker::TExpr, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, indent: str) {
+    if checker::texpr_diverges(expr) {
+        emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body)
+    }
+    buf.write(indent)
+    emit_expr_ctx(buf, prog, checker::Void { }, expr, escaping, regions, fn_body, dctx)
+    buf.write(";\n")
 }
 
-fn emit_adopt(buf: Cb, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_adopt(buf: teko::io::FileStream, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, a.body)
-    var region = fresh_named("_tkad", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+    var region = fresh_named("_tkad", buf.gensym() to i64)
+    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr_framed(regions, frame)); buf.write(");\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = []; bound_names = cg_block_bound_names(a.body) }]
-    out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { Cb as o => o; error as err => return err }
-    out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDropSubtree); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
-    out
+    emit_block(buf, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false)
+    emit_defers(buf, fall, defer_floor, prog, indent, escaping, fn_body)
+    buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionDropSubtree); buf.write("("); buf.write(region); buf.write("); "); buf.write(region); buf.write(" = NULL;\n")
 }
 
 fn cg_expr_calls_self(e: checker::TExpr, ns: str, name: str): bool {
@@ -7115,35 +7119,34 @@ fn cg_fn_ref_ns(prog: CgProg, ns: str): str {
     ns
 }
 
-fn emit_function_sig(buf: Cb, prog: CgProg, f: checker::TFunction): Cb | error {
-    var out = buf
-    if cg_fn_is_self_recursive(f) { out = cb(out, "__attribute__((noinline)) ") }
-    if f.is_extern { out = cb(out, "extern ") }
-    out = match emit_type(out, prog, f.return_type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
+fn emit_function_sig(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction) {
+    if cg_fn_is_self_recursive(f) { buf.write("__attribute__((noinline)) ") }
+    if f.is_extern { buf.write("extern ") }
+    emit_type(buf, prog, f.return_type)
+    buf.write(" ")
     if f.is_extern {
-        out = cb(out, f.c_symbol)
+        buf.write(f.c_symbol)
     } else {
-        out = cb_fn_name(out, f.namespace, f.name, f.overload_suffix)
+        cb_fn_name(buf, f.namespace, f.name, f.overload_suffix)
     }
-    out = cb(out, "(")
+    buf.write("(")
     if f.params.len == 0 {
-        out = cb(out, "void")
+        buf.write("void")
     } else {
         var ref_ns = cg_fn_ref_ns(prog, f.namespace)
         var self_is_ref = match cg_struct_self_recv(prog, f) { str => true; null => false }
         var i: u64 = 0
         loop {
             if i >= f.params.len { break }
-            if i > 0 { out = cb(out, ", ") }
-            out = match emit_type_expr(out, prog, f.params[i].type_ann, ref_ns) { Cb as o => o; error as err => return err }
-            out = cb(out, " ")
-            if i == 0 && self_is_ref { out = cb(out, "*") }
-            out = cb_ident(out, f.params[i].name)
+            if i > 0 { buf.write(", ") }
+            emit_type_expr(buf, prog, f.params[i].type_ann, ref_ns)
+            buf.write(" ")
+            if i == 0 && self_is_ref { buf.write("*") }
+            cb_ident(buf, f.params[i].name)
             i++
         }
     }
-    cb(out, ")")
+    buf.write(")")
 }
 
 fn cg_stmt_c_terminates(s: @TStatement()): bool {
@@ -7186,7 +7189,7 @@ fn fn_body_has_frame_local(prog: CgProg, escaping: []str, body: []@TStatement())
     false
 }
 
-fn emit_function(buf: Cb, prog: CgProg, f: checker::TFunction): Cb | error {
+fn emit_function(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction) {
     emit_function_cov(buf, prog, f, -1)
 }
 
@@ -7274,17 +7277,14 @@ fn cg_emit_bracket_unwind(buf: Cb, indent: str, n: u64): Cb {
     out
 }
 
-fn cg_frame_exit(buf: Cb, indent: str, frame: str, entered: bool): Cb {
-    var out = buf
-    if entered { out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionLeave); out = cb(out, "();\n") }
-    if cg_tkfr_drop_active(entered) { out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, frame); out = cb(out, ");\n") }
-    out
+fn cg_frame_exit(buf: teko::io::FileStream, indent: str, frame: str, entered: bool) {
+    if entered { buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionLeave); buf.write("();\n") }
+    if cg_tkfr_drop_active(entered) { buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(frame); buf.write(");\n") }
 }
 
-fn cg_return_frame_exit(buf: Cb, indent: str, frame: str, dctx: DeferCtx): Cb {
-    if dctx.rr.len > 0 { return cg_frame_exit(buf, indent, "_tkfr", true) }
-    if frame.len > 0 { return cg_frame_exit(buf, indent, frame, false) }
-    buf
+fn cg_return_frame_exit(buf: teko::io::FileStream, indent: str, frame: str, dctx: DeferCtx) {
+    if dctx.rr.len > 0 { cg_frame_exit(buf, indent, "_tkfr", true); return }
+    if frame.len > 0 { cg_frame_exit(buf, indent, frame, false) }
 }
 
 fn cg_closure_env_region(dctx: DeferCtx): str {
@@ -7292,18 +7292,18 @@ fn cg_closure_env_region(dctx: DeferCtx): str {
     teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
 }
 
-fn cg_emit_arena_presize(buf: Cb, n: u64): Cb {
-    var out = cb(buf, "    (void)")
-    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
-    out = cb(out, "(_tkfr, ")
-    var sized = cb_u64_digits(out, n)
-    cb(sized, ");\n")
+fn cg_emit_arena_presize(buf: teko::io::FileStream, n: u64) {
+    buf.write("    (void)")
+    cb_arena_sym(buf, CgArenaSym::RegionAlloc)
+    buf.write("(_tkfr, ")
+    cb_u64_digits(buf, n)
+    buf.write(");\n")
 }
 
-fn emit_function_cov(buf: Cb, prog: CgProg, f: checker::TFunction, cov_idx: i64): Cb | error {
-    var out = match emit_function_sig(buf, prog, f) { Cb as o => o; error as err => return err }
-    out = cb(out, " {\n")
-    if cov_idx >= 0 { out = cb(cb_u64_digits(cb(out, "    tk_cov_mark("), cov_idx to u64), ");\n") }
+fn emit_function_cov(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, cov_idx: i64) {
+    emit_function_sig(buf, prog, f)
+    buf.write(" {\n")
+    if cov_idx >= 0 { buf.write("    tk_cov_mark("); cb_u64_digits(buf, cov_idx to u64); buf.write(");\n") }
     var fbody = f.body
     var cov = if cov_idx >= 0 { CovCtx { on = true; fn_idx = cov_idx to u64 } } else { cov_off() }
     var escaping = checker::fn_escaping_vars(f)
@@ -7312,50 +7312,48 @@ fn emit_function_cov(buf: Cb, prog: CgProg, f: checker::TFunction, cov_idx: i64)
     var use_rr = want_frame && !f.has_arena_size
     var rr: str = if use_rr { "_tkrr" } else { "" }
     var dctx = DeferCtx { defers = []; loops = []; cov = cov; rr = rr; bracket_depth = 0 }
-    if use_rr { out = cb(out, "    tk_region *_tkrr = "); out = cb(out, cg_rr_init_expr()); out = cb(out, ";\n") }
+    if use_rr { buf.write("    tk_region *_tkrr = "); buf.write(cg_rr_init_expr()); buf.write(";\n") }
     if want_frame {
-        out = cb(out, "    tk_region *_tkfr = "); out = cb(out, cg_tkfr_init_expr(f, use_rr)); out = cb(out, ";\n")
-        if use_rr { out = cb(out, "    "); out = cb_arena_sym(out, CgArenaSym::RegionEnter); out = cb(out, "(_tkfr);\n") }
-        if f.has_arena_size { out = cg_emit_arena_presize(out, f.arena_size) }
+        buf.write("    tk_region *_tkfr = "); buf.write(cg_tkfr_init_expr(f, use_rr)); buf.write(";\n")
+        if use_rr { buf.write("    "); cb_arena_sym(buf, CgArenaSym::RegionEnter); buf.write("(_tkfr);\n") }
+        if f.has_arena_size { cg_emit_arena_presize(buf, f.arena_size) }
     }
-    out = match emit_block_tail(out, fbody, false, prog, f.return_type, "    ", frame, escaping, [], fbody, dctx) { Cb as o => o; error as err => return err }
+    emit_block_tail(buf, fbody, false, prog, f.return_type, "    ", frame, escaping, [], fbody, dctx)
     var tail_is_expr = if fbody.len > 0 { match fbody[fbody.len - 1] { checker::TExprStmt => true; _ => false } } else { false }
     var tail_term = if fbody.len > 0 { cg_stmt_c_terminates(fbody[fbody.len - 1]) } else { false }
     if !tail_is_expr && !tail_term {
         var fn_defers = cg_append_direct_defers(dctx.defers, fbody)
-        out = match emit_defers(out, fn_defers, 0, prog, "    ", escaping, fbody) { Cb as o => o; error as err => return err }
+        emit_defers(buf, fn_defers, 0, prog, "    ", escaping, fbody)
     }
     if !tail_term {
         var no_tail = checker::TExpr { kind = checker::TNullLit { }; type = checker::Void { }; line = 0; col = 0 }
-        var cleanup = match cg_class_cleanup_text(prog, escaping, fbody, false, no_tail) { str as c => c; error as e => return e }
-        if cleanup.len > 0 { out = cb(out, "    "); out = cb(out, cleanup); out = cb(out, "\n") }
+        var cleanup = match cg_class_cleanup_text(prog, escaping, fbody, false, no_tail) { str as c => c; error as e => panic(e.message) }
+        if cleanup.len > 0 { buf.write("    "); buf.write(cleanup); buf.write("\n") }
     }
     if want_frame {
         var tail_terminates = if fbody.len > 0 { cg_stmt_c_terminates(fbody[fbody.len - 1]) } else { false }
-        if !tail_terminates { out = cg_frame_exit(out, "    ", "_tkfr", use_rr) }
+        if !tail_terminates { cg_frame_exit(buf, "    ", "_tkfr", use_rr) }
     }
     var needs_unreachable = match f.return_type {
         checker::Void => false
         _ => if fbody.len > 0 { !cg_stmt_c_terminates(fbody[fbody.len - 1]) } else { true }
     }
-    if needs_unreachable { out = cb(out, "    __builtin_unreachable();\n") }
-    cb(out, "}\n\n")
+    if needs_unreachable { buf.write("    __builtin_unreachable();\n") }
+    buf.write("}\n\n")
 }
 
-fn cb_upper(buf: Cb, s: str): Cb {
-    var out = buf
+fn cb_upper(buf: teko::io::FileStream, s: str) {
     var i = 0
     loop {
         if i >= s.len { break }
         var c = s[i]
         if c >= b'a' && c <= b'z' {
-            out = cb_byte(out, (c to i64 - b'a' to i64 + b'A' to i64) to byte)
+            buf.write_byte((c to i64 - b'a' to i64 + b'A' to i64) to byte)
         } else {
-            out = cb_byte(out, c)
+            buf.write_byte(c)
         }
         i++
     }
-    out
 }
 
 fn variant_member_name(m: @TypeExpr()): str | error {
@@ -7372,187 +7370,181 @@ fn flags_carrier_ctype(n: u64): str {
     "uint64_t"
 }
 
-fn emit_flags_member_const(buf: Cb, type_name: str, member: str, ordinal: u64): Cb {
-    var out = cb(buf, "static const ")
-    out = mangle_type_name(out, "", type_name)
-    out = cb(out, " ")
-    out = mangle_type_name(out, "", type_name)
-    out = cb(out, "_")
-    out = cb_upper(out, member)
-    out = cb(out, " = (")
-    out = mangle_type_name(out, "", type_name)
-    out = cb(out, ")(((uint64_t)1) << ")
-    out = cb_i64(out, ordinal to i64)
-    cb(out, ");\n")
+fn emit_flags_member_const(buf: teko::io::FileStream, type_name: str, member: str, ordinal: u64) {
+    buf.write("static const ")
+    mangle_type_name(buf, "", type_name)
+    buf.write(" ")
+    mangle_type_name(buf, "", type_name)
+    buf.write("_")
+    cb_upper(buf, member)
+    buf.write(" = (")
+    mangle_type_name(buf, "", type_name)
+    buf.write(")(((uint64_t)1) << ")
+    cb_i64(buf, ordinal to i64)
+    buf.write(");\n")
 }
 
-fn emit_newtype_typedef(buf: Cb, prog: CgProg, d: parser::TypeDecl, nb: parser::NewtypeBody): Cb | error {
-    var o = cb(buf, "typedef ")
-    o = match emit_type_expr(o, prog, nb.backing, checker::name_qualifier(d.name)) { Cb as x => x; error as err => return err }
-    o = cb(o, " ")
-    o = mangle_type_name(o, "", d.name)
-    cb(o, ";\n\n")
+fn emit_newtype_typedef(buf: teko::io::FileStream, prog: CgProg, d: parser::TypeDecl, nb: parser::NewtypeBody) {
+    buf.write("typedef ")
+    emit_type_expr(buf, prog, nb.backing, checker::name_qualifier(d.name))
+    buf.write(" ")
+    mangle_type_name(buf, "", d.name)
+    buf.write(";\n\n")
 }
 
-fn emit_flags_typedef(buf: Cb, d: parser::TypeDecl, fb: parser::FlagsBody): Cb {
-    var out = cb(buf, "typedef ")
-    out = cb(out, flags_carrier_ctype(fb.members.len))
-    out = cb(out, " ")
-    out = mangle_type_name(out, "", d.name)
-    out = cb(out, ";\n")
+fn emit_flags_typedef(buf: teko::io::FileStream, d: parser::TypeDecl, fb: parser::FlagsBody) {
+    buf.write("typedef ")
+    buf.write(flags_carrier_ctype(fb.members.len))
+    buf.write(" ")
+    mangle_type_name(buf, "", d.name)
+    buf.write(";\n")
     var mi: u64 = 0
     loop {
         if mi >= fb.members.len { break }
-        out = emit_flags_member_const(out, d.name, fb.members[mi], mi)
+        emit_flags_member_const(buf, d.name, fb.members[mi], mi)
         mi++
     }
-    cb(out, "\n")
+    buf.write("\n")
 }
 
-fn emit_type_decl(buf: Cb, prog: CgProg, d: parser::TypeDecl): Cb | error {
+fn emit_type_decl(buf: teko::io::FileStream, prog: CgProg, d: parser::TypeDecl) {
     match d.body {
         parser::StructBody as sb => {
-            var out = cb(buf, "typedef struct ")
-            out = mangle_type_name(out, "", d.name)
-            out = cb(out, " {\n")
-            out = cb(out, "    tk_struct_hdr __hdr;\n")
+            buf.write("typedef struct ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(" {\n")
+            buf.write("    tk_struct_hdr __hdr;\n")
             var i = 0
             loop {
                 if i >= sb.fields.len { break }
-                out = cb(out, "    ")
-                out = match emit_type_expr(out, prog, sb.fields[i].type_ann, checker::name_qualifier(d.name)) { Cb as o => o; error as err => return err }
-                out = cb(out, " ")
-                if cg_field_boxed(prog, d.name, sb.fields[i].type_ann) { out = cb(out, "*") }
-                out = cb_str(out, sb.fields[i].name)
-                out = cb(out, ";\n")
+                buf.write("    ")
+                emit_type_expr(buf, prog, sb.fields[i].type_ann, checker::name_qualifier(d.name))
+                buf.write(" ")
+                if cg_field_boxed(prog, d.name, sb.fields[i].type_ann) { buf.write("*") }
+                buf.write(sb.fields[i].name)
+                buf.write(";\n")
                 i++
             }
-            out = cb(out, "} ")
-            out = mangle_type_name(out, "", d.name)
-            cb(out, ";\n\n")
+            buf.write("} ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(";\n\n")
         }
         parser::ClassBody as cb2 => {
             var table = cg_type_table(prog)
-            var fields = match checker::effective_class_fields(cb2, table) { []parser::Field as fs => fs; error as err => return err }
-            var out = cb(buf, "typedef struct ")
-            out = mangle_type_name(out, "", d.name)
-            out = cb(out, " {\n")
+            var fields = match checker::effective_class_fields(cb2, table) { []parser::Field as fs => fs; error as err => panic(err.message) }
+            buf.write("typedef struct ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(" {\n")
             var i = 0
             loop {
                 if i >= fields.len { break }
-                out = cb(out, "    ")
-                out = match emit_type_expr(out, prog, fields[i].type_ann, checker::name_qualifier(d.name)) { Cb as o => o; error as err => return err }
-                out = cb(out, " ")
-                if cg_field_boxed(prog, d.name, fields[i].type_ann) { out = cb(out, "*") }
-                out = cb_str(out, fields[i].name)
-                out = cb(out, ";\n")
+                buf.write("    ")
+                emit_type_expr(buf, prog, fields[i].type_ann, checker::name_qualifier(d.name))
+                buf.write(" ")
+                if cg_field_boxed(prog, d.name, fields[i].type_ann) { buf.write("*") }
+                buf.write(fields[i].name)
+                buf.write(";\n")
                 i++
             }
-            out = cb(out, "    tk_region *__region;\n")
-            out = cb(out, "} ")
-            out = mangle_type_name(out, "", d.name)
-            cb(out, ";\n\n")
+            buf.write("    tk_region *__region;\n")
+            buf.write("} ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(";\n\n")
         }
-        parser::InterfaceBody => {
-            buf
-        }
-        parser::TraitBody => {
-            buf
-        }
+        parser::InterfaceBody => { }
+        parser::TraitBody => { }
         parser::VariantBody as vb => {
             var members = match vb.type_expr {
                 parser::UnionType as u => u.members
-                _ => return error { message = "codegen: a variant body must be a union of members" }
+                _ => panic("codegen: a variant body must be a union of members")
             }
-            var out = cb(buf, "typedef enum tk_tag_")
-            out = cb_tysym(out, d.name)
-            out = cb(out, " {\n")
+            buf.write("typedef enum tk_tag_")
+            cb_tysym(buf, d.name)
+            buf.write(" {\n")
             var i = 0
             loop {
                 if i >= members.len { break }
-                var mk = match cg_member_key_texpr_str(prog, members[i], checker::name_qualifier(d.name)) { str as s => s; error as err => return err }
-                out = cb(out, "    TK_TAG_")
-                out = cb_upper(out, cg_ns_c_key(d.name))
-                out = cb(out, "_")
-                out = cb_upper(out, mk)
-                if i + 1 < members.len { out = cb(out, ",") }
-                out = cb(out, "\n")
+                var mk = match cg_member_key_texpr_str(prog, members[i], checker::name_qualifier(d.name)) { str as s => s; error as err => panic(err.message) }
+                buf.write("    TK_TAG_")
+                cb_upper(buf, cg_ns_c_key(d.name))
+                buf.write("_")
+                cb_upper(buf, mk)
+                if i + 1 < members.len { buf.write(",") }
+                buf.write("\n")
                 i++
             }
-            out = cb(out, "} tk_tag_")
-            out = cb_tysym(out, d.name)
-            out = cb(out, ";\n\n")
-            out = cb(out, "typedef struct ")
-            out = mangle_type_name(out, "", d.name)
-            out = cb(out, " {\n    tk_tag_")
-            out = cb_tysym(out, d.name)
-            out = cb(out, " tag;\n    union {\n")
+            buf.write("} tk_tag_")
+            cb_tysym(buf, d.name)
+            buf.write(";\n\n")
+            buf.write("typedef struct ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(" {\n    tk_tag_")
+            cb_tysym(buf, d.name)
+            buf.write(" tag;\n    union {\n")
             var j = 0
             loop {
                 if j >= members.len { break }
                 var mem = members[j]
-                var mk = match cg_member_key_texpr_str(prog, mem, checker::name_qualifier(d.name)) { str as s => s; error as err => return err }
-                out = cb(out, "        ")
-                out = match emit_type_expr(out, prog, mem, checker::name_qualifier(d.name)) { Cb as o => o; error as err => return err }
-                out = cb(out, " ")
-                out = cb_str(out, mk)
-                out = cb(out, ";\n")
+                var mk = match cg_member_key_texpr_str(prog, mem, checker::name_qualifier(d.name)) { str as s => s; error as err => panic(err.message) }
+                buf.write("        ")
+                emit_type_expr(buf, prog, mem, checker::name_qualifier(d.name))
+                buf.write(" ")
+                buf.write(mk)
+                buf.write(";\n")
                 j++
             }
-            out = cb(out, "    } as;\n} ")
-            out = mangle_type_name(out, "", d.name)
-            cb(out, ";\n\n")
+            buf.write("    } as;\n} ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(";\n\n")
         }
         parser::EnumBody as eb => {
-            var out = cb(buf, "typedef enum ")
-            out = mangle_type_name(out, "", d.name)
-            out = cb(out, " {\n")
+            buf.write("typedef enum ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(" {\n")
             var i = 0
             loop {
                 if i >= eb.members.len { break }
-                out = cb(out, "    TK_E_")
-                out = cb_upper(out, checker::name_last_segment(d.name))
-                out = cb(out, "_")
-                out = cb_upper(out, eb.members[i])
-                if i + 1 < eb.members.len { out = cb(out, ",") }
-                out = cb(out, "\n")
+                buf.write("    TK_E_")
+                cb_upper(buf, checker::name_last_segment(d.name))
+                buf.write("_")
+                cb_upper(buf, eb.members[i])
+                if i + 1 < eb.members.len { buf.write(",") }
+                buf.write("\n")
                 i++
             }
-            out = cb(out, "} ")
-            out = mangle_type_name(out, "", d.name)
-            cb(out, ";\n\n")
+            buf.write("} ")
+            mangle_type_name(buf, "", d.name)
+            buf.write(";\n\n")
         }
-        parser::AliasBody => {
-            buf
-        }
-        parser::NewtypeBody as nb => match emit_newtype_typedef(buf, prog, d, nb) { Cb as x => x; error as err => return err }
+        parser::AliasBody => { }
+        parser::NewtypeBody as nb => emit_newtype_typedef(buf, prog, d, nb)
         parser::FlagsBody as fb => emit_flags_typedef(buf, d, fb)
         parser::ExternBody => {
-            var o = cb(buf, "typedef void *")
-            o = mangle_type_name(o, "", d.name)
-            cb(o, ";\n\n")
+            buf.write("typedef void *")
+            mangle_type_name(buf, "", d.name)
+            buf.write(";\n\n")
         }
-        parser::ExternStructBody as esb => match emit_extern_struct_typedef(buf, prog, d, esb) { Cb as x => x; error as err => return err }
+        parser::ExternStructBody as esb => emit_extern_struct_typedef(buf, prog, d, esb)
     }
 }
 
-fn emit_extern_struct_typedef(buf: Cb, prog: CgProg, d: parser::TypeDecl, esb: parser::ExternStructBody): Cb | error {
-    var out = cb(buf, "typedef struct ")
-    out = mangle_type_name(out, "", d.name)
-    out = cb(out, " {\n")
+fn emit_extern_struct_typedef(buf: teko::io::FileStream, prog: CgProg, d: parser::TypeDecl, esb: parser::ExternStructBody) {
+    buf.write("typedef struct ")
+    mangle_type_name(buf, "", d.name)
+    buf.write(" {\n")
     var i = 0
     loop {
         if i >= esb.fields.len { break }
-        out = cb(out, "    ")
-        out = match emit_type_expr(out, prog, esb.fields[i].type_ann, checker::name_qualifier(d.name)) { Cb as o => o; error as err => return err }
-        out = cb(out, " ")
-        out = cb_str(out, esb.fields[i].name)
-        out = cb(out, ";\n")
+        buf.write("    ")
+        emit_type_expr(buf, prog, esb.fields[i].type_ann, checker::name_qualifier(d.name))
+        buf.write(" ")
+        buf.write(esb.fields[i].name)
+        buf.write(";\n")
         i++
     }
-    out = cb(out, "} ")
-    out = mangle_type_name(out, "", d.name)
-    cb(out, ";\n\n")
+    buf.write("} ")
+    mangle_type_name(buf, "", d.name)
+    buf.write(";\n\n")
 }
 
 type CgTypeSet = struct {
@@ -7586,7 +7578,7 @@ fn cg_slice_add(set: CgTypeSet, elem: @Type()): CgTypeSet {
 }
 fn cg_variant_key(t: @Type()): str {
     match t {
-        checker::Variant as v => match cg_variant_typename(cb_new(), v) { Cb as o => str(cb_flat(o)); error => "" }
+        checker::Variant as v => match cg_variant_typename_str(v) { str as s => s; error => "" }
         _ => ""
     }
 }
@@ -7949,10 +7941,10 @@ fn cg_is_builtin_scalar(last: str): bool {
 }
 fn cg_texpr_union_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, ut: parser::UnionType, owner_ns: str): bool {
     if !cg_texpr_union_has_null(ut) {
-        return cg_uvar_emitted_key(em, set, match cg_variant_typename_texpr(cb_new(), prog, ut, owner_ns) { Cb as o => str(cb_flat(o)); error => "" })
+        return cg_uvar_emitted_key(em, set, cg_variant_typename_texpr_str(prog, ut, owner_ns))
     }
     var resolved = cg_te_to_type_ns(prog, owner_ns, parser::UnionType { members = ut.members })
-    var va = match resolved { checker::Variant as v => v; _ => return cg_uvar_emitted_key(em, set, match cg_variant_typename_texpr(cb_new(), prog, ut, owner_ns) { Cb as o => str(cb_flat(o)); error => "" }) }
+    var va = match resolved { checker::Variant as v => v; _ => return cg_uvar_emitted_key(em, set, cg_variant_typename_texpr_str(prog, ut, owner_ns)) }
     match cg_union_niche_member(prog, va) { (@Type()) as _gt16 => return true; null => { } }
     match cg_union_box_member(prog, va) { (@Type()) as _gt17 => return true; null => { } }
     cg_uvar_emitted_key(em, set, cg_variant_key(va))
