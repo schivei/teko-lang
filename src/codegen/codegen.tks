@@ -16,7 +16,7 @@ type TThunkEmit = struct {
 
 fn cov_off(): CovCtx { CovCtx { on = false; fn_idx = 0 } }
 
-fn emit_cov_line(ref buf: teko::io::FileStream, ctx: CovCtx, line: u32, indent: str) {
+fn emit_cov_line(buf: teko::io::FileStream, ctx: CovCtx, line: u32, indent: str) {
     if !ctx.on { return }
     if line == 0 { return }
     buf.write(indent)
@@ -27,7 +27,7 @@ fn emit_cov_line(ref buf: teko::io::FileStream, ctx: CovCtx, line: u32, indent: 
     buf.write(");\n")
 }
 
-fn emit_cov_branch(ref buf: teko::io::FileStream, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str) {
+fn emit_cov_branch(buf: teko::io::FileStream, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str) {
     if !ctx.on { return }
     buf.write(indent)
     buf.write("tk_cov_branch_at(")
@@ -41,7 +41,7 @@ fn emit_cov_branch(ref buf: teko::io::FileStream, ctx: CovCtx, line: u32, col: u
     buf.write(");\n")
 }
 
-fn cb_i64(ref buf: teko::io::FileStream, v: i64) {
+fn cb_i64(buf: teko::io::FileStream, v: i64) {
     if v == 0 { buf.write_byte(b'0'); return }
     var n = v
     if n < 0 { buf.write_byte(b'-'); n = -n }
@@ -61,7 +61,7 @@ fn cb_i64(ref buf: teko::io::FileStream, v: i64) {
     }
 }
 
-fn cb_u64_digits(ref buf: teko::io::FileStream, v: u64) {
+fn cb_u64_digits(buf: teko::io::FileStream, v: u64) {
     if v == 0 { buf.write_byte(b'0'); return }
     var n = v
     var digits: [24]byte = []
@@ -80,12 +80,12 @@ fn cb_u64_digits(ref buf: teko::io::FileStream, v: u64) {
     }
 }
 
-fn cb_u64_c_expr(ref buf: teko::io::FileStream, v: u64) {
+fn cb_u64_c_expr(buf: teko::io::FileStream, v: u64) {
     cb_u64_digits(buf, v)
     buf.write("ULL")
 }
 
-fn cb_numint(ref buf: teko::io::FileStream, v: parser::NumInt) {
+fn cb_numint(buf: teko::io::FileStream, v: parser::NumInt) {
     if v.neg {
         buf.write("-(")
         cb_u64_c_expr(buf, v.mag)
@@ -121,7 +121,7 @@ fn cg_arena_sym(kind: CgArenaSym): str {
  * @param buf   the output stream to write the symbol to
  * @param kind  which arena provider symbol to emit
  */
-fn cb_arena_sym(ref buf: teko::io::FileStream, kind: CgArenaSym) {
+fn cb_arena_sym(buf: teko::io::FileStream, kind: CgArenaSym) {
     buf.write("TK_ARENA_")
     buf.write(cg_arena_kind_suffix(kind))
 }
@@ -185,7 +185,7 @@ fn cg_arena_all_kinds(): []CgArenaSym {
     ]
 }
 
-fn cg_emit_arena_provider_ladder(ref buf: teko::io::FileStream) {
+fn cg_emit_arena_provider_ladder(buf: teko::io::FileStream) {
     buf.write("#if defined(__linux__)\n")
     cg_emit_arena_ladder_arm(buf, true)
     buf.write("#else\n")
@@ -193,7 +193,7 @@ fn cg_emit_arena_provider_ladder(ref buf: teko::io::FileStream) {
     buf.write("#endif\n\n")
 }
 
-fn cg_emit_arena_ladder_arm(ref buf: teko::io::FileStream, linux: bool) {
+fn cg_emit_arena_ladder_arm(buf: teko::io::FileStream, linux: bool) {
     var kinds = cg_arena_all_kinds()
     var i = 0
     loop {
@@ -213,7 +213,7 @@ const F64_EXPONENT_MASK: u64 = 2047 to u64
 const F64_SIGNIFICAND_MASK: u64 = 4503599627370495 to u64
 const F64_SIGN_SHIFT: u64 = 63 to u64
 
-fn cb_f64_literal(ref buf: teko::io::FileStream, v: f64) {
+fn cb_f64_literal(buf: teko::io::FileStream, v: f64) {
     var bits = teko::f64_bits(v)
     if f64_bits_are_finite(bits) { buf.write(c_double_spelling(teko::ftoa(v))); return }
     if f64_bits_are_nan(bits) { buf.write("NAN"); return }
@@ -249,7 +249,7 @@ fn has_c_float_marker(text: str): bool {
     false
 }
 
-fn cb_cstr_escaped(ref buf: teko::io::FileStream, s: str) {
+fn cb_cstr_escaped(buf: teko::io::FileStream, s: str) {
     var i = 0
     loop {
         if i >= s.len { break }
@@ -327,7 +327,7 @@ pub fn tk_emit_meta(name: str, version: str, suffix: str, description: str): str
     teko::str::concat(out, "\";\n")
 }
 
-fn emit_prim(ref buf: teko::io::FileStream, k: checker::PrimKind): error | null {
+fn emit_prim(buf: teko::io::FileStream, k: checker::PrimKind): error | null {
     match k {
         checker::PrimKind::U8 => buf.write("uint8_t")
         checker::PrimKind::U16 => buf.write("uint16_t")
@@ -365,7 +365,7 @@ fn emit_prim_str(k: checker::PrimKind): str {
     }
 }
 
-fn cb_tysym(ref buf: teko::io::FileStream, name: str) {
+fn cb_tysym(buf: teko::io::FileStream, name: str) {
     var i = 0
     loop {
         if i >= name.len { break }
@@ -409,7 +409,7 @@ fn cg_ns_c_key(name: str): str { cb_tysym_str(name) }
 
 const TEKO_USER_PREFIX: str = "teko_"
 
-fn mangle_type_name(ref buf: teko::io::FileStream, namespace: str, name: str) {
+fn mangle_type_name(buf: teko::io::FileStream, namespace: str, name: str) {
     buf.write("tk_t_")
     if namespace.len > 0 {
         cb_tysym(buf, namespace)
@@ -425,7 +425,7 @@ fn mangle_type_name_str(namespace: str, name: str): str {
     teko::str::concat(out, cb_tysym_str(name))
 }
 
-fn cb_fn_name(ref buf: teko::io::FileStream, ns: str, name: str, suffix: str = "") {
+fn cb_fn_name(buf: teko::io::FileStream, ns: str, name: str, suffix: str = "") {
     buf.write(TEKO_USER_PREFIX)
     if ns.len != 0 {
         var i = 0
@@ -788,7 +788,7 @@ fn cg_expr_is_addressable(e: checker::TExpr): bool {
     }
 }
 
-fn cg_emit_self_addr(ref buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+fn cg_emit_self_addr(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if cg_expr_is_addressable(recv) {
         buf.write("&(")
         match emit_expr_ctx(buf, prog, ret_type, recv, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
@@ -1146,7 +1146,7 @@ fn cg_variant_has_member(d: parser::TypeDecl, member: str): bool {
     false
 }
 
-fn emit_type(ref buf: teko::io::FileStream, prog: CgProg, t: @Type()): error | null {
+fn emit_type(buf: teko::io::FileStream, prog: CgProg, t: @Type()): error | null {
     match t {
         checker::Prim as p => match emit_prim(buf, p.kind) { error as e => return e; null => { } }
         checker::Byte => buf.write("uint8_t")
@@ -1182,7 +1182,7 @@ fn emit_type(ref buf: teko::io::FileStream, prog: CgProg, t: @Type()): error | n
     null
 }
 
-fn cg_emit_fnptr_sig_ex(ref buf: teko::io::FileStream, prog: CgProg, t: @Type(), with_env: bool): error | null {
+fn cg_emit_fnptr_sig_ex(buf: teko::io::FileStream, prog: CgProg, t: @Type(), with_env: bool): error | null {
     match t {
         checker::Func as f => {
             match emit_type(buf, prog, f.ret) { error as e => return e; null => { } }
@@ -1208,7 +1208,7 @@ fn cg_emit_fnptr_sig_ex(ref buf: teko::io::FileStream, prog: CgProg, t: @Type(),
     null
 }
 
-fn emit_closure_call(ref buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+fn emit_closure_call(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var nm = c.callee.segments[c.callee.segments.len - 1].name
     buf.write("({ ")
     var j = 0
@@ -1239,7 +1239,7 @@ fn emit_closure_call(ref buf: teko::io::FileStream, prog: CgProg, ret_type: @Typ
     null
 }
 
-fn cg_slice_typename(ref buf: teko::io::FileStream, elem: @Type()): error | null {
+fn cg_slice_typename(buf: teko::io::FileStream, elem: @Type()): error | null {
     buf.write("tk_slice_")
     match cg_opt_mangle_str(elem) { str as s => buf.write(s); error as e => return e }
     null
@@ -1306,7 +1306,7 @@ fn cg_is_c_keyword(s: str): bool {
     s == "typedef" || s == "extern" || s == "inline" || s == "restrict"
 }
 
-fn cb_ident(ref buf: teko::io::FileStream, name: str) {
+fn cb_ident(buf: teko::io::FileStream, name: str) {
     buf.write(name)
     if cg_is_c_keyword(name) { buf.write("_") }
 }
@@ -1339,7 +1339,7 @@ fn cg_member_key_is_c_keyword(m: @Type()): bool {
     }
 }
 
-fn cg_member_key(ref buf: teko::io::FileStream, m: @Type()): error | null {
+fn cg_member_key(buf: teko::io::FileStream, m: @Type()): error | null {
     var out = match cg_opt_mangle_str(m) { str as s => s; error as e => return e }
     if cg_member_key_is_c_keyword(m) { out = teko::str::concat(out, "_") }
     buf.write(out)
@@ -1381,13 +1381,26 @@ fn cg_member_bare_key(m: @Type()): str | error {
     if cg_is_c_keyword(k) { teko::str::concat(k, "_") } else { k }
 }
 
-fn cg_variant_typename(buf: Cb, v: checker::Variant): Cb | error {
-    var out = cb(buf, "tk_u")
+fn cg_variant_typename(buf: teko::io::FileStream, v: checker::Variant): error | null {
+    buf.write("tk_u")
     var i = 0
     loop {
         if i >= v.members.len { break }
-        out = cb(out, "_")
-        out = match cg_member_key(out, v.members[i]) { Cb as o => o; error as e => return e }
+        buf.write("_")
+        match cg_member_key(buf, v.members[i]) { error as e => return e; null => { } }
+        i++
+    }
+    null
+}
+
+/** cg_variant_typename_str — the mangled C type name for variant `v`, standalone. */
+fn cg_variant_typename_str(v: checker::Variant): str | error {
+    var out = "tk_u"
+    var i = 0
+    loop {
+        if i >= v.members.len { break }
+        var k = match cg_member_key_str(v.members[i]) { str as s => s; error as e => return e }
+        out = teko::str::concat(out, teko::str::concat("_", k))
         i++
     }
     out
@@ -1464,40 +1477,42 @@ fn cg_niche_null_accessor(x: @Type()): str {
     }
 }
 
-fn cg_emit_niche_null(buf: Cb, prog: CgProg, x: @Type()): Cb | error {
+fn cg_emit_niche_null(buf: teko::io::FileStream, prog: CgProg, x: @Type()): error | null {
     if cg_niche_is_fat(x) {
-        var o = cb(buf, "(")
-        o = match emit_type(o, prog, x) { Cb as r => r; error as e => return e }
-        return cb(o, "){0}")
+        buf.write("(")
+        match emit_type(buf, prog, x) { error as e => return e; null => { } }
+        buf.write("){0}")
+        return null
     }
-    cb(buf, "0")
+    buf.write("0")
+    null
 }
 
-fn cg_emit_niche_is_null(buf: Cb, subj: str, x: @Type()): Cb {
-    var o = cb(buf, "(")
-    o = cb(o, subj)
-    o = cb(o, cg_niche_null_accessor(x))
-    cb(o, " == 0)")
+fn cg_emit_niche_is_null(buf: teko::io::FileStream, subj: str, x: @Type()) {
+    buf.write("(")
+    buf.write(subj)
+    buf.write(cg_niche_null_accessor(x))
+    buf.write(" == 0)")
 }
 
-fn cg_emit_niche_not_null(buf: Cb, subj: str, x: @Type()): Cb {
-    var o = cb(buf, "(")
-    o = cb(o, subj)
-    o = cb(o, cg_niche_null_accessor(x))
-    cb(o, " != 0)")
+fn cg_emit_niche_not_null(buf: teko::io::FileStream, subj: str, x: @Type()) {
+    buf.write("(")
+    buf.write(subj)
+    buf.write(cg_niche_null_accessor(x))
+    buf.write(" != 0)")
 }
 
-fn cg_union_tag_ctype(buf: Cb, v: checker::Variant): Cb | error {
-    if cg_variant_has_null(v) { return cb(buf, "uint8_t") }
-    var out = cb(buf, "tk_tag")
+fn cg_union_tag_ctype(buf: teko::io::FileStream, v: checker::Variant): error | null {
+    if cg_variant_has_null(v) { buf.write("uint8_t"); return null }
+    buf.write("tk_tag")
     var i = 0
     loop {
         if i >= v.members.len { break }
-        out = cb(out, "_")
-        out = match cg_member_key(out, v.members[i]) { Cb as o => o; error as e => return e }
+        buf.write("_")
+        match cg_member_key(buf, v.members[i]) { error as e => return e; null => { } }
         i++
     }
-    out
+    null
 }
 
 type UnionRepr = enum { Niche; InlineTag; BoxInArena }
@@ -1643,12 +1658,13 @@ fn inline_attr_eligible(prog: CgProg, t: @Type()): error | null {
     }
 }
 
-fn cg_emit_variant_ctype(buf: Cb, v: @Type()): Cb | error {
+fn cg_emit_variant_ctype(buf: teko::io::FileStream, v: @Type()): error | null {
     match v {
         checker::Named as nm => mangle_type_name(buf, "", nm.name)
-        checker::Variant as va => cg_variant_typename(buf, va)
-        _ => error { message = "codegen: cg_emit_variant_ctype on a non-variant type (internal)" }
+        checker::Variant as va => match cg_variant_typename(buf, va) { error as e => return e; null => { } }
+        _ => return error { message = "codegen: cg_emit_variant_ctype on a non-variant type (internal)" }
     }
+    null
 }
 
 fn cg_union_texpr_mangle_str(prog: CgProg, ut: parser::UnionType, ref_ns: str): str | error {
@@ -1724,16 +1740,16 @@ fn cg_texpr_union_has_null(ut: parser::UnionType): bool {
     false
 }
 
-fn cg_variant_typename_texpr(buf: Cb, prog: CgProg, te: parser::UnionType, ref_ns: str): Cb | error {
-    var out = cb(buf, "tk_u")
+fn cg_variant_typename_texpr(buf: teko::io::FileStream, prog: CgProg, te: parser::UnionType, ref_ns: str): error | null {
+    buf.write("tk_u")
     var i = 0
     loop {
         if i >= te.members.len { break }
-        out = cb(out, "_")
-        out = cb(out, match cg_member_key_texpr_str(prog, te.members[i], ref_ns) { str as s => s; error as e => return e })
+        buf.write("_")
+        buf.write(match cg_member_key_texpr_str(prog, te.members[i], ref_ns) { str as s => s; error as e => return e })
         i++
     }
-    out
+    null
 }
 
 fn cg_texpr_mangle(te: @TypeExpr()): str {
@@ -1782,40 +1798,48 @@ fn cg_texpr_inst_name(stem: str, args: []@TypeExpr()): str {
     out
 }
 
-fn cg_emit_slice_type_expr(buf: Cb, prog: CgProg, st: parser::SliceType, ref_ns: str): Cb | error {
+fn cg_emit_slice_type_expr(buf: teko::io::FileStream, prog: CgProg, st: parser::SliceType, ref_ns: str): error | null {
     match st.element {
         parser::UnionType => match cg_te_to_type_ns(prog, ref_ns, st) {
-            checker::Slice as sl => cg_slice_typename(buf, sl.element)
-            _ => cg_opt_mangle_texpr(cb(buf, "tk_slice_"), prog, st.element, ref_ns)
+            checker::Slice as sl => match cg_slice_typename(buf, sl.element) { error as e => return e; null => { } }
+            _ => { buf.write("tk_slice_"); match cg_opt_mangle_texpr_str(prog, st.element, ref_ns) { str as s => buf.write(s); error as e => return e } }
         }
-        _ => cg_opt_mangle_texpr(cb(buf, "tk_slice_"), prog, st.element, ref_ns)
+        _ => { buf.write("tk_slice_"); match cg_opt_mangle_texpr_str(prog, st.element, ref_ns) { str as s => buf.write(s); error as e => return e } }
     }
+    null
 }
 
-fn emit_type_expr(buf: Cb, prog: CgProg, te: @TypeExpr(), ref_ns: str): Cb | error {
+fn emit_type_expr(buf: teko::io::FileStream, prog: CgProg, te: @TypeExpr(), ref_ns: str): error | null {
     match te {
         parser::NamedType as nt => {
             var last = nt.path.segments[nt.path.segments.len - 1].name
-            if last == "u8" { return cb(buf, "uint8_t") }
-            else if last == "u16" { return cb(buf, "uint16_t") }
-            else if last == "u32" { return cb(buf, "uint32_t") }
-            else if last == "u64" { return cb(buf, "uint64_t") }
-            else if last == "i8" { return cb(buf, "int8_t") }
-            else if last == "i16" { return cb(buf, "int16_t") }
-            else if last == "i32" { return cb(buf, "int32_t") }
-            else if last == "i64" { return cb(buf, "int64_t") }
-            else if last == "f32" { return cb(buf, "float") }
-            else if last == "f64" { return cb(buf, "double") }
-            else if last == "bool" { return cb(buf, "bool") }
-            else if last == "usize" { return cb(buf, "uint64_t") }
-            else if last == "size" { return cb(buf, "int64_t") }
-            else if last == "byte" { return cb(buf, "uint8_t") }
-            else if last == "char" { return cb(buf, "tk_char") }
-            else if last == "str" { return cb(buf, "tk_str") }
-            else if last == "error" { return cb(buf, "tk_error") }
-            else if last == "ptr" { if nt.args.len > 0 { return cb(match emit_type_expr(buf, prog, nt.args[0], ref_ns) { Cb as o => o; error as e => return e }, " *") } else { return cb(buf, "void *") } }
-            else if last == "uptr" { return cb(buf, "uintptr_t") }
-            else if last == "Ref" { if nt.args.len > 0 { return cb(match emit_type_expr(buf, prog, nt.args[0], ref_ns) { Cb as o => o; error as e => return e }, " *") } else { return error { message = "`Ref<T>` needs a type argument" } } }
+            if last == "u8" { buf.write("uint8_t"); return null }
+            else if last == "u16" { buf.write("uint16_t"); return null }
+            else if last == "u32" { buf.write("uint32_t"); return null }
+            else if last == "u64" { buf.write("uint64_t"); return null }
+            else if last == "i8" { buf.write("int8_t"); return null }
+            else if last == "i16" { buf.write("int16_t"); return null }
+            else if last == "i32" { buf.write("int32_t"); return null }
+            else if last == "i64" { buf.write("int64_t"); return null }
+            else if last == "f32" { buf.write("float"); return null }
+            else if last == "f64" { buf.write("double"); return null }
+            else if last == "bool" { buf.write("bool"); return null }
+            else if last == "usize" { buf.write("uint64_t"); return null }
+            else if last == "size" { buf.write("int64_t"); return null }
+            else if last == "byte" { buf.write("uint8_t"); return null }
+            else if last == "char" { buf.write("tk_char"); return null }
+            else if last == "str" { buf.write("tk_str"); return null }
+            else if last == "error" { buf.write("tk_error"); return null }
+            else if last == "ptr" {
+                if nt.args.len > 0 { match emit_type_expr(buf, prog, nt.args[0], ref_ns) { error as e => return e; null => { } }; buf.write(" *") }
+                else { buf.write("void *") }
+                return null
+            }
+            else if last == "uptr" { buf.write("uintptr_t"); return null }
+            else if last == "Ref" {
+                if nt.args.len > 0 { match emit_type_expr(buf, prog, nt.args[0], ref_ns) { error as e => return e; null => { } }; buf.write(" *"); return null }
+                else { return error { message = "`Ref<T>` needs a type argument" } }
+            }
             var cdname = match cg_find_decl_ns(prog, nt.path, ref_ns) { parser::TypeDecl as d => d.name; error => last }
             match cg_find_decl_ns(prog, nt.path, ref_ns) {
                 parser::TypeDecl as ad => match ad.body {
@@ -1824,42 +1848,36 @@ fn emit_type_expr(buf: Cb, prog: CgProg, te: @TypeExpr(), ref_ns: str): Cb | err
                 }
                 error => { }
             }
-            if nt.args.len > 0 { return mangle_type_name(buf, "", cg_texpr_inst_name(last, nt.args)) }
-            if cg_is_polymorphic_base(prog, cdname) { return cb_tysym(cb(buf, "tk_base_"), cdname) }
+            if nt.args.len > 0 { mangle_type_name(buf, "", cg_texpr_inst_name(last, nt.args)); return null }
+            if cg_is_polymorphic_base(prog, cdname) { buf.write("tk_base_"); cb_tysym(buf, cdname); return null }
             match cg_find_decl_ns(prog, nt.path, ref_ns) {
                 parser::TypeDecl as cd => match cd.body {
-                    parser::ClassBody => return cb(mangle_type_name(buf, "", cdname), " *")
+                    parser::ClassBody => { mangle_type_name(buf, "", cdname); buf.write(" *"); return null }
                     _ => { }
                 }
                 error => { }
             }
             mangle_type_name(buf, "", cdname)
         }
-        parser::SliceType as st => cg_emit_slice_type_expr(buf, prog, st, ref_ns)
-        parser::SizedArrayType as sa => cg_emit_slice_type_expr(buf, prog, parser::SliceType { element = sa.element }, ref_ns)
+        parser::SliceType as st => match cg_emit_slice_type_expr(buf, prog, st, ref_ns) { error as e => return e; null => { } }
+        parser::SizedArrayType as sa => match cg_emit_slice_type_expr(buf, prog, parser::SliceType { element = sa.element }, ref_ns) { error as e => return e; null => { } }
         parser::UnionType as ut => {
             if !cg_texpr_union_has_null(ut) { return cg_variant_typename_texpr(buf, prog, ut, ref_ns) }
             match cg_te_to_type_ns(prog, ref_ns, te) {
                 checker::Variant as va => match cg_union_niche_member(prog, va) {
-                    (@Type()) as x => emit_type(buf, prog, x)
+                    (@Type()) as x => match emit_type(buf, prog, x) { error as e => return e; null => { } }
                     null => match cg_union_box_member(prog, va) {
-                        (@Type()) as bx => cb(match emit_type(buf, prog, bx) { Cb as o => o; error as e => return e }, " *")
-                        null => cg_variant_typename(buf, va)
+                        (@Type()) as bx => { match emit_type(buf, prog, bx) { error as e => return e; null => { } }; buf.write(" *") }
+                        null => match cg_variant_typename(buf, va) { error as e => return e; null => { } }
                     }
                 }
-                _ => cg_variant_typename_texpr(buf, prog, ut, ref_ns)
+                _ => match cg_variant_typename_texpr(buf, prog, ut, ref_ns) { error as e => return e; null => { } }
             }
         }
-        parser::FunctionType => cb(buf, "tk_closure")
-        parser::MacroType => error { message = "internal: an unexpanded @Type() macro reached codegen — it should be expanded by the Family-A pre-pass" }
+        parser::FunctionType => buf.write("tk_closure")
+        parser::MacroType => return error { message = "internal: an unexpanded @Type() macro reached codegen — it should be expanded by the Family-A pre-pass" }
     }
-}
-
-fn cg_opt_mangle_texpr(buf: Cb, prog: CgProg, te: @TypeExpr(), ref_ns: str): Cb | error {
-    match te {
-        parser::NamedType as nt => cb_tysym(buf, cg_canon_name_ns(prog, nt.path, ref_ns))
-        _ => error { message = "codegen: optional inner type-expr not yet supported" }
-    }
+    null
 }
 
 fn binop_c(op: lexer::TokenKind): str | error {
