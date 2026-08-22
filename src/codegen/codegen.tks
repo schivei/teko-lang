@@ -6374,28 +6374,30 @@ fn emit_if_stmt(buf: teko::io::FileStream, f: checker::TIfExpr, line: u32, col: 
     buf.write("}\n")
 }
 
-fn emit_binding(buf: Cb, prog: CgProg, ret_type: @Type(), b: checker::TBinding, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
+fn emit_binding(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), b: checker::TBinding, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
     var name = match b.target {
         parser::SimpleName as sn => sn.name
-        parser::DestructurePattern => return error { message = "codegen: destructuring binding not yet supported" }
+        parser::DestructurePattern => panic("codegen: destructuring binding not yet supported")
     }
     if name == "_" {
-        var dout = cb(buf, indent)
-        dout = cb(dout, "(void)(")
-        dout = match emit_as_r(dout, prog, ret_type, b.bound, b.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        return cb(dout, ");\n")
+        buf.write(indent)
+        buf.write("(void)(")
+        emit_as_r(buf, prog, ret_type, b.bound, b.value, escaping, regions, fn_body, dctx)
+        buf.write(");\n")
+        return
     }
-    var out = cb(buf, indent)
-    if b.kind == parser::BindKind::Const { out = cb(out, "const ") }
-    out = match emit_type(out, prog, b.bound) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb_ident(out, name)
-    out = cb(out, " = ")
+    buf.write(indent)
+    if b.kind == parser::BindKind::Const { buf.write("const ") }
+    emit_type(buf, prog, b.bound)
+    buf.write(" ")
+    cb_ident(buf, name)
+    buf.write(" = ")
     if regions.len > 0 && cur_block.len > 0 && cg_same_named_struct(b.bound, b.value.type) && checker::binding_is_block_local(escaping, fn_body, cur_block, cur_block_is_value, b) {
         match b.value.kind {
             checker::TStructInit as si => {
-                out = match emit_struct_init_framed(out, prog, b.value, si, regions[regions.len - 1].name, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                return cb(out, ";\n")
+                emit_struct_init_framed(buf, prog, b.value, si, regions[regions.len - 1].name, escaping, regions, fn_body, dctx)
+                buf.write(";\n")
+                return
             }
             _ => { }
         }
@@ -6404,13 +6406,15 @@ fn emit_binding(buf: Cb, prog: CgProg, ret_type: @Type(), b: checker::TBinding, 
         var str_region = regions[regions.len - 1].name
         match b.value.kind {
             checker::TInterp as bin => {
-                out = match emit_interp(out, prog, bin, str_region, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                return cb(out, ";\n")
+                emit_interp(buf, prog, bin, str_region, escaping, regions, fn_body, dctx)
+                buf.write(";\n")
+                return
             }
             checker::TCall as bc => {
                 if cg_is_concat_bridge(prog, bc) {
-                    out = match emit_concat_fold(out, prog, bc.args[0], str_region, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                    return cb(out, ";\n")
+                    emit_concat_fold(buf, prog, bc.args[0], str_region, escaping, regions, fn_body, dctx)
+                    buf.write(";\n")
+                    return
                 }
             }
             _ => { }
@@ -6419,8 +6423,9 @@ fn emit_binding(buf: Cb, prog: CgProg, ret_type: @Type(), b: checker::TBinding, 
     if frame.len > 0 && checker::binding_is_frame_local(escaping, b) && cg_same_named_struct(b.bound, b.value.type) {
         match b.value.kind {
             checker::TStructInit as si => {
-                out = match emit_struct_init_framed(out, prog, b.value, si, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                return cb(out, ";\n")
+                emit_struct_init_framed(buf, prog, b.value, si, frame, escaping, regions, fn_body, dctx)
+                buf.write(";\n")
+                return
             }
             _ => { }
         }
@@ -6432,18 +6437,18 @@ fn emit_binding(buf: Cb, prog: CgProg, ret_type: @Type(), b: checker::TBinding, 
     } else {
         ""
     }
-    out = match emit_as_r_in(out, prog, ret_type, b.bound, b.value, box_region, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ";\n")
+    emit_as_r_in(buf, prog, ret_type, b.bound, b.value, box_region, escaping, regions, fn_body, dctx)
+    buf.write(";\n")
 }
 
-fn emit_assign_lvalue(buf: Cb, prog: CgProg, a: checker::TAssign): Cb | error {
+fn emit_assign_lvalue(buf: teko::io::FileStream, prog: CgProg, a: checker::TAssign) {
     match a.kind {
         parser::AssignKind::Field => emit_expr(buf, prog, a.target)
         _ => {
             if a.deref {
-                var out = cb(buf, "(*")
-                out = cb_ident(out, a.name)
-                cb(out, ")")
+                buf.write("(*")
+                cb_ident(buf, a.name)
+                buf.write(")")
             } else {
                 cb_ident(buf, a.name)
             }
@@ -6451,168 +6456,173 @@ fn emit_assign_lvalue(buf: Cb, prog: CgProg, a: checker::TAssign): Cb | error {
     }
 }
 
-fn emit_index_assign(buf: Cb, prog: CgProg, ret_type: @Type(), a: checker::TAssign, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var ix = match a.target.kind { checker::TIndex as ti => ti; _ => return error { message = "codegen: index-assign target is not a subscript (internal)" } }
-    var elem = match ix.receiver.type { checker::Slice as sl => sl.element; _ => return error { message = "codegen: index-assign receiver is not a slice (internal)" } }
-    var wstmp = $"_ws{buf.len}"
-    var witmp = $"_wi{buf.len + 1}"
-    var out = cb(buf, indent)
-    out = cb(out, "{ ")
-    out = match emit_type(out, prog, ix.receiver.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, wstmp)
-    out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); uint64_t ")
-    out = cb(out, witmp)
-    out = cb(out, " = (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); if (")
-    out = cb(out, witmp)
-    out = cb(out, " < ")
-    out = cb(out, wstmp)
-    out = cb(out, ".len) { ")
-    out = match emit_index_store_body(out, prog, ret_type, a, wstmp, witmp, elem, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, " } else { tk_panic_oob_at(")
-    out = cb_u64_digits(out, a.target.line to u64)
-    out = cb(out, ", ")
-    out = cb_u64_digits(out, a.target.col to u64)
-    cb(out, "); }\n }\n")
+fn emit_index_assign(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), a: checker::TAssign, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var ix = match a.target.kind { checker::TIndex as ti => ti; _ => panic("codegen: index-assign target is not a subscript (internal)") }
+    var elem = match ix.receiver.type { checker::Slice as sl => sl.element; _ => panic("codegen: index-assign receiver is not a slice (internal)") }
+    var wstmp = $"_ws{buf.gensym()}"
+    var witmp = $"_wi{buf.gensym()}"
+    buf.write(indent)
+    buf.write("{ ")
+    emit_type(buf, prog, ix.receiver.type)
+    buf.write(" ")
+    buf.write(wstmp)
+    buf.write(" = (")
+    emit_expr_ctx(buf, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx)
+    buf.write("); uint64_t ")
+    buf.write(witmp)
+    buf.write(" = (uint64_t)(")
+    emit_expr_ctx(buf, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx)
+    buf.write("); if (")
+    buf.write(witmp)
+    buf.write(" < ")
+    buf.write(wstmp)
+    buf.write(".len) { ")
+    emit_index_store_body(buf, prog, ret_type, a, wstmp, witmp, elem, escaping, regions, fn_body, dctx)
+    buf.write(" } else { tk_panic_oob_at(")
+    cb_u64_digits(buf, a.target.line to u64)
+    buf.write(", ")
+    cb_u64_digits(buf, a.target.col to u64)
+    buf.write("); }\n }\n")
 }
 
-fn emit_index_store_body(buf: Cb, prog: CgProg, ret_type: @Type(), a: checker::TAssign, wstmp: str, witmp: str, elem: @Type(), escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_index_store_body(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), a: checker::TAssign, wstmp: str, witmp: str, elem: @Type(), escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {
-        var prim = match elem { checker::Prim as p => p; _ => return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
-        if !cg_prim_is_int(prim.kind) { return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
-        var tag = match prim_int_tag(prim.kind) { str as t => t; error => return error { message = "codegen: shift-assign on a non-integer slice element not supported" } }
+        var prim = match elem { checker::Prim as p => p; _ => panic("codegen: shift-assign on a non-integer slice element not supported") }
+        if !cg_prim_is_int(prim.kind) { panic("codegen: shift-assign on a non-integer slice element not supported") }
+        var tag = match prim_int_tag(prim.kind) { str as t => t; error => panic("codegen: shift-assign on a non-integer slice element not supported") }
         var fn_prefix = if a.op == lexer::TokenKind::ShlEq { "tk_shl_" } else { "tk_shr_" }
-        var so = emit_index_slot(buf, wstmp, witmp)
-        so = cb(so, " = ")
-        so = cb(so, fn_prefix)
-        so = cb(so, tag)
-        so = cb(so, "(")
-        so = emit_index_slot(so, wstmp, witmp)
-        so = cb(so, ", ")
-        so = match emit_expr_ctx(so, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        return cb(so, ");")
+        emit_index_slot(buf, wstmp, witmp)
+        buf.write(" = ")
+        buf.write(fn_prefix)
+        buf.write(tag)
+        buf.write("(")
+        emit_index_slot(buf, wstmp, witmp)
+        buf.write(", ")
+        emit_expr_ctx(buf, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx)
+        buf.write(");")
+        return
     }
-    var op = match assignop_c(a.op) { str as s => s; error as err => return err }
-    var out = emit_index_slot(buf, wstmp, witmp)
-    out = cb(out, " ")
-    out = cb(out, op)
-    out = cb(out, " ")
-    out = match emit_as_r(out, prog, ret_type, elem, a.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ";")
+    var op = match assignop_c(a.op) { str as s => s; error as err => panic(err.message) }
+    emit_index_slot(buf, wstmp, witmp)
+    buf.write(" ")
+    buf.write(op)
+    buf.write(" ")
+    emit_as_r(buf, prog, ret_type, elem, a.value, escaping, regions, fn_body, dctx)
+    buf.write(";")
 }
 
-fn emit_index_slot(buf: Cb, wstmp: str, witmp: str): Cb {
-    var out = cb(buf, wstmp)
-    out = cb(out, ".ptr[")
-    out = cb(out, witmp)
-    cb(out, "]")
+fn emit_index_slot(buf: teko::io::FileStream, wstmp: str, witmp: str) {
+    buf.write(wstmp)
+    buf.write(".ptr[")
+    buf.write(witmp)
+    buf.write("]")
 }
 
-fn emit_assign(buf: Cb, prog: CgProg, ret_type: @Type(), a: checker::TAssign, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_assign(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), a: checker::TAssign, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var is_index = match a.kind { parser::AssignKind::Index => true; _ => false }
-    if is_index { return emit_index_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body, dctx) }
+    if is_index { emit_index_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body, dctx); return }
     if a.op == lexer::TokenKind::Assign && checker::assign_frees_old(fn_body, a) {
-        var nm = $"_tkna{buf.len}"
-        var pout = cb(buf, indent)
-        pout = cb(pout, "{ ")
-        pout = match emit_type(pout, prog, a.bound) { Cb as o => o; error as err => return err }
-        pout = cb(pout, " ")
-        pout = cb(pout, nm)
-        pout = cb(pout, " = ")
-        pout = match emit_as_r(pout, prog, ret_type, a.bound, a.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        pout = cb(pout, "; ")
-        pout = cb_arena_sym(pout, CgArenaSym::FreeBlock)
-        pout = cb(pout, "((uint64_t)(uintptr_t)")
-        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
-        pout = cb(pout, ".ptr, (uint64_t)")
-        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
-        pout = cb(pout, ".len * sizeof(*")
-        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
-        pout = cb(pout, ".ptr)); ")
-        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
-        pout = cb(pout, " = ")
-        pout = cb(pout, nm)
-        return cb(pout, "; }\n")
+        var nm = $"_tkna{buf.gensym()}"
+        buf.write(indent)
+        buf.write("{ ")
+        emit_type(buf, prog, a.bound)
+        buf.write(" ")
+        buf.write(nm)
+        buf.write(" = ")
+        emit_as_r(buf, prog, ret_type, a.bound, a.value, escaping, regions, fn_body, dctx)
+        buf.write("; ")
+        cb_arena_sym(buf, CgArenaSym::FreeBlock)
+        buf.write("((uint64_t)(uintptr_t)")
+        emit_assign_lvalue(buf, prog, a)
+        buf.write(".ptr, (uint64_t)")
+        emit_assign_lvalue(buf, prog, a)
+        buf.write(".len * sizeof(*")
+        emit_assign_lvalue(buf, prog, a)
+        buf.write(".ptr)); ")
+        emit_assign_lvalue(buf, prog, a)
+        buf.write(" = ")
+        buf.write(nm)
+        buf.write("; }\n")
+        return
     }
-    var op = match assignop_c(a.op) { str as s => s; error as err => return err }
-    var out = cb(buf, indent)
+    var op = match assignop_c(a.op) { str as s => s; error as err => panic(err.message) }
+    buf.write(indent)
     if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {
         var prim = match a.bound {
             checker::Prim as p => p
-            _ => return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+            _ => panic("codegen: shift-assign on a non-integer type not yet supported")
         }
         if !cg_prim_is_int(prim.kind) {
-            return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+            panic("codegen: shift-assign on a non-integer type not yet supported")
         }
         var tag = match prim_int_tag(prim.kind) {
             str as t => t
-            error => return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+            error => panic("codegen: shift-assign on a non-integer type not yet supported")
         }
         var fn_prefix = if a.op == lexer::TokenKind::ShlEq { "tk_shl_" } else { "tk_shr_" }
-        out = match emit_assign_lvalue(out, prog, a) { Cb as o => o; error as err => return err }
-        out = cb(out, " = ")
-        out = cb(out, fn_prefix)
-        out = cb(out, tag)
-        out = cb(out, "(")
-        out = match emit_assign_lvalue(out, prog, a) { Cb as o => o; error as err => return err }
-        out = cb(out, ", ")
-        out = match emit_expr_ctx(out, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        out = cb(out, ")")
-        return cb(out, ";\n")
+        emit_assign_lvalue(buf, prog, a)
+        buf.write(" = ")
+        buf.write(fn_prefix)
+        buf.write(tag)
+        buf.write("(")
+        emit_assign_lvalue(buf, prog, a)
+        buf.write(", ")
+        emit_expr_ctx(buf, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx)
+        buf.write(")")
+        buf.write(";\n")
+        return
     }
     if a.op == lexer::TokenKind::SlashEq || a.op == lexer::TokenKind::PercentEq {
-        return emit_div_mod_assign(out, prog, a, escaping, regions, fn_body, dctx)
+        emit_div_mod_assign(buf, prog, a, escaping, regions, fn_body, dctx)
+        return
     }
-    out = match emit_assign_lvalue(out, prog, a) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, op)
-    out = cb(out, " ")
-    out = match emit_as_r(out, prog, ret_type, a.bound, a.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ";\n")
+    emit_assign_lvalue(buf, prog, a)
+    buf.write(" ")
+    buf.write(op)
+    buf.write(" ")
+    emit_as_r(buf, prog, ret_type, a.bound, a.value, escaping, regions, fn_body, dctx)
+    buf.write(";\n")
 }
 
-fn emit_return(buf: Cb, prog: CgProg, r: checker::TReturn, in_main: bool, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = match emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    out = cg_drop_all_regions(out, indent, regions)
+fn emit_return(buf: teko::io::FileStream, prog: CgProg, r: checker::TReturn, in_main: bool, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body)
+    cg_drop_all_regions(buf, indent, regions)
     var no_tail = checker::TExpr { kind = checker::TNullLit { }; type = checker::Void { }; line = 0; col = 0 }
     var cleanup = if r.has_value {
-        match cg_class_cleanup_text(prog, escaping, fn_body, true, r.value) { str as c => c; error as e => return e }
+        match cg_class_cleanup_text(prog, escaping, fn_body, true, r.value) { str as c => c; error as e => panic(e.message) }
     } else {
-        match cg_class_cleanup_text(prog, escaping, fn_body, false, no_tail) { str as c => c; error as e => return e }
+        match cg_class_cleanup_text(prog, escaping, fn_body, false, no_tail) { str as c => c; error as e => panic(e.message) }
     }
-    if cleanup.len > 0 { out = cb(out, indent); out = cb(out, cleanup); out = cb(out, "\n") }
-    out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
-    out = cg_return_frame_exit(out, indent, frame, dctx)
-    out = cb(out, indent)
+    if cleanup.len > 0 { buf.write(indent); buf.write(cleanup); buf.write("\n") }
+    cg_emit_bracket_unwind(buf, indent, dctx.bracket_depth)
+    cg_return_frame_exit(buf, indent, frame, dctx)
+    buf.write(indent)
     if !r.has_value {
-        if in_main { return cb(out, "return 0;\n") }
-        return cb(out, "return;\n")
+        if in_main { buf.write("return 0;\n"); return }
+        buf.write("return;\n")
+        return
     }
     var ret_regions: []RegionFrame = []
     if in_main {
-        out = cb(out, CG_MAIN_RETURN_OPEN)
-        out = match emit_expr_ctx(out, prog, checker::Void { }, r.value, escaping, ret_regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        return cb(out, CG_MAIN_RETURN_CLOSE)
+        buf.write(CG_MAIN_RETURN_OPEN)
+        emit_expr_ctx(buf, prog, checker::Void { }, r.value, escaping, ret_regions, fn_body, dctx)
+        buf.write(CG_MAIN_RETURN_CLOSE)
+        return
     }
-    out = cb(out, "return ")
-    out = match emit_as_r(out, prog, ret_type, ret_type, r.value, escaping, ret_regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ";\n")
+    buf.write("return ")
+    emit_as_r(buf, prog, ret_type, ret_type, r.value, escaping, ret_regions, fn_body, dctx)
+    buf.write(";\n")
 }
 
-fn emit_loop(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    if l.init.len == 0 { return emit_loop_while(buf, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx) }
-    var out = cb(buf, indent)
-    out = cb(out, "{\n")
+fn emit_loop(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    if l.init.len == 0 { emit_loop_while(buf, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx); return }
+    buf.write(indent)
+    buf.write("{\n")
     var inner = cb_indent_deeper(indent)
-    out = match emit_block(out, l.init, in_main, prog, ret_type, inner, escaping, regions, fn_body, dctx, [], false) { Cb as o => o; error as err => return err }
-    out = match emit_loop_while(out, l, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, indent)
-    out = cb(out, "}\n")
-    out
+    emit_block(buf, l.init, in_main, prog, ret_type, inner, escaping, regions, fn_body, dctx, [], false)
+    emit_loop_while(buf, l, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx)
+    buf.write(indent)
+    buf.write("}\n")
 }
 
 fn emit_loop_while(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
