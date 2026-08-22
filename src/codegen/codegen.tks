@@ -983,7 +983,7 @@ fn cg_class_cleanup_text(prog: CgProg, escaping: []str, fn_body: []@TStatement()
                 var is_borrow = cg_binding_is_slice_element_borrow(b)
                 if name.len > 0 && name != "_" && b.kind != parser::BindKind::Const && !cg_str_in(escaping, name) && !referenced_in_tail && !is_borrow {
                     var cname = match b.bound { checker::Named as nm => nm.name; _ => "" }
-                    if cname.len > 0 && cg_is_class_named(prog, cname) {
+                    if cname.len > 0 && cg_is_class_named(prog, cname) && !cg_is_polymorphic_base(prog, cname) {
                         match cg_find_destruct_ns(prog, cname) {
                             str as ns => {
                                 out = teko::str::concat(out, cb_fn_name_str(ns, "destruct"))
@@ -3407,8 +3407,12 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
             else if last == "peak_rss" { builtin = "tk_peak_rss"; has_builtin = true }
         }
     }
-    if c.call_ns.len == 0 { panic("codegen: no resolved namespace") }
-    var cf_res = cg_find_function(prog, c.call_ns, p.segments[p.segments.len - 1].name)
+    if !has_builtin && c.call_ns.len == 0 { panic("codegen: no resolved namespace") }
+    var cf_res = if c.call_ns.len != 0 {
+        cg_find_function(prog, c.call_ns, p.segments[p.segments.len - 1].name)
+    } else {
+        error { message = "codegen: no resolved namespace" }
+    }
     if has_builtin {
         buf.write(builtin)
     } else if c.call_ns.len != 0 {
@@ -9839,23 +9843,13 @@ fn fn_items_index(prog: CgProg, f: checker::TFunction): u64 {
     0
 }
 
+/**
+ * The `.tsym` symbol map is debug-only (native-backend stack traces); emitting it is disabled
+ * to avoid the O(n²) whole-program string concatenation. Returns only the format header.
+ *
+ * @param prog  the checked program (unused while emission stays disabled)
+ * @return      the `.tsym` header line, with no per-function records
+ */
 fn tk_emit_tsym(prog: checker::TProgram): str {
-    var out = "# teko symbol map (.tsym v1): <c-symbol>\\t<teko-name>\\t<file>:<line>\n"
-    var i: u64 = 0
-    loop {
-        if i >= prog.items.len { break }
-        match prog.items[i] {
-            checker::TFunction as f => { out = teko::str::concat(out, tk_tsym_line(f)) }
-            _ => { }
-        }
-        i = i + 1
-    }
-    out
-}
-
-/** tk_tsym_line — the one-line `.tsym` record (`<c-symbol>\t<teko-name>\t<file>:<line>\n`) for a
- * single top-level function. */
-fn tk_tsym_line(f: checker::TFunction): str {
-    var qname = if f.namespace.len != 0 { teko::str::concat(f.namespace, teko::str::concat("::", f.name)) } else { f.name }
-    teko::str::concat(cb_fn_name_str(f.namespace, f.name, f.overload_suffix), teko::str::concat("\t", teko::str::concat(qname, teko::str::concat("\t", teko::str::concat(f.file, teko::str::concat(":", teko::str::concat(teko::u64_to_str(f.line to u64), "\n")))))))
+    "# teko symbol map (.tsym v1): disabled (debug-only, native backend)\n"
 }
