@@ -5722,62 +5722,142 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
     var types = pre.types
     var cenv = pre.env
     program = drop_comptime_items(program)
-    var items: []@TItem() = []
-    var mainbody: []@TStatement() = []
+    var outs: [program.items.len]TopItemOut = []
+    var total: u64 = 0
+    var mbtotal: u64 = 0
     var cur = cenv
     var i = 0
     loop {
         if i >= program.items.len { break }
-        var it = program.items[i]
-        cur = with_ns(cur, it.namespace)
-        var ienv = with_ns(cenv, it.namespace)
-        var line: u32 = 0
-        var col: u32 = 0
-        match it.content {
-            parser::Function as f => { line = f.line; col = f.col }
-            parser::TypeDecl as td => { line = td.line; col = td.col }
-            parser::ConstDecl as cd => { line = cd.line; col = cd.col }
-            _ => { }
-        }
-        match it.content {
-            (@Statement()) as s => {
-                var seq = match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
-                    TStmtSeq as x => x
-                    error as e => return surface_at(it.file, line, col, e)
-                }
-                var si: u64 = 0
-                loop {
-                    if si >= seq.stmts.len { break }
-                    items = [..items, seq.stmts[si]]
-                    mainbody = [..mainbody, seq.stmts[si]]
-                    si = si + 1
-                }
-                cur = seq.env
-            }
-            _ => {
-                var ti = match type_item(it, ienv, types) {
-                    (@TItem()) as x => x
-                    error as e => return surface_at(it.file, line, col, e)
-                }
-                items = [..items, ti]
-                match it.content {
-                    parser::TypeDecl as td => {
-                        var mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
-                        var mi2 = 0
-                        loop { if mi2 >= mitems.len { break }; items = [..items, mitems[mi2]]; mi2++ }
-                        var citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
-                        var ci2 = 0
-                        loop { if ci2 >= citems.len { break }; items = [..items, citems[ci2]]; ci2++ }
-                    }
-                    _ => { }
-                }
-            }
-        }
+        var out = match type_top_level_item(program.items[i], cur, cenv, types) { TopItemOut as x => x; error as e => return e }
+        outs[i] = out
+        total = total + out.items.len
+        mbtotal = mbtotal + out.mainbody.len
+        cur = out.env
         i++
     }
+    var items = flatten_titem_chunks(outs, total)
+    var mainbody = flatten_tstmt_chunks(outs, mbtotal)
     var lc = check_labels(mainbody, [], false, [])
     if lc.failed { return error { message = lc.message } }
     var tp = TProgram { items = items }
     var mono = match monomorphize(tp, types) { TProgram as mp => mp; error as e => return e }
     inline_consts(mono)
+}
+
+/**
+ * The typed output of one top-level program item: the `@TItem()`s it emits, the
+ * main-body statements it contributes, and the environment threaded to the next
+ * item.
+ */
+type TopItemOut = struct {
+    /** the typed items this program item emits, in order */
+    items: []@TItem()
+    /** the virtual-main statements this item contributes (empty for declarations) */
+    mainbody: []@TStatement()
+    /** the environment to feed the next top-level item */
+    env: Env
+}
+
+/**
+ * Type one top-level program item, returning its emitted items, its main-body
+ * contribution, and the environment for the next item.
+ *
+ * @param it     the program item to type
+ * @param cur    the environment threaded from the previous item
+ * @param cenv   the sealed namespace environment for declarations
+ * @param types  the resolved type table
+ * @return       the item's typed output and the next environment
+ * @throws        when typing the item or its members fails
+ */
+fn type_top_level_item(it: parser::Item, cur: Env, cenv: Env, types: TypeTable): TopItemOut | error {
+    var ns_cur = with_ns(cur, it.namespace)
+    var ienv = with_ns(cenv, it.namespace)
+    var line: u32 = 0
+    var col: u32 = 0
+    match it.content {
+        parser::Function as f => { line = f.line; col = f.col }
+        parser::TypeDecl as td => { line = td.line; col = td.col }
+        parser::ConstDecl as cd => { line = cd.line; col = cd.col }
+        _ => { }
+    }
+    match it.content {
+        (@Statement()) as s => {
+            var seq = match top_level_stmt_nodes(s, with_file(ns_cur, it.file), types) {
+                TStmtSeq as x => x
+                error as e => return surface_at(it.file, line, col, e)
+            }
+            return TopItemOut { items = stmts_as_items(seq.stmts); mainbody = seq.stmts; env = seq.env }
+        }
+        _ => { }
+    }
+    var ti = match type_item(it, ienv, types) {
+        (@TItem()) as x => x
+        error as e => return surface_at(it.file, line, col, e)
+    }
+    match it.content {
+        parser::TypeDecl as td => {
+            var mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
+            var citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
+            return TopItemOut { items = [..[ti], ..mitems, ..citems]; mainbody = []; env = ns_cur }
+        }
+        _ => { }
+    }
+    TopItemOut { items = [ti]; mainbody = []; env = ns_cur }
+}
+
+/**
+ * Reinterpret typed statements as top-level items (a statement is a valid item
+ * in the virtual main).
+ *
+ * @param stmts  the typed statements
+ * @return       an exact-sized item array holding the same nodes
+ */
+fn stmts_as_items(stmts: []@TStatement()): []@TItem() {
+    var out: [stmts.len]@TItem() = []
+    var i: u64 = 0
+    loop { if i >= stmts.len { break }; out[i] = stmts[i]; i++ }
+    out
+}
+
+/**
+ * Flatten the per-item typed-item lists into one exact-sized array.
+ *
+ * @param outs   the per-program-item typed outputs
+ * @param total  the summed length of every `items` list
+ * @return       the concatenated items in item-then-chunk order
+ */
+fn flatten_titem_chunks(outs: []TopItemOut, total: u64): []@TItem() {
+    var out: [total]@TItem() = []
+    var k: u64 = 0
+    var ci: u64 = 0
+    loop {
+        if ci >= outs.len { break }
+        var chunk = outs[ci].items
+        var cj: u64 = 0
+        loop { if cj >= chunk.len { break }; out[k] = chunk[cj]; k++; cj++ }
+        ci++
+    }
+    out
+}
+
+/**
+ * Flatten the per-item main-body statement lists into one exact-sized array.
+ *
+ * @param outs   the per-program-item typed outputs
+ * @param total  the summed length of every `mainbody` list
+ * @return       the concatenated statements in item-then-chunk order
+ */
+fn flatten_tstmt_chunks(outs: []TopItemOut, total: u64): []@TStatement() {
+    var out: [total]@TStatement() = []
+    var k: u64 = 0
+    var ci: u64 = 0
+    loop {
+        if ci >= outs.len { break }
+        var chunk = outs[ci].mainbody
+        var cj: u64 = 0
+        loop { if cj >= chunk.len { break }; out[k] = chunk[cj]; k++; cj++ }
+        ci++
+    }
+    out
 }
