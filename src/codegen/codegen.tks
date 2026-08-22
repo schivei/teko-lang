@@ -3491,38 +3491,42 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
     null
 }
 
-fn cg_emit_nn_guard(buf: Cb, prog: CgProg, recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "(")
-    out = match emit_type(out, prog, recv.type) { Cb as o => o; error as err => return err }
-    out = cb(out, ")tk_nn((void *)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, recv, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "), ")
-    out = cb_u64_digits(out, recv.line to u64)
-    out = cb(out, ", ")
-    out = cb_u64_digits(out, recv.col to u64)
-    cb(out, ")")
+fn cg_emit_nn_guard(buf: teko::io::FileStream, prog: CgProg, recv: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    buf.write("(")
+    match emit_type(buf, prog, recv.type) { error as err => return err; null => { } }
+    buf.write(")tk_nn((void *)(")
+    match emit_expr_ctx(buf, prog, checker::Void { }, recv, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write("), ")
+    cb_u64_digits(buf, recv.line to u64)
+    buf.write(", ")
+    cb_u64_digits(buf, recv.col to u64)
+    buf.write(")")
+    null
 }
 
-fn emit_field_access(buf: Cb, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_field_access(buf: teko::io::FileStream, prog: CgProg, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var is_slice = match fa.receiver.type { checker::Slice => true; _ => false }
     if is_slice && fa.field == "len" {
-        var o = cb(buf, "(")
-        o = match emit_expr_ctx(o, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        return cb(o, ".len)")
+        buf.write("(")
+        match emit_expr_ctx(buf, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        buf.write(".len)")
+        return null
     }
     var is_error = match fa.receiver.type { checker::Error => true; _ => false }
     if is_error {
-        var oe = cb(buf, "((")
-        oe = match emit_expr_ctx(oe, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        oe = cb(oe, ").")
-        oe = cb_str(oe, fa.field)
-        return cb(oe, ")")
+        buf.write("((")
+        match emit_expr_ctx(buf, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        buf.write(").")
+        buf.write(fa.field)
+        buf.write(")")
+        return null
     }
     var is_ref = match fa.receiver.type { checker::Reference => true; _ => false }
     if is_ref && fa.field == "value" {
-        var or = cb(buf, "(*(")
-        or = match emit_expr_ctx(or, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        return cb(or, "))")
+        buf.write("(*(")
+        match emit_expr_ctx(buf, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        buf.write("))")
+        return null
     }
     var is_class_recv = match fa.receiver.type {
         checker::Named as nm => cg_is_class_named(prog, nm.name)
@@ -3535,19 +3539,21 @@ fn emit_field_access(buf: Cb, prog: CgProg, fa: checker::TFieldAccess, escaping:
         }
         if recv_poly_base {
             var bname = match fa.receiver.type { checker::Named as nm => nm.name; _ => "" }
-            var ob = cb(buf, "((*((")
-            ob = mangle_type_name(ob, "", bname)
-            ob = cb(ob, " *)(")
-            ob = match emit_expr_ctx(ob, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            ob = cb(ob, ").data)).")
-            ob = cb_str(ob, fa.field)
-            return cb(ob, ")")
+            buf.write("((*((")
+            mangle_type_name(buf, "", bname)
+            buf.write(" *)(")
+            match emit_expr_ctx(buf, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write(").data)).")
+            buf.write(fa.field)
+            buf.write(")")
+            return null
         }
-        var oc = cb(buf, "((*")
-        oc = match cg_emit_nn_guard(oc, prog, fa.receiver, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        oc = cb(oc, ").")
-        oc = cb_str(oc, fa.field)
-        return cb(oc, ")")
+        buf.write("((*")
+        match cg_emit_nn_guard(buf, prog, fa.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        buf.write(").")
+        buf.write(fa.field)
+        buf.write(")")
+        return null
     }
     var fa_boxed = match fa.receiver.type {
         checker::Named as nm => match cg_find_struct_field_type(prog, nm.name, fa.field) {
@@ -3556,13 +3562,14 @@ fn emit_field_access(buf: Cb, prog: CgProg, fa: checker::TFieldAccess, escaping:
         }
         _ => false
     }
-    var out = cb(buf, "(")
-    if fa_boxed { out = cb(out, "*") }
-    out = cb(out, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ".")
-    out = cb_str(out, fa.field)
-    cb(out, "))")
+    buf.write("(")
+    if fa_boxed { buf.write("*") }
+    buf.write("(")
+    match emit_expr_ctx(buf, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write(".")
+    buf.write(fa.field)
+    buf.write("))")
+    null
 }
 
 fn cg_expr_diverges(e: checker::TExpr): bool {
@@ -3572,106 +3579,110 @@ fn cg_expr_diverges(e: checker::TExpr): bool {
     }
 }
 
-fn emit_index(buf: Cb, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_index(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, ix: checker::TIndex, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     match ix.receiver.type {
         checker::Slice as srt => {
             var elem = match srt.element {
                 checker::Void => return error { message = "codegen: indexing an untyped empty slice (internal: checker should reject)" }
                 _ => srt.element
             }
-            var lstmp = $"_ls{buf.len}"
-            var litmp = $"_li{buf.len + 1}"
-            var so = cb(buf, "({ ")
-            so = match emit_type(so, prog, elem) { Cb as o => o; error as err => return err }
-            so = cb(so, " const *")
-            so = cb(so, lstmp)
-            so = cb(so, " = (")
-            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            so = cb(so, ").ptr; uint64_t ")
-            so = cb(so, litmp)
-            so = cb(so, " = (uint64_t)(")
-            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            so = cb(so, "); ")
-            so = cb(so, litmp)
-            so = cb(so, " < (")
-            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            so = cb(so, ").len ? ")
-            so = cb(so, lstmp)
-            so = cb(so, "[")
-            so = cb(so, litmp)
-            so = cb(so, "]")
-            so = cb(so, " : (tk_panic_oob_at(")
-            so = cb_u64_digits(so, e.line to u64)
-            so = cb(so, ", ")
-            so = cb_u64_digits(so, e.col to u64)
-            so = cb(so, "), (")
-            so = match emit_type(so, prog, elem) { Cb as o => o; error as err => return err }
-            return cb(so, "){0}); })")
+            var lstmp = $"_ls{buf.gensym()}"
+            var litmp = $"_li{buf.gensym()}"
+            buf.write("({ ")
+            match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+            buf.write(" const *")
+            buf.write(lstmp)
+            buf.write(" = (")
+            match emit_expr_ctx(buf, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write(").ptr; uint64_t ")
+            buf.write(litmp)
+            buf.write(" = (uint64_t)(")
+            match emit_expr_ctx(buf, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write("); ")
+            buf.write(litmp)
+            buf.write(" < (")
+            match emit_expr_ctx(buf, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write(").len ? ")
+            buf.write(lstmp)
+            buf.write("[")
+            buf.write(litmp)
+            buf.write("]")
+            buf.write(" : (tk_panic_oob_at(")
+            cb_u64_digits(buf, e.line to u64)
+            buf.write(", ")
+            cb_u64_digits(buf, e.col to u64)
+            buf.write("), (")
+            match emit_type(buf, prog, elem) { error as err => return err; null => { } }
+            buf.write("){0}); })")
+            return null
         }
         checker::Str => { }
         _ => return error { message = "codegen: indexing a non-string value not yet supported" }
     }
-    var stmp = $"_s{buf.len}"
-    var itmp = $"_i{buf.len + 1}"
-    var out = cb(buf, "({ tk_str ")
-    out = cb(out, stmp)
-    out = cb(out, " = ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; uint64_t ")
-    out = cb(out, itmp)
-    out = cb(out, " = (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); ")
-    out = cb(out, itmp)
-    out = cb(out, " < ")
-    out = cb(out, stmp)
-    out = cb(out, ".len ? ")
-    out = cb(out, stmp)
-    out = cb(out, ".ptr[")
-    out = cb(out, itmp)
-    out = cb(out, "]")
-    var z = cb(out, " : (tk_panic_oob_at(")
-    z = cb_u64_digits(z, e.line to u64)
-    z = cb(z, ", ")
-    z = cb_u64_digits(z, e.col to u64)
-    cb(z, "), (tk_byte)0); })")
+    var stmp = $"_s{buf.gensym()}"
+    var itmp = $"_i{buf.gensym()}"
+    buf.write("({ tk_str ")
+    buf.write(stmp)
+    buf.write(" = ")
+    match emit_expr_ctx(buf, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write("; uint64_t ")
+    buf.write(itmp)
+    buf.write(" = (uint64_t)(")
+    match emit_expr_ctx(buf, prog, checker::Void { }, ix.index, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write("); ")
+    buf.write(itmp)
+    buf.write(" < ")
+    buf.write(stmp)
+    buf.write(".len ? ")
+    buf.write(stmp)
+    buf.write(".ptr[")
+    buf.write(itmp)
+    buf.write("]")
+    buf.write(" : (tk_panic_oob_at(")
+    cb_u64_digits(buf, e.line to u64)
+    buf.write(", ")
+    cb_u64_digits(buf, e.col to u64)
+    buf.write("), (tk_byte)0); })")
+    null
 }
 
-fn emit_in(buf: Cb, prog: CgProg, ie: checker::TInExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_in(buf: teko::io::FileStream, prog: CgProg, ie: checker::TInExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if ie.elems.len == 0 {
-        var z = cb(buf, "({ (void)(")
-        z = match emit_expr_ctx(z, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        return cb(z, "); 0; })")
+        buf.write("({ (void)(")
+        match emit_expr_ctx(buf, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        buf.write("); 0; })")
+        return null
     }
-    var tmp = $"_inv{buf.len}"
+    var tmp = $"_inv{buf.gensym()}"
     var str_in = match ie.lhs.type { checker::Str => true; _ => false }
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, ie.lhs.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, tmp)
-    out = cb(out, " = ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; ")
+    buf.write("({ ")
+    match emit_type(buf, prog, ie.lhs.type) { error as err => return err; null => { } }
+    buf.write(" ")
+    buf.write(tmp)
+    buf.write(" = ")
+    match emit_expr_ctx(buf, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write("; ")
     var i = 0
     loop {
         if i >= ie.elems.len { break }
-        if i > 0 { out = cb(out, " || ") }
+        if i > 0 { buf.write(" || ") }
         if str_in {
-            out = cb(out, "tk_str_eq(")
-            out = cb(out, tmp)
-            out = cb(out, ", ")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, ie.elems[i], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, ")")
+            buf.write("tk_str_eq(")
+            buf.write(tmp)
+            buf.write(", ")
+            match emit_expr_ctx(buf, prog, checker::Void { }, ie.elems[i], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write(")")
         } else {
-            out = cb(out, "(")
-            out = cb(out, tmp)
-            out = cb(out, " == ")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, ie.elems[i], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, ")")
+            buf.write("(")
+            buf.write(tmp)
+            buf.write(" == ")
+            match emit_expr_ctx(buf, prog, checker::Void { }, ie.elems[i], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write(")")
         }
         i++
     }
-    cb(out, "; })")
+    buf.write("; })")
+    null
 }
 
 fn emit_slice_of_len(buf: Cb, prog: CgProg, e: checker::TExpr, s: checker::TSliceOfLen, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
