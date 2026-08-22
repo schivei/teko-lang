@@ -1,5 +1,56 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (hand-harvest, isolated worktree, forward-only) — FILESTREAM CODEGEN WRITER + TSYM
+# EMISSION DISABLED. codegen.tks's C emitter now writes through teko::io::FileStream end to end
+# (the `cb` string-accumulator entry point is gone). Two genuine bugs the conversion surfaced are
+# fixed: (1) cg_class_cleanup_text unconditionally emitted `TK_ARENA_region_drop(x->__region)` for
+# any local bound to a class name, including the synthetic zero-field vtable-wrapper local
+# (`tk_base_NS__Class`) that codegen injects at the top of every method implementing a polymorphic
+# interface — that wrapper is a stack VALUE with no `__region` field, so the drop failed to
+# compile; the fix skips the whole cleanup block when the bound class is a polymorphic base
+# (`cg_is_polymorphic_base`). (2) emit_call_inner unconditionally panicked on an empty
+# `call_ns`, which a resolved builtin (e.g. `tk_peak_rss`) legitimately carries; the panic and the
+# `cg_find_function` lookup are now gated on `!has_builtin`. Separately, `tk_emit_tsym` — the
+# `.tsym` debug symbol map (native-backend stack traces only, not consumed by the C route or the
+# self-build) — is disabled down to its header line: its old body did
+# `out = teko::str::concat(out, tk_tsym_line(f))` in a loop over ~9200 functions, an O(n²)
+# copy-grow on the never-freed root arena that alone pushed the reseeded compiler's peak RSS from
+# ~3845 MB to ~9.2 GB; `tk_tsym_line` is removed as dead code with it.
+#
+# BOOTSTRAP CAPABILITY GAP, hand-harvested across it. The committed seed at this reseed's start
+# (sha256 8cd98f6d0a5471e56d5e07bdf9a008b5111cc1b8d619f48b72bac5e623322bb6, 21 022 072 bytes) predates
+# fix (1) in its OWN compiled class-cleanup logic, so gen0 built from it emits the same broken
+# `base->__region` dereference for FileStream's own Stream-interface methods when compiling THIS
+# tree's source — a chicken-and-egg gap fix (1) cannot close by itself, since gen0 executes its own
+# prior (unfixed) codegen regardless of what the fixed source text says. gen0's emitted gen1.c had
+# exactly 7 such malformed statements (one per FileStream method implementing Stream: write, flush,
+# close, write_bytes, write_byte, gensym, reset_gensym); each was hand-stripped (removing only the
+# `TK_ARENA_region_drop(base->__region); ` text — precisely what a compiler already carrying fix (1)
+# would have omitted for that binding) and the patched C linked with `cc` to produce a working
+# intermediate gen1. From gen1 onward the fixes are load-bearing in the running compiler and no
+# further hand edits are needed: gen1 built gen2 with zero occurrences of the broken pattern.
+#
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3, C AND binary byte-identical), backend C,
+# under `ulimit -v 6815744` (6.5 GiB), TEKO_BACKEND=c TEKO_CC=clang.
+#   - gen2.c == gen3.c byte-identical (20 328 171 bytes, the bytes of this file); gen2 == gen3
+#     binaries also byte-identical (7 295 464 bytes each).
+#   - Peaks: gen2 3845.1 MB (after-bodies), gen3 3811.6 MB (after-bodies) — back at the pre-tsym
+#     baseline, not the ~9.2 GB the O(n²) tsym loop produced.
+#   - Phase RSS (gen2, representative): after checker 2799.9 MB, after monomorph 3075.4 MB, after
+#     consteval 3418.0 MB, codegen after-lift 3555.0 MB, codegen after-decls 3773.9 MB, codegen
+#     after-bodies (peak) 3845.1 MB.
+#   - REPRODUCE (new seed): bootstrap/teko.c replaced with the harvested gen2.c above; gen0-NEW
+#     relinked from the NEW bootstrap/teko.c builds gen1-NEW, and gen1-NEW.c is byte-identical to
+#     the harvested C already at gen1 (the new seed IS the fixed algorithm — no capability gap
+#     remains). Peak of that confirmation run: 3845.6 MB.
+#   - EXTRA: build TEKO_MEM_PARANOID=1 (backend C, gen2 rebuilding the source) exits 0, peak
+#     3811.6 MB.
+#   - The DEGRAU (bootstrap/DEGRAU) remains declared — the published release still does not
+#     recognize this tree.
+#
+# ----------------------------------------------------------------------------------------------------
+# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — SLICE-PUSH-ZERO HARVEST. The spread
 # array-literal lowering (codegen.tks::emit_array_lit) no longer builds via tk_slice_push into a
 # growing accumulator: it binds each operand once, sums the exact total, allocates one
