@@ -5584,40 +5584,39 @@ fn cg_block_diverges_jump(stmts: []@TStatement()): bool {
     }
 }
 
-fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TExpr, body: []@TStatement(), sink: str, ci: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_arm_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), match_e: checker::TExpr, body: []@TStatement(), sink: str, ci: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     if cg_block_diverges_jump(body) {
-        return error { message = "codegen: break/continue inside a `match` used as a sub-expression not yet supported" }
+        panic("codegen: break/continue inside a `match` used as a sub-expression not yet supported")
     }
     if cg_block_diverges(body) {
-        var out = buf
         var cur = dctx
         var i = 0
         loop {
             if i + 1 >= body.len { break }
             match body[i] {
                 checker::TDeferStmt => { cur = dctx_register(cur, body[i]) }
-                _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false) { Cb as o => o; error as err => return err } }
+                _ => { emit_stmt(buf, body[i], false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false) }
             }
             i++
         }
         var last = body[body.len - 1]
-        return match last {
+        match last {
             checker::TExprStmt as es => match es.expr.kind {
-                checker::TIfExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur)
-                checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur)
-                _ => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false)
+                checker::TIfExpr as _ => emit_exprstmt_tail(buf, es.expr, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur)
+                checker::TMatchExpr as _ => emit_exprstmt_tail(buf, es.expr, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur)
+                _ => emit_stmt(buf, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false)
             }
-            _ => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false)
+            _ => emit_stmt(buf, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, cur, [], false)
         }
+        return
     }
     var defer_floor = dctx.defers.len
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
-    var region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
+    var region = if want_block { fresh_named("_tkbr", buf.gensym() to i64) } else { "" }
     var regs2 = if want_block { [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true); bound_names = cg_block_bound_names(body) }] } else { regions }
     var cur_blk = if want_block { body } else { [] }
-    var out = buf
     if want_block {
-        out = cb(out, ci); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
+        buf.write(ci); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr(regions)); buf.write(");\n")
     }
     var cur = dctx
     var i = 0
@@ -5625,89 +5624,88 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
         if i + 1 >= body.len { break }
         match body[i] {
             checker::TDeferStmt => { cur = dctx_register(cur, body[i]) }
-            _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", escaping, regs2, fn_body, cur, cur_blk, want_block) { Cb as o => o; error as err => return err } }
+            _ => { emit_stmt(buf, body[i], false, prog, ret_type, ci, "", escaping, regs2, fn_body, cur, cur_blk, want_block) }
         }
         i++
     }
-    if body.len == 0 { return error { message = "codegen: empty match arm body in value position" } }
+    if body.len == 0 { panic("codegen: empty match arm body in value position") }
     var fall = cg_append_direct_defers(dctx.defers, body)
     var last = body[body.len - 1]
     match last {
         checker::TExprStmt as es => {
-            out = emit_cov_lines(out, dctx.cov, cov_collect_expr(es.expr, []), ci)
-            out = cb(out, ci)
-            out = cb(out, sink)
-            out = cb(out, " = (")
+            emit_cov_lines(buf, dctx.cov, cov_collect_expr(es.expr, []), ci)
+            buf.write(ci)
+            buf.write(sink)
+            buf.write(" = (")
             if cg_expr_diverges(es.expr) {
-                out = match emit_expr_ctx(out, prog, checker::Void { }, es.expr, escaping, regs2, fn_body, cur) { Cb as o => o; error as err => return err }
-                out = cb(out, ", (")
-                out = match emit_type(out, prog, match_e.type) { Cb as o => o; error as err => return err }
-                out = cb(out, "){0}")
+                emit_expr_ctx(buf, prog, checker::Void { }, es.expr, escaping, regs2, fn_body, cur)
+                buf.write(", (")
+                emit_type(buf, prog, match_e.type)
+                buf.write("){0}")
             } else {
-                out = match emit_as_r(out, prog, ret_type, match_e.type, es.expr, escaping, regs2, fn_body, cur) { Cb as o => o; error as err => return err }
+                emit_as_r(buf, prog, ret_type, match_e.type, es.expr, escaping, regs2, fn_body, cur)
             }
-            out = cb(out, ");")
+            buf.write(");")
             if want_block {
                 if fall.len > defer_floor {
-                    out = cb(out, "\n")
-                    out = match emit_defers(out, fall, defer_floor, prog, ci, escaping, fn_body) { Cb as o => o; error as err => return err }
-                    out = cb(out, ci); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
+                    buf.write("\n")
+                    emit_defers(buf, fall, defer_floor, prog, ci, escaping, fn_body)
+                    buf.write(ci); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(region); buf.write("); "); buf.write(region); buf.write(" = NULL;")
                 } else {
-                    out = cb(out, " "); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
+                    buf.write(" "); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(region); buf.write("); "); buf.write(region); buf.write(" = NULL;")
                 }
-                cb(out, " break;\n")
+                buf.write(" break;\n")
             } else if fall.len > defer_floor {
-                out = cb(out, "\n")
-                out = match emit_defers(out, fall, defer_floor, prog, ci, escaping, fn_body) { Cb as o => o; error as err => return err }
-                out = cb(out, ci); out = cb(out, "break;\n")
-                out
+                buf.write("\n")
+                emit_defers(buf, fall, defer_floor, prog, ci, escaping, fn_body)
+                buf.write(ci); buf.write("break;\n")
             } else {
-                cb(out, " break;\n")
+                buf.write(" break;\n")
             }
         }
-        _ => error { message = "codegen: non-value trailing statement in a match arm used as a value" }
+        _ => panic("codegen: non-value trailing statement in a match arm used as a value")
     }
 }
 
-fn emit_match_value(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, m: checker::TMatchExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var subj = fresh_named("_s", buf.len to i64)
-    var res = fresh_named("_r", buf.len to i64 + 1)
+fn emit_match_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: checker::TExpr, m: checker::TMatchExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var subj = fresh_named("_s", buf.gensym() to i64)
+    var res = fresh_named("_r", buf.gensym() to i64)
     var subjT = m.subject.type
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, m.subject.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, subj)
-    out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); ")
-    out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, res)
-    out = cb(out, " = {0}; do {\n")
+    buf.write("({ ")
+    emit_type(buf, prog, m.subject.type)
+    buf.write(" ")
+    buf.write(subj)
+    buf.write(" = (")
+    emit_expr_ctx(buf, prog, checker::Void { }, m.subject, escaping, regions, fn_body, dctx)
+    buf.write("); ")
+    emit_type(buf, prog, e.type)
+    buf.write(" ")
+    buf.write(res)
+    buf.write(" = {0}; do {\n")
     var i = 0
     loop {
         if i >= m.arms.len { break }
         var arm = m.arms[i]
-        out = cb(out, "    if (")
-        out = match cg_emit_pat_test(out, prog, arm.pattern, subj, subjT) { Cb as o => o; error as err => return err }
-        out = cb(out, ") {\n")
-        out = match cg_emit_pat_binds(out, prog, arm.pattern, subj, subjT, "        ") { Cb as o => o; error as err => return err }
+        buf.write("    if (")
+        cg_emit_pat_test(buf, prog, arm.pattern, subj, subjT)
+        buf.write(") {\n")
+        cg_emit_pat_binds(buf, prog, arm.pattern, subj, subjT, "        ")
         var ci = "        "
         if arm.has_when {
-            out = cb(out, "        if (")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, ") {\n")
+            buf.write("        if (")
+            emit_expr_ctx(buf, prog, checker::Void { }, arm.guard, escaping, regions, fn_body, dctx)
+            buf.write(") {\n")
             ci = "            "
         }
-        out = emit_cov_branch(out, dctx.cov, e.line, e.col, i to u64, ci)
-        out = match emit_arm_value(out, prog, ret_type, e, arm.body, res, ci, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        if arm.has_when { out = cb(out, "        }\n") }
-        out = cb(out, "    }\n")
+        emit_cov_branch(buf, dctx.cov, e.line, e.col, i to u64, ci)
+        emit_arm_value(buf, prog, ret_type, e, arm.body, res, ci, escaping, regions, fn_body, dctx)
+        if arm.has_when { buf.write("        }\n") }
+        buf.write("    }\n")
         i++
     }
-    out = cb(out, "    } while (0); ")
-    out = cb(out, res)
-    cb(out, "; })")
+    buf.write("    } while (0); ")
+    buf.write(res)
+    buf.write("; })")
 }
 
 fn emit_match_tail(buf: Cb, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: @Type(), indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
