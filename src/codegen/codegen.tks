@@ -5708,117 +5708,117 @@ fn emit_match_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), 
     buf.write("; })")
 }
 
-fn emit_match_tail(buf: Cb, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: @Type(), indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var subj = fresh_named("_s", buf.len to i64)
-    var done = teko::str::concat(fresh_named("tk_mt", buf.len to i64 + 1), "_done")
+fn emit_match_tail(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: @Type(), indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var subj = fresh_named("_s", buf.gensym() to i64)
+    var done = teko::str::concat(fresh_named("tk_mt", buf.gensym() to i64), "_done")
     var subjT = m.subject.type
     var inner = cb_indent_deeper(indent)
     var inner2 = cb_indent_deeper(inner)
-    var out = cb(buf, indent)
-    out = cb(out, "{\n")
-    out = cb(out, inner)
-    out = match emit_type(out, prog, m.subject.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, subj)
-    out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ");\n")
+    buf.write(indent)
+    buf.write("{\n")
+    buf.write(inner)
+    emit_type(buf, prog, m.subject.type)
+    buf.write(" ")
+    buf.write(subj)
+    buf.write(" = (")
+    emit_expr_ctx(buf, prog, checker::Void { }, m.subject, escaping, regions, fn_body, dctx)
+    buf.write(");\n")
     var i = 0
     loop {
         if i >= m.arms.len { break }
         var arm = m.arms[i]
-        out = cb(out, inner)
-        out = cb(out, "if (")
-        out = match cg_emit_pat_test(out, prog, arm.pattern, subj, subjT) { Cb as o => o; error as err => return err }
-        out = cb(out, ") {\n")
-        out = match cg_emit_pat_binds(out, prog, arm.pattern, subj, subjT, inner2) { Cb as o => o; error as err => return err }
+        buf.write(inner)
+        buf.write("if (")
+        cg_emit_pat_test(buf, prog, arm.pattern, subj, subjT)
+        buf.write(") {\n")
+        cg_emit_pat_binds(buf, prog, arm.pattern, subj, subjT, inner2)
         var ci = inner2
         if arm.has_when {
-            out = cb(out, inner2)
-            out = cb(out, "if (")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, ") {\n")
+            buf.write(inner2)
+            buf.write("if (")
+            emit_expr_ctx(buf, prog, checker::Void { }, arm.guard, escaping, regions, fn_body, dctx)
+            buf.write(") {\n")
             ci = cb_indent_deeper(inner2)
         }
-        out = emit_cov_branch(out, dctx.cov, e.line, e.col, i to u64, ci)
+        emit_cov_branch(buf, dctx.cov, e.line, e.col, i to u64, ci)
         var tarm_base = dctx.defers.len
-        out = match emit_block_tail(out, arm.body, in_main, prog, ret_type, ci, "", escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+        emit_block_tail(buf, arm.body, in_main, prog, ret_type, ci, "", escaping, regions, fn_body, dctx)
         var tarm_term = if arm.body.len > 0 { cg_stmt_c_terminates(arm.body[arm.body.len - 1]) } else { false }
-        if !tarm_term { out = match emit_defers(out, cg_append_direct_defers(dctx.defers, arm.body), tarm_base, prog, ci, escaping, fn_body) { Cb as o => o; error as err => return err } }
-        out = cb(out, ci)
-        out = cb(out, "goto ")
-        out = cb(out, done)
-        out = cb(out, ";\n")
-        if arm.has_when { out = cb(out, inner2); out = cb(out, "}\n") }
-        out = cb(out, inner)
-        out = cb(out, "}\n")
+        if !tarm_term { emit_defers(buf, cg_append_direct_defers(dctx.defers, arm.body), tarm_base, prog, ci, escaping, fn_body) }
+        buf.write(ci)
+        buf.write("goto ")
+        buf.write(done)
+        buf.write(";\n")
+        if arm.has_when { buf.write(inner2); buf.write("}\n") }
+        buf.write(inner)
+        buf.write("}\n")
         i++
     }
-    out = cb(out, inner)
-    out = cb(out, done)
-    out = cb(out, ": ;\n")
-    out = match emit_match_tail_fallthrough_return(out, prog, ret_type, in_main, inner) { Cb as o => o; error as err => return err }
-    out = cb(out, indent)
-    cb(out, "}\n")
+    buf.write(inner)
+    buf.write(done)
+    buf.write(": ;\n")
+    emit_match_tail_fallthrough_return(buf, prog, ret_type, in_main, inner)
+    buf.write(indent)
+    buf.write("}\n")
 }
 
-fn emit_match_tail_fallthrough_return(buf: Cb, prog: CgProg, ret_type: @Type(), in_main: bool, inner: str): Cb | error {
-    if in_main { return buf }
-    if is_void_type(ret_type) { return buf }
-    var out = cb(buf, inner)
-    out = cb(out, "return (")
-    out = match emit_type(out, prog, ret_type) { Cb as o => o; error as err => return err }
-    cb(out, "){0};\n")
+fn emit_match_tail_fallthrough_return(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), in_main: bool, inner: str) {
+    if in_main { return }
+    if is_void_type(ret_type) { return }
+    buf.write(inner)
+    buf.write("return (")
+    emit_type(buf, prog, ret_type)
+    buf.write("){0};\n")
 }
 
-fn emit_match_stmt(buf: Cb, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
-    var subj = fresh_named("_s", buf.len to i64)
-    var done = teko::str::concat(fresh_named("tk_m", buf.len to i64 + 1), "_done")
+fn emit_match_stmt(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
+    var subj = fresh_named("_s", buf.gensym() to i64)
+    var done = teko::str::concat(fresh_named("tk_m", buf.gensym() to i64), "_done")
     var subjT = m.subject.type
     var inner = cb_indent_deeper(indent)
     var inner2 = cb_indent_deeper(inner)
-    var out = cb(buf, indent)
-    out = cb(out, "{\n")
-    out = cb(out, inner)
-    out = match emit_type(out, prog, m.subject.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, subj)
-    out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ");\n")
+    buf.write(indent)
+    buf.write("{\n")
+    buf.write(inner)
+    emit_type(buf, prog, m.subject.type)
+    buf.write(" ")
+    buf.write(subj)
+    buf.write(" = (")
+    emit_expr_ctx(buf, prog, checker::Void { }, m.subject, escaping, regions, fn_body, dctx)
+    buf.write(");\n")
     var i = 0
     loop {
         if i >= m.arms.len { break }
         var arm = m.arms[i]
-        out = cb(out, inner)
-        out = cb(out, "if (")
-        out = match cg_emit_pat_test(out, prog, arm.pattern, subj, subjT) { Cb as o => o; error as err => return err }
-        out = cb(out, ") {\n")
-        out = match cg_emit_pat_binds(out, prog, arm.pattern, subj, subjT, inner2) { Cb as o => o; error as err => return err }
+        buf.write(inner)
+        buf.write("if (")
+        cg_emit_pat_test(buf, prog, arm.pattern, subj, subjT)
+        buf.write(") {\n")
+        cg_emit_pat_binds(buf, prog, arm.pattern, subj, subjT, inner2)
         var ci = inner2
         if arm.has_when {
-            out = cb(out, inner2)
-            out = cb(out, "if (")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, ") {\n")
+            buf.write(inner2)
+            buf.write("if (")
+            emit_expr_ctx(buf, prog, checker::Void { }, arm.guard, escaping, regions, fn_body, dctx)
+            buf.write(") {\n")
             ci = cb_indent_deeper(inner2)
         }
-        out = emit_cov_branch(out, dctx.cov, e.line, e.col, i to u64, ci)
-        out = match emit_block_region(out, arm.body, in_main, prog, ret_type, ci, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        out = cb(out, ci)
-        out = cb(out, "goto ")
-        out = cb(out, done)
-        out = cb(out, ";\n")
-        if arm.has_when { out = cb(out, inner2); out = cb(out, "}\n") }
-        out = cb(out, inner)
-        out = cb(out, "}\n")
+        emit_cov_branch(buf, dctx.cov, e.line, e.col, i to u64, ci)
+        emit_block_region(buf, arm.body, in_main, prog, ret_type, ci, frame, escaping, regions, fn_body, dctx)
+        buf.write(ci)
+        buf.write("goto ")
+        buf.write(done)
+        buf.write(";\n")
+        if arm.has_when { buf.write(inner2); buf.write("}\n") }
+        buf.write(inner)
+        buf.write("}\n")
         i++
     }
-    out = cb(out, inner)
-    out = cb(out, done)
-    out = cb(out, ": ;\n")
-    out = cb(out, indent)
-    cb(out, "}\n")
+    buf.write(inner)
+    buf.write(done)
+    buf.write(": ;\n")
+    buf.write(indent)
+    buf.write("}\n")
 }
 
 fn emit_number(buf: Cb, prog: CgProg, e: checker::TExpr, n: checker::TNumber): Cb | error {
