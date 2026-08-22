@@ -8709,110 +8709,119 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
     }
 }
 
-fn cg_emit_lambda_decls(buf: Cb, prog: CgProg, lams: []checker::TLambda, protos_only: bool): Cb | error {
-    var out = buf
+fn cg_emit_lambda_decls(buf: teko::io::FileStream, prog: CgProg, lams: []checker::TLambda, protos_only: bool) {
     var li = 0
     loop {
         if li >= lams.len { break }
         var lam = lams[li]
         if protos_only {
-            out = cb(out, "typedef struct { ")
+            buf.write("typedef struct { ")
             var ci = 0
             loop {
                 if ci >= lam.captures.len { break }
-                out = match emit_type(out, prog, lam.captures[ci].type) { Cb as o => o; error as e => return e }
-                out = cb(out, " ")
-                out = cb_ident(out, lam.captures[ci].name)
-                out = cb(out, "; ")
+                emit_type(buf, prog, lam.captures[ci].type)
+                buf.write(" ")
+                cb_ident(buf, lam.captures[ci].name)
+                buf.write("; ")
                 ci++
             }
-            out = cb(cb_u64_digits(cb(out, "} __tkenv_"), lam.lift_id), ";\n")
+            buf.write("} __tkenv_"); cb_u64_digits(buf, lam.lift_id); buf.write(";\n")
         }
-        out = match emit_type(out, prog, lam.ret) { Cb as o => o; error as e => return e }
-        out = cb(out, " ")
-        out = cb_fn_name(out, "", lam_fn_name(lam.lift_id))
-        out = cb(out, "(void *envp")
+        emit_type(buf, prog, lam.ret)
+        buf.write(" ")
+        cb_fn_name(buf, "", lam_fn_name(lam.lift_id))
+        buf.write("(void *envp")
         var pi = 0
         loop {
             if pi >= lam.params.len { break }
-            out = cb(out, ", ")
-            out = match emit_type(out, prog, lam.params[pi].type) { Cb as o => o; error as e => return e }
-            out = cb(out, " ")
-            out = cb_ident(out, lam.params[pi].name)
+            buf.write(", ")
+            emit_type(buf, prog, lam.params[pi].type)
+            buf.write(" ")
+            cb_ident(buf, lam.params[pi].name)
             pi++
         }
-        out = cb(out, ")")
+        buf.write(")")
         if protos_only {
-            out = cb(out, ";\n")
+            buf.write(";\n")
         } else {
-            out = cb(out, " {\n")
-            out = cb(cb_u64_digits(cb(out, "    __tkenv_"), lam.lift_id), " *_e = envp;\n")
+            buf.write(" {\n")
+            buf.write("    __tkenv_"); cb_u64_digits(buf, lam.lift_id); buf.write(" *_e = envp;\n")
             var ui = 0
             loop {
                 if ui >= lam.captures.len { break }
-                out = cb(out, "    ")
-                out = match emit_type(out, prog, lam.captures[ui].type) { Cb as o => o; error as e => return e }
-                out = cb(out, " ")
-                out = cb_ident(out, lam.captures[ui].name)
-                out = cb(out, " = _e->")
-                out = cb_ident(out, lam.captures[ui].name)
-                out = cb(out, ";\n")
+                buf.write("    ")
+                emit_type(buf, prog, lam.captures[ui].type)
+                buf.write(" ")
+                cb_ident(buf, lam.captures[ui].name)
+                buf.write(" = _e->")
+                cb_ident(buf, lam.captures[ui].name)
+                buf.write(";\n")
                 ui++
             }
-            out = match emit_block_tail(out, lam.body, false, prog, lam.ret, "    ", "", [], [], lam.body, dctx_empty()) { Cb as o => o; error as e => return e }
-            out = cb(out, "}\n")
+            emit_block_tail(buf, lam.body, false, prog, lam.ret, "    ", "", [], [], lam.body, dctx_empty())
+            buf.write("}\n")
         }
         li++
     }
-    out
 }
 
-fn cb_vtthunk_name(buf: Cb, cd_name: str, idd_name: str, method: str): Cb {
-    cb_ident(cb(cb_tysym(cb(cb_tysym(cb(buf, "tk_vtthunk_"), cd_name), "__"), idd_name), "__"), method)
+fn cb_vtthunk_name(buf: teko::io::FileStream, cd_name: str, idd_name: str, method: str) {
+    buf.write("tk_vtthunk_")
+    cb_tysym(buf, cd_name)
+    buf.write("__")
+    cb_tysym(buf, idd_name)
+    buf.write("__")
+    cb_ident(buf, method)
 }
 
-fn cg_emit_vtthunk_def(buf: Cb, prog: CgProg, cd_name: str, idd_name: str, mns: str, method: str): Cb | error {
-    var f = match cg_find_function(prog, mns, method) { checker::TFunction as tf => tf; error => return error { message = "codegen: vtable thunk cannot resolve its concrete method (internal)" } }
-    if f.params.len == 0 { return error { message = "codegen: vtable thunk method has no receiver parameter (internal)" } }
-    var out = match emit_type(buf, prog, f.return_type) { Cb as o => o; error as err => return err }
-    out = cb_vtthunk_name(cb(out, " "), cd_name, idd_name, method)
-    out = cb(out, "(void *self")
+fn cg_emit_vtthunk_def(buf: teko::io::FileStream, prog: CgProg, cd_name: str, idd_name: str, mns: str, method: str) {
+    var f = match cg_find_function(prog, mns, method) { checker::TFunction as tf => tf; error => panic("codegen: vtable thunk cannot resolve its concrete method (internal)") }
+    if f.params.len == 0 { panic("codegen: vtable thunk method has no receiver parameter (internal)") }
+    emit_type(buf, prog, f.return_type)
+    buf.write(" ")
+    cb_vtthunk_name(buf, cd_name, idd_name, method)
+    buf.write("(void *self")
     var pi: u64 = 1
     loop {
         if pi >= f.params.len { break }
-        out = cb(out, ", ")
-        out = match emit_type_expr(out, prog, f.params[pi].type_ann, f.namespace) { Cb as o => o; error as err => return err }
-        out = cb(out, " ")
-        out = cb_ident(out, f.params[pi].name)
+        buf.write(", ")
+        emit_type_expr(buf, prog, f.params[pi].type_ann, f.namespace)
+        buf.write(" ")
+        cb_ident(buf, f.params[pi].name)
         pi++
     }
     var returns_void = match f.return_type { checker::Void => true; _ => false }
-    out = cb(out, ") { ")
-    out = cb(out, if returns_void { "" } else { "return " })
-    out = cb_fn_name(out, mns, method)
-    out = cb(out, "(")
-    out = match cg_emit_vtthunk_receiver(out, prog, cd_name, f.params[0].type_ann, f.namespace) { Cb as o => o; error as err => return err }
+    buf.write(") { ")
+    buf.write(if returns_void { "" } else { "return " })
+    cb_fn_name(buf, mns, method)
+    buf.write("(")
+    cg_emit_vtthunk_receiver(buf, prog, cd_name, f.params[0].type_ann, f.namespace)
     var ai: u64 = 1
     loop {
         if ai >= f.params.len { break }
-        out = cb(out, ", ")
-        out = cb_ident(out, f.params[ai].name)
+        buf.write(", ")
+        cb_ident(buf, f.params[ai].name)
         ai++
     }
-    cb(out, "); }\n")
+    buf.write("); }\n")
 }
 
-fn cg_emit_vtthunk_receiver(buf: Cb, prog: CgProg, cd_name: str, recv_ann: @TypeExpr(), recv_ns: str): Cb | error {
+fn cg_emit_vtthunk_receiver(buf: teko::io::FileStream, prog: CgProg, cd_name: str, recv_ann: @TypeExpr(), recv_ns: str) {
     var thunk_base = cg_vtthunk_base_name(recv_ann)
     if thunk_base.len > 0 && cg_is_polymorphic_base(prog, thunk_base) {
-        var out = cb_tysym(cb(buf, "(tk_base_"), thunk_base)
-        out = cb(out, "){ .data = self, .vtable = ")
-        out = cb_tysym(cb(cb_tysym(cb(out, "tk_vt_"), cd_name), "_"), thunk_base)
-        return cb(out, " }")
+        buf.write("(tk_base_")
+        cb_tysym(buf, thunk_base)
+        buf.write("){ .data = self, .vtable = ")
+        buf.write("tk_vt_")
+        cb_tysym(buf, cd_name)
+        buf.write("_")
+        cb_tysym(buf, thunk_base)
+        buf.write(" }")
+        return
     }
-    var out = cb(buf, "(")
-    out = match emit_type_expr(out, prog, recv_ann, recv_ns) { Cb as o => o; error as err => return err }
-    cb(out, ")self")
+    buf.write("(")
+    emit_type_expr(buf, prog, recv_ann, recv_ns)
+    buf.write(")self")
 }
 
 fn cg_vtthunk_base_name(recv_ann: @TypeExpr()): str {
@@ -8826,15 +8835,18 @@ fn cg_method_is_instance(m: parser::Function): bool {
     m.params.len > 0 && !m.params[0].has_type
 }
 
-fn cg_emit_vtable_slot(buf: Cb, prog: CgProg, cd_name: str, idd_name: str, m: parser::Function): Cb | error {
+fn cg_emit_vtable_slot(buf: teko::io::FileStream, prog: CgProg, cd_name: str, idd_name: str, m: parser::Function) {
     if cg_method_is_instance(m) {
-        return cb_vtthunk_name(cb(buf, "(void *)&"), cd_name, idd_name, m.name)
+        buf.write("(void *)&")
+        cb_vtthunk_name(buf, cd_name, idd_name, m.name)
+        return
     }
     var mns = match cg_find_method_ns(prog, cd_name, m.name) {
         str as ns2 => ns2
-        null => return error { message = "codegen: conforming class is missing a vtable method's stamped function (internal)" }
+        null => panic("codegen: conforming class is missing a vtable method's stamped function (internal)")
     }
-    cb_fn_name(cb(buf, "(void *)&"), mns, m.name)
+    buf.write("(void *)&")
+    cb_fn_name(buf, mns, m.name)
 }
 
 fn cg_pair_is_iface_vtable(cd: parser::TypeDecl, idd: parser::TypeDecl, vt_table: checker::TypeTable): bool {
@@ -8856,22 +8868,29 @@ fn cg_pair_is_base_vtable(prog: CgProg, cd: parser::TypeDecl, idd: parser::TypeD
     idd_is_poly_base && cd_is_a
 }
 
-fn cg_emit_vtable_def(buf: Cb, prog: CgProg, cd_name: str, idd_name: str, method_list: []parser::Function): Cb | error {
-    var b = cb_tysym(cb(cb_tysym(cb(buf, "static void *const tk_vt_"), cd_name), "_"), idd_name)
-    b = cb(b, "[] = {")
-    if method_list.len == 0 { b = cb(b, " (void *)0") }
+fn cg_emit_vtable_def(buf: teko::io::FileStream, prog: CgProg, cd_name: str, idd_name: str, method_list: []parser::Function) {
+    buf.write("static void *const tk_vt_")
+    cb_tysym(buf, cd_name)
+    buf.write("_")
+    cb_tysym(buf, idd_name)
+    buf.write("[] = {")
+    if method_list.len == 0 { buf.write(" (void *)0") }
     var i: u64 = 0
     loop {
         if i >= method_list.len { break }
-        b = cb(b, if i == 0 { " " } else { ", " })
-        b = match cg_emit_vtable_slot(b, prog, cd_name, idd_name, method_list[i]) { Cb as o => o; error as err => return err }
+        buf.write(if i == 0 { " " } else { ", " })
+        cg_emit_vtable_slot(buf, prog, cd_name, idd_name, method_list[i])
         i++
     }
-    cb(b, " };\n")
+    buf.write(" };\n")
 }
 
-fn cg_emit_vtable_thunks(buf: Cb, prog: CgProg, cd_name: str, idd_name: str, method_list: []parser::Function, emitted: []str): TThunkEmit | error {
-    var b = buf
+/** cg_vtthunk_name_str — the mangled C symbol for a class/interface vtable thunk, standalone. */
+fn cg_vtthunk_name_str(cd_name: str, idd_name: str, method: str): str {
+    teko::str::concat("tk_vtthunk_", teko::str::concat(cb_tysym_str(cd_name), teko::str::concat("__", teko::str::concat(cb_tysym_str(idd_name), teko::str::concat("__", cb_ident_str(method))))))
+}
+
+fn cg_emit_vtable_thunks(buf: teko::io::FileStream, prog: CgProg, cd_name: str, idd_name: str, method_list: []parser::Function, emitted: []str): []str {
     var seen = emitted
     var i: u64 = 0
     loop {
@@ -8879,27 +8898,26 @@ fn cg_emit_vtable_thunks(buf: Cb, prog: CgProg, cd_name: str, idd_name: str, met
         var m = method_list[i]
         i++
         if !cg_method_is_instance(m) { continue }
-        var key = str(cb_flat(cb_vtthunk_name(cb_new(), cd_name, idd_name, m.name)))
+        var key = cg_vtthunk_name_str(cd_name, idd_name, m.name)
         if cg_str_in(seen, key) { continue }
         var mns = match cg_find_method_ns(prog, cd_name, m.name) {
             str as ns2 => ns2
-            null => return error { message = "codegen: conforming class is missing a vtable method's stamped function (internal)" }
+            null => panic("codegen: conforming class is missing a vtable method's stamped function (internal)")
         }
-        b = match cg_emit_vtthunk_def(b, prog, cd_name, idd_name, mns, m.name) { Cb as o => o; error as err => return err }
+        cg_emit_vtthunk_def(buf, prog, cd_name, idd_name, mns, m.name)
         seen = [..seen, key]
     }
-    TThunkEmit { buf = b; emitted = seen }
+    seen
 }
 
-fn cg_emit_vtables_and_thunks(buf: Cb, prog: CgProg): Cb | error {
+fn cg_emit_vtables_and_thunks(buf: teko::io::FileStream, prog: CgProg) {
     var vt_table = cg_type_table(prog)
-    var b = match cg_emit_vtable_protos(buf, prog, vt_table) { Cb as o => o; error as err => return err }
-    b = match cg_emit_all_vtthunks(b, prog, vt_table) { Cb as o => o; error as err => return err }
-    cg_emit_all_vtable_defs(b, prog, vt_table)
+    cg_emit_vtable_protos(buf, prog, vt_table)
+    cg_emit_all_vtthunks(buf, prog, vt_table)
+    cg_emit_all_vtable_defs(buf, prog, vt_table)
 }
 
-fn cg_emit_vtable_protos(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): Cb | error {
-    var b = buf
+fn cg_emit_vtable_protos(buf: teko::io::FileStream, prog: CgProg, vt_table: checker::TypeTable) {
     var ci = 0
     loop {
         if ci >= prog.items.len { break }
@@ -8911,8 +8929,8 @@ fn cg_emit_vtable_protos(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): C
                         if ii >= prog.items.len { break }
                         match prog.items[ii] {
                             parser::TypeDecl as idd => {
-                                if cg_pair_is_iface_vtable(cd, idd, vt_table) { b = cb(cb_tysym(cb(cb_tysym(cb(b, "static void *const tk_vt_"), cd.name), "_"), idd.name), "[];\n") }
-                                if cg_pair_is_base_vtable(prog, cd, idd) { b = cb(cb_tysym(cb(cb_tysym(cb(b, "static void *const tk_vt_"), cd.name), "_"), idd.name), "[];\n") }
+                                if cg_pair_is_iface_vtable(cd, idd, vt_table) { cg_emit_vtable_proto_line(buf, cd.name, idd.name) }
+                                if cg_pair_is_base_vtable(prog, cd, idd) { cg_emit_vtable_proto_line(buf, cd.name, idd.name) }
                             }
                             _ => { }
                         }
@@ -8924,11 +8942,18 @@ fn cg_emit_vtable_protos(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): C
         }
         ci++
     }
-    b
 }
 
-fn cg_emit_all_vtthunks(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): Cb | error {
-    var b = buf
+/** cg_emit_vtable_proto_line — the extern-array forward declaration for a class/interface vtable. */
+fn cg_emit_vtable_proto_line(buf: teko::io::FileStream, cd_name: str, idd_name: str) {
+    buf.write("static void *const tk_vt_")
+    cb_tysym(buf, cd_name)
+    buf.write("_")
+    cb_tysym(buf, idd_name)
+    buf.write("[];\n")
+}
+
+fn cg_emit_all_vtthunks(buf: teko::io::FileStream, prog: CgProg, vt_table: checker::TypeTable) {
     var emitted: []str = []
     var ci = 0
     loop {
@@ -8942,14 +8967,12 @@ fn cg_emit_all_vtthunks(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): Cb
                         match prog.items[ii] {
                             parser::TypeDecl as idd => {
                                 if cg_pair_is_iface_vtable(cd, idd, vt_table) {
-                                    var ms = match checker::iface_methods_by_name(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: interface method list failed (internal)" } }
-                                    var r = match cg_emit_vtable_thunks(b, prog, cd.name, idd.name, ms, emitted) { TThunkEmit as e => e; error as err => return err }
-                                    b = r.buf; emitted = r.emitted
+                                    var ms = match checker::iface_methods_by_name(idd.name, vt_table) { []parser::Function as f => f; error => panic("codegen: interface method list failed (internal)") }
+                                    emitted = cg_emit_vtable_thunks(buf, prog, cd.name, idd.name, ms, emitted)
                                 }
                                 if cg_pair_is_base_vtable(prog, cd, idd) {
-                                    var bms = match checker::base_vtable_methods(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: base method list failed (internal)" } }
-                                    var r = match cg_emit_vtable_thunks(b, prog, cd.name, idd.name, bms, emitted) { TThunkEmit as e => e; error as err => return err }
-                                    b = r.buf; emitted = r.emitted
+                                    var bms = match checker::base_vtable_methods(idd.name, vt_table) { []parser::Function as f => f; error => panic("codegen: base method list failed (internal)") }
+                                    emitted = cg_emit_vtable_thunks(buf, prog, cd.name, idd.name, bms, emitted)
                                 }
                             }
                             _ => { }
@@ -8962,11 +8985,9 @@ fn cg_emit_all_vtthunks(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): Cb
         }
         ci++
     }
-    b
 }
 
-fn cg_emit_all_vtable_defs(buf: Cb, prog: CgProg, vt_table: checker::TypeTable): Cb | error {
-    var b = buf
+fn cg_emit_all_vtable_defs(buf: teko::io::FileStream, prog: CgProg, vt_table: checker::TypeTable) {
     var ci = 0
     loop {
         if ci >= prog.items.len { break }
@@ -8979,12 +9000,12 @@ fn cg_emit_all_vtable_defs(buf: Cb, prog: CgProg, vt_table: checker::TypeTable):
                         match prog.items[ii] {
                             parser::TypeDecl as idd => {
                                 if cg_pair_is_iface_vtable(cd, idd, vt_table) {
-                                    var ms = match checker::iface_methods_by_name(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: interface method list failed (internal)" } }
-                                    b = match cg_emit_vtable_def(b, prog, cd.name, idd.name, ms) { Cb as o => o; error as err => return err }
+                                    var ms = match checker::iface_methods_by_name(idd.name, vt_table) { []parser::Function as f => f; error => panic("codegen: interface method list failed (internal)") }
+                                    cg_emit_vtable_def(buf, prog, cd.name, idd.name, ms)
                                 }
                                 if cg_pair_is_base_vtable(prog, cd, idd) {
-                                    var bms = match checker::base_vtable_methods(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: base method list failed (internal)" } }
-                                    b = match cg_emit_vtable_def(b, prog, cd.name, idd.name, bms) { Cb as o => o; error as err => return err }
+                                    var bms = match checker::base_vtable_methods(idd.name, vt_table) { []parser::Function as f => f; error => panic("codegen: base method list failed (internal)") }
+                                    cg_emit_vtable_def(buf, prog, cd.name, idd.name, bms)
                                 }
                             }
                             _ => { }
@@ -8997,7 +9018,6 @@ fn cg_emit_all_vtable_defs(buf: Cb, prog: CgProg, vt_table: checker::TypeTable):
         }
         ci++
     }
-    b
 }
 
 type SyscallUse = struct {
