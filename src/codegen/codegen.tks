@@ -4066,83 +4066,85 @@ fn cg_find_struct_field_type(prog: CgProg, sname: str, fname: str): @TypeExpr() 
     null
 }
 
-fn emit_struct_init(buf: Cb, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_struct_init(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     return emit_struct_init_framed(buf, prog, e, si, "", escaping, regions, fn_body, dctx)
 }
 
-fn emit_struct_init_framed(buf: Cb, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_struct_init_framed(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var is_class = match e.type {
         checker::Named as nm => cg_is_class_named(prog, nm.name)
         _ => false
     }
     if is_class {
-        var id = buf.len to i64
+        var id = buf.gensym() to i64
         var rN = fresh_named("_clsr", id)
         var pN = fresh_named("_clsp", id)
-        var out = cb(buf, "({ tk_region *")
-        out = cb(out, rN)
-        out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "(")
-        out = cb(out, cg_enclosing_region_expr_framed(regions, frame))
-        out = cb(out, "); ")
-        out = match e.type { checker::Named as nm => mangle_type_name(out, "", nm.name); _ => out }
-        out = cb(out, " *")
-        out = cb(out, pN)
-        out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "(")
-        out = cb(out, rN)
-        out = cb(out, ", sizeof(*")
-        out = cb(out, pN)
-        out = cb(out, ")); *")
-        out = cb(out, pN)
-        out = cb(out, " = ")
-        out = match emit_struct_init_literal(out, prog, e, si, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        out = cb(out, "; ")
-        out = cb(out, pN)
-        out = cb(out, "->__region = ")
-        out = cb(out, rN)
-        out = cb(out, "; ")
-        out = cb(out, pN)
-        return cb(out, "; })")
+        buf.write("({ tk_region *")
+        buf.write(rN)
+        buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("(")
+        buf.write(cg_enclosing_region_expr_framed(regions, frame))
+        buf.write("); ")
+        match e.type { checker::Named as nm => mangle_type_name(buf, "", nm.name); _ => { } }
+        buf.write(" *")
+        buf.write(pN)
+        buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionAlloc); buf.write("(")
+        buf.write(rN)
+        buf.write(", sizeof(*")
+        buf.write(pN)
+        buf.write(")); *")
+        buf.write(pN)
+        buf.write(" = ")
+        match emit_struct_init_literal(buf, prog, e, si, frame, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        buf.write("; ")
+        buf.write(pN)
+        buf.write("->__region = ")
+        buf.write(rN)
+        buf.write("; ")
+        buf.write(pN)
+        buf.write("; })")
+        return null
     }
     emit_struct_init_literal(buf, prog, e, si, frame, escaping, regions, fn_body, dctx)
 }
 
-fn emit_struct_init_literal(buf: Cb, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_struct_init_literal(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var name = match e.type {
         checker::Named as nm => nm.name
         checker::Error => {
             if si.field_vals.len != 1 { return error { message = "codegen: error value must have exactly the `message` field (internal)" } }
-            var oe = cb(buf, "tk_error_make(")
-            oe = match emit_expr_ctx(oe, prog, checker::Void { }, si.field_vals[0], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-            return cb(oe, ")")
+            buf.write("tk_error_make(")
+            match emit_expr_ctx(buf, prog, checker::Void { }, si.field_vals[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write(")")
+            return null
         }
         _ => return error { message = "codegen: struct literal with a non-named type not yet supported" }
     }
-    var out = cb(buf, "(")
-    out = mangle_type_name(out, "", name)
-    out = cb(out, "){ ")
+    buf.write("(")
+    mangle_type_name(buf, "", name)
+    buf.write("){ ")
     var i = 0
     loop {
         if i >= si.field_names.len { break }
-        if i > 0 { out = cb(out, ", ") }
-        out = cb(out, ".")
-        out = cb_str(out, si.field_names[i])
-        out = cb(out, " = ")
+        if i > 0 { buf.write(", ") }
+        buf.write(".")
+        buf.write(si.field_names[i])
+        buf.write(" = ")
         var fv = si.field_vals[i]
         var fte_opt = cg_find_struct_field_type(prog, name, si.field_names[i])
         var boxed = match fte_opt {
             (@TypeExpr()) as fte => cg_field_boxed(prog, name, fte)
             null => false
         }
-        var bxid = out.len to i64
+        var bxid = buf.gensym() to i64
         var bxN = fresh_named("_bx", bxid)
         if boxed {
-            out = cb(out, "({ ")
-            match fte_opt { (@TypeExpr()) as fte => { out = match emit_type_expr(out, prog, fte, checker::name_qualifier(name)) { Cb as o => o; error as err => return err } }; null => { } }
-            out = cb(out, " *"); out = cb(out, bxN)
+            buf.write("({ ")
+            match fte_opt { (@TypeExpr()) as fte => { match emit_type_expr(buf, prog, fte, checker::name_qualifier(name)) { error as err => return err; null => { } } }; null => { } }
+            buf.write(" *"); buf.write(bxN)
             if frame.len > 0 {
-                out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "("); out = cb(out, frame); out = cb(out, ", sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+                buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionAlloc); buf.write("("); buf.write(frame); buf.write(", sizeof *"); buf.write(bxN); buf.write("); *"); buf.write(bxN); buf.write(" = ")
             } else {
-                out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::Alloc); out = cb(out, "(sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+                buf.write(" = "); cb_arena_sym(buf, CgArenaSym::Alloc); buf.write("(sizeof *"); buf.write(bxN); buf.write("); *"); buf.write(bxN); buf.write(" = ")
             }
         }
         var emitted: bool = match fv.kind {
@@ -4153,9 +4155,9 @@ fn emit_struct_init_literal(buf: Cb, prog: CgProg, e: checker::TExpr, si: checke
                         match fte_opt {
                             (@TypeExpr()) as fte => match fte {
                                 parser::SliceType as st => {
-                                    out = cb(out, "(")
-                                    out = match emit_type_expr(out, prog, fte, checker::name_qualifier(name)) { Cb as o => o; error as err => return err }
-                                    out = cb(out, "){ .ptr = 0, .len = 0 }")
+                                    buf.write("(")
+                                    match emit_type_expr(buf, prog, fte, checker::name_qualifier(name)) { error as err => return err; null => { } }
+                                    buf.write("){ .ptr = 0, .len = 0 }")
                                     true
                                 }
                                 _ => false
@@ -4189,22 +4191,24 @@ fn emit_struct_init_literal(buf: Cb, prog: CgProg, e: checker::TExpr, si: checke
                 null => { }
             }
             match exp_t {
-                checker::Void => { out = match emit_expr_ctx(out, prog, checker::Void { }, fv, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err } }
-                _ => { out = match emit_as_r_in(out, prog, checker::Void { }, exp_t, fv, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err } }
+                checker::Void => { match emit_expr_ctx(buf, prog, checker::Void { }, fv, escaping, regions, fn_body, dctx) { error as err => return err; null => { } } }
+                _ => { match emit_as_r_in(buf, prog, checker::Void { }, exp_t, fv, frame, escaping, regions, fn_body, dctx) { error as err => return err; null => { } } }
             }
         }
-        if boxed { out = cb(out, "; "); out = cb(out, bxN); out = cb(out, "; })") }
+        if boxed { buf.write("; "); buf.write(bxN); buf.write("; })") }
         i++
     }
-    cb(out, " }")
+    buf.write(" }")
+    null
 }
 
-fn emit_strlit(buf: Cb, s: checker::TStrLit): Cb | error {
-    var out = cb(buf, "(tk_str){ (const tk_byte *)\"")
-    out = cb_cstr_escaped(out, s.text)
-    out = cb(out, "\", ")
-    out = cb_i64(out, s.text.len to i64)
-    cb(out, " }")
+fn emit_strlit(buf: teko::io::FileStream, s: checker::TStrLit): error | null {
+    buf.write("(tk_str){ (const tk_byte *)\"")
+    cb_cstr_escaped(buf, s.text)
+    buf.write("\", ")
+    cb_i64(buf, s.text.len to i64)
+    buf.write(" }")
+    null
 }
 
 fn emit_bytestrlit(buf: Cb, s: checker::TByteStrLit): Cb | error {
