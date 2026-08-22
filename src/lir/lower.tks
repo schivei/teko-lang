@@ -672,16 +672,6 @@ fn close_native_regions_to(ctx: LowerCtx, floor: u64, line: u32, col: u32): Lowe
     cur
 }
 
-fn native_scope_region_of(stack: []NativeRegionFrame, name: str): u32 | null {
-    var i: u64 = stack.len
-    loop {
-        if i == 0 { break }
-        i = i - 1
-        if stack[i].decl_name == name { return stack[i].region_vreg }
-    }
-    null
-}
-
 pub fn lower_expr(ctx: LowerCtx, e: checker::TExpr): Lowered | error {
     match e.kind {
         checker::TNumber as n => lower_number(ctx, e, n)
@@ -4387,14 +4377,7 @@ fn lower_append_fo_call(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall): L
 fn lower_list_builtin(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall): LoweredFat | error {
     var last = cl.callee.segments[cl.callee.segments.len - 1].name
     if last == "empty" { return lower_list_empty(ctx, e) }
-    if last == "push" || last == "push_fo" { return lower_list_push(ctx, e, cl, slice_push_symbol(last)) }
-    if last == "grow_inplace" { return error { message = "native backend: `teko::list::grow_inplace` has no native lowering yet — the backend still models a slice as a 2-word `{ptr,len}` fat, and the 3-word `{ptr,len,cap}` header the primitive mutates is not yet represented natively" } }
-    error { message = "native backend N1: `teko::list::with_cap` has no native lowering yet (N2)" }
-}
-
-fn slice_push_symbol(last: str): str {
-    if last == "push_fo" { return "tk_slice_push_fo" }
-    "tk_slice_push"
+    error { message = teko::str::concat("native backend: `teko::list::", last, "`/`teko::mem::push_fo` slice-grow builtin is retired (NO PUSHES) — build with a sized `[]T` literal + index-fill instead") }
 }
 
 fn lower_list_empty(ctx: LowerCtx, e: checker::TExpr): LoweredFat {
@@ -4403,44 +4386,6 @@ fn lower_list_empty(ctx: LowerCtx, e: checker::TExpr): LoweredFat {
     var l = ctx_alloc(with_ptr)
     var with_len = ctx_append(l.ctx, const_int_inst(l.vreg, 0, e.line, e.col))
     LoweredFat { ctx = with_len; ptr = p.vreg; len = l.vreg }
-}
-
-fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str): LoweredFat | error {
-    if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` expects (slice, item) (internal)" } }
-    var elem = match push_elem_type(e, cl) { (@Type()) as t => t; error as err => return err }
-    var dst_fat = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
-    if is_fat_type(elem) { return lower_fat_element_push(dst_fat, cl.args[1], sym, e) }
-    lower_scalar_element_push(dst_fat, elem, cl.args[1], sym, e)
-}
-
-fn lower_scalar_element_push(dst_fat: LoweredFat, elem: @Type(), item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
-    var box_bytes = match push_box_bytes(elem, dst_fat.ctx) { u32 as n => n; error as err => return err }
-    var elem_lt = ltype_of(elem, dst_fat.ctx.enums)
-    if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
-    var lowered = match lower_value_into_type(dst_fat.ctx, elem, item) { Lowered as x => x; error as err => return err }
-    var boxed = box_aggregate_value(lowered, box_bytes, e)
-    var slot = reserve_item_slot(boxed.ctx, ltype_size(elem_lt), ltype_align(elem_lt), e)
-    var with_store = ctx_append(slot.ctx, store_inst(slot.vreg, boxed.vreg, elem_lt, e.line, e.col))
-    var esz = ctx_alloc(with_store)
-    var with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, ltype_size(elem_lt) to i64, e.line, e.col))
-    lower_len_out_call(with_esz, sym, push_head_args(dst_fat, slot.vreg, esz.vreg), e)
-}
-
-fn lower_fat_element_push(dst_fat: LoweredFat, item: checker::TExpr, sym: str, e: checker::TExpr): LoweredFat | error {
-    var fo = match lower_fat_expr(dst_fat.ctx, item) { LoweredFat as x => x; error as err => return err }
-    var slot = reserve_item_slot(fo.ctx, fat_slot_bytes(), ltype_align(LType::Ptr), e)
-    var with_store = store_fat_slot(slot.ctx, slot.vreg, fo, e.line, e.col)
-    var esz = ctx_alloc(with_store)
-    var with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, fat_slot_bytes() to i64, e.line, e.col))
-    lower_len_out_call(with_esz, sym, push_head_args(dst_fat, slot.vreg, esz.vreg), e)
-}
-
-fn push_box_bytes(t: @Type(), ctx: LowerCtx): u32 | error {
-    if is_register_value_type(t, ctx.enums) { return 0 to u32 }
-    match aggregate_box_bytes(t, ctx) {
-        u32 as n => n
-        null => unsized_aggregate_push_stop(aggregate_form_name(t))
-    }
 }
 
 fn aggregate_box_bytes(t: @Type(), ctx: LowerCtx): u32 | null {
@@ -4574,36 +4519,6 @@ fn is_register_value_type(t: @Type(), enums: []LEnumInfo): bool {
         checker::Named as n => match find_value_carrier(enums, n.name) { LEnumInfo as info => info.is_register; null => false }
         _ => false
     }
-}
-
-fn push_elem_type(e: checker::TExpr, cl: checker::TCall): @Type() | error {
-    match e.type {
-        checker::Slice as sl => match sl.element { checker::Void => { }; _ => return sl.element }
-        _ => return error { message = "native backend N1: `teko::list::push` result is not a slice (internal)" }
-    }
-    if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` result is not a concrete slice (internal)" } }
-    match cl.args[0].type {
-        checker::Slice as base_sl => match base_sl.element { checker::Void => { }; _ => return base_sl.element }
-        _ => { }
-    }
-    var it = cl.args[1].type
-    match it {
-        checker::Slice as item_sl => match item_sl.element {
-            checker::Void => return error { message = "native backend N1: `teko::list::push` result is not a concrete slice (internal)" }
-            _ => { }
-        }
-        _ => { }
-    }
-    it
-}
-
-fn reserve_item_slot(ctx: LowerCtx, bytes: u32, align: u32, e: checker::TExpr): Lowered {
-    var islot = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(islot.ctx, alloca_inst(islot.vreg, bytes, align, e.line, e.col)); vreg = islot.vreg }
-}
-
-fn push_head_args(dst_fat: LoweredFat, item_slot: u32, esz: u32): []u32 {
-    [..two_args(dst_fat.ptr, dst_fat.len), item_slot, esz]
 }
 
 fn merge_fat_value_args(ptr: u32, len: u32): []u32 {
@@ -5738,47 +5653,8 @@ fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign): LowerStmtOut | error {
     store_fat_through_addr(ctx, slot.slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
 }
 
-type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
-
-fn enter_self_append_region(ctx: LowerCtx, name: str, line: u32, col: u32): SelfAppendBracket {
-    match native_scope_region_of(ctx.region_stack, name) {
-        u32 as target => bracket_to_region(ctx, target, line, col)
-        null => enter_self_append_fallback(ctx, name, line, col)
-    }
-}
-
-fn bracket_to_region(ctx: LowerCtx, region_vreg: u32, line: u32, col: u32): SelfAppendBracket {
-    SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(region_vreg), false, line, col)); opened = true }
-}
-
-fn bracket_to_root(ctx: LowerCtx, line: u32, col: u32): SelfAppendBracket {
-    var rr = ctx_alloc(ctx)
-    var with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", [], false, line, col))
-    bracket_to_region(with_rr, rr.vreg, line, col)
-}
-
-fn enter_self_append_fallback(ctx: LowerCtx, name: str, line: u32, col: u32): SelfAppendBracket {
-    if binding_conveys_escape(ctx.escaping, name) { return SelfAppendBracket { ctx = ctx; opened = false } }
-    if ctx.region_stack.len == 0 { return SelfAppendBracket { ctx = ctx; opened = false } }
-    if ctx.region_stack[0].is_loop { return bracket_to_root(ctx, line, col) }
-    bracket_to_region(ctx, ctx.region_stack[0].region_vreg, line, col)
-}
-
-fn leave_self_append_region(ctx: LowerCtx, opened: bool, line: u32, col: u32): LowerCtx {
-    if !opened { return ctx }
-    ctx_append(ctx, void_call_inst("tk_region_leave", [], false, line, col))
-}
-
 fn lower_assign_plain_self_append(ctx: LowerCtx, slot: u32, a: checker::TAssign): LowerStmtOut | error {
-    match a.value.kind {
-        checker::TCall as c => {
-            var br = enter_self_append_region(ctx, a.name, a.value.line, a.value.col)
-            var fo = match lower_list_push(br.ctx, a.value, c, "tk_slice_push") { LoweredFat as x => x; error as err => return err }
-            var left = leave_self_append_region(fo.ctx, br.opened, a.value.line, a.value.col)
-            LowerStmtOut { ctx = store_fat_slot(left, slot, fo, a.value.line, a.value.col); terminated = false }
-        }
-        _ => store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
-    }
+    store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
 }
 
 fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign): bool {
@@ -5786,15 +5662,7 @@ fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign): bool {
 }
 
 fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign): LowerStmtOut | error {
-    match a.value.kind {
-        checker::TCall as c => {
-            var br = enter_self_append_region(ctx, a.name, a.value.line, a.value.col)
-            var fo = match lower_list_push(br.ctx, a.value, c, "tk_slice_push_fo") { LoweredFat as x => x; error as err => return err }
-            var left = leave_self_append_region(fo.ctx, br.opened, a.value.line, a.value.col)
-            LowerStmtOut { ctx = store_fat_slot(left, slot, fo, a.value.line, a.value.col); terminated = false }
-        }
-        _ => store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
-    }
+    store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
 }
 
 fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign): LowerStmtOut | error {

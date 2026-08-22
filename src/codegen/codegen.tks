@@ -3829,57 +3829,96 @@ fn emit_array_lit(buf: Cb, prog: CgProg, e: checker::TExpr, a: checker::TArrayLi
         return cb(out, " }; })")
     }
     var tag = buf.len
-    var accN = $"_sarr{tag}"
-    var capN = $"_scap{tag}"
+    var accN = $"_sacc{tag}"
+    var totN = $"_stot{tag}"
+    var posN = $"_spos{tag}"
     var out = cb(buf, "({ ")
+    out = match cg_array_lit_bind_operands(out, prog, e, a, elem, tag, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+    out = match cg_array_lit_total(out, a, totN, tag) { Cb as o => o; error as err => return err }
+    out = match cg_array_lit_alloc(out, prog, elem, accN, totN, posN) { Cb as o => o; error as err => return err }
+    out = cg_array_lit_fill(out, a, accN, posN, tag)
+    out = cb(out, "(")
     out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-    out = cb(out, " "); out = cb(out, accN); out = cb(out, " = { .ptr = 0, .len = 0 }; uint64_t "); out = cb(out, capN); out = cb(out, " = 0; ")
+    out = cb(out, "){ .ptr = "); out = cb(out, accN); out = cb(out, ", .len = "); out = cb(out, totN)
+    if cg_slice_rep_has_cap(elem) { out = cb(out, ", .cap = "); out = cb(out, totN) }
+    cb(out, " }; })")
+}
+
+fn cg_array_plain_count(a: checker::TArrayLit): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if !a.elements[i].is_spread { n = n + 1 }
+        i++
+    }
+    n
+}
+
+fn cg_array_lit_bind_operands(buf: Cb, prog: CgProg, e: checker::TExpr, a: checker::TArrayLit, elem: @Type(), tag: u64, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+    var out = buf
     var i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         var ae = a.elements[i]
-        var spN = $"_spp{tag}_{i}"
         if ae.is_spread {
-            var subN = $"_ssub{tag}_{i}"
-            var jN = $"_sj{tag}_{i}"
             out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, " "); out = cb(out, subN); out = cb(out, " = ")
+            out = cb(out, " "); out = cb(out, $"_ssub{tag}_{i}"); out = cb(out, " = ")
             out = match emit_expr_ctx(out, prog, checker::Void { }, ae.expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
             out = cb(out, "; ")
-            out = cb(out, "for (uint64_t "); out = cb(out, jN); out = cb(out, " = 0; ")
-            out = cb(out, jN); out = cb(out, " < "); out = cb(out, subN); out = cb(out, ".len; ")
-            out = cb(out, jN); out = cb(out, "++) { ")
-            out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, " *"); out = cb(out, spN); out = cb(out, " = (")
-            out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, "*)tk_slice_push("); out = cb(out, accN); out = cb(out, ".ptr, "); out = cb(out, accN); out = cb(out, ".len, &")
-            out = cb(out, subN); out = cb(out, ".ptr["); out = cb(out, jN); out = cb(out, "], sizeof(")
-            out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, "), &"); out = cb(out, capN); out = cb(out, "); if (!"); out = cb(out, spN); out = cb(out, ") abort(); ")
-            out = cb(out, accN); out = cb(out, " = (")
-            out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, "){ .ptr = "); out = cb(out, spN); out = cb(out, ", .len = "); out = cb(out, capN); out = cb(out, " }; } ")
         } else {
-            var tmpN = $"_sitm{tag}_{i}"
             out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, " "); out = cb(out, tmpN); out = cb(out, " = ")
+            out = cb(out, " "); out = cb(out, $"_sitm{tag}_{i}"); out = cb(out, " = ")
             out = match emit_as(out, prog, elem, ae.expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
             out = cb(out, "; ")
-            out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, " *"); out = cb(out, spN); out = cb(out, " = (")
-            out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, "*)tk_slice_push("); out = cb(out, accN); out = cb(out, ".ptr, "); out = cb(out, accN); out = cb(out, ".len, &")
-            out = cb(out, tmpN); out = cb(out, ", sizeof(")
-            out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, "), &"); out = cb(out, capN); out = cb(out, "); if (!"); out = cb(out, spN); out = cb(out, ") abort(); ")
-            out = cb(out, accN); out = cb(out, " = (")
-            out = match cg_slice_typename(out, elem) { Cb as o => o; error as err => return err }
-            out = cb(out, "){ .ptr = "); out = cb(out, spN); out = cb(out, ", .len = "); out = cb(out, capN); out = cb(out, " }; ")
         }
         i++
     }
-    var z = cb(out, accN)
-    cb(z, "; })")
+    out
+}
+
+fn cg_array_lit_total(buf: Cb, a: checker::TArrayLit, totN: str, tag: u64): Cb | error {
+    var out = cb(buf, "uint64_t "); out = cb(out, totN); out = cb(out, " = ")
+    out = cb_u64_digits(out, cg_array_plain_count(a))
+    var i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread {
+            out = cb(out, " + "); out = cb(out, $"_ssub{tag}_{i}"); out = cb(out, ".len")
+        }
+        i++
+    }
+    cb(out, "; ")
+}
+
+fn cg_array_lit_alloc(buf: Cb, prog: CgProg, elem: @Type(), accN: str, totN: str, posN: str): Cb | error {
+    var out = match emit_type(buf, prog, elem) { Cb as o => o; error as err => return err }
+    out = cb(out, " *"); out = cb(out, accN); out = cb(out, " = (")
+    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
+    out = cb(out, " *)tk_region_alloc(tk_region_current(), "); out = cb(out, totN); out = cb(out, " * sizeof(")
+    out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
+    out = cb(out, ")); uint64_t "); out = cb(out, posN); cb(out, " = 0; ")
+}
+
+fn cg_array_lit_fill(buf: Cb, a: checker::TArrayLit, accN: str, posN: str, tag: u64): Cb {
+    var out = buf
+    var i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread {
+            var subN = $"_ssub{tag}_{i}"
+            var jN = $"_sj{tag}_{i}"
+            out = cb(out, "for (uint64_t "); out = cb(out, jN); out = cb(out, " = 0; "); out = cb(out, jN)
+            out = cb(out, " < "); out = cb(out, subN); out = cb(out, ".len; "); out = cb(out, jN); out = cb(out, "++) { ")
+            out = cb(out, accN); out = cb(out, "["); out = cb(out, posN); out = cb(out, "++] = ")
+            out = cb(out, subN); out = cb(out, ".ptr["); out = cb(out, jN); out = cb(out, "]; } ")
+        } else {
+            out = cb(out, accN); out = cb(out, "["); out = cb(out, posN); out = cb(out, "++] = ")
+            out = cb(out, $"_sitm{tag}_{i}"); out = cb(out, "; ")
+        }
+        i++
+    }
+    out
 }
 
 fn emit_piece_lit(buf: Cb, piece: str): Cb {

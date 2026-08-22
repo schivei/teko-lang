@@ -1417,43 +1417,6 @@ void     tk_cov_branch_at(uint64_t fn, uint32_t line, uint32_t col, uint64_t out
 void     tk_cov_dump(const char *path);    // write the three sinks to a `.tkcov` file (child, cov-on)
 bool     tk_cov_merge(tk_str path);        // union a `.tkcov` into this process's sinks (parent)
 
-// tk_slice_push — the AMORTIZED lowering of `teko::list::push` (a `[]T` grow-by-one). The
-// language keeps value semantics (fixed slices, copy-to-grow — collections #2); this is purely a
-// codegen optimization so a LINEAR `b = push(b, x)` chain (the codegen output buffer is 1.4MB+
-// built this way) is O(1) amortized instead of O(n) copy-every-push → O(n²). A small cache of
-// recent "live tails" lets an in-place append happen when `ptr` is the current end of a buffer
-// this function grew (matched by ptr + length witness + element size, with spare capacity); ANY
-// other slice — a stale/shorter version, a different or untracked buffer, or a full one — COPIES
-// (geometric growth), so aliased/branched buffers never observe each other's appends (value-safe).
-// `elem` points at one element of `esz` bytes; `*out_len` receives the new length; returns the
-// (possibly same) data pointer.
-void *tk_slice_push(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len);
-// (S2 Level-1) region-aware variant — the grown buffer is allocated in `region` (a function frame
-// region `_tkfr`) instead of the process root, so a NON-escaping slice's whole buffer history is
-// bulk-freed when the frame drops. `tk_slice_push` is the root-region wrapper over this. Codegen
-// emits this only for a slice binding the escape analysis proves frame-local.
-void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len, tk_region *region);
-// (#148 S2 Level-2) free-old-on-grow variant — for a self-append whose chain the checker PROVED
-// linear: on a copy-grow the old buffer is PARKED on the free-list for reuse (realloc parity).
-void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len);
-// (enabling primitive — staged off; no compiler source calls this yet) tk_slice_with_cap_r —
-// allocate a FRESH, len-0 buffer sized for `cap` elements of `esz` bytes in `region`, and register
-// it as that region's live push-cache tail — so the very FIRST tk_slice_push/tk_slice_push_fo
-// append onto the returned slice takes the O(1) in-place path instead of copy-growing from empty.
-// The lowering of a future `teko::list::with_cap(cap)` whose final length is known up-front (the
-// #148 R3b fix — a builder that pre-sizes never pays the 1->2->4->8… doubling ladder at all). A
-// `cap` of 0 still yields a distinct non-NULL pointer (mirrors tk_alloc's n->1 convention).
-void *tk_slice_with_cap_r(uint64_t esz, uint64_t cap, tk_region *region);
-// tk_slice_with_cap — the default root-region lowering (unchanged contract), mirroring
-// tk_slice_push over tk_slice_push_r.
-void *tk_slice_with_cap(uint64_t esz, uint64_t cap);
-// tk_slice_grow_inplace — the Model A (#F3) in-place append primitive: append `elem` to the slice
-// whose {ptr,len,cap} header lives at `*hdr`, mutating the header DIRECTLY. len<cap writes ptr[len]
-// and bumps len (O(1)); len==cap reallocs to cap*2 (tk_panic on u64 overflow) then writes. NO global
-// push cache, NO defensive copy, NO slot collision — cap lives in the header. Sound ONLY under an
-// exclusive `ref` borrow (F1 is_unique_at proves no live copy). `esz` is sizeof(T); `region` is the
-// current allocation region (root/frame/phase). Distinct from tk_slice_push (the value form, kept).
-void tk_slice_grow_inplace(void *hdr, const void *elem, uint64_t esz, tk_region *region);
 // (#148 R2) bulk byte-append with free-old-on-grow BY DECREE (the linear cb emitter chain) — one
 // memcpy per fragment; the old buffer parks for reuse the moment a grow replaces it.
 void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_t n, uint64_t *out_len);
