@@ -6174,28 +6174,24 @@ fn cg_target_region_base(loops: []LoopDeferFrame, label: str): u64 {
     0
 }
 
-fn cg_drop_regions_from(buf: Cb, indent: str, regions: []RegionFrame, defer_floor: u64): Cb {
-    var out = buf
+fn cg_drop_regions_from(buf: teko::io::FileStream, indent: str, regions: []RegionFrame, defer_floor: u64) {
     var k = regions.len
     loop {
         if k <= defer_floor { break }
         var r = regions[k - 1]
-        out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
+        buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(r.name); buf.write("); "); buf.write(r.name); buf.write(" = NULL;\n")
         k = k - 1
     }
-    out
 }
 
-fn cg_drop_all_regions(buf: Cb, indent: str, regions: []RegionFrame): Cb {
-    var out = buf
+fn cg_drop_all_regions(buf: teko::io::FileStream, indent: str, regions: []RegionFrame) {
     var k = regions.len
     loop {
         if k == 0 { break }
         var r = regions[k - 1]
-        out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
+        buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(r.name); buf.write("); "); buf.write(r.name); buf.write(" = NULL;\n")
         k = k - 1
     }
-    out
 }
 
 fn cg_binding_routes_box_to_local_region(prog: CgProg, b: checker::TBinding): bool {
@@ -6238,8 +6234,7 @@ fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []@TStatemen
     false
 }
 
-fn emit_block(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
-    var out = buf
+fn emit_block(buf: teko::io::FileStream, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
     var cur = dctx
     var i: u64 = 0
     loop {
@@ -6248,90 +6243,93 @@ fn emit_block(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, ret_t
         match s {
             checker::TDeferStmt => { cur = dctx_register(cur, s) }
             _ => {
-                out = match emit_stmt(out, s, in_main, prog, ret_type, indent, "", escaping, regions, fn_body, cur, cur_block, cur_block_is_value) { Cb as o => o; error as err => return err }
+                emit_stmt(buf, s, in_main, prog, ret_type, indent, "", escaping, regions, fn_body, cur, cur_block, cur_block_is_value)
             }
         }
         i++
     }
-    out
 }
 
-fn emit_block_region(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_block_region(buf: teko::io::FileStream, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, body)
     var want_block = (cg_block_has_block_local(prog, escaping, fn_body, body, false) || (dctx.rr.len > 0 && cg_block_wants_region(body))) && regions.len < 64
     if !want_block {
-        var out = match emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, dctx, [], false) { Cb as o => o; error as err => return err }
-        return emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body)
+        emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, dctx, [], false)
+        emit_defers(buf, fall, defer_floor, prog, indent, escaping, fn_body)
+        return
     }
-    var region = fresh_named("_tkbr", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+    var region = fresh_named("_tkbr", buf.gensym() to i64)
+    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr_framed(regions, frame)); buf.write(");\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false); bound_names = cg_block_bound_names(body) }]
-    out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false) { Cb as o => o; error as err => return err }
-    out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
-    out
+    emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false)
+    emit_defers(buf, fall, defer_floor, prog, indent, escaping, fn_body)
+    buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(region); buf.write("); "); buf.write(region); buf.write(" = NULL;\n")
 }
 
-fn emit_exprstmt_tail(buf: Cb, x: checker::TExpr, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_exprstmt_tail(buf: teko::io::FileStream, x: checker::TExpr, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     match x.kind {
         checker::TIfExpr as f => {
-            var bh = emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent)
-            if !f.has_else { return emit_if_stmt(bh, f, x.line, x.col, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, [], false) }
-            var out = cb(bh, indent)
-            out = cb(out, "if (")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            out = cb(out, ") {\n")
+            emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent)
+            if !f.has_else { emit_if_stmt(buf, f, x.line, x.col, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, [], false); return }
+            buf.write(indent)
+            buf.write("if (")
+            emit_expr_ctx(buf, prog, checker::Void { }, f.cond, escaping, regions, fn_body, dctx)
+            buf.write(") {\n")
             var inner = cb_indent_deeper(indent)
-            out = emit_cov_branch(out, dctx.cov, x.line, x.col, 0, inner)
+            emit_cov_branch(buf, dctx.cov, x.line, x.col, 0, inner)
             var then_base = dctx.defers.len
-            out = match emit_block_tail(out, f.then_blk, in_main, prog, ret_type, inner, "", escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+            emit_block_tail(buf, f.then_blk, in_main, prog, ret_type, inner, "", escaping, regions, fn_body, dctx)
             var then_term = if f.then_blk.len > 0 { cg_stmt_c_terminates(f.then_blk[f.then_blk.len - 1]) } else { false }
-            if !then_term { out = match emit_defers(out, cg_append_direct_defers(dctx.defers, f.then_blk), then_base, prog, inner, escaping, fn_body) { Cb as o => o; error as err => return err } }
-            out = cb(out, indent)
-            out = cb(out, "} else {\n")
-            out = emit_cov_branch(out, dctx.cov, x.line, x.col, 1, inner)
+            if !then_term { emit_defers(buf, cg_append_direct_defers(dctx.defers, f.then_blk), then_base, prog, inner, escaping, fn_body) }
+            buf.write(indent)
+            buf.write("} else {\n")
+            emit_cov_branch(buf, dctx.cov, x.line, x.col, 1, inner)
             var else_base = dctx.defers.len
-            out = match emit_block_tail(out, f.else_blk, in_main, prog, ret_type, inner, "", escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+            emit_block_tail(buf, f.else_blk, in_main, prog, ret_type, inner, "", escaping, regions, fn_body, dctx)
             var else_term = if f.else_blk.len > 0 { cg_stmt_c_terminates(f.else_blk[f.else_blk.len - 1]) } else { false }
-            if !else_term { out = match emit_defers(out, cg_append_direct_defers(dctx.defers, f.else_blk), else_base, prog, inner, escaping, fn_body) { Cb as o => o; error as err => return err } }
-            out = cb(out, indent)
-            cb(out, "}\n")
+            if !else_term { emit_defers(buf, cg_append_direct_defers(dctx.defers, f.else_blk), else_base, prog, inner, escaping, fn_body) }
+            buf.write(indent)
+            buf.write("}\n")
         }
-        checker::TMatchExpr as m => emit_match_tail(emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent), prog, x, m, in_main, ret_type, indent, escaping, regions, fn_body, dctx)
+        checker::TMatchExpr as m => {
+            emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent)
+            emit_match_tail(buf, prog, x, m, in_main, ret_type, indent, escaping, regions, fn_body, dctx)
+        }
         _ => {
-            var bl = emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent)
+            emit_cov_lines(buf, dctx.cov, cov_collect_expr(x, []), indent)
             if is_void_type(x.type) {
-                var out = cb(bl, indent)
-                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-                out = cb(out, ";\n")
-                return emit_defers(out, dctx.defers, 0, prog, indent, escaping, fn_body)
+                buf.write(indent)
+                emit_expr_ctx(buf, prog, checker::Void { }, x, escaping, regions, fn_body, dctx)
+                buf.write(";\n")
+                emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body)
+                return
             }
-            var out = match emit_defers(bl, dctx.defers, 0, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-            out = cg_drop_all_regions(out, indent, regions)
+            emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body)
+            cg_drop_all_regions(buf, indent, regions)
             if !in_main {
-                var cleanup = match cg_class_cleanup_text(prog, escaping, fn_body, true, x) { str as c => c; error as e => return e }
-                if cleanup.len > 0 { out = cb(out, indent); out = cb(out, cleanup); out = cb(out, "\n") }
+                var cleanup = match cg_class_cleanup_text(prog, escaping, fn_body, true, x) { str as c => c; error as e => panic(e.message) }
+                if cleanup.len > 0 { buf.write(indent); buf.write(cleanup); buf.write("\n") }
             }
             if !in_main {
-                out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
-                out = cg_return_frame_exit(out, indent, frame, dctx)
+                cg_emit_bracket_unwind(buf, indent, dctx.bracket_depth)
+                cg_return_frame_exit(buf, indent, frame, dctx)
             }
-            out = cb(out, indent)
+            buf.write(indent)
             if in_main {
-                out = cb(out, CG_MAIN_RETURN_OPEN)
-                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
-                return cb(out, CG_MAIN_RETURN_CLOSE)
+                buf.write(CG_MAIN_RETURN_OPEN)
+                emit_expr_ctx(buf, prog, checker::Void { }, x, escaping, [], fn_body, dctx)
+                buf.write(CG_MAIN_RETURN_CLOSE)
+                return
             }
-            out = cb(out, "return ")
-            out = match emit_as_r(out, prog, ret_type, ret_type, x, escaping, [], fn_body, dctx) { Cb as o => o; error as err => return err }
-            cb(out, ";\n")
+            buf.write("return ")
+            emit_as_r(buf, prog, ret_type, ret_type, x, escaping, [], fn_body, dctx)
+            buf.write(";\n")
         }
     }
 }
 
-fn emit_block_tail(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = buf
+fn emit_block_tail(buf: teko::io::FileStream, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var cur = dctx
     var i: u64 = 0
     loop {
@@ -6340,40 +6338,40 @@ fn emit_block_tail(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, 
         match s {
             checker::TDeferStmt => { cur = dctx_register(cur, s) }
             _ => {
-                out = match emit_stmt(out, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, cur, [], false) { Cb as o => o; error as err => return err }
+                emit_stmt(buf, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, cur, [], false)
             }
         }
         i++
     }
-    if body.len == 0 { return out }
+    if body.len == 0 { return }
     var last = body[body.len - 1]
     match last {
-        checker::TDeferStmt => out
-        checker::TExprStmt as es => emit_exprstmt_tail(out, es.expr, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, cur)
-        _ => emit_stmt(out, last, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, cur, [], false)
+        checker::TDeferStmt => { }
+        checker::TExprStmt as es => emit_exprstmt_tail(buf, es.expr, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, cur)
+        _ => emit_stmt(buf, last, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, cur, [], false)
     }
 }
 
-fn emit_if_stmt(buf: Cb, f: checker::TIfExpr, line: u32, col: u32, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
-    var out = cb(buf, indent)
-    out = cb(out, "if (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ") {\n")
+fn emit_if_stmt(buf: teko::io::FileStream, f: checker::TIfExpr, line: u32, col: u32, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
+    buf.write(indent)
+    buf.write("if (")
+    emit_expr_ctx(buf, prog, checker::Void { }, f.cond, escaping, regions, fn_body, dctx)
+    buf.write(") {\n")
     var inner = cb_indent_deeper(indent)
-    out = emit_cov_branch(out, dctx.cov, line, col, 0, inner)
-    out = match emit_block_region(out, f.then_blk, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+    emit_cov_branch(buf, dctx.cov, line, col, 0, inner)
+    emit_block_region(buf, f.then_blk, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx)
     if f.has_else {
-        out = cb(out, indent)
-        out = cb(out, "} else {\n")
-        out = emit_cov_branch(out, dctx.cov, line, col, 1, inner)
-        out = match emit_block_region(out, f.else_blk, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+        buf.write(indent)
+        buf.write("} else {\n")
+        emit_cov_branch(buf, dctx.cov, line, col, 1, inner)
+        emit_block_region(buf, f.else_blk, in_main, prog, ret_type, inner, frame, escaping, regions, fn_body, dctx)
     } else if dctx.cov.on {
-        out = cb(out, indent)
-        out = cb(out, "} else {\n")
-        out = emit_cov_branch(out, dctx.cov, line, col, 1, inner)
+        buf.write(indent)
+        buf.write("} else {\n")
+        emit_cov_branch(buf, dctx.cov, line, col, 1, inner)
     }
-    out = cb(out, indent)
-    cb(out, "}\n")
+    buf.write(indent)
+    buf.write("}\n")
 }
 
 fn emit_binding(buf: Cb, prog: CgProg, ret_type: @Type(), b: checker::TBinding, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
