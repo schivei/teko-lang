@@ -1,5 +1,34 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (forward-only) — RUNTIME-PRELUDE `teko::sys` PATH FIX. `rt_prelude_paths_for`
+# (src/build/project.tks) computed `parent` (the shipped-runtime dir with its last path segment
+# stripped, e.g. src/runtime -> src) for the `teko::sys` branch, but the `return` still built its
+# path from `rt` unchanged — resolving `<rt>/sys/sys.tks` (src/runtime/sys/sys.tks, which does not
+# exist) instead of `<parent>/sys/sys.tks` (src/sys/sys.tks, the real shipped location). Every
+# fresh external `binary`/`tool` project without its own `teko::sys` source file failed the
+# runtime-prelude injection outright with "cannot read shipped source". Fixed by returning
+# `parent` (already computed, previously unused) instead of `rt`. One-line diff.
+#
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3, C AND binary byte-identical), backend C,
+# under `ulimit -v 6815744` (6.5 GiB), TEKO_BACKEND=c TEKO_CC=clang.
+#   - gen2.c == gen3.c byte-identical (20 337 601 bytes); gen2 == gen3 binaries also
+#     byte-identical (7 304 160 bytes each).
+#   - Peaks: gen1 3848.7 MB, gen2 3816.6 MB, gen3 3816.0 MB.
+#   - `cc -std=c2x -w` over gen2.c + teko_rt.c + assert.c: clean, exit 0, no output.
+#   - REPRODUCE (new seed): bootstrap/teko.c replaced with the harvested gen2.c above; gen0-NEW
+#     relinked from the NEW bootstrap/teko.c builds gen1-NEW, and gen1-NEW.c is byte-identical to
+#     the harvested C already at gen1. Peak of that confirmation run: 3848.7 MB.
+#   - EXTRA: build TEKO_MEM_PARANOID=1 (backend C, gen1 rebuilding the source) exits 0, peak
+#     3816.6 MB.
+#   - Regression proof (the point of the fix, not just the reseed): a fresh minimal external
+#     `binary` project with no `teko::sys` source of its own, built with the PRE-fix gen0, failed
+#     `cannot read shipped source '.../src/runtime/sys/sys.tks' for namespace teko::sys`; the same
+#     project, built with the POST-fix gen1 (backend C), compiles and links to exit 0.
+#   - Native backend is out of scope for this gate — deferred per standing project convention.
+#
+# ----------------------------------------------------------------------------------------------------
+# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
+#
 # RESEED (forward-only) — .tkh CONTRACT-HEADER WRITER CONVERTED TO FileStream + EMITTED IN ALL
 # ARTIFACT KINDS. src/emit/tkh.tks's writer no longer accumulates the whole header body into one
 # []byte (the `write_header`/`write_tyexports`/`write_fnsigs`/... family and `emit_tkh` itself);
