@@ -47,6 +47,7 @@ Not blocked by any open dependency; this is executable design.
   (C12 fuses check+lower+emit; C11 only provides the linked table).
 - `src/emit/tkb_frame.tks` (the `.tkb` decl projection, `reducao…` 286-288) — REUSE its exported-decl
   projection, EXTENDED to include `pub` (not only `exp`), as the incomplete-AST/internal-FFI carrier.
+  > **PHASE NOTE (owner 2026-08-22):** This `.tkb` carrier / FFI-via-projection is a NATIVE/PACKAGE phase design (separate compilation, deferred with native backend). It does NOT apply to the C route. In the C route, cross-unit FFI in the per-unit pipeline is IN-MEMORY (signatures, no serialization, no `.tkb`) — an emitted binary does not emit `.tkb`. Do not pull this design out of phase.
 - NEW module skeleton: `src/build/link.tks` — the LINK barrier + the `InternalFfi` table type. New decls below.
 - Existing types touched: `parser::Program`/`parser::Item` (the parse output), `checker::TProgram` (the check
   input).
@@ -113,6 +114,7 @@ fn link_units(units: []IncompleteUnit): InternalFfi | error
    linkage plane, C15).
 4. **Reuse the `.tkb` decl projection** (`reducao…` 286-288), extended to include `pub`, as the incomplete-AST
    carrier — do NOT invent a new frame unless the minimal `exp`+`pub`+pendings projection needs one.
+   > **PHASE NOTE (owner 2026-08-22):** This `.tkb` carrier design is NATIVE/PACKAGE phase (deferred with backend native), not C route. C-route cross-unit FFI is IN-MEMORY only (no `.tkb` serialization). Do not advance this design into C-phase work.
 5. **Additive — coexists with whole-program.** C11 does NOT yet stream check+lower+emit (that is C12); it adds
    the parse-per-unit + LINK path while the whole-program path still produces `teko.c`. `teko.c` stays
    byte-identical (`reducao…` 288, Fixpoint).

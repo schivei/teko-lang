@@ -287,6 +287,11 @@ do link e precisa dos tipos Teko). O `.tkh` (só `exp`) é emitido à parte, ort
 projeção de decls do `.tkb` (`emit/tkb_frame.tks`), estendida para incluir `pub`. Aditivo
 (convive com whole-program). Fixpoint.
 
+> **NOTA DE FASE (dono 2026-08-22):** este carrier `.tkb`/FFI-via-projeção é da FASE NATIVE/PACKAGE
+> (compilação separada, deferida com o backend native). NÃO se aplica à rota C. Na rota C, a FFI
+> cross-unit do pipeline per-unit é IN-MEMORY (assinaturas, sem serialização, sem `.tkb`) — um
+> binário não emite `.tkb`. Não puxar este design pra fora de fase.
+
 ### C12 — Check+lower+emit FUNDIDOS por unidade (despejo em memória = C6)
 Reestruturar `backend`/`codegen_and_report` para iterar namespaces em ordem determinística:
 (re)carrega corpos da unidade, checa contra a FFI interna (C11), lowera, emite a
