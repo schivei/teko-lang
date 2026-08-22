@@ -2615,7 +2615,7 @@ fn emit_write(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions
 
 fn emit_buf_ptr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
     var out = cb(buf, "(uint8_t *)"); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "(")
-    out = cb(out, cg_enclosing_region_expr(regions))
+    out = cb(out, cg_scratch_region_expr(regions))
     out = cb(out, ", (size_t)(")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     cb(out, "))")
@@ -2999,7 +2999,7 @@ fn emit_deep_copy(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, e
     out = cb(out, " = ")
     out = cg_dc_helper_name(out, cls)
     out = cb(out, "(")
-    out = cb(out, cg_enclosing_region_expr(regions))
+    out = cb(out, cg_scratch_region_expr(regions))
     out = cb(out, ", ")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
     out = cb(out, ", 0, &")
@@ -3073,7 +3073,7 @@ fn emit_as_cstr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regio
     var v = $"_ac{buf.len}"
     var out = cb(buf, $"({{ tk_str {v}_s = (")
     out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    var region = cg_enclosing_region_expr(regions)
+    var region = cg_scratch_region_expr(regions)
     out = cb(out, $"); uint8_t *{v} = (uint8_t *)")
     out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
     cb(out, $"({region}, (size_t)({v}_s.len + 1)); for (uint64_t {v}_i = 0; {v}_i < {v}_s.len; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} {v}[{v}_s.len] = 0; {v}; }})")
@@ -3763,7 +3763,7 @@ fn emit_slice_of_len(buf: Cb, prog: CgProg, e: checker::TExpr, s: checker::TSlic
     out = cb(out, " *)")
     out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
     out = cb(out, "(")
-    out = cb(out, cg_enclosing_region_expr(regions))
+    out = cb(out, cg_scratch_region_expr(regions))
     out = cb(out, ", ")
     out = cb(out, lenN)
     out = cb(out, " * sizeof(")
@@ -4974,7 +4974,7 @@ fn cg_emit_box_construct(buf: Cb, prog: CgProg, ret_type: @Type(), inner: @Type(
     out = cb(out, " *")
     out = cb(out, bxN)
     out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "(")
-    if box_region.len > 0 { out = cb(out, box_region) } else { out = cb(cb_arena_sym(out, CgArenaSym::RegionRoot), "()") }
+    if box_region.len > 0 { out = cb(out, box_region) } else { out = cb(cb_arena_sym(out, CgArenaSym::RegionCurrent), "()") }
     out = cb(out, ", sizeof(")
     out = match emit_type(out, prog, inner) { Cb as o => o; error as e => return e }
     out = cb(out, ")); *")
@@ -6108,6 +6108,11 @@ fn cg_enclosing_region_expr_framed(regions: []RegionFrame, frame: str): str {
     if regions.len > 0 { return regions[regions.len - 1].name }
     if frame != "" { return frame }
     teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
+}
+
+fn cg_scratch_region_expr(regions: []RegionFrame): str {
+    if regions.len > 0 { return regions[regions.len - 1].name }
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()")
 }
 
 type LoopDeferFrame = struct {
