@@ -4598,147 +4598,153 @@ fn cg_wrap_elem_str_contract(buf: teko::io::FileStream, prog: CgProg, en: checke
     }
 }
 
-fn emit_host_ffi(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, kind: str, rtfn: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var t = $"_h{buf.len}"
+fn emit_host_ffi(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, c: checker::TCall, kind: str, rtfn: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
+    var t = $"_h{buf.gensym()}"
     var str_t = checker::Str { }
     var err_t = checker::Error { }
 
     if kind == "args" {
-        var o = cb(buf, "({ uint64_t ")
-        o = cb(o, t)
-        o = cb(o, "n; tk_str *")
-        o = cb(o, t)
-        o = cb(o, "p = ")
-        o = cb(o, rtfn)
-        o = cb(o, "(&")
-        o = cb(o, t)
-        o = cb(o, "n); (")
-        o = match cg_slice_typename(o, str_t) { Cb as r => r; error as err => return err }
-        o = cb(o, "){ .ptr = ")
-        o = cb(o, t)
-        o = cb(o, "p, .len = ")
-        o = cb(o, t)
-        return cb(o, "n }; })")
+        buf.write("({ uint64_t ")
+        buf.write(t)
+        buf.write("n; tk_str *")
+        buf.write(t)
+        buf.write("p = ")
+        buf.write(rtfn)
+        buf.write("(&")
+        buf.write(t)
+        buf.write("n); (")
+        cg_slice_typename(buf, str_t)
+        buf.write("){ .ptr = ")
+        buf.write(t)
+        buf.write("p, .len = ")
+        buf.write(t)
+        buf.write("n }; })")
+        return
     }
     if kind == "bytes" {
         var byte_t = checker::Byte { }
-        var o = cb(buf, "({ tk_ffi_bytes ")
-        o = cb(o, t)
-        o = cb(o, " = ")
-        o = cb(o, rtfn)
-        o = cb(o, "(")
-        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        o = cb(o, ", ")
-        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        o = cb(o, "); (")
-        o = match cg_slice_typename(o, byte_t) { Cb as r => r; error as err => return err }
-        o = cb(o, "){ .ptr = ")
-        o = cb(o, t)
-        o = cb(o, ".ptr, .len = ")
-        o = cb(o, t)
-        return cb(o, ".len }; })")
+        buf.write("({ tk_ffi_bytes ")
+        buf.write(t)
+        buf.write(" = ")
+        buf.write(rtfn)
+        buf.write("(")
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+        buf.write(", ")
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
+        buf.write("); (")
+        cg_slice_typename(buf, byte_t)
+        buf.write("){ .ptr = ")
+        buf.write(t)
+        buf.write(".ptr, .len = ")
+        buf.write(t)
+        buf.write(".len }; })")
+        return
     }
     if kind == "run" {
-        var o = cb(buf, "({ ")
-        o = match cg_slice_typename(o, str_t) { Cb as r => r; error as err => return err }
-        o = cb(o, " ")
-        o = cb(o, t)
-        o = cb(o, " = ")
-        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        o = cb(o, "; ")
-        o = cb(o, rtfn)
-        o = cb(o, "(")
-        o = cb(o, t)
-        o = cb(o, ".ptr, ")
-        o = cb(o, t)
-        return cb(o, ".len); })")
+        buf.write("({ ")
+        cg_slice_typename(buf, str_t)
+        buf.write(" ")
+        buf.write(t)
+        buf.write(" = ")
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+        buf.write("; ")
+        buf.write(rtfn)
+        buf.write("(")
+        buf.write(t)
+        buf.write(".ptr, ")
+        buf.write(t)
+        buf.write(".len); })")
+        return
     }
 
     if kind == "ures_byteslice" {
         var byte_t = checker::Byte { }
-        var o = cb(buf, "({ ")
-        o = match cg_slice_typename(o, byte_t) { Cb as r => r; error as err => return err }
-        o = cb(o, " ")
-        o = cb(o, t)
-        o = cb(o, "s = ")
-        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        o = cb(o, "; tk_ffi_ures ")
-        o = cb(o, t)
-        o = cb(o, "r = ")
-        o = cb(o, rtfn)
-        o = cb(o, "(")
-        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        o = cb(o, ", ")
-        o = cb(o, t)
-        o = cb(o, "s.ptr, (uint64_t)")
-        o = cb(o, t)
-        o = cb(o, "s.len); ")
-        o = match cg_emit_ffi_ures(o, prog, e.type, teko::str::concat(t, "r"), escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        return cb(o, "; })")
+        buf.write("({ ")
+        cg_slice_typename(buf, byte_t)
+        buf.write(" ")
+        buf.write(t)
+        buf.write("s = ")
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx)
+        buf.write("; tk_ffi_ures ")
+        buf.write(t)
+        buf.write("r = ")
+        buf.write(rtfn)
+        buf.write("(")
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+        buf.write(", ")
+        buf.write(t)
+        buf.write("s.ptr, (uint64_t)")
+        buf.write(t)
+        buf.write("s.len); ")
+        cg_emit_ffi_ures(buf, prog, e.type, teko::str::concat(t, "r"), escaping, regions, fn_body, dctx)
+        buf.write("; })")
+        return
     }
 
     if kind == "sres_byteslice" {
         var byte_t = checker::Byte { }
-        var o = cb(buf, "({ ")
-        o = match cg_slice_typename(o, byte_t) { Cb as r => r; error as err => return err }
-        o = cb(o, " ")
-        o = cb(o, t)
-        o = cb(o, "s = ")
-        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        o = cb(o, "; tk_ffi_sres ")
-        o = cb(o, t)
-        o = cb(o, "r = ")
-        o = cb(o, rtfn)
-        o = cb(o, "(")
-        o = cb(o, t)
-        o = cb(o, "s.ptr, (uint64_t)")
-        o = cb(o, t)
-        o = cb(o, "s.len); ")
-        o = cb(o, t)
-        o = cb(o, "r.ok ? ")
-        o = match emit_variant_wrap_str(o, prog, e.type, str_t, $"{t}r.value") { Cb as r => r; error as err => return err }
-        o = cb(o, " : ")
-        o = match emit_variant_wrap_str(o, prog, e.type, err_t, teko::str::concat("tk_error_make(", $"{t}r", ".err)")) { Cb as r => r; error as err => return err }
-        return cb(o, "; })")
+        buf.write("({ ")
+        cg_slice_typename(buf, byte_t)
+        buf.write(" ")
+        buf.write(t)
+        buf.write("s = ")
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx)
+        buf.write("; tk_ffi_sres ")
+        buf.write(t)
+        buf.write("r = ")
+        buf.write(rtfn)
+        buf.write("(")
+        buf.write(t)
+        buf.write("s.ptr, (uint64_t)")
+        buf.write(t)
+        buf.write("s.len); ")
+        buf.write(t)
+        buf.write("r.ok ? ")
+        emit_variant_wrap_str(buf, prog, e.type, str_t, $"{t}r.value")
+        buf.write(" : ")
+        emit_variant_wrap_str(buf, prog, e.type, err_t, teko::str::concat("tk_error_make(", $"{t}r", ".err)"))
+        buf.write("; })")
+        return
     }
 
     var resty = if kind == "sres" { "tk_ffi_sres" } else if kind == "ures" { "tk_ffi_ures" } else if kind == "slres" { "tk_ffi_slres" } else { "tk_ffi_u64res" }
-    var o = cb(buf, "({ ")
-    o = cb(o, resty)
-    o = cb(o, " ")
-    o = cb(o, t)
-    o = cb(o, " = ")
-    o = cb(o, rtfn)
-    o = cb(o, "(")
+    buf.write("({ ")
+    buf.write(resty)
+    buf.write(" ")
+    buf.write(t)
+    buf.write(" = ")
+    buf.write(rtfn)
+    buf.write("(")
     var i: u64 = 0
     loop {
         if i >= c.args.len { break }
-        if i > 0 { o = cb(o, ", ") }
-        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[i], escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
+        if i > 0 { buf.write(", ") }
+        emit_expr_ctx(buf, prog, checker::Void { }, c.args[i], escaping, regions, fn_body, dctx)
         i++
     }
-    o = cb(o, "); ")
+    buf.write("); ")
 
     if kind == "ures" {
-        o = match cg_emit_ffi_ures(o, prog, e.type, t, escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-        return cb(o, "; })")
+        cg_emit_ffi_ures(buf, prog, e.type, t, escaping, regions, fn_body, dctx)
+        buf.write("; })")
+        return
     }
 
-    o = cb(o, t)
-    o = cb(o, ".ok ? ")
+    buf.write(t)
+    buf.write(".ok ? ")
     if kind == "sres" {
-        o = match emit_variant_wrap_str(o, prog, e.type, str_t, $"{t}.value") { Cb as r => r; error as err => return err }
+        emit_variant_wrap_str(buf, prog, e.type, str_t, $"{t}.value")
     } else if kind == "u64res" {
-        o = match emit_variant_wrap_str(o, prog, e.type, checker::Prim { kind = checker::PrimKind::U64 }, $"{t}.value") { Cb as r => r; error as err => return err }
+        emit_variant_wrap_str(buf, prog, e.type, checker::Prim { kind = checker::PrimKind::U64 }, $"{t}.value")
     } else {
         var slice_t = checker::Slice { element = checker::Str { } }
         var sx = teko::str::concat("(tk_slice_str){ .ptr = ", t, teko::str::concat(".ptr, .len = ", t, ".len }"))
-        o = match emit_variant_wrap_str(o, prog, e.type, slice_t, sx) { Cb as r => r; error as err => return err }
+        emit_variant_wrap_str(buf, prog, e.type, slice_t, sx)
     }
-    o = cb(o, " : ")
+    buf.write(" : ")
     var eexpr = if kind == "u64res" { "tk_error_make((tk_str){0})" } else { teko::str::concat("tk_error_make(", t, ".err)") }
-    o = match emit_variant_wrap_str(o, prog, e.type, err_t, eexpr) { Cb as r => r; error as err => return err }
-    return cb(o, "; })")
+    emit_variant_wrap_str(buf, prog, e.type, err_t, eexpr)
+    buf.write("; })")
 }
 
 fn cg_mangle_eq(a: @Type(), b: @Type()): bool {
