@@ -7266,15 +7266,13 @@ fn cg_block_has_escaping_write(escaping: []str, body: []@TStatement()): bool {
     false
 }
 
-fn cg_emit_bracket_unwind(buf: Cb, indent: str, n: u64): Cb {
-    var out = buf
+fn cg_emit_bracket_unwind(buf: teko::io::FileStream, indent: str, n: u64) {
     var i: u64 = 0
     loop {
         if i >= n { break }
-        out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionLeave); out = cb(out, "();\n")
+        buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionLeave); buf.write("();\n")
         i = i + 1
     }
-    out
 }
 
 fn cg_frame_exit(buf: teko::io::FileStream, indent: str, frame: str, entered: bool) {
@@ -7786,70 +7784,70 @@ fn cg_register_variant_body(set: CgTypeSet, prog: CgProg, ref_ns: str, te: @Type
     }
 }
 
-fn cg_emit_inline_variant_typedef(buf: Cb, prog: CgProg, v: checker::Variant): Cb | error {
+fn cg_emit_inline_variant_typedef(buf: teko::io::FileStream, prog: CgProg, v: checker::Variant) {
     match cg_union_niche_member(prog, v) {
-        (@Type()) as _gt14 => return buf
+        (@Type()) as _gt14 => return
         null => { }
     }
     match cg_union_box_member(prog, v) {
-        (@Type()) as _gt15 => return buf
+        (@Type()) as _gt15 => return
         null => { }
     }
-    var out = cb(buf, "typedef enum tk_tag")
+    buf.write("typedef enum tk_tag")
     var a = 0
     loop {
         if a >= v.members.len { break }
-        out = cb(out, "_")
-        out = match cg_member_key(out, v.members[a]) { Cb as o => o; error as err => return err }
+        buf.write("_")
+        cg_member_key(buf, v.members[a])
         a++
     }
-    out = cb(out, " {\n")
+    buf.write(" {\n")
     var i = 0
     loop {
         if i >= v.members.len { break }
-        out = cb(out, "    TK_TAG_U")
+        buf.write("    TK_TAG_U")
         var j = 0
         loop {
             if j >= v.members.len { break }
-            out = cb(out, "_")
-            var kj = match cg_member_key_str(v.members[j]) { str as s => s; error as err => return err }
-            out = cb_upper(out, kj)
+            buf.write("_")
+            var kj = match cg_member_key_str(v.members[j]) { str as s => s; error as err => panic(err.message) }
+            cb_upper(buf, kj)
             j++
         }
-        out = cb(out, "_")
-        var ki = match cg_member_key_str(v.members[i]) { str as s => s; error as err => return err }
-        out = cb_upper(out, ki)
-        if i + 1 < v.members.len { out = cb(out, ",") }
-        out = cb(out, "\n")
+        buf.write("_")
+        var ki = match cg_member_key_str(v.members[i]) { str as s => s; error as err => panic(err.message) }
+        cb_upper(buf, ki)
+        if i + 1 < v.members.len { buf.write(",") }
+        buf.write("\n")
         i++
     }
-    out = cb(out, "} tk_tag")
+    buf.write("} tk_tag")
     var b = 0
     loop {
         if b >= v.members.len { break }
-        out = cb(out, "_")
-        out = match cg_member_key(out, v.members[b]) { Cb as o => o; error as err => return err }
+        buf.write("_")
+        cg_member_key(buf, v.members[b])
         b++
     }
-    out = cb(out, ";\n")
-    out = cb(out, "typedef struct ")
-    out = match cg_variant_typename(out, v) { Cb as o => o; error as err => return err }
-    out = cb(out, " {\n    ")
-    out = match cg_union_tag_ctype(out, v) { Cb as o => o; error as err => return err }
-    out = cb(out, " tag;\n    union {\n")
+    buf.write(";\n")
+    buf.write("typedef struct ")
+    cg_variant_typename(buf, v)
+    buf.write(" {\n    ")
+    cg_union_tag_ctype(buf, v)
+    buf.write(" tag;\n    union {\n")
     var m = 0
     loop {
         if m >= v.members.len { break }
-        out = cb(out, "        ")
-        out = match emit_type(out, prog, v.members[m]) { Cb as o => o; error as err => return err }
-        out = cb(out, " ")
-        out = match cg_member_key(out, v.members[m]) { Cb as o => o; error as err => return err }
-        out = cb(out, ";\n")
+        buf.write("        ")
+        emit_type(buf, prog, v.members[m])
+        buf.write(" ")
+        cg_member_key(buf, v.members[m])
+        buf.write(";\n")
         m++
     }
-    out = cb(out, "    } as;\n} ")
-    out = match cg_variant_typename(out, v) { Cb as o => o; error as err => return err }
-    cb(out, ";\n")
+    buf.write("    } as;\n} ")
+    cg_variant_typename(buf, v)
+    buf.write(";\n")
 }
 
 type CgEmitted = struct { names: []str; names_n: u64; opt_keys: []str; uvar_keys: []str; uvar_n: u64 }
@@ -8056,7 +8054,7 @@ fn cg_collect_all(set: CgTypeSet, prog: CgProg): CgTypeSet {
     s
 }
 
-fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
+fn cg_emit_types_ordered(buf: teko::io::FileStream, prog: CgProg) {
     var empty_t: []@Type() = []
     var empty_s: []str = []
     var cset = CgTypeSet { slices = empty_t; slice_keys = empty_s; slices_n = 0; variants = empty_t; variant_keys = empty_s; variants_n = 0; counting = true }
@@ -8071,7 +8069,6 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
     set = cg_collect_all(set, prog)
     var named = cg_named_decls(prog)
 
-    var out = buf
     var names_cap = named.len
     var uvar_cap = set.variants_n
     var names_buf: [names_cap]str = []
@@ -8087,44 +8084,44 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
             _ => false
         }
         if is_enum_or_flags {
-            out = match emit_type_decl(out, prog, named[ei]) { Cb as o => o; error as err => return err }
+            emit_type_decl(buf, prog, named[ei])
             em0.names[em0.names_n] = named[ei].name
             em0.names_n = em0.names_n + 1
             enum_count = enum_count + 1
         }
         ei++
     }
-    if enum_count > 0 { out = cb(out, "\n") }
+    if enum_count > 0 { buf.write("\n") }
     var fv = 0
     loop {
         if fv >= set.variants_n { break }
         match set.variants[fv] {
             checker::Variant as va => {
-                out = cb(out, "typedef struct ")
-                out = match cg_variant_typename(out, va) { Cb as o => o; error as err => return err }
-                out = cb(out, " ")
-                out = match cg_variant_typename(out, va) { Cb as o => o; error as err => return err }
-                out = cb(out, ";\n")
+                buf.write("typedef struct ")
+                cg_variant_typename(buf, va)
+                buf.write(" ")
+                cg_variant_typename(buf, va)
+                buf.write(";\n")
             }
             _ => { }
         }
         fv++
     }
-    if set.variants_n > 0 { out = cb(out, "\n") }
+    if set.variants_n > 0 { buf.write("\n") }
 
     var k = 0
     loop {
         if k >= set.slices_n { break }
         match set.slices[k] { Char => { k++; continue }; _ => { } }
         match set.slices[k] { Byte => { k++; continue }; _ => { } }
-        out = cb(out, "typedef struct { ")
-        out = match emit_type(out, prog, set.slices[k]) { Cb as o => o; error as err => return err }
-        out = cb(out, " *ptr; uint64_t len; uint64_t cap; } ")
-        out = match cg_slice_typename(out, set.slices[k]) { Cb as o => o; error as err => return err }
-        out = cb(out, ";\n")
+        buf.write("typedef struct { ")
+        emit_type(buf, prog, set.slices[k])
+        buf.write(" *ptr; uint64_t len; uint64_t cap; } ")
+        cg_slice_typename(buf, set.slices[k])
+        buf.write(";\n")
         k++
     }
-    if set.slices_n > 0 { out = cb(out, "\n") }
+    if set.slices_n > 0 { buf.write("\n") }
 
     var em = em0
     var remaining = named.len + set.variants_n - enum_count
@@ -8139,7 +8136,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
             var d = named[ni]
             if cg_str_in_n(em.names, em.names_n, d.name) { ni++ } else {
                 if !cg_named_ready(prog, em, set, d) { ni++ } else {
-                    out = match emit_type_decl(out, prog, d) { Cb as o => o; error as err => return err }
+                    emit_type_decl(buf, prog, d)
                     em.names[em.names_n] = d.name
                     em.names_n = em.names_n + 1
                     remaining = remaining - 1
@@ -8168,7 +8165,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
                 }
                 if !ready { vi++ } else {
                     match vt {
-                        checker::Variant as va => { out = match cg_emit_inline_variant_typedef(out, prog, va) { Cb as o => o; error as err => return err } }
+                        checker::Variant as va => cg_emit_inline_variant_typedef(buf, prog, va)
                         _ => { }
                     }
                     em.uvar_keys[em.uvar_n] = vkey
@@ -8180,8 +8177,7 @@ fn cg_emit_types_ordered(buf: Cb, prog: CgProg): Cb | error {
             }
         }
     }
-    if remaining > 0 { return error { message = "codegen: cyclic value-type dependency (a recursive type must pass through a slice or a boxed reference)" } }
-    out
+    if remaining > 0 { panic("codegen: cyclic value-type dependency (a recursive type must pass through a slice or a boxed reference)") }
 }
 
 /**
