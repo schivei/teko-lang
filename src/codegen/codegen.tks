@@ -9330,6 +9330,15 @@ fn cg_emit_fn_proto_guarded(buf: Cb, prog: CgProg, f: checker::TFunction): Cb | 
     out
 }
 
+fn cg_emit_fn_def_scoped(buf: Cb, prog: CgProg, f: checker::TFunction, mode: CgMode): Cb | error {
+    var scratch = teko::runtime::region_new(teko::runtime::region_current())
+    teko::runtime::region_enter(scratch)
+    var out = match cg_emit_fn_def_guarded(buf, prog, f, mode) { Cb as o => o; error as err => { teko::runtime::region_leave(); teko::runtime::region_drop(scratch); return err } }
+    teko::runtime::region_leave()
+    teko::runtime::region_drop(scratch)
+    out
+}
+
 fn cg_emit_fn_def_guarded(buf: Cb, prog: CgProg, f: checker::TFunction, mode: CgMode): Cb | error {
     if f.is_extern { return buf }
     var gc = match cg_fn_guard_cond(f.guard) { str as s => s; error as e => return e }
@@ -9535,7 +9544,7 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode): str | error {
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
-            checker::TFunction as f => { b = match cg_emit_fn_def_guarded(b, prog, f, mode) { Cb as o => o; error as err => return err } }
+            checker::TFunction as f => { b = match cg_emit_fn_def_scoped(b, prog, f, mode) { Cb as o => o; error as err => return err } }
             parser::TypeDecl => { }
             parser::UseDecl => { }
             (@TStatement()) as _gb3 => { }
