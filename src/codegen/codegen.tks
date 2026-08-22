@@ -2796,7 +2796,7 @@ fn emit_store_u64(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escapin
     return null
 }
 
-fn emit_iface_call(buf: Cb, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_iface_call(fd: i64, ref id: u64, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var p = c.callee
     var f = match c.callee_type { checker::Func as ff => ff; _ => return error { message = "codegen: malformed interface-dispatch node (internal)" } }
     if p.segments.len < 2 || c.args.len == 0 || c.args.len != f.params.len {
@@ -2804,39 +2804,43 @@ fn emit_iface_call(buf: Cb, prog: CgProg, ret_type: @Type(), c: checker::TCall, 
     }
     var iface_raw = p.segments[p.segments.len - 2].name
     var iface = match cg_find_decl(prog, iface_raw) { parser::TypeDecl as d => d.name; error => iface_raw }
-    var t = fresh_named("_tid", buf.len to i64)
+    var t = fresh_named("_tid", id)
     var iface_t = checker::Named { name = iface }
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, iface_t) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, t)
-    out = cb(out, " = ")
-    out = match emit_as_r(out, prog, ret_type, iface_t, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; ((")
-    out = match emit_type(out, prog, f.ret) { Cb as o => o; error as err => return err }
-    out = cb(out, " (*)(void *")
+    cb(fd, "({ ")
+    var ts1 = match emit_type(prog, iface_t) { str as o => o; error as err => return err }
+    cb(fd, ts1)
+    cb(fd, " ")
+    cb(fd, t)
+    cb(fd, " = ")
+    match emit_as_r(fd, id, prog, ret_type, iface_t, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "; ((")
+    var ts2 = match emit_type(prog, f.ret) { str as o => o; error as err => return err }
+    cb(fd, ts2)
+    cb(fd, " (*)(void *")
     var pi: u64 = 1
     loop {
         if pi >= f.params.len { break }
-        out = cb(out, ", ")
-        out = match emit_type(out, prog, f.params[pi]) { Cb as o => o; error as err => return err }
+        cb(fd, ", ")
+        var ts3 = match emit_type(prog, f.params[pi]) { str as o => o; error as err => return err }
+        cb(fd, ts3)
         pi++
     }
-    out = cb(out, "))")
-    out = cb(out, t)
-    out = cb(out, ".vtable[")
-    out = cb_u64_digits(out, c.iface_slot to u64)
-    out = cb(out, "])(")
-    out = cb(out, t)
-    out = cb(out, ".data")
+    cb(fd, "))")
+    cb(fd, t)
+    cb(fd, ".vtable[")
+    cb(fd, cb_u64_digits(c.iface_slot to u64))
+    cb(fd, "])(")
+    cb(fd, t)
+    cb(fd, ".data")
     var ai: u64 = 1
     loop {
         if ai >= c.args.len { break }
-        out = cb(out, ", ")
-        out = match emit_as_r(out, prog, ret_type, f.params[ai], c.args[ai], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+        cb(fd, ", ")
+        match emit_as_r(fd, id, prog, ret_type, f.params[ai], c.args[ai], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
         ai++
     }
-    cb(out, "); })")
+    cb(fd, "); })")
+    return null
 }
 
 fn cg_call_bare_name(c: checker::TCall): str {
@@ -2853,17 +2857,19 @@ fn cg_call_is_user_declared(prog: CgProg, c: checker::TCall): bool {
     }
 }
 
-fn emit_concat_fold(buf: Cb, prog: CgProg, arg: checker::TExpr, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var cs = $"_cs{buf.len}"
-    var ci = $"_ci{buf.len}"
-    var ca = $"_ca{buf.len}"
+fn emit_concat_fold(fd: i64, ref id: u64, prog: CgProg, arg: checker::TExpr, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    var cs = $"_cs{id}"
+    var ci = $"_ci{id}"
+    var ca = $"_ca{id}"
+    id = id + 1
     var step = if str_region.len > 0 { $"{ca} = tk_str_concat_r({str_region}, {ca}, {cs}.ptr[{ci}]);" } else { $"{ca} = tk_str_concat({ca}, {cs}.ptr[{ci}]);" }
-    var o = cb(buf, "({ ")
-    o = match emit_type(o, prog, arg.type) { Cb as r => r; error as err => return err }
-    o = cb(o, $" {cs} = ")
-    o = match emit_expr_ctx(o, prog, checker::Void { }, arg, escaping, regions, fn_body, dctx) { Cb as r => r; error as err => return err }
-    o = cb(o, $"; tk_str {ca} = (tk_str){{0,0}}; for (uint64_t {ci} = 0; {ci} < {cs}.len; {ci}++) {{ {step} }} {ca}; }})")
-    o
+    cb(fd, "({ ")
+    var ts = match emit_type(prog, arg.type) { str as r => r; error as err => return err }
+    cb(fd, ts)
+    cb(fd, $" {cs} = ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, arg, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, $"; tk_str {ca} = (tk_str){{0,0}}; for (uint64_t {ci} = 0; {ci} < {cs}.len; {ci}++) {{ {step} }} {ca}; }})")
+    return null
 }
 
 fn cg_is_concat_bridge(prog: CgProg, c: checker::TCall): bool {
@@ -2879,43 +2885,46 @@ fn cg_bound_is_str(t: @Type()): bool {
     match t { checker::Str => true; _ => false }
 }
 
-fn emit_svc_slot_call(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, scope: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_svc_slot_call(fd: i64, ref id: u64, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, scope: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var sname = match e.type { checker::Named as nm => nm.name; _ => return error { message = "codegen: a service ctor call must have a named type" } }
-    var id = checker::svc_type_id(sname)
-    var rN = fresh_named("_svcr", buf.len to i64)
-    var hN = fresh_named("_svch", buf.len to i64)
-    var out = cb(buf, "({ tk_region *")
-    out = cb(out, rN)
-    out = cb(out, " = ")
-    out = cb(out, scope)
-    out = cb(out, "; void *")
-    out = cb(out, hN)
-    out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionLookup); out = cb(out, "(")
-    out = cb(out, rN)
-    out = cb(out, ", ")
-    out = cb_u64_digits(out, id)
-    out = cb(out, "ULL); ")
-    out = cb(out, hN)
-    out = cb(out, " ? (")
-    out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-    out = cb(out, ")")
-    out = cb(out, hN)
-    out = cb(out, " : ({ ")
-    out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-    var vN = fresh_named("_svcv", buf.len to i64)
-    out = cb(out, " ")
-    out = cb(out, vN)
-    out = cb(out, " = ")
-    out = match emit_call_inner(out, prog, ret_type, e, c, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; "); out = cb_arena_sym(out, CgArenaSym::RegionRegister); out = cb(out, "(")
-    out = cb(out, rN)
-    out = cb(out, ", ")
-    out = cb_u64_digits(out, id)
-    out = cb(out, "ULL, (void *)")
-    out = cb(out, vN)
-    out = cb(out, "); ")
-    out = cb(out, vN)
-    cb(out, "; }); })")
+    var svc_id = checker::svc_type_id(sname)
+    var rN = fresh_named("_svcr", id)
+    var hN = fresh_named("_svch", id)
+    cb(fd, "({ tk_region *")
+    cb(fd, rN)
+    cb(fd, " = ")
+    cb(fd, scope)
+    cb(fd, "; void *")
+    cb(fd, hN)
+    cb(fd, " = "); cb_arena_sym(fd, CgArenaSym::RegionLookup); cb(fd, "(")
+    cb(fd, rN)
+    cb(fd, ", ")
+    cb(fd, cb_u64_digits(svc_id))
+    cb(fd, "ULL); ")
+    cb(fd, hN)
+    cb(fd, " ? (")
+    var ts1 = match emit_type(prog, e.type) { str as o => o; error as err => return err }
+    cb(fd, ts1)
+    cb(fd, ")")
+    cb(fd, hN)
+    cb(fd, " : ({ ")
+    var ts2 = match emit_type(prog, e.type) { str as o => o; error as err => return err }
+    cb(fd, ts2)
+    var vN = fresh_named("_svcv", id)
+    cb(fd, " ")
+    cb(fd, vN)
+    cb(fd, " = ")
+    match emit_call_inner(fd, id, prog, ret_type, e, c, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "; "); cb_arena_sym(fd, CgArenaSym::RegionRegister); cb(fd, "(")
+    cb(fd, rN)
+    cb(fd, ", ")
+    cb(fd, cb_u64_digits(svc_id))
+    cb(fd, "ULL, (void *)")
+    cb(fd, vN)
+    cb(fd, "); ")
+    cb(fd, vN)
+    cb(fd, "; }); })")
+    return null
 }
 
 fn svc_scope_expr(lifetime: parser::ServiceLifetime, regions: []RegionFrame): str {
@@ -2941,15 +2950,15 @@ fn cg_service_ctor_lifetime(prog: CgProg, c: checker::TCall): parser::ServiceLif
     }
 }
 
-fn emit_call(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_call(fd: i64, ref id: u64, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     match cg_service_ctor_lifetime(prog, c) {
         parser::ServiceLifetime as lt => {
             var scope = svc_scope_expr(lt, regions)
-            if scope.len > 0 { return emit_svc_slot_call(buf, prog, ret_type, e, c, scope, escaping, regions, fn_body, dctx) }
+            if scope.len > 0 { return emit_svc_slot_call(fd, id, prog, ret_type, e, c, scope, escaping, regions, fn_body, dctx) }
         }
         null => { }
     }
-    emit_call_inner(buf, prog, ret_type, e, c, escaping, regions, fn_body, dctx)
+    emit_call_inner(fd, id, prog, ret_type, e, c, escaping, regions, fn_body, dctx)
 }
 
 fn emit_call_inner(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
