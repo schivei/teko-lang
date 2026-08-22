@@ -84,21 +84,42 @@ fn parse_use_header(tokens: []lexer::Token, pos: u64): ParsedList<UseDecl> | err
 
 pub fn parse_main_file(tokens: []lexer::Token, pos: u64): Parsed<MainFile> | error {
     var hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
-    var p = skip_trivia(tokens, hdr.next)
-    var body: []@Statement() = []
-    loop {
-        if !has_token(tokens, p) { break }
-        if is_decl_start(tokens, p) {
-            return err_at(tokens, p, "main.tks is a virtual main: it may not declare types or functions (only `use` + statements)")
-        }
-        var s = match parse_statement(tokens, p) { Parsed<@Statement()> as x => x; error as e => return e }
-        body = [..body, s.node]
-        p = s.next
-        if !has_token(tokens, p) { break }
-        if !is_sep(tokens, p) {
-            return err_at(tokens, p, "expected ';' or a newline after a statement")
-        }
-        p = skip_trivia(tokens, p)
+    var body = match fill_main_body(tokens, skip_trivia(tokens, hdr.next), 0) { ParsedList<@Statement()> as x => x; error as e => return e }
+    Parsed<MainFile> { node = MainFile { uses = hdr.items; body = body.items }; next = body.next }
+}
+
+/**
+ * Parse the remaining top-level statements of a virtual main, allocating the
+ * exact-sized array at end-of-input and writing each statement into its slot as
+ * the recursion unwinds — one parse pass, no per-iteration spread reallocation.
+ *
+ * @param tokens  the token stream being parsed
+ * @param p       index of the next statement, or of end-of-input
+ * @param filled  count of statements already parsed by outer frames
+ * @return        the exact-sized statement array and the index past the body
+ * @throws        when main.tks declares a type/function, or a statement is not
+ *                followed by ';' or a newline
+ */
+fn fill_main_body(tokens: []lexer::Token, p: u64, filled: u64): ParsedList<@Statement()> | error {
+    if !has_token(tokens, p) {
+        var empty: [filled]@Statement() = []
+        return ParsedList<@Statement()> { items = empty; next = p }
     }
-    Parsed<MainFile> { node = MainFile { uses = hdr.items; body = body }; next = p }
+    if is_decl_start(tokens, p) {
+        return err_at(tokens, p, "main.tks is a virtual main: it may not declare types or functions (only `use` + statements)")
+    }
+    var s = match parse_statement(tokens, p) { Parsed<@Statement()> as x => x; error as e => return e }
+    var q = s.next
+    if !has_token(tokens, q) {
+        var last: [filled + 1]@Statement() = []
+        last[filled] = s.node
+        return ParsedList<@Statement()> { items = last; next = q }
+    }
+    if !is_sep(tokens, q) {
+        return err_at(tokens, q, "expected ';' or a newline after a statement")
+    }
+    var rest = match fill_main_body(tokens, skip_trivia(tokens, q), filled + 1) { ParsedList<@Statement()> as x => x; error as e => return e }
+    var items = rest.items
+    items[filled] = s.node
+    ParsedList<@Statement()> { items = items; next = rest.next }
 }

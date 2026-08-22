@@ -153,21 +153,48 @@ fn parse_adopt(tokens: []lexer::Token, pos: u64): Parsed<@Statement()> | error {
     Parsed<@Statement()> { node = AdoptStmt { name = name; body = blk.items }; next = blk.next }
 }
 
+/**
+ * Parse a brace-delimited statement block into an exact-sized statement array.
+ *
+ * @param tokens  the token stream being parsed
+ * @param pos     index of the opening '{'
+ * @return        the parsed statements and the index past the closing '}'
+ * @throws        when a statement is not followed by ';', a newline, or '}'
+ */
 fn parse_block(tokens: []lexer::Token, pos: u64): ParsedList<@Statement()> | error {
-    var p = skip_seps(tokens, pos + 1)
-    var stmts: []@Statement() = []
-    loop {
-        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
-        var s = match parse_statement(tokens, p) { Parsed<@Statement()> as x => x; error as e => return e }
-        stmts = [..stmts, s.node]
-        p = s.next
-        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
-        if !is_sep(tokens, p) {
-            return err_at(tokens, p, "expected ';', a newline, or '}' after a statement")
-        }
-        p = skip_seps(tokens, p)
+    fill_block_stmts(tokens, skip_seps(tokens, pos + 1), 0)
+}
+
+/**
+ * Parse the remaining statements of a block, allocating the exact-sized array
+ * at the closing brace and writing each statement into its slot as the
+ * recursion unwinds — one parse pass, no per-iteration spread reallocation.
+ *
+ * @param tokens  the token stream being parsed
+ * @param p       index of the next statement, or of the closing '}'
+ * @param filled  count of statements already parsed by outer frames
+ * @return        the exact-sized statement array and the index past '}'
+ * @throws        when a statement is not followed by ';', a newline, or '}'
+ */
+fn fill_block_stmts(tokens: []lexer::Token, p: u64, filled: u64): ParsedList<@Statement()> | error {
+    if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
+        var empty: [filled]@Statement() = []
+        return ParsedList<@Statement()> { items = empty; next = p + 1 }
     }
-    ParsedList<@Statement()> { items = stmts; next = p + 1 }
+    var s = match parse_statement(tokens, p) { Parsed<@Statement()> as x => x; error as e => return e }
+    var q = s.next
+    if is_kind_at(tokens, q, lexer::TokenKind::RBrace) {
+        var last: [filled + 1]@Statement() = []
+        last[filled] = s.node
+        return ParsedList<@Statement()> { items = last; next = q + 1 }
+    }
+    if !is_sep(tokens, q) {
+        return err_at(tokens, q, "expected ';', a newline, or '}' after a statement")
+    }
+    var rest = match fill_block_stmts(tokens, skip_seps(tokens, q), filled + 1) { ParsedList<@Statement()> as x => x; error as e => return e }
+    var items = rest.items
+    items[filled] = s.node
+    ParsedList<@Statement()> { items = items; next = rest.next }
 }
 
 fn no_type(): @TypeExpr() {
