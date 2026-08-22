@@ -4211,20 +4211,22 @@ fn emit_strlit(buf: teko::io::FileStream, s: checker::TStrLit): error | null {
     null
 }
 
-fn emit_bytestrlit(buf: Cb, s: checker::TByteStrLit): Cb | error {
-    var out = cb(buf, "(tk_slice_byte){ (tk_byte *)\"")
-    out = cb_cstr_escaped(out, s.text)
-    out = cb(out, "\", ")
-    out = cb_i64(out, s.text.len to i64)
-    cb(out, " }")
+fn emit_bytestrlit(buf: teko::io::FileStream, s: checker::TByteStrLit): error | null {
+    buf.write("(tk_slice_byte){ (tk_byte *)\"")
+    cb_cstr_escaped(buf, s.text)
+    buf.write("\", ")
+    cb_i64(buf, s.text.len to i64)
+    buf.write(" }")
+    null
 }
 
-fn emit_charlit(buf: Cb, ch: checker::TCharLit): Cb | error {
-    var out = cb(buf, "(tk_char){ (uint8_t *)\"")
-    out = cb_cstr_escaped(out, ch.bytes)
-    out = cb(out, "\", ")
-    out = cb_i64(out, ch.bytes.len to i64)
-    cb(out, " }")
+fn emit_charlit(buf: teko::io::FileStream, ch: checker::TCharLit): error | null {
+    buf.write("(tk_char){ (uint8_t *)\"")
+    cb_cstr_escaped(buf, ch.bytes)
+    buf.write("\", ")
+    cb_i64(buf, ch.bytes.len to i64)
+    buf.write(" }")
+    null
 }
 
 fn is_void_type(t: @Type()): bool {
@@ -4232,12 +4234,10 @@ fn is_void_type(t: @Type()): bool {
 }
 
 fn fresh_tmp_name(buf_len: i64): str {
-    var nm = cb(cb_new(), "_tk")
-    nm = cb_i64(nm, buf_len)
-    str(cb_flat(nm))
+    teko::str::concat("_tk", teko::i64_to_str(buf_len))
 }
 
-fn emit_stmt_value(buf: Cb, prog: CgProg, ret_type: @Type(), s: @TStatement(), slot: @Type(), sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement()): Cb | error {
+fn emit_stmt_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), s: @TStatement(), slot: @Type(), sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement()): error | null {
     match s {
         checker::TReturn => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
         checker::TBreakStmt => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
@@ -4246,44 +4246,44 @@ fn emit_stmt_value(buf: Cb, prog: CgProg, ret_type: @Type(), s: @TStatement(), s
             if is_void_type(es.expr.type) {
                 return emit_stmt(buf, s, false, prog, ret_type, indent, "", escaping, regions, fn_body, dctx, cur_block, true)
             }
-            var out = emit_cov_lines(buf, dctx.cov, cov_collect_expr(es.expr, []), indent)
-            out = cb(out, indent)
-            out = cb(out, sink)
-            out = cb(out, " = ")
-            out = match emit_as_r(out, prog, ret_type, slot, es.expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            cb(out, ";\n")
+            emit_cov_lines(buf, dctx.cov, cov_collect_expr(es.expr, []), indent)
+            buf.write(indent)
+            buf.write(sink)
+            buf.write(" = ")
+            match emit_as_r(buf, prog, ret_type, slot, es.expr, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            buf.write(";\n")
+            null
         }
         _ => emit_stmt(buf, s, false, prog, ret_type, indent, "", escaping, regions, fn_body, dctx, cur_block, true)
     }
 }
 
-fn emit_branch_value(buf: Cb, prog: CgProg, ret_type: @Type(), body: []@TStatement(), slot: @Type(), sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_branch_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), body: []@TStatement(), slot: @Type(), sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     if !want_block {
         var defer_floor = dctx.defers.len
         var cur = dctx
-        var out = buf
         var i = 0
         loop {
             if i + 1 >= body.len { break }
             match body[i] {
                 checker::TDeferStmt => { cur = dctx_register(cur, body[i]) }
-                _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, indent, "", escaping, regions, fn_body, cur, [], false) { Cb as o => o; error as err => return err } }
+                _ => { match emit_stmt(buf, body[i], false, prog, ret_type, indent, "", escaping, regions, fn_body, cur, [], false) { error as err => return err; null => { } } }
             }
             i++
         }
         if body.len > 0 {
-            out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regions, fn_body, cur, []) { Cb as o => o; error as err => return err }
+            match emit_stmt_value(buf, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regions, fn_body, cur, []) { error as err => return err; null => { } }
         }
         if cur.defers.len > defer_floor {
-            out = match emit_defers(out, cur.defers, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
+            match emit_defers(buf, cur.defers, defer_floor, prog, indent, escaping, fn_body) { error as err => return err; null => { } }
         }
-        return out
+        return null
     }
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, body)
-    var region = fresh_named("_tkbr", buf.len to i64)
-    var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
+    var region = fresh_named("_tkbr", buf.gensym() to i64)
+    buf.write(indent); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr(regions)); buf.write(");\n")
     var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true); bound_names = cg_block_bound_names(body) }]
     var cur = dctx
     var i = 0
@@ -4291,42 +4291,41 @@ fn emit_branch_value(buf: Cb, prog: CgProg, ret_type: @Type(), body: []@TStateme
         if i + 1 >= body.len { break }
         match body[i] {
             checker::TDeferStmt => { cur = dctx_register(cur, body[i]) }
-            _ => { out = match emit_stmt(out, body[i], false, prog, ret_type, indent, "", escaping, regs2, fn_body, cur, body, true) { Cb as o => o; error as err => return err } }
+            _ => { match emit_stmt(buf, body[i], false, prog, ret_type, indent, "", escaping, regs2, fn_body, cur, body, true) { error as err => return err; null => { } } }
         }
         i++
     }
     if body.len > 0 {
-        out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regs2, fn_body, cur, body) { Cb as o => o; error as err => return err }
+        match emit_stmt_value(buf, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regs2, fn_body, cur, body) { error as err => return err; null => { } }
     }
-    out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-    out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
-    out
+    match emit_defers(buf, fall, defer_floor, prog, indent, escaping, fn_body) { error as err => return err; null => { } }
+    buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(region); buf.write("); "); buf.write(region); buf.write(" = NULL;\n")
+    null
 }
 
-fn emit_if_value(buf: Cb, prog: CgProg, ret_type: @Type(), e: checker::TExpr, f: checker::TIfExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_if_value(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e: checker::TExpr, f: checker::TIfExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if !f.has_else { return error { message = "codegen: if-without-else used as a value not yet supported" } }
-    var tmp = fresh_tmp_name(buf.len to i64)
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, tmp)
-    out = cb(out, "; if (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ") {\n")
-    out = emit_cov_branch(out, dctx.cov, e.line, e.col, 0, "    ")
-    out = match emit_branch_value(out, prog, ret_type, f.then_blk, e.type, tmp, "    ", escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "} else {\n")
-    out = emit_cov_branch(out, dctx.cov, e.line, e.col, 1, "    ")
-    out = match emit_branch_value(out, prog, ret_type, f.else_blk, e.type, tmp, "    ", escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "} ")
-    out = cb(out, tmp)
-    cb(out, "; })")
+    var tmp = fresh_tmp_name(buf.gensym() to i64)
+    buf.write("({ ")
+    match emit_type(buf, prog, e.type) { error as err => return err; null => { } }
+    buf.write(" ")
+    buf.write(tmp)
+    buf.write("; if (")
+    match emit_expr_ctx(buf, prog, checker::Void { }, f.cond, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write(") {\n")
+    emit_cov_branch(buf, dctx.cov, e.line, e.col, 0, "    ")
+    match emit_branch_value(buf, prog, ret_type, f.then_blk, e.type, tmp, "    ", escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write("} else {\n")
+    emit_cov_branch(buf, dctx.cov, e.line, e.col, 1, "    ")
+    match emit_branch_value(buf, prog, ret_type, f.else_blk, e.type, tmp, "    ", escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    buf.write("} ")
+    buf.write(tmp)
+    buf.write("; })")
+    null
 }
 
 fn fresh_named(prefix: str, n: i64): str {
-    var nm = cb(cb_new(), prefix)
-    nm = cb_i64(nm, n)
-    str(cb_flat(nm))
+    teko::str::concat(prefix, teko::i64_to_str(n))
 }
 
 fn cg_var_nmem(prog: CgProg, v: @Type()): i64 {
