@@ -5951,30 +5951,31 @@ fn emit_borrow(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), b: ch
 
 fn lam_fn_name(id: u64): str { teko::str::concat("__tkclo_", teko::u64_to_str(id)) }
 
-fn emit_lambda(buf: Cb, prog: CgProg, e: checker::TExpr, lam: checker::TLambda, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_lambda(buf: teko::io::FileStream, prog: CgProg, e: checker::TExpr, lam: checker::TLambda, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     if lam.captures.len == 0 {
-        var out = cb(buf, "(tk_closure){ (void*)&")
-        out = cb_fn_name(out, "", lam_fn_name(lam.lift_id))
-        return cb(out, ", (void*)0 }")
+        buf.write("(tk_closure){ (void*)&")
+        cb_fn_name(buf, "", lam_fn_name(lam.lift_id))
+        buf.write(", (void*)0 }")
+        return
     }
-    var out = cb(buf, "({ __tkenv_")
-    out = cb_u64_digits(out, lam.lift_id)
-    out = cb(out, " *_tke = "); out = cb_arena_sym(out, CgArenaSym::RegionAlloc); out = cb(out, "("); out = cb(out, cg_closure_env_region(dctx)); out = cb(out, ", sizeof(__tkenv_")
-    out = cb_u64_digits(out, lam.lift_id)
-    out = cb(out, ")); ")
+    buf.write("({ __tkenv_")
+    cb_u64_digits(buf, lam.lift_id)
+    buf.write(" *_tke = "); cb_arena_sym(buf, CgArenaSym::RegionAlloc); buf.write("("); buf.write(cg_closure_env_region(dctx)); buf.write(", sizeof(__tkenv_")
+    cb_u64_digits(buf, lam.lift_id)
+    buf.write(")); ")
     var i = 0
     loop {
         if i >= lam.captures.len { break }
-        out = cb(out, "_tke->")
-        out = cb_ident(out, lam.captures[i].name)
-        out = cb(out, " = ")
-        out = cb_ident(out, lam.captures[i].name)
-        out = cb(out, "; ")
+        buf.write("_tke->")
+        cb_ident(buf, lam.captures[i].name)
+        buf.write(" = ")
+        cb_ident(buf, lam.captures[i].name)
+        buf.write("; ")
         i++
     }
-    out = cb(out, "(tk_closure){ (void*)&")
-    out = cb_fn_name(out, "", lam_fn_name(lam.lift_id))
-    cb(out, ", (void*)_tke }; })")
+    buf.write("(tk_closure){ (void*)&")
+    cb_fn_name(buf, "", lam_fn_name(lam.lift_id))
+    buf.write(", (void*)_tke }; })")
 }
 
 type RegionFrame = struct {
@@ -6112,8 +6113,7 @@ fn dctx_empty(): DeferCtx {
     DeferCtx { defers = []; loops = []; cov = cov_off(); rr = ""; bracket_depth = 0 }
 }
 
-fn emit_defers(buf: Cb, defers: []@TStatement(), defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []@TStatement()): Cb | error {
-    var out = buf
+fn emit_defers(buf: teko::io::FileStream, defers: []@TStatement(), defer_floor: u64, prog: CgProg, indent: str, escaping: []str, fn_body: []@TStatement()) {
     var i = defers.len
     loop {
         if i <= defer_floor { break }
@@ -6123,14 +6123,13 @@ fn emit_defers(buf: Cb, defers: []@TStatement(), defer_floor: u64, prog: CgProg,
                 var j: u64 = 0
                 loop {
                     if j >= d.body.len { break }
-                    out = match emit_stmt(out, d.body[j], false, prog, checker::Void { }, indent, "", escaping, [], fn_body, dctx_empty(), [], false) { Cb as o => o; error as err => return err }
+                    emit_stmt(buf, d.body[j], false, prog, checker::Void { }, indent, "", escaping, [], fn_body, dctx_empty(), [], false)
                     j++
                 }
             }
             _ => { }
         }
     }
-    out
 }
 
 fn dctx_register(dctx: DeferCtx, s: @TStatement()): DeferCtx {
