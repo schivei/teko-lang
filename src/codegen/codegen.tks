@@ -5084,41 +5084,41 @@ fn emit_as_r_in(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), expe
     emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx)
 }
 
-fn cg_emit_lit_pattern(buf: Cb, lit: parser::Expr): Cb | error {
+fn cg_emit_lit_pattern(buf: teko::io::FileStream, lit: parser::Expr) {
     match lit.kind {
         parser::Number as n => {
-            if n.is_float { return cb_f64_literal(buf, n.fval) }
+            if n.is_float { cb_f64_literal(buf, n.fval); return }
             cb_numint(buf, n.value)
         }
         parser::ByteLit as b => cb_i64(buf, b.value to i64)
         parser::StrLit as sl => {
-            var out = cb(buf, "(tk_str){ (const tk_byte *)\"")
-            out = cb_cstr_escaped(out, sl.text)
-            out = cb(out, "\", ")
-            out = cb_i64(out, sl.text.len to i64)
-            cb(out, " }")
+            buf.write("(tk_str){ (const tk_byte *)\"")
+            cb_cstr_escaped(buf, sl.text)
+            buf.write("\", ")
+            cb_i64(buf, sl.text.len to i64)
+            buf.write(" }")
         }
-        _ => error { message = "codegen: unsupported literal in a pattern (parser emits only number/byte/str)" }
+        _ => panic("codegen: unsupported literal in a pattern (parser emits only number/byte/str)")
     }
 }
 
-fn cg_emit_tag_prefix(buf: Cb, variantT: @Type()): Cb | error {
-    var out = cb(buf, "TK_TAG_")
+fn cg_emit_tag_prefix(buf: teko::io::FileStream, variantT: @Type()) {
+    buf.write("TK_TAG_")
     match variantT {
         checker::Variant as va => {
-            out = cb(out, "U")
+            buf.write("U")
             var j = 0
             loop {
                 if j >= va.members.len { break }
-                out = cb(out, "_")
-                var kj = match cg_member_key_str(va.members[j]) { str as s => s; error as err => return err }
-                out = cb_upper(out, kj)
+                buf.write("_")
+                var kj = match cg_member_key_str(va.members[j]) { str as s => s; error as err => panic(err.message) }
+                cb_upper(buf, kj)
                 j++
             }
-            cb(out, "_")
+            buf.write("_")
         }
-        checker::Named as nm => { out = cb_upper(out, cg_ns_c_key(nm.name)); cb(out, "_") }
-        _ => error { message = "codegen: tag prefix over a non-variant subject (internal)" }
+        checker::Named as nm => { cb_upper(buf, cg_ns_c_key(nm.name)); buf.write("_") }
+        _ => panic("codegen: tag prefix over a non-variant subject (internal)")
     }
 }
 
