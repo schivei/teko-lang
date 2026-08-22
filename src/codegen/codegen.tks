@@ -6625,30 +6625,29 @@ fn emit_loop(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bool, pr
     buf.write("}\n")
 }
 
-fn emit_loop_while(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_loop_while(buf: teko::io::FileStream, l: checker::TLoopStmt, in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx) {
     var labeled = l.label.len > 0
-    var out = cb(buf, indent)
-    out = cb(out, "while (1) {\n")
+    buf.write(indent)
+    buf.write("while (1) {\n")
     var inner = cb_indent_deeper(indent)
-    if labeled { out = cb(out, inner); out = cb(out, "tk_lbl_"); out = cb_str(out, l.label); out = cb(out, "_cont: ;\n") }
+    if labeled { buf.write(inner); buf.write("tk_lbl_"); buf.write(l.label); buf.write("_cont: ;\n") }
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, l.body)
     var dctx2 = DeferCtx { defers = dctx.defers; loops = [..dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }]; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
     var want_block = (cg_block_has_block_local(prog, escaping, fn_body, l.body, false) || (dctx.rr.len > 0 && cg_block_wants_region(l.body))) && regions.len < 64
-    var region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
+    var region = if want_block { fresh_named("_tkbr", buf.gensym() to i64) } else { "" }
     var regs2 = regions
     if want_block {
-        out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
+        buf.write(inner); buf.write("tk_region *"); buf.write(region); buf.write(" = "); cb_arena_sym(buf, CgArenaSym::RegionNew); buf.write("("); buf.write(cg_enclosing_region_expr_framed(regions, frame)); buf.write(");\n")
         regs2 = [..regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false); bound_names = cg_block_bound_names(l.body) }]
     }
     var cur_blk = if want_block { l.body } else { [] }
-    out = match emit_block(out, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false) { Cb as o => o; error as err => return err }
-    out = match emit_defers(out, fall, defer_floor, prog, inner, escaping, fn_body) { Cb as o => o; error as err => return err }
-    if want_block { out = cb(out, inner); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n") }
-    out = cb(out, indent)
-    out = cb(out, "}\n")
-    if labeled { out = cb(out, indent); out = cb(out, "tk_lbl_"); out = cb_str(out, l.label); out = cb(out, "_break: ;\n") }
-    out
+    emit_block(buf, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false)
+    emit_defers(buf, fall, defer_floor, prog, inner, escaping, fn_body)
+    if want_block { buf.write(inner); cb_arena_sym(buf, CgArenaSym::RegionDrop); buf.write("("); buf.write(region); buf.write("); "); buf.write(region); buf.write(" = NULL;\n") }
+    buf.write(indent)
+    buf.write("}\n")
+    if labeled { buf.write(indent); buf.write("tk_lbl_"); buf.write(l.label); buf.write("_break: ;\n") }
 }
 
 fn cb_indent_deeper(indent: str): str {
