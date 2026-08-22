@@ -4349,17 +4349,53 @@ fn lower_concat_call(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall): Lowe
 
 fn lower_concat_elements(ctx: LowerCtx, e: checker::TExpr, elements: []checker::TArrayElem): LoweredFat | error {
     if elements.len == 0 { return lower_list_empty(ctx, e) }
-    if elements[0].is_spread { return error { message = "native backend N1: a spread argument to `teko::str::concat` is not yet lowered (N2)" } }
-    var acc = match lower_fat_expr(ctx, elements[0].expr) { LoweredFat as x => x; error as err => return err }
-    var i: u64 = 1
+    var acc = match concat_seed(ctx, e, elements) { LoweredFat as x => x; error as err => return err }
+    var i: u64 = if elements[0].is_spread { 0 } else { 1 }
     loop {
         if i >= elements.len { break }
-        if elements[i].is_spread { return error { message = "native backend N1: a spread argument to `teko::str::concat` is not yet lowered (N2)" } }
-        var arg = match lower_fat_expr(acc.ctx, elements[i].expr) { LoweredFat as x => x; error as err => return err }
-        acc = lower_len_out_call(arg.ctx, "tk_str_concat_len", four_args(acc.ptr, acc.len, arg.ptr, arg.len), e)
+        if elements[i].is_spread {
+            acc = match fold_spread_concat(acc, elements[i].expr, e) { LoweredFat as x => x; error as err => return err }
+        } else {
+            var arg = match lower_fat_expr(acc.ctx, elements[i].expr) { LoweredFat as x => x; error as err => return err }
+            acc = lower_len_out_call(arg.ctx, "tk_str_concat_len", four_args(acc.ptr, acc.len, arg.ptr, arg.len), e)
+        }
         i++
     }
     acc
+}
+
+fn concat_seed(ctx: LowerCtx, e: checker::TExpr, elements: []checker::TArrayElem): LoweredFat | error {
+    if elements[0].is_spread { return lower_list_empty(ctx, e) }
+    lower_fat_expr(ctx, elements[0].expr)
+}
+
+fn fold_spread_concat(acc: LoweredFat, xs_expr: checker::TExpr, e: checker::TExpr): LoweredFat | error {
+    var xs = match lower_fat_expr(acc.ctx, xs_expr) { LoweredFat as x => x; error as err => return err }
+    var ctx0 = xs.ctx
+    var headb = alloc_block(ctx0.func)
+    var bodyb = alloc_block(headb.func)
+    var exitb = alloc_block(bodyb.func)
+    var pj = add_block_param(exitb.func, headb.block_id)
+    var pap = add_block_param(pj.func, headb.block_id)
+    var pal = add_block_param(pap.func, headb.block_id)
+    var xrp = add_block_param(pal.func, exitb.block_id)
+    var xrl = add_block_param(xrp.func, exitb.block_id)
+    var j0 = alloc_vreg(xrl.func)
+    var f1 = append_inst(j0.func, ctx0.block_id, const_int_inst(j0.vreg, 0, e.line, e.col))
+    var f2 = append_inst(f1, ctx0.block_id, jump_inst(headb.block_id, [j0.vreg, acc.ptr, acc.len], e.line, e.col))
+    var cmp = alloc_vreg(f2)
+    var f3 = append_inst(cmp.func, headb.block_id, bin_inst(cmp.vreg, LBinOp::ICmpLtU, pj.vreg, xs.len, e.line, e.col))
+    var f4 = append_inst(f3, headb.block_id, branch_inst(cmp.vreg, bodyb.block_id, [pj.vreg, pap.vreg, pal.vreg], exitb.block_id, [pap.vreg, pal.vreg], e.line, e.col))
+    var bodyctx = ctx_with(ctx0, f4, bodyb.block_id, ctx0.env)
+    var addr = element_addr_at(bodyctx, xs.ptr, pj.vreg, str_fat_value_bytes(), e.line, e.col)
+    var s = load_fat_slot(addr.ctx, addr.vreg, e.line, e.col)
+    var joined = lower_len_out_call(s.ctx, "tk_str_concat_len", four_args(pap.vreg, pal.vreg, s.ptr, s.len), e)
+    var one = ctx_alloc(joined.ctx)
+    var withone = ctx_append(one.ctx, const_int_inst(one.vreg, 1, e.line, e.col))
+    var j2 = ctx_alloc(withone)
+    var withj2 = ctx_append(j2.ctx, bin_inst(j2.vreg, LBinOp::IAdd, pj.vreg, one.vreg, e.line, e.col))
+    var looped = ctx_append(withj2, jump_inst(headb.block_id, [j2.vreg, joined.ptr, joined.len], e.line, e.col))
+    LoweredFat { ctx = ctx_with(looped, looped.func, exitb.block_id, ctx0.env); ptr = xrp.vreg; len = xrl.vreg }
 }
 
 fn is_append_fo_call(callee: parser::Path): bool {
@@ -5384,6 +5420,10 @@ fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex): Low
 }
 
 fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit): Lowered | error {
+    if array_has_spread(al) {
+        var f = match lower_array_lit_spread_fat(ctx, e, al) { LoweredFat as x => x; error as err => return err }
+        return Lowered { ctx = f.ctx; vreg = f.ptr }
+    }
     var elem_t = match slice_element_type(e.type) { (@Type()) as t => t; error as err => return err }
     var stride = elem_byte_stride(elem_t, ctx.enums)
     var total = (al.elements.len to u32) * stride
@@ -5399,7 +5439,7 @@ fn store_array_elements(ctx: LowerCtx, base_vreg: u32, elem_t: @Type(), elements
     loop {
         if i >= elements.len { break }
         var elem = elements[i]
-        if elem.is_spread { return error { message = "native backend N1: spread array element not yet lowered (N2)" } }
+        if elem.is_spread { return error { message = "native backend: spread reached scalar array fill (internal)" } }
         var offset = (i to u32) * stride
         cur = match store_array_elem(cur, base_vreg, offset, elem_t, elem.expr, line, col) { LowerCtx as c => c; error as err => return err }
         i++
@@ -5421,10 +5461,119 @@ fn store_array_elem(ctx: LowerCtx, base_vreg: u32, offset: u32, elem_t: @Type(),
 }
 
 fn lower_array_lit_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit): LoweredFat | error {
+    if array_has_spread(al) { return lower_array_lit_spread_fat(ctx, e, al) }
     var slot = match lower_array_lit(ctx, e, al) { Lowered as x => x; error as err => return err }
     var lenr = ctx_alloc(slot.ctx)
     var with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, al.elements.len to i64, e.line, e.col))
     LoweredFat { ctx = with_len; ptr = slot.vreg; len = lenr.vreg }
+}
+
+fn array_has_spread(al: checker::TArrayLit): bool {
+    var i: u64 = 0
+    loop {
+        if i >= al.elements.len { break }
+        if al.elements[i].is_spread { return true }
+        i++
+    }
+    false
+}
+
+fn array_plain_count(al: checker::TArrayLit): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= al.elements.len { break }
+        if !al.elements[i].is_spread { n = n + 1 }
+        i++
+    }
+    n
+}
+
+type SpreadFill = struct { ctx: LowerCtx; pos: u32 }
+
+fn lower_array_lit_spread_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit): LoweredFat | error {
+    var elem_t = match slice_element_type(e.type) { (@Type()) as t => t; error as err => return err }
+    var stride = elem_byte_stride(elem_t, ctx.enums)
+    var elem_is_fat = is_fat_type(elem_t)
+    var n = al.elements.len
+    var kind: [n]u32 = []
+    var av: [n]u32 = []
+    var bv: [n]u32 = []
+    var cur = ctx
+    var i: u64 = 0
+    loop {
+        if i >= n { break }
+        var ae = al.elements[i]
+        if ae.is_spread || elem_is_fat {
+            var fo = match lower_fat_expr(cur, ae.expr) { LoweredFat as x => x; error as err => return err }
+            cur = fo.ctx
+            kind[i] = if ae.is_spread { 2 } else { 1 }
+            av[i] = fo.ptr
+            bv[i] = fo.len
+        } else {
+            var vo = match lower_expr(cur, ae.expr) { Lowered as x => x; error as err => return err }
+            cur = vo.ctx
+            kind[i] = 0
+            av[i] = vo.vreg
+            bv[i] = 0
+        }
+        i++
+    }
+    var strider = ctx_alloc(cur)
+    var cur1 = ctx_append(strider.ctx, const_int_inst(strider.vreg, stride to i64, e.line, e.col))
+    var totlen = ctx_alloc(cur1)
+    var cur2 = ctx_append(totlen.ctx, const_int_inst(totlen.vreg, array_plain_count(al) to i64, e.line, e.col))
+    var total_vreg = totlen.vreg
+    i = 0
+    loop {
+        if i >= n { break }
+        if kind[i] == 2 {
+            var acc = ctx_alloc(cur2)
+            cur2 = ctx_append(acc.ctx, bin_inst(acc.vreg, LBinOp::IAdd, total_vreg, bv[i], e.line, e.col))
+            total_vreg = acc.vreg
+        }
+        i++
+    }
+    var tbytes = ctx_alloc(cur2)
+    var cur3 = ctx_append(tbytes.ctx, bin_inst(tbytes.vreg, LBinOp::IMul, total_vreg, strider.vreg, e.line, e.col))
+    var region = region_current_vreg(cur3)
+    var bufr = ctx_alloc(region.ctx)
+    var cur4 = ctx_append(bufr.ctx, call_inst(bufr.vreg, "tk_region_alloc", two_args(region.vreg, tbytes.vreg), false, e.line, e.col))
+    var posr = ctx_alloc(cur4)
+    var cur5 = ctx_append(posr.ctx, const_int_inst(posr.vreg, 0, e.line, e.col))
+    var pos_vreg = posr.vreg
+    i = 0
+    loop {
+        if i >= n { break }
+        var filled = match fill_spread_operand(cur5, bufr.vreg, pos_vreg, kind[i], av[i], bv[i], strider.vreg, elem_t, e.line, e.col) { SpreadFill as x => x; error as err => return err }
+        cur5 = filled.ctx
+        pos_vreg = filled.pos
+        i++
+    }
+    LoweredFat { ctx = cur5; ptr = bufr.vreg; len = total_vreg }
+}
+
+fn fill_spread_operand(ctx: LowerCtx, buf: u32, pos: u32, kind: u32, a: u32, b: u32, stride_vreg: u32, elem_t: @Type(), line: u32, col: u32): SpreadFill | error {
+    var addr = ctx_alloc(ctx)
+    var cur = ctx_append(addr.ctx, bin_inst(addr.vreg, LBinOp::IAdd, buf, pos, line, col))
+    if kind == 2 {
+        var byr = ctx_alloc(cur)
+        var c2 = ctx_append(byr.ctx, bin_inst(byr.vreg, LBinOp::IMul, b, stride_vreg, line, col))
+        var c3 = ctx_append(c2, void_call_inst("tk_mem_copy", [..two_args(addr.vreg, a), byr.vreg], false, line, col))
+        var np = ctx_alloc(c3)
+        var c4 = ctx_append(np.ctx, bin_inst(np.vreg, LBinOp::IAdd, pos, byr.vreg, line, col))
+        return SpreadFill { ctx = c4; pos = np.vreg }
+    }
+    if kind == 1 {
+        var stored = store_fat_slot(cur, addr.vreg, LoweredFat { ctx = cur; ptr = a; len = b }, line, col)
+        var np = ctx_alloc(stored)
+        var c3 = ctx_append(np.ctx, bin_inst(np.vreg, LBinOp::IAdd, pos, stride_vreg, line, col))
+        return SpreadFill { ctx = c3; pos = np.vreg }
+    }
+    var stored = ctx_append(cur, store_inst(addr.vreg, a, ltype_of(elem_t, cur.enums), line, col))
+    var np = ctx_alloc(stored)
+    var c3 = ctx_append(np.ctx, bin_inst(np.vreg, LBinOp::IAdd, pos, stride_vreg, line, col))
+    SpreadFill { ctx = c3; pos = np.vreg }
 }
 
 fn zero_fill_bytes(ctx: LowerCtx, ptr_vreg: u32, count_vreg: u32, line: u32, col: u32): LowerCtx {
