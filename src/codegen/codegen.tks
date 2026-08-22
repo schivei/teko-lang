@@ -5156,102 +5156,105 @@ fn cg_case_name_escaped(name: str): str {
     if cg_is_c_keyword(name) { teko::str::concat(name, "_") } else { name }
 }
 
-fn emit_pat_test(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, variantT: @Type()): Cb | error {
+fn emit_pat_test(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj: str, variantT: @Type()) {
     match pat {
-        parser::WildcardPattern => cb(buf, "1")
+        parser::WildcardPattern => buf.write("1")
         parser::LiteralPattern as lp => {
             var is_str_lit = match lp.value.kind { parser::StrLit => true; _ => false }
             if is_str_lit {
-                var out = cb(buf, "tk_str_eq(")
-                out = cb(out, subj)
-                out = cb(out, ", ")
-                out = match cg_emit_lit_pattern(out, lp.value) { Cb as o => o; error as err => return err }
-                return cb(out, ")")
+                buf.write("tk_str_eq(")
+                buf.write(subj)
+                buf.write(", ")
+                cg_emit_lit_pattern(buf, lp.value)
+                buf.write(")")
+                return
             }
-            var out = cb(buf, "(")
-            out = cb(out, subj)
-            out = cb(out, " == ")
-            out = match cg_emit_lit_pattern(out, lp.value) { Cb as o => o; error as err => return err }
-            cb(out, ")")
+            buf.write("(")
+            buf.write(subj)
+            buf.write(" == ")
+            cg_emit_lit_pattern(buf, lp.value)
+            buf.write(")")
         }
         parser::RangePattern as rp => {
-            var out = cb(buf, "(")
-            out = cb(out, subj)
-            out = cb(out, " >= ")
-            out = match cg_emit_lit_pattern(out, rp.lo) { Cb as o => o; error as err => return err }
-            out = cb(out, " && ")
-            out = cb(out, subj)
-            out = cb(out, " <= ")
-            out = match cg_emit_lit_pattern(out, rp.hi) { Cb as o => o; error as err => return err }
-            cb(out, ")")
+            buf.write("(")
+            buf.write(subj)
+            buf.write(" >= ")
+            cg_emit_lit_pattern(buf, rp.lo)
+            buf.write(" && ")
+            buf.write(subj)
+            buf.write(" <= ")
+            cg_emit_lit_pattern(buf, rp.hi)
+            buf.write(")")
         }
         parser::AltPattern as ap => {
-            var out = cb(buf, "(")
+            buf.write("(")
             var i = 0
             loop {
                 if i >= ap.options.len { break }
-                if i > 0 { out = cb(out, " || ") }
-                out = match emit_pat_test(out, prog, ap.options[i], subj, variantT) { Cb as o => o; error as err => return err }
+                if i > 0 { buf.write(" || ") }
+                emit_pat_test(buf, prog, ap.options[i], subj, variantT)
                 i++
             }
-            cb(out, ")")
+            buf.write(")")
         }
         parser::BindPattern as bp0 => {
             var bind_whole = match variantT {
                 checker::Named as nm => (!bp0.is_slice) && (cg_path_last(bp0.type_name) == checker::name_last_segment(nm.name))
                 _ => false
             }
-            if bind_whole { return cb(buf, "1") }
+            if bind_whole { buf.write("1"); return }
             var is_enum = match variantT { checker::Named as nm => cg_named_is_enum(prog, nm.name); _ => false }
             if is_enum {
                 var ename = match variantT { checker::Named as nm => checker::name_last_segment(nm.name); _ => "" }
-                var oe = cb(buf, "(")
-                oe = cb(oe, subj)
-                oe = cb(oe, " == TK_E_")
-                oe = cb_upper(oe, ename)
-                oe = cb(oe, "_")
-                var cke = match cg_emit_case_key_str(pat) { str as s => s; error as err => return err }
-                oe = cb_upper(oe, cke)
-                return cb(oe, ")")
+                buf.write("(")
+                buf.write(subj)
+                buf.write(" == TK_E_")
+                cb_upper(buf, ename)
+                buf.write("_")
+                var cke = match cg_emit_case_key_str(pat) { str as s => s; error as err => panic(err.message) }
+                cb_upper(buf, cke)
+                buf.write(")")
+                return
             }
-            var out = cb(buf, "(")
-            out = cb(out, subj)
-            out = cb(out, ".tag == ")
-            out = match cg_emit_tag_prefix(out, variantT) { Cb as o => o; error as err => return err }
-            var ck = match cg_case_key_qualified(prog, variantT, pat) { str as s => s; error as err => return err }
-            out = cb_upper(out, ck)
-            cb(out, ")")
+            buf.write("(")
+            buf.write(subj)
+            buf.write(".tag == ")
+            cg_emit_tag_prefix(buf, variantT)
+            var ck = match cg_case_key_qualified(prog, variantT, pat) { str as s => s; error as err => panic(err.message) }
+            cb_upper(buf, ck)
+            buf.write(")")
         }
         parser::FieldPattern => {
-            var out = cb(buf, "(")
-            out = cb(out, subj)
-            out = cb(out, ".tag == ")
-            out = match cg_emit_tag_prefix(out, variantT) { Cb as o => o; error as err => return err }
-            var ck = match cg_case_key_qualified(prog, variantT, pat) { str as s => s; error as err => return err }
-            out = cb_upper(out, ck)
-            cb(out, ")")
+            buf.write("(")
+            buf.write(subj)
+            buf.write(".tag == ")
+            cg_emit_tag_prefix(buf, variantT)
+            var ck = match cg_case_key_qualified(prog, variantT, pat) { str as s => s; error as err => panic(err.message) }
+            cb_upper(buf, ck)
+            buf.write(")")
         }
         parser::NullPattern => {
             if cg_var_reaches(prog, variantT, "null", 16) {
-                var out = cb(buf, "(")
-                out = cb(out, subj)
-                out = cb(out, ".tag == ")
-                out = match cg_emit_tag_prefix(out, variantT) { Cb as o => o; error as err => return err }
-                out = cb_upper(out, "null")
-                return cb(out, ")")
+                buf.write("(")
+                buf.write(subj)
+                buf.write(".tag == ")
+                cg_emit_tag_prefix(buf, variantT)
+                cb_upper(buf, "null")
+                buf.write(")")
+                return
             }
-            error { message = "codegen: `null` pattern over a non-optional subject (internal)" }
+            panic("codegen: `null` pattern over a non-optional subject (internal)")
         }
         parser::GroupBindPattern => {
-            var out = cb(buf, "(")
-            out = cb(out, subj)
-            out = cb(out, ".tag == ")
-            out = match cg_emit_tag_prefix(out, variantT) { Cb as o => o; error as err => return err }
-            var ck = match cg_case_key_qualified(prog, variantT, pat) { str as s => s; error as err => return err }
-            out = cb_upper(out, ck)
-            cb(out, ")")
+            buf.write("(")
+            buf.write(subj)
+            buf.write(".tag == ")
+            cg_emit_tag_prefix(buf, variantT)
+            var ck = match cg_case_key_qualified(prog, variantT, pat) { str as s => s; error as err => panic(err.message) }
+            cb_upper(buf, ck)
+            buf.write(")")
         }
-        parser::MacroPattern => error { message = "internal: an unexpanded @Type() macro reached codegen — it should be expanded by the Family-A pre-pass" }
+        parser::MacroPattern => panic("internal: an unexpanded @Type() macro reached codegen — it should be expanded by the Family-A pre-pass")
     }
 }
 
@@ -5283,13 +5286,11 @@ fn cg_kind_descend(prog: CgProg, subjT: @Type(), pat: @Pattern()): CgKindDescend
 }
 
 fn cg_kind_derived_subj(subj: str, boxed: bool): str {
-    var o: Cb = cb_new()
-    if boxed { o = cb(o, "(*") }
-    o = cb(o, "(")
-    o = cb(o, subj)
-    o = cb(o, ").kind")
-    if boxed { o = cb(o, ")") }
-    str(cb_flat(o))
+    var o = if boxed { "(*(" } else { "(" }
+    o = teko::str::concat(o, subj)
+    o = teko::str::concat(o, ").kind")
+    if boxed { o = teko::str::concat(o, ")") }
+    o
 }
 
 fn cg_fatptr_subject_name(prog: CgProg, subjT: @Type()): str | null {
