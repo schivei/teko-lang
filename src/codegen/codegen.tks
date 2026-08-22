@@ -311,7 +311,7 @@ fn cb_numint(buf: Cb, v: parser::NumInt): Cb {
 type CgArenaSym = enum {
     RegionAlloc; RegionNew; RegionDrop; RegionDropSubtree; RegionRoot; RegionCurrent;
     RegionEnter; RegionLeave; ArenaPush; ArenaPop; ArenaCommit; RegionRegister; RegionLookup; Alloc;
-    RetDestSet; RetDestGet
+    RetDestSet; RetDestGet; FreeBlock
 }
 
 fn cg_arena_sym(kind: CgArenaSym): str {
@@ -351,6 +351,7 @@ fn cg_arena_kind_suffix(kind: CgArenaSym): str {
         CgArenaSym::Alloc => "alloc"
         CgArenaSym::RetDestSet => "set_ret_dest"
         CgArenaSym::RetDestGet => "ret_dest"
+        CgArenaSym::FreeBlock => "free_block"
     }
 }
 
@@ -376,6 +377,7 @@ fn cg_arena_c_sym(kind: CgArenaSym): str {
         CgArenaSym::Alloc => "tk_alloc"
         CgArenaSym::RetDestSet => cg_arena_teko_sym(CgArenaSym::RetDestSet)
         CgArenaSym::RetDestGet => cg_arena_teko_sym(CgArenaSym::RetDestGet)
+        CgArenaSym::FreeBlock => "tk_free_block"
     }
 }
 
@@ -386,7 +388,7 @@ fn cg_arena_all_kinds(): []CgArenaSym {
         CgArenaSym::RegionEnter, CgArenaSym::RegionLeave, CgArenaSym::ArenaPush,
         CgArenaSym::ArenaPop, CgArenaSym::ArenaCommit, CgArenaSym::RegionRegister,
         CgArenaSym::RegionLookup, CgArenaSym::Alloc,
-        CgArenaSym::RetDestSet, CgArenaSym::RetDestGet
+        CgArenaSym::RetDestSet, CgArenaSym::RetDestGet, CgArenaSym::FreeBlock
     ]
 }
 
@@ -6577,6 +6579,29 @@ fn emit_index_slot(buf: Cb, wstmp: str, witmp: str): Cb {
 fn emit_assign(buf: Cb, prog: CgProg, ret_type: @Type(), a: checker::TAssign, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
     var is_index = match a.kind { parser::AssignKind::Index => true; _ => false }
     if is_index { return emit_index_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body, dctx) }
+    if a.op == lexer::TokenKind::Assign && checker::assign_frees_old(fn_body, a) {
+        var nm = $"_tkna{buf.len}"
+        var pout = cb(buf, indent)
+        pout = cb(pout, "{ ")
+        pout = match emit_type(pout, prog, a.bound) { Cb as o => o; error as err => return err }
+        pout = cb(pout, " ")
+        pout = cb(pout, nm)
+        pout = cb(pout, " = ")
+        pout = match emit_as_r(pout, prog, ret_type, a.bound, a.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+        pout = cb(pout, "; ")
+        pout = cb_arena_sym(pout, CgArenaSym::FreeBlock)
+        pout = cb(pout, "((uint64_t)(uintptr_t)")
+        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
+        pout = cb(pout, ".ptr, (uint64_t)")
+        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
+        pout = cb(pout, ".len * sizeof(*")
+        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
+        pout = cb(pout, ".ptr)); ")
+        pout = match emit_assign_lvalue(pout, prog, a) { Cb as o => o; error as err => return err }
+        pout = cb(pout, " = ")
+        pout = cb(pout, nm)
+        return cb(pout, "; }\n")
+    }
     var op = match assignop_c(a.op) { str as s => s; error as err => return err }
     var out = cb(buf, indent)
     if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {

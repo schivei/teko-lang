@@ -171,7 +171,7 @@ fn mark_stmt(s: @TStatement(), tail: bool, ref acc: []str) {
         TBinding as b => mark_expr(b.value, true, acc)
         TAssign as a => {
             if assign_is_self_append(a) {
-                mark_class_holder_escape(self_append_item(a), acc)
+                mark_self_append_items(a, acc)
             } else {
                 mark_expr(a.value, true, acc)
                 if parser::assign_has_target(a.kind) { mark_expr(a.target, true, acc) }
@@ -272,14 +272,30 @@ pub fn assign_is_self_append(a: TAssign): bool {
                 _ => false
             }
         }
+        TArrayLit as al => {
+            if al.elements.len < 1 { return false }
+            if !al.elements[0].is_spread { return false }
+            match al.elements[0].expr.kind {
+                TVar as v => v.name == a.name
+                _ => false
+            }
+        }
         _ => false
     }
 }
 
-fn self_append_item(a: TAssign): TExpr {
+fn mark_self_append_items(a: TAssign, ref acc: []str) {
     match a.value.kind {
-        TCall as c => c.args[1]
-        _ => a.value
+        TCall as c => if c.args.len == 2 { mark_class_holder_escape(c.args[1], acc) } else { }
+        TArrayLit as al => {
+            var i: u64 = 1
+            loop {
+                if i >= al.elements.len { break }
+                mark_class_holder_escape(al.elements[i].expr, acc)
+                i++
+            }
+        }
+        _ => { }
     }
 }
 
@@ -306,6 +322,7 @@ fn binding_value_is_list_empty(b: TBinding): bool {
             if segs.len < 2 { return false }
             segs[segs.len - 1].name == "empty" && segs[segs.len - 2].name == "list"
         }
+        TArrayLit as al => al.elements.len == 0
         _ => false
     }
 }
