@@ -5303,55 +5303,57 @@ fn cg_fatptr_subject_name(prog: CgProg, subjT: @Type()): str | null {
     }
 }
 
-fn cg_emit_fatptr_pat_test(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjname: str): Cb | error {
+fn cg_emit_fatptr_pat_test(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj: str, subjname: str) {
     match pat {
-        parser::WildcardPattern => cb(buf, "1")
+        parser::WildcardPattern => buf.write("1")
         parser::BindPattern as bp => {
-            if bp.is_slice { return error { message = "codegen: a slice pattern cannot discriminate a class/interface subject (internal)" } }
+            if bp.is_slice { panic("codegen: a slice pattern cannot discriminate a class/interface subject (internal)") }
             var sub_last = cg_path_last(bp.type_name)
-            if sub_last == checker::name_last_segment(subjname) { return cb(buf, "1") }
+            if sub_last == checker::name_last_segment(subjname) { buf.write("1"); return }
             var canon = cg_canon_name(prog, sub_last)
-            var o = cb(buf, "((")
-            o = cb(o, subj)
-            o = cb(o, ").vtable == tk_vt_")
-            o = cb_tysym(o, canon)
-            o = cb(o, "_")
-            o = cb_tysym(o, subjname)
-            cb(o, ")")
+            buf.write("((")
+            buf.write(subj)
+            buf.write(").vtable == tk_vt_")
+            cb_tysym(buf, canon)
+            buf.write("_")
+            cb_tysym(buf, subjname)
+            buf.write(")")
         }
-        _ => error { message = "codegen: unsupported pattern over a class/interface subject (internal)" }
+        _ => panic("codegen: unsupported pattern over a class/interface subject (internal)")
     }
 }
 
-fn cg_emit_fatptr_pat_binds(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjname: str, indent: str): Cb | error {
+fn cg_emit_fatptr_pat_binds(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj: str, subjname: str, indent: str) {
     match pat {
         parser::BindPattern as bp => {
-            if !bp.has_binding { return buf }
-            var o = cb(buf, indent)
-            o = cb(o, "auto ")
-            o = cb_str(o, bp.binding)
-            o = cb(o, " = ")
+            if !bp.has_binding { return }
+            buf.write(indent)
+            buf.write("auto ")
+            buf.write(bp.binding)
+            buf.write(" = ")
             var sub_last = cg_path_last(bp.type_name)
             if sub_last == checker::name_last_segment(subjname) {
-                o = cb(o, subj)
-                return cb(o, ";\n")
+                buf.write(subj)
+                buf.write(";\n")
+                return
             }
             var canon = cg_canon_name(prog, sub_last)
-            o = cb(o, "(")
-            o = mangle_type_name(o, "", canon)
-            o = cb(o, " *)((")
-            o = cb(o, subj)
-            cb(o, ").data);\n")
+            buf.write("(")
+            mangle_type_name(buf, "", canon)
+            buf.write(" *)((")
+            buf.write(subj)
+            buf.write(").data);\n")
         }
-        _ => buf
+        _ => { }
     }
 }
 
-fn cg_emit_pat_test(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @Type()): Cb | error {
+fn cg_emit_pat_test(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj: str, subjT: @Type()) {
     match cg_kind_descend(prog, subjT, pat) {
         CgKindDescend as kd => {
             var ds = cg_kind_derived_subj(subj, kd.boxed)
-            return cg_emit_pat_test(buf, prog, pat, ds, kd.var_type)
+            cg_emit_pat_test(buf, prog, pat, ds, kd.var_type)
+            return
         }
         null => { }
     }
@@ -5359,11 +5361,11 @@ fn cg_emit_pat_test(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @T
         checker::Variant as nva => match cg_union_niche_member(prog, nva) {
             (@Type()) as nx => {
                 match pat {
-                    parser::NullPattern => return cg_emit_niche_is_null(buf, subj, nx)
-                    parser::WildcardPattern => return cb(buf, "1")
-                    parser::BindPattern => return cg_emit_niche_not_null(buf, subj, nx)
-                    parser::FieldPattern => return cg_emit_niche_not_null(buf, subj, nx)
-                    parser::GroupBindPattern => return cg_emit_niche_not_null(buf, subj, nx)
+                    parser::NullPattern => { cg_emit_niche_is_null(buf, subj, nx); return }
+                    parser::WildcardPattern => { buf.write("1"); return }
+                    parser::BindPattern => { cg_emit_niche_not_null(buf, subj, nx); return }
+                    parser::FieldPattern => { cg_emit_niche_not_null(buf, subj, nx); return }
+                    parser::GroupBindPattern => { cg_emit_niche_not_null(buf, subj, nx); return }
                     _ => { }
                 }
             }
@@ -5375,11 +5377,11 @@ fn cg_emit_pat_test(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @T
         checker::Variant as bva => match cg_union_box_member(prog, bva) {
             (@Type()) as _gt10 => {
                 match pat {
-                    parser::NullPattern => { var o = cb(buf, "("); o = cb(o, subj); return cb(o, " == 0)") }
-                    parser::WildcardPattern => return cb(buf, "1")
-                    parser::BindPattern => { var o = cb(buf, "("); o = cb(o, subj); return cb(o, " != 0)") }
-                    parser::FieldPattern => { var o = cb(buf, "("); o = cb(o, subj); return cb(o, " != 0)") }
-                    parser::GroupBindPattern => { var o = cb(buf, "("); o = cb(o, subj); return cb(o, " != 0)") }
+                    parser::NullPattern => { buf.write("("); buf.write(subj); buf.write(" == 0)"); return }
+                    parser::WildcardPattern => { buf.write("1"); return }
+                    parser::BindPattern => { buf.write("("); buf.write(subj); buf.write(" != 0)"); return }
+                    parser::FieldPattern => { buf.write("("); buf.write(subj); buf.write(" != 0)"); return }
+                    parser::GroupBindPattern => { buf.write("("); buf.write(subj); buf.write(" != 0)"); return }
                     _ => { }
                 }
             }
@@ -5388,67 +5390,66 @@ fn cg_emit_pat_test(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @T
         _ => { }
     }
     match cg_fatptr_subject_name(prog, subjT) {
-        str as sname => return cg_emit_fatptr_pat_test(buf, prog, pat, subj, sname)
+        str as sname => { cg_emit_fatptr_pat_test(buf, prog, pat, subj, sname); return }
         null => { }
     }
     emit_pat_test(buf, prog, pat, subj, subjT)
 }
 
-fn emit_pat_binds(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @Type(), indent: str): Cb | error {
+fn emit_pat_binds(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj: str, subjT: @Type(), indent: str) {
     match pat {
         parser::BindPattern as bp => {
             if bp.has_binding {
-                var out = cb(buf, indent)
-                out = cb(out, "auto ")
-                out = cb_str(out, bp.binding)
-                out = cb(out, " = ")
-                out = cb(out, subj)
-                out = cb(out, ".as.")
-                var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => return err }
-                out = cb_str(out, ck)
-                cb(out, ";\n")
-            } else { buf }
+                buf.write(indent)
+                buf.write("auto ")
+                buf.write(bp.binding)
+                buf.write(" = ")
+                buf.write(subj)
+                buf.write(".as.")
+                var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => panic(err.message) }
+                buf.write(ck)
+                buf.write(";\n")
+            }
         }
         parser::FieldPattern as fp => {
-            var out = buf
             var i = 0
             loop {
                 if i >= fp.fields.len { break }
-                out = cb(out, indent)
-                out = cb(out, "auto ")
-                out = cb_str(out, fp.fields[i])
-                out = cb(out, " = ")
-                out = cb(out, subj)
-                out = cb(out, ".as.")
-                var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => return err }
-                out = cb_str(out, ck)
-                out = cb(out, ".")
-                out = cb_str(out, fp.fields[i])
-                out = cb(out, ";\n")
+                buf.write(indent)
+                buf.write("auto ")
+                buf.write(fp.fields[i])
+                buf.write(" = ")
+                buf.write(subj)
+                buf.write(".as.")
+                var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => panic(err.message) }
+                buf.write(ck)
+                buf.write(".")
+                buf.write(fp.fields[i])
+                buf.write(";\n")
                 i++
             }
-            out
         }
         parser::GroupBindPattern as gp => {
-            var out = cb(buf, indent)
-            out = cb(out, "auto ")
-            out = cb_str(out, gp.binding)
-            out = cb(out, " = ")
-            out = cb(out, subj)
-            out = cb(out, ".as.")
-            var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => return err }
-            out = cb_str(out, ck)
-            cb(out, ";\n")
+            buf.write(indent)
+            buf.write("auto ")
+            buf.write(gp.binding)
+            buf.write(" = ")
+            buf.write(subj)
+            buf.write(".as.")
+            var ck = match cg_case_key_qualified(prog, subjT, pat) { str as s => s; error as err => panic(err.message) }
+            buf.write(ck)
+            buf.write(";\n")
         }
-        _ => buf
+        _ => { }
     }
 }
 
-fn cg_emit_pat_binds(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @Type(), indent: str): Cb | error {
+fn cg_emit_pat_binds(buf: teko::io::FileStream, prog: CgProg, pat: @Pattern(), subj: str, subjT: @Type(), indent: str) {
     match cg_kind_descend(prog, subjT, pat) {
         CgKindDescend as kd => {
             var ds = cg_kind_derived_subj(subj, kd.boxed)
-            return cg_emit_pat_binds(buf, prog, pat, ds, kd.var_type, indent)
+            cg_emit_pat_binds(buf, prog, pat, ds, kd.var_type, indent)
+            return
         }
         null => { }
     }
@@ -5458,24 +5459,25 @@ fn cg_emit_pat_binds(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @
                 match pat {
                     parser::BindPattern as nbp => {
                         if nbp.has_binding {
-                            var o = cb(buf, indent)
-                            o = cb(o, "auto ")
-                            o = cb_str(o, nbp.binding)
-                            o = cb(o, " = ")
-                            o = cb(o, subj)
-                            return cb(o, ";\n")
+                            buf.write(indent)
+                            buf.write("auto ")
+                            buf.write(nbp.binding)
+                            buf.write(" = ")
+                            buf.write(subj)
+                            buf.write(";\n")
                         }
-                        return buf
+                        return
                     }
                     parser::GroupBindPattern as ngp => {
-                        var o = cb(buf, indent)
-                        o = cb(o, "auto ")
-                        o = cb_str(o, ngp.binding)
-                        o = cb(o, " = ")
-                        o = cb(o, subj)
-                        return cb(o, ";\n")
+                        buf.write(indent)
+                        buf.write("auto ")
+                        buf.write(ngp.binding)
+                        buf.write(" = ")
+                        buf.write(subj)
+                        buf.write(";\n")
+                        return
                     }
-                    _ => return buf
+                    _ => return
                 }
             }
             null => { }
@@ -5488,24 +5490,25 @@ fn cg_emit_pat_binds(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @
                 match pat {
                     parser::BindPattern as nbp => {
                         if nbp.has_binding {
-                            var o = cb(buf, indent)
-                            o = cb(o, "auto ")
-                            o = cb_str(o, nbp.binding)
-                            o = cb(o, " = (*(")
-                            o = cb(o, subj)
-                            return cb(o, "));\n")
+                            buf.write(indent)
+                            buf.write("auto ")
+                            buf.write(nbp.binding)
+                            buf.write(" = (*(")
+                            buf.write(subj)
+                            buf.write("));\n")
                         }
-                        return buf
+                        return
                     }
                     parser::GroupBindPattern as bgp => {
-                        var o = cb(buf, indent)
-                        o = cb(o, "auto ")
-                        o = cb_str(o, bgp.binding)
-                        o = cb(o, " = (*(")
-                        o = cb(o, subj)
-                        return cb(o, "));\n")
+                        buf.write(indent)
+                        buf.write("auto ")
+                        buf.write(bgp.binding)
+                        buf.write(" = (*(")
+                        buf.write(subj)
+                        buf.write("));\n")
+                        return
                     }
-                    _ => return buf
+                    _ => return
                 }
             }
             null => { }
@@ -5513,7 +5516,7 @@ fn cg_emit_pat_binds(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @
         _ => { }
     }
     match cg_fatptr_subject_name(prog, subjT) {
-        str as sname => return cg_emit_fatptr_pat_binds(buf, prog, pat, subj, sname, indent)
+        str as sname => { cg_emit_fatptr_pat_binds(buf, prog, pat, subj, sname, indent); return }
         null => { }
     }
     match pat {
@@ -5524,10 +5527,10 @@ fn cg_emit_pat_binds(buf: Cb, prog: CgProg, pat: @Pattern(), subj: str, subjT: @
             }
             if bind_whole {
                 if bp.has_binding {
-                    var o = cb(buf, indent); o = cb(o, "auto "); o = cb_str(o, bp.binding)
-                    o = cb(o, " = "); o = cb(o, subj); return cb(o, ";\n")
+                    buf.write(indent); buf.write("auto "); buf.write(bp.binding)
+                    buf.write(" = "); buf.write(subj); buf.write(";\n")
                 }
-                return buf
+                return
             }
         }
         _ => { }
