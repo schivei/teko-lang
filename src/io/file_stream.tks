@@ -26,6 +26,9 @@ exp type FileStream = class Stream {
     sfill: u64
     /** The cumulative bytes handed to `write` (flushed or still pending). */
     pub written: u64
+    /** The next fresh-name ordinal for the C function currently being emitted by the codegen
+     * writer; unused by callers outside the codegen writer. */
+    pub next_gensym: u64
 
     /** open — open `path` for writing, truncating (creating when absent) — the write-stream
      * constructor for callers that want the buffered `Stream` interface.
@@ -79,12 +82,25 @@ exp type FileStream = class Stream {
         self.flush()
         match stream_close(self) { error => { }; null => { } }
     }
+
+    /** gensym — the next fresh-name ordinal for the C function currently being emitted, advancing
+     * the counter. Reset at the start of each emitted C function via `reset_gensym`. */
+    pub fn gensym(): u64 {
+        var n = self.next_gensym
+        self.next_gensym = self.next_gensym + 1
+        n
+    }
+
+    /** reset_gensym — restart the fresh-name counter at the top of a newly emitted C function. */
+    pub fn reset_gensym() {
+        self.next_gensym = 0
+    }
 }
 
 /** file_stream_of — a fresh stream wrapping the open handle `h`, with an empty write buffer. */
 fn file_stream_of(h: i64): FileStream {
     var sb: [CHUNK]byte = []
-    FileStream { handle = h; sbuf = sb; sfill = 0; written = 0 }
+    FileStream { handle = h; sbuf = sb; sfill = 0; written = 0; next_gensym = 0 }
 }
 
 const WIN_CP_UTF8: u32 = 65001

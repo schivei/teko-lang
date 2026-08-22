@@ -11,250 +11,40 @@ type CovCtx = struct {
 }
 
 type TThunkEmit = struct {
-    buf: Cb
     emitted: []str
 }
 
 fn cov_off(): CovCtx { CovCtx { on = false; fn_idx = 0 } }
 
-fn emit_cov_line(buf: Cb, ctx: CovCtx, line: u32, indent: str): Cb {
-    if !ctx.on { return buf }
-    if line == 0 { return buf }
-    var b = cb(cb(buf, indent), "tk_cov_line_at(")
-    b = cb(cb_u64_digits(b, ctx.fn_idx), "ULL, ")
-    cb(cb_u64_digits(b, line to u64), ");\n")
+fn emit_cov_line(buf: ref teko::io::FileStream, ctx: CovCtx, line: u32, indent: str) {
+    if !ctx.on { return }
+    if line == 0 { return }
+    buf.write(indent)
+    buf.write("tk_cov_line_at(")
+    cb_u64_digits(buf, ctx.fn_idx)
+    buf.write("ULL, ")
+    cb_u64_digits(buf, line to u64)
+    buf.write(");\n")
 }
 
-fn emit_cov_branch(buf: Cb, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str): Cb {
-    if !ctx.on { return buf }
-    var b = cb(cb(buf, indent), "tk_cov_branch_at(")
-    b = cb(cb_u64_digits(b, ctx.fn_idx), "ULL, ")
-    b = cb(cb_u64_digits(b, line to u64), ", ")
-    b = cb(cb_u64_digits(b, col to u64), ", ")
-    cb(cb_u64_digits(b, outcome), ");\n")
+fn emit_cov_branch(buf: ref teko::io::FileStream, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str) {
+    if !ctx.on { return }
+    buf.write(indent)
+    buf.write("tk_cov_branch_at(")
+    cb_u64_digits(buf, ctx.fn_idx)
+    buf.write("ULL, ")
+    cb_u64_digits(buf, line to u64)
+    buf.write(", ")
+    cb_u64_digits(buf, col to u64)
+    buf.write(", ")
+    cb_u64_digits(buf, outcome)
+    buf.write(");\n")
 }
 
-type Chunk = struct {
-    data: []byte
-}
-
-type Cb = struct {
-    c0: []byte
-    c1: []byte
-    ninline: u64
-    prev: []Chunk
-    pn: u64
-    cur: []byte
-    fill: u64
-    len: u64
-    last: byte
-    fd: i64
-    sbuf: []byte
-    sfill: u64
-}
-
-fn cb_new(): Cb {
-    var e: []Chunk = []
-    var z: []byte = []
-    Cb { c0 = z; c1 = z; ninline = 0; prev = e; pn = 0; cur = z; fill = 0; len = 0; last = 0; fd = 0; sbuf = z; sfill = 0 }
-}
-
-fn cb_new_stream(fd: i64): Cb {
-    var e: []Chunk = []
-    var z: []byte = []
-    var sb: [1024]byte = []
-    Cb { c0 = z; c1 = z; ninline = 0; prev = e; pn = 0; cur = z; fill = 0; len = 0; last = 0; fd = fd; sbuf = sb; sfill = 0 }
-}
-
-fn cb_stream_flush(b: Cb): Cb {
-    var nb = b
-    if nb.sfill == 0 { return nb }
-    match teko::io::stream_write_prefix(teko::io::FileStream { handle = nb.fd }, nb.sbuf, nb.sfill) {
-        u64 => { }
-        error => { }
-    }
-    nb.sfill = 0
-    nb
-}
-
-fn cb_stream_add(b: Cb, s: []byte): Cb {
-    var nb = b
-    var slen = s.len
-    if slen == 0 { return nb }
-    var si: u64 = 0
-    loop {
-        if si >= slen { break }
-        if nb.sfill >= nb.sbuf.len { nb = cb_stream_flush(nb) }
-        var room = nb.sbuf.len - nb.sfill
-        var take = slen - si
-        if room < take { take = room }
-        var j: u64 = 0
-        loop {
-            if j >= take { break }
-            nb.sbuf[nb.sfill + j] = s[si + j]
-            j = j + 1
-        }
-        nb.sfill = nb.sfill + take
-        nb.len = nb.len + take
-        si = si + take
-    }
-    nb.last = s[slen - 1]
-    nb
-}
-
-fn cb_prev_room(b: Cb): Cb {
-    var nb = b
-    if nb.prev.len == 0 {
-        var p: [8]Chunk = []
-        nb.prev = p
-        return nb
-    }
-    if nb.pn < nb.prev.len { return nb }
-    var cap = nb.prev.len * 2
-    var np: [cap]Chunk = []
-    var i: u64 = 0
-    loop {
-        if i >= nb.pn { break }
-        np[i] = nb.prev[i]
-        i = i + 1
-    }
-    nb.prev = np
-    nb
-}
-
-fn cb_seal_grow(b: Cb, need: u64): Cb {
-    var nb = b
-    if nb.cur.len > 0 {
-        if nb.ninline == 0 { nb.c0 = nb.cur; nb.ninline = 1 }
-        else if nb.ninline == 1 { nb.c1 = nb.cur; nb.ninline = 2 }
-        else {
-            nb = cb_prev_room(nb)
-            nb.prev[nb.pn] = Chunk { data = nb.cur }
-            nb.pn = nb.pn + 1
-        }
-    }
-    var next: u64 = need
-    if nb.cur.len > 0 {
-        next = nb.cur.len * 8
-        if next > 2097152 { next = 2097152 }
-        if next < need { next = need }
-    }
-    if next < 16 { next = 16 }
-    var nc: [next]byte = []
-    nb.cur = nc
-    nb.fill = 0
-    nb
-}
-
-fn cb_add(b: Cb, s: []byte): Cb {
-    if b.fd != 0 { return cb_stream_add(b, s) }
-    var nb = b
-    var slen = s.len
-    if slen == 0 { return nb }
-    var si: u64 = 0
-    loop {
-        if si >= slen { break }
-        if nb.fill >= nb.cur.len { nb = cb_seal_grow(nb, slen - si) }
-        var room = nb.cur.len - nb.fill
-        var take = slen - si
-        if room < take { take = room }
-        var j: u64 = 0
-        loop {
-            if j >= take { break }
-            nb.cur[nb.fill + j] = s[si + j]
-            j = j + 1
-        }
-        nb.fill = nb.fill + take
-        nb.len = nb.len + take
-        si = si + take
-    }
-    nb.last = s[slen - 1]
-    nb
-}
-
-fn cb(buf: Cb, s: str): Cb { cb_add(buf, s) }
-
-fn cb_str(buf: Cb, s: str): Cb { cb_add(buf, s) }
-
-fn cb_byte(buf: Cb, x: byte): Cb {
-    if buf.fd != 0 {
-        var sb = buf
-        if sb.sfill >= sb.sbuf.len { sb = cb_stream_flush(sb) }
-        sb.sbuf[sb.sfill] = x
-        sb.sfill = sb.sfill + 1
-        sb.len = sb.len + 1
-        sb.last = x
-        return sb
-    }
-    var nb = buf
-    if nb.fill >= nb.cur.len { nb = cb_seal_grow(nb, 64) }
-    nb.cur[nb.fill] = x
-    nb.fill = nb.fill + 1
-    nb.len = nb.len + 1
-    nb.last = x
-    nb
-}
-
-fn cb_last(buf: Cb): byte { buf.last }
-
-fn cb_flat(b: Cb): []byte {
-    if b.fd != 0 {
-        var _flushed = cb_stream_flush(b)
-        var empty: []byte = []
-        return empty
-    }
-    if b.ninline == 0 && b.pn == 0 {
-        if b.fill == b.cur.len { return b.cur }
-    }
-    var total = b.len
-    var out: [total]byte = []
-    var k: u64 = 0
-    if b.ninline >= 1 {
-        var j: u64 = 0
-        loop {
-            if j >= b.c0.len { break }
-            out[k] = b.c0[j]
-            k = k + 1
-            j = j + 1
-        }
-    }
-    if b.ninline >= 2 {
-        var j: u64 = 0
-        loop {
-            if j >= b.c1.len { break }
-            out[k] = b.c1[j]
-            k = k + 1
-            j = j + 1
-        }
-    }
-    var i: u64 = 0
-    loop {
-        if i >= b.pn { break }
-        var ch = b.prev[i].data
-        var j: u64 = 0
-        loop {
-            if j >= ch.len { break }
-            out[k] = ch[j]
-            k = k + 1
-            j = j + 1
-        }
-        i = i + 1
-    }
-    var j2: u64 = 0
-    loop {
-        if j2 >= b.fill { break }
-        out[k] = b.cur[j2]
-        k = k + 1
-        j2 = j2 + 1
-    }
-    out
-}
-
-fn cb_i64(buf: Cb, v: i64): Cb {
-    if v == 0 { return cb_byte(buf, b'0') }
-    var b = buf
+fn cb_i64(buf: ref teko::io::FileStream, v: i64) {
+    if v == 0 { buf.write_byte(b'0'); return }
     var n = v
-    if n < 0 { b = cb_byte(b, b'-'); n = -n }
+    if n < 0 { buf.write_byte(b'-'); n = -n }
     var digits: [24]byte = []
     var c: u64 = 0
     loop {
@@ -266,17 +56,13 @@ fn cb_i64(buf: Cb, v: i64): Cb {
     var i = c
     loop {
         if i == 0 { break }
-        b = cb_byte(b, digits[i - 1])
+        buf.write_byte(digits[i - 1])
         i--
     }
-    b
 }
 
-fn cb_to_str(a: str, b: str): str { str(cb_flat(cb(cb(cb_new(), a), b))) }
-
-fn cb_u64_digits(buf: Cb, v: u64): Cb {
-    if v == 0 { return cb_byte(buf, b'0') }
-    var b = buf
+fn cb_u64_digits(buf: ref teko::io::FileStream, v: u64) {
+    if v == 0 { buf.write_byte(b'0'); return }
     var n = v
     var digits: [24]byte = []
     var c: u64 = 0
@@ -289,23 +75,30 @@ fn cb_u64_digits(buf: Cb, v: u64): Cb {
     var i = c
     loop {
         if i == 0 { break }
-        b = cb_byte(b, digits[i - 1])
+        buf.write_byte(digits[i - 1])
         i--
     }
-    b
 }
 
-fn cb_u64_c_expr(buf: Cb, v: u64): Cb {
-    cb(cb_u64_digits(buf, v), "ULL")
+fn cb_u64_c_expr(buf: ref teko::io::FileStream, v: u64) {
+    cb_u64_digits(buf, v)
+    buf.write("ULL")
 }
 
-fn cb_numint(buf: Cb, v: parser::NumInt): Cb {
+fn cb_numint(buf: ref teko::io::FileStream, v: parser::NumInt) {
     if v.neg {
-        var b = cb(buf, "-(")
-        b = cb_u64_c_expr(b, v.mag)
-        return cb(b, ")")
+        buf.write("-(")
+        cb_u64_c_expr(buf, v.mag)
+        buf.write(")")
+        return
     }
     cb_u64_c_expr(buf, v.mag)
+}
+
+/** cb_numint_str — the C literal spelling of `v`, standalone (not streamed). */
+fn cb_numint_str(v: parser::NumInt): str {
+    var mag = teko::str::concat(teko::u64_to_str(v.mag), "ULL")
+    if v.neg { teko::str::concat(teko::str::concat("-(", mag), ")") } else { mag }
 }
 
 type CgArenaSym = enum {
@@ -319,18 +112,18 @@ fn cg_arena_sym(kind: CgArenaSym): str {
 }
 
 /**
- * cb_arena_sym — stream the `TK_ARENA_<suffix>` provider symbol straight into the output buffer.
+ * cb_arena_sym — stream the `TK_ARENA_<suffix>` provider symbol straight into the output stream.
  *
- * The no-copy-grow counterpart of `cg_arena_sym`: it appends the fixed prefix and the kind suffix
- * as two streamed pieces, allocating nothing, for the emit sites that hand the symbol directly to
- * a buffer instead of materializing it as a `str`.
+ * The no-copy-grow counterpart of `cg_arena_sym`: it writes the fixed prefix and the kind suffix
+ * as two pieces, for the emit sites that hand the symbol directly to the stream instead of
+ * materializing it as a `str`.
  *
- * @param buf   the output buffer to append the symbol to
+ * @param buf   the output stream to write the symbol to
  * @param kind  which arena provider symbol to emit
- * @return      the buffer with `TK_ARENA_<suffix>` appended
  */
-fn cb_arena_sym(buf: Cb, kind: CgArenaSym): Cb {
-    cb(cb(buf, "TK_ARENA_"), cg_arena_kind_suffix(kind))
+fn cb_arena_sym(buf: ref teko::io::FileStream, kind: CgArenaSym) {
+    buf.write("TK_ARENA_")
+    buf.write(cg_arena_kind_suffix(kind))
 }
 
 fn cg_arena_kind_suffix(kind: CgArenaSym): str {
@@ -392,30 +185,27 @@ fn cg_arena_all_kinds(): []CgArenaSym {
     ]
 }
 
-fn cg_emit_arena_provider_ladder(buf: Cb): Cb {
-    var out = cb(buf, "#if defined(__linux__)\n")
-    out = cg_emit_arena_ladder_arm(out, true)
-    out = cb(out, "#else\n")
-    out = cg_emit_arena_ladder_arm(out, false)
-    out = cb(out, "#endif\n\n")
-    out
+fn cg_emit_arena_provider_ladder(buf: ref teko::io::FileStream) {
+    buf.write("#if defined(__linux__)\n")
+    cg_emit_arena_ladder_arm(buf, true)
+    buf.write("#else\n")
+    cg_emit_arena_ladder_arm(buf, false)
+    buf.write("#endif\n\n")
 }
 
-fn cg_emit_arena_ladder_arm(buf: Cb, linux: bool): Cb {
-    var out = buf
+fn cg_emit_arena_ladder_arm(buf: ref teko::io::FileStream, linux: bool) {
     var kinds = cg_arena_all_kinds()
     var i = 0
     loop {
         if i >= kinds.len { break }
         var kind = kinds[i]
-        out = cb(out, "#define TK_ARENA_")
-        out = cb(out, cg_arena_kind_suffix(kind))
-        out = cb(out, " ")
-        out = cb(out, if linux { cg_arena_teko_sym(kind) } else { cg_arena_c_sym(kind) })
-        out = cb(out, "\n")
+        buf.write("#define TK_ARENA_")
+        buf.write(cg_arena_kind_suffix(kind))
+        buf.write(" ")
+        buf.write(if linux { cg_arena_teko_sym(kind) } else { cg_arena_c_sym(kind) })
+        buf.write("\n")
         i = i + 1
     }
-    out
 }
 
 const F64_EXPONENT_SHIFT: u64 = 52 to u64
@@ -423,12 +213,12 @@ const F64_EXPONENT_MASK: u64 = 2047 to u64
 const F64_SIGNIFICAND_MASK: u64 = 4503599627370495 to u64
 const F64_SIGN_SHIFT: u64 = 63 to u64
 
-fn cb_f64_literal(buf: Cb, v: f64): Cb {
+fn cb_f64_literal(buf: ref teko::io::FileStream, v: f64) {
     var bits = teko::f64_bits(v)
-    if f64_bits_are_finite(bits) { return cb(buf, c_double_spelling(teko::ftoa(v))) }
-    if f64_bits_are_nan(bits) { return cb(buf, "NAN") }
-    if f64_bits_are_negative(bits) { return cb(buf, "(-INFINITY)") }
-    cb(buf, "INFINITY")
+    if f64_bits_are_finite(bits) { buf.write(c_double_spelling(teko::ftoa(v))); return }
+    if f64_bits_are_nan(bits) { buf.write("NAN"); return }
+    if f64_bits_are_negative(bits) { buf.write("(-INFINITY)"); return }
+    buf.write("INFINITY")
 }
 
 fn f64_bits_are_finite(bits: u64): bool {
@@ -459,102 +249,212 @@ fn has_c_float_marker(text: str): bool {
     false
 }
 
-fn cb_cstr_escaped(buf: Cb, s: str): Cb {
-    var b = buf
+fn cb_cstr_escaped(buf: ref teko::io::FileStream, s: str) {
     var i = 0
     loop {
         if i >= s.len { break }
         var c = s[i]
-        if c == b'\\' { b = cb(b, "\\\\") }
-        else if c == b'"' { b = cb(b, "\\\"") }
-        else if c == b'\n' { b = cb(b, "\\n") }
-        else if c == b'\t' { b = cb(b, "\\t") }
-        else if c == b'\r' { b = cb(b, "\\r") }
+        if c == b'\\' { buf.write("\\\\") }
+        else if c == b'"' { buf.write("\\\"") }
+        else if c == b'\n' { buf.write("\\n") }
+        else if c == b'\t' { buf.write("\\t") }
+        else if c == b'\r' { buf.write("\\r") }
         else if c < 0x20 || c >= 0x7F {
-            b = cb_byte(b, b'\\')
-            b = cb_byte(b, (b'0' to i64 + ((c to i64 / 64) % 8)) to byte)
-            b = cb_byte(b, (b'0' to i64 + ((c to i64 / 8) % 8)) to byte)
-            b = cb_byte(b, (b'0' to i64 + (c to i64 % 8)) to byte)
+            buf.write_byte(b'\\')
+            buf.write_byte((b'0' to i64 + ((c to i64 / 64) % 8)) to byte)
+            buf.write_byte((b'0' to i64 + ((c to i64 / 8) % 8)) to byte)
+            buf.write_byte((b'0' to i64 + (c to i64 % 8)) to byte)
         }
-        else { b = cb_byte(b, c) }
+        else { buf.write_byte(c) }
         i++
     }
-    b
+}
+
+/** cb_cstr_escaped_len — the C-escaped byte length of one source byte `c`. */
+fn cb_cstr_escaped_len(c: byte): u64 {
+    if c == b'\\' || c == b'"' || c == b'\n' || c == b'\t' || c == b'\r' { return 2 }
+    if c < 0x20 || c >= 0x7F { return 4 }
+    1
+}
+
+/** cb_cstr_escaped_fill — write the C-escaped spelling of `c` into `out` starting at `k`.
+ * @return the next free index in `out` */
+fn cb_cstr_escaped_fill(out: ref []byte, k: u64, c: byte): u64 {
+    if c == b'\\' { out[k] = b'\\'; out[k + 1] = b'\\'; return k + 2 }
+    if c == b'"' { out[k] = b'\\'; out[k + 1] = b'"'; return k + 2 }
+    if c == b'\n' { out[k] = b'\\'; out[k + 1] = b'n'; return k + 2 }
+    if c == b'\t' { out[k] = b'\\'; out[k + 1] = b't'; return k + 2 }
+    if c == b'\r' { out[k] = b'\\'; out[k + 1] = b'r'; return k + 2 }
+    if c < 0x20 || c >= 0x7F {
+        out[k] = b'\\'
+        out[k + 1] = (b'0' to i64 + ((c to i64 / 64) % 8)) to byte
+        out[k + 2] = (b'0' to i64 + ((c to i64 / 8) % 8)) to byte
+        out[k + 3] = (b'0' to i64 + (c to i64 % 8)) to byte
+        return k + 4
+    }
+    out[k] = c
+    k + 1
+}
+
+/** cb_cstr_escaped_str — the C-escaped spelling of `s`, standalone (not streamed). */
+fn cb_cstr_escaped_str(s: str): str {
+    var outlen: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        outlen = outlen + cb_cstr_escaped_len(s[i])
+        i++
+    }
+    var out: [outlen]byte = []
+    i = 0
+    var k: u64 = 0
+    loop {
+        if i >= s.len { break }
+        k = cb_cstr_escaped_fill(out, k, s[i])
+        i++
+    }
+    str_of_bytes(out)
 }
 
 pub fn tk_emit_meta(name: str, version: str, suffix: str, description: str): str {
-    var b: Cb = cb_new()
-    b = cb(b, "\n/* build metadata (teko C7.1k) — what(1)/strings-readable */\n")
-    b = cb(b, "__attribute__((used)) static const char tk_build_meta[] = \"@(#)")
-    b = cb_cstr_escaped(b, name)
-    b = cb(b, " ")
-    b = cb_cstr_escaped(b, version)
-    if suffix != "" { b = cb(b, "-"); b = cb_cstr_escaped(b, suffix) }
-    if description != "" { b = cb(b, " | "); b = cb_cstr_escaped(b, description) }
-    b = cb(b, "\";\n")
-    str(cb_flat(b))
+    var out = "\n/* build metadata (teko C7.1k) — what(1)/strings-readable */\n"
+    out = teko::str::concat(out, "__attribute__((used)) static const char tk_build_meta[] = \"@(#)")
+    out = teko::str::concat(out, cb_cstr_escaped_str(name))
+    out = teko::str::concat(out, " ")
+    out = teko::str::concat(out, cb_cstr_escaped_str(version))
+    if suffix != "" { out = teko::str::concat(out, teko::str::concat("-", cb_cstr_escaped_str(suffix))) }
+    if description != "" { out = teko::str::concat(out, teko::str::concat(" | ", cb_cstr_escaped_str(description))) }
+    teko::str::concat(out, "\";\n")
 }
 
-fn emit_prim(buf: Cb, k: checker::PrimKind): Cb | error {
+fn emit_prim(buf: ref teko::io::FileStream, k: checker::PrimKind): error | null {
     match k {
-        checker::PrimKind::U8 => cb(buf, "uint8_t")
-        checker::PrimKind::U16 => cb(buf, "uint16_t")
-        checker::PrimKind::U32 => cb(buf, "uint32_t")
-        checker::PrimKind::U64 => cb(buf, "uint64_t")
-        checker::PrimKind::I8 => cb(buf, "int8_t")
-        checker::PrimKind::I16 => cb(buf, "int16_t")
-        checker::PrimKind::I32 => cb(buf, "int32_t")
-        checker::PrimKind::I64 => cb(buf, "int64_t")
-        checker::PrimKind::F32 => cb(buf, "float")
-        checker::PrimKind::F64 => cb(buf, "double")
-        checker::PrimKind::Bool => cb(buf, "bool")
-        checker::PrimKind::Usize => cb(buf, "uint64_t")
-        checker::PrimKind::Size => cb(buf, "int64_t")
+        checker::PrimKind::U8 => buf.write("uint8_t")
+        checker::PrimKind::U16 => buf.write("uint16_t")
+        checker::PrimKind::U32 => buf.write("uint32_t")
+        checker::PrimKind::U64 => buf.write("uint64_t")
+        checker::PrimKind::I8 => buf.write("int8_t")
+        checker::PrimKind::I16 => buf.write("int16_t")
+        checker::PrimKind::I32 => buf.write("int32_t")
+        checker::PrimKind::I64 => buf.write("int64_t")
+        checker::PrimKind::F32 => buf.write("float")
+        checker::PrimKind::F64 => buf.write("double")
+        checker::PrimKind::Bool => buf.write("bool")
+        checker::PrimKind::Usize => buf.write("uint64_t")
+        checker::PrimKind::Size => buf.write("int64_t")
+    }
+    null
+}
+
+/** emit_prim_str — the C spelling of a primitive kind, standalone (not streamed). */
+fn emit_prim_str(k: checker::PrimKind): str {
+    match k {
+        checker::PrimKind::U8 => "uint8_t"
+        checker::PrimKind::U16 => "uint16_t"
+        checker::PrimKind::U32 => "uint32_t"
+        checker::PrimKind::U64 => "uint64_t"
+        checker::PrimKind::I8 => "int8_t"
+        checker::PrimKind::I16 => "int16_t"
+        checker::PrimKind::I32 => "int32_t"
+        checker::PrimKind::I64 => "int64_t"
+        checker::PrimKind::F32 => "float"
+        checker::PrimKind::F64 => "double"
+        checker::PrimKind::Bool => "bool"
+        checker::PrimKind::Usize => "uint64_t"
+        checker::PrimKind::Size => "int64_t"
     }
 }
 
-fn cb_tysym(buf: Cb, name: str): Cb {
-    var out = buf
+fn cb_tysym(buf: ref teko::io::FileStream, name: str) {
     var i = 0
     loop {
         if i >= name.len { break }
         if i + 1 < name.len && name[i] == b':' && name[i + 1] == b':' {
-            out = cb(out, "__")
+            buf.write("__")
             i = i + 2
         } else {
-            out = cb_byte(out, name[i])
+            buf.write_byte(name[i])
             i++
         }
     }
-    out
 }
 
-fn cg_ns_c_key(name: str): str { str(cb_flat(cb_tysym(cb_new(), name))) }
+/** cb_tysym_str — the `::`-mangled spelling of `name`, standalone (not streamed). */
+fn cb_tysym_str(name: str): str {
+    var outlen: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= name.len { break }
+        if i + 1 < name.len && name[i] == b':' && name[i + 1] == b':' { outlen = outlen + 2; i = i + 2 }
+        else { outlen = outlen + 1; i++ }
+    }
+    var out: [outlen]byte = []
+    i = 0
+    var k: u64 = 0
+    loop {
+        if i >= name.len { break }
+        if i + 1 < name.len && name[i] == b':' && name[i + 1] == b':' {
+            out[k] = b'_'; k++
+            out[k] = b'_'; k++
+            i = i + 2
+        } else {
+            out[k] = name[i]; k++
+            i++
+        }
+    }
+    str_of_bytes(out)
+}
+
+fn cg_ns_c_key(name: str): str { cb_tysym_str(name) }
 
 const TEKO_USER_PREFIX: str = "teko_"
 
-fn mangle_type_name(buf: Cb, namespace: str, name: str): Cb {
-    var out = cb(buf, "tk_t_")
+fn mangle_type_name(buf: ref teko::io::FileStream, namespace: str, name: str) {
+    buf.write("tk_t_")
     if namespace.len > 0 {
-        out = cb_tysym(out, namespace)
-        out = cb(out, "__")
+        cb_tysym(buf, namespace)
+        buf.write("__")
     }
-    cb_tysym(out, name)
+    cb_tysym(buf, name)
 }
 
-fn cb_fn_name(buf: Cb, ns: str, name: str, suffix: str = ""): Cb {
-    var out = cb(buf, TEKO_USER_PREFIX)
+/** mangle_type_name_str — the mangled C type name for (`namespace`, `name`), standalone. */
+fn mangle_type_name_str(namespace: str, name: str): str {
+    var out = "tk_t_"
+    if namespace.len > 0 { out = teko::str::concat(out, teko::str::concat(cb_tysym_str(namespace), "__")) }
+    teko::str::concat(out, cb_tysym_str(name))
+}
+
+fn cb_fn_name(buf: ref teko::io::FileStream, ns: str, name: str, suffix: str = "") {
+    buf.write(TEKO_USER_PREFIX)
     if ns.len != 0 {
         var i = 0
         loop {
             if i >= ns.len { break }
-            if ns[i] == b':' { out = cb_byte(out, b'_') } else { out = cb_byte(out, ns[i]) }
+            if ns[i] == b':' { buf.write_byte(b'_') } else { buf.write_byte(ns[i]) }
             i++
         }
-        out = cb(out, "__")
+        buf.write("__")
     }
-    out = cb_ident(out, name)
-    if suffix.len != 0 { out = cb(out, suffix) }
+    cb_ident(buf, name)
+    if suffix.len != 0 { buf.write(suffix) }
+}
+
+/** cb_fn_name_str — the mangled C function name for (`ns`, `name`, `suffix`), standalone. */
+fn cb_fn_name_str(ns: str, name: str, suffix: str = ""): str {
+    var out = TEKO_USER_PREFIX
+    if ns.len != 0 {
+        var nsm: [ns.len]byte = []
+        var i: u64 = 0
+        loop {
+            if i >= ns.len { break }
+            nsm[i] = if ns[i] == b':' { b'_' } else { ns[i] }
+            i++
+        }
+        out = teko::str::concat(out, teko::str::concat(str_of_bytes(nsm), "__"))
+    }
+    out = teko::str::concat(out, cb_ident_str(name))
+    if suffix.len != 0 { out = teko::str::concat(out, suffix) }
     out
 }
 
