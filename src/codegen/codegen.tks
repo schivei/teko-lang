@@ -1178,6 +1178,42 @@ fn emit_type(buf: teko::io::FileStream, prog: CgProg, t: @Type()) {
     }
 }
 
+/** emit_type_str — the C type spelling of `t`, standalone (not streamed). */
+fn emit_type_str(prog: CgProg, t: @Type()): str {
+    match t {
+        checker::Prim as p => emit_prim_str(p.kind)
+        checker::Byte => "uint8_t"
+        checker::Char => "tk_char"
+        checker::Void => "void"
+        checker::Str => "tk_str"
+        checker::Slice as sl => match sl.element {
+            checker::Void => panic("codegen: an untyped empty slice needs a known element type from context (internal)")
+            _ => teko::str::concat("tk_slice_", match cg_opt_mangle_str(sl.element) { str as s => s; error as e => panic(e.message) })
+        }
+        checker::Named as nm => {
+            if cg_is_polymorphic_base(prog, nm.name) { teko::str::concat("tk_base_", cb_tysym_str(nm.name)) }
+            else if cg_is_class_named(prog, nm.name) { teko::str::concat(mangle_type_name_str("", nm.name), " *") }
+            else { mangle_type_name_str("", nm.name) }
+        }
+        checker::Variant as va => match cg_union_niche_member(prog, va) {
+            (@Type()) as x => emit_type_str(prog, x)
+            null => match cg_union_box_member(prog, va) {
+                (@Type()) as bx => teko::str::concat(emit_type_str(prog, bx), " *")
+                null => match cg_variant_typename_str(va) { str as s => s; error as e => panic(e.message) }
+            }
+        }
+        checker::Func => "tk_closure"
+        checker::Error => "tk_error"
+        checker::Ptr as p => match p.inner {
+            null => "void *"
+            (@Type()) as pt => teko::str::concat(emit_type_str(prog, pt), " *")
+        }
+        checker::Uptr => "uintptr_t"
+        checker::Reference as r => teko::str::concat(emit_type_str(prog, r.inner), " *")
+        checker::Null => "uint8_t"
+    }
+}
+
 fn cg_emit_fnptr_sig_ex(buf: teko::io::FileStream, prog: CgProg, t: @Type(), with_env: bool) {
     match t {
         checker::Func as f => {
@@ -6756,38 +6792,36 @@ fn stmt_cov_lines(s: @TStatement()): []u32 {
     }
 }
 
-fn emit_cov_lines(buf: Cb, ctx: CovCtx, lines: []u32, indent: str): Cb {
-    if !ctx.on { return buf }
-    var out = buf
+fn emit_cov_lines(buf: teko::io::FileStream, ctx: CovCtx, lines: []u32, indent: str) {
+    if !ctx.on { return }
     var i: u64 = 0
-    loop { if i >= lines.len { break }; out = emit_cov_line(out, ctx, lines[i], indent); i = i + 1 }
-    out
+    loop { if i >= lines.len { break }; emit_cov_line(buf, ctx, lines[i], indent); i = i + 1 }
 }
 
-fn emit_stmt(buf: Cb, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
-    var b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
+fn emit_stmt(buf: teko::io::FileStream, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
+    emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
-        var ob = cb(b0, indent); ob = cb_arena_sym(ob, CgArenaSym::RegionEnter); ob = cb(ob, "("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
+        buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionEnter); buf.write("("); buf.write(dctx.rr); buf.write(");\n")
         var d2 = cg_dctx_bracket(dctx)
-        var ob2 = match emit_stmt_dispatch(ob, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value) { Cb as o => o; error as err => return err }
-        ob2 = cb(ob2, indent); ob2 = cb_arena_sym(ob2, CgArenaSym::RegionLeave); ob2 = cb(ob2, "();\n")
-        return ob2
+        emit_stmt_dispatch(buf, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value)
+        buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionLeave); buf.write("();\n")
+        return
     }
     if dctx.rr.len > 0 && dctx.bracket_depth == 0 && regions.len > 0 {
         var wt = cg_stmt_write_target(s)
         if wt != "" && !str_list_has(regions[regions.len - 1].bound_names, wt) {
             var res = cg_write_residence(regions, wt)
-            var rb = cb(b0, indent); rb = cb_arena_sym(rb, CgArenaSym::RegionEnter); rb = cb(rb, "("); rb = cb(rb, res); rb = cb(rb, ");\n")
+            buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionEnter); buf.write("("); buf.write(res); buf.write(");\n")
             var rd2 = cg_dctx_bracket(dctx)
-            var rb2 = match emit_stmt_dispatch(rb, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, rd2, cur_block, cur_block_is_value) { Cb as o => o; error as err => return err }
-            rb2 = cb(rb2, indent); rb2 = cb_arena_sym(rb2, CgArenaSym::RegionLeave); rb2 = cb(rb2, "();\n")
-            return rb2
+            emit_stmt_dispatch(buf, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, rd2, cur_block, cur_block_is_value)
+            buf.write(indent); cb_arena_sym(buf, CgArenaSym::RegionLeave); buf.write("();\n")
+            return
         }
     }
-    emit_stmt_dispatch(b0, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
+    emit_stmt_dispatch(buf, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
 }
 
-fn emit_stmt_dispatch(b0: Cb, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool): Cb | error {
+fn emit_stmt_dispatch(b0: teko::io::FileStream, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx, cur_block: []@TStatement(), cur_block_is_value: bool) {
     match s {
         checker::TBinding as b => emit_binding(b0, prog, ret_type, b, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
         checker::TAssign as a => emit_assign(b0, prog, ret_type, a, indent, frame, escaping, regions, fn_body, dctx)
@@ -6801,22 +6835,22 @@ fn emit_stmt_dispatch(b0: Cb, s: @TStatement(), in_main: bool, prog: CgProg, ret
         }
         checker::TLoopStmt as l => emit_loop(b0, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
         checker::TBreakStmt as b => {
-            var out = match emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, b.label), prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-            out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
-            out = cg_drop_regions_from(out, indent, regions, cg_target_region_base(dctx.loops, b.label))
-            out = cb(out, indent)
-            if b.label.len > 0 { out = cb(out, "goto tk_lbl_"); out = cb_str(out, b.label); cb(out, "_break;\n") }
-            else { cb(out, "break;\n") }
+            emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, b.label), prog, indent, escaping, fn_body)
+            cg_emit_bracket_unwind(b0, indent, dctx.bracket_depth)
+            cg_drop_regions_from(b0, indent, regions, cg_target_region_base(dctx.loops, b.label))
+            b0.write(indent)
+            if b.label.len > 0 { b0.write("goto tk_lbl_"); b0.write(b.label); b0.write("_break;\n") }
+            else { b0.write("break;\n") }
         }
         checker::TContinueStmt as c => {
-            var out = match emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, c.label), prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
-            out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
-            out = cg_drop_regions_from(out, indent, regions, cg_target_region_base(dctx.loops, c.label))
-            out = cb(out, indent)
-            if c.label.len > 0 { out = cb(out, "goto tk_lbl_"); out = cb_str(out, c.label); cb(out, "_cont;\n") }
-            else { cb(out, "continue;\n") }
+            emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, c.label), prog, indent, escaping, fn_body)
+            cg_emit_bracket_unwind(b0, indent, dctx.bracket_depth)
+            cg_drop_regions_from(b0, indent, regions, cg_target_region_base(dctx.loops, c.label))
+            b0.write(indent)
+            if c.label.len > 0 { b0.write("goto tk_lbl_"); b0.write(c.label); b0.write("_cont;\n") }
+            else { b0.write("continue;\n") }
         }
-        checker::TDeferStmt => b0
+        checker::TDeferStmt => { }
         checker::TAdoptStmt as a => emit_adopt(b0, a, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
         checker::TBlockStmt as b => emit_block_region(b0, b.body, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
         checker::TSpawn as sp => emit_spawn(b0, sp, prog, escaping, regions, fn_body, dctx, indent)
@@ -6831,107 +6865,103 @@ fn cg_spawn_arg_is_fat(t: @Type()): bool {
     }
 }
 
-fn cg_ctype_text(prog: CgProg, t: @Type()): str | error {
-    var b = match emit_type(cb_new(), prog, t) { Cb as o => o; error as e => return e }
-    str(cb_flat(b))
+fn cg_ctype_text(prog: CgProg, t: @Type()): str {
+    emit_type_str(prog, t)
 }
 
-fn cg_spawn_target_name(buf: Cb, prog: CgProg, c: checker::TCall): Cb {
+fn cg_spawn_target_name(buf: teko::io::FileStream, prog: CgProg, c: checker::TCall) {
     var last = cg_path_last(c.callee)
     match cg_find_function(prog, c.call_ns, last) {
-        checker::TFunction as cf => if cf.is_extern { cb(buf, cf.c_symbol) } else { cb_fn_name(buf, c.call_ns, last, c.overload_suffix) }
+        checker::TFunction as cf => if cf.is_extern { buf.write(cf.c_symbol) } else { cb_fn_name(buf, c.call_ns, last, c.overload_suffix) }
         error => cb_fn_name(buf, c.call_ns, last, c.overload_suffix)
     }
 }
 
-fn emit_spawn_thunks(buf: Cb, prog: CgProg, spawns: []checker::TSpawn): Cb | error {
-    var out = buf
+fn emit_spawn_thunks(buf: teko::io::FileStream, prog: CgProg, spawns: []checker::TSpawn) {
     var i: u64 = 0
     loop {
         if i >= spawns.len { break }
-        out = match emit_spawn_thunk_one(out, prog, spawns[i]) { Cb as o => o; error as e => return e }
+        emit_spawn_thunk_one(buf, prog, spawns[i])
         i = i + 1
     }
-    out
 }
 
-fn emit_spawn_thunk_one(buf: Cb, prog: CgProg, sp: checker::TSpawn): Cb | error {
-    var c = match sp.call.kind { checker::TCall as tc => tc; _ => return error { message = "internal: spawn target is not a call at codegen" } }
+fn emit_spawn_thunk_one(buf: teko::io::FileStream, prog: CgProg, sp: checker::TSpawn) {
+    var c = match sp.call.kind { checker::TCall as tc => tc; _ => panic("internal: spawn target is not a call at codegen") }
     var k = sp.id
     var args = c.args
-    var out = cb(buf, $"typedef struct {{ ")
+    buf.write($"typedef struct {{ ")
     var i: u64 = 0
     loop {
         if i >= args.len { break }
-        out = match emit_type(out, prog, args[i].type) { Cb as o => o; error as e => return e }
-        out = cb(out, $" a{i}; ")
+        emit_type(buf, prog, args[i].type)
+        buf.write($" a{i}; ")
         i = i + 1
     }
-    if args.len == 0 { out = cb(out, "char _pad; ") }
-    out = cb(out, $"}} tk_spawn_ctx_{k};\n")
-    out = cb(out, $"static tk_spawn_ctx_{k} *tk_spawn_pack_{k}(")
-    if args.len == 0 { out = cb(out, "void") }
+    if args.len == 0 { buf.write("char _pad; ") }
+    buf.write($"}} tk_spawn_ctx_{k};\n")
+    buf.write($"static tk_spawn_ctx_{k} *tk_spawn_pack_{k}(")
+    if args.len == 0 { buf.write("void") }
     i = 0
     loop {
         if i >= args.len { break }
-        if i > 0 { out = cb(out, ", ") }
-        out = match emit_type(out, prog, args[i].type) { Cb as o => o; error as e => return e }
-        out = cb(out, $" a{i}")
+        if i > 0 { buf.write(", ") }
+        emit_type(buf, prog, args[i].type)
+        buf.write($" a{i}")
         i = i + 1
     }
-    out = cb(out, $") {{\n    size_t _need = sizeof(tk_spawn_ctx_{k});\n")
+    buf.write($") {{\n    size_t _need = sizeof(tk_spawn_ctx_{k});\n")
     i = 0
     loop {
         if i >= args.len { break }
         if cg_spawn_arg_is_fat(args[i].type) {
-            var bytes_expr = match cg_spawn_fat_bytes(prog, args[i].type, i) { str as s => s; error as e => return e }
-            out = cb(out, $"    _need += 15u + {bytes_expr};\n")
+            var bytes_expr = cg_spawn_fat_bytes(prog, args[i].type, i)
+            buf.write($"    _need += 15u + {bytes_expr};\n")
         }
         i = i + 1
     }
-    out = cb(out, $"    char *_blk = (char *)malloc(_need ? _need : 1); if (!_blk) tk_panic(\"out of memory\");\n")
-    out = cb(out, $"    tk_spawn_ctx_{k} *_c = (tk_spawn_ctx_{k} *)_blk;\n")
-    out = cb(out, $"    char *_tail = _blk + sizeof(tk_spawn_ctx_{k}); (void)_tail;\n")
+    buf.write($"    char *_blk = (char *)malloc(_need ? _need : 1); if (!_blk) tk_panic(\"out of memory\");\n")
+    buf.write($"    tk_spawn_ctx_{k} *_c = (tk_spawn_ctx_{k} *)_blk;\n")
+    buf.write($"    char *_tail = _blk + sizeof(tk_spawn_ctx_{k}); (void)_tail;\n")
     i = 0
     loop {
         if i >= args.len { break }
-        out = match emit_spawn_pack_field(out, prog, args[i].type, i) { Cb as o => o; error as e => return e }
+        emit_spawn_pack_field(buf, prog, args[i].type, i)
         i = i + 1
     }
-    out = cb(out, "    return _c;\n}\n")
-    out = cb(out, $"static void tk_spawn_tramp_{k}(void *_raw) {{\n    tk_spawn_ctx_{k} *_c = (tk_spawn_ctx_{k} *)_raw; (void)_c;\n    ")
-    out = cg_spawn_target_name(out, prog, c)
-    out = cb(out, "(")
+    buf.write("    return _c;\n}\n")
+    buf.write($"static void tk_spawn_tramp_{k}(void *_raw) {{\n    tk_spawn_ctx_{k} *_c = (tk_spawn_ctx_{k} *)_raw; (void)_c;\n    ")
+    cg_spawn_target_name(buf, prog, c)
+    buf.write("(")
     i = 0
     loop {
         if i >= args.len { break }
-        if i > 0 { out = cb(out, ", ") }
-        out = cb(out, $"_c->a{i}")
+        if i > 0 { buf.write(", ") }
+        buf.write($"_c->a{i}")
         i = i + 1
     }
-    out = cb(out, ");\n    free(_raw);\n}\n")
-    out
+    buf.write(");\n    free(_raw);\n}\n")
 }
 
-fn cg_spawn_fat_bytes(prog: CgProg, t: @Type(), i: u64): str | error {
+fn cg_spawn_fat_bytes(prog: CgProg, t: @Type(), i: u64): str {
     match t {
         checker::Str => $"(size_t)a{i}.len"
         checker::Slice as sl => {
-            var elem = match cg_ctype_text(prog, sl.element) { str as s => s; error as e => return e }
+            var elem = cg_ctype_text(prog, sl.element)
             $"(size_t)a{i}.len * sizeof({elem})"
         }
-        _ => error { message = "internal: cg_spawn_fat_bytes on a non-fat spawn argument" }
+        _ => panic("internal: cg_spawn_fat_bytes on a non-fat spawn argument")
     }
 }
 
-fn emit_spawn_pack_field(buf: Cb, prog: CgProg, t: @Type(), i: u64): Cb | error {
+fn emit_spawn_pack_field(buf: teko::io::FileStream, prog: CgProg, t: @Type(), i: u64) {
     match t {
-        checker::Str => cb(buf, $"    _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, (size_t)a{i}.len); _c->a{i}.ptr = (const tk_byte *)_tail; _c->a{i}.len = a{i}.len; _tail += a{i}.len;\n")
+        checker::Str => buf.write($"    _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, (size_t)a{i}.len); _c->a{i}.ptr = (const tk_byte *)_tail; _c->a{i}.len = a{i}.len; _tail += a{i}.len;\n")
         checker::Slice as sl => {
-            var elem = match cg_ctype_text(prog, sl.element) { str as s => s; error as e => return e }
-            cb(buf, $"    {{ size_t _n = (size_t)a{i}.len * sizeof({elem}); _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, _n); _c->a{i}.ptr = ({elem} *)_tail; _c->a{i}.len = a{i}.len; _tail += _n; }}\n")
+            var elem = cg_ctype_text(prog, sl.element)
+            buf.write($"    {{ size_t _n = (size_t)a{i}.len * sizeof({elem}); _tail = (char *)(((uintptr_t)_tail + 15u) & ~(uintptr_t)15u); memcpy(_tail, (const void *)a{i}.ptr, _n); _c->a{i}.ptr = ({elem} *)_tail; _c->a{i}.len = a{i}.len; _tail += _n; }}\n")
         }
-        _ => cb(buf, $"    _c->a{i} = a{i};\n")
+        _ => buf.write($"    _c->a{i} = a{i};\n")
     }
 }
 
