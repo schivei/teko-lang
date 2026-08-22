@@ -29,68 +29,100 @@ type TyExport = struct {
 type Header = struct { types: []TyExport; fns: []FnSig }
 
 
-fn write_doc(buf: []byte, t: StrTable, has_doc: bool, doc: str): []byte {
-    if !has_doc { return write_u8(buf, 0) }
-    write_u32(write_u8(buf, 1), st_find(t, doc))
+const FNV_PRIME: u64 = 0x100000001B3
+
+fn fnv1a_fold(data: []byte, ref hash: u64) {
+    var i: u64 = 0
+    loop {
+        if i >= data.len { break }
+        hash.value = hash.value ^ (data[i] to u64)
+        hash.value = hash.value * FNV_PRIME
+        i = i + 1
+    }
 }
 
-fn write_sigparam(buf: []byte, t: StrTable, p: SigParam): []byte {
-    write_type(write_u32(buf, st_find(t, p.name)), t, p.type)
+fn stream_byte(fs: teko::io::FileStream, ref hash: u64, x: byte) {
+    fs.write_byte(x)
+    hash.value = hash.value ^ (x to u64)
+    hash.value = hash.value * FNV_PRIME
 }
 
-fn write_sigparams(buf: []byte, t: StrTable, xs: []SigParam): []byte {
-    var b = write_u32(buf, xs.len to u32)
+fn stream_bytes(fs: teko::io::FileStream, ref hash: u64, data: []byte) {
+    fs.write_bytes(data)
+    fnv1a_fold(data, hash)
+}
+
+fn stream_u32(fs: teko::io::FileStream, ref hash: u64, x: u32) {
+    stream_byte(fs, hash, lo8(x))
+    stream_byte(fs, hash, lo8(x >> 8))
+    stream_byte(fs, hash, lo8(x >> 16))
+    stream_byte(fs, hash, lo8(x >> 24))
+}
+
+fn stream_doc(fs: teko::io::FileStream, ref hash: u64, t: StrTable, has_doc: bool, doc: str) {
+    if !has_doc {
+        stream_byte(fs, hash, 0)
+        return
+    }
+    stream_byte(fs, hash, 1)
+    stream_u32(fs, hash, st_find(t, doc))
+}
+
+fn stream_sigparam(fs: teko::io::FileStream, ref hash: u64, t: StrTable, p: SigParam) {
+    stream_u32(fs, hash, st_find(t, p.name))
+    stream_bytes(fs, hash, write_type([], t, p.type))
+}
+
+fn stream_sigparams(fs: teko::io::FileStream, ref hash: u64, t: StrTable, xs: []SigParam) {
+    stream_u32(fs, hash, xs.len to u32)
     var i = 0
     loop {
         if i >= xs.len { break }
-        b = write_sigparam(b, t, xs[i])
+        stream_sigparam(fs, hash, t, xs[i])
         i++
     }
-    b
 }
 
-fn write_fnsig(buf: []byte, t: StrTable, f: FnSig): []byte {
-    var b = write_u32(buf, st_find(t, f.name))
-    b = write_sigparams(b, t, f.params)
-    b = write_type(b, t, f.ret)
-    write_doc(b, t, f.has_doc, f.doc)
+fn stream_fnsig(fs: teko::io::FileStream, ref hash: u64, t: StrTable, f: FnSig) {
+    stream_u32(fs, hash, st_find(t, f.name))
+    stream_sigparams(fs, hash, t, f.params)
+    stream_bytes(fs, hash, write_type([], t, f.ret))
+    stream_doc(fs, hash, t, f.has_doc, f.doc)
 }
 
-fn write_fnsigs(buf: []byte, t: StrTable, xs: []FnSig): []byte {
-    var b = write_u32(buf, xs.len to u32)
+fn stream_fnsigs(fs: teko::io::FileStream, ref hash: u64, t: StrTable, xs: []FnSig) {
+    stream_u32(fs, hash, xs.len to u32)
     var i = 0
     loop {
         if i >= xs.len { break }
-        b = write_fnsig(b, t, xs[i])
+        stream_fnsig(fs, hash, t, xs[i])
         i++
     }
-    b
 }
 
-fn write_sigfield(buf: []byte, t: StrTable, f: SigField): []byte {
-    write_type(write_u32(buf, st_find(t, f.name)), t, f.type)
+fn stream_sigfield(fs: teko::io::FileStream, ref hash: u64, t: StrTable, f: SigField) {
+    stream_u32(fs, hash, st_find(t, f.name))
+    stream_bytes(fs, hash, write_type([], t, f.type))
 }
 
-fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField): []byte {
-    var b = write_u32(buf, xs.len to u32)
+fn stream_sigfields(fs: teko::io::FileStream, ref hash: u64, t: StrTable, xs: []SigField) {
+    stream_u32(fs, hash, xs.len to u32)
     var i = 0
     loop {
         if i >= xs.len { break }
-        b = write_sigfield(b, t, xs[i])
+        stream_sigfield(fs, hash, t, xs[i])
         i++
     }
-    b
 }
 
-fn write_members(buf: []byte, t: StrTable, xs: []str): []byte {
-    var b = write_u32(buf, xs.len to u32)
+fn stream_members(fs: teko::io::FileStream, ref hash: u64, t: StrTable, xs: []str) {
+    stream_u32(fs, hash, xs.len to u32)
     var i = 0
     loop {
         if i >= xs.len { break }
-        b = write_u32(b, st_find(t, xs[i]))
+        stream_u32(fs, hash, st_find(t, xs[i]))
         i++
     }
-    b
 }
 
 fn shape_byte(s: TyShape): byte {
@@ -99,28 +131,39 @@ fn shape_byte(s: TyShape): byte {
     2
 }
 
-fn write_tyexport(buf: []byte, t: StrTable, e: TyExport): []byte {
-    var b = write_u32(buf, st_find(t, e.name))
-    b = write_u8(b, shape_byte(e.shape))
-    b = write_sigfields(b, t, e.fields)
-    b = write_members(b, t, e.members)
-    b = write_types(b, t, e.cases)
-    write_doc(b, t, e.has_doc, e.doc)
+fn stream_tyexport(fs: teko::io::FileStream, ref hash: u64, t: StrTable, e: TyExport) {
+    stream_u32(fs, hash, st_find(t, e.name))
+    stream_byte(fs, hash, shape_byte(e.shape))
+    stream_sigfields(fs, hash, t, e.fields)
+    stream_members(fs, hash, t, e.members)
+    stream_bytes(fs, hash, write_types([], t, e.cases))
+    stream_doc(fs, hash, t, e.has_doc, e.doc)
 }
 
-fn write_tyexports(buf: []byte, t: StrTable, xs: []TyExport): []byte {
-    var b = write_u32(buf, xs.len to u32)
+fn stream_tyexports(fs: teko::io::FileStream, ref hash: u64, t: StrTable, xs: []TyExport) {
+    stream_u32(fs, hash, xs.len to u32)
     var i = 0
     loop {
         if i >= xs.len { break }
-        b = write_tyexport(b, t, xs[i])
+        stream_tyexport(fs, hash, t, xs[i])
         i++
     }
-    b
 }
 
-fn write_header(buf: []byte, t: StrTable, h: Header): []byte {
-    write_fnsigs(write_tyexports(buf, t, h.types), t, h.fns)
+fn stream_strtable(fs: teko::io::FileStream, ref hash: u64, t: StrTable) {
+    stream_u32(fs, hash, t.strings.len to u32)
+    var i = 0
+    loop {
+        if i >= t.strings.len { break }
+        stream_bytes(fs, hash, write_bytes([], t.strings[i]))
+        i++
+    }
+}
+
+fn stream_header(fs: teko::io::FileStream, ref hash: u64, t: StrTable, h: Header) {
+    stream_strtable(fs, hash, t)
+    stream_tyexports(fs, hash, t, h.types)
+    stream_fnsigs(fs, hash, t, h.fns)
 }
 
 
@@ -214,18 +257,41 @@ fn collect_header(t: StrTable, h: Header): StrTable {
 
 const TKH_VERSION: u32 = 2
 
-fn emit_tkh(h: Header): []byte {
+const TKH_HASH_FIELD_OFFSET: i64 = 8
+
+fn tkh_stub_header(): []byte {
+    var b: []byte = []
+    b = write_u8(b, b'T')
+    b = write_u8(b, b'K')
+    b = write_u8(b, b'H')
+    b = write_u8(b, 0)
+    b = write_u32(b, TKH_VERSION)
+    write_u64(b, 0)
+}
+
+fn patch_tkh_hash(fs: teko::io::FileStream, hash: u64) {
+    fs.flush()
+    match teko::io::stream_seek(fs, TKH_HASH_FIELD_OFFSET, teko::io::Whence::Start) {
+        u64 => { }
+        error as e => panic(e.message)
+    }
+    match teko::io::stream_write(fs, write_u64([], hash)) {
+        u64 => { }
+        error as e => panic(e.message)
+    }
+}
+
+fn emit_tkh(h: Header, path: str) {
+    var fs = match teko::io::FileStream::open(path) {
+        teko::io::FileStream as f => f
+        error as e => panic(e.message)
+    }
+    defer { fs.flush(); fs.close() }
+    fs.write_bytes(tkh_stub_header())
     var table = collect_header(st_empty(), h)
-    var body = write_header(write_strtable([], table), table, h)
-    var hash = fnv1a(body, 0)
-    var out: []byte = []
-    out = write_u8(out, b'T')
-    out = write_u8(out, b'K')
-    out = write_u8(out, b'H')
-    out = write_u8(out, 0)
-    out = write_u32(out, TKH_VERSION)
-    out = write_u64(out, hash)
-    append_bytes(out, body)
+    var hash: u64 = 0xCBF29CE484222325
+    stream_header(fs, hash, table, h)
+    patch_tkh_hash(fs, hash)
 }
 
 
