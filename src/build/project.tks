@@ -1161,26 +1161,21 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
     if m.abi == "c" {
         match codegen::check_ffi_export(prog) { null => { }; error as e => return fail(dir, e.message) }
     }
+    var od = strip_trailing_slash(out_dir)
+    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
+    var cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
+    var binp = binary_output_path(od, stem, resolved_target())
     var codegen_phase = phase_begin("codegen", count_unit_text(0, prog.items.len, "items"), mode)
-    var emitted = match ffi_emit_c(prog, m.abi) {
-        str as s => s
+    var csize = match ffi_emit_c_file(prog, m.abi, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description)) {
+        u64 as n => n
         error as e => {
             phase_end_fail(codegen_phase, count_unit_text(0, prog.items.len, "items"), e.message)
             return fail(dir, e.message)
         }
     }
     phase_end_ok(codegen_phase, count_unit_text(prog.items.len, prog.items.len, "items"))
-    var csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
-    var od = strip_trailing_slash(out_dir)
-    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    var cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
-    var binp = binary_output_path(od, stem, resolved_target())
     var emit_phase = phase_begin("emit C", cfile, mode)
-    match teko::io::write_file(cfile, csrc) {
-        error as e => { phase_end_fail(emit_phase, cfile, e.message); return fail(dir, e.message) }
-        null => { }
-    }
-    phase_end_ok(emit_phase, teko::str::concat(cfile, teko::str::concat(" ", size_text(csrc.len))))
+    phase_end_ok(emit_phase, teko::str::concat(cfile, teko::str::concat(" ", size_text(csize))))
     if m.abi == "c" {
         match ffi_write_c_header(od, stem, prog) { null => { }; error as e => return fail(dir, e.message) }
     }
@@ -2361,9 +2356,9 @@ fn report_build_done(binp: str, start: i64) {
     teko::io::eprintln(teko::str::concat("built ", binp, teko::str::concat("   ", teko::str::concat(elapsed_str(start), "s"))))
 }
 
-fn ffi_emit_c(prog: checker::TProgram, abi: str): str | error {
-    if abi == "c" { return codegen::tk_emit_c_export(prog) }
-    codegen::tk_emit_c(prog)
+fn ffi_emit_c_file(prog: checker::TProgram, abi: str, out_path: str, meta: str): u64 | error {
+    if abi == "c" { return codegen::tk_emit_c_export_file(prog, out_path, meta) }
+    codegen::tk_emit_c_file(prog, out_path, meta)
 }
 
 fn ffi_write_c_header(od: str, stem: str, prog: checker::TProgram): error | null {
@@ -2881,12 +2876,10 @@ fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram
     if m.backend == Backend::Native {
         return emit_native(dir, stem, out_dir, prog, m, DebugInfo::None)
     }
-    var emitted = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
-    var csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
     var od = strip_trailing_slash(out_dir)
     var cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
     var binp = binary_output_path(od, stem, resolved_target())
-    match teko::io::write_file(cfile, csrc) { error as e => return fail(dir, e.message); null => { } }
+    match codegen::tk_emit_c_file(prog, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description)) { u64 => { }; error as e => return fail(dir, e.message) }
     if run_cc_debug(cfile, binp, m, prog) != 0 {
         return fail(dir, "cc failed to build the generated C")
     }
@@ -3159,9 +3152,7 @@ fn run_analyzer(dir: str, fe: Frontend): i32 {
     var stem = teko::str::concat(fe.manifest.name, "-tkanalyze")
     var cfile = teko::str::concat(od, "/", stem, ".c")
     var binp = binary_output_path(od, stem, resolved_target())
-    var emitted = match codegen::tk_emit_c_test_analyze(fe.prog) { str as s => s; error as e => return fail(dir, e.message) }
-    var csrc = teko::str::concat(emitted, codegen::tk_emit_meta(fe.manifest.name, fe.manifest.version, fe.manifest.suffix, fe.manifest.description))
-    match teko::io::write_file(cfile, csrc) { error as e => return fail(dir, e.message); null => { } }
+    match codegen::tk_emit_c_test_analyze_file(fe.prog, cfile, codegen::tk_emit_meta(fe.manifest.name, fe.manifest.version, fe.manifest.suffix, fe.manifest.description)) { u64 => { }; error as e => return fail(dir, e.message) }
     if run_cc(cfile, binp, fe.manifest, fe.prog, 0) != 0 { return fail(dir, "cc failed to build the analyzer test gate") }
     var adir = teko::str::concat(od, "/analyze")
     match teko::fs::mkdir(adir) { error => return fail(dir, "cannot create the analyzer scratch directory"); null => { } }
@@ -3243,9 +3234,7 @@ fn run_one_test_cov(dir: str, out_dir: str, filtered: checker::TProgram, m: Mani
     var cfile = teko::str::concat(od, "/", stem, ".c")
     var binp = binary_output_path(od, stem, resolved_target())
     var covfile = teko::str::concat(od, "/", stem, ".tkcov")
-    var emitted = match codegen::tk_emit_c_test(filtered, true) { str as s => s; error as e => return fail(dir, e.message) }
-    var csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
-    match teko::io::write_file(cfile, csrc) { error as e => return fail(dir, e.message); null => { } }
+    match codegen::tk_emit_c_test_file(filtered, true, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description)) { u64 => { }; error as e => return fail(dir, e.message) }
     if run_cc(cfile, binp, m, filtered, 0) != 0 { return fail(dir, "cc failed to build the per-test coverage gate") }
     match teko::env::set_var("TEKO_TKCOV", covfile) { error => { }; null => { } }
     var argv = [binp]
@@ -3575,16 +3564,11 @@ fn build_regression_cov_exe(m: Manifest, prog: checker::TProgram): str | error {
     var binp = binary_output_path(od, stem, resolved_target())
     var mode = report_mode(false, output_is_tty(false))
     var emit_phase = phase_begin("emit rcov", cfile, mode)
-    var emitted = match codegen::tk_emit_c_cov(prog) {
-        str as s => s
+    var csize = match codegen::tk_emit_c_cov_file(prog, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description)) {
+        u64 as n => n
         error as e => { phase_end_fail(emit_phase, cfile, e.message); return e }
     }
-    var csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
-    match teko::io::write_file(cfile, csrc) {
-        error as e => { phase_end_fail(emit_phase, cfile, e.message); return e }
-        null => { }
-    }
-    phase_end_ok(emit_phase, teko::str::concat(cfile, teko::str::concat(" ", size_text(csrc.len))))
+    phase_end_ok(emit_phase, teko::str::concat(cfile, teko::str::concat(" ", size_text(csize))))
     match teko::fs::remove_file(binp) { error => { }; null => { } }
     var cc_phase = phase_begin("cc rcov", binp, mode)
     if run_cc(cfile, binp, m, prog, REGRCOV_CC_OPT) != 0 {
