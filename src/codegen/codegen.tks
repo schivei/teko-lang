@@ -2669,118 +2669,131 @@ fn emit_deep_copy(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, c: chec
     return null
 }
 
-fn emit_ptr_unwrap_seam(buf: Cb, addr_c: str, tag_c: str): Cb {
-    buf
+fn emit_ptr_unwrap_seam(addr_c: str, tag_c: str): str {
+    ""
 }
 
-fn emit_ptr_wrap_guard(buf: Cb, addr_c: str, tag_c: str): Cb {
-    cb(buf, "1")
+fn emit_ptr_wrap_guard(addr_c: str, tag_c: str): str {
+    "1"
 }
 
-fn emit_ptr_unwrap(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_ptr_unwrap(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 1 { return error { message = "codegen: ptr::__unwrap expects one argument (internal)" } }
-    var a = fresh_named("_pu", buf.len to i64)
-    var out = cb(buf, "({ void *")
-    out = cb(out, a)
-    out = cb(out, " = (void *)(&(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ")); ")
-    out = emit_ptr_unwrap_seam(out, a, "")
-    out = cb(out, "(")
-    out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-    out = cb(out, ")")
-    out = cb(out, a)
-    cb(out, "; })")
+    var a = fresh_named("_pu", id)
+    cb(fd, "({ void *")
+    cb(fd, a)
+    cb(fd, " = (void *)(&(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")); ")
+    cb(fd, emit_ptr_unwrap_seam(a, ""))
+    cb(fd, "(")
+    var ts = match emit_type(prog, e.type) { str as o => o; error as err => return err }
+    cb(fd, ts)
+    cb(fd, ")")
+    cb(fd, a)
+    cb(fd, "; })")
+    return null
 }
 
-fn emit_ref_word(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_ref_word(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 1 { return error { message = "codegen: ref_word expects one argument (internal)" } }
-    var out = cb(buf, "((int64_t)(uintptr_t)&(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+    cb(fd, "((int64_t)(uintptr_t)&(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
-fn emit_ptr_wrap(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_ptr_wrap(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if c.args.len != 1 { return error { message = "codegen: __wrap expects one (receiver) argument (internal)" } }
     if c.type_args.len != 1 { return error { message = "codegen: __wrap expects one type argument (internal)" } }
     var ttype = c.type_args[0]
-    var addr = fresh_named("_pw", buf.len to i64)
-    var out = cb(buf, "({ void *")
-    out = cb(out, addr)
-    out = cb(out, " = (void *)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); ")
-    out = cb(out, addr)
-    out = cb(out, " == 0 ? ")
-    out = match emit_variant_wrap_str(out, prog, e.type, checker::Null { }, "0") { Cb as o => o; error as err => return err }
-    out = cb(out, " : (")
-    out = emit_ptr_wrap_guard(out, addr, "")
-    out = cb(out, " ? ")
-    var tcbuf = match emit_type(cb_new(), prog, ttype) { Cb as o => o; error as err => return err }
-    var tc = str(cb_flat(tcbuf))
+    var addr = fresh_named("_pw", id)
+    cb(fd, "({ void *")
+    cb(fd, addr)
+    cb(fd, " = (void *)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "); ")
+    cb(fd, addr)
+    cb(fd, " == 0 ? ")
+    match emit_variant_wrap_str(fd, id, prog, e.type, checker::Null { }, "0") { error as err => return err; null => { } }
+    cb(fd, " : (")
+    cb(fd, emit_ptr_wrap_guard(addr, ""))
+    cb(fd, " ? ")
+    var tc = match emit_type(prog, ttype) { str as o => o; error as err => return err }
     var tarm = $"*({tc} *){addr}"
-    out = match emit_variant_wrap_str(out, prog, e.type, ttype, tarm) { Cb as o => o; error as err => return err }
-    out = cb(out, " : ")
-    out = match emit_variant_wrap_str(out, prog, e.type, checker::Error { }, "(tk_error){0}") { Cb as o => o; error as err => return err }
-    cb(out, "); })")
+    match emit_variant_wrap_str(fd, id, prog, e.type, ttype, tarm) { error as err => return err; null => { } }
+    cb(fd, " : ")
+    match emit_variant_wrap_str(fd, id, prog, e.type, checker::Error { }, "(tk_error){0}") { error as err => return err; null => { } }
+    cb(fd, "); })")
+    return null
 }
 
-fn emit_as_cstr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var v = $"_ac{buf.len}"
-    var out = cb(buf, $"({{ tk_str {v}_s = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+fn emit_as_cstr(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    var v = $"_ac{id}"
+    id = id + 1
+    cb(fd, $"({{ tk_str {v}_s = (")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
     var region = cg_scratch_region_expr(regions)
-    out = cb(out, $"); uint8_t *{v} = (uint8_t *)")
-    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
-    cb(out, $"({region}, (size_t)({v}_s.len + 1)); for (uint64_t {v}_i = 0; {v}_i < {v}_s.len; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} {v}[{v}_s.len] = 0; {v}; }})")
+    cb(fd, $"); uint8_t *{v} = (uint8_t *)")
+    cb_arena_sym(fd, CgArenaSym::RegionAlloc)
+    cb(fd, $"({region}, (size_t)({v}_s.len + 1)); for (uint64_t {v}_i = 0; {v}_i < {v}_s.len; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} {v}[{v}_s.len] = 0; {v}; }})")
+    return null
 }
 
-fn emit_str_from_c(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var v = $"_sfc{buf.len}"
-    var out = cb(buf, $"({{ const uint8_t *{v}_p = (const uint8_t *)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, $"); uint64_t {v}_max = (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, $"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)malloc({v}_n ? {v}_n : 1); if (!{v}_buf) abort(); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
+fn emit_str_from_c(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    var v = $"_sfc{id}"
+    id = id + 1
+    cb(fd, $"({{ const uint8_t *{v}_p = (const uint8_t *)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, $"); uint64_t {v}_max = (uint64_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, $"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)malloc({v}_n ? {v}_n : 1); if (!{v}_buf) abort(); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
+    return null
 }
 
-fn emit_region_buf(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var v = $"_rb{buf.len}"
-    var out = cb(buf, $"({{ tk_region *{v}_r = (tk_region *)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, $"); uint64_t {v}_len = (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, $"); tk_str {v}_s = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, $"); uint8_t *{v} = (uint8_t *)")
-    out = cb_arena_sym(out, CgArenaSym::RegionAlloc)
-    cb(out, $"({v}_r, (size_t){v}_len); uint64_t {v}_cn = ({v}_s.len < {v}_len) ? {v}_s.len : {v}_len; for (uint64_t {v}_i = 0; {v}_i < {v}_cn; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} if ({v}_cn < {v}_len) {{ {v}[{v}_cn] = 0; }} else if ({v}_len > 0) {{ {v}[{v}_len - 1] = 0; }} {v}; }})")
+fn emit_region_buf(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    var v = $"_rb{id}"
+    id = id + 1
+    cb(fd, $"({{ tk_region *{v}_r = (tk_region *)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, $"); uint64_t {v}_len = (uint64_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, $"); tk_str {v}_s = (")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, $"); uint8_t *{v} = (uint8_t *)")
+    cb_arena_sym(fd, CgArenaSym::RegionAlloc)
+    cb(fd, $"({v}_r, (size_t){v}_len); uint64_t {v}_cn = ({v}_s.len < {v}_len) ? {v}_s.len : {v}_len; for (uint64_t {v}_i = 0; {v}_i < {v}_cn; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} if ({v}_cn < {v}_len) {{ {v}[{v}_cn] = 0; }} else if ({v}_len > 0) {{ {v}[{v}_len - 1] = 0; }} {v}; }})")
+    return null
 }
 
-fn emit_ptr_word(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "((int64_t)(uintptr_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+fn emit_ptr_word(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, "((int64_t)(uintptr_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
-fn emit_word_ptr(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "((void *)(uintptr_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+fn emit_word_ptr(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, "((void *)(uintptr_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
-fn emit_load_u64(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "((uint64_t)*(volatile uint64_t *)(uintptr_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+fn emit_load_u64(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, "((uint64_t)*(volatile uint64_t *)(uintptr_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
-fn emit_store_u64(buf: Cb, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "(*(volatile uint64_t *)(uintptr_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ") = (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+fn emit_store_u64(fd: i64, ref id: u64, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, "(*(volatile uint64_t *)(uintptr_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ") = (uint64_t)(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
 fn emit_iface_call(buf: Cb, prog: CgProg, ret_type: @Type(), c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
