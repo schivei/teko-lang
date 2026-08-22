@@ -4341,7 +4341,7 @@ fn emit_branch_value(buf: Cb, prog: CgProg, ret_type: @Type(), body: []@TStateme
     var fall = cg_append_direct_defers(dctx.defers, body)
     var region = fresh_named("_tkbr", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
-    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }]
+    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true); bound_names = cg_block_bound_names(body) }]
     var cur = dctx
     var i = 0
     loop {
@@ -5736,7 +5736,7 @@ fn emit_arm_value(buf: Cb, prog: CgProg, ret_type: @Type(), match_e: checker::TE
     var defer_floor = dctx.defers.len
     var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     var region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
-    var regs2 = if want_block { [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }] } else { regions }
+    var regs2 = if want_block { [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true); bound_names = cg_block_bound_names(body) }] } else { regions }
     var cur_blk = if want_block { body } else { [] }
     var out = buf
     if want_block {
@@ -6100,6 +6100,61 @@ type RegionFrame = struct {
     is_loop: bool
     defer_base: u64
     decls: []str
+    bound_names: []str
+}
+
+fn cg_block_bound_names(body: []@TStatement()): []str {
+    var acc: []str = []
+    var i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        match body[i] {
+            checker::TBinding as b => match b.target {
+                parser::SimpleName as sn => { acc = [..acc, sn.name] }
+                parser::DestructurePattern => { }
+            }
+            _ => { }
+        }
+        i = i + 1
+    }
+    acc
+}
+
+fn cg_block_wants_region(body: []@TStatement()): bool {
+    var i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        match body[i] {
+            checker::TBinding => { return true }
+            checker::TExprStmt as es => match es.expr.kind {
+                checker::TCall => { return true }
+                checker::TIfExpr => { return true }
+                checker::TMatchExpr => { return true }
+                _ => { }
+            }
+            checker::TLoopStmt => { return true }
+            _ => { }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn cg_write_residence(regions: []RegionFrame, name: str): str {
+    var k = regions.len
+    loop {
+        if k == 0 { break }
+        if str_list_has(regions[k - 1].bound_names, name) { return regions[k - 1].name }
+        k = k - 1
+    }
+    "_tkfr"
+}
+
+fn cg_stmt_write_target(s: @TStatement()): str {
+    match s {
+        checker::TAssign as a => a.name
+        _ => ""
+    }
 }
 
 fn str_list_has(xs: []str, name: str): bool {
@@ -6322,14 +6377,14 @@ fn emit_block(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, ret_t
 fn emit_block_region(buf: Cb, body: []@TStatement(), in_main: bool, prog: CgProg, ret_type: @Type(), indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, body)
-    var want_block = cg_block_has_block_local(prog, escaping, fn_body, body, false) && regions.len < 64
+    var want_block = (cg_block_has_block_local(prog, escaping, fn_body, body, false) || (dctx.rr.len > 0 && cg_block_wants_region(body))) && regions.len < 64
     if !want_block {
         var out = match emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, dctx, [], false) { Cb as o => o; error as err => return err }
         return emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body)
     }
     var region = fresh_named("_tkbr", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) }]
+    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false); bound_names = cg_block_bound_names(body) }]
     out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
     out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDrop); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
@@ -6688,12 +6743,12 @@ fn emit_loop_while(buf: Cb, l: checker::TLoopStmt, in_main: bool, prog: CgProg, 
     var defer_floor = dctx.defers.len
     var fall = cg_append_direct_defers(dctx.defers, l.body)
     var dctx2 = DeferCtx { defers = dctx.defers; loops = [..dctx.loops, LoopDeferFrame { label = l.label; defer_base = defer_floor; region_base = regions.len }]; cov = dctx.cov; rr = dctx.rr; bracket_depth = dctx.bracket_depth }
-    var want_block = cg_block_has_block_local(prog, escaping, fn_body, l.body, false) && regions.len < 64
+    var want_block = (cg_block_has_block_local(prog, escaping, fn_body, l.body, false) || (dctx.rr.len > 0 && cg_block_wants_region(l.body))) && regions.len < 64
     var region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     var regs2 = regions
     if want_block {
         out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-        regs2 = [..regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) }]
+        regs2 = [..regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = defer_floor; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false); bound_names = cg_block_bound_names(l.body) }]
     }
     var cur_blk = if want_block { l.body } else { [] }
     out = match emit_block(out, l.body, in_main, prog, ret_type, inner, escaping, regs2, fn_body, dctx2, cur_blk, false) { Cb as o => o; error as err => return err }
@@ -6827,6 +6882,17 @@ fn emit_stmt(buf: Cb, s: @TStatement(), in_main: bool, prog: CgProg, ret_type: @
         var ob2 = match emit_stmt_dispatch(ob, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value) { Cb as o => o; error as err => return err }
         ob2 = cb(ob2, indent); ob2 = cb_arena_sym(ob2, CgArenaSym::RegionLeave); ob2 = cb(ob2, "();\n")
         return ob2
+    }
+    if dctx.rr.len > 0 && dctx.bracket_depth == 0 && regions.len > 0 {
+        var wt = cg_stmt_write_target(s)
+        if wt != "" && !str_list_has(regions[regions.len - 1].bound_names, wt) {
+            var res = cg_write_residence(regions, wt)
+            var rb = cb(b0, indent); rb = cb_arena_sym(rb, CgArenaSym::RegionEnter); rb = cb(rb, "("); rb = cb(rb, res); rb = cb(rb, ");\n")
+            var rd2 = cg_dctx_bracket(dctx)
+            var rb2 = match emit_stmt_dispatch(rb, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, rd2, cur_block, cur_block_is_value) { Cb as o => o; error as err => return err }
+            rb2 = cb(rb2, indent); rb2 = cb_arena_sym(rb2, CgArenaSym::RegionLeave); rb2 = cb(rb2, "();\n")
+            return rb2
+        }
     }
     emit_stmt_dispatch(b0, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
 }
@@ -7009,7 +7075,7 @@ fn emit_adopt(buf: Cb, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, ret_
     var fall = cg_append_direct_defers(dctx.defers, a.body)
     var region = fresh_named("_tkad", buf.len to i64)
     var out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = "); out = cb_arena_sym(out, CgArenaSym::RegionNew); out = cb(out, "("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = [] }]
+    var regs2 = [..regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = defer_floor; decls = []; bound_names = cg_block_bound_names(a.body) }]
     out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { Cb as o => o; error as err => return err }
     out = match emit_defers(out, fall, defer_floor, prog, indent, escaping, fn_body) { Cb as o => o; error as err => return err }
     out = cb(out, indent); out = cb_arena_sym(out, CgArenaSym::RegionDropSubtree); out = cb(out, "("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
