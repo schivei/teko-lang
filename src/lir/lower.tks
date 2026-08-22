@@ -5811,7 +5811,21 @@ fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign): bool {
 }
 
 fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign): LowerStmtOut | error {
-    store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
+    var elemt = match a.bound {
+        checker::Slice as sl => sl.element
+        checker::Str => checker::Byte { }
+        _ => return store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
+    }
+    var stride = elem_byte_stride(elemt, ctx.enums)
+    var avar = checker::TExpr { kind = checker::TVar { name = a.name; is_func = false; func_ns = "" }; type = a.bound; line = a.target.line; col = a.target.col }
+    var old = match lower_fat_expr(ctx, avar) { LoweredFat as x => x; error as err => return err }
+    var strider = ctx_alloc(old.ctx)
+    var c1 = ctx_append(strider.ctx, const_int_inst(strider.vreg, stride to i64, a.target.line, a.target.col))
+    var bytes = ctx_alloc(c1)
+    var c2 = ctx_append(bytes.ctx, bin_inst(bytes.vreg, LBinOp::IMul, old.len, strider.vreg, a.target.line, a.target.col))
+    var stored = match store_fat_through_addr(c2, slot, a, teko::str::concat("the str/slice local `", a.name, "`")) { LowerStmtOut as x => x; error as err => return err }
+    var freed = ctx_append(stored.ctx, void_call_inst("tk_free_block", two_args(old.ptr, bytes.vreg), false, a.target.line, a.target.col))
+    LowerStmtOut { ctx = freed; terminated = false }
 }
 
 fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign): LowerStmtOut | error {
