@@ -1772,7 +1772,7 @@ pub fn cast_may_lose(src: checker::PrimKind, dst: checker::PrimKind): bool {
     !checker::cast_is_lossless_widen(src, dst)
 }
 
-fn emit_div_mod(buf: Cb, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_div_mod(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var prim = match e.type {
         checker::Prim as p => p
         _ => return error { message = "codegen: division/modulo on a non-primitive type not yet supported" }
@@ -1784,17 +1784,17 @@ fn emit_div_mod(buf: Cb, prog: CgProg, e: checker::TExpr, b: checker::TBinary, e
         str as t => t
         error => return error { message = "codegen: division/modulo on a non-numeric type not yet supported" }
     }
-    var out = buf
-    if b.op == lexer::TokenKind::Slash { out = cb(out, "tk_div_") } else { out = cb(out, "tk_mod_") }
-    out = cb(out, tag)
-    out = cb(out, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ", ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")")
+    if b.op == lexer::TokenKind::Slash { cb(fd, "tk_div_") } else { cb(fd, "tk_mod_") }
+    cb(fd, tag)
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ", ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    return null
 }
 
-fn emit_div_mod_assign(buf: Cb, prog: CgProg, a: checker::TAssign, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_div_mod_assign(fd: i64, ref id: u64, prog: CgProg, a: checker::TAssign, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var prim = match a.bound {
         checker::Prim as p => p
         _ => return error { message = "codegen: division/modulo-assign on a non-primitive type not yet supported" }
@@ -1807,19 +1807,20 @@ fn emit_div_mod_assign(buf: Cb, prog: CgProg, a: checker::TAssign, escaping: []s
         error => return error { message = "codegen: division/modulo-assign on a non-numeric type not yet supported" }
     }
     var fn_prefix = if a.op == lexer::TokenKind::SlashEq { "tk_div_" } else { "tk_mod_" }
-    var out = match emit_assign_lvalue(buf, prog, a) { Cb as o => o; error as err => return err }
-    out = cb(out, " = ")
-    out = cb(out, fn_prefix)
-    out = cb(out, tag)
-    out = cb(out, "(")
-    out = match emit_assign_lvalue(out, prog, a) { Cb as o => o; error as err => return err }
-    out = cb(out, ", ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ")")
-    cb(out, ";\n")
+    match emit_assign_lvalue(fd, id, prog, a) { error as err => return err; null => { } }
+    cb(fd, " = ")
+    cb(fd, fn_prefix)
+    cb(fd, tag)
+    cb(fd, "(")
+    match emit_assign_lvalue(fd, id, prog, a) { error as err => return err; null => { } }
+    cb(fd, ", ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    cb(fd, ";\n")
+    return null
 }
 
-fn emit_arith(buf: Cb, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_arith(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var prim = match e.type {
         checker::Prim as p => p
         _ => return error { message = "codegen: arithmetic on a non-primitive type not yet supported" }
@@ -1834,16 +1835,17 @@ fn emit_arith(buf: Cb, prog: CgProg, e: checker::TExpr, b: checker::TBinary, esc
     var fn_prefix = if b.op == lexer::TokenKind::Plus { "tk_add_" }
     else if b.op == lexer::TokenKind::Minus { "tk_sub_" }
     else { "tk_mul_" }
-    var out = cb(buf, fn_prefix)
-    out = cb(out, tag)
-    out = cb(out, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ", ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")")
+    cb(fd, fn_prefix)
+    cb(fd, tag)
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ", ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    return null
 }
 
-fn emit_shift(buf: Cb, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_shift(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var prim = match e.type {
         checker::Prim as p => p
         _ => return error { message = "codegen: shift on a non-integer type not yet supported" }
@@ -1856,51 +1858,54 @@ fn emit_shift(buf: Cb, prog: CgProg, e: checker::TExpr, b: checker::TBinary, esc
         error => return error { message = "codegen: shift on a non-integer type not yet supported" }
     }
     var fn_prefix = if b.op == lexer::TokenKind::Shl { "tk_shl_" } else { "tk_shr_" }
-    var out = cb(buf, fn_prefix)
-    out = cb(out, tag)
-    out = cb(out, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ", ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")")
+    cb(fd, fn_prefix)
+    cb(fd, tag)
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ", ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    return null
 }
 
-fn emit_binary(buf: Cb, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_binary(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     if b.op == lexer::TokenKind::Slash || b.op == lexer::TokenKind::Percent {
-        return emit_div_mod(buf, prog, e, b, escaping, regions, fn_body, dctx)
+        return emit_div_mod(fd, id, prog, e, b, escaping, regions, fn_body, dctx)
     }
     if b.op == lexer::TokenKind::Plus || b.op == lexer::TokenKind::Minus || b.op == lexer::TokenKind::Star {
         var is_int_prim = match e.type {
             checker::Prim as p => cg_prim_is_int(p.kind)
             _ => false
         }
-        if is_int_prim { return emit_arith(buf, prog, e, b, escaping, regions, fn_body, dctx) }
+        if is_int_prim { return emit_arith(fd, id, prog, e, b, escaping, regions, fn_body, dctx) }
     }
     if b.op == lexer::TokenKind::Shl || b.op == lexer::TokenKind::Shr {
-        return emit_shift(buf, prog, e, b, escaping, regions, fn_body, dctx)
+        return emit_shift(fd, id, prog, e, b, escaping, regions, fn_body, dctx)
     }
     var op = match binop_c(b.op) { str as s => s; error as err => return err }
-    var out = cb(buf, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, op)
-    out = cb(out, " ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")")
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.left, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, " ")
+    cb(fd, op)
+    cb(fd, " ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    return null
 }
 
-fn emit_unary(buf: Cb, prog: CgProg, u: checker::TUnary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_unary(fd: i64, ref id: u64, prog: CgProg, u: checker::TUnary, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var op = match unop_c(u.op) { str as s => s; error as err => return err }
     var mask_type = cg_bnot_mask_type(u)
-    var out = cb(buf, "(")
+    cb(fd, "(")
     match mask_type {
-        checker::Prim as p => { out = cb(out, "("); out = match emit_type(out, prog, checker::Prim { kind = p.kind }) { Cb as o => o; error as err => return err }; out = cb(out, ")(") }
+        checker::Prim as p => { cb(fd, "("); var ts = match emit_type(prog, checker::Prim { kind = p.kind }) { str as o => o; error as err => return err }; cb(fd, ts); cb(fd, ")(") }
         _ => { }
     }
-    out = cb(out, op)
-    out = match emit_expr_ctx(out, prog, checker::Void { }, u.operand, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    match mask_type { checker::Prim => { out = cb(out, ")") }; _ => { } }
-    cb(out, ")")
+    cb(fd, op)
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, u.operand, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    match mask_type { checker::Prim => { cb(fd, ")") }; _ => { } }
+    cb(fd, ")")
+    return null
 }
 
 fn cg_bnot_mask_type(u: checker::TUnary): @Type() {
@@ -1970,24 +1975,25 @@ fn cg_variant_member_payload_comparable(t: @Type()): bool {
     }
 }
 
-fn emit_content_eq(buf: Cb, prog: CgProg, route: CgCmpRoute, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_content_eq(fd: i64, ref id: u64, prog: CgProg, route: CgCmpRoute, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     match route {
-        CgCmpRoute::StrEq => emit_runtime_eq_call(buf, prog, "tk_str_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
-        CgCmpRoute::CharEq => emit_runtime_eq_call(buf, prog, "tk_char_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
-        CgCmpRoute::SliceEq => emit_slice_eq(buf, prog, op, lhs, rhs, escaping, regions, fn_body, dctx)
+        CgCmpRoute::StrEq => emit_runtime_eq_call(fd, id, prog, "tk_str_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
+        CgCmpRoute::CharEq => emit_runtime_eq_call(fd, id, prog, "tk_char_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
+        CgCmpRoute::SliceEq => emit_slice_eq(fd, id, prog, op, lhs, rhs, escaping, regions, fn_body, dctx)
         CgCmpRoute::Plain => error { message = "codegen: emit_content_eq called with the Plain route (internal)" }
     }
 }
 
-fn emit_runtime_eq_call(buf: Cb, prog: CgProg, rtfn: str, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    var out = cb(buf, "(")
-    if op == lexer::TokenKind::Ne { out = cb(out, "!") }
-    out = cb(out, rtfn)
-    out = cb(out, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, lhs, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, ", ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, rhs, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+fn emit_runtime_eq_call(fd: i64, ref id: u64, prog: CgProg, rtfn: str, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    cb(fd, "(")
+    if op == lexer::TokenKind::Ne { cb(fd, "!") }
+    cb(fd, rtfn)
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, lhs, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ", ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, rhs, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
 pub type CgSliceEqPlan = struct {
@@ -2015,110 +2021,121 @@ fn cg_slice_elem_of(t: @Type()): @Type() {
     match t { checker::Slice as sl => sl.element; _ => checker::Void { } }
 }
 
-fn emit_slice_eq(buf: Cb, prog: CgProg, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_slice_eq(fd: i64, ref id: u64, prog: CgProg, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var elem = cg_slice_elem_of(lhs.type)
     var plan = match cg_slice_eq_plan(elem) { CgSliceEqPlan as p => p; error as err => return err }
-    var t = $"_teq{buf.len}"
-    var out = cb(buf, "(")
-    if op == lexer::TokenKind::Ne { out = cb(out, "!") }
-    out = cb(out, "({ ")
-    out = match emit_type(out, prog, lhs.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, t)
-    out = cb(out, "a = ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, lhs, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; ")
-    out = match emit_type(out, prog, rhs.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, t)
-    out = cb(out, "b = ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, rhs, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "; ")
-    out = cb(out, plan.rtfn)
-    out = cb(out, "(")
-    out = cb(out, t)
-    out = cb(out, "a.ptr, ")
-    out = cb(out, t)
-    out = cb(out, "a.len, ")
-    out = cb(out, t)
-    out = cb(out, "b.ptr, ")
-    out = cb(out, t)
-    out = cb(out, "b.len")
+    var t = $"_teq{id}"
+    id = id + 1
+    cb(fd, "(")
+    if op == lexer::TokenKind::Ne { cb(fd, "!") }
+    cb(fd, "({ ")
+    var ts1 = match emit_type(prog, lhs.type) { str as o => o; error as err => return err }
+    cb(fd, ts1)
+    cb(fd, " ")
+    cb(fd, t)
+    cb(fd, "a = ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, lhs, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "; ")
+    var ts2 = match emit_type(prog, rhs.type) { str as o => o; error as err => return err }
+    cb(fd, ts2)
+    cb(fd, " ")
+    cb(fd, t)
+    cb(fd, "b = ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, rhs, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "; ")
+    cb(fd, plan.rtfn)
+    cb(fd, "(")
+    cb(fd, t)
+    cb(fd, "a.ptr, ")
+    cb(fd, t)
+    cb(fd, "a.len, ")
+    cb(fd, t)
+    cb(fd, "b.ptr, ")
+    cb(fd, t)
+    cb(fd, "b.len")
     if plan.needs_size {
-        out = cb(out, ", sizeof(")
-        out = match emit_type(out, prog, elem) { Cb as o => o; error as err => return err }
-        out = cb(out, ")")
+        cb(fd, ", sizeof(")
+        var ts3 = match emit_type(prog, elem) { str as o => o; error as err => return err }
+        cb(fd, ts3)
+        cb(fd, ")")
     }
-    out = cb(out, "); })")
-    cb(out, ")")
+    cb(fd, "); })")
+    cb(fd, ")")
+    return null
 }
 
-fn cg_emit_variant_member_cmp(buf: Cb, prog: CgProg, cmp: CgVariantMemberCmp, eq: bool, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn cg_emit_variant_member_cmp(fd: i64, ref id: u64, prog: CgProg, cmp: CgVariantMemberCmp, eq: bool, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var is_null_member = match cmp.member.type { checker::Null => true; _ => false }
     if !is_null_member && !cg_variant_member_payload_comparable(cmp.member.type) {
         return error { message = "codegen: comparing a tagged union to a non-null, non-numeric member is not yet supported" }
     }
-    var tmp = fresh_named("_vm", buf.len to i64)
-    var out = cb(buf, "({ ")
-    out = match emit_type(out, prog, cmp.subj_expr.type) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, tmp)
-    out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, cmp.subj_expr, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, "); (")
-    out = cb(out, tmp)
-    out = cb(out, ".tag ")
-    out = cb(out, if eq { "== " } else { "!= " })
-    out = match cg_emit_tag_prefix(out, checker::Variant { members = cmp.variant_type.members }) { Cb as o => o; error as err => return err }
+    var tmp = fresh_named("_vm", id)
+    cb(fd, "({ ")
+    var ts = match emit_type(prog, cmp.subj_expr.type) { str as o => o; error as err => return err }
+    cb(fd, ts)
+    cb(fd, " ")
+    cb(fd, tmp)
+    cb(fd, " = (")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, cmp.subj_expr, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "); (")
+    cb(fd, tmp)
+    cb(fd, ".tag ")
+    cb(fd, if eq { "== " } else { "!= " })
+    var tp = match cg_emit_tag_prefix(checker::Variant { members = cmp.variant_type.members }) { str as o => o; error as err => return err }
+    cb(fd, tp)
     var mk = match cg_member_key_str(cmp.member.type) { str as s => s; error as err => return err }
-    out = cb_upper(out, mk)
-    if is_null_member { return cb(out, "); })") }
-    out = cb(out, if eq { " && " } else { " || " })
-    out = cb(out, tmp)
-    out = cb(out, ".as.")
-    out = match cg_member_key(out, cmp.member.type) { Cb as o => o; error as err => return err }
-    out = cb(out, if eq { " == (" } else { " != (" })
-    out = match emit_expr_ctx(out, prog, checker::Void { }, cmp.member, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")); })")
+    cb(fd, cb_upper(mk))
+    if is_null_member { cb(fd, "); })"); return null }
+    cb(fd, if eq { " && " } else { " || " })
+    cb(fd, tmp)
+    cb(fd, ".as.")
+    var mk2 = match cg_member_key_str(cmp.member.type) { str as s => s; error as err => return err }
+    cb(fd, mk2)
+    cb(fd, if eq { " == (" } else { " != (" })
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, cmp.member, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")); })")
+    return null
 }
 
-fn emit_compare(buf: Cb, prog: CgProg, c: checker::TCompare, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
-    if c.rest.len == 0 { return emit_expr_ctx(buf, prog, checker::Void { }, c.first, escaping, regions, fn_body, dctx) }
-    var out = cb(buf, "(")
+fn emit_compare(fd: i64, ref id: u64, prog: CgProg, c: checker::TCompare, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
+    if c.rest.len == 0 { return emit_expr_ctx(fd, id, prog, checker::Void { }, c.first, escaping, regions, fn_body, dctx) }
+    cb(fd, "(")
     var prev = c.first
     var i = 0
     loop {
         if i >= c.rest.len { break }
         var term = c.rest[i]
         var op = match cmpop_c(term.op) { str as s => s; error as err => return err }
-        if i > 0 { out = cb(out, " && ") }
-        out = match emit_compare_term(out, prog, prev, term, op, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
+        if i > 0 { cb(fd, " && ") }
+        match emit_compare_term(fd, id, prog, prev, term, op, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
         prev = term.operand
         i++
     }
-    cb(out, ")")
+    cb(fd, ")")
+    return null
 }
 
-fn emit_compare_term(buf: Cb, prog: CgProg, prev: checker::TExpr, term: checker::TCmpTerm, op: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_compare_term(fd: i64, ref id: u64, prog: CgProg, prev: checker::TExpr, term: checker::TCmpTerm, op: str, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var is_eq = term.op == lexer::TokenKind::EqEq || term.op == lexer::TokenKind::Ne
     var vm_cmp = if is_eq { cg_variant_member_cmp(prog, prev, term.operand) } else { null }
     match vm_cmp {
-        CgVariantMemberCmp as cmp => return cg_emit_variant_member_cmp(buf, prog, cmp, term.op == lexer::TokenKind::EqEq, escaping, regions, fn_body, dctx)
+        CgVariantMemberCmp as cmp => return cg_emit_variant_member_cmp(fd, id, prog, cmp, term.op == lexer::TokenKind::EqEq, escaping, regions, fn_body, dctx)
         null => { }
     }
     var prev_route = cg_cmp_route_of(prev.type)
     var opnd_route = cg_cmp_route_of(term.operand.type)
     var route = if prev_route != CgCmpRoute::Plain { prev_route } else { opnd_route }
     if route != CgCmpRoute::Plain && is_eq {
-        return emit_content_eq(buf, prog, route, term.op, prev, term.operand, escaping, regions, fn_body, dctx)
+        return emit_content_eq(fd, id, prog, route, term.op, prev, term.operand, escaping, regions, fn_body, dctx)
     }
-    var out = cb(buf, "(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    out = cb(out, " ")
-    out = cb(out, op)
-    out = cb(out, " ")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, ")")
+    cb(fd, "(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, " ")
+    cb(fd, op)
+    cb(fd, " ")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, ")")
+    return null
 }
 
 fn cg_cast_target_is_variant(prog: CgProg, t: @Type()): bool {
@@ -2135,23 +2152,24 @@ fn cg_is_byte_slice_type(t: @Type()): bool {
     match t { checker::Slice as sl => match sl.element { checker::Byte => true; _ => false }; _ => false }
 }
 
-fn emit_bytes_str_reinterpret(buf: Cb, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_bytes_str_reinterpret(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, inner: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var to_bytes = cg_is_byte_slice_type(e.type)
     var src_c = if to_bytes { "({ tk_str _tkbsr = (" } else { "({ tk_slice_byte _tkbsr = (" }
     var tail = if to_bytes { "); (tk_slice_byte){ (tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" } else { "); (tk_str){ (const tk_byte *)_tkbsr.ptr, _tkbsr.len }; })" }
-    var out = cb(buf, src_c)
-    out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, tail)
+    cb(fd, src_c)
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, tail)
+    return null
 }
 
 fn cg_is_bytes_str_reinterpret(dst: @Type(), src: @Type()): bool {
     (cg_is_str_type(src) && cg_is_byte_slice_type(dst)) || (cg_is_byte_slice_type(src) && cg_is_str_type(dst))
 }
 
-fn emit_cast(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): Cb | error {
+fn emit_cast(fd: i64, ref id: u64, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []@TStatement(), dctx: DeferCtx): error | null {
     var inner = c.expr
-    if cg_is_bytes_str_reinterpret(e.type, inner.type) { return emit_bytes_str_reinterpret(buf, prog, e, inner, escaping, regions, fn_body, dctx) }
-    if cg_cast_target_is_variant(prog, e.type) { return emit_as(buf, prog, e.type, inner, escaping, regions, fn_body, dctx) }
+    if cg_is_bytes_str_reinterpret(e.type, inner.type) { return emit_bytes_str_reinterpret(fd, id, prog, e, inner, escaping, regions, fn_body, dctx) }
+    if cg_cast_target_is_variant(prog, e.type) { return emit_as(fd, id, prog, e.type, inner, escaping, regions, fn_body, dctx) }
     var dst_opt = match e.type { checker::Prim as p => p.kind; _ => checker::PrimKind::Bool }
     var src_opt = match inner.type { checker::Prim as p => p.kind; _ => checker::PrimKind::Bool }
     var prim_both = match e.type {
@@ -2163,11 +2181,13 @@ fn emit_cast(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCast, escapi
 
     match inner.type {
         checker::Char => {
-            var out = cb(buf, "((")
-            out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-            out = cb(out, ")tk_char_to_u32(")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            return cb(out, "))")
+            cb(fd, "((")
+            var ts = match emit_type(prog, e.type) { str as o => o; error as err => return err }
+            cb(fd, ts)
+            cb(fd, ")tk_char_to_u32(")
+            match emit_expr_ctx(fd, id, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            cb(fd, "))")
+            return null
         }
         _ => { }
     }
@@ -2176,50 +2196,56 @@ fn emit_cast(buf: Cb, prog: CgProg, e: checker::TExpr, c: checker::TCast, escapi
         var dtag = match prim_int_tag(dst) { str as t => t; error as err => return err }
         var fsrc = match prim_float_tag(src) { str as t => t; error as err => return err }
         if e.line != 0 {
-            var out = cb(buf, "({ _tk_cast_loc_line = ")
-            out = cb_u64_digits(out, e.line to u64)
-            out = cb(out, "; _tk_cast_loc_col = ")
-            out = cb_u64_digits(out, e.col to u64)
-            out = cb(out, "; tk_to_")
-            out = cb(out, dtag)
-            out = cb(out, "_from_")
-            out = cb(out, fsrc)
-            out = cb(out, "(")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            return cb(out, "); })")
+            cb(fd, "({ _tk_cast_loc_line = ")
+            cb(fd, cb_u64_digits(e.line to u64))
+            cb(fd, "; _tk_cast_loc_col = ")
+            cb(fd, cb_u64_digits(e.col to u64))
+            cb(fd, "; tk_to_")
+            cb(fd, dtag)
+            cb(fd, "_from_")
+            cb(fd, fsrc)
+            cb(fd, "(")
+            match emit_expr_ctx(fd, id, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            cb(fd, "); })")
+            return null
         }
-        var out = cb(buf, "tk_to_")
-        out = cb(out, dtag)
-        out = cb(out, "_from_")
-        out = cb(out, fsrc)
-        out = cb(out, "(")
-        out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        return cb(out, ")")
+        cb(fd, "tk_to_")
+        cb(fd, dtag)
+        cb(fd, "_from_")
+        cb(fd, fsrc)
+        cb(fd, "(")
+        match emit_expr_ctx(fd, id, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        cb(fd, ")")
+        return null
     }
     if prim_both && cg_prim_is_int(src) && cg_prim_is_int(dst) && cast_may_lose(src, dst) {
         var dtag = match prim_int_tag(dst) { str as t => t; error as err => return err }
         if e.line != 0 {
-            var out = cb(buf, "({ _tk_cast_loc_line = ")
-            out = cb_u64_digits(out, e.line to u64)
-            out = cb(out, "; _tk_cast_loc_col = ")
-            out = cb_u64_digits(out, e.col to u64)
-            out = cb(out, "; tk_to_")
-            out = cb(out, dtag)
-            if cg_prim_is_signed_int(src) { out = cb(out, "_s(") } else { out = cb(out, "_u(") }
-            out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-            return cb(out, "); })")
+            cb(fd, "({ _tk_cast_loc_line = ")
+            cb(fd, cb_u64_digits(e.line to u64))
+            cb(fd, "; _tk_cast_loc_col = ")
+            cb(fd, cb_u64_digits(e.col to u64))
+            cb(fd, "; tk_to_")
+            cb(fd, dtag)
+            if cg_prim_is_signed_int(src) { cb(fd, "_s(") } else { cb(fd, "_u(") }
+            match emit_expr_ctx(fd, id, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+            cb(fd, "); })")
+            return null
         }
-        var out = cb(buf, "tk_to_")
-        out = cb(out, dtag)
-        if cg_prim_is_signed_int(src) { out = cb(out, "_s(") } else { out = cb(out, "_u(") }
-        out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-        return cb(out, ")")
+        cb(fd, "tk_to_")
+        cb(fd, dtag)
+        if cg_prim_is_signed_int(src) { cb(fd, "_s(") } else { cb(fd, "_u(") }
+        match emit_expr_ctx(fd, id, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+        cb(fd, ")")
+        return null
     }
-    var out = cb(buf, "((")
-    out = match emit_type(out, prog, e.type) { Cb as o => o; error as err => return err }
-    out = cb(out, ")(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { Cb as o => o; error as err => return err }
-    cb(out, "))")
+    cb(fd, "((")
+    var ts2 = match emit_type(prog, e.type) { str as o => o; error as err => return err }
+    cb(fd, ts2)
+    cb(fd, ")(")
+    match emit_expr_ctx(fd, id, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { error as err => return err; null => { } }
+    cb(fd, "))")
+    return null
 }
 
 fn cg_is_mem_value_call(p: parser::Path, user_declared: bool): bool {
