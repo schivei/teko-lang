@@ -1113,6 +1113,19 @@ fn plist_xml(m: Manifest): str {
                         teko::str::concat("  <key>CFBundleGetInfoString</key><string>", info, "</string>\n</dict>\n</plist>\n"))))))
 }
 
+fn write_tkh_sidecar(prog: checker::TProgram, path: str) {
+    var table = checker::type_table_of(prog)
+    match emit::emit_tkh_file(prog, table, path) { error => { }; null => { } }
+}
+
+fn tkh_bytes_of(prog: checker::TProgram, table: checker::TypeTable, od: str, name: str): []byte | error {
+    var tmp_path = teko::str::concat(od, "/.", teko::str::concat(name, ".tkh.tmp"))
+    match emit::emit_tkh_file(prog, table, tmp_path) { error as e => return e; null => { } }
+    var bytes = match teko::io::read_stream(tmp_path) { []byte as b => b; error as e => return e }
+    match teko::fs::remove_file(tmp_path) { error => { }; null => { } }
+    bytes
+}
+
 fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, debug: DebugInfo): i32 {
     match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.artifact == Artifact::Static {
@@ -1125,7 +1138,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
         var od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
         match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
         var table = checker::type_table_of(prog)
-        var tkh_bytes = match emit::emit_program(prog, table) {
+        var tkh_bytes = match tkh_bytes_of(prog, table, od, m.name) {
             []byte as b => b
             error as e => return fail(dir, e.message)
         }
@@ -1186,6 +1199,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
     }
     phase_end_ok(cc_phase, binp)
     match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
+    write_tkh_sidecar(prog, teko::str::concat(binp, ".tkh"))
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, "")))
     0
 }
@@ -2129,12 +2143,14 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
     var raw_lmod = match teko::lir::lower_program(prog, true) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
     var lmod = strip_virtual_main(raw_lmod)
     var target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
-    match target {
+    var rc = match target {
         NativeTarget::X8664Linux => emit_static_lib_x86(dir, od, stem, lmod)
         NativeTarget::Arm64Macho => emit_static_lib_macho(dir, od, stem, lmod)
         NativeTarget::Arm64Linux => emit_static_lib_arm64_linux(dir, od, stem, lmod)
         NativeTarget::X8664Windows => emit_static_lib_coff(dir, od, stem, lmod)
     }
+    if rc == 0 { write_tkh_sidecar(prog, teko::str::concat(od, "/", teko::str::concat(stem, ".tkh"))) }
+    rc
 }
 
 fn strip_virtual_main(lmod: teko::lir::LModule): teko::lir::LModule {

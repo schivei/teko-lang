@@ -1,5 +1,38 @@
 # bootstrap/PROVENANCE — provenance for the bootstrap/teko.c currently committed to this tree.
 #
+# RESEED (forward-only) — .tkh CONTRACT-HEADER WRITER CONVERTED TO FileStream + EMITTED IN ALL
+# ARTIFACT KINDS. src/emit/tkh.tks's writer no longer accumulates the whole header body into one
+# []byte (the `write_header`/`write_tyexports`/`write_fnsigs`/... family and `emit_tkh` itself);
+# it streams straight through a `teko::io::FileStream`, threading the running FNV-1a content hash
+# as a `ref hash: u64` accumulator alongside the stream (the individual per-declaration type/param
+# fragments still go through the small, bounded, unchanged `write_type`/`write_types` encoders
+# shared with the unrelated module-cache serializer). The upfront content-hash field is written as
+# a zero placeholder, then patched in place via `stream_seek` + `stream_write` once the real hash
+# is known — a write-only handle still allows a seek-then-write at an earlier offset. `.tkh` is now
+# also emitted for the binary/tool and static-lib (native-only) kinds as a best-effort sidecar next
+# to the built artifact (mirroring the existing `.tsym` sidecar's silently-ignored-on-error
+# convention), not just for the Package kind's `.tkl` zip entry; the Package path now streams to a
+# temporary file and reads it back for the zip entry, so there is exactly one `.tkh` writer
+# implementation. Round-trip verified independently: a built `.tkl`'s embedded `pkgproj.tkh` hash
+# recomputed from its own bytes matches the stored hash exactly.
+#
+# GATE: SELF-REPRODUCE — CLEAN FIXPOINT (gen2 == gen3, C AND binary byte-identical), backend C,
+# under `ulimit -v 6815744` (6.5 GiB), TEKO_BACKEND=c TEKO_CC=clang.
+#   - gen2.c == gen3.c byte-identical (20 337 597 bytes); gen2 == gen3 binaries also
+#     byte-identical (7 126 128 bytes each).
+#   - Peaks: gen1 3848.1 MB, gen2 3849.3 MB, gen3 3849.3 MB — at the pre-existing baseline.
+#   - `cc -std=c2x -w` over gen2.c + teko_rt.c + assert.c: clean, exit 0, no warnings.
+#   - REPRODUCE (new seed): bootstrap/teko.c replaced with the harvested gen2.c above; gen0-NEW
+#     relinked from the NEW bootstrap/teko.c builds gen1-NEW, and gen1-NEW.c is byte-identical to
+#     the harvested C already at gen1. Peak of that confirmation run: 3849.5 MB.
+#   - EXTRA: build TEKO_MEM_PARANOID=1 (backend C, gen1 rebuilding the source) exits 0, peak
+#     3848.9 MB.
+#   - Native backend (static-lib `.tkh` sidecar; `emit_native`'s own binary path is untouched by
+#     this change) is out of scope for this gate — deferred per standing project convention.
+#
+# ----------------------------------------------------------------------------------------------------
+# PROVENANCE ANTERIOR (mantida abaixo, nao apagada):
+#
 # RESEED (hand-harvest, isolated worktree, forward-only) — FILESTREAM CODEGEN WRITER + TSYM
 # EMISSION DISABLED. codegen.tks's C emitter now writes through teko::io::FileStream end to end
 # (the `cb` string-accumulator entry point is gone). Two genuine bugs the conversion surfaced are
