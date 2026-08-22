@@ -2,11 +2,89 @@
  * accumulator. Every stream read/write moves at most this many bytes per OS call. */
 exp const CHUNK: u64 = 1024
 
+/** Stream — a byte sink: buffered write, flush and close. */
+exp type Stream = abstract class {
+    /** write — append `s` to the stream, buffering internally. */
+    pub abstract fn write(s: str)
+
+    /** flush — drain any bytes still held in the internal buffer to the underlying resource. */
+    pub abstract fn flush()
+
+    /** close — flush and release the stream's resource. */
+    pub abstract fn close()
+}
+
 /** FileStream — an open OS file handle: a POSIX fd (Linux/macOS) or a Windows HANDLE carried as a
- * word. The dev drives open, close and the buffer directly through the stream primitives. */
-exp type FileStream = struct {
+ * word, with a reusable ≤1024-byte write buffer. The dev drives open/close and the read primitives
+ * directly; `write`/`flush`/`close` buffer and drain through the stream itself. */
+exp type FileStream = class Stream {
     /** The POSIX fd or the Windows HANDLE, carried as a word. */
-    handle: i64
+    pub handle: i64
+    /** The reusable write buffer, flushed once full. */
+    sbuf: []byte
+    /** The bytes currently held in `sbuf`, not yet flushed. */
+    sfill: u64
+    /** The cumulative bytes handed to `write` (flushed or still pending). */
+    pub written: u64
+
+    /** open — open `path` for writing, truncating (creating when absent) — the write-stream
+     * constructor for callers that want the buffered `Stream` interface.
+     * @return the open stream, or an error when the file cannot be opened. */
+    pub static fn open(path: str): FileStream | error { open_write(path) }
+
+    /** write — buffer `s`, flushing to the file whenever the buffer fills. */
+    pub override fn write(s: str) {
+        self.write_bytes(bytes_of_str(s))
+    }
+
+    /** write_bytes — buffer `data`, flushing to the file whenever the buffer fills. */
+    pub fn write_bytes(data: []byte) {
+        var n = data.len
+        var i: u64 = 0
+        loop {
+            if i >= n { break }
+            if self.sfill >= self.sbuf.len { self.flush() }
+            var room = self.sbuf.len - self.sfill
+            var take = n - i
+            if room < take { take = room }
+            var j: u64 = 0
+            loop {
+                if j >= take { break }
+                self.sbuf[self.sfill + j] = data[i + j]
+                j = j + 1
+            }
+            self.sfill = self.sfill + take
+            self.written = self.written + take
+            i = i + take
+        }
+    }
+
+    /** write_byte — buffer a single byte, flushing to the file first when the buffer is full. */
+    pub fn write_byte(x: byte) {
+        if self.sfill >= self.sbuf.len { self.flush() }
+        self.sbuf[self.sfill] = x
+        self.sfill = self.sfill + 1
+        self.written = self.written + 1
+    }
+
+    /** flush — drain the pending buffer to the file. */
+    pub override fn flush() {
+        if self.sfill == 0 { return }
+        match stream_write_prefix(self, self.sbuf, self.sfill) { u64 => { }; error => { } }
+        self.sfill = 0
+    }
+
+    /** close — flush the pending buffer, then release the OS handle. */
+    pub override fn close() {
+        self.flush()
+        match stream_close(self) { error => { }; null => { } }
+    }
+}
+
+/** file_stream_of — a fresh stream wrapping the open handle `h`, with an empty write buffer. */
+fn file_stream_of(h: i64): FileStream {
+    var sb: [CHUNK]byte = []
+    FileStream { handle = h; sbuf = sb; sfill = 0; written = 0 }
 }
 
 const WIN_CP_UTF8: u32 = 65001
@@ -187,7 +265,7 @@ fn buf_base(xs: []byte, i: u64): i64 {
 exp fn open_read(path: str): FileStream | error {
     var h = os_open_read(path)
     if is_os_error(h) { return error { message = $"teko::io::open_read: cannot open {path}" } }
-    FileStream { handle = h }
+    file_stream_of(h)
 }
 
 #os("linux")
@@ -213,7 +291,7 @@ fn os_open_read(path: str): i64 {
 exp fn open_write(path: str): FileStream | error {
     var h = os_open_write(path)
     if is_os_error(h) { return error { message = $"teko::io::open_write: cannot open {path}" } }
-    FileStream { handle = h }
+    file_stream_of(h)
 }
 
 #os("linux")
@@ -241,7 +319,7 @@ fn os_open_write(path: str): i64 {
 exp fn open_append(path: str): FileStream | error {
     var h = os_open_append(path)
     if is_os_error(h) { return error { message = $"teko::io::open_append: cannot open {path}" } }
-    FileStream { handle = h }
+    file_stream_of(h)
 }
 
 #os("linux")
