@@ -1,4 +1,10 @@
-# Terminal native — `.tkb`/`.tkh` por-namespace + linker interno (0.3.1)
+# Terminal native — `.tkbl`/`.tkhl` por-namespace + linker interno (0.3.1)
+
+> **Convenção de nomes (sufixo `l` = link/intermediário).** O **par intermediário**,
+> por-namespace, tempo de link, **pré-mono** = **`.tkbl`** (objeto) + **`.tkhl`** (header de
+> símbolos). O **par publicado**, final, entregue = **`.tkb`** (objeto/pacote) + **`.tkh`**
+> (header). Onde este doc dizia "`.tkb` intermediário", leia **`.tkbl`**; o `.tkb` sem sufixo
+> é sempre o artefato FINAL publicado.
 
 Base de leitura: `docs/design/reducao-memoria-arrays-0.3.1.md` (§6bis Eixo C e os parágrafos
 do "terminal native") + crumbs `RM-C10`..`RM-C17`. Autor: arquiteto (SÓ design; não toca
@@ -18,31 +24,32 @@ aqui só se **cita e estende**.
 
 ---
 
-## 1. Visão — o arbusto vira per-namespace `.tkb`+`.tkh` + linker interno
+## 1. Visão — o arbusto vira per-namespace `.tkbl`+`.tkhl` + linker interno
 
 Hoje a build é whole-program e termina em UM `teko.c` que o `cc` compila. O dono corrige o
 endgame: **`teko.c` é muleta**; a linguagem tem que emitir seu **próprio objeto linkável**.
-A rota native é a **única a se beneficiar de `.tkb`** — porque native é compilação separada
-clássica, e `.tkb`/`.tkh` são exatamente o par "objeto intermediário + header de símbolos"
+A rota native é a **única a se beneficiar de `.tkbl`** — porque native é compilação separada
+clássica, e `.tkbl`/`.tkhl` são exatamente o par "objeto intermediário + header de símbolos"
 que a compilação separada precisa.
 
 O "arbusto" (o programa inteiro como uma árvore densa de namespaces com recursão mútua) é
 **podado em galhos independentes**: ao ir para native, o compilador emite, **POR NAMESPACE**,
-um `.tkb` intermediário (o typed/lowered daquela unidade) + o seu `.tkh` de link (a interface
-de símbolos daquela unidade). Um **linker próprio** — que conhece SÓ os NOSSOS objetos, como
-um IR — associa os símbolos entre unidades (a FFI interna de `RM-C11`) e roda os passos de
-pipeline que faltam **na ponta** (monomorfização + isel/regalloc/encode do alvo). A saída
-final depende do destino (package/lib/binary — §5).
+um `.tkbl` intermediário (o typed/lowered daquela unidade, **pré-mono**) + o seu `.tkhl` de
+link (a interface de símbolos daquela unidade). Um **linker próprio** — que conhece SÓ os
+NOSSOS objetos, como um IR — associa os símbolos entre unidades (a FFI interna de `RM-C11`) e
+roda os passos de pipeline que faltam **na ponta** (monomorfização + isel/regalloc/encode do
+alvo). A saída final depende do destino (package/tool/lib/binary — §5).
 
 Este arranjo dá **o mesmo ganho que C já tem** (gera `.o`, depois linka) — só que **o linker
-é nosso**, opera sobre o nosso IR/`.tkb`, e conhece a semântica Teko (visibilidade,
+é nosso**, opera sobre o nosso IR/`.tkbl`, e conhece a semântica Teko (visibilidade,
 monomorfização pendente, ABI). É esse conhecimento que habilita os dois grandes ganhos
-seguintes: **paralelização do build** (§6) e **build incremental** (§7).
+seguintes: **paralelização do build** (§6) e **build incremental** (§7) — no qual o `.tkbl`
+é a própria **unidade de cache** (§7).
 
 O terminal native NÃO é um novo pipeline: é a **realização native da saída-de-unidade
 abstrata de `RM-C12`** (`UnitOutput`). Na rota C, a saída-de-unidade é um pedaço de texto
-concatenado num `teko.c`; na rota native, é um `.o` no disco. Mesmo laço de streaming, dois
-back-ends de emissão (`reducao…` 311-320, 546-559).
+concatenado num `teko.c`; na rota native, é um `.tkbl`/`.o` no disco. Mesmo laço de streaming,
+dois back-ends de emissão (`reducao…` 311-320, 546-559).
 
 ---
 
@@ -64,16 +71,19 @@ O pipeline do Eixo C já está desenhado (`reducao…` §6bis, crumbs C10–C13)
        → derruba a região da unidade (o despejo)
      saída-de-unidade abstrata:
        • rota C      → pedaço de texto (concatena no teko.c)          [muleta]
-       • rota native → .tkb intermediário PRÉ-mono + .tkh de link      [endgame, RM-C15]
+       • rota native → .tkbl intermediário PRÉ-mono + .tkhl de link    [endgame, RM-C15]
                        POR NAMESPACE
-4. LINKER INTERNO (o "linker próprio")
-       • associa símbolos entre os .tkb/.tkh de link (a FFI interna no plano de linkagem;
+4. LINKER INTERNO (o "linker próprio") — SEQUENCIADO POR DEPENDÊNCIA, memory-bounded (§2bis)
+       • ordena as unidades em ORDEM TOPOLÓGICA (grafo vindo da FFI interna / barreira LINK)
+       • por unidade (ou SCC — ver §2bis), em streaming:
+           carrega o .tkbl → mono-na-ponta (lib/binary/tool-no-install) → isel/regalloc/encode
+           → PODA (descarta o que a unidade não precisa mais) → EMITE direto pro .tkb/.o/.tkh
+           final → derruba a unidade
+       • associa símbolos entre unidades (a FFI interna no plano de linkagem;
          tabela de símbolos do .o = exp+pub global, privado = local)
-       • roda os passos restantes NA PONTA conforme o destino:
-           - MONOMORFIZAÇÃO (para lib/binary) — os .tkb são pré-mono
-           - isel → regalloc → encode → emit_elf/macho/coff por unidade
        • junta via ld do SO (ou objfile_ar) no artefato final
-5. SAÍDA POR DESTINO (§5): package | lib (shared/static) | binary/tool
+       • segura SÓ a unidade/SCC corrente + a FFI interna (compacta)
+5. SAÍDA POR DESTINO (§5): package | tool | lib (shared/static) | binary
 ```
 
 **Ponto-chave do desenho:** os estágios 3 e 4 são **separados de propósito**. O estágio 3
@@ -83,6 +93,43 @@ monomorfização que cruzam unidades). O estágio 4 (o linker interno) é onde a
 as unidades (§4). Isto casa com o modelo de pico do Eixo C: cada unidade emitida é despejada
 (região derrubada), e o linker interno segura só a FFI interna (compacta) + a unidade
 corrente.
+
+---
+
+## 2bis. O linker interno é memory-bounded — ordem topológica + poda ao carregar + SCC
+
+O linker interno **NÃO carrega tudo em memória**. Ele é o mesmo princípio de despejo do Eixo C
+aplicado à PONTA: processa as unidades em **streaming, em ordem topológica de dependência**, e
+descarta cada uma assim que emite. O grafo de dependência vem **da FFI interna / barreira de
+LINK** (`RM-C11`) — a mesma tabela que resolve os símbolos cross-namespace já descreve *quem
+depende de quem*.
+
+**O laço (memory-bounded por construção):**
+
+1. **Ordena topologicamente** as unidades pelo grafo da FFI interna.
+2. Para cada unidade (ou SCC — ver abaixo), em ordem: **carrega** o `.tkbl` → roda os passos da
+   ponta (**mono-na-ponta** para lib/binary e para tool-no-install; isel/regalloc/encode) →
+   **PODA** (a "jardinagem" aplicada no linker: descarta tudo o que a unidade não precisa mais
+   — corpos já encodados, instanciações já materializadas, scratch) → **emite DIRETO** para o
+   `.tkb`/`.o`/`.tkh` final → **derruba a unidade** (região de arena).
+3. Segura só a **unidade/SCC corrente + a FFI interna** (compacta). O pico do linker é o MÁXIMO
+   de uma unidade, não a soma — o mesmo teto do Eixo C, agora na etapa de link.
+
+**CUIDADO DE DESIGN a registrar — o grafo TEM CICLOS (não é DAG).** A linguagem é um monólito
+com **recursão mútua entre namespaces** (o checker resolve nomes/tipos cruzando namespaces,
+`reducao…` 428-435). Logo o grafo de dependência **não é acíclico** — há ciclos. O linker
+interno agrupa os **componentes fortemente conexos (SCC)**: namespaces mutuamente recursivos
+são processados **JUNTOS, como uma única unidade de link**. A ordenação topológica é sobre o
+**grafo condensado de SCCs** (que É um DAG). Um SCC vira a granularidade real de despejo do
+linker — o que casa exatamente com a granularidade de unidade do Eixo C (namespace, ou um
+grupo de namespaces mutuamente recursivos quando o ciclo existe; `reducao…` R5: se um
+namespace/SCC sozinho piquear acima do guard, subdivide-se por REGIÃO de escopo interno, não
+por arquivo). Assim o linker é **memory-bounded por construção**, sem exceção de ciclo.
+
+**Nota de determinismo:** a ordem topológica + a ordem interna de cada SCC têm que ser
+**canônicas** (chaves ordenadas, não ordem de iteração de `map`/`hashset`) — é a mesma âncora
+de determinismo do fixpoint (R6, transitivamente `RM-C10`). Um SCC processado em ordem
+não-determinística divergiria o `.o` e quebraria `gen2.o==gen3.o` (§8).
 
 ---
 
@@ -97,52 +144,62 @@ Nomeados e distintos:
 
 - **O que é:** a interface de **símbolos** de UMA unidade no tempo de link — a materialização
   em disco (ou em memória) da **FFI interna** de `RM-C11` restrita àquele namespace:
-  `exp`+`pub`, cada entrada com **tipo Teko + símbolo de linkagem + ABI**.
-- **Sabor:** **PRÉ-monomorfização** (assinaturas genéricas cruas). Companheiro do `.tkb`
+  `exp`+`pub`, cada entrada com **tipo Teko + símbolo de linkagem + ABI**. Par com o `.tkbl`
+  (o objeto intermediário da mesma unidade).
+- **Sabor:** **PRÉ-monomorfização** (assinaturas genéricas cruas). Companheiro do `.tkbl`
   intermediário por-namespace.
 - **Tempo de vida:** **TRANSITÓRIO** — vive o link, some após o streaming; **NUNCA** é
   embarcado. É a "FFI interna no plano de linkagem" (`reducao…` 421-426, R8).
-- **Nome sugerido:** `.tkhl` (`tkh`-link) para não colidir com o `.tkh` publicado. Alternativa
-  law-clean: manter em memória (nunca tocar disco) quando o estágio 3→4 funde; só materializar
-  em `.tkhl` na fronteira que não funde (o LINK global, análogo a `RM-C13`).
+- **Nome:** `.tkhl` (`tkh`-link, sufixo `l`) para não colidir com o `.tkh` publicado; par com
+  `.tkbl`. Alternativa law-clean: manter em memória (nunca tocar disco) quando o estágio 3→4
+  funde; só materializar em `.tkhl` na fronteira que não funde (o LINK global / o cache
+  incremental, análogo a `RM-C13`/`RM-C14`).
 
 ### 3.2 `.tkh` — o header PUBLICADO, final (FFI externa / IDE)
 
 - **O que é:** a superfície `exp` **agregada** do artefato inteiro — a interface do USUÁRIO
   (`src/emit/tkh.tks`, `RM-C17`). SÓ `exp`; `pub` jamais aparece (lei de visibilidade
   `tast.tks` M.4 + R8).
-- **Sabor depende do destino (§5):**
-  - **package** → **PRÉ-monomorph, portátil** (poli; genéricos preservados para o consumidor
-    instanciar).
-  - **lib (shared/static)** e **binary/tool** → **MONOMÓRFICO** (para FFI com outras
-    linguagens — C/Rust/… precisam de assinaturas concretas, sem genéricos).
+- **Sabor depende do destino (§5) — DUAS políticas de mono:**
+  - **package** e **tool** → **PRÉ-monomorph, portátil** (poli; genéricos preservados). O
+    package instancia no consumidor; o tool instancia no INSTALL (mono adiada). Ambos
+    distribuem o `.tkb` pré-mono.
+  - **lib (shared/static)** e **binary** → **MONOMÓRFICO** no build (para FFI com outras
+    linguagens — C/Rust/… precisam de assinaturas concretas, sem genéricos; binary fecha a
+    partir do `main`).
 - **Tempo de vida:** **EMBARCADO** — entregue junto do artefato (`RM-C17`).
 
-**A tabela de distinção (registrar):**
+**A tabela de distinção (registrar) — headers E objetos, o par espelhado:**
 
-| Header | Tempo | Escopo | Visibilidade | Mono? | Embarcado? | Papel |
+| Artefato | Tempo | Escopo | Visibilidade | Mono? | Embarcado? | Papel |
 |---|---|---|---|---|---|---|
-| **`.tkhl`** (link) | LINK interno | 1 namespace | `exp`+`pub` | PRÉ-mono | **não** (transitório) | associar símbolos entre unidades |
-| **`.tkh`** (publicado) | pós-build | agregado | só `exp` | package: PRÉ · lib/bin: MONO | **sim** | FFI externa + IDE/intellisense |
+| **`.tkhl`** (header link) | LINK interno | 1 namespace/SCC | `exp`+`pub` | PRÉ-mono | **não** (transitório) | associar símbolos entre unidades |
+| **`.tkbl`** (objeto link) | LINK interno | 1 namespace/SCC | — (corpos) | PRÉ-mono | **não** (transitório) | objeto intermediário + **unidade de cache incremental** (§7) |
+| **`.tkh`** (header publicado) | pós-build | agregado | só `exp` | package/tool: PRÉ · lib/binary: MONO | **sim** | FFI externa + IDE/intellisense |
+| **`.tkb`** (objeto publicado) | pós-build | agregado | — | package/tool: PRÉ · lib/binary: MONO | **sim** | pacote distribuível (`.tkl`) / objeto final |
 
-Os dois são **ortogonais** (R8): `.tkhl` carrega `pub` para o link; `.tkh` **nunca** vê `pub`.
-Reusar a projeção do `.tkb` estendida com `pub` (`RM-C11`) para montar o `.tkhl` é correto —
-mas o emissor de `.tkh` (`emit_tkh`) tem que continuar **filtrando só `exp`**; embarcar o
-`.tkhl` no `.tkh` por descuido é o erro que R8 nomeia.
+Convenção: sufixo **`l`** = **link/intermediário** (transitório, pré-mono); sem sufixo =
+**final publicado**. Par intermediário = `.tkbl`+`.tkhl`; par publicado = `.tkb`+`.tkh`.
+
+Os dois planos são **ortogonais** (R8): `.tkhl`/`.tkbl` carregam `pub` para o link;
+`.tkh`/`.tkb` publicados **nunca** vazam `pub`. Reusar a projeção do `.tkb` estendida com `pub`
+(`RM-C11`) para montar o `.tkhl` é correto — mas o emissor de `.tkh` (`emit_tkh`) tem que
+continuar **filtrando só `exp`**; embarcar o `.tkhl`/`.tkbl` no par publicado por descuido é o
+erro que R8 nomeia.
 
 ---
 
-## 4. Onde a monomorfização mora — na PONTA (target), nunca no `.tkb` intermediário
+## 4. Onde a monomorfização mora — na PONTA (target), nunca no `.tkbl` intermediário
 
 **Estado de hoje (verificado):** `src/build/project.tks:204-256` (`checked_program_of`) roda
 `checker::monomorphize` (`src/checker/monomorph.tks:946`) **antes** de qualquer emissão, e o
 `.tkb` de package (`:1145` `emit::serialize_program(prog)`) serializa o programa **POST-mono**.
 Ou seja: hoje o `.tkb` carrega o monomorfizado. **O redesign inverte isto.**
 
-**Regra do redesign (`reducao…` + descrição do dono):** o `.tkb` intermediário por-namespace
+**Regra do redesign (`reducao…` + descrição do dono):** o `.tkbl` intermediário por-namespace
 é **PRÉ-monomorph** — genéricos crus + **pedidos de monomorfização** que cruzam unidades
 (`reducao…` 441: "Pedidos de monomorfização que cruzam unidades" é o que a FFI interna
-retém). A monomorfização roda **na ponta (o linker interno, estágio 4)**, porque:
+retém). A monomorfização roda **na ponta**, porque:
 
 1. **Fecho global.** A monomorfização precisa do conjunto FECHADO de instanciações alcançáveis
    a partir do `main`/exports. Sob emissão por-namespace, esse fecho só é conhecido depois que
@@ -150,43 +207,75 @@ retém). A monomorfização roda **na ponta (o linker interno, estágio 4)**, po
 2. **Portabilidade do package.** Um package pré-mono é **reinstanciável** pelo consumidor
    (que combina os genéricos do package com os seus próprios tipos). Monomorfizar no package
    **congelaria** as instanciações e quebraria a composição.
-3. **Bounded memory.** O `.tkb` pré-mono é MENOR (uma cópia do genérico, não N cópias
+3. **Bounded memory.** O `.tkbl` pré-mono é MENOR (uma cópia do genérico, não N cópias
    monomorfizadas), o que reforça o teto de pico do Eixo C.
 
+**"Na ponta" tem DOIS momentos (a mono é adiada, mas para pontos diferentes):**
+
+- Para **lib** e **binary**, "a ponta" é o **linker interno no BUILD** (estágio 4): monomorfiza
+  no build, entrega binário/`.tkh` monomórficos.
+- Para **tool**, "a ponta" é o **INSTALL**: o tool é distribuído `.tkb` pré-mono (igual
+  package) e só monomorfiza quando instalado, virando executável standalone (§5.2).
+- Para **package**, a mono **nunca** roda no produtor — roda no **consumidor** que instancia os
+  genéricos (§5.1).
+
+Em todos os casos o `.tkbl`/`.tkb` distribuído é **pré-mono**; só muda ONDE a mono acontece.
+
 **Consequência de sequenciamento:** o passo `checker::monomorphize` sai do meio do frontend
-(`checked_program_of`) e migra para o **linker interno** (estágio 4), rodando SÓ para os
-destinos lib/binary. Para package, **nunca** roda — o `.tkb` final agrega todos os namespaces
-ainda poli (§5.1). Ver **[DECISÃO DO DONO] 2**.
+(`checked_program_of`) e migra para o **linker interno** (estágio 4, para lib/binary) ou para o
+**instalador** (tool). Para package, **nunca** roda no produtor — o `.tkb` final agrega todos
+os namespaces ainda poli (§5.1). Ver **[DECISÃO DO DONO] 2**.
 
 ---
 
-## 5. Saída por destino
+## 5. Saída por destino — QUATRO destinos, DUAS políticas de mono
 
 O `Artifact` já existe (`src/build/init.tks`: `binary`/`static`/`shared`/`package`; enum
-`Artifact::{Binary,Tool,Static,Shared,Package}` em `project.tks`). O terminal native
-especializa a saída:
+`Artifact::{Binary,Tool,Static,Shared,Package}` em `project.tks` — **`Binary` e `Tool` já são
+separados**; SÓ a semântica muda). O terminal native especializa a saída. Resumo:
 
-### 5.1 `package` → um `.tkb` final (TODOS os namespaces) + um único `.tkh`, PRÉ-mono, portátil
+| Destino | Distribui | Mono? | Onde a mono roda | Linka em outro binário Teko? |
+|---|---|---|---|---|
+| **package** | `.tkb`+`.tkh` pré-mono/poli | PRÉ | no CONSUMIDOR (ao instanciar) | **sim** (biblioteca/dependência) |
+| **tool** | `.tkb`+`.tkh` pré-mono/poli | PRÉ | no INSTALL (vira executável) | **não** (standalone) |
+| **lib** (shared/static) | binário + `.tkh` monomórfico | MONO | no BUILD (linker interno) | via FFI (C ABI) |
+| **binary** | executável + `.tkh` monomórfico | MONO | no BUILD (fecho do `main`) | **não** |
 
-- **`.tkb` final:** agrega os `.tkb` intermediários de TODOS os namespaces num único artefato,
-  mantido **PRÉ-monomorfização** (poli). É o `.tkb` reinstanciável que o consumidor combina.
+### 5.1 `package` → `.tkb`+`.tkh` pré-mono/poli, LINKA em outro binário Teko
+
+- **`.tkb` final:** agrega os `.tkbl` intermediários de TODOS os namespaces num único artefato,
+  mantido **PRÉ-monomorfização** (poli). É o `.tkb` reinstanciável que o **consumidor combina**
+  com os próprios tipos — a mono roda quando o consumidor instancia.
 - **`.tkh` final:** um único header, **só `exp`**, **PRÉ-mono/portátil** (§3.2).
 - **Sem monomorfização, sem isel/encode:** package NÃO produz binário — entrega o par
   `.tkb`+`.tkh` (dentro do `.tkl`, como hoje `src/build/project.tks:1137-1168`), agora
   pré-mono em vez de post-mono. Este é o único ponto onde o `.tkb` de HOJE muda de sabor.
 
-### 5.2 `lib` (shared/static) → binário MONOMORFIZADO + `.tkh` MONOMÓRFICO
+### 5.2 `tool` → `.tkb`+`.tkh` pré-mono (IGUAL package), mono no INSTALL → executável standalone
 
-- **Binário:** o linker interno **monomorfiza na ponta** (fecho de instanciações da lib),
+- **Distribuição:** um tool é um **helper/acessório de CLI distribuído como pacote** — sai
+  `.tkb` **pré-mono, exatamente como package** (poli, portátil). A monomorfização é **adiada
+  para a INSTALAÇÃO**.
+- **No install:** o `.tkb` pré-mono é **compilado ao executável** (mono no install → isel/encode
+  → binário standalone). Vira um executável de CLI autônomo.
+- **NÃO linka em outro binário:** diferente de package (que é biblioteca/dependência), o tool
+  **não** é linkado em outro binário Teko — é acessório standalone.
+- É por isso que `Tool` e `Binary` são enums separados: mesma forma final (executável), mas
+  **política de distribuição/mono oposta** (tool distribui pré-mono e monomorfiza no install;
+  binary monomorfiza no build).
+
+### 5.3 `lib` (shared/static) → binário MONOMORFIZADO no build + `.tkh` MONOMÓRFICO
+
+- **Binário:** o linker interno **monomorfiza no BUILD** (fecho de instanciações da lib),
   isel/regalloc/encode por unidade, e junta num `.a` (static, `objfile_ar`) ou `.so`/`.dylib`/
   `.dll` (shared — hoje `project.tks:1134-1136` ainda é honest-stop "not yet implemented";
   ver §11).
 - **`.tkh` monomórfico:** a interface `exp` já monomorfizada — **para FFI com outras
   linguagens** (C/Rust chamam símbolos concretos, sem genéricos).
 
-### 5.3 `binary`/`tool` → executável + `.tkh` monomórfico
+### 5.4 `binary` → executável MONOMORFIZADO no build + `.tkh` monomórfico
 
-- **Executável:** monomorfização na ponta (fecho a partir do `main`) → isel/encode por
+- **Executável:** monomorfização no build (fecho a partir do `main`) → isel/encode por
   unidade → `ld` do SO junta os `.o` + os externals do runtime (`reducao…` 320) → executável.
 - **`.tkh` monomórfico:** emitido junto (`RM-C17`), para linkar/estender o compilador e
   intellisense na IDE.
@@ -223,20 +312,25 @@ onda — é o ganho que o desenho HABILITA (registrar como linha de roadmap, nã
 
 ## 7. Build incremental (RM-C14)
 
-Já desenhado em `RM-C14` (`.crumbs/0069`): cache do `.tkb` typed por-unidade em disco,
+Já desenhado em `RM-C14` (`.crumbs/0069`): cache do **`.tkbl`** typed por-unidade em disco,
 chaveado por `hash(unidade) + hash(fatia da FFI interna de que ela depende)`; recompila só o
 que mudou (fonte ou assinatura `pub` de dependência). É o **caso persistente** do
-despejo-em-disco de `RM-C13` — o mesmo `.tkb` que bounded o pico serve de cache entre builds.
+despejo-em-disco de `RM-C13` — o mesmo `.tkbl` que bounded o pico serve de cache entre builds.
 
-**Amarração ao terminal native:** o `.tkb` intermediário por-namespace do terminal native é
-**exatamente a unidade de cache** do incremental. Um namespace cuja fonte e cujas dependências
-(via `.tkhl`) não mudaram **reusa o `.tkb`/`.o` cacheado** — não re-checa, não re-emite, não
-re-encoda. Como o linker interno conhece o grafo de dependência (a FFI interna), a
-invalidação é precisa: mudar uma assinatura `pub` invalida os dependentes.
+**Amarração ao terminal native — o `.tkbl` É a unidade de cache.** O `.tkbl` intermediário
+por-namespace do terminal native é **exatamente a unidade de cache** do incremental: ele
+**persiste em disco chaveado por hash**, e o **`.tkhl` da mesma unidade alimenta o grafo de
+link junto** (a fatia da FFI interna de que a unidade depende — é o que o hash de dependência
+captura). Um namespace cuja fonte e cujas dependências (via `.tkhl`) não mudaram **reusa o
+`.tkbl`/`.o` cacheado** — não re-checa, não re-emite, não re-encoda. Como o linker interno
+conhece o grafo de dependência (a FFI interna / os `.tkhl`), a invalidação é precisa: mudar uma
+assinatura `pub` num `.tkhl` invalida os dependentes.
 
 **Lei (RM-C14):** o incremental é **DESLIGADO no self-build/fixpoint** — um build limpo tem
 que produzir o artefato byte-idêntico. É otimização de **tempo de dev**, não reduz pico, e
-**nunca** influencia o byte do fixpoint. É `[dry]`, reseed-class `none`.
+**nunca** influencia o byte do fixpoint. É `[dry]`, reseed-class `none`. O `.tkbl` cacheado
+tem que ser byte-determinístico (mesmo frame de R6) para que uma reutilização de cache produza
+o mesmo `.o` que uma recompilação limpa.
 
 ---
 
@@ -277,12 +371,12 @@ enfileirada. Amarração um-a-um:
 |---|---|---|
 | **RM-C10** (`0065`) determinizar gensym | **PRÉ-REQUISITO** do per-unit native: gensym derivado de `buf.len` global quebra a reprodutibilidade sob emissão por-namespace (o buffer passa a ser por-unidade). Bloqueia C11. Ver **[DECISÃO DO DONO] 4**. | `codegen.tks:3840,3932` + `next_temp()` |
 | **RM-C11** (`0066`) parse-per-unit → LINK / FFI interna | A **FFI interna** (`exp`+`pub`: tipo Teko + símbolo + ABI) — a base do `.tkhl` (§3.1) e a tabela que o **linker interno** usa para associar símbolos. É o "linker próprio" no plano lógico. | `project.tks:352,272` + novo `src/build/link.tks` |
-| **RM-C12** (`0067`) check+lower+emit fundidos por unidade | O laço de streaming cuja **saída-de-unidade abstrata** (`UnitOutput`) o terminal native realiza como `.tkb`+`.tkhl`+`.o`. Despejo = região derrubada por namespace. | `project.tks:1165,2426` + `UnitOutput` |
-| **RM-C13** (`0068`) dump typed `.tkb` por unidade | O `.tkb` intermediário **por-namespace** (agora PRÉ-mono, §4) — despejo em disco na fronteira do LINK que não funde. `serialize_unit`/`deserialize_unit`. | `tkb_frame.tks:369`, `tkb_read.tks:930` |
-| **RM-C14** (`0069`) build incremental | Cache do `.tkb`/`.o` por-unidade (§7). DESLIGADO no fixpoint. | novo `src/build/incremental.tks` |
+| **RM-C12** (`0067`) check+lower+emit fundidos por unidade | O laço de streaming cuja **saída-de-unidade abstrata** (`UnitOutput`) o terminal native realiza como `.tkbl`+`.tkhl`+`.o`. Despejo = região derrubada por namespace. | `project.tks:1165,2426` + `UnitOutput` |
+| **RM-C13** (`0068`) dump typed `.tkbl` por unidade | O `.tkbl` intermediário **por-namespace** (agora PRÉ-mono, §4) — despejo em disco na fronteira do LINK que não funde. `serialize_unit`/`deserialize_unit`. | `tkb_frame.tks:369`, `tkb_read.tks:930` |
+| **RM-C14** (`0069`) build incremental | Cache do `.tkbl`/`.o` por-unidade (§7) — o `.tkbl` É a unidade de cache; o `.tkhl` alimenta o grafo de link. DESLIGADO no fixpoint. | novo `src/build/incremental.tks` |
 | **RM-C15** (`0105`) terminal native `.o` por unidade | **O coração deste doc:** cada namespace → `lower→isel→regalloc→encode→emit_elf/macho/coff` → `.o` no disco; região derrubada (o `.o` É o despejo). Visibilidade → tabela de símbolos. | `project.tks:1598,1615` + `objfile_*` |
 | **RM-C16** (`0106`) fixpoint de objeto native + retirar muleta C | Migração do fixpoint (§8); remoção de `teko.c`+`cc` gated nas 4 pernas verdes + `S16-SWEEP`. | `objfile_*`, harness/CI, `codegen.tks` |
-| **RM-C17** (`0107`) emitir + empacotar `.tkh` | O `.tkh` **publicado** (§3.2), monomórfico (lib/binary) ou pré-mono (package). Só `exp`; FFI interna nunca embarca. | `emit/tkh.tks:217`, `header.tks:144` |
+| **RM-C17** (`0107`) emitir + empacotar `.tkh` | O `.tkh` **publicado** (§3.2), monomórfico (lib/binary) ou pré-mono (package/tool). Só `exp`; FFI interna nunca embarca. | `emit/tkh.tks:217`, `header.tks:144` |
 
 **A monomorfização-na-ponta (§4) e os dois `.tkh` (§3) são a extensão que este doc acrescenta
 ao desenho de C15/C17** — não os re-delibera; concretiza *onde* a mono roda (linker interno,
@@ -322,7 +416,7 @@ Este doc é desenho adiantado. O que já é **executável hoje** vs. o que **esp
 - Todo o design deste doc (contratos, sabores de artefato, mapeamentos, os 4 pontos).
 - `RM-C10` (determinizar gensym) — dep `RM-C5` já pousou; é rename mecânico byte-preservante.
 - `RM-C11`/`C12`/`C13` — deps na própria onda RM; a FFI interna, o laço por-unidade e o dump
-  `.tkb` por-namespace são construíveis contra a forma DECLARADA do `.tkb` de hoje.
+  `.tkbl` por-namespace são construíveis contra a forma DECLARADA do `.tkb` de hoje.
 - Scaffolding que compila hoje: skeletons de `src/build/link.tks` (a barreira LINK +
   `InternalFfi`/`FfiEntry`/`link_units`), `src/build/incremental.tks` (`incremental_enabled`/
   `cache_key`), com doc-comments W15 e honest-stops onde a lógica ainda depende de C15.
@@ -384,18 +478,24 @@ concretiza em DOIS artefatos de header distintos (§3). Sem tensão de lei — `
 preserva a lei de visibilidade `tast.tks` M.4; a FFI interna resolve o furo do
 link-só-por-interface sem inchar o header.
 
-### [DECISÃO DO DONO] 2 — Monomorfização mora na PONTA (target)
+### [DECISÃO DO DONO] 2 — Monomorfização mora na PONTA (target) — 4 destinos, 2 políticas
 
-O `.tkb` intermediário é **PRÉ-monomorph** (genéricos crus + pedidos de monomorfização);
-**package fica poli**, **lib/binary monomorfizam no target**.
+O `.tkbl` intermediário é **PRÉ-monomorph** (genéricos crus + pedidos de monomorfização).
+Política por destino: **package** fica poli (mono no consumidor); **tool** fica poli (mono no
+INSTALL → executável standalone, não linka em outro binário); **lib** e **binary**
+monomorfizam **no build**.
 
-**Recomendação do coordenador (CONFIRMAR):** o **`.tkb` NUNCA carrega o monomorfizado**. A
-mono roda no **linker interno (estágio 4)**, só para lib/binary; package agrega pré-mono e
-entrega poli/portátil (§4, §5.1). Isto **inverte o comportamento de hoje** (`project.tks:1145`
+**Recomendação do coordenador (CONFIRMAR):** o **`.tkbl` NUNCA carrega o monomorfizado**. A
+mono é **adiada** — roda no **linker interno (estágio 4)** só para lib/binary; para **tool**,
+roda no **INSTALL** (o `.tkb` distribuído é pré-mono, igual package); para **package**, roda no
+**consumidor** (§4, §5.1–5.2). Isto **inverte o comportamento de hoje** (`project.tks:1145`
 serializa post-mono) — é uma mudança de sabor de artefato, gated em `RM-C15`, **com reseed** e
 byte de versão de sabor (T-mono, §12). Recomendado por três razões law-first: fecho global
-(mono precisa do conjunto fechado, só conhecido na ponta), portabilidade do package
-(pré-mono é reinstanciável), e bounded memory (pré-mono é menor). Sem tensão de lei.
+(mono precisa do conjunto fechado, só conhecido na ponta), portabilidade do package/tool
+(pré-mono é reinstanciável/instalável), e bounded memory (pré-mono é menor). **Correção
+registrada:** o `tool` NÃO é monomorfizado no build (mono no install) — `Tool` e `Binary` já
+são enums separados (`project.tks`), só a semântica de mono/distribuição muda. Sem tensão de
+lei.
 
 ### [DECISÃO DO DONO] 3 — Dois sabores de `.tkh`
 
@@ -404,11 +504,13 @@ O `.tkh` por-namespace de **LINK** (interface de símbolos, tempo de link) vs. o
 
 **Recomendação do coordenador (nomear e distinguir):** adotar **`.tkhl`** (`tkh`-link,
 por-namespace, `exp`+`pub`, PRÉ-mono, transitório) para o tempo de link (§3.1), e **`.tkh`**
-(publicado, agregado, só `exp`, monomórfico para lib/binary e pré-mono para package,
-embarcado) para a FFI externa/IDE (§3.2). São ortogonais (R8): `.tkhl` carrega `pub`; `.tkh`
-nunca. Alternativa aceitável: NÃO materializar o `.tkhl` em disco quando o estágio 3→4 funde
-em memória — só serializá-lo na fronteira do LINK que não funde (análogo a `RM-C13`). CONFIRMAR
-o nome `.tkhl` (ou o preferido do dono) e a política disco-vs-memória.
+(publicado, agregado, só `exp`, monomórfico para lib/binary e pré-mono para package/tool,
+embarcado) para a FFI externa/IDE (§3.2). O par intermediário (`.tkbl`+`.tkhl`) espelha o par
+publicado (`.tkb`+`.tkh`) — sufixo `l` = link/intermediário. São ortogonais (R8):
+`.tkhl`/`.tkbl` carregam `pub`; `.tkh`/`.tkb` nunca. Alternativa aceitável: NÃO materializar o
+`.tkhl` em disco quando o estágio 3→4 funde em memória — só serializá-lo na fronteira do LINK
+que não funde ou no cache incremental (análogo a `RM-C13`/`RM-C14`). CONFIRMAR os nomes
+`.tkbl`/`.tkhl` (ou os preferidos do dono) e a política disco-vs-memória.
 
 ### [DECISÃO DO DONO] 4 — RM-C10 (gensym determinístico) é PRÉ-REQUISITO de C11
 
@@ -431,18 +533,23 @@ isoladas ficam onde o self-build NÃO exercita o caminho:
 
 | Fixture | Entrada → asserção | Exit esperado |
 |---|---|---|
-| `tkb_flavor_premono_roundtrip` | serializar um namespace genérico pré-mono e deserializar → o `.tkb` recupera os genéricos crus + pedidos de mono, sem instanciar (sabor poli preservado) | `0` |
-| `tkb_flavor_rejects_wrong` | deserializar um `.tkb` de sabor mono onde se espera poli (byte de versão de sabor errado) → erro claro, não crash | `0` |
+| `tkbl_flavor_premono_roundtrip` | serializar um namespace genérico pré-mono (`.tkbl`) e deserializar → recupera os genéricos crus + pedidos de mono, sem instanciar (sabor poli preservado) | `0` |
+| `tkb_flavor_rejects_wrong` | deserializar um `.tkb` publicado de sabor mono onde se espera poli (byte de versão de sabor errado) → erro claro, não crash | `0` |
 | `tkhl_excludes_from_tkh` | montar `.tkhl` (`exp`+`pub`) e emitir `.tkh` do mesmo namespace → `pub` NÃO aparece no `.tkh`; só `exp` | `0` |
 | `visibility_symbol_binding` | um namespace com `exp`/`pub`/privado → no `.o`, `exp`+`pub` são GLOBAL (`!local`), privado é LOCAL/`static` (nem entra na tabela) | `0` |
-| `package_tkh_is_poly` | package com genérico exportado → o `.tkh` publicado preserva o genérico (pré-mono/portátil) | `0` |
+| `linker_scc_mutual_recursion` | dois namespaces mutuamente recursivos → o linker os agrupa num único SCC/unidade de link e processa juntos; a ordem topológica dos SCCs é canônica (determinística) | `0` |
+| `package_tkb_is_poly` | package com genérico exportado → o `.tkb`+`.tkh` publicados preservam o genérico (pré-mono/portátil) | `0` |
+| `tool_tkb_is_poly` | tool com genérico → o `.tkb` distribuído é pré-mono (IGUAL package); a mono NÃO roda no build (adiada pro install) | `0` |
 | `lib_tkh_is_mono` | lib com `exp` genérico instanciado → o `.tkh` publicado é monomórfico (assinaturas concretas, para FFI) | `0` |
+| `binary_is_mono_at_build` | binary com genérico alcançável do `main` → monomorfizado no build (fecho do `main`); nenhum genérico cru no `.o` | `0` |
 | `incremental_off_self_build` (já em RM-C14) | `self_build=true` → cache bypassed, saída byte-idêntica a um build limpo C12/C13 | `0` |
 
 As fixtures de `RM-C14` (`incremental_hit_reuses`, `incremental_dep_invalidates`,
-`incremental_off_self_build`) já estão no crumb `0069` e permanecem. As de sabor de `.tkb` e
-de header são **novas deste desenho** (acompanham o flip pré-mono do §4 e os dois headers do
-§3), e só ganham gate quando `RM-C15`/`C17` saírem do bloqueio (§11).
+`incremental_off_self_build`) já estão no crumb `0069` e permanecem. As de sabor de
+`.tkbl`/`.tkb`, de header, de política de mono por destino (tool/binary) e do SCC do linker são
+**novas deste desenho** (acompanham o flip pré-mono do §4, os dois pares de artefato do §3, os
+4 destinos do §5 e o linker sequenciado do §2bis), e só ganham gate quando `RM-C15`/`C17`
+saírem do bloqueio (§11).
 
 ---
 
@@ -465,11 +572,17 @@ de header são **novas deste desenho** (acompanham o flip pré-mono do §4 e os 
 ## 16. Resumo do amarre
 
 Este doc **não re-delibera** o Eixo C — ele preenche o terminal native com o que faltava
-concretizar: (a) o **arbusto → `.tkb`+`.tkhl` por-namespace + linker interno** (§1–2); (b) os
-**dois sabores de `.tkh`** (`.tkhl` de link × `.tkh` publicado, §3); (c) **onde a
-monomorfização mora** (na ponta / linker interno, `.tkb` sempre pré-mono, §4); (d) a **saída
-por destino** (package poli · lib/binary mono, §5); (e) **paralelização** (§6) e
-**incremental** (§7) como os ganhos que o desenho habilita; (f) a **migração do fixpoint**
-para objeto native (§8); (g) a **restrição SQLite/no-C** como lei (§10). Tudo gated no marco de
-memória e nas pernas NAT (§11) — é **design-ahead**. Os 4 pontos do dono (§13) têm recomendação
-law-first e **nenhum HALT**: são confirmações, não impasses.
+concretizar: (a) o **arbusto → `.tkbl`+`.tkhl` por-namespace + linker interno** (§1–2), com o
+par intermediário (`.tkbl`+`.tkhl`, transitório/pré-mono) distinto do par publicado
+(`.tkb`+`.tkh`, final); (b) o **linker interno memory-bounded** — ordem topológica de
+dependência + poda ao carregar + agrupamento de **SCCs** (recursão mútua ⇒ grafo com ciclos)
+(§2bis); (c) os **dois sabores de header/objeto** (`.tkhl`/`.tkbl` de link × `.tkh`/`.tkb`
+publicados, §3); (d) **onde a monomorfização mora** (na ponta, `.tkbl` sempre pré-mono; mono
+adiada — build p/ lib/binary, install p/ tool, consumidor p/ package, §4); (e) a **saída por
+destino** — **QUATRO destinos, DUAS políticas de mono**: package (poli, linka em outro binário)
+· tool (poli, mono no install, standalone) · lib (mono no build, FFI) · binary (mono no build)
+(§5); (f) **paralelização** (§6) e **incremental** (§7, o `.tkbl` É a unidade de cache) como os
+ganhos que o desenho habilita; (g) a **migração do fixpoint** para objeto native (§8); (h) a
+**restrição SQLite/no-C** como lei (§10). Tudo gated no marco de memória e nas pernas NAT (§11)
+— é **design-ahead**. Os 4 pontos do dono (§13) têm recomendação law-first e **nenhum HALT**:
+são confirmações, não impasses.
