@@ -6101,13 +6101,13 @@ fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []@TStatement(), bo
 
 fn cg_enclosing_region_expr(regions: []RegionFrame): str {
     if regions.len > 0 { return regions[regions.len - 1].name }
-    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()")
 }
 
 fn cg_enclosing_region_expr_framed(regions: []RegionFrame, frame: str): str {
     if regions.len > 0 { return regions[regions.len - 1].name }
     if frame != "" { return frame }
-    teko::str::concat(cg_arena_sym(CgArenaSym::RegionRoot), "()")
+    teko::str::concat(cg_arena_sym(CgArenaSym::RegionCurrent), "()")
 }
 
 fn cg_scratch_region_expr(regions: []RegionFrame): str {
@@ -9348,6 +9348,13 @@ fn cg_emit_fn_def_scoped(buf: Cb, prog: CgProg, f: checker::TFunction, mode: CgM
     out
 }
 
+fn cg_emit_fn_proto_scoped(buf: Cb, prog: CgProg, f: checker::TFunction): Cb | error {
+    var scratch = cg_scope_begin()
+    var out = match cg_emit_fn_proto_guarded(buf, prog, f) { Cb as o => o; error as err => { cg_scope_end(scratch); return err } }
+    cg_scope_end(scratch)
+    out
+}
+
 fn cg_emit_fn_def_guarded(buf: Cb, prog: CgProg, f: checker::TFunction, mode: CgMode): Cb | error {
     if f.is_extern { return buf }
     var gc = match cg_fn_guard_cond(f.guard) { str as s => s; error as e => return e }
@@ -9542,27 +9549,31 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, fd: i64): Cb | error {
         fw++
     }
     b = cb(b, "\n")
-    var _decls_scope = cg_scope_begin()
-    b = match cg_emit_types_ordered(b, prog) { Cb as o => o; error as err => { cg_scope_end(_decls_scope); return err } }
+    var _types_scope = cg_scope_begin()
+    b = match cg_emit_types_ordered(b, prog) { Cb as o => o; error as err => { cg_scope_end(_types_scope); return err } }
+    cg_scope_end(_types_scope)
 
     var pi = 0
     loop {
         if pi >= prog.items.len { break }
         match prog.items[pi] {
-            checker::TFunction as f => { b = match cg_emit_fn_proto_guarded(b, prog, f) { Cb as o => o; error as err => { cg_scope_end(_decls_scope); return err } } }
+            checker::TFunction as f => { b = match cg_emit_fn_proto_scoped(b, prog, f) { Cb as o => o; error as err => return err } }
             _ => { }
         }
         pi++
     }
     b = cb(b, "\n")
-    b = match cg_emit_deep_copy_helpers(b, prog) { Cb as o => o; error as err => { cg_scope_end(_decls_scope); return err } }
-    b = match cg_emit_vtables_and_thunks(b, prog) { Cb as o => o; error as err => { cg_scope_end(_decls_scope); return err } }
+    var _helpers_scope = cg_scope_begin()
+    b = match cg_emit_deep_copy_helpers(b, prog) { Cb as o => o; error as err => { cg_scope_end(_helpers_scope); return err } }
+    b = match cg_emit_vtables_and_thunks(b, prog) { Cb as o => o; error as err => { cg_scope_end(_helpers_scope); return err } }
+    cg_scope_end(_helpers_scope)
     b = cb(b, "\n")
-    b = match cg_emit_lambda_decls(b, prog, cap_lams, true) { Cb as o => o; error as err => { cg_scope_end(_decls_scope); return err } }
+    var _lam_scope = cg_scope_begin()
+    b = match cg_emit_lambda_decls(b, prog, cap_lams, true) { Cb as o => o; error as err => { cg_scope_end(_lam_scope); return err } }
     b = cb(b, "\n")
-    b = match emit_spawn_thunks(b, prog, spawn_sites) { Cb as o => o; error as err => { cg_scope_end(_decls_scope); return err } }
+    b = match emit_spawn_thunks(b, prog, spawn_sites) { Cb as o => o; error as err => { cg_scope_end(_lam_scope); return err } }
+    cg_scope_end(_lam_scope)
     b = cb(b, "\n")
-    cg_scope_end(_decls_scope)
     cg_report_phase_rss("after-decls")
 
     var i = 0
