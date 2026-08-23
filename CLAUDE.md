@@ -258,6 +258,13 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
   passo) numa **branch real no origin** — não confiar no worktree local, que **some no restart de container/
   sessão** (perdemos o trabalho do agente de reclamação exatamente assim). Push frequente = trabalho vive no
   origin e sobrevive a restart; se o agente morrer, re-despacho continua da branch pushada.
+- **MENOS BUILD, MAIS CÓDIGO (dono 2026-08-24).** Self-compile custa minutos + memória; **build-por-edição é
+  desperdício que ninguém faz.** O agente escreve um LOTE/camada coerente inteiro RACIOCINANDO sobre a
+  correção pelas regras da linguagem (na maioria das vezes não precisa de build pra saber que está certo) e
+  builda só no CHECKPOINT que realmente precisa validar (camada fechada, degrau pra reseed, medição). Um
+  build valida um lote, não uma linha; um commit = um lote validado. O gate de memória (ratchet, D68) se
+  aplica aos builds que REALMENTE roda, não a um build-por-passo. Quem mede (contabilidade/perfil) instrumenta
+  pra extrair TUDO num único run, não N builds pra N números.
 - **COMPILADOR C LOCAL = CLANG (dono 2026-08-18).** Todo agente e toda medição local usam **`TEKO_CC=clang`**
   (e `CC=clang` para o caminho cru `scripts/build_gen1_from_c.sh` que linka o `teko.c` direto). Motivo-raiz: o
   `cc` default no Linux é gcc, **patologicamente lento** no TU único de 22 MB do `teko.c` (medição de gcc levou
