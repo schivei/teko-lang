@@ -1,0 +1,391 @@
+
+use teko::parser
+
+fn teq_str_slice(xs: []str, ys: []str): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] != ys[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_type(a: @Type(), b: @Type()): bool {
+    match a {
+        Prim as pa => match b { Prim as pb => pa.kind == pb.kind; _ => false }
+        Byte => match b { Byte => true; _ => false }
+        Char => match b { Char => true; _ => false }
+        Str => match b { Str => true; _ => false }
+        Error => match b { Error => true; _ => false }
+        Void => match b { Void => true; _ => false }
+        Uptr => match b { Uptr => true; _ => false }
+        Null => match b { Null => true; _ => false }
+        Slice as sa => match b { Slice as sb => teq_type(sa.element, sb.element); _ => false }
+        Named as na => match b { Named as nb => na.name == nb.name; _ => false }
+        Variant as va => match b { Variant as vb => teq_types(va.members, vb.members); _ => false }
+        Reference as ra => match b { Reference as rb => teq_type(ra.inner, rb.inner); _ => false }
+        Ptr as pa => match b { Ptr as pb => teq_ptr_inner(pa.inner, pb.inner); _ => false }
+        Func as fa => match b {
+            Func as fb => teq_type(fa.ret, fb.ret) && teq_types(fa.params, fb.params) && fa.variadic == fb.variadic && teq_str_slice(fa.param_names, fb.param_names) && fa.n_required == fb.n_required && teq_types(fa.ret_extra, fb.ret_extra) && teq_uexprs(fa.defaults, fb.defaults)
+            _ => false
+        }
+    }
+}
+
+fn teq_ptr_inner(a: @Type() | null, b: @Type() | null): bool {
+    match a {
+        null => match b { null => true; _ => false }
+        (@Type()) as ta => match b { (@Type()) as tb => teq_type(ta, tb); _ => false }
+    }
+}
+
+fn teq_types(xs: []@Type(), ys: []@Type()): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_type(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_numint(a: parser::NumInt, b: parser::NumInt): bool {
+    a.neg == b.neg && a.mag == b.mag
+}
+
+fn teq_path(a: parser::Path, b: parser::Path): bool {
+    if a.segments.len != b.segments.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.segments.len { break }
+        if a.segments[i].name != b.segments[i].name { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_uexpr(a: parser::Expr, b: parser::Expr): bool {
+    teq_uexprkind(a.kind, b.kind)
+}
+
+fn teq_uexprs(xs: []parser::Expr, ys: []parser::Expr): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_uexpr(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_uexprkind(a: @parser::ExprKind(), b: @parser::ExprKind()): bool {
+    match a {
+        parser::Number as na => match b { parser::Number as nb => na.is_float == nb.is_float && teq_numint(na.value, nb.value) && na.fval == nb.fval; _ => false }
+        parser::Var as na => match b { parser::Var as nb => na.name == nb.name; _ => false }
+        parser::StrLit as na => match b { parser::StrLit as nb => na.text == nb.text; _ => false }
+        parser::ByteStrLit as na => match b { parser::ByteStrLit as nb => na.text == nb.text; _ => false }
+        parser::ByteLit as na => match b { parser::ByteLit as nb => na.value == nb.value; _ => false }
+        parser::CharLit as na => match b { parser::CharLit as nb => na.bytes == nb.bytes; _ => false }
+        parser::BoolLit as na => match b { parser::BoolLit as nb => na.value == nb.value; _ => false }
+        parser::NullLit => match b { parser::NullLit => true; _ => false }
+        parser::Binary as na => match b { parser::Binary as nb => na.op == nb.op && teq_uexpr(na.left, nb.left) && teq_uexpr(na.right, nb.right); _ => false }
+        parser::Unary as na => match b { parser::Unary as nb => na.op == nb.op && teq_uexpr(na.operand, nb.operand); _ => false }
+        parser::Compare as na => match b { parser::Compare as nb => teq_uexpr(na.first, nb.first) && teq_ucmpterms(na.rest, nb.rest); _ => false }
+        parser::PathExpr as na => match b { parser::PathExpr as nb => teq_path(na.path, nb.path); _ => false }
+        parser::Index as na => match b { parser::Index as nb => teq_uexpr(na.receiver, nb.receiver) && teq_uexpr(na.index, nb.index); _ => false }
+        parser::FieldAccess as na => match b { parser::FieldAccess as nb => teq_uexpr(na.receiver, nb.receiver) && na.field == nb.field; _ => false }
+        parser::Cast as na => match b { parser::Cast as nb => teq_uexpr(na.expr, nb.expr) && teq_utype(na.target, nb.target); _ => false }
+        parser::InExpr as na => match b { parser::InExpr as nb => teq_uexpr(na.lhs, nb.lhs) && teq_uexprs(na.elems, nb.elems); _ => false }
+        parser::ArrayLit as na => match b { parser::ArrayLit as nb => teq_uarrayelems(na.elements, nb.elements); _ => false }
+        parser::Borrow as na => match b { parser::Borrow as nb => teq_uexpr(na.operand, nb.operand); _ => false }
+        _ => false
+    }
+}
+
+fn teq_ucmpterms(xs: []parser::CmpTerm, ys: []parser::CmpTerm): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i].op != ys[i].op { return false }
+        if !teq_uexpr(xs[i].operand, ys[i].operand) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_uarrayelems(xs: []parser::ArrayElem, ys: []parser::ArrayElem): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i].is_spread != ys[i].is_spread { return false }
+        if !teq_uexpr(xs[i].expr, ys[i].expr) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_utype(a: @parser::TypeExpr(), b: @parser::TypeExpr()): bool {
+    match a {
+        parser::NamedType as na => match b { parser::NamedType as nb => teq_path(na.path, nb.path) && teq_utypes(na.args, nb.args); _ => false }
+        parser::SliceType as na => match b { parser::SliceType as nb => teq_utype(na.element, nb.element); _ => false }
+        parser::SizedArrayType as na => match b { parser::SizedArrayType as nb => teq_uexpr(na.size, nb.size) && teq_utype(na.element, nb.element); _ => false }
+        parser::UnionType as na => match b { parser::UnionType as nb => teq_utypes(na.members, nb.members); _ => false }
+        parser::FunctionType as na => match b { parser::FunctionType as nb => teq_utype(na.ret, nb.ret) && teq_utypes(na.params, nb.params); _ => false }
+        _ => false
+    }
+}
+
+fn teq_utypes(xs: []@parser::TypeExpr(), ys: []@parser::TypeExpr()): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_utype(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_utype_opt(a: @parser::TypeExpr() | null, b: @parser::TypeExpr() | null): bool {
+    match a {
+        null => match b { null => true; _ => false }
+        (@parser::TypeExpr()) as ta => match b { (@parser::TypeExpr()) as tb => teq_utype(ta, tb); _ => false }
+    }
+}
+
+fn teq_pattern(a: @parser::Pattern(), b: @parser::Pattern()): bool {
+    match a {
+        parser::LiteralPattern as na => match b { parser::LiteralPattern as nb => teq_uexpr(na.value, nb.value); _ => false }
+        parser::RangePattern as na => match b { parser::RangePattern as nb => teq_uexpr(na.lo, nb.lo) && teq_uexpr(na.hi, nb.hi); _ => false }
+        parser::AltPattern as na => match b { parser::AltPattern as nb => teq_patterns(na.options, nb.options); _ => false }
+        parser::GroupBindPattern as na => match b { parser::GroupBindPattern as nb => teq_patterns(na.options, nb.options) && na.binding == nb.binding; _ => false }
+        parser::BindPattern as na => match b {
+            parser::BindPattern as nb => teq_path(na.type_name, nb.type_name) && na.has_binding == nb.has_binding && na.binding == nb.binding && na.is_slice == nb.is_slice && teq_utype_opt(na.slice_type, nb.slice_type) && teq_utypes(na.type_args, nb.type_args)
+            _ => false
+        }
+        parser::FieldPattern as na => match b { parser::FieldPattern as nb => teq_path(na.type_name, nb.type_name) && teq_str_slice(na.fields, nb.fields); _ => false }
+        parser::WildcardPattern => match b { parser::WildcardPattern => true; _ => false }
+        parser::NullPattern => match b { parser::NullPattern => true; _ => false }
+        _ => false
+    }
+}
+
+fn teq_patterns(xs: []@parser::Pattern(), ys: []@parser::Pattern()): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_pattern(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_bindtarget(a: @parser::BindTarget(), b: @parser::BindTarget()): bool {
+    match a {
+        parser::SimpleName as na => match b { parser::SimpleName as nb => na.name == nb.name; _ => false }
+        parser::DestructurePattern as na => match b { parser::DestructurePattern as nb => teq_str_slice(na.names, nb.names); _ => false }
+    }
+}
+
+fn teq_tfspec(a: TFSpec, b: TFSpec): bool {
+    match a.kind {
+        TFSpecNone => match b.kind { TFSpecNone => true; _ => false }
+        TFSpecStatic as na => match b.kind { TFSpecStatic as nb => na.s == nb.s; _ => false }
+        TFSpecDynamic as na => match b.kind { TFSpecDynamic as nb => teq_texprs(na.args, nb.args); _ => false }
+    }
+}
+
+fn teq_tfspecs(xs: []TFSpec, ys: []TFSpec): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_tfspec(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_texpr(a: TExpr, b: TExpr): bool {
+    if a.line != b.line || a.col != b.col { return false }
+    if !teq_type(a.type, b.type) { return false }
+    teq_texprkind(a.kind, b.kind)
+}
+
+fn teq_texprs(xs: []TExpr, ys: []TExpr): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_texpr(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_tcmpterms(xs: []TCmpTerm, ys: []TCmpTerm): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i].op != ys[i].op { return false }
+        if !teq_texpr(xs[i].operand, ys[i].operand) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_tarrayelems(xs: []TArrayElem, ys: []TArrayElem): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i].is_spread != ys[i].is_spread { return false }
+        if !teq_texpr(xs[i].expr, ys[i].expr) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_tlambdaparams(xs: []TLambdaParam, ys: []TLambdaParam): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i].name != ys[i].name { return false }
+        if !teq_type(xs[i].type, ys[i].type) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_tcaptures(xs: []TCapture, ys: []TCapture): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i].name != ys[i].name { return false }
+        if xs[i].by_ref != ys[i].by_ref { return false }
+        if !teq_type(xs[i].type, ys[i].type) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_tarm(a: TArm, b: TArm): bool {
+    teq_pattern(a.pattern, b.pattern) && a.has_when == b.has_when && teq_texpr(a.guard, b.guard) && teq_tstmts(a.body, b.body)
+}
+
+fn teq_tarms(xs: []TArm, ys: []TArm): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_tarm(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_texprkind(a: @TExprKind(), b: @TExprKind()): bool {
+    match a {
+        TNumber as na => match b { TNumber as nb => na.is_float == nb.is_float && teq_numint(na.value, nb.value) && na.fval == nb.fval; _ => false }
+        TVar as na => match b { TVar as nb => na.name == nb.name && na.is_func == nb.is_func && na.func_ns == nb.func_ns; _ => false }
+        TStrLit as na => match b { TStrLit as nb => na.text == nb.text; _ => false }
+        TByteStrLit as na => match b { TByteStrLit as nb => na.text == nb.text; _ => false }
+        TByteLit as na => match b { TByteLit as nb => na.value == nb.value; _ => false }
+        TCharLit as na => match b { TCharLit as nb => na.bytes == nb.bytes; _ => false }
+        TBoolLit as na => match b { TBoolLit as nb => na.value == nb.value; _ => false }
+        TNullLit => match b { TNullLit => true; _ => false }
+        TBinary as na => match b { TBinary as nb => na.op == nb.op && teq_texpr(na.left, nb.left) && teq_texpr(na.right, nb.right); _ => false }
+        TUnary as na => match b { TUnary as nb => na.op == nb.op && teq_texpr(na.operand, nb.operand); _ => false }
+        TCompare as na => match b { TCompare as nb => teq_texpr(na.first, nb.first) && teq_tcmpterms(na.rest, nb.rest); _ => false }
+        TCall as na => match b {
+            TCall as nb => teq_path(na.callee, nb.callee) && teq_texprs(na.args, nb.args) && na.call_ns == nb.call_ns && na.is_closure_call == nb.is_closure_call && teq_type(na.callee_type, nb.callee_type) && na.is_iface_dispatch == nb.is_iface_dispatch && na.iface_slot == nb.iface_slot && teq_types(na.type_args, nb.type_args) && na.overload_suffix == nb.overload_suffix && teq_types(na.ret_extra, nb.ret_extra)
+            _ => false
+        }
+        TIfExpr as na => match b { TIfExpr as nb => teq_texpr(na.cond, nb.cond) && teq_tstmts(na.then_blk, nb.then_blk) && na.has_else == nb.has_else && teq_tstmts(na.else_blk, nb.else_blk); _ => false }
+        TMatchExpr as na => match b { TMatchExpr as nb => teq_texpr(na.subject, nb.subject) && teq_tarms(na.arms, nb.arms); _ => false }
+        TCast as na => match b { TCast as nb => teq_texpr(na.expr, nb.expr); _ => false }
+        TFieldAccess as na => match b { TFieldAccess as nb => teq_texpr(na.receiver, nb.receiver) && na.field == nb.field; _ => false }
+        TStructInit as na => match b { TStructInit as nb => teq_str_slice(na.field_names, nb.field_names) && teq_texprs(na.field_vals, nb.field_vals); _ => false }
+        TIndex as na => match b { TIndex as nb => teq_texpr(na.receiver, nb.receiver) && teq_texpr(na.index, nb.index); _ => false }
+        TInterp as na => match b { TInterp as nb => teq_str_slice(na.pieces, nb.pieces) && teq_texprs(na.holes, nb.holes) && teq_tfspecs(na.specs, nb.specs); _ => false }
+        TInExpr as na => match b { TInExpr as nb => teq_texpr(na.lhs, nb.lhs) && teq_texprs(na.elems, nb.elems); _ => false }
+        TPathExpr as na => match b { TPathExpr as nb => na.enum_name == nb.enum_name && na.member == nb.member && na.ordinal == nb.ordinal && na.value == nb.value; _ => false }
+        TArrayLit as na => match b { TArrayLit as nb => teq_tarrayelems(na.elements, nb.elements); _ => false }
+        TSliceOfLen as na => match b { TSliceOfLen as nb => teq_texpr(na.size, nb.size) && teq_type(na.element, nb.element); _ => false }
+        TLambda as na => match b { TLambda as nb => teq_tlambdaparams(na.params, nb.params) && teq_tstmts(na.body, nb.body) && teq_tcaptures(na.captures, nb.captures) && teq_type(na.ret, nb.ret) && na.lift_id == nb.lift_id; _ => false }
+        TBorrow as na => match b { TBorrow as nb => teq_texpr(na.operand, nb.operand); _ => false }
+        TBlockExpr as na => match b { TBlockExpr as nb => teq_tstmts(na.body, nb.body); _ => false }
+    }
+}
+
+fn teq_tstmt(a: @TStatement(), b: @TStatement()): bool {
+    match a {
+        TBinding as na => match b { TBinding as nb => na.kind == nb.kind && teq_bindtarget(na.target, nb.target) && teq_type(na.bound, nb.bound) && teq_texpr(na.value, nb.value); _ => false }
+        TAssign as na => match b { TAssign as nb => na.kind == nb.kind && na.name == nb.name && na.op == nb.op && teq_type(na.bound, nb.bound) && teq_texpr(na.value, nb.value) && na.deref == nb.deref && teq_texpr(na.target, nb.target); _ => false }
+        TReturn as na => match b { TReturn as nb => na.has_value == nb.has_value && teq_texpr(na.value, nb.value) && teq_texprs(na.values, nb.values); _ => false }
+        TLoopStmt as na => match b { TLoopStmt as nb => na.label == nb.label && teq_tstmts(na.init, nb.init) && teq_tstmts(na.body, nb.body); _ => false }
+        TBreakStmt as na => match b { TBreakStmt as nb => na.label == nb.label; _ => false }
+        TContinueStmt as na => match b { TContinueStmt as nb => na.label == nb.label; _ => false }
+        TExprStmt as na => match b { TExprStmt as nb => teq_texpr(na.expr, nb.expr); _ => false }
+        TDeferStmt as na => match b { TDeferStmt as nb => teq_tstmts(na.body, nb.body); _ => false }
+        TAdoptStmt as na => match b { TAdoptStmt as nb => na.name == nb.name && teq_tstmts(na.body, nb.body); _ => false }
+        TBlockStmt as na => match b { TBlockStmt as nb => teq_tstmts(na.body, nb.body); _ => false }
+        TSpawn as na => match b { TSpawn as nb => teq_texpr(na.call, nb.call) && na.id == nb.id; _ => false }
+    }
+}
+
+fn teq_tstmts(xs: []@TStatement(), ys: []@TStatement()): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if !teq_tstmt(xs[i], ys[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_params(xs: []parser::Param, ys: []parser::Param): bool {
+    if xs.len != ys.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i].name != ys[i].name { return false }
+        if xs[i].has_type != ys[i].has_type { return false }
+        if xs[i].is_params != ys[i].is_params { return false }
+        if xs[i].has_default != ys[i].has_default { return false }
+        if !teq_utype(xs[i].type_ann, ys[i].type_ann) { return false }
+        if !teq_uexpr(xs[i].default_expr, ys[i].default_expr) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn teq_tfunction(a: TFunction, b: TFunction): bool {
+    if a.name != b.name || a.namespace != b.namespace || a.overload_suffix != b.overload_suffix { return false }
+    if a.is_extern != b.is_extern || a.is_test != b.is_test { return false }
+    if a.has_arena_size != b.has_arena_size || a.arena_size != b.arena_size { return false }
+    if a.line != b.line || a.col != b.col { return false }
+    if !teq_str_slice(a.type_params, b.type_params) { return false }
+    if !teq_type(a.return_type, b.return_type) { return false }
+    if !teq_types(a.ret_extra, b.ret_extra) { return false }
+    if !teq_params(a.params, b.params) { return false }
+    teq_tstmts(a.body, b.body)
+}
+
+pub fn titem_eq(a: @TItem(), b: @TItem()): bool {
+    match a {
+        TFunction as fa => match b { TFunction as fb => teq_tfunction(fa, fb); _ => false }
+        _ => false
+    }
+}
