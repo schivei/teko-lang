@@ -148,12 +148,8 @@ TK_ASSERT_WEAK void teko__assert__eq_f64(double got, double want, double tol) {
     double diff = got - want;
     if (diff < 0) diff = -diff;
     if (diff <= tol) return;
-    tk_str g = tk_ftoa(got);
-    tk_str w = tk_ftoa(want);
-    tk_str t = tk_ftoa(tol);
     char d[TK_ASSERT_MSG_MAX];
-    snprintf(d, sizeof d, "expected %.*s within %.*s, got %.*s",
-             (int)w.len, (const char *)w.ptr, (int)t.len, (const char *)t.ptr, (int)g.len, (const char *)g.ptr);
+    snprintf(d, sizeof d, "expected %.17g within %.17g, got %.17g", want, tol, got);
     tk_assert_fail("eq_f64", d);
 }
 

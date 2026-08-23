@@ -750,67 +750,6 @@ typedef struct { tk_char *ptr; uint64_t len; } tk_slice_char;
 tk_slice_char tk_str_chars(tk_str s);
 // tk_str_concat3 REMOVED (2026-07-01) — superseded by `concat(params pieces: []str)`, bridged
 // at the call site (codegen.c/.tks) by folding N pieces via tk_str_concat; no runtime symbol needed.
-// tk_ftoa — x rendered as %.17g float text (exact binary64 round-trip) in a fresh str.
-tk_str tk_ftoa(double x);
-// tk_ftoa_len / tk_f64_g17_len — the out-parameter-length twins of the two FLOAT-TO-TEXT renderers
-// (`ftoa` and `f64_g17`, both `%.17g`), mirroring tk_i64_to_str_len's own doc: the native backend's
-// LCall captures ONE result register, never the two-eightbyte SysV/AAPCS64 pair a tk_str return
-// occupies, so the pointer half rides the ordinary return value and the length rides *out_len. The
-// `double` argument needs no such detour — it rides XMM0/D0 like any other float argument (the same
-// shape tk_fmt_f_len already uses). Thin wrappers: each calls its own two-word twin and owns no
-// logic (0.3.1.0 degrau 27 — the stop that blocked the native self-host at cb_f64_literal).
-const tk_byte *tk_ftoa_len(double x, uint64_t *out_len);
-const tk_byte *tk_f64_g17_len(double x, uint64_t *out_len);
-
-// --- Format spec helpers ($"{x:F2}" / $"{x:[fmt]}") ---
-// All return fresh malloc'd str (tk_panic on OOM).  spec codes:
-//   F{n}  fixed-point n decimal places (default 6)
-//   D{n}  zero-padded integer to n digits
-//   X/x   hex uppercase/lowercase
-//   E{n}  scientific notation
-//   N{n}  thousands-separator float;  N (no digit) = integer with thousands-sep
-//   G{n}  shorter of F/E (snprintf %g)
-//   B     binary
-//   P{n}  percentage (val*100, n decimal places)
-tk_str tk_fmt_f(double val, int prec);
-tk_str tk_fmt_d(int64_t val, int width);
-tk_str tk_fmt_x_upper(uint64_t val);
-tk_str tk_fmt_x_lower(uint64_t val);
-tk_str tk_fmt_e(double val, int prec);
-tk_str tk_fmt_n_f(double val, int prec);
-tk_str tk_fmt_n_i(int64_t val);
-tk_str tk_fmt_g(double val, int prec);
-tk_str tk_fmt_b(uint64_t val);
-tk_str tk_fmt_p(double val, int prec);
-// Dynamic dispatchers: parse spec at runtime (first char + optional digits).
-tk_str tk_fmt_dyn_f64(double val, tk_str spec);
-tk_str tk_fmt_dyn_i64(int64_t val, tk_str spec);
-tk_str tk_fmt_dyn_u64(uint64_t val, tk_str spec);
-
-// tk_fmt_*_len — the SAME thirteen format-spec builders above, with their result's length handed
-// back through an OUT-PARAMETER instead of `tk_str`'s second field — the identical convention
-// `tk_str_concat_len`/`tk_i64_to_str_len`/`tk_u64_to_str_len` already carry (see their own comment
-// above for WHY: this backend's `LCall` captures one result register, one short of the
-// two-eightbyte SysV/AAPCS64 pair a `tk_str`-by-value return occupies). A genuine C caller never
-// needs these; each is a thin wrapper calling its own `tk_str`-returning twin, owning no logic of
-// its own. Every scalar parameter here is widened to a 64-bit width (`int64_t`/`uint64_t`) even
-// where the `tk_str`-returning twin takes a narrower C `int`, so the native lowering's own VReg
-// width (always a full machine word) never needs a narrowing move to call these (0.3.1.0
-// degrau 19).
-const tk_byte *tk_fmt_f_len(double val, int64_t prec, uint64_t *out_len);
-const tk_byte *tk_fmt_d_len(int64_t val, int64_t width, uint64_t *out_len);
-const tk_byte *tk_fmt_x_upper_len(uint64_t val, uint64_t *out_len);
-const tk_byte *tk_fmt_x_lower_len(uint64_t val, uint64_t *out_len);
-const tk_byte *tk_fmt_e_len(double val, int64_t prec, uint64_t *out_len);
-const tk_byte *tk_fmt_n_f_len(double val, int64_t prec, uint64_t *out_len);
-const tk_byte *tk_fmt_n_i_len(int64_t val, uint64_t *out_len);
-const tk_byte *tk_fmt_g_len(double val, int64_t prec, uint64_t *out_len);
-const tk_byte *tk_fmt_b_len(uint64_t val, uint64_t *out_len);
-const tk_byte *tk_fmt_p_len(double val, int64_t prec, uint64_t *out_len);
-const tk_byte *tk_fmt_dyn_f64_len(double val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len);
-const tk_byte *tk_fmt_dyn_i64_len(int64_t val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len);
-const tk_byte *tk_fmt_dyn_u64_len(uint64_t val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len);
-
 // --- Phase 3 str query/slice builtins (the checker types these via tk_builtin_fn) ---
 // The query helpers (eq/ends_with/contains/len) do NO allocation; the slice helpers return a
 // FRESH owned buffer (same ownership as tk_str_concat), tk_panic on OOM/out-of-range (M.1).
@@ -903,9 +842,6 @@ bool tk_str_ends_with(tk_str s, tk_str suffix);
 // tk_str_contains — true iff needle occurs in s (naive byte search; an empty needle → true).
 // No allocation.
 bool tk_str_contains(tk_str s, tk_str needle);
-// tk_f64_g17 — x rendered as %.17g into a fresh owned str (the host float renderer; the same
-// renderer as tk_ftoa, exposed under the `f64_g17` name the checker/codegen reference).
-tk_str tk_f64_g17(double x);
 
 // --- ROUND 0: UTF-8 codepoint operations (char_at / str_slice_chars / is_alpha / is_digit /
 //     is_space / to_lower / to_upper). Mirrored in scope.c/.tks, codegen.c/.tks. ---
