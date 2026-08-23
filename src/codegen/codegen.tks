@@ -2,6 +2,7 @@
 use teko::checker
 use teko::lexer
 use teko::parser
+use teko::emit
 
 type CgMode = enum { Program; TestPlain; TestCov; TestAnalyze; ProgramCov }
 
@@ -9295,10 +9296,26 @@ fn cg_scope_end(scratch: ptr) {
     teko::runtime::region_drop(scratch)
 }
 
-fn cg_emit_fn_def_scoped(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, mode: CgMode) {
+fn cg_emit_fn_def_scoped(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, mode: CgMode, perunit: bool, raw: parser::Program, bnd: checker::Boundary) {
     var scratch = cg_scope_begin()
-    cg_emit_fn_def_guarded(buf, prog, f, mode)
+    cg_emit_fn_def_perunit(buf, prog, f, mode, perunit, raw, bnd)
     cg_scope_end(scratch)
+}
+
+fn cg_emit_fn_def_perunit(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, mode: CgMode, perunit: bool, raw: parser::Program, bnd: checker::Boundary) {
+    if !perunit { cg_emit_fn_def_guarded(buf, prog, f, mode); return }
+    var guard = cg_scope_begin()
+    var emitted = perunit_item_for(true, bnd, raw, f)
+    if emitted.retyped {
+        match emitted.node {
+            checker::TFunction as ef => cg_emit_fn_def_guarded(buf, prog, ef, mode)
+            _ => cg_emit_fn_def_guarded(buf, prog, f, mode)
+        }
+        cg_scope_end(guard)
+        return
+    }
+    cg_scope_end(guard)
+    cg_emit_fn_def_guarded(buf, prog, f, mode)
 }
 
 fn cg_emit_fn_def_guarded(buf: teko::io::FileStream, prog: CgProg, f: checker::TFunction, mode: CgMode) {
@@ -9335,10 +9352,10 @@ fn cg_emit_atomic_helpers(buf: teko::io::FileStream, want: bool) {
     buf.write(cg_emit_atomic_helpers_text())
 }
 
-fn cg_emit_c_file_mode(prog0: checker::TProgram, mode: CgMode, out_path: str, meta: str, export_c: bool): u64 | error {
+fn cg_emit_c_file_mode(prog0: checker::TProgram, mode: CgMode, out_path: str, meta: str, export_c: bool, raw: parser::Program, bnd: checker::Boundary): u64 | error {
     var fs = match teko::io::FileStream::open(out_path) { teko::io::FileStream as f => f; error as e => panic(e.message) }
     defer { fs.flush(); fs.close() }
-    match tk_emit_c_body(prog0, mode, fs) { error as e => panic(e.message); null => { } }
+    match tk_emit_c_body(prog0, mode, fs, raw, bnd) { error as e => panic(e.message); null => { } }
     if export_c {
         var wrappers = match cg_c_export_wrappers_text(prog0) { str as s => s; error as e => panic(e.message) }
         fs.write(wrappers)
@@ -9347,24 +9364,24 @@ fn cg_emit_c_file_mode(prog0: checker::TProgram, mode: CgMode, out_path: str, me
     fs.written
 }
 
-pub fn tk_emit_c_file(prog0: checker::TProgram, out_path: str, meta: str): u64 | error {
-    cg_emit_c_file_mode(prog0, CgMode::Program, out_path, meta, false)
+pub fn tk_emit_c_file(prog0: checker::TProgram, out_path: str, meta: str, raw: parser::Program, bnd: checker::Boundary): u64 | error {
+    cg_emit_c_file_mode(prog0, CgMode::Program, out_path, meta, false, raw, bnd)
 }
 
-pub fn tk_emit_c_export_file(prog0: checker::TProgram, out_path: str, meta: str): u64 | error {
-    cg_emit_c_file_mode(prog0, CgMode::Program, out_path, meta, true)
+pub fn tk_emit_c_export_file(prog0: checker::TProgram, out_path: str, meta: str, raw: parser::Program, bnd: checker::Boundary): u64 | error {
+    cg_emit_c_file_mode(prog0, CgMode::Program, out_path, meta, true, raw, bnd)
 }
 
 pub fn tk_emit_c_test_file(prog0: checker::TProgram, cov: bool, out_path: str, meta: str): u64 | error {
-    cg_emit_c_file_mode(prog0, if cov { CgMode::TestCov } else { CgMode::TestPlain }, out_path, meta, false)
+    cg_emit_c_file_mode(prog0, if cov { CgMode::TestCov } else { CgMode::TestPlain }, out_path, meta, false, cg_empty_raw_program(), cg_empty_boundary())
 }
 
 pub fn tk_emit_c_cov_file(prog0: checker::TProgram, out_path: str, meta: str): u64 | error {
-    cg_emit_c_file_mode(prog0, CgMode::ProgramCov, out_path, meta, false)
+    cg_emit_c_file_mode(prog0, CgMode::ProgramCov, out_path, meta, false, cg_empty_raw_program(), cg_empty_boundary())
 }
 
 pub fn tk_emit_c_test_analyze_file(prog0: checker::TProgram, out_path: str, meta: str): u64 | error {
-    cg_emit_c_file_mode(prog0, CgMode::TestAnalyze, out_path, meta, false)
+    cg_emit_c_file_mode(prog0, CgMode::TestAnalyze, out_path, meta, false, cg_empty_raw_program(), cg_empty_boundary())
 }
 
 extern fn cg_cur_rss(): u64 = "tk_cur_rss" from "teko_rt"
@@ -9385,7 +9402,90 @@ fn cg_report_phase_rss(label: str) {
     teko::io::eprintln($"teko: memory: codegen {label}: cur {cg_mb_tenths(cur)} MB / peak {cg_mb_tenths(teko::mem::peak_rss())} MB")
 }
 
-fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStream): error | null {
+pub fn perunit_enabled(): bool {
+    match teko::env::var("TEKO_PERUNIT") { str as v => v == "1"; error => false }
+}
+
+pub fn cg_empty_raw_program(): parser::Program {
+    parser::Program { items = [] }
+}
+
+pub fn cg_empty_boundary(): checker::Boundary {
+    checker::Boundary { table = checker::tt_empty(); env = checker::env_empty(); worklist = []; lift_seed = 0 }
+}
+
+type PerUnitPick = struct { retype: bool; widx: u64 }
+
+fn perunit_no_pick(): PerUnitPick { PerUnitPick { retype = false; widx = 0 } }
+
+fn raw_function_name_at(raw: parser::Program, idx: u64): str | error {
+    if idx >= raw.items.len { return error { message = "perunit: source_index out of range" } }
+    match raw.items[idx].content {
+        parser::Function as rf => rf.name
+        _ => error { message = "perunit: worklist index is not a function" }
+    }
+}
+
+fn perunit_pick(bnd: checker::Boundary, raw: parser::Program, f: checker::TFunction): PerUnitPick {
+    if f.type_params.len != 0 || f.is_extern { return perunit_no_pick() }
+    var picked = perunit_no_pick()
+    var matches: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= bnd.worklist.len { break }
+        var wu = bnd.worklist[i]
+        if wu.owner_ns == f.namespace {
+            match raw_function_name_at(raw, wu.source_index) {
+                str as nm => if nm == f.name { picked = PerUnitPick { retype = true; widx = i }; matches = matches + 1 }
+                error => { }
+            }
+        }
+        i = i + 1
+    }
+    if matches == 1 { picked } else { perunit_no_pick() }
+}
+
+fn perunit_serialize_one(it: @TItem()): []byte | error {
+    emit::serialize_program(checker::TProgram { items = [it] })
+}
+
+fn perunit_bytes_eq(a: []byte, b: []byte): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn perunit_item_faithful(retyped: @TItem(), resident: @TItem()): bool {
+    var ra = match perunit_serialize_one(retyped) { []byte as b => b; error => return false }
+    var rb = match perunit_serialize_one(resident) { []byte as b => b; error => return false }
+    perunit_bytes_eq(ra, rb)
+}
+
+pub type PerUnitEmit = struct { node: @TItem(); retyped: bool }
+
+fn perunit_passthrough(resident: @TItem()): PerUnitEmit { PerUnitEmit { node = resident; retyped = false } }
+
+pub fn perunit_item_for(enabled: bool, bnd: checker::Boundary, raw: parser::Program, resident: @TItem()): PerUnitEmit {
+    if !enabled { return perunit_passthrough(resident) }
+    match resident {
+        checker::TFunction as f => {
+            var pick = perunit_pick(bnd, raw, f)
+            if !pick.retype { return perunit_passthrough(resident) }
+            match checker::retype_unit(raw, bnd.worklist[pick.widx], bnd) {
+                (@TItem()) as retyped => if perunit_item_faithful(retyped, resident) { PerUnitEmit { node = retyped; retyped = true } } else { perunit_passthrough(resident) }
+                error => perunit_passthrough(resident)
+            }
+        }
+        _ => perunit_passthrough(resident)
+    }
+}
+
+fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStream, raw: parser::Program, bnd: checker::Boundary): error | null {
     cg_report_phase_rss("emit-start")
     var prog_ag = match checker::inline_aggregate_consts(prog0) { checker::TProgram as p => p; error as e => panic(e.message) }
     var _lr = cg_lift_lambdas(cg_prog_of(prog_ag))
@@ -9448,11 +9548,12 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     cg_scope_end(_decls_scope)
     cg_report_phase_rss("after-decls")
 
+    var perunit = perunit_enabled()
     var i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
-            checker::TFunction as f => cg_emit_fn_def_scoped(buf, prog, f, mode)
+            checker::TFunction as f => cg_emit_fn_def_scoped(buf, prog, f, mode, perunit, raw, bnd)
             parser::TypeDecl => { }
             parser::UseDecl => { }
             (@TStatement()) as _gb3 => { }

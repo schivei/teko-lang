@@ -25,10 +25,6 @@ type Frontend = struct {
     boundary: checker::Boundary
 }
 
-fn perunit_enabled(): bool {
-    match teko::env::var("TEKO_PERUNIT") { str as v => v == "1"; error => false }
-}
-
 fn empty_raw_program(): parser::Program {
     parser::Program { items = [] }
 }
@@ -388,7 +384,7 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Fron
 
     var checked = match checked_program_of(expanded, dep_prog, !quiet, tty, pf.diags, explicit) { checker::TProgram as c => c; error as e => return e }
 
-    if !perunit_enabled() {
+    if !codegen::perunit_enabled() {
         return Frontend { prog = checked; manifest = pf.manifest; raw = empty_raw_program(); deps = empty_boundary_deps(); boundary = empty_boundary() }
     }
     var db = match checker::discover_boundary(expanded, dep_prog, explicit) { checker::DiscoveredBoundary as d => d; error as e => return e }
@@ -1202,7 +1198,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
     var cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
     var binp = binary_output_path(od, stem, resolved_target())
     var codegen_phase = phase_begin("codegen", count_unit_text(0, prog.items.len, "items"), mode)
-    var csize = match ffi_emit_c_file(prog, m.abi, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description)) {
+    var csize = match ffi_emit_c_file(prog, m.abi, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description), raw, bnd) {
         u64 as n => n
         error as e => {
             phase_end_fail(codegen_phase, count_unit_text(0, prog.items.len, "items"), e.message)
@@ -1866,77 +1862,6 @@ fn native_item_label(i: u64, total: u64): str {
     teko::str::concat("item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::u64_to_str(total))))
 }
 
-type PerUnitPick = struct { retype: bool; widx: u64 }
-
-fn perunit_no_pick(): PerUnitPick { PerUnitPick { retype = false; widx = 0 } }
-
-fn raw_function_name_at(raw: parser::Program, idx: u64): str | error {
-    if idx >= raw.items.len { return error { message = "perunit: source_index out of range" } }
-    match raw.items[idx].content {
-        parser::Function as rf => rf.name
-        _ => error { message = "perunit: worklist index is not a function" }
-    }
-}
-
-fn perunit_pick(bnd: checker::Boundary, raw: parser::Program, f: checker::TFunction): PerUnitPick {
-    if f.type_params.len != 0 || f.is_extern { return perunit_no_pick() }
-    var picked = perunit_no_pick()
-    var matches: u64 = 0
-    var i: u64 = 0
-    loop {
-        if i >= bnd.worklist.len { break }
-        var wu = bnd.worklist[i]
-        if wu.owner_ns == f.namespace {
-            match raw_function_name_at(raw, wu.source_index) {
-                str as nm => if nm == f.name { picked = PerUnitPick { retype = true; widx = i }; matches = matches + 1 }
-                error => { }
-            }
-        }
-        i = i + 1
-    }
-    if matches == 1 { picked } else { perunit_no_pick() }
-}
-
-fn perunit_serialize_one(it: @TItem()): []byte | error {
-    emit::serialize_program(checker::TProgram { items = [it] })
-}
-
-fn perunit_bytes_eq(a: []byte, b: []byte): bool {
-    if a.len != b.len { return false }
-    var i: u64 = 0
-    loop {
-        if i >= a.len { break }
-        if a[i] != b[i] { return false }
-        i = i + 1
-    }
-    true
-}
-
-fn perunit_item_faithful(retyped: @TItem(), resident: @TItem()): bool {
-    var ra = match perunit_serialize_one(retyped) { []byte as b => b; error => return false }
-    var rb = match perunit_serialize_one(resident) { []byte as b => b; error => return false }
-    perunit_bytes_eq(ra, rb)
-}
-
-type PerUnitEmit = struct { node: @TItem(); retyped: bool }
-
-fn perunit_passthrough(resident: @TItem()): PerUnitEmit { PerUnitEmit { node = resident; retyped = false } }
-
-fn perunit_item_for(enabled: bool, bnd: checker::Boundary, raw: parser::Program, resident: @TItem()): PerUnitEmit {
-    if !enabled { return perunit_passthrough(resident) }
-    match resident {
-        checker::TFunction as f => {
-            var pick = perunit_pick(bnd, raw, f)
-            if !pick.retype { return perunit_passthrough(resident) }
-            match checker::retype_unit(raw, bnd.worklist[pick.widx], bnd) {
-                (@TItem()) as retyped => if perunit_item_faithful(retyped, resident) { PerUnitEmit { node = retyped; retyped = true } } else { perunit_passthrough(resident) }
-                error => perunit_passthrough(resident)
-            }
-        }
-        _ => perunit_passthrough(resident)
-    }
-}
-
 fn trace_perunit_retyped(i: u64, retyped: bool) {
     if !native_trace_items_enabled() { return }
     if !retyped { return }
@@ -1945,7 +1870,7 @@ fn trace_perunit_retyped(i: u64, retyped: bool) {
 
 fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo, raw: parser::Program, bnd: checker::Boundary): i32 {
     var prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
-    var perunit = perunit_enabled()
+    var perunit = codegen::perunit_enabled()
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
@@ -1956,7 +1881,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         var t0 = trace_native_item(i, prog.items.len, prog.items[i])
         var child = region_new(region_root())
         region_enter(child)
-        var emitted = perunit_item_for(perunit, bnd, raw, prog.items[i])
+        var emitted = codegen::perunit_item_for(perunit, bnd, raw, prog.items[i])
         trace_perunit_retyped(i, emitted.retyped)
         var outcome = fuse_lower_item_x86(robase, prelude, loose, emitted.node, lifted_ph)
         region_leave()
@@ -2475,9 +2400,9 @@ fn report_build_done(binp: str, start: i64) {
     teko::io::eprintln(teko::str::concat("built ", binp, teko::str::concat("   ", teko::str::concat(elapsed_str(start), "s"))))
 }
 
-fn ffi_emit_c_file(prog: checker::TProgram, abi: str, out_path: str, meta: str): u64 | error {
-    if abi == "c" { return codegen::tk_emit_c_export_file(prog, out_path, meta) }
-    codegen::tk_emit_c_file(prog, out_path, meta)
+fn ffi_emit_c_file(prog: checker::TProgram, abi: str, out_path: str, meta: str, raw: parser::Program, bnd: checker::Boundary): u64 | error {
+    if abi == "c" { return codegen::tk_emit_c_export_file(prog, out_path, meta, raw, bnd) }
+    codegen::tk_emit_c_file(prog, out_path, meta, raw, bnd)
 }
 
 fn ffi_write_c_header(od: str, stem: str, prog: checker::TProgram): error | null {
@@ -2998,7 +2923,7 @@ fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram
     var od = strip_trailing_slash(out_dir)
     var cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
     var binp = binary_output_path(od, stem, resolved_target())
-    match codegen::tk_emit_c_file(prog, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description)) { u64 => { }; error as e => return fail(dir, e.message) }
+    match codegen::tk_emit_c_file(prog, cfile, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description), empty_raw_program(), empty_boundary()) { u64 => { }; error as e => return fail(dir, e.message) }
     if run_cc_debug(cfile, binp, m, prog) != 0 {
         return fail(dir, "cc failed to build the generated C")
     }
