@@ -52,8 +52,11 @@ binding de arena scoped → uso deferido-mas-in-plan. Errado (o que eu fiz): def
 
 ## Ritmo de trabalho
 - **BASE DO COORDENADOR = `fix/retirement` (lei dura, dono 2026-08-18). NUNCA opero na branch `main`.**
-  Todo o trabalho parte de `fix/retirement`; agentes recebem branch própria a partir do que for
-  relevante (ex.: `origin/feat/expurgo-arrays`) e eu dreno de volta para `fix/retirement`.
+  Todo o trabalho parte de `fix/retirement`; agentes recebem branch própria **FRESCA a partir de
+  `fix/retirement`** (que já carrega as leis+docs — o agente opera sob elas desde o 1º commit), e eu
+  dreno de volta por ff/cherry-pick. **Basear em outra branch é o que causou a divergência massiva do
+  expurgo (base antiga sem leis/docs → reconciliação cara com duplo reseed); só se a dependência
+  REALMENTE exigir, e mesmo assim rebaseando sobre `fix/retirement` fresca (dono 2026-08-24).**
 - Continuar o processo de forma autônoma, mas **fazer pausas para ler** o que o
   dono pode ter escrito no meio do caminho, antes de decisões que importam.
 - **ERROU → PARA E REFAZ CERTO, NÃO INSISTE NO ERRO (lei dura, dono 2026-08-19).** Se um dispatch/base/
