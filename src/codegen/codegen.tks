@@ -9401,6 +9401,17 @@ fn cg_report_phase_rss(label: str) {
     teko::io::eprintln($"teko: memory: codegen {label}: cur {cg_mb_tenths(cur)} MB / peak {cg_mb_tenths(teko::mem::peak_rss())} MB")
 }
 
+fn cg_region_check_enabled(): bool {
+    match teko::env::var("TEKO_REGION_CHECK") { str as v => v == "1"; error => false }
+}
+
+fn cg_current_region_word(): u64 { teko::sys::ptr_word(teko::runtime::region_current()) to u64 }
+
+fn cg_assert_region_stable(seen: u64, now: u64) {
+    if seen == now { return }
+    panic("codegen: per-unit body did not restore the current region")
+}
+
 pub fn perunit_enabled(): bool {
     match teko::env::var("TEKO_PERUNIT") { str as v => v == "1"; error => false }
 }
@@ -9531,6 +9542,9 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
     cg_report_phase_rss("after-decls")
 
     var perunit = perunit_enabled()
+    var check_regions = cg_region_check_enabled()
+    var region_seen: u64 = 0
+    var region_seen_set = false
     var i = 0
     loop {
         if i >= prog.items.len { break }
@@ -9540,6 +9554,12 @@ fn tk_emit_c_body(prog0: checker::TProgram, mode: CgMode, buf: teko::io::FileStr
             parser::UseDecl => { }
             (@TStatement()) as _gb3 => { }
             checker::TConstDecl => { }
+        }
+        if check_regions {
+            var region_now = cg_current_region_word()
+            if region_seen_set { cg_assert_region_stable(region_seen, region_now) }
+            region_seen = region_now
+            region_seen_set = true
         }
         i++
     }
