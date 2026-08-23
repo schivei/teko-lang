@@ -5722,8 +5722,7 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
     var types = pre.types
     var cenv = pre.env
     program = drop_comptime_items(program)
-    var items: []@TItem() = []
-    var mainbody: []@TStatement() = []
+    var per_item: [program.items.len]PreMonoItemOut = []
     var cur = cenv
     var i = 0
     loop {
@@ -5739,19 +5738,19 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
             parser::ConstDecl as cd => { line = cd.line; col = cd.col }
             _ => { }
         }
+        var contrib: []@TItem() = []
+        var body_stmts: []@TStatement() = []
         match it.content {
             (@Statement()) as s => {
                 var seq = match top_level_stmt_nodes(s, with_file(cur, it.file), types) {
                     TStmtSeq as x => x
                     error as e => return surface_at(it.file, line, col, e)
                 }
-                var si: u64 = 0
-                loop {
-                    if si >= seq.stmts.len { break }
-                    items = [..items, seq.stmts[si]]
-                    mainbody = [..mainbody, seq.stmts[si]]
-                    si = si + 1
-                }
+                var conv: [seq.stmts.len]@TItem() = []
+                var sci: u64 = 0
+                loop { if sci >= seq.stmts.len { break }; conv[sci] = seq.stmts[sci]; sci++ }
+                contrib = conv
+                body_stmts = seq.stmts
                 cur = seq.env
             }
             _ => {
@@ -5759,21 +5758,48 @@ pub fn type_program(raw_program: parser::Program): TProgram | error {
                     (@TItem()) as x => x
                     error as e => return surface_at(it.file, line, col, e)
                 }
-                items = [..items, ti]
                 match it.content {
                     parser::TypeDecl as td => {
                         var mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
-                        var mi2 = 0
-                        loop { if mi2 >= mitems.len { break }; items = [..items, mitems[mi2]]; mi2++ }
                         var citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []@TItem() as x => x; error as e => return e }
-                        var ci2 = 0
-                        loop { if ci2 >= citems.len { break }; items = [..items, citems[ci2]]; ci2++ }
+                        var combined: [1 + mitems.len + citems.len]@TItem() = []
+                        combined[0] = ti
+                        var ci: u64 = 1
+                        var mi2: u64 = 0
+                        loop { if mi2 >= mitems.len { break }; combined[ci] = mitems[mi2]; ci++; mi2++ }
+                        var ci2: u64 = 0
+                        loop { if ci2 >= citems.len { break }; combined[ci] = citems[ci2]; ci++; ci2++ }
+                        contrib = combined
                     }
-                    _ => { }
+                    _ => { contrib = [ti] }
                 }
             }
         }
+        per_item[i] = PreMonoItemOut { contrib = contrib; body_stmts = body_stmts }
         i++
+    }
+    var items_total: u64 = 0
+    var mainbody_total: u64 = 0
+    var si2: u64 = 0
+    loop {
+        if si2 >= per_item.len { break }
+        items_total = items_total + per_item[si2].contrib.len
+        mainbody_total = mainbody_total + per_item[si2].body_stmts.len
+        si2++
+    }
+    var items: [items_total]@TItem() = []
+    var mainbody: [mainbody_total]@TStatement() = []
+    var ik: u64 = 0
+    var bk: u64 = 0
+    var si3: u64 = 0
+    loop {
+        if si3 >= per_item.len { break }
+        var po = per_item[si3]
+        var cj: u64 = 0
+        loop { if cj >= po.contrib.len { break }; items[ik] = po.contrib[cj]; ik++; cj++ }
+        var bj: u64 = 0
+        loop { if bj >= po.body_stmts.len { break }; mainbody[bk] = po.body_stmts[bj]; bk++; bj++ }
+        si3++
     }
     var lc = check_labels(mainbody, [], false, [])
     if lc.failed { return error { message = lc.message } }
