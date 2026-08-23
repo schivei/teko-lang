@@ -943,6 +943,245 @@ fn check_instance_constraints(table: TypeTable): error | null {
     null
 }
 
+/**
+ * Reports whether two paths spell the same sequence of segment names.
+ *
+ * @param p  the first path
+ * @param q  the second path
+ * @return   `true` when both paths have equal length and matching segment names
+ */
+fn mono_path_eq(p: parser::Path, q: parser::Path): bool {
+    if p.segments.len != q.segments.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        if !teko::runtime::str_eq(p.segments[i].name, q.segments[i].name) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * Reports whether two calls differ in callee path, namespace, dispatch flag, or interface slot.
+ *
+ * @param a  the rewritten call
+ * @param b  the original call
+ * @return   `true` when any dispatch-affecting field differs between `a` and `b`
+ */
+fn mono_tcall_differs(a: TCall, b: TCall): bool {
+    if !mono_path_eq(a.callee, b.callee) { return true }
+    if !teko::runtime::str_eq(a.call_ns, b.call_ns) { return true }
+    if a.is_iface_dispatch != b.is_iface_dispatch { return true }
+    a.iface_slot != b.iface_slot
+}
+
+/**
+ * Reports whether the empty substitution would still rewrite the call `cl`.
+ *
+ * Under an empty substitution the only rewrites are generic-callee mangling (which also seeds an
+ * instantiation) and interface-dispatch rekeying, so both are checked here.
+ *
+ * @param cl     the call node
+ * @param items  the program items, for locating a generic template by bare name
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when the call resolves to a generic function or is rekeyed
+ */
+fn mono_call_is_rewrite(cl: TCall, items: []@TItem(), table: TypeTable): bool {
+    var bare = if cl.callee.segments.len == 0 { "" } else { cl.callee.segments[cl.callee.segments.len - 1].name }
+    match find_generic_fn(items, bare) { TFunction => return true; null => { } }
+    var rekeyed = rekey_iface_dispatch(cl, cl.args, table)
+    mono_tcall_differs(rekeyed, cl)
+}
+
+/**
+ * Reports whether the empty substitution would rewrite any element of `xs`.
+ *
+ * @param xs     the expressions, in order
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when at least one element would be rewritten
+ */
+fn mono_exprs_are_rewrite(xs: []TExpr, items: []@TItem(), table: TypeTable): bool {
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if mono_expr_is_rewrite(xs[i], items, table) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the empty substitution would rewrite the comparison `c`.
+ *
+ * @param c      the comparison node
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when the first operand or any tail operand would be rewritten
+ */
+fn mono_compare_is_rewrite(c: TCompare, items: []@TItem(), table: TypeTable): bool {
+    if mono_expr_is_rewrite(c.first, items, table) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        if mono_expr_is_rewrite(c.rest[i].operand, items, table) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the empty substitution would rewrite the match `m`.
+ *
+ * @param m      the match-expression node
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when the subject, an arm guard, or an arm body would be rewritten
+ */
+fn mono_match_is_rewrite(m: TMatchExpr, items: []@TItem(), table: TypeTable): bool {
+    if mono_expr_is_rewrite(m.subject, items, table) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        if m.arms[i].has_when && mono_expr_is_rewrite(m.arms[i].guard, items, table) { return true }
+        if mono_block_is_rewrite(m.arms[i].body, items, table) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the empty substitution would rewrite the interpolation `in`.
+ *
+ * A spec count that exceeds the hole count forces the answer `true`, since expansion would then
+ * truncate the specs and reusing the input would diverge.
+ *
+ * @param in     the interpolation node
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when a hole or dynamic format-spec argument would be rewritten
+ */
+fn mono_interp_is_rewrite(in: TInterp, items: []@TItem(), table: TypeTable): bool {
+    if in.specs.len > in.holes.len { return true }
+    if mono_exprs_are_rewrite(in.holes, items, table) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= in.specs.len { break }
+        match in.specs[i].kind {
+            TFSpecDynamic as fd => { if mono_exprs_are_rewrite(fd.args, items, table) { return true } }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the empty substitution would rewrite any element of the array literal `a`.
+ *
+ * @param a      the array-literal node
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when an element expression would be rewritten
+ */
+fn mono_array_is_rewrite(a: TArrayLit, items: []@TItem(), table: TypeTable): bool {
+    var i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if mono_expr_is_rewrite(a.elements[i].expr, items, table) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the empty substitution would rewrite any node reachable from `e`.
+ *
+ * The predicate mirrors `mono_texpr`'s traversal under an empty substitution, so a `false` answer
+ * guarantees the walk would reproduce `e` and seed no instantiations, letting the caller reuse it.
+ *
+ * @param e      the expression to inspect
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when some subtree would be rewritten or seed an instantiation
+ */
+fn mono_expr_is_rewrite(e: TExpr, items: []@TItem(), table: TypeTable): bool {
+    match e.kind {
+        TBinary as b => mono_expr_is_rewrite(b.left, items, table) || mono_expr_is_rewrite(b.right, items, table)
+        TUnary as u => mono_expr_is_rewrite(u.operand, items, table)
+        TCompare as c => mono_compare_is_rewrite(c, items, table)
+        TCall as cl => mono_call_is_rewrite(cl, items, table) || mono_exprs_are_rewrite(cl.args, items, table)
+        TIfExpr as f => mono_expr_is_rewrite(f.cond, items, table) || mono_block_is_rewrite(f.then_blk, items, table) || (f.has_else && mono_block_is_rewrite(f.else_blk, items, table))
+        TMatchExpr as m => mono_match_is_rewrite(m, items, table)
+        TCast as c => mono_expr_is_rewrite(c.expr, items, table)
+        TFieldAccess as fa => mono_expr_is_rewrite(fa.receiver, items, table)
+        TStructInit as si => mono_exprs_are_rewrite(si.field_vals, items, table)
+        TIndex as ix => mono_expr_is_rewrite(ix.receiver, items, table) || mono_expr_is_rewrite(ix.index, items, table)
+        TInterp as in => mono_interp_is_rewrite(in, items, table)
+        TInExpr as n => mono_expr_is_rewrite(n.lhs, items, table) || mono_exprs_are_rewrite(n.elems, items, table)
+        TArrayLit as a => mono_array_is_rewrite(a, items, table)
+        TSliceOfLen as s => mono_expr_is_rewrite(s.size, items, table)
+        TLambda as lam => mono_block_is_rewrite(lam.body, items, table)
+        TBorrow as b => mono_expr_is_rewrite(b.operand, items, table)
+        TBlockExpr as b => mono_block_is_rewrite(b.body, items, table)
+        _ => false
+    }
+}
+
+/**
+ * Reports whether the empty substitution would rewrite either side of the assignment `a`.
+ *
+ * @param a      the assignment statement
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when the value or a live target expression would be rewritten
+ */
+fn mono_assign_is_rewrite(a: TAssign, items: []@TItem(), table: TypeTable): bool {
+    if mono_expr_is_rewrite(a.value, items, table) { return true }
+    parser::assign_has_target(a.kind) && mono_expr_is_rewrite(a.target, items, table)
+}
+
+/**
+ * Reports whether the empty substitution would rewrite any node reachable from the statement `st`.
+ *
+ * @param st     the statement to inspect
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when some subtree would be rewritten or seed an instantiation
+ */
+fn mono_stmt_is_rewrite(st: @TStatement(), items: []@TItem(), table: TypeTable): bool {
+    match st {
+        TBinding as b => mono_expr_is_rewrite(b.value, items, table)
+        TAssign as a => mono_assign_is_rewrite(a, items, table)
+        TReturn as r => r.has_value && mono_expr_is_rewrite(r.value, items, table)
+        TLoopStmt as l => mono_block_is_rewrite(l.init, items, table) || mono_block_is_rewrite(l.body, items, table)
+        TExprStmt as es => mono_expr_is_rewrite(es.expr, items, table)
+        TDeferStmt as d => mono_block_is_rewrite(d.body, items, table)
+        TAdoptStmt as a => mono_block_is_rewrite(a.body, items, table)
+        TBlockStmt as b => mono_block_is_rewrite(b.body, items, table)
+        TSpawn as sp => mono_expr_is_rewrite(sp.call, items, table)
+        _ => false
+    }
+}
+
+/**
+ * Reports whether the empty substitution would rewrite any statement of the block `stmts`.
+ *
+ * @param stmts  the statements, in order
+ * @param items  the program items, for locating generic templates
+ * @param table  the type table driving interface-dispatch rekeying
+ * @return       `true` when at least one statement would be rewritten or seed an instantiation
+ */
+fn mono_block_is_rewrite(stmts: []@TStatement(), items: []@TItem(), table: TypeTable): bool {
+    var i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        if mono_stmt_is_rewrite(stmts[i], items, table) { return true }
+        i++
+    }
+    false
+}
+
 pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
     var any_generic = false
     var g = 0
@@ -974,18 +1213,28 @@ pub fn monomorphize(prog: TProgram, table: TypeTable): TProgram | error {
             TFunction as f => {
                 var is_droppable = f.type_params.len > 0 || is_generic_template_method(f, table)
                 if !is_droppable {
-                    var wb = match mono_block(f.body, empty_s, prog.items, table) { WBlock as w => w; error as e => return e }
-                    var nf = TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
-                    kept[kn] = nf
-                    kn++
-                    queue = mono_inst_concat(queue, wb.insts)
+                    if !mono_block_is_rewrite(f.body, prog.items, table) {
+                        kept[kn] = prog.items[i]
+                        kn++
+                    } else {
+                        var wb = match mono_block(f.body, empty_s, prog.items, table) { WBlock as w => w; error as e => return e }
+                        var nf = TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
+                        kept[kn] = nf
+                        kn++
+                        queue = mono_inst_concat(queue, wb.insts)
+                    }
                 }
             }
             (@TStatement()) as ts => {
-                var w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
-                kept[kn] = w.stmt
-                kn++
-                queue = mono_inst_concat(queue, w.insts)
+                if !mono_stmt_is_rewrite(ts, prog.items, table) {
+                    kept[kn] = prog.items[i]
+                    kn++
+                } else {
+                    var w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
+                    kept[kn] = w.stmt
+                    kn++
+                    queue = mono_inst_concat(queue, w.insts)
+                }
             }
             parser::TypeDecl as d => {
                 if d.type_params.len == 0 { kept[kn] = prog.items[i]; kn++ }

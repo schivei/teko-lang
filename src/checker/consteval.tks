@@ -287,6 +287,194 @@ fn inline_rw_exprs(xs: []TExpr, map: ScalarConstMap): []TExpr {
     out
 }
 
+/**
+ * Reports whether a `TVar` names a constant present in the scalar map.
+ *
+ * @param v    the variable-reference node
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when `map` holds an initializer for `v`'s name and namespace
+ */
+fn ce_var_is_mapped(v: TVar, map: ScalarConstMap): bool {
+    match scalar_const_init(map, v.name, v.func_ns) { TExpr => true; null => false }
+}
+
+/**
+ * Reports whether folding `map` would rewrite any element of `xs`.
+ *
+ * @param xs   the expressions, in order
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when at least one element references a mapped constant
+ */
+fn ce_exprs_rewrite(xs: []TExpr, map: ScalarConstMap): bool {
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if ce_expr_rewrites(xs[i], map) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether folding `map` would rewrite any node of the comparison `c`.
+ *
+ * @param c    the comparison node
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when the first operand or any tail operand references a mapped constant
+ */
+fn ce_compare_rewrites(c: TCompare, map: ScalarConstMap): bool {
+    if ce_expr_rewrites(c.first, map) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        if ce_expr_rewrites(c.rest[i].operand, map) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether folding `map` would rewrite any node of the match `m`.
+ *
+ * @param m    the match-expression node
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when the subject, an arm guard, or an arm body references a mapped constant
+ */
+fn ce_match_rewrites(m: TMatchExpr, map: ScalarConstMap): bool {
+    if ce_expr_rewrites(m.subject, map) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        if m.arms[i].has_when && ce_expr_rewrites(m.arms[i].guard, map) { return true }
+        if ce_block_rewrites(m.arms[i].body, map) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether folding `map` would rewrite any hole or dynamic spec of the interpolation `in`.
+ *
+ * @param in   the interpolation node
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when a hole or a dynamic format-spec argument references a mapped constant
+ */
+fn ce_interp_rewrites(in: TInterp, map: ScalarConstMap): bool {
+    if ce_exprs_rewrite(in.holes, map) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= in.specs.len { break }
+        match in.specs[i].kind {
+            TFSpecDynamic as fd => { if ce_exprs_rewrite(fd.args, map) { return true } }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether folding `map` would rewrite any element of the array literal `a`.
+ *
+ * @param a    the array-literal node
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when an element expression references a mapped constant
+ */
+fn ce_array_rewrites(a: TArrayLit, map: ScalarConstMap): bool {
+    var i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if ce_expr_rewrites(a.elements[i].expr, map) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether folding `map` would rewrite any node reachable from `e`.
+ *
+ * The predicate mirrors `inline_rw_expr`'s traversal, so a `false` answer guarantees that
+ * rebuilding `e` would reproduce it exactly and the caller may reuse the input node.
+ *
+ * @param e    the expression to inspect
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when some subtree references a mapped constant
+ */
+fn ce_expr_rewrites(e: TExpr, map: ScalarConstMap): bool {
+    match e.kind {
+        TVar as v => !v.is_func && ce_var_is_mapped(v, map)
+        TBinary as b => ce_expr_rewrites(b.left, map) || ce_expr_rewrites(b.right, map)
+        TUnary as u => ce_expr_rewrites(u.operand, map)
+        TCompare as c => ce_compare_rewrites(c, map)
+        TCall as cl => ce_exprs_rewrite(cl.args, map)
+        TIfExpr as f => ce_expr_rewrites(f.cond, map) || ce_block_rewrites(f.then_blk, map) || ce_block_rewrites(f.else_blk, map)
+        TMatchExpr as m => ce_match_rewrites(m, map)
+        TCast as c => ce_expr_rewrites(c.expr, map)
+        TFieldAccess as fa => ce_expr_rewrites(fa.receiver, map)
+        TStructInit as si => ce_exprs_rewrite(si.field_vals, map)
+        TIndex as ix => ce_expr_rewrites(ix.receiver, map) || ce_expr_rewrites(ix.index, map)
+        TInterp as in => ce_interp_rewrites(in, map)
+        TInExpr as n => ce_expr_rewrites(n.lhs, map) || ce_exprs_rewrite(n.elems, map)
+        TArrayLit as a => ce_array_rewrites(a, map)
+        TSliceOfLen as s => ce_expr_rewrites(s.size, map)
+        TLambda as lam => ce_block_rewrites(lam.body, map)
+        TBorrow as b => ce_expr_rewrites(b.operand, map)
+        TBlockExpr as b => ce_block_rewrites(b.body, map)
+        _ => false
+    }
+}
+
+/**
+ * Reports whether folding `map` would rewrite either side of the assignment `a`.
+ *
+ * @param a    the assignment statement
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when the value or a live target expression references a mapped constant
+ */
+fn ce_assign_rewrites(a: TAssign, map: ScalarConstMap): bool {
+    if ce_expr_rewrites(a.value, map) { return true }
+    parser::assign_has_target(a.kind) && ce_expr_rewrites(a.target, map)
+}
+
+/**
+ * Reports whether folding `map` would rewrite any node reachable from the statement `st`.
+ *
+ * @param st   the statement to inspect
+ * @param map  the scalar constant substitution in effect
+ * @return     `true` when some subtree references a mapped constant
+ */
+fn ce_stmt_rewrites(st: @TStatement(), map: ScalarConstMap): bool {
+    match st {
+        TBinding as b => ce_expr_rewrites(b.value, map)
+        TAssign as a => ce_assign_rewrites(a, map)
+        TReturn as r => r.has_value && ce_expr_rewrites(r.value, map)
+        TLoopStmt as l => ce_block_rewrites(l.init, map) || ce_block_rewrites(l.body, map)
+        TExprStmt as es => ce_expr_rewrites(es.expr, map)
+        TDeferStmt as d => ce_block_rewrites(d.body, map)
+        TAdoptStmt as a => ce_block_rewrites(a.body, map)
+        TBlockStmt as b => ce_block_rewrites(b.body, map)
+        TSpawn as sp => ce_expr_rewrites(sp.call, map)
+        _ => false
+    }
+}
+
+/**
+ * Reports whether folding `map` would rewrite any statement of the block `stmts`.
+ *
+ * @param stmts  the statements, in order
+ * @param map    the scalar constant substitution in effect
+ * @return       `true` when at least one statement references a mapped constant
+ */
+fn ce_block_rewrites(stmts: []@TStatement(), map: ScalarConstMap): bool {
+    var i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        if ce_stmt_rewrites(stmts[i], map) { return true }
+        i++
+    }
+    false
+}
+
 fn inline_rw_expr(e: TExpr, map: ScalarConstMap): TExpr {
     match e.kind {
         TNumber => e
@@ -425,10 +613,12 @@ fn inline_rw_assign(a: TAssign, map: ScalarConstMap): @TStatement() {
 }
 
 fn rewrite_function(f: TFunction, map: ScalarConstMap): TFunction {
+    if !ce_block_rewrites(f.body, map) { return f }
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = inline_rw_block(f.body, map); vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
 }
 
 fn rewrite_const_init(cd: TConstDecl, map: ScalarConstMap): TConstDecl {
+    if !ce_expr_rewrites(cd.init, map) { return cd }
     TConstDecl { name = cd.name; namespace = cd.namespace; ty = cd.ty; init = inline_rw_expr(cd.init, map); vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col; guard = cd.guard }
 }
 
@@ -449,7 +639,7 @@ fn inline_place_item_value(it: @TItem(), map: ScalarConstMap): @TItem() | null {
     match it {
         TFunction as f => rewrite_function(f, map)
         TConstDecl as cd => if is_scalar_const_type(cd.ty) { inline_scalar_const_value(cd, map) } else { rewrite_const_init(cd, map) }
-        (@TStatement()) as s => inline_rw_stmt(s, map)
+        (@TStatement()) as s => if ce_stmt_rewrites(s, map) { inline_rw_stmt(s, map) } else { s }
         _ => it
     }
 }
@@ -742,6 +932,7 @@ fn collapse_agg_const_decl_item(it: @TItem(), amap: ScalarConstMap): @TItem() {
 
 fn collapse_agg_const_decl(cd: TConstDecl, amap: ScalarConstMap): @TItem() {
     if is_scalar_const_type(cd.ty) { return cd }
+    if !ce_expr_rewrites(cd.init, amap) { return cd }
     TConstDecl {
         name = cd.name; namespace = cd.namespace; ty = cd.ty
         init = inline_rw_expr(cd.init, amap)
@@ -752,7 +943,7 @@ fn collapse_agg_const_decl(cd: TConstDecl, amap: ScalarConstMap): @TItem() {
 fn inline_place_item_agg(it: @TItem(), map: ScalarConstMap): @TItem() {
     match it {
         TFunction as f => rewrite_function(f, map)
-        (@TStatement()) as s => inline_rw_stmt(s, map)
+        (@TStatement()) as s => if ce_stmt_rewrites(s, map) { inline_rw_stmt(s, map) } else { s }
         _ => it
     }
 }

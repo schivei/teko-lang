@@ -36,17 +36,19 @@ fn cx_item(it: @TItem(), ctx: CxCtx): @TItem() | error {
     match it {
         TFunction as f => cx_function(f, ctx)
         TConstDecl as cd => cx_const_decl(cd, ctx)
-        (@TStatement()) as s => match cx_stmt(s, ctx) { error as x => return x; (@TStatement()) as v => v }
+        (@TStatement()) as s => if cx_stmt_has_comptime(s) { match cx_stmt(s, ctx) { error as x => return x; (@TStatement()) as v => v } } else { s }
         _ => it
     }
 }
 
 fn cx_function(f: TFunction, ctx: CxCtx): @TItem() | error {
+    if !cx_block_has_comptime(f.body) { return f }
     var body = match cx_block(f.body, ctx) { error as x => return x; []@TStatement() as v => v }
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
 }
 
 fn cx_const_decl(cd: TConstDecl, ctx: CxCtx): @TItem() | error {
+    if !cx_expr_has_comptime(cd.init) { return cd }
     var init = match cx_expr(cd.init, ctx) { error as x => return x; TExpr as v => v }
     TConstDecl { name = cd.name; namespace = cd.namespace; ty = cd.ty; init = init; vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col; guard = cd.guard }
 }
@@ -114,6 +116,177 @@ fn cx_assign(a: TAssign, ctx: CxCtx): @TStatement() | error {
         return TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = target }
     }
     TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = a.target }
+}
+
+/**
+ * Reports whether any element of `xs` reaches a comptime call.
+ *
+ * @param xs  the expressions, in order
+ * @return    `true` when at least one element contains an `@comptime` call
+ */
+fn cx_exprs_have_comptime(xs: []TExpr): bool {
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if cx_expr_has_comptime(xs[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the comparison `c` reaches a comptime call.
+ *
+ * @param c  the comparison node
+ * @return   `true` when the first operand or any tail operand contains an `@comptime` call
+ */
+fn cx_compare_has_comptime(c: TCompare): bool {
+    if cx_expr_has_comptime(c.first) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        if cx_expr_has_comptime(c.rest[i].operand) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the match `m` reaches a comptime call.
+ *
+ * @param m  the match-expression node
+ * @return   `true` when the subject, an arm guard, or an arm body contains an `@comptime` call
+ */
+fn cx_match_has_comptime(m: TMatchExpr): bool {
+    if cx_expr_has_comptime(m.subject) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        if m.arms[i].has_when && cx_expr_has_comptime(m.arms[i].guard) { return true }
+        if cx_block_has_comptime(m.arms[i].body) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the interpolation `in` reaches a comptime call.
+ *
+ * A spec count that exceeds the hole count forces the answer `true`, since expansion would
+ * then truncate the specs and reusing the input would diverge.
+ *
+ * @param in  the interpolation node
+ * @return    `true` when a hole or dynamic format-spec argument contains an `@comptime` call
+ */
+fn cx_interp_has_comptime(in: TInterp): bool {
+    if in.specs.len > in.holes.len { return true }
+    if cx_exprs_have_comptime(in.holes) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= in.specs.len { break }
+        match in.specs[i].kind {
+            TFSpecDynamic as fd => { if cx_exprs_have_comptime(fd.args) { return true } }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether any element of the array literal `a` reaches a comptime call.
+ *
+ * @param a  the array-literal node
+ * @return   `true` when an element expression contains an `@comptime` call
+ */
+fn cx_array_has_comptime(a: TArrayLit): bool {
+    var i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if cx_expr_has_comptime(a.elements[i].expr) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Reports whether the expression `e` reaches a comptime call.
+ *
+ * The predicate mirrors `cx_children`'s traversal (binds are empty during the top-level walk),
+ * so a `false` answer guarantees expansion would reproduce `e` and the caller may reuse it.
+ *
+ * @param e  the expression to inspect
+ * @return   `true` when some subtree contains an `@comptime` call
+ */
+fn cx_expr_has_comptime(e: TExpr): bool {
+    match e.kind {
+        TBinary as b => cx_expr_has_comptime(b.left) || cx_expr_has_comptime(b.right)
+        TUnary as u => cx_expr_has_comptime(u.operand)
+        TCompare as c => cx_compare_has_comptime(c)
+        TCall as cl => cl.call_ns == comptime_call_ns() || cx_exprs_have_comptime(cl.args)
+        TIfExpr as f => cx_expr_has_comptime(f.cond) || cx_block_has_comptime(f.then_blk) || cx_block_has_comptime(f.else_blk)
+        TMatchExpr as m => cx_match_has_comptime(m)
+        TCast as c => cx_expr_has_comptime(c.expr)
+        TFieldAccess as fa => cx_expr_has_comptime(fa.receiver)
+        TStructInit as si => cx_exprs_have_comptime(si.field_vals)
+        TIndex as ix => cx_expr_has_comptime(ix.receiver) || cx_expr_has_comptime(ix.index)
+        TInterp as in => cx_interp_has_comptime(in)
+        TInExpr as n => cx_expr_has_comptime(n.lhs) || cx_exprs_have_comptime(n.elems)
+        TArrayLit as a => cx_array_has_comptime(a)
+        TSliceOfLen as s => cx_expr_has_comptime(s.size)
+        TLambda as lam => cx_block_has_comptime(lam.body)
+        TBorrow as b => cx_expr_has_comptime(b.operand)
+        TBlockExpr as b => cx_block_has_comptime(b.body)
+        _ => false
+    }
+}
+
+/**
+ * Reports whether either side of the assignment `a` reaches a comptime call.
+ *
+ * @param a  the assignment statement
+ * @return   `true` when the value or a live target expression contains an `@comptime` call
+ */
+fn cx_assign_has_comptime(a: TAssign): bool {
+    if cx_expr_has_comptime(a.value) { return true }
+    parser::assign_has_target(a.kind) && cx_expr_has_comptime(a.target)
+}
+
+/**
+ * Reports whether the statement `st` reaches a comptime call.
+ *
+ * @param st  the statement to inspect
+ * @return    `true` when some subtree contains an `@comptime` call
+ */
+fn cx_stmt_has_comptime(st: @TStatement()): bool {
+    match st {
+        TBinding as b => cx_expr_has_comptime(b.value)
+        TAssign as a => cx_assign_has_comptime(a)
+        TReturn as r => r.has_value && cx_expr_has_comptime(r.value)
+        TLoopStmt as l => cx_block_has_comptime(l.init) || cx_block_has_comptime(l.body)
+        TExprStmt as es => cx_expr_has_comptime(es.expr)
+        TDeferStmt as d => cx_block_has_comptime(d.body)
+        TAdoptStmt as a => cx_block_has_comptime(a.body)
+        TBlockStmt as b => cx_block_has_comptime(b.body)
+        TSpawn as sp => cx_expr_has_comptime(sp.call)
+        _ => false
+    }
+}
+
+/**
+ * Reports whether any statement of the block `stmts` reaches a comptime call.
+ *
+ * @param stmts  the statements, in order
+ * @return       `true` when at least one statement contains an `@comptime` call
+ */
+fn cx_block_has_comptime(stmts: []@TStatement()): bool {
+    var i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        if cx_stmt_has_comptime(stmts[i]) { return true }
+        i++
+    }
+    false
 }
 
 fn cx_expr(e: TExpr, ctx: CxCtx): TExpr | error {
