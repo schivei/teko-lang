@@ -2815,12 +2815,19 @@ fn lower_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt): LowerStmtOut | error 
 }
 
 fn terminate_diverging_stmt(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error {
-    if is_fat_type(ctx.ret_type) { return error { message = "native backend N1: a diverging panic/exit statement inside a fat-returning function is not yet lowered (N2)" } }
+    if is_fat_type(ctx.ret_type) { return terminate_diverging_fat(ctx, line, col) }
     var ret_ty = ltype_of(ctx.ret_type, ctx.enums)
     if ltype_is_void(ret_ty) { return ctx_append(ctx, ret_void_inst(line, col)) }
     var r = ctx_alloc(ctx)
     var with_const = ctx_append(r.ctx, const_int_inst(r.vreg, lfallback_const(ret_ty), line, col))
     ctx_append(with_const, ret_inst(r.vreg, line, col))
+}
+
+fn terminate_diverging_fat(ctx: LowerCtx, line: u32, col: u32): LowerCtx | error {
+    if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
+    var fv = diverging_tail_value_fat(ctx)
+    var stored = ctx_append(fv.ctx, store_inst(fv.ctx.ret_len_slot, fv.len, LType::I64, line, col))
+    ctx_append(stored, ret_inst(fv.ptr, line, col))
 }
 
 fn lower_defer(ctx: LowerCtx, d: checker::TDeferStmt): LowerStmtOut {
