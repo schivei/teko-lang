@@ -29,16 +29,16 @@ type TyExport = struct {
 type Header = struct { types: []TyExport; fns: []FnSig }
 
 
-fn write_doc(buf: []byte, t: StrTable, has_doc: bool, doc: str): []byte {
+fn write_doc(buf: Wb, t: StrTable, has_doc: bool, doc: str): Wb {
     if !has_doc { return write_u8(buf, 0) }
     write_u32(write_u8(buf, 1), st_find(t, doc))
 }
 
-fn write_sigparam(buf: []byte, t: StrTable, p: SigParam): []byte {
+fn write_sigparam(buf: Wb, t: StrTable, p: SigParam): Wb {
     write_type(write_u32(buf, st_find(t, p.name)), t, p.type)
 }
 
-fn write_sigparams(buf: []byte, t: StrTable, xs: []SigParam): []byte {
+fn write_sigparams(buf: Wb, t: StrTable, xs: []SigParam): Wb {
     var b = write_u32(buf, xs.len to u32)
     var i = 0
     loop {
@@ -49,14 +49,14 @@ fn write_sigparams(buf: []byte, t: StrTable, xs: []SigParam): []byte {
     b
 }
 
-fn write_fnsig(buf: []byte, t: StrTable, f: FnSig): []byte {
+fn write_fnsig(buf: Wb, t: StrTable, f: FnSig): Wb {
     var b = write_u32(buf, st_find(t, f.name))
     b = write_sigparams(b, t, f.params)
     b = write_type(b, t, f.ret)
     write_doc(b, t, f.has_doc, f.doc)
 }
 
-fn write_fnsigs(buf: []byte, t: StrTable, xs: []FnSig): []byte {
+fn write_fnsigs(buf: Wb, t: StrTable, xs: []FnSig): Wb {
     var b = write_u32(buf, xs.len to u32)
     var i = 0
     loop {
@@ -67,11 +67,11 @@ fn write_fnsigs(buf: []byte, t: StrTable, xs: []FnSig): []byte {
     b
 }
 
-fn write_sigfield(buf: []byte, t: StrTable, f: SigField): []byte {
+fn write_sigfield(buf: Wb, t: StrTable, f: SigField): Wb {
     write_type(write_u32(buf, st_find(t, f.name)), t, f.type)
 }
 
-fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField): []byte {
+fn write_sigfields(buf: Wb, t: StrTable, xs: []SigField): Wb {
     var b = write_u32(buf, xs.len to u32)
     var i = 0
     loop {
@@ -82,7 +82,7 @@ fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField): []byte {
     b
 }
 
-fn write_members(buf: []byte, t: StrTable, xs: []str): []byte {
+fn write_members(buf: Wb, t: StrTable, xs: []str): Wb {
     var b = write_u32(buf, xs.len to u32)
     var i = 0
     loop {
@@ -99,7 +99,7 @@ fn shape_byte(s: TyShape): byte {
     2
 }
 
-fn write_tyexport(buf: []byte, t: StrTable, e: TyExport): []byte {
+fn write_tyexport(buf: Wb, t: StrTable, e: TyExport): Wb {
     var b = write_u32(buf, st_find(t, e.name))
     b = write_u8(b, shape_byte(e.shape))
     b = write_sigfields(b, t, e.fields)
@@ -108,7 +108,7 @@ fn write_tyexport(buf: []byte, t: StrTable, e: TyExport): []byte {
     write_doc(b, t, e.has_doc, e.doc)
 }
 
-fn write_tyexports(buf: []byte, t: StrTable, xs: []TyExport): []byte {
+fn write_tyexports(buf: Wb, t: StrTable, xs: []TyExport): Wb {
     var b = write_u32(buf, xs.len to u32)
     var i = 0
     loop {
@@ -119,7 +119,7 @@ fn write_tyexports(buf: []byte, t: StrTable, xs: []TyExport): []byte {
     b
 }
 
-fn write_header(buf: []byte, t: StrTable, h: Header): []byte {
+fn write_header(buf: Wb, t: StrTable, h: Header): Wb {
     write_fnsigs(write_tyexports(buf, t, h.types), t, h.fns)
 }
 
@@ -216,16 +216,16 @@ const TKH_VERSION: u32 = 2
 
 fn emit_tkh(h: Header): []byte {
     var table = collect_header(st_empty(), h)
-    var body = write_header(write_strtable([], table), table, h)
+    var body = wb_flat(write_header(write_strtable(wb_new(), table), table, h))
     var hash = fnv1a(body, 0)
-    var out: []byte = []
+    var out = wb_new()
     out = write_u8(out, b'T')
     out = write_u8(out, b'K')
     out = write_u8(out, b'H')
     out = write_u8(out, 0)
     out = write_u32(out, TKH_VERSION)
     out = write_u64(out, hash)
-    append_bytes(out, body)
+    wb_flat(wb_append(out, body))
 }
 
 

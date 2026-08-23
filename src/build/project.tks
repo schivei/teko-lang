@@ -328,6 +328,12 @@ fn inject_runtime_prelude(files: []SourceFile): []SourceFile | error {
     dsc_append(prelude, files)
 }
 
+fn read_manifest(): Manifest | error {
+    var mname = match find_manifest() { str as n => n; error as e => return e }
+    var mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
+    parse_manifest(mtext)
+}
+
 fn frontend_parse(include_tests: bool, quiet: bool, tty: bool): ParsedFront | error {
     var mname = match find_manifest() { str as n => n; error as e => return e }
     var mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
@@ -2391,8 +2397,24 @@ fn report_pt_census(prog: checker::TProgram) {
 }
 
 fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo, explicit: bool): i32 {
-    var fe = match frontend_body(false, false, tty, explicit) { Frontend as f => f; error as e => return fail(dir, e.message) }
-    codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug)
+    var front = region_new(region_root())
+    region_enter(front)
+    var fe = match frontend_body(false, false, tty, explicit) {
+        Frontend as f => f
+        error as e => { region_leave(); region_drop(front); return fail(dir, e.message) }
+    }
+    region_leave()
+    var bytes = match emit::serialize_program(fe.prog) {
+        []byte as b => b
+        error as e => { region_drop(front); return fail(dir, e.message) }
+    }
+    region_drop(front)
+    var prog2 = match emit::deserialize_program(bytes) {
+        checker::TProgram as p => p
+        error as e => return fail(dir, e.message)
+    }
+    var m = match read_manifest() { Manifest as x => x; error as e => return fail(dir, e.message) }
+    codegen_and_report(dir, out_dir, prog2, with_backend(m, backend), opt, tty, start, debug)
 }
 
 fn unmet_coverage_floors(fcov: u64, lcov: u64, bcov: u64, floor_f: u64, floor_l: u64, floor_b: u64): []str {
