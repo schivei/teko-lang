@@ -152,7 +152,7 @@ fn type_lambda(lam: parser::Lambda, expected: @Type(), env: Env, table: TypeTabl
         var p = lam.params[i]
         var pt = match lam_param_type(p, i, exp_params, table, env.cur_ns) { (@Type()) as t => t; error as e => return e }
         tparams[i] = TLambdaParam { name = p.name; type = pt }
-        cenv = define(cenv, p.name, pt, false)
+        cenv = define(cenv, p.name, pt, true)
         i++
     }
     var tb = match type_block(lam.body, cenv, table) { TypedBlock as bk => bk; error as e => return e }
@@ -2161,7 +2161,10 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable): TExpr | error {
                                     }
                                     error => return error { message = "auto-ref requires a mutable variable (a `var` binding)" }
                                 }
-                                _ => return error { message = "a `ref<T>` argument must be a mutable variable (a `var` binding) — only an lvalue can be referenced" }
+                                _ => {
+                                    if !texpr_lvalue_root_mut(a, env) { return error { message = "a `ref<T>` argument must be a mutable lvalue (a `var`, or a field/element of one)" } }
+                                    auto_reffed = true
+                                }
                             }
                         }
                     }
@@ -3661,10 +3664,11 @@ fn type_ref_binding_value(bv: parser::Expr, rf: Reference, env: Env, table: Type
 }
 
 fn ref_source_mutable_var(bv: parser::Expr, v: TExpr, env: Env): TExpr | error {
-    var var = match bv.kind { parser::Var as x => x; _ => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" } }
-    var vb = match lookup_binding(env, var.name) { ValBinding as b => b; error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" } }
+    var root = lvalue_root(bv)
+    if !root.reachable { return error { message = "a `ref` binding's source must be a mutable lvalue (a `var`, or a field/element of one) or another reference — not an expression" } }
+    var vb = match lookup_binding(env, root.name) { ValBinding as b => b; error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" } }
     if vb.is_mut { return v }
-    error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" }
+    error { message = $"cannot take a reference to immutable `{root.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" }
 }
 
 fn type_inferred_ref_value(bv: parser::Expr, env: Env, table: TypeTable): TExpr | error {
@@ -3760,7 +3764,17 @@ fn lvalue_root(e: parser::Expr): LvalueRoot {
     match e.kind {
         parser::Var as v => LvalueRoot { reachable = true; name = v.name }
         parser::FieldAccess as fa => lvalue_root(fa.receiver)
+        parser::Index as ix => lvalue_root(ix.receiver)
         _ => LvalueRoot { reachable = false; name = "" }
+    }
+}
+
+fn texpr_lvalue_root_mut(a: TExpr, env: Env): bool {
+    match a.kind {
+        TVar as v => match lookup_binding(env, v.name) { ValBinding as vb => vb.is_mut; error => false }
+        TFieldAccess as fa => texpr_lvalue_root_mut(fa.receiver, env)
+        TIndex as ix => texpr_lvalue_root_mut(ix.receiver, env)
+        _ => false
     }
 }
 
@@ -5011,7 +5025,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
                 }
             }
         }
-        local = define(local, f.params[i].name, pt, is_method_receiver(f, i))
+        local = define(local, f.params[i].name, pt, true)
         i++
     }
     if inject_base { local = define(local, "base", canonical_base_type(base_name, env.cur_ns), true) }
@@ -5202,7 +5216,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable): TFunction | e
                 }
             }
         }
-        local = define(local, f.params[i].name, pt, false)
+        local = define(local, f.params[i].name, pt, true)
         i++
     }
     var ret = match function_return(f, tbl, env.cur_ns) { (@Type()) as t => t; error as e => return e }

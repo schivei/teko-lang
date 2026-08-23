@@ -8462,12 +8462,14 @@ fn cg_lift_lambdas(prog: CgProg): LiftResult {
     LiftResult { prog = checker::TProgram { items = items }; lams = tlamvec_flat(acc.lams); spawns = acc.spawns }
 }
 fn cg_lift_block(stmts: []@TStatement(), ref acc: StampAcc): []@TStatement() {
+    if !cg_block_has_lift(stmts) { return stmts }
     var out: [stmts.len]@TStatement() = []
     var i = 0
     loop { if i >= stmts.len { break }; out[i] = cg_lift_stmt(stmts[i], acc); i++ }
     out
 }
 fn cg_lift_stmt(s: @TStatement(), ref acc: StampAcc): @TStatement() {
+    if !cg_stmt_has_lift(s) { return s }
     match s {
         checker::TBinding as b => checker::TBinding { kind = b.kind; target = b.target; bound = b.bound; value = cg_lift_expr(b.value, acc) }
         checker::TAssign as a => checker::TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = cg_lift_expr(a.value, acc); deref = a.deref; target = if parser::assign_has_target(a.kind) { cg_lift_expr(a.target, acc) } else { a.target } }
@@ -8488,92 +8490,125 @@ fn cg_lift_stmt(s: @TStatement(), ref acc: StampAcc): @TStatement() {
         }
     }
 }
-fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
-    match e.kind {
-        checker::TLambda as lam => {
-            var id = acc.next
-            acc = StampAcc { next = id + 1; next_spawn = acc.next_spawn; fns = acc.fns; lams = acc.lams; spawns = acc.spawns }
-            var nbody = cg_lift_block(lam.body, acc)
-            var newfns = acc.fns
-            var newlams = acc.lams
-            var stamped = checker::TLambda { params = lam.params; body = nbody; captures = lam.captures; ret = lam.ret; lift_id = id }
-            if lam.captures.len == 0 {
-                var ps: []parser::Param = []
-                var pi = 0
-                loop { if pi >= lam.params.len { break }; ps = [..ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }]; pi++ }
-                newfns = tfnvec_push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = []; guard = parser::pred_true() })
-            } else {
-                newlams = tlamvec_push(newlams, stamped)
-            }
-            acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = newfns; lams = newlams; spawns = acc.spawns }
-            checker::TExpr { kind = stamped; type = e.type; line = e.line; col = e.col }
+fn cg_lift_lambda_params(lam: checker::TLambda): []parser::Param {
+    var ps: [lam.params.len]parser::Param = []
+    var pi = 0
+    loop {
+        if pi >= lam.params.len { break }
+        ps[pi] = parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }
+        pi++
+    }
+    ps
+}
+
+fn cg_lift_lambda(e: checker::TExpr, lam: checker::TLambda, ref acc: StampAcc): checker::TExpr {
+    var id = acc.next
+    acc = StampAcc { next = id + 1; next_spawn = acc.next_spawn; fns = acc.fns; lams = acc.lams; spawns = acc.spawns }
+    var nbody = cg_lift_block(lam.body, acc)
+    var newfns = acc.fns
+    var newlams = acc.lams
+    var stamped = checker::TLambda { params = lam.params; body = nbody; captures = lam.captures; ret = lam.ret; lift_id = id }
+    if lam.captures.len == 0 {
+        newfns = tfnvec_push(newfns, checker::TFunction { overload_suffix = ""; name = lam_fn_name(id); type_params = []; type_constraints = []; params = cg_lift_lambda_params(lam); return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = parser::docspan_none(); namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64; ret_extra = []; guard = parser::pred_true() })
+    } else {
+        newlams = tlamvec_push(newlams, stamped)
+    }
+    acc = StampAcc { next = acc.next; next_spawn = acc.next_spawn; fns = newfns; lams = newlams; spawns = acc.spawns }
+    checker::TExpr { kind = stamped; type = e.type; line = e.line; col = e.col }
+}
+
+fn cg_lift_expr_slice(xs: []checker::TExpr, ref acc: StampAcc): []checker::TExpr {
+    var out: [xs.len]checker::TExpr = []
+    var i = 0
+    loop { if i >= xs.len { break }; out[i] = cg_lift_expr(xs[i], acc); i++ }
+    out
+}
+
+fn cg_lift_fspec(sp: checker::TFSpec, ref acc: StampAcc): checker::TFSpec {
+    match sp.kind {
+        checker::TFSpecDynamic as fd => checker::TFSpec { kind = checker::TFSpecDynamic { args = cg_lift_expr_slice(fd.args, acc) } }
+        _ => sp
+    }
+}
+
+fn cg_lift_interp_spec_count(in: checker::TInterp): u64 {
+    if in.holes.len < in.specs.len { in.holes.len } else { in.specs.len }
+}
+
+fn cg_lift_interp(e: checker::TExpr, in: checker::TInterp, ref acc: StampAcc): checker::TExpr {
+    var holes: [in.holes.len]checker::TExpr = []
+    var specs: [cg_lift_interp_spec_count(in)]checker::TFSpec = []
+    var i = 0
+    var si = 0
+    loop {
+        if i >= in.holes.len { break }
+        holes[i] = cg_lift_expr(in.holes[i], acc)
+        if i < in.specs.len {
+            specs[si] = cg_lift_fspec(in.specs[i], acc)
+            si++
         }
+        i++
+    }
+    checker::TExpr { kind = checker::TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = e.type; line = e.line; col = e.col }
+}
+
+fn cg_lift_compare(e: checker::TExpr, c: checker::TCompare, ref acc: StampAcc): checker::TExpr {
+    var terms: [c.rest.len]checker::TCmpTerm = []
+    var i = 0
+    loop {
+        if i >= c.rest.len { break }
+        terms[i] = checker::TCmpTerm { op = c.rest[i].op; operand = cg_lift_expr(c.rest[i].operand, acc) }
+        i++
+    }
+    checker::TExpr { kind = checker::TCompare { first = cg_lift_expr(c.first, acc); rest = terms }; type = e.type; line = e.line; col = e.col }
+}
+
+fn cg_lift_match(e: checker::TExpr, m: checker::TMatchExpr, ref acc: StampAcc): checker::TExpr {
+    var arms: [m.arms.len]checker::TArm = []
+    var i = 0
+    loop {
+        if i >= m.arms.len { break }
+        var a = m.arms[i]
+        arms[i] = checker::TArm { pattern = a.pattern; has_when = a.has_when; guard = if a.has_when { cg_lift_expr(a.guard, acc) } else { a.guard }; body = cg_lift_block(a.body, acc) }
+        i++
+    }
+    checker::TExpr { kind = checker::TMatchExpr { subject = cg_lift_expr(m.subject, acc); arms = arms }; type = e.type; line = e.line; col = e.col }
+}
+
+fn cg_lift_in_expr(e: checker::TExpr, ie: checker::TInExpr, ref acc: StampAcc): checker::TExpr {
+    var elems = cg_lift_expr_slice(ie.elems, acc)
+    var lhs = cg_lift_expr(ie.lhs, acc)
+    checker::TExpr { kind = checker::TInExpr { lhs = lhs; elems = elems }; type = e.type; line = e.line; col = e.col }
+}
+
+fn cg_lift_array_lit(e: checker::TExpr, a: checker::TArrayLit, ref acc: StampAcc): checker::TExpr {
+    var elems: [a.elements.len]checker::TArrayElem = []
+    var i = 0
+    loop {
+        if i >= a.elements.len { break }
+        elems[i] = checker::TArrayElem { is_spread = a.elements[i].is_spread; expr = cg_lift_expr(a.elements[i].expr, acc) }
+        i++
+    }
+    checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
+}
+
+fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc): checker::TExpr {
+    if !cg_expr_has_lift(e) { return e }
+    match e.kind {
+        checker::TLambda as lam => cg_lift_lambda(e, lam, acc)
         checker::TBinary as b => checker::TExpr { kind = checker::TBinary { op = b.op; left = cg_lift_expr(b.left, acc); right = cg_lift_expr(b.right, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TUnary as u => checker::TExpr { kind = checker::TUnary { op = u.op; operand = cg_lift_expr(u.operand, acc) }; type = e.type; line = e.line; col = e.col }
-        checker::TCompare as c => {
-            var terms: []checker::TCmpTerm = []
-            var i = 0
-            loop { if i >= c.rest.len { break }; terms = [..terms, checker::TCmpTerm { op = c.rest[i].op; operand = cg_lift_expr(c.rest[i].operand, acc) }]; i++ }
-            checker::TExpr { kind = checker::TCompare { first = cg_lift_expr(c.first, acc); rest = terms }; type = e.type; line = e.line; col = e.col }
-        }
-        checker::TCall as cl => {
-            var args: []checker::TExpr = []
-            var i = 0
-            loop { if i >= cl.args.len { break }; args = [..args, cg_lift_expr(cl.args[i], acc)]; i++ }
-            checker::TExpr { kind = checker::TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = e.type; line = e.line; col = e.col }
-        }
+        checker::TCompare as c => cg_lift_compare(e, c, acc)
+        checker::TCall as cl => checker::TExpr { kind = checker::TCall { overload_suffix = cl.overload_suffix; callee = cl.callee; args = cg_lift_expr_slice(cl.args, acc); call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = cl.type_args; ret_extra = cl.ret_extra }; type = e.type; line = e.line; col = e.col }
         checker::TIfExpr as f => checker::TExpr { kind = checker::TIfExpr { cond = cg_lift_expr(f.cond, acc); then_blk = cg_lift_block(f.then_blk, acc); has_else = f.has_else; else_blk = cg_lift_block(f.else_blk, acc) }; type = e.type; line = e.line; col = e.col }
-        checker::TMatchExpr as m => {
-            var arms: []checker::TArm = []
-            var i = 0
-            loop { if i >= m.arms.len { break }; var a = m.arms[i]; arms = [..arms, checker::TArm { pattern = a.pattern; has_when = a.has_when; guard = if a.has_when { cg_lift_expr(a.guard, acc) } else { a.guard }; body = cg_lift_block(a.body, acc) }]; i++ }
-            checker::TExpr { kind = checker::TMatchExpr { subject = cg_lift_expr(m.subject, acc); arms = arms }; type = e.type; line = e.line; col = e.col }
-        }
+        checker::TMatchExpr as m => cg_lift_match(e, m, acc)
         checker::TCast as ct => checker::TExpr { kind = checker::TCast { expr = cg_lift_expr(ct.expr, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TFieldAccess as fa => checker::TExpr { kind = checker::TFieldAccess { receiver = cg_lift_expr(fa.receiver, acc); field = fa.field }; type = e.type; line = e.line; col = e.col }
-        checker::TStructInit as si => {
-            var vals: []checker::TExpr = []
-            var i = 0
-            loop { if i >= si.field_vals.len { break }; vals = [..vals, cg_lift_expr(si.field_vals[i], acc)]; i++ }
-            checker::TExpr { kind = checker::TStructInit { field_names = si.field_names; field_vals = vals }; type = e.type; line = e.line; col = e.col }
-        }
+        checker::TStructInit as si => checker::TExpr { kind = checker::TStructInit { field_names = si.field_names; field_vals = cg_lift_expr_slice(si.field_vals, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TIndex as ix => checker::TExpr { kind = checker::TIndex { receiver = cg_lift_expr(ix.receiver, acc); index = cg_lift_expr(ix.index, acc) }; type = e.type; line = e.line; col = e.col }
-        checker::TInterp as in => {
-            var holes: []checker::TExpr = []
-            var specs: []checker::TFSpec = []
-            var i = 0
-            loop {
-                if i >= in.holes.len { break }
-                holes = [..holes, cg_lift_expr(in.holes[i], acc)]
-                if i < in.specs.len {
-                    var sp = in.specs[i]
-                    var lifted_sp = match sp.kind {
-                        checker::TFSpecDynamic as fd => {
-                            var args: []checker::TExpr = []
-                            var k = 0
-                            loop { if k >= fd.args.len { break }; args = [..args, cg_lift_expr(fd.args[k], acc)]; k++ }
-                            checker::TFSpec { kind = checker::TFSpecDynamic { args = args } }
-                        }
-                        _ => sp
-                    }
-                    specs = [..specs, lifted_sp]
-                }
-                i++
-            }
-            checker::TExpr { kind = checker::TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = e.type; line = e.line; col = e.col }
-        }
-        checker::TInExpr as ie => {
-            var elems: []checker::TExpr = []
-            var i = 0
-            loop { if i >= ie.elems.len { break }; elems = [..elems, cg_lift_expr(ie.elems[i], acc)]; i++ }
-            checker::TExpr { kind = checker::TInExpr { lhs = cg_lift_expr(ie.lhs, acc); elems = elems }; type = e.type; line = e.line; col = e.col }
-        }
-        checker::TArrayLit as a => {
-            var elems: []checker::TArrayElem = []
-            var i = 0
-            loop { if i >= a.elements.len { break }; elems = [..elems, checker::TArrayElem { is_spread = a.elements[i].is_spread; expr = cg_lift_expr(a.elements[i].expr, acc) }]; i++ }
-            checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
-        }
+        checker::TInterp as in => cg_lift_interp(e, in, acc)
+        checker::TInExpr as ie => cg_lift_in_expr(e, ie, acc)
+        checker::TArrayLit as a => cg_lift_array_lit(e, a, acc)
         checker::TBlockExpr as blk => checker::TExpr { kind = checker::TBlockExpr { body = cg_lift_block(blk.body, acc) }; type = e.type; line = e.line; col = e.col }
         _ => e
     }
