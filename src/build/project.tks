@@ -222,7 +222,6 @@ fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, re
     }
     phase_end_ok(checker_phase, count_unit_text(total_cell, total_cell, "items"))
     report_phase_rss("checker")
-    report_position_census("checker", pre.prog)
 
     var mono_phase = phase_begin("monomorph", count_only_text(0, "instances"), mode)
     var checked = match checker::monomorphize(pre.prog, pre.table) {
@@ -2328,103 +2327,6 @@ fn report_phase_rss(label: str) {
     teko::io::eprintln($"teko: memory: after {label}: cur {cur_s} MB / peak {peak_s} MB")
 }
 
-fn pos_cnt_exprs(xs: []checker::TExpr): u64 {
-    var n: u64 = 0
-    var i: u64 = 0
-    loop { if i >= xs.len { break }; n = n + pos_cnt_expr(xs[i]); i++ }
-    n
-}
-
-fn pos_cnt_expr(e: checker::TExpr): u64 {
-    match e.kind {
-        checker::TBinary as b => 1 + pos_cnt_expr(b.left) + pos_cnt_expr(b.right)
-        checker::TUnary as u => 1 + pos_cnt_expr(u.operand)
-        checker::TCompare as c => 1 + pos_cnt_expr(c.first) + pos_cnt_terms(c.rest)
-        checker::TCall as cl => 1 + pos_cnt_exprs(cl.args)
-        checker::TIfExpr as f => 1 + pos_cnt_expr(f.cond) + pos_cnt_block(f.then_blk) + pos_cnt_block(f.else_blk)
-        checker::TMatchExpr as m => 1 + pos_cnt_expr(m.subject) + pos_cnt_arms(m.arms)
-        checker::TCast as c => 1 + pos_cnt_expr(c.expr)
-        checker::TFieldAccess as fa => 1 + pos_cnt_expr(fa.receiver)
-        checker::TStructInit as si => 1 + pos_cnt_exprs(si.field_vals)
-        checker::TIndex as ix => 1 + pos_cnt_expr(ix.receiver) + pos_cnt_expr(ix.index)
-        checker::TInterp as in => 1 + pos_cnt_exprs(in.holes)
-        checker::TInExpr as ne => 1 + pos_cnt_expr(ne.lhs) + pos_cnt_exprs(ne.elems)
-        checker::TArrayLit as a => 1 + pos_cnt_array(a.elements)
-        checker::TSliceOfLen as s => 1 + pos_cnt_expr(s.size)
-        checker::TLambda as lam => 1 + pos_cnt_block(lam.body)
-        checker::TBorrow as bw => 1 + pos_cnt_expr(bw.operand)
-        checker::TBlockExpr as bl => 1 + pos_cnt_block(bl.body)
-        _ => 1
-    }
-}
-
-fn pos_cnt_terms(ts: []checker::TCmpTerm): u64 {
-    var n: u64 = 0
-    var i: u64 = 0
-    loop { if i >= ts.len { break }; n = n + pos_cnt_expr(ts[i].operand); i++ }
-    n
-}
-
-fn pos_cnt_array(xs: []checker::TArrayElem): u64 {
-    var n: u64 = 0
-    var i: u64 = 0
-    loop { if i >= xs.len { break }; n = n + pos_cnt_expr(xs[i].expr); i++ }
-    n
-}
-
-fn pos_cnt_arms(xs: []checker::TArm): u64 {
-    var n: u64 = 0
-    var i: u64 = 0
-    loop { if i >= xs.len { break }; if xs[i].has_when { n = n + pos_cnt_expr(xs[i].guard) }; n = n + pos_cnt_block(xs[i].body); i++ }
-    n
-}
-
-fn pos_cnt_block(stmts: []@TStatement()): u64 {
-    var n: u64 = 0
-    var i: u64 = 0
-    loop { if i >= stmts.len { break }; n = n + pos_cnt_stmt(stmts[i]); i++ }
-    n
-}
-
-fn pos_cnt_stmt(s: @TStatement()): u64 {
-    match s {
-        checker::TBinding as b => pos_cnt_expr(b.value)
-        checker::TAssign as a => if parser::assign_has_target(a.kind) { pos_cnt_expr(a.value) + pos_cnt_expr(a.target) } else { pos_cnt_expr(a.value) }
-        checker::TReturn as r => if r.has_value { pos_cnt_expr(r.value) + pos_cnt_exprs(r.values) } else { pos_cnt_exprs(r.values) }
-        checker::TLoopStmt as l => pos_cnt_block(l.init) + pos_cnt_block(l.body)
-        checker::TExprStmt as es => pos_cnt_expr(es.expr)
-        checker::TDeferStmt as d => pos_cnt_block(d.body)
-        checker::TAdoptStmt as ad => pos_cnt_block(ad.body)
-        checker::TBlockStmt as bl => pos_cnt_block(bl.body)
-        checker::TSpawn as sp => pos_cnt_expr(sp.call)
-        _ => 0
-    }
-}
-
-fn pos_cnt_program(prog: checker::TProgram): u64 {
-    var n: u64 = 0
-    var i: u64 = 0
-    loop {
-        if i >= prog.items.len { break }
-        match prog.items[i] {
-            checker::TFunction as f => { n = n + pos_cnt_block(f.body) }
-            checker::TConstDecl as c => { n = n + pos_cnt_expr(c.init) }
-            (@TStatement()) as s => { n = n + pos_cnt_stmt(s) }
-            _ => { }
-        }
-        i++
-    }
-    n
-}
-
-fn report_position_census(label: str, prog: checker::TProgram) {
-    if !phase_rss_enabled() { return }
-    var n = pos_cnt_program(prog)
-    var per_copy_kb = n * 8 / 1024
-    var four_copies_mb = n * 8 * 4 / 1048576
-    teko::io::eprintln($"teko: pos-census: after {label}: {n} TExpr nodes; line/col = 8 B/node = {per_copy_kb} KB/copy; ~4 phase copies = {four_copies_mb} MB")
-}
-
 fn strip_tests(prog: checker::TProgram): checker::TProgram {
     var kept: [prog.items.len]@TItem() = []
     var count: u64 = 0
@@ -2488,14 +2390,9 @@ fn report_pt_census(prog: checker::TProgram) {
     teko::io::println(checker::pt_census_line(c))
 }
 
-fn garden_enabled(): bool {
-    match teko::env::var("TEKO_GARDEN") { str as v => v == "1"; error => false }
-}
-
 fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo, explicit: bool): i32 {
     var fe = match frontend_body(false, false, tty, explicit) { Frontend as f => f; error as e => return fail(dir, e.message) }
-    var prog = if garden_enabled() { checker::project_program(fe.prog) } else { fe.prog }
-    codegen_and_report(dir, out_dir, prog, with_backend(fe.manifest, backend), opt, tty, start, debug)
+    codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug)
 }
 
 fn unmet_coverage_floors(fcov: u64, lcov: u64, bcov: u64, floor_f: u64, floor_l: u64, floor_b: u64): []str {
