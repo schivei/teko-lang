@@ -143,17 +143,19 @@ Nomeados e distintos:
 ### 3.1 `.tkhl` — o header de LINK, por-namespace (tempo de LINK interno)
 
 - **O que é:** a interface de **símbolos** de UMA unidade no tempo de link — a materialização
-  em disco (ou em memória) da **FFI interna** de `RM-C11` restrita àquele namespace:
-  `exp`+`pub`, cada entrada com **tipo Teko + símbolo de linkagem + ABI**. Par com o `.tkbl`
-  (o objeto intermediário da mesma unidade).
+  **em disco** da **FFI interna** de `RM-C11` restrita àquele namespace: `exp`+`pub`, cada
+  entrada com **tipo Teko + símbolo de linkagem + ABI**. Par com o `.tkbl` (o objeto
+  intermediário da mesma unidade).
 - **Sabor:** **PRÉ-monomorfização** (assinaturas genéricas cruas). Companheiro do `.tkbl`
   intermediário por-namespace.
 - **Tempo de vida:** **TRANSITÓRIO** — vive o link, some após o streaming; **NUNCA** é
   embarcado. É a "FFI interna no plano de linkagem" (`reducao…` 421-426, R8).
-- **Nome:** `.tkhl` (`tkh`-link, sufixo `l`) para não colidir com o `.tkh` publicado; par com
-  `.tkbl`. Alternativa law-clean: manter em memória (nunca tocar disco) quando o estágio 3→4
-  funde; só materializar em `.tkhl` na fronteira que não funde (o LINK global / o cache
-  incremental, análogo a `RM-C13`/`RM-C14`).
+- **Nome + política:** `.tkhl` (`tkh`-link, sufixo `l`) para não colidir com o `.tkh`
+  publicado; par com `.tkbl`. **Política DECIDIDA (dono 2026-08-24, §13.3 Opção 3A): `.tkhl`
+  vai SEMPRE DIRETO EM DISCO** (par do `.tkbl`), reusando o serializer determinístico de
+  `RM-C13`. **Não** há rota memória-primeiro — a tese da campanha é despejo-em-disco para bound
+  de memória; segurar o `.tkhl` em memória contradiria o objetivo. O IO por unidade é o *preço
+  aceito* do despejo (o cache incremental `RM-C14` reusa o `.tkhl` do disco direto).
 
 ### 3.2 `.tkh` — o header PUBLICADO, final (FFI externa / IDE)
 
@@ -452,8 +454,9 @@ terminal native:
   sabor errado com erro claro. **Não é tensão de lei** — é sequenciamento + versionamento.
 - **T-tkhl (§3.1) — vazamento de `pub` para o `.tkh` (R8).** Reusar a projeção `.tkb`+`pub`
   para o `.tkhl` e, por descuido, alimentá-la em `emit_tkh`. Guarda: `emit_tkh` filtra só
-  `exp`; o `.tkhl` vive só na região do link e é derrubado antes do emit final. Já coberto por
-  R8 — reforçado aqui pela existência de DOIS headers.
+  `exp`; o `.tkhl` é um artefato de disco TRANSITÓRIO (par do `.tkbl`, §13.3 Opção 3A),
+  consumido só pelo link/incremental e nunca lido pelo emissor de `.tkh` — e apagado ao fim do
+  build. Já coberto por R8 — reforçado aqui pela existência de DOIS headers.
 - **T-det (§8) — não-determinismo do encoder.** O fixpoint native (`gen2.o==gen3.o`) exige
   determinismo TOTAL do `.o`. Já há ordenação de símbolos, mas o audit de `RM-C16` tem que
   cobrir toda fonte de não-determinismo (timestamps, paths, ordem de relocations). Causa-raiz
@@ -472,7 +475,11 @@ terminal native:
 > leque**; a recomendação vem SÓ no fim, com o "por que as outras perdem". Nenhum ponto HALTa
 > (não há tensão de lei não resolvida) — são escolhas de engenharia sobre um piso law-first.
 
-### [DECISÃO DO DONO] 1 — Duas tabelas (FFI interna × `.tkh`)
+### [DECISÃO DO DONO] 1 — Duas tabelas (FFI interna × `.tkh`) — ✅ RATIFICADA: Opção 1A (dono 2026-08-24)
+
+> **✅ RATIFICADA (dono 2026-08-24) — Opção 1A** (duas tabelas totalmente separadas: `.tkhl`
+> `exp`+`pub` transitório × `.tkh` só `exp`). Bate com a recomendação do coordenador. Registro
+> no `DECISION_LOG.md` D67. O leque abaixo fica como memória de deliberação.
 
 **Problema.** A compilação separada cross-namespace DENTRO do programa precisa ver `exp`+`pub`
 (o compilador chama MUITO símbolo `pub` interno). Mas o `.tkh` publicado é só `exp` (lei de
@@ -567,7 +574,7 @@ type FatEntry = struct { symbol: str; sig: @Type(); internal: bool }
 - **Eixos.** Memória: ruim (header embarcado inflado). Complexidade: baixa. Leis/R8:
   **reprovado** (viola R8 e M.4). Reprodutibilidade: alta, mas irrelevante — reprova na lei.
 
-#### Recomendação — **Opção 1A (duas tabelas totalmente separadas)**
+#### Recomendação → **✅ RATIFICADA: Opção 1A (duas tabelas totalmente separadas)** — dono 2026-08-24
 
 1A é a única que torna o vazamento R8 **estruturalmente impossível** (tipos distintos, o `.tkh`
 nunca segura um `pub`) e derruba o `.tkhl` cedo (melhor memória). **1C está fora** — viola R8/M.4
@@ -575,9 +582,14 @@ frontalmente (é exatamente o erro proibido). **1B perde** por transformar uma g
 estrutural (R8) numa garantia procedural (um filtro que pode falhar) e por manter a tabela
 grande viva mais tempo; a economia de uma projeção não paga o risco de vazamento de superfície.
 A duplicação de projeção de 1A é mitigável reusando a projeção de decl do `.tkb` (`RM-C11`)
-como base comum, filtrando `exp`+`pub` para `.tkhl` e `exp` para `.tkh` na saída.
+como base comum, filtrando `exp`+`pub` para `.tkhl` e `exp` para `.tkh` na saída. **O dono
+ratificou 1A em 2026-08-24 (DECISION_LOG D67).**
 
-### [DECISÃO DO DONO] 2 — Onde a monomorfização mora
+### [DECISÃO DO DONO] 2 — Onde a monomorfização mora — ✅ RATIFICADA: Opção 2A (dono 2026-08-24)
+
+> **✅ RATIFICADA (dono 2026-08-24) — Opção 2A** (100% no linker; `.tkbl` sempre pré-mono; mono
+> só na ponta, com as 2 políticas de destino do §5). Bate com a recomendação do coordenador.
+> Registro no `DECISION_LOG.md` D67.
 
 **Problema.** Hoje `checker::monomorphize` (`monomorph.tks:946`) roda no frontend e o `.tkb`
 sai post-mono. Sob emissão por-namespace, onde a mono deve rodar?
@@ -667,7 +679,7 @@ fn request_mono(key: MonoKey, cache: ref MonoCache): str | error
   Complexidade: **alta**. Leis: neutra. Reprodutibilidade: **a pior** (cache global mutável +
   ordem de flush + tensão com paralela).
 
-#### Recomendação — **Opção 2A (100% no linker, `.tkbl` sempre pré-mono)**, com as 2 políticas de destino do §5
+#### Recomendação → **✅ RATIFICADA: Opção 2A (100% no linker, `.tkbl` sempre pré-mono)** — dono 2026-08-24
 
 2A dá o fecho global correto (a razão técnica dura: instanciações cruzam namespaces), o menor
 `.tkbl` (melhor pico) e a portabilidade de package/tool — tudo law-first. **2B perde** porque
@@ -678,8 +690,13 @@ reprodutibilidade. Sobre 2A, a política por-destino do §5 se aplica na PONTA: 
 monomorfizam no build (linker), **tool** monomorfiza no INSTALL, **package** no consumidor — o
 `.tkbl` distribuído é sempre pré-mono. Gated em `RM-C15`, com reseed + byte de versão de sabor
 (T-mono, §12). `Tool` e `Binary` já são enums separados (`project.tks`); só a semântica muda.
+**O dono ratificou 2A em 2026-08-24 (DECISION_LOG D67).**
 
-### [DECISÃO DO DONO] 3 — Dois `.tkh`: nome + política disco-vs-memória
+### [DECISÃO DO DONO] 3 — Dois `.tkh`: nome + política disco-vs-memória — ✅ RATIFICADA: Opção 3A (dono 2026-08-24, INVERTE a recomendação)
+
+> **✅ RATIFICADA (dono 2026-08-24) — Opção 3A** (`.tkhl` **DIRETO EM DISCO**, par do `.tkbl`),
+> nome `.tkhl`. **O dono INVERTEU a recomendação do coordenador (era 3B, memória-primeiro).**
+> Ver a **retratação formal** ao fim da sub-seção. Registro no `DECISION_LOG.md` D67.
 
 **Problema.** O header de LINK (`exp`+`pub`, tempo de link) vs. o header PUBLICADO (só `exp`).
 Como nomear e onde materializar o de link?
@@ -750,18 +767,40 @@ consumidor lê `[public]`, o linker lê `[link]`.
 junto do `.tkh` no diretório. Contra: `.tkhl` × `.tkh` diferem por uma letra (erro de digitação
 fácil). `.tkhi` deixa "interno" mais óbvio mas quebra a simetria com `.tkbl`.
 
-#### Recomendação — **Opção 3B (memória-primeiro, disco na fronteira), nome `.tkhl`**
+#### Recomendação (original) → **Opção 3B (memória-primeiro)** — ⛔ RETRATADA; ver decisão do dono
 
-3B é 3A com um fast-path: zero IO no build limpo fundido (o caso quente), materializando `.tkhl`
-só onde é inevitável (LINK global não-fundido + cache incremental). **3C perde** — reintroduz o
-risco R8 (é 1C com seções) e troca a separação estrutural por um strip frágil no empacotamento.
-Entre 3A e 3B, 3B ganha no tempo de build limpo sem perder nada (ainda constrói o `.tkhl`
-serializável que o incremental precisa); o custo é uma rota condicional a mais, que o
-implementer isola em `serialize_link_header`. **Nome: `.tkhl`** pela simetria com `.tkbl` (o par
-intermediário inteiro fica com sufixo `l`); se o dono preferir o "interno" explícito, `.tkhi` é
-o fallback aceitável. CONFIRMAR nome + a política 3B.
+3B era 3A com um fast-path: zero IO no build limpo fundido (o caso quente), materializando
+`.tkhl` só onde é inevitável (LINK global não-fundido + cache incremental). **3C perde** —
+reintroduz o risco R8 (é 1C com seções) e troca a separação estrutural por um strip frágil no
+empacotamento. O coordenador havia recomendado 3B por ganhar tempo de build limpo isolando a
+rota condicional em `serialize_link_header`.
 
-### [DECISÃO DO DONO] 4 — RM-C10: COMO determinizar o gensym
+#### ✅ RATIFICADA: **Opção 3A (`.tkhl` DIRETO EM DISCO)**, nome `.tkhl` — dono 2026-08-24
+
+> **RETRATAÇÃO FORMAL (counter-argue do dono).** A **recomendação 3B (memória-primeiro) fica
+> RETRATADA** — o dono escolheu **3A** (`.tkhl` direto em disco). **Razão do dono:** a tese da
+> campanha inteira é **despejo-em-disco para bound de memória**; manter o `.tkhl` em memória
+> (3B) **contradiz o objetivo** de tirar coisa da memória para o disco. Além disso, **3A reusa o
+> serializer de copy-grow já escrito** (o mesmo framing `.tkb`/`RM-C13`), sem inventar a rota
+> condicional memória-vs-disco de 3B. Ou seja: 3B otimizava um tempo de build às custas de
+> reintroduzir estado em memória — exatamente o que o Eixo C existe para eliminar. **3A é a
+> decisão.** O contra-argumento do coordenador (IO no build fundido) é subordinado à tese de
+> memória: o custo de IO é o *preço aceito* do despejo, não um defeito a evitar.
+
+**Consequência (política decidida):** o `.tkhl` é **sempre materializado em disco**, par do
+`.tkbl`, reusando o serializer determinístico (`RM-C13`, frame R6). Não há rota memória-primeiro
+nem `serialize_link_header` condicional — há um único caminho: emitir `.tkbl`+`.tkhl` em disco
+por unidade, derrubar a região. O cache incremental (`RM-C14`) lê o `.tkhl` do disco direto.
+**Nome: `.tkhl`** (simetria com `.tkbl`; `.tkhi` era o fallback, não escolhido).
+
+### [DECISÃO DO DONO] 4 — RM-C10: COMO determinizar o gensym — ✅ RATIFICADA: Opção 4A (dono 2026-08-24)
+
+> **✅ RATIFICADA (dono 2026-08-24) — Opção 4A** (contador global monotônico substitui
+> `buf.len`). Bate com a recomendação do coordenador para o `RM-C10` AGORA. **Razão do dono:**
+> "se é naming, já existe maquinaria, não tem nada para inventar" — 4A é a mudança MÍNIMA que
+> **reusa a maquinaria de gensym existente** (só troca `buf.len` por um contador), byte-
+> preservante; B/C inventavam esquemas novos. **4B fica registrada como migração futura, só se a
+> paralelização (§6) exigir.** Registro no `DECISION_LOG.md` D67.
 
 **Problema (R4).** Hoje nomes temporários derivam de `buf.len` (ex.: `$"_oln{buf.len}"`). Sob
 emissão por-namespace o buffer é por-unidade → o MESMO corpo gera nome DIFERENTE conforme a
@@ -859,7 +898,7 @@ Nome gerado no exemplo: **`_t_9f3a1c`** (hash truncado do nó).
   desambiguador ordinal (regride). Colisão: **problema real**. Legibilidade do C: **ruim**.
   Estabilidade sob paralela: ótima (se resolver colisão de forma determinística).
 
-#### Recomendação — **Opção 4A para `RM-C10` AGORA; migrar para 4B quando a paralelização (§6) entrar**
+#### Recomendação → **✅ RATIFICADA: Opção 4A para `RM-C10`; 4B como migração futura** — dono 2026-08-24
 
 `RM-C10` (o crumb `0065`) exige explicitamente **`teko.c` byte-idêntico após o rename** (rename
 mecânico, validado byte-a-byte) — SÓ **4A** satisfaz isso (reproduz a sequência de `buf.len` de
@@ -873,7 +912,10 @@ preservante, desbloqueia o Eixo C), e registrar **4B como a migração** a fazer
 paralelização (§6), onde a estabilidade por-coordenada deixa de ser luxo e vira requisito (o
 contador global de 4A não sobrevive a workers). Até lá, 4A + ordem de emissão determinística
 (garantida por `RM-C11`/`C12`) mantém `gen2==gen3`. **Marcar `RM-C10` como bloqueador do
-per-unit native** segue valendo (já nos crumbs: `RM-C10` "BLOCKS C11").
+per-unit native** segue valendo (já nos crumbs: `RM-C10` "BLOCKS C11"). **O dono ratificou 4A em
+2026-08-24 (DECISION_LOG D67), razão: "se é naming, já existe maquinaria, não tem nada para
+inventar" — 4A reusa o gensym existente; 4B fica como migração futura, só se a paralelização
+exigir.**
 
 ---
 
