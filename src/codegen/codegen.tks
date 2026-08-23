@@ -204,7 +204,7 @@ const F64_SIGN_SHIFT: u64 = 63 to u64
 
 fn cb_f64_literal(buf: teko::io::FileStream, v: f64) {
     var bits = teko::f64_bits(v)
-    if f64_bits_are_finite(bits) { buf.write(c_double_spelling(teko::ftoa(v))); return }
+    if f64_bits_are_finite(bits) { buf.write(c_double_spelling(teko::runtime::ftoa(v))); return }
     if f64_bits_are_nan(bits) { buf.write("__builtin_nan(\"\")"); return }
     if f64_bits_are_negative(bits) { buf.write("(-__builtin_inf())"); return }
     buf.write("__builtin_inf()")
@@ -236,6 +236,22 @@ fn has_c_float_marker(text: str): bool {
         i++
     }
     false
+}
+
+fn cg_rt_fmt_fn(last: str): str | null {
+    if last == "ftoa" { return "ftoa" }
+    if last == "fmt_f" || last == "fmt_e" || last == "fmt_g" || last == "fmt_p" || last == "fmt_n_f" { return last }
+    if last == "fmt_d" || last == "fmt_b" || last == "fmt_n_i" { return last }
+    if last == "fmt_x_upper" || last == "fmt_x_lower" { return last }
+    if last == "fmt_dyn_f64" || last == "fmt_dyn_i64" || last == "fmt_dyn_u64" { return last }
+    null
+}
+
+fn cg_rt_fmt_open(buf: teko::io::FileStream, name: str, cast: str) {
+    cb_fn_name(buf, "teko::runtime", name)
+    buf.write("((")
+    buf.write(cast)
+    buf.write(")(")
 }
 
 fn cb_cstr_escaped(buf: teko::io::FileStream, s: str) {
@@ -3391,7 +3407,10 @@ fn emit_call_inner(buf: teko::io::FileStream, prog: CgProg, ret_type: @Type(), e
         error { message = "codegen: no resolved namespace" }
     }
     if has_builtin {
-        buf.write(builtin)
+        match cg_rt_fmt_fn(p.segments[p.segments.len - 1].name) {
+            str as rtname => cb_fn_name(buf, "teko::runtime", rtname)
+            null => buf.write(builtin)
+        }
     } else if c.call_ns.len != 0 {
         var is_extern_call = false
         var ext_symbol = ""
@@ -3866,16 +3885,16 @@ fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, st
                         if !has_prec { prec = if fc_low == 100 { 1 } else { 6 } }
                         var is_flt = match h.type { checker::Prim as p => p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64; _ => false }
                         var prec_str = teko::i64_to_str(prec)
-                        if fc_low == 102 { buf.write("tk_fmt_f((double)(") }
-                        else if fc_low == 101 { buf.write("tk_fmt_e((double)(") }
-                        else if fc_low == 103 { buf.write("tk_fmt_g((double)(") }
-                        else if fc_low == 112 { buf.write("tk_fmt_p((double)(") }
-                        else if fc_low == 100 { buf.write("tk_fmt_d((int64_t)(") }
-                        else if fc_low == 120 && spec.len > 0 && spec[0] == 88 { buf.write("tk_fmt_x_upper((uint64_t)(") }
-                        else if fc_low == 120 { buf.write("tk_fmt_x_lower((uint64_t)(") }
-                        else if fc_low == 98 { buf.write("tk_fmt_b((uint64_t)(") }
-                        else if fc_low == 110 && is_flt { buf.write("tk_fmt_n_f((double)(") }
-                        else if fc_low == 110 { buf.write("tk_fmt_n_i((int64_t)(") }
+                        if fc_low == 102 { cg_rt_fmt_open(buf, "fmt_f", "double") }
+                        else if fc_low == 101 { cg_rt_fmt_open(buf, "fmt_e", "double") }
+                        else if fc_low == 103 { cg_rt_fmt_open(buf, "fmt_g", "double") }
+                        else if fc_low == 112 { cg_rt_fmt_open(buf, "fmt_p", "double") }
+                        else if fc_low == 100 { cg_rt_fmt_open(buf, "fmt_d", "int64_t") }
+                        else if fc_low == 120 && spec.len > 0 && spec[0] == 88 { cg_rt_fmt_open(buf, "fmt_x_upper", "uint64_t") }
+                        else if fc_low == 120 { cg_rt_fmt_open(buf, "fmt_x_lower", "uint64_t") }
+                        else if fc_low == 98 { cg_rt_fmt_open(buf, "fmt_b", "uint64_t") }
+                        else if fc_low == 110 && is_flt { cg_rt_fmt_open(buf, "fmt_n_f", "double") }
+                        else if fc_low == 110 { cg_rt_fmt_open(buf, "fmt_n_i", "int64_t") }
                         else { panic("codegen: unrecognized format spec") }
                         emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
                         if fmt_family_takes_prec(fc_low, is_flt) {
@@ -3889,9 +3908,9 @@ fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, st
                     checker::TFSpecDynamic as fd => {
                         var is_flt = match h.type { checker::Prim as p => p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64; _ => false }
                         var is_sint = match h.type { checker::Prim as p => cg_prim_is_signed_int(p.kind); _ => false }
-                        if is_flt { buf.write("tk_fmt_dyn_f64((double)(") }
-                        else if is_sint { buf.write("tk_fmt_dyn_i64((int64_t)(") }
-                        else { buf.write("tk_fmt_dyn_u64((uint64_t)(") }
+                        if is_flt { cg_rt_fmt_open(buf, "fmt_dyn_f64", "double") }
+                        else if is_sint { cg_rt_fmt_open(buf, "fmt_dyn_i64", "int64_t") }
+                        else { cg_rt_fmt_open(buf, "fmt_dyn_u64", "uint64_t") }
                         emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
                         buf.write("), ")
                         emit_expr_ctx(buf, prog, checker::Void { }, fd.args[0], escaping, regions, fn_body, dctx)
@@ -3907,7 +3926,7 @@ fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, st
                                     emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
                                     buf.write(" ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
                                 } else if p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64 {
-                                    buf.write("tk_ftoa((double)(")
+                                    cg_rt_fmt_open(buf, "ftoa", "double")
                                     emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
                                     buf.write("))")
                                 } else if cg_prim_is_signed_int(p.kind) {
@@ -3944,7 +3963,7 @@ fn emit_interp(buf: teko::io::FileStream, prog: CgProg, in: checker::TInterp, st
                             emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
                             buf.write(" ? (tk_str){ (const tk_byte *)\"true\", 4 } : (tk_str){ (const tk_byte *)\"false\", 5 })")
                         } else if p.kind == checker::PrimKind::F32 || p.kind == checker::PrimKind::F64 {
-                            buf.write("tk_ftoa((double)(")
+                            cg_rt_fmt_open(buf, "ftoa", "double")
                             emit_expr_ctx(buf, prog, checker::Void { }, h, escaping, regions, fn_body, dctx)
                             buf.write("))")
                         } else if cg_prim_is_signed_int(p.kind) {
