@@ -5693,6 +5693,84 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     PreMono { prog = tp; table = types; diags = diags }
 }
 
+pub type Boundary = struct {
+    table: TypeTable
+    env: Env
+    worklist: []WorkUnit
+    lift_seed: u64
+}
+
+pub type WorkUnit = struct {
+    source_index: u64
+    mono_mangle: str
+    subst: Subst
+    owner_ns: str
+}
+
+pub type DiscoveredBoundary = struct {
+    boundary: Boundary
+    program: parser::Program
+}
+
+fn boundary_empty_subst(): Subst {
+    Subst { params = []; names = []; types = [] }
+}
+
+fn item_is_plain_function(it: parser::Item): bool {
+    match it.content {
+        parser::Function as f => f.type_params.len == 0 && !f.is_extern
+        _ => false
+    }
+}
+
+fn boundary_unit_count(program: parser::Program): u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        if item_is_plain_function(program.items[i]) { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+fn boundary_worklist(program: parser::Program): []WorkUnit {
+    var out: [boundary_unit_count(program)]WorkUnit = []
+    var k: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        if item_is_plain_function(program.items[i]) {
+            out[k] = WorkUnit { source_index = i; mono_mangle = ""; subst = boundary_empty_subst(); owner_ns = program.items[i].namespace }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+pub fn discover_boundary(raw: parser::Program, dep_prog: TProgram, explicit: bool): DiscoveredBoundary | error {
+    var folded = fold_traits_collected(raw)
+    if folded.diags.len > 0 { return error { message = join_checker_diags(folded.diags) } }
+    var program = synthesize_mret_structs(canon_class_bases(folded.program))
+    var seed_empty = Collected { types = tt_empty(); env = with_explicit(env_empty(), explicit) }
+    var seed = match seed_from_dep(dep_prog, seed_empty.types, seed_empty.env) {
+        Collected as s => s
+        error as e => return e
+    }
+    var pre = pre_walk(program, collect_with_seed(program, seed))
+    if pre.cut { return error { message = join_checker_diags(pre.diags) } }
+    var pruned = drop_comptime_items(program)
+    var bnd = Boundary { table = pre.types; env = pre.env; worklist = boundary_worklist(pruned); lift_seed = 0 }
+    DiscoveredBoundary { boundary = bnd; program = pruned }
+}
+
+pub fn retype_unit(raw: parser::Program, unit: WorkUnit, bnd: Boundary): @TItem() | error {
+    if unit.source_index >= raw.items.len { return error { message = "retype_unit: source_index out of range" } }
+    var it = raw.items[unit.source_index]
+    type_item(it, with_ns(bnd.env, it.namespace), bnd.table)
+}
+
 type PreWalk = struct {
     types: TypeTable
     env: Env

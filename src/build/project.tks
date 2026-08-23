@@ -20,6 +20,21 @@ fn project_dir_of(arg: str): str {
 type Frontend = struct {
     prog: checker::TProgram
     manifest: Manifest
+    raw: parser::Program
+    deps: checker::TProgram
+    boundary: checker::Boundary
+}
+
+fn perunit_enabled(): bool {
+    match teko::env::var("TEKO_PERUNIT") { str as v => v == "1"; error => false }
+}
+
+fn empty_raw_program(): parser::Program {
+    parser::Program { items = [] }
+}
+
+fn empty_boundary(): checker::Boundary {
+    checker::Boundary { table = checker::tt_empty(); env = checker::env_empty(); worklist = []; lift_seed = 0 }
 }
 
 fn fail(path: str, message: str): i32 {
@@ -373,7 +388,15 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool, explicit: bool): Fron
 
     var checked = match checked_program_of(expanded, dep_prog, !quiet, tty, pf.diags, explicit) { checker::TProgram as c => c; error as e => return e }
 
-    Frontend { prog = checked; manifest = pf.manifest }
+    if !perunit_enabled() {
+        return Frontend { prog = checked; manifest = pf.manifest; raw = empty_raw_program(); deps = empty_boundary_deps(); boundary = empty_boundary() }
+    }
+    var db = match checker::discover_boundary(expanded, dep_prog, explicit) { checker::DiscoveredBoundary as d => d; error as e => return e }
+    Frontend { prog = checked; manifest = pf.manifest; raw = db.program; deps = dep_prog; boundary = db.boundary }
+}
+
+fn empty_boundary_deps(): checker::TProgram {
+    checker::TProgram { items = [] }
 }
 
 fn frontend_body(include_tests: bool, quiet: bool, tty: bool, explicit: bool): Frontend | error {
@@ -1126,7 +1149,7 @@ fn tkh_bytes_of(prog: checker::TProgram, table: checker::TypeTable, od: str, nam
     bytes
 }
 
-fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, debug: DebugInfo): i32 {
+fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, debug: DebugInfo, raw: parser::Program, bnd: checker::Boundary): i32 {
     match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.artifact == Artifact::Static {
         return emit_static_lib(dir, stem, out_dir, prog, m)
@@ -1168,7 +1191,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
         return 0
     }
     if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m, debug)
+        return emit_native(dir, stem, out_dir, prog, m, debug, raw, bnd)
     }
     var mode = report_mode(false, tty)
     if m.abi == "c" {
@@ -1556,13 +1579,13 @@ fn build_dwarf_sink_for(dir: str, prog: checker::TProgram, symbols: []teko::back
     teko::backend::build_dwarf_sink(cu, files, dwarf_rows_of(facts, files), text_len - (last.offset to u64))
 }
 
-fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo): i32 {
+fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo, raw: parser::Program, bnd: checker::Boundary): i32 {
     report_phase_rss("codegen start")
     var od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
     var target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
     match target {
-        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, prog, m, debug)
+        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, prog, m, debug, raw, bnd)
         NativeTarget::X8664Windows => emit_native_win(dir, od, stem, prog, m)
         NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, prog, m, debug)
         NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, prog, m, debug)
@@ -1843,8 +1866,76 @@ fn native_item_label(i: u64, total: u64): str {
     teko::str::concat("item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::u64_to_str(total))))
 }
 
-fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo): i32 {
+type PerUnitPick = struct { retype: bool; widx: u64 }
+
+fn perunit_no_pick(): PerUnitPick { PerUnitPick { retype = false; widx = 0 } }
+
+fn raw_function_name_at(raw: parser::Program, idx: u64): str | error {
+    if idx >= raw.items.len { return error { message = "perunit: source_index out of range" } }
+    match raw.items[idx].content {
+        parser::Function as rf => rf.name
+        _ => error { message = "perunit: worklist index is not a function" }
+    }
+}
+
+fn perunit_pick(bnd: checker::Boundary, raw: parser::Program, f: checker::TFunction): PerUnitPick {
+    if f.type_params.len != 0 || f.is_extern { return perunit_no_pick() }
+    var picked = perunit_no_pick()
+    var matches: u64 = 0
+    var i: u64 = 0
+    loop {
+        if i >= bnd.worklist.len { break }
+        var wu = bnd.worklist[i]
+        if wu.owner_ns == f.namespace {
+            match raw_function_name_at(raw, wu.source_index) {
+                str as nm => if nm == f.name { picked = PerUnitPick { retype = true; widx = i }; matches = matches + 1 }
+                error => { }
+            }
+        }
+        i = i + 1
+    }
+    if matches == 1 { picked } else { perunit_no_pick() }
+}
+
+fn perunit_serialize_one(it: @TItem()): []byte | error {
+    emit::serialize_program(checker::TProgram { items = [it] })
+}
+
+fn perunit_bytes_eq(a: []byte, b: []byte): bool {
+    if a.len != b.len { return false }
+    var i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn perunit_item_faithful(retyped: @TItem(), resident: @TItem()): bool {
+    var ra = match perunit_serialize_one(retyped) { []byte as b => b; error => return false }
+    var rb = match perunit_serialize_one(resident) { []byte as b => b; error => return false }
+    perunit_bytes_eq(ra, rb)
+}
+
+fn perunit_item_for(enabled: bool, bnd: checker::Boundary, raw: parser::Program, resident: @TItem()): @TItem() {
+    if !enabled { return resident }
+    match resident {
+        checker::TFunction as f => {
+            var pick = perunit_pick(bnd, raw, f)
+            if !pick.retype { return resident }
+            match checker::retype_unit(raw, bnd.worklist[pick.widx], bnd) {
+                (@TItem()) as retyped => if perunit_item_faithful(retyped, resident) { retyped } else { resident }
+                error => resident
+            }
+        }
+        _ => resident
+    }
+}
+
+fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo, raw: parser::Program, bnd: checker::Boundary): i32 {
     var prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    var perunit = perunit_enabled()
     var robase = prelude.module.rodata
     var loose: []@TStatement() = []
     var lifted_ph: []teko::lir::LFunc = []
@@ -1855,7 +1946,8 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         var t0 = trace_native_item(i, prog.items.len, prog.items[i])
         var child = region_new(region_root())
         region_enter(child)
-        var outcome = fuse_lower_item_x86(robase, prelude, loose, prog.items[i], lifted_ph)
+        var it = perunit_item_for(perunit, bnd, raw, prog.items[i])
+        var outcome = fuse_lower_item_x86(robase, prelude, loose, it, lifted_ph)
         region_leave()
         match outcome {
             FusedItemOut as out => {
@@ -2385,9 +2477,9 @@ fn ffi_write_c_header(od: str, stem: str, prog: checker::TProgram): error | null
     null
 }
 
-fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i64, debug: DebugInfo): i32 {
+fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i64, debug: DebugInfo, raw: parser::Program, bnd: checker::Boundary): i32 {
     report_pt_census(prog)
-    var rc = backend(dir, m.name, out_dir, prog, m, opt, tty, debug)
+    var rc = backend(dir, m.name, out_dir, prog, m, opt, tty, debug, raw, bnd)
     if rc == 0 {
         report_build_done(built_artifact_path(out_dir, m), start)
         report_peak()
@@ -2403,7 +2495,7 @@ fn report_pt_census(prog: checker::TProgram) {
 
 fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo, explicit: bool): i32 {
     var fe = match frontend_body(false, false, tty, explicit) { Frontend as f => f; error as e => return fail(dir, e.message) }
-    codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug)
+    codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug, fe.raw, fe.boundary)
 }
 
 fn unmet_coverage_floors(fcov: u64, lcov: u64, bcov: u64, floor_f: u64, floor_l: u64, floor_b: u64): []str {
@@ -2606,7 +2698,7 @@ fn native_gate_program(pf: ParsedFront, tty: bool): checker::TProgram | error {
 fn native_gate_build(dir: str, od: str, gp: GatePaths, pf: ParsedFront, m: Manifest, tty: bool): i32 {
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
     var test_prog = match native_gate_program(pf, tty) { checker::TProgram as p => p; error as e => return fail(dir, e.message) }
-    emit_native(dir, gp.stem, od, test_prog, m, DebugInfo::None)
+    emit_native(dir, gp.stem, od, test_prog, m, DebugInfo::None, empty_raw_program(), empty_boundary())
 }
 
 fn native_gate_run(od: str, gp: GatePaths, merge_cov: bool): i32 {
@@ -2705,7 +2797,7 @@ fn cobertura_path_of(out_dir: str, gen_cov: bool): str {
 fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront, debug: DebugInfo): i32 {
     var pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest; diags = pf.diags }
     var rel = match frontend_check(pf_prod, false, tty, false) { Frontend as f => f; error as e => return fail(dir, e.message) }
-    codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start, debug)
+    codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start, debug, empty_raw_program(), empty_boundary())
 }
 
 fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool, debug: DebugInfo): i32 {
@@ -2719,7 +2811,7 @@ fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront
     run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation, debug)
 }
 
-fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo): i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug) }
+fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo): i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug, fe.raw, fe.boundary) }
 
 fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool, debug: DebugInfo, explicit: bool): i32 {
     ensure_rt_dir_abs()
@@ -2890,7 +2982,7 @@ fn project_arg_of(args: []str, start: u64): str {
 fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest): i32 {
     match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m, DebugInfo::None)
+        return emit_native(dir, stem, out_dir, prog, m, DebugInfo::None, empty_raw_program(), empty_boundary())
     }
     var od = strip_trailing_slash(out_dir)
     var cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
