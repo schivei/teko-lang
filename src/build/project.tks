@@ -1918,19 +1918,29 @@ fn perunit_item_faithful(retyped: @TItem(), resident: @TItem()): bool {
     perunit_bytes_eq(ra, rb)
 }
 
-fn perunit_item_for(enabled: bool, bnd: checker::Boundary, raw: parser::Program, resident: @TItem()): @TItem() {
-    if !enabled { return resident }
+type PerUnitEmit = struct { node: @TItem(); retyped: bool }
+
+fn perunit_passthrough(resident: @TItem()): PerUnitEmit { PerUnitEmit { node = resident; retyped = false } }
+
+fn perunit_item_for(enabled: bool, bnd: checker::Boundary, raw: parser::Program, resident: @TItem()): PerUnitEmit {
+    if !enabled { return perunit_passthrough(resident) }
     match resident {
         checker::TFunction as f => {
             var pick = perunit_pick(bnd, raw, f)
-            if !pick.retype { return resident }
+            if !pick.retype { return perunit_passthrough(resident) }
             match checker::retype_unit(raw, bnd.worklist[pick.widx], bnd) {
-                (@TItem()) as retyped => if perunit_item_faithful(retyped, resident) { retyped } else { resident }
-                error => resident
+                (@TItem()) as retyped => if perunit_item_faithful(retyped, resident) { PerUnitEmit { node = retyped; retyped = true } } else { perunit_passthrough(resident) }
+                error => perunit_passthrough(resident)
             }
         }
-        _ => resident
+        _ => perunit_passthrough(resident)
     }
+}
+
+fn trace_perunit_retyped(i: u64, retyped: bool) {
+    if !native_trace_items_enabled() { return }
+    if !retyped { return }
+    teko::io::eprintln(teko::str::concat("teko: perunit re-typed item ", teko::str::concat(teko::u64_to_str(i + 1), " in child region, byte-identical")))
 }
 
 fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo, raw: parser::Program, bnd: checker::Boundary): i32 {
@@ -1946,8 +1956,9 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         var t0 = trace_native_item(i, prog.items.len, prog.items[i])
         var child = region_new(region_root())
         region_enter(child)
-        var it = perunit_item_for(perunit, bnd, raw, prog.items[i])
-        var outcome = fuse_lower_item_x86(robase, prelude, loose, it, lifted_ph)
+        var emitted = perunit_item_for(perunit, bnd, raw, prog.items[i])
+        trace_perunit_retyped(i, emitted.retyped)
+        var outcome = fuse_lower_item_x86(robase, prelude, loose, emitted.node, lifted_ph)
         region_leave()
         match outcome {
             FusedItemOut as out => {
