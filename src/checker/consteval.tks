@@ -275,6 +275,127 @@ fn inline_rw_fspec(sp: TFSpec, map: ScalarConstMap): TFSpec {
     }
 }
 
+fn scalar_ref_in_exprs(xs: []TExpr, map: ScalarConstMap): bool {
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if scalar_ref_in_expr(xs[i], map) { return true }
+        i++
+    }
+    false
+}
+
+fn scalar_ref_in_fspecs(xs: []TFSpec, map: ScalarConstMap): bool {
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        match xs[i].kind {
+            TFSpecDynamic as fd => if scalar_ref_in_exprs(fd.args, map) { return true }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+fn scalar_ref_in_var(v: TVar, map: ScalarConstMap): bool {
+    if v.is_func { return false }
+    match scalar_const_init(map, v.name, v.func_ns) { TExpr => true; null => false }
+}
+
+fn scalar_ref_in_compare(c: TCompare, map: ScalarConstMap): bool {
+    if scalar_ref_in_expr(c.first, map) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        if scalar_ref_in_expr(c.rest[i].operand, map) { return true }
+        i++
+    }
+    false
+}
+
+fn scalar_ref_in_arm(arm: TArm, map: ScalarConstMap): bool {
+    if arm.has_when && scalar_ref_in_expr(arm.guard, map) { return true }
+    scalar_ref_in_block(arm.body, map)
+}
+
+fn scalar_ref_in_match(m: TMatchExpr, map: ScalarConstMap): bool {
+    if scalar_ref_in_expr(m.subject, map) { return true }
+    var i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        if scalar_ref_in_arm(m.arms[i], map) { return true }
+        i++
+    }
+    false
+}
+
+fn scalar_ref_in_array(a: TArrayLit, map: ScalarConstMap): bool {
+    var i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if scalar_ref_in_expr(a.elements[i].expr, map) { return true }
+        i++
+    }
+    false
+}
+
+fn scalar_ref_in_expr(e: TExpr, map: ScalarConstMap): bool {
+    match e.kind {
+        TVar as v => scalar_ref_in_var(v, map)
+        TBinary as b => scalar_ref_in_expr(b.left, map) || scalar_ref_in_expr(b.right, map)
+        TUnary as u => scalar_ref_in_expr(u.operand, map)
+        TCompare as c => scalar_ref_in_compare(c, map)
+        TCall as cl => scalar_ref_in_exprs(cl.args, map)
+        TIfExpr as f => scalar_ref_in_expr(f.cond, map) || scalar_ref_in_block(f.then_blk, map) || scalar_ref_in_block(f.else_blk, map)
+        TMatchExpr as m => scalar_ref_in_match(m, map)
+        TCast as c => scalar_ref_in_expr(c.expr, map)
+        TFieldAccess as fa => scalar_ref_in_expr(fa.receiver, map)
+        TStructInit as si => scalar_ref_in_exprs(si.field_vals, map)
+        TIndex as ix => scalar_ref_in_expr(ix.receiver, map) || scalar_ref_in_expr(ix.index, map)
+        TInterp as in => scalar_ref_in_exprs(in.holes, map) || scalar_ref_in_fspecs(in.specs, map)
+        TInExpr as n => scalar_ref_in_expr(n.lhs, map) || scalar_ref_in_exprs(n.elems, map)
+        TArrayLit as a => scalar_ref_in_array(a, map)
+        TSliceOfLen as s => scalar_ref_in_expr(s.size, map)
+        TLambda as lam => scalar_ref_in_block(lam.body, map)
+        TBorrow as b => scalar_ref_in_expr(b.operand, map)
+        TBlockExpr as b => scalar_ref_in_block(b.body, map)
+        _ => false
+    }
+}
+
+fn scalar_ref_in_assign(a: TAssign, map: ScalarConstMap): bool {
+    if scalar_ref_in_expr(a.value, map) { return true }
+    if parser::assign_has_target(a.kind) && scalar_ref_in_expr(a.target, map) { return true }
+    false
+}
+
+fn scalar_ref_in_stmt(st: @TStatement(), map: ScalarConstMap): bool {
+    match st {
+        TBinding as b => scalar_ref_in_expr(b.value, map)
+        TAssign as a => scalar_ref_in_assign(a, map)
+        TReturn as r => r.has_value && scalar_ref_in_expr(r.value, map)
+        TLoopStmt as l => scalar_ref_in_block(l.init, map) || scalar_ref_in_block(l.body, map)
+        TBreakStmt => false
+        TContinueStmt => false
+        TExprStmt as es => scalar_ref_in_expr(es.expr, map)
+        TDeferStmt as d => scalar_ref_in_block(d.body, map)
+        TAdoptStmt as a => scalar_ref_in_block(a.body, map)
+        TBlockStmt as b => scalar_ref_in_block(b.body, map)
+        TSpawn as sp => scalar_ref_in_expr(sp.call, map)
+    }
+}
+
+fn scalar_ref_in_block(stmts: []@TStatement(), map: ScalarConstMap): bool {
+    var i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        if scalar_ref_in_stmt(stmts[i], map) { return true }
+        i++
+    }
+    false
+}
+
 fn inline_rw_exprs(xs: []TExpr, map: ScalarConstMap): []TExpr {
     var n = xs.len
     var out: [n]TExpr = []
@@ -425,6 +546,7 @@ fn inline_rw_assign(a: TAssign, map: ScalarConstMap): @TStatement() {
 }
 
 fn rewrite_function(f: TFunction, map: ScalarConstMap): TFunction {
+    if !scalar_ref_in_block(f.body, map) { return f }
     TFunction { overload_suffix = f.overload_suffix; name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = inline_rw_block(f.body, map); vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size; ret_extra = f.ret_extra; guard = f.guard }
 }
 
@@ -449,7 +571,7 @@ fn inline_place_item_value(it: @TItem(), map: ScalarConstMap): @TItem() | null {
     match it {
         TFunction as f => rewrite_function(f, map)
         TConstDecl as cd => if is_scalar_const_type(cd.ty) { inline_scalar_const_value(cd, map) } else { rewrite_const_init(cd, map) }
-        (@TStatement()) as s => inline_rw_stmt(s, map)
+        (@TStatement()) as s => if scalar_ref_in_stmt(s, map) { inline_rw_stmt(s, map) } else { s }
         _ => it
     }
 }
@@ -752,7 +874,7 @@ fn collapse_agg_const_decl(cd: TConstDecl, amap: ScalarConstMap): @TItem() {
 fn inline_place_item_agg(it: @TItem(), map: ScalarConstMap): @TItem() {
     match it {
         TFunction as f => rewrite_function(f, map)
-        (@TStatement()) as s => inline_rw_stmt(s, map)
+        (@TStatement()) as s => if scalar_ref_in_stmt(s, map) { inline_rw_stmt(s, map) } else { s }
         _ => it
     }
 }
