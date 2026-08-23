@@ -15,6 +15,165 @@ fn gc_strs(xs: []str): []str {
     out
 }
 
+fn gc_path(p: parser::Path): parser::Path {
+    var segs: [p.segments.len]parser::Segment = []
+    var i: u64 = 0
+    loop { if i >= p.segments.len { break }; segs[i] = parser::Segment { name = gc_str(p.segments[i].name) }; i++ }
+    parser::Path { segments = segs }
+}
+
+fn gc_pexprs(xs: []parser::Expr): []parser::Expr {
+    var out: [xs.len]parser::Expr = []
+    var i: u64 = 0
+    loop { if i >= xs.len { break }; out[i] = gc_pexpr(xs[i]); i++ }
+    out
+}
+
+fn gc_pcmpterms(xs: []parser::CmpTerm): []parser::CmpTerm {
+    var out: [xs.len]parser::CmpTerm = []
+    var i: u64 = 0
+    loop { if i >= xs.len { break }; out[i] = parser::CmpTerm { op = xs[i].op; operand = gc_pexpr(xs[i].operand) }; i++ }
+    out
+}
+
+fn gc_parray(xs: []parser::ArrayElem): []parser::ArrayElem {
+    var out: [xs.len]parser::ArrayElem = []
+    var i: u64 = 0
+    loop { if i >= xs.len { break }; out[i] = parser::ArrayElem { is_spread = xs[i].is_spread; expr = gc_pexpr(xs[i].expr) }; i++ }
+    out
+}
+
+fn gc_pfspecs(xs: []parser::FSpec): []parser::FSpec {
+    var out: [xs.len]parser::FSpec = []
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out[i] = parser::FSpec { kind = match xs[i].kind {
+            parser::FSpecDynamic as d => parser::FSpecDynamic { args = gc_pexprs(d.args) }
+            parser::FSpecStatic as s => parser::FSpecStatic { s = gc_str(s.s) }
+            _ => xs[i].kind
+        } }
+        i++
+    }
+    out
+}
+
+fn gc_pexpr(e: parser::Expr): parser::Expr {
+    parser::Expr { kind = gc_pkind(e); line = e.line; col = e.col }
+}
+
+fn gc_pkind(e: parser::Expr): @ExprKind() {
+    match e.kind {
+        parser::Number as n => parser::Number { is_float = n.is_float; value = n.value; fval = n.fval }
+        parser::Var as v => parser::Var { name = gc_str(v.name) }
+        parser::StrLit as s => parser::StrLit { text = gc_str(s.text) }
+        parser::ByteStrLit as bs => parser::ByteStrLit { text = gc_str(bs.text) }
+        parser::ByteLit as bl => parser::ByteLit { value = bl.value }
+        parser::CharLit as ch => parser::CharLit { bytes = gc_str(ch.bytes) }
+        parser::BoolLit as bo => parser::BoolLit { value = bo.value }
+        parser::Binary as b => parser::Binary { op = b.op; left = gc_pexpr(b.left); right = gc_pexpr(b.right) }
+        parser::Unary as u => parser::Unary { op = u.op; operand = gc_pexpr(u.operand) }
+        parser::Compare as c => parser::Compare { first = gc_pexpr(c.first); rest = gc_pcmpterms(c.rest) }
+        parser::FieldAccess as fa => parser::FieldAccess { receiver = gc_pexpr(fa.receiver); field = gc_str(fa.field) }
+        parser::Cast as c => parser::Cast { expr = gc_pexpr(c.expr); target = gc_typeexpr(c.target) }
+        parser::PathExpr as p => parser::PathExpr { path = gc_path(p.path) }
+        parser::Index as ix => parser::Index { receiver = gc_pexpr(ix.receiver); index = gc_pexpr(ix.index) }
+        parser::Borrow as bw => parser::Borrow { operand = gc_pexpr(bw.operand) }
+        parser::ArrayLit as a => parser::ArrayLit { elements = gc_parray(a.elements) }
+        parser::Call as cl => parser::Call { callee = gc_path(cl.callee); args = gc_pexprs(cl.args); arg_names = gc_strs(cl.arg_names); owner_type_args = gc_typeexprs(cl.owner_type_args); callee_type_args = gc_typeexprs(cl.callee_type_args) }
+        parser::StructLit as sl => parser::StructLit { type_path = gc_path(sl.type_path); type_args = gc_typeexprs(sl.type_args); field_names = gc_strs(sl.field_names); field_vals = gc_pexprs(sl.field_vals) }
+        parser::InExpr as ne => parser::InExpr { lhs = gc_pexpr(ne.lhs); elems = gc_pexprs(ne.elems) }
+        parser::Interp as in => parser::Interp { pieces = gc_strs(in.pieces); holes = gc_pexprs(in.holes); specs = gc_pfspecs(in.specs) }
+        _ => e.kind
+    }
+}
+
+fn gc_typeexprs(xs: []@TypeExpr()): []@TypeExpr() {
+    var out: [xs.len]@TypeExpr() = []
+    var i: u64 = 0
+    loop { if i >= xs.len { break }; out[i] = gc_typeexpr(xs[i]); i++ }
+    out
+}
+
+fn gc_typeexpr(t: @TypeExpr()): @TypeExpr() {
+    match t {
+        parser::NamedType as n => parser::NamedType { path = gc_path(n.path); args = gc_typeexprs(n.args) }
+        parser::SliceType as s => parser::SliceType { element = gc_typeexpr(s.element) }
+        parser::SizedArrayType as sa => parser::SizedArrayType { size = gc_pexpr(sa.size); element = gc_typeexpr(sa.element) }
+        parser::UnionType as u => parser::UnionType { members = gc_typeexprs(u.members) }
+        parser::FunctionType as f => parser::FunctionType { params = gc_typeexprs(f.params); ret = gc_typeexpr(f.ret) }
+        parser::MacroType as m => parser::MacroType { callee = gc_path(m.callee); args = gc_pexprs(m.args); callee_type_args = gc_typeexprs(m.callee_type_args) }
+        _ => t
+    }
+}
+
+fn gc_patterns(xs: []@Pattern()): []@Pattern() {
+    var out: [xs.len]@Pattern() = []
+    var i: u64 = 0
+    loop { if i >= xs.len { break }; out[i] = gc_pattern(xs[i]); i++ }
+    out
+}
+
+fn gc_pattern(p: @Pattern()): @Pattern() {
+    match p {
+        parser::LiteralPattern as l => parser::LiteralPattern { value = gc_pexpr(l.value) }
+        parser::RangePattern as r => parser::RangePattern { lo = gc_pexpr(r.lo); hi = gc_pexpr(r.hi) }
+        parser::AltPattern as a => parser::AltPattern { options = gc_patterns(a.options) }
+        parser::GroupBindPattern as g => parser::GroupBindPattern { options = gc_patterns(g.options); binding = gc_str(g.binding) }
+        parser::BindPattern as b => parser::BindPattern { type_name = gc_path(b.type_name); has_binding = b.has_binding; binding = gc_str(b.binding); is_slice = b.is_slice; slice_type = b.slice_type; type_args = gc_typeexprs(b.type_args) }
+        parser::FieldPattern as f => parser::FieldPattern { type_name = gc_path(f.type_name); fields = gc_strs(f.fields) }
+        parser::MacroPattern as m => parser::MacroPattern { macro_call = gc_typeexpr(m.macro_call) }
+        _ => p
+    }
+}
+
+fn gc_params(xs: []parser::Param): []parser::Param {
+    var out: [xs.len]parser::Param = []
+    var i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out[i] = parser::Param { name = gc_str(xs[i].name); has_type = xs[i].has_type; type_ann = gc_typeexpr(xs[i].type_ann); is_params = xs[i].is_params; has_default = xs[i].has_default; default_expr = if xs[i].has_default { gc_pexpr(xs[i].default_expr) } else { xs[i].default_expr } }
+        i++
+    }
+    out
+}
+
+fn gc_pred(p: parser::Pred): parser::Pred {
+    parser::Pred { kind = match p.kind {
+        parser::PEq as e => parser::PEq { axis = gc_str(e.axis); value = gc_str(e.value) }
+        parser::PFlag as f => parser::PFlag { name = gc_str(f.name) }
+        parser::PNot as n => parser::PNot { inner = gc_pred(n.inner) }
+        parser::PAnd as a => parser::PAnd { left = gc_pred(a.left); right = gc_pred(a.right) }
+        parser::POr as o => parser::POr { left = gc_pred(o.left); right = gc_pred(o.right) }
+        _ => p.kind
+    } }
+}
+
+fn gc_constraints(xs: []@ConstraintExpr()): []@ConstraintExpr() {
+    var out: [xs.len]@ConstraintExpr() = []
+    var i: u64 = 0
+    loop { if i >= xs.len { break }; out[i] = gc_constraint(xs[i]); i++ }
+    out
+}
+
+fn gc_constraint(c: @ConstraintExpr()): @ConstraintExpr() {
+    match c {
+        parser::ConstraintAtom as a => parser::ConstraintAtom { name = gc_str(a.name) }
+        parser::ConstraintType as ct => parser::ConstraintType { ty = gc_typeexpr(ct.ty) }
+        parser::ConstraintAnd as an => parser::ConstraintAnd { left = gc_constraint(an.left); right = gc_constraint(an.right) }
+        parser::ConstraintOr as o => parser::ConstraintOr { left = gc_constraint(o.left); right = gc_constraint(o.right) }
+        parser::ConstraintForm as f => parser::ConstraintForm { form = gc_str(f.form); has_lifetime = f.has_lifetime; lifetime = f.lifetime }
+        _ => c
+    }
+}
+
+fn gc_bindtarget(t: @BindTarget()): @BindTarget() {
+    match t {
+        parser::SimpleName as s => parser::SimpleName { name = gc_str(s.name) }
+        parser::DestructurePattern as d => parser::DestructurePattern { names = gc_strs(d.names) }
+    }
+}
+
 fn gc_types(xs: []@Type()): []@Type() {
     var out: [xs.len]@Type() = []
     var i: u64 = 0
@@ -58,7 +217,7 @@ fn gc_arms(xs: []TArm): []TArm {
     loop {
         if i >= xs.len { break }
         var a = xs[i]
-        out[i] = TArm { pattern = a.pattern; has_when = a.has_when; guard = if a.has_when { gc_texpr(a.guard) } else { a.guard }; body = gc_block(a.body) }
+        out[i] = TArm { pattern = gc_pattern(a.pattern); has_when = a.has_when; guard = if a.has_when { gc_texpr(a.guard) } else { a.guard }; body = gc_block(a.body) }
         i++
     }
     out
@@ -113,7 +272,7 @@ fn gc_kind(e: TExpr): @TExprKind() {
         TBinary as b => TBinary { op = b.op; left = gc_texpr(b.left); right = gc_texpr(b.right) }
         TUnary as u => TUnary { op = u.op; operand = gc_texpr(u.operand) }
         TCompare as c => TCompare { first = gc_texpr(c.first); rest = gc_terms(c.rest) }
-        TCall as cl => TCall { callee = cl.callee; args = gc_texprs(cl.args); call_ns = gc_str(cl.call_ns); is_closure_call = cl.is_closure_call; callee_type = gc_type(cl.callee_type); is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = gc_types(cl.type_args); overload_suffix = gc_str(cl.overload_suffix); ret_extra = gc_types(cl.ret_extra) }
+        TCall as cl => TCall { callee = gc_path(cl.callee); args = gc_texprs(cl.args); call_ns = gc_str(cl.call_ns); is_closure_call = cl.is_closure_call; callee_type = gc_type(cl.callee_type); is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot; type_args = gc_types(cl.type_args); overload_suffix = gc_str(cl.overload_suffix); ret_extra = gc_types(cl.ret_extra) }
         TIfExpr as f => TIfExpr { cond = gc_texpr(f.cond); then_blk = gc_block(f.then_blk); has_else = f.has_else; else_blk = gc_block(f.else_blk) }
         TMatchExpr as m => TMatchExpr { subject = gc_texpr(m.subject); arms = gc_arms(m.arms) }
         TCast as c => TCast { expr = gc_texpr(c.expr) }
@@ -140,7 +299,7 @@ fn gc_block(stmts: []@TStatement()): []@TStatement() {
 
 fn gc_stmt(s: @TStatement()): @TStatement() {
     match s {
-        TBinding as b => TBinding { kind = b.kind; target = b.target; bound = gc_type(b.bound); value = gc_texpr(b.value) }
+        TBinding as b => TBinding { kind = b.kind; target = gc_bindtarget(b.target); bound = gc_type(b.bound); value = gc_texpr(b.value) }
         TAssign as a => TAssign { kind = a.kind; name = gc_str(a.name); op = a.op; bound = gc_type(a.bound); value = gc_texpr(a.value); deref = a.deref; target = gc_texpr(a.target) }
         TReturn as r => TReturn { has_value = r.has_value; value = if r.has_value { gc_texpr(r.value) } else { r.value }; values = gc_texprs(r.values) }
         TLoopStmt as l => TLoopStmt { label = gc_str(l.label); init = gc_block(l.init); body = gc_block(l.body) }
@@ -155,11 +314,11 @@ fn gc_stmt(s: @TStatement()): @TStatement() {
 }
 
 fn gc_tfunction(f: TFunction): TFunction {
-    TFunction { name = gc_str(f.name); type_params = gc_strs(f.type_params); type_constraints = f.type_constraints; params = f.params; return_type = gc_type(f.return_type); body = gc_block(f.body); vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = gc_str(f.namespace); file = gc_str(f.file); line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = gc_str(f.c_symbol); from_lib = gc_str(f.from_lib); has_arena_size = f.has_arena_size; arena_size = f.arena_size; overload_suffix = gc_str(f.overload_suffix); ret_extra = gc_types(f.ret_extra); guard = f.guard }
+    TFunction { name = gc_str(f.name); type_params = gc_strs(f.type_params); type_constraints = gc_constraints(f.type_constraints); params = gc_params(f.params); return_type = gc_type(f.return_type); body = gc_block(f.body); vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = gc_str(f.namespace); file = gc_str(f.file); line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = gc_str(f.c_symbol); from_lib = gc_str(f.from_lib); has_arena_size = f.has_arena_size; arena_size = f.arena_size; overload_suffix = gc_str(f.overload_suffix); ret_extra = gc_types(f.ret_extra); guard = gc_pred(f.guard) }
 }
 
 fn gc_tconstdecl(c: TConstDecl): TConstDecl {
-    TConstDecl { name = gc_str(c.name); namespace = gc_str(c.namespace); ty = gc_type(c.ty); init = gc_texpr(c.init); vis = c.vis; has_doc = c.has_doc; doc = c.doc; line = c.line; col = c.col; guard = c.guard }
+    TConstDecl { name = gc_str(c.name); namespace = gc_str(c.namespace); ty = gc_type(c.ty); init = gc_texpr(c.init); vis = c.vis; has_doc = c.has_doc; doc = c.doc; line = c.line; col = c.col; guard = gc_pred(c.guard) }
 }
 
 fn gc_item(it: @TItem()): @TItem() {
