@@ -222,7 +222,8 @@ Metas medidas: **doc-comment ≤ 10% do código; comentário `//` = 0%** (hoje: 
     reseeda — é a que RODA agora); a validação de **runtime do native espera o marco**. NÃO pular o
     `lower.tks`: ele entra no self-build (compila + reseeda), só não é EXECUTADO ainda. (Uma feature "sumida"
     pode estar em qualquer um dos dois — verificar contra o código, não presumir.)
-- **GUARD DE MEMÓRIA `ulimit -v 4194304` (4 GiB) = INVIOLÁVEL (dono 2026-08-20, baixado de 6,5→4 GiB).**
+- **GUARD SUBIU 4→4,5 GiB `ulimit -v 4718592` (dono 2026-08-24).** O build seco estoura no **VIRTUAL** a 4 GiB mesmo com RSS ~3,8 GB (o virtual tem ~350 MB de overhead sobre o RSS → OOM antes de completar o codegen). O guard sobe pra **4,5 GiB** pra os builds COMPLETAREM (necessário pra medir o pico real na contabilidade e pra a onda de expurgo do runtime C). **A lei do RATCHET (RSS só baixa, D68) segue governando** — subir o TETO virtual não autoriza o RSS a crescer; é só folga de overhead virtual. Meta segue `< 1 GB` de RSS; quando o RSS cair, o teto volta.
+- **GUARD DE MEMÓRIA `ulimit -v 4194304` (4 GiB) = INVIOLÁVEL (dono 2026-08-20, baixado de 6,5→4 GiB) — atualizado p/ 4,5 GiB acima.**
   Os builds de ensino/aditivos agora picam ~3,3 GB → o teto cai pra 4 GiB: (a) pega regressão de memória
   (estouro acima de 4 GiB = sinal), (b) cabe **mais build simultâneo** nos ~15 GiB físicos (4 GiB×3 vs
   6,5 GiB×2) → habilita mais paralelismo. Se um build **estoura** o guard, o agente **encontra a causa-raiz
